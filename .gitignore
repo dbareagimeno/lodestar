@@ -1,0 +1,35 @@
+# Rust / Cargo
+/target/
+**/target/
+Cargo.lock.orig
+
+# Node / Vite / Svelte
+node_modules/
+dist/
+.svelte-kit/
+*.tsbuildinfo
+
+# Tauri
+src-tauri/target/
+src-tauri/gen/
+
+# SQLite cache (índice derivado y desechable)
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*~
+
+# Logs / env
+*.log
+.env
+.env.*
+!.env.example
