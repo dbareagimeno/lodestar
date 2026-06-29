@@ -1,0 +1,65 @@
+/* Variables CSS portadas VERBATIM del prototipo (prototype/index.html). El port de la UI (E6)
+   reusa estas mismas variables y atributos data-* para que el aspecto sea idéntico. */
+:root {
+  /* dirección D "wiki cósmica": noche profunda + luz de oro estelar */
+  --bg: #0c0b11;
+  --surface: #121119;
+  --panel: #191824;
+  --panel-2: #262433;
+  --line: #252330;
+  --line-2: #3a3650;
+  --ink: #ece9f1;
+  --muted: #a3a0b4;
+  --faint: #837f96;
+  --accent: #e8b54a; /* luz estelar — activo / enlaces / marca */
+  --accent-dim: #3a3020;
+  --ok: #5fc59a;
+  --warn: #d98f3f;
+  --err: #e07a86; /* SOLO revisión */
+  --ghost: #6e6a7e; /* páginas por escribir */
+  --star: #d9cfa6;
+  --gold: #f3c659; /* oro estelar — marca */
+  --radius: 3px;
+  --radius-sm: 2px;
+  --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --sans: "Hanken Grotesk", system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+  --serif: "Newsreader", Georgia, "Times New Roman", serif;
+  --shadow: 0 1px 0 rgba(255, 255, 255, 0.03), 0 22px 50px rgba(0, 0, 0, 0.6);
+}
+html[data-theme="light"] {
+  --bg: #f4f2ea;
+  --surface: #fffdf7;
+  --panel: #ffffff;
+  --panel-2: #efeade;
+  --line: #e8e3d6;
+  --line-2: #ddd6c5;
+  --ink: #262129;
+  --muted: #6a6456;
+  --faint: #8b8573;
+  --accent: #a06b12;
+  --accent-dim: #f0e4c6;
+  --ok: #2f9e5e;
+  --warn: #b9791a;
+  --err: #c0524d;
+  --ghost: #aaa492;
+  --star: #8a7a4a;
+  --gold: #c8920f;
+  --shadow: 0 1px 0 rgba(0, 0, 0, 0.02), 0 16px 40px rgba(40, 38, 40, 0.1);
+}
+* {
+  box-sizing: border-box;
+}
+html,
+body {
+  height: 100%;
+}
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--sans);
+}
+::selection {
+  background: var(--accent-dim);
+  color: var(--ink);
+}
