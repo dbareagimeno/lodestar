@@ -614,6 +614,10 @@ version = "0.1.0"
 dependencies = [
  "lodestar-core",
  "lodestar-workspace",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tempfile",
 ]
 
 [[package]]
