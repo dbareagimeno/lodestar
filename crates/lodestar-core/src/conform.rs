@@ -1,0 +1,264 @@
+//! Conformidad: los 15 checks OKF (`ARCHITECTURE.md §4.1`, `§13.6`). Port de `validateFile`.
+//!
+//! Mensajes en español canónico (reproducen el prototipo). La externalización i18n keyed por
+//! código es E8-H03; el core ya produce `code` + `targets`, que es lo que la UI necesita para localizar.
+
+use std::collections::{BTreeMap, BTreeSet};
+
+use once_cell::sync::Lazy;
+use regex::Regex;
+use serde_yaml::Value as Yaml;
+
+use crate::model::{self, Parsed};
+use crate::types::{Check, CheckCode, FileKind, FileMap, FmError, RelPath, Severity};
+
+static CONFLICT_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?m)^(<{7}|={7}|>{7}|\|{7})").unwrap());
+static HEADING_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?m)^#{1,6}\s").unwrap());
+static OKF_VER_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"^\s*okf_version\s*:").unwrap());
+static LOG_HEAD_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?m)^##\s+(.+)$").unwrap());
+static LOG_DATE_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"^##\s+\d{4}-\d{2}-\d{2}\s*$").unwrap());
+
+/// Contexto de análisis necesario para validar un fichero (datos ya computados por `analyze`).
+pub(crate) struct ConformCtx<'a> {
+    pub files: &'a FileMap,
+    pub out: &'a BTreeMap<RelPath, Vec<RelPath>>,
+    pub inn: &'a BTreeMap<RelPath, Vec<RelPath>>,
+    pub in_index: &'a BTreeSet<RelPath>,
+}
+
+/// Valida un fichero y devuelve sus `Check`. Port fiel de `validateFile` + `OKF-CONFLICT` (nuevo).
+pub(crate) fn validate_file(
+    path: &RelPath,
+    parsed: &Parsed,
+    raw: &str,
+    ctx: &ConformCtx,
+) -> Vec<Check> {
+    let mut out: Vec<Check> = Vec::new();
+
+    // OKF-CONFLICT (hard-fail): marcadores de merge en cuerpo o frontmatter, en cualquier tipo de fichero.
+    if CONFLICT_RE.is_match(raw) {
+        out.push(Check::new(
+            Severity::Err,
+            CheckCode::OkfConflict,
+            "Hay marcadores de conflicto de merge sin resolver.",
+            vec![path.clone()],
+        ));
+    }
+
+    match parsed.kind {
+        FileKind::Index => {
+            validate_index(path, raw, &mut out);
+            return out;
+        }
+        FileKind::Log => {
+            validate_log(raw, &mut out);
+            return out;
+        }
+        FileKind::Concept => {}
+    }
+
+    // Errores de frontmatter (early-return como el prototipo).
+    match &parsed.fm_err {
+        Some(FmError::Missing) => {
+            out.push(Check::new(
+                Severity::Err,
+                CheckCode::OkfFm01,
+                "Falta el bloque de metadatos al inicio de la página.",
+                vec![path.clone()],
+            ));
+            return out;
+        }
+        Some(FmError::Unclosed) => {
+            out.push(Check::new(
+                Severity::Err,
+                CheckCode::OkfFm02,
+                "El bloque de metadatos no está cerrado.",
+                vec![path.clone()],
+            ));
+            return out;
+        }
+        Some(FmError::Malformed(e)) => {
+            out.push(Check::new(
+                Severity::Err,
+                CheckCode::OkfFm03,
+                format!("Los metadatos tienen un error de formato: {e}"),
+                vec![path.clone()],
+            ));
+            return out;
+        }
+        None => {}
+    }
+
+    let fm = parsed.fm.clone().unwrap_or_default();
+
+    // OKF-TYPE (única regla dura): falta `type` → err; presente → pass con el tipo.
+    match fm
+        .r#type
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        None => out.push(Check::new(
+            Severity::Err,
+            CheckCode::OkfType,
+            "Falta indicar de qué tipo es esta página.",
+            vec![path.clone()],
+        )),
+        Some(t) => out.push(Check::new(
+            Severity::Pass,
+            CheckCode::OkfType,
+            format!("Es una página de tipo «{t}»."),
+            vec![path.clone()],
+        )),
+    }
+
+    // REC-TITLE / REC-DESC (info).
+    if fm.title.as_deref().map(str::is_empty).unwrap_or(true) {
+        out.push(Check::new(
+            Severity::Info,
+            CheckCode::RecTitle,
+            "Sin título: ponle un nombre legible.",
+            vec![path.clone()],
+        ));
+    }
+    if fm.description.as_deref().map(str::is_empty).unwrap_or(true) {
+        out.push(Check::new(
+            Severity::Info,
+            CheckCode::RecDesc,
+            "Sin descripción: ayuda a encontrarla y a previsualizarla.",
+            vec![path.clone()],
+        ));
+    }
+
+    // FMT-TAGS (warn): tags presente pero no es lista.
+    if let Some(v) = &fm.tags {
+        if yaml_truthy(v) && !matches!(v, Yaml::Sequence(_)) {
+            out.push(Check::new(
+                Severity::Warn,
+                CheckCode::FmtTags,
+                "Las etiquetas deberían ir como una lista.",
+                vec![path.clone()],
+            ));
+        }
+    }
+    // FMT-TS (warn): timestamp presente pero no ISO.
+    if let Some(v) = &fm.timestamp {
+        if yaml_truthy(v) && !model::is_iso(v) {
+            out.push(Check::new(
+                Severity::Warn,
+                CheckCode::FmtTs,
+                "La fecha no está en el formato estándar.",
+                vec![path.clone()],
+            ));
+        }
+    }
+
+    // LINK-STUB (info): destinos salientes que no existen como fichero.
+    let empty = Vec::new();
+    let outs = ctx.out.get(path).unwrap_or(&empty);
+    let dang: Vec<RelPath> = outs
+        .iter()
+        .filter(|t| !ctx.files.contains_key(*t))
+        .cloned()
+        .collect();
+    if !dang.is_empty() {
+        let titles: Vec<String> = dang
+            .iter()
+            .map(|t| model::title_from_path(t.as_str()))
+            .collect();
+        let verb = if dang.len() == 1 {
+            "enlace lleva"
+        } else {
+            "enlaces llevan"
+        };
+        out.push(Check::new(
+            Severity::Info,
+            CheckCode::LinkStub,
+            format!(
+                "{} {} a páginas que aún no existen: {}",
+                dang.len(),
+                verb,
+                titles.join(", ")
+            ),
+            dang,
+        ));
+    }
+
+    // LINK-REL (info): enlaces relativos.
+    if !model::raw_rel_links(&parsed.body).is_empty() {
+        out.push(Check::new(
+            Severity::Info,
+            CheckCode::LinkRel,
+            "Hay enlaces relativos; es mejor usar la ruta completa /…",
+            vec![path.clone()],
+        ));
+    }
+
+    // ORPHAN (info): nadie enlaza aquí y no está en ningún index.
+    let inn_empty = ctx.inn.get(path).map(|v| v.is_empty()).unwrap_or(true);
+    if inn_empty && !ctx.in_index.contains(path) {
+        out.push(Check::new(
+            Severity::Info,
+            CheckCode::Orphan,
+            "Ninguna otra página enlaza a esta.",
+            vec![path.clone()],
+        ));
+    }
+
+    // BODY-STRUCT (info): el cuerpo no tiene encabezados.
+    if !HEADING_RE.is_match(&parsed.body) {
+        out.push(Check::new(
+            Severity::Info,
+            CheckCode::BodyStruct,
+            "El cuerpo no tiene apartados; añade encabezados para organizarlo.",
+            vec![path.clone()],
+        ));
+    }
+
+    out
+}
+
+fn validate_index(path: &RelPath, raw: &str, out: &mut Vec<Check>) {
+    let sf = model::split_front(raw);
+    if let Some(fm_text) = sf.fm_text {
+        if !fm_text.trim().is_empty() {
+            let is_root = path.dir().is_empty();
+            let single_line = fm_text.trim().lines().count() == 1;
+            let ok_fm = is_root && OKF_VER_RE.is_match(&fm_text) && single_line;
+            if !ok_fm {
+                out.push(Check::new(
+                    Severity::Warn,
+                    CheckCode::OkfIdx,
+                    "Esta página de índice no debería llevar metadatos al inicio.",
+                    vec![path.clone()],
+                ));
+            }
+        }
+    }
+}
+
+fn validate_log(raw: &str, out: &mut Vec<Check>) {
+    let bad = LOG_HEAD_RE
+        .find_iter(raw)
+        .any(|m| !LOG_DATE_RE.is_match(m.as_str()));
+    if bad {
+        out.push(Check::new(
+            Severity::Warn,
+            CheckCode::OkfLog,
+            "Las fechas del historial deben escribirse como AAAA-MM-DD.",
+            vec![],
+        ));
+    }
+}
+
+/// `true` si un valor YAML es "truthy" al estilo JS (no null, no cadena vacía, no lista vacía, no false/0).
+fn yaml_truthy(v: &Yaml) -> bool {
+    match v {
+        Yaml::Null => false,
+        Yaml::Bool(b) => *b,
+        Yaml::String(s) => !s.is_empty(),
+        Yaml::Sequence(s) => !s.is_empty(),
+        Yaml::Number(n) => n.as_f64().map(|x| x != 0.0).unwrap_or(true),
+        _ => true,
+    }
+}

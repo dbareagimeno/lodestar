@@ -1,0 +1,15 @@
+[package]
+name = "lodestar-workspace"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Glue: compone core + store + vcs. Handle unificado, único escritor y bus de eventos."
+
+[dependencies]
+lodestar-core = { workspace = true }
+lodestar-store = { workspace = true }
+lodestar-vcs = { workspace = true }
+thiserror = { workspace = true }
+
+[lints]
+workspace = true

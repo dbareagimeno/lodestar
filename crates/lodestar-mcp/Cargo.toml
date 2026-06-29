@@ -1,0 +1,17 @@
+[package]
+name = "lodestar-mcp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Fachada de agentes (MCP/rmcp/stdio) sobre Workspace. Semántica, no CRUD."
+
+[[bin]]
+name = "lodestar-mcp"
+path = "src/main.rs"
+
+[dependencies]
+lodestar-core = { workspace = true }
+lodestar-workspace = { workspace = true }
+
+[lints]
+workspace = true

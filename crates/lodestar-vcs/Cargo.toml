@@ -1,0 +1,14 @@
+[package]
+name = "lodestar-vcs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Dueño único de git: libgit2 local + binario git para red. git2 vive SOLO aquí; git2::Oid nunca cruza la frontera."
+
+[dependencies]
+lodestar-core = { workspace = true }
+thiserror = { workspace = true }
+# git2: se añade al implementar E4.
+
+[lints]
+workspace = true

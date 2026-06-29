@@ -1,0 +1,35 @@
+[package]
+name = "lodestar-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Núcleo puro de lodestar: modelo, conformidad, links, query, grafo, generación, export y diff OKF. Sin I/O, DB, git ni runtime."
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+blake3 = { workspace = true }
+thiserror = { workspace = true }
+once_cell = { workspace = true }
+regex = { workspace = true }
+zip = { workspace = true }
+schemars = { version = "0.8", optional = true }
+pulldown-cmark = { version = "0.12", optional = true, default-features = false, features = ["html"] }
+
+[features]
+default = []
+# Gatea #[derive(JsonSchema)] en los DTO públicos (lo consume el MCP).
+schemars = ["dep:schemars"]
+# Render de markdown a HTML para el preview (el saneado DOMPurify vive en el frontend).
+render = ["dep:pulldown-cmark"]
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+zip = { workspace = true }
