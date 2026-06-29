@@ -10,6 +10,13 @@ lodestar-core = { workspace = true }
 lodestar-store = { workspace = true }
 lodestar-vcs = { workspace = true }
 thiserror = { workspace = true }
+ignore = { workspace = true }
+serde = { workspace = true }
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+tempfile = "3"
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }

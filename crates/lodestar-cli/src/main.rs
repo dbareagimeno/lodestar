@@ -12,6 +12,7 @@ use clap::{Parser, Subcommand};
 
 mod bundle_io;
 mod commands;
+mod git;
 mod sarif;
 
 /// Editor local-first de bases de conocimiento OKF — interfaz de línea de comandos.
@@ -67,21 +68,24 @@ enum Command {
     Reindex,
     /// Importa un bundle del prototipo (localStorage) — pendiente E8.
     Import { source: Option<PathBuf> },
-    /// Historial de commits (pendiente E4).
-    Log,
-    /// Diff entre dos revisiones (pendiente E4).
-    Diff,
-    /// Último commit conforme (pendiente E4).
+    /// Historial de commits (con conformidad).
+    Log {
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+    },
+    /// Último commit conforme.
     LastConforming,
-    /// Operaciones de rama (pendiente E4).
+    /// Lista las ramas locales.
     Branch,
-    /// Merge de una rama (pendiente E4).
-    Merge,
-    /// Pull del upstream (pendiente E4).
+    /// Pull del upstream (`git pull --ff-only`).
     Pull,
-    /// Push al upstream (pendiente E4).
+    /// Push al upstream configurado.
     Push,
-    /// Instala los hooks de git (pendiente E4).
+    /// Diff entre dos revisiones (pendiente E6: render del OkfDiff).
+    Diff,
+    /// Merge de una rama (pendiente: switch/merge target en vcs).
+    Merge,
+    /// Instala los hooks de git (pendiente).
     Hooks,
 }
 
@@ -131,15 +135,13 @@ fn main() -> ExitCode {
             eprintln!("import: pendiente E8 (migración del prototipo).");
             Ok(ExitCode::SUCCESS)
         }
-        Command::Log
-        | Command::Diff
-        | Command::LastConforming
-        | Command::Branch
-        | Command::Merge
-        | Command::Pull
-        | Command::Push
-        | Command::Hooks => {
-            eprintln!("Subcomando de git: pendiente E4 (lodestar-vcs).");
+        Command::Log { limit } => git::log(&root, limit),
+        Command::LastConforming => git::last_conforming(&root),
+        Command::Branch => git::branch(&root),
+        Command::Pull => git::sync(&root, false),
+        Command::Push => git::sync(&root, true),
+        Command::Diff | Command::Merge | Command::Hooks => {
+            eprintln!("Subcomando de git: pendiente (ver requirements E4/E6).");
             Ok(ExitCode::SUCCESS)
         }
     };

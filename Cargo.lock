@@ -581,6 +581,7 @@ dependencies = [
  "ignore",
  "lodestar-core",
  "lodestar-fixtures",
+ "lodestar-workspace",
  "serde_json",
 ]
 
@@ -646,9 +647,14 @@ dependencies = [
 name = "lodestar-workspace"
 version = "0.1.0"
 dependencies = [
+ "ignore",
  "lodestar-core",
  "lodestar-store",
  "lodestar-vcs",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tempfile",
  "thiserror 1.0.69",
 ]
 
