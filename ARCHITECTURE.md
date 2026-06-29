@@ -14,7 +14,7 @@
 | Frontend | **Svelte 5 + Vite** | Runtime mínimo; porta el prototipo verbatim; mejor que Astro (estático) o React (más pesado) |
 | Cache / índice | **SQLite + FTS5** (`rusqlite`) | Cold-start y full-text a escala; **derivado y desechable**, nunca la verdad |
 | Watcher | **`notify`** | Convergencia multi-escritor (app, MCP, edición a pelo, `git pull`) |
-| Versionado | **git** (`git2`/libgit2) | "Versiones" = commits; historial, diff OKF y conformidad-por-commit; local-first |
+| Versionado | **git** (libgit2 local + binario `git` solo para red) | Commits, ramas, historial, diff OKF, conformidad-por-commit, push/pull; vocabulario git directo; local-first |
 | Fachada agentes | **MCP** (`rmcp`, stdio) | Expone *semántica* a Claude Code, no CRUD de ficheros |
 | Fachada CI | **CLI** (`clap`) | `lodestar check` como puerta de CI con exit codes |
 
@@ -45,8 +45,9 @@ crates/
                         #       diff semántico OKF. Sin I/O, sin DB, sin git, sin runtime.
         ▲          ▲
   lodestar-store/    lodestar-vcs/   # store: rusqlite+FTS5+watcher notify, dueño del DDL .lodestar/index.db.
-        ▲          ▲                 # vcs:   git2/libgit2, dueño de git (status/log/diff/commit/restore/init,
-        │          │                 #        lee árboles de commit a file-maps, ref-watch). NO toca el working tree.
+        ▲          ▲                 # vcs:   git2/libgit2 (local: status/log/diff/commit/branch/merge/restore/init,
+        │          │                 #        lee árboles a file-maps, ref-watch) + binario `git` confinado a la red
+        │          │                 #        (push/pull/fetch). NO toca el working tree.
   lodestar-workspace/   # GLUE. Compone core + store + vcs. Handle `Workspace` unificado + bus de eventos.
         ▲               #       Único escritor (commit/restore pasan por aquí). Sin tokio.
         │  ▲  ▲
@@ -58,9 +59,13 @@ crates/
 - **`rusqlite` vive SOLO en `lodestar-store`.** El motor de grafo/conformidad del core opera
   sobre el mapa de ficheros en memoria (o un trait `ConceptStore`), **nunca declara DDL**.
 - **`git2`/libgit2 vive SOLO en `lodestar-vcs`** (igual que rusqlite en store). El core no sabe de git;
-  el diff *semántico* OKF sí es lógica pura del core. libgit2 (no shell a `git`) por seguridad: abrir un
-  bundle ajeno no debe ejecutar sus hooks/aliases/config. Git history y la cache SQLite tienen ciclos de
-  vida opuestos (`.git` durable vs `.lodestar/` desechable) → crates separadas.
+  el diff *semántico* OKF sí es lógica pura del core. **Transporte híbrido**: libgit2 para todas las
+  operaciones *locales* (commit/log/diff/branch/merge/restore) — abrir o indexar un bundle ajeno **nunca**
+  ejecuta sus hooks/aliases/`include.path` (la garantía RCE-safe). El binario `git` se invoca **solo** para
+  las operaciones de *red* (push/pull/fetch), iniciadas explícitamente por el usuario sobre su propio repo,
+  para heredar su auth (SSH-agent/credential-helpers/tokens) sin reimplementarla. El shell-out se confina a
+  `vcs` y nunca corre en open/index. Git history y la cache SQLite tienen ciclos de vida opuestos (`.git`
+  durable vs `.lodestar/` desechable) → crates separadas.
 - `lodestar-core` lleva `#![forbid(unsafe_code)]`, feature `schemars` (gated, para que el MCP
   derive `JsonSchema` en los DTO) y feature `render` (pulldown-cmark para HTML de preview).
 
@@ -140,6 +145,7 @@ pub struct Analysis {
   pub dangling: Vec<RelPath>, pub orphans: Vec<RelPath>,
   pub per_file: BTreeMap<RelPath, Vec<Check>>,
   pub hard_fail: usize, pub warn_count: usize,     // hard_fail = #ficheros con algún Err
+  pub okf_version: Option<String>,                 // del index.md raíz; None si falta. §12 lo expone en la conformidad
 }
 
 #[serde(rename_all = "camelCase")]
@@ -147,6 +153,37 @@ pub struct GraphModel { pub nodes: Vec<GraphNode>, pub edges: Vec<Edge> }   // `
 pub struct GraphNode { pub id: RelPath, pub ghost: bool, pub r#type: Option<String>,
                        pub status: Option<String> }
 pub struct Edge { pub source: RelPath, pub target: RelPath, pub dangling: bool }
+
+// --- DTOs de lectura de Bundle (§4.2). Se congelan AQUÍ, en core::types, como el resto (principio #4):
+//     una sola definición, wire camelCase, sin capa DTO paralela. Contenido = port 1:1 del prototipo.
+
+/// Mapa de ficheros del bundle. Es lo que come `Bundle::from_files` y lo que devuelve `vcs.tree_files`.
+pub type FileMap = BTreeMap<RelPath, String>;
+
+/// Fila del árbol de concepts (port de fileRow/renderTree). La jerarquía la deriva el front del `path`.
+#[serde(rename_all = "camelCase")]
+pub struct ConceptSummary { pub path: RelPath, pub title: String, pub r#type: Option<String>,
+  pub status: Option<String>, pub orphan: bool, pub invalid: bool }   // title = ya resuelto (fm.title o del path); invalid = algún Check level=Err
+
+/// Un extremo de un enlace + el href crudo tal como aparece en el `.md` (port de resolveLink).
+/// Es la rich link-metadata que §4.1 dejaba "aparte". (ghost no va aquí: es de GraphNode.)
+pub struct LinkRef { pub path: RelPath, pub href: String }
+
+/// Vecindad de enlaces de un concept (port del panel de backlinks). wire camelCase.
+#[serde(rename_all = "camelCase")]
+pub struct Backlinks { pub inbound: Vec<LinkRef>,   // quién enlaza aquí (con el href usado)
+  pub index_refs: Vec<RelPath>,                     // index.md que lo listan
+  pub out: Vec<RelPath>,                            // destinos salientes resueltos
+  pub dangling: Vec<String> }                       // hrefs salientes que no resuelven a ningún fichero
+
+/// Subgrafo dirigido alrededor de un concept (reusa la forma de GraphModel; `root` = el centro).
+#[serde(rename_all = "camelCase")]
+pub struct Neighborhood { pub root: RelPath, pub nodes: Vec<GraphNode>, pub edges: Vec<Edge> }
+
+/// Patch de frontmatter (merge_frontmatter / MCP update_frontmatter). Semántica merge-patch (RFC 7386):
+/// clave→Some(v) escribe/reemplaza; clave→None BORRA; clave AUSENTE del mapa = no se toca. El tercer
+/// estado se modela con la pertenencia al mapa (evita el Option<Option<_>> y su trampa en serde).
+pub struct FrontmatterPatch(pub BTreeMap<String, Option<serde_yaml::Value>>);
 ```
 
 ### 4.2 Superficie pública de `Bundle`
@@ -154,14 +191,14 @@ pub struct Edge { pub source: RelPath, pub target: RelPath, pub dangling: bool }
 ```rust
 impl Bundle {
   // construcción
-  pub fn from_files(files: BTreeMap<RelPath, String>) -> Self;
+  pub fn from_files(files: FileMap) -> Self;                // FileMap = BTreeMap<RelPath, String> (§4.1)
   pub fn analyze(&self) -> &Analysis;                       // cacheado (OnceCell)
   // lectura semántica (todas determinísticas desde ficheros)
   pub fn list_concepts(&self) -> Vec<ConceptSummary>;       // tree rows + orphan/invalid flags
   pub fn backlinks(&self, p: &RelPath) -> Backlinks;        // inbound(LinkRef)+index_refs+out+dangling
   pub fn neighborhood(&self, p: &RelPath, depth: u32, dir: Direction) -> Neighborhood;
   pub fn graph_model(&self) -> GraphModel;
-  pub fn query(&self, dsl: &str) -> Vec<QueryHit>;          // un solo tokenizer (§4.3)
+  pub fn query(&self, dsl: &str) -> Vec<RelPath>;           // filtro de paths (port fiel: el prototipo no enriquece); tokenizer §4.3
   pub fn validate_draft(&self, fm: &Frontmatter, body: &str) -> Vec<Check>; // contenido SIN guardar
   // escritura validada (OKF logic, NO en la fachada)
   pub fn create_concept(&self, p: &RelPath, ty: &str, /*…*/) -> WriteOutcome;
@@ -187,10 +224,15 @@ pub struct Mutation { pub writes: BTreeMap<RelPath, String>, pub deletes: Vec<Re
 ### 4.3 Query (un solo tokenizer, semántica de subcadena)
 
 Un único `tokenize_query` + `match_token` en el core (port de `tokenizeQuery/matchToken/isPredicate`).
-Soporta `field:val` (subcadena), `field=val` (exacto), `-neg`, `has:`/`no:`, `is:orphan|invalid|reserved|linked`,
-`body:`, texto suelto. Conserva el quirk de **gating de fichero reservado ANTES de negar**.
+Soporta `field:val` (subcadena), `field=val` (exacto), `-neg`, `has:`/`no:`,
+`is:orphan|invalid|reserved|linked|accepted|draft|review|deprecated` (los cuatro últimos = predicados de `status`),
+`body:`, texto suelto, y el **flip de negación** `!val` (un `!` al inicio del valor invierte `-neg`, doble-negable).
+Conserva el quirk de **gating de fichero reservado ANTES de negar**. El nombre de campo es ASCII `[\w\-]+` (una
+clave con acento cae a texto suelto, como en el prototipo); el valor se compara case-insensitive.
 `body:`/texto suelto son **subcadena** (no token FTS) para paridad con el prototipo. FTS5 se usa
 solo como acelerador/superset, **nunca** como único pre-filtro de subcadena (perdería matches reales).
+`query()` devuelve **paths** (filtro, port fiel); enriquecer el hit (snippet/score vía FTS5) queda como
+ampliación futura **aditiva**, fuera de la paridad v1.
 
 ### 4.4 Tipos de versionado (git) — también en `lodestar-core::types`
 
@@ -226,8 +268,20 @@ pub struct DiffStats { pub added: usize, pub modified: usize, pub removed: usize
 pub enum MessageHint { AddSingle{title:String}, StatusSingle{to:String,title:String},
                        Update{added:usize,modified:usize,removed:usize} }  // i18n via catálogo en la fachada
 
-/// Estado del repo — detecta merge/rebase en curso (bloquea "guardar versión").
+/// Estado del repo — detecta merge/rebase en curso (bloquea el commit hasta resolver).
 pub enum RepoState { Clean, Merging, Rebasing, CherryPicking, Reverting }
+
+/// Una rama. UNA definición. `upstream` = rama remota de seguimiento (p.ej. "origin/main"), si la hay.
+#[serde(rename_all = "camelCase")]
+pub struct Branch { pub name: String, pub is_head: bool, pub upstream: Option<String>,
+                    pub ahead: usize, pub behind: usize }   // ahead/behind vs upstream (0/0 si no hay)
+
+/// Resultado de una operación de red (push/pull) — vía binario `git`. Sin tipos de git2::Remote.
+#[serde(rename_all = "camelCase")]
+pub struct SyncOutcome { pub kind: SyncKind, pub ok: bool, pub summary: String }
+// pull es --ff-only (nunca conflicta in-app); push rechazado (non-ff) → ok:false + summary. Los conflictos viven
+// en el `merge` local (marcadores inline → OKF-CONFLICT), no aquí.
+pub enum SyncKind { Push, Pull }
 ```
 
 ---
@@ -256,7 +310,7 @@ sobre la misma fixture. Si difieren, es bug de la cache.
 
 ## 6. `lodestar-workspace` — el handle unificado
 
-Compone `lodestar-core` (puro) + `lodestar-store`. Es lo que ven las fachadas. Reglas:
+Compone `lodestar-core` (puro) + `lodestar-store` + `lodestar-vcs`. Es lo que ven las fachadas. Reglas:
 
 - **Un solo watcher por proceso** que posee el **único escritor** de SQLite. Los comandos
   **nunca** escriben la cache directamente: escriben el `.md` (atómico temp+rename) y dejan que el
@@ -267,13 +321,17 @@ Compone `lodestar-core` (puro) + `lodestar-store`. Es lo que ven las fachadas. R
 
 ```rust
 impl Workspace {
-  pub fn open(root: &Path) -> Result<Self, WorkspaceError>;   // abre/crea cache, arranca watcher
+  pub fn open(root: &Path) -> Result<Self, WorkspaceError>;   // abre/crea cache, arranca watcher, Vcs::discover
   pub fn open_ephemeral(root: &Path) -> Result<Self, _>;      // sin cache (CLI hermético)
   pub fn subscribe(&self) -> crossbeam::Receiver<IndexEvent>;
   pub fn snapshot(&self) -> BundleSnapshot;                    // files + analysis + graph, todo junto
   // delega en core para semántica; aplica Mutations por el único camino de escritura
   pub fn backlinks/neighborhood/query/conformance/create_concept/merge_frontmatter/
          generate_index/generate_tag_indexes/export/add_log_entry(...) -> …;
+  // git (vía lodestar-vcs): commit/restore/switch_branch/merge convierten el file-map de vcs en core::Mutation y
+  //   lo aplican por el ÚNICO escritor (+ checkpoint si hay cambios sin commitear, §13.6); create_branch/branches/
+  //   vcs_log/vcs_diff/last_conforming son lecturas; pull/push delegan en el subproceso `git` (escritor externo).
+  pub fn commit/restore/switch_branch/merge/create_branch/branches/vcs_log/vcs_diff/pull/push/last_conforming(...) -> …;
 }
 ```
 
@@ -297,7 +355,7 @@ Tabla de comandos (nombres congelados): `open_bundle` · `pick_dir` · `get_snap
 `list_concepts` · `read_concept` · `write_concept` (enum `Raw|Structured`) · `create_concept` ·
 `delete_concept` · `merge_frontmatter` · `validate_draft` · `conformance` · `query` · `backlinks` ·
 `neighborhood` · `graph_model` · `generate_index` · `generate_tags` · `add_log_entry` · `export` ·
-`get_settings` · `set_setting`. Error `{code, message}` con `code` estable (`NO_BUNDLE` → onboarding).
+`get_settings` · `set_setting` (+ comandos `vcs_*` de versionado en §13.7). Error `{code, message}` con `code` estable (`NO_BUNDLE` → onboarding).
 
 ### 7.2 MCP (`lodestar-mcp`, rmcp, stdio)
 Scope = **semántica, no CRUD** (Claude Code ya tiene Read/Write/Edit). Logs solo a stderr; stdout = JSON-RPC.
@@ -310,7 +368,8 @@ Scope = **semántica, no CRUD** (Claude Code ya tiene Read/Write/Edit). Logs sol
   ghosts, huérfanos, impacto, la puerta OKF, query estructurada y **escrituras validadas**.
 
 ### 7.3 CLI (`lodestar-cli`, clap)
-Subcomandos `init` · `check` · `index` · `tags` · `export` · `reindex` · `import`.
+Subcomandos `init` · `check` · `index` · `tags` · `export` · `reindex` · `import` (+ los subcomandos git de §13.7:
+`log` · `diff` · `last-conforming` · `branch` · `merge` · `pull` · `push` · `hooks install`).
 Exit codes: `0` conforme · `1` hard-fail (la puerta de CI) · `2` uso · `3` runtime/IO · `4` drift de generadores (`--check`).
 `lodestar check` **reconcilia o corre efímero** antes de leer, para que una cache obsoleta nunca deje pasar el gate.
 Salida humana / `--json` / SARIF.
@@ -370,8 +429,10 @@ Porta la UI del prototipo **verbatim en aspecto** (mismo `<style>`, mismas varia
 **Git (versionado).** Un `commit` mueve refs pero **no cambia bytes** → el gate de hash blake3 es ciego a él:
 el watcher vigila además un subconjunto de `.git` (`HEAD`, `refs/heads/`, `packed-refs`, `logs/HEAD`) y emite
 `vcs:changed`, y el pill se actualiza **optimistamente** con el `Sha` que devuelve el propio commit (nunca espera
-el echo) + un reconcile al enfocar la ventana. Un `restore` reescribe ficheros del working tree por el **único
-escritor** (lote auto-originado que el reconcile absorbe). `commit`/`restore`/`init` son operaciones de la
+el echo) + un reconcile al enfocar la ventana. Un `restore`, un cambio de rama (`switch_branch`) y un `merge`
+reescriben ficheros del working tree por el **único escritor** (lote auto-originado que el reconcile absorbe). Un
+`pull` (vía binario `git`) cambia **bytes y refs** a la vez → lo absorben el watcher (bytes) y el ref-watch (refs)
+como cualquier escritor externo. `commit`/`restore`/`switch_branch`/`merge`/`init` son operaciones de la
 **workspace** → el invariante de único escritor se preserva. Detalle completo en §13.
 
 ---
@@ -394,13 +455,13 @@ escritor** (lote auto-originado que el reconcile absorbe). `commit`/`restore`/`i
 | 12 | Generadores puros vs que escriben | Puros (devuelven `Mutation`); la workspace aplica y diffea para `{written,removed,unchanged}`. |
 | 13 | `merge_frontmatter` (patch, null-borra) no existía en el core | Vive en el **core** (es lógica OKF), no en el MCP. |
 | 14 | Falta `schemars` para el outputSchema del MCP | Feature `schemars` en el core que gatea `#[derive(JsonSchema)]` en los DTO públicos. |
-| 15 | ¿Dónde vive git? | Crate `lodestar-vcs` (git2/libgit2), hermana de `store`; core sin git. **libgit2, no shell** a `git` (no ejecutar hooks/config de bundles ajenos = RCE). |
-| 16 | "Restore soft" podía **perder trabajo sin commitear** | No-destructivo *de historial* pero reescribe el working tree → **checkpoint automático** si hay cambios sin guardar; excluye `log.md` curado; **regenera** `index`/`tags` tras restaurar. |
+| 15 | ¿Dónde vive git? | Crate `lodestar-vcs`, hermana de `store`; core sin git. **Transporte híbrido**: libgit2 para lo *local* (no ejecuta hooks/config al abrir/indexar = RCE-safe) + binario `git` confinado a la *red* (push/pull/fetch, iniciados por el usuario, heredan su auth). El shell-out nunca corre en open/index. |
+| 16 | "Restore soft" podía **perder trabajo sin commitear** | Restore/cambio de rama/merge son no-destructivos *de historial* pero reescriben el working tree → **checkpoint automático** si hay cambios sin commitear; excluyen `log.md` curado; **regeneran** `index`/`tags` tras aplicar. |
 | 17 | Marcadores de conflicto pasaban la conformidad | Nuevo check **`OKF-CONFLICT`** (hard-fail) por `<<<<<<<`/`=======`/`>>>>>>>`/`\|\|\|\|\|\|\|`; el gate y la conformidad-por-commit los detectan en las 3 fachadas. |
 | 18 | Merge/rebase en curso no detectado | `RepoState` desde `repository.state()`; pill/overlay muestran "resolviendo conflicto" y `commit` se niega sobre índice no-merge. |
 | 19 | Pill obsoleto tras commit (no cambia bytes) | Defensa en profundidad: ref-watch del gitdir real (incl. `logs/HEAD`) + update **optimista** con el `Sha` + reconcile al enfocar. El ref-watch es pista, no garantía. |
 | 20 | Tipos commit/diff/cache triplicados | Una familia en `core::types` (§4.4); cache de conformidad por **tree-oid** (dedup de reverts) con gate `ruleset_version`; golden cross-fachada. |
-| 21 | Contador "sin guardar" usaba `diffSnap` (caro/edición) | **Hash por path** contra el HEAD-map en RAM (O(cambiados)); `OkfDiff` completo perezoso solo al abrir overlay/modo Cambios; LCS con guarda + DP dos-filas/Hirschberg; saltar blobs binarios. |
+| 21 | Contador "sin commitear" usaba `diffSnap` (caro/edición) | **Hash por path** contra el HEAD-map en RAM (O(cambiados)); `OkfDiff` completo perezoso solo al abrir overlay/modo Cambios; LCS con guarda + DP dos-filas/Hirschberg; saltar blobs binarios. |
 
 ---
 
@@ -423,13 +484,13 @@ Objetivos explícitos (gate de bench con una fixture sintética de 10k concepts)
 | **i18n** | Mensajes de conformidad **keyed por código** (la UI localiza). Cabeceras de artefactos generados (`index.md`/tags) **fijas canónicas** como consts (los bytes generados son ficheros commiteados: cambiar locale los churnea). UI en español, strings externalizadas a catálogo. |
 | **Packaging** | Tauri updater + firma/notarización (macOS/Windows); los 3 binarios desde un release etiquetado; comando de lanzamiento del MCP documentado para Claude Code; política de compat app/CLI/MCP/schema. CI de release. |
 | **Testing/paridad** | Crate de fixtures; test diferencial (proto JS en node vs core); golden cross-fachada (CLI `--json` == MCP `structuredContent` == comando Tauri); property test (incremental == rebuild); tests de store Svelte; e2e smoke de Tauri. |
-| **Seguridad** | **DOMPurify** en el markdown (no regex casera); escapado de expresiones FTS5; threat model de una página (webview, MCP confianza-local, zip-slip, path-traversal). |
+| **Seguridad** | **DOMPurify** en el markdown (no regex casera); escapado de expresiones FTS5; **el shell-out al binario `git`** (solo red) usa argumentos fijos validados, jamás interpola input no confiable y nunca corre en open/index; threat model de una página (webview, MCP confianza-local, zip-slip, path-traversal, subproceso git). |
 | **Errores** | Taxonomía fatal/recuperable/transitorio + afford de recuperación; código estable cruzando `CoreError`→`AppError`/exit-code; **supervisar el watcher** (panic → restart + banner, nunca UI obsoleta en silencio). |
 | **Config** | Dos niveles: app-global (tema/layout/recents) y **por-bundle** (`lodestar.toml` commiteado: strictness, write policy, locale de artefactos) para que GUI/CLI/MCP coincidan. |
 | **Un bundle por proceso** | Asunción documentada + lockfile que elige un único indexador cuando GUI y MCP abren el mismo bundle. Multi-ventana/multi-bundle = no-goal v1. |
 | **First-run** | `lodestar init` / "crear bundle" en GUI: scaffold de `index.md` raíz con `okf_version`, `.gitignore` (incluye `.lodestar/`), **`git init` + commit inicial**. En cada `open` de un repo existente se verifica que `.lodestar/` está ignorado (idempotente; oferta "dejar de trackear" si ya estaba trackeada). |
-| **Sincronización / remoto** | **No-goal v1.** `push`/`pull`/`fetch`/`clone` = responsabilidad del usuario vía su `git` CLI; lodestar lee el estado post-pull por el ref-watch pero nunca habla con remotos (libgit2 sin red). Resuelve la tensión hooks-RCE-vs-push. |
-| **Paridad con `git` CLI** | libgit2 **no** corre hooks, **no** firma (`commit.gpgsign` ignorado), **no** aplica filtros LFS/`.gitattributes`. v1: commits **sin firmar**; si el repo exige firma/LFS, **avisar** en el diálogo de commit y delegar en el CLI. Nunca shell-out a `git`. |
+| **Sincronización / remoto** | **push/pull/fetch soportados in-app** vía el binario `git` sobre el **upstream ya configurado** (hereda el auth del usuario: SSH-agent/credential-helpers/tokens). libgit2 **nunca** habla con la red. **`clone` y la gestión de remotos siguen no-goal v1** (el usuario clona/añade remotos con su `git` CLI; lodestar usa el remoto existente). El ref-watch absorbe los cambios de `pull`. |
+| **Paridad con `git` CLI** | **Commits van por libgit2**: no corren hooks de commit, no firman (`commit.gpgsign` ignorado), no aplican filtros LFS/`.gitattributes`. v1: commits **sin firmar**; si el repo exige firma, **avisar** en el diálogo y ofrecer commitear vía CLI. **push/pull van por el binario `git`** → sí corren los hooks pre-push/post-merge del usuario y respetan LFS/credenciales (es su repo, acción explícita). El shell-out se **confina a la red**; commit/log/diff nunca lo usan. |
 | **Identidad / atribución** | Autor+committer separados; override (`lodestar.toml [identity]`)→git config→fallback marcado. Commits del **agente** (MCP) llevan trailer `Co-Authored-By` distinguible para que `git log`/blame no mientan. `[identity]` se añade al schema de `lodestar.toml`. |
 | **CRDT (futuro)** | Documentar que la canonicalización de `build_raw` + LWW por fichero sesga contra un CRDT por-bloque. Mantener el core sin I/O para que un futuro server `axum` reuse la superficie de análisis. |
 
@@ -437,45 +498,75 @@ Objetivos explícitos (gate de bench con una fixture sintética de 10k concepts)
 
 ## 13. Versionado (git) — integración de primera clase
 
-El prototipo añadió **"Versiones / historial"**: git escondido tras el vocabulario de lodestar. Se integra
-sin romper ninguna decisión ratificada (core puro, único escritor, snapshot-push, un contrato de tipos).
+El prototipo añadió **"Versiones / historial"**. La implementación real lo eleva a **git de primera clase con
+vocabulario directo** (commits, ramas, push/pull): el público objetivo es técnico (desarrolladores), así que
+**no** se esconde git tras eufemismos para "quitar complejidad". **Transporte híbrido**: libgit2 para lo local,
+binario `git` confinado a la red. Se integra sin romper ninguna decisión ratificada (core puro, único escritor,
+snapshot-push, un contrato de tipos).
 
-### 13.1 Vocabulario
+### 13.1 Terminología
 
-| lodestar | git |
+**Vocabulario git directo** (público técnico): la UI dice "commit", "rama", "push", "pull", "merge" — no
+eufemismos. El prototipo usaba términos velados ("versión", "línea principal"); el port los reemplaza por los
+términos git. Solo quedan como término *propio* los conceptos que **no** son git sino OKF.
+
+| UI de lodestar | git / concepto |
 |---|---|
-| "versión" / "guardar versión" (Ctrl/Cmd+S) | commit |
-| "N sin guardar" / "Al día" | working tree dirty vs HEAD (menos generados) |
-| "línea principal" | la rama actual (resuelta de HEAD; no hardcodeada) |
-| "restaurar versión" | materializar el árbol de un commit al working tree (soft) |
-| "última versión conforme" | último commit cuyo árbol pasa la puerta OKF |
-| "propuesta en revisión" | concept con `status: review` (no una rama, v1) |
+| "commit" / "Hacer commit" (Ctrl/Cmd+S) | commit (no hay paso de "guardar" aparte: el `.md` se escribe atómico al editar) |
+| "N sin commitear" / "Limpio" | working tree dirty vs HEAD (menos generados) |
+| "rama" (actual · cambiar · crear · merge) | branch (resuelta de HEAD; create/switch/merge locales) |
+| "push" / "pull" | push/pull al upstream configurado (vía binario `git`) |
+| "restaurar a un commit" | materializar el árbol de un commit al working tree (soft) |
+| **"último commit conforme"** | último commit cuyo árbol pasa la puerta OKF (concepto OKF, no git) |
+| **"propuesta en revisión"** | concept con `status: review` — **NO** una rama (decisión del modelo OKF, §13.8) |
 
-### 13.2 `lodestar-vcs` (git2/libgit2)
+### 13.2 `lodestar-vcs` (libgit2 local + binario `git` para red)
 
-Dueño único de git, hermana de `store`. Encapsula git2: expone `Sha`, nunca `git2::Oid`. **libgit2, no shell
-a `git`** — abrir un bundle ajeno no debe ejecutar sus hooks/aliases/`include.path`/fsmonitor (RCE).
-`git2::Repository` es `!Sync` → vive tras el único escritor (`Mutex<Vcs>`).
+Dueño único de git, hermana de `store`. Encapsula git2: expone `Sha`/`Branch`, nunca `git2::Oid`. **Transporte
+híbrido**: libgit2 para todo lo local (commit/log/diff/branch/merge/restore) — abrir/indexar un bundle ajeno no
+ejecuta sus hooks/aliases/`include.path`/fsmonitor (RCE-safe); el binario `git` se invoca **solo** para
+push/pull/fetch (red), por un camino aparte (subproceso con args fijos validados, nunca interpola input no
+confiable), para heredar el auth del usuario. `git2::Repository` es `!Sync` → vive tras el único escritor
+(`Mutex<Vcs>`).
 
 ```rust
 impl Vcs {
-  pub fn discover(root: &Path) -> Result<Option<Vcs>>;     // None = sin .git (modo "activar versiones")
+  // --- local (libgit2) ---
+  pub fn discover(root: &Path) -> Result<Option<Vcs>>;     // None = sin .git (modo "activar git")
   pub fn init(root: &Path) -> Result<Vcs>;                 // git init + .gitignore + commit inicial
   pub fn status(&self) -> RepoStatus;                      // dirty set + RepoState (merge en curso)
   pub fn log(&self, limit: usize) -> Vec<CommitRow>;       // metadatos baratos (revwalk), sin leer árboles
   pub fn log_for_path(&self, p: &RelPath, limit: usize) -> Vec<CommitRow>;  // con techo de commits escaneados
   pub fn tree_files(&self, sha: &Sha) -> Result<FileMap>;  // árbol de un commit → file-map SIN tocar el working tree
   pub fn commit(&self, msg: &str, author: &Author) -> Result<Sha>;          // stage + commit del working tree
-  pub fn current_branch(&self) -> Option<String>;          // la "línea"; HEAD desacoplado = None
-  // restore NO lo hace vcs: la workspace computa un core::Mutation y lo aplica por el único escritor
+  pub fn branches(&self) -> Vec<Branch>;                   // locales + ahead/behind vs upstream
+  pub fn current_branch(&self) -> Option<String>;          // la rama actual; HEAD desacoplado = None
+  pub fn create_branch(&self, name: &str, from: Option<&Sha>) -> Result<()>;  // no toca el working tree
+  // switch_branch / merge / restore NO los APLICA vcs: devuelven el árbol/file-map destino; la workspace
+  //   computa un core::Mutation (diff vs working tree) y lo aplica por el ÚNICO escritor.
+  pub fn switch_branch_target(&self, name: &str) -> Result<FileMap>;         // árbol de la rama destino
+  pub fn merge_target(&self, name: &str) -> Result<FileMap>;                 // fija MERGE_HEAD en .git (commit de 2 padres) + file-map merged; conflicto → marcadores inline (OKF-CONFLICT + RepoState=Merging)
+  // --- red (binario `git`, subproceso confinado) ---
+  pub fn pull(&self) -> Result<SyncOutcome>;               // git pull --ff-only; si la rama divergió, aborta limpio → la UI sugiere merge (nunca conflicta in-app)
+  pub fn push(&self) -> Result<SyncOutcome>;               // al upstream configurado; rechazo (non-ff) → ok:false
 }
 ```
 
-- **Nunca escribe el working tree.** `restore` devuelve un `core::Mutation` que aplica la **workspace** por el
-  único escritor (igual que los generadores) → preserva el invariante de único escritor. Blobs binarios/no-UTF8 se
-  **saltan y diagnostican** en `tree_files` (no abortan el árbol ni la cache de conformidad).
+- **vcs no escribe el working tree en las operaciones locales.** `restore`, `switch_branch` y `merge` devuelven un
+  árbol/file-map que la **workspace** convierte en `core::Mutation` y aplica por el único escritor (igual que los
+  generadores). `merge` además fija `MERGE_HEAD` en `.git` (vcs es dueño de `.git`, no del working tree). La
+  **excepción es `pull`** (subproceso `git`), que muta bytes como **escritor externo**: el watcher (gate blake3)
+  reconcilia y el ref-watch absorbe las refs — el único escritor de la cache SQLite se preserva, igual que un `git
+  pull` lanzado en la terminal (§9). Blobs binarios/no-UTF8 se **saltan y diagnostican** en `tree_files` (no abortan
+  el árbol ni la cache de conformidad).
 - **Degradación sin `.git`**: `discover` con techo en el root del bundle (no engancha un repo ancestro como
-  `~/.git`); tres estados distintos: sin-repo ("activar versiones"→`init`), repo-vacío, con-historial.
+  `~/.git`); tres estados distintos: sin-repo ("activar git"→`init`), repo-vacío, con-historial.
+- **Red confinada al binario `git`**: `pull`/`push` lanzan un subproceso con argumentos fijos (`git pull
+  --ff-only` / `git push` sobre el upstream), heredan el entorno de auth del usuario, y **nunca** se ejecutan en
+  `open`/`index` (solo por acción explícita). Sin upstream configurado → la UI deshabilita push/pull y remite al
+  `git` CLI (clone/añadir remoto siguen fuera de scope, §13.8). **Sin binario `git` en el PATH (o versión
+  incompatible)** → push/pull deshabilitados con aviso accionable; las operaciones **locales** (libgit2) siguen
+  funcionando.
 
 ### 13.3 Diff semántico OKF (puro, en el core)
 
@@ -485,14 +576,14 @@ working); el core da el *significado*: frontmatter por-campo (orden `status` pri
 contexto, transiciones de ciclo de vida, impacto en el grafo de enlaces, y **segregación de generados** (index/log/
 tags no cuentan como edición manual).
 
-- **Rendimiento**: el contador "sin guardar" es comparación de **hash por path** contra el HEAD-map en RAM
+- **Rendimiento**: el contador "sin commitear" es comparación de **hash por path** contra el HEAD-map en RAM
   (O(cambiados)), **nunca** `diffSnap`. El `OkfDiff` completo (con LCS) se computa **perezoso**, solo para el
   fichero abierto. El LCS lleva guarda de tamaño (fallback grueso por umbral) y DP en dos filas + Hirschberg
   (mata el muro de memoria O(n·m): un fichero de 10k líneas reservaba ~400 MB).
 
 ### 13.4 Conformidad por commit (la pieza estrella)
 
-Cada versión guarda su conformidad — el `confOf(snap)` del prototipo hecho real:
+Cada commit guarda su conformidad — el `confOf(snap)` del prototipo hecho real:
 `core::Bundle::from_files(vcs.tree_files(sha)).analyze()` → `CommitConformance{hardFail,warnCount,conform}`.
 
 - **Cache** en `.lodestar/index.db` keyed por **tree-oid** (content-addressed: dedup de reverts/cherry-picks),
@@ -516,26 +607,35 @@ Cada versión guarda su conformidad — el `confOf(snap)` del prototipo hecho re
 
 ### 13.6 Las cuatro correcciones de seguridad (ship-blockers)
 
-1. **Restore no pierde trabajo.** No-destructivo *de historial* pero **reescribe el working tree**: si hay cambios
-   sin guardar, primero hace un **commit de checkpoint** automático (trabajo perdido → "una versión más a la que
-   volver"); excluye el `log.md` curado; **regenera** `index`/`tags` tras restaurar.
-2. **`OKF-CONFLICT`** (hard-fail): marcadores `<<<<<<<`/`=======`/`>>>>>>>`/`|||||||` en cuerpo o frontmatter —
-   antes pasaban la conformidad en silencio tras un `git pull` conflictivo.
-3. **`RepoState`** desde `repository.state()`: merge/rebase en curso bloquea "guardar versión" y avisa
-   "resolviendo conflicto" (en vez de `add_all`+commit sobre índice no-merge → basura).
+1. **Restore / cambio de rama / merge no pierden trabajo.** No-destructivos *de historial* pero **reescriben el
+   working tree**: si hay cambios sin commitear, primero hacen un **commit de checkpoint** automático (trabajo
+   perdido → "un commit más al que volver"); excluyen el `log.md` curado; **regeneran** `index`/`tags` tras aplicar.
+2. **`OKF-CONFLICT`** (hard-fail): marcadores `<<<<<<<`/`=======`/`>>>>>>>`/`|||||||` en cuerpo o frontmatter,
+   vengan de un `merge` in-app (libgit2) o de un `git merge`/`pull` conflictivo del CLI externo — antes pasaban la
+   conformidad en silencio.
+3. **`RepoState`** desde `repository.state()`: detecta un merge/rebase en curso en `.git` — el `merge` in-app
+   (libgit2 fija `MERGE_HEAD` → commit de 2 padres) o un merge/rebase del `git` CLI externo. Bloquea el commit y
+   avisa "resolviendo conflicto" (en vez de `add_all`+commit sobre índice no-merge → basura). Los **marcadores** los
+   caza `OKF-CONFLICT` (gate); `RepoState` cubre el **estado** del repo. (`pull` es `--ff-only` → nunca deja un
+   merge a medias.)
 4. **Pill nunca obsoleto.** Un commit no cambia bytes → defensa en profundidad: ref-watch del gitdir real (incl.
    `logs/HEAD`, maneja `.git`-como-fichero), update **optimista** con el `Sha`, y reconcile al enfocar.
 
 ### 13.7 Fachadas y frontend
 
 - **Tauri**: `vcs_status` · `vcs_log` · `vcs_log_for_path` · `vcs_diff(a,b,filter?)` · `vcs_diff_working` ·
-  `vcs_commit(msg, alsoLog)` · `vcs_restore(sha)` · `vcs_last_conforming` · `vcs_init`. `bundle:changed` crece un
-  campo `vcs` barato (head/pendingCount/clean); el `OkfDiff`/log pesados se piden al abrir.
-- **MCP**: `history(concept?)` · `diff(revA,revB)` · `last_conforming_version` · `when_changed(concept)` ·
-  **`commit(message)`** (única escritura: el agente hace checkpoint y recibe la conformidad post-commit → aprende
-  "no conforme" y se autocorrige). Commits del agente con trailer `Co-Authored-By`.
-- **CLI**: `log` · `diff` · `last-conforming` · `hooks install` (+ `check --staged/--rev/--range`).
-- **Frontend**: el **pill** de versión + popover (pendientes, recientes, "restaurar última conforme"); el **overlay**
+  `vcs_commit(msg, alsoLog)` · `vcs_restore(sha)` · `vcs_branches` · `vcs_create_branch(name)` ·
+  `vcs_switch_branch(name)` · `vcs_merge(name)` · `vcs_pull` · `vcs_push` · `vcs_last_conforming` · `vcs_init`.
+  `bundle:changed` crece un campo `vcs` barato (head/branch/ahead/behind/pendingCount/clean); el `OkfDiff`/log
+  pesados se piden al abrir.
+- **MCP**: `history(concept?)` · `diff(revA,revB)` · `last_conforming_commit` · `when_changed(concept)` ·
+  **`commit(message)`** (única escritura del agente: hace checkpoint y recibe la conformidad post-commit → aprende
+  "no conforme" y se autocorrige). **push/pull y operaciones de rama quedan fuera del MCP** (sync y topología de
+  ramas son acciones humanas deliberadas). Commits del agente con trailer `Co-Authored-By`.
+- **CLI**: `log` · `diff` · `last-conforming` · `branch` (list/create/switch) · `merge` · `pull` · `push` ·
+  `hooks install` (+ `check --staged/--rev/--range`).
+- **Frontend**: el **pill** de git (HEAD/rama/ahead-behind/pendientes) + popover (pendientes, recientes, cambiar de
+  rama, push/pull, "restaurar al último conforme"); el **overlay**
   (timeline de la rama con puntos de conformidad por commit renderizados progresivamente + "Propuestas en revisión"
   = `status:review` + panel de diff + restaurar/comparar/filtrar a una página); y el **4º modo de editor "Cambios"**
   (diff de la página vs HEAD, `OkfDiff` perezoso). El grafo/física no se toca; un store `vcs` se alimenta de
@@ -548,11 +648,11 @@ Cada versión guarda su conformidad — el `confOf(snap)` del prototipo hecho re
 
 | Tema | Decisión v1 |
 |---|---|
-| Sincronización / remoto | **No-goal.** push/pull/fetch/clone = `git` CLI del usuario; lodestar lee el estado post-pull por el ref-watch, sin red. |
-| Firma de commits | **Sin firmar** (libgit2 ignora `commit.gpgsign`); si el repo la exige, avisar y delegar en el CLI. |
-| LFS / `.gitattributes` | libgit2 no aplica filtros; detectar y **avisar** (no commitear un blob LFS crudo); binarios fuera de scope, se saltan. |
-| Ramas | Read-only (vocabulario "línea"); no crear/cambiar/mergear desde la app. |
-| Propuestas | `status: review` en la línea principal, **no** ramas/PR. Aceptar/rechazar = editar frontmatter. |
+| Sincronización / remoto | **push/pull/fetch in-app** vía binario `git` sobre el upstream configurado (hereda auth). **clone y gestión de remotos = no-goal** (`git` CLI del usuario). libgit2 nunca toca la red. |
+| Firma de commits | **Sin firmar** (commit por libgit2, ignora `commit.gpgsign`); si el repo la exige, avisar y ofrecer commit vía CLI. (`push` sí respeta hooks/firma del lado servidor.) |
+| LFS / `.gitattributes` | **commit** (libgit2) no aplica filtros → detectar y **avisar** (no commitear un blob LFS crudo); **pull/push** (binario `git`) sí respetan LFS. Binarios fuera de scope, se saltan. |
+| Ramas | **Crear/cambiar/merge locales** desde la app (libgit2; switch/merge reescriben el working tree por el único escritor + checkpoint). Rebase = diferido. |
+| Propuestas | `status: review`, **no** ramas/PR — decisión del modelo OKF (aunque ahora haya ramas). Aceptar/rechazar = editar frontmatter. |
 | Tags · submódulos · worktrees · repos bare | Diferidos / no soportados v1 (degradan, no crashean). |
 
 ---
@@ -565,8 +665,8 @@ Cada fase se valida con el arnés de paridad antes de la siguiente.
    prototipo JS. Sale aquí toda la lógica OKF; testeable sin GUI/DB.
 2. **`lodestar-cli`** mínimo (`check`/`index`/`tags`/`export`) sobre el core efímero. Ya es útil como gate de CI.
 3. **`lodestar-store`** (SQLite/FTS5 + watcher) + test de paridad SQL==core + property test incremental==rebuild.
-4. **`lodestar-vcs`** (git2: status/log/diff/commit/restore/init + ref-watch) + cache de conformidad por commit
-   (tree-oid) + `lodestar check --staged/--rev` y `hooks install`.
+4. **`lodestar-vcs`** (libgit2: status/log/diff/commit/restore/branch/merge/init + ref-watch · binario `git` para
+   push/pull/fetch) + cache de conformidad por commit (tree-oid) + `lodestar check --staged/--rev` y `hooks install`.
 5. **`lodestar-workspace`** (handle unificado + bus de eventos + único escritor; compone core+store+vcs; restore con checkpoint).
 6. **`src-tauri`** + **frontend Svelte** portando el prototipo verbatim (incl. pill/overlay/modo "Cambios"); `.d.ts` generado; editor multi-escritor.
 7. **`lodestar-mcp`** (casi gratis: 4ª fachada sobre la misma workspace, con `commit` para agentes) + golden cross-fachada.
