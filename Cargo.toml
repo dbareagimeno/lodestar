@@ -38,6 +38,8 @@ lodestar-fixtures = { path = "crates/lodestar-fixtures" }
 clap = { version = "4", features = ["derive"] }
 anyhow = "1"
 ignore = "0.4"
+# git2 sin features de red (https/ssh): la red va por el binario `git`. libgit2 vendored.
+git2 = { version = "0.19", default-features = false }
 
 [workspace.lints.clippy]
 all = "warn"

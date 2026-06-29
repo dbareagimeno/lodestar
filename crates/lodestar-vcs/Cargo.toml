@@ -8,7 +8,10 @@ description = "Dueño único de git: libgit2 local + binario git para red. git2 
 [dependencies]
 lodestar-core = { workspace = true }
 thiserror = { workspace = true }
-# git2: se añade al implementar E4.
+git2 = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
 
 [lints]
 workspace = true
