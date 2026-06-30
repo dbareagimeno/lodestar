@@ -1,37 +1,97 @@
 name: CI
 
+# Gate de calidad: ninguna rama puede mergearse a `main` sin pasar TODOS estos jobs.
+# (Para bloquear el merge de verdad, activa "Require status checks to pass" en la
+#  protección de rama de `main` y marca como obligatorios: rust, core-purity, frontend.)
+
 on:
   push:
     branches: [main]
   pull_request:
 
+# Cancela runs antiguos de la misma rama/PR para no malgastar minutos.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # ---------------------------------------------------------------------------
+  # Rust: formato + lint estricto + compila TODO + tests. Si algo no compila, falla.
+  # ---------------------------------------------------------------------------
   rust:
-    name: Rust (fmt · clippy · test)
+    name: Rust · fmt · clippy · build · test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Instala toolchain (stable + rustfmt + clippy)
+        uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
-      - name: rustfmt
+
+      - name: Cache de cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Formato (falla si no está formateado)
         run: cargo fmt --all --check
-      - name: clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
-      - name: test
-        run: cargo test --workspace
+
+      - name: Clippy (warnings = error, todos los targets y features)
+        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+
+      # `--all-targets` compila también tests, benches y ejemplos: garantiza que NADA que
+      # no compile entre en la rama, no solo el código de producción.
+      - name: Build (todo el workspace, todos los targets)
+        run: cargo build --workspace --all-targets --locked
+
+      - name: Tests
+        run: cargo test --workspace --locked
         env:
+          # git2 necesita identidad para los tests que crean commits.
           GIT_AUTHOR_NAME: CI
           GIT_AUTHOR_EMAIL: ci@example.com
           GIT_COMMITTER_NAME: CI
           GIT_COMMITTER_EMAIL: ci@example.com
 
+      - name: Doc (los doc-comments deben compilar; intra-doc links rotos = error)
+        run: cargo doc --workspace --no-deps --locked
+        env:
+          RUSTDOCFLAGS: "-D warnings"
+
+  # ---------------------------------------------------------------------------
+  # Invariante #2 (ARCHITECTURE.md §2.2, §10 fila 2, E8-H11): el core es PURO.
+  # Falla si lodestar-core adquiere una dependencia de I/O/DB/git/runtime/GUI.
+  # ---------------------------------------------------------------------------
+  core-purity:
+    name: Core puro (sin tokio/rusqlite/git2/notify/tauri)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Verifica el árbol de dependencias de lodestar-core
+        run: |
+          set -euo pipefail
+          tree="$(cargo tree -p lodestar-core --edges normal --prefix none --locked)"
+          echo "$tree"
+          forbidden='^(tokio|rusqlite|libsqlite3-sys|git2|libgit2-sys|notify|notify-debouncer-full|tauri|tauri-build) '
+          if echo "$tree" | grep -Eq "$forbidden"; then
+            echo "::error::lodestar-core arrastra una dependencia prohibida (debe permanecer puro)."
+            echo "$tree" | grep -E "$forbidden" || true
+            exit 1
+          fi
+          echo "OK: lodestar-core es puro."
+
+  # ---------------------------------------------------------------------------
+  # Frontend: instalación reproducible + type-check + build. Si no compila, falla.
+  # ---------------------------------------------------------------------------
   frontend:
-    name: Frontend (build · check)
+    name: Frontend · check · build
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -41,6 +101,11 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
-      - run: npm install
-      - run: npm run check
-      - run: npm run build
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Instala dependencias (reproducible)
+        run: npm ci
+      - name: Type-check (svelte-check + tsc)
+        run: npm run check
+      - name: Build (Vite → dist/)
+        run: npm run build
