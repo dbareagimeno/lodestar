@@ -1,0 +1,15 @@
+[package]
+name = "lodestar-store"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Cache derivada (SQLite/FTS5) + watcher. Dueño único del DDL .lodestar/index.db. rusqlite vive SOLO aquí."
+
+[dependencies]
+lodestar-core = { workspace = true }
+blake3 = { workspace = true }
+thiserror = { workspace = true }
+# rusqlite, notify, ignore, crossbeam: se añaden al implementar E3.
+
+[lints]
+workspace = true
