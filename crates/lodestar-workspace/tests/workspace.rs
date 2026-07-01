@@ -109,6 +109,33 @@ fn generate_index_aplica_por_el_unico_escritor() {
 }
 
 #[test]
+fn open_live_emite_evento_y_acelera_lecturas() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut ws = Workspace::open(dir.path()).unwrap();
+    ws.set_identity(Author {
+        name: "Test".into(),
+        email: "t@e.com".into(),
+    });
+    ws.init_vcs().unwrap();
+    ws.enable_cache().unwrap();
+    let rx = ws.subscribe().unwrap();
+
+    // Escribir por el único escritor dispara el update optimista de la cache → IndexEvent.
+    let p = RelPath::new("alfa.md").unwrap();
+    ws.create_concept(&p, "Nota", Some("Alfa"), "# H\n\n[b](/beta.md)\n", false)
+        .unwrap();
+    let ev = rx
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .expect("debe llegar un IndexEvent");
+    assert!(ev.changed.contains(&p));
+
+    // La cache responde consultas aceleradas coherentes con el core.
+    let cache = ws.cache().unwrap();
+    assert!(cache.dangling().unwrap().iter().any(|d| d.as_str() == "beta.md"));
+    assert!(cache.orphans().unwrap().contains(&p));
+}
+
+#[test]
 fn diff_working_vs_head() {
     let (_dir, ws) = setup();
     let p = RelPath::new("alfa.md").unwrap();

@@ -23,9 +23,11 @@ mod bundle;
 mod conform;
 mod graph;
 mod query;
+mod store_trait;
 
 pub use bundle::Bundle;
 pub use error::CoreError;
+pub use store_trait::ConceptStore;
 pub use types::*;
 
 #[cfg(feature = "render")]
