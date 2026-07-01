@@ -21,10 +21,12 @@ use lodestar_core::Bundle;
 use lodestar_store::{IndexEvent, Store, Watcher};
 use lodestar_vcs::{MergeOutcome, Vcs};
 
+pub mod config;
 mod error;
 mod io;
 mod snapshot;
 
+pub use config::Config;
 pub use error::WorkspaceError;
 pub use snapshot::BundleSnapshot;
 
@@ -44,13 +46,23 @@ impl Workspace {
     /// **No** activa la cache incremental (usa [`Workspace::open_live`] o [`Workspace::enable_cache`]).
     pub fn open(root: &Path) -> Result<Self, WorkspaceError> {
         let vcs = Vcs::discover(root)?.map(Mutex::new);
+        // La identidad de `lodestar.toml` (si existe) tiene prioridad sobre el defecto.
+        let identity = Config::load(root)
+            .ok()
+            .and_then(|c| c.author())
+            .unwrap_or_else(default_identity);
         Ok(Workspace {
             root: root.to_path_buf(),
             vcs,
-            identity: default_identity(),
+            identity,
             cache: None,
             _watcher: None,
         })
+    }
+
+    /// La configuración efectiva del bundle (`lodestar.toml` + defaults).
+    pub fn config(&self) -> Config {
+        Config::load(&self.root).unwrap_or_default()
     }
 
     /// Abre sin git (modo hermético, p. ej. CLI efímera).
@@ -277,7 +289,12 @@ impl Workspace {
     /// Conformidad de un commit concreto, cacheada por `tree_oid` en el store (`§10` fila 20):
     /// solo recomputa (analyze sobre el árbol) en el primer acceso; luego sirve de la cache.
     pub fn conformance_of(&self, sha: &Sha) -> Result<CommitConformance, WorkspaceError> {
-        let guard = self.vcs.as_ref().ok_or(WorkspaceError::NoVcs)?.lock().unwrap();
+        let guard = self
+            .vcs
+            .as_ref()
+            .ok_or(WorkspaceError::NoVcs)?
+            .lock()
+            .unwrap();
         let tree_oid = guard.tree_oid(sha)?;
         if let Some(store) = &self.cache {
             if let Some(cached) = store.get_conformance(&tree_oid)? {
@@ -305,9 +322,17 @@ impl Workspace {
     /// aplica el árbol destino y regenera index/tags (`§16`).
     pub fn switch(&self, name: &str) -> Result<ApplyReport, WorkspaceError> {
         let target_files = {
-            let guard = self.vcs.as_ref().ok_or(WorkspaceError::NoVcs)?.lock().unwrap();
+            let guard = self
+                .vcs
+                .as_ref()
+                .ok_or(WorkspaceError::NoVcs)?
+                .lock()
+                .unwrap();
             if !guard.dirty_paths()?.is_empty() {
-                guard.commit("Checkpoint automático antes de cambiar de rama", &self.identity)?;
+                guard.commit(
+                    "Checkpoint automático antes de cambiar de rama",
+                    &self.identity,
+                )?;
             }
             guard.switch(name)?
         };
@@ -322,7 +347,12 @@ impl Workspace {
     /// conflicto deja marcadores (`OKF-CONFLICT`) y `MERGE_HEAD` (bloquea el commit hasta resolver).
     pub fn merge(&self, name: &str) -> Result<MergeReport, WorkspaceError> {
         let outcome: MergeOutcome = {
-            let guard = self.vcs.as_ref().ok_or(WorkspaceError::NoVcs)?.lock().unwrap();
+            let guard = self
+                .vcs
+                .as_ref()
+                .ok_or(WorkspaceError::NoVcs)?
+                .lock()
+                .unwrap();
             if !guard.dirty_paths()?.is_empty() {
                 guard.commit("Checkpoint automático antes de hacer merge", &self.identity)?;
             }
@@ -503,7 +533,12 @@ impl Workspace {
     /// Analiza el árbol de una revisión git (para `lodestar check --rev <REV>`).
     pub fn analyze_rev(&self, rev: &str) -> Result<Analysis, WorkspaceError> {
         let files = {
-            let guard = self.vcs.as_ref().ok_or(WorkspaceError::NoVcs)?.lock().unwrap();
+            let guard = self
+                .vcs
+                .as_ref()
+                .ok_or(WorkspaceError::NoVcs)?
+                .lock()
+                .unwrap();
             let sha = guard.resolve_rev(rev)?;
             guard.tree_files(&sha)?
         };

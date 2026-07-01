@@ -124,7 +124,11 @@ fn resolve_rev_y_staged_files() {
     // resolve_rev("HEAD") == el commit recién hecho.
     assert_eq!(vcs.resolve_rev("HEAD").unwrap(), sha);
     // staged: stagea un fichero nuevo (sin commitear) y aparece en staged_files.
-    write(dir.path(), "b.md", "---\ntype: Nota\ntitle: B\n---\n\n# H\n");
+    write(
+        dir.path(),
+        "b.md",
+        "---\ntype: Nota\ntitle: B\n---\n\n# H\n",
+    );
     // El commit stagea todo; para probar staged sin commit, usamos el índice de git directamente
     // mediante otro commit-less stage: aquí staged_files refleja el árbol del último commit staged.
     let staged = vcs.staged_files().unwrap();
@@ -135,7 +139,11 @@ fn resolve_rev_y_staged_files() {
 fn switch_devuelve_arbol_destino_sin_tocar_working_tree() {
     let dir = tempfile::tempdir().unwrap();
     let vcs = Vcs::init(dir.path(), &author()).unwrap();
-    write(dir.path(), "a.md", "---\ntype: Nota\ntitle: A\n---\n\n# H\n");
+    write(
+        dir.path(),
+        "a.md",
+        "---\ntype: Nota\ntitle: A\n---\n\n# H\n",
+    );
     vcs.commit("main: A", &author()).unwrap();
     vcs.create_branch("otra", None).unwrap();
     let files = vcs.switch("otra").unwrap();
@@ -147,12 +155,20 @@ fn switch_devuelve_arbol_destino_sin_tocar_working_tree() {
 fn merge_fast_forward() {
     let dir = tempfile::tempdir().unwrap();
     let vcs = Vcs::init(dir.path(), &author()).unwrap();
-    write(dir.path(), "a.md", "---\ntype: Nota\ntitle: A\n---\n\n# H\n");
+    write(
+        dir.path(),
+        "a.md",
+        "---\ntype: Nota\ntitle: A\n---\n\n# H\n",
+    );
     let base = vcs.commit("base", &author()).unwrap();
     // rama feature desde base, con un commit extra
     vcs.create_branch("feature", Some(&base)).unwrap();
     vcs.switch("feature").unwrap();
-    write(dir.path(), "b.md", "---\ntype: Nota\ntitle: B\n---\n\n# H\n");
+    write(
+        dir.path(),
+        "b.md",
+        "---\ntype: Nota\ntitle: B\n---\n\n# H\n",
+    );
     vcs.commit("feature: B", &author()).unwrap();
     // volver a la rama por defecto y hacer merge ff de feature
     let default = vcs

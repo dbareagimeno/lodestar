@@ -147,7 +147,11 @@ pub(crate) fn upsert_file(
 
     // Diagnostics locales (el core es la autoridad; ORPHAN/LINK-STUB se sintetizan).
     for check in local_diagnostics(path, raw) {
-        let targets: Vec<String> = check.targets.iter().map(|t| t.as_str().to_string()).collect();
+        let targets: Vec<String> = check
+            .targets
+            .iter()
+            .map(|t| t.as_str().to_string())
+            .collect();
         let targets_json = serde_json::to_string(&targets).unwrap_or_else(|_| "[]".to_string());
         tx.execute(
             "INSERT INTO diagnostics (path, code, level, msg, targets_json) VALUES (?1,?2,?3,?4,?5)",

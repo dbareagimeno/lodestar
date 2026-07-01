@@ -80,7 +80,8 @@ pub fn check_staged(root: &Path, json: bool, sarif: bool) -> anyhow::Result<Exit
     let analysis = ws
         .analyze_staged()
         .map_err(|e| anyhow::anyhow!(e.to_string()))?;
-    crate::commands::render_analysis(&analysis, json, sarif)
+    let blocked = ws.config().gate_blocked(&analysis);
+    crate::commands::render_analysis(&analysis, json, sarif, blocked)
 }
 
 /// `lodestar check --rev <REV>`: juzga el árbol de una revisión (exit 0/1).
@@ -89,7 +90,8 @@ pub fn check_rev(root: &Path, rev: &str, json: bool, sarif: bool) -> anyhow::Res
     let analysis = ws
         .analyze_rev(rev)
         .map_err(|e| anyhow::anyhow!(e.to_string()))?;
-    crate::commands::render_analysis(&analysis, json, sarif)
+    let blocked = ws.config().gate_blocked(&analysis);
+    crate::commands::render_analysis(&analysis, json, sarif, blocked)
 }
 
 /// `lodestar switch <name>`: cambia de rama por el único escritor (checkpoint previo).
@@ -99,7 +101,9 @@ pub fn switch(root: &Path, name: &str, create: bool) -> anyhow::Result<ExitCode>
         ws.create_branch(name, None)
             .map_err(|e| anyhow::anyhow!(e.to_string()))?;
     }
-    let report = ws.switch(name).map_err(|e| anyhow::anyhow!(e.to_string()))?;
+    let report = ws
+        .switch(name)
+        .map_err(|e| anyhow::anyhow!(e.to_string()))?;
     println!(
         "en la rama {name} ({} escritos, {} eliminados)",
         report.written, report.removed
@@ -143,6 +147,9 @@ pub fn reindex(root: &Path) -> anyhow::Result<ExitCode> {
     let mut ws = open(root)?;
     ws.enable_cache()
         .map_err(|e| anyhow::anyhow!(e.to_string()))?;
-    println!("cache reconstruida en {}", root.join(".lodestar/index.db").display());
+    println!(
+        "cache reconstruida en {}",
+        root.join(".lodestar/index.db").display()
+    );
     Ok(ExitCode::SUCCESS)
 }

@@ -39,4 +39,15 @@ export async function query(dsl: string): Promise<RelPath[]> {
   return (await invoke(COMMANDS.query, { dsl })) as RelPath[];
 }
 
+// Suscripción a eventos empujados por la fachada (`bundle:changed`). En producción usa
+// `@tauri-apps/api/event`; fuera de Tauri devuelve un unsubscribe no-op (la UI sigue compilando).
+type Listen = (event: string, cb: (e: { payload: unknown }) => void) => Promise<() => void>;
+
+export async function onBundleChanged(cb: (snap: BundleSnapshot) => void): Promise<() => void> {
+  const w = window as unknown as { __TAURI__?: { event?: { listen?: Listen } } };
+  const listen = w.__TAURI__?.event?.listen;
+  if (!listen) return () => {};
+  return listen(EVENTS.bundleChanged, (e) => cb(e.payload as BundleSnapshot));
+}
+
 export { COMMANDS, EVENTS };

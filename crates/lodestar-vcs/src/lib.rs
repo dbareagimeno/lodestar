@@ -376,7 +376,9 @@ impl Vcs {
                 Ok(p) if p.ends_with(".md") => p.to_string(),
                 _ => continue,
             };
-            let Ok(rp) = RelPath::new(&path) else { continue };
+            let Ok(rp) = RelPath::new(&path) else {
+                continue;
+            };
             let read = |e: Option<&git2::IndexEntry>| -> String {
                 e.and_then(|e| self.repo.find_blob(e.id).ok())
                     .and_then(|b| std::str::from_utf8(b.content()).ok().map(String::from))

@@ -12,19 +12,23 @@ use crate::sarif;
 
 const DRIFT: u8 = 4;
 
-/// `lodestar check`: analiza y decide conformidad (exit 0/1).
+/// `lodestar check`: analiza y decide conformidad (exit 0/1), con la strictness de `lodestar.toml`.
 pub fn check(root: &Path, json: bool, sarif_out: bool) -> anyhow::Result<ExitCode> {
     let files = load_bundle(root)?;
     let bundle = Bundle::from_files(files);
-    render_analysis(bundle.analyze(), json, sarif_out)
+    let blocked = lodestar_workspace::Config::load(root)
+        .unwrap_or_default()
+        .gate_blocked(bundle.analyze());
+    render_analysis(bundle.analyze(), json, sarif_out, blocked)
 }
 
-/// Imprime un `Analysis` en el formato pedido y devuelve el exit code (0 conforme / 1 hard-fail).
-/// Reutilizado por `check` sobre disco, `--staged` y `--rev`.
+/// Imprime un `Analysis` en el formato pedido y devuelve el exit code (0 conforme / 1 bloqueado).
+/// `blocked` lo decide la strictness de `lodestar.toml`. Reutilizado por `check`, `--staged` y `--rev`.
 pub fn render_analysis(
     analysis: &lodestar_core::types::Analysis,
     json: bool,
     sarif_out: bool,
+    blocked: bool,
 ) -> anyhow::Result<ExitCode> {
     if json {
         println!("{}", serde_json::to_string_pretty(analysis)?);
@@ -33,8 +37,7 @@ pub fn render_analysis(
     } else {
         print_human(analysis);
     }
-    // Strictness por defecto: solo Err bloquea. (La lectura de lodestar.toml es E8-H01.)
-    if analysis.hard_fail > 0 {
+    if blocked {
         Ok(ExitCode::from(1))
     } else {
         Ok(ExitCode::SUCCESS)
@@ -146,7 +149,7 @@ pub fn init(dir: PathBuf) -> anyhow::Result<ExitCode> {
         std::fs::write(&index, "---\nokf_version: \"0.1\"\n---\n\n# Bundle\n")?;
     }
     let _ = RelPath::new("index.md"); // documenta el invariante de paths
-    // `git init` + `.gitignore` + commit inicial (por el vcs, que es el dueño de git).
+                                      // `git init` + `.gitignore` + commit inicial (por el vcs, que es el dueño de git).
     let mut ws =
         lodestar_workspace::Workspace::open(&dir).map_err(|e| anyhow::anyhow!(e.to_string()))?;
     if !ws.has_vcs() {

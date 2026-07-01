@@ -142,8 +142,17 @@ pub(crate) fn fts_candidates(conn: &Connection, needle: &str) -> Result<Vec<RelP
 
 /// Búsqueda de subcadena (semántica del core): title/description/body que contienen `needle`
 /// (case-insensitive). Es LA verdad; FTS solo acelera. Incluye matches parciales dentro de un token.
-pub(crate) fn search_substring(conn: &Connection, needle: &str) -> Result<Vec<RelPath>, StoreError> {
-    let like = format!("%{}%", needle.to_lowercase().replace('%', "\\%").replace('_', "\\_"));
+pub(crate) fn search_substring(
+    conn: &Connection,
+    needle: &str,
+) -> Result<Vec<RelPath>, StoreError> {
+    let like = format!(
+        "%{}%",
+        needle
+            .to_lowercase()
+            .replace('%', "\\%")
+            .replace('_', "\\_")
+    );
     rows_to_relpaths(
         conn,
         r#"SELECT path FROM files

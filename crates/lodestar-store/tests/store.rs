@@ -50,7 +50,11 @@ fn assert_matches_core(store: &Store, files: &FileMap) {
         "dangling difiere"
     );
     assert_eq!(
-        store.in_index().unwrap().into_iter().collect::<BTreeSet<_>>(),
+        store
+            .in_index()
+            .unwrap()
+            .into_iter()
+            .collect::<BTreeSet<_>>(),
         a.in_index.iter().cloned().collect::<BTreeSet<_>>(),
         "in_index difiere"
     );
@@ -130,7 +134,9 @@ fn property_incremental_igual_core() {
     // LCG determinista (Math.random no disponible en scripts de test tampoco hace falta).
     let mut seed: u64 = 0x9E3779B97F4A7C15;
     let mut next = || {
-        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         (seed >> 33) as usize
     };
 
@@ -138,9 +144,7 @@ fn property_incremental_igual_core() {
     let store = Store::open(dir.path()).unwrap();
     let mut mirror: FileMap = FileMap::new();
 
-    let names = [
-        "index.md", "a.md", "b.md", "c.md", "d.md", "e.md",
-    ];
+    let names = ["index.md", "a.md", "b.md", "c.md", "d.md", "e.md"];
 
     for _ in 0..120 {
         let name = names[next() % names.len()];
@@ -188,11 +192,19 @@ fn fts_expresion_maliciosa_no_rompe() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
     store
-        .upsert(&rp("a.md"), "---\ntype: C\ntitle: A\n---\n\n# H\n\nx\n", 0, 0)
+        .upsert(
+            &rp("a.md"),
+            "---\ntype: C\ntitle: A\n---\n\n# H\n\nx\n",
+            0,
+            0,
+        )
         .unwrap();
     // Operadores/comillas de FTS5 no deben inyectar ni provocar error.
     for expr in ["\" OR 1=1 --", "a*", "NEAR(", "\"\"\"", "col:val"] {
-        assert!(store.fts_candidates(expr).is_ok(), "expr {expr:?} rompió FTS");
+        assert!(
+            store.fts_candidates(expr).is_ok(),
+            "expr {expr:?} rompió FTS"
+        );
     }
 }
 
@@ -200,9 +212,18 @@ fn fts_expresion_maliciosa_no_rompe() {
 fn blast_radius_igual_neighborhood_in() {
     // a -> b -> c ; blast-radius de c (In) = {c, b, a}
     let mut files = FileMap::new();
-    files.insert(rp("a.md"), "---\ntype: C\ntitle: A\n---\n\n# H\n\n[b](/b.md)\n".into());
-    files.insert(rp("b.md"), "---\ntype: C\ntitle: B\n---\n\n# H\n\n[c](/c.md)\n".into());
-    files.insert(rp("c.md"), "---\ntype: C\ntitle: C\n---\n\n# H\n\nfin\n".into());
+    files.insert(
+        rp("a.md"),
+        "---\ntype: C\ntitle: A\n---\n\n# H\n\n[b](/b.md)\n".into(),
+    );
+    files.insert(
+        rp("b.md"),
+        "---\ntype: C\ntitle: B\n---\n\n# H\n\n[c](/c.md)\n".into(),
+    );
+    files.insert(
+        rp("c.md"),
+        "---\ntype: C\ntitle: C\n---\n\n# H\n\nfin\n".into(),
+    );
 
     let dir = tempfile::tempdir().unwrap();
     write_all(dir.path(), &files);
@@ -211,7 +232,11 @@ fn blast_radius_igual_neighborhood_in() {
     let bundle = Bundle::from_files(files.clone());
     let nb = bundle.neighborhood(&rp("c.md"), 5, Direction::In);
     let core_set: BTreeSet<RelPath> = nb.nodes.iter().map(|n| n.id.clone()).collect();
-    let sql_set: BTreeSet<RelPath> = store.blast_radius(&rp("c.md"), 5).unwrap().into_iter().collect();
+    let sql_set: BTreeSet<RelPath> = store
+        .blast_radius(&rp("c.md"), 5)
+        .unwrap()
+        .into_iter()
+        .collect();
     assert_eq!(sql_set, core_set);
 }
 
@@ -221,14 +246,24 @@ fn bus_emite_indexevent_en_cambio() {
     let store = Store::open(dir.path()).unwrap();
     let rx = store.subscribe();
     store
-        .upsert(&rp("a.md"), "---\ntype: C\ntitle: A\n---\n\n# H\n\nx\n", 0, 0)
+        .upsert(
+            &rp("a.md"),
+            "---\ntype: C\ntitle: A\n---\n\n# H\n\nx\n",
+            0,
+            0,
+        )
         .unwrap();
     let ev = rx.recv_timeout(Duration::from_secs(1)).unwrap();
     assert_eq!(ev.changed, vec![rp("a.md")]);
     assert!(ev.removed.is_empty());
     // Un no-op no emite: el canal queda vacío.
     store
-        .upsert(&rp("a.md"), "---\ntype: C\ntitle: A\n---\n\n# H\n\nx\n", 0, 0)
+        .upsert(
+            &rp("a.md"),
+            "---\ntype: C\ntitle: A\n---\n\n# H\n\nx\n",
+            0,
+            0,
+        )
         .unwrap();
     assert!(rx.recv_timeout(Duration::from_millis(100)).is_err());
 }
@@ -242,7 +277,8 @@ fn reconcile_repara_drift_fuera_de_banda() {
 
     // Cambio fuera de banda: añade un fichero y borra otro directamente en disco.
     let nuevo = rp("gamma.md");
-    let nuevo_raw = "---\ntype: Concept\ntitle: Gamma\ndescription: d\n---\n\n# H\n\n[a](/alfa.md)\n";
+    let nuevo_raw =
+        "---\ntype: Concept\ntitle: Gamma\ndescription: d\n---\n\n# H\n\n[a](/alfa.md)\n";
     std::fs::write(dir.path().join("gamma.md"), nuevo_raw).unwrap();
     std::fs::remove_file(dir.path().join("beta.md")).unwrap();
     files.insert(nuevo.clone(), nuevo_raw.into());

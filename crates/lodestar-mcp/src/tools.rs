@@ -192,3 +192,62 @@ fn json_to_yaml(v: &Value) -> serde_yaml::Value {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    //! Golden cross-fachada (E7-H06): la salida de cada tool == la del `Workspace` directo.
+    //! Verifica que la fachada MCP es un shell fino sin lógica OKF propia (`§2`, `§7`).
+    use super::*;
+
+    fn ws_with_fixture() -> (tempfile::TempDir, Workspace) {
+        let dir = tempfile::tempdir().unwrap();
+        for (p, c) in [
+            ("index.md", "---\nokf_version: \"0.1\"\n---\n\n# Bundle\n\n* [Alfa](alfa.md)\n"),
+            (
+                "alfa.md",
+                "---\ntype: Concept\ntitle: Alfa\ndescription: d\n---\n\n# H\n\n[huerfano falta](/no-existe.md)\n",
+            ),
+            (
+                "beta.md",
+                "---\ntype: Concept\ntitle: Beta\ndescription: d\n---\n\n# H\n\ncuerpo\n",
+            ),
+        ] {
+            std::fs::write(dir.path().join(p), c).unwrap();
+        }
+        let ws = Workspace::open_ephemeral(dir.path()).unwrap();
+        (dir, ws)
+    }
+
+    #[test]
+    fn golden_backlinks_igual_workspace() {
+        let (_d, ws) = ws_with_fixture();
+        let p = RelPath::new("alfa.md").unwrap();
+        let via_tool = call(&ws, "find_backlinks", &json!({"concept": "alfa.md"})).unwrap();
+        let direct = serde_json::to_value(ws.backlinks(&p).unwrap()).unwrap();
+        assert_eq!(via_tool, direct);
+    }
+
+    #[test]
+    fn golden_orphans_y_dangling_igual_workspace() {
+        let (_d, ws) = ws_with_fixture();
+        let a = ws.analyze().unwrap();
+        let orphans = call(&ws, "find_orphans", &json!({})).unwrap();
+        assert_eq!(orphans, json!({ "orphans": a.orphans }));
+        let dangling = call(&ws, "find_dangling", &json!({})).unwrap();
+        assert_eq!(dangling, json!({ "dangling": a.dangling }));
+    }
+
+    #[test]
+    fn golden_query_igual_workspace() {
+        let (_d, ws) = ws_with_fixture();
+        let via_tool = call(&ws, "query", &json!({"dsl": "is:orphan"})).unwrap();
+        let direct = serde_json::to_value(ws.query("is:orphan").unwrap()).unwrap();
+        assert_eq!(via_tool, direct);
+    }
+
+    #[test]
+    fn tool_desconocida_es_error() {
+        let (_d, ws) = ws_with_fixture();
+        assert!(call(&ws, "no_existe", &json!({})).is_err());
+    }
+}

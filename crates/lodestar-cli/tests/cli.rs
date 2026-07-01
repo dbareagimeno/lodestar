@@ -141,8 +141,9 @@ fn init_scaffold() {
 }
 
 #[test]
-fn check_staged_pendiente_e4_exit_3() {
-    let dir = temp_dir("staged");
+fn check_staged_sin_git_exit_3() {
+    // Sin repo git, `--staged` no tiene árbol staged → error de runtime (exit 3).
+    let dir = temp_dir("staged-nogit");
     write(
         &dir,
         "index.md",
@@ -155,4 +156,82 @@ fn check_staged_pendiente_e4_exit_3() {
         .status()
         .unwrap();
     assert_eq!(status.code(), Some(3));
+}
+
+#[test]
+fn check_rev_head_tras_init() {
+    // `init` crea git + commit inicial; `check --rev HEAD` juzga ese árbol (index.md conforme → 0).
+    let dir = temp_dir("checkrev");
+    let target = dir.join("b");
+    assert_eq!(
+        bin().arg("init").arg(&target).status().unwrap().code(),
+        Some(0)
+    );
+    let status = bin()
+        .arg("--path")
+        .arg(&target)
+        .args(["check", "--rev", "HEAD"])
+        .status()
+        .unwrap();
+    assert_eq!(status.code(), Some(0));
+}
+
+#[test]
+fn import_desde_zip_del_prototipo() {
+    // Exporta un bundle a .zip y lo reimporta en un directorio nuevo (roundtrip).
+    let dir = temp_dir("import-src");
+    write(
+        &dir,
+        "a.md",
+        "---\ntype: Nota\ntitle: A\ndescription: d\n---\n\n# H\n",
+    );
+    let zip = dir.join("bundle.zip");
+    assert_eq!(
+        bin()
+            .arg("--path")
+            .arg(&dir)
+            .args(["export", "--out"])
+            .arg(&zip)
+            .status()
+            .unwrap()
+            .code(),
+        Some(0)
+    );
+    let dest = temp_dir("import-dest");
+    let status = bin()
+        .arg("--path")
+        .arg(&dest)
+        .arg("import")
+        .arg(&zip)
+        .status()
+        .unwrap();
+    assert_eq!(status.code(), Some(0));
+    assert!(dest.join("a.md").is_file());
+}
+
+#[test]
+fn import_rechaza_zip_slip() {
+    // Un zip con una ruta con `..` no debe escribir fuera del bundle (chokepoint RelPath).
+    let dir = temp_dir("zipslip");
+    let zip_path = dir.join("evil.zip");
+    {
+        let f = std::fs::File::create(&zip_path).unwrap();
+        let mut zw = zip::ZipWriter::new(f);
+        use zip::write::SimpleFileOptions;
+        zw.start_file("../evil.md", SimpleFileOptions::default())
+            .unwrap();
+        std::io::Write::write_all(&mut zw, b"---\ntype: X\n---\n\n# H\n").unwrap();
+        zw.finish().unwrap();
+    }
+    let dest = temp_dir("zipslip-dest");
+    let status = bin()
+        .arg("--path")
+        .arg(&dest)
+        .arg("import")
+        .arg(&zip_path)
+        .status()
+        .unwrap();
+    assert_eq!(status.code(), Some(0)); // no falla, pero...
+                                        // ...la ruta insegura se ignora: no se escribe fuera del destino.
+    assert!(!dest.parent().unwrap().join("evil.md").exists());
 }

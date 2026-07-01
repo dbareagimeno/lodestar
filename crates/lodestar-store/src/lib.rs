@@ -106,7 +106,13 @@ impl Store {
     /// Upsert incremental de un path con contenido ya en memoria. **Gate por hash blake3**:
     /// si el contenido coincide con el de la cache (no-op/echo), no toca nada ni emite evento.
     /// Devuelve `true` si hubo cambio efectivo.
-    pub fn upsert(&self, path: &RelPath, content: &str, mtime: i64, size: i64) -> Result<bool, StoreError> {
+    pub fn upsert(
+        &self,
+        path: &RelPath,
+        content: &str,
+        mtime: i64,
+        size: i64,
+    ) -> Result<bool, StoreError> {
         let new_hash = blake3::hash(content.as_bytes());
         let changed = {
             let mut conn = self.conn.lock().unwrap();
@@ -203,7 +209,8 @@ impl Store {
                 .to_string_lossy()
                 .replace('\\', "/");
             let Ok(rp) = RelPath::new(&rel) else { continue };
-            let content = std::fs::read_to_string(path).map_err(|e| StoreError::Io(e.to_string()))?;
+            let content =
+                std::fs::read_to_string(path).map_err(|e| StoreError::Io(e.to_string()))?;
             let (mtime, size) = fs_meta(path);
             out.push((rp, content, mtime, size));
         }
@@ -286,11 +293,13 @@ impl Store {
                 },
             )
             .ok();
-        Ok(row.map(|(hf, wc, cf)| lodestar_core::types::CommitConformance {
-            hard_fail: hf as usize,
-            warn_count: wc as usize,
-            conform: cf != 0,
-        }))
+        Ok(
+            row.map(|(hf, wc, cf)| lodestar_core::types::CommitConformance {
+                hard_fail: hf as usize,
+                warn_count: wc as usize,
+                conform: cf != 0,
+            }),
+        )
     }
 
     /// Guarda la conformidad de un `tree_oid` en la cache (idempotente).
@@ -303,7 +312,12 @@ impl Store {
         conn.execute(
             "INSERT OR REPLACE INTO commit_conformance (tree_oid, hard_fail, warn_count, conform)
              VALUES (?1, ?2, ?3, ?4)",
-            rusqlite::params![tree_oid, c.hard_fail as i64, c.warn_count as i64, c.conform as i64],
+            rusqlite::params![
+                tree_oid,
+                c.hard_fail as i64,
+                c.warn_count as i64,
+                c.conform as i64
+            ],
         )?;
         Ok(())
     }
