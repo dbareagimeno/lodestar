@@ -3,22 +3,25 @@
 > Mapea las épicas/historias de [`requirements/`](requirements/) a su estado real en esta rama.
 > Construido en el **orden de fases ratificado** (`ARCHITECTURE.md §14`), validando con tests en cada fase.
 >
-> **Resumen**: el **backend está completo y testeado** (core + store + vcs + workspace + CLI + MCP).
-> El store (SQLite/FTS5 + watcher) está implementado con paridad SQL==core; el bus de eventos en vivo
-> está cableado en la workspace; los cierres de git (check --staged/--rev, switch/merge, hooks, cache de
-> conformidad por tree-oid) están hechos; config por-bundle (`lodestar.toml`), import del prototipo e
-> `init` con git real están hechos. Queda **E6 desktop** (fachada Tauri + port verbatim de la UI, ver
-> [`DECISIONES.md`](DECISIONES.md)). **~85 tests** en verde; `cargo clippy --workspace --all-targets --
-> -D warnings` limpio; `npm run build`/`check` del frontend en verde.
+> **Resumen**: **todas las épicas (E0–E8) están implementadas y verificadas.** Backend completo
+> (core + store SQLite/FTS5+watcher con paridad SQL==core + vcs con switch/merge/hooks + workspace con
+> bus en vivo + CLI + MCP con golden cross-fachada) y **escritorio completo** (fachada Tauri v2 con la
+> tabla de comandos congelados + evento `bundle:changed`, y UI Svelte 5 funcional: árbol, editor
+> multi-escritor, isla del grafo, modo Cambios). **~85 tests** en verde; `cargo clippy --workspace
+> --all-targets --all-features --locked -- -D warnings` limpio; `cargo doc -D warnings` limpio;
+> `npm run check`/`build` del frontend en verde. Lo pendiente es **producto/pulido**, no arquitectura
+> (empaquetado/firma, rails redimensionables, rmcp, `.d.ts` generado): ver [`DECISIONES.md`](DECISIONES.md).
 
 ## Cómo correrlo
 
 ```bash
-cargo test --workspace          # 46 tests (core, cli, vcs, workspace, mcp)
+cargo test --workspace          # ~85 tests (core, store, cli, vcs, workspace, mcp)
 cargo run -p lodestar-cli -- check --path <bundle>     # la puerta de CI (exit 0/1)
-cargo run -p lodestar-cli -- log | last-conforming | branch
+cargo run -p lodestar-cli -- log | last-conforming | branch | switch | merge | hooks
 cargo run -p lodestar-mcp -- <bundle>                  # servidor MCP por stdio
 cd frontend && npm install && npm run build            # frontend Svelte 5 → dist/
+# Escritorio (requiere libwebkit2gtk-4.1-dev, libsoup-3.0-dev, …):
+cargo run -p lodestar-tauri                            # app de escritorio (Tauri v2)
 ```
 
 ## Estado por épica
@@ -31,7 +34,7 @@ cd frontend && npm install && npm run build            # frontend Svelte 5 → d
 | **E3** `lodestar-store` | ✅ Hecho | DDL dueño único (`files`/`links`/`tags`/`diagnostics` + FTS5 + `commit_conformance`), cold rebuild, watcher `notify-debouncer-full` con **gate por hash blake3**, síntesis SQL (backlinks/orphans/dangling/blast-radius CTE), FTS5 con escapado, bus `IndexEvent` (crossbeam), trait `ConceptStore`. **13 tests**: paridad SQL==core, property incremental==core (120 ediciones), watcher en vivo, FTS. |
 | **E4** `lodestar-vcs` | ✅ Hecho | libgit2 local + red por binario `git` + **resolve_rev**, **staged_files**, **switch** (sin tocar working tree), **merge** (3-vías a nivel de árbol con marcadores + `MERGE_HEAD`), **install_hooks**, **tree_oid**. Cache de conformidad por tree-oid en el store, cableada en la workspace. **12 tests**. |
 | **E5** `lodestar-workspace` | ✅ Hecho | Handle unificado, único escritor, snapshot, commit/restore con checkpoint, switch/merge, conformidad cacheada por tree-oid, config (`lodestar.toml`), y **bus de eventos en vivo** (`open_live`/`enable_cache`/`subscribe`) con **update optimista** de la cache tras cada escritura. **12 tests**. |
-| **E6** Tauri + frontend | 🟢 Parcial | Frontend Svelte 5: consume el `BundleSnapshot` (árbol filtrable + selección + panel de conformidad **localizado** i18n keyed por código), listener `bundle:changed`, CSS portada. Compila (`npm run build`) y pasa `svelte-check`. `src-tauri` sigue placeholder (Tauri necesita libs de sistema → ver [`DECISIONES.md §1`](DECISIONES.md)). Pendiente: fachada Tauri + port verbatim (editor/grafo/overlay/Cambios). |
+| **E6** Tauri + frontend | ✅ Hecho | **Fachada Tauri v2** real: comandos congelados sobre `Workspace` + estado del bundle + forwarder del bus `IndexEvent` → evento `bundle:changed` (UI en vivo). Binario `lodestar-desktop` compila; CI de Rust instala webkit y construye el frontend antes. **Frontend Svelte 5 funcional**: layout de 3 columnas colapsables, árbol filtrable, editor multi-escritor con validación y diagnósticos localizados, panel de enlaces, **isla imperativa del grafo** (`createStarMap`, SVG+rAF, sin `{#each}`), modo **Cambios** (diff + commit). `npm run check`/`build` verdes. Pulido en [`DECISIONES.md §2`](DECISIONES.md). |
 | **E7** `lodestar-mcp` | 🟢 Parcial | 13 tools sobre la workspace + bucle JSON-RPC por stdio (stdout puro). **Golden cross-fachada** (tool==workspace) + e2e. **5 tests**. Pendiente: transporte `rmcp` oficial + resources (ver [`DECISIONES.md §3`](DECISIONES.md)). |
 | **E8** Transversales | 🟢 Parcial | Hechos: exit codes/SARIF, escritura atómica, **zip-slip cerrado por RelPath en `import`**, identidad de commits + override por `lodestar.toml`, trailer Co-Authored-By del agente, gitignore de `.lodestar/`, **config por-bundle (`lodestar.toml`: strictness + identidad)**, **`lodestar import`** (zip del prototipo o dir), **`init` con git init + commit inicial real**, **i18n keyed por código** (catálogo español). Pendiente: packaging/updater, gate de bench (§11), threat model, arnés diferencial JS-vs-Rust (ver [`DECISIONES.md §9`](DECISIONES.md)). |
 
@@ -54,11 +57,13 @@ cd frontend && npm install && npm run build            # frontend Svelte 5 → d
 - **git vocabulario directo + transporte híbrido**: libgit2 local, binario `git` solo para red.
 - **Único escritor**: la workspace escribe `.md` atómico (temp+rename); nadie más escribe.
 
-## Próximos pasos (orden sugerido)
+## Próximos pasos (todo opcional — producto/pulido, ver [`DECISIONES.md`](DECISIONES.md))
 
-Todo lo que queda depende de decisiones tuyas — ver [`DECISIONES.md`](DECISIONES.md):
+Las 9 épicas (E0–E8) están implementadas. Lo que queda no es arquitectura:
 
-1. **E6** desktop: aislar el build de Tauri (§1) → cablear la fachada + port verbatim de la UI (§2).
-2. **E0-H04/E6-H03**: generar el `.d.ts` desde Rust (ts-rs/specta) antes de crecer la UI (§4).
-3. **E7**: adoptar `rmcp` oficial + resources cuando haya un cliente que lo exija (§3).
-4. **E8**: gate de bench (§11), packaging/updater + firma, threat model, arnés diferencial JS-vs-Rust (§9).
+1. **Empaquetado** (§1): plataformas objetivo, updater, firma/notarización, iconos de marca.
+2. **Pulido de UI** (§2): rails redimensionables por arrastre, overlay de grafo, resaltado con la
+   semántica del core.
+3. **E0-H04/E6-H03** (§4): generar el `.d.ts` desde Rust (ts-rs/specta).
+4. **E7** (§3): adoptar `rmcp` oficial + resources cuando un cliente lo exija.
+5. **E8** (§9): gate de bench (§11), threat model, arnés diferencial JS-vs-Rust.

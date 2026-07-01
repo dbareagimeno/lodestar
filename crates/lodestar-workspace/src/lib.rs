@@ -208,6 +208,36 @@ impl Workspace {
         Ok(outcome)
     }
 
+    /// Escribe contenido **crudo** en un concept (editor multi-escritor), validado por el core.
+    /// Rechazo = `written:false` (no un `Err`). Escribe por el único escritor si es conforme.
+    pub fn write_concept(
+        &self,
+        p: &RelPath,
+        raw: &str,
+        allow_nonconformant: bool,
+    ) -> Result<WriteOutcome, WorkspaceError> {
+        let bundle = self.bundle()?;
+        let outcome = bundle.write_concept_raw(p, raw, allow_nonconformant);
+        if outcome.written {
+            io::write_atomic(&self.root, &outcome.path, &outcome.raw)?;
+            self.cache_upsert(&outcome.path, &outcome.raw);
+        }
+        Ok(outcome)
+    }
+
+    /// Lee el contenido crudo de un concept desde disco.
+    pub fn read_concept(&self, p: &RelPath) -> Result<String, WorkspaceError> {
+        std::fs::read_to_string(self.root.join(p.as_str()))
+            .map_err(|e| WorkspaceError::Io(e.to_string()))
+    }
+
+    /// Lista las filas del árbol de concepts (título/orphan/invalid resueltos por el core).
+    pub fn list_concepts(
+        &self,
+    ) -> Result<Vec<lodestar_core::types::ConceptSummary>, WorkspaceError> {
+        Ok(self.bundle()?.list_concepts())
+    }
+
     /// Aplica un patch de frontmatter (null-borra) y lo escribe si es conforme.
     pub fn merge_frontmatter(
         &self,

@@ -8,33 +8,37 @@
 
 ---
 
-## 1. Build y empaquetado de la fachada de escritorio Tauri (E6)
+## 1. Build de la fachada de escritorio Tauri (E6) — ✅ RESUELTO/IMPLEMENTADO
 
-- **Estado**: `src-tauri` es un binario placeholder que compone `core` + `workspace`. **No** declara
-  las dependencias de `tauri`/`tauri-build`.
-- **Por qué está abierta**: añadir `tauri` obliga a librerías de sistema (en Linux:
-  `webkit2gtk-4.1`, `libsoup-3`, `libjavascriptcoregtk`…) que **no están** en este entorno de CI/
-  ejecución. Meterlas ahora **rompería `cargo build`** para todo el mundo que no las tenga.
-- **Qué decidir**:
-  1. ¿Aislamos la fachada Tauri en su propio flujo de build (feature/CI dedicada de escritorio) para
-     que el workspace siga compilando en CI sin libs de sistema? **(Recomendado.)**
-  2. Plataformas objetivo (macOS/Windows/Linux) y estrategia de **updater** + **firma/notarización**
-     (§12 packaging, E8-H06).
-- **Recomendación**: sí, aislar Tauri detrás de una CI de escritorio separada. El resto del workspace
-  (core/store/vcs/workspace/cli/mcp) se mantiene como la puerta de CI portable.
+- **Estado**: `src-tauri` es ahora una **fachada Tauri v2 real y compilada**: tabla de comandos con
+  los nombres congelados (`open_bundle`/`get_snapshot`/`read_concept`/`write_concept`/`create_concept`/
+  `conformance`/`query`/`backlinks`/`graph_model`/… + `history`/`diff_working`/`commit`), estado del
+  bundle abierto, y un **forwarder** que reemite el bus `IndexEvent` de la cache como `bundle:changed`
+  (watcher + escrituras → UI en vivo). Compila en este entorno (webkit disponible) y produce el binario
+  `lodestar-desktop`. El **CI de Rust** ya instala las libs de sistema (`libwebkit2gtk-4.1-dev`,
+  `libsoup-3.0-dev`, …) y construye el `frontend/dist` antes del `cargo build` (Tauri lo embebe).
+- **Qué queda por decidir (solo empaquetado/distribución, no bloquea el uso local)**:
+  - **Plataformas objetivo** (macOS/Windows/Linux) y **updater** + **firma/notarización** (§12
+    packaging, E8-H06). Hoy `bundle.active = false` (no se generan instaladores en CI).
+  - **Iconos definitivos**: `src-tauri/icons/icon.png` es un placeholder generado; sustitúyelo por el
+    icono de marca antes de empaquetar.
+- **Recomendación**: definir plataformas + firma cuando quieras publicar releases; el desarrollo y el
+  uso local ya funcionan (`cargo run -p lodestar-tauri` con las libs instaladas).
 
-## 2. Alcance del port verbatim de la UI del prototipo (E6)
+## 2. Port de la UI del prototipo (E6) — ✅ IMPLEMENTADO (funcional)
 
-- **Estado**: el frontend Svelte ya consume el `BundleSnapshot` empujado: árbol filtrable, selección,
-  píldora de conformidad y **panel de diagnósticos localizado** (i18n keyed por código). CSS/variables
-  portadas del prototipo. Compila (`npm run build`) y pasa `svelte-check` (0 errores).
-- **Por qué está abierta**: el prototipo son ~2900 líneas (rails redimensionables, tabs, editor
-  multi-escritor, **isla imperativa del grafo** `createStarMap` con loop rAF, overlay/modo «Cambios»).
-  Portarlo verbatim es un esfuerzo grande y **no verificable de extremo a extremo sin la fachada Tauri**
-  (punto 1).
-- **Qué decidir**: ¿port incremental (vista a vista, empezando por editor y grafo) o un port completo
-  de una vez antes de cablear Tauri?
-- **Recomendación**: incremental, priorizando editor + isla del grafo, una vez decidido el punto 1.
+- **Estado**: el frontend Svelte 5 es una app funcional completa sobre el `BundleSnapshot`:
+  layout de **tres columnas** (páginas · centro · enlaces) con paneles colapsables, **árbol** filtrable
+  con estados (orphan/invalid), **tabs** editor · grafo · cambios, **editor multi-escritor** que guarda
+  por el único escritor con validación y diagnósticos localizados, **panel de enlaces** (entrantes/
+  salientes/índice), **isla imperativa del grafo** (`createStarMap`: posee el SVG + loop rAF, recibe
+  nodos/aristas por `$effect`, nunca `{#each}`), y **modo «Cambios»** (diff semántico `OkfDiff` + commit
+  con mensaje sugerido). Aspecto con las variables CSS portadas del prototipo. `npm run check`/`build`
+  en verde.
+- **Qué queda (pulido, no bloquea)**: rails **redimensionables por arrastre** (hoy son colapsables),
+  overlay de grafo a pantalla completa, resaltado de query en el grafo con la **semántica del core**
+  (hoy es subcadena sobre el id), y detalles de micro-interacción del prototipo.
+- **Recomendación**: iterar el pulido visual según uso real; la funcionalidad completa ya está.
 
 ## 3. Transporte MCP: stdio propio vs `rmcp` oficial (E7)
 
@@ -109,6 +113,8 @@ Pendientes de priorización (no bloquean el núcleo):
 
 ### Resumen de la recomendación
 
-Cerrar el punto **1** (aislar el build de Tauri) desbloquea el punto **2** (crecer la UI) y el **4**
-(generar el `.d.ts`). Los puntos **6**, **7** y **8** solo necesitan tu «sí» para darlos por cerrados
-con el comportamiento actual. El resto (3, 5, 9) puede esperar sin deuda arquitectónica.
+Los puntos **1** (build de Tauri) y **2** (port de la UI) están **implementados**: la app de escritorio
+compila, corre y es funcional de extremo a extremo. Lo que queda son decisiones de **producto/pulido**,
+no de arquitectura: empaquetado/firma/plataformas (1), pulido visual (2), y los puntos **3–9** (rmcp,
+`.d.ts` generado, i18n, semántica de merge/`--range`, esquema de `lodestar.toml`, benches/threat model),
+que solo necesitan tu criterio o pueden esperar sin deuda.

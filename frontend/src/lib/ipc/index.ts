@@ -1,46 +1,73 @@
 // Envoltorio tipado del IPC con Tauri (ARCHITECTURE.md §8). Mata la deriva de nombres Rust↔TS.
 //
-// Importa los tipos del contrato (generados desde Rust en producción). Cada función invoca UN comando
-// de la Workspace. La fachada Tauri (E6) registra estos comandos; aquí está el lado del cliente.
+// Cada función invoca UN comando registrado por la fachada Tauri (src-tauri). Fuera de Tauri
+// (p. ej. `vite dev` en navegador) `invoke` lanza un error claro y la UI muestra el aviso.
 
 import { COMMANDS, EVENTS } from "./types";
-import type { Analysis, BundleSnapshot, ConceptSummary, RelPath } from "./types";
+import type {
+  Analysis,
+  Backlinks,
+  BundleSnapshot,
+  ConceptSummary,
+  GraphModel,
+  RelPath,
+  WriteOutcome,
+} from "./types";
 
-// `invoke`/`listen` reales vienen de @tauri-apps/api en la app empaquetada. Para que el frontend
-// compile y se pueda probar fuera de Tauri, se resuelven de forma perezosa con un fallback claro.
 type Invoke = (cmd: string, args?: Record<string, unknown>) => Promise<unknown>;
 
 async function getInvoke(): Promise<Invoke> {
   const w = window as unknown as { __TAURI__?: { core?: { invoke?: Invoke } } };
   const invoke = w.__TAURI__?.core?.invoke;
   if (!invoke) {
-    throw new Error("IPC no disponible: la app no corre dentro de Tauri (E6 pendiente de empaquetar).");
+    throw new Error("IPC no disponible: la app no corre dentro de Tauri (usa el binario de escritorio).");
   }
   return invoke;
 }
 
-export async function getSnapshot(): Promise<BundleSnapshot> {
+async function call<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
   const invoke = await getInvoke();
-  return (await invoke(COMMANDS.getSnapshot)) as BundleSnapshot;
+  return (await invoke(cmd, args)) as T;
 }
 
-export async function conformance(): Promise<Analysis> {
-  const invoke = await getInvoke();
-  return (await invoke(COMMANDS.conformance)) as Analysis;
-}
+export const openBundle = (path: string) => call<BundleSnapshot>(COMMANDS.openBundle, { path });
+export const getSnapshot = () => call<BundleSnapshot>(COMMANDS.getSnapshot);
+export const listConcepts = () => call<ConceptSummary[]>(COMMANDS.listConcepts);
+export const readConcept = (path: RelPath) => call<string>(COMMANDS.readConcept, { path });
+export const writeConcept = (path: RelPath, content: string, allowNonconformant = false) =>
+  call<WriteOutcome>(COMMANDS.writeConcept, { path, content, allowNonconformant });
+export const createConcept = (
+  path: RelPath,
+  type: string,
+  title?: string,
+  body?: string,
+  allowNonconformant = false,
+) => call<WriteOutcome>(COMMANDS.createConcept, { path, type, title, body, allowNonconformant });
+export const conformance = () => call<Analysis>(COMMANDS.conformance);
+export const query = (dsl: string) => call<RelPath[]>(COMMANDS.query, { dsl });
+export const backlinks = (path: RelPath) => call<Backlinks>(COMMANDS.backlinks, { path });
+export const graphModel = () => call<GraphModel>(COMMANDS.graphModel);
+export const history = (limit = 20) => call<CommitRow[]>(COMMANDS.history, { limit });
+export const diffWorking = () => call<OkfDiff>(COMMANDS.diffWorking);
+export const commit = (message: string) => call<CommitResult>(COMMANDS.commit, { message });
 
-export async function listConcepts(): Promise<ConceptSummary[]> {
-  const invoke = await getInvoke();
-  return (await invoke(COMMANDS.listConcepts)) as ConceptSummary[];
+// Tipos auxiliares de comandos que no viven en el snapshot.
+export interface CommitRow {
+  id: string;
+  short: string;
+  message: string;
+  author: { name: string; email: string };
+  timeUnix: number;
+  parents: string[];
 }
-
-export async function query(dsl: string): Promise<RelPath[]> {
-  const invoke = await getInvoke();
-  return (await invoke(COMMANDS.query, { dsl })) as RelPath[];
+export interface CommitResult {
+  sha: string;
+  conformance: { hardFail: number; warnCount: number; conform: boolean };
 }
+// El OkfDiff se renderiza tal cual llega; se tipa laxo para no duplicar el contrato completo.
+export type OkfDiff = Record<string, unknown>;
 
-// Suscripción a eventos empujados por la fachada (`bundle:changed`). En producción usa
-// `@tauri-apps/api/event`; fuera de Tauri devuelve un unsubscribe no-op (la UI sigue compilando).
+// Suscripción a eventos empujados por la fachada (`bundle:changed`).
 type Listen = (event: string, cb: (e: { payload: unknown }) => void) => Promise<() => void>;
 
 export async function onBundleChanged(cb: (snap: BundleSnapshot) => void): Promise<() => void> {
