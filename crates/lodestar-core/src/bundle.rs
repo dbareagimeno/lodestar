@@ -409,7 +409,8 @@ fn apply_patch(fm: &mut Frontmatter, patch: FrontmatterPatch) {
                     fm.extra.insert(key, v);
                 }
                 None => {
-                    fm.extra.remove(&key);
+                    // `shift_remove` (no `swap_remove`) para conservar el orden de las claves restantes.
+                    fm.extra.shift_remove(&key);
                 }
             },
         }

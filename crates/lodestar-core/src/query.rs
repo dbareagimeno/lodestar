@@ -155,11 +155,12 @@ fn fm_get(fm: &Frontmatter, key: &str) -> Option<Yaml> {
 }
 
 fn fm_present(fm: &Frontmatter, key: &str) -> bool {
+    // Port fiel de `fmPresent`: `v!==undefined && v!=="" && !(lista vacía)`. Un `null` YAML
+    // (campo presente sin valor) NO es undefined ni "" ni lista vacía → cuenta como presente.
     match fm_get(fm, key) {
         None => false,
         Some(Yaml::String(s)) => !s.is_empty(),
         Some(Yaml::Sequence(s)) => !s.is_empty(),
-        Some(Yaml::Null) => false,
         Some(_) => true,
     }
 }
