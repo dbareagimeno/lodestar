@@ -12,6 +12,10 @@ pub enum WorkspaceError {
     Io(String),
     #[error("el bundle no tiene git inicializado")]
     NoVcs,
+    #[error("la cache incremental no está activada (usa open_live/enable_cache)")]
+    NoCache,
+    #[error("error de la cache: {0}")]
+    Store(String),
     #[error("hay un merge/rebase en curso: resuelve el conflicto antes de commitear")]
     RepoBusy,
 }
@@ -24,8 +28,16 @@ impl WorkspaceError {
             WorkspaceError::Vcs(_) => "VCS",
             WorkspaceError::Io(_) => "IO",
             WorkspaceError::NoVcs => "NO_VCS",
+            WorkspaceError::NoCache => "NO_CACHE",
+            WorkspaceError::Store(_) => "STORE",
             WorkspaceError::RepoBusy => "REPO_BUSY",
         }
+    }
+}
+
+impl From<lodestar_store::StoreError> for WorkspaceError {
+    fn from(e: lodestar_store::StoreError) -> Self {
+        WorkspaceError::Store(e.to_string())
     }
 }
 

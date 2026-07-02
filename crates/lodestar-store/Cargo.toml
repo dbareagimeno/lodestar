@@ -9,7 +9,17 @@ description = "Cache derivada (SQLite/FTS5) + watcher. Dueño único del DDL .lo
 lodestar-core = { workspace = true }
 blake3 = { workspace = true }
 thiserror = { workspace = true }
-# rusqlite, notify, ignore, crossbeam: se añaden al implementar E3.
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+ignore = { workspace = true }
+rusqlite = { version = "0.32", features = ["bundled"] }
+notify = "6"
+notify-debouncer-full = "0.3"
+crossbeam-channel = "0.5"
+
+[dev-dependencies]
+lodestar-fixtures = { workspace = true }
+tempfile = "3"
 
 [lints]
 workspace = true

@@ -12,12 +12,24 @@ use crate::sarif;
 
 const DRIFT: u8 = 4;
 
-/// `lodestar check`: analiza y decide conformidad (exit 0/1).
+/// `lodestar check`: analiza y decide conformidad (exit 0/1), con la strictness de `lodestar.toml`.
 pub fn check(root: &Path, json: bool, sarif_out: bool) -> anyhow::Result<ExitCode> {
     let files = load_bundle(root)?;
     let bundle = Bundle::from_files(files);
-    let analysis = bundle.analyze();
+    let blocked = lodestar_workspace::Config::load(root)
+        .unwrap_or_default()
+        .gate_blocked(bundle.analyze());
+    render_analysis(bundle.analyze(), json, sarif_out, blocked)
+}
 
+/// Imprime un `Analysis` en el formato pedido y devuelve el exit code (0 conforme / 1 bloqueado).
+/// `blocked` lo decide la strictness de `lodestar.toml`. Reutilizado por `check`, `--staged` y `--rev`.
+pub fn render_analysis(
+    analysis: &lodestar_core::types::Analysis,
+    json: bool,
+    sarif_out: bool,
+    blocked: bool,
+) -> anyhow::Result<ExitCode> {
     if json {
         println!("{}", serde_json::to_string_pretty(analysis)?);
     } else if sarif_out {
@@ -25,9 +37,7 @@ pub fn check(root: &Path, json: bool, sarif_out: bool) -> anyhow::Result<ExitCod
     } else {
         print_human(analysis);
     }
-
-    // Strictness por defecto: solo Err bloquea. (La lectura de lodestar.toml es E8-H01.)
-    if analysis.hard_fail > 0 {
+    if blocked {
         Ok(ExitCode::from(1))
     } else {
         Ok(ExitCode::SUCCESS)
@@ -131,21 +141,75 @@ pub fn export(root: &Path, out: Option<PathBuf>) -> anyhow::Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
-/// `lodestar init [dir]`: scaffold mínimo de un bundle (index raíz + `.gitignore`).
-///
-/// El `git init` + commit inicial se completa en E4 (vcs); aquí solo el scaffold de ficheros.
+/// `lodestar init [dir]`: scaffold de un bundle (index raíz + `.gitignore`) + `git init` + commit inicial.
 pub fn init(dir: PathBuf) -> anyhow::Result<ExitCode> {
     std::fs::create_dir_all(&dir).with_context(|| format!("creando {}", dir.display()))?;
     let index = dir.join("index.md");
     if !index.exists() {
         std::fs::write(&index, "---\nokf_version: \"0.1\"\n---\n\n# Bundle\n")?;
     }
-    let gitignore = dir.join(".gitignore");
-    if !gitignore.exists() {
-        std::fs::write(&gitignore, "/.lodestar/\n*.db\n*.db-shm\n*.db-wal\n")?;
-    }
     let _ = RelPath::new("index.md"); // documenta el invariante de paths
+                                      // `git init` + `.gitignore` + commit inicial (por el vcs, que es el dueño de git).
+    let mut ws =
+        lodestar_workspace::Workspace::open(&dir).map_err(|e| anyhow::anyhow!(e.to_string()))?;
+    if !ws.has_vcs() {
+        ws.init_vcs().map_err(|e| anyhow::anyhow!(e.to_string()))?;
+        println!("git inicializado (commit inicial creado)");
+    }
     println!("bundle inicializado en {}", dir.display());
-    eprintln!("nota: `git init` + commit inicial se cablea en E4 (vcs).");
     Ok(ExitCode::SUCCESS)
+}
+
+/// `lodestar import <source>`: migra un export del prototipo (un `.zip` de `path→.md`, o un
+/// directorio de `.md`) al bundle. `RelPath` es el chokepoint anti zip-slip (`§12` seguridad).
+pub fn import(root: &Path, source: Option<PathBuf>) -> anyhow::Result<ExitCode> {
+    let source = source.ok_or_else(|| anyhow::anyhow!("uso: lodestar import <fichero.zip|dir>"))?;
+    let imported = if source.is_dir() {
+        import_dir(root, &source)?
+    } else {
+        import_zip(root, &source)?
+    };
+    println!("importados {imported} ficheros a {}", root.display());
+    Ok(ExitCode::SUCCESS)
+}
+
+fn import_zip(root: &Path, zip_path: &Path) -> anyhow::Result<usize> {
+    let file = std::fs::File::open(zip_path)
+        .with_context(|| format!("abriendo {}", zip_path.display()))?;
+    let mut archive = zip::ZipArchive::new(file).context("leyendo el .zip")?;
+    let mut count = 0;
+    for i in 0..archive.len() {
+        let mut entry = archive.by_index(i)?;
+        if !entry.is_file() {
+            continue;
+        }
+        let name = entry.name().replace('\\', "/");
+        if !name.ends_with(".md") {
+            continue;
+        }
+        // Chokepoint anti zip-slip: rutas absolutas / `..` se rechazan.
+        let rp = match RelPath::new(&name) {
+            Ok(rp) => rp,
+            Err(_) => {
+                eprintln!("aviso: se ignora una ruta no segura del zip: {name}");
+                continue;
+            }
+        };
+        let mut content = String::new();
+        std::io::Read::read_to_string(&mut entry, &mut content)
+            .with_context(|| format!("leyendo {name} del zip"))?;
+        bundle_io::write_atomic(root, &rp, &content)?;
+        count += 1;
+    }
+    Ok(count)
+}
+
+fn import_dir(root: &Path, dir: &Path) -> anyhow::Result<usize> {
+    let files = load_bundle(dir)?;
+    let mut count = 0;
+    for (rp, content) in &files {
+        bundle_io::write_atomic(root, rp, content)?;
+        count += 1;
+    }
+    Ok(count)
 }

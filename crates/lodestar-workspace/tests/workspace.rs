@@ -109,6 +109,128 @@ fn generate_index_aplica_por_el_unico_escritor() {
 }
 
 #[test]
+fn open_live_emite_evento_y_acelera_lecturas() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut ws = Workspace::open(dir.path()).unwrap();
+    ws.set_identity(Author {
+        name: "Test".into(),
+        email: "t@e.com".into(),
+    });
+    ws.init_vcs().unwrap();
+    ws.enable_cache().unwrap();
+    let rx = ws.subscribe().unwrap();
+
+    // Escribir por el único escritor dispara el update optimista de la cache → IndexEvent.
+    let p = RelPath::new("alfa.md").unwrap();
+    ws.create_concept(&p, "Nota", Some("Alfa"), "# H\n\n[b](/beta.md)\n", false)
+        .unwrap();
+    let ev = rx
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .expect("debe llegar un IndexEvent");
+    assert!(ev.changed.contains(&p));
+
+    // La cache responde consultas aceleradas coherentes con el core.
+    let cache = ws.cache().unwrap();
+    assert!(cache
+        .dangling()
+        .unwrap()
+        .iter()
+        .any(|d| d.as_str() == "beta.md"));
+    assert!(cache.orphans().unwrap().contains(&p));
+}
+
+#[test]
+fn switch_de_rama_por_el_unico_escritor() {
+    let (dir, ws) = setup();
+    let alfa = RelPath::new("alfa.md").unwrap();
+    ws.create_concept(&alfa, "Nota", Some("Alfa"), "# H\n", false)
+        .unwrap();
+    ws.commit("main: alfa").unwrap();
+    // rama nueva con un fichero extra
+    ws.create_branch("feature", None).unwrap();
+    ws.switch("feature").unwrap();
+    let beta = RelPath::new("beta.md").unwrap();
+    ws.create_concept(&beta, "Nota", Some("Beta"), "# H\n", false)
+        .unwrap();
+    ws.commit("feature: beta").unwrap();
+    assert!(dir.path().join("beta.md").is_file());
+    // volver a main → beta desaparece del working tree (aplicado por el único escritor)
+    ws.switch("master").or_else(|_| ws.switch("main")).unwrap();
+    assert!(!dir.path().join("beta.md").exists());
+    assert!(dir.path().join("alfa.md").is_file());
+}
+
+#[test]
+fn merge_fast_forward_por_workspace() {
+    let (dir, ws) = setup();
+    let alfa = RelPath::new("alfa.md").unwrap();
+    ws.create_concept(&alfa, "Nota", Some("Alfa"), "# H\n", false)
+        .unwrap();
+    ws.commit("base").unwrap();
+    let base_branch = ws
+        .branches()
+        .unwrap()
+        .into_iter()
+        .find(|b| b.is_head)
+        .unwrap()
+        .name;
+    ws.create_branch("feature", None).unwrap();
+    ws.switch("feature").unwrap();
+    let beta = RelPath::new("beta.md").unwrap();
+    ws.create_concept(&beta, "Nota", Some("Beta"), "# H\n", false)
+        .unwrap();
+    ws.commit("feature: beta").unwrap();
+    ws.switch(&base_branch).unwrap();
+    // Merge limpio (sin conflictos): beta se integra en la rama base. Puede ser ff o merge de
+    // 3-vías según si la regeneración de index/tags dejó el árbol dirty (la ff pura se testea en vcs).
+    let report = ws.merge("feature").unwrap();
+    assert!(report.conflicted.is_empty());
+    assert!(dir.path().join("beta.md").is_file());
+}
+
+#[test]
+fn config_strictness_bloquea_avisos() {
+    use lodestar_workspace::Config;
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("lodestar.toml"),
+        "[gate]\nblock_warnings = true\n\n[identity]\nname = \"Ana\"\nemail = \"ana@x.com\"\n",
+    )
+    .unwrap();
+    let cfg = Config::load(dir.path()).unwrap();
+    assert!(cfg.gate.block_warnings);
+    assert_eq!(cfg.author().unwrap().name, "Ana");
+    // un análisis con warns pero sin errores: bloquea solo si block_warnings.
+    let analysis = lodestar_core::types::Analysis {
+        warn_count: 2,
+        ..Default::default()
+    };
+    assert!(cfg.gate_blocked(&analysis));
+    assert!(!Config::default().gate_blocked(&analysis));
+}
+
+#[test]
+fn conformance_cache_por_tree_oid() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut ws = Workspace::open(dir.path()).unwrap();
+    ws.set_identity(Author {
+        name: "Test".into(),
+        email: "t@e.com".into(),
+    });
+    ws.init_vcs().unwrap();
+    ws.enable_cache().unwrap();
+    let p = RelPath::new("ok.md").unwrap();
+    ws.create_concept(&p, "Nota", Some("Ok"), "# H\n\ncuerpo\n", false)
+        .unwrap();
+    let c = ws.commit("añade ok").unwrap();
+    // primera lectura computa y cachea; segunda debe salir de la cache (mismo resultado).
+    let a = ws.conformance_of(&c.sha).unwrap();
+    let b = ws.conformance_of(&c.sha).unwrap();
+    assert_eq!(a, b);
+    assert!(a.conform);
+}
+
+#[test]
 fn diff_working_vs_head() {
     let (_dir, ws) = setup();
     let p = RelPath::new("alfa.md").unwrap();

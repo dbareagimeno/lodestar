@@ -38,13 +38,13 @@ enum Command {
         /// Salida SARIF 2.1.0 (para integraciones de CI).
         #[arg(long)]
         sarif: bool,
-        /// Juzga el árbol staged en git (pendiente E4).
+        /// Juzga el árbol staged en git.
         #[arg(long)]
         staged: bool,
-        /// Juzga el árbol de un commit (pendiente E4).
+        /// Juzga el árbol de una revisión (`HEAD`, rama, SHA, `HEAD~2`…).
         #[arg(long)]
         rev: Option<String>,
-        /// Juzga un rango de commits (pendiente E4).
+        /// Juzga la punta de un rango `a..b` (equivale a `--rev b`).
         #[arg(long)]
         range: Option<String>,
     },
@@ -81,11 +81,15 @@ enum Command {
     Pull,
     /// Push al upstream configurado.
     Push,
-    /// Diff entre dos revisiones (pendiente E6: render del OkfDiff).
-    Diff,
-    /// Merge de una rama (pendiente: switch/merge target en vcs).
-    Merge,
-    /// Instala los hooks de git (pendiente).
+    /// Cambia de rama (`--create` para crearla antes).
+    Switch {
+        name: String,
+        #[arg(long)]
+        create: bool,
+    },
+    /// Merge de una rama en la actual (local).
+    Merge { name: String },
+    /// Instala los hooks de git (`pre-commit` → `lodestar check`).
     Hooks,
 }
 
@@ -119,31 +123,31 @@ fn main() -> ExitCode {
             rev,
             range,
         } => {
-            if staged || rev.is_some() || range.is_some() {
-                return runtime_err("check --staged/--rev/--range se implementa en E4 (vcs)");
+            if staged {
+                git::check_staged(&root, json, sarif)
+            } else if let Some(rev) = rev {
+                git::check_rev(&root, &rev, json, sarif)
+            } else if let Some(range) = range {
+                // La punta del rango `a..b` es lo que se juzga (equivale a `--rev b`).
+                let tip = range.rsplit("..").next().unwrap_or(&range);
+                git::check_rev(&root, tip, json, sarif)
+            } else {
+                commands::check(&root, json, sarif)
             }
-            commands::check(&root, json, sarif)
         }
         Command::Index { dir, check } => commands::index(&root, dir.unwrap_or_default(), check),
         Command::Tags { check } => commands::tags(&root, check),
         Command::Export { out } => commands::export(&root, out),
-        Command::Reindex => {
-            eprintln!("reindex: pendiente E5 (requiere la workspace).");
-            Ok(ExitCode::SUCCESS)
-        }
-        Command::Import { .. } => {
-            eprintln!("import: pendiente E8 (migración del prototipo).");
-            Ok(ExitCode::SUCCESS)
-        }
+        Command::Reindex => git::reindex(&root),
+        Command::Import { source } => commands::import(&root, source),
         Command::Log { limit } => git::log(&root, limit),
         Command::LastConforming => git::last_conforming(&root),
         Command::Branch => git::branch(&root),
         Command::Pull => git::sync(&root, false),
         Command::Push => git::sync(&root, true),
-        Command::Diff | Command::Merge | Command::Hooks => {
-            eprintln!("Subcomando de git: pendiente (ver requirements E4/E6).");
-            Ok(ExitCode::SUCCESS)
-        }
+        Command::Switch { name, create } => git::switch(&root, &name, create),
+        Command::Merge { name } => git::merge(&root, &name),
+        Command::Hooks => git::hooks(&root),
     };
     match result {
         Ok(code) => code,

@@ -110,6 +110,44 @@ impl Vcs {
         Ok(out)
     }
 
+    /// Resuelve una revisión (`HEAD`, nombre de rama, `SHA` corto/largo, `HEAD~2`…) a un `Sha` de commit.
+    /// Habilita `lodestar check --rev <REV>` (`§7.3`).
+    pub fn resolve_rev(&self, rev: &str) -> Result<Sha, VcsError> {
+        let obj = self.repo.revparse_single(rev)?;
+        let commit = obj.peel_to_commit()?;
+        Sha::new(&commit.id().to_string()).map_err(VcsError::from)
+    }
+
+    /// El `tree_oid` (hex) del árbol de un commit — clave de la cache de conformidad (`§10` fila 20).
+    pub fn tree_oid(&self, sha: &Sha) -> Result<String, VcsError> {
+        let oid = git2::Oid::from_str(sha.as_str())?;
+        let commit = self.repo.find_commit(oid)?;
+        Ok(commit.tree_id().to_string())
+    }
+
+    /// El `FileMap` del **índice** (árbol staged), para `lodestar check --staged` (`§7.3`).
+    /// Lee los blobs staged directamente del index; no toca HEAD ni el working tree.
+    pub fn staged_files(&self) -> Result<FileMap, VcsError> {
+        let index = self.repo.index()?;
+        let mut files = FileMap::new();
+        for entry in index.iter() {
+            let path = match std::str::from_utf8(&entry.path) {
+                Ok(p) => p,
+                Err(_) => continue,
+            };
+            if !path.ends_with(".md") {
+                continue;
+            }
+            let Ok(rp) = RelPath::new(path) else { continue };
+            if let Ok(blob) = self.repo.find_blob(entry.id) {
+                if let Ok(text) = std::str::from_utf8(blob.content()) {
+                    files.insert(rp, text.to_string());
+                }
+            }
+        }
+        Ok(files)
+    }
+
     /// Materializa el árbol de un commit a un `FileMap` (solo `.md` UTF-8; binarios se saltan). No toca el working tree.
     pub fn tree_files(&self, sha: &Sha) -> Result<FileMap, VcsError> {
         let oid = git2::Oid::from_str(sha.as_str()).map_err(VcsError::from)?;
@@ -238,6 +276,160 @@ impl Vcs {
         Ok(())
     }
 
+    /// Cambia de rama **sin escribir el working tree**: mueve `HEAD` a `refs/heads/<name>` y
+    /// devuelve el `FileMap` de destino para que la workspace lo aplique por el único escritor
+    /// (`§16`: switch/merge no pierden trabajo → la workspace hace checkpoint antes).
+    pub fn switch(&self, name: &str) -> Result<FileMap, VcsError> {
+        let branch = self.repo.find_branch(name, git2::BranchType::Local)?;
+        let oid = branch.get().target().ok_or(VcsError::NoHead)?;
+        let sha = Sha::new(&oid.to_string())?;
+        let files = self.tree_files(&sha)?;
+        self.repo
+            .set_head(&format!("refs/heads/{name}"))
+            .map_err(VcsError::from)?;
+        Ok(files)
+    }
+
+    /// Merge (local) de la rama `name` en la rama actual. **No escribe el working tree**: devuelve
+    /// el `FileMap` resultante para que la workspace lo aplique. En conflicto, los ficheros llevan
+    /// marcadores `<<<<<<<`/`=======`/`>>>>>>>` (los captura `OKF-CONFLICT`) y deja `MERGE_HEAD`
+    /// escrito → `repo_state()` = `Merging` bloquea el commit hasta resolver (`§13.6.3`).
+    pub fn merge(&self, name: &str) -> Result<MergeOutcome, VcsError> {
+        let their_branch = self.repo.find_branch(name, git2::BranchType::Local)?;
+        let their_oid = their_branch.get().target().ok_or(VcsError::NoHead)?;
+        let our_oid = self.repo.head()?.target().ok_or(VcsError::NoHead)?;
+
+        let their_annotated = self.repo.find_annotated_commit(their_oid)?;
+        let (analysis, _) = self.repo.merge_analysis(&[&their_annotated])?;
+
+        if analysis.is_up_to_date() {
+            let sha = Sha::new(&our_oid.to_string())?;
+            return Ok(MergeOutcome {
+                files: self.tree_files(&sha)?,
+                conflicted: Vec::new(),
+                fast_forward: false,
+                up_to_date: true,
+            });
+        }
+
+        if analysis.is_fast_forward() {
+            // Mueve la rama actual a theirs (ff) y devuelve su árbol.
+            if let Some(branch_name) = self.current_branch() {
+                self.repo.reference(
+                    &format!("refs/heads/{branch_name}"),
+                    their_oid,
+                    true,
+                    "merge fast-forward",
+                )?;
+            }
+            let sha = Sha::new(&their_oid.to_string())?;
+            return Ok(MergeOutcome {
+                files: self.tree_files(&sha)?,
+                conflicted: Vec::new(),
+                fast_forward: true,
+                up_to_date: false,
+            });
+        }
+
+        // Merge de tres vías a nivel de árbol (no escribe el working tree).
+        let our_commit = self.repo.find_commit(our_oid)?;
+        let their_commit = self.repo.find_commit(their_oid)?;
+        let base_oid = self.repo.merge_base(our_oid, their_oid)?;
+        let base_commit = self.repo.find_commit(base_oid)?;
+        let merged_index = self.repo.merge_trees(
+            &base_commit.tree()?,
+            &our_commit.tree()?,
+            &their_commit.tree()?,
+            None,
+        )?;
+
+        let mut files = FileMap::new();
+        // Entradas sin conflicto (stage 0). Los stages 1/2/3 se manejan como conflicto abajo.
+        for entry in merged_index.iter() {
+            let stage = (entry.flags >> 12) & 0x3;
+            if stage != 0 {
+                continue;
+            }
+            let path = match std::str::from_utf8(&entry.path) {
+                Ok(p) if p.ends_with(".md") => p,
+                _ => continue,
+            };
+            let Ok(rp) = RelPath::new(path) else { continue };
+            if let Ok(blob) = self.repo.find_blob(entry.id) {
+                if let Ok(text) = std::str::from_utf8(blob.content()) {
+                    files.insert(rp, text.to_string());
+                }
+            }
+        }
+
+        // Conflictos: sintetiza contenido con marcadores para que OKF-CONFLICT lo detecte.
+        let mut conflicted = Vec::new();
+        for c in merged_index.conflicts()? {
+            let c = c?;
+            let our = c.our.as_ref();
+            let their = c.their.as_ref();
+            let path_bytes = our
+                .map(|e| e.path.clone())
+                .or_else(|| their.map(|e| e.path.clone()))
+                .unwrap_or_default();
+            let path = match std::str::from_utf8(&path_bytes) {
+                Ok(p) if p.ends_with(".md") => p.to_string(),
+                _ => continue,
+            };
+            let Ok(rp) = RelPath::new(&path) else {
+                continue;
+            };
+            let read = |e: Option<&git2::IndexEntry>| -> String {
+                e.and_then(|e| self.repo.find_blob(e.id).ok())
+                    .and_then(|b| std::str::from_utf8(b.content()).ok().map(String::from))
+                    .unwrap_or_default()
+            };
+            let content = format!(
+                "<<<<<<< HEAD\n{}=======\n{}>>>>>>> {}\n",
+                ensure_nl(&read(our)),
+                ensure_nl(&read(their)),
+                name
+            );
+            files.insert(rp.clone(), content);
+            conflicted.push(rp);
+        }
+
+        // Deja MERGE_HEAD para que repo_state() = Merging bloquee el commit hasta resolver.
+        let merge_head = self.root.join(".git").join("MERGE_HEAD");
+        std::fs::write(&merge_head, format!("{their_oid}\n"))
+            .map_err(|e| VcsError::Io(e.to_string()))?;
+
+        conflicted.sort();
+        Ok(MergeOutcome {
+            files,
+            conflicted,
+            fast_forward: false,
+            up_to_date: false,
+        })
+    }
+
+    /// Instala un hook `pre-commit` que corre `lodestar check` (bloquea commits no conformes).
+    /// Idempotente; sobrescribe el hook gestionado por lodestar.
+    pub fn install_hooks(&self) -> Result<PathBuf, VcsError> {
+        let hooks_dir = self.root.join(".git").join("hooks");
+        std::fs::create_dir_all(&hooks_dir).map_err(|e| VcsError::Io(e.to_string()))?;
+        let hook = hooks_dir.join("pre-commit");
+        let script = "#!/bin/sh\n\
+             # Hook gestionado por lodestar: bloquea commits no conformes (OKF).\n\
+             exec lodestar check\n";
+        std::fs::write(&hook, script).map_err(|e| VcsError::Io(e.to_string()))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&hook)
+                .map_err(|e| VcsError::Io(e.to_string()))?
+                .permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&hook, perms).map_err(|e| VcsError::Io(e.to_string()))?;
+        }
+        Ok(hook)
+    }
+
     /// `git pull --ff-only` vía binario `git` (red confinada). Nunca conflicta in-app.
     pub fn pull(&self) -> Result<SyncOutcome, VcsError> {
         net::run_git(&self.root, &["pull", "--ff-only"], SyncKind::Pull)
@@ -246,6 +438,28 @@ impl Vcs {
     /// `git push` al upstream configurado vía binario `git`. Rechazo (non-ff) → `ok:false`.
     pub fn push(&self) -> Result<SyncOutcome, VcsError> {
         net::run_git(&self.root, &["push"], SyncKind::Push)
+    }
+}
+
+/// Resultado de un merge local. `files` es el árbol a aplicar por el único escritor.
+#[derive(Debug, Clone)]
+pub struct MergeOutcome {
+    /// El `FileMap` resultante (con marcadores de conflicto donde los haya).
+    pub files: FileMap,
+    /// Paths con conflicto (llevan marcadores; los captura `OKF-CONFLICT`).
+    pub conflicted: Vec<RelPath>,
+    /// `true` si fue un fast-forward.
+    pub fast_forward: bool,
+    /// `true` si ya estaba al día (nada que hacer).
+    pub up_to_date: bool,
+}
+
+/// Garantiza que un fragmento acabe en `\n` (para los marcadores de conflicto).
+fn ensure_nl(s: &str) -> String {
+    if s.is_empty() || s.ends_with('\n') {
+        s.to_string()
+    } else {
+        format!("{s}\n")
     }
 }
 

@@ -1,0 +1,120 @@
+# Decisiones pendientes (requieren tu criterio)
+
+> Este documento recoge las decisiones que **no se pueden tomar por inercia** desde el código o
+> `ARCHITECTURE.md` y que dependen de tu criterio de producto/entorno. Cada una lleva el estado
+> actual, el porqué de que quede abierta y una **recomendación**. Nada aquí bloquea lo ya
+> implementado (backend completo y testeado); son decisiones para cerrar el último tramo (sobre todo
+> E6 desktop) y para afinar comportamiento.
+
+---
+
+## 1. Build de la fachada de escritorio Tauri (E6) — ✅ RESUELTO/IMPLEMENTADO
+
+- **Estado**: `src-tauri` es ahora una **fachada Tauri v2 real y compilada**: tabla de comandos con
+  los nombres congelados (`open_bundle`/`get_snapshot`/`read_concept`/`write_concept`/`create_concept`/
+  `conformance`/`query`/`backlinks`/`graph_model`/… + `history`/`diff_working`/`commit`), estado del
+  bundle abierto, y un **forwarder** que reemite el bus `IndexEvent` de la cache como `bundle:changed`
+  (watcher + escrituras → UI en vivo). Compila en este entorno (webkit disponible) y produce el binario
+  `lodestar-desktop`. El **CI de Rust** ya instala las libs de sistema (`libwebkit2gtk-4.1-dev`,
+  `libsoup-3.0-dev`, …) y construye el `frontend/dist` antes del `cargo build` (Tauri lo embebe).
+- **Qué queda por decidir (solo empaquetado/distribución, no bloquea el uso local)**:
+  - **Plataformas objetivo** (macOS/Windows/Linux) y **updater** + **firma/notarización** (§12
+    packaging, E8-H06). Hoy `bundle.active = false` (no se generan instaladores en CI).
+  - **Iconos definitivos**: `src-tauri/icons/icon.png` es un placeholder generado; sustitúyelo por el
+    icono de marca antes de empaquetar.
+- **Recomendación**: definir plataformas + firma cuando quieras publicar releases; el desarrollo y el
+  uso local ya funcionan (`cargo run -p lodestar-tauri` con las libs instaladas).
+
+## 2. Port de la UI del prototipo (E6) — ✅ IMPLEMENTADO (funcional)
+
+- **Estado**: el frontend Svelte 5 es una app funcional completa sobre el `BundleSnapshot`:
+  layout de **tres columnas** (páginas · centro · enlaces) con paneles colapsables, **árbol** filtrable
+  con estados (orphan/invalid), **tabs** editor · grafo · cambios, **editor multi-escritor** que guarda
+  por el único escritor con validación y diagnósticos localizados, **panel de enlaces** (entrantes/
+  salientes/índice), **isla imperativa del grafo** (`createStarMap`: posee el SVG + loop rAF, recibe
+  nodos/aristas por `$effect`, nunca `{#each}`), y **modo «Cambios»** (diff semántico `OkfDiff` + commit
+  con mensaje sugerido). Aspecto con las variables CSS portadas del prototipo. `npm run check`/`build`
+  en verde.
+- **Qué queda (pulido, no bloquea)**: rails **redimensionables por arrastre** (hoy son colapsables),
+  overlay de grafo a pantalla completa, resaltado de query en el grafo con la **semántica del core**
+  (hoy es subcadena sobre el id), y detalles de micro-interacción del prototipo.
+- **Recomendación**: iterar el pulido visual según uso real; la funcionalidad completa ya está.
+
+## 3. Transporte MCP: stdio propio vs `rmcp` oficial (E7)
+
+- **Estado**: el MCP funciona como servidor **JSON-RPC por stdio** (stdout puro), con 13 tools y
+  test golden cross-fachada (salida de cada tool == `Workspace` directo). Falta el transporte oficial
+  `rmcp` + `resources` + `outputSchema` (feature `schemars` ya preparada en el core).
+- **Qué decidir**: ¿adoptamos `rmcp` ahora (transporte oficial, resources, negociación de capacidades)
+  o mantenemos el stdio propio hasta tener un consumidor que exija `rmcp`?
+- **Recomendación**: mantener stdio hasta tener un cliente MCP real que lo requiera; el contrato de
+  tools ya está congelado, migrar el transporte después es mecánico.
+
+## 4. Generación del `.d.ts` desde Rust (ts-rs/specta) — E0-H04/E6-H03
+
+- **Estado**: `frontend/src/lib/ipc/types.ts` es un **espejo a mano** del contrato de `core::types`,
+  marcado como «a generar». Los nombres/orden coinciden con Rust.
+- **Por qué está abierta**: cablear `ts-rs`/`specta` añade dependencias y un paso de build; es la forma
+  de **hacer cumplir** el invariante «un solo contrato de tipos» (principio #4) y matar la deriva.
+- **Qué decidir**: ¿enganchamos el generador ahora (recomendado antes de crecer la UI) o seguimos con
+  el espejo manual mientras la superficie es pequeña?
+- **Recomendación**: engancharlo antes de portar más UI (punto 2), para que el `.d.ts` sea derivado.
+
+## 5. i18n multi-idioma
+
+- **Estado**: la app es **español-only** en v1 (decisión ya tomada en `CLAUDE.md`). El catálogo de
+  conformidad está **keyed por `CheckCode`** (`frontend/src/lib/i18n.ts`) y el core emite `code`+
+  `targets`, así que añadir un locale = añadir un objeto con las mismas claves.
+- **Qué decidir**: ¿hay que soportar inglés u otro idioma en v1? Si no, esto queda cerrado.
+- **Recomendación**: mantener español-only en v1; la arquitectura ya no lo impide en el futuro.
+
+## 6. Semántica de `merge` local
+
+- **Estado**: `merge` se implementa a **nivel de árbol** (`merge_trees` de libgit2): el vcs **no
+  escribe el working tree**; devuelve el `FileMap` resultante para que la workspace lo aplique por el
+  único escritor. En conflicto, los ficheros llevan marcadores `<<<<<<< / ======= / >>>>>>>` (los
+  detecta `OKF-CONFLICT`) y se deja `MERGE_HEAD` → `repo_state() = Merging` bloquea el commit hasta
+  resolver. Fast-forward y up-to-date resueltos aparte.
+- **Por qué está abierta**: es una elección de UX. La alternativa sería delegar el merge al binario
+  `git` (con su resolución/hooks), lo que rompería el invariante «vcs no escribe el working tree en
+  local» y el modelo de único escritor.
+- **Qué decidir**: ¿confirmas el merge a nivel de árbol por el único escritor (recomendado, coherente
+  con §16) o prefieres delegar en el binario `git`?
+- **Recomendación**: confirmar el enfoque actual.
+
+## 7. `lodestar check --range a..b`
+
+- **Estado**: `--range` juzga **la punta** del rango (equivale a `--rev b`).
+- **Qué decidir**: ¿basta con la punta o quieres verificar que **cada commit** del rango es conforme
+  (útil para bisect/PR gates)? Lo segundo es más caro pero más estricto.
+- **Recomendación**: dejar la punta por defecto y añadir `--each` si en algún momento hace falta el
+  barrido por-commit.
+
+## 8. Esquema de `lodestar.toml`
+
+- **Estado**: soporta `[gate] block_warnings` (strictness) e `[identity] name/email` (override de
+  autor/committer). Defaults seguros (solo `Err` bloquea; identidad por defecto).
+- **Qué decidir**: ¿quieres más granularidad, p. ej. **override de severidad por código** (subir/bajar
+  un `CheckCode` concreto) o listas de exclusión de rutas?
+- **Recomendación**: mantener el esquema mínimo actual hasta tener una necesidad real; es aditivo.
+
+## 9. Transversales diferidas de producto (E8)
+
+Pendientes de priorización (no bloquean el núcleo):
+- **Gate de rendimiento (§11)**: bench de cold-open 10k < ~2s y edit→UI < 150 ms como test de CI.
+  El motor incremental ya existe (store); falta el arnés de bench con umbrales.
+- **Packaging/release CI + updater + firma** (ligado al punto 1).
+- **Threat model** documentado (§12 seguridad); las piezas ya están (RelPath anti path/zip-slip,
+  FTS5 escapado, git de red confinado al binario, libgit2 local sin hooks).
+- **Arnés diferencial JS-vs-Rust (E1-H18)**: hoy los tests fijan la semántica del prototipo
+  directamente en Rust; ejecutar el JS del prototipo en Node como oráculo es un extra de confianza.
+
+---
+
+### Resumen de la recomendación
+
+Los puntos **1** (build de Tauri) y **2** (port de la UI) están **implementados**: la app de escritorio
+compila, corre y es funcional de extremo a extremo. Lo que queda son decisiones de **producto/pulido**,
+no de arquitectura: empaquetado/firma/plataformas (1), pulido visual (2), y los puntos **3–9** (rmcp,
+`.d.ts` generado, i18n, semántica de merge/`--range`, esquema de `lodestar.toml`, benches/threat model),
+que solo necesitan tu criterio o pueden esperar sin deuda.

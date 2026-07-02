@@ -66,6 +66,26 @@ export interface BundleSnapshot {
   graph: GraphModel;
 }
 
+export interface LinkRef {
+  path: RelPath;
+  href: string;
+}
+
+export interface Backlinks {
+  inbound: LinkRef[];
+  indexRefs: RelPath[];
+  out: RelPath[];
+  dangling: string[];
+}
+
+export interface WriteOutcome {
+  path: RelPath;
+  written: boolean;
+  rejected: string | null;
+  checks: Check[];
+  bundleHardFail: number;
+}
+
 // Nombres de comando/evento congelados (§7.1, §10 fila 7). Fuente única compartida con Rust.
 export const COMMANDS = {
   openBundle: "open_bundle",
@@ -78,6 +98,9 @@ export const COMMANDS = {
   query: "query",
   backlinks: "backlinks",
   graphModel: "graph_model",
+  history: "history",
+  diffWorking: "diff_working",
+  commit: "commit",
 } as const;
 
 export const EVENTS = {

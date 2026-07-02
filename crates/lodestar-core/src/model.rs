@@ -178,6 +178,23 @@ pub fn out_links(path: &str, body: &str) -> Vec<String> {
     result
 }
 
+/// Como [`out_links`], pero conserva el href **crudo** junto al destino resuelto.
+/// Mismo criterio (destinos únicos, excluye el propio path); útil para materializar `links` en la cache.
+pub fn out_links_with_href(path: &str, body: &str) -> Vec<(String, String)> {
+    let mut seen = std::collections::BTreeSet::new();
+    let mut result = Vec::new();
+    for cap in LINK_RE.captures_iter(body) {
+        if let Some(href) = cap.get(1) {
+            if let Some(t) = resolve_link(href.as_str(), path) {
+                if t != path && seen.insert(t.clone()) {
+                    result.push((href.as_str().to_string(), t));
+                }
+            }
+        }
+    }
+    result
+}
+
 /// Port de `rawRelLinks`: hrefs salientes que son relativos (`./` o `../`) y apuntan a `.md`.
 pub fn raw_rel_links(body: &str) -> Vec<String> {
     let rel = Regex::new(r"^\.{1,2}/").unwrap();

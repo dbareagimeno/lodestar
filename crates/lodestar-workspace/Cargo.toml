@@ -12,6 +12,8 @@ lodestar-vcs = { workspace = true }
 thiserror = { workspace = true }
 ignore = { workspace = true }
 serde = { workspace = true }
+crossbeam-channel = "0.5"
+toml = "0.8"
 
 [lints]
 workspace = true

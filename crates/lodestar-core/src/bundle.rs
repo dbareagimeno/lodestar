@@ -296,6 +296,17 @@ impl Bundle {
         self.outcome_for_write(p, raw, allow_nonconformant)
     }
 
+    /// Valida y prepara la escritura de contenido **crudo** en `p` (el editor guarda lo que el
+    /// usuario tecleó, sin canonicalizar). Rechaza por defecto si introduciría un `Err`.
+    pub fn write_concept_raw(
+        &self,
+        p: &RelPath,
+        raw: &str,
+        allow_nonconformant: bool,
+    ) -> WriteOutcome {
+        self.outcome_for_write(p, raw.to_string(), allow_nonconformant)
+    }
+
     /// Aplica un patch de frontmatter (merge-patch RFC 7386: `Some` escribe, `None` borra).
     pub fn merge_frontmatter(&self, p: &RelPath, patch: FrontmatterPatch) -> WriteOutcome {
         let parsed = self.parsed.get(p);

@@ -73,3 +73,83 @@ pub fn sync(root: &Path, push: bool) -> anyhow::Result<ExitCode> {
         ExitCode::from(1)
     })
 }
+
+/// `lodestar check --staged`: juzga el árbol staged (exit 0/1).
+pub fn check_staged(root: &Path, json: bool, sarif: bool) -> anyhow::Result<ExitCode> {
+    let ws = open(root)?;
+    let analysis = ws
+        .analyze_staged()
+        .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+    let blocked = ws.config().gate_blocked(&analysis);
+    crate::commands::render_analysis(&analysis, json, sarif, blocked)
+}
+
+/// `lodestar check --rev <REV>`: juzga el árbol de una revisión (exit 0/1).
+pub fn check_rev(root: &Path, rev: &str, json: bool, sarif: bool) -> anyhow::Result<ExitCode> {
+    let ws = open(root)?;
+    let analysis = ws
+        .analyze_rev(rev)
+        .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+    let blocked = ws.config().gate_blocked(&analysis);
+    crate::commands::render_analysis(&analysis, json, sarif, blocked)
+}
+
+/// `lodestar switch <name>`: cambia de rama por el único escritor (checkpoint previo).
+pub fn switch(root: &Path, name: &str, create: bool) -> anyhow::Result<ExitCode> {
+    let ws = open(root)?;
+    if create {
+        ws.create_branch(name, None)
+            .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+    }
+    let report = ws
+        .switch(name)
+        .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+    println!(
+        "en la rama {name} ({} escritos, {} eliminados)",
+        report.written, report.removed
+    );
+    Ok(ExitCode::SUCCESS)
+}
+
+/// `lodestar merge <name>`: merge local por el único escritor.
+pub fn merge(root: &Path, name: &str) -> anyhow::Result<ExitCode> {
+    let ws = open(root)?;
+    let report = ws.merge(name).map_err(|e| anyhow::anyhow!(e.to_string()))?;
+    if report.up_to_date {
+        println!("ya está al día");
+    } else if !report.conflicted.is_empty() {
+        eprintln!("merge con conflictos en:");
+        for p in &report.conflicted {
+            eprintln!("  {p}");
+        }
+        eprintln!("resuelve los marcadores y commitea para completar el merge");
+        return Ok(ExitCode::from(1));
+    } else if report.fast_forward {
+        println!("merge fast-forward completado");
+    } else {
+        println!("merge completado ({} ficheros)", report.report.written);
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// `lodestar hooks install`: instala el hook `pre-commit`.
+pub fn hooks(root: &Path) -> anyhow::Result<ExitCode> {
+    let ws = open(root)?;
+    let path = ws
+        .install_hooks()
+        .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+    println!("hook instalado en {}", path.display());
+    Ok(ExitCode::SUCCESS)
+}
+
+/// `lodestar reindex`: reconstruye la cache `.lodestar/index.db` desde disco.
+pub fn reindex(root: &Path) -> anyhow::Result<ExitCode> {
+    let mut ws = open(root)?;
+    ws.enable_cache()
+        .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+    println!(
+        "cache reconstruida en {}",
+        root.join(".lodestar/index.db").display()
+    );
+    Ok(ExitCode::SUCCESS)
+}
