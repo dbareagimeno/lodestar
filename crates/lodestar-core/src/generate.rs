@@ -155,7 +155,8 @@ pub fn gen_tag_indexes(bundle: &Bundle) -> Mutation {
     for t in &tags {
         let slug = &slug_by_tag[t];
         let mut paths: Vec<&RelPath> = tag_map[t].iter().collect();
-        paths.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+        // El prototipo ordena los items de cada tag con `sortPaths` (numeric-aware), no léxico.
+        paths.sort_by(|a, b| model::sort_paths_cmp(a.as_str(), b.as_str()));
         let items: Vec<String> = paths
             .iter()
             .map(|p| {
@@ -195,11 +196,15 @@ pub fn gen_tag_indexes(bundle: &Bundle) -> Mutation {
     Mutation { writes, deletes }
 }
 
-/// Port de `slugifyTag`.
+/// Port de `slugifyTag`: `lower → trim → NFC → reemplazos → colapsa → recorta`.
 pub fn slugify_tag(t: &str) -> String {
+    use unicode_normalization::UnicodeNormalization;
     let s = t.to_lowercase();
     let s = s.trim();
-    let s = SLUG_SEP_RE.replace_all(s, "-");
+    // NFC como en el prototipo (`.normalize("NFC")`): compone p. ej. `e`+U+0301 → `é` para que
+    // `\p{L}` no descarte la marca combinante.
+    let s: String = s.nfc().collect();
+    let s = SLUG_SEP_RE.replace_all(&s, "-");
     let s = SLUG_WS_RE.replace_all(&s, "-");
     let s = SLUG_BAD_RE.replace_all(&s, "-");
     let s = SLUG_DASH_RE.replace_all(&s, "-");

@@ -5,6 +5,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 
 /// Macro interna: deriva `JsonSchema` solo con la feature `schemars` (para el outputSchema del MCP).
@@ -232,9 +233,12 @@ pub struct Frontmatter {
     pub timestamp: Option<serde_yaml::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<String>,
+    /// `IndexMap` (no `BTreeMap`) para preservar el **orden de aparición** de las claves de
+    /// productor, igual que `Object.keys(fm)` del prototipo (`buildRaw`). Con `BTreeMap` se
+    /// reordenaban alfabéticamente (divergencia de paridad).
     #[cfg_attr(feature = "schemars", schemars(skip))]
     #[serde(flatten)]
-    pub extra: BTreeMap<String, serde_yaml::Value>,
+    pub extra: IndexMap<String, serde_yaml::Value>,
 }
 }
 

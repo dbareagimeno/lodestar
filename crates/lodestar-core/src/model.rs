@@ -236,6 +236,53 @@ fn parse_iso_date(s: &str) -> bool {
     y >= 1 && (1..=12).contains(&m) && (1..=31).contains(&d)
 }
 
+/// Port de `sortPaths` = `a.localeCompare(b, undefined, {numeric:true})`: orden natural con
+/// reconocimiento de números (`doc-2` < `doc-10`). Las tiras de dígitos se comparan por valor;
+/// el resto, por code-point. La paridad exacta con la colación ICU para mayúsculas/acentos es un
+/// no-goal documentado: para paths kebab-case en minúscula (el caso real) coincide.
+pub fn sort_paths_cmp(a: &str, b: &str) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    let (mut i, mut j) = (0usize, 0usize);
+    while i < a.len() && j < b.len() {
+        let (ca, cb) = (a[i], b[j]);
+        if ca.is_ascii_digit() && cb.is_ascii_digit() {
+            let si = i;
+            while i < a.len() && a[i].is_ascii_digit() {
+                i += 1;
+            }
+            let sj = j;
+            while j < b.len() && b[j].is_ascii_digit() {
+                j += 1;
+            }
+            let na: String = a[si..i].iter().collect();
+            let nb: String = b[sj..j].iter().collect();
+            let ta = na.trim_start_matches('0');
+            let tb = nb.trim_start_matches('0');
+            // Mismo valor numérico ⇒ compara por magnitud (longitud sin ceros, luego dígitos),
+            // y como desempate la tira más corta (menos ceros a la izquierda) va primero.
+            let ord = ta
+                .len()
+                .cmp(&tb.len())
+                .then_with(|| ta.cmp(tb))
+                .then_with(|| na.len().cmp(&nb.len()));
+            if ord != Ordering::Equal {
+                return ord;
+            }
+        } else {
+            match ca.cmp(&cb) {
+                Ordering::Equal => {
+                    i += 1;
+                    j += 1;
+                }
+                ord => return ord,
+            }
+        }
+    }
+    (a.len() - i).cmp(&(b.len() - j))
+}
+
 /// Construye la representación YAML canónica de un frontmatter ordenado (known fields primero).
 fn dump_frontmatter(fm: &Frontmatter) -> String {
     let mut map = serde_yaml::Mapping::new();
@@ -278,12 +325,13 @@ fn dump_frontmatter(fm: &Frontmatter) -> String {
         .to_string()
 }
 
-/// `true` si un valor YAML cuenta como "vacío" para `build_raw` (cadena vacía o lista vacía).
+/// `true` si un valor YAML cuenta como "vacío" para `build_raw`. El filtro de `buildRaw`
+/// (`fm[k]!==undefined && fm[k]!=="" && !lista-vacía`) solo descarta cadena/lista vacías: un
+/// `null` YAML SÍ se serializa (p. ej. `tags: null`), así que NO cuenta como vacío.
 fn yaml_is_empty(v: &Yaml) -> bool {
     match v {
         Yaml::String(s) => s.is_empty(),
         Yaml::Sequence(s) => s.is_empty(),
-        Yaml::Null => true,
         _ => false,
     }
 }

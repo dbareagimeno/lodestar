@@ -1,0 +1,10 @@
+{
+  "name": "lodestar-harness",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Arnés diferencial JS-vs-Rust (E1-H18): ejecuta las funciones puras del prototipo como oráculo de paridad.",
+  "dependencies": {
+    "js-yaml": "^4.1.0"
+  }
+}

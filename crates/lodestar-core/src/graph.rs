@@ -14,6 +14,11 @@ pub(crate) fn graph_model(bundle: &Bundle) -> GraphModel {
     for src in &a.concepts {
         if let Some(targets) = a.out.get(src) {
             for t in targets {
+                // Quirk del prototipo (buildGraphModel:1850): las aristas/nodos a ficheros
+                // reservados (index.md/log.md) se descartan, existan o no.
+                if t.is_reserved() {
+                    continue;
+                }
                 let dangling = !bundle.files().contains_key(t);
                 if dangling {
                     node_ids.insert(t.clone()); // ghost
@@ -73,6 +78,10 @@ pub(crate) fn neighborhood(
         if matches!(dir, Direction::Out | Direction::Both) {
             if let Some(ts) = out.get(&cur) {
                 for t in ts {
+                    // Mismo quirk que graph_model: sin aristas a reservados (buildGraphModel:1850).
+                    if t.is_reserved() {
+                        continue;
+                    }
                     let dangling = !bundle.files().contains_key(t);
                     edge_set.insert((cur.clone(), t.clone()), dangling);
                     neighbors.push(t.clone());
