@@ -47,7 +47,7 @@ cargo run -p lodestar-tauri                            # app de escritorio (Taur
 - **E2**: H01–H05 hechas; H06/H07 (reindex/import/git) reales o stub según fase.
 - **E4**: H01–H06, H09 (conformidad por commit) hechas; H07 (red) hecha; H08/H10 parciales.
 - **E5**: H01–H06 hechas (sin el watcher de E3); H07 parcial.
-- **E7**: H01–H05 hechas (subset stdio); H06 (golden cross-fachada) **pendiente**; H07 doc.
+- **E7**: H01–H06 hechas (subset stdio; H06 = golden cross-fachada en `tools.rs` + e2e); H07 doc.
 
 ## Invariantes verificados
 

@@ -64,9 +64,9 @@ enum Command {
         #[arg(long)]
         out: Option<PathBuf>,
     },
-    /// Reconstruye la cache (pendiente E5: requiere la workspace).
+    /// Reconstruye la cache `.lodestar/index.db` desde los `.md`.
     Reindex,
-    /// Importa un bundle del prototipo (localStorage) — pendiente E8.
+    /// Importa un bundle (zip exportado del prototipo o directorio).
     Import { source: Option<PathBuf> },
     /// Historial de commits (con conformidad).
     Log {

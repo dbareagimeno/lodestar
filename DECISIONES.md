@@ -106,8 +106,9 @@ Pendientes de priorización (no bloquean el núcleo):
 - **Packaging/release CI + updater + firma** (ligado al punto 1).
 - **Threat model** documentado (§12 seguridad); las piezas ya están (RelPath anti path/zip-slip,
   FTS5 escapado, git de red confinado al binario, libgit2 local sin hooks).
-- **Arnés diferencial JS-vs-Rust (E1-H18)**: hoy los tests fijan la semántica del prototipo
-  directamente en Rust; ejecutar el JS del prototipo en Node como oráculo es un extra de confianza.
+- ~~Arnés diferencial JS-vs-Rust (E1-H18)~~ — **hecho**: `prototype/harness/` ejecuta las funciones
+  puras del prototipo en node como oráculo y `tests/differential.rs` compara con el core (6 fixtures);
+  cazó y cerró 6 divergencias de paridad.
 
 ---
 
