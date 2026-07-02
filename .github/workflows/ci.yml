@@ -59,6 +59,13 @@ jobs:
         run: npm ci && npm run build
         working-directory: frontend
 
+      # El arnés diferencial (E1-H18, §12) ejecuta las funciones puras del prototipo en node
+      # como ORÁCULO; `tests/differential.rs` compara con el core. Sin estas deps el arnés
+      # explota (ERR_MODULE_NOT_FOUND: js-yaml) en vez de saltarse → hay que instalarlas.
+      - name: Dependencias del arnés diferencial JS-vs-Rust
+        run: npm ci
+        working-directory: prototype/harness
+
       - name: Formato (falla si no está formateado)
         run: cargo fmt --all --check
 
