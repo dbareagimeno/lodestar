@@ -33,16 +33,16 @@ enum Command {
     /// La puerta de CI: ¿es conforme el bundle? (exit 0/1).
     Check {
         /// Salida JSON (el `Analysis` serializado).
-        #[arg(long)]
+        #[arg(long, conflicts_with = "sarif")]
         json: bool,
         /// Salida SARIF 2.1.0 (para integraciones de CI).
         #[arg(long)]
         sarif: bool,
         /// Juzga el árbol staged en git.
-        #[arg(long)]
+        #[arg(long, conflicts_with_all = ["rev", "range"])]
         staged: bool,
         /// Juzga el árbol de una revisión (`HEAD`, rama, SHA, `HEAD~2`…).
-        #[arg(long)]
+        #[arg(long, conflicts_with = "range")]
         rev: Option<String>,
         /// Juzga la punta de un rango `a..b` (equivale a `--rev b`).
         #[arg(long)]
@@ -67,7 +67,8 @@ enum Command {
     /// Reconstruye la cache `.lodestar/index.db` desde los `.md`.
     Reindex,
     /// Importa un bundle (zip exportado del prototipo o directorio).
-    Import { source: Option<PathBuf> },
+    /// Requerido en clap: sin argumento es error de USO (exit 2), no de runtime.
+    Import { source: PathBuf },
     /// Historial de commits (con conformidad).
     Log {
         #[arg(long, default_value_t = 20)]
@@ -115,7 +116,15 @@ fn main() -> ExitCode {
     let cli = Cli::parse();
     let root = resolve_root(cli.path.as_deref());
     let result = match cli.command {
-        Command::Init { dir } => commands::init(dir.unwrap_or(root)),
+        // `init` sin argumento inicializa el CWD (o `--path`), NUNCA el resultado de
+        // `resolve_root`: subiría hasta un bundle ancestro e inicializaría el padre.
+        Command::Init { dir } => {
+            let target = dir
+                .or_else(|| cli.path.clone())
+                .or_else(|| std::env::current_dir().ok())
+                .unwrap_or_else(|| PathBuf::from("."));
+            commands::init(target)
+        }
         Command::Check {
             json,
             sarif,

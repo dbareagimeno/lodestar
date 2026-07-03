@@ -8,7 +8,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard, Weak};
 
 use lodestar_core::types::{Direction, FrontmatterPatch, RelPath};
 use lodestar_store::Store;
@@ -24,8 +24,17 @@ struct AppState {
 
 type CmdResult<T> = Result<T, String>;
 
-fn with_ws<T>(state: &State<AppState>, f: impl FnOnce(&Workspace) -> CmdResult<T>) -> CmdResult<T> {
-    let guard = state.ws.lock().unwrap();
+/// Toma el lock del estado recuperándose del envenenamiento: un panic puntual dentro de un
+/// comando no debe dejar la app permanentemente inerte.
+fn lock_ws<'a>(state: &'a State<'_, AppState>) -> MutexGuard<'a, Option<Workspace>> {
+    state.ws.lock().unwrap_or_else(|p| p.into_inner())
+}
+
+fn with_ws<T>(
+    state: &State<'_, AppState>,
+    f: impl FnOnce(&Workspace) -> CmdResult<T>,
+) -> CmdResult<T> {
+    let guard = lock_ws(state);
     let ws = guard.as_ref().ok_or("no hay ningún bundle abierto")?;
     f(ws)
 }
@@ -35,16 +44,28 @@ fn rp(s: &str) -> CmdResult<RelPath> {
 }
 
 /// Reemite el bus `IndexEvent` de la cache como `bundle:changed` (snapshot completo) a la webview.
-fn start_forwarder(app: AppHandle, store: Arc<Store>) {
+///
+/// Sostiene un `Weak<Store>`: si retuviera el `Arc`, el hilo mantendría vivo el `Store` viejo
+/// (cuyo `Bus` contiene el `Sender`) y `rx.iter()` no terminaría jamás — cada reapertura de
+/// bundle fugaría un hilo + una conexión SQLite, y los eventos encolados del bundle anterior
+/// pisarían la UI con snapshots del bundle equivocado.
+fn start_forwarder(app: AppHandle, store: &Arc<Store>) {
     let rx = store.subscribe();
+    let weak: Weak<Store> = Arc::downgrade(store);
     std::thread::spawn(move || {
-        for _ev in rx.iter() {
+        while rx.recv().is_ok() {
+            // Coalescing: drena la ráfaga pendiente (un switch/pull toca N ficheros y emite N
+            // eventos) y computa UN solo snapshot en vez de N análisis completos consecutivos.
+            while rx.try_recv().is_ok() {}
+            // Si el bundle se cerró/reemplazó, el store ya no existe: este forwarder muere.
+            let Some(store) = weak.upgrade() else { break };
             let b = store.bundle();
             let snap = BundleSnapshot {
                 files: b.files().clone(),
                 analysis: b.analyze().clone(),
                 graph: b.graph_model(),
             };
+            drop(store);
             if app.emit("bundle:changed", &snap).is_err() {
                 break; // la app se está cerrando
             }
@@ -55,24 +76,35 @@ fn start_forwarder(app: AppHandle, store: Arc<Store>) {
 // --- comandos (nombres congelados, §7.1) -----------------------------------
 
 #[tauri::command]
-fn open_bundle(app: AppHandle, state: State<AppState>, path: String) -> CmdResult<BundleSnapshot> {
+async fn open_bundle(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    path: String,
+) -> CmdResult<BundleSnapshot> {
     let root = PathBuf::from(&path);
+    // Sin esta comprobación, un path arbitrario del webview crearía `.lodestar/` donde caiga
+    // e indexaría medio disco.
+    if !root.join("index.md").is_file() && !root.join(".lodestar").is_dir() {
+        return Err(format!(
+            "{path} no es un bundle lodestar (falta index.md o .lodestar/)"
+        ));
+    }
     let ws = Workspace::open_live(&root).map_err(|e| e.to_string())?;
     let snap = ws.snapshot().map_err(|e| e.to_string())?;
     if let Some(store) = ws.cache() {
-        start_forwarder(app, Arc::clone(store));
+        start_forwarder(app, store);
     }
-    *state.ws.lock().unwrap() = Some(ws);
+    *lock_ws(&state) = Some(ws);
     Ok(snap)
 }
 
 #[tauri::command]
-fn get_snapshot(state: State<AppState>) -> CmdResult<BundleSnapshot> {
+async fn get_snapshot(state: State<'_, AppState>) -> CmdResult<BundleSnapshot> {
     with_ws(&state, |ws| ws.snapshot().map_err(|e| e.to_string()))
 }
 
 #[tauri::command]
-fn list_concepts(state: State<AppState>) -> CmdResult<Value> {
+async fn list_concepts(state: State<'_, AppState>) -> CmdResult<Value> {
     with_ws(&state, |ws| {
         let rows = ws.list_concepts().map_err(|e| e.to_string())?;
         serde_json::to_value(rows).map_err(|e| e.to_string())
@@ -80,15 +112,15 @@ fn list_concepts(state: State<AppState>) -> CmdResult<Value> {
 }
 
 #[tauri::command]
-fn read_concept(state: State<AppState>, path: String) -> CmdResult<String> {
+async fn read_concept(state: State<'_, AppState>, path: String) -> CmdResult<String> {
     with_ws(&state, |ws| {
         ws.read_concept(&rp(&path)?).map_err(|e| e.to_string())
     })
 }
 
 #[tauri::command]
-fn write_concept(
-    state: State<AppState>,
+async fn write_concept(
+    state: State<'_, AppState>,
     path: String,
     content: String,
     allow_nonconformant: Option<bool>,
@@ -102,8 +134,8 @@ fn write_concept(
 }
 
 #[tauri::command]
-fn create_concept(
-    state: State<AppState>,
+async fn create_concept(
+    state: State<'_, AppState>,
     path: String,
     r#type: String,
     title: Option<String>,
@@ -125,7 +157,11 @@ fn create_concept(
 }
 
 #[tauri::command]
-fn update_frontmatter(state: State<AppState>, path: String, patch: Value) -> CmdResult<Value> {
+async fn update_frontmatter(
+    state: State<'_, AppState>,
+    path: String,
+    patch: Value,
+) -> CmdResult<Value> {
     with_ws(&state, |ws| {
         let patch = parse_patch(&patch)?;
         let o = ws
@@ -136,7 +172,7 @@ fn update_frontmatter(state: State<AppState>, path: String, patch: Value) -> Cmd
 }
 
 #[tauri::command]
-fn conformance(state: State<AppState>) -> CmdResult<Value> {
+async fn conformance(state: State<'_, AppState>) -> CmdResult<Value> {
     with_ws(&state, |ws| {
         let a = ws.analyze().map_err(|e| e.to_string())?;
         serde_json::to_value(a).map_err(|e| e.to_string())
@@ -144,7 +180,7 @@ fn conformance(state: State<AppState>) -> CmdResult<Value> {
 }
 
 #[tauri::command]
-fn query(state: State<AppState>, dsl: String) -> CmdResult<Value> {
+async fn query(state: State<'_, AppState>, dsl: String) -> CmdResult<Value> {
     with_ws(&state, |ws| {
         let paths = ws.query(&dsl).map_err(|e| e.to_string())?;
         serde_json::to_value(paths).map_err(|e| e.to_string())
@@ -152,7 +188,7 @@ fn query(state: State<AppState>, dsl: String) -> CmdResult<Value> {
 }
 
 #[tauri::command]
-fn backlinks(state: State<AppState>, path: String) -> CmdResult<Value> {
+async fn backlinks(state: State<'_, AppState>, path: String) -> CmdResult<Value> {
     with_ws(&state, |ws| {
         let bl = ws.backlinks(&rp(&path)?).map_err(|e| e.to_string())?;
         serde_json::to_value(bl).map_err(|e| e.to_string())
@@ -160,7 +196,7 @@ fn backlinks(state: State<AppState>, path: String) -> CmdResult<Value> {
 }
 
 #[tauri::command]
-fn graph_model(state: State<AppState>) -> CmdResult<Value> {
+async fn graph_model(state: State<'_, AppState>) -> CmdResult<Value> {
     with_ws(&state, |ws| {
         let g = ws.graph_model().map_err(|e| e.to_string())?;
         serde_json::to_value(g).map_err(|e| e.to_string())
@@ -168,8 +204,8 @@ fn graph_model(state: State<AppState>) -> CmdResult<Value> {
 }
 
 #[tauri::command]
-fn neighborhood(
-    state: State<AppState>,
+async fn neighborhood(
+    state: State<'_, AppState>,
     path: String,
     depth: Option<u32>,
     direction: Option<String>,
@@ -188,7 +224,7 @@ fn neighborhood(
 }
 
 #[tauri::command]
-fn history(state: State<AppState>, limit: Option<usize>) -> CmdResult<Value> {
+async fn history(state: State<'_, AppState>, limit: Option<usize>) -> CmdResult<Value> {
     with_ws(&state, |ws| {
         let rows = ws.vcs_log(limit.unwrap_or(20)).map_err(|e| e.to_string())?;
         serde_json::to_value(rows).map_err(|e| e.to_string())
@@ -196,7 +232,7 @@ fn history(state: State<AppState>, limit: Option<usize>) -> CmdResult<Value> {
 }
 
 #[tauri::command]
-fn branches(state: State<AppState>) -> CmdResult<Value> {
+async fn branches(state: State<'_, AppState>) -> CmdResult<Value> {
     with_ws(&state, |ws| {
         let bs = ws.branches().map_err(|e| e.to_string())?;
         serde_json::to_value(bs).map_err(|e| e.to_string())
@@ -204,7 +240,7 @@ fn branches(state: State<AppState>) -> CmdResult<Value> {
 }
 
 #[tauri::command]
-fn diff_working(state: State<AppState>) -> CmdResult<Value> {
+async fn diff_working(state: State<'_, AppState>) -> CmdResult<Value> {
     with_ws(&state, |ws| {
         let d = ws.diff_working().map_err(|e| e.to_string())?;
         serde_json::to_value(d).map_err(|e| e.to_string())
@@ -212,8 +248,8 @@ fn diff_working(state: State<AppState>) -> CmdResult<Value> {
 }
 
 #[tauri::command]
-fn commit(state: State<AppState>, message: String) -> CmdResult<Value> {
-    with_ws(&state, |ws| {
+async fn commit(app: AppHandle, state: State<'_, AppState>, message: String) -> CmdResult<Value> {
+    let result = with_ws(&state, |ws| {
         let o = ws.commit(&message).map_err(|e| e.to_string())?;
         Ok(json!({
             "sha": o.sha.as_str(),
@@ -223,7 +259,10 @@ fn commit(state: State<AppState>, message: String) -> CmdResult<Value> {
                 "conform": o.conformance.conform,
             }
         }))
-    })
+    })?;
+    // El contrato (`EVENTS.vcsChanged` en types.ts) promete este evento tras cambios de vcs.
+    let _ = app.emit("vcs:changed", &result);
+    Ok(result)
 }
 
 fn outcome_json(o: &lodestar_core::types::WriteOutcome) -> Value {

@@ -23,12 +23,17 @@ fn relpath_rechaza_absolutas_y_dotdot() {
     assert!(RelPath::new("../x").is_err());
     assert!(RelPath::new("a/../../b").is_err());
     assert!(RelPath::new("").is_err());
+    // Absolutas de unidad Windows: `root.join("C:/x")` descartaría el root (zip-slip).
+    assert!(RelPath::new("C:\\evil\\x.md").is_err());
+    assert!(RelPath::new("C:/evil/x.md").is_err());
+    assert!(RelPath::new("c:evil.md").is_err());
+    // Backslash: separador en Windows, literal en el proto → rechazo en ambos casos.
+    assert!(RelPath::new("a\\b.md").is_err());
 }
 
 #[test]
 fn relpath_normaliza() {
     assert_eq!(RelPath::new("a//b/./c.md").unwrap().as_str(), "a/b/c.md");
-    assert_eq!(RelPath::new("a\\b.md").unwrap().as_str(), "a/b.md");
 }
 
 #[test]
@@ -354,4 +359,150 @@ fn merge_frontmatter_null_borra() {
 fn generadores_consistentes_via_mutation() {
     let _ = generate::slugify_tag("Hólà Múndo/x");
     assert_eq!(generate::slugify_tag("Hólà Múndo"), "hólà-múndo");
+}
+
+// --- Regresiones de paridad con el prototipo (revisión profunda) -------------
+
+#[test]
+fn fm_escalares_no_string_se_coercen_como_js() {
+    // `type: 123` NO es OKF-FM03 (hard-fail de fichero entero): el proto lo acepta vía String(v).
+    let b = Bundle::from_files(fm(&[(
+        "n.md",
+        "---\ntype: 123\ntitle: 2024\ndescription: true\n---\n\n# H\n\ncuerpo\n",
+    )]));
+    let a = b.analyze();
+    assert_eq!(a.hard_fail, 0, "el veredicto no puede invertirse: {a:?}");
+    let checks = &a.per_file[&RelPath::new("n.md").unwrap()];
+    assert!(!checks.iter().any(|c| c.code == CheckCode::OkfFm03));
+}
+
+#[test]
+fn fm_null_explicito_cuenta_como_presente() {
+    // `type:` (null) → presente para has:/no: (fmPresent de JS: null !== undefined)…
+    let b = Bundle::from_files(fm(&[
+        (
+            "connull.md",
+            "---\ntype:\ntitle: A\ndescription: d\n---\n\n# H\n",
+        ),
+        ("sintipo.md", "---\ntitle: B\ndescription: d\n---\n\n# H\n"),
+    ]));
+    let con_type = b.query("has:type");
+    assert!(con_type.iter().any(|p| p.as_str() == "connull.md"));
+    assert!(!con_type.iter().any(|p| p.as_str() == "sintipo.md"));
+    // …y buildRaw lo conserva (`type: null`), no lo borra en silencio.
+    let p = RelPath::new("connull.md").unwrap();
+    let outcome = b.merge_frontmatter(&p, FrontmatterPatch(BTreeMap::new()));
+    assert!(outcome.raw.contains("type: null"), "raw: {:?}", outcome.raw);
+}
+
+#[test]
+fn fmt_ts_rechaza_iso_con_basura() {
+    // El proto valida con Date.parse el string ENTERO: `2024-01-15hello` y `T99:99` son FMT-TS.
+    let ok = serde_yaml::Value::String("2024-01-15".into());
+    let ok_t = serde_yaml::Value::String("2024-01-15T10:30:00Z".into());
+    let bad_tail = serde_yaml::Value::String("2024-01-15hello".into());
+    let bad_hour = serde_yaml::Value::String("2024-01-15T99:99".into());
+    assert!(model::is_iso(&ok));
+    assert!(model::is_iso(&ok_t));
+    assert!(!model::is_iso(&bad_tail));
+    assert!(!model::is_iso(&bad_hour));
+}
+
+#[test]
+fn title_from_path_boundaries_como_js() {
+    // \b\w del proto: el acento y el punto abren palabra (quirk incluido, es la spec).
+    assert_eq!(model::title_from_path("año.md"), "AñO");
+    assert_eq!(model::title_from_path("foo.bar.md"), "Foo.Bar");
+    assert_eq!(model::title_from_path("mi-nota_2.md"), "Mi Nota 2");
+}
+
+#[test]
+fn tags_ordenados_con_locale_compare() {
+    // localeCompare: "alpha" < "árbol" < "Beta" (no orden de bytes, que pondría Beta primero).
+    let b = Bundle::from_files(fm(&[(
+        "x.md",
+        "---\ntype: N\ntitle: X\ndescription: d\ntags: [Beta, alpha, \u{e1}rbol]\n---\n\n# H\n",
+    )]));
+    let m = b.gen_tag_indexes();
+    let root = m
+        .writes
+        .get(&RelPath::new("tags/index.md").unwrap())
+        .unwrap();
+    let pos = |s: &str| root.find(s).unwrap_or(usize::MAX);
+    assert!(pos("[alpha]") < pos("[\u{e1}rbol]"), "root: {root}");
+    assert!(pos("[\u{e1}rbol]") < pos("[Beta]"), "root: {root}");
+}
+
+#[test]
+fn gen_index_type_vacio_cae_a_concept() {
+    let b = Bundle::from_files(fm(&[(
+        "e.md",
+        "---\ntype: \"\"\ntitle: E\ndescription: d\n---\n\n# H\n",
+    )]));
+    let m = b.gen_index("");
+    let idx = m.writes.get(&RelPath::new("index.md").unwrap()).unwrap();
+    assert!(idx.contains("# Concept\n"), "idx: {idx}");
+}
+
+#[test]
+fn fm_diff_sin_cambio_fantasma_por_string_vacio() {
+    // Añadir `description: ""` no es un cambio (fmFmt(undefined) === fmFmt("")).
+    let a = "---\ntype: N\ntitle: X\n---\n\n# H\n";
+    let b = "---\ntype: N\ntitle: X\ndescription: \"\"\n---\n\n# H\n";
+    assert!(diff::fm_diff(a, b).is_empty());
+}
+
+#[test]
+fn suggest_msg_status_vacio_cae_a_update() {
+    let a = fm(&[(
+        "s.md",
+        "---\ntype: N\ntitle: S\nstatus: draft\n---\n\n# H\n",
+    )]);
+    let b = fm(&[("s.md", "---\ntype: N\ntitle: S\nstatus: \"\"\n---\n\n# H\n")]);
+    let d = diff::diff_snap(&a, &b);
+    assert!(
+        matches!(d.suggested, MessageHint::Update { .. }),
+        "{:?}",
+        d.suggested
+    );
+}
+
+#[test]
+fn diff_snap_ordena_numeric_aware() {
+    let a = fm(&[]);
+    let b = fm(&[
+        ("doc-10.md", "---\ntype: N\ntitle: D10\n---\n\n# H\n"),
+        ("doc-2.md", "---\ntype: N\ntitle: D2\n---\n\n# H\n"),
+    ]);
+    let d = diff::diff_snap(&a, &b);
+    let order: Vec<&str> = d.files.iter().map(|f| f.path.as_str()).collect();
+    assert_eq!(order, vec!["doc-2.md", "doc-10.md"]);
+}
+
+#[test]
+fn backlinks_out_dedup_sin_self_ni_reservados() {
+    let b = Bundle::from_files(fm(&[
+        (
+            "x.md",
+            "---\ntype: N\ntitle: X\ndescription: d\n---\n\n[a](/a.md) [a](/a.md) [idx](/index.md) [yo](/x.md)\n",
+        ),
+        ("a.md", "---\ntype: N\ntitle: A\ndescription: d\n---\n\n# H\n"),
+        ("index.md", "---\nokf_version: \"0.1\"\n---\n\n# B\n\n* [x](x.md)\n"),
+    ]));
+    let bl = b.backlinks(&RelPath::new("x.md").unwrap());
+    assert_eq!(
+        bl.out.iter().map(|p| p.as_str()).collect::<Vec<_>>(),
+        vec!["a.md"]
+    );
+}
+
+#[test]
+fn query_campo_vacio_es_texto_suelto() {
+    // `":foo"` → field vacío es falsy en JS → texto suelto (busca "foo"), no field-match de "".
+    let b = Bundle::from_files(fm(&[(
+        "foo-nota.md",
+        "---\ntype: N\ntitle: T\ndescription: d\n---\n\n# H\n",
+    )]));
+    let hits = b.query(":foo");
+    assert!(hits.iter().any(|p| p.as_str() == "foo-nota.md"));
 }

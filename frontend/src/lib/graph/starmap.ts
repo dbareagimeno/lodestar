@@ -134,7 +134,13 @@ export function createStarMap(svg: SVGSVGElement, opts: Opts) {
       b.vy -= fy * k;
     });
     N.forEach((n) => {
-      if (n === held) return;
+      if (n === held) {
+        // El nodo agarrado no integra NI acumula: sin esto, la repulsión/muelle de arriba
+        // seguía sumando a vx/vy durante todo el drag y al soltar salía disparado.
+        n.vx = 0;
+        n.vy = 0;
+        return;
+      }
       n.vx += -n.x * 0.002 * k;
       n.vy += -n.y * 0.002 * k;
       n.vx *= 0.85;
@@ -222,14 +228,13 @@ export function createStarMap(svg: SVGSVGElement, opts: Opts) {
       }
     });
     svg.innerHTML = parts.join("");
+    // Solo pointerdown: el `click` del navegador NUNCA llegaba a los <g> — el repintado
+    // síncrono de `start()` los saca del DOM entre pointerdown y pointerup, y el click se
+    // despacha al ancestro común (el svg, sin handler). La selección se resuelve en el
+    // pointerup de startDrag con umbral de movimiento (tap = seleccionar, drag = arrastrar).
     svg.querySelectorAll<SVGGElement>("g.node").forEach((g) => {
       const id = g.getAttribute("data-id")!;
       g.querySelector(".hit")?.addEventListener("pointerdown", (e) => startDrag(e as PointerEvent, id));
-      g.addEventListener("click", () => {
-        const n = nodes.find((x) => x.id === id);
-        if (n && !n.ghost) opts.onSelect(id);
-        else if (n) opts.onCreateGhost(id);
-      });
     });
   }
 
@@ -241,12 +246,21 @@ export function createStarMap(svg: SVGSVGElement, opts: Opts) {
     dragging = true;
     n.vx = 0;
     n.vy = 0;
-    const rect = svg.getBoundingClientRect();
+    const startX = e.clientX,
+      startY = e.clientY;
+    let moved = false;
     const move = (ev: PointerEvent) => {
+      if (Math.abs(ev.clientX - startX) + Math.abs(ev.clientY - startY) > 4) moved = true;
+      if (!moved) return;
+      // El rect se re-lee por evento: si el layout cambió a mitad del drag, unas coordenadas
+      // capturadas al inicio desplazarían el nodo respecto al puntero.
+      const rect = svg.getBoundingClientRect();
       const mx = ev.clientX - rect.left,
         my = ev.clientY - rect.top;
       n.x = (mx - tf.W / 2) / tf.s + tf.cx;
       n.y = (my - tf.H / 2) / tf.s + tf.cy;
+      n.vx = 0;
+      n.vy = 0;
       alpha = Math.max(alpha, 0.3);
     };
     const up = () => {
@@ -254,6 +268,11 @@ export function createStarMap(svg: SVGSVGElement, opts: Opts) {
       held = null;
       window.removeEventListener("pointermove", move);
       window.removeEventListener("pointerup", up);
+      if (!moved) {
+        // Tap sin arrastre = selección (sustituye al listener de `click` roto).
+        if (!n.ghost) opts.onSelect(id);
+        else opts.onCreateGhost(id);
+      }
       alpha = Math.max(alpha, 0.2);
       start();
     };
@@ -262,8 +281,14 @@ export function createStarMap(svg: SVGSVGElement, opts: Opts) {
     start();
   }
 
+  // Repinta al redimensionar: con la simulación fría (alpha ≤ 0.02) nada volvía a pintar y el
+  // grafo quedaba mal escalado hasta el siguiente push de datos.
+  const resizeObserver = typeof ResizeObserver !== "undefined" ? new ResizeObserver(() => paint()) : null;
+  resizeObserver?.observe(svg);
+
   function destroy() {
     destroyed = true;
+    resizeObserver?.disconnect();
     cancelAnimationFrame(raf);
     svg.innerHTML = "";
   }

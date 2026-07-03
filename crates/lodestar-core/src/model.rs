@@ -44,20 +44,75 @@ pub fn split_front(raw: &str) -> SplitFront {
 }
 
 /// Port de `parseYAML`: parsea el texto del frontmatter a un mapa. Devuelve `Err(msg)` si es inválido.
+///
+/// La conversión mapa→`Frontmatter` es **manual** (no serde-derive): el prototipo acepta
+/// cualquier escalar YAML en los campos tipados (`type: 123` → página de tipo "123" vía
+/// `String(v)` en los puntos de uso), mientras que el derive fallaba el fichero ENTERO con
+/// `OKF-FM03` (hard-fail) — invirtiendo el veredicto de la puerta de CI. También conserva
+/// los `null` explícitos (presentes en JS) y stringifica claves no-string (`1: x` → `"1"`).
 pub fn parse_yaml(text: &str) -> Result<Frontmatter, String> {
     if text.trim().is_empty() {
         return Ok(Frontmatter::default());
     }
     match serde_yaml::from_str::<Yaml>(text) {
-        Ok(v) => {
-            // Solo los mapeos producen frontmatter; cualquier otra cosa → frontmatter vacío (como el proto).
-            if let Yaml::Mapping(_) = v {
-                serde_yaml::from_value::<Frontmatter>(v).map_err(|e| e.to_string())
-            } else {
-                Ok(Frontmatter::default())
+        // Solo los mapeos producen frontmatter; cualquier otra cosa → frontmatter vacío (como el proto).
+        Ok(Yaml::Mapping(m)) => Ok(frontmatter_from_mapping(m)),
+        Ok(_) => Ok(Frontmatter::default()),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+/// Convierte un mapping YAML a `Frontmatter` con la coerción del prototipo.
+fn frontmatter_from_mapping(m: serde_yaml::Mapping) -> Frontmatter {
+    let mut fm = Frontmatter::default();
+    for (k, v) in m {
+        let key = js_string(&k);
+        // Los 5 knowns string: null explícito se registra (presente); el resto se coerce a string.
+        let mut set = |slot: &mut Option<String>, name: &str, v: Yaml| match v {
+            Yaml::Null => fm_mark_null(&mut fm.known_null, name),
+            other => *slot = Some(js_string(&other)),
+        };
+        match key.as_str() {
+            "type" => set(&mut fm.r#type, "type", v),
+            "title" => set(&mut fm.title, "title", v),
+            "description" => set(&mut fm.description, "description", v),
+            "resource" => set(&mut fm.resource, "resource", v),
+            "status" => set(&mut fm.status, "status", v),
+            // tags/timestamp se guardan RAW (incluido `null`: presente, y FMT-TAGS lo ve).
+            "tags" => fm.tags = Some(v),
+            "timestamp" => fm.timestamp = Some(v),
+            _ => {
+                fm.extra.insert(key, v);
             }
         }
-        Err(e) => Err(e.to_string()),
+    }
+    fm
+}
+
+fn fm_mark_null(nulls: &mut Vec<String>, name: &str) {
+    if !nulls.iter().any(|n| n == name) {
+        nulls.push(name.to_string());
+    }
+}
+
+/// Port de `String(v)` de JS para valores YAML: números/bools a texto, arrays `join(",")`
+/// (con `null` → `""` dentro del join, como `Array.prototype.toString`), mapas `[object Object]`.
+pub(crate) fn js_string(v: &Yaml) -> String {
+    match v {
+        Yaml::String(s) => s.clone(),
+        Yaml::Bool(b) => b.to_string(),
+        Yaml::Number(n) => n.to_string(),
+        Yaml::Null => "null".to_string(),
+        Yaml::Sequence(items) => items
+            .iter()
+            .map(|x| match x {
+                Yaml::Null => String::new(),
+                other => js_string(other),
+            })
+            .collect::<Vec<_>>()
+            .join(","),
+        Yaml::Mapping(_) => "[object Object]".to_string(),
+        Yaml::Tagged(t) => js_string(&t.value),
     }
 }
 
@@ -84,18 +139,21 @@ pub fn is_reserved(p: &str) -> bool {
     matches!(basename(p), "index.md" | "log.md")
 }
 
-/// Port de `titleFromPath`: deriva un título legible del path (Title Case sobre el concept id).
+/// Port de `titleFromPath`: `replace(/\b\w/g, c=>c.toUpperCase())`. El boundary `\b` de JS es
+/// «char `\w` precedido de no-`\w`» con `\w = [A-Za-z0-9_]`: un acento o un punto también abren
+/// palabra (`año` → `AñO`, `foo.bar` → `Foo.Bar`) — quirk incluido, es la spec.
 pub fn title_from_path(p: &str) -> String {
     let base = concept_id(basename(p)).replace(['-', '_'], " ");
     let mut out = String::with_capacity(base.len());
-    let mut at_word_start = true;
+    let mut prev_is_word = false;
     for ch in base.chars() {
-        if at_word_start && ch.is_alphanumeric() {
+        let is_word = ch.is_ascii_alphanumeric() || ch == '_';
+        if is_word && !prev_is_word {
             out.extend(ch.to_uppercase());
         } else {
             out.push(ch);
         }
-        at_word_start = ch.is_whitespace();
+        prev_is_word = is_word;
     }
     out
 }
@@ -210,30 +268,37 @@ pub fn raw_rel_links(body: &str) -> Vec<String> {
     res
 }
 
-/// Port de `isISO`: `true` si parece una fecha ISO (`AAAA-MM-DD…`).
+/// Port de `isISO`: `true` si es una fecha ISO **válida entera** (`Date.parse` + regex).
+/// La validación cubre el string completo: `2024-01-15hello` o `…T99:99` son NaN en
+/// `Date.parse` → FMT-TS, no silencio.
 pub fn is_iso(v: &serde_yaml::Value) -> bool {
+    static ISO_RE: Lazy<Regex> = Lazy::new(|| {
+        Regex::new(
+            r"^(\d{4})-(\d{2})-(\d{2})([T ](\d{2}):(\d{2})(:(\d{2})(\.\d+)?)?(Z|[+-]\d{2}:?\d{2})?)?$",
+        )
+        .unwrap()
+    });
     let s = match v {
-        serde_yaml::Value::String(s) => s.clone(),
-        // serde_yaml puede tipar una fecha sin comillas como String; otros tipos no son ISO.
+        serde_yaml::Value::String(s) => s,
+        // serde_yaml tipa una fecha sin comillas como String; otros tipos no son ISO.
         _ => return false,
     };
-    let date_re = Regex::new(r"\d{4}-\d{2}-\d{2}").unwrap();
-    date_re.is_match(&s) && parse_iso_date(&s)
-}
-
-/// Validación laxa de fecha: `AAAA-MM-DD` con rangos plausibles (sustituye a `Date.parse`).
-fn parse_iso_date(s: &str) -> bool {
-    let head = &s.get(0..10).unwrap_or("");
-    let bytes = head.as_bytes();
-    if head.len() != 10 || bytes[4] != b'-' || bytes[7] != b'-' {
+    let Some(c) = ISO_RE.captures(s) else {
+        return false;
+    };
+    let num = |i: usize| c.get(i).and_then(|m| m.as_str().parse::<u32>().ok());
+    let (Some(y), Some(m), Some(d)) = (num(1), num(2), num(3)) else {
+        return false;
+    };
+    if y < 1 || !(1..=12).contains(&m) || !(1..=31).contains(&d) {
         return false;
     }
-    let (y, m, d) = (&head[0..4], &head[5..7], &head[8..10]);
-    let (y, m, d) = match (y.parse::<u32>(), m.parse::<u32>(), d.parse::<u32>()) {
-        (Ok(y), Ok(m), Ok(d)) => (y, m, d),
-        _ => return false,
-    };
-    y >= 1 && (1..=12).contains(&m) && (1..=31).contains(&d)
+    match (num(5), num(6), num(8)) {
+        (None, _, _) => true,
+        // `24:00` es válido en ISO (y en `Date.parse`); 25+ no.
+        (Some(h), Some(min), sec) => h <= 24 && min <= 59 && sec.map(|x| x <= 59).unwrap_or(true),
+        _ => false,
+    }
 }
 
 /// Port de `sortPaths` = `a.localeCompare(b, undefined, {numeric:true})`: orden natural con
@@ -283,57 +348,98 @@ pub fn sort_paths_cmp(a: &str, b: &str) -> std::cmp::Ordering {
     (a.len() - i).cmp(&(b.len() - j))
 }
 
+/// Aproximación de `a.localeCompare(b)` (colación ICU por defecto): primaria = letras base
+/// en minúscula (NFD sin marcas), desempate = minúscula antes que mayúscula, luego code-point.
+/// Para el catálogo real (tags en español) coincide con V8; la paridad ICU exacta es no-goal.
+pub fn locale_cmp(a: &str, b: &str) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    use unicode_normalization::char::is_combining_mark;
+    use unicode_normalization::UnicodeNormalization;
+    let fold = |s: &str| -> String {
+        s.nfd()
+            .filter(|c| !is_combining_mark(*c))
+            .flat_map(char::to_lowercase)
+            .collect()
+    };
+    match fold(a).cmp(&fold(b)) {
+        Ordering::Equal => {}
+        ord => return ord,
+    }
+    // Desempate por caso: la minúscula ordena antes ("foo" < "Foo", como localeCompare).
+    for (ca, cb) in a.chars().zip(b.chars()) {
+        if ca == cb {
+            continue;
+        }
+        let (la, lb): (String, String) = (ca.to_lowercase().collect(), cb.to_lowercase().collect());
+        if la == lb {
+            return if ca.is_lowercase() {
+                Ordering::Less
+            } else {
+                Ordering::Greater
+            };
+        }
+        return ca.cmp(&cb);
+    }
+    a.len().cmp(&b.len())
+}
+
 /// Construye la representación YAML canónica de un frontmatter ordenado (known fields primero).
+///
+/// Filtros de `buildRaw` (fieles al proto): los KNOWN descartan cadena vacía Y lista vacía;
+/// los extras SOLO cadena vacía (una lista vacía de productor se conserva). Un `null` explícito
+/// se serializa en ambos casos (`tags: null`).
 fn dump_frontmatter(fm: &Frontmatter) -> String {
     let mut map = serde_yaml::Mapping::new();
-    let push = |map: &mut serde_yaml::Mapping, k: &str, v: Yaml| {
-        if !yaml_is_empty(&v) {
+    let push_known = |map: &mut serde_yaml::Mapping, k: &str, v: Yaml| {
+        let empty = matches!(&v, Yaml::String(s) if s.is_empty())
+            || matches!(&v, Yaml::Sequence(s) if s.is_empty());
+        if !empty {
             map.insert(Yaml::String(k.to_string()), v);
         }
     };
-    // Orden KNOWN_FM.
-    if let Some(v) = &fm.r#type {
-        push(&mut map, "type", Yaml::String(v.clone()));
+    let is_null = |k: &str| fm.known_null.iter().any(|n| n == k);
+    // Orden KNOWN_FM (los null explícitos también se emiten, en su posición canónica).
+    match (&fm.r#type, is_null("type")) {
+        (Some(v), _) => push_known(&mut map, "type", Yaml::String(v.clone())),
+        (None, true) => push_known(&mut map, "type", Yaml::Null),
+        _ => {}
     }
-    if let Some(v) = &fm.title {
-        push(&mut map, "title", Yaml::String(v.clone()));
+    match (&fm.title, is_null("title")) {
+        (Some(v), _) => push_known(&mut map, "title", Yaml::String(v.clone())),
+        (None, true) => push_known(&mut map, "title", Yaml::Null),
+        _ => {}
     }
-    if let Some(v) = &fm.description {
-        push(&mut map, "description", Yaml::String(v.clone()));
+    match (&fm.description, is_null("description")) {
+        (Some(v), _) => push_known(&mut map, "description", Yaml::String(v.clone())),
+        (None, true) => push_known(&mut map, "description", Yaml::Null),
+        _ => {}
     }
-    if let Some(v) = &fm.resource {
-        push(&mut map, "resource", Yaml::String(v.clone()));
+    match (&fm.resource, is_null("resource")) {
+        (Some(v), _) => push_known(&mut map, "resource", Yaml::String(v.clone())),
+        (None, true) => push_known(&mut map, "resource", Yaml::Null),
+        _ => {}
     }
     if let Some(v) = &fm.tags {
-        push(&mut map, "tags", v.clone());
+        push_known(&mut map, "tags", v.clone());
     }
     if let Some(v) = &fm.timestamp {
-        push(&mut map, "timestamp", v.clone());
+        push_known(&mut map, "timestamp", v.clone());
     }
-    if let Some(v) = &fm.status {
-        push(&mut map, "status", Yaml::String(v.clone()));
+    match (&fm.status, is_null("status")) {
+        (Some(v), _) => push_known(&mut map, "status", Yaml::String(v.clone())),
+        (None, true) => push_known(&mut map, "status", Yaml::Null),
+        _ => {}
     }
-    // Extras (claves de productor), ordenadas por el BTreeMap.
+    // Extras (claves de productor), en orden de aparición; solo se filtra la cadena vacía.
     for (k, v) in &fm.extra {
-        if !KNOWN_FM.contains(&k.as_str()) {
-            push(&mut map, k, v.clone());
+        if !KNOWN_FM.contains(&k.as_str()) && !matches!(v, Yaml::String(s) if s.is_empty()) {
+            map.insert(Yaml::String(k.clone()), v.clone());
         }
     }
     serde_yaml::to_string(&Yaml::Mapping(map))
         .unwrap_or_default()
         .trim_end()
         .to_string()
-}
-
-/// `true` si un valor YAML cuenta como "vacío" para `build_raw`. El filtro de `buildRaw`
-/// (`fm[k]!==undefined && fm[k]!=="" && !lista-vacía`) solo descarta cadena/lista vacías: un
-/// `null` YAML SÍ se serializa (p. ej. `tags: null`), así que NO cuenta como vacío.
-fn yaml_is_empty(v: &Yaml) -> bool {
-    match v {
-        Yaml::String(s) => s.is_empty(),
-        Yaml::Sequence(s) => s.is_empty(),
-        _ => false,
-    }
 }
 
 /// Port de `buildRaw`: reconstrucción canónica del `.md` (frontmatter ordenado + cuerpo).

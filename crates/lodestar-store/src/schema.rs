@@ -8,10 +8,13 @@ use crate::error::StoreError;
 /// Versión del esquema de cache. Un bump fuerza reconstrucción total (la cache es desechable).
 pub const USER_VERSION: i64 = 1;
 
-/// Aplica los `PRAGMA` de sesión (WAL + claves foráneas).
+/// Aplica los `PRAGMA` de sesión (WAL + claves foráneas + busy_timeout).
 pub(crate) fn apply_pragmas(conn: &Connection) -> Result<(), StoreError> {
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "foreign_keys", "ON")?;
+    // WAL admite UN escritor: sin busy_timeout, la segunda conexión concurrente (app abierta +
+    // `lodestar reindex`, o dos ventanas) falla al instante con SQLITE_BUSY en vez de esperar.
+    conn.busy_timeout(std::time::Duration::from_millis(5000))?;
     Ok(())
 }
 

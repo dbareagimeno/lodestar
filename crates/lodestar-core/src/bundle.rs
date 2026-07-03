@@ -214,16 +214,28 @@ impl Bundle {
             })
             .cloned()
             .collect();
-        // Salientes resueltos vs colgantes.
+        // Salientes resueltos vs colgantes. Como el panel del proto (usa `analysis.out`, que
+        // dedupea y excluye self), sin destinos reservados y sin hrefs colgantes repetidos.
         let mut out_resolved: Vec<RelPath> = Vec::new();
         let mut dangling: Vec<String> = Vec::new();
+        let mut seen_out: BTreeSet<RelPath> = BTreeSet::new();
+        let mut seen_dangling: BTreeSet<String> = BTreeSet::new();
         if let Some(parsed) = self.parsed.get(p) {
             for cap in model::LINK_RE.captures_iter(&parsed.body) {
                 if let Some(href) = cap.get(1) {
                     if let Some(t) = model::resolve_link(href.as_str(), p.as_str()) {
                         match RelPath::new(&t) {
-                            Ok(rp) if self.files.contains_key(&rp) => out_resolved.push(rp),
-                            _ => dangling.push(href.as_str().to_string()),
+                            Ok(rp) if self.files.contains_key(&rp) => {
+                                if rp != *p && !rp.is_reserved() && seen_out.insert(rp.clone()) {
+                                    out_resolved.push(rp);
+                                }
+                            }
+                            _ => {
+                                let h = href.as_str().to_string();
+                                if seen_dangling.insert(h.clone()) {
+                                    dangling.push(h);
+                                }
+                            }
                         }
                     }
                 }
@@ -396,12 +408,29 @@ fn apply_patch(fm: &mut Frontmatter, patch: FrontmatterPatch) {
                 .trim()
                 .to_string(),
         };
+        // Escribir o borrar un known string invalida su marca de null explícito.
+        let clear_null = |fm: &mut Frontmatter, k: &str| fm.known_null.retain(|n| n != k);
         match key.as_str() {
-            "type" => fm.r#type = val.as_ref().map(as_string),
-            "title" => fm.title = val.as_ref().map(as_string),
-            "description" => fm.description = val.as_ref().map(as_string),
-            "resource" => fm.resource = val.as_ref().map(as_string),
-            "status" => fm.status = val.as_ref().map(as_string),
+            "type" => {
+                clear_null(fm, "type");
+                fm.r#type = val.as_ref().map(as_string);
+            }
+            "title" => {
+                clear_null(fm, "title");
+                fm.title = val.as_ref().map(as_string);
+            }
+            "description" => {
+                clear_null(fm, "description");
+                fm.description = val.as_ref().map(as_string);
+            }
+            "resource" => {
+                clear_null(fm, "resource");
+                fm.resource = val.as_ref().map(as_string);
+            }
+            "status" => {
+                clear_null(fm, "status");
+                fm.status = val.as_ref().map(as_string);
+            }
             "tags" => fm.tags = val,
             "timestamp" => fm.timestamp = val,
             _ => match val {

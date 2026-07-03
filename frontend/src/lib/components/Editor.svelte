@@ -20,12 +20,41 @@
   $effect(() => {
     const cur = $selected;
     if (cur && cur !== loadedFor) {
+      // No descartar 20 minutos de edición por un click accidental en el árbol.
+      if (dirty && loadedFor && !window.confirm("Hay cambios sin guardar. ¿Descartarlos?")) {
+        const prev = loadedFor;
+        queueMicrotask(() => selected.set(prev));
+        return;
+      }
       loadedFor = cur;
       dirty = false;
       status = null;
       readConcept(cur)
-        .then((c) => (raw = c))
-        .catch((e) => (status = String(e)));
+        .then((c) => {
+          // Guard anti-carrera: si el usuario ya cambió de selección, esta respuesta es
+          // obsoleta — aplicarla pondría el contenido de A bajo el path de B (y un
+          // «Guardar» corrompería B).
+          if (loadedFor === cur) raw = c;
+        })
+        .catch((e) => {
+          if (loadedFor === cur) status = String(e);
+        });
+    }
+  });
+
+  // Reconciliación con escrituras externas (agente MCP, git pull, watcher): si el snapshot trae
+  // contenido nuevo para el fichero abierto y NO hay edición local, refresca el textarea.
+  // Con edición local en curso se avisa en vez de pisar (multi-escritor sin sorpresas).
+  $effect(() => {
+    const s = $snapshot;
+    const cur = loadedFor;
+    if (!s || !cur) return;
+    const onDisk = s.files[cur];
+    if (onDisk === undefined || onDisk === raw) return;
+    if (!dirty) {
+      raw = onDisk;
+    } else if (!status?.startsWith("Aviso")) {
+      status = "Aviso: el fichero cambió en disco; «Guardar» sobrescribirá ese cambio.";
     }
   });
 

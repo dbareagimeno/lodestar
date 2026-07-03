@@ -52,10 +52,12 @@ pub fn gen_index(bundle: &Bundle, dir: &str) -> Mutation {
     // Agrupa por tipo.
     let mut by_type: BTreeMap<String, Vec<&RelPath>> = BTreeMap::new();
     for p in &here {
+        // `fm.type || "Concept"` del proto: el fallback captura también el string vacío (falsy).
         let ty = bundle
             .parsed(p)
             .and_then(|x| x.fm.as_ref())
             .and_then(|f| f.r#type.clone())
+            .filter(|s| !s.is_empty())
             .unwrap_or_else(|| "Concept".to_string());
         by_type.entry(ty).or_default().push(p);
     }
@@ -121,7 +123,11 @@ pub fn gen_tag_indexes(bundle: &Bundle) -> Mutation {
         }
     }
 
-    let tags: Vec<String> = tag_map.keys().cloned().collect();
+    // El proto ordena con `localeCompare` (no bytes): el orden decide además qué tag gana el
+    // slug base en una colisión (`Foo` vs `foo` → `foo`/`foo-2`).
+    let mut tags: Vec<String> = tag_map.keys().cloned().collect();
+    tags.sort_by(|a, b| model::locale_cmp(a, b));
+    let tags = tags;
     let existing: Vec<RelPath> = bundle
         .files()
         .keys()

@@ -90,8 +90,16 @@ impl Workspace {
         if self.cache.is_some() {
             return Ok(());
         }
-        let store = Arc::new(Store::open_and_build(&self.root)?);
+        // En repos adoptados, garantiza que `.lodestar/` esté ignorado ANTES de crear la cache
+        // (si no, los checkpoints automáticos commitearían `index.db` a la historia).
+        if let Some(v) = &self.vcs {
+            let _ = v.lock().unwrap().ensure_cache_ignored();
+        }
+        let store = Arc::new(Store::open(&self.root)?);
+        // Watcher ANTES del rebuild: un guardado externo durante el rebuild inicial genera
+        // evento y se reconcilia; al revés quedaba una ventana ciega hasta el siguiente evento.
         let watcher = store.watch()?;
+        store.rebuild()?;
         self.cache = Some(store);
         self._watcher = Some(watcher);
         Ok(())
@@ -351,7 +359,7 @@ impl Workspace {
     /// Cambia de rama por el único escritor: checkpoint si hay trabajo sin commitear, mueve `HEAD`,
     /// aplica el árbol destino y regenera index/tags (`§16`).
     pub fn switch(&self, name: &str) -> Result<ApplyReport, WorkspaceError> {
-        let target_files = {
+        let (target_files, previous_branch) = {
             let guard = self
                 .vcs
                 .as_ref()
@@ -364,12 +372,29 @@ impl Workspace {
                     &self.identity,
                 )?;
             }
-            guard.switch(name)?
+            let prev = guard.current_branch();
+            (guard.switch(name)?, prev)
         };
-        let current = io::load_bundle(&self.root)?;
-        let report = self.apply_mutation(&restore_mutation(&current, &target_files))?;
-        self.generate_index("")?;
+        // Si la aplicación falla a mitad (disco lleno, fichero ilegible…), HEAD ya apunta a la
+        // rama nueva pero el árbol quedaría mezclado — y el siguiente checkpoint commitearía
+        // contenido de la rama vieja sobre la nueva. Compensación: devolver HEAD a la original.
+        let apply = || -> Result<ApplyReport, WorkspaceError> {
+            let current = io::load_bundle(&self.root)?;
+            self.apply_mutation(&restore_mutation(&current, &target_files))
+        };
+        let report = match apply() {
+            Ok(r) => r,
+            Err(e) => {
+                if let (Some(prev), Some(v)) = (previous_branch, &self.vcs) {
+                    let _ = v.lock().unwrap().switch(&prev);
+                }
+                return Err(e);
+            }
+        };
+        // Tags ANTES que index: `gen_tags` puede crear/borrar `tags/` y el index raíz debe
+        // listar el estado final de los subdirectorios (si no, queda drift recién generado).
         self.generate_tags()?;
+        self.generate_index("")?;
         Ok(report)
     }
 
@@ -388,6 +413,19 @@ impl Workspace {
             }
             guard.merge(name)?
         };
+        // Los artefactos GENERADOS (index/tags/log) que conflictan se auto-resuelven: no se
+        // escriben marcadores en ellos (se regeneran desde los concepts mergeados). Sin esto,
+        // cualquier merge donde ambas ramas añadieron páginas conflictaba en `index.md` y
+        // obligaba a resolver a mano un fichero derivado.
+        let (gen_conflicts, real_conflicts): (Vec<RelPath>, Vec<RelPath>) = outcome
+            .conflicted
+            .iter()
+            .cloned()
+            .partition(lodestar_core::diff::is_generated);
+        let mut merged_files = outcome.files.clone();
+        for p in &gen_conflicts {
+            merged_files.remove(p);
+        }
         let report = if outcome.up_to_date {
             ApplyReport {
                 written: 0,
@@ -396,16 +434,20 @@ impl Workspace {
             }
         } else {
             let current = io::load_bundle(&self.root)?;
-            self.apply_mutation(&restore_mutation(&current, &outcome.files))?
+            let mut mutation = restore_mutation(&current, &merged_files);
+            // Los generados excluidos no deben borrarse por ausencia: los recrea el generador.
+            mutation.deletes.retain(|p| !gen_conflicts.contains(p));
+            self.apply_mutation(&mutation)?
         };
-        // Solo regenera artefactos si el merge quedó limpio (con conflictos, primero se resuelve).
-        if outcome.conflicted.is_empty() && !outcome.up_to_date {
-            self.generate_index("")?;
+        // Solo regenera artefactos si el merge quedó limpio (con conflictos reales, primero se
+        // resuelve; `commit` regenerará al concluir).
+        if real_conflicts.is_empty() && !outcome.up_to_date {
             self.generate_tags()?;
+            self.generate_index("")?;
         }
         Ok(MergeReport {
             report,
-            conflicted: outcome.conflicted,
+            conflicted: real_conflicts,
             fast_forward: outcome.fast_forward,
             up_to_date: outcome.up_to_date,
         })
@@ -446,21 +488,35 @@ impl Workspace {
         }
     }
 
-    /// Commit del working tree. Niega el commit si hay un merge/rebase en curso (`§13.6.3`);
-    /// regenera index/tags antes de commitear y devuelve la conformidad post-commit.
+    /// Commit del working tree. Niega el commit si hay un rebase/cherry-pick/revert en curso
+    /// (`§13.6.3`); un **merge** pendiente SÍ se puede commitear (lo concluye: el vcs añade el
+    /// segundo padre y limpia el estado). El gate va ANTES de regenerar index/tags: si el
+    /// commit se niega, no se ensucia el árbol en mitad de la operación pendiente.
     pub fn commit(&self, msg: &str) -> Result<CommitOutcome, WorkspaceError> {
+        {
+            let guard = self
+                .vcs
+                .as_ref()
+                .ok_or(WorkspaceError::NoVcs)?
+                .lock()
+                .unwrap();
+            match guard.repo_state() {
+                lodestar_core::types::RepoState::Clean
+                | lodestar_core::types::RepoState::Merging => {}
+                _ => return Err(WorkspaceError::RepoBusy),
+            }
+        }
         // Regenera artefactos para que el commit sea coherente.
-        self.generate_index("")?;
+        // Tags ANTES que index: `gen_tags` puede crear/borrar `tags/` y el index raíz debe
+        // listar el estado final de los subdirectorios (si no, queda drift recién generado).
         self.generate_tags()?;
+        self.generate_index("")?;
         let guard = self
             .vcs
             .as_ref()
             .ok_or(WorkspaceError::NoVcs)?
             .lock()
             .unwrap();
-        if guard.repo_state() != lodestar_core::types::RepoState::Clean {
-            return Err(WorkspaceError::RepoBusy);
-        }
         let sha = guard.commit(msg, &self.identity)?;
         let conformance = guard.conformance(&sha)?;
         Ok(CommitOutcome { sha, conformance })
@@ -487,8 +543,10 @@ impl Workspace {
         let mutation = restore_mutation(&current, &target_files);
         let report = self.apply_mutation(&mutation)?;
         // Regenera index/tags tras aplicar.
-        self.generate_index("")?;
+        // Tags ANTES que index: `gen_tags` puede crear/borrar `tags/` y el index raíz debe
+        // listar el estado final de los subdirectorios (si no, queda drift recién generado).
         self.generate_tags()?;
+        self.generate_index("")?;
         Ok(report)
     }
 

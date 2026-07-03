@@ -61,7 +61,9 @@ pub fn branch(root: &Path) -> anyhow::Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
-/// `lodestar pull` / `lodestar push`: red por el binario `git`.
+/// `lodestar pull` / `lodestar push`: red por el binario `git`. Un fallo de red/upstream es
+/// runtime (exit 3), NO el `1` congelado para «bundle no conforme» — un CI que trate el 1 como
+/// veredicto de conformidad se confundiría.
 pub fn sync(root: &Path, push: bool) -> anyhow::Result<ExitCode> {
     let ws = open(root)?;
     let outcome =
@@ -70,7 +72,7 @@ pub fn sync(root: &Path, push: bool) -> anyhow::Result<ExitCode> {
     Ok(if outcome.ok {
         ExitCode::SUCCESS
     } else {
-        ExitCode::from(1)
+        ExitCode::from(3)
     })
 }
 
@@ -80,8 +82,13 @@ pub fn check_staged(root: &Path, json: bool, sarif: bool) -> anyhow::Result<Exit
     let analysis = ws
         .analyze_staged()
         .map_err(|e| anyhow::anyhow!(e.to_string()))?;
-    let blocked = ws.config().gate_blocked(&analysis);
+    let blocked = load_gate(root)?.gate_blocked(&analysis);
     crate::commands::render_analysis(&analysis, json, sarif, blocked)
+}
+
+/// Config con error explícito: un `lodestar.toml` roto no puede relajar la puerta en silencio.
+fn load_gate(root: &Path) -> anyhow::Result<lodestar_workspace::Config> {
+    lodestar_workspace::Config::load(root).map_err(|e| anyhow::anyhow!(e))
 }
 
 /// `lodestar check --rev <REV>`: juzga el árbol de una revisión (exit 0/1).
@@ -90,7 +97,7 @@ pub fn check_rev(root: &Path, rev: &str, json: bool, sarif: bool) -> anyhow::Res
     let analysis = ws
         .analyze_rev(rev)
         .map_err(|e| anyhow::anyhow!(e.to_string()))?;
-    let blocked = ws.config().gate_blocked(&analysis);
+    let blocked = load_gate(root)?.gate_blocked(&analysis);
     crate::commands::render_analysis(&analysis, json, sarif, blocked)
 }
 

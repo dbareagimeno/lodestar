@@ -20,23 +20,68 @@ fn rel(params: &Value, key: &str) -> Result<RelPath, String> {
     RelPath::new(s).map_err(|e| e.to_string())
 }
 
-/// Lista las tools con su descripción (para `tools/list`).
+/// Lista las tools con descripción e `inputSchema` (obligatorio en el spec MCP: sin él,
+/// los clientes conformes rechazan la tool o el modelo no sabe qué argumentos pasar).
 pub fn list() -> Value {
+    // Schema de un objeto sin parámetros.
+    let empty = json!({ "type": "object", "properties": {}, "additionalProperties": false });
     json!([
-        {"name": "find_backlinks", "description": "Quién enlaza a un concept (inbound + index + dangling)."},
-        {"name": "find_orphans", "description": "Concepts sin enlaces entrantes."},
-        {"name": "find_dangling", "description": "Enlaces que apuntan a páginas inexistentes."},
-        {"name": "neighborhood", "description": "Subgrafo dirigido alrededor de un concept (depth, direction)."},
-        {"name": "conformance_check", "description": "Gate OKF del bundle (o de un path)."},
-        {"name": "query", "description": "Query estructurada (DSL de subcadena)."},
-        {"name": "create_concept", "description": "Crea un concept validado (rechaza no conforme)."},
-        {"name": "update_frontmatter", "description": "Patch de frontmatter (null borra)."},
-        {"name": "generate_index", "description": "Regenera el index de un directorio."},
-        {"name": "generate_tag_indexes", "description": "Regenera los índices de tags."},
-        {"name": "history", "description": "Historial de commits."},
-        {"name": "last_conforming_commit", "description": "Último commit conforme."},
-        {"name": "commit", "description": "Commit del agente (checkpoint + conformidad post-commit)."},
+        {"name": "find_backlinks", "description": "Quién enlaza a un concept (inbound + index + dangling).",
+         "inputSchema": { "type": "object", "properties": {
+             "concept": { "type": "string", "description": "Ruta relativa del concept (p. ej. «notas/alfa.md»)." }
+         }, "required": ["concept"], "additionalProperties": false }},
+        {"name": "find_orphans", "description": "Concepts sin enlaces entrantes.", "inputSchema": empty},
+        {"name": "find_dangling", "description": "Enlaces que apuntan a páginas inexistentes.", "inputSchema": empty},
+        {"name": "neighborhood", "description": "Subgrafo dirigido alrededor de un concept (depth, direction).",
+         "inputSchema": { "type": "object", "properties": {
+             "concept": { "type": "string", "description": "Ruta relativa del concept centro." },
+             "depth": { "type": "integer", "minimum": 1, "default": 1 },
+             "direction": { "type": "string", "enum": ["out", "in", "both"], "default": "out" }
+         }, "required": ["concept"], "additionalProperties": false }},
+        {"name": "conformance_check", "description": "Gate OKF del bundle (o de un path).",
+         "inputSchema": { "type": "object", "properties": {
+             "path": { "type": "string", "description": "Opcional: solo los checks de este fichero." }
+         }, "additionalProperties": false }},
+        {"name": "query", "description": "Query estructurada (DSL de subcadena).",
+         "inputSchema": { "type": "object", "properties": {
+             "dsl": { "type": "string", "description": "DSL del prototipo: «type:X tag:y is:orphan texto suelto…»." }
+         }, "required": ["dsl"], "additionalProperties": false }},
+        {"name": "create_concept", "description": "Crea un concept validado (rechaza no conforme).",
+         "inputSchema": { "type": "object", "properties": {
+             "path": { "type": "string" },
+             "type": { "type": "string" },
+             "title": { "type": "string" },
+             "body": { "type": "string" },
+             "allow_nonconformant": { "type": "boolean", "default": false }
+         }, "required": ["path", "type"], "additionalProperties": false }},
+        {"name": "update_frontmatter", "description": "Patch de frontmatter (null borra).",
+         "inputSchema": { "type": "object", "properties": {
+             "path": { "type": "string" },
+             "patch": { "type": "object", "description": "Merge-patch RFC 7386: valor escribe, null borra." }
+         }, "required": ["path", "patch"], "additionalProperties": false }},
+        {"name": "generate_index", "description": "Regenera el index de un directorio.",
+         "inputSchema": { "type": "object", "properties": {
+             "dir": { "type": "string", "description": "Directorio relativo («» = raíz).", "default": "" }
+         }, "additionalProperties": false }},
+        {"name": "generate_tag_indexes", "description": "Regenera los índices de tags.", "inputSchema": empty},
+        {"name": "history", "description": "Historial de commits.",
+         "inputSchema": { "type": "object", "properties": {
+             "limit": { "type": "integer", "minimum": 1, "default": 20 }
+         }, "additionalProperties": false }},
+        {"name": "last_conforming_commit", "description": "Último commit conforme.", "inputSchema": empty},
+        {"name": "commit", "description": "Commit del agente (checkpoint + conformidad post-commit).",
+         "inputSchema": { "type": "object", "properties": {
+             "message": { "type": "string" }
+         }, "additionalProperties": false }},
     ])
+}
+
+/// ¿Existe una tool con este nombre? Distingue «tool desconocida» (error de protocolo,
+/// `-32602`) de un error de ejecución (que va como `isError` en el result).
+pub fn exists(name: &str) -> bool {
+    list()
+        .as_array()
+        .is_some_and(|ts| ts.iter().any(|t| t["name"] == name))
 }
 
 /// Despacha una tool por nombre.
@@ -70,7 +115,8 @@ pub fn call(ws: &Workspace, name: &str, params: &Value) -> ToolResult {
                 Some(path) => {
                     let p = RelPath::new(path).map_err(|e| e.to_string())?;
                     let checks = a.per_file.get(&p).cloned().unwrap_or_default();
-                    to_json(&checks)
+                    // Objeto (no array): `structuredContent` del spec MCP exige objeto.
+                    Ok(json!({ "checks": checks }))
                 }
                 None => Ok(json!({
                     "hardFail": a.hard_fail,
@@ -82,7 +128,8 @@ pub fn call(ws: &Workspace, name: &str, params: &Value) -> ToolResult {
         }
         "query" => {
             let dsl = params.get("dsl").and_then(Value::as_str).unwrap_or("");
-            to_json(&ws.query(dsl).map_err(|e| e.to_string())?)
+            let paths = ws.query(dsl).map_err(|e| e.to_string())?;
+            Ok(json!({ "paths": paths }))
         }
         "create_concept" => {
             let p = rel(params, "path")?;
@@ -118,7 +165,8 @@ pub fn call(ws: &Workspace, name: &str, params: &Value) -> ToolResult {
         }
         "history" => {
             let limit = params.get("limit").and_then(Value::as_u64).unwrap_or(20) as usize;
-            to_json(&ws.vcs_log(limit).map_err(|e| e.to_string())?)
+            let commits = ws.vcs_log(limit).map_err(|e| e.to_string())?;
+            Ok(json!({ "commits": commits }))
         }
         "last_conforming_commit" => {
             let sha = ws.last_conforming().map_err(|e| e.to_string())?;
@@ -242,7 +290,21 @@ mod tests {
         let (_d, ws) = ws_with_fixture();
         let via_tool = call(&ws, "query", &json!({"dsl": "is:orphan"})).unwrap();
         let direct = serde_json::to_value(ws.query("is:orphan").unwrap()).unwrap();
-        assert_eq!(via_tool, direct);
+        // Envuelto en objeto: `structuredContent` del spec MCP exige objeto, no array.
+        assert_eq!(via_tool, json!({ "paths": direct }));
+    }
+
+    #[test]
+    fn tools_list_lleva_input_schema() {
+        // El spec MCP exige `inputSchema` en cada tool; sin él los clientes conformes las rechazan.
+        let tools = list();
+        for t in tools.as_array().unwrap() {
+            assert!(
+                t["inputSchema"]["type"] == "object",
+                "tool sin inputSchema: {}",
+                t["name"]
+            );
+        }
     }
 
     #[test]

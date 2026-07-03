@@ -20,8 +20,11 @@
     // Si ya hay un bundle abierto (la fachada lo abrió al arrancar), tómalo; si no, espera a abrir.
     try {
       $snapshot = await getSnapshot();
-    } catch {
-      // sin bundle abierto todavía; el usuario lo abre por ruta
+    } catch (e) {
+      // «No hay bundle abierto» es el flujo normal (el usuario lo abre por ruta); cualquier
+      // otro error de IPC se deja visible en consola para no depurar a ciegas.
+      const msg = e instanceof Error ? e.message : String(e);
+      if (!/ning[uú]n bundle|IPC no disponible/i.test(msg)) console.error("getSnapshot:", e);
     }
     try {
       await onBundleChanged((snap) => ($snapshot = snap));

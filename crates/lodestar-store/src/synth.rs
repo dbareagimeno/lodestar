@@ -140,26 +140,28 @@ pub(crate) fn fts_candidates(conn: &Connection, needle: &str) -> Result<Vec<RelP
     )
 }
 
-/// Búsqueda de subcadena (semántica del core): title/description/body que contienen `needle`
-/// (case-insensitive). Es LA verdad; FTS solo acelera. Incluye matches parciales dentro de un token.
+/// Búsqueda de subcadena con la MISMA función del core (`query::loose_text_match`): basename +
+/// cualquier valor de frontmatter + cuerpo, con lowercase Unicode. Antes era un LIKE de SQL que
+/// divergía en tres frentes (sin escapar `\`, `lower()` solo-ASCII —«PROGRAMACIÓN» no casaba—,
+/// y sin basename/fm). SQL solo sirve las filas; la verdad es del core. FTS solo acelera.
 pub(crate) fn search_substring(
     conn: &Connection,
     needle: &str,
 ) -> Result<Vec<RelPath>, StoreError> {
-    let like = format!(
-        "%{}%",
-        needle
-            .to_lowercase()
-            .replace('%', "\\%")
-            .replace('_', "\\_")
-    );
-    rows_to_relpaths(
-        conn,
-        r#"SELECT path FROM files
-           WHERE lower(title)       LIKE ?1 ESCAPE '\'
-              OR lower(description) LIKE ?1 ESCAPE '\'
-              OR lower(body)        LIKE ?1 ESCAPE '\'
-           ORDER BY path"#,
-        &[&like],
-    )
+    let needle_lower = needle.to_lowercase();
+    let mut stmt = conn.prepare("SELECT path, raw FROM files ORDER BY path")?;
+    let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+    let mut out = Vec::new();
+    for row in rows {
+        let (path, raw) = row?;
+        let Ok(rp) = RelPath::new(&path) else {
+            continue;
+        };
+        let parsed = lodestar_core::model::parse_file(rp.as_str(), &raw);
+        let fm = parsed.fm.unwrap_or_default();
+        if lodestar_core::query::loose_text_match(&rp, &fm, &parsed.body, &needle_lower) {
+            out.push(rp);
+        }
+    }
+    Ok(out)
 }

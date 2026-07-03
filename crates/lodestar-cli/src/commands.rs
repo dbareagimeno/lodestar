@@ -16,8 +16,10 @@ const DRIFT: u8 = 4;
 pub fn check(root: &Path, json: bool, sarif_out: bool) -> anyhow::Result<ExitCode> {
     let files = load_bundle(root)?;
     let bundle = Bundle::from_files(files);
+    // Un `lodestar.toml` inválido es exit 3, NO defaults silenciosos: con `block_warnings=true`
+    // y un typo TOML, la puerta de CI se relajaría sin ningún aviso.
     let blocked = lodestar_workspace::Config::load(root)
-        .unwrap_or_default()
+        .map_err(|e| anyhow::anyhow!(e))?
         .gate_blocked(bundle.analyze());
     render_analysis(bundle.analyze(), json, sarif_out, blocked)
 }
@@ -35,7 +37,7 @@ pub fn render_analysis(
     } else if sarif_out {
         println!("{}", sarif::to_sarif(analysis)?);
     } else {
-        print_human(analysis);
+        print_human(analysis, blocked);
     }
     if blocked {
         Ok(ExitCode::from(1))
@@ -44,7 +46,7 @@ pub fn render_analysis(
     }
 }
 
-fn print_human(a: &lodestar_core::types::Analysis) {
+fn print_human(a: &lodestar_core::types::Analysis, blocked: bool) {
     let mut errs = 0usize;
     let mut warns = 0usize;
     for (path, checks) in &a.per_file {
@@ -67,10 +69,15 @@ fn print_human(a: &lodestar_core::types::Analysis) {
         a.concepts.len(),
         a.hard_fail,
         warns,
-        if a.hard_fail == 0 {
-            "CONFORME"
+        if blocked {
+            // Cubre también el gate estricto: no imprimir «CONFORME» con exit code 1.
+            if a.hard_fail == 0 {
+                "NO CONFORME (avisos bloqueados por lodestar.toml)"
+            } else {
+                "NO CONFORME"
+            }
         } else {
-            "NO CONFORME"
+            "CONFORME"
         }
     );
     let _ = errs;
@@ -162,8 +169,7 @@ pub fn init(dir: PathBuf) -> anyhow::Result<ExitCode> {
 
 /// `lodestar import <source>`: migra un export del prototipo (un `.zip` de `path→.md`, o un
 /// directorio de `.md`) al bundle. `RelPath` es el chokepoint anti zip-slip (`§12` seguridad).
-pub fn import(root: &Path, source: Option<PathBuf>) -> anyhow::Result<ExitCode> {
-    let source = source.ok_or_else(|| anyhow::anyhow!("uso: lodestar import <fichero.zip|dir>"))?;
+pub fn import(root: &Path, source: PathBuf) -> anyhow::Result<ExitCode> {
     let imported = if source.is_dir() {
         import_dir(root, &source)?
     } else {

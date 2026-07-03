@@ -28,14 +28,22 @@ pub struct RelPath(String);
 }
 
 impl RelPath {
-    /// Construye un `RelPath` validado. Rechaza rutas absolutas, componentes `..` y la cadena vacía.
+    /// Construye un `RelPath` validado. Rechaza rutas absolutas (POSIX **y** de unidad Windows
+    /// `C:...`), componentes `..`, backslashes y la cadena vacía.
     pub fn new(s: &str) -> Result<Self, crate::CoreError> {
-        let unified = s.replace('\\', "/");
-        if unified.starts_with('/') {
+        // Backslash: en Windows es separador (ambigüedad peligrosa) y en POSIX un char válido
+        // pero que el prototipo trata como literal → rechazar cierra el hueco en ambos casos.
+        if s.contains('\\') || s.starts_with('/') {
+            return Err(crate::CoreError::InvalidRelPath(s.to_string()));
+        }
+        // Unidad Windows (`C:` / `c:` al inicio): `root.join("C:/x")` DESCARTA el root en Windows
+        // → escritura fuera del bundle (zip-slip). También cubre `C:evil.md` (relativa a unidad).
+        let b = s.as_bytes();
+        if b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':' {
             return Err(crate::CoreError::InvalidRelPath(s.to_string()));
         }
         let mut parts: Vec<&str> = Vec::new();
-        for seg in unified.split('/') {
+        for seg in s.split('/') {
             match seg {
                 "" | "." => continue,
                 ".." => return Err(crate::CoreError::InvalidRelPath(s.to_string())),
@@ -239,6 +247,12 @@ pub struct Frontmatter {
     #[cfg_attr(feature = "schemars", schemars(skip))]
     #[serde(flatten)]
     pub extra: IndexMap<String, serde_yaml::Value>,
+    /// Claves KNOWN de tipo string presentes con `null` explícito (`type:\n`). En JS `null !==
+    /// undefined`: cuentan como presentes (`fmPresent`) y `buildRaw` las serializa (`k: null`).
+    /// Con `Option<String>` el null se perdía como ausencia — esto conserva la distinción.
+    #[cfg_attr(feature = "schemars", schemars(skip))]
+    #[serde(skip)]
+    pub known_null: Vec<String>,
 }
 }
 
@@ -541,27 +555,22 @@ impl Frontmatter {
     pub fn as_pairs(&self) -> Vec<(String, serde_yaml::Value)> {
         let mut v: Vec<(String, serde_yaml::Value)> = Vec::new();
         let s = |x: &String| serde_yaml::Value::String(x.clone());
-        if let Some(x) = &self.r#type {
-            v.push(("type".into(), s(x)));
-        }
-        if let Some(x) = &self.title {
-            v.push(("title".into(), s(x)));
-        }
-        if let Some(x) = &self.description {
-            v.push(("description".into(), s(x)));
-        }
-        if let Some(x) = &self.resource {
-            v.push(("resource".into(), s(x)));
-        }
-        if let Some(x) = &self.tags {
-            v.push(("tags".into(), x.clone()));
-        }
-        if let Some(x) = &self.timestamp {
-            v.push(("timestamp".into(), x.clone()));
-        }
-        if let Some(x) = &self.status {
-            v.push(("status".into(), s(x)));
-        }
+        // Un known con null explícito se emite como par `(k, Null)` — presente, como en JS.
+        let push_known =
+            |v: &mut Vec<(String, serde_yaml::Value)>, k: &str, val: Option<serde_yaml::Value>| {
+                if let Some(val) = val {
+                    v.push((k.to_string(), val));
+                } else if self.known_null.iter().any(|n| n == k) {
+                    v.push((k.to_string(), serde_yaml::Value::Null));
+                }
+            };
+        push_known(&mut v, "type", self.r#type.as_ref().map(s));
+        push_known(&mut v, "title", self.title.as_ref().map(s));
+        push_known(&mut v, "description", self.description.as_ref().map(s));
+        push_known(&mut v, "resource", self.resource.as_ref().map(s));
+        push_known(&mut v, "tags", self.tags.clone());
+        push_known(&mut v, "timestamp", self.timestamp.clone());
+        push_known(&mut v, "status", self.status.as_ref().map(s));
         for (k, val) in &self.extra {
             v.push((k.clone(), val.clone()));
         }

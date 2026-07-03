@@ -323,3 +323,64 @@ fn watcher_reconcilia_en_vivo() {
     let ev = rx.recv_timeout(Duration::from_secs(5)).unwrap();
     assert!(ev.changed.contains(&rp("delta.md")) || !ev.changed.is_empty());
 }
+
+// --- Regresiones de la revisión profunda -------------------------------------
+
+#[test]
+fn fichero_no_utf8_no_congela_la_cache() {
+    // Antes, UN .md no-UTF8 abortaba TODO walk_disk → ninguna reconciliación volvía a aplicar.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("buena.md"),
+        "---\ntype: N\ntitle: B\ndescription: d\n---\n\n# H\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("latin1.md"),
+        b"---\ntype: N\n---\n\n# a\xf1o\n",
+    )
+    .unwrap();
+    let store = Store::open_and_build(dir.path()).unwrap();
+    // La buena está indexada; la ilegible se saltó con diagnóstico (no venenó el walk).
+    assert!(store.concepts().unwrap().contains(&rp("buena.md")));
+    // Y el reconcile sigue vivo (repara drift a pesar del fichero no-UTF8).
+    std::fs::write(
+        dir.path().join("nueva.md"),
+        "---\ntype: N\ntitle: N2\ndescription: d\n---\n\n# H\n",
+    )
+    .unwrap();
+    let ev = store.reconcile_all().unwrap();
+    assert!(ev.changed.contains(&rp("nueva.md")));
+}
+
+#[test]
+fn search_unicode_case_insensitive_como_el_core() {
+    // El LIKE de SQLite plegaba solo ASCII: «PROGRAMACIÓN» no casaba con «programación».
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("curso.md"),
+        "---\ntype: N\ntitle: Curso\ndescription: d\n---\n\n# H\n\nPROGRAMACI\u{d3}N avanzada\n",
+    )
+    .unwrap();
+    let store = Store::open_and_build(dir.path()).unwrap();
+    let hits = store.search("programaci\u{f3}n").unwrap();
+    assert!(hits.contains(&rp("curso.md")), "hits: {hits:?}");
+    // Y el texto suelto también cubre basename y valores de frontmatter (semántica del core).
+    assert!(store.search("curso").unwrap().contains(&rp("curso.md")));
+}
+
+#[test]
+fn cache_corrupta_se_recrea_sola() {
+    // La cache es desechable: un index.db corrupto no puede dejar open() fallando para siempre.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("a.md"),
+        "---\ntype: N\ntitle: A\ndescription: d\n---\n\n# H\n",
+    )
+    .unwrap();
+    let db_dir = dir.path().join(".lodestar");
+    std::fs::create_dir_all(&db_dir).unwrap();
+    std::fs::write(db_dir.join("index.db"), b"esto no es una base sqlite").unwrap();
+    let store = Store::open_and_build(dir.path()).unwrap();
+    assert!(store.concepts().unwrap().contains(&rp("a.md")));
+}

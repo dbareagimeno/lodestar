@@ -4,7 +4,7 @@
 //! El LCS lleva una **guarda de tamaño** (fallback grueso por umbral) para no reventar la memoria
 //! con ficheros enormes; la versión Hirschberg/dos-filas es una mejora aditiva futura.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
 
@@ -125,7 +125,13 @@ pub fn is_generated(p: &RelPath) -> bool {
 
 /// Diff entre dos file-maps (árbol vs árbol, o HEAD vs working). Port de `diffSnap`.
 pub fn diff_snap(a: &FileMap, b: &FileMap) -> OkfDiff {
-    let keys: BTreeSet<RelPath> = a.keys().chain(b.keys()).cloned().collect();
+    // El proto ordena las claves con `sortPaths` (numeric-aware: `doc-2` < `doc-10`), no léxico.
+    let keys: Vec<RelPath> = {
+        let set: BTreeSet<RelPath> = a.keys().chain(b.keys()).cloned().collect();
+        let mut v: Vec<RelPath> = set.into_iter().collect();
+        v.sort_by(|x, y| model::sort_paths_cmp(x.as_str(), y.as_str()));
+        v
+    };
     let mut files: Vec<FileDiff> = Vec::new();
     let mut generated: Vec<GeneratedChange> = Vec::new();
     let mut stats = DiffStats::default();
@@ -207,12 +213,26 @@ fn out_link_paths(p: &RelPath, body: &str) -> BTreeSet<RelPath> {
 pub fn fm_diff(a_raw: &str, b_raw: &str) -> Vec<FieldChange> {
     let a = fm_pairs(a_raw);
     let b = fm_pairs(b_raw);
-    let keys: BTreeSet<String> = a.keys().chain(b.keys()).cloned().collect();
+    // Unión de claves en orden de aparición (Set de JS), no alfabético: el sort status-first
+    // es estable y el proto conserva ese orden para las claves sin rango.
+    let mut keys: Vec<String> = a.iter().map(|(k, _)| k.clone()).collect();
+    for (k, _) in &b {
+        if !keys.contains(k) {
+            keys.push(k.clone());
+        }
+    }
+    let get = |m: &Vec<(String, serde_yaml::Value)>, k: &str| -> Option<serde_yaml::Value> {
+        m.iter().find(|(kk, _)| kk == k).map(|(_, v)| v.clone())
+    };
     let mut out: Vec<FieldChange> = Vec::new();
     for k in keys {
-        let af = a.get(&k).map(fm_fmt);
-        let bf = b.get(&k).map(fm_fmt);
-        if af == bf {
+        let av = get(&a, &k);
+        let bv = get(&b, &k);
+        let af = av.as_ref().map(fm_fmt);
+        let bf = bv.as_ref().map(fm_fmt);
+        // El proto compara los FORMATEADOS (`fmFmt(undefined) === ""`): clave ausente y clave
+        // con valor que formatea a "" son indistinguibles → sin cambio fantasma.
+        if af.clone().unwrap_or_default() == bf.clone().unwrap_or_default() {
             continue;
         }
         out.push(FieldChange {
@@ -241,15 +261,15 @@ pub fn fm_diff(a_raw: &str, b_raw: &str) -> Vec<FieldChange> {
     out
 }
 
-fn fm_pairs(raw: &str) -> BTreeMap<String, serde_yaml::Value> {
+fn fm_pairs(raw: &str) -> Vec<(String, serde_yaml::Value)> {
     let sf = model::split_front(raw);
     let text = match sf.fm_text {
         Some(t) if !t.is_empty() => t,
-        _ => return BTreeMap::new(),
+        _ => return Vec::new(),
     };
     match model::parse_yaml(&text) {
-        Ok(fm) => fm.as_pairs().into_iter().collect(),
-        Err(_) => BTreeMap::new(),
+        Ok(fm) => fm.as_pairs(),
+        Err(_) => Vec::new(),
     }
 }
 
@@ -399,7 +419,8 @@ fn suggest_msg(
         return MessageHint::AddSingle { title };
     }
     if status_changes.len() == 1 {
-        if let Some(to) = &status_changes[0].to {
+        // El proto exige `to` truthy: `status → ""` cae al mensaje genérico.
+        if let Some(to) = status_changes[0].to.as_ref().filter(|t| !t.is_empty()) {
             let title = page_title(a, b, &status_changes[0].path);
             return MessageHint::StatusSingle {
                 to: to.clone(),
@@ -418,7 +439,7 @@ fn page_title(a: &FileMap, b: &FileMap, p: &RelPath) -> String {
     let raw = b.get(p).or_else(|| a.get(p));
     if let Some(raw) = raw {
         let pairs = fm_pairs(raw);
-        if let Some(serde_yaml::Value::String(t)) = pairs.get("title") {
+        if let Some((_, serde_yaml::Value::String(t))) = pairs.iter().find(|(k, _)| k == "title") {
             if !t.is_empty() {
                 return t.clone();
             }

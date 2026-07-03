@@ -1,7 +1,7 @@
 <script lang="ts">
   // Modo «Cambios»: diff semántico del working tree vs HEAD (OkfDiff perezoso del core) + commit.
-  import { onMount } from "svelte";
   import { commit, diffWorking } from "../ipc";
+  import { snapshot } from "../stores/bundle";
 
   interface FieldChange { key: string; from: string | null; to: string | null }
   interface BodyHunk { t: "context" | "add" | "remove" | "gap"; v: string | number }
@@ -34,12 +34,18 @@
       status = String(e);
     }
   }
-  onMount(load);
+  // Carga inicial + recarga cuando el snapshot cambia (edición externa, watcher): sin esto,
+  // el diff y el mensaje sugerido se quedaban congelados en la carga inicial.
+  $effect(() => {
+    void $snapshot;
+    load();
+  });
 
   function suggestMessage(d: OkfDiff): string {
+    // El tag de `MessageHint` viaja en camelCase (serde rename_all): "addSingle"/"statusSingle".
     const s = d.suggested as { kind?: string; title?: string; to?: string };
-    if (s?.kind === "AddSingle") return `Añade ${s.title}`;
-    if (s?.kind === "StatusSingle") return `${s.title}: ${s.to}`;
+    if (s?.kind === "addSingle") return `Añade ${s.title}`;
+    if (s?.kind === "statusSingle") return `${s.title}: ${s.to}`;
     const { added, modified, removed } = d.stats;
     return `Actualiza el bundle (+${added} ~${modified} -${removed})`;
   }

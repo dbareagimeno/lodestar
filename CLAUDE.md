@@ -9,7 +9,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **Todas las épicas (E0–E8) están implementadas y verificadas**: Cargo workspace de 7 crates +
 `src-tauri`, frontend Svelte 5 funcional, CLI, MCP por stdio, store SQLite/FTS5 con watcher, vcs
-git y workspace con bus en vivo. ~91 tests en verde, clippy `-D warnings` limpio. Lo pendiente es
+git y workspace con bus en vivo. ~113 tests en verde, clippy `-D warnings` limpio. Lo pendiente es
 **producto/pulido** (packaging/firma, rmcp, `.d.ts` generado), no arquitectura.
 
 Mapa de documentos — quién manda sobre qué:
@@ -30,7 +30,7 @@ Mapa de documentos — quién manda sobre qué:
 
 ### Build, test y lint (lo que corre el CI — `.github/workflows/ci.yml`)
 ```bash
-cargo test --workspace --locked        # ~91 tests (incl. 6 diferenciales JS-vs-Rust)
+cargo test --workspace --locked        # ~113 tests (incl. 6 diferenciales JS-vs-Rust)
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 cargo doc --workspace --no-deps --locked   # con RUSTDOCFLAGS="-D warnings"
