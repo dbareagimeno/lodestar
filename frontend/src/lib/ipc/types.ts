@@ -86,6 +86,26 @@ export interface WriteOutcome {
   bundleHardFail: number;
 }
 
+export interface Neighborhood {
+  root: RelPath;
+  nodes: GraphNode[];
+  edges: Edge[];
+}
+
+export interface Branch {
+  name: string;
+  isHead: boolean;
+  upstream: string | null;
+  ahead: number;
+  behind: number;
+}
+
+export interface CommitConformance {
+  hardFail: number;
+  warnCount: number;
+  conform: boolean;
+}
+
 // Nombres de comando/evento congelados (§7.1, §10 fila 7). Fuente única compartida con Rust.
 export const COMMANDS = {
   openBundle: "open_bundle",
@@ -94,11 +114,14 @@ export const COMMANDS = {
   readConcept: "read_concept",
   writeConcept: "write_concept",
   createConcept: "create_concept",
+  updateFrontmatter: "update_frontmatter",
   conformance: "conformance",
   query: "query",
   backlinks: "backlinks",
   graphModel: "graph_model",
+  neighborhood: "neighborhood",
   history: "history",
+  branches: "branches",
   diffWorking: "diff_working",
   commit: "commit",
 } as const;

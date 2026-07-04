@@ -10,6 +10,10 @@ pub enum VcsError {
     Io(String),
     #[error("el repo no tiene HEAD (sin commits)")]
     NoHead,
+    #[error("HEAD desacoplado: cambia a una rama antes de hacer merge")]
+    DetachedHead,
+    #[error("el índice de git tiene conflictos sin resolver")]
+    IndexConflicts,
     #[error("error del núcleo: {0}")]
     Core(String),
 }

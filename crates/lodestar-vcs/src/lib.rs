@@ -127,10 +127,19 @@ impl Vcs {
 
     /// El `FileMap` del **índice** (árbol staged), para `lodestar check --staged` (`§7.3`).
     /// Lee los blobs staged directamente del index; no toca HEAD ni el working tree.
+    /// Con conflictos sin resolver devuelve error: un veredicto sobre «theirs gana» sería
+    /// una luz verde falsa en pleno merge (esquivaría `OKF-CONFLICT`).
     pub fn staged_files(&self) -> Result<FileMap, VcsError> {
         let index = self.repo.index()?;
+        if index.has_conflicts() {
+            return Err(VcsError::IndexConflicts);
+        }
         let mut files = FileMap::new();
         for entry in index.iter() {
+            // Solo stage 0 (entradas normales); 1/2/3 son restos de conflicto.
+            if (entry.flags >> 12) & 0x3 != 0 {
+                continue;
+            }
             let path = match std::str::from_utf8(&entry.path) {
                 Ok(p) => p,
                 Err(_) => continue,
@@ -187,9 +196,9 @@ impl Vcs {
         })
     }
 
-    /// Último commit cuyo árbol pasa la puerta OKF (barrido early-exit hacia atrás).
+    /// Último commit cuyo árbol pasa la puerta OKF (barrido early-exit hacia atrás, historial completo).
     pub fn last_conforming(&self) -> Result<Option<Sha>, VcsError> {
-        for row in self.log(1000)? {
+        for row in self.log(usize::MAX)? {
             if self.conformance(&row.id)?.conform {
                 return Ok(Some(row.id));
             }
@@ -198,6 +207,11 @@ impl Vcs {
     }
 
     /// Stage del working tree + commit. Por libgit2 → **no** corre hooks ni firma (`§13.8`).
+    ///
+    /// Consciente del merge: si hay `MERGE_HEAD` (merge 3-vías pendiente), el commit lleva
+    /// **dos padres** (ratifica §13.6.3) y limpia el estado de merge. Y detecta no-ops: si el
+    /// árbol no cambió y no hay merge que concluir, devuelve el HEAD actual sin crear un
+    /// commit vacío (evita los «checkpoints» espurios que ensucian el historial).
     pub fn commit(&self, msg: &str, author: &Author) -> Result<Sha, VcsError> {
         let mut index = self.repo.index()?;
         index.add_all(["*"].iter(), git2::IndexAddOption::DEFAULT, None)?;
@@ -205,14 +219,39 @@ impl Vcs {
         let tree_oid = index.write_tree()?;
         let tree = self.repo.find_tree(tree_oid)?;
         let sig = git2::Signature::now(&author.name, &author.email)?;
-        let parents = match self.repo.head().ok().and_then(|h| h.target()) {
+        let head_oid = self.repo.head().ok().and_then(|h| h.target());
+        let mut parents = match head_oid {
             Some(oid) => vec![self.repo.find_commit(oid)?],
             None => Vec::new(),
         };
+        // Segundo padre: el MERGE_HEAD de un merge 3-vías pendiente.
+        let merge_parent = self
+            .repo
+            .find_reference("MERGE_HEAD")
+            .ok()
+            .and_then(|r| r.target());
+        if let Some(oid) = merge_parent {
+            if Some(oid) != head_oid {
+                parents.push(self.repo.find_commit(oid)?);
+            }
+        }
+        // No-op: árbol idéntico al del HEAD y sin merge que concluir → no crear commit vacío.
+        if merge_parent.is_none() {
+            if let Some(oid) = head_oid {
+                let head_commit = self.repo.find_commit(oid)?;
+                if head_commit.tree_id() == tree_oid {
+                    return Sha::new(&oid.to_string()).map_err(VcsError::from);
+                }
+            }
+        }
         let parent_refs: Vec<&git2::Commit> = parents.iter().collect();
         let oid = self
             .repo
             .commit(Some("HEAD"), &sig, &sig, msg, &tree, &parent_refs)?;
+        if merge_parent.is_some() {
+            // Concluye el merge: borra MERGE_HEAD/MERGE_MSG (si no, el repo queda «Merging» eterno).
+            self.repo.cleanup_state()?;
+        }
         Sha::new(&oid.to_string()).map_err(VcsError::from)
     }
 
@@ -287,7 +326,20 @@ impl Vcs {
         self.repo
             .set_head(&format!("refs/heads/{name}"))
             .map_err(VcsError::from)?;
+        // Sincroniza el index de git con el árbol destino (SIN tocar el working tree): si no,
+        // todo fichero que difiera entre ramas aparecería «dirty» tras el switch aunque el
+        // working tree == HEAD, y el siguiente switch dispararía un checkpoint espurio.
+        self.sync_index_to(oid)?;
         Ok(files)
+    }
+
+    /// Alinea el index de git con el árbol de un commit (no escribe el working tree).
+    fn sync_index_to(&self, commit_oid: git2::Oid) -> Result<(), VcsError> {
+        let tree = self.repo.find_commit(commit_oid)?.tree()?;
+        let mut index = self.repo.index()?;
+        index.read_tree(&tree)?;
+        index.write()?;
+        Ok(())
     }
 
     /// Merge (local) de la rama `name` en la rama actual. **No escribe el working tree**: devuelve
@@ -313,15 +365,19 @@ impl Vcs {
         }
 
         if analysis.is_fast_forward() {
-            // Mueve la rama actual a theirs (ff) y devuelve su árbol.
-            if let Some(branch_name) = self.current_branch() {
-                self.repo.reference(
-                    &format!("refs/heads/{branch_name}"),
-                    their_oid,
-                    true,
-                    "merge fast-forward",
-                )?;
-            }
+            // Mueve la rama actual a theirs (ff) y devuelve su árbol. Con HEAD desacoplado no
+            // hay rama que mover: reportar «éxito» sin mover nada dejaría al usuario creyendo
+            // que mergeó cuando la historia no registró nada.
+            let Some(branch_name) = self.current_branch() else {
+                return Err(VcsError::DetachedHead);
+            };
+            self.repo.reference(
+                &format!("refs/heads/{branch_name}"),
+                their_oid,
+                true,
+                "merge fast-forward",
+            )?;
+            self.sync_index_to(their_oid)?;
             let sha = Sha::new(&their_oid.to_string())?;
             return Ok(MergeOutcome {
                 files: self.tree_files(&sha)?,
@@ -394,8 +450,9 @@ impl Vcs {
             conflicted.push(rp);
         }
 
-        // Deja MERGE_HEAD para que repo_state() = Merging bloquee el commit hasta resolver.
-        let merge_head = self.root.join(".git").join("MERGE_HEAD");
+        // Deja MERGE_HEAD: el commit que concluya el merge llevará 2 padres (§13.6.3). La ruta
+        // sale de `repo.path()` (no de `root/.git`): con worktrees o `.git`-fichero difieren.
+        let merge_head = self.repo.path().join("MERGE_HEAD");
         std::fs::write(&merge_head, format!("{their_oid}\n"))
             .map_err(|e| VcsError::Io(e.to_string()))?;
 
@@ -408,15 +465,15 @@ impl Vcs {
         })
     }
 
-    /// Instala un hook `pre-commit` que corre `lodestar check` (bloquea commits no conformes).
-    /// Idempotente; sobrescribe el hook gestionado por lodestar.
+    /// Instala un hook `pre-commit` que corre `lodestar check --staged` (`§13.5`: juzga el
+    /// índice staged, no el working sucio). Idempotente; sobrescribe el hook gestionado.
     pub fn install_hooks(&self) -> Result<PathBuf, VcsError> {
-        let hooks_dir = self.root.join(".git").join("hooks");
+        let hooks_dir = self.repo.path().join("hooks");
         std::fs::create_dir_all(&hooks_dir).map_err(|e| VcsError::Io(e.to_string()))?;
         let hook = hooks_dir.join("pre-commit");
         let script = "#!/bin/sh\n\
              # Hook gestionado por lodestar: bloquea commits no conformes (OKF).\n\
-             exec lodestar check\n";
+             exec lodestar check --staged\n";
         std::fs::write(&hook, script).map_err(|e| VcsError::Io(e.to_string()))?;
         #[cfg(unix)]
         {
@@ -428,6 +485,37 @@ impl Vcs {
             std::fs::set_permissions(&hook, perms).map_err(|e| VcsError::Io(e.to_string()))?;
         }
         Ok(hook)
+    }
+
+    /// Garantiza que la cache `.lodestar/` esté ignorada. En un repo **adoptado** (con
+    /// `.gitignore` propio sin `.lodestar/`), los commits/checkpoints acabarían metiendo
+    /// `index.db` + `-wal` en la historia. Se añade a `.git/info/exclude` (no versionado,
+    /// no invasivo con el `.gitignore` del usuario).
+    pub fn ensure_cache_ignored(&self) -> Result<(), VcsError> {
+        if self
+            .repo
+            .is_path_ignored(".lodestar/probe")
+            .unwrap_or(false)
+        {
+            return Ok(());
+        }
+        let info = self.repo.path().join("info");
+        std::fs::create_dir_all(&info).map_err(|e| VcsError::Io(e.to_string()))?;
+        let exclude = info.join("exclude");
+        let current = std::fs::read_to_string(&exclude).unwrap_or_default();
+        if !current.lines().any(|l| l.trim() == "/.lodestar/") {
+            let sep = if current.is_empty() || current.ends_with('\n') {
+                ""
+            } else {
+                "\n"
+            };
+            std::fs::write(
+                &exclude,
+                format!("{current}{sep}# cache de lodestar (derivada/desechable)\n/.lodestar/\n"),
+            )
+            .map_err(|e| VcsError::Io(e.to_string()))?;
+        }
+        Ok(())
     }
 
     /// `git pull --ff-only` vía binario `git` (red confinada). Nunca conflicta in-app.

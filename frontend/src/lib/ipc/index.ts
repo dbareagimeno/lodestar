@@ -59,6 +59,7 @@ export interface CommitRow {
   author: { name: string; email: string };
   timeUnix: number;
   parents: string[];
+  conformance: { hardFail: number; warnCount: number; conform: boolean } | null;
 }
 export interface CommitResult {
   sha: string;

@@ -48,14 +48,16 @@ impl Store {
     pub fn open(root: &Path) -> Result<Self, StoreError> {
         let dir = root.join(CACHE_DIR);
         std::fs::create_dir_all(&dir).map_err(|e| StoreError::Io(e.to_string()))?;
-        let conn = Connection::open(dir.join(DB_FILE))?;
-        schema::apply_pragmas(&conn)?;
-        schema::create_schema(&conn)?;
-        if schema::read_user_version(&conn)? != schema::USER_VERSION {
-            schema::drop_schema(&conn)?;
-            schema::create_schema(&conn)?;
-            schema::set_user_version(&conn)?;
-        }
+        let db = dir.join(DB_FILE);
+        // La cache es DESECHABLE: si el fichero está corrupto o el esquema viejo no migra
+        // (p. ej. un índice nuevo sobre una columna renombrada), se borra y se recrea limpio
+        // en vez de dejar `open()` fallando para siempre.
+        let conn = open_and_migrate(&db).or_else(|_| {
+            for suffix in ["", "-wal", "-shm"] {
+                let _ = std::fs::remove_file(dir.join(format!("{DB_FILE}{suffix}")));
+            }
+            open_and_migrate(&db)
+        })?;
         Ok(Store {
             root: root.to_path_buf(),
             conn: Mutex::new(conn),
@@ -171,7 +173,25 @@ impl Store {
             for (path, content, mtime, size) in &disk {
                 let new_hash = blake3::hash(content.as_bytes());
                 if current_hash_tx(&tx, path)?.as_deref() != Some(new_hash.as_bytes().as_slice()) {
-                    index::upsert_file(&tx, path, content, *mtime, *size)?;
+                    // TOCTOU: el walk se hizo ANTES de tomar el lock; una escritura del único
+                    // escritor pudo colarse en medio (su upsert optimista ya está en la cache).
+                    // Se relee el fichero con el lock tomado para no pisar contenido nuevo con
+                    // el snapshot viejo del walk (flip-flop visible en la UI).
+                    let fresh = std::fs::read_to_string(self.root.join(path.as_str()));
+                    let (content, mtime, size) = match &fresh {
+                        Ok(c) => {
+                            let (m, s) = fs_meta(&self.root.join(path.as_str()));
+                            (c.as_str(), m, s)
+                        }
+                        Err(_) => (content.as_str(), *mtime, *size),
+                    };
+                    let fresh_hash = blake3::hash(content.as_bytes());
+                    if current_hash_tx(&tx, path)?.as_deref()
+                        == Some(fresh_hash.as_bytes().as_slice())
+                    {
+                        continue;
+                    }
+                    index::upsert_file(&tx, path, content, mtime, size)?;
                     changed.push(path.clone());
                 }
             }
@@ -198,7 +218,16 @@ impl Store {
             })
             .build();
         for entry in walker {
-            let entry = entry.map_err(|e| StoreError::Io(e.to_string()))?;
+            // Un fichero ilegible o no-UTF8 NO puede abortar el walk entero: eso congelaría
+            // TODAS las reconciliaciones de la cache para siempre (el error del watcher se
+            // descarta). Se salta con diagnóstico y el resto del bundle sigue vivo.
+            let entry = match entry {
+                Ok(e) => e,
+                Err(e) => {
+                    eprintln!("lodestar-store: aviso: entrada ilegible al indexar: {e}");
+                    continue;
+                }
+            };
             let path = entry.path();
             if !path.is_file() || path.extension().map(|e| e != "md").unwrap_or(true) {
                 continue;
@@ -209,8 +238,16 @@ impl Store {
                 .to_string_lossy()
                 .replace('\\', "/");
             let Ok(rp) = RelPath::new(&rel) else { continue };
-            let content =
-                std::fs::read_to_string(path).map_err(|e| StoreError::Io(e.to_string()))?;
+            let content = match std::fs::read_to_string(path) {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!(
+                        "lodestar-store: aviso: se salta {} (no UTF-8 o ilegible): {e}",
+                        path.display()
+                    );
+                    continue;
+                }
+            };
             let (mtime, size) = fs_meta(path);
             out.push((rp, content, mtime, size));
         }
@@ -357,6 +394,22 @@ impl ConceptStore for Store {
         )
         .ok()
     }
+}
+
+/// Abre la conexión y migra el esquema. El check de `user_version` va ANTES de crear el DDL
+/// nuevo: aplicarlo sobre un esquema viejo puede fallar (índice sobre columna inexistente).
+fn open_and_migrate(db: &Path) -> Result<Connection, StoreError> {
+    let conn = Connection::open(db)?;
+    schema::apply_pragmas(&conn)?;
+    if schema::read_user_version(&conn)? != schema::USER_VERSION {
+        schema::drop_schema(&conn)?;
+        schema::create_schema(&conn)?;
+        schema::set_user_version(&conn)?;
+    } else {
+        // Misma versión: el DDL es idempotente (IF NOT EXISTS) y sana tablas perdidas.
+        schema::create_schema(&conn)?;
+    }
+    Ok(conn)
 }
 
 fn current_hash(conn: &Connection, path: &RelPath) -> Result<Option<Vec<u8>>, StoreError> {

@@ -7,7 +7,7 @@
 > (core + store SQLite/FTS5+watcher con paridad SQL==core + vcs con switch/merge/hooks + workspace con
 > bus en vivo + CLI + MCP con golden cross-fachada) y **escritorio completo** (fachada Tauri v2 con la
 > tabla de comandos congelados + evento `bundle:changed`, y UI Svelte 5 funcional: árbol, editor
-> multi-escritor, isla del grafo, modo Cambios). **~91 tests** en verde; `cargo clippy --workspace
+> multi-escritor, isla del grafo, modo Cambios). **~113 tests** en verde; `cargo clippy --workspace
 > --all-targets --all-features --locked -- -D warnings` limpio; `cargo doc -D warnings` limpio;
 > `npm run check`/`build` del frontend en verde. Lo pendiente es **producto/pulido**, no arquitectura
 > (empaquetado/firma, rails redimensionables, rmcp, `.d.ts` generado): ver [`DECISIONES.md`](DECISIONES.md).
@@ -15,7 +15,7 @@
 ## Cómo correrlo
 
 ```bash
-cargo test --workspace          # ~91 tests (incl. 6 diferenciales JS-vs-Rust; core, store, cli, vcs, workspace, mcp)
+cargo test --workspace          # ~113 tests (incl. 6 diferenciales JS-vs-Rust; core, store, cli, vcs, workspace, mcp)
 cargo run -p lodestar-cli -- check --path <bundle>     # la puerta de CI (exit 0/1)
 cargo run -p lodestar-cli -- log | last-conforming | branch | switch | merge | hooks
 cargo run -p lodestar-mcp -- <bundle>                  # servidor MCP por stdio
@@ -48,6 +48,45 @@ cargo run -p lodestar-tauri                            # app de escritorio (Taur
 - **E4**: H01–H06, H09 (conformidad por commit) hechas; H07 (red) hecha; H08/H10 parciales.
 - **E5**: H01–H06 hechas (sin el watcher de E3); H07 parcial.
 - **E7**: H01–H06 hechas (subset stdio; H06 = golden cross-fachada en `tools.rs` + e2e); H07 doc.
+
+## Revisión profunda (2026-07): endurecimiento transversal
+
+Auditoría completa por subsistema (core/store/vcs/workspace/cli/mcp/tauri/frontend) con
+verificación empírica; ~40 defectos corregidos con tests de regresión. Lo más relevante:
+
+- **Paridad core↔prototipo** (8 arreglos): escalares no-string en el frontmatter ya no invierten
+  el veredicto (`type: 123` era OKF-FM03 hard-fail; el proto coerce con `String()`), `null`
+  explícito cuenta como presente y `buildRaw` lo conserva, `isISO` valida el string entero,
+  `titleFromPath` con `\b\w` de JS, tags ordenados con `localeCompare`, `fmDiff` sin cambios
+  fantasma y con orden de aparición, `diffSnap` con `sortPaths`, panel de backlinks con
+  dedupe/sin-self/sin-reservados.
+- **Seguridad**: `RelPath` rechaza también unidades Windows (`C:\…` → zip-slip en `import`) y
+  backslashes; validación de raíz de bundle en MCP y Tauri (`open_bundle` ya no indexa un
+  directorio arbitrario).
+- **Ciclo de merge completo** (vcs/workspace): el commit que concluye un merge lleva **2 padres**
+  y limpia `MERGE_HEAD` (antes el repo quedaba `Merging` para siempre); ff con HEAD desacoplado
+  es error, no éxito silencioso; el index de git se sincroniza tras switch/ff (fin de la suciedad
+  fantasma y los checkpoints vacíos); los conflictos en artefactos **generados** (index/tags) se
+  auto-resuelven regenerando.
+- **Robustez de la cache**: un `.md` no-UTF8 ya no congela todas las reconciliaciones;
+  `busy_timeout` para multi-proceso; el watcher ignora `.lodestar/`/`.git/` (fin del eco por
+  cada escritura de la propia cache); `index.db` corrupto se recrea solo; watcher arranca antes
+  del rebuild (sin ventana ciega); `search` de la cache usa la misma función del core.
+- **Escritura atómica de verdad**: `fsync` antes del rename + temporal único por proceso.
+- **CLI**: `--staged/--rev/--range` excluyentes (exit 2), `import` sin arg = uso (2, no 3),
+  `init` sin arg usa el CWD (no el bundle ancestro), `lodestar.toml` inválido = exit 3 (no
+  defaults silenciosos), push/pull fallido = 3 (no el 1 de conformidad), hook pre-commit usa
+  `check --staged` (§13.5).
+- **MCP**: `inputSchema` en las 13 tools, `-32700`/`-32600`/`ping`, errores de tool como
+  `isError` (visibles para el modelo), `structuredContent` siempre objeto.
+- **Tauri**: forwarder con `Weak<Store>` (fin de la fuga de hilo+conexión y de los snapshots
+  del bundle anterior al reabrir), coalescing de ráfagas de eventos, comandos `async` (no
+  bloquean el hilo de UI), recuperación de Mutex envenenado, `vcs:changed` emitido tras commit.
+- **Frontend**: selección del grafo reparada (el repintado síncrono mataba el `click`),
+  editor sin carrera de cargas ni pisado de escrituras externas (y con confirmación al
+  descartar), `type`/`status` del árbol salen del grafo del core, espejo `types.ts` completado.
+- **Tests e2e nuevos**: viaje completo CLI (init→check→generadores→export/import), hooks con
+  `git` real, push/pull contra remoto local bare, ramas switch/merge, protocolo MCP por stdio.
 
 ## Invariantes verificados
 

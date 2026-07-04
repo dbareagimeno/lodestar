@@ -34,9 +34,19 @@ pub fn load_bundle(root: &Path) -> anyhow::Result<FileMap> {
             Ok(rp) => rp,
             Err(_) => continue, // rutas no representables se ignoran
         };
-        let content =
-            std::fs::read_to_string(path).with_context(|| format!("leyendo {}", path.display()))?;
-        files.insert(rp, content);
+        // Un `.md` no-UTF8 se salta CON diagnóstico (`§13.2`), igual que hace `check --rev` con
+        // los blobs: abortar el check entero daba dos veredictos distintos para el mismo árbol.
+        match std::fs::read_to_string(path) {
+            Ok(content) => {
+                files.insert(rp, content);
+            }
+            Err(e) => {
+                eprintln!(
+                    "aviso: se salta {} (no UTF-8 o ilegible): {e}",
+                    path.display()
+                );
+            }
+        }
     }
     Ok(files)
 }
@@ -64,7 +74,14 @@ pub fn delete(root: &Path, rel: &RelPath) -> anyhow::Result<()> {
 }
 
 fn tmp_sibling(target: &Path) -> PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
     let mut name = target.file_name().unwrap_or_default().to_os_string();
-    name.push(".lodestar-tmp");
+    // Único por proceso+secuencia: dos escritores concurrentes no comparten temporal.
+    name.push(format!(
+        ".{}-{}.lodestar-tmp",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::Relaxed)
+    ));
     target.with_file_name(name)
 }

@@ -253,3 +253,138 @@ fn diff_working_vs_head() {
         .iter()
         .any(|s| s.to.as_deref() == Some("review")));
 }
+
+// --- Regresiones de la revisión profunda: ciclo de merge y commits -----------
+
+#[test]
+fn merge_tres_vias_limpio_se_concluye_con_dos_padres() {
+    // base → dos ramas con ficheros DISJUNTOS pero divergentes (no ff) → merge → commit.
+    // Antes: MERGE_HEAD quedaba para siempre (RepoBusy eterno) y el commit tenía 1 padre.
+    let (_dir, ws) = setup();
+    let alfa = RelPath::new("alfa.md").unwrap();
+    ws.create_concept(&alfa, "Nota", Some("Alfa"), "# H\n", false)
+        .unwrap();
+    ws.commit("base").unwrap();
+    let base_branch = ws
+        .branches()
+        .unwrap()
+        .into_iter()
+        .find(|b| b.is_head)
+        .unwrap()
+        .name;
+    ws.create_branch("feature", None).unwrap();
+    ws.switch("feature").unwrap();
+    let beta = RelPath::new("beta.md").unwrap();
+    ws.create_concept(&beta, "Nota", Some("Beta"), "# H\n", false)
+        .unwrap();
+    ws.commit("feature: beta").unwrap();
+    ws.switch(&base_branch).unwrap();
+    let gamma = RelPath::new("gamma.md").unwrap();
+    ws.create_concept(&gamma, "Nota", Some("Gamma"), "# H\n", false)
+        .unwrap();
+    ws.commit("base: gamma").unwrap();
+
+    let report = ws.merge("feature").unwrap();
+    assert!(report.conflicted.is_empty());
+    assert!(!report.fast_forward);
+    // Concluir el merge NO puede estar bloqueado (RepoBusy) — es como funciona git.
+    let outcome = ws.commit("merge feature").unwrap();
+    let head = &ws.vcs_log(1).unwrap()[0];
+    assert_eq!(head.parents.len(), 2, "el commit de merge ratifica §13.6.3");
+    assert_eq!(head.id, outcome.sha);
+    // Y el estado del repo queda limpio: el siguiente commit normal funciona.
+    let delta = RelPath::new("delta.md").unwrap();
+    ws.create_concept(&delta, "Nota", Some("Delta"), "# H\n", false)
+        .unwrap();
+    ws.commit("post-merge").unwrap();
+}
+
+#[test]
+fn merge_con_conflicto_se_resuelve_y_concluye() {
+    let (dir, ws) = setup();
+    let f = RelPath::new("f.md").unwrap();
+    ws.create_concept(&f, "Nota", Some("F"), "# H\n\nbase\n", false)
+        .unwrap();
+    ws.commit("base").unwrap();
+    let base_branch = ws
+        .branches()
+        .unwrap()
+        .into_iter()
+        .find(|b| b.is_head)
+        .unwrap()
+        .name;
+    ws.create_branch("feature", None).unwrap();
+    ws.switch("feature").unwrap();
+    ws.write_concept(
+        &f,
+        "---\ntype: Nota\ntitle: F\ndescription: d\n---\n\n# H\n\nfeature\n",
+        true,
+    )
+    .unwrap();
+    ws.commit("feature").unwrap();
+    ws.switch(&base_branch).unwrap();
+    ws.write_concept(
+        &f,
+        "---\ntype: Nota\ntitle: F\ndescription: d\n---\n\n# H\n\nmain\n",
+        true,
+    )
+    .unwrap();
+    ws.commit("main").unwrap();
+
+    let report = ws.merge("feature").unwrap();
+    assert!(
+        report.conflicted.contains(&f),
+        "debe conflictar: {report:?}"
+    );
+    let raw = std::fs::read_to_string(dir.path().join("f.md")).unwrap();
+    assert!(raw.contains("<<<<<<<"), "marcadores para OKF-CONFLICT");
+    // Resuelve y concluye: el commit lleva 2 padres y el repo queda limpio.
+    ws.write_concept(
+        &f,
+        "---\ntype: Nota\ntitle: F\ndescription: d\n---\n\n# H\n\nresuelto\n",
+        true,
+    )
+    .unwrap();
+    ws.commit("resuelve el merge").unwrap();
+    assert_eq!(ws.vcs_log(1).unwrap()[0].parents.len(), 2);
+    let delta = RelPath::new("post.md").unwrap();
+    ws.create_concept(&delta, "Nota", Some("Post"), "# H\n", false)
+        .unwrap();
+    ws.commit("post").unwrap(); // ya sin estado Merging
+}
+
+#[test]
+fn switch_no_deja_suciedad_fantasma_ni_checkpoints_vacios() {
+    let (_dir, ws) = setup();
+    let alfa = RelPath::new("alfa.md").unwrap();
+    ws.create_concept(&alfa, "Nota", Some("Alfa"), "# H\n", false)
+        .unwrap();
+    ws.commit("base").unwrap();
+    let base_branch = ws
+        .branches()
+        .unwrap()
+        .into_iter()
+        .find(|b| b.is_head)
+        .unwrap()
+        .name;
+    ws.create_branch("feature", None).unwrap();
+    ws.switch("feature").unwrap();
+    let beta = RelPath::new("beta.md").unwrap();
+    ws.create_concept(&beta, "Nota", Some("Beta"), "# H\n", false)
+        .unwrap();
+    ws.commit("feature: beta").unwrap();
+    let n_before = ws.vcs_log(50).unwrap().len();
+    // Ida y vuelta sin tocar nada, terminando en la MISMA rama: NO deben aparecer commits
+    // nuevos (checkpoints espurios por el index desincronizado tras el switch).
+    ws.switch(&base_branch).unwrap();
+    ws.switch("feature").unwrap();
+    ws.switch(&base_branch).unwrap();
+    ws.switch("feature").unwrap();
+    let log = ws.vcs_log(50).unwrap();
+    assert_eq!(
+        log.len(),
+        n_before,
+        "checkpoints espurios: {:?}",
+        log.iter().map(|c| c.message.clone()).collect::<Vec<_>>()
+    );
+}

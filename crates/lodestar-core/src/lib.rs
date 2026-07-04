@@ -17,12 +17,12 @@ pub mod diff;
 pub mod error;
 pub mod generate;
 pub mod model;
+pub mod query;
 pub mod types;
 
 mod bundle;
 mod conform;
 mod graph;
-mod query;
 mod store_trait;
 
 pub use bundle::Bundle;

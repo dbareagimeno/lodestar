@@ -103,8 +103,10 @@ fn match_file(bundle: &Bundle, path: &RelPath, tokens: &[Token], a: &Analysis) -
 fn match_token(t: &Token, path: &RelPath, fm: &Frontmatter, body: &str, a: &Analysis) -> bool {
     let reserved = path.is_reserved();
     let val = t.val.to_lowercase();
-    let field_name = t.field.as_ref().map(|f| f.to_lowercase());
-    let is_field_token = t.field.is_some()
+    // Quirk: un campo VACÍO (`":foo"`) es falsy en JS → el proto lo trata como texto suelto.
+    let field = t.field.as_ref().filter(|f| !f.is_empty());
+    let field_name = field.map(|f| f.to_lowercase());
+    let is_field_token = field.is_some()
         && !matches!(
             field_name.as_deref(),
             Some("has") | Some("no") | Some("is") | Some("body")
@@ -120,7 +122,7 @@ fn match_token(t: &Token, path: &RelPath, fm: &Frontmatter, body: &str, a: &Anal
         return false;
     }
 
-    let res = if let Some(field) = &t.field {
+    let res = if let Some(field) = field {
         match field_name.as_deref() {
             Some("has") => fm_present(fm, &t.val),
             Some("no") => !fm_present(fm, &t.val),
@@ -129,10 +131,7 @@ fn match_token(t: &Token, path: &RelPath, fm: &Frontmatter, body: &str, a: &Anal
             _ => field_match(fm_get(fm, field), &t.val, t.op),
         }
     } else {
-        // Texto suelto: basename, luego cualquier valor de frontmatter, luego el cuerpo (subcadena).
-        path.basename().to_lowercase().contains(&val)
-            || fm.as_pairs().iter().any(|(_, v)| value_includes(v, &val))
-            || body.to_lowercase().contains(&val)
+        loose_text_match(path, fm, body, &val)
     };
 
     if t.neg {
@@ -140,6 +139,19 @@ fn match_token(t: &Token, path: &RelPath, fm: &Frontmatter, body: &str, a: &Anal
     } else {
         res
     }
+}
+
+/// Semántica de **texto suelto** (subcadena, case-insensitive): basename, luego cualquier valor
+/// de frontmatter, luego el cuerpo. Pública para que la cache (`lodestar-store`) use LA MISMA
+/// verdad en vez de reimplementarla en SQL (invariante «una sola verdad computada»).
+/// `needle_lower` debe venir ya en minúsculas.
+pub fn loose_text_match(path: &RelPath, fm: &Frontmatter, body: &str, needle_lower: &str) -> bool {
+    path.basename().to_lowercase().contains(needle_lower)
+        || fm
+            .as_pairs()
+            .iter()
+            .any(|(_, v)| value_includes(v, needle_lower))
+        || body.to_lowercase().contains(needle_lower)
 }
 
 fn fm_get(fm: &Frontmatter, key: &str) -> Option<Yaml> {
