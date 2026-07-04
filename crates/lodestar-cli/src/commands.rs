@@ -150,17 +150,10 @@ pub fn export(root: &Path, out: Option<PathBuf>) -> anyhow::Result<ExitCode> {
 
 /// `lodestar init [dir]`: scaffold de un bundle (index raíz + `.gitignore`) + `git init` + commit inicial.
 pub fn init(dir: PathBuf) -> anyhow::Result<ExitCode> {
-    std::fs::create_dir_all(&dir).with_context(|| format!("creando {}", dir.display()))?;
-    let index = dir.join("index.md");
-    if !index.exists() {
-        std::fs::write(&index, "---\nokf_version: \"0.1\"\n---\n\n# Bundle\n")?;
-    }
-    let _ = RelPath::new("index.md"); // documenta el invariante de paths
-                                      // `git init` + `.gitignore` + commit inicial (por el vcs, que es el dueño de git).
-    let mut ws =
-        lodestar_workspace::Workspace::open(&dir).map_err(|e| anyhow::anyhow!(e.to_string()))?;
-    if !ws.has_vcs() {
-        ws.init_vcs().map_err(|e| anyhow::anyhow!(e.to_string()))?;
+    // El scaffold vive UNA vez en la workspace (lo comparte el first-run del escritorio).
+    let had_git = dir.join(".git").exists();
+    lodestar_workspace::Workspace::init_bundle(&dir).map_err(|e| anyhow::anyhow!(e.to_string()))?;
+    if !had_git {
         println!("git inicializado (commit inicial creado)");
     }
     println!("bundle inicializado en {}", dir.display());

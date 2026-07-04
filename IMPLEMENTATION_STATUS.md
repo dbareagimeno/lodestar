@@ -88,6 +88,19 @@ verificación empírica; ~40 defectos corregidos con tests de regresión. Lo má
 - **Tests e2e nuevos**: viaje completo CLI (init→check→generadores→export/import), hooks con
   `git` real, push/pull contra remoto local bare, ramas switch/merge, protocolo MCP por stdio.
 
+## First-run del escritorio (2026-07)
+
+- **El IPC de la webview estaba muerto**: `frontend/src/lib/ipc` usa `window.__TAURI__` pero
+  `tauri.conf.json` no activaba `withGlobalTauri` → NINGÚN comando funcionaba desde la UI
+  (abrir por ruta incluido). Activado.
+- **Crear/abrir workspace con selector nativo de carpetas** (`tauri-plugin-dialog`): comandos
+  `pick_folder` y `create_bundle`; el scaffold vive UNA vez en `Workspace::init_bundle`
+  (compartido con `lodestar init`).
+- **Opener rediseñado**: tarjeta de bienvenida con «Crear workspace nuevo» / «Abrir existente»
+  (diálogo nativo), ruta manual como alternativa, estados de carga/error, y oferta de crear el
+  workspace ahí mismo cuando la ruta indicada no es un bundle. El topbar oculta tabs/píldora
+  hasta que hay workspace abierto.
+
 ## Invariantes verificados
 
 - **Core puro**: `lodestar-core` no declara `tauri`/`rusqlite`/`notify`/`tokio`/`git2`; `#![forbid(unsafe_code)]`.

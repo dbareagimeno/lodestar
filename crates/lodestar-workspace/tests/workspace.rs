@@ -388,3 +388,21 @@ fn switch_no_deja_suciedad_fantasma_ni_checkpoints_vacios() {
         log.iter().map(|c| c.message.clone()).collect::<Vec<_>>()
     );
 }
+
+#[test]
+fn init_bundle_scaffold_e_idempotente() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("nuevo");
+    // Primer arranque: crea directorio + index raíz + git con commit inicial.
+    let ws = Workspace::init_bundle(&root).unwrap();
+    assert!(root.join("index.md").is_file());
+    assert!(root.join(".git").is_dir());
+    assert!(ws.has_vcs());
+    assert!(!ws.vcs_log(5).unwrap().is_empty(), "commit inicial");
+    // Idempotente: sobre un bundle existente no duplica ni rompe nada.
+    let n = ws.vcs_log(10).unwrap().len();
+    let ws2 = Workspace::init_bundle(&root).unwrap();
+    assert_eq!(ws2.vcs_log(10).unwrap().len(), n);
+    // Y el bundle recién creado es conforme (abrible por open_bundle del escritorio).
+    assert_eq!(ws2.analyze().unwrap().hard_fail, 0);
+}

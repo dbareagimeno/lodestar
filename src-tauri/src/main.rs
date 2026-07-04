@@ -75,6 +75,21 @@ fn start_forwarder(app: AppHandle, store: &Arc<Store>) {
 
 // --- comandos (nombres congelados, §7.1) -----------------------------------
 
+/// Abre un bundle en vivo y lo instala como el bundle del proceso (forwarder incluido).
+fn open_live_into(
+    app: AppHandle,
+    state: &State<'_, AppState>,
+    root: &std::path::Path,
+) -> CmdResult<BundleSnapshot> {
+    let ws = Workspace::open_live(root).map_err(|e| e.to_string())?;
+    let snap = ws.snapshot().map_err(|e| e.to_string())?;
+    if let Some(store) = ws.cache() {
+        start_forwarder(app, store);
+    }
+    *lock_ws(state) = Some(ws);
+    Ok(snap)
+}
+
 #[tauri::command]
 async fn open_bundle(
     app: AppHandle,
@@ -82,20 +97,41 @@ async fn open_bundle(
     path: String,
 ) -> CmdResult<BundleSnapshot> {
     let root = PathBuf::from(&path);
+    if !root.is_dir() {
+        return Err(format!("{path} no existe o no es un directorio"));
+    }
     // Sin esta comprobación, un path arbitrario del webview crearía `.lodestar/` donde caiga
     // e indexaría medio disco.
     if !root.join("index.md").is_file() && !root.join(".lodestar").is_dir() {
         return Err(format!(
-            "{path} no es un bundle lodestar (falta index.md o .lodestar/)"
+            "{path} no es un workspace lodestar (falta index.md o .lodestar/)"
         ));
     }
-    let ws = Workspace::open_live(&root).map_err(|e| e.to_string())?;
-    let snap = ws.snapshot().map_err(|e| e.to_string())?;
-    if let Some(store) = ws.cache() {
-        start_forwarder(app, store);
-    }
-    *lock_ws(&state) = Some(ws);
-    Ok(snap)
+    open_live_into(app, &state, &root)
+}
+
+/// Diálogo nativo de carpetas (first-run / abrir otro workspace). `None` = cancelado.
+#[tauri::command]
+async fn pick_folder(app: AppHandle) -> CmdResult<Option<String>> {
+    use tauri_plugin_dialog::DialogExt;
+    // Bloqueante, pero este comando es async → corre fuera del hilo principal.
+    let folder = app.dialog().file().blocking_pick_folder();
+    Ok(folder
+        .and_then(|f| f.into_path().ok())
+        .map(|p| p.to_string_lossy().into_owned()))
+}
+
+/// Crea un workspace nuevo en `path` (scaffold de la workspace: index raíz + git con commit
+/// inicial; idempotente sobre un bundle existente) y lo abre.
+#[tauri::command]
+async fn create_bundle(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    path: String,
+) -> CmdResult<BundleSnapshot> {
+    let root = PathBuf::from(&path);
+    Workspace::init_bundle(&root).map_err(|e| e.to_string())?;
+    open_live_into(app, &state, &root)
 }
 
 #[tauri::command]
@@ -308,9 +344,12 @@ fn json_to_yaml(v: &Value) -> serde_yaml::Value {
 
 fn main() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .manage(AppState::default())
         .invoke_handler(tauri::generate_handler![
             open_bundle,
+            pick_folder,
+            create_bundle,
             get_snapshot,
             list_concepts,
             read_concept,

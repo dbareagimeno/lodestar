@@ -109,6 +109,8 @@ export interface CommitConformance {
 // Nombres de comando/evento congelados (§7.1, §10 fila 7). Fuente única compartida con Rust.
 export const COMMANDS = {
   openBundle: "open_bundle",
+  pickFolder: "pick_folder",
+  createBundle: "create_bundle",
   getSnapshot: "get_snapshot",
   listConcepts: "list_concepts",
   readConcept: "read_concept",
