@@ -31,6 +31,10 @@ async function call<T>(cmd: string, args?: Record<string, unknown>): Promise<T> 
 }
 
 export const openBundle = (path: string) => call<BundleSnapshot>(COMMANDS.openBundle, { path });
+/** Diálogo nativo de carpetas; `null` si el usuario cancela. */
+export const pickFolder = () => call<string | null>(COMMANDS.pickFolder);
+/** Crea un workspace nuevo (scaffold + git) en `path` y lo abre. */
+export const createBundle = (path: string) => call<BundleSnapshot>(COMMANDS.createBundle, { path });
 export const getSnapshot = () => call<BundleSnapshot>(COMMANDS.getSnapshot);
 export const listConcepts = () => call<ConceptSummary[]>(COMMANDS.listConcepts);
 export const readConcept = (path: RelPath) => call<string>(COMMANDS.readConcept, { path });

@@ -149,6 +149,23 @@ impl Workspace {
         Ok(())
     }
 
+    /// Scaffold de un bundle nuevo (equivale a `lodestar init`): crea el directorio, el
+    /// `index.md` raíz si falta y git (con commit inicial) si no hay repo. Idempotente sobre
+    /// un bundle existente. Es la ÚNICA implementación del scaffold: la usan la CLI y el
+    /// first-run del escritorio.
+    pub fn init_bundle(root: &Path) -> Result<Workspace, WorkspaceError> {
+        std::fs::create_dir_all(root).map_err(|e| WorkspaceError::Io(e.to_string()))?;
+        if !root.join("index.md").exists() {
+            let index = RelPath::new("index.md").expect("path constante válido");
+            io::write_atomic(root, &index, "---\nokf_version: \"0.1\"\n---\n\n# Bundle\n")?;
+        }
+        let mut ws = Workspace::open(root)?;
+        if !ws.has_vcs() {
+            ws.init_vcs()?;
+        }
+        Ok(ws)
+    }
+
     // --- lectura ----------------------------------------------------------
 
     /// Carga el bundle desde disco (el core es la autoridad).
