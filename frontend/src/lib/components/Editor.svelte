@@ -8,18 +8,33 @@
   import { mode, tabs, setMode, closeTab, select, offerCreate, writeFile, confirmDlg, toast, openDialog, isReserved, verOverlayOpen } from "../stores/ui";
   import {
     parseFile, basename, dirOf, RESERVED, titleFromPath, STATUS_LABEL, resolveLink, fmtWhen, miniMd,
-    buildRaw, extrasToYAML, toISOStr, KNOWN_FM,
+    buildRaw, extrasToYAML, toISOStr, KNOWN_FM, parseYAML,
   } from "../okf";
   import { versions, tipSnapshot, tipVersion, diffSnap, statusLabel, pageTitleRaw, type FileDiff, type DiffLine } from "../versions";
+  import CodeEditor from "./CodeEditor.svelte";
+  import type { PageEntry } from "../editor/linkCompletion";
 
   const files = $derived($filesStore);
   const analysis = $derived($snapshot?.analysis ?? null);
+
+  // Páginas del bundle para el autocompletado de enlaces. Se pasa como closure
+  // (`getPages={() => linkPages}`): CodeMirror lee la versión fresca en cada activación sin
+  // que el wrapper tenga que recrear extensiones cuando cambian los ficheros.
+  const linkPages = $derived<PageEntry[]>(
+    Object.keys(files)
+      .filter((p) => p.endsWith(".md"))
+      .map((p) => ({ path: p, title: (parseFile(files, p).fm?.title as string) || titleFromPath(p) })),
+  );
 
   // ---- draft local del fichero abierto ----
   let draft = $state("");
   let loadedFor = $state<string | null>(null);
   let dirty = $state(false);
   let writeT: ReturnType<typeof setTimeout> | null = null;
+  // Generación de edición: se incrementa en cada tecla. El write en vuelo solo puede limpiar
+  // `dirty` si su generación sigue vigente (nadie tecleó durante el await); si no, otro write
+  // ya está programado y NO debemos pisar el estado sucio (esa era la carrera con el eco).
+  let editGen = 0;
 
   $effect(() => {
     const cur = $current;
@@ -42,13 +57,18 @@
 
   function scheduleWrite() {
     dirty = true;
+    editGen++;
+    const myGen = editGen;
     if (writeT) clearTimeout(writeT);
     const cur = loadedFor;
     const content = draft;
     writeT = setTimeout(async () => {
       if (!cur) return;
       await writeFile(cur, content);
-      dirty = false;
+      // Solo limpiamos `dirty` si NADIE tecleó desde que capturamos `content`. Si `editGen`
+      // avanzó, hay teclas nuevas (y otro write programado): dejar `dirty=true` evita que el
+      // eco del watcher + la reconciliación pisen el draft con el contenido antiguo.
+      if (editGen === myGen) dirty = false;
     }, 220);
   }
 
@@ -149,24 +169,65 @@
     const issues = (cur && analysis?.perFile[cur]) || [];
     return issues.find((x) => codes.includes(x.code) && x.level !== "pass") ?? null;
   }
-  // Reserializa el formulario al draft.
-  function reserialize(patch: Partial<Record<string, string>>, bodyVal?: string) {
-    const f = { ...fm } as Record<string, unknown>;
-    const cur = { type: "type", title: "title", description: "description", resource: "resource", tags: "tags", timestamp: "timestamp", status: "status" };
-    void cur;
-    Object.entries(patch).forEach(([k, v]) => {
-      if (k === "tags") {
-        const arr = String(v || "").split(",").map((s) => s.trim()).filter(Boolean);
-        if (arr.length) f.tags = arr; else delete f.tags;
-      } else if (v == null || v === "") {
-        delete f[k];
-      } else f[k] = v;
-    });
-    const body = bodyVal ?? pf?.body ?? "";
-    draft = buildRaw(f, body);
+  // Estado local del formulario. Los campos son "no controlados mientras editas": el `value` del
+  // input siempre iguala lo tecleado (lo fijamos en el propio `oninput`), así Svelte no reescribe
+  // el DOM ni mueve el caret, y la normalización (tags, timestamp, coerción YAML) NO pisa lo que
+  // escribes. Solo se resiembran desde el fichero al abrir otra página o ante un cambio externo
+  // cuando no editas ni tienes el foco. Es el patrón del prototipo (form uncontrolled + reserialize
+  // que lee de los campos), portado a Svelte 5.
+  type FormState = { title: string; description: string; type: string; status: string; tags: string; timestamp: string; resource: string; body: string; extra: string };
+  let form = $state<FormState>({ title: "", description: "", type: "", status: "", tags: "", timestamp: "", resource: "", body: "", extra: "" });
+  let formSeededFor = $state<string | null>(null);
+  let formSeedRaw = $state("");
+  let formFocused = $state(false);
+
+  function seedForm(raw: string, cur: string) {
+    const p = parseFile({ [cur]: raw }, cur);
+    const f = (p.fm || {}) as Record<string, unknown>;
+    form = {
+      title: (f.title as string) || "",
+      description: (f.description as string) || "",
+      type: (f.type as string) || "",
+      status: (f.status as string) || "",
+      tags: Array.isArray(f.tags) ? (f.tags as string[]).join(", ") : (f.tags as string) || "",
+      timestamp: toISOStr(f.timestamp),
+      resource: (f.resource as string) || "",
+      body: p.body || "",
+      extra: extrasToYAML(f),
+    };
+    formSeededFor = cur;
+    formSeedRaw = raw;
+  }
+
+  // Siembra el formulario al abrir un fichero; lo refresca ante un cambio externo (watcher/otra
+  // fachada) SOLO si no estás editando (`dirty`) ni tienes el foco en el form.
+  $effect(() => {
+    const cur = loadedFor;
+    if (!cur) { formSeededFor = null; return; }
+    const onDisk = files[cur];
+    if (cur !== formSeededFor) {
+      seedForm(onDisk ?? "", cur);
+    } else if (onDisk !== undefined && !dirty && !formFocused && onDisk !== formSeedRaw) {
+      seedForm(onDisk, cur);
+    }
+  });
+
+  // Reserializa el formulario al draft leyendo del estado local (nunca re-parsea para mostrar).
+  function reserializeForm() {
+    const f: Record<string, unknown> = {};
+    if (form.type) f.type = form.type;
+    if (form.title) f.title = form.title;
+    if (form.description) f.description = form.description;
+    if (form.resource) f.resource = form.resource;
+    const tags = form.tags.split(",").map((s) => s.trim()).filter(Boolean);
+    if (tags.length) f.tags = tags;
+    if (form.timestamp) f.timestamp = form.timestamp;
+    if (form.status) f.status = form.status;
+    const ex = parseYAML(form.extra);
+    if (ex.ok && ex.data) Object.entries(ex.data).forEach(([k, v]) => { if (!(k in f)) f[k] = v; });
+    draft = buildRaw(f, form.body);
     scheduleWrite();
   }
-  const tagsStr = $derived(Array.isArray(fm.tags) ? (fm.tags as string[]).join(", ") : (fm.tags as string) || "");
   const bodyIssues = $derived.by(() => {
     const cur = $current;
     const issues = (cur && analysis?.perFile[cur]) || [];
@@ -253,7 +314,12 @@
     {:else if isReserved($current)}
       {@render reservedView()}
     {:else if $mode === "raw"}
-      <textarea class="raw-edit" spellcheck="false" style="margin:14px 16px;width:calc(100% - 32px)" bind:value={draft} oninput={scheduleWrite}></textarea>
+      <!-- {#key loadedFor}: editor nuevo por fichero → el historial de undo no cruza páginas. -->
+      {#key loadedFor}
+        <div style="margin:14px 16px">
+          <CodeEditor variant="raw" value={draft} onChange={(v) => { draft = v; scheduleWrite(); }} getPages={() => linkPages} />
+        </div>
+      {/key}
       {@render noteBlock("Revisión", notes)}
     {:else if $mode === "form"}
       {@render formView()}
@@ -293,39 +359,41 @@
 {/snippet}
 
 {#snippet formView()}
-  <div>
+  <div onfocusin={() => (formFocused = true)} onfocusout={() => (formFocused = false)}>
     <div class="doc-head">
-      <input class="doc-title" class:need={!fm.title} value={(fm.title as string) || ""} placeholder="Título de la página" oninput={(e) => reserialize({ title: e.currentTarget.value })} />
+      <input class="doc-title" class:need={!form.title} value={form.title} placeholder="Título de la página" oninput={(e) => { form.title = e.currentTarget.value; reserializeForm(); }} />
       {#if fmField(["REC-TITLE"])}{@render inlineNote(fmField(["REC-TITLE"]))}{/if}
-      <textarea class="doc-sub" rows="1" placeholder="Añade una breve descripción…" spellcheck="false" value={(fm.description as string) || ""} oninput={(e) => reserialize({ description: e.currentTarget.value })}></textarea>
+      <textarea class="doc-sub" rows="1" placeholder="Añade una breve descripción…" spellcheck="false" value={form.description} oninput={(e) => { form.description = e.currentTarget.value; reserializeForm(); }}></textarea>
       {#if fmField(["REC-DESC"])}{@render inlineNote(fmField(["REC-DESC"]))}{/if}
       <div class="meta-grid">
         <span class="meta-k">Tipo</span>
-        <input class="meta-v" class:need={!fm.type} value={(fm.type as string) || ""} placeholder="Página" spellcheck="false" oninput={(e) => reserialize({ type: e.currentTarget.value })} />
+        <input class="meta-v" class:need={!form.type} value={form.type} placeholder="Página" spellcheck="false" oninput={(e) => { form.type = e.currentTarget.value; reserializeForm(); }} />
         {#if fmField(["OKF-TYPE"])}{@render inlineNote(fmField(["OKF-TYPE"]))}{/if}
         <span class="meta-k">Estado</span>
-        <select class="meta-v" value={(fm.status as string) || ""} onchange={(e) => reserialize({ status: e.currentTarget.value })}>
+        <select class="meta-v" value={form.status} onchange={(e) => { form.status = e.currentTarget.value; reserializeForm(); }}>
           {#each ["", "draft", "review", "accepted", "deprecated"] as s}<option value={s}>{STATUS_LABEL[s]}</option>{/each}
         </select>
         <span class="meta-k">Etiquetas</span>
-        <input class="meta-v" value={tagsStr} placeholder="añadir…" oninput={(e) => reserialize({ tags: e.currentTarget.value })} />
+        <input class="meta-v" value={form.tags} placeholder="añadir…" oninput={(e) => { form.tags = e.currentTarget.value; reserializeForm(); }} />
         {#if fmField(["FMT-TAGS"])}{@render inlineNote(fmField(["FMT-TAGS"]))}{/if}
         <span class="meta-k">Actualizado</span>
         <div class="meta-when">
-          <input class="meta-v" value={toISOStr(fm.timestamp)} placeholder="—" spellcheck="false" oninput={(e) => reserialize({ timestamp: e.currentTarget.value })} />
-          <button class="mini" onclick={() => reserialize({ timestamp: new Date().toISOString().replace(/\.\d+Z$/, "Z") })}>hoy</button>
+          <input class="meta-v" value={form.timestamp} placeholder="—" spellcheck="false" oninput={(e) => { form.timestamp = e.currentTarget.value; reserializeForm(); }} />
+          <button class="mini" onclick={() => { form.timestamp = new Date().toISOString().replace(/\.\d+Z$/, "Z"); reserializeForm(); }}>hoy</button>
         </div>
         {#if fmField(["FMT-TS"])}{@render inlineNote(fmField(["FMT-TS"]))}{/if}
         <span class="meta-k">Recurso</span>
-        <input class="meta-v" value={(fm.resource as string) || ""} placeholder="enlace (opcional)" spellcheck="false" oninput={(e) => reserialize({ resource: e.currentTarget.value })} />
+        <input class="meta-v" value={form.resource} placeholder="enlace (opcional)" spellcheck="false" oninput={(e) => { form.resource = e.currentTarget.value; reserializeForm(); }} />
       </div>
       <details class="fm-extra wiki" open={extras.length > 0}>
         <summary>Campos adicionales</summary>
-        <textarea class="fld" rows={Math.max(2, extras.length + 1)} spellcheck="false" placeholder="clave: valor" value={extrasToYAML(fm)}></textarea>
+        <textarea class="fld" rows={Math.max(2, extras.length + 1)} spellcheck="false" placeholder="clave: valor" value={form.extra} oninput={(e) => { form.extra = e.currentTarget.value; reserializeForm(); }}></textarea>
       </details>
     </div>
     <div class="body-wrap">
-      <textarea class="body-edit" spellcheck="false" placeholder="# Cuerpo markdown…" value={pf?.body ?? ""} oninput={(e) => reserialize({}, e.currentTarget.value)}></textarea>
+      {#key loadedFor}
+        <CodeEditor variant="body" value={form.body} placeholder="# Cuerpo markdown…" onChange={(v) => { form.body = v; reserializeForm(); }} getPages={() => linkPages} />
+      {/key}
     </div>
     {@render noteBlock("Sugerencias", bodyIssues)}
   </div>
@@ -351,7 +419,13 @@
         <div class="acts"><button class="btn-ghost" onclick={() => toast("Añadir entrada: edita log.md directamente.")}>Añadir entrada (hoy)</button></div>
       {/if}
     </div>
-    <textarea class="raw-edit" spellcheck="false" style="margin:0 16px;width:calc(100% - 32px)" bind:value={draft} oninput={scheduleWrite}></textarea>
+    <!-- Reservados: editables (mismo contrato que el textarea), pero sin autocompletado —
+         index.md/log.md se regeneran y no deben invitar a enlazar a mano. -->
+    {#key loadedFor}
+      <div style="margin:0 16px">
+        <CodeEditor variant="raw" value={draft} onChange={(v) => { draft = v; scheduleWrite(); }} autocomplete={false} />
+      </div>
+    {/key}
   </div>
 {/snippet}
 
