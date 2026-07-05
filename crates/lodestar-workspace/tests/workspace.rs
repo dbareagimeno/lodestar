@@ -406,3 +406,45 @@ fn init_bundle_scaffold_e_idempotente() {
     // Y el bundle recién creado es conforme (abrible por open_bundle del escritorio).
     assert_eq!(ws2.analyze().unwrap().hard_fail, 0);
 }
+
+#[test]
+fn escritorio_crear_workspace_con_cache_vieja_funciona() {
+    // Regresión e2e del flujo del escritorio: un build antiguo dejó en `.lodestar/index.db`
+    // un esquema viejo (tabla `files` SIN la columna `hash`) pero con `user_version=1`. Como
+    // `create_schema` es `IF NOT EXISTS`, la tabla vieja sobrevivía y al abrir/crear el
+    // workspace la app reventaba con «error de la cache: sqlite: table files has no column
+    // named hash». Ahora el store detecta el drift y reconstruye el esquema limpio.
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+
+    // (1) Cache vieja fabricada a mano, ANTES de cualquier arranque.
+    let db_dir = root.join(".lodestar");
+    std::fs::create_dir_all(&db_dir).unwrap();
+    {
+        let conn = rusqlite::Connection::open(db_dir.join("index.db")).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE files (path TEXT PRIMARY KEY, kind TEXT NOT NULL);
+             PRAGMA user_version = 1;",
+        )
+        .unwrap();
+    }
+
+    // (2) Scaffold del bundle (first-run del escritorio). Idempotente.
+    Workspace::init_bundle(root).unwrap();
+    assert!(root.join("index.md").is_file());
+
+    // (3) Apertura en vivo: cache incremental + watcher (lo que hace la app al abrir).
+    let ws = Workspace::open_live(root).unwrap();
+
+    // (4) El snapshot funciona pese a la cache vieja.
+    let snap = ws.snapshot().unwrap();
+    assert!(snap.files.keys().any(|p| p.as_str() == "index.md"));
+
+    // (5) Crear un concept nuevo funciona (este era el flujo que reventaba).
+    let p = RelPath::new("nuevo.md").unwrap();
+    let outcome = ws
+        .create_concept(&p, "Nota", Some("Nuevo"), "# H\n\ncuerpo\n", false)
+        .unwrap();
+    assert!(outcome.written);
+    assert!(root.join("nuevo.md").is_file());
+}

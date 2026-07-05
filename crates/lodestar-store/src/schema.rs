@@ -97,6 +97,33 @@ pub(crate) fn create_schema(conn: &Connection) -> Result<(), StoreError> {
     Ok(())
 }
 
+/// Valida que el esquema **real** en disco coincide con el esperado por esta versión del código.
+///
+/// El check por `user_version` no basta: un build antiguo pudo escribir `user_version=1` con un
+/// esquema distinto (p. ej. una tabla `files` sin la columna `hash`). Como `create_schema` es
+/// `IF NOT EXISTS`, esa tabla vieja sobrevive y el upsert revienta con «no column named hash».
+/// Aquí preparamos un `SELECT` con **todas** las columnas esperadas de cada tabla (con `LIMIT 0`,
+/// sin leer filas): si algún `prepare` falla, el esquema ha derivado y hay que reconstruirlo.
+/// Es barato — solo compila las sentencias, no ejecuta consultas.
+pub(crate) fn schema_is_current(conn: &Connection) -> Result<bool, StoreError> {
+    // Cada entrada lista las columnas que el resto del store da por hechas.
+    let probes = [
+        "SELECT path, kind, type, title, description, status, resource, \
+         frontmatter_json, body, raw, hash, mtime, size FROM files LIMIT 0",
+        "SELECT src, dst, href, src_is_index FROM links LIMIT 0",
+        "SELECT path, tag FROM tags LIMIT 0",
+        "SELECT path, code, level, msg, targets_json FROM diagnostics LIMIT 0",
+        "SELECT tree_oid, hard_fail, warn_count, conform FROM commit_conformance LIMIT 0",
+        "SELECT path, title, description, body FROM files_fts LIMIT 0",
+    ];
+    for sql in probes {
+        if conn.prepare(sql).is_err() {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 /// Elimina el esquema completo (para migrar cuando `user_version` no coincide: rebuild limpio).
 pub(crate) fn drop_schema(conn: &Connection) -> Result<(), StoreError> {
     conn.execute_batch(

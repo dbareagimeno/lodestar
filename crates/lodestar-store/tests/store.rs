@@ -370,6 +370,53 @@ fn search_unicode_case_insensitive_como_el_core() {
 }
 
 #[test]
+fn esquema_viejo_con_misma_version_se_reconstruye() {
+    // Regresión: un build antiguo dejó `user_version=1` pero una tabla `files` SIN la columna
+    // `hash`. Como `create_schema` es `IF NOT EXISTS`, la tabla vieja sobrevivía y el upsert
+    // reventaba con «table files has no column named hash». `schema_is_current` lo detecta y
+    // fuerza el rebuild limpio pese a coincidir la versión.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("a.md"),
+        "---\ntype: N\ntitle: A\ndescription: d\n---\n\n# H\n",
+    )
+    .unwrap();
+
+    // Fabrica a mano una cache con esquema viejo (solo `path`/`kind`, sin `hash`).
+    let db_dir = dir.path().join(".lodestar");
+    std::fs::create_dir_all(&db_dir).unwrap();
+    {
+        let conn = rusqlite::Connection::open(db_dir.join("index.db")).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE files (path TEXT PRIMARY KEY, kind TEXT);
+             PRAGMA user_version = 1;",
+        )
+        .unwrap();
+    }
+
+    // open + rebuild + upsert deben funcionar sin error pese al esquema derivado.
+    let store = Store::open(dir.path()).unwrap();
+    store.rebuild().unwrap();
+    store
+        .upsert(
+            &rp("b.md"),
+            "---\ntype: N\ntitle: B\ndescription: d\n---\n\n# H\n",
+            0,
+            0,
+        )
+        .unwrap();
+    assert!(store.concepts().unwrap().contains(&rp("a.md")));
+    assert!(store.concepts().unwrap().contains(&rp("b.md")));
+
+    // Y la tabla `files` reconstruida ya tiene la columna `hash`.
+    let conn = rusqlite::Connection::open(db_dir.join("index.db")).unwrap();
+    assert!(
+        conn.prepare("SELECT hash FROM files LIMIT 0").is_ok(),
+        "la tabla files debe tener la columna hash tras el rebuild limpio"
+    );
+}
+
+#[test]
 fn cache_corrupta_se_recrea_sola() {
     // La cache es desechable: un index.db corrupto no puede dejar open() fallando para siempre.
     let dir = tempfile::tempdir().unwrap();

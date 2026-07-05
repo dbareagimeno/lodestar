@@ -401,12 +401,19 @@ impl ConceptStore for Store {
 fn open_and_migrate(db: &Path) -> Result<Connection, StoreError> {
     let conn = Connection::open(db)?;
     schema::apply_pragmas(&conn)?;
-    if schema::read_user_version(&conn)? != schema::USER_VERSION {
+    if schema::read_user_version(&conn)? != schema::USER_VERSION
+        || !schema::schema_is_current(&conn)?
+    {
+        // Rebuild limpio si la versión no coincide O si el esquema derivó pese a coincidir la
+        // versión (p. ej. un build antiguo con `user_version=1` pero una tabla `files` sin la
+        // columna `hash`). `create_schema` es `IF NOT EXISTS`, así que NO sanaría la tabla vieja:
+        // el upsert reventaría con «no column named hash». La cache es derivada/desechable, así
+        // que la política ratificada es tirarla y recrearla limpia (nunca migración in-place).
         schema::drop_schema(&conn)?;
         schema::create_schema(&conn)?;
         schema::set_user_version(&conn)?;
     } else {
-        // Misma versión: el DDL es idempotente (IF NOT EXISTS) y sana tablas perdidas.
+        // Misma versión y esquema vigente: el DDL es idempotente (IF NOT EXISTS) y sana tablas perdidas.
         schema::create_schema(&conn)?;
     }
     Ok(conn)

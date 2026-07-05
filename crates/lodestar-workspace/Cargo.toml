@@ -22,3 +22,5 @@ workspace = true
 tempfile = "3"
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }
+# Solo para fabricar a mano una cache con esquema viejo en el test de regresión e2e.
+rusqlite = { version = "0.32", features = ["bundled"] }
