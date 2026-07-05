@@ -19,10 +19,12 @@ type Invoke = (cmd: string, args?: Record<string, unknown>) => Promise<unknown>;
 async function getInvoke(): Promise<Invoke> {
   const w = window as unknown as { __TAURI__?: { core?: { invoke?: Invoke } } };
   const invoke = w.__TAURI__?.core?.invoke;
-  if (!invoke) {
-    throw new Error("IPC no disponible: la app no corre dentro de Tauri (usa el binario de escritorio).");
-  }
-  return invoke;
+  if (invoke) return invoke;
+  // Fuera de Tauri, en desarrollo (`vite dev` en navegador): usa el mock sembrado con el bundle del
+  // prototipo para poder ver/comparar la UI sin backend. En producción esto no ocurre.
+  const { isMockActive, mockInvoke } = await import("./mock");
+  if (isMockActive()) return mockInvoke;
+  throw new Error("IPC no disponible: la app no corre dentro de Tauri (usa el binario de escritorio).");
 }
 
 async function call<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
