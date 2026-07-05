@@ -17,13 +17,23 @@
   (watcher + escrituras → UI en vivo). Compila en este entorno (webkit disponible) y produce el binario
   `lodestar-desktop`. El **CI de Rust** ya instala las libs de sistema (`libwebkit2gtk-4.1-dev`,
   `libsoup-3.0-dev`, …) y construye el `frontend/dist` antes del `cargo build` (Tauri lo embebe).
-- **Qué queda por decidir (solo empaquetado/distribución, no bloquea el uso local)**:
-  - **Plataformas objetivo** (macOS/Windows/Linux) y **updater** + **firma/notarización** (§12
-    packaging, E8-H06). Hoy `bundle.active = false` (no se generan instaladores en CI).
-  - **Iconos definitivos**: `src-tauri/icons/icon.png` es un placeholder generado; sustitúyelo por el
-    icono de marca antes de empaquetar.
-- **Recomendación**: definir plataformas + firma cuando quieras publicar releases; el desarrollo y el
-  uso local ya funcionan (`cargo run -p lodestar-tauri` con las libs instaladas).
+- **Empaquetado/release — PARCIALMENTE RESUELTO (v0.1.0)**:
+  - **Plataformas objetivo cerradas**: **macOS Apple Silicon (arm64)**, **Windows** y **Linux**.
+    Existe pipeline de release (`.github/workflows/release.yml`) que se dispara con el tag `vX.Y.Z`,
+    compila las tres plataformas y crea un GitHub Release en **borrador** con los bundles (dmg/deb/
+    appimage/nsis) + los binarios de CLI/MCP. `bundle.active = true` y los **iconos de marca** (la
+    estrella dorada) ya están integrados. Runbook en [`RELEASING.md`](RELEASING.md).
+  - **Firma/notarización — DIFERIDA (no cerrada)**: los bundles de v0.1.0 salen **SIN FIRMAR** para
+    las tres plataformas (avisos de Gatekeeper/SmartScreen al instalar). Queda pendiente decidir e
+    integrar certificados + notarización cuando se quiera distribución sin fricción (§12 packaging,
+    E8-H06). **No es un no-go**; es trabajo de infraestructura + secretos.
+  - **Updater**: sigue sin cablear (no bloquea; la distribución es por descarga manual del Release).
+  - **crates.io — PREPARADO, SIN PUBLICAR**: el orden topológico y los `publish = false` (fixtures,
+    tauri) están listos (ver [`RELEASING.md`](RELEASING.md)), pero **no se publica**: el repo es
+    **privado** y `cargo publish` haría el código público y permanente. Queda a criterio del usuario.
+- **Recomendación**: v0.1.0 ya se distribuye por Release multiplataforma sin firmar; abordar la
+  firma/notarización (y opcionalmente el updater) en una iteración posterior, según necesidad real de
+  distribución amplia.
 
 ## 2. Port de la UI del prototipo (E6) — ✅ IMPLEMENTADO (funcional)
 
@@ -103,7 +113,8 @@
 Pendientes de priorización (no bloquean el núcleo):
 - **Gate de rendimiento (§11)**: bench de cold-open 10k < ~2s y edit→UI < 150 ms como test de CI.
   El motor incremental ya existe (store); falta el arnés de bench con umbrales.
-- **Packaging/release CI + updater + firma** (ligado al punto 1).
+- **Packaging/release CI + updater + firma** (ligado al punto 1): **CI de release ya existe**
+  (`release.yml`, tres plataformas, bundles sin firmar); **queda la firma/notarización + updater**.
 - **Threat model** documentado (§12 seguridad); las piezas ya están (RelPath anti path/zip-slip,
   FTS5 escapado, git de red confinado al binario, libgit2 local sin hooks).
 - ~~Arnés diferencial JS-vs-Rust (E1-H18)~~ — **hecho**: `prototype/harness/` ejecuta las funciones
@@ -116,6 +127,7 @@ Pendientes de priorización (no bloquean el núcleo):
 
 Los puntos **1** (build de Tauri) y **2** (port de la UI) están **implementados**: la app de escritorio
 compila, corre y es funcional de extremo a extremo. Lo que queda son decisiones de **producto/pulido**,
-no de arquitectura: empaquetado/firma/plataformas (1), pulido visual (2), y los puntos **3–9** (rmcp,
+no de arquitectura: firma/notarización + updater (1) —el empaquetado y las plataformas ya salen en
+`release.yml` (v0.1.0, sin firmar)—, pulido visual (2), y los puntos **3–9** (rmcp,
 `.d.ts` generado, i18n, semántica de merge/`--range`, esquema de `lodestar.toml`, benches/threat model),
 que solo necesitan tu criterio o pueden esperar sin deuda.
