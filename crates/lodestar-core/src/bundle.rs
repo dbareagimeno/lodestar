@@ -287,12 +287,17 @@ impl Bundle {
     }
 
     /// Crea un concept validado. Rechaza por defecto si introduciría un `Err` (regla dura: `type`).
+    ///
+    /// `timestamp` es el instante de creación en ISO-8601 (paridad con el prototipo, que escribe
+    /// `timestamp: now()`). El core es **puro**: no computa el reloj; el llamante (la workspace,
+    /// único escritor con I/O) inyecta el valor. `None` omite la clave.
     pub fn create_concept(
         &self,
         p: &RelPath,
         ty: &str,
         title: Option<&str>,
         body: &str,
+        timestamp: Option<&str>,
         allow_nonconformant: bool,
     ) -> WriteOutcome {
         let mut fm = Frontmatter {
@@ -304,6 +309,7 @@ impl Bundle {
             .map(|s| s.to_string())
             .unwrap_or_else(|| model::title_from_path(p.as_str()));
         fm.title = Some(resolved_title);
+        fm.timestamp = timestamp.map(|s| serde_yaml::Value::String(s.to_string()));
         let raw = model::build_raw(&fm, body);
         self.outcome_for_write(p, raw, allow_nonconformant)
     }
