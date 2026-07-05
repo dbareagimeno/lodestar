@@ -110,6 +110,31 @@ Pendientes de priorización (no bloquean el núcleo):
   puras del prototipo en node como oráculo y `tests/differential.rs` compara con el core (6 fixtures);
   cazó y cerró 6 divergencias de paridad.
 
+## 10. Ghosts como primitiva de planificación + templates (siguiente feature, no iniciada)
+
+- **Contexto**: los *ghosts* («por escribir») ya existen y están portados: nodo con `ghost: bool` en
+  `GraphModel` (`core/graph.rs`) derivado de enlaces a `.md` inexistentes, check `LINK-STUB` con
+  severidad **info** (no rompe `check`). Dan un modelo de estados gratis y no falseable:
+  ghost = planificado · existe-pero-no-conforme = en curso · conforme = hecho. Todo derivado de los
+  `.md` en disco (invariante #1), sin campo `status:` que mantener.
+- **Qué se quiere** (acordado como dirección, pendiente de diseño):
+  1. **Crear ghosts desde la UI**: gesto de «esto habrá que crearlo». Para no introducir estado
+     nuevo, «crear un ghost» debe materializarse como **insertar un enlace** en una página existente
+     (la actual, o una página-plan por convención) — el ghost sigue siendo 100% derivado.
+  2. **Tool MCP para leer ghosts** (`list_ghosts` o similar): ghosts con sus backlinks e in-degree
+     (cuántas páginas lo reclaman = prioridad), para que un agente consuma el backlog y vaya creando
+     páginas conformes siguiendo el plan. El contexto/spec de cada ghost es la prosa alrededor de
+     los enlaces que le apuntan.
+  3. **Templates**: plantillas tanto de **archivos sueltos** (esqueleto de frontmatter/cuerpo por
+     `type`) como de **directorios** (estructura de páginas planificadas — posiblemente expresable
+     como una página-plan que genera los ghosts de toda la estructura).
+- **Qué decidir cuando se aborde**: UX del gesto en la UI (¿desde el grafo?, ¿desde autocompletado
+  de enlaces?), dónde viven los templates (¿`.lodestar/templates/`?, ¿páginas especiales?), si el
+  template de directorio crea ghosts (solo plan) o stubs (archivos reales), y la firma exacta de la
+  tool MCP.
+- **Recomendación**: mantener el principio «ghost = derivado de enlaces»; cualquier variante que
+  requiera una lista de ghosts persistida aparte contradice el invariante #1.
+
 ---
 
 ### Resumen de la recomendación
@@ -118,4 +143,5 @@ Los puntos **1** (build de Tauri) y **2** (port de la UI) están **implementados
 compila, corre y es funcional de extremo a extremo. Lo que queda son decisiones de **producto/pulido**,
 no de arquitectura: empaquetado/firma/plataformas (1), pulido visual (2), y los puntos **3–9** (rmcp,
 `.d.ts` generado, i18n, semántica de merge/`--range`, esquema de `lodestar.toml`, benches/threat model),
-que solo necesitan tu criterio o pueden esperar sin deuda.
+que solo necesitan tu criterio o pueden esperar sin deuda. El punto **10** (ghosts como primitiva
+de planificación + templates) es la **siguiente feature acordada**, pendiente de diseño.
