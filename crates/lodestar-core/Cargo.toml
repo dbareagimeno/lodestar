@@ -4,8 +4,12 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
 rust-version.workspace = true
 description = "Núcleo puro de lodestar: modelo, conformidad, links, query, grafo, generación, export y diff OKF. Sin I/O, DB, git ni runtime."
+keywords = ["okf", "knowledge-base", "markdown", "conformance", "graph"]
+categories = ["text-processing", "parsing"]
 
 [dependencies]
 serde = { workspace = true }

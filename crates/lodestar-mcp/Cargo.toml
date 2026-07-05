@@ -3,7 +3,13 @@ name = "lodestar-mcp"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+rust-version.workspace = true
 description = "Fachada de agentes (MCP/stdio) sobre Workspace. Semántica, no CRUD."
+keywords = ["okf", "mcp", "knowledge-base", "agents", "markdown"]
+categories = ["development-tools"]
 
 [[bin]]
 name = "lodestar-mcp"

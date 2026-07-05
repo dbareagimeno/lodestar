@@ -3,7 +3,13 @@ name = "lodestar-store"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+rust-version.workspace = true
 description = "Cache derivada (SQLite/FTS5) + watcher. Dueño único del DDL .lodestar/index.db. rusqlite vive SOLO aquí."
+keywords = ["okf", "knowledge-base", "sqlite", "fts5", "cache"]
+categories = ["database", "caching"]
 
 [dependencies]
 lodestar-core = { workspace = true }
