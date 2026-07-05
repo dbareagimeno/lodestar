@@ -2094,7 +2094,7 @@ function createConcept(path, type){
   else {
     const fm={type:type||"Spec", title:titleFromPath(path), description:"", status:"draft",
               timestamp:new Date().toISOString().replace(/\.\d+Z$/,"Z")};
-    files[path]=buildRaw(fm, bodyTemplate(type));
+    files[path]=buildRaw(fm, bodyTemplate(type, fm.title));
   }
   setActiveTab(path); closeDlg(); mode="raw";
   renderAll(); save(); toast("creado · "+path);
@@ -2104,7 +2104,7 @@ function fmtWhen(v){ const d=(v instanceof Date)?v:new Date(v); if(isNaN(d.getTi
 function titleFromPath(p){
   return conceptId(basename(p)).replace(/[-_]/g," ").replace(/\b\w/g,c=>c.toUpperCase());
 }
-function bodyTemplate(type){
+function bodyTemplate(type, title){
   switch(type){
     case "API Endpoint": return "# Resumen\n\n# Schema\n\n| Campo | Tipo | Descripción |\n|---|---|---|\n|  |  |  |\n\n# Examples\n\n# Citations\n";
     case "BigQuery Table": return "# Schema\n\n| Column | Type | Description |\n|---|---|---|\n|  |  |  |\n\n# Citations\n";
@@ -2112,7 +2112,7 @@ function bodyTemplate(type){
     case "Playbook": return "# Trigger\n\n# Steps\n\n1. \n";
     case "ADR": return "# Contexto\n\n# Decisión\n\n# Consecuencias\n";
     case "Requirement": return "# Requisito\n\n# Criterios de aceptación\n\n- [ ] \n";
-    default: return "# Resumen\n\n_Describe el concept. Enlaza a otros con_ `[texto](/ruta/concept.md)`.\n";
+    default: return `# ${type ? type + " - " : ""}${title}\n\n_Describe el concept. Enlaza a otros con_ \`[texto](/ruta/concept.md)\`.\n`;
   }
 }
 function deleteCurrent(){

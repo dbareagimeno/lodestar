@@ -291,6 +291,11 @@ impl Bundle {
     /// `timestamp` es el instante de creación en ISO-8601 (paridad con el prototipo, que escribe
     /// `timestamp: now()`). El core es **puro**: no computa el reloj; el llamante (la workspace,
     /// único escritor con I/O) inyecta el valor. `None` omite la clave.
+    ///
+    /// Si `body` está vacío (tras `trim`) se genera un heading por defecto único en el core: con
+    /// `ty` no vacío `# {ty} - {título}\n`, y `# {título}\n` cuando `ty` está vacío. El `título` es
+    /// el `title` recibido o, en su defecto, el derivado del path (`title_from_path`). Las fachadas
+    /// no inyectan plantilla: pasan `""` para delegar aquí el default.
     pub fn create_concept(
         &self,
         p: &RelPath,
@@ -308,8 +313,19 @@ impl Bundle {
         let resolved_title = title
             .map(|s| s.to_string())
             .unwrap_or_else(|| model::title_from_path(p.as_str()));
+        // Heading por defecto (construido antes de mover `resolved_title` a `fm.title`).
+        let default_body = if ty.is_empty() {
+            format!("# {resolved_title}\n")
+        } else {
+            format!("# {ty} - {resolved_title}\n")
+        };
         fm.title = Some(resolved_title);
         fm.timestamp = timestamp.map(|s| serde_yaml::Value::String(s.to_string()));
+        let body = if body.trim().is_empty() {
+            &default_body
+        } else {
+            body
+        };
         let raw = model::build_raw(&fm, body);
         self.outcome_for_write(p, raw, allow_nonconformant)
     }

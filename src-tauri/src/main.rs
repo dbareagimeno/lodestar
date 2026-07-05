@@ -184,7 +184,7 @@ async fn create_concept(
                 &rp(&path)?,
                 &r#type,
                 title.as_deref(),
-                body.as_deref().unwrap_or("# Resumen\n"),
+                body.as_deref().unwrap_or(""),
                 allow_nonconformant.unwrap_or(false),
             )
             .map_err(|e| e.to_string())?;

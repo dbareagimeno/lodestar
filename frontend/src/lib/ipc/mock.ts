@@ -340,7 +340,11 @@ export async function mockInvoke(cmd: string, args?: Record<string, unknown>): P
     }
     case "create_concept": {
       const path = args!.path as string;
-      files[path] = args!.body as string || `---\ntype: ${args!.type}\n---\n\n# Resumen\n`;
+      const type = (args!.type as string) ?? "";
+      const title = (args!.title as string) || titleFromPath(path);
+      const heading = type ? `# ${type} - ${title}` : `# ${title}`;
+      files[path] =
+        (args!.body as string) || `---\ntype: ${type}\n---\n\n${heading}\n`;
       return { path, written: true, rejected: null, checks: [], bundleHardFail: 0 } as WriteOutcome;
     }
     default:

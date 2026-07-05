@@ -373,6 +373,41 @@ fn create_concept_incluye_timestamp_en_su_posicion_canonica() {
 }
 
 #[test]
+fn create_concept_genera_heading_por_defecto_cuando_body_vacio() {
+    let b = Bundle::from_files(fm(&[]));
+    // body vacío + ty no vacío → `# {ty} - {title}`.
+    let p = RelPath::new("mi-cosa.md").unwrap();
+    let con_tipo = b.create_concept(&p, "Nota", Some("Mi Cosa"), "", None, false);
+    assert!(con_tipo.written);
+    assert!(
+        con_tipo.raw.contains("# Nota - Mi Cosa\n"),
+        "falta el heading con tipo: {}",
+        con_tipo.raw
+    );
+    // ty vacío → `# {title}` (sin separador colgante). type vacío rechaza, pero el raw se computa.
+    let sin_tipo = b.create_concept(&p, "", Some("Mi Cosa"), "", None, false);
+    assert!(
+        sin_tipo.raw.contains("# Mi Cosa\n") && !sin_tipo.raw.contains("# Mi Cosa -"),
+        "el heading sin tipo no debe tener separador: {}",
+        sin_tipo.raw
+    );
+    // title None → deriva del path con title_from_path (`mi-cosa` → `Mi Cosa`).
+    let sin_titulo = b.create_concept(&p, "Nota", None, "", None, false);
+    assert!(
+        sin_titulo.raw.contains("# Nota - Mi Cosa\n"),
+        "el título debe derivar del path: {}",
+        sin_titulo.raw
+    );
+    // body no vacío → se respeta tal cual, sin generar default.
+    let con_body = b.create_concept(&p, "Nota", Some("Mi Cosa"), "# H\n", None, false);
+    assert!(
+        con_body.raw.contains("# H\n") && !con_body.raw.contains("# Nota - Mi Cosa"),
+        "un body explícito no debe reemplazarse: {}",
+        con_body.raw
+    );
+}
+
+#[test]
 fn merge_frontmatter_null_borra() {
     let b = Bundle::from_files(fm(&[(
         "x.md",
