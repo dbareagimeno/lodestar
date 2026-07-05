@@ -4,6 +4,8 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 description = "Fachada de escritorio (Tauri v2): shell fino sobre lodestar-workspace. CERO lógica OKF."
+# App binaria (embebe frontend/dist): se distribuye por GitHub Releases, no por crates.io.
+publish = false
 
 [[bin]]
 name = "lodestar-desktop"

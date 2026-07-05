@@ -3,7 +3,13 @@ name = "lodestar-vcs"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+rust-version.workspace = true
 description = "Dueño único de git: libgit2 local + binario git para red. git2 vive SOLO aquí; git2::Oid nunca cruza la frontera."
+keywords = ["okf", "git", "libgit2", "version-control", "knowledge-base"]
+categories = ["development-tools"]
 
 [dependencies]
 lodestar-core = { workspace = true }

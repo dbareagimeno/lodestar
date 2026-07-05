@@ -3,7 +3,13 @@ name = "lodestar-workspace"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+rust-version.workspace = true
 description = "Glue: compone core + store + vcs. Handle unificado, único escritor y bus de eventos."
+keywords = ["okf", "knowledge-base", "local-first", "watcher", "markdown"]
+categories = ["filesystem", "development-tools"]
 
 [dependencies]
 lodestar-core = { workspace = true }

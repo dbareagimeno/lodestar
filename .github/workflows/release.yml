@@ -1,0 +1,142 @@
+name: Release
+
+# Publica los artefactos de la v0.1.0 cuando se empuja un tag `vX.Y.Z`.
+# - Job `app`: construye e instala el bundle de escritorio (Tauri) por plataforma
+#   y crea un release en borrador con los instaladores adjuntos.
+# - Job `binaries`: compila la CLI y el MCP (sin Tauri) y sube los tarballs/zip
+#   al mismo release.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+# El release necesita escribir (crear el release y subir artefactos).
+permissions:
+  contents: write
+
+# Un solo release en vuelo por ref; no cancelamos uno a medias.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Bundle de escritorio (Tauri): dmg (mac), deb+appimage (linux), nsis (win).
+  # tauri-action ejecuta el beforeBuildCommand (build del frontend) y crea el
+  # release en borrador, adjuntando los instaladores de cada plataforma.
+  # ---------------------------------------------------------------------------
+  app:
+    name: Bundle escritorio (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            target: aarch64-apple-darwin
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Instala toolchain (stable + target)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache de cargo
+        uses: Swatinem/rust-cache@v2
+
+      # Tauri v2 en Linux necesita webkitgtk/soup; patchelf lo requiere AppImage.
+      - name: Instala libs de sistema para Tauri (solo Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev \
+            libgtk-3-dev librsvg2-dev patchelf
+
+      # tauri-action correrá el beforeBuildCommand (npm run build en frontend),
+      # pero las dependencias del frontend deben instalarse antes.
+      - name: Node para construir el frontend (dist embebido por Tauri)
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Instala dependencias del frontend (reproducible)
+        run: npm ci
+        working-directory: frontend
+
+      - name: Build + bundle + release (tauri-action)
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: "lodestar ${{ github.ref_name }}"
+          releaseBody: "Ver CHANGELOG.md."
+          releaseDraft: true
+          prerelease: false
+          args: --target ${{ matrix.target }}
+
+  # ---------------------------------------------------------------------------
+  # Binarios de línea de comandos: lodestar (CLI) y lodestar-mcp (MCP).
+  # No arrastran Tauri ni webkit, así que no hacen falta apt ni node.
+  # Se suben al release que creó el job `app`.
+  # ---------------------------------------------------------------------------
+  binaries:
+    name: Binarios CLI/MCP (${{ matrix.target }})
+    needs: app
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            target: aarch64-apple-darwin
+            archive: tar.gz
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            archive: tar.gz
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            archive: zip
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Instala toolchain (stable + target)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache de cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Compila CLI y MCP (release)
+        run: cargo build --release --locked -p lodestar-cli -p lodestar-mcp
+
+      - name: Empaqueta binarios (unix)
+        if: runner.os != 'Windows'
+        run: >-
+          tar czf lodestar-cli-${{ github.ref_name }}-${{ matrix.target }}.tar.gz
+          -C target/release lodestar lodestar-mcp
+
+      - name: Empaqueta binarios (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: >-
+          Compress-Archive
+          -Path target/release/lodestar.exe, target/release/lodestar-mcp.exe
+          -DestinationPath lodestar-cli-${{ github.ref_name }}-${{ matrix.target }}.zip
+
+      - name: Sube al release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: >-
+          gh release upload ${{ github.ref_name }}
+          lodestar-cli-${{ github.ref_name }}-${{ matrix.target }}.${{ matrix.archive }}
+          --clobber

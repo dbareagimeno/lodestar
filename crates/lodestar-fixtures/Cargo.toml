@@ -4,6 +4,8 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 description = "Bundles de ejemplo reusables por los tests de todos los crates."
+# Solo para tests: nunca se publica en crates.io.
+publish = false
 
 [dependencies]
 lodestar-core = { workspace = true }

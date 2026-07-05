@@ -9,8 +9,10 @@
 > tabla de comandos congelados + evento `bundle:changed`, y UI Svelte 5 funcional: árbol, editor
 > multi-escritor, isla del grafo, modo Cambios). **~113 tests** en verde; `cargo clippy --workspace
 > --all-targets --all-features --locked -- -D warnings` limpio; `cargo doc -D warnings` limpio;
-> `npm run check`/`build` del frontend en verde. Lo pendiente es **producto/pulido**, no arquitectura
-> (empaquetado/firma, rails redimensionables, rmcp, `.d.ts` generado): ver [`DECISIONES.md`](DECISIONES.md).
+> `npm run check`/`build` del frontend en verde. Ya hay **pipeline de release multiplataforma**
+> (`release.yml`: macOS arm64 · Windows · Linux, bundles **sin firmar**) y **CI multiplataforma**.
+> Lo pendiente es **producto/pulido**, no arquitectura (firma/notarización de bundles, rails
+> redimensionables, rmcp, `.d.ts` generado): ver [`DECISIONES.md`](DECISIONES.md).
 
 ## Cómo correrlo
 
@@ -36,7 +38,7 @@ cargo run -p lodestar-tauri                            # app de escritorio (Taur
 | **E5** `lodestar-workspace` | ✅ Hecho | Handle unificado, único escritor, snapshot, commit/restore con checkpoint, switch/merge, conformidad cacheada por tree-oid, config (`lodestar.toml`), y **bus de eventos en vivo** (`open_live`/`enable_cache`/`subscribe`) con **update optimista** de la cache tras cada escritura. **12 tests**. |
 | **E6** Tauri + frontend | ✅ Hecho | **Fachada Tauri v2** real: comandos congelados sobre `Workspace` + estado del bundle + forwarder del bus `IndexEvent` → evento `bundle:changed` (UI en vivo). Binario `lodestar-desktop` compila; CI de Rust instala webkit y construye el frontend antes. **Frontend Svelte 5 funcional**: layout de 3 columnas colapsables, árbol filtrable, editor multi-escritor con validación y diagnósticos localizados, panel de enlaces, **isla imperativa del grafo** (`createStarMap`, SVG+rAF, sin `{#each}`), modo **Cambios** (diff + commit). `npm run check`/`build` verdes. Pulido en [`DECISIONES.md §2`](DECISIONES.md). |
 | **E7** `lodestar-mcp` | 🟢 Parcial | 13 tools sobre la workspace + bucle JSON-RPC por stdio (stdout puro). **Golden cross-fachada** (tool==workspace) + e2e. **5 tests**. Pendiente: transporte `rmcp` oficial + resources (ver [`DECISIONES.md §3`](DECISIONES.md)). |
-| **E8** Transversales | 🟢 Parcial | Hechos: exit codes/SARIF, escritura atómica, **zip-slip cerrado por RelPath en `import`**, identidad de commits + override por `lodestar.toml`, trailer Co-Authored-By del agente, gitignore de `.lodestar/`, **config por-bundle (`lodestar.toml`: strictness + identidad)**, **`lodestar import`** (zip del prototipo o dir), **`init` con git init + commit inicial real**, **i18n keyed por código** (catálogo español), **arnés diferencial JS-vs-Rust (§12)**. Pendiente: packaging/updater, gate de bench (§11), threat model. |
+| **E8** Transversales | 🟢 Parcial | Hechos: exit codes/SARIF, escritura atómica, **zip-slip cerrado por RelPath en `import`**, identidad de commits + override por `lodestar.toml`, trailer Co-Authored-By del agente, gitignore de `.lodestar/`, **config por-bundle (`lodestar.toml`: strictness + identidad)**, **`lodestar import`** (zip del prototipo o dir), **`init` con git init + commit inicial real**, **i18n keyed por código** (catálogo español), **arnés diferencial JS-vs-Rust (§12)**, y **pipeline de release multiplataforma** (`release.yml`: macOS arm64/Windows/Linux → bundles sin firmar + binarios CLI/MCP; Release en borrador) con **CI multiplataforma** (job de Rust en las 3 plataformas). Pendiente: **firma/notarización** de bundles + updater, gate de bench (§11), threat model. |
 
 ## Cobertura de historias (destacadas)
 
@@ -101,6 +103,22 @@ verificación empírica; ~40 defectos corregidos con tests de regresión. Lo má
   workspace ahí mismo cuando la ruta indicada no es un bundle. El topbar oculta tabs/píldora
   hasta que hay workspace abierto.
 
+## Release y CI multiplataforma (2026-07)
+
+- **Pipeline de release** (`.github/workflows/release.yml`): se dispara con el tag `vX.Y.Z`, compila
+  **macOS Apple Silicon (arm64)**, **Windows** y **Linux**, y crea un GitHub Release en **borrador**
+  con los bundles (dmg/deb/appimage/nsis) + los binarios de CLI/MCP. Bundles **sin firmar** (firma/
+  notarización diferida — ver [`DECISIONES.md`](DECISIONES.md)). `bundle.active = true` y los iconos
+  de marca (estrella dorada) integrados. Runbook en [`RELEASING.md`](RELEASING.md).
+- **CI multiplataforma**: el job `rust` (fmt/clippy/build/test/doc) corre en `ubuntu-latest`,
+  `macos-14` y `windows-latest` (`fail-fast: false`); el paso de `apt` (webkitgtk/soup) queda
+  condicionado a Linux. `core-purity` y `frontend` siguen solo en Linux. Coste ~3× minutos, asumido
+  por ser producto multiplataforma.
+- **Sincronización de versión**: `scripts/set-version.sh X.Y.Z` fija la versión en `Cargo.toml`
+  (`[workspace.package]`), `src-tauri/tauri.conf.json` y `frontend/package.json` con `sed` acotado.
+- **crates.io**: preparado (orden topológico + `publish = false` en fixtures/tauri) pero **sin
+  publicar** (repo privado; publicar es público y permanente). Ver [`RELEASING.md`](RELEASING.md).
+
 ## Invariantes verificados
 
 - **Core puro**: `lodestar-core` no declara `tauri`/`rusqlite`/`notify`/`tokio`/`git2`; `#![forbid(unsafe_code)]`.
@@ -114,7 +132,8 @@ verificación empírica; ~40 defectos corregidos con tests de regresión. Lo má
 
 Las 9 épicas (E0–E8) están implementadas. Lo que queda no es arquitectura:
 
-1. **Empaquetado** (§1): plataformas objetivo, updater, firma/notarización, iconos de marca.
+1. **Empaquetado** (§1): plataformas objetivo, iconos de marca y pipeline de release **ya hechos**
+   (`release.yml`, tres plataformas, bundles sin firmar); queda la **firma/notarización** + **updater**.
 2. **Pulido de UI** (§2): rails redimensionables por arrastre, overlay de grafo, resaltado con la
    semántica del core.
 3. **E0-H04/E6-H03** (§4): generar el `.d.ts` desde Rust (ts-rs/specta).

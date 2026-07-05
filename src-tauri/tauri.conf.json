@@ -26,8 +26,18 @@
     }
   },
   "bundle": {
-    "active": false,
-    "targets": "all",
-    "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.icns", "icons/icon.ico"]
+    "active": true,
+    "targets": ["app", "dmg", "deb", "appimage", "nsis"],
+    "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.icns", "icons/icon.ico"],
+    "category": "DeveloperTool",
+    "shortDescription": "Editor local-first de bases de conocimiento OKF",
+    "longDescription": "lodestar es un editor local-first de bases de conocimiento OKF: directorios de Markdown con frontmatter YAML, con verificación de conformidad, grafo de enlaces, búsqueda e integración git.",
+    "copyright": "© 2026 dbareagimeno",
+    "publisher": "dbareagimeno",
+    "linux": {
+      "deb": {
+        "depends": ["libwebkit2gtk-4.1-0"]
+      }
+    }
   }
 }
