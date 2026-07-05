@@ -23,13 +23,30 @@ fn crea_concept_y_lo_escribe_por_el_unico_escritor() {
         .unwrap();
     assert!(outcome.written);
     assert!(dir.path().join("alfa.md").is_file());
-    // el snapshot lo refleja
+    // la workspace inyecta el timestamp de creación (paridad prototipo): el .md nace con él,
+    // en formato ISO-8601 con precisión de segundos y sin generar warn FMT-TS.
+    let escrito = std::fs::read_to_string(dir.path().join("alfa.md")).unwrap();
+    assert!(
+        escrito.contains("timestamp: "),
+        "el .md creado no lleva timestamp: {escrito}"
+    );
     let snap = ws.snapshot().unwrap();
+    // el snapshot lo refleja
     assert!(snap
         .analysis
         .concepts
         .iter()
         .any(|c| c.as_str() == "alfa.md"));
+    // ninguna página creada debe nacer con un warn de timestamp mal formado.
+    assert!(
+        !snap
+            .analysis
+            .per_file
+            .get(&p)
+            .map(|checks| checks.iter().any(|c| c.code.as_str() == "FMT-TS"))
+            .unwrap_or(false),
+        "la página creada dispara FMT-TS"
+    );
 }
 
 #[test]

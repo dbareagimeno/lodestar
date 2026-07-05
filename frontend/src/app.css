@@ -772,3 +772,12 @@ html[data-theme="light"] .vp-btn{color:#fff}
 
 /* isla StarMap dentro de overlays/nav: ocupa el alto disponible (equivalente a #graphBig/#navGraph svg.graph) */
 .graph-overlay > svg.graph{flex:1; min-height:0; height:auto}
+
+/* islas CodeMirror del editor: replican .raw-edit/.body-edit (que se conservan).
+   El scroll lo sigue llevando .ed-scroll, por eso el .cm-scroller no scrollea. */
+.cm-host.cm-raw{
+  background:var(--panel); border:1px solid var(--line-2);
+  border-radius:var(--radius); padding:13px; min-height:70vh;
+}
+.cm-host.cm-body{min-height:48vh}
+.cm-host .cm-scroller{overflow:visible}

@@ -4,7 +4,7 @@
   // data-*). La webview es vista fina sobre el BundleSnapshot empujado por Rust.
   import { onMount } from "svelte";
   import { snapshot, current, refreshSnapshot } from "./lib/stores/bundle";
-  import { onBundleChanged } from "./lib/ipc";
+  import { onBundleChanged, openBundle } from "./lib/ipc";
   import { loadVersions } from "./lib/versions";
   import {
     mode, tabs, explorerView, railLeft, railRight, clW, crW, mobileView,
@@ -20,12 +20,28 @@
   import Dialogs from "./lib/components/Dialogs.svelte";
   import Toast from "./lib/components/Toast.svelte";
   import MobileNav from "./lib/components/MobileNav.svelte";
+  import Welcome from "./lib/components/Welcome.svelte";
 
   let mainEl: HTMLElement;
   let gutterL: HTMLElement;
   let gutterR: HTMLElement;
 
   onMount(async () => {
+    // Reapertura automática: si el usuario ya eligió un workspace, reábrelo antes de nada. Si la
+    // carpeta desapareció (o ya no es un workspace), limpia la clave y sigue: el <Welcome /> pedirá
+    // uno. En navegador (mock) esta clave no existe y el mock puebla el snapshot vía getSnapshot.
+    try {
+      const saved = localStorage.getItem("lodestar:workspace");
+      if (saved) {
+        try {
+          snapshot.set(await openBundle(saved));
+        } catch {
+          localStorage.removeItem("lodestar:workspace");
+        }
+      }
+    } catch {
+      /* localStorage no disponible: se ignora */
+    }
     await refreshSnapshot();
     await loadVersions();
     // Selección inicial: como el prototipo, abre la spec de login si existe (paridad de la vista por
@@ -97,7 +113,10 @@
       return;
     }
     if ((e.metaKey || e.ctrlKey) && (e.key === "s" || e.key === "S")) { e.preventDefault(); openDialog("commit"); return; }
-    if (/input|textarea|select/i.test(tag)) return;
+    // El editor (CodeMirror 6) es un <div contenteditable>, no un <input>/<textarea>/<select>,
+    // así que el regex de tag no lo detecta: isContentEditable cubre también ese caso.
+    const el = e.target as HTMLElement;
+    if (/input|textarea|select/i.test(tag) || el.isContentEditable) return;
     if (e.key === "/") { e.preventDefault(); (document.querySelector(".search-row .s-input") as HTMLInputElement)?.focus(); return; }
     if (e.key === "n" || e.key === "N") openDialog("new");
     if (e.key === "m" || e.key === "M") {
@@ -137,4 +156,5 @@
 <VerOverlay />
 <MobileNav />
 <Dialogs />
+<Welcome />
 <Toast />

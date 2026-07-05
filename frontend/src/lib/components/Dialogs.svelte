@@ -6,17 +6,18 @@
   import { commitVersion, diffSnap, diffChips, suggestMsg, tipSnapshot } from "../versions";
 
   let newPath = $state("");
-  let newType = $state("Spec");
+  let newType = $state("");
   let commitMsg = $state("");
   let commitLog = $state(true);
 
-  const TYPES = ["Spec", "Requirement", "ADR", "API Endpoint", "Metric", "Playbook", "Reference", "BigQuery Table", "BigQuery Dataset"];
+  // OKF exige un `type` no vacío; también la ubicación es obligatoria.
+  const canCreate = $derived(newPath.trim() !== "" && newType.trim() !== "");
 
   // Al abrir "nueva", pre-rellena la ruta (enlace fantasma) y enfoca.
   $effect(() => {
     if ($dialog === "new") {
       newPath = $pendingNewPath;
-      newType = "Spec";
+      newType = "";
       $pendingNewPath = "";
     }
   });
@@ -27,9 +28,8 @@
   const commitPlaceholder = $derived(commitDiff ? suggestMsg(commitDiff, files) : "Describe el cambio…");
 
   function doCreate() {
-    let ty = newType;
-    if (ty === "__custom") ty = prompt("Tipo del concept:", "Spec") || "Spec";
-    createConcept(newPath, ty);
+    if (!canCreate) return;
+    createConcept(newPath, newType.trim());
   }
   function doCommit() {
     commitVersion(commitMsg, { log: commitLog });
@@ -46,14 +46,11 @@
       <div class="fm-grid" style="grid-template-columns:90px 1fr">
         <label>Ubicación</label><input class="fld" placeholder="specs/mi-pagina" spellcheck="false" bind:value={newPath} onkeydown={(e) => e.key === "Enter" && doCreate()} />
         <label>Tipo</label>
-        <select class="fld" bind:value={newType}>
-          {#each TYPES as t}<option>{t}</option>{/each}
-          <option value="__custom">otro…</option>
-        </select>
+        <input class="fld" placeholder="p. ej. Spec, Nota, Decisión…" spellcheck="false" bind:value={newType} onkeydown={(e) => e.key === "Enter" && doCreate()} />
       </div>
       <div class="row">
         <button class="btn-ghost" onclick={closeDialog}>Cancelar</button>
-        <button class="btn-primary" onclick={doCreate}>Crear</button>
+        <button class="btn-primary" onclick={doCreate} disabled={!canCreate}>Crear</button>
       </div>
     </div>
   {:else if $dialog === "confirm" && $confirmState}

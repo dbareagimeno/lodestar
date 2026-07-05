@@ -225,7 +225,8 @@ impl Workspace {
         allow_nonconformant: bool,
     ) -> Result<WriteOutcome, WorkspaceError> {
         let bundle = self.bundle()?;
-        let outcome = bundle.create_concept(p, ty, title, body, allow_nonconformant);
+        let now = now_iso8601();
+        let outcome = bundle.create_concept(p, ty, title, body, Some(&now), allow_nonconformant);
         if outcome.written {
             io::write_atomic(&self.root, &outcome.path, &outcome.raw)?;
             self.cache_upsert(&outcome.path, &outcome.raw);
@@ -683,5 +684,55 @@ fn default_identity() -> Author {
     Author {
         name: "lodestar".to_string(),
         email: "lodestar@localhost".to_string(),
+    }
+}
+
+/// Instante actual UTC en ISO-8601 con precisión de segundos: `YYYY-MM-DDTHH:MM:SSZ`.
+///
+/// Paridad con el prototipo, que escribe `new Date().toISOString().replace(/\.\d+Z$/,"Z")`
+/// (truncando los milisegundos). El core es puro y no toca el reloj; la workspace —único escritor
+/// con I/O— computa el instante y lo inyecta en `create_concept`. Se formatea a mano (algoritmo
+/// civil-desde-días de Howard Hinnant) para no arrastrar una dependencia de fecha/hora.
+fn now_iso8601() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let days = (secs / 86_400) as i64;
+    let rem = secs % 86_400;
+    let (hh, mm, ss) = (rem / 3_600, (rem % 3_600) / 60, rem % 60);
+    // civil_from_days (Hinnant): días desde 1970-01-01 → (año, mes, día) proleptic gregoriano.
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097); // [0, 146096]
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365; // [0, 399]
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
+    let mp = (5 * doy + 2) / 153; // [0, 11]
+    let d = doy - (153 * mp + 2) / 5 + 1; // [1, 31]
+    let m = if mp < 10 { mp + 3 } else { mp - 9 }; // [1, 12]
+    let year = if m <= 2 { y + 1 } else { y };
+    format!("{year:04}-{m:02}-{d:02}T{hh:02}:{mm:02}:{ss:02}Z")
+}
+
+#[cfg(test)]
+mod time_tests {
+    use super::now_iso8601;
+
+    #[test]
+    fn now_iso8601_tiene_formato_y_es_iso_para_el_core() {
+        let s = now_iso8601();
+        // Forma exacta: `YYYY-MM-DDTHH:MM:SSZ` (20 caracteres, sin milisegundos).
+        assert_eq!(s.len(), 20, "formato inesperado: {s}");
+        assert!(
+            s.ends_with('Z') && s.as_bytes()[10] == b'T',
+            "formato inesperado: {s}"
+        );
+        // El core debe aceptarlo como ISO (si no, FMT-TS marcaría warn en toda página creada).
+        let v = serde_yaml::Value::String(s.clone());
+        assert!(
+            lodestar_core::model::is_iso(&v),
+            "el core no reconoce como ISO: {s}"
+        );
     }
 }

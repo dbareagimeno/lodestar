@@ -328,13 +328,48 @@ fn create_concept_rechaza_no_conforme() {
     let b = Bundle::from_files(fm(&[]));
     let p = RelPath::new("nuevo.md").unwrap();
     // type vacío → rechazado (no Err de Result).
-    let outcome = b.create_concept(&p, "", Some("Nuevo"), "# H\n", false);
+    let outcome = b.create_concept(&p, "", Some("Nuevo"), "# H\n", None, false);
     assert!(!outcome.written);
     assert!(outcome.rejected.is_some());
     // con type válido → escribible.
-    let ok = b.create_concept(&p, "Nota", Some("Nuevo"), "# H\n", false);
+    let ok = b.create_concept(&p, "Nota", Some("Nuevo"), "# H\n", None, false);
     assert!(ok.written);
     assert!(ok.rejected.is_none());
+}
+
+#[test]
+fn create_concept_incluye_timestamp_en_su_posicion_canonica() {
+    let b = Bundle::from_files(fm(&[]));
+    let p = RelPath::new("nuevo.md").unwrap();
+    // Con timestamp (paridad prototipo): aparece antes de `status` (orden KNOWN_FM).
+    let ok = b.create_concept(
+        &p,
+        "Nota",
+        Some("Nuevo"),
+        "# H\n",
+        Some("2026-07-05T10:20:30Z"),
+        false,
+    );
+    assert!(ok.written);
+    assert!(
+        ok.raw.contains("timestamp: 2026-07-05T10:20:30Z"),
+        "falta el timestamp: {}",
+        ok.raw
+    );
+    let ts_pos = ok.raw.find("timestamp:").unwrap();
+    let status_pos = ok.raw.find("status:").unwrap();
+    assert!(
+        ts_pos < status_pos,
+        "timestamp debe preceder a status: {}",
+        ok.raw
+    );
+    // Sin timestamp: no se emite la clave.
+    let sin = b.create_concept(&p, "Nota", Some("Nuevo"), "# H\n", None, false);
+    assert!(
+        !sin.raw.contains("timestamp:"),
+        "no debía emitir timestamp: {}",
+        sin.raw
+    );
 }
 
 #[test]
