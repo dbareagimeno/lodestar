@@ -51,7 +51,7 @@ pub fn list() -> Value {
              "path": { "type": "string" },
              "type": { "type": "string" },
              "title": { "type": "string" },
-             "body": { "type": "string" },
+             "body": { "type": "string", "description": "Cuerpo Markdown. Si se omite, se genera «# {Tipo} - {Nombre}»." },
              "allow_nonconformant": { "type": "boolean", "default": false }
          }, "required": ["path", "type"], "additionalProperties": false }},
         {"name": "update_frontmatter", "description": "Patch de frontmatter (null borra).",
@@ -135,10 +135,7 @@ pub fn call(ws: &Workspace, name: &str, params: &Value) -> ToolResult {
             let p = rel(params, "path")?;
             let ty = params.get("type").and_then(Value::as_str).unwrap_or("");
             let title = params.get("title").and_then(Value::as_str);
-            let body = params
-                .get("body")
-                .and_then(Value::as_str)
-                .unwrap_or("# Resumen\n");
+            let body = params.get("body").and_then(Value::as_str).unwrap_or("");
             let allow = params
                 .get("allow_nonconformant")
                 .and_then(Value::as_bool)

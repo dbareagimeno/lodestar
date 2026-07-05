@@ -191,6 +191,25 @@ fn create_concept_escribe_y_query_lo_ve() {
     assert_eq!(resp[2]["result"]["structuredContent"]["conform"], true);
 }
 
+/// Sin `body`, create_concept genera el heading por defecto `# {Tipo} - {Nombre}` en el .md.
+#[test]
+fn create_concept_sin_body_genera_heading_por_defecto() {
+    let dir = bundle_min();
+    let resp = roundtrip(
+        dir.path(),
+        &[
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"create_concept","arguments":{"path":"otra.md","type":"Nota","title":"Otra"}}}"#,
+        ],
+        1,
+    );
+    assert_eq!(resp[0]["result"]["structuredContent"]["written"], true);
+    let contenido = std::fs::read_to_string(dir.path().join("otra.md")).unwrap();
+    assert!(
+        contenido.contains("# Nota - Otra\n"),
+        "falta el heading por defecto: {contenido}"
+    );
+}
+
 /// initialize ecoa la protocolVersion del cliente si la soporta.
 #[test]
 fn initialize_ecoa_version_soportada() {
