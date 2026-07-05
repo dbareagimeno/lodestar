@@ -136,11 +136,15 @@ fn rust_normalize(files: &FileMap, queries: &[&str]) -> Value {
 }
 
 /// Localiza `prototype/harness/run.mjs` desde el manifest del crate.
+///
+/// No se canonicaliza a propósito: en Windows `canonicalize` devuelve un path verbatim
+/// (`\\?\D:\...`) que node no sabe usar como base para resolver el `import` relativo
+/// `./proto.mjs` de `run.mjs`, y falla con `EISDIR ... lstat 'D:'`. El path con `..` lo
+/// resuelve node correctamente en las tres plataformas.
 fn harness_runner() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../prototype/harness/run.mjs")
-        .canonicalize()
-        .expect("ruta del arnés existe")
+    let p = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../prototype/harness/run.mjs");
+    assert!(p.exists(), "el arnés existe: {}", p.display());
+    p
 }
 
 fn node_available() -> bool {
