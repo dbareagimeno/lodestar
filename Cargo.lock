@@ -2173,6 +2173,7 @@ dependencies = [
  "lodestar-core",
  "lodestar-store",
  "lodestar-vcs",
+ "rusqlite",
  "serde",
  "serde_json",
  "serde_yaml",
