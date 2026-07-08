@@ -59,8 +59,11 @@ jobs:
             libwebkit2gtk-4.1-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev \
             libgtk-3-dev librsvg2-dev patchelf
 
-      # tauri-action correrá el beforeBuildCommand (npm run build en frontend),
-      # pero las dependencias del frontend deben instalarse antes.
+      # Construimos el frontend ANTES de tauri-action (en vez de delegarlo al
+      # beforeBuildCommand de tauri.conf.json). tauri build resuelve la ruta de
+      # beforeBuildCommand relativa a un CWD dependiente del SO; con el package.json
+      # del arnés en prototype/harness eso resolvía mal en Linux. Construir aquí
+      # (como hace ci.yml) es determinista: tauri solo embebe frontend/dist ya listo.
       - name: Node para construir el frontend (dist embebido por Tauri)
         uses: actions/setup-node@v4
         with:
@@ -69,6 +72,9 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
       - name: Instala dependencias del frontend (reproducible)
         run: npm ci
+        working-directory: frontend
+      - name: Construye el frontend (dist/)
+        run: npm run build
         working-directory: frontend
 
       - name: Build + bundle + release (tauri-action)
