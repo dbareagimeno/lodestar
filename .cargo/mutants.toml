@@ -1,0 +1,16 @@
+# Config de cargo-mutants (skill /mutantes — mutation testing a demanda, sin CI).
+# Uso típico: cargo mutants -p lodestar-core --file src/<módulo>.rs
+
+# Fixtures y arneses no son código de producción: mutarlos solo genera ruido.
+exclude_globs = [
+    "crates/lodestar-fixtures/**",
+    "crates/*/tests/**",
+]
+
+# El árbol mutado se copia respetando .gitignore: prototype/harness/node_modules no se copia,
+# y los tests diferenciales fallarían con ERR_MODULE_NOT_FOUND en vez de saltarse — se excluyen.
+additional_cargo_test_args = ["--", "--skip", "diferencial"]
+
+# La suite completa ronda el minuto; margen amplio para mutantes que ralentizan.
+timeout_multiplier = 3.0
+minimum_test_timeout = 60.0

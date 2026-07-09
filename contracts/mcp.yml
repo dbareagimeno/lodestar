@@ -1,0 +1,147 @@
+# Contrato MCP — spec de SUPERFICIE Y SEMÁNTICA de las tools del servidor MCP.
+#
+# Se verifica contra el código real con `/contrato --check` (agente `guardian-contrato`).
+# Refleja `crates/lodestar-mcp/src/tools.rs` (registro `list()` + despacho `call()`) y el
+# bucle JSON-RPC de `crates/lodestar-mcp/src/main.rs`.
+#
+# REGLAS (ver contracts/README.md):
+#   - Los TIPOS NO se definen aquí: se REFERENCIAN por nombre de `lodestar_core::types`.
+#     Los retornos se envuelven en un objeto json (el spec MCP exige que `structuredContent`
+#     sea objeto, nunca array): p. ej. `{ paths: Vec<RelPath> }`, `{ commits: Vec<CommitRow> }`.
+#   - Nombres de tool CONGELADOS (ARCHITECTURE.md §7.2). `fuente:` = fichero:línea aproximada.
+#
+# INVARIANTES: shells finos sobre `Workspace`, CERO lógica OKF propia (misma verdad que
+# CLI/Tauri; test golden cross-fachada lo verifica). create_concept/update_frontmatter/commit
+# escriben el `.md` atómico por el ÚNICO escritor; nunca la cache. `path`/`concept` se validan
+# a `RelPath` (rechaza absolutas/`..`, chokepoint de traversal).
+
+meta:
+  fachada: lodestar-mcp (JSON-RPC por stdio; stdout puro, logs a stderr)
+  fuente_registro: crates/lodestar-mcp/src/tools.rs:25   # tools::list()
+  fuente_despacho: crates/lodestar-mcp/src/tools.rs:88   # tools::call()
+  fuente_bucle: crates/lodestar-mcp/src/main.rs:70       # handle()
+  protocolo:
+    metodos: [initialize, ping, "tools/list", "tools/call"]
+    protocol_versions_aceptadas: ["2024-11-05", "2025-03-26", "2025-06-18"]
+  errores_protocolo:
+    - "-32700 Parse error (JSON imparseable), id null (main.rs:55)"
+    - "-32600 Invalid Request (no es objeto / batch no soportado) (main.rs:75)"
+    - "-32601 método no soportado (main.rs:127)"
+    - "-32602 tool desconocida (tools/call con nombre no registrado) (main.rs:109)"
+  errores_ejecucion: >-
+    Un error de ejecución de tool NO viaja como error JSON-RPC: va en el result como
+    { content:[{type:text,text:msg}], isError:true } para que el modelo lo vea y corrija
+    (main.rs:120). Éxito → { content:[{type:text,text:json}], structuredContent:<objeto> }.
+  arranque: "Exige index.md o .lodestar/ en el root, si no exit 3 (main.rs:24)."
+
+tools:
+  - nombre: find_backlinks
+    fuente: crates/lodestar-mcp/src/tools.rs:90
+    params:
+      - { nombre: concept, tipo: "RelPath (string)", requerido: true, semantica: "ruta relativa del concept" }
+    retorno: Backlinks
+    errores: ["«falta el parámetro «concept»»", "InvalidRelPath", "WorkspaceError"]
+    semantica: "Quién enlaza a un concept: inbound + index refs + dangling (backlinks resueltos por el core)."
+
+  - nombre: find_orphans
+    fuente: crates/lodestar-mcp/src/tools.rs:94
+    params: []
+    retorno: "json { orphans: Vec<RelPath> }  # proyección de Analysis.orphans"
+    errores: ["WorkspaceError"]
+    semantica: "Concepts sin enlaces entrantes."
+
+  - nombre: find_dangling
+    fuente: crates/lodestar-mcp/src/tools.rs:98
+    params: []
+    retorno: "json { dangling: Vec<RelPath> }  # proyección de Analysis.dangling"
+    errores: ["WorkspaceError"]
+    semantica: "Enlaces que apuntan a páginas inexistentes."
+
+  - nombre: neighborhood
+    fuente: crates/lodestar-mcp/src/tools.rs:102
+    params:
+      - { nombre: concept, tipo: "RelPath (string)", requerido: true }
+      - { nombre: depth, tipo: integer, default: 1, minimo: 1 }
+      - { nombre: direction, tipo: "string (Direction)", valores: ["out", "in", "both"], default: "out  # cualquier otro → Out" }
+    retorno: Neighborhood
+    errores: ["«falta el parámetro «concept»»", "InvalidRelPath", "WorkspaceError"]
+    semantica: "Subgrafo dirigido alrededor del concept (depth, direction)."
+
+  - nombre: conformance_check
+    fuente: crates/lodestar-mcp/src/tools.rs:112
+    params:
+      - { nombre: path, tipo: "RelPath (string)", requerido: false, semantica: "opcional: solo los checks de este fichero" }
+    retorno: >-
+      con path → json { checks: Vec<Check> } (per_file, vacío si no existe);
+      sin path → json { hardFail, warnCount, conform: bool, okfVersion } (proyección de Analysis)
+    errores: ["InvalidRelPath (si path presente)", "WorkspaceError"]
+    semantica: "Gate OKF del bundle completo, o los checks de un solo path. `conform = hardFail == 0`."
+
+  - nombre: query
+    fuente: crates/lodestar-mcp/src/tools.rs:129
+    params:
+      - { nombre: dsl, tipo: string, requerido: true, semantica: "DSL de subcadena del prototipo («type:X tag:y is:orphan texto…»)" }
+    retorno: "json { paths: Vec<RelPath> }"
+    errores: ["WorkspaceError"]
+    semantica: "Query estructurada; misma lógica del core que CLI/Tauri. dsl ausente → \"\"."
+
+  - nombre: create_concept
+    fuente: crates/lodestar-mcp/src/tools.rs:134
+    params:
+      - { nombre: path, tipo: "RelPath (string)", requerido: true }
+      - { nombre: type, tipo: string, requerido: true }
+      - { nombre: title, tipo: string, requerido: false }
+      - { nombre: body, tipo: string, requerido: false, semantica: "cuerpo Markdown; si se omite, «# {Tipo} - {Nombre}»" }
+      - { nombre: allow_nonconformant, tipo: boolean, default: false }
+    retorno: "WriteOutcome (json: path, written, rejected, checks, bundleHardFail)"
+    errores: ["«falta el parámetro «path»»", "InvalidRelPath", "WorkspaceError"]
+    semantica: "Crea un concept validado (rechaza no conforme salvo allow). Escritura atómica por el único escritor; nunca la cache."
+
+  - nombre: update_frontmatter
+    fuente: crates/lodestar-mcp/src/tools.rs:148
+    params:
+      - { nombre: path, tipo: "RelPath (string)", requerido: true }
+      - { nombre: patch, tipo: "object (FrontmatterPatch)", requerido: true, semantica: "merge-patch RFC 7386: valor escribe, null BORRA" }
+    retorno: "WriteOutcome (json: path, written, rejected, checks, bundleHardFail)"
+    errores: ["«falta el parámetro «path»»", "«falta el parámetro «patch» (objeto)»", "InvalidRelPath", "WorkspaceError"]
+    semantica: "Patch de frontmatter y reescritura atómica del `.md` si es conforme. Único escritor."
+
+  - nombre: generate_index
+    fuente: crates/lodestar-mcp/src/tools.rs:154
+    params:
+      - { nombre: dir, tipo: string, default: "\"\"  # raíz", semantica: "directorio relativo a regenerar" }
+    retorno: "json { written, removed, unchanged }  # ApplyReport"
+    errores: ["WorkspaceError"]
+    semantica: "Regenera el index de un directorio (Mutation aplicada por el único escritor)."
+
+  - nombre: generate_tag_indexes
+    fuente: crates/lodestar-mcp/src/tools.rs:159
+    params: []
+    retorno: "json { written, removed, unchanged }  # ApplyReport"
+    errores: ["WorkspaceError"]
+    semantica: "Regenera los índices de tags."
+
+  - nombre: history
+    fuente: crates/lodestar-mcp/src/tools.rs:163
+    params:
+      - { nombre: limit, tipo: integer, default: 20, minimo: 1 }
+    retorno: "json { commits: Vec<CommitRow> }"
+    errores: ["WorkspaceError"]
+    semantica: "Historial de commits (libgit2 local, sin red)."
+
+  - nombre: last_conforming_commit
+    fuente: crates/lodestar-mcp/src/tools.rs:168
+    params: []
+    retorno: "json { sha: Sha | null }  # string hex o null si ninguno"
+    errores: ["WorkspaceError"]
+    semantica: "Último commit conforme (para rollback / gate de CI)."
+
+  - nombre: commit
+    fuente: crates/lodestar-mcp/src/tools.rs:172
+    params:
+      - { nombre: message, tipo: string, default: "«Commit del agente»" }
+    retorno: "json { sha: Sha, conformance: CommitConformance }  # {hardFail, warnCount, conform}"
+    errores: ["WorkspaceError"]
+    semantica: >-
+      Commit del agente por el único escritor + conformidad post-commit. La fachada añade el
+      trailer «Co-Authored-By: lodestar-agent <agent@lodestar>» para distinguir commits de agente (§12).

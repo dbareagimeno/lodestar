@@ -137,3 +137,22 @@ pasa nodos/aristas por métodos en `$effect`, **nunca** con `{#each}` reactivo (
   no la deshagas por inercia.
 - **Mantén los documentos de estado**: si cierras algo de `DECISIONES.md` o cambias el estado de una
   épica, refleja el cambio en `IMPLEMENTATION_STATUS.md`/`DECISIONES.md` en el mismo PR.
+
+## Flujo de trabajo con agentes (SDD · TDD · BDD · jueces ciegos)
+
+El desarrollo se organiza con los agentes y skills de `.claude/` — mapa completo y workflows por
+tipo de trabajo en [`.claude/README.md`](.claude/README.md):
+
+| Skill | Cuándo |
+|---|---|
+| `/historia <desc\|ID>` | Puerta de entrada de todo trabajo: spec en `requirements/` + ratificación. |
+| `/tdd <ID>` | Rojo→verde→refactor con separación de poderes (autor-tests ≠ implementador). |
+| `/juzgar [ID] [--panel]` | Juez **ciego** (agente fresco, solo spec+diff) antes de commitear/mergear. |
+| `/contrato [--check]` | Coherencia de la frontera front↔back contra `contracts/*.yml`. |
+| `/mutantes [--file ruta]` | cargo-mutants scoped: ¿la suite muerde donde tocaste? |
+| `/ciclo <desc\|ID>` | Pipeline completo (historia→tdd→contrato→juez→docs→commit). Úsalo para features. |
+
+Reglas de proceso: **nada se implementa sin historia ratificada**; el implementador **no puede
+tocar los tests** del autor; a los jueces **nunca** se les pasa contexto de la conversación (esa es
+la garantía de imparcialidad); `contracts/*.yml` describe la superficie de la frontera pero los
+tipos viven solo en `core::types` (invariante #4).

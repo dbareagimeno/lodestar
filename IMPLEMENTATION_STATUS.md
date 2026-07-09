@@ -40,6 +40,23 @@ cargo run -p lodestar-tauri                            # app de escritorio (Taur
 | **E7** `lodestar-mcp` | 🟢 Parcial | 13 tools sobre la workspace + bucle JSON-RPC por stdio (stdout puro). **Golden cross-fachada** (tool==workspace) + e2e. **5 tests**. Pendiente: transporte `rmcp` oficial + resources (ver [`DECISIONES.md §3`](DECISIONES.md)). |
 | **E8** Transversales | 🟢 Parcial | Hechos: exit codes/SARIF, escritura atómica, **zip-slip cerrado por RelPath en `import`**, identidad de commits + override por `lodestar.toml`, trailer Co-Authored-By del agente, gitignore de `.lodestar/`, **config por-bundle (`lodestar.toml`: strictness + identidad)**, **`lodestar import`** (zip del prototipo o dir), **`init` con git init + commit inicial real**, **i18n keyed por código** (catálogo español), **arnés diferencial JS-vs-Rust (§12)**, y **pipeline de release multiplataforma** (`release.yml`: macOS arm64/Windows/Linux → bundles sin firmar + binarios CLI/MCP; Release en borrador) con **CI multiplataforma** (job de Rust en las 3 plataformas). Pendiente: **firma/notarización** de bundles + updater, gate de bench (§11), threat model. |
 
+## Infraestructura de proceso (2026-07-10)
+
+El repo tiene ahora una **estructura de agentes y skills** para el desarrollo por venir
+(SDD · TDD · BDD · jueces ciegos · contratos de frontera) — mapa y workflows en
+[`.claude/README.md`](.claude/README.md):
+
+- **Agentes** (`.claude/agents/`): `historiador` · `autor-tests` · `implementador` ·
+  `juez-historia` (ciego: solo spec+diff) · `guardian-contrato`.
+- **Skills** (`.claude/skills/`): `/historia` · `/tdd` · `/juzgar [--panel]` · `/contrato [--check]`
+  · `/mutantes` · `/ciclo` (pipeline completo).
+- **Contratos de la frontera** (`contracts/`): `ipc.yml` (comandos Tauri + eventos) y `mcp.yml`
+  (13 tools), extraídos del código real; los tipos siguen viviendo solo en `core::types`
+  (invariante #4). Verificación con `/contrato --check`.
+- **Mutation testing a demanda**: `cargo-mutants` configurado (`.cargo/mutants.toml`), sin CI.
+- Primera historia acordada para el nuevo flujo: **ts-rs** (E0-H04/E6-H03,
+  [`DECISIONES.md §4`](DECISIONES.md)).
+
 ## Cobertura de historias (destacadas)
 
 - **E1**: H01–H19 implementadas y testeadas, **incluida H18** (arnés diferencial JS-vs-Rust:

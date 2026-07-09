@@ -60,15 +60,18 @@
 - **Recomendación**: mantener stdio hasta tener un cliente MCP real que lo requiera; el contrato de
   tools ya está congelado, migrar el transporte después es mecánico.
 
-## 4. Generación del `.d.ts` desde Rust (ts-rs/specta) — E0-H04/E6-H03
+## 4. Generación del `.d.ts` desde Rust (ts-rs/specta) — E0-H04/E6-H03 — 🟡 DIRECCIÓN RATIFICADA
 
 - **Estado**: `frontend/src/lib/ipc/types.ts` es un **espejo a mano** del contrato de `core::types`,
   marcado como «a generar». Los nombres/orden coinciden con Rust.
-- **Por qué está abierta**: cablear `ts-rs`/`specta` añade dependencias y un paso de build; es la forma
-  de **hacer cumplir** el invariante «un solo contrato de tipos» (principio #4) y matar la deriva.
-- **Qué decidir**: ¿enganchamos el generador ahora (recomendado antes de crecer la UI) o seguimos con
-  el espejo manual mientras la superficie es pequeña?
-- **Recomendación**: engancharlo antes de portar más UI (punto 2), para que el `.d.ts` sea derivado.
+- **Decidido (2026-07-10)**: **sí a ts-rs** — el `.d.ts` se generará desde Rust. Además, la
+  frontera front↔back queda descrita por **contratos YAML de superficie** (`contracts/ipc.yml`,
+  `contracts/mcp.yml` + `contracts/README.md`): el YAML documenta comandos/eventos/tools y su
+  semántica; los **tipos** siguen viviendo solo en `core::types` (invariante #4). El drift se
+  vigila con el skill `/contrato --check` (agente `guardian-contrato`).
+- **Pendiente**: la implementación de ts-rs (deps + paso de build + marcar `types.ts` como
+  generado/«NO EDITAR»). Acordado ejecutarla como **primera historia del nuevo flujo `/ciclo`**
+  (dogfooding de `.claude/README.md`). Esta sección se cierra en ese PR.
 
 ## 5. i18n multi-idioma
 
