@@ -46,10 +46,12 @@ El repo tiene ahora una **estructura de agentes y skills** para el desarrollo po
 (SDD · TDD · BDD · jueces ciegos · contratos de frontera) — mapa y workflows en
 [`.claude/README.md`](.claude/README.md):
 
-- **Agentes** (`.claude/agents/`): `historiador` · `autor-tests` · `implementador` ·
-  `juez-historia` (ciego: solo spec+diff) · `guardian-contrato`.
-- **Skills** (`.claude/skills/`): `/historia` · `/tdd` · `/juzgar [--panel]` · `/contrato [--check]`
-  · `/mutantes` · `/ciclo` (pipeline completo).
+- **Agentes** (`.claude/agents/`): `planificador` (spec/diseño mayor → épica de historias) ·
+  `historiador` · `autor-tests` · `implementador` · `juez-historia` (ciego: solo spec+diff) ·
+  `guardian-contrato`.
+- **Skills** (`.claude/skills/`): `/planificar` (features grandes: diseño + épica, 2 puertas) ·
+  `/historia` · `/tdd` · `/juzgar [--panel]` · `/contrato [--check]` · `/mutantes` · `/ciclo`
+  (pipeline completo por historia).
 - **Contratos de la frontera** (`contracts/`): `ipc.yml` (comandos Tauri + eventos) y `mcp.yml`
   (13 tools), extraídos del código real; los tipos siguen viviendo solo en `core::types`
   (invariante #4). Verificación con `/contrato --check`.

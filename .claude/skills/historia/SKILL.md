@@ -1,6 +1,6 @@
 ---
 name: historia
-description: SDD - redacta o refina una historia en requirements/ (formato E<n>-H<nn>, criterios BDD Dado/Cuando/Entonces, delta de contrato YAML) y la presenta para ratificación. Úsalo al arrancar cualquier trabajo nuevo; nunca se implementa sin historia ratificada.
+description: SDD - redacta o refina una historia en requirements/ (formato E<n>-H<nn>, criterios BDD Dado/Cuando/Entonces, delta de contrato YAML) y la presenta para ratificación. Úsalo al arrancar trabajo que cabe en una historia (para features grandes, /planificar); nunca se implementa sin historia ratificada.
 argument-hint: <descripción de la necesidad | ID E<n>-H<nn> a refinar>
 ---
 

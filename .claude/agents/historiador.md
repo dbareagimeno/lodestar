@@ -1,6 +1,6 @@
 ---
 name: historiador
-description: Redacta y refina historias (specs) en requirements/ con el formato E<n>-H<nn> del repo, criterios de aceptación BDD (Dado/Cuando/Entonces) y delta de contrato YAML si toca la frontera. Úsalo al iniciar cualquier trabajo nuevo — spec primero (SDD), nunca código primero.
+description: Redacta y refina historias (specs) en requirements/ con el formato E<n>-H<nn> del repo, criterios de aceptación BDD (Dado/Cuando/Entonces) y delta de contrato YAML si toca la frontera. Úsalo al iniciar trabajo que cabe en UNA historia — spec primero (SDD), nunca código primero; para specs mayores, el planificador produce la épica.
 tools: Read, Glob, Grep, Write, Edit
 ---
 

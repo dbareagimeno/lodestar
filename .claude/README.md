@@ -9,6 +9,7 @@
 
 | Agente | Modelo | Rol |
 |---|---|---|
+| `planificador` | sesión | Convierte una spec/diseño mayor en una **épica**: fase A (propuesta de diseño → adenda a `ARCHITECTURE.md`) y fase B (descomposición en historias ordenadas + trazabilidad), cada una con puerta de ratificación. |
 | `historiador` | sesión | Redacta historias `E<n>-H<nn>` con criterios BDD y delta de contrato. Propone; el usuario ratifica. |
 | `autor-tests` | opus | Fase ROJA: escribe los tests de la historia y **verifica que fallan**. No toca `src/`. |
 | `implementador` | opus | Fase VERDE: pone los tests en verde + gates. **No puede modificar los tests.** |
@@ -22,7 +23,8 @@ quien implementa no toca los tests, y quien juzga no conoce las intenciones de n
 
 | Skill | Qué hace |
 |---|---|
-| `/historia <desc\|ID>` | Redacta/refina la spec y pide ratificación. Puerta de entrada de todo trabajo. |
+| `/planificar <spec\|§N>` | De spec/diseño mayor a épica de historias ordenadas (2 puertas: diseño y épica). Puerta de entrada de las **features grandes**. |
+| `/historia <desc\|ID>` | Redacta/refina la spec y pide ratificación. Puerta de entrada del trabajo que cabe en **una historia**. |
 | `/tdd <ID>` | Rojo → verde → refactor de una historia ratificada. |
 | `/juzgar [ID] [--panel]` | 1 juez ciego (o panel de 3 lentes: corrección / invariantes / paridad+tests). |
 | `/contrato [--check]` | Verifica (o sincroniza) la frontera front↔back contra `contracts/`. |
@@ -31,8 +33,19 @@ quien implementa no toca los tests, y quien juzga no conoce las intenciones de n
 
 ## Workflows recomendados
 
-- **Feature nueva** (p. ej. ghosts+templates, `DECISIONES.md §10`): `/ciclo` completo. Las puertas
-  (ratificación, gates, sin drift, veredicto) no se negocian: si una falla, se vuelve atrás.
+La pirámide del flujo, de arriba abajo — cada nivel tiene su puerta:
+
+```
+/planificar  (spec/feature grande → diseño ratificado + épica de historias)
+   └─ /ciclo E<n>-H<nn>   (una historia de principio a fin, en orden de construcción)
+        └─ /historia · /tdd · /contrato · /juzgar   (etapas del ciclo)
+```
+
+- **Feature grande** (p. ej. ghosts+templates, `DECISIONES.md §10`): `/planificar` primero —
+  cierra el diseño y produce la épica — y después `/ciclo` historia a historia. Las puertas
+  (ratificación de diseño, de épica, gates, sin drift, veredicto) no se negocian: si una falla,
+  se vuelve atrás.
+- **Feature que cabe en una historia**: `/ciclo` directo (que empieza por `/historia`).
 - **Bugfix**: no hace falta historia completa — test de regresión primero (rojo, reproduce el bug),
   fix (verde), `/juzgar` simple con el issue como spec. Si el bug es de paridad con el prototipo,
   el test va además al arnés diferencial o a la sección «Regresiones de paridad con el

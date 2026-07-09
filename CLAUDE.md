@@ -145,7 +145,8 @@ tipo de trabajo en [`.claude/README.md`](.claude/README.md):
 
 | Skill | Cuándo |
 |---|---|
-| `/historia <desc\|ID>` | Puerta de entrada de todo trabajo: spec en `requirements/` + ratificación. |
+| `/planificar <spec\|§N>` | Features grandes: diseño ratificado + épica de historias ordenadas (2 puertas). |
+| `/historia <desc\|ID>` | Trabajo que cabe en una historia: spec en `requirements/` + ratificación. |
 | `/tdd <ID>` | Rojo→verde→refactor con separación de poderes (autor-tests ≠ implementador). |
 | `/juzgar [ID] [--panel]` | Juez **ciego** (agente fresco, solo spec+diff) antes de commitear/mergear. |
 | `/contrato [--check]` | Coherencia de la frontera front↔back contra `contracts/*.yml`. |

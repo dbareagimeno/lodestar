@@ -11,7 +11,9 @@ Encadena el flujo completo del repo. Cada etapa tiene su skill; tú orquestas y 
 ## Etapas (en orden, con sus puertas)
 
 1. **Spec** — si no hay historia ratificada para el argumento, ejecuta `/historia`. **Puerta:
-   ratificación explícita del usuario.** (Si ya existe historia ratificada, salta a 2.)
+   ratificación explícita del usuario.** (Si ya existe historia ratificada, salta a 2. Si el
+   alcance NO cabe en una historia, esto no es un ciclo: redirige a `/planificar`, que produce la
+   épica cuyas historias sí se ejecutan con `/ciclo`.)
 2. **Rama** — trabaja en una rama `claude/<slug-de-la-historia>` desde `main` actualizado.
 3. **TDD** — ejecuta `/tdd <ID>` (rojo → verde → gates). **Puerta: gates locales en verde.**
 4. **Contrato** — si el diff toca `core::types`, `src-tauri`, `lodestar-mcp` o `frontend/src/lib/ipc/`,
