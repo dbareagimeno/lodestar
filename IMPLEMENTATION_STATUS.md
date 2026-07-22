@@ -172,5 +172,11 @@ superficie de producto; git queda como crate dormido) y `DECISIONES.md §0`. Des
     `switch`/`merge`/`pull`/`push`/`hooks`) y los flags `--staged`/`--rev`/`--range` de `check`
     (D-check). `check` sin flags juzga el working tree; `reindex` conservado (movido a
     `commands.rs`). `git.rs` eliminado. Juez ciego: APROBADA (4/4).
-  - ⏳ E9-H03..H07 pendientes.
+  - ✅ **E9-H05** — Config `.lodestar/config.yaml` (YAML): tipo `WorkspaceConfig` +
+    `WorkspaceConfig::load` (writableRoots/referenceRoots/ignored + gate + transactions; identity
+    dormida). Defaults seguros; `RelPath` rechaza traversal en roots; malformado = error explícito.
+    Convive con el `Config`/`lodestar.toml` legado. Juez ciego: APROBADA CON RESERVAS (4/4).
+    **Pendiente en E9-H06**: garantizar el merge de `ignored` (hoy `#[serde(default)]` reemplaza;
+    los obligatorios `.lodestar/runtime`/`.git` deben inyectarse siempre al consumir `ignored`).
+  - ⏳ E9-H03, H04, H06, H07 pendientes.
 - E10–E14: pendientes.

@@ -465,3 +465,95 @@ fn escritorio_crear_workspace_con_cache_vieja_funciona() {
     assert!(outcome.written);
     assert!(root.join("nuevo.md").is_file());
 }
+
+// ---------------------------------------------------------------------------
+// E9-H05 — Config nueva `.lodestar/config.yaml` (`WorkspaceConfig::load`).
+//
+// Fase ROJA: `WorkspaceConfig` y su loader YAML todavía NO existen en producción.
+// Estos tests fijan el contrato objetivo (ARCHITECTURE.md §19.4, DECISIONES D4/D5):
+//   WorkspaceConfig { workspace: { writable_roots: Vec<RelPath>, reference_roots: Vec<RelPath>,
+//                                  ignored: Vec<String> }, gate, transactions }
+// cargado con `WorkspaceConfig::load(root)` desde `.lodestar/config.yaml` (YAML, claves camelCase).
+// Los defaults son seguros: un bundle sin `config.yaml` NO es error.
+// ---------------------------------------------------------------------------
+
+/// Escribe `<root>/.lodestar/config.yaml` con el contenido dado (crea `.lodestar/` si falta).
+fn escribe_config_yaml(root: &std::path::Path, contenido: &str) {
+    let dir = root.join(".lodestar");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("config.yaml"), contenido).unwrap();
+}
+
+/// Criterio: `.lodestar/config.yaml` con `writableRoots: [knowledge]` →
+/// `writable_roots == [RelPath("knowledge")]`.
+#[test]
+fn carga_writable_roots() {
+    use lodestar_workspace::WorkspaceConfig;
+    let dir = tempfile::tempdir().unwrap();
+    escribe_config_yaml(dir.path(), "workspace:\n  writableRoots: [knowledge]\n");
+
+    let cfg = WorkspaceConfig::load(dir.path()).unwrap();
+
+    assert_eq!(
+        cfg.workspace.writable_roots,
+        vec![RelPath::new("knowledge").unwrap()],
+        "writableRoots del YAML debe deserializarse a Vec<RelPath> validado"
+    );
+}
+
+/// Criterio: bundle SIN `config.yaml` → defaults seguros (NO error) y `ignored` contiene
+/// `.lodestar/runtime`. (No aseveramos el valor exacto de `writable_roots` por defecto: la
+/// representación del root "todo el bundle" es una decisión de diseño del implementador —
+/// `RelPath::new(".")` es inválido — y no debemos cerrarla desde el test.)
+#[test]
+fn defaults_sin_config() {
+    use lodestar_workspace::WorkspaceConfig;
+    let dir = tempfile::tempdir().unwrap();
+    // Deliberadamente NO escribimos `.lodestar/config.yaml`.
+
+    let cfg = WorkspaceConfig::load(dir.path())
+        .expect("un bundle sin config.yaml debe cargar defaults seguros, no fallar");
+
+    assert!(
+        cfg.workspace
+            .ignored
+            .iter()
+            .any(|p| p == ".lodestar/runtime"),
+        "los defaults de `ignored` deben incluir siempre `.lodestar/runtime`; eran: {:?}",
+        cfg.workspace.ignored
+    );
+}
+
+/// Criterio: `writableRoots: [../escape]` → error de validación (`RelPath` rechaza `..`).
+/// La carga NO debe silenciar el traversal ni caer a defaults: debe ser `Err`.
+#[test]
+fn roots_rechazan_traversal() {
+    use lodestar_workspace::WorkspaceConfig;
+    let dir = tempfile::tempdir().unwrap();
+    escribe_config_yaml(dir.path(), "workspace:\n  writableRoots: [\"../escape\"]\n");
+
+    let res = WorkspaceConfig::load(dir.path());
+
+    assert!(
+        res.is_err(),
+        "un writableRoot con `..` debe ser rechazado por RelPath y propagarse como error, \
+         no devolver una config; se obtuvo: {res:?}"
+    );
+}
+
+/// Criterio: `config.yaml` malformado → error explícito (NO defaults silenciosos).
+#[test]
+fn config_malformada_es_error() {
+    use lodestar_workspace::WorkspaceConfig;
+    let dir = tempfile::tempdir().unwrap();
+    // Secuencia de flujo YAML sin cerrar: parseo inválido garantizado.
+    escribe_config_yaml(dir.path(), "workspace:\n  writableRoots: [knowledge\n");
+
+    let res = WorkspaceConfig::load(dir.path());
+
+    assert!(
+        res.is_err(),
+        "un config.yaml malformado debe ser error explícito, nunca caer a defaults silenciosos; \
+         se obtuvo: {res:?}"
+    );
+}

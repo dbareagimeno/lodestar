@@ -26,7 +26,7 @@ mod error;
 mod io;
 mod snapshot;
 
-pub use config::Config;
+pub use config::{Config, WorkspaceConfig};
 pub use error::WorkspaceError;
 pub use snapshot::BundleSnapshot;
 
