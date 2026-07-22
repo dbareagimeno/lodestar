@@ -1915,3 +1915,286 @@ fn plan_warnings_permitido() {
         "con resultado conforme y `allowWarnings:true`, el plan es aplicable",
     );
 }
+
+// --- E12-H05: normalización de operaciones de contenido -----------------------------------------
+//
+// Fase ROJA: los normalizadores puros de contenido todavía NO existen en producción. Ubicación
+// ASUMIDA: el módulo `lodestar_core::plan` (junto a `assess_risk`/`semantic_diff`/`validate_result`
+// — es análisis/normalización de plan, y el core es puro). Firmas ASUMIDAS (documentadas por el
+// autor de tests; el implementador queda vinculado a ellas):
+//
+//   pub fn normalize_create(
+//       bundle: &Bundle, schema: &Schema, path: &RelPath,
+//       doctype: &str, title: Option<&str>, body: Option<String>,
+//   ) -> Result<NormalizedOperation, CoreError>;
+//   pub fn normalize_replace_text(
+//       bundle: &Bundle, path: &RelPath,
+//       find: &str, replace: &str, expected_occurrences: Option<usize>,
+//   ) -> Result<NormalizedOperation, CoreError>;
+//   pub fn normalize_edit_section(
+//       bundle: &Bundle, path: &RelPath,
+//       heading_path: &[String], mode: EditSectionMode, content: &str,
+//   ) -> Result<NormalizedOperation, CoreError>;
+//
+// Forma RESUELTA de la `NormalizedOperation` de salida (contrato que estos tests fijan): como el
+// tipo `NormalizedOperation::EditSection` NO tiene campo para el cuerpo final completo (solo
+// `heading_path`/`mode`/`content`), una operación de sección "resuelta a la escritura concreta"
+// (E12-H01: "cada una resuelta a las escrituras concretas que producirá") solo puede llevar el
+// cuerpo final en `ReplaceBody { path, body }`. Por eso este autor ASUME que `normalize_edit_section`
+// devuelve un `NormalizedOperation::ReplaceBody` con el cuerpo entero ya reescrito. `normalize_create`
+// devuelve `NormalizedOperation::Create { body: Some(<plantilla resuelta>), .. }` (el propio tipo
+// `Create` porta `body: Option<String>`).
+//
+// Dónde vive la lógica de secciones: hoy `parse_headings`/`locate_section`/`extract_sections` son
+// funciones PRIVADAS de `lodestar-app` (E10-H10, `crates/lodestar-app/src/lib.rs`). Como esta
+// normalización es del core PURO, este autor ASUME que la lógica de localización de secciones se
+// MUEVE a `core` (lo natural: `core::model`, donde ya viven `parse_file`/`build_raw`/`split_front`,
+// o `core::plan`) y que `lodestar-app::knowledge_get` pasa a reusarla. El test extra
+// `edit_section_ignora_code_fence` cierra la reserva documentada de E10-H10: `parse_headings` NO
+// reconoce hoy los bloques de código fenceados (` ``` `) y confundiría un `#` interno con un heading.
+//
+// Hasta que E12-H05 defina los tres normalizadores, estos cuatro tests hacen ROJO por SÍMBOLO
+// AUSENTE (compile-fail: `plan::normalize_create`/`normalize_replace_text`/`normalize_edit_section`
+// no existen), lo que impide compilar el binario de tests del crate. Es el rojo esperado.
+
+/// Extrae el cuerpo final de una operación de contenido ya normalizada. Este autor fija que
+/// `edit_section` se resuelve a un `ReplaceBody` (ver comentario de sección): cualquier otra
+/// variante es un fallo del contrato acordado.
+fn cuerpo_resuelto(op: &NormalizedOperation) -> &str {
+    match op {
+        NormalizedOperation::ReplaceBody { body, .. } => body,
+        otro => panic!(
+            "una operación de sección normalizada debe resolverse a `ReplaceBody` con el cuerpo \
+             final completo; fue {otro:?}",
+        ),
+    }
+}
+
+/// Criterio `create_usa_plantilla`: **Dado** un `create` SIN body para un `DocType` con
+/// `bodyTemplate`, **Cuando** se normaliza, **Entonces** el cuerpo sale de la plantilla (con
+/// `{title}` sustituido). Se aseveran PROPIEDADES (el cuerpo lleva el marcador distintivo de la
+/// plantilla, sustituye el título y no deja el placeholder crudo), no el texto exacto.
+#[test]
+fn create_usa_plantilla() {
+    use lodestar_core::schema::{DocType, Schema};
+
+    // Bundle mínimo (solo el index raíz): el concepto a crear todavía no existe.
+    let b = Bundle::from_files(fm(&[(
+        "index.md",
+        "---\nokf_version: \"0.1\"\n---\n\n# B\n",
+    )]));
+
+    // Schema: el `DocType decision` trae una `bodyTemplate` con un marcador inequívoco y `{title}`.
+    let mut schema = Schema::default();
+    schema.types.insert(
+        "decision".to_string(),
+        DocType {
+            name: "decision".to_string(),
+            body_template: Some(
+                "## Contexto\n\nDecisión sobre {title}.\n\n## Consecuencias\n".to_string(),
+            ),
+            ..DocType::default()
+        },
+    );
+
+    let path = RelPath::new("decisiones/usar-rust.md").unwrap();
+    let op = match lodestar_core::plan::normalize_create(
+        &b,
+        &schema,
+        &path,
+        "decision",
+        Some("Usar Rust"),
+        None, // sin body ⇒ debe salir de la plantilla
+    ) {
+        Ok(op) => op,
+        Err(_) => panic!("crear un concepto con plantilla válida no debe fallar la normalización"),
+    };
+
+    let NormalizedOperation::Create {
+        path: create_path,
+        body,
+        ..
+    } = &op
+    else {
+        panic!("`create` debe normalizarse a `NormalizedOperation::Create`, fue {op:?}");
+    };
+    assert_eq!(create_path, &path, "el path resuelto debe ser el pedido");
+
+    let cuerpo = body
+        .as_ref()
+        .expect("`create` sin body sobre un DocType con plantilla debe rellenar `body: Some(..)`");
+    assert!(
+        cuerpo.contains("## Contexto"),
+        "el cuerpo debe provenir de la plantilla (marcador `## Contexto`); cuerpo = {cuerpo:?}",
+    );
+    assert!(
+        cuerpo.contains("Usar Rust"),
+        "la plantilla debe sustituir `{{title}}` por el título; cuerpo = {cuerpo:?}",
+    );
+    assert!(
+        !cuerpo.contains("{title}"),
+        "el placeholder `{{title}}` no debe quedar crudo en el cuerpo; cuerpo = {cuerpo:?}",
+    );
+}
+
+/// Criterio `replace_text_ocurrencias`: **Dado** `replace_text` con `expectedOccurrences:1` y 2
+/// coincidencias, **Cuando** se normaliza, **Entonces** error (no aplica). Se añade un control
+/// positivo con `expectedOccurrences:2` (el número correcto) para probar que el fallo es
+/// EXACTAMENTE el desajuste de conteo y no otro error del fixture.
+#[test]
+fn replace_text_ocurrencias() {
+    // Cuerpo con la palabra `token` EXACTAMENTE dos veces.
+    let b = Bundle::from_files(fm(&[(
+        "auth.md",
+        "---\ntype: guide\ntitle: Auth\ndescription: d\nstatus: draft\n---\n\n# Auth\n\n\
+         El token se envía en el header. Renueva el token cada hora.\n",
+    )]));
+    let path = RelPath::new("auth.md").unwrap();
+
+    // `expectedOccurrences:1` pero hay 2 coincidencias ⇒ error, no aplica.
+    let desajuste =
+        lodestar_core::plan::normalize_replace_text(&b, &path, "token", "secreto", Some(1));
+    assert!(
+        desajuste.is_err(),
+        "con `expectedOccurrences:1` y 2 coincidencias la normalización debe fallar",
+    );
+
+    // Control positivo: con el número correcto (2) sí normaliza.
+    let acierto =
+        lodestar_core::plan::normalize_replace_text(&b, &path, "token", "secreto", Some(2));
+    assert!(
+        acierto.is_ok(),
+        "con `expectedOccurrences:2` (el número real) la normalización debe tener éxito, \
+         demostrando que el error anterior era el desajuste de conteo",
+    );
+}
+
+/// Criterio `edit_section_acotado`: **Dado** `edit_section(["Security","Token rotation"],
+/// mode:replace)`, **Cuando** se normaliza, **Entonces** SOLO esa subsección cambia (su heading se
+/// conserva, su contenido se reemplaza; las secciones hermanas y de otro nivel quedan intactas).
+#[test]
+fn edit_section_acotado() {
+    let raw = "---\ntype: guide\ntitle: Seguridad\ndescription: d\nstatus: draft\n---\n\n\
+               # Security\n\nIntroducción a la seguridad.\n\n\
+               ## Token rotation\n\nRotar cada 90 días.\n\n\
+               ## Password policy\n\nMínimo 12 caracteres.\n\n\
+               # Deployment\n\nDesplegar con CI.\n";
+    let b = Bundle::from_files(fm(&[("seguridad.md", raw)]));
+    let path = RelPath::new("seguridad.md").unwrap();
+
+    let heading_path = vec!["Security".to_string(), "Token rotation".to_string()];
+    let op = match lodestar_core::plan::normalize_edit_section(
+        &b,
+        &path,
+        &heading_path,
+        EditSectionMode::Replace,
+        "Rotar cada 24 horas.",
+    ) {
+        Ok(op) => op,
+        Err(_) => panic!("un `headingPath` existente no debe fallar la normalización"),
+    };
+
+    let cuerpo = cuerpo_resuelto(&op);
+    // La subsección objetivo se reemplaza: contenido nuevo dentro, contenido viejo fuera.
+    assert!(
+        cuerpo.contains("Rotar cada 24 horas."),
+        "el contenido nuevo debe estar en la subsección editada; cuerpo = {cuerpo:?}",
+    );
+    assert!(
+        !cuerpo.contains("Rotar cada 90 días."),
+        "el contenido viejo de la subsección editada debe desaparecer; cuerpo = {cuerpo:?}",
+    );
+    // El heading de la subsección se conserva (mode:replace reemplaza el contenido, no el título).
+    assert!(
+        cuerpo.contains("## Token rotation"),
+        "el heading de la subsección editada debe conservarse; cuerpo = {cuerpo:?}",
+    );
+    // Las hermanas y las secciones de otro nivel quedan INTACTAS.
+    assert!(
+        cuerpo.contains("Mínimo 12 caracteres."),
+        "la subsección hermana `Password policy` no debe tocarse; cuerpo = {cuerpo:?}",
+    );
+    assert!(
+        cuerpo.contains("Desplegar con CI."),
+        "la sección de nivel superior `Deployment` no debe tocarse; cuerpo = {cuerpo:?}",
+    );
+    assert!(
+        cuerpo.contains("Introducción a la seguridad."),
+        "el preámbulo de `Security` (fuera de la subsección) no debe tocarse; cuerpo = {cuerpo:?}",
+    );
+}
+
+/// Criterio EXTRA `edit_section_ignora_code_fence` (cierra la reserva de E10-H10): un cuerpo con un
+/// heading FALSO dentro de un bloque de código fenceado (` ``` `). Un `edit_section` sobre una
+/// sección real NO debe confundir ese `#` interno con un heading (lo que TRUNCARÍA el rango de la
+/// sección al detectar un "hermano" espurio). Con el bug de E10-H10, la sección `Uso` acabaría
+/// justo antes del `#` del bloque de código, dejando fuera (sin reemplazar) el propio bloque y el
+/// texto posterior; el fix lo evita.
+#[test]
+fn edit_section_ignora_code_fence() {
+    let raw = r#"---
+type: guide
+title: Uso
+description: d
+status: draft
+---
+
+# Uso
+
+Ejemplo de configuración:
+
+```bash
+# Este comentario NO es un heading
+export TOKEN=abc
+```
+
+Texto después del bloque de código.
+
+# Referencias
+
+Ver el manual.
+"#;
+    let b = Bundle::from_files(fm(&[("uso.md", raw)]));
+    let path = RelPath::new("uso.md").unwrap();
+
+    let heading_path = vec!["Uso".to_string()];
+    let op = match lodestar_core::plan::normalize_edit_section(
+        &b,
+        &path,
+        &heading_path,
+        EditSectionMode::Replace,
+        "NUEVO CUERPO DE USO",
+    ) {
+        Ok(op) => op,
+        Err(_) => panic!("editar la sección `Uso` no debe fallar por el heading falso del fence"),
+    };
+
+    let cuerpo = cuerpo_resuelto(&op);
+    // El contenido nuevo debe estar.
+    assert!(
+        cuerpo.contains("NUEVO CUERPO DE USO"),
+        "el contenido nuevo debe reemplazar toda la sección `Uso`; cuerpo = {cuerpo:?}",
+    );
+    // DISCRIMINADORES: todo lo que estaba DENTRO de `Uso` (incl. el bloque de código y el texto
+    // posterior) debe haber sido reemplazado. Con el bug del code fence, el rango se truncaría en
+    // el `#` interno y estos supervivirían.
+    assert!(
+        !cuerpo.contains("export TOKEN=abc"),
+        "el bloque de código (dentro de `Uso`) debe reemplazarse, no sobrevivir por un rango \
+         truncado en el `#` falso; cuerpo = {cuerpo:?}",
+    );
+    assert!(
+        !cuerpo.contains("# Este comentario NO es un heading"),
+        "el `#` dentro del fence no es un heading real y su línea debe reemplazarse con el resto \
+         de `Uso`; cuerpo = {cuerpo:?}",
+    );
+    assert!(
+        !cuerpo.contains("Texto después del bloque de código."),
+        "el texto tras el fence (aún dentro de `Uso`) debe reemplazarse; cuerpo = {cuerpo:?}",
+    );
+    // La sección real SIGUIENTE queda intacta (guarda de que no arrasamos de más).
+    assert!(
+        cuerpo.contains("# Referencias") && cuerpo.contains("Ver el manual."),
+        "la sección `Referencias` (fuera de `Uso`) debe quedar intacta; cuerpo = {cuerpo:?}",
+    );
+}

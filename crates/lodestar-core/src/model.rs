@@ -500,3 +500,115 @@ pub fn parse_file(path: &str, raw: &str) -> Parsed {
         },
     }
 }
+
+// ---------------------------------------------------------------------------
+// Localización de secciones por `headingPath` (movido de `lodestar-app`, E10-H10;
+// reusado por `knowledge_get` y por la normalización de `edit_section`, E12-H05).
+// ---------------------------------------------------------------------------
+
+/// Un heading Markdown detectado en un `body`, con el rango de bytes de la sección que abarca:
+/// desde el final de su propia línea de heading hasta el siguiente heading de nivel **menor o
+/// igual** al suyo (o el final del cuerpo). Ese rango contiene exactamente sus subsecciones
+/// anidadas (nivel estrictamente mayor) y nada de sus hermanas ni de secciones de nivel superior —
+/// la propiedad que usa [`locate_section`] para no necesitar validar jerarquía explícitamente.
+///
+/// Tipo opaco: los campos son privados del módulo (solo [`parse_headings`]/[`locate_section`] los
+/// tocan); los llamantes externos lo manejan como un `Vec<Heading>` sin inspeccionarlo.
+pub struct Heading<'a> {
+    /// Texto del heading, recortado.
+    title: &'a str,
+    /// Offset de byte donde empieza la línea del heading (para comprobar pertenencia a un rango).
+    line_start: usize,
+    /// Offset de byte donde empieza el contenido de su sección (justo tras su línea).
+    content_start: usize,
+    /// Offset de byte donde termina el contenido de su sección (exclusivo).
+    content_end: usize,
+}
+
+/// Detecta los headings ATX (`#` a `######`) de `body` línea a línea y calcula el rango de
+/// contenido de cada uno.
+///
+/// **Reconoce los bloques de código fenceados** (` ``` `): una línea cuyo texto recortado empieza
+/// por ` ``` ` (con o sin lenguaje) abre o cierra un bloque de código, y los `#` que aparezcan
+/// DENTRO de ese bloque NO se tratan como headings (serían texto/comentarios del código). Esto
+/// evita truncar el rango de una sección real en un `#` espurio (E12-H05, cierra la reserva
+/// documentada de E10-H10).
+pub fn parse_headings(body: &str) -> Vec<Heading<'_>> {
+    let mut raw: Vec<(usize, &str, usize, usize)> = Vec::new();
+    let mut offset = 0usize;
+    let mut in_fence = false;
+    for line in body.split_inclusive('\n') {
+        let trimmed = line.trim_end_matches('\n').trim_end_matches('\r');
+        // Un fence de código (```) abre/cierra el bloque; la propia línea del fence nunca es un
+        // heading, y mientras el bloque está abierto los `#` internos se ignoran.
+        if trimmed.trim_start().starts_with("```") {
+            in_fence = !in_fence;
+            offset += line.len();
+            continue;
+        }
+        if !in_fence {
+            let hashes = trimmed.chars().take_while(|c| *c == '#').count();
+            if (1..=6).contains(&hashes) {
+                let rest = &trimmed[hashes..];
+                if rest.starts_with(' ') || rest.starts_with('\t') {
+                    raw.push((hashes, rest.trim(), offset, offset + line.len()));
+                }
+            }
+        }
+        offset += line.len();
+    }
+    let body_len = body.len();
+    raw.iter()
+        .enumerate()
+        .map(|(i, &(level, title, line_start, content_start))| {
+            let content_end = raw[i + 1..]
+                .iter()
+                .find(|&&(l, ..)| l <= level)
+                .map(|&(_, _, ls, _)| ls)
+                .unwrap_or(body_len);
+            Heading {
+                title,
+                line_start,
+                content_start,
+                content_end,
+            }
+        })
+        .collect()
+}
+
+/// Localiza el rango de bytes del contenido de la subsección apuntada por un `heading_path` (p. ej.
+/// `["Security","Token rotation"]`): recorre el path segmento a segmento, en cada paso busca el
+/// primer heading cuyo título coincida (comparación exacta, recortada) **dentro del rango actual**
+/// y estrecha el rango a su sección. Como el rango de una sección solo contiene a sus
+/// descendientes (ver [`Heading`]), no hace falta comprobar niveles explícitamente: el segundo
+/// segmento del path solo puede casar con un heading anidado bajo el primero. `None` si algún
+/// segmento no casa (heading_path inexistente). El rango devuelto es `(content_start, content_end)`
+/// — el contenido de la sección SIN su línea de heading.
+pub fn locate_section(
+    headings: &[Heading<'_>],
+    body_len: usize,
+    path: &[String],
+) -> Option<(usize, usize)> {
+    let mut range = (0usize, body_len);
+    for segment in path {
+        let found = headings
+            .iter()
+            .find(|h| h.line_start >= range.0 && h.line_start < range.1 && h.title == *segment)?;
+        range = (found.content_start, found.content_end);
+    }
+    Some(range)
+}
+
+/// Extrae y concatena (separadas por una línea en blanco) las subsecciones apuntadas por cada
+/// `heading_path` de `sections`, en el orden pedido. Un `heading_path` que no casa con ningún
+/// heading se omite silenciosamente (sin `sections` no vacío, el llamante ya filtra este caso).
+pub fn extract_sections(body: &str, sections: &[Vec<String>]) -> String {
+    let headings = parse_headings(body);
+    sections
+        .iter()
+        .filter(|path| !path.is_empty())
+        .filter_map(|path| locate_section(&headings, body.len(), path))
+        .map(|(start, end)| body[start..end].to_string())
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}

@@ -23,6 +23,16 @@ pub enum CoreError {
     /// Error de escritura/serialización al exportar (p. ej. al construir el zip).
     #[error("error de export/IO: {0}")]
     Export(String),
+
+    /// Al normalizar `replace_text` (E12-H05), el número de coincidencias de la cadena buscada no
+    /// casa con el `expected_occurrences` declarado. Lleva `(esperadas, encontradas)`.
+    #[error("replace_text: se esperaban {0} coincidencias pero se encontraron {1}")]
+    ReplaceTextMismatch(usize, usize),
+
+    /// Al normalizar una operación de contenido (E12-H05), el concepto o la sección referida no
+    /// existe en el bundle (path sin fichero, o `heading_path` que no casa con ningún heading).
+    #[error("objetivo de normalización no encontrado: {0}")]
+    NormalizeTargetNotFound(String),
 }
 
 /// Resultado de conveniencia del núcleo.

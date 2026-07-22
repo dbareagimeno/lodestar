@@ -105,12 +105,16 @@ pub struct ResourceLink {
 /// - `InvalidSha` → `InvalidSchema` (formato de entrada inválido).
 /// - `SizeGuardExceeded` → `ResultTooLarge` (guarda de tamaño excedida en una operación).
 /// - `Export` → `InternalIoError` (fallo de IO/serialización al exportar).
+/// - `ReplaceTextMismatch` → `InvalidSchema` (precondición de `replace_text` incumplida, E12-H05).
+/// - `NormalizeTargetNotFound` → `ConceptNotFound` (path/sección objetivo inexistente, E12-H05).
 pub fn error_code(err: &CoreError) -> ErrorCode {
     match err {
         CoreError::InvalidRelPath(_) => ErrorCode::PermissionDenied,
         CoreError::InvalidSha(_) => ErrorCode::InvalidSchema,
         CoreError::SizeGuardExceeded(_) => ErrorCode::ResultTooLarge,
         CoreError::Export(_) => ErrorCode::InternalIoError,
+        CoreError::ReplaceTextMismatch(_, _) => ErrorCode::InvalidSchema,
+        CoreError::NormalizeTargetNotFound(_) => ErrorCode::ConceptNotFound,
     }
 }
 
@@ -527,7 +531,7 @@ impl App {
     ///
     /// `sections`, si está presente y no vacío, acota el `body` devuelto (solo aplica si `body` fue
     /// pedido en `include`): cada `headingPath` (p. ej. `["Security","Token rotation"]`) localiza
-    /// esa subsección anidada del Markdown (ver la función privada `extract_sections` más abajo) y
+    /// esa subsección anidada del Markdown (vía `model::extract_sections`, en el core) y
     /// el resultado final es la concatenación de todos los `headingPath` pedidos. Sin `sections`,
     /// `body` es el cuerpo completo.
     ///
@@ -561,7 +565,7 @@ impl App {
 
         let frontmatter = wants("frontmatter").then(|| parsed.fm.clone().unwrap_or_default());
         let body = wants("body").then(|| match sections {
-            Some(secs) if !secs.is_empty() => extract_sections(&parsed.body, secs),
+            Some(secs) if !secs.is_empty() => model::extract_sections(&parsed.body, secs),
             _ => parsed.body.clone(),
         });
         let outgoing_links = wants("outgoingLinks")
@@ -1402,96 +1406,6 @@ pub struct ConceptView {
     /// Checks de conformidad del concepto (`Analysis::per_file`), si se pidió `"diagnostics"`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub diagnostics: Option<Vec<Check>>,
-}
-
-/// Un heading Markdown detectado en un `body`, con el rango de bytes de la sección que abarca:
-/// desde el final de su propia línea de heading hasta el siguiente heading de nivel **menor o
-/// igual** al suyo (o el final del cuerpo). Ese rango contiene exactamente sus subsecciones
-/// anidadas (nivel estrictamente mayor) y nada de sus hermanas ni de secciones de nivel superior —
-/// la propiedad que usa [`locate_section`] para no necesitar validar jerarquía explícitamente.
-struct Heading<'a> {
-    /// Texto del heading, recortado.
-    title: &'a str,
-    /// Offset de byte donde empieza la línea del heading (para comprobar pertenencia a un rango).
-    line_start: usize,
-    /// Offset de byte donde empieza el contenido de su sección (justo tras su línea).
-    content_start: usize,
-    /// Offset de byte donde termina el contenido de su sección (exclusivo).
-    content_end: usize,
-}
-
-/// Detecta los headings ATX (`#` a `######`) de `body` línea a línea y calcula el rango de
-/// contenido de cada uno. **Limitación conocida**: no distingue bloques de código con fences
-/// (` ``` `) — una línea que empiece por `#` dentro de un fence se detectaría igualmente como
-/// heading. No hay caso de prueba que lo ejercite en esta historia; documentado para quien amplíe
-/// esta función.
-fn parse_headings(body: &str) -> Vec<Heading<'_>> {
-    let mut raw: Vec<(usize, &str, usize, usize)> = Vec::new();
-    let mut offset = 0usize;
-    for line in body.split_inclusive('\n') {
-        let trimmed = line.trim_end_matches('\n').trim_end_matches('\r');
-        let hashes = trimmed.chars().take_while(|c| *c == '#').count();
-        if (1..=6).contains(&hashes) {
-            let rest = &trimmed[hashes..];
-            if rest.starts_with(' ') || rest.starts_with('\t') {
-                raw.push((hashes, rest.trim(), offset, offset + line.len()));
-            }
-        }
-        offset += line.len();
-    }
-    let body_len = body.len();
-    raw.iter()
-        .enumerate()
-        .map(|(i, &(level, title, line_start, content_start))| {
-            let content_end = raw[i + 1..]
-                .iter()
-                .find(|&&(l, ..)| l <= level)
-                .map(|&(_, _, ls, _)| ls)
-                .unwrap_or(body_len);
-            Heading {
-                title,
-                line_start,
-                content_start,
-                content_end,
-            }
-        })
-        .collect()
-}
-
-/// Localiza el rango de bytes de la subsección apuntada por un `headingPath` (p. ej.
-/// `["Security","Token rotation"]`): recorre el path segmento a segmento, en cada paso busca el
-/// primer heading cuyo título coincida (comparación exacta, recortada) **dentro del rango actual**
-/// y estrecha el rango a su sección. Como el rango de una sección solo contiene a sus
-/// descendientes (ver [`Heading`]), no hace falta comprobar niveles explícitamente: el segundo
-/// segmento del path solo puede casar con un heading anidado bajo el primero. `None` si algún
-/// segmento no casa (headingPath inexistente).
-fn locate_section(
-    headings: &[Heading<'_>],
-    body_len: usize,
-    path: &[String],
-) -> Option<(usize, usize)> {
-    let mut range = (0usize, body_len);
-    for segment in path {
-        let found = headings
-            .iter()
-            .find(|h| h.line_start >= range.0 && h.line_start < range.1 && h.title == segment)?;
-        range = (found.content_start, found.content_end);
-    }
-    Some(range)
-}
-
-/// Extrae y concatena (separadas por una línea en blanco) las subsecciones apuntadas por cada
-/// `headingPath` de `sections`, en el orden pedido. Un `headingPath` que no casa con ningún
-/// heading se omite silenciosamente (sin `sections` no vacío, el llamante ya filtra este caso).
-fn extract_sections(body: &str, sections: &[Vec<String>]) -> String {
-    let headings = parse_headings(body);
-    sections
-        .iter()
-        .filter(|path| !path.is_empty())
-        .filter_map(|path| locate_section(&headings, body.len(), path))
-        .map(|(start, end)| body[start..end].to_string())
-        .collect::<Vec<_>>()
-        .join("\n\n")
 }
 
 // ---------------------------------------------------------------------------

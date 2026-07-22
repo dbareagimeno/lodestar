@@ -304,5 +304,11 @@ superficie de producto; git queda como crate dormido) y `DECISIONES.md §0`. Des
   - ✅ **E12-H04** — `core::plan::validate_result(bundle, schema)` → `ValidationReport` (reusa
     all_checks; conformant=errors==0 explícito) + `PlanPolicy{requireConformantResult,allowWarnings}`
     + `can_apply(report, policy)` (los dos ejes). Juez ciego: APROBADA (2/2).
-  - ⏳ E12-H05–H09 pendientes (normalización → change_plan → persistencia).
+  - ✅ **E12-H05** — Normalización de contenido: `normalize_create` (usa bodyTemplate + {title}),
+    `normalize_replace_text` (error si conteo != expectedOccurrences), `normalize_edit_section` (acota
+    por headingPath). Lógica de secciones MOVIDA a `core::model` (pública) con **fix de code fences**
+    (cierra la reserva de E10-H10); `knowledge_get` la reusa (sin duplicar). Juez ciego: APROBADA CON
+    RESERVAS (3/3). **A cubrir en E12-H08**: normalizadores `patch_frontmatter`/`replace_body` (los 11
+    ops) + modos Append/Prepend de edit_section.
+  - ⏳ E12-H06–H09 pendientes (estructura/semántica → change_plan → persistencia).
 - **E13–E14: pendientes** (publicación recuperable · integración + evaluación — `ARCHITECTURE.md §19.8`).

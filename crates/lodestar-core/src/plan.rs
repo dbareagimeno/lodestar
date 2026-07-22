@@ -36,15 +36,17 @@
 //! `SemanticDiff`, E12-H04 `ValidationReport` sí lo necesitan); esta heurística de riesgo solo
 //! necesita el bundle *antes* del cambio para medir backlinks del concepto afectado.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::diff::{diff_snap, BodyHunk, ChangeKind};
+use crate::error::CoreError;
+use crate::model;
 use crate::schema::{validate_relations, validate_schema, Schema};
 use serde::{Deserialize, Serialize};
 
 use crate::types::{
-    Check, CheckCode, FrontmatterPatch, NormalizedOperation, RelPath, RiskAssessment, RiskLevel,
-    SemanticDiff, Severity, ValidationReport, ValidationSummary,
+    Check, CheckCode, EditSectionMode, FrontmatterPatch, NormalizedOperation, RelPath,
+    RiskAssessment, RiskLevel, SemanticDiff, Severity, ValidationReport, ValidationSummary,
 };
 use crate::Bundle;
 
@@ -297,4 +299,166 @@ pub fn can_apply(report: &ValidationReport, policy: &PlanPolicy) -> bool {
         return false;
     }
     true
+}
+
+// ---------------------------------------------------------------------------
+// Normalización de operaciones de CONTENIDO (E12-H05).
+//
+// Cada `normalize_*` toma el `Bundle` (fuente de verdad, invariante #1/#3) y una operación de alto
+// nivel, y devuelve la [`NormalizedOperation`] YA RESUELTA a path(s) + contenido concreto, lista
+// para que la workspace (único escritor) la aplique. Todo es PURO: no toca disco ni reloj.
+// Estructura (move/delete) y semántica (relaciones/status) quedan para E12-H06/H07.
+// ---------------------------------------------------------------------------
+
+/// El marcador de plantilla que `create` sustituye por el título del concepto (E10-H05/E12-H05).
+const TITLE_PLACEHOLDER: &str = "{title}";
+
+/// Normaliza un `create`: resuelve el cuerpo del concepto nuevo.
+///
+/// - Si `body` es `Some`, se usa tal cual.
+/// - Si `body` es `None` y el `DocType` `doctype` (buscado en `schema`) tiene `body_template`, el
+///   cuerpo sale de esa plantilla, sustituyendo cada `{title}` por el título dado (o el derivado
+///   del path si no se pasa `title`).
+/// - Si `body` es `None` y no hay plantilla, se deja `None` (la workspace generará el heading por
+///   defecto vía [`Bundle::create_concept`]).
+///
+/// El `frontmatter` resuelto es el mínimo (`type` + `title`); el resto de campos (status,
+/// timestamp) los completa el escritor. Devuelve [`NormalizedOperation::Create`].
+///
+/// # Errores
+/// No falla en esta historia (un `path` ya presente en el bundle no se rechaza aquí; esa política
+/// es de la workspace). La firma devuelve `Result` por coherencia con las otras normalizaciones.
+pub fn normalize_create(
+    _bundle: &Bundle,
+    schema: &Schema,
+    path: &RelPath,
+    doctype: &str,
+    title: Option<&str>,
+    body: Option<String>,
+) -> Result<NormalizedOperation, CoreError> {
+    let resolved_title = title
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| model::title_from_path(path.as_str()));
+
+    let resolved_body = match body {
+        Some(b) => Some(b),
+        None => schema
+            .types
+            .get(doctype)
+            .and_then(|dt| dt.body_template.as_ref())
+            .map(|tpl| tpl.replace(TITLE_PLACEHOLDER, &resolved_title)),
+    };
+
+    let mut fm: BTreeMap<String, Option<serde_yaml::Value>> = BTreeMap::new();
+    fm.insert(
+        "type".to_string(),
+        Some(serde_yaml::Value::String(doctype.to_string())),
+    );
+    fm.insert(
+        "title".to_string(),
+        Some(serde_yaml::Value::String(resolved_title)),
+    );
+
+    Ok(NormalizedOperation::Create {
+        path: path.clone(),
+        frontmatter: FrontmatterPatch(fm),
+        body: resolved_body,
+    })
+}
+
+/// Cuerpo (tras el frontmatter) del concepto en `path`, o `Err(NormalizeTargetNotFound)` si el
+/// path no tiene fichero en el bundle. Reusa `model::parse_file` (la misma verdad del core).
+fn concept_body(bundle: &Bundle, path: &RelPath) -> Result<String, CoreError> {
+    let raw = bundle
+        .files()
+        .get(path)
+        .ok_or_else(|| CoreError::NormalizeTargetNotFound(path.as_str().to_string()))?;
+    Ok(model::parse_file(path.as_str(), raw).body)
+}
+
+/// Normaliza un `replace_text`: sustituye todas las ocurrencias literales de `find` por `replace`
+/// en el CUERPO del concepto (tras el frontmatter).
+///
+/// Si `expected_occurrences` es `Some(n)`, cuenta las coincidencias de `find` en el cuerpo y falla
+/// con [`CoreError::ReplaceTextMismatch`] cuando el número real no es `n` (guarda contra ediciones
+/// ciegas que tocan más —o menos— de lo previsto). Con `None` no se comprueba el conteo.
+///
+/// Devuelve [`NormalizedOperation::ReplaceBody`] con el cuerpo entero ya reescrito.
+///
+/// # Errores
+/// - [`CoreError::NormalizeTargetNotFound`] si `path` no existe en el bundle.
+/// - [`CoreError::ReplaceTextMismatch`] si el conteo no casa con `expected_occurrences`.
+pub fn normalize_replace_text(
+    bundle: &Bundle,
+    path: &RelPath,
+    find: &str,
+    replace: &str,
+    expected_occurrences: Option<usize>,
+) -> Result<NormalizedOperation, CoreError> {
+    let body = concept_body(bundle, path)?;
+
+    if let Some(expected) = expected_occurrences {
+        let found = if find.is_empty() {
+            0
+        } else {
+            body.matches(find).count()
+        };
+        if found != expected {
+            return Err(CoreError::ReplaceTextMismatch(expected, found));
+        }
+    }
+
+    let new_body = body.replace(find, replace);
+    Ok(NormalizedOperation::ReplaceBody {
+        path: path.clone(),
+        body: new_body,
+    })
+}
+
+/// Normaliza un `edit_section`: localiza la subsección acotada por `heading_path` (con
+/// [`model::parse_headings`], que ignora los `#` dentro de bloques de código fenceados) y aplica
+/// `mode` sobre SU contenido, dejando intactas las secciones hermanas y de otro nivel.
+///
+/// - [`EditSectionMode::Replace`]: reemplaza el contenido de la sección por `content` (el heading
+///   se conserva).
+/// - [`EditSectionMode::Append`]: añade `content` al final del contenido de la sección.
+/// - [`EditSectionMode::Prepend`]: inserta `content` al principio del contenido de la sección.
+///
+/// Devuelve [`NormalizedOperation::ReplaceBody`] con el CUERPO COMPLETO reescrito (la sección
+/// editada más el resto sin tocar), listo para el único escritor.
+///
+/// # Errores
+/// - [`CoreError::NormalizeTargetNotFound`] si `path` no existe o el `heading_path` no casa con
+///   ninguna sección.
+pub fn normalize_edit_section(
+    bundle: &Bundle,
+    path: &RelPath,
+    heading_path: &[String],
+    mode: EditSectionMode,
+    content: &str,
+) -> Result<NormalizedOperation, CoreError> {
+    let body = concept_body(bundle, path)?;
+    let headings = model::parse_headings(&body);
+    let (start, end) =
+        model::locate_section(&headings, body.len(), heading_path).ok_or_else(|| {
+            CoreError::NormalizeTargetNotFound(format!(
+                "{}#{}",
+                path.as_str(),
+                heading_path.join("/")
+            ))
+        })?;
+
+    let section = &body[start..end];
+    let content = content.trim();
+    let new_section = match mode {
+        EditSectionMode::Replace => format!("\n{content}\n\n"),
+        EditSectionMode::Append => format!("{}\n\n{content}\n\n", section.trim_end()),
+        EditSectionMode::Prepend => format!("\n{content}\n{}", section.trim_start()),
+    };
+
+    let new_body = format!("{}{}{}", &body[..start], new_section, &body[end..]);
+    Ok(NormalizedOperation::ReplaceBody {
+        path: path.clone(),
+        body: new_body,
+    })
 }
