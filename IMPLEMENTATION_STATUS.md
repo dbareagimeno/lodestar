@@ -222,6 +222,10 @@ superficie de producto; git queda como crate dormido) y `DECISIONES.md §0`. Des
   - ✅ **E10-H05** — `core::schema` (PURO): `Schema`/`DocType`/`RelationDef`/`FieldDef` (wire
     camelCase) + loader `WorkspaceSchema::load` en workspace (ausente→`Schema` permisivo,
     malformado→Err). Juez ciego: APROBADA (3/3).
-  - ⏳ E10-H07 (validación schema) y H08–H13 (tools) pendientes.
+  - ✅ **E10-H07** — `validate_schema(bundle, schema) -> Vec<Check>` puro y aditivo (SCHEMA-REQFIELD
+    por campo obligatorio ausente, SCHEMA-STATUS por status fuera de allowedStatuses; msg español —
+    cierra la reserva de H06). No se llama desde `analyze` (diferenciales intactos); se compondrá en
+    E10-H12 (knowledge_check). Juez ciego: APROBADA CON RESERVAS (3/3).
+  - ⏳ E10-H08–H13 (5 tools de lectura + outputSchema/mcp.yml) pendientes.
 - **E11–E14: pendientes** (grafo e impacto · planificación · publicación recuperable ·
   integración software + evaluación — `ARCHITECTURE.md §19.8`).

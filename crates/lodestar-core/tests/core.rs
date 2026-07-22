@@ -864,3 +864,126 @@ types:
         decision.allowed_statuses
     );
 }
+
+// --- E10-H07: validación schema-driven (`core::schema::validate_schema`) -----
+// Función PURA `validate_schema(&Bundle, &Schema) -> Vec<Check>`: por cada concepto con
+// `type` conocido comprueba `required_fields` (falta → SCHEMA-REQFIELD/Err) y `status ∈
+// allowed_statuses` (fuera → SCHEMA-STATUS/Err). Aditiva: sin schema, cero checks.
+
+/// Criterio `falta_campo_obligatorio`: `DocType decision` con `requiredFields:[rationale]` y un
+/// concepto `decision` SIN `rationale` → un `Check{code:SCHEMA-REQFIELD, level:Err}` sobre ese path,
+/// con `msg` no vacío que nombra el campo que falta.
+#[test]
+fn falta_campo_obligatorio() {
+    use lodestar_core::schema::{validate_schema, DocType, Schema};
+
+    // Bundle: un concepto `type: decision` SIN el campo obligatorio `rationale`.
+    let b = Bundle::from_files(fm(&[(
+        "d.md",
+        "---\ntype: decision\ntitle: Migrar a Rust\nstatus: proposed\n---\n\n# H\n\ncuerpo\n",
+    )]));
+
+    // Schema: el `DocType decision` exige `rationale`.
+    let mut schema = Schema::default();
+    schema.types.insert(
+        "decision".to_string(),
+        DocType {
+            name: "decision".to_string(),
+            required_fields: vec!["rationale".to_string()],
+            ..DocType::default()
+        },
+    );
+
+    let checks = validate_schema(&b, &schema);
+
+    let path = RelPath::new("d.md").unwrap();
+    let reqfield = checks
+        .iter()
+        .find(|c| c.code == CheckCode::SchemaReqfield)
+        .expect("falta `rationale` → debe emitirse un Check SCHEMA-REQFIELD");
+    assert_eq!(
+        reqfield.level,
+        Severity::Err,
+        "un campo obligatorio ausente es un error duro"
+    );
+    assert!(
+        reqfield.targets.contains(&path),
+        "el check debe apuntar al path del concepto; targets: {:?}",
+        reqfield.targets
+    );
+    assert!(
+        !reqfield.msg.is_empty(),
+        "el msg del check no debe ser vacío"
+    );
+    assert!(
+        reqfield.msg.contains("rationale"),
+        "el msg debe nombrar el campo que falta; msg: {:?}",
+        reqfield.msg
+    );
+}
+
+/// Criterio `status_no_permitido`: un concepto con `status: invented` fuera de `allowedStatuses`
+/// → `Check{code:SCHEMA-STATUS, level:Err}` con `msg` no vacío que nombra el status inválido.
+/// `required_fields` se deja VACÍO para aislar este criterio del de campos obligatorios.
+#[test]
+fn status_no_permitido() {
+    use lodestar_core::schema::{validate_schema, DocType, Schema};
+
+    // Concepto con `status: invented`, fuera de los estados permitidos.
+    let b = Bundle::from_files(fm(&[(
+        "d.md",
+        "---\ntype: decision\ntitle: X\nstatus: invented\n---\n\n# H\n\ncuerpo\n",
+    )]));
+
+    // Schema: `required_fields` VACÍO (aísla el criterio); solo restringe `status`.
+    let mut schema = Schema::default();
+    schema.types.insert(
+        "decision".to_string(),
+        DocType {
+            name: "decision".to_string(),
+            required_fields: Vec::new(),
+            allowed_statuses: vec!["proposed".to_string(), "accepted".to_string()],
+            ..DocType::default()
+        },
+    );
+
+    let checks = validate_schema(&b, &schema);
+
+    let status = checks
+        .iter()
+        .find(|c| c.code == CheckCode::SchemaStatus)
+        .expect(
+            "`status: invented` fuera de allowedStatuses → debe emitirse un Check SCHEMA-STATUS",
+        );
+    assert_eq!(
+        status.level,
+        Severity::Err,
+        "un status fuera del lifecycle declarado es un error duro"
+    );
+    assert!(!status.msg.is_empty(), "el msg del check no debe ser vacío");
+    assert!(
+        status.msg.contains("invented"),
+        "el msg debe nombrar el status no permitido; msg: {:?}",
+        status.msg
+    );
+}
+
+/// Criterio `sin_schema_sin_checks`: el mismo bundle validado contra `Schema::default()` (bundle
+/// sin `schema.yaml`) NO produce ningún check schema-driven (compat con bundles OKF actuales).
+#[test]
+fn sin_schema_sin_checks() {
+    use lodestar_core::schema::{validate_schema, Schema};
+
+    let b = Bundle::from_files(fm(&[(
+        "d.md",
+        "---\ntype: decision\ntitle: X\nstatus: invented\n---\n\n# H\n\ncuerpo\n",
+    )]));
+
+    let checks = validate_schema(&b, &Schema::default());
+
+    assert_eq!(
+        checks,
+        Vec::<Check>::new(),
+        "un bundle sin schema no debe producir checks schema-driven"
+    );
+}

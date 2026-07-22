@@ -10,10 +10,15 @@
 //!
 //! Un bundle **sin** `schema.yaml` se modela como [`Schema::default()`]: `types` vacío, lo que
 //! deja el bundle sin restricciones adicionales (compat con bundles OKF actuales que no declaran
-//! esquema). La validación schema-driven (`SCHEMA-REQFIELD`/`SCHEMA-STATUS`/…) es E10-H07 y queda
-//! fuera de este módulo.
+//! esquema). La validación schema-driven (`SCHEMA-REQFIELD`/`SCHEMA-STATUS`) vive en
+//! [`validate_schema`] (E10-H07): función **pura y separada** de `analyze`/`validate_file` — no
+//! se integra ahí (aditiva por composición del llamante, no por acoplamiento del core).
 
 use std::collections::BTreeMap;
+
+use crate::model;
+use crate::types::{Check, CheckCode, Frontmatter, Severity};
+use crate::Bundle;
 
 use serde::{Deserialize, Serialize};
 
@@ -108,6 +113,82 @@ impl Default for RelationDef {
 
 fn default_cardinality() -> String {
     "many".to_string()
+}
+
+/// Valida los conceptos de `bundle` contra el catálogo `schema` (E10-H07, `ARCHITECTURE.md
+/// §19.2/§19.3`): para cada concepto cuyo `type` está declarado en `schema.types`, comprueba que
+/// estén presentes sus `required_fields` (ausente → [`CheckCode::SchemaReqfield`]) y que
+/// `status`, si no está vacío, esté en `allowed_statuses` cuando este último no está vacío
+/// (fuera → [`CheckCode::SchemaStatus`]). Ambos con severidad [`Severity::Err`].
+///
+/// Función **pura y separada** de `Bundle::analyze`/`conform::validate_file`: no se llama desde
+/// ninguna de las dos, así que un bundle sin `schema.yaml` (`Schema::default()`, `types` vacío)
+/// no cambia su veredicto de conformidad actual (aditiva por composición del llamante). Un
+/// concepto cuyo `type` no está declarado en el schema se ignora (el catálogo es permisivo, no
+/// exhaustivo) — mismo criterio que `sin_schema_permisivo` (E10-H05).
+pub fn validate_schema(bundle: &Bundle, schema: &Schema) -> Vec<Check> {
+    if schema.types.is_empty() {
+        return Vec::new();
+    }
+
+    let mut out = Vec::new();
+    for path in &bundle.analyze().concepts {
+        let Some(raw) = bundle.files().get(path) else {
+            continue;
+        };
+        let parsed = model::parse_file(path.as_str(), raw);
+        let Some(fm) = parsed.fm else {
+            continue;
+        };
+        let Some(tipo) = fm.r#type.as_deref() else {
+            continue;
+        };
+        let Some(doctype) = schema.types.get(tipo) else {
+            continue;
+        };
+
+        for campo in &doctype.required_fields {
+            if !field_present(&fm, campo) {
+                out.push(Check::new(
+                    Severity::Err,
+                    CheckCode::SchemaReqfield,
+                    format!("Falta el campo obligatorio «{campo}» para el tipo «{tipo}»."),
+                    vec![path.clone()],
+                ));
+            }
+        }
+
+        if let Some(status) = fm.status.as_deref() {
+            if !status.is_empty()
+                && !doctype.allowed_statuses.is_empty()
+                && !doctype.allowed_statuses.iter().any(|s| s == status)
+            {
+                out.push(Check::new(
+                    Severity::Err,
+                    CheckCode::SchemaStatus,
+                    format!("El estado «{status}» no está permitido para el tipo «{tipo}»."),
+                    vec![path.clone()],
+                ));
+            }
+        }
+    }
+    out
+}
+
+/// `true` si `campo` está presente en `fm`: como campo KNOWN con `Some(_)`, o en `extra`. Un
+/// campo KNOWN presente con `null` explícito (`fm.known_null`) NO cuenta como presente para
+/// `required_fields` — mismo criterio que `falta_campo_obligatorio` (E10-H07).
+fn field_present(fm: &Frontmatter, campo: &str) -> bool {
+    match campo {
+        "type" => fm.r#type.is_some(),
+        "title" => fm.title.is_some(),
+        "description" => fm.description.is_some(),
+        "resource" => fm.resource.is_some(),
+        "tags" => fm.tags.is_some(),
+        "timestamp" => fm.timestamp.is_some(),
+        "status" => fm.status.is_some(),
+        _ => fm.extra.contains_key(campo),
+    }
 }
 
 #[cfg(test)]
