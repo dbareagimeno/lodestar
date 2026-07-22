@@ -372,5 +372,10 @@ superficie de producto; git queda como crate dormido) y `DECISIONES.md §0`. Des
     `WORKSPACE_RECOVERY_REQUIRED` (publish excluye su propio journal). Tolerante a JSON torn. Juez ciego
     riguroso: APROBADA (4/4). **Contratos a honrar en E13-H08**: change_apply debe llamar `recover()`, hacer
     `backup_originals` ANTES de `publish`, y crear el journal con el conjunto afectado completo.
-  - ⏳ E13-H07–H11 pendientes (receipts/change_apply/revert/audit/regen).
+  - ✅ **E13-H07** — `ChangeReceipt` (creado en core::types, forma REFACTOR §6.5) + retención:
+    `write_receipt` persiste `.lodestar/runtime/receipts/<id>.json` (temp+fsync+rename); `gc_receipts`
+    ordena por mtime y purga los excedentes (>maximumReceipts) y caducados (retainReceiptsFor) más
+    antiguos, borrando también su `recovery/<id>/`. Vínculo receipt↔recovery por id saneado (contrato para
+    H08). Juez ciego: APROBADA CON RESERVAS (2/2).
+  - ⏳ E13-H08 (change_apply) y E13-H09/H10/H11 (revert/audit/regen) pendientes.
 - **E14: pendiente** (integración software + evaluación — `ARCHITECTURE.md §19.8`).

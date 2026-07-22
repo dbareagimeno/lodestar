@@ -30,6 +30,7 @@ mod io;
 mod journal;
 mod lock;
 mod publish;
+mod receipts;
 mod recovery;
 mod runtime;
 pub mod schema;

@@ -37,11 +37,13 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime};
 
 use lodestar_core::plan;
 use lodestar_core::types::{
-    ChangeSet, ChangeSetId, FileMap, FrontmatterPatch, NormalizedOperation, PlanHash, RelPath,
-    RiskAssessment, SemanticDiff, ValidationReport, WorkspaceRevision,
+    ChangeReceipt, ChangeSet, ChangeSetId, FileMap, FrontmatterPatch, NormalizedOperation,
+    PlanHash, ReceiptId, RelPath, RiskAssessment, SemanticDiff, ValidationReport,
+    WorkspaceRevision,
 };
 use lodestar_workspace::Workspace;
 
@@ -809,6 +811,187 @@ fn revision_resultante_coincide() {
         recalculada, result_rev_prevista,
         "la WorkspaceRevision del canónico publicado no coincide con la prevista por el plan"
     );
+}
+
+// ===========================================================================
+// E13-H07 — `ChangeReceipt` + retención.
+//
+// Firmas asumidas de E13-H07 (fase ROJA; el implementador debe respetarlas):
+// - `Workspace::write_receipt(&self, receipt: &ChangeReceipt) -> Result<(), WorkspaceError>`:
+//   persiste el `ChangeReceipt` de una aplicación completada (`done`) como
+//   `.lodestar/runtime/receipts/<receiptId>.json`. El wire es el de `ChangeReceipt`
+//   (`serde(rename_all = "camelCase")`): `previousRevision`/`resultRevision` son strings
+//   (`WorkspaceRevision` es `#[serde(transparent)]`).
+// - `Workspace::gc_receipts(&self) -> Result<(), WorkspaceError>`: recolecta los recibos caducados
+//   (`transactions.retainReceiptsFor`) o excedentes (`transactions.maximumReceipts`) según la config
+//   del workspace (E9-H05, default `24h`/`20`), borrando además las copias de recuperación asociadas
+//   (`.lodestar/runtime/recovery/<receiptId>/`).
+// - `Workspace::load_receipt(&self, id: &ReceiptId) -> Result<ChangeReceipt, WorkspaceError>`:
+//   (auxiliar, no ejercitada aquí) lee un receipt persistido por id.
+//
+// **Cómo decide el GC "el más antiguo"**: por el **mtime** del fichero `<receiptId>.json` — es el
+// mismo reloj que gobierna la retención por edad (`retainReceiptsFor`), y `ChangeReceipt` no lleva
+// timestamp propio (los recibos son runtime desechable, invariante #1). El test `receipt_gc` fija
+// mtimes escalonados explícitos para que el orden por antigüedad sea determinista y no dependa de la
+// resolución del reloj del sistema de ficheros.
+// ---------------------------------------------------------------------------
+
+/// Un `ChangeReceipt` mínimo con id y revisiones conocidas (los `changed_paths`/`semantic_diff` no
+/// intervienen en la persistencia ni en el GC — van a un valor razonable/`Default`).
+fn receipt(id: &str, previous: &str, result: &str) -> ChangeReceipt {
+    ChangeReceipt {
+        id: ReceiptId(id.to_string()),
+        change_set_id: ChangeSetId(format!("changeset:{id}")),
+        previous_revision: WorkspaceRevision(previous.to_string()),
+        result_revision: WorkspaceRevision(result.to_string()),
+        changed_paths: vec![RelPath::new("uno.md").unwrap()],
+        semantic_diff: SemanticDiff::default(),
+    }
+}
+
+/// Fija el mtime de `path` a `t` (abriendo el fichero con permiso de escritura). Sirve para
+/// escalonar de forma determinista la "antigüedad" de los recibos en `receipt_gc`.
+fn set_mtime(path: &Path, t: SystemTime) {
+    let f = std::fs::OpenOptions::new()
+        .write(true)
+        .open(path)
+        .unwrap_or_else(|e| panic!("abrir {} para fijar mtime: {e}", path.display()));
+    f.set_modified(t)
+        .unwrap_or_else(|e| panic!("fijar mtime de {}: {e}", path.display()));
+}
+
+/// Cuenta los ficheros `*.json` directamente bajo `dir` (los recibos persistidos).
+fn contar_json(dir: &Path) -> usize {
+    std::fs::read_dir(dir)
+        .map(|rd| {
+            rd.flatten()
+                .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("json"))
+                .count()
+        })
+        .unwrap_or(0)
+}
+
+/// **E13-H07** · Criterio `receipt_persistido`: dado un apply completado, al terminar existe el
+/// receipt en `.lodestar/runtime/receipts/<receiptId>.json` con `previousRevision` y `resultRevision`
+/// correctos (leídos del disco, la fuente de verdad recuperable).
+#[test]
+fn receipt_persistido() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws = Workspace::open(dir.path()).unwrap();
+
+    let rc = receipt("receipt-persistido", "blake3:previa", "blake3:resultante");
+
+    // Persistir el receipt de la aplicación completada.
+    ws.write_receipt(&rc)
+        .expect("persistir el receipt de una aplicación completada");
+
+    // El receipt vive en `.lodestar/runtime/receipts/<receiptId>.json`.
+    let receipt_path = dir
+        .path()
+        .join(".lodestar/runtime/receipts")
+        .join("receipt-persistido.json");
+    assert!(
+        receipt_path.is_file(),
+        "el receipt debe persistirse en {}",
+        receipt_path.display()
+    );
+
+    // Releído del disco: sus revisiones (wire camelCase) coinciden con las conocidas.
+    let raw = std::fs::read_to_string(&receipt_path).unwrap_or_else(|e| {
+        panic!(
+            "el receipt debe ser legible {}: {e}",
+            receipt_path.display()
+        )
+    });
+    let json: serde_json::Value = serde_json::from_str(&raw)
+        .unwrap_or_else(|e| panic!("el receipt debe ser JSON bien formado: {e}"));
+    assert_eq!(
+        json["previousRevision"].as_str(),
+        Some("blake3:previa"),
+        "el receipt debe registrar la previousRevision correcta: {json}"
+    );
+    assert_eq!(
+        json["resultRevision"].as_str(),
+        Some("blake3:resultante"),
+        "el receipt debe registrar la resultRevision correcta: {json}"
+    );
+}
+
+/// **E13-H07** · Criterio `receipt_gc`: dados 21 recibos con `maximumReceipts:20`, al hacer GC queda
+/// el más antiguo (`receipt-00`, por mtime) fuera —su receipt y su copia de recuperación borrados—
+/// y persisten exactamente los 20 más recientes con sus copias intactas.
+#[test]
+fn receipt_gc() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws = Workspace::open(dir.path()).unwrap();
+
+    // Config explícita del criterio: retener como máximo 20 recibos (y 24h por edad, holgado).
+    std::fs::write(
+        dir.path().join(".lodestar/config.yaml"),
+        "transactions:\n  retainReceiptsFor: \"24h\"\n  maximumReceipts: 20\n",
+    )
+    .unwrap();
+
+    let receipts_dir = dir.path().join(".lodestar/runtime/receipts");
+    let recovery_dir = dir.path().join(".lodestar/runtime/recovery");
+    std::fs::create_dir_all(&recovery_dir).unwrap();
+
+    // 21 recibos con mtimes ESCALONADOS: `receipt-00` el más antiguo … `receipt-20` el más nuevo,
+    // cada uno con su copia de recuperación asociada en `recovery/<id>/` (convención: mismo id).
+    let now = SystemTime::now();
+    let ids: Vec<String> = (0..21).map(|i| format!("receipt-{i:02}")).collect();
+    for (i, id) in ids.iter().enumerate() {
+        let rc = receipt(id, "blake3:previa", "blake3:resultante");
+        let path = receipts_dir.join(format!("{id}.json"));
+        std::fs::write(&path, serde_json::to_vec(&rc).unwrap()).unwrap();
+
+        let rec = recovery_dir.join(id);
+        std::fs::create_dir_all(&rec).unwrap();
+        std::fs::write(rec.join("uno.md"), b"backup").unwrap();
+
+        // mtime: receipt-00 = hace 20 s (más antiguo) … receipt-20 = ahora (más nuevo). Todos MUY
+        // dentro de las 24h de retención, de modo que SOLO el límite de cantidad (20) fuerza la purga.
+        let t = now - Duration::from_secs((20 - i) as u64);
+        set_mtime(&path, t);
+    }
+
+    // Precondición no vacua: 21 recibos antes del GC.
+    assert_eq!(
+        contar_json(&receipts_dir),
+        21,
+        "precondición: deben existir 21 recibos antes del GC"
+    );
+
+    // Recolectar los excedentes según `maximumReceipts:20`.
+    ws.gc_receipts()
+        .expect("recolectar los recibos que exceden maximumReceipts");
+
+    // El más antiguo (`receipt-00`) queda fuera: su receipt y su copia de recuperación se borraron.
+    assert!(
+        !receipts_dir.join("receipt-00.json").exists(),
+        "el receipt más antiguo debía purgarse por exceder maximumReceipts:20"
+    );
+    assert!(
+        !recovery_dir.join("receipt-00").exists(),
+        "la copia de recuperación del receipt purgado debía borrarse también"
+    );
+
+    // Quedan exactamente 20 recibos (los más recientes), con sus copias de recuperación intactas.
+    assert_eq!(
+        contar_json(&receipts_dir),
+        20,
+        "tras el GC deben quedar exactamente maximumReceipts=20 recibos"
+    );
+    for id in &ids[1..] {
+        assert!(
+            receipts_dir.join(format!("{id}.json")).exists(),
+            "el receipt reciente {id} no debía purgarse"
+        );
+        assert!(
+            recovery_dir.join(id).exists(),
+            "la copia de recuperación del receipt reciente {id} no debía borrarse"
+        );
+    }
 }
 
 // ===========================================================================

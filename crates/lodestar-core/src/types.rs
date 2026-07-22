@@ -1133,3 +1133,25 @@ pub struct ChangeSet {
     pub expires_at: String,
 }
 }
+
+schema_derive! {
+/// Recibo de una aplicación de `ChangeSet` **completada** (E13-H07). Tras sellar la transacción
+/// (`done`), se persiste como `.lodestar/runtime/receipts/<receiptId>.json` para poder revertir
+/// (E13-H09) y auditar. Runtime desechable (invariante #1), retenido según la config
+/// `transactions` (`retainReceiptsFor`/`maximumReceipts`).
+///
+/// **Fase ROJA (E13-H07)**: aquí solo se congela la forma que el implementador persistirá; la
+/// mecánica de escritura/GC vive en `lodestar-workspace`. Los campos son los que fija la spec de
+/// la historia (`{ id, changeSetId, previousRevision, resultRevision, changedPaths, semanticDiff }`);
+/// si el implementador necesita añadir alguno, que respete estos nombres de wire.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChangeReceipt {
+    pub id: ReceiptId,
+    pub change_set_id: ChangeSetId,
+    pub previous_revision: WorkspaceRevision,
+    pub result_revision: WorkspaceRevision,
+    pub changed_paths: Vec<RelPath>,
+    pub semantic_diff: SemanticDiff,
+}
+}
