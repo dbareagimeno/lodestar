@@ -16,7 +16,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use lodestar_core::model;
-use lodestar_core::schema::{validate_schema, DocType};
+use lodestar_core::schema::{validate_relations, validate_schema, DocType};
 use lodestar_core::types::{
     workspace_revision, Analysis, Backlinks, Check, ConceptRef, ConceptRevision, Direction, Edge,
     ErrorCode, Frontmatter, GraphNode, RelPath, Severity, WorkspaceRevision,
@@ -687,8 +687,13 @@ impl App {
         let revision = workspace_revision(bundle.files(), &cfg.workspace.writable_roots);
 
         // Checks schema-driven agrupados por su path (`target`): así se unen a los OKF por path.
+        // Aditivo (E11-H03, `validate_relations`): un bundle sin relaciones tipadas no cambia el
+        // conjunto de diagnósticos, igual que `validate_schema` con un bundle sin `schema.yaml`.
         let mut schema_by_path: BTreeMap<RelPath, Vec<Check>> = BTreeMap::new();
-        for check in validate_schema(&bundle, &schema) {
+        for check in validate_schema(&bundle, &schema)
+            .into_iter()
+            .chain(validate_relations(&bundle, &schema))
+        {
             for target in &check.targets {
                 schema_by_path
                     .entry(target.clone())

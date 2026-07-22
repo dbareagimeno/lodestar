@@ -14,10 +14,10 @@
 //! [`validate_schema`] (E10-H07): función **pura y separada** de `analyze`/`validate_file` — no
 //! se integra ahí (aditiva por composición del llamante, no por acoplamiento del core).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::model;
-use crate::types::{Check, CheckCode, Frontmatter, Severity};
+use crate::types::{Check, CheckCode, Frontmatter, Range, RelPath, Severity};
 use crate::Bundle;
 
 use serde::{Deserialize, Serialize};
@@ -177,6 +177,180 @@ pub fn validate_schema(bundle: &Bundle, schema: &Schema) -> Vec<Check> {
         }
     }
     out
+}
+
+/// Valida las relaciones tipadas del frontmatter contra su [`RelationDef`] (E11-H03,
+/// `ARCHITECTURE.md §19.2/§19.3`): para cada concepto cuyo `type` está declarado en
+/// `schema.types`, y por cada relación declarada en `doctype.relations`, lee el campo
+/// homónimo del frontmatter (una secuencia YAML de paths target, o un único `String`) y
+/// comprueba:
+///
+/// 1. cada target existe como concepto del bundle → si no, [`CheckCode::RelTarget`];
+/// 2. el `type` del target, si el target existe, está en `RelationDef::target_types` (vacío =
+///    cualquier tipo) → si no, [`CheckCode::RelType`];
+/// 3. el nº de targets respeta `RelationDef::cardinality` (`"one"` ⇒ máx. 1) → si no,
+///    [`CheckCode::RelCard`].
+///
+/// Todos los `Check` son [`Severity::Err`], con `targets = [path del concepto origen]` y, cuando
+/// se localiza la línea del campo en el frontmatter crudo, `range` relleno.
+///
+/// Función **pura y separada** de `Bundle::analyze`/`conform::validate_file`/[`validate_schema`]:
+/// no se llama desde ninguna, así que un bundle sin relaciones tipadas (o sin `schema.yaml`) no
+/// cambia su veredicto de conformidad actual (aditiva por composición del llamante). Un campo de
+/// relación ausente del frontmatter no se valida (nada que comprobar); un concepto cuyo `type` no
+/// está en el schema se ignora — mismo criterio que [`validate_schema`].
+pub fn validate_relations(bundle: &Bundle, schema: &Schema) -> Vec<Check> {
+    if schema.types.is_empty() {
+        return Vec::new();
+    }
+
+    let concepts: BTreeSet<&RelPath> = bundle.analyze().concepts.iter().collect();
+
+    let mut out = Vec::new();
+    for path in &bundle.analyze().concepts {
+        let Some(raw) = bundle.files().get(path) else {
+            continue;
+        };
+        let parsed = model::parse_file(path.as_str(), raw);
+        let Some(fm) = parsed.fm else {
+            continue;
+        };
+        let Some(tipo) = fm.r#type.as_deref() else {
+            continue;
+        };
+        let Some(doctype) = schema.types.get(tipo) else {
+            continue;
+        };
+
+        for (rel_name, reldef) in &doctype.relations {
+            let Some(targets) = relation_targets(&fm, rel_name) else {
+                continue;
+            };
+            if targets.is_empty() {
+                continue;
+            }
+
+            let range = find_field_range(raw, rel_name);
+
+            if reldef.cardinality == "one" && targets.len() > 1 {
+                let mut check = Check::new(
+                    Severity::Err,
+                    CheckCode::RelCard,
+                    format!(
+                        "La relación «{rel_name}» de «{}» admite como máximo un target \
+                         (cardinalidad «one») pero declara {}.",
+                        path.as_str(),
+                        targets.len()
+                    ),
+                    vec![path.clone()],
+                );
+                check.range = range;
+                out.push(check);
+            }
+
+            for target_str in &targets {
+                let Ok(target_path) = RelPath::new(target_str) else {
+                    let mut check = Check::new(
+                        Severity::Err,
+                        CheckCode::RelTarget,
+                        format!(
+                            "La relación «{rel_name}» de «{}» apunta a «{target_str}», que no es una ruta válida.",
+                            path.as_str()
+                        ),
+                        vec![path.clone()],
+                    );
+                    check.range = range;
+                    out.push(check);
+                    continue;
+                };
+
+                if !concepts.contains(&target_path) {
+                    let mut check = Check::new(
+                        Severity::Err,
+                        CheckCode::RelTarget,
+                        format!(
+                            "La relación «{rel_name}» de «{}» apunta a «{target_str}», que no existe.",
+                            path.as_str()
+                        ),
+                        vec![path.clone()],
+                    );
+                    check.range = range;
+                    out.push(check);
+                    continue;
+                }
+
+                if !reldef.target_types.is_empty() {
+                    if let Some(target_type) = target_type_of(bundle, &target_path) {
+                        if !reldef.target_types.iter().any(|t| t == &target_type) {
+                            let mut check = Check::new(
+                                Severity::Err,
+                                CheckCode::RelType,
+                                format!(
+                                    "La relación «{rel_name}» de «{}» apunta a «{target_str}» de \
+                                     tipo «{target_type}», no permitido (admite: {}).",
+                                    path.as_str(),
+                                    reldef.target_types.join(", ")
+                                ),
+                                vec![path.clone()],
+                            );
+                            check.range = range;
+                            out.push(check);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Lee el campo `rel_name` del frontmatter como lista de paths target: acepta una secuencia YAML
+/// de `String` o un único `String` (envuelto en un vector de un elemento). `None` si el campo no
+/// está presente en `extra` o su forma no es ninguna de las dos anteriores.
+fn relation_targets(fm: &Frontmatter, rel_name: &str) -> Option<Vec<String>> {
+    match fm.extra.get(rel_name)? {
+        serde_yaml::Value::Sequence(seq) => Some(
+            seq.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect(),
+        ),
+        serde_yaml::Value::String(s) => Some(vec![s.clone()]),
+        _ => None,
+    }
+}
+
+/// El `type` del concepto en `target`, si existe en el bundle y parsea con frontmatter válido.
+fn target_type_of(bundle: &Bundle, target: &RelPath) -> Option<String> {
+    let raw = bundle.files().get(target)?;
+    let parsed = model::parse_file(target.as_str(), raw);
+    parsed.fm.and_then(|fm| fm.r#type)
+}
+
+/// Busca la línea del campo `{field}:` dentro del bloque de frontmatter (entre el primer y el
+/// segundo `---`) de `raw`, ignorando indentación. Devuelve su nº de línea 1-based como
+/// `Range{start_line,end_line}` (un solo renglón); `None` si no se encuentra o el fichero no
+/// tiene bloque de frontmatter.
+fn find_field_range(raw: &str, field: &str) -> Option<Range> {
+    let prefix = format!("{field}:");
+    let mut in_front = false;
+    for (idx, line) in raw.lines().enumerate() {
+        let trimmed = line.trim_start();
+        if trimmed == "---" {
+            if in_front {
+                break;
+            }
+            in_front = true;
+            continue;
+        }
+        if in_front && trimmed.starts_with(&prefix) {
+            let line_no = (idx + 1) as u32;
+            return Some(Range {
+                start_line: line_no,
+                end_line: line_no,
+            });
+        }
+    }
+    None
 }
 
 /// `true` si `campo` está presente en `fm`: como campo KNOWN con `Some(_)`, o en `extra`. Un

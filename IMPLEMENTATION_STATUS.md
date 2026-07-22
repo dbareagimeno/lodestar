@@ -269,6 +269,10 @@ superficie de producto; git queda como crate dormido) y `DECISIONES.md §0`. Des
     dirigido) puras en `core::graph` (reusan `graph_model`, invariante #3; deterministas) + enchufadas
     en `graph_query`. Reserva de H01 resuelta: `node_for` público, `graph_node_for` eliminado.
     Diferenciales 6/6 verde. Juez ciego: APROBADA (4/4).
-  - ⏳ E11-H03–H05 pendientes.
+  - ✅ **E11-H03** — `validate_relations(bundle, schema)` puro (REL-TARGET si el target no existe,
+    REL-TYPE si su type no está en target_types, REL-CARD si cardinality "one" con >1 target; msg
+    español + range al campo), cableado aditivo en `knowledge_check`. Diferenciales verde. Juez
+    ciego: APROBADA CON RESERVAS (3/3).
+  - ⏳ E11-H04–H05 pendientes.
 - **E12–E14: pendientes** (planificación · publicación recuperable · integración + evaluación
   — `ARCHITECTURE.md §19.8`).

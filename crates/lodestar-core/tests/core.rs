@@ -988,6 +988,203 @@ fn sin_schema_sin_checks() {
     );
 }
 
+// --- E11-H03: relaciones tipadas (`core::schema::validate_relations`) ---------
+//
+// Función PURA aún NO implementada (fase roja — compila-falla porque `validate_relations`
+// no existe todavía en `crates/lodestar-core/src/schema.rs`). Firma asumida (paralela a
+// `validate_schema` de E10-H07):
+//
+//   pub fn validate_relations(bundle: &Bundle, schema: &Schema) -> Vec<Check>;
+//
+// Por cada concepto cuyo `type` está declarado en el schema, y por cada relación declarada en
+// su `DocType.relations` (BTreeMap<nombre, RelationDef>), lee el campo del frontmatter con ese
+// NOMBRE (vive en `Frontmatter.extra`, valor = secuencia YAML de paths target) y comprueba:
+//   1. target existe como concepto del bundle → si no, `CheckCode::RelTarget` (Err).
+//   2. el `type` del target ∈ `RelationDef.target_types` (vacío = cualquiera) → si no,
+//      `CheckCode::RelType` (Err).
+//   3. nº de targets respeta `RelationDef.cardinality` ("one" ⇒ máx. 1) → si no,
+//      `CheckCode::RelCard` (Err).
+// Cada `Check` con `level: Err`, `msg` en español no vacío, `targets` = [path del concepto
+// origen] y `range` al campo de la relación. Los paths target del frontmatter se representan
+// como el `RelPath` del fichero destino tal cual (p. ej. `capitulo.md`), sin barra inicial.
+
+/// Criterio `relacion_target_roto`: una relación `appears_in` a un target inexistente →
+/// `Check{code:REL-TARGET, level:Err}` sobre el concepto origen, con `msg` no vacío y `range`
+/// presente (acota el campo de la relación).
+#[test]
+fn relacion_target_roto() {
+    use lodestar_core::schema::{validate_relations, DocType, RelationDef, Schema};
+
+    // Concepto `character` con `appears_in` a un capítulo que no existe en el bundle.
+    let b = Bundle::from_files(fm(&[(
+        "juan.md",
+        "---\ntype: character\ntitle: Juan\nappears_in:\n  - capitulo_fantasma.md\n---\n\n# Juan\n\ncuerpo\n",
+    )]));
+
+    // Schema: `character.appears_in` apunta a tipos `chapter`, cardinalidad libre (`many`).
+    let mut schema = Schema::default();
+    schema.types.insert(
+        "character".to_string(),
+        DocType {
+            name: "character".to_string(),
+            relations: BTreeMap::from([(
+                "appears_in".to_string(),
+                RelationDef {
+                    target_types: vec!["chapter".to_string()],
+                    cardinality: "many".to_string(),
+                },
+            )]),
+            ..DocType::default()
+        },
+    );
+
+    let checks = validate_relations(&b, &schema);
+
+    let path = RelPath::new("juan.md").unwrap();
+    let target = checks
+        .iter()
+        .find(|c| c.code == CheckCode::RelTarget)
+        .expect("una relación a un target inexistente → debe emitirse un Check REL-TARGET");
+    assert_eq!(
+        target.level,
+        Severity::Err,
+        "una relación a un target inexistente es un error duro"
+    );
+    assert!(
+        target.targets.contains(&path),
+        "el check debe apuntar al concepto origen; targets: {:?}",
+        target.targets
+    );
+    assert!(!target.msg.is_empty(), "el msg del check no debe ser vacío");
+    assert!(
+        target.range.is_some(),
+        "el check debe acotar el campo de la relación con un `range`"
+    );
+}
+
+/// Criterio `relacion_tipo_invalido`: una relación a un concepto cuyo `type` NO está en
+/// `RelationDef.target_types` → `Check{code:REL-TYPE, level:Err}` sobre el concepto origen, con
+/// `msg` no vacío. El target EXISTE y la cardinalidad se respeta (aísla el criterio del tipo).
+#[test]
+fn relacion_tipo_invalido() {
+    use lodestar_core::schema::{validate_relations, DocType, RelationDef, Schema};
+
+    // `juan` (character) → appears_in `espada` (type item), pero `appears_in` solo admite `chapter`.
+    let b = Bundle::from_files(fm(&[
+        (
+            "juan.md",
+            "---\ntype: character\ntitle: Juan\nappears_in:\n  - espada.md\n---\n\n# Juan\n\ncuerpo\n",
+        ),
+        (
+            "espada.md",
+            "---\ntype: item\ntitle: Espada\n---\n\n# Espada\n\ncuerpo\n",
+        ),
+    ]));
+
+    let mut schema = Schema::default();
+    for t in ["chapter", "item"] {
+        schema.types.insert(
+            t.to_string(),
+            DocType {
+                name: t.to_string(),
+                ..DocType::default()
+            },
+        );
+    }
+    schema.types.insert(
+        "character".to_string(),
+        DocType {
+            name: "character".to_string(),
+            relations: BTreeMap::from([(
+                "appears_in".to_string(),
+                RelationDef {
+                    target_types: vec!["chapter".to_string()],
+                    cardinality: "many".to_string(),
+                },
+            )]),
+            ..DocType::default()
+        },
+    );
+
+    let checks = validate_relations(&b, &schema);
+
+    let path = RelPath::new("juan.md").unwrap();
+    let tipo = checks
+        .iter()
+        .find(|c| c.code == CheckCode::RelType)
+        .expect("un target de `type` no permitido → debe emitirse un Check REL-TYPE");
+    assert_eq!(
+        tipo.level,
+        Severity::Err,
+        "un target de tipo no permitido es un error duro"
+    );
+    assert!(
+        tipo.targets.contains(&path),
+        "el check debe apuntar al concepto origen; targets: {:?}",
+        tipo.targets
+    );
+    assert!(!tipo.msg.is_empty(), "el msg del check no debe ser vacío");
+}
+
+/// Criterio `relacion_cardinalidad`: una relación de cardinalidad `one` con DOS targets →
+/// `Check{code:REL-CARD, level:Err}` sobre el concepto origen, con `msg` no vacío. Ambos targets
+/// existen y son de tipo válido (`target_types` vacío = cualquiera) para aislar el criterio.
+#[test]
+fn relacion_cardinalidad() {
+    use lodestar_core::schema::{validate_relations, DocType, RelationDef, Schema};
+
+    // `mentor` es cardinalidad "one" pero `juan` declara DOS mentores (ambos existen, tipo libre).
+    let b = Bundle::from_files(fm(&[
+        (
+            "juan.md",
+            "---\ntype: character\ntitle: Juan\nmentor:\n  - pedro.md\n  - ana.md\n---\n\n# Juan\n\ncuerpo\n",
+        ),
+        (
+            "pedro.md",
+            "---\ntype: character\ntitle: Pedro\n---\n\n# Pedro\n\ncuerpo\n",
+        ),
+        (
+            "ana.md",
+            "---\ntype: character\ntitle: Ana\n---\n\n# Ana\n\ncuerpo\n",
+        ),
+    ]));
+
+    let mut schema = Schema::default();
+    schema.types.insert(
+        "character".to_string(),
+        DocType {
+            name: "character".to_string(),
+            relations: BTreeMap::from([(
+                "mentor".to_string(),
+                RelationDef {
+                    target_types: Vec::new(),
+                    cardinality: "one".to_string(),
+                },
+            )]),
+            ..DocType::default()
+        },
+    );
+
+    let checks = validate_relations(&b, &schema);
+
+    let path = RelPath::new("juan.md").unwrap();
+    let card = checks
+        .iter()
+        .find(|c| c.code == CheckCode::RelCard)
+        .expect("cardinalidad `one` con dos targets → debe emitirse un Check REL-CARD");
+    assert_eq!(
+        card.level,
+        Severity::Err,
+        "exceder la cardinalidad declarada es un error duro"
+    );
+    assert!(
+        card.targets.contains(&path),
+        "el check debe apuntar al concepto origen; targets: {:?}",
+        card.targets
+    );
+    assert!(!card.msg.is_empty(), "el msg del check no debe ser vacío");
+}
+
 // --- E11-H02: graph_query estructural (path_between / cycles / components) ----
 //
 // Operaciones puras del core sobre el grafo de enlaces (aristas = `out_links`/`resolve_link`,
