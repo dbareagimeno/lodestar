@@ -1312,7 +1312,26 @@ impl App {
     /// gracias al **orden** de la transacción (guard de escritura antes de publicar), no a un cambio
     /// del aplanamiento. `change_apply` no introduce ningún camino donde un permiso denegado pase por
     /// `WorkspaceError::Core`.
+    ///
+    /// # Auditoría (E13-H10, `ARCHITECTURE.md §19.7`)
+    /// Cada intento (éxito **o** fallo, incluidos los rechazos de los pasos 1-4 que abortan ANTES de
+    /// publicar) anexa una línea a `.lodestar/runtime/audit.jsonl` — ver `App::audit`. Es
+    /// diagnóstico local, best-effort: nunca tumba el apply ni enmascara su error original. Delegado
+    /// en `App::change_apply_uncounted`, que conserva la lógica de publicación intacta; este método
+    /// público es solo el wrapper que garantiza que **ningún** `Err` se devuelve sin auditar primero.
     pub fn change_apply(
+        &self,
+        change_set_id: &ChangeSetId,
+        expected_workspace_revision: Option<WorkspaceRevision>,
+    ) -> Result<ApplyResult, ErrorCode> {
+        let outcome = self.change_apply_uncounted(change_set_id, expected_workspace_revision);
+        self.audit(audit_entry_for_apply(change_set_id, &outcome));
+        outcome
+    }
+
+    /// Lógica real de `change_apply` (E13-H08) — ver el rustdoc de [`App::change_apply`], que la
+    /// envuelve con la auditoría de E13-H10 sin alterar su comportamiento de éxito/error.
+    fn change_apply_uncounted(
         &self,
         change_set_id: &ChangeSetId,
         expected_workspace_revision: Option<WorkspaceRevision>,
@@ -1420,7 +1439,27 @@ impl App {
     /// transacción INVERSA (`previousWorkspaceRevision` == `resultRevision` del apply;
     /// `workspaceRevision` == `previousRevision` del apply, el estado restaurado) y los paths
     /// restaurados.
+    ///
+    /// # Auditoría (E13-H10, `ARCHITECTURE.md §19.7`)
+    /// Mismo wrapper que [`App::change_apply`]: audita éxito y fallo (incluidos los rechazos de los
+    /// pasos 1-3) antes de devolver, sin alterar la semántica. El `changeSetId` auditado es el del
+    /// receipt cuando se logra cargar; si el receipt ya no existe (el propio motivo del fallo
+    /// `PLAN_EXPIRED`), se audita con el `receiptId` como mejor identificador disponible — ver
+    /// `App::revert_change_set_hint`.
     pub fn change_revert(
+        &self,
+        receipt_id: &ReceiptId,
+        expected_workspace_revision: Option<WorkspaceRevision>,
+    ) -> Result<RevertResult, ErrorCode> {
+        let outcome = self.change_revert_uncounted(receipt_id, expected_workspace_revision);
+        let change_set_id_hint = self.revert_change_set_hint(receipt_id);
+        self.audit(audit_entry_for_revert(&change_set_id_hint, &outcome));
+        outcome
+    }
+
+    /// Lógica real de `change_revert` (E13-H09) — ver el rustdoc de [`App::change_revert`], que la
+    /// envuelve con la auditoría de E13-H10 sin alterar su comportamiento de éxito/error.
+    fn change_revert_uncounted(
         &self,
         receipt_id: &ReceiptId,
         expected_workspace_revision: Option<WorkspaceRevision>,
@@ -1488,6 +1527,38 @@ impl App {
             changed_paths,
             semantic_diff: receipt.semantic_diff,
         })
+    }
+
+    /// Mejor identificador de `changeSetId` disponible para auditar un `change_revert` (E13-H10),
+    /// sin alterar el comportamiento de [`App::change_revert_uncounted`]: intenta cargar el receipt
+    /// (misma llamada que hace el paso 1 de la reversión, idempotente y de solo lectura) y devuelve
+    /// su `changeSetId`; si el receipt ya no existe — precisamente el motivo típico de un fallo
+    /// `PLAN_EXPIRED` — cae al `receiptId` recibido como mejor identificador disponible (se sabe
+    /// siempre, independientemente de dónde falle la reversión).
+    fn revert_change_set_hint(&self, receipt_id: &ReceiptId) -> String {
+        self.workspace
+            .load_receipt(receipt_id)
+            .map(|r| r.change_set_id.0)
+            .unwrap_or_else(|_| receipt_id.0.clone())
+    }
+
+    /// Anexa `entry` como una línea JSON a `.lodestar/runtime/audit.jsonl` (E13-H10,
+    /// `ARCHITECTURE.md §19.7`, `REFACTOR §14`): crea `.lodestar/runtime/` si falta y abre el
+    /// fichero en modo `append` (nunca reescribe líneas previas — JSONL que solo crece).
+    ///
+    /// **Best-effort y silencioso para el llamante**: la auditoría es diagnóstico local, NUNCA debe
+    /// tumbar una operación de escritura ni enmascarar su error original (regla de la historia). Un
+    /// fallo al escribir (permisos, disco lleno, …) se reporta por stderr y se descarta — mismo
+    /// criterio que `gitignore::ensure_gitignore`/`runtime::ensure_runtime_scaffold` en
+    /// `lodestar-workspace`. Es runtime puro: gitignored, fuera de `WorkspaceRevision`
+    /// (E9-H06/E10-H03), no indexado y no expuesto por ninguna tool MCP (solo diagnóstico local).
+    fn audit(&self, entry: AuditEntry) {
+        if let Err(e) = try_append_audit(self.workspace.root(), &entry) {
+            eprintln!(
+                "lodestar: aviso: no se pudo anexar la auditoría de `{}`: {e}",
+                entry.tool
+            );
+        }
     }
 }
 
@@ -1568,6 +1639,156 @@ pub struct ApplyConformance {
     pub errors: usize,
     /// Nº de checks `Warn`.
     pub warnings: usize,
+}
+
+// ---------------------------------------------------------------------------
+// Auditoría local `.lodestar/runtime/audit.jsonl` (E13-H10, `ARCHITECTURE.md §19.7`,
+// `REFACTOR §14`). Registra localmente cada operación de escritura (`change_apply`/
+// `change_revert`) — éxito Y fallo, incluidos los intentos rechazados antes de publicar. Runtime,
+// NO conocimiento canónico: gitignored, fuera de `WorkspaceRevision` (E9-H06/E10-H03), nunca
+// indexado y no expuesto por ninguna tool MCP (solo diagnóstico local).
+// ---------------------------------------------------------------------------
+
+/// Cliente por defecto de las entradas de auditoría. El protocolo (MCP/CLI) no identifica hoy un
+/// cliente concreto — no hay mecanismo de identidad de cliente todavía (E13-H10 solo pide un valor
+/// «razonable», no resolver identidad; ver el rustdoc de la historia). Placeholder documentado,
+/// no una decisión de producto.
+const AUDIT_CLIENT_DEFAULT: &str = "mcp";
+
+/// Una línea del registro de auditoría local `.lodestar/runtime/audit.jsonl` (E13-H10). Proyección
+/// de servicio, wire en camelCase — `changeSetId`/`baseRevision`/`resultRevision`. `timestamp` es
+/// `SystemTime::now()` en segundos epoch, tomado aquí (fachada de superficie) — `lodestar-core`
+/// sigue sin tocar tiempo de pared (pureza, invariante #2).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AuditEntry {
+    /// Instante de la operación, en segundos epoch (wall-clock).
+    pub timestamp: String,
+    /// Cliente que originó la operación (hoy siempre `AUDIT_CLIENT_DEFAULT`).
+    pub client: String,
+    /// Nombre de la operación de escritura auditada (misma etiqueta que la tool MCP:
+    /// `"change_apply"`/`"change_revert"`).
+    pub tool: String,
+    /// El `ChangeSetId` de la operación auditada, tal cual se intentó. Para `change_revert` que
+    /// falla antes de poder resolver el receipt, es el `receiptId` (ver
+    /// `App::revert_change_set_hint`).
+    pub change_set_id: String,
+    /// [`WorkspaceRevision`] base ANTES de la operación, solo en éxito (en fallo no se conoce de
+    /// forma fiable sin duplicar los pasos de la operación, y el criterio de la historia solo fija
+    /// las revisiones para el camino de éxito).
+    pub base_revision: Option<String>,
+    /// [`WorkspaceRevision`] resultante DESPUÉS de la operación, solo en éxito.
+    pub result_revision: Option<String>,
+    /// Paths del canónico afectados, solo en éxito (vacío en fallo: nada se publicó).
+    pub paths: Vec<String>,
+    /// `"success"` en éxito; en fallo, el código wire del [`ErrorCode`] rechazado (p. ej.
+    /// `"REVISION_CONFLICT"`), vía [`ErrorCode::as_str`] — un audit trail cubre también los
+    /// intentos rechazados, y el código wire es más útil como diagnóstico que un literal genérico.
+    pub result: String,
+}
+
+/// Instante actual en segundos epoch, como string (E13-H10). Wall-clock, en la fachada de
+/// superficie — mismo patrón que `expires_at_string` para `change_plan`; `lodestar-core` sigue sin
+/// tocar `SystemTime` (pureza, invariante #2).
+fn audit_timestamp_now() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+        .to_string()
+}
+
+/// Construye la entrada de auditoría de un `change_apply` (E13-H10) a partir de su resultado: en
+/// éxito, las revisiones/paths del [`ApplyResult`]; en fallo, solo lo que se conoce siempre —el
+/// `changeSetId` de entrada (el parámetro, el mismo en cualquier paso donde falle) y el código wire
+/// del [`ErrorCode`] rechazado.
+fn audit_entry_for_apply(
+    change_set_id: &ChangeSetId,
+    outcome: &Result<ApplyResult, ErrorCode>,
+) -> AuditEntry {
+    let (base_revision, result_revision, paths, result) = match outcome {
+        Ok(apply) => (
+            Some(apply.previous_workspace_revision.0.clone()),
+            Some(apply.workspace_revision.0.clone()),
+            apply
+                .changed_paths
+                .iter()
+                .map(|p| p.as_str().to_string())
+                .collect(),
+            "success".to_string(),
+        ),
+        Err(err) => (None, None, Vec::new(), err.as_str().to_string()),
+    };
+    AuditEntry {
+        timestamp: audit_timestamp_now(),
+        client: AUDIT_CLIENT_DEFAULT.to_string(),
+        tool: "change_apply".to_string(),
+        change_set_id: change_set_id.0.clone(),
+        base_revision,
+        result_revision,
+        paths,
+        result,
+    }
+}
+
+/// Construye la entrada de auditoría de un `change_revert` (E13-H10) a partir de su resultado —
+/// mismo criterio que [`audit_entry_for_apply`]. El `changeSetId` ya viene resuelto por el llamante
+/// (ver `App::revert_change_set_hint`), porque `change_revert` solo recibe un `receiptId`, no un
+/// `ChangeSetId` directo.
+fn audit_entry_for_revert(
+    change_set_id_hint: &str,
+    outcome: &Result<RevertResult, ErrorCode>,
+) -> AuditEntry {
+    let (base_revision, result_revision, paths, result) = match outcome {
+        Ok(revert) => (
+            Some(revert.previous_workspace_revision.0.clone()),
+            Some(revert.workspace_revision.0.clone()),
+            revert
+                .changed_paths
+                .iter()
+                .map(|p| p.as_str().to_string())
+                .collect(),
+            "success".to_string(),
+        ),
+        Err(err) => (None, None, Vec::new(), err.as_str().to_string()),
+    };
+    AuditEntry {
+        timestamp: audit_timestamp_now(),
+        client: AUDIT_CLIENT_DEFAULT.to_string(),
+        tool: "change_revert".to_string(),
+        change_set_id: change_set_id_hint.to_string(),
+        base_revision,
+        result_revision,
+        paths,
+        result,
+    }
+}
+
+/// Ruta completa de `.lodestar/runtime/audit.jsonl` bajo `root` (E13-H10). El directorio `runtime`
+/// ya lo garantiza `ensure_runtime_scaffold` al abrir el workspace (E9-H06); `try_append_audit` lo
+/// reafirma con `create_dir_all` por robustez (mismo patrón que `persist_plan`).
+fn audit_file_path(root: &Path) -> PathBuf {
+    root.join(".lodestar").join("runtime").join("audit.jsonl")
+}
+
+/// Anexa `entry` como una línea JSON (+ `\n`) a `.lodestar/runtime/audit.jsonl` bajo `root`
+/// (E13-H10): crea `.lodestar/runtime/` si falta y abre en modo `append` — JSONL que solo crece,
+/// nunca reescribe líneas previas. Devuelve el error de I/O sin envolver; `App::audit` es quien
+/// decide que un fallo aquí es best-effort (no debe tumbar la operación auditada).
+fn try_append_audit(root: &Path, entry: &AuditEntry) -> std::io::Result<()> {
+    use std::io::Write;
+    let path = audit_file_path(root);
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let mut line = serde_json::to_string(entry).expect("AuditEntry siempre serializa a JSON");
+    line.push('\n');
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .create(true)
+        .open(&path)?;
+    file.write_all(line.as_bytes())
 }
 
 // ---------------------------------------------------------------------------

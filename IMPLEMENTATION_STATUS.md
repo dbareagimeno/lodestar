@@ -391,5 +391,10 @@ superficie de producto; git queda como crate dormido) y `DECISIONES.md §0`. Des
     `recovery/<orig>/` como una transacción INVERSA recuperable (lock + backup del estado actual + journal
     propios ANTES de restaurar por `write_atomic`/`delete`). El workspace vuelve a `previousRevision`.
     Juez ciego: APROBADA (3/3).
-  - ⏳ E13-H10 (audit) y E13-H11 (auto-regen index/tags) pendientes.
+  - ✅ **E13-H10** — Auditoría `.lodestar/runtime/audit.jsonl`: `change_apply`/`change_revert` son
+    wrappers que auditan SIEMPRE antes de devolver (éxito → result:"success" + revisiones; fallo,
+    incluido un RevisionConflict que aborta antes de publicar → result = código wire). Best-effort
+    (no tumba la operación ni enmascara el error); append JSONL; runtime (invariante #1); SystemTime
+    solo en app (invariante #2). Juez ciego: APROBADA CON RESERVAS (2/2).
+  - ⏳ E13-H11 (auto-regen index/tags en change_apply) pendiente.
 - **E14: pendiente** (integración software + evaluación — `ARCHITECTURE.md §19.8`).
