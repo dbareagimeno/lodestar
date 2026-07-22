@@ -191,3 +191,28 @@ impl Workspace {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Pin del contrato de saneado de `staging_dir_name` (chokepoint del `changeSetId` hacia el
+    /// nombre de directorio bajo `.lodestar/runtime/staging/`): descarta el prefijo `changeset:` y
+    /// neutraliza cualquier carácter de path (`:`/`/`/`\`) → `_`, de modo que un id hostil no puede
+    /// escapar de la raíz de staging. Sin este test, mutar la función a una constante sobrevive
+    /// (el directorio es efímero y su nombre no entra en las aserciones de las transacciones).
+    #[test]
+    fn staging_dir_name_sanea_prefijo_y_separadores() {
+        // Prefijo descartado + los tres separadores de path neutralizados.
+        let id = ChangeSetId("changeset:a/b:c\\d".into());
+        assert_eq!(staging_dir_name(&id), "a_b_c_d");
+
+        // Sin prefijo `changeset:`, el id se conserva (solo se sanean separadores).
+        let sin_prefijo = ChangeSetId("a/b".into());
+        assert_eq!(staging_dir_name(&sin_prefijo), "a_b");
+
+        // Un id ya limpio pasa intacto (determinista y distinto por id).
+        let limpio = ChangeSetId("changeset:abc123".into());
+        assert_eq!(staging_dir_name(&limpio), "abc123");
+    }
+}
