@@ -160,6 +160,7 @@ pub fn workspace_error_code(err: &WorkspaceError) -> ErrorCode {
         WorkspaceError::Store(_) => ErrorCode::InternalIoError,
         WorkspaceError::RepoBusy => ErrorCode::WriteConflict,
         WorkspaceError::PermissionDenied(_) => ErrorCode::PermissionDenied,
+        WorkspaceError::NonconformantResult(_) => ErrorCode::NonconformantResult,
     }
 }
 

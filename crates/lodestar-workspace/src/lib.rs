@@ -29,12 +29,14 @@ mod io;
 mod runtime;
 pub mod schema;
 mod snapshot;
+mod staging;
 
 pub use config::{Config, WorkspaceConfig};
 pub use error::WorkspaceError;
 pub use external_refs::{ExternalReference, ExternalRefsReport};
 pub use schema::WorkspaceSchema;
 pub use snapshot::BundleSnapshot;
+pub use staging::StagingDir;
 
 /// Handle unificado de un bundle abierto.
 pub struct Workspace {

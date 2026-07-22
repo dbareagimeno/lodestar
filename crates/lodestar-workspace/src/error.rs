@@ -23,6 +23,13 @@ pub enum WorkspaceError {
     /// el motivo concreto.
     #[error("permiso denegado: {0}")]
     PermissionDenied(String),
+    /// El resultado hipotético de un plan, materializado en staging (E13-H01,
+    /// [`crate::Workspace::validate_staging`]), NO cumple la política de conformidad estricta
+    /// (`hard_fail > 0`): publicarlo dejaría el conocimiento canónico no conforme. La validación
+    /// aborta sin tocar el canónico y limpia el staging; el `String` describe el motivo concreto
+    /// (recuento de fallos duros). Mapea al wire `NONCONFORMANT_RESULT`.
+    #[error("el resultado del plan no es conforme: {0}")]
+    NonconformantResult(String),
 }
 
 impl WorkspaceError {
@@ -37,6 +44,7 @@ impl WorkspaceError {
             WorkspaceError::Store(_) => "STORE",
             WorkspaceError::RepoBusy => "REPO_BUSY",
             WorkspaceError::PermissionDenied(_) => "PERMISSION_DENIED",
+            WorkspaceError::NonconformantResult(_) => "NONCONFORMANT_RESULT",
         }
     }
 }

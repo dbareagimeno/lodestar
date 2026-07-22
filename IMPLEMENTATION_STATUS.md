@@ -335,4 +335,11 @@ superficie de producto; git queda como crate dormido) y `DECISIONES.md §0`. Des
   - **E12 — COMPLETA** (9/9). Criterio de salida cumplido: un agente puede proponer refactors complejos
     sin modificar archivos (change_plan normaliza/simula/valida en memoria, con diff semántico, riesgo,
     validación, concurrencia optimista y plan persistido/recuperable).
-- **E13–E14: pendientes** (publicación recuperable · integración + evaluación — `ARCHITECTURE.md §19.8`).
+- **E13 — EN CURSO** (publicación recuperable):
+  - ✅ **E13-H01** — Staging: `Workspace::materialize_staging(&ChangeSet)` computa el resultado con
+    `apply_normalized_ops` y lo escribe en `.lodestar/runtime/staging/<id saneado>/` SIN tocar el
+    canónico (invariante #1; runtime desechable); `validate_staging` construye el Bundle del resultado,
+    aplica el gate estricto y limpia + `NONCONFORMANT_RESULT` si no conforme. `WorkspaceError::
+    NonconformantResult`. Juez ciego: APROBADA (2/2).
+  - ⏳ E13-H02–H11 pendientes (lock/journal/copias/publicar/crash-recovery/receipts/change_apply/revert/audit/regen).
+- **E14: pendiente** (integración software + evaluación — `ARCHITECTURE.md §19.8`).
