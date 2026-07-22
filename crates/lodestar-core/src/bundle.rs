@@ -10,7 +10,7 @@ use crate::conform::{self, ConformCtx};
 use crate::model::{self, Parsed};
 use crate::types::{
     Analysis, Backlinks, Check, ConceptSummary, Direction, Frontmatter, FrontmatterPatch,
-    GraphModel, LinkRef, Neighborhood, RelPath, Severity, WriteOutcome,
+    GraphModel, GraphNode, LinkRef, Neighborhood, RelPath, Severity, WriteOutcome,
 };
 
 static OKF_VER_VAL_RE: Lazy<Regex> =
@@ -258,6 +258,31 @@ impl Bundle {
     /// Modelo de grafo completo del bundle.
     pub fn graph_model(&self) -> GraphModel {
         crate::graph::graph_model(self)
+    }
+
+    /// [`GraphNode`] de `id` (ghost/type/status), reusando `graph::node_for` — la única definición
+    /// de "qué es un nodo del grafo" (invariante #3). Envoltorio público para que las fachadas
+    /// (`lodestar-app`) no reimplementen ese criterio ni necesiten acceso a `parsed` (`pub(crate)`).
+    pub fn node(&self, id: &RelPath) -> GraphNode {
+        crate::graph::node_for(self, id)
+    }
+
+    /// Camino más corto **dirigido** de `a` a `b` (`[a, .., b]`), o `vec![]` si no hay camino
+    /// (E11-H02). Nunca error. Ver `graph::path_between`.
+    pub fn path_between(&self, a: &RelPath, b: &RelPath) -> Vec<RelPath> {
+        crate::graph::path_between(self, a, b)
+    }
+
+    /// Ciclos dirigidos del grafo de enlaces; cada ciclo es el conjunto de nodos de una SCC no
+    /// trivial (E11-H02). Ver `graph::cycles`.
+    pub fn cycles(&self) -> Vec<Vec<RelPath>> {
+        crate::graph::cycles(self)
+    }
+
+    /// Componentes conexas (conectividad no dirigida) del grafo de enlaces; cada componente es el
+    /// conjunto de sus nodos (E11-H02). Ver `graph::components`.
+    pub fn components(&self) -> Vec<Vec<RelPath>> {
+        crate::graph::components(self)
     }
 
     /// Filtro de paths por la DSL de query (port fiel; devuelve paths).

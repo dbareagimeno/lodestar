@@ -987,3 +987,133 @@ fn sin_schema_sin_checks() {
         "un bundle sin schema no debe producir checks schema-driven"
     );
 }
+
+// --- E11-H02: graph_query estructural (path_between / cycles / components) ----
+//
+// Operaciones puras del core sobre el grafo de enlaces (aristas = `out_links`/`resolve_link`,
+// la MISMA representación que `analyze().out`/`inn` y `graph_model`/`neighborhood`). Firmas
+// asumidas (fase roja — aún NO existen en `crates/lodestar-core/src/graph.rs`; se exponen como
+// métodos de `Bundle`, en línea con `neighborhood`/`graph_model`/`backlinks`):
+//
+//   impl Bundle {
+//       /// Camino más corto DIRIGIDO de `a` a `b` (siguiendo aristas salientes), incluyendo
+//       /// ambos extremos. `[a, .., b]`. Vacío (`vec![]`) si no hay camino — NUNCA error.
+//       pub fn path_between(&self, a: &RelPath, b: &RelPath) -> Vec<RelPath>;
+//       /// Ciclos dirigidos del grafo de enlaces. Cada ciclo es el conjunto de nodos que lo
+//       /// forman (un `Vec<RelPath>`). Los nodos acíclicos NO aparecen.
+//       pub fn cycles(&self) -> Vec<Vec<RelPath>>;
+//       /// Componentes conexas (conectividad no dirigida) del grafo de enlaces. Cada componente
+//       /// es el conjunto de sus nodos.
+//       pub fn components(&self) -> Vec<Vec<RelPath>>;
+//   }
+//
+// Fixtures: cada concepto lleva frontmatter válido (`type`/`title`/`description`) para ser
+// concepto real; las aristas se montan con enlaces markdown `[x](/x.md)` en el cuerpo (mismo
+// patrón que `analyze_backlinks_son_inversa_de_out`), sin ghosts ni reservados.
+
+/// Nodo concepto con `body` como cuerpo (donde van los enlaces markdown que forman aristas).
+fn nodo(title: &str, body: &str) -> String {
+    format!("---\ntype: N\ntitle: {title}\ndescription: d\n---\n\n# H\n\n{body}\n")
+}
+
+/// Criterio `path_between_directo`: A→B→C ⇒ `path_between(A,C) == [A,B,C]` (camino más corto
+/// dirigido, incluyendo los dos extremos).
+#[test]
+fn path_between_directo() {
+    let b = Bundle::from_files(fm(&[
+        ("a.md", &nodo("A", "[b](/b.md)")),
+        ("b.md", &nodo("B", "[c](/c.md)")),
+        ("c.md", &nodo("C", "cuerpo")),
+    ]));
+    let a = RelPath::new("a.md").unwrap();
+    let c = RelPath::new("c.md").unwrap();
+
+    let camino = b.path_between(&a, &c);
+
+    assert_eq!(
+        camino.iter().map(|p| p.as_str()).collect::<Vec<_>>(),
+        vec!["a.md", "b.md", "c.md"],
+        "el camino más corto dirigido A→B→C debe ser exactamente [A,B,C]"
+    );
+}
+
+/// Criterio `detecta_ciclo`: A→B→A ⇒ `cycles()` reporta el ciclo `{A,B}`. El nodo D→A, acíclico,
+/// NO debe aparecer en ningún ciclo reportado.
+#[test]
+fn detecta_ciclo() {
+    let b = Bundle::from_files(fm(&[
+        ("a.md", &nodo("A", "[b](/b.md)")),
+        ("b.md", &nodo("B", "[a](/a.md)")),
+        // D enlaza a A pero nadie enlaza a D: entra al ciclo pero no forma parte de él.
+        ("d.md", &nodo("D", "[a](/a.md)")),
+    ]));
+    let pa = RelPath::new("a.md").unwrap();
+    let pb = RelPath::new("b.md").unwrap();
+    let pd = RelPath::new("d.md").unwrap();
+
+    let ciclos = b.cycles();
+
+    assert_eq!(ciclos.len(), 1, "debe reportar exactamente un ciclo");
+    let miembros: std::collections::BTreeSet<&str> = ciclos[0].iter().map(|p| p.as_str()).collect();
+    assert!(
+        miembros.contains(pa.as_str()) && miembros.contains(pb.as_str()),
+        "el ciclo debe contener A y B, fue {miembros:?}"
+    );
+    assert!(
+        !miembros.contains(pd.as_str()),
+        "el nodo acíclico D no debe aparecer en el ciclo"
+    );
+}
+
+/// Criterio `dos_componentes`: dos subgrafos inconexos (A→B y C→D) ⇒ `components()` devuelve 2
+/// componentes, y cada nodo pertenece a exactamente una.
+#[test]
+fn dos_componentes() {
+    let b = Bundle::from_files(fm(&[
+        ("a.md", &nodo("A", "[b](/b.md)")),
+        ("b.md", &nodo("B", "cuerpo")),
+        ("c.md", &nodo("C", "[d](/d.md)")),
+        ("d.md", &nodo("D", "cuerpo")),
+    ]));
+
+    let comps = b.components();
+
+    assert_eq!(comps.len(), 2, "dos subgrafos inconexos ⇒ 2 componentes");
+
+    // Cada uno de los 4 nodos aparece en exactamente una componente.
+    let mut vistos: BTreeMap<&str, usize> = BTreeMap::new();
+    for comp in &comps {
+        for n in comp {
+            *vistos.entry(n.as_str()).or_insert(0) += 1;
+        }
+    }
+    for id in ["a.md", "b.md", "c.md", "d.md"] {
+        assert_eq!(
+            vistos.get(id).copied().unwrap_or(0),
+            1,
+            "{id} debe pertenecer a exactamente una componente"
+        );
+    }
+}
+
+/// Criterio `sin_camino`: A y C sin ninguna arista que los conecte ⇒ `path_between(A,C)` es vacío
+/// (`vec![]`), NO un error.
+#[test]
+fn sin_camino() {
+    let b = Bundle::from_files(fm(&[
+        ("a.md", &nodo("A", "[b](/b.md)")),
+        ("b.md", &nodo("B", "cuerpo")),
+        // C aislado: ni sale ni entra hacia el grupo de A.
+        ("c.md", &nodo("C", "cuerpo")),
+    ]));
+    let a = RelPath::new("a.md").unwrap();
+    let c = RelPath::new("c.md").unwrap();
+
+    let camino = b.path_between(&a, &c);
+
+    assert!(
+        camino.is_empty(),
+        "sin camino dirigido A→C el resultado debe ser vacío, fue {:?}",
+        camino.iter().map(|p| p.as_str()).collect::<Vec<_>>()
+    );
+}

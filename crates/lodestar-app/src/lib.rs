@@ -824,6 +824,22 @@ impl App {
     ///   no hay arista que mostrar); `dangling` empareja cada target colgante con las aristas
     ///   `origen→target` que lo referencian (recorriendo `Analysis::out`).
     ///
+    /// **Operaciones estructurales (E11-H02)**, funciones puras del core reexpuestas en la misma
+    /// forma `{nodes,edges}` (invariante #3):
+    /// - `path_between` requiere `r` (origen) y `to` (destino); reusa [`Bundle::path_between`]
+    ///   (camino más corto dirigido). `nodes` = los nodos del camino, `edges` = los enlaces
+    ///   consecutivos `[a→..→b]`. Si algún ref no resuelve → `Err(ErrorCode::ConceptNotFound)`; si
+    ///   no hay camino, `nodes`/`edges` vacíos (nunca error). **Nota**: la paginación genérica
+    ///   ordena `nodes` por `id`, así que el orden del camino se recupera de `edges`, no de `nodes`.
+    /// - `cycles` no requiere `r`: reusa [`Bundle::cycles`]. `nodes` = la unión de los nodos que
+    ///   participan en algún ciclo (SCC no trivial); `edges` = los enlaces del grafo internos a ese
+    ///   conjunto. La partición en ciclos concretos la da el core; aquí se sirve el subgrafo cíclico
+    ///   agregado (coherente con la forma `{nodes,edges}` de esta tool).
+    /// - `components` no requiere `r`: reusa [`Bundle::components`]. Como las componentes conexas
+    ///   particionan **todo** el grafo, se sirve el grafo completo (`nodes`/`edges` de
+    ///   [`Bundle::graph_model`]); el cliente reconstruye la partición con [`Bundle::components`] o
+    ///   recorriendo las aristas.
+    ///
     /// **Paginación**: orden total y estable de `nodes` por `id` (mismo criterio que
     /// `knowledge_search`/`knowledge_check`); `limit` trunca esa página con un cursor-offset opaco
     /// (mismo esquema hex, autosuficiente entre procesos). Sin `limit`, o con `limit` mayor o igual
@@ -831,10 +847,15 @@ impl App {
     /// los `nodes` que sobreviven a la página (origen y destino ambos presentes), así el subgrafo
     /// que se sirve es siempre coherente consigo mismo — nunca una arista "colgando" de un nodo que
     /// la paginación dejó fuera.
+    // Dispatcher de wire: cada argumento mapea 1:1 a un campo del `inputSchema` de la tool MCP
+    // `graph_query` (operation/ref/to/depth/direction/limit/cursor). Agruparlos en un struct sería
+    // una capa de framing paralela sin valor; el listado plano es el contrato.
+    #[allow(clippy::too_many_arguments)]
     pub fn graph_query(
         &self,
         operation: &str,
         r: Option<&ConceptRef>,
+        to: Option<&ConceptRef>,
         depth: Option<u32>,
         direction: Option<&str>,
         limit: Option<usize>,
@@ -854,7 +875,7 @@ impl App {
                 for lr in &bl.inbound {
                     ids.insert(lr.path.clone());
                 }
-                let nodes = ids.iter().map(|id| graph_node_for(&bundle, id)).collect();
+                let nodes = ids.iter().map(|id| bundle.node(id)).collect();
                 let edges = bl
                     .inbound
                     .iter()
@@ -883,11 +904,7 @@ impl App {
             }
             "orphans" => {
                 let a = bundle.analyze();
-                let nodes = a
-                    .orphans
-                    .iter()
-                    .map(|id| graph_node_for(&bundle, id))
-                    .collect();
+                let nodes = a.orphans.iter().map(|id| bundle.node(id)).collect();
                 (nodes, Vec::new())
             }
             "dangling" => {
@@ -905,17 +922,47 @@ impl App {
                         }
                     }
                 }
-                let nodes = a
-                    .dangling
-                    .iter()
-                    .map(|id| graph_node_for(&bundle, id))
+                let nodes = a.dangling.iter().map(|id| bundle.node(id)).collect();
+                (nodes, edges)
+            }
+            "path_between" => {
+                let from = self.resolve_ref(r.ok_or(ErrorCode::ConceptNotFound)?)?;
+                let dest = self.resolve_ref(to.ok_or(ErrorCode::ConceptNotFound)?)?;
+                let path = bundle.path_between(&from, &dest);
+                let nodes = path.iter().map(|id| bundle.node(id)).collect();
+                // Aristas consecutivas del camino; `dangling` si el destino no es un fichero real.
+                let edges = path
+                    .windows(2)
+                    .map(|w| Edge {
+                        source: w[0].clone(),
+                        target: w[1].clone(),
+                        dangling: !bundle.files().contains_key(&w[1]),
+                    })
                     .collect();
                 (nodes, edges)
             }
-            // Ninguna historia ejerce todavía una `operation` fuera de las 5 anteriores
-            // (`path_between`/`cycles`/`components` son E11-H02); mismo criterio que
-            // `schema_inspect` para un `mode` no reconocido — no hay un código de "argumento
-            // inválido" dedicado en el catálogo de 16.
+            "cycles" => {
+                // Unión de los nodos que participan en algún ciclo (SCC no trivial).
+                let en_ciclo: BTreeSet<RelPath> = bundle.cycles().into_iter().flatten().collect();
+                let nodes = en_ciclo.iter().map(|id| bundle.node(id)).collect();
+                // Aristas del grafo internas al conjunto cíclico.
+                let edges = bundle
+                    .graph_model()
+                    .edges
+                    .into_iter()
+                    .filter(|e| en_ciclo.contains(&e.source) && en_ciclo.contains(&e.target))
+                    .collect();
+                (nodes, edges)
+            }
+            "components" => {
+                // Las componentes particionan todo el grafo: se sirve el grafo completo y el
+                // cliente reconstruye la partición (Bundle::components) si la necesita.
+                let model = bundle.graph_model();
+                (model.nodes, model.edges)
+            }
+            // Ninguna historia ejerce todavía una `operation` fuera de las anteriores; mismo
+            // criterio que `schema_inspect` para un `mode` no reconocido — no hay un código de
+            // "argumento inválido" dedicado en el catálogo de 16.
             _ => return Err(ErrorCode::InvalidSchema),
         };
 
@@ -1078,33 +1125,6 @@ pub struct GraphQuerySummary {
     pub edge_count: usize,
     /// `true` si `limit` recortó el total de nodos (hay más páginas vía `nextCursor`).
     pub truncated: bool,
-}
-
-/// Construye el `GraphNode` de `id`: `ghost` si no hay fichero en disco para ese path, `type`/
-/// `status` del frontmatter cuando sí existe. Mismo criterio que `node_for` del core
-/// (`crates/lodestar-core/src/graph.rs`, privado al crate) — reimplementado aquí porque `App` no
-/// tiene acceso a `Bundle::parsed` (`pub(crate)` del core), pero con la MISMA semántica: la verdad
-/// de qué es un "ghost" y de dónde salen `type`/`status` es siempre "¿hay fichero en el `FileMap`?
-/// ¿qué dice su frontmatter?", nunca una heurística propia de esta capa.
-fn graph_node_for(bundle: &Bundle, id: &RelPath) -> GraphNode {
-    match bundle.files().get(id) {
-        Some(raw) => {
-            let parsed = model::parse_file(id.as_str(), raw);
-            let fm = parsed.fm.unwrap_or_default();
-            GraphNode {
-                id: id.clone(),
-                ghost: false,
-                r#type: fm.r#type,
-                status: fm.status,
-            }
-        }
-        None => GraphNode {
-            id: id.clone(),
-            ghost: true,
-            r#type: None,
-            status: None,
-        },
-    }
 }
 
 // ---------------------------------------------------------------------------

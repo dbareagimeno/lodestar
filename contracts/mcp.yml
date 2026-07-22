@@ -247,22 +247,29 @@ tools:
 
   - nombre: graph_query
     fuente: crates/lodestar-mcp/src/tools.rs:120
-    historia: E11-H01
+    historia: E11-H01, E11-H02 (amplía el enum operation con path_between/cycles/components)
     params:
-      - { nombre: operation, tipo: string, requerido: true, valores: ["backlinks", "outgoing", "neighborhood", "orphans", "dangling"], semantica: "backlinks/outgoing/neighborhood requieren «ref»; orphans/dangling no. path_between/cycles/components quedan fuera (E11-H02, amplía este enum)" }
-      - { nombre: ref, tipo: "object (ConceptRef)", requerido: false, semantica: "{ path: RelPath }, concepto centro — requerido en backlinks/outgoing/neighborhood; su ausencia en esas operaciones es CONCEPT_NOT_FOUND" }
+      - { nombre: operation, tipo: string, requerido: true, valores: ["backlinks", "outgoing", "neighborhood", "orphans", "dangling", "path_between", "cycles", "components"], semantica: "backlinks/outgoing/neighborhood requieren «ref»; path_between requiere «ref» (origen) y «to» (destino); orphans/dangling/cycles/components no requieren refs" }
+      - { nombre: ref, tipo: "object (ConceptRef)", requerido: false, semantica: "{ path: RelPath }, concepto centro — requerido en backlinks/outgoing/neighborhood y como origen en path_between; su ausencia en esas operaciones es CONCEPT_NOT_FOUND" }
+      - { nombre: to, tipo: "object (ConceptRef)", requerido: false, semantica: "{ path: RelPath }, destino del camino — SOLO path_between; su ausencia (o la de ref) en path_between es CONCEPT_NOT_FOUND" }
       - { nombre: depth, tipo: integer, default: 1, minimo: 1, semantica: "solo neighborhood" }
       - { nombre: direction, tipo: "string (Direction)", valores: ["out", "in", "both"], default: "out  # cualquier otro → Out", semantica: "solo neighborhood" }
       - { nombre: limit, tipo: integer, requerido: false, semantica: "trunca el nº de nodos de la página (orden total estable por id); sin limit o limit>=total → sin truncar" }
       - { nombre: cursor, tipo: string, requerido: false, semantica: "cursor opaco de paginación (offset hex, mismo esquema que knowledge_search/knowledge_check) devuelto en nextCursor" }
     retorno: "GraphQueryResult (lodestar_app): { nodes: [GraphNode], edges: [Edge], summary: { nodeCount, edgeCount, truncated }, nextCursor } — json directo, sin envelope. nodes/edges == core::types::GraphNode/Edge, reexpuestos sin capa DTO paralela"
     output_schema: "sí — schemars::schema_for!(GraphQueryResult), vía lodestar_app::schemas::graph_query_schema()"
-    errores: ["«falta el parámetro «operation»»", "CONCEPT_NOT_FOUND (ref ausente o no resuelve en backlinks/outgoing/neighborhood)", "INVALID_SCHEMA (operation desconocida)", "WorkspaceError"]
+    errores: ["«falta el parámetro «operation»»", "CONCEPT_NOT_FOUND (ref/to ausente o no resuelve en backlinks/outgoing/neighborhood/path_between)", "INVALID_SCHEMA (operation desconocida)", "WorkspaceError"]
     semantica: >-
       Consulta el grafo: `backlinks` reusa Bundle::backlinks (nodes = ref + fuentes entrantes,
       edges = fuente→ref); `outgoing` reusa Bundle::neighborhood(ref,1,Out); `neighborhood`
       reexpone Bundle::neighborhood(ref,depth,direction) TAL CUAL (paridad exacta con el core,
       invariante #3); `orphans`/`dangling` proyectan Analysis::orphans/Analysis::dangling.
+      Estructurales (E11-H02, funciones puras del core): `path_between` reusa
+      Bundle::path_between(ref,to) (camino más corto dirigido; nodes = el camino, edges = enlaces
+      consecutivos; sin camino → vacío, nunca error); `cycles` reusa Bundle::cycles (nodes = unión
+      de nodos en algún ciclo/SCC no trivial, edges = enlaces internos a ese conjunto); `components`
+      reusa Bundle::components (sirve el grafo completo — nodes/edges de graph_model — porque las
+      componentes particionan todo el grafo; el cliente reconstruye la partición).
       Las edges devueltas se acotan a los nodes que sobreviven a la página. Consolida
       semánticamente a `find_backlinks`/`find_orphans`/`find_dangling`/`neighborhood` (ver §15);
       esas 4 tools heredadas se conservan activas — su retirada queda diferida (ver nota abajo).
