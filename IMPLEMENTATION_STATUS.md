@@ -263,8 +263,12 @@ superficie de producto; git queda como crate dormido) y `DECISIONES.md §0`. Des
   - ✅ **E11-H01** — Tool `graph_query` (consolida backlinks/outgoing/neighborhood/orphans/dangling):
     reexpone `Bundle::neighborhood`/`backlinks` y `Analysis::orphans`/`dangling` (invariante #3, paridad
     literal); truncación + cursor; outputSchema; `mcp.yml` actualizado (las 4 tools viejas se retiran
-    en la limpieza final de E13). Juez ciego: APROBADA CON RESERVAS (4/4). **A resolver en E11-H02**:
-    promover `core::graph::node_for` a público y quitar la duplicación `graph_node_for` en app.
-  - ⏳ E11-H02–H05 pendientes.
+    en la limpieza final de E13). Juez ciego: APROBADA CON RESERVAS (4/4). (Reserva de `node_for`
+    resuelta en E11-H02.)
+  - ✅ **E11-H02** — `path_between` (BFS), `cycles` (Tarjan SCC iterativo), `components` (BFS no
+    dirigido) puras en `core::graph` (reusan `graph_model`, invariante #3; deterministas) + enchufadas
+    en `graph_query`. Reserva de H01 resuelta: `node_for` público, `graph_node_for` eliminado.
+    Diferenciales 6/6 verde. Juez ciego: APROBADA (4/4).
+  - ⏳ E11-H03–H05 pendientes.
 - **E12–E14: pendientes** (planificación · publicación recuperable · integración + evaluación
   — `ARCHITECTURE.md §19.8`).
