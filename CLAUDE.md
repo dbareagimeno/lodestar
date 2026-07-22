@@ -7,25 +7,32 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Estado actual del repo (importante)
 
-**El repo está en pleno giro a motor headless de integridad semántica** (`ARCHITECTURE.md §19`,
+**El repo COMPLETÓ el giro a motor headless de integridad semántica** (`ARCHITECTURE.md §19`,
 ratificado 2026-07-22 — supersede `§13` en superficie de producto; épicas `E9`–`E14` en
 `requirements/`). Lodestar deja de posicionarse como "editor local-first con git de primera clase"
 y pasa a ser un **motor headless** consumido por agentes (MCP/CLI): **sin GUI y sin git en la
-superficie**. El giro es **aditivo, no destructivo** — retira exposición, no capacidad: nada se
+superficie**. El giro fue **aditivo, no destructivo** — retira exposición, no capacidad: nada se
 borra, nada de lo ya construido deja de compilar.
 
-Estado del giro — **E9 (reducción de alcance, fase 0) hecha**: la superficie MCP ya no expone git
-(10 tools; antes 13 — ver `crates/lodestar-mcp/src/tools.rs`); la CLI ya no expone subcomandos git
-(`log`/`branch`/`switch`/`merge`/`pull`/`push`/`hooks`) ni `--staged`/`--rev`/`--range` en `check`
-— `check` sin flags juzga solo el **working tree**. El crate `lodestar-vcs` **se conserva
-dormido**: compila, sus tests siguen verdes, `lodestar-workspace` sigue exponiendo `vcs_*`
-internamente, pero **ninguna fachada lo invoca** (doc-comment de módulo en
-`crates/lodestar-vcs/src/lib.rs`). La **UI queda congelada**: `frontend/` y `src-tauri/` no se
-tocan en el flujo de desarrollo de v2 (detalle en «Flujo de trabajo con agentes», más abajo).
-`E10`–`E14` (esquemas, grafo/impacto, planificación, publicación recuperable, integración) están
-**pendientes** — introducirán el crate fino **`lodestar-app`** (servicios de caso de uso; ver el
-mapa de crates) y las 10 tools nuevas del giro (`§19.6`). Estado detallado por historia:
-`IMPLEMENTATION_STATUS.md`.
+Estado del giro — **E9–E14 COMPLETAS** (`IMPLEMENTATION_STATUS.md` tiene el detalle por historia):
+- **Superficie MCP convergida a las 10 tools objetivo** (`§19.6`): `workspace_status`,
+  `knowledge_search`, `knowledge_get`, `schema_inspect`, `graph_query`, `impact_analyze`,
+  `knowledge_check`, `change_plan`, `change_apply`, `change_revert` (E14-H06 retiró las 10
+  heredadas — `query`/`conformance_check`/`find_*`/`neighborhood`/`create_concept`/
+  `update_frontmatter`/`generate_*` — a `contracts/mcp.yml §15`; ver `crates/lodestar-mcp/src/tools.rs`).
+  Perfiles `readonly`/`standard` (`--profile`): readonly oculta Y rechaza las 3 tools de cambio.
+- **git fuera de la superficie**: la CLI no expone subcomandos git ni `--staged`/`--rev`/`--range`
+  en `check` — `check` sin flags juzga el **working tree** con conformidad completa (OKF + schema +
+  refs) como puerta de CI (E14-H01). El crate `lodestar-vcs` **se conserva dormido** (compila, tests
+  verdes; ninguna fachada lo invoca).
+- **Modelo transaccional recuperable** (E12–E13): `change_plan` (normaliza/simula/valida, planHash) →
+  `change_apply` (staging → lock → backup → write-ahead journal → renames atómicos → receipt, con
+  crash-recovery determinista) → `change_revert`. El gate de staging valida la conformidad completa
+  schema-driven (E14-H04, invariante #3). Auto-regen de `index`/`tags` dentro del apply (E13-H11).
+- **Capa de servicios `lodestar-app`** introducida (envelope, códigos de error, casos de uso
+  compartidos por MCP y CLI). **UI CONGELADA**: `frontend/`/`src-tauri/` no se tocan en el flujo de v2.
+- Verificado end-to-end por el **benchmark funcional §17** (15 escenarios, E14-H04) y arnés de escala
+  (~10k conceptos, E14-H05).
 
 Herencia previa al giro — **las épicas E0–E8 están implementadas y verificadas**: Cargo workspace
 de 7 crates + `src-tauri`, frontend Svelte 5 funcional (hoy congelado), CLI, MCP por stdio, store
@@ -103,8 +110,8 @@ eufemismos — esa decisión sigue documentada en `§13` para si vuelve.
 
 ### Grafo de crates (dirección de dependencia ◄ = "depende de")
 
-Mapa objetivo del giro headless (`§19.2`; `lodestar-app` **llega en E10**, hoy no existe — hasta
-entonces `lodestar-cli`/`lodestar-mcp` siguen llamando a `workspace` directamente):
+Mapa del giro headless (`§19.2`; `lodestar-app` **ya existe** y las fachadas `lodestar-cli`/
+`lodestar-mcp` lo consumen como capa de servicios de caso de uso):
 ```
 lodestar-core   (PURO: modelo·conformidad·links·query·grafo·generación·export·diff. SIN I/O/DB/git/runtime)
    ▲        ▲
@@ -113,8 +120,8 @@ store      vcs  (store: rusqlite+FTS5+watcher notify, dueño del DDL .lodestar/i
    │        │    sin consumidor de fachada, NUNCA escribe el working tree)
    └─ workspace ─┘  (GLUE: compone core+store+vcs · handle unificado · ÚNICO escritor · bus de eventos)
         ▲
-   lodestar-app   (E10, aún no existe: servicios de caso de uso compartidos · envelope ·
-                    códigos de error · CERO lógica de dominio)
+   lodestar-app   (servicios de caso de uso compartidos · envelope · códigos de error ·
+                    CERO lógica de dominio; consumido por cli y mcp)
     ▲       ▲
 lodestar-cli · lodestar-mcp   (fachadas finas: shells de 5–15 líneas, CERO lógica OKF; sin git)
 src-tauri   (CONGELADO: sigue llamando a `workspace` directamente; UI congelada, no se toca)
