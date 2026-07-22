@@ -432,8 +432,22 @@ superficie de producto; git queda como crate dormido) y `DECISIONES.md §0`. Des
     con invariante #5); (2) `conformant` juzga solo `concepts` mientras `gate_blocked` cuenta `Err` de
     todos los ficheros (p. ej. `index.md`) → un error solo en `index.md` da `conformant:true` pero exit
     1 vía gate — es exactamente la semántica de `knowledge_check` que la historia manda replicar.
-  - ⏳ E14-H02 (convivencia con software: writableRoots/referenceRoots + detección de escritura externa),
-    E14-H03 (perfiles readonly/standard + server instructions — FRONTERA mcp.yml), E14-H04 (benchmark
+  - ✅ **E14-H02** — Convivencia con proyectos de software (config por proyecto + detección de escritura
+    externa): **historia de composición/regresión** — el comportamiento ya emerge de E9-H05
+    (`writableRoots`/`referenceRoots`/`ignored` en `WorkspaceConfig`) + E11-H04 (`assert_writable` →
+    `PERMISSION_DENIED`, paso 5 de `apply_transaction`, ANTES de tocar disco) + E13-H02/H08
+    (`reverify_base_revision` → `WRITE_CONFLICT`, paso 7, ANTES de publicar). Aporta la **cobertura de
+    integración e2e que faltaba** (ninguna prueba ejercitaba el orquestador `apply_transaction`
+    completo): `crates/lodestar-workspace/tests/convivencia.rs` con `solo_escribe_writable` (create bajo
+    `src/` → rechazo sin tocar disco; create bajo `knowledge/` → se aplica) y `detecta_escritura_externa`
+    (edición externa entre plan y apply cambia la revisión writable → `WRITE_CONFLICT`, el `.md` conserva
+    la edición externa). **CERO cambios de producción.** Juez ciego: **APROBADA (2/2)**, no-vacuidad
+    verificada (las aserciones dependen realmente del enforcement/reverify). Ítems del **alcance** sin
+    criterio testeable propio (no exigidos como aceptación, anotados): `ignored`
+    (`node_modules`/`target`/`.git`, ya cubierto por `ignored_conserva_obligatorios` en `workspace.rs`) y
+    "al reabrir/tras evento recalcular/invalidar revisiones y reindexar" (`REFACTOR §5.3`, ejercitado
+    indirectamente vía reverify que relee la revisión del disco).
+  - ⏳ E14-H03 (perfiles readonly/standard + server instructions — FRONTERA mcp.yml), E14-H04 (benchmark
     §17 e2e), E14-H05 (métricas de escala) pendientes.
   - **Pendiente al cierre de E14**: limpieza final de superficie `mcp.yml` → 10 tools objetivo (retirar
     `query`/`conformance_check`/`find_*`/`neighborhood`/`create_concept`/`update_frontmatter`/
