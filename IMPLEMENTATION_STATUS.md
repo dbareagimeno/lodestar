@@ -294,5 +294,8 @@ superficie de producto; git queda como crate dormido) y `DECISIONES.md §0`. Des
     (wire `baseWorkspaceRevision`/`planHash`/`expiresAt`), `NormalizedOperation` (11 variantes),
     `RiskAssessment`/`RiskLevel` (low/medium/high), `SemanticDiff`, `ValidationReport`. `FrontmatterPatch`
     ganó serde. Juez ciego: APROBADA (2/2).
-  - ⏳ E12-H02–H09 pendientes (riesgo/diff/validación/normalización → change_plan → persistencia).
+  - ✅ **E12-H02** — `core::plan::assess_risk` (pura): mide el blast-radius de deprecate/delete/move
+    (`Bundle::backlinks`); umbral 0→sin factor, 1..=4→Medium, >=5→High; level=máximo, reasons español.
+    Juez ciego: APROBADA (2/2).
+  - ⏳ E12-H03–H09 pendientes (diff/validación/normalización → change_plan → persistencia).
 - **E13–E14: pendientes** (publicación recuperable · integración + evaluación — `ARCHITECTURE.md §19.8`).

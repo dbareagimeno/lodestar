@@ -17,6 +17,7 @@ pub mod diff;
 pub mod error;
 pub mod generate;
 pub mod model;
+pub mod plan;
 pub mod query;
 pub mod schema;
 pub mod types;

@@ -1425,3 +1425,148 @@ fn changeset_roundtrip() {
         "el round-trip serde de `ChangeSet` debe ser idéntico",
     );
 }
+
+// --- E12-H02: `RiskAssessment` (lógica pura de riesgo) ------------------------------------------
+//
+// Fase ROJA: la función pura `assess_risk` todavía NO existe en producción. Ubicación ASUMIDA:
+// un módulo nuevo `lodestar_core::plan` (E12 = planificación de cambios; el riesgo es análisis de
+// plan, no diff ni grafo). Firma ASUMIDA:
+//
+//     pub fn assess_risk(
+//         ops: &[NormalizedOperation],
+//         bundle_before: &Bundle,
+//         bundle_after: &Bundle,
+//     ) -> RiskAssessment
+//
+// Hasta que E12-H02 la defina, estos dos tests hacen ROJO por SÍMBOLO AUSENTE (compile-fail: el
+// módulo `plan`/`assess_risk` no existe), lo que impide compilar el binario de tests de este crate.
+// Es el rojo esperado y documentado.
+//
+// Representación del `deprecate` (el enunciado admite dos): se modela como
+// `NormalizedOperation::TransitionStatus { path, to: "deprecated" }` — la variante semántica cuyo
+// nombre expresa el ciclo de vida (E12-H07). El `bundle_after` refleja ese estado deprecado para
+// que `before`/`after` sean coherentes; los backlinks del concepto no cambian con la transición.
+//
+// Los tests aseveran PROPIEDADES (nivel de riesgo, razón no vacía que menciona el concepto o los
+// backlinks), nunca el texto exacto de la razón ni el umbral interno de la heurística.
+
+/// Bundle con un concepto `core.md` (en el `status` dado) al que apuntan 7 conceptos referentes,
+/// más un `index.md` mínimo. Sirve para construir el `before` (activo) y el `after` (deprecado) del
+/// criterio `riesgo_deprecate_backlinks`.
+fn bundle_con_7_backlinks(status_core: &str) -> Bundle {
+    let mut files: FileMap = FileMap::new();
+    files.insert(
+        RelPath::new("core.md").unwrap(),
+        format!(
+            "---\ntype: N\ntitle: Core\ndescription: d\nstatus: {status_core}\n---\n\n# Core\n"
+        ),
+    );
+    for i in 1..=7 {
+        files.insert(
+            RelPath::new(&format!("r{i}.md")).unwrap(),
+            format!("---\ntype: N\ntitle: R{i}\ndescription: d\n---\n\n[core](/core.md)\n"),
+        );
+    }
+    files.insert(
+        RelPath::new("index.md").unwrap(),
+        "---\nokf_version: \"0.1\"\n---\n\n# B\n".to_string(),
+    );
+    Bundle::from_files(files)
+}
+
+/// Criterio `riesgo_deprecate_backlinks`: **Dado** un `deprecate` sobre un concepto con 7 backlinks,
+/// **Cuando** se evalúa, **Entonces** `level >= Medium` con una razón que lo menciona.
+#[test]
+fn riesgo_deprecate_backlinks() {
+    let antes = bundle_con_7_backlinks("active");
+    let despues = bundle_con_7_backlinks("deprecated");
+
+    // Precondición del fixture: `core.md` recibe exactamente 7 backlinks entrantes (r1..r7).
+    let entrantes = antes
+        .backlinks(&RelPath::new("core.md").unwrap())
+        .inbound
+        .len();
+    assert_eq!(
+        entrantes, 7,
+        "el fixture debe dar 7 backlinks a core.md, dio {entrantes}",
+    );
+
+    let ops = vec![NormalizedOperation::TransitionStatus {
+        path: RelPath::new("core.md").unwrap(),
+        to: "deprecated".to_string(),
+    }];
+
+    let risk = lodestar_core::plan::assess_risk(&ops, &antes, &despues);
+
+    assert!(
+        risk.level >= RiskLevel::Medium,
+        "deprecar un concepto con 7 backlinks debe ser al menos Medium, fue {:?}",
+        risk.level,
+    );
+    assert!(
+        !risk.reasons.is_empty(),
+        "un riesgo >= Medium debe justificarse con al menos una razón",
+    );
+    // La razón debe mencionar el concepto afectado (`core`) o el alcance del blast-radius (los
+    // 7 backlinks) — propiedad, no texto exacto.
+    assert!(
+        risk.reasons
+            .iter()
+            .any(|r| r.contains("core") || r.contains('7')),
+        "alguna razón debe mencionar el concepto (`core`) o sus backlinks (7); razones = {:?}",
+        risk.reasons,
+    );
+}
+
+/// Criterio `riesgo_bajo_aislado`: **Dado** un `patch_frontmatter` sin backlinks afectados,
+/// **Cuando** se evalúa, **Entonces** `level: Low`.
+#[test]
+fn riesgo_bajo_aislado() {
+    // Concepto `sola.md` sin ningún referente: nadie le apunta. `index.md` tampoco lo lista.
+    let construir = |titulo: &str| -> Bundle {
+        let mut files: FileMap = FileMap::new();
+        files.insert(
+            RelPath::new("sola.md").unwrap(),
+            format!(
+                "---\ntype: N\ntitle: {titulo}\ndescription: d\nstatus: draft\n---\n\n# Sola\n"
+            ),
+        );
+        files.insert(
+            RelPath::new("index.md").unwrap(),
+            "---\nokf_version: \"0.1\"\n---\n\n# B\n".to_string(),
+        );
+        Bundle::from_files(files)
+    };
+    let antes = construir("Antes");
+    let despues = construir("Despues");
+
+    // Precondición del fixture: `sola.md` no recibe backlinks entrantes ni referencias de index.
+    let bl = antes.backlinks(&RelPath::new("sola.md").unwrap());
+    assert!(
+        bl.inbound.is_empty() && bl.index_refs.is_empty(),
+        "el fixture debe dejar sola.md sin backlinks, fue inbound={:?} index_refs={:?}",
+        bl.inbound,
+        bl.index_refs,
+    );
+
+    // `patch_frontmatter` que solo cambia el título (cambio aislado, sin tocar relaciones).
+    let mut patch = BTreeMap::new();
+    patch.insert(
+        "title".to_string(),
+        Some(serde_yaml::Value::String("Despues".into())),
+    );
+    let ops = vec![NormalizedOperation::PatchFrontmatter {
+        path: RelPath::new("sola.md").unwrap(),
+        patch: FrontmatterPatch(patch),
+    }];
+
+    let risk = lodestar_core::plan::assess_risk(&ops, &antes, &despues);
+
+    assert_eq!(
+        risk.level,
+        RiskLevel::Low,
+        "un patch de frontmatter sobre un concepto aislado debe ser riesgo Low, fue {:?} (razones {:?})",
+        risk.level,
+        risk.reasons,
+    );
+}
