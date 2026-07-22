@@ -363,5 +363,14 @@ superficie de producto; git queda como crate dormido) y `DECISIONES.md §0`. Des
     Endureció `write_journal` a escritura atómica (temp+rename+fsync-dir), cerrando la reserva de H03.
     Juez ciego: APROBADA (3/3). **A resolver en H06/H08**: el journal debe crearse con el conjunto
     completo de paths afectados que `publish` calcula (no solo las ops crudas), p. ej. para `Move`.
-  - ⏳ E13-H06–H11 pendientes (crash-recovery/receipts/change_apply/revert/audit/regen).
+  - ✅ **E13-H06 ⭐** — Crash-recovery determinista: `Workspace::recover()` escanea los journals no-`done`
+    y decide por el ESTADO DURABLE — `applied`→completar (canónico ya es el resultado, limpia), `prepared`/
+    `applying`→restaurar desde las copias de H04 (deshace renames parciales por `write_atomic`, borra los
+    creados vía `.absent`). Sin ventana de corrupción (`mark_all_applied` sella tras el último rename; la
+    restauración deriva el conjunto del árbol de recovery). NUNCA un `.md` parcial (property `recovery_sin_
+    parciales` sobre 7 FailPoints × 2 formas). Gate `guard_recovery` bloquea escrituras con
+    `WORKSPACE_RECOVERY_REQUIRED` (publish excluye su propio journal). Tolerante a JSON torn. Juez ciego
+    riguroso: APROBADA (4/4). **Contratos a honrar en E13-H08**: change_apply debe llamar `recover()`, hacer
+    `backup_originals` ANTES de `publish`, y crear el journal con el conjunto afectado completo.
+  - ⏳ E13-H07–H11 pendientes (receipts/change_apply/revert/audit/regen).
 - **E14: pendiente** (integración software + evaluación — `ARCHITECTURE.md §19.8`).

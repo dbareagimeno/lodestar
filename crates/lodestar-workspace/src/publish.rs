@@ -52,6 +52,20 @@ impl Workspace {
         change_set: &ChangeSet,
         journal: &mut Journal,
     ) -> Result<WorkspaceRevision, WorkspaceError> {
+        // Gate de recuperación (E13-H06): si existe un journal no-`done` de OTRA transacción
+        // (una publicación anterior interrumpida que aún no se ha recuperado), no se publica sobre
+        // un estado a medio recuperar. Se excluye el journal de ESTA transacción —recién creado en
+        // `prepared` por `create_journal` (E13-H03)—, que no es una recuperación pendiente sino el
+        // registro write-ahead del lote en curso.
+        if !self.pending_journals(Some(journal.path())).is_empty() {
+            return Err(WorkspaceError::WorkspaceRecoveryRequired(
+                "hay un journal de publicación anterior sin completar bajo \
+                 .lodestar/runtime/journal/: ejecuta la recuperación (Workspace::recover) antes \
+                 de publicar una nueva transacción"
+                    .to_string(),
+            ));
+        }
+
         // Estado de partida y resultado previsto por el plan (misma lógica que el staging).
         let canonical = io::load_bundle(&self.root)?;
         let result = plan::apply_normalized_ops(&canonical, &change_set.operations)?;

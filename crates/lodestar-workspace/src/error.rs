@@ -38,6 +38,16 @@ pub enum WorkspaceError {
     /// conflicto (revisión esperada vs. actual). Mapea al wire `WRITE_CONFLICT`.
     #[error("conflicto de escritura: {0}")]
     WriteConflict(String),
+    /// Hay una recuperación de publicación PENDIENTE (E13-H06,
+    /// [`crate::Workspace::recover`]): al abrir el workspace se detectó un write-ahead journal
+    /// no-`done` (E13-H03/H05) — una transacción que se interrumpió a mitad. Mientras `recover` no
+    /// **complete** (journal `applied`: renames hechos, solo falta sellar) o **restaure** (journal
+    /// `prepared`/`applying`: deshacer los renames parciales desde las copias de H04) esa
+    /// transacción, toda escritura del canónico se rechaza ANTES de tocarlo, para no publicar sobre
+    /// un estado a medio recuperar. El `String` describe la transacción pendiente. Mapea al wire
+    /// `WORKSPACE_RECOVERY_REQUIRED`.
+    #[error("recuperación pendiente: {0}")]
+    WorkspaceRecoveryRequired(String),
 }
 
 impl WorkspaceError {
@@ -54,6 +64,7 @@ impl WorkspaceError {
             WorkspaceError::PermissionDenied(_) => "PERMISSION_DENIED",
             WorkspaceError::NonconformantResult(_) => "NONCONFORMANT_RESULT",
             WorkspaceError::WriteConflict(_) => "WRITE_CONFLICT",
+            WorkspaceError::WorkspaceRecoveryRequired(_) => "WORKSPACE_RECOVERY_REQUIRED",
         }
     }
 }

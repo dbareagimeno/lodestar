@@ -1,10 +1,23 @@
-//! Copias de recuperación (E13-H04, `ARCHITECTURE.md §19.5`, `REFACTOR §5.2`): antes de sustituir
-//! el conocimiento `.md` canónico, guarda el contenido previo de cada fichero afectado bajo
-//! `.lodestar/runtime/recovery/<txnId>/` para poder restaurarlo si la publicación falla.
+//! Copias de recuperación (E13-H04) y **crash-recovery determinista** (E13-H06,
+//! `ARCHITECTURE.md §19.5`, `REFACTOR §5.2`, `§17`).
 //!
-//! Es el eslabón que hace la publicación **recuperable**: con las copias listas, un fallo entre
-//! renames (E13-H06) puede deshacerse restaurando los originales; los paths que no existían quedan
-//! marcados "no existía" para poder borrarlos al revertir (E13-H09).
+//! **H04** — antes de sustituir el conocimiento `.md` canónico, [`Workspace::backup_originals`]
+//! guarda el contenido previo de cada fichero afectado bajo `.lodestar/runtime/recovery/<txnId>/`
+//! para poder restaurarlo si la publicación falla. Es el eslabón que hace la publicación
+//! **recuperable**: con las copias listas, un fallo entre renames puede deshacerse restaurando los
+//! originales; los paths que no existían quedan marcados "no existía" (`.absent`) para poder
+//! borrarlos al restaurar/revertir.
+//!
+//! **H06** — al reabrir el workspace, [`Workspace::recover`] escanea los write-ahead journals
+//! no-`done` (E13-H03/H05) y, **por el estado global durable del journal**, decide de forma
+//! determinista: `applied` (todos los renames hechos, solo falta sellar) → **COMPLETAR** (el
+//! canónico ya es el resultado final; solo se limpia staging/recovery y se sella la transacción);
+//! `prepared`/`applying` (renames parciales) → **RESTAURAR** el estado anterior desde las copias de
+//! H04 (deshacer los renames hechos + borrar los creados que marca `.absent`). Toda escritura del
+//! canónico durante la restauración va por el **único escritor** (`io::write_atomic`/`io::delete`,
+//! invariante #5), que nunca deja un `.md` parcial. Mientras exista un journal no-`done`,
+//! [`Workspace::recovery_pending`] devuelve `true` y las escrituras del canónico se rechazan con
+//! `WORKSPACE_RECOVERY_REQUIRED`.
 //!
 //! Runtime, no canónico: el árbol de recuperación vive bajo `.lodestar/runtime/`, que el walker de
 //! conocimiento (`io::load_bundle`) y el watcher excluyen (E9-H06) y `WorkspaceRevision` ignora
@@ -14,10 +27,13 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
+use serde::Deserialize;
+
 use lodestar_core::types::RelPath;
 
 use crate::error::WorkspaceError;
-use crate::Workspace;
+use crate::journal::JournalState;
+use crate::{io, Workspace};
 
 /// Nombre del manifiesto que registra, una línea por path relativo, los ficheros afectados que
 /// **no existían** en el canónico al preparar las copias (se van a crear). Vive dentro del
@@ -134,5 +150,236 @@ impl Workspace {
         std::fs::write(dir.join(ABSENT_MANIFEST), manifest)?;
 
         Ok(RecoveryDir { path: dir, absent })
+    }
+}
+
+/// Cabecera mínima del write-ahead journal que la recuperación (E13-H06) necesita leer del JSON en
+/// disco: el estado global y el `txnId`. Los demás campos (`operations`, revisiones) se ignoran a
+/// propósito — la restauración deriva el conjunto de paths afectados del **árbol de recuperación**
+/// de H04, no de la lista de operaciones del journal, de modo que converge igual aunque el journal
+/// esté torn (los renames del canónico solo ocurren TRAS crear esas copias).
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct JournalHeader {
+    txn_id: String,
+    state: JournalState,
+}
+
+/// Reconstruye el conjunto "no existía" desde el manifiesto `.absent` de un directorio de
+/// recuperación (una línea por path relativo). Un directorio o manifiesto ausente/ilegible produce
+/// un conjunto vacío (no había nada que crear que borrar).
+fn read_absent_manifest(recovery_root: &Path) -> Vec<RelPath> {
+    let Ok(raw) = std::fs::read_to_string(recovery_root.join(ABSENT_MANIFEST)) else {
+        return Vec::new();
+    };
+    raw.lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .filter_map(|l| RelPath::new(l).ok())
+        .collect()
+}
+
+impl Workspace {
+    /// El directorio de write-ahead journals de la transacción (`.lodestar/runtime/journal/`).
+    fn journal_dir(&self) -> PathBuf {
+        self.root.join(".lodestar").join("runtime").join("journal")
+    }
+
+    /// Rutas de los write-ahead journals **pendientes de recuperar** bajo
+    /// `.lodestar/runtime/journal/`: todo `<txnId>.json` cuyo estado global no sea `done` —o cuyo
+    /// JSON sea ilegible/torn, que también exige recuperación conservadora—. Con `exclude =
+    /// Some(path)` se omite el journal de ese nombre de fichero: lo usa [`Workspace::publish`] para
+    /// no confundir el registro write-ahead de la transacción en curso (recién creado en
+    /// `prepared`) con una recuperación pendiente de una transacción anterior.
+    ///
+    /// Comprobación perezosa por disco (sin estado en el handle): el JSON del journal es la fuente
+    /// de verdad recuperable, así que reabrir el workspace y consultar esto refleja siempre lo que
+    /// hay durable en disco.
+    pub(crate) fn pending_journals(&self, exclude: Option<&Path>) -> Vec<PathBuf> {
+        let exclude_name = exclude.and_then(|p| p.file_name());
+        let mut out = Vec::new();
+        let Ok(entries) = std::fs::read_dir(self.journal_dir()) else {
+            return out;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                continue;
+            }
+            if exclude_name.is_some() && path.file_name() == exclude_name {
+                continue;
+            }
+            // `done` está sellado (nada que recuperar); cualquier otro estado —o un JSON
+            // ilegible/torn— cuenta como recuperación pendiente.
+            let done = std::fs::read_to_string(&path)
+                .ok()
+                .and_then(|raw| serde_json::from_str::<JournalHeader>(&raw).ok())
+                .is_some_and(|h| h.state == JournalState::Done);
+            if !done {
+                out.push(path);
+            }
+        }
+        out
+    }
+
+    /// `true` si hay una recuperación de publicación **pendiente** (E13-H06): existe algún
+    /// write-ahead journal no-`done` (o torn) bajo `.lodestar/runtime/journal/`. Mientras lo haya,
+    /// las escrituras del canónico se rechazan con `WORKSPACE_RECOVERY_REQUIRED` (gate interno)
+    /// hasta que [`Workspace::recover`] complete/restaure la transacción interrumpida.
+    pub fn recovery_pending(&self) -> bool {
+        !self.pending_journals(None).is_empty()
+    }
+
+    /// Ejecuta la **recuperación determinista** de toda transacción de publicación interrumpida cuyo
+    /// write-ahead journal quedó no-`done` (E13-H03/H05). Explícita (no un efecto colateral de
+    /// `open`): la fachada la invoca al detectar una recuperación pendiente.
+    ///
+    /// Por cada journal pendiente, decide **por su estado global durable** (la única fuente de
+    /// verdad recuperable):
+    /// - `applied` → **COMPLETAR**: todos los renames se hicieron antes de caer; el canónico ya es
+    ///   el resultado final, así que solo se limpia el staging/recovery y se sella la transacción.
+    /// - `prepared`/`applying` → **RESTAURAR**: se deshace la transacción devolviendo el canónico a
+    ///   su estado anterior desde las copias de H04 (restaurar cada original respaldado y borrar los
+    ///   paths que `.absent` marcó "no existía"), y luego se limpia y sella.
+    ///
+    /// Convergencia sin parciales: la decisión depende SOLO del estado durable del journal (nunca de
+    /// cuántos renames se llegaron a ver en disco) y toda escritura del canónico va por el único
+    /// escritor (`io::write_atomic`, temp+fsync+rename / `io::delete`), que jamás deja un `.md` a
+    /// medias. Por eso el conocimiento converge determinista a UNO de los dos bordes de la
+    /// transacción —todo el original íntegro o todo el resultado íntegro—, para cualquier punto de
+    /// caída.
+    ///
+    /// # Errores
+    /// - [`WorkspaceError::Io`] si falla la restauración/limpieza sobre el runtime o el canónico.
+    pub fn recover(&self) -> Result<(), WorkspaceError> {
+        for journal_path in self.pending_journals(None) {
+            let header = std::fs::read_to_string(&journal_path)
+                .ok()
+                .and_then(|raw| serde_json::from_str::<JournalHeader>(&raw).ok());
+
+            match header {
+                // COMPLETAR: el canónico ya es el resultado (todos los renames hechos).
+                Some(h) if h.state == JournalState::Applied => {
+                    self.finish_recovery(&h.txn_id, &journal_path)?;
+                }
+                // RESTAURAR el estado anterior (renames parciales).
+                Some(h) => {
+                    self.restore_from_recovery(&h.txn_id)?;
+                    self.finish_recovery(&h.txn_id, &journal_path)?;
+                }
+                // Journal torn (JSON ilegible/truncado): política defensiva. `write_journal`
+                // persiste atómico (temp+rename), así que un torn es rarísimo; aun así NO se
+                // paniquea. Como los renames del canónico solo ocurren TRAS crear las copias de
+                // recuperación (H04), restaurar desde el árbol de recuperación (si existe) deshace
+                // cualquier rename parcial; si no existe, la caída fue antes de tocar el canónico y
+                // no hay nada que restaurar. En ambos casos se converge al estado ANTERIOR (opción
+                // conservadora: ante la duda, no dar por buena una transacción cuyo registro no se
+                // puede leer). El `txnId` se toma del nombre del fichero `<txnId>.json`.
+                None => {
+                    let txn_id = journal_path
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or_default()
+                        .to_string();
+                    eprintln!(
+                        "lodestar: aviso: journal de recuperación ilegible {}: se restaura \
+                         conservadoramente al estado anterior desde las copias de recuperación",
+                        journal_path.display()
+                    );
+                    self.restore_from_recovery(&txn_id)?;
+                    self.finish_recovery(&txn_id, &journal_path)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// **RESTAURAR** (E13-H06): devuelve el conocimiento canónico a su estado anterior a la
+    /// transacción `txn_id` usando exclusivamente las copias de recuperación de H04
+    /// (`.lodestar/runtime/recovery/<txnId>/`). Deriva el conjunto afectado del propio árbol de
+    /// recuperación (robusto ante un journal torn):
+    /// 1. cada fichero del árbol (salvo el manifiesto `.absent`) es la copia byte-a-byte de un
+    ///    original que se sobrescribió → se devuelve a su sitio con `io::write_atomic`;
+    /// 2. cada path del manifiesto `.absent` no existía antes → si la transacción lo creó, se borra
+    ///    con `io::delete` (idempotente si no llegó a crearse).
+    ///
+    /// Si el directorio de recuperación no existe, la caída fue antes del backup de H04 (que precede
+    /// a todo rename), así que el canónico está intacto y no hay nada que restaurar.
+    fn restore_from_recovery(&self, txn_id: &str) -> Result<(), WorkspaceError> {
+        let recovery_root = self
+            .root
+            .join(".lodestar")
+            .join("runtime")
+            .join("recovery")
+            .join(recovery_dir_name(txn_id));
+        if !recovery_root.exists() {
+            return Ok(());
+        }
+
+        // (1) Restaurar cada original respaldado (deshace los renames que sí ocurrieron).
+        self.restore_backups(&recovery_root, &recovery_root)?;
+
+        // (2) Borrar los paths marcados "no existía" que la transacción pudo crear.
+        for rel in read_absent_manifest(&recovery_root) {
+            io::delete(&self.root, &rel)?;
+        }
+        Ok(())
+    }
+
+    /// Recorre el árbol de recuperación restaurando por el único escritor cada copia de un original
+    /// a su ruta canónica (espejando la ruta relativa bajo `recovery_root`). Salta el manifiesto
+    /// `.absent` (no es una copia). Auxiliar recursivo de [`Workspace::restore_from_recovery`].
+    fn restore_backups(&self, dir: &Path, recovery_root: &Path) -> Result<(), WorkspaceError> {
+        for entry in std::fs::read_dir(dir)? {
+            let path = entry?.path();
+            if path.is_dir() {
+                self.restore_backups(&path, recovery_root)?;
+                continue;
+            }
+            if path.file_name().and_then(|n| n.to_str()) == Some(ABSENT_MANIFEST) {
+                continue;
+            }
+            let rel = path
+                .strip_prefix(recovery_root)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            let Ok(rp) = RelPath::new(&rel) else {
+                continue;
+            };
+            let content = std::fs::read_to_string(&path).map_err(|e| {
+                WorkspaceError::Io(format!(
+                    "copia de recuperación ilegible {}: {e}",
+                    path.display()
+                ))
+            })?;
+            io::write_atomic(&self.root, &rp, &content)?;
+        }
+        Ok(())
+    }
+
+    /// Sella una transacción recuperada (E13-H06): limpia el staging (`.lodestar/runtime/staging/
+    /// <txnId>/`) y las copias de recuperación (`.lodestar/runtime/recovery/<txnId>/`), y **borra el
+    /// fichero de journal** para levantar el gate (tras esto ya no queda ningún journal no-`done`,
+    /// de modo que [`Workspace::recovery_pending`] vuelve a `false` y las escrituras se permiten).
+    ///
+    /// El `txnId` (sin prefijo `changeset:`) nombra por igual el staging, la recuperación y el
+    /// journal (convención de E13-H06), así que un mismo nombre saneado localiza los tres.
+    fn finish_recovery(&self, txn_id: &str, journal_path: &Path) -> Result<(), WorkspaceError> {
+        let name = recovery_dir_name(txn_id);
+        let runtime = self.root.join(".lodestar").join("runtime");
+
+        let staging = runtime.join("staging").join(&name);
+        if staging.exists() {
+            std::fs::remove_dir_all(&staging)?;
+        }
+        let recovery = runtime.join("recovery").join(&name);
+        if recovery.exists() {
+            std::fs::remove_dir_all(&recovery)?;
+        }
+        if journal_path.exists() {
+            std::fs::remove_file(journal_path)?;
+        }
+        Ok(())
     }
 }

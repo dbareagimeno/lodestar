@@ -29,6 +29,11 @@ default = []
 # Gatea #[derive(JsonSchema)] en `ExternalReference` (E11-H04), consumido por `lodestar-app` para
 # el `outputSchema` de `knowledge_get` — mismo patrón que la feature homónima de `lodestar-core`.
 schemars = ["dep:schemars"]
+# Arnés de crash-recovery (E13-H06): habilita la sonda de fallo (`FailPoint`) y la batería de tests
+# de recuperación determinista de `tests/transactions.rs`. Solo test/plumbing — NO cablea lógica de
+# recovery en producción. La sonda de fallo de PRODUCCIÓN que el implementador thread-eará por el
+# orquestador transaccional también vivirá tras esta feature (contrato documentado en los tests).
+test-failpoints = []
 
 [lints]
 workspace = true

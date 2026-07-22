@@ -150,6 +150,8 @@ pub fn error_code(err: &CoreError) -> ErrorCode {
 /// - `PermissionDenied` (E11-H04: escritura bajo un `referenceRoot`, o fuera de `writableRoots`) →
 ///   `ErrorCode::PermissionDenied`, mapeo directo por nombre (mismo caso que `error_code` con
 ///   `CoreError::InvalidRelPath`).
+/// - `NonconformantResult` (E13-H01) / `WriteConflict` (E13-H02) / `WorkspaceRecoveryRequired`
+///   (E13-H06) → sus códigos homónimos del catálogo, mapeo directo por nombre.
 pub fn workspace_error_code(err: &WorkspaceError) -> ErrorCode {
     match err {
         WorkspaceError::Core(_) => ErrorCode::InternalIoError,
@@ -162,6 +164,7 @@ pub fn workspace_error_code(err: &WorkspaceError) -> ErrorCode {
         WorkspaceError::PermissionDenied(_) => ErrorCode::PermissionDenied,
         WorkspaceError::NonconformantResult(_) => ErrorCode::NonconformantResult,
         WorkspaceError::WriteConflict(_) => ErrorCode::WriteConflict,
+        WorkspaceError::WorkspaceRecoveryRequired(_) => ErrorCode::WorkspaceRecoveryRequired,
     }
 }
 

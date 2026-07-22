@@ -283,6 +283,27 @@ impl Workspace {
 
     // --- escritura validada (por el ÚNICO escritor) -----------------------
 
+    /// Rechaza una escritura del canónico si hay una recuperación PENDIENTE (E13-H06): un
+    /// write-ahead journal no-`done` bajo `.lodestar/runtime/journal/` significa que una
+    /// transacción anterior se interrumpió a mitad y [`Workspace::recover`] aún no la
+    /// completó/restauró. El gate se comprueba ANTES de tocar el canónico —para no publicar sobre
+    /// un estado a medio recuperar (principio «nunca un estado parcial silencioso»)— en toda
+    /// escritura de alto nivel del canónico ([`Workspace::create_concept`],
+    /// [`Workspace::write_concept`], [`Workspace::merge_frontmatter`],
+    /// [`Workspace::apply_mutation`]) y en [`Workspace::publish`] (que excluye su propio journal en
+    /// curso). La restauración de `recover` NO pasa por aquí: escribe por `io::write_atomic`/
+    /// `io::delete` directamente, de modo que puede reparar el canónico con el gate levantado.
+    fn guard_recovery(&self) -> Result<(), WorkspaceError> {
+        if self.recovery_pending() {
+            return Err(WorkspaceError::WorkspaceRecoveryRequired(
+                "hay un journal de publicación sin completar bajo .lodestar/runtime/journal/: \
+                 ejecuta la recuperación (Workspace::recover) antes de volver a escribir"
+                    .to_string(),
+            ));
+        }
+        Ok(())
+    }
+
     /// Crea un concept validado y lo escribe por el único escritor (si es conforme).
     pub fn create_concept(
         &self,
@@ -292,6 +313,7 @@ impl Workspace {
         body: &str,
         allow_nonconformant: bool,
     ) -> Result<WriteOutcome, WorkspaceError> {
+        self.guard_recovery()?;
         let bundle = self.bundle()?;
         let now = now_iso8601();
         let outcome = bundle.create_concept(p, ty, title, body, Some(&now), allow_nonconformant);
@@ -310,6 +332,7 @@ impl Workspace {
         raw: &str,
         allow_nonconformant: bool,
     ) -> Result<WriteOutcome, WorkspaceError> {
+        self.guard_recovery()?;
         let bundle = self.bundle()?;
         let outcome = bundle.write_concept_raw(p, raw, allow_nonconformant);
         if outcome.written {
@@ -338,6 +361,7 @@ impl Workspace {
         p: &RelPath,
         patch: FrontmatterPatch,
     ) -> Result<WriteOutcome, WorkspaceError> {
+        self.guard_recovery()?;
         let bundle = self.bundle()?;
         let outcome = bundle.merge_frontmatter(p, patch);
         if outcome.written {
@@ -349,6 +373,7 @@ impl Workspace {
 
     /// Aplica una `Mutation` por el único escritor y devuelve `{written, removed, unchanged}`.
     pub fn apply_mutation(&self, mutation: &Mutation) -> Result<ApplyReport, WorkspaceError> {
+        self.guard_recovery()?;
         let mut written = 0;
         let mut unchanged = 0;
         for (path, content) in &mutation.writes {

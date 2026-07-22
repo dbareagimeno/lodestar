@@ -810,3 +810,448 @@ fn revision_resultante_coincide() {
         "la WorkspaceRevision del canónico publicado no coincide con la prevista por el plan"
     );
 }
+
+// ===========================================================================
+// E13-H06 — Crash-recovery determinista (journal incompleto al abrir).
+//
+// Gateado tras la feature `test-failpoints`: `cargo test -p lodestar-workspace
+// --features test-failpoints`. En el build por defecto (`cargo test --workspace`) este módulo NO se
+// compila, de modo que la suite verde de H01–H05 no se ve afectada por los ROJOS de H06.
+//
+// ---------------------------------------------------------------------------
+// API de `FailPoint` y punto de entrada transaccional ASUMIDOS (fase ROJA; el implementador de
+// H06/H08 debe respetarlos):
+//
+// - **Sonda de fallo (`FailPoint`)** — taxonomía de puntos de caída de la publicación transaccional.
+//   El *contrato de producción* que el implementador cableará es una sonda de test global
+//   (thread-local) tras la feature `test-failpoints`, consultada por el orquestador transaccional
+//   (`Workspace::apply_transaction`, E13-H08) en cada paso etiquetado para ABORTAR ahí y modelar un
+//   crash a mitad. En ESTA fase ROJA (recuperación al abrir, H06) no dependemos de que ese seam de
+//   producción exista todavía: `simular_caida` reproduce el mismo estado en disco COMPONIENDO las
+//   primitivas ya construidas (H01 `materialize_staging` · H03 `create_journal` · H04
+//   `backup_originals` · H05 renames + `mark_applied`/`mark_all_applied`) hasta el punto de fallo y
+//   deteniéndose — deja exactamente lo que dejaría el crash real: journal no-`done` + renames
+//   parciales + copias de recuperación + staging. El enum `FailPoint` de este fichero ES esa
+//   taxonomía; el implementador la re-usará como etiquetas de sus `#[cfg(feature="test-failpoints")]`
+//   en el orquestador.
+//
+// - **Punto de entrada de recuperación** — `Workspace::recover(&self) -> Result<(), WorkspaceError>`:
+//   al reabrir un `Workspace` NUEVO sobre el mismo directorio, ejecuta la recuperación determinista
+//   leyendo el/los journal(s) no-`done` de `.lodestar/runtime/journal/`. Por el estado GLOBAL del
+//   journal: `applied` → COMPLETAR (canónico ya renombrado; limpiar staging/backup y sellar `done`);
+//   `applying`/`prepared` → RESTAURAR (deshacer renames parciales desde los backups de H04; borrar
+//   los creados que marca `.absent`). Es explícito (no un efecto colateral del constructor): mientras
+//   la recuperación esté PENDIENTE, las escrituras se bloquean con `WORKSPACE_RECOVERY_REQUIRED`.
+//   (Se asume que `Workspace::open` DETECTA el journal no-`done` y marca el workspace como
+//   "recuperación pendiente"; `App::workspace_status().recovery.pendingTransaction` lo refleja,
+//   E10-H08 — probado en la capa `App`, fuera de este crate.)
+//
+// - **Convención de id de transacción** — un MISMO id nombra el journal (`<id>.json`), el staging
+//   (`staging/<id>/`) y las copias de recuperación (`recovery/<id>/`), de modo que `recover` localiza
+//   staging y backups a partir del `txnId` del journal. Por eso los ids de aquí van SIN prefijo
+//   `changeset:` (así `staging_dir_name`, `recovery_dir_name` y el stem del journal coinciden).
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "test-failpoints")]
+mod recuperacion {
+    use std::collections::BTreeSet;
+    use std::path::{Path, PathBuf};
+
+    use lodestar_core::plan;
+    use lodestar_core::types::{ChangeSet, FileMap, NormalizedOperation, RelPath};
+    use lodestar_workspace::Workspace;
+
+    use super::{canonical_filemap, change_set, create_conforme};
+
+    /// Punto de caída de la publicación transaccional (E13-H06). Describe HASTA DÓNDE progresa la
+    /// transacción antes de "caer"; `simular_caida` compone las primitivas de H01/H03/H04/H05 hasta
+    /// ese punto y se detiene, dejando en disco lo que dejaría un crash real (journal no-`done` +
+    /// renames parciales + copias de recuperación + staging).
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum FailPoint {
+        /// Journal `prepared`, aún sin copias de recuperación ni renames (0 renames).
+        TrasJournalPrepared,
+        /// Journal `prepared`, copias de recuperación listas, aún 0 renames.
+        TrasBackup,
+        /// Journal `applying`, **1** rename hecho (entre el rename 1 y el 2 de 3).
+        EntreRenames,
+        /// Journal `applying`, **2** renames hechos.
+        TrasSegundoRename,
+        /// Journal `applying`, **3** renames hechos, pero SIN `mark_all_applied` (borde: el journal
+        /// nunca registró durablemente que el lote estaba completo → recuperación conservadora).
+        TrasUltimoRenameSinApplied,
+        /// Journal `applied`, 3 renames hechos, SIN sellar `done` (tras el último rename, antes de
+        /// `done`).
+        TrasAppliedSinDone,
+        /// Journal `applied`, 3 renames hechos, antes de escribir el receipt (E13-H07).
+        AntesDelReceipt,
+    }
+
+    /// Todos los puntos de caída, para el property test `recovery_sin_parciales`.
+    pub const TODOS_LOS_FAILPOINTS: &[FailPoint] = &[
+        FailPoint::TrasJournalPrepared,
+        FailPoint::TrasBackup,
+        FailPoint::EntreRenames,
+        FailPoint::TrasSegundoRename,
+        FailPoint::TrasUltimoRenameSinApplied,
+        FailPoint::TrasAppliedSinDone,
+        FailPoint::AntesDelReceipt,
+    ];
+
+    /// Desde este punto de caída, la recuperación determinista debe **restaurar** al estado original
+    /// (`true`) o **completar** hasta el resultado (`false`). Decisión por el estado GLOBAL del
+    /// journal: solo `applied` (fijado atómicamente por `mark_all_applied` TRAS el último rename)
+    /// autoriza a completar; cualquier estado anterior (`prepared`/`applying`) restaura, incluido el
+    /// borde en que los 3 renames ocurrieron pero el journal no llegó a `applied`.
+    pub fn debe_restaurar(fp: FailPoint) -> bool {
+        !matches!(
+            fp,
+            FailPoint::TrasAppliedSinDone | FailPoint::AntesDelReceipt
+        )
+    }
+
+    /// Cuántos renames deja hechos el punto de caída (0..=3).
+    fn renames_hechos(fp: FailPoint, total: usize) -> usize {
+        match fp {
+            FailPoint::TrasJournalPrepared | FailPoint::TrasBackup => 0,
+            FailPoint::EntreRenames => 1,
+            FailPoint::TrasSegundoRename => 2,
+            _ => total,
+        }
+    }
+
+    /// Abre un bundle con 3 conceptos canónicos conocidos (`uno/dos/tres.md`) y devuelve el
+    /// workspace + el `FileMap` canónico ORIGINAL (el estado "antes de la transacción").
+    fn bundle_con_tres(root: &Path) -> (Workspace, FileMap) {
+        let ws = Workspace::open(root).unwrap();
+        for (p, t) in [("uno.md", "Uno"), ("dos.md", "Dos"), ("tres.md", "Tres")] {
+            ws.create_concept(
+                &RelPath::new(p).unwrap(),
+                "Nota",
+                Some(t),
+                &format!("# {t}\n\ncuerpo original\n"),
+                false,
+            )
+            .unwrap();
+        }
+        let original = canonical_filemap(root);
+        (ws, original)
+    }
+
+    /// Change set de 3 **modificaciones** (`ReplaceBody`) de los conceptos existentes.
+    fn cs_modifica_tres(id: &str) -> ChangeSet {
+        change_set(
+            id,
+            vec![
+                NormalizedOperation::ReplaceBody {
+                    path: RelPath::new("uno.md").unwrap(),
+                    body: "# Uno\n\nCUERPO MODIFICADO uno\n".to_string(),
+                },
+                NormalizedOperation::ReplaceBody {
+                    path: RelPath::new("dos.md").unwrap(),
+                    body: "# Dos\n\nCUERPO MODIFICADO dos\n".to_string(),
+                },
+                NormalizedOperation::ReplaceBody {
+                    path: RelPath::new("tres.md").unwrap(),
+                    body: "# Tres\n\nCUERPO MODIFICADO tres\n".to_string(),
+                },
+            ],
+        )
+    }
+
+    /// Change set de 3 **creaciones** de conceptos nuevos (`a/b/c.md`): ejercita la ruta de
+    /// recuperación por `.absent` (borrar los creados al restaurar).
+    fn cs_crea_tres(id: &str) -> ChangeSet {
+        change_set(
+            id,
+            vec![
+                create_conforme("a.md", "Nota", "A"),
+                create_conforme("b.md", "Nota", "B"),
+                create_conforme("c.md", "Nota", "C"),
+            ],
+        )
+    }
+
+    /// Conjunto de paths afectados por el plan, en el MISMO orden determinista que
+    /// `Workspace::publish` (BTreeSet por `RelPath`): creados/modificados (el resultado difiere del
+    /// canónico) + borrados (el canónico los tenía y el resultado ya no).
+    fn afectados(original: &FileMap, result: &FileMap) -> Vec<RelPath> {
+        let mut set: BTreeSet<RelPath> = BTreeSet::new();
+        for (rel, content) in result {
+            if original.get(rel) != Some(content) {
+                set.insert(rel.clone());
+            }
+        }
+        for rel in original.keys() {
+            if !result.contains_key(rel) {
+                set.insert(rel.clone());
+            }
+        }
+        set.into_iter().collect()
+    }
+
+    /// Simula una **caída** de la publicación transaccional en el punto `fp`: compone las primitivas
+    /// ya construidas (staging H01 → journal H03 → backup H04 → renames H05) hasta ese punto y se
+    /// detiene, dejando en disco el journal no-`done`, los renames parciales, las copias de
+    /// recuperación y el staging — tal cual los dejaría un crash real. Devuelve la ruta del
+    /// directorio de staging (para comprobar que la recuperación lo limpia).
+    ///
+    /// El `id` nombra a la vez el change set (staging), el journal y las copias de recuperación
+    /// (convención documentada: `recover` los localiza por el `txnId` del journal).
+    fn simular_caida(
+        ws: &Workspace,
+        root: &Path,
+        id: &str,
+        cs: &ChangeSet,
+        fp: FailPoint,
+    ) -> PathBuf {
+        let original = canonical_filemap(root);
+        let result = plan::apply_normalized_ops(&original, &cs.operations)
+            .expect("prever el resultado del plan");
+        let affected = afectados(&original, &result);
+        assert_eq!(
+            affected.len(),
+            3,
+            "precondición del arnés: la transacción debe afectar a 3 paths (fp {fp:?})"
+        );
+
+        let base = ws.workspace_revision().unwrap();
+        let result_rev = lodestar_core::types::workspace_revision(&result, &[]);
+
+        // Paso 1 (H01): materializa el resultado en staging (aún sin tocar el canónico).
+        let staging = ws
+            .materialize_staging(cs)
+            .expect("materializar el staging de la transacción");
+        let staging_path = staging.path().to_path_buf();
+
+        // Paso 2 (H03): write-ahead journal `prepared`.
+        let mut journal = ws
+            .create_journal(id, &affected, &base, &result_rev)
+            .expect("crear el write-ahead journal");
+        if fp == FailPoint::TrasJournalPrepared {
+            return staging_path;
+        }
+
+        // Paso 3 (H04): copias de recuperación de los originales afectados.
+        ws.backup_originals(id, &affected)
+            .expect("preparar las copias de recuperación");
+        if fp == FailPoint::TrasBackup {
+            return staging_path;
+        }
+
+        // Paso 4 (H05): renames parciales, marcando el journal tras cada uno (igual que `publish`).
+        let k = renames_hechos(fp, affected.len());
+        for rel in affected.iter().take(k) {
+            match result.get(rel) {
+                Some(content) => std::fs::write(root.join(rel.as_str()), content).unwrap(),
+                None => {
+                    let _ = std::fs::remove_file(root.join(rel.as_str()));
+                }
+            }
+            journal
+                .mark_applied(rel)
+                .expect("marcar el rename en el journal");
+        }
+
+        // Los puntos de caída que COMPLETAN sellaron `applied` (todos los renames + mark_all_applied)
+        // antes de caer; los demás quedan en `applying`/`prepared`.
+        if matches!(
+            fp,
+            FailPoint::TrasAppliedSinDone | FailPoint::AntesDelReceipt
+        ) {
+            journal
+                .mark_all_applied()
+                .expect("sellar el journal a `applied`");
+        }
+
+        // Se "cae": el journal NO llega a `done`; el handle se dropea aquí.
+        staging_path
+    }
+
+    /// **E13-H06** · Criterio `recovery_restaura_desde_medio`: un fallo inyectado ENTRE el rename 1 y
+    /// el 2 de 3 → al reabrir y recuperar, el estado queda COMO ANTES de la transacción (los 3
+    /// originales), sin `.md` a medias.
+    #[test]
+    fn recovery_restaura_desde_medio() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ws, original) = bundle_con_tres(dir.path());
+
+        let cs = cs_modifica_tres("recovery-restaura-desde-medio");
+        let result = plan::apply_normalized_ops(&original, &cs.operations).unwrap();
+        // Precondición no vacua: original y resultado difieren (hay algo que restaurar).
+        assert_ne!(original, result, "el plan debe cambiar el canónico");
+
+        // Caída entre el rename 1 y el 2 (journal `applying`, 1 rename hecho).
+        simular_caida(
+            &ws,
+            dir.path(),
+            "recovery-restaura-desde-medio",
+            &cs,
+            FailPoint::EntreRenames,
+        );
+        drop(ws);
+
+        // Se REABRE un workspace nuevo sobre el mismo directorio y se recupera.
+        let ws2 = Workspace::open(dir.path()).unwrap();
+        ws2.recover()
+            .expect("la recuperación debe restaurar sin error");
+
+        // El canónico quedó EXACTAMENTE como antes de la transacción (los 3 originales, byte-a-byte).
+        let despues = canonical_filemap(dir.path());
+        assert_eq!(
+            despues, original,
+            "tras un fallo a mitad, la recuperación debía restaurar el estado original íntegro"
+        );
+    }
+
+    /// **E13-H06** · Criterio `recovery_completa`: un fallo inyectado TRAS el último rename pero ANTES
+    /// de marcar `done` → al reabrir y recuperar, la transacción se COMPLETA (resultado final,
+    /// staging limpio).
+    #[test]
+    fn recovery_completa() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ws, original) = bundle_con_tres(dir.path());
+
+        let cs = cs_modifica_tres("recovery-completa");
+        let result = plan::apply_normalized_ops(&original, &cs.operations).unwrap();
+        assert_ne!(original, result, "el plan debe cambiar el canónico");
+
+        // Caída tras el último rename, con el journal ya en `applied` pero SIN sellar `done`.
+        let staging_path = simular_caida(
+            &ws,
+            dir.path(),
+            "recovery-completa",
+            &cs,
+            FailPoint::TrasAppliedSinDone,
+        );
+        drop(ws);
+
+        let ws2 = Workspace::open(dir.path()).unwrap();
+        ws2.recover()
+            .expect("la recuperación debe completar sin error");
+
+        // El canónico quedó con el RESULTADO final del plan.
+        let despues = canonical_filemap(dir.path());
+        assert_eq!(
+            despues, result,
+            "tras un fallo con el journal `applied`, la recuperación debía completar al resultado"
+        );
+
+        // Y el staging de la transacción quedó limpio (el directorio del txn ya no existe).
+        assert!(
+            !staging_path.exists(),
+            "la recuperación al completar debía limpiar el staging: {}",
+            staging_path.display()
+        );
+    }
+
+    /// **E13-H06** · Criterio `recovery_bloquea_escritura`: con una recuperación PENDIENTE (journal
+    /// no-`done` al reabrir, aún sin `recover`), una escritura → `WORKSPACE_RECOVERY_REQUIRED`.
+    #[test]
+    fn recovery_bloquea_escritura() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ws, original) = bundle_con_tres(dir.path());
+
+        let cs = cs_modifica_tres("recovery-bloquea-escritura");
+        // Deja una transacción a medias (journal `applying`): la recuperación queda PENDIENTE.
+        simular_caida(
+            &ws,
+            dir.path(),
+            "recovery-bloquea-escritura",
+            &cs,
+            FailPoint::EntreRenames,
+        );
+        drop(ws);
+
+        // Se reabre pero NO se llama a `recover`: la recuperación sigue pendiente.
+        let ws2 = Workspace::open(dir.path()).unwrap();
+
+        // Una escritura con recuperación pendiente debe rechazarse con WORKSPACE_RECOVERY_REQUIRED.
+        match ws2.create_concept(
+            &RelPath::new("nuevo.md").unwrap(),
+            "Nota",
+            Some("Nuevo"),
+            "# Nuevo\n\ncuerpo\n",
+            false,
+        ) {
+            Err(e) => assert_eq!(
+                e.code(),
+                "WORKSPACE_RECOVERY_REQUIRED",
+                "una escritura con recuperación pendiente debe mapear a WORKSPACE_RECOVERY_REQUIRED: {e:?}"
+            ),
+            Ok(outcome) => panic!(
+                "una escritura con recuperación pendiente debía fallar con \
+                 WORKSPACE_RECOVERY_REQUIRED, pero create_concept escribió (written={})",
+                outcome.written
+            ),
+        }
+
+        // Y el canónico no se tocó por esa escritura bloqueada (`nuevo.md` no se creó).
+        assert!(
+            !dir.path().join("nuevo.md").exists(),
+            "la escritura bloqueada no debía tocar el canónico"
+        );
+        // El bundle sigue conteniendo los 3 originales (no se perdió nada del canónico previo).
+        let _ = original;
+    }
+
+    /// **E13-H06** · Criterio `recovery_sin_parciales`: property test sobre TODOS los `FailPoint` (×
+    /// dos formas de change set: modificaciones y creaciones). Para cada combinación: se simula la
+    /// caída, se reabre, se recupera, y se asevera que NINGÚN `.md` canónico queda en estado parcial
+    /// — el conocimiento converge de forma determinista a UNO de los dos bordes de la transacción
+    /// (todo el original íntegro, o todo el resultado íntegro), nunca una mezcla.
+    #[test]
+    fn recovery_sin_parciales() {
+        // Cada forma de change set se fabrica desde el bundle base (3 conceptos existentes).
+        type FormaCs = (&'static str, fn(&str) -> ChangeSet);
+        let formas: &[FormaCs] = &[("modifica", cs_modifica_tres), ("crea", cs_crea_tres)];
+
+        for (forma, build_cs) in formas {
+            for &fp in TODOS_LOS_FAILPOINTS {
+                let dir = tempfile::tempdir().unwrap();
+                let (ws, original) = bundle_con_tres(dir.path());
+
+                let id = format!("recovery-sin-parciales-{forma}-{fp:?}");
+                let cs = build_cs(&id);
+                let result = plan::apply_normalized_ops(&original, &cs.operations).unwrap();
+                assert_ne!(
+                    original, result,
+                    "[{forma}/{fp:?}] el plan debe cambiar el canónico (test no vacuo)"
+                );
+
+                simular_caida(&ws, dir.path(), &id, &cs, fp);
+                drop(ws);
+
+                let ws2 = Workspace::open(dir.path()).unwrap();
+                ws2.recover()
+                    .unwrap_or_else(|e| panic!("[{forma}/{fp:?}] la recuperación falló: {e:?}"));
+
+                let despues = canonical_filemap(dir.path());
+
+                // (1) Convergencia determinista: el conjunto canónico ES o bien el original íntegro
+                //     o bien el resultado íntegro — nunca un estado intermedio.
+                let esperado = if debe_restaurar(fp) {
+                    &original
+                } else {
+                    &result
+                };
+                assert_eq!(
+                    &despues, esperado,
+                    "[{forma}/{fp:?}] la recuperación no convergió al borde determinista esperado"
+                );
+
+                // (2) Ningún fichero con contenido parcial: cada `.md` canónico es byte-a-byte O su
+                //     original íntegro O su resultado íntegro (jamás truncado/mezclado/foráneo).
+                for (rel, contenido) in &despues {
+                    let es_original = original.get(rel) == Some(contenido);
+                    let es_resultado = result.get(rel) == Some(contenido);
+                    assert!(
+                        es_original || es_resultado,
+                        "[{forma}/{fp:?}] el `.md` {} quedó con contenido parcial/foráneo",
+                        rel.as_str()
+                    );
+                }
+            }
+        }
+    }
+}
