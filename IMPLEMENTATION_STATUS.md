@@ -356,5 +356,12 @@ superficie de producto; git queda como crate dormido) y `DECISIONES.md §0`. Des
     ausentes ("no existía") en un manifiesto `.absent`; solo LEE el canónico (invariante #1). `RecoveryDir`
     con path/backup_path/was_absent. Juez ciego: APROBADA CON RESERVAS (2/2). (Assert del manifiesto `.absent`
     → H06.)
-  - ⏳ E13-H05–H11 pendientes (publicar/crash-recovery/receipts/change_apply/revert/audit/regen).
+  - ✅ **E13-H05** — Aplicación atómica por lote: `Workspace::publish(change_set, journal)` aplica los
+    cambios al canónico SOLO por el único escritor (`io::write_atomic` temp+fsync+rename para creados/
+    modificados, `io::delete` para borrados; orden determinista por `RelPath`; invariante #5), marca el
+    journal por op y lo sella (`applied`), y devuelve la `WorkspaceRevision` resultante (== la prevista).
+    Endureció `write_journal` a escritura atómica (temp+rename+fsync-dir), cerrando la reserva de H03.
+    Juez ciego: APROBADA (3/3). **A resolver en H06/H08**: el journal debe crearse con el conjunto
+    completo de paths afectados que `publish` calcula (no solo las ops crudas), p. ej. para `Move`.
+  - ⏳ E13-H06–H11 pendientes (crash-recovery/receipts/change_apply/revert/audit/regen).
 - **E14: pendiente** (integración software + evaluación — `ARCHITECTURE.md §19.8`).

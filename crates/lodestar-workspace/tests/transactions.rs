@@ -38,8 +38,9 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use lodestar_core::plan;
 use lodestar_core::types::{
-    ChangeSet, ChangeSetId, FrontmatterPatch, NormalizedOperation, PlanHash, RelPath,
+    ChangeSet, ChangeSetId, FileMap, FrontmatterPatch, NormalizedOperation, PlanHash, RelPath,
     RiskAssessment, SemanticDiff, ValidationReport, WorkspaceRevision,
 };
 use lodestar_workspace::Workspace;
@@ -606,6 +607,16 @@ fn backup_originales() {
     );
 }
 
+/// `FileMap` del conocimiento `.md` canónico (mismas claves relativas POSIX que usa el core),
+/// reutilizando el recorrido de [`canonical_md`]. Es el `files` de entrada con el que el core prevé
+/// el resultado del plan ([`plan::apply_normalized_ops`]) y la [`WorkspaceRevision`] resultante.
+fn canonical_filemap(root: &Path) -> FileMap {
+    canonical_md(root)
+        .into_iter()
+        .map(|(rel, content)| (RelPath::new(&rel.replace('\\', "/")).unwrap(), content))
+        .collect()
+}
+
 /// **E13-H04** · Criterio `backup_fiel`: dado un path afectado con contenido X (con bytes UTF-8
 /// multibyte no triviales), al hacer backup la copia de recuperación contiene X **byte-a-byte**.
 #[test]
@@ -634,5 +645,168 @@ fn backup_fiel() {
     assert_eq!(
         bytes_backup, contenido_x,
         "el backup de b.md no es fiel byte-a-byte al original"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// E13-H05 — Aplicación atómica por lote (único escritor).
+//
+// Firma asumida de E13-H05 (fase ROJA; el implementador debe respetarla):
+// - `Workspace::publish(&self, change_set: &ChangeSet, journal: &mut Journal)
+//     -> Result<WorkspaceRevision, WorkspaceError>`:
+//   publica el resultado del `change_set` sobre el conocimiento canónico por el ÚNICO escritor.
+//   Reusa `plan::apply_normalized_ops` sobre el `FileMap` canónico para obtener el `FileMap`
+//   resultante y, en orden determinista, sustituye cada `.md` con `io::write_atomic` (temp + fsync
+//   + rename) o lo borra con `io::delete` (paths que el resultado ya no contiene), actualizando el
+//   `journal` tras cada operación (`Journal::mark_applied`). NO hay segundo escritor: el watcher
+//   absorbe el lote auto-originado (gate blake3). Al terminar, deja el journal en estado `applied`
+//   y devuelve la `resultWorkspaceRevision` calculada del conocimiento ya publicado — que debe
+//   coincidir con la `result_rev` que el plan capturó y con la que se creó el journal (H03).
+//
+// El grep estructural del criterio ("la publicación usa `write_atomic`; ningún otro camino de
+// escritura del canónico") es checklist de revisión, no un test de integración: se verifica leyendo
+// `publish` en `src/`, no desde aquí.
+// ---------------------------------------------------------------------------
+
+/// **E13-H05** · Criterio `publica_lote`: dado un change set de 3 escrituras, al publicarlo los 3
+/// `.md` CANÓNICOS (leídos de disco, no del staging) quedan con el contenido del staging (el
+/// resultado que `plan::apply_normalized_ops` prevé, que es exactamente lo que
+/// `materialize_staging` escribe).
+#[test]
+fn publica_lote() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws = Workspace::open(dir.path()).unwrap();
+
+    // Change set con 3 escrituras (create de 3 `.md` nuevos).
+    let cs = change_set(
+        "changeset:publica-tres",
+        vec![
+            create_conforme("uno.md", "Nota", "Uno"),
+            create_conforme("dos.md", "Nota", "Dos"),
+            create_conforme("tres.md", "Nota", "Tres"),
+        ],
+    );
+
+    // El resultado que el plan prevé sobre el canónico (idéntico al contenido del staging que
+    // `materialize_staging` materializaría): la referencia contra la que se compara el canónico.
+    let canonico_antes = canonical_filemap(dir.path());
+    let esperado = plan::apply_normalized_ops(&canonico_antes, &cs.operations)
+        .expect("aplicar las ops normalizadas para prever el resultado del plan");
+    // Los 3 `.md` del plan figuran en el resultado previsto (precondición del test, no vacuo).
+    for f in ["uno.md", "dos.md", "tres.md"] {
+        assert!(
+            esperado.contains_key(&RelPath::new(f).unwrap()),
+            "precondición: {f} debe estar en el resultado previsto del plan"
+        );
+    }
+
+    // Journal de la transacción (H03) con la `resultWorkspaceRevision` que el plan prevé.
+    let ops: Vec<RelPath> = cs
+        .operations
+        .iter()
+        .map(|op| match op {
+            NormalizedOperation::Create { path, .. } => path.clone(),
+            _ => unreachable!("el change set de este test solo tiene `Create`"),
+        })
+        .collect();
+    let base = ws.workspace_revision().unwrap();
+    let result_rev = lodestar_core::types::workspace_revision(&esperado, &[]);
+    let mut journal = ws
+        .create_journal("txn-h05-publica-lote", &ops, &base, &result_rev)
+        .expect("crear el journal de la transacción");
+
+    // Publica el lote por el único escritor.
+    ws.publish(&cs, &mut journal)
+        .expect("publicar el change set sobre el canónico");
+
+    // Los 3 `.md` CANÓNICOS (releídos de disco) quedan con el contenido del staging/plan.
+    let canonico_despues = canonical_filemap(dir.path());
+    for (rel, contenido) in &esperado {
+        let en_disco = canonico_despues.get(rel).unwrap_or_else(|| {
+            panic!(
+                "tras publicar, el `.md` canónico {} debe existir en disco",
+                rel.as_str()
+            )
+        });
+        assert_eq!(
+            en_disco,
+            contenido,
+            "el `.md` canónico {} no quedó con el contenido del staging tras publicar",
+            rel.as_str()
+        );
+    }
+    // Y el canónico es EXACTAMENTE el resultado previsto (ni ficheros de más ni de menos).
+    assert_eq!(
+        canonico_despues, esperado,
+        "el conocimiento canónico publicado no coincide con el resultado del plan"
+    );
+}
+
+/// **E13-H05** · Criterio `revision_resultante_coincide`: tras publicar, la `WorkspaceRevision`
+/// calculada coincide con la `resultWorkspaceRevision` que el plan previó. El esperado se obtiene
+/// aplicando el plan sobre el canónico (`plan::apply_normalized_ops`) y hasheando el resultado con
+/// la misma lógica del core (`types::workspace_revision`, writableRoots por defecto = vacío en un
+/// bundle recién abierto). Se comprueba tanto el valor devuelto por `publish` como el que
+/// `Workspace::workspace_revision()` calcula del canónico ya publicado.
+#[test]
+fn revision_resultante_coincide() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws = Workspace::open(dir.path()).unwrap();
+
+    // Un concepto canónico previo, para que la publicación opere sobre una base no vacía.
+    ws.create_concept(
+        &RelPath::new("raiz.md").unwrap(),
+        "Nota",
+        Some("Raiz"),
+        "# H\n\ncuerpo\n",
+        false,
+    )
+    .unwrap();
+
+    let cs = change_set(
+        "changeset:revision-resultante",
+        vec![
+            create_conforme("uno.md", "Nota", "Uno"),
+            create_conforme("dos.md", "Nota", "Dos"),
+            create_conforme("tres.md", "Nota", "Tres"),
+        ],
+    );
+
+    // `resultWorkspaceRevision` prevista por el plan: hash del resultado de aplicar las ops sobre
+    // el canónico actual (writableRoots por defecto = vacío → cubre todos los `.md`).
+    let canonico_antes = canonical_filemap(dir.path());
+    let esperado = plan::apply_normalized_ops(&canonico_antes, &cs.operations)
+        .expect("aplicar las ops normalizadas para prever el resultado del plan");
+    let result_rev_prevista = lodestar_core::types::workspace_revision(&esperado, &[]);
+
+    let ops: Vec<RelPath> = cs
+        .operations
+        .iter()
+        .map(|op| match op {
+            NormalizedOperation::Create { path, .. } => path.clone(),
+            _ => unreachable!("el change set de este test solo tiene `Create`"),
+        })
+        .collect();
+    let base = ws.workspace_revision().unwrap();
+    let mut journal = ws
+        .create_journal("txn-h05-revision", &ops, &base, &result_rev_prevista)
+        .expect("crear el journal de la transacción");
+
+    // `publish` devuelve la `resultWorkspaceRevision` calculada del conocimiento publicado.
+    let devuelta = ws
+        .publish(&cs, &mut journal)
+        .expect("publicar el change set sobre el canónico");
+    assert_eq!(
+        devuelta, result_rev_prevista,
+        "la revisión devuelta por publish no coincide con la resultWorkspaceRevision del plan"
+    );
+
+    // Y recalculada del canónico ya publicado, coincide igualmente con la prevista por el plan.
+    let recalculada = ws
+        .workspace_revision()
+        .expect("recomputar la WorkspaceRevision del canónico publicado");
+    assert_eq!(
+        recalculada, result_rev_prevista,
+        "la WorkspaceRevision del canónico publicado no coincide con la prevista por el plan"
     );
 }

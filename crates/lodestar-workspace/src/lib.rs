@@ -29,6 +29,7 @@ mod gitignore;
 mod io;
 mod journal;
 mod lock;
+mod publish;
 mod recovery;
 mod runtime;
 pub mod schema;

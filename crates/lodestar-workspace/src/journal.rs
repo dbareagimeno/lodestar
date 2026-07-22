@@ -140,6 +140,26 @@ impl Journal {
 
         write_journal(&self.path, &self.data)
     }
+
+    /// Transiciona el journal a estado global `applied` (E13-H05): todas las operaciones de la
+    /// transacción ya se sustituyeron en el canónico. Marca también cada operación como `applied`
+    /// (deja el registro internamente coherente: sin `pending` bajo un estado `applied`) y
+    /// **re-persiste** el journal a disco con fsync.
+    ///
+    /// Se llama una sola vez, al final de [`Workspace::publish`], después de que el último rename
+    /// se haya completado. `applied` es lo que E13-H06 leerá para decidir **completar** una
+    /// publicación interrumpida (todo renombrado, solo falta sellar), frente a `applying`/`prepared`
+    /// (renames parciales que hay que **restaurar**).
+    ///
+    /// # Errores
+    /// - [`WorkspaceError::Io`] si falla la re-escritura fsynced del journal.
+    pub fn mark_all_applied(&mut self) -> Result<(), WorkspaceError> {
+        for op in &mut self.data.operations {
+            op.state = OpState::Applied;
+        }
+        self.data.state = JournalState::Applied;
+        write_journal(&self.path, &self.data)
+    }
 }
 
 impl Workspace {
@@ -188,20 +208,50 @@ impl Workspace {
     }
 }
 
-/// Serializa `data` a JSON y lo persiste en `path` con **fsync** (`write_all` + `sync_all`).
+/// Serializa `data` a JSON y lo persiste en `path` de forma **atómica y durable**
+/// (temp+fsync+rename).
 ///
-/// El `sync_all` es la garantía de durabilidad write-ahead: fuerza el volcado de los datos al medio
-/// físico antes de devolver, de modo que el journal ya está en disco cuando el llamador procede a
-/// tocar el canónico. Escribe directamente sobre el fichero (no temp+rename): el journal es scratch
-/// runtime y su nombre `<txnId>.json` es estable, así que no necesita el protocolo atómico del
-/// único-escritor que protege los `.md` canónicos; lo que importa aquí es la durabilidad, y el fsync
-/// la da.
+/// El journal es el registro que E13-H06 releerá para recuperar una publicación interrumpida, así
+/// que una re-escritura no debe poder dejarlo *torn* (JSON a medias) ni siquiera si el proceso cae
+/// justo mientras lo actualiza. Por eso se escribe a un temporal hermano, se hace `sync_all` del
+/// temporal (durabilidad: los datos están en el medio físico) y se hace `rename` sobre el fichero
+/// definitivo (atomicidad: el lector ve el JSON viejo íntegro o el nuevo íntegro, nunca uno a
+/// medias). Endurecido en E13-H05 (cierra la reserva de E13-H03): antes se escribía in situ, lo que
+/// bastaba para la durabilidad pero no descartaba un fichero torn si la caída ocurría a mitad de la
+/// escritura.
 fn write_journal(path: &Path, data: &JournalData) -> Result<(), WorkspaceError> {
     let json = serde_json::to_vec_pretty(data)
         .map_err(|e| WorkspaceError::Io(format!("no se pudo serializar el journal: {e}")))?;
     let io_err = |e: std::io::Error| WorkspaceError::Io(e.to_string());
-    let mut f = std::fs::File::create(path).map_err(io_err)?;
-    f.write_all(&json).map_err(io_err)?;
-    f.sync_all().map_err(io_err)?;
+
+    // Temporal hermano único por proceso+secuencia (evita que dos escrituras se pisen el temp).
+    let tmp = {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let mut name = path.file_name().unwrap_or_default().to_os_string();
+        name.push(format!(
+            ".{}-{}.lodestar-tmp",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        path.with_file_name(name)
+    };
+
+    {
+        let mut f = std::fs::File::create(&tmp).map_err(io_err)?;
+        f.write_all(&json).map_err(io_err)?;
+        f.sync_all().map_err(io_err)?;
+    }
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(io_err(e));
+    }
+    // Persiste la entrada del directorio (best-effort en Unix), como en `io::write_atomic`.
+    #[cfg(unix)]
+    if let Some(parent) = path.parent() {
+        if let Ok(dir) = std::fs::File::open(parent) {
+            let _ = dir.sync_all();
+        }
+    }
     Ok(())
 }
