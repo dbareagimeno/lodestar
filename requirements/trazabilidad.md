@@ -77,3 +77,62 @@ Todos producidos por **E1-H06** (conformidad) y agregados por **E1-H07** (analyz
 
 > `LINK-STUB` y `ORPHAN` se **sintetizan** en el store (E3-H05), no se materializan (`§10` fila 10),
 > pero su definición canónica vive en el core (E1-H06) y la paridad lo verifica (E3-H07).
+
+---
+
+## §19 — Giro headless (decisiones D0–D6/D-CheckCode/D-check) → historias
+
+> Ratificado 2026-07-22 (`ARCHITECTURE.md §19`, `DECISIONES.md §0`). Supersede §13 en superficie de
+> producto. Cada sub-decisión mapea a las historias que la implementan (épicas E9–E14).
+
+| Sub-decisión (§0/§19) | Historias |
+|---|---|
+| D0 — §19 nueva + nota en §13/§10 (git dormido) | E9-H01, E9-H02, E9-H03 |
+| D1 — Opción C: mecánica en `workspace`, `lodestar-app` fino | E10-H01, E12-H08, E13-H08 |
+| D3 — Envelope en `lodestar-app`; códigos de error en `core::types` | E10-H01, E10-H02 |
+| D4 — Config a `.lodestar/config.yaml` (writable/reference/ignored + gate + transactions) | E9-H05 |
+| D5 — Canónico vs runtime; `WorkspaceRevision` excluye `.lodestar/` | E9-H06, E10-H03 |
+| D6a — Generadores solo CLI + auto-regen en `change_apply` | E13-H11, E14-H01 |
+| D6b — stdio + `outputSchema` (schemars); rmcp diferido | E10-H13 |
+| D-CheckCode — familias estáticas `SCHEMA-*`/`REL-*`; i18n por código | E10-H06, E10-H07, E11-H03 |
+| D-check — `check` sobre working tree; `--staged/--rev/--range` diferidos con vcs | E9-H02, E14-H01 |
+
+## §19 — Capacidades del motor headless (`REFACTOR §8`) → historias
+
+| Capacidad (tool / pieza) | Historias |
+|---|---|
+| `core::schema` (DocType/relations/lifecycle/templates) puro | E10-H05, E10-H07, E11-H03 |
+| `ConceptRevision` / `WorkspaceRevision` (identidad determinista) | E10-H03 |
+| Envelope + códigos de error (`lodestar-app`) | E10-H01, E10-H02 |
+| `workspace_status` | E10-H08 |
+| `knowledge_search` (sustituye `query`) | E10-H09 |
+| `knowledge_get` | E10-H10 |
+| `schema_inspect` | E10-H11 |
+| `knowledge_check` (sustituye `conformance_check`) | E10-H12, E14-H01 |
+| `graph_query` (consolida backlinks/orphans/dangling/neighborhood) | E11-H01, E11-H02 |
+| `impact_analyze` (reusa blast-radius) | E11-H05 |
+| `change_plan` (normaliza+simula+valida, sin escribir) | E12-H05, E12-H06, E12-H07, E12-H08, E12-H09 |
+| Modelo transaccional (staging/journal/locks/recovery/receipts) | E13-H01…E13-H07, E13-H10 |
+| `change_apply` / `change_revert` | E13-H08, E13-H09 |
+| Perfiles `readonly`/`standard` + instrucciones | E14-H03 |
+| Seguridad §14 (RelPath + writableRoots + symlink; sin red/exec/git) | E9-H05, E11-H04, E13-H08 |
+
+## Benchmark funcional (`REFACTOR §17`) → historias que lo cubren
+
+| Escenario §17 | Historia(s) |
+|---|---|
+| Encontrar una decisión por significado | E10-H09 |
+| Crear un concepto válido | E13-H08 |
+| Crear un concepto sin campo obligatorio → rechazado | E10-H07, E12-H04 |
+| Mover un concepto con 30 backlinks | E11-H05, E12-H06 |
+| Borrar un concepto referenciado → rechazo con blockers | E11-H05, E12-H06 |
+| Modificar un concepto cambiado externamente → `REVISION_CONFLICT` | E12-H08 |
+| Cambiar cinco conceptos relacionados → un change set | E12-H08 |
+| Introducir una relación inválida → error antes de escribir | E11-H03, E12-H07 |
+| Corregir safe fixes → `apply_fix` | E10-H12, E12-H07 |
+| Revisar un refactor → diff semántico | E12-H03 |
+| Recuperar un cambio reciente → `change_revert` | E13-H09 |
+| Cerrar Lodestar durante publicación → recuperación determinista | E13-H06 |
+| Intentar escribir fuera de `writableRoots` → rechazo | E13-H08 |
+| Referenciar un archivo de código inexistente → diagnóstico | E11-H04 |
+| Editar directamente un Markdown inválido → detectado | E10-H12, E14-H01 |

@@ -8,6 +8,40 @@
 
 ---
 
+## 0. Giro a motor headless de integridad semántica — ✅ RATIFICADO (2026-07-22)
+
+- **Contexto**: `docs/REFACTOR.md` redefine Lodestar como **motor headless de integridad semántica**
+  (busca/comprende/valida/modifica conocimiento vía cambios planificados y recuperables, sin editor,
+  sin GUI y sin git). Propuesta de diseño en `docs/REFACTOR_DISENO_PROPUESTA.md`; diseño ratificado en
+  **`ARCHITECTURE.md §19`** (supersede §13 en superficie de producto). Descomposición en
+  `requirements/epica-09-*.md` … `epica-14-*.md`.
+- **Sub-decisiones cerradas** (puerta 1 de `/planificar`):
+  - **D0** — Adenda como **§19 nueva** + nota de cabecera en §13 ("superada en superficie; crate `vcs`
+    y mecánica §13.2–§13.6 conservados como dormidos") + anotación en §10 (filas de git ciertas sobre
+    el crate, exposición revertida).
+  - **D1** — Capas nuevas: **Opción C (híbrido)** — mecánica transaccional en `lodestar-workspace`
+    (único escritor); crate nuevo **`lodestar-app`** fino como servicios de caso de uso que comparten
+    mcp/cli.
+  - **D3** — Envelope en `lodestar-app`; **códigos de error** en `core::types`.
+  - **D4** — Config migra a **`.lodestar/config.yaml`** YAML unificado
+    (`workspace.{writableRoots,referenceRoots,ignored}` + `gate` + `transactions`; `identity` dormida).
+  - **D5** — `.lodestar/{config,schema}.yaml` + `templates/` **versionados**; `.lodestar/runtime/` +
+    `index.db` **gitignored**; `WorkspaceRevision` **excluye todo `.lodestar/`**.
+  - **D6** — (a) generadores **solo CLI** + auto-regen dentro de `change_apply`; (b) transporte
+    **stdio + `outputSchema` vía `schemars`**, `rmcp` **diferido**.
+  - **D-CheckCode** — Familias estáticas acotadas de `CheckCode` (`SCHEMA-REQFIELD`, `SCHEMA-STATUS`,
+    `REL-TARGET`, `REL-CARD`, `REL-TYPE`), i18n keyed por código.
+  - **D-check** — `lodestar check` sigue como puerta de CI sobre el working tree;
+    `--staged`/`--rev`/`--range` **diferidos** con el crate `vcs` dormido.
+- **Confirmadas** (se declaran en §19, sin criterio adicional): `core::schema` en el core **puro**;
+  modelo transaccional en `workspace`; reutilización de `OkfDiff`/`blast_radius`/`neighborhood`/
+  `Mutation`/`RelPath`/blake3; seguridad §14 (simplificada al no haber git/red/exec en la superficie).
+- **Cierres colaterales**: la parte de **git** de este documento queda **superada por §19** (§6 semántica
+  de `merge` local, y la exposición de git en fachadas): el crate `vcs` se conserva dormido pero su
+  superficie no se implementa en v2. §3 (rmcp) se reafina a "**stdio + `outputSchema`, `rmcp` diferido**".
+
+---
+
 ## 1. Build de la fachada de escritorio Tauri (E6) — ✅ RESUELTO/IMPLEMENTADO
 
 - **Estado**: `src-tauri` es ahora una **fachada Tauri v2 real y compilada**: tabla de comandos con
@@ -52,6 +86,11 @@
 
 ## 3. Transporte MCP: stdio propio vs `rmcp` oficial (E7)
 
+> **Reafinada por §0/§19 (2026-07-22)**: se mantiene **stdio** y se activa **`outputSchema` vía
+> `schemars`** (lo exige el contrato de la superficie 13→10, `REFACTOR §13`); **`rmcp` sigue diferido**
+> hasta tener un cliente que lo requiera.
+
+
 - **Estado**: el MCP funciona como servidor **JSON-RPC por stdio** (stdout puro), con 13 tools y
   test golden cross-fachada (salida de cada tool == `Workspace` directo). Falta el transporte oficial
   `rmcp` + `resources` + `outputSchema` (feature `schemars` ya preparada en el core).
@@ -82,6 +121,11 @@
 - **Recomendación**: mantener español-only en v1; la arquitectura ya no lo impide en el futuro.
 
 ## 6. Semántica de `merge` local
+
+> **Superada por §0/§19 (2026-07-22)**: git sale de la superficie de producto; el crate `vcs` (con su
+> `merge` a nivel de árbol) se conserva **dormido**, sin fachadas que lo expongan. Esta decisión queda
+> como diseño de referencia por si git vuelve.
+
 
 - **Estado**: `merge` se implementa a **nivel de árbol** (`merge_trees` de libgit2): el vcs **no
   escribe el working tree**; devuelve el `FileMap` resultante para que la workspace lo aplique por el

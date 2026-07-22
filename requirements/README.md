@@ -30,10 +30,32 @@
 | **E7** — `lodestar-mcp` | 7 | fachada agentes (rmcp/stdio) + golden cross-fachada | [epica-07-mcp.md](epica-07-mcp.md) |
 | **E8** — Transversales de producto | 8 | migración · packaging · i18n · seguridad · config · first-run · errores · perf | [epica-08-transversales.md](epica-08-transversales.md) |
 
-**Orden de construcción**: estrictamente E0 → E1 → E2 → E3 → E4 → E5 → E6 → E7, con E8 entrelazada
+**Orden de construcción (E0–E8)**: estrictamente E0 → E1 → E2 → E3 → E4 → E5 → E6 → E7, con E8 entrelazada
 (sus historias declaran de qué fase dependen). Cada fase se valida con el arnés de paridad antes de la
 siguiente (`§14`). Una historia **no se puede empezar** hasta que sus dependencias (`Dependencias:`)
 estén `Done`.
+
+## Mapa de épicas del giro headless (alineadas con `ARCHITECTURE.md §19.8`)
+
+> Giro a **motor headless de integridad semántica** (`ARCHITECTURE.md §19`, ratificado 2026-07-22;
+> supersede §13 en superficie). Git sale de las fachadas (crate `vcs` dormido); la UI queda congelada.
+
+| Épica | Fase §19.8 | Área | Doc |
+|---|---|---|---|
+| **E9** — Reducción de alcance | 0 | Retirar git de superficie · congelar UI · `.lodestar/config.yaml` · canónico/runtime | [epica-09-reduccion-alcance.md](epica-09-reduccion-alcance.md) |
+| **E10** — Esquemas y lectura headless | 1 | `core::schema` · revisiones · `lodestar-app` · envelope/errores · 5 tools READ/VERIFY | [epica-10-esquemas-lectura.md](epica-10-esquemas-lectura.md) |
+| **E11** — Grafo e impacto | 2 | `graph_query` · relaciones tipadas · refs externas · `impact_analyze` | [epica-11-grafo-impacto.md](epica-11-grafo-impacto.md) |
+| **E12** — Planificación de cambios | 3 | `ChangeSet` · 11 ops normalizadas · `change_plan` (sin escribir) | [epica-12-planificacion.md](epica-12-planificacion.md) |
+| **E13** — Publicación recuperable | 4 | staging · journal · locks · recovery · receipts · `change_apply`/`change_revert` | [epica-13-publicacion-recuperable.md](epica-13-publicacion-recuperable.md) |
+| **E14** — Integración software + evaluación | 5+6 | gate CI · convivencia · perfiles · benchmark §17 · métricas | [epica-14-integracion-evaluacion.md](epica-14-integracion-evaluacion.md) |
+
+**Orden de construcción (E9–E14)**: estrictamente E9 → E10 → E11 → E12 → E13 → E14 (cada fase valida su
+criterio de salida de `§19.8`/`REFACTOR §16` antes de la siguiente). Dentro de cada épica, el «Orden de
+construcción» al final del documento fija el orden de sus historias. **E9 es prerrequisito de todo** (retira
+git, define config/runtime); **E10** habilita 11–13 (schemas y revisiones son la base de impacto y
+planificación); **E12** depende de **E11** (el impacto alimenta el riesgo del plan); **E13** aplica los
+planes de **E12**; **E14** cierra. Ninguna historia del giro está **[BLOQUEADA]**: las decisiones de diseño
+(D0–D6/D-CheckCode/D-check) se ratificaron en la puerta 1 (`DECISIONES.md §0`, `ARCHITECTURE.md §19`).
 
 ## Formato de una historia
 
