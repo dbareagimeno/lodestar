@@ -8,16 +8,76 @@
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
 
-use lodestar_workspace::Workspace;
+use lodestar_app::{App, Profile};
 use serde_json::{json, Value};
 
 mod tools;
 
+/// Instrucciones del servidor (`instructions` de la respuesta `initialize`, `ARCHITECTURE.md
+/// §19.6`): orientan al agente con el **flujo recomendado de 10 pasos**, mencionando las 10 tools
+/// en el orden en que se espera usarlas. Los nombres de tool son identificadores (no se traducen);
+/// el resto va en español, el idioma del repo (E14-H03).
+const SERVER_INSTRUCTIONS: &str = "\
+Motor headless de integridad semántica (OKF) para agentes. Flujo recomendado en cada sesión \
+(10 pasos, en orden):
+
+1. `workspace_status`: oriéntate primero — config activa, capacidades del perfil, conformidad y \
+recuento agregado del workspace.
+2. `knowledge_search`: localiza conceptos por texto y filtros (snippets y revisión, nunca cuerpos \
+completos).
+3. `knowledge_get`: lee un concepto concreto con `include` selectivo y secciones acotadas.
+4. `schema_inspect`: descubre el catálogo de tipos y sus reglas (`.lodestar/schema.yaml`) antes de \
+proponer cambios.
+5. `graph_query`: consulta el grafo (backlinks, huérfanos, vecindario, caminos) para entender el \
+contexto de un concepto.
+6. `impact_analyze`: evalúa el impacto de un cambio hipotético (afectados, bloqueos, riesgo) antes \
+de proponerlo.
+7. `change_plan`: planifica el cambio SIN escribir — normaliza, simula en memoria y valida; \
+devuelve un change set con su hash determinista.
+8. `change_apply`: aplica el plan calculado con todas las salvaguardas transaccionales; devuelve el \
+recibo.
+9. `knowledge_check`: audita el conocimiento tras aplicar para confirmar que sigue conforme.
+10. `change_revert`: si algo salió mal, revierte la última transacción al estado anterior.
+
+Perfil `readonly`: solo los pasos de lectura y verificación (las tools de cambio no están \
+disponibles). Perfil `standard` (por defecto): el flujo completo.";
+
+/// Parsea `<bundle> [--profile readonly|standard]`: el bundle es el primer argumento
+/// posicional (sin tocar); `--profile` es una flag adicional, `standard` por defecto
+/// (`ARCHITECTURE.md §19.6`).
+fn parse_args() -> (PathBuf, Profile) {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mut root = None;
+    let mut profile = Profile::Standard;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--profile" => {
+                i += 1;
+                profile = match args.get(i).map(String::as_str) {
+                    Some("readonly") => Profile::Readonly,
+                    Some("standard") => Profile::Standard,
+                    other => {
+                        eprintln!(
+                            "lodestar-mcp: --profile inválido «{}» (usa «readonly» o «standard»)",
+                            other.unwrap_or("")
+                        );
+                        std::process::exit(2);
+                    }
+                };
+            }
+            other if root.is_none() => root = Some(PathBuf::from(other)),
+            _ => {}
+        }
+        i += 1;
+    }
+    let root =
+        root.unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    (root, profile)
+}
+
 fn main() {
-    let root = std::env::args()
-        .nth(1)
-        .map(PathBuf::from)
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    let (root, profile) = parse_args();
 
     // Un bundle de verdad tiene `index.md` o `.lodestar/`: sin esta comprobación el servidor
     // arrancaría "feliz" sobre un directorio arbitrario y `create_concept` escribiría donde caiga.
@@ -28,15 +88,15 @@ fn main() {
         );
         std::process::exit(3);
     }
-    let ws = match Workspace::open(&root) {
-        Ok(ws) => ws,
+    let app = match App::open(&root) {
+        Ok(app) => app,
         Err(e) => {
             eprintln!("lodestar-mcp: no se pudo abrir el bundle: {e}");
             std::process::exit(3);
         }
     };
     eprintln!(
-        "lodestar-mcp: escuchando JSON-RPC en stdio (root={})",
+        "lodestar-mcp: escuchando JSON-RPC en stdio (root={}, profile={profile:?})",
         root.display()
     );
 
@@ -51,7 +111,7 @@ fn main() {
         // JSON-RPC: el JSON imparseable exige responder -32700 con id null (si no, el cliente
         // se queda esperando la respuesta de ese id para siempre).
         let resp = match serde_json::from_str::<Value>(&line) {
-            Ok(v) => handle(&ws, &v),
+            Ok(v) => handle(&app, profile, &v),
             Err(e) => Some(rpc_error(Value::Null, -32700, &format!("Parse error: {e}"))),
         };
         if let Some(resp) = resp {
@@ -67,7 +127,7 @@ fn rpc_error(id: Value, code: i64, message: &str) -> Value {
 }
 
 /// Despacha un mensaje JSON-RPC. Devuelve `None` para notificaciones (sin `id`).
-fn handle(ws: &Workspace, req: &Value) -> Option<Value> {
+fn handle(app: &App, profile: Profile, req: &Value) -> Option<Value> {
     // Un mensaje que no es un objeto (array de batch, string, número…) es un request
     // inválido: -32600, no un descarte silencioso que cuelga al cliente.
     if !req.is_object() {
@@ -95,20 +155,24 @@ fn handle(ws: &Workspace, req: &Value) -> Option<Value> {
             Ok(json!({
                 "protocolVersion": version,
                 "serverInfo": { "name": "lodestar-mcp", "version": env!("CARGO_PKG_VERSION") },
-                "capabilities": { "tools": {} }
+                "capabilities": { "tools": {} },
+                "instructions": SERVER_INSTRUCTIONS
             }))
         }
         // El spec obliga a responder a ping con result vacío ("MUST respond promptly").
         "ping" => Ok(json!({})),
-        "tools/list" => Ok(json!({ "tools": tools::list() })),
+        "tools/list" => Ok(json!({ "tools": tools::available_tools(profile) })),
         "tools/call" => {
             let name = params.get("name").and_then(Value::as_str).unwrap_or("");
             let args = params.get("arguments").cloned().unwrap_or(Value::Null);
-            if !tools::exists(name) {
-                // Tool desconocida = error de protocolo (Invalid params, según el spec MCP).
+            if !tools::available(profile, name) {
+                // Tool no disponible bajo este perfil = error de protocolo (`-32602`): tool
+                // desconocida, o tool de cambio invocada bajo `readonly`. Ocultarla de
+                // `tools/list` no basta — un cliente que la llame igualmente NO debe ejecutarla
+                // (E14-H03). El código `-32602` la deja fuera del despacho antes de `call()`.
                 Err((-32602, format!("tool desconocida: {name}")))
             } else {
-                match tools::call(ws, name, &args) {
+                match tools::call(app, profile, name, &args) {
                     // `structuredContent` debe ser un objeto: las tools ya devuelven objetos.
                     Ok(v) => Ok(json!({
                         "content": [{ "type": "text", "text": v.to_string() }],

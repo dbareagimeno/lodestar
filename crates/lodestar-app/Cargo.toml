@@ -1,0 +1,33 @@
+[package]
+name = "lodestar-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+rust-version.workspace = true
+description = "Servicios de caso de uso finos sobre Workspace: envelope de protocolo y códigos de error."
+keywords = ["okf", "knowledge-base", "local-first", "services", "markdown"]
+categories = ["development-tools"]
+
+[dependencies]
+# Activa `JsonSchema` en los tipos de `core::types`/`core::schema` que embeben las respuestas de
+# las tools de lectura (outputSchema, E10-H13, decisión D6b) — el core los lleva ya preparados
+# detrás de esta feature (`schema_derive!` en `types.rs`), sin traer rusqlite/git2/tokio.
+lodestar-core = { workspace = true, features = ["schemars"] }
+# `features = ["schemars"]`: activa `JsonSchema` en `ExternalReference` (E11-H04), embebido en
+# `ConceptView::external_references` — mismo motivo que la feature homónima de `lodestar-core`.
+lodestar-workspace = { workspace = true, features = ["schemars"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+blake3 = { workspace = true }
+schemars = { workspace = true }
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+serde_json = { workspace = true }
+tempfile = "3"

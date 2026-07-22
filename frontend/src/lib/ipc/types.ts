@@ -12,6 +12,12 @@ export type CheckCode =
   | "REC-TITLE" | "REC-DESC" | "FMT-TAGS" | "FMT-TS"
   | "LINK-STUB" | "LINK-REL" | "ORPHAN" | "BODY-STRUCT"
   | "OKF-IDX" | "OKF-LOG" | "OKF-CONFLICT";
+// NOTA (E11-H04, mismo criterio que E10-H06/E11-H03): `SCHEMA-REQFIELD`/`SCHEMA-STATUS`/
+// `REL-TARGET`/`REL-CARD`/`REL-TYPE`/`EXTREF-MISSING` existen en `core::types::CheckCode` pero
+// NO se mirroran aquí — el catálogo i18n del frontend (`i18n.ts`) está congelado y esos códigos no
+// llegan hoy a ningún flujo que consuma la webview (viven en `Analysis`/relaciones tipadas sin UI,
+// o en `ExternalRefsReport`/`knowledge_get`, superficie MCP/CLI, no Tauri). `Check.msg` ya lleva el
+// mensaje en español inline; sincronizar el mirror queda pendiente para cuando haya UI que los use.
 
 export interface Check {
   level: Severity;

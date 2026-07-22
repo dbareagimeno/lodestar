@@ -5,6 +5,7 @@ members = [
   "crates/lodestar-store",
   "crates/lodestar-vcs",
   "crates/lodestar-workspace",
+  "crates/lodestar-app",
   "crates/lodestar-cli",
   "crates/lodestar-mcp",
   "crates/lodestar-fixtures",
@@ -32,12 +33,14 @@ regex = "1"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 indexmap = { version = "2", features = ["serde"] }
 unicode-normalization = "0.1"
+schemars = "0.8"
 # Crates internos. Los publicables llevan `version` junto al `path`: cargo usa el `path`
 # en el workspace y sustituye por la `version` (crates.io) al publicar.
 lodestar-core = { path = "crates/lodestar-core", version = "0.1.0" }
 lodestar-store = { path = "crates/lodestar-store", version = "0.1.0" }
 lodestar-vcs = { path = "crates/lodestar-vcs", version = "0.1.0" }
 lodestar-workspace = { path = "crates/lodestar-workspace", version = "0.1.0" }
+lodestar-app = { path = "crates/lodestar-app", version = "0.1.0" }
 # Solo-dev y `publish = false`: sin `version` para que cargo la descarte al empaquetar.
 lodestar-fixtures = { path = "crates/lodestar-fixtures" }
 # Fachadas / infra

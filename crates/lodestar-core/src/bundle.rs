@@ -10,7 +10,7 @@ use crate::conform::{self, ConformCtx};
 use crate::model::{self, Parsed};
 use crate::types::{
     Analysis, Backlinks, Check, ConceptSummary, Direction, Frontmatter, FrontmatterPatch,
-    GraphModel, LinkRef, Neighborhood, RelPath, Severity, WriteOutcome,
+    GraphModel, GraphNode, LinkRef, Neighborhood, RelPath, Severity, WriteOutcome,
 };
 
 static OKF_VER_VAL_RE: Lazy<Regex> =
@@ -260,6 +260,31 @@ impl Bundle {
         crate::graph::graph_model(self)
     }
 
+    /// [`GraphNode`] de `id` (ghost/type/status), reusando `graph::node_for` — la única definición
+    /// de "qué es un nodo del grafo" (invariante #3). Envoltorio público para que las fachadas
+    /// (`lodestar-app`) no reimplementen ese criterio ni necesiten acceso a `parsed` (`pub(crate)`).
+    pub fn node(&self, id: &RelPath) -> GraphNode {
+        crate::graph::node_for(self, id)
+    }
+
+    /// Camino más corto **dirigido** de `a` a `b` (`[a, .., b]`), o `vec![]` si no hay camino
+    /// (E11-H02). Nunca error. Ver `graph::path_between`.
+    pub fn path_between(&self, a: &RelPath, b: &RelPath) -> Vec<RelPath> {
+        crate::graph::path_between(self, a, b)
+    }
+
+    /// Ciclos dirigidos del grafo de enlaces; cada ciclo es el conjunto de nodos de una SCC no
+    /// trivial (E11-H02). Ver `graph::cycles`.
+    pub fn cycles(&self) -> Vec<Vec<RelPath>> {
+        crate::graph::cycles(self)
+    }
+
+    /// Componentes conexas (conectividad no dirigida) del grafo de enlaces; cada componente es el
+    /// conjunto de sus nodos (E11-H02). Ver `graph::components`.
+    pub fn components(&self) -> Vec<Vec<RelPath>> {
+        crate::graph::components(self)
+    }
+
     /// Filtro de paths por la DSL de query (port fiel; devuelve paths).
     pub fn query(&self, dsl: &str) -> Vec<RelPath> {
         crate::query::query(self, dsl)
@@ -420,7 +445,12 @@ impl Bundle {
 }
 
 /// Aplica un `FrontmatterPatch` sobre un `Frontmatter` (conoce los KNOWN_FM tipados + extras).
-fn apply_patch(fm: &mut Frontmatter, patch: FrontmatterPatch) {
+///
+/// `pub(crate)`: además de [`Bundle::merge_frontmatter`], lo reutiliza `crate::plan`
+/// (E12-H08, `apply_normalized_ops`) para materializar en memoria un `Create`/`PatchFrontmatter`
+/// sobre el `FileMap` hipotético — una sola lógica de merge-patch en todo el core (invariante #3
+/// de `CLAUDE.md`), nunca reimplementada.
+pub(crate) fn apply_patch(fm: &mut Frontmatter, patch: FrontmatterPatch) {
     use serde_yaml::Value as Yaml;
     for (key, val) in patch.0 {
         let as_string = |v: &Yaml| match v {

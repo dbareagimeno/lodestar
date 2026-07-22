@@ -12,7 +12,6 @@ use clap::{Parser, Subcommand};
 
 mod bundle_io;
 mod commands;
-mod git;
 mod sarif;
 
 /// Editor local-first de bases de conocimiento OKF — interfaz de línea de comandos.
@@ -30,7 +29,9 @@ struct Cli {
 enum Command {
     /// Inicializa un bundle nuevo (index raíz + `.gitignore`).
     Init { dir: Option<PathBuf> },
-    /// La puerta de CI: ¿es conforme el bundle? (exit 0/1).
+    /// La puerta de CI: ¿es conforme el bundle? (exit 0/1). Juzga siempre el **working tree**
+    /// (scope workspace) — el `vcs`/git queda fuera de la superficie de la CLI (E9-H02); `--staged`,
+    /// `--rev` y `--range` quedan diferidos con el crate `vcs` dormido.
     Check {
         /// Salida JSON (el `Analysis` serializado).
         #[arg(long, conflicts_with = "sarif")]
@@ -38,15 +39,6 @@ enum Command {
         /// Salida SARIF 2.1.0 (para integraciones de CI).
         #[arg(long)]
         sarif: bool,
-        /// Juzga el árbol staged en git.
-        #[arg(long, conflicts_with_all = ["rev", "range"])]
-        staged: bool,
-        /// Juzga el árbol de una revisión (`HEAD`, rama, SHA, `HEAD~2`…).
-        #[arg(long, conflicts_with = "range")]
-        rev: Option<String>,
-        /// Juzga la punta de un rango `a..b` (equivale a `--rev b`).
-        #[arg(long)]
-        range: Option<String>,
     },
     /// Genera el `index.md` de un directorio (o `--check` para detectar drift, exit 4).
     Index {
@@ -69,29 +61,6 @@ enum Command {
     /// Importa un bundle (zip exportado del prototipo o directorio).
     /// Requerido en clap: sin argumento es error de USO (exit 2), no de runtime.
     Import { source: PathBuf },
-    /// Historial de commits (con conformidad).
-    Log {
-        #[arg(long, default_value_t = 20)]
-        limit: usize,
-    },
-    /// Último commit conforme.
-    LastConforming,
-    /// Lista las ramas locales.
-    Branch,
-    /// Pull del upstream (`git pull --ff-only`).
-    Pull,
-    /// Push al upstream configurado.
-    Push,
-    /// Cambia de rama (`--create` para crearla antes).
-    Switch {
-        name: String,
-        #[arg(long)]
-        create: bool,
-    },
-    /// Merge de una rama en la actual (local).
-    Merge { name: String },
-    /// Instala los hooks de git (`pre-commit` → `lodestar check`).
-    Hooks,
 }
 
 /// Resuelve el root del bundle: `--path`, o sube desde el cwd buscando `index.md`/`.lodestar`.
@@ -125,38 +94,12 @@ fn main() -> ExitCode {
                 .unwrap_or_else(|| PathBuf::from("."));
             commands::init(target)
         }
-        Command::Check {
-            json,
-            sarif,
-            staged,
-            rev,
-            range,
-        } => {
-            if staged {
-                git::check_staged(&root, json, sarif)
-            } else if let Some(rev) = rev {
-                git::check_rev(&root, &rev, json, sarif)
-            } else if let Some(range) = range {
-                // La punta del rango `a..b` es lo que se juzga (equivale a `--rev b`).
-                let tip = range.rsplit("..").next().unwrap_or(&range);
-                git::check_rev(&root, tip, json, sarif)
-            } else {
-                commands::check(&root, json, sarif)
-            }
-        }
+        Command::Check { json, sarif } => commands::check(&root, json, sarif),
         Command::Index { dir, check } => commands::index(&root, dir.unwrap_or_default(), check),
         Command::Tags { check } => commands::tags(&root, check),
         Command::Export { out } => commands::export(&root, out),
-        Command::Reindex => git::reindex(&root),
+        Command::Reindex => commands::reindex(&root),
         Command::Import { source } => commands::import(&root, source),
-        Command::Log { limit } => git::log(&root, limit),
-        Command::LastConforming => git::last_conforming(&root),
-        Command::Branch => git::branch(&root),
-        Command::Pull => git::sync(&root, false),
-        Command::Push => git::sync(&root, true),
-        Command::Switch { name, create } => git::switch(&root, &name, create),
-        Command::Merge { name } => git::merge(&root, &name),
-        Command::Hooks => git::hooks(&root),
     };
     match result {
         Ok(code) => code,

@@ -15,7 +15,8 @@ use crossbeam_channel::Receiver;
 use lodestar_core::diff::OkfDiff;
 use lodestar_core::types::{
     Analysis, Author, Backlinks, Branch, CommitConformance, CommitRow, Direction, FileMap,
-    FrontmatterPatch, GraphModel, Mutation, Neighborhood, RelPath, Sha, SyncOutcome, WriteOutcome,
+    FrontmatterPatch, GraphModel, Mutation, Neighborhood, RelPath, Sha, SyncOutcome,
+    WorkspaceRevision, WriteOutcome,
 };
 use lodestar_core::Bundle;
 use lodestar_store::{IndexEvent, Store, Watcher};
@@ -23,12 +24,30 @@ use lodestar_vcs::{MergeOutcome, Vcs};
 
 pub mod config;
 mod error;
+mod external_refs;
+mod gitignore;
 mod io;
+mod journal;
+mod lock;
+mod publish;
+mod receipts;
+mod recovery;
+mod runtime;
+pub mod schema;
 mod snapshot;
+mod staging;
+mod transaction;
 
-pub use config::Config;
+pub use config::{Config, WorkspaceConfig};
 pub use error::WorkspaceError;
+pub use external_refs::{ExternalReference, ExternalRefsReport};
+pub use journal::{Journal, JournalState, OpState};
+pub use lock::WorkspaceLock;
+pub use recovery::RecoveryDir;
+pub use schema::WorkspaceSchema;
 pub use snapshot::BundleSnapshot;
+pub use staging::StagingDir;
+pub use transaction::transaction_id;
 
 /// Handle unificado de un bundle abierto.
 pub struct Workspace {
@@ -45,6 +64,11 @@ impl Workspace {
     /// Abre un bundle: descubre git (puede no haber). Identidad por defecto (override en E8-H01).
     /// **No** activa la cache incremental (usa [`Workspace::open_live`] o [`Workspace::enable_cache`]).
     pub fn open(root: &Path) -> Result<Self, WorkspaceError> {
+        // Ajusta el `.gitignore` versionado (cache + runtime desechables, config canónica
+        // preservada) y garantiza el scaffold de `.lodestar/runtime/` — ambos best-effort, no
+        // abortan la apertura (`ARCHITECTURE.md §19.4`, `DECISIONES.md §0` D5).
+        gitignore::ensure_gitignore(root);
+        runtime::ensure_runtime_scaffold(root);
         let vcs = Vcs::discover(root)?.map(Mutex::new);
         // La identidad de `lodestar.toml` (si existe) tiene prioridad sobre el defecto.
         let identity = Config::load(root)
@@ -63,6 +87,54 @@ impl Workspace {
     /// La configuración efectiva del bundle (`lodestar.toml` + defaults).
     pub fn config(&self) -> Config {
         Config::load(&self.root).unwrap_or_default()
+    }
+
+    /// El directorio raíz del bundle abierto (E10-H08: lo expone `App::workspace_status` como
+    /// `root` de la proyección de estado).
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    /// Computa la [`WorkspaceRevision`] actual del conocimiento **escribible** (E13-H02, E10-H03).
+    ///
+    /// Carga el `FileMap` canónico desde disco y aplica la única lógica del core
+    /// ([`lodestar_core::types::workspace_revision`]) con los `writableRoots` de la config: el
+    /// hash blake3 cubre solo los `.md` que Lodestar puede reescribir (ignora `.lodestar/` y, si
+    /// hay `writableRoots`, cualquier `.md` fuera de ellos). Es la `baseWorkspaceRevision` que un
+    /// plan captura al planificar y que [`Workspace::reverify_base_revision`] re-comprueba al
+    /// aplicar.
+    ///
+    /// # Errores
+    /// - [`WorkspaceError::Io`] si falla la lectura del canónico.
+    pub fn workspace_revision(&self) -> Result<WorkspaceRevision, WorkspaceError> {
+        let files = io::load_bundle(&self.root)?;
+        let cfg = WorkspaceConfig::load(&self.root).unwrap_or_default();
+        Ok(lodestar_core::types::workspace_revision(
+            &files,
+            &cfg.workspace.writable_roots,
+        ))
+    }
+
+    /// Re-verifica el control optimista de escritura (E13-H02): comprueba que la
+    /// [`WorkspaceRevision`] actual del conocimiento escribible sigue siendo la `base` que el plan
+    /// capturó. Si coincide, `Ok(())`; si el workspace cambió entre plan y apply (otro escritor
+    /// tocó los `.md`), devuelve [`WorkspaceError::WriteConflict`] y **no se publica** — publicar
+    /// sobre una base obsoleta pisaría ese cambio.
+    ///
+    /// # Errores
+    /// - [`WorkspaceError::WriteConflict`] si la revisión actual difiere de `base`.
+    /// - [`WorkspaceError::Io`] si falla el cálculo de la revisión actual.
+    pub fn reverify_base_revision(&self, base: &WorkspaceRevision) -> Result<(), WorkspaceError> {
+        let actual = self.workspace_revision()?;
+        if &actual == base {
+            Ok(())
+        } else {
+            Err(WorkspaceError::WriteConflict(format!(
+                "la base del plan ({}) ya no es la revisión actual del workspace ({}): \
+                 otro escritor lo modificó entre el plan y el apply",
+                base.0, actual.0
+            )))
+        }
     }
 
     /// Abre sin git (modo hermético, p. ej. CLI efímera).
@@ -90,11 +162,10 @@ impl Workspace {
         if self.cache.is_some() {
             return Ok(());
         }
-        // En repos adoptados, garantiza que `.lodestar/` esté ignorado ANTES de crear la cache
-        // (si no, los checkpoints automáticos commitearían `index.db` a la historia).
-        if let Some(v) = &self.vcs {
-            let _ = v.lock().unwrap().ensure_cache_ignored();
-        }
+        // El `.gitignore` ya quedó ajustado en `Workspace::open` (cache + runtime ignorados,
+        // ANTES de crear la cache) — ver `gitignore::ensure_gitignore`. Ya no se toca
+        // `.git/info/exclude` vía `Vcs::ensure_cache_ignored` (ese ajuste era no-versionado; el
+        // `.gitignore` del bundle es la fuente única, texto plano, sin `git2`).
         let store = Arc::new(Store::open(&self.root)?);
         // Watcher ANTES del rebuild: un guardado externo durante el rebuild inicial genera
         // evento y se reconcilia; al revés quedaba una ventana ciega hasta el siguiente evento.
@@ -215,6 +286,27 @@ impl Workspace {
 
     // --- escritura validada (por el ÚNICO escritor) -----------------------
 
+    /// Rechaza una escritura del canónico si hay una recuperación PENDIENTE (E13-H06): un
+    /// write-ahead journal no-`done` bajo `.lodestar/runtime/journal/` significa que una
+    /// transacción anterior se interrumpió a mitad y [`Workspace::recover`] aún no la
+    /// completó/restauró. El gate se comprueba ANTES de tocar el canónico —para no publicar sobre
+    /// un estado a medio recuperar (principio «nunca un estado parcial silencioso»)— en toda
+    /// escritura de alto nivel del canónico ([`Workspace::create_concept`],
+    /// [`Workspace::write_concept`], [`Workspace::merge_frontmatter`],
+    /// [`Workspace::apply_mutation`]) y en [`Workspace::publish`] (que excluye su propio journal en
+    /// curso). La restauración de `recover` NO pasa por aquí: escribe por `io::write_atomic`/
+    /// `io::delete` directamente, de modo que puede reparar el canónico con el gate levantado.
+    fn guard_recovery(&self) -> Result<(), WorkspaceError> {
+        if self.recovery_pending() {
+            return Err(WorkspaceError::WorkspaceRecoveryRequired(
+                "hay un journal de publicación sin completar bajo .lodestar/runtime/journal/: \
+                 ejecuta la recuperación (Workspace::recover) antes de volver a escribir"
+                    .to_string(),
+            ));
+        }
+        Ok(())
+    }
+
     /// Crea un concept validado y lo escribe por el único escritor (si es conforme).
     pub fn create_concept(
         &self,
@@ -224,6 +316,7 @@ impl Workspace {
         body: &str,
         allow_nonconformant: bool,
     ) -> Result<WriteOutcome, WorkspaceError> {
+        self.guard_recovery()?;
         let bundle = self.bundle()?;
         let now = now_iso8601();
         let outcome = bundle.create_concept(p, ty, title, body, Some(&now), allow_nonconformant);
@@ -242,6 +335,7 @@ impl Workspace {
         raw: &str,
         allow_nonconformant: bool,
     ) -> Result<WriteOutcome, WorkspaceError> {
+        self.guard_recovery()?;
         let bundle = self.bundle()?;
         let outcome = bundle.write_concept_raw(p, raw, allow_nonconformant);
         if outcome.written {
@@ -270,6 +364,7 @@ impl Workspace {
         p: &RelPath,
         patch: FrontmatterPatch,
     ) -> Result<WriteOutcome, WorkspaceError> {
+        self.guard_recovery()?;
         let bundle = self.bundle()?;
         let outcome = bundle.merge_frontmatter(p, patch);
         if outcome.written {
@@ -281,6 +376,7 @@ impl Workspace {
 
     /// Aplica una `Mutation` por el único escritor y devuelve `{written, removed, unchanged}`.
     pub fn apply_mutation(&self, mutation: &Mutation) -> Result<ApplyReport, WorkspaceError> {
+        self.guard_recovery()?;
         let mut written = 0;
         let mut unchanged = 0;
         for (path, content) in &mutation.writes {

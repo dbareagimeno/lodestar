@@ -2070,12 +2070,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "lodestar-app"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "lodestar-core",
+ "lodestar-workspace",
+ "schemars 0.8.22",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tempfile",
+]
+
+[[package]]
 name = "lodestar-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
  "ignore",
+ "lodestar-app",
  "lodestar-core",
  "lodestar-fixtures",
  "lodestar-workspace",
@@ -2113,6 +2128,7 @@ dependencies = [
 name = "lodestar-mcp"
 version = "0.1.0"
 dependencies = [
+ "lodestar-app",
  "lodestar-core",
  "lodestar-workspace",
  "serde",
@@ -2174,6 +2190,7 @@ dependencies = [
  "lodestar-store",
  "lodestar-vcs",
  "rusqlite",
+ "schemars 0.8.22",
  "serde",
  "serde_json",
  "serde_yaml",

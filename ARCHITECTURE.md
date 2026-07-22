@@ -439,6 +439,13 @@ como cualquier escritor externo. `commit`/`restore`/`switch_branch`/`merge`/`ini
 
 ## 10. Decisiones ratificadas (resuelven las contradicciones del workflow)
 
+> **Nota (giro headless §19, 2026-07-22).** Las filas **#15–#21** (git de primera clase) siguen
+> siendo **ciertas sobre el crate `lodestar-vcs`**, pero su **exposición en la superficie de producto
+> queda revertida** por §19: el crate se conserva dormido y ninguna fachada lo consume. Las filas
+> **#1–#14 siguen vigentes tal cual** y son el cimiento del giro (core puro, una verdad computada, un
+> contrato de tipos, único escritor, `RelPath` chokepoint, generadores puros, `merge_frontmatter` en
+> el core, feature `schemars`). §19 **no relitiga** ninguna decisión #1–#14; las usa.
+
 | # | Tensión entre capas | Resolución |
 |---|---|---|
 | 1 | ¿Modelo en memoria o SQLite es la verdad computada? | **Core es la autoridad** en las 3 fachadas; SQLite = acelerador/FTS verificado por test de paridad. `lodestar check` reconcilia antes de leer. A escala, el mismo API del core se alimenta de proyecciones SQL (trait `ConceptStore`), no de todo el corpus en RAM. |
@@ -497,6 +504,15 @@ Objetivos explícitos (gate de bench con una fixture sintética de 10k concepts)
 ---
 
 ## 13. Versionado (git) — integración de primera clase
+
+> **⚠ Superada por §19 en cuanto a superficie de producto (ratificado 2026-07-22).** El giro a
+> *motor headless de integridad semántica* (§19) **retira git de la superficie**: ninguna fachada
+> (MCP/CLI) expone commit/rama/push/pull/merge/hooks ni la conformidad-por-commit. **El crate
+> `lodestar-vcs` y su mecánica interna (§13.2–§13.6) se conservan como DORMIDOS** — compilan, sus
+> tests siguen verdes, `Workspace` puede seguir teniendo los métodos `vcs_*` internamente, pero
+> **ningún consumidor los llama**. Esta sección queda como diseño de referencia por si git vuelve a
+> la superficie; no describe implementación viva de producto en v2. Los tipos git de `core::types`
+> (`Sha`/`CommitRow`/`Branch`/`OkfDiff`…) permanecen en el contrato aunque dejen de exponerse.
 
 El prototipo añadió **"Versiones / historial"**. La implementación real lo eleva a **git de primera clase con
 vocabulario directo** (commits, ramas, push/pull): el público objetivo es técnico (desarrolladores), así que
@@ -671,3 +687,190 @@ Cada fase se valida con el arnés de paridad antes de la siguiente.
 6. **`src-tauri`** + **frontend Svelte** portando el prototipo verbatim (incl. pill/overlay/modo "Cambios"); `.d.ts` generado; editor multi-escritor.
 7. **`lodestar-mcp`** (casi gratis: 4ª fachada sobre la misma workspace, con `commit` para agentes) + golden cross-fachada.
 8. Transversales de producto: migración (con replay de historial a git), packaging/updater, i18n, seguridad, config por-bundle, first-run.
+
+---
+
+## 19. Motor headless de integridad semántica (supersede §13 en superficie)
+
+> **Ratificado 2026-07-22** (puerta 1 de `/planificar`; fuente: `docs/REFACTOR.md`; propuesta:
+> `docs/REFACTOR_DISENO_PROPUESTA.md`). Lodestar deja de posicionarse como "editor local-first con git
+> de primera clase" y pasa a ser un **motor headless de integridad semántica para bases de conocimiento
+> Markdown gestionadas por humanos y agentes**. Los **invariantes #1–#6 de `CLAUDE.md` siguen íntegros**
+> y son el cimiento del giro; **no se relitiga** ninguna decisión ratificada #1–#14 de §10.
+
+### 19.1 Posicionamiento
+
+Lodestar **no** compite con Obsidian, **no** es un editor generalista y **no** gestiona git. Ofrece una
+capa fiable para: buscar/consultar conocimiento, entender esquemas/tipos/relaciones, detectar
+inconsistencias, analizar impacto de cambios, planificar modificaciones semánticas, validar antes de
+escribir, publicar cambios recuperables y proteger el workspace frente a estados incoherentes. Flujo:
+`descubrir → buscar → leer → analizar → planificar → validar → aplicar → verificar`. Se usa desde Claude
+Code, Codex, otros clientes MCP y la CLI, **sin editor, sin GUI y sin git** (`REFACTOR §1, §18`).
+
+**Git sale de la superficie de producto** (decisión ratificada): fuera las tools MCP `history`/
+`last_conforming_commit`/`commit` y los subcomandos CLI de `crates/lodestar-cli/src/git.rs`
+(`log`/`last-conforming`/`branch`/`switch`/`merge`/`pull`/`push`/`hooks`). El crate **`lodestar-vcs`
+se conserva DORMIDO** (§13, cabecera). La UI (`frontend/`, `src-tauri/`) queda **congelada**: no se toca
+aunque queden zonas sin backend nuevo; el flujo de desarrollo (`.claude/`, `CLAUDE.md`,
+`docs/WORKFLOWS.md`) se actualiza para tratarla como congelada.
+
+### 19.2 Grafo de crates (con `lodestar-app`)
+
+Decisión **D1 (Opción C, híbrido)**: la **mecánica transaccional** (staging, journal, locks, aplicación
+atómica por lotes, crash-recovery) vive en `lodestar-workspace`, **junto al único escritor** (preserva el
+invariante #5). Se introduce **`lodestar-app`**, crate **fino** de servicios de caso de uso que ambas
+fachadas comparten (REFACTOR §3: "MCP y CLI invocan los mismos servicios de aplicación; no contienen
+lógica de dominio"). No arrastra `rusqlite`/`git2`/`tokio`.
+
+```
+lodestar-core (PURO)  ◄─ lodestar-store ─┐        lodestar-core ◄─ lodestar-vcs (DORMIDO: sin consumidores)
+   ▲  (+ core::schema, WorkspaceRevision) ▼
+   └──────────────── lodestar-workspace (ÚNICO escritor + staging/journal/locks/recovery + cache + bus)
+                              ▲
+                       lodestar-app   (servicios de caso de uso · envelope · mapa de códigos de error)
+                          ▲       ▲
+                   lodestar-mcp · lodestar-cli     (fachadas finas: 5–15 líneas, CERO dominio)
+                   src-tauri (CONGELADO: sigue llamando a workspace directamente; no se toca)
+```
+
+- **`core::schema`** (nuevo módulo, **PURO**): tipo `Schema` (catálogo de `DocType`, campos,
+  `requiredFields`, `allowedStatuses`, typed relations, lifecycle, plantillas) + funciones de validación
+  que, dado un `Schema` + un `Bundle`, producen `Vec<Check>` (extiende `conform`). La **aplicación de
+  plantillas** es generación pura (como `gen_index`/`gen_tag_indexes`). **Leer** `.lodestar/schema.yaml` /
+  `.lodestar/templates/` es I/O de `workspace` (patrón `Config::load`); el core nunca abre ficheros.
+- **`lodestar-app`**: ensambla `ChangeSet`, conduce plan→validar→aplicar→verificar, construye el
+  **envelope** (decisión D3: el envelope es framing de protocolo, no dominio → vive aquí, no en `core`) y
+  mapea `CoreError`/`WorkspaceError` → **códigos de error** estables.
+
+### 19.3 Tipos nuevos (invariante #4: UNA vez en `core::types`)
+
+Se congelan en `lodestar-core::types` (salvo el envelope, que va en `lodestar-app`):
+
+- `ConceptRevision` = `blake3:<hex>` del contenido en disco de un `.md`. **Eleva** el `WriteOutcome.hash`
+  (ya `blake3::hash(raw)`) y el gate de la cache (§5) de gate interno a **identidad expuesta**.
+- `WorkspaceRevision` = hash raíz determinista sobre `writableRoots`: ordenar paths (`RelPath: Ord`) →
+  hash de cada contenido → combinar `path+hash` → hash raíz. **Independiente** de mtime, orden de fs,
+  cachés/índices, **todo `.lodestar/`** (canónico y runtime), `referenceRoots` e ignorados. Lo computa el
+  **core** (función pura; invariante #3).
+- `ConceptRef { path: RelPath, id: Option<ConceptId> }` — **path** como identidad primaria; `id` opcional
+  y diferido (IDs obligatorios = no-goal, REFACTOR §16).
+- `ChangeSet { id, base_revision: WorkspaceRevision, operations: Vec<NormalizedOperation>, plan_hash,
+  risk: RiskAssessment, semantic_diff: SemanticDiff, validation: ValidationReport, expires_at }`.
+- `NormalizedOperation` — enum de las 11 ops resueltas a escrituras (`create`/`patch_frontmatter`/
+  `replace_body`/`edit_section`/`replace_text`/`move`/`delete`/`add_relation`/`remove_relation`/
+  `transition_status`/`apply_fix`); reutiliza `FrontmatterPatch` (merge-patch RFC 7386, null-borra).
+- `RiskAssessment { level, reasons }` — lógica pura nueva alimentada por backlinks/blast-radius.
+- `SemanticDiff` — **reutiliza `OkfDiff`** (`core::diff`, port de `diffSnap`), ampliado con
+  `diagnosticsIntroduced`/`diagnosticsResolved`.
+- `ValidationReport { conformant, summary{errors,warnings,info}, diagnostics: Vec<Check> }` — sobre
+  `Analysis.hard_fail`/`warn_count`.
+- `ChangeReceipt { id, change_set_id, previous_revision, result_revision, changed_paths, semantic_diff }`.
+- **Códigos de error** (§13 de REFACTOR): enum estable en `core::types` (patrón `CheckCode`, wire por
+  `#[serde(rename)]`): `WORKSPACE_NOT_FOUND`, `WORKSPACE_RECOVERY_REQUIRED`, `CONCEPT_NOT_FOUND`,
+  `AMBIGUOUS_REFERENCE`, `REVISION_CONFLICT`, `PLAN_STALE`, `PLAN_EXPIRED`, `PERMISSION_DENIED`,
+  `INVALID_SCHEMA`, `NONCONFORMANT_RESULT`, `INBOUND_LINKS_EXIST`, `RELATION_CONSTRAINT_VIOLATION`,
+  `WRITE_CONFLICT`, `RESULT_TOO_LARGE`, `RECOVERY_FAILED`, `INTERNAL_IO_ERROR`.
+
+**Extensión del tipo `Check`** (aditiva, sin forkear — invariante #4): gana campos **opcionales**
+`id: Option<_>`, `range: Option<Range>` (`startLine`/`endLine`), `related: Vec<_>`,
+`fixes: Vec<Fix{fixId,title,safe}>`. Los 15 checks OKF actuales los dejan vacíos/None.
+
+**Nuevas familias de `CheckCode`** (decisión D-CheckCode): variantes **estáticas acotadas** para los
+diagnósticos schema-driven — `SCHEMA-REQFIELD`, `SCHEMA-STATUS`, `REL-TARGET`, `REL-CARD`, `REL-TYPE` —
+aditivas y con clave i18n por código (§12). **No** hay espacio de códigos dinámico. El *qué* concreto
+(qué campo, qué relación) va en `targets`/`msg`/`related`.
+
+### 19.4 Config nueva y separación canónico vs runtime
+
+Decisión **D4/D5**. La config por-bundle migra de `lodestar.toml` a **`.lodestar/config.yaml`** (YAML
+unificado, idiomático con el frontmatter del bundle):
+
+```yaml
+workspace:
+  writableRoots:   [knowledge]        # Lodestar puede modificar (transacciones)
+  referenceRoots:  [src, tests]       # visibles para validación, NUNCA modificables por el MCP
+  ignored:         [node_modules, target, dist, .git, .lodestar/runtime]
+gate:
+  blockWarnings:   false              # strictness (antes [gate] block_warnings)
+transactions:
+  retainReceiptsFor: 24h
+  maximumReceipts:   20
+# identity: DORMIDA (git fuera de superficie; se conserva por si vcs vuelve)
+```
+
+`.lodestar/` se parte en **dos naturalezas**:
+
+- **Canónico / versionado** (entra a git, pero **fuera** de `WorkspaceRevision` y del índice de
+  conceptos — es *config del workspace*, no *conocimiento*): `.lodestar/config.yaml`,
+  `.lodestar/schema.yaml`, `.lodestar/templates/`.
+- **Runtime / desechable** (gitignored, como hoy `index.db`): `.lodestar/runtime/` (plans/, receipts/,
+  journal, `audit.jsonl`) + `.lodestar/index.db`.
+
+Consecuencia: el `.gitignore` deja de ignorar `.lodestar/` entero y pasa a ignorar **solo**
+`.lodestar/index.db` + `.lodestar/runtime/`. Invariante #1 intacto: los `.md` de `writableRoots` son la
+única fuente de verdad del conocimiento; la config es config.
+
+### 19.5 Modelo transaccional (§5 de REFACTOR) — mecánica en `workspace`
+
+Una "transacción" no es de BD: los `.md` siguen siendo la verdad. Es **semántica transaccional
+recuperable**: staging completo → validación previa → lock de workspace → control optimista de
+concurrencia (`expectedRevision`/`expectedWorkspaceRevision`) → write-ahead journal → reemplazo atómico
+por fichero (el `write_atomic` de §6, en bucle) → copias de recuperación → recuperación tras cierre/fallo
+→ validación posterior. **Todo pasa por el único escritor** (invariante #5); staging vive en
+`.lodestar/runtime/staging/` (no es el árbol canónico). Al abrir, un journal incompleto dispara la
+estrategia determinista (completar o restaurar) **antes** de servir lecturas;
+`workspace_status.recovery.pendingTransaction` lo expone y `WORKSPACE_RECOVERY_REQUIRED` bloquea
+escrituras hasta resolver. Lodestar **no** asume acceso exclusivo: recalcula/invalida revisiones ante
+escrituras externas (REFACTOR §5.3).
+
+### 19.6 Superficie MCP 13 → 10 y perfiles
+
+Diez tools (`REFACTOR §8`): **READ** `workspace_status` · `knowledge_search` · `knowledge_get` ·
+`schema_inspect` · `graph_query` · `impact_analyze`; **VERIFY** `knowledge_check`; **CHANGE**
+`change_plan` · `change_apply` · `change_revert`. Migración desde las 13 actuales:
+
+| Tool actual | Destino |
+|---|---|
+| `find_backlinks`/`find_orphans`/`find_dangling`/`neighborhood` | `graph_query(operation=…)` (reusa `Bundle::neighborhood`, `Store::blast_radius`) |
+| `conformance_check` | `knowledge_check` (scopes workspace/concept/paths/affected) |
+| `query` | `knowledge_search` (filtros, snippets, paginación por cursor) |
+| `create_concept`/`update_frontmatter` | `change_plan` + `change_apply` (ops `create`/`patch_frontmatter`) |
+| `generate_index`/`generate_tag_indexes` | **CLI** (`lodestar index`/`tags`) + **auto-regen dentro de `change_apply`** cuando el cambio afecta a index/tags (decisión D6a) |
+| `history`/`last_conforming_commit`/`commit` | **ELIMINADAS** (git fuera de superficie) |
+
+`impact_analyze` reutiliza el **blast-radius** del store (`synth::blast_radius`) y `neighborhood`.
+**Perfiles** (§12 de REFACTOR): `readonly` = las 7 de lectura/verificación; `standard` = añade las 3 de
+cambio. Se eligen **al arrancar** (`lodestar-mcp --profile readonly|standard`). **Política** de
+conformidad al arrancar (`--policy strict`, `strict` por defecto): no hay `allow_nonconformant` por
+llamada (seguridad §19.7). **Transporte** (decisión D6b): se mantiene **stdio** (DECISIONES §3) y se
+activa **`outputSchema`** derivado con la feature `schemars` (ya preparada, §10 fila 14); `rmcp`
+**diferido**. `contracts/mcp.yml` se **reescribe** 13→10 y el guardián de contrato lo vigila.
+
+**Envelope común** (en `lodestar-app`): `{ ok, workspaceRevision, summary, data, diagnostics, warnings,
+resourceLinks }`; `summary` es texto compacto para el modelo.
+
+### 19.7 Seguridad (§14 de REFACTOR) — simplificada
+
+`RelPath` (§4.1) sigue siendo el **chokepoint sintáctico** (rechaza absolutas/`..`/backslash/unidad
+Windows). Se **añade** (aditivo) una comprobación **semántica** de nivel workspace: (1) el path resuelto
+cae bajo un `writableRoot` para escribir (bajo un root visible para leer); (2) **guarda de symlinks** por
+canonicalización + verificación de contención. El servidor arranca con un único root, no permite cambiar
+de workspace por tool, **no ejecuta comandos, no accede a red, no conoce git** (el crate `vcs` queda sin
+consumidores → la superficie no lanza procesos ni toca la red; el threat model de §12 se **simplifica**).
+Auditoría local en `.lodestar/runtime/audit.jsonl` (runtime, no conocimiento).
+
+### 19.8 Plan de fases → épicas
+
+Épicas nuevas **09–14** (las 00–08 quedan como están; `requirements/`):
+
+| Épica | Fase REFACTOR | Foco |
+|---|---|---|
+| **E9** — Reducción de alcance | 0 (§16) | Retirar git de superficie; congelar UI en `.claude/`/docs; `.lodestar/config.yaml` + separación canónico/runtime; escribir §19; reposicionar README/CLAUDE |
+| **E10** — Esquemas + lectura headless | 1 | `core::schema` puro; `ConceptRevision`/`WorkspaceRevision`/`ConceptRef`; extensión de `Check`; envelope + códigos de error; crate `lodestar-app`; `workspace_status`/`knowledge_search`/`knowledge_get`/`schema_inspect`/`knowledge_check` |
+| **E11** — Grafo e impacto | 2 | `graph_query` (consolida grafo); `impact_analyze` (blast-radius); typed relations + validación de `referenceRoots` |
+| **E12** — Planificación | 3 | `ChangeSet`/`NormalizedOperation`/`RiskAssessment`/`SemanticDiff`/`ValidationReport`; `change_plan` (sin escribir); 11 ops; optimistic concurrency |
+| **E13** — Publicación recuperable | 4 | Staging · journal · locks · copias de recuperación · crash-recovery · `change_apply` · `change_revert` · `ChangeReceipt` · `audit.jsonl` |
+| **E14** — Integración software + evaluación | 5+6 | Validación de paths de código en CI; knowledge checks en CI; benchmarks (§17); tokens; concurrencia; recuperación |
+
+Cada fase se valida antes de la siguiente; los criterios de aceptación se alimentan del **benchmark
+funcional** (`REFACTOR §17`).

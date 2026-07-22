@@ -40,6 +40,25 @@ cargo run -p lodestar-tauri                            # app de escritorio (Taur
 | **E7** `lodestar-mcp` | 🟢 Parcial | 13 tools sobre la workspace + bucle JSON-RPC por stdio (stdout puro). **Golden cross-fachada** (tool==workspace) + e2e. **5 tests**. Pendiente: transporte `rmcp` oficial + resources (ver [`DECISIONES.md §3`](DECISIONES.md)). |
 | **E8** Transversales | 🟢 Parcial | Hechos: exit codes/SARIF, escritura atómica, **zip-slip cerrado por RelPath en `import`**, identidad de commits + override por `lodestar.toml`, trailer Co-Authored-By del agente, gitignore de `.lodestar/`, **config por-bundle (`lodestar.toml`: strictness + identidad)**, **`lodestar import`** (zip del prototipo o dir), **`init` con git init + commit inicial real**, **i18n keyed por código** (catálogo español), **arnés diferencial JS-vs-Rust (§12)**, y **pipeline de release multiplataforma** (`release.yml`: macOS arm64/Windows/Linux → bundles sin firmar + binarios CLI/MCP; Release en borrador) con **CI multiplataforma** (job de Rust en las 3 plataformas). Pendiente: **firma/notarización** de bundles + updater, gate de bench (§11), threat model. |
 
+## Infraestructura de proceso (2026-07-10)
+
+El repo tiene ahora una **estructura de agentes y skills** para el desarrollo por venir
+(SDD · TDD · BDD · jueces ciegos · contratos de frontera) — mapa y workflows en
+[`.claude/README.md`](.claude/README.md):
+
+- **Agentes** (`.claude/agents/`): `planificador` (spec/diseño mayor → épica de historias) ·
+  `historiador` · `autor-tests` · `implementador` · `juez-historia` (ciego: solo spec+diff) ·
+  `guardian-contrato`.
+- **Skills** (`.claude/skills/`): `/planificar` (features grandes: diseño + épica, 2 puertas) ·
+  `/historia` · `/tdd` · `/juzgar [--panel]` · `/contrato [--check]` · `/mutantes` · `/ciclo`
+  (pipeline completo por historia).
+- **Contratos de la frontera** (`contracts/`): `ipc.yml` (comandos Tauri + eventos) y `mcp.yml`
+  (13 tools), extraídos del código real; los tipos siguen viviendo solo en `core::types`
+  (invariante #4). Verificación con `/contrato --check`.
+- **Mutation testing a demanda**: `cargo-mutants` configurado (`.cargo/mutants.toml`), sin CI.
+- Primera historia acordada para el nuevo flujo: **ts-rs** (E0-H04/E6-H03,
+  [`DECISIONES.md §4`](DECISIONES.md)).
+
 ## Cobertura de historias (destacadas)
 
 - **E1**: H01–H19 implementadas y testeadas, **incluida H18** (arnés diferencial JS-vs-Rust:
@@ -139,3 +158,377 @@ Las 9 épicas (E0–E8) están implementadas. Lo que queda no es arquitectura:
 3. **E0-H04/E6-H03** (§4): generar el `.d.ts` desde Rust (ts-rs/specta).
 4. **E7** (§3): adoptar `rmcp` oficial + resources cuando un cliente lo exija.
 5. **E8** (§9): gate de bench (§11), threat model.
+
+## Giro a motor headless de integridad semántica (E9–E14) — COMPLETO
+
+Refactor de `docs/REFACTOR.md`, diseño ratificado en `ARCHITECTURE.md §19` (supersede §13 en
+superficie de producto; git queda como crate dormido) y `DECISIONES.md §0`. Descomposición en
+`requirements/epica-09..14` (47 historias, orden E9→E14).
+
+- **E9 — Reducción de alcance** (Fase 0):
+  - ✅ **E9-H01** — Retirar las tools git del MCP (`history`/`last_conforming_commit`/`commit`);
+    MCP pasa de 13 a 10 tools. `contracts/mcp.yml` recortado. Juez ciego: APROBADA (3/3).
+  - ✅ **E9-H02** — Retirar los subcomandos git de la CLI (`log`/`last-conforming`/`branch`/
+    `switch`/`merge`/`pull`/`push`/`hooks`) y los flags `--staged`/`--rev`/`--range` de `check`
+    (D-check). `check` sin flags juzga el working tree; `reindex` conservado (movido a
+    `commands.rs`). `git.rs` eliminado. Juez ciego: APROBADA (4/4).
+  - ✅ **E9-H05** — Config `.lodestar/config.yaml` (YAML): tipo `WorkspaceConfig` +
+    `WorkspaceConfig::load` (writableRoots/referenceRoots/ignored + gate + transactions; identity
+    dormida). Defaults seguros; `RelPath` rechaza traversal en roots; malformado = error explícito.
+    Convive con el `Config`/`lodestar.toml` legado. Juez ciego: APROBADA CON RESERVAS (4/4).
+    (Reserva del merge de `ignored` cerrada en E9-H06.)
+  - ✅ **E9-H06** — Separación canónico vs runtime: `.gitignore` gestionado como texto plano desde
+    workspace (sin git2) ignorando solo `.lodestar/index.db` + `.lodestar/runtime/` (idempotente,
+    con adopción de repos de estilo viejo); scaffold de `.lodestar/runtime/{plans,receipts,staging}`;
+    `WorkspaceConfig::load` inyecta siempre los `ignored` obligatorios (cierra la reserva de H05).
+    Juez ciego: APROBADA (4/4).
+  - ✅ **E9-H03** — Aislado `lodestar-vcs` como crate dormido: `cargo tree -p lodestar-mcp`/
+    `-p lodestar-cli` confirman que `vcs`/`git2` solo llegan **transitivamente** vía
+    `lodestar-workspace` (ningún `use lodestar_vcs`/`vcs` en `crates/lodestar-{mcp,cli}/src/`);
+    doc-comment de módulo en `crates/lodestar-vcs/src/lib.rs` declarando el crate DORMIDO
+    (puntero a `ARCHITECTURE.md §19`/`§13`). `cargo test -p lodestar-vcs` sigue verde (12 tests);
+    `cargo build --workspace` sin warnings nuevos. No se tocó el crate ni `core::types`.
+  - ✅ **E9-H04** — UI congelada en el flujo de desarrollo: `.claude/README.md` y
+    `docs/WORKFLOWS.md` anotan que el motor es headless y que `/ciclo`/`/historia`/`/ux` no tocan
+    `frontend/`/`src-tauri/` en v2; el skill `/ux` y el agente `disenador-ux` quedan marcados
+    **no aplicables al giro headless** (documentados, no invocados — reconciliado con el circuito
+    UX preexistente sin revertirlo). `CLAUDE.md` actualizado (estado + mapa de crates con
+    `lodestar-app`) sin reescribir los invariantes #1–#6.
+  - ✅ **E9-H07** — Documentación de producto reposicionada: `README.md`/`CLAUDE.md` describen el
+    posicionamiento como motor headless de integridad semántica, citan `ARCHITECTURE.md §19`,
+    listan `lodestar-app` en el mapa de crates y marcan git como capacidad dormida y la UI como
+    congelada. Este bloque de `IMPLEMENTATION_STATUS.md` refleja E9 completa.
+- **E9 — COMPLETA** (H01–H07, las 7 historias de la fase 0).
+- **E10 — COMPLETA (13/13)** (esquemas + lectura headless):
+  - ✅ **E10-H03** — `ConceptRevision` + `WorkspaceRevision` en `core::types` (puros): revisión
+    determinista sobre `writableRoots` (excluye `.lodestar/`, referenceRoots, mtime/orden/caché;
+    contención por segmentos; separador `\0` anti-colisión). Juez ciego: APROBADA CON RESERVAS (4/4).
+  - ✅ **E10-H06** — Extensión de `Check` (campos opcionales `id`/`range`/`related`/`fixes`,
+    retro-compat: `fixes`/`related`→`[]`, `id`/`range` ausentes) + familias estáticas de `CheckCode`
+    (`SCHEMA-REQFIELD`/`SCHEMA-STATUS`/`REL-TARGET`/`REL-CARD`/`REL-TYPE`). Frontend congelado sin
+    tocar. Juez ciego: APROBADA CON RESERVAS (2/2). **Pendiente en E10-H07**: emitir `Check.msg`
+    español por cada código nuevo (equivale a la "i18n" en headless).
+  - ✅ **E10-H01** — Crate nuevo `lodestar-app` (fino sobre `Workspace`, D1-C): `Envelope<T>`
+    (7 claves wire camelCase, D3), `ResourceLink`, `App::open`. Deps directas sin rusqlite/git2/tokio.
+    Juez ciego: APROBADA (2/2).
+  - ✅ **E10-H02** — `ErrorCode` (16 códigos SCREAMING_SNAKE) en `core::types` + mapeo
+    `CoreError`/`WorkspaceError`→`ErrorCode` y `ErrorEnvelope` (code/message/recovery) en
+    `lodestar-app`. Juez ciego: APROBADA CON RESERVAS (3/3). **A rastrear en E12/E13**: hacer que
+    `WorkspaceError::Core` preserve la variante `CoreError` (hoy la aplana a String → un
+    `PERMISSION_DENIED` real se degradaría a `INTERNAL_IO_ERROR` al envolverse).
+  - ✅ **E10-H04** — `ConceptRef {path, id?}` + `ConceptId` en `core::types`; `App::resolve_ref`
+    resuelve contra `Analysis::concepts` (invariante #3: excluye reservados) →
+    `CONCEPT_NOT_FOUND` si no existe; `AMBIGUOUS_REFERENCE` reservado. Juez ciego: APROBADA (3/3).
+  - ✅ **E10-H05** — `core::schema` (PURO): `Schema`/`DocType`/`RelationDef`/`FieldDef` (wire
+    camelCase) + loader `WorkspaceSchema::load` en workspace (ausente→`Schema` permisivo,
+    malformado→Err). Juez ciego: APROBADA (3/3).
+  - ✅ **E10-H07** — `validate_schema(bundle, schema) -> Vec<Check>` puro y aditivo (SCHEMA-REQFIELD
+    por campo obligatorio ausente, SCHEMA-STATUS por status fuera de allowedStatuses; msg español —
+    cierra la reserva de H06). No se llama desde `analyze` (diferenciales intactos); se compondrá en
+    E10-H12 (knowledge_check). Juez ciego: APROBADA CON RESERVAS (3/3).
+  - ✅ **E10-H08** — Tool `workspace_status` (1ª tool headless): `App::workspace_status(profile)`
+    con la forma §9.1 (workspaceRevision, counts desde Analysis, capabilities por perfil,
+    recovery). Server MCP acepta `--profile readonly|standard`; shell fino que delega en el servicio.
+    Juez ciego: APROBADA (2/2). (Drift de mcp.yml diferido a E10-H13.)
+  - ✅ **E10-H09** — Tool `knowledge_search` (sustituye `query`): casado por `Bundle::query`
+    (subcadena del core, invariante #3) ∩ `Analysis::concepts`; filtros types/statuses/tags/pathPrefix;
+    snippet UTF-8-safe, `revision`, SIN `body` (estructural); orden determinista (score desc, path asc)
+    + paginación por cursor-offset autosuficiente. Juez ciego: APROBADA CON RESERVAS (3/3).
+    **A vigilar**: filtros avanzados (is:orphan/references/…) se admiten pero se ignoran en silencio
+    (implementarlos en E11/E10-H13); cursor malformado reinicia a página 1.
+  - ✅ **E10-H10** — Tool `knowledge_get`: `include` selectivo (campo no pedido no se puebla),
+    `revision` siempre, backlinks/diagnostics/outgoing desde la verdad del core (invariante #3),
+    selección de secciones por `headingPath` (rangos por nivel de heading, excluye hermanas), error
+    en forma wire (`CONCEPT_NOT_FOUND`). Juez ciego: APROBADA CON RESERVAS (3/3). **A arreglar en
+    E12-H04 (edit_section)**: `parse_headings` no reconoce code fences (un `#` dentro de ``` se toma
+    como heading → puede truncar el rango).
+  - ✅ **E10-H11** — Tool `schema_inspect`: modos `catalog`/`type` proyectan el `Schema` cargado
+    (`WorkspaceSchema::load`); `DocType` reexpuesto de core::schema sin DTO paralelo (invariante #4);
+    sin schema → catálogo vacío; modo/tipo inválido → `INVALID_SCHEMA` en wire. Juez ciego: APROBADA (3/3).
+  - ✅ **E10-H12** — Tool `knowledge_check` (sustituye `conformance_check`): compone `analyze`
+    (OKF) + `validate_schema` (E10-H07, cableado por 1ª vez) con scopes workspace/concept/paths/
+    affected (vecindario vía `neighborhood`, sin off-by-one); ids de diagnóstico estables
+    (`diag:blake3:` solo de datos del diagnóstico); `conformant`/`summary` computados antes de
+    minimumSeverity/paginación. Juez ciego: APROBADA (3/3).
+  - ✅ **E10-H13** — `outputSchema` (schemars) en las 5 tools nuevas, derivado del tipo Rust real
+    (`schema_for!`, no divergible); `contracts/mcp.yml` reescrito (15 tools: 10 heredadas + 5 nuevas)
+    + sección de migración §15; core sigue puro con la feature schemars. Retirada de query/
+    conformance_check **descopada** a la limpieza final de superficie al cerrar E13. Juez ciego:
+    APROBADA CON RESERVAS (2/2).
+  - **E10 — COMPLETA** (13/13). Criterio de salida cumplido: un agente puede comprender y auditar
+    la base (workspace_status/knowledge_search/knowledge_get/schema_inspect/knowledge_check) sin
+    tocar el filesystem. **Pendiente al cierre de E13**: limpieza final de mcp.yml → 10 tools objetivo
+    (retirar query/conformance_check/find_*/neighborhood/create/update/generate según reemplazos).
+- **E11 — COMPLETA (5/5)** (grafo e impacto):
+  - ✅ **E11-H01** — Tool `graph_query` (consolida backlinks/outgoing/neighborhood/orphans/dangling):
+    reexpone `Bundle::neighborhood`/`backlinks` y `Analysis::orphans`/`dangling` (invariante #3, paridad
+    literal); truncación + cursor; outputSchema; `mcp.yml` actualizado (las 4 tools viejas se retiran
+    en la limpieza final de E13). Juez ciego: APROBADA CON RESERVAS (4/4). (Reserva de `node_for`
+    resuelta en E11-H02.)
+  - ✅ **E11-H02** — `path_between` (BFS), `cycles` (Tarjan SCC iterativo), `components` (BFS no
+    dirigido) puras en `core::graph` (reusan `graph_model`, invariante #3; deterministas) + enchufadas
+    en `graph_query`. Reserva de H01 resuelta: `node_for` público, `graph_node_for` eliminado.
+    Diferenciales 6/6 verde. Juez ciego: APROBADA (4/4).
+  - ✅ **E11-H03** — `validate_relations(bundle, schema)` puro (REL-TARGET si el target no existe,
+    REL-TYPE si su type no está en target_types, REL-CARD si cardinality "one" con >1 target; msg
+    español + range al campo), cableado aditivo en `knowledge_check`. Diferenciales verde. Juez
+    ciego: APROBADA CON RESERVAS (3/3).
+  - ✅ **E11-H04** — Validación de paths externos (`referenceRoots`): `Workspace::external_refs`
+    (`implemented_by`/`verified_by` → `{path,exists}` + diagnóstico `EXTREF-MISSING`) y
+    `assert_writable` (referenceRoots → `PERMISSION_DENIED`, contención por segmentos);
+    `knowledge_get.externalReferences` cableado. **Seguridad**: un juez ciego cazó un oráculo de
+    existencia por `join` crudo (traversal/absolutas); endurecido con `RelPath::new`+`under_root`
+    antes de tocar disco + test de regresión `ref_externa_traversal`. Re-juicio: APROBADA CON
+    RESERVAS (drift menor del espejo types.ts, sin impacto en la webview). Nuevo `CheckCode::ExtrefMissing`
+    y `WorkspaceError::PermissionDenied`.
+  - ✅ **E11-H05** — Tool `impact_analyze`: directlyAffected (backlinks directos), transitivelyAffected
+    (neighborhood(In) del core; paridad con store::blast_radius verificada), blockingReferences (relaciones
+    tipadas entrantes del schema, para delete; decoy de enlace suelto excluido), risk (high con bloqueos),
+    recommendations. Juez ciego: APROBADA (3/3). Minor: `relation_field_targets` duplica
+    `core::schema::relation_targets` (privada) — promover a público en una limpieza futura.
+  - **E11 — COMPLETA** (5/5). Criterio de salida cumplido: Lodestar responde preguntas estructurales
+    (graph_query: backlinks/outgoing/neighborhood/orphans/dangling/path_between/cycles/components) y
+    anticipa consecuencias (impact_analyze), con relaciones tipadas (REL-*) y paths externos validados.
+- **E12 — COMPLETA (9/9)** (planificación de cambios):
+  - ✅ **E12-H01** — Tipos del plan en `core::types`: `ChangeSetId`/`PlanHash`/`ReceiptId`, `ChangeSet`
+    (wire `baseWorkspaceRevision`/`planHash`/`expiresAt`), `NormalizedOperation` (11 variantes),
+    `RiskAssessment`/`RiskLevel` (low/medium/high), `SemanticDiff`, `ValidationReport`. `FrontmatterPatch`
+    ganó serde. Juez ciego: APROBADA (2/2).
+  - ✅ **E12-H02** — `core::plan::assess_risk` (pura): mide el blast-radius de deprecate/delete/move
+    (`Bundle::backlinks`); umbral 0→sin factor, 1..=4→Medium, >=5→High; level=máximo, reasons español.
+    Juez ciego: APROBADA (2/2).
+  - ✅ **E12-H03** — `core::plan::semantic_diff(before, after, schema)` (pura): created/modified/
+    deleted/*_changes reusan `diff_snap`; diagnosticsIntroduced/Resolved = diff de all_checks
+    (analyze+validate_schema+validate_relations) por clave (targets,code,msg). `moved` vacío (diff_snap
+    no detecta renames → H06/H08). Juez ciego: APROBADA (3/3).
+  - ✅ **E12-H04** — `core::plan::validate_result(bundle, schema)` → `ValidationReport` (reusa
+    all_checks; conformant=errors==0 explícito) + `PlanPolicy{requireConformantResult,allowWarnings}`
+    + `can_apply(report, policy)` (los dos ejes). Juez ciego: APROBADA (2/2).
+  - ✅ **E12-H05** — Normalización de contenido: `normalize_create` (usa bodyTemplate + {title}),
+    `normalize_replace_text` (error si conteo != expectedOccurrences), `normalize_edit_section` (acota
+    por headingPath). Lógica de secciones MOVIDA a `core::model` (pública) con **fix de code fences**
+    (cierra la reserva de E10-H10); `knowledge_get` la reusa (sin duplicar). Juez ciego: APROBADA CON
+    RESERVAS (3/3). **A cubrir en E12-H08**: normalizadores `patch_frontmatter`/`replace_body` (los 11
+    ops) + modos Append/Prepend de edit_section.
+  - ✅ **E12-H06** — Normalización de estructura: `normalize_move` (1 Move + N ReplaceBody reescribiendo
+    los entrantes; discrimina el enlace por `resolve_link`, no regex; preserva estilo/fragmentos) y
+    `normalize_delete` (reject→`CoreError::InboundLinksExist`, remove_links→Delete + desenlazar entrantes).
+    Juez ciego: APROBADA CON RESERVAS (3/3). **A endurecer antes de E13**: `Retarget`/`CreateStub` hoy hacen
+    solo Delete en silencio (deben implementarse o dar error explícito); añadir test de enlace-señuelo y
+    cobertura de rutas relativas.
+  - ✅ **E12-H07** — Normalización semántica: `normalize_add_relation`/`remove_relation` (validan
+    RelationDef → `RELATION_CONSTRAINT_VIOLATION`), `normalize_transition_status` (valida allowedStatuses),
+    `normalize_apply_fix`. `validate_relations` emite un `Fix{safe}` en REL-TARGET (fix_id blake3 estable,
+    aditivo sin regresión); apply_fix lo re-localiza y materializa (quita la relación rota). Juez ciego:
+    APROBADA (3/3).
+  - ✅ **E12-H08** — Tool `change_plan` (integración central, perfil standard): dispatcher de los 11
+    ops crudos → normalizadores del core; `apply_normalized_ops` construye el bundle hipotético EN
+    MEMORIA (no escribe, invariante #1); semantic_diff + assess_risk + validate_result + impact;
+    planHash determinista (blake3 de baseWorkspaceRevision + normalizedOperations, SIN reloj);
+    REVISION_CONFLICT por-op (ConceptRevision) y a nivel workspace. Cierra reserva de H05
+    (patch_frontmatter/replace_body). outputSchema + mcp.yml. Juez ciego: APROBADA (4/4).
+    **A rastrear**: gating por perfil (readonly debe rechazar tools de cambio) → E14-H03.
+  - ✅ **E12-H09** — Persistencia del plan: `change_plan` escribe el `PlanResult` a
+    `.lodestar/runtime/plans/<hex>.json` (nombre saneado sin `:`, runtime desechable); `App::load_plan`
+    con caducidad (`expiresAt` pasado → `PLAN_EXPIRED`; reloj solo en app). El plan no afecta
+    `WorkspaceRevision` (runtime excluido, invariante #1). Juez ciego: APROBADA (3/3).
+  - **E12 — COMPLETA** (9/9). Criterio de salida cumplido: un agente puede proponer refactors complejos
+    sin modificar archivos (change_plan normaliza/simula/valida en memoria, con diff semántico, riesgo,
+    validación, concurrencia optimista y plan persistido/recuperable).
+- **E13 — COMPLETA (11/11)** (publicación recuperable):
+  - ✅ **E13-H01** — Staging: `Workspace::materialize_staging(&ChangeSet)` computa el resultado con
+    `apply_normalized_ops` y lo escribe en `.lodestar/runtime/staging/<id saneado>/` SIN tocar el
+    canónico (invariante #1; runtime desechable); `validate_staging` construye el Bundle del resultado,
+    aplica el gate estricto y limpia + `NONCONFORMANT_RESULT` si no conforme. `WorkspaceError::
+    NonconformantResult`. Juez ciego: APROBADA (2/2).
+  - ✅ **E13-H02** — Lock de workspace: `acquire_lock` con creación atómica exclusiva
+    (`create_new` = O_CREAT|O_EXCL, sin TOCTOU) en `.lodestar/runtime/lock.json`; `WorkspaceLock` RAII
+    cuyo Drop libera best-effort (seguro en unwind, sin doble-panic). `reverify_base_revision` →
+    `WRITE_CONFLICT` si la revisión cambió. Juez ciego: APROBADA (3/3). (Lock huérfano ante SIGKILL → H06.)
+  - ✅ **E13-H03** — Write-ahead journal: `create_journal` escribe `.lodestar/runtime/journal/<txnId>.json`
+    en estado `prepared` (ops `pending`) con fsync ANTES de la 1ª sustitución; `mark_applied` marca la op,
+    transiciona `prepared`→`applying` y re-persiste con fsync. JSON de recuperación estable (camelCase +
+    estados lowercase) que H06 releerá. Juez ciego: APROBADA CON RESERVAS (2/2). **A endurecer en H05/H06**:
+    reescritura temp+rename+fsync-del-dir (hoy truncate+write → posible JSON torn ante crash) y recovery
+    tolerante a journal torn.
+  - ✅ **E13-H04** — Copias de recuperación: `Workspace::backup_originals(txn, affected)` copia
+    byte-a-byte (fs::copy) cada original existente a `.lodestar/runtime/recovery/<txn>/` y marca los
+    ausentes ("no existía") en un manifiesto `.absent`; solo LEE el canónico (invariante #1). `RecoveryDir`
+    con path/backup_path/was_absent. Juez ciego: APROBADA CON RESERVAS (2/2). (Assert del manifiesto `.absent`
+    → H06.)
+  - ✅ **E13-H05** — Aplicación atómica por lote: `Workspace::publish(change_set, journal)` aplica los
+    cambios al canónico SOLO por el único escritor (`io::write_atomic` temp+fsync+rename para creados/
+    modificados, `io::delete` para borrados; orden determinista por `RelPath`; invariante #5), marca el
+    journal por op y lo sella (`applied`), y devuelve la `WorkspaceRevision` resultante (== la prevista).
+    Endureció `write_journal` a escritura atómica (temp+rename+fsync-dir), cerrando la reserva de H03.
+    Juez ciego: APROBADA (3/3). **A resolver en H06/H08**: el journal debe crearse con el conjunto
+    completo de paths afectados que `publish` calcula (no solo las ops crudas), p. ej. para `Move`.
+  - ✅ **E13-H06 ⭐** — Crash-recovery determinista: `Workspace::recover()` escanea los journals no-`done`
+    y decide por el ESTADO DURABLE — `applied`→completar (canónico ya es el resultado, limpia), `prepared`/
+    `applying`→restaurar desde las copias de H04 (deshace renames parciales por `write_atomic`, borra los
+    creados vía `.absent`). Sin ventana de corrupción (`mark_all_applied` sella tras el último rename; la
+    restauración deriva el conjunto del árbol de recovery). NUNCA un `.md` parcial (property `recovery_sin_
+    parciales` sobre 7 FailPoints × 2 formas). Gate `guard_recovery` bloquea escrituras con
+    `WORKSPACE_RECOVERY_REQUIRED` (publish excluye su propio journal). Tolerante a JSON torn. Juez ciego
+    riguroso: APROBADA (4/4). **Contratos a honrar en E13-H08**: change_apply debe llamar `recover()`, hacer
+    `backup_originals` ANTES de `publish`, y crear el journal con el conjunto afectado completo.
+  - ✅ **E13-H07** — `ChangeReceipt` (creado en core::types, forma REFACTOR §6.5) + retención:
+    `write_receipt` persiste `.lodestar/runtime/receipts/<id>.json` (temp+fsync+rename); `gc_receipts`
+    ordena por mtime y purga los excedentes (>maximumReceipts) y caducados (retainReceiptsFor) más
+    antiguos, borrando también su `recovery/<id>/`. Vínculo receipt↔recovery por id saneado (contrato para
+    H08). Juez ciego: APROBADA CON RESERVAS (2/2).
+  - ✅ **E13-H08** — Tool `change_apply` (perfil standard): `App::change_apply` orquesta los 15 pasos —
+    load_plan (PLAN_EXPIRED) → verificar planHash recomputado (PLAN_STALE, sin escribir) →
+    `Workspace::apply_transaction` [lock → recover si pendiente → afectados reales → assert_writable
+    (PERMISSION_DENIED antes de tocar el canónico) → staging+validar → reverify → **backup → journal →
+    publish** → sellar] → receipt + gc. Honra los contratos de H06 (backup y journal antes de publish,
+    conjunto afectado completo, recover). PERMISSION_DENIED no se degrada (assert_writable directo).
+    Juez ciego riguroso: APROBADA (4/4). **Diferido**: gating por perfil (E14-H03); fsync del árbol de
+    recovery para power-loss (hardening E14).
+  - ✅ **E13-H09** — Tool `change_revert` (perfil standard): `App::change_revert` verifica el receipt
+    (ausente/purgado → `PLAN_EXPIRED`), la revisión actual == `result_revision` (si no → `WRITE_CONFLICT`,
+    sin tocar disco) y las copias de recuperación; luego `Workspace::revert_transaction` restaura desde
+    `recovery/<orig>/` como una transacción INVERSA recuperable (lock + backup del estado actual + journal
+    propios ANTES de restaurar por `write_atomic`/`delete`). El workspace vuelve a `previousRevision`.
+    Juez ciego: APROBADA (3/3).
+  - ✅ **E13-H10** — Auditoría `.lodestar/runtime/audit.jsonl`: `change_apply`/`change_revert` son
+    wrappers que auditan SIEMPRE antes de devolver (éxito → result:"success" + revisiones; fallo,
+    incluido un RevisionConflict que aborta antes de publicar → result = código wire). Best-effort
+    (no tumba la operación ni enmascara el error); append JSONL; runtime (invariante #1); SystemTime
+    solo en app (invariante #2). Juez ciego: APROBADA CON RESERVAS (2/2).
+  - ✅ **E13-H11** — Auto-regeneración de `index`/`tags` dentro de `change_apply` (decisión D6a): la
+    transacción de publicación fusiona EN MEMORIA (`transaction.rs::augment_with_regenerated`) lo que
+    producirían `lodestar index` (regenera los `index.md` de directorio ya existentes, excluyendo
+    `tags/`) y `lodestar tags` (`gen_tag_indexes`: escribe los vigentes y PURGA los obsoletos) sobre el
+    resultado del plan → `result_augmented`. El conjunto afectado se deriva contra el resultado
+    aumentado, de modo que staging+validar → **backup → journal → publish** cubren index/tags en el
+    MISMO lote/journal/receipt (único escritor, recuperable igual que un `Move`). Idempotente
+    (afectados por-diferencia). `materialize_staging`/`publish` conservan firma (núcleo extraído a
+    `*_result`). Sin tools MCP de generación (D6a). Tests `apply_regenera_index`/`apply_regenera_tags`
+    en `crates/lodestar-app/tests/regen.rs`. Juez ciego riguroso: APROBADA CON RESERVAS (2/2).
+    **Reservas menores registradas** (no bloqueantes): (1) `gen_tag_indexes` SIEMPRE materializa el
+    árbol `tags/` vigente (fiel a `lodestar tags`), asimétrico con index que solo regenera existentes
+    → en un bundle con tags pero árbol `tags/` sin generar, cualquier apply lo materializa; (2) sin
+    test de crash dedicado que mate la publicación DESPUÉS del `.md` del plan y ANTES del index/tags
+    regenerado (la recuperabilidad de ese path queda garantizada estructuralmente: está en
+    affected/journal/backup).
+- **E14 — COMPLETA (6/6)** (integración software + evaluación — `ARCHITECTURE.md §19.8`):
+  - ✅ **E14-H01** — `lodestar check` como puerta de CI con conformidad schema-driven: `check` (working
+    tree, sin flags git) juzga con el MISMO motor que `App::knowledge_check` scope `workspace` (OKF +
+    SCHEMA-* + REL-* + refs externas). La fusión OKF+schema/rel vive en UN solo sitio compartido
+    (`App::schema_diagnostics_by_path`), consumido por `knowledge_check` y por `App::full_analysis`
+    (invariante #3, una sola verdad computada; sin doble `analyze()`). La CLI es fachada fina que
+    consume `full_analysis` y deriva `conformant` con la misma regla del motor. Salida humana / `--json`
+    (campo `conformant` aditivo + `perFile` con los `SCHEMA-*`/`REL-*`) / SARIF (`ruleId` schema/rel)
+    surfacean los diagnósticos del motor completo, no solo el veredicto. Exit codes CONGELADOS
+    (`0`/`1`/`2`/`3`) intactos; `blocked` es superconjunto del anterior (nada que bloqueaba deja de
+    hacerlo). Sin cambios en `core::types` (invariante #4; `conformant` inyectado en la fachada). Tests
+    `check_falla_schema`/`check_conforme_json`/`check_caza_edicion_directa` + surfacing
+    `check_sarif_lista_schema`/`check_json_lista_schema` en `crates/lodestar-cli/tests/cli.rs`. Juez
+    ciego (2 pasadas): la 1ª APROBADA CON RESERVAS (salida no surfaceaba schema/rel) → cerrada con
+    micro-ciclo rojo→verde; la 2ª (historia completa, no-regresión MCP 41 tests verdes) **APROBADA
+    (6/6)**. Hallazgos menores heredados (no bloqueantes): (1) `check` abre el `App` completo → puede
+    materializar la cache `store` como efecto de un comando read-only (mismo camino que MCP, coherente
+    con invariante #5); (2) `conformant` juzga solo `concepts` mientras `gate_blocked` cuenta `Err` de
+    todos los ficheros (p. ej. `index.md`) → un error solo en `index.md` da `conformant:true` pero exit
+    1 vía gate — es exactamente la semántica de `knowledge_check` que la historia manda replicar.
+  - ✅ **E14-H02** — Convivencia con proyectos de software (config por proyecto + detección de escritura
+    externa): **historia de composición/regresión** — el comportamiento ya emerge de E9-H05
+    (`writableRoots`/`referenceRoots`/`ignored` en `WorkspaceConfig`) + E11-H04 (`assert_writable` →
+    `PERMISSION_DENIED`, paso 5 de `apply_transaction`, ANTES de tocar disco) + E13-H02/H08
+    (`reverify_base_revision` → `WRITE_CONFLICT`, paso 7, ANTES de publicar). Aporta la **cobertura de
+    integración e2e que faltaba** (ninguna prueba ejercitaba el orquestador `apply_transaction`
+    completo): `crates/lodestar-workspace/tests/convivencia.rs` con `solo_escribe_writable` (create bajo
+    `src/` → rechazo sin tocar disco; create bajo `knowledge/` → se aplica) y `detecta_escritura_externa`
+    (edición externa entre plan y apply cambia la revisión writable → `WRITE_CONFLICT`, el `.md` conserva
+    la edición externa). **CERO cambios de producción.** Juez ciego: **APROBADA (2/2)**, no-vacuidad
+    verificada (las aserciones dependen realmente del enforcement/reverify). Ítems del **alcance** sin
+    criterio testeable propio (no exigidos como aceptación, anotados): `ignored`
+    (`node_modules`/`target`/`.git`, ya cubierto por `ignored_conserva_obligatorios` en `workspace.rs`) y
+    "al reabrir/tras evento recalcular/invalidar revisiones y reindexar" (`REFACTOR §5.3`, ejercitado
+    indirectamente vía reverify que relee la revisión del disco).
+  - ✅ **E14-H03** — Instrucciones del servidor + perfiles para agentes (FRONTERA mcp.yml): perfiles
+    `readonly`/`standard` (`--profile`, default standard; el enum `Profile` ya venía de E10-H08). **Fuente
+    única** de "tools de cambio": `tools::CHANGE_TOOLS = [change_plan, change_apply, change_revert]` +
+    `is_change_tool`, de la que derivan TANTO el filtrado de `tools/list` (`available_tools(profile)`)
+    COMO el gating de invocación (`available(profile, name)`), gobernados por `Profile::writes_enabled()`
+    — sin lista duplicada que pueda divergir. Bajo `readonly`: las 3 tools de cambio se ocultan de
+    `tools/list` Y su invocación se rechaza con `-32602` ANTES del despacho (`main.rs`, antes de
+    `tools::call()`) — **cierra la reserva de gating por perfil de E13-H08**: ocultar de la lista no
+    basta, un cliente que las llame igualmente no planifica/aplica/revierte. `initialize` devuelve
+    `instructions` (`SERVER_INSTRUCTIONS`) con el flujo de 10 pasos EN ORDEN. `workspace_status.
+    capabilities` ya coherente con el perfil (E10-H08). Tests `perfil_readonly_sin_cambio`,
+    `instrucciones_flujo` (orden de la espina, no "string no vacío"), `perfil_readonly_rechaza_cambio`
+    (endurecido: invoca directamente las 3 de cambio bajo readonly con ids inexistentes → `-32602`;
+    contraste con standard → `isError` de aplicación, distingue "rechazo por perfil" de "fallo por
+    argumento") en `crates/lodestar-mcp/tests/mcp.rs`. `contracts/mcp.yml`: bloques `meta.perfiles` +
+    `meta.protocolo.instructions`. Sin cambios en `core::types` (invariante #4; `Profile` es runtime, no
+    wire → sin sync del espejo TS). Guardián de contrato: NO BLOQUEANTE (perfil de las 3 tools 1:1 con
+    `CHANGE_TOOLS`). Juez ciego (seguridad escrutada, sin bypass): **APROBADA (2/2)**.
+  - ✅ **E14-H04** — Benchmark funcional (`REFACTOR §17`) como suite e2e: `crates/lodestar-mcp/tests/
+    benchmark.rs` ejercita los **15 escenarios** de §17 contra la superficie real (binario `lodestar-mcp`
+    por stdio, JSON-RPC), un `#[test]` por fila (`bench_01`…`bench_15`) + el agregador
+    `benchmark_15_escenarios`, con aserciones no-vacuas del resultado esperado (búsqueda por significado,
+    create válido/rechazado, mover con 31 ops en un plan, borrar referenciado → `INBOUND_LINKS_EXIST`,
+    `REVISION_CONFLICT`, 5 conceptos en un changeSet, relación inválida → `RELATION_CONSTRAINT_VIOLATION`,
+    `apply_fix` sobre REL-TARGET, diff semántico, revert, crash+durabilidad, `PERMISSION_DENIED` fuera de
+    writable, ref de código inexistente → `exists:false`, edición manual inválida → `knowledge_check`).
+    Usa los códigos de error REALES del motor (documentados como divergencia consciente frente a los
+    idealizados de §17). El escenario de crash reutiliza `recovery_sin_parciales` (E13-H06) + durabilidad
+    e2e tras reabrir. **El benchmark destapó un hueco real de seguridad (invariante #3) que la fase verde
+    cerró**: `Workspace::validate_staging` medía solo `analyze().hard_fail` (OKF) y NO la conformidad
+    schema-driven → `change_apply` podía **publicar** un resultado con `SCHEMA-*`/`REL-*` err reportando
+    `conformant:true` (mientras `knowledge_check`/`lodestar check` lo dirían no-conforme). Arreglo: el gate
+    usa ahora `plan::validate_result(&bundle, &schema)` — la MISMA función del core que `change_plan` usa
+    para `canApply` (OKF `per_file` + `validate_schema` + `validate_relations`, cuenta solo `err`,
+    `conformant == errors==0`) — así el gate transaccional y `change_plan`/`knowledge_check` convergen por
+    construcción, no por lógica duplicada. Corre ANTES de backup/journal/publish (no toca el canónico).
+    Layering intacto (`lodestar-workspace`→`core`, NO `app`; schema cargado con `WorkspaceSchema::load`).
+    Sin regresión (E13-H11 regen, recovery con failpoints, 44 MCP verdes). Juez ciego (equivalencia del
+    gate escrutada): **APROBADA CON RESERVAS (3/3)**. **Reserva menor registrada** (preexistente, dirección
+    segura, sin trigger práctico): `plan::validate_result` aplana TODO `per_file` (incluye reservados
+    `index.md`/`log.md`) mientras `knowledge_check` itera solo `concepts` → el gate puede ser *más*
+    estricto que `knowledge_check` sobre `OKF-CONFLICT` de un reservado (nunca menos: dirección segura;
+    y el `index.md` de staging se regenera limpio, sin trigger real). El delta del arreglo (schema+rel)
+    apunta solo a paths de `concepts`, alineado con `knowledge_check`.
+  - ✅ **E14-H05** — Métricas de evaluación y presupuesto de escala: **historia de composición/regresión**
+    (cero producción) — arnés de medición sobre fixture sintética de ~10k conceptos generada en runtime
+    (tempdir, nada committeado). `crates/lodestar-app/tests/escala.rs`: `bench_search_payload_acotado`
+    (10k conceptos → `knowledge_search` acota el payload: `SearchResult` no tiene `body`, expone `snippet`
+    de 160 chars; aserción no-vacua con un centinela al final de cada cuerpo, fuera de la ventana del
+    snippet, que NO debe viajar en la respuesta serializada; + cota de payload como proxy de tokens;
+    latencia registrada, sin umbral duro — ~8s en debug para 10k, O(n)) y `bench_concurrencia_segura`
+    (dos `change_apply` concurrentes → exactamente UNO gana; el perdedor recibe `WRITE_CONFLICT`
+    —observado— o `PLAN_STALE`, ambos rechazan limpio ANTES de publicar; determinista no-flaky por el lock
+    exclusivo `O_CREAT|O_EXCL` de E13-H02 que serializa `apply_transaction` + reverify optimista bajo el
+    lock; asevera integridad: un solo `.md`, revisión coherente). Juez ciego: **APROBADA (2/2)**,
+    no-vacuidad y determinismo confirmados. Las mediciones adicionales del alcance
+    (`graph_query`/`impact_analyze`/`change_plan`/tiempo de crash-recovery) no tienen criterio testeable
+    propio (umbrales orientativos, gate opcional que no bloquea v2); registrables por `eprintln!` si se
+    desea.
+  - ✅ **E14-H06** — Retirada de la superficie heredada (10 tools heredadas → 10 objetivo): el "único
+    rewrite" que anticipaba `mcp.yml §15`, ahora que todos los reemplazos existen y el benchmark (E14-H04)
+    demostró que las nuevas cubren los 15 escenarios. `crates/lodestar-mcp/src/tools.rs` retira de `list()`
+    y del `match` de `call()` las 10 heredadas (`query`, `conformance_check`, `find_backlinks`,
+    `find_orphans`, `find_dangling`, `neighborhood`, `create_concept`, `update_frontmatter`,
+    `generate_index`, `generate_tag_indexes`) + helpers muertos (`rel`/`write_outcome_json`/`parse_patch`/
+    `json_to_yaml`) e imports huérfanos. Superficie resultante: EXACTAMENTE las **10 objetivo**
+    (`workspace_status`, `knowledge_search`, `knowledge_get`, `schema_inspect`, `graph_query`,
+    `impact_analyze`, `knowledge_check`, `change_plan`, `change_apply`, `change_revert`). Invocar una
+    heredada → `-32602` (nombre de tool desconocido = parámetro inválido; `tools/call` sigue siendo método
+    válido; convención coherente con la retirada de git en E9). `contracts/mcp.yml` reescrito: `tools:`
+    lista solo las 10; las heredadas movidas a `§15` como RETIRADA en E14-H06 con su reemplazo semántico;
+    recuentos narrativos → 10. **RETIRA EXPOSICIÓN, NO CAPACIDAD**: la mecánica de dominio sigue viva
+    (dormida, como el vcs) en `lodestar-workspace` (`backlinks`/`neighborhood`/`query`/`create_concept`/
+    `merge_frontmatter`/`generate_index`/`generate_tags`); la CLI mantiene `index`/`tags`/`check`; cero
+    cambios en `core`/`store`/`workspace`/CLI/UI. Sin cambios en `core::types` (invariante #4). Tests
+    `tools_list_solo_objetivo` (conjunto exacto de 10) + `tool_heredada_retirada` (las 10 → `-32602` sin
+    ejecutar) en `crates/lodestar-mcp/tests/mcp.rs`; el autor migró/retiró los tests del contrato viejo a
+    sus equivalentes de las tools objetivo (cerrando el hueco de `dangling` con `graph_dangling`). Guardián
+    de contrato: **LIMPIO** (1:1 `list()`↔`call()`↔`mcp.yml`). Juez ciego: **APROBADA (2/2)**, capacidad
+    conservada verificada.
+  - **Cierre de E14 y del giro headless**: el motor queda medido, conviviendo con código sin poseer git ni
+    el editor, y con la superficie MCP convergida a las **10 tools objetivo** de `§19.6`. E9–E14 completas.
+  - **Pendiente al cierre de E14**: limpieza final de superficie `mcp.yml` → 10 tools objetivo (retirar
+    `query`/`conformance_check`/`find_*`/`neighborhood`/`create_concept`/`update_frontmatter`/
+    `generate_*`), descopada aquí desde E12/E13.
