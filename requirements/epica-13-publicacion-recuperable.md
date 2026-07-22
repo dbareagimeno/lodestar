@@ -241,7 +241,8 @@ maten el proceso a mitad y verifiquen la recuperación. La sonda es solo de test
   - **Dado** un cambio de tags, **Cuando** se aplica, **Entonces** los índices de tags obsoletos se purgan
     en la misma transacción → `apply_regenera_tags`.
 - **Dependencias**: E13-H08.
-- **Pruebas**: `crates/lodestar-workspace/tests/`: `apply_regenera_index`, `apply_regenera_tags`.
+- **Pruebas**: `crates/lodestar-app/tests/regen.rs`: `apply_regenera_index`, `apply_regenera_tags`
+  (ejercitan el camino completo `App::change_apply` → `workspace::apply_transaction`).
 - **Frontera (mcp.yml)**: no.
 
 ---

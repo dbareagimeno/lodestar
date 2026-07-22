@@ -15,7 +15,7 @@
 use std::collections::BTreeSet;
 
 use lodestar_core::plan;
-use lodestar_core::types::{ChangeSet, RelPath, WorkspaceRevision};
+use lodestar_core::types::{ChangeSet, FileMap, RelPath, WorkspaceRevision};
 
 use crate::error::WorkspaceError;
 use crate::journal::Journal;
@@ -52,6 +52,36 @@ impl Workspace {
         change_set: &ChangeSet,
         journal: &mut Journal,
     ) -> Result<WorkspaceRevision, WorkspaceError> {
+        // Estado de partida y resultado previsto por el plan (misma lógica que el staging).
+        let canonical = io::load_bundle(&self.root)?;
+        let result = plan::apply_normalized_ops(&canonical, &change_set.operations)?;
+        self.publish_result(&result, journal)
+    }
+
+    /// Publica un `FileMap` resultado **ya computado** sobre el canónico por el **único escritor**
+    /// (E13-H11). Es el núcleo de [`Workspace::publish`] extraído para que la transacción (E13-H08)
+    /// pueda publicar el resultado del plan **aumentado** con la auto-regeneración de `index`/`tags`
+    /// (D6a) —el mismo `FileMap` que se materializó y validó en staging— en lugar de recomputarlo
+    /// desde las ops. Así los `index.md`/`tags/*` regenerados/purgados se sustituyen en el MISMO lote
+    /// y bajo el MISMO journal que el `.md` del plan.
+    ///
+    /// Determina el conjunto de cambios contra el canónico: paths **creados/modificados** (el
+    /// resultado deja un contenido que difiere del canónico) y **borrados** (el canónico los tenía y
+    /// el resultado ya no). En **orden determinista por [`RelPath`]** aplica cada cambio con
+    /// `io::write_atomic` (temp+fsync+rename) o `io::delete`, marcando el journal tras cada
+    /// sustitución; al terminar transiciona el journal a `applied`. Devuelve la
+    /// `resultWorkspaceRevision` recalculada del canónico ya publicado.
+    ///
+    /// # Errores
+    /// - [`WorkspaceError::WorkspaceRecoveryRequired`] si existe un journal no-`done` de OTRA
+    ///   transacción sin recuperar (no se publica sobre un estado a medio recuperar).
+    /// - [`WorkspaceError::Io`] si falla la lectura del canónico, alguna escritura/borrado atómico o
+    ///   la re-persistencia del journal.
+    pub(crate) fn publish_result(
+        &self,
+        result: &FileMap,
+        journal: &mut Journal,
+    ) -> Result<WorkspaceRevision, WorkspaceError> {
         // Gate de recuperación (E13-H06): si existe un journal no-`done` de OTRA transacción
         // (una publicación anterior interrumpida que aún no se ha recuperado), no se publica sobre
         // un estado a medio recuperar. Se excluye el journal de ESTA transacción —recién creado en
@@ -66,9 +96,7 @@ impl Workspace {
             ));
         }
 
-        // Estado de partida y resultado previsto por el plan (misma lógica que el staging).
         let canonical = io::load_bundle(&self.root)?;
-        let result = plan::apply_normalized_ops(&canonical, &change_set.operations)?;
 
         // Conjunto de paths afectados, en orden determinista por `RelPath` (BTreeSet).
         //
@@ -79,7 +107,7 @@ impl Workspace {
         // Un `rel` cuyo contenido no cambia no se toca (no es una sustitución): no hay rename inútil
         // ni echo espurio para el watcher.
         let mut affected: BTreeSet<&RelPath> = BTreeSet::new();
-        for (rel, content) in &result {
+        for (rel, content) in result {
             if canonical.get(rel) != Some(content) {
                 affected.insert(rel);
             }

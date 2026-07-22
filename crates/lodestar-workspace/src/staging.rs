@@ -101,13 +101,31 @@ impl Workspace {
     ) -> Result<StagingDir, WorkspaceError> {
         let canonical = io::load_bundle(&self.root)?;
         let result = plan::apply_normalized_ops(&canonical, &change_set.operations)?;
+        self.materialize_staging_result(&change_set.id, &result)
+    }
 
+    /// Materializa en staging un `FileMap` resultado **ya computado**, bajo
+    /// `.lodestar/runtime/staging/<changeSetId saneado>/` (E13-H11). Es el núcleo de
+    /// [`Workspace::materialize_staging`] extraído para que la transacción (E13-H08) pueda
+    /// materializar el resultado del plan **aumentado** con la auto-regeneración de `index`/`tags`
+    /// (D6a) en lugar de recomputarlo desde las ops — así el árbol de staging (y por tanto lo que se
+    /// valida y se publica) refleja exactamente el lote aumentado. Nunca toca los `.md` canónicos.
+    ///
+    /// Si ya existía un staging con el mismo id (reintento), se limpia antes de reescribir.
+    ///
+    /// # Errores
+    /// - [`WorkspaceError::Io`] si falla la creación de directorios o la escritura del staging.
+    pub(crate) fn materialize_staging_result(
+        &self,
+        id: &ChangeSetId,
+        result: &FileMap,
+    ) -> Result<StagingDir, WorkspaceError> {
         let dir = self
             .root
             .join(".lodestar")
             .join("runtime")
             .join("staging")
-            .join(staging_dir_name(&change_set.id));
+            .join(staging_dir_name(id));
 
         // Reintento idempotente: parte de un directorio limpio.
         if dir.exists() {
@@ -115,7 +133,7 @@ impl Workspace {
         }
         std::fs::create_dir_all(&dir)?;
 
-        for (rel, content) in &result {
+        for (rel, content) in result {
             let target = dir.join(rel.as_str());
             if let Some(parent) = target.parent() {
                 std::fs::create_dir_all(parent)?;

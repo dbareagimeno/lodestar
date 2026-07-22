@@ -12,9 +12,11 @@
 //! 2. `recover()` si hay una recuperación pendiente — nunca se publica sobre un estado a medio
 //!    recuperar (E13-H06).
 //! 3. `previous = workspace_revision()` — la revisión sobre la que se publica (`previousRevision`).
-//! 4. Conjunto **afectado real** = paths creados/modificados/borrados por `apply_normalized_ops` vs
-//!    el canónico (no solo las ops crudas; contrato de E13-H06: journal y backup cubren ESE
-//!    conjunto, para que un `Move` no rompa la recuperación).
+//! 4. **Resultado aumentado** = resultado de `apply_normalized_ops` + auto-regeneración de
+//!    `index`/`tags` (`augment_with_regenerated`, E13-H11/D6a) → conjunto **afectado real** = paths
+//!    creados/modificados/borrados por ESE resultado aumentado vs el canónico (no solo las ops
+//!    crudas; contrato de E13-H06: journal y backup cubren ESE conjunto, para que un `Move` o una
+//!    regeneración no rompan la recuperación).
 //! 5. `assert_writable(path)` para **cada** afectado — si alguno cae fuera de `writableRoots` (o bajo
 //!    `referenceRoots`), `Err(PermissionDenied)` ANTES de tocar el canónico (E11-H04).
 //! 6. `materialize_staging` + `validate_staging` — resultado hipotético validado sin tocar el
@@ -30,7 +32,8 @@
 use std::collections::BTreeSet;
 
 use lodestar_core::plan;
-use lodestar_core::types::{ChangeSet, ChangeSetId, FileMap, RelPath, WorkspaceRevision};
+use lodestar_core::types::{ChangeSet, ChangeSetId, FileMap, Mutation, RelPath, WorkspaceRevision};
+use lodestar_core::Bundle;
 
 use crate::config::WorkspaceConfig;
 use crate::{io, Workspace, WorkspaceError};
@@ -65,6 +68,58 @@ fn affected_paths(canonical: &FileMap, result: &FileMap) -> Vec<RelPath> {
         }
     }
     set.into_iter().collect()
+}
+
+/// Aplica una [`Mutation`] (plan de un generador) sobre un [`FileMap`] en memoria: inserta cada
+/// `write` y elimina cada `delete`. No toca disco — es la fusión pura de la regeneración dentro del
+/// resultado hipotético de la transacción.
+fn apply_mutation(files: &mut FileMap, mutation: &Mutation) {
+    for (path, content) in &mutation.writes {
+        files.insert(path.clone(), content.clone());
+    }
+    for path in &mutation.deletes {
+        files.remove(path);
+    }
+}
+
+/// **Auto-regeneración de los generados dentro de la transacción** (E13-H11, decisión **D6a**,
+/// `ARCHITECTURE.md §19.6`): toma el resultado hipotético del plan (`result`) y le fusiona lo que
+/// producirían `lodestar index` y `lodestar tags`, de modo que los `index.md` de directorio y el
+/// árbol de índices de `tags/` queden coherentes con la estructura nueva **en el mismo lote**.
+///
+/// - **`index.md` de directorio**: se regeneran los que YA existían en el resultado (misma política
+///   que la CLI, que regenera índices existentes; no se inventan índices de directorios nuevos). Se
+///   **excluye** el árbol `tags/`, cuyos `index.md` son propiedad de [`Bundle::gen_tag_indexes`], no
+///   índices de directorio.
+/// - **Índices de tags**: [`Bundle::gen_tag_indexes`] escribe los vigentes y **purga** (borra) los
+///   obsoletos (un tag que se quedó sin conceptos) — reproduciendo `lodestar tags`.
+///
+/// La regeneración se ejecuta **siempre** por simplicidad, y es **idempotente**: si el change set no
+/// altera conceptos/tags, los generadores producen el mismo contenido que ya hay → sin diferencia
+/// contra el canónico → sin paths extra en el lote (el conjunto afectado se computa por diferencia,
+/// [`affected_paths`], que descarta los no-cambios). El [`Bundle`] se construye una sola vez desde
+/// `result`: `index.md`/`tags/*` son reservados y no influyen en el análisis de conceptos que
+/// alimenta a los generadores, así que ver el resultado del plan (con los generados aún stale)
+/// basta para reproducir su salida canónica.
+fn augment_with_regenerated(result: &FileMap) -> FileMap {
+    let bundle = Bundle::from_files(result.clone());
+    let mut augmented = result.clone();
+
+    // (a) `index.md` de directorio existentes, excluyendo el árbol de índices de tags.
+    let dirs: BTreeSet<String> = result
+        .keys()
+        .filter(|p| p.basename() == "index.md")
+        .map(|p| p.dir())
+        .filter(|dir| dir != "tags/" && !dir.starts_with("tags/"))
+        .collect();
+    for dir in &dirs {
+        apply_mutation(&mut augmented, &bundle.gen_index(dir));
+    }
+
+    // (b) Índices de tags: escribe los vigentes y purga los obsoletos.
+    apply_mutation(&mut augmented, &bundle.gen_tag_indexes());
+
+    augmented
 }
 
 impl Workspace {
@@ -112,11 +167,17 @@ impl Workspace {
         // (3) Revisión base actual: será la `previousRevision` del receipt.
         let previous = self.workspace_revision()?;
 
-        // (4) Conjunto AFECTADO real (creados/modificados/borrados por el plan vs canónico). El
-        //     journal y las copias deben cubrir ESTE conjunto, no las ops crudas (contrato H06).
+        // (4) Resultado del plan y su AUMENTO con la auto-regeneración de index/tags (E13-H11, D6a):
+        //     el objetivo real de la transacción es `result_augmented` = resultado del plan + lo que
+        //     producirían `lodestar index`/`tags` sobre él, para que los generados queden coherentes
+        //     EN EL MISMO LOTE (mismo staging/journal/backup/publish/receipt). El conjunto AFECTADO
+        //     se computa contra `result_augmented`, no contra las ops crudas: así el journal y las
+        //     copias cubren tanto el `.md` del plan como los `index.md`/`tags/*` regenerados/purgados
+        //     (contrato H06: un `Move` o una regeneración no rompen la recuperación).
         let canonical = io::load_bundle(&self.root)?;
         let result_files = plan::apply_normalized_ops(&canonical, &change_set.operations)?;
-        let affected = affected_paths(&canonical, &result_files);
+        let result_augmented = augment_with_regenerated(&result_files);
+        let affected = affected_paths(&canonical, &result_augmented);
 
         // (5) Guard del único escritor (E11-H04): si algún path afectado no es escribible, se rechaza
         //     ANTES de tocar el canónico (ni staging del canónico, ni backup, ni rename).
@@ -124,8 +185,11 @@ impl Workspace {
             self.assert_writable(path)?;
         }
 
-        // (6) Staging: materializa y valida el resultado hipotético sin tocar el canónico (E13-H01).
-        let staging = self.materialize_staging(change_set)?;
+        // (6) Staging: materializa y valida el resultado hipotético AUMENTADO sin tocar el canónico
+        //     (E13-H01). Se materializa `result_augmented` (no las ops crudas) para que la validación
+        //     de conformidad cubra también los generados regenerados y para que el lote publicado
+        //     coincida exactamente con lo materializado.
+        let staging = self.materialize_staging_result(&change_set.id, &result_augmented)?;
         let staging_path = staging.path().to_path_buf();
         self.validate_staging(&staging)?;
 
@@ -138,7 +202,7 @@ impl Workspace {
             .unwrap_or_default()
             .workspace
             .writable_roots;
-        let result_rev = lodestar_core::types::workspace_revision(&result_files, &writable);
+        let result_rev = lodestar_core::types::workspace_revision(&result_augmented, &writable);
 
         // (8) Copias de recuperación de los originales afectados, ANTES de publicar (E13-H04). Se
         //     conservan al sellar (para el receipt y el revert de H09).
@@ -147,8 +211,10 @@ impl Workspace {
         // (9) Write-ahead journal `prepared`, fsynced antes del primer rename (E13-H03).
         let mut journal = self.create_journal(&txn_id, &affected, &previous, &result_rev)?;
 
-        // (10) Publica por el único escritor (renames atómicos + journal `applied`, E13-H05).
-        let result = self.publish(change_set, &mut journal)?;
+        // (10) Publica el resultado AUMENTADO por el único escritor (renames atómicos + journal
+        //      `applied`, E13-H05): el mismo `result_augmented` que se materializó y validó en
+        //      staging, de modo que index/tags se publican en el MISMO lote que el `.md` del plan.
+        let result = self.publish_result(&result_augmented, &mut journal)?;
 
         // (11) Sella la transacción: limpia el staging y el journal (levanta el gate de recuperación)
         //      pero CONSERVA las copias de recuperación (el receipt y `change_revert` las usan). El

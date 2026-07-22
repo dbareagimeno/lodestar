@@ -335,7 +335,7 @@ superficie de producto; git queda como crate dormido) y `DECISIONES.md §0`. Des
   - **E12 — COMPLETA** (9/9). Criterio de salida cumplido: un agente puede proponer refactors complejos
     sin modificar archivos (change_plan normaliza/simula/valida en memoria, con diff semántico, riesgo,
     validación, concurrencia optimista y plan persistido/recuperable).
-- **E13 — EN CURSO** (publicación recuperable):
+- **E13 — COMPLETA (11/11)** (publicación recuperable):
   - ✅ **E13-H01** — Staging: `Workspace::materialize_staging(&ChangeSet)` computa el resultado con
     `apply_normalized_ops` y lo escribe en `.lodestar/runtime/staging/<id saneado>/` SIN tocar el
     canónico (invariante #1; runtime desechable); `validate_staging` construye el Bundle del resultado,
@@ -396,5 +396,20 @@ superficie de producto; git queda como crate dormido) y `DECISIONES.md §0`. Des
     incluido un RevisionConflict que aborta antes de publicar → result = código wire). Best-effort
     (no tumba la operación ni enmascara el error); append JSONL; runtime (invariante #1); SystemTime
     solo en app (invariante #2). Juez ciego: APROBADA CON RESERVAS (2/2).
-  - ⏳ E13-H11 (auto-regen index/tags en change_apply) pendiente.
+  - ✅ **E13-H11** — Auto-regeneración de `index`/`tags` dentro de `change_apply` (decisión D6a): la
+    transacción de publicación fusiona EN MEMORIA (`transaction.rs::augment_with_regenerated`) lo que
+    producirían `lodestar index` (regenera los `index.md` de directorio ya existentes, excluyendo
+    `tags/`) y `lodestar tags` (`gen_tag_indexes`: escribe los vigentes y PURGA los obsoletos) sobre el
+    resultado del plan → `result_augmented`. El conjunto afectado se deriva contra el resultado
+    aumentado, de modo que staging+validar → **backup → journal → publish** cubren index/tags en el
+    MISMO lote/journal/receipt (único escritor, recuperable igual que un `Move`). Idempotente
+    (afectados por-diferencia). `materialize_staging`/`publish` conservan firma (núcleo extraído a
+    `*_result`). Sin tools MCP de generación (D6a). Tests `apply_regenera_index`/`apply_regenera_tags`
+    en `crates/lodestar-app/tests/regen.rs`. Juez ciego riguroso: APROBADA CON RESERVAS (2/2).
+    **Reservas menores registradas** (no bloqueantes): (1) `gen_tag_indexes` SIEMPRE materializa el
+    árbol `tags/` vigente (fiel a `lodestar tags`), asimétrico con index que solo regenera existentes
+    → en un bundle con tags pero árbol `tags/` sin generar, cualquier apply lo materializa; (2) sin
+    test de crash dedicado que mate la publicación DESPUÉS del `.md` del plan y ANTES del index/tags
+    regenerado (la recuperabilidad de ese path queda garantizada estructuralmente: está en
+    affected/journal/backup).
 - **E14: pendiente** (integración software + evaluación — `ARCHITECTURE.md §19.8`).
