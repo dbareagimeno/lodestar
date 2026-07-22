@@ -168,5 +168,9 @@ superficie de producto; git queda como crate dormido) y `DECISIONES.md §0`. Des
 - **E9 — Reducción de alcance** (Fase 0):
   - ✅ **E9-H01** — Retirar las tools git del MCP (`history`/`last_conforming_commit`/`commit`);
     MCP pasa de 13 a 10 tools. `contracts/mcp.yml` recortado. Juez ciego: APROBADA (3/3).
-  - ⏳ E9-H02..H07 pendientes.
+  - ✅ **E9-H02** — Retirar los subcomandos git de la CLI (`log`/`last-conforming`/`branch`/
+    `switch`/`merge`/`pull`/`push`/`hooks`) y los flags `--staged`/`--rev`/`--range` de `check`
+    (D-check). `check` sin flags juzga el working tree; `reindex` conservado (movido a
+    `commands.rs`). `git.rs` eliminado. Juez ciego: APROBADA (4/4).
+  - ⏳ E9-H03..H07 pendientes.
 - E10–E14: pendientes.

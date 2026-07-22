@@ -140,41 +140,9 @@ fn init_scaffold() {
     assert!(target.join(".gitignore").is_file());
 }
 
-#[test]
-fn check_staged_sin_git_exit_3() {
-    // Sin repo git, `--staged` no tiene árbol staged → error de runtime (exit 3).
-    let dir = temp_dir("staged-nogit");
-    write(
-        &dir,
-        "index.md",
-        "---\nokf_version: \"0.1\"\n---\n\n# Bundle\n",
-    );
-    let status = bin()
-        .arg("--path")
-        .arg(&dir)
-        .args(["check", "--staged"])
-        .status()
-        .unwrap();
-    assert_eq!(status.code(), Some(3));
-}
-
-#[test]
-fn check_rev_head_tras_init() {
-    // `init` crea git + commit inicial; `check --rev HEAD` juzga ese árbol (index.md conforme → 0).
-    let dir = temp_dir("checkrev");
-    let target = dir.join("b");
-    assert_eq!(
-        bin().arg("init").arg(&target).status().unwrap().code(),
-        Some(0)
-    );
-    let status = bin()
-        .arg("--path")
-        .arg(&target)
-        .args(["check", "--rev", "HEAD"])
-        .status()
-        .unwrap();
-    assert_eq!(status.code(), Some(0));
-}
+// `check_staged_sin_git_exit_3` y `check_rev_head_tras_init` se retiran en E9-H02: probaban
+// `check --staged`/`--rev`, retirados de la superficie de la CLI (el crate `vcs` queda dormido).
+// El contrato nuevo lo cubren `check_rev_es_uso` y `check_working_tree_conforme` más abajo.
 
 #[test]
 fn import_desde_zip_del_prototipo() {
@@ -207,6 +175,79 @@ fn import_desde_zip_del_prototipo() {
         .unwrap();
     assert_eq!(status.code(), Some(0));
     assert!(dest.join("a.md").is_file());
+}
+
+// --- E9-H02: retirar los subcomandos git de la CLI (conservando `check`) ---
+
+/// E9-H02 `help_sin_subcomandos_git`: **Dado** `lodestar --help`, **Entonces** NO aparecen los 8
+/// subcomandos git. Retiramos exposición, no capacidad (el crate `vcs` queda dormido).
+#[test]
+fn help_sin_subcomandos_git() {
+    let out = bin().arg("--help").output().unwrap();
+    // `--help` sale con 0 y escribe el listado de comandos en stdout.
+    assert_eq!(out.status.code(), Some(0), "`--help` sale 0");
+    let help = String::from_utf8(out.stdout).unwrap();
+    for sub in [
+        "log",
+        "last-conforming",
+        "branch",
+        "switch",
+        "merge",
+        "pull",
+        "push",
+        "hooks",
+    ] {
+        assert!(
+            !help.contains(sub),
+            "el subcomando git `{sub}` no debe aparecer en `--help`, pero sigue:\n{help}"
+        );
+    }
+}
+
+/// E9-H02 `check_rev_es_uso`: **Dado** `lodestar check --rev HEAD`, **Entonces** exit `2` (uso:
+/// flag retirado con el crate `vcs` dormido — D-check). No juzga ningún árbol git.
+#[test]
+fn check_rev_es_uso() {
+    let dir = temp_dir("check-rev-uso");
+    write(
+        &dir,
+        "index.md",
+        "---\nokf_version: \"0.1\"\n---\n\n# Bundle\n",
+    );
+    let status = bin()
+        .arg("--path")
+        .arg(&dir)
+        .args(["check", "--rev", "HEAD"])
+        .status()
+        .unwrap();
+    assert_eq!(
+        status.code(),
+        Some(2),
+        "`--rev` retirado → error de uso (exit 2), no juzgar el rev"
+    );
+}
+
+/// E9-H02 `check_working_tree_conforme`: **Dado** `lodestar check` sobre un bundle conforme,
+/// **Entonces** exit `0`. La puerta de CI sobre el working tree sigue viva (no-regresión).
+#[test]
+fn check_working_tree_conforme() {
+    let dir = temp_dir("check-wt-conforme");
+    write(
+        &dir,
+        "index.md",
+        "---\nokf_version: \"0.1\"\n---\n\n# Bundle\n",
+    );
+    write(
+        &dir,
+        "a.md",
+        "---\ntype: Nota\ntitle: A\ndescription: d\n---\n\n# H\n\ncuerpo\n",
+    );
+    let status = bin().arg("--path").arg(&dir).arg("check").status().unwrap();
+    assert_eq!(
+        status.code(),
+        Some(0),
+        "la puerta sobre el working tree vive"
+    );
 }
 
 #[test]

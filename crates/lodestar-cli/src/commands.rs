@@ -212,3 +212,17 @@ fn import_dir(root: &Path, dir: &Path) -> anyhow::Result<usize> {
     }
     Ok(count)
 }
+
+/// `lodestar reindex`: reconstruye la cache `.lodestar/index.db` desde disco. No es un subcomando
+/// git (`§13`): la cache es una vista derivada del bundle, independiente de si hay repo git o no.
+pub fn reindex(root: &Path) -> anyhow::Result<ExitCode> {
+    let mut ws =
+        lodestar_workspace::Workspace::open(root).map_err(|e| anyhow::anyhow!(e.to_string()))?;
+    ws.enable_cache()
+        .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+    println!(
+        "cache reconstruida en {}",
+        root.join(".lodestar/index.db").display()
+    );
+    Ok(ExitCode::SUCCESS)
+}
