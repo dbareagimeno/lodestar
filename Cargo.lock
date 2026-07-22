@@ -2077,6 +2077,7 @@ dependencies = [
  "lodestar-workspace",
  "serde",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]

@@ -809,3 +809,58 @@ fn revision_sensible_al_contenido() {
         workspace_revision(&un_byte, &writable),
     );
 }
+
+// ---------------------------------------------------------------------------
+// E10-H05 — `core::schema`: tipo `Schema` + wire YAML camelCase.
+//
+// Fase ROJA (ARCHITECTURE.md §19.2, REFACTOR §4/§9.4): el módulo PURO `core::schema`
+// todavía NO existe. Este test fija el contrato de deserialización EN MEMORIA (el core
+// nunca abre ficheros: recibe el `Schema` ya deserializado desde un string):
+//   Schema { version: String, types: BTreeMap<String, DocType> }
+//   DocType { name, description, required_fields, allowed_statuses, fields,
+//             relations: BTreeMap<String, RelationDef>, rules, body_template }
+// El wire YAML usa claves camelCase (`requiredFields`/`allowedStatuses`/`bodyTemplate`/
+// `targetTypes`) mapeadas a los campos snake_case (mismo patrón que `WorkspaceConfig`).
+// ---------------------------------------------------------------------------
+
+/// Criterio `carga_doctype`: un `Schema` con un `DocType` `decision`
+/// (`requiredFields`/`allowedStatuses`) deserializado desde YAML en memoria →
+/// `schema.types["decision"].required_fields == ["title","status","rationale"]`.
+#[test]
+fn carga_doctype() {
+    use lodestar_core::schema::Schema;
+
+    // YAML EN MEMORIA (no hay I/O: el core solo deserializa). Claves camelCase del wire.
+    let yaml = "\
+version: \"1\"
+types:
+  decision:
+    name: decision
+    description: Una decisión de arquitectura
+    requiredFields: [title, status, rationale]
+    allowedStatuses: [proposed, accepted, rejected, superseded]
+";
+
+    let schema: Schema =
+        serde_yaml::from_str(yaml).expect("un Schema válido debe deserializar desde YAML");
+
+    let decision = schema
+        .types
+        .get("decision")
+        .expect("el DocType `decision` debe existir en `schema.types`");
+
+    assert_eq!(
+        decision.required_fields,
+        vec![
+            "title".to_string(),
+            "status".to_string(),
+            "rationale".to_string()
+        ],
+        "requiredFields del wire camelCase debe mapear a `required_fields` preservando el orden"
+    );
+    assert!(
+        decision.allowed_statuses.iter().any(|s| s == "proposed"),
+        "allowedStatuses debe mapear a `allowed_statuses`; eran: {:?}",
+        decision.allowed_statuses
+    );
+}

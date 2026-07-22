@@ -26,10 +26,12 @@ mod error;
 mod gitignore;
 mod io;
 mod runtime;
+pub mod schema;
 mod snapshot;
 
 pub use config::{Config, WorkspaceConfig};
 pub use error::WorkspaceError;
+pub use schema::WorkspaceSchema;
 pub use snapshot::BundleSnapshot;
 
 /// Handle unificado de un bundle abierto.
