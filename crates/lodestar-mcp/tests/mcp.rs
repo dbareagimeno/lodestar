@@ -2524,3 +2524,387 @@ fn plan_no_escribe() {
         "una op `create` en change_plan NO debe crear el .md en disco: {resp:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// E13-H08 — Tool `change_apply` (orquestación del proceso de 15 pasos, `REFACTOR §11.2/§17`).
+//
+// UBICACIÓN: los 4 criterios se ejercitan **e2e por la tool MCP** (campo Pruebas de la historia:
+// `crates/lodestar-mcp/tests/`), coherente con E12-H08 (`change_plan`). `change_apply` es la
+// integración de toda E13 (staging/journal/copias/publicación/receipt), pero lo que hay que fijar
+// AQUÍ es su contrato de **wire**: qué `arguments` toma, qué `structuredContent` devuelve al aplicar,
+// y cómo afloran `PLAN_STALE`/`PLAN_EXPIRED`/`PERMISSION_DENIED`. La mecánica interna la testean las
+// historias de `lodestar-workspace` (E13-H01…H07).
+//
+// FASE ROJA: la tool `change_apply` NO está en `tools::list()` todavía, así que
+// `tools/call {name:"change_apply"}` devuelve el error de protocolo `-32602` (tool desconocida, vía
+// `tools::exists`) y `result` es `null`. Por eso los asserts que leen `result.structuredContent.*` o
+// `result.isError` fallan por AUSENCIA de la tool/servicio (`App::change_apply`), no por un valor
+// erróneo. Ese es el rojo correcto. (El paso previo `change_plan` SÍ existe desde E12-H08, así que el
+// flujo `change_plan → change_apply` deja el rojo en la segunda llamada, no en la primera.)
+//
+// WIRE DE ENTRADA asumido (el implementador puede refinar los tipos internos, no el wire):
+//   arguments: {
+//     changeSetId: "changeset:<hash>",           // el id que devolvió change_plan (E12-H08)
+//     expectedWorkspaceRevision?: "blake3:…"      // control optimista a nivel de workspace; si se
+//   }                                             // omite, se adopta la revisión actual del workspace
+//
+// WIRE DE SALIDA asumido (`structuredContent`, `REFACTOR §11.2`, `ARCHITECTURE.md §19.5/§19.6`):
+//   {
+//     receiptId, applied,                         // applied:true al publicar; receiptId del recibo (H07)
+//     previousWorkspaceRevision, workspaceRevision,   // «blake3:…» antes/después de la transacción
+//     changedPaths, semanticDiff,
+//     conformance: { conformant, errors, warnings }
+//   }
+//   El `workspaceRevision` devuelto es la revisión resultante: tras un apply OK el workspace «queda
+//   en» ella (comprobado contra `workspace_status`). Los errores de EJECUCIÓN (`PLAN_STALE`,
+//   `PLAN_EXPIRED`, `PERMISSION_DENIED`) afloran como `result.isError == true` con el código estable
+//   wire visible (ErrorCode `as_str()`, E10-H02 / invariante #4 / `REFACTOR §13`), NUNCA como error
+//   JSON-RPC de transporte — mismo patrón que `CONCEPT_NOT_FOUND`/`REVISION_CONFLICT`.
+//
+// FIRMA DE SERVICIO ASUMIDA (el implementador la crea con su propia elección de tipos internos):
+//   App::change_apply(change_set_id: &ChangeSetId, expected_workspace_revision: Option<WorkspaceRevision>)
+//       -> Result<ApplyResult, ErrorCode>
+//   que carga el plan persistido (E12-H09), verifica caducidad (`PLAN_EXPIRED`) y `planHash`
+//   (`PLAN_STALE`), y publica por el ÚNICO ESCRITOR con assert_writable (E11-H04 → `PERMISSION_DENIED`
+//   fuera de `writableRoots`).
+//
+// FLUJO change_plan → change_apply: `change_plan` PERSISTE el plan en `.lodestar/runtime/plans/<hash>.json`
+// (E12-H09), así que `change_apply` puede recuperarlo por `changeSetId` desde un servidor FRESCO (no
+// hace falta la misma sesión stdio). Todos los tests hacen: (1) un `roundtrip` con `change_plan` para
+// obtener el `changeSetId` y la `baseWorkspaceRevision`; (2) —tras la manipulación que fije el
+// escenario— un segundo `roundtrip` (servidor fresco, mismo bundle) con `change_apply`.
+// ---------------------------------------------------------------------------
+
+/// Construye la línea `tools/call change_apply` con el `changeSetId` y un `expectedWorkspaceRevision`
+/// opcional. Documenta el wire de entrada que fija esta historia.
+fn change_apply_line(change_set_id: &str, expected_ws_rev: Option<&str>) -> String {
+    let mut args = serde_json::json!({ "changeSetId": change_set_id });
+    if let Some(r) = expected_ws_rev {
+        args["expectedWorkspaceRevision"] = serde_json::Value::String(r.to_string());
+    }
+    serde_json::json!({
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": { "name": "change_apply", "arguments": args }
+    })
+    .to_string()
+}
+
+/// `structuredContent` de una respuesta `change_apply`, tras verificar que es un objeto. En fase
+/// ROJA (tool ausente) `result` es `null` → panica con un mensaje que documenta el porqué del rojo
+/// (la tool/servicio `change_apply` ausente), no un fallo espurio.
+fn apply_sc(resp: &serde_json::Value) -> &serde_json::Value {
+    let sc = &resp["result"]["structuredContent"];
+    assert!(
+        sc.is_object(),
+        "change_apply debe devolver structuredContent (objeto); tool/servicio ausente en fase ROJA: {resp:?}"
+    );
+    sc
+}
+
+/// El `changeSetId` (string, «changeset:<hash>») de una respuesta `change_plan`. Panica —documentando
+/// el rojo— si el plan no se produjo (tool/servicio ausente ⇒ `structuredContent` nulo).
+fn plan_change_set_id(resp: &serde_json::Value) -> String {
+    plan_sc(resp)["changeSetId"]
+        .as_str()
+        .unwrap_or_else(|| panic!("change_plan debe devolver un `changeSetId` (string): {resp:?}"))
+        .to_string()
+}
+
+/// Fuerza la caducidad de un plan persistido reescribiendo su `expiresAt` a un instante pasado
+/// («0» epoch), como haría el paso de caducidad de E12-H09 al comparar contra `now`. El fichero es
+/// `.lodestar/runtime/plans/<hash>.json`, donde `<hash>` es el `changeSetId` sin el prefijo
+/// `changeset:` (mismo saneado que `plan_file_name` en `lodestar-app`). Solo toca `expiresAt`; el
+/// resto del plan (incl. `planHash`) queda intacto para que la caducidad sea el ÚNICO discriminante.
+fn force_plan_expired(root: &std::path::Path, change_set_id: &str) {
+    let hex = change_set_id
+        .strip_prefix("changeset:")
+        .unwrap_or(change_set_id);
+    let path = root
+        .join(".lodestar")
+        .join("runtime")
+        .join("plans")
+        .join(format!("{hex}.json"));
+    let raw = std::fs::read_to_string(&path).unwrap_or_else(|e| {
+        panic!("el plan persistido debe existir en {path:?} tras change_plan: {e}")
+    });
+    let mut plan: serde_json::Value =
+        serde_json::from_str(&raw).expect("el plan persistido debe ser JSON válido");
+    plan["expiresAt"] = serde_json::Value::String("0".to_string());
+    std::fs::write(&path, serde_json::to_vec(&plan).unwrap()).unwrap();
+}
+
+/// E13-H08 · Criterio `apply_ok` (benchmark §17: "Crear un concepto válido → plan aceptado y aplicado"):
+/// Dado un plan válido y vigente, Cuando se aplica, Entonces `applied:true` y el workspace queda en el
+/// `resultWorkspaceRevision` que el plan previó. Se comprueba (a) `applied==true`; (b) que
+/// `previousWorkspaceRevision` == la `baseWorkspaceRevision` del plan (se aplicó sobre la base
+/// prevista); (c) que la revisión AVANZÓ (`previous != workspaceRevision`, para no ser vacuo); (d) que
+/// el `.md` canónico del `create` existe en disco (la escritura real ocurrió, invariante #1); y (e)
+/// que un `workspace_status` posterior reporta EXACTAMENTE el `workspaceRevision` devuelto (el
+/// workspace «queda en» esa revisión resultante).
+#[test]
+fn apply_ok() {
+    let dir = bundle_min();
+
+    // (1) Plan válido: crear un concepto conforme (type/title/body ⇒ conforme, cf.
+    // `create_concept_escribe_y_query_lo_ve`). Servidor fresco; el plan se persiste en runtime.
+    let ops = serde_json::json!([
+        { "op": "create", "path": "nuevo.md", "type": "Nota", "title": "Nuevo",
+          "body": "# Resumen\n\ncuerpo del concepto nuevo\n" },
+    ]);
+    let plan = roundtrip(
+        dir.path(),
+        &[change_plan_line(None, ops, policy_permisiva()).as_str()],
+        1,
+    );
+    let id = plan_change_set_id(&plan[0]);
+    let base = plan_sc(&plan[0])["baseWorkspaceRevision"]
+        .as_str()
+        .unwrap_or_else(|| panic!("change_plan debe devolver `baseWorkspaceRevision`: {plan:?}"))
+        .to_string();
+
+    // (2) Aplicar el plan por su `changeSetId` (servidor fresco, mismo bundle) + `workspace_status`.
+    let status_line = r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"workspace_status","arguments":{}}}"#;
+    let resp = roundtrip(
+        dir.path(),
+        &[change_apply_line(&id, None).as_str(), status_line],
+        2,
+    );
+    let sc = apply_sc(&resp[0]);
+
+    // (a) El plan se aplicó.
+    assert_eq!(
+        sc["applied"],
+        serde_json::Value::Bool(true),
+        "un plan válido y vigente debe aplicarse (applied:true): {resp:?}"
+    );
+    assert!(
+        resp[0]["result"]["isError"].as_bool() != Some(true),
+        "un apply exitoso no debe dar isError: {resp:?}"
+    );
+
+    // (b) Se aplicó SOBRE la base prevista por el plan.
+    let ws_rev = sc["workspaceRevision"].as_str().unwrap_or("");
+    let prev = sc["previousWorkspaceRevision"].as_str().unwrap_or("");
+    assert_eq!(
+        prev, base,
+        "previousWorkspaceRevision debe ser la baseWorkspaceRevision que previó el plan: {resp:?}"
+    );
+
+    // (c) No vacuo: la revisión resultante AVANZÓ respecto de la previa (hubo cambio real).
+    assert!(
+        ws_rev.starts_with("blake3:"),
+        "workspaceRevision resultante ausente o mal formado («blake3:…»): {resp:?}"
+    );
+    assert_ne!(
+        prev, ws_rev,
+        "el apply debe hacer avanzar la WorkspaceRevision (prev != resultado): {resp:?}"
+    );
+
+    // (d) La escritura real ocurrió: el `.md` canónico existe con su cuerpo (invariante #1).
+    let creado = dir.path().join("nuevo.md");
+    assert!(
+        creado.is_file(),
+        "el apply debe materializar el `.md` del create en disco: {resp:?}"
+    );
+    let contenido = std::fs::read_to_string(&creado).unwrap();
+    assert!(
+        contenido.contains("cuerpo del concepto nuevo"),
+        "el `.md` canónico debe reflejar el cuerpo del plan: {contenido:?}"
+    );
+
+    // (e) El workspace «queda en» la revisión resultante: `workspace_status` reporta la misma.
+    let status_rev = resp[1]["result"]["structuredContent"]["workspaceRevision"]
+        .as_str()
+        .unwrap_or("");
+    assert_eq!(
+        status_rev, ws_rev,
+        "tras el apply, workspace_status debe reportar la workspaceRevision resultante: {resp:?}"
+    );
+}
+
+/// E13-H08 · Criterio `apply_plan_stale`:
+/// Dado un plan cuya `planHash` ya no casa (el bundle cambió bajo él), Cuando se aplica, Entonces
+/// `PLAN_STALE` y no escribe. El drift se fuerza reescribiendo EN DISCO un `.md` que el plan toca
+/// (`a.md`): cambia la `baseWorkspaceRevision` actual ⇒ el `planHash` recomputado en
+/// `change_apply` (paso «re-normalizar y validar → verificar planHash», `REFACTOR §11.2`) difiere del
+/// persistido ⇒ `PLAN_STALE`. Se NO pasa `expectedWorkspaceRevision` para que el discriminante sea el
+/// `planHash` (no un `REVISION_CONFLICT` del control optimista de workspace).
+#[test]
+fn apply_plan_stale() {
+    let dir = bundle_cinco_relacionados();
+
+    // (1) Plan: un patch sobre `a.md` que fijaría una descripción reconocible.
+    let ops = serde_json::json!([
+        { "op": "patch_frontmatter", "ref": { "path": "a.md" },
+          "patch": { "description": "PLANNED-DESC-STALE" } },
+    ]);
+    let plan = roundtrip(
+        dir.path(),
+        &[change_plan_line(None, ops, policy_permisiva()).as_str()],
+        1,
+    );
+    let id = plan_change_set_id(&plan[0]);
+
+    // (2) El bundle cambia BAJO el plan: `a.md` se reescribe en disco con OTRO contenido (otra
+    // WorkspaceRevision base ⇒ otro planHash recomputado).
+    write(
+        dir.path(),
+        "a.md",
+        "---\ntype: Concept\ntitle: A\ndescription: EXTERNAL-STALE-CHANGE\n---\n\n# A\n\ncuerpo cambiado por fuera del plan\n",
+    );
+
+    // (3) Aplicar (servidor fresco): el planHash ya no casa ⇒ PLAN_STALE.
+    let resp = roundtrip(dir.path(), &[change_apply_line(&id, None).as_str()], 1);
+    assert_eq!(
+        resp[0]["result"]["isError"], true,
+        "un plan con planHash obsoleto debe dar isError en change_apply: {resp:?}"
+    );
+    assert!(
+        resp[0]["error"].is_null(),
+        "un plan obsoleto NO debe ser un error de protocolo JSON-RPC: {resp:?}"
+    );
+    let texto = resp[0].to_string();
+    assert!(
+        texto.contains("PLAN_STALE"),
+        "el error debe exponer el código estable «PLAN_STALE»: {resp:?}"
+    );
+
+    // No escribe: `a.md` conserva el contenido externo, NO la descripción que fijaba el plan.
+    let en_disco = std::fs::read_to_string(dir.path().join("a.md")).unwrap();
+    assert!(
+        en_disco.contains("EXTERNAL-STALE-CHANGE"),
+        "un apply rechazado por PLAN_STALE no debe tocar `a.md`: {en_disco:?}"
+    );
+    assert!(
+        !en_disco.contains("PLANNED-DESC-STALE"),
+        "el patch del plan obsoleto NO debe aplicarse: {en_disco:?}"
+    );
+}
+
+/// E13-H08 · Criterio `apply_plan_expired`:
+/// Dado un plan caducado, Cuando se aplica, Entonces `PLAN_EXPIRED`. Se fuerza la caducidad
+/// reescribiendo el `expiresAt` del plan persistido a un instante pasado (E12-H09), SIN tocar el
+/// bundle (así el discriminante es la caducidad, no un PLAN_STALE por drift).
+#[test]
+fn apply_plan_expired() {
+    let dir = bundle_cinco_relacionados();
+
+    // (1) Plan válido sobre `a.md`.
+    let ops = serde_json::json!([
+        { "op": "patch_frontmatter", "ref": { "path": "a.md" },
+          "patch": { "description": "PLANNED-DESC-EXPIRED" } },
+    ]);
+    let plan = roundtrip(
+        dir.path(),
+        &[change_plan_line(None, ops, policy_permisiva()).as_str()],
+        1,
+    );
+    let id = plan_change_set_id(&plan[0]);
+    let antes = std::fs::read_to_string(dir.path().join("a.md")).unwrap();
+
+    // (2) Caducar el plan persistido (expiresAt en el pasado).
+    force_plan_expired(dir.path(), &id);
+
+    // (3) Aplicar (servidor fresco): plan vencido ⇒ PLAN_EXPIRED.
+    let resp = roundtrip(dir.path(), &[change_apply_line(&id, None).as_str()], 1);
+    assert_eq!(
+        resp[0]["result"]["isError"], true,
+        "un plan caducado debe dar isError en change_apply: {resp:?}"
+    );
+    assert!(
+        resp[0]["error"].is_null(),
+        "un plan caducado NO debe ser un error de protocolo JSON-RPC: {resp:?}"
+    );
+    let texto = resp[0].to_string();
+    assert!(
+        texto.contains("PLAN_EXPIRED"),
+        "el error debe exponer el código estable «PLAN_EXPIRED»: {resp:?}"
+    );
+
+    // No escribe: `a.md` queda idéntico (el plan vencido no se aplica).
+    let despues = std::fs::read_to_string(dir.path().join("a.md")).unwrap();
+    assert_eq!(
+        antes, despues,
+        "un apply rechazado por PLAN_EXPIRED no debe tocar `a.md`"
+    );
+}
+
+/// Bundle con `writableRoots:[knowledge]` y `referenceRoots:[src]`: `knowledge/` es la única raíz
+/// escribible; `src/` es una raíz de referencia (visible, NUNCA escribible, E11-H04). Un plan que
+/// intente CREAR un `.md` bajo `src/` debe rechazarse al aplicar (`PERMISSION_DENIED`).
+fn bundle_writable_restringido() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    // Marcador de bundle en la raíz.
+    write(
+        dir.path(),
+        "index.md",
+        "---\nokf_version: \"0.1\"\n---\n\n# Bundle\n",
+    );
+    // Un concepto conforme dentro de la raíz escribible.
+    write(
+        dir.path(),
+        "knowledge/concepto.md",
+        "---\ntype: Concept\ntitle: Concepto\ndescription: dentro de knowledge\n---\n\n# H\n\ncuerpo\n",
+    );
+    // Un fichero cualquiera bajo la raíz de referencia (código adoptado, no conocimiento).
+    write(dir.path(), "src/existente.rs", "fn main() {}\n");
+    // Config: solo `knowledge` escribible; `src` de referencia.
+    write(
+        dir.path(),
+        ".lodestar/config.yaml",
+        "workspace:\n  writableRoots: [knowledge]\n  referenceRoots: [src]\n",
+    );
+    dir
+}
+
+/// E13-H08 · Criterio `apply_fuera_de_writable` (benchmark §17: "Intentar escribir fuera de
+/// writableRoots → rechazo"):
+/// Dado un intento de escribir fuera de `writableRoots` en las ops, Cuando se aplica, Entonces
+/// `PERMISSION_DENIED` y no escribe.
+///
+/// DÓNDE se rechaza: `change_plan` NO valida `writableRoots` — normaliza y simula en memoria
+/// (`plan::normalize_create` es del core PURO, sin config; verificado en el árbol actual). Por eso el
+/// plan del `create` bajo `src/` se PRODUCE (hay `changeSetId`), y el rechazo corresponde a
+/// `change_apply`, que publica por el único escritor con `assert_writable` (E11-H04) ⇒
+/// `PERMISSION_DENIED`. El test asevera el rechazo EN APPLY (la redacción literal del criterio) y, de
+/// forma independiente del punto de rechazo, que NO se materializa nada bajo `src/`.
+#[test]
+fn apply_fuera_de_writable() {
+    let dir = bundle_writable_restringido();
+
+    // (1) Plan con un create bajo `src/` (fuera de `writableRoots`). change_plan no valida writable,
+    // así que produce el plan (documentado arriba): exigimos un `changeSetId` para que el rojo lo
+    // dispare la ausencia de `change_apply`, no un rechazo prematuro en el plan.
+    let ops = serde_json::json!([
+        { "op": "create", "path": "src/malicioso.md", "type": "Nota", "title": "Malo",
+          "body": "# Malo\n\nintento de escribir fuera de writableRoots\n" },
+    ]);
+    let plan = roundtrip(
+        dir.path(),
+        &[change_plan_line(None, ops, policy_permisiva()).as_str()],
+        1,
+    );
+    let id = plan_change_set_id(&plan[0]);
+
+    // (2) Aplicar: escribir bajo `src/` (referenceRoot / fuera de writableRoots) ⇒ PERMISSION_DENIED.
+    let resp = roundtrip(dir.path(), &[change_apply_line(&id, None).as_str()], 1);
+    assert_eq!(
+        resp[0]["result"]["isError"], true,
+        "un apply que escribe fuera de writableRoots debe dar isError: {resp:?}"
+    );
+    assert!(
+        resp[0]["error"].is_null(),
+        "un rechazo por permisos NO debe ser un error de protocolo JSON-RPC: {resp:?}"
+    );
+    let texto = resp[0].to_string();
+    assert!(
+        texto.contains("PERMISSION_DENIED"),
+        "el error debe exponer el código estable «PERMISSION_DENIED»: {resp:?}"
+    );
+
+    // No escribe: nada se materializa bajo la raíz de referencia `src/`.
+    assert!(
+        !dir.path().join("src/malicioso.md").exists(),
+        "el apply rechazado NO debe crear ningún `.md` bajo `src/`: {resp:?}"
+    );
+}

@@ -377,5 +377,13 @@ superficie de producto; git queda como crate dormido) y `DECISIONES.md §0`. Des
     ordena por mtime y purga los excedentes (>maximumReceipts) y caducados (retainReceiptsFor) más
     antiguos, borrando también su `recovery/<id>/`. Vínculo receipt↔recovery por id saneado (contrato para
     H08). Juez ciego: APROBADA CON RESERVAS (2/2).
-  - ⏳ E13-H08 (change_apply) y E13-H09/H10/H11 (revert/audit/regen) pendientes.
+  - ✅ **E13-H08** — Tool `change_apply` (perfil standard): `App::change_apply` orquesta los 15 pasos —
+    load_plan (PLAN_EXPIRED) → verificar planHash recomputado (PLAN_STALE, sin escribir) →
+    `Workspace::apply_transaction` [lock → recover si pendiente → afectados reales → assert_writable
+    (PERMISSION_DENIED antes de tocar el canónico) → staging+validar → reverify → **backup → journal →
+    publish** → sellar] → receipt + gc. Honra los contratos de H06 (backup y journal antes de publish,
+    conjunto afectado completo, recover). PERMISSION_DENIED no se degrada (assert_writable directo).
+    Juez ciego riguroso: APROBADA (4/4). **Diferido**: gating por perfil (E14-H03); fsync del árbol de
+    recovery para power-loss (hardening E14).
+  - ⏳ E13-H09/H10/H11 (change_revert/audit/auto-regen) pendientes.
 - **E14: pendiente** (integración software + evaluación — `ARCHITECTURE.md §19.8`).

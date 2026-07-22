@@ -20,14 +20,15 @@ use lodestar_core::model;
 use lodestar_core::plan::{self, PlanPolicy};
 use lodestar_core::schema::{validate_relations, validate_schema, DocType, Schema};
 use lodestar_core::types::{
-    workspace_revision, Analysis, Backlinks, ChangeSetId, Check, ConceptRef, ConceptRevision,
-    Direction, Edge, EditSectionMode, ErrorCode, Frontmatter, FrontmatterPatch, GraphNode,
-    InboundLinksPolicy, NormalizedOperation, PlanHash, RelPath, RiskAssessment, SemanticDiff,
-    Severity, ValidationSummary, WorkspaceRevision,
+    workspace_revision, Analysis, Backlinks, ChangeReceipt, ChangeSet, ChangeSetId, Check,
+    ConceptRef, ConceptRevision, Direction, Edge, EditSectionMode, ErrorCode, Frontmatter,
+    FrontmatterPatch, GraphNode, InboundLinksPolicy, NormalizedOperation, PlanHash, ReceiptId,
+    RelPath, RiskAssessment, SemanticDiff, Severity, ValidationReport, ValidationSummary,
+    WorkspaceRevision,
 };
 use lodestar_core::{Bundle, CoreError};
 use lodestar_workspace::{
-    ExternalReference, Workspace, WorkspaceConfig, WorkspaceError, WorkspaceSchema,
+    transaction_id, ExternalReference, Workspace, WorkspaceConfig, WorkspaceError, WorkspaceSchema,
 };
 
 /// Envelope común de protocolo (`ARCHITECTURE.md §19.6`, `docs/REFACTOR.md §13`, decisión **D3**).
@@ -1278,6 +1279,172 @@ impl App {
 
         Ok(plan)
     }
+
+    /// Aplica un plan previamente calculado y vigente por el ÚNICO ESCRITOR, con todas las
+    /// salvaguardas de la publicación recuperable (`change_apply`, E13-H08,
+    /// `ARCHITECTURE.md §19.5/§19.6`, `REFACTOR §11.2`). Es la orquestación de servicio que rodea a
+    /// la mecánica transaccional de [`Workspace::apply_transaction`] con los pasos de **plan**:
+    ///
+    /// 1. **Cargar el plan** persistido por `change_set_id` ([`App::load_plan`], E12-H09) →
+    ///    `Err(PlanExpired)` si caducó, `Err(PlanStale)` si no existe/es ilegible.
+    /// 2. **Control optimista de workspace**: si viene `expected_workspace_revision` y no coincide
+    ///    con la revisión actual → `Err(RevisionConflict)`.
+    /// 3. **Verificar `planHash`**: recomputa el hash determinista sobre la base ACTUAL del workspace
+    ///    (`compute_plan_hash(revisión_actual, plan.normalizedOperations)`, la misma función que
+    ///    `change_plan`) y lo compara con el `planHash` persistido; si difiere, el bundle cambió bajo
+    ///    el plan → `Err(PlanStale)` y **no escribe**. (El `planHash` mezcla la base y las
+    ///    operaciones, así que un cambio del canónico bajo el plan lo invalida.)
+    /// 4. **Transacción**: [`Workspace::apply_transaction`] publica por el único escritor (staging →
+    ///    lock → backup → journal → renames atómicos), devolviendo `(previous, result, changedPaths)`.
+    ///    Su `assert_writable` rechaza cualquier path fuera de `writableRoots` → `PERMISSION_DENIED`
+    ///    ANTES de tocar el canónico.
+    /// 5. **Receipt + GC**: persiste el [`ChangeReceipt`] de la aplicación completada (E13-H07) y
+    ///    ejecuta la retención (`gc_receipts`).
+    /// 6. Devuelve un [`ApplyResult`] (proyección de servicio) con `applied:true`, las revisiones
+    ///    antes/después, los paths cambiados, el `semanticDiff` del plan y la conformidad post-apply.
+    ///
+    /// # Mapeo de error y la reserva `WorkspaceError::Core` (E10-H02)
+    /// Los errores de la transacción se mapean con [`workspace_error_code`]. El rechazo por permisos
+    /// llega como [`WorkspaceError::PermissionDenied`] **directo** (lo emite `assert_writable` ANTES
+    /// de cualquier operación que aplane un `CoreError` a texto), así que **preserva** su código wire
+    /// `PERMISSION_DENIED` — la reserva de E10-H02 (un `WorkspaceError::Core` que degradaría un
+    /// permiso denegado a `INTERNAL_IO_ERROR` al aplanar el `CoreError`) no se materializa aquí
+    /// gracias al **orden** de la transacción (guard de escritura antes de publicar), no a un cambio
+    /// del aplanamiento. `change_apply` no introduce ningún camino donde un permiso denegado pase por
+    /// `WorkspaceError::Core`.
+    pub fn change_apply(
+        &self,
+        change_set_id: &ChangeSetId,
+        expected_workspace_revision: Option<WorkspaceRevision>,
+    ) -> Result<ApplyResult, ErrorCode> {
+        // (1) Cargar el plan persistido (caducidad → PLAN_EXPIRED; ausente/ilegible → PLAN_STALE).
+        let plan = self.load_plan(change_set_id)?;
+
+        let root = self.workspace.root();
+        let cfg = WorkspaceConfig::load(root).map_err(|_| ErrorCode::InternalIoError)?;
+        let bundle = self
+            .workspace
+            .bundle()
+            .map_err(|e| workspace_error_code(&e))?;
+        let current_base = workspace_revision(bundle.files(), &cfg.workspace.writable_roots);
+
+        // (2) Control optimista a nivel de workspace (si el llamante fijó una expectativa).
+        if let Some(expected) = &expected_workspace_revision {
+            if expected != &current_base {
+                return Err(ErrorCode::RevisionConflict);
+            }
+        }
+
+        // (3) Verificar `planHash` sobre la base ACTUAL: si el bundle cambió bajo el plan, el hash
+        //     recomputado difiere del persistido → PLAN_STALE (no se escribe).
+        let recomputed = compute_plan_hash(&current_base, &plan.normalized_operations);
+        if recomputed != plan.plan_hash {
+            return Err(ErrorCode::PlanStale);
+        }
+
+        // (4) Publicar por el único escritor (staging → lock → backup → journal → renames). El guard
+        //     `assert_writable` de la transacción rechaza fuera de `writableRoots` → PERMISSION_DENIED
+        //     antes de tocar el canónico.
+        let change_set = plan_to_change_set(&plan);
+        let (previous, result, changed_paths) = self
+            .workspace
+            .apply_transaction(&change_set)
+            .map_err(|e| workspace_error_code(&e))?;
+
+        // (5) Receipt de la aplicación completada + retención (E13-H07). El `receiptId` es el mismo
+        //     id de transacción derivado del `changeSetId`, así el receipt localiza sus copias de
+        //     recuperación por convención de nombre.
+        let receipt_id = ReceiptId(transaction_id(&plan.change_set_id));
+        let receipt = ChangeReceipt {
+            id: receipt_id.clone(),
+            change_set_id: plan.change_set_id.clone(),
+            previous_revision: previous.clone(),
+            result_revision: result.clone(),
+            changed_paths: changed_paths.clone(),
+            semantic_diff: plan.semantic_diff.clone(),
+        };
+        self.workspace
+            .write_receipt(&receipt)
+            .map_err(|e| workspace_error_code(&e))?;
+        self.workspace
+            .gc_receipts()
+            .map_err(|e| workspace_error_code(&e))?;
+
+        // (6) Conformidad del workspace ya publicado (una sola verdad computada, invariante #3).
+        let analysis = self
+            .workspace
+            .analyze()
+            .map_err(|e| workspace_error_code(&e))?;
+
+        Ok(ApplyResult {
+            receipt_id,
+            applied: true,
+            previous_workspace_revision: previous,
+            workspace_revision: result,
+            changed_paths,
+            semantic_diff: plan.semantic_diff,
+            conformance: ApplyConformance {
+                conformant: analysis.hard_fail == 0,
+                errors: analysis.hard_fail,
+                warnings: analysis.warn_count,
+            },
+        })
+    }
+}
+
+/// Construye el [`ChangeSet`] de dominio que consume [`Workspace::apply_transaction`] a partir del
+/// [`PlanResult`] persistido. La transacción solo lee `id` y `operations` (para staging/publicación)
+/// y `base_revision` (control optimista); `validation` se rellena a `Default` porque el `PlanResult`
+/// no la almacena (guarda `diagnostics_before`/`diagnostics_after` en su lugar) y la transacción no
+/// la consume.
+fn plan_to_change_set(plan: &PlanResult) -> ChangeSet {
+    ChangeSet {
+        id: plan.change_set_id.clone(),
+        base_revision: plan.base_workspace_revision.clone(),
+        operations: plan.normalized_operations.clone(),
+        plan_hash: plan.plan_hash.clone(),
+        risk: plan.risk.clone(),
+        semantic_diff: plan.semantic_diff.clone(),
+        validation: ValidationReport::default(),
+        expires_at: plan.expires_at.clone(),
+    }
+}
+
+/// Resultado de `change_apply` (E13-H08): el recibo de una transacción **aplicada** por el único
+/// escritor. Proyección de servicio (framing, no dominio); wire en camelCase — `receiptId`,
+/// `applied`, `previousWorkspaceRevision`, `workspaceRevision`, `changedPaths`, `semanticDiff`,
+/// `conformance`. `workspaceRevision` es la revisión resultante: tras un apply OK el workspace
+/// «queda en» ella. Sin `Eq` (transitivo desde [`SemanticDiff`]).
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ApplyResult {
+    /// Id del recibo persistido de esta aplicación (E13-H07); permite revertir (E13-H09).
+    pub receipt_id: ReceiptId,
+    /// `true` cuando la transacción se publicó (siempre `true` en un `Ok`; los rechazos son `Err`).
+    pub applied: bool,
+    /// [`WorkspaceRevision`] del workspace ANTES de la transacción (la base sobre la que se publicó).
+    pub previous_workspace_revision: WorkspaceRevision,
+    /// [`WorkspaceRevision`] resultante: el workspace queda en ella tras el apply.
+    pub workspace_revision: WorkspaceRevision,
+    /// Paths del canónico que la transacción creó/modificó/borró, en orden determinista.
+    pub changed_paths: Vec<RelPath>,
+    /// Diff semántico del plan aplicado (una sola verdad de diff, invariante #3).
+    pub semantic_diff: SemanticDiff,
+    /// Conformidad del workspace ya publicado.
+    pub conformance: ApplyConformance,
+}
+
+/// Veredicto de conformidad del workspace tras aplicar la transacción (`conformance` de
+/// [`ApplyResult`]). Mismo desglose que `hardFail`/`warnCount` de [`Analysis`]. Wire en camelCase.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ApplyConformance {
+    /// `true` si el workspace publicado no tiene ningún check `Err` (`hardFail == 0`).
+    pub conformant: bool,
+    /// Nº de ficheros con al menos un check `Err`.
+    pub errors: usize,
+    /// Nº de checks `Warn`.
+    pub warnings: usize,
 }
 
 // ---------------------------------------------------------------------------
@@ -2177,7 +2344,7 @@ pub mod schemas {
     use serde_json::Value;
 
     use super::{
-        CheckReport, GraphQueryResult, ImpactReport, KnowledgeGetResponse, PlanResult,
+        ApplyResult, CheckReport, GraphQueryResult, ImpactReport, KnowledgeGetResponse, PlanResult,
         SchemaInspection, SearchResults, WorkspaceStatus,
     };
 
@@ -2229,5 +2396,10 @@ pub mod schemas {
     /// `outputSchema` de `change_plan` (== [`PlanResult`]).
     pub fn change_plan_schema() -> Value {
         schema_of::<PlanResult>()
+    }
+
+    /// `outputSchema` de `change_apply` (== [`ApplyResult`]).
+    pub fn change_apply_schema() -> Value {
+        schema_of::<ApplyResult>()
     }
 }

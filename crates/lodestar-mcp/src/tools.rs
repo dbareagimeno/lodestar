@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 use lodestar_app::{schemas, App, CheckScope, Profile, SearchFilters};
 use lodestar_core::plan::PlanPolicy;
 use lodestar_core::types::{
-    ConceptRef, Direction, FrontmatterPatch, RelPath, Severity, WorkspaceRevision,
+    ChangeSetId, ConceptRef, Direction, FrontmatterPatch, RelPath, Severity, WorkspaceRevision,
 };
 #[cfg(test)]
 use lodestar_workspace::Workspace;
@@ -162,6 +162,12 @@ pub fn list() -> Value {
              } }
          }, "required": ["operations"], "additionalProperties": false },
          "outputSchema": schemas::change_plan_schema()},
+        {"name": "change_apply", "description": "Aplica un plan previamente calculado y vigente por el ÚNICO ESCRITOR, con todas las salvaguardas transaccionales (staging → lock → copias de recuperación → write-ahead journal → renames atómicos → receipt). Verifica caducidad (PLAN_EXPIRED) y planHash (PLAN_STALE si el bundle cambió bajo el plan) y rechaza escrituras fuera de writableRoots (PERMISSION_DENIED). Devuelve el recibo con las revisiones antes/después y el semanticDiff.",
+         "inputSchema": { "type": "object", "properties": {
+             "changeSetId": { "type": "string", "description": "El «changeset:<hash>» que devolvió change_plan (E12-H08); el plan se recupera de runtime por este id." },
+             "expectedWorkspaceRevision": { "type": "string", "description": "Control optimista a nivel de workspace («blake3:…»). Si se omite, se adopta la revisión actual; si no coincide → REVISION_CONFLICT." }
+         }, "required": ["changeSetId"], "additionalProperties": false },
+         "outputSchema": schemas::change_apply_schema()},
     ])
 }
 
@@ -410,6 +416,25 @@ pub fn call(app: &App, profile: Profile, name: &str, params: &Value) -> ToolResu
             // `ErrorCode::as_str()` (p. ej. «REVISION_CONFLICT»), nunca el `Debug` de la variante.
             let result = app
                 .change_plan(expected, &operations, policy)
+                .map_err(|e| e.as_str().to_string())?;
+            to_json(&result)
+        }
+        "change_apply" => {
+            let change_set_id = ChangeSetId(
+                params
+                    .get("changeSetId")
+                    .and_then(Value::as_str)
+                    .ok_or("falta el parámetro «changeSetId»")?
+                    .to_string(),
+            );
+            let expected = params
+                .get("expectedWorkspaceRevision")
+                .and_then(Value::as_str)
+                .map(|s| WorkspaceRevision(s.to_string()));
+            // Mismo mapeo de error a wire que las demás tools (E10-H02): el código estable
+            // `ErrorCode::as_str()` (p. ej. «PLAN_STALE»/«PERMISSION_DENIED»), nunca el `Debug`.
+            let result = app
+                .change_apply(&change_set_id, expected)
                 .map_err(|e| e.as_str().to_string())?;
             to_json(&result)
         }
