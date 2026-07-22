@@ -151,12 +151,11 @@ fn tools_list_schema_y_structured_content_objeto() {
         &[
             r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#,
             r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"query","arguments":{"dsl":"is:orphan"}}}"#,
-            r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"history","arguments":{}}}"#,
         ],
-        3,
+        2,
     );
     let tools = resp[0]["result"]["tools"].as_array().unwrap();
-    assert_eq!(tools.len(), 13);
+    assert_eq!(tools.len(), 10);
     for t in tools {
         assert_eq!(
             t["inputSchema"]["type"], "object",
@@ -166,7 +165,6 @@ fn tools_list_schema_y_structured_content_objeto() {
     }
     assert!(resp[1]["result"]["structuredContent"].is_object());
     assert!(resp[1]["result"]["structuredContent"]["paths"].is_array());
-    assert!(resp[2]["result"]["structuredContent"]["commits"].is_array());
 }
 
 /// E2E de escritura: create_concept escribe el .md en disco (validado) y query lo encuentra.
@@ -222,6 +220,56 @@ fn initialize_ecoa_version_soportada() {
         1,
     );
     assert_eq!(resp[0]["result"]["protocolVersion"], "2025-03-26");
+}
+
+/// E9-H01 · Criterio `list_sin_tools_git`:
+/// Dado un servidor MCP arrancado, Cuando un cliente pide `tools/list`, Entonces NO aparece
+/// ninguna de las 3 tools git (`history`/`last_conforming_commit`/`commit`) en el catálogo.
+#[test]
+fn list_sin_tools_git() {
+    let dir = bundle_min();
+    let resp = roundtrip(
+        dir.path(),
+        &[r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#],
+        1,
+    );
+    let tools = resp[0]["result"]["tools"]
+        .as_array()
+        .expect("tools/list devuelve un array de tools");
+    let git_tools = ["history", "last_conforming_commit", "commit"];
+    let expuestas: Vec<&str> = tools
+        .iter()
+        .filter_map(|t| t["name"].as_str())
+        .filter(|n| git_tools.contains(n))
+        .collect();
+    assert!(
+        expuestas.is_empty(),
+        "la superficie MCP no debe exponer tools git, pero aparecen: {expuestas:?}"
+    );
+}
+
+/// E9-H01 · Criterio `call_commit_desconocida`:
+/// Dado una petición `tools/call` con `name:"commit"`, Cuando se procesa, Entonces responde
+/// error de tool desconocida (`-32602`) y NO la ejecuta (sin `result`).
+#[test]
+fn call_commit_desconocida() {
+    let dir = bundle_min();
+    let resp = roundtrip(
+        dir.path(),
+        &[
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"commit","arguments":{"message":"intento"}}}"#,
+        ],
+        1,
+    );
+    // Tool desconocida = error de protocolo -32602, no una ejecución (isError o result poblado).
+    assert_eq!(
+        resp[0]["error"]["code"], -32602,
+        "«commit» debe ser tool desconocida (-32602), no ejecutarse: {resp:?}"
+    );
+    assert!(
+        resp[0]["result"].is_null(),
+        "«commit» no debe producir result (no se ejecuta): {resp:?}"
+    );
 }
 
 /// Un directorio que no es un bundle → exit 3 (no un servidor "feliz" sobre la nada).

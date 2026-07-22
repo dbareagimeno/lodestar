@@ -7,13 +7,17 @@
 # REGLAS (ver contracts/README.md):
 #   - Los TIPOS NO se definen aquí: se REFERENCIAN por nombre de `lodestar_core::types`.
 #     Los retornos se envuelven en un objeto json (el spec MCP exige que `structuredContent`
-#     sea objeto, nunca array): p. ej. `{ paths: Vec<RelPath> }`, `{ commits: Vec<CommitRow> }`.
+#     sea objeto, nunca array): p. ej. `{ paths: Vec<RelPath> }`, `{ orphans: Vec<RelPath> }`.
 #   - Nombres de tool CONGELADOS (ARCHITECTURE.md §7.2). `fuente:` = fichero:línea aproximada.
 #
 # INVARIANTES: shells finos sobre `Workspace`, CERO lógica OKF propia (misma verdad que
-# CLI/Tauri; test golden cross-fachada lo verifica). create_concept/update_frontmatter/commit
+# CLI/Tauri; test golden cross-fachada lo verifica). create_concept/update_frontmatter
 # escriben el `.md` atómico por el ÚNICO escritor; nunca la cache. `path`/`concept` se validan
 # a `RelPath` (rechaza absolutas/`..`, chokepoint de traversal).
+#
+# E9-H01: las 3 tools git (history/last_conforming_commit/commit) se retiraron de esta
+# superficie; `Workspace::vcs_log`/`last_conforming`/`commit` siguen existiendo sin consumidor
+# MCP (crate `vcs` dormido, decisión #1 — no se borran).
 
 meta:
   fachada: lodestar-mcp (JSON-RPC por stdio; stdout puro, logs a stderr)
@@ -120,28 +124,3 @@ tools:
     retorno: "json { written, removed, unchanged }  # ApplyReport"
     errores: ["WorkspaceError"]
     semantica: "Regenera los índices de tags."
-
-  - nombre: history
-    fuente: crates/lodestar-mcp/src/tools.rs:163
-    params:
-      - { nombre: limit, tipo: integer, default: 20, minimo: 1 }
-    retorno: "json { commits: Vec<CommitRow> }"
-    errores: ["WorkspaceError"]
-    semantica: "Historial de commits (libgit2 local, sin red)."
-
-  - nombre: last_conforming_commit
-    fuente: crates/lodestar-mcp/src/tools.rs:168
-    params: []
-    retorno: "json { sha: Sha | null }  # string hex o null si ninguno"
-    errores: ["WorkspaceError"]
-    semantica: "Último commit conforme (para rollback / gate de CI)."
-
-  - nombre: commit
-    fuente: crates/lodestar-mcp/src/tools.rs:172
-    params:
-      - { nombre: message, tipo: string, default: "«Commit del agente»" }
-    retorno: "json { sha: Sha, conformance: CommitConformance }  # {hardFail, warnCount, conform}"
-    errores: ["WorkspaceError"]
-    semantica: >-
-      Commit del agente por el único escritor + conformidad post-commit. La fachada añade el
-      trailer «Co-Authored-By: lodestar-agent <agent@lodestar>» para distinguir commits de agente (§12).

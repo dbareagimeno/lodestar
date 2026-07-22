@@ -64,15 +64,6 @@ pub fn list() -> Value {
              "dir": { "type": "string", "description": "Directorio relativo («» = raíz).", "default": "" }
          }, "additionalProperties": false }},
         {"name": "generate_tag_indexes", "description": "Regenera los índices de tags.", "inputSchema": empty},
-        {"name": "history", "description": "Historial de commits.",
-         "inputSchema": { "type": "object", "properties": {
-             "limit": { "type": "integer", "minimum": 1, "default": 20 }
-         }, "additionalProperties": false }},
-        {"name": "last_conforming_commit", "description": "Último commit conforme.", "inputSchema": empty},
-        {"name": "commit", "description": "Commit del agente (checkpoint + conformidad post-commit).",
-         "inputSchema": { "type": "object", "properties": {
-             "message": { "type": "string" }
-         }, "additionalProperties": false }},
     ])
 }
 
@@ -159,32 +150,6 @@ pub fn call(ws: &Workspace, name: &str, params: &Value) -> ToolResult {
         "generate_tag_indexes" => {
             let r = ws.generate_tags().map_err(|e| e.to_string())?;
             Ok(json!({ "written": r.written, "removed": r.removed, "unchanged": r.unchanged }))
-        }
-        "history" => {
-            let limit = params.get("limit").and_then(Value::as_u64).unwrap_or(20) as usize;
-            let commits = ws.vcs_log(limit).map_err(|e| e.to_string())?;
-            Ok(json!({ "commits": commits }))
-        }
-        "last_conforming_commit" => {
-            let sha = ws.last_conforming().map_err(|e| e.to_string())?;
-            Ok(json!({ "sha": sha.map(|s| s.as_str().to_string()) }))
-        }
-        "commit" => {
-            let msg = params
-                .get("message")
-                .and_then(Value::as_str)
-                .unwrap_or("Commit del agente");
-            // El trailer Co-Authored-By distingue los commits del agente (§12); lo añade la fachada.
-            let full = format!("{msg}\n\nCo-Authored-By: lodestar-agent <agent@lodestar>");
-            let outcome = ws.commit(&full).map_err(|e| e.to_string())?;
-            Ok(json!({
-                "sha": outcome.sha.as_str(),
-                "conformance": {
-                    "hardFail": outcome.conformance.hard_fail,
-                    "warnCount": outcome.conformance.warn_count,
-                    "conform": outcome.conformance.conform,
-                }
-            }))
         }
         other => Err(format!("tool desconocida: {other}")),
     }

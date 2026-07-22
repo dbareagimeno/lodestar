@@ -158,3 +158,15 @@ Las 9 épicas (E0–E8) están implementadas. Lo que queda no es arquitectura:
 3. **E0-H04/E6-H03** (§4): generar el `.d.ts` desde Rust (ts-rs/specta).
 4. **E7** (§3): adoptar `rmcp` oficial + resources cuando un cliente lo exija.
 5. **E8** (§9): gate de bench (§11), threat model.
+
+## Giro a motor headless de integridad semántica (E9–E14) — EN CURSO
+
+Refactor de `docs/REFACTOR.md`, diseño ratificado en `ARCHITECTURE.md §19` (supersede §13 en
+superficie de producto; git queda como crate dormido) y `DECISIONES.md §0`. Descomposición en
+`requirements/epica-09..14` (47 historias, orden E9→E14).
+
+- **E9 — Reducción de alcance** (Fase 0):
+  - ✅ **E9-H01** — Retirar las tools git del MCP (`history`/`last_conforming_commit`/`commit`);
+    MCP pasa de 13 a 10 tools. `contracts/mcp.yml` recortado. Juez ciego: APROBADA (3/3).
+  - ⏳ E9-H02..H07 pendientes.
+- E10–E14: pendientes.
