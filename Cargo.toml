@@ -12,7 +12,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/dbareagimeno/lodestar"
@@ -35,11 +35,11 @@ unicode-normalization = "0.1"
 schemars = "0.8"
 # Crates internos. Los publicables llevan `version` junto al `path`: cargo usa el `path`
 # en el workspace y sustituye por la `version` (crates.io) al publicar.
-lodestar-core = { path = "crates/lodestar-core", version = "0.1.0" }
-lodestar-store = { path = "crates/lodestar-store", version = "0.1.0" }
-lodestar-vcs = { path = "crates/lodestar-vcs", version = "0.1.0" }
-lodestar-workspace = { path = "crates/lodestar-workspace", version = "0.1.0" }
-lodestar-app = { path = "crates/lodestar-app", version = "0.1.0" }
+lodestar-core = { path = "crates/lodestar-core", version = "0.2.0" }
+lodestar-store = { path = "crates/lodestar-store", version = "0.2.0" }
+lodestar-vcs = { path = "crates/lodestar-vcs", version = "0.2.0" }
+lodestar-workspace = { path = "crates/lodestar-workspace", version = "0.2.0" }
+lodestar-app = { path = "crates/lodestar-app", version = "0.2.0" }
 # Solo-dev y `publish = false`: sin `version` para que cargo la descarte al empaquetar.
 lodestar-fixtures = { path = "crates/lodestar-fixtures" }
 # Fachadas / infra

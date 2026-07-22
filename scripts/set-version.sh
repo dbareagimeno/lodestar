@@ -9,6 +9,9 @@
 #
 # Actualiza (con sed acotado, sin tocar otras líneas «version»):
 #   1. Cargo.toml → línea `version = "…"` dentro de [workspace.package]
+#   2. Cargo.toml → el `version` de las deps internas de [workspace.dependencies]
+#      (las `lodestar-* = { path = "crates/…", version = "…" }`); si no se suben a
+#      la vez, `cargo update -w` falla porque el requisito ^X.Y.Z ya no casa.
 #
 # (La UI de escritorio —tauri.conf.json / frontend/package.json— se movió a la
 #  rama `experimental/ui-desktop`; este script ya no la versiona.)
@@ -50,11 +53,17 @@ fi
 # `rust-version` empieza por otro prefijo, así que el ancla ^ las excluye.
 sed -i.bak -E "s/^version = \"[0-9]+\.[0-9]+\.[0-9]+\"/version = \"$VERSION\"/" "$CARGO_TOML"
 
+# Deps internas de [workspace.dependencies]: `lodestar-x = { path = "crates/…", version = "…" }`.
+# El requisito semver debe seguir a la versión del workspace o `cargo update -w` no resuelve.
+sed -i.bak -E \
+  "s|(path = \"crates/lodestar-[a-z-]+\", version = \")[0-9]+\.[0-9]+\.[0-9]+\"|\1$VERSION\"|" \
+  "$CARGO_TOML"
+
 # Limpia el respaldo que dejó sed.
 rm -f "$CARGO_TOML.bak"
 
 echo "Versión fijada a $VERSION en:"
-echo "  - Cargo.toml ([workspace.package])"
+echo "  - Cargo.toml ([workspace.package] + deps internas de [workspace.dependencies])"
 echo
 echo "Recordatorio:"
 echo "  1. Actualiza el lockfile:   cargo update -w"
