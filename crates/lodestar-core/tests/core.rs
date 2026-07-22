@@ -7,6 +7,9 @@ use lodestar_core::generate;
 use lodestar_core::model;
 use lodestar_core::types::*;
 use lodestar_core::Bundle;
+// E10-H03: función pura aún NO implementada (fase roja). Se espera reachable en el crate root
+// (p. ej. re-exportada vía `pub use types::*`).
+use lodestar_core::workspace_revision;
 
 fn fm(pairs: &[(&str, &str)]) -> FileMap {
     pairs
@@ -575,4 +578,106 @@ fn query_campo_vacio_es_texto_suelto() {
     )]));
     let hits = b.query(":foo");
     assert!(hits.iter().any(|p| p.as_str() == "foo-nota.md"));
+}
+
+// --- E10-H03: WorkspaceRevision (identidad de contenido determinista) ---------
+//
+// La función pura `workspace_revision(files: &FileMap, writable: &[RelPath])` (aún NO
+// implementada) calcula una identidad determinista del contenido escribible del workspace:
+// filtra a los `writableRoots` (slice vacío = todo el bundle es escribible, coherente con
+// E9-H05), EXCLUYE todo `.lodestar/` y cualquier root fuera de `writable` (referenceRoots),
+// ordena por `RelPath`, hashea cada contenido con blake3 y combina path+hash en un hash raíz.
+// Estos tests aseveran PROPIEDADES (determinismo, exclusión, sensibilidad), nunca el hash
+// literal ni el separador exacto del hash raíz — eso lo decide el implementador.
+
+#[test]
+fn revision_independiente_del_orden() {
+    // Mismo contenido, claves insertadas en órdenes distintos → misma revisión.
+    // (Aunque `FileMap` es `BTreeMap` y ya ordena, forzamos el punto insertando en orden
+    // inverso: la revisión debe depender solo del contenido, no del orden de inserción.)
+    let a = RelPath::new("a.md").unwrap();
+    let b = RelPath::new("b/c.md").unwrap();
+    let z = RelPath::new("z.md").unwrap();
+
+    let mut ascendente: FileMap = BTreeMap::new();
+    ascendente.insert(a.clone(), "contenido A".to_string());
+    ascendente.insert(b.clone(), "contenido B".to_string());
+    ascendente.insert(z.clone(), "contenido Z".to_string());
+
+    let mut inverso: FileMap = BTreeMap::new();
+    inverso.insert(z.clone(), "contenido Z".to_string());
+    inverso.insert(b.clone(), "contenido B".to_string());
+    inverso.insert(a.clone(), "contenido A".to_string());
+
+    // writable vacío = todo el bundle es escribible.
+    assert_eq!(
+        workspace_revision(&ascendente, &[]),
+        workspace_revision(&inverso, &[]),
+    );
+}
+
+#[test]
+fn revision_excluye_lodestar() {
+    // Añadir ficheros bajo `.lodestar/` (cachés/índices/runtime) NO cambia la revisión.
+    let mut base: FileMap = BTreeMap::new();
+    base.insert(RelPath::new("nota.md").unwrap(), "cuerpo".to_string());
+    base.insert(
+        RelPath::new("sub/otra.md").unwrap(),
+        "más cuerpo".to_string(),
+    );
+
+    let mut con_lodestar = base.clone();
+    con_lodestar.insert(
+        RelPath::new(".lodestar/index.db").unwrap(),
+        "binario de la cache".to_string(),
+    );
+    con_lodestar.insert(
+        RelPath::new(".lodestar/runtime/pending.json").unwrap(),
+        "estado efímero".to_string(),
+    );
+
+    assert_eq!(
+        workspace_revision(&base, &[]),
+        workspace_revision(&con_lodestar, &[]),
+    );
+}
+
+#[test]
+fn revision_excluye_reference_roots() {
+    // Con `writable = ["docs"]`, los ficheros bajo otros roots son referenceRoots (solo lectura)
+    // y quedan FUERA de la identidad: cambiar su contenido NO cambia la revisión.
+    let docs = RelPath::new("docs/guia.md").unwrap();
+    let referencia = RelPath::new("reference/externo.md").unwrap();
+
+    let mut base: FileMap = BTreeMap::new();
+    base.insert(docs.clone(), "guia escribible".to_string());
+    base.insert(referencia.clone(), "referencia v1".to_string());
+
+    let mut cambio_fuera = base.clone();
+    // Cambio FUERA de writable (en el reference root).
+    cambio_fuera.insert(referencia.clone(), "referencia v2 muy distinta".to_string());
+
+    let writable = [RelPath::new("docs").unwrap()];
+    assert_eq!(
+        workspace_revision(&base, &writable),
+        workspace_revision(&cambio_fuera, &writable),
+    );
+}
+
+#[test]
+fn revision_sensible_al_contenido() {
+    // Cambiar un solo byte en un `.md` DENTRO de writable cambia la revisión.
+    let p = RelPath::new("docs/guia.md").unwrap();
+
+    let mut base: FileMap = BTreeMap::new();
+    base.insert(p.clone(), "contenido original".to_string());
+
+    let mut un_byte = base.clone();
+    un_byte.insert(p.clone(), "contenido originaL".to_string()); // 'l' → 'L'
+
+    let writable = [RelPath::new("docs").unwrap()];
+    assert_ne!(
+        workspace_revision(&base, &writable),
+        workspace_revision(&un_byte, &writable),
+    );
 }

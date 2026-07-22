@@ -199,5 +199,10 @@ superficie de producto; git queda como crate dormido) y `DECISIONES.md §0`. Des
     listan `lodestar-app` en el mapa de crates y marcan git como capacidad dormida y la UI como
     congelada. Este bloque de `IMPLEMENTATION_STATUS.md` refleja E9 completa.
 - **E9 — COMPLETA** (H01–H07, las 7 historias de la fase 0).
-- **E10–E14: pendientes** (esquemas + lectura headless · grafo e impacto · planificación ·
-  publicación recuperable · integración software + evaluación — `ARCHITECTURE.md §19.8`).
+- **E10 — EN CURSO** (esquemas + lectura headless):
+  - ✅ **E10-H03** — `ConceptRevision` + `WorkspaceRevision` en `core::types` (puros): revisión
+    determinista sobre `writableRoots` (excluye `.lodestar/`, referenceRoots, mtime/orden/caché;
+    contención por segmentos; separador `\0` anti-colisión). Juez ciego: APROBADA CON RESERVAS (4/4).
+  - ⏳ E10-H06/H01/H02/H04/H05/H07 (tipos + app + schema) y H08–H13 (tools) pendientes.
+- **E11–E14: pendientes** (grafo e impacto · planificación · publicación recuperable ·
+  integración software + evaluación — `ARCHITECTURE.md §19.8`).

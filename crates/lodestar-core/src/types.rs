@@ -433,6 +433,86 @@ pub struct Mutation {
 }
 
 // ---------------------------------------------------------------------------
+// Identidad de contenido determinista: `ConceptRevision` / `WorkspaceRevision`
+// (E10-H03, `ARCHITECTURE.md §19.3`, `REFACTOR §6.2/§6.3`). Eleva blake3 (ya usado en
+// `WriteOutcome.hash`, `bundle.rs`) a identidad expuesta. Wire = string `"blake3:<hex>"`.
+// ---------------------------------------------------------------------------
+
+schema_derive! {
+/// Revisión de contenido de un único `.md`: `"blake3:<hex>"` del contenido en disco.
+/// Wire = el string tal cual (sin envoltorio de objeto).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ConceptRevision(pub String);
+}
+
+impl ConceptRevision {
+    /// Construye la revisión a partir de un hash blake3 crudo (el mismo patrón que
+    /// `WriteOutcome.hash`).
+    pub fn from_hash(hash: [u8; 32]) -> Self {
+        ConceptRevision(format!("blake3:{}", blake3::Hash::from(hash).to_hex()))
+    }
+}
+
+schema_derive! {
+/// Revisión determinista de (una porción de) el workspace: combina path+contenido de todos los
+/// ficheros incluidos, en orden estable. Independiente de mtime, orden de inserción y de
+/// cualquier caché/índice. Ver `workspace_revision`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct WorkspaceRevision(pub String);
+}
+
+/// `true` si `path` está bajo el root `prefix` (por SEGMENTOS de path, no por prefijo de string):
+/// `"docs"` cubre `"docs/guia.md"` pero NO `"docsx/y.md"`. Un `path == prefix` exacto también
+/// cuenta como contenido (root con extensión, aunque en la práctica `RelPath` siempre trae `.md`).
+fn under_root(path: &RelPath, prefix: &RelPath) -> bool {
+    let path = path.as_str();
+    let prefix = prefix.as_str();
+    path == prefix
+        || (path.len() > prefix.len()
+            && path.starts_with(prefix)
+            && path.as_bytes()[prefix.len()] == b'/')
+}
+
+/// `true` si `path` cae bajo `.lodestar/` (cachés, índices, runtime — SIEMPRE excluido de la
+/// identidad de contenido).
+fn under_lodestar(path: &RelPath) -> bool {
+    let s = path.as_str();
+    s == ".lodestar" || s.starts_with(".lodestar/")
+}
+
+/// Calcula la revisión determinista del workspace escribible.
+///
+/// Selección de ficheros incluidos:
+/// - Excluye SIEMPRE todo lo bajo `.lodestar/` (cachés/índices/runtime, nunca fuente de verdad).
+/// - Si `writable` no está vacío, incluye SOLO los ficheros bajo alguno de esos roots (prefijo por
+///   segmentos, `under_root`); esto excluye de forma natural los `referenceRoots` (solo lectura).
+/// - Si `writable` está vacío, incluye todo lo que no sea `.lodestar/` (todo el bundle es
+///   escribible, coherente con E9-H05).
+///
+/// Determinismo: itera `files` en su orden natural (`FileMap` es `BTreeMap<RelPath, _>`, ya
+/// ordenado por `RelPath`), así el resultado depende solo del contenido incluido — nunca del
+/// orden de inserción, de mtime ni de ninguna caché.
+pub fn workspace_revision(files: &FileMap, writable: &[RelPath]) -> WorkspaceRevision {
+    let mut hasher = blake3::Hasher::new();
+    for (path, content) in files.iter() {
+        if under_lodestar(path) {
+            continue;
+        }
+        if !writable.is_empty() && !writable.iter().any(|root| under_root(path, root)) {
+            continue;
+        }
+        let content_hash = blake3::hash(content.as_bytes());
+        hasher.update(path.as_str().as_bytes());
+        hasher.update(b"\0"); // separador fijo: evita colisiones tipo "a"+"b" == "ab"+""
+        hasher.update(content_hash.as_bytes());
+        hasher.update(b"\0");
+    }
+    WorkspaceRevision(format!("blake3:{}", hasher.finalize().to_hex()))
+}
+
+// ---------------------------------------------------------------------------
 // Tipos de versionado (git) — también en core::types (§4.4). Sin git2, sin I/O.
 // ---------------------------------------------------------------------------
 
