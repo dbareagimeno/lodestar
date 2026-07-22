@@ -250,6 +250,213 @@ fn check_working_tree_conforme() {
     );
 }
 
+// --- E14-H01: `knowledge_check` como puerta de CI (CLI, sobre el working tree) ---
+//
+// `lodestar check` (working tree, sin flags git) debe juzgar con el MISMO motor que
+// `knowledge_check` scope `workspace`: OKF + SCHEMA-* + REL-* + refs externas. Hoy el comando
+// solo corre `Bundle::analyze()` (los 15 checks OKF) y NO carga `.lodestar/schema.yaml`, así que
+// una violación schema-driven pasa desapercibida. Estos tres tests fijan el contrato de la puerta.
+
+/// Escribe el schema de bundle en `.lodestar/schema.yaml` (loader `WorkspaceSchema::load`, wire
+/// camelCase). Aquí: el `DocType` «Nota» exige el campo obligatorio `owner` (un extra), cuya
+/// ausencia dispara `SCHEMA-REQFIELD` (E10-H07, `core::schema::validate_schema`).
+fn write_schema_nota_requiere_owner(dir: &std::path::Path) {
+    write(
+        dir,
+        ".lodestar/schema.yaml",
+        "types:\n  Nota:\n    requiredFields:\n      - owner\n",
+    );
+}
+
+/// E14-H01 `check_falla_schema`: **Dado** un bundle con un `SCHEMA-REQFIELD`, **Cuando** se corre
+/// `lodestar check`, **Entonces** exit `1`. El bundle es OKF-conforme (frontmatter válido, sin
+/// hard-fail OKF): el ÚNICO motivo de bloqueo es la conformidad schema-driven, así que si `check`
+/// no la corriese sobre el working tree saldría `0` (rojo actual).
+#[test]
+fn check_falla_schema() {
+    let dir = temp_dir("falla-schema");
+    write(
+        &dir,
+        "index.md",
+        "---\nokf_version: \"0.1\"\n---\n\n# Bundle\n",
+    );
+    // Concepto de tipo Nota, OKF-conforme, pero SIN el campo `owner` que el schema exige.
+    write(
+        &dir,
+        "a.md",
+        "---\ntype: Nota\ntitle: A\ndescription: d\n---\n\n# H\n\ncuerpo\n",
+    );
+    write_schema_nota_requiere_owner(&dir);
+
+    let status = bin().arg("--path").arg(&dir).arg("check").status().unwrap();
+    assert_eq!(
+        status.code(),
+        Some(1),
+        "un SCHEMA-REQFIELD sobre el working tree debe bloquear la puerta de CI (exit 1)"
+    );
+}
+
+/// E14-H01 `check_conforme_json`: **Dado** un bundle conforme con schema, **Cuando** se corre
+/// `lodestar check --json`, **Entonces** exit `0` y JSON con `conformant: true`. El concepto
+/// satisface el `requiredFields` del schema (tiene `owner`), demostrando que el motor schema-driven
+/// SÍ se ejecuta y da veredicto conforme. Hoy el JSON serializa un `Analysis` sin campo
+/// `conformant` → rojo por aserción.
+#[test]
+fn check_conforme_json() {
+    let dir = temp_dir("conforme-json");
+    write(
+        &dir,
+        "index.md",
+        "---\nokf_version: \"0.1\"\n---\n\n# Bundle\n",
+    );
+    // Concepto de tipo Nota que SÍ trae `owner` → satisface el schema.
+    write(
+        &dir,
+        "a.md",
+        "---\ntype: Nota\ntitle: A\ndescription: d\nowner: alguien\n---\n\n# H\n\ncuerpo\n",
+    );
+    write_schema_nota_requiere_owner(&dir);
+
+    let out = bin()
+        .arg("--path")
+        .arg(&dir)
+        .args(["check", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "bundle conforme con schema → exit 0"
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(
+        v.get("conformant").and_then(serde_json::Value::as_bool),
+        Some(true),
+        "el JSON de `check` debe exponer el veredicto `conformant: true` (mismo motor que knowledge_check)"
+    );
+}
+
+/// E14-H01 `check_caza_edicion_directa`: **Dado** un `.md` editado a mano e inválido (schema-driven),
+/// **Cuando** corre CI, **Entonces** la puerta lo caza (exit `1`). Escenario §17 del benchmark
+/// «Editar directamente un Markdown inválido → detectado»: se parte de un concepto válido (con
+/// `owner`) y se SOBRESCRIBE a mano por una versión sin `owner`, simulando una edición directa del
+/// fichero que rompe el schema. `check` sobre el working tree debe detectarlo.
+#[test]
+fn check_caza_edicion_directa() {
+    let dir = temp_dir("edicion-directa");
+    write(
+        &dir,
+        "index.md",
+        "---\nokf_version: \"0.1\"\n---\n\n# Bundle\n",
+    );
+    write_schema_nota_requiere_owner(&dir);
+    // Estado inicial válido (satisface el schema).
+    write(
+        &dir,
+        "a.md",
+        "---\ntype: Nota\ntitle: A\ndescription: d\nowner: alguien\n---\n\n# H\n\ncuerpo\n",
+    );
+    // Edición directa del Markdown a mano → queda inválido (borra el campo obligatorio `owner`).
+    write(
+        &dir,
+        "a.md",
+        "---\ntype: Nota\ntitle: A\ndescription: d\n---\n\n# H\n\ncuerpo editado a mano\n",
+    );
+
+    let status = bin().arg("--path").arg(&dir).arg("check").status().unwrap();
+    assert_eq!(
+        status.code(),
+        Some(1),
+        "la puerta debe cazar el Markdown editado a mano que rompe el schema (exit 1)"
+    );
+}
+
+/// Monta el bundle con `SCHEMA-REQFIELD` de `check_falla_schema` (concepto Nota SIN `owner`,
+/// schema que lo exige) en `dir`. Reutilizado por los tests de surfaceo en `--sarif`/`--json`.
+fn bundle_con_schema_reqfield(dir: &std::path::Path) {
+    write(
+        dir,
+        "index.md",
+        "---\nokf_version: \"0.1\"\n---\n\n# Bundle\n",
+    );
+    write(
+        dir,
+        "a.md",
+        "---\ntype: Nota\ntitle: A\ndescription: d\n---\n\n# H\n\ncuerpo\n",
+    );
+    write_schema_nota_requiere_owner(dir);
+}
+
+/// E14-H01 (reserva del juez) `check_sarif_lista_schema`: la puerta bloquea (exit 1) con el motor
+/// schema-driven, pero el SARIF debe además SURFACEAR el diagnóstico que dispara ese fallo, no solo
+/// los checks OKF. **Dado** el bundle con `SCHEMA-REQFIELD`, **Cuando** `lodestar check --sarif`,
+/// **Entonces** exit 1 Y `runs[0].results` contiene al menos un result con
+/// `ruleId == "SCHEMA-REQFIELD"` (misma forma SARIF que `check_sarif_es_valido`, que usa `ruleId`).
+/// Hoy `to_sarif(&Analysis)` solo itera `per_file`, y `analyze()` no coloca los SCHEMA-* ahí → el
+/// SARIF sale con cero results de schema (inútil para anotar el fallo en CI) → rojo por aserción.
+#[test]
+fn check_sarif_lista_schema() {
+    let dir = temp_dir("sarif-schema");
+    bundle_con_schema_reqfield(&dir);
+
+    let out = bin()
+        .arg("--path")
+        .arg(&dir)
+        .args(["check", "--sarif"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "SCHEMA-REQFIELD bloquea la puerta (exit 1)"
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let results = v["runs"][0]["results"].as_array().unwrap();
+    assert!(
+        results.iter().any(|r| r["ruleId"] == "SCHEMA-REQFIELD"),
+        "el SARIF debe surfacear el diagnóstico de schema que dispara el exit 1, no solo los OKF; \
+         results = {results:#?}"
+    );
+}
+
+/// E14-H01 (reserva del juez) `check_json_lista_schema`: análogo en `--json`. **Dado** el bundle con
+/// `SCHEMA-REQFIELD`, **Cuando** `lodestar check --json`, **Entonces** exit 1 Y el JSON expone el
+/// diagnóstico de forma accionable. La salida serializa un `Analysis` cuyo `perFile`
+/// (`BTreeMap<RelPath, Vec<Check>>`) lista los `Check`, cada uno con su campo `code` (wire
+/// `"SCHEMA-REQFIELD"`). Aseveramos que algún check de algún fichero tiene `code == "SCHEMA-REQFIELD"`
+/// — campo ya existente en el wire (`check_json_es_valido` fija `concepts`/`hardFail`), sin inventar
+/// campos nuevos: el implementador solo debe INYECTAR los SCHEMA-*/REL- en `perFile` de forma
+/// aditiva. Hoy `analyze()` no los coloca ahí → rojo por aserción.
+#[test]
+fn check_json_lista_schema() {
+    let dir = temp_dir("json-schema");
+    bundle_con_schema_reqfield(&dir);
+
+    let out = bin()
+        .arg("--path")
+        .arg(&dir)
+        .args(["check", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "SCHEMA-REQFIELD bloquea la puerta (exit 1)"
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let per_file = v["perFile"].as_object().unwrap();
+    let lista_schema = per_file
+        .values()
+        .filter_map(|checks| checks.as_array())
+        .flatten()
+        .any(|c| c["code"] == "SCHEMA-REQFIELD");
+    assert!(
+        lista_schema,
+        "el JSON debe listar el diagnóstico SCHEMA-REQFIELD en `perFile`, no solo los checks OKF; \
+         perFile = {per_file:#?}"
+    );
+}
+
 #[test]
 fn import_rechaza_zip_slip() {
     // Un zip con una ruta con `..` no debe escribir fuera del bundle (chokepoint RelPath).

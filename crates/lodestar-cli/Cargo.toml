@@ -18,6 +18,7 @@ path = "src/main.rs"
 [dependencies]
 lodestar-core = { workspace = true }
 lodestar-workspace = { workspace = true }
+lodestar-app = { workspace = true }
 clap = { workspace = true }
 anyhow = { workspace = true }
 ignore = { workspace = true }

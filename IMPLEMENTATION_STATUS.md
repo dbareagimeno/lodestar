@@ -412,4 +412,29 @@ superficie de producto; git queda como crate dormido) y `DECISIONES.md §0`. Des
     test de crash dedicado que mate la publicación DESPUÉS del `.md` del plan y ANTES del index/tags
     regenerado (la recuperabilidad de ese path queda garantizada estructuralmente: está en
     affected/journal/backup).
-- **E14: pendiente** (integración software + evaluación — `ARCHITECTURE.md §19.8`).
+- **E14 — EN CURSO** (integración software + evaluación — `ARCHITECTURE.md §19.8`):
+  - ✅ **E14-H01** — `lodestar check` como puerta de CI con conformidad schema-driven: `check` (working
+    tree, sin flags git) juzga con el MISMO motor que `App::knowledge_check` scope `workspace` (OKF +
+    SCHEMA-* + REL-* + refs externas). La fusión OKF+schema/rel vive en UN solo sitio compartido
+    (`App::schema_diagnostics_by_path`), consumido por `knowledge_check` y por `App::full_analysis`
+    (invariante #3, una sola verdad computada; sin doble `analyze()`). La CLI es fachada fina que
+    consume `full_analysis` y deriva `conformant` con la misma regla del motor. Salida humana / `--json`
+    (campo `conformant` aditivo + `perFile` con los `SCHEMA-*`/`REL-*`) / SARIF (`ruleId` schema/rel)
+    surfacean los diagnósticos del motor completo, no solo el veredicto. Exit codes CONGELADOS
+    (`0`/`1`/`2`/`3`) intactos; `blocked` es superconjunto del anterior (nada que bloqueaba deja de
+    hacerlo). Sin cambios en `core::types` (invariante #4; `conformant` inyectado en la fachada). Tests
+    `check_falla_schema`/`check_conforme_json`/`check_caza_edicion_directa` + surfacing
+    `check_sarif_lista_schema`/`check_json_lista_schema` en `crates/lodestar-cli/tests/cli.rs`. Juez
+    ciego (2 pasadas): la 1ª APROBADA CON RESERVAS (salida no surfaceaba schema/rel) → cerrada con
+    micro-ciclo rojo→verde; la 2ª (historia completa, no-regresión MCP 41 tests verdes) **APROBADA
+    (6/6)**. Hallazgos menores heredados (no bloqueantes): (1) `check` abre el `App` completo → puede
+    materializar la cache `store` como efecto de un comando read-only (mismo camino que MCP, coherente
+    con invariante #5); (2) `conformant` juzga solo `concepts` mientras `gate_blocked` cuenta `Err` de
+    todos los ficheros (p. ej. `index.md`) → un error solo en `index.md` da `conformant:true` pero exit
+    1 vía gate — es exactamente la semántica de `knowledge_check` que la historia manda replicar.
+  - ⏳ E14-H02 (convivencia con software: writableRoots/referenceRoots + detección de escritura externa),
+    E14-H03 (perfiles readonly/standard + server instructions — FRONTERA mcp.yml), E14-H04 (benchmark
+    §17 e2e), E14-H05 (métricas de escala) pendientes.
+  - **Pendiente al cierre de E14**: limpieza final de superficie `mcp.yml` → 10 tools objetivo (retirar
+    `query`/`conformance_check`/`find_*`/`neighborhood`/`create_concept`/`update_frontmatter`/
+    `generate_*`), descopada aquí desde E12/E13.

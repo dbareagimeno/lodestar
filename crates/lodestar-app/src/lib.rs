@@ -730,20 +730,9 @@ impl App {
         let revision = workspace_revision(bundle.files(), &cfg.workspace.writable_roots);
 
         // Checks schema-driven agrupados por su path (`target`): así se unen a los OKF por path.
-        // Aditivo (E11-H03, `validate_relations`): un bundle sin relaciones tipadas no cambia el
-        // conjunto de diagnósticos, igual que `validate_schema` con un bundle sin `schema.yaml`.
-        let mut schema_by_path: BTreeMap<RelPath, Vec<Check>> = BTreeMap::new();
-        for check in validate_schema(&bundle, &schema)
-            .into_iter()
-            .chain(validate_relations(&bundle, &schema))
-        {
-            for target in &check.targets {
-                schema_by_path
-                    .entry(target.clone())
-                    .or_default()
-                    .push(check.clone());
-            }
-        }
+        // Fuente ÚNICA de esta fusión (invariante #3): la comparten esta tool y la salida de
+        // `lodestar check` vía [`App::schema_diagnostics_by_path`].
+        let schema_by_path = Self::schema_diagnostics_by_path(&bundle, &schema);
 
         // Conjunto de paths del scope.
         let allowed = self.scope_paths(&bundle, analysis, scope)?;
@@ -846,6 +835,57 @@ impl App {
                 Ok(set)
             }
         }
+    }
+
+    /// Diagnósticos schema-driven (`validate_schema` + `validate_relations`, PUROS) agrupados por
+    /// su `target` path. Es la **fuente única** (invariante #3) de la fusión OKF+schema que
+    /// comparten [`App::knowledge_check`] (con scope/severidad/paginación encima) y la salida de
+    /// `lodestar check` (vía [`App::full_analysis`]): la lógica de qué diagnósticos schema-driven
+    /// existen y bajo qué path se listan vive **una sola vez**.
+    ///
+    /// Aditivo (E10-H07/E11-H03): un bundle sin `.lodestar/schema.yaml` produce `Schema::default()`
+    /// (vacío) y estas funciones devuelven cero checks, así que el conjunto de diagnósticos no cambia.
+    fn schema_diagnostics_by_path(
+        bundle: &Bundle,
+        schema: &Schema,
+    ) -> BTreeMap<RelPath, Vec<Check>> {
+        let mut by_path: BTreeMap<RelPath, Vec<Check>> = BTreeMap::new();
+        for check in validate_schema(bundle, schema)
+            .into_iter()
+            .chain(validate_relations(bundle, schema))
+        {
+            for target in &check.targets {
+                by_path
+                    .entry(target.clone())
+                    .or_default()
+                    .push(check.clone());
+            }
+        }
+        by_path
+    }
+
+    /// Computa el `Analysis` **completo** del working tree: los 15 checks OKF de
+    /// [`Bundle::analyze`] con los diagnósticos schema-driven (`SCHEMA-*`/`REL-*`) fusionados en
+    /// `per_file` por su path (`App::schema_diagnostics_by_path`). Es la fuente que alimenta la
+    /// **salida** de `lodestar check` (`--json`/`--sarif`/humano), de modo que el mismo motor que
+    /// decide el veredicto (`knowledge_check`) también surface los diagnósticos que lo disparan —
+    /// sin recomputar `analyze()` dos veces ni recomponer la validación schema-driven en la fachada.
+    ///
+    /// Los contadores `hard_fail`/`warn_count` conservan su semántica OKF (los rellena `analyze`);
+    /// la fusión solo **añade** checks a `per_file` (aditiva). Un bundle sin `schema.yaml` devuelve
+    /// exactamente el `Analysis` de `analyze()`.
+    pub fn full_analysis(&self) -> Result<Analysis, ErrorCode> {
+        let bundle = self
+            .workspace
+            .bundle()
+            .map_err(|e| workspace_error_code(&e))?;
+        let schema =
+            WorkspaceSchema::load(self.workspace.root()).map_err(|_| ErrorCode::InternalIoError)?;
+        let mut analysis = bundle.analyze().clone();
+        for (path, checks) in Self::schema_diagnostics_by_path(&bundle, &schema) {
+            analysis.per_file.entry(path).or_default().extend(checks);
+        }
+        Ok(analysis)
     }
 
     /// Consulta el grafo, consolidando en una sola tool lo que hoy son 4 tools separadas

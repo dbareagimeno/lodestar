@@ -2090,6 +2090,7 @@ dependencies = [
  "anyhow",
  "clap",
  "ignore",
+ "lodestar-app",
  "lodestar-core",
  "lodestar-fixtures",
  "lodestar-workspace",
