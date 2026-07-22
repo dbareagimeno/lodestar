@@ -1314,3 +1314,114 @@ fn sin_camino() {
         camino.iter().map(|p| p.as_str()).collect::<Vec<_>>()
     );
 }
+
+// --- E12-H01: tipos del plan (`ChangeSet`, `NormalizedOperation`, ids/hashes) -------------------
+//
+// Fase ROJA: los tipos del plan (`ChangeSet`, `NormalizedOperation`, los newtypes
+// `ChangeSetId`/`PlanHash`/`ReceiptId`, y los tipos de análisis `RiskAssessment`/`RiskLevel`/
+// `SemanticDiff`/`ValidationReport`) todavía NO existen en producción. Se esperan alcanzables vía
+// `use lodestar_core::types::*` (mismo patrón que `WorkspaceRevision`/`ConceptRef`). Estos tests
+// hacen ROJO por API ausente (símbolos inexistentes) hasta que E12-H01 los defina en `core::types`.
+//
+// Forma ASUMIDA del contrato (solo lo que el criterio de aceptación fija; la forma interna de
+// `NormalizedOperation` se cierra en E12-H05..H07 y NO se sobre-restringe aquí):
+//   ChangeSet {
+//       id: ChangeSetId,                       // wire `id`            (newtype string transparente)
+//       base_revision: WorkspaceRevision,      // wire `baseWorkspaceRevision` (rename explícito)
+//       operations: Vec<NormalizedOperation>,  // wire `operations`
+//       plan_hash: PlanHash,                   // wire `planHash`
+//       risk: RiskAssessment,                  // wire `risk`
+//       semantic_diff: SemanticDiff,           // wire `semanticDiff`
+//       validation: ValidationReport,          // wire `validation`
+//       expires_at: String,                    // wire `expiresAt`     (timestamp ISO-8601)
+//   }
+// Supuestos de construcción mínima (documentados para el implementador):
+//   - `ChangeSetId`/`PlanHash` son newtypes string transparentes (como `WorkspaceRevision`), con el
+//     string construible por literal de tupla `ChangeSetId("…".into())`.
+//   - `RiskAssessment { level: RiskLevel, reasons: Vec<String> }` con `enum RiskLevel { Low, .. }`.
+//   - `SemanticDiff` y `ValidationReport` derivan `Default` (diff/validación vacíos = mínimos).
+
+/// Construye un `ChangeSet` mínimo (sin operaciones, análisis vacíos) para los tests de forma.
+fn changeset_minimo() -> ChangeSet {
+    ChangeSet {
+        id: ChangeSetId("cs-1".into()),
+        base_revision: WorkspaceRevision("blake3:base-abc".into()),
+        operations: Vec::<NormalizedOperation>::new(),
+        plan_hash: PlanHash("blake3:plan-123".into()),
+        risk: RiskAssessment {
+            level: RiskLevel::Low,
+            reasons: Vec::new(),
+        },
+        semantic_diff: SemanticDiff::default(),
+        validation: ValidationReport::default(),
+        expires_at: "2026-07-22T00:00:00Z".to_string(),
+    }
+}
+
+/// Criterio `changeset_shape`: un `ChangeSet` serializado lleva las claves de wire en camelCase
+/// `baseWorkspaceRevision`, `planHash` y `expiresAt` (y NO sus formas snake_case), con sus valores.
+#[test]
+fn changeset_shape() {
+    let v = serde_json::to_value(changeset_minimo()).expect("`ChangeSet` debe serializar a JSON");
+
+    assert!(
+        v.is_object(),
+        "un `ChangeSet` debe serializar a un objeto JSON, fue {v:?}"
+    );
+
+    // Las tres claves de wire que el criterio exige, con su valor (los newtypes son strings
+    // transparentes).
+    assert_eq!(
+        v["baseWorkspaceRevision"],
+        serde_json::json!("blake3:base-abc"),
+        "la revisión base debe salir como `baseWorkspaceRevision` (camelCase con `Workspace`)",
+    );
+    assert_eq!(
+        v["planHash"],
+        serde_json::json!("blake3:plan-123"),
+        "el hash del plan debe salir como `planHash`",
+    );
+    assert_eq!(
+        v["expiresAt"],
+        serde_json::json!("2026-07-22T00:00:00Z"),
+        "la caducidad debe salir como `expiresAt`",
+    );
+
+    // El resto de las claves del contrato deben estar presentes (en camelCase).
+    for clave in ["id", "operations", "risk", "semanticDiff", "validation"] {
+        assert!(
+            v.get(clave).is_some(),
+            "el `ChangeSet` serializado debe llevar la clave `{clave}`, claves = {:?}",
+            v.as_object().map(|o| o.keys().collect::<Vec<_>>()),
+        );
+    }
+
+    // Blindaje contra un `derive` snake_case o un camelCase ingenuo (`baseRevision`): las formas
+    // incorrectas NO deben aparecer.
+    for prohibida in [
+        "base_revision",
+        "baseRevision",
+        "plan_hash",
+        "expires_at",
+        "semantic_diff",
+    ] {
+        assert!(
+            v.get(prohibida).is_none(),
+            "el `ChangeSet` NO debe exponer la clave `{prohibida}` (contrato camelCase con rename)",
+        );
+    }
+}
+
+/// Criterio `round-trip serde`: `ChangeSet` sobrevive un ciclo serializar → deserializar sin
+/// pérdida (blinda el contrato de wire en ambas direcciones).
+#[test]
+fn changeset_roundtrip() {
+    let original = changeset_minimo();
+    let json = serde_json::to_string(&original).expect("`ChangeSet` debe serializar");
+    let recuperado: ChangeSet =
+        serde_json::from_str(&json).expect("`ChangeSet` debe deserializar desde su propio JSON");
+    assert_eq!(
+        original, recuperado,
+        "el round-trip serde de `ChangeSet` debe ser idéntico",
+    );
+}

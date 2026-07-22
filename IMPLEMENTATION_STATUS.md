@@ -289,5 +289,10 @@ superficie de producto; git queda como crate dormido) y `DECISIONES.md §0`. Des
   - **E11 — COMPLETA** (5/5). Criterio de salida cumplido: Lodestar responde preguntas estructurales
     (graph_query: backlinks/outgoing/neighborhood/orphans/dangling/path_between/cycles/components) y
     anticipa consecuencias (impact_analyze), con relaciones tipadas (REL-*) y paths externos validados.
-- **E12–E14: pendientes** (planificación · publicación recuperable · integración + evaluación
-  — `ARCHITECTURE.md §19.8`).
+- **E12 — EN CURSO** (planificación de cambios):
+  - ✅ **E12-H01** — Tipos del plan en `core::types`: `ChangeSetId`/`PlanHash`/`ReceiptId`, `ChangeSet`
+    (wire `baseWorkspaceRevision`/`planHash`/`expiresAt`), `NormalizedOperation` (11 variantes),
+    `RiskAssessment`/`RiskLevel` (low/medium/high), `SemanticDiff`, `ValidationReport`. `FrontmatterPatch`
+    ganó serde. Juez ciego: APROBADA (2/2).
+  - ⏳ E12-H02–H09 pendientes (riesgo/diff/validación/normalización → change_plan → persistencia).
+- **E13–E14: pendientes** (publicación recuperable · integración + evaluación — `ARCHITECTURE.md §19.8`).

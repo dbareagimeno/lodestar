@@ -539,7 +539,15 @@ pub struct Backlinks {
 
 /// Patch de frontmatter (merge-patch RFC 7386). `Some(v)` escribe/reemplaza; `None` BORRA;
 /// clave ausente = no se toca. El tercer estado se modela con la pertenencia al mapa.
-#[derive(Debug, Clone, Default)]
+///
+/// `Serialize`/`Deserialize`/`PartialEq` (E12-H01): forma parte del wire de `NormalizedOperation`
+/// (`create`/`patch_frontmatter`). `#[serde(transparent)]` para que serialice como el objeto YAML
+/// plano `{clave: valor|null}`, no envuelto en `{"0": {...}}`. Sin `Eq`: `serde_yaml::Value` solo
+/// deriva `PartialEq` (números `f64`). Sin `schema_derive!`/`JsonSchema` (no lo implementa
+/// `serde_yaml::Value`) — los campos que la usan en `NormalizedOperation` se marcan
+/// `schemars(skip)`, mismo patrón que `Frontmatter.tags`/`.timestamp`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(transparent)]
 pub struct FrontmatterPatch(pub BTreeMap<String, Option<serde_yaml::Value>>);
 
 // ---------------------------------------------------------------------------
@@ -880,3 +888,248 @@ pub(crate) const KNOWN_FM: [&str; 7] = [
     "timestamp",
     "status",
 ];
+
+// ---------------------------------------------------------------------------
+// Planificación (`ChangeSet`) — §4.1 vía `ARCHITECTURE.md §19.3`, `REFACTOR §6.4` (E12-H01)
+// ---------------------------------------------------------------------------
+//
+// SOLO las formas: la lógica que produce cada pieza (riesgo, diff semántico, validación,
+// normalización de cada operación) es de las historias E12-H02..H07. Aquí se congela el contrato
+// de wire de `ChangeSet` (criterio `changeset_shape`) y las 11 variantes de `NormalizedOperation`
+// con campos razonables — su forma exacta la cierran esas historias.
+
+schema_derive! {
+/// Identificador de un `ChangeSet` (plan). Newtype string transparente, mismo patrón que
+/// [`WorkspaceRevision`]/[`ConceptRevision`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ChangeSetId(pub String);
+}
+
+schema_derive! {
+/// Hash determinista de un plan: mismo input (operaciones + `base_revision`) ⇒ mismo hash
+/// (`plan_hash_determinista`, E12-H08). Newtype string transparente, `"blake3:<hex>"`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct PlanHash(pub String);
+}
+
+schema_derive! {
+/// Identificador de un recibo de aplicación de un `ChangeSet` (E13). Newtype string
+/// transparente.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ReceiptId(pub String);
+}
+
+schema_derive! {
+/// Nivel de riesgo de un plan (E12-H02). Wire en minúsculas — mismos valores `"low"`/`"medium"`/
+/// `"high"` que usa (o usará) `impact_analyze` (`contracts/mcp.yml`), un solo vocabulario de
+/// riesgo en todo el contrato.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum RiskLevel {
+    #[default]
+    Low,
+    Medium,
+    High,
+}
+}
+
+schema_derive! {
+/// Evaluación de riesgo de un plan (E12-H02 rellena `level`/`reasons`; aquí solo la forma). El
+/// valor por defecto es el plan mínimo: riesgo bajo, sin razones.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct RiskAssessment {
+    pub level: RiskLevel,
+    pub reasons: Vec<String>,
+}
+}
+
+schema_derive! {
+/// Un `move` dentro de un [`SemanticDiff`]: de dónde a dónde.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MovedPath {
+    pub from: RelPath,
+    pub to: RelPath,
+}
+}
+
+schema_derive! {
+/// Diff semántico entre el bundle actual y el hipotético resultante de aplicar un `ChangeSet`
+/// (E12-H03 lo calcula; aquí solo la forma). `frontmatter_changes`/`body_changes`/
+/// `relation_changes` son los paths afectados por cada categoría — una forma mínima razonable;
+/// E12-H03 puede reusar [`crate::diff::OkfDiff`] como referencia sin que sea obligatorio aquí.
+/// `Default` = diff vacío (plan sin efecto observable), usado por los tests de forma.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct SemanticDiff {
+    pub created: Vec<RelPath>,
+    pub modified: Vec<RelPath>,
+    pub deleted: Vec<RelPath>,
+    pub moved: Vec<MovedPath>,
+    pub frontmatter_changes: Vec<RelPath>,
+    pub body_changes: Vec<RelPath>,
+    pub relation_changes: Vec<RelPath>,
+    pub diagnostics_introduced: Vec<Check>,
+    pub diagnostics_resolved: Vec<Check>,
+}
+}
+
+schema_derive! {
+/// Conteo de diagnósticos por severidad del resultado hipotético (mismo desglose que
+/// `hard_fail`/`warn_count` de [`Analysis`], pero completo con `info`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ValidationSummary {
+    pub errors: usize,
+    pub warnings: usize,
+    pub info: usize,
+}
+}
+
+schema_derive! {
+/// Veredicto de conformidad del bundle hipotético resultante de un `ChangeSet` (E12-H04 lo
+/// calcula sobre `analyze()`; aquí solo la forma). `Default` = conformidad vacía (sin
+/// diagnósticos, `conformant: false` — coherente con "nada analizado todavía").
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ValidationReport {
+    pub conformant: bool,
+    pub summary: ValidationSummary,
+    pub diagnostics: Vec<Check>,
+}
+}
+
+schema_derive! {
+/// Modo de `edit_section` (E12-H05): reemplaza, añade al final o al principio de la subsección
+/// acotada por `heading_path`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum EditSectionMode {
+    Replace,
+    Append,
+    Prepend,
+}
+}
+
+schema_derive! {
+/// Política ante enlaces entrantes al borrar un concepto (E12-H06). `Reject` es el default del
+/// prototipo/spec — un `delete` sobre un concepto referenciado se rechaza salvo que se pida
+/// explícitamente otra política.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum InboundLinksPolicy {
+    #[default]
+    Reject,
+    Retarget,
+    RemoveLinks,
+    CreateStub,
+}
+}
+
+schema_derive! {
+/// Una operación YA normalizada (resuelta a path(s) y contenido/patch concretos) dentro de un
+/// `ChangeSet`. Las 11 variantes del alcance de E12 (contenido: E12-H05 · estructura: E12-H06 ·
+/// semántica: E12-H07); aquí solo su forma — los campos son razonables para lo que cada operación
+/// resuelve, sin cerrar la lógica que los produce.
+///
+/// El tag de wire (`op`) usa los mismos nombres snake_case que `proposedOperation.kind`
+/// (`contracts/mcp.yml`) — un solo vocabulario de tipos de operación en el contrato.
+///
+/// Sin `Eq`: `Create`/`PatchFrontmatter` llevan `FrontmatterPatch`, que envuelve
+/// `serde_yaml::Value` (solo `PartialEq`, por los números `f64`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+pub enum NormalizedOperation {
+    /// Crea un concepto nuevo. `body: None` ⇒ se rellena con la `bodyTemplate` del `DocType`
+    /// (E12-H05); aquí la resolución de la plantilla NO ocurre todavía.
+    Create {
+        path: RelPath,
+        #[cfg_attr(feature = "schemars", schemars(skip))]
+        frontmatter: FrontmatterPatch,
+        body: Option<String>,
+    },
+    /// Parchea el frontmatter existente (null en el patch = borra la clave, `FrontmatterPatch`).
+    PatchFrontmatter {
+        path: RelPath,
+        #[cfg_attr(feature = "schemars", schemars(skip))]
+        patch: FrontmatterPatch,
+    },
+    /// Sustituye el cuerpo completo del concepto.
+    ReplaceBody { path: RelPath, body: String },
+    /// Edita SOLO la subsección acotada por `heading_path` (p. ej. `["Security", "Token
+    /// rotation"]`), con el modo indicado.
+    EditSection {
+        path: RelPath,
+        heading_path: Vec<String>,
+        mode: EditSectionMode,
+        content: String,
+    },
+    /// Reemplaza texto literal; `expected_occurrences` (si se da) hace fallar la normalización
+    /// cuando el número de coincidencias no casa (E12-H05).
+    ReplaceText {
+        path: RelPath,
+        find: String,
+        replace: String,
+        expected_occurrences: Option<usize>,
+    },
+    /// Mueve/renombra un concepto; `rewrite_inbound_links` decide si sus backlinks se reescriben
+    /// dentro del mismo change set (E12-H06).
+    Move {
+        from: RelPath,
+        to: RelPath,
+        rewrite_inbound_links: bool,
+    },
+    /// Borra un concepto, sujeto a `inbound_links_policy` si está referenciado (E12-H06).
+    Delete {
+        path: RelPath,
+        inbound_links_policy: InboundLinksPolicy,
+    },
+    /// Añade una relación tipada (validada contra `RelationDef`, E12-H07).
+    AddRelation {
+        source: RelPath,
+        relation: String,
+        target: RelPath,
+    },
+    /// Quita una relación tipada existente.
+    RemoveRelation {
+        source: RelPath,
+        relation: String,
+        target: RelPath,
+    },
+    /// Transiciona el `status` de un concepto (validado contra `allowedStatuses`/lifecycle,
+    /// E12-H07).
+    TransitionStatus { path: RelPath, to: String },
+    /// Materializa un `Fix` `safe` sugerido por un diagnóstico previo (`Fix.fix_id`).
+    ApplyFix { fix_id: String },
+}
+}
+
+schema_derive! {
+/// El plan de cambios completo: operaciones normalizadas + análisis (riesgo/diff/validación) +
+/// caducidad, sin tocar disco (E12-H08 lo ensambla; aquí solo la forma, criterio
+/// `changeset_shape`). Wire con renames EXPLÍCITOS donde `rename_all = "camelCase"` no basta
+/// (`base_revision` → `baseWorkspaceRevision`, no `baseRevision`).
+///
+/// Sin `Eq` (transitivo desde `NormalizedOperation`/`FrontmatterPatch`, ver ahí); el criterio
+/// `changeset_roundtrip` solo necesita `PartialEq`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChangeSet {
+    pub id: ChangeSetId,
+    #[serde(rename = "baseWorkspaceRevision")]
+    pub base_revision: WorkspaceRevision,
+    pub operations: Vec<NormalizedOperation>,
+    #[serde(rename = "planHash")]
+    pub plan_hash: PlanHash,
+    pub risk: RiskAssessment,
+    #[serde(rename = "semanticDiff")]
+    pub semantic_diff: SemanticDiff,
+    pub validation: ValidationReport,
+    #[serde(rename = "expiresAt")]
+    pub expires_at: String,
+}
+}
