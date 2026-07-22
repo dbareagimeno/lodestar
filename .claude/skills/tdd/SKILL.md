@@ -24,7 +24,7 @@ implementa, y quien implementa no puede tocar los tests.
 4. **Gates** — verifica que el implementador aportó evidencia de:
    `cargo test --workspace --locked` · `cargo fmt --all --check` ·
    `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings` ·
-   `cargo doc` con `RUSTDOCFLAGS="-D warnings"` · y si tocó `frontend/`: `npm run check && npm run build`.
+   `cargo doc` con `RUSTDOCFLAGS="-D warnings"`.
    Si falta alguno, córrelo tú antes de dar el ciclo por cerrado.
 5. **REFACTOR (opcional)** — si el verde dejó duplicación o complejidad evidente, propone al usuario
    correr `/simplify` sobre el diff. No refactorices por inercia.

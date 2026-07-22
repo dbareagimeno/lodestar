@@ -82,10 +82,11 @@ cargo install --path crates/lodestar-mcp    # binario `lodestar-mcp`
 ## Requisitos
 
 - **Rust** estable (≥ 1.80, con `rustfmt` y `clippy`; ver `rust-toolchain.toml`)
-- **Node.js** ≥ 20 + npm (frontend y arnés diferencial)
+- **Node.js** ≥ 20 + npm (arnés diferencial)
 - **git** en el PATH (operaciones de red)
-- Solo Linux: libs de Tauri (`libwebkit2gtk-4.1-dev`, `libsoup-3.0-dev`, `libgtk-3-dev`,
-  `librsvg2-dev`). En macOS/Windows no hace falta nada extra.
+
+(La UI de escritorio y sus dependencias de sistema Tauri se retiraron de `main`; viven en la rama
+`experimental/ui-desktop`.)
 
 ## Build desde el código
 
@@ -109,13 +110,11 @@ retirados de la superficie; la mecánica sigue dormida en `lodestar-vcs`, ver `A
 Exit codes de `check`: `0` conforme · `1` hard-fail · `2` uso · `3` runtime/IO · `4` drift de
 generadores.
 
-### App de escritorio (Tauri v2, congelada)
-```bash
-cd frontend && npm ci && npm run dev    # terminal 1: dev server de la webview (:5173)
-cargo run -p lodestar-tauri             # terminal 2: la app (binario lodestar-desktop)
-```
-O sin dev server: `npm run build --prefix frontend && cargo run -p lodestar-tauri --release`. Sigue
-compilando y funcionando (E0–E8), pero no recibe desarrollo nuevo tras el giro headless.
+### App de escritorio (Tauri v2) — retirada de `main`
+
+La UI de escritorio (`frontend/` Svelte + `src-tauri/`, binario `lodestar-desktop`) se **retiró de
+`main`** con el giro headless y vive íntegra en la rama `experimental/ui-desktop`. Quien la quiera
+construir, esa rama; este repo es un motor headless (CLI + MCP).
 
 ### Servidor MCP (agentes)
 ```bash
@@ -138,15 +137,14 @@ crates/
   lodestar-cli/         # fachada CLI (clap) — sin git en la superficie
   lodestar-mcp/         # fachada MCP (stdio, 10 tools) — sin git en la superficie
   lodestar-fixtures/    # bundles de prueba compartidos (no se publica)
-src-tauri/              # fachada de escritorio (Tauri v2, no se publica) — CONGELADA
-frontend/               # UI Svelte 5 + Vite (vista fina sobre BundleSnapshot) — CONGELADA
 prototype/              # prototipo HTML/JS de referencia + arnés diferencial (oráculo en node)
 requirements/           # épicas e historias
 ```
+(La UI de escritorio —`src-tauri/` + `frontend/`— se retiró de `main` a la rama
+`experimental/ui-desktop`.)
 
 Los seis crates de la biblioteca (`lodestar-core`, `-store`, `-vcs`, `-workspace`, `-cli`, `-mcp`)
-son publicables; `lodestar-fixtures` (solo tests) y `src-tauri` (app binaria, hoy congelada) llevan
-`publish = false`.
+son publicables; `lodestar-fixtures` (solo tests) lleva `publish = false`.
 
 ## Documentación
 

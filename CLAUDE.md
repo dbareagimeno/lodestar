@@ -30,14 +30,17 @@ Estado del giro — **E9–E14 COMPLETAS** (`IMPLEMENTATION_STATUS.md` tiene el 
   crash-recovery determinista) → `change_revert`. El gate de staging valida la conformidad completa
   schema-driven (E14-H04, invariante #3). Auto-regen de `index`/`tags` dentro del apply (E13-H11).
 - **Capa de servicios `lodestar-app`** introducida (envelope, códigos de error, casos de uso
-  compartidos por MCP y CLI). **UI CONGELADA**: `frontend/`/`src-tauri/` no se tocan en el flujo de v2.
+  compartidos por MCP y CLI). **UI RETIRADA de `main`**: `frontend/` (Svelte) y `src-tauri/` se
+  movieron íntegros a la rama `experimental/ui-desktop`; ya no forman parte del motor headless.
 - Verificado end-to-end por el **benchmark funcional §17** (15 escenarios, E14-H04) y arnés de escala
   (~10k conceptos, E14-H05).
 
 Herencia previa al giro — **las épicas E0–E8 están implementadas y verificadas**: Cargo workspace
-de 7 crates + `src-tauri`, frontend Svelte 5 funcional (hoy congelado), CLI, MCP por stdio, store
-SQLite/FTS5 con watcher, vcs git (hoy dormido) y workspace con bus en vivo. ~113 tests en verde,
-clippy `-D warnings` limpio.
+de crates de core/store/vcs/workspace + fachadas, CLI, MCP por stdio, store SQLite/FTS5 con watcher,
+vcs git (hoy dormido) y workspace con bus en vivo. La UI de escritorio (`src-tauri` + frontend
+Svelte 5) se construyó y verificó en E0–E8, pero se **retiró de `main` a la rama
+`experimental/ui-desktop`** con el giro headless (queda ahí íntegra como referencia, no como parte
+del producto). ~113 tests en verde, clippy `-D warnings` limpio.
 
 Mapa de documentos — quién manda sobre qué:
 
@@ -61,7 +64,6 @@ cargo test --workspace --locked        # ~113 tests (incl. 6 diferenciales JS-vs
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 cargo doc --workspace --no-deps --locked   # con RUSTDOCFLAGS="-D warnings"
-cd frontend && npm ci && npm run check && npm run build   # svelte-check + Vite → dist/
 ```
 - El arnés diferencial necesita sus deps: `npm ci` en `prototype/harness/` (sin ellas, explota
   con `ERR_MODULE_NOT_FOUND` en vez de saltarse).
@@ -82,25 +84,21 @@ cd frontend && npm ci && npm run check && npm run build   # svelte-check + Vite 
   retirados en `E9-H02`; la mecánica sigue en `lodestar-vcs`, dormida, por si vuelve a la
   superficie).
 
-### MCP y escritorio (escritorio CONGELADO)
+### MCP
 ```bash
 cargo run -p lodestar-mcp -- <bundle>   # servidor MCP JSON-RPC por stdio (10 tools, sin git; stdout puro)
-# Escritorio (Tauri v2) — CONGELADO desde el giro headless (§19.1): se conserva compilando y
-# funcional, pero el flujo de desarrollo (agentes/skills de `.claude/`) no lo toca en v2.
-cd frontend && npm run dev              # terminal 1
-cargo run -p lodestar-tauri             # terminal 2 → binario lodestar-desktop
-# Sin dev server: cd frontend && npm run build && cargo run -p lodestar-tauri --release
 ```
-En Linux, Tauri necesita libs de sistema (`libwebkit2gtk-4.1-dev`, `libsoup-3.0-dev`, …); en macOS
-no hace falta nada. `tauri.conf.json` embebe `frontend/dist` en el build (`generate_context!`).
+La app de escritorio (Tauri v2 + Svelte 5) se **retiró de `main`** con el giro headless y vive en la
+rama `experimental/ui-desktop`; sus comandos de desarrollo (`npm run dev`, `cargo run -p
+lodestar-tauri`, libs de sistema Tauri) ya no aplican a este repo headless.
 
 ## Arquitectura (el panorama)
 
 `lodestar` es hoy un **motor headless de integridad semántica** (`ARCHITECTURE.md §19`) para bases
 de conocimiento **OKF** (un directorio de `.md` con frontmatter YAML): sin GUI y sin git en la
-superficie, consumido por agentes vía MCP/CLI. Stack: **Rust + SQLite/FTS5 + MCP + CLI (clap)**;
-`Tauri v2 + Svelte 5/Vite` se conservan como la app de escritorio ya construida, hoy **congelada**
-(no se toca en el flujo de desarrollo de v2). git sigue en el repo como capacidad **dormida**
+superficie, consumido por agentes vía MCP/CLI. Stack: **Rust + SQLite/FTS5 + MCP + CLI (clap)**. La
+app de escritorio (`Tauri v2 + Svelte 5/Vite`) se **retiró de `main`** con el giro headless y se
+conserva en la rama `experimental/ui-desktop`, ya fuera del producto. git sigue en el repo como capacidad **dormida**
 (`lodestar-vcs`, libgit2 local + binario `git` para red) — la mecánica del §13 se conserva por si
 la superficie vuelve a exponerlo, pero hoy ninguna fachada la invoca.
 
@@ -124,8 +122,9 @@ store      vcs  (store: rusqlite+FTS5+watcher notify, dueño del DDL .lodestar/i
                     CERO lógica de dominio; consumido por cli y mcp)
     ▲       ▲
 lodestar-cli · lodestar-mcp   (fachadas finas: shells de 5–15 líneas, CERO lógica OKF; sin git)
-src-tauri   (CONGELADO: sigue llamando a `workspace` directamente; UI congelada, no se toca)
 ```
+Las **dos únicas fachadas** son ahora `lodestar-cli` y `lodestar-mcp`; la fachada de escritorio
+(`src-tauri`) se retiró de `main` a la rama `experimental/ui-desktop`.
 (`crates/lodestar-fixtures` provee los bundles de prueba compartidos por los tests.)
 
 ### Invariantes no negociables (no relitigar sin motivo fuerte)
@@ -138,8 +137,10 @@ src-tauri   (CONGELADO: sigue llamando a `workspace` directamente; UI congelada,
    idéntica por el test de paridad; cuando podrían discrepar, **gana el core**.
 4. **Un solo contrato de tipos**: `Check`/`Severity`/`CheckCode`/`Analysis`/`GraphModel`/… se definen
    **una vez** en `lodestar-core::types`. **Sin capa DTO paralela**. (§4.1 fija los nombres/orden
-   exactos — respétalos.) `frontend/src/lib/ipc/types.ts` es hoy un espejo **a mano**; generarlo con
-   ts-rs/specta está pendiente (`DECISIONES.md §4`) — si tocas `core::types`, sincroniza el espejo.
+   exactos — respétalos.) Los tipos los consumen directamente `lodestar-cli`/`lodestar-mcp`; **ya no
+   hay espejo TS que sincronizar** — el `frontend/src/lib/ipc/types.ts` desapareció al retirar la UI
+   a `experimental/ui-desktop`, y con él la nota de ts-rs/specta de `DECISIONES.md §4` (obsoleta para
+   el espejo TS).
 5. **Un watcher = único escritor.** Los comandos **nunca** escriben la cache: escriben el `.md`
    (atómico temp+rename) y el watcher reconcilia (gate por hash blake3 que descarta echoes/no-ops).
 6. **`RelPath` es un newtype validado** (rechaza absolutas/`..`) — único chokepoint de path-traversal
@@ -154,23 +155,17 @@ src-tauri   (CONGELADO: sigue llamando a `workspace` directamente; UI congelada,
    > si git vuelve a la superficie, no como comportamiento actual de producto.
 
 ### Flujo de datos (resumen)
-Humano-en-app / agente-vía-MCP / git-pull → escriben un `.md` atómico → `notify` watcher (gate hash
+Agente-vía-MCP / CLI / git-pull → escriben un `.md` atómico → `notify` watcher (gate hash
 blake3) → `store` upsert incremental a `.lodestar/index.db` + emite `IndexEvent` (crossbeam) →
-`workspace` recomputa `Analysis` + snapshot → Tauri `app.emit('bundle:changed')` / MCP invalida
-resources / CLI one-shot. (Diagrama completo en §9; integración git en §13.)
+`workspace` recomputa `Analysis` + snapshot → MCP invalida resources / CLI one-shot. (Diagrama
+completo en §9; integración git en §13.)
 
-### Frontend (Svelte 5 — `frontend/`) — CONGELADO desde el giro headless
+### UI de escritorio — RETIRADA de `main`
 
-> **No se toca en el flujo de desarrollo de v2** (`§19.1`, `E9-H04`): ningún skill/agente de
-> `.claude/` modifica `frontend/`/`src-tauri/` en el motor headless. Se documenta tal cual quedó
-> construida (E0–E8), no como superficie activa.
-
-Porta la UI del prototipo **verbatim en aspecto** (mismo `<style>`, variables CSS, atributos
-`data-*`) pero **invierte la propiedad de los datos**: el `files{}`/`analyzeBundle()` del prototipo
-viven en Rust; la webview es vista fina sobre un `BundleSnapshot` empujado. **El grafo es una isla
-imperativa** (`createStarMap` en `frontend/src/lib/graph/`): posee el SVG y el loop rAF; Svelte le
-pasa nodos/aristas por métodos en `$effect`, **nunca** con `{#each}` reactivo (§8). i18n keyed por
-`CheckCode` (`frontend/src/lib/i18n.ts`, catálogo español).
+La UI Svelte 5 (`frontend/`) y su fachada Tauri (`src-tauri/`) se **retiraron de `main`** con el giro
+headless y viven íntegras en la rama `experimental/ui-desktop` — quien la quiera, esa rama. No forman
+parte del motor headless ni del flujo de desarrollo de v2; su diseño se documenta en
+`ARCHITECTURE.md §8`/`§13` como referencia histórica, no como superficie activa de este repo.
 
 ## Cómo trabajar aquí
 
@@ -182,7 +177,7 @@ pasa nodos/aristas por métodos en `$effect`, **nunca** con `{#each}` reactivo (
   red de seguridad**: ya cazó 6 divergencias reales (NFC en slugs, orden numérico de tags, `null` en
   YAML vacío, aristas a reservados, orden de extras).
 - **Antes de mergear**: el CI exige fmt + clippy `-D warnings` + build `--all-targets` + tests +
-  doc + pureza del core + frontend check/build. Ejecuta el subconjunto relevante en local.
+  doc + pureza del core. Ejecuta el subconjunto relevante en local.
 - **`ARCHITECTURE.md` es la autoridad** en diseño; `DECISIONES.md` lista lo que está abierto a
   criterio del usuario — si una decisión ratificada te parece equivocada, plantéalo explícitamente,
   no la deshagas por inercia.
@@ -195,10 +190,9 @@ El desarrollo se organiza con los agentes y skills de `.claude/` — mapa comple
 tipo de trabajo en [`.claude/README.md`](.claude/README.md); guía explicativa (porqué del proceso,
 pirámide, recetas con diagramas) en [`docs/WORKFLOWS.md`](docs/WORKFLOWS.md).
 
-**El motor es headless (`§19.1`, `E9-H04`): `frontend/`/`src-tauri/` quedan CONGELADOS en el flujo
-de desarrollo de v2.** `/ciclo`, `/historia`, `/tdd` no modifican esos directorios; el circuito UX
-(`/ux` y el agente `disenador-ux`) queda **documentado pero no aplicable al giro headless** — se
-conserva igual que git quedó dormido en `lodestar-vcs`, por si la UI vuelve a evolucionar.
+**El motor es headless (`§19.1`, `E9-H04`): la UI de escritorio se retiró de `main` a la rama
+`experimental/ui-desktop`.** Con ella se retiraron el skill `/ux` y el agente `disenador-ux` (el
+circuito UX ya no existe en `main`); si la UI vuelve a evolucionar, se hace en esa rama.
 
 | Skill | Cuándo |
 |---|---|
@@ -206,10 +200,9 @@ conserva igual que git quedó dormido en `lodestar-vcs`, por si la UI vuelve a e
 | `/historia <desc\|ID>` | Trabajo que cabe en una historia: spec en `requirements/` + ratificación. |
 | `/tdd <ID>` | Rojo→verde→refactor con separación de poderes (autor-tests ≠ implementador). |
 | `/juzgar [ID] [--panel]` | Juez **ciego** (agente fresco, solo spec+diff) antes de commitear/mergear. |
-| `/contrato [--check]` | Coherencia de la frontera front↔back contra `contracts/*.yml`. |
-| `/ux <flujo\|mockup\|audit>` | **No aplicable al giro headless** (UI congelada, `§19.1`) — documentado por si la UI vuelve a evolucionar; no se invoca en v2. |
+| `/contrato [--check]` | Coherencia de la frontera MCP↔`core::types` contra `contracts/mcp.yml`. |
 | `/mutantes [--file ruta]` | cargo-mutants scoped: ¿la suite muerde donde tocaste? |
-| `/ciclo <desc\|ID>` | Pipeline completo (historia→tdd→contrato→juez→docs→commit). Úsalo para features. **No toca `frontend/`/`src-tauri/`** en v2. |
+| `/ciclo <desc\|ID>` | Pipeline completo (historia→tdd→contrato→juez→docs→commit). Úsalo para features. |
 
 Reglas de proceso: **nada se implementa sin historia ratificada**; el implementador **no puede
 tocar los tests** del autor; a los jueces **nunca** se les pasa contexto de la conversación (esa es

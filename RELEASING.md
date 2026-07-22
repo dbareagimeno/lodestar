@@ -1,8 +1,12 @@
 # Publicar una versión de lodestar
 
-Runbook para cerrar una versión y publicar un release multiplataforma. El pipeline
-(`.github/workflows/release.yml`) se dispara al empujar un tag `vX.Y.Z` y deja el
-GitHub Release en **borrador** para que lo revises antes de publicarlo.
+Runbook para cerrar una versión y publicar los binarios de línea de comandos (CLI +
+MCP) para las tres plataformas. El pipeline (`.github/workflows/release.yml`) se
+dispara al empujar un tag `vX.Y.Z` y deja el GitHub Release en **borrador** para que lo
+revises antes de publicarlo.
+
+> La UI de escritorio (Tauri) se movió a la rama `experimental/ui-desktop`; este runbook
+> y el pipeline de `main` ya no publican el bundle de escritorio (dmg/deb/appimage/nsis).
 
 ## Requisitos previos
 
@@ -11,8 +15,8 @@ GitHub Release en **borrador** para que lo revises antes de publicarlo.
 
 ## Pasos
 
-1. **Fija la versión** en los tres sitios que la declaran (`Cargo.toml`,
-   `src-tauri/tauri.conf.json`, `frontend/package.json`) y actualiza el lockfile:
+1. **Fija la versión** donde se declara (`Cargo.toml`, `[workspace.package]`) y
+   actualiza el lockfile:
 
    ```bash
    ./scripts/set-version.sh X.Y.Z   # p. ej. 0.1.0 (chmod +x la primera vez)
@@ -35,9 +39,8 @@ GitHub Release en **borrador** para que lo revises antes de publicarlo.
    ```
 
 5. **El workflow `release.yml` compila las tres plataformas** (macOS Apple Silicon,
-   Windows y Linux) y crea un **GitHub Release en borrador** con los instaladores
-   (dmg / deb / appimage / nsis) más los binarios de CLI y MCP. Los bundles salen
-   **sin firmar** (ver «Firma de código» abajo).
+   Windows y Linux) y crea un **GitHub Release en borrador** con los tarballs/zip de
+   los binarios de CLI y MCP.
 
 6. **Revisa el borrador y publícalo**: en GitHub → *Releases*, comprueba que están
    todos los artefactos de las tres plataformas y las notas, ajusta el texto si hace
@@ -45,11 +48,11 @@ GitHub Release en **borrador** para que lo revises antes de publicarlo.
 
 ## Firma de código (diferida)
 
-Los bundles de v0.1.0 salen **sin firmar** para macOS (arm64), Windows y Linux. Esto
-implica avisos del SO al instalar (Gatekeeper en macOS, SmartScreen en Windows). La
-firma y notarización están **diferidas, no descartadas**: cuando se aborde, el
-pipeline añadirá los certificados/secretos correspondientes. Ver el estado en
-`DECISIONES.md` (packaging/firma).
+Los binarios de CLI/MCP salen **sin firmar** para macOS (arm64), Windows y Linux. Esto
+puede implicar avisos del SO al ejecutarlos (Gatekeeper en macOS, SmartScreen en
+Windows). La firma y notarización están **diferidas, no descartadas**: cuando se
+aborde, el pipeline añadirá los certificados/secretos correspondientes. Ver el estado
+en `DECISIONES.md` (packaging/firma).
 
 ## Publicar en crates.io (opcional)
 
@@ -64,8 +67,7 @@ cargo login   # pega el token de https://crates.io/settings/tokens
 ```
 
 Publica en **orden topológico** (una dependencia debe existir en el registry antes que
-quien la consume). `lodestar-fixtures` y `src-tauri` son `publish = false` y no se
-publican:
+quien la consume). `lodestar-fixtures` es `publish = false` y no se publica:
 
 ```bash
 cargo publish -p lodestar-core

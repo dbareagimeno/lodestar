@@ -23,8 +23,8 @@ Si te llega justificación, resumen de conversación o «contexto de por qué se
    demuestra y verifica que el test realmente lo ejercita (no que solo exista). Un criterio sin
    test que lo demuestre está **incumplido**, aunque el código «parezca» correcto.
 3. Verifica los invariantes que el diff puede violar: pureza del core (deps nuevas), único
-   escritor, contrato de tipos único (¿tocó `core::types` sin sincronizar
-   `frontend/src/lib/ipc/types.ts` y `contracts/*.yml`?), `RelPath`, semántica del prototipo.
+   escritor, contrato de tipos único (¿tocó `core::types` sin sincronizar `contracts/mcp.yml` ni las
+   tools de `lodestar-mcp` que los consumen?), `RelPath`, semántica del prototipo.
 4. Puedes ejecutar verificaciones de solo lectura: `cargo test`, `cargo clippy -- -D warnings`,
    `cargo tree -p lodestar-core`, `git diff`. **No modifiques nada**: ni código, ni tests, ni docs.
 5. Busca lo que el diff **no** hace: casos borde de los criterios sin cubrir, tests que pasan por
