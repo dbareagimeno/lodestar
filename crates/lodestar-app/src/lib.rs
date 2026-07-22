@@ -11,7 +11,7 @@
 //! `cargo tree -p lodestar-app`).
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -1218,7 +1218,7 @@ impl App {
             plan_hash.0.strip_prefix("blake3:").unwrap_or(&plan_hash.0)
         ));
 
-        Ok(PlanResult {
+        let result = PlanResult {
             change_set_id,
             base_workspace_revision: base_revision,
             plan_hash,
@@ -1230,7 +1230,48 @@ impl App {
             impact,
             diagnostics_before: before_report.summary,
             diagnostics_after: after_report.summary,
-        })
+        };
+
+        // (6) Persistencia en runtime (E12-H09, `ARCHITECTURE.md §19.4/§19.5`): un plan exitoso se
+        // guarda entero en `.lodestar/runtime/plans/` para que `load_plan` (y, más adelante,
+        // `change_apply`, E13) lo recupere por `changeSetId`. Es runtime — gitignored, fuera de
+        // `WorkspaceRevision` (E9-H06/E10-H03) — así que NO usa el único-escritor atómico de
+        // `lodestar_workspace::io` (ese protocolo protege el conocimiento canónico, no el scratch).
+        persist_plan(root, &result)?;
+
+        Ok(result)
+    }
+
+    /// Carga el plan persistido `id` desde `.lodestar/runtime/plans/` (E12-H09,
+    /// `ARCHITECTURE.md §19.4/§19.5`).
+    ///
+    /// `Err(ErrorCode::PlanStale)` si el fichero no existe, no se puede leer o no deserializa a un
+    /// `PlanResult` válido — el wire no distingue "changeSetId desconocido" de "runtime purgado" y
+    /// `PLAN_STALE` es el código ya reservado para "este plan ya no es utilizable" (E12-H08 lo deja
+    /// declarado y sin emisor; aquí gana su primer uso real).
+    ///
+    /// `Err(ErrorCode::PlanExpired)` si `expiresAt` (segundos epoch, wall-clock) ya quedó en el
+    /// pasado respecto de `SystemTime::now()`. El reloj de pared vive aquí, en la fachada de `app`
+    /// — **nunca** en `lodestar-core`, que es puro y no puede depender del reloj del sistema
+    /// (invariante #2 de `CLAUDE.md`).
+    ///
+    /// Si el plan existe y está vigente, `Ok(PlanResult)` con el contenido persistido tal cual
+    /// (mismo `planHash` que devolvió `change_plan`).
+    pub fn load_plan(&self, id: &ChangeSetId) -> Result<PlanResult, ErrorCode> {
+        let path = plan_file_path(self.workspace.root(), id);
+        let raw = std::fs::read(&path).map_err(|_| ErrorCode::PlanStale)?;
+        let plan: PlanResult = serde_json::from_slice(&raw).map_err(|_| ErrorCode::PlanStale)?;
+
+        let expires_at: u64 = plan.expires_at.parse().map_err(|_| ErrorCode::PlanStale)?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        if expires_at < now {
+            return Err(ErrorCode::PlanExpired);
+        }
+
+        Ok(plan)
     }
 }
 
@@ -1460,6 +1501,43 @@ fn compute_plan_hash(base: &WorkspaceRevision, ops: &[NormalizedOperation]) -> P
     let serialized = serde_json::to_vec(ops).expect("NormalizedOperation siempre serializa a JSON");
     hasher.update(&serialized);
     PlanHash(format!("blake3:{}", hasher.finalize().to_hex()))
+}
+
+/// Nombre de fichero saneado para persistir un plan bajo `.lodestar/runtime/plans/` (E12-H09): el
+/// hash hexadecimal DESNUDO del `changeSetId` (sin el prefijo `changeset:`) más `.json`. El
+/// `changeSetId` completo lleva `:`, hostil a nombres de fichero en Windows — el hash desnudo basta
+/// para la trazabilidad (el criterio de aceptación exige que el nombre CONTENGA el hash, no que
+/// preserve el `changeSetId` literal) y es determinista/derivable en ambas direcciones (persistir y
+/// cargar usan esta misma función).
+fn plan_file_name(id: &ChangeSetId) -> String {
+    let hex = id.0.strip_prefix("changeset:").unwrap_or(&id.0);
+    format!("{hex}.json")
+}
+
+/// Ruta completa del fichero de plan persistido para `id`, bajo `.lodestar/runtime/plans/` del
+/// `root` del workspace. El directorio ya lo garantiza `ensure_runtime_scaffold` al abrir el
+/// workspace (E9-H06); [`persist_plan`] lo reafirma con `create_dir_all` por robustez.
+fn plan_file_path(root: &Path, id: &ChangeSetId) -> PathBuf {
+    root.join(".lodestar")
+        .join("runtime")
+        .join("plans")
+        .join(plan_file_name(id))
+}
+
+/// Persiste el `PlanResult` completo (operaciones normalizadas, revisión base, hash, caducidad,
+/// diff, impacto, validación) en `.lodestar/runtime/plans/<hash>.json` (E12-H09,
+/// `ARCHITECTURE.md §19.4/§19.5`).
+///
+/// Runtime, no canónico: gitignored y excluido de `WorkspaceRevision` (E9-H06/E10-H03), por lo que
+/// se escribe con `std::fs::write` normal — el protocolo temp+rename del único-escritor
+/// (`lodestar_workspace::io::write_atomic`) protege el conocimiento `.md` canónico, no el scratch
+/// de runtime, que ni el watcher ni el walker observan.
+fn persist_plan(root: &Path, plan: &PlanResult) -> Result<(), ErrorCode> {
+    let dir = root.join(".lodestar").join("runtime").join("plans");
+    std::fs::create_dir_all(&dir).map_err(|_| ErrorCode::InternalIoError)?;
+    let path = dir.join(plan_file_name(&plan.change_set_id));
+    let json = serde_json::to_vec_pretty(plan).map_err(|_| ErrorCode::InternalIoError)?;
+    std::fs::write(&path, json).map_err(|_| ErrorCode::InternalIoError)
 }
 
 /// Instante de caducidad del plan (`expiresAt`): ahora + [`PLAN_TTL_SECS`], en segundos epoch como

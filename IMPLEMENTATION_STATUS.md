@@ -328,5 +328,11 @@ superficie de producto; git queda como crate dormido) y `DECISIONES.md §0`. Des
     REVISION_CONFLICT por-op (ConceptRevision) y a nivel workspace. Cierra reserva de H05
     (patch_frontmatter/replace_body). outputSchema + mcp.yml. Juez ciego: APROBADA (4/4).
     **A rastrear**: gating por perfil (readonly debe rechazar tools de cambio) → E14-H03.
-  - ⏳ E12-H09 (persistencia del plan en runtime/plans/) pendiente.
+  - ✅ **E12-H09** — Persistencia del plan: `change_plan` escribe el `PlanResult` a
+    `.lodestar/runtime/plans/<hex>.json` (nombre saneado sin `:`, runtime desechable); `App::load_plan`
+    con caducidad (`expiresAt` pasado → `PLAN_EXPIRED`; reloj solo en app). El plan no afecta
+    `WorkspaceRevision` (runtime excluido, invariante #1). Juez ciego: APROBADA (3/3).
+  - **E12 — COMPLETA** (9/9). Criterio de salida cumplido: un agente puede proponer refactors complejos
+    sin modificar archivos (change_plan normaliza/simula/valida en memoria, con diff semántico, riesgo,
+    validación, concurrencia optimista y plan persistido/recuperable).
 - **E13–E14: pendientes** (publicación recuperable · integración + evaluación — `ARCHITECTURE.md §19.8`).
