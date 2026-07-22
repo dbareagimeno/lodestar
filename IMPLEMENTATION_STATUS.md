@@ -297,5 +297,9 @@ superficie de producto; git queda como crate dormido) y `DECISIONES.md §0`. Des
   - ✅ **E12-H02** — `core::plan::assess_risk` (pura): mide el blast-radius de deprecate/delete/move
     (`Bundle::backlinks`); umbral 0→sin factor, 1..=4→Medium, >=5→High; level=máximo, reasons español.
     Juez ciego: APROBADA (2/2).
-  - ⏳ E12-H03–H09 pendientes (diff/validación/normalización → change_plan → persistencia).
+  - ✅ **E12-H03** — `core::plan::semantic_diff(before, after, schema)` (pura): created/modified/
+    deleted/*_changes reusan `diff_snap`; diagnosticsIntroduced/Resolved = diff de all_checks
+    (analyze+validate_schema+validate_relations) por clave (targets,code,msg). `moved` vacío (diff_snap
+    no detecta renames → H06/H08). Juez ciego: APROBADA (3/3).
+  - ⏳ E12-H04–H09 pendientes (validación/normalización → change_plan → persistencia).
 - **E13–E14: pendientes** (publicación recuperable · integración + evaluación — `ARCHITECTURE.md §19.8`).

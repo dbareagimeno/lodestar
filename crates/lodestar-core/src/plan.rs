@@ -1,8 +1,12 @@
-//! Evaluación de riesgo de un plan (`ChangeSet`) — E12-H02.
+//! Análisis de un plan (`ChangeSet`): riesgo (E12-H02) y diff semántico (E12-H03).
 //!
 //! Función pura [`assess_risk`]: dado un conjunto de [`NormalizedOperation`] ya resueltas y el
 //! `Bundle` anterior al cambio, deriva un [`RiskAssessment`] con razones en español. No hace I/O;
 //! toda la verdad la da el core (`Bundle::backlinks`, invariante #3 de `CLAUDE.md`).
+//!
+//! Función pura [`semantic_diff`]: dado el `Bundle` antes/después de un plan y el `Schema`,
+//! deriva un [`SemanticDiff`] reusando [`crate::diff::diff_snap`] y las validaciones de esquema
+//! (`validate_schema`/`validate_relations`) — ver la doc de la función para el detalle.
 //!
 //! ## Heurística (documentada, no normativa — H02 solo fija el orden de magnitud)
 //!
@@ -27,7 +31,14 @@
 //! `SemanticDiff`, E12-H04 `ValidationReport` sí lo necesitan); esta heurística de riesgo solo
 //! necesita el bundle *antes* del cambio para medir backlinks del concepto afectado.
 
-use crate::types::{FrontmatterPatch, NormalizedOperation, RelPath, RiskAssessment, RiskLevel};
+use std::collections::BTreeSet;
+
+use crate::diff::{diff_snap, BodyHunk, ChangeKind};
+use crate::schema::{validate_relations, validate_schema, Schema};
+use crate::types::{
+    Check, CheckCode, FrontmatterPatch, NormalizedOperation, RelPath, RiskAssessment, RiskLevel,
+    SemanticDiff, Severity,
+};
 use crate::Bundle;
 
 /// A partir de este número de backlinks entrantes, el factor de riesgo es `High` (por debajo,
@@ -107,4 +118,111 @@ fn accion(op: &NormalizedOperation) -> &'static str {
         NormalizedOperation::Move { .. } => "Mover",
         _ => "Deprecar",
     }
+}
+
+// --- E12-H03: `SemanticDiff` --------------------------------------------------------------
+
+/// Diff semántico entre `before` y `after` — E12-H03.
+///
+/// `created`/`modified`/`deleted`/`frontmatter_changes`/`body_changes` reusan
+/// [`crate::diff::diff_snap`] (la única verdad de diff del core, invariante #3 de `CLAUDE.md`):
+/// cada [`crate::diff::FileDiff`] se clasifica por su `kind`, y `frontmatter_changes`/
+/// `body_changes` marcan los paths cuyo `FileDiff` trae cambios de frontmatter (`fm` no vacío) o
+/// de cuerpo (algún `BodyHunk::Add`/`Remove`, no solo contexto). `moved` queda siempre vacío:
+/// `diff_snap` no hace detección de renombres (un `Move` se ve como `Remove` + `Add`), y no hay
+/// heurística de renombre en el core que reusar sin inventar semántica nueva — fuera del alcance
+/// de esta historia. `relation_changes` se deriva de `links_added`/`links_removed` de cada
+/// `FileDiff` (los out-links textuales que ya computa `diff_snap`): es la aproximación más
+/// cercana a "cambió una relación" sin reimplementar la resolución de relaciones del `schema`.
+///
+/// `diagnostics_introduced`/`diagnostics_resolved` comparan el conjunto COMPLETO de diagnósticos
+/// de cada bundle bajo `schema`: los 15 checks OKF (`Bundle::analyze().per_file`) más
+/// `validate_schema`/`validate_relations` (E10-H07/E11-H03) — el mismo universo que ve
+/// `lodestar check`. La identidad de un check para este diff es la tupla `(targets, code, msg)`:
+/// dos checks son "el mismo problema" si coinciden en los paths afectados, el código y el
+/// mensaje; se ignoran `id`/`range`/`related`/`fixes` (metadatos aditivos sin relevancia para
+/// "¿sigue el mismo diagnóstico?"). `diagnostics_introduced` = checks de `after` cuya clave no
+/// está en `before`; `diagnostics_resolved` = checks de `before` cuya clave no está en `after`.
+/// Se descartan los `Severity::Pass` (no son diagnósticos, son la ausencia de uno).
+pub fn semantic_diff(before: &Bundle, after: &Bundle, schema: &Schema) -> SemanticDiff {
+    let okf = diff_snap(before.files(), after.files());
+
+    let mut created = Vec::new();
+    let mut modified = Vec::new();
+    let mut deleted = Vec::new();
+    let mut frontmatter_changes = Vec::new();
+    let mut body_changes = Vec::new();
+    let mut relation_changes = Vec::new();
+
+    for fd in &okf.files {
+        match fd.kind {
+            ChangeKind::Add => created.push(fd.path.clone()),
+            ChangeKind::Mod => modified.push(fd.path.clone()),
+            ChangeKind::Remove => deleted.push(fd.path.clone()),
+        }
+        if !fd.fm.is_empty() {
+            frontmatter_changes.push(fd.path.clone());
+        }
+        if fd
+            .body
+            .iter()
+            .any(|h| matches!(h, BodyHunk::Add(_) | BodyHunk::Remove(_)))
+        {
+            body_changes.push(fd.path.clone());
+        }
+        if !fd.links_added.is_empty() || !fd.links_removed.is_empty() {
+            relation_changes.push(fd.path.clone());
+        }
+    }
+
+    let before_checks = all_checks(before, schema);
+    let after_checks = all_checks(after, schema);
+    let before_keys: BTreeSet<_> = before_checks.iter().map(check_key).collect();
+    let after_keys: BTreeSet<_> = after_checks.iter().map(check_key).collect();
+
+    let diagnostics_introduced = after_checks
+        .iter()
+        .filter(|c| !before_keys.contains(&check_key(c)))
+        .cloned()
+        .collect();
+    let diagnostics_resolved = before_checks
+        .iter()
+        .filter(|c| !after_keys.contains(&check_key(c)))
+        .cloned()
+        .collect();
+
+    SemanticDiff {
+        created,
+        modified,
+        deleted,
+        moved: Vec::new(),
+        frontmatter_changes,
+        body_changes,
+        relation_changes,
+        diagnostics_introduced,
+        diagnostics_resolved,
+    }
+}
+
+/// Conjunto completo de diagnósticos de `bundle` bajo `schema`: los 15 checks OKF clásicos
+/// (`Bundle::analyze`) más las extensiones de esquema (`validate_schema`/`validate_relations`) —
+/// el mismo universo que ve `lodestar check`. Descarta `Severity::Pass`: no es un diagnóstico,
+/// es la ausencia de uno.
+fn all_checks(bundle: &Bundle, schema: &Schema) -> Vec<Check> {
+    let mut out: Vec<Check> = bundle
+        .analyze()
+        .per_file
+        .values()
+        .flatten()
+        .cloned()
+        .collect();
+    out.extend(validate_schema(bundle, schema));
+    out.extend(validate_relations(bundle, schema));
+    out.retain(|c| c.level != Severity::Pass);
+    out
+}
+
+/// Clave de identidad de un check para `semantic_diff`: `(targets, code, msg)`.
+fn check_key(c: &Check) -> (Vec<RelPath>, CheckCode, String) {
+    (c.targets.clone(), c.code, c.msg.clone())
 }

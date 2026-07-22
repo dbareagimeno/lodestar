@@ -1570,3 +1570,206 @@ fn riesgo_bajo_aislado() {
         risk.reasons,
     );
 }
+
+// --- E12-H03: `SemanticDiff` (reusa OkfDiff + diagnósticos introducidos/resueltos) --------------
+//
+// Fase ROJA: la función pura `semantic_diff` todavía NO existe en producción. Ubicación ASUMIDA:
+// el módulo `lodestar_core::plan` (paralela a `assess_risk` de E12-H02: análisis de plan, no diff
+// crudo — necesita el `Schema` para computar los checks schema-driven, y `core::diff` es puro sin
+// dependencia de schema). Firma ASUMIDA:
+//
+//     pub fn semantic_diff(
+//         before: &Bundle,
+//         after: &Bundle,
+//         schema: &Schema,
+//     ) -> SemanticDiff
+//
+// Hasta que E12-H03 la defina, estos tres tests hacen ROJO por SÍMBOLO AUSENTE (compile-fail: la
+// función `plan::semantic_diff` no existe), lo que impide compilar el binario de tests del crate.
+// Es el rojo esperado y documentado.
+//
+// El tipo `SemanticDiff` (E12-H01) ya existe en `core::types` con la forma:
+//   { created, modified, deleted, moved, frontmatter_changes, body_changes, relation_changes,
+//     diagnostics_introduced: Vec<Check>, diagnostics_resolved: Vec<Check> }
+// `created/modified/deleted/moved/*_changes` reutilizan `core::diff::OkfDiff`/`diff_snap`;
+// `diagnostics_introduced` = checks de `after` que NO estaban en `before`; `diagnostics_resolved`
+// = checks de `before` que NO están en `after`. Los checks componen `analyze` + `validate_schema`
+// + `validate_relations` (para que SCHEMA-REQFIELD y REL-* participen del diff de diagnósticos).
+//
+// Los tests aseveran PROPIEDADES (el path aparece en `created`/`modified`; un check con el `code`
+// esperado aparece en `diagnostics_resolved`/`diagnostics_introduced`), nunca la representación
+// interna ni el orden.
+
+/// Criterio `diff_created_modified`: **Dado** un plan que crea A y modifica B, **Cuando** se
+/// computa el diff, **Entonces** `created` contiene A y `modified` contiene B.
+#[test]
+fn diff_created_modified() {
+    use lodestar_core::schema::Schema;
+
+    let a = RelPath::new("a.md").unwrap();
+    let b = RelPath::new("b.md").unwrap();
+
+    // `before`: solo B. `after`: A nuevo + B con el cuerpo modificado.
+    let before = Bundle::from_files(fm(&[(
+        "b.md",
+        "---\ntype: N\ntitle: B\ndescription: d\nstatus: draft\n---\n\n# B\n\ncuerpo original\n",
+    )]));
+    let after = Bundle::from_files(fm(&[
+        (
+            "a.md",
+            "---\ntype: N\ntitle: A\ndescription: d\nstatus: draft\n---\n\n# A\n\ncuerpo nuevo\n",
+        ),
+        (
+            "b.md",
+            "---\ntype: N\ntitle: B\ndescription: d\nstatus: draft\n---\n\n# B\n\ncuerpo MODIFICADO\n",
+        ),
+    ]));
+
+    let diff = lodestar_core::plan::semantic_diff(&before, &after, &Schema::default());
+
+    assert!(
+        diff.created.contains(&a),
+        "A (creado en `after`) debe aparecer en `created`; created = {:?}",
+        diff.created,
+    );
+    assert!(
+        diff.modified.contains(&b),
+        "B (modificado en `after`) debe aparecer en `modified`; modified = {:?}",
+        diff.modified,
+    );
+}
+
+/// Criterio `diff_resuelve_diagnostico`: **Dado** un plan que corrige un `SCHEMA-REQFIELD` (añade
+/// el campo obligatorio ausente), **Cuando** se computa el diff, **Entonces** ese diagnóstico
+/// aparece en `diagnosticsResolved`.
+#[test]
+fn diff_resuelve_diagnostico() {
+    use lodestar_core::schema::{DocType, Schema};
+
+    // Schema: el `DocType decision` exige el campo obligatorio `rationale`.
+    let mut schema = Schema::default();
+    schema.types.insert(
+        "decision".to_string(),
+        DocType {
+            name: "decision".to_string(),
+            required_fields: vec!["rationale".to_string()],
+            ..DocType::default()
+        },
+    );
+
+    // `before`: `d.md` (decision) SIN `rationale` → viola SCHEMA-REQFIELD.
+    let before = Bundle::from_files(fm(&[(
+        "d.md",
+        "---\ntype: decision\ntitle: Migrar\nstatus: proposed\n---\n\n# H\n\ncuerpo\n",
+    )]));
+    // `after`: el mismo concepto CON `rationale` → deja de violar SCHEMA-REQFIELD.
+    let after = Bundle::from_files(fm(&[(
+        "d.md",
+        "---\ntype: decision\ntitle: Migrar\nstatus: proposed\nrationale: porque sí\n---\n\n# H\n\ncuerpo\n",
+    )]));
+
+    // Precondición del fixture: `before` viola el requisito y `after` lo cumple (aísla el criterio).
+    use lodestar_core::schema::validate_schema;
+    assert!(
+        validate_schema(&before, &schema)
+            .iter()
+            .any(|c| c.code == CheckCode::SchemaReqfield),
+        "el fixture `before` debe violar SCHEMA-REQFIELD",
+    );
+    assert!(
+        !validate_schema(&after, &schema)
+            .iter()
+            .any(|c| c.code == CheckCode::SchemaReqfield),
+        "el fixture `after` debe corregir SCHEMA-REQFIELD",
+    );
+
+    let diff = lodestar_core::plan::semantic_diff(&before, &after, &schema);
+
+    assert!(
+        diff.diagnostics_resolved
+            .iter()
+            .any(|c| c.code == CheckCode::SchemaReqfield),
+        "el `SCHEMA-REQFIELD` corregido debe aparecer en `diagnostics_resolved`; resolved = {:?}",
+        diff.diagnostics_resolved,
+    );
+}
+
+/// Criterio `diff_introduce_diagnostico`: **Dado** un plan que rompe una relación (target
+/// existente pasa a inexistente), **Cuando** se computa el diff, **Entonces** el diagnóstico
+/// `REL-TARGET`/`REL-TYPE` aparece en `diagnosticsIntroduced`.
+#[test]
+fn diff_introduce_diagnostico() {
+    use lodestar_core::schema::{DocType, RelationDef, Schema};
+
+    // Schema: `character.appears_in` apunta a tipos `chapter`, cardinalidad libre (`many`).
+    let mut schema = Schema::default();
+    schema.types.insert(
+        "chapter".to_string(),
+        DocType {
+            name: "chapter".to_string(),
+            ..DocType::default()
+        },
+    );
+    schema.types.insert(
+        "character".to_string(),
+        DocType {
+            name: "character".to_string(),
+            relations: BTreeMap::from([(
+                "appears_in".to_string(),
+                RelationDef {
+                    target_types: vec!["chapter".to_string()],
+                    cardinality: "many".to_string(),
+                },
+            )]),
+            ..DocType::default()
+        },
+    );
+
+    // `cap.md` (chapter) existe en ambos estados; solo cambia el target de la relación de `juan`.
+    let cap = (
+        "cap.md",
+        "---\ntype: chapter\ntitle: Capitulo\n---\n\n# Capitulo\n\ncuerpo\n",
+    );
+    // `before`: `juan.appears_in` → `cap.md` (existe, tipo válido): relación conforme.
+    let before = Bundle::from_files(fm(&[
+        (
+            "juan.md",
+            "---\ntype: character\ntitle: Juan\nappears_in:\n  - cap.md\n---\n\n# Juan\n\ncuerpo\n",
+        ),
+        cap,
+    ]));
+    // `after`: `juan.appears_in` → `capitulo_fantasma.md` (inexistente): rompe la relación.
+    let after = Bundle::from_files(fm(&[
+        (
+            "juan.md",
+            "---\ntype: character\ntitle: Juan\nappears_in:\n  - capitulo_fantasma.md\n---\n\n# Juan\n\ncuerpo\n",
+        ),
+        cap,
+    ]));
+
+    // Precondición: `before` no rompe la relación y `after` sí (aísla el criterio).
+    use lodestar_core::schema::validate_relations;
+    assert!(
+        !validate_relations(&before, &schema)
+            .iter()
+            .any(|c| c.code == CheckCode::RelTarget || c.code == CheckCode::RelType),
+        "el fixture `before` debe tener la relación conforme",
+    );
+    assert!(
+        validate_relations(&after, &schema)
+            .iter()
+            .any(|c| c.code == CheckCode::RelTarget || c.code == CheckCode::RelType),
+        "el fixture `after` debe romper la relación",
+    );
+
+    let diff = lodestar_core::plan::semantic_diff(&before, &after, &schema);
+
+    assert!(
+        diff.diagnostics_introduced
+            .iter()
+            .any(|c| c.code == CheckCode::RelTarget || c.code == CheckCode::RelType),
+        "la relación rota debe aparecer como `REL-TARGET`/`REL-TYPE` en `diagnostics_introduced`; \
+         introduced = {:?}",
+        diff.diagnostics_introduced,
+    );
+}
