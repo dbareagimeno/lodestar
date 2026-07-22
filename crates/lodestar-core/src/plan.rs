@@ -42,11 +42,14 @@ use crate::diff::{diff_snap, BodyHunk, ChangeKind};
 use crate::error::CoreError;
 use crate::model;
 use crate::schema::{validate_relations, validate_schema, Schema};
+use once_cell::sync::Lazy;
+use regex::{Captures, Regex};
 use serde::{Deserialize, Serialize};
 
 use crate::types::{
-    Check, CheckCode, EditSectionMode, FrontmatterPatch, NormalizedOperation, RelPath,
-    RiskAssessment, RiskLevel, SemanticDiff, Severity, ValidationReport, ValidationSummary,
+    Check, CheckCode, EditSectionMode, FrontmatterPatch, InboundLinksPolicy, NormalizedOperation,
+    RelPath, RiskAssessment, RiskLevel, SemanticDiff, Severity, ValidationReport,
+    ValidationSummary,
 };
 use crate::Bundle;
 
@@ -461,4 +464,197 @@ pub fn normalize_edit_section(
         path: path.clone(),
         body: new_body,
     })
+}
+
+// ---------------------------------------------------------------------------
+// Normalización de operaciones de ESTRUCTURA (E12-H06): `move` y `delete`.
+//
+// A diferencia de las de contenido, estas producen VARIAS `NormalizedOperation` dentro del mismo
+// change set: el rename/borrado estructural MÁS la reescritura/eliminación de los enlaces entrantes.
+// Toda la verdad la da el core (`Bundle::backlinks`, `model::resolve_link`); nada de I/O.
+// ---------------------------------------------------------------------------
+
+/// Mismo léxico de enlace markdown que [`model::LINK_RE`] (un solo vocabulario de enlaces en el
+/// core), pero capturando además el TEXTO del enlace (grupo 1) junto al href (grupo 2). El patrón
+/// del interior del paréntesis es idéntico al de `LINK_RE`; el grupo de texto extra permite
+/// reescribir el href a un nuevo destino o "desenlazar" a texto plano.
+static LINK_REWRITE_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r#"\[([^\]]*)\]\(([^)\s]+)(?:\s+"[^"]*")?\)"#).unwrap());
+
+/// Qué hacer con un enlace entrante cuyo destino resuelto es el concepto afectado.
+enum LinkAction<'a> {
+    /// Reescribir el href para que apunte a `to` (usado por `move` con `rewriteInboundLinks`).
+    Retarget(&'a RelPath),
+    /// Quitar el enlace dejando solo su texto (usado por `delete` con `remove_links`).
+    Remove,
+}
+
+/// Divide un href crudo en `(base, sufijo)`, donde el sufijo empieza en el primer `#` (fragmento) o
+/// `?` (query). `model::resolve_link` ignora ese sufijo al resolver; al reescribir lo conservamos.
+fn split_href_suffix(href: &str) -> (&str, &str) {
+    match href.find(['#', '?']) {
+        Some(i) => (&href[..i], &href[i..]),
+        None => (href, ""),
+    }
+}
+
+/// Construye un href relativo desde el directorio de `source_path` hasta `target` (ambos paths de
+/// bundle normalizados), reusando el álgebra de directorios del core (`model::dir_of`). Es puro
+/// cálculo de rutas: sin `..` cuando comparten prefijo, con `./` cuando el destino queda en el mismo
+/// directorio (para que `resolve_link` lo trate inequívocamente como relativo, como el prototipo).
+fn relative_href(source_path: &str, target: &str) -> String {
+    let from_dir = model::dir_of(source_path);
+    let from_parts: Vec<&str> = from_dir.split('/').filter(|s| !s.is_empty()).collect();
+    let to_parts: Vec<&str> = target.split('/').collect();
+    let (to_dirs, file) = to_parts.split_at(to_parts.len() - 1);
+
+    let mut common = 0;
+    while common < from_parts.len()
+        && common < to_dirs.len()
+        && from_parts[common] == to_dirs[common]
+    {
+        common += 1;
+    }
+
+    let mut segs: Vec<&str> = vec![".."; from_parts.len() - common];
+    segs.extend_from_slice(&to_dirs[common..]);
+    segs.push(file[0]);
+    let joined = segs.join("/");
+
+    // Sin `../` y en el mismo directorio → `./fichero.md`, claramente relativo.
+    if from_parts.len() == common && !joined.contains('/') {
+        format!("./{joined}")
+    } else {
+        joined
+    }
+}
+
+/// Reescribe el href de un enlace que apuntaba a `from_target` para que apunte a `to`, conservando
+/// el estilo (absoluto `/…` vs relativo) y el sufijo `#fragmento`/`?query`.
+fn retarget_href(old_href: &str, source_path: &str, to: &RelPath) -> String {
+    let (base, suffix) = split_href_suffix(old_href);
+    let new_base = if base.starts_with('/') {
+        format!("/{}", to.as_str())
+    } else {
+        relative_href(source_path, to.as_str())
+    };
+    format!("{new_base}{suffix}")
+}
+
+/// Reescribe el CUERPO de un concepto entrante aplicando `action` SOLO a los enlaces markdown cuyo
+/// href resuelve (vía `model::resolve_link`, la misma verdad del core) al concepto `target`. El
+/// resto de enlaces y de texto queda intacto — nunca se toca un enlace que apunte a otro sitio.
+fn rewrite_body_links(
+    body: &str,
+    source_path: &str,
+    target: &RelPath,
+    action: &LinkAction,
+) -> String {
+    LINK_REWRITE_RE
+        .replace_all(body, |caps: &Captures| {
+            let full = caps.get(0).map_or("", |m| m.as_str());
+            let text = &caps[1];
+            let href = &caps[2];
+            let resuelve =
+                model::resolve_link(href, source_path).and_then(|t| RelPath::new(&t).ok());
+            if resuelve.as_ref() != Some(target) {
+                return full.to_string();
+            }
+            match action {
+                LinkAction::Retarget(to) => {
+                    format!("[{text}]({})", retarget_href(href, source_path, to))
+                }
+                LinkAction::Remove => text.to_string(),
+            }
+        })
+        .into_owned()
+}
+
+/// Normaliza un `move` (rename de un concepto) — E12-H06.
+///
+/// Produce siempre un [`NormalizedOperation::Move`] `{ from, to }`. Si `rewrite_inbound_links`,
+/// añade además, por cada concepto que enlaza a `from` (los entrantes de `Bundle::backlinks(from)`,
+/// invariante #3 de `CLAUDE.md`), un [`NormalizedOperation::ReplaceBody`] con el cuerpo del entrante
+/// reescrito para que su enlace apunte a `to` (ver `rewrite_body_links` / `retarget_href`). Así,
+/// mover un concepto con 30 backlinks y `rewriteInboundLinks:true` da 1 `Move` + 30 `ReplaceBody`,
+/// todo dentro del mismo change set.
+///
+/// # Errores
+/// [`CoreError::NormalizeTargetNotFound`] si algún concepto entrante no tiene fichero en el bundle
+/// (no debería ocurrir: los entrantes salen del propio bundle).
+pub fn normalize_move(
+    bundle: &Bundle,
+    from: &RelPath,
+    to: &RelPath,
+    rewrite_inbound_links: bool,
+) -> Result<Vec<NormalizedOperation>, CoreError> {
+    let mut ops = vec![NormalizedOperation::Move {
+        from: from.clone(),
+        to: to.clone(),
+        rewrite_inbound_links,
+    }];
+
+    if rewrite_inbound_links {
+        for link in bundle.backlinks(from).inbound {
+            let source = link.path;
+            let body = concept_body(bundle, &source)?;
+            let new_body =
+                rewrite_body_links(&body, source.as_str(), from, &LinkAction::Retarget(to));
+            ops.push(NormalizedOperation::ReplaceBody {
+                path: source,
+                body: new_body,
+            });
+        }
+    }
+
+    Ok(ops)
+}
+
+/// Normaliza un `delete` (borrado de un concepto) según la política ante enlaces entrantes — E12-H06.
+///
+/// - [`InboundLinksPolicy::Reject`] (el default): si el concepto tiene entrantes
+///   (`Bundle::backlinks(path).inbound`), falla con [`CoreError::InboundLinksExist`] (wire
+///   `"INBOUND_LINKS_EXIST"`); sin entrantes, devuelve solo el [`NormalizedOperation::Delete`].
+/// - [`InboundLinksPolicy::RemoveLinks`]: devuelve el `Delete` MÁS, por cada entrante, un
+///   [`NormalizedOperation::ReplaceBody`] que quita el enlace al concepto borrado dejando su texto
+///   plano (ver `rewrite_body_links`).
+/// - [`InboundLinksPolicy::Retarget`] / [`InboundLinksPolicy::CreateStub`]: **implementación mínima**
+///   en esta historia — devuelven solo el `Delete`, sin manejar los entrantes. E12-H06 no fija
+///   criterio para ellas (a qué destino redirigir, qué contenido tendría el stub), así que no se
+///   inventa semántica aquí; queda para una historia posterior.
+pub fn normalize_delete(
+    bundle: &Bundle,
+    path: &RelPath,
+    policy: InboundLinksPolicy,
+) -> Result<Vec<NormalizedOperation>, CoreError> {
+    let inbound = bundle.backlinks(path).inbound;
+    let delete = NormalizedOperation::Delete {
+        path: path.clone(),
+        inbound_links_policy: policy,
+    };
+
+    match policy {
+        InboundLinksPolicy::Reject => {
+            if !inbound.is_empty() {
+                return Err(CoreError::InboundLinksExist(path.clone()));
+            }
+            Ok(vec![delete])
+        }
+        InboundLinksPolicy::RemoveLinks => {
+            let mut ops = vec![delete];
+            for link in inbound {
+                let source = link.path;
+                let body = concept_body(bundle, &source)?;
+                let new_body =
+                    rewrite_body_links(&body, source.as_str(), path, &LinkAction::Remove);
+                ops.push(NormalizedOperation::ReplaceBody {
+                    path: source,
+                    body: new_body,
+                });
+            }
+            Ok(ops)
+        }
+        // Sin criterio en E12-H06: mínimo defensible, solo el borrado (ver doc).
+        InboundLinksPolicy::Retarget | InboundLinksPolicy::CreateStub => Ok(vec![delete]),
+    }
 }

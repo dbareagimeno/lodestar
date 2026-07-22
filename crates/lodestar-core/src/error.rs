@@ -5,12 +5,22 @@
 
 use thiserror::Error;
 
+use crate::types::RelPath;
+
 /// Error del núcleo. Recuperable y serializable a un código estable por las fachadas.
 #[derive(Debug, Error)]
 pub enum CoreError {
     /// Ruta relativa inválida (absoluta, con `..`, o vacía). Único chokepoint de path-traversal.
     #[error("ruta relativa inválida: {0}")]
     InvalidRelPath(String),
+
+    /// Al normalizar un `delete` con la política por defecto `reject` (E12-H06), el concepto a
+    /// borrar todavía tiene enlaces entrantes. Lleva el path del concepto referenciado. Mapea a
+    /// `ErrorCode::InboundLinksExist` (wire `"INBOUND_LINKS_EXIST"`).
+    #[error(
+        "el concepto «{0}» tiene enlaces entrantes; no se puede borrar con la política «reject»"
+    )]
+    InboundLinksExist(RelPath),
 
     /// SHA de git con formato inválido (no hexadecimal o longitud incorrecta).
     #[error("sha inválido: {0}")]

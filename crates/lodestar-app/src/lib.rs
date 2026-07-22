@@ -107,6 +107,7 @@ pub struct ResourceLink {
 /// - `Export` → `InternalIoError` (fallo de IO/serialización al exportar).
 /// - `ReplaceTextMismatch` → `InvalidSchema` (precondición de `replace_text` incumplida, E12-H05).
 /// - `NormalizeTargetNotFound` → `ConceptNotFound` (path/sección objetivo inexistente, E12-H05).
+/// - `InboundLinksExist` → `InboundLinksExist` (borrar `reject` con entrantes, E12-H06).
 pub fn error_code(err: &CoreError) -> ErrorCode {
     match err {
         CoreError::InvalidRelPath(_) => ErrorCode::PermissionDenied,
@@ -115,6 +116,7 @@ pub fn error_code(err: &CoreError) -> ErrorCode {
         CoreError::Export(_) => ErrorCode::InternalIoError,
         CoreError::ReplaceTextMismatch(_, _) => ErrorCode::InvalidSchema,
         CoreError::NormalizeTargetNotFound(_) => ErrorCode::ConceptNotFound,
+        CoreError::InboundLinksExist(_) => ErrorCode::InboundLinksExist,
     }
 }
 

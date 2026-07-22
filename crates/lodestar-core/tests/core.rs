@@ -2198,3 +2198,295 @@ Ver el manual.
         "la sección `Referencias` (fuera de `Uso`) debe quedar intacta; cuerpo = {cuerpo:?}",
     );
 }
+
+// --- E12-H06: Normalización de operaciones de estructura (`move`, `delete`) ---
+//
+// Fase ROJA: los normalizadores puros de ESTRUCTURA todavía NO existen en producción. Ubicación
+// ASUMIDA: el módulo `lodestar_core::plan` (junto a `normalize_create`/`normalize_replace_text`/
+// `normalize_edit_section` de E12-H05 y a `assess_risk`/`semantic_diff` — es análisis/normalización
+// de plan, y el core es puro). A diferencia de los normalizadores de contenido, estos producen
+// VARIAS `NormalizedOperation` (el rename/borrado + las reescrituras/eliminaciones de los enlaces
+// entrantes dentro del MISMO change set), por eso devuelven `Vec<NormalizedOperation>`.
+//
+// Firmas ASUMIDAS (documentadas por el autor de tests; el implementador queda vinculado a ellas):
+//
+//   pub fn normalize_move(
+//       bundle: &Bundle, from: &RelPath, to: &RelPath, rewrite_inbound_links: bool,
+//   ) -> Result<Vec<NormalizedOperation>, CoreError>;
+//   pub fn normalize_delete(
+//       bundle: &Bundle, path: &RelPath, policy: InboundLinksPolicy,
+//   ) -> Result<Vec<NormalizedOperation>, CoreError>;
+//
+// Forma RESUELTA del `Vec` de salida (contrato que estos tests fijan):
+//   * `normalize_move(.., rewrite:true)` → un `NormalizedOperation::Move { from, to, .. }` MÁS,
+//     por cada concepto que enlaza a `from`, una operación que reescribe ese enlace a `to`. Como el
+//     enlace vive en el CUERPO (`[x](/from.md)`), la reescritura natural es un `ReplaceBody` del
+//     concepto entrante con el href actualizado a `/to.md`. Estos tests NO exigen la variante exacta
+//     (aceptan cualquier op de contenido cuyo `path` sea el entrante), pero SÍ exigen que el enlace
+//     quede realmente reescrito: la op referencia `/destino.md` y ya NO `/target.md`.
+//   * `normalize_delete(.., Reject)` sobre un concepto con entrantes → `Err`. El error DEBE ser la
+//     variante de `CoreError` que mapea a `ErrorCode::InboundLinksExist` (wire "INBOUND_LINKS_EXIST",
+//     definido en `types.rs`). Como hoy `CoreError` NO tiene esa variante, el implementador debe
+//     añadirla con ese nombre (`CoreError::InboundLinksExist`, alineado con `ErrorCode`). La aserción
+//     es AGNÓSTICA a la forma del payload (tupla/struct/unit): comprueba que el nombre de la variante
+//     aparece en el `Debug` del error. Ver `delete_referenciado_rechaza`.
+//   * `normalize_delete(.., RemoveLinks)` → un `NormalizedOperation::Delete { path, .. }` MÁS, por
+//     cada entrante, una op que quita el enlace (op de contenido cuyo `path` es el entrante y cuyo
+//     `Debug` ya NO contiene `/target.md`).
+//
+// Hasta que E12-H06 defina ambos normalizadores, estos tres tests hacen ROJO por SÍMBOLO AUSENTE
+// (compile-fail: `plan::normalize_move`/`plan::normalize_delete` — y la variante de error — no
+// existen), lo que impide compilar el binario de tests del crate. Es el rojo esperado.
+
+/// Path del concepto tocado por una op de CONTENIDO (reescritura o eliminación de enlace). Las ops
+/// estructurales (`Move`/`Delete`) devuelven `None`: se filtran para aislar las ops de enlace.
+fn path_op_enlace(op: &NormalizedOperation) -> Option<RelPath> {
+    match op {
+        NormalizedOperation::ReplaceBody { path, .. }
+        | NormalizedOperation::PatchFrontmatter { path, .. }
+        | NormalizedOperation::ReplaceText { path, .. }
+        | NormalizedOperation::EditSection { path, .. } => Some(path.clone()),
+        _ => None,
+    }
+}
+
+/// Lista ordenada y deduplicada de paths (para comparar conjuntos de entrantes sin depender del orden).
+fn paths_ordenados(mut v: Vec<RelPath>) -> Vec<RelPath> {
+    v.sort();
+    v.dedup();
+    v
+}
+
+/// Criterio `move_reescribe_entrantes`: **Dado** un `move` con `rewriteInboundLinks:true` y 30
+/// backlinks, **Cuando** se normaliza, **Entonces** el change set incluye el rename MÁS la
+/// reescritura de los 30 enlaces entrantes.
+#[test]
+fn move_reescribe_entrantes() {
+    let from = RelPath::new("target.md").unwrap();
+    let to = RelPath::new("destino.md").unwrap();
+
+    // Bundle: index raíz + `target.md` + 30 conceptos `r1.md`..`r30.md`, cada uno con un enlace de
+    // cuerpo `[target](/target.md)`.
+    let mut files: FileMap = FileMap::new();
+    files.insert(
+        RelPath::new("index.md").unwrap(),
+        "---\nokf_version: \"0.1\"\n---\n\n# B\n".to_string(),
+    );
+    files.insert(
+        from.clone(),
+        "---\ntype: N\ntitle: Target\ndescription: d\n---\n\n# Target\n".to_string(),
+    );
+    let mut entrantes_esperados: Vec<RelPath> = Vec::new();
+    for i in 1..=30 {
+        let p = RelPath::new(&format!("r{i}.md")).unwrap();
+        files.insert(
+            p.clone(),
+            format!("---\ntype: N\ntitle: R{i}\ndescription: d\n---\n\n[target](/target.md)\n"),
+        );
+        entrantes_esperados.push(p);
+    }
+    let entrantes_esperados = paths_ordenados(entrantes_esperados);
+    let b = Bundle::from_files(files);
+
+    // Precondición del fixture: `target.md` recibe exactamente 30 backlinks entrantes.
+    let inbound = b.backlinks(&from).inbound.len();
+    assert_eq!(
+        inbound, 30,
+        "el fixture debe dar 30 backlinks a target.md, dio {inbound}",
+    );
+
+    let ops = lodestar_core::plan::normalize_move(&b, &from, &to, true)
+        .expect("mover un concepto con backlinks y rewrite:true no debe fallar la normalización");
+
+    // 1) Hay exactamente UN rename `Move { from: target, to: destino }`.
+    let moves: Vec<&NormalizedOperation> = ops
+        .iter()
+        .filter(|op| matches!(op, NormalizedOperation::Move { .. }))
+        .collect();
+    assert_eq!(
+        moves.len(),
+        1,
+        "el change set debe incluir exactamente un `Move`; ops = {ops:?}",
+    );
+    let NormalizedOperation::Move {
+        from: mv_from,
+        to: mv_to,
+        ..
+    } = moves[0]
+    else {
+        unreachable!()
+    };
+    assert_eq!(mv_from, &from, "el `Move` debe renombrar desde `target.md`");
+    assert_eq!(mv_to, &to, "el `Move` debe renombrar hacia `destino.md`");
+
+    // 2) El resto de ops son reescrituras de enlace, una por cada uno de los 30 entrantes.
+    let reescrituras: Vec<&NormalizedOperation> = ops
+        .iter()
+        .filter(|op| !matches!(op, NormalizedOperation::Move { .. }))
+        .collect();
+    let paths_reescritos = paths_ordenados(
+        reescrituras
+            .iter()
+            .map(|op| {
+                path_op_enlace(op).unwrap_or_else(|| {
+                    panic!(
+                        "toda op no-`Move` del change set debe ser una reescritura de contenido de \
+                         un concepto entrante; fue {op:?}",
+                    )
+                })
+            })
+            .collect(),
+    );
+    assert_eq!(
+        paths_reescritos, entrantes_esperados,
+        "debe haber una reescritura para cada uno de los 30 entrantes (sin faltar ni sobrar); \
+         reescritos = {paths_reescritos:?}",
+    );
+
+    // 3) DISCRIMINADOR: cada reescritura apunta ya al nuevo destino y NO conserva el href viejo (una
+    // op vacua que dejara `/target.md` pasaría el conteo pero fallaría aquí).
+    for op in &reescrituras {
+        let dbg = format!("{op:?}");
+        assert!(
+            dbg.contains("/destino.md"),
+            "la reescritura de un entrante debe apuntar al nuevo href `/destino.md`; op = {op:?}",
+        );
+        assert!(
+            !dbg.contains("/target.md"),
+            "la reescritura no debe conservar el href viejo `/target.md`; op = {op:?}",
+        );
+    }
+}
+
+/// Criterio `delete_referenciado_rechaza`: **Dado** un `delete` con `inboundLinksPolicy` por defecto
+/// (`reject`) sobre un concepto referenciado, **Cuando** se normaliza, **Entonces** se rechaza con
+/// `INBOUND_LINKS_EXIST`.
+///
+/// Cómo se asevera el rechazo: `normalize_delete(.., Reject)` devuelve `Err`, y el `Debug` del error
+/// contiene el nombre de la variante `InboundLinksExist` — es decir, la variante de `CoreError` que
+/// el implementador debe añadir alineada con `ErrorCode::InboundLinksExist` (wire "INBOUND_LINKS_EXIST").
+/// La comprobación por `Debug` es agnóstica a la forma del payload de la variante (tupla/struct/unit).
+#[test]
+fn delete_referenciado_rechaza() {
+    let target = RelPath::new("target.md").unwrap();
+
+    // Guarda de coherencia con `types.rs`: el `ErrorCode` esperado mapea a este wire.
+    assert_eq!(ErrorCode::InboundLinksExist.as_str(), "INBOUND_LINKS_EXIST");
+
+    let b = Bundle::from_files(fm(&[
+        ("index.md", "---\nokf_version: \"0.1\"\n---\n\n# B\n"),
+        (
+            "target.md",
+            "---\ntype: N\ntitle: Target\ndescription: d\n---\n\n# Target\n",
+        ),
+        (
+            "r1.md",
+            "---\ntype: N\ntitle: R1\ndescription: d\n---\n\n[target](/target.md)\n",
+        ),
+    ]));
+
+    // Precondición del fixture: `target.md` está referenciado (>= 1 entrante).
+    assert!(
+        !b.backlinks(&target).inbound.is_empty(),
+        "el fixture debe dejar target.md con al menos un entrante",
+    );
+
+    let err = lodestar_core::plan::normalize_delete(&b, &target, InboundLinksPolicy::Reject)
+        .expect_err(
+            "borrar un concepto referenciado con la política por defecto `reject` debe fallar",
+        );
+
+    let dbg = format!("{err:?}");
+    assert!(
+        dbg.contains("InboundLinksExist"),
+        "el rechazo debe ser la variante de `CoreError` que mapea a `ErrorCode::InboundLinksExist` \
+         (wire \"INBOUND_LINKS_EXIST\"); error = {err:?}",
+    );
+}
+
+/// Criterio `delete_remove_links`: **Dado** un `delete` con `remove_links` sobre un concepto
+/// referenciado, **Cuando** se normaliza, **Entonces** el change set incluye el borrado MÁS quitar
+/// esos enlaces en los conceptos entrantes.
+#[test]
+fn delete_remove_links() {
+    let target = RelPath::new("target.md").unwrap();
+
+    let b = Bundle::from_files(fm(&[
+        ("index.md", "---\nokf_version: \"0.1\"\n---\n\n# B\n"),
+        (
+            "target.md",
+            "---\ntype: N\ntitle: Target\ndescription: d\n---\n\n# Target\n",
+        ),
+        (
+            "r1.md",
+            "---\ntype: N\ntitle: R1\ndescription: d\n---\n\n[target](/target.md)\n",
+        ),
+        (
+            "r2.md",
+            "---\ntype: N\ntitle: R2\ndescription: d\n---\n\n[target](/target.md)\n",
+        ),
+    ]));
+
+    // Precondición del fixture: exactamente 2 entrantes a `target.md`.
+    let inbound = b.backlinks(&target).inbound.len();
+    assert_eq!(
+        inbound, 2,
+        "el fixture debe dar 2 backlinks a target.md, dio {inbound}",
+    );
+    let entrantes_esperados = paths_ordenados(vec![
+        RelPath::new("r1.md").unwrap(),
+        RelPath::new("r2.md").unwrap(),
+    ]);
+
+    let ops = lodestar_core::plan::normalize_delete(&b, &target, InboundLinksPolicy::RemoveLinks)
+        .expect("borrar con `remove_links` sobre un concepto referenciado no debe fallar");
+
+    // 1) Hay exactamente un `Delete { path: target }`.
+    let deletes: Vec<&NormalizedOperation> = ops
+        .iter()
+        .filter(|op| matches!(op, NormalizedOperation::Delete { .. }))
+        .collect();
+    assert_eq!(
+        deletes.len(),
+        1,
+        "el change set debe incluir exactamente un `Delete`; ops = {ops:?}",
+    );
+    let NormalizedOperation::Delete { path: del_path, .. } = deletes[0] else {
+        unreachable!()
+    };
+    assert_eq!(del_path, &target, "el `Delete` debe borrar `target.md`");
+
+    // 2) El resto de ops quitan el enlace en cada uno de los 2 entrantes.
+    let removidas: Vec<&NormalizedOperation> = ops
+        .iter()
+        .filter(|op| !matches!(op, NormalizedOperation::Delete { .. }))
+        .collect();
+    let paths_removidos = paths_ordenados(
+        removidas
+            .iter()
+            .map(|op| {
+                path_op_enlace(op).unwrap_or_else(|| {
+                    panic!(
+                        "toda op no-`Delete` del change set debe quitar el enlace de un concepto \
+                         entrante; fue {op:?}",
+                    )
+                })
+            })
+            .collect(),
+    );
+    assert_eq!(
+        paths_removidos, entrantes_esperados,
+        "debe haber una op que quita el enlace por cada uno de los 2 entrantes; \
+         removidos = {paths_removidos:?}",
+    );
+
+    // 3) DISCRIMINADOR: tras quitar el enlace, la op del entrante ya NO conserva el href al target
+    // borrado (una op vacua que dejara `/target.md` pasaría el conteo pero fallaría aquí).
+    for op in &removidas {
+        let dbg = format!("{op:?}");
+        assert!(
+            !dbg.contains("/target.md"),
+            "la op debe QUITAR el enlace a `/target.md` del entrante, no conservarlo; op = {op:?}",
+        );
+    }
+}

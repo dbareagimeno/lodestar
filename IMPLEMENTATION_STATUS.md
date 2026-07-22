@@ -310,5 +310,11 @@ superficie de producto; git queda como crate dormido) y `DECISIONES.md §0`. Des
     (cierra la reserva de E10-H10); `knowledge_get` la reusa (sin duplicar). Juez ciego: APROBADA CON
     RESERVAS (3/3). **A cubrir en E12-H08**: normalizadores `patch_frontmatter`/`replace_body` (los 11
     ops) + modos Append/Prepend de edit_section.
-  - ⏳ E12-H06–H09 pendientes (estructura/semántica → change_plan → persistencia).
+  - ✅ **E12-H06** — Normalización de estructura: `normalize_move` (1 Move + N ReplaceBody reescribiendo
+    los entrantes; discrimina el enlace por `resolve_link`, no regex; preserva estilo/fragmentos) y
+    `normalize_delete` (reject→`CoreError::InboundLinksExist`, remove_links→Delete + desenlazar entrantes).
+    Juez ciego: APROBADA CON RESERVAS (3/3). **A endurecer antes de E13**: `Retarget`/`CreateStub` hoy hacen
+    solo Delete en silencio (deben implementarse o dar error explícito); añadir test de enlace-señuelo y
+    cobertura de rutas relativas.
+  - ⏳ E12-H07–H09 pendientes (semántica → change_plan → persistencia).
 - **E13–E14: pendientes** (publicación recuperable · integración + evaluación — `ARCHITECTURE.md §19.8`).
