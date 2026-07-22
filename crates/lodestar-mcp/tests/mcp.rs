@@ -965,3 +965,184 @@ fn get_inexistente() {
         "el error debe exponer el código estable «CONCEPT_NOT_FOUND»: {resp:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// E10-H11 — Tool `schema_inspect`.
+//
+// UBICACIÓN: los 3 criterios se ejercitan **e2e por la tool MCP** (campo Pruebas de la historia:
+// `crates/lodestar-mcp/tests/`), coherente con E10-H09/H10: el contrato que importa fijar aquí es
+// el de **wire** (nombres de argumento `mode`/`type`, forma del `structuredContent`), sin acoplar
+// los tests a los tipos internos que el implementador aún no ha creado.
+//
+// FASE ROJA: la tool `schema_inspect` NO está en `tools::list()` todavía, así que `tools/call`
+// devuelve el error de protocolo `-32602` (tool desconocida) y `result` es `null` → los asserts
+// que leen `result.structuredContent.*` fallan por AUSENCIA de la tool/servicio (no por un valor
+// erróneo). Ese es el rojo correcto: la tool + `App::schema_inspect` no existen.
+//
+// WIRE DE ENTRADA asumido (el implementador puede refinar los tipos internos, no el wire):
+//   arguments: { mode: string, type?: string }
+//     - inspect_type:    { "mode": "type", "type": "decision" }
+//     - inspect_catalog: { "mode": "catalog" }
+//   (modos `field`/`relation`/`diagnosticCode`/`lifecycle`/`template` del REFACTOR §9.4 quedan
+//    fuera de los criterios de esta historia; solo se fijan `type` y `catalog`.)
+//
+// WIRE DE SALIDA asumido (`structuredContent`, `ARCHITECTURE.md §19.2`, `REFACTOR §9.4`):
+//   - mode "type":    { schemaVersion, type: { name, description, requiredFields,
+//                       allowedStatuses, fields, relations, rules, bodyTemplate } }
+//   - mode "catalog": { schemaVersion, types: [ { name, description, requiredFields,
+//                       allowedStatuses, ... } ] }  (lista de todos los DocType disponibles)
+//
+// La firma de servicio ASUMIDA (proyección del `Schema` cargado por `WorkspaceSchema::load`):
+//   App::schema_inspect(mode) -> Result<SchemaInspection, WorkspaceError>
+// ---------------------------------------------------------------------------
+
+/// Bundle con un `.lodestar/schema.yaml` que declara DOS `DocType`s: `decision` (con
+/// `requiredFields`/`allowedStatuses`/`bodyTemplate` completos, el sujeto de `inspect_type`) y
+/// `note` (para que `inspect_catalog` no sea vacuo: un stub que devolviera un único tipo cableado a
+/// mano fallaría al no listar los dos). Formato de wire camelCase idéntico al que ya carga el
+/// loader (`crates/lodestar-workspace/tests/workspace.rs::loader_carga_schema_yaml`).
+fn bundle_con_schema() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "index.md",
+        "---\nokf_version: \"0.1\"\n---\n\n# Bundle\n",
+    );
+    write(
+        dir.path(),
+        ".lodestar/schema.yaml",
+        "\
+version: \"1\"
+types:
+  decision:
+    name: decision
+    description: Una decisión de arquitectura registrada
+    requiredFields: [title, status, rationale]
+    allowedStatuses: [proposed, accepted, rejected, deprecated]
+    bodyTemplate: |
+      # {title}
+
+      ## Contexto
+
+      ## Decisión
+
+      ## Consecuencias
+  note:
+    name: note
+    description: Una nota libre
+    requiredFields: [title]
+    allowedStatuses: [draft, published]
+",
+    );
+    dir
+}
+
+/// E10-H11 · Criterio `inspect_type`:
+/// Dado un `DocType decision`, Cuando se llama `schema_inspect(type="decision")`, Entonces devuelve
+/// sus `requiredFields`/`allowedStatuses`/`bodyTemplate`.
+#[test]
+fn inspect_type() {
+    let dir = bundle_con_schema();
+    let resp = roundtrip(
+        dir.path(),
+        &[
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"schema_inspect","arguments":{"mode":"type","type":"decision"}}}"#,
+        ],
+        1,
+    );
+    let sc = &resp[0]["result"]["structuredContent"];
+
+    // `requiredFields` == [title, status, rationale] (orden preservado del wire).
+    let required = sc["type"]["requiredFields"].as_array().unwrap_or_else(|| {
+        panic!("schema_inspect(type=decision) debe devolver type.requiredFields (array): {resp:?}")
+    });
+    let required: Vec<&str> = required.iter().filter_map(|v| v.as_str()).collect();
+    assert_eq!(
+        required,
+        vec!["title", "status", "rationale"],
+        "type.requiredFields debe ser exactamente [title, status, rationale]: {resp:?}"
+    );
+
+    // `allowedStatuses` incluye "accepted".
+    let statuses = sc["type"]["allowedStatuses"].as_array().unwrap_or_else(|| {
+        panic!("schema_inspect(type=decision) debe devolver type.allowedStatuses (array): {resp:?}")
+    });
+    assert!(
+        statuses.iter().any(|v| v == "accepted"),
+        "type.allowedStatuses debe incluir «accepted»: {resp:?}"
+    );
+
+    // `bodyTemplate` presente y no vacío.
+    let template = sc["type"]["bodyTemplate"].as_str().unwrap_or_else(|| {
+        panic!("schema_inspect(type=decision) debe devolver type.bodyTemplate (string): {resp:?}")
+    });
+    assert!(
+        !template.is_empty(),
+        "type.bodyTemplate no debe estar vacío: {resp:?}"
+    );
+}
+
+/// E10-H11 · Criterio `inspect_catalog`:
+/// Dado el modo `catalog`, Cuando se llama, Entonces lista todos los `DocType` disponibles (aquí
+/// `decision` y `note`).
+#[test]
+fn inspect_catalog() {
+    let dir = bundle_con_schema();
+    let resp = roundtrip(
+        dir.path(),
+        &[
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"schema_inspect","arguments":{"mode":"catalog"}}}"#,
+        ],
+        1,
+    );
+    let sc = &resp[0]["result"]["structuredContent"];
+    let types = sc["types"].as_array().unwrap_or_else(|| {
+        panic!("schema_inspect(catalog) debe devolver structuredContent.types (array): {resp:?}")
+    });
+    let nombres: Vec<&str> = types.iter().filter_map(|t| t["name"].as_str()).collect();
+    assert!(
+        nombres.contains(&"decision"),
+        "el catálogo debe listar el DocType «decision»: {resp:?}"
+    );
+    assert!(
+        nombres.contains(&"note"),
+        "el catálogo debe listar el DocType «note»: {resp:?}"
+    );
+}
+
+/// E10-H11 · Criterio `inspect_sin_schema`:
+/// Dado un bundle SIN `.lodestar/schema.yaml`, Cuando se llama `catalog`, Entonces catálogo vacío
+/// (no error). El bundle es válido (tiene `index.md`) pero no declara esquema → `types == []`, sin
+/// que la ausencia de esquema se convierta en un fallo.
+#[test]
+fn inspect_sin_schema() {
+    let dir = bundle_min(); // index.md, deliberadamente SIN `.lodestar/schema.yaml`.
+    let resp = roundtrip(
+        dir.path(),
+        &[
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"schema_inspect","arguments":{"mode":"catalog"}}}"#,
+        ],
+        1,
+    );
+    // No es un fallo: ni error JSON-RPC de transporte ni error de ejecución de la tool.
+    assert!(
+        resp[0]["error"].is_null(),
+        "un bundle sin schema NO debe producir un error de protocolo: {resp:?}"
+    );
+    assert!(
+        resp[0]["result"]["isError"].as_bool() != Some(true),
+        "un bundle sin schema NO debe producir isError: {resp:?}"
+    );
+    // Catálogo vacío.
+    let types = resp[0]["result"]["structuredContent"]["types"]
+        .as_array()
+        .unwrap_or_else(|| {
+            panic!(
+                "schema_inspect(catalog) debe devolver structuredContent.types (array): {resp:?}"
+            )
+        });
+    assert!(
+        types.is_empty(),
+        "un bundle sin schema.yaml debe dar un catálogo vacío: {resp:?}"
+    );
+}

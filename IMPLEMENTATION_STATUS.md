@@ -242,6 +242,9 @@ superficie de producto; git queda como crate dormido) y `DECISIONES.md §0`. Des
     en forma wire (`CONCEPT_NOT_FOUND`). Juez ciego: APROBADA CON RESERVAS (3/3). **A arreglar en
     E12-H04 (edit_section)**: `parse_headings` no reconoce code fences (un `#` dentro de ``` se toma
     como heading → puede truncar el rango).
-  - ⏳ E10-H11–H13 (schema_inspect, knowledge_check + outputSchema/mcp.yml).
+  - ✅ **E10-H11** — Tool `schema_inspect`: modos `catalog`/`type` proyectan el `Schema` cargado
+    (`WorkspaceSchema::load`); `DocType` reexpuesto de core::schema sin DTO paralelo (invariante #4);
+    sin schema → catálogo vacío; modo/tipo inválido → `INVALID_SCHEMA` en wire. Juez ciego: APROBADA (3/3).
+  - ⏳ E10-H12–H13 (knowledge_check + outputSchema/mcp.yml).
 - **E11–E14: pendientes** (grafo e impacto · planificación · publicación recuperable ·
   integración software + evaluación — `ARCHITECTURE.md §19.8`).

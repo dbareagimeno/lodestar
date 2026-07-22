@@ -90,6 +90,11 @@ pub fn list() -> Value {
              "sections": { "type": "array", "description": "Acota «body» a estas subsecciones (solo si «body» está en include). Cada elemento es un headingPath, p. ej. [\"Security\",\"Token rotation\"].",
                  "items": { "type": "array", "items": { "type": "string" } } }
          }, "required": ["ref"], "additionalProperties": false }},
+        {"name": "schema_inspect", "description": "Descubre el catálogo de tipos (`.lodestar/schema.yaml`): un DocType concreto o el catálogo completo.",
+         "inputSchema": { "type": "object", "properties": {
+             "mode": { "type": "string", "description": "«catalog» (todos los DocType) o «type» (uno concreto, requiere «type»).", "enum": ["catalog", "type"] },
+             "type": { "type": "string", "description": "Nombre del DocType a inspeccionar (solo con mode «type»)." }
+         }, "required": ["mode"], "additionalProperties": false }},
     ])
 }
 
@@ -221,6 +226,19 @@ pub fn call(app: &App, profile: Profile, name: &str, params: &Value) -> ToolResu
                 .knowledge_get(&r, &include, sections.as_deref())
                 .map_err(|e| e.as_str().to_string())?;
             Ok(json!({ "concept": to_json(&concept)? }))
+        }
+        "schema_inspect" => {
+            let mode = params
+                .get("mode")
+                .and_then(Value::as_str)
+                .ok_or("falta el parámetro «mode»")?;
+            let type_name = params.get("type").and_then(Value::as_str);
+            // Mismo mapeo de error a wire que `knowledge_get` (E10-H02): el código estable
+            // `ErrorCode::as_str()`, nunca el `Debug` de la variante.
+            let inspection = app
+                .schema_inspect(mode, type_name)
+                .map_err(|e| e.as_str().to_string())?;
+            to_json(&inspection)
         }
         other => Err(format!("tool desconocida: {other}")),
     }

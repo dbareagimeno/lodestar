@@ -16,6 +16,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use lodestar_core::model;
+use lodestar_core::schema::DocType;
 use lodestar_core::types::{
     workspace_revision, Backlinks, Check, ConceptRef, ConceptRevision, ErrorCode, Frontmatter,
     RelPath, WorkspaceRevision,
@@ -579,6 +580,62 @@ impl App {
             diagnostics,
         })
     }
+
+    /// Descubrimiento del catálogo de tipos (E10-H11, `ARCHITECTURE.md §19.2`, `docs/REFACTOR.md
+    /// §9.4`): lo que un agente consulta ANTES de escribir, para conocer los contratos (`DocType`s,
+    /// campos, relaciones, lifecycle, plantillas) declarados en `.lodestar/schema.yaml`.
+    ///
+    /// Solo los modos `"catalog"` (todos los `DocType`) y `"type"` (uno concreto, requiere
+    /// `type_name`) tienen criterio de aceptación en esta historia. El resto de modos de
+    /// `REFACTOR §9.4` (`field`/`relation`/`diagnosticCode`/`lifecycle`/`template`) quedan
+    /// **admitidos por el catálogo de modos pero sin proyección propia todavía**: inventar una
+    /// semántica rica para ellos sin un criterio que la ejerza arriesgaría fijar una forma de wire
+    /// que luego hubiera que romper, así que devuelven `Err(ErrorCode::InvalidSchema)` con un
+    /// mensaje explícito — igual que un modo realmente desconocido (`mode` sin reconocer nunca
+    /// entra en pánico). Un bundle sin `.lodestar/schema.yaml` NO es un error:
+    /// `WorkspaceSchema::load` ya devuelve `Schema::default()` (vacío y permisivo, E10-H05), así
+    /// que `catalog` da `types: []` (criterio `inspect_sin_schema`).
+    ///
+    /// Tipo inexistente en `mode: "type"` → `Err(ErrorCode::InvalidSchema)` (ningún criterio de
+    /// esta historia lo ejerce; se documenta la elección por si una historia futura la refina).
+    ///
+    /// `Result<_, ErrorCode>` (no `WorkspaceError`) — mismo patrón que [`App::resolve_ref`]/
+    /// [`App::knowledge_get`]: este es un servicio de cara a la fachada MCP/CLI, y el catálogo de
+    /// 16 códigos estables (E10-H02) es lo que el llamante necesita para construir el wire de
+    /// error, no la variante interna de `WorkspaceError`. El error de `WorkspaceSchema::load`
+    /// (YAML malformado — el único caso en que puede fallar, ya que la ausencia de fichero no es
+    /// error) mapea a `ErrorCode::InternalIoError` (fallo de IO/parseo, sin código más específico
+    /// en el catálogo de 16 todavía).
+    pub fn schema_inspect(
+        &self,
+        mode: &str,
+        type_name: Option<&str>,
+    ) -> Result<SchemaInspection, ErrorCode> {
+        let schema =
+            WorkspaceSchema::load(self.workspace.root()).map_err(|_| ErrorCode::InternalIoError)?;
+
+        match mode {
+            "catalog" => Ok(SchemaInspection {
+                schema_version: schema.version.clone(),
+                r#type: None,
+                types: Some(schema.types.into_values().collect()),
+            }),
+            "type" => {
+                let name = type_name.ok_or(ErrorCode::InvalidSchema)?;
+                let doc_type = schema
+                    .types
+                    .get(name)
+                    .cloned()
+                    .ok_or(ErrorCode::InvalidSchema)?;
+                Ok(SchemaInspection {
+                    schema_version: schema.version.clone(),
+                    r#type: Some(doc_type),
+                    types: None,
+                })
+            }
+            _ => Err(ErrorCode::InvalidSchema),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -913,4 +970,33 @@ fn encode_cursor(offset: usize) -> String {
 /// Decodifica un cursor a su offset. Un cursor malformado se interpreta como el inicio (offset 0).
 fn decode_cursor(cursor: &str) -> usize {
     usize::from_str_radix(cursor, 16).unwrap_or(0)
+}
+
+// ---------------------------------------------------------------------------
+// `schema_inspect` — tipo de proyección de servicio (E10-H11).
+//
+// Proyección de servicio (framing), NO dominio: vive en `lodestar-app`, no en `core::types`. El
+// `DocType` que porta sí es dominio puro y se reexpone directo desde `core::schema` (ya serializa
+// camelCase con los nombres de wire exactos que pide la historia: `name`/`description`/
+// `requiredFields`/`allowedStatuses`/`fields`/`relations`/`rules`/`bodyTemplate`). Wire en
+// camelCase.
+// ---------------------------------------------------------------------------
+
+/// Respuesta de `schema_inspect` (`ARCHITECTURE.md §19.2`, `docs/REFACTOR.md §9.4`).
+///
+/// `type`/`types` son mutuamente excluyentes según el `mode` pedido: `"type"` puebla `type` y deja
+/// `types` en `None`; `"catalog"` puebla `types` (posiblemente vacío) y deja `type` en `None`. Un
+/// campo en `None` no se serializa (`skip_serializing_if`), así que el wire de cada modo solo
+/// lleva la clave que le corresponde.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SchemaInspection {
+    /// Versión del formato de esquema (`Schema::version`; `"1"` si no hay `.lodestar/schema.yaml`).
+    pub schema_version: String,
+    /// El `DocType` pedido, cuando `mode == "type"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub r#type: Option<DocType>,
+    /// Todos los `DocType` declarados, cuando `mode == "catalog"` (vacío si no hay schema).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub types: Option<Vec<DocType>>,
 }
