@@ -2124,6 +2124,7 @@ dependencies = [
 name = "lodestar-mcp"
 version = "0.1.0"
 dependencies = [
+ "lodestar-app",
  "lodestar-core",
  "lodestar-workspace",
  "serde",

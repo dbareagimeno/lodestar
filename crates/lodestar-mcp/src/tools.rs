@@ -5,7 +5,9 @@
 
 use std::collections::BTreeMap;
 
+use lodestar_app::{App, Profile};
 use lodestar_core::types::{Direction, FrontmatterPatch, RelPath};
+#[cfg(test)]
 use lodestar_workspace::Workspace;
 use serde_json::{json, Value};
 
@@ -64,6 +66,7 @@ pub fn list() -> Value {
              "dir": { "type": "string", "description": "Directorio relativo («» = raíz).", "default": "" }
          }, "additionalProperties": false }},
         {"name": "generate_tag_indexes", "description": "Regenera los índices de tags.", "inputSchema": empty},
+        {"name": "workspace_status", "description": "Config activa, capacidades del perfil, conformidad y recuento agregado del workspace (llámala primero en cada sesión).", "inputSchema": empty},
     ])
 }
 
@@ -75,8 +78,11 @@ pub fn exists(name: &str) -> bool {
         .is_some_and(|ts| ts.iter().any(|t| t["name"] == name))
 }
 
-/// Despacha una tool por nombre.
-pub fn call(ws: &Workspace, name: &str, params: &Value) -> ToolResult {
+/// Despacha una tool por nombre. `profile` solo lo consume `workspace_status` hoy (E10-H08); el
+/// resto de tools no dependen del perfil de arranque todavía (E12 lo cambiará: `create_concept`/
+/// `update_frontmatter` quedarán fuera del perfil `readonly`).
+pub fn call(app: &App, profile: Profile, name: &str, params: &Value) -> ToolResult {
+    let ws = app.workspace();
     match name {
         "find_backlinks" => {
             let p = rel(params, "concept")?;
@@ -151,6 +157,10 @@ pub fn call(ws: &Workspace, name: &str, params: &Value) -> ToolResult {
             let r = ws.generate_tags().map_err(|e| e.to_string())?;
             Ok(json!({ "written": r.written, "removed": r.removed, "unchanged": r.unchanged }))
         }
+        "workspace_status" => {
+            let status = app.workspace_status(profile).map_err(|e| e.to_string())?;
+            to_json(&status)
+        }
         other => Err(format!("tool desconocida: {other}")),
     }
 }
@@ -209,7 +219,11 @@ mod tests {
     //! Verifica que la fachada MCP es un shell fino sin lógica OKF propia (`§2`, `§7`).
     use super::*;
 
-    fn ws_with_fixture() -> (tempfile::TempDir, Workspace) {
+    /// Como antes (`Workspace` efímero sobre un fixture en disco), pero envuelto en `App` —
+    /// `call()` despacha sobre `App` desde E10-H08 (necesita `App::workspace_status`). Las
+    /// comparaciones «directas» del golden test siguen yendo contra el mismo `Workspace`, vía
+    /// `App::workspace()`.
+    fn app_with_fixture() -> (tempfile::TempDir, App) {
         let dir = tempfile::tempdir().unwrap();
         for (p, c) in [
             ("index.md", "---\nokf_version: \"0.1\"\n---\n\n# Bundle\n\n* [Alfa](alfa.md)\n"),
@@ -225,33 +239,45 @@ mod tests {
             std::fs::write(dir.path().join(p), c).unwrap();
         }
         let ws = Workspace::open_ephemeral(dir.path()).unwrap();
-        (dir, ws)
+        (dir, App::from_workspace(ws))
     }
 
     #[test]
     fn golden_backlinks_igual_workspace() {
-        let (_d, ws) = ws_with_fixture();
+        let (_d, app) = app_with_fixture();
         let p = RelPath::new("alfa.md").unwrap();
-        let via_tool = call(&ws, "find_backlinks", &json!({"concept": "alfa.md"})).unwrap();
-        let direct = serde_json::to_value(ws.backlinks(&p).unwrap()).unwrap();
+        let via_tool = call(
+            &app,
+            Profile::Standard,
+            "find_backlinks",
+            &json!({"concept": "alfa.md"}),
+        )
+        .unwrap();
+        let direct = serde_json::to_value(app.workspace().backlinks(&p).unwrap()).unwrap();
         assert_eq!(via_tool, direct);
     }
 
     #[test]
     fn golden_orphans_y_dangling_igual_workspace() {
-        let (_d, ws) = ws_with_fixture();
-        let a = ws.analyze().unwrap();
-        let orphans = call(&ws, "find_orphans", &json!({})).unwrap();
+        let (_d, app) = app_with_fixture();
+        let a = app.workspace().analyze().unwrap();
+        let orphans = call(&app, Profile::Standard, "find_orphans", &json!({})).unwrap();
         assert_eq!(orphans, json!({ "orphans": a.orphans }));
-        let dangling = call(&ws, "find_dangling", &json!({})).unwrap();
+        let dangling = call(&app, Profile::Standard, "find_dangling", &json!({})).unwrap();
         assert_eq!(dangling, json!({ "dangling": a.dangling }));
     }
 
     #[test]
     fn golden_query_igual_workspace() {
-        let (_d, ws) = ws_with_fixture();
-        let via_tool = call(&ws, "query", &json!({"dsl": "is:orphan"})).unwrap();
-        let direct = serde_json::to_value(ws.query("is:orphan").unwrap()).unwrap();
+        let (_d, app) = app_with_fixture();
+        let via_tool = call(
+            &app,
+            Profile::Standard,
+            "query",
+            &json!({"dsl": "is:orphan"}),
+        )
+        .unwrap();
+        let direct = serde_json::to_value(app.workspace().query("is:orphan").unwrap()).unwrap();
         // Envuelto en objeto: `structuredContent` del spec MCP exige objeto, no array.
         assert_eq!(via_tool, json!({ "paths": direct }));
     }
@@ -271,7 +297,17 @@ mod tests {
 
     #[test]
     fn tool_desconocida_es_error() {
-        let (_d, ws) = ws_with_fixture();
-        assert!(call(&ws, "no_existe", &json!({})).is_err());
+        let (_d, app) = app_with_fixture();
+        assert!(call(&app, Profile::Standard, "no_existe", &json!({})).is_err());
+    }
+
+    #[test]
+    fn golden_workspace_status_igual_app() {
+        let (_d, app) = app_with_fixture();
+        let via_tool = call(&app, Profile::Readonly, "workspace_status", &json!({})).unwrap();
+        let direct =
+            serde_json::to_value(app.workspace_status(Profile::Readonly).unwrap()).unwrap();
+        assert_eq!(via_tool, direct);
+        assert_eq!(via_tool["capabilities"]["writes"], false);
     }
 }

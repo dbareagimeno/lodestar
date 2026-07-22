@@ -74,6 +74,12 @@ impl Workspace {
         Config::load(&self.root).unwrap_or_default()
     }
 
+    /// El directorio raíz del bundle abierto (E10-H08: lo expone `App::workspace_status` como
+    /// `root` de la proyección de estado).
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
     /// Abre sin git (modo hermético, p. ej. CLI efímera).
     pub fn open_ephemeral(root: &Path) -> Result<Self, WorkspaceError> {
         Ok(Workspace {

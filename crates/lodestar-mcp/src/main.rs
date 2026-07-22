@@ -8,16 +8,47 @@
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
 
-use lodestar_workspace::Workspace;
+use lodestar_app::{App, Profile};
 use serde_json::{json, Value};
 
 mod tools;
 
+/// Parsea `<bundle> [--profile readonly|standard]`: el bundle es el primer argumento
+/// posicional (sin tocar); `--profile` es una flag adicional, `standard` por defecto
+/// (`ARCHITECTURE.md §19.6`).
+fn parse_args() -> (PathBuf, Profile) {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mut root = None;
+    let mut profile = Profile::Standard;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--profile" => {
+                i += 1;
+                profile = match args.get(i).map(String::as_str) {
+                    Some("readonly") => Profile::Readonly,
+                    Some("standard") => Profile::Standard,
+                    other => {
+                        eprintln!(
+                            "lodestar-mcp: --profile inválido «{}» (usa «readonly» o «standard»)",
+                            other.unwrap_or("")
+                        );
+                        std::process::exit(2);
+                    }
+                };
+            }
+            other if root.is_none() => root = Some(PathBuf::from(other)),
+            _ => {}
+        }
+        i += 1;
+    }
+    let root =
+        root.unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    (root, profile)
+}
+
 fn main() {
-    let root = std::env::args()
-        .nth(1)
-        .map(PathBuf::from)
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    let (root, profile) = parse_args();
 
     // Un bundle de verdad tiene `index.md` o `.lodestar/`: sin esta comprobación el servidor
     // arrancaría "feliz" sobre un directorio arbitrario y `create_concept` escribiría donde caiga.
@@ -28,15 +59,15 @@ fn main() {
         );
         std::process::exit(3);
     }
-    let ws = match Workspace::open(&root) {
-        Ok(ws) => ws,
+    let app = match App::open(&root) {
+        Ok(app) => app,
         Err(e) => {
             eprintln!("lodestar-mcp: no se pudo abrir el bundle: {e}");
             std::process::exit(3);
         }
     };
     eprintln!(
-        "lodestar-mcp: escuchando JSON-RPC en stdio (root={})",
+        "lodestar-mcp: escuchando JSON-RPC en stdio (root={}, profile={profile:?})",
         root.display()
     );
 
@@ -51,7 +82,7 @@ fn main() {
         // JSON-RPC: el JSON imparseable exige responder -32700 con id null (si no, el cliente
         // se queda esperando la respuesta de ese id para siempre).
         let resp = match serde_json::from_str::<Value>(&line) {
-            Ok(v) => handle(&ws, &v),
+            Ok(v) => handle(&app, profile, &v),
             Err(e) => Some(rpc_error(Value::Null, -32700, &format!("Parse error: {e}"))),
         };
         if let Some(resp) = resp {
@@ -67,7 +98,7 @@ fn rpc_error(id: Value, code: i64, message: &str) -> Value {
 }
 
 /// Despacha un mensaje JSON-RPC. Devuelve `None` para notificaciones (sin `id`).
-fn handle(ws: &Workspace, req: &Value) -> Option<Value> {
+fn handle(app: &App, profile: Profile, req: &Value) -> Option<Value> {
     // Un mensaje que no es un objeto (array de batch, string, número…) es un request
     // inválido: -32600, no un descarte silencioso que cuelga al cliente.
     if !req.is_object() {
@@ -108,7 +139,7 @@ fn handle(ws: &Workspace, req: &Value) -> Option<Value> {
                 // Tool desconocida = error de protocolo (Invalid params, según el spec MCP).
                 Err((-32602, format!("tool desconocida: {name}")))
             } else {
-                match tools::call(ws, name, &args) {
+                match tools::call(app, profile, name, &args) {
                     // `structuredContent` debe ser un objeto: las tools ya devuelven objetos.
                     Ok(v) => Ok(json!({
                         "content": [{ "type": "text", "text": v.to_string() }],

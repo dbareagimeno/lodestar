@@ -226,6 +226,10 @@ superficie de producto; git queda como crate dormido) y `DECISIONES.md §0`. Des
     por campo obligatorio ausente, SCHEMA-STATUS por status fuera de allowedStatuses; msg español —
     cierra la reserva de H06). No se llama desde `analyze` (diferenciales intactos); se compondrá en
     E10-H12 (knowledge_check). Juez ciego: APROBADA CON RESERVAS (3/3).
-  - ⏳ E10-H08–H13 (5 tools de lectura + outputSchema/mcp.yml) pendientes.
+  - ✅ **E10-H08** — Tool `workspace_status` (1ª tool headless): `App::workspace_status(profile)`
+    con la forma §9.1 (workspaceRevision, counts desde Analysis, capabilities por perfil,
+    recovery). Server MCP acepta `--profile readonly|standard`; shell fino que delega en el servicio.
+    Juez ciego: APROBADA (2/2). (Drift de mcp.yml diferido a E10-H13.)
+  - ⏳ E10-H09–H13 (knowledge_search/get, schema_inspect, knowledge_check + outputSchema/mcp.yml).
 - **E11–E14: pendientes** (grafo e impacto · planificación · publicación recuperable ·
   integración software + evaluación — `ARCHITECTURE.md §19.8`).

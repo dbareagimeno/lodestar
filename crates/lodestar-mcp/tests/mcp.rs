@@ -155,7 +155,19 @@ fn tools_list_schema_y_structured_content_objeto() {
         2,
     );
     let tools = resp[0]["result"]["tools"].as_array().unwrap();
-    assert_eq!(tools.len(), 10);
+    // Conteo robusto a adiciones (E10-H08+ va añadiendo tools nuevas cada historia): el propósito
+    // de este test es la FORMA (inputSchema de objeto en todas), no un total exacto. Se ancla con
+    // un mínimo (las 10 heredadas + `workspace_status`) en vez de `==` para no quedar obsoleto en
+    // cada historia de E10.
+    assert!(
+        tools.len() >= 11,
+        "se esperaban al menos 11 tools (10 heredadas + workspace_status): {}",
+        tools.len()
+    );
+    assert!(
+        tools.iter().any(|t| t["name"] == "workspace_status"),
+        "falta la tool «workspace_status» en tools/list: {tools:?}"
+    );
     for t in tools {
         assert_eq!(
             t["inputSchema"]["type"], "object",
@@ -269,6 +281,128 @@ fn call_commit_desconocida() {
     assert!(
         resp[0]["result"].is_null(),
         "«commit» no debe producir result (no se ejecuta): {resp:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// E10-H08 — Tool `workspace_status`.
+//
+// Ambos criterios se ejercitan e2e por stdio (campo Pruebas de la historia:
+// `crates/lodestar-mcp/tests/`): `status_capabilities_readonly` DEPENDE del perfil con el que se
+// arranca el servidor, así que el arnés tiene que poder lanzar el server con `--profile readonly`;
+// `status_counts` va por el mismo camino para ejercitar la tool tal y como la ve un cliente MCP.
+//
+// CLI asumida (aún NO implementada — de ahí el ROJO): `lodestar-mcp <bundle> [--profile
+// readonly|standard]`, por defecto `standard`. `capabilities.writes` = (perfil == standard).
+// ---------------------------------------------------------------------------
+
+/// Como [`roundtrip`], pero arranca el servidor con `--profile <profile>` tras el bundle.
+/// El perfil aún no existe en producción: este helper documenta la superficie CLI que la historia
+/// introduce y produce el ROJO cuando el flag / la tool todavía no están.
+fn roundtrip_profile(
+    dir: &std::path::Path,
+    profile: &str,
+    lines: &[&str],
+    expect: usize,
+) -> Vec<serde_json::Value> {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_lodestar-mcp"))
+        .arg(dir)
+        .arg("--profile")
+        .arg(profile)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+    for l in lines {
+        writeln!(stdin, "{l}").unwrap();
+    }
+    stdin.flush().unwrap();
+    drop(stdin);
+    let mut out = Vec::new();
+    for line in (&mut stdout).lines().map_while(Result::ok) {
+        out.push(serde_json::from_str(&line).expect("stdout = JSON-RPC puro"));
+        if out.len() == expect {
+            break;
+        }
+    }
+    child.wait().ok();
+    out
+}
+
+/// Bundle con **exactamente 3 conceptos huérfanos**: un `index.md` raíz que NO enlaza a ninguno
+/// (in_index vacío) más 3 `.md` conceptuales que no se enlazan entre sí ni reciben backlinks. Un
+/// huérfano = concepto sin enlaces entrantes y ausente del índice (`bundle.rs` `compute_analysis`),
+/// así que los 3 lo son y nadie más (index.md/log.md no cuentan como concepto).
+fn bundle_con_tres_orphans() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    // index.md sin enlaces salientes: no "adopta" a ningún concepto.
+    write(
+        dir.path(),
+        "index.md",
+        "---\nokf_version: \"0.1\"\n---\n\n# Bundle\n",
+    );
+    for slug in ["uno", "dos", "tres"] {
+        write(
+            dir.path(),
+            &format!("{slug}.md"),
+            &format!(
+                "---\ntype: Concept\ntitle: {slug}\ndescription: d\n---\n\n# H\n\ncuerpo suelto\n"
+            ),
+        );
+    }
+    dir
+}
+
+/// E10-H08 · Criterio `status_counts` (benchmark §17):
+/// Dado un workspace con 3 orphans, Cuando se llama `workspace_status`, Entonces
+/// `counts.orphans == 3` y `workspaceRevision` está presente (formato `blake3:…`).
+#[test]
+fn status_counts() {
+    let dir = bundle_con_tres_orphans();
+    let resp = roundtrip(
+        dir.path(),
+        &[
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"workspace_status","arguments":{}}}"#,
+        ],
+        1,
+    );
+    let sc = &resp[0]["result"]["structuredContent"];
+    assert_eq!(
+        sc["counts"]["orphans"].as_u64(),
+        Some(3),
+        "workspace_status debe reportar counts.orphans == 3: {resp:?}"
+    );
+    let rev = sc["workspaceRevision"].as_str().unwrap_or("");
+    assert!(
+        rev.starts_with("blake3:"),
+        "workspaceRevision ausente o mal formado (se esperaba «blake3:…»): {resp:?}"
+    );
+}
+
+/// E10-H08 · Criterio `status_capabilities_readonly`:
+/// Dado el perfil `readonly`, Cuando se llama `workspace_status`, Entonces
+/// `capabilities.writes == false`. (Se añade el caso `standard ⇒ writes==true` para no ser vacuo:
+/// que devuelva `false` siempre pasaría el criterio sin implementar la lógica del perfil.)
+#[test]
+fn status_capabilities_readonly() {
+    let dir = bundle_con_tres_orphans();
+    let call = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"workspace_status","arguments":{}}}"#;
+
+    let ro = roundtrip_profile(dir.path(), "readonly", &[call], 1);
+    assert_eq!(
+        ro[0]["result"]["structuredContent"]["capabilities"]["writes"],
+        serde_json::Value::Bool(false),
+        "perfil readonly ⇒ capabilities.writes == false: {ro:?}"
+    );
+
+    let std = roundtrip_profile(dir.path(), "standard", &[call], 1);
+    assert_eq!(
+        std[0]["result"]["structuredContent"]["capabilities"]["writes"],
+        serde_json::Value::Bool(true),
+        "perfil standard ⇒ capabilities.writes == true: {std:?}"
     );
 }
 

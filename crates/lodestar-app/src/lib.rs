@@ -3,7 +3,8 @@
 //! Capa compartida por las dos fachadas de superficie (`lodestar-mcp`, `lodestar-cli`): compone
 //! el `Envelope<T>` de protocolo (framing, no dominio — decisión **D3**, `docs/REFACTOR_DISENO_PROPUESTA.md`)
 //! y la fachada `App`, que envuelve un [`lodestar_workspace::Workspace`] y expone los métodos de
-//! caso de uso (`workspace_status`, `knowledge_search`, … — se irán poblando en E10-H08+).
+//! caso de uso (`workspace_status` desde E10-H08; `knowledge_search`, … se irán poblando en
+//! E10-H09+).
 //!
 //! Este crate depende solo de `lodestar-core` + `lodestar-workspace` + `serde`/`serde_json` — nunca
 //! directamente de `rusqlite`/`git2`/`tokio` (invariante #2 de `CLAUDE.md`, verificado por
@@ -13,9 +14,11 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use lodestar_core::types::{Check, ConceptRef, ErrorCode, RelPath, WorkspaceRevision};
+use lodestar_core::types::{
+    workspace_revision, Check, ConceptRef, ErrorCode, RelPath, WorkspaceRevision,
+};
 use lodestar_core::CoreError;
-use lodestar_workspace::{Workspace, WorkspaceError};
+use lodestar_workspace::{Workspace, WorkspaceConfig, WorkspaceError, WorkspaceSchema};
 
 /// Envelope común de protocolo (`ARCHITECTURE.md §19.6`, `docs/REFACTOR.md §13`, decisión **D3**).
 ///
@@ -167,13 +170,123 @@ impl ErrorEnvelope {
     }
 }
 
+// ---------------------------------------------------------------------------
+// `workspace_status` (E10-H08, `ARCHITECTURE.md §19.6`, `docs/REFACTOR.md §9.1/§7`).
+// ---------------------------------------------------------------------------
+
+/// Perfil con el que arranca el servidor (`lodestar-mcp --profile readonly|standard`,
+/// `ARCHITECTURE.md §19.6`). Config de **runtime del proceso**, no contrato de wire — el cliente
+/// nunca envía ni recibe un `Profile` serializado; solo ve su efecto en `capabilities.writes` (y,
+/// en su día, `transactions`/`revert`) del `WorkspaceStatus`. Por eso vive en `lodestar-app` y no
+/// en `core::types` (invariante #4: ese módulo es para el contrato de wire, no para flags de
+/// arranque del proceso).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Profile {
+    /// Solo las tools de lectura/verificación — sin `create_concept`/`update_frontmatter` ni,
+    /// más adelante, `change_plan`/`change_apply`/`change_revert`.
+    Readonly,
+    /// Añade las tools de cambio a las de lectura/verificación (perfil por defecto).
+    Standard,
+}
+
+impl Profile {
+    /// `true` si este perfil habilita las tools de escritura (`capabilities.writes`).
+    fn writes_enabled(self) -> bool {
+        matches!(self, Profile::Standard)
+    }
+}
+
+/// Recuento agregado de conceptos/enlaces/diagnósticos de un workspace (`counts` de
+/// `WorkspaceStatus`, `docs/REFACTOR.md §9.1`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StatusCounts {
+    /// Nº de conceptos (`Analysis::concepts`).
+    pub concepts: usize,
+    /// Nº total de enlaces salientes resueltos (suma de `Analysis::out` sobre todos los conceptos).
+    pub links: usize,
+    /// Nº de conceptos huérfanos (`Analysis::orphans`).
+    pub orphans: usize,
+    /// Nº de enlaces colgantes (`Analysis::dangling`).
+    pub dangling: usize,
+    /// Nº de ficheros con al menos un check `Err` (`Analysis::hard_fail`).
+    pub errors: usize,
+    /// Nº de checks `Warn` (`Analysis::warn_count`).
+    pub warnings: usize,
+}
+
+/// Capacidades habilitadas por el perfil de arranque (`capabilities` de `WorkspaceStatus`,
+/// `docs/REFACTOR.md §9.1`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StatusCapabilities {
+    /// `true` si el perfil admite tools de cambio (`create_concept`/`update_frontmatter` hoy;
+    /// `change_plan`/`change_apply` en E12).
+    pub writes: bool,
+    /// `true` si el perfil admite transacciones (`change_apply`, E13). Hoy igual a `writes`: la
+    /// mecánica transaccional real es de E13, pero el perfil que la habilitará es el mismo que
+    /// habilita escrituras.
+    pub transactions: bool,
+    /// `true` si el perfil admite revertir la última transacción (`change_revert`, E13). Misma
+    /// nota que `transactions`.
+    pub revert: bool,
+    /// `true` si el servidor entiende `.lodestar/schema.yaml` (siempre, desde E10-H05).
+    pub schemas: bool,
+    /// `true` si el servidor entiende `referenceRoots` (siempre, desde E9-H05).
+    pub external_references: bool,
+}
+
+/// Estado de una posible transacción interrumpida (`recovery` de `WorkspaceStatus`). E13 lo
+/// puebla de verdad (staging/journal/crash-recovery); hasta entonces siempre `false` — no hay
+/// mecánica transaccional que pueda dejar el workspace a medio escribir.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StatusRecovery {
+    /// `true` si hay una transacción sin terminar pendiente de recuperar. Fijo a `false` hasta
+    /// E13-H06.
+    pub pending_transaction: bool,
+}
+
+/// Proyección de estado del workspace — la primera tool que se espera que llame un agente en
+/// cada sesión (`docs/REFACTOR.md §7`, §9.1). Compone `core::types::workspace_revision` +
+/// `Analysis` + `WorkspaceConfig` + `Schema`, sin lógica de dominio nueva propia: es un servicio
+/// que reusa lo que el core y la workspace ya calculan.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceStatus {
+    /// Revisión determinista de las raíces escribibles (`WorkspaceRevision`, E10-H03).
+    pub workspace_revision: WorkspaceRevision,
+    /// Directorio raíz del bundle abierto.
+    pub root: String,
+    /// Raíces de escritura/lectura (`WorkspaceConfig::workspace.writable_roots`).
+    pub knowledge_roots: Vec<RelPath>,
+    /// Raíces visibles pero no escribibles (`WorkspaceConfig::workspace.reference_roots`).
+    pub reference_roots: Vec<RelPath>,
+    /// Versión del formato OKF del `index.md` raíz (`Analysis::okf_version`), o `"0.2"` si no
+    /// está declarada.
+    pub format_version: String,
+    /// Versión del formato de `.lodestar/schema.yaml` (`Schema::version`; `"1"` si no hay schema).
+    pub schema_version: String,
+    /// `true` si el bundle no tiene ningún check `Err` (`Analysis::hard_fail == 0`).
+    pub conformant: bool,
+    /// Recuento agregado de conceptos/enlaces/diagnósticos.
+    pub counts: StatusCounts,
+    /// Capacidades habilitadas por el perfil de arranque.
+    pub capabilities: StatusCapabilities,
+    /// Estado de recuperación de transacciones (siempre `pendingTransaction: false` hasta E13).
+    pub recovery: StatusRecovery,
+}
+
+/// Versión del formato OKF asumida cuando el `index.md` raíz no declara `okf_version`
+/// (`ARCHITECTURE.md §19.6`).
+const DEFAULT_FORMAT_VERSION: &str = "0.2";
+
 /// Fachada fina de servicios de caso de uso sobre un [`Workspace`] abierto.
 ///
 /// `App` es lo que consumen `lodestar-mcp` y `lodestar-cli`: un punto de entrada único que
 /// traduce peticiones de protocolo a operaciones del `Workspace` y envuelve las respuestas en
-/// [`Envelope`]. De momento solo abre el workspace subyacente — los métodos de caso de uso
-/// (`workspace_status`, `knowledge_search`, `knowledge_get`, `schema_inspect`, `knowledge_check`,
-/// …) se irán añadiendo en E10-H08 y siguientes.
+/// [`Envelope`]. Expone `workspace_status` (E10-H08); `knowledge_search`, `knowledge_get`,
+/// `schema_inspect`, `knowledge_check`, … se irán añadiendo en E10-H09 y siguientes.
 pub struct App {
     workspace: Workspace,
 }
@@ -185,6 +298,12 @@ impl App {
     pub fn open(root: &Path) -> Result<Self, WorkspaceError> {
         let workspace = Workspace::open(root)?;
         Ok(App { workspace })
+    }
+
+    /// Envuelve un [`Workspace`] ya abierto (p. ej. [`Workspace::open_ephemeral`] en tests, o un
+    /// caller que ya gestiona su propio ciclo de vida del workspace).
+    pub fn from_workspace(workspace: Workspace) -> Self {
+        App { workspace }
     }
 
     /// El `Workspace` subyacente, para los servicios que se implementen sobre `App`.
@@ -215,6 +334,57 @@ impl App {
         }
     }
 
-    // Los métodos de caso de uso (`workspace_status`, `knowledge_search`, `knowledge_get`,
-    // `schema_inspect`, `knowledge_check`, …) llegan en E10-H08+.
+    /// Proyección de estado del workspace (E10-H08): config activa, capacidades del perfil,
+    /// conformidad y recuento agregado — la primera tool que debe llamar un agente en cada
+    /// sesión (`docs/REFACTOR.md §7`).
+    ///
+    /// Compone `Bundle::analyze` (una sola verdad computada, invariante #3) +
+    /// `core::types::workspace_revision` (E10-H03) + `WorkspaceConfig::load`/`WorkspaceSchema::load`
+    /// (I/O de `workspace`, nunca del core) — sin lógica de dominio propia.
+    pub fn workspace_status(&self, profile: Profile) -> Result<WorkspaceStatus, WorkspaceError> {
+        let bundle = self.workspace.bundle()?;
+        let files = bundle.files();
+        let analysis = bundle.analyze();
+        let root = self.workspace.root();
+        let cfg = WorkspaceConfig::load(root).map_err(WorkspaceError::Io)?;
+        let schema = WorkspaceSchema::load(root).map_err(WorkspaceError::Io)?;
+
+        let revision = workspace_revision(files, &cfg.workspace.writable_roots);
+        let links = analysis.out.values().map(Vec::len).sum();
+        let writes = profile.writes_enabled();
+
+        Ok(WorkspaceStatus {
+            workspace_revision: revision,
+            root: root.display().to_string(),
+            knowledge_roots: cfg.workspace.writable_roots.clone(),
+            reference_roots: cfg.workspace.reference_roots.clone(),
+            format_version: analysis
+                .okf_version
+                .clone()
+                .unwrap_or_else(|| DEFAULT_FORMAT_VERSION.to_string()),
+            schema_version: schema.version.clone(),
+            conformant: analysis.hard_fail == 0,
+            counts: StatusCounts {
+                concepts: analysis.concepts.len(),
+                links,
+                orphans: analysis.orphans.len(),
+                dangling: analysis.dangling.len(),
+                errors: analysis.hard_fail,
+                warnings: analysis.warn_count,
+            },
+            capabilities: StatusCapabilities {
+                writes,
+                transactions: writes,
+                revert: writes,
+                schemas: true,
+                external_references: true,
+            },
+            recovery: StatusRecovery {
+                pending_transaction: false,
+            },
+        })
+    }
+
+    // Los métodos de caso de uso (`knowledge_search`, `knowledge_get`, `schema_inspect`,
+    // `knowledge_check`, …) llegan en E10-H09+.
 }

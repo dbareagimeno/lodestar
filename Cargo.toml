@@ -39,6 +39,7 @@ lodestar-core = { path = "crates/lodestar-core", version = "0.1.0" }
 lodestar-store = { path = "crates/lodestar-store", version = "0.1.0" }
 lodestar-vcs = { path = "crates/lodestar-vcs", version = "0.1.0" }
 lodestar-workspace = { path = "crates/lodestar-workspace", version = "0.1.0" }
+lodestar-app = { path = "crates/lodestar-app", version = "0.1.0" }
 # Solo-dev y `publish = false`: sin `version` para que cargo la descarte al empaquetar.
 lodestar-fixtures = { path = "crates/lodestar-fixtures" }
 # Fachadas / infra
