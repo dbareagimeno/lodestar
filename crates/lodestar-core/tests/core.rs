@@ -132,6 +132,32 @@ fn check_campos_nuevos_por_defecto() {
     assert!(c.fixes.is_empty());
 }
 
+// --- E10-H02: `ErrorCode` estable en `core::types` ---------------------------
+//
+// Fase ROJA: el enum `ErrorCode` (16 códigos del contrato, `REFACTOR §13`) todavía NO existe
+// en producción. Se espera reachable vía `use lodestar_core::types::*` (patrón de `CheckCode`),
+// con wire SCREAMING_SNAKE por `#[serde(rename = "…")]`. Este test fija el WIRE de varios de esos
+// códigos; hace ROJO por API ausente hasta que se implemente `ErrorCode`.
+
+#[test]
+fn error_code_wire() {
+    // Criterio E10-H02 `error_code_wire`: `ErrorCode::RevisionConflict` → `"REVISION_CONFLICT"`.
+    assert_eq!(
+        serde_json::to_value(ErrorCode::RevisionConflict).unwrap(),
+        serde_json::json!("REVISION_CONFLICT"),
+    );
+    // Blindaje adicional del wire de otros dos códigos del contrato (cubre que TODOS usan
+    // SCREAMING_SNAKE y no el `PascalCase` por defecto de serde ni el guion de `CheckCode`).
+    assert_eq!(
+        serde_json::to_value(ErrorCode::WorkspaceNotFound).unwrap(),
+        serde_json::json!("WORKSPACE_NOT_FOUND"),
+    );
+    assert_eq!(
+        serde_json::to_value(ErrorCode::PermissionDenied).unwrap(),
+        serde_json::json!("PERMISSION_DENIED"),
+    );
+}
+
 // --- E1-H05: modelo ---------------------------------------------------------
 
 #[test]

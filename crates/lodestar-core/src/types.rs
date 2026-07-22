@@ -612,6 +612,81 @@ pub fn workspace_revision(files: &FileMap, writable: &[RelPath]) -> WorkspaceRev
 }
 
 // ---------------------------------------------------------------------------
+// Códigos de error estables del protocolo (E10-H02, `ARCHITECTURE.md §19.3`, `REFACTOR §13`).
+// ---------------------------------------------------------------------------
+
+schema_derive! {
+/// Los 16 códigos de error estables del protocolo (`REFACTOR §13`). UNA sola enum, igual que
+/// `CheckCode`: el valor de wire ES la cadena SCREAMING_SNAKE (rename por variante, NO el
+/// `PascalCase` por defecto de serde ni el guion de `CheckCode`). Cualquier fachada que traduzca
+/// un error a protocolo usa una de estas variantes — está prohibido redefinir estos códigos fuera
+/// de `core::types` (grep de CI).
+///
+/// Esta historia (E10-H02) solo fija el contrato de wire y el punto de mapeo; los flujos reales
+/// que producen cada código llegan en E12/E13 (fuera de alcance aquí).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum ErrorCode {
+    #[serde(rename = "WORKSPACE_NOT_FOUND")]
+    WorkspaceNotFound,
+    #[serde(rename = "WORKSPACE_RECOVERY_REQUIRED")]
+    WorkspaceRecoveryRequired,
+    #[serde(rename = "CONCEPT_NOT_FOUND")]
+    ConceptNotFound,
+    #[serde(rename = "AMBIGUOUS_REFERENCE")]
+    AmbiguousReference,
+    #[serde(rename = "REVISION_CONFLICT")]
+    RevisionConflict,
+    #[serde(rename = "PLAN_STALE")]
+    PlanStale,
+    #[serde(rename = "PLAN_EXPIRED")]
+    PlanExpired,
+    #[serde(rename = "PERMISSION_DENIED")]
+    PermissionDenied,
+    #[serde(rename = "INVALID_SCHEMA")]
+    InvalidSchema,
+    #[serde(rename = "NONCONFORMANT_RESULT")]
+    NonconformantResult,
+    #[serde(rename = "INBOUND_LINKS_EXIST")]
+    InboundLinksExist,
+    #[serde(rename = "RELATION_CONSTRAINT_VIOLATION")]
+    RelationConstraintViolation,
+    #[serde(rename = "WRITE_CONFLICT")]
+    WriteConflict,
+    #[serde(rename = "RESULT_TOO_LARGE")]
+    ResultTooLarge,
+    #[serde(rename = "RECOVERY_FAILED")]
+    RecoveryFailed,
+    #[serde(rename = "INTERNAL_IO_ERROR")]
+    InternalIoError,
+}
+}
+
+impl ErrorCode {
+    /// El valor de wire (SCREAMING_SNAKE), p. ej. `"REVISION_CONFLICT"`. Útil para grep/CLI sin
+    /// pasar por `serde_json` (mismo patrón que `CheckCode::as_str`).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ErrorCode::WorkspaceNotFound => "WORKSPACE_NOT_FOUND",
+            ErrorCode::WorkspaceRecoveryRequired => "WORKSPACE_RECOVERY_REQUIRED",
+            ErrorCode::ConceptNotFound => "CONCEPT_NOT_FOUND",
+            ErrorCode::AmbiguousReference => "AMBIGUOUS_REFERENCE",
+            ErrorCode::RevisionConflict => "REVISION_CONFLICT",
+            ErrorCode::PlanStale => "PLAN_STALE",
+            ErrorCode::PlanExpired => "PLAN_EXPIRED",
+            ErrorCode::PermissionDenied => "PERMISSION_DENIED",
+            ErrorCode::InvalidSchema => "INVALID_SCHEMA",
+            ErrorCode::NonconformantResult => "NONCONFORMANT_RESULT",
+            ErrorCode::InboundLinksExist => "INBOUND_LINKS_EXIST",
+            ErrorCode::RelationConstraintViolation => "RELATION_CONSTRAINT_VIOLATION",
+            ErrorCode::WriteConflict => "WRITE_CONFLICT",
+            ErrorCode::ResultTooLarge => "RESULT_TOO_LARGE",
+            ErrorCode::RecoveryFailed => "RECOVERY_FAILED",
+            ErrorCode::InternalIoError => "INTERNAL_IO_ERROR",
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tipos de versionado (git) — también en core::types (§4.4). Sin git2, sin I/O.
 // ---------------------------------------------------------------------------
 

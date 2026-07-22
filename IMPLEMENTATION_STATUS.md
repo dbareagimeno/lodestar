@@ -211,6 +211,11 @@ superficie de producto; git queda como crate dormido) y `DECISIONES.md §0`. Des
   - ✅ **E10-H01** — Crate nuevo `lodestar-app` (fino sobre `Workspace`, D1-C): `Envelope<T>`
     (7 claves wire camelCase, D3), `ResourceLink`, `App::open`. Deps directas sin rusqlite/git2/tokio.
     Juez ciego: APROBADA (2/2).
-  - ⏳ E10-H02/H04/H05/H07 (errores + schema) y H08–H13 (tools) pendientes.
+  - ✅ **E10-H02** — `ErrorCode` (16 códigos SCREAMING_SNAKE) en `core::types` + mapeo
+    `CoreError`/`WorkspaceError`→`ErrorCode` y `ErrorEnvelope` (code/message/recovery) en
+    `lodestar-app`. Juez ciego: APROBADA CON RESERVAS (3/3). **A rastrear en E12/E13**: hacer que
+    `WorkspaceError::Core` preserve la variante `CoreError` (hoy la aplana a String → un
+    `PERMISSION_DENIED` real se degradaría a `INTERNAL_IO_ERROR` al envolverse).
+  - ⏳ E10-H04/H05/H07 (schema) y H08–H13 (tools) pendientes.
 - **E11–E14: pendientes** (grafo e impacto · planificación · publicación recuperable ·
   integración software + evaluación — `ARCHITECTURE.md §19.8`).
