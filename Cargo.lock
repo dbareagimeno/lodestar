@@ -2073,10 +2073,12 @@ dependencies = [
 name = "lodestar-app"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "lodestar-core",
  "lodestar-workspace",
  "serde",
  "serde_json",
+ "serde_yaml",
  "tempfile",
 ]
 

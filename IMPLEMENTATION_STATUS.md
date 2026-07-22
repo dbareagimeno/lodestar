@@ -230,6 +230,12 @@ superficie de producto; git queda como crate dormido) y `DECISIONES.md §0`. Des
     con la forma §9.1 (workspaceRevision, counts desde Analysis, capabilities por perfil,
     recovery). Server MCP acepta `--profile readonly|standard`; shell fino que delega en el servicio.
     Juez ciego: APROBADA (2/2). (Drift de mcp.yml diferido a E10-H13.)
-  - ⏳ E10-H09–H13 (knowledge_search/get, schema_inspect, knowledge_check + outputSchema/mcp.yml).
+  - ✅ **E10-H09** — Tool `knowledge_search` (sustituye `query`): casado por `Bundle::query`
+    (subcadena del core, invariante #3) ∩ `Analysis::concepts`; filtros types/statuses/tags/pathPrefix;
+    snippet UTF-8-safe, `revision`, SIN `body` (estructural); orden determinista (score desc, path asc)
+    + paginación por cursor-offset autosuficiente. Juez ciego: APROBADA CON RESERVAS (3/3).
+    **A vigilar**: filtros avanzados (is:orphan/references/…) se admiten pero se ignoran en silencio
+    (implementarlos en E11/E10-H13); cursor malformado reinicia a página 1.
+  - ⏳ E10-H10–H13 (knowledge_get, schema_inspect, knowledge_check + outputSchema/mcp.yml).
 - **E11–E14: pendientes** (grafo e impacto · planificación · publicación recuperable ·
   integración software + evaluación — `ARCHITECTURE.md §19.8`).

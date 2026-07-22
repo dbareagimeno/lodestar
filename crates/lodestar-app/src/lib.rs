@@ -10,12 +10,15 @@
 //! directamente de `rusqlite`/`git2`/`tokio` (invariante #2 de `CLAUDE.md`, verificado por
 //! `cargo tree -p lodestar-app`).
 
+use std::collections::BTreeSet;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
+use lodestar_core::model;
 use lodestar_core::types::{
-    workspace_revision, Check, ConceptRef, ErrorCode, RelPath, WorkspaceRevision,
+    workspace_revision, Check, ConceptRef, ConceptRevision, ErrorCode, Frontmatter, RelPath,
+    WorkspaceRevision,
 };
 use lodestar_core::CoreError;
 use lodestar_workspace::{Workspace, WorkspaceConfig, WorkspaceError, WorkspaceSchema};
@@ -385,6 +388,324 @@ impl App {
         })
     }
 
-    // Los métodos de caso de uso (`knowledge_search`, `knowledge_get`, `schema_inspect`,
-    // `knowledge_check`, …) llegan en E10-H09+.
+    /// Localiza conceptos por texto y filtros, con snippets y paginación por cursor, **sin devolver
+    /// cuerpos completos** (E10-H09, `ARCHITECTURE.md §19.6`, `REFACTOR §9.2/§15`).
+    ///
+    /// La **verdad** del casado la da el core (invariante #3): el conjunto de conceptos que casan
+    /// `text` se computa con la misma semántica de subcadena de la DSL del prototipo
+    /// (`Bundle::query` → `tokenize_query`/`match_token`), intersectada con la lista autoritativa de
+    /// conceptos (`Analysis::concepts`, así los reservados `index.md`/`log.md` nunca aparecen). Un
+    /// `text` vacío casa todos los conceptos.
+    ///
+    /// Los `filters` baratos se aplican aquí (`types`/`statuses`/`tags`/`pathPrefix`); los filtros
+    /// avanzados del contrato (`references`/`referencedBy`/`linkedTo`/`is:*`/`has:*`) quedan
+    /// **admitidos pero sin criterio** en esta historia (se ignoran silenciosamente si llegan, no se
+    /// inventan con semántica dudosa — E10-H09 fuera de alcance).
+    ///
+    /// **Orden determinista**: `score` descendente y, a igualdad, `path` ascendente — total y estable
+    /// (los paths son únicos), así la partición en páginas es reproducible entre procesos frescos.
+    ///
+    /// **Paginación por cursor autosuficiente**: el cursor es la codificación hexadecimal opaca de un
+    /// **offset** dentro del orden determinista. Como el orden depende solo del contenido (no de
+    /// ningún estado de sesión ni de la caché), un mismo cursor reanuda idénticamente en un servidor
+    /// recién arrancado. `limit` por defecto 20, tope 100; `nextCursor` es `None` al agotar.
+    ///
+    /// `sort` queda reservado para una futura elección de criterio explícito; hoy el orden es siempre
+    /// el determinista descrito arriba.
+    ///
+    /// Cada resultado lleva `revision` = [`ConceptRevision`] del contenido en disco (blake3, E10-H03)
+    /// y un `snippet` compacto NO vacío; la estructura [`SearchResult`] **no tiene** campo `body`, así
+    /// que es imposible filtrar el cuerpo completo por esta vía.
+    pub fn knowledge_search(
+        &self,
+        text: &str,
+        filters: &SearchFilters,
+        _sort: Option<&str>,
+        limit: Option<usize>,
+        cursor: Option<&str>,
+    ) -> Result<SearchResults, WorkspaceError> {
+        let bundle = self.workspace.bundle()?;
+        let analysis = bundle.analyze();
+        let files = bundle.files();
+
+        let text_trim = text.trim();
+        let needle = text_trim.to_lowercase();
+        // Casado de texto reusando la verdad del core (subcadena); intersección con conceptos.
+        let matched_text: BTreeSet<RelPath> = bundle.query(text_trim).into_iter().collect();
+
+        let mut results: Vec<SearchResult> = Vec::new();
+        for path in &analysis.concepts {
+            if !matched_text.contains(path) {
+                continue;
+            }
+            let Some(raw) = files.get(path) else { continue };
+            let parsed = model::parse_file(path.as_str(), raw);
+            let fm = parsed.fm.unwrap_or_default();
+
+            if !passes_filters(path, &fm, filters) {
+                continue;
+            }
+
+            let title = fm
+                .title
+                .clone()
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| model::title_from_path(path.as_str()));
+            let snippet = {
+                let s = snippet_of(&parsed.body, &needle);
+                if s.is_empty() {
+                    // Garantía de snippet NO vacío: cae al título (o al path si no hay título).
+                    if title.is_empty() {
+                        path.as_str().to_string()
+                    } else {
+                        title.clone()
+                    }
+                } else {
+                    s
+                }
+            };
+            let revision = ConceptRevision::from_hash(*blake3::hash(raw.as_bytes()).as_bytes());
+
+            results.push(SearchResult {
+                path: path.clone(),
+                id: None,
+                r#type: fm.r#type.clone(),
+                title,
+                status: fm.status.clone(),
+                description: fm.description.clone(),
+                tags: tags_to_vec(&fm.tags),
+                snippet,
+                score: score_of(raw, &needle),
+                revision,
+            });
+        }
+
+        // Orden total y estable: score desc, path asc.
+        results.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.path.cmp(&b.path))
+        });
+
+        let total = results.len();
+        let limit = limit.unwrap_or(DEFAULT_SEARCH_LIMIT).min(MAX_SEARCH_LIMIT);
+        let start = cursor.map(decode_cursor).unwrap_or(0).min(total);
+        let end = start.saturating_add(limit).min(total);
+        let page = results.get(start..end).unwrap_or(&[]).to_vec();
+        // `nextCursor` solo si hubo progreso y quedan resultados (evita bucles con `limit == 0`).
+        let next_cursor = (end > start && end < total).then(|| encode_cursor(end));
+
+        Ok(SearchResults {
+            results: page,
+            next_cursor,
+            total_approximate: total,
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// `knowledge_search` — tipos de proyección de servicio (E10-H09).
+//
+// Son proyección de servicio (framing), NO dominio: viven en `lodestar-app`, no en `core::types`.
+// El casado, la revisión y el snippet reusan lógica pura del core. Wire en camelCase.
+// ---------------------------------------------------------------------------
+
+/// Límite por defecto de resultados por página de `knowledge_search`.
+const DEFAULT_SEARCH_LIMIT: usize = 20;
+/// Tope duro de resultados por página (evita respuestas gigantes).
+const MAX_SEARCH_LIMIT: usize = 100;
+
+/// Filtros de `knowledge_search` (`ARCHITECTURE.md §19.6`). Todos opcionales; un campo ausente no
+/// filtra. Wire en camelCase (`pathPrefix`).
+///
+/// En esta historia se implementan los filtros **baratos y sin ambigüedad** (`types`/`statuses`/
+/// `tags`/`pathPrefix`). Los filtros avanzados del contrato (`references`/`referencedBy`/`linkedTo`/
+/// `is:*`/`has:*`) quedan **admitidos pero no ejercitados**: como el deserializador ignora las claves
+/// desconocidas, un cliente puede enviarlos sin error, pero no alteran el resultado todavía (se
+/// añadirán con su criterio en una historia posterior, para no inventar semántica dudosa).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchFilters {
+    /// Restringe a conceptos cuyo `type` (frontmatter) esté en esta lista (comparación
+    /// case-insensitive).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub types: Option<Vec<String>>,
+    /// Restringe a conceptos cuyo `status` esté en esta lista (case-insensitive).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub statuses: Option<Vec<String>>,
+    /// Restringe a conceptos que tengan al menos uno de estos `tags` (case-insensitive).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tags: Option<Vec<String>>,
+    /// Restringe a conceptos cuyo `path` empiece por este prefijo.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path_prefix: Option<String>,
+}
+
+/// Un resultado de `knowledge_search` — proyección de un concepto para localizarlo, **nunca su
+/// cuerpo completo** (invariante de la historia). Wire en camelCase.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchResult {
+    /// Ruta relativa del concepto (su identidad en v2, E10-H04).
+    pub path: RelPath,
+    /// Id estable del concepto, cuando exista (no-goal en v2 → siempre ausente).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    /// `type` del frontmatter.
+    #[serde(rename = "type", default, skip_serializing_if = "Option::is_none")]
+    pub r#type: Option<String>,
+    /// Título resuelto (`title` del frontmatter o derivado del path).
+    pub title: String,
+    /// `status` del frontmatter.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    /// `description` del frontmatter.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// `tags` del frontmatter, normalizados a lista de strings.
+    pub tags: Vec<String>,
+    /// Extracto compacto NO vacío alrededor del match (o del inicio del cuerpo). **No** es el cuerpo.
+    pub snippet: String,
+    /// Puntuación de relevancia (mayor = más relevante). Base simple por frecuencia del texto.
+    pub score: f64,
+    /// Revisión de contenido del concepto (`blake3:…`, == [`ConceptRevision`] de E10-H03).
+    pub revision: ConceptRevision,
+}
+
+/// Respuesta de `knowledge_search`: la página de resultados, el cursor a la siguiente página (o
+/// `None` al agotar) y el total aproximado de coincidencias. Wire en camelCase (`nextCursor`,
+/// `totalApproximate`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchResults {
+    /// La página actual de resultados (nunca contiene cuerpos).
+    pub results: Vec<SearchResult>,
+    /// Cursor opaco a la siguiente página, o `None` si no quedan más resultados.
+    pub next_cursor: Option<String>,
+    /// Número total de conceptos que casan (todas las páginas juntas).
+    pub total_approximate: usize,
+}
+
+/// `true` si el concepto pasa todos los filtros baratos activos.
+fn passes_filters(path: &RelPath, fm: &Frontmatter, filters: &SearchFilters) -> bool {
+    if let Some(types) = &filters.types {
+        let ty = fm.r#type.as_deref().unwrap_or("").to_lowercase();
+        if !types.iter().any(|t| t.to_lowercase() == ty) {
+            return false;
+        }
+    }
+    if let Some(statuses) = &filters.statuses {
+        let st = fm.status.as_deref().unwrap_or("").to_lowercase();
+        if !statuses.iter().any(|s| s.to_lowercase() == st) {
+            return false;
+        }
+    }
+    if let Some(want) = &filters.tags {
+        let have: BTreeSet<String> = tags_to_vec(&fm.tags)
+            .iter()
+            .map(|t| t.to_lowercase())
+            .collect();
+        if !want.iter().any(|t| have.contains(&t.to_lowercase())) {
+            return false;
+        }
+    }
+    if let Some(prefix) = &filters.path_prefix {
+        if !path.as_str().starts_with(prefix.as_str()) {
+            return false;
+        }
+    }
+    true
+}
+
+/// Normaliza los `tags` crudos del frontmatter (`serde_yaml::Value`) a una lista de strings.
+fn tags_to_vec(tags: &Option<serde_yaml::Value>) -> Vec<String> {
+    use serde_yaml::Value as Y;
+    match tags {
+        Some(Y::Sequence(seq)) => seq.iter().filter_map(scalar_string).collect(),
+        Some(Y::String(s)) if !s.is_empty() => vec![s.clone()],
+        Some(other) => scalar_string(other).into_iter().collect(),
+        None => Vec::new(),
+    }
+}
+
+/// Representa un escalar YAML como string (para normalizar tags); `None` para no-escalares.
+fn scalar_string(v: &serde_yaml::Value) -> Option<String> {
+    use serde_yaml::Value as Y;
+    match v {
+        Y::String(s) => Some(s.clone()),
+        Y::Number(n) => Some(n.to_string()),
+        Y::Bool(b) => Some(b.to_string()),
+        _ => None,
+    }
+}
+
+/// Puntuación simple: nº de apariciones del texto (minúsculas) en el contenido crudo; `1.0` para un
+/// texto vacío (todos los conceptos empatan y el orden lo decide el `path`).
+fn score_of(raw: &str, needle_lower: &str) -> f64 {
+    if needle_lower.is_empty() {
+        return 1.0;
+    }
+    let count = raw.to_lowercase().matches(needle_lower).count();
+    if count == 0 {
+        1.0
+    } else {
+        count as f64
+    }
+}
+
+/// Genera un snippet compacto: una ventana de caracteres alrededor de la primera aparición del
+/// `needle` (o del inicio del cuerpo si el texto está vacío o no aparece). Opera sobre `char`s
+/// (nunca sobre bytes) para no romper en fronteras UTF-8, y colapsa los espacios en blanco. Devuelve
+/// cadena vacía solo si el cuerpo colapsado está vacío (el llamante garantiza el no-vacío).
+fn snippet_of(body: &str, needle_lower: &str) -> String {
+    const WINDOW: usize = 160;
+    const LEAD: usize = 30;
+    let collapsed: String = body.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.is_empty() {
+        return String::new();
+    }
+    let chars: Vec<char> = collapsed.chars().collect();
+    let match_idx = if needle_lower.is_empty() {
+        None
+    } else {
+        let low: Vec<char> = chars
+            .iter()
+            .map(|c| c.to_lowercase().next().unwrap_or(*c))
+            .collect();
+        let needle: Vec<char> = needle_lower.chars().collect();
+        find_subseq(&low, &needle)
+    };
+    let start = match_idx.map(|m| m.saturating_sub(LEAD)).unwrap_or(0);
+    let end = (start + WINDOW).min(chars.len());
+    let mut out = String::new();
+    if start > 0 {
+        out.push('…');
+    }
+    out.extend(&chars[start..end]);
+    if end < chars.len() {
+        out.push('…');
+    }
+    out
+}
+
+/// Índice del primer subslice contiguo de `hay` que iguala a `needle` (`None` si no aparece o
+/// `needle` está vacío).
+fn find_subseq(hay: &[char], needle: &[char]) -> Option<usize> {
+    if needle.is_empty() || needle.len() > hay.len() {
+        return None;
+    }
+    (0..=hay.len() - needle.len()).find(|&i| hay[i..i + needle.len()] == *needle)
+}
+
+/// Codifica un offset de paginación como cursor opaco (hexadecimal). Autosuficiente: como el orden de
+/// resultados es determinista y solo depende del contenido, un offset reanuda idénticamente en
+/// cualquier servidor fresco.
+fn encode_cursor(offset: usize) -> String {
+    format!("{offset:x}")
+}
+
+/// Decodifica un cursor a su offset. Un cursor malformado se interpreta como el inicio (offset 0).
+fn decode_cursor(cursor: &str) -> usize {
+    usize::from_str_radix(cursor, 16).unwrap_or(0)
 }

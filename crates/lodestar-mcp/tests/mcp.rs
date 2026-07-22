@@ -419,3 +419,328 @@ fn directorio_no_bundle_sale_con_3() {
         .unwrap();
     assert_eq!(status.code(), Some(3));
 }
+
+// ---------------------------------------------------------------------------
+// E10-H09 — Tool `knowledge_search` (sustituye `query`).
+//
+// UBICACIÓN: los 3 criterios se ejercitan **e2e por la tool MCP** (campo Pruebas de la historia:
+// `crates/lodestar-mcp/tests/`) en vez de contra `App::knowledge_search` directo. Razón deliberada:
+// el contrato que importa fijar aquí es el de **wire** (nombres de campo del result, AUSENCIA de
+// `body`, forma de `filters`, semántica de `nextCursor`) y probarlo por la frontera JSON-RPC lo fija
+// sin acoplar los tests a los nombres internos de tipos Rust que el implementador aún no ha creado
+// (`SearchFilters`/`SearchResults`/…). El parent sugirió app-directo como alternativa más simple para
+// las 50 fixtures; se opta por e2e para no fijar tipos internos (el corpus de 50 se escribe en disco
+// igual de fácil y el cursor autosuficiente se prueba mejor entre servidores frescos).
+//
+// CONTRATO fijado (fase ROJA — la tool aún NO existe, así que `tools/call` devuelve -32602 y
+// `structuredContent.results` es nulo → los asserts fallan por AUSENCIA de la tool/servicio):
+//   arguments: { text?: string, filters?: { types?: [...], statuses?, tags?, pathPrefix?, … },
+//                sort?, limit?: 20 por defecto (máx 100), cursor?: string }
+//   structuredContent: {
+//     results: [ { path, id, type, title, status, description, tags, snippet, score, revision } ],
+//     nextCursor: string | null,
+//     totalApproximate: number
+//   }
+// `results[*]` NUNCA incluye la clave `body` (invariante de la historia: nunca cuerpos completos).
+// La firma de servicio ASUMIDA (el implementador la crea con su propia elección de tipos):
+//   App::knowledge_search(text, filters, sort, limit, cursor)
+//       -> Result<{ results:[…], nextCursor, totalApproximate }, WorkspaceError>
+// ---------------------------------------------------------------------------
+
+/// Extrae los `path` de los `results` de una respuesta `knowledge_search`. Si la tool/servicio no
+/// existe todavía (fase ROJA), `structuredContent.results` es nulo → panica con un mensaje que
+/// documenta el porqué del rojo (la tool ausente), no un fallo espurio.
+fn search_paths(resp: &serde_json::Value) -> Vec<String> {
+    resp["result"]["structuredContent"]["results"]
+        .as_array()
+        .unwrap_or_else(|| {
+            panic!("knowledge_search debe devolver structuredContent.results (array): {resp:?}")
+        })
+        .iter()
+        .map(|r| {
+            r["path"]
+                .as_str()
+                .expect("cada result de knowledge_search lleva un `path` string")
+                .to_string()
+        })
+        .collect()
+}
+
+/// Bundle con un concepto que casa el texto «autenticación» (en título y cuerpo) más un decoy que
+/// NO casa: así el criterio no es vacuo (un stub que devuelva todo incluiría el decoy y fallaría).
+fn bundle_autenticacion() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "index.md",
+        "---\nokf_version: \"0.1\"\n---\n\n# Bundle\n\n* [Auth](auth.md)\n",
+    );
+    write(
+        dir.path(),
+        "auth.md",
+        "---\ntype: decision\ntitle: Autenticación con tokens\ndescription: Cómo autenticar usuarios\nstatus: accepted\ntags: [seguridad]\n---\n\n# Resumen\n\nDecidimos usar autenticación basada en tokens rotatorios.\n",
+    );
+    write(
+        dir.path(),
+        "bici.md",
+        "---\ntype: concept\ntitle: Bicicletas\ndescription: sobre ruedas\n---\n\n# H\n\nnada que ver con el tema.\n",
+    );
+    dir
+}
+
+/// E10-H09 · Criterio `search_sin_cuerpos` (benchmark §17: "Encontrar una decisión por significado"):
+/// Dado un corpus con un concepto que casa «autenticación», Cuando se busca ese texto, Entonces
+/// aparece con `snippet` y `revision`, y SIN `body`.
+#[test]
+fn search_sin_cuerpos() {
+    let dir = bundle_autenticacion();
+    let resp = roundtrip(
+        dir.path(),
+        &[
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"knowledge_search","arguments":{"text":"autenticación"}}}"#,
+        ],
+        1,
+    );
+    let sc = &resp[0]["result"]["structuredContent"];
+    let results = sc["results"].as_array().unwrap_or_else(|| {
+        panic!("knowledge_search debe devolver structuredContent.results (array): {resp:?}")
+    });
+
+    // El concepto que casa aparece.
+    let auth = results
+        .iter()
+        .find(|r| r["path"] == "auth.md")
+        .unwrap_or_else(|| panic!("el concepto que casa «autenticación» debe aparecer: {resp:?}"));
+
+    // `snippet` no vacío.
+    let snippet = auth["snippet"].as_str().unwrap_or("");
+    assert!(
+        !snippet.is_empty(),
+        "el result debe traer un `snippet` no vacío: {auth:?}"
+    );
+
+    // `revision` con formato de identidad de contenido `blake3:…` (ConceptRevision, E10-H03).
+    let revision = auth["revision"].as_str().unwrap_or("");
+    assert!(
+        revision.starts_with("blake3:"),
+        "el result debe traer `revision` con formato «blake3:…»: {auth:?}"
+    );
+
+    // NUNCA cuerpos: la clave `body` debe estar AUSENTE en TODOS los results (no basta con que sea
+    // corta; se verifica la ausencia de la clave).
+    for r in results {
+        assert!(
+            r.get("body").is_none(),
+            "un result de knowledge_search NUNCA debe incluir la clave `body`: {r:?}"
+        );
+    }
+
+    // No vacuo: un concepto que no casa el texto NO debe aparecer.
+    assert!(
+        !results.iter().any(|r| r["path"] == "bici.md"),
+        "un concepto que no casa «autenticación» no debe aparecer en los resultados: {resp:?}"
+    );
+}
+
+/// Bundle con conceptos `type:decision` mezclados con otros tipos, todos con el mismo texto en el
+/// cuerpo para que el único discriminante sea el filtro de tipo.
+fn bundle_tipos_mixtos() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "index.md",
+        "---\nokf_version: \"0.1\"\n---\n\n# Bundle\n",
+    );
+    for slug in ["dec-uno", "dec-dos"] {
+        write(
+            dir.path(),
+            &format!("{slug}.md"),
+            &format!(
+                "---\ntype: decision\ntitle: {slug}\ndescription: arquitectura\nstatus: accepted\n---\n\n# H\n\ncuerpo sobre arquitectura.\n"
+            ),
+        );
+    }
+    write(
+        dir.path(),
+        "nota.md",
+        "---\ntype: nota\ntitle: Nota\ndescription: arquitectura\n---\n\n# H\n\ncuerpo sobre arquitectura.\n",
+    );
+    write(
+        dir.path(),
+        "concepto.md",
+        "---\ntype: concept\ntitle: Concepto\ndescription: arquitectura\n---\n\n# H\n\ncuerpo sobre arquitectura.\n",
+    );
+    dir
+}
+
+/// E10-H09 · Criterio `search_filtra_tipo`:
+/// Dado `filters.types:[decision]`, Cuando se busca, Entonces solo aparecen conceptos `type:decision`.
+#[test]
+fn search_filtra_tipo() {
+    let dir = bundle_tipos_mixtos();
+    let resp = roundtrip(
+        dir.path(),
+        &[
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"knowledge_search","arguments":{"text":"","filters":{"types":["decision"]}}}}"#,
+        ],
+        1,
+    );
+    let results = search_paths_values(&resp[0]);
+
+    // No vacuo: debe haber al menos un resultado (si el filtro devolviese vacío, el `all` de abajo
+    // pasaría trivialmente).
+    assert!(
+        !results.is_empty(),
+        "con `filters.types:[decision]` debe haber al menos un resultado: {resp:?}"
+    );
+
+    // TODOS los resultados son `type:decision`.
+    for r in &results {
+        assert_eq!(
+            r["type"], "decision",
+            "`filters.types:[decision]` solo debe devolver conceptos type:decision, apareció: {r:?}"
+        );
+    }
+
+    // No vacuo (segunda cara): un concepto de otro tipo NO aparece.
+    assert!(
+        !results.iter().any(|r| r["path"] == "nota.md"),
+        "un concepto `type:nota` no debe aparecer al filtrar por decision: {resp:?}"
+    );
+}
+
+/// Como [`search_paths`] pero devuelve los objetos `result` completos (no solo el `path`), para
+/// aseverar sobre otros campos (`type`, `snippet`, …).
+fn search_paths_values(resp: &serde_json::Value) -> Vec<serde_json::Value> {
+    resp["result"]["structuredContent"]["results"]
+        .as_array()
+        .unwrap_or_else(|| {
+            panic!("knowledge_search debe devolver structuredContent.results (array): {resp:?}")
+        })
+        .clone()
+}
+
+/// Bundle con **50 conceptos** que casan todos el texto «paginacion» (en `description` y cuerpo),
+/// deterministas por slug (`c00`…`c49`). El `index.md` no contiene el token y no cuenta como
+/// concepto, así que la búsqueda casa exactamente 50.
+fn bundle_cincuenta() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "index.md",
+        "---\nokf_version: \"0.1\"\n---\n\n# Bundle\n",
+    );
+    for i in 0..50 {
+        let slug = format!("c{i:02}");
+        write(
+            dir.path(),
+            &format!("{slug}.md"),
+            &format!(
+                "---\ntype: concept\ntitle: Concepto {i:02}\ndescription: paginacion\n---\n\n# H\n\ncuerpo paginacion numero {i:02}.\n"
+            ),
+        );
+    }
+    dir
+}
+
+/// E10-H09 · Criterio `search_paginacion`:
+/// Dado `limit:20` y 50 resultados, Cuando se pagina con `nextCursor`, Entonces la 2ª página no
+/// repite ni omite. Se recorren las 3 páginas (20+20+10) y se verifica: partición determinista,
+/// `nextCursor` presente hasta agotar, unión == 50 sin repetidos, y solapamiento nulo 1↔2.
+#[test]
+fn search_paginacion() {
+    let dir = bundle_cincuenta();
+
+    // Construye una línea `tools/call knowledge_search` con `limit:20` y un `cursor` opcional.
+    let req = |cursor: Option<&str>| -> String {
+        let mut args = serde_json::json!({ "text": "paginacion", "limit": 20 });
+        if let Some(c) = cursor {
+            args["cursor"] = serde_json::Value::String(c.to_string());
+        }
+        serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": { "name": "knowledge_search", "arguments": args }
+        })
+        .to_string()
+    };
+
+    // Página 1 (sin cursor).
+    let p1 = roundtrip(dir.path(), &[req(None).as_str()], 1);
+    let sc1 = &p1[0]["result"]["structuredContent"];
+    let paths1 = search_paths(&p1[0]);
+    assert_eq!(
+        paths1.len(),
+        20,
+        "la página 1 con limit:20 debe traer 20 resultados: {p1:?}"
+    );
+    assert!(
+        sc1["totalApproximate"].is_number(),
+        "el result debe incluir `totalApproximate` numérico: {p1:?}"
+    );
+    let cursor1 = sc1["nextCursor"]
+        .as_str()
+        .unwrap_or_else(|| panic!("con 50>20 resultados `nextCursor` debe ser no nulo: {p1:?}"))
+        .to_string();
+
+    // Determinismo: la misma petición produce la misma partición y el mismo orden.
+    let p1b = roundtrip(dir.path(), &[req(None).as_str()], 1);
+    assert_eq!(
+        search_paths(&p1b[0]),
+        paths1,
+        "mismo sort ⇒ misma partición determinista (mismo orden): {p1b:?}"
+    );
+
+    // Página 2, con el cursor de la página 1. Servidor FRESCO: el cursor debe ser autosuficiente y
+    // determinista (no atado al estado de una sesión), o la 2ª página divergiría.
+    let p2 = roundtrip(dir.path(), &[req(Some(&cursor1)).as_str()], 1);
+    let sc2 = &p2[0]["result"]["structuredContent"];
+    let paths2 = search_paths(&p2[0]);
+    assert_eq!(
+        paths2.len(),
+        20,
+        "la página 2 debe traer los siguientes 20 resultados: {p2:?}"
+    );
+    let cursor2 = sc2["nextCursor"]
+        .as_str()
+        .unwrap_or_else(|| {
+            panic!("quedan 10 resultados: `nextCursor` de la página 2 debe ser no nulo: {p2:?}")
+        })
+        .to_string();
+
+    // Página 3: los 10 restantes; ya sin cursor (agotados).
+    let p3 = roundtrip(dir.path(), &[req(Some(&cursor2)).as_str()], 1);
+    let sc3 = &p3[0]["result"]["structuredContent"];
+    let paths3 = search_paths(&p3[0]);
+    assert_eq!(
+        paths3.len(),
+        10,
+        "la página 3 debe traer los 10 conceptos restantes: {p3:?}"
+    );
+    assert!(
+        sc3["nextCursor"].is_null(),
+        "agotados los 50 resultados `nextCursor` debe ser null: {p3:?}"
+    );
+
+    // No repite ni omite: la unión de las 3 páginas cubre los 50 conceptos, todos únicos.
+    let mut union: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for page in [&paths1, &paths2, &paths3] {
+        for path in page {
+            assert!(
+                union.insert(path.clone()),
+                "path repetido entre páginas (la paginación no debe repetir): {path}"
+            );
+        }
+    }
+    assert_eq!(
+        union.len(),
+        50,
+        "la unión de las 3 páginas debe cubrir los 50 conceptos sin omisiones"
+    );
+
+    // Solapamiento nulo explícito entre página 1 y 2 (redacción literal del criterio).
+    let en_p1: std::collections::BTreeSet<&String> = paths1.iter().collect();
+    assert!(
+        paths2.iter().all(|p| !en_p1.contains(p)),
+        "la 2ª página no debe solapar con la 1ª"
+    );
+}

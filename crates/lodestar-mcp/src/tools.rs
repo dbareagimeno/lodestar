@@ -5,7 +5,7 @@
 
 use std::collections::BTreeMap;
 
-use lodestar_app::{App, Profile};
+use lodestar_app::{App, Profile, SearchFilters};
 use lodestar_core::types::{Direction, FrontmatterPatch, RelPath};
 #[cfg(test)]
 use lodestar_workspace::Workspace;
@@ -67,6 +67,19 @@ pub fn list() -> Value {
          }, "additionalProperties": false }},
         {"name": "generate_tag_indexes", "description": "Regenera los índices de tags.", "inputSchema": empty},
         {"name": "workspace_status", "description": "Config activa, capacidades del perfil, conformidad y recuento agregado del workspace (llámala primero en cada sesión).", "inputSchema": empty},
+        {"name": "knowledge_search", "description": "Localiza conceptos por texto y filtros, con snippets y paginación por cursor (nunca devuelve cuerpos).",
+         "inputSchema": { "type": "object", "properties": {
+             "text": { "type": "string", "description": "Texto libre (subcadena, misma semántica que la DSL del prototipo). Vacío = todos los conceptos." },
+             "filters": { "type": "object", "description": "Filtros: types/statuses/tags (listas) y pathPrefix (string).", "properties": {
+                 "types": { "type": "array", "items": { "type": "string" } },
+                 "statuses": { "type": "array", "items": { "type": "string" } },
+                 "tags": { "type": "array", "items": { "type": "string" } },
+                 "pathPrefix": { "type": "string" }
+             } },
+             "sort": { "type": "string", "description": "Reservado: hoy el orden es siempre determinista (score desc, path asc)." },
+             "limit": { "type": "integer", "minimum": 1, "maximum": 100, "default": 20 },
+             "cursor": { "type": "string", "description": "Cursor opaco de paginación devuelto en «nextCursor»." }
+         }, "additionalProperties": false }},
     ])
 }
 
@@ -160,6 +173,23 @@ pub fn call(app: &App, profile: Profile, name: &str, params: &Value) -> ToolResu
         "workspace_status" => {
             let status = app.workspace_status(profile).map_err(|e| e.to_string())?;
             to_json(&status)
+        }
+        "knowledge_search" => {
+            let text = params.get("text").and_then(Value::as_str).unwrap_or("");
+            let filters: SearchFilters = match params.get("filters") {
+                Some(v) => serde_json::from_value(v.clone()).map_err(|e| e.to_string())?,
+                None => SearchFilters::default(),
+            };
+            let sort = params.get("sort").and_then(Value::as_str);
+            let limit = params
+                .get("limit")
+                .and_then(Value::as_u64)
+                .map(|n| n as usize);
+            let cursor = params.get("cursor").and_then(Value::as_str);
+            let results = app
+                .knowledge_search(text, &filters, sort, limit, cursor)
+                .map_err(|e| e.to_string())?;
+            to_json(&results)
         }
         other => Err(format!("tool desconocida: {other}")),
     }
