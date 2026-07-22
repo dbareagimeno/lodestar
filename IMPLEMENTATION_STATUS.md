@@ -208,6 +208,9 @@ superficie de producto; git queda como crate dormido) y `DECISIONES.md §0`. Des
     (`SCHEMA-REQFIELD`/`SCHEMA-STATUS`/`REL-TARGET`/`REL-CARD`/`REL-TYPE`). Frontend congelado sin
     tocar. Juez ciego: APROBADA CON RESERVAS (2/2). **Pendiente en E10-H07**: emitir `Check.msg`
     español por cada código nuevo (equivale a la "i18n" en headless).
-  - ⏳ E10-H01/H02/H04/H05/H07 (app + schema) y H08–H13 (tools) pendientes.
+  - ✅ **E10-H01** — Crate nuevo `lodestar-app` (fino sobre `Workspace`, D1-C): `Envelope<T>`
+    (7 claves wire camelCase, D3), `ResourceLink`, `App::open`. Deps directas sin rusqlite/git2/tokio.
+    Juez ciego: APROBADA (2/2).
+  - ⏳ E10-H02/H04/H05/H07 (errores + schema) y H08–H13 (tools) pendientes.
 - **E11–E14: pendientes** (grafo e impacto · planificación · publicación recuperable ·
   integración software + evaluación — `ARCHITECTURE.md §19.8`).

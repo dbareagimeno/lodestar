@@ -5,6 +5,7 @@ members = [
   "crates/lodestar-store",
   "crates/lodestar-vcs",
   "crates/lodestar-workspace",
+  "crates/lodestar-app",
   "crates/lodestar-cli",
   "crates/lodestar-mcp",
   "crates/lodestar-fixtures",

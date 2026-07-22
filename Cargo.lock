@@ -2070,6 +2070,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "lodestar-app"
+version = "0.1.0"
+dependencies = [
+ "lodestar-core",
+ "lodestar-workspace",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "lodestar-cli"
 version = "0.1.0"
 dependencies = [
