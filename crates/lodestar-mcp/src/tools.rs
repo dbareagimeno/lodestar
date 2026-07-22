@@ -6,7 +6,7 @@
 use std::collections::BTreeMap;
 
 use lodestar_app::{App, Profile, SearchFilters};
-use lodestar_core::types::{Direction, FrontmatterPatch, RelPath};
+use lodestar_core::types::{ConceptRef, Direction, FrontmatterPatch, RelPath};
 #[cfg(test)]
 use lodestar_workspace::Workspace;
 use serde_json::{json, Value};
@@ -80,6 +80,16 @@ pub fn list() -> Value {
              "limit": { "type": "integer", "minimum": 1, "maximum": 100, "default": 20 },
              "cursor": { "type": "string", "description": "Cursor opaco de paginación devuelto en «nextCursor»." }
          }, "additionalProperties": false }},
+        {"name": "knowledge_get", "description": "Obtiene un concepto concreto con `include` selectivo y selección de secciones por headingPath.",
+         "inputSchema": { "type": "object", "properties": {
+             "ref": { "type": "object", "description": "ConceptRef: identidad del concepto a leer.", "properties": {
+                 "path": { "type": "string", "description": "Ruta relativa del concepto (p. ej. «notas/alfa.md»)." }
+             }, "required": ["path"], "additionalProperties": false },
+             "include": { "type": "array", "description": "Campos a poblar; un campo no pedido queda sin poblar.",
+                 "items": { "type": "string", "enum": ["frontmatter", "body", "revision", "outgoingLinks", "backlinks", "diagnostics", "externalReferences"] } },
+             "sections": { "type": "array", "description": "Acota «body» a estas subsecciones (solo si «body» está en include). Cada elemento es un headingPath, p. ej. [\"Security\",\"Token rotation\"].",
+                 "items": { "type": "array", "items": { "type": "string" } } }
+         }, "required": ["ref"], "additionalProperties": false }},
     ])
 }
 
@@ -190,6 +200,27 @@ pub fn call(app: &App, profile: Profile, name: &str, params: &Value) -> ToolResu
                 .knowledge_search(text, &filters, sort, limit, cursor)
                 .map_err(|e| e.to_string())?;
             to_json(&results)
+        }
+        "knowledge_get" => {
+            let r: ConceptRef = match params.get("ref") {
+                Some(v) => serde_json::from_value(v.clone()).map_err(|e| e.to_string())?,
+                None => return Err("falta el parámetro «ref»".to_string()),
+            };
+            let include: Vec<String> = match params.get("include") {
+                Some(v) => serde_json::from_value(v.clone()).map_err(|e| e.to_string())?,
+                None => Vec::new(),
+            };
+            let sections: Option<Vec<Vec<String>>> = match params.get("sections") {
+                Some(v) => Some(serde_json::from_value(v.clone()).map_err(|e| e.to_string())?),
+                None => None,
+            };
+            // Mapeo de error a wire (E10-H02): el texto que ve el agente lleva el código estable
+            // `ErrorCode::as_str()` (p. ej. «CONCEPT_NOT_FOUND»), NUNCA el `Debug` de la variante
+            // (`ConceptNotFound`) — el catálogo de 16 códigos es el contrato, no el nombre Rust.
+            let concept = app
+                .knowledge_get(&r, &include, sections.as_deref())
+                .map_err(|e| e.as_str().to_string())?;
+            Ok(json!({ "concept": to_json(&concept)? }))
         }
         other => Err(format!("tool desconocida: {other}")),
     }

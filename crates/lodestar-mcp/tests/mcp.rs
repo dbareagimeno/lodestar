@@ -744,3 +744,224 @@ fn search_paginacion() {
         "la 2ª página no debe solapar con la 1ª"
     );
 }
+
+// ---------------------------------------------------------------------------
+// E10-H10 — Tool `knowledge_get` (sustituye la lectura directa).
+//
+// UBICACIÓN: los 3 criterios se ejercitan **e2e por la tool MCP** (campo Pruebas de la historia:
+// `crates/lodestar-mcp/tests/`), igual que E10-H09. Razón deliberada (misma que H09): lo que hay que
+// fijar es el contrato de **wire** (forma de `arguments`, forma del `concept` en `structuredContent`,
+// acotado de body por sección, cómo aflora el error `CONCEPT_NOT_FOUND`) sin acoplar los tests a los
+// nombres de tipos Rust internos que el implementador aún no ha elegido (el tipo de retorno del
+// servicio, el enum/lista de `include`, etc.). El parent ofreció como alternativa probar
+// `App::knowledge_get` directo; se opta por e2e para (a) no fijar el tipo de retorno interno y (b) no
+// tener que añadir un stub en `src/` (la tool ausente da un ROJO limpio en runtime, sin tocar
+// producción y sin romper la compilación del resto de la suite).
+//
+// FASE ROJA: la tool `knowledge_get` NO existe todavía → `tools::exists("knowledge_get")` es `false`
+// → `tools/call` responde el error de protocolo -32602 (sin `result`). Por eso `structuredContent`
+// es nulo y los asserts fallan por AUSENCIA de la tool/servicio, no por un fallo espurio.
+//
+// CONTRATO DE WIRE fijado por esta historia (lo que el implementador debe respetar):
+//   arguments: {
+//     ref: { path: "<RelPath>" },                 // ConceptRef (E10-H04); deser de { "path": … }
+//     include?: [ "frontmatter" | "body" | "revision" | "outgoingLinks" | "backlinks"
+//                 | "diagnostics" | "externalReferences" ],   // selectivo: qué campos se pueblan
+//     sections?: [ [ "<heading>", "<subheading>", … ] ]       // cada headingPath acota el body
+//   }
+//   structuredContent: {
+//     concept: { path, revision, frontmatter?, body?, outgoingLinks?, backlinks?,
+//                externalReferences?, diagnostics? }
+//   }
+// `concept.revision` == `ConceptRevision` (E10-H03), formato `blake3:…`, presente siempre (identidad).
+// Un campo NO pedido en `include` NO se puebla (queda nulo/ausente).
+//
+// FIRMA DE SERVICIO ASUMIDA (el implementador la crea con su propia elección de tipos internos):
+//   App::knowledge_get(r: &ConceptRef, include: &[…], sections: Option<&[…]>)
+//       -> Result<{ concept: { path, revision, frontmatter, body, outgoingLinks, backlinks,
+//                              externalReferences, diagnostics } }, ErrorCode>
+//   con `CONCEPT_NOT_FOUND` cuando `resolve_ref` no encuentra el path (E10-H04).
+// ---------------------------------------------------------------------------
+
+/// Bundle con un concepto conforme `alfa.md` (frontmatter completo) para los casos que solo necesitan
+/// un concepto existente al que pedirle `revision`/`frontmatter`, y para el caso inexistente (pedir un
+/// path que NO está en el bundle).
+fn bundle_get_revision() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "index.md",
+        "---\nokf_version: \"0.1\"\n---\n\n# Bundle\n\n* [Alfa](alfa.md)\n",
+    );
+    write(
+        dir.path(),
+        "alfa.md",
+        "---\ntype: decision\ntitle: Alfa\ndescription: Primer concepto\nstatus: accepted\ntags: [seguridad]\n---\n\n# Resumen\n\nCuerpo del concepto alfa.\n",
+    );
+    dir
+}
+
+/// E10-H10 · Criterio `get_incluye_revision`:
+/// Dado un concepto existente, Cuando se pide con `include:[frontmatter,revision]`, Entonces devuelve
+/// la `revision` (== `ConceptRevision`, formato `blake3:…`) y el `frontmatter`. Se añade que un campo
+/// NO pedido (`body`) queda sin poblar, para que el `include` selectivo sea significativo (no vacuo).
+#[test]
+fn get_incluye_revision() {
+    let dir = bundle_get_revision();
+    let resp = roundtrip(
+        dir.path(),
+        &[
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"knowledge_get","arguments":{"ref":{"path":"alfa.md"},"include":["frontmatter","revision"]}}}"#,
+        ],
+        1,
+    );
+    let concept = &resp[0]["result"]["structuredContent"]["concept"];
+
+    // `revision` presente y con formato de identidad de contenido `blake3:…` (ConceptRevision, E10-H03).
+    let revision = concept["revision"].as_str().unwrap_or_else(|| {
+        panic!("knowledge_get debe devolver concept.revision (string «blake3:…»): {resp:?}")
+    });
+    assert!(
+        revision.starts_with("blake3:"),
+        "concept.revision debe tener formato «blake3:…»: {resp:?}"
+    );
+
+    // `frontmatter` presente (objeto no nulo) porque se pidió en `include`.
+    assert!(
+        concept["frontmatter"].is_object(),
+        "con include:[frontmatter] el concept debe traer un `frontmatter` (objeto): {resp:?}"
+    );
+
+    // `include` selectivo: `body` NO se pidió ⇒ no se puebla (nulo o ausente). Sin esta comprobación
+    // el criterio sería vacuo (una impl que devuelve todos los campos siempre lo cumpliría igual).
+    assert!(
+        concept["body"].is_null(),
+        "con include:[frontmatter,revision] el `body` NO debe poblarse: {resp:?}"
+    );
+}
+
+/// Bundle con un concepto cuyo cuerpo tiene una jerarquía de headings clara: `## Security` con la
+/// subsección objetivo `### Token rotation`, más secciones/subsecciones hermanas que DEBEN quedar
+/// fuera al acotar por `sections:[["Security","Token rotation"]]`. Cada bloque lleva un marcador único
+/// para que las comprobaciones de subcadena sean inequívocas:
+///   - `TOKEN-OBJETIVO-INCLUIR`  → bajo `## Security → ### Token rotation` (DEBE aparecer).
+///   - `TOKEN-HERMANA-SUB-EXCLUIR` → bajo `## Security → ### Otra` (subsección hermana; DEBE quedar
+///     fuera; su exclusión obliga a que el 2º nivel del headingPath cuente, no solo `## Security`).
+///   - `TOKEN-HERMANA-TOP-EXCLUIR` → bajo `## Otra seccion` (sección hermana de nivel superior; fuera).
+///   - `TOKEN-OVERVIEW-EXCLUIR`   → bajo `## Overview` (otra sección de nivel superior; fuera).
+fn bundle_get_secciones() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "index.md",
+        "---\nokf_version: \"0.1\"\n---\n\n# Bundle\n\n* [Rotacion](decisiones/rotacion.md)\n",
+    );
+    write(
+        dir.path(),
+        "decisiones/rotacion.md",
+        "---\n\
+type: decision\n\
+title: Rotacion de tokens\n\
+description: Politica de rotacion de tokens\n\
+status: accepted\n\
+---\n\
+\n\
+# Rotacion de tokens\n\
+\n\
+Introduccion general del documento.\n\
+\n\
+## Overview\n\
+\n\
+Vision general del sistema. TOKEN-OVERVIEW-EXCLUIR.\n\
+\n\
+## Security\n\
+\n\
+Consideraciones generales de seguridad.\n\
+\n\
+### Token rotation\n\
+\n\
+Los tokens de acceso rotan cada 24 horas. TOKEN-OBJETIVO-INCLUIR.\n\
+\n\
+### Otra\n\
+\n\
+Detalle de una subseccion hermana. TOKEN-HERMANA-SUB-EXCLUIR.\n\
+\n\
+## Otra seccion\n\
+\n\
+Contenido de una seccion hermana de nivel superior. TOKEN-HERMANA-TOP-EXCLUIR.\n",
+    );
+    dir
+}
+
+/// E10-H10 · Criterio `get_por_seccion`:
+/// Dado `sections:[["Security","Token rotation"]]`, Cuando se pide, Entonces el body devuelto es SOLO
+/// esa subsección: contiene su texto y NO contiene el de sus secciones/subsecciones hermanas.
+#[test]
+fn get_por_seccion() {
+    let dir = bundle_get_secciones();
+    let resp = roundtrip(
+        dir.path(),
+        &[
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"knowledge_get","arguments":{"ref":{"path":"decisiones/rotacion.md"},"include":["body"],"sections":[["Security","Token rotation"]]}}}"#,
+        ],
+        1,
+    );
+    let concept = &resp[0]["result"]["structuredContent"]["concept"];
+    let body = concept["body"].as_str().unwrap_or_else(|| {
+        panic!("knowledge_get con include:[body] debe devolver concept.body (string): {resp:?}")
+    });
+
+    // CONTIENE el texto de la subsección pedida (## Security → ### Token rotation).
+    assert!(
+        body.contains("TOKEN-OBJETIVO-INCLUIR"),
+        "el body acotado debe contener la subsección pedida «Token rotation»: {body:?}"
+    );
+    // NO contiene la subsección HERMANA `### Otra` (misma `## Security`): fuerza que el 2º nivel del
+    // headingPath cuente (acotar solo por `## Security` dejaría entrar esta subsección).
+    assert!(
+        !body.contains("TOKEN-HERMANA-SUB-EXCLUIR"),
+        "el body no debe incluir la subsección hermana `### Otra`: {body:?}"
+    );
+    // NO contiene la sección HERMANA de nivel superior `## Otra seccion`.
+    assert!(
+        !body.contains("TOKEN-HERMANA-TOP-EXCLUIR"),
+        "el body no debe incluir la sección hermana `## Otra seccion`: {body:?}"
+    );
+    // NO contiene otra sección de nivel superior `## Overview`.
+    assert!(
+        !body.contains("TOKEN-OVERVIEW-EXCLUIR"),
+        "el body no debe incluir la sección `## Overview`: {body:?}"
+    );
+}
+
+/// E10-H10 · Criterio `get_inexistente`:
+/// Dado un path inexistente, Cuando se pide, Entonces `CONCEPT_NOT_FOUND`. En la superficie MCP un
+/// concepto inexistente es un error de EJECUCIÓN de la tool (no un fallo de protocolo): aflora como
+/// `result.isError == true` con el código estable `CONCEPT_NOT_FOUND` visible al agente (ErrorCode
+/// wire de E10-H02, `REFACTOR §13` / invariante #4), no como un error JSON-RPC.
+#[test]
+fn get_inexistente() {
+    let dir = bundle_get_revision(); // tiene `alfa.md`; pedimos un path que NO existe.
+    let resp = roundtrip(
+        dir.path(),
+        &[
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"knowledge_get","arguments":{"ref":{"path":"no-existe.md"},"include":["frontmatter"]}}}"#,
+        ],
+        1,
+    );
+    // Error de ejecución de la tool → isError en el result, no un error JSON-RPC de transporte.
+    assert_eq!(
+        resp[0]["result"]["isError"], true,
+        "un ConceptRef a un path inexistente debe dar isError en knowledge_get: {resp:?}"
+    );
+    assert!(
+        resp[0]["error"].is_null(),
+        "un concepto inexistente NO debe ser un error de protocolo JSON-RPC: {resp:?}"
+    );
+    // El código estable `CONCEPT_NOT_FOUND` debe ser visible en la respuesta (no un mensaje opaco).
+    let texto = resp[0].to_string();
+    assert!(
+        texto.contains("CONCEPT_NOT_FOUND"),
+        "el error debe exponer el código estable «CONCEPT_NOT_FOUND»: {resp:?}"
+    );
+}

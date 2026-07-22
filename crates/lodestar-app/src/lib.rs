@@ -17,8 +17,8 @@ use serde::{Deserialize, Serialize};
 
 use lodestar_core::model;
 use lodestar_core::types::{
-    workspace_revision, Check, ConceptRef, ConceptRevision, ErrorCode, Frontmatter, RelPath,
-    WorkspaceRevision,
+    workspace_revision, Backlinks, Check, ConceptRef, ConceptRevision, ErrorCode, Frontmatter,
+    RelPath, WorkspaceRevision,
 };
 use lodestar_core::CoreError;
 use lodestar_workspace::{Workspace, WorkspaceConfig, WorkspaceError, WorkspaceSchema};
@@ -288,8 +288,9 @@ const DEFAULT_FORMAT_VERSION: &str = "0.2";
 ///
 /// `App` es lo que consumen `lodestar-mcp` y `lodestar-cli`: un punto de entrada único que
 /// traduce peticiones de protocolo a operaciones del `Workspace` y envuelve las respuestas en
-/// [`Envelope`]. Expone `workspace_status` (E10-H08); `knowledge_search`, `knowledge_get`,
-/// `schema_inspect`, `knowledge_check`, … se irán añadiendo en E10-H09 y siguientes.
+/// [`Envelope`]. Expone `workspace_status` (E10-H08), `knowledge_search` (E10-H09) y
+/// `knowledge_get` (E10-H10); `schema_inspect`, `knowledge_check`, … se irán añadiendo en
+/// historias siguientes.
 pub struct App {
     workspace: Workspace,
 }
@@ -502,6 +503,210 @@ impl App {
             total_approximate: total,
         })
     }
+
+    /// Obtiene un concepto concreto, con `include` selectivo y selección de secciones por
+    /// `headingPath` (E10-H10, `ARCHITECTURE.md §19.6`, `REFACTOR §9.3`).
+    ///
+    /// Resuelve con [`App::resolve_ref`] (E10-H04) — `Err(ErrorCode::ConceptNotFound)` si el path
+    /// no está en la lista autoritativa de conceptos. `revision` (== [`ConceptRevision`], E10-H03)
+    /// se calcula **siempre**, sin depender de `include`: es la identidad de contenido, no un
+    /// campo opcional.
+    ///
+    /// `include` es la lista de campos wire pedidos (`"frontmatter"`, `"body"`, `"outgoingLinks"`,
+    /// `"backlinks"`, `"diagnostics"`, `"externalReferences"`; `"revision"` es aceptado pero no-op,
+    /// ya que ese campo siempre se puebla). Un campo **no** pedido queda en `None` en el
+    /// [`ConceptView`] — nunca en su valor por defecto "vacío" disfrazado de "no pedido", para que
+    /// el `include` selectivo sea significativo (criterio `get_incluye_revision`).
+    ///
+    /// `sections`, si está presente y no vacío, acota el `body` devuelto (solo aplica si `body` fue
+    /// pedido en `include`): cada `headingPath` (p. ej. `["Security","Token rotation"]`) localiza
+    /// esa subsección anidada del Markdown (ver la función privada `extract_sections` más abajo) y
+    /// el resultado final es la concatenación de todos los `headingPath` pedidos. Sin `sections`,
+    /// `body` es el cuerpo completo.
+    ///
+    /// `externalReferences` queda **vacío** en esta historia (E11-H04 fuera de alcance: no hay
+    /// todavía criterio de qué frontmatter de productor cuenta como referencia externa) — se puebla
+    /// como `Vec::new()` cuando se pide, para respetar la selectividad de `include` sin inventar
+    /// semántica.
+    pub fn knowledge_get(
+        &self,
+        r: &ConceptRef,
+        include: &[String],
+        sections: Option<&[Vec<String>]>,
+    ) -> Result<ConceptView, ErrorCode> {
+        let path = self.resolve_ref(r)?;
+        let bundle = self
+            .workspace
+            .bundle()
+            .map_err(|e| workspace_error_code(&e))?;
+        let files = bundle.files();
+        // `resolve_ref` ya comprobó que `path` está en `Analysis::concepts`, que se computa a
+        // partir de este mismo `FileMap` (invariante #3) — así que el fichero existe.
+        let raw = files
+            .get(&path)
+            .expect("resolve_ref garantiza presencia en el FileMap");
+        let parsed = model::parse_file(path.as_str(), raw);
+        let revision = ConceptRevision::from_hash(*blake3::hash(raw.as_bytes()).as_bytes());
+
+        let wants = |field: &str| include.iter().any(|s| s == field);
+
+        let frontmatter = wants("frontmatter").then(|| parsed.fm.clone().unwrap_or_default());
+        let body = wants("body").then(|| match sections {
+            Some(secs) if !secs.is_empty() => extract_sections(&parsed.body, secs),
+            _ => parsed.body.clone(),
+        });
+        let outgoing_links = wants("outgoingLinks")
+            .then(|| bundle.analyze().out.get(&path).cloned().unwrap_or_default());
+        let backlinks = wants("backlinks").then(|| bundle.backlinks(&path));
+        let diagnostics = wants("diagnostics").then(|| {
+            bundle
+                .analyze()
+                .per_file
+                .get(&path)
+                .cloned()
+                .unwrap_or_default()
+        });
+        let external_references = wants("externalReferences").then(Vec::new);
+
+        Ok(ConceptView {
+            path,
+            revision,
+            frontmatter,
+            body,
+            outgoing_links,
+            backlinks,
+            external_references,
+            diagnostics,
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// `knowledge_get` — tipos de proyección de servicio y extracción de secciones (E10-H10).
+//
+// Proyección de servicio (framing), NO dominio: vive en `lodestar-app`, no en `core::types`. No
+// hay función equivalente en `prototype/index.html` (la selección por `headingPath` es superficie
+// nueva de esta épica, no un port) — implementación propia. Wire en camelCase.
+// ---------------------------------------------------------------------------
+
+/// Proyección de un concepto para `knowledge_get`. `path`/`revision` siempre presentes; el resto
+/// es `None` cuando no se pidió en `include` (selectividad significativa, no vacua).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConceptView {
+    /// Ruta relativa del concepto (su identidad en v2).
+    pub path: RelPath,
+    /// Identidad de contenido (`blake3:…`, == [`ConceptRevision`] de E10-H03). Siempre presente.
+    pub revision: ConceptRevision,
+    /// Frontmatter tipado, si se pidió `"frontmatter"` en `include`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frontmatter: Option<Frontmatter>,
+    /// Cuerpo Markdown (completo o acotado por `sections`), si se pidió `"body"` en `include`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body: Option<String>,
+    /// Enlaces salientes resueltos (`Analysis::out`), si se pidió `"outgoingLinks"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outgoing_links: Option<Vec<RelPath>>,
+    /// Vecindad de enlaces entrantes (`Bundle::backlinks`), si se pidió `"backlinks"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backlinks: Option<Backlinks>,
+    /// Referencias externas (siempre vacío en esta historia; ver nota de `knowledge_get`), si se
+    /// pidió `"externalReferences"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_references: Option<Vec<String>>,
+    /// Checks de conformidad del concepto (`Analysis::per_file`), si se pidió `"diagnostics"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diagnostics: Option<Vec<Check>>,
+}
+
+/// Un heading Markdown detectado en un `body`, con el rango de bytes de la sección que abarca:
+/// desde el final de su propia línea de heading hasta el siguiente heading de nivel **menor o
+/// igual** al suyo (o el final del cuerpo). Ese rango contiene exactamente sus subsecciones
+/// anidadas (nivel estrictamente mayor) y nada de sus hermanas ni de secciones de nivel superior —
+/// la propiedad que usa [`locate_section`] para no necesitar validar jerarquía explícitamente.
+struct Heading<'a> {
+    /// Texto del heading, recortado.
+    title: &'a str,
+    /// Offset de byte donde empieza la línea del heading (para comprobar pertenencia a un rango).
+    line_start: usize,
+    /// Offset de byte donde empieza el contenido de su sección (justo tras su línea).
+    content_start: usize,
+    /// Offset de byte donde termina el contenido de su sección (exclusivo).
+    content_end: usize,
+}
+
+/// Detecta los headings ATX (`#` a `######`) de `body` línea a línea y calcula el rango de
+/// contenido de cada uno. **Limitación conocida**: no distingue bloques de código con fences
+/// (` ``` `) — una línea que empiece por `#` dentro de un fence se detectaría igualmente como
+/// heading. No hay caso de prueba que lo ejercite en esta historia; documentado para quien amplíe
+/// esta función.
+fn parse_headings(body: &str) -> Vec<Heading<'_>> {
+    let mut raw: Vec<(usize, &str, usize, usize)> = Vec::new();
+    let mut offset = 0usize;
+    for line in body.split_inclusive('\n') {
+        let trimmed = line.trim_end_matches('\n').trim_end_matches('\r');
+        let hashes = trimmed.chars().take_while(|c| *c == '#').count();
+        if (1..=6).contains(&hashes) {
+            let rest = &trimmed[hashes..];
+            if rest.starts_with(' ') || rest.starts_with('\t') {
+                raw.push((hashes, rest.trim(), offset, offset + line.len()));
+            }
+        }
+        offset += line.len();
+    }
+    let body_len = body.len();
+    raw.iter()
+        .enumerate()
+        .map(|(i, &(level, title, line_start, content_start))| {
+            let content_end = raw[i + 1..]
+                .iter()
+                .find(|&&(l, ..)| l <= level)
+                .map(|&(_, _, ls, _)| ls)
+                .unwrap_or(body_len);
+            Heading {
+                title,
+                line_start,
+                content_start,
+                content_end,
+            }
+        })
+        .collect()
+}
+
+/// Localiza el rango de bytes de la subsección apuntada por un `headingPath` (p. ej.
+/// `["Security","Token rotation"]`): recorre el path segmento a segmento, en cada paso busca el
+/// primer heading cuyo título coincida (comparación exacta, recortada) **dentro del rango actual**
+/// y estrecha el rango a su sección. Como el rango de una sección solo contiene a sus
+/// descendientes (ver [`Heading`]), no hace falta comprobar niveles explícitamente: el segundo
+/// segmento del path solo puede casar con un heading anidado bajo el primero. `None` si algún
+/// segmento no casa (headingPath inexistente).
+fn locate_section(
+    headings: &[Heading<'_>],
+    body_len: usize,
+    path: &[String],
+) -> Option<(usize, usize)> {
+    let mut range = (0usize, body_len);
+    for segment in path {
+        let found = headings
+            .iter()
+            .find(|h| h.line_start >= range.0 && h.line_start < range.1 && h.title == segment)?;
+        range = (found.content_start, found.content_end);
+    }
+    Some(range)
+}
+
+/// Extrae y concatena (separadas por una línea en blanco) las subsecciones apuntadas por cada
+/// `headingPath` de `sections`, en el orden pedido. Un `headingPath` que no casa con ningún
+/// heading se omite silenciosamente (sin `sections` no vacío, el llamante ya filtra este caso).
+fn extract_sections(body: &str, sections: &[Vec<String>]) -> String {
+    let headings = parse_headings(body);
+    sections
+        .iter()
+        .filter(|path| !path.is_empty())
+        .filter_map(|path| locate_section(&headings, body.len(), path))
+        .map(|(start, end)| body[start..end].to_string())
+        .collect::<Vec<_>>()
+        .join("\n\n")
 }
 
 // ---------------------------------------------------------------------------

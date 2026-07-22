@@ -236,6 +236,12 @@ superficie de producto; git queda como crate dormido) y `DECISIONES.md §0`. Des
     + paginación por cursor-offset autosuficiente. Juez ciego: APROBADA CON RESERVAS (3/3).
     **A vigilar**: filtros avanzados (is:orphan/references/…) se admiten pero se ignoran en silencio
     (implementarlos en E11/E10-H13); cursor malformado reinicia a página 1.
-  - ⏳ E10-H10–H13 (knowledge_get, schema_inspect, knowledge_check + outputSchema/mcp.yml).
+  - ✅ **E10-H10** — Tool `knowledge_get`: `include` selectivo (campo no pedido no se puebla),
+    `revision` siempre, backlinks/diagnostics/outgoing desde la verdad del core (invariante #3),
+    selección de secciones por `headingPath` (rangos por nivel de heading, excluye hermanas), error
+    en forma wire (`CONCEPT_NOT_FOUND`). Juez ciego: APROBADA CON RESERVAS (3/3). **A arreglar en
+    E12-H04 (edit_section)**: `parse_headings` no reconoce code fences (un `#` dentro de ``` se toma
+    como heading → puede truncar el rango).
+  - ⏳ E10-H11–H13 (schema_inspect, knowledge_check + outputSchema/mcp.yml).
 - **E11–E14: pendientes** (grafo e impacto · planificación · publicación recuperable ·
   integración software + evaluación — `ARCHITECTURE.md §19.8`).
