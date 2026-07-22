@@ -18,6 +18,7 @@ lodestar-vcs = { workspace = true }
 thiserror = { workspace = true }
 ignore = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
 crossbeam-channel = "0.5"
 toml = "0.8"
 serde_yaml = { workspace = true }
@@ -34,7 +35,6 @@ workspace = true
 
 [dev-dependencies]
 tempfile = "3"
-serde_json = { workspace = true }
 serde_yaml = { workspace = true }
 # Solo para fabricar a mano una cache con esquema viejo en el test de regresión e2e.
 rusqlite = { version = "0.32", features = ["bundled"] }

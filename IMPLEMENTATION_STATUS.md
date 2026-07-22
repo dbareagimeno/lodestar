@@ -345,5 +345,11 @@ superficie de producto; git queda como crate dormido) y `DECISIONES.md §0`. Des
     (`create_new` = O_CREAT|O_EXCL, sin TOCTOU) en `.lodestar/runtime/lock.json`; `WorkspaceLock` RAII
     cuyo Drop libera best-effort (seguro en unwind, sin doble-panic). `reverify_base_revision` →
     `WRITE_CONFLICT` si la revisión cambió. Juez ciego: APROBADA (3/3). (Lock huérfano ante SIGKILL → H06.)
-  - ⏳ E13-H03–H11 pendientes (journal/copias/publicar/crash-recovery/receipts/change_apply/revert/audit/regen).
+  - ✅ **E13-H03** — Write-ahead journal: `create_journal` escribe `.lodestar/runtime/journal/<txnId>.json`
+    en estado `prepared` (ops `pending`) con fsync ANTES de la 1ª sustitución; `mark_applied` marca la op,
+    transiciona `prepared`→`applying` y re-persiste con fsync. JSON de recuperación estable (camelCase +
+    estados lowercase) que H06 releerá. Juez ciego: APROBADA CON RESERVAS (2/2). **A endurecer en H05/H06**:
+    reescritura temp+rename+fsync-del-dir (hoy truncate+write → posible JSON torn ante crash) y recovery
+    tolerante a journal torn.
+  - ⏳ E13-H04–H11 pendientes (copias/publicar/crash-recovery/receipts/change_apply/revert/audit/regen).
 - **E14: pendiente** (integración software + evaluación — `ARCHITECTURE.md §19.8`).

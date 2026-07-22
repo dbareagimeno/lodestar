@@ -44,6 +44,68 @@ use lodestar_core::types::{
 };
 use lodestar_workspace::Workspace;
 
+// ---------------------------------------------------------------------------
+// E13-H03 — Write-ahead journal.
+//
+// Firmas asumidas de E13-H03 (fase ROJA; el implementador debe respetarlas):
+// - `Workspace::create_journal(&self, txn_id: &str, ops: &[RelPath], base_rev: &WorkspaceRevision,
+//   result_rev: &WorkspaceRevision) -> Result<Journal, WorkspaceError>`: escribe el write-ahead
+//   journal de la transacción en `.lodestar/runtime/journal/<txnId>.json` en estado `prepared`
+//   ANTES de la primera sustitución del canónico, con las N operaciones registradas (una por
+//   `RelPath`), la `baseWorkspaceRevision` y la `resultWorkspaceRevision` esperadas, y lo **fsyncea**
+//   a disco (el fsync no es directamente testeable a nivel unitario — el test solo comprueba que el
+//   fichero quedó en disco y bien formado; el `Journal` devuelto es un handle vivo para marcar los
+//   renames a medida que se completan).
+// - `Journal::path(&self) -> &std::path::Path`: ruta del fichero de journal materializado (bajo
+//   `.lodestar/runtime/journal/`).
+// - `Journal::mark_applied(&mut self, path: &RelPath) -> Result<(), WorkspaceError>`: marca la
+//   operación de `path` como aplicada (rename completado) y **persiste** el journal actualizado a
+//   disco; la primera marca transiciona el estado global del journal de `prepared` a `applying`.
+// - `Journal::state(&self) -> JournalState` (asumida disponible; los tests leen el estado del JSON
+//   en disco, que es la fuente de verdad recuperable, por lo que no la invocan directamente).
+//
+// Forma del JSON del journal que asumen los tests (`.lodestar/runtime/journal/<txnId>.json`):
+//   {
+//     "txnId": "txn-h03-tres-ops",
+//     "state": "prepared",            // prepared -> applying -> applied -> done
+//     "baseWorkspaceRevision": "blake3:...",
+//     "resultWorkspaceRevision": "blake3:...",
+//     "operations": [
+//       { "path": "uno.md",  "state": "pending" },   // pending -> applied (por rename)
+//       { "path": "dos.md",  "state": "pending" },
+//       { "path": "tres.md", "state": "pending" }
+//     ]
+//   }
+// Los tests solo dependen de: `state` (string a nivel raíz), `operations` (array con un `path` por
+// entrada y un `state` por entrada). Los nombres exactos de campo (`state`/`operations`/`path`) son
+// parte del contrato de recuperación (H06 releerá este mismo JSON).
+// ---------------------------------------------------------------------------
+
+/// Lee y parsea el JSON del journal desde disco (la fuente de verdad recuperable). Falla si el
+/// fichero no existe o no es JSON válido — así el ROJO por journal ausente es inequívoco.
+fn leer_journal(path: &Path) -> serde_json::Value {
+    let raw = std::fs::read_to_string(path)
+        .unwrap_or_else(|e| panic!("el journal debe existir en disco {}: {e}", path.display()));
+    serde_json::from_str(&raw).unwrap_or_else(|e| {
+        panic!(
+            "el journal debe ser JSON bien formado {}: {e}",
+            path.display()
+        )
+    })
+}
+
+/// Estado (campo `state`) de la operación cuyo `path` coincide, leído del JSON del journal.
+fn estado_op<'a>(journal: &'a serde_json::Value, path: &str) -> &'a str {
+    let ops = journal["operations"]
+        .as_array()
+        .expect("el journal debe listar `operations` como array");
+    ops.iter()
+        .find(|op| op["path"].as_str() == Some(path))
+        .unwrap_or_else(|| panic!("el journal no registra la operación {path}"))["state"]
+        .as_str()
+        .unwrap_or_else(|| panic!("la operación {path} debe tener un `state` string"))
+}
+
 /// Un `FrontmatterPatch` a partir de pares `(clave, valor_string)`.
 fn patch(pares: &[(&str, &str)]) -> FrontmatterPatch {
     let mut map = BTreeMap::new();
@@ -340,4 +402,125 @@ fn lock_se_libera_en_panic() {
     let _nuevo = ws
         .acquire_lock()
         .expect("tras el panic y la liberación, el lock debe poder re-adquirirse");
+}
+
+// ---------------------------------------------------------------------------
+// E13-H03 — Write-ahead journal (tests).
+// ---------------------------------------------------------------------------
+
+/// **E13-H03** · Criterio `journal_prepared_antes_de_publicar`: dada una transacción a punto de
+/// publicar con N operaciones, al prepararla existe el journal en estado `prepared` con las N
+/// operaciones (fsynced — no directamente testeable a nivel unitario; se comprueba que el fichero
+/// quedó en disco y bien formado).
+#[test]
+fn journal_prepared_antes_de_publicar() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws = Workspace::open(dir.path()).unwrap();
+
+    // Las N (=3) operaciones que la transacción va a sustituir en el canónico.
+    let ops = [
+        RelPath::new("uno.md").unwrap(),
+        RelPath::new("dos.md").unwrap(),
+        RelPath::new("tres.md").unwrap(),
+    ];
+    let base = WorkspaceRevision("blake3:base".to_string());
+    let result = WorkspaceRevision("blake3:result".to_string());
+
+    // Se prepara el write-ahead journal ANTES de la primera sustitución del canónico.
+    let journal = ws
+        .create_journal("txn-h03-tres-ops", &ops, &base, &result)
+        .expect("crear el journal en estado prepared");
+
+    // El fichero vive bajo `.lodestar/runtime/journal/<txnId>.json`.
+    let journal_path: PathBuf = journal.path().to_path_buf();
+    assert!(
+        journal_path.starts_with(dir.path().join(".lodestar/runtime/journal")),
+        "el journal no vive bajo .lodestar/runtime/journal: {}",
+        journal_path.display()
+    );
+    assert_eq!(
+        journal_path.file_name().and_then(|n| n.to_str()),
+        Some("txn-h03-tres-ops.json"),
+        "el journal debe nombrarse <txnId>.json: {}",
+        journal_path.display()
+    );
+    assert!(
+        journal_path.is_file(),
+        "el journal debe estar materializado en disco (fsynced) antes de publicar: {}",
+        journal_path.display()
+    );
+
+    // Releído del disco: estado `prepared` y las 3 operaciones registradas.
+    let json = leer_journal(&journal_path);
+    assert_eq!(
+        json["state"].as_str(),
+        Some("prepared"),
+        "el journal recién creado debe estar en estado `prepared`: {json}"
+    );
+    let listadas = json["operations"]
+        .as_array()
+        .expect("el journal debe listar `operations` como array");
+    assert_eq!(
+        listadas.len(),
+        3,
+        "el journal debe registrar las N=3 operaciones de la transacción: {json}"
+    );
+    for f in ["uno.md", "dos.md", "tres.md"] {
+        assert_eq!(
+            estado_op(&json, f),
+            "pending",
+            "toda operación de un journal `prepared` debe estar `pending`: {json}"
+        );
+    }
+}
+
+/// **E13-H03** · Criterio `journal_registra_cada_rename`: dada una sustitución completada, al
+/// registrarla el journal la marca aplicada (y el estado global transiciona a `applying`),
+/// persistido a disco.
+#[test]
+fn journal_registra_cada_rename() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws = Workspace::open(dir.path()).unwrap();
+
+    let ops = [
+        RelPath::new("uno.md").unwrap(),
+        RelPath::new("dos.md").unwrap(),
+        RelPath::new("tres.md").unwrap(),
+    ];
+    let base = WorkspaceRevision("blake3:base".to_string());
+    let result = WorkspaceRevision("blake3:result".to_string());
+
+    let mut journal = ws
+        .create_journal("txn-h03-un-rename", &ops, &base, &result)
+        .expect("crear el journal en estado prepared");
+    let journal_path: PathBuf = journal.path().to_path_buf();
+
+    // El primer rename se completa: se registra en el journal.
+    journal
+        .mark_applied(&RelPath::new("dos.md").unwrap())
+        .expect("marcar `dos.md` como aplicada tras completar su rename");
+
+    // Releído del disco (la fuente de verdad recuperable): la op figura aplicada y el estado global
+    // transicionó a `applying`; las demás siguen pendientes.
+    let json = leer_journal(&journal_path);
+    assert_eq!(
+        estado_op(&json, "dos.md"),
+        "applied",
+        "la operación cuyo rename se completó debe figurar `applied`: {json}"
+    );
+    assert_eq!(
+        json["state"].as_str(),
+        Some("applying"),
+        "tras el primer rename el journal debe transicionar a `applying`: {json}"
+    );
+    assert_eq!(
+        estado_op(&json, "uno.md"),
+        "pending",
+        "una operación aún no aplicada debe seguir `pending`: {json}"
+    );
+    assert_eq!(
+        estado_op(&json, "tres.md"),
+        "pending",
+        "una operación aún no aplicada debe seguir `pending`: {json}"
+    );
 }
