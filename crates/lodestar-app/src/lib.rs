@@ -108,6 +108,11 @@ pub struct ResourceLink {
 /// - `ReplaceTextMismatch` → `InvalidSchema` (precondición de `replace_text` incumplida, E12-H05).
 /// - `NormalizeTargetNotFound` → `ConceptNotFound` (path/sección objetivo inexistente, E12-H05).
 /// - `InboundLinksExist` → `InboundLinksExist` (borrar `reject` con entrantes, E12-H06).
+/// - `RelationConstraintViolation` → `RelationConstraintViolation` (`add_relation` viola la
+///   `RelationDef`, E12-H07).
+/// - `InvalidStatusTransition` → `InvalidSchema` (transición a un estado fuera de `allowedStatuses`,
+///   E12-H07: precondición de lifecycle incumplida).
+/// - `FixNotFound` → `ConceptNotFound` (`apply_fix` con un `fixId` inexistente/no aplicable, E12-H07).
 pub fn error_code(err: &CoreError) -> ErrorCode {
     match err {
         CoreError::InvalidRelPath(_) => ErrorCode::PermissionDenied,
@@ -117,6 +122,9 @@ pub fn error_code(err: &CoreError) -> ErrorCode {
         CoreError::ReplaceTextMismatch(_, _) => ErrorCode::InvalidSchema,
         CoreError::NormalizeTargetNotFound(_) => ErrorCode::ConceptNotFound,
         CoreError::InboundLinksExist(_) => ErrorCode::InboundLinksExist,
+        CoreError::RelationConstraintViolation(_) => ErrorCode::RelationConstraintViolation,
+        CoreError::InvalidStatusTransition(_) => ErrorCode::InvalidSchema,
+        CoreError::FixNotFound(_) => ErrorCode::ConceptNotFound,
     }
 }
 

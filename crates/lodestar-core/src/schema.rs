@@ -17,7 +17,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::model;
-use crate::types::{Check, CheckCode, Frontmatter, Range, RelPath, Severity};
+use crate::types::{Check, CheckCode, Fix, Frontmatter, Range, RelPath, Severity};
 use crate::Bundle;
 
 use serde::{Deserialize, Serialize};
@@ -260,6 +260,7 @@ pub fn validate_relations(bundle: &Bundle, schema: &Schema) -> Vec<Check> {
                         vec![path.clone()],
                     );
                     check.range = range;
+                    check.fixes = vec![rel_target_fix(path, rel_name, target_str)];
                     out.push(check);
                     continue;
                 };
@@ -275,6 +276,7 @@ pub fn validate_relations(bundle: &Bundle, schema: &Schema) -> Vec<Check> {
                         vec![path.clone()],
                     );
                     check.range = range;
+                    check.fixes = vec![rel_target_fix(path, rel_name, target_str)];
                     out.push(check);
                     continue;
                 }
@@ -307,7 +309,7 @@ pub fn validate_relations(bundle: &Bundle, schema: &Schema) -> Vec<Check> {
 /// Lee el campo `rel_name` del frontmatter como lista de paths target: acepta una secuencia YAML
 /// de `String` o un único `String` (envuelto en un vector de un elemento). `None` si el campo no
 /// está presente en `extra` o su forma no es ninguna de las dos anteriores.
-fn relation_targets(fm: &Frontmatter, rel_name: &str) -> Option<Vec<String>> {
+pub(crate) fn relation_targets(fm: &Frontmatter, rel_name: &str) -> Option<Vec<String>> {
     match fm.extra.get(rel_name)? {
         serde_yaml::Value::Sequence(seq) => Some(
             seq.iter()
@@ -320,10 +322,104 @@ fn relation_targets(fm: &Frontmatter, rel_name: &str) -> Option<Vec<String>> {
 }
 
 /// El `type` del concepto en `target`, si existe en el bundle y parsea con frontmatter válido.
-fn target_type_of(bundle: &Bundle, target: &RelPath) -> Option<String> {
+pub(crate) fn target_type_of(bundle: &Bundle, target: &RelPath) -> Option<String> {
     let raw = bundle.files().get(target)?;
     let parsed = model::parse_file(target.as_str(), raw);
     parsed.fm.and_then(|fm| fm.r#type)
+}
+
+/// Datos para materializar el `Fix` `safe` de una relación tipada ROTA (`REL-TARGET`, E12-H07):
+/// quitar `target` del campo `rel_name` del frontmatter de `source`. Lo consume
+/// [`crate::plan::normalize_apply_fix`], que re-localiza el fix por su `fix_id` estable.
+pub(crate) struct RelTargetRepair {
+    /// Id estable del fix (idéntico al del `Fix` que adjunta [`validate_relations`]).
+    pub fix_id: String,
+    /// Concepto origen (dueño del campo de relación) sobre el que recae el patch correctivo.
+    pub source: RelPath,
+    /// Nombre del campo de relación en el frontmatter (p. ej. `mentor`).
+    pub rel_name: String,
+    /// Target roto tal cual aparece en el campo, que el arreglo quita.
+    pub target: String,
+}
+
+/// `fix_id` estable y determinista de una relación rota (`REL-TARGET`): `fix:blake3:<hex>` con
+/// `hex = blake3(source ‖ 0x00 ‖ rel_name ‖ 0x00 ‖ target)`. Derivado **solo** del diagnóstico
+/// (nunca de timestamps, orden ni caché), así el mismo bundle produce el mismo `fix_id` entre
+/// procesos frescos → [`crate::plan::normalize_apply_fix`] puede re-localizarlo recomputando los
+/// checks.
+fn rel_target_fix_id(source: &str, rel_name: &str, target: &str) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(source.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(rel_name.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(target.as_bytes());
+    format!("fix:blake3:{}", hasher.finalize().to_hex())
+}
+
+/// Construye el `Fix { safe: true }` que se adjunta a un check `REL-TARGET` de relación rota: su
+/// arreglo es «quitar la relación rota del campo». `safe` porque no destruye información conforme
+/// (el target no existe/no es válido).
+fn rel_target_fix(source: &RelPath, rel_name: &str, target: &str) -> Fix {
+    Fix {
+        fix_id: rel_target_fix_id(source.as_str(), rel_name, target),
+        title: format!(
+            "Quitar la relación rota «{rel_name} → {target}» de «{}».",
+            source.as_str()
+        ),
+        safe: true,
+    }
+}
+
+/// Recomputa los arreglos de relaciones tipadas ROTAS del bundle bajo `schema` — E12-H07. Espeja
+/// exactamente la detección de `REL-TARGET` de [`validate_relations`] (target con ruta inválida o
+/// que no existe como concepto), y devuelve, por cada uno, el [`RelTargetRepair`] con su `fix_id`
+/// estable. Es la contraparte estructurada de los `Fix` que adjunta `validate_relations`: comparten
+/// `rel_target_fix_id`, así que los `fix_id` coinciden. **Pura**.
+pub(crate) fn rel_target_repairs(bundle: &Bundle, schema: &Schema) -> Vec<RelTargetRepair> {
+    if schema.types.is_empty() {
+        return Vec::new();
+    }
+
+    let concepts: BTreeSet<&RelPath> = bundle.analyze().concepts.iter().collect();
+
+    let mut out = Vec::new();
+    for path in &bundle.analyze().concepts {
+        let Some(raw) = bundle.files().get(path) else {
+            continue;
+        };
+        let parsed = model::parse_file(path.as_str(), raw);
+        let Some(fm) = parsed.fm else {
+            continue;
+        };
+        let Some(tipo) = fm.r#type.as_deref() else {
+            continue;
+        };
+        let Some(doctype) = schema.types.get(tipo) else {
+            continue;
+        };
+
+        for rel_name in doctype.relations.keys() {
+            let Some(targets) = relation_targets(&fm, rel_name) else {
+                continue;
+            };
+            for target_str in &targets {
+                let roto = match RelPath::new(target_str) {
+                    Ok(target_path) => !concepts.contains(&target_path),
+                    Err(_) => true,
+                };
+                if roto {
+                    out.push(RelTargetRepair {
+                        fix_id: rel_target_fix_id(path.as_str(), rel_name, target_str),
+                        source: path.clone(),
+                        rel_name: rel_name.clone(),
+                        target: target_str.clone(),
+                    });
+                }
+            }
+        }
+    }
+    out
 }
 
 /// Busca la línea del campo `{field}:` dentro del bloque de frontmatter (entre el primer y el

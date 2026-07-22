@@ -2490,3 +2490,255 @@ fn delete_remove_links() {
         );
     }
 }
+
+// --- E12-H07: Normalización de operaciones SEMÁNTICAS -------------------------
+// (`add_relation` / `remove_relation` / `transition_status` / `apply_fix`)
+//
+// Fase ROJA: los normalizadores puros SEMÁNTICOS todavía NO existen en producción. Ubicación
+// ASUMIDA: el módulo `lodestar_core::plan` (junto a `normalize_create`/`normalize_move`/… — es
+// normalización de plan, y el core es puro, invariante #2). A diferencia de las de estructura,
+// estas producen la ESCRITURA CONCRETA ya resuelta (un `PatchFrontmatter`), siguiendo el mismo
+// criterio que E12-H05 (`normalize_edit_section` resuelve a `ReplaceBody`): las variantes
+// `AddRelation`/`RemoveRelation`/`TransitionStatus`/`ApplyFix` del enum son ops de ALTO NIVEL; el
+// normalizador las baja a la escritura resuelta que aplicará el único escritor.
+//
+// Firmas ASUMIDAS (documentadas por el autor de tests; vinculan al implementador):
+//
+//   pub fn normalize_add_relation(
+//       bundle: &Bundle, schema: &Schema,
+//       source: &RelPath, relation: &str, target: &RelPath,
+//   ) -> Result<NormalizedOperation, CoreError>;
+//   pub fn normalize_remove_relation(
+//       bundle: &Bundle, schema: &Schema,
+//       source: &RelPath, relation: &str, target: &RelPath,
+//   ) -> Result<NormalizedOperation, CoreError>;
+//   pub fn normalize_transition_status(
+//       bundle: &Bundle, schema: &Schema, reference: &RelPath, to: &str,
+//   ) -> Result<NormalizedOperation, CoreError>;
+//   pub fn normalize_apply_fix(
+//       bundle: &Bundle, schema: &Schema, fix_id: &str,
+//   ) -> Result<NormalizedOperation, CoreError>;
+//
+// Contrato que estos tests fijan:
+//   * `normalize_add_relation` valida el target contra la `RelationDef` del `DocType` del `source`
+//     (el `type` del target ∈ `RelationDef.target_types`, la cardinalidad no se viola). Si viola,
+//     `Err` de la variante de `CoreError` que mapea a `ErrorCode::RelationConstraintViolation`
+//     (wire "RELATION_CONSTRAINT_VIOLATION", ya definido en `types.rs`). Como hoy `CoreError` NO
+//     tiene esa variante, el implementador debe añadirla con ese nombre
+//     (`CoreError::RelationConstraintViolation`). La aserción es AGNÓSTICA al payload: comprueba
+//     que el nombre de la variante aparece en el `Debug` del error.
+//   * `normalize_transition_status` valida `to` contra `allowed_statuses` del `DocType` del `ref`.
+//     Si `to` no está permitido → `Err` (rechazo; la spec no fija un wire concreto, así que solo
+//     se exige `is_err`). Si está permitido → `Ok(PatchFrontmatter{ status: to })` (discriminador
+//     contra un stub que siempre falle).
+//   * `normalize_apply_fix` recomputa los diagnósticos del bundle bajo el schema (analyze +
+//     validate_schema + validate_relations) y materializa el `Fix` `safe` cuyo `fix_id` casa.
+//
+// DIAGNÓSTICO FIXABLE ASUMIDO (decisión del autor, documentada para el implementador):
+//   El diagnóstico `REL-TARGET` de una relación tipada ROTA (un target que no existe como
+//   concepto) debe emitir un `Fix { fix_id, title, safe: true }` cuyo arreglo es «quitar la
+//   relación rota». El `fix_id` es estable (derivable del diagnóstico). `normalize_apply_fix`
+//   resuelve ese fix a un `PatchFrontmatter` sobre el concepto origen que QUITA el target roto del
+//   campo de la relación (deja de referenciarlo). El test obtiene el `fix_id` recomputando
+//   `validate_relations` y leyendo `check.fixes[].fix_id` del primer fix `safe`; hoy los checks NO
+//   emiten fixes, así que el implementador debe hacer que `validate_relations` adjunte ese `Fix`.
+//
+// Hasta que E12-H07 defina los normalizadores (y el `Fix` de `REL-TARGET`), estos tres tests hacen
+// ROJO por SÍMBOLO AUSENTE (compile-fail: `plan::normalize_add_relation` /
+// `plan::normalize_transition_status` / `plan::normalize_apply_fix` — y la variante de error — no
+// existen), lo que impide compilar el binario de tests del crate. Es el rojo esperado.
+
+/// Criterio `add_relation_invalida`: **Dado** `add_relation` que viola la `RelationDef` (el `type`
+/// del target no está en `target_types`), **Cuando** se normaliza, **Entonces**
+/// `RELATION_CONSTRAINT_VIOLATION`.
+///
+/// Fixture aislado en el TIPO: `mentor` es cardinalidad `many` con `target_types:[character]`, así
+/// que añadir un target de tipo `item` viola SOLO la restricción de tipo (no la cardinalidad).
+#[test]
+fn add_relation_invalida() {
+    use lodestar_core::schema::{DocType, RelationDef, Schema};
+
+    // Guarda de coherencia con `types.rs`: el `ErrorCode` esperado mapea a este wire.
+    assert_eq!(
+        ErrorCode::RelationConstraintViolation.as_str(),
+        "RELATION_CONSTRAINT_VIOLATION"
+    );
+
+    // `heroe` (character) quiere añadir `mentor -> espada`, pero `espada` es `item`, no `character`.
+    let b = Bundle::from_files(fm(&[
+        (
+            "heroe.md",
+            "---\ntype: character\ntitle: Heroe\n---\n\n# Heroe\n\ncuerpo\n",
+        ),
+        (
+            "espada.md",
+            "---\ntype: item\ntitle: Espada\n---\n\n# Espada\n\ncuerpo\n",
+        ),
+    ]));
+
+    let mut schema = Schema::default();
+    schema.types.insert(
+        "item".to_string(),
+        DocType {
+            name: "item".to_string(),
+            ..DocType::default()
+        },
+    );
+    schema.types.insert(
+        "character".to_string(),
+        DocType {
+            name: "character".to_string(),
+            relations: BTreeMap::from([(
+                "mentor".to_string(),
+                RelationDef {
+                    target_types: vec!["character".to_string()],
+                    cardinality: "many".to_string(),
+                },
+            )]),
+            ..DocType::default()
+        },
+    );
+
+    let source = RelPath::new("heroe.md").unwrap();
+    let target = RelPath::new("espada.md").unwrap();
+
+    let err = lodestar_core::plan::normalize_add_relation(&b, &schema, &source, "mentor", &target)
+        .expect_err(
+            "añadir una relación a un target de tipo no permitido debe violar la `RelationDef`",
+        );
+
+    let dbg = format!("{err:?}");
+    assert!(
+        dbg.contains("RelationConstraintViolation"),
+        "el rechazo debe ser la variante de `CoreError` que mapea a \
+         `ErrorCode::RelationConstraintViolation` (wire \"RELATION_CONSTRAINT_VIOLATION\"); \
+         error = {err:?}",
+    );
+}
+
+/// Criterio `transicion_invalida`: **Dado** `transition_status` a un estado NO permitido, **Cuando**
+/// se normaliza, **Entonces** rechazo (`Err`).
+///
+/// Fixture: `DocType decision` con `allowedStatuses:[proposed, accepted]`; `d1.md` (decision) en
+/// `proposed`. Transicionar a `"inventado"` (fuera de la lista) → `Err`. Discriminador contra un
+/// stub que siempre falle: transicionar a `"accepted"` (permitido) → `Ok(PatchFrontmatter{status})`.
+#[test]
+fn transicion_invalida() {
+    use lodestar_core::schema::{DocType, Schema};
+
+    let b = Bundle::from_files(fm(&[(
+        "d1.md",
+        "---\ntype: decision\ntitle: D1\nstatus: proposed\n---\n\n# D1\n\ncuerpo\n",
+    )]));
+
+    let mut schema = Schema::default();
+    schema.types.insert(
+        "decision".to_string(),
+        DocType {
+            name: "decision".to_string(),
+            allowed_statuses: vec!["proposed".to_string(), "accepted".to_string()],
+            ..DocType::default()
+        },
+    );
+
+    let reference = RelPath::new("d1.md").unwrap();
+
+    // 1) Estado NO permitido → rechazo.
+    let err =
+        lodestar_core::plan::normalize_transition_status(&b, &schema, &reference, "inventado")
+            .expect_err("transicionar a un estado fuera de `allowedStatuses` debe rechazarse");
+    let _ = err; // el criterio solo exige `Err`; la spec no fija un wire concreto para el rechazo.
+
+    // 2) DISCRIMINADOR: estado permitido → `Ok` con la escritura correctora (`status: accepted`).
+    let op = lodestar_core::plan::normalize_transition_status(&b, &schema, &reference, "accepted")
+        .expect("transicionar a un estado permitido debe producir la escritura correctora");
+    let NormalizedOperation::PatchFrontmatter { path, patch } = &op else {
+        panic!("una transición válida debe resolverse a un `PatchFrontmatter`; fue {op:?}");
+    };
+    assert_eq!(
+        path, &reference,
+        "el patch debe recaer sobre el concepto transicionado"
+    );
+    assert!(
+        patch.0.contains_key("status"),
+        "el patch de una transición válida debe fijar el campo `status`; patch = {patch:?}",
+    );
+    assert!(
+        format!("{patch:?}").contains("accepted"),
+        "el patch debe fijar `status: accepted`; patch = {patch:?}",
+    );
+}
+
+/// Criterio `apply_fix_safe`: **Dado** `apply_fix` con el `fixId` de un fix `safe`, **Cuando** se
+/// normaliza, **Entonces** produce la escritura correctora.
+///
+/// Diagnóstico fixable asumido (ver cabecera de sección): una relación tipada ROTA (`REL-TARGET`)
+/// cuyo `Fix` `safe` es «quitar la relación rota». El test obtiene el `fix_id` recomputando
+/// `validate_relations` y leyendo el primer `Fix` `safe`; luego exige que `normalize_apply_fix`
+/// resuelva a un `PatchFrontmatter` sobre el concepto origen que YA NO referencia el target roto.
+#[test]
+fn apply_fix_safe() {
+    use lodestar_core::schema::{validate_relations, DocType, RelationDef, Schema};
+
+    // `heroe` (character) declara `mentor -> fantasma.md`, pero `fantasma.md` NO existe → REL-TARGET.
+    let b = Bundle::from_files(fm(&[(
+        "heroe.md",
+        "---\ntype: character\ntitle: Heroe\nmentor:\n  - fantasma.md\n---\n\n# Heroe\n\ncuerpo\n",
+    )]));
+
+    let mut schema = Schema::default();
+    schema.types.insert(
+        "character".to_string(),
+        DocType {
+            name: "character".to_string(),
+            relations: BTreeMap::from([(
+                "mentor".to_string(),
+                RelationDef {
+                    target_types: vec!["character".to_string()],
+                    cardinality: "many".to_string(),
+                },
+            )]),
+            ..DocType::default()
+        },
+    );
+
+    // Precondición: el diagnóstico REL-TARGET existe y emite un `Fix` `safe` (lo que el implementador
+    // debe añadir a `validate_relations`). De ahí sale el `fix_id` que consume `normalize_apply_fix`.
+    let checks = validate_relations(&b, &schema);
+    assert!(
+        checks.iter().any(|c| c.code == CheckCode::RelTarget),
+        "el fixture debe producir un diagnóstico REL-TARGET (relación rota); checks = {checks:?}",
+    );
+    let fix = checks
+        .iter()
+        .flat_map(|c| &c.fixes)
+        .find(|f| f.safe)
+        .expect(
+            "el diagnóstico REL-TARGET de una relación rota debe emitir un `Fix{ safe: true }` \
+             cuyo arreglo es «quitar la relación rota» (el implementador debe adjuntarlo en \
+             `validate_relations`)",
+        );
+    let fix_id = fix.fix_id.clone();
+
+    let op = lodestar_core::plan::normalize_apply_fix(&b, &schema, &fix_id)
+        .expect("aplicar un fix `safe` conocido debe producir la escritura correctora");
+
+    // La escritura correctora es un `PatchFrontmatter` sobre `heroe.md` que quita la relación rota.
+    let source = RelPath::new("heroe.md").unwrap();
+    let NormalizedOperation::PatchFrontmatter { path, patch } = &op else {
+        panic!("aplicar el fix debe resolverse a un `PatchFrontmatter`; fue {op:?}");
+    };
+    assert_eq!(
+        path, &source,
+        "el patch debe recaer sobre el concepto de la relación rota"
+    );
+    assert!(
+        patch.0.contains_key("mentor"),
+        "el patch debe tocar el campo de la relación rota (`mentor`); patch = {patch:?}",
+    );
+    assert!(
+        !format!("{patch:?}").contains("fantasma"),
+        "el patch correctivo debe QUITAR el target roto `fantasma.md` del campo `mentor`, no \
+         conservarlo; patch = {patch:?}",
+    );
+}

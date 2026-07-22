@@ -316,5 +316,10 @@ superficie de producto; git queda como crate dormido) y `DECISIONES.md §0`. Des
     Juez ciego: APROBADA CON RESERVAS (3/3). **A endurecer antes de E13**: `Retarget`/`CreateStub` hoy hacen
     solo Delete en silencio (deben implementarse o dar error explícito); añadir test de enlace-señuelo y
     cobertura de rutas relativas.
-  - ⏳ E12-H07–H09 pendientes (semántica → change_plan → persistencia).
+  - ✅ **E12-H07** — Normalización semántica: `normalize_add_relation`/`remove_relation` (validan
+    RelationDef → `RELATION_CONSTRAINT_VIOLATION`), `normalize_transition_status` (valida allowedStatuses),
+    `normalize_apply_fix`. `validate_relations` emite un `Fix{safe}` en REL-TARGET (fix_id blake3 estable,
+    aditivo sin regresión); apply_fix lo re-localiza y materializa (quita la relación rota). Juez ciego:
+    APROBADA (3/3).
+  - ⏳ E12-H08 (change_plan) y E12-H09 (persistencia) pendientes.
 - **E13–E14: pendientes** (publicación recuperable · integración + evaluación — `ARCHITECTURE.md §19.8`).

@@ -43,6 +43,27 @@ pub enum CoreError {
     /// existe en el bundle (path sin fichero, o `heading_path` que no casa con ningún heading).
     #[error("objetivo de normalización no encontrado: {0}")]
     NormalizeTargetNotFound(String),
+
+    /// Al normalizar `add_relation`/`remove_relation` (E12-H07), la relación viola su
+    /// [`crate::schema::RelationDef`]: el `type` del target no está en `target_types` (vacío =
+    /// cualquier tipo), o la cardinalidad `"one"` se superaría. El payload es un mensaje legible
+    /// en español con el detalle del incumplimiento (concepto origen, relación, target y motivo).
+    /// Mapea a `ErrorCode::RelationConstraintViolation` (wire `"RELATION_CONSTRAINT_VIOLATION"`).
+    #[error("restricción de relación violada: {0}")]
+    RelationConstraintViolation(String),
+
+    /// Al normalizar `transition_status` (E12-H07), el estado destino no está en los
+    /// `allowed_statuses` del `DocType` del concepto (cuando esa lista no está vacía). El payload
+    /// es un mensaje legible con el estado rechazado y los permitidos. Mapea a
+    /// `ErrorCode::InvalidSchema` (precondición de lifecycle incumplida).
+    #[error("transición de estado no permitida: {0}")]
+    InvalidStatusTransition(String),
+
+    /// Al normalizar `apply_fix` (E12-H07), el `fix_id` pedido no corresponde a ningún `Fix`
+    /// `safe` de los diagnósticos recomputados del bundle (desconocido, ya resuelto, o no `safe`).
+    /// El payload es el `fix_id` no encontrado. Mapea a `ErrorCode::ConceptNotFound`.
+    #[error("fix no encontrado o no aplicable: {0}")]
+    FixNotFound(String),
 }
 
 /// Resultado de conveniencia del núcleo.

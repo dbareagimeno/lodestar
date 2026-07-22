@@ -41,7 +41,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::diff::{diff_snap, BodyHunk, ChangeKind};
 use crate::error::CoreError;
 use crate::model;
-use crate::schema::{validate_relations, validate_schema, Schema};
+use crate::schema::{
+    rel_target_repairs, relation_targets, target_type_of, validate_relations, validate_schema,
+    Schema,
+};
 use once_cell::sync::Lazy;
 use regex::{Captures, Regex};
 use serde::{Deserialize, Serialize};
@@ -657,4 +660,215 @@ pub fn normalize_delete(
         // Sin criterio en E12-H06: mínimo defensible, solo el borrado (ver doc).
         InboundLinksPolicy::Retarget | InboundLinksPolicy::CreateStub => Ok(vec![delete]),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Normalización de operaciones SEMÁNTICAS (E12-H07): relaciones tipadas, ciclo de vida y fixes.
+//
+// A diferencia de las de estructura, resuelven SIEMPRE a un único `PatchFrontmatter` sobre el
+// concepto afectado — la única verdad la dan `schema` (RelationDef/allowedStatuses, invariante #3)
+// y el frontmatter del propio concepto. Todo PURO: sin I/O, sin reloj. `apply_fix` recompone el
+// mismo universo de diagnósticos que `lodestar check` para re-localizar el fix por su id estable.
+// ---------------------------------------------------------------------------
+
+/// `type` declarado en el frontmatter del concepto en `path`, o `None` si el fichero no existe,
+/// no tiene frontmatter, o no declara `type`. Reusa `model::parse_file` (la misma verdad del core).
+fn concept_type(bundle: &Bundle, path: &RelPath) -> Option<String> {
+    bundle
+        .files()
+        .get(path)
+        .and_then(|raw| model::parse_file(path.as_str(), raw).fm)
+        .and_then(|fm| fm.r#type)
+}
+
+/// Targets actuales del campo de relación `relation` en el frontmatter de `source` (secuencia YAML
+/// o `String` único, vía `schema::relation_targets`). Vector vacío si el concepto no existe, no
+/// tiene frontmatter, o el campo no está presente.
+fn current_targets(bundle: &Bundle, source: &RelPath, relation: &str) -> Vec<String> {
+    bundle
+        .files()
+        .get(source)
+        .and_then(|raw| model::parse_file(source.as_str(), raw).fm)
+        .and_then(|fm| relation_targets(&fm, relation))
+        .unwrap_or_default()
+}
+
+/// Construye un [`FrontmatterPatch`] que fija el campo `relation` a la secuencia YAML de `targets`
+/// (lista de paths). Una lista vacía deja el campo como `[]` (presente pero sin targets): el
+/// concepto deja de referenciar, sin borrar la declaración del campo.
+fn relation_field_patch(relation: &str, targets: &[String]) -> FrontmatterPatch {
+    let seq = serde_yaml::Value::Sequence(
+        targets
+            .iter()
+            .map(|t| serde_yaml::Value::String(t.clone()))
+            .collect(),
+    );
+    let mut map = BTreeMap::new();
+    map.insert(relation.to_string(), Some(seq));
+    FrontmatterPatch(map)
+}
+
+/// Normaliza un `add_relation`: añade `target` al campo de relación `relation` del frontmatter de
+/// `source`, validando antes contra la [`crate::schema::RelationDef`] del `DocType` de `source` —
+/// E12-H07.
+///
+/// Validaciones (solo si el `DocType` de `source` declara la relación `relation`; sin `RelationDef`
+/// no hay restricción que imponer):
+/// - **Tipo del target**: si `target_types` no está vacío y el `type` de `target` es conocido y no
+///   figura en la lista → [`CoreError::RelationConstraintViolation`].
+/// - **Cardinalidad**: si `cardinality == "one"` y añadir `target` dejaría el campo con más de un
+///   target → [`CoreError::RelationConstraintViolation`].
+///
+/// Si es válida, devuelve un [`NormalizedOperation::PatchFrontmatter`] que fija el campo `relation`
+/// a los targets actuales MÁS `target` (idempotente: no duplica si ya estaba). **Puro.**
+pub fn normalize_add_relation(
+    bundle: &Bundle,
+    schema: &Schema,
+    source: &RelPath,
+    relation: &str,
+    target: &RelPath,
+) -> Result<NormalizedOperation, CoreError> {
+    let mut new_targets = current_targets(bundle, source, relation);
+    let already = new_targets.iter().any(|t| t == target.as_str());
+    if !already {
+        new_targets.push(target.as_str().to_string());
+    }
+
+    if let Some(reldef) = concept_type(bundle, source)
+        .as_deref()
+        .and_then(|tipo| schema.types.get(tipo))
+        .and_then(|dt| dt.relations.get(relation))
+    {
+        if !reldef.target_types.is_empty() {
+            if let Some(target_type) = target_type_of(bundle, target) {
+                if !reldef.target_types.iter().any(|t| t == &target_type) {
+                    return Err(CoreError::RelationConstraintViolation(format!(
+                        "la relación «{relation}» de «{}» no admite un target de tipo «{target_type}» \
+                         (admite: {}); target «{}».",
+                        source.as_str(),
+                        reldef.target_types.join(", "),
+                        target.as_str(),
+                    )));
+                }
+            }
+        }
+
+        if reldef.cardinality == "one" && new_targets.len() > 1 {
+            return Err(CoreError::RelationConstraintViolation(format!(
+                "la relación «{relation}» de «{}» admite como máximo un target (cardinalidad \
+                 «one») pero quedaría con {}.",
+                source.as_str(),
+                new_targets.len(),
+            )));
+        }
+    }
+
+    Ok(NormalizedOperation::PatchFrontmatter {
+        path: source.clone(),
+        patch: relation_field_patch(relation, &new_targets),
+    })
+}
+
+/// Normaliza un `remove_relation`: quita `target` del campo de relación `relation` del frontmatter
+/// de `source` — E12-H07.
+///
+/// Devuelve un [`NormalizedOperation::PatchFrontmatter`] que fija el campo `relation` a los targets
+/// actuales SIN `target` (idempotente: si no estaba, el campo queda igual). No valida contra la
+/// `RelationDef` — quitar una relación nunca puede violar una restricción de tipo/cardinalidad.
+/// **Puro.**
+pub fn normalize_remove_relation(
+    _bundle: &Bundle,
+    _schema: &Schema,
+    source: &RelPath,
+    relation: &str,
+    target: &RelPath,
+) -> Result<NormalizedOperation, CoreError> {
+    let remaining: Vec<String> = current_targets(_bundle, source, relation)
+        .into_iter()
+        .filter(|t| t != target.as_str())
+        .collect();
+
+    Ok(NormalizedOperation::PatchFrontmatter {
+        path: source.clone(),
+        patch: relation_field_patch(relation, &remaining),
+    })
+}
+
+/// Normaliza un `transition_status`: valida `to` contra los `allowed_statuses` del `DocType` de
+/// `reference` y produce el patch de `status` — E12-H07.
+///
+/// Si el `DocType` de `reference` declara `allowed_statuses` no vacío y `to` no está en la lista →
+/// [`CoreError::InvalidStatusTransition`] (mismo criterio que `SCHEMA-STATUS` en `validate_schema`:
+/// una lista vacía, o un tipo sin `DocType`, no impone restricción). Si es válida, devuelve un
+/// [`NormalizedOperation::PatchFrontmatter`] que fija `status: to`. **Puro.**
+pub fn normalize_transition_status(
+    bundle: &Bundle,
+    schema: &Schema,
+    reference: &RelPath,
+    to: &str,
+) -> Result<NormalizedOperation, CoreError> {
+    if let Some(doctype) = concept_type(bundle, reference)
+        .as_deref()
+        .and_then(|tipo| schema.types.get(tipo))
+    {
+        if !doctype.allowed_statuses.is_empty() && !doctype.allowed_statuses.iter().any(|s| s == to)
+        {
+            return Err(CoreError::InvalidStatusTransition(format!(
+                "«{to}» no es un estado permitido para «{}» (permite: {}).",
+                reference.as_str(),
+                doctype.allowed_statuses.join(", "),
+            )));
+        }
+    }
+
+    let mut map = BTreeMap::new();
+    map.insert(
+        "status".to_string(),
+        Some(serde_yaml::Value::String(to.to_string())),
+    );
+    Ok(NormalizedOperation::PatchFrontmatter {
+        path: reference.clone(),
+        patch: FrontmatterPatch(map),
+    })
+}
+
+/// Normaliza un `apply_fix`: materializa el `Fix` `safe` cuyo `fix_id` casa con `fix_id`, entre los
+/// diagnósticos recomputados del bundle — E12-H07.
+///
+/// Recompone el MISMO universo de diagnósticos que `lodestar check` (`all_checks`:
+/// `analyze().per_file` + `validate_schema` + `validate_relations`) y comprueba que exista un
+/// [`crate::types::Fix`] con `fix_id == fix_id` y `safe == true`; si no, falla con
+/// [`CoreError::FixNotFound`]. Localizado el fix, deriva su arreglo a partir de
+/// `schema::rel_target_repairs` (la contraparte estructurada de los fixes de relación rota,
+/// con el mismo `fix_id` estable): el único arreglo soportado en esta historia es el de una relación
+/// tipada ROTA (`REL-TARGET`), que se materializa como un [`NormalizedOperation::PatchFrontmatter`]
+/// sobre el concepto origen QUITANDO el target roto de su campo de relación. Un `fix_id` sin repair
+/// asociado (fix de otra familia aún no soportada) también da [`CoreError::FixNotFound`]. **Puro.**
+pub fn normalize_apply_fix(
+    bundle: &Bundle,
+    schema: &Schema,
+    fix_id: &str,
+) -> Result<NormalizedOperation, CoreError> {
+    let safe_fix_presente = all_checks(bundle, schema)
+        .iter()
+        .flat_map(|c| &c.fixes)
+        .any(|f| f.fix_id == fix_id && f.safe);
+    if !safe_fix_presente {
+        return Err(CoreError::FixNotFound(fix_id.to_string()));
+    }
+
+    let repair = rel_target_repairs(bundle, schema)
+        .into_iter()
+        .find(|r| r.fix_id == fix_id)
+        .ok_or_else(|| CoreError::FixNotFound(fix_id.to_string()))?;
+
+    let remaining: Vec<String> = current_targets(bundle, &repair.source, &repair.rel_name)
+        .into_iter()
+        .filter(|t| t != &repair.target)
+        .collect();
+
+    Ok(NormalizedOperation::PatchFrontmatter {
+        path: repair.source.clone(),
+        patch: relation_field_patch(&repair.rel_name, &remaining),
+    })
 }
