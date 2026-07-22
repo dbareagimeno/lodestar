@@ -412,7 +412,7 @@ superficie de producto; git queda como crate dormido) y `DECISIONES.md §0`. Des
     test de crash dedicado que mate la publicación DESPUÉS del `.md` del plan y ANTES del index/tags
     regenerado (la recuperabilidad de ese path queda garantizada estructuralmente: está en
     affected/journal/backup).
-- **E14 — EN CURSO** (integración software + evaluación — `ARCHITECTURE.md §19.8`):
+- **E14 — COMPLETA (5/5)** (integración software + evaluación — `ARCHITECTURE.md §19.8`):
   - ✅ **E14-H01** — `lodestar check` como puerta de CI con conformidad schema-driven: `check` (working
     tree, sin flags git) juzga con el MISMO motor que `App::knowledge_check` scope `workspace` (OKF +
     SCHEMA-* + REL-* + refs externas). La fusión OKF+schema/rel vive en UN solo sitio compartido
@@ -491,7 +491,24 @@ superficie de producto; git queda como crate dormido) y `DECISIONES.md §0`. Des
     estricto que `knowledge_check` sobre `OKF-CONFLICT` de un reservado (nunca menos: dirección segura;
     y el `index.md` de staging se regenera limpio, sin trigger real). El delta del arreglo (schema+rel)
     apunta solo a paths de `concepts`, alineado con `knowledge_check`.
-  - ⏳ E14-H05 (métricas de escala) pendiente.
+  - ✅ **E14-H05** — Métricas de evaluación y presupuesto de escala: **historia de composición/regresión**
+    (cero producción) — arnés de medición sobre fixture sintética de ~10k conceptos generada en runtime
+    (tempdir, nada committeado). `crates/lodestar-app/tests/escala.rs`: `bench_search_payload_acotado`
+    (10k conceptos → `knowledge_search` acota el payload: `SearchResult` no tiene `body`, expone `snippet`
+    de 160 chars; aserción no-vacua con un centinela al final de cada cuerpo, fuera de la ventana del
+    snippet, que NO debe viajar en la respuesta serializada; + cota de payload como proxy de tokens;
+    latencia registrada, sin umbral duro — ~8s en debug para 10k, O(n)) y `bench_concurrencia_segura`
+    (dos `change_apply` concurrentes → exactamente UNO gana; el perdedor recibe `WRITE_CONFLICT`
+    —observado— o `PLAN_STALE`, ambos rechazan limpio ANTES de publicar; determinista no-flaky por el lock
+    exclusivo `O_CREAT|O_EXCL` de E13-H02 que serializa `apply_transaction` + reverify optimista bajo el
+    lock; asevera integridad: un solo `.md`, revisión coherente). Juez ciego: **APROBADA (2/2)**,
+    no-vacuidad y determinismo confirmados. Las mediciones adicionales del alcance
+    (`graph_query`/`impact_analyze`/`change_plan`/tiempo de crash-recovery) no tienen criterio testeable
+    propio (umbrales orientativos, gate opcional que no bloquea v2); registrables por `eprintln!` si se
+    desea.
+  - **Cierre de E14**: el motor headless queda medido y con la base de conocimiento conviviendo con código
+    sin poseer git ni el editor. Queda pendiente SOLO la limpieza final de superficie `mcp.yml` → 10 tools
+    objetivo (retirar las tools heredadas), abordada como historia propia de cierre del giro.
   - **Pendiente al cierre de E14**: limpieza final de superficie `mcp.yml` → 10 tools objetivo (retirar
     `query`/`conformance_check`/`find_*`/`neighborhood`/`create_concept`/`update_frontmatter`/
     `generate_*`), descopada aquí desde E12/E13.
