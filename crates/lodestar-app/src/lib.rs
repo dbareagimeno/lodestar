@@ -22,7 +22,9 @@ use lodestar_core::types::{
     ErrorCode, Frontmatter, GraphNode, RelPath, Severity, WorkspaceRevision,
 };
 use lodestar_core::{Bundle, CoreError};
-use lodestar_workspace::{Workspace, WorkspaceConfig, WorkspaceError, WorkspaceSchema};
+use lodestar_workspace::{
+    ExternalReference, Workspace, WorkspaceConfig, WorkspaceError, WorkspaceSchema,
+};
 
 /// Envelope común de protocolo (`ARCHITECTURE.md §19.6`, `docs/REFACTOR.md §13`, decisión **D3**).
 ///
@@ -124,6 +126,9 @@ pub fn error_code(err: &CoreError) -> ErrorCode {
 ///   fachada es un estado de escritura en conflicto (aproximación documentada; git puede fallar
 ///   por otras razones, p. ej. red, pero el catálogo actual no distingue más).
 /// - `RepoBusy` (merge/rebase en curso) → `WriteConflict`: literalmente un conflicto de escritura.
+/// - `PermissionDenied` (E11-H04: escritura bajo un `referenceRoot`, o fuera de `writableRoots`) →
+///   `ErrorCode::PermissionDenied`, mapeo directo por nombre (mismo caso que `error_code` con
+///   `CoreError::InvalidRelPath`).
 pub fn workspace_error_code(err: &WorkspaceError) -> ErrorCode {
     match err {
         WorkspaceError::Core(_) => ErrorCode::InternalIoError,
@@ -133,6 +138,7 @@ pub fn workspace_error_code(err: &WorkspaceError) -> ErrorCode {
         WorkspaceError::NoCache => ErrorCode::InternalIoError,
         WorkspaceError::Store(_) => ErrorCode::InternalIoError,
         WorkspaceError::RepoBusy => ErrorCode::WriteConflict,
+        WorkspaceError::PermissionDenied(_) => ErrorCode::PermissionDenied,
     }
 }
 
@@ -525,10 +531,12 @@ impl App {
     /// el resultado final es la concatenación de todos los `headingPath` pedidos. Sin `sections`,
     /// `body` es el cuerpo completo.
     ///
-    /// `externalReferences` queda **vacío** en esta historia (E11-H04 fuera de alcance: no hay
-    /// todavía criterio de qué frontmatter de productor cuenta como referencia externa) — se puebla
-    /// como `Vec::new()` cuando se pide, para respetar la selectividad de `include` sin inventar
-    /// semántica.
+    /// `externalReferences` resuelve `implemented_by`/`verified_by` contra disco vía
+    /// [`Workspace::external_refs`] (E11-H04) — `{path, exists}` por cada referencia declarada.
+    /// Los diagnósticos de referencia rota (`CheckCode::ExtrefMissing`) que produce esa llamada NO
+    /// se mezclan en el campo `diagnostics` de esta proyección (que sigue viniendo, sin cambios,
+    /// de `Analysis::per_file` — invariante #3: una sola verdad computada por fuente); un agente
+    /// que quiera esos diagnósticos los deriva de `exists:false` en `externalReferences`.
     pub fn knowledge_get(
         &self,
         r: &ConceptRef,
@@ -567,7 +575,15 @@ impl App {
                 .cloned()
                 .unwrap_or_default()
         });
-        let external_references = wants("externalReferences").then(Vec::new);
+        let external_references = if wants("externalReferences") {
+            let report = self
+                .workspace
+                .external_refs(&path)
+                .map_err(|e| workspace_error_code(&e))?;
+            Some(report.references)
+        } else {
+            None
+        };
 
         Ok(ConceptView {
             path,
@@ -1161,10 +1177,10 @@ pub struct ConceptView {
     /// Vecindad de enlaces entrantes (`Bundle::backlinks`), si se pidió `"backlinks"`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backlinks: Option<Backlinks>,
-    /// Referencias externas (siempre vacío en esta historia; ver nota de `knowledge_get`), si se
-    /// pidió `"externalReferences"`.
+    /// Referencias externas (`implemented_by`/`verified_by`, E11-H04) resueltas contra
+    /// `referenceRoots`, si se pidió `"externalReferences"`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub external_references: Option<Vec<String>>,
+    pub external_references: Option<Vec<ExternalReference>>,
     /// Checks de conformidad del concepto (`Analysis::per_file`), si se pidió `"diagnostics"`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub diagnostics: Option<Vec<Check>>,

@@ -21,6 +21,13 @@ serde = { workspace = true }
 crossbeam-channel = "0.5"
 toml = "0.8"
 serde_yaml = { workspace = true }
+schemars = { workspace = true, optional = true }
+
+[features]
+default = []
+# Gatea #[derive(JsonSchema)] en `ExternalReference` (E11-H04), consumido por `lodestar-app` para
+# el `outputSchema` de `knowledge_get` — mismo patrón que la feature homónima de `lodestar-core`.
+schemars = ["dep:schemars"]
 
 [lints]
 workspace = true

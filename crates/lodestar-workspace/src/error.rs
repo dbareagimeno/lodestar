@@ -18,6 +18,11 @@ pub enum WorkspaceError {
     Store(String),
     #[error("hay un merge/rebase en curso: resuelve el conflicto antes de commitear")]
     RepoBusy,
+    /// Escritura rechazada por caer bajo un `referenceRoot` (inmutable) o fuera de los
+    /// `writableRoots` configurados (E11-H04, `Workspace::assert_writable`). El mensaje describe
+    /// el motivo concreto.
+    #[error("permiso denegado: {0}")]
+    PermissionDenied(String),
 }
 
 impl WorkspaceError {
@@ -31,6 +36,7 @@ impl WorkspaceError {
             WorkspaceError::NoCache => "NO_CACHE",
             WorkspaceError::Store(_) => "STORE",
             WorkspaceError::RepoBusy => "REPO_BUSY",
+            WorkspaceError::PermissionDenied(_) => "PERMISSION_DENIED",
         }
     }
 }

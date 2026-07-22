@@ -23,6 +23,7 @@ use lodestar_vcs::{MergeOutcome, Vcs};
 
 pub mod config;
 mod error;
+mod external_refs;
 mod gitignore;
 mod io;
 mod runtime;
@@ -31,6 +32,7 @@ mod snapshot;
 
 pub use config::{Config, WorkspaceConfig};
 pub use error::WorkspaceError;
+pub use external_refs::{ExternalReference, ExternalRefsReport};
 pub use schema::WorkspaceSchema;
 pub use snapshot::BundleSnapshot;
 

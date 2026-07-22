@@ -273,6 +273,14 @@ superficie de producto; git queda como crate dormido) y `DECISIONES.md §0`. Des
     REL-TYPE si su type no está en target_types, REL-CARD si cardinality "one" con >1 target; msg
     español + range al campo), cableado aditivo en `knowledge_check`. Diferenciales verde. Juez
     ciego: APROBADA CON RESERVAS (3/3).
-  - ⏳ E11-H04–H05 pendientes.
+  - ✅ **E11-H04** — Validación de paths externos (`referenceRoots`): `Workspace::external_refs`
+    (`implemented_by`/`verified_by` → `{path,exists}` + diagnóstico `EXTREF-MISSING`) y
+    `assert_writable` (referenceRoots → `PERMISSION_DENIED`, contención por segmentos);
+    `knowledge_get.externalReferences` cableado. **Seguridad**: un juez ciego cazó un oráculo de
+    existencia por `join` crudo (traversal/absolutas); endurecido con `RelPath::new`+`under_root`
+    antes de tocar disco + test de regresión `ref_externa_traversal`. Re-juicio: APROBADA CON
+    RESERVAS (drift menor del espejo types.ts, sin impacto en la webview). Nuevo `CheckCode::ExtrefMissing`
+    y `WorkspaceError::PermissionDenied`.
+  - ⏳ E11-H05 pendiente (impact_analyze).
 - **E12–E14: pendientes** (planificación · publicación recuperable · integración + evaluación
   — `ARCHITECTURE.md §19.8`).

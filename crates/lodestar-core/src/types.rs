@@ -203,6 +203,13 @@ pub enum CheckCode {
     RelCard,
     #[serde(rename = "REL-TYPE")]
     RelType,
+    /// Referencia externa (`implemented_by`/`verified_by`, E9-H05) a un fichero de código bajo
+    /// `referenceRoots` que no existe en disco (E11-H04). Variante propia, no reuso de
+    /// `LINK-STUB`/`LINK-REL` (enlaces ENTRE concepts del bundle) ni `REL-TARGET` (relaciones
+    /// tipadas a concepts): un `implemented_by`/`verified_by` apunta a código fuera del dominio
+    /// OKF, no a un concept — semánticamente distinto de los tres.
+    #[serde(rename = "EXTREF-MISSING")]
+    ExtrefMissing,
 }
 }
 
@@ -230,6 +237,7 @@ impl CheckCode {
             CheckCode::RelTarget => "REL-TARGET",
             CheckCode::RelCard => "REL-CARD",
             CheckCode::RelType => "REL-TYPE",
+            CheckCode::ExtrefMissing => "EXTREF-MISSING",
         }
     }
 }
@@ -591,7 +599,11 @@ pub struct WorkspaceRevision(pub String);
 /// `true` si `path` está bajo el root `prefix` (por SEGMENTOS de path, no por prefijo de string):
 /// `"docs"` cubre `"docs/guia.md"` pero NO `"docsx/y.md"`. Un `path == prefix` exacto también
 /// cuenta como contenido (root con extensión, aunque en la práctica `RelPath` siempre trae `.md`).
-fn under_root(path: &RelPath, prefix: &RelPath) -> bool {
+///
+/// `pub`: además de [`workspace_revision`], lo reutiliza `lodestar-workspace` (E11-H04,
+/// `Workspace::assert_writable`) para la contención de `writableRoots`/`referenceRoots` — un solo
+/// algoritmo de contención por segmentos, nunca reimplementado por prefijo de string.
+pub fn under_root(path: &RelPath, prefix: &RelPath) -> bool {
     let path = path.as_str();
     let prefix = prefix.as_str();
     path == prefix
