@@ -13,6 +13,35 @@ use serde_json::{json, Value};
 
 mod tools;
 
+/// Instrucciones del servidor (`instructions` de la respuesta `initialize`, `ARCHITECTURE.md
+/// §19.6`): orientan al agente con el **flujo recomendado de 10 pasos**, mencionando las 10 tools
+/// en el orden en que se espera usarlas. Los nombres de tool son identificadores (no se traducen);
+/// el resto va en español, el idioma del repo (E14-H03).
+const SERVER_INSTRUCTIONS: &str = "\
+Motor headless de integridad semántica (OKF) para agentes. Flujo recomendado en cada sesión \
+(10 pasos, en orden):
+
+1. `workspace_status`: oriéntate primero — config activa, capacidades del perfil, conformidad y \
+recuento agregado del workspace.
+2. `knowledge_search`: localiza conceptos por texto y filtros (snippets y revisión, nunca cuerpos \
+completos).
+3. `knowledge_get`: lee un concepto concreto con `include` selectivo y secciones acotadas.
+4. `schema_inspect`: descubre el catálogo de tipos y sus reglas (`.lodestar/schema.yaml`) antes de \
+proponer cambios.
+5. `graph_query`: consulta el grafo (backlinks, huérfanos, vecindario, caminos) para entender el \
+contexto de un concepto.
+6. `impact_analyze`: evalúa el impacto de un cambio hipotético (afectados, bloqueos, riesgo) antes \
+de proponerlo.
+7. `change_plan`: planifica el cambio SIN escribir — normaliza, simula en memoria y valida; \
+devuelve un change set con su hash determinista.
+8. `change_apply`: aplica el plan calculado con todas las salvaguardas transaccionales; devuelve el \
+recibo.
+9. `knowledge_check`: audita el conocimiento tras aplicar para confirmar que sigue conforme.
+10. `change_revert`: si algo salió mal, revierte la última transacción al estado anterior.
+
+Perfil `readonly`: solo los pasos de lectura y verificación (las tools de cambio no están \
+disponibles). Perfil `standard` (por defecto): el flujo completo.";
+
 /// Parsea `<bundle> [--profile readonly|standard]`: el bundle es el primer argumento
 /// posicional (sin tocar); `--profile` es una flag adicional, `standard` por defecto
 /// (`ARCHITECTURE.md §19.6`).
@@ -126,17 +155,21 @@ fn handle(app: &App, profile: Profile, req: &Value) -> Option<Value> {
             Ok(json!({
                 "protocolVersion": version,
                 "serverInfo": { "name": "lodestar-mcp", "version": env!("CARGO_PKG_VERSION") },
-                "capabilities": { "tools": {} }
+                "capabilities": { "tools": {} },
+                "instructions": SERVER_INSTRUCTIONS
             }))
         }
         // El spec obliga a responder a ping con result vacío ("MUST respond promptly").
         "ping" => Ok(json!({})),
-        "tools/list" => Ok(json!({ "tools": tools::list() })),
+        "tools/list" => Ok(json!({ "tools": tools::available_tools(profile) })),
         "tools/call" => {
             let name = params.get("name").and_then(Value::as_str).unwrap_or("");
             let args = params.get("arguments").cloned().unwrap_or(Value::Null);
-            if !tools::exists(name) {
-                // Tool desconocida = error de protocolo (Invalid params, según el spec MCP).
+            if !tools::available(profile, name) {
+                // Tool no disponible bajo este perfil = error de protocolo (`-32602`): tool
+                // desconocida, o tool de cambio invocada bajo `readonly`. Ocultarla de
+                // `tools/list` no basta — un cliente que la llame igualmente NO debe ejecutarla
+                // (E14-H03). El código `-32602` la deja fuera del despacho antes de `call()`.
                 Err((-32602, format!("tool desconocida: {name}")))
             } else {
                 match tools::call(app, profile, name, &args) {

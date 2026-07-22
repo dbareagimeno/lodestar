@@ -3228,3 +3228,247 @@ fn revert_caducado() {
         "una reversión de receipt no disponible no debe tocar el canónico: {resp:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// E14-H03 — Instrucciones del servidor + perfiles para agentes
+// (`requirements/epica-14-integracion-evaluacion.md` E14-H03; `ARCHITECTURE.md §19.6`;
+// `REFACTOR §7, §12`). Fase ROJA: hoy el servidor arranca con `--profile` y refleja el perfil en
+// `workspace_status.capabilities` (E10-H08), pero (a) `tools/list` NO se filtra por perfil, (b)
+// `initialize` NO devuelve `instructions`, y (c) no hay gating al INVOCAR una tool de cambio bajo
+// `readonly`. Los tres tests de abajo fijan ese comportamiento pendiente.
+//
+// Las **3 tools de cambio** (las que el perfil `readonly` debe ocultar) son, según `contracts/mcp.yml`
+// (`perfil: standard` en las tres) y la superficie objetivo de 10 tools: `change_plan`,
+// `change_apply`, `change_revert`. `change_plan` SÍ cuenta como tool de cambio (planifica un cambio,
+// aunque no escriba; el contrato la marca `perfil: standard`).
+// ---------------------------------------------------------------------------
+
+/// Las 3 tools de cambio que `readonly` debe ocultar de `tools/list` (todas `perfil: standard` en
+/// `contracts/mcp.yml`; `change_plan` incluido — es una tool de cambio aunque no escriba).
+const TOOLS_DE_CAMBIO: [&str; 3] = ["change_plan", "change_apply", "change_revert"];
+
+/// Tools de lectura/consulta que deben seguir presentes en CUALQUIER perfil (muestra representativa
+/// de la superficie objetivo de lectura, `REFACTOR §8`).
+const TOOLS_DE_LECTURA: [&str; 7] = [
+    "workspace_status",
+    "knowledge_search",
+    "knowledge_get",
+    "schema_inspect",
+    "knowledge_check",
+    "graph_query",
+    "impact_analyze",
+];
+
+/// Nombres de tool presentes en la respuesta `tools/list` de `resp`.
+fn nombres_de_tools(resp: &serde_json::Value) -> std::collections::BTreeSet<String> {
+    resp["result"]["tools"]
+        .as_array()
+        .expect("tools/list devuelve un array de tools")
+        .iter()
+        .filter_map(|t| t["name"].as_str().map(str::to_string))
+        .collect()
+}
+
+/// E14-H03 · Criterio `perfil_readonly_sin_cambio`:
+/// Dado el servidor con `--profile readonly`, Cuando un cliente pide `tools/list`, Entonces NO
+/// aparecen las 3 tools de cambio (y SÍ las de lectura). Con `--profile standard` SÍ aparecen las 3
+/// (control para no ser vacuo: si el perfil se ignorase, standard también las ocultaría/mostraría).
+#[test]
+fn perfil_readonly_sin_cambio() {
+    let dir = bundle_min();
+    let list = r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#;
+
+    // --- readonly: sin tools de cambio, con tools de lectura ---
+    let ro = roundtrip_profile(dir.path(), "readonly", &[list], 1);
+    let ro_tools = nombres_de_tools(&ro[0]);
+    for cambio in TOOLS_DE_CAMBIO {
+        assert!(
+            !ro_tools.contains(cambio),
+            "perfil readonly NO debe exponer la tool de cambio «{cambio}» en tools/list: {ro_tools:?}"
+        );
+    }
+    for lectura in TOOLS_DE_LECTURA {
+        assert!(
+            ro_tools.contains(lectura),
+            "perfil readonly DEBE seguir exponiendo la tool de lectura «{lectura}»: {ro_tools:?}"
+        );
+    }
+
+    // --- standard: con las 3 tools de cambio (y las de lectura) ---
+    let std = roundtrip_profile(dir.path(), "standard", &[list], 1);
+    let std_tools = nombres_de_tools(&std[0]);
+    for cambio in TOOLS_DE_CAMBIO {
+        assert!(
+            std_tools.contains(cambio),
+            "perfil standard DEBE exponer la tool de cambio «{cambio}» en tools/list: {std_tools:?}"
+        );
+    }
+    for lectura in TOOLS_DE_LECTURA {
+        assert!(
+            std_tools.contains(lectura),
+            "perfil standard DEBE exponer la tool de lectura «{lectura}»: {std_tools:?}"
+        );
+    }
+}
+
+/// E14-H03 · Criterio `instrucciones_flujo`:
+/// Dado el arranque, Cuando el cliente lee las instrucciones del servidor (campo `instructions` de
+/// la respuesta `initialize`), Entonces describen el flujo de 10 pasos
+/// `workspace_status → knowledge_search → knowledge_get → schema_inspect →
+/// graph_query/impact_analyze → change_plan → change_apply → knowledge_check → change_revert`,
+/// mencionando las 10 tools EN ORDEN (no solo un string no vacío).
+#[test]
+fn instrucciones_flujo() {
+    let dir = bundle_min();
+    let resp = roundtrip(
+        dir.path(),
+        &[r#"{"jsonrpc":"2.0","id":1,"method":"initialize"}"#],
+        1,
+    );
+    let instructions = resp[0]["result"]["instructions"]
+        .as_str()
+        .unwrap_or_else(|| {
+            panic!(
+                "initialize debe devolver `instructions` (string) con el flujo recomendado: {resp:?}"
+            )
+        });
+    assert!(
+        !instructions.trim().is_empty(),
+        "las instrucciones del servidor no deben estar vacías: {resp:?}"
+    );
+
+    // Índice de la primera aparición de cada tool en el texto (None si no aparece).
+    let pos = |tool: &str| -> usize {
+        instructions.find(tool).unwrap_or_else(|| {
+            panic!("las instrucciones deben mencionar la tool «{tool}» del flujo: {instructions:?}")
+        })
+    };
+
+    // La "columna vertebral" del flujo debe aparecer en orden estrictamente creciente.
+    let espina = [
+        "workspace_status",
+        "knowledge_search",
+        "knowledge_get",
+        "schema_inspect",
+        "change_plan",
+        "change_apply",
+        "change_revert",
+    ];
+    let mut previo: Option<(&str, usize)> = None;
+    for tool in espina {
+        let aqui = pos(tool);
+        if let Some((antes, idx)) = previo {
+            assert!(
+                idx < aqui,
+                "el flujo debe listar «{antes}» antes de «{tool}» (10 pasos en orden): {instructions:?}"
+            );
+        }
+        previo = Some((tool, aqui));
+    }
+
+    // `graph_query`/`impact_analyze` son el paso de análisis: entre schema_inspect y change_plan.
+    let (ini, fin) = (pos("schema_inspect"), pos("change_plan"));
+    for tool in ["graph_query", "impact_analyze"] {
+        let idx = pos(tool);
+        assert!(
+            ini < idx && idx < fin,
+            "«{tool}» debe situarse tras schema_inspect y antes de change_plan en el flujo: {instructions:?}"
+        );
+    }
+
+    // `knowledge_check` es la verificación tras aplicar: entre change_apply y change_revert.
+    let (ini, fin) = (pos("change_apply"), pos("change_revert"));
+    let idx = pos("knowledge_check");
+    assert!(
+        ini < idx && idx < fin,
+        "«knowledge_check» debe situarse tras change_apply y antes de change_revert en el flujo: {instructions:?}"
+    );
+}
+
+/// E14-H03 (endurecimiento; cierra la reserva de «gating por perfil» de E13-H08):
+/// Dado el servidor con `--profile readonly`, Cuando un cliente INVOCA directamente una tool de
+/// cambio (las 3: `change_plan`, `change_apply`, `change_revert`), Entonces la invocación se RECHAZA
+/// sin ejecutarse: ocultarla de `tools/list` no basta si el cliente la llama igualmente.
+///
+/// Cubre las tres tools de cambio, no solo la que planifica: `change_apply`/`change_revert` son las
+/// que SÍ escriben, así que la aserción de seguridad de más valor es que un cliente que ignore
+/// `tools/list` NO pueda **aplicar** ni **revertir** bajo `readonly`.
+///
+/// No vacuidad — cada rama se contrasta con `standard` para atribuir el rechazo AL PERFIL, no a una
+/// petición malformada:
+/// - `change_plan` (con ops válidas): bajo `standard` produce un plan (`changeSetId`); bajo
+///   `readonly` no debe devolver ninguno.
+/// - `change_apply`/`change_revert` (con `changeSetId`/`receiptId` INEXISTENTES): el gating debe
+///   cortar ANTES de tocar el argumento → `-32602` (tool no disponible). Bajo `standard` la MISMA
+///   llamada SÍ llega a ejecutarse y falla por el id inexistente como error de aplicación
+///   (`isError`, sin `-32602`). Ese contraste prueba que el `-32602` de `readonly` es gating de
+///   perfil, no validación de argumento.
+#[test]
+fn perfil_readonly_rechaza_cambio() {
+    let dir = bundle_cinco_relacionados();
+
+    // --- change_plan: bajo standard produce un plan válido; bajo readonly no debe producirlo ---
+    let plan_line = change_plan_line(None, cinco_operaciones(), policy_permisiva());
+
+    // Control: bajo `standard` la MISMA llamada produce un plan válido (changeSetId presente).
+    let std = roundtrip_profile(dir.path(), "standard", &[plan_line.as_str()], 1);
+    let std_id = std[0]["result"]["structuredContent"]["changeSetId"].as_str();
+    assert!(
+        std_id.is_some_and(|s| !s.is_empty()),
+        "control: bajo standard, change_plan debe devolver un changeSetId (la petición es válida): {std:?}"
+    );
+
+    // Bajo `readonly`, la misma invocación debe rechazarse: ni changeSetId ni ejecución silenciosa.
+    let ro = roundtrip_profile(dir.path(), "readonly", &[plan_line.as_str()], 1);
+    assert!(
+        ro[0]["result"]["structuredContent"]["changeSetId"].is_null(),
+        "perfil readonly NO debe ejecutar change_plan (no debe devolver un changeSetId): {ro:?}"
+    );
+    let rechazado =
+        ro[0]["error"].get("code").is_some() || ro[0]["result"]["isError"].as_bool() == Some(true);
+    assert!(
+        rechazado,
+        "perfil readonly debe RECHAZAR change_plan con un error claro (protocolo -32602 o result.isError), no ignorarlo: {ro:?}"
+    );
+
+    // --- change_apply / change_revert: las tools que SÍ escriben. Con ids INEXISTENTES ---
+    // El gating de perfil debe cortar ANTES de intentar ejecutar (tool no disponible = -32602), sin
+    // llegar siquiera a validar el argumento. Ids deliberadamente inexistentes: si el gating NO
+    // cortara, la ejecución fallaría con un error de aplicación (isError), NO con -32602 — por eso
+    // aseverar el `-32602` distingue «rechazado por perfil» de «falló por otra razón».
+    let escrituras = [
+        (
+            "change_apply",
+            change_apply_line("changeset:inexistente0000", None),
+        ),
+        (
+            "change_revert",
+            change_revert_line("receipt:inexistente0000", None),
+        ),
+    ];
+    for (tool, line) in escrituras {
+        // readonly: gating de perfil → -32602 (tool no disponible), sin ejecutar (sin result).
+        let ro = roundtrip_profile(dir.path(), "readonly", &[line.as_str()], 1);
+        assert_eq!(
+            ro[0]["error"]["code"], -32602,
+            "perfil readonly debe rechazar «{tool}» con -32602 (tool no disponible), no ejecutarla: {ro:?}"
+        );
+        assert!(
+            ro[0]["result"].is_null(),
+            "perfil readonly NO debe ejecutar «{tool}» (sin result, corta antes del despacho): {ro:?}"
+        );
+
+        // Control de no-vacuidad: bajo `standard` la MISMA llamada SÍ llega a ejecutarse y falla por
+        // el id inexistente como error de aplicación (isError), NUNCA como -32602 de gating. Así el
+        // -32602 de readonly se atribuye al perfil, no a un argumento inválido.
+        let st = roundtrip_profile(dir.path(), "standard", &[line.as_str()], 1);
+        assert_ne!(
+            st[0]["error"]["code"], -32602,
+            "control: bajo standard «{tool}» debe llegar a ejecutarse (no el -32602 de gating): {st:?}"
+        );
+        assert_eq!(
+            st[0]["result"]["isError"], true,
+            "control: bajo standard «{tool}» con id inexistente debe fallar como error de aplicación (isError): {st:?}"
+        );
+    }
+}

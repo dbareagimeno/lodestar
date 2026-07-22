@@ -447,8 +447,25 @@ superficie de producto; git queda como crate dormido) y `DECISIONES.md §0`. Des
     (`node_modules`/`target`/`.git`, ya cubierto por `ignored_conserva_obligatorios` en `workspace.rs`) y
     "al reabrir/tras evento recalcular/invalidar revisiones y reindexar" (`REFACTOR §5.3`, ejercitado
     indirectamente vía reverify que relee la revisión del disco).
-  - ⏳ E14-H03 (perfiles readonly/standard + server instructions — FRONTERA mcp.yml), E14-H04 (benchmark
-    §17 e2e), E14-H05 (métricas de escala) pendientes.
+  - ✅ **E14-H03** — Instrucciones del servidor + perfiles para agentes (FRONTERA mcp.yml): perfiles
+    `readonly`/`standard` (`--profile`, default standard; el enum `Profile` ya venía de E10-H08). **Fuente
+    única** de "tools de cambio": `tools::CHANGE_TOOLS = [change_plan, change_apply, change_revert]` +
+    `is_change_tool`, de la que derivan TANTO el filtrado de `tools/list` (`available_tools(profile)`)
+    COMO el gating de invocación (`available(profile, name)`), gobernados por `Profile::writes_enabled()`
+    — sin lista duplicada que pueda divergir. Bajo `readonly`: las 3 tools de cambio se ocultan de
+    `tools/list` Y su invocación se rechaza con `-32602` ANTES del despacho (`main.rs`, antes de
+    `tools::call()`) — **cierra la reserva de gating por perfil de E13-H08**: ocultar de la lista no
+    basta, un cliente que las llame igualmente no planifica/aplica/revierte. `initialize` devuelve
+    `instructions` (`SERVER_INSTRUCTIONS`) con el flujo de 10 pasos EN ORDEN. `workspace_status.
+    capabilities` ya coherente con el perfil (E10-H08). Tests `perfil_readonly_sin_cambio`,
+    `instrucciones_flujo` (orden de la espina, no "string no vacío"), `perfil_readonly_rechaza_cambio`
+    (endurecido: invoca directamente las 3 de cambio bajo readonly con ids inexistentes → `-32602`;
+    contraste con standard → `isError` de aplicación, distingue "rechazo por perfil" de "fallo por
+    argumento") en `crates/lodestar-mcp/tests/mcp.rs`. `contracts/mcp.yml`: bloques `meta.perfiles` +
+    `meta.protocolo.instructions`. Sin cambios en `core::types` (invariante #4; `Profile` es runtime, no
+    wire → sin sync del espejo TS). Guardián de contrato: NO BLOQUEANTE (perfil de las 3 tools 1:1 con
+    `CHANGE_TOOLS`). Juez ciego (seguridad escrutada, sin bypass): **APROBADA (2/2)**.
+  - ⏳ E14-H04 (benchmark §17 e2e), E14-H05 (métricas de escala) pendientes.
   - **Pendiente al cierre de E14**: limpieza final de superficie `mcp.yml` → 10 tools objetivo (retirar
     `query`/`conformance_check`/`find_*`/`neighborhood`/`create_concept`/`update_frontmatter`/
     `generate_*`), descopada aquí desde E12/E13.

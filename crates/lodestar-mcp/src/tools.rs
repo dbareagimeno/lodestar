@@ -178,12 +178,51 @@ pub fn list() -> Value {
     ])
 }
 
+/// Las 3 tools **de cambio** (perfil `standard` en `contracts/mcp.yml`): planifican, aplican o
+/// revierten cambios sobre el conocimiento. `change_plan` cuenta como tool de cambio aunque no
+/// escriba en disco (planifica un cambio). **Fuente única** del efecto del perfil sobre la
+/// superficie: el perfil `readonly` las oculta de [`available_tools`] y hace que [`available`] rechace su
+/// invocación (E14-H03, `ARCHITECTURE.md §19.6`).
+pub const CHANGE_TOOLS: [&str; 3] = ["change_plan", "change_apply", "change_revert"];
+
+/// ¿Es `name` una tool de cambio (requiere perfil `standard` para usarse)?
+pub fn is_change_tool(name: &str) -> bool {
+    CHANGE_TOOLS.contains(&name)
+}
+
 /// ¿Existe una tool con este nombre? Distingue «tool desconocida» (error de protocolo,
 /// `-32602`) de un error de ejecución (que va como `isError` en el result).
 pub fn exists(name: &str) -> bool {
     list()
         .as_array()
         .is_some_and(|ts| ts.iter().any(|t| t["name"] == name))
+}
+
+/// Catálogo de tools **visible bajo `profile`**: el perfil `readonly` oculta las tools de cambio
+/// (`change_plan`/`change_apply`/`change_revert`); `standard` las incluye. Deriva del predicado
+/// único [`is_change_tool`] + [`Profile::writes_enabled`] (E14-H03).
+pub fn available_tools(profile: Profile) -> Value {
+    if profile.writes_enabled() {
+        return list();
+    }
+    let visibles: Vec<Value> = list()
+        .as_array()
+        .map(|ts| {
+            ts.iter()
+                .filter(|t| !is_change_tool(t["name"].as_str().unwrap_or("")))
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default();
+    Value::Array(visibles)
+}
+
+/// ¿Está disponible la tool `name` bajo `profile`? Existe y, si es de cambio, el perfil habilita
+/// escrituras. Un `false` sobre una tool de cambio en `readonly` produce el mismo `-32602` que una
+/// tool desconocida: ocultarla de la lista no basta, un cliente que la llame igualmente NO debe
+/// ejecutarla (E14-H03).
+pub fn available(profile: Profile, name: &str) -> bool {
+    exists(name) && (profile.writes_enabled() || !is_change_tool(name))
 }
 
 /// Despacha una tool por nombre. `profile` solo lo consume `workspace_status` hoy (E10-H08); el

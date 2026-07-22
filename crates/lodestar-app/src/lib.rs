@@ -227,8 +227,11 @@ pub enum Profile {
 }
 
 impl Profile {
-    /// `true` si este perfil habilita las tools de escritura (`capabilities.writes`).
-    fn writes_enabled(self) -> bool {
+    /// `true` si este perfil habilita las tools de cambio (`change_plan`/`change_apply`/
+    /// `change_revert`). Fuente única del efecto del perfil: gobierna a la vez
+    /// `capabilities.writes` de [`WorkspaceStatus`] y la disponibilidad de las tools de cambio en
+    /// la superficie MCP (filtrado de `tools/list` y gating de invocación, E14-H03).
+    pub fn writes_enabled(self) -> bool {
         matches!(self, Profile::Standard)
     }
 }

@@ -55,6 +55,22 @@ meta:
   protocolo:
     metodos: [initialize, ping, "tools/list", "tools/call"]
     protocol_versions_aceptadas: ["2024-11-05", "2025-03-26", "2025-06-18"]
+    instructions: >-
+      La respuesta `initialize` incluye `instructions` (string): el flujo recomendado de 10 pasos
+      en orden — workspace_status → knowledge_search → knowledge_get → schema_inspect →
+      graph_query/impact_analyze → change_plan → change_apply → knowledge_check → change_revert
+      (main.rs SERVER_INSTRUCTIONS, E14-H03).
+  perfiles:
+    # `lodestar-mcp <bundle> [--profile readonly|standard]`, `standard` por defecto
+    # (main.rs parse_args; lodestar_app::Profile). El perfil NO viaja por el wire: el cliente solo
+    # ve su efecto. Fuente única del efecto = `Profile::writes_enabled()` (standard ⇒ true) +
+    # `tools::is_change_tool` (E14-H03).
+    readonly: >-
+      Oculta las 3 tools de cambio (`perfil: standard`) de `tools/list` (tools::available_tools) y
+      RECHAZA su invocación con -32602 (tools::available), aunque el cliente las llame directamente.
+      `workspace_status.capabilities.writes/transactions/revert` == false.
+    standard: >-
+      Superficie completa (tools de lectura + las 3 de cambio). `capabilities.writes` == true.
   errores_protocolo:
     - "-32700 Parse error (JSON imparseable), id null (main.rs:86)"
     - "-32600 Invalid Request (no es objeto / batch no soportado) (main.rs:107)"
