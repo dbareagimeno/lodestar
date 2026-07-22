@@ -5,42 +5,66 @@
 # bucle JSON-RPC de `crates/lodestar-mcp/src/main.rs`.
 #
 # REGLAS (ver contracts/README.md):
-#   - Los TIPOS NO se definen aquí: se REFERENCIAN por nombre de `lodestar_core::types`.
+#   - Los TIPOS NO se definen aquí: se REFERENCIAN por nombre de `lodestar_core::types` /
+#     `lodestar_core::schema` / `lodestar_app` (invariante #4 — un solo contrato de tipos).
 #     Los retornos se envuelven en un objeto json (el spec MCP exige que `structuredContent`
 #     sea objeto, nunca array): p. ej. `{ paths: Vec<RelPath> }`, `{ orphans: Vec<RelPath> }`.
-#   - Nombres de tool CONGELADOS (ARCHITECTURE.md §7.2). `fuente:` = fichero:línea aproximada.
+#   - Nombres de tool CONGELADOS (ARCHITECTURE.md §19.6). `fuente:` = fichero:línea aproximada.
 #
-# INVARIANTES: shells finos sobre `Workspace`, CERO lógica OKF propia (misma verdad que
+# INVARIANTES: shells finos sobre `App`/`Workspace`, CERO lógica OKF propia (misma verdad que
 # CLI/Tauri; test golden cross-fachada lo verifica). create_concept/update_frontmatter
-# escriben el `.md` atómico por el ÚNICO escritor; nunca la cache. `path`/`concept` se validan
-# a `RelPath` (rechaza absolutas/`..`, chokepoint de traversal).
+# escriben el `.md` atómico por el ÚNICO escritor; nunca la cache. `path`/`concept`/`ref.path`
+# se validan a `RelPath` (rechaza absolutas/`..`, chokepoint de traversal).
 #
 # E9-H01: las 3 tools git (history/last_conforming_commit/commit) se retiraron de esta
 # superficie; `Workspace::vcs_log`/`last_conforming`/`commit` siguen existiendo sin consumidor
 # MCP (crate `vcs` dormido, decisión #1 — no se borran).
+#
+# E10 (§19, decisión "0. Giro a motor headless" — DECISIONES.md): la superficie MCP migra de las
+# 10 tools heredadas (tras la retirada de las 3 tools git en E9-H01) a un objetivo de 10 tools
+# nuevas (`docs/REFACTOR.md §8/§15/§16`). E10-H08…H12 AÑADEN las 5 tools de lectura/verificación
+# (`workspace_status`/`knowledge_search`/`knowledge_get`/`schema_inspect`/`knowledge_check`) que
+# sustituyen semánticamente a `query`/`conformance_check` y parte de `find_*`/`neighborhood`. La
+# RETIRADA de las tools viejas queda diferida a E11 (graph_query) y E12/E13 (tools de cambio) —
+# ver §15 «Migración» al final de este fichero. Hoy (tras E10) las 10 tools heredadas + las 5
+# nuevas coexisten: 15 tools activas.
+#
+# E10-H13 (decisión D6b, `docs/REFACTOR.md §13`, `DECISIONES.md §3`): las 5 tools nuevas declaran
+# `outputSchema` (JSON Schema derivado con `schemars::schema_for!` desde el tipo de respuesta real
+# de `lodestar-app`, vía los helpers de `lodestar_app::schemas::*`). Las 10 tools heredadas NO
+# declaran `outputSchema` (fuera de alcance de E10-H13 — ninguna historia lo pide para ellas y
+# varias se retirarán antes de que valiera la pena derivarlo).
 
 meta:
   fachada: lodestar-mcp (JSON-RPC por stdio; stdout puro, logs a stderr)
-  fuente_registro: crates/lodestar-mcp/src/tools.rs:25   # tools::list()
-  fuente_despacho: crates/lodestar-mcp/src/tools.rs:88   # tools::call()
-  fuente_bucle: crates/lodestar-mcp/src/main.rs:70       # handle()
+  fuente_registro: crates/lodestar-mcp/src/tools.rs:27    # tools::list()
+  fuente_despacho: crates/lodestar-mcp/src/tools.rs:134   # tools::call()
+  fuente_bucle: crates/lodestar-mcp/src/main.rs:101       # handle()
   protocolo:
     metodos: [initialize, ping, "tools/list", "tools/call"]
     protocol_versions_aceptadas: ["2024-11-05", "2025-03-26", "2025-06-18"]
   errores_protocolo:
-    - "-32700 Parse error (JSON imparseable), id null (main.rs:55)"
-    - "-32600 Invalid Request (no es objeto / batch no soportado) (main.rs:75)"
-    - "-32601 método no soportado (main.rs:127)"
-    - "-32602 tool desconocida (tools/call con nombre no registrado) (main.rs:109)"
+    - "-32700 Parse error (JSON imparseable), id null (main.rs:86)"
+    - "-32600 Invalid Request (no es objeto / batch no soportado) (main.rs:107)"
+    - "-32601 método no soportado (main.rs:158)"
+    - "-32602 tool desconocida (tools/call con nombre no registrado) (main.rs:140)"
   errores_ejecucion: >-
     Un error de ejecución de tool NO viaja como error JSON-RPC: va en el result como
-    { content:[{type:text,text:msg}], isError:true } para que el modelo lo vea y corrija
-    (main.rs:120). Éxito → { content:[{type:text,text:json}], structuredContent:<objeto> }.
-  arranque: "Exige index.md o .lodestar/ en el root, si no exit 3 (main.rs:24)."
+    { content:[{type:text,text:msg}], isError:true } para que el modelo lo vea y corrija.
+    Éxito → { content:[{type:text,text:json}], structuredContent:<objeto> }. Las 5 tools de
+    E10 mapean el error a un texto que lleva el código estable de `ErrorCode::as_str()`
+    (p. ej. «CONCEPT_NOT_FOUND»/«INVALID_SCHEMA»), NUNCA el `Debug` de la variante Rust
+    (`tools.rs`, casos `knowledge_get`/`schema_inspect`/`knowledge_check`).
+  arranque: "Exige index.md o .lodestar/ en el root, si no exit 3 (main.rs:55)."
 
 tools:
+  # -------------------------------------------------------------------------
+  # Tools heredadas (10) — superficie previa a E10, conservada. Ver §15 abajo
+  # para el mapeo de retirada (diferida a E11/E12/E13).
+  # -------------------------------------------------------------------------
+
   - nombre: find_backlinks
-    fuente: crates/lodestar-mcp/src/tools.rs:90
+    fuente: crates/lodestar-mcp/src/tools.rs:137
     params:
       - { nombre: concept, tipo: "RelPath (string)", requerido: true, semantica: "ruta relativa del concept" }
     retorno: Backlinks
@@ -48,21 +72,21 @@ tools:
     semantica: "Quién enlaza a un concept: inbound + index refs + dangling (backlinks resueltos por el core)."
 
   - nombre: find_orphans
-    fuente: crates/lodestar-mcp/src/tools.rs:94
+    fuente: crates/lodestar-mcp/src/tools.rs:141
     params: []
     retorno: "json { orphans: Vec<RelPath> }  # proyección de Analysis.orphans"
     errores: ["WorkspaceError"]
     semantica: "Concepts sin enlaces entrantes."
 
   - nombre: find_dangling
-    fuente: crates/lodestar-mcp/src/tools.rs:98
+    fuente: crates/lodestar-mcp/src/tools.rs:145
     params: []
     retorno: "json { dangling: Vec<RelPath> }  # proyección de Analysis.dangling"
     errores: ["WorkspaceError"]
     semantica: "Enlaces que apuntan a páginas inexistentes."
 
   - nombre: neighborhood
-    fuente: crates/lodestar-mcp/src/tools.rs:102
+    fuente: crates/lodestar-mcp/src/tools.rs:149
     params:
       - { nombre: concept, tipo: "RelPath (string)", requerido: true }
       - { nombre: depth, tipo: integer, default: 1, minimo: 1 }
@@ -72,25 +96,29 @@ tools:
     semantica: "Subgrafo dirigido alrededor del concept (depth, direction)."
 
   - nombre: conformance_check
-    fuente: crates/lodestar-mcp/src/tools.rs:112
+    fuente: crates/lodestar-mcp/src/tools.rs:159
     params:
       - { nombre: path, tipo: "RelPath (string)", requerido: false, semantica: "opcional: solo los checks de este fichero" }
     retorno: >-
       con path → json { checks: Vec<Check> } (per_file, vacío si no existe);
       sin path → json { hardFail, warnCount, conform: bool, okfVersion } (proyección de Analysis)
     errores: ["InvalidRelPath (si path presente)", "WorkspaceError"]
-    semantica: "Gate OKF del bundle completo, o los checks de un solo path. `conform = hardFail == 0`."
+    semantica: >-
+      Gate OKF del bundle completo, o los checks de un solo path. `conform = hardFail == 0`.
+      SUSTITUIDA semánticamente por `knowledge_check` (E10-H12) — ver §15; se conserva activa.
 
   - nombre: query
-    fuente: crates/lodestar-mcp/src/tools.rs:129
+    fuente: crates/lodestar-mcp/src/tools.rs:176
     params:
       - { nombre: dsl, tipo: string, requerido: true, semantica: "DSL de subcadena del prototipo («type:X tag:y is:orphan texto…»)" }
     retorno: "json { paths: Vec<RelPath> }"
     errores: ["WorkspaceError"]
-    semantica: "Query estructurada; misma lógica del core que CLI/Tauri. dsl ausente → \"\"."
+    semantica: >-
+      Query estructurada; misma lógica del core que CLI/Tauri. dsl ausente → "".
+      SUSTITUIDA semánticamente por `knowledge_search` (E10-H09) — ver §15; se conserva activa.
 
   - nombre: create_concept
-    fuente: crates/lodestar-mcp/src/tools.rs:134
+    fuente: crates/lodestar-mcp/src/tools.rs:181
     params:
       - { nombre: path, tipo: "RelPath (string)", requerido: true }
       - { nombre: type, tipo: string, requerido: true }
@@ -102,7 +130,7 @@ tools:
     semantica: "Crea un concept validado (rechaza no conforme salvo allow). Escritura atómica por el único escritor; nunca la cache."
 
   - nombre: update_frontmatter
-    fuente: crates/lodestar-mcp/src/tools.rs:148
+    fuente: crates/lodestar-mcp/src/tools.rs:195
     params:
       - { nombre: path, tipo: "RelPath (string)", requerido: true }
       - { nombre: patch, tipo: "object (FrontmatterPatch)", requerido: true, semantica: "merge-patch RFC 7386: valor escribe, null BORRA" }
@@ -111,7 +139,7 @@ tools:
     semantica: "Patch de frontmatter y reescritura atómica del `.md` si es conforme. Único escritor."
 
   - nombre: generate_index
-    fuente: crates/lodestar-mcp/src/tools.rs:154
+    fuente: crates/lodestar-mcp/src/tools.rs:201
     params:
       - { nombre: dir, tipo: string, default: "\"\"  # raíz", semantica: "directorio relativo a regenerar" }
     retorno: "json { written, removed, unchanged }  # ApplyReport"
@@ -119,8 +147,117 @@ tools:
     semantica: "Regenera el index de un directorio (Mutation aplicada por el único escritor)."
 
   - nombre: generate_tag_indexes
-    fuente: crates/lodestar-mcp/src/tools.rs:159
+    fuente: crates/lodestar-mcp/src/tools.rs:206
     params: []
     retorno: "json { written, removed, unchanged }  # ApplyReport"
     errores: ["WorkspaceError"]
     semantica: "Regenera los índices de tags."
+
+  # -------------------------------------------------------------------------
+  # Tools nuevas de E10 (lectura/verificación headless, §19.6). Las 5 declaran
+  # `outputSchema` (decisión D6b, criterio `tools_declaran_outputschema`).
+  # -------------------------------------------------------------------------
+
+  - nombre: workspace_status
+    fuente: crates/lodestar-mcp/src/tools.rs:210
+    historia: E10-H08
+    params: []
+    retorno: "WorkspaceStatus (lodestar_app) — json directo, sin envelope"
+    output_schema: "sí — schemars::schema_for!(WorkspaceStatus), vía lodestar_app::schemas::workspace_status_schema()"
+    errores: ["WorkspaceError"]
+    semantica: >-
+      Config activa, capacidades del perfil de arranque (`readonly`/`standard`),
+      conformidad y recuento agregado (concepts/links/orphans/dangling/errors/warnings).
+      La primera tool que debe llamar un agente en cada sesión. `recovery.pendingTransaction`
+      siempre `false` hasta E13-H06.
+
+  - nombre: knowledge_search
+    fuente: crates/lodestar-mcp/src/tools.rs:214
+    historia: E10-H09
+    params:
+      - { nombre: text, tipo: string, requerido: false, semantica: "texto libre, subcadena (misma DSL que el prototipo); vacío = todos los conceptos" }
+      - { nombre: filters, tipo: "object (SearchFilters)", requerido: false, semantica: "types/statuses/tags (listas, case-insensitive) + pathPrefix; filtros avanzados (references/referencedBy/linkedTo/is:*/has:*) admitidos por el deserializador pero SIN criterio todavía — se ignoran" }
+      - { nombre: sort, tipo: string, requerido: false, semantica: "reservado; el orden es siempre determinista (score desc, path asc)" }
+      - { nombre: limit, tipo: integer, default: 20, minimo: 1, maximo: 100 }
+      - { nombre: cursor, tipo: string, requerido: false, semantica: "cursor opaco (offset codificado en hex) devuelto en nextCursor" }
+    retorno: "SearchResults (lodestar_app): { results: [SearchResult], nextCursor, totalApproximate } — json directo, sin envelope. SearchResult NUNCA lleva body"
+    output_schema: "sí — schemars::schema_for!(SearchResults), vía lodestar_app::schemas::knowledge_search_schema()"
+    errores: ["WorkspaceError"]
+    semantica: >-
+      Localiza conceptos por texto+filtros con snippet compacto y `revision` (ConceptRevision),
+      sin devolver cuerpos completos. Paginación por cursor-offset autosuficiente (reanuda
+      idéntico en un proceso fresco). Reemplaza semánticamente a `query` (ver §15).
+
+  - nombre: knowledge_get
+    fuente: crates/lodestar-mcp/src/tools.rs:231
+    historia: E10-H10
+    params:
+      - { nombre: ref, tipo: "object (ConceptRef)", requerido: true, semantica: "{ path: RelPath }, identidad del concepto" }
+      - { nombre: include, tipo: "array<string>", requerido: false, semantica: "campos a poblar: frontmatter/body/revision/outgoingLinks/backlinks/diagnostics/externalReferences; un campo no pedido queda ausente (None), nunca un valor por defecto disfrazado" }
+      - { nombre: sections, tipo: "array<array<string>>", requerido: false, semantica: "headingPaths para acotar «body» (solo si «body» ∈ include), p. ej. [[\"Security\",\"Token rotation\"]]" }
+    retorno: "json { concept: ConceptView } — envoltorio de un solo campo, NO ConceptView a secas (lodestar_app::KnowledgeGetResponse describe esta forma exacta)"
+    output_schema: "sí — schemars::schema_for!(KnowledgeGetResponse), vía lodestar_app::schemas::knowledge_get_schema()"
+    errores: ["«falta el parámetro «ref»»", "CONCEPT_NOT_FOUND", "WorkspaceError"]
+    semantica: >-
+      Obtiene un concepto concreto con `include` selectivo y selección de secciones.
+      `revision` (== ConceptRevision, blake3 del contenido en disco) se calcula SIEMPRE,
+      independiente de `include`. `externalReferences` siempre vacío en esta historia
+      (E11-H04 fuera de alcance).
+
+  - nombre: schema_inspect
+    fuente: crates/lodestar-mcp/src/tools.rs:252
+    historia: E10-H11
+    params:
+      - { nombre: mode, tipo: string, requerido: true, valores: ["catalog", "type"], semantica: "modos field/relation/diagnosticCode/lifecycle/template de REFACTOR §9.4 quedan admitidos por el catálogo de modos pero SIN proyección propia en esta historia → INVALID_SCHEMA" }
+      - { nombre: type, tipo: string, requerido: false, semantica: "nombre del DocType a inspeccionar (solo con mode «type»); requerido cuando mode==«type»" }
+    retorno: "SchemaInspection (lodestar_app): { schemaVersion, type: Option<DocType>, types: Option<Vec<DocType>> } — mutuamente excluyentes según mode, json directo sin envelope"
+    output_schema: "sí — schemars::schema_for!(SchemaInspection), vía lodestar_app::schemas::schema_inspect_schema()"
+    errores: ["INVALID_SCHEMA (mode desconocido, mode «type» sin «type», o tipo inexistente)", "WorkspaceError (YAML malformado → INTERNAL_IO_ERROR)"]
+    semantica: >-
+      Descubre el catálogo de tipos (`.lodestar/schema.yaml`) ANTES de escribir: DocType
+      concreto (`requiredFields`/`allowedStatuses`/`fields`/`relations`/`rules`/`bodyTemplate`)
+      o el catálogo completo. Bundle sin schema.yaml → catalog vacío, NO error (compat).
+
+  - nombre: knowledge_check
+    fuente: crates/lodestar-mcp/src/tools.rs:265
+    historia: E10-H12
+    params:
+      - { nombre: scope, tipo: "object (CheckScope)", requerido: true, semantica: "discriminado por «kind»: workspace (todos) | concept{ref} | paths{paths} | affected{refs,depth} (vecindario/blast-radius, Bundle::neighborhood Direction::Both)" }
+      - { nombre: minimumSeverity, tipo: string, requerido: false, valores: ["err", "warn", "info"], default: "info (ya excluye Pass)", semantica: "umbral de lo DEVUELTO; summary/conformant se computan sobre todo el scope, antes del umbral" }
+      - { nombre: includeSuggestedFixes, tipo: boolean, default: false, semantica: "false vacía «fixes» en cada diagnóstico (hoy siempre vacío: E12-H07 los produce)" }
+      - { nombre: limit, tipo: integer, default: 100, minimo: 1, maximo: 1000 }
+      - { nombre: cursor, tipo: string, requerido: false, semantica: "cursor opaco de paginación devuelto en nextCursor" }
+    retorno: "CheckReport (lodestar_app): { conformant, summary: CheckSummary, diagnostics: [Check], workspaceRevision, nextCursor } — json directo, sin envelope"
+    output_schema: "sí — schemars::schema_for!(CheckReport), vía lodestar_app::schemas::knowledge_check_schema()"
+    errores: ["CONCEPT_NOT_FOUND (ref inexistente en scope concept/affected)", "WorkspaceError"]
+    semantica: >-
+      Audita conocimiento (checks OKF de Bundle::analyze + checks schema-driven de
+      core::schema::validate_schema, E10-H07) con scope y severidad mínima. Cada diagnóstico
+      lleva un `id` estable dentro de una revisión (`diag:blake3:<hex>`, determinista, sin
+      timestamps/orden/caché). Reemplaza semánticamente a `conformance_check` (ver §15).
+
+# ---------------------------------------------------------------------------
+# §15 — Migración de superficie (10 tools heredadas → 10 tools objetivo NUEVAS,
+# `docs/REFACTOR.md §15/§16`, `DECISIONES.md` §"0. Giro a motor headless"). Vive aquí (no solo en
+# REFACTOR.md) porque es la nota que explica por qué este contrato lista 15 tools activas cuando
+# la superficie objetivo de largo plazo son 10.
+# ---------------------------------------------------------------------------
+migracion:
+  nota: >-
+    E10 AÑADE 5 tools nuevas sin retirar ninguna vieja — coexistencia deliberada
+    (`requirements/epica-10-esquemas-lectura.md` E10-H13: «la retirada de query/conformance_check
+    queda FUERA de H13»). La retirada coherente de la superficie previa requiere piezas que
+    todavía no existen (`graph_query` de E11, las tools de cambio de E12/E13) y se hará en un
+    único rewrite de este fichero al cerrar E13 — no en pasos parciales que dejarían el contrato
+    en un estado intermedio incoherente.
+  reemplazos:
+    - { vieja: query, nueva: knowledge_search, estado: "reemplazo ya existe (E10-H09); retirada de «query» diferida al cierre de E13" }
+    - { vieja: conformance_check, nueva: knowledge_check, estado: "reemplazo ya existe (E10-H12); retirada de «conformance_check» diferida al cierre de E13" }
+    - { viejas: [find_backlinks, find_orphans, find_dangling, neighborhood], nueva: graph_query, estado: "pendiente — E11 (`docs/REFACTOR.md §9.5`)" }
+    - { viejas: [create_concept, update_frontmatter], nuevas: [change_plan, change_apply], estado: "pendiente — E12/E13 (`docs/REFACTOR.md §11`)" }
+    - { viejas: [generate_index, generate_tag_indexes], nueva: "CLI + auto-regen dentro de change_apply", estado: "pendiente — E13 (`docs/REFACTOR.md §15` fila generate_*, decisión D6a)" }
+  superficie_objetivo: >-
+    10 tools al cerrar E13: workspace_status, knowledge_search, knowledge_get, schema_inspect,
+    knowledge_check, graph_query, impact_analyze, change_plan, change_apply, change_revert
+    (`docs/REFACTOR.md §8`). Ninguna de las 10 tools heredadas de este fichero sobrevive a ese
+    cierre salvo por su reemplazo semántico ya listado arriba.

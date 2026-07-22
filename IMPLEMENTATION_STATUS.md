@@ -250,6 +250,14 @@ superficie de producto; git queda como crate dormido) y `DECISIONES.md §0`. Des
     affected (vecindario vía `neighborhood`, sin off-by-one); ids de diagnóstico estables
     (`diag:blake3:` solo de datos del diagnóstico); `conformant`/`summary` computados antes de
     minimumSeverity/paginación. Juez ciego: APROBADA (3/3).
-  - ⏳ E10-H13 (outputSchema schemars + reescritura mcp.yml + retirar query/conformance_check).
+  - ✅ **E10-H13** — `outputSchema` (schemars) en las 5 tools nuevas, derivado del tipo Rust real
+    (`schema_for!`, no divergible); `contracts/mcp.yml` reescrito (15 tools: 10 heredadas + 5 nuevas)
+    + sección de migración §15; core sigue puro con la feature schemars. Retirada de query/
+    conformance_check **descopada** a la limpieza final de superficie al cerrar E13. Juez ciego:
+    APROBADA CON RESERVAS (2/2).
+  - **E10 — COMPLETA** (13/13). Criterio de salida cumplido: un agente puede comprender y auditar
+    la base (workspace_status/knowledge_search/knowledge_get/schema_inspect/knowledge_check) sin
+    tocar el filesystem. **Pendiente al cierre de E13**: limpieza final de mcp.yml → 10 tools objetivo
+    (retirar query/conformance_check/find_*/neighborhood/create/update/generate según reemplazos).
 - **E11–E14: pendientes** (grafo e impacto · planificación · publicación recuperable ·
   integración software + evaluación — `ARCHITECTURE.md §19.8`).

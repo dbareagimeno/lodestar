@@ -26,6 +26,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// `Schema::default()` es el esquema **vacío y permisivo** (sin `DocType`s declarados): el que
 /// se usa cuando un bundle no tiene `.lodestar/schema.yaml`.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Schema {
@@ -53,6 +54,7 @@ fn default_schema_version() -> String {
 ///
 /// Todos los campos llevan `#[serde(default)]`: un YAML parcial (solo `requiredFields`, por
 /// ejemplo) deserializa sin error, con el resto en su valor por defecto.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct DocType {
@@ -83,6 +85,7 @@ pub struct DocType {
 }
 
 /// Definición simple de un campo adicional de un [`DocType`].
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct FieldDef {
@@ -91,6 +94,7 @@ pub struct FieldDef {
 }
 
 /// Definición de una relación tipada (`docs/REFACTOR.md §9.4`; validación en E11-H03).
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct RelationDef {

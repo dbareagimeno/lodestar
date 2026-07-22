@@ -33,6 +33,7 @@ regex = "1"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 indexmap = { version = "2", features = ["serde"] }
 unicode-normalization = "0.1"
+schemars = "0.8"
 # Crates internos. Los publicables llevan `version` junto al `path`: cargo usa el `path`
 # en el workspace y sustituye por la `version` (crates.io) al publicar.
 lodestar-core = { path = "crates/lodestar-core", version = "0.1.0" }

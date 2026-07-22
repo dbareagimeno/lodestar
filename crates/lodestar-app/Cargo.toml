@@ -12,12 +12,16 @@ keywords = ["okf", "knowledge-base", "local-first", "services", "markdown"]
 categories = ["development-tools"]
 
 [dependencies]
-lodestar-core = { workspace = true }
+# Activa `JsonSchema` en los tipos de `core::types`/`core::schema` que embeben las respuestas de
+# las tools de lectura (outputSchema, E10-H13, decisión D6b) — el core los lleva ya preparados
+# detrás de esta feature (`schema_derive!` en `types.rs`), sin traer rusqlite/git2/tokio.
+lodestar-core = { workspace = true, features = ["schemars"] }
 lodestar-workspace = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }
 blake3 = { workspace = true }
+schemars = { workspace = true }
 
 [lints]
 workspace = true

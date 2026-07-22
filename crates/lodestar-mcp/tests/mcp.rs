@@ -1432,3 +1432,79 @@ fn check_ids_estables() {
         "los `id` de diagnóstico deben coincidir entre dos llamadas sobre la misma revisión"
     );
 }
+
+// ---------------------------------------------------------------------------
+// E10-H13 — `outputSchema` (schemars).
+//
+// El único criterio testeable de esta historia se ejercita **e2e por stdio** (campo Pruebas:
+// `crates/lodestar-mcp/tests/`):
+//   `tools_declaran_outputschema`: las 5 tools de lectura/verificación de E10
+//   (workspace_status/knowledge_search/knowledge_get/schema_inspect/knowledge_check) deben declarar
+//   `outputSchema` (decisión D6b: derivarlo con `schemars`).
+//
+// FASE ROJA: las 5 tools declaran hoy `inputSchema` pero NO `outputSchema` en `tools::list()` →
+// `tools_declaran_outputschema` falla por AUSENCIA de la clave `outputSchema`.
+//
+// DESCOPE (coordinación): la retirada de `query`/`conformance_check` (§15) queda FUERA de H13 — la
+// limpieza coherente de superficie a las 10 tools objetivo requiere `graph_query` (E11) y las tools
+// de cambio (E12/E13), y se hará en un único rewrite de `mcp.yml` al cerrar E13. Por eso NO hay
+// aquí un test de retirada y los 3 tests heredados que usan `query`/`conformance_check` siguen
+// válidos (esas tools permanecen).
+//
+// El criterio estructural restante («`/contrato --check` pasa contra el `mcp.yml` reescrito») lo
+// verifica el guardián de contrato, no un `#[test]` (por eso no se codifica aquí).
+// ---------------------------------------------------------------------------
+
+/// E10-H13 · Criterio `tools_declaran_outputschema`:
+/// Dado `tools/list`, Cuando se inspecciona cada una de las 5 tools de lectura/verificación de E10,
+/// Entonces cada una incluye `outputSchema` y es un objeto de JSON Schema (con al menos una clave
+/// estructural de esquema). Se exigen las 5 (no basta con `workspace_status`): un stub que solo
+/// añadiera `outputSchema` a una tool no pasaría.
+#[test]
+fn tools_declaran_outputschema() {
+    let dir = bundle_min();
+    let resp = roundtrip(
+        dir.path(),
+        &[r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#],
+        1,
+    );
+    let tools = resp[0]["result"]["tools"]
+        .as_array()
+        .expect("tools/list devuelve un array de tools");
+
+    // Las 5 tools de lectura/verificación de E10 (D6b): todas deben declarar `outputSchema`.
+    let con_output = [
+        "workspace_status",
+        "knowledge_search",
+        "knowledge_get",
+        "schema_inspect",
+        "knowledge_check",
+    ];
+    // Claves estructurales que identifican un JSON Schema derivado por schemars (raíz objeto,
+    // referencia, o combinador). Basta con que aparezca una.
+    let claves_schema = [
+        "type",
+        "$ref",
+        "properties",
+        "allOf",
+        "oneOf",
+        "anyOf",
+        "$defs",
+        "definitions",
+    ];
+    for name in con_output {
+        let tool = tools
+            .iter()
+            .find(|t| t["name"] == name)
+            .unwrap_or_else(|| panic!("falta la tool «{name}» en tools/list: {tools:?}"));
+        let output = &tool["outputSchema"];
+        assert!(
+            output.is_object(),
+            "la tool «{name}» debe declarar `outputSchema` como objeto (D6b): {tool:?}"
+        );
+        assert!(
+            claves_schema.iter().any(|k| output.get(k).is_some()),
+            "el `outputSchema` de «{name}» debe ser un JSON Schema (alguna clave estructural): {output:?}"
+        );
+    }
+}

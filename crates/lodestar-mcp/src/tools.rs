@@ -5,7 +5,7 @@
 
 use std::collections::BTreeMap;
 
-use lodestar_app::{App, CheckScope, Profile, SearchFilters};
+use lodestar_app::{schemas, App, CheckScope, Profile, SearchFilters};
 use lodestar_core::types::{ConceptRef, Direction, FrontmatterPatch, RelPath, Severity};
 #[cfg(test)]
 use lodestar_workspace::Workspace;
@@ -66,7 +66,8 @@ pub fn list() -> Value {
              "dir": { "type": "string", "description": "Directorio relativo («» = raíz).", "default": "" }
          }, "additionalProperties": false }},
         {"name": "generate_tag_indexes", "description": "Regenera los índices de tags.", "inputSchema": empty},
-        {"name": "workspace_status", "description": "Config activa, capacidades del perfil, conformidad y recuento agregado del workspace (llámala primero en cada sesión).", "inputSchema": empty},
+        {"name": "workspace_status", "description": "Config activa, capacidades del perfil, conformidad y recuento agregado del workspace (llámala primero en cada sesión).", "inputSchema": empty,
+         "outputSchema": schemas::workspace_status_schema()},
         {"name": "knowledge_search", "description": "Localiza conceptos por texto y filtros, con snippets y paginación por cursor (nunca devuelve cuerpos).",
          "inputSchema": { "type": "object", "properties": {
              "text": { "type": "string", "description": "Texto libre (subcadena, misma semántica que la DSL del prototipo). Vacío = todos los conceptos." },
@@ -79,7 +80,8 @@ pub fn list() -> Value {
              "sort": { "type": "string", "description": "Reservado: hoy el orden es siempre determinista (score desc, path asc)." },
              "limit": { "type": "integer", "minimum": 1, "maximum": 100, "default": 20 },
              "cursor": { "type": "string", "description": "Cursor opaco de paginación devuelto en «nextCursor»." }
-         }, "additionalProperties": false }},
+         }, "additionalProperties": false },
+         "outputSchema": schemas::knowledge_search_schema()},
         {"name": "knowledge_get", "description": "Obtiene un concepto concreto con `include` selectivo y selección de secciones por headingPath.",
          "inputSchema": { "type": "object", "properties": {
              "ref": { "type": "object", "description": "ConceptRef: identidad del concepto a leer.", "properties": {
@@ -89,12 +91,14 @@ pub fn list() -> Value {
                  "items": { "type": "string", "enum": ["frontmatter", "body", "revision", "outgoingLinks", "backlinks", "diagnostics", "externalReferences"] } },
              "sections": { "type": "array", "description": "Acota «body» a estas subsecciones (solo si «body» está en include). Cada elemento es un headingPath, p. ej. [\"Security\",\"Token rotation\"].",
                  "items": { "type": "array", "items": { "type": "string" } } }
-         }, "required": ["ref"], "additionalProperties": false }},
+         }, "required": ["ref"], "additionalProperties": false },
+         "outputSchema": schemas::knowledge_get_schema()},
         {"name": "schema_inspect", "description": "Descubre el catálogo de tipos (`.lodestar/schema.yaml`): un DocType concreto o el catálogo completo.",
          "inputSchema": { "type": "object", "properties": {
              "mode": { "type": "string", "description": "«catalog» (todos los DocType) o «type» (uno concreto, requiere «type»).", "enum": ["catalog", "type"] },
              "type": { "type": "string", "description": "Nombre del DocType a inspeccionar (solo con mode «type»)." }
-         }, "required": ["mode"], "additionalProperties": false }},
+         }, "required": ["mode"], "additionalProperties": false },
+         "outputSchema": schemas::schema_inspect_schema()},
         {"name": "knowledge_check", "description": "Audita el conocimiento (checks OKF + esquema) con scopes y severidad mínima; diagnósticos con id estable y paginación por cursor.",
          "inputSchema": { "type": "object", "properties": {
              "scope": { "type": "object", "description": "Qué auditar. Discriminado por «kind».", "properties": {
@@ -111,7 +115,8 @@ pub fn list() -> Value {
              "includeSuggestedFixes": { "type": "boolean", "default": false, "description": "Si false, los diagnósticos no llevan «fixes»." },
              "limit": { "type": "integer", "minimum": 1, "maximum": 1000, "default": 100 },
              "cursor": { "type": "string", "description": "Cursor opaco de paginación devuelto en «nextCursor»." }
-         }, "required": ["scope"], "additionalProperties": false }},
+         }, "required": ["scope"], "additionalProperties": false },
+         "outputSchema": schemas::knowledge_check_schema()},
     ])
 }
 

@@ -202,7 +202,7 @@ impl Profile {
 
 /// Recuento agregado de conceptos/enlaces/diagnósticos de un workspace (`counts` de
 /// `WorkspaceStatus`, `docs/REFACTOR.md §9.1`).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct StatusCounts {
     /// Nº de conceptos (`Analysis::concepts`).
@@ -221,7 +221,7 @@ pub struct StatusCounts {
 
 /// Capacidades habilitadas por el perfil de arranque (`capabilities` de `WorkspaceStatus`,
 /// `docs/REFACTOR.md §9.1`).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct StatusCapabilities {
     /// `true` si el perfil admite tools de cambio (`create_concept`/`update_frontmatter` hoy;
@@ -243,7 +243,7 @@ pub struct StatusCapabilities {
 /// Estado de una posible transacción interrumpida (`recovery` de `WorkspaceStatus`). E13 lo
 /// puebla de verdad (staging/journal/crash-recovery); hasta entonces siempre `false` — no hay
 /// mecánica transaccional que pueda dejar el workspace a medio escribir.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct StatusRecovery {
     /// `true` si hay una transacción sin terminar pendiente de recuperar. Fijo a `false` hasta
@@ -255,7 +255,7 @@ pub struct StatusRecovery {
 /// cada sesión (`docs/REFACTOR.md §7`, §9.1). Compone `core::types::workspace_revision` +
 /// `Analysis` + `WorkspaceConfig` + `Schema`, sin lógica de dominio nueva propia: es un servicio
 /// que reusa lo que el core y la workspace ya calculan.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkspaceStatus {
     /// Revisión determinista de las raíces escribibles (`WorkspaceRevision`, E10-H03).
@@ -849,7 +849,7 @@ fn default_affected_depth() -> u32 {
 }
 
 /// Recuento de diagnósticos por severidad de un informe de `knowledge_check`. Wire en camelCase.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct CheckSummary {
     /// Nº de diagnósticos de severidad `Err` en el scope.
@@ -862,7 +862,7 @@ pub struct CheckSummary {
 
 /// Informe de `knowledge_check` (`ARCHITECTURE.md §19.6`, `REFACTOR §10`). Wire en camelCase
 /// (`workspaceRevision`, `nextCursor`).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct CheckReport {
     /// `true` si el scope no tiene ningún diagnóstico de severidad `Err`.
@@ -907,7 +907,7 @@ fn diagnostic_id(path: &RelPath, check: &Check) -> String {
 
 /// Proyección de un concepto para `knowledge_get`. `path`/`revision` siempre presentes; el resto
 /// es `None` cuando no se pidió en `include` (selectividad significativa, no vacua).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ConceptView {
     /// Ruta relativa del concepto (su identidad en v2).
@@ -1065,7 +1065,7 @@ pub struct SearchFilters {
 
 /// Un resultado de `knowledge_search` — proyección de un concepto para localizarlo, **nunca su
 /// cuerpo completo** (invariante de la historia). Wire en camelCase.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct SearchResult {
     /// Ruta relativa del concepto (su identidad en v2, E10-H04).
@@ -1097,7 +1097,7 @@ pub struct SearchResult {
 /// Respuesta de `knowledge_search`: la página de resultados, el cursor a la siguiente página (o
 /// `None` al agotar) y el total aproximado de coincidencias. Wire en camelCase (`nextCursor`,
 /// `totalApproximate`).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct SearchResults {
     /// La página actual de resultados (nunca contiene cuerpos).
@@ -1247,7 +1247,7 @@ fn decode_cursor(cursor: &str) -> usize {
 /// `types` en `None`; `"catalog"` puebla `types` (posiblemente vacío) y deja `type` en `None`. Un
 /// campo en `None` no se serializa (`skip_serializing_if`), así que el wire de cada modo solo
 /// lleva la clave que le corresponde.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct SchemaInspection {
     /// Versión del formato de esquema (`Schema::version`; `"1"` si no hay `.lodestar/schema.yaml`).
@@ -1258,4 +1258,71 @@ pub struct SchemaInspection {
     /// Todos los `DocType` declarados, cuando `mode == "catalog"` (vacío si no hay schema).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub types: Option<Vec<DocType>>,
+}
+
+// ---------------------------------------------------------------------------
+// `outputSchema` (E10-H13, `ARCHITECTURE.md §19.6`, decisión **D6b**, `docs/REFACTOR.md §13`).
+//
+// La tool MCP `knowledge_get` no sirve `ConceptView` a secas: la envuelve en `{ "concept": … }`
+// (`lodestar-mcp/src/tools.rs`, caso `"knowledge_get"`). El `outputSchema` declarado en
+// `tools/list` debe describir la forma de wire REAL, así que aquí vive un wrapper mínimo — solo
+// para derivar su `JsonSchema`, nunca construido por ningún servicio (`App::knowledge_get` sigue
+// devolviendo `ConceptView`; el envoltorio lo aplica la fachada MCP).
+// ---------------------------------------------------------------------------
+
+/// Forma de wire de la respuesta de la tool `knowledge_get` (envoltorio de un único campo
+/// `concept`) — usado solo para derivar su `outputSchema`, ver nota de módulo arriba.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct KnowledgeGetResponse {
+    /// El concepto pedido.
+    pub concept: ConceptView,
+}
+
+/// Los `outputSchema` (JSON Schema, vía `schemars`) de las 5 tools de lectura/verificación de
+/// E10 (`workspace_status`/`knowledge_search`/`knowledge_get`/`schema_inspect`/`knowledge_check`,
+/// decisión **D6b**). `lodestar-mcp::tools::list` llama a estos helpers para poblar la clave
+/// `outputSchema` de cada tool — así el schema se deriva del tipo Rust real que sirve cada
+/// servicio (nunca se escribe a mano, no puede divergir silenciosamente del wire).
+pub mod schemas {
+    use serde_json::Value;
+
+    use super::{
+        CheckReport, KnowledgeGetResponse, SchemaInspection, SearchResults, WorkspaceStatus,
+    };
+
+    /// Deriva el JSON Schema de `T` y lo serializa a `serde_json::Value`. `schemars::schema_for!`
+    /// siempre produce una estructura serializable (nunca falla en la práctica) — el `expect`
+    /// documenta esa garantía en vez de propagar un `Result` que ningún llamante puede fallar
+    /// realmente.
+    fn schema_of<T: schemars::JsonSchema>() -> Value {
+        serde_json::to_value(schemars::schema_for!(T))
+            .expect("un `RootSchema` de schemars siempre serializa a JSON")
+    }
+
+    /// `outputSchema` de `workspace_status` (== [`WorkspaceStatus`]).
+    pub fn workspace_status_schema() -> Value {
+        schema_of::<WorkspaceStatus>()
+    }
+
+    /// `outputSchema` de `knowledge_search` (== [`SearchResults`]).
+    pub fn knowledge_search_schema() -> Value {
+        schema_of::<SearchResults>()
+    }
+
+    /// `outputSchema` de `knowledge_get` (== [`KnowledgeGetResponse`], el envoltorio `{ concept }`
+    /// que sirve de verdad la tool — no [`super::ConceptView`] a secas).
+    pub fn knowledge_get_schema() -> Value {
+        schema_of::<KnowledgeGetResponse>()
+    }
+
+    /// `outputSchema` de `schema_inspect` (== [`SchemaInspection`]).
+    pub fn schema_inspect_schema() -> Value {
+        schema_of::<SchemaInspection>()
+    }
+
+    /// `outputSchema` de `knowledge_check` (== [`CheckReport`]).
+    pub fn knowledge_check_schema() -> Value {
+        schema_of::<CheckReport>()
+    }
 }

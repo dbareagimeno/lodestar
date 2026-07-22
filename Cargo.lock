@@ -2076,6 +2076,7 @@ dependencies = [
  "blake3",
  "lodestar-core",
  "lodestar-workspace",
+ "schemars 0.8.22",
  "serde",
  "serde_json",
  "serde_yaml",
