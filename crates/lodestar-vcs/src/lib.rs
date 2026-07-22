@@ -4,6 +4,15 @@
 //! **binario `git`** confinado a la red (push/pull/fetch). `git2::Oid` NUNCA cruza la frontera:
 //! se expone `Sha`/`Branch`/`CommitRow` de `lodestar_core::types`. **vcs no escribe el working tree**
 //! en operaciones locales: `tree_files` devuelve file-maps que la workspace aplica por el único escritor.
+//!
+//! ## Crate DORMIDO en v2 (giro headless, `ARCHITECTURE.md §19`, cabecera de supersesión de §13)
+//!
+//! Desde `E9-H01`/`E9-H02` **ninguna fachada** (`lodestar-mcp`, `lodestar-cli`) invoca este crate:
+//! las tools MCP `history`/`last_conforming_commit`/`commit` y los subcomandos CLI de git se
+//! retiraron de la superficie de producto. La mecánica **se conserva intacta** (compila, sus tests
+//! siguen verdes, `lodestar-workspace` sigue exponiendo `vcs_*` internamente) — lo que desaparece es
+//! la exposición, no la capacidad (`requirements/epica-09-reduccion-alcance.md`, E9-H03). Si git
+//! vuelve a la superficie en el futuro, esta es la base sobre la que se reengancharía.
 
 use std::path::{Path, PathBuf};
 

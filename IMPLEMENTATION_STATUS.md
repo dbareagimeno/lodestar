@@ -182,5 +182,22 @@ superficie de producto; git queda como crate dormido) y `DECISIONES.md §0`. Des
     con adopción de repos de estilo viejo); scaffold de `.lodestar/runtime/{plans,receipts,staging}`;
     `WorkspaceConfig::load` inyecta siempre los `ignored` obligatorios (cierra la reserva de H05).
     Juez ciego: APROBADA (4/4).
-  - ⏳ E9-H03, H04, H07 pendientes (docs/checklist).
-- E10–E14: pendientes.
+  - ✅ **E9-H03** — Aislado `lodestar-vcs` como crate dormido: `cargo tree -p lodestar-mcp`/
+    `-p lodestar-cli` confirman que `vcs`/`git2` solo llegan **transitivamente** vía
+    `lodestar-workspace` (ningún `use lodestar_vcs`/`vcs` en `crates/lodestar-{mcp,cli}/src/`);
+    doc-comment de módulo en `crates/lodestar-vcs/src/lib.rs` declarando el crate DORMIDO
+    (puntero a `ARCHITECTURE.md §19`/`§13`). `cargo test -p lodestar-vcs` sigue verde (12 tests);
+    `cargo build --workspace` sin warnings nuevos. No se tocó el crate ni `core::types`.
+  - ✅ **E9-H04** — UI congelada en el flujo de desarrollo: `.claude/README.md` y
+    `docs/WORKFLOWS.md` anotan que el motor es headless y que `/ciclo`/`/historia`/`/ux` no tocan
+    `frontend/`/`src-tauri/` en v2; el skill `/ux` y el agente `disenador-ux` quedan marcados
+    **no aplicables al giro headless** (documentados, no invocados — reconciliado con el circuito
+    UX preexistente sin revertirlo). `CLAUDE.md` actualizado (estado + mapa de crates con
+    `lodestar-app`) sin reescribir los invariantes #1–#6.
+  - ✅ **E9-H07** — Documentación de producto reposicionada: `README.md`/`CLAUDE.md` describen el
+    posicionamiento como motor headless de integridad semántica, citan `ARCHITECTURE.md §19`,
+    listan `lodestar-app` en el mapa de crates y marcan git como capacidad dormida y la UI como
+    congelada. Este bloque de `IMPLEMENTATION_STATUS.md` refleja E9 completa.
+- **E9 — COMPLETA** (H01–H07, las 7 historias de la fase 0).
+- **E10–E14: pendientes** (esquemas + lectura headless · grafo e impacto · planificación ·
+  publicación recuperable · integración software + evaluación — `ARCHITECTURE.md §19.8`).
