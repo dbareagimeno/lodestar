@@ -8,6 +8,11 @@
 //! deriva un [`SemanticDiff`] reusando [`crate::diff::diff_snap`] y las validaciones de esquema
 //! (`validate_schema`/`validate_relations`) — ver la doc de la función para el detalle.
 //!
+//! Función pura [`validate_result`]: dado el `Bundle` hipotético resultante de un `ChangeSet` y
+//! el `Schema`, deriva un [`ValidationReport`] reusando el mismo universo de diagnósticos que
+//! `all_checks` (`analyze().per_file` + `validate_schema` + `validate_relations`). Junto con
+//! [`PlanPolicy`] y [`can_apply`] (E12-H04) decide si el plan es aplicable.
+//!
 //! ## Heurística (documentada, no normativa — H02 solo fija el orden de magnitud)
 //!
 //! Para cada operación que **encoge** el grafo de conceptos — deprecar (`TransitionStatus{to:
@@ -35,9 +40,11 @@ use std::collections::BTreeSet;
 
 use crate::diff::{diff_snap, BodyHunk, ChangeKind};
 use crate::schema::{validate_relations, validate_schema, Schema};
+use serde::{Deserialize, Serialize};
+
 use crate::types::{
     Check, CheckCode, FrontmatterPatch, NormalizedOperation, RelPath, RiskAssessment, RiskLevel,
-    SemanticDiff, Severity,
+    SemanticDiff, Severity, ValidationReport, ValidationSummary,
 };
 use crate::Bundle;
 
@@ -225,4 +232,69 @@ fn all_checks(bundle: &Bundle, schema: &Schema) -> Vec<Check> {
 /// Clave de identidad de un check para `semantic_diff`: `(targets, code, msg)`.
 fn check_key(c: &Check) -> (Vec<RelPath>, CheckCode, String) {
     (c.targets.clone(), c.code, c.msg.clone())
+}
+
+// --- E12-H04: `ValidationReport` + `PlanPolicy` -------------------------------------------
+
+/// Valida el `Bundle` hipotético resultante de un `ChangeSet` bajo `schema` — E12-H04.
+///
+/// Reusa `all_checks` (el mismo universo de diagnósticos que `semantic_diff` y `lodestar
+/// check`: los 15 checks OKF de `Bundle::analyze` más `validate_schema`/`validate_relations`,
+/// sin `Severity::Pass`). `summary` cuenta por severidad; `conformant` se computa explícitamente
+/// como `summary.errors == 0` (no se reusa `ValidationSummary::default().conformant`, que sería
+/// `false` por defecto — aquí "conforme" significa "sin errores duros", con o sin warnings).
+pub fn validate_result(bundle: &Bundle, schema: &Schema) -> ValidationReport {
+    let diagnostics = all_checks(bundle, schema);
+
+    let mut summary = ValidationSummary::default();
+    for check in &diagnostics {
+        match check.level {
+            Severity::Err => summary.errors += 1,
+            Severity::Warn => summary.warnings += 1,
+            Severity::Info => summary.info += 1,
+            Severity::Pass => {}
+        }
+    }
+
+    ValidationReport {
+        conformant: summary.errors == 0,
+        summary,
+        diagnostics,
+    }
+}
+
+/// Política de aplicación de un plan — E12-H04. Wire camelCase
+/// (`requireConformantResult`/`allowWarnings`) por coherencia con el resto del contrato de plan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanPolicy {
+    /// Si `true`, un [`ValidationReport`] no conforme (`conformant == false`) bloquea `can_apply`.
+    pub require_conformant_result: bool,
+    /// Si `false`, cualquier warning (`summary.warnings > 0`) bloquea `can_apply`, incluso con
+    /// resultado conforme.
+    pub allow_warnings: bool,
+}
+
+impl Default for PlanPolicy {
+    /// Default razonable: exige conformidad y permite warnings (el prototipo no bloquea por
+    /// avisos, solo por errores duros).
+    fn default() -> Self {
+        Self {
+            require_conformant_result: true,
+            allow_warnings: true,
+        }
+    }
+}
+
+/// Decide si un plan cuyo resultado hipotético dio `report` es aplicable bajo `policy` —
+/// E12-H04. `false` si `policy.require_conformant_result` y `!report.conformant`; `false` si
+/// `!policy.allow_warnings` y `report.summary.warnings > 0`; `true` en cualquier otro caso.
+pub fn can_apply(report: &ValidationReport, policy: &PlanPolicy) -> bool {
+    if policy.require_conformant_result && !report.conformant {
+        return false;
+    }
+    if !policy.allow_warnings && report.summary.warnings > 0 {
+        return false;
+    }
+    true
 }

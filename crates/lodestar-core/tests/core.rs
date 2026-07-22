@@ -1773,3 +1773,145 @@ fn diff_introduce_diagnostico() {
         diff.diagnostics_introduced,
     );
 }
+
+// --- E12-H04: `ValidationReport` (conformidad del resultado hipotético + policy) ----------------
+//
+// Fase ROJA: ni la función pura `validate_result` ni la política `can_apply`/`PlanPolicy` existen
+// todavía en producción. Ubicación ASUMIDA: el módulo `lodestar_core::plan` (paralela a
+// `assess_risk`/`semantic_diff`: análisis del plan, y necesita el `Schema` para contar los checks
+// schema-driven —SCHEMA-*/REL-*— del resultado hipotético). Firmas ASUMIDAS:
+//
+//     pub fn validate_result(bundle: &Bundle, schema: &Schema) -> ValidationReport
+//
+//     pub struct PlanPolicy {
+//         pub require_conformant_result: bool,  // wire `requireConformantResult`
+//         pub allow_warnings: bool,             // wire `allowWarnings`
+//     }
+//     pub fn can_apply(report: &ValidationReport, policy: &PlanPolicy) -> bool
+//
+// Semántica ASUMIDA (spec E12-H04, `REFACTOR §11.1`):
+//   - `validate_result` compone `analyze()` + `validate_schema` + `validate_relations` sobre el
+//     bundle hipotético; `summary` cuenta Err/Warn/Info; `conformant = (summary.errors == 0)`;
+//     `diagnostics` acumula los `Check`.
+//   - `can_apply`: si `require_conformant_result` y NO conforme → false; si `!allow_warnings` y hay
+//     warnings → false; en otro caso → true.
+//
+// El tipo `ValidationReport { conformant, summary{errors,warnings,info}, diagnostics }` (E12-H01)
+// ya existe en `core::types`. Hasta que E12-H04 defina `validate_result`/`can_apply`/`PlanPolicy`,
+// estos dos tests hacen ROJO por SÍMBOLO AUSENTE (compile-fail: `plan::validate_result`,
+// `plan::can_apply` y `plan::PlanPolicy` no existen), lo que impide compilar el binario de tests
+// del crate. Es el rojo esperado y documentado.
+//
+// Los tests aseveran PROPIEDADES (conformidad, conteos, decisión de la política), nunca la
+// representación interna ni el orden de los diagnósticos.
+
+/// Criterio `plan_no_conforme_rechaza`: **Dado** un plan cuyo resultado introduce un `Err` (un
+/// concepto `decision` sin el campo obligatorio `rationale` → `SCHEMA-REQFIELD`/Err) y
+/// `policy.requireConformantResult:true`, **Cuando** se valida, **Entonces** `conformant:false` y
+/// el plan NO es aplicable (`can_apply == false`).
+/// (Benchmark §17: "Crear un concepto sin campo obligatorio → plan rechazado".)
+#[test]
+fn plan_no_conforme_rechaza() {
+    use lodestar_core::plan::{can_apply, validate_result, PlanPolicy};
+    use lodestar_core::schema::{validate_schema, DocType, Schema};
+
+    // Schema: el `DocType decision` exige el campo obligatorio `rationale`.
+    let mut schema = Schema::default();
+    schema.types.insert(
+        "decision".to_string(),
+        DocType {
+            name: "decision".to_string(),
+            required_fields: vec!["rationale".to_string()],
+            ..DocType::default()
+        },
+    );
+
+    // Bundle hipotético resultante del plan: un concepto `decision` SIN `rationale` → Err duro.
+    let hipotetico = Bundle::from_files(fm(&[(
+        "d.md",
+        "---\ntype: decision\ntitle: Migrar a Rust\nstatus: proposed\n---\n\n# H\n\ncuerpo\n",
+    )]));
+
+    // Precondición del fixture: el resultado hipotético viola SCHEMA-REQFIELD (aísla el criterio).
+    assert!(
+        validate_schema(&hipotetico, &schema)
+            .iter()
+            .any(|c| c.code == CheckCode::SchemaReqfield && c.level == Severity::Err),
+        "el bundle hipotético debe introducir un `SCHEMA-REQFIELD`/Err",
+    );
+
+    let report = validate_result(&hipotetico, &schema);
+
+    assert!(
+        report.summary.errors >= 1,
+        "el resultado con un Err debe contar al menos un error; summary = {:?}",
+        report.summary,
+    );
+    assert!(
+        !report.conformant,
+        "con errores el resultado NO es conforme (`conformant == false`); report = {:?}",
+        report,
+    );
+
+    let policy = PlanPolicy {
+        require_conformant_result: true,
+        allow_warnings: true,
+    };
+    assert!(
+        !can_apply(&report, &policy),
+        "con `requireConformantResult:true` y resultado no conforme, el plan NO es aplicable",
+    );
+}
+
+/// Criterio `plan_warnings_permitido`: **Dado** un plan con SOLO warnings (ningún `Err`) y
+/// `allowWarnings:true`, **Cuando** se valida, **Entonces** el resultado es conforme
+/// (`conformant:true`, 0 errores, `summary.warnings >= 1`) y el plan es aplicable
+/// (`can_apply == true`).
+#[test]
+fn plan_warnings_permitido() {
+    use lodestar_core::plan::{can_apply, validate_result, PlanPolicy};
+    use lodestar_core::schema::Schema;
+
+    // Bundle hipotético con SOLO warnings: concepto conforme (type/title/description presentes,
+    // cuerpo con encabezado) salvo `tags` como escalar → `FMT-TAGS`/Warn. Sin schema activo, no
+    // hay checks SCHEMA-*; sin enlaces rotos, no hay más que el warning (y algún Info como ORPHAN,
+    // que no afecta a la conformidad).
+    let hipotetico = Bundle::from_files(fm(&[(
+        "nota.md",
+        "---\ntype: Nota\ntitle: T\ndescription: d\ntags: uno\n---\n\n# H\n\ncuerpo\n",
+    )]));
+
+    // Precondición del fixture: 0 errores duros (solo warnings) sobre el análisis base.
+    assert_eq!(
+        hipotetico.analyze().hard_fail,
+        0,
+        "el bundle hipotético no debe tener ningún Err (solo warnings)",
+    );
+
+    let report = validate_result(&hipotetico, &Schema::default());
+
+    assert_eq!(
+        report.summary.errors, 0,
+        "un resultado con solo warnings tiene 0 errores; summary = {:?}",
+        report.summary,
+    );
+    assert!(
+        report.conformant,
+        "sin errores el resultado es conforme (`conformant == true`); report = {:?}",
+        report,
+    );
+    assert!(
+        report.summary.warnings >= 1,
+        "el fixture debe producir al menos un warning (FMT-TAGS); summary = {:?}",
+        report.summary,
+    );
+
+    let policy = PlanPolicy {
+        require_conformant_result: true,
+        allow_warnings: true,
+    };
+    assert!(
+        can_apply(&report, &policy),
+        "con resultado conforme y `allowWarnings:true`, el plan es aplicable",
+    );
+}

@@ -301,5 +301,8 @@ superficie de producto; git queda como crate dormido) y `DECISIONES.md §0`. Des
     deleted/*_changes reusan `diff_snap`; diagnosticsIntroduced/Resolved = diff de all_checks
     (analyze+validate_schema+validate_relations) por clave (targets,code,msg). `moved` vacío (diff_snap
     no detecta renames → H06/H08). Juez ciego: APROBADA (3/3).
-  - ⏳ E12-H04–H09 pendientes (validación/normalización → change_plan → persistencia).
+  - ✅ **E12-H04** — `core::plan::validate_result(bundle, schema)` → `ValidationReport` (reusa
+    all_checks; conformant=errors==0 explícito) + `PlanPolicy{requireConformantResult,allowWarnings}`
+    + `can_apply(report, policy)` (los dos ejes). Juez ciego: APROBADA (2/2).
+  - ⏳ E12-H05–H09 pendientes (normalización → change_plan → persistencia).
 - **E13–E14: pendientes** (publicación recuperable · integración + evaluación — `ARCHITECTURE.md §19.8`).
