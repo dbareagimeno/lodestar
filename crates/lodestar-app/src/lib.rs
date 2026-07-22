@@ -16,7 +16,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use lodestar_core::model;
-use lodestar_core::schema::{validate_relations, validate_schema, DocType};
+use lodestar_core::schema::{validate_relations, validate_schema, DocType, Schema};
 use lodestar_core::types::{
     workspace_revision, Analysis, Backlinks, Check, ConceptRef, ConceptRevision, Direction, Edge,
     ErrorCode, Frontmatter, GraphNode, RelPath, Severity, WorkspaceRevision,
@@ -1013,6 +1013,104 @@ impl App {
             next_cursor,
         })
     }
+
+    /// Analiza el **impacto** de un cambio hipotético sobre un concepto sin materializarlo
+    /// (E11-H05, `ARCHITECTURE.md §19.6`, `REFACTOR §9.6/§17`): cuántos conceptos se verían
+    /// afectados directa y transitivamente, qué **relaciones tipadas obligatorias** quedarían rotas
+    /// (bloqueos) y un nivel de riesgo derivado. No materializa ningún cambio (aplicar es E12/E13).
+    ///
+    /// - `directlyAffected` = nº de backlinks **directos** entrantes del `ref`
+    ///   ([`Bundle::backlinks`]`.inbound`).
+    /// - `transitivelyAffected` = tamaño del blast-radius entrante
+    ///   ([`Bundle::neighborhood`]`(_, _, Direction::In)`, excluido el propio `ref`) — la **verdad
+    ///   del core** (invariante #3); `Store::blast_radius` es la proyección SQL equivalente,
+    ///   verificada idéntica por el test `impacto_paridad_core`.
+    /// - `blockingReferences` (solo para `kind == "delete"`): cada concepto que declara una relación
+    ///   tipada del schema ([`lodestar_core::schema::RelationDef`], E11-H03) cuyo target es el `ref`
+    ///   — las dependencias estructurales que quedarían rotas al borrarlo. Para otros `kind` sin
+    ///   bloqueos estructurales, va vacío.
+    /// - `risk`: `"high"` si hay bloqueos o el nº de afectados directos es alto; `"medium"` para un
+    ///   impacto moderado; `"low"` en caso contrario.
+    ///
+    /// `Err(ErrorCode::ConceptNotFound)` si el `ref` no resuelve a un concepto
+    /// ([`App::resolve_ref`]).
+    pub fn impact_analyze(
+        &self,
+        r: &ConceptRef,
+        kind: &str,
+        depth: Option<u32>,
+    ) -> Result<ImpactReport, ErrorCode> {
+        let path = self.resolve_ref(r)?;
+        let bundle = self
+            .workspace
+            .bundle()
+            .map_err(|e| workspace_error_code(&e))?;
+
+        // `directlyAffected`: backlinks DIRECTOS entrantes (verdad del core).
+        let directly_affected = bundle.backlinks(&path).inbound.len();
+
+        // `transitivelyAffected`: blast-radius entrante (`neighborhood(In)`), excluido el propio
+        // `ref`. Profundidad grande por defecto para cubrir todo el alcance transitivo, no solo el
+        // vecindario inmediato (paridad con `Store::blast_radius`, invariante #3).
+        let nb = bundle.neighborhood(&path, depth.unwrap_or(u32::MAX), Direction::In);
+        let mut affected_concepts: Vec<RelPath> = nb
+            .nodes
+            .into_iter()
+            .map(|n| n.id)
+            .filter(|id| id != &path)
+            .collect();
+        affected_concepts.sort();
+        let transitively_affected = affected_concepts.len();
+
+        // `blockingReferences`: relaciones tipadas obligatorias entrantes que romperían al borrar el
+        // `ref` (solo `kind == "delete"`; el resto de operaciones no tiene bloqueos estructurales
+        // en v1 — mover/deprecar/etc. no rompen la relación, solo requieren revisión).
+        let blocking_references = if kind == "delete" {
+            let schema = WorkspaceSchema::load(self.workspace.root())
+                .map_err(|_| ErrorCode::InternalIoError)?;
+            blocking_relations(&bundle, &schema, &path)
+        } else {
+            Vec::new()
+        };
+
+        // Riesgo derivado (conjunto cerrado {"low","medium","high"}, wire en inglés).
+        let risk = if !blocking_references.is_empty() || directly_affected >= HIGH_IMPACT_BACKLINKS
+        {
+            "high"
+        } else if directly_affected >= MEDIUM_IMPACT_BACKLINKS
+            || transitively_affected >= MEDIUM_IMPACT_BACKLINKS
+        {
+            "medium"
+        } else {
+            "low"
+        };
+
+        // Recomendaciones accionables (texto español); vacías para un cambio de bajo riesgo.
+        let mut recommendations = Vec::new();
+        if !blocking_references.is_empty() {
+            recommendations.push(format!(
+                "Actualiza o redirige las {} relaciones obligatorias entrantes antes de aplicar el cambio.",
+                blocking_references.len()
+            ));
+        }
+        if directly_affected > 0 {
+            recommendations.push(format!(
+                "Revisa los {directly_affected} enlaces entrantes que apuntan a este concepto tras aplicar «{kind}»."
+            ));
+        }
+
+        Ok(ImpactReport {
+            summary: ImpactSummary {
+                directly_affected,
+                transitively_affected,
+                blocking_references: blocking_references.len(),
+                risk: risk.to_string(),
+            },
+            affected_concepts,
+            blocking_references,
+            recommendations,
+        })
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1146,6 +1244,126 @@ pub struct GraphQuerySummary {
     pub edge_count: usize,
     /// `true` si `limit` recortó el total de nodos (hay más páginas vía `nextCursor`).
     pub truncated: bool,
+}
+
+// ---------------------------------------------------------------------------
+// `impact_analyze` — tipos de proyección de servicio (E11-H05, `ARCHITECTURE.md §19.6`,
+// `REFACTOR §9.6/§17`).
+//
+// Proyección de servicio (framing), NO dominio: vive en `lodestar-app`, no en `core::types`. Los
+// recuentos y los `blockingReferences` los computa `App::impact_analyze` componiendo el core
+// (`Bundle::backlinks`/`neighborhood` + `RelationDef` del schema); esta capa solo les da forma de
+// wire (camelCase). Wire en camelCase.
+// ---------------------------------------------------------------------------
+
+/// Umbral de backlinks directos a partir del cual el impacto de un cambio se considera **alto**
+/// (E11-H05): mover/borrar un concepto con muchos enlaces entrantes es intrínsecamente arriesgado.
+const HIGH_IMPACT_BACKLINKS: usize = 20;
+/// Umbral de afectados (directos o transitivos) a partir del cual el impacto se considera **medio**.
+const MEDIUM_IMPACT_BACKLINKS: usize = 5;
+
+/// Respuesta de `impact_analyze` (`ARCHITECTURE.md §19.6`, `REFACTOR §9.6`). Wire en camelCase.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ImpactReport {
+    /// Recuentos agregados y nivel de riesgo del cambio propuesto.
+    pub summary: ImpactSummary,
+    /// Conceptos alcanzados por el blast-radius entrante (excluido el propio `ref`), orden estable.
+    pub affected_concepts: Vec<RelPath>,
+    /// Relaciones tipadas obligatorias entrantes que quedarían rotas (solo para `kind:"delete"`).
+    pub blocking_references: Vec<BlockingReference>,
+    /// Acciones sugeridas antes de aplicar el cambio (texto en español); vacío si el riesgo es bajo.
+    pub recommendations: Vec<String>,
+}
+
+/// Recuentos agregados de un `impact_analyze` y su nivel de riesgo. Wire en camelCase.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ImpactSummary {
+    /// Nº de backlinks **directos** entrantes del `ref` (`Bundle::backlinks.inbound`).
+    pub directly_affected: usize,
+    /// Tamaño del blast-radius entrante (`neighborhood(In)`, excluido el propio `ref`).
+    pub transitively_affected: usize,
+    /// `blockingReferences.len()` — nº de relaciones obligatorias entrantes que romperían.
+    pub blocking_references: usize,
+    /// Nivel de riesgo derivado, del conjunto cerrado `{"low","medium","high"}` (wire en inglés).
+    pub risk: String,
+}
+
+/// Una relación tipada entrante que quedaría rota si se aplicara el cambio (E11-H05). `path` es el
+/// concepto que depende del `ref`; `reason` explica el bloqueo (nombre de la relación rota). Wire
+/// en camelCase.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct BlockingReference {
+    /// El concepto origen que declara la relación tipada hacia el `ref`.
+    pub path: RelPath,
+    /// Texto (no vacío) que explica por qué bloquea (la relación tipada que se rompería).
+    pub reason: String,
+}
+
+/// Conceptos que declaran una **relación tipada del schema** ([`lodestar_core::schema::RelationDef`],
+/// E11-H03) cuyo target es `target_path` — las dependencias estructurales que quedarían rotas al
+/// borrar el target (E11-H05). Reusa la misma lectura de campos de relación que
+/// `core::schema::validate_relations` (una secuencia YAML de paths o un único `String`). Emite un
+/// bloqueo por cada relación tipada de un concepto que apunte al target (los enlaces sueltos de
+/// cuerpo Markdown NO cuentan: no son dependencias estructurales tipadas).
+fn blocking_relations(
+    bundle: &Bundle,
+    schema: &Schema,
+    target_path: &RelPath,
+) -> Vec<BlockingReference> {
+    if schema.types.is_empty() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for path in &bundle.analyze().concepts {
+        if path == target_path {
+            continue;
+        }
+        let Some(raw) = bundle.files().get(path) else {
+            continue;
+        };
+        let parsed = model::parse_file(path.as_str(), raw);
+        let Some(fm) = parsed.fm else {
+            continue;
+        };
+        let Some(tipo) = fm.r#type.as_deref() else {
+            continue;
+        };
+        let Some(doctype) = schema.types.get(tipo) else {
+            continue;
+        };
+        for rel_name in doctype.relations.keys() {
+            let apunta = relation_field_targets(&fm, rel_name)
+                .iter()
+                .any(|t| RelPath::new(t).ok().as_ref() == Some(target_path));
+            if apunta {
+                out.push(BlockingReference {
+                    path: path.clone(),
+                    reason: format!(
+                        "«{}» depende de este concepto vía la relación tipada «{rel_name}».",
+                        path.as_str()
+                    ),
+                });
+            }
+        }
+    }
+    out
+}
+
+/// Lee el campo `rel_name` del frontmatter como lista de paths target: una secuencia YAML de
+/// `String` o un único `String` (misma forma que `core::schema`); vacío si el campo no está o su
+/// forma no es ninguna de las dos.
+fn relation_field_targets(fm: &Frontmatter, rel_name: &str) -> Vec<String> {
+    match fm.extra.get(rel_name) {
+        Some(serde_yaml::Value::Sequence(seq)) => seq
+            .iter()
+            .filter_map(|v| v.as_str().map(str::to_string))
+            .collect(),
+        Some(serde_yaml::Value::String(s)) => vec![s.clone()],
+        _ => Vec::new(),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1539,8 +1757,8 @@ pub mod schemas {
     use serde_json::Value;
 
     use super::{
-        CheckReport, GraphQueryResult, KnowledgeGetResponse, SchemaInspection, SearchResults,
-        WorkspaceStatus,
+        CheckReport, GraphQueryResult, ImpactReport, KnowledgeGetResponse, SchemaInspection,
+        SearchResults, WorkspaceStatus,
     };
 
     /// Deriva el JSON Schema de `T` y lo serializa a `serde_json::Value`. `schemars::schema_for!`
@@ -1581,5 +1799,10 @@ pub mod schemas {
     /// `outputSchema` de `graph_query` (== [`GraphQueryResult`]).
     pub fn graph_query_schema() -> Value {
         schema_of::<GraphQueryResult>()
+    }
+
+    /// `outputSchema` de `impact_analyze` (== [`ImpactReport`]).
+    pub fn impact_analyze_schema() -> Value {
+        schema_of::<ImpactReport>()
     }
 }

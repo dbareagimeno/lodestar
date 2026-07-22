@@ -132,6 +132,17 @@ pub fn list() -> Value {
              "cursor": { "type": "string", "description": "Cursor opaco de paginación devuelto en «nextCursor»." }
          }, "required": ["operation"], "additionalProperties": false },
          "outputSchema": schemas::graph_query_schema()},
+        {"name": "impact_analyze", "description": "Analiza el impacto de un cambio hipotético sobre un concepto (sin aplicarlo): afectados directos/transitivos, relaciones tipadas obligatorias que romperían (bloqueos) y nivel de riesgo. Reusa el blast-radius entrante y las relaciones del schema.",
+         "inputSchema": { "type": "object", "properties": {
+             "ref": { "type": "object", "description": "ConceptRef: el concepto sobre el que se propone el cambio.", "properties": {
+                 "path": { "type": "string", "description": "Ruta relativa del concepto (p. ej. «notas/alfa.md»)." }
+             }, "required": ["path"], "additionalProperties": false },
+             "proposedOperation": { "type": "object", "description": "El cambio hipotético a evaluar.", "properties": {
+                 "kind": { "type": "string", "enum": ["move", "delete", "deprecate", "transition_status", "change_relation", "replace_concept"], "description": "Tipo de operación propuesta. Solo «delete» computa bloqueos estructurales en v1." }
+             }, "required": ["kind"], "additionalProperties": false },
+             "depth": { "type": "integer", "minimum": 1, "description": "Profundidad del blast-radius entrante; por defecto cubre todo el alcance transitivo." }
+         }, "required": ["ref", "proposedOperation"], "additionalProperties": false },
+         "outputSchema": schemas::impact_analyze_schema()},
     ])
 }
 
@@ -344,6 +355,27 @@ pub fn call(app: &App, profile: Profile, name: &str, params: &Value) -> ToolResu
                 )
                 .map_err(|e| e.as_str().to_string())?;
             to_json(&result)
+        }
+        "impact_analyze" => {
+            let r: ConceptRef = match params.get("ref") {
+                Some(v) => serde_json::from_value(v.clone()).map_err(|e| e.to_string())?,
+                None => return Err("falta el parámetro «ref»".to_string()),
+            };
+            let kind = params
+                .get("proposedOperation")
+                .and_then(|op| op.get("kind"))
+                .and_then(Value::as_str)
+                .ok_or("falta el parámetro «proposedOperation.kind»")?;
+            let depth = params
+                .get("depth")
+                .and_then(Value::as_u64)
+                .map(|n| n as u32);
+            // Mismo mapeo de error a wire que las demás tools (E10-H02): el código estable
+            // `ErrorCode::as_str()`, nunca el `Debug` de la variante.
+            let report = app
+                .impact_analyze(&r, kind, depth)
+                .map_err(|e| e.as_str().to_string())?;
+            to_json(&report)
         }
         other => Err(format!("tool desconocida: {other}")),
     }

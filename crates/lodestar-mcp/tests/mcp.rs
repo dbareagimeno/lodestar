@@ -1930,3 +1930,245 @@ fn graph_truncado() {
         "sin truncar, deben aparecer los 10 huérfanos: {full:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// E11-H05 — Tool `impact_analyze` (reusa blast-radius + neighborhood).
+//
+// UBICACIÓN: los criterios de comportamiento (`impacto_move_30`, `impacto_delete_bloqueos`) se
+// ejercitan **e2e por la tool MCP** (campo Pruebas de la historia: `crates/lodestar-mcp/tests/`),
+// coherente con E10-H08…H12 y E11-H01. Lo que hay que fijar aquí es el contrato de **wire**
+// (forma de `arguments` con `ref`/`proposedOperation`/`depth`, forma del `structuredContent` con
+// `summary`/`affectedConcepts`/`blockingReferences`/`recommendations`) sin acoplar los tests a los
+// tipos internos que el implementador aún no ha creado (`App::impact_analyze`, el enum de `kind`,
+// el struct de `summary`, etc.). El tercer criterio (`impacto_paridad_core`) NO vive aquí: es una
+// paridad **store vs core** (invariante #3, el bloque que `impact_analyze` reusa), sin superficie
+// de wire ni tool; está en `crates/lodestar-store/tests/store.rs::impacto_paridad_core` (ver la
+// nota de rojo de este archivo, abajo, y la cabecera de ese test).
+//
+// FASE ROJA: la tool `impact_analyze` NO está en `tools::list()` todavía, así que
+// `tools/call {name:"impact_analyze"}` devuelve el error de protocolo `-32602` (tool desconocida) y
+// `result` es `null` → los asserts que leen `result.structuredContent.summary.*` /
+// `result.structuredContent.blockingReferences` fallan por AUSENCIA de la tool/servicio (no por un
+// valor erróneo). Ese es el rojo correcto: la tool + `App::impact_analyze` no existen.
+//
+// WIRE DE ENTRADA asumido (el implementador puede refinar los tipos internos, no el wire):
+//   arguments: {
+//     ref: { path: "<RelPath>" },                       // ConceptRef (E10-H04); deser de { path }
+//     proposedOperation: {
+//       kind: "move" | "delete" | "deprecate" | "transition_status"
+//           | "change_relation" | "replace_concept"
+//     },
+//     depth?: integer                                    // profundidad del blast-radius; def. impl.
+//   }
+//
+// WIRE DE SALIDA asumido (`structuredContent`, `ARCHITECTURE.md §19.6`, `REFACTOR §9.6`):
+//   {
+//     summary: {
+//       directlyAffected: number,        // nº de backlinks DIRECTOS del ref (Bundle::backlinks)
+//       transitivelyAffected: number,    // tamaño del blast-radius (== neighborhood(In) del core)
+//       blockingReferences: number,      // == blockingReferences.len()
+//       risk: "low" | "medium" | "high"  // nivel derivado de nº de afectados/bloqueos
+//     },
+//     affectedConcepts: [ … ],           // conceptos alcanzados (paths / nodos)
+//     blockingReferences: [ { path: "<RelPath>", reason: "<texto>" } ],
+//     recommendations: [ … ]             // acciones sugeridas (texto)
+//   }
+//
+// DECISIÓN DE WIRE FIJADA POR ESTA HISTORIA (el implementador debe respetarla):
+//   - `summary.risk` es un string en INGLÉS del conjunto cerrado {"low","medium","high"},
+//     coherente con el resto del wire camelCase/inglés (`direction:"in"`, `minimumSeverity:"err"`,
+//     claves `directlyAffected`/`blockingReferences`). El NIVEL ALTO es exactamente `"high"`.
+//   - Un `blockingReference` (para `kind:"delete"`) = un concepto que declara una **relación
+//     tipada del schema** (`RelationDef`, E11-H03) cuyo target es el `ref`. Cada blocker es
+//     `{ path, reason }`: `path` = el concepto que depende del ref; `reason` = texto no vacío que
+//     explica el bloqueo (p. ej. el nombre de la relación que quedaría rota). Esta es la lectura
+//     literal del alcance de la historia ("relaciones obligatorias que quedarían rotas"): las
+//     dependencias estructurales tipadas, NO los enlaces sueltos de cuerpo Markdown.
+//
+// FIRMA DE SERVICIO ASUMIDA (el implementador la crea con su propia elección de tipos internos):
+//   App::impact_analyze(ref: &ConceptRef, proposed_operation_kind, depth: Option<u32>)
+//       -> Result<{ summary, affectedConcepts, blockingReferences, recommendations }, _>
+//   `directlyAffected` compone `Bundle::backlinks`; `transitivelyAffected` reusa
+//   `Store::blast_radius` (verificado idéntico a `neighborhood(In)` por `impacto_paridad_core`);
+//   `blockingReferences` compone `validate_relations`/`RelationDef` (E11-H03).
+// ---------------------------------------------------------------------------
+
+/// Bundle con un concepto `target.md` al que apuntan **exactamente 30** conceptos vía un enlace de
+/// cuerpo Markdown (`[t](/target.md)`), y NINGÚN otro backlink. El `index.md` NO lista `target.md`
+/// (así `Backlinks::index_refs` queda vacío) y los 30 emisores no reciben backlinks entre sí, de
+/// modo que `directlyAffected` del target es 30 bajo cualquier lectura (inbound-solo o
+/// inbound+index). Deterministas por slug (`emisor00`…`emisor29`).
+fn bundle_treinta_backlinks() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    // index.md sin enlaces salientes: no "adopta" al target (index_refs vacío).
+    write(
+        dir.path(),
+        "index.md",
+        "---\nokf_version: \"0.1\"\n---\n\n# Bundle\n",
+    );
+    write(
+        dir.path(),
+        "target.md",
+        "---\ntype: Concept\ntitle: Target\ndescription: el concepto a mover\n---\n\n# Target\n\ncuerpo\n",
+    );
+    for i in 0..30 {
+        let slug = format!("emisor{i:02}");
+        write(
+            dir.path(),
+            &format!("{slug}.md"),
+            &format!(
+                "---\ntype: Concept\ntitle: Emisor {i:02}\ndescription: enlaza al target\n---\n\n# H\n\nreferencia a [target](/target.md).\n"
+            ),
+        );
+    }
+    dir
+}
+
+/// E11-H05 · Criterio `impacto_move_30` (benchmark §17: "Mover un concepto con 30 backlinks"):
+/// Dado un concepto con 30 backlinks, Cuando `impact_analyze(kind:move)`, Entonces
+/// `summary.directlyAffected == 30`.
+#[test]
+fn impacto_move_30() {
+    let dir = bundle_treinta_backlinks();
+    let resp = roundtrip(
+        dir.path(),
+        &[
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"impact_analyze","arguments":{"ref":{"path":"target.md"},"proposedOperation":{"kind":"move"}}}}"#,
+        ],
+        1,
+    );
+    let sc = &resp[0]["result"]["structuredContent"];
+    let directly = sc["summary"]["directlyAffected"]
+        .as_u64()
+        .unwrap_or_else(|| {
+            panic!("impact_analyze debe devolver summary.directlyAffected (número): {resp:?}")
+        });
+    assert_eq!(
+        directly, 30,
+        "un concepto con 30 backlinks debe dar summary.directlyAffected == 30: {resp:?}"
+    );
+}
+
+/// Bundle con un `.lodestar/schema.yaml` que declara una relación tipada **obligatoria**
+/// (estructural) `depends_on` del tipo `task` hacia tipos `component`, y **3 conceptos `task`** que
+/// declaran esa relación apuntando al target `component.md`. Al borrar `component.md`, esas 3
+/// relaciones tipadas quedarían rotas → 3 `blockingReferences`. Un decoy `nota.md` (tipo `note`,
+/// SIN la relación) NO debe contar como bloqueo, para que el criterio no sea vacuo (un stub que
+/// contara "cualquier concepto" daría 4). Wire camelCase idéntico al loader
+/// (`crates/lodestar-workspace/tests/workspace.rs`), con `targetTypes`/`cardinality` de `RelationDef`.
+fn bundle_delete_bloqueos() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "index.md",
+        "---\nokf_version: \"0.1\"\n---\n\n# Bundle\n",
+    );
+    write(
+        dir.path(),
+        ".lodestar/schema.yaml",
+        "\
+version: \"1\"
+types:
+  component:
+    name: component
+    description: Un componente del sistema
+  note:
+    name: note
+    description: Una nota libre
+  task:
+    name: task
+    description: Una tarea que depende de un componente
+    relations:
+      depends_on:
+        targetTypes: [component]
+        cardinality: many
+",
+    );
+    // El target a borrar.
+    write(
+        dir.path(),
+        "component.md",
+        "---\ntype: component\ntitle: Componente critico\ndescription: el nucleo\n---\n\n# Componente\n\ncuerpo\n",
+    );
+    // 3 tareas con la relación tipada OBLIGATORIA `depends_on` apuntando al target.
+    for i in 1..=3 {
+        write(
+            dir.path(),
+            &format!("tarea{i}.md"),
+            &format!(
+                "---\ntype: task\ntitle: Tarea {i}\ndescription: depende del componente\ndepends_on:\n  - component.md\n---\n\n# Tarea {i}\n\ncuerpo\n"
+            ),
+        );
+    }
+    // Decoy: una nota SIN relación tipada al target (no debe contar como bloqueo).
+    write(
+        dir.path(),
+        "nota.md",
+        "---\ntype: note\ntitle: Nota\ndescription: irrelevante\n---\n\n# Nota\n\nsin dependencias.\n",
+    );
+    dir
+}
+
+/// E11-H05 · Criterio `impacto_delete_bloqueos` (benchmark §17: "Borrar un concepto referenciado →
+/// rechazo con blockers"):
+/// Dado un concepto con 3 relaciones obligatorias entrantes, Cuando `impact_analyze(kind:delete)`,
+/// Entonces `blockingReferences.len() == 3` y `summary.risk == "high"`.
+#[test]
+fn impacto_delete_bloqueos() {
+    let dir = bundle_delete_bloqueos();
+    let resp = roundtrip(
+        dir.path(),
+        &[
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"impact_analyze","arguments":{"ref":{"path":"component.md"},"proposedOperation":{"kind":"delete"}}}}"#,
+        ],
+        1,
+    );
+    let sc = &resp[0]["result"]["structuredContent"];
+
+    // `blockingReferences` es una lista de 3 blockers, uno por relación tipada entrante que rompería.
+    let blockers = sc["blockingReferences"].as_array().unwrap_or_else(|| {
+        panic!(
+            "impact_analyze(delete) debe devolver structuredContent.blockingReferences (array): {resp:?}"
+        )
+    });
+    assert_eq!(
+        blockers.len(),
+        3,
+        "3 relaciones obligatorias entrantes ⇒ blockingReferences.len() == 3: {resp:?}"
+    );
+
+    // Cada blocker es `{ path, reason }`: `path` string, `reason` no vacío.
+    for b in blockers {
+        let path = b["path"].as_str().unwrap_or_else(|| {
+            panic!("cada blockingReference debe llevar un `path` string: {b:?}")
+        });
+        assert!(
+            path.starts_with("tarea"),
+            "los blockers deben ser las 3 tareas que dependen del componente, apareció: {b:?}"
+        );
+        let reason = b["reason"].as_str().unwrap_or("");
+        assert!(
+            !reason.is_empty(),
+            "cada blockingReference debe llevar un `reason` no vacío: {b:?}"
+        );
+    }
+
+    // No vacuo: el decoy `nota.md` (sin relación tipada al target) NO debe ser un blocker.
+    assert!(
+        !blockers.iter().any(|b| b["path"] == "nota.md"),
+        "un concepto sin relación tipada al target NO debe contar como bloqueo: {resp:?}"
+    );
+
+    // `summary.blockingReferences` (contador) coherente con la lista.
+    assert_eq!(
+        sc["summary"]["blockingReferences"].as_u64(),
+        Some(3),
+        "summary.blockingReferences debe ser 3 (coherente con la lista): {resp:?}"
+    );
+
+    // Nivel de riesgo ALTO fijado como `"high"` (conjunto cerrado {low,medium,high}, wire inglés).
+    assert_eq!(
+        sc["summary"]["risk"], "high",
+        "borrar un concepto con 3 relaciones obligatorias entrantes ⇒ summary.risk == «high»: {resp:?}"
+    );
+}

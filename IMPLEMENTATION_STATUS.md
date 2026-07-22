@@ -281,6 +281,13 @@ superficie de producto; git queda como crate dormido) y `DECISIONES.md §0`. Des
     antes de tocar disco + test de regresión `ref_externa_traversal`. Re-juicio: APROBADA CON
     RESERVAS (drift menor del espejo types.ts, sin impacto en la webview). Nuevo `CheckCode::ExtrefMissing`
     y `WorkspaceError::PermissionDenied`.
-  - ⏳ E11-H05 pendiente (impact_analyze).
+  - ✅ **E11-H05** — Tool `impact_analyze`: directlyAffected (backlinks directos), transitivelyAffected
+    (neighborhood(In) del core; paridad con store::blast_radius verificada), blockingReferences (relaciones
+    tipadas entrantes del schema, para delete; decoy de enlace suelto excluido), risk (high con bloqueos),
+    recommendations. Juez ciego: APROBADA (3/3). Minor: `relation_field_targets` duplica
+    `core::schema::relation_targets` (privada) — promover a público en una limpieza futura.
+  - **E11 — COMPLETA** (5/5). Criterio de salida cumplido: Lodestar responde preguntas estructurales
+    (graph_query: backlinks/outgoing/neighborhood/orphans/dangling/path_between/cycles/components) y
+    anticipa consecuencias (impact_analyze), con relaciones tipadas (REL-*) y paths externos validados.
 - **E12–E14: pendientes** (planificación · publicación recuperable · integración + evaluación
   — `ARCHITECTURE.md §19.8`).

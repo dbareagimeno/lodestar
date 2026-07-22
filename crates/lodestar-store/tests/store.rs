@@ -431,3 +431,99 @@ fn cache_corrupta_se_recrea_sola() {
     let store = Store::open_and_build(dir.path()).unwrap();
     assert!(store.concepts().unwrap().contains(&rp("a.md")));
 }
+
+// --- E11-H05: `impact_analyze` reusa el blast-radius; verificado idéntico al core ------------
+//
+// UBICACIÓN (documentada): el criterio `impacto_paridad_core` de la historia E11-H05 es una
+// paridad **store vs core** — el `Store::blast_radius` (CTE recursivo, el bloque que
+// `transitivelyAffected` de `impact_analyze` reusa) debe alcanzar EXACTAMENTE el mismo conjunto de
+// paths que `Bundle::neighborhood(In)` del core (invariante #3: "gana el core"; SQLite solo
+// acelera). No tiene superficie de wire ni depende de la tool MCP, así que vive junto al bloque que
+// verifica (`lodestar-store`), no en `crates/lodestar-mcp/tests/`. El parent autorizó explícitamente
+// esta ubicación ("puede vivir en crates/lodestar-store/tests/ … elige dónde encaja; documenta").
+//
+// NOTA SOBRE EL COLOR (honestidad de fase): este test es **VERDE desde ya**, no rojo. Verifica un
+// invariante que YA se sostiene porque `Store::blast_radius` y `Bundle::neighborhood` YA existen
+// (E11-H05 los REUSA, no los crea). Su valor es de guarda de regresión: sella que el bloque que
+// `impact_analyze` reusa es paridad-exacta con el core antes de construir la tool encima. El ROJO de
+// la historia lo aportan los dos criterios de comportamiento (`impacto_move_30`,
+// `impacto_delete_bloqueos`) en `crates/lodestar-mcp/tests/mcp.rs`, que sí necesitan la tool/servicio
+// inexistentes. Es una elección deliberada frente a duplicar el nombre en MCP con un rojo artificial:
+// aquí la aserción es real y no vacua (topología no trivial, ver abajo), no un placeholder.
+//
+// NO-VACUIDAD: usa un grafo NO lineal (diamante A→{B,C}→D, más una rama larga D→E→F y un nodo
+// DESCONECTADO `z.md`) para que la igualdad de conjuntos sea informativa: el blast-radius(In) de F
+// debe reunir a {F,E,D,B,C,A} y EXCLUIR a `z.md`. Un CTE mal escrito (o un core divergente) rompería
+// en esta topología aunque pasara el caso lineal preexistente (`blast_radius_igual_neighborhood_in`).
+
+#[test]
+fn impacto_paridad_core() {
+    // Diamante + rama + desconectado:
+    //   A ─▶ B ─┐
+    //   A ─▶ C ─┴▶ D ─▶ E ─▶ F        (aristas dirigidas por enlaces de cuerpo)
+    //   z (aislado, sin aristas)
+    // blast-radius(In) de F = {F, E, D, B, C, A}; `z` queda fuera.
+    let mut files = FileMap::new();
+    files.insert(
+        rp("a.md"),
+        "---\ntype: C\ntitle: A\n---\n\n# H\n\n[b](/b.md) y [c](/c.md)\n".into(),
+    );
+    files.insert(
+        rp("b.md"),
+        "---\ntype: C\ntitle: B\n---\n\n# H\n\n[d](/d.md)\n".into(),
+    );
+    files.insert(
+        rp("c.md"),
+        "---\ntype: C\ntitle: C\n---\n\n# H\n\n[d](/d.md)\n".into(),
+    );
+    files.insert(
+        rp("d.md"),
+        "---\ntype: C\ntitle: D\n---\n\n# H\n\n[e](/e.md)\n".into(),
+    );
+    files.insert(
+        rp("e.md"),
+        "---\ntype: C\ntitle: E\n---\n\n# H\n\n[f](/f.md)\n".into(),
+    );
+    files.insert(
+        rp("f.md"),
+        "---\ntype: C\ntitle: F\n---\n\n# H\n\nfin\n".into(),
+    );
+    files.insert(
+        rp("z.md"),
+        "---\ntype: C\ntitle: Z\n---\n\n# H\n\naislado\n".into(),
+    );
+
+    let dir = tempfile::tempdir().unwrap();
+    write_all(dir.path(), &files);
+    let store = Store::open_and_build(dir.path()).unwrap();
+
+    let bundle = Bundle::from_files(files.clone());
+    // Profundidad grande para alcanzar todo el alcance transitivo, no solo el vecindario inmediato.
+    let core_set: BTreeSet<RelPath> = bundle
+        .neighborhood(&rp("f.md"), 10, Direction::In)
+        .nodes
+        .iter()
+        .map(|n| n.id.clone())
+        .collect();
+    let sql_set: BTreeSet<RelPath> = store
+        .blast_radius(&rp("f.md"), 10)
+        .unwrap()
+        .into_iter()
+        .collect();
+
+    assert_eq!(
+        sql_set, core_set,
+        "el blast-radius del store debe ser idéntico a neighborhood(In) del core (gana el core)"
+    );
+    // Sanidad de la topología (no vacuo): el alcance transitivo cubre el diamante y excluye el nodo
+    // desconectado. Si el core cambiara y ambos conjuntos degeneraran juntos, esto lo cazaría.
+    let esperado: BTreeSet<RelPath> = ["f.md", "e.md", "d.md", "b.md", "c.md", "a.md"]
+        .into_iter()
+        .map(rp)
+        .collect();
+    assert_eq!(core_set, esperado, "el core debe alcanzar todo el diamante");
+    assert!(
+        !core_set.contains(&rp("z.md")),
+        "el nodo desconectado no debe estar en el blast-radius"
+    );
+}
