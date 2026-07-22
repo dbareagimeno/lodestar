@@ -259,5 +259,12 @@ superficie de producto; git queda como crate dormido) y `DECISIONES.md §0`. Des
     la base (workspace_status/knowledge_search/knowledge_get/schema_inspect/knowledge_check) sin
     tocar el filesystem. **Pendiente al cierre de E13**: limpieza final de mcp.yml → 10 tools objetivo
     (retirar query/conformance_check/find_*/neighborhood/create/update/generate según reemplazos).
-- **E11–E14: pendientes** (grafo e impacto · planificación · publicación recuperable ·
-  integración software + evaluación — `ARCHITECTURE.md §19.8`).
+- **E11 — EN CURSO** (grafo e impacto):
+  - ✅ **E11-H01** — Tool `graph_query` (consolida backlinks/outgoing/neighborhood/orphans/dangling):
+    reexpone `Bundle::neighborhood`/`backlinks` y `Analysis::orphans`/`dangling` (invariante #3, paridad
+    literal); truncación + cursor; outputSchema; `mcp.yml` actualizado (las 4 tools viejas se retiran
+    en la limpieza final de E13). Juez ciego: APROBADA CON RESERVAS (4/4). **A resolver en E11-H02**:
+    promover `core::graph::node_for` a público y quitar la duplicación `graph_node_for` en app.
+  - ⏳ E11-H02–H05 pendientes.
+- **E12–E14: pendientes** (planificación · publicación recuperable · integración + evaluación
+  — `ARCHITECTURE.md §19.8`).

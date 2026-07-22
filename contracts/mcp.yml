@@ -29,6 +29,10 @@
 # ver §15 «Migración» al final de este fichero. Hoy (tras E10) las 10 tools heredadas + las 5
 # nuevas coexisten: 15 tools activas.
 #
+# E11-H01: AÑADE `graph_query` (consolida `find_backlinks`/`find_orphans`/`find_dangling`/
+# `neighborhood` en una sola tool con `operation`), sin retirar las 4 viejas todavía — misma
+# coexistencia deliberada que E10 (ver §15 «Migración»). Hoy (tras E11-H01) 16 tools activas.
+#
 # E10-H13 (decisión D6b, `docs/REFACTOR.md §13`, `DECISIONES.md §3`): las 5 tools nuevas declaran
 # `outputSchema` (JSON Schema derivado con `schemars::schema_for!` desde el tipo de respuesta real
 # de `lodestar-app`, vía los helpers de `lodestar_app::schemas::*`). Las 10 tools heredadas NO
@@ -236,24 +240,55 @@ tools:
       lleva un `id` estable dentro de una revisión (`diag:blake3:<hex>`, determinista, sin
       timestamps/orden/caché). Reemplaza semánticamente a `conformance_check` (ver §15).
 
+  # -------------------------------------------------------------------------
+  # Tool nueva de E11-H01 (consolidación del grafo, §19.6). Declara `outputSchema`
+  # (mismo patrón D6b que las 5 tools de E10).
+  # -------------------------------------------------------------------------
+
+  - nombre: graph_query
+    fuente: crates/lodestar-mcp/src/tools.rs:120
+    historia: E11-H01
+    params:
+      - { nombre: operation, tipo: string, requerido: true, valores: ["backlinks", "outgoing", "neighborhood", "orphans", "dangling"], semantica: "backlinks/outgoing/neighborhood requieren «ref»; orphans/dangling no. path_between/cycles/components quedan fuera (E11-H02, amplía este enum)" }
+      - { nombre: ref, tipo: "object (ConceptRef)", requerido: false, semantica: "{ path: RelPath }, concepto centro — requerido en backlinks/outgoing/neighborhood; su ausencia en esas operaciones es CONCEPT_NOT_FOUND" }
+      - { nombre: depth, tipo: integer, default: 1, minimo: 1, semantica: "solo neighborhood" }
+      - { nombre: direction, tipo: "string (Direction)", valores: ["out", "in", "both"], default: "out  # cualquier otro → Out", semantica: "solo neighborhood" }
+      - { nombre: limit, tipo: integer, requerido: false, semantica: "trunca el nº de nodos de la página (orden total estable por id); sin limit o limit>=total → sin truncar" }
+      - { nombre: cursor, tipo: string, requerido: false, semantica: "cursor opaco de paginación (offset hex, mismo esquema que knowledge_search/knowledge_check) devuelto en nextCursor" }
+    retorno: "GraphQueryResult (lodestar_app): { nodes: [GraphNode], edges: [Edge], summary: { nodeCount, edgeCount, truncated }, nextCursor } — json directo, sin envelope. nodes/edges == core::types::GraphNode/Edge, reexpuestos sin capa DTO paralela"
+    output_schema: "sí — schemars::schema_for!(GraphQueryResult), vía lodestar_app::schemas::graph_query_schema()"
+    errores: ["«falta el parámetro «operation»»", "CONCEPT_NOT_FOUND (ref ausente o no resuelve en backlinks/outgoing/neighborhood)", "INVALID_SCHEMA (operation desconocida)", "WorkspaceError"]
+    semantica: >-
+      Consulta el grafo: `backlinks` reusa Bundle::backlinks (nodes = ref + fuentes entrantes,
+      edges = fuente→ref); `outgoing` reusa Bundle::neighborhood(ref,1,Out); `neighborhood`
+      reexpone Bundle::neighborhood(ref,depth,direction) TAL CUAL (paridad exacta con el core,
+      invariante #3); `orphans`/`dangling` proyectan Analysis::orphans/Analysis::dangling.
+      Las edges devueltas se acotan a los nodes que sobreviven a la página. Consolida
+      semánticamente a `find_backlinks`/`find_orphans`/`find_dangling`/`neighborhood` (ver §15);
+      esas 4 tools heredadas se conservan activas — su retirada queda diferida (ver nota abajo).
+
 # ---------------------------------------------------------------------------
 # §15 — Migración de superficie (10 tools heredadas → 10 tools objetivo NUEVAS,
 # `docs/REFACTOR.md §15/§16`, `DECISIONES.md` §"0. Giro a motor headless"). Vive aquí (no solo en
-# REFACTOR.md) porque es la nota que explica por qué este contrato lista 15 tools activas cuando
+# REFACTOR.md) porque es la nota que explica por qué este contrato lista 16 tools activas cuando
 # la superficie objetivo de largo plazo son 10.
 # ---------------------------------------------------------------------------
 migracion:
   nota: >-
     E10 AÑADE 5 tools nuevas sin retirar ninguna vieja — coexistencia deliberada
     (`requirements/epica-10-esquemas-lectura.md` E10-H13: «la retirada de query/conformance_check
-    queda FUERA de H13»). La retirada coherente de la superficie previa requiere piezas que
-    todavía no existen (`graph_query` de E11, las tools de cambio de E12/E13) y se hará en un
-    único rewrite de este fichero al cerrar E13 — no en pasos parciales que dejarían el contrato
-    en un estado intermedio incoherente.
+    queda FUERA de H13»). E11-H01 AÑADE `graph_query` con el mismo criterio: coexiste con las 4
+    tools que consolida (`find_backlinks`/`find_orphans`/`find_dangling`/`neighborhood`), que
+    siguen activas y con sus propios tests (`golden_backlinks_igual_workspace`,
+    `golden_orphans_y_dangling_igual_workspace`, `tools_list_lleva_input_schema`, …). La retirada
+    coherente de la superficie previa requiere piezas que todavía no existen (las tools de cambio
+    de E12/E13, y/o que E11-H02 complete `graph_query` con `path_between`/`cycles`/`components`) y
+    se hará en un único rewrite de este fichero al cerrar E13 — no en pasos parciales que
+    dejarían el contrato en un estado intermedio incoherente.
   reemplazos:
     - { vieja: query, nueva: knowledge_search, estado: "reemplazo ya existe (E10-H09); retirada de «query» diferida al cierre de E13" }
     - { vieja: conformance_check, nueva: knowledge_check, estado: "reemplazo ya existe (E10-H12); retirada de «conformance_check» diferida al cierre de E13" }
-    - { viejas: [find_backlinks, find_orphans, find_dangling, neighborhood], nueva: graph_query, estado: "pendiente — E11 (`docs/REFACTOR.md §9.5`)" }
+    - { viejas: [find_backlinks, find_orphans, find_dangling, neighborhood], nueva: graph_query, estado: "reemplazo ya existe (E11-H01); retirada de las 4 tools viejas diferida a la limpieza final al cerrar E13, o cuando E11-H02 complete graph_query (path_between/cycles/components) — lo que llegue primero" }
     - { viejas: [create_concept, update_frontmatter], nuevas: [change_plan, change_apply], estado: "pendiente — E12/E13 (`docs/REFACTOR.md §11`)" }
     - { viejas: [generate_index, generate_tag_indexes], nueva: "CLI + auto-regen dentro de change_apply", estado: "pendiente — E13 (`docs/REFACTOR.md §15` fila generate_*, decisión D6a)" }
   superficie_objetivo: >-

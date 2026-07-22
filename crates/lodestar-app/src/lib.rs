@@ -18,8 +18,8 @@ use serde::{Deserialize, Serialize};
 use lodestar_core::model;
 use lodestar_core::schema::{validate_schema, DocType};
 use lodestar_core::types::{
-    workspace_revision, Analysis, Backlinks, Check, ConceptRef, ConceptRevision, Direction,
-    ErrorCode, Frontmatter, RelPath, Severity, WorkspaceRevision,
+    workspace_revision, Analysis, Backlinks, Check, ConceptRef, ConceptRevision, Direction, Edge,
+    ErrorCode, Frontmatter, GraphNode, RelPath, Severity, WorkspaceRevision,
 };
 use lodestar_core::{Bundle, CoreError};
 use lodestar_workspace::{Workspace, WorkspaceConfig, WorkspaceError, WorkspaceSchema};
@@ -799,6 +799,152 @@ impl App {
             }
         }
     }
+
+    /// Consulta el grafo, consolidando en una sola tool lo que hoy son 4 tools separadas
+    /// (`find_backlinks`/`neighborhood`/`find_orphans`/`find_dangling`, E11-H01,
+    /// `ARCHITECTURE.md §19.6`, `REFACTOR §9.5/§15`).
+    ///
+    /// `operation` ∈ `"backlinks"`/`"outgoing"`/`"neighborhood"`/`"orphans"`/`"dangling"`:
+    /// - `backlinks`/`outgoing`/`neighborhood` requieren `r` (resuelto con [`App::resolve_ref`]);
+    ///   su ausencia es `Err(ErrorCode::ConceptNotFound)` — no hay un código de "falta parámetro"
+    ///   dedicado en el catálogo de 16 códigos estables, y es el mismo error que produciría un
+    ///   `ref` que no resuelve, así que reusarlo aquí no inventa semántica nueva.
+    /// - `backlinks` reusa [`Bundle::backlinks`] (invariante #3, "una sola verdad computada"):
+    ///   `nodes` = el propio concepto + sus fuentes entrantes (`inbound`); `edges` = fuente→ref.
+    /// - `outgoing` reusa [`Bundle::neighborhood`] con `Direction::Out` a profundidad 1: mismo
+    ///   filtrado de reservados/dangling que `graph_model`/`neighborhood` (invariante #3), así que
+    ///   no reimplementa ese criterio en esta capa.
+    /// - `neighborhood` reexpone [`Bundle::neighborhood`]`(ref, depth, direction)` **tal cual**
+    ///   (paridad exacta con el core — el criterio `graph_neighborhood_paridad` lo compara
+    ///   directamente contra la salida del core). `depth` por defecto 1; `direction` por defecto
+    ///   `"out"` (cualquier valor no reconocido cae también a `Out`, mismo criterio que la tool
+    ///   heredada `neighborhood`).
+    /// - `orphans`/`dangling` no requieren `r`: se computan de [`Analysis::orphans`]/
+    ///   [`Analysis::dangling`] directamente. `orphans` no tiene `edges` (son nodos sin entrantes,
+    ///   no hay arista que mostrar); `dangling` empareja cada target colgante con las aristas
+    ///   `origen→target` que lo referencian (recorriendo `Analysis::out`).
+    ///
+    /// **Paginación**: orden total y estable de `nodes` por `id` (mismo criterio que
+    /// `knowledge_search`/`knowledge_check`); `limit` trunca esa página con un cursor-offset opaco
+    /// (mismo esquema hex, autosuficiente entre procesos). Sin `limit`, o con `limit` mayor o igual
+    /// al total, no hay truncamiento y `nextCursor` es `None`. Las `edges` devueltas se acotan a
+    /// los `nodes` que sobreviven a la página (origen y destino ambos presentes), así el subgrafo
+    /// que se sirve es siempre coherente consigo mismo — nunca una arista "colgando" de un nodo que
+    /// la paginación dejó fuera.
+    pub fn graph_query(
+        &self,
+        operation: &str,
+        r: Option<&ConceptRef>,
+        depth: Option<u32>,
+        direction: Option<&str>,
+        limit: Option<usize>,
+        cursor: Option<&str>,
+    ) -> Result<GraphQueryResult, ErrorCode> {
+        let bundle = self
+            .workspace
+            .bundle()
+            .map_err(|e| workspace_error_code(&e))?;
+
+        let (mut nodes, mut edges): (Vec<GraphNode>, Vec<Edge>) = match operation {
+            "backlinks" => {
+                let path = self.resolve_ref(r.ok_or(ErrorCode::ConceptNotFound)?)?;
+                let bl = bundle.backlinks(&path);
+                let mut ids: BTreeSet<RelPath> = BTreeSet::new();
+                ids.insert(path.clone());
+                for lr in &bl.inbound {
+                    ids.insert(lr.path.clone());
+                }
+                let nodes = ids.iter().map(|id| graph_node_for(&bundle, id)).collect();
+                let edges = bl
+                    .inbound
+                    .iter()
+                    .map(|lr| Edge {
+                        source: lr.path.clone(),
+                        target: path.clone(),
+                        dangling: false,
+                    })
+                    .collect();
+                (nodes, edges)
+            }
+            "outgoing" => {
+                let path = self.resolve_ref(r.ok_or(ErrorCode::ConceptNotFound)?)?;
+                let nb = bundle.neighborhood(&path, 1, Direction::Out);
+                (nb.nodes, nb.edges)
+            }
+            "neighborhood" => {
+                let path = self.resolve_ref(r.ok_or(ErrorCode::ConceptNotFound)?)?;
+                let dir = match direction {
+                    Some("in") => Direction::In,
+                    Some("both") => Direction::Both,
+                    _ => Direction::Out,
+                };
+                let nb = bundle.neighborhood(&path, depth.unwrap_or(1), dir);
+                (nb.nodes, nb.edges)
+            }
+            "orphans" => {
+                let a = bundle.analyze();
+                let nodes = a
+                    .orphans
+                    .iter()
+                    .map(|id| graph_node_for(&bundle, id))
+                    .collect();
+                (nodes, Vec::new())
+            }
+            "dangling" => {
+                let a = bundle.analyze();
+                let dangling_set: BTreeSet<&RelPath> = a.dangling.iter().collect();
+                let mut edges: Vec<Edge> = Vec::new();
+                for src in &a.concepts {
+                    for t in a.out.get(src).cloned().unwrap_or_default() {
+                        if dangling_set.contains(&t) {
+                            edges.push(Edge {
+                                source: src.clone(),
+                                target: t.clone(),
+                                dangling: true,
+                            });
+                        }
+                    }
+                }
+                let nodes = a
+                    .dangling
+                    .iter()
+                    .map(|id| graph_node_for(&bundle, id))
+                    .collect();
+                (nodes, edges)
+            }
+            // Ninguna historia ejerce todavía una `operation` fuera de las 5 anteriores
+            // (`path_between`/`cycles`/`components` son E11-H02); mismo criterio que
+            // `schema_inspect` para un `mode` no reconocido — no hay un código de "argumento
+            // inválido" dedicado en el catálogo de 16.
+            _ => return Err(ErrorCode::InvalidSchema),
+        };
+
+        // Orden total y estable por `id` — paginación reproducible entre procesos frescos.
+        nodes.sort_by(|a, b| a.id.cmp(&b.id));
+
+        let total = nodes.len();
+        let start = cursor.map(decode_cursor).unwrap_or(0).min(total);
+        let end = match limit {
+            Some(l) => start.saturating_add(l).min(total),
+            None => total,
+        };
+        let truncated = end < total;
+        let next_cursor = truncated.then(|| encode_cursor(end));
+        let page_nodes: Vec<GraphNode> = nodes.get(start..end).unwrap_or(&[]).to_vec();
+        let page_ids: BTreeSet<&RelPath> = page_nodes.iter().map(|n| &n.id).collect();
+        edges.retain(|e| page_ids.contains(&e.source) && page_ids.contains(&e.target));
+
+        Ok(GraphQueryResult {
+            summary: GraphQuerySummary {
+                node_count: page_nodes.len(),
+                edge_count: edges.len(),
+                truncated,
+            },
+            nodes: page_nodes,
+            edges,
+            next_cursor,
+        })
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -895,6 +1041,70 @@ fn diagnostic_id(path: &RelPath, check: &Check) -> String {
     hasher.update(b"\0");
     hasher.update(check.msg.as_bytes());
     format!("diag:blake3:{}", hasher.finalize().to_hex())
+}
+
+// ---------------------------------------------------------------------------
+// `graph_query` — tipos de proyección de servicio (E11-H01, `ARCHITECTURE.md §19.6`,
+// `REFACTOR §9.5`).
+//
+// Proyección de servicio (framing), NO dominio: vive en `lodestar-app`, no en `core::types`. Los
+// `nodes`/`edges` que porta SÍ son dominio puro (`GraphNode`/`Edge` de `core::types`), reexpuestos
+// tal cual — esta capa nunca redefine su forma. Wire en camelCase.
+// ---------------------------------------------------------------------------
+
+/// Respuesta de `graph_query` (`ARCHITECTURE.md §19.6`, `REFACTOR §9.5`). Wire en camelCase
+/// (`nextCursor`).
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct GraphQueryResult {
+    /// Los nodos de la página actual (orden total y estable por `id`).
+    pub nodes: Vec<GraphNode>,
+    /// Las aristas cuyos dos extremos están en `nodes` (nunca "cuelgan" de un nodo paginado fuera).
+    pub edges: Vec<Edge>,
+    /// Recuento y estado de truncamiento de la página devuelta (no del total del grafo).
+    pub summary: GraphQuerySummary,
+    /// Cursor opaco a la siguiente página, o `None` si no quedan más nodos.
+    pub next_cursor: Option<String>,
+}
+
+/// Recuento agregado de un `graph_query`, sobre la página efectivamente devuelta (`nodes`/`edges`
+/// tras paginar). Wire en camelCase.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct GraphQuerySummary {
+    /// `nodes.len()` de la página devuelta.
+    pub node_count: usize,
+    /// `edges.len()` de la página devuelta.
+    pub edge_count: usize,
+    /// `true` si `limit` recortó el total de nodos (hay más páginas vía `nextCursor`).
+    pub truncated: bool,
+}
+
+/// Construye el `GraphNode` de `id`: `ghost` si no hay fichero en disco para ese path, `type`/
+/// `status` del frontmatter cuando sí existe. Mismo criterio que `node_for` del core
+/// (`crates/lodestar-core/src/graph.rs`, privado al crate) — reimplementado aquí porque `App` no
+/// tiene acceso a `Bundle::parsed` (`pub(crate)` del core), pero con la MISMA semántica: la verdad
+/// de qué es un "ghost" y de dónde salen `type`/`status` es siempre "¿hay fichero en el `FileMap`?
+/// ¿qué dice su frontmatter?", nunca una heurística propia de esta capa.
+fn graph_node_for(bundle: &Bundle, id: &RelPath) -> GraphNode {
+    match bundle.files().get(id) {
+        Some(raw) => {
+            let parsed = model::parse_file(id.as_str(), raw);
+            let fm = parsed.fm.unwrap_or_default();
+            GraphNode {
+                id: id.clone(),
+                ghost: false,
+                r#type: fm.r#type,
+                status: fm.status,
+            }
+        }
+        None => GraphNode {
+            id: id.clone(),
+            ghost: true,
+            r#type: None,
+            status: None,
+        },
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1288,7 +1498,8 @@ pub mod schemas {
     use serde_json::Value;
 
     use super::{
-        CheckReport, KnowledgeGetResponse, SchemaInspection, SearchResults, WorkspaceStatus,
+        CheckReport, GraphQueryResult, KnowledgeGetResponse, SchemaInspection, SearchResults,
+        WorkspaceStatus,
     };
 
     /// Deriva el JSON Schema de `T` y lo serializa a `serde_json::Value`. `schemars::schema_for!`
@@ -1324,5 +1535,10 @@ pub mod schemas {
     /// `outputSchema` de `knowledge_check` (== [`CheckReport`]).
     pub fn knowledge_check_schema() -> Value {
         schema_of::<CheckReport>()
+    }
+
+    /// `outputSchema` de `graph_query` (== [`GraphQueryResult`]).
+    pub fn graph_query_schema() -> Value {
+        schema_of::<GraphQueryResult>()
     }
 }

@@ -1508,3 +1508,425 @@ fn tools_declaran_outputschema() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// E11-H01 — Tool `graph_query` (consolida find_backlinks/neighborhood/find_orphans/find_dangling).
+//
+// UBICACIÓN: los 4 criterios se ejercitan **e2e por la tool MCP** (campo Pruebas de la historia:
+// `crates/lodestar-mcp/tests/`), coherente con E10-H08…H13. Lo que hay que fijar es el contrato de
+// **wire** (nombres del argumento `operation`/`ref`/`depth`/`direction`/`limit`/`cursor`, y la forma
+// del `structuredContent` con `nodes`/`edges`/`summary{nodeCount,edgeCount,truncated}`/`nextCursor`)
+// sin acoplar los tests a los tipos internos que el implementador aún no ha creado
+// (`App::graph_query`, el enum de operación, el tipo del subgrafo, etc.).
+//
+// El criterio de PARIDAD (`graph_neighborhood_paridad`) se comprueba comparando la salida de wire de
+// la tool contra la **verdad del core** (`Bundle::neighborhood`, invariante #3): se abre el MISMO
+// bundle en proceso con `App::open` y se computa `neighborhood(path, 2, Both)`; los `nodes`/`edges`
+// del wire deben coincidir (como conjuntos) con los del core. Esto ancla la tool a la lógica pura del
+// core en vez de a una reimplementación paralela. Se hace de forma SECUENCIAL (el proceso hijo del
+// `roundtrip` ya terminó — `child.wait()` — antes de abrir el `App`, así no compiten por
+// `.lodestar/index.db`).
+//
+// FASE ROJA: la tool `graph_query` NO está en `tools::list()` todavía, así que `tools/call
+// {name:"graph_query"}` devuelve el error de protocolo `-32602` (tool desconocida) y `result` es
+// `null` → los helpers que leen `result.structuredContent.nodes`/`edges`/`summary` fallan por
+// AUSENCIA de la tool/servicio (no por un valor erróneo). Ese es el rojo correcto: la tool +
+// `App::graph_query` no existen.
+//
+// WIRE DE ENTRADA asumido (el implementador puede refinar los tipos internos, no el wire):
+//   arguments: {
+//     operation: "backlinks" | "outgoing" | "neighborhood" | "orphans" | "dangling",
+//     ref?:       { path: "<RelPath>" },       // ConceptRef; obligatorio en backlinks/outgoing/neighborhood
+//     depth?:     <n>,                          // solo neighborhood (por defecto 1)
+//     direction?: "out" | "in" | "both",       // solo neighborhood (por defecto "out")
+//     limit?:     <n>,                          // trunca el nº de nodos devueltos
+//     cursor?:    string                        // cursor opaco de paginación
+//   }
+//
+// WIRE DE SALIDA asumido (`structuredContent`, `ARCHITECTURE.md §19.6`, `REFACTOR §9.5`):
+//   {
+//     nodes: [ { id, ghost, type, status } ],     // GraphNode (core::types)
+//     edges: [ { source, target, dangling } ],    // Edge (core::types)
+//     summary: { nodeCount, edgeCount, truncated },
+//     nextCursor: string | null
+//   }
+//
+// FIRMA DE SERVICIO ASUMIDA (el implementador la crea con su propia elección de tipos internos):
+//   App::graph_query(operation, ref?, depth?, direction?, limit?, cursor?)
+//       -> Result<{ nodes, edges, summary{nodeCount,edgeCount,truncated}, nextCursor }, _>
+//   Reusa `Bundle::backlinks`/`Bundle::neighborhood` y `Analysis::orphans`/`dangling` (verdad del
+//   core, invariante #3).
+// ---------------------------------------------------------------------------
+
+/// Extrae `structuredContent.nodes` de una respuesta `graph_query`. En fase ROJA (tool ausente) ese
+/// campo es nulo → panica con un mensaje que documenta el porqué del rojo, no un fallo espurio.
+fn graph_nodes(resp: &serde_json::Value) -> Vec<serde_json::Value> {
+    resp["result"]["structuredContent"]["nodes"]
+        .as_array()
+        .unwrap_or_else(|| {
+            panic!("graph_query debe devolver structuredContent.nodes (array): {resp:?}")
+        })
+        .clone()
+}
+
+/// Extrae `structuredContent.edges` de una respuesta `graph_query` (misma nota de ROJO que arriba).
+fn graph_edges(resp: &serde_json::Value) -> Vec<serde_json::Value> {
+    resp["result"]["structuredContent"]["edges"]
+        .as_array()
+        .unwrap_or_else(|| {
+            panic!("graph_query debe devolver structuredContent.edges (array): {resp:?}")
+        })
+        .clone()
+}
+
+/// Conjunto de `id` (string) de una lista de nodos de grafo (`GraphNode.id` == RelPath serializado).
+fn graph_node_ids(nodes: &[serde_json::Value]) -> std::collections::BTreeSet<String> {
+    nodes
+        .iter()
+        .map(|n| {
+            n["id"]
+                .as_str()
+                .unwrap_or_else(|| panic!("cada nodo de graph_query lleva un `id` string: {n:?}"))
+                .to_string()
+        })
+        .collect()
+}
+
+/// Canonicaliza una lista de objetos JSON a un conjunto de strings (para comparar `edges`/`nodes`
+/// como conjuntos, sin depender del orden). Como ambos lados provienen de serializar el mismo tipo
+/// del core, el orden de claves es idéntico y la comparación textual es fiel.
+fn como_conjunto(vals: &[serde_json::Value]) -> std::collections::BTreeSet<String> {
+    vals.iter().map(|v| v.to_string()).collect()
+}
+
+/// E11-H01 · Criterio `graph_backlinks`:
+/// Dado un concepto (`objetivo.md`) con **3 backlinks**, Cuando se llama
+/// `graph_query(operation:backlinks, ref:{path})`, Entonces los 3 aparecen en `nodes`/`edges`.
+///
+/// Bundle: `a.md`/`b.md`/`c.md` enlazan a `objetivo.md`; `d.md` es un decoy que enlaza a OTRO
+/// concepto (`a.md`), no a `objetivo.md`, para que el criterio no sea vacuo (un stub que devolviera
+/// todos los conceptos incluiría a `d` como fuente y fallaría). `index.md` NO lista `objetivo.md`
+/// (evita que `index_refs` añada una arista desde un fichero reservado).
+#[test]
+fn graph_backlinks() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "index.md",
+        "---\nokf_version: \"0.1\"\n---\n\n# Bundle\n\n* [A](a.md)\n* [B](b.md)\n* [C](c.md)\n* [D](d.md)\n",
+    );
+    write(
+        dir.path(),
+        "objetivo.md",
+        "---\ntype: concept\ntitle: Objetivo\ndescription: recibe 3 backlinks\n---\n\n# Objetivo\n\ncuerpo.\n",
+    );
+    for slug in ["a", "b", "c"] {
+        write(
+            dir.path(),
+            &format!("{slug}.md"),
+            &format!(
+                "---\ntype: concept\ntitle: {slug}\ndescription: enlaza al objetivo\n---\n\n# {slug}\n\n[Objetivo](objetivo.md)\n"
+            ),
+        );
+    }
+    // Decoy: enlaza a `a.md`, NUNCA a `objetivo.md`.
+    write(
+        dir.path(),
+        "d.md",
+        "---\ntype: concept\ntitle: D\ndescription: no enlaza al objetivo\n---\n\n# D\n\n[A](a.md)\n",
+    );
+
+    let resp = roundtrip(
+        dir.path(),
+        &[
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"graph_query","arguments":{"operation":"backlinks","ref":{"path":"objetivo.md"}}}}"#,
+        ],
+        1,
+    );
+
+    let nodes = graph_nodes(&resp[0]);
+    let edges = graph_edges(&resp[0]);
+    let ids = graph_node_ids(&nodes);
+
+    // Las 3 fuentes aparecen como nodos.
+    for src in ["a.md", "b.md", "c.md"] {
+        assert!(
+            ids.contains(src),
+            "el backlink «{src}» debe aparecer en nodes de graph_query(backlinks): {resp:?}"
+        );
+    }
+
+    // Las aristas de backlink (target == objetivo.md) son EXACTAMENTE {a,b,c} → objetivo (3).
+    let fuentes_hacia_objetivo: std::collections::BTreeSet<String> = edges
+        .iter()
+        .filter(|e| e["target"] == "objetivo.md")
+        .map(|e| {
+            e["source"]
+                .as_str()
+                .unwrap_or_else(|| panic!("cada arista lleva `source` string: {e:?}"))
+                .to_string()
+        })
+        .collect();
+    assert_eq!(
+        fuentes_hacia_objetivo,
+        ["a.md", "b.md", "c.md"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect::<std::collections::BTreeSet<String>>(),
+        "los backlinks de «objetivo.md» deben ser exactamente {{a,b,c}} → objetivo: {resp:?}"
+    );
+
+    // No vacuo: el decoy `d.md` no enlaza al objetivo, así que NO es una fuente de backlink.
+    assert!(
+        !fuentes_hacia_objetivo.contains("d.md"),
+        "el decoy «d.md» no enlaza a objetivo y no debe ser un backlink: {resp:?}"
+    );
+
+    // El `summary` es coherente con las listas devueltas.
+    let summary = &resp[0]["result"]["structuredContent"]["summary"];
+    assert_eq!(
+        summary["nodeCount"].as_u64(),
+        Some(nodes.len() as u64),
+        "summary.nodeCount debe casar con nodes.len(): {resp:?}"
+    );
+    assert_eq!(
+        summary["edgeCount"].as_u64(),
+        Some(edges.len() as u64),
+        "summary.edgeCount debe casar con edges.len(): {resp:?}"
+    );
+}
+
+/// Bundle con un vecindario dirigido no trivial alrededor de `centro.md`, con aristas de entrada y de
+/// salida a distancia 1 y 2, más un `lejano.md` aislado que DEBE quedar fuera de
+/// `neighborhood(centro, 2, Both)`:
+///
+///   abuelo.md ──► raiz.md ──► centro.md ──► vecino.md ──► c.md        lejano.md (aislado)
+///
+/// `neighborhood(centro, 2, Both)` = {centro, vecino, c (out, d2), raiz, abuelo (in, d2)}; `lejano`
+/// a distancia infinita. `index.md` no enlaza a conceptos (evita ruido de aristas reservadas).
+fn bundle_vecindario() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "index.md",
+        "---\nokf_version: \"0.1\"\n---\n\n# Bundle\n",
+    );
+    write(
+        dir.path(),
+        "centro.md",
+        "---\ntype: concept\ntitle: Centro\ndescription: raiz del vecindario\n---\n\n# Centro\n\n[Vecino](vecino.md)\n",
+    );
+    write(
+        dir.path(),
+        "vecino.md",
+        "---\ntype: concept\ntitle: Vecino\ndescription: salida a distancia 1\n---\n\n# Vecino\n\n[C](c.md)\n",
+    );
+    write(
+        dir.path(),
+        "c.md",
+        "---\ntype: concept\ntitle: C\ndescription: salida a distancia 2\n---\n\n# C\n\ncuerpo.\n",
+    );
+    write(
+        dir.path(),
+        "raiz.md",
+        "---\ntype: concept\ntitle: Raiz\ndescription: entrada a distancia 1\n---\n\n# Raiz\n\n[Centro](centro.md)\n",
+    );
+    write(
+        dir.path(),
+        "abuelo.md",
+        "---\ntype: concept\ntitle: Abuelo\ndescription: entrada a distancia 2\n---\n\n# Abuelo\n\n[Raiz](raiz.md)\n",
+    );
+    write(
+        dir.path(),
+        "lejano.md",
+        "---\ntype: concept\ntitle: Lejano\ndescription: desconectado\n---\n\n# Lejano\n\ncuerpo sin enlaces.\n",
+    );
+    dir
+}
+
+/// E11-H01 · Criterio `graph_neighborhood_paridad`:
+/// Dado `operation:neighborhood, depth:2, direction:both`, Cuando se llama, Entonces el subgrafo
+/// (`nodes`/`edges`) casa **exactamente** con `Bundle::neighborhood(path, 2, Both)` del core
+/// (invariante #3: el grafo es una verdad computada del core).
+#[test]
+fn graph_neighborhood_paridad() {
+    use lodestar_core::types::{Direction, RelPath};
+
+    let dir = bundle_vecindario();
+
+    // 1) Salida de wire de la tool.
+    let resp = roundtrip(
+        dir.path(),
+        &[
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"graph_query","arguments":{"operation":"neighborhood","ref":{"path":"centro.md"},"depth":2,"direction":"both"}}}"#,
+        ],
+        1,
+    );
+    let wire_nodes = como_conjunto(&graph_nodes(&resp[0]));
+    let wire_edges = como_conjunto(&graph_edges(&resp[0]));
+
+    // 2) Verdad del core: se abre el MISMO bundle en proceso (el hijo del roundtrip ya terminó) y se
+    //    computa `neighborhood(centro, 2, Both)` con la lógica pura del core.
+    let app = lodestar_app::App::open(dir.path()).expect("el bundle temporal debe abrir");
+    let centro = RelPath::new("centro.md").unwrap();
+    let nb = app
+        .workspace()
+        .neighborhood(&centro, 2, Direction::Both)
+        .expect("el core debe computar el vecindario");
+    let nb_json = serde_json::to_value(&nb).unwrap();
+    let core_nodes = como_conjunto(nb_json["nodes"].as_array().unwrap());
+    let core_edges = como_conjunto(nb_json["edges"].as_array().unwrap());
+
+    // No vacuo: el vecindario es no trivial (varios nodos) y `lejano` NO forma parte de él.
+    assert!(
+        core_nodes.len() >= 4,
+        "el fixture debe producir un vecindario no trivial (>=4 nodos): {nb_json:?}"
+    );
+    let core_ids = graph_node_ids(nb_json["nodes"].as_array().unwrap());
+    assert!(
+        !core_ids.contains("lejano.md"),
+        "el concepto aislado «lejano.md» no debe estar en el vecindario del core: {nb_json:?}"
+    );
+
+    // Paridad: los nodos y aristas del wire coinciden (como conjuntos) con los del core.
+    assert_eq!(
+        wire_nodes, core_nodes,
+        "los `nodes` de graph_query(neighborhood) deben casar con Bundle::neighborhood del core: {resp:?}"
+    );
+    assert_eq!(
+        wire_edges, core_edges,
+        "los `edges` de graph_query(neighborhood) deben casar con Bundle::neighborhood del core: {resp:?}"
+    );
+}
+
+/// E11-H01 · Criterio `graph_orphans`:
+/// Dado un bundle con conceptos huérfanos, Cuando se llama `graph_query(operation:orphans)`,
+/// Entonces lista exactamente esos paths (los conceptos sin enlaces entrantes y ausentes del índice).
+///
+/// Bundle: `uno`/`dos`/`tres` son huérfanos (no listados en index, sin backlinks); `visible.md` SÍ
+/// está en el índice → NO es huérfano. El no-huérfano hace el criterio no vacuo (un stub que
+/// devolviera todos los conceptos incluiría `visible.md` y fallaría).
+#[test]
+fn graph_orphans() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "index.md",
+        "---\nokf_version: \"0.1\"\n---\n\n# Bundle\n\n* [Visible](visible.md)\n",
+    );
+    write(
+        dir.path(),
+        "visible.md",
+        "---\ntype: concept\ntitle: Visible\ndescription: listado en el indice\n---\n\n# Visible\n\ncuerpo.\n",
+    );
+    for slug in ["uno", "dos", "tres"] {
+        write(
+            dir.path(),
+            &format!("{slug}.md"),
+            &format!(
+                "---\ntype: concept\ntitle: {slug}\ndescription: huerfano\n---\n\n# {slug}\n\ncuerpo suelto.\n"
+            ),
+        );
+    }
+
+    let resp = roundtrip(
+        dir.path(),
+        &[
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"graph_query","arguments":{"operation":"orphans"}}}"#,
+        ],
+        1,
+    );
+
+    let ids = graph_node_ids(&graph_nodes(&resp[0]));
+    assert_eq!(
+        ids,
+        ["uno.md", "dos.md", "tres.md"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect::<std::collections::BTreeSet<String>>(),
+        "graph_query(orphans) debe listar exactamente los 3 conceptos huérfanos: {resp:?}"
+    );
+    // No vacuo: el concepto listado en el índice NO es huérfano.
+    assert!(
+        !ids.contains("visible.md"),
+        "«visible.md» está en el índice y no debe aparecer como huérfano: {resp:?}"
+    );
+}
+
+/// E11-H01 · Criterio `graph_truncado`:
+/// Dado un `limit` menor que el nº de nodos, Cuando se llama, Entonces `summary.truncated == true` y
+/// `nextCursor` está presente (no nulo).
+///
+/// Bundle con **10 conceptos huérfanos** (`o00`…`o09`): `graph_query(orphans, limit:5)` trunca. Para
+/// que el criterio NO sea vacuo (un stub que devolviera siempre `truncated:true` lo pasaría) se hace
+/// una segunda llamada con `limit:20 >= 10`: entonces `truncated == false` y `nextCursor == null`.
+#[test]
+fn graph_truncado() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "index.md",
+        "---\nokf_version: \"0.1\"\n---\n\n# Bundle\n",
+    );
+    for i in 0..10 {
+        let slug = format!("o{i:02}");
+        write(
+            dir.path(),
+            &format!("{slug}.md"),
+            &format!(
+                "---\ntype: concept\ntitle: Orphan {i:02}\ndescription: huerfano\n---\n\n# H\n\ncuerpo suelto {i:02}.\n"
+            ),
+        );
+    }
+
+    // Llamada truncada: limit:5 < 10 nodos.
+    let trunc = roundtrip(
+        dir.path(),
+        &[
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"graph_query","arguments":{"operation":"orphans","limit":5}}}"#,
+        ],
+        1,
+    );
+    let sc = &trunc[0]["result"]["structuredContent"];
+    assert_eq!(
+        sc["summary"]["truncated"],
+        serde_json::Value::Bool(true),
+        "con limit:5 < 10 nodos, summary.truncated debe ser true: {trunc:?}"
+    );
+    let cursor = sc["nextCursor"].as_str().unwrap_or_else(|| {
+        panic!("con la salida truncada, `nextCursor` debe ser un string no nulo: {trunc:?}")
+    });
+    assert!(
+        !cursor.is_empty(),
+        "el `nextCursor` de una página truncada no debe ser vacío: {trunc:?}"
+    );
+    let nodes_trunc = graph_nodes(&trunc[0]);
+    assert!(
+        nodes_trunc.len() <= 5,
+        "la página truncada no debe exceder el `limit`: {trunc:?}"
+    );
+
+    // No vacuo: con limit:20 >= 10 nodos NO se trunca.
+    let full = roundtrip(
+        dir.path(),
+        &[
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"graph_query","arguments":{"operation":"orphans","limit":20}}}"#,
+        ],
+        1,
+    );
+    let sc_full = &full[0]["result"]["structuredContent"];
+    assert_eq!(
+        sc_full["summary"]["truncated"],
+        serde_json::Value::Bool(false),
+        "con limit:20 >= 10 nodos, summary.truncated debe ser false: {full:?}"
+    );
+    assert!(
+        sc_full["nextCursor"].is_null(),
+        "sin truncar, `nextCursor` debe ser null: {full:?}"
+    );
+    assert_eq!(
+        graph_nodes(&full[0]).len(),
+        10,
+        "sin truncar, deben aparecer los 10 huérfanos: {full:?}"
+    );
+}

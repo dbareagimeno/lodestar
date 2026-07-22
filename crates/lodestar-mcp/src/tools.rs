@@ -117,6 +117,18 @@ pub fn list() -> Value {
              "cursor": { "type": "string", "description": "Cursor opaco de paginación devuelto en «nextCursor»." }
          }, "required": ["scope"], "additionalProperties": false },
          "outputSchema": schemas::knowledge_check_schema()},
+        {"name": "graph_query", "description": "Consulta el grafo: backlinks/outgoing/neighborhood/orphans/dangling en una sola tool (consolida find_backlinks/find_orphans/find_dangling/neighborhood).",
+         "inputSchema": { "type": "object", "properties": {
+             "operation": { "type": "string", "enum": ["backlinks", "outgoing", "neighborhood", "orphans", "dangling"], "description": "Qué subgrafo computar. «backlinks»/«outgoing»/«neighborhood» requieren «ref»; «orphans»/«dangling» no." },
+             "ref": { "type": "object", "description": "ConceptRef: el concepto centro (requerido en backlinks/outgoing/neighborhood).", "properties": {
+                 "path": { "type": "string", "description": "Ruta relativa del concepto (p. ej. «notas/alfa.md»)." }
+             }, "required": ["path"], "additionalProperties": false },
+             "depth": { "type": "integer", "minimum": 1, "default": 1, "description": "Solo «neighborhood»." },
+             "direction": { "type": "string", "enum": ["out", "in", "both"], "default": "out", "description": "Solo «neighborhood»." },
+             "limit": { "type": "integer", "minimum": 1, "description": "Trunca el nº de nodos devueltos (paginación por cursor)." },
+             "cursor": { "type": "string", "description": "Cursor opaco de paginación devuelto en «nextCursor»." }
+         }, "required": ["operation"], "additionalProperties": false },
+         "outputSchema": schemas::graph_query_schema()},
     ])
 }
 
@@ -290,6 +302,32 @@ pub fn call(app: &App, profile: Profile, name: &str, params: &Value) -> ToolResu
                 .knowledge_check(&scope, min_severity, include_fixes, limit, cursor)
                 .map_err(|e| e.as_str().to_string())?;
             to_json(&report)
+        }
+        "graph_query" => {
+            let operation = params
+                .get("operation")
+                .and_then(Value::as_str)
+                .ok_or("falta el parámetro «operation»")?;
+            let r: Option<ConceptRef> = match params.get("ref") {
+                Some(v) => Some(serde_json::from_value(v.clone()).map_err(|e| e.to_string())?),
+                None => None,
+            };
+            let depth = params
+                .get("depth")
+                .and_then(Value::as_u64)
+                .map(|n| n as u32);
+            let direction = params.get("direction").and_then(Value::as_str);
+            let limit = params
+                .get("limit")
+                .and_then(Value::as_u64)
+                .map(|n| n as usize);
+            let cursor = params.get("cursor").and_then(Value::as_str);
+            // Mismo mapeo de error a wire que `knowledge_get`/`schema_inspect`/`knowledge_check`
+            // (E10-H02): el código estable `ErrorCode::as_str()`, nunca el `Debug` de la variante.
+            let result = app
+                .graph_query(operation, r.as_ref(), depth, direction, limit, cursor)
+                .map_err(|e| e.as_str().to_string())?;
+            to_json(&result)
         }
         other => Err(format!("tool desconocida: {other}")),
     }
