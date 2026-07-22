@@ -2172,3 +2172,355 @@ fn impacto_delete_bloqueos() {
         "borrar un concepto con 3 relaciones obligatorias entrantes ⇒ summary.risk == «high»: {resp:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// E12-H08 — Tool `change_plan` (orquesta: normaliza + simula + valida, SIN escribir).
+//
+// UBICACIÓN: los 4 criterios se ejercitan **e2e por la tool MCP** (campo Pruebas de la historia:
+// `crates/lodestar-mcp/tests/`), coherente con E10-H08…E11-H05. Lo que hay que fijar es el contrato
+// de **wire** (forma de `arguments` con `expectedWorkspaceRevision?`/`operations`/`policy`, forma
+// del `structuredContent` con `changeSetId`/`baseWorkspaceRevision`/`planHash`/`normalizedOperations`
+// /…, y cómo aflora `REVISION_CONFLICT`) sin acoplar los tests a los tipos internos que el
+// implementador aún no ha creado (`App::change_plan`, el enum de op crudas, `ChangeSet`, `PlanHash`,
+// `PlanPolicy`, etc.).
+//
+// FASE ROJA: la tool `change_plan` NO está en `tools::list()` todavía, así que
+// `tools/call {name:"change_plan"}` devuelve el error de protocolo `-32602` (tool desconocida) y
+// `result` es `null` → los helpers que leen `result.structuredContent.*` fallan por AUSENCIA de la
+// tool/servicio (no por un valor erróneo). Ese es el rojo correcto: la tool + `App::change_plan` no
+// existen. (`plan_no_escribe` se blinda contra la vacuidad: exige PRIMERO que el plan se produjo —
+// así el rojo lo dispara la tool ausente, no la ausencia de escritura, que un `-32602` cumpliría de
+// balde.)
+//
+// WIRE DE ENTRADA asumido (el implementador puede refinar los tipos internos, no el wire):
+//   arguments: {
+//     expectedWorkspaceRevision?: "blake3:…",   // omitido = se toma la revisión actual del workspace
+//     operations: [                              // ops CRUDAS, discriminadas por «op»
+//       { "op": "create",            "path": "<RelPath>", "type": "<DocType>",
+//                                    "title"?: "…", "body"?: "…" },
+//       { "op": "patch_frontmatter", "ref": { "path": "<RelPath>" },
+//                                    "patch": { … },               // merge-patch RFC 7386 (null borra)
+//                                    "expectedRevision"?: "blake3:…" },  // control optimista por op
+//       …                                        // (las 11 ops del REFACTOR §11.1)
+//     ],
+//     policy: { "requireConformantResult"?: bool, "allowWarnings"?: bool }
+//   }
+//   `expectedRevision` es OPCIONAL por op y es el `ConceptRevision` (E10-H03, «blake3:…») que el
+//   agente cree vigente; si el concepto cambió (revisión actual distinta) → `REVISION_CONFLICT`.
+//
+// WIRE DE SALIDA asumido (`structuredContent`, `REFACTOR §11.1`, `ARCHITECTURE.md §19.5`):
+//   {
+//     changeSetId, baseWorkspaceRevision, planHash, canApply, expiresAt,
+//     normalizedOperations: [ … ],   // una `NormalizedOperation` resuelta por cada op cruda
+//     risk, semanticDiff, impact, diagnosticsBefore, diagnosticsAfter
+//   }
+//   `planHash` es DETERMINISTA: mismo `operations` + misma `baseWorkspaceRevision` ⇒ mismo `planHash`.
+//   `change_plan` NO escribe: toda la simulación es sobre un `Bundle` en memoria (invariante #1, la
+//   escritura real es E13).
+//
+// FIRMA DE SERVICIO ASUMIDA (el implementador la crea con su propia elección de tipos internos):
+//   App::change_plan(expected_workspace_revision: Option<WorkspaceRevision>, operations, policy)
+//       -> Result<ChangeSet-o-PlanResult, ErrorCode>   // con `REVISION_CONFLICT` en discrepancia
+// ---------------------------------------------------------------------------
+
+/// Bundle con un cluster de **4 conceptos relacionados** conformes (`a`/`b`/`c`/`d`, enlazados en
+/// anillo y listados en el índice) sobre el que las pruebas montan una propuesta de 5 operaciones
+/// (1 `create` del 5º concepto + 4 `patch_frontmatter` sobre los existentes). Todos llevan
+/// `type`/`title`/`description` → el bundle base es conforme, así que un plan sin errores es posible.
+fn bundle_cinco_relacionados() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "index.md",
+        "---\nokf_version: \"0.1\"\n---\n\n# Bundle\n\n* [A](a.md)\n* [B](b.md)\n* [C](c.md)\n* [D](d.md)\n",
+    );
+    // Anillo a→b→c→d→a: un cluster relacionado (los enlaces de cuerpo los conectan).
+    for (slug, next) in [("a", "b"), ("b", "c"), ("c", "d"), ("d", "a")] {
+        let up = slug.to_uppercase();
+        write(
+            dir.path(),
+            &format!("{slug}.md"),
+            &format!(
+                "---\ntype: Concept\ntitle: {up}\ndescription: nodo {slug} del cluster\n---\n\n# {up}\n\n[Siguiente]({next}.md)\n"
+            ),
+        );
+    }
+    dir
+}
+
+/// Construye la línea `tools/call change_plan` con `operations`/`policy` y un
+/// `expectedWorkspaceRevision` opcional. Documenta el wire de entrada que fija esta historia.
+fn change_plan_line(
+    expected_ws_rev: Option<&str>,
+    operations: serde_json::Value,
+    policy: serde_json::Value,
+) -> String {
+    let mut args = serde_json::json!({ "operations": operations, "policy": policy });
+    if let Some(r) = expected_ws_rev {
+        args["expectedWorkspaceRevision"] = serde_json::Value::String(r.to_string());
+    }
+    serde_json::json!({
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": { "name": "change_plan", "arguments": args }
+    })
+    .to_string()
+}
+
+/// Devuelve el `structuredContent` de una respuesta `change_plan`, tras verificar que es un objeto.
+/// En fase ROJA (tool ausente) `result` es `null` → panica con un mensaje que documenta el porqué
+/// del rojo (la tool/servicio ausente), no un fallo espurio.
+fn plan_sc(resp: &serde_json::Value) -> &serde_json::Value {
+    let sc = &resp["result"]["structuredContent"];
+    assert!(
+        sc.is_object(),
+        "change_plan debe devolver structuredContent (objeto); tool/servicio ausente en fase ROJA: {resp:?}"
+    );
+    sc
+}
+
+/// Snapshot del conocimiento en disco: `RelPath` → contenido de cada `.md` (recursivo). Excluye
+/// `.lodestar/` (cache/runtime, no conocimiento canónico — invariante #1/#5). Sirve para aseverar
+/// que `change_plan` NO escribió: el mapa antes y después debe ser idéntico.
+fn snapshot_md(root: &std::path::Path) -> std::collections::BTreeMap<String, String> {
+    fn walk(
+        base: &std::path::Path,
+        dir: &std::path::Path,
+        map: &mut std::collections::BTreeMap<String, String>,
+    ) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                // `.lodestar/` es cache/runtime (index.db, planes): no es conocimiento canónico.
+                if path.file_name().and_then(|n| n.to_str()) == Some(".lodestar") {
+                    continue;
+                }
+                walk(base, &path, map);
+            } else if path.extension().and_then(|e| e.to_str()) == Some("md") {
+                let rel = path
+                    .strip_prefix(base)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                map.insert(rel, std::fs::read_to_string(&path).unwrap());
+            }
+        }
+    }
+    let mut map = std::collections::BTreeMap::new();
+    walk(root, root, &mut map);
+    map
+}
+
+/// Las 5 operaciones de la propuesta base: 1 `create` del 5º concepto + 4 `patch_frontmatter` sobre
+/// el cluster `a`/`b`/`c`/`d`. Los `patch` son inocuos (actualizan `description`) para que el plan
+/// pueda ser conforme; lo que fija el criterio es que salgan **5** `normalizedOperations`.
+fn cinco_operaciones() -> serde_json::Value {
+    serde_json::json!([
+        { "op": "create", "path": "nuevo.md", "type": "Concept", "title": "Nuevo",
+          "body": "# Nuevo\n\ncuerpo del quinto concepto\n" },
+        { "op": "patch_frontmatter", "ref": { "path": "a.md" }, "patch": { "description": "a actualizada por el plan" } },
+        { "op": "patch_frontmatter", "ref": { "path": "b.md" }, "patch": { "description": "b actualizada por el plan" } },
+        { "op": "patch_frontmatter", "ref": { "path": "c.md" }, "patch": { "description": "c actualizada por el plan" } },
+        { "op": "patch_frontmatter", "ref": { "path": "d.md" }, "patch": { "description": "d actualizada por el plan" } },
+    ])
+}
+
+/// Política permisiva (no exige resultado conforme, admite warnings): así el criterio de
+/// `plan_un_solo_changeset`/`plan_hash_determinista` no depende del veredicto de conformidad.
+fn policy_permisiva() -> serde_json::Value {
+    serde_json::json!({ "requireConformantResult": false, "allowWarnings": true })
+}
+
+/// E12-H08 · Criterio `plan_un_solo_changeset` (benchmark §17: "Cambiar cinco conceptos relacionados
+/// → un único change set"):
+/// Dado una propuesta de 5 operaciones sobre conceptos relacionados, Cuando se planifica, Entonces
+/// se obtiene un **único** `ChangeSet` (un solo `changeSetId`) con `normalizedOperations` de los 5.
+#[test]
+fn plan_un_solo_changeset() {
+    let dir = bundle_cinco_relacionados();
+    let line = change_plan_line(None, cinco_operaciones(), policy_permisiva());
+    let resp = roundtrip(dir.path(), &[line.as_str()], 1);
+    let sc = plan_sc(&resp[0]);
+
+    // Un solo change set: un `changeSetId` presente y no vacío.
+    let id = sc["changeSetId"]
+        .as_str()
+        .unwrap_or_else(|| panic!("change_plan debe devolver un `changeSetId` (string): {resp:?}"));
+    assert!(
+        !id.is_empty(),
+        "el `changeSetId` del plan no debe estar vacío: {resp:?}"
+    );
+
+    // `normalizedOperations` con exactamente 5 entradas (una por op cruda), en un ÚNICO change set.
+    let normalized = sc["normalizedOperations"].as_array().unwrap_or_else(|| {
+        panic!("change_plan debe devolver structuredContent.normalizedOperations (array): {resp:?}")
+    });
+    assert_eq!(
+        normalized.len(),
+        5,
+        "las 5 operaciones propuestas deben producir 5 normalizedOperations en un único change set: {resp:?}"
+    );
+
+    // Es un plan, no un error de ejecución.
+    assert!(
+        resp[0]["result"]["isError"].as_bool() != Some(true),
+        "una propuesta válida de 5 ops no debe dar isError: {resp:?}"
+    );
+}
+
+/// E12-H08 · Criterio `plan_revision_conflict` (benchmark §17: "Modificar un concepto cambiado
+/// externamente → REVISION_CONFLICT"):
+/// Dado el `expectedRevision` de un concepto que luego cambia EN DISCO, Cuando se planifica una op
+/// sobre él con esa revisión vieja, Entonces `REVISION_CONFLICT`.
+#[test]
+fn plan_revision_conflict() {
+    let dir = bundle_cinco_relacionados();
+
+    // 1) Revisión actual de `a.md` (ConceptRevision, «blake3:…»), vía knowledge_get (tool existente).
+    let get = roundtrip(
+        dir.path(),
+        &[
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"knowledge_get","arguments":{"ref":{"path":"a.md"},"include":["revision"]}}}"#,
+        ],
+        1,
+    );
+    let old_rev = get[0]["result"]["structuredContent"]["concept"]["revision"]
+        .as_str()
+        .unwrap_or_else(|| {
+            panic!("knowledge_get debe devolver concept.revision de «a.md»: {get:?}")
+        })
+        .to_string();
+    assert!(
+        old_rev.starts_with("blake3:"),
+        "la revisión de partida debe tener formato «blake3:…»: {old_rev}"
+    );
+
+    // 2) `a.md` cambia EN DISCO (otro contenido ⇒ otra ConceptRevision): simula un cambio externo.
+    write(
+        dir.path(),
+        "a.md",
+        "---\ntype: Concept\ntitle: A\ndescription: CAMBIADA EXTERNAMENTE fuera del plan\n---\n\n# A\n\notro cuerpo distinto\n",
+    );
+
+    // 3) `change_plan` con una op sobre `a.md` que trae la revisión VIEJA ⇒ discrepancia optimista.
+    let ops = serde_json::json!([
+        { "op": "patch_frontmatter", "ref": { "path": "a.md" },
+          "patch": { "description": "descripción desde el plan" },
+          "expectedRevision": old_rev },
+    ]);
+    let line = change_plan_line(None, ops, policy_permisiva());
+    let resp = roundtrip(dir.path(), &[line.as_str()], 1);
+
+    // Es un error de EJECUCIÓN de la tool (no de protocolo): aflora como isError con el código
+    // estable `REVISION_CONFLICT` visible al agente (ErrorCode wire, E10-H02 / invariante #4).
+    assert_eq!(
+        resp[0]["result"]["isError"], true,
+        "un expectedRevision obsoleto debe dar isError en change_plan: {resp:?}"
+    );
+    assert!(
+        resp[0]["error"].is_null(),
+        "un conflicto de revisión NO debe ser un error de protocolo JSON-RPC: {resp:?}"
+    );
+    let texto = resp[0].to_string();
+    assert!(
+        texto.contains("REVISION_CONFLICT"),
+        "el error debe exponer el código estable «REVISION_CONFLICT»: {resp:?}"
+    );
+}
+
+/// E12-H08 · Criterio `plan_hash_determinista`:
+/// Dado el mismo `operations` y la misma `baseWorkspaceRevision` (mismo bundle sin cambios entre
+/// medias), Cuando se planifica dos veces, Entonces el `planHash` coincide. Para que NO sea vacuo
+/// (un stub con hash constante lo pasaría) se añade una tercera llamada con un input DISTINTO y se
+/// exige que su `planHash` difiera.
+#[test]
+fn plan_hash_determinista() {
+    let dir = bundle_cinco_relacionados();
+    let line = change_plan_line(None, cinco_operaciones(), policy_permisiva());
+
+    // Dos servidores frescos sobre el MISMO bundle (misma baseWorkspaceRevision), mismo input.
+    let a = roundtrip(dir.path(), &[line.as_str()], 1);
+    let b = roundtrip(dir.path(), &[line.as_str()], 1);
+
+    let hash_a = plan_sc(&a[0])["planHash"]
+        .as_str()
+        .unwrap_or_else(|| panic!("change_plan debe devolver un `planHash` (string): {a:?}"))
+        .to_string();
+    let hash_b = plan_sc(&b[0])["planHash"]
+        .as_str()
+        .unwrap_or_else(|| panic!("change_plan debe devolver un `planHash` (string): {b:?}"))
+        .to_string();
+    assert!(
+        !hash_a.is_empty(),
+        "el `planHash` no debe estar vacío: {a:?}"
+    );
+    assert_eq!(
+        hash_a, hash_b,
+        "mismo input + misma baseWorkspaceRevision ⇒ mismo planHash: {a:?} vs {b:?}"
+    );
+
+    // La base sobre la que se computa el plan también coincide (mismo bundle, misma revisión).
+    assert_eq!(
+        plan_sc(&a[0])["baseWorkspaceRevision"],
+        plan_sc(&b[0])["baseWorkspaceRevision"],
+        "sobre el mismo bundle la baseWorkspaceRevision debe coincidir: {a:?} vs {b:?}"
+    );
+
+    // No vacuo: un input DISTINTO (otras ops) debe producir un planHash distinto.
+    let ops_otro = serde_json::json!([
+        { "op": "patch_frontmatter", "ref": { "path": "a.md" },
+          "patch": { "description": "una descripción completamente distinta" } },
+    ]);
+    let line_otro = change_plan_line(None, ops_otro, policy_permisiva());
+    let c = roundtrip(dir.path(), &[line_otro.as_str()], 1);
+    let hash_c = plan_sc(&c[0])["planHash"]
+        .as_str()
+        .unwrap_or_else(|| panic!("change_plan debe devolver un `planHash` (string): {c:?}"))
+        .to_string();
+    assert_ne!(
+        hash_a, hash_c,
+        "un input distinto debe producir un planHash distinto (el hash no puede ser constante): {a:?} vs {c:?}"
+    );
+}
+
+/// E12-H08 · Criterio `plan_no_escribe`:
+/// Dado un `change_plan` (incluida una op `create`), Cuando termina, Entonces el disco NO cambió:
+/// ningún `.md` se modificó y NO se creó el fichero del `create`. La simulación es en memoria
+/// (invariante #1; la escritura real es E13).
+#[test]
+fn plan_no_escribe() {
+    let dir = bundle_cinco_relacionados();
+
+    // Estado del conocimiento en disco ANTES.
+    let antes = snapshot_md(dir.path());
+
+    let line = change_plan_line(None, cinco_operaciones(), policy_permisiva());
+    let resp = roundtrip(dir.path(), &[line.as_str()], 1);
+
+    // No vacuo: primero exige que el plan SE PRODUJO (si no, un `-32602` sin escritura pasaría de
+    // balde). Así el rojo lo dispara la tool ausente, no la (trivial) ausencia de escritura.
+    let sc = plan_sc(&resp[0]);
+    assert!(
+        sc["changeSetId"].as_str().is_some(),
+        "change_plan debe producir un plan (changeSetId) para que el criterio no sea vacuo: {resp:?}"
+    );
+    let normalized = sc["normalizedOperations"].as_array().unwrap_or_else(|| {
+        panic!("change_plan debe devolver normalizedOperations (array): {resp:?}")
+    });
+    assert!(
+        !normalized.is_empty(),
+        "el plan debe incluir la op `create` (entre otras): {resp:?}"
+    );
+
+    // Estado del conocimiento en disco DESPUÉS: idéntico bit a bit.
+    let despues = snapshot_md(dir.path());
+    assert_eq!(
+        antes, despues,
+        "change_plan NO debe escribir: los .md en disco deben quedar idénticos"
+    );
+
+    // La op `create nuevo.md` NO debe materializar el fichero en disco (solo en el bundle en memoria).
+    assert!(
+        !dir.path().join("nuevo.md").exists(),
+        "una op `create` en change_plan NO debe crear el .md en disco: {resp:?}"
+    );
+}

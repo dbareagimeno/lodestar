@@ -6,7 +6,10 @@
 use std::collections::BTreeMap;
 
 use lodestar_app::{schemas, App, CheckScope, Profile, SearchFilters};
-use lodestar_core::types::{ConceptRef, Direction, FrontmatterPatch, RelPath, Severity};
+use lodestar_core::plan::PlanPolicy;
+use lodestar_core::types::{
+    ConceptRef, Direction, FrontmatterPatch, RelPath, Severity, WorkspaceRevision,
+};
 #[cfg(test)]
 use lodestar_workspace::Workspace;
 use serde_json::{json, Value};
@@ -143,6 +146,22 @@ pub fn list() -> Value {
              "depth": { "type": "integer", "minimum": 1, "description": "Profundidad del blast-radius entrante; por defecto cubre todo el alcance transitivo." }
          }, "required": ["ref", "proposedOperation"], "additionalProperties": false },
          "outputSchema": schemas::impact_analyze_schema()},
+        {"name": "change_plan", "description": "Planifica un cambio complejo SIN escribir: normaliza las operaciones propuestas, simula su aplicación en memoria y valida el resultado. Devuelve un único change set (normalizedOperations, semanticDiff, risk, impact, diagnosticsBefore/After) con un planHash determinista. No toca disco (aplicar es change_apply, E13).",
+         "inputSchema": { "type": "object", "properties": {
+             "expectedWorkspaceRevision": { "type": "string", "description": "Control optimista a nivel de workspace («blake3:…»). Si se omite, se toma la revisión actual; si no coincide → REVISION_CONFLICT." },
+             "operations": { "type": "array", "description": "Operaciones propuestas, discriminadas por «op» (create/patch_frontmatter/replace_body/replace_text/edit_section/move/delete/add_relation/remove_relation/transition_status/apply_fix). Cada op puede llevar «expectedRevision» (ConceptRevision «blake3:…») para control optimista por concepto.",
+                 "items": { "type": "object", "properties": {
+                     "op": { "type": "string", "enum": ["create", "patch_frontmatter", "replace_body", "replace_text", "edit_section", "move", "delete", "add_relation", "remove_relation", "transition_status", "apply_fix"] },
+                     "path": { "type": "string" },
+                     "ref": { "type": "object", "properties": { "path": { "type": "string" } } },
+                     "expectedRevision": { "type": "string", "description": "ConceptRevision que el agente cree vigente («blake3:…»); si el concepto cambió → REVISION_CONFLICT." }
+                 }, "required": ["op"] } },
+             "policy": { "type": "object", "description": "Política de aplicación del plan.", "properties": {
+                 "requireConformantResult": { "type": "boolean", "description": "Si true, un resultado no conforme bloquea canApply." },
+                 "allowWarnings": { "type": "boolean", "description": "Si false, cualquier warning bloquea canApply." }
+             } }
+         }, "required": ["operations"], "additionalProperties": false },
+         "outputSchema": schemas::change_plan_schema()},
     ])
 }
 
@@ -376,6 +395,23 @@ pub fn call(app: &App, profile: Profile, name: &str, params: &Value) -> ToolResu
                 .impact_analyze(&r, kind, depth)
                 .map_err(|e| e.as_str().to_string())?;
             to_json(&report)
+        }
+        "change_plan" => {
+            let expected = params
+                .get("expectedWorkspaceRevision")
+                .and_then(Value::as_str)
+                .map(|s| WorkspaceRevision(s.to_string()));
+            let operations = params.get("operations").cloned().unwrap_or(Value::Null);
+            let policy: PlanPolicy = match params.get("policy") {
+                Some(v) => serde_json::from_value(v.clone()).map_err(|e| e.to_string())?,
+                None => PlanPolicy::default(),
+            };
+            // Mismo mapeo de error a wire que las demás tools (E10-H02): el código estable
+            // `ErrorCode::as_str()` (p. ej. «REVISION_CONFLICT»), nunca el `Debug` de la variante.
+            let result = app
+                .change_plan(expected, &operations, policy)
+                .map_err(|e| e.as_str().to_string())?;
+            to_json(&result)
         }
         other => Err(format!("tool desconocida: {other}")),
     }

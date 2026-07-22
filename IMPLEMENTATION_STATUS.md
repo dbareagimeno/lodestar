@@ -321,5 +321,12 @@ superficie de producto; git queda como crate dormido) y `DECISIONES.md §0`. Des
     `normalize_apply_fix`. `validate_relations` emite un `Fix{safe}` en REL-TARGET (fix_id blake3 estable,
     aditivo sin regresión); apply_fix lo re-localiza y materializa (quita la relación rota). Juez ciego:
     APROBADA (3/3).
-  - ⏳ E12-H08 (change_plan) y E12-H09 (persistencia) pendientes.
+  - ✅ **E12-H08** — Tool `change_plan` (integración central, perfil standard): dispatcher de los 11
+    ops crudos → normalizadores del core; `apply_normalized_ops` construye el bundle hipotético EN
+    MEMORIA (no escribe, invariante #1); semantic_diff + assess_risk + validate_result + impact;
+    planHash determinista (blake3 de baseWorkspaceRevision + normalizedOperations, SIN reloj);
+    REVISION_CONFLICT por-op (ConceptRevision) y a nivel workspace. Cierra reserva de H05
+    (patch_frontmatter/replace_body). outputSchema + mcp.yml. Juez ciego: APROBADA (4/4).
+    **A rastrear**: gating por perfil (readonly debe rechazar tools de cambio) → E14-H03.
+  - ⏳ E12-H09 (persistencia del plan en runtime/plans/) pendiente.
 - **E13–E14: pendientes** (publicación recuperable · integración + evaluación — `ARCHITECTURE.md §19.8`).

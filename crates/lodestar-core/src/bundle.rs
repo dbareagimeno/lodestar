@@ -445,7 +445,12 @@ impl Bundle {
 }
 
 /// Aplica un `FrontmatterPatch` sobre un `Frontmatter` (conoce los KNOWN_FM tipados + extras).
-fn apply_patch(fm: &mut Frontmatter, patch: FrontmatterPatch) {
+///
+/// `pub(crate)`: además de [`Bundle::merge_frontmatter`], lo reutiliza `crate::plan`
+/// (E12-H08, `apply_normalized_ops`) para materializar en memoria un `Create`/`PatchFrontmatter`
+/// sobre el `FileMap` hipotético — una sola lógica de merge-patch en todo el core (invariante #3
+/// de `CLAUDE.md`), nunca reimplementada.
+pub(crate) fn apply_patch(fm: &mut Frontmatter, patch: FrontmatterPatch) {
     use serde_yaml::Value as Yaml;
     for (key, val) in patch.0 {
         let as_string = |v: &Yaml| match v {

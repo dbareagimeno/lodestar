@@ -37,6 +37,10 @@
 # relaciones tipadas obligatorias que romperían y riesgo), sin retirar ninguna vieja. Hoy (tras
 # E11-H05) 17 tools activas.
 #
+# E12-H08: AÑADE `change_plan` (planifica un cambio complejo SIN escribir: normaliza + simula en
+# memoria + valida → un único change set con planHash determinista), perfil standard, sin retirar
+# ninguna vieja. Hoy (tras E12-H08) 18 tools activas.
+#
 # E10-H13 (decisión D6b, `docs/REFACTOR.md §13`, `DECISIONES.md §3`): las 5 tools nuevas declaran
 # `outputSchema` (JSON Schema derivado con `schemars::schema_for!` desde el tipo de respuesta real
 # de `lodestar-app`, vía los helpers de `lodestar_app::schemas::*`). Las 10 tools heredadas NO
@@ -302,10 +306,37 @@ tools:
       o los afectados directos son muchos, «medium» para impacto moderado, «low» si no. `recommendations`
       = acciones sugeridas (texto español), vacío si el riesgo es bajo.
 
+  - nombre: change_plan
+    fuente: crates/lodestar-mcp/src/tools.rs
+    historia: E12-H08
+    perfil: standard
+    params:
+      - { nombre: expectedWorkspaceRevision, tipo: string, requerido: false, semantica: "control optimista a nivel de workspace («blake3:…»); si se omite se toma la revisión actual, si no coincide → REVISION_CONFLICT" }
+      - { nombre: operations, tipo: "array<object>", requerido: true, semantica: "operaciones propuestas, discriminadas por «op»; cada op puede llevar «expectedRevision» (ConceptRevision, control optimista por concepto)" }
+      - { nombre: "operations[].op", tipo: string, requerido: true, valores: ["create", "patch_frontmatter", "replace_body", "replace_text", "edit_section", "move", "delete", "add_relation", "remove_relation", "transition_status", "apply_fix"], semantica: "las 11 operaciones de REFACTOR §11.1; cada una se despacha a su normalizador del core (E12-H05/H06/H07)" }
+      - { nombre: "operations[].expectedRevision", tipo: string, requerido: false, semantica: "ConceptRevision que el agente cree vigente («blake3:…»); si el concepto cambió → REVISION_CONFLICT" }
+      - { nombre: policy, tipo: object, requerido: false, semantica: "{ requireConformantResult?, allowWarnings? } (PlanPolicy, E12-H04); por defecto exige conformidad y permite warnings" }
+    retorno: "PlanResult (lodestar_app): { changeSetId, baseWorkspaceRevision, planHash, canApply, expiresAt, normalizedOperations: [NormalizedOperation], risk, semanticDiff, impact: { affectedConcepts, affectedCount }, diagnosticsBefore, diagnosticsAfter } — json directo, sin envelope"
+    output_schema: "sí — schemars::schema_for!(PlanResult), vía lodestar_app::schemas::change_plan_schema()"
+    errores: ["REVISION_CONFLICT (workspace o concepto cambiado)", "INVALID_SCHEMA (op desconocida o parámetro inválido)", "CONCEPT_NOT_FOUND (objetivo de normalización inexistente)", "INBOUND_LINKS_EXIST (delete «reject» con entrantes)", "RELATION_CONSTRAINT_VIOLATION (add_relation viola RelationDef)", "PERMISSION_DENIED (path-traversal)", "INTERNAL_IO_ERROR (carga de config/schema)", "WorkspaceError"]
+    semantica: >-
+      Orquesta un plan de cambios SIN escribir (invariante #1; aplicar es change_apply, E13): toda
+      la simulación es sobre un Bundle en memoria. Verifica `expectedWorkspaceRevision` (o toma la
+      actual como `baseWorkspaceRevision` = workspace_revision sobre las raíces escribibles) y, por
+      cada op con `expectedRevision`, la ConceptRevision (blake3 del .md) del concepto objetivo →
+      REVISION_CONFLICT si difiere. Normaliza TODAS las ops a un ÚNICO change set (una op de
+      estructura puede producir varias NormalizedOperation, p. ej. move + N ReplaceBody), construye
+      el bundle hipotético (plan::apply_normalized_ops) y deriva semanticDiff (E12-H03), risk
+      (E12-H02) y validación antes/después (E12-H04); `canApply` = can_apply(report, policy).
+      `planHash` DETERMINISTA = blake3(baseWorkspaceRevision ‖ serialización JSON canónica de las
+      normalizedOperations) — mismo input+base ⇒ mismo hash, input distinto ⇒ hash distinto; NO
+      depende del reloj (`expiresAt` sí es wall-clock pero queda fuera del hash). `changeSetId` se
+      deriva del planHash. Persistir el plan es E12-H09.
+
 # ---------------------------------------------------------------------------
 # §15 — Migración de superficie (10 tools heredadas → 10 tools objetivo NUEVAS,
 # `docs/REFACTOR.md §15/§16`, `DECISIONES.md` §"0. Giro a motor headless"). Vive aquí (no solo en
-# REFACTOR.md) porque es la nota que explica por qué este contrato lista 17 tools activas cuando
+# REFACTOR.md) porque es la nota que explica por qué este contrato lista 18 tools activas cuando
 # la superficie objetivo de largo plazo son 10.
 # ---------------------------------------------------------------------------
 migracion:
@@ -324,7 +355,7 @@ migracion:
     - { vieja: query, nueva: knowledge_search, estado: "reemplazo ya existe (E10-H09); retirada de «query» diferida al cierre de E13" }
     - { vieja: conformance_check, nueva: knowledge_check, estado: "reemplazo ya existe (E10-H12); retirada de «conformance_check» diferida al cierre de E13" }
     - { viejas: [find_backlinks, find_orphans, find_dangling, neighborhood], nueva: graph_query, estado: "reemplazo ya existe (E11-H01); retirada de las 4 tools viejas diferida a la limpieza final al cerrar E13, o cuando E11-H02 complete graph_query (path_between/cycles/components) — lo que llegue primero" }
-    - { viejas: [create_concept, update_frontmatter], nuevas: [change_plan, change_apply], estado: "pendiente — E12/E13 (`docs/REFACTOR.md §11`)" }
+    - { viejas: [create_concept, update_frontmatter], nuevas: [change_plan, change_apply], estado: "change_plan ya existe (E12-H08, planifica sin escribir); change_apply pendiente — E13. Retirada de create_concept/update_frontmatter diferida al cierre de E13 (`docs/REFACTOR.md §11`)" }
     - { viejas: [generate_index, generate_tag_indexes], nueva: "CLI + auto-regen dentro de change_apply", estado: "pendiente — E13 (`docs/REFACTOR.md §15` fila generate_*, decisión D6a)" }
   superficie_objetivo: >-
     10 tools al cerrar E13: workspace_status, knowledge_search, knowledge_get, schema_inspect,

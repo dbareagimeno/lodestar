@@ -14,12 +14,16 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use lodestar_core::model;
+use lodestar_core::plan::{self, PlanPolicy};
 use lodestar_core::schema::{validate_relations, validate_schema, DocType, Schema};
 use lodestar_core::types::{
-    workspace_revision, Analysis, Backlinks, Check, ConceptRef, ConceptRevision, Direction, Edge,
-    ErrorCode, Frontmatter, GraphNode, RelPath, Severity, WorkspaceRevision,
+    workspace_revision, Analysis, Backlinks, ChangeSetId, Check, ConceptRef, ConceptRevision,
+    Direction, Edge, EditSectionMode, ErrorCode, Frontmatter, FrontmatterPatch, GraphNode,
+    InboundLinksPolicy, NormalizedOperation, PlanHash, RelPath, RiskAssessment, SemanticDiff,
+    Severity, ValidationSummary, WorkspaceRevision,
 };
 use lodestar_core::{Bundle, CoreError};
 use lodestar_workspace::{
@@ -125,6 +129,9 @@ pub fn error_code(err: &CoreError) -> ErrorCode {
         CoreError::RelationConstraintViolation(_) => ErrorCode::RelationConstraintViolation,
         CoreError::InvalidStatusTransition(_) => ErrorCode::InvalidSchema,
         CoreError::FixNotFound(_) => ErrorCode::ConceptNotFound,
+        // Invariante interno (E12-H08): el aplicador recibió una op sin normalizar a forma
+        // terminal — fallo de infraestructura, no del agente.
+        CoreError::OperationNotApplicable(_) => ErrorCode::InternalIoError,
     }
 }
 
@@ -1125,6 +1132,412 @@ impl App {
             recommendations,
         })
     }
+
+    /// Orquesta un plan de cambios (`change_plan`, E12-H08, `ARCHITECTURE.md §19.5/§19.6`): normaliza
+    /// las operaciones propuestas, simula su aplicación sobre un `Bundle` **en memoria** y valida el
+    /// resultado — **sin tocar disco** (invariante #1 de `CLAUDE.md`; la escritura real es E13).
+    ///
+    /// Pasos:
+    /// 1. Toma el bundle actual (`Workspace::bundle`, en memoria) y calcula
+    ///    `baseWorkspaceRevision` = [`workspace_revision`] sobre las raíces escribibles. Si
+    ///    `expected_workspace_revision` viene y **no** coincide → [`ErrorCode::RevisionConflict`]
+    ///    (control optimista a nivel de workspace); si viene `None`, se adopta la revisión actual.
+    /// 2. **Control optimista por operación**: cada op cruda con `expectedRevision` se compara con la
+    ///    [`ConceptRevision`] actual del concepto objetivo (`blake3` del `.md` en disco/memoria); si
+    ///    difiere (o el concepto ya no existe) → [`ErrorCode::RevisionConflict`].
+    /// 3. Despacha cada op cruda a su normalizador del core (E12-H05/H06/H07 y los de contenido
+    ///    `patch_frontmatter`/`replace_body`), acumulando TODAS las [`NormalizedOperation`] en un
+    ///    **único** `ChangeSet` (una op de estructura puede producir varias).
+    /// 4. Construye el bundle hipotético con [`plan::apply_normalized_ops`] y deriva
+    ///    [`plan::semantic_diff`], [`plan::assess_risk`] y [`plan::validate_result`] (antes y
+    ///    después); `canApply` = [`plan::can_apply`] bajo `policy`.
+    /// 5. **`planHash` DETERMINISTA**: `blake3(baseWorkspaceRevision ‖ 0x00 ‖ serialización JSON
+    ///    canónica de las normalizedOperations)` — mismo input + misma base ⇒ mismo hash; input
+    ///    distinto ⇒ hash distinto. **No** depende del reloj (`expiresAt` sí es wall-clock, pero
+    ///    queda FUERA del hash). `changeSetId` se deriva del `planHash`.
+    ///
+    /// Devuelve un [`PlanResult`] (proyección de servicio) con el plan completo. `Err(ErrorCode)`
+    /// para el wire de error (mismo patrón que el resto de servicios de `App`).
+    pub fn change_plan(
+        &self,
+        expected_workspace_revision: Option<WorkspaceRevision>,
+        raw_ops: &Value,
+        policy: PlanPolicy,
+    ) -> Result<PlanResult, ErrorCode> {
+        let bundle = self
+            .workspace
+            .bundle()
+            .map_err(|e| workspace_error_code(&e))?;
+        let root = self.workspace.root();
+        let cfg = WorkspaceConfig::load(root).map_err(|_| ErrorCode::InternalIoError)?;
+        let schema = WorkspaceSchema::load(root).map_err(|_| ErrorCode::InternalIoError)?;
+        let files = bundle.files();
+        let writable = &cfg.workspace.writable_roots;
+
+        // (1) Revisión base del workspace + control optimista a nivel de workspace.
+        let base_revision = workspace_revision(files, writable);
+        if let Some(expected) = &expected_workspace_revision {
+            if expected != &base_revision {
+                return Err(ErrorCode::RevisionConflict);
+            }
+        }
+
+        let ops_arr = raw_ops.as_array().ok_or(ErrorCode::InvalidSchema)?;
+
+        // (2)+(3) Control optimista por op y normalización, acumulando en un único change set.
+        let mut normalized: Vec<NormalizedOperation> = Vec::new();
+        for raw in ops_arr {
+            if let Some(expected) = raw.get("expectedRevision").and_then(Value::as_str) {
+                let target = op_target_path(raw)?;
+                let actual = files.get(&target).map(|raw_md| {
+                    ConceptRevision::from_hash(*blake3::hash(raw_md.as_bytes()).as_bytes())
+                });
+                if actual.as_ref().map(|r| r.0.as_str()) != Some(expected) {
+                    return Err(ErrorCode::RevisionConflict);
+                }
+            }
+            normalized.extend(normalize_raw_op(&bundle, &schema, raw)?);
+        }
+
+        // (4) Bundle hipotético + análisis del plan (todo en memoria, sin escribir).
+        let after_files =
+            plan::apply_normalized_ops(files, &normalized).map_err(|e| error_code(&e))?;
+        let after = Bundle::from_files(after_files);
+
+        let risk = plan::assess_risk(&normalized, &bundle, &after);
+        let semantic_diff = plan::semantic_diff(&bundle, &after, &schema);
+        let before_report = plan::validate_result(&bundle, &schema);
+        let after_report = plan::validate_result(&after, &schema);
+        let can_apply = plan::can_apply(&after_report, &policy);
+        let impact = PlanImpact::from_diff(&semantic_diff);
+
+        // (5) planHash determinista (independiente del reloj) + id derivado.
+        let plan_hash = compute_plan_hash(&base_revision, &normalized);
+        let change_set_id = ChangeSetId(format!(
+            "changeset:{}",
+            plan_hash.0.strip_prefix("blake3:").unwrap_or(&plan_hash.0)
+        ));
+
+        Ok(PlanResult {
+            change_set_id,
+            base_workspace_revision: base_revision,
+            plan_hash,
+            can_apply,
+            expires_at: expires_at_string(),
+            normalized_operations: normalized,
+            risk,
+            semantic_diff,
+            impact,
+            diagnostics_before: before_report.summary,
+            diagnostics_after: after_report.summary,
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// `change_plan` — dispatch de operaciones crudas y tipos de proyección (E12-H08,
+// `ARCHITECTURE.md §19.5/§19.6`, `REFACTOR §11.1/§17`).
+//
+// Proyección de servicio (framing), NO dominio: `PlanResult`/`PlanImpact` viven en `lodestar-app`.
+// Las `NormalizedOperation`/`RiskAssessment`/`SemanticDiff`/`ValidationSummary` que portan SÍ son
+// dominio puro del core (`core::types`), reexpuestas tal cual. Wire en camelCase.
+// ---------------------------------------------------------------------------
+
+/// Vida útil (segundos) que se concede a un plan recién generado antes de `expiresAt`. La
+/// caducidad real (rechazar planes vencidos → `PLAN_EXPIRED`) es E12-H09; aquí solo se estampa un
+/// instante futuro. `expiresAt` es wall-clock y **no** entra en el `planHash`.
+const PLAN_TTL_SECS: u64 = 3600;
+
+/// El concepto cuya [`ConceptRevision`] guarda el control optimista de una op cruda: `ref.path`,
+/// `path`, `from` (move) o `source` (relaciones), en ese orden. `Err(InvalidSchema)` si la op trae
+/// `expectedRevision` pero no un objetivo identificable.
+fn op_target_path(op: &Value) -> Result<RelPath, ErrorCode> {
+    let candidate = op
+        .get("ref")
+        .and_then(|r| r.get("path"))
+        .and_then(Value::as_str)
+        .or_else(|| op.get("path").and_then(Value::as_str))
+        .or_else(|| op.get("from").and_then(Value::as_str))
+        .or_else(|| op.get("source").and_then(Value::as_str))
+        .ok_or(ErrorCode::InvalidSchema)?;
+    RelPath::new(candidate).map_err(|e| error_code(&e))
+}
+
+/// `ref.path` o `path` de una op cruda como [`RelPath`]. `Err(InvalidSchema)` si falta, o el error
+/// mapeado de [`RelPath::new`] (path-traversal → `PermissionDenied`) si es inválido.
+fn op_ref_path(op: &Value) -> Result<RelPath, ErrorCode> {
+    let s = op
+        .get("ref")
+        .and_then(|r| r.get("path"))
+        .and_then(Value::as_str)
+        .or_else(|| op.get("path").and_then(Value::as_str))
+        .ok_or(ErrorCode::InvalidSchema)?;
+    RelPath::new(s).map_err(|e| error_code(&e))
+}
+
+/// Un campo string obligatorio de una op cruda como [`RelPath`].
+fn op_rel_field(op: &Value, key: &str) -> Result<RelPath, ErrorCode> {
+    let s = op
+        .get(key)
+        .and_then(Value::as_str)
+        .ok_or(ErrorCode::InvalidSchema)?;
+    RelPath::new(s).map_err(|e| error_code(&e))
+}
+
+/// Despacha UNA op cruda (`{op, …}`) a su normalizador del core, devolviendo las
+/// [`NormalizedOperation`] resultantes (una op de estructura puede producir varias, E12-H06).
+/// El discriminador `op` usa el mismo vocabulario snake_case que [`NormalizedOperation`]. Un `op`
+/// desconocido o un parámetro inválido → `Err(ErrorCode::InvalidSchema)`; los errores del core se
+/// mapean con [`error_code`].
+fn normalize_raw_op(
+    bundle: &Bundle,
+    schema: &Schema,
+    op: &Value,
+) -> Result<Vec<NormalizedOperation>, ErrorCode> {
+    let kind = op
+        .get("op")
+        .and_then(Value::as_str)
+        .ok_or(ErrorCode::InvalidSchema)?;
+    let one = |n: NormalizedOperation| vec![n];
+    match kind {
+        "create" => {
+            let path = op_rel_field(op, "path")?;
+            let ty = op.get("type").and_then(Value::as_str).unwrap_or("");
+            let title = op.get("title").and_then(Value::as_str);
+            let body = op.get("body").and_then(Value::as_str).map(str::to_string);
+            plan::normalize_create(bundle, schema, &path, ty, title, body)
+                .map(one)
+                .map_err(|e| error_code(&e))
+        }
+        "patch_frontmatter" => {
+            let path = op_ref_path(op)?;
+            let patch = op_patch(op)?;
+            plan::normalize_patch_frontmatter(bundle, &path, patch)
+                .map(one)
+                .map_err(|e| error_code(&e))
+        }
+        "replace_body" => {
+            let path = op_ref_path(op)?;
+            let body = op
+                .get("body")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            plan::normalize_replace_body(bundle, &path, body)
+                .map(one)
+                .map_err(|e| error_code(&e))
+        }
+        "replace_text" => {
+            let path = op_ref_path(op)?;
+            let find = op.get("find").and_then(Value::as_str).unwrap_or("");
+            let replace = op.get("replace").and_then(Value::as_str).unwrap_or("");
+            let expected = op
+                .get("expectedOccurrences")
+                .and_then(Value::as_u64)
+                .map(|n| n as usize);
+            plan::normalize_replace_text(bundle, &path, find, replace, expected)
+                .map(one)
+                .map_err(|e| error_code(&e))
+        }
+        "edit_section" => {
+            let path = op_ref_path(op)?;
+            let heading_path: Vec<String> = op
+                .get("headingPath")
+                .and_then(Value::as_array)
+                .map(|a| {
+                    a.iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_string)
+                        .collect()
+                })
+                .unwrap_or_default();
+            let mode = match op.get("mode").and_then(Value::as_str) {
+                Some("append") => EditSectionMode::Append,
+                Some("prepend") => EditSectionMode::Prepend,
+                _ => EditSectionMode::Replace,
+            };
+            let content = op.get("content").and_then(Value::as_str).unwrap_or("");
+            plan::normalize_edit_section(bundle, &path, &heading_path, mode, content)
+                .map(one)
+                .map_err(|e| error_code(&e))
+        }
+        "move" => {
+            let from = op_rel_field(op, "from")?;
+            let to = op_rel_field(op, "to")?;
+            let rewrite = op
+                .get("rewriteInboundLinks")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            plan::normalize_move(bundle, &from, &to, rewrite).map_err(|e| error_code(&e))
+        }
+        "delete" => {
+            let path = op_ref_path(op)?;
+            let policy = match op.get("inboundLinksPolicy").and_then(Value::as_str) {
+                Some("retarget") => InboundLinksPolicy::Retarget,
+                Some("remove_links") => InboundLinksPolicy::RemoveLinks,
+                Some("create_stub") => InboundLinksPolicy::CreateStub,
+                _ => InboundLinksPolicy::Reject,
+            };
+            plan::normalize_delete(bundle, &path, policy).map_err(|e| error_code(&e))
+        }
+        "add_relation" => {
+            let source = op_source_path(op)?;
+            let relation = op
+                .get("relation")
+                .and_then(Value::as_str)
+                .ok_or(ErrorCode::InvalidSchema)?;
+            let target = op_rel_field(op, "target")?;
+            plan::normalize_add_relation(bundle, schema, &source, relation, &target)
+                .map(one)
+                .map_err(|e| error_code(&e))
+        }
+        "remove_relation" => {
+            let source = op_source_path(op)?;
+            let relation = op
+                .get("relation")
+                .and_then(Value::as_str)
+                .ok_or(ErrorCode::InvalidSchema)?;
+            let target = op_rel_field(op, "target")?;
+            plan::normalize_remove_relation(bundle, schema, &source, relation, &target)
+                .map(one)
+                .map_err(|e| error_code(&e))
+        }
+        "transition_status" => {
+            let path = op_ref_path(op)?;
+            let to = op
+                .get("to")
+                .and_then(Value::as_str)
+                .ok_or(ErrorCode::InvalidSchema)?;
+            plan::normalize_transition_status(bundle, schema, &path, to)
+                .map(one)
+                .map_err(|e| error_code(&e))
+        }
+        "apply_fix" => {
+            let fix_id = op
+                .get("fixId")
+                .and_then(Value::as_str)
+                .ok_or(ErrorCode::InvalidSchema)?;
+            plan::normalize_apply_fix(bundle, schema, fix_id)
+                .map(one)
+                .map_err(|e| error_code(&e))
+        }
+        _ => Err(ErrorCode::InvalidSchema),
+    }
+}
+
+/// `source` de una op de relación: `ref.path`, `path` o `source`.
+fn op_source_path(op: &Value) -> Result<RelPath, ErrorCode> {
+    let s = op
+        .get("ref")
+        .and_then(|r| r.get("path"))
+        .and_then(Value::as_str)
+        .or_else(|| op.get("source").and_then(Value::as_str))
+        .or_else(|| op.get("path").and_then(Value::as_str))
+        .ok_or(ErrorCode::InvalidSchema)?;
+    RelPath::new(s).map_err(|e| error_code(&e))
+}
+
+/// Convierte el campo `patch` de una op cruda en un [`FrontmatterPatch`] (merge-patch RFC 7386:
+/// `null` borra la clave, cualquier otro valor la escribe). `Err(InvalidSchema)` si `patch` falta o
+/// no es un objeto.
+fn op_patch(op: &Value) -> Result<FrontmatterPatch, ErrorCode> {
+    let patch = op.get("patch").ok_or(ErrorCode::InvalidSchema)?;
+    if !patch.is_object() {
+        return Err(ErrorCode::InvalidSchema);
+    }
+    serde_json::from_value(patch.clone()).map_err(|_| ErrorCode::InvalidSchema)
+}
+
+/// `planHash` determinista: `blake3(baseWorkspaceRevision ‖ 0x00 ‖ serialización JSON de las
+/// normalizedOperations)`. La serialización de `serde_json` es estable (orden de campos por
+/// declaración; `FrontmatterPatch` es un `BTreeMap` ordenado), así que el mismo plan sobre la misma
+/// base produce el mismo hash entre procesos frescos, y un plan distinto uno distinto. **No**
+/// depende del reloj.
+fn compute_plan_hash(base: &WorkspaceRevision, ops: &[NormalizedOperation]) -> PlanHash {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(base.0.as_bytes());
+    hasher.update(b"\0");
+    let serialized = serde_json::to_vec(ops).expect("NormalizedOperation siempre serializa a JSON");
+    hasher.update(&serialized);
+    PlanHash(format!("blake3:{}", hasher.finalize().to_hex()))
+}
+
+/// Instante de caducidad del plan (`expiresAt`): ahora + [`PLAN_TTL_SECS`], en segundos epoch como
+/// string. Wall-clock, FUERA del `planHash` (E12-H08). La semántica de caducidad real es E12-H09.
+fn expires_at_string() -> String {
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+    let at = SystemTime::now() + Duration::from_secs(PLAN_TTL_SECS);
+    let secs = at
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    secs.to_string()
+}
+
+/// Resultado de `change_plan` (E12-H08): un plan de cambios completo, simulado en memoria y **sin
+/// escribir** (invariante #1). Proyección de servicio; wire en camelCase — `changeSetId`,
+/// `baseWorkspaceRevision`, `planHash`, `canApply`, `expiresAt`, `normalizedOperations`,
+/// `semanticDiff`, `diagnosticsBefore`/`diagnosticsAfter`.
+///
+/// Sin `Eq` (transitivo desde `NormalizedOperation`/`FrontmatterPatch`).
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanResult {
+    /// Identificador del change set (derivado del `planHash`, determinista).
+    pub change_set_id: ChangeSetId,
+    /// Revisión del workspace sobre la que se computó el plan ([`workspace_revision`]).
+    pub base_workspace_revision: WorkspaceRevision,
+    /// Hash determinista del plan (mismo input + misma base ⇒ mismo hash).
+    pub plan_hash: PlanHash,
+    /// `true` si el plan es aplicable bajo la `policy` dada ([`plan::can_apply`]).
+    pub can_apply: bool,
+    /// Instante de caducidad (segundos epoch, wall-clock; fuera del `planHash`).
+    pub expires_at: String,
+    /// Todas las operaciones normalizadas del plan, en un único change set.
+    pub normalized_operations: Vec<NormalizedOperation>,
+    /// Evaluación de riesgo del plan (E12-H02).
+    pub risk: RiskAssessment,
+    /// Diff semántico entre el bundle actual y el hipotético (E12-H03).
+    pub semantic_diff: SemanticDiff,
+    /// Resumen de impacto (conceptos afectados).
+    pub impact: PlanImpact,
+    /// Conteo de diagnósticos del bundle ANTES del plan.
+    pub diagnostics_before: ValidationSummary,
+    /// Conteo de diagnósticos del bundle hipotético DESPUÉS del plan.
+    pub diagnostics_after: ValidationSummary,
+}
+
+/// Resumen de impacto de un plan (E12-H08): los conceptos que el plan crea/modifica/borra/mueve, y
+/// su recuento. Derivado del [`SemanticDiff`] (una sola verdad de diff, invariante #3). Wire en
+/// camelCase.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanImpact {
+    /// Conceptos afectados por el plan (unión de creados/modificados/borrados/movidos), orden estable.
+    pub affected_concepts: Vec<RelPath>,
+    /// Número de conceptos afectados (`affected_concepts.len()`).
+    pub affected_count: usize,
+}
+
+impl PlanImpact {
+    /// Deriva el impacto de un [`SemanticDiff`]: unión (sin duplicados, orden estable) de los paths
+    /// creados, modificados, borrados y de los extremos de cada movimiento.
+    fn from_diff(diff: &SemanticDiff) -> Self {
+        let mut set: BTreeSet<RelPath> = BTreeSet::new();
+        set.extend(diff.created.iter().cloned());
+        set.extend(diff.modified.iter().cloned());
+        set.extend(diff.deleted.iter().cloned());
+        for m in &diff.moved {
+            set.insert(m.from.clone());
+            set.insert(m.to.clone());
+        }
+        let affected_concepts: Vec<RelPath> = set.into_iter().collect();
+        let affected_count = affected_concepts.len();
+        PlanImpact {
+            affected_concepts,
+            affected_count,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1681,8 +2094,8 @@ pub mod schemas {
     use serde_json::Value;
 
     use super::{
-        CheckReport, GraphQueryResult, ImpactReport, KnowledgeGetResponse, SchemaInspection,
-        SearchResults, WorkspaceStatus,
+        CheckReport, GraphQueryResult, ImpactReport, KnowledgeGetResponse, PlanResult,
+        SchemaInspection, SearchResults, WorkspaceStatus,
     };
 
     /// Deriva el JSON Schema de `T` y lo serializa a `serde_json::Value`. `schemars::schema_for!`
@@ -1728,5 +2141,10 @@ pub mod schemas {
     /// `outputSchema` de `impact_analyze` (== [`ImpactReport`]).
     pub fn impact_analyze_schema() -> Value {
         schema_of::<ImpactReport>()
+    }
+
+    /// `outputSchema` de `change_plan` (== [`PlanResult`]).
+    pub fn change_plan_schema() -> Value {
+        schema_of::<PlanResult>()
     }
 }

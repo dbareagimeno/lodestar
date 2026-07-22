@@ -50,9 +50,9 @@ use regex::{Captures, Regex};
 use serde::{Deserialize, Serialize};
 
 use crate::types::{
-    Check, CheckCode, EditSectionMode, FrontmatterPatch, InboundLinksPolicy, NormalizedOperation,
-    RelPath, RiskAssessment, RiskLevel, SemanticDiff, Severity, ValidationReport,
-    ValidationSummary,
+    Check, CheckCode, EditSectionMode, FileMap, Frontmatter, FrontmatterPatch, InboundLinksPolicy,
+    NormalizedOperation, RelPath, RiskAssessment, RiskLevel, SemanticDiff, Severity,
+    ValidationReport, ValidationSummary,
 };
 use crate::Bundle;
 
@@ -469,6 +469,63 @@ pub fn normalize_edit_section(
     })
 }
 
+/// `Err(NormalizeTargetNotFound)` si `path` no tiene fichero en el bundle. Punto único de
+/// verificación de existencia para los normalizadores que solo necesitan saber que el concepto
+/// objetivo existe (sin leer su cuerpo).
+fn ensure_exists(bundle: &Bundle, path: &RelPath) -> Result<(), CoreError> {
+    if bundle.files().contains_key(path) {
+        Ok(())
+    } else {
+        Err(CoreError::NormalizeTargetNotFound(
+            path.as_str().to_string(),
+        ))
+    }
+}
+
+/// Normaliza un `patch_frontmatter`: aplica un merge-patch RFC 7386 al frontmatter de un concepto
+/// existente (E12-H05, reserva completada en E12-H08).
+///
+/// El `patch` (un [`FrontmatterPatch`]) ya es la forma normalizada del merge-patch — `Some(v)`
+/// escribe/reemplaza, `None` **borra** la clave (`null` en el wire), clave ausente = no se toca —,
+/// así que esta normalización se limita a **validar que el concepto objetivo existe** y envolverlo
+/// en [`NormalizedOperation::PatchFrontmatter`]. El merge real sobre el `Frontmatter` lo materializa
+/// el aplicador ([`apply_normalized_ops`]) reusando la misma lógica que `Bundle::merge_frontmatter`
+/// (un solo camino de merge-patch en el core, invariante #3). **Puro.**
+///
+/// # Errores
+/// [`CoreError::NormalizeTargetNotFound`] si `path` no existe en el bundle.
+pub fn normalize_patch_frontmatter(
+    bundle: &Bundle,
+    path: &RelPath,
+    patch: FrontmatterPatch,
+) -> Result<NormalizedOperation, CoreError> {
+    ensure_exists(bundle, path)?;
+    Ok(NormalizedOperation::PatchFrontmatter {
+        path: path.clone(),
+        patch,
+    })
+}
+
+/// Normaliza un `replace_body`: reemplaza el cuerpo completo (tras el frontmatter) de un concepto
+/// existente por `body` (E12-H05, reserva completada en E12-H08).
+///
+/// Valida que el concepto objetivo existe y devuelve [`NormalizedOperation::ReplaceBody`] con el
+/// cuerpo nuevo tal cual; el frontmatter se conserva al aplicar. **Puro.**
+///
+/// # Errores
+/// [`CoreError::NormalizeTargetNotFound`] si `path` no existe en el bundle.
+pub fn normalize_replace_body(
+    bundle: &Bundle,
+    path: &RelPath,
+    body: String,
+) -> Result<NormalizedOperation, CoreError> {
+    ensure_exists(bundle, path)?;
+    Ok(NormalizedOperation::ReplaceBody {
+        path: path.clone(),
+        body,
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Normalización de operaciones de ESTRUCTURA (E12-H06): `move` y `delete`.
 //
@@ -871,4 +928,121 @@ pub fn normalize_apply_fix(
         path: repair.source.clone(),
         patch: relation_field_patch(&repair.rel_name, &remaining),
     })
+}
+
+// ---------------------------------------------------------------------------
+// Aplicación en memoria de un plan (E12-H08): construir el `FileMap` hipotético.
+//
+// `apply_normalized_ops` toma el `FileMap` actual y una lista de operaciones YA normalizadas a
+// forma terminal (las que producen los normalizadores de E12-H05/H06/H07:
+// `Create`/`PatchFrontmatter`/`ReplaceBody`/`Move`/`Delete`) y devuelve el `FileMap` resultante de
+// aplicarlas EN ORDEN, sin tocar disco (invariante #1 de `CLAUDE.md`: la escritura real es E13).
+// Es la simulación que alimenta `SemanticDiff`/`RiskAssessment`/`ValidationReport` del `change_plan`.
+// ---------------------------------------------------------------------------
+
+/// Aplica `ops` (ya normalizadas) sobre una **copia** de `files` y devuelve el `FileMap`
+/// hipotético — E12-H08. **Puro**: no toca disco ni reloj; el `files` de entrada queda intacto.
+///
+/// Cada operación se materializa reusando la única canonicalización del core
+/// (`model::build_raw`/`model::parse_file` y `bundle::apply_patch`, invariante #3 de `CLAUDE.md`):
+/// - [`NormalizedOperation::Create`]: escribe el `.md` nuevo con el frontmatter del patch aplicado
+///   sobre uno vacío y el cuerpo dado (o un heading por defecto `# {título}` si `body` es `None`).
+/// - [`NormalizedOperation::PatchFrontmatter`]: aplica el merge-patch al frontmatter existente,
+///   conservando el cuerpo (mismo camino que `Bundle::merge_frontmatter`).
+/// - [`NormalizedOperation::ReplaceBody`]: conserva el frontmatter y sustituye el cuerpo.
+/// - [`NormalizedOperation::Move`]: renombra la clave (mismo contenido); la reescritura de enlaces
+///   entrantes llega como `ReplaceBody` aparte dentro del mismo plan (E12-H06).
+/// - [`NormalizedOperation::Delete`]: elimina la clave.
+///
+/// Las ops se aplican secuencialmente, así que una op posterior ve el efecto de las anteriores.
+///
+/// # Errores
+/// [`CoreError::OperationNotApplicable`] si llega una variante NO terminal (semántica/de contenido
+/// que los normalizadores ya resuelven a las cinco de arriba) — es una violación de invariante
+/// interno del pipeline, nunca una entrada del agente.
+pub fn apply_normalized_ops(
+    files: &FileMap,
+    ops: &[NormalizedOperation],
+) -> Result<FileMap, CoreError> {
+    let mut out = files.clone();
+    for op in ops {
+        apply_one(&mut out, op)?;
+    }
+    Ok(out)
+}
+
+/// Frontmatter (o el vacío por defecto) y cuerpo actuales del `.md` en `path` dentro de `files`.
+fn parsed_of(files: &FileMap, path: &RelPath) -> (Frontmatter, String) {
+    match files.get(path) {
+        Some(raw) => {
+            let parsed = model::parse_file(path.as_str(), raw);
+            (parsed.fm.unwrap_or_default(), parsed.body)
+        }
+        None => (Frontmatter::default(), String::new()),
+    }
+}
+
+/// Aplica una única operación normalizada sobre `files` (mutación in situ). Ver
+/// [`apply_normalized_ops`].
+fn apply_one(files: &mut FileMap, op: &NormalizedOperation) -> Result<(), CoreError> {
+    match op {
+        NormalizedOperation::Create {
+            path,
+            frontmatter,
+            body,
+        } => {
+            let mut fm = Frontmatter::default();
+            crate::bundle::apply_patch(&mut fm, frontmatter.clone());
+            let body = body.clone().unwrap_or_else(|| {
+                let title = fm
+                    .title
+                    .clone()
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| model::title_from_path(path.as_str()));
+                format!("# {title}\n")
+            });
+            files.insert(path.clone(), model::build_raw(&fm, &body));
+        }
+        NormalizedOperation::PatchFrontmatter { path, patch } => {
+            let (mut fm, body) = parsed_of(files, path);
+            crate::bundle::apply_patch(&mut fm, patch.clone());
+            files.insert(path.clone(), model::build_raw(&fm, &body));
+        }
+        NormalizedOperation::ReplaceBody { path, body } => {
+            let (fm, _) = parsed_of(files, path);
+            files.insert(path.clone(), model::build_raw(&fm, body));
+        }
+        NormalizedOperation::Move { from, to, .. } => {
+            if let Some(raw) = files.remove(from) {
+                files.insert(to.clone(), raw);
+            }
+        }
+        NormalizedOperation::Delete { path, .. } => {
+            files.remove(path);
+        }
+        // Variantes NO terminales: los normalizadores (E12-H05/H06/H07) siempre las resuelven a
+        // las cinco de arriba antes de llegar aquí. Si aparecen, es un bug del pipeline.
+        other => {
+            return Err(CoreError::OperationNotApplicable(op_variant_name(other)));
+        }
+    }
+    Ok(())
+}
+
+/// Nombre de la variante (para el mensaje de [`CoreError::OperationNotApplicable`]).
+fn op_variant_name(op: &NormalizedOperation) -> String {
+    match op {
+        NormalizedOperation::Create { .. } => "create",
+        NormalizedOperation::PatchFrontmatter { .. } => "patch_frontmatter",
+        NormalizedOperation::ReplaceBody { .. } => "replace_body",
+        NormalizedOperation::EditSection { .. } => "edit_section",
+        NormalizedOperation::ReplaceText { .. } => "replace_text",
+        NormalizedOperation::Move { .. } => "move",
+        NormalizedOperation::Delete { .. } => "delete",
+        NormalizedOperation::AddRelation { .. } => "add_relation",
+        NormalizedOperation::RemoveRelation { .. } => "remove_relation",
+        NormalizedOperation::TransitionStatus { .. } => "transition_status",
+        NormalizedOperation::ApplyFix { .. } => "apply_fix",
+    }
+    .to_string()
 }

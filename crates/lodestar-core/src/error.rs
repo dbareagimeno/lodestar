@@ -64,6 +64,15 @@ pub enum CoreError {
     /// El payload es el `fix_id` no encontrado. Mapea a `ErrorCode::ConceptNotFound`.
     #[error("fix no encontrado o no aplicable: {0}")]
     FixNotFound(String),
+
+    /// Al materializar un plan en memoria (E12-H08, [`crate::plan::apply_normalized_ops`]) se
+    /// recibió una [`crate::types::NormalizedOperation`] en forma NO terminal (una variante
+    /// semántica/de contenido que los normalizadores de E12-H05/H06/H07 ya resuelven a
+    /// `Create`/`PatchFrontmatter`/`ReplaceBody`/`Move`/`Delete`). Es una violación de invariante
+    /// interno —el aplicador solo debe ver operaciones ya normalizadas—, no un error del agente;
+    /// mapea a `ErrorCode::InternalIoError`. El payload nombra la variante recibida.
+    #[error("operación no aplicable (no normalizada a forma terminal): {0}")]
+    OperationNotApplicable(String),
 }
 
 /// Resultado de conveniencia del núcleo.
