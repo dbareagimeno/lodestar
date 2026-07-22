@@ -351,5 +351,10 @@ superficie de producto; git queda como crate dormido) y `DECISIONES.md §0`. Des
     estados lowercase) que H06 releerá. Juez ciego: APROBADA CON RESERVAS (2/2). **A endurecer en H05/H06**:
     reescritura temp+rename+fsync-del-dir (hoy truncate+write → posible JSON torn ante crash) y recovery
     tolerante a journal torn.
-  - ⏳ E13-H04–H11 pendientes (copias/publicar/crash-recovery/receipts/change_apply/revert/audit/regen).
+  - ✅ **E13-H04** — Copias de recuperación: `Workspace::backup_originals(txn, affected)` copia
+    byte-a-byte (fs::copy) cada original existente a `.lodestar/runtime/recovery/<txn>/` y marca los
+    ausentes ("no existía") en un manifiesto `.absent`; solo LEE el canónico (invariante #1). `RecoveryDir`
+    con path/backup_path/was_absent. Juez ciego: APROBADA CON RESERVAS (2/2). (Assert del manifiesto `.absent`
+    → H06.)
+  - ⏳ E13-H05–H11 pendientes (publicar/crash-recovery/receipts/change_apply/revert/audit/regen).
 - **E14: pendiente** (integración software + evaluación — `ARCHITECTURE.md §19.8`).

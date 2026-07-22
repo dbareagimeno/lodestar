@@ -524,3 +524,115 @@ fn journal_registra_cada_rename() {
         "una operación aún no aplicada debe seguir `pending`: {json}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// E13-H04 — Copias de recuperación (backup de los originales).
+//
+// Firmas asumidas de E13-H04 (fase ROJA; el implementador debe respetarlas):
+// - `Workspace::backup_originals(&self, txn_id: &str, affected: &[RelPath]) -> Result<RecoveryDir,
+//   WorkspaceError>`: ANTES de sustituir el canónico, por cada `RelPath` de `affected`, si el `.md`
+//   existe en el canónico copia su contenido **byte-a-byte** a
+//   `.lodestar/runtime/recovery/<txnId>/<path>`; si NO existe (se va a crear), registra una marca
+//   "no existía" (fichero/entrada, p. ej. un `.absent` o un manifiesto) para poder borrarlo al
+//   revertir. Devuelve el `RecoveryDir` que referenciará el journal (E13-H03).
+// - `RecoveryDir::path(&self) -> &std::path::Path`: raíz del directorio de recuperación de la
+//   transacción, bajo `.lodestar/runtime/recovery/<txnId>/`.
+// - `RecoveryDir::backup_path(&self, path: &RelPath) -> std::path::PathBuf`: ruta donde vive (o
+//   viviría) la copia de recuperación de `path` bajo el directorio de la transacción. Los tests la
+//   usan para comprobar existencia y para leer el contenido byte-a-byte del backup.
+// - `RecoveryDir::was_absent(&self, path: &RelPath) -> bool`: `true` si `path` se marcó "no existía"
+//   (no había original que copiar; se creará y habrá que borrarlo al revertir); `false` si tenía
+//   original y se copió.
+//
+// El directorio de recuperación vive bajo `.lodestar/runtime/` (desechable, invariante #1), como el
+// journal (H03) y el staging (H01), por lo que no viola «los `.md` son la única fuente de verdad».
+// ---------------------------------------------------------------------------
+
+/// **E13-H04** · Criterio `backup_originales`: dada una transacción que modifica `b.md` (existe) y
+/// crea `c.md` (no existe), al preparar las copias existe el backup de `b.md` bajo
+/// `.lodestar/runtime/recovery/<txnId>/` y hay una marca de que `c.md` "no existía" (para poder
+/// borrarlo al revertir).
+#[test]
+fn backup_originales() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws = Workspace::open(dir.path()).unwrap();
+
+    // `b.md` EXISTE en el canónico con contenido conocido; `c.md` NO existe (se va a crear).
+    let b = RelPath::new("b.md").unwrap();
+    let c = RelPath::new("c.md").unwrap();
+    std::fs::write(
+        dir.path().join("b.md"),
+        "---\ntype: Nota\ntitle: B\n---\n# B\n\ncuerpo previo\n",
+    )
+    .unwrap();
+    assert!(
+        !dir.path().join("c.md").exists(),
+        "precondición: c.md no debe existir (se creará en la transacción)"
+    );
+
+    // Se preparan las copias de recuperación para los dos paths afectados.
+    let recovery = ws
+        .backup_originals("txn-h04-b-y-c", &[b.clone(), c.clone()])
+        .expect("preparar las copias de recuperación de los paths afectados");
+
+    // El directorio de recuperación vive bajo `.lodestar/runtime/recovery/<txnId>/`.
+    let recovery_root: PathBuf = recovery.path().to_path_buf();
+    assert!(
+        recovery_root.starts_with(dir.path().join(".lodestar/runtime/recovery")),
+        "la recuperación no vive bajo .lodestar/runtime/recovery: {}",
+        recovery_root.display()
+    );
+
+    // El backup de `b.md` (que existía) está materializado en disco.
+    let backup_b: PathBuf = recovery.backup_path(&b);
+    assert!(
+        backup_b.is_file(),
+        "debe existir el backup del original b.md en {}",
+        backup_b.display()
+    );
+    assert!(
+        !recovery.was_absent(&b),
+        "b.md existía: no debe marcarse como \"no existía\""
+    );
+
+    // `c.md` (que no existía) queda marcado "no existía" y SIN copia (no había original que copiar).
+    assert!(
+        recovery.was_absent(&c),
+        "c.md no existía: debe marcarse \"no existía\" para poder borrarlo al revertir"
+    );
+    assert!(
+        !recovery.backup_path(&c).is_file(),
+        "c.md no tenía original: no debe existir una copia de recuperación para él"
+    );
+}
+
+/// **E13-H04** · Criterio `backup_fiel`: dado un path afectado con contenido X (con bytes UTF-8
+/// multibyte no triviales), al hacer backup la copia de recuperación contiene X **byte-a-byte**.
+#[test]
+fn backup_fiel() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws = Workspace::open(dir.path()).unwrap();
+
+    // Contenido X con bytes no triviales: UTF-8 multibyte (acentos, símbolo €, kana) y saltos.
+    let contenido_x: &[u8] =
+        "---\ntype: Nota\ntitle: Böé\n---\n# Café ☕\n\ncuerpo con € y 日本語\n".as_bytes();
+    let b = RelPath::new("b.md").unwrap();
+    std::fs::write(dir.path().join("b.md"), contenido_x).unwrap();
+
+    let recovery = ws
+        .backup_originals("txn-h04-fiel", std::slice::from_ref(&b))
+        .expect("preparar la copia de recuperación de b.md");
+
+    // El backup contiene X byte-a-byte (lectura binaria y comparación exacta de bytes).
+    let backup_b: PathBuf = recovery.backup_path(&b);
+    let bytes_backup = std::fs::read(&backup_b).unwrap_or_else(|e| {
+        panic!(
+            "el backup de b.md debe existir y ser legible {}: {e}",
+            backup_b.display()
+        )
+    });
+    assert_eq!(
+        bytes_backup, contenido_x,
+        "el backup de b.md no es fiel byte-a-byte al original"
+    );
+}
