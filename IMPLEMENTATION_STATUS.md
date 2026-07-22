@@ -159,7 +159,7 @@ Las 9 épicas (E0–E8) están implementadas. Lo que queda no es arquitectura:
 4. **E7** (§3): adoptar `rmcp` oficial + resources cuando un cliente lo exija.
 5. **E8** (§9): gate de bench (§11), threat model.
 
-## Giro a motor headless de integridad semántica (E9–E14) — EN CURSO
+## Giro a motor headless de integridad semántica (E9–E14) — COMPLETO
 
 Refactor de `docs/REFACTOR.md`, diseño ratificado en `ARCHITECTURE.md §19` (supersede §13 en
 superficie de producto; git queda como crate dormido) y `DECISIONES.md §0`. Descomposición en
@@ -199,7 +199,7 @@ superficie de producto; git queda como crate dormido) y `DECISIONES.md §0`. Des
     listan `lodestar-app` en el mapa de crates y marcan git como capacidad dormida y la UI como
     congelada. Este bloque de `IMPLEMENTATION_STATUS.md` refleja E9 completa.
 - **E9 — COMPLETA** (H01–H07, las 7 historias de la fase 0).
-- **E10 — EN CURSO** (esquemas + lectura headless):
+- **E10 — COMPLETA (13/13)** (esquemas + lectura headless):
   - ✅ **E10-H03** — `ConceptRevision` + `WorkspaceRevision` en `core::types` (puros): revisión
     determinista sobre `writableRoots` (excluye `.lodestar/`, referenceRoots, mtime/orden/caché;
     contención por segmentos; separador `\0` anti-colisión). Juez ciego: APROBADA CON RESERVAS (4/4).
@@ -259,7 +259,7 @@ superficie de producto; git queda como crate dormido) y `DECISIONES.md §0`. Des
     la base (workspace_status/knowledge_search/knowledge_get/schema_inspect/knowledge_check) sin
     tocar el filesystem. **Pendiente al cierre de E13**: limpieza final de mcp.yml → 10 tools objetivo
     (retirar query/conformance_check/find_*/neighborhood/create/update/generate según reemplazos).
-- **E11 — EN CURSO** (grafo e impacto):
+- **E11 — COMPLETA (5/5)** (grafo e impacto):
   - ✅ **E11-H01** — Tool `graph_query` (consolida backlinks/outgoing/neighborhood/orphans/dangling):
     reexpone `Bundle::neighborhood`/`backlinks` y `Analysis::orphans`/`dangling` (invariante #3, paridad
     literal); truncación + cursor; outputSchema; `mcp.yml` actualizado (las 4 tools viejas se retiran
@@ -289,7 +289,7 @@ superficie de producto; git queda como crate dormido) y `DECISIONES.md §0`. Des
   - **E11 — COMPLETA** (5/5). Criterio de salida cumplido: Lodestar responde preguntas estructurales
     (graph_query: backlinks/outgoing/neighborhood/orphans/dangling/path_between/cycles/components) y
     anticipa consecuencias (impact_analyze), con relaciones tipadas (REL-*) y paths externos validados.
-- **E12 — EN CURSO** (planificación de cambios):
+- **E12 — COMPLETA (9/9)** (planificación de cambios):
   - ✅ **E12-H01** — Tipos del plan en `core::types`: `ChangeSetId`/`PlanHash`/`ReceiptId`, `ChangeSet`
     (wire `baseWorkspaceRevision`/`planHash`/`expiresAt`), `NormalizedOperation` (11 variantes),
     `RiskAssessment`/`RiskLevel` (low/medium/high), `SemanticDiff`, `ValidationReport`. `FrontmatterPatch`
@@ -412,7 +412,7 @@ superficie de producto; git queda como crate dormido) y `DECISIONES.md §0`. Des
     test de crash dedicado que mate la publicación DESPUÉS del `.md` del plan y ANTES del index/tags
     regenerado (la recuperabilidad de ese path queda garantizada estructuralmente: está en
     affected/journal/backup).
-- **E14 — COMPLETA (5/5)** (integración software + evaluación — `ARCHITECTURE.md §19.8`):
+- **E14 — COMPLETA (6/6)** (integración software + evaluación — `ARCHITECTURE.md §19.8`):
   - ✅ **E14-H01** — `lodestar check` como puerta de CI con conformidad schema-driven: `check` (working
     tree, sin flags git) juzga con el MISMO motor que `App::knowledge_check` scope `workspace` (OKF +
     SCHEMA-* + REL-* + refs externas). La fusión OKF+schema/rel vive en UN solo sitio compartido
