@@ -557,3 +557,194 @@ fn config_malformada_es_error() {
          se obtuvo: {res:?}"
     );
 }
+
+/// Criterio EXTRA (cierra reserva de E9-H05): el usuario especifica su propia lista `ignored`
+/// y los obligatorios `.lodestar/runtime` y `.git` SIGUEN en el conjunto efectivo (no se pierden
+/// por el reemplazo de serde). La garantía es "los obligatorios se inyectan siempre al consumir
+/// `ignored`" (config.rs: «Los defaults **siempre** incluyen `.lodestar/runtime` y `.git`, se
+/// especifique o no `ignored` en el YAML»).
+///
+/// Fase ROJA: hoy `#[serde(default)]` sobre `ignored: Vec<String>` REEMPLAZA la lista completa
+/// cuando el YAML la trae, así que `[node_modules]` borra los obligatorios. El implementador debe
+/// inyectarlos al cargar/consumir (o exponer un `effective_ignored()`); este test asevera el
+/// conjunto efectivo servido en `cfg.workspace.ignored`, coherente con `defaults_sin_config`.
+#[test]
+fn ignored_conserva_obligatorios() {
+    use lodestar_workspace::WorkspaceConfig;
+    let dir = tempfile::tempdir().unwrap();
+    // El usuario declara SOLO `node_modules`: no menciona los obligatorios.
+    escribe_config_yaml(dir.path(), "workspace:\n  ignored: [node_modules]\n");
+
+    let cfg = WorkspaceConfig::load(dir.path()).unwrap();
+    let ig = &cfg.workspace.ignored;
+
+    assert!(
+        ig.iter().any(|s| s == "node_modules"),
+        "la lista del usuario debe conservarse; eran: {ig:?}"
+    );
+    assert!(
+        ig.iter().any(|s| s == ".lodestar/runtime"),
+        "obligatorio `.lodestar/runtime` perdido al especificar `ignored`; eran: {ig:?}"
+    );
+    assert!(
+        ig.iter().any(|s| s == ".git"),
+        "obligatorio `.git` perdido al especificar `ignored`; eran: {ig:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// E9-H06 — Separación canónico vs runtime (`.lodestar/runtime/` + gitignore ajustado).
+//
+// Fase ROJA (ARCHITECTURE.md §19.4, REFACTOR §4.1/§14, DECISIONES D5):
+//   - El `.gitignore` deja de ignorar `.lodestar/` ENTERO: ignora solo `index.db` + `runtime/`,
+//     dejando `config.yaml`/`schema.yaml`/`templates/` VERSIONADOS.
+//   - El watcher/carga NO indexan `.lodestar/runtime/` (desechable), sí los canónicos.
+//   - En un repo ya adoptado (con `.lodestar/` trackeado entero) la apertura ajusta el
+//     `.gitignore` de forma idempotente.
+// La escritura del `.gitignore` pasa a hacerse como texto plano desde `lodestar-workspace`
+// (sin git2; `vcs` queda dormido, §19.2).
+// ---------------------------------------------------------------------------
+
+/// Construye un matcher de gitignore a partir del `<root>/.gitignore` real.
+fn gitignore_de(root: &std::path::Path) -> ignore::gitignore::Gitignore {
+    let (gi, err) = ignore::gitignore::Gitignore::new(root.join(".gitignore"));
+    assert!(err.is_none(), "gitignore ilegible: {err:?}");
+    gi
+}
+
+/// `true` si `rel` (relativa al root) queda ignorada por el `.gitignore` dado, considerando
+/// también sus directorios padre (semántica real de git).
+fn esta_ignorado(gi: &ignore::gitignore::Gitignore, rel: &str, es_dir: bool) -> bool {
+    gi.matched_path_or_any_parents(rel, es_dir).is_ignore()
+}
+
+/// Criterio: bundle recién abierto → el `.gitignore` ignora `.lodestar/index.db` y
+/// `.lodestar/runtime/` pero **no** `.lodestar/config.yaml`.
+///
+/// Fase ROJA: hoy `Vcs::init` escribe `/.lodestar/\n*.db…`, que ignora `.lodestar/` ENTERO
+/// (incluido `config.yaml`) → la aserción "config.yaml NO ignorado" falla.
+#[test]
+fn gitignore_parte_lodestar() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("bundle");
+    // Scaffold de un bundle nuevo (la ruta canónica de "recién abierto/creado").
+    Workspace::init_bundle(&root).unwrap();
+
+    let gi = gitignore_de(&root);
+
+    assert!(
+        esta_ignorado(&gi, ".lodestar/index.db", false),
+        "el `.gitignore` debe ignorar la cache `.lodestar/index.db`"
+    );
+    assert!(
+        esta_ignorado(&gi, ".lodestar/runtime/plans/x.json", false),
+        "el `.gitignore` debe ignorar el runtime desechable `.lodestar/runtime/`"
+    );
+    assert!(
+        !esta_ignorado(&gi, ".lodestar/config.yaml", false),
+        "el `.gitignore` NO debe ignorar la config VERSIONADA `.lodestar/config.yaml`"
+    );
+}
+
+/// Criterio: un fichero en `.lodestar/runtime/plans/x.json` no genera un `IndexEvent` de
+/// conocimiento cuando el watcher procesa eventos.
+///
+/// Nota de fase: hoy el store excluye `.lodestar/` entero e indexa solo `.md`, así que este test
+/// ya pasa — es el **guardián de regresión** de H06: cuando la carga empiece a INCLUIR los
+/// canónicos de `.lodestar/` (config/schema/templates), el runtime debe seguir excluido. El
+/// control positivo (un `.md` de conocimiento real SÍ emite evento) garantiza que la ausencia de
+/// evento del runtime no es un bus muerto.
+#[test]
+fn runtime_no_indexa() {
+    let dir = tempfile::tempdir().unwrap();
+    // Apertura EN VIVO (cache + watcher + bus). Sin git: no hace falta para observar el bus.
+    let ws = Workspace::open_live(dir.path()).unwrap();
+    let rx = ws.subscribe().unwrap();
+
+    // (1) Escribe runtime DESECHABLE directamente en disco (json y md, el caso peligroso).
+    let rt = dir.path().join(".lodestar/runtime/plans");
+    std::fs::create_dir_all(&rt).unwrap();
+    std::fs::write(rt.join("x.json"), "{\"plan\":1}\n").unwrap();
+    std::fs::write(
+        rt.join("nota.md"),
+        "---\ntype: Nota\ntitle: R\n---\n\n# R\n",
+    )
+    .unwrap();
+
+    // (2) Control positivo: un `.md` de CONOCIMIENTO real por el único escritor debe emitir evento.
+    let real = RelPath::new("real.md").unwrap();
+    ws.create_concept(&real, "Nota", Some("Real"), "# H\n\ncuerpo\n", false)
+        .unwrap();
+
+    // (3) Drena el bus una ventana amplia (cubre el debounce ~250 ms). NINGÚN evento puede
+    // referenciar el runtime; el evento de `real.md` debe llegar.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(2000);
+    let mut vio_real = false;
+    while std::time::Instant::now() < deadline {
+        match rx.recv_timeout(std::time::Duration::from_millis(200)) {
+            Ok(ev) => {
+                for p in ev.changed.iter().chain(ev.removed.iter()) {
+                    assert!(
+                        !p.as_str().contains("runtime"),
+                        "un fichero de `.lodestar/runtime/` generó un IndexEvent de conocimiento: {p:?}"
+                    );
+                }
+                if ev.changed.iter().any(|p| p.as_str() == "real.md") {
+                    vio_real = true;
+                }
+            }
+            Err(_) if vio_real => break,
+            Err(_) => {}
+        }
+    }
+    assert!(
+        vio_real,
+        "control positivo: un `.md` de conocimiento real debe emitir un IndexEvent (bus vivo)"
+    );
+}
+
+/// Criterio: un repo ya adoptado con `.lodestar/` trackeado ENTERO (su `.gitignore` no lo ignora)
+/// → al abrir se ofrece/aplica ignorar solo `index.db` + `runtime/`, de forma idempotente.
+///
+/// Fase ROJA: hoy la apertura solo toca `.git/info/exclude` (vía `ensure_cache_ignored`), nunca el
+/// `.gitignore` versionado del repo → el `.gitignore` sigue sin ignorar `index.db`/`runtime/`.
+#[test]
+fn adopcion_ajusta_gitignore() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    // Repo adoptado: el usuario ya tiene su `.gitignore` propio SIN mención de `.lodestar/`
+    // (es decir, `.lodestar/` entero está trackeado) y sus ficheros canónicos versionados.
+    std::fs::write(root.join(".gitignore"), "node_modules/\n").unwrap();
+    std::fs::create_dir_all(root.join(".lodestar")).unwrap();
+    std::fs::write(root.join(".lodestar/config.yaml"), "workspace: {}\n").unwrap();
+
+    // Abrir el workspace debe ajustar el `.gitignore` (texto plano, sin git2).
+    let _ws = Workspace::open_live(root).unwrap();
+    let tras_primera = std::fs::read_to_string(root.join(".gitignore")).unwrap();
+
+    let gi = gitignore_de(root);
+    assert!(
+        esta_ignorado(&gi, ".lodestar/index.db", false),
+        "tras adoptar, el `.gitignore` debe ignorar `.lodestar/index.db`; era:\n{tras_primera}"
+    );
+    assert!(
+        esta_ignorado(&gi, ".lodestar/runtime/plans/x.json", false),
+        "tras adoptar, el `.gitignore` debe ignorar `.lodestar/runtime/`; era:\n{tras_primera}"
+    );
+    assert!(
+        !esta_ignorado(&gi, ".lodestar/config.yaml", false),
+        "el ajuste NO debe ignorar la config versionada `.lodestar/config.yaml`; era:\n{tras_primera}"
+    );
+    assert!(
+        tras_primera.lines().any(|l| l.trim() == "node_modules/"),
+        "el ajuste debe preservar el `.gitignore` propio del usuario; era:\n{tras_primera}"
+    );
+
+    // Idempotencia: una segunda apertura no vuelve a mutar el `.gitignore`.
+    let _ws2 = Workspace::open_live(root).unwrap();
+    let tras_segunda = std::fs::read_to_string(root.join(".gitignore")).unwrap();
+    assert_eq!(
+        tras_primera, tras_segunda,
+        "el ajuste del `.gitignore` debe ser idempotente (sin líneas duplicadas)"
+    );
+}

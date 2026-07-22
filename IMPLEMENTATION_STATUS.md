@@ -176,7 +176,11 @@ superficie de producto; git queda como crate dormido) y `DECISIONES.md §0`. Des
     `WorkspaceConfig::load` (writableRoots/referenceRoots/ignored + gate + transactions; identity
     dormida). Defaults seguros; `RelPath` rechaza traversal en roots; malformado = error explícito.
     Convive con el `Config`/`lodestar.toml` legado. Juez ciego: APROBADA CON RESERVAS (4/4).
-    **Pendiente en E9-H06**: garantizar el merge de `ignored` (hoy `#[serde(default)]` reemplaza;
-    los obligatorios `.lodestar/runtime`/`.git` deben inyectarse siempre al consumir `ignored`).
-  - ⏳ E9-H03, H04, H06, H07 pendientes.
+    (Reserva del merge de `ignored` cerrada en E9-H06.)
+  - ✅ **E9-H06** — Separación canónico vs runtime: `.gitignore` gestionado como texto plano desde
+    workspace (sin git2) ignorando solo `.lodestar/index.db` + `.lodestar/runtime/` (idempotente,
+    con adopción de repos de estilo viejo); scaffold de `.lodestar/runtime/{plans,receipts,staging}`;
+    `WorkspaceConfig::load` inyecta siempre los `ignored` obligatorios (cierra la reserva de H05).
+    Juez ciego: APROBADA (4/4).
+  - ⏳ E9-H03, H04, H07 pendientes (docs/checklist).
 - E10–E14: pendientes.

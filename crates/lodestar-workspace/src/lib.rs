@@ -23,7 +23,9 @@ use lodestar_vcs::{MergeOutcome, Vcs};
 
 pub mod config;
 mod error;
+mod gitignore;
 mod io;
+mod runtime;
 mod snapshot;
 
 pub use config::{Config, WorkspaceConfig};
@@ -45,6 +47,11 @@ impl Workspace {
     /// Abre un bundle: descubre git (puede no haber). Identidad por defecto (override en E8-H01).
     /// **No** activa la cache incremental (usa [`Workspace::open_live`] o [`Workspace::enable_cache`]).
     pub fn open(root: &Path) -> Result<Self, WorkspaceError> {
+        // Ajusta el `.gitignore` versionado (cache + runtime desechables, config canónica
+        // preservada) y garantiza el scaffold de `.lodestar/runtime/` — ambos best-effort, no
+        // abortan la apertura (`ARCHITECTURE.md §19.4`, `DECISIONES.md §0` D5).
+        gitignore::ensure_gitignore(root);
+        runtime::ensure_runtime_scaffold(root);
         let vcs = Vcs::discover(root)?.map(Mutex::new);
         // La identidad de `lodestar.toml` (si existe) tiene prioridad sobre el defecto.
         let identity = Config::load(root)
@@ -90,11 +97,10 @@ impl Workspace {
         if self.cache.is_some() {
             return Ok(());
         }
-        // En repos adoptados, garantiza que `.lodestar/` esté ignorado ANTES de crear la cache
-        // (si no, los checkpoints automáticos commitearían `index.db` a la historia).
-        if let Some(v) = &self.vcs {
-            let _ = v.lock().unwrap().ensure_cache_ignored();
-        }
+        // El `.gitignore` ya quedó ajustado en `Workspace::open` (cache + runtime ignorados,
+        // ANTES de crear la cache) — ver `gitignore::ensure_gitignore`. Ya no se toca
+        // `.git/info/exclude` vía `Vcs::ensure_cache_ignored` (ese ajuste era no-versionado; el
+        // `.gitignore` del bundle es la fuente única, texto plano, sin `git2`).
         let store = Arc::new(Store::open(&self.root)?);
         // Watcher ANTES del rebuild: un guardado externo durante el rebuild inicial genera
         // evento y se reconcilia; al revés quedaba una ventana ciega hasta el siguiente evento.

@@ -106,8 +106,12 @@ pub struct WorkspaceSection {
     /// `tests` de un repo de código adoptado). Vacío por defecto. Uso diferido a E11-H04.
     pub reference_roots: Vec<RelPath>,
     /// Rutas (relativas al root, no necesariamente `RelPath` válidos si describen directorios
-    /// arbitrarios de un repo adoptado) que el walker ignora. Los defaults **siempre** incluyen
-    /// `.lodestar/runtime` y `.git`, se especifique o no `ignored` en el YAML.
+    /// arbitrarios de un repo adoptado) que el walker ignora. `#[serde(default)]` **reemplaza**
+    /// la lista entera cuando el YAML trae `ignored` propio (no hace merge), así que el
+    /// deserializado en crudo puede no traer los obligatorios. [`WorkspaceConfig::load`] los
+    /// inyecta siempre tras deserializar (merge + dedupe) — el campo `ignored` que ve cualquier
+    /// consumidor de `WorkspaceConfig` (tras `load`) SIEMPRE incluye `.lodestar/runtime` y
+    /// `.git`, se hayan especificado o no en el YAML.
     pub ignored: Vec<String>,
 }
 
@@ -159,12 +163,23 @@ impl WorkspaceConfig {
     /// (mismo patrón que `Config::load`: la ausencia de fichero no es un error). YAML malformado,
     /// o un `writableRoots`/`referenceRoots` con un componente inválido (p. ej. `..`, rechazado
     /// por `RelPath`), sí es un error explícito — nunca se silencia a defaults.
+    ///
+    /// Tras deserializar, inyecta siempre los obligatorios (`.lodestar/runtime`, `.git`) en
+    /// `workspace.ignored` (merge + dedupe): `#[serde(default)]` reemplaza la lista entera cuando
+    /// el YAML trae la suya, así que sin esta inyección un `ignored` explícito del usuario se
+    /// comería los obligatorios.
     pub fn load(root: &Path) -> Result<WorkspaceConfig, String> {
         let path = root.join(WORKSPACE_CONFIG_FILE);
-        match std::fs::read_to_string(&path) {
-            Ok(text) => serde_yaml::from_str(&text)
-                .map_err(|e| format!("{WORKSPACE_CONFIG_FILE} inválido: {e}")),
-            Err(_) => Ok(WorkspaceConfig::default()),
+        let mut cfg = match std::fs::read_to_string(&path) {
+            Ok(text) => serde_yaml::from_str::<WorkspaceConfig>(&text)
+                .map_err(|e| format!("{WORKSPACE_CONFIG_FILE} inválido: {e}"))?,
+            Err(_) => WorkspaceConfig::default(),
+        };
+        for obligatorio in default_ignored() {
+            if !cfg.workspace.ignored.contains(&obligatorio) {
+                cfg.workspace.ignored.push(obligatorio);
+            }
         }
+        Ok(cfg)
     }
 }
