@@ -465,7 +465,33 @@ superficie de producto; git queda como crate dormido) y `DECISIONES.md §0`. Des
     `meta.protocolo.instructions`. Sin cambios en `core::types` (invariante #4; `Profile` es runtime, no
     wire → sin sync del espejo TS). Guardián de contrato: NO BLOQUEANTE (perfil de las 3 tools 1:1 con
     `CHANGE_TOOLS`). Juez ciego (seguridad escrutada, sin bypass): **APROBADA (2/2)**.
-  - ⏳ E14-H04 (benchmark §17 e2e), E14-H05 (métricas de escala) pendientes.
+  - ✅ **E14-H04** — Benchmark funcional (`REFACTOR §17`) como suite e2e: `crates/lodestar-mcp/tests/
+    benchmark.rs` ejercita los **15 escenarios** de §17 contra la superficie real (binario `lodestar-mcp`
+    por stdio, JSON-RPC), un `#[test]` por fila (`bench_01`…`bench_15`) + el agregador
+    `benchmark_15_escenarios`, con aserciones no-vacuas del resultado esperado (búsqueda por significado,
+    create válido/rechazado, mover con 31 ops en un plan, borrar referenciado → `INBOUND_LINKS_EXIST`,
+    `REVISION_CONFLICT`, 5 conceptos en un changeSet, relación inválida → `RELATION_CONSTRAINT_VIOLATION`,
+    `apply_fix` sobre REL-TARGET, diff semántico, revert, crash+durabilidad, `PERMISSION_DENIED` fuera de
+    writable, ref de código inexistente → `exists:false`, edición manual inválida → `knowledge_check`).
+    Usa los códigos de error REALES del motor (documentados como divergencia consciente frente a los
+    idealizados de §17). El escenario de crash reutiliza `recovery_sin_parciales` (E13-H06) + durabilidad
+    e2e tras reabrir. **El benchmark destapó un hueco real de seguridad (invariante #3) que la fase verde
+    cerró**: `Workspace::validate_staging` medía solo `analyze().hard_fail` (OKF) y NO la conformidad
+    schema-driven → `change_apply` podía **publicar** un resultado con `SCHEMA-*`/`REL-*` err reportando
+    `conformant:true` (mientras `knowledge_check`/`lodestar check` lo dirían no-conforme). Arreglo: el gate
+    usa ahora `plan::validate_result(&bundle, &schema)` — la MISMA función del core que `change_plan` usa
+    para `canApply` (OKF `per_file` + `validate_schema` + `validate_relations`, cuenta solo `err`,
+    `conformant == errors==0`) — así el gate transaccional y `change_plan`/`knowledge_check` convergen por
+    construcción, no por lógica duplicada. Corre ANTES de backup/journal/publish (no toca el canónico).
+    Layering intacto (`lodestar-workspace`→`core`, NO `app`; schema cargado con `WorkspaceSchema::load`).
+    Sin regresión (E13-H11 regen, recovery con failpoints, 44 MCP verdes). Juez ciego (equivalencia del
+    gate escrutada): **APROBADA CON RESERVAS (3/3)**. **Reserva menor registrada** (preexistente, dirección
+    segura, sin trigger práctico): `plan::validate_result` aplana TODO `per_file` (incluye reservados
+    `index.md`/`log.md`) mientras `knowledge_check` itera solo `concepts` → el gate puede ser *más*
+    estricto que `knowledge_check` sobre `OKF-CONFLICT` de un reservado (nunca menos: dirección segura;
+    y el `index.md` de staging se regenera limpio, sin trigger real). El delta del arreglo (schema+rel)
+    apunta solo a paths de `concepts`, alineado con `knowledge_check`.
+  - ⏳ E14-H05 (métricas de escala) pendiente.
   - **Pendiente al cierre de E14**: limpieza final de superficie `mcp.yml` → 10 tools objetivo (retirar
     `query`/`conformance_check`/`find_*`/`neighborhood`/`create_concept`/`update_frontmatter`/
     `generate_*`), descopada aquí desde E12/E13.

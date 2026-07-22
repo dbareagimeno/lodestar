@@ -18,7 +18,7 @@ use lodestar_core::types::{ChangeSet, ChangeSetId, FileMap, RelPath};
 use lodestar_core::Bundle;
 
 use crate::error::WorkspaceError;
-use crate::{io, Workspace};
+use crate::{io, Workspace, WorkspaceSchema};
 
 /// Directorio de staging materializado: contiene el árbol `.md` resultante de aplicar un
 /// [`ChangeSet`] sobre el canónico, bajo `.lodestar/runtime/staging/<changeSetId saneado>/`.
@@ -144,23 +144,48 @@ impl Workspace {
         Ok(StagingDir { path: dir })
     }
 
-    /// Valida un staging materializado contra la política de conformidad **estricta** antes de
-    /// publicar (E13-H01). Construye un [`Bundle`] desde el árbol de staging, lo analiza y, si hay
-    /// algún fallo duro (`hard_fail > 0`), **aborta sin tocar el canónico** y limpia el directorio
-    /// de staging, devolviendo [`WorkspaceError::NonconformantResult`]. Si el resultado es
-    /// conforme, devuelve `Ok(())` y el staging queda listo para publicarse.
+    /// Valida un staging materializado contra la política de conformidad **completa** antes de
+    /// publicar (E13-H01; conformidad schema-driven añadida en E14-H04). Construye un [`Bundle`]
+    /// desde el árbol de staging y evalúa el **mismo universo de diagnósticos** que
+    /// `App::knowledge_check`/`lodestar check`: los 15 checks OKF de [`Bundle::analyze`] MÁS la
+    /// validación schema-driven (`SCHEMA-*`/`REL-*`, `core::schema::validate_schema` +
+    /// `validate_relations`) contra el esquema del workspace. Si el resultado deja **cualquier**
+    /// diagnóstico de nivel `err`, **aborta sin tocar el canónico** y limpia el directorio de
+    /// staging, devolviendo [`WorkspaceError::NonconformantResult`]. Si es conforme, devuelve
+    /// `Ok(())` y el staging queda listo para publicarse.
     ///
-    /// El gate es estricto por diseño: nunca se publica un resultado con fallos duros, con
-    /// independencia de que la config bloquee o no los avisos.
+    /// **Invariante #3 (una sola verdad computada)**: el veredicto del gate debe coincidir
+    /// EXACTAMENTE con el de `App::knowledge_check` scope workspace sobre el mismo resultado. Para
+    /// no duplicar la composición se reutiliza [`plan::validate_result`] — la MISMA función que
+    /// `change_plan` usa para computar `canApply`/`diagnosticsAfter`, que a su vez compone
+    /// `analyze().per_file` + `validate_schema` + `validate_relations` (`plan::all_checks`) y
+    /// declara `conformant == (errors == 0)`. Antes (E13-H01) el gate medía solo
+    /// `analyze().hard_fail` (los checks OKF) y NO ejecutaba la validación schema-driven, así que un
+    /// `SCHEMA-REQFIELD`/`REL-*` (level `err`) pasaba el gate y `change_apply` publicaba un
+    /// resultado que `knowledge_check` declararía no conforme: gate transaccional y motor de
+    /// conformidad DIVERGÍAN. Reusar `validate_result` cierra esa divergencia por construcción.
+    ///
+    /// El esquema se carga con [`WorkspaceSchema::load`] (I/O de `workspace`, nunca del core:
+    /// invariante #2 — el core es puro y recibe el `Schema` ya deserializado); un bundle sin
+    /// `.lodestar/schema.yaml` produce `Schema::default()` (vacío/permisivo) y la validación
+    /// schema-driven devuelve cero checks, así que el veredicto de un bundle sin esquema no cambia.
+    ///
+    /// El gate es estricto por diseño: cuenta solo `err` (no `warn`), nunca se publica un resultado
+    /// con errores duros, con independencia de que la config bloquee o no los avisos.
     pub fn validate_staging(&self, staging: &StagingDir) -> Result<(), WorkspaceError> {
         let files = read_tree(staging.path())?;
         let bundle = Bundle::from_files(files);
-        let hard_fail = bundle.analyze().hard_fail;
-        if hard_fail > 0 {
+        // Esquema del workspace (el mismo que carga `App::knowledge_check`); su ausencia no es error.
+        let schema = WorkspaceSchema::load(&self.root).map_err(WorkspaceError::Io)?;
+        // Conformidad COMPLETA (OKF + SCHEMA-* + REL-*): misma composición y mismo criterio
+        // (`conformant == errors == 0`) que `change_plan`/`knowledge_check` (invariante #3).
+        let report = plan::validate_result(&bundle, &schema);
+        if !report.conformant {
             // Aborta: limpia el staging (best-effort) y no toca el canónico.
             let _ = std::fs::remove_dir_all(staging.path());
+            let errors = report.summary.errors;
             return Err(WorkspaceError::NonconformantResult(format!(
-                "el resultado del plan deja {hard_fail} fallo(s) duro(s) de conformidad"
+                "el resultado del plan deja {errors} fallo(s) duro(s) de conformidad"
             )));
         }
         Ok(())
