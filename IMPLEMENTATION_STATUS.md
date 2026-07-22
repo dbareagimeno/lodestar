@@ -245,6 +245,11 @@ superficie de producto; git queda como crate dormido) y `DECISIONES.md §0`. Des
   - ✅ **E10-H11** — Tool `schema_inspect`: modos `catalog`/`type` proyectan el `Schema` cargado
     (`WorkspaceSchema::load`); `DocType` reexpuesto de core::schema sin DTO paralelo (invariante #4);
     sin schema → catálogo vacío; modo/tipo inválido → `INVALID_SCHEMA` en wire. Juez ciego: APROBADA (3/3).
-  - ⏳ E10-H12–H13 (knowledge_check + outputSchema/mcp.yml).
+  - ✅ **E10-H12** — Tool `knowledge_check` (sustituye `conformance_check`): compone `analyze`
+    (OKF) + `validate_schema` (E10-H07, cableado por 1ª vez) con scopes workspace/concept/paths/
+    affected (vecindario vía `neighborhood`, sin off-by-one); ids de diagnóstico estables
+    (`diag:blake3:` solo de datos del diagnóstico); `conformant`/`summary` computados antes de
+    minimumSeverity/paginación. Juez ciego: APROBADA (3/3).
+  - ⏳ E10-H13 (outputSchema schemars + reescritura mcp.yml + retirar query/conformance_check).
 - **E11–E14: pendientes** (grafo e impacto · planificación · publicación recuperable ·
   integración software + evaluación — `ARCHITECTURE.md §19.8`).

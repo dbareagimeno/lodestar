@@ -1146,3 +1146,289 @@ fn inspect_sin_schema() {
         "un bundle sin schema.yaml debe dar un catálogo vacío: {resp:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// E10-H12 — Tool `knowledge_check` (sustituye `conformance_check`).
+//
+// UBICACIÓN: los 3 criterios se ejercitan **e2e por la tool MCP** (campo Pruebas de la historia:
+// `crates/lodestar-mcp/tests/`), coherente con E10-H08…H11. Lo que hay que fijar es el contrato de
+// **wire** (forma de `scope`, forma del `structuredContent` con `conformant`/`summary`/
+// `diagnostics`/`workspaceRevision`/`nextCursor`, y que cada diagnóstico lleve `id`/`code`/`targets`)
+// sin acoplar los tests a los tipos internos que el implementador aún no ha creado
+// (`App::knowledge_check`, el enum de scope, etc.).
+//
+// FASE ROJA: la tool `knowledge_check` NO está en `tools::list()` todavía (solo existe la vieja
+// `conformance_check`), así que `tools/call {name:"knowledge_check"}` devuelve el error de protocolo
+// `-32602` (tool desconocida) y `result` es `null` → los asserts que leen
+// `result.structuredContent.diagnostics` fallan por AUSENCIA de la tool/servicio (no por un valor
+// erróneo). Ese es el rojo correcto: la tool + `App::knowledge_check` no existen.
+//
+// WIRE DE ENTRADA asumido (el implementador puede refinar los tipos internos, no el wire):
+//   arguments: {
+//     scope: { kind: "workspace" }
+//          | { kind: "concept",  ref: { path } }
+//          | { kind: "paths",    paths: [ "<RelPath>", … ] }
+//          | { kind: "affected", refs: [ { path } ], depth: <n> },
+//     minimumSeverity?: "err" | "warn" | "info",   // omitido = todos los niveles
+//     includeSuggestedFixes?: bool,
+//     limit?: <n>,
+//     cursor?: string
+//   }
+//
+// WIRE DE SALIDA asumido (`structuredContent`, `ARCHITECTURE.md §19.6`, `REFACTOR §10`):
+//   {
+//     conformant: bool,
+//     summary: { errors, warnings, info },
+//     diagnostics: [ { level, code, msg, targets, id, range?, related, fixes } ],  // Check (E10-H06)
+//     workspaceRevision: "blake3:…",
+//     nextCursor: string | null
+//   }
+// Cada diagnóstico lleva un `id` ESTABLE dentro de una revisión, con formato `diag:…` que embebe un
+// `blake3:` (hash determinista de, p. ej., path+code+range+msg).
+//
+// FIRMA DE SERVICIO ASUMIDA (el implementador la crea con su propia elección de tipos internos):
+//   App::knowledge_check(scope, minimum_severity, include_suggested_fixes, limit, cursor)
+//       -> Result<{ conformant, summary, diagnostics, workspaceRevision, nextCursor }, _>
+//   Compone `Bundle::analyze` (los 15 checks OKF) + `validate_schema(bundle, schema)` (E10-H07);
+//   `affected` acota por vecindad (`Bundle::neighborhood` / `Store::blast_radius`).
+// ---------------------------------------------------------------------------
+
+/// Extrae los diagnósticos (`structuredContent.diagnostics`) de una respuesta `knowledge_check`. Si
+/// la tool/servicio no existe todavía (fase ROJA), ese campo es nulo → panica con un mensaje que
+/// documenta el porqué del rojo (la tool ausente), no un fallo espurio.
+fn check_diagnostics(resp: &serde_json::Value) -> Vec<serde_json::Value> {
+    resp["result"]["structuredContent"]["diagnostics"]
+        .as_array()
+        .unwrap_or_else(|| {
+            panic!("knowledge_check debe devolver structuredContent.diagnostics (array): {resp:?}")
+        })
+        .clone()
+}
+
+/// Los `targets` (paths afectados) de un diagnóstico `Check` (campo `targets`, siempre presente).
+fn diag_targets(d: &serde_json::Value) -> Vec<String> {
+    d["targets"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// `true` si algún diagnóstico de `diags` tiene `path` entre sus `targets`.
+fn diags_cubren(diags: &[serde_json::Value], path: &str) -> bool {
+    diags
+        .iter()
+        .any(|d| diag_targets(d).iter().any(|t| t == path))
+}
+
+/// Bundle con un `.md` **editado a mano** cuyo frontmatter es inválido: le falta el campo
+/// obligatorio `type`, lo que dispara el check hard-fail `OKF-TYPE` (severidad `Err`) sobre ese
+/// path (`conform.rs`: "Falta indicar de qué tipo es esta página."). El bundle es por lo demás
+/// válido (tiene `index.md`), así que el ÚNICO error viene de la edición directa.
+fn bundle_editado_a_mano() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "index.md",
+        "---\nokf_version: \"0.1\"\n---\n\n# Bundle\n\n* [Editado](editado-a-mano.md)\n",
+    );
+    // Frontmatter válido como bloque pero SIN `type` → OKF-TYPE (Err). Simula a alguien que editó
+    // el .md a pelo y olvidó el campo obligatorio.
+    write(
+        dir.path(),
+        "editado-a-mano.md",
+        "---\ntitle: Editado a mano\ndescription: alguien lo escribió a pelo\n---\n\n# Nota\n\ncuerpo suelto sin tipo.\n",
+    );
+    dir
+}
+
+/// E10-H12 · Criterio `check_detecta_edicion_directa` (benchmark §17):
+/// Dado un `.md` editado a mano con frontmatter inválido, Cuando se hace `knowledge_check` de scope
+/// `workspace`, Entonces aparece el diagnóstico de ese path y el veredicto es no conforme.
+#[test]
+fn check_detecta_edicion_directa() {
+    let dir = bundle_editado_a_mano();
+    let resp = roundtrip(
+        dir.path(),
+        &[
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"knowledge_check","arguments":{"scope":{"kind":"workspace"}}}}"#,
+        ],
+        1,
+    );
+    let diags = check_diagnostics(&resp[0]);
+
+    // Hay un diagnóstico sobre el fichero editado a mano.
+    let del_fichero: Vec<&serde_json::Value> = diags
+        .iter()
+        .filter(|d| diag_targets(d).iter().any(|t| t == "editado-a-mano.md"))
+        .collect();
+    assert!(
+        !del_fichero.is_empty(),
+        "knowledge_check(workspace) debe reportar el diagnóstico de «editado-a-mano.md»: {resp:?}"
+    );
+    // Y es exactamente el hard-fail OKF-TYPE (frontmatter sin `type`) — no un warning cualquiera.
+    assert!(
+        del_fichero.iter().any(|d| d["code"] == "OKF-TYPE"),
+        "el diagnóstico de «editado-a-mano.md» debe ser OKF-TYPE (falta el campo `type`): {resp:?}"
+    );
+
+    // Veredicto global: NO conforme (hay al menos un error).
+    assert_eq!(
+        resp[0]["result"]["structuredContent"]["conformant"],
+        serde_json::Value::Bool(false),
+        "con un frontmatter inválido el workspace NO debe ser conforme: {resp:?}"
+    );
+}
+
+/// Bundle para `check_scope_affected`. Grafo de vecindad **bidireccional** (robusto a la dirección
+/// que use el implementador — out/in/both) alrededor del ref `centro.md`:
+///
+///   index.md ──► centro.md ◄──► vecino.md ◄──► c.md          lejano.md   (aislado)
+///
+/// - `centro.md` (A): el ref; conforme. Enlaza a `vecino.md`.
+/// - `vecino.md` (B, distancia 1): frontmatter sin `type` → diagnóstico OKF-TYPE. Enlaza a `centro`
+///   y a `c` (así, en CUALQUIER dirección, B está a distancia 1 y C a distancia 2 de A).
+/// - `c.md` (C, distancia 2): frontmatter sin `type` → diagnóstico OKF-TYPE. Enlaza a `vecino`.
+/// - `lejano.md` (D, NO conectado): frontmatter sin `type` → diagnóstico OKF-TYPE. Su diagnóstico
+///   DEBE quedar fuera del scope `affected {refs:[centro], depth:2}`.
+///
+/// El criterio es inequívoco: con `depth:2` el vecindario de A es exactamente {centro, vecino, c};
+/// `lejano` está a distancia infinita y no puede colarse.
+fn bundle_affected() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "index.md",
+        "---\nokf_version: \"0.1\"\n---\n\n# Bundle\n\n* [Centro](centro.md)\n",
+    );
+    // A: conforme, enlaza a B.
+    write(
+        dir.path(),
+        "centro.md",
+        "---\ntype: concept\ntitle: Centro\ndescription: nodo raíz del vecindario\n---\n\n# Centro\n\n[Vecino](vecino.md)\n",
+    );
+    // B (distancia 1): sin `type` → OKF-TYPE. Enlaza a A y a C (bidireccional).
+    write(
+        dir.path(),
+        "vecino.md",
+        "---\ntitle: Vecino\ndescription: a distancia 1 de centro\n---\n\n# Vecino\n\n[Centro](centro.md)\n\n[C](c.md)\n",
+    );
+    // C (distancia 2): sin `type` → OKF-TYPE. Enlaza a B (bidireccional).
+    write(
+        dir.path(),
+        "c.md",
+        "---\ntitle: C\ndescription: a distancia 2 de centro\n---\n\n# C\n\n[Vecino](vecino.md)\n",
+    );
+    // D (lejano, aislado): sin `type` → OKF-TYPE. Sin ningún enlace desde/hacia el vecindario.
+    write(
+        dir.path(),
+        "lejano.md",
+        "---\ntitle: Lejano\ndescription: desconectado del vecindario\n---\n\n# Lejano\n\ncuerpo sin enlaces.\n",
+    );
+    dir
+}
+
+/// E10-H12 · Criterio `check_scope_affected`:
+/// Dado `scope:affected` con un ref (`centro.md`) y `depth:2`, Cuando se llama `knowledge_check`,
+/// Entonces solo aparecen diagnósticos del vecindario (vecino a distancia 1 y c a distancia 2), y
+/// NO el del concepto lejano y desconectado.
+#[test]
+fn check_scope_affected() {
+    let dir = bundle_affected();
+    let resp = roundtrip(
+        dir.path(),
+        &[
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"knowledge_check","arguments":{"scope":{"kind":"affected","refs":[{"path":"centro.md"}],"depth":2}}}}"#,
+        ],
+        1,
+    );
+    let diags = check_diagnostics(&resp[0]);
+
+    // Vecino (distancia 1) DEBE aparecer.
+    assert!(
+        diags_cubren(&diags, "vecino.md"),
+        "el diagnóstico de «vecino.md» (distancia 1) debe estar en el scope affected: {resp:?}"
+    );
+    // C (distancia 2) DEBE aparecer — prueba que `depth:2` alcanza el segundo salto (no vacuo).
+    assert!(
+        diags_cubren(&diags, "c.md"),
+        "el diagnóstico de «c.md» (distancia 2) debe estar en el scope affected con depth:2: {resp:?}"
+    );
+    // El concepto LEJANO y desconectado NO debe aparecer: es lo que hace inequívoco el scope.
+    assert!(
+        !diags_cubren(&diags, "lejano.md"),
+        "el diagnóstico de «lejano.md» (desconectado) NO debe estar en el scope affected: {resp:?}"
+    );
+}
+
+/// Bundle con DOS ficheros no conformes (frontmatter sin `type` → OKF-TYPE), para que el conjunto de
+/// `id` de diagnóstico sea significativo (≥1, aquí ≥2) al comparar estabilidad entre revisiones.
+fn bundle_dos_diagnosticos() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "index.md",
+        "---\nokf_version: \"0.1\"\n---\n\n# Bundle\n\n* [Uno](uno.md)\n* [Dos](dos.md)\n",
+    );
+    for slug in ["uno", "dos"] {
+        write(
+            dir.path(),
+            &format!("{slug}.md"),
+            &format!("---\ntitle: {slug}\ndescription: sin type\n---\n\n# H\n\ncuerpo.\n"),
+        );
+    }
+    dir
+}
+
+/// Reúne el conjunto de `id` de diagnóstico de una respuesta `knowledge_check`, tras verificar que
+/// cada `id` está presente y con el formato estable `diag:…` que embebe `blake3:`.
+fn diag_ids(resp: &serde_json::Value) -> std::collections::BTreeSet<String> {
+    check_diagnostics(resp)
+        .iter()
+        .map(|d| {
+            let id = d["id"].as_str().unwrap_or_else(|| {
+                panic!("cada diagnóstico de knowledge_check debe llevar un `id` estable: {d:?}")
+            });
+            assert!(
+                id.starts_with("diag:"),
+                "el `id` de diagnóstico debe empezar por «diag:»: {id}"
+            );
+            assert!(
+                id.contains("blake3:"),
+                "el `id` de diagnóstico debe embeber un hash «blake3:»: {id}"
+            );
+            id.to_string()
+        })
+        .collect()
+}
+
+/// E10-H12 · Criterio `check_ids_estables`:
+/// Dada la misma revisión dos veces (dos servidores frescos sobre el MISMO bundle sin cambios),
+/// Cuando se hace `knowledge_check` de scope `workspace`, Entonces el conjunto de `id` de
+/// diagnóstico coincide entre ambas llamadas (misma revisión → mismos ids).
+#[test]
+fn check_ids_estables() {
+    let dir = bundle_dos_diagnosticos();
+    let call = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"knowledge_check","arguments":{"scope":{"kind":"workspace"}}}}"#;
+
+    // Dos procesos frescos sobre el mismo bundle: misma revisión de workspace.
+    let a = roundtrip(dir.path(), &[call], 1);
+    let b = roundtrip(dir.path(), &[call], 1);
+
+    let ids_a = diag_ids(&a[0]);
+    let ids_b = diag_ids(&b[0]);
+
+    // Significativo: hay al menos un diagnóstico (si no, la igualdad sería vacua).
+    assert!(
+        !ids_a.is_empty(),
+        "el bundle debe producir al menos un diagnóstico para que el criterio no sea vacuo: {a:?}"
+    );
+    // Misma revisión → mismos ids.
+    assert_eq!(
+        ids_a, ids_b,
+        "los `id` de diagnóstico deben coincidir entre dos llamadas sobre la misma revisión"
+    );
+}

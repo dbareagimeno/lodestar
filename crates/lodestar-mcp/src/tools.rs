@@ -5,8 +5,8 @@
 
 use std::collections::BTreeMap;
 
-use lodestar_app::{App, Profile, SearchFilters};
-use lodestar_core::types::{ConceptRef, Direction, FrontmatterPatch, RelPath};
+use lodestar_app::{App, CheckScope, Profile, SearchFilters};
+use lodestar_core::types::{ConceptRef, Direction, FrontmatterPatch, RelPath, Severity};
 #[cfg(test)]
 use lodestar_workspace::Workspace;
 use serde_json::{json, Value};
@@ -95,6 +95,23 @@ pub fn list() -> Value {
              "mode": { "type": "string", "description": "«catalog» (todos los DocType) o «type» (uno concreto, requiere «type»).", "enum": ["catalog", "type"] },
              "type": { "type": "string", "description": "Nombre del DocType a inspeccionar (solo con mode «type»)." }
          }, "required": ["mode"], "additionalProperties": false }},
+        {"name": "knowledge_check", "description": "Audita el conocimiento (checks OKF + esquema) con scopes y severidad mínima; diagnósticos con id estable y paginación por cursor.",
+         "inputSchema": { "type": "object", "properties": {
+             "scope": { "type": "object", "description": "Qué auditar. Discriminado por «kind».", "properties": {
+                 "kind": { "type": "string", "enum": ["workspace", "concept", "paths", "affected"] },
+                 "ref": { "type": "object", "description": "ConceptRef (solo con kind «concept»).", "properties": {
+                     "path": { "type": "string" }
+                 }, "required": ["path"] },
+                 "paths": { "type": "array", "description": "Lista de paths (solo con kind «paths»).", "items": { "type": "string" } },
+                 "refs": { "type": "array", "description": "ConceptRefs centro del vecindario (solo con kind «affected»).",
+                     "items": { "type": "object", "properties": { "path": { "type": "string" } }, "required": ["path"] } },
+                 "depth": { "type": "integer", "minimum": 1, "default": 1, "description": "Distancia máxima del vecindario (solo con kind «affected»)." }
+             }, "required": ["kind"] },
+             "minimumSeverity": { "type": "string", "enum": ["err", "warn", "info"], "description": "Umbral de severidad de los diagnósticos devueltos (por defecto «info»)." },
+             "includeSuggestedFixes": { "type": "boolean", "default": false, "description": "Si false, los diagnósticos no llevan «fixes»." },
+             "limit": { "type": "integer", "minimum": 1, "maximum": 1000, "default": 100 },
+             "cursor": { "type": "string", "description": "Cursor opaco de paginación devuelto en «nextCursor»." }
+         }, "required": ["scope"], "additionalProperties": false }},
     ])
 }
 
@@ -239,6 +256,35 @@ pub fn call(app: &App, profile: Profile, name: &str, params: &Value) -> ToolResu
                 .schema_inspect(mode, type_name)
                 .map_err(|e| e.as_str().to_string())?;
             to_json(&inspection)
+        }
+        "knowledge_check" => {
+            let scope: CheckScope = match params.get("scope") {
+                Some(v) => serde_json::from_value(v.clone()).map_err(|e| e.to_string())?,
+                None => return Err("falta el parámetro «scope»".to_string()),
+            };
+            // Wire de severidad mínima → `Severity` (err|warn|info); ausente = sin umbral extra.
+            let min_severity = match params.get("minimumSeverity").and_then(Value::as_str) {
+                Some("err") => Some(Severity::Err),
+                Some("warn") => Some(Severity::Warn),
+                Some("info") => Some(Severity::Info),
+                Some(other) => return Err(format!("minimumSeverity inválido: «{other}»")),
+                None => None,
+            };
+            let include_fixes = params
+                .get("includeSuggestedFixes")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let limit = params
+                .get("limit")
+                .and_then(Value::as_u64)
+                .map(|n| n as usize);
+            let cursor = params.get("cursor").and_then(Value::as_str);
+            // Mismo mapeo de error a wire que `knowledge_get`/`schema_inspect` (E10-H02): el código
+            // estable `ErrorCode::as_str()`, nunca el `Debug` de la variante.
+            let report = app
+                .knowledge_check(&scope, min_severity, include_fixes, limit, cursor)
+                .map_err(|e| e.as_str().to_string())?;
+            to_json(&report)
         }
         other => Err(format!("tool desconocida: {other}")),
     }

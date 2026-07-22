@@ -10,18 +10,18 @@
 //! directamente de `rusqlite`/`git2`/`tokio` (invariante #2 de `CLAUDE.md`, verificado por
 //! `cargo tree -p lodestar-app`).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
 use lodestar_core::model;
-use lodestar_core::schema::DocType;
+use lodestar_core::schema::{validate_schema, DocType};
 use lodestar_core::types::{
-    workspace_revision, Backlinks, Check, ConceptRef, ConceptRevision, ErrorCode, Frontmatter,
-    RelPath, WorkspaceRevision,
+    workspace_revision, Analysis, Backlinks, Check, ConceptRef, ConceptRevision, Direction,
+    ErrorCode, Frontmatter, RelPath, Severity, WorkspaceRevision,
 };
-use lodestar_core::CoreError;
+use lodestar_core::{Bundle, CoreError};
 use lodestar_workspace::{Workspace, WorkspaceConfig, WorkspaceError, WorkspaceSchema};
 
 /// Envelope común de protocolo (`ARCHITECTURE.md §19.6`, `docs/REFACTOR.md §13`, decisión **D3**).
@@ -636,6 +636,265 @@ impl App {
             _ => Err(ErrorCode::InvalidSchema),
         }
     }
+
+    /// Audita el conocimiento con scopes y severidad mínima (E10-H12, `ARCHITECTURE.md §19.6`,
+    /// `REFACTOR §10/§17`). Es la tool que **cablea por primera vez** la validación schema-driven
+    /// (E10-H07, `validate_schema`, PURA) junto a los 15 checks OKF de `Bundle::analyze`.
+    ///
+    /// **Composición de diagnósticos** (invariante #3 — una sola verdad computada): por cada
+    /// concepto (`Analysis::concepts`) se unen sus checks de conformidad OKF (`Analysis::per_file`)
+    /// con los checks de esquema (`validate_schema(&bundle, &schema)`, agrupados por su `target`).
+    /// Un bundle sin `.lodestar/schema.yaml` produce `Schema::default()` (vacío) y `validate_schema`
+    /// devuelve cero checks, así que **el veredicto de un bundle sin esquema no cambia**. Los checks
+    /// `Pass` (no son hallazgos) se descartan.
+    ///
+    /// **Scopes** (`scope`): `workspace` = todos los conceptos; `concept{ref}` = solo ese concepto
+    /// (resuelto con [`App::resolve_ref`], `CONCEPT_NOT_FOUND` si no existe); `paths{paths}` = esos
+    /// paths; `affected{refs,depth}` = el vecindario a distancia ≤ `depth` de cada `ref`
+    /// (`Bundle::neighborhood(_, depth, Direction::Both)`, unión de los nodos alcanzados más los
+    /// propios refs) — los conceptos desconectados quedan fuera.
+    ///
+    /// **IDs estables dentro de una revisión**: cada diagnóstico lleva
+    /// `diag:blake3:<hex>` con `hex = blake3(path ‖ 0x00 ‖ code ‖ 0x00 ‖ range ‖ 0x00 ‖ msg)`.
+    /// Como solo depende de los datos del diagnóstico (nunca de timestamps/orden/caché), la misma
+    /// revisión produce los mismos `id` incluso entre procesos frescos (criterio `check_ids_estables`).
+    ///
+    /// `summary` (errors/warnings/info) y `conformant` (== `errors == 0`) se computan sobre **todo**
+    /// el conjunto de diagnósticos del scope, antes de aplicar `minimum_severity` o la paginación —
+    /// son un agregado del scope, no de la página devuelta. `minimum_severity` (por defecto `Info`,
+    /// que ya excluye los `Pass`) eleva el umbral de lo que se **devuelve** en `diagnostics`.
+    /// `include_suggested_fixes == false` vacía `fixes` (hoy siempre vacío: los checks OKF/schema no
+    /// proponen fixes todavía — E12-H07). `limit`/`cursor` paginan de forma determinista sobre el
+    /// orden total estable `(path, code, id)` (mismo patrón de cursor-offset opaco que
+    /// `knowledge_search`); `limit` por defecto 100 (`REFACTOR §10`), `next_cursor` `None` al agotar.
+    pub fn knowledge_check(
+        &self,
+        scope: &CheckScope,
+        minimum_severity: Option<Severity>,
+        include_suggested_fixes: bool,
+        limit: Option<usize>,
+        cursor: Option<&str>,
+    ) -> Result<CheckReport, ErrorCode> {
+        let bundle = self
+            .workspace
+            .bundle()
+            .map_err(|e| workspace_error_code(&e))?;
+        let analysis = bundle.analyze();
+        let root = self.workspace.root();
+        let cfg = WorkspaceConfig::load(root).map_err(|_| ErrorCode::InternalIoError)?;
+        let schema = WorkspaceSchema::load(root).map_err(|_| ErrorCode::InternalIoError)?;
+
+        let revision = workspace_revision(bundle.files(), &cfg.workspace.writable_roots);
+
+        // Checks schema-driven agrupados por su path (`target`): así se unen a los OKF por path.
+        let mut schema_by_path: BTreeMap<RelPath, Vec<Check>> = BTreeMap::new();
+        for check in validate_schema(&bundle, &schema) {
+            for target in &check.targets {
+                schema_by_path
+                    .entry(target.clone())
+                    .or_default()
+                    .push(check.clone());
+            }
+        }
+
+        // Conjunto de paths del scope.
+        let allowed = self.scope_paths(&bundle, analysis, scope)?;
+
+        // Compón (path, check) uniendo OKF + schema por cada concepto del scope, con id estable.
+        let mut items: Vec<(RelPath, Check)> = Vec::new();
+        for path in &analysis.concepts {
+            if !allowed.contains(path) {
+                continue;
+            }
+            let mut checks: Vec<Check> = analysis.per_file.get(path).cloned().unwrap_or_default();
+            if let Some(extra) = schema_by_path.get(path) {
+                checks.extend(extra.iter().cloned());
+            }
+            for mut check in checks {
+                // Los `Pass` no son diagnósticos: no computan en summary ni se devuelven.
+                if check.level == Severity::Pass {
+                    continue;
+                }
+                check.id = Some(diagnostic_id(path, &check));
+                if !include_suggested_fixes {
+                    check.fixes.clear();
+                }
+                items.push((path.clone(), check));
+            }
+        }
+
+        // Summary/conformant sobre TODO el scope (antes de minimum_severity y paginación).
+        let errors = items
+            .iter()
+            .filter(|(_, c)| c.level == Severity::Err)
+            .count();
+        let warnings = items
+            .iter()
+            .filter(|(_, c)| c.level == Severity::Warn)
+            .count();
+        let info = items
+            .iter()
+            .filter(|(_, c)| c.level == Severity::Info)
+            .count();
+        let conformant = errors == 0;
+
+        // Umbral de severidad para lo que se DEVUELVE (por defecto Info, que ya excluye Pass).
+        let floor = minimum_severity.unwrap_or(Severity::Info);
+        items.retain(|(_, c)| c.level >= floor);
+
+        // Orden total estable para paginación determinista: (path, code, id).
+        items.sort_by(|(pa, ca), (pb, cb)| {
+            pa.cmp(pb)
+                .then_with(|| ca.code.as_str().cmp(cb.code.as_str()))
+                .then_with(|| ca.id.cmp(&cb.id))
+        });
+
+        let diagnostics_all: Vec<Check> = items.into_iter().map(|(_, c)| c).collect();
+        let total = diagnostics_all.len();
+        let limit = limit.unwrap_or(DEFAULT_CHECK_LIMIT).min(MAX_CHECK_LIMIT);
+        let start = cursor.map(decode_cursor).unwrap_or(0).min(total);
+        let end = start.saturating_add(limit).min(total);
+        let page = diagnostics_all.get(start..end).unwrap_or(&[]).to_vec();
+        let next_cursor = (end > start && end < total).then(|| encode_cursor(end));
+
+        Ok(CheckReport {
+            conformant,
+            summary: CheckSummary {
+                errors,
+                warnings,
+                info,
+            },
+            diagnostics: page,
+            workspace_revision: revision,
+            next_cursor,
+        })
+    }
+
+    /// Resuelve el conjunto de paths que abarca un [`CheckScope`] (E10-H12). Ver la doc de
+    /// [`App::knowledge_check`] para la semántica de cada variante.
+    fn scope_paths(
+        &self,
+        bundle: &Bundle,
+        analysis: &Analysis,
+        scope: &CheckScope,
+    ) -> Result<BTreeSet<RelPath>, ErrorCode> {
+        match scope {
+            CheckScope::Workspace => Ok(analysis.concepts.iter().cloned().collect()),
+            CheckScope::Concept { r#ref } => {
+                let path = self.resolve_ref(r#ref)?;
+                Ok(std::iter::once(path).collect())
+            }
+            CheckScope::Paths { paths } => Ok(paths.iter().cloned().collect()),
+            CheckScope::Affected { refs, depth } => {
+                let mut set: BTreeSet<RelPath> = BTreeSet::new();
+                for r in refs {
+                    let path = self.resolve_ref(r)?;
+                    let nb = bundle.neighborhood(&path, *depth, Direction::Both);
+                    for node in &nb.nodes {
+                        set.insert(node.id.clone());
+                    }
+                    set.insert(path);
+                }
+                Ok(set)
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// `knowledge_check` — scope, informe y id estable de diagnóstico (E10-H12).
+//
+// Proyección de servicio (framing), NO dominio: viven en `lodestar-app`, no en `core::types`. Los
+// diagnósticos que porta (`Check`) sí son dominio puro del core (compuestos de `Analysis::per_file`
+// + `validate_schema`). Wire en camelCase.
+// ---------------------------------------------------------------------------
+
+/// Límite por defecto de diagnósticos por página de `knowledge_check` (`REFACTOR §10`).
+const DEFAULT_CHECK_LIMIT: usize = 100;
+/// Tope duro de diagnósticos por página (evita respuestas gigantes).
+const MAX_CHECK_LIMIT: usize = 1000;
+
+/// Scope de auditoría de [`App::knowledge_check`] (`ARCHITECTURE.md §19.6`, `REFACTOR §10`). El
+/// discriminante de wire es `kind` (camelCase): `workspace` (todos los conceptos), `concept` (uno,
+/// por `ref`), `paths` (una lista explícita) y `affected` (el vecindario/blast-radius de unos
+/// `refs` a distancia ≤ `depth`).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum CheckScope {
+    /// Todos los conceptos del workspace.
+    Workspace,
+    /// Un único concepto, identificado por `ref` (`ConceptRef`).
+    Concept {
+        /// El concepto a auditar.
+        r#ref: ConceptRef,
+    },
+    /// Una lista explícita de paths.
+    Paths {
+        /// Los paths a auditar.
+        paths: Vec<RelPath>,
+    },
+    /// El vecindario (blast-radius) de unos `refs` a distancia ≤ `depth`.
+    Affected {
+        /// Los conceptos centro del vecindario.
+        refs: Vec<ConceptRef>,
+        /// Distancia máxima de exploración (por defecto 1 si el cliente la omite).
+        #[serde(default = "default_affected_depth")]
+        depth: u32,
+    },
+}
+
+/// Profundidad por defecto del scope `affected` cuando el cliente omite `depth`.
+fn default_affected_depth() -> u32 {
+    1
+}
+
+/// Recuento de diagnósticos por severidad de un informe de `knowledge_check`. Wire en camelCase.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CheckSummary {
+    /// Nº de diagnósticos de severidad `Err` en el scope.
+    pub errors: usize,
+    /// Nº de diagnósticos de severidad `Warn` en el scope.
+    pub warnings: usize,
+    /// Nº de diagnósticos de severidad `Info` en el scope.
+    pub info: usize,
+}
+
+/// Informe de `knowledge_check` (`ARCHITECTURE.md §19.6`, `REFACTOR §10`). Wire en camelCase
+/// (`workspaceRevision`, `nextCursor`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CheckReport {
+    /// `true` si el scope no tiene ningún diagnóstico de severidad `Err`.
+    pub conformant: bool,
+    /// Recuento por severidad sobre TODO el scope (independiente de `minimumSeverity`/paginación).
+    pub summary: CheckSummary,
+    /// La página de diagnósticos (cada uno con su `id` estable), tras filtrar por severidad y paginar.
+    pub diagnostics: Vec<Check>,
+    /// Revisión determinista del workspace en el momento de la auditoría (`WorkspaceRevision`).
+    pub workspace_revision: WorkspaceRevision,
+    /// Cursor opaco a la siguiente página, o `None` si no quedan más diagnósticos.
+    pub next_cursor: Option<String>,
+}
+
+/// Id estable de un diagnóstico dentro de una revisión (E10-H12): `diag:blake3:<hex>` donde
+/// `hex = blake3(path ‖ 0x00 ‖ code ‖ 0x00 ‖ range ‖ 0x00 ‖ msg)`. Determinista y derivado **solo**
+/// de los datos del diagnóstico (nunca de timestamps, orden ni caché), así que la misma revisión
+/// produce los mismos `id` incluso entre procesos frescos.
+fn diagnostic_id(path: &RelPath, check: &Check) -> String {
+    let range_repr = match &check.range {
+        Some(r) => format!("{}:{}", r.start_line, r.end_line),
+        None => String::new(),
+    };
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(path.as_str().as_bytes());
+    hasher.update(b"\0");
+    hasher.update(check.code.as_str().as_bytes());
+    hasher.update(b"\0");
+    hasher.update(range_repr.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(check.msg.as_bytes());
+    format!("diag:blake3:{}", hasher.finalize().to_hex())
 }
 
 // ---------------------------------------------------------------------------
