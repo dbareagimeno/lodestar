@@ -1,8 +1,9 @@
 //! Tests de integración de la mecánica transaccional de `lodestar-workspace` (E13:
 //! publicación recuperable). Este fichero cubre **E13-H01 — Staging: materializar el resultado
-//! completo + validar staging**.
+//! completo + validar staging** y **E13-H02 — Lock de workspace + re-verificación de la
+//! `WorkspaceRevision` base**.
 //!
-//! Firmas asumidas (fase ROJA; el implementador debe respetarlas):
+//! Firmas asumidas de E13-H01 (fase ROJA; el implementador debe respetarlas):
 //! - `Workspace::materialize_staging(&self, change_set: &ChangeSet) -> Result<StagingDir, WorkspaceError>`
 //!   escribe TODOS los ficheros resultantes del plan (reusando `plan::apply_normalized_ops` sobre
 //!   el `FileMap` canónico) bajo `.lodestar/runtime/staging/<changeSetId>/`. No toca el canónico.
@@ -11,6 +12,23 @@
 //!   resultado no cumple la política (gate estricto: `hard_fail > 0`), aborta SIN tocar el canónico
 //!   y limpia el staging. El `Err` mapea al wire `NONCONFORMANT_RESULT` (`WorkspaceError::code()`).
 //! - `StagingDir::path(&self) -> &Path` expone el directorio de staging materializado.
+//!
+//! Firmas asumidas de E13-H02 (fase ROJA; el implementador debe respetarlas):
+//! - `Workspace::acquire_lock(&self) -> Result<WorkspaceLock, WorkspaceError>`: adquiere el lock
+//!   exclusivo de publicación (fichero en `.lodestar/runtime/` con owner/pid/timestamp). **Modelo
+//!   fail-fast**: si el lock ya está tomado (por este u otro handle sobre el mismo root) devuelve
+//!   `Err` (no bloquea). El `WorkspaceLock` devuelto es un guard RAII: su `Drop` borra el fichero
+//!   de lock, de modo que el lock se libera SIEMPRE (incluido en un `panic`/desenrollado de pila).
+//! - `Workspace::lock_path(&self) -> PathBuf`: ruta del fichero de lock de publicación (bajo
+//!   `.lodestar/runtime/`), exista o no. Determinista; los tests la usan para comprobar que el
+//!   guard crea el fichero mientras vive y lo borra al dropearse.
+//! - `Workspace::workspace_revision(&self) -> Result<WorkspaceRevision, WorkspaceError>`: computa la
+//!   `WorkspaceRevision` actual del conocimiento escribible (misma lógica que
+//!   `lodestar_core::types::workspace_revision(files, &cfg.workspace.writable_roots)`, E10-H03).
+//! - `Workspace::reverify_base_revision(&self, base: &WorkspaceRevision) -> Result<(), WorkspaceError>`:
+//!   re-verifica que la revisión actual sigue siendo la `base` esperada por el plan. Si coincide →
+//!   `Ok(())`; si el workspace cambió entre plan y apply → `Err` cuyo `.code()` mapea al wire
+//!   `WRITE_CONFLICT` (nueva variante `WorkspaceError::WriteConflict`), y NO se publica.
 //!
 //! `ChangeSet` (dominio de `lodestar-core`) es el argumento: `materialize_staging` solo necesita su
 //! `id` (nombre del directorio de staging) y sus `operations`; los campos de análisis
@@ -198,4 +216,128 @@ fn staging_no_conforme_aborta() {
         antes, despues,
         "un staging abortado alteró el conocimiento canónico"
     );
+}
+
+// ---------------------------------------------------------------------------
+// E13-H02 — Lock de workspace + re-verificación de la `WorkspaceRevision` base.
+// ---------------------------------------------------------------------------
+
+/// **E13-H02** · Criterio `lock_exclusivo`: dado un lock tomado, cuando otro publicador intenta
+/// adquirirlo, entonces falla (modelo fail-fast: no dos escritores). Al liberar el primero, un
+/// nuevo intento vuelve a adquirirlo.
+#[test]
+fn lock_exclusivo() {
+    let dir = tempfile::tempdir().unwrap();
+    // Dos handles sobre el MISMO root: modelan dos publicadores concurrentes.
+    let ws = Workspace::open(dir.path()).unwrap();
+    let otro = Workspace::open(dir.path()).unwrap();
+
+    // El primer publicador adquiere el lock; el guard vive mientras esté en alcance.
+    let guard = ws
+        .acquire_lock()
+        .expect("el primer publicador debe adquirir el lock");
+
+    // El segundo publicador NO puede adquirirlo con el lock ya tomado (fail-fast, no bloqueante).
+    assert!(
+        otro.acquire_lock().is_err(),
+        "un segundo publicador no debe poder adquirir un lock ya tomado (no dos escritores)"
+    );
+
+    // Al soltar el primero, el guard se dropea y el lock queda libre...
+    drop(guard);
+
+    // ...y un nuevo intento SÍ lo obtiene.
+    let _tercero = otro
+        .acquire_lock()
+        .expect("tras liberar el lock, un nuevo publicador debe poder adquirirlo");
+}
+
+/// **E13-H02** · Criterio `revision_base_cambiada`: si el workspace cambió entre plan y apply, al
+/// re-verificar la revisión base → `WRITE_CONFLICT` y no se publica.
+#[test]
+fn revision_base_cambiada() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws = Workspace::open(dir.path()).unwrap();
+
+    // Estado inicial sobre el que se "planificó".
+    ws.create_concept(
+        &RelPath::new("base.md").unwrap(),
+        "Nota",
+        Some("Base"),
+        "# H\n\ncuerpo\n",
+        false,
+    )
+    .unwrap();
+
+    // R1: la `baseWorkspaceRevision` del plan.
+    let r1 = ws
+        .workspace_revision()
+        .expect("computa la revisión base del workspace");
+
+    // Sin cambios, la re-verificación contra R1 es coherente (no es un test vacuo al revés).
+    ws.reverify_base_revision(&r1)
+        .expect("sin cambios, re-verificar la revisión base debe ser Ok");
+
+    // El workspace cambia ENTRE plan y apply: otro escritor introduce un concepto.
+    ws.create_concept(
+        &RelPath::new("intruso.md").unwrap(),
+        "Nota",
+        Some("Intruso"),
+        "# H\n\notro\n",
+        false,
+    )
+    .unwrap();
+
+    // Re-verificar contra R1 detecta que la base ya no es la misma → conflicto de escritura.
+    let err = ws
+        .reverify_base_revision(&r1)
+        .expect_err("la base cambió entre plan y apply: la re-verificación debe abortar");
+    assert_eq!(
+        err.code(),
+        "WRITE_CONFLICT",
+        "el conflicto de revisión base debe mapear al wire WRITE_CONFLICT: {err:?}"
+    );
+}
+
+/// **E13-H02** · Criterio `lock_se_libera_en_panic`: un panic durante la publicación → el guard se
+/// dropea → el lock se libera (no queda fichero huérfano ni bloqueo lógico).
+#[test]
+fn lock_se_libera_en_panic() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws = Workspace::open(dir.path()).unwrap();
+
+    let lock_path: PathBuf = ws.lock_path();
+    assert!(
+        !lock_path.exists(),
+        "no debe existir fichero de lock antes de adquirirlo"
+    );
+
+    // Publicación que paniquea con el guard vivo. `catch_unwind` recoge el desenrollado; durante él
+    // el `Drop` del guard debe ejecutarse y liberar el lock.
+    let resultado = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _guard = ws
+            .acquire_lock()
+            .expect("adquiere el lock antes de publicar");
+        assert!(
+            lock_path.exists(),
+            "el fichero de lock debe existir mientras el guard vive"
+        );
+        panic!("fallo simulado durante la publicación");
+    }));
+
+    assert!(
+        resultado.is_err(),
+        "el panic debe propagarse fuera del catch_unwind"
+    );
+
+    // El Drop del guard liberó el lock: ni fichero huérfano...
+    assert!(
+        !lock_path.exists(),
+        "el Drop del guard debe borrar el fichero de lock tras el panic (no queda huérfano)"
+    );
+
+    // ...ni bloqueo lógico: un nuevo publicador vuelve a adquirirlo.
+    let _nuevo = ws
+        .acquire_lock()
+        .expect("tras el panic y la liberación, el lock debe poder re-adquirirse");
 }

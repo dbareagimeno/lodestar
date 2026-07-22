@@ -341,5 +341,9 @@ superficie de producto; git queda como crate dormido) y `DECISIONES.md §0`. Des
     canónico (invariante #1; runtime desechable); `validate_staging` construye el Bundle del resultado,
     aplica el gate estricto y limpia + `NONCONFORMANT_RESULT` si no conforme. `WorkspaceError::
     NonconformantResult`. Juez ciego: APROBADA (2/2).
-  - ⏳ E13-H02–H11 pendientes (lock/journal/copias/publicar/crash-recovery/receipts/change_apply/revert/audit/regen).
+  - ✅ **E13-H02** — Lock de workspace: `acquire_lock` con creación atómica exclusiva
+    (`create_new` = O_CREAT|O_EXCL, sin TOCTOU) en `.lodestar/runtime/lock.json`; `WorkspaceLock` RAII
+    cuyo Drop libera best-effort (seguro en unwind, sin doble-panic). `reverify_base_revision` →
+    `WRITE_CONFLICT` si la revisión cambió. Juez ciego: APROBADA (3/3). (Lock huérfano ante SIGKILL → H06.)
+  - ⏳ E13-H03–H11 pendientes (journal/copias/publicar/crash-recovery/receipts/change_apply/revert/audit/regen).
 - **E14: pendiente** (integración software + evaluación — `ARCHITECTURE.md §19.8`).

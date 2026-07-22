@@ -30,6 +30,14 @@ pub enum WorkspaceError {
     /// (recuento de fallos duros). Mapea al wire `NONCONFORMANT_RESULT`.
     #[error("el resultado del plan no es conforme: {0}")]
     NonconformantResult(String),
+    /// Conflicto de escritura optimista (E13-H02, [`crate::Workspace::reverify_base_revision`]):
+    /// la [`lodestar_core::types::WorkspaceRevision`] del conocimiento escribible cambió entre que
+    /// se planificó (`baseWorkspaceRevision`) y el momento del apply — otro escritor (humano,
+    /// agente o `git pull`) tocó el workspace. Publicar sobre una base obsoleta arriesga pisar ese
+    /// cambio, así que la re-verificación aborta sin tocar el canónico. El `String` describe el
+    /// conflicto (revisión esperada vs. actual). Mapea al wire `WRITE_CONFLICT`.
+    #[error("conflicto de escritura: {0}")]
+    WriteConflict(String),
 }
 
 impl WorkspaceError {
@@ -45,6 +53,7 @@ impl WorkspaceError {
             WorkspaceError::RepoBusy => "REPO_BUSY",
             WorkspaceError::PermissionDenied(_) => "PERMISSION_DENIED",
             WorkspaceError::NonconformantResult(_) => "NONCONFORMANT_RESULT",
+            WorkspaceError::WriteConflict(_) => "WRITE_CONFLICT",
         }
     }
 }

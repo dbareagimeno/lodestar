@@ -15,7 +15,8 @@ use crossbeam_channel::Receiver;
 use lodestar_core::diff::OkfDiff;
 use lodestar_core::types::{
     Analysis, Author, Backlinks, Branch, CommitConformance, CommitRow, Direction, FileMap,
-    FrontmatterPatch, GraphModel, Mutation, Neighborhood, RelPath, Sha, SyncOutcome, WriteOutcome,
+    FrontmatterPatch, GraphModel, Mutation, Neighborhood, RelPath, Sha, SyncOutcome,
+    WorkspaceRevision, WriteOutcome,
 };
 use lodestar_core::Bundle;
 use lodestar_store::{IndexEvent, Store, Watcher};
@@ -26,6 +27,7 @@ mod error;
 mod external_refs;
 mod gitignore;
 mod io;
+mod lock;
 mod runtime;
 pub mod schema;
 mod snapshot;
@@ -34,6 +36,7 @@ mod staging;
 pub use config::{Config, WorkspaceConfig};
 pub use error::WorkspaceError;
 pub use external_refs::{ExternalReference, ExternalRefsReport};
+pub use lock::WorkspaceLock;
 pub use schema::WorkspaceSchema;
 pub use snapshot::BundleSnapshot;
 pub use staging::StagingDir;
@@ -82,6 +85,48 @@ impl Workspace {
     /// `root` de la proyección de estado).
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// Computa la [`WorkspaceRevision`] actual del conocimiento **escribible** (E13-H02, E10-H03).
+    ///
+    /// Carga el `FileMap` canónico desde disco y aplica la única lógica del core
+    /// ([`lodestar_core::types::workspace_revision`]) con los `writableRoots` de la config: el
+    /// hash blake3 cubre solo los `.md` que Lodestar puede reescribir (ignora `.lodestar/` y, si
+    /// hay `writableRoots`, cualquier `.md` fuera de ellos). Es la `baseWorkspaceRevision` que un
+    /// plan captura al planificar y que [`Workspace::reverify_base_revision`] re-comprueba al
+    /// aplicar.
+    ///
+    /// # Errores
+    /// - [`WorkspaceError::Io`] si falla la lectura del canónico.
+    pub fn workspace_revision(&self) -> Result<WorkspaceRevision, WorkspaceError> {
+        let files = io::load_bundle(&self.root)?;
+        let cfg = WorkspaceConfig::load(&self.root).unwrap_or_default();
+        Ok(lodestar_core::types::workspace_revision(
+            &files,
+            &cfg.workspace.writable_roots,
+        ))
+    }
+
+    /// Re-verifica el control optimista de escritura (E13-H02): comprueba que la
+    /// [`WorkspaceRevision`] actual del conocimiento escribible sigue siendo la `base` que el plan
+    /// capturó. Si coincide, `Ok(())`; si el workspace cambió entre plan y apply (otro escritor
+    /// tocó los `.md`), devuelve [`WorkspaceError::WriteConflict`] y **no se publica** — publicar
+    /// sobre una base obsoleta pisaría ese cambio.
+    ///
+    /// # Errores
+    /// - [`WorkspaceError::WriteConflict`] si la revisión actual difiere de `base`.
+    /// - [`WorkspaceError::Io`] si falla el cálculo de la revisión actual.
+    pub fn reverify_base_revision(&self, base: &WorkspaceRevision) -> Result<(), WorkspaceError> {
+        let actual = self.workspace_revision()?;
+        if &actual == base {
+            Ok(())
+        } else {
+            Err(WorkspaceError::WriteConflict(format!(
+                "la base del plan ({}) ya no es la revisión actual del workspace ({}): \
+                 otro escritor lo modificó entre el plan y el apply",
+                base.0, actual.0
+            )))
+        }
     }
 
     /// Abre sin git (modo hermético, p. ej. CLI efímera).

@@ -161,6 +161,7 @@ pub fn workspace_error_code(err: &WorkspaceError) -> ErrorCode {
         WorkspaceError::RepoBusy => ErrorCode::WriteConflict,
         WorkspaceError::PermissionDenied(_) => ErrorCode::PermissionDenied,
         WorkspaceError::NonconformantResult(_) => ErrorCode::NonconformantResult,
+        WorkspaceError::WriteConflict(_) => ErrorCode::WriteConflict,
     }
 }
 
