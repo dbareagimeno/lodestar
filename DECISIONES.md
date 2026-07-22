@@ -99,10 +99,16 @@
 - **Recomendación**: mantener stdio hasta tener un cliente MCP real que lo requiera; el contrato de
   tools ya está congelado, migrar el transporte después es mecánico.
 
-## 4. Generación del `.d.ts` desde Rust (ts-rs/specta) — E0-H04/E6-H03 — 🟡 DIRECCIÓN RATIFICADA
+## 4. Generación del `.d.ts` desde Rust (ts-rs/specta) — E0-H04/E6-H03 — ⚪ OBSOLETA (UI retirada de `main`)
 
-- **Estado**: `frontend/src/lib/ipc/types.ts` es un **espejo a mano** del contrato de `core::types`,
-  marcado como «a generar». Los nombres/orden coinciden con Rust.
+> **Obsoleta para el espejo TS** desde el giro headless: `frontend/src/lib/ipc/types.ts` desapareció
+> al retirar la UI de escritorio de `main` a la rama `experimental/ui-desktop`. Los tipos de
+> `core::types` los consumen ya directamente `lodestar-cli`/`lodestar-mcp` (Rust), sin espejo TS que
+> generar. Se conserva el registro histórico abajo; si la UI vuelve a evolucionar en esa rama, la
+> decisión de ts-rs se retomaría allí.
+
+- **Estado**: `frontend/src/lib/ipc/types.ts` era un **espejo a mano** del contrato de `core::types`,
+  marcado como «a generar». Los nombres/orden coincidían con Rust.
 - **Decidido (2026-07-10)**: **sí a ts-rs** — el `.d.ts` se generará desde Rust. Además, la
   frontera front↔back queda descrita por **contratos YAML de superficie** (`contracts/ipc.yml`,
   `contracts/mcp.yml` + `contracts/README.md`): el YAML documenta comandos/eventos/tools y su

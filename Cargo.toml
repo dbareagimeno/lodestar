@@ -9,7 +9,6 @@ members = [
   "crates/lodestar-cli",
   "crates/lodestar-mcp",
   "crates/lodestar-fixtures",
-  "src-tauri",
 ]
 
 [workspace.package]

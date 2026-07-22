@@ -343,6 +343,10 @@ Cada tool de MCP y cada subcomando de CLI = un shell de 5–15 líneas: resuelve
 método de `Workspace` → serializa el DTO ya estructurado. **Cero lógica OKF en las fachadas.**
 
 ### 7.1 Tauri (`src-tauri`)
+
+> **Retirado de `main`** (giro headless, §19.1): la fachada Tauri se movió a la rama
+> `experimental/ui-desktop`. Sección conservada como diseño ratificado de referencia.
+
 - 100% del acceso a disco/diálogo vive en Rust. La webview no recibe permiso `fs`/`shell`/`dialog`.
 - Comandos `async` que delegan el trabajo pesado a `spawn_blocking` (los guards `RwLock`/`Mutex`
   nunca cruzan un `.await`).
@@ -377,6 +381,11 @@ Salida humana / `--json` / SARIF.
 ---
 
 ## 8. Frontend (Svelte 5 + Vite)
+
+> **Retirado de `main`** (giro headless, §19.1): la UI de escritorio (`frontend/` + `src-tauri/`) se
+> movió íntegra a la rama `experimental/ui-desktop`. Esta sección se conserva como **diseño
+> ratificado de referencia** (histórico), no como parte del motor headless; si la UI vuelve a
+> evolucionar, se hace en esa rama.
 
 Porta la UI del prototipo **verbatim en aspecto** (mismo `<style>`, mismas variables CSS y atributos
 `data-theme/view/explorer/rail-*`) pero **invierte la propiedad de los datos**: el `files{}` y
@@ -639,6 +648,12 @@ Cada commit guarda su conformidad — el `confOf(snap)` del prototipo hecho real
 
 ### 13.7 Fachadas y frontend
 
+> **IPC front↔back retirado de `main`** (giro headless, §19.1): los comandos Tauri, el evento
+> `bundle:changed`, el frontend y su contrato `contracts/ipc.yml` se movieron a la rama
+> `experimental/ui-desktop`. Lo que sigue es **diseño ratificado de referencia**; la única frontera
+> viva en el motor headless es la MCP (§13 git, además, está dormido). No describe superficie activa
+> de este repo.
+
 - **Tauri**: `vcs_status` · `vcs_log` · `vcs_log_for_path` · `vcs_diff(a,b,filter?)` · `vcs_diff_working` ·
   `vcs_commit(msg, alsoLog)` · `vcs_restore(sha)` · `vcs_branches` · `vcs_create_branch(name)` ·
   `vcs_switch_branch(name)` · `vcs_merge(name)` · `vcs_pull` · `vcs_push` · `vcs_last_conforming` · `vcs_init`.
@@ -710,9 +725,10 @@ Code, Codex, otros clientes MCP y la CLI, **sin editor, sin GUI y sin git** (`RE
 **Git sale de la superficie de producto** (decisión ratificada): fuera las tools MCP `history`/
 `last_conforming_commit`/`commit` y los subcomandos CLI de `crates/lodestar-cli/src/git.rs`
 (`log`/`last-conforming`/`branch`/`switch`/`merge`/`pull`/`push`/`hooks`). El crate **`lodestar-vcs`
-se conserva DORMIDO** (§13, cabecera). La UI (`frontend/`, `src-tauri/`) queda **congelada**: no se toca
-aunque queden zonas sin backend nuevo; el flujo de desarrollo (`.claude/`, `CLAUDE.md`,
-`docs/WORKFLOWS.md`) se actualiza para tratarla como congelada.
+se conserva DORMIDO** (§13, cabecera). La UI (`frontend/`, `src-tauri/`) se **retiró de `main`** a la
+rama `experimental/ui-desktop` (con su IPC Tauri y el contrato `contracts/ipc.yml`): ya no forma
+parte del motor headless; el flujo de desarrollo (`.claude/`, `CLAUDE.md`, `docs/WORKFLOWS.md`) se
+actualizó en consecuencia. Su diseño se conserva como referencia en §7.1/§8/§13.7 y en esa rama.
 
 ### 19.2 Grafo de crates (con `lodestar-app`)
 
@@ -729,8 +745,8 @@ lodestar-core (PURO)  ◄─ lodestar-store ─┐        lodestar-core ◄─ l
                               ▲
                        lodestar-app   (servicios de caso de uso · envelope · mapa de códigos de error)
                           ▲       ▲
-                   lodestar-mcp · lodestar-cli     (fachadas finas: 5–15 líneas, CERO dominio)
-                   src-tauri (CONGELADO: sigue llamando a workspace directamente; no se toca)
+                   lodestar-mcp · lodestar-cli     (las dos fachadas del motor headless: 5–15 líneas, CERO dominio)
+                   (src-tauri RETIRADO de `main` → rama experimental/ui-desktop)
 ```
 
 - **`core::schema`** (nuevo módulo, **PURO**): tipo `Schema` (catálogo de `DocType`, campos,

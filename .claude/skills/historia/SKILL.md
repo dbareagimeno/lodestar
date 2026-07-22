@@ -19,7 +19,7 @@ código ni tests**: su entregable es la spec.
    - El recordatorio de sus reglas: formato exacto de `requirements/README.md`, criterios de
      comportamiento en **Dado/Cuando/Entonces mapeados a nombres de test**, campo Pruebas concreto
      (fichero de test, fixtures, sondas diferenciales), sección «Delta de contrato» si toca la
-     frontera (`contracts/ipc.yml`/`contracts/mcp.yml`), trazabilidad §10/§12.
+     frontera MCP (`contracts/mcp.yml`), trazabilidad §10/§12.
 3. Revisa su salida: comprueba que cada criterio es binario y verificable, que no cierra decisiones
    de `DECISIONES.md`, y que el delta de contrato (si existe) referencia tipos de `core::types` por
    nombre sin redefinirlos.

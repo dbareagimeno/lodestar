@@ -7,15 +7,14 @@
 > (el porqué del proceso y los recorridos, con diagramas) está en
 > [`docs/WORKFLOWS.md`](../docs/WORKFLOWS.md).
 
-> **El motor es headless** (`ARCHITECTURE.md §19`, giro E9–E14): `frontend/` y `src-tauri/` quedan
-> **CONGELADOS** en el flujo de desarrollo de v2. `/ciclo`, `/historia` y `/ux` **no** modifican esos
-> directorios; el skill `/ux` y el agente `disenador-ux` quedan marcados **no aplicables al giro
-> headless** — se conservan documentados abajo (igual que git quedó dormido en `lodestar-vcs`), por
-> si la UI vuelve a evolucionar en el futuro. `git` también sale de la superficie de las tools/skills:
-> ninguna receta de este documento invoca ya subcomandos git de la CLI ni tools MCP de git. Las
-> historias de `E10` en adelante introducen el crate **`lodestar-app`** (servicios de caso de uso
-> compartidos por `lodestar-cli`/`lodestar-mcp`; ver `CLAUDE.md` y `ARCHITECTURE.md §19.2`) — no
-> existe todavía; cuando llegue, sus historias siguen el mismo circuito `/historia` → `/tdd`.
+> **El motor es headless** (`ARCHITECTURE.md §19`, giro E9–E14): la **UI de escritorio se retiró de
+> `main`** (`frontend/` Svelte + `src-tauri/`) y vive íntegra en la rama `experimental/ui-desktop`.
+> Con ella se retiraron el skill `/ux` y el agente `disenador-ux`: **el circuito UX ya no existe en
+> `main`** — si la UI vuelve a evolucionar, se hace en esa rama. `git` también está fuera de la
+> superficie de las tools/skills: ninguna receta de este documento invoca ya subcomandos git de la
+> CLI ni tools MCP de git. El crate **`lodestar-app`** (servicios de caso de uso compartidos por
+> `lodestar-cli`/`lodestar-mcp`; ver `CLAUDE.md` y `ARCHITECTURE.md §19.2`) ya existe y es consumido
+> por ambas fachadas.
 
 ## Agentes (`.claude/agents/`)
 
@@ -26,8 +25,7 @@
 | `autor-tests` | opus | Fase ROJA: escribe los tests de la historia y **verifica que fallan**. No toca `src/`. |
 | `implementador` | opus | Fase VERDE: pone los tests en verde + gates. **No puede modificar los tests.** |
 | `juez-historia` | sesión | Juez **ciego**: recibe solo spec + diff, veredicto estructurado criterio a criterio. |
-| `guardian-contrato` | opus | Coherencia de las 5 superficies de la frontera (`types.rs` ↔ `types.ts` ↔ src-tauri ↔ mcp ↔ `contracts/*.yml`). |
-| `disenador-ux` | sesión | **No aplicable al giro headless** (UI congelada). Experto UX: flujos `.excalidraw`, mockups HTML unitarios por pantalla/estado y auditorías contra buenas prácticas (Nielsen, ley de Jakob, estados obligatorios, accesibilidad). Solo escribe en `design/`, nunca código de producción. Documentado como registro histórico, no se invoca en v2. |
+| `guardian-contrato` | opus | Coherencia de la frontera MCP: `core::types` (fuente de tipos) ↔ tools de `lodestar-mcp` ↔ `contracts/mcp.yml`. |
 
 La separación de poderes es deliberada: quien especifica no implementa, quien testea no implementa,
 quien implementa no toca los tests, y quien juzga no conoce las intenciones de nadie.
@@ -39,11 +37,10 @@ quien implementa no toca los tests, y quien juzga no conoce las intenciones de n
 | `/planificar <spec\|§N>` | De spec/diseño mayor a épica de historias ordenadas (2 puertas: diseño y épica). Puerta de entrada de las **features grandes**. |
 | `/historia <desc\|ID>` | Redacta/refina la spec y pide ratificación. Puerta de entrada del trabajo que cabe en **una historia**. |
 | `/tdd <ID>` | Rojo → verde → refactor de una historia ratificada. |
-| `/juzgar [ID] [--panel]` | 1 juez ciego (o panel de lentes: corrección / invariantes / paridad+tests, + fidelidad UX automática si el diff toca `frontend/` y la historia cita artefactos de `design/`). |
-| `/contrato [--check]` | Verifica (o sincroniza) la frontera front↔back contra `contracts/`. |
+| `/juzgar [ID] [--panel]` | 1 juez ciego (o panel de lentes: corrección / invariantes / paridad+tests). |
+| `/contrato [--check]` | Verifica (o sincroniza) la frontera MCP↔`core::types` contra `contracts/mcp.yml`. |
 | `/mutantes [-p crate] [--file ruta]` | cargo-mutants scoped: qué mutaciones sobreviven a la suite + tests propuestos. |
-| `/ux <flujo\|mockup\|audit> <desc\|ID\|ruta>` | **No aplicable al giro headless** (UI congelada) — spec visual ratificable en `design/` (flujos, mockups unitarios) o auditoría de la UI contra heurísticas. Documentado por si la UI vuelve a evolucionar; no se invoca en v2. |
-| `/ciclo <desc\|ID>` | Pipeline completo: historia → tdd → contrato → juez → docs → commit en rama. **No toca `frontend/`/`src-tauri/`** en v2 (UI congelada). |
+| `/ciclo <desc\|ID>` | Pipeline completo: historia → tdd → contrato → juez → docs → commit en rama. |
 
 ## Workflows recomendados
 
@@ -60,12 +57,9 @@ La pirámide del flujo, de arriba abajo — cada nivel tiene su puerta:
   (ratificación de diseño, de épica, gates, sin drift, veredicto) no se negocian: si una falla,
   se vuelve atrás.
 - **Feature que cabe en una historia**: `/ciclo` directo (que empieza por `/historia`).
-- **Trabajo con UI nueva**: **no aplica en v2** — la UI está congelada (`§19.1`), así que no hay
-  circuito de entrada por `/ux` mientras el motor sea headless. La descripción que sigue queda
-  como registro de cómo funcionaba el circuito antes del giro, por si la UI vuelve a evolucionar:
-  `/ux flujo` (y mockups si hace falta verlo) **antes** de `/historia`; los artefactos ratificados
-  de `design/` se citan en las Referencias de la historia como spec visual. Patrón conocido por
-  defecto (ley de Jakob) — un patrón nuevo exige justificación explícita en el artefacto.
+- **Trabajo con UI nueva**: **no aplica en `main`** — la UI de escritorio se retiró a la rama
+  `experimental/ui-desktop` y con ella el circuito `/ux`; el motor es headless. Si la UI vuelve a
+  evolucionar, se hace en esa rama, no en el flujo de este repo.
 - **Bugfix**: no hace falta historia completa — test de regresión primero (rojo, reproduce el bug),
   fix (verde), `/juzgar` simple con el issue como spec. Si el bug es de paridad con el prototipo,
   el test va además al arnés diferencial o a la sección «Regresiones de paridad con el
@@ -73,8 +67,8 @@ La pirámide del flujo, de arriba abajo — cada nivel tiene su puerta:
 - **Refactor**: los tests existentes son la red. `/mutantes` con el mismo alcance **antes y
   después**: si tras el refactor sobreviven mutantes que antes morían, la suite se debilitó.
   `/simplify` para el pulido final.
-- **Cambio en la frontera front↔back** (`core::types`, `src-tauri`, `lodestar-mcp`,
-  `frontend/src/lib/ipc/`): siempre `/contrato --check` antes del PR, y `/juzgar --panel`.
+- **Cambio en la frontera MCP** (`core::types`, tools de `lodestar-mcp`, `contracts/mcp.yml`):
+  siempre `/contrato --check` antes del PR, y `/juzgar --panel`.
 - **Release**: runbook de `RELEASING.md` (sin skill; ya está resuelto).
 
 ## Los jueces son ciegos: qué significa y por qué
@@ -93,5 +87,6 @@ mismo), y el orquestador tampoco escribe código en `/tdd` para no contaminar lo
 - **Mutation testing a demanda, sin CI**: `/mutantes` scoped a lo que tocó cada historia. Se
   integrará en CI solo si demuestra valor sostenido.
 - **Contrato YAML = superficie y semántica; los tipos viven en `core::types`** (invariante #4).
-  Generación del espejo `.ts` con ts-rs: dirección ratificada, pendiente de implementar como
-  primera historia del nuevo flujo (E0-H04/E6-H03, `DECISIONES.md §4`).
+  Los tipos los consumen directamente `lodestar-cli`/`lodestar-mcp`; **ya no hay espejo `.ts`** (se
+  retiró con la UI a `experimental/ui-desktop`), así que la generación con ts-rs de `DECISIONES.md §4`
+  queda obsoleta para el espejo TS.

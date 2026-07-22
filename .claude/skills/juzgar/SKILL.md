@@ -24,19 +24,13 @@ la spec y el diff. La garantía de no-contaminación es tu responsabilidad como 
    **PROHIBIDO** incluir en el prompt: por qué se implementó así, resúmenes de la conversación,
    dificultades encontradas, o tu propia opinión del diff. Si el juez conoce la intención, deja de
    ser ciego.
-3. **`--panel`**: lanza los jueces `juez-historia` frescos **en paralelo** (3, o 4 si aplica la
-   lente D), mismo expediente, cada uno con una lente declarada al inicio de su prompt:
+3. **`--panel`**: lanza 3 jueces `juez-historia` frescos **en paralelo**, mismo expediente, cada
+   uno con una lente declarada al inicio de su prompt:
    - **Lente A — corrección**: ¿el diff cumple cada criterio de aceptación, con test que lo demuestre?
    - **Lente B — invariantes y arquitectura**: pureza del core, único escritor, contrato de tipos
      único, `RelPath`, decisiones §10/§12 no relitigadas.
    - **Lente C — paridad y calidad de tests**: ¿la semántica respeta el prototipo (sondas
      diferenciales incluidas)? ¿Los tests morderían si la implementación estuviera mal?
-   - **Lente D — fidelidad UX** (condicional y automática, sin flag): solo si el diff toca
-     `frontend/` **y** la historia cita artefactos de `design/` en sus Referencias. El juez recibe
-     además esos artefactos (flujos/mockups ratificados) y verifica que el diff los implementa
-     fielmente: estados cubiertos (vacío/cargando/error/éxito), tokens CSS del prototipo, patrón
-     del artefacto sin desviaciones. Sin artefactos ratificados **no hay lente D** — un juez UX
-     sin spec visual opinaría desde el gusto.
 4. **Sintetiza** (solo con `--panel`): el veredicto agregado es el **peor** de todas las lentes
    (un RECHAZADA de cualquiera rechaza el conjunto). Deduplica hallazgos y presenta la tabla
    veredicto-por-lente + hallazgos por severidad.

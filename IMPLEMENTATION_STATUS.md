@@ -21,10 +21,9 @@ cargo test --workspace          # ~113 tests (incl. 6 diferenciales JS-vs-Rust; 
 cargo run -p lodestar-cli -- check --path <bundle>     # la puerta de CI (exit 0/1)
 cargo run -p lodestar-cli -- log | last-conforming | branch | switch | merge | hooks
 cargo run -p lodestar-mcp -- <bundle>                  # servidor MCP por stdio
-cd frontend && npm install && npm run build            # frontend Svelte 5 → dist/
-# Escritorio (requiere libwebkit2gtk-4.1-dev, libsoup-3.0-dev, …):
-cargo run -p lodestar-tauri                            # app de escritorio (Tauri v2)
 ```
+(La app de escritorio —`frontend/` + `src-tauri/`, binario `lodestar-desktop`— se retiró de `main`
+a la rama `experimental/ui-desktop`; ya no se construye ni se ejecuta desde este repo headless.)
 
 ## Estado por épica
 
@@ -194,6 +193,10 @@ superficie de producto; git queda como crate dormido) y `DECISIONES.md §0`. Des
     **no aplicables al giro headless** (documentados, no invocados — reconciliado con el circuito
     UX preexistente sin revertirlo). `CLAUDE.md` actualizado (estado + mapa de crates con
     `lodestar-app`) sin reescribir los invariantes #1–#6.
+    - **Superado por `remove-ui-from-main`**: la UI de escritorio se retiró después de `main` a la
+      rama `experimental/ui-desktop` (con `frontend/`, `src-tauri/`, `contracts/ipc.yml`, el espejo
+      `types.ts`, el skill `/ux` y el agente `disenador-ux`). El flujo ya no la trata como
+      «congelada» sino como **retirada**; docs y `.claude/` reencuadrados en consecuencia.
   - ✅ **E9-H07** — Documentación de producto reposicionada: `README.md`/`CLAUDE.md` describen el
     posicionamiento como motor headless de integridad semántica, citan `ARCHITECTURE.md §19`,
     listan `lodestar-app` en el mapa de crates y marcan git como capacidad dormida y la UI como

@@ -30,10 +30,9 @@ ambigua, tu salida lo dice explícitamente y lista las preguntas — no rellenes
 - **Campo Pruebas concreto**: qué fichero de test (`crates/<crate>/tests/*.rs`), qué fixtures de
   `lodestar-fixtures`, y si necesita sonda nueva en el arnés diferencial
   (`crates/lodestar-core/tests/differential.rs` + `PROBES`).
-- **Delta de contrato**: si la historia toca la frontera front↔back (comandos Tauri, eventos,
-  tools MCP), incluye en la historia una sección «Delta de contrato» con el cambio propuesto a
-  `contracts/ipc.yml`/`contracts/mcp.yml` (los tipos se referencian por nombre de `core::types`,
-  nunca se redefinen — invariante #4).
+- **Delta de contrato**: si la historia toca la frontera MCP (tools de `lodestar-mcp`), incluye en
+  la historia una sección «Delta de contrato» con el cambio propuesto a `contracts/mcp.yml` (los
+  tipos se referencian por nombre de `core::types`, nunca se redefinen — invariante #4).
 - **Trazabilidad**: el campo Referencias cita las filas de `§10`/`§12` afectadas; si añades una
   historia nueva, anota la fila correspondiente en `requirements/trazabilidad.md`.
 - **No cierres decisiones de `DECISIONES.md`**: si la historia depende de una decisión abierta,

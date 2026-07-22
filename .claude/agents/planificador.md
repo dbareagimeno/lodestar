@@ -37,7 +37,7 @@ necesidad merece una épica.
    reglas que el historiador: criterios de comportamiento en **Dado/Cuando/Entonces mapeados a
    nombres de test** (los estructurales — grep en CI, pureza, docs — siguen siendo checklist
    binario), campo Pruebas concreto (fichero, fixtures, sondas diferenciales si aplica),
-   y sección «Delta de contrato» en las que tocan la frontera (`contracts/ipc.yml`/`mcp.yml`).
+   y sección «Delta de contrato» en las que tocan la frontera MCP (`contracts/mcp.yml`).
 3. **Dependencias sanas**: campo `Dependencias:` consistente, sin ciclos, y un orden de
    construcción explícito al final de la épica (como el «Orden de construcción» del README).
    Dimensiona cada historia para implementarse «de una sentada» con `/ciclo`; si una no cabe,

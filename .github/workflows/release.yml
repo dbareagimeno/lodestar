@@ -1,10 +1,11 @@
 name: Release
 
-# Publica los artefactos de la v0.1.0 cuando se empuja un tag `vX.Y.Z`.
-# - Job `app`: construye e instala el bundle de escritorio (Tauri) por plataforma
-#   y crea un release en borrador con los instaladores adjuntos.
-# - Job `binaries`: compila la CLI y el MCP (sin Tauri) y sube los tarballs/zip
-#   al mismo release.
+# Publica los artefactos (CLI + MCP) cuando se empuja un tag `vX.Y.Z`.
+# - Job `create-release`: crea el release en borrador una sola vez.
+# - Job `binaries`: compila la CLI y el MCP por plataforma y sube los tarballs/zip
+#   a ese release.
+# La UI de escritorio (Tauri) se movió a la rama `experimental/ui-desktop`; este
+# pipeline ya no construye ni publica el bundle de escritorio.
 
 on:
   push:
@@ -22,81 +23,32 @@ concurrency:
 
 jobs:
   # ---------------------------------------------------------------------------
-  # Bundle de escritorio (Tauri): dmg (mac), deb+appimage (linux), nsis (win).
-  # tauri-action ejecuta el beforeBuildCommand (build del frontend) y crea el
-  # release en borrador, adjuntando los instaladores de cada plataforma.
+  # Crea el release en borrador una sola vez (antes lo creaba el job `app` de
+  # Tauri). Idempotente: si ya existe para este tag, no falla.
   # ---------------------------------------------------------------------------
-  app:
-    name: Bundle escritorio (${{ matrix.target }})
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: macos-14
-            target: aarch64-apple-darwin
-          - os: ubuntu-22.04
-            target: x86_64-unknown-linux-gnu
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-    runs-on: ${{ matrix.os }}
+  create-release:
+    name: Crea el release en borrador
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - name: Instala toolchain (stable + target)
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
-
-      - name: Cache de cargo
-        uses: Swatinem/rust-cache@v2
-
-      # Tauri v2 en Linux necesita webkitgtk/soup; patchelf lo requiere AppImage.
-      - name: Instala libs de sistema para Tauri (solo Linux)
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            libwebkit2gtk-4.1-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev \
-            libgtk-3-dev librsvg2-dev patchelf
-
-      # Construimos el frontend ANTES de tauri-action (en vez de delegarlo al
-      # beforeBuildCommand de tauri.conf.json). tauri build resuelve la ruta de
-      # beforeBuildCommand relativa a un CWD dependiente del SO; con el package.json
-      # del arnés en prototype/harness eso resolvía mal en Linux. Construir aquí
-      # (como hace ci.yml) es determinista: tauri solo embebe frontend/dist ya listo.
-      - name: Node para construir el frontend (dist embebido por Tauri)
-        uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-          cache: npm
-          cache-dependency-path: frontend/package-lock.json
-      - name: Instala dependencias del frontend (reproducible)
-        run: npm ci
-        working-directory: frontend
-      - name: Construye el frontend (dist/)
-        run: npm run build
-        working-directory: frontend
-
-      - name: Build + bundle + release (tauri-action)
-        uses: tauri-apps/tauri-action@v0
+      - name: Crea (o reutiliza) el release en borrador
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          tagName: ${{ github.ref_name }}
-          releaseName: "lodestar ${{ github.ref_name }}"
-          releaseBody: "Ver CHANGELOG.md."
-          releaseDraft: true
-          prerelease: false
-          args: --target ${{ matrix.target }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: >-
+          gh release view ${{ github.ref_name }} >/dev/null 2>&1 ||
+          gh release create ${{ github.ref_name }}
+          --draft
+          --title "lodestar ${{ github.ref_name }}"
+          --notes "Ver CHANGELOG.md."
 
   # ---------------------------------------------------------------------------
   # Binarios de línea de comandos: lodestar (CLI) y lodestar-mcp (MCP).
   # No arrastran Tauri ni webkit, así que no hacen falta apt ni node.
-  # Se suben al release que creó el job `app`.
+  # Se suben al release que creó `create-release`.
   # ---------------------------------------------------------------------------
   binaries:
     name: Binarios CLI/MCP (${{ matrix.target }})
-    needs: app
+    needs: create-release
     strategy:
       fail-fast: false
       matrix:

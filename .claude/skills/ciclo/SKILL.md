@@ -16,7 +16,7 @@ Encadena el flujo completo del repo. Cada etapa tiene su skill; tú orquestas y 
    épica cuyas historias sí se ejecutan con `/ciclo`.)
 2. **Rama** — trabaja en una rama `claude/<slug-de-la-historia>` desde `main` actualizado.
 3. **TDD** — ejecuta `/tdd <ID>` (rojo → verde → gates). **Puerta: gates locales en verde.**
-4. **Contrato** — si el diff toca `core::types`, `src-tauri`, `lodestar-mcp` o `frontend/src/lib/ipc/`,
+4. **Contrato** — si el diff toca `core::types`, las tools de `lodestar-mcp` o `contracts/mcp.yml`,
    ejecuta `/contrato --check`. **Puerta: sin drift BLOQUEANTE.**
 5. **Juicio** — ejecuta `/juzgar <ID>` (añade `--panel` si el diff es grande, toca la frontera o
    superficies de seguridad). **Puerta: veredicto APROBADA (o CON RESERVAS aceptadas explícitamente
