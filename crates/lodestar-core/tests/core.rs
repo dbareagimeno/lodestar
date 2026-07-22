@@ -69,6 +69,69 @@ fn checkcode_wire_con_guion() {
     assert_eq!(CheckCode::OkfConflict.as_str(), "OKF-CONFLICT");
 }
 
+// --- E10-H06: extensión de `Check` + familias `SCHEMA-*` / `REL-*` -----------
+//
+// Fase ROJA: las variantes `SchemaReqfield`/`RelTarget` y los campos nuevos de `Check`
+// (`id`/`range`/`related`/`fixes`) todavía NO existen en producción. Estos tests fijan
+// el WIRE de los códigos nuevos y la RETRO-COMPAT del `Check` clásico.
+
+#[test]
+fn schema_code_wire() {
+    // Criterio: `CheckCode::SchemaReqfield` → serializa `"SCHEMA-REQFIELD"`.
+    assert_eq!(
+        serde_json::to_value(CheckCode::SchemaReqfield).unwrap(),
+        serde_json::json!("SCHEMA-REQFIELD"),
+    );
+    // La familia REL-* comparte el mismo patrón de wire con guion (cubre ambas familias).
+    assert_eq!(
+        serde_json::to_value(CheckCode::RelTarget).unwrap(),
+        serde_json::json!("REL-TARGET"),
+    );
+}
+
+#[test]
+fn check_extension_retrocompat() {
+    // Un `Check` de un código OKF clásico, construido SIN fixes/range/id/related.
+    let c = Check::new(
+        Severity::Err,
+        CheckCode::OkfFm01,
+        "falta frontmatter",
+        vec![RelPath::new("a/b.md").unwrap()],
+    );
+    let v = serde_json::to_value(&c).unwrap();
+
+    // Retro-compat: los 4 campos clásicos NO cambian de forma ni de valor respecto al wire
+    // actual (un consumidor viejo del `Check` no se rompe).
+    assert_eq!(v["level"], serde_json::json!("err"));
+    assert_eq!(v["code"], serde_json::json!("OKF-FM01"));
+    assert_eq!(v["msg"], serde_json::json!("falta frontmatter"));
+    assert_eq!(v["targets"], serde_json::json!(["a/b.md"]));
+
+    // Campos nuevos ADITIVOS con su valor por defecto: `fixes` serializa como `[]`
+    // y `range` está ausente (o `null`).
+    assert_eq!(
+        v["fixes"],
+        serde_json::json!([]),
+        "un Check OKF clásico debe serializar `fixes` como []",
+    );
+    assert!(
+        v.get("range").is_none_or(serde_json::Value::is_null),
+        "un Check OKF clásico debe serializar `range` ausente o null",
+    );
+}
+
+#[test]
+fn check_campos_nuevos_por_defecto() {
+    // Los 15 checks OKF dejan los campos nuevos en su valor por defecto. Este test fija los
+    // NOMBRES Rust de los campos aditivos (id/range/related/fixes) que el diseño D-CheckCode
+    // dicta; su presencia hace ROJO por API ausente hasta que se implementen.
+    let c = Check::new(Severity::Info, CheckCode::RecTitle, "sin título", vec![]);
+    assert!(c.id.is_none());
+    assert!(c.range.is_none());
+    assert!(c.related.is_empty());
+    assert!(c.fixes.is_empty());
+}
+
 // --- E1-H05: modelo ---------------------------------------------------------
 
 #[test]

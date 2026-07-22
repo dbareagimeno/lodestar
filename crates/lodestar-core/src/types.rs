@@ -161,6 +161,22 @@ pub enum CheckCode {
     OkfLog,
     #[serde(rename = "OKF-CONFLICT")]
     OkfConflict,
+    // --- Familias schema-driven (decisión D-CheckCode, `ARCHITECTURE.md §19.3`) ---
+    // Variantes ESTÁTICAS acotadas (no hay espacio de códigos dinámico). El core aún no las
+    // produce (eso es E10-H07/E11-H03) — esta historia solo fija el contrato de wire. La clave
+    // i18n por código (§12) se satisface con `Check.msg`, que el core emite inline (no hay
+    // catálogo i18n en el core; el catálogo de `frontend/src/lib/i18n.ts` está congelado y
+    // fuera de alcance de esta historia).
+    #[serde(rename = "SCHEMA-REQFIELD")]
+    SchemaReqfield,
+    #[serde(rename = "SCHEMA-STATUS")]
+    SchemaStatus,
+    #[serde(rename = "REL-TARGET")]
+    RelTarget,
+    #[serde(rename = "REL-CARD")]
+    RelCard,
+    #[serde(rename = "REL-TYPE")]
+    RelType,
 }
 }
 
@@ -183,24 +199,75 @@ impl CheckCode {
             CheckCode::OkfIdx => "OKF-IDX",
             CheckCode::OkfLog => "OKF-LOG",
             CheckCode::OkfConflict => "OKF-CONFLICT",
+            CheckCode::SchemaReqfield => "SCHEMA-REQFIELD",
+            CheckCode::SchemaStatus => "SCHEMA-STATUS",
+            CheckCode::RelTarget => "REL-TARGET",
+            CheckCode::RelCard => "REL-CARD",
+            CheckCode::RelType => "REL-TYPE",
         }
     }
 }
 
 schema_derive! {
-/// Un diagnóstico de conformidad. Campos = los del prototipo `chk(level, code, msg, targets)`.
-/// NO `severity`/`message`. `targets` SIEMPRE presente (array, nunca null).
+/// Rango de líneas (1-based, como el resto de referencias a línea del core) que acota un `Check`
+/// dentro de un fichero. Aditivo (E10-H06, `ARCHITECTURE.md §19.3`); los checks OKF clásicos no
+/// lo rellenan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Range {
+    pub start_line: u32,
+    pub end_line: u32,
+}
+}
+
+schema_derive! {
+/// Un arreglo sugerido para un `Check` (E12-H07 los aplica; aquí solo se describen). `safe`
+/// indica si se puede aplicar sin revisión humana.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Fix {
+    pub fix_id: String,
+    pub title: String,
+    pub safe: bool,
+}
+}
+
+schema_derive! {
+/// Un diagnóstico de conformidad. Campos clásicos = los del prototipo `chk(level, code, msg,
+/// targets)`. NO `severity`/`message`. `targets` SIEMPRE presente (array, nunca null).
+///
+/// Campos ADITIVOS (decisión D-CheckCode, `ARCHITECTURE.md §19.3`, E10-H06): `id`/`range`/
+/// `related`/`fixes`. Retro-compat: `id`/`range` quedan AUSENTES cuando `None` y `related`/
+/// `fixes` serializan `[]` cuando vacíos — un consumidor del wire clásico no ve cambios.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Check {
     pub level: Severity,
     pub code: CheckCode,
     pub msg: String,
     pub targets: Vec<RelPath>,
+    /// Identificador estable del diagnóstico dentro de una revisión (p. ej. `diag:blake3:…`,
+    /// E10-H12). Ausente para los checks OKF clásicos hasta que un productor lo rellene.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    /// Rango de líneas del fichero afectado, si se conoce.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub range: Option<Range>,
+    /// Otros paths relacionados con el diagnóstico (además de `targets`), p. ej. el destino de un
+    /// link roto en un check `REL-*`. Siempre presente (array, `[]` si no hay ninguno) — mismo
+    /// patrón que `targets`.
+    #[serde(default)]
+    pub related: Vec<RelPath>,
+    /// Arreglos sugeridos (E12-H07 los aplica). Siempre presente; `[]` si no hay ninguno (el
+    /// test `check_extension_retrocompat` fija que NO se omite del wire).
+    #[serde(default)]
+    pub fixes: Vec<Fix>,
 }
 }
 
 impl Check {
-    /// Constructor equivalente al `chk(level, code, msg, targets)` del prototipo.
+    /// Constructor equivalente al `chk(level, code, msg, targets)` del prototipo. Los campos
+    /// aditivos (`id`/`range`/`related`/`fixes`) quedan en su valor por defecto — usa los
+    /// builders `.with_*` para rellenarlos.
     pub fn new(
         level: Severity,
         code: CheckCode,
@@ -212,7 +279,39 @@ impl Check {
             code,
             msg: msg.into(),
             targets,
+            id: None,
+            range: None,
+            related: Vec::new(),
+            fixes: Vec::new(),
         }
+    }
+
+    /// Builder: fija el `id` estable del diagnóstico (E10-H12).
+    #[must_use]
+    pub fn with_id(mut self, id: impl Into<String>) -> Self {
+        self.id = Some(id.into());
+        self
+    }
+
+    /// Builder: fija el `range` de líneas afectado.
+    #[must_use]
+    pub fn with_range(mut self, range: Range) -> Self {
+        self.range = Some(range);
+        self
+    }
+
+    /// Builder: fija los paths `related` (p. ej. el destino de una relación tipada).
+    #[must_use]
+    pub fn with_related(mut self, related: Vec<RelPath>) -> Self {
+        self.related = related;
+        self
+    }
+
+    /// Builder: fija los `fixes` sugeridos (E10-H07/E12-H07).
+    #[must_use]
+    pub fn with_fixes(mut self, fixes: Vec<Fix>) -> Self {
+        self.fixes = fixes;
+        self
     }
 }
 
