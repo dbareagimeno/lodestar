@@ -158,6 +158,45 @@ fn error_code_wire() {
     );
 }
 
+// --- E10-H04: `ConceptRef` (identidad por path, id opcional/diferido) --------
+//
+// Fase ROJA: el struct `ConceptRef { path: RelPath, id: Option<ConceptId> }` (`REFACTOR §6.1`)
+// todavía NO existe en producción. Se espera reachable vía `use lodestar_core::types::*` (mismo
+// patrón que `RelPath`/`ErrorCode`), con una deserialización que acepta `{ "path": … }` y deja el
+// `id` ausente como `None`. Estos tests hacen ROJO por API ausente (símbolo `ConceptRef`) hasta que
+// se implemente. La resolución contra un bundle (`CONCEPT_NOT_FOUND`) se prueba en `lodestar-app`
+// (`tests/concept_ref.rs`), porque exige un `Workspace` abierto y el core es puro.
+
+#[test]
+fn ref_por_path() {
+    // Criterio `ref_por_path`: `{ "path": "a/b.md" }` deserializa a un `ConceptRef` cuyo `path` es
+    // el `RelPath` validado y cuyo `id` queda ausente (`None`) — el id es opcional/diferido.
+    let referencia: ConceptRef =
+        serde_json::from_str(r#"{"path":"a/b.md"}"#).expect("`{ path: a/b.md }` debe deserializar");
+    assert_eq!(
+        referencia.path,
+        RelPath::new("a/b.md").unwrap(),
+        "el `path` deserializado debe ser el RelPath validado `a/b.md`",
+    );
+    assert!(
+        referencia.id.is_none(),
+        "sin clave `id` en el JSON, `ConceptRef::id` debe quedar `None`, es {:?}",
+        referencia.id,
+    );
+}
+
+#[test]
+fn ref_rechaza_traversal() {
+    // Criterio `ref_rechaza_traversal`: `{ "path": "../x" }` NO debe deserializar — `RelPath`
+    // rechaza el `..` en su `Deserialize` (invariante #6, único chokepoint de path-traversal), y
+    // `ConceptRef` hereda ese rechazo por delegar en el `RelPath` de su campo `path`.
+    let resultado = serde_json::from_str::<ConceptRef>(r#"{"path":"../x"}"#);
+    assert!(
+        resultado.is_err(),
+        "un `ConceptRef` con `path` de traversal (`../x`) debe fallar al deserializar, dio {resultado:?}",
+    );
+}
+
 // --- E1-H05: modelo ---------------------------------------------------------
 
 #[test]

@@ -216,6 +216,9 @@ superficie de producto; git queda como crate dormido) y `DECISIONES.md §0`. Des
     `lodestar-app`. Juez ciego: APROBADA CON RESERVAS (3/3). **A rastrear en E12/E13**: hacer que
     `WorkspaceError::Core` preserve la variante `CoreError` (hoy la aplana a String → un
     `PERMISSION_DENIED` real se degradaría a `INTERNAL_IO_ERROR` al envolverse).
-  - ⏳ E10-H04/H05/H07 (schema) y H08–H13 (tools) pendientes.
+  - ✅ **E10-H04** — `ConceptRef {path, id?}` + `ConceptId` en `core::types`; `App::resolve_ref`
+    resuelve contra `Analysis::concepts` (invariante #3: excluye reservados) →
+    `CONCEPT_NOT_FOUND` si no existe; `AMBIGUOUS_REFERENCE` reservado. Juez ciego: APROBADA (3/3).
+  - ⏳ E10-H05/H07 (schema) y H08–H13 (tools) pendientes.
 - **E11–E14: pendientes** (grafo e impacto · planificación · publicación recuperable ·
   integración software + evaluación — `ARCHITECTURE.md §19.8`).

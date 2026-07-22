@@ -13,7 +13,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use lodestar_core::types::{Check, ErrorCode, WorkspaceRevision};
+use lodestar_core::types::{Check, ConceptRef, ErrorCode, RelPath, WorkspaceRevision};
 use lodestar_core::CoreError;
 use lodestar_workspace::{Workspace, WorkspaceError};
 
@@ -190,6 +190,29 @@ impl App {
     /// El `Workspace` subyacente, para los servicios que se implementen sobre `App`.
     pub fn workspace(&self) -> &Workspace {
         &self.workspace
+    }
+
+    /// Resuelve un [`ConceptRef`] al `RelPath` del concepto que referencia (E10-H04).
+    ///
+    /// v2 resuelve identidad **únicamente por `path`**: comprueba contra la lista autoritativa de
+    /// concepts que computa el core (`Analysis::concepts`, invariante #3 — "una sola verdad
+    /// computada"), no contra la mera presencia de un fichero en el `FileMap` (así un `.md`
+    /// reservado como `index.md`/`log.md`, que el core no cuenta como concept, tampoco resuelve
+    /// aquí). Si el `path` no está en esa lista, `Err(ErrorCode::ConceptNotFound)`.
+    ///
+    /// `ErrorCode::AmbiguousReference` queda RESERVADO para cuando exista resolución por `id`
+    /// (`REFACTOR §6.1`) — no-goal de esta historia (IDs estables/federación). En v2 `ConceptRef.id`
+    /// es siempre `None`, así que esta función nunca lo produce todavía.
+    pub fn resolve_ref(&self, r: &ConceptRef) -> Result<RelPath, ErrorCode> {
+        let analysis = self
+            .workspace
+            .analyze()
+            .map_err(|e| workspace_error_code(&e))?;
+        if analysis.concepts.contains(&r.path) {
+            Ok(r.path.clone())
+        } else {
+            Err(ErrorCode::ConceptNotFound)
+        }
     }
 
     // Los métodos de caso de uso (`workspace_status`, `knowledge_search`, `knowledge_get`,

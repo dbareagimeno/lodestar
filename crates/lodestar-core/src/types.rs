@@ -111,6 +111,32 @@ impl<'de> Deserialize<'de> for RelPath {
 pub type FileMap = BTreeMap<RelPath, String>;
 
 // ---------------------------------------------------------------------------
+// ConceptRef / ConceptId — identidad por path (E10-H04). `id` queda diferido/reservado.
+// ---------------------------------------------------------------------------
+
+schema_derive! {
+/// Id estable de concepto — newtype **diferido**: IDs estables/federación son no-goal de esta
+/// historia (`REFACTOR §16`). Existe ya en el wire de `ConceptRef` para no romper compatibilidad
+/// cuando se implemente la resolución por id, pero ningún flujo actual lo produce ni lo consume.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConceptId(pub String);
+}
+
+schema_derive! {
+/// Referencia a un concepto, usada por todas las tools de lectura/escritura (`ARCHITECTURE.md
+/// §19.3`). v2 resuelve identidad **únicamente por `path`**: `id` es opcional y su resolución
+/// queda diferida (`REFACTOR §6.1`, no-goal IDs estables/federación). `{ "path": "a/b.md" }`
+/// deserializa con `id: None`; `path` hereda la validación de `RelPath` — rechaza `..`/absolutas
+/// (invariante #6, único chokepoint de path-traversal).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConceptRef {
+    pub path: RelPath,
+    #[serde(default)]
+    pub id: Option<ConceptId>,
+}
+}
+
+// ---------------------------------------------------------------------------
 // Conformidad: Severity · CheckCode · Check (§4.1, §10 filas 3/4)
 // ---------------------------------------------------------------------------
 
