@@ -385,5 +385,11 @@ superficie de producto; git queda como crate dormido) y `DECISIONES.md §0`. Des
     conjunto afectado completo, recover). PERMISSION_DENIED no se degrada (assert_writable directo).
     Juez ciego riguroso: APROBADA (4/4). **Diferido**: gating por perfil (E14-H03); fsync del árbol de
     recovery para power-loss (hardening E14).
-  - ⏳ E13-H09/H10/H11 (change_revert/audit/auto-regen) pendientes.
+  - ✅ **E13-H09** — Tool `change_revert` (perfil standard): `App::change_revert` verifica el receipt
+    (ausente/purgado → `PLAN_EXPIRED`), la revisión actual == `result_revision` (si no → `WRITE_CONFLICT`,
+    sin tocar disco) y las copias de recuperación; luego `Workspace::revert_transaction` restaura desde
+    `recovery/<orig>/` como una transacción INVERSA recuperable (lock + backup del estado actual + journal
+    propios ANTES de restaurar por `write_atomic`/`delete`). El workspace vuelve a `previousRevision`.
+    Juez ciego: APROBADA (3/3).
+  - ⏳ E13-H10 (audit) y E13-H11 (auto-regen index/tags) pendientes.
 - **E14: pendiente** (integración software + evaluación — `ARCHITECTURE.md §19.8`).

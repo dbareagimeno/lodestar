@@ -361,6 +361,36 @@ tools:
       revisión resultante: el workspace «queda en» ella. revert = change_revert (E13-H09);
       auto-regen de index/tags dentro de la transacción = E13-H11.
 
+  - nombre: change_revert
+    fuente: crates/lodestar-mcp/src/tools.rs
+    historia: E13-H09
+    perfil: standard
+    params:
+      - { nombre: receiptId, tipo: string, requerido: true, semantica: "el «receiptId» que devolvió change_apply (E13-H08); localiza el ChangeReceipt persistido (E13-H07) y sus copias de recuperación (E13-H04) por convención de nombre" }
+      - { nombre: expectedWorkspaceRevision, tipo: string, requerido: false, semantica: "control optimista a nivel de workspace («blake3:…»); si se omite se adopta la revisión actual, si no coincide → REVISION_CONFLICT" }
+    retorno: "RevertResult (lodestar_app): { reverted, receiptId, previousWorkspaceRevision, workspaceRevision, changedPaths, semanticDiff } — json directo, sin envelope. Es INVERSO al apply: previousWorkspaceRevision == resultRevision del apply revertido; workspaceRevision == previousRevision del apply (estado restaurado)"
+    output_schema: "sí — schemars::schema_for!(RevertResult), vía lodestar_app::schemas::change_revert_schema()"
+    errores: ["PLAN_EXPIRED (receipt no disponible: caducado/purgado por retención — reuso documentado del catálogo congelado de ErrorCode, no hay variante «receipt no encontrado»)", "REVISION_CONFLICT (expectedWorkspaceRevision no coincide con la revisión actual)", "WRITE_CONFLICT (un fichero afectado —o cualquier otro— cambió tras el apply: la revisión actual ya no es la resultRevision del receipt)", "PERMISSION_DENIED (un path afectado ya no es escribible)", "INTERNAL_IO_ERROR (carga de config, IO de la transacción, copias de recuperación ausentes)", "WorkspaceError"]
+    semantica: >-
+      Revierte una transacción RECIENTE y no alterada por el ÚNICO ESCRITOR (invariante #5),
+      devolviendo el conocimiento canónico al estado ANTERIOR al apply desde sus copias de
+      recuperación (E13-H04), como una NUEVA transacción inversa recuperable (con su propio
+      write-ahead journal y copias de recuperación, invariante «nunca un estado parcial silencioso»).
+      Condiciones EN ORDEN: (1) carga el ChangeReceipt persistido (E13-H07) por `receiptId` →
+      PLAN_EXPIRED si no está (purgado por el GC de retención); (2) verifica
+      `expectedWorkspaceRevision` si viene → REVISION_CONFLICT; (3) comprueba que el workspace sigue
+      en la `resultRevision` que dejó el apply (la revisión actual del conocimiento escribible == la
+      del receipt) → WRITE_CONFLICT y NO revierte si algún fichero afectado cambió tras el apply.
+      Luego delega en `Workspace::revert_transaction`, que bajo el lock de publicación (E13-H02)
+      verifica que las copias de recuperación existen, respalda el estado actual de los afectados
+      (recuperabilidad de la inversa), registra su intención en un journal `prepared` fsynced y
+      restaura por el único escritor (`io::write_atomic` de cada original respaldado, `io::delete` de
+      los paths creados marcados `.absent`), sella y devuelve las revisiones. Tras revertir, persiste
+      el ChangeReceipt de la reversión (inversa: previous/result intercambiados) y ejecuta la
+      retención (`gc_receipts`). El `workspaceRevision` devuelto == la `previousRevision` del apply
+      revertido: el workspace vuelve al estado previo. Historial general (no-goal, no es git;
+      `REFACTOR §11.3`). audit = E13-H10; auto-regen = E13-H11.
+
 # ---------------------------------------------------------------------------
 # §15 — Migración de superficie (10 tools heredadas → 10 tools objetivo NUEVAS,
 # `docs/REFACTOR.md §15/§16`, `DECISIONES.md` §"0. Giro a motor headless"). Vive aquí (no solo en

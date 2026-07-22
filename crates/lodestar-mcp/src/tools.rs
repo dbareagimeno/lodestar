@@ -8,7 +8,8 @@ use std::collections::BTreeMap;
 use lodestar_app::{schemas, App, CheckScope, Profile, SearchFilters};
 use lodestar_core::plan::PlanPolicy;
 use lodestar_core::types::{
-    ChangeSetId, ConceptRef, Direction, FrontmatterPatch, RelPath, Severity, WorkspaceRevision,
+    ChangeSetId, ConceptRef, Direction, FrontmatterPatch, ReceiptId, RelPath, Severity,
+    WorkspaceRevision,
 };
 #[cfg(test)]
 use lodestar_workspace::Workspace;
@@ -168,6 +169,12 @@ pub fn list() -> Value {
              "expectedWorkspaceRevision": { "type": "string", "description": "Control optimista a nivel de workspace («blake3:…»). Si se omite, se adopta la revisión actual; si no coincide → REVISION_CONFLICT." }
          }, "required": ["changeSetId"], "additionalProperties": false },
          "outputSchema": schemas::change_apply_schema()},
+        {"name": "change_revert", "description": "Revierte una transacción RECIENTE y no alterada por el ÚNICO ESCRITOR, devolviendo el conocimiento canónico al estado anterior al apply desde sus copias de recuperación (transacción inversa recuperable con journal propio). Requiere que el receipt siga disponible (PLAN_EXPIRED si caducó/purgado por retención), que el workspace no haya cambiado tras el apply (WRITE_CONFLICT si un fichero afectado se alteró) y —opcionalmente— control optimista de workspace (REVISION_CONFLICT). Devuelve el recibo de la reversión con las revisiones antes/después: el workspace vuelve a la previousRevision del apply.",
+         "inputSchema": { "type": "object", "properties": {
+             "receiptId": { "type": "string", "description": "El «receiptId» que devolvió change_apply (E13-H08); localiza el receipt persistido (E13-H07) y sus copias de recuperación." },
+             "expectedWorkspaceRevision": { "type": "string", "description": "Control optimista a nivel de workspace («blake3:…»). Si se omite, se adopta la revisión actual; si no coincide → REVISION_CONFLICT." }
+         }, "required": ["receiptId"], "additionalProperties": false },
+         "outputSchema": schemas::change_revert_schema()},
     ])
 }
 
@@ -435,6 +442,25 @@ pub fn call(app: &App, profile: Profile, name: &str, params: &Value) -> ToolResu
             // `ErrorCode::as_str()` (p. ej. «PLAN_STALE»/«PERMISSION_DENIED»), nunca el `Debug`.
             let result = app
                 .change_apply(&change_set_id, expected)
+                .map_err(|e| e.as_str().to_string())?;
+            to_json(&result)
+        }
+        "change_revert" => {
+            let receipt_id = ReceiptId(
+                params
+                    .get("receiptId")
+                    .and_then(Value::as_str)
+                    .ok_or("falta el parámetro «receiptId»")?
+                    .to_string(),
+            );
+            let expected = params
+                .get("expectedWorkspaceRevision")
+                .and_then(Value::as_str)
+                .map(|s| WorkspaceRevision(s.to_string()));
+            // Mismo mapeo de error a wire que las demás tools (E10-H02): el código estable
+            // `ErrorCode::as_str()` (p. ej. «WRITE_CONFLICT»/«PLAN_EXPIRED»), nunca el `Debug`.
+            let result = app
+                .change_revert(&receipt_id, expected)
                 .map_err(|e| e.as_str().to_string())?;
             to_json(&result)
         }

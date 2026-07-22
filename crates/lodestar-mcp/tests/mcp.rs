@@ -2908,3 +2908,323 @@ fn apply_fuera_de_writable() {
         "el apply rechazado NO debe crear ningún `.md` bajo `src/`: {resp:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// E13-H09 — Tool `change_revert` (reversión de una transacción reciente y no alterada,
+// `REFACTOR §11.3/§17`, `ARCHITECTURE.md §19.5/§19.6`).
+//
+// UBICACIÓN: los 3 criterios se ejercitan **e2e por la tool MCP** (campo Pruebas de la historia:
+// `crates/lodestar-mcp/tests/`), coherente con E13-H08 (`change_apply`). Lo que se fija AQUÍ es el
+// contrato de **wire** de `change_revert`: qué `arguments` toma, qué `structuredContent` devuelve al
+// revertir, y cómo afloran `WRITE_CONFLICT` (fichero afectado alterado) y el código de «receipt no
+// disponible» (caducado/purgado). La mecánica interna (restauración por el único escritor desde las
+// copias de recuperación, transacción inversa con su propio journal) la testean las historias de
+// `lodestar-workspace` / `lodestar-app`; aquí se fija la SUPERFICIE.
+//
+// FASE ROJA: la tool `change_revert` NO está en `tools::list()` todavía, así que
+// `tools/call {name:"change_revert"}` devuelve el error de protocolo `-32602` (tool desconocida, vía
+// `tools::exists`) y `result` es `null`. Por eso los asserts que leen `result.structuredContent.*` o
+// `result.isError` fallan por AUSENCIA de la tool/servicio (`App::change_revert`), no por un valor
+// erróneo. Ese es el rojo correcto. Los pasos previos `change_plan`/`change_apply` SÍ existen desde
+// E12-H08/E13-H08, así que el flujo `change_plan → change_apply → change_revert` deja el rojo SIEMPRE
+// en la ÚLTIMA llamada (la reversión), no antes.
+//
+// WIRE DE ENTRADA asumido (`REFACTOR §11.3`; el implementador puede refinar los tipos internos, no el
+// wire):
+//   arguments: {
+//     receiptId: "<el receiptId que devolvió change_apply>",  // requerido; localiza el receipt (E13-H07)
+//     expectedWorkspaceRevision?: "blake3:…"                  // control optimista a nivel de workspace;
+//   }                                                         // si se omite, se adopta la revisión actual
+//
+// WIRE DE SALIDA asumido (`structuredContent`, salida «razonable» de la historia: la reversión es una
+// transacción inversa por el único escritor):
+//   {
+//     reverted: true,                              // la reversión se publicó
+//     previousWorkspaceRevision, workspaceRevision,   // «blake3:…» antes/después de la transacción INVERSA:
+//       // `previousWorkspaceRevision` == la `resultRevision` que dejó el apply (el estado del que parte
+//       //  la reversión); `workspaceRevision` == la `previousRevision` original del apply (el estado
+//       //  restaurado). Es decir: revertir devuelve el workspace a `previousRevision` (criterio).
+//     receiptId, changedPaths, …
+//   }
+//   Los errores de EJECUCIÓN afloran como `result.isError == true` con el código estable wire visible
+//   (ErrorCode `as_str()`, E10-H02 / invariante #4 / `REFACTOR §13`), NUNCA como error JSON-RPC de
+//   transporte — mismo patrón que `PLAN_STALE`/`REVISION_CONFLICT` en `change_apply`.
+//
+// FIRMA DE SERVICIO ASUMIDA (el implementador la crea con su propia elección de tipos internos):
+//   App::change_revert(receipt_id: &ReceiptId, expected_workspace_revision: Option<WorkspaceRevision>)
+//       -> Result<RevertResult, ErrorCode>
+//   que carga el receipt persistido (E13-H07), verifica que existe/no caducó, que el workspace sigue en
+//   la `resultRevision` y que los ficheros afectados no cambiaron (si no → `WRITE_CONFLICT`), y restaura
+//   desde las copias de recuperación (E13-H04) por el ÚNICO ESCRITOR (invariante #5).
+//
+// CÓDIGO DE «RECEIPT NO DISPONIBLE» (caducado/purgado): el catálogo de `ErrorCode` (invariante #4,
+// `core::types`) está CONGELADO en 16 variantes y NO tiene una específica de «receipt no encontrado».
+// Se REUSA `PLAN_EXPIRED` —igual que `change_apply` reusa `PLAN_EXPIRED`/`PLAN_STALE` para el plan
+// persistido ausente/vencido— por ser el match semántico más cercano a «la transacción registrada ya
+// no está disponible por retención» y por alinear con el nombre del criterio (`revert_caducado`).
+// ASUNCIÓN documentada y sujeta a ratificación por el implementador/juez: si se prefiere otro código
+// del catálogo, es una decisión de contrato a cerrar antes de la fase verde (no la cierro aquí).
+// ---------------------------------------------------------------------------
+
+/// Construye la línea `tools/call change_revert` con el `receiptId` y un `expectedWorkspaceRevision`
+/// opcional. Documenta el wire de entrada que fija esta historia.
+fn change_revert_line(receipt_id: &str, expected_ws_rev: Option<&str>) -> String {
+    let mut args = serde_json::json!({ "receiptId": receipt_id });
+    if let Some(r) = expected_ws_rev {
+        args["expectedWorkspaceRevision"] = serde_json::Value::String(r.to_string());
+    }
+    serde_json::json!({
+        "jsonrpc": "2.0", "id": 3, "method": "tools/call",
+        "params": { "name": "change_revert", "arguments": args }
+    })
+    .to_string()
+}
+
+/// `structuredContent` de una respuesta `change_revert`, tras verificar que es un objeto. En fase
+/// ROJA (tool ausente) `result` es `null` → panica con un mensaje que documenta el porqué del rojo
+/// (la tool/servicio `change_revert` ausente), no un fallo espurio.
+fn revert_sc(resp: &serde_json::Value) -> &serde_json::Value {
+    let sc = &resp["result"]["structuredContent"];
+    assert!(
+        sc.is_object(),
+        "change_revert debe devolver structuredContent (objeto); tool/servicio ausente en fase ROJA: {resp:?}"
+    );
+    sc
+}
+
+/// El `receiptId` (string; `ReceiptId` es un newtype `#[serde(transparent)]`) de una respuesta
+/// `change_apply`. Panica —documentando el rojo— si el apply no lo produjo (tool/servicio
+/// `change_apply` ausente ⇒ `structuredContent` nulo). Como `change_apply` YA existe (E13-H08), en
+/// la práctica esto siempre devuelve un id: el rojo lo dispara la ausencia de `change_revert`.
+fn apply_receipt_id(resp: &serde_json::Value) -> String {
+    apply_sc(resp)["receiptId"]
+        .as_str()
+        .unwrap_or_else(|| panic!("change_apply debe devolver un `receiptId` (string): {resp:?}"))
+        .to_string()
+}
+
+/// Purga los recibos persistidos borrando `.lodestar/runtime/receipts/` entero (como haría un GC de
+/// retención al caducar, E13-H07): tras esto, ningún `receiptId` es localizable ⇒ «no disponible».
+/// Se borra el directorio completo (no un fichero concreto) para no acoplar el test al saneado del
+/// nombre del receipt (`receipt_file_name`). Las copias de recuperación se dejan intactas: el
+/// discriminante del criterio `revert_caducado` es que el RECEIPT ya no está.
+fn purge_receipts(root: &std::path::Path) {
+    let dir = root.join(".lodestar").join("runtime").join("receipts");
+    if dir.exists() {
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+}
+
+/// E13-H09 · Criterio `revert_reciente` (benchmark §17: "Recuperar un cambio reciente → change_revert"):
+/// Dado un receipt reciente y el workspace intacto, Cuando se revierte, Entonces el workspace vuelve a
+/// `previousRevision`. Flujo: `change_plan` (create) → `change_apply` (captura `receiptId` y la
+/// `previousWorkspaceRevision` original) → `change_revert(receiptId)`. Se comprueba (a) `reverted==true`
+/// y no `isError`; (b) que la `workspaceRevision` resultante de la reversión == la
+/// `previousWorkspaceRevision` que tenía el apply (se volvió al estado previo); (c) empírico: el `.md`
+/// creado por el apply YA NO existe en disco (la reversión de un `create` lo borra, invariante #1); y
+/// (d) que un `workspace_status` posterior reporta EXACTAMENTE esa revisión restaurada.
+#[test]
+fn revert_reciente() {
+    let dir = bundle_min();
+
+    // (1) Plan válido: crear un concepto conforme (mismo patrón que `apply_ok`).
+    let ops = serde_json::json!([
+        { "op": "create", "path": "nuevo.md", "type": "Nota", "title": "Nuevo",
+          "body": "# Resumen\n\ncuerpo del concepto nuevo\n" },
+    ]);
+    let plan = roundtrip(
+        dir.path(),
+        &[change_plan_line(None, ops, policy_permisiva()).as_str()],
+        1,
+    );
+    let id = plan_change_set_id(&plan[0]);
+
+    // (2) Aplicar (servidor fresco): captura el `receiptId` y la revisión ORIGINAL previa al apply.
+    let applied = roundtrip(dir.path(), &[change_apply_line(&id, None).as_str()], 1);
+    let receipt_id = apply_receipt_id(&applied[0]);
+    let revision_original = apply_sc(&applied[0])["previousWorkspaceRevision"]
+        .as_str()
+        .unwrap_or_else(|| {
+            panic!("change_apply debe devolver `previousWorkspaceRevision`: {applied:?}")
+        })
+        .to_string();
+    // El apply materializó el `.md` (precondición: si no, el criterio sería vacuo).
+    assert!(
+        dir.path().join("nuevo.md").is_file(),
+        "precondición: el apply debe haber creado `nuevo.md` antes de revertir: {applied:?}"
+    );
+
+    // (3) Revertir por el `receiptId` (servidor fresco, mismo bundle) + `workspace_status`.
+    let status_line = r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"workspace_status","arguments":{}}}"#;
+    let resp = roundtrip(
+        dir.path(),
+        &[change_revert_line(&receipt_id, None).as_str(), status_line],
+        2,
+    );
+    let sc = revert_sc(&resp[0]);
+
+    // (a) La reversión se publicó.
+    assert_eq!(
+        sc["reverted"],
+        serde_json::Value::Bool(true),
+        "un receipt reciente y el workspace intacto deben revertirse (reverted:true): {resp:?}"
+    );
+    assert!(
+        resp[0]["result"]["isError"].as_bool() != Some(true),
+        "una reversión exitosa no debe dar isError: {resp:?}"
+    );
+
+    // (b) El workspace VUELVE a la revisión previa al apply (criterio literal).
+    let ws_rev = sc["workspaceRevision"].as_str().unwrap_or("");
+    assert!(
+        ws_rev.starts_with("blake3:"),
+        "workspaceRevision restaurada ausente o mal formada («blake3:…»): {resp:?}"
+    );
+    assert_eq!(
+        ws_rev, revision_original,
+        "revertir debe devolver el workspace a la previousRevision del apply: {resp:?}"
+    );
+
+    // (c) Empírico: la reversión del `create` borró el `.md` del disco (invariante #1).
+    assert!(
+        !dir.path().join("nuevo.md").exists(),
+        "revertir un `create` debe borrar el `.md` del canónico: {resp:?}"
+    );
+
+    // (d) El workspace «queda en» la revisión restaurada: `workspace_status` reporta la misma.
+    let status_rev = resp[1]["result"]["structuredContent"]["workspaceRevision"]
+        .as_str()
+        .unwrap_or("");
+    assert_eq!(
+        status_rev, ws_rev,
+        "tras revertir, workspace_status debe reportar la workspaceRevision restaurada: {resp:?}"
+    );
+}
+
+/// E13-H09 · Criterio `revert_fichero_alterado`:
+/// Dado que un fichero afectado cambió tras el apply, Cuando se revierte, Entonces `WRITE_CONFLICT` y
+/// no revierte. Flujo: `change_plan`(create) → `change_apply` → se REESCRIBE en disco el `.md`
+/// afectado (`nuevo.md`) → `change_revert`. Se NO pasa `expectedWorkspaceRevision` para que el
+/// discriminante sea la comprobación de fichero-afectado-alterado (`WRITE_CONFLICT`), no un
+/// `REVISION_CONFLICT` del control optimista de workspace.
+#[test]
+fn revert_fichero_alterado() {
+    let dir = bundle_min();
+
+    // (1) Plan + apply de un `create` (el único fichero afectado es `nuevo.md`).
+    let ops = serde_json::json!([
+        { "op": "create", "path": "nuevo.md", "type": "Nota", "title": "Nuevo",
+          "body": "# Resumen\n\ncuerpo del concepto nuevo\n" },
+    ]);
+    let plan = roundtrip(
+        dir.path(),
+        &[change_plan_line(None, ops, policy_permisiva()).as_str()],
+        1,
+    );
+    let id = plan_change_set_id(&plan[0]);
+    let applied = roundtrip(dir.path(), &[change_apply_line(&id, None).as_str()], 1);
+    let receipt_id = apply_receipt_id(&applied[0]);
+
+    // (2) Un fichero AFECTADO cambia tras el apply: `nuevo.md` se reescribe EN DISCO con otro
+    //     contenido (marcador reconocible). Ahora el workspace ya NO está en la `resultRevision` que
+    //     dejó el apply y el afectado no casa con el receipt.
+    write(
+        dir.path(),
+        "nuevo.md",
+        "---\ntype: Nota\ntitle: Nuevo\n---\n\n# Resumen\n\nALTERADO-A-MANO-TRAS-EL-APPLY\n",
+    );
+
+    // (3) Revertir (servidor fresco): fichero afectado alterado ⇒ WRITE_CONFLICT.
+    let resp = roundtrip(
+        dir.path(),
+        &[change_revert_line(&receipt_id, None).as_str()],
+        1,
+    );
+    assert_eq!(
+        resp[0]["result"]["isError"], true,
+        "revertir con un fichero afectado alterado debe dar isError: {resp:?}"
+    );
+    assert!(
+        resp[0]["error"].is_null(),
+        "un conflicto de escritura NO debe ser un error de protocolo JSON-RPC: {resp:?}"
+    );
+    let texto = resp[0].to_string();
+    assert!(
+        texto.contains("WRITE_CONFLICT"),
+        "el error debe exponer el código estable «WRITE_CONFLICT»: {resp:?}"
+    );
+
+    // No revierte: `nuevo.md` conserva el contenido alterado a mano (si hubiera revertido el
+    // `create`, el fichero estaría BORRADO). El estado permanece intacto.
+    let en_disco = std::fs::read_to_string(dir.path().join("nuevo.md")).unwrap();
+    assert!(
+        en_disco.contains("ALTERADO-A-MANO-TRAS-EL-APPLY"),
+        "una reversión rechazada por WRITE_CONFLICT no debe tocar el fichero afectado: {en_disco:?}"
+    );
+}
+
+/// E13-H09 · Criterio `revert_caducado`:
+/// Dado un receipt caducado/purgado, Cuando se revierte, Entonces error (no disponible). Flujo:
+/// `change_plan`(create) → `change_apply` (captura `receiptId`) → se PURGA el receipt persistido
+/// (borra `.lodestar/runtime/receipts/`, como un GC de retención, E13-H07) → `change_revert`.
+///
+/// CÓDIGO ASUMIDO: `PLAN_EXPIRED` (reuso documentado del catálogo congelado de 16 `ErrorCode`, cf. la
+/// nota de sección). Además de exigir el código, se comprueba que (a) es un error de EJECUCIÓN
+/// (isError, no JSON-RPC); (b) NO es `WRITE_CONFLICT` (así el receipt-no-disponible se distingue del
+/// fichero-alterado y el test no es vacuo); y (c) no revierte: el `.md` del apply permanece en disco.
+#[test]
+fn revert_caducado() {
+    let dir = bundle_min();
+
+    // (1) Plan + apply de un `create`.
+    let ops = serde_json::json!([
+        { "op": "create", "path": "nuevo.md", "type": "Nota", "title": "Nuevo",
+          "body": "# Resumen\n\ncuerpo del concepto nuevo\n" },
+    ]);
+    let plan = roundtrip(
+        dir.path(),
+        &[change_plan_line(None, ops, policy_permisiva()).as_str()],
+        1,
+    );
+    let id = plan_change_set_id(&plan[0]);
+    let applied = roundtrip(dir.path(), &[change_apply_line(&id, None).as_str()], 1);
+    let receipt_id = apply_receipt_id(&applied[0]);
+    assert!(
+        dir.path().join("nuevo.md").is_file(),
+        "precondición: el apply debe haber creado `nuevo.md`: {applied:?}"
+    );
+
+    // (2) Caducar/purgar el receipt: se borra el directorio de recibos (como un GC de retención).
+    purge_receipts(dir.path());
+
+    // (3) Revertir (servidor fresco): el receipt ya no está ⇒ error «no disponible».
+    let resp = roundtrip(
+        dir.path(),
+        &[change_revert_line(&receipt_id, None).as_str()],
+        1,
+    );
+    assert_eq!(
+        resp[0]["result"]["isError"], true,
+        "revertir un receipt caducado/purgado debe dar isError: {resp:?}"
+    );
+    assert!(
+        resp[0]["error"].is_null(),
+        "un receipt no disponible NO debe ser un error de protocolo JSON-RPC: {resp:?}"
+    );
+    let texto = resp[0].to_string();
+    assert!(
+        texto.contains("PLAN_EXPIRED"),
+        "el error debe exponer el código estable de «no disponible» (asumido «PLAN_EXPIRED»): {resp:?}"
+    );
+    // No es un WRITE_CONFLICT: el receipt-no-disponible se distingue del fichero-alterado.
+    assert!(
+        !texto.contains("WRITE_CONFLICT"),
+        "un receipt purgado no es un WRITE_CONFLICT (debe ser «no disponible»): {resp:?}"
+    );
+
+    // No revierte: el `.md` creado por el apply sigue en disco (nada se restauró).
+    assert!(
+        dir.path().join("nuevo.md").is_file(),
+        "una reversión de receipt no disponible no debe tocar el canónico: {resp:?}"
+    );
+}

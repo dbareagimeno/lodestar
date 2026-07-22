@@ -29,8 +29,9 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
-use lodestar_core::types::RelPath;
+use lodestar_core::types::{workspace_revision, RelPath, WorkspaceRevision};
 
+use crate::config::WorkspaceConfig;
 use crate::error::WorkspaceError;
 use crate::journal::JournalState;
 use crate::{io, Workspace};
@@ -382,4 +383,171 @@ impl Workspace {
         }
         Ok(())
     }
+
+    /// El directorio raíz de las copias de recuperación de una transacción
+    /// (`.lodestar/runtime/recovery/<txnId saneado>/`), exista o no.
+    fn recovery_root(&self, txn_id: &str) -> PathBuf {
+        self.root
+            .join(".lodestar")
+            .join("runtime")
+            .join("recovery")
+            .join(recovery_dir_name(txn_id))
+    }
+
+    /// Recoge, en orden determinista por [`RelPath`], las copias byte-a-byte del árbol de
+    /// recuperación de `recovery_root` (cada fichero salvo el manifiesto `.absent`), como pares
+    /// `(rutaCanónica, contenido)`. Auxiliar de [`Workspace::revert_transaction`] (no toca disco:
+    /// solo lee las copias).
+    fn collect_backups(
+        &self,
+        recovery_root: &Path,
+    ) -> Result<Vec<(RelPath, String)>, WorkspaceError> {
+        let mut out = std::collections::BTreeMap::new();
+        collect_backups_into(recovery_root, recovery_root, &mut out)?;
+        Ok(out.into_iter().collect())
+    }
+
+    /// Revierte la transacción `orig_txn_id` como una **nueva transacción inversa recuperable**
+    /// (E13-H09, `ARCHITECTURE.md §19.5/§19.6`, `REFACTOR §11.3`), devolviendo el conocimiento
+    /// canónico al estado ANTERIOR a `orig_txn_id` desde sus copias de recuperación (E13-H04).
+    ///
+    /// Toda escritura del canónico va por el **único escritor** (invariante #5): las copias
+    /// respaldadas se restauran con `io::write_atomic` y los paths que se habían creado (marcados
+    /// `.absent`) se borran con `io::delete`. La reversión es ella misma **recuperable**: bajo el
+    /// lock de publicación (E13-H02) respalda el estado ACTUAL de los afectados en su propio árbol
+    /// de recuperación (`new_txn_id`) y registra su intención en un write-ahead journal propio
+    /// (E13-H03) **antes** del primer rename, de modo que una caída a mitad converge determinista al
+    /// reabrir (E13-H06). Devuelve `(previousRevision, resultRevision, changedPaths)`: la
+    /// [`WorkspaceRevision`] antes (== `resultRevision` del apply original) y después (==
+    /// `previousRevision` del apply original) de la reversión, y los paths que restauró.
+    ///
+    /// # Errores
+    /// - [`WorkspaceError::Io`] si faltan las copias de recuperación de `orig_txn_id` (no se puede
+    ///   revertir: transacción no disponible), o ante un fallo de IO de la restauración.
+    /// - [`WorkspaceError::WriteConflict`] si el lock ya está tomado (otro publicador).
+    /// - [`WorkspaceError::PermissionDenied`] si algún path afectado ya no es escribible.
+    pub fn revert_transaction(
+        &self,
+        orig_txn_id: &str,
+        new_txn_id: &str,
+    ) -> Result<(WorkspaceRevision, WorkspaceRevision, Vec<RelPath>), WorkspaceError> {
+        // (1) Lock exclusivo de publicación (RAII: liberado al final por `Drop`, incluso en panic).
+        let _lock = self.acquire_lock()?;
+
+        // (2) Recuperación pendiente primero: nunca se revierte sobre un estado a medio recuperar.
+        if self.recovery_pending() {
+            self.recover()?;
+        }
+
+        // (3) Localizar el árbol de recuperación de la transacción a revertir. Si no está, la
+        //     transacción ya no es reversible (copias purgadas por el GC, E13-H07).
+        let recovery_root = self.recovery_root(orig_txn_id);
+        if !recovery_root.exists() {
+            return Err(WorkspaceError::Io(format!(
+                "no hay copias de recuperación para la transacción {orig_txn_id}: no se puede \
+                 revertir"
+            )));
+        }
+
+        // (4) Conjunto afectado = originales respaldados (a restaurar) + paths creados (a borrar).
+        let backups = self.collect_backups(&recovery_root)?;
+        let absent = read_absent_manifest(&recovery_root);
+        let mut affected_set: BTreeSet<RelPath> = BTreeSet::new();
+        for (rel, _) in &backups {
+            affected_set.insert(rel.clone());
+        }
+        for rel in &absent {
+            affected_set.insert(rel.clone());
+        }
+        let affected: Vec<RelPath> = affected_set.into_iter().collect();
+
+        // (5) Guard del único escritor (E11-H04): los afectados deben seguir siendo escribibles.
+        for path in &affected {
+            self.assert_writable(path)?;
+        }
+
+        // (6) Revisión actual (== `resultRevision` del apply, ya re-verificado por la fachada) y
+        //     resultado hipotético de la reversión (canónico con backups restaurados / creados
+        //     borrados) para estampar la `resultRevision` en el journal ANTES de tocar el canónico.
+        let previous = self.workspace_revision()?;
+        let canonical = io::load_bundle(&self.root)?;
+        let mut result_files = canonical.clone();
+        for (rel, content) in &backups {
+            result_files.insert(rel.clone(), content.clone());
+        }
+        for rel in &absent {
+            result_files.remove(rel);
+        }
+        let writable = WorkspaceConfig::load(&self.root)
+            .unwrap_or_default()
+            .workspace
+            .writable_roots;
+        let result_rev = workspace_revision(&result_files, &writable);
+
+        // (7) Copias de recuperación de la INVERSA (respalda el estado actual) → la reversión es
+        //     recuperable (E13-H04): si cae a mitad, `recover` restaura desde `recovery/<new>/`.
+        self.backup_originals(new_txn_id, &affected)?;
+
+        // (8) Write-ahead journal `prepared` de la inversa, fsynced antes del primer rename (H03).
+        let mut journal = self.create_journal(new_txn_id, &affected, &previous, &result_rev)?;
+
+        // (9) Restaura por el único escritor: escribe cada original respaldado; borra los creados.
+        for (rel, content) in &backups {
+            io::write_atomic(&self.root, rel, content)?;
+            journal.mark_applied(rel)?;
+        }
+        for rel in &absent {
+            io::delete(&self.root, rel)?;
+            journal.mark_applied(rel)?;
+        }
+        journal.mark_all_applied()?;
+
+        // (10) Sella: borra el fichero de journal (levanta el gate de recuperación). Conserva las
+        //      copias de recuperación de la inversa (el receipt de la reversión las referencia; el
+        //      GC de E13-H07 las purgará con su recibo).
+        let journal_path = journal.path().to_path_buf();
+        if journal_path.exists() {
+            std::fs::remove_file(&journal_path)?;
+        }
+
+        // (11) Revisión resultante (== `previousRevision` del apply original) + paths restaurados.
+        let result = self.workspace_revision()?;
+        Ok((previous, result, affected))
+    }
+}
+
+/// Recorre el árbol de recuperación bajo `dir` acumulando en `out` cada copia de un original
+/// (`RelPath` espejado bajo `recovery_root` → contenido byte-a-byte), saltando el manifiesto
+/// `.absent`. Auxiliar recursivo de [`Workspace::collect_backups`].
+fn collect_backups_into(
+    dir: &Path,
+    recovery_root: &Path,
+    out: &mut std::collections::BTreeMap<RelPath, String>,
+) -> Result<(), WorkspaceError> {
+    for entry in std::fs::read_dir(dir)? {
+        let path = entry?.path();
+        if path.is_dir() {
+            collect_backups_into(&path, recovery_root, out)?;
+            continue;
+        }
+        if path.file_name().and_then(|n| n.to_str()) == Some(ABSENT_MANIFEST) {
+            continue;
+        }
+        let rel = path
+            .strip_prefix(recovery_root)
+            .unwrap_or(&path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        let Ok(rp) = RelPath::new(&rel) else {
+            continue;
+        };
+        let content = std::fs::read_to_string(&path).map_err(|e| {
+            WorkspaceError::Io(format!(
+                "copia de recuperación ilegible {}: {e}",
+                path.display()
+            ))
+        })?;
+        out.insert(rp, content);
+    }
+    Ok(())
 }

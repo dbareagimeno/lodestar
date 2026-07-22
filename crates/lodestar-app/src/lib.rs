@@ -1390,6 +1390,129 @@ impl App {
             },
         })
     }
+
+    /// Revierte una transacción **reciente y no alterada** desde sus copias de recuperación
+    /// (E13-H09, `ARCHITECTURE.md §19.5/§19.6`, `REFACTOR §11.3`). Es la operación inversa de
+    /// [`App::change_apply`]: devuelve el conocimiento canónico al estado ANTERIOR al apply
+    /// identificado por `receipt_id`, por el **único escritor** (invariante #5), como una nueva
+    /// transacción inversa recuperable (su propio journal y copias de recuperación).
+    ///
+    /// Condiciones (E13-H09), en orden:
+    /// 1. **Receipt disponible**: carga el [`ChangeReceipt`] persistido (E13-H07). Si no existe
+    ///    (purgado por retención / GC), la transacción ya no es reversible → [`ErrorCode::PlanExpired`].
+    ///    Se **reusa** `PLAN_EXPIRED` —el catálogo de `ErrorCode` (invariante #4) está congelado y no
+    ///    tiene una variante «receipt no encontrado»— por ser el match semántico más cercano a «la
+    ///    transacción registrada ya no está disponible por retención», igual que `change_apply` reusa
+    ///    `PLAN_EXPIRED` para el plan persistido ausente/vencido.
+    /// 2. **Control optimista de workspace** (opcional): si `expected_workspace_revision` viene y no
+    ///    coincide con la revisión actual → [`ErrorCode::RevisionConflict`].
+    /// 3. **Ficheros afectados no alterados**: la revisión actual del workspace debe seguir siendo la
+    ///    `resultRevision` que dejó el apply; si difiere, algún fichero afectado (o cualquier otro)
+    ///    cambió tras el apply → [`ErrorCode::WriteConflict`] y **no** revierte (comprobación
+    ///    conservadora y suficiente para el criterio: un cambio en el conocimiento escribible mueve la
+    ///    `WorkspaceRevision`).
+    /// 4. **Restauración recuperable**: delega en [`Workspace::revert_transaction`], que verifica que
+    ///    las copias de recuperación (E13-H04) existen y restaura por el único escritor bajo su propio
+    ///    journal; luego persiste el [`ChangeReceipt`] de la reversión (transacción inversa) y ejecuta
+    ///    la retención (`gc_receipts`).
+    ///
+    /// Devuelve un [`RevertResult`] con `reverted:true`, las revisiones antes/después de la
+    /// transacción INVERSA (`previousWorkspaceRevision` == `resultRevision` del apply;
+    /// `workspaceRevision` == `previousRevision` del apply, el estado restaurado) y los paths
+    /// restaurados.
+    pub fn change_revert(
+        &self,
+        receipt_id: &ReceiptId,
+        expected_workspace_revision: Option<WorkspaceRevision>,
+    ) -> Result<RevertResult, ErrorCode> {
+        // (1) Cargar el receipt persistido. Ausente/purgado ⇒ transacción no disponible → PLAN_EXPIRED.
+        let receipt = self
+            .workspace
+            .load_receipt(receipt_id)
+            .map_err(|_| ErrorCode::PlanExpired)?;
+
+        // (2) Revisión actual del conocimiento escribible.
+        let root = self.workspace.root();
+        let cfg = WorkspaceConfig::load(root).map_err(|_| ErrorCode::InternalIoError)?;
+        let bundle = self
+            .workspace
+            .bundle()
+            .map_err(|e| workspace_error_code(&e))?;
+        let current = workspace_revision(bundle.files(), &cfg.workspace.writable_roots);
+
+        // (3) Control optimista a nivel de workspace (si el llamante fijó una expectativa).
+        if let Some(expected) = &expected_workspace_revision {
+            if expected != &current {
+                return Err(ErrorCode::RevisionConflict);
+            }
+        }
+
+        // (4) Ficheros afectados no alterados: el workspace sigue en la `resultRevision` del apply.
+        //     Si difiere, algo cambió tras el apply → WRITE_CONFLICT y NO se revierte.
+        if current != receipt.result_revision {
+            return Err(ErrorCode::WriteConflict);
+        }
+
+        // (5) Restaurar por el único escritor (transacción inversa recuperable con journal propio).
+        let orig_txn_id = transaction_id(&receipt.change_set_id);
+        let revert_txn_id = format!("{orig_txn_id}-revert");
+        let (previous, result, changed_paths) = self
+            .workspace
+            .revert_transaction(&orig_txn_id, &revert_txn_id)
+            .map_err(|e| workspace_error_code(&e))?;
+
+        // (6) Receipt de la reversión (inversa: previous/result intercambiados respecto al apply) +
+        //     retención. Su id nombra por convención las copias de recuperación de la inversa
+        //     (`recovery/<revert_txn_id>/`), que el GC purgará junto al recibo.
+        let revert_receipt_id = ReceiptId(revert_txn_id);
+        let revert_receipt = ChangeReceipt {
+            id: revert_receipt_id.clone(),
+            change_set_id: receipt.change_set_id.clone(),
+            previous_revision: previous.clone(),
+            result_revision: result.clone(),
+            changed_paths: changed_paths.clone(),
+            semantic_diff: receipt.semantic_diff.clone(),
+        };
+        self.workspace
+            .write_receipt(&revert_receipt)
+            .map_err(|e| workspace_error_code(&e))?;
+        self.workspace
+            .gc_receipts()
+            .map_err(|e| workspace_error_code(&e))?;
+
+        Ok(RevertResult {
+            reverted: true,
+            receipt_id: revert_receipt_id,
+            previous_workspace_revision: previous,
+            workspace_revision: result,
+            changed_paths,
+            semantic_diff: receipt.semantic_diff,
+        })
+    }
+}
+
+/// Resultado de `change_revert` (E13-H09): el recibo de una transacción **revertida** por el único
+/// escritor (transacción inversa). Proyección de servicio (framing, no dominio); wire en camelCase —
+/// `reverted`, `receiptId`, `previousWorkspaceRevision`, `workspaceRevision`, `changedPaths`,
+/// `semanticDiff`. La reversión es INVERSA al apply: `previousWorkspaceRevision` es la revisión de la
+/// que parte la reversión (la `resultRevision` que dejó el apply) y `workspaceRevision` es la
+/// resultante (la `previousRevision` original del apply, el estado restaurado). Sin `Eq` (transitivo
+/// desde [`SemanticDiff`]).
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct RevertResult {
+    /// `true` cuando la reversión se publicó (siempre `true` en un `Ok`; los rechazos son `Err`).
+    pub reverted: bool,
+    /// Id del recibo persistido de esta reversión (la transacción inversa).
+    pub receipt_id: ReceiptId,
+    /// [`WorkspaceRevision`] ANTES de la reversión (== `resultRevision` del apply revertido).
+    pub previous_workspace_revision: WorkspaceRevision,
+    /// [`WorkspaceRevision`] resultante: el workspace vuelve a la `previousRevision` del apply.
+    pub workspace_revision: WorkspaceRevision,
+    /// Paths del canónico que la reversión restauró/borró, en orden determinista.
+    pub changed_paths: Vec<RelPath>,
+    /// Diff semántico de la transacción revertida (una sola verdad de diff, invariante #3).
+    pub semantic_diff: SemanticDiff,
 }
 
 /// Construye el [`ChangeSet`] de dominio que consume [`Workspace::apply_transaction`] a partir del
@@ -2345,7 +2468,7 @@ pub mod schemas {
 
     use super::{
         ApplyResult, CheckReport, GraphQueryResult, ImpactReport, KnowledgeGetResponse, PlanResult,
-        SchemaInspection, SearchResults, WorkspaceStatus,
+        RevertResult, SchemaInspection, SearchResults, WorkspaceStatus,
     };
 
     /// Deriva el JSON Schema de `T` y lo serializa a `serde_json::Value`. `schemars::schema_for!`
@@ -2401,5 +2524,10 @@ pub mod schemas {
     /// `outputSchema` de `change_apply` (== [`ApplyResult`]).
     pub fn change_apply_schema() -> Value {
         schema_of::<ApplyResult>()
+    }
+
+    /// `outputSchema` de `change_revert` (== [`RevertResult`]).
+    pub fn change_revert_schema() -> Value {
+        schema_of::<RevertResult>()
     }
 }
