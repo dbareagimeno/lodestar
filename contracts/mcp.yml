@@ -12,9 +12,9 @@
 #   - Nombres de tool CONGELADOS (ARCHITECTURE.md §19.6). `fuente:` = fichero:línea aproximada.
 #
 # INVARIANTES: shells finos sobre `App`/`Workspace`, CERO lógica OKF propia (misma verdad que
-# CLI/Tauri; test golden cross-fachada lo verifica). create_concept/update_frontmatter
-# escriben el `.md` atómico por el ÚNICO escritor; nunca la cache. `path`/`concept`/`ref.path`
-# se validan a `RelPath` (rechaza absolutas/`..`, chokepoint de traversal).
+# CLI/Tauri; test golden cross-fachada lo verifica). Las tools de cambio (`change_apply`/
+# `change_revert`) escriben el `.md` atómico por el ÚNICO escritor; nunca la cache. `ref.path`
+# se valida a `RelPath` (rechaza absolutas/`..`, chokepoint de traversal).
 #
 # E9-H01: las 3 tools git (history/last_conforming_commit/commit) se retiraron de esta
 # superficie; `Workspace::vcs_log`/`last_conforming`/`commit` siguen existiendo sin consumidor
@@ -24,28 +24,24 @@
 # 10 tools heredadas (tras la retirada de las 3 tools git en E9-H01) a un objetivo de 10 tools
 # nuevas (`docs/REFACTOR.md §8/§15/§16`). E10-H08…H12 AÑADEN las 5 tools de lectura/verificación
 # (`workspace_status`/`knowledge_search`/`knowledge_get`/`schema_inspect`/`knowledge_check`) que
-# sustituyen semánticamente a `query`/`conformance_check` y parte de `find_*`/`neighborhood`. La
-# RETIRADA de las tools viejas queda diferida a E11 (graph_query) y E12/E13 (tools de cambio) —
-# ver §15 «Migración» al final de este fichero. Hoy (tras E10) las 10 tools heredadas + las 5
-# nuevas coexisten: 15 tools activas.
+# sustituyen semánticamente a `query`/`conformance_check` y parte de `find_*`/`neighborhood`;
+# E11-H01 AÑADE `graph_query` (consolida `find_backlinks`/`find_orphans`/`find_dangling`/
+# `neighborhood`); E11-H05 AÑADE `impact_analyze`; E12-H08/E13 AÑADEN `change_plan`/`change_apply`/
+# `change_revert`. Durante E10–E13 las 10 heredadas coexistieron con las nuevas (coexistencia
+# deliberada — la retirada quedó diferida al cierre del giro; ver §15 «Migración»).
 #
-# E11-H01: AÑADE `graph_query` (consolida `find_backlinks`/`find_orphans`/`find_dangling`/
-# `neighborhood` en una sola tool con `operation`), sin retirar las 4 viejas todavía — misma
-# coexistencia deliberada que E10 (ver §15 «Migración»). Hoy (tras E11-H01) 16 tools activas.
+# E14-H06 (CIERRE del giro headless, `ARCHITECTURE.md §19.6`): se RETIRAN de la superficie las 10
+# tools heredadas (`query`, `conformance_check`, `find_backlinks`, `find_orphans`, `find_dangling`,
+# `neighborhood`, `create_concept`, `update_frontmatter`, `generate_index`, `generate_tag_indexes`)
+# — salen de `tools::list()` y del despacho de `tools::call()`; un nombre heredado cae ahora en el
+# brazo por defecto → tool desconocida (-32602), sin ejecutar. La CAPACIDAD subyacente se conserva
+# en core/store/workspace (backlinks, orphans, dangling, query, conformidad, create, generate…): se
+# retira la EXPOSICIÓN, no la mecánica. Hoy (tras E14-H06) la superficie es de EXACTAMENTE 10 tools
+# activas — las 10 objetivo. Su reemplazo semántico 1:1 está en §15 «Migración».
 #
-# E11-H05: AÑADE `impact_analyze` (impacto de un cambio hipotético: afectados directos/transitivos,
-# relaciones tipadas obligatorias que romperían y riesgo), sin retirar ninguna vieja. Hoy (tras
-# E11-H05) 17 tools activas.
-#
-# E12-H08: AÑADE `change_plan` (planifica un cambio complejo SIN escribir: normaliza + simula en
-# memoria + valida → un único change set con planHash determinista), perfil standard, sin retirar
-# ninguna vieja. Hoy (tras E12-H08) 18 tools activas.
-#
-# E10-H13 (decisión D6b, `docs/REFACTOR.md §13`, `DECISIONES.md §3`): las 5 tools nuevas declaran
+# E10-H13 (decisión D6b, `docs/REFACTOR.md §13`, `DECISIONES.md §3`): las 10 tools activas declaran
 # `outputSchema` (JSON Schema derivado con `schemars::schema_for!` desde el tipo de respuesta real
-# de `lodestar-app`, vía los helpers de `lodestar_app::schemas::*`). Las 10 tools heredadas NO
-# declaran `outputSchema` (fuera de alcance de E10-H13 — ninguna historia lo pide para ellas y
-# varias se retirarán antes de que valiera la pena derivarlo).
+# de `lodestar-app`, vía los helpers de `lodestar_app::schemas::*`).
 
 meta:
   fachada: lodestar-mcp (JSON-RPC por stdio; stdout puro, logs a stderr)
@@ -87,102 +83,8 @@ meta:
 
 tools:
   # -------------------------------------------------------------------------
-  # Tools heredadas (10) — superficie previa a E10, conservada. Ver §15 abajo
-  # para el mapeo de retirada (diferida a E11/E12/E13).
-  # -------------------------------------------------------------------------
-
-  - nombre: find_backlinks
-    fuente: crates/lodestar-mcp/src/tools.rs:137
-    params:
-      - { nombre: concept, tipo: "RelPath (string)", requerido: true, semantica: "ruta relativa del concept" }
-    retorno: Backlinks
-    errores: ["«falta el parámetro «concept»»", "InvalidRelPath", "WorkspaceError"]
-    semantica: "Quién enlaza a un concept: inbound + index refs + dangling (backlinks resueltos por el core)."
-
-  - nombre: find_orphans
-    fuente: crates/lodestar-mcp/src/tools.rs:141
-    params: []
-    retorno: "json { orphans: Vec<RelPath> }  # proyección de Analysis.orphans"
-    errores: ["WorkspaceError"]
-    semantica: "Concepts sin enlaces entrantes."
-
-  - nombre: find_dangling
-    fuente: crates/lodestar-mcp/src/tools.rs:145
-    params: []
-    retorno: "json { dangling: Vec<RelPath> }  # proyección de Analysis.dangling"
-    errores: ["WorkspaceError"]
-    semantica: "Enlaces que apuntan a páginas inexistentes."
-
-  - nombre: neighborhood
-    fuente: crates/lodestar-mcp/src/tools.rs:149
-    params:
-      - { nombre: concept, tipo: "RelPath (string)", requerido: true }
-      - { nombre: depth, tipo: integer, default: 1, minimo: 1 }
-      - { nombre: direction, tipo: "string (Direction)", valores: ["out", "in", "both"], default: "out  # cualquier otro → Out" }
-    retorno: Neighborhood
-    errores: ["«falta el parámetro «concept»»", "InvalidRelPath", "WorkspaceError"]
-    semantica: "Subgrafo dirigido alrededor del concept (depth, direction)."
-
-  - nombre: conformance_check
-    fuente: crates/lodestar-mcp/src/tools.rs:159
-    params:
-      - { nombre: path, tipo: "RelPath (string)", requerido: false, semantica: "opcional: solo los checks de este fichero" }
-    retorno: >-
-      con path → json { checks: Vec<Check> } (per_file, vacío si no existe);
-      sin path → json { hardFail, warnCount, conform: bool, okfVersion } (proyección de Analysis)
-    errores: ["InvalidRelPath (si path presente)", "WorkspaceError"]
-    semantica: >-
-      Gate OKF del bundle completo, o los checks de un solo path. `conform = hardFail == 0`.
-      SUSTITUIDA semánticamente por `knowledge_check` (E10-H12) — ver §15; se conserva activa.
-
-  - nombre: query
-    fuente: crates/lodestar-mcp/src/tools.rs:176
-    params:
-      - { nombre: dsl, tipo: string, requerido: true, semantica: "DSL de subcadena del prototipo («type:X tag:y is:orphan texto…»)" }
-    retorno: "json { paths: Vec<RelPath> }"
-    errores: ["WorkspaceError"]
-    semantica: >-
-      Query estructurada; misma lógica del core que CLI/Tauri. dsl ausente → "".
-      SUSTITUIDA semánticamente por `knowledge_search` (E10-H09) — ver §15; se conserva activa.
-
-  - nombre: create_concept
-    fuente: crates/lodestar-mcp/src/tools.rs:181
-    params:
-      - { nombre: path, tipo: "RelPath (string)", requerido: true }
-      - { nombre: type, tipo: string, requerido: true }
-      - { nombre: title, tipo: string, requerido: false }
-      - { nombre: body, tipo: string, requerido: false, semantica: "cuerpo Markdown; si se omite, «# {Tipo} - {Nombre}»" }
-      - { nombre: allow_nonconformant, tipo: boolean, default: false }
-    retorno: "WriteOutcome (json: path, written, rejected, checks, bundleHardFail)"
-    errores: ["«falta el parámetro «path»»", "InvalidRelPath", "WorkspaceError"]
-    semantica: "Crea un concept validado (rechaza no conforme salvo allow). Escritura atómica por el único escritor; nunca la cache."
-
-  - nombre: update_frontmatter
-    fuente: crates/lodestar-mcp/src/tools.rs:195
-    params:
-      - { nombre: path, tipo: "RelPath (string)", requerido: true }
-      - { nombre: patch, tipo: "object (FrontmatterPatch)", requerido: true, semantica: "merge-patch RFC 7386: valor escribe, null BORRA" }
-    retorno: "WriteOutcome (json: path, written, rejected, checks, bundleHardFail)"
-    errores: ["«falta el parámetro «path»»", "«falta el parámetro «patch» (objeto)»", "InvalidRelPath", "WorkspaceError"]
-    semantica: "Patch de frontmatter y reescritura atómica del `.md` si es conforme. Único escritor."
-
-  - nombre: generate_index
-    fuente: crates/lodestar-mcp/src/tools.rs:201
-    params:
-      - { nombre: dir, tipo: string, default: "\"\"  # raíz", semantica: "directorio relativo a regenerar" }
-    retorno: "json { written, removed, unchanged }  # ApplyReport"
-    errores: ["WorkspaceError"]
-    semantica: "Regenera el index de un directorio (Mutation aplicada por el único escritor)."
-
-  - nombre: generate_tag_indexes
-    fuente: crates/lodestar-mcp/src/tools.rs:206
-    params: []
-    retorno: "json { written, removed, unchanged }  # ApplyReport"
-    errores: ["WorkspaceError"]
-    semantica: "Regenera los índices de tags."
-
-  # -------------------------------------------------------------------------
-  # Tools nuevas de E10 (lectura/verificación headless, §19.6). Las 5 declaran
+  # Superficie objetivo (10 tools, `ARCHITECTURE.md §19.6`). Las 10 tools heredadas se RETIRARON en
+  # E14-H06 (ver §15 «Migración» para su reemplazo semántico 1:1). Las 10 activas declaran
   # `outputSchema` (decisión D6b, criterio `tools_declaran_outputschema`).
   # -------------------------------------------------------------------------
 
@@ -295,8 +197,8 @@ tools:
       reusa Bundle::components (sirve el grafo completo — nodes/edges de graph_model — porque las
       componentes particionan todo el grafo; el cliente reconstruye la partición).
       Las edges devueltas se acotan a los nodes que sobreviven a la página. Consolida
-      semánticamente a `find_backlinks`/`find_orphans`/`find_dangling`/`neighborhood` (ver §15);
-      esas 4 tools heredadas se conservan activas — su retirada queda diferida (ver nota abajo).
+      semánticamente a `find_backlinks`/`find_orphans`/`find_dangling`/`neighborhood` (ver §15),
+      las 4 tools heredadas RETIRADAS en E14-H06.
 
   - nombre: impact_analyze
     fuente: crates/lodestar-mcp/src/tools.rs
@@ -409,30 +311,29 @@ tools:
 
 # ---------------------------------------------------------------------------
 # §15 — Migración de superficie (10 tools heredadas → 10 tools objetivo NUEVAS,
-# `docs/REFACTOR.md §15/§16`, `DECISIONES.md` §"0. Giro a motor headless"). Vive aquí (no solo en
-# REFACTOR.md) porque es la nota que explica por qué este contrato lista 18 tools activas cuando
-# la superficie objetivo de largo plazo son 10.
+# `docs/REFACTOR.md §15/§16`, `DECISIONES.md` §"0. Giro a motor headless"). E14-H06 CERRÓ la
+# migración: las 10 heredadas están RETIRADAS de la superficie (fuera de `tools:` arriba); esta
+# sección conserva el mapeo de reemplazo semántico 1:1 como memoria de la migración.
 # ---------------------------------------------------------------------------
 migracion:
   nota: >-
-    E10 AÑADE 5 tools nuevas sin retirar ninguna vieja — coexistencia deliberada
-    (`requirements/epica-10-esquemas-lectura.md` E10-H13: «la retirada de query/conformance_check
-    queda FUERA de H13»). E11-H01 AÑADE `graph_query` con el mismo criterio: coexiste con las 4
-    tools que consolida (`find_backlinks`/`find_orphans`/`find_dangling`/`neighborhood`), que
-    siguen activas y con sus propios tests (`golden_backlinks_igual_workspace`,
-    `golden_orphans_y_dangling_igual_workspace`, `tools_list_lleva_input_schema`, …). La retirada
-    coherente de la superficie previa requiere piezas que todavía no existen (las tools de cambio
-    de E12/E13, y/o que E11-H02 complete `graph_query` con `path_between`/`cycles`/`components`) y
-    se hará en un único rewrite de este fichero al cerrar E13 — no en pasos parciales que
-    dejarían el contrato en un estado intermedio incoherente.
+    Durante E10–E13 las 10 tools heredadas coexistieron con las nuevas (coexistencia deliberada:
+    E10 añadió las 5 de lectura, E11-H01 `graph_query`, E11-H05 `impact_analyze`, E12-H08/E13 las de
+    cambio, sin retirar ninguna vieja en el camino). E14-H06 (cierre del giro headless,
+    `ARCHITECTURE.md §19.6`) RETIRA las 10 heredadas de la superficie MCP en un único rewrite: salen
+    de `tools::list()` y del despacho de `tools::call()`. La CAPACIDAD subyacente se conserva en
+    core/store/workspace (backlinks, orphans, dangling, query, conformidad, create, generate…): se
+    retira la EXPOSICIÓN como tool MCP, no la mecánica de dominio. Un nombre heredado invocado por
+    `tools/call` cae en el brazo por defecto → tool desconocida (-32602), sin ejecutar (coherente con
+    la retirada de las tools git en E9-H01).
   reemplazos:
-    - { vieja: query, nueva: knowledge_search, estado: "reemplazo ya existe (E10-H09); retirada de «query» diferida al cierre de E13" }
-    - { vieja: conformance_check, nueva: knowledge_check, estado: "reemplazo ya existe (E10-H12); retirada de «conformance_check» diferida al cierre de E13" }
-    - { viejas: [find_backlinks, find_orphans, find_dangling, neighborhood], nueva: graph_query, estado: "reemplazo ya existe (E11-H01); retirada de las 4 tools viejas diferida a la limpieza final al cerrar E13, o cuando E11-H02 complete graph_query (path_between/cycles/components) — lo que llegue primero" }
-    - { viejas: [create_concept, update_frontmatter], nuevas: [change_plan, change_apply], estado: "change_plan ya existe (E12-H08, planifica sin escribir); change_apply pendiente — E13. Retirada de create_concept/update_frontmatter diferida al cierre de E13 (`docs/REFACTOR.md §11`)" }
-    - { viejas: [generate_index, generate_tag_indexes], nueva: "CLI + auto-regen dentro de change_apply", estado: "pendiente — E13 (`docs/REFACTOR.md §15` fila generate_*, decisión D6a)" }
+    - { vieja: query, nueva: knowledge_search, estado: "RETIRADA en E14-H06 → knowledge_search (reemplazo desde E10-H09)" }
+    - { vieja: conformance_check, nueva: knowledge_check, estado: "RETIRADA en E14-H06 → knowledge_check (reemplazo desde E10-H12)" }
+    - { viejas: [find_backlinks, find_orphans, find_dangling, neighborhood], nueva: graph_query, estado: "RETIRADAS en E14-H06 → graph_query (reemplazo desde E11-H01: operations backlinks/orphans/dangling/neighborhood)" }
+    - { viejas: [create_concept, update_frontmatter], nuevas: [change_plan, change_apply], estado: "RETIRADAS en E14-H06 → change_plan + change_apply (escritura validada por el único escritor; ops create/patch_frontmatter, E12-H08/E13)" }
+    - { viejas: [generate_index, generate_tag_indexes], nueva: "CLI (`index`/`tags`) + auto-regen dentro de change_apply", estado: "RETIRADAS en E14-H06 → CLI + auto-regen transaccional (`docs/REFACTOR.md §15` fila generate_*, decisión D6a)" }
   superficie_objetivo: >-
-    10 tools al cerrar E13: workspace_status, knowledge_search, knowledge_get, schema_inspect,
-    knowledge_check, graph_query, impact_analyze, change_plan, change_apply, change_revert
-    (`docs/REFACTOR.md §8`). Ninguna de las 10 tools heredadas de este fichero sobrevive a ese
-    cierre salvo por su reemplazo semántico ya listado arriba.
+    10 tools activas (alcanzado en E14-H06): workspace_status, knowledge_search, knowledge_get,
+    schema_inspect, knowledge_check, graph_query, impact_analyze, change_plan, change_apply,
+    change_revert (`docs/REFACTOR.md §8`). Ninguna de las 10 tools heredadas sobrevive salvo por su
+    reemplazo semántico listado arriba.

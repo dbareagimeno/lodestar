@@ -9,70 +9,13 @@ fn write(dir: &std::path::Path, rel: &str, content: &str) {
     std::fs::write(p, content).unwrap();
 }
 
-#[test]
-fn handshake_y_tools_call_conformance() {
-    let dir = tempfile::tempdir().unwrap();
-    write(
-        dir.path(),
-        "index.md",
-        "---\nokf_version: \"0.1\"\n---\n\n# Bundle\n",
-    );
-    write(dir.path(), "malo.md", "# sin frontmatter\n");
-
-    let mut child = Command::new(env!("CARGO_BIN_EXE_lodestar-mcp"))
-        .arg(dir.path())
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
-
-    let mut stdin = child.stdin.take().unwrap();
-    let mut stdout = BufReader::new(child.stdout.take().unwrap());
-
-    // initialize
-    writeln!(stdin, r#"{{"jsonrpc":"2.0","id":1,"method":"initialize"}}"#).unwrap();
-    // tools/list
-    writeln!(stdin, r#"{{"jsonrpc":"2.0","id":2,"method":"tools/list"}}"#).unwrap();
-    // tools/call conformance_check
-    writeln!(
-        stdin,
-        r#"{{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{{"name":"conformance_check","arguments":{{}}}}}}"#
-    )
-    .unwrap();
-    stdin.flush().unwrap();
-    drop(stdin);
-
-    let mut lines = Vec::new();
-    for line in (&mut stdout).lines().map_while(Result::ok) {
-        lines.push(line);
-        if lines.len() == 3 {
-            break;
-        }
-    }
-    child.wait().ok();
-
-    // Cada línea de stdout es JSON-RPC válido (stdout puro).
-    let init: serde_json::Value = serde_json::from_str(&lines[0]).unwrap();
-    assert_eq!(init["result"]["serverInfo"]["name"], "lodestar-mcp");
-
-    let list: serde_json::Value = serde_json::from_str(&lines[1]).unwrap();
-    assert!(list["result"]["tools"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|t| t["name"] == "query"));
-
-    let conf: serde_json::Value = serde_json::from_str(&lines[2]).unwrap();
-    // malo.md sin frontmatter → hard_fail >= 1, no conforme.
-    assert_eq!(conf["result"]["structuredContent"]["conform"], false);
-    assert!(
-        conf["result"]["structuredContent"]["hardFail"]
-            .as_u64()
-            .unwrap()
-            >= 1
-    );
-}
+// NOTA E14-H06: el test `handshake_y_tools_call_conformance` se RETIRÓ al retirar la superficie
+// heredada. Ejercitaba dos cosas heredadas —`query` presente en `tools/list` y la salida de
+// `conformance_check` (`conform`/`hardFail`)— más una no-heredada (el `serverInfo.name` de
+// `initialize`). La conformidad la cubre hoy `knowledge_check` (scope workspace) y sus tests e2e
+// (`check_detecta_edicion_directa`, `check_scope_affected`, `check_ids_estables`); la presencia de
+// las tools la fija `tools_list_solo_objetivo`; el `serverInfo.name` se migró a
+// `initialize_ecoa_version_soportada`.
 
 /// Arranca el servidor sobre un bundle, envía `lines` y devuelve las primeras `expect` respuestas.
 fn roundtrip(dir: &std::path::Path, lines: &[&str], expect: usize) -> Vec<serde_json::Value> {
@@ -123,7 +66,7 @@ fn protocolo_errores_y_ping() {
             r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#,
             r#"{"jsonrpc":"2.0","id":2,"method":"metodo/inexistente"}"#,
             r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"no_existe","arguments":{}}}"#,
-            r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"find_backlinks","arguments":{"concept":"../fuera.md"}}}"#,
+            r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"knowledge_get","arguments":{"ref":{"path":"../fuera.md"}}}}"#,
         ],
         5,
     );
@@ -132,7 +75,9 @@ fn protocolo_errores_y_ping() {
     assert_eq!(resp[1]["result"], serde_json::json!({}));
     assert_eq!(resp[2]["error"]["code"], -32601);
     assert_eq!(resp[3]["error"]["code"], -32602);
-    // RelPath inválido = error de ejecución de la tool → isError en el result, visible al modelo.
+    // Ruta inválida (`../` fuera del bundle) = error de EJECUCIÓN de la tool → isError en el result,
+    // no un error de protocolo. Vehículo migrado en E14-H06 de la tool heredada `find_backlinks` a la
+    // tool objetivo `knowledge_get` (la propiedad probada es del protocolo, no de la tool retirada).
     assert_eq!(resp[4]["result"]["isError"], true);
     assert!(resp[4]["error"].is_null());
 }
@@ -150,18 +95,18 @@ fn tools_list_schema_y_structured_content_objeto() {
         dir.path(),
         &[
             r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#,
-            r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"query","arguments":{"dsl":"is:orphan"}}}"#,
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"knowledge_search","arguments":{"text":""}}}"#,
         ],
         2,
     );
     let tools = resp[0]["result"]["tools"].as_array().unwrap();
-    // Conteo robusto a adiciones (E10-H08+ va añadiendo tools nuevas cada historia): el propósito
-    // de este test es la FORMA (inputSchema de objeto en todas), no un total exacto. Se ancla con
-    // un mínimo (las 10 heredadas + `workspace_status`) en vez de `==` para no quedar obsoleto en
-    // cada historia de E10.
+    // El propósito de este test es la FORMA (inputSchema de objeto en TODAS las tools) y que el
+    // `structuredContent` de una tool sea un objeto, no el total exacto (que fija
+    // `tools_list_solo_objetivo`). Se ancla con el mínimo de las 10 tools objetivo. E14-H06 migró el
+    // universo desde «10 heredadas + workspace_status» a las 10 objetivo.
     assert!(
-        tools.len() >= 11,
-        "se esperaban al menos 11 tools (10 heredadas + workspace_status): {}",
+        tools.len() >= 10,
+        "se esperaban al menos las 10 tools objetivo: {}",
         tools.len()
     );
     assert!(
@@ -175,50 +120,23 @@ fn tools_list_schema_y_structured_content_objeto() {
             t["name"]
         );
     }
+    // `structuredContent` siempre es un objeto (spec MCP). Vehículo migrado en E14-H06 de la tool
+    // heredada `query` a la tool objetivo `knowledge_search`.
     assert!(resp[1]["result"]["structuredContent"].is_object());
-    assert!(resp[1]["result"]["structuredContent"]["paths"].is_array());
+    assert!(resp[1]["result"]["structuredContent"]["results"].is_array());
 }
 
-/// E2E de escritura: create_concept escribe el .md en disco (validado) y query lo encuentra.
-#[test]
-fn create_concept_escribe_y_query_lo_ve() {
-    let dir = bundle_min();
-    let resp = roundtrip(
-        dir.path(),
-        &[
-            r##"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"create_concept","arguments":{"path":"nueva.md","type":"Nota","title":"Nueva","body":"# Resumen\n\ncuerpo\n"}}}"##,
-            r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"query","arguments":{"dsl":"type:nota"}}}"#,
-            r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"conformance_check","arguments":{}}}"#,
-        ],
-        3,
-    );
-    assert_eq!(resp[0]["result"]["structuredContent"]["written"], true);
-    assert!(dir.path().join("nueva.md").is_file(), "el .md es la verdad");
-    let paths = resp[1]["result"]["structuredContent"]["paths"]
-        .as_array()
-        .unwrap();
-    assert!(paths.iter().any(|p| p == "nueva.md"));
-    assert_eq!(resp[2]["result"]["structuredContent"]["conform"], true);
-}
-
-/// Sin `body`, create_concept genera el heading por defecto `# {Tipo} - {Nombre}` en el .md.
-#[test]
-fn create_concept_sin_body_genera_heading_por_defecto() {
-    let dir = bundle_min();
-    let resp = roundtrip(
-        dir.path(),
-        &[
-            r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"create_concept","arguments":{"path":"otra.md","type":"Nota","title":"Otra"}}}"#,
-        ],
-        1,
-    );
-    assert_eq!(resp[0]["result"]["structuredContent"]["written"], true);
-    let contenido = std::fs::read_to_string(dir.path().join("otra.md")).unwrap();
-    assert!(
-        contenido.contains("# Nota - Otra\n"),
-        "falta el heading por defecto: {contenido}"
-    );
-}
+// NOTA E14-H06: los tests `create_concept_escribe_y_query_lo_ve` y
+// `create_concept_sin_body_genera_heading_por_defecto` se RETIRARON al retirar las tools heredadas
+// `create_concept`/`query`/`conformance_check`. La escritura validada de un concepto la cubre hoy el
+// par `change_plan` + `change_apply` (`plan_un_solo_changeset`, `apply_ok`: la op `create` planifica
+// y `change_apply` escribe el `.md` por el único escritor), su localización posterior la cubre
+// `knowledge_search`, y la conformidad `knowledge_check`.
+//
+// El heading por defecto sin `body` cambia DE PROPÓSITO en la superficie objetivo: la op `create` de
+// `change_plan` genera `# {título}` (`crates/lodestar-core/src/plan.rs`, `apply_one`), no el
+// `# {Tipo} - {Nombre}` de la heredada `create_concept`. Esa nueva semántica es una responsabilidad
+// del core (con su propia cobertura en `plan.rs`), no un hueco de la superficie MCP.
 
 /// initialize ecoa la protocolVersion del cliente si la soporta.
 #[test]
@@ -232,6 +150,10 @@ fn initialize_ecoa_version_soportada() {
         1,
     );
     assert_eq!(resp[0]["result"]["protocolVersion"], "2025-03-26");
+    // Migrado desde `handshake_y_tools_call_conformance` (retirado en E14-H06 al retirar la tool
+    // heredada `conformance_check`): la única propiedad no-heredada de aquel test era que
+    // `initialize` identifica al servidor por nombre. Se conserva aquí.
+    assert_eq!(resp[0]["result"]["serverInfo"]["name"], "lodestar-mcp");
 }
 
 /// E9-H01 · Criterio `list_sin_tools_git`:
@@ -1853,6 +1775,68 @@ fn graph_orphans() {
     );
 }
 
+/// E11-H01 · Operación `dangling` de `graph_query`.
+/// Dado un bundle con un enlace colgante (a una página inexistente), Cuando se llama
+/// `graph_query(operation:dangling)`, Entonces el target colgante aparece listado como nodo (fantasma)
+/// y un target que sí resuelve NO aparece.
+///
+/// Aserción MIGRADA en E14-H06 desde el golden heredado `golden_orphans_y_dangling_igual_workspace`
+/// (que ejercitaba la tool retirada `find_dangling` comparando su salida con `Analysis::dangling`, la
+/// LISTA de targets colgantes): su mitad de huérfanos ya la cubre `graph_orphans`, pero la de dangling
+/// no tenía equivalente en la superficie objetivo. Se conserva aquí sobre `graph_query(dangling)`, su
+/// reemplazo semántico (`contracts/mcp.yml §15`), sobre la misma propiedad: la lista de targets
+/// colgantes son los nodos devueltos (que es como `graph_query(dangling)` proyecta `Analysis::dangling`,
+/// invariante #3).
+///
+/// Bundle: `fuente.md` enlaza a `inexistente.md` (colgante) y `otro.md` enlaza a `existe.md` (que sí
+/// existe → NO colgante). El enlace que resuelve hace el criterio no vacuo (un stub que devolviera
+/// todos los targets incluiría `existe.md` y fallaría).
+#[test]
+fn graph_dangling() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "index.md",
+        "---\nokf_version: \"0.1\"\n---\n\n# Bundle\n",
+    );
+    write(
+        dir.path(),
+        "fuente.md",
+        "---\ntype: concept\ntitle: Fuente\ndescription: enlaza a algo inexistente\n---\n\n# Fuente\n\n[Roto](inexistente.md)\n",
+    );
+    write(
+        dir.path(),
+        "otro.md",
+        "---\ntype: concept\ntitle: Otro\ndescription: enlaza a algo que existe\n---\n\n# Otro\n\n[Existe](existe.md)\n",
+    );
+    write(
+        dir.path(),
+        "existe.md",
+        "---\ntype: concept\ntitle: Existe\ndescription: destino real\n---\n\n# Existe\n\ncuerpo.\n",
+    );
+
+    let resp = roundtrip(
+        dir.path(),
+        &[
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"graph_query","arguments":{"operation":"dangling"}}}"#,
+        ],
+        1,
+    );
+
+    // El target colgante aparece listado como nodo.
+    let ids = graph_node_ids(&graph_nodes(&resp[0]));
+    assert!(
+        ids.contains("inexistente.md"),
+        "graph_query(dangling) debe listar el target colgante «inexistente.md» como nodo: {resp:?}"
+    );
+
+    // No vacuo: un target que SÍ resuelve no es colgante y NO debe aparecer.
+    assert!(
+        !ids.contains("existe.md"),
+        "«existe.md» existe y no es un target colgante; no debe aparecer en graph_query(dangling): {resp:?}"
+    );
+}
+
 /// E11-H01 · Criterio `graph_truncado`:
 /// Dado un `limit` menor que el nº de nodos, Cuando se llama, Entonces `summary.truncated == true` y
 /// `nextCursor` está presente (no nulo).
@@ -3469,6 +3453,148 @@ fn perfil_readonly_rechaza_cambio() {
         assert_eq!(
             st[0]["result"]["isError"], true,
             "control: bajo standard «{tool}» con id inexistente debe fallar como error de aplicación (isError): {st:?}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// E14-H06 — Retirada de la superficie heredada (10 tools heredadas → 10 objetivo).
+//
+// Cierra el giro headless: la superficie MCP converge a EXACTAMENTE las 10 tools objetivo
+// (`ARCHITECTURE.md §19.6`, `contracts/mcp.yml §15`). Las 10 heredadas (`query`,
+// `conformance_check`, `find_backlinks`, `find_orphans`, `find_dangling`, `neighborhood`,
+// `create_concept`, `update_frontmatter`, `generate_index`, `generate_tag_indexes`) desaparecen de
+// `tools/list` y del despacho.
+//
+// FASE ROJA: hoy las 10 heredadas siguen en `tools::list()` y en el `match` de `tools::call()`, así
+// que `tools_list_solo_objetivo` falla (la lista NO es solo las 10 objetivo: hay 20) y
+// `tool_heredada_retirada` falla (invocar `query`/`conformance_check`/… SÍ ejecuta en vez de dar
+// `-32602`). La retirada real en `src/tools.rs` es del implementador.
+// ---------------------------------------------------------------------------
+
+/// Las 10 tools objetivo del giro headless (superficie de largo plazo, perfil `standard`).
+const TOOLS_OBJETIVO: [&str; 10] = [
+    "workspace_status",
+    "knowledge_search",
+    "knowledge_get",
+    "schema_inspect",
+    "graph_query",
+    "impact_analyze",
+    "knowledge_check",
+    "change_plan",
+    "change_apply",
+    "change_revert",
+];
+
+/// Las 10 tools heredadas que E14-H06 retira (su reemplazo semántico vive en las objetivo,
+/// `contracts/mcp.yml §15`).
+const TOOLS_HEREDADAS: [&str; 10] = [
+    "query",
+    "conformance_check",
+    "find_backlinks",
+    "find_orphans",
+    "find_dangling",
+    "neighborhood",
+    "create_concept",
+    "update_frontmatter",
+    "generate_index",
+    "generate_tag_indexes",
+];
+
+/// E14-H06 · Criterio `tools_list_solo_objetivo`:
+/// Dado el servidor MCP (perfil standard), Cuando un cliente pide `tools/list`, Entonces devuelve
+/// EXACTAMENTE las 10 tools objetivo y NINGUNA heredada. Se asevera el CONJUNTO exacto (las 10
+/// presentes Y las 10 heredadas ausentes), no solo el conteo: un conteo por sí solo no distinguiría
+/// «10 objetivo» de «5 objetivo + 5 heredadas».
+#[test]
+fn tools_list_solo_objetivo() {
+    let dir = bundle_min();
+    let resp = roundtrip_profile(
+        dir.path(),
+        "standard",
+        &[r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#],
+        1,
+    );
+    let presentes = nombres_de_tools(&resp[0]);
+
+    // Conjunto EXACTO: la superficie es exactamente las 10 objetivo.
+    let objetivo: std::collections::BTreeSet<String> =
+        TOOLS_OBJETIVO.iter().map(|s| s.to_string()).collect();
+    assert_eq!(
+        presentes, objetivo,
+        "tools/list (standard) debe devolver EXACTAMENTE las 10 tools objetivo: {presentes:?}"
+    );
+
+    // Redundante pero explícito (redacción literal del criterio): las 10 objetivo presentes…
+    for objetivo in TOOLS_OBJETIVO {
+        assert!(
+            presentes.contains(objetivo),
+            "falta la tool objetivo «{objetivo}» en tools/list: {presentes:?}"
+        );
+    }
+    // …y NINGUNA de las 10 heredadas.
+    for heredada in TOOLS_HEREDADAS {
+        assert!(
+            !presentes.contains(heredada),
+            "la tool heredada «{heredada}» NO debe aparecer en tools/list tras E14-H06: {presentes:?}"
+        );
+    }
+    // Y el conteo exacto, por si acaso (ni más ni menos que 10).
+    assert_eq!(
+        presentes.len(),
+        10,
+        "la superficie objetivo es de EXACTAMENTE 10 tools: {presentes:?}"
+    );
+}
+
+/// E14-H06 · Criterio `tool_heredada_retirada`:
+/// Dado el servidor, Cuando un cliente invoca una tool heredada (se cubren las 10, incluidas
+/// `query`/`conformance_check`/`find_backlinks`/`create_concept`/`generate_index`), Entonces se
+/// rechaza como tool desconocida SIN ejecutarla (sin `result`).
+///
+/// CÓDIGO DE ERROR — `-32602` (ratificado en la spec): una tool inexistente en `tools/call` se mapea
+/// a `-32602` («Invalid params»: `tools/call` SÍ es un método válido, lo desconocido es el *nombre de
+/// tool* = un parámetro); `-32601` queda reservado para un *método* de alto nivel desconocido (p. ej.
+/// `foo/bar`). Convención coherente con los tests `call_commit_desconocida` (E9, retirada de la tool
+/// git `commit` → `-32602`) y `protocolo_errores_y_ping` (tool `no_existe` → `-32602`). Una tool
+/// heredada RETIRADA es, tras la retirada, exactamente el mismo caso que una tool inexistente.
+#[test]
+fn tool_heredada_retirada() {
+    let dir = bundle_min();
+    // Un argumento plausible por tool heredada, para descartar que el rechazo venga de un argumento
+    // ausente en vez de la retirada de la tool.
+    let args = |name: &str| -> &'static str {
+        match name {
+            "query" => r#"{"dsl":"is:orphan"}"#,
+            "conformance_check" => r#"{}"#,
+            "find_backlinks" => r#"{"concept":"alfa.md"}"#,
+            "find_orphans" => r#"{}"#,
+            "find_dangling" => r#"{}"#,
+            "neighborhood" => r#"{"concept":"alfa.md"}"#,
+            "create_concept" => r#"{"path":"nueva.md","type":"Nota"}"#,
+            "update_frontmatter" => r#"{"path":"alfa.md","patch":{}}"#,
+            "generate_index" => r#"{"dir":""}"#,
+            "generate_tag_indexes" => r#"{}"#,
+            _ => r#"{}"#,
+        }
+    };
+
+    for heredada in TOOLS_HEREDADAS {
+        let line = format!(
+            r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"{heredada}","arguments":{args}}}}}"#,
+            args = args(heredada)
+        );
+        let resp = roundtrip(dir.path(), &[line.as_str()], 1);
+
+        // Tool desconocida (tras la retirada): -32602, coherente con `call_commit_desconocida` (E9).
+        // Sin ejecutar la tool (sin result). Ver la nota sobre el código -32602 arriba.
+        assert_eq!(
+            resp[0]["error"]["code"], -32602,
+            "la tool heredada «{heredada}» debe rechazarse como desconocida (-32602): {resp:?}"
+        );
+        assert!(
+            resp[0]["result"].is_null(),
+            "la tool heredada «{heredada}» NO debe producir result (no se ejecuta): {resp:?}"
         );
     }
 }

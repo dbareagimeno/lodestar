@@ -506,9 +506,29 @@ superficie de producto; git queda como crate dormido) y `DECISIONES.md §0`. Des
     (`graph_query`/`impact_analyze`/`change_plan`/tiempo de crash-recovery) no tienen criterio testeable
     propio (umbrales orientativos, gate opcional que no bloquea v2); registrables por `eprintln!` si se
     desea.
-  - **Cierre de E14**: el motor headless queda medido y con la base de conocimiento conviviendo con código
-    sin poseer git ni el editor. Queda pendiente SOLO la limpieza final de superficie `mcp.yml` → 10 tools
-    objetivo (retirar las tools heredadas), abordada como historia propia de cierre del giro.
+  - ✅ **E14-H06** — Retirada de la superficie heredada (10 tools heredadas → 10 objetivo): el "único
+    rewrite" que anticipaba `mcp.yml §15`, ahora que todos los reemplazos existen y el benchmark (E14-H04)
+    demostró que las nuevas cubren los 15 escenarios. `crates/lodestar-mcp/src/tools.rs` retira de `list()`
+    y del `match` de `call()` las 10 heredadas (`query`, `conformance_check`, `find_backlinks`,
+    `find_orphans`, `find_dangling`, `neighborhood`, `create_concept`, `update_frontmatter`,
+    `generate_index`, `generate_tag_indexes`) + helpers muertos (`rel`/`write_outcome_json`/`parse_patch`/
+    `json_to_yaml`) e imports huérfanos. Superficie resultante: EXACTAMENTE las **10 objetivo**
+    (`workspace_status`, `knowledge_search`, `knowledge_get`, `schema_inspect`, `graph_query`,
+    `impact_analyze`, `knowledge_check`, `change_plan`, `change_apply`, `change_revert`). Invocar una
+    heredada → `-32602` (nombre de tool desconocido = parámetro inválido; `tools/call` sigue siendo método
+    válido; convención coherente con la retirada de git en E9). `contracts/mcp.yml` reescrito: `tools:`
+    lista solo las 10; las heredadas movidas a `§15` como RETIRADA en E14-H06 con su reemplazo semántico;
+    recuentos narrativos → 10. **RETIRA EXPOSICIÓN, NO CAPACIDAD**: la mecánica de dominio sigue viva
+    (dormida, como el vcs) en `lodestar-workspace` (`backlinks`/`neighborhood`/`query`/`create_concept`/
+    `merge_frontmatter`/`generate_index`/`generate_tags`); la CLI mantiene `index`/`tags`/`check`; cero
+    cambios en `core`/`store`/`workspace`/CLI/UI. Sin cambios en `core::types` (invariante #4). Tests
+    `tools_list_solo_objetivo` (conjunto exacto de 10) + `tool_heredada_retirada` (las 10 → `-32602` sin
+    ejecutar) en `crates/lodestar-mcp/tests/mcp.rs`; el autor migró/retiró los tests del contrato viejo a
+    sus equivalentes de las tools objetivo (cerrando el hueco de `dangling` con `graph_dangling`). Guardián
+    de contrato: **LIMPIO** (1:1 `list()`↔`call()`↔`mcp.yml`). Juez ciego: **APROBADA (2/2)**, capacidad
+    conservada verificada.
+  - **Cierre de E14 y del giro headless**: el motor queda medido, conviviendo con código sin poseer git ni
+    el editor, y con la superficie MCP convergida a las **10 tools objetivo** de `§19.6`. E9–E14 completas.
   - **Pendiente al cierre de E14**: limpieza final de superficie `mcp.yml` → 10 tools objetivo (retirar
     `query`/`conformance_check`/`find_*`/`neighborhood`/`create_concept`/`update_frontmatter`/
     `generate_*`), descopada aquí desde E12/E13.

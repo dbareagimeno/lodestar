@@ -107,11 +107,46 @@ juez de que las 10 tools cubren los escenarios de producto.
 - **Pruebas**: `crates/lodestar-mcp/tests/` o bench: `bench_search_payload_acotado`, `bench_concurrencia_segura`.
 - **Frontera (mcp.yml)**: no.
 
+### E14-H06 — Retirada de la superficie heredada (10 tools heredadas → 10 objetivo)
+- **Objetivo**: converger la superficie MCP a las **10 tools objetivo** del giro, retirando las 10 tools
+  heredadas cuya migración (`§15`) quedó diferida hasta tener todos los reemplazos. Es el "único rewrite"
+  que anticipa la nota de `contracts/mcp.yml §15` (no pasos parciales).
+- **Referencias**: `ARCHITECTURE.md §19.6` · `REFACTOR §8, §15, §16` · `contracts/mcp.yml §15` (tabla de
+  reemplazos) · `DECISIONES.md §0`. Dependencias: E10–E13 (todos los reemplazos ya existen y verificados).
+- **Alcance**:
+  - Retirar de `tools/list` y del despacho de `lodestar-mcp` las 10 heredadas: `query`,
+    `conformance_check`, `find_backlinks`, `find_orphans`, `find_dangling`, `neighborhood`,
+    `create_concept`, `update_frontmatter`, `generate_index`, `generate_tag_indexes`.
+  - Superficie resultante: EXACTAMENTE las 10 objetivo (`workspace_status`, `knowledge_search`,
+    `knowledge_get`, `schema_inspect`, `graph_query`, `impact_analyze`, `knowledge_check`, `change_plan`,
+    `change_apply`, `change_revert`).
+  - `contracts/mcp.yml`: reescribir para que la sección `tools:` liste solo las 10; las heredadas pasan a
+    `§15` como **retiradas** (con su reemplazo semántico). Actualizar el recuento narrativo a 10.
+  - Migrar/retirar los tests que ejercitaban las tools heredadas: su cobertura equivalente ya vive en los
+    tests de las tools objetivo (`knowledge_search`/`graph_query`/`knowledge_check`/`change_plan`+`apply`).
+    La capacidad NO se pierde (retira exposición, no capacidad — `lodestar-core`/`workspace` conservan la
+    mecánica; la CLI mantiene `index`/`tags`).
+- **Fuera de alcance**: eliminar código de dominio de `core`/`workspace` (la mecánica se conserva); tocar
+  la CLI (mantiene `index`/`tags`/`check`); `frontend/`/`src-tauri/` (congelados).
+- **Criterios de aceptación**:
+  - **Dado** el servidor MCP, **Cuando** un cliente pide `tools/list` (perfil standard), **Entonces**
+    devuelve EXACTAMENTE las 10 tools objetivo y NINGUNA heredada → `tools_list_solo_objetivo`.
+  - **Dado** el servidor, **Cuando** un cliente invoca una tool heredada (p. ej. `query`/`conformance_check`/
+    `find_backlinks`/`create_concept`/`generate_index`), **Entonces** se rechaza como parámetro inválido
+    (`-32602`: `tools/call` es método válido, el nombre de tool desconocido es un parámetro) sin ejecutar →
+    `tool_heredada_retirada`. (Convención JSON-RPC coherente con la retirada de las tools git en `E9-H01`:
+    `call_commit_desconocida` → `-32602`.)
+- **Dependencias**: E10-H09/H12 (search/check), E11-H01 (graph_query), E12-H08/E13-H08/H09 (change_*),
+  E13-H11 (auto-regen sustituye generate_*). Ninguna **[BLOQUEADA]** (todos los reemplazos existen).
+- **Pruebas**: `crates/lodestar-mcp/tests/`: `tools_list_solo_objetivo`, `tool_heredada_retirada`.
+- **Frontera (mcp.yml)**: **sí** (retirada de 10 tools; reescritura de la superficie a 10).
+
 ---
 
 ## Orden de construcción (E14)
 
 `E14-H01` (gate de CI) y `E14-H02` (convivencia) se pueden construir en cuanto E10–E13 den sus piezas.
 `E14-H03` (perfiles/instrucciones) necesita las tools completas. `E14-H04` (benchmark e2e) compone todo lo
-anterior y por eso va casi al final; `E14-H05` (métricas) cierra sobre el benchmark. Ninguna historia
-**[BLOQUEADA]**.
+anterior y por eso va casi al final; `E14-H05` (métricas) cierra sobre el benchmark. `E14-H06` (retirada de
+la superficie heredada) va **la última**: converge a las 10 tools objetivo una vez que el benchmark ha
+demostrado que las nuevas cubren los 15 escenarios. Ninguna historia **[BLOQUEADA]**.
