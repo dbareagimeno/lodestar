@@ -119,15 +119,36 @@ impl Workspace {
         })
     }
 
-    /// Guard del único escritor: `Err(WorkspaceError::PermissionDenied)` si `path` cae bajo un
-    /// `referenceRoot` (inmutable) o, cuando `writableRoots` es una lista explícita no vacía,
-    /// fuera de todos ellos; `Ok(())` en caso contrario (incluye el caso `writableRoots` vacío =
-    /// todo el bundle escribible salvo `referenceRoots`, mismo criterio que
-    /// [`lodestar_core::types::workspace_revision`]).
+    /// Guard del único escritor: `Err(WorkspaceError::PermissionDenied)` si `path` queda **fuera
+    /// del inventario** del descubrimiento (E15-H09), si cae bajo un `referenceRoot` (inmutable) o,
+    /// cuando `writableRoots` es una lista explícita no vacía, fuera de todos ellos; `Ok(())` en
+    /// caso contrario (incluye el caso `writableRoots` vacío = todo el bundle escribible salvo
+    /// `referenceRoots`, mismo criterio que [`lodestar_core::types::workspace_revision`]).
     ///
     /// Contención por SEGMENTOS de path (reusa [`lodestar_core::types::under_root`]), nunca por
     /// prefijo de string — así `"src"` no cubre `"srcx/y.rs"`.
+    ///
+    /// # Descubrimiento primero (E15-H09, `REFACTOR_PHASE_2 §Principio 8`)
+    ///
+    /// Antes que las raíces se consulta [`Workspace::assert_discoverable`]: escribir donde el
+    /// inventario no mira deja un documento invisible al grafo y ciego al control optimista, así
+    /// que es un rechazo previo a cualquier consideración de permisos.
+    ///
+    /// **Cuando los dos criterios se cruzan, manda la exclusión**: un path excluido del
+    /// descubrimiento se rechaza aunque caiga bajo un `writableRoot` explícito (p. ej.
+    /// `writableRoots: [knowledge]` con un `.gitignore` que ignora `knowledge/borradores/` ⇒
+    /// `knowledge/borradores/x.md` NO es escribible). Dos razones:
+    ///
+    /// 1. `writableRoots` es una lista de **permiso**, no de **habilitación** — la config
+    ///    «limita, nunca habilita» (`ARCHITECTURE.md §20.1`), así que declarar una raíz no puede
+    ///    resucitar un path que el inventario no ve.
+    /// 2. Lo que sostiene la exclusión es una **invariante de correctitud del motor** (todo
+    ///    documento del inventario cuenta para [`lodestar_core::types::workspace_revision`],
+    ///    `ARCHITECTURE.md §20.5`), no una preferencia del usuario; una preferencia no puede
+    ///    levantarla.
     pub fn assert_writable(&self, path: &RelPath) -> Result<(), WorkspaceError> {
+        self.assert_discoverable(path)?;
+
         let ws = &self.config().workspace;
 
         if ws

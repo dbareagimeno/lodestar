@@ -1189,6 +1189,16 @@ impl App {
     /// 4. Construye el bundle hipotético con [`plan::apply_normalized_ops`] y deriva
     ///    [`plan::semantic_diff`], [`plan::assess_risk`] y [`plan::validate_result`] (antes y
     ///    después); `canApply` = [`plan::can_apply`] bajo `policy`.
+    ///    - **Guard de descubrimiento** (E15-H09, `REFACTOR_PHASE_2 §Principio 8`): cada path que
+    ///      el plan crearía o modificaría pasa por [`Workspace::assert_discoverable`]; si el
+    ///      descubrimiento lo deja fuera del inventario (`.lodestar/**`, un `.gitignore`/
+    ///      `.lodestarignore` del árbol, `discovery.exclude` o el filtro `discovery.include`) →
+    ///      [`ErrorCode::PermissionDenied`] y **no se persiste plan alguno**. Se rechaza aquí —y
+    ///      no solo en el apply— porque un plan aceptado que revienta al aplicarse le devuelve al
+    ///      agente un `semanticDiff.created` con el path colado y le hace descubrir el fallo
+    ///      tarde. **Solo** se consulta el descubrimiento: `writableRoots`/`referenceRoots`
+    ///      siguen comprobándose exclusivamente en el apply (E11-H04), donde vive el único
+    ///      escritor.
     /// 5. **`planHash` DETERMINISTA**: `blake3(baseWorkspaceRevision ‖ 0x00 ‖ serialización JSON
     ///    canónica de las normalizedOperations)` — mismo input + misma base ⇒ mismo hash; input
     ///    distinto ⇒ hash distinto. **No** depende del reloj (`expiresAt` sí es wall-clock, pero
@@ -1241,6 +1251,19 @@ impl App {
         let after_files =
             plan::apply_normalized_ops(files, &normalized).map_err(|e| error_code(&e))?;
         let after = Bundle::from_files(after_files);
+
+        // (4-bis) Guard de descubrimiento (E15-H09): ningún path que el plan escribiría puede
+        //     quedar fuera del inventario. Se comprueban los creados/modificados —los borrados
+        //     estaban en el inventario por construcción— y se hace ANTES de persistir el plan, de
+        //     modo que un plan rechazado no queda aplicable después. Nótese que aquí NO se llama a
+        //     `assert_writable`: las raíces de la config se siguen juzgando en el apply.
+        for (path, contenido) in after.files() {
+            if files.get(path) != Some(contenido) {
+                self.workspace
+                    .assert_discoverable(path)
+                    .map_err(|e| workspace_error_code(&e))?;
+            }
+        }
 
         let risk = plan::assess_risk(&normalized, &bundle, &after);
         let semantic_diff = plan::semantic_diff(&bundle, &after, &schema);

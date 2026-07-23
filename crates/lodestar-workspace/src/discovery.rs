@@ -17,14 +17,20 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
+use ignore::gitignore::GitignoreBuilder;
 use ignore::overrides::{Override, OverrideBuilder};
-use ignore::WalkBuilder;
+use ignore::{Match, WalkBuilder};
 use lodestar_core::types::{Check, CheckCode, FileMap, RelPath, Severity};
 
 use crate::error::WorkspaceError;
+use crate::Workspace;
 
 /// Nombre del fichero de exclusiones propio de Lodestar (mismo formato que un `.gitignore`).
 pub const LODESTAR_IGNORE_FILENAME: &str = ".lodestarignore";
+
+/// Nombre del fichero de exclusiones estándar del árbol que el walker respeta cuando
+/// [`DiscoveryPolicy::respect_gitignore`] está activo.
+pub const GITIGNORE_FILENAME: &str = ".gitignore";
 
 /// El **suelo duro** del descubrimiento: el plano de control de Lodestar (`.lodestar/` entero).
 ///
@@ -273,6 +279,189 @@ pub fn discover(root: &Path, policy: &DiscoveryPolicy) -> Result<Discovered, Wor
     diagnostics.sort_by(|a, b| clave_orden(a).cmp(&clave_orden(b)));
 
     Ok(Discovered { files, diagnostics })
+}
+
+impl Workspace {
+    /// Guard de **descubrimiento** (E15-H09, `REFACTOR_PHASE_2 §Principio 8`): `Err` si escribir en
+    /// `path` produciría un documento que el inventario **no vería**.
+    ///
+    /// Es el complemento de [`Workspace::assert_writable`], y responde a una pregunta distinta: no
+    /// «¿tengo permiso para escribir aquí?» (raíces de la config) sino «¿existiría de verdad lo que
+    /// escriba aquí?». La diferencia importa porque un `.md` fuera del inventario queda **fuera de
+    /// la [`lodestar_core::types::workspace_revision`]**: invisible al grafo y a la búsqueda, sin
+    /// protección del control optimista (un segundo `create` en el mismo path no vería colisión y lo
+    /// sobrescribiría) y un `change_revert` lo trataría como creado y lo borraría.
+    ///
+    /// Se consulta la política **efectiva** ([`Workspace::discovery_policy`]) y el estado **actual**
+    /// del árbol, sin cachear: el descubrimiento no es config de sesión —un `.gitignore` puede
+    /// aparecer entre el plan y el apply sin mover la revisión (no es un `.md`), de modo que ni el
+    /// control optimista ni el `planHash` lo detectan—. Por eso el guard tiene que volver a
+    /// preguntar en el momento de escribir.
+    ///
+    /// # Errores
+    /// - [`WorkspaceError::PermissionDenied`] con el motivo de la exclusión (glob de
+    ///   `discovery.exclude`, patrón de un `.gitignore`/`.lodestarignore` del árbol, o el filtro
+    ///   `discovery.include`).
+    /// - [`WorkspaceError::Io`] si la política trae un glob inválido (mismo criterio que
+    ///   [`discover`]).
+    pub fn assert_discoverable(&self, path: &RelPath) -> Result<(), WorkspaceError> {
+        match exclusion_reason(self.root(), path, &self.discovery_policy())? {
+            None => Ok(()),
+            Some(motivo) => Err(WorkspaceError::PermissionDenied(format!(
+                "«{}» queda fuera del inventario del workspace ({motivo}): escribir ahí dejaría un \
+                 documento invisible al grafo y ciego al control optimista",
+                path.as_str()
+            ))),
+        }
+    }
+}
+
+/// ¿Por qué quedaría `path` **fuera del inventario**? `None` si el descubrimiento lo vería.
+///
+/// Es la versión «una ruta, sin recorrer el árbol» de [`discover`]: responde por un path que puede
+/// **no existir todavía** (el destino de un `create`/`move`), donde el walker no sirve. Respeta el
+/// mismo **orden de precedencia** que [`discover`] —`exclude` → ficheros de ignore del árbol →
+/// `include` como filtro final—, así que un `Ok(None)` aquí significa que ese mismo path, una vez
+/// escrito, aparecerá en el inventario que devuelve `discover`.
+///
+/// Lo que **no** puede responder son las exclusiones que dependen del contenido del fichero ya
+/// escrito ([`DiscoveryPolicy::max_document_bytes`], UTF-8) ni las de symlink: no son política de
+/// ubicación sino propiedades del documento, y Lodestar solo escribe ficheros regulares UTF-8 por su
+/// único escritor, así que no puede producirlas.
+///
+/// # Errores
+/// - [`WorkspaceError::Io`] si algún glob de `policy` es inválido (igual que [`discover`]).
+pub fn exclusion_reason(
+    root: &Path,
+    path: &RelPath,
+    policy: &DiscoveryPolicy,
+) -> Result<Option<String>, WorkspaceError> {
+    // (1) `exclude` explícito: la máxima precedencia, como en el walker.
+    let excludes = build_excludes(root, policy)?;
+    if excluido_por_override(&excludes, path) {
+        let motivo = match glob_culpable(root, path, policy) {
+            Some(glob) => format!("lo excluye el glob «{glob}» de `discovery.exclude`"),
+            None => "lo excluye `discovery.exclude`".to_string(),
+        };
+        return Ok(Some(motivo));
+    }
+
+    // (2) Ficheros de ignore del árbol (`.lodestarignore`/`.gitignore`), del directorio más
+    //     profundo hacia la raíz.
+    if let Some(motivo) = excluido_por_ficheros_de_ignore(root, path, policy) {
+        return Ok(Some(motivo));
+    }
+
+    // (3) `include`, el filtro FINAL sobre lo que sobrevivió a (1) y (2).
+    let include = build_include(root, policy)?;
+    if !incluido(&include, Path::new(path.as_str())) {
+        return Ok(Some(format!(
+            "no casa con ningún glob de `discovery.include` ({:?})",
+            policy.include
+        )));
+    }
+
+    Ok(None)
+}
+
+/// ¿Casa `path` (o alguno de sus directorios ancestros) con el `Override` de exclusiones?
+///
+/// El ascenso por ancestros es necesario porque [`Override::matched`] no lo hace y en semántica
+/// `.gitignore` un patrón de directorio (`vendor/`, o el `!vendor` que [`build_excludes`] añade
+/// para podar un `vendor/**`) casa con el **directorio**, no con los ficheros de dentro: en el
+/// walker eso basta porque el directorio se poda y no se desciende, pero aquí se pregunta por una
+/// ruta suelta.
+fn excluido_por_override(excludes: &Override, path: &RelPath) -> bool {
+    let componentes: Vec<&str> = path.as_str().split('/').collect();
+    for i in 1..componentes.len() {
+        if excludes
+            .matched(componentes[..i].join("/"), true)
+            .is_ignore()
+        {
+            return true;
+        }
+    }
+    excludes.matched(path.as_str(), false).is_ignore()
+}
+
+/// El primer glob de [`DiscoveryPolicy::exclude`] que excluye `path`, para poder nombrarlo en el
+/// mensaje de error. Camino **frío**: solo se recorre cuando ya se sabe que el path está excluido
+/// (el `Override` completo se consulta de una vez, no glob a glob).
+fn glob_culpable(root: &Path, path: &RelPath, policy: &DiscoveryPolicy) -> Option<String> {
+    for glob in &policy.exclude {
+        let solo_este = DiscoveryPolicy {
+            exclude: vec![glob.clone()],
+            ..policy.clone()
+        };
+        match build_excludes(root, &solo_este) {
+            Ok(ov) if excluido_por_override(&ov, path) => return Some(glob.clone()),
+            _ => continue,
+        }
+    }
+    None
+}
+
+/// ¿Excluye a `path` algún `.lodestarignore`/`.gitignore` del árbol? Devuelve el motivo legible.
+///
+/// Reproduce la precedencia de `ignore`: gana el fichero de ignore del directorio **más profundo**
+/// (por eso el recorrido va del padre del documento hacia la raíz) y, dentro de un directorio, el
+/// `.lodestarignore` (custom ignore) antes que el `.gitignore`. Una regla de re-inclusión (`!x`)
+/// que case corta la búsqueda igual que un match de exclusión: el fichero más cercano decide.
+fn excluido_por_ficheros_de_ignore(
+    root: &Path,
+    path: &RelPath,
+    policy: &DiscoveryPolicy,
+) -> Option<String> {
+    let ficheros: Vec<&str> = [
+        (policy.respect_lodestar_ignore, LODESTAR_IGNORE_FILENAME),
+        (policy.respect_gitignore, GITIGNORE_FILENAME),
+    ]
+    .into_iter()
+    .filter(|(activo, _)| *activo)
+    .map(|(_, nombre)| nombre)
+    .collect();
+    if ficheros.is_empty() {
+        return None;
+    }
+
+    let componentes: Vec<&str> = path.as_str().split('/').collect();
+    for i in (0..componentes.len()).rev() {
+        let dir = if i == 0 {
+            root.to_path_buf()
+        } else {
+            root.join(componentes[..i].join("/"))
+        };
+        // Ruta del documento RELATIVA al directorio que hospeda el fichero de ignore: es como
+        // `ignore` evalúa cada matcher (y evita depender del heurístico de `strip`).
+        let relativa = componentes[i..].join("/");
+        for nombre in &ficheros {
+            let fichero = dir.join(nombre);
+            if !fichero.is_file() {
+                continue;
+            }
+            let mut builder = GitignoreBuilder::new(&dir);
+            if builder.add(&fichero).is_some() {
+                continue; // ilegible/malformado: el walker tampoco lo aplicaría
+            }
+            let Ok(matcher) = builder.build() else {
+                continue;
+            };
+            match matcher.matched_path_or_any_parents(&relativa, false) {
+                Match::Ignore(glob) => {
+                    let ubicacion = fichero.strip_prefix(root).unwrap_or(&fichero);
+                    return Some(format!(
+                        "lo ignora el patrón «{}» de «{}»",
+                        glob.original(),
+                        ubicacion.display()
+                    ));
+                }
+                // Re-inclusión explícita: decide el fichero más cercano, no se sigue subiendo.
+                Match::Whitelist(_) => return None,
+                Match::None => {}
+            }
+        }
+    }
+    None
 }
 
 /// Diagnósticos de **portabilidad** por rutas que solo difieren en capitalización.
