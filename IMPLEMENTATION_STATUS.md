@@ -637,3 +637,35 @@ superficie de producto; git queda como crate dormido) y `DECISIONES.md §0`. Des
     arranca, `workspace_status` reporta los 7, y `graph_query` resuelve el enlace raíz →
     `packages/api/docs/endpoints.md` y el de vuelta `../../../README.md` **en el mismo grafo**. Es
     el `§Resultado esperado` de `docs/REFACTOR_PHASE_2.md`.
+- ✅ **E15-H07** — **Descubrimiento recursivo universal**. Módulo `discovery` (`DiscoveryPolicy`,
+  `Discovered`, `discover`, `case_collisions`, `rel_path_from`) que sustituye a `io::load_bundle` en
+  sus **7 llamadores**, por un punto de inyección único (`Workspace::discovery_policy` +
+  `discover_files`) para que `bundle()`, `workspace_revision()` y el motor transaccional vean el
+  mismo inventario. 5 códigos nuevos en `CheckCode` (`DOC-NOT-UTF8`, `DOC-TOO-LARGE`,
+  `PATH-NOT-UTF8`, `SYMLINK-UNSUPPORTED`, `LINK-CASE-MISMATCH`), todos `Warn`. Determinismo
+  reforzado más allá de lo pedido: `parents(false)` + `git_global(false)` + `git_exclude(false)`, de
+  modo que el inventario dependa solo del árbol bajo la raíz. `io::load_bundle` borrado. 10 tests.
+  - **Corrección durante la historia**: la política excluye **`.lodestar/` entero**, no solo
+    `runtime/`. Un `.md` ahí sería nodo del grafo y escribible pero **ciego al control optimista**
+    (`workspace_revision` excluye todo `.lodestar/` por D5, y no puede dejar de hacerlo: `StagingDir`
+    materializa ahí copias `.md` de los documentos que está guardando — si contara,
+    `reverify_base_revision` fallaría *a causa del apply en curso*). `§20.5` enmendada.
+- ⚖️ **Juez ciego (H06 + H07)**: **RECHAZADAS** ambas, con 3/4 y 7/9 criterios cumplidos. Dos
+  bloqueantes reales:
+  - **H06** — `rechaza_absoluta` **falla en `windows-latest`**: el cebo (`C:\Users\…`) se interpola
+    crudo en un literal de cadena JSON y `\U`/`\A`/`\T` no son escapes válidos → el servidor
+    responde `-32700` y el test panica. Defecto de arnés, no de producto.
+  - **H07** — **regresión silenciosa**: los patrones de `.gitignore`/`.lodestarignore` **a nivel de
+    fichero** dejaron de aplicarse. `include: ["**/*.md"]` entra como whitelist del `Override`, y en
+    el crate `ignore` los overrides tienen precedencia absoluta y cortocircuitan. Los patrones de
+    **directorio** siguen funcionando por accidente (el override no aplica whitelist a directorios,
+    así que el directorio se poda antes de descender) — y por eso los dos tests que demuestran esos
+    criterios pasaban **por la razón equivocada**.
+  - Otros: symlinks de **directorio** sin diagnóstico (MAYOR-2); `.ignore` siempre aplicado y no
+    desactivable (`WalkBuilder::ignore` vale `true` por defecto y nunca se toca); `**/*.md` es
+    case-sensitive, así que `README.MD` no se descubre; `rel_path_from` normaliza `\`→`/` también en
+    Unix, donde `\` es legal, y un `a\b.md` puede enmascarar al `a/b.md` real. Los tres últimos son
+    heredados de `io::load_bundle`, no regresiones.
+  - **MAYOR-1 → historia nueva E15-H09**: `assert_writable` no consulta la política de
+    descubrimiento, así que se puede escribir en paths excluidos del inventario **y** de la revisión.
+    `REFACTOR_PHASE_2 §8` lo prohíbe explícitamente.

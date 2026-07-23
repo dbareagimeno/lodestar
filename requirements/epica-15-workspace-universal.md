@@ -296,6 +296,35 @@ y la suite en verde.
 - **Pruebas**: `crates/lodestar-workspace/tests/config.rs`: los 4 nombres.
 - **Frontera (mcp.yml)**: **sí** (`workspace_status` expone `discovery` en su salida, `§20.10`).
 
+### E15-H09 — La política de escritura respeta el descubrimiento
+
+> **Origen**: hallazgo MAYOR-1 del juez ciego de E15-H07 (2026-07-23). No es deuda descubierta por
+> casualidad: `REFACTOR_PHASE_2 §Principio 8` lo pide literalmente — *"ninguna operación debe …
+> escribir sobre archivos excluidos"*.
+
+- **Objetivo**: que no se pueda escribir un documento que el descubrimiento excluye.
+- **Referencias**: `REFACTOR_PHASE_2 §8 (Seguridad de escritura)` · `ARCHITECTURE.md §20.5`,
+  `§20.11` · `crates/lodestar-workspace/src/external_refs.rs:132-160` (`assert_writable`).
+- **El problema**: `assert_writable` **no consulta la política de descubrimiento**. Con la config
+  por defecto (`writableRoots` vacío) acepta escribir en paths que el inventario excluye. Verificado
+  por el juez contra el binario real: un `change_plan` con `create ".lodestar/colado.md"` y
+  `create "vendor/oculto.md"` los acepta y los lista en `semanticDiff.created`. Un documento así se
+  escribiría en disco quedando **fuera del inventario y fuera de la revisión**: invisible al grafo y
+  a `knowledge_search`, sin protección del control optimista (un segundo `create` en el mismo path
+  no vería colisión y lo sobrescribiría), y un `revert` lo trataría como creado y lo borraría.
+- **Alcance**: `assert_writable` consulta la `DiscoveryPolicy` efectiva y rechaza con
+  `PERMISSION_DENIED` cualquier destino excluido. Cubre también el destino de un `move_document`.
+- **Criterios de aceptación**:
+  - **Dado** un `change_plan` que crea `.lodestar/colado.md`, **Cuando** se planifica, **Entonces**
+    se rechaza con `PERMISSION_DENIED` → `no_se_escribe_en_el_plano_de_control`.
+  - **Dado** un `.gitignore` con `vendor/` y un plan que crea `vendor/oculto.md`, **Cuando** se
+    planifica, **Entonces** se rechaza → `no_se_escribe_en_lo_ignorado`.
+  - **Dado** un `move_document` cuyo destino cae en una ruta excluida, **Cuando** se planifica,
+    **Entonces** se rechaza → `move_a_excluido_se_rechaza`.
+- **Dependencias**: E15-H08 (la política efectiva ya viene de la config).
+- **Pruebas**: `crates/lodestar-app/tests/`.
+- **Frontera (mcp.yml)**: no (usa un `ErrorCode` existente).
+
 ---
 
 ## Orden de construcción
