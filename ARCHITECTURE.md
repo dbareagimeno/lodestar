@@ -1109,6 +1109,15 @@ sobre cualquier propiedad YAML, con dot-notation para propiedades anidadas.
   Las propiedades calculadas **exigen** namespace explícito.
 - **Sin coerción implícita** entre string/número, string/booleano, escalar/lista, lista/objeto. La
   heterogeneidad de tipos de una propiedad es inspeccionable y comunicable.
+
+> **Aviso de implementación (E16-H01)**: el evaluador de comparaciones debe ir **siempre** sobre
+> `ParsedFrontmatter::get` (que devuelve el `serde_yaml::Value` con su tipo), **nunca** sobre
+> `get_text`. `get_text` renderiza escalares a `String` para las columnas de cache y los DTO de
+> presentación; construir las comparaciones encima haría que todo se comparase como texto y el
+> invariante 4 de `§20.2` —`priority >= "high"` es un error de tipo— desaparecería **sin que ningún
+> test lo notara**, porque para fechas y números ISO el orden lexicográfico suele coincidir. Es la
+> vía por la que puede volver a colarse la coerción implícita que `js_string` tenía y E16-H01
+> retiró.
 - **Un solo AST** (`Expression`: `Comparison`/`Function`/`And`/`Or`/`Not`): la consulta textual
   (`where`) y el filtro estructurado (`filter`) se traducen al mismo AST y **producen exactamente el
   mismo resultado**.

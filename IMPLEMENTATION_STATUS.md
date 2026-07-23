@@ -669,3 +669,32 @@ superficie de producto; git queda como crate dormido) y `DECISIONES.md §0`. Des
   - **MAYOR-1 → historia nueva E15-H09**: `assert_writable` no consulta la política de
     descubrimiento, así que se puede escribir en paths excluidos del inventario **y** de la revisión.
     `REFACTOR_PHASE_2 §8` lo prohíbe explícitamente.
+- ✅ **E15-H09** — **La política de escritura respeta el descubrimiento** (cierra E15). Pieza nueva
+  `discovery::exclusion_reason`: la versión "una ruta suelta, sin recorrer el árbol" de `discover`,
+  necesaria porque el destino de un `create`/`move` **todavía no existe**. Reproduce el mismo orden
+  de precedencia reusando los constructores de `discover`, de modo que un «sí» significa literalmente
+  «ese path, una vez escrito, saldrá en el inventario». Se rechaza en `change_plan` **y** en
+  `assert_writable` (apply + revert): lo segundo no es redundante, porque el descubrimiento es estado
+  del árbol y un `.gitignore` que aparece entre plan y apply no mueve la `WorkspaceRevision` ni
+  invalida el `planHash`. El escenario 13 del benchmark sobrevive porque `change_plan` llama solo a
+  `assert_discoverable`, no a `assert_writable` entero. Cruce documentado: cuando `writableRoots`
+  permite lo que el descubrimiento excluye, **manda la exclusión** (es lista de permiso, no de
+  habilitación). 4 tests. **257 tests · E15 COMPLETA (H01–H09).**
+
+### E16 — Modelo documental genérico
+
+- ✅ **E16-H01** — **Frontmatter YAML arbitrario**. La cirugía más ancha de la migración: ~95 puntos
+  en 13 ficheros. Muere `Frontmatter` (7 campos tipados), `KNOWN_FM`, `known_null`, `as_pairs`,
+  `js_string`, `dump_frontmatter`, `FmError::Missing` y `types::ParsedFile` (jamás construido desde
+  E1); cae `indexmap` como dep directa del core. Nace
+  `ParsedFrontmatter { value, raw, span }` con `FieldPath` (newtype de **segmentos**, con `parse`
+  para dot-notation y `from_segments` para claves que contienen un punto) como **única verdad de
+  acceso a metadata**, que reutilizarán E18/E19/E20. `split_front` reescrito por bytes: corrige el
+  bug por el que `---\n---\n` se reportaba como frontmatter *sin cerrar*. 262 tests.
+  - **Aviso registrado para E19** (`§20.8`): las comparaciones deben ir sobre `get`, nunca sobre
+    `get_text` — construirlas sobre este último reintroduciría la coerción implícita **sin que
+    ningún test lo notara**.
+  - **Defecto de fixtures del autor, corregido por él**: las continuaciones de línea de Rust (`\`)
+    se comen la indentación, así que su YAML anidado llegaba aplanado. Auditadas las 45 apariciones
+    del patrón en los 6 ficheros de test de la migración: ninguna otra estaba rota — E16-H01 es la
+    primera historia cuyas fixtures necesitan YAML **anidado**.
