@@ -415,35 +415,6 @@ impl Bundle {
     }
 }
 
-impl Bundle {
-    /// Plan de generación del `index.md` de un directorio (`""` = root, `"sub/"` = subdir).
-    pub fn gen_index(&self, dir: &str) -> crate::types::Mutation {
-        crate::generate::gen_index(self, dir)
-    }
-
-    /// Plan de generación/purga de los índices de tags.
-    pub fn gen_tag_indexes(&self) -> crate::types::Mutation {
-        crate::generate::gen_tag_indexes(self)
-    }
-
-    /// Exporta el bundle a un `.zip` (sin zip-slip: las claves son `RelPath` validados).
-    pub fn export_zip<W: std::io::Write + std::io::Seek>(&self, w: W) -> crate::error::Result<()> {
-        use zip::write::SimpleFileOptions;
-        let mut zip = zip::ZipWriter::new(w);
-        let opts =
-            SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
-        for (path, content) in &self.files {
-            zip.start_file(path.as_str(), opts)
-                .map_err(|e| crate::CoreError::Export(e.to_string()))?;
-            std::io::Write::write_all(&mut zip, content.as_bytes())
-                .map_err(|e| crate::CoreError::Export(e.to_string()))?;
-        }
-        zip.finish()
-            .map_err(|e| crate::CoreError::Export(e.to_string()))?;
-        Ok(())
-    }
-}
-
 /// Aplica un `FrontmatterPatch` sobre un `Frontmatter` (conoce los KNOWN_FM tipados + extras).
 ///
 /// `pub(crate)`: además de [`Bundle::merge_frontmatter`], lo reutiliza `crate::plan`

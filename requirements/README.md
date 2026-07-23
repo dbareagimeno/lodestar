@@ -8,10 +8,12 @@
 
 ## Cómo leer estos documentos
 
-- **`ARCHITECTURE.md` es la autoridad.** Cada historia cita la sección (`§N`) y las funciones del
-  prototipo (`prototype/index.html`) que porta. Lee siempre la sección citada antes de implementar.
-- **El prototipo es la spec de comportamiento.** Portar = encontrar la función original y mantener
-  su semántica *incluidos sus quirks*. El arnés diferencial JS-vs-Rust (E1) es la red de seguridad.
+- **`ARCHITECTURE.md` es la autoridad.** Cada historia cita la sección (`§N`) que implementa. Lee
+  siempre la sección citada antes de implementar.
+- **La spec de comportamiento es `docs/REFACTOR_PHASE_2.md` + `ARCHITECTURE.md §20`.** Las historias
+  de E0–E14 citan además funciones del prototipo (`prototype/index.html`): desde `E15-H04` esas
+  citas son **referencia histórica de v0.2.x** —explican el comportamiento portado, no lo
+  arbitran— y el arnés diferencial JS-vs-Rust ya no existe.
 - **Idioma**: español en código, comentarios, UI, mensajes y commits (el usuario es hispanohablante),
   salvo identificadores técnicos congelados por el contrato (nombres de tipos, comandos, eventos,
   códigos `OKF-*`).

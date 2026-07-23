@@ -82,8 +82,9 @@ cargo install --path crates/lodestar-mcp    # binario `lodestar-mcp`
 ## Requisitos
 
 - **Rust** estable (≥ 1.80, con `rustfmt` y `clippy`; ver `rust-toolchain.toml`)
-- **Node.js** ≥ 20 + npm (arnés diferencial)
-- **git** en el PATH (operaciones de red)
+
+(Desde `E15-H01`/`E15-H04` no hacen falta node ni git: el arnés diferencial y el crate `vcs` se
+retiraron del repo.)
 
 (La UI de escritorio y sus dependencias de sistema Tauri se retiraron de `main`; viven en la rama
 `experimental/ui-desktop`.)
@@ -92,23 +93,21 @@ cargo install --path crates/lodestar-mcp    # binario `lodestar-mcp`
 
 ### Tests
 ```bash
-npm ci --prefix prototype/harness   # deps del arnés diferencial (una vez)
-cargo test --workspace              # core, store, vcs, workspace, cli, mcp + diferenciales
+cargo test --workspace              # core, store, workspace, app, cli, mcp
 ```
 
 ### CLI
 ```bash
-cargo run -p lodestar-cli -- init mi-bundle          # bundle nuevo (git init + commit inicial)
 cargo run -p lodestar-cli -- check --path mi-bundle  # ¿conforme? exit 0/1 (--json | --sarif)
 cargo run -p lodestar-cli -- reindex                 # reconstruye la cache .lodestar/index.db
 ```
-Subcomandos: `init` · `check` · `index` · `tags` · `export` · `import` · `reindex`. Desde `E9-H02`
-**no** hay subcomandos git (`log`/`last-conforming`/`branch`/`switch`/`merge`/`pull`/`push`/`hooks`
-retirados de la superficie; la mecánica sigue dormida en `lodestar-vcs`, ver `ARCHITECTURE.md
-§19.1`) ni `--staged`/`--rev`/`--range` en `check` — juzga siempre el working tree.
+Subcomandos: `check` · `reindex`. `E15-H02`/`E15-H03` retiraron `init`, `index`, `tags`, `export` e
+`import` (no hay ceremonia de creación, ni ficheros con semántica de catálogo, ni formato propio de
+intercambio). Desde `E9-H02` tampoco hay subcomandos git ni `--staged`/`--rev`/`--range` en `check`
+— juzga siempre el working tree; `E15-H01` borró además el crate `lodestar-vcs`.
 
-Exit codes de `check`: `0` conforme · `1` hard-fail · `2` uso · `3` runtime/IO · `4` drift de
-generadores.
+Exit codes de `check`: `0` conforme · `1` hard-fail · `2` uso · `3` runtime/IO (el `4`, drift de
+generadores, se retiró con los generadores en `E15-H02`).
 
 ### App de escritorio (Tauri v2) — retirada de `main`
 

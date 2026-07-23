@@ -1,9 +1,9 @@
 //! `lodestar-core` — núcleo **puro** de lodestar.
 //!
-//! Contiene toda la semántica OKF (modelo, conformidad, links, query, grafo, generación,
-//! export y diff semántico) sin I/O, sin DB, sin git y sin runtime. Es testeable sin
-//! GUI/DB/runtime y es la **única verdad computada** que comparten las tres fachadas
-//! (Tauri, CLI, MCP). Ver `ARCHITECTURE.md §2`, `§4`.
+//! Contiene toda la semántica OKF (modelo, conformidad, links, query, grafo, plan de cambios y
+//! diff semántico) sin I/O, sin DB, sin git y sin runtime. Es testeable sin DB/runtime y es la
+//! **única verdad computada** que comparten las fachadas (CLI, MCP). Ver `ARCHITECTURE.md §2`,
+//! `§4`.
 //!
 //! Invariantes (no negociables):
 //! - Los `.md` en disco son la única fuente de verdad; este crate solo computa.
@@ -15,7 +15,6 @@
 
 pub mod diff;
 pub mod error;
-pub mod generate;
 pub mod model;
 pub mod plan;
 pub mod query;

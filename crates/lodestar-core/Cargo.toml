@@ -19,7 +19,6 @@ blake3 = { workspace = true }
 thiserror = { workspace = true }
 once_cell = { workspace = true }
 regex = { workspace = true }
-zip = { workspace = true }
 indexmap = { workspace = true }
 unicode-normalization = { workspace = true }
 schemars = { workspace = true, optional = true }
@@ -38,6 +37,5 @@ workspace = true
 [dev-dependencies]
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }
-zip = { workspace = true }
 # Solo-dev: fixtures compartidas para el arnés diferencial (E1-H18). El ciclo dev-only lo permite cargo.
 lodestar-fixtures = { workspace = true }

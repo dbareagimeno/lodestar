@@ -7,14 +7,13 @@ repository.workspace = true
 homepage.workspace = true
 readme.workspace = true
 rust-version.workspace = true
-description = "Glue: compone core + store + vcs. Handle unificado, único escritor y bus de eventos."
+description = "Glue: compone core + store. Handle unificado, único escritor y bus de eventos."
 keywords = ["okf", "knowledge-base", "local-first", "watcher", "markdown"]
 categories = ["filesystem", "development-tools"]
 
 [dependencies]
 lodestar-core = { workspace = true }
 lodestar-store = { workspace = true }
-lodestar-vcs = { workspace = true }
 thiserror = { workspace = true }
 ignore = { workspace = true }
 serde = { workspace = true }

@@ -6,7 +6,11 @@ use rusqlite::Connection;
 use crate::error::StoreError;
 
 /// Versión del esquema de cache. Un bump fuerza reconstrucción total (la cache es desechable).
-pub const USER_VERSION: i64 = 1;
+///
+/// - `1` — esquema de v0.2 (incluía la tabla git `commit_conformance`).
+/// - `2` — E15-H01: git desaparece del repo; el DDL pierde `commit_conformance`. Una cache de v0.2
+///   se detecta antigua por este número y se reconstruye limpia.
+pub const USER_VERSION: i64 = 2;
 
 /// Aplica los `PRAGMA` de sesión (WAL + claves foráneas + busy_timeout).
 pub(crate) fn apply_pragmas(conn: &Connection) -> Result<(), StoreError> {
@@ -85,13 +89,6 @@ pub(crate) fn create_schema(conn: &Connection) -> Result<(), StoreError> {
         CREATE VIRTUAL TABLE IF NOT EXISTS files_fts USING fts5(
             path UNINDEXED, title, description, body
         );
-
-        CREATE TABLE IF NOT EXISTS commit_conformance (
-            tree_oid   TEXT PRIMARY KEY,
-            hard_fail  INTEGER NOT NULL,
-            warn_count INTEGER NOT NULL,
-            conform    INTEGER NOT NULL
-        );
         "#,
     )?;
     Ok(())
@@ -113,7 +110,6 @@ pub(crate) fn schema_is_current(conn: &Connection) -> Result<bool, StoreError> {
         "SELECT src, dst, href, src_is_index FROM links LIMIT 0",
         "SELECT path, tag FROM tags LIMIT 0",
         "SELECT path, code, level, msg, targets_json FROM diagnostics LIMIT 0",
-        "SELECT tree_oid, hard_fail, warn_count, conform FROM commit_conformance LIMIT 0",
         "SELECT path, title, description, body FROM files_fts LIMIT 0",
     ];
     for sql in probes {
@@ -133,6 +129,8 @@ pub(crate) fn drop_schema(conn: &Connection) -> Result<(), StoreError> {
         DROP TABLE IF EXISTS tags;
         DROP TABLE IF EXISTS links;
         DROP TABLE IF EXISTS files;
+        -- Legado de v0.2 (tabla git, retirada en E15-H01): se dropea para que una cache antigua
+        -- reconstruida no arrastre la tabla huérfana.
         DROP TABLE IF EXISTS commit_conformance;
         "#,
     )?;

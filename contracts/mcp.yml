@@ -331,7 +331,7 @@ migracion:
     - { vieja: conformance_check, nueva: knowledge_check, estado: "RETIRADA en E14-H06 → knowledge_check (reemplazo desde E10-H12)" }
     - { viejas: [find_backlinks, find_orphans, find_dangling, neighborhood], nueva: graph_query, estado: "RETIRADAS en E14-H06 → graph_query (reemplazo desde E11-H01: operations backlinks/orphans/dangling/neighborhood)" }
     - { viejas: [create_concept, update_frontmatter], nuevas: [change_plan, change_apply], estado: "RETIRADAS en E14-H06 → change_plan + change_apply (escritura validada por el único escritor; ops create/patch_frontmatter, E12-H08/E13)" }
-    - { viejas: [generate_index, generate_tag_indexes], nueva: "CLI (`index`/`tags`) + auto-regen dentro de change_apply", estado: "RETIRADAS en E14-H06 → CLI + auto-regen transaccional (`docs/REFACTOR.md §15` fila generate_*, decisión D6a)" }
+    - { viejas: [generate_index, generate_tag_indexes], nueva: "—", estado: "RETIRADAS en E14-H06 → CLI (`index`/`tags`) + auto-regen transaccional; capacidad BORRADA en E15-H02 (core::generate, subcomandos y auto-regen del apply: ningún fichero tiene semántica de catálogo, ARCHITECTURE.md §20.13)" }
   superficie_objetivo: >-
     10 tools activas (alcanzado en E14-H06): workspace_status, knowledge_search, knowledge_get,
     schema_inspect, knowledge_check, graph_query, impact_analyze, change_plan, change_apply,

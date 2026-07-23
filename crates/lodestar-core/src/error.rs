@@ -22,17 +22,9 @@ pub enum CoreError {
     )]
     InboundLinksExist(RelPath),
 
-    /// SHA de git con formato inválido (no hexadecimal o longitud incorrecta).
-    #[error("sha inválido: {0}")]
-    InvalidSha(String),
-
     /// El contenido excede la guarda de tamaño de una operación (p. ej. diff/LCS).
     #[error("excedida la guarda de tamaño: {0}")]
     SizeGuardExceeded(String),
-
-    /// Error de escritura/serialización al exportar (p. ej. al construir el zip).
-    #[error("error de export/IO: {0}")]
-    Export(String),
 
     /// Al normalizar `replace_text` (E12-H05), el número de coincidencias de la cadena buscada no
     /// casa con el `expected_occurrences` declarado. Lleva `(esperadas, encontradas)`.

@@ -566,3 +566,30 @@ superficie de producto; git queda como crate dormido) y `DECISIONES.md §0`. Des
   `materialize_disk_only()` (no UTF-8, sobre el límite, symlink, `.gitignore`, `.lodestarignore`).
   **Aditivo**: los bundles OKF heredados siguen vivos hasta que E16/E17 retiren a sus consumidores.
   4 tests.
+- ✅ **E15-H01** — `lodestar-vcs` **borrado** (crate, `git2`, `build.rs`, tests). Fuera del
+  `Workspace`: campos `vcs`/`identity`, `Vcs::discover`/`init`, `set_identity`, `has_vcs`,
+  `init_vcs`, `init_bundle`, `commit`/`restore`/`switch`/`merge`/`create_branch`/`branches`/
+  `vcs_log`/`last_conforming`/`conformance`/`conformance_of`/`install_hooks`/`push`/`pull`/
+  `diff_working`/`analyze_rev`/`analyze_staged`, `CommitOutcome`/`MergeReport`, y las variantes
+  `Vcs`/`NoVcs`/`RepoBusy` de `WorkspaceError` con su `From<VcsError>`. Fuera de `core::types`:
+  `Sha`/`Author`/`CommitRow`/`CommitConformance`/`RepoState`/`Branch`/`SyncKind`/`SyncOutcome` y
+  `CoreError::InvalidSha`. Store: tabla `commit_conformance` (DDL, probe, accesores) fuera y
+  **`USER_VERSION` 1 → 2** (una cache v0.2 se detecta antigua y se reconstruye limpia). `identity`
+  fuera de `Config`/`WorkspaceConfig`. **Conservado** `workspace/src/gitignore.rs` (texto plano).
+  Tests: `abre_sin_repo_git`, `cache_v2_se_reconstruye`.
+- ✅ **E15-H02** — Generadores **borrados**: `core::generate`, `Bundle::gen_index`/`gen_tag_indexes`,
+  `Workspace::generate_index`/`generate_tags`, subcomandos `index`/`tags` de la CLI y el **exit code
+  4** (drift), y la auto-regeneración de E13-H11 dentro de `apply_transaction` (el apply publica
+  exactamente el resultado del change set). `Mutation` se conserva (motor transaccional). Tests:
+  `help_sin_generadores`, `index_es_uso`, `apply_no_regenera_indices` (sustituye a `regen.rs`).
+- ✅ **E15-H03** — `init`/`export`/`import` **borrados** de la CLI (clap + dispatch), con
+  `Bundle::export_zip`, `CoreError::Export`, la dependencia `zip` (workspace, core y cli) y
+  `crates/lodestar-cli/src/bundle_io.rs` entero (quedó sin consumidores: `check` va por `App` y
+  `reindex` por `Workspace`). La CLI queda en `check` + `reindex`. Tests:
+  `help_solo_check_y_reindex`, `init_es_uso`.
+- ✅ **E15-H04** — Prototipo retirado como spec: `crates/lodestar-core/tests/differential.rs`
+  borrado y el CI sin node/`npm ci`. `CLAUDE.md`, `requirements/README.md` y `docs/WORKFLOWS.md`
+  declaran ahora `docs/REFACTOR_PHASE_2.md` + `ARCHITECTURE.md §20` como spec de comportamiento y
+  `prototype/` como referencia histórica de v0.2.x (el directorio **se conserva**). El job
+  `core-purity` añade `zip` a la lista prohibida y un guard nuevo verifica que
+  `cargo tree --workspace` no muestre `git2`/`lodestar-vcs`/`zip`.

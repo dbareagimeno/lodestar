@@ -2,12 +2,12 @@
 //! `<root>/.lodestar/config.yaml` (nueva, `ARCHITECTURE.md §19.4`, `DECISIONES.md §0` D4/D5).
 //!
 //! Ambas son aditivas y con defaults seguros: un bundle sin fichero de config se comporta como
-//! hasta ahora (solo `Err` bloquea; identidad por defecto; todo el bundle escribible). Los
-//! ficheros se versionan con el bundle (no son cache).
+//! hasta ahora (solo `Err` bloquea; todo el bundle escribible). Los ficheros se versionan con el
+//! bundle (no son cache).
 
 use std::path::Path;
 
-use lodestar_core::types::{Analysis, Author, RelPath};
+use lodestar_core::types::{Analysis, RelPath};
 use serde::Deserialize;
 
 /// Nombre del fichero de configuración por-bundle.
@@ -19,8 +19,6 @@ pub const CONFIG_FILE: &str = "lodestar.toml";
 pub struct Config {
     /// Puerta de conformidad (qué severidades bloquean).
     pub gate: GateConfig,
-    /// Identidad para autor/committer de los commits (override del defecto).
-    pub identity: Option<IdentityConfig>,
 }
 
 /// Puerta de conformidad. Por defecto solo `Err` bloquea (`§4.1`): `block_warnings = false`.
@@ -29,13 +27,6 @@ pub struct Config {
 pub struct GateConfig {
     /// Si `true`, los avisos (`Warn`) también hacen fallar la puerta (además de `Err`).
     pub block_warnings: bool,
-}
-
-/// Identidad de commits configurada.
-#[derive(Debug, Clone, Deserialize, PartialEq)]
-pub struct IdentityConfig {
-    pub name: String,
-    pub email: String,
 }
 
 impl Config {
@@ -51,14 +42,6 @@ impl Config {
     /// `true` si la puerta debe fallar para este análisis según la strictness configurada.
     pub fn gate_blocked(&self, a: &Analysis) -> bool {
         a.hard_fail > 0 || (self.gate.block_warnings && a.warn_count > 0)
-    }
-
-    /// La identidad configurada como `Author`, si la hay.
-    pub fn author(&self) -> Option<Author> {
-        self.identity.as_ref().map(|i| Author {
-            name: i.name.clone(),
-            email: i.email.clone(),
-        })
     }
 }
 
@@ -84,10 +67,6 @@ pub struct WorkspaceConfig {
     pub gate: GateSection,
     /// Retención del histórico de recibos transaccionales (E13; solo config aquí, sin mecánica).
     pub transactions: TransactionsSection,
-    /// Identidad de commits — sección **dormida**: git queda fuera de la superficie headless
-    /// (`ARCHITECTURE.md §19.1`); se conserva por si el vcs vuelve a exponerse, pero
-    /// `WorkspaceConfig` no la usa hoy (a diferencia de `Config::author`).
-    pub identity: Option<IdentityConfig>,
 }
 
 /// Raíces de escritura/lectura del bundle (`ARCHITECTURE.md §19.4`).

@@ -107,9 +107,7 @@ pub struct ResourceLink {
 /// `PermissionDenied`: un intento de escapar del bundle es semánticamente un permiso denegado, no
 /// un error de esquema. El resto son mapeos razonables a falta de que E12/E13 los produzcan en
 /// flujos reales (fuera de alcance de esta historia):
-/// - `InvalidSha` → `InvalidSchema` (formato de entrada inválido).
 /// - `SizeGuardExceeded` → `ResultTooLarge` (guarda de tamaño excedida en una operación).
-/// - `Export` → `InternalIoError` (fallo de IO/serialización al exportar).
 /// - `ReplaceTextMismatch` → `InvalidSchema` (precondición de `replace_text` incumplida, E12-H05).
 /// - `NormalizeTargetNotFound` → `ConceptNotFound` (path/sección objetivo inexistente, E12-H05).
 /// - `InboundLinksExist` → `InboundLinksExist` (borrar `reject` con entrantes, E12-H06).
@@ -121,9 +119,7 @@ pub struct ResourceLink {
 pub fn error_code(err: &CoreError) -> ErrorCode {
     match err {
         CoreError::InvalidRelPath(_) => ErrorCode::PermissionDenied,
-        CoreError::InvalidSha(_) => ErrorCode::InvalidSchema,
         CoreError::SizeGuardExceeded(_) => ErrorCode::ResultTooLarge,
-        CoreError::Export(_) => ErrorCode::InternalIoError,
         CoreError::ReplaceTextMismatch(_, _) => ErrorCode::InvalidSchema,
         CoreError::NormalizeTargetNotFound(_) => ErrorCode::ConceptNotFound,
         CoreError::InboundLinksExist(_) => ErrorCode::InboundLinksExist,
@@ -142,12 +138,8 @@ pub fn error_code(err: &CoreError) -> ErrorCode {
 /// (`error.rs` de `lodestar-workspace`), así que aquí no se puede recuperar su variante original
 /// para reusar [`error_code`] — se documenta como limitación conocida, a resolver si una historia
 /// futura decide preservar la variante en vez de aplanarla a texto. Mapeos:
-/// - `Core`/`Store`/`Io`/`NoVcs`/`NoCache` → `InternalIoError`: fallos de infraestructura/IO o
+/// - `Core`/`Store`/`Io`/`NoCache` → `InternalIoError`: fallos de infraestructura/IO o
 ///   precondiciones internas sin un código más específico todavía en el catálogo de 16.
-/// - `Vcs` → `WriteConflict`: el caso más común de un fallo de git durante una operación de la
-///   fachada es un estado de escritura en conflicto (aproximación documentada; git puede fallar
-///   por otras razones, p. ej. red, pero el catálogo actual no distingue más).
-/// - `RepoBusy` (merge/rebase en curso) → `WriteConflict`: literalmente un conflicto de escritura.
 /// - `PermissionDenied` (E11-H04: escritura bajo un `referenceRoot`, o fuera de `writableRoots`) →
 ///   `ErrorCode::PermissionDenied`, mapeo directo por nombre (mismo caso que `error_code` con
 ///   `CoreError::InvalidRelPath`).
@@ -156,12 +148,9 @@ pub fn error_code(err: &CoreError) -> ErrorCode {
 pub fn workspace_error_code(err: &WorkspaceError) -> ErrorCode {
     match err {
         WorkspaceError::Core(_) => ErrorCode::InternalIoError,
-        WorkspaceError::Vcs(_) => ErrorCode::WriteConflict,
         WorkspaceError::Io(_) => ErrorCode::InternalIoError,
-        WorkspaceError::NoVcs => ErrorCode::InternalIoError,
         WorkspaceError::NoCache => ErrorCode::InternalIoError,
         WorkspaceError::Store(_) => ErrorCode::InternalIoError,
-        WorkspaceError::RepoBusy => ErrorCode::WriteConflict,
         WorkspaceError::PermissionDenied(_) => ErrorCode::PermissionDenied,
         WorkspaceError::NonconformantResult(_) => ErrorCode::NonconformantResult,
         WorkspaceError::WriteConflict(_) => ErrorCode::WriteConflict,

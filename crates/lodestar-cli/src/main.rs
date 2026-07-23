@@ -3,14 +3,14 @@
 //! Cada subcomando resuelve el root → construye el `Bundle` (efímero, sobre el core) → serializa.
 //! **Cero lógica OKF aquí**: toda la semántica vive en `lodestar-core`.
 //!
-//! Exit codes (congelados): `0` conforme · `1` hard-fail · `2` uso · `3` runtime/IO · `4` drift de generadores.
+//! Exit codes (congelados): `0` conforme · `1` hard-fail · `2` uso · `3` runtime/IO. El `4` (drift
+//! de generadores) se retiró con los generadores en E15-H02: sin `index`/`tags` no hay drift.
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 
-mod bundle_io;
 mod commands;
 mod sarif;
 
@@ -27,11 +27,9 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Inicializa un bundle nuevo (index raíz + `.gitignore`).
-    Init { dir: Option<PathBuf> },
     /// La puerta de CI: ¿es conforme el bundle? (exit 0/1). Juzga siempre el **working tree**
-    /// (scope workspace) — el `vcs`/git queda fuera de la superficie de la CLI (E9-H02); `--staged`,
-    /// `--rev` y `--range` quedan diferidos con el crate `vcs` dormido.
+    /// (scope workspace) — git salió de la superficie en E9-H02 y del repo en E15-H01, así que no
+    /// hay `--staged`/`--rev`/`--range` que valgan.
     Check {
         /// Salida JSON (el `Analysis` serializado).
         #[arg(long, conflicts_with = "sarif")]
@@ -40,27 +38,8 @@ enum Command {
         #[arg(long)]
         sarif: bool,
     },
-    /// Genera el `index.md` de un directorio (o `--check` para detectar drift, exit 4).
-    Index {
-        dir: Option<String>,
-        #[arg(long)]
-        check: bool,
-    },
-    /// Genera/purga los índices de tags (o `--check`, exit 4).
-    Tags {
-        #[arg(long)]
-        check: bool,
-    },
-    /// Exporta el bundle a un `.zip`.
-    Export {
-        #[arg(long)]
-        out: Option<PathBuf>,
-    },
     /// Reconstruye la cache `.lodestar/index.db` desde los `.md`.
     Reindex,
-    /// Importa un bundle (zip exportado del prototipo o directorio).
-    /// Requerido en clap: sin argumento es error de USO (exit 2), no de runtime.
-    Import { source: PathBuf },
 }
 
 /// Resuelve el root del bundle: `--path`, o sube desde el cwd buscando `index.md`/`.lodestar`.
@@ -85,21 +64,8 @@ fn main() -> ExitCode {
     let cli = Cli::parse();
     let root = resolve_root(cli.path.as_deref());
     let result = match cli.command {
-        // `init` sin argumento inicializa el CWD (o `--path`), NUNCA el resultado de
-        // `resolve_root`: subiría hasta un bundle ancestro e inicializaría el padre.
-        Command::Init { dir } => {
-            let target = dir
-                .or_else(|| cli.path.clone())
-                .or_else(|| std::env::current_dir().ok())
-                .unwrap_or_else(|| PathBuf::from("."));
-            commands::init(target)
-        }
         Command::Check { json, sarif } => commands::check(&root, json, sarif),
-        Command::Index { dir, check } => commands::index(&root, dir.unwrap_or_default(), check),
-        Command::Tags { check } => commands::tags(&root, check),
-        Command::Export { out } => commands::export(&root, out),
         Command::Reindex => commands::reindex(&root),
-        Command::Import { source } => commands::import(&root, source),
     };
     match result {
         Ok(code) => code,

@@ -3,7 +3,6 @@
 use std::collections::BTreeMap;
 
 use lodestar_core::diff::{self, ChangeKind, MessageHint};
-use lodestar_core::generate;
 use lodestar_core::model;
 use lodestar_core::types::*;
 use lodestar_core::Bundle;
@@ -343,54 +342,6 @@ fn query_operadores() {
     assert_eq!(query_set(&b, "beta"), vec!["b.md"]);
 }
 
-// --- E1-H14: generadores ----------------------------------------------------
-
-#[test]
-fn gen_index_determinista() {
-    let b = Bundle::from_files(fm(&[(
-        "alfa.md",
-        "---\ntype: Concept\ntitle: Alfa\ndescription: d\n---\n\n# H\n",
-    )]));
-    let m1 = b.gen_index("");
-    let m2 = b.gen_index("");
-    assert_eq!(m1, m2);
-    let idx = RelPath::new("index.md").unwrap();
-    assert!(m1.writes[&idx].contains("okf_version"));
-    assert!(m1.writes[&idx].contains("[Alfa](alfa.md)"));
-}
-
-#[test]
-fn gen_tag_indexes_purga_obsoletos() {
-    let b = Bundle::from_files(fm(&[
-        (
-            "a.md",
-            "---\ntype: N\ntitle: A\ndescription: d\ntags:\n  - rojo\n---\n\n# H\n",
-        ),
-        ("tags/viejo/index.md", "# viejo\n"),
-    ]));
-    let m = b.gen_tag_indexes();
-    let viejo = RelPath::new("tags/viejo/index.md").unwrap();
-    assert!(m.deletes.contains(&viejo), "el tag obsoleto se elimina");
-    assert!(m.writes.keys().any(|k| k.as_str() == "tags/index.md"));
-}
-
-// --- E1-H16: export ---------------------------------------------------------
-
-#[test]
-fn export_zip_round_trip() {
-    let files = fm(&[("a.md", "contenido a"), ("dir/b.md", "contenido b")]);
-    let b = Bundle::from_files(files.clone());
-    let mut buf = std::io::Cursor::new(Vec::new());
-    b.export_zip(&mut buf).unwrap();
-    let mut archive = zip::ZipArchive::new(buf).unwrap();
-    assert_eq!(archive.len(), 2);
-    let mut names: Vec<String> = (0..archive.len())
-        .map(|i| archive.by_index(i).unwrap().name().to_string())
-        .collect();
-    names.sort();
-    assert_eq!(names, vec!["a.md", "dir/b.md"]);
-}
-
 // --- E1-H17: diff -----------------------------------------------------------
 
 #[test]
@@ -556,12 +507,6 @@ fn merge_frontmatter_null_borra() {
     assert!(outcome.raw.contains("title: Nuevo"));
 }
 
-#[test]
-fn generadores_consistentes_via_mutation() {
-    let _ = generate::slugify_tag("Hólà Múndo/x");
-    assert_eq!(generate::slugify_tag("Hólà Múndo"), "hólà-múndo");
-}
-
 // --- Regresiones de paridad con el prototipo (revisión profunda) -------------
 
 #[test]
@@ -615,34 +560,6 @@ fn title_from_path_boundaries_como_js() {
     assert_eq!(model::title_from_path("año.md"), "AñO");
     assert_eq!(model::title_from_path("foo.bar.md"), "Foo.Bar");
     assert_eq!(model::title_from_path("mi-nota_2.md"), "Mi Nota 2");
-}
-
-#[test]
-fn tags_ordenados_con_locale_compare() {
-    // localeCompare: "alpha" < "árbol" < "Beta" (no orden de bytes, que pondría Beta primero).
-    let b = Bundle::from_files(fm(&[(
-        "x.md",
-        "---\ntype: N\ntitle: X\ndescription: d\ntags: [Beta, alpha, \u{e1}rbol]\n---\n\n# H\n",
-    )]));
-    let m = b.gen_tag_indexes();
-    let root = m
-        .writes
-        .get(&RelPath::new("tags/index.md").unwrap())
-        .unwrap();
-    let pos = |s: &str| root.find(s).unwrap_or(usize::MAX);
-    assert!(pos("[alpha]") < pos("[\u{e1}rbol]"), "root: {root}");
-    assert!(pos("[\u{e1}rbol]") < pos("[Beta]"), "root: {root}");
-}
-
-#[test]
-fn gen_index_type_vacio_cae_a_concept() {
-    let b = Bundle::from_files(fm(&[(
-        "e.md",
-        "---\ntype: \"\"\ntitle: E\ndescription: d\n---\n\n# H\n",
-    )]));
-    let m = b.gen_index("");
-    let idx = m.writes.get(&RelPath::new("index.md").unwrap()).unwrap();
-    assert!(idx.contains("# Concept\n"), "idx: {idx}");
 }
 
 #[test]

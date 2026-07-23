@@ -310,55 +310,6 @@ impl Store {
         synth::search_substring(&conn, needle)
     }
 
-    /// Conformidad de un commit cacheada por `tree_oid` (`§10` fila 20). `None` si no está cacheada.
-    /// El `tree_oid` es inmutable, así que la entrada nunca caduca (sobrevive a rebuilds).
-    pub fn get_conformance(
-        &self,
-        tree_oid: &str,
-    ) -> Result<Option<lodestar_core::types::CommitConformance>, StoreError> {
-        let conn = self.conn.lock().unwrap();
-        let row = conn
-            .query_row(
-                "SELECT hard_fail, warn_count, conform FROM commit_conformance WHERE tree_oid = ?1",
-                [tree_oid],
-                |r| {
-                    Ok((
-                        r.get::<_, i64>(0)?,
-                        r.get::<_, i64>(1)?,
-                        r.get::<_, i64>(2)?,
-                    ))
-                },
-            )
-            .ok();
-        Ok(
-            row.map(|(hf, wc, cf)| lodestar_core::types::CommitConformance {
-                hard_fail: hf as usize,
-                warn_count: wc as usize,
-                conform: cf != 0,
-            }),
-        )
-    }
-
-    /// Guarda la conformidad de un `tree_oid` en la cache (idempotente).
-    pub fn put_conformance(
-        &self,
-        tree_oid: &str,
-        c: &lodestar_core::types::CommitConformance,
-    ) -> Result<(), StoreError> {
-        let conn = self.conn.lock().unwrap();
-        conn.execute(
-            "INSERT OR REPLACE INTO commit_conformance (tree_oid, hard_fail, warn_count, conform)
-             VALUES (?1, ?2, ?3, ?4)",
-            rusqlite::params![
-                tree_oid,
-                c.hard_fail as i64,
-                c.warn_count as i64,
-                c.conform as i64
-            ],
-        )?;
-        Ok(())
-    }
-
     /// Un `Bundle` del core servido desde la cache (vía el trait [`ConceptStore`]).
     /// Su análisis es idéntico al de `Bundle::from_files` sobre el mismo corpus.
     pub fn bundle(&self) -> Bundle {

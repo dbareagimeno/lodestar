@@ -82,105 +82,10 @@ fn check_sarif_es_valido() {
         .any(|r| r["ruleId"] == "OKF-FM01"));
 }
 
-#[test]
-fn index_drift_exit_4_luego_0() {
-    let dir = temp_dir("drift");
-    write(
-        &dir,
-        "a.md",
-        "---\ntype: Concept\ntitle: A\ndescription: d\n---\n\n# H\n",
-    );
-    // Sin index.md generado → drift.
-    let drift = bin()
-        .arg("--path")
-        .arg(&dir)
-        .args(["index", "--check"])
-        .status()
-        .unwrap();
-    assert_eq!(drift.code(), Some(4));
-    // Genera y vuelve a comprobar → 0.
-    let gen = bin().arg("--path").arg(&dir).arg("index").status().unwrap();
-    assert_eq!(gen.code(), Some(0));
-    let ok = bin()
-        .arg("--path")
-        .arg(&dir)
-        .args(["index", "--check"])
-        .status()
-        .unwrap();
-    assert_eq!(ok.code(), Some(0));
-}
-
-#[test]
-fn export_genera_zip() {
-    let dir = temp_dir("export");
-    write(
-        &dir,
-        "a.md",
-        "---\ntype: Nota\ntitle: A\ndescription: d\n---\n\n# H\n",
-    );
-    let out = dir.join("salida.zip");
-    let status = bin()
-        .arg("--path")
-        .arg(&dir)
-        .args(["export", "--out"])
-        .arg(&out)
-        .status()
-        .unwrap();
-    assert_eq!(status.code(), Some(0));
-    assert!(out.is_file());
-}
-
-#[test]
-fn init_scaffold() {
-    let dir = temp_dir("init");
-    let target = dir.join("nuevo");
-    let status = bin().arg("init").arg(&target).status().unwrap();
-    assert_eq!(status.code(), Some(0));
-    assert!(target.join("index.md").is_file());
-    assert!(target.join(".gitignore").is_file());
-}
-
-// `check_staged_sin_git_exit_3` y `check_rev_head_tras_init` se retiran en E9-H02: probaban
-// `check --staged`/`--rev`, retirados de la superficie de la CLI (el crate `vcs` queda dormido).
-// El contrato nuevo lo cubren `check_rev_es_uso` y `check_working_tree_conforme` más abajo.
-
-#[test]
-fn import_desde_zip_del_prototipo() {
-    // Exporta un bundle a .zip y lo reimporta en un directorio nuevo (roundtrip).
-    let dir = temp_dir("import-src");
-    write(
-        &dir,
-        "a.md",
-        "---\ntype: Nota\ntitle: A\ndescription: d\n---\n\n# H\n",
-    );
-    let zip = dir.join("bundle.zip");
-    assert_eq!(
-        bin()
-            .arg("--path")
-            .arg(&dir)
-            .args(["export", "--out"])
-            .arg(&zip)
-            .status()
-            .unwrap()
-            .code(),
-        Some(0)
-    );
-    let dest = temp_dir("import-dest");
-    let status = bin()
-        .arg("--path")
-        .arg(&dest)
-        .arg("import")
-        .arg(&zip)
-        .status()
-        .unwrap();
-    assert_eq!(status.code(), Some(0));
-    assert!(dest.join("a.md").is_file());
-}
-
 // --- E9-H02: retirar los subcomandos git de la CLI (conservando `check`) ---
 
 /// E9-H02 `help_sin_subcomandos_git`: **Dado** `lodestar --help`, **Entonces** NO aparecen los 8
-/// subcomandos git. Retiramos exposición, no capacidad (el crate `vcs` queda dormido).
+/// subcomandos git. E9-H02 retiró la exposición; E15-H01 borró también el crate `vcs`.
 #[test]
 fn help_sin_subcomandos_git() {
     let out = bin().arg("--help").output().unwrap();
@@ -205,7 +110,7 @@ fn help_sin_subcomandos_git() {
 }
 
 /// E9-H02 `check_rev_es_uso`: **Dado** `lodestar check --rev HEAD`, **Entonces** exit `2` (uso:
-/// flag retirado con el crate `vcs` dormido — D-check). No juzga ningún árbol git.
+/// flag retirado — D-check). No juzga ningún árbol git (que ya no existe: E15-H01).
 #[test]
 fn check_rev_es_uso() {
     let dir = temp_dir("check-rev-uso");
@@ -455,33 +360,6 @@ fn check_json_lista_schema() {
         "el JSON debe listar el diagnóstico SCHEMA-REQFIELD en `perFile`, no solo los checks OKF; \
          perFile = {per_file:#?}"
     );
-}
-
-#[test]
-fn import_rechaza_zip_slip() {
-    // Un zip con una ruta con `..` no debe escribir fuera del bundle (chokepoint RelPath).
-    let dir = temp_dir("zipslip");
-    let zip_path = dir.join("evil.zip");
-    {
-        let f = std::fs::File::create(&zip_path).unwrap();
-        let mut zw = zip::ZipWriter::new(f);
-        use zip::write::SimpleFileOptions;
-        zw.start_file("../evil.md", SimpleFileOptions::default())
-            .unwrap();
-        std::io::Write::write_all(&mut zw, b"---\ntype: X\n---\n\n# H\n").unwrap();
-        zw.finish().unwrap();
-    }
-    let dest = temp_dir("zipslip-dest");
-    let status = bin()
-        .arg("--path")
-        .arg(&dest)
-        .arg("import")
-        .arg(&zip_path)
-        .status()
-        .unwrap();
-    assert_eq!(status.code(), Some(0)); // no falla, pero...
-                                        // ...la ruta insegura se ignora: no se escribe fuera del destino.
-    assert!(!dest.parent().unwrap().join("evil.md").exists());
 }
 
 // ---------------------------------------------------------------------------
