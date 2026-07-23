@@ -137,7 +137,7 @@ tools:
     historia: E10-H10
     params:
       - { nombre: ref, tipo: "object (ConceptRef)", requerido: true, semantica: "{ path: RelPath }, identidad del concepto" }
-      - { nombre: include, tipo: "array<string>", requerido: false, semantica: "campos a poblar: frontmatter/body/revision/outgoingLinks/backlinks/diagnostics/externalReferences; un campo no pedido queda ausente (None), nunca un valor por defecto disfrazado" }
+      - { nombre: include, tipo: "array<string>", requerido: false, semantica: "campos a poblar: frontmatter/body/revision/outgoingLinks/backlinks/diagnostics/externalReferences; un campo no pedido queda ausente (None), nunca un valor por defecto disfrazado. Desde E16-H01 «frontmatter» es el YAML ARBITRARIO del documento (objeto libre con las claves del usuario, tipos YAML reales: numero/booleano/null/lista/objeto), NO la proyeccion de 7 campos conocidos del extinto core::types::Frontmatter; un documento sin bloque devuelve {}" }
       - { nombre: sections, tipo: "array<array<string>>", requerido: false, semantica: "headingPaths para acotar «body» (solo si «body» ∈ include), p. ej. [[\"Security\",\"Token rotation\"]]" }
     retorno: "json { concept: ConceptView } — envoltorio de un solo campo, NO ConceptView a secas (lodestar_app::KnowledgeGetResponse describe esta forma exacta)"
     output_schema: "sí — schemars::schema_for!(KnowledgeGetResponse), vía lodestar_app::schemas::knowledge_get_schema()"

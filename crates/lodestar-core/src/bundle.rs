@@ -9,8 +9,8 @@ use regex::Regex;
 use crate::conform::{self, ConformCtx};
 use crate::model::{self, Parsed};
 use crate::types::{
-    Analysis, Backlinks, Check, ConceptSummary, Direction, Frontmatter, FrontmatterPatch,
-    GraphModel, GraphNode, LinkRef, Neighborhood, RelPath, Severity, WriteOutcome,
+    Analysis, Backlinks, Check, ConceptSummary, Direction, FrontmatterPatch, GraphModel, GraphNode,
+    LinkRef, Neighborhood, ParsedFrontmatter, RelPath, Severity, WriteOutcome,
 };
 
 static OKF_VER_VAL_RE: Lazy<Regex> =
@@ -154,9 +154,9 @@ impl Bundle {
             .iter()
             .map(|p| {
                 let parsed = &self.parsed[p];
-                let fm = parsed.fm.as_ref();
+                let fm = parsed.frontmatter.as_ref();
                 let title = fm
-                    .and_then(|f| f.title.clone())
+                    .and_then(|f| f.get_text("title"))
                     .filter(|s| !s.is_empty())
                     .unwrap_or_else(|| model::title_from_path(p.as_str()));
                 let invalid = a
@@ -167,8 +167,8 @@ impl Bundle {
                 ConceptSummary {
                     path: p.clone(),
                     title,
-                    r#type: fm.and_then(|f| f.r#type.clone()),
-                    status: fm.and_then(|f| f.status.clone()),
+                    r#type: fm.and_then(|f| f.get_text("type")),
+                    status: fm.and_then(|f| f.get_text("status")),
                     orphan: orphan_set.contains(p),
                     invalid,
                 }
@@ -298,7 +298,7 @@ impl Bundle {
     // --- escritura validada (lógica OKF; la workspace aplica) --------------
 
     /// Valida un draft (contenido sin guardar) reutilizando el pipeline de análisis.
-    pub fn validate_draft(&self, fm: &Frontmatter, body: &str) -> Vec<Check> {
+    pub fn validate_draft(&self, fm: Option<&ParsedFrontmatter>, body: &str) -> Vec<Check> {
         let raw = model::build_raw(fm, body);
         let draft_path = RelPath::new("__draft__.md").expect("path constante válido");
         let mut files = self.files.clone();
@@ -330,28 +330,33 @@ impl Bundle {
         timestamp: Option<&str>,
         allow_nonconformant: bool,
     ) -> WriteOutcome {
-        let mut fm = Frontmatter {
-            r#type: Some(ty.to_string()),
-            status: Some("draft".to_string()),
-            ..Default::default()
-        };
         let resolved_title = title
             .map(|s| s.to_string())
             .unwrap_or_else(|| model::title_from_path(p.as_str()));
-        // Heading por defecto (construido antes de mover `resolved_title` a `fm.title`).
         let default_body = if ty.is_empty() {
             format!("# {resolved_title}\n")
         } else {
             format!("# {ty} - {resolved_title}\n")
         };
-        fm.title = Some(resolved_title);
-        fm.timestamp = timestamp.map(|s| serde_yaml::Value::String(s.to_string()));
+        // Orden de inserción = orden en el `.md` (el `Mapping` de serde_yaml preserva el de
+        // aparición): `type`, `title`, `timestamp` y `status`, como hacía la canonicalización OKF.
+        let mut map = serde_yaml::Mapping::new();
+        let mut set = |k: &str, v: serde_yaml::Value| {
+            map.insert(serde_yaml::Value::String(k.to_string()), v);
+        };
+        set("type", serde_yaml::Value::String(ty.to_string()));
+        set("title", serde_yaml::Value::String(resolved_title));
+        if let Some(ts) = timestamp {
+            set("timestamp", serde_yaml::Value::String(ts.to_string()));
+        }
+        set("status", serde_yaml::Value::String("draft".to_string()));
+        let fm = ParsedFrontmatter::from_mapping(map);
         let body = if body.trim().is_empty() {
             &default_body
         } else {
             body
         };
-        let raw = model::build_raw(&fm, body);
+        let raw = model::build_raw(Some(&fm), body);
         self.outcome_for_write(p, raw, allow_nonconformant)
     }
 
@@ -369,10 +374,14 @@ impl Bundle {
     /// Aplica un patch de frontmatter (merge-patch RFC 7386: `Some` escribe, `None` borra).
     pub fn merge_frontmatter(&self, p: &RelPath, patch: FrontmatterPatch) -> WriteOutcome {
         let parsed = self.parsed.get(p);
-        let mut fm = parsed.and_then(|x| x.fm.clone()).unwrap_or_default();
+        let mut map = parsed
+            .and_then(|x| x.frontmatter.as_ref())
+            .map(|fm| fm.mapping().clone())
+            .unwrap_or_default();
         let body = parsed.map(|x| x.body.clone()).unwrap_or_default();
-        apply_patch(&mut fm, patch);
-        let raw = model::build_raw(&fm, &body);
+        apply_patch(&mut map, patch);
+        let fm = ParsedFrontmatter::from_mapping(map);
+        let raw = model::build_raw(Some(&fm), &body);
         self.outcome_for_write(p, raw, false)
     }
 
@@ -415,56 +424,27 @@ impl Bundle {
     }
 }
 
-/// Aplica un `FrontmatterPatch` sobre un `Frontmatter` (conoce los KNOWN_FM tipados + extras).
+/// Aplica un `FrontmatterPatch` (merge-patch RFC 7386) sobre el mapa YAML de un frontmatter:
+/// `Some(v)` escribe/reemplaza el valor **tal cual** (sin coercionarlo a string), `None` borra la
+/// clave, y una clave ausente del patch no se toca.
+///
+/// Escribir sobre una clave existente conserva su posición y borrar usa `shift_remove` (no
+/// `swap_remove`): el orden de aparición del resto de claves queda intacto.
 ///
 /// `pub(crate)`: además de [`Bundle::merge_frontmatter`], lo reutiliza `crate::plan`
 /// (E12-H08, `apply_normalized_ops`) para materializar en memoria un `Create`/`PatchFrontmatter`
 /// sobre el `FileMap` hipotético — una sola lógica de merge-patch en todo el core (invariante #3
 /// de `CLAUDE.md`), nunca reimplementada.
-pub(crate) fn apply_patch(fm: &mut Frontmatter, patch: FrontmatterPatch) {
-    use serde_yaml::Value as Yaml;
+pub(crate) fn apply_patch(map: &mut serde_yaml::Mapping, patch: FrontmatterPatch) {
     for (key, val) in patch.0 {
-        let as_string = |v: &Yaml| match v {
-            Yaml::String(s) => s.clone(),
-            other => serde_yaml::to_string(other)
-                .unwrap_or_default()
-                .trim()
-                .to_string(),
-        };
-        // Escribir o borrar un known string invalida su marca de null explícito.
-        let clear_null = |fm: &mut Frontmatter, k: &str| fm.known_null.retain(|n| n != k);
-        match key.as_str() {
-            "type" => {
-                clear_null(fm, "type");
-                fm.r#type = val.as_ref().map(as_string);
+        let key = serde_yaml::Value::String(key);
+        match val {
+            Some(v) => {
+                map.insert(key, v);
             }
-            "title" => {
-                clear_null(fm, "title");
-                fm.title = val.as_ref().map(as_string);
+            None => {
+                map.shift_remove(&key);
             }
-            "description" => {
-                clear_null(fm, "description");
-                fm.description = val.as_ref().map(as_string);
-            }
-            "resource" => {
-                clear_null(fm, "resource");
-                fm.resource = val.as_ref().map(as_string);
-            }
-            "status" => {
-                clear_null(fm, "status");
-                fm.status = val.as_ref().map(as_string);
-            }
-            "tags" => fm.tags = val,
-            "timestamp" => fm.timestamp = val,
-            _ => match val {
-                Some(v) => {
-                    fm.extra.insert(key, v);
-                }
-                None => {
-                    // `shift_remove` (no `swap_remove`) para conservar el orden de las claves restantes.
-                    fm.extra.shift_remove(&key);
-                }
-            },
         }
     }
 }

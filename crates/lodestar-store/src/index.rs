@@ -47,8 +47,8 @@ fn level_str(level: Severity) -> &'static str {
 }
 
 /// Extrae las etiquetas (solo si `tags` es una lista; escalares → string).
-fn extract_tags(fm: &lodestar_core::types::Frontmatter) -> Vec<String> {
-    match &fm.tags {
+fn extract_tags(fm: &lodestar_core::types::ParsedFrontmatter) -> Vec<String> {
+    match fm.get_key("tags") {
         Some(serde_yaml::Value::Sequence(items)) => items
             .iter()
             .filter_map(|v| match v {
@@ -85,9 +85,11 @@ pub(crate) fn upsert_file(
 
     let parsed = model::parse_file(path.as_str(), raw);
     let kind = parsed.kind;
-    let fm = parsed.fm.clone().unwrap_or_default();
+    let fm = parsed.frontmatter.clone().unwrap_or_default();
     let hash = blake3::hash(raw.as_bytes());
-    let fm_json = serde_json::to_string(&fm).unwrap_or_else(|_| "{}".to_string());
+    // La cache materializa el frontmatter ARBITRARIO tal cual (E16-H01): el `value` YAML entero,
+    // no una proyección de campos conocidos.
+    let fm_json = serde_json::to_string(&fm.value).unwrap_or_else(|_| "{}".to_string());
     let p = path.as_str();
 
     tx.execute(
@@ -98,11 +100,11 @@ pub(crate) fn upsert_file(
         params![
             p,
             kind_str(kind),
-            fm.r#type,
-            fm.title,
-            fm.description,
-            fm.status,
-            fm.resource,
+            fm.get_text("type"),
+            fm.get_text("title"),
+            fm.get_text("description"),
+            fm.get_text("status"),
+            fm.get_text("resource"),
             fm_json,
             parsed.body,
             raw,
@@ -116,8 +118,8 @@ pub(crate) fn upsert_file(
         "INSERT INTO files_fts (path, title, description, body) VALUES (?1,?2,?3,?4)",
         params![
             p,
-            fm.title.clone().unwrap_or_default(),
-            fm.description.clone().unwrap_or_default(),
+            fm.get_text("title").unwrap_or_default(),
+            fm.get_text("description").unwrap_or_default(),
             parsed.body,
         ],
     )?;

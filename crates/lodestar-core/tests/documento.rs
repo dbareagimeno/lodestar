@@ -232,26 +232,33 @@ fn frontmatter_vacio_es_valido() {
 /// Frontmatter con los siete casos del criterio 3. Usa deliberadamente nombres de los antiguos
 /// `KNOWN_FM` (`type`, `status`, `title`, `description`) con valores NO string: son exactamente
 /// los que hoy pasan por `js_string` y pierden el tipo.
-const FM_TIPOS: &str = "---\n\
-type: 2\n\
-status: true\n\
-title: Autenticación\n\
-description:\n\
-priority: 2\n\
-owners:\n\
-  - platform\n\
-  - security\n\
-service:\n\
-  name: auth\n\
-  tier: critical\n\
-approvals:\n\
-  - who: ana\n\
-    ok: true\n\
-  - who: luis\n\
-    ok: false\n\
----\n\
-\n\
-# Autenticación\n";
+///
+/// **`concat!` a propósito, una línea YAML por literal.** NO usar la continuación de línea de Rust
+/// (`\` al final): se come el salto Y **toda la indentación** de la línea siguiente, con lo que las
+/// estructuras anidadas llegan aplanadas al parser (`  name: auth` → `name: auth`, clave hermana) y
+/// las listas de objetos ni siquiera son YAML válido. Aquí la indentación va DENTRO de las comillas.
+const FM_TIPOS: &str = concat!(
+    "---\n",
+    "type: 2\n",
+    "status: true\n",
+    "title: Autenticación\n",
+    "description:\n",
+    "priority: 2\n",
+    "owners:\n",
+    "  - platform\n",
+    "  - security\n",
+    "service:\n",
+    "  name: auth\n",
+    "  tier: critical\n",
+    "approvals:\n",
+    "  - who: ana\n",
+    "    ok: true\n",
+    "  - who: luis\n",
+    "    ok: false\n",
+    "---\n",
+    "\n",
+    "# Autenticación\n",
+);
 
 /// Criterio 3: string, número, booleano, `null`, lista, objeto anidado y lista de objetos
 /// conservan su **tipo YAML real**. Se asierta sobre el TIPO, nunca sobre el valor renderizado.
@@ -364,14 +371,18 @@ fn preserva_tipos_yaml() {
 /// Criterio 4: `service.tier` → `critical`; `service.ausente` → `None`.
 #[test]
 fn dot_notation() {
-    let raw = "---\n\
-service: {name: auth, tier: critical}\n\
-release:\n\
-  target:\n\
-    date: \"2026-07-23\"\n\
----\n\
-\n\
-# Servicio\n";
+    // `concat!` con una línea YAML por literal: la indentación va dentro de las comillas (ver la
+    // nota de `FM_TIPOS` sobre la continuación de línea de Rust).
+    let raw = concat!(
+        "---\n",
+        "service: {name: auth, tier: critical}\n",
+        "release:\n",
+        "  target:\n",
+        "    date: \"2026-07-23\"\n",
+        "---\n",
+        "\n",
+        "# Servicio\n",
+    );
     let parsed = model::parse_file("docs/servicio.md", raw);
     let pf = parsed
         .frontmatter
@@ -418,13 +429,15 @@ release:\n\
     // El `FieldPath` es una secuencia de segmentos, no un string con puntos: una clave YAML
     // PUEDE contener un punto y debe seguir siendo direccionable (lo necesitan el filtro JSON de
     // E19 y el catálogo de E20, que construyen paths sin pasar por la sintaxis textual).
-    let raw_punto = "---\n\
-\"service.tier\": literal\n\
-service:\n\
-  tier: anidado\n\
----\n\
-\n\
-# Punto\n";
+    let raw_punto = concat!(
+        "---\n",
+        "\"service.tier\": literal\n",
+        "service:\n",
+        "  tier: anidado\n",
+        "---\n",
+        "\n",
+        "# Punto\n",
+    );
     let con_punto = model::parse_file("docs/punto.md", raw_punto);
     let pf_punto = con_punto
         .frontmatter
@@ -465,21 +478,23 @@ service:\n\
 
 /// Frontmatter íntegramente compuesto por claves que Lodestar nunca ha visto, incluidos los tres
 /// valores que el `dump_frontmatter` actual descarta o filtra.
-const FM_DESCONOCIDAS: &str = "---\n\
-owners: [platform, security]\n\
-sla_minutes: 15\n\
-deprecated_field: null\n\
-nota_vacia: \"\"\n\
-sin_duenos: []\n\
-sonar.projectKey: lodestar\n\
-nested:\n\
-  vendor:\n\
-    id: 42\n\
----\n\
-\n\
-# Doc\n\
-\n\
-Cuerpo.\n";
+const FM_DESCONOCIDAS: &str = concat!(
+    "---\n",
+    "owners: [platform, security]\n",
+    "sla_minutes: 15\n",
+    "deprecated_field: null\n",
+    "nota_vacia: \"\"\n",
+    "sin_duenos: []\n",
+    "sonar.projectKey: lodestar\n",
+    "nested:\n",
+    "  vendor:\n",
+    "    id: 42\n",
+    "---\n",
+    "\n",
+    "# Doc\n",
+    "\n",
+    "Cuerpo.\n",
+);
 
 /// Criterio 5: un frontmatter con claves desconocidas sobrevive intacto a parse + serialize sin
 /// patch.

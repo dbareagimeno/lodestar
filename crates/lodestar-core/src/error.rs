@@ -14,6 +14,12 @@ pub enum CoreError {
     #[error("ruta relativa inválida: {0}")]
     InvalidRelPath(String),
 
+    /// Ruta a propiedad de frontmatter inválida (vacía, o con algún segmento vacío como en
+    /// `"service."`). La construye [`crate::types::FieldPath`] — es un dato de entrada del agente,
+    /// no un panic.
+    #[error("ruta de campo inválida: {0}")]
+    InvalidFieldPath(String),
+
     /// Al normalizar un `delete` con la política por defecto `reject` (E12-H06), el concepto a
     /// borrar todavía tiene enlaces entrantes. Lleva el path del concepto referenciado. Mapea a
     /// `ErrorCode::InboundLinksExist` (wire `"INBOUND_LINKS_EXIST"`).

@@ -59,15 +59,6 @@ pub(crate) fn validate_file(
 
     // Errores de frontmatter (early-return como el prototipo).
     match &parsed.fm_err {
-        Some(FmError::Missing) => {
-            out.push(Check::new(
-                Severity::Err,
-                CheckCode::OkfFm01,
-                "Falta el bloque de metadatos al inicio de la página.",
-                vec![path.clone()],
-            ));
-            return out;
-        }
         Some(FmError::Unclosed) => {
             out.push(Check::new(
                 Severity::Err,
@@ -89,13 +80,23 @@ pub(crate) fn validate_file(
         None => {}
     }
 
-    let fm = parsed.fm.clone().unwrap_or_default();
+    // OKF-FM01: sin bloque de frontmatter. El modelo ya NO lo trata como error de parseo
+    // (E16-H01: un documento sin frontmatter es válido); el check se deriva aquí de la ausencia,
+    // y desaparece del catálogo con E16-H05.
+    let Some(fm) = parsed.frontmatter.as_ref() else {
+        out.push(Check::new(
+            Severity::Err,
+            CheckCode::OkfFm01,
+            "Falta el bloque de metadatos al inicio de la página.",
+            vec![path.clone()],
+        ));
+        return out;
+    };
 
     // OKF-TYPE (única regla dura): falta `type` → err; presente → pass con el tipo.
     match fm
-        .r#type
-        .as_deref()
-        .map(str::trim)
+        .get_text("type")
+        .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
     {
         None => out.push(Check::new(
@@ -113,7 +114,7 @@ pub(crate) fn validate_file(
     }
 
     // REC-TITLE / REC-DESC (info).
-    if fm.title.as_deref().map(str::is_empty).unwrap_or(true) {
+    if fm.get_text("title").map(|s| s.is_empty()).unwrap_or(true) {
         out.push(Check::new(
             Severity::Info,
             CheckCode::RecTitle,
@@ -121,7 +122,11 @@ pub(crate) fn validate_file(
             vec![path.clone()],
         ));
     }
-    if fm.description.as_deref().map(str::is_empty).unwrap_or(true) {
+    if fm
+        .get_text("description")
+        .map(|s| s.is_empty())
+        .unwrap_or(true)
+    {
         out.push(Check::new(
             Severity::Info,
             CheckCode::RecDesc,
@@ -131,7 +136,7 @@ pub(crate) fn validate_file(
     }
 
     // FMT-TAGS (warn): tags presente pero no es lista.
-    if let Some(v) = &fm.tags {
+    if let Some(v) = fm.get_key("tags") {
         if yaml_truthy(v) && !matches!(v, Yaml::Sequence(_)) {
             out.push(Check::new(
                 Severity::Warn,
@@ -142,7 +147,7 @@ pub(crate) fn validate_file(
         }
     }
     // FMT-TS (warn): timestamp presente pero no ISO.
-    if let Some(v) = &fm.timestamp {
+    if let Some(v) = fm.get_key("timestamp") {
         if yaml_truthy(v) && !model::is_iso(v) {
             out.push(Check::new(
                 Severity::Warn,
@@ -220,11 +225,11 @@ pub(crate) fn validate_file(
 
 fn validate_index(path: &RelPath, raw: &str, out: &mut Vec<Check>) {
     let sf = model::split_front(raw);
-    if let Some(fm_text) = sf.fm_text {
+    if let Some(fm_text) = sf.fm_text(raw) {
         if !fm_text.trim().is_empty() {
             let is_root = path.dir().is_empty();
             let single_line = fm_text.trim().lines().count() == 1;
-            let ok_fm = is_root && OKF_VER_RE.is_match(&fm_text) && single_line;
+            let ok_fm = is_root && OKF_VER_RE.is_match(fm_text) && single_line;
             if !ok_fm {
                 out.push(Check::new(
                     Severity::Warn,

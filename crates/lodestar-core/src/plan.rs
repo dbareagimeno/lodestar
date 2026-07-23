@@ -50,9 +50,9 @@ use regex::{Captures, Regex};
 use serde::{Deserialize, Serialize};
 
 use crate::types::{
-    Check, CheckCode, EditSectionMode, FileMap, Frontmatter, FrontmatterPatch, InboundLinksPolicy,
-    NormalizedOperation, RelPath, RiskAssessment, RiskLevel, SemanticDiff, Severity,
-    ValidationReport, ValidationSummary,
+    Check, CheckCode, EditSectionMode, FileMap, FrontmatterPatch, InboundLinksPolicy,
+    NormalizedOperation, ParsedFrontmatter, RelPath, RiskAssessment, RiskLevel, SemanticDiff,
+    Severity, ValidationReport, ValidationSummary,
 };
 use crate::Bundle;
 
@@ -734,8 +734,8 @@ fn concept_type(bundle: &Bundle, path: &RelPath) -> Option<String> {
     bundle
         .files()
         .get(path)
-        .and_then(|raw| model::parse_file(path.as_str(), raw).fm)
-        .and_then(|fm| fm.r#type)
+        .and_then(|raw| model::parse_file(path.as_str(), raw).frontmatter)
+        .and_then(|fm| fm.get_text("type"))
 }
 
 /// Targets actuales del campo de relación `relation` en el frontmatter de `source` (secuencia YAML
@@ -745,7 +745,7 @@ fn current_targets(bundle: &Bundle, source: &RelPath, relation: &str) -> Vec<Str
     bundle
         .files()
         .get(source)
-        .and_then(|raw| model::parse_file(source.as_str(), raw).fm)
+        .and_then(|raw| model::parse_file(source.as_str(), raw).frontmatter)
         .and_then(|fm| relation_targets(&fm, relation))
         .unwrap_or_default()
 }
@@ -972,13 +972,18 @@ pub fn apply_normalized_ops(
 }
 
 /// Frontmatter (o el vacío por defecto) y cuerpo actuales del `.md` en `path` dentro de `files`.
-fn parsed_of(files: &FileMap, path: &RelPath) -> (Frontmatter, String) {
+fn parsed_of(files: &FileMap, path: &RelPath) -> (serde_yaml::Mapping, String) {
     match files.get(path) {
         Some(raw) => {
             let parsed = model::parse_file(path.as_str(), raw);
-            (parsed.fm.unwrap_or_default(), parsed.body)
+            let map = parsed
+                .frontmatter
+                .as_ref()
+                .map(|fm| fm.mapping().clone())
+                .unwrap_or_default();
+            (map, parsed.body)
         }
-        None => (Frontmatter::default(), String::new()),
+        None => (serde_yaml::Mapping::new(), String::new()),
     }
 }
 
@@ -991,26 +996,28 @@ fn apply_one(files: &mut FileMap, op: &NormalizedOperation) -> Result<(), CoreEr
             frontmatter,
             body,
         } => {
-            let mut fm = Frontmatter::default();
-            crate::bundle::apply_patch(&mut fm, frontmatter.clone());
+            let mut map = serde_yaml::Mapping::new();
+            crate::bundle::apply_patch(&mut map, frontmatter.clone());
+            let fm = ParsedFrontmatter::from_mapping(map);
             let body = body.clone().unwrap_or_else(|| {
                 let title = fm
-                    .title
-                    .clone()
+                    .get_text("title")
                     .filter(|s| !s.is_empty())
                     .unwrap_or_else(|| model::title_from_path(path.as_str()));
                 format!("# {title}\n")
             });
-            files.insert(path.clone(), model::build_raw(&fm, &body));
+            files.insert(path.clone(), model::build_raw(Some(&fm), &body));
         }
         NormalizedOperation::PatchFrontmatter { path, patch } => {
-            let (mut fm, body) = parsed_of(files, path);
-            crate::bundle::apply_patch(&mut fm, patch.clone());
-            files.insert(path.clone(), model::build_raw(&fm, &body));
+            let (mut map, body) = parsed_of(files, path);
+            crate::bundle::apply_patch(&mut map, patch.clone());
+            let fm = ParsedFrontmatter::from_mapping(map);
+            files.insert(path.clone(), model::build_raw(Some(&fm), &body));
         }
         NormalizedOperation::ReplaceBody { path, body } => {
-            let (fm, _) = parsed_of(files, path);
-            files.insert(path.clone(), model::build_raw(&fm, body));
+            let (map, _) = parsed_of(files, path);
+            let fm = ParsedFrontmatter::from_mapping(map);
+            files.insert(path.clone(), model::build_raw(Some(&fm), body));
         }
         NormalizedOperation::Move { from, to, .. } => {
             if let Some(raw) = files.remove(from) {

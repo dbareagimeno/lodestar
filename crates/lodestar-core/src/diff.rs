@@ -171,14 +171,18 @@ pub fn diff_snap(a: &FileMap, b: &FileMap) -> OkfDiff {
                 to: sc.to.clone(),
             });
         }
-        let a_body = av.map(|r| model::split_front(r).body).unwrap_or_default();
-        let b_body = bv.map(|r| model::split_front(r).body).unwrap_or_default();
+        let a_body = av
+            .map(|r| model::split_front(r).body(r).to_string())
+            .unwrap_or_default();
+        let b_body = bv
+            .map(|r| model::split_front(r).body(r).to_string())
+            .unwrap_or_default();
         let body = collapse_diff(line_diff(&a_body, &b_body));
         let la: BTreeSet<RelPath> = av
-            .map(|r| out_link_paths(p, &model::split_front(r).body))
+            .map(|r| out_link_paths(p, model::split_front(r).body(r)))
             .unwrap_or_default();
         let lb: BTreeSet<RelPath> = bv
-            .map(|r| out_link_paths(p, &model::split_front(r).body))
+            .map(|r| out_link_paths(p, model::split_front(r).body(r)))
             .unwrap_or_default();
         let links_added = lb.difference(&la).cloned().collect();
         let links_removed = la.difference(&lb).cloned().collect();
@@ -262,15 +266,14 @@ pub fn fm_diff(a_raw: &str, b_raw: &str) -> Vec<FieldChange> {
 }
 
 fn fm_pairs(raw: &str) -> Vec<(String, serde_yaml::Value)> {
-    let sf = model::split_front(raw);
-    let text = match sf.fm_text {
-        Some(t) if !t.is_empty() => t,
-        _ => return Vec::new(),
-    };
-    match model::parse_yaml(&text) {
-        Ok(fm) => fm.as_pairs(),
-        Err(_) => Vec::new(),
-    }
+    model::parse_frontmatter(raw)
+        .map(|fm| {
+            fm.entries()
+                .into_iter()
+                .map(|(k, v)| (k, v.clone()))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Port de `fmFmt`: representación textual de un valor de frontmatter.

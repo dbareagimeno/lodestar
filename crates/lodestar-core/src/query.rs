@@ -6,7 +6,7 @@
 use serde_yaml::Value as Yaml;
 
 use crate::bundle::Bundle;
-use crate::types::{Analysis, Frontmatter, RelPath, Severity};
+use crate::types::{Analysis, ParsedFrontmatter, RelPath, Severity};
 
 /// Un token de la DSL.
 #[derive(Debug, Clone)]
@@ -94,13 +94,19 @@ fn match_file(bundle: &Bundle, path: &RelPath, tokens: &[Token], a: &Analysis) -
     }
     let fm = bundle
         .parsed(path)
-        .and_then(|p| p.fm.clone())
+        .and_then(|p| p.frontmatter.clone())
         .unwrap_or_default();
     let body = bundle.parsed(path).map(|p| p.body.as_str()).unwrap_or("");
     tokens.iter().all(|t| match_token(t, path, &fm, body, a))
 }
 
-fn match_token(t: &Token, path: &RelPath, fm: &Frontmatter, body: &str, a: &Analysis) -> bool {
+fn match_token(
+    t: &Token,
+    path: &RelPath,
+    fm: &ParsedFrontmatter,
+    body: &str,
+    a: &Analysis,
+) -> bool {
     let reserved = path.is_reserved();
     let val = t.val.to_lowercase();
     // Quirk: un campo VACÍO (`":foo"`) es falsy en JS → el proto lo trata como texto suelto.
@@ -145,28 +151,28 @@ fn match_token(t: &Token, path: &RelPath, fm: &Frontmatter, body: &str, a: &Anal
 /// de frontmatter, luego el cuerpo. Pública para que la cache (`lodestar-store`) use LA MISMA
 /// verdad en vez de reimplementarla en SQL (invariante «una sola verdad computada»).
 /// `needle_lower` debe venir ya en minúsculas.
-pub fn loose_text_match(path: &RelPath, fm: &Frontmatter, body: &str, needle_lower: &str) -> bool {
+pub fn loose_text_match(
+    path: &RelPath,
+    fm: &ParsedFrontmatter,
+    body: &str,
+    needle_lower: &str,
+) -> bool {
     path.basename().to_lowercase().contains(needle_lower)
         || fm
-            .as_pairs()
+            .entries()
             .iter()
             .any(|(_, v)| value_includes(v, needle_lower))
         || body.to_lowercase().contains(needle_lower)
 }
 
-fn fm_get(fm: &Frontmatter, key: &str) -> Option<Yaml> {
-    let pairs = fm.as_pairs();
-    if let Some((_, v)) = pairs.iter().find(|(k, _)| k == key) {
-        return Some(v.clone());
+fn fm_get<'a>(fm: &'a ParsedFrontmatter, key: &str) -> Option<&'a Yaml> {
+    if let Some(v) = fm.get_key(key) {
+        return Some(v);
     }
-    let lower = key.to_lowercase();
-    pairs
-        .iter()
-        .find(|(k, _)| *k == lower)
-        .map(|(_, v)| v.clone())
+    fm.get_key(&key.to_lowercase())
 }
 
-fn fm_present(fm: &Frontmatter, key: &str) -> bool {
+fn fm_present(fm: &ParsedFrontmatter, key: &str) -> bool {
     // Port fiel de `fmPresent`: `v!==undefined && v!=="" && !(lista vacía)`. Un `null` YAML
     // (campo presente sin valor) NO es undefined ni "" ni lista vacía → cuenta como presente.
     match fm_get(fm, key) {
@@ -177,7 +183,7 @@ fn fm_present(fm: &Frontmatter, key: &str) -> bool {
     }
 }
 
-fn field_match(raw: Option<Yaml>, value: &str, op: Option<char>) -> bool {
+fn field_match(raw: Option<&Yaml>, value: &str, op: Option<char>) -> bool {
     let raw = match raw {
         Some(r) => r,
         None => return false,
@@ -194,7 +200,7 @@ fn field_match(raw: Option<Yaml>, value: &str, op: Option<char>) -> bool {
             }
         }),
         other => {
-            let s = scalar_to_string(&other).to_lowercase();
+            let s = scalar_to_string(other).to_lowercase();
             if exact {
                 s == val
             } else {
@@ -214,7 +220,7 @@ fn value_includes(raw: &Yaml, val: &str) -> bool {
     }
 }
 
-fn is_predicate(name: &str, path: &RelPath, fm: &Frontmatter, a: &Analysis) -> bool {
+fn is_predicate(name: &str, path: &RelPath, fm: &ParsedFrontmatter, a: &Analysis) -> bool {
     match name {
         "orphan" => a.orphans.contains(path),
         "invalid" => a
@@ -225,8 +231,7 @@ fn is_predicate(name: &str, path: &RelPath, fm: &Frontmatter, a: &Analysis) -> b
         "reserved" => path.is_reserved(),
         "linked" => a.inn.get(path).map(|v| !v.is_empty()).unwrap_or(false),
         "accepted" | "draft" | "review" | "deprecated" => fm
-            .status
-            .as_deref()
+            .get_text("status")
             .map(|s| s.to_lowercase() == name)
             .unwrap_or(false),
         _ => false,

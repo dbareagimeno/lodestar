@@ -202,9 +202,9 @@ fn ref_rechaza_traversal() {
 fn build_raw_idempotente() {
     let raw = "---\ntype: Concept\ntitle: Alfa\n---\n\n# H\n\ncuerpo\n";
     let parsed = model::parse_file("alfa.md", raw);
-    let rebuilt = model::build_raw(parsed.fm.as_ref().unwrap(), &parsed.body);
+    let rebuilt = model::build_raw(parsed.frontmatter.as_ref(), &parsed.body);
     let reparsed = model::parse_file("alfa.md", &rebuilt);
-    let rebuilt2 = model::build_raw(reparsed.fm.as_ref().unwrap(), &reparsed.body);
+    let rebuilt2 = model::build_raw(reparsed.frontmatter.as_ref(), &reparsed.body);
     assert_eq!(rebuilt, rebuilt2, "build_raw debe ser idempotente");
 }
 
@@ -423,7 +423,8 @@ fn create_concept_rechaza_no_conforme() {
 fn create_concept_incluye_timestamp_en_su_posicion_canonica() {
     let b = Bundle::from_files(fm(&[]));
     let p = RelPath::new("nuevo.md").unwrap();
-    // Con timestamp (paridad prototipo): aparece antes de `status` (orden KNOWN_FM).
+    // Con timestamp: aparece antes de `status`. Desde E16-H01 el orden del `.md` es el orden de
+    // inserción de las claves (el `Mapping` de serde_yaml lo preserva), no una lista canónica.
     let ok = b.create_concept(
         &p,
         "Nota",
@@ -510,8 +511,12 @@ fn merge_frontmatter_null_borra() {
 // --- Regresiones de paridad con el prototipo (revisión profunda) -------------
 
 #[test]
-fn fm_escalares_no_string_se_coercen_como_js() {
-    // `type: 123` NO es OKF-FM03 (hard-fail de fichero entero): el proto lo acepta vía String(v).
+fn fm_escalares_no_string_no_invierten_el_veredicto() {
+    // MIGRADO en E16-H01 (antes `fm_escalares_no_string_se_coercen_como_js`): la coerción `String(v)`
+    // del prototipo desapareció, pero la garantía que protegía este test sigue viva y es la que
+    // importa — un escalar no-string en una clave cualquiera NO convierte el fichero entero en
+    // OKF-FM03 (hard-fail), que invertiría el veredicto de la puerta de CI. Lo que cambia es que
+    // ahora el valor conserva su TIPO YAML en vez de convertirse en texto.
     let b = Bundle::from_files(fm(&[(
         "n.md",
         "---\ntype: 123\ntitle: 2024\ndescription: true\n---\n\n# H\n\ncuerpo\n",
@@ -520,6 +525,28 @@ fn fm_escalares_no_string_se_coercen_como_js() {
     assert_eq!(a.hard_fail, 0, "el veredicto no puede invertirse: {a:?}");
     let checks = &a.per_file[&RelPath::new("n.md").unwrap()];
     assert!(!checks.iter().any(|c| c.code == CheckCode::OkfFm03));
+
+    // El tipo YAML real sobrevive al parseo (ya no hay coerción a string).
+    let parsed = model::parse_file("n.md", &b.files()[&RelPath::new("n.md").unwrap()]);
+    let pf = parsed.frontmatter.expect("el documento tiene frontmatter");
+    assert_eq!(
+        pf.get_key("type"),
+        Some(&serde_yaml::Value::Number(123.into())),
+        "`type: 123` debe seguir siendo el número 123"
+    );
+    assert_eq!(
+        pf.get_key("description"),
+        Some(&serde_yaml::Value::Bool(true)),
+        "`description: true` debe seguir siendo el booleano true"
+    );
+    // …y las proyecciones de presentación siguen viéndolo como texto (columnas de cache, DTO).
+    let resumen = b.list_concepts();
+    let fila = resumen
+        .iter()
+        .find(|c| c.path.as_str() == "n.md")
+        .expect("n.md está en el listado");
+    assert_eq!(fila.r#type.as_deref(), Some("123"));
+    assert_eq!(fila.title, "2024");
 }
 
 #[test]

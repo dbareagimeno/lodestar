@@ -67,7 +67,7 @@ impl Workspace {
             WorkspaceError::Io(format!("concepto no encontrado: {}", concept.as_str()))
         })?;
         let parsed = model::parse_file(concept.as_str(), raw);
-        let Some(fm) = parsed.fm else {
+        let Some(fm) = parsed.frontmatter else {
             return Ok(ExternalRefsReport {
                 references: Vec::new(),
                 diagnostics: Vec::new(),
@@ -178,11 +178,11 @@ impl Workspace {
     }
 }
 
-/// Lee un campo de frontmatter de productor (`fm.extra`) como lista de paths: una secuencia YAML
-/// de strings, o un único `String` (mismo criterio que `relation_targets` del core,
-/// `lodestar-core/src/schema.rs`, no reexportado porque es privado a ese módulo).
-fn field_paths(fm: &lodestar_core::types::Frontmatter, field: &str) -> Vec<String> {
-    match fm.extra.get(field) {
+/// Lee un campo del frontmatter como lista de paths: una secuencia YAML de strings, o un único
+/// `String` (mismo criterio que `relation_targets` del core, `lodestar-core/src/schema.rs`, no
+/// reexportado porque es privado a ese módulo).
+fn field_paths(fm: &lodestar_core::types::ParsedFrontmatter, field: &str) -> Vec<String> {
+    match fm.get_key(field) {
         Some(serde_yaml::Value::Sequence(seq)) => seq
             .iter()
             .filter_map(|v| v.as_str().map(str::to_string))

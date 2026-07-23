@@ -19,7 +19,6 @@ blake3 = { workspace = true }
 thiserror = { workspace = true }
 once_cell = { workspace = true }
 regex = { workspace = true }
-indexmap = { workspace = true }
 unicode-normalization = { workspace = true }
 schemars = { workspace = true, optional = true }
 pulldown-cmark = { version = "0.12", optional = true, default-features = false, features = ["html"] }

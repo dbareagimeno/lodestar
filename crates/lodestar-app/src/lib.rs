@@ -21,8 +21,8 @@ use lodestar_core::plan::{self, PlanPolicy};
 use lodestar_core::schema::{validate_relations, validate_schema, DocType, Schema};
 use lodestar_core::types::{
     workspace_revision, Analysis, Backlinks, ChangeReceipt, ChangeSet, ChangeSetId, Check,
-    ConceptRef, ConceptRevision, Direction, Edge, EditSectionMode, ErrorCode, Frontmatter,
-    FrontmatterPatch, GraphNode, InboundLinksPolicy, NormalizedOperation, PlanHash, ReceiptId,
+    ConceptRef, ConceptRevision, Direction, Edge, EditSectionMode, ErrorCode, FrontmatterPatch,
+    GraphNode, InboundLinksPolicy, NormalizedOperation, ParsedFrontmatter, PlanHash, ReceiptId,
     RelPath, RiskAssessment, SemanticDiff, Severity, ValidationReport, ValidationSummary,
     WorkspaceRevision,
 };
@@ -116,9 +116,12 @@ pub struct ResourceLink {
 /// - `InvalidStatusTransition` → `InvalidSchema` (transición a un estado fuera de `allowedStatuses`,
 ///   E12-H07: precondición de lifecycle incumplida).
 /// - `FixNotFound` → `ConceptNotFound` (`apply_fix` con un `fixId` inexistente/no aplicable, E12-H07).
+/// - `InvalidFieldPath` → `InvalidSchema` (ruta a propiedad de frontmatter mal formada, E16-H01:
+///   entrada del agente que no designa ningún campo).
 pub fn error_code(err: &CoreError) -> ErrorCode {
     match err {
         CoreError::InvalidRelPath(_) => ErrorCode::PermissionDenied,
+        CoreError::InvalidFieldPath(_) => ErrorCode::InvalidSchema,
         CoreError::SizeGuardExceeded(_) => ErrorCode::ResultTooLarge,
         CoreError::ReplaceTextMismatch(_, _) => ErrorCode::InvalidSchema,
         CoreError::NormalizeTargetNotFound(_) => ErrorCode::ConceptNotFound,
@@ -467,15 +470,14 @@ impl App {
             }
             let Some(raw) = files.get(path) else { continue };
             let parsed = model::parse_file(path.as_str(), raw);
-            let fm = parsed.fm.unwrap_or_default();
+            let fm = parsed.frontmatter.unwrap_or_default();
 
             if !passes_filters(path, &fm, filters) {
                 continue;
             }
 
             let title = fm
-                .title
-                .clone()
+                .get_text("title")
                 .filter(|s| !s.is_empty())
                 .unwrap_or_else(|| model::title_from_path(path.as_str()));
             let snippet = {
@@ -496,11 +498,11 @@ impl App {
             results.push(SearchResult {
                 path: path.clone(),
                 id: None,
-                r#type: fm.r#type.clone(),
+                r#type: fm.get_text("type"),
                 title,
-                status: fm.status.clone(),
-                description: fm.description.clone(),
-                tags: tags_to_vec(&fm.tags),
+                status: fm.get_text("status"),
+                description: fm.get_text("description"),
+                tags: tags_to_vec(fm.get_key("tags")),
                 snippet,
                 score: score_of(raw, &needle),
                 revision,
@@ -578,7 +580,10 @@ impl App {
 
         let wants = |field: &str| include.iter().any(|s| s == field);
 
-        let frontmatter = wants("frontmatter").then(|| parsed.fm.clone().unwrap_or_default());
+        // El frontmatter que viaja es el YAML ARBITRARIO del documento (E16-H01): un objeto con
+        // las claves del usuario, no una proyección de campos conocidos. Sin bloque → `{}`.
+        let frontmatter =
+            wants("frontmatter").then(|| parsed.frontmatter.clone().unwrap_or_default().value);
         let body = wants("body").then(|| match sections {
             Some(secs) if !secs.is_empty() => model::extract_sections(&parsed.body, secs),
             _ => parsed.body.clone(),
@@ -2399,13 +2404,13 @@ fn blocking_relations(
             continue;
         };
         let parsed = model::parse_file(path.as_str(), raw);
-        let Some(fm) = parsed.fm else {
+        let Some(fm) = parsed.frontmatter else {
             continue;
         };
-        let Some(tipo) = fm.r#type.as_deref() else {
+        let Some(tipo) = fm.get_text("type") else {
             continue;
         };
-        let Some(doctype) = schema.types.get(tipo) else {
+        let Some(doctype) = schema.types.get(&tipo) else {
             continue;
         };
         for rel_name in doctype.relations.keys() {
@@ -2429,8 +2434,8 @@ fn blocking_relations(
 /// Lee el campo `rel_name` del frontmatter como lista de paths target: una secuencia YAML de
 /// `String` o un único `String` (misma forma que `core::schema`); vacío si el campo no está o su
 /// forma no es ninguna de las dos.
-fn relation_field_targets(fm: &Frontmatter, rel_name: &str) -> Vec<String> {
-    match fm.extra.get(rel_name) {
+fn relation_field_targets(fm: &ParsedFrontmatter, rel_name: &str) -> Vec<String> {
+    match fm.get_key(rel_name) {
         Some(serde_yaml::Value::Sequence(seq)) => seq
             .iter()
             .filter_map(|v| v.as_str().map(str::to_string))
@@ -2457,9 +2462,11 @@ pub struct ConceptView {
     pub path: RelPath,
     /// Identidad de contenido (`blake3:…`, == [`ConceptRevision`] de E10-H03). Siempre presente.
     pub revision: ConceptRevision,
-    /// Frontmatter tipado, si se pidió `"frontmatter"` en `include`.
+    /// Frontmatter del documento —metadata **arbitraria** del usuario, siempre un objeto YAML—,
+    /// si se pidió `"frontmatter"` en `include` (`ARCHITECTURE.md §20.4`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub frontmatter: Option<Frontmatter>,
+    #[schemars(with = "Option<serde_json::Map<String, serde_json::Value>>")]
+    pub frontmatter: Option<serde_yaml::Value>,
     /// Cuerpo Markdown (completo o acotado por `sections`), si se pidió `"body"` en `include`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub body: Option<String>,
@@ -2562,21 +2569,21 @@ pub struct SearchResults {
 }
 
 /// `true` si el concepto pasa todos los filtros baratos activos.
-fn passes_filters(path: &RelPath, fm: &Frontmatter, filters: &SearchFilters) -> bool {
+fn passes_filters(path: &RelPath, fm: &ParsedFrontmatter, filters: &SearchFilters) -> bool {
     if let Some(types) = &filters.types {
-        let ty = fm.r#type.as_deref().unwrap_or("").to_lowercase();
+        let ty = fm.get_text("type").unwrap_or_default().to_lowercase();
         if !types.iter().any(|t| t.to_lowercase() == ty) {
             return false;
         }
     }
     if let Some(statuses) = &filters.statuses {
-        let st = fm.status.as_deref().unwrap_or("").to_lowercase();
+        let st = fm.get_text("status").unwrap_or_default().to_lowercase();
         if !statuses.iter().any(|s| s.to_lowercase() == st) {
             return false;
         }
     }
     if let Some(want) = &filters.tags {
-        let have: BTreeSet<String> = tags_to_vec(&fm.tags)
+        let have: BTreeSet<String> = tags_to_vec(fm.get_key("tags"))
             .iter()
             .map(|t| t.to_lowercase())
             .collect();
@@ -2593,7 +2600,7 @@ fn passes_filters(path: &RelPath, fm: &Frontmatter, filters: &SearchFilters) -> 
 }
 
 /// Normaliza los `tags` crudos del frontmatter (`serde_yaml::Value`) a una lista de strings.
-fn tags_to_vec(tags: &Option<serde_yaml::Value>) -> Vec<String> {
+fn tags_to_vec(tags: Option<&serde_yaml::Value>) -> Vec<String> {
     use serde_yaml::Value as Y;
     match tags {
         Some(Y::Sequence(seq)) => seq.iter().filter_map(scalar_string).collect(),

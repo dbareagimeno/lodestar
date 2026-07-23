@@ -17,7 +17,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::model;
-use crate::types::{Check, CheckCode, Fix, Frontmatter, Range, RelPath, Severity};
+use crate::types::{Check, CheckCode, Fix, ParsedFrontmatter, Range, RelPath, Severity};
 use crate::Bundle;
 
 use serde::{Deserialize, Serialize};
@@ -141,13 +141,13 @@ pub fn validate_schema(bundle: &Bundle, schema: &Schema) -> Vec<Check> {
             continue;
         };
         let parsed = model::parse_file(path.as_str(), raw);
-        let Some(fm) = parsed.fm else {
+        let Some(fm) = parsed.frontmatter else {
             continue;
         };
-        let Some(tipo) = fm.r#type.as_deref() else {
+        let Some(tipo) = fm.get_text("type") else {
             continue;
         };
-        let Some(doctype) = schema.types.get(tipo) else {
+        let Some(doctype) = schema.types.get(&tipo) else {
             continue;
         };
 
@@ -162,10 +162,10 @@ pub fn validate_schema(bundle: &Bundle, schema: &Schema) -> Vec<Check> {
             }
         }
 
-        if let Some(status) = fm.status.as_deref() {
+        if let Some(status) = fm.get_text("status") {
             if !status.is_empty()
                 && !doctype.allowed_statuses.is_empty()
-                && !doctype.allowed_statuses.iter().any(|s| s == status)
+                && !doctype.allowed_statuses.iter().any(|s| s == &status)
             {
                 out.push(Check::new(
                     Severity::Err,
@@ -212,13 +212,13 @@ pub fn validate_relations(bundle: &Bundle, schema: &Schema) -> Vec<Check> {
             continue;
         };
         let parsed = model::parse_file(path.as_str(), raw);
-        let Some(fm) = parsed.fm else {
+        let Some(fm) = parsed.frontmatter else {
             continue;
         };
-        let Some(tipo) = fm.r#type.as_deref() else {
+        let Some(tipo) = fm.get_text("type") else {
             continue;
         };
-        let Some(doctype) = schema.types.get(tipo) else {
+        let Some(doctype) = schema.types.get(&tipo) else {
             continue;
         };
 
@@ -309,8 +309,8 @@ pub fn validate_relations(bundle: &Bundle, schema: &Schema) -> Vec<Check> {
 /// Lee el campo `rel_name` del frontmatter como lista de paths target: acepta una secuencia YAML
 /// de `String` o un único `String` (envuelto en un vector de un elemento). `None` si el campo no
 /// está presente en `extra` o su forma no es ninguna de las dos anteriores.
-pub(crate) fn relation_targets(fm: &Frontmatter, rel_name: &str) -> Option<Vec<String>> {
-    match fm.extra.get(rel_name)? {
+pub(crate) fn relation_targets(fm: &ParsedFrontmatter, rel_name: &str) -> Option<Vec<String>> {
+    match fm.get_key(rel_name)? {
         serde_yaml::Value::Sequence(seq) => Some(
             seq.iter()
                 .filter_map(|v| v.as_str().map(str::to_string))
@@ -325,7 +325,7 @@ pub(crate) fn relation_targets(fm: &Frontmatter, rel_name: &str) -> Option<Vec<S
 pub(crate) fn target_type_of(bundle: &Bundle, target: &RelPath) -> Option<String> {
     let raw = bundle.files().get(target)?;
     let parsed = model::parse_file(target.as_str(), raw);
-    parsed.fm.and_then(|fm| fm.r#type)
+    parsed.frontmatter.and_then(|fm| fm.get_text("type"))
 }
 
 /// Datos para materializar el `Fix` `safe` de una relación tipada ROTA (`REL-TARGET`, E12-H07):
@@ -389,13 +389,13 @@ pub(crate) fn rel_target_repairs(bundle: &Bundle, schema: &Schema) -> Vec<RelTar
             continue;
         };
         let parsed = model::parse_file(path.as_str(), raw);
-        let Some(fm) = parsed.fm else {
+        let Some(fm) = parsed.frontmatter else {
             continue;
         };
-        let Some(tipo) = fm.r#type.as_deref() else {
+        let Some(tipo) = fm.get_text("type") else {
             continue;
         };
-        let Some(doctype) = schema.types.get(tipo) else {
+        let Some(doctype) = schema.types.get(&tipo) else {
             continue;
         };
 
@@ -449,20 +449,11 @@ fn find_field_range(raw: &str, field: &str) -> Option<Range> {
     None
 }
 
-/// `true` si `campo` está presente en `fm`: como campo KNOWN con `Some(_)`, o en `extra`. Un
-/// campo KNOWN presente con `null` explícito (`fm.known_null`) NO cuenta como presente para
-/// `required_fields` — mismo criterio que `falta_campo_obligatorio` (E10-H07).
-fn field_present(fm: &Frontmatter, campo: &str) -> bool {
-    match campo {
-        "type" => fm.r#type.is_some(),
-        "title" => fm.title.is_some(),
-        "description" => fm.description.is_some(),
-        "resource" => fm.resource.is_some(),
-        "tags" => fm.tags.is_some(),
-        "timestamp" => fm.timestamp.is_some(),
-        "status" => fm.status.is_some(),
-        _ => fm.extra.contains_key(campo),
-    }
+/// `true` si `campo` está presente en el frontmatter. Desde E16-H01 no hay campos privilegiados:
+/// cualquier clave de primer nivel cuenta igual, y una presente con `null` explícito cuenta como
+/// presente (declarar la clave es declararla, aunque no tenga valor todavía).
+fn field_present(fm: &ParsedFrontmatter, campo: &str) -> bool {
+    fm.contains_key(campo)
 }
 
 #[cfg(test)]

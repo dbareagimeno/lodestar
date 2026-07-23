@@ -47,12 +47,12 @@ pub(crate) fn graph_model(bundle: &Bundle) -> GraphModel {
 /// la reusan (esta última vía [`Bundle::node`]) en vez de reimplementar el criterio.
 pub fn node_for(bundle: &Bundle, id: &RelPath) -> GraphNode {
     let exists = bundle.files().contains_key(id);
-    let fm = bundle.parsed(id).and_then(|p| p.fm.as_ref());
+    let fm = bundle.parsed(id).and_then(|p| p.frontmatter.as_ref());
     GraphNode {
         id: id.clone(),
         ghost: !exists,
-        r#type: fm.and_then(|f| f.r#type.clone()),
-        status: fm.and_then(|f| f.status.clone()),
+        r#type: fm.and_then(|f| f.get_text("type")),
+        status: fm.and_then(|f| f.get_text("status")),
     }
 }
 

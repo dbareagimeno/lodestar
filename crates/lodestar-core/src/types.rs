@@ -5,7 +5,6 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 
 /// Macro interna: deriva `JsonSchema` solo con la feature `schemars` (para el outputSchema del MCP).
@@ -381,43 +380,177 @@ impl Check {
 }
 
 // ---------------------------------------------------------------------------
-// Modelo de fichero: Frontmatter · ParsedFile · FileKind · FmError (§4.1)
+// Modelo documental genérico: FieldPath · ParsedFrontmatter · FileKind · FmError
+// (`ARCHITECTURE.md §20.4`, E16-H01 — supersede los 7 campos tipados de `§4.1`)
 // ---------------------------------------------------------------------------
 
-schema_derive! {
-/// Frontmatter: 7 KNOWN_FM tipados + `extra` para claves de productor. `tags`/`timestamp` se
-/// guardan RAW (`serde_yaml::Value`) para poder detectar FMT-TAGS (no-lista) y FMT-TS (no-ISO).
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct Frontmatter {
-    #[serde(rename = "type", default, skip_serializing_if = "Option::is_none")]
-    pub r#type: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub title: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub resource: Option<String>,
-    #[cfg_attr(feature = "schemars", schemars(skip))]
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tags: Option<serde_yaml::Value>,
-    #[cfg_attr(feature = "schemars", schemars(skip))]
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub timestamp: Option<serde_yaml::Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub status: Option<String>,
-    /// `IndexMap` (no `BTreeMap`) para preservar el **orden de aparición** de las claves de
-    /// productor, igual que `Object.keys(fm)` del prototipo (`buildRaw`). Con `BTreeMap` se
-    /// reordenaban alfabéticamente (divergencia de paridad).
-    #[cfg_attr(feature = "schemars", schemars(skip))]
-    #[serde(flatten)]
-    pub extra: IndexMap<String, serde_yaml::Value>,
-    /// Claves KNOWN de tipo string presentes con `null` explícito (`type:\n`). En JS `null !==
-    /// undefined`: cuentan como presentes (`fmPresent`) y `buildRaw` las serializa (`k: null`).
-    /// Con `Option<String>` el null se perdía como ausencia — esto conserva la distinción.
-    #[cfg_attr(feature = "schemars", schemars(skip))]
-    #[serde(skip)]
-    pub known_null: Vec<String>,
+/// Ruta a una propiedad del frontmatter: una secuencia **no vacía** de segmentos ya resueltos.
+///
+/// Newtype validado (mismo patrón que [`RelPath`]) y no un `String` crudo: la dot-notation es una
+/// *sintaxis de entrada*, no la identidad del campo. Por eso hay dos constructores —
+/// [`FieldPath::parse`] parte por puntos (lo que teclea un agente) y
+/// [`FieldPath::from_segments`] no (la vía para direccionar una clave YAML que *contiene* un
+/// punto, p. ej. `sonar.projectKey`).
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct FieldPath(Vec<String>);
+
+impl FieldPath {
+    /// Construye un `FieldPath` desde dot-notation (`"service.tier"`,
+    /// `"release.target.date"`). **Siempre** parte por puntos: nunca resuelve a una clave literal
+    /// que los contenga.
+    ///
+    /// # Errores
+    /// [`crate::CoreError::InvalidFieldPath`] si el path está vacío o algún segmento lo está
+    /// (`""`, `"service."`, `"a..b"`).
+    pub fn parse(s: &str) -> Result<Self, crate::CoreError> {
+        Self::from_segments(s.split('.'))
+    }
+
+    /// Construye un `FieldPath` desde segmentos explícitos, **sin** partir por puntos: es la vía
+    /// para direccionar una clave YAML que contiene un punto (la usan el filtro JSON de la query
+    /// y el catálogo de metadata, que construyen paths sin pasar por la sintaxis textual).
+    ///
+    /// # Errores
+    /// [`crate::CoreError::InvalidFieldPath`] si la lista está vacía o algún segmento lo está.
+    pub fn from_segments<I, S>(segments: I) -> Result<Self, crate::CoreError>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        let segs: Vec<String> = segments.into_iter().map(Into::into).collect();
+        if segs.is_empty() || segs.iter().any(String::is_empty) {
+            return Err(crate::CoreError::InvalidFieldPath(segs.join(".")));
+        }
+        Ok(FieldPath(segs))
+    }
+
+    /// Los segmentos del path, en orden de descenso.
+    pub fn segments(&self) -> &[String] {
+        &self.0
+    }
 }
+
+impl std::fmt::Display for FieldPath {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0.join("."))
+    }
+}
+
+/// Frontmatter parseado de un documento. **Es metadata arbitraria del usuario**: sin campos
+/// conocidos, sin lista cerrada, sin conversión automática de tipos y sin borrado de claves
+/// desconocidas (`ARCHITECTURE.md §20.4`).
+///
+/// La ausencia de frontmatter se modela con `Option<ParsedFrontmatter>` (`None`), **no** con
+/// `Value::Null`: «sin frontmatter» y «frontmatter vacío» son dos estados distintos del modelo.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ParsedFrontmatter {
+    /// El YAML del bloque. **Siempre** un `Mapping` (vacío si el bloque está vacío o su YAML no
+    /// es un mapa): el accesor y los catálogos de metadata necesitan una forma uniforme.
+    pub value: serde_yaml::Value,
+    /// Texto YAML **exacto** del bloque, sin los delimitadores `---`.
+    pub raw: String,
+    /// Rango de **bytes** que ocupa [`Self::raw`] dentro del raw del documento, de modo que
+    /// `documento[span] == raw`. Excluye los delimitadores: el patch quirúrgico sustituye
+    /// exactamente ese rango y los diagnósticos derivan de él su rango de reporte.
+    ///
+    /// En un `ParsedFrontmatter` **sintético** (el que construye [`ParsedFrontmatter::from_mapping`]
+    /// para los flujos de escritura, que aún no tienen documento) el span es relativo a su propio
+    /// `raw`.
+    pub span: std::ops::Range<usize>,
+}
+
+impl Default for ParsedFrontmatter {
+    fn default() -> Self {
+        ParsedFrontmatter::from_mapping(serde_yaml::Mapping::new())
+    }
+}
+
+impl ParsedFrontmatter {
+    /// Construye un `ParsedFrontmatter` **sintético** a partir de un mapa YAML ya editado, que no
+    /// procede de ningún documento: `raw` es la serialización canónica del mapa y `span` la cubre
+    /// entera. Lo usan los flujos de escritura (merge-patch, creación de conceptos), que componen
+    /// frontmatter en memoria antes de que exista el `.md`.
+    pub fn from_mapping(map: serde_yaml::Mapping) -> Self {
+        let value = serde_yaml::Value::Mapping(map);
+        let raw = serde_yaml::to_string(&value)
+            .unwrap_or_default()
+            .trim_end()
+            .to_string();
+        let span = 0..raw.len();
+        ParsedFrontmatter { value, raw, span }
+    }
+
+    /// El `value` como `Mapping`. Siempre lo es por construcción; devuelve el mapa vacío si
+    /// alguien manipuló el campo público hasta dejarlo en otra forma.
+    pub fn mapping(&self) -> &serde_yaml::Mapping {
+        static VACIO: once_cell::sync::Lazy<serde_yaml::Mapping> =
+            once_cell::sync::Lazy::new(serde_yaml::Mapping::new);
+        self.value.as_mapping().unwrap_or(&VACIO)
+    }
+
+    /// **La** única verdad de acceso a metadata (invariante #3): resuelve un [`FieldPath`]
+    /// descendiendo por mapas anidados. Descender por un escalar, o por una clave que no existe,
+    /// es ausencia (`None`), nunca un error.
+    ///
+    /// Una clave presente con valor `null` devuelve `Some(&Value::Null)` — así se distingue de la
+    /// clave ausente.
+    pub fn get(&self, path: &FieldPath) -> Option<&serde_yaml::Value> {
+        let mut actual = &self.value;
+        for segmento in &path.0 {
+            actual = lookup(actual, segmento)?;
+        }
+        Some(actual)
+    }
+
+    /// Atajo de [`Self::get`] con un `FieldPath` de un **único segmento literal**: la clave de
+    /// primer nivel `key`, aunque contenga puntos.
+    pub fn get_key(&self, key: &str) -> Option<&serde_yaml::Value> {
+        lookup(&self.value, key)
+    }
+
+    /// El valor escalar de la clave de primer nivel `key` renderizado a texto, para las columnas
+    /// de la cache y los DTO de presentación. `None` si la clave falta o su valor **no** es un
+    /// escalar (`null`, lista y mapa no tienen texto: no se aplanan).
+    ///
+    /// Es *renderizado de salida*, no la coerción de parseo que E16-H01 retiró: el `value` sigue
+    /// conservando el tipo YAML real.
+    pub fn get_text(&self, key: &str) -> Option<String> {
+        self.get_key(key).and_then(scalar_text)
+    }
+
+    /// `true` si la clave de primer nivel `key` está presente (aunque su valor sea `null`).
+    pub fn contains_key(&self, key: &str) -> bool {
+        self.get_key(key).is_some()
+    }
+
+    /// Pares clave→valor de primer nivel, en **orden de aparición**. Las claves se rinden a texto
+    /// (las no escalares se omiten: no son direccionables por [`FieldPath`]).
+    pub fn entries(&self) -> Vec<(String, &serde_yaml::Value)> {
+        self.mapping()
+            .iter()
+            .filter_map(|(k, v)| scalar_text(k).map(|k| (k, v)))
+            .collect()
+    }
+}
+
+/// Busca `segmento` como clave de `valor` si este es un mapa. Compara por el **texto** de la
+/// clave, de modo que una clave escalar no-string (`1: x`) sigue siendo direccionable.
+fn lookup<'a>(valor: &'a serde_yaml::Value, segmento: &str) -> Option<&'a serde_yaml::Value> {
+    valor
+        .as_mapping()?
+        .iter()
+        .find(|(k, _)| scalar_text(k).as_deref() == Some(segmento))
+        .map(|(_, v)| v)
+}
+
+/// Texto de un escalar YAML (string, número o booleano). `None` para `null`, listas y mapas.
+fn scalar_text(v: &serde_yaml::Value) -> Option<String> {
+    match v {
+        serde_yaml::Value::String(s) => Some(s.clone()),
+        serde_yaml::Value::Number(n) => Some(n.to_string()),
+        serde_yaml::Value::Bool(b) => Some(b.to_string()),
+        _ => None,
+    }
 }
 
 /// Clase de fichero. `reserved = kind != Concept`.
@@ -429,21 +562,13 @@ pub enum FileKind {
 }
 
 /// Error de frontmatter (es un dato, no un `Result`: `parse_file` nunca falla por contenido).
+///
+/// **No** hay variante «falta el frontmatter»: desde E16-H01 un documento sin bloque es válido y
+/// se modela con `frontmatter: None` (`ARCHITECTURE.md §20.4`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FmError {
-    Missing,
     Unclosed,
     Malformed(String),
-}
-
-/// Fichero parseado. `parse_file` NUNCA devuelve `Err` por contenido: FM01/02/03 son Checks (datos).
-#[derive(Debug, Clone)]
-pub struct ParsedFile {
-    pub kind: FileKind,
-    pub fm: Option<Frontmatter>,
-    pub fm_err: Option<FmError>,
-    pub body: String,
-    pub raw: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -755,46 +880,6 @@ impl ErrorCode {
         }
     }
 }
-
-impl Frontmatter {
-    /// Vista del frontmatter como pares clave→valor (known fields presentes + extras), al estilo
-    /// del objeto JS del prototipo. Útil para query (`fmGet`/`Object.values`).
-    pub fn as_pairs(&self) -> Vec<(String, serde_yaml::Value)> {
-        let mut v: Vec<(String, serde_yaml::Value)> = Vec::new();
-        let s = |x: &String| serde_yaml::Value::String(x.clone());
-        // Un known con null explícito se emite como par `(k, Null)` — presente, como en JS.
-        let push_known =
-            |v: &mut Vec<(String, serde_yaml::Value)>, k: &str, val: Option<serde_yaml::Value>| {
-                if let Some(val) = val {
-                    v.push((k.to_string(), val));
-                } else if self.known_null.iter().any(|n| n == k) {
-                    v.push((k.to_string(), serde_yaml::Value::Null));
-                }
-            };
-        push_known(&mut v, "type", self.r#type.as_ref().map(s));
-        push_known(&mut v, "title", self.title.as_ref().map(s));
-        push_known(&mut v, "description", self.description.as_ref().map(s));
-        push_known(&mut v, "resource", self.resource.as_ref().map(s));
-        push_known(&mut v, "tags", self.tags.clone());
-        push_known(&mut v, "timestamp", self.timestamp.clone());
-        push_known(&mut v, "status", self.status.as_ref().map(s));
-        for (k, val) in &self.extra {
-            v.push((k.clone(), val.clone()));
-        }
-        v
-    }
-}
-
-// Constantes canónicas del modelo OKF (port del prototipo).
-pub(crate) const KNOWN_FM: [&str; 7] = [
-    "type",
-    "title",
-    "description",
-    "resource",
-    "tags",
-    "timestamp",
-    "status",
-];
 
 // ---------------------------------------------------------------------------
 // Planificación (`ChangeSet`) — §4.1 vía `ARCHITECTURE.md §19.3`, `REFACTOR §6.4` (E12-H01)

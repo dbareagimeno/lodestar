@@ -158,7 +158,7 @@ pub(crate) fn search_substring(
             continue;
         };
         let parsed = lodestar_core::model::parse_file(rp.as_str(), &raw);
-        let fm = parsed.fm.unwrap_or_default();
+        let fm = parsed.frontmatter.unwrap_or_default();
         if lodestar_core::query::loose_text_match(&rp, &fm, &parsed.body, &needle_lower) {
             out.push(rp);
         }

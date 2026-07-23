@@ -1,118 +1,118 @@
-//! Primitivas de modelo: parseo y serialización 1:1 del prototipo (`ARCHITECTURE.md §4`).
+//! Primitivas de modelo: parseo y serialización del documento (`ARCHITECTURE.md §4`, `§20.4`).
 //!
-//! Port fiel de `splitFront`, `parseYAML`, `dumpYAML`, `parseFile`, `buildRaw`, `resolveLink`,
-//! `normalize`, `outLinks`, `rawRelLinks`, `isISO`. Quirks incluidos.
+//! El frontmatter es **metadata arbitraria del usuario** (`§20.4`, E16-H01): se conserva íntegro,
+//! con su tipo YAML real y su texto original. El resto del módulo sigue siendo el port de
+//! `resolveLink`, `normalize`, `outLinks`, `rawRelLinks`, `isISO`, quirks incluidos.
 
 use once_cell::sync::Lazy;
 use regex::Regex;
 use serde_yaml::Value as Yaml;
 
-use crate::types::{FileKind, FmError, Frontmatter, KNOWN_FM};
-
-static SPLIT_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(?s)^---\r?\n(.*?)\r?\n---\r?\n?(.*)$").unwrap());
+use crate::types::{FileKind, FmError, ParsedFrontmatter};
 
 /// `[texto](href "title")` — el grupo 1 es el href. Global.
 pub(crate) static LINK_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r#"\[[^\]]*\]\(([^)\s]+)(?:\s+"[^"]*")?\)"#).unwrap());
 
-/// Resultado de `split_front`. `fm_text == Some("")` = sin frontmatter; `None` = sin cierre.
-pub struct SplitFront {
-    pub fm_text: Option<String>,
-    pub body: String,
+/// Resultado de [`split_front`]: dónde está (si está) el bloque de frontmatter de un documento.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SplitFront {
+    /// El documento no abre bloque de frontmatter: el cuerpo es el documento entero. Es un estado
+    /// **válido** (`§20.4`), no un error.
+    Sin,
+    /// Bloque presente y cerrado. `span` es el rango de bytes de su TEXTO YAML (sin los
+    /// delimitadores `---`); `body_start` es el offset donde empieza el cuerpo.
+    Bloque {
+        span: std::ops::Range<usize>,
+        body_start: usize,
+    },
+    /// El documento abre `---` y nunca lo cierra: el cuerpo es el documento entero.
+    SinCerrar,
 }
 
-/// Port de `splitFront`: separa frontmatter del cuerpo.
-pub fn split_front(raw: &str) -> SplitFront {
-    if raw.starts_with("---") {
-        if let Some(c) = SPLIT_RE.captures(raw) {
-            return SplitFront {
-                fm_text: Some(c.get(1).map_or("", |m| m.as_str()).to_string()),
-                body: c.get(2).map_or("", |m| m.as_str()).to_string(),
-            };
+impl SplitFront {
+    /// El cuerpo del documento `raw` según este corte.
+    pub fn body<'a>(&self, raw: &'a str) -> &'a str {
+        match self {
+            SplitFront::Bloque { body_start, .. } => &raw[*body_start..],
+            _ => raw,
         }
-        // Empieza por `---` pero no cierra → sin cierre.
-        return SplitFront {
-            fm_text: None,
-            body: raw.to_string(),
-        };
     }
-    SplitFront {
-        fm_text: Some(String::new()),
-        body: raw.to_string(),
+
+    /// El texto YAML del bloque (sin delimitadores), o `None` si no hay bloque cerrado.
+    pub fn fm_text<'a>(&self, raw: &'a str) -> Option<&'a str> {
+        match self {
+            SplitFront::Bloque { span, .. } => Some(&raw[span.clone()]),
+            _ => None,
+        }
     }
 }
 
-/// Port de `parseYAML`: parsea el texto del frontmatter a un mapa. Devuelve `Err(msg)` si es inválido.
+/// Separa el bloque de frontmatter del cuerpo, **por bytes** (para poder devolver el `span` que
+/// necesitan el patch quirúrgico y los rangos de diagnóstico, `§20.4`/`§20.9`).
 ///
-/// La conversión mapa→`Frontmatter` es **manual** (no serde-derive): el prototipo acepta
-/// cualquier escalar YAML en los campos tipados (`type: 123` → página de tipo "123" vía
-/// `String(v)` en los puntos de uso), mientras que el derive fallaba el fichero ENTERO con
-/// `OKF-FM03` (hard-fail) — invirtiendo el veredicto de la puerta de CI. También conserva
-/// los `null` explícitos (presentes en JS) y stringifica claves no-string (`1: x` → `"1"`).
-pub fn parse_yaml(text: &str) -> Result<Frontmatter, String> {
+/// El bloque abre con `---` en la primera línea y cierra con la primera línea posterior que
+/// empieza por `---`. Un bloque **vacío** (`---\n---\n`) es un bloque presente con texto vacío —
+/// no un bloque sin cerrar, que era el veredicto del port del prototipo.
+pub fn split_front(raw: &str) -> SplitFront {
+    if !raw.starts_with("---") {
+        return SplitFront::Sin;
+    }
+    // Tras el `---` de apertura debe venir un salto de línea; si no, no hay bloque bien formado.
+    let after_open = if raw[3..].starts_with("\r\n") {
+        5
+    } else if raw[3..].starts_with('\n') {
+        4
+    } else {
+        return SplitFront::SinCerrar;
+    };
+
+    // El cierre puede venir inmediatamente (bloque vacío) o tras una o más líneas de contenido.
+    let (span, close_start) = if raw[after_open..].starts_with("---") {
+        (after_open..after_open, after_open)
+    } else {
+        let Some(nl) = raw[after_open..]
+            .match_indices('\n')
+            .map(|(i, _)| after_open + i)
+            .find(|i| raw[i + 1..].starts_with("---"))
+        else {
+            return SplitFront::SinCerrar;
+        };
+        // El `\r` de un CRLF pertenece al delimitador, no al texto del bloque.
+        let end = if raw[..nl].ends_with('\r') {
+            nl - 1
+        } else {
+            nl
+        };
+        (after_open..end, nl + 1)
+    };
+
+    // Tras el `---` de cierre se consume el salto de línea (CRLF o LF) si lo hay.
+    let mut body_start = close_start + 3;
+    if raw[body_start..].starts_with('\r') {
+        body_start += 1;
+    }
+    if raw[body_start..].starts_with('\n') {
+        body_start += 1;
+    }
+    SplitFront::Bloque { span, body_start }
+}
+
+/// Parsea el texto de un bloque de frontmatter. `Ok` es **siempre** un `Value::Mapping`: un bloque
+/// vacío (o cuyo YAML no es un mapa) produce el mapa vacío; `Err(msg)` solo si el YAML es
+/// sintácticamente inválido.
+///
+/// **No** convierte tipos ni descarta claves: `type: 2` es el número 2 y `status: true` el
+/// booleano `true` (E16-H01 retiró la coerción `String(v)` heredada del prototipo).
+pub fn parse_yaml(text: &str) -> Result<Yaml, String> {
     if text.trim().is_empty() {
-        return Ok(Frontmatter::default());
+        return Ok(Yaml::Mapping(serde_yaml::Mapping::new()));
     }
     match serde_yaml::from_str::<Yaml>(text) {
-        // Solo los mapeos producen frontmatter; cualquier otra cosa → frontmatter vacío (como el proto).
-        Ok(Yaml::Mapping(m)) => Ok(frontmatter_from_mapping(m)),
-        Ok(_) => Ok(Frontmatter::default()),
+        Ok(v @ Yaml::Mapping(_)) => Ok(v),
+        // Un YAML válido que no es un mapa no describe propiedades: frontmatter vacío.
+        Ok(_) => Ok(Yaml::Mapping(serde_yaml::Mapping::new())),
         Err(e) => Err(e.to_string()),
-    }
-}
-
-/// Convierte un mapping YAML a `Frontmatter` con la coerción del prototipo.
-fn frontmatter_from_mapping(m: serde_yaml::Mapping) -> Frontmatter {
-    let mut fm = Frontmatter::default();
-    for (k, v) in m {
-        let key = js_string(&k);
-        // Los 5 knowns string: null explícito se registra (presente); el resto se coerce a string.
-        let mut set = |slot: &mut Option<String>, name: &str, v: Yaml| match v {
-            Yaml::Null => fm_mark_null(&mut fm.known_null, name),
-            other => *slot = Some(js_string(&other)),
-        };
-        match key.as_str() {
-            "type" => set(&mut fm.r#type, "type", v),
-            "title" => set(&mut fm.title, "title", v),
-            "description" => set(&mut fm.description, "description", v),
-            "resource" => set(&mut fm.resource, "resource", v),
-            "status" => set(&mut fm.status, "status", v),
-            // tags/timestamp se guardan RAW (incluido `null`: presente, y FMT-TAGS lo ve).
-            "tags" => fm.tags = Some(v),
-            "timestamp" => fm.timestamp = Some(v),
-            _ => {
-                fm.extra.insert(key, v);
-            }
-        }
-    }
-    fm
-}
-
-fn fm_mark_null(nulls: &mut Vec<String>, name: &str) {
-    if !nulls.iter().any(|n| n == name) {
-        nulls.push(name.to_string());
-    }
-}
-
-/// Port de `String(v)` de JS para valores YAML: números/bools a texto, arrays `join(",")`
-/// (con `null` → `""` dentro del join, como `Array.prototype.toString`), mapas `[object Object]`.
-pub(crate) fn js_string(v: &Yaml) -> String {
-    match v {
-        Yaml::String(s) => s.clone(),
-        Yaml::Bool(b) => b.to_string(),
-        Yaml::Number(n) => n.to_string(),
-        Yaml::Null => "null".to_string(),
-        Yaml::Sequence(items) => items
-            .iter()
-            .map(|x| match x {
-                Yaml::Null => String::new(),
-                other => js_string(other),
-            })
-            .collect::<Vec<_>>()
-            .join(","),
-        Yaml::Mapping(_) => "[object Object]".to_string(),
-        Yaml::Tagged(t) => js_string(&t.value),
     }
 }
 
@@ -383,121 +383,103 @@ pub fn locale_cmp(a: &str, b: &str) -> std::cmp::Ordering {
     a.len().cmp(&b.len())
 }
 
-/// Construye la representación YAML canónica de un frontmatter ordenado (known fields primero).
-///
-/// Filtros de `buildRaw` (fieles al proto): los KNOWN descartan cadena vacía Y lista vacía;
-/// los extras SOLO cadena vacía (una lista vacía de productor se conserva). Un `null` explícito
-/// se serializa en ambos casos (`tags: null`).
-fn dump_frontmatter(fm: &Frontmatter) -> String {
-    let mut map = serde_yaml::Mapping::new();
-    let push_known = |map: &mut serde_yaml::Mapping, k: &str, v: Yaml| {
-        let empty = matches!(&v, Yaml::String(s) if s.is_empty())
-            || matches!(&v, Yaml::Sequence(s) if s.is_empty());
-        if !empty {
-            map.insert(Yaml::String(k.to_string()), v);
-        }
+/// Parsea **solo** el frontmatter de un documento, sin necesitar su path: para las utilidades que
+/// no tienen más que el raw (el diff, p. ej.). `None` si el documento no tiene bloque cerrado o su
+/// YAML es inválido.
+pub fn parse_frontmatter(raw: &str) -> Option<ParsedFrontmatter> {
+    let SplitFront::Bloque { span, .. } = split_front(raw) else {
+        return None;
     };
-    let is_null = |k: &str| fm.known_null.iter().any(|n| n == k);
-    // Orden KNOWN_FM (los null explícitos también se emiten, en su posición canónica).
-    match (&fm.r#type, is_null("type")) {
-        (Some(v), _) => push_known(&mut map, "type", Yaml::String(v.clone())),
-        (None, true) => push_known(&mut map, "type", Yaml::Null),
-        _ => {}
-    }
-    match (&fm.title, is_null("title")) {
-        (Some(v), _) => push_known(&mut map, "title", Yaml::String(v.clone())),
-        (None, true) => push_known(&mut map, "title", Yaml::Null),
-        _ => {}
-    }
-    match (&fm.description, is_null("description")) {
-        (Some(v), _) => push_known(&mut map, "description", Yaml::String(v.clone())),
-        (None, true) => push_known(&mut map, "description", Yaml::Null),
-        _ => {}
-    }
-    match (&fm.resource, is_null("resource")) {
-        (Some(v), _) => push_known(&mut map, "resource", Yaml::String(v.clone())),
-        (None, true) => push_known(&mut map, "resource", Yaml::Null),
-        _ => {}
-    }
-    if let Some(v) = &fm.tags {
-        push_known(&mut map, "tags", v.clone());
-    }
-    if let Some(v) = &fm.timestamp {
-        push_known(&mut map, "timestamp", v.clone());
-    }
-    match (&fm.status, is_null("status")) {
-        (Some(v), _) => push_known(&mut map, "status", Yaml::String(v.clone())),
-        (None, true) => push_known(&mut map, "status", Yaml::Null),
-        _ => {}
-    }
-    // Extras (claves de productor), en orden de aparición; solo se filtra la cadena vacía.
-    for (k, v) in &fm.extra {
-        if !KNOWN_FM.contains(&k.as_str()) && !matches!(v, Yaml::String(s) if s.is_empty()) {
-            map.insert(Yaml::String(k.clone()), v.clone());
-        }
-    }
-    serde_yaml::to_string(&Yaml::Mapping(map))
-        .unwrap_or_default()
-        .trim_end()
-        .to_string()
+    let texto = &raw[span.clone()];
+    parse_yaml(texto).ok().map(|value| ParsedFrontmatter {
+        value,
+        raw: texto.to_string(),
+        span,
+    })
 }
 
-/// Port de `buildRaw`: reconstrucción canónica del `.md` (frontmatter ordenado + cuerpo).
-/// Es LA canonicalización del modelo OKF.
-pub fn build_raw(fm: &Frontmatter, body: &str) -> String {
-    let y = dump_frontmatter(fm);
+/// Reconstruye el `.md` a partir de su frontmatter y su cuerpo.
+///
+/// Sin frontmatter (`None`) el documento **es** su cuerpo: no se inventa un bloque vacío. Con
+/// frontmatter se serializa su `value`, que preserva el orden de aparición de las claves (el
+/// `Mapping` de `serde_yaml` es un `IndexMap`) y **no descarta ninguna**: ni la cadena vacía, ni
+/// la lista vacía, ni el `null` explícito — todos son valores del usuario (`§20.4`).
+///
+/// > La edición **quirúrgica** del bloque (reutilizar `raw`/`span` en vez de reserializar) es
+/// > E16-H04; aquí siempre se reserializa el `value`.
+pub fn build_raw(fm: Option<&ParsedFrontmatter>, body: &str) -> String {
+    let Some(fm) = fm else {
+        return body.to_string();
+    };
+    let y = serde_yaml::to_string(&fm.value)
+        .unwrap_or_default()
+        .trim_end()
+        .to_string();
     let body_trimmed = body.trim_start_matches('\n');
     format!("---\n{y}\n---\n\n{body_trimmed}")
 }
 
-/// Resultado interno del parseo de un fichero (sin el `raw`, que añade el llamante).
+/// Resultado del parseo de un documento (sin el `raw`, que ya tiene el llamante).
 pub struct Parsed {
     pub kind: FileKind,
-    pub fm: Option<Frontmatter>,
+    /// El frontmatter del documento, o `None` si no tiene bloque (estado **válido**, `§20.4`).
+    pub frontmatter: Option<ParsedFrontmatter>,
     pub fm_err: Option<FmError>,
     pub body: String,
 }
 
-/// Port de `parseFile`: NUNCA falla por contenido (FM01/02/03 son datos, no `Result`).
+/// Parsea un documento. NUNCA falla por contenido: los errores de frontmatter son datos
+/// ([`FmError`]), no un `Result`.
+///
+/// Un documento **sin** frontmatter es válido: `frontmatter: None`, `fm_err: None` y el cuerpo es
+/// el fichero entero.
 pub fn parse_file(path: &str, raw: &str) -> Parsed {
     let kind = file_kind(path);
-    let sf = split_front(raw);
     if kind != FileKind::Concept {
-        // Reservados: el cuerpo es el raw entero, sin frontmatter tipado.
+        // Reservados: el cuerpo es el raw entero, sin frontmatter. (E16-H02 retira esta rama.)
         return Parsed {
             kind,
-            fm: None,
+            frontmatter: None,
             fm_err: None,
             body: raw.to_string(),
         };
     }
-    match sf.fm_text {
-        None => Parsed {
+    let sf = split_front(raw);
+    let body = sf.body(raw).to_string();
+    match &sf {
+        SplitFront::Sin => Parsed {
             kind,
-            fm: None,
+            frontmatter: None,
+            fm_err: None,
+            body,
+        },
+        SplitFront::SinCerrar => Parsed {
+            kind,
+            frontmatter: None,
             fm_err: Some(FmError::Unclosed),
-            body: sf.body,
+            body,
         },
-        Some(t) if t.is_empty() => Parsed {
-            kind,
-            fm: None,
-            fm_err: Some(FmError::Missing),
-            body: sf.body,
-        },
-        Some(t) => match parse_yaml(&t) {
-            Ok(fm) => Parsed {
-                kind,
-                fm: Some(fm),
-                fm_err: None,
-                body: sf.body,
-            },
-            Err(e) => Parsed {
-                kind,
-                fm: None,
-                fm_err: Some(FmError::Malformed(e)),
-                body: sf.body,
-            },
-        },
+        SplitFront::Bloque { span, .. } => {
+            let texto = &raw[span.clone()];
+            match parse_yaml(texto) {
+                Ok(value) => Parsed {
+                    kind,
+                    frontmatter: Some(ParsedFrontmatter {
+                        value,
+                        raw: texto.to_string(),
+                        span: span.clone(),
+                    }),
+                    fm_err: None,
+                    body,
+                },
+                Err(e) => Parsed {
+                    kind,
+                    frontmatter: None,
+                    fm_err: Some(FmError::Malformed(e)),
+                    body,
+                },
+            }
+        }
     }
 }
 
