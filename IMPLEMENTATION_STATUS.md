@@ -604,3 +604,22 @@ superficie de producto; git queda como crate dormido) y `DECISIONES.md §0`. Des
   historiador, planificador), `.claude/README.md`, `DECISIONES.md §9` y
   `requirements/paridad-auditoria.md` daban por vivo el arnés diferencial y el `npm ci` de
   `prototype/harness/`; ahora lo declaran retirado en `E15-H04`.
+- ⚖️ **Juez ciego (H01–H04)**: **APROBADA CON RESERVAS**, 11/11 criterios cumplen. Hallazgos
+  corregidos después:
+  - *Isla de código muerto*: `Workspace::apply_mutation` quedó sin llamadores (sus consumidores eran
+    `generate_index`/`generate_tags`/`switch`/`merge`/`restore`, todos borrados). Borrados él,
+    `ApplyReport`, `core::types::Mutation` y `cache_remove`. La nota de "fuera de alcance" de
+    E15-H02 —que justificaba conservar `Mutation` porque «lo usa el motor transaccional»— era
+    **factualmente falsa** tras retirar la auto-regen; corregida en la épica.
+  - *Contrato desalineado*: la semántica normativa de `change_apply`/`change_revert` en
+    `contracts/mcp.yml` seguía anunciando la auto-regeneración de `index`/`tags`.
+  - *Menores*: exit code 4 aún en la tabla de `CLAUDE.md`; `ignore` huérfano en `lodestar-cli`;
+    doc-comments de `publish.rs`/`staging.rs` justificando la escisión `publish`/`publish_result`
+    por la auto-regen (la escisión **se conserva**: vale por sí sola, se publica exactamente el mapa
+    que se validó); `RELEASING.md` publicando `lodestar-vcs` y omitiendo `lodestar-app`.
+  - *Hueco preexistente, no regresión*: `reindex` no tiene ningún test que lo ejecute, y ahora es la
+    mitad de la superficie de la CLI. Pendiente.
+- 🟡 **E15-H06** (raíz = `cwd`) — fase roja commiteada: `arranca_en_directorio_arbitrario`,
+  `root_explicito_gana`, `cli_no_asciende` (rojos) + `rechaza_absoluta`, `rechaza_escape` (guardas
+  que elevan la validación de `RelPath` a contrato de la frontera, con cebo real fuera de la raíz
+  para que no pasen en falso).
