@@ -10,5 +10,8 @@ publish = false
 [dependencies]
 lodestar-core = { workspace = true }
 
+[dev-dependencies]
+tempfile = "3"
+
 [lints]
 workspace = true

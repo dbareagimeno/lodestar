@@ -1,7 +1,17 @@
-//! Bundles de ejemplo reusables por los tests (E0-H03).
+//! Workspaces de ejemplo reusables por los tests (E0-H03; ampliado en E15-H05).
 //!
-//! Expone `FileMap`s deterministas que disparan cada `CheckCode`, además de un generador
-//! sintético parametrizable (para los benches del `§11`).
+//! Dos familias conviven aquí:
+//!
+//! - **Workspaces Markdown universales** ([`arbitrary`], [`with_edge_cases`], [`materialize`],
+//!   [`materialize_disk_only`]) — los que exige `ARCHITECTURE.md §20.5` y
+//!   `REFACTOR_PHASE_2 §Tests imprescindibles`: estructuras de carpetas arbitrarias, sin `index.md`
+//!   ni frontmatter obligatorio, con los casos límite del descubrimiento.
+//! - **Bundles OKF heredados** ([`conformant`], [`with_issues`], [`synthetic`]) — de v0.2.x, vivos
+//!   solo mientras existan sus consumidores (los retiran E16/E17 al cambiar el modelo documental).
+//!
+//! Todos son deterministas: misma llamada ⇒ mismos bytes.
+
+use std::path::Path;
 
 use lodestar_core::types::{FileMap, RelPath};
 
@@ -17,6 +27,147 @@ pub fn file_map(pairs: &[(&str, &str)]) -> FileMap {
         })
         .collect()
 }
+
+// ---------------------------------------------------------------------------
+// Workspaces Markdown universales (E15-H05, `ARCHITECTURE.md §20.5`)
+// ---------------------------------------------------------------------------
+
+/// El workspace del `§Resultado esperado` de `REFACTOR_PHASE_2`: estructura arbitraria, **sin**
+/// `index.md`, **sin** frontmatter, con enlaces cruzados entre la raíz y tres niveles de
+/// profundidad en ambos sentidos.
+///
+/// ```text
+/// README.md                       → one/first.md, three/levels/deep/third.md
+/// one/first.md                    → ../two/levels/second.md   (hermano en otro árbol)
+/// two/levels/second.md            → (sin salientes: solo lo enlazan)
+/// three/levels/deep/third.md      → ../../../README.md        (vuelta a la raíz)
+/// ```
+pub fn arbitrary() -> FileMap {
+    file_map(&[
+        (
+            "README.md",
+            "# Proyecto\n\nEmpieza por [lo primero](one/first.md) y mira lo \
+             [profundo](three/levels/deep/third.md).\n",
+        ),
+        (
+            "one/first.md",
+            "# Primero\n\nHermano en otro árbol: [segundo](../two/levels/second.md).\n",
+        ),
+        (
+            "two/levels/second.md",
+            "# Segundo\n\nNo enlaza a nadie; solo lo enlazan.\n",
+        ),
+        (
+            "three/levels/deep/third.md",
+            "# Tercero\n\nVolver a la [visión general](../../../README.md).\n",
+        ),
+    ])
+}
+
+/// Casos límite de resolución de enlaces y de paths, en un solo workspace.
+///
+/// Cubre: paths con espacios, href con `%20`, directorio oculto, dos documentos con el **mismo
+/// basename** en árboles distintos, un enlace con **capitalización errónea** (portabilidad), un
+/// enlace a un fichero de código del proyecto, un enlace externo, un anchor propio, un destino
+/// inexistente y un intento de escape del workspace.
+pub fn with_edge_cases() -> FileMap {
+    file_map(&[
+        (
+            "notas/con espacios.md",
+            "# Con espacios\n\nEl path de este documento lleva espacios.\n",
+        ),
+        (
+            "raiz.md",
+            "# Raíz\n\n\
+             Espacios por porcentaje: [nota](notas/con%20espacios.md).\n\
+             Capitalización errónea: [auth](Docs/Auth.md).\n\
+             A código del proyecto: [servicio](src/auth/token_service.rs).\n\
+             Externo: [web](https://example.com).\n\
+             Anchor propio: [aquí](#raiz).\n\
+             Inexistente: [falta](no-existe.md).\n\
+             Escape: [fuera](../../../etc/passwd).\n",
+        ),
+        (
+            "docs/auth.md",
+            "# Auth\n\nEl enlace real es en minúsculas: `docs/auth.md`.\n",
+        ),
+        (
+            ".oculto/secreto.md",
+            "# Oculto\n\nVive en un directorio que empieza por punto.\n",
+        ),
+        // Mismo basename (`auth.md`) en dos árboles distintos: deben quedar inequívocos.
+        (
+            "packages/api/docs/auth.md",
+            "# Auth de la API\n\nMismo basename que [el otro](../../../docs/auth.md).\n",
+        ),
+    ])
+}
+
+/// Escribe un [`FileMap`] en disco bajo `root`, creando los directorios intermedios.
+///
+/// Los tests de descubrimiento necesitan ficheros reales (el walker recorre disco, no un mapa);
+/// el resto de tests siguen trabajando con el `FileMap` en memoria.
+///
+/// # Errores
+/// Propaga cualquier error de I/O (crear directorio o escribir fichero).
+pub fn materialize(files: &FileMap, root: &Path) -> std::io::Result<()> {
+    for (rel, content) in files {
+        let target = root.join(rel.as_str());
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&target, content)?;
+    }
+    Ok(())
+}
+
+/// Materializa los casos que **no** son representables en un [`FileMap`] porque no son texto UTF-8
+/// válido, no son ficheros regulares, o son ficheros de control del descubrimiento.
+///
+/// Crea bajo `root`:
+/// - `binario.md` — bytes no UTF-8 (`DOC-NOT-UTF8`).
+/// - `enorme.md` — `size_limit + 1` bytes de texto (`DOC-TOO-LARGE`).
+/// - `enlace.md` — symlink a `README.md`, solo en Unix (`SYMLINK-UNSUPPORTED`).
+/// - `vendor/dep.md` + `.gitignore` con `vendor/`.
+/// - `borradores/wip.md` + `.lodestarignore` con `borradores/`.
+/// - `src/auth/token_service.rs` — fichero del proyecto que **no** es Markdown (destino de un
+///   enlace `WorkspaceFile`).
+///
+/// # Errores
+/// Propaga cualquier error de I/O.
+pub fn materialize_disk_only(root: &Path, size_limit: usize) -> std::io::Result<()> {
+    std::fs::write(root.join("binario.md"), [0xF0, 0x28, 0x8C, 0xBC])?;
+    // `size_limit + 1` bytes exactos: un byte por encima del límite, sin ambigüedad de frontera.
+    std::fs::write(root.join("enorme.md"), "a".repeat(size_limit + 1))?;
+
+    std::fs::create_dir_all(root.join("vendor"))?;
+    std::fs::write(root.join("vendor/dep.md"), "# Dependencia\n")?;
+    std::fs::write(root.join(".gitignore"), "vendor/\n")?;
+
+    std::fs::create_dir_all(root.join("borradores"))?;
+    std::fs::write(root.join("borradores/wip.md"), "# Borrador\n")?;
+    std::fs::write(root.join(".lodestarignore"), "borradores/\n")?;
+
+    std::fs::create_dir_all(root.join("src/auth"))?;
+    std::fs::write(
+        root.join("src/auth/token_service.rs"),
+        "// Destino de un enlace WorkspaceFile.\n",
+    )?;
+
+    // El symlink necesita un destino existente para que el walker lo vea como `.md`.
+    let objetivo = root.join("README.md");
+    if !objetivo.exists() {
+        std::fs::write(&objetivo, "# Objetivo del symlink\n")?;
+    }
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&objetivo, root.join("enlace.md"))?;
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Bundles OKF heredados (v0.2.x) — se retiran con sus consumidores en E16/E17
+// ---------------------------------------------------------------------------
 
 /// Bundle conforme mínimo: un index raíz + un concept válido que se enlazan mutuamente.
 pub fn conformant() -> FileMap {
