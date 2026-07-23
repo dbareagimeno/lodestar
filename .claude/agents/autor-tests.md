@@ -20,7 +20,8 @@ recibes, pídelo y no hagas nada más.
 - **Unit inline**: módulos `#[cfg(test)]` junto al código, para lógica interna.
 - **Fixtures compartidas**: `crates/lodestar-fixtures` (`file_map`, `conformant()`, `with_issues()`,
   `synthetic(n)`). Amplíalas antes que duplicar bundles inline.
-- **Arnés diferencial** (si la historia porta comportamiento del prototipo): añade un `#[test]` en
+- **Arnés diferencial**: RETIRADO en `E15-H04`. El prototipo ya no arbitra comportamiento; la spec
+  es `docs/REFACTOR_PHASE_2.md` + `ARCHITECTURE.md §20`. (Histórico) añadía un `#[test]` en
   `crates/lodestar-core/tests/differential.rs` con `assert_parity(...)` guardado tras
   `if !node_available() { return; }`, y las sondas de query nuevas al slice `PROBES`.
 - **Regresiones de paridad**: sección «Regresiones de paridad con el prototipo» de

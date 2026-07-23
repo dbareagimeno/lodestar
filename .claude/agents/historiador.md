@@ -28,7 +28,7 @@ ambigua, tu salida lo dice explícitamente y lista las preguntas — no rellenes
   propuesto** (p. ej. `Entonces el check es OKF-FM01 → test: fm01_falta_frontmatter`). Los
   criterios estructurales (grep en CI, pureza, docs) siguen siendo checklist binario.
 - **Campo Pruebas concreto**: qué fichero de test (`crates/<crate>/tests/*.rs`), qué fixtures de
-  `lodestar-fixtures`, y si necesita sonda nueva en el arnés diferencial
+  `lodestar-fixtures` (el arnés diferencial se retiró en `E15-H04`)
   (`crates/lodestar-core/tests/differential.rs` + `PROBES`).
 - **Delta de contrato**: si la historia toca la frontera MCP (tools de `lodestar-mcp`), incluye en
   la historia una sección «Delta de contrato» con el cambio propuesto a `contracts/mcp.yml` (los

@@ -36,7 +36,7 @@ necesidad merece una épica.
    Alcance, Fuera de alcance, Criterios de aceptación, Dependencias, Pruebas), con las mismas
    reglas que el historiador: criterios de comportamiento en **Dado/Cuando/Entonces mapeados a
    nombres de test** (los estructurales — grep en CI, pureza, docs — siguen siendo checklist
-   binario), campo Pruebas concreto (fichero, fixtures, sondas diferenciales si aplica),
+   binario), campo Pruebas concreto (fichero, fixtures),
    y sección «Delta de contrato» en las que tocan la frontera MCP (`contracts/mcp.yml`).
 3. **Dependencias sanas**: campo `Dependencias:` consistente, sin ciclos, y un orden de
    construcción explícito al final de la épica (como el «Orden de construcción» del README).
