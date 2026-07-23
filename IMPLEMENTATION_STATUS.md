@@ -535,3 +535,34 @@ superficie de producto; git queda como crate dormido) y `DECISIONES.md §0`. Des
   - **Pendiente al cierre de E14**: limpieza final de superficie `mcp.yml` → 10 tools objetivo (retirar
     `query`/`conformance_check`/`find_*`/`neighborhood`/`create_concept`/`update_frontmatter`/
     `generate_*`), descopada aquí desde E12/E13.
+
+---
+
+## Migración a workspaces Markdown universales (E15–E22) — EN CURSO
+
+> Rama `refactor/markdown-universal`. Diseño ratificado: `ARCHITECTURE.md §20` (2026-07-23; fuente:
+> `docs/REFACTOR_PHASE_2.md`). Lodestar deja de exigir OKF y opera sobre cualquier red de `.md` de un
+> proyecto. **v0.3.0 será incompatible con v0.2.x**; `v0.2.0` queda como última versión OKF.
+
+| Épica | Estado | Detalle |
+|---|---|---|
+| **E15** Workspace universal | 🟡 En curso | Retirada de vcs/generadores/init-zip/prototipo · raíz = `cwd` · descubrimiento recursivo · config opcional. |
+| **E16** Modelo documental genérico | ⚪ Pendiente | `ParsedFrontmatter` YAML arbitrario · sin ficheros reservados · título derivado · patch quirúrgico · diagnósticos mínimos · `Concept`→`Document`. |
+| **E17** Enlaces y grafo universal | ⚪ Pendiente | Parser de enlaces (`pulldown-cmark`) · `LinkTarget` · diagnósticos de enlace · `Analysis` nueva · superficie de grafo. |
+| **E18** Store v2 | ⚪ Pendiente | DDL nuevo, metadata anidada, links genéricos, cold rebuild, paridad core/store. |
+| **E19** Lenguaje de consulta | ⚪ Pendiente | Parser · AST · type checking · namespaces · filtro JSON equivalente. |
+| **E20** Inspección y validación genéricas | ⚪ Pendiente | `metadata_inspect` (retira `core::schema`) · política `rejectNewErrors`/`allowExistingErrors`. |
+| **E21** Contrato MCP y transacciones genéricas | ⚪ Pendiente | Contrato nuevo · 8 operaciones universales · selecciones masivas por consulta. |
+| **E22** Migración y limpieza pública | ⚪ Pendiente | `migrate-from-okf --dry-run` · docs · README · publicación incompatible. |
+
+### E15 — Workspace universal
+
+- ✅ **Puerta de diseño** — `ARCHITECTURE.md §20` escrita y ratificada (adenda de 14 subsecciones;
+  notas de supersesión en §4, §10 y §19). Épicas E15/E16/E17 descompuestas en `requirements/`.
+- ✅ **E15-H05** — Fixtures de workspaces Markdown arbitrarios (`crates/lodestar-fixtures`):
+  `arbitrary()` (raíz + 3 niveles, enlaces cruzados en ambos sentidos, sin `index.md` ni
+  frontmatter), `with_edge_cases()` (espacios, `%20`, oculto, mismo basename en dos árboles,
+  capitalización errónea, código, externo, anchor, inexistente, escape), `materialize()` y
+  `materialize_disk_only()` (no UTF-8, sobre el límite, symlink, `.gitignore`, `.lodestarignore`).
+  **Aditivo**: los bundles OKF heredados siguen vivos hasta que E16/E17 retiren a sus consumidores.
+  4 tests.
