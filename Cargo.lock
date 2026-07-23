@@ -772,6 +772,7 @@ name = "lodestar-fixtures"
 version = "0.2.0"
 dependencies = [
  "lodestar-core",
+ "tempfile",
 ]
 
 [[package]]

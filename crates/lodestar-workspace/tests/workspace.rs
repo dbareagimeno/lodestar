@@ -825,3 +825,56 @@ types:
         "el loader debe preservar `requiredFields` del wire camelCase"
     );
 }
+
+// ---------------------------------------------------------------------------
+// E15-H01 — Borrar el crate `lodestar-vcs` y su cableado
+// ---------------------------------------------------------------------------
+
+/// `abre_sin_repo_git` — **Dado** un directorio que **no** es un repo git, **Cuando** se abre con
+/// [`Workspace::open`], **Entonces** abre sin error y sin rama de descubrimiento de repo
+/// (`requirements/epica-15-workspace-universal.md` § E15-H01).
+///
+/// // guarda: ya verde, debe seguir verde tras la retirada
+///
+/// Hoy pasa porque `Vcs::discover` devuelve `Ok(None)` cuando no hay repo; tras E15-H01 debe
+/// seguir pasando **sin** que exista siquiera esa rama. El test no menciona git en su API: fija
+/// que la apertura de un directorio arbitrario es un camino feliz, no una excepción tolerada.
+/// Se asevera además que la apertura **no crea** un `.git/` (no hay `git init` implícito) y que el
+/// workspace queda operativo (analiza el `.md` de disco).
+#[test]
+fn abre_sin_repo_git() {
+    let dir = tempfile::tempdir().unwrap();
+    // Un `.md` cualquiera: el directorio es un proyecto normal, no un bundle ceremonioso.
+    std::fs::write(
+        dir.path().join("notas.md"),
+        "---\ntype: Nota\ntitle: Notas\ndescription: d\n---\n\n# H\n\ncuerpo\n",
+    )
+    .unwrap();
+    // Guarda anti-vacuidad: el directorio temporal NO es (ni está dentro de) un repo git.
+    assert!(
+        !dir.path().join(".git").exists(),
+        "el directorio de partida no debe ser un repo git"
+    );
+
+    let ws = Workspace::open(dir.path())
+        .expect("un directorio que no es repo git debe abrirse sin error");
+
+    // La apertura no fabrica un repo: git no participa en abrir un workspace.
+    assert!(
+        !dir.path().join(".git").exists(),
+        "`Workspace::open` no debe crear un repo git al abrir"
+    );
+
+    // Y el workspace queda operativo sobre el contenido de disco.
+    let snap = ws
+        .snapshot()
+        .expect("el snapshot debe computarse sin repo git");
+    assert!(
+        snap.analysis
+            .concepts
+            .iter()
+            .any(|c| c.as_str() == "notas.md"),
+        "el análisis debe ver el `.md` del directorio: {:?}",
+        snap.analysis.concepts
+    );
+}

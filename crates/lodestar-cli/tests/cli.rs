@@ -483,3 +483,126 @@ fn import_rechaza_zip_slip() {
                                         // ...la ruta insegura se ignora: no se escribe fuera del destino.
     assert!(!dest.parent().unwrap().join("evil.md").exists());
 }
+
+// ---------------------------------------------------------------------------
+// E15-H02 / E15-H03 — la CLI queda en `check` + `reindex`
+// (`requirements/epica-15-workspace-universal.md`)
+// ---------------------------------------------------------------------------
+
+/// Nombres de los subcomandos que anuncia `lodestar --help`, parseados de la sección `Commands:`
+/// de clap (primer token de cada línea, hasta la línea en blanco que cierra la sección).
+///
+/// Se parsea en vez de buscar subcadenas porque `index` es subcadena de `reindex` y de la propia
+/// descripción de `reindex` («la cache `.lodestar/index.db`»): un `help.contains("index")` sería a
+/// la vez falso-positivo y test vacuo.
+fn subcomandos_del_help() -> Vec<String> {
+    let out = bin().arg("--help").output().unwrap();
+    assert_eq!(out.status.code(), Some(0), "`--help` sale 0");
+    let help = String::from_utf8(out.stdout).unwrap();
+    let mut subs = Vec::new();
+    let mut dentro = false;
+    for linea in help.lines() {
+        if linea.trim_end() == "Commands:" {
+            dentro = true;
+            continue;
+        }
+        if dentro {
+            if linea.trim().is_empty() {
+                break;
+            }
+            // Las líneas de continuación de una descripción larga van más indentadas; el nombre
+            // del subcomando es el primer token de una línea con indentación de dos espacios.
+            if let Some(nombre) = linea.split_whitespace().next() {
+                if linea.starts_with("  ") && !linea.starts_with("      ") {
+                    subs.push(nombre.to_string());
+                }
+            }
+        }
+    }
+    assert!(
+        !subs.is_empty(),
+        "no se pudo parsear la sección `Commands:` del help:\n{help}"
+    );
+    subs
+}
+
+/// `help_sin_generadores` (E15-H02) — **Dado** `lodestar --help`, **Cuando** se imprime,
+/// **Entonces** no aparecen los subcomandos `index` ni `tags`: sin generadores no hay catálogo.
+///
+/// Fase ROJA: hoy ambos siguen en el enum de clap (`main.rs`), así que el listado los incluye.
+#[test]
+fn help_sin_generadores() {
+    let subs = subcomandos_del_help();
+    for generador in ["index", "tags"] {
+        assert!(
+            !subs.iter().any(|s| s == generador),
+            "el subcomando generador `{generador}` no debe existir; el help ofrece: {subs:?}"
+        );
+    }
+}
+
+/// `index_es_uso` (E15-H02) — **Dado** `lodestar index`, **Cuando** se ejecuta, **Entonces** exit
+/// code `2` (uso: subcomando retirado).
+///
+/// Se ejecuta con el cwd en un directorio temporal para que, mientras el subcomando siga vivo, la
+/// generación no escriba un `index.md` dentro del repo.
+///
+/// Fase ROJA: hoy `index` genera el índice del directorio y sale `0`.
+#[test]
+fn index_es_uso() {
+    let dir = temp_dir("index-es-uso");
+    write(
+        &dir,
+        "a.md",
+        "---\ntype: Nota\ntitle: A\ndescription: d\n---\n\n# H\n",
+    );
+    let status = bin().current_dir(&dir).arg("index").status().unwrap();
+    assert_eq!(
+        status.code(),
+        Some(2),
+        "`index` retirado → error de uso (exit 2), no generar el índice"
+    );
+    assert!(
+        !dir.join("index.md").exists(),
+        "un subcomando retirado no debe haber escrito nada en disco"
+    );
+}
+
+/// `help_solo_check_y_reindex` (E15-H03) — **Dado** `lodestar --help`, **Cuando** se imprime,
+/// **Entonces** los únicos subcomandos son `check` y `reindex` (más el `help` que añade clap).
+///
+/// Fase ROJA: hoy el help ofrece además `init`, `index`, `tags`, `export` e `import`.
+#[test]
+fn help_solo_check_y_reindex() {
+    let mut subs = subcomandos_del_help();
+    subs.sort();
+    subs.dedup();
+    let esperados = vec![
+        "check".to_string(),
+        "help".to_string(),
+        "reindex".to_string(),
+    ];
+    assert_eq!(
+        subs, esperados,
+        "la CLI debe quedar en `check` + `reindex` (más `help` de clap); ofrece: {subs:?}"
+    );
+}
+
+/// `init_es_uso` (E15-H03) — **Dado** `lodestar init`, **Cuando** se ejecuta, **Entonces** exit
+/// code `2`: no hay ceremonia de creación, cualquier directorio vale desde el principio.
+///
+/// Fase ROJA: hoy `init` monta el scaffold (index raíz + `.gitignore` + repo) y sale `0`.
+#[test]
+fn init_es_uso() {
+    let dir = temp_dir("init-es-uso");
+    let status = bin().current_dir(&dir).arg("init").status().unwrap();
+    assert_eq!(
+        status.code(),
+        Some(2),
+        "`init` retirado → error de uso (exit 2), no crear scaffold"
+    );
+    assert!(
+        !dir.join("index.md").exists(),
+        "un subcomando retirado no debe haber creado el scaffold"
+    );
+}

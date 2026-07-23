@@ -416,6 +416,116 @@ fn esquema_viejo_con_misma_version_se_reconstruye() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// E15-H01 — Borrar el crate `lodestar-vcs` y su cableado (cara del store)
+// ---------------------------------------------------------------------------
+
+/// `PRAGMA user_version` que estampó **v0.2** (la versión con la tabla `commit_conformance`).
+/// Es un dato **histórico**, no la versión vigente: el test lo usa solo para fabricar una cache
+/// antigua, y nunca asevera contra el número nuevo (que lee de disco), así que sigue valiendo
+/// después de cualquier bump futuro.
+const USER_VERSION_V02: i64 = 1;
+
+/// DDL exacto que escribía v0.2 (incluida la tabla git `commit_conformance`).
+const DDL_V02: &str = r#"
+    CREATE TABLE files (
+        path TEXT PRIMARY KEY, kind TEXT NOT NULL, type TEXT, title TEXT, description TEXT,
+        status TEXT, resource TEXT, frontmatter_json TEXT NOT NULL DEFAULT '{}',
+        body TEXT NOT NULL DEFAULT '', raw TEXT NOT NULL DEFAULT '', hash BLOB NOT NULL,
+        mtime INTEGER NOT NULL DEFAULT 0, size INTEGER NOT NULL DEFAULT 0
+    );
+    CREATE TABLE links (
+        src TEXT NOT NULL, dst TEXT NOT NULL, href TEXT NOT NULL,
+        src_is_index INTEGER NOT NULL DEFAULT 0
+    );
+    CREATE TABLE tags (path TEXT NOT NULL, tag TEXT NOT NULL);
+    CREATE TABLE diagnostics (
+        path TEXT NOT NULL, code TEXT NOT NULL, level TEXT NOT NULL, msg TEXT NOT NULL,
+        targets_json TEXT NOT NULL DEFAULT '[]'
+    );
+    CREATE VIRTUAL TABLE files_fts USING fts5(path UNINDEXED, title, description, body);
+    CREATE TABLE commit_conformance (
+        tree_oid TEXT PRIMARY KEY, hard_fail INTEGER NOT NULL, warn_count INTEGER NOT NULL,
+        conform INTEGER NOT NULL
+    );
+"#;
+
+/// Lee el `PRAGMA user_version` de la cache de `root` (sin pasar por el store).
+fn user_version_de(root: &Path) -> i64 {
+    let conn = rusqlite::Connection::open(root.join(".lodestar").join("index.db")).unwrap();
+    conn.query_row("PRAGMA user_version", [], |r| r.get(0))
+        .unwrap()
+}
+
+/// `cache_v2_se_reconstruye` — **Dado** una cache `.lodestar/index.db` escrita por v0.2 (con
+/// `commit_conformance` y su `user_version`), **Cuando** se abre con el código nuevo, **Entonces**
+/// se detecta que la versión no es la vigente y se reconstruye limpia, sin error y sirviendo el
+/// contenido actual de los `.md` (`requirements/epica-15-workspace-universal.md` § E15-H01).
+///
+/// **Sin acoplarse al número de versión nuevo**: el test estampa la versión *histórica* de v0.2 y
+/// asevera que, tras abrir, la cache quedó estampada con una versión **distinta** — es decir, que
+/// el bump de `USER_VERSION` (`schema.rs`) ocurrió y disparó la reconstrucción. Cualquier bump
+/// futuro lo mantiene verde.
+///
+/// Fase ROJA: hoy `USER_VERSION == 1 == USER_VERSION_V02` y `schema_is_current` acepta el esquema
+/// v0.2 tal cual (es idéntico al vigente), así que la cache **no** se detecta antigua: la versión
+/// sigue siendo la de v0.2 y una cache nueva sigue trayendo la tabla `commit_conformance`. Las dos
+/// aserciones de retirada fallan.
+#[test]
+fn cache_v2_se_reconstruye() {
+    // (1) Un proyecto con un `.md` y una cache fabricada a mano con el esquema y la versión de v0.2.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("a.md"),
+        "---\ntype: N\ntitle: A\ndescription: d\n---\n\n# H\n",
+    )
+    .unwrap();
+    let db_dir = dir.path().join(".lodestar");
+    std::fs::create_dir_all(&db_dir).unwrap();
+    {
+        let conn = rusqlite::Connection::open(db_dir.join("index.db")).unwrap();
+        conn.execute_batch(DDL_V02).unwrap();
+        // Una fila de la tabla git, para que la cache v0.2 sea genuina (no un esquema vacío).
+        conn.execute(
+            "INSERT INTO commit_conformance (tree_oid, hard_fail, warn_count, conform) \
+             VALUES ('deadbeef', 0, 0, 1)",
+            [],
+        )
+        .unwrap();
+        conn.pragma_update(None, "user_version", USER_VERSION_V02)
+            .unwrap();
+    }
+    // Guarda anti-vacuidad: la cache de partida está estampada con la versión de v0.2.
+    assert_eq!(user_version_de(dir.path()), USER_VERSION_V02);
+
+    // (2) Abrir con el código nuevo: sin error y sirviendo el contenido actual de los `.md`.
+    let store =
+        Store::open_and_build(dir.path()).expect("una cache v0.2 no puede romper la apertura");
+    assert!(
+        store.concepts().unwrap().contains(&rp("a.md")),
+        "tras la reconstrucción, la cache debe servir el contenido actual de los `.md`"
+    );
+
+    // (3) Se detectó como antigua: la cache quedó estampada con una versión DISTINTA de la de v0.2.
+    assert_ne!(
+        user_version_de(dir.path()),
+        USER_VERSION_V02,
+        "la cache de v0.2 debe detectarse antigua (bump de `USER_VERSION`) y reconstruirse"
+    );
+
+    // (4) Y el esquema nuevo es limpio: una cache recién creada NO trae la tabla git
+    //     `commit_conformance` (se retira del DDL en E15-H01).
+    let limpio = tempfile::tempdir().unwrap();
+    let _fresca = Store::open(limpio.path()).unwrap();
+    let conn =
+        rusqlite::Connection::open(limpio.path().join(".lodestar").join("index.db")).unwrap();
+    assert!(
+        conn.prepare("SELECT tree_oid FROM commit_conformance LIMIT 0")
+            .is_err(),
+        "el DDL vigente no debe crear la tabla git `commit_conformance`"
+    );
+}
+
 #[test]
 fn cache_corrupta_se_recrea_sola() {
     // La cache es desechable: un index.db corrupto no puede dejar open() fallando para siempre.
