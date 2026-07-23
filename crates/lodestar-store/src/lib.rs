@@ -348,6 +348,22 @@ impl Store {
         synth::search_substring(&conn, needle)
     }
 
+    /// Enlaces salientes materializados de un documento **con su clasificación** (`§20.12`,
+    /// E18-H04): una tupla `(raw_href, target_kind, target_path, fragment)` por enlace del cuerpo,
+    /// leída de la tabla `links`. Es la superficie pública por la que el test de paridad compara la
+    /// clasificación de `Analysis::outgoing` (invariante #3: cuando core y cache podrían discrepar,
+    /// gana el core).
+    ///
+    /// STUB de la fase roja (E18-H04): la firma existe para que el test compile; el implementador
+    /// la puebla desde la tabla `links` materializada.
+    pub fn outgoing_links(
+        &self,
+        source: &RelPath,
+    ) -> Result<Vec<(String, String, Option<String>, Option<String>)>, StoreError> {
+        let _ = source;
+        todo!("E18-H04: exponer los enlaces salientes clasificados desde la tabla `links`")
+    }
+
     /// Un `DocumentSet` del core servido desde la cache (vía el trait [`DocumentStore`]).
     /// Su análisis es idéntico al de `DocumentSet::from_files` sobre el mismo corpus.
     pub fn document_set(&self) -> DocumentSet {

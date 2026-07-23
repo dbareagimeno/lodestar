@@ -1511,3 +1511,342 @@ fn diagnostics_conserva_el_rango() {
         "sin rango conocido, `range_json` es NULL"
     );
 }
+
+// --- E18-H03: FTS sin campos privilegiados -----------------------------------
+//
+// El índice de texto deja de depender de `type`/`status`/`tags`/`description`: ha de indexar
+// path, título derivado, body y los VALORES TEXTUALES del frontmatter genérico (`§20.12`). Los
+// tests apuntan a `fts_candidates` (el índice FTS5 en sí), NO a `search` — `search` ya cubre el
+// frontmatter por la vía del core (`query::loose_text_match`), así que no distinguiría un FTS que
+// privilegia `description` de uno que indexa metadata genérica. `fts_candidates` sí.
+//
+// Fase ROJA: hoy el FTS es `files_fts(path, title, description, body)` (index.rs), así que una
+// palabra que solo vive en un campo de frontmatter que no sea `description` NO es indexable.
+
+/// `fts_encuentra_valores_de_frontmatter` — **Dado** un documento con `owners: [platform,
+/// security]`, **Cuando** se busca «security», **Entonces** aparece.
+///
+/// La palabra vive **solo** en el valor de un campo de frontmatter arbitrario (ni en el título
+/// derivado ni en el body): si el FTS solo indexa `description`, no la encuentra.
+///
+/// Fase ROJA: `security` no está en ninguna columna FTS actual (`title`/`description`/`body`).
+#[test]
+fn fts_encuentra_valores_de_frontmatter() {
+    let dir = tempfile::tempdir().unwrap();
+    let raw = "---\nowners: [platform, security]\n---\n\n# Servicio\n\nCuerpo sin la palabra clave.\n";
+    std::fs::write(dir.path().join("svc.md"), raw).unwrap();
+    let store = Store::open_and_build(dir.path()).unwrap();
+    assert!(
+        store.documents().unwrap().contains(&rp("svc.md")),
+        "guarda anti-vacuidad: el documento está indexado"
+    );
+
+    // El FTS (acelerador) debe casar la palabra que vive en el valor de `owners`.
+    let hits = store.fts_candidates("security").unwrap();
+    assert!(
+        hits.contains(&rp("svc.md")),
+        "el FTS debe indexar los valores textuales del frontmatter, no solo `description`; \
+         hits: {hits:?}"
+    );
+}
+
+/// `fts_no_privilegia_campos` — **Dado** dos documentos con la misma palabra en el body y en el
+/// frontmatter, **Cuando** se buscan, **Entonces** ambos aparecen.
+///
+/// El body de A y el campo de frontmatter arbitrario de B deben pesar **igual** en el índice: la
+/// misma palabra los encuentra a los dos.
+///
+/// Fase ROJA: A aparece (el body está indexado) pero B no (su palabra vive en `plataforma`, un
+/// campo que el FTS actual no indexa) — el índice privilegia `description`/`body` sobre la
+/// metadata genérica.
+#[test]
+fn fts_no_privilegia_campos() {
+    let dir = tempfile::tempdir().unwrap();
+    // Doc A: la palabra en el BODY.
+    std::fs::write(
+        dir.path().join("a.md"),
+        "---\ntitle: Alfa\n---\n\n# Alfa\n\nDesplegamos sobre kubernetes en el cuerpo.\n",
+    )
+    .unwrap();
+    // Doc B: la MISMA palabra en un valor de frontmatter arbitrario (ni `title` ni `description`).
+    std::fs::write(
+        dir.path().join("b.md"),
+        "---\nplataforma: kubernetes\n---\n\n# Beta\n\nCuerpo sin la palabra clave.\n",
+    )
+    .unwrap();
+    let store = Store::open_and_build(dir.path()).unwrap();
+    assert_eq!(
+        store.documents().unwrap().len(),
+        2,
+        "guarda anti-vacuidad: los dos documentos están indexados"
+    );
+
+    let hits: BTreeSet<RelPath> = store
+        .fts_candidates("kubernetes")
+        .unwrap()
+        .into_iter()
+        .collect();
+    // (1) El body de A se encuentra (esto ya vale hoy: no-vacuidad).
+    assert!(
+        hits.contains(&rp("a.md")),
+        "la palabra en el body debe encontrarse; hits: {hits:?}"
+    );
+    // (2) El frontmatter de B pesa lo mismo: también aparece.
+    assert!(
+        hits.contains(&rp("b.md")),
+        "la misma palabra en un campo de frontmatter arbitrario debe encontrarse igual que en el \
+         body; hits: {hits:?}"
+    );
+}
+
+// ===========================================================================
+// E18-H04 — Paridad core ↔ store bajo el modelo nuevo (`§20.12`, `§10` fila 1)
+// ===========================================================================
+//
+// La garantía del invariante #3 sobre el modelo GENÉRICO: la `Analysis` que sirve la cache desde
+// su DDL v2 debe coincidir con la que computa el core puro. La comparación NO reusa
+// `assert_matches_core` (que construye el core con `DocumentSet::from_files`, SIN `other_files`):
+// una paridad honesta del modelo nuevo tiene que declarar los `other_files` en AMBOS lados, o el
+// `WorkspaceFile` se degradaría a `Missing` en el core de referencia y la asimetría quedaría
+// invisible. Por eso hay un helper nuevo, `assert_paridad_con_inventario`.
+//
+// COLISIÓN DE NOMBRE (resuelta): ya existe un `property_incremental_igual_core` (arriba) que hace
+// 120 ediciones sobre corpus OKF y compara vía `assert_matches_core`. NO se puede duplicar el
+// nombre ni editar el existente. El test incremental de H04 lleva otro nombre
+// —`paridad_incremental_con_enlaces_clasificados`— y ejercita lo que el existente NO puede: la
+// clasificación de enlaces (`WorkspaceFile` a un fichero de proyecto estable) y la metadata
+// ANIDADA bajo ediciones incrementales, comparando la `Analysis` completa con `other_files`
+// declarados.
+//
+// STUB de la fase roja: `Store::outgoing_links` (firma + `todo!()`, declarado en `lib.rs`) es la
+// pieza que faltaba — hoy el store no expone la clasificación de `Analysis::outgoing` desde su
+// tabla `links` materializada.
+
+/// El `target_path` que el store escribe para un [`lodestar_core::types::LinkTarget`] (la columna
+/// `links.target_path`): el path sin fragmento de los destinos con path, `None` para los demás. Se
+/// **deriva del enum** del core (no se copia un vocabulario paralelo de la cache), igual que
+/// `kind_de`.
+fn target_path_de(t: &lodestar_core::types::LinkTarget) -> Option<String> {
+    use lodestar_core::types::LinkTarget;
+    match t {
+        LinkTarget::Document(p) | LinkTarget::WorkspaceFile(p) | LinkTarget::Missing(p) => {
+            Some(p.as_str().to_string())
+        }
+        LinkTarget::ExternalUri(_) | LinkTarget::SelfAnchor(_) | LinkTarget::EscapesWorkspace => {
+            None
+        }
+    }
+}
+
+/// Compara la `Analysis` **completa** del modelo nuevo entre el store y el core, declarando los
+/// mismos `other_files` en ambos lados (la clave de la paridad honesta con `WorkspaceFile`).
+///
+/// Cubre las seis piezas de `Analysis` (`§20.7`) por la superficie pública del store:
+/// - `documents` → `Store::documents`
+/// - `diagnostics` (agregados) → `Store::validation_counts` (`hard_fail`/`warn_count`)
+/// - `isolated` → `Store::isolated`
+/// - `dangling` → `Store::dangling` (destinos markdown ausentes; `§20.7`)
+/// - `incoming` → `Store::backlinks` (orígenes distintos)
+/// - `outgoing` **con su clasificación de `target_kind`** → `Store::outgoing_links` (STUB)
+fn assert_paridad_con_inventario(store: &Store, files: &FileMap, other_files: &[RelPath]) {
+    let ds = DocumentSet::with_other_files(files.clone(), other_files.iter().cloned());
+    let a = ds.analyze();
+
+    // diagnostics (agregados): gana el core.
+    let (hf, wc) = store.validation_counts().unwrap();
+    assert_eq!(hf, a.hard_fail(), "hard_fail difiere (gana el core)");
+    assert_eq!(wc, a.warn_count(), "warn_count difiere (gana el core)");
+
+    // documentos.
+    assert_eq!(
+        sorted(store.documents().unwrap()),
+        sorted(a.documents.clone()),
+        "el inventario de documentos difiere"
+    );
+
+    // aislados.
+    assert_eq!(
+        sorted(store.isolated().unwrap()),
+        sorted(a.isolated.clone()),
+        "isolated difiere"
+    );
+
+    // colgantes: la síntesis SQL devuelve los destinos markdown ausentes (`is_edge = 1`, fantasmas
+    // del grafo). Se comparan contra los destinos `Missing` del core que serían documentos.
+    let mut destinos_colgantes: Vec<RelPath> = a
+        .dangling
+        .iter()
+        .filter(|d| d.target.is_markdown())
+        .map(|d| d.target.clone())
+        .collect();
+    destinos_colgantes.sort();
+    destinos_colgantes.dedup();
+    assert_eq!(
+        sorted(store.dangling().unwrap()),
+        destinos_colgantes,
+        "dangling difiere"
+    );
+
+    for p in &a.documents {
+        // incoming: orígenes distintos (el store sintetiza `SELECT DISTINCT source_path`).
+        let mut expected: Vec<RelPath> = a
+            .incoming
+            .get(p)
+            .into_iter()
+            .flatten()
+            .map(|r| r.from.clone())
+            .collect();
+        expected.sort();
+        expected.dedup();
+        assert_eq!(
+            sorted(store.backlinks(p).unwrap()),
+            expected,
+            "backlinks de {p} difieren"
+        );
+
+        // outgoing CON su clasificación: `(href, target_kind, target_path, fragment)`. El
+        // `target_kind` sale del discriminante serde del `LinkTarget` del core (`kind_de`), no de
+        // un vocabulario propio de la cache.
+        let mut core_out: Vec<(String, String, Option<String>, Option<String>)> = a
+            .outgoing
+            .get(p)
+            .into_iter()
+            .flatten()
+            .map(|l| {
+                (
+                    l.href.clone(),
+                    kind_de(&l.target),
+                    target_path_de(&l.target),
+                    l.fragment.clone(),
+                )
+            })
+            .collect();
+        core_out.sort();
+        let mut store_out = store.outgoing_links(p).unwrap();
+        store_out.sort();
+        assert_eq!(
+            store_out, core_out,
+            "los enlaces salientes clasificados de {p} difieren (gana el core)"
+        );
+    }
+}
+
+/// `paridad_con_edge_cases` — **Dado** el fixture `with_edge_cases()` (5 clases de enlace, mismo
+/// basename, capitalización), **Cuando** se compara core vs store, **Entonces** las dos `Analysis`
+/// son idénticas.
+///
+/// Es el test que cierra el invariante #3 sobre el modelo genérico: `with_edge_cases()` tiene las
+/// cinco clases de destino, dos documentos con el **mismo basename** en árboles distintos y un
+/// enlace con **capitalización errónea**, más un enlace a un fichero de proyecto (`.rs`) que solo
+/// es `WorkspaceFile` si el store declara `other_files` como el core. La paridad se juzga con
+/// `DocumentSet::with_other_files` en el lado del core (declarando el `.rs`) contra la `Analysis`
+/// que el store sirve desde su DDL nuevo.
+///
+/// Fase ROJA: el store no expone hoy la clasificación de `Analysis::outgoing` (`Store::outgoing_links`
+/// es un stub), y la síntesis de diagnósticos de enlace (`synth::link_diagnostics`) reconstruye el
+/// `DocumentSet` **sin** `other_files`, así que `warn_count` diverge (el `.rs` cae como
+/// `LINK-TARGET-MISSING` en la cache y como `WorkspaceFile` silencioso en el core).
+#[test]
+fn paridad_con_edge_cases() {
+    let dir = tempfile::tempdir().unwrap();
+    let files = lodestar_fixtures::with_edge_cases();
+    lodestar_fixtures::materialize(&files, dir.path()).unwrap();
+    // El fichero de proyecto (no-`.md`) al que apunta uno de los enlaces de `raiz.md`: es lo que
+    // hace `WorkspaceFile` (y no `Missing`) a ese enlace. El store lo recoge en `other_files` al
+    // recorrer el disco; el core lo recibe declarado abajo.
+    let rs = rp("src/auth/token_service.rs");
+    std::fs::create_dir_all(dir.path().join("src/auth")).unwrap();
+    std::fs::write(
+        dir.path().join(rs.as_str()),
+        "// Destino de un enlace WorkspaceFile.\n",
+    )
+    .unwrap();
+
+    let store = Store::open_and_build(dir.path()).unwrap();
+    assert_eq!(
+        store.documents().unwrap().len(),
+        5,
+        "guarda anti-vacuidad: los 5 `.md` del fixture son documentos; el `.rs` no"
+    );
+
+    assert_paridad_con_inventario(&store, &files, &[rs]);
+}
+
+/// `paridad_incremental_con_enlaces_clasificados` — **Dado** N ediciones aleatorias deterministas
+/// sobre documentos con metadata **anidada** y enlaces a un fichero de proyecto **estable**,
+/// **Cuando** se aplican incrementalmente, **Entonces** el store coincide con el core en cada paso.
+///
+/// Es el criterio incremental de H04 con OTRO nombre (el `property_incremental_igual_core` de
+/// arriba no se puede duplicar ni editar) y ejercitando lo que aquel no cubre: la clasificación de
+/// enlaces (`WorkspaceFile`) y la metadata anidada bajo `upsert`/`remove` incrementales. Los
+/// destinos de los enlaces son **estables** a propósito (un `.rs` de `other_files` que nunca se
+/// borra, un `index.md` que siempre existe, un `no-existe.md` que nunca existe, un externo y un
+/// anchor): así el `target_kind` materializado nunca queda obsoleto por la limitación de cascada
+/// de los `upsert` incrementales, y la única divergencia posible es de modelo, no de refresco.
+///
+/// Fase ROJA: misma que `paridad_con_edge_cases` — falta `Store::outgoing_links` y la síntesis de
+/// diagnósticos ignora `other_files` (el enlace al `.rs` infla `warn_count` en la cache).
+#[test]
+fn paridad_incremental_con_enlaces_clasificados() {
+    // LCG determinista (semilla distinta de la del property test existente).
+    let mut seed: u64 = 0xD1B54A32D192ED03;
+    let mut next = || {
+        seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        (seed >> 33) as usize
+    };
+
+    let dir = tempfile::tempdir().unwrap();
+    // Fichero de proyecto ESTABLE (no-`.md`): destino `WorkspaceFile` que nunca cambia.
+    let rs = rp("src/lib.rs");
+    std::fs::create_dir_all(dir.path().join("src")).unwrap();
+    std::fs::write(dir.path().join(rs.as_str()), "// código estable\n").unwrap();
+    // Documento raíz ESTABLE (nunca se churnea): destino `Document` siempre presente, para que los
+    // enlaces `/index.md` no oscilen entre `document` y `missing`.
+    let index_raw = "---\nkind: index\n---\n\n# Índice\n";
+    std::fs::write(dir.path().join("index.md"), index_raw).unwrap();
+
+    let store = Store::open_and_build(dir.path()).unwrap();
+    let mut mirror: FileMap = FileMap::new();
+    mirror.insert(rp("index.md"), index_raw.to_string());
+
+    // Documentos que se churnean (crean/modifican/borran). NO se enlazan entre sí: así ningún
+    // `target_kind` queda obsoleto por la ausencia de cascada.
+    let churn = ["a.md", "b.md", "docs/c.md"];
+
+    for _ in 0..80 {
+        let name = churn[next() % churn.len()];
+        let p = rp(name);
+        let op = next() % 3;
+        if op == 0 {
+            mirror.remove(&p);
+            store.remove(&p).unwrap();
+        } else {
+            let tier = ["critical", "normal", "low"][next() % 3];
+            // Frontmatter con metadata ANIDADA (`service.name`/`service.tier`) y una lista, y
+            // cuerpo con enlaces a destinos estables de cada clase.
+            let raw = format!(
+                "---\nservice:\n  name: auth\n  tier: {tier}\nowners: [platform, security]\n---\n\n\
+                 # H\n\n\
+                 A la raíz: [i](/index.md).\n\
+                 A código del proyecto: [c](/src/lib.rs).\n\
+                 Externo: [e](https://example.com).\n\
+                 Anchor propio: [a](#h).\n\
+                 Inexistente: [m](/no-existe.md).\n"
+            );
+            mirror.insert(p.clone(), raw.clone());
+            store.upsert(&p, &raw, 0, 0).unwrap();
+        }
+
+        // (1) La `Analysis` completa coincide, con `other_files` declarados en ambos lados.
+        assert_paridad_con_inventario(&store, &mirror, &[rs.clone()]);
+
+        // (2) La metadata anidada materializada sigue siendo la del core (`walk`) tras cada
+        //     edición: ni una fila inventada ni un valor coercionado.
+        for (path, raw) in &mirror {
+            let filas = filas_metadata(dir.path(), path.as_str());
+            assert_metadata_coincide_con_el_core(raw, &filas);
+        }
+    }
+}
