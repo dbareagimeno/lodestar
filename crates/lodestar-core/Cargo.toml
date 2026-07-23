@@ -21,14 +21,16 @@ once_cell = { workspace = true }
 regex = { workspace = true }
 unicode-normalization = { workspace = true }
 schemars = { workspace = true, optional = true }
-pulldown-cmark = { version = "0.12", optional = true, default-features = false, features = ["html"] }
+# NO opcional desde E17-H01: la extracción de enlaces del core lo necesita siempre.
+pulldown-cmark = { workspace = true }
 
 [features]
 default = []
 # Gatea #[derive(JsonSchema)] en los DTO públicos (lo consume el MCP).
 schemars = ["dep:schemars"]
 # Render de markdown a HTML para el preview (el saneado DOMPurify vive en el frontend).
-render = ["dep:pulldown-cmark"]
+# El parser ya es una dependencia fija; la feature solo enciende su serializador a HTML.
+render = ["pulldown-cmark/html"]
 
 [lints]
 workspace = true

@@ -553,14 +553,16 @@ pub enum FmError {
 // Enlaces: LinkKind · RawLink · LinkTarget · ResolvedLink · Inventory (§20.6, E17-H01/H02)
 // ---------------------------------------------------------------------------
 //
-// > **STUB de la fase roja de E17-H01/H02**: los tipos existen para que `tests/enlaces.rs`
-// > compile; `crate::links` está sin implementar. Viven en `types` y no en `links` por el
-// > invariante #4 (`LinkTarget` viaja en el wire de `knowledge_get.outgoingLinks`); las derivas de
-// > serialización las añade el implementador.
+// Viven en `types` y no en `links` por el invariante #4 (`LinkTarget` viaja en el wire de
+// `knowledge_get.outgoingLinks`). Las derivas de serialización se fijan aquí, **una vez**:
+// `LinkTarget` va etiquetado adyacente en camelCase —`{"kind":"document","value":"a/b.md"}`,
+// `{"kind":"escapesWorkspace"}`— para que la variante sin payload no cambie la forma de las
+// demás. Qué tool lo expone, y bajo qué campo, es E17-H05.
 
 /// Sintaxis con la que se escribió un enlace Markdown (`§20.6`). Es el `link_type` del parser:
 /// clasifica **la forma**, no el destino (eso es [`LinkTarget`]).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub enum LinkKind {
     /// `[texto](destino)`.
     Inline,
@@ -575,7 +577,8 @@ pub enum LinkKind {
 }
 
 /// Un enlace tal como aparece en el cuerpo, **sin resolver** (E17-H01).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RawLink {
     /// El destino **crudo**, tal como está escrito: sin percent-decoding, con su fragmento y su
     /// query. En un enlace de referencia es el destino de la **definición**.
@@ -591,7 +594,8 @@ pub struct RawLink {
 }
 
 /// Clasificación del destino de un enlace (`ARCHITECTURE.md §20.6`).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "value", rename_all = "camelCase")]
 pub enum LinkTarget {
     /// Otro documento Markdown del inventario → **arista del grafo**.
     Document(RelPath),
@@ -608,7 +612,8 @@ pub enum LinkTarget {
 }
 
 /// Un enlace ya resuelto y clasificado (E17-H02).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ResolvedLink {
     /// El href **original**, byte a byte (paso 10 del algoritmo de `§20.6`).
     pub href: String,
@@ -632,7 +637,7 @@ pub struct ResolvedLink {
 /// ficheros** del proyecto (código, imágenes, …), que `resolve` necesita para poder clasificar un
 /// destino como [`LinkTarget::WorkspaceFile`] en vez de como [`LinkTarget::Missing`]. Quien hace
 /// I/O —el descubrimiento de `lodestar-workspace`— es quien lo construye.
-#[allow(dead_code)] // STUB de la fase roja: los campos los lee el implementador.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Inventory {
     documents: BTreeSet<RelPath>,
     other_files: BTreeSet<RelPath>,
@@ -641,41 +646,39 @@ pub struct Inventory {
 impl Inventory {
     /// Inventario completo: documentos Markdown + resto de ficheros del proyecto.
     ///
-    /// > **STUB de la fase roja de E17-H02**: sin implementar.
+    /// Los `.md` que existen en disco pero están **excluidos del descubrimiento** (un `vendor/`
+    /// bajo `.gitignore`, p. ej.) van en `other_files`, no en `documents`: existen —así que su
+    /// enlace no «falta»— pero no son nodos del grafo (`ARCHITECTURE.md §20.6`, precisión 2).
     pub fn new<D, F>(documents: D, other_files: F) -> Inventory
     where
         D: IntoIterator<Item = RelPath>,
         F: IntoIterator<Item = RelPath>,
     {
-        let _ = (
-            documents.into_iter().count(),
-            other_files.into_iter().count(),
-        );
-        todo!("E17-H02: inventario de documentos y ficheros del workspace")
+        Inventory {
+            documents: documents.into_iter().collect(),
+            other_files: other_files.into_iter().collect(),
+        }
     }
 
     /// Atajo: solo los documentos de un [`FileMap`], sin ficheros no-Markdown conocidos.
-    ///
-    /// > **STUB de la fase roja de E17-H02**: sin implementar.
     pub fn from_documents(files: &FileMap) -> Inventory {
-        let _ = files;
-        todo!("E17-H02: inventario a partir de los documentos")
+        Inventory {
+            documents: files.keys().cloned().collect(),
+            other_files: BTreeSet::new(),
+        }
     }
 
     /// ¿Hay un documento Markdown en esa ruta exacta?
     ///
-    /// > **STUB de la fase roja de E17-H02**: sin implementar.
+    /// Comparación **exacta**, sin plegado de mayúsculas: `Docs/Auth.md` no es `docs/auth.md`. De
+    /// ahí sale el diagnóstico de portabilidad `LINK-CASE-MISMATCH` (E17-H03).
     pub fn contains_document(&self, path: &RelPath) -> bool {
-        let _ = path;
-        todo!("E17-H02: pertenencia al inventario de documentos")
+        self.documents.contains(path)
     }
 
     /// ¿Existe un fichero del proyecto (no Markdown) en esa ruta exacta?
-    ///
-    /// > **STUB de la fase roja de E17-H02**: sin implementar.
     pub fn contains_file(&self, path: &RelPath) -> bool {
-        let _ = path;
-        todo!("E17-H02: pertenencia al inventario de ficheros")
+        self.other_files.contains(path)
     }
 }
 
