@@ -785,3 +785,25 @@ superficie de producto; git queda como crate dormido) y `DECISIONES.md §0`. Des
   - **Deuda de test**: la guarda de `diagnosticos.rs:208` nombra `LinkStub`/`LinkRel`, las variantes
     que la historia manda borrar. Se conservan **declaradas y sin productor**; retirarlas es una
     línea cuando se retire esa guarda.
+- ✅ **Cableado de `other_files`** (cierre de E17). `DocumentSet::with_other_files` no tenía **ni un
+  llamador**: `Inventory::contains_file` devolvía siempre `false` y la rama `WorkspaceFile` era
+  código muerto en ejecución, así que **todo** enlace a código salía `Missing` — y sobre un destino
+  `.md` excluido eso es `Err`, o sea que **tumbaba la puerta de CI por un fichero que estaba ahí**.
+  `Discovered` gana `other_files` (todo lo que el walker **visita** y no acaba en el inventario;
+  cero I/O extra, medido en 4,4 ms sobre este repo con 48 documentos y 98 `other_files`).
+  - **Bug destapado y corregido**: los fantasmas del grafo se acotan a documentos Markdown. Todo
+    `Missing` se convertía en nodo sin mirar si el destino era siquiera un `.md`, contra `§20.7`.
+    Estaba oculto porque, mientras todo enlace a código era `Missing`, los ficheros de código eran
+    **siempre** fantasmas y ningún test lo miraba (`codigo_no_es_nodo` solo cubría el que sí existe).
+    El filtro por extensión se aplica **solo a `Missing`**, nunca a `Document`: un `Document` está en
+    el inventario y lo es aunque `discovery.include` admita otra extensión — filtrarlo por el nombre
+    sería la clasificación por extensión que `§20.6` prohíbe.
+  - **Verificado end-to-end**: las 5 clasificaciones de `§20.6` sobre un repo real, con el enlace de
+    **referencia** resuelto por su definición y **un solo** diagnóstico (el enlace realmente roto),
+    donde antes había dos. **317 tests.**
+- ⚠️ **Asimetrías declaradas al cerrar E17**: (1) el camino transaccional (`change_plan` y el gate de
+  staging) construye el `DocumentSet` **sin** `other_files`, así que un plan sobre un documento con
+  enlaces a código verá en `diagnosticsAfter` un `LINK-TARGET-MISSING` que el `before` ya no tiene;
+  (2) la cache resuelve con `Inventory::default()`, que solo coincide con el core mientras los
+  documentos sean `.md`; (3) los **diagnósticos de descubrimiento se siguen descartando** — con
+  dueño en E20, ver `requirements/README.md`.
