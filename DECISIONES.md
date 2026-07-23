@@ -126,9 +126,13 @@
 - **Qué decidir**: ¿hay que soportar inglés u otro idioma en v1? Si no, esto queda cerrado.
 - **Recomendación**: mantener español-only en v1; la arquitectura ya no lo impide en el futuro.
 
-## 6. Semántica de `merge` local
+## 6. Semántica de `merge` local — ⚫ CERRADA/OBSOLETA (crate `vcs` borrado, §20)
 
-> **Superada por §0/§19 (2026-07-22)**: git sale de la superficie de producto; el crate `vcs` (con su
+> **Cerrada por §20 (2026-07-23)**: la migración a workspaces Markdown universales **borra** el crate
+> `lodestar-vcs` (E15-H01), no lo deja dormido. Ya no hay `merge` que decidir: si git volviera algún
+> día a la superficie, se rediseñaría desde cero. Se conserva el registro histórico.
+>
+> **Superada antes por §0/§19 (2026-07-22)**: git sale de la superficie de producto; el crate `vcs` (con su
 > `merge` a nivel de árbol) se conserva **dormido**, sin fachadas que lo expongan. Esta decisión queda
 > como diseño de referencia por si git vuelve.
 
@@ -145,7 +149,11 @@
   con §16) o prefieres delegar en el binario `git`?
 - **Recomendación**: confirmar el enfoque actual.
 
-## 7. `lodestar check --range a..b`
+## 7. `lodestar check --range a..b` — ⚫ CERRADA/OBSOLETA (sin git, §20)
+
+> **Cerrada por §20 (2026-07-23)**: `--staged`/`--rev`/`--range` se retiraron de la superficie en
+> E9-H02 quedando diferidos con el crate `vcs` dormido; al borrarse el crate en E15-H01 dejan de
+> tener implementación posible. `check` juzga el working tree y nada más. Registro histórico abajo.
 
 - **Estado**: `--range` juzga **la punta** del rango (equivale a `--rev b`).
 - **Qué decidir**: ¿basta con la punta o quieres verificar que **cada commit** del rango es conforme
@@ -153,7 +161,13 @@
 - **Recomendación**: dejar la punta por defecto y añadir `--each` si en algún momento hace falta el
   barrido por-commit.
 
-## 8. Esquema de `lodestar.toml`
+## 8. Esquema de `lodestar.toml` — ⚫ CERRADA/OBSOLETA (fichero retirado, §20)
+
+> **Cerrada por §20 (2026-07-23)**: `lodestar.toml` se **borra** en E15-H08. Su `[identity]` murió
+> con git (E15-H01) y su `[gate]` se absorbe en `.lodestar/config.yaml`, el único fichero de
+> configuración (`§20.5`). Lo que la pregunta abierta pedía —override de severidad por código y
+> exclusión de rutas— **se concede** en el formato nuevo: `discovery.exclude` y la sección
+> `validation:` de `§20.9`, que fija la severidad por familia de diagnóstico. Registro histórico:
 
 - **Estado**: soporta `[gate] block_warnings` (strictness) e `[identity] name/email` (override de
   autor/committer). Defaults seguros (solo `Err` bloquea; identidad por defecto).
@@ -175,6 +189,14 @@ Pendientes de priorización (no bloquean el núcleo):
   cazó y cerró 6 divergencias de paridad.
 
 ## 10. Ghosts como primitiva de planificación + templates (siguiente feature, no iniciada)
+
+> **Parcialmente superada por §20 (2026-07-23)**: la primitiva **sobrevive y de hecho mejora** — un
+> ghost es un enlace a un `.md` inexistente, que en el modelo nuevo es un `LinkTarget::Missing`
+> (`§20.6`) con su `dangling` identificando origen y href crudo (`§20.7`), más informativo que el
+> `LINK-STUB` de antes. Lo que **muere** son las piezas OKF de la propuesta: el gesto de UI (la UI se
+> retiró de `main`) y los *templates por `type`* con `.lodestar/templates/` (`core::schema` se borra
+> en E20; `§20` no tiene tipos documentales). Si se retoma, el backlog de ghosts se lee hoy con
+> `graph_query(dangling)`.
 
 - **Contexto**: los *ghosts* («por escribir») ya existen y están portados: nodo con `ghost: bool` en
   `GraphModel` (`core/graph.rs`) derivado de enlaces a `.md` inexistentes, check `LINK-STUB` con
@@ -198,6 +220,24 @@ Pendientes de priorización (no bloquean el núcleo):
   tool MCP.
 - **Recomendación**: mantener el principio «ghost = derivado de enlaces»; cualquier variante que
   requiera una lista de ghosts persistida aparte contradice el invariante #1.
+
+## 11. `pulldown-cmark` en `lodestar-core` (E17) — 🟡 TOMADA, revisable
+
+- **Contexto**: la migración exige enlaces Markdown **de referencia** (`[t][id]` con su definición
+  `[id]: ../p.md` en otro punto del documento) y **offsets fiables** del destino dentro del cuerpo,
+  para reescribirlo en `move_document` (`§20.6`, `§20.11`). Hoy el parser son dos regex
+  (`crates/lodestar-core/src/model.rs:16-17,257-258`) que solo ven `[texto](href)`.
+- **Decidido (2026-07-23, al escribir la épica E17)**: adoptar `pulldown-cmark` como dependencia de
+  `lodestar-core`. Es **pura** (sin I/O, sin runtime, sin C), así que no viola el invariante #2 ni el
+  job `core-purity` del CI, que prohíbe `tokio`/`rusqlite`/`git2`/`notify`/`tauri`. Aporta
+  resolución nativa de referencias, `link_type` (que es exactamente la clasificación de `§20.6`) y
+  `OffsetIter`.
+- **Por qué queda anotada aquí**: es la **primera dependencia de parsing** que entra en el core, que
+  hasta ahora se autoabastecía con regex. Si prefieres no ampliar la superficie de dependencias del
+  core, la alternativa es extender la regex — pero no cubre enlaces de referencia sin reimplementar
+  buena parte de un parser Markdown, y los offsets serían menos fiables.
+- **Reversible**: solo afecta a `crates/lodestar-core/src/links.rs` (E17-H01). Dilo antes de que
+  E17 empiece y se replantea.
 
 ---
 
