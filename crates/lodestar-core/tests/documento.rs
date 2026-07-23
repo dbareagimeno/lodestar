@@ -578,3 +578,631 @@ fn no_borra_desconocidas() {
         "una lista vacía es un valor del usuario:\n{salida}"
     );
 }
+
+// =============================================================================
+// E16-H02 — Ningún nombre de fichero activa reglas especiales
+// =============================================================================
+//
+// `REFACTOR_PHASE_2 §Principios 3 y 4` («ningún nombre de archivo debe activar reglas
+// especiales», «`index.md` no representa una colección»), `§Fase 8 (Eliminar)` y
+// `ARCHITECTURE.md §20.4`/`§20.7`.
+//
+// ## API que fija esta fase roja
+//
+// ```ignore
+// // lodestar_core::model
+// /// Ya NO ramifica por basename: `index.md`, `log.md` y `README.md` se parsean como
+// /// cualquier otro `.md` (hoy `model.rs:437-446` devuelve `fm: None` + raw entero como body).
+// pub fn parse_file(path: &str, raw: &str) -> Parsed;   // `Parsed` SIN campo `kind`
+//
+// // lodestar_core::types::Analysis
+// pub struct Analysis {
+//     // …
+//     /// Sustituye a `orphans` con la definición de `§20.7`: documentos SIN enlaces internos
+//     /// entrantes NI salientes. Es una propiedad consultable, no un diagnóstico.
+//     pub isolated: Vec<RelPath>,
+//     // SIN `in_index`, SIN `okf_version`.
+// }
+// // `Backlinks` SIN `index_refs`.
+// ```
+//
+// **Desaparecen** (`§20.4`): `FileKind`, `model::file_kind`, `model::is_reserved`,
+// `RelPath::is_reserved`, `RelPath::concept_id`, `Bundle::root_okf_version`, el gating de
+// fichero reservado de `query.rs:104-123` y el `is:reserved` de `is_predicate`.
+//
+// **Lo que estas pruebas NO fijan**: la forma final de `Analysis` (`documents`/`outgoing`/
+// `incoming`/`dangling`/`diagnostics` con `ResolvedLink`/`DanglingLink` es E17-H04) ni el
+// renombre `concepts` → `documents` (E16-H06). Aquí se usan los nombres vigentes —
+// `concepts`/`out`/`inn`/`per_file` — porque esta historia solo RETIRA campos.
+
+use lodestar_core::types::{Analysis, FileMap, RelPath};
+use lodestar_core::Bundle;
+
+/// `RelPath` para rutas obviamente válidas (invariante #6: nunca un string crudo).
+fn rp(p: &str) -> RelPath {
+    RelPath::new(p).unwrap_or_else(|e| panic!("`{p}` debe ser un RelPath válido: {e:?}"))
+}
+
+/// `FileMap` desde pares (ruta, contenido).
+fn mapa(pares: &[(&str, &str)]) -> FileMap {
+    pares
+        .iter()
+        .map(|(p, c)| (rp(p), (*c).to_string()))
+        .collect()
+}
+
+/// Claves de primer nivel del objeto JSON de un tipo del wire.
+///
+/// Se juzga la AUSENCIA de un campo por su serialización y no por el compilador (que no puede
+/// aserir «este campo no existe»): es la única forma de fijar que `in_index`/`okf_version`/
+/// `index_refs` se han **retirado** y no meramente ocultado.
+fn claves_wire<T: serde::Serialize>(v: &T) -> BTreeSet<String> {
+    serde_json::to_value(v)
+        .expect("los tipos del wire deben serializar")
+        .as_object()
+        .expect("el tipo del wire es un objeto JSON")
+        .keys()
+        .cloned()
+        .collect()
+}
+
+/// Códigos de diagnóstico emitidos para `p`, **como cadena de wire**.
+///
+/// Deliberadamente por serialización y no por la variante `CheckCode::Orphan`: E16-H05 borra esa
+/// variante y el test debe sobrevivir a su desaparición sin dejar de significar lo mismo.
+fn codigos(a: &Analysis, p: &RelPath) -> Vec<String> {
+    a.per_file
+        .get(p)
+        .into_iter()
+        .flatten()
+        .map(|c| {
+            serde_json::to_value(c.code)
+                .ok()
+                .and_then(|v| v.as_str().map(String::from))
+                .unwrap_or_else(|| "<no serializable>".to_string())
+        })
+        .collect()
+}
+
+/// Un `index.md` **con frontmatter** que además enlaza a otro documento. Reúne los dos rasgos que
+/// hoy reciben trato mágico: el basename reservado y los enlaces «de pertenencia».
+const INDICE_CON_FM: &str = concat!(
+    "---\n",
+    "title: Índice del workspace\n",
+    "okf_version: \"1.0\"\n",
+    "owners:\n",
+    "  - platform\n",
+    "---\n",
+    "\n",
+    "# Índice\n",
+    "\n",
+    "- [Alfa](alfa.md)\n",
+);
+
+/// El cuerpo de `INDICE_CON_FM`: lo que queda tras el delimitador de cierre.
+const INDICE_BODY: &str = "\n# Índice\n\n- [Alfa](alfa.md)\n";
+
+const LOG_CON_FM: &str = concat!(
+    "---\n",
+    "updated: 2026-07-23\n",
+    "---\n",
+    "\n",
+    "- 2026-07-23 — se creó el workspace\n",
+);
+
+/// Entrantes (desde `index.md` y desde `gamma.md`), ningún saliente.
+const ALFA: &str = "---\nstatus: accepted\n---\n\n# Alfa\n\nSin enlaces salientes.\n";
+/// Salientes (a `alfa.md`), ningún entrante.
+const GAMMA: &str = "---\nstatus: draft\n---\n\n# Gamma\n\nEnlaza a [Alfa](alfa.md).\n";
+/// Ni entrantes ni salientes: el único documento **aislado** del workspace.
+const SOLO: &str = "---\nstatus: draft\n---\n\n# Solo\n\nNi entrantes ni salientes.\n";
+
+/// Workspace de los criterios 2, 3, 4 y 5: un índice con frontmatter que enlaza a `alfa.md`, un
+/// `gamma.md` que solo tiene salientes y un `solo.md` sin enlaces de ningún tipo.
+fn ws_enlaces() -> FileMap {
+    mapa(&[
+        ("index.md", INDICE_CON_FM),
+        ("log.md", LOG_CON_FM),
+        ("alfa.md", ALFA),
+        ("gamma.md", GAMMA),
+        ("solo.md", SOLO),
+    ])
+}
+
+/// Criterio 1: un `index.md` con frontmatter se parsea como cualquier otro documento.
+///
+/// Hoy `parse_file` corta por basename (`model.rs:437-446`) y devuelve `frontmatter: None` con el
+/// raw entero como cuerpo, de modo que la metadata del índice es invisible para todo el motor.
+#[test]
+fn index_md_es_documento_normal() {
+    let parsed = model::parse_file("index.md", INDICE_CON_FM);
+
+    assert!(
+        parsed.fm_err.is_none(),
+        "el frontmatter del índice está bien formado"
+    );
+    let pf = parsed
+        .frontmatter
+        .as_ref()
+        .expect("un `index.md` con frontmatter TIENE frontmatter: el basename no lo suprime");
+    assert_eq!(
+        pf.get(&fp("title")),
+        Some(&Yaml::String("Índice del workspace".to_string())),
+        "la metadata del índice se lee como la de cualquier documento"
+    );
+    assert!(
+        matches!(pf.get(&fp("owners")), Some(Yaml::Sequence(_))),
+        "y conserva sus tipos YAML: {:?}",
+        pf.get(&fp("owners"))
+    );
+    assert_eq!(
+        parsed.body, INDICE_BODY,
+        "el cuerpo del índice EXCLUYE el bloque de frontmatter, como en cualquier documento"
+    );
+    assert_span_coherente(INDICE_CON_FM, pf);
+
+    // Un `log.md` con frontmatter, igual.
+    let log = model::parse_file("log.md", LOG_CON_FM);
+    assert!(
+        log.frontmatter
+            .as_ref()
+            .is_some_and(|f| f.contains_key("updated")),
+        "`log.md` tampoco pierde su frontmatter por llamarse como se llama"
+    );
+    assert_eq!(
+        log.body, "\n- 2026-07-23 — se creó el workspace\n",
+        "el cuerpo de `log.md` excluye su frontmatter"
+    );
+
+    // La formulación exacta del principio 4: el MISMO contenido bajo CUALQUIER nombre produce
+    // exactamente el mismo parseo.
+    let referencia = model::parse_file("docs/cualquiera.md", INDICE_CON_FM);
+    for nombre in ["index.md", "log.md", "README.md", "AGENTS.md", "a/index.md"] {
+        let otro = model::parse_file(nombre, INDICE_CON_FM);
+        assert_eq!(
+            otro.body, referencia.body,
+            "`{nombre}` debe parsearse igual que un documento cualquiera (cuerpo)"
+        );
+        assert_eq!(
+            otro.frontmatter
+                .as_ref()
+                .map(|f| (&f.value, &f.raw, &f.span)),
+            referencia
+                .frontmatter
+                .as_ref()
+                .map(|f| (&f.value, &f.raw, &f.span)),
+            "`{nombre}` debe parsearse igual que un documento cualquiera (frontmatter)"
+        );
+    }
+}
+
+/// Criterio 2: un enlace desde `index.md` es una **arista** normal, no una relación de
+/// pertenencia.
+///
+/// Hoy `compute_analysis` (`bundle.rs:57-70`) se salta el índice como origen y vuelca sus enlaces
+/// en `in_index`; `backlinks` (`bundle.rs:182-216`) los aparta en `index_refs`.
+#[test]
+fn enlace_desde_indice_es_arista() {
+    let b = Bundle::from_files(ws_enlaces());
+    let a = b.analyze();
+    let index = rp("index.md");
+    let alfa = rp("alfa.md");
+
+    assert!(
+        a.concepts.contains(&index),
+        "`index.md` es un documento más del análisis, no un fichero de servicio: {:?}",
+        a.concepts
+    );
+    assert!(
+        a.out.get(&index).is_some_and(|t| t.contains(&alfa)),
+        "el enlace del índice a `alfa.md` es una arista SALIENTE de `index.md`: {:?}",
+        a.out.get(&index)
+    );
+    assert!(
+        a.inn.get(&alfa).is_some_and(|v| v.contains(&index)),
+        "y se invierte como cualquier otra: `alfa.md` tiene a `index.md` entre sus entrantes: {:?}",
+        a.inn.get(&alfa)
+    );
+
+    // Indistinguible de un enlace desde un documento cualquiera: `index.md` y `gamma.md` entran
+    // por la MISMA puerta.
+    let bl = b.backlinks(&alfa);
+    let entrantes: BTreeSet<&str> = bl.inbound.iter().map(|l| l.path.as_str()).collect();
+    assert!(
+        entrantes.contains("index.md") && entrantes.contains("gamma.md"),
+        "los entrantes de `alfa.md` son `index.md` Y `gamma.md`, sin distinción de origen: {entrantes:?}"
+    );
+    assert!(
+        bl.inbound
+            .iter()
+            .any(|l| l.path == index && l.href == "alfa.md"),
+        "el enlace del índice conserva su href como cualquier otro: {:?}",
+        bl.inbound
+    );
+
+    // La pertenencia determinada por índices desaparece del contrato, no se limita a quedar vacía.
+    let claves_analysis = claves_wire(a);
+    assert!(
+        !claves_analysis.contains("inIndex") && !claves_analysis.contains("in_index"),
+        "`Analysis` ya no tiene `in_index`: la pertenencia por índices no existe. Claves: {claves_analysis:?}"
+    );
+    let claves_backlinks = claves_wire(&bl);
+    assert!(
+        !claves_backlinks.contains("indexRefs") && !claves_backlinks.contains("index_refs"),
+        "`Backlinks` ya no tiene `index_refs`: un índice que te enlaza es un entrante más. Claves: {claves_backlinks:?}"
+    );
+}
+
+/// Criterio 3: un documento sin entrantes pero **con** salientes NO es aislado (`§20.7`).
+#[test]
+fn con_salientes_no_es_aislado() {
+    let b = Bundle::from_files(ws_enlaces());
+    let a = b.analyze();
+
+    assert!(
+        !a.isolated.contains(&rp("gamma.md")),
+        "`gamma.md` no tiene entrantes, pero enlaza a `alfa.md`: NO está aislado. isolated={:?}",
+        a.isolated
+    );
+    assert!(
+        !a.isolated.contains(&rp("alfa.md")),
+        "`alfa.md` no tiene salientes, pero le entran dos enlaces: NO está aislado. isolated={:?}",
+        a.isolated
+    );
+    assert!(
+        !a.isolated.contains(&rp("index.md")),
+        "`index.md` enlaza a `alfa.md`: tampoco está aislado (ni recibe trato especial). isolated={:?}",
+        a.isolated
+    );
+    assert!(
+        a.isolated.contains(&rp("solo.md")),
+        "el contraste: `solo.md` no tiene enlaces de ningún tipo y SÍ está aislado. isolated={:?}",
+        a.isolated
+    );
+    assert!(
+        a.isolated.contains(&rp("log.md")),
+        "`log.md` tampoco tiene enlaces: se juzga con la misma regla que los demás. isolated={:?}",
+        a.isolated
+    );
+}
+
+/// Criterio 4: un documento sin enlaces de ningún tipo es aislado y **no genera diagnóstico**.
+///
+/// El «no genera diagnóstico» se juzga a nivel del código `ORPHAN` —el que hoy emite `conform`
+/// por esta causa (`conform.rs:204-211`)—, no exigiendo cero diagnósticos: el resto del catálogo
+/// OKF cae en E16-H05 y no puede bloquear a esta historia.
+#[test]
+fn aislado_no_es_error() {
+    let b = Bundle::from_files(ws_enlaces());
+    let a = b.analyze();
+    let solo = rp("solo.md");
+
+    assert!(
+        a.isolated.contains(&solo),
+        "`solo.md` no tiene entrantes ni salientes: está aislado. isolated={:?}",
+        a.isolated
+    );
+    let cs = codigos(a, &solo);
+    assert!(
+        !cs.iter().any(|c| c == "ORPHAN"),
+        "el aislamiento es una PROPIEDAD consultable, no un diagnóstico: {cs:?}"
+    );
+
+    // El renombre es un renombre: `orphans` (que además significaba otra cosa —«sin entrantes y
+    // no listado en un índice»—) no sobrevive junto a `isolated`.
+    let claves = claves_wire(a);
+    assert!(
+        claves.contains("isolated"),
+        "`Analysis` expone `isolated` en el wire. Claves: {claves:?}"
+    );
+    assert!(
+        !claves.contains("orphans"),
+        "`orphans` no coexiste con `isolated`: es el mismo campo, renombrado y redefinido. Claves: {claves:?}"
+    );
+}
+
+/// Criterio 5: `okf_version` es metadata consultable normal y no aparece en `Analysis`.
+#[test]
+fn okf_version_es_metadata_normal() {
+    // (a) Como dato del usuario, se lee por el accesor como cualquier otra clave (`§20.13`: se
+    //     conserva, deja de ser un concepto del motor).
+    let parsed = model::parse_file("index.md", INDICE_CON_FM);
+    let pf = parsed
+        .frontmatter
+        .as_ref()
+        .expect("el índice tiene frontmatter");
+    assert_eq!(
+        pf.get(&fp("okf_version")),
+        Some(&Yaml::String("1.0".to_string())),
+        "`okf_version` se consulta como cualquier otra clave del frontmatter"
+    );
+    assert!(
+        claves(pf).contains("okf_version"),
+        "y sigue ahí entre las demás claves, sin trato aparte: {:?}",
+        claves(pf)
+    );
+
+    // (b) Como concepto del motor, desaparece: `Analysis` no lo promociona a campo propio.
+    let b = Bundle::from_files(ws_enlaces());
+    let a = b.analyze();
+    let cl = claves_wire(a);
+    assert!(
+        !cl.contains("okfVersion") && !cl.contains("okf_version"),
+        "`Analysis` ya no tiene `okf_version`: el motor no lee la versión OKF del índice raíz. \
+         Claves: {cl:?}"
+    );
+}
+
+// =============================================================================
+// E16-H03 — Título derivado
+// =============================================================================
+//
+// `ARCHITECTURE.md §20.4` («`frontmatter.title` → primer heading H1 → nombre del fichero. Es
+// **solo una heurística de presentación**: `title` no se convierte en propiedad reservada») y
+// `REFACTOR_PHASE_2 §Fase 4 (Título derivado)`.
+//
+// ## API que fija esta fase roja
+//
+// ```ignore
+// // lodestar_core::model
+// /// Título presentable de un documento. Función PURA (el core no hace I/O) y total: siempre
+// /// devuelve algo, porque el último eslabón de la cadena —el nombre del fichero— existe
+// /// siempre. La consumen `ConceptSummary`/`DocumentSummary` y `GraphNode` (E17-H05) y el FTS
+// /// del store (E18); recibe las tres piezas por separado —y no un `&Parsed`— para que el store
+// /// pueda derivarlo sin re-parsear el documento entero.
+// pub fn derived_title(
+//     fm: Option<&ParsedFrontmatter>,
+//     body: &str,
+//     path: &RelPath,
+// ) -> String;
+// ```
+//
+// **Desaparece** `model::title_from_path` (Title Case con el quirk del `\b` de JS: `año.md` →
+// `AñO`), y con ella el test de paridad `title_from_path_boundaries_como_js` de `core.rs:585`.
+
+/// Deriva el título de un documento a partir de su texto crudo, que es como llegan siempre los
+/// documentos: se parsea y se pasan las tres piezas a `derived_title`.
+fn titulo(path: &str, raw: &str) -> String {
+    let parsed = model::parse_file(path, raw);
+    model::derived_title(parsed.frontmatter.as_ref(), &parsed.body, &rp(path))
+}
+
+/// Criterio 1: con `title` en el frontmatter y un H1 distinto, gana el del frontmatter.
+#[test]
+fn titulo_frontmatter_gana() {
+    let raw = concat!(
+        "---\n",
+        "title: Autenticación\n",
+        "status: accepted\n",
+        "---\n",
+        "\n",
+        "# Rotación de tokens\n",
+        "\n",
+        "Cuerpo.\n",
+    );
+    assert_eq!(
+        titulo("docs/auth.md", raw),
+        "Autenticación",
+        "el primer eslabón de la cadena es `frontmatter.title`"
+    );
+
+    // Se toma TAL CUAL: sin Title Case, sin recortes, sin reescrituras.
+    let literal = concat!(
+        "---\n",
+        "title: rotación de tokens (v2)\n",
+        "---\n",
+        "\n",
+        "# Otro\n",
+    );
+    assert_eq!(
+        titulo("docs/auth.md", literal),
+        "rotación de tokens (v2)",
+        "el título del frontmatter se usa literalmente: no es un slug ni se capitaliza"
+    );
+
+    // Un `title` vacío no es un título presentable: la cadena continúa. (Es la semántica que ya
+    // tiene `Bundle::list_concepts` con su `.filter(|s| !s.is_empty())`, `bundle.rs:160`.)
+    let vacio = concat!(
+        "---\n",
+        "title: \"\"\n",
+        "---\n",
+        "\n",
+        "# Rotación de tokens\n",
+    );
+    assert_eq!(
+        titulo("docs/auth.md", vacio),
+        "Rotación de tokens",
+        "`title: \"\"` no es un título: se cae al siguiente eslabón de la cadena"
+    );
+}
+
+/// Criterio 2: sin `title`, gana el **primer H1** del cuerpo.
+#[test]
+fn titulo_del_h1() {
+    // Con frontmatter, pero sin `title`.
+    let raw = concat!(
+        "---\n",
+        "status: draft\n",
+        "---\n",
+        "\n",
+        "# Rotación de tokens\n",
+        "\n",
+        "## Detalle\n",
+    );
+    assert_eq!(
+        titulo("docs/rotacion.md", raw),
+        "Rotación de tokens",
+        "sin `title`, el título es el primer H1 del cuerpo"
+    );
+
+    // Sin frontmatter en absoluto: el cuerpo es el fichero entero y el H1 sigue encontrándose.
+    assert_eq!(
+        titulo("docs/rotacion.md", "# Rotación de tokens\n\nCuerpo.\n"),
+        "Rotación de tokens",
+        "un documento sin frontmatter también tiene H1"
+    );
+
+    // **H1**, no «primer heading»: un `##` previo no es un título de documento.
+    let con_h2_delante = concat!(
+        "## Contexto\n",
+        "\n",
+        "Texto.\n",
+        "\n",
+        "# Rotación de tokens\n",
+        "\n",
+        "### Detalle\n",
+    );
+    assert_eq!(
+        titulo("docs/rotacion.md", con_h2_delante),
+        "Rotación de tokens",
+        "la cadena dice H1: un `##` que aparece antes no gana"
+    );
+
+    // El texto del heading llega recortado y sin las almohadillas.
+    assert_eq!(
+        titulo("docs/x.md", "#    Rotación de tokens   \n"),
+        "Rotación de tokens",
+        "el título es el TEXTO del heading, sin `#` ni espacios de relleno"
+    );
+}
+
+/// Criterio 3: un `#` dentro de un bloque de código no es un H1.
+///
+/// `model::parse_headings` (`model.rs:536`) ya reconoce los fences ` ``` `: esta es la razón de
+/// reutilizarlo en vez de reimplementar la detección de headings.
+#[test]
+fn h1_en_fence_no_cuenta() {
+    let raw = concat!(
+        "Texto introductorio.\n",
+        "\n",
+        "```md\n",
+        "# No soy un título\n",
+        "```\n",
+        "\n",
+        "# Sí soy el título\n",
+    );
+    assert_eq!(
+        titulo("docs/ejemplo.md", raw),
+        "Sí soy el título",
+        "el `#` de dentro del fence es contenido del bloque de código, no un heading"
+    );
+
+    // Si el ÚNICO `#` del documento vive dentro de un fence, NO hay H1: la cadena sigue hasta el
+    // nombre del fichero (es lo que distingue reconocer fences de limitarse a ignorarlos).
+    let solo_fence = concat!(
+        "```sh\n",
+        "# instala las dependencias\n",
+        "npm ci\n",
+        "```\n",
+        "\n",
+        "Fin.\n",
+    );
+    assert_eq!(
+        titulo("docs/instalacion.md", solo_fence),
+        "instalacion",
+        "un comentario de shell dentro de un fence no puede convertirse en el título del documento"
+    );
+}
+
+/// Criterio 4: sin `title` ni H1, el título es el **nombre del fichero tal cual**, sin `.md`.
+#[test]
+fn titulo_del_nombre_de_fichero() {
+    let cuerpo = "Un documento sin metadata y sin encabezados.\n";
+    assert_eq!(
+        titulo("docs/decisions/auth-tokens.md", cuerpo),
+        "auth-tokens",
+        "el último eslabón es el NOMBRE del fichero: sin directorios, sin `.md`, sin retoques"
+    );
+    assert_ne!(
+        titulo("docs/decisions/auth-tokens.md", cuerpo),
+        "Auth Tokens",
+        "el Title Case de `title_from_path` era paridad con el prototipo, ya retirado"
+    );
+
+    // El quirk del `\b` de JS (`año.md` → `AñO`, `foo.bar.md` → `Foo.Bar`) se va con él.
+    assert_eq!(
+        titulo("año_fiscal.md", cuerpo),
+        "año_fiscal",
+        "ni se capitaliza ni se sustituyen `-`/`_` por espacios"
+    );
+    assert_eq!(
+        titulo("docs/foo.bar.md", cuerpo),
+        "foo.bar",
+        "solo se quita la extensión `.md` final"
+    );
+    // Y ningún nombre es especial (E16-H02).
+    assert_eq!(
+        titulo("README.md", cuerpo),
+        "README",
+        "`README.md` deriva su título con la misma regla que cualquier otro documento"
+    );
+    assert_eq!(
+        titulo("docs/index.md", cuerpo),
+        "index",
+        "`index.md` tampoco hereda el título de su carpeta: no representa una colección"
+    );
+}
+
+/// Criterio 5: con `title: 42` la derivación no revienta **y** `title` sigue siendo metadata
+/// consultable con su tipo numérico.
+#[test]
+fn title_no_es_reservada() {
+    let raw = concat!(
+        "---\n",
+        "title: 42\n",
+        "status: accepted\n",
+        "---\n",
+        "\n",
+        "# Encabezado del cuerpo\n",
+    );
+    let parsed = model::parse_file("docs/numerico.md", raw);
+    let pf = parsed
+        .frontmatter
+        .as_ref()
+        .expect("el documento tiene frontmatter");
+
+    // (a) No revienta: un escalar no-string se rinde a texto para presentar.
+    assert_eq!(
+        model::derived_title(Some(pf), &parsed.body, &rp("docs/numerico.md")),
+        "42",
+        "`title: 42` se presenta como «42»: la derivación es tolerante, no valida el tipo"
+    );
+
+    // (b) Y `title` NO se convierte en propiedad reservada: sigue siendo metadata del usuario,
+    //     con su tipo YAML real (si la heurística coercionase el dato, volvería `js_string`).
+    let v = pf
+        .get(&fp("title"))
+        .expect("`title` sigue en el frontmatter");
+    assert!(
+        matches!(v, Yaml::Number(_)),
+        "`title` conserva su tipo numérico para la consulta; llegó {v:?}"
+    );
+    assert_eq!(v.as_i64(), Some(42), "y su valor es el entero 42");
+    assert_ne!(
+        v,
+        &Yaml::String("42".to_string()),
+        "derivar un título NO puede reescribir el dato del usuario a string"
+    );
+
+    // (c) Un `title` sin rendición textual (lista, mapa, `null`) no es un título: la cadena sigue.
+    let lista = concat!(
+        "---\n",
+        "title:\n",
+        "  - uno\n",
+        "  - dos\n",
+        "---\n",
+        "\n",
+        "# Título real\n",
+    );
+    assert_eq!(
+        titulo("docs/lista.md", lista),
+        "Título real",
+        "una lista no tiene rendición textual: no puede ser el título, pero tampoco un error"
+    );
+    let nulo = concat!("---\n", "title:\n", "---\n", "\n", "# Título real\n");
+    assert_eq!(
+        titulo("docs/nulo.md", nulo),
+        "Título real",
+        "`title:` a `null` es una clave presente sin valor presentable: la cadena continúa"
+    );
+}
