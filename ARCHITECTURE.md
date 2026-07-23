@@ -1021,11 +1021,23 @@ durante toda la sesión**. Todas las rutas públicas son relativas a ella. Polí
 ```yaml
 discovery:
   include: ["**/*.md"]
-  exclude: [".git/**", ".lodestar/runtime/**"]
+  exclude: [".git/**", ".lodestar/**"]
   respectGitignore: true
   respectLodestarIgnore: true
   followSymlinks: false
 ```
+
+> **Corrección (E15-H07)**: `REFACTOR_PHASE_2 §Fase 3` sugiere `.lodestar/runtime/**` en su
+> «política recomendada». Se excluye **`.lodestar/` entero** por una **invariante de consistencia**:
+> *todo documento del inventario debe contar para la `WorkspaceRevision`*. Si no, sería nodo del
+> grafo, analizable y escribible, con cambios que nunca mueven la revisión — el control optimista
+> dejaría de protegerlo en silencio. Y la revisión **no puede** dejar de excluir `.lodestar/`
+> (decisión **D5**): `StagingDir` materializa ahí un árbol `.md` completo —copias de los documentos
+> cuya escritura está guardando—, así que si contara, `reverify_base_revision` fallaría *a causa del
+> apply en curso*: el motor transaccional invalidaría su propia base al preparar la escritura. Lo
+> mismo con las copias de recuperación. `.lodestar/` es el **plano de control** (config, cache,
+> runtime), nunca conocimiento del usuario. Tras E20 —que retira `schema.yaml` y los templates— ahí
+> no queda nada más.
 
 Sin profundidad máxima artificial. Restricciones iniciales: documentos UTF-8, paths representables,
 tamaño máximo configurable, symlinks desactivados. Se detectan **colisiones de capitalización**.

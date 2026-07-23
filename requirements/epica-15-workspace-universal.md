@@ -268,6 +268,11 @@ y la suite en verde.
   - Extender `WorkspaceConfig` con `workspace.root`, `discovery` (`include`/`exclude`/
     `respectGitignore`/`respectLodestarIgnore`/`followSymlinks`/tamaño máximo) y `validation`
     (severidad por familia de diagnóstico) + `transactions.rejectNewErrors`/`allowExistingErrors`.
+  - **`.lodestar/**` es un suelo duro, no un default sobreescribible** (recomendación del autor de
+    tests en E15-H07, aceptada): la config puede **añadir** exclusiones, nunca quitar esa. Un
+    usuario que escriba `exclude: []` reabriría el agujero que E15-H07 cerró — documentos
+    escribibles y ciegos al control optimista (ver `ARCHITECTURE.md §20.5`, corrección E15-H07).
+    → `exclude_vacio_no_reabre_lodestar`.
   - **Borrar** `Config`/`lodestar.toml` (legado, `config.rs:14-63`): dos ficheros de configuración
     para lo mismo es deuda, y `identity` ya murió en E15-H01. Cierra `DECISIONES.md §8`.
   - Renombrar `writableRoots` conservando semántica (es la *write policy* de `§20.1`);

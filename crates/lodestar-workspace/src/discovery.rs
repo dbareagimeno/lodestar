@@ -41,8 +41,19 @@ pub struct DiscoveryPolicy {
     /// Globs (estilo `.gitignore`) de lo que **entra** en el inventario. Por defecto `**/*.md`.
     pub include: Vec<String>,
     /// Globs de lo que queda **fuera**, con prioridad sobre `include`. Por defecto `.git/**` y
-    /// `.lodestar/runtime/**` (el árbol de trabajo desechable: planes, recibos, staging, journal y
-    /// copias de recuperación — que contienen `.md` espejados del canónico).
+    /// **`.lodestar/**` entero** — no solo `runtime/`.
+    ///
+    /// La razón no es higiene, es una **invariante de consistencia**: todo documento del inventario
+    /// tiene que contar para la [`lodestar_core::types::workspace_revision`], o el control optimista
+    /// dejaría de protegerlo en silencio (sería nodo del grafo, analizable y escribible, con
+    /// cambios que nunca mueven la revisión). Y `workspace_revision` **no puede** dejar de excluir
+    /// `.lodestar/` (decisión D5): `StagingDir` materializa ahí un árbol `.md` completo —copias de
+    /// los documentos cuya escritura está guardando— así que si contara, `reverify_base_revision`
+    /// fallaría *a causa del apply en curso*; el motor transaccional invalidaría su propia base al
+    /// preparar la escritura. Igual con las copias de recuperación.
+    ///
+    /// Por eso el arreglo va por aquí y no por la revisión. `.lodestar/` es el **plano de control**
+    /// de Lodestar (config, cache, runtime), nunca conocimiento del usuario.
     pub exclude: Vec<String>,
     /// Aplicar los `.gitignore` del árbol. Por defecto `true`.
     pub respect_gitignore: bool,
@@ -60,7 +71,7 @@ impl Default for DiscoveryPolicy {
     fn default() -> Self {
         DiscoveryPolicy {
             include: vec!["**/*.md".to_string()],
-            exclude: vec![".git/**".to_string(), ".lodestar/runtime/**".to_string()],
+            exclude: vec![".git/**".to_string(), ".lodestar/**".to_string()],
             respect_gitignore: true,
             respect_lodestar_ignore: true,
             follow_symlinks: false,

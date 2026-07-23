@@ -596,3 +596,114 @@ fn path_no_representable() -> std::ffi::OsString {
         .collect();
     std::ffi::OsString::from_wide(&unidades)
 }
+
+// ---------------------------------------------------------------------------
+// Criterio 10: `.lodestar/` es el plano de control, no conocimiento
+// ---------------------------------------------------------------------------
+
+/// **Dado** un `.md` bajo `.lodestar/` (una plantilla, o un fichero suelto), **Cuando** se
+/// descubre con la política por defecto, **Entonces** no entra en el inventario.
+///
+/// ## El agujero que cierra
+///
+/// El walker viejo (`io::load_bundle`) podaba **cualquier** directorio `.lodestar` a cualquier
+/// profundidad; la política por defecto de `§20.5` excluía solo `.lodestar/runtime/**`. En esa
+/// rendija cabía `.lodestar/templates/plantilla.md`, que pasaba a ser un documento del inventario
+/// con todas las consecuencias: nodo del grafo, resultado de `knowledge_search`, sujeto de
+/// `change_apply`, `move_document` y `delete_document`.
+///
+/// Y ahí estaba la incoherencia: [`lodestar_core::types::workspace_revision`] excluye **todo**
+/// `.lodestar/` (decisión D5 — `.lodestar/` nunca es fuente de verdad). Un documento así sería
+/// escribible por el motor transaccional y **sus cambios jamás moverían la revisión del
+/// workspace**: el control optimista dejaría de protegerlo en silencio. Es el mismo fallo que
+/// [`bundle_usa_la_politica_de_descubrimiento`] previene entre `bundle()` y
+/// `workspace_revision()`, entrando por el otro lado.
+///
+/// ## Por qué se cierra por el lado del descubrimiento
+///
+/// D5 no es una convención arbitraria: es lo que impide que la revisión observe su propia
+/// maquinaria. `StagingDir` materializa bajo `.lodestar/runtime/staging/` un **árbol `.md`
+/// completo** — copias de los mismos documentos cuya escritura está guardando. Si `.lodestar/`
+/// contara para la revisión, `reverify_base_revision` fallaría *a causa del apply en curso*.
+/// Ampliar `workspace_revision` no es una alternativa; excluir `.lodestar/` del inventario sí.
+///
+/// ## Las dos mitades del test
+///
+/// 1. **La exclusión**, en los tres sitios donde puede aparecer un `.md` de control: bajo
+///    `templates/`, suelto en la raíz de `.lodestar/`, y bajo `runtime/` (este último ya salía
+///    excluido — va como guarda de regresión).
+/// 2. **El invariante que hay detrás**, que es lo que de verdad importa y sobrevive a cualquier
+///    cambio futuro de la lista de globs: *todo documento del inventario cuenta para la revisión
+///    del workspace*. Se comprueba de la única forma observable desde fuera — tocando cada
+///    documento descubierto y exigiendo que la revisión se mueva. Un documento invisible para la
+///    revisión hace fallar el bucle, esté donde esté y lo excluya quien lo excluya.
+#[test]
+fn lodestar_interno_no_es_conocimiento() {
+    let dir = tempfile::tempdir().unwrap();
+    lodestar_fixtures::materialize(&lodestar_fixtures::arbitrary(), dir.path()).unwrap();
+
+    let control = [
+        // El caso real de hoy: las plantillas de `.lodestar/templates/` son ENTRADA de la
+        // generación, no documentos de la base.
+        ".lodestar/templates/plantilla.md",
+        // Un `.md` suelto en la raíz del directorio de control.
+        ".lodestar/nota.md",
+        // Runtime: ya excluido antes de esta enmienda; guarda de regresión.
+        ".lodestar/runtime/staging/copia.md",
+    ];
+    for rel in control {
+        let destino = dir.path().join(rel);
+        std::fs::create_dir_all(destino.parent().unwrap()).unwrap();
+        std::fs::write(&destino, "# Fichero de control\n").unwrap();
+    }
+
+    // Política POR DEFECTO explícita: el criterio es sobre los valores de `§20.5`, no sobre una
+    // política a medida (la configurable llega en E15-H08).
+    let d = discover(dir.path(), &DiscoveryPolicy::default()).unwrap();
+
+    // --- Mitad 1: la exclusión ------------------------------------------------------
+    for rel in control {
+        assert!(
+            !contiene(&d.files, rel),
+            "`.lodestar/` es el plano de control de Lodestar, no conocimiento del usuario: \
+             {rel} no puede entrar en el inventario. Inventario: {:?}",
+            rutas(&d.files)
+        );
+    }
+    assert_eq!(
+        rutas(&d.files),
+        vec![
+            "README.md",
+            "one/first.md",
+            "three/levels/deep/third.md",
+            "two/levels/second.md",
+        ],
+        "excluir `.lodestar/` no puede llevarse por delante ningún documento del usuario"
+    );
+
+    // --- Mitad 2: el invariante -----------------------------------------------------
+    // Todo documento del inventario cuenta para la revisión del workspace. Si alguno no la
+    // moviera, sería escribible por el motor transaccional y ciego al control optimista.
+    let revision =
+        |files: &FileMap| lodestar_core::types::workspace_revision(files, &[] as &[RelPath]);
+    let descubiertos: Vec<String> = rutas(&d.files).into_iter().map(String::from).collect();
+    let mut anterior = revision(&d.files);
+    for rel in descubiertos {
+        let destino = dir.path().join(&rel);
+        let mut contenido = std::fs::read_to_string(&destino).unwrap();
+        contenido.push_str("\n<!-- tocado por el test -->\n");
+        std::fs::write(&destino, contenido).unwrap();
+
+        let actual = revision(
+            &discover(dir.path(), &DiscoveryPolicy::default())
+                .unwrap()
+                .files,
+        );
+        assert_ne!(
+            actual, anterior,
+            "`{rel}` está en el inventario pero cambiarlo NO mueve la revisión del workspace: \
+             sería un documento escribible al que el control optimista no protege"
+        );
+        anterior = actual;
+    }
+}
