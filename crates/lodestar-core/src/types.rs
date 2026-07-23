@@ -1528,3 +1528,211 @@ pub struct ChangeReceipt {
     pub semantic_diff: SemanticDiff,
 }
 }
+
+// ---------------------------------------------------------------------------
+// Lenguaje de consulta tipado: QueryValue · ComparisonOperator · FunctionName ·
+// Expression · ValueType · TypeError
+// (`ARCHITECTURE.md §20.8`, `REFACTOR_PHASE_2 §Fase 5`, E19-H01 — supersede la DSL de subcadena
+//  de `§4.3`/`query.rs`, que se retira en E19-H05).
+// ---------------------------------------------------------------------------
+//
+// **STUBS de la fase ROJA de E19-H01**: aquí solo se congela la FORMA del AST y de sus tipos de
+// apoyo (el contrato de wire que toda E19 hereda). La lógica del evaluador vive en
+// [`crate::eval::evaluate`] (hoy `todo!()`); el parser textual es E19-H02 y el filtro JSON E19-H03.
+
+/// Un valor literal **tipado** de una consulta: el operando derecho de una [`Expression::Comparison`]
+/// y el argumento de una [`Expression::Function`] (`§20.8`, `§Fase 5 (AST unificado)`).
+///
+/// Refleja los cinco tipos escalares/compuestos que el lenguaje admite como literal —
+/// string/número/booleano/`null`/lista— y **conserva el tipo** (no hay coerción): es lo que permite
+/// que `priority = "2"` (string) y `priority = 2` (número) sean literales distintos y no el mismo
+/// valor renderizado a texto.
+///
+/// **Forma serde (contrato de wire, `§20.10`)**: `#[serde(untagged)]` para que el campo `value` del
+/// filtro JSON de E19-H03 deserialice desde el valor JSON **desnudo** (`"accepted"` → `String`, `2`
+/// → `Number`, `true` → `Bool`, `null` → `Null`, `["a","b"]` → `List`) sin envoltura. El número usa
+/// [`serde_yaml::Number`] —el mismo dominio numérico que [`ParsedFrontmatter::get`] devuelve— para
+/// que la comparación no tenga que cruzar representaciones. El orden de las variantes es el orden en
+/// que serde las prueba: `Null` primero (solo casa con `null`), la lista al final. **E19-H03 fija y
+/// testea el round-trip JSON exacto**; aquí solo se declara la forma.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum QueryValue {
+    /// El literal `null`.
+    Null,
+    /// Un booleano (`true`/`false`).
+    Bool(bool),
+    /// Un número (entero o real), en el dominio numérico de YAML.
+    Number(serde_yaml::Number),
+    /// Un string (el literal entrecomillado de la consulta textual).
+    String(String),
+    /// Una lista de literales — el operando de `contains_any`/`contains_all`.
+    List(Vec<QueryValue>),
+}
+
+/// Los operadores de una [`Expression::Comparison`] (`§20.8`, `§Fase 5 (Operadores mínimos)`).
+///
+/// **Un solo `Contains`**: `§Fase 5` lista `contains` bajo «Texto» *y* bajo «Listas»; no son dos
+/// operadores, sino uno cuyo significado lo decide el **tipo del campo** (subcadena sobre un string,
+/// pertenencia sobre una lista). `contains_any`/`contains_all` son exclusivos de listas.
+///
+/// **Forma serde (contrato de wire, `§20.10`)**: nombres largos —`equals`, `greater_than_or_equal`,
+/// …— porque el filtro JSON de E19-H03 usa `"operator": "equals"`, no el símbolo `=`. La consulta
+/// textual de E19-H02 mapea `=`/`>=`/… a estas variantes por su cuenta (el símbolo no es wire).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ComparisonOperator {
+    /// `=` — igualdad por **valor e igualdad de tipo** (cruce de tipos = `false`, no error).
+    #[serde(rename = "equals")]
+    Eq,
+    /// `!=` — la negación de [`ComparisonOperator::Eq`].
+    #[serde(rename = "not_equals")]
+    Ne,
+    /// `>` — orden estricto; exige ambos operandos numéricos o ambos string (cruce = `TypeError`).
+    #[serde(rename = "greater_than")]
+    Gt,
+    /// `>=` — orden no estricto; mismas reglas de tipo que [`ComparisonOperator::Gt`].
+    #[serde(rename = "greater_than_or_equal")]
+    Ge,
+    /// `<` — orden estricto.
+    #[serde(rename = "less_than")]
+    Lt,
+    /// `<=` — orden no estricto.
+    #[serde(rename = "less_than_or_equal")]
+    Le,
+    /// `contains` — subcadena si el campo es string, pertenencia si es lista (el tipo decide).
+    #[serde(rename = "contains")]
+    Contains,
+    /// `starts_with` — prefijo de texto (solo sobre string).
+    #[serde(rename = "starts_with")]
+    StartsWith,
+    /// `ends_with` — sufijo de texto (solo sobre string).
+    #[serde(rename = "ends_with")]
+    EndsWith,
+    /// `contains_any` — la lista del campo comparte al menos un elemento con el literal (solo lista).
+    #[serde(rename = "contains_any")]
+    ContainsAny,
+    /// `contains_all` — la lista del campo contiene todos los elementos del literal (solo lista).
+    #[serde(rename = "contains_all")]
+    ContainsAll,
+}
+
+/// Las funciones de **existencia** de una [`Expression::Function`] (`§20.8`, `§Fase 5 (Existencia)`).
+///
+/// `has(x)` es «la propiedad `x` está presente» y `missing(x)` su negación. Existencia se juzga con
+/// [`ParsedFrontmatter::get`] (presente aunque su valor sea `null`/`""`/`[]`), **no** con la vieja
+/// heurística `fmPresent` de `query.rs` (que trataba `""` y la lista vacía como ausencia).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FunctionName {
+    /// `has(x)` — la propiedad existe.
+    Has,
+    /// `missing(x)` — la propiedad no existe.
+    Missing,
+}
+
+/// El **AST unificado** del lenguaje de consulta (`§20.8`, `§Fase 5 (AST unificado)`): tanto la
+/// consulta textual `where` (E19-H02) como el filtro estructurado `filter` (E19-H03) se traducen a
+/// este único árbol, y **producen exactamente el mismo resultado**.
+///
+/// La evalúa [`crate::eval::evaluate`], que respeta los tipos YAML sin coerción (E19-H01).
+///
+/// **serde diferido a E19-H03**: `Comparison` lleva un [`FieldPath`], que hoy no es
+/// `Serialize`/`Deserialize`; el filtro JSON de E19-H03 —el único consumidor de wire de este
+/// árbol— añadirá esa capacidad y la forma etiquetada (`{and:[…]}`, `{field,operator,value}`) junto
+/// con su test de round-trip. En E19-H01 el AST se construye **en memoria** (por el evaluador y sus
+/// tests), así que aquí basta con `PartialEq` para poder compararlo.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Expression {
+    /// Una comparación `campo operador valor` (`priority >= 2`, `owners contains "security"`).
+    Comparison {
+        field: FieldPath,
+        operator: ComparisonOperator,
+        value: QueryValue,
+    },
+    /// Una llamada de existencia (`has(status)`, `missing(reviewed_at)`). El argumento nombra la
+    /// propiedad como [`QueryValue::String`] (la forma que impone el AST de `§20.8`,
+    /// `arguments: Vec<QueryValue>`); el evaluador lo reinterpreta como [`FieldPath`].
+    Function {
+        name: FunctionName,
+        arguments: Vec<QueryValue>,
+    },
+    /// Conjunción: verdadera si **todas** sus ramas lo son.
+    And(Vec<Expression>),
+    /// Disyunción: verdadera si **alguna** de sus ramas lo es.
+    Or(Vec<Expression>),
+    /// Negación.
+    Not(Box<Expression>),
+}
+
+/// El tipo YAML **observado** de un valor, para poblar los operandos de un [`TypeError`] («qué
+/// encontró»). Es la clasificación mínima que distingue las cinco familias que el lenguaje trata de
+/// forma distinta (escalar ordenable vs no ordenable vs lista vs mapa).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ValueType {
+    /// `null`.
+    Null,
+    /// Un booleano — **no** ordenable.
+    Bool,
+    /// Un número — ordenable entre números.
+    Number,
+    /// Un string — ordenable entre strings (lexicográfico) y contenedor de subcadenas.
+    String,
+    /// Una lista.
+    List,
+    /// Un mapa/objeto.
+    Mapping,
+}
+
+impl ValueType {
+    /// Clasifica un [`serde_yaml::Value`] en su [`ValueType`]. La usa el evaluador para poblar los
+    /// operandos de un [`TypeError`]; se declara aquí (no en `eval`) por vivir junto al enum.
+    pub fn of(value: &serde_yaml::Value) -> ValueType {
+        match value {
+            serde_yaml::Value::Null => ValueType::Null,
+            serde_yaml::Value::Bool(_) => ValueType::Bool,
+            serde_yaml::Value::Number(_) => ValueType::Number,
+            serde_yaml::Value::String(_) => ValueType::String,
+            serde_yaml::Value::Sequence(_) => ValueType::List,
+            serde_yaml::Value::Mapping(_) => ValueType::Mapping,
+            // `Tagged` (un `!Tag valor` de YAML) se clasifica por su valor interno.
+            serde_yaml::Value::Tagged(t) => ValueType::of(&t.value),
+        }
+    }
+}
+
+/// El error de tipo del evaluador (`§20.8`, `§Fase 5 (Semántica de tipos)`): la consecuencia de
+/// prohibir la coerción implícita. Es lo que separa este lenguaje de un grep — `priority >= "high"`
+/// **no** es `false`, es un error.
+///
+/// Lleva estructurado *qué esperaba* (la variante) y *qué encontró* (los [`ValueType`] de los
+/// operandos), de modo que E20/E21 puedan mapearlo a `ErrorCode::InvalidSchema` con un mensaje
+/// legible sin volver a inspeccionar el `Value`. Tipo **propio** —y no una variante de
+/// [`crate::CoreError`]— porque no es un fallo del núcleo sino un dato del `Result` del evaluador
+/// (mismo espíritu que [`FmError`]): un `where` mal tipado es entrada del agente, y quien lo
+/// traduce a protocolo (la fachada) decide su envoltorio.
+#[derive(Debug, Clone, PartialEq)]
+pub enum TypeError {
+    /// Una comparación de **orden** (`> >= < <=`) cuyos operandos no admiten orden entre sí: un
+    /// número frente a un string (**orden cruzado**), o un tipo no ordenable en cualquiera de los
+    /// lados (booleano, `null`, lista, mapa). El orden solo está definido entre dos números o entre
+    /// dos strings (lexicográfico). Contrasta con `=`/`!=`, que **nunca** es error: el cruce de
+    /// tipos en igualdad es `false`.
+    OrderNotDefined {
+        field: FieldPath,
+        operator: ComparisonOperator,
+        /// El tipo del **campo** (operando izquierdo).
+        field_type: ValueType,
+        /// El tipo del **literal** (operando derecho).
+        value_type: ValueType,
+    },
+    /// Un operador de **lista** (`contains`/`contains_any`/`contains_all`) sobre un campo que no es
+    /// lista. `contains` admite además un string (subcadena), así que solo es error sobre un
+    /// escalar **no string**; `contains_any`/`contains_all` son exclusivos de listas y son error
+    /// también sobre un string. Un campo **inexistente** no llega aquí: la ausencia es `false`.
+    NotAList {
+        field: FieldPath,
+        operator: ComparisonOperator,
+        /// El tipo que tenía el campo (nunca `List`).
+        found: ValueType,
+    },
+}
