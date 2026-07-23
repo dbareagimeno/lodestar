@@ -11,7 +11,6 @@
 use lodestar_core::model;
 use lodestar_core::types::{Check, CheckCode, RelPath, Severity};
 
-use crate::config::WorkspaceConfig;
 use crate::error::WorkspaceError;
 use crate::Workspace;
 
@@ -75,8 +74,7 @@ impl Workspace {
             });
         };
 
-        let cfg = WorkspaceConfig::load(self.root()).map_err(WorkspaceError::Io)?;
-        let reference_roots = &cfg.workspace.reference_roots;
+        let reference_roots = &self.config().workspace.reference_roots;
 
         let mut references = Vec::new();
         let mut diagnostics = Vec::new();
@@ -130,8 +128,7 @@ impl Workspace {
     /// Contención por SEGMENTOS de path (reusa [`lodestar_core::types::under_root`]), nunca por
     /// prefijo de string — así `"src"` no cubre `"srcx/y.rs"`.
     pub fn assert_writable(&self, path: &RelPath) -> Result<(), WorkspaceError> {
-        let cfg = WorkspaceConfig::load(self.root()).map_err(WorkspaceError::Io)?;
-        let ws = &cfg.workspace;
+        let ws = &self.config().workspace;
 
         if ws
             .reference_roots

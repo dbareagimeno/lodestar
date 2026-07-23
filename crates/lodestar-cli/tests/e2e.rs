@@ -39,12 +39,23 @@ fn run(dir: &Path, args: &[&str]) -> i32 {
         .unwrap()
 }
 
-/// Un `lodestar.toml` inválido NO relaja la puerta en silencio: exit 3.
+/// Un `.lodestar/config.yaml` inválido NO relaja la puerta en silencio: exit 3.
+///
+/// Migrado en E15-H08: hasta entonces el fichero de config era `lodestar.toml` y este e2e escribía
+/// un TOML roto. Con el legado borrado, `lodestar.toml` es un fichero más del proyecto (ver
+/// `lodestar_toml_ignorado`) y el fichero cuyo YAML roto **debe** abortar la puerta de CI es el
+/// nuevo `.lodestar/config.yaml`: desde que gobierna el descubrimiento, degradar a defaults ante un
+/// typo haría que la CI juzgara un conjunto de documentos distinto del declarado, sin avisar.
 #[test]
 fn config_invalida_es_error_de_runtime() {
-    let dir = temp_dir("toml-roto");
+    let dir = temp_dir("yaml-roto");
     write(&dir, "index.md", "---\nokf_version: \"0.1\"\n---\n\n# B\n");
-    write(&dir, "lodestar.toml", "[gate\nblock_warnings = true\n");
+    // Secuencia de flujo YAML sin cerrar: parseo inválido garantizado.
+    write(
+        &dir,
+        ".lodestar/config.yaml",
+        "discovery:\n  exclude: [\"notas/**\"\n",
+    );
     assert_eq!(run(&dir, &["check"]), 3);
 }
 

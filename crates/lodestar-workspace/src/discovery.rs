@@ -7,7 +7,8 @@
 //!    ([`Check`] con los códigos de `§20.9`). Lo que antes se tiraba por un `eprintln!` que nadie
 //!    podía consultar (no-UTF-8, ruta no representable, symlink) ahora es un diagnóstico.
 //! 2. La política es **explícita** ([`DiscoveryPolicy`]), con los valores por defecto de `§20.5`.
-//!    E15-H08 la construirá desde `.lodestar/config.yaml`; hasta entonces se usa la de por defecto.
+//!    Desde E15-H08 se construye desde la sección `discovery` de `.lodestar/config.yaml`
+//!    ([`crate::config::DiscoverySection::policy`]), con [`CONTROL_PLANE_EXCLUDE`] como suelo duro.
 //!
 //! Determinismo: el inventario es un `BTreeMap` (orden por ruta) y el recorrido va ordenado por
 //! nombre de fichero, de modo que **mismo árbol ⇒ mismo inventario y mismos diagnósticos, en el
@@ -25,6 +26,13 @@ use crate::error::WorkspaceError;
 /// Nombre del fichero de exclusiones propio de Lodestar (mismo formato que un `.gitignore`).
 pub const LODESTAR_IGNORE_FILENAME: &str = ".lodestarignore";
 
+/// El **suelo duro** del descubrimiento: el plano de control de Lodestar (`.lodestar/` entero).
+///
+/// No es un default sobreescribible sino una exclusión que la config puede **añadir pero nunca
+/// quitar** ([`crate::config::DiscoverySection::policy`] la inyecta siempre): sostiene la
+/// invariante de consistencia de [`DiscoveryPolicy::exclude`].
+pub const CONTROL_PLANE_EXCLUDE: &str = ".lodestar/**";
+
 /// Tamaño máximo por documento **por defecto**: 10 MiB.
 ///
 /// Un `.md` de conocimiento no llega ahí ni de lejos (10 MiB son ~10 millones de caracteres
@@ -41,7 +49,8 @@ pub struct DiscoveryPolicy {
     /// Globs (estilo `.gitignore`) de lo que **entra** en el inventario. Por defecto `**/*.md`.
     pub include: Vec<String>,
     /// Globs de lo que queda **fuera**, con prioridad sobre `include`. Por defecto `.git/**` y
-    /// **`.lodestar/**` entero** — no solo `runtime/`.
+    /// **`.lodestar/**` entero** ([`CONTROL_PLANE_EXCLUDE`]) — no solo `runtime/`. `.lodestar/**`
+    /// es además el **suelo duro** que la config no puede levantar (E15-H08).
     ///
     /// La razón no es higiene, es una **invariante de consistencia**: todo documento del inventario
     /// tiene que contar para la [`lodestar_core::types::workspace_revision`], o el control optimista
@@ -71,7 +80,7 @@ impl Default for DiscoveryPolicy {
     fn default() -> Self {
         DiscoveryPolicy {
             include: vec!["**/*.md".to_string()],
-            exclude: vec![".git/**".to_string(), ".lodestar/**".to_string()],
+            exclude: vec![".git/**".to_string(), CONTROL_PLANE_EXCLUDE.to_string()],
             respect_gitignore: true,
             respect_lodestar_ignore: true,
             follow_symlinks: false,
@@ -97,8 +106,8 @@ pub struct Discovered {
 /// [`case_collisions`] sobre el inventario resultante.
 ///
 /// # Errores
-/// - [`WorkspaceError::Io`] si algún glob de `policy` es inválido (hasta E15-H08 la política no
-///   viene de fuera, así que en la práctica es inalcanzable).
+/// - [`WorkspaceError::Io`] si algún glob de `policy` es inválido (desde E15-H08 la política puede
+///   venir del `config.yaml` del usuario, así que es alcanzable con un glob mal escrito).
 pub fn discover(root: &Path, policy: &DiscoveryPolicy) -> Result<Discovered, WorkspaceError> {
     let mut builder = WalkBuilder::new(root);
     builder

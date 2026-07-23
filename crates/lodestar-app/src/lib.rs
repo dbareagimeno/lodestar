@@ -28,7 +28,7 @@ use lodestar_core::types::{
 };
 use lodestar_core::{Bundle, CoreError};
 use lodestar_workspace::{
-    transaction_id, ExternalReference, Workspace, WorkspaceConfig, WorkspaceError, WorkspaceSchema,
+    transaction_id, ExternalReference, Workspace, WorkspaceError, WorkspaceSchema,
 };
 
 /// Envelope común de protocolo (`ARCHITECTURE.md §19.6`, `docs/REFACTOR.md §13`, decisión **D3**).
@@ -376,7 +376,7 @@ impl App {
         let files = bundle.files();
         let analysis = bundle.analyze();
         let root = self.workspace.root();
-        let cfg = WorkspaceConfig::load(root).map_err(WorkspaceError::Io)?;
+        let cfg = self.workspace.config();
         let schema = WorkspaceSchema::load(root).map_err(WorkspaceError::Io)?;
 
         let revision = workspace_revision(files, &cfg.workspace.writable_roots);
@@ -716,7 +716,7 @@ impl App {
             .map_err(|e| workspace_error_code(&e))?;
         let analysis = bundle.analyze();
         let root = self.workspace.root();
-        let cfg = WorkspaceConfig::load(root).map_err(|_| ErrorCode::InternalIoError)?;
+        let cfg = self.workspace.config();
         let schema = WorkspaceSchema::load(root).map_err(|_| ErrorCode::InternalIoError)?;
 
         let revision = workspace_revision(bundle.files(), &cfg.workspace.writable_roots);
@@ -1207,7 +1207,7 @@ impl App {
             .bundle()
             .map_err(|e| workspace_error_code(&e))?;
         let root = self.workspace.root();
-        let cfg = WorkspaceConfig::load(root).map_err(|_| ErrorCode::InternalIoError)?;
+        let cfg = self.workspace.config();
         let schema = WorkspaceSchema::load(root).map_err(|_| ErrorCode::InternalIoError)?;
         let files = bundle.files();
         let writable = &cfg.workspace.writable_roots;
@@ -1371,8 +1371,7 @@ impl App {
         // (1) Cargar el plan persistido (caducidad → PLAN_EXPIRED; ausente/ilegible → PLAN_STALE).
         let plan = self.load_plan(change_set_id)?;
 
-        let root = self.workspace.root();
-        let cfg = WorkspaceConfig::load(root).map_err(|_| ErrorCode::InternalIoError)?;
+        let cfg = self.workspace.config();
         let bundle = self
             .workspace
             .bundle()
@@ -1503,8 +1502,7 @@ impl App {
             .map_err(|_| ErrorCode::PlanExpired)?;
 
         // (2) Revisión actual del conocimiento escribible.
-        let root = self.workspace.root();
-        let cfg = WorkspaceConfig::load(root).map_err(|_| ErrorCode::InternalIoError)?;
+        let cfg = self.workspace.config();
         let bundle = self
             .workspace
             .bundle()

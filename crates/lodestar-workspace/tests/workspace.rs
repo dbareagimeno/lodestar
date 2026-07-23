@@ -102,24 +102,29 @@ fn open_live_emite_evento_y_acelera_lecturas() {
     assert!(cache.orphans().unwrap().contains(&p));
 }
 
+/// La strictness de la puerta (`gate.blockWarnings`) en el **formato nuevo** (E15-H08): el
+/// `lodestar.toml` legado se borró, así que lo que endurece `lodestar check` es ahora la sección
+/// `gate` de `.lodestar/config.yaml`. Mismo criterio de antes: por defecto solo los errores
+/// bloquean; con `blockWarnings: true` también los avisos.
 #[test]
 fn config_strictness_bloquea_avisos() {
-    use lodestar_workspace::Config;
+    use lodestar_workspace::WorkspaceConfig;
     let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join(".lodestar")).unwrap();
     std::fs::write(
-        dir.path().join("lodestar.toml"),
-        "[gate]\nblock_warnings = true\n",
+        dir.path().join(".lodestar/config.yaml"),
+        "gate:\n  blockWarnings: true\n",
     )
     .unwrap();
-    let cfg = Config::load(dir.path()).unwrap();
+    let cfg = WorkspaceConfig::load(dir.path()).unwrap();
     assert!(cfg.gate.block_warnings);
-    // un análisis con warns pero sin errores: bloquea solo si block_warnings.
+    // un análisis con warns pero sin errores: bloquea solo si blockWarnings.
     let analysis = lodestar_core::types::Analysis {
         warn_count: 2,
         ..Default::default()
     };
     assert!(cfg.gate_blocked(&analysis));
-    assert!(!Config::default().gate_blocked(&analysis));
+    assert!(!WorkspaceConfig::default().gate_blocked(&analysis));
 }
 
 #[test]

@@ -38,7 +38,7 @@ mod snapshot;
 mod staging;
 mod transaction;
 
-pub use config::{Config, WorkspaceConfig};
+pub use config::WorkspaceConfig;
 pub use error::WorkspaceError;
 pub use external_refs::{ExternalReference, ExternalRefsReport};
 pub use journal::{Journal, JournalState, OpState};
@@ -52,6 +52,8 @@ pub use transaction::transaction_id;
 /// Handle unificado de un bundle abierto.
 pub struct Workspace {
     root: PathBuf,
+    /// Configuración de la sesión (`.lodestar/config.yaml`), leída **una sola vez** al abrir.
+    config: WorkspaceConfig,
     /// Cache incremental (SQLite/FTS5). `None` en modo efímero (CLI one-shot).
     cache: Option<Arc<Store>>,
     /// Watcher vivo (mantiene la observación de disco mientras exista).
@@ -63,32 +65,52 @@ impl Workspace {
     /// (usa [`Workspace::open_live`] o [`Workspace::enable_cache`]).
     ///
     /// Abrir no exige ceremonia: no hay descubrimiento de repo, ni `init`, ni scaffold obligatorio
-    /// (`ARCHITECTURE.md §20.1`). Un directorio con `.md` sueltos es un workspace válido.
+    /// (`ARCHITECTURE.md §20.1`). Un directorio con `.md` sueltos —y **sin** `.lodestar/`— es un
+    /// workspace válido: la config es opcional y su ausencia da los defaults de `§20.5`.
+    ///
+    /// # Errores
+    /// - [`WorkspaceError::Io`] si `.lodestar/config.yaml` existe pero es inválido. Se comprueba
+    ///   **antes** de tocar nada del disco: desde que la config gobierna el descubrimiento
+    ///   (E15-H08), degradar a defaults ante un typo haría que Lodestar viera un conjunto de
+    ///   documentos distinto del que el usuario declaró sin decir una palabra.
     pub fn open(root: &Path) -> Result<Self, WorkspaceError> {
+        // La config se lee UNA vez por sesión: la raíz y su política son fijas mientras el
+        // workspace vive (`ARCHITECTURE.md §20.5`).
+        let config = WorkspaceConfig::load(root).map_err(WorkspaceError::Io)?;
         // Ajusta el `.gitignore` versionado (cache + runtime desechables, config canónica
         // preservada) y garantiza el scaffold de `.lodestar/runtime/` — ambos best-effort, no
-        // abortan la apertura (`ARCHITECTURE.md §19.4`, `DECISIONES.md §0` D5).
+        // abortan la apertura (`ARCHITECTURE.md §19.4`, `DECISIONES.md §0` D5). Ninguno de los dos
+        // escribe configuración: un workspace sin `.lodestar/config.yaml` sigue sin tenerlo tras
+        // abrirlo.
         gitignore::ensure_gitignore(root);
         runtime::ensure_runtime_scaffold(root);
         Ok(Workspace {
             root: root.to_path_buf(),
+            config,
             cache: None,
             _watcher: None,
         })
     }
 
-    /// La configuración efectiva del bundle (`lodestar.toml` + defaults).
-    pub fn config(&self) -> Config {
-        Config::load(&self.root).unwrap_or_default()
+    /// La configuración de la sesión (`.lodestar/config.yaml` + defaults seguros), leída una sola
+    /// vez al abrir. El `lodestar.toml` legado desapareció en E15-H08: hoy es un fichero más del
+    /// proyecto.
+    pub fn config(&self) -> &WorkspaceConfig {
+        &self.config
     }
 
     /// La [`DiscoveryPolicy`] efectiva del workspace (`ARCHITECTURE.md §20.5`).
     ///
-    /// **Punto de inyección único** de la política: hoy son los valores por defecto de `§20.5`;
-    /// E15-H08 la construirá desde `.lodestar/config.yaml` (`discovery.*`) sin que ninguno de los
-    /// llamadores tenga que cambiar.
+    /// **Punto de inyección único** de la política: se deriva de la sección `discovery` de la
+    /// config de la sesión ([`config::DiscoverySection::policy`]), que le añade el suelo duro
+    /// `.lodestar/**` — la config puede añadir exclusiones, nunca quitar esa.
+    ///
+    /// La firma es infalible a propósito: la validación del YAML ocurre **una vez**, al abrir
+    /// ([`Workspace::open`]), de modo que un workspace abierto siempre tiene una política válida y
+    /// ninguno de sus llamadores tiene que decidir qué hacer con un error de config a mitad de una
+    /// lectura.
     pub fn discovery_policy(&self) -> DiscoveryPolicy {
-        DiscoveryPolicy::default()
+        self.config.discovery.policy()
     }
 
     /// El inventario `.md` del workspace según [`Workspace::discovery_policy`] (E15-H07).
@@ -128,10 +150,9 @@ impl Workspace {
     /// - [`WorkspaceError::Io`] si falla la lectura del canónico.
     pub fn workspace_revision(&self) -> Result<WorkspaceRevision, WorkspaceError> {
         let files = self.discover_files()?;
-        let cfg = WorkspaceConfig::load(&self.root).unwrap_or_default();
         Ok(lodestar_core::types::workspace_revision(
             &files,
-            &cfg.workspace.writable_roots,
+            &self.config.workspace.writable_roots,
         ))
     }
 
@@ -159,9 +180,19 @@ impl Workspace {
 
     /// Abre en modo hermético (p. ej. CLI efímera): sin tocar `.gitignore` ni el scaffold de
     /// runtime, y sin cache incremental.
+    ///
+    /// «Hermético» se refiere a **no escribir** en el workspace, no a saltarse la validación: la
+    /// config se carga y se valida igual que en [`Workspace::open`]. Si no lo hiciera, esta vía
+    /// serviría un inventario calculado con una política de defaults que el usuario nunca escribió
+    /// — justo el fallo silencioso que la validación existe para evitar.
+    ///
+    /// # Errores
+    /// - [`WorkspaceError::Io`] si `.lodestar/config.yaml` existe pero es inválido.
     pub fn open_ephemeral(root: &Path) -> Result<Self, WorkspaceError> {
+        let config = WorkspaceConfig::load(root).map_err(WorkspaceError::Io)?;
         Ok(Workspace {
             root: root.to_path_buf(),
+            config,
             cache: None,
             _watcher: None,
         })

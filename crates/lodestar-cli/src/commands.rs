@@ -18,9 +18,9 @@ use crate::sarif;
 /// ([`lodestar_app::App::full_analysis`], un solo `analyze()`): así los diagnósticos `SCHEMA-*`/
 /// `REL-*` que disparan el fallo se **surface an** en el wire, no solo el veredicto. El veredicto
 /// `conformant` (== sin `Err` entre los conceptos, misma semántica que `knowledge_check`) decide el
-/// bloqueo; además, `lodestar.toml` puede endurecer la puerta bloqueando también avisos
-/// (`gate.block_warnings`). Exit codes congelados: `0` conforme · `1` bloqueado · `3` runtime/IO
-/// (error del servicio o `lodestar.toml` inválido).
+/// bloqueo; además, `.lodestar/config.yaml` puede endurecer la puerta bloqueando también avisos
+/// (`gate.blockWarnings`). Exit codes congelados: `0` conforme · `1` bloqueado · `3` runtime/IO
+/// (error del servicio o `.lodestar/config.yaml` inválido — lo detecta ya `App::open`).
 pub fn check(root: &Path, json: bool, sarif_out: bool) -> anyhow::Result<ExitCode> {
     // Motor completo (OKF + schema-driven) en `App`, computado UNA sola vez: `full_analysis` corre
     // `analyze()` y fusiona los `SCHEMA-*`/`REL-*` en `per_file` con la misma lógica que
@@ -40,14 +40,12 @@ pub fn check(root: &Path, json: bool, sarif_out: bool) -> anyhow::Result<ExitCod
         .flatten()
         .any(|c| c.level == Severity::Err);
 
-    // Un `lodestar.toml` inválido es exit 3, NO defaults silenciosos: con `block_warnings=true`
-    // y un typo TOML, la puerta de CI se relajaría sin ningún aviso. El motor ya cubre los `Err`
-    // (incluidos los schema-driven) vía `conformant`; `lodestar.toml` solo puede endurecer la
-    // puerta para que los avisos OKF también bloqueen.
-    let blocked = !conformant
-        || lodestar_workspace::Config::load(root)
-            .map_err(|e| anyhow::anyhow!(e))?
-            .gate_blocked(&analysis);
+    // Un `.lodestar/config.yaml` inválido es exit 3, NO defaults silenciosos: con
+    // `blockWarnings: true` y un typo en el YAML, la puerta de CI se relajaría sin ningún aviso.
+    // El error lo levanta ya `App::open` (la config se valida una vez, al abrir el workspace). El
+    // motor cubre los `Err` (incluidos los schema-driven) vía `conformant`; la config solo puede
+    // endurecer la puerta para que los avisos OKF también bloqueen.
+    let blocked = !conformant || app.workspace().config().gate_blocked(&analysis);
     render_analysis(&analysis, conformant, json, sarif_out, blocked)
 }
 
@@ -56,7 +54,7 @@ pub fn check(root: &Path, json: bool, sarif_out: bool) -> anyhow::Result<ExitCod
 /// `--json` se emite de forma ADITIVA junto a los campos históricos del `Analysis`; los `SCHEMA-*`/
 /// `REL-*` viajan dentro de `per_file` (y por tanto en `--sarif`/humano) al haberse fusionado en
 /// [`lodestar_app::App::full_analysis`]. `blocked` decide el exit code: lo endurece la strictness de
-/// `lodestar.toml` (avisos OKF) sobre el veredicto del motor.
+/// `.lodestar/config.yaml` (`gate.blockWarnings`, avisos OKF) sobre el veredicto del motor.
 pub fn render_analysis(
     analysis: &lodestar_core::types::Analysis,
     conformant: bool,
@@ -116,7 +114,7 @@ fn print_human(a: &lodestar_core::types::Analysis, blocked: bool) {
         if blocked {
             // Cubre también el gate estricto: no imprimir «CONFORME» con exit code 1.
             if errs == 0 {
-                "NO CONFORME (avisos bloqueados por lodestar.toml)"
+                "NO CONFORME (avisos bloqueados por .lodestar/config.yaml)"
             } else {
                 "NO CONFORME"
             }

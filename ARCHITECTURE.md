@@ -840,6 +840,14 @@ transactions:
 # identity: DORMIDA (git fuera de superficie; se conserva por si vcs vuelve)
 ```
 
+> **Actualización E15-H08**: `lodestar.toml` **ya no existe** (borrado; cierra `DECISIONES.md §8`),
+> así que `.lodestar/config.yaml` es el único fichero de configuración del motor. El esquema de
+> arriba se **amplía** con dos secciones que documentan `§20.5` y `§20.9`: `discovery`
+> (`include`/`exclude`/`respectGitignore`/`respectLodestarIgnore`/`followSymlinks`/
+> `maxDocumentBytes`) y `validation` (severidad por familia de diagnóstico), más
+> `transactions.rejectNewErrors`/`allowExistingErrors`. `validation` y la política de cambios **solo
+> se cargan**: aplicarlas es E20. `workspace.root` **no** se implementa (circular, `§20.5`).
+
 `.lodestar/` se parte en **dos naturalezas**:
 
 - **Canónico / versionado** (entra a git, pero **fuera** de `WorkspaceRevision` y del índice de

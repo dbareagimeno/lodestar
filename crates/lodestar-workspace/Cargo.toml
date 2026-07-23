@@ -19,7 +19,6 @@ ignore = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 crossbeam-channel = "0.5"
-toml = "0.8"
 serde_yaml = { workspace = true }
 schemars = { workspace = true, optional = true }
 

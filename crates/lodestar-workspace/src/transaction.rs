@@ -34,7 +34,6 @@ use std::collections::BTreeSet;
 use lodestar_core::plan;
 use lodestar_core::types::{ChangeSet, ChangeSetId, FileMap, RelPath, WorkspaceRevision};
 
-use crate::config::WorkspaceConfig;
 use crate::{Workspace, WorkspaceError};
 
 /// Deriva el identificador de transacción de un [`ChangeSetId`]: el hash **desnudo** (sin el prefijo
@@ -141,11 +140,8 @@ impl Workspace {
 
         // Id de transacción: nombra journal, staging, recuperación y receipt (misma convención).
         let txn_id = transaction_id(&change_set.id);
-        let writable = WorkspaceConfig::load(&self.root)
-            .unwrap_or_default()
-            .workspace
-            .writable_roots;
-        let result_rev = lodestar_core::types::workspace_revision(&result_files, &writable);
+        let writable = &self.config().workspace.writable_roots;
+        let result_rev = lodestar_core::types::workspace_revision(&result_files, writable);
 
         // (8) Copias de recuperación de los originales afectados, ANTES de publicar (E13-H04). Se
         //     conservan al sellar (para el receipt y el revert de H09).

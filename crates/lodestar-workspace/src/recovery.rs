@@ -31,7 +31,6 @@ use serde::Deserialize;
 
 use lodestar_core::types::{workspace_revision, RelPath, WorkspaceRevision};
 
-use crate::config::WorkspaceConfig;
 use crate::error::WorkspaceError;
 use crate::journal::JournalState;
 use crate::{io, Workspace};
@@ -478,11 +477,8 @@ impl Workspace {
         for rel in &absent {
             result_files.remove(rel);
         }
-        let writable = WorkspaceConfig::load(&self.root)
-            .unwrap_or_default()
-            .workspace
-            .writable_roots;
-        let result_rev = workspace_revision(&result_files, &writable);
+        let writable = &self.config().workspace.writable_roots;
+        let result_rev = workspace_revision(&result_files, writable);
 
         // (7) Copias de recuperación de la INVERSA (respalda el estado actual) → la reversión es
         //     recuperable (E13-H04): si cae a mitad, `recover` restaura desde `recovery/<new>/`.
