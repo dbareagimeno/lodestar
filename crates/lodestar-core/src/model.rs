@@ -426,6 +426,32 @@ pub fn build_raw(fm: Option<&ParsedFrontmatter>, body: &str) -> String {
     format!("---\n{y}\n---\n\n{body_trimmed}")
 }
 
+/// El documento resultante de aplicar un [`crate::types::FrontmatterPatch`]
+/// (`ARCHITECTURE.md §20.4`, E16-H04).
+///
+/// > **STUB de la fase roja de E16-H04**: el tipo existe para que la suite compile; la operación
+/// > está sin implementar.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PatchedDocument {
+    /// El `.md` **completo** resultante (frontmatter + cuerpo).
+    pub raw: String,
+    /// `true` si el bloque de frontmatter se **reserializó entero** en vez de editarse in situ —
+    /// es decir, si se ha perdido el texto original del bloque (formato, comillas, comentarios
+    /// YAML). Lo consume `change_plan` (E21) para declararlo en el plan.
+    pub reserialized: bool,
+}
+
+/// Aplica un `FrontmatterPatch` sobre el texto crudo de **un** documento (`§20.4`, E16-H04).
+///
+/// > **STUB de la fase roja de E16-H04**: sin implementar.
+pub fn patch_frontmatter(
+    raw: &str,
+    patch: &crate::types::FrontmatterPatch,
+) -> Result<PatchedDocument, crate::CoreError> {
+    let _ = (raw, patch);
+    todo!("E16-H04: patch quirúrgico del bloque de frontmatter")
+}
+
 /// Resultado del parseo de un documento (sin el `raw`, que ya tiene el llamante).
 pub struct Parsed {
     /// El frontmatter del documento, o `None` si no tiene bloque (estado **válido**, `§20.4`).

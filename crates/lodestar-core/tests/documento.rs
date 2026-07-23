@@ -1206,3 +1206,961 @@ fn title_no_es_reservada() {
         "`title:` a `null` es una clave presente sin valor presentable: la cadena continúa"
     );
 }
+
+// =============================================================================
+// E16-H04 — `patch_frontmatter` quirúrgico
+// =============================================================================
+//
+// `ARCHITECTURE.md §20.4` («modifica solo las claves pedidas, preserva las demás, no reordena
+// innecesariamente, mantiene el cuerpo intacto y **distingue explícitamente asignar `null` de
+// eliminar una clave**. El plan debe declarar si el bloque se reserializará entero») y
+// `REFACTOR_PHASE_2 §Fase 4 (Requisitos de edición)`.
+//
+// ## API que fija esta fase roja
+//
+// ```ignore
+// // lodestar_core::model
+//
+// /// El documento resultante de aplicar un `FrontmatterPatch`, con la declaración que
+// /// `change_plan` (E21) necesita para avisar al agente.
+// pub struct PatchedDocument {
+//     /// El `.md` COMPLETO resultante (frontmatter + cuerpo), listo para el único escritor.
+//     pub raw: String,
+//     /// `true` si el bloque de frontmatter se **reserializó entero** en vez de editarse in situ.
+//     /// Es el «campo booleano del resultado» de la historia: significa *se ha perdido el texto
+//     /// original del bloque* (formato, estilo de comillas, comentarios YAML, saltos), no
+//     /// meramente *el fichero ha cambiado*.
+//     pub reserialized: bool,
+// }
+//
+// /// Aplica un patch de frontmatter sobre el texto crudo de UN documento. Pura (`§CLAUDE` #2):
+// /// ni toca disco ni necesita el resto del workspace — por eso recibe el `raw` entero y no un
+// /// `&Bundle`: el patch quirúrgico necesita el `span` del bloque DENTRO del documento.
+// pub fn patch_frontmatter(
+//     raw: &str,
+//     patch: &FrontmatterPatch,
+// ) -> Result<PatchedDocument, CoreError>;
+// ```
+//
+// ## Contrato de «el patch lo permite» (lo fija esta fase roja, `§20.4` no lo detalla)
+//
+// El patch se aplica **quirúrgicamente** (`reserialized == false`) si, para **cada** clave que
+// toca, se cumple una de estas dos:
+//
+//   1. la clave **no existe** en el bloque — `set` añade una línea al final, `remove` es no-op; o
+//   2. la clave existe en el **primer nivel** y su valor está escrito **en una sola línea**
+//      (`clave: escalar`, `clave: [a, b]` en flow style, `clave:` vacío): esa línea —y solo
+//      esa— se sustituye o se borra.
+//
+// Es **reserialización** (`reserialized == true`) si alguna clave tocada existe con un valor
+// **multilínea** (un mapa o una lista en block style, que ocupan varias líneas del bloque), o si
+// el bloque tiene cualquier otra forma que impida localizar líneas con seguridad. Es el «la clave
+// está dentro de una estructura anidada compleja» de la historia, llevado al único direccionamiento
+// que `FrontmatterPatch` sabe expresar (claves de primer nivel): tocar la estructura ENTERA.
+//
+// **Deliberadamente NO se fija** (queda como reserialización, que siempre es correcta): claves
+// duplicadas, anchors/alias YAML, documentos multi-doc `---` internos, block scalars `|`/`>`.
+//
+// ## Hasta dónde llega «su formato original»
+//
+// Hasta el **byte**, y solo en el camino quirúrgico: las líneas del bloque que el patch no toca
+// llegan al resultado **idénticas y en el mismo orden** — el flow style sigue en flow style, las
+// comillas siguen como estaban, la indentación del mapa anidado se conserva y **un comentario YAML
+// sobrevive** (serde_yaml los descarta: un comentario en el bloque es el testigo más limpio de que
+// no ha habido round-trip). De la línea **sí** tocada no se exige formato alguno, solo que su
+// valor sea el nuevo. En el camino de reserialización no se exige formato: se exige que no se
+// pierda ninguna clave, que los valores conserven su tipo y que el cuerpo siga intacto.
+//
+// ## El `Err`: por qué la firma devuelve `Result` y qué variante
+//
+// Un frontmatter que Lodestar **no puede interpretar** (sin cerrar, o con YAML inválido) no se
+// puede parchear: no hay mapa sobre el que aplicar el merge-patch. El peligro no es teórico —
+// `parse_file` devuelve `frontmatter: None` tanto para «no hay bloque» como para «hay un bloque
+// ilegible» (solo `fm_err` los distingue), así que una implementación que se guíe por
+// `frontmatter.is_none()` creará un bloque nuevo **encima del ilegible y lo borrará**. En un motor
+// que promete garantías transaccionales, ese es el peor fallo posible; de ahí el `Result` y
+// `patch_sobre_frontmatter_ilegible_falla`.
+//
+// La variante **debe ser nueva**: `CoreError::UnreadableFrontmatter`. Ninguna existente sirve —
+// `NormalizeTargetNotFound` mapea a `ConceptNotFound` y mentiría (el documento existe), y
+// `OperationNotApplicable` mapea a `InternalIoError`, que culparía al motor de un estado del
+// fichero del usuario. El agente necesita oír «el frontmatter de este documento no es
+// interpretable: repáralo (o escríbelo crudo) antes de tocar su metadata». Su mapeo a `ErrorCode`
+// se decide en E21, cuando la operación llegue a la superficie MCP; aquí solo se exige que la
+// variante exista con ese nombre.
+//
+// La aserción es **agnóstica a la forma del payload** (tupla/struct/unit): comprueba que el nombre
+// de la variante aparece en el `Debug` del error — misma convención que `delete_referenciado_rechaza`
+// con `CoreError::InboundLinksExist` (`core.rs:2172-2177`). Se hace así, y no añadiendo la variante
+// en el stub, porque `lodestar_app::error_code` (`lodestar-app/src/lib.rs:121`) hace `match`
+// **exhaustivo** sobre `CoreError`: añadirla sin su brazo rompería la compilación de producción.
+
+use lodestar_core::model::PatchedDocument;
+use lodestar_core::types::{FmError, FrontmatterPatch};
+
+/// `FrontmatterPatch` desde pares: `Some(v)` escribe, `None` borra (los 3 estados de `§20.4`).
+fn parche(entradas: &[(&str, Option<Yaml>)]) -> FrontmatterPatch {
+    FrontmatterPatch(
+        entradas
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), v.clone()))
+            .collect(),
+    )
+}
+
+/// Aplica un patch sobre un documento bien formado (todos los de esta sección lo son).
+fn parchear(raw: &str, patch: &FrontmatterPatch) -> PatchedDocument {
+    model::patch_frontmatter(raw, patch)
+        .expect("el patch debe aplicarse sobre un documento con frontmatter bien formado")
+}
+
+/// El texto YAML del bloque de un documento, **sin** los delimitadores: lo que hay que comparar
+/// para juzgar «formato original». Reutiliza [`model::parse_frontmatter`] (E16-H01).
+fn bloque(raw: &str) -> String {
+    model::parse_frontmatter(raw)
+        .unwrap_or_else(|| panic!("el documento debe tener un bloque de frontmatter:\n{raw}"))
+        .raw
+}
+
+/// Claves de primer nivel **en orden de aparición** (la `claves` de E16-H01 devuelve un conjunto
+/// a propósito; aquí el orden es justamente lo que se juzga).
+fn claves_ordenadas(raw: &str) -> Vec<String> {
+    model::parse_frontmatter(raw)
+        .unwrap_or_else(|| panic!("el documento debe tener un bloque de frontmatter:\n{raw}"))
+        .mapping()
+        .keys()
+        .map(|k| {
+            k.as_str()
+                .expect("las claves de estos tests son escalares string")
+                .to_string()
+        })
+        .collect()
+}
+
+/// Un valor string YAML, para los patches.
+fn s(v: &str) -> Option<Yaml> {
+    Some(Yaml::String(v.to_string()))
+}
+
+/// Documento con **6 claves en orden no alfabético** (alfabético sería `owners`, `priority`,
+/// `reviewed`, `service`, `status`, `type`), y con las tres formas de escritura que un round-trip
+/// por `serde_yaml` destruiría: una lista en **flow style**, un **comentario** y un mapa anidado en
+/// **block style**. `status` es la clave «del medio» que se parchea.
+const DOC_SEIS_CLAVES: &str = concat!(
+    "---\n",
+    "type: decision\n",
+    "status: draft\n",
+    "# el equipo que mantiene el servicio\n",
+    "owners: [platform, security]\n",
+    "priority: 2\n",
+    "service:\n",
+    "  name: auth\n",
+    "  tier: critical\n",
+    "reviewed: false\n",
+    "---\n",
+    "\n",
+    "# Autenticación\n",
+    "\n",
+    "Cuerpo.\n",
+);
+
+/// Las 6 claves de `DOC_SEIS_CLAVES`, en su orden de aparición.
+const SEIS_CLAVES: [&str; 6] = [
+    "type", "status", "owners", "priority", "service", "reviewed",
+];
+
+/// Líneas del bloque de `raw` que **no** pertenecen a la clave de primer nivel `clave` (se
+/// reconoce por el inicio de línea, tolerando que el valor se escriba entrecomillado).
+fn lineas_salvo(raw: &str, clave: &str) -> Vec<String> {
+    bloque(raw)
+        .lines()
+        .filter(|l| {
+            !l.trim_start()
+                .trim_start_matches(['"', '\''])
+                .starts_with(clave)
+        })
+        .map(str::to_string)
+        .collect()
+}
+
+/// Criterio 1: con 6 claves en orden no alfabético, parchear una del medio deja a las otras 5 con
+/// su orden **y su formato original**.
+#[test]
+fn patch_preserva_orden_y_claves() {
+    let original = model::parse_frontmatter(DOC_SEIS_CLAVES).expect("el fixture tiene frontmatter");
+
+    // --- (a) Modificar la clave del medio.
+    let res = parchear(DOC_SEIS_CLAVES, &parche(&[("status", s("accepted"))]));
+
+    assert!(
+        !res.reserialized,
+        "sustituir el valor escalar de una clave de primer nivel es una edición QUIRÚRGICA: no \
+         reserializa el bloque.\nbloque resultante:\n{}",
+        bloque(&res.raw)
+    );
+    assert_eq!(
+        claves_ordenadas(&res.raw),
+        SEIS_CLAVES.map(String::from).to_vec(),
+        "las 6 claves siguen en su orden de aparición: el patch no canonicaliza nada.\nbloque \
+         resultante:\n{}",
+        bloque(&res.raw)
+    );
+
+    // El formato original, byte a byte: TODA línea del bloque que no sea la de `status` llega
+    // idéntica y en el mismo orden. Esto fija el flow style de `owners`, el comentario YAML, la
+    // indentación de `service` y las comillas de todo lo demás.
+    assert_eq!(
+        lineas_salvo(&res.raw, "status"),
+        lineas_salvo(DOC_SEIS_CLAVES, "status"),
+        "las 5 claves no tocadas conservan su TEXTO original línea a línea (flow style, \
+         comentario, indentación); reserializar el bloque las reescribiría.\nbloque \
+         resultante:\n{}",
+        bloque(&res.raw)
+    );
+
+    // Y el patch hizo su trabajo, con el tipo YAML del nuevo valor.
+    let re = model::parse_frontmatter(&res.raw).expect("el resultado tiene frontmatter");
+    assert_eq!(
+        re.get(&fp("status")),
+        Some(&Yaml::String("accepted".to_string())),
+        "la clave parcheada toma el valor nuevo:\n{}",
+        bloque(&res.raw)
+    );
+    for clave in ["type", "owners", "priority", "service", "reviewed"] {
+        let path = fp(clave);
+        assert_eq!(
+            re.get(&path),
+            original.get(&path),
+            "la clave `{clave}` no se ha tocado: mismo valor y mismo tipo.\nbloque \
+             resultante:\n{}",
+            bloque(&res.raw)
+        );
+    }
+
+    // --- (b) Añadir una clave nueva: va al FINAL, sin mover ni reescribir nada de lo anterior.
+    let add = parchear(DOC_SEIS_CLAVES, &parche(&[("reviewed_by", s("ana"))]));
+    assert!(
+        !add.reserialized,
+        "añadir una clave escalar es añadir una línea al final del bloque: tampoco reserializa.\n\
+         bloque resultante:\n{}",
+        bloque(&add.raw)
+    );
+    let mut esperadas = SEIS_CLAVES.map(String::from).to_vec();
+    esperadas.push("reviewed_by".to_string());
+    assert_eq!(
+        claves_ordenadas(&add.raw),
+        esperadas,
+        "las claves nuevas se añaden al final, sin reordenar las existentes.\nbloque \
+         resultante:\n{}",
+        bloque(&add.raw)
+    );
+    let previas: Vec<String> = bloque(DOC_SEIS_CLAVES)
+        .lines()
+        .map(str::to_string)
+        .collect();
+    let nuevas: Vec<String> = bloque(&add.raw).lines().map(str::to_string).collect();
+    assert_eq!(
+        nuevas.get(..previas.len()).map(<[String]>::to_vec),
+        Some(previas.clone()),
+        "el bloque original queda como PREFIJO exacto del nuevo: nada se reescribe al añadir.\n\
+         bloque resultante:\n{}",
+        bloque(&add.raw)
+    );
+}
+
+/// Criterio 2: `{status: null}` deja la clave con valor nulo; eliminarla la hace desaparecer. Son
+/// dos estados distintos, no dos formas de lo mismo.
+#[test]
+fn null_no_es_borrado() {
+    // Asignar `null` (`Some(Value::Null)` en el patch).
+    let nulo = parchear(DOC_SEIS_CLAVES, &parche(&[("status", Some(Yaml::Null))]));
+    let re_nulo = model::parse_frontmatter(&nulo.raw).expect("el resultado tiene frontmatter");
+    assert!(
+        re_nulo.contains_key("status"),
+        "asignar `null` deja la clave PRESENTE:\n{}",
+        bloque(&nulo.raw)
+    );
+    assert_eq!(
+        re_nulo.get(&fp("status")),
+        Some(&Yaml::Null),
+        "…y con valor nulo:\n{}",
+        bloque(&nulo.raw)
+    );
+    assert_eq!(
+        claves_ordenadas(&nulo.raw),
+        SEIS_CLAVES.map(String::from).to_vec(),
+        "asignar `null` no altera el juego de claves ni su orden:\n{}",
+        bloque(&nulo.raw)
+    );
+
+    // Eliminar la clave (`None` en el patch).
+    let borrado = parchear(DOC_SEIS_CLAVES, &parche(&[("status", None)]));
+    let re_borrado =
+        model::parse_frontmatter(&borrado.raw).expect("el resultado tiene frontmatter");
+    assert!(
+        !re_borrado.contains_key("status"),
+        "eliminar la clave la hace DESAPARECER del bloque:\n{}",
+        bloque(&borrado.raw)
+    );
+    assert!(
+        !bloque(&borrado.raw).contains("status"),
+        "…también del texto: no queda una línea `status:` huérfana:\n{}",
+        bloque(&borrado.raw)
+    );
+    assert_eq!(
+        claves_ordenadas(&borrado.raw),
+        ["type", "owners", "priority", "service", "reviewed"].map(String::from),
+        "y solo desaparece esa: el resto conserva su orden:\n{}",
+        bloque(&borrado.raw)
+    );
+
+    // Los dos estados son distinguibles (es la razón de ser de `Option<Value>` en el patch).
+    assert_ne!(
+        nulo.raw, borrado.raw,
+        "«asignar null» y «eliminar» no pueden producir el mismo documento"
+    );
+    assert_ne!(
+        re_nulo.get(&fp("status")),
+        re_borrado.get(&fp("status")),
+        "`Some(Null)` es presencia con valor nulo; `None` es ausencia"
+    );
+}
+
+/// Documento cuyo **cuerpo contiene una línea `---`** (una regla horizontal Markdown) y que además
+/// deja DOS líneas en blanco tras el bloque: cualquier reconstrucción que normalice separadores
+/// —como hace hoy `build_raw` con su `trim_start_matches('\n')`— lo altera.
+const DOC_CUERPO_CON_RAYA: &str = concat!(
+    "---\n",
+    "type: decision\n",
+    "status: draft\n",
+    "service:\n",
+    "  name: auth\n",
+    "  tier: critical\n",
+    "---\n",
+    "\n",
+    "\n",
+    "# Documento\n",
+    "\n",
+    "Un párrafo.\n",
+    "\n",
+    "---\n",
+    "\n",
+    "Otro párrafo, tras la regla horizontal.\n",
+);
+
+/// El cuerpo de `DOC_CUERPO_CON_RAYA`: todo lo que sigue al delimitador de cierre y a su salto.
+const CUERPO_CON_RAYA: &str = concat!(
+    "\n",
+    "\n",
+    "# Documento\n",
+    "\n",
+    "Un párrafo.\n",
+    "\n",
+    "---\n",
+    "\n",
+    "Otro párrafo, tras la regla horizontal.\n",
+);
+
+/// Criterio 3: el cuerpo queda **byte a byte** idéntico tras parchear el frontmatter.
+///
+/// Se comprueba por los **dos** caminos —quirúrgico y reserialización—, porque «el cuerpo del
+/// documento queda intacto byte a byte» es incondicional en la historia: el `---` del cuerpo no
+/// puede confundirse con un delimitador ni bajo reserialización.
+#[test]
+fn cuerpo_intacto() {
+    assert_eq!(
+        model::parse_file("docs/raya.md", DOC_CUERPO_CON_RAYA).body,
+        CUERPO_CON_RAYA,
+        "premisa del fixture: el cuerpo empieza tras el delimitador de cierre"
+    );
+
+    let casos: [(&str, FrontmatterPatch); 3] = [
+        // Quirúrgico: escalar de primer nivel.
+        ("escalar", parche(&[("status", s("accepted"))])),
+        // Quirúrgico: borrado de un escalar de primer nivel.
+        ("borrado", parche(&[("status", None)])),
+        // Reserialización: la clave tocada es un mapa anidado multilínea.
+        (
+            "anidado",
+            parche(&[("service", Some(Yaml::String("auth".to_string())))]),
+        ),
+    ];
+
+    for (nombre, patch) in casos {
+        let res = parchear(DOC_CUERPO_CON_RAYA, &patch);
+        assert!(
+            res.raw.ends_with(CUERPO_CON_RAYA),
+            "[{nombre}] el cuerpo debe sobrevivir byte a byte al final del documento; \
+             resultado:\n{}",
+            res.raw
+        );
+        assert_eq!(
+            model::parse_file("docs/raya.md", &res.raw).body,
+            CUERPO_CON_RAYA,
+            "[{nombre}] al reparsear, el cuerpo es EXACTAMENTE el original: ni se normalizan las \
+             líneas en blanco de separación ni el `---` del cuerpo cierra nada; resultado:\n{}",
+            res.raw
+        );
+    }
+}
+
+/// Criterio 4: un patch que obliga a reserializar el bloque entero **lo señala explícitamente**.
+#[test]
+fn declara_reserializacion() {
+    // `service` está escrito como mapa anidado en block style (3 líneas del bloque): sustituirlo
+    // no es sustituir una línea, así que el bloque se reserializa entero.
+    let res = parchear(DOC_SEIS_CLAVES, &parche(&[("service", s("auth"))]));
+    assert!(
+        res.reserialized,
+        "tocar una clave cuyo valor es una estructura anidada multilínea reserializa el bloque, y \
+         el resultado DEBE declararlo (`change_plan` de E21 lo consume para avisar al agente).\n\
+         bloque resultante:\n{}",
+        bloque(&res.raw)
+    );
+
+    // La bandera describe el camino tomado, no es una constante: el MISMO documento, parcheado en
+    // una clave escalar de una sola línea, no reserializa.
+    let quirurgico = parchear(
+        DOC_SEIS_CLAVES,
+        &parche(&[("priority", Some(Yaml::Number(7.into())))]),
+    );
+    assert!(
+        !quirurgico.reserialized,
+        "sobre el mismo documento, tocar `priority` (escalar en una línea) NO reserializa: la \
+         bandera distingue los dos caminos.\nbloque resultante:\n{}",
+        bloque(&quirurgico.raw)
+    );
+
+    // Reserializar es perder el TEXTO del bloque, nunca perder DATOS: siguen las 6 claves, con sus
+    // valores y sus tipos, y el cuerpo intacto.
+    let original = model::parse_frontmatter(DOC_SEIS_CLAVES).expect("el fixture tiene frontmatter");
+    let re = model::parse_frontmatter(&res.raw).expect("el resultado tiene frontmatter");
+    assert_eq!(
+        claves_ordenadas(&res.raw),
+        SEIS_CLAVES.map(String::from).to_vec(),
+        "ni reserializando se pierde o reordena una clave.\nbloque resultante:\n{}",
+        bloque(&res.raw)
+    );
+    for clave in ["type", "status", "owners", "priority", "reviewed"] {
+        let path = fp(clave);
+        assert_eq!(
+            re.get(&path),
+            original.get(&path),
+            "reserializar conserva el VALOR y el TIPO de `{clave}`.\nbloque resultante:\n{}",
+            bloque(&res.raw)
+        );
+    }
+    assert_eq!(
+        re.get(&fp("service")),
+        Some(&Yaml::String("auth".to_string())),
+        "y la clave pedida toma el valor nuevo.\nbloque resultante:\n{}",
+        bloque(&res.raw)
+    );
+    assert!(
+        res.raw.ends_with("\n# Autenticación\n\nCuerpo.\n"),
+        "el cuerpo sigue intacto tras la reserialización:\n{}",
+        res.raw
+    );
+}
+
+/// Documento **sin una sola línea de frontmatter**, con un `---` suelto en el cuerpo.
+const DOC_SIN_BLOQUE: &str = concat!(
+    "# Documento pelado\n",
+    "\n",
+    "Sin frontmatter.\n",
+    "\n",
+    "---\n",
+    "\n",
+    "Fin.\n",
+);
+
+/// Criterio 5: parchear un documento **sin** frontmatter crea el bloque al principio y deja el
+/// cuerpo intacto.
+#[test]
+fn patch_crea_bloque() {
+    let res = parchear(
+        DOC_SIN_BLOQUE,
+        &parche(&[
+            ("status", s("accepted")),
+            ("priority", Some(Yaml::Number(2.into()))),
+        ]),
+    );
+
+    // El cuerpo entero sobrevive byte a byte como sufijo del documento; delante solo puede haber
+    // el bloque recién creado (con, a lo sumo, una línea en blanco de separación).
+    let cabecera = res.raw.strip_suffix(DOC_SIN_BLOQUE).unwrap_or_else(|| {
+        panic!(
+            "el cuerpo debe quedar intacto al final del documento:\n{}",
+            res.raw
+        )
+    });
+    assert!(
+        cabecera.starts_with("---\n"),
+        "el bloque se crea AL PRINCIPIO del documento; cabecera: {cabecera:?}"
+    );
+    let cerrado = cabecera.trim_end_matches('\n');
+    assert!(
+        cerrado.ends_with("\n---"),
+        "y se cierra con su delimitador; cabecera: {cabecera:?}"
+    );
+    assert!(
+        cabecera.len() - cerrado.len() <= 2,
+        "entre el bloque y el cuerpo cabe como mucho una línea en blanco; cabecera: {cabecera:?}"
+    );
+
+    // Y es un frontmatter de verdad: se reparsea con los valores del patch, con su tipo YAML.
+    let parsed = model::parse_file("docs/pelado.md", &res.raw);
+    let re = parsed
+        .frontmatter
+        .as_ref()
+        .expect("el documento parcheado ya tiene frontmatter");
+    assert_eq!(
+        re.get(&fp("status")),
+        Some(&Yaml::String("accepted".to_string())),
+        "el bloque creado lleva las claves del patch:\n{}",
+        res.raw
+    );
+    assert!(
+        matches!(re.get(&fp("priority")), Some(Yaml::Number(_))),
+        "…con su tipo YAML, no coercionadas a texto: {:?}",
+        re.get(&fp("priority"))
+    );
+    assert!(
+        parsed.body.ends_with(DOC_SIN_BLOQUE),
+        "el `---` del cuerpo no se ha convertido en delimitador: el cuerpo sigue entero:\n{}",
+        res.raw
+    );
+
+    // Crear el bloque NO es reserializarlo: la bandera significa «se ha perdido el texto original
+    // del bloque», y aquí no había bloque que perder. (Lo contrario haría que `change_plan`
+    // avisara de una pérdida de formato inexistente en toda creación de metadata.)
+    assert!(
+        !res.reserialized,
+        "crear un bloque donde no había ninguno no destruye formato del usuario: no es \
+         reserialización"
+    );
+}
+
+/// Frontmatter que abre `---` y **nunca cierra**.
+///
+/// Ojo al montar este fixture (E16-H01 reescribió `split_front`): el bloque se cierra con la
+/// PRIMERA línea posterior que empiece por `---`, así que el cuerpo no puede contener ninguna —
+/// ni siquiera una regla horizontal `----` o un separador `-----`, que empiezan por `---` y
+/// cerrarían el bloque, convirtiendo el documento en uno perfectamente legible y este test en una
+/// tautología. Por el mismo cambio, `---\n---\n` **ya no** es «sin cerrar» sino un bloque vacío
+/// válido: tampoco sirve como fixture de este caso.
+const DOC_FM_SIN_CERRAR: &str = concat!(
+    "---\n",
+    "type: decision\n",
+    "status: draft\n",
+    "owners: [platform, security]\n",
+    "\n",
+    "# Aquí arriba falta el cierre del bloque\n",
+    "\n",
+    "Este cuerpo tampoco debe perderse.\n",
+);
+
+/// Frontmatter con bloque bien delimitado pero **YAML sintácticamente inválido**.
+const DOC_FM_YAML_ROTO: &str = concat!(
+    "---\n",
+    "type: : :\n",
+    "  - x\n",
+    ": bad\n",
+    "---\n",
+    "\n",
+    "# Documento\n",
+    "\n",
+    "Y este cuerpo tampoco.\n",
+);
+
+/// Criterio 6 (añadido tras la fase roja): parchear un documento cuyo frontmatter **no es
+/// interpretable** falla, y el documento queda **intacto byte a byte**. El bloque ilegible no se
+/// sustituye nunca por uno nuevo.
+///
+/// Es el escenario destructivo: `parse_file` devuelve `frontmatter: None` **tanto** para «no hay
+/// bloque» (→ `patch_crea_bloque`: se crea, correcto) **como** para «hay un bloque y no se puede
+/// leer» (→ aquí: se falla). Solo `fm_err` los distingue. Una implementación que se guíe por
+/// `frontmatter.is_none()` pasa `patch_crea_bloque` y **borra el frontmatter del usuario** en este.
+/// Por eso el test comprueba las dos caras: que este falla **y** que el de ausencia sigue creando.
+#[test]
+fn patch_sobre_frontmatter_ilegible_falla() {
+    for (caso, doc, err_esperado) in [
+        ("sin cerrar", DOC_FM_SIN_CERRAR, FmError::Unclosed),
+        (
+            "YAML inválido",
+            DOC_FM_YAML_ROTO,
+            FmError::Malformed(String::new()),
+        ),
+    ] {
+        // --- Premisa del fixture: el documento es ilegible por la razón que se dice, y su
+        //     frontmatter llega como `None` (que es justo lo que lo hace confundible con la
+        //     ausencia de bloque). Si `split_front` derivase, el fixture dejaría de probar nada.
+        let parsed = model::parse_file("docs/roto.md", doc);
+        assert!(
+            parsed.frontmatter.is_none(),
+            "[{caso}] premisa: un frontmatter ilegible llega como `frontmatter: None`"
+        );
+        assert_eq!(
+            std::mem::discriminant(
+                parsed
+                    .fm_err
+                    .as_ref()
+                    .unwrap_or_else(|| panic!("[{caso}] premisa: el documento debe ser ilegible"))
+            ),
+            std::mem::discriminant(&err_esperado),
+            "[{caso}] premisa: el documento debe ser ilegible por ESTA razón, no por otra"
+        );
+
+        // --- (a) Cualquier patch que modifique algo FALLA.
+        for (que, patch) in [
+            ("sobrescribir una clave", parche(&[("status", s("done"))])),
+            ("borrar una clave", parche(&[("status", None)])),
+            ("añadir una clave nueva", parche(&[("reviewed", s("si"))])),
+        ] {
+            let res = model::patch_frontmatter(doc, &patch);
+            assert!(
+                res.is_err(),
+                "[{caso}] {que}: parchear un frontmatter que no se puede interpretar DEBE fallar. \
+                 Devolver `Ok` significa haber reconstruido el bloque encima del ilegible, es \
+                 decir, haber borrado la metadata del usuario. Devolvió:\n{}",
+                res.as_ref().map(|d| d.raw.as_str()).unwrap_or_default()
+            );
+        }
+
+        // --- (b) El error NOMBRA el problema. `change_plan` (E21) tiene que poder decirle al
+        //     agente qué reparar; un error genérico lo dejaría adivinando.
+        let err = model::patch_frontmatter(doc, &parche(&[("status", s("done"))]))
+            .expect_err("ya comprobado en (a)");
+        assert!(
+            format!("{err:?}").contains("UnreadableFrontmatter"),
+            "[{caso}] el error debe ser `CoreError::UnreadableFrontmatter` (variante nueva: \
+             ninguna existente sirve — `NormalizeTargetNotFound` mentiría diciendo que el \
+             documento no existe y `OperationNotApplicable` culparía al motor de un estado del \
+             fichero del usuario). Llegó: {err:?}"
+        );
+
+        // --- (c) La garantía fuerte, y la que no bastaría con satisfacer devolviendo `Err`: de
+        //     esta operación NUNCA sale un documento distinto del original. Ni con el patch vacío,
+        //     que un implementador podría querer tratar como no-op: o falla, o devuelve el
+        //     original byte a byte. No hay tercera opción, y desde luego no una en la que el
+        //     bloque ilegible haya sido sustituido.
+        if let Ok(d) = model::patch_frontmatter(doc, &parche(&[])) {
+            assert_eq!(
+                d.raw, doc,
+                "[{caso}] un patch vacío sobre un documento ilegible puede ser un no-op, pero \
+                 entonces devuelve el documento ORIGINAL: jamás uno con el bloque reconstruido"
+            );
+        }
+    }
+
+    // --- (d) Contraste, para que el fallo no se pueda satisfacer fallando siempre:
+    //     el mismo patch funciona sobre un documento legible…
+    let patch = parche(&[("status", s("done"))]);
+    assert!(
+        model::patch_frontmatter(DOC_SEIS_CLAVES, &patch).is_ok(),
+        "el mismo patch sobre un documento legible tiene que seguir funcionando"
+    );
+    //     …y sobre uno SIN frontmatter, que también llega con `frontmatter: None`. Ahí sí se crea
+    //     el bloque (`patch_crea_bloque`): la frontera no es «no hay mapa que parchear», es «hay
+    //     un bloque del usuario que no sé leer y no voy a pisar».
+    assert!(
+        model::patch_frontmatter(DOC_SIN_BLOQUE, &patch).is_ok(),
+        "un documento SIN frontmatter no es un documento ilegible: ahí el patch crea el bloque"
+    );
+}
+
+// =============================================================================
+// E16-H05 — Diagnósticos mínimos: retirar el catálogo OKF
+// =============================================================================
+//
+// `ARCHITECTURE.md §20.9` («¿puede Lodestar interpretar y modificar este workspace de forma
+// consistente y segura?», **no** «¿cumple el workspace una especificación documental?») y
+// `REFACTOR_PHASE_2 §Fase 10`.
+//
+// ## Lo que fija esta fase roja
+//
+// El catálogo de `CheckCode` pasa a ser el de `§20.9`. **Se borran** `OKF-FM01` (la falta de
+// frontmatter deja de ser error), `OKF-TYPE`, `REC-TITLE`, `REC-DESC`, `FMT-TAGS`, `FMT-TS`,
+// `BODY-STRUCT`, `ORPHAN` (ya sin productor desde E16-H02), `OKF-IDX`, `OKF-LOG`, y las familias
+// `SCHEMA-*`/`REL-*`/`EXTREF-MISSING` dejan de producirse. **Renombres**: `OKF-FM02` →
+// `FM-UNCLOSED`, `OKF-FM03` → `FM-YAML-INVALID`, `OKF-CONFLICT` → `DOC-CONFLICT-MARKER`. Mueren
+// también `conform::validate_index`, `conform::validate_log` y `model::is_iso` (existía solo para
+// `FMT-TS`).
+//
+// `Check` **conserva su forma** (`level`/`code`/`msg`/`targets` + los aditivos `id`/`range`/
+// `related`/`fixes`, `§10` fila #3): cambia el catálogo de códigos, no la estructura.
+//
+// Los códigos se comparan **por su cadena de wire** (serializando `Check::code`) y nunca por la
+// variante de la enum: así estos tests no dependen de cómo se llame la variante en Rust, y
+// sobreviven al borrado de las variantes viejas sin dejar de significar lo mismo.
+//
+// **Fuera de alcance aquí**: `LINK-STUB`/`LINK-REL` siguen vivos hasta E17 (donde se convierten en
+// `LINK-TARGET-MISSING`/`LINK-CASE-MISMATCH`/…), así que ningún fixture de esta sección tiene
+// enlaces; y `DOC-NOT-UTF8`/`DOC-TOO-LARGE`/`PATH-NOT-UTF8`/`SYMLINK-UNSUPPORTED` los produce el
+// descubrimiento de `lodestar-workspace` (E15-H07), no `conform`.
+
+use lodestar_core::types::{Check, Range as RangoLineas, Severity};
+
+/// Los diagnósticos emitidos para `p` (vacío si no hay ninguno).
+fn diagnosticos<'a>(a: &'a Analysis, p: &RelPath) -> &'a [Check] {
+    a.per_file.get(p).map_or(&[], Vec::as_slice)
+}
+
+/// Analiza un workspace de un solo documento y devuelve su análisis y su ruta.
+fn analiza_uno(path: &str, raw: &str) -> (Analysis, RelPath) {
+    let b = Bundle::from_files(mapa(&[(path, raw)]));
+    (b.analyze().clone(), rp(path))
+}
+
+/// Criterio 1: un documento sin frontmatter, sin `type` y sin `status` no emite **ningún**
+/// diagnóstico.
+///
+/// Ojo con la deuda de E16-H02: allí se migraron 55 fixtures `index.md` a `type:`/`title:`/
+/// `description:` porque `OKF-TYPE` seguía vivo. El punto de este test es el contrario: un
+/// documento **pelado** no produce nada — ni `OKF-FM01`, ni `OKF-TYPE`, ni `REC-*`, ni
+/// `BODY-STRUCT`.
+#[test]
+fn sin_frontmatter_no_diagnostica() {
+    // Ni siquiera tiene encabezados (lo que hoy dispara además `BODY-STRUCT`).
+    let (a, p) = analiza_uno(
+        "docs/pelado.md",
+        "Un documento pelado: sin frontmatter, sin `type` y sin `status`.\n",
+    );
+    assert_eq!(
+        codigos(&a, &p),
+        Vec::<String>::new(),
+        "un `.md` cualquiera es un documento de primera clase: no incumple nada. Diagnósticos: {:?}",
+        diagnosticos(&a, &p)
+    );
+    assert_eq!(
+        a.hard_fail, 0,
+        "y no es un hard-fail: la puerta de CI no puede caerse por un README sin metadata"
+    );
+
+    // Con encabezados y sin frontmatter, igual: nada.
+    let (b, q) = analiza_uno("README.md", "# Proyecto\n\nQué es esto.\n");
+    assert_eq!(
+        codigos(&b, &q),
+        Vec::<String>::new(),
+        "tampoco un `README.md` con encabezados. Diagnósticos: {:?}",
+        diagnosticos(&b, &q)
+    );
+
+    // Y un frontmatter vacío tampoco: no hay «campos obligatorios» que echar de menos.
+    let (c, r) = analiza_uno("docs/vacio.md", "---\n---\n\n# Vacío\n");
+    assert_eq!(
+        codigos(&c, &r),
+        Vec::<String>::new(),
+        "un bloque vacío es válido y silencioso. Diagnósticos: {:?}",
+        diagnosticos(&c, &r)
+    );
+}
+
+/// Criterio 2: `tags: "no-es-lista"` y `timestamp: "ayer"` no producen diagnóstico — son metadata
+/// arbitraria del usuario, no un formato de Lodestar.
+#[test]
+fn formato_de_tags_no_diagnostica() {
+    let raw = concat!(
+        "---\n",
+        "tags: \"no-es-lista\"\n",
+        "timestamp: \"ayer\"\n",
+        "---\n",
+        "\n",
+        "# Documento\n",
+    );
+    let (a, p) = analiza_uno("docs/tags.md", raw);
+    assert_eq!(
+        codigos(&a, &p),
+        Vec::<String>::new(),
+        "el formato de `tags`/`timestamp` es cosa del usuario: ni `FMT-TAGS`, ni `FMT-TS`, ni \
+         `OKF-TYPE`, ni `REC-*`. Diagnósticos: {:?}",
+        diagnosticos(&a, &p)
+    );
+    assert_eq!(a.hard_fail, 0, "y desde luego no es un hard-fail");
+
+    // El caso simétrico: los mismos nombres con «buen» formato tampoco dicen nada (no hay `Pass`
+    // que informe de conformidad: Lodestar ya no juzga especificaciones documentales).
+    let bueno = concat!(
+        "---\n",
+        "type: decision\n",
+        "title: Autenticación\n",
+        "description: Cómo se autentica el servicio\n",
+        "tags:\n",
+        "  - auth\n",
+        "timestamp: 2026-07-23T10:00:00Z\n",
+        "---\n",
+        "\n",
+        "# Autenticación\n",
+    );
+    let (b, q) = analiza_uno("docs/bueno.md", bueno);
+    assert_eq!(
+        codigos(&b, &q),
+        Vec::<String>::new(),
+        "cumplir OKF tampoco genera checks `Pass`: el catálogo entero se retira. Diagnósticos: {:?}",
+        diagnosticos(&b, &q)
+    );
+}
+
+/// Documento cuyo frontmatter abre `---` y nunca cierra.
+const DOC_SIN_CIERRE: &str = concat!(
+    "---\n",
+    "type: decision\n",
+    "status: draft\n",
+    "\n",
+    "# El bloque de arriba nunca se cierra\n",
+);
+
+/// Criterio 3: frontmatter sin cierre → `FM-UNCLOSED` con severidad error.
+#[test]
+fn frontmatter_sin_cierre() {
+    let (a, p) = analiza_uno("docs/sin-cierre.md", DOC_SIN_CIERRE);
+    assert_eq!(
+        codigos(&a, &p),
+        vec!["FM-UNCLOSED".to_string()],
+        "un bloque sin cerrar impide interpretar el documento: es exactamente `FM-UNCLOSED` (el \
+         antiguo `OKF-FM02`), y nada más. Diagnósticos: {:?}",
+        diagnosticos(&a, &p)
+    );
+    let d = &diagnosticos(&a, &p)[0];
+    assert_eq!(
+        d.level,
+        Severity::Err,
+        "con severidad error: Lodestar no puede modificar con seguridad lo que no sabe leer"
+    );
+    assert_eq!(
+        d.targets,
+        vec![p.clone()],
+        "y apunta al documento afectado (`targets` nunca es null)"
+    );
+    assert_eq!(
+        a.hard_fail, 1,
+        "sigue siendo hard-fail: es de lo poco que queda en el catálogo"
+    );
+}
+
+/// Frontmatter con YAML sintácticamente inválido. Numerado para el rango esperado:
+/// 1 `---` · 2 `type: : :` · 3 `  - x` · 4 `: bad` · 5 `---`.
+const DOC_YAML_INVALIDO: &str = concat!(
+    "---\n",       // línea 1 (delimitador de apertura)
+    "type: : :\n", // línea 2
+    "  - x\n",     // línea 3
+    ": bad\n",     // línea 4
+    "---\n",       // línea 5 (delimitador de cierre)
+    "\n",
+    "# Documento\n",
+);
+
+/// Criterio 4: YAML inválido → `FM-YAML-INVALID` **con el rango de líneas del bloque**.
+///
+/// El rango son las líneas de **contenido** del bloque (1-based, ambas inclusive), sin los
+/// delimitadores: es la traducción a líneas del `span` de `ParsedFrontmatter` (E16-H01), que se
+/// define igual — «excluye los delimitadores».
+#[test]
+fn yaml_invalido_con_rango() {
+    let (a, p) = analiza_uno("docs/malo.md", DOC_YAML_INVALIDO);
+    assert_eq!(
+        codigos(&a, &p),
+        vec!["FM-YAML-INVALID".to_string()],
+        "YAML inválido es exactamente `FM-YAML-INVALID` (el antiguo `OKF-FM03`), y nada más. \
+         Diagnósticos: {:?}",
+        diagnosticos(&a, &p)
+    );
+    let d = &diagnosticos(&a, &p)[0];
+    assert_eq!(d.level, Severity::Err, "con severidad error");
+    assert_eq!(
+        d.range,
+        Some(RangoLineas {
+            start_line: 2,
+            end_line: 4,
+        }),
+        "el diagnóstico acota el bloque: líneas 2..4 (1-based, delimitadores excluidos). Es lo que \
+         `§20.9` hace posible con el `span` de E16-H01. Diagnóstico: {d:?}"
+    );
+}
+
+/// Criterio 5: marcadores de merge → `DOC-CONFLICT-MARKER` con severidad error.
+#[test]
+fn marcadores_de_merge() {
+    let raw = concat!(
+        "---\n",
+        "status: draft\n",
+        "---\n",
+        "\n",
+        "# Documento\n",
+        "\n",
+        "<<<<<<< HEAD\n",
+        "una versión\n",
+        "=======\n",
+        "otra versión\n",
+        ">>>>>>> rama\n",
+    );
+    let (a, p) = analiza_uno("docs/conflicto.md", raw);
+    assert_eq!(
+        codigos(&a, &p),
+        vec!["DOC-CONFLICT-MARKER".to_string()],
+        "unos marcadores sin resolver impiden modificar el documento con seguridad: \
+         `DOC-CONFLICT-MARKER` (el antiguo `OKF-CONFLICT`), y nada más. Diagnósticos: {:?}",
+        diagnosticos(&a, &p)
+    );
+    assert_eq!(
+        diagnosticos(&a, &p)[0].level,
+        Severity::Err,
+        "con severidad error"
+    );
+    assert_eq!(
+        a.hard_fail, 1,
+        "y hard-fail: el documento está a medio mergear"
+    );
+}
+
+/// Criterio 6: un documento **aislado** y uno con **estructura de headings arbitraria** no
+/// producen diagnóstico.
+#[test]
+fn aislado_y_headings_no_diagnostican() {
+    let headings = concat!(
+        "---\n",
+        "status: draft\n",
+        "---\n",
+        "\n",
+        "### Empieza por un H3\n",
+        "\n",
+        "Texto.\n",
+        "\n",
+        "# Y luego un H1\n",
+        "\n",
+        "###### Y un H6\n",
+    );
+    let b = Bundle::from_files(mapa(&[
+        (
+            "docs/aislado.md",
+            "---\nstatus: draft\n---\n\n# Aislado\n\nNi entrantes ni salientes.\n",
+        ),
+        ("docs/headings.md", headings),
+        // Sin encabezados de ningún tipo: `BODY-STRUCT` tampoco sobrevive.
+        (
+            "docs/plano.md",
+            "---\nstatus: draft\n---\n\nSolo un párrafo, sin apartados.\n",
+        ),
+    ]));
+    let a = b.analyze();
+
+    for path in ["docs/aislado.md", "docs/headings.md", "docs/plano.md"] {
+        let p = rp(path);
+        assert_eq!(
+            codigos(a, &p),
+            Vec::<String>::new(),
+            "`{path}` no incumple nada: la estructura del cuerpo y el aislamiento dejaron de ser \
+             diagnósticos. Diagnósticos: {:?}",
+            diagnosticos(a, &p)
+        );
+    }
+    assert_eq!(a.hard_fail, 0, "ninguno es hard-fail");
+
+    // El aislamiento sigue siendo una PROPIEDAD consultable del grafo (`§20.7`, E16-H02): lo que
+    // se retira es el diagnóstico, no la información.
+    assert!(
+        a.isolated.contains(&rp("docs/aislado.md")),
+        "el aislamiento sigue reportándose como propiedad: isolated={:?}",
+        a.isolated
+    );
+}

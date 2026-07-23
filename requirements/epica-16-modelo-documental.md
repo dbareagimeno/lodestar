@@ -182,6 +182,13 @@ sobre lo que operar. Por eso la reducción de `conform` al catálogo mínimo de 
     el resultado lo señala explícitamente → `declara_reserializacion`.
   - **Dado** un documento **sin** frontmatter, **Cuando** se le aplica un patch, **Entonces** se crea
     el bloque al principio y el cuerpo queda intacto → `patch_crea_bloque`.
+  - **[Añadido tras la fase roja — riesgo de PÉRDIDA DE DATOS]** **Dado** un documento cuyo
+    frontmatter **no es interpretable** (`FM-UNCLOSED` o `FM-YAML-INVALID`), **Cuando** se le aplica
+    un patch, **Entonces** la operación **falla** y el documento queda intacto — nunca se sustituye
+    el bloque ilegible por uno nuevo → `patch_sobre_frontmatter_ilegible_falla`.
+    La implementación ingenua (parsear → falla → mapa vacío → escribir bloque nuevo) **borra el
+    frontmatter del usuario**. Es el peor fallo posible en un motor que se vende por sus garantías
+    transaccionales, y no tenía criterio.
 - **Dependencias**: E16-H01.
 - **Pruebas**: `crates/lodestar-core/tests/`: los 5 nombres.
 - **Frontera (mcp.yml)**: no (la operación se expone en E21).
