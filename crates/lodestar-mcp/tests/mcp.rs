@@ -3598,3 +3598,378 @@ fn tool_heredada_retirada() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// E15-H06 — La raíz del workspace es el `cwd`
+// (`requirements/epica-15-workspace-universal.md`, `ARCHITECTURE.md §20.1`/`§20.5`).
+//
+// SUPERFICIE FIJADA (fase ROJA — todavía NO implementada):
+//   `lodestar-mcp [--root <dir>] [--profile readonly|standard]`
+//   · sin `--root` ⇒ la raíz es `std::env::current_dir()`;
+//   · `--root <dir>` la fija explícitamente y gana sobre el cwd;
+//   · **no hay argumento posicional**: v0.3 es incompatible con v0.2 y la historia declara que no
+//     hace falta conservarlo como alias deprecado. Por eso NINGUNO de los tests de este bloque
+//     usa `roundtrip`/`roundtrip_profile` (que pasan la raíz como posicional): usan
+//     [`roundtrip_en`], que ejercita la superficie nueva y que sigue siendo válida cuando el
+//     posicional desaparezca.
+//   · desaparece el gate «esto no es un bundle lodestar» (exit 3): cualquier directorio vale.
+// ---------------------------------------------------------------------------
+
+/// Como [`roundtrip`], pero arranca el servidor con el **cwd** en `cwd` y exactamente los
+/// argumentos `args` (ninguno posicional). Es el arnés de la superficie de arranque de E15-H06:
+/// `&[]` ejercita «la raíz es el cwd» y `&["--root", dir]` ejercita la raíz explícita.
+///
+/// Si el servidor aborta al arrancar (hoy: exit 3 por el gate de bundle), el vector devuelto sale
+/// **vacío** — de ahí que cada test asserte primero cuántas respuestas llegaron, para que el rojo
+/// se lea como «el servidor no arrancó» y no como un índice fuera de rango.
+fn roundtrip_en(
+    cwd: &std::path::Path,
+    args: &[&str],
+    lines: &[&str],
+    expect: usize,
+) -> Vec<serde_json::Value> {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_lodestar-mcp"))
+        .args(args)
+        .current_dir(cwd)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+    for l in lines {
+        // El servidor puede haber muerto ya (gate de arranque): un EPIPE al escribir no debe
+        // reventar el arnés, debe traducirse en «no llegaron respuestas».
+        if writeln!(stdin, "{l}").is_err() {
+            break;
+        }
+    }
+    let _ = stdin.flush();
+    drop(stdin);
+    let mut out = Vec::new();
+    for line in (&mut stdout).lines().map_while(Result::ok) {
+        out.push(serde_json::from_str(&line).expect("stdout = JSON-RPC puro"));
+        if out.len() == expect {
+            break;
+        }
+    }
+    child.wait().ok();
+    out
+}
+
+/// E15-H06 · Criterio `arranca_en_directorio_arbitrario`:
+/// **Dado** un directorio con `notas.md` y **sin** `index.md` ni `.lodestar/`, **Cuando** se lanza
+/// `lodestar-mcp` con el cwd ahí (y sin argumentos), **Entonces** arranca y responde `tools/list`.
+///
+/// Es el criterio de aceptación central de la épica (`§20.1`: «`cd my-project && lodestar-mcp`
+/// funciona»). El documento no tiene frontmatter a propósito: el arranque no puede depender del
+/// modelo documental.
+///
+/// Fase ROJA: hoy `main.rs` comprueba `index.md`/`.lodestar/` y aborta con exit 3 antes de leer
+/// stdin, así que no llega ninguna respuesta.
+#[test]
+fn arranca_en_directorio_arbitrario() {
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), "notas.md", "Notas sueltas, sin frontmatter.\n");
+    // Precondiciones del escenario: nada de lodestar en el directorio (si no, sería vacuo).
+    assert!(
+        !dir.path().join("index.md").exists(),
+        "el escenario exige un directorio SIN index.md"
+    );
+    assert!(
+        !dir.path().join(".lodestar").exists(),
+        "el escenario exige un directorio SIN .lodestar/"
+    );
+
+    let resp = roundtrip_en(
+        dir.path(),
+        &[],
+        &[r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#],
+        1,
+    );
+
+    assert_eq!(
+        resp.len(),
+        1,
+        "el servidor debe arrancar en un directorio arbitrario y responder tools/list; \
+         no llegó respuesta (¿abortó al arrancar?): {resp:?}"
+    );
+    let tools = resp[0]["result"]["tools"]
+        .as_array()
+        .unwrap_or_else(|| panic!("tools/list debe devolver un array de tools: {resp:?}"));
+    assert!(
+        !tools.is_empty(),
+        "tools/list debe listar el catálogo también sobre un directorio arbitrario: {resp:?}"
+    );
+}
+
+/// E15-H06 · Criterio `root_explicito_gana`:
+/// **Dado** `lodestar-mcp --root /otro/dir`, **Cuando** arranca, **Entonces** opera sobre ese
+/// directorio aunque el cwd del proceso sea otro.
+///
+/// Se comprueba por dos vías independientes, porque «operar sobre ese directorio» son dos cosas:
+///  1. la raíz que reporta `workspace_status` es la pedida — canonicalizada (`§20.5`: «canonicalizar
+///     la raíz una sola vez al arrancar»), por eso se compara `canonicalize` contra `canonicalize`
+///     y no cadena contra cadena (en macOS `/var/...` ⇒ `/private/var/...`);
+///  2. el inventario es el de `--root` (`alfa.md`) y **no** el del cwd (`beta.md`) — sin esta
+///     segunda parte, un servidor que solo guardara la ruta pero leyera el cwd pasaría el test.
+///
+/// Fase ROJA: hoy la raíz es un argumento POSICIONAL, así que `--root` se toma como si fuera la
+/// ruta del bundle (`root = "--root"`), el gate de bundle falla y el proceso sale con 3.
+#[test]
+fn root_explicito_gana() {
+    let raiz = tempfile::tempdir().unwrap();
+    let cwd = tempfile::tempdir().unwrap();
+    write(
+        raiz.path(),
+        "alfa.md",
+        "---\ntype: Nota\ntitle: Alfa\ndescription: d\n---\n\n# Alfa\n\ncuerpo\n",
+    );
+    write(
+        cwd.path(),
+        "beta.md",
+        "---\ntype: Nota\ntitle: Beta\ndescription: d\n---\n\n# Beta\n\ncuerpo\n",
+    );
+    let root_arg = raiz.path().to_str().expect("tempdir con ruta UTF-8");
+
+    let resp = roundtrip_en(
+        cwd.path(),
+        &["--root", root_arg],
+        &[
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"workspace_status","arguments":{}}}"#,
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"knowledge_search","arguments":{"text":""}}}"#,
+        ],
+        2,
+    );
+
+    assert_eq!(
+        resp.len(),
+        2,
+        "`lodestar-mcp --root <dir>` debe arrancar sobre <dir>; no llegaron las 2 respuestas \
+         (¿`--root` no se reconoce?): {resp:?}"
+    );
+
+    // 1. La raíz reportada es la pedida (no la del cwd).
+    let reportada = resp[0]["result"]["structuredContent"]["root"]
+        .as_str()
+        .unwrap_or_else(|| panic!("workspace_status debe reportar `root`: {resp:?}"));
+    let reportada = std::fs::canonicalize(reportada)
+        .unwrap_or_else(|e| panic!("`root` reportada «{reportada}» no es un directorio: {e}"));
+    assert_eq!(
+        reportada,
+        std::fs::canonicalize(raiz.path()).unwrap(),
+        "la raíz debe ser la de `--root`, no la del cwd ({}): {resp:?}",
+        cwd.path().display()
+    );
+
+    // 2. Y el inventario es el de esa raíz, no el del cwd.
+    let paths = search_paths(&resp[1]);
+    assert!(
+        paths.iter().any(|p| p == "alfa.md"),
+        "el inventario debe ser el de `--root` (falta «alfa.md»): {paths:?}"
+    );
+    assert!(
+        !paths.iter().any(|p| p == "beta.md"),
+        "el inventario NO debe incluir documentos del cwd («beta.md»): {paths:?}"
+    );
+}
+
+/// Workspace mínimo **dentro de un directorio padre controlado**, para poder comprobar que un path
+/// rechazado no escribe nada FUERA de la raíz. Devuelve `(padre, raíz)`; el padre se conserva vivo
+/// porque su `Drop` borra el árbol.
+///
+/// Lleva `index.md` a propósito: estos dos tests son **guardas** que deben estar en verde ANTES de
+/// E15-H06 (no dependen de que se retire el gate de arranque). Se lanzan con el cwd en la raíz y sin
+/// argumentos, que es la forma de arranque válida tanto hoy como después de la historia.
+fn ws_con_padre() -> (tempfile::TempDir, std::path::PathBuf) {
+    let padre = tempfile::tempdir().unwrap();
+    let ws = padre.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    write(
+        &ws,
+        "index.md",
+        "---\nokf_version: \"0.1\"\n---\n\n# Bundle\n",
+    );
+    write(
+        &ws,
+        "a.md",
+        "---\ntype: Nota\ntitle: A\ndescription: d\n---\n\n# H\n\ncuerpo\n",
+    );
+    // Cebo FUERA de la raíz: un `.md` legible y bien formado, al alcance tanto de una ruta
+    // absoluta como de un `..`. Sin él la guarda no mordería: un `knowledge_get` que dejara de
+    // validar la ruta respondería igualmente «no encontrado» (isError) y el test pasaría en falso.
+    // Con él, un escape que prosperase devolvería el cuerpo y [`SECRETO`] aparecería en la
+    // respuesta.
+    write(
+        padre.path(),
+        "secreto.md",
+        "---\ntype: Nota\ntitle: Secreto\ndescription: d\n---\n\n# S\n\nCONTENIDO-SECRETO-FUERA\n",
+    );
+    (padre, ws)
+}
+
+/// Marca del cebo de [`ws_con_padre`]: nunca debe aparecer en una respuesta del servidor.
+const SECRETO: &str = "CONTENIDO-SECRETO-FUERA";
+
+/// Todos los ficheros (rutas absolutas) bajo `dir`, recursivamente. Se usa para verificar que una
+/// operación rechazada **no tocó disco**: ni dentro ni fuera del workspace.
+fn ficheros_bajo(dir: &std::path::Path) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut pila = vec![dir.to_path_buf()];
+    while let Some(d) = pila.pop() {
+        let Ok(rd) = std::fs::read_dir(&d) else {
+            continue;
+        };
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                pila.push(p);
+            } else {
+                out.push(p.to_string_lossy().to_string());
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+/// Llamada `tools/call` a `knowledge_get` (camino de LECTURA) con la ruta cruda `path`.
+fn llamada_get(id: u32, path: &str) -> String {
+    format!(
+        r#"{{"jsonrpc":"2.0","id":{id},"method":"tools/call","params":{{"name":"knowledge_get","arguments":{{"ref":{{"path":"{path}"}},"include":["body"]}}}}}}"#
+    )
+}
+
+/// Llamada `tools/call` a `change_plan` con una op `create` sobre la ruta cruda `path` (camino de
+/// ESCRITURA: es el que podría materializar un fichero fuera del workspace).
+fn llamada_plan_create(id: u32, path: &str) -> String {
+    format!(
+        r#"{{"jsonrpc":"2.0","id":{id},"method":"tools/call","params":{{"name":"change_plan","arguments":{{"operations":[{{"op":"create","path":"{path}"}}]}}}}}}"#
+    )
+}
+
+/// Comprueba que una respuesta de tool es un **rechazo de ejecución reconocible**: `isError: true`
+/// en el `result` (no un error de protocolo, que el modelo no puede corregir), con un mensaje no
+/// vacío, y sin filtrar contenido del fichero apuntado.
+fn asserta_rechazo(resp: &serde_json::Value, ruta: &str) {
+    assert!(
+        resp["error"].is_null(),
+        "una ruta inválida es un error de EJECUCIÓN de la tool (isError), no de protocolo: {resp:?}"
+    );
+    assert_eq!(
+        resp["result"]["isError"],
+        serde_json::Value::Bool(true),
+        "la tool debe rechazar la ruta «{ruta}» con isError: {resp:?}"
+    );
+    let texto = resp["result"]["content"][0]["text"].as_str().unwrap_or("");
+    assert!(
+        !texto.trim().is_empty(),
+        "el rechazo de «{ruta}» debe llevar un mensaje legible para el modelo: {resp:?}"
+    );
+    // Nada del fichero apuntado puede viajar de vuelta: ni el cebo plantado fuera de la raíz
+    // (`secreto.md`) ni el contenido de `/etc/passwd` (que empieza por líneas «root:…»).
+    let entera = resp.to_string();
+    assert!(
+        !entera.contains(SECRETO) && !entera.contains("root:"),
+        "el rechazo de «{ruta}» no debe filtrar contenido de fuera del workspace: {resp:?}"
+    );
+}
+
+/// E15-H06 · Criterio `rechaza_absoluta` — **guarda: ya verde, fija el contrato de la frontera**.
+/// **Dado** un servidor arrancado, **Cuando** una tool recibe `path: "/etc/passwd"`, **Entonces**
+/// responde error de path inválido sin tocar disco.
+///
+/// No es código nuevo: `RelPath::new` (`crates/lodestar-core/src/types.rs:33`) ya rechaza las
+/// absolutas. Lo que fija este test es que ese rechazo es **contrato de la frontera MCP** (llega al
+/// cliente como `isError` reconocible) y no un detalle de implementación que un refactor pueda
+/// perder. Se cubren los dos caminos: lectura (`knowledge_get`) y escritura (`change_plan`).
+///
+/// Se prueban DOS rutas absolutas: la literal del criterio (`/etc/passwd`) y la del cebo
+/// `<padre>/secreto.md` — esta última existe, es un `.md` bien formado y **sería legible** si la
+/// validación desapareciera, así que es la que hace que la guarda muerda de verdad.
+#[test]
+fn rechaza_absoluta() {
+    let (padre, ws) = ws_con_padre();
+    let antes = ficheros_bajo(padre.path());
+    let cebo = padre.path().join("secreto.md");
+    let cebo = cebo.to_str().expect("tempdir con ruta UTF-8").to_string();
+
+    let l1 = llamada_get(1, "/etc/passwd");
+    let l2 = llamada_plan_create(2, "/etc/passwd");
+    let l3 = llamada_get(3, &cebo);
+    let l4 = llamada_plan_create(4, &cebo);
+    let resp = roundtrip_en(&ws, &[], &[&l1, &l2, &l3, &l4], 4);
+
+    assert_eq!(
+        resp.len(),
+        4,
+        "el servidor debe seguir vivo tras rechazar rutas absolutas: {resp:?}"
+    );
+    asserta_rechazo(&resp[0], "/etc/passwd");
+    asserta_rechazo(&resp[1], "/etc/passwd");
+    asserta_rechazo(&resp[2], &cebo);
+    asserta_rechazo(&resp[3], &cebo);
+
+    // Sin tocar disco: ningún `.md` nuevo y ningún rastro de la ruta absoluta reconstruida
+    // dentro del workspace (`ws/etc/passwd`).
+    let despues = ficheros_bajo(padre.path());
+    let nuevos_md: Vec<&String> = despues
+        .iter()
+        .filter(|p| p.ends_with(".md") && !antes.contains(*p))
+        .collect();
+    assert!(
+        nuevos_md.is_empty(),
+        "una ruta absoluta rechazada no debe escribir ningún .md: {nuevos_md:?}"
+    );
+    assert!(
+        !ws.join("etc").exists(),
+        "la ruta absoluta no debe reinterpretarse como relativa dentro del workspace"
+    );
+    assert!(
+        !despues.iter().any(|p| p.ends_with("/passwd")),
+        "no debe aparecer ningún fichero «passwd» bajo el árbol de pruebas: {despues:?}"
+    );
+}
+
+/// E15-H06 · Criterio `rechaza_escape` — **guarda: ya verde, fija el contrato de la frontera**.
+/// **Dado** un servidor arrancado, **Cuando** una tool recibe `path: "../fuera.md"`, **Entonces**
+/// responde error de path inválido sin tocar disco.
+///
+/// Aquí «sin tocar disco» es literal y comprobable en las dos direcciones, porque el workspace vive
+/// en un subdirectorio de un padre temporal y `..` apunta a un directorio real bajo control del
+/// test: si el escape prosperase, la LECTURA de `../secreto.md` devolvería el cebo y la ESCRITURA
+/// materializaría `<padre>/fuera.md`.
+#[test]
+fn rechaza_escape() {
+    let (padre, ws) = ws_con_padre();
+    let antes = ficheros_bajo(padre.path());
+
+    let l1 = llamada_get(1, "../fuera.md");
+    let l2 = llamada_plan_create(2, "../fuera.md");
+    let l3 = llamada_get(3, "../secreto.md");
+    let resp = roundtrip_en(&ws, &[], &[&l1, &l2, &l3], 3);
+
+    assert_eq!(
+        resp.len(),
+        3,
+        "el servidor debe seguir vivo tras rechazar un escape con «..»: {resp:?}"
+    );
+    asserta_rechazo(&resp[0], "../fuera.md");
+    asserta_rechazo(&resp[1], "../fuera.md");
+    asserta_rechazo(&resp[2], "../secreto.md");
+
+    assert!(
+        !padre.path().join("fuera.md").exists(),
+        "el escape con «..» no debe materializar nada fuera de la raíz del workspace"
+    );
+    let despues = ficheros_bajo(padre.path());
+    let nuevos_md: Vec<&String> = despues
+        .iter()
+        .filter(|p| p.ends_with(".md") && !antes.contains(*p))
+        .collect();
+    assert!(
+        nuevos_md.is_empty(),
+        "un escape rechazado no debe escribir ningún .md: {nuevos_md:?}"
+    );
+}

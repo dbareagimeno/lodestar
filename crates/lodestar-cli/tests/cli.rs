@@ -484,3 +484,72 @@ fn init_es_uso() {
         "un subcomando retirado no debe haber creado el scaffold"
     );
 }
+
+// ---------------------------------------------------------------------------
+// E15-H06 — La raíz del workspace es el `cwd`
+// (`requirements/epica-15-workspace-universal.md`, `ARCHITECTURE.md §20.5`).
+//
+// `resolve_root` (`crates/lodestar-cli/src/main.rs:46`) deja de SUBIR por los ancestros buscando
+// `index.md`/`.lodestar`: usa `--path`, y si no hay, el cwd tal cual.
+// ---------------------------------------------------------------------------
+
+/// `cli_no_asciende` (E15-H06) — **Dado** un cwd que es subdirectorio de un proyecto con `index.md`
+/// en un ancestro, **Cuando** se corre `lodestar check`, **Entonces** juzga el cwd, no el ancestro.
+///
+/// El escenario está montado para que el veredicto sea **distinto** en cada caso, de modo que el
+/// test no pueda pasar por casualidad:
+///   · el ANCESTRO contiene `malo.md` (sin frontmatter ⇒ `OKF-FM01`, hard fail) ⇒ juzgarlo da exit 1;
+///   · el SUBDIRECTORIO contiene solo un `a.md` conforme ⇒ juzgarlo da exit 0.
+/// Además se comprueba el inventario juzgado (`concepts` del `--json`, campo ya existente en el
+/// wire): desde el subdirectorio debe ser exactamente `["a.md"]`, no `["malo.md","sub/a.md"]`.
+///
+/// Fase ROJA: hoy `resolve_root` sube hasta el ancestro (tiene `index.md`), juzga el proyecto
+/// entero y sale con 1.
+#[test]
+fn cli_no_asciende() {
+    let proyecto = temp_dir("no-asciende");
+    write(
+        &proyecto,
+        "index.md",
+        "---\nokf_version: \"0.1\"\n---\n\n# Bundle\n",
+    );
+    // Hard fail OKF que vive SOLO en el ancestro.
+    write(&proyecto, "malo.md", "# sin frontmatter\n");
+    // El subdirectorio, juzgado por sí mismo, es conforme.
+    let sub = proyecto.join("sub");
+    write(
+        &sub,
+        "a.md",
+        "---\ntype: Nota\ntitle: A\ndescription: d\n---\n\n# H\n\ncuerpo\n",
+    );
+    // Precondición: el subdirectorio no tiene marcas de lodestar. Si las tuviera, el
+    // `resolve_root` de hoy pararía ahí y el test sería vacuo.
+    assert!(
+        !sub.join("index.md").exists() && !sub.join(".lodestar").exists(),
+        "el escenario exige un subdirectorio sin marcas de lodestar"
+    );
+
+    let out = bin()
+        .current_dir(&sub)
+        .args(["check", "--json"])
+        .output()
+        .unwrap();
+
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let concepts: Vec<&str> = v["concepts"]
+        .as_array()
+        .expect("`check --json` expone `concepts`")
+        .iter()
+        .filter_map(serde_json::Value::as_str)
+        .collect();
+    assert_eq!(
+        concepts,
+        vec!["a.md"],
+        "`check` debe juzgar el cwd (solo `a.md`), no ascender al ancestro"
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "el subdirectorio es conforme por sí mismo → exit 0 (el hard fail es del ancestro)"
+    );
+}
