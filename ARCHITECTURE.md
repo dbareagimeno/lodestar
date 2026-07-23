@@ -1016,7 +1016,14 @@ declarar si el bloque se reserializará entero.
 ### 20.5 Descubrimiento (§3 de REFACTOR_PHASE_2)
 
 La raíz es `--root` si se da, si no `std::env::current_dir()`, canonicalizada al arrancar y **fija
-durante toda la sesión**. Todas las rutas públicas son relativas a ella. Política por defecto:
+durante toda la sesión**. Todas las rutas públicas son relativas a ella.
+
+> **`workspace.root` en la config NO se implementa** (E15-H08). `REFACTOR_PHASE_2 §Fase 2` lo
+> sugiere como configuración opcional, pero es **circular**: el fichero vive en
+> `<root>/.lodestar/config.yaml`, luego hay que conocer la raíz para leerlo. La raíz sale
+> exclusivamente de `--root` o del cwd.
+
+Política por defecto:
 
 ```yaml
 discovery:

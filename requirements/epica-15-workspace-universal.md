@@ -265,7 +265,12 @@ y la suite en verde.
   `crates/lodestar-workspace/src/config.rs:80-185` (`WorkspaceConfig`, que ya tiene el patrón
   correcto: ausencia de fichero ⇒ defaults, YAML inválido ⇒ error explícito).
 - **Alcance**:
-  - Extender `WorkspaceConfig` con `workspace.root`, `discovery` (`include`/`exclude`/
+  - **`workspace.root` NO se implementa** (decisión tomada tras la fase roja, al detectarse que no
+    tenía criterio de aceptación). Es **circular**: el fichero de config vive en
+    `<root>/.lodestar/config.yaml`, así que hace falta conocer la raíz para poder leerlo. La raíz
+    la fija exclusivamente `--root` o el cwd (`§20.5`, puntos 1 y 2). La clave se ignora si aparece,
+    y se documenta el porqué — no se acepta silenciosamente ni se convierte en una redirección.
+  - Extender `WorkspaceConfig` con `discovery` (`include`/`exclude`/
     `respectGitignore`/`respectLodestarIgnore`/`followSymlinks`/tamaño máximo) y `validation`
     (severidad por familia de diagnóstico) + `transactions.rejectNewErrors`/`allowExistingErrors`.
   - **`.lodestar/**` es un suelo duro, no un default sobreescribible** (recomendación del autor de
