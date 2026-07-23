@@ -71,7 +71,7 @@ planes de **E12**; **E14** cierra. Ninguna historia del giro está **[BLOQUEADA]
 | **E16** — Modelo documental genérico | 2 | `ParsedFrontmatter` YAML arbitrario · sin ficheros reservados · título derivado · patch quirúrgico · diagnósticos mínimos · `Concept`→`Document` | [epica-16-modelo-documental.md](epica-16-modelo-documental.md) |
 | **E17** — Enlaces y grafo universal | 3 + 4 | Parser de enlaces · `LinkTarget` · diagnósticos de enlace · `Analysis` nueva · superficie de grafo | [epica-17-enlaces-grafo.md](epica-17-enlaces-grafo.md) |
 | **E18** — Store v2 | 5 | DDL nuevo · metadata anidada · links genéricos · cold rebuild · paridad core/store | [epica-18-store-v2.md](epica-18-store-v2.md) |
-| **E19** — Lenguaje de consulta | 6 | Parser · AST · type checking · namespaces · filtro JSON equivalente | *(pendiente)* |
+| **E19** — Lenguaje de consulta | 6 | Parser · AST · type checking · namespaces · filtro JSON equivalente | [epica-19-lenguaje-consulta.md](epica-19-lenguaje-consulta.md) |
 | **E20** — Inspección y validación genéricas | 7 + 8 | `metadata_inspect` (retira `core::schema`) · política `rejectNewErrors`/`allowExistingErrors` · **cablear los diagnósticos de descubrimiento** (ver abajo) | *(pendiente)* |
 | **E21** — Contrato MCP y transacciones genéricas | 9 + 10 | Contrato nuevo · 8 operaciones universales · selecciones masivas por consulta | *(pendiente)* |
 | **E22** — Migración y limpieza pública | 11 | `migrate-from-okf --dry-run` · docs · README · publicación incompatible | *(pendiente)* |
