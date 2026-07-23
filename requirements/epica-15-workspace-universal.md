@@ -202,9 +202,13 @@ y la suite en verde.
     - globs `include` (por defecto `**/*.md`) y `exclude` (por defecto `.git/**`,
       `.lodestar/runtime/**`);
     - `.gitignore` respetado por defecto (ya activo) **y** `.lodestarignore` vía
-      `add_custom_ignore_filename`;
+      `add_custom_ignore_filename`. **Ojo**: `WalkBuilder` solo aplica `.gitignore` dentro de un repo
+      git salvo que se le pase `require_git(false)` — sin eso, un proyecto sin `.git/` ignoraría su
+      propio `.gitignore`, que es justo el caso "directorio arbitrario" que persigue la épica;
     - `follow_links(false)` + diagnóstico `SYMLINK-UNSUPPORTED` cuando se encuentra uno;
-    - límite de tamaño por documento, configurable → `DOC-TOO-LARGE`;
+    - límite de tamaño por documento, configurable → `DOC-TOO-LARGE`. **No** usar
+      `WalkBuilder::max_filesize`: descarta el fichero en silencio, y aquí hace falta el diagnóstico;
+      comprobar el tamaño al leer;
     - no-UTF-8 y rutas no representables como **diagnósticos** (`DOC-NOT-UTF8`, `PATH-NOT-UTF8`) en
       vez del `eprintln!` silencioso de hoy (`io.rs:27,46`);
     - detección de **colisiones de capitalización** entre paths descubiertos → `LINK-CASE-MISMATCH`
