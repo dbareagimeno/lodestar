@@ -47,9 +47,16 @@ sobre lo que operar. Por eso la reducción de `conform` al catálogo mínimo de 
     anidados y listas de objetos. **No** se eliminan claves desconocidas ni se convierten tipos.
   - Retirar `KNOWN_FM`, `Frontmatter::known_null`, `Frontmatter::as_pairs`, `js_string` y la coerción
     a string de `frontmatter_from_mapping` (era la paridad con `String(v)` de JS, sin sentido ya).
-  - Migrar mecánicamente los ~44 puntos que leen `fm.r#type`/`fm.status`/`fm.title` a través del
-    accesor: `conform.rs`, `bundle.rs`, `query.rs`, `schema.rs`, `graph.rs`,
-    `crates/lodestar-store/src/index.rs`, `crates/lodestar-app/src/lib.rs`.
+  - Migrar los puntos que leen campos tipados a través del accesor. **Conteo real (fase roja,
+    corrige el «~44» que estimé): ~90 lecturas + menciones del tipo `Frontmatter`, en 12 ficheros**
+    — `model.rs` (18+11), `bundle.rs` (16+6), `schema.rs` (15+3), `lodestar-app/src/lib.rs` (9+5),
+    `store/src/index.rs` (8+1), `conform.rs` (4), `types.rs` (4+6), `query.rs` (2+6),
+    `external_refs.rs` (2+1), `graph.rs`/`diff.rs`/`plan.rs` (3+6), `fixtures` (1).
+  - **Borrar `types::ParsedFile`**: está declarado y **jamás construido** en todo el workspace
+    (muerto desde E1; el struct vivo es `model::Parsed`, lo que devuelve `parse_file`).
+  - **Ojo a la colisión de nombres**: `types::Range { start_line, end_line }` ya existe para los
+    `Check`. El `span` es `std::ops::Range<usize>` en bytes y hay que cualificarlo dentro de
+    `types.rs`.
 - **Fuera de alcance**: el título derivado (E16-H03), el patch (E16-H04), el DDL del store (E18) —
   las columnas `type`/`title`/`status` de `files` siguen existiendo, alimentadas por el accesor.
 - **Criterios de aceptación**:

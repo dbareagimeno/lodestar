@@ -241,6 +241,25 @@ Pendientes de priorización (no bloquean el núcleo):
 - **Reversible**: solo afecta a `crates/lodestar-core/src/links.rs` (E17-H01). Dilo antes de que
   E17 empiece y se replantea.
 
+## 12. Comparación de fechas en el lenguaje de consulta (E19) — 🟠 ABIERTA
+
+- **Contexto** (detectado en la fase roja de E16-H01): `REFACTOR_PHASE_2 §Fase 4` exige soportar
+  *"fechas interpretadas como valores YAML"*, y `§Fase 5` pide comparaciones tipadas sin coerción
+  implícita (`priority >= 2` funciona, `priority >= "high"` es error de tipo). Pero **`serde_yaml`
+  0.9.34 no tiene tipo timestamp**: un `2026-07-23` sin comillas se deserializa como `String`.
+- **Consecuencia**: hoy `reviewed_at > "2026-01-01"` sería una comparación de **strings**. Para
+  fechas ISO-8601 bien formadas el orden lexicográfico coincide con el cronológico, así que
+  «funciona» — pero silenciosamente, y deja de funcionar con formatos mixtos (`2026-7-3`), con
+  offsets de zona horaria distintos, o al comparar una fecha con un datetime.
+- **Qué decidir**: (a) declarar explícitamente que las fechas son strings y su comparación es
+  lexicográfica, documentándolo como limitación; (b) introducir un tipo fecha propio en el core que
+  reconozca ISO-8601 al indexar (`§20.12` guarda `value_type` en el store, así que hay sitio);
+  (c) cambiar de librería YAML por una que tipe timestamps.
+- **Recomendación**: **(a) para E19** —es lo barato y cubre el caso real, que son fechas ISO— y
+  reevaluar en E20, cuando `metadata_inspect` tenga que **comunicar** el tipo inferido de cada
+  propiedad y la ficción de "todo es string" se note. No bloquea: se puede empezar por (a) y migrar
+  a (b) sin romper el wire, porque el tipo viaja en `value_type`.
+
 ---
 
 ### Resumen de la recomendación
