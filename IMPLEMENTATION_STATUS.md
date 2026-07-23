@@ -807,3 +807,21 @@ superficie de producto; git queda como crate dormido) y `DECISIONES.md §0`. Des
   (2) la cache resuelve con `Inventory::default()`, que solo coincide con el core mientras los
   documentos sean `.md`; (3) los **diagnósticos de descubrimiento se siguen descartando** — con
   dueño en E20, ver `requirements/README.md`.
+
+### E18 — Store v2
+
+- ✅ **E18-H01/H02** — **DDL v2**. `files` → `documents(path, title, body, raw, frontmatter_json,
+  content_hash)` sin las columnas OKF promovidas; `metadata(document_path, field_path, value_json,
+  value_type)` poblada con `ParsedFrontmatter::walk` —el reflejo exacto de `get`, así que
+  `get(path)==Some(value)` por construcción y no hay un segundo navegador del `Value`—; `links` gana
+  `target_kind`/`fragment`/`resolved`/**`is_edge`** (este último computado por el core: hace exactas
+  las consultas de grafo incluso bajo `upsert` incremental, porque no depende del inventario vivo);
+  `diagnostics` gana `range_json`. El store **materializa `other_files`** para clasificar los enlaces
+  a código, cerrando la asimetría de `Inventory::default()`. `walk` es la firma que heredan E19/E20.
+- ✅ **E18-H03/H04** — **FTS genérico + paridad completa** (cierra E18). `documents_fts(path, title,
+  body, frontmatter_text)` sin `description` privilegiado, alimentado en el mismo recorrido `walk`.
+  La paridad core↔store vuelve a comparar la `Analysis` **completa** del modelo nuevo, incluida la
+  clasificación de enlaces; la fase roja **verificó empíricamente** que la síntesis de diagnósticos
+  aún reconstruía el `DocumentSet` sin `other_files` (enlace a código: `warn_count` store=2 vs
+  core=1), y H04 lo cerró propagándolos a `synth::link_diagnostics` y al trait `DocumentStore`.
+  **329 tests · E18 COMPLETA.** El store se reconstruye sin un solo dato OKF.
