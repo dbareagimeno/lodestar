@@ -70,8 +70,13 @@ y la suite en verde.
     (drift de generadores) de la tabla de códigos congelados: sin generadores no hay drift.
   - Retirar la **auto-regeneración de `index`/`tags` dentro de `change_apply`** (E13-H11,
     `crates/lodestar-app/src/lib.rs`) y sus tests (`crates/lodestar-app/tests/regen.rs`).
-- **Fuera de alcance**: los checks `OKF-IDX`/`OKF-LOG` y `FileKind` (mueren en E16, con el modelo);
-  el tipo `Mutation` (lo usa el motor transaccional).
+- **Fuera de alcance**: los checks `OKF-IDX`/`OKF-LOG` y `FileKind` (mueren en E16, con el modelo).
+- **Corrección post-juez (2026-07-23)**: esta historia declaraba fuera de alcance el tipo `Mutation`
+  «porque lo usa el motor transaccional». **Era falso**: al retirar `augment_with_regenerated` de
+  `transaction.rs`, ni `plan.rs` ni `transaction.rs`/`publish.rs`/`staging.rs`/`recovery.rs` lo
+  tocan. Sobrevivía solo porque lo usaba `Workspace::apply_mutation`, que se quedó sin llamadores —
+  exactamente lo que prohíbe el principio rector de la épica. Se borraron `apply_mutation`,
+  `ApplyReport`, `Mutation` y el `cache_remove` asociado.
 - **Criterios de aceptación**:
   - **Dado** `lodestar --help`, **Cuando** se imprime, **Entonces** no aparecen `index` ni `tags`
     → `help_sin_generadores`.
