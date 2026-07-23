@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use crossbeam_channel::Receiver;
 use lodestar_core::types::{
-    Analysis, Backlinks, Direction, FrontmatterPatch, GraphModel, Mutation, Neighborhood, RelPath,
+    Analysis, Backlinks, Direction, FrontmatterPatch, GraphModel, Neighborhood, RelPath,
     WorkspaceRevision, WriteOutcome,
 };
 use lodestar_core::Bundle;
@@ -184,11 +184,10 @@ impl Workspace {
         }
     }
 
-    fn cache_remove(&self, path: &RelPath) {
-        if let Some(store) = &self.cache {
-            let _ = store.remove(path);
-        }
-    }
+    // NOTA (E15-H02): el `cache_remove` simétrico se retiró con `apply_mutation` — su único
+    // llamador. Hoy ninguna escritura de alto nivel borra `.md` del canónico fuera de la
+    // transacción, y el borrado transaccional va por `publish_result`, que reconcilia la cache por
+    // el watcher. Si vuelve a hacer falta, es `store.remove(path)` con el mismo patrón de arriba.
 
     // --- lectura ----------------------------------------------------------
 
@@ -245,9 +244,8 @@ impl Workspace {
     /// completó/restauró. El gate se comprueba ANTES de tocar el canónico —para no publicar sobre
     /// un estado a medio recuperar (principio «nunca un estado parcial silencioso»)— en toda
     /// escritura de alto nivel del canónico ([`Workspace::create_concept`],
-    /// [`Workspace::write_concept`], [`Workspace::merge_frontmatter`],
-    /// [`Workspace::apply_mutation`]) y en [`Workspace::publish`] (que excluye su propio journal en
-    /// curso). La restauración de `recover` NO pasa por aquí: escribe por `io::write_atomic`/
+    /// [`Workspace::write_concept`], [`Workspace::merge_frontmatter`]) y en [`Workspace::publish`]
+    /// (que excluye su propio journal en curso). La restauración de `recover` NO pasa por aquí: escribe por `io::write_atomic`/
     /// `io::delete` directamente, de modo que puede reparar el canónico con el gate levantado.
     fn guard_recovery(&self) -> Result<(), WorkspaceError> {
         if self.recovery_pending() {
@@ -326,44 +324,6 @@ impl Workspace {
         }
         Ok(outcome)
     }
-
-    /// Aplica una `Mutation` por el único escritor y devuelve `{written, removed, unchanged}`.
-    pub fn apply_mutation(&self, mutation: &Mutation) -> Result<ApplyReport, WorkspaceError> {
-        self.guard_recovery()?;
-        let mut written = 0;
-        let mut unchanged = 0;
-        for (path, content) in &mutation.writes {
-            let on_disk = std::fs::read_to_string(self.root.join(path.as_str())).ok();
-            if on_disk.as_deref() == Some(content.as_str()) {
-                unchanged += 1;
-            } else {
-                io::write_atomic(&self.root, path, content)?;
-                self.cache_upsert(path, content);
-                written += 1;
-            }
-        }
-        let mut removed = 0;
-        for path in &mutation.deletes {
-            if self.root.join(path.as_str()).exists() {
-                io::delete(&self.root, path)?;
-                self.cache_remove(path);
-                removed += 1;
-            }
-        }
-        Ok(ApplyReport {
-            written,
-            removed,
-            unchanged,
-        })
-    }
-}
-
-/// Conteo de una aplicación de `Mutation` por el único escritor.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ApplyReport {
-    pub written: usize,
-    pub removed: usize,
-    pub unchanged: usize,
 }
 
 /// Instante actual UTC en ISO-8601 con precisión de segundos: `YYYY-MM-DDTHH:MM:SSZ`.

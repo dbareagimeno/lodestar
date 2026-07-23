@@ -105,11 +105,15 @@ impl Workspace {
     }
 
     /// Materializa en staging un `FileMap` resultado **ya computado**, bajo
-    /// `.lodestar/runtime/staging/<changeSetId saneado>/` (E13-H11). Es el núcleo de
-    /// [`Workspace::materialize_staging`] extraído para que la transacción (E13-H08) pueda
-    /// materializar el resultado del plan **aumentado** con la auto-regeneración de `index`/`tags`
-    /// (D6a) en lugar de recomputarlo desde las ops — así el árbol de staging (y por tanto lo que se
-    /// valida y se publica) refleja exactamente el lote aumentado. Nunca toca los `.md` canónicos.
+    /// `.lodestar/runtime/staging/<changeSetId saneado>/`. Es el núcleo de
+    /// [`Workspace::materialize_staging`] extraído para que la transacción (E13-H08) materialice el
+    /// resultado ya computado en lugar de recomputarlo desde las ops — así el árbol de staging (y
+    /// por tanto lo que se valida y se publica) refleja exactamente el mismo mapa. Nunca toca los
+    /// `.md` canónicos.
+    ///
+    /// Nota histórica: la escisión nació en E13-H11 para el plan *aumentado* con la auto-regeneración
+    /// de `index`/`tags` (D6a), retirada en E15-H02; la escisión sobrevive por la propiedad de
+    /// arriba.
     ///
     /// Si ya existía un staging con el mismo id (reintento), se limpia antes de reescribir.
     ///

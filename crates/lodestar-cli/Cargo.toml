@@ -21,7 +21,6 @@ lodestar-workspace = { workspace = true }
 lodestar-app = { workspace = true }
 clap = { workspace = true }
 anyhow = { workspace = true }
-ignore = { workspace = true }
 serde_json = { workspace = true }
 
 [lints]

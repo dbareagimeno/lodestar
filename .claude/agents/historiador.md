@@ -15,8 +15,9 @@ ambigua, tu salida lo dice explícitamente y lista las preguntas — no rellenes
 1. Lee `requirements/README.md` (plantilla e invariantes) y la épica donde encaja la historia.
 2. Lee las secciones de `ARCHITECTURE.md` que la historia toca (cita `§N` concretos). Las tablas
    §10/§12 resuelven contradicciones ya zanjadas: **no relitigues** decisiones ratificadas.
-3. Si el comportamiento existe en el prototipo (`prototype/index.html`), nombra las funciones
-   originales — el prototipo es la spec de comportamiento y el core lo porta 1:1, quirks incluidos.
+3. La spec de comportamiento es `docs/REFACTOR_PHASE_2.md` + `ARCHITECTURE.md §20`. El prototipo
+   (`prototype/index.html`) es referencia HISTÓRICA de v0.2.x: cítalo para explicar de dónde viene
+   un comportamiento portado, nunca como autoridad sobre lo que debe hacer el código.
 4. Redacta la historia con la plantilla EXACTA de `requirements/README.md` (Objetivo, Referencias,
    Alcance, Fuera de alcance, Criterios de aceptación, Dependencias, Pruebas).
 
@@ -28,8 +29,7 @@ ambigua, tu salida lo dice explícitamente y lista las preguntas — no rellenes
   propuesto** (p. ej. `Entonces el check es OKF-FM01 → test: fm01_falta_frontmatter`). Los
   criterios estructurales (grep en CI, pureza, docs) siguen siendo checklist binario.
 - **Campo Pruebas concreto**: qué fichero de test (`crates/<crate>/tests/*.rs`), qué fixtures de
-  `lodestar-fixtures` (el arnés diferencial se retiró en `E15-H04`)
-  (`crates/lodestar-core/tests/differential.rs` + `PROBES`).
+  `lodestar-fixtures`. (El arnés diferencial JS-vs-Rust se retiró en `E15-H04`.)
 - **Delta de contrato**: si la historia toca la frontera MCP (tools de `lodestar-mcp`), incluye en
   la historia una sección «Delta de contrato» con el cambio propuesto a `contracts/mcp.yml` (los
   tipos se referencian por nombre de `core::types`, nunca se redefinen — invariante #4).

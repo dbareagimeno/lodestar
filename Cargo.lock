@@ -498,7 +498,6 @@ version = "0.2.0"
 dependencies = [
  "anyhow",
  "clap",
- "ignore",
  "lodestar-app",
  "lodestar-core",
  "lodestar-fixtures",

@@ -276,8 +276,9 @@ tools:
       escritor (E13-H05) → sellado (limpia staging/journal, CONSERVA las copias de recuperación).
       Tras publicar, persiste el ChangeReceipt (E13-H07, `receiptId` = id de transacción derivado del
       changeSetId) y ejecuta la retención (`gc_receipts`). El `workspaceRevision` devuelto es la
-      revisión resultante: el workspace «queda en» ella. revert = change_revert (E13-H09);
-      auto-regen de index/tags dentro de la transacción = E13-H11.
+      revisión resultante: el workspace «queda en» ella. revert = change_revert (E13-H09).
+      La auto-regen de index/tags dentro de la transacción (E13-H11) se RETIRÓ en E15-H02: el
+      apply publica EXACTAMENTE el resultado del change set, sin añadir índices ni tags.
 
   - nombre: change_revert
     fuente: crates/lodestar-mcp/src/tools.rs
@@ -307,7 +308,7 @@ tools:
       el ChangeReceipt de la reversión (inversa: previous/result intercambiados) y ejecuta la
       retención (`gc_receipts`). El `workspaceRevision` devuelto == la `previousRevision` del apply
       revertido: el workspace vuelve al estado previo. Historial general (no-goal, no es git;
-      `REFACTOR §11.3`). audit = E13-H10; auto-regen = E13-H11.
+      `REFACTOR §11.3`). audit = E13-H10.
 
 # ---------------------------------------------------------------------------
 # §15 — Migración de superficie (10 tools heredadas → 10 tools objetivo NUEVAS,

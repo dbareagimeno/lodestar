@@ -58,12 +58,15 @@ impl Workspace {
         self.publish_result(&result, journal)
     }
 
-    /// Publica un `FileMap` resultado **ya computado** sobre el canónico por el **único escritor**
-    /// (E13-H11). Es el núcleo de [`Workspace::publish`] extraído para que la transacción (E13-H08)
-    /// pueda publicar el resultado del plan **aumentado** con la auto-regeneración de `index`/`tags`
-    /// (D6a) —el mismo `FileMap` que se materializó y validó en staging— en lugar de recomputarlo
-    /// desde las ops. Así los `index.md`/`tags/*` regenerados/purgados se sustituyen en el MISMO lote
-    /// y bajo el MISMO journal que el `.md` del plan.
+    /// Publica un `FileMap` resultado **ya computado** sobre el canónico por el **único escritor**.
+    /// Es el núcleo de [`Workspace::publish`] extraído para que la transacción (E13-H08) publique
+    /// **el mismo `FileMap` que se materializó y validó en staging**, en lugar de recomputarlo desde
+    /// las ops: lo que se valida es exactamente lo que se publica, bajo el mismo journal.
+    ///
+    /// Nota histórica: la escisión nació en E13-H11 para publicar el plan *aumentado* con la
+    /// auto-regeneración de `index`/`tags` (D6a). Esa auto-regeneración se **retiró** en E15-H02
+    /// (`ARCHITECTURE.md §20.13`), pero la escisión se conserva porque la propiedad de arriba
+    /// —validar y publicar el mismo mapa— vale por sí sola.
     ///
     /// Determina el conjunto de cambios contra el canónico: paths **creados/modificados** (el
     /// resultado deja un contenido que difiere del canónico) y **borrados** (el canónico los tenía y

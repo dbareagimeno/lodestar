@@ -37,5 +37,5 @@ workspace = true
 [dev-dependencies]
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }
-# Solo-dev: fixtures compartidas para el arnés diferencial (E1-H18). El ciclo dev-only lo permite cargo.
+# Solo-dev: fixtures compartidas de los tests. El ciclo dev-only lo permite cargo.
 lodestar-fixtures = { workspace = true }

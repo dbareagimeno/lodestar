@@ -566,13 +566,6 @@ pub struct WriteOutcome {
     pub bundle_hard_fail: usize,
 }
 
-/// Plan de generación puro: la workspace lo aplica por el único camino de escritura.
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct Mutation {
-    pub writes: BTreeMap<RelPath, String>,
-    pub deletes: Vec<RelPath>,
-}
-
 // ---------------------------------------------------------------------------
 // Identidad de contenido determinista: `ConceptRevision` / `WorkspaceRevision`
 // (E10-H03, `ARCHITECTURE.md §19.3`, `REFACTOR §6.2/§6.3`). Eleva blake3 (ya usado en

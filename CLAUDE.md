@@ -76,7 +76,7 @@ cargo doc --workspace --no-deps --locked   # con RUSTDOCFLAGS="-D warnings"
 
 ### CLI (`cargo run -p lodestar-cli -- …`)
 - `check [--json|--sarif]` — la **puerta de CI**. Exit codes congelados: `0` conforme · `1`
-  hard-fail · `2` uso · `3` runtime/IO · `4` drift de generadores. Juzga siempre el **working
+  hard-fail · `2` uso · `3` runtime/IO. Juzga siempre el **working
   tree** (scope workspace); desde `E9-H02` **no** expone `--staged`/`--rev`/`--range`, y desde
   `E15-H01` no hay crate `vcs` que los soporte.
 - `reindex` — reconstruye la cache `.lodestar/index.db`.
