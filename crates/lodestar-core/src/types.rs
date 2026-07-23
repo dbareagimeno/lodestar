@@ -181,6 +181,15 @@ pub enum CheckCode {
     LinkStub,
     #[serde(rename = "LINK-REL")]
     LinkRel,
+    /// El destino de un enlace está contenido en el workspace pero **no existe** (`§20.9`).
+    /// Severidad `Err` si el destino sería un documento Markdown (`danglingDocumentLinks: error`) y
+    /// `Warn` si sería otro fichero del proyecto (`missingWorkspaceFiles: warning`). E17-H03.
+    #[serde(rename = "LINK-TARGET-MISSING")]
+    LinkTargetMissing,
+    /// El destino de un enlace sale de la raíz del workspace ([`LinkTarget::EscapesWorkspace`]):
+    /// Lodestar no puede seguirlo ni reescribirlo. E17-H03.
+    #[serde(rename = "LINK-ESCAPES-WORKSPACE")]
+    LinkEscapesWorkspace,
     // --- Familias schema-driven (decisión D-CheckCode, `ARCHITECTURE.md §19.3`) ---
     // `conform` ya NO las produce (E16-H05): solo las emiten `core::schema` y `external_refs`,
     // fuera de `DocumentSet::analyze`. Mueren del todo en E20, con `core::schema`.
@@ -242,6 +251,8 @@ impl CheckCode {
             CheckCode::DocConflictMarker => "DOC-CONFLICT-MARKER",
             CheckCode::LinkStub => "LINK-STUB",
             CheckCode::LinkRel => "LINK-REL",
+            CheckCode::LinkTargetMissing => "LINK-TARGET-MISSING",
+            CheckCode::LinkEscapesWorkspace => "LINK-ESCAPES-WORKSPACE",
             CheckCode::SchemaReqfield => "SCHEMA-REQFIELD",
             CheckCode::SchemaStatus => "SCHEMA-STATUS",
             CheckCode::RelTarget => "REL-TARGET",

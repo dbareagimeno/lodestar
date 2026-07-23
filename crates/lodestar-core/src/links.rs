@@ -13,7 +13,7 @@ use std::ops::Range;
 
 use pulldown_cmark::{Event, LinkType, Options, Parser, RefDefs, Tag, TagEnd};
 
-use crate::types::{Inventory, LinkKind, LinkTarget, RawLink, RelPath, ResolvedLink};
+use crate::types::{Check, Inventory, LinkKind, LinkTarget, RawLink, RelPath, ResolvedLink};
 
 /// Extensiones de Markdown reconocidas al extraer enlaces.
 ///
@@ -412,6 +412,29 @@ fn decodificar_segmento(seg: &str) -> String {
     } else {
         d
     }
+}
+
+// ---------------------------------------------------------------------------
+// E17-H03 — Diagnósticos de enlaces (STUB de la fase roja)
+// ---------------------------------------------------------------------------
+
+/// Diagnósticos de enlaces de un documento (`ARCHITECTURE.md §20.9`, E17-H03).
+///
+/// **STUB de la fase roja**: firma + `todo!()`. La lógica es del implementador.
+///
+/// `raw` es el documento **entero** (con su frontmatter) porque el `range` de un [`Check`] se
+/// expresa en líneas del **fichero**, mientras que el `span` de un [`ResolvedLink`] es un offset de
+/// bytes dentro del **cuerpo**: quien emite el diagnóstico tiene que sumar el `body_start` de
+/// [`crate::model::split_front`]. `links` son los enlaces ya resueltos del documento (los que
+/// produce [`resolve`]) — se pasan en vez de re-extraerlos para que el análisis los resuelva **una
+/// sola vez** (invariante #3).
+pub fn diagnose(
+    _path: &RelPath,
+    _raw: &str,
+    _links: &[ResolvedLink],
+    _inventory: &Inventory,
+) -> Vec<Check> {
+    todo!("E17-H03: LINK-TARGET-MISSING / LINK-ESCAPES-WORKSPACE / LINK-CASE-MISMATCH")
 }
 
 /// Percent-decoding de un **segmento** de path. Una secuencia `%XX` mal formada, o un resultado

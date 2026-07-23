@@ -167,6 +167,14 @@ parte de un parser Markdown, y la reescritura de `move_document` necesita offset
     `LINK-TARGET-MISSING` con severidad **warning**, no error → `workspace_file_ausente_es_warning`.
   - **Dado** un enlace externo y un anchor propio, **Cuando** se validan, **Entonces** no producen
     diagnóstico → `externos_y_anchors_no_diagnostican`.
+- **Coste conocido, aceptado en la fase roja**: un enlace a la **raíz del workspace** (`[x](../)`
+  desde un subdirectorio) emite `LINK-ESCAPES-WORKSPACE` con severidad error, aunque GitHub lo
+  renderiza sin problema. La causa es que un destino que normaliza a la raíz **no es nombrable como
+  `RelPath`**, así que E17-H02 lo clasifica `EscapesWorkspace` — la única variante sin path. Se
+  acepta a propósito: el diagnóstico debe ser función **pura** del `LinkTarget`, y distinguir aquí
+  «escapa» de «apunta a la raíz» obligaría a re-inspeccionar el href, reimplementando la
+  clasificación con un segundo algoritmo. **El arreglo correcto es ampliar `LinkTarget`** (`§20.6`)
+  con una variante propia para la raíz, no parchear el diagnóstico → candidato a E20/E21.
 - **Dependencias**: E17-H02, E16-H05.
 - **Pruebas**: `crates/lodestar-core/tests/`: los 5 nombres.
 - **Frontera (mcp.yml)**: **sí** (`CheckCode`).
