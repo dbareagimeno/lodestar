@@ -63,7 +63,16 @@ fn check_json_es_valido() {
         .unwrap();
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert!(v.get("documents").is_some());
-    assert!(v.get("hardFail").is_some(), "wire camelCase");
+    // MIGRADO en E17-H04: el wire del `Analysis` son los SEIS campos de `§20.7` y ninguno es un
+    // contador — `hardFail`/`warnCount` pasaron a métodos derivados de `diagnostics`. El veredicto
+    // que consume CI sigue viajando aparte, en `conformant` (lo añade la CLI).
+    assert!(v.get("diagnostics").is_some(), "wire camelCase");
+    assert!(v.get("outgoing").is_some() && v.get("incoming").is_some());
+    assert_eq!(v.get("conformant"), Some(&serde_json::Value::Bool(true)));
+    assert!(
+        v.get("hardFail").is_none() && v.get("warnCount").is_none() && v.get("perFile").is_none(),
+        "los campos retirados no reaparecen en el wire: {v}"
+    );
 }
 
 #[test]
@@ -352,7 +361,8 @@ fn check_json_lista_schema() {
         "SCHEMA-REQFIELD bloquea la puerta (exit 1)"
     );
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    let per_file = v["perFile"].as_object().unwrap();
+    // MIGRADO en E17-H04: `perFile` pasó a `diagnostics`.
+    let per_file = v["diagnostics"].as_object().unwrap();
     let lista_schema = per_file
         .values()
         .filter_map(|checks| checks.as_array())
@@ -360,8 +370,8 @@ fn check_json_lista_schema() {
         .any(|c| c["code"] == "SCHEMA-REQFIELD");
     assert!(
         lista_schema,
-        "el JSON debe listar el diagnóstico SCHEMA-REQFIELD en `perFile`, no solo los checks OKF; \
-         perFile = {per_file:#?}"
+        "el JSON debe listar el diagnóstico SCHEMA-REQFIELD en `diagnostics`, no solo los checks \
+         del documento; diagnostics = {per_file:#?}"
     );
 }
 

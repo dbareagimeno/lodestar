@@ -216,29 +216,15 @@ fn build_raw_idempotente() {
     assert_eq!(rebuilt, rebuilt2, "build_raw debe ser idempotente");
 }
 
-#[test]
-fn resolve_link_casos() {
-    assert_eq!(
-        model::resolve_link("/a/b.md", "x.md").as_deref(),
-        Some("a/b.md")
-    );
-    assert_eq!(
-        model::resolve_link("./b.md", "dir/x.md").as_deref(),
-        Some("dir/b.md")
-    );
-    assert_eq!(model::resolve_link("http://x", "x.md"), None);
-    assert_eq!(model::resolve_link("#frag", "x.md"), None);
-    assert_eq!(
-        model::resolve_link("sub/", "x.md").as_deref(),
-        Some("sub/index.md")
-    );
-}
+// E17-H02 retiró `resolve_link_casos`: `model::resolve_link` ya no existe. Su semántica —y la
+// que la sustituye, sin `foo/` → `foo/index.md`— la cubren `enlaces.rs::punto_barra_equivale` y
+// `enlaces.rs::directorio_no_es_index`.
 
 // --- E1-H06/H07: conformidad y analyze --------------------------------------
 
 fn codes_of(b: &DocumentSet, path: &str) -> Vec<String> {
     let p = RelPath::new(path).unwrap();
-    b.analyze().per_file[&p]
+    b.analyze().diagnostics[&p]
         .iter()
         .map(|c| c.code.as_str().to_string())
         .collect()
@@ -265,10 +251,18 @@ fn conformidad_dispara_cada_codigo() {
     assert!(codes_of(&b, "sin-cierre.md").contains(&"FM-UNCLOSED".to_string()));
     assert!(codes_of(&b, "malo-yaml.md").contains(&"FM-YAML-INVALID".to_string()));
     assert!(codes_of(&b, "conflicto.md").contains(&"DOC-CONFLICT-MARKER".to_string()));
-    // Enlaces: vivos hasta E17, que los sustituye por `LINK-TARGET-MISSING`/`LINK-CASE-MISMATCH`.
+    // Enlaces (E17-H03): el destino inexistente es `LINK-TARGET-MISSING`, y un enlace relativo
+    // que RESUELVE no diagnostica nada — `LINK-REL` («usa la ruta completa /…») murió con el
+    // modelo que lo justificaba.
     let malo = codes_of(&b, "malo.md");
-    assert!(malo.contains(&"LINK-STUB".to_string()));
-    assert!(malo.contains(&"LINK-REL".to_string()));
+    assert!(
+        malo.contains(&"LINK-TARGET-MISSING".to_string()),
+        "{malo:?}"
+    );
+    assert!(
+        !malo.contains(&"LINK-STUB".to_string()) && !malo.contains(&"LINK-REL".to_string()),
+        "los códigos de enlace del prototipo se retiraron en E17-H03: {malo:?}"
+    );
 
     // Y el otro lado del catálogo mínimo: un `.md` cualquiera NO incumple nada. Un documento sin
     // frontmatter, uno sin `type` ni encabezados y una metadata «mal formateada» son válidos y
@@ -296,7 +290,7 @@ fn hard_fail_cuenta_ficheros_no_max() {
             "---\ntype: Nota\ntitle: B\ndescription: d\n---\n\n# H\n\n[x](/malo.md)\n",
         ),
     ]));
-    assert_eq!(b.analyze().hard_fail, 1);
+    assert_eq!(b.analyze().hard_fail(), 1);
 }
 
 #[test]
@@ -314,8 +308,26 @@ fn analyze_backlinks_son_inversa_de_out() {
     let a = b.analyze();
     let pa = RelPath::new("a.md").unwrap();
     let pb = RelPath::new("b.md").unwrap();
-    assert_eq!(a.out[&pa], vec![pb.clone()]);
-    assert_eq!(a.inn[&pb], vec![pa.clone()]);
+    // MIGRADO en E17-H04: `out`/`inn` son ahora `outgoing`/`incoming`, con el enlace resuelto
+    // completo en vez de una adyacencia de paths.
+    assert_eq!(
+        a.outgoing[&pa]
+            .iter()
+            .map(|l| l.target.clone())
+            .collect::<Vec<_>>(),
+        vec![LinkTarget::Document(pb.clone())]
+    );
+    assert_eq!(
+        a.incoming[&pb]
+            .iter()
+            .map(|r| r.from.clone())
+            .collect::<Vec<_>>(),
+        vec![pa.clone()]
+    );
+    assert_eq!(
+        a.incoming[&pb][0].link, a.outgoing[&pa][0],
+        "`incoming` es la inversa de `outgoing`: el mismo enlace, no una copia recalculada"
+    );
     // `a.md` no tiene entrantes, pero SÍ salientes → NO está aislado (`§20.7`, E16-H02).
     assert!(!a.isolated.contains(&pa));
     // `b.md` tiene entrantes → tampoco.
@@ -555,8 +567,8 @@ fn fm_escalares_no_string_no_invierten_el_veredicto() {
         "---\ntype: 123\ntitle: 2024\ndescription: true\n---\n\n# H\n\ncuerpo\n",
     )]));
     let a = b.analyze();
-    assert_eq!(a.hard_fail, 0, "el veredicto no puede invertirse: {a:?}");
-    let checks = &a.per_file[&RelPath::new("n.md").unwrap()];
+    assert_eq!(a.hard_fail(), 0, "el veredicto no puede invertirse: {a:?}");
+    let checks = &a.diagnostics[&RelPath::new("n.md").unwrap()];
     assert!(!checks.iter().any(|c| c.code == CheckCode::FmYamlInvalid));
 
     // El tipo YAML real sobrevive al parseo (ya no hay coerción a string).
@@ -668,8 +680,13 @@ fn diff_snap_ordena_numeric_aware() {
     assert_eq!(order, vec!["doc-2.md", "doc-10.md"]);
 }
 
+/// MIGRADO en E17-H04 (antes `backlinks_out_dedup_sin_self`): `Backlinks::out` dejó de ser la
+/// lista deduplicada de destinos resueltos y pasó a ser **todos** los enlaces del documento, en
+/// orden de aparición y con su clasificación. Enlazar dos veces al mismo destino son dos enlaces
+/// (lo que `move_document` necesita reescribir), y el self-enlace es un enlace más: la
+/// deduplicación y la exclusión del self viven ahora en el GRAFO, no en la lista.
 #[test]
-fn backlinks_out_dedup_sin_self() {
+fn backlinks_out_lista_todos_los_enlaces() {
     let b = DocumentSet::from_files(fm(&[
         (
             "x.md",
@@ -678,13 +695,19 @@ fn backlinks_out_dedup_sin_self() {
         ("a.md", "---\ntype: N\ntitle: A\ndescription: d\n---\n\n# H\n"),
         ("index.md", "---\ntype: Index\ntitle: Bundle\ndescription: Índice del bundle\nokf_version: \"0.1\"\n---\n\n# B\n\n* [x](x.md)\n"),
     ]));
-    let bl = b.backlinks(&RelPath::new("x.md").unwrap());
-    // Se dedupea `/a.md` y se excluye el self-enlace; `index.md` SÍ aparece: desde E16-H02 no es
-    // un destino reservado, sino un documento como cualquier otro.
+    let x = RelPath::new("x.md").unwrap();
+    let bl = b.backlinks(&x);
+    // Los CUATRO enlaces, en orden de aparición: el repetido no se dedupea y el self-enlace no se
+    // excluye. `index.md` SÍ aparece: desde E16-H02 no es un destino reservado, sino un documento
+    // como cualquier otro.
     assert_eq!(
-        bl.out.iter().map(|p| p.as_str()).collect::<Vec<_>>(),
-        vec!["a.md", "index.md"]
+        bl.out.iter().map(|l| l.href.as_str()).collect::<Vec<_>>(),
+        vec!["/a.md", "/a.md", "/index.md", "/x.md"]
     );
+    // …pero el grafo sí: una sola arista por vecino, y el self-enlace es un self-loop.
+    let vecindad = b.neighborhood(&x, 1, Direction::Out);
+    let vecinos: Vec<&str> = vecindad.edges.iter().map(|e| e.target.as_str()).collect();
+    assert_eq!(vecinos, vec!["a.md", "index.md", "x.md"]);
 }
 
 #[test]
@@ -1877,7 +1900,7 @@ fn plan_warnings_permitido() {
 
     // Precondición del fixture: 0 errores duros.
     assert_eq!(
-        hipotetico.analyze().hard_fail,
+        hipotetico.analyze().hard_fail(),
         0,
         "el workspace hipotético no debe tener ningún Err",
     );

@@ -161,6 +161,9 @@ schema_derive! {
 /// El catálogo OKF (`OKF-FM01`, `OKF-TYPE`, `REC-TITLE`, `REC-DESC`, `FMT-TAGS`, `FMT-TS`,
 /// `BODY-STRUCT`, `ORPHAN`, `OKF-IDX`, `OKF-LOG`) se **retiró**; `OKF-FM02`/`OKF-FM03`/
 /// `OKF-CONFLICT` se renombraron a `FM-UNCLOSED`/`FM-YAML-INVALID`/`DOC-CONFLICT-MARKER`.
+/// **E17-H03** retiró `LINK-STUB`/`LINK-REL` (el destino inexistente y el enlace relativo del
+/// prototipo) en favor de `LINK-TARGET-MISSING`/`LINK-ESCAPES-WORKSPACE`/`LINK-CASE-MISMATCH`,
+/// derivados de la clasificación de [`LinkTarget`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum CheckCode {
     // --- Frontmatter no interpretable (`§20.9`) ---
@@ -176,11 +179,23 @@ pub enum CheckCode {
     /// puede modificar con seguridad.
     #[serde(rename = "DOC-CONFLICT-MARKER")]
     DocConflictMarker,
-    // --- Enlaces (E17 los sustituye por `LINK-TARGET-MISSING`/`LINK-ESCAPES-WORKSPACE`) ---
+    // --- Enlaces heredados del prototipo: RETIRADOS en E17-H03 ---
+    //
+    // `LINK-STUB` («N enlaces llevan a páginas que aún no existen») y `LINK-REL` («es mejor usar
+    // la ruta completa /…») dejaron de tener productor: `conform` ya no los emite y ninguna otra
+    // puerta puede reintroducirlos — los sustituyen `LINK-TARGET-MISSING`/
+    // `LINK-ESCAPES-WORKSPACE`/`LINK-CASE-MISMATCH`, derivados de la clasificación del destino.
+    //
+    // Las dos variantes sobreviven **solo como nombres**, porque el test de la fase roja
+    // (`crates/lodestar-core/tests/diagnosticos.rs::link_missing_con_rango`) las nombra en un
+    // `matches!` para asegurar que no reaparecen, y ese fichero no se puede tocar. Borrarlas es un
+    // cambio de una línea en cuanto esa guarda se retire; hasta entonces, que estén aquí es lo que
+    // hace que la guarda verifique algo de verdad.
     #[serde(rename = "LINK-STUB")]
     LinkStub,
     #[serde(rename = "LINK-REL")]
     LinkRel,
+    // --- Enlaces (`§20.9`, E17-H03) ---
     /// El destino de un enlace está contenido en el workspace pero **no existe** (`§20.9`).
     /// Severidad `Err` si el destino sería un documento Markdown (`danglingDocumentLinks: error`) y
     /// `Warn` si sería otro fichero del proyecto (`missingWorkspaceFiles: warning`). E17-H03.
@@ -210,9 +225,9 @@ pub enum CheckCode {
     RelType,
     /// Referencia externa (`implemented_by`/`verified_by`, E9-H05) a un fichero de código bajo
     /// `referenceRoots` que no existe en disco (E11-H04). Variante propia, no reuso de
-    /// `LINK-STUB`/`LINK-REL` (enlaces ENTRE documentos del workspace) ni `REL-TARGET` (relaciones
-    /// tipadas a documentos): un `implemented_by`/`verified_by` apunta a código fuera del dominio
-    /// OKF, no a un documento — semánticamente distinto de los tres.
+    /// `LINK-TARGET-MISSING` (destino de un **enlace Markdown**) ni de `REL-TARGET` (relaciones
+    /// tipadas a documentos): un `implemented_by`/`verified_by` apunta a código declarado en el
+    /// frontmatter, no a un enlace del cuerpo — semánticamente distinto de los dos.
     #[serde(rename = "EXTREF-MISSING")]
     ExtrefMissing,
     // --- Descubrimiento universal (E15-H07, `ARCHITECTURE.md §20.5`/`§20.9`) ---
@@ -237,6 +252,10 @@ pub enum CheckCode {
     SymlinkUnsupported,
     /// Rutas que solo difieren en capitalización: en un volumen case-insensitive son el mismo
     /// fichero, así que el workspace no es portable.
+    ///
+    /// **Dos productores**: el descubrimiento (`§20.5`, colisiones entre ficheros del árbol) y —
+    /// desde E17-H03— [`crate::links::diagnose`], cuando un enlace apunta a una ruta que el
+    /// inventario tiene *salvo capitalización*.
     #[serde(rename = "LINK-CASE-MISMATCH")]
     LinkCaseMismatch,
 }
@@ -249,6 +268,7 @@ impl CheckCode {
             CheckCode::FmUnclosed => "FM-UNCLOSED",
             CheckCode::FmYamlInvalid => "FM-YAML-INVALID",
             CheckCode::DocConflictMarker => "DOC-CONFLICT-MARKER",
+            // Sin productor desde E17-H03 (ver la nota de la enum).
             CheckCode::LinkStub => "LINK-STUB",
             CheckCode::LinkRel => "LINK-REL",
             CheckCode::LinkTargetMissing => "LINK-TARGET-MISSING",
@@ -570,6 +590,7 @@ pub enum FmError {
 // `{"kind":"escapesWorkspace"}`— para que la variante sin payload no cambie la forma de las
 // demás. Qué tool lo expone, y bajo qué campo, es E17-H05.
 
+schema_derive! {
 /// Sintaxis con la que se escribió un enlace Markdown (`§20.6`). Es el `link_type` del parser:
 /// clasifica **la forma**, no el destino (eso es [`LinkTarget`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -586,7 +607,9 @@ pub enum LinkKind {
     /// `<https://example.com>`.
     Autolink,
 }
+}
 
+schema_derive! {
 /// Un enlace tal como aparece en el cuerpo, **sin resolver** (E17-H01).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -603,7 +626,9 @@ pub struct RawLink {
     /// La forma sintáctica del enlace.
     pub kind: LinkKind,
 }
+}
 
+schema_derive! {
 /// Clasificación del destino de un enlace (`ARCHITECTURE.md §20.6`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "value", rename_all = "camelCase")]
@@ -621,7 +646,32 @@ pub enum LinkTarget {
     /// El destino sale de la raíz del workspace. No lleva path: no hay `RelPath` que lo represente.
     EscapesWorkspace,
 }
+}
 
+impl LinkTarget {
+    /// El destino si el enlace conecta con **otro documento** del grafo, o `None` si no.
+    ///
+    /// Interno = [`LinkTarget::Document`] (arista real) o [`LinkTarget::Missing`] (arista a un
+    /// fantasma: el documento *participa* en el grafo aunque el otro extremo no exista todavía).
+    /// Una URI externa, un anchor propio, un escape o un fichero del proyecto **no** conectan con
+    /// ningún documento (`§20.7`).
+    ///
+    /// Es la **única** definición de «enlace interno» (invariante #3): la reusan el grafo, los
+    /// aislados, los colgantes, la reescritura de `move_document` y la tabla `links` de la cache.
+    pub fn internal_path(&self) -> Option<&RelPath> {
+        match self {
+            LinkTarget::Document(p) | LinkTarget::Missing(p) => Some(p),
+            _ => None,
+        }
+    }
+
+    /// `true` si el enlace conecta con otro documento del grafo. Ver [`LinkTarget::internal_path`].
+    pub fn is_internal(&self) -> bool {
+        self.internal_path().is_some()
+    }
+}
+
+schema_derive! {
 /// Un enlace ya resuelto y clasificado (E17-H02).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -641,6 +691,43 @@ pub struct ResolvedLink {
     /// `links(…, fragment, …)` en el store v2 (`§20.12`).
     pub fragment: Option<String>,
 }
+}
+
+schema_derive! {
+/// Un enlace visto **desde su destino**: quién lo escribe y cómo (`§20.7`, E17-H04).
+///
+/// Es el elemento de [`Analysis::incoming`], que es literalmente la inversa de
+/// [`Analysis::outgoing`]: `link` es **el mismo** [`ResolvedLink`] que su origen tiene entre sus
+/// salientes, no una copia recalculada (invariante #3). Anida el enlace en vez de copiar sus
+/// campos porque `move_document` necesita su `span` y su `kind` para reescribir el destino.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LinkReference {
+    /// El documento que escribe el enlace.
+    pub from: RelPath,
+    /// El enlace, ya resuelto y clasificado.
+    pub link: ResolvedLink,
+}
+}
+
+schema_derive! {
+/// Un enlace **roto**: quién lo escribe, qué destino pretendía y cómo lo escribió (`§20.7`,
+/// E17-H04).
+///
+/// Invariante: `link.target == LinkTarget::Missing(target)` — `target` es el payload de la
+/// variante, no un segundo cálculo. Sustituye al `Vec<RelPath>` de destinos perdidos de la forma
+/// anterior, que no permitía decir **quién** enlazaba mal.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DanglingLink {
+    /// El documento que contiene el enlace roto.
+    pub from: RelPath,
+    /// El destino pretendido, ya normalizado desde el origen.
+    pub target: RelPath,
+    /// El enlace tal como se escribió, ya resuelto.
+    pub link: ResolvedLink,
+}
+}
 
 /// Lo que el motor sabe que existe en el workspace, sin tocar el disco (invariante #2).
 ///
@@ -652,6 +739,10 @@ pub struct ResolvedLink {
 pub struct Inventory {
     documents: BTreeSet<RelPath>,
     other_files: BTreeSet<RelPath>,
+    /// Índice auxiliar `ruta plegada a minúsculas → ruta REAL`, derivado de los dos anteriores.
+    /// Solo lo consume [`Inventory::find_ignoring_case`]; no forma parte de la identidad del
+    /// inventario más allá de lo que ya determinan `documents`/`other_files`.
+    folded: BTreeMap<String, RelPath>,
 }
 
 impl Inventory {
@@ -665,18 +756,45 @@ impl Inventory {
         D: IntoIterator<Item = RelPath>,
         F: IntoIterator<Item = RelPath>,
     {
-        Inventory {
-            documents: documents.into_iter().collect(),
-            other_files: other_files.into_iter().collect(),
-        }
+        Inventory::build(
+            documents.into_iter().collect(),
+            other_files.into_iter().collect(),
+        )
     }
 
     /// Atajo: solo los documentos de un [`FileMap`], sin ficheros no-Markdown conocidos.
     pub fn from_documents(files: &FileMap) -> Inventory {
-        Inventory {
-            documents: files.keys().cloned().collect(),
-            other_files: BTreeSet::new(),
+        Inventory::build(files.keys().cloned().collect(), BTreeSet::new())
+    }
+
+    /// Construye el inventario y su índice plegado. Los documentos entran **antes** que el resto
+    /// de ficheros y en orden de `RelPath`, así que si dos rutas colisionan al plegar
+    /// capitalización gana siempre la misma (determinismo: el veredicto no depende del orden de
+    /// inserción del llamante).
+    fn build(documents: BTreeSet<RelPath>, other_files: BTreeSet<RelPath>) -> Inventory {
+        let mut folded: BTreeMap<String, RelPath> = BTreeMap::new();
+        for p in documents.iter().chain(other_files.iter()) {
+            folded
+                .entry(p.as_str().to_lowercase())
+                .or_insert_with(|| p.clone());
         }
+        Inventory {
+            documents,
+            other_files,
+            folded,
+        }
+    }
+
+    /// La ruta **real** del inventario que coincide con `path` salvo capitalización, o `None` si
+    /// no hay ninguna. Con una coincidencia exacta devuelve la propia `path`.
+    ///
+    /// Es lo que convierte un destino ausente en `LINK-CASE-MISMATCH` (E17-H03): el veredicto sale
+    /// de este inventario **en memoria**, jamás del disco, así que es idéntico en un volumen
+    /// case-insensitive (APFS) y en uno que no lo es (ext4) — que es justo el problema de
+    /// portabilidad que el diagnóstico denuncia. El plegado es Unicode ([`str::to_lowercase`]),
+    /// no ASCII.
+    pub fn find_ignoring_case(&self, path: &RelPath) -> Option<&RelPath> {
+        self.folded.get(&path.as_str().to_lowercase())
     }
 
     /// ¿Hay un documento Markdown en esa ruta exacta?
@@ -698,30 +816,69 @@ impl Inventory {
 // ---------------------------------------------------------------------------
 
 schema_derive! {
-/// El resultado de `analyze()`. Nombres heredados del prototipo (`inn`, `perFile`, `out`);
-/// camelCase en wire. La forma final con `ResolvedLink`/`DanglingLink` de `§20.7` es E17-H04.
+/// El resultado de `analyze()`: el **grafo universal** de `ARCHITECTURE.md §20.7` (E17-H04).
+/// Wire en camelCase.
+///
+/// Nodos = todos los documentos descubiertos; aristas = los enlaces resueltos entre ellos. Los
+/// seis campos son exactamente los de `§20.7`: **ninguno es un contador** — `hard_fail`/
+/// `warn_count` pasaron a ser [`Analysis::hard_fail`]/[`Analysis::warn_count`], derivados de
+/// `diagnostics`, de modo que no puede existir un recuento desincronizado de la lista de la que
+/// sale (invariante #3).
 ///
 /// **E16-H02** retiró `in_index`/`okf_version` (y `Backlinks::index_refs`): la pertenencia
 /// determinada por índices no existe — `index.md` es un documento como cualquier otro y sus
-/// enlaces son aristas normales. `orphans` pasó a [`Analysis::isolated`] **con definición nueva**.
+/// enlaces son aristas normales. **E17-H04** sustituyó la adyacencia de strings (`out`/`inn`) por
+/// los enlaces resueltos, `dangling: Vec<RelPath>` por [`DanglingLink`] y `per_file` por
+/// `diagnostics`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Analysis {
-    /// **Todos** los documentos del workspace: ningún basename se salta el análisis (`§20.7`).
+    /// **Todos** los documentos del workspace, ordenados por `RelPath`: ningún basename se salta
+    /// el análisis (`§20.7`).
     pub documents: Vec<RelPath>,
-    /// Adyacencia de strings (destinos salientes resueltos por documento).
-    pub out: BTreeMap<RelPath, Vec<RelPath>>,
-    /// Backlinks (la inversa de `out`).
-    pub inn: BTreeMap<RelPath, Vec<RelPath>>,
-    pub dangling: Vec<RelPath>,
+    /// Enlaces salientes ya resueltos, en **orden de aparición** en el cuerpo. Una entrada por
+    /// documento (vector vacío si no enlaza a nadie). Lleva **todos** los enlaces —también los
+    /// externos, los anchors y los que apuntan a ficheros del proyecto—, no solo las aristas del
+    /// grafo: los necesitan `knowledge_get`, `move_document` y la tabla `links` del store v2. El
+    /// filtro de qué es arista lo hace el grafo, no esta lista.
+    pub outgoing: BTreeMap<RelPath, Vec<ResolvedLink>>,
+    /// La inversa de `outgoing`: quién enlaza a cada documento, con **una entrada por enlace**
+    /// (un origen que enlaza dos veces aparece dos veces). Una entrada por documento.
+    pub incoming: BTreeMap<RelPath, Vec<LinkReference>>,
     /// Documentos **aislados** (`§20.7`): sin enlaces internos entrantes **ni** salientes. Es una
     /// propiedad consultable, **no** un diagnóstico (el código `ORPHAN` murió con E16-H02).
     pub isolated: Vec<RelPath>,
-    pub per_file: BTreeMap<RelPath, Vec<Check>>,
-    /// `hard_fail` = nº de ficheros con algún `Err` (conteo, no `.max()`). (`§10` fila 4.)
-    pub hard_fail: usize,
-    pub warn_count: usize,
+    /// Los enlaces cuyo destino es [`LinkTarget::Missing`], con su origen y su href crudo.
+    pub dangling: Vec<DanglingLink>,
+    /// Diagnósticos por documento (antes `per_file`). Una entrada por documento.
+    pub diagnostics: BTreeMap<RelPath, Vec<Check>>,
 }
+}
+
+impl Analysis {
+    /// Nº de **ficheros** con al menos un diagnóstico [`Severity::Err`] (conteo de ficheros, no
+    /// `.max()` ni nº de diagnósticos — `§10` fila 4). Es lo que decide la puerta de CI
+    /// (`WorkspaceConfig::gate_blocked`, `lodestar check`).
+    ///
+    /// Derivado de `diagnostics` en cada llamada: `§20.7` no admite un campo contador, y así el
+    /// recuento no puede divergir de la lista de la que sale (invariante #3).
+    pub fn hard_fail(&self) -> usize {
+        self.diagnostics
+            .values()
+            .filter(|cs| cs.iter().any(|c| c.level == Severity::Err))
+            .count()
+    }
+
+    /// Nº total de **diagnósticos** [`Severity::Warn`] del workspace (suma sobre ficheros, no
+    /// conteo de ficheros — es la semántica histórica de `warn_count`). Derivado de `diagnostics`,
+    /// por la misma razón que [`Analysis::hard_fail`].
+    pub fn warn_count(&self) -> usize {
+        self.diagnostics
+            .values()
+            .flatten()
+            .filter(|c| c.level == Severity::Warn)
+            .count()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -738,13 +895,17 @@ pub struct GraphModel {
 }
 
 schema_derive! {
+/// Un nodo del grafo (`§20.7`, E17-H05).
+///
+/// Perdió `type`/`status` —campos OKF, que dejaron de ser vocabulario del modelo (`§20.3`)— y ganó
+/// el **título derivado** de E16-H03 ([`crate::model::derived_title`]). Conserva `ghost`, que
+/// distingue el nodo de un destino [`LinkTarget::Missing`] del de un documento real.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GraphNode {
     pub id: RelPath,
+    pub title: String,
     pub ghost: bool,
-    pub r#type: Option<String>,
-    pub status: Option<String>,
 }
 }
 
@@ -799,28 +960,22 @@ pub struct DocumentSummary {
 }
 
 schema_derive! {
-/// Un extremo de un enlace + el href crudo tal como aparece en el `.md` (port de `resolveLink`).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct LinkRef {
-    pub path: RelPath,
-    pub href: String,
-}
-}
-
-schema_derive! {
-/// Vecindad de enlaces de un documento.
+/// Vecindad de enlaces de un documento: su porción de [`Analysis::incoming`]/
+/// [`Analysis::outgoing`], sin recalcular nada (invariante #3).
 ///
 /// **E16-H02** retiró `index_refs`: un `index.md` que te enlaza es un entrante más de `inbound`,
-/// no una relación de pertenencia aparte (`REFACTOR_PHASE_2 §Fase 8 (Eliminar)`).
+/// no una relación de pertenencia aparte (`REFACTOR_PHASE_2 §Fase 8 (Eliminar)`). **E17-H05**
+/// pasó `inbound`/`out` a los tipos del grafo universal: el `LinkRef` `{path, href}` (que solo
+/// llevaba el href) desapareció, y `out` dejó de ser una lista de paths resueltos.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Backlinks {
-    /// Quién enlaza aquí (con el href usado).
-    pub inbound: Vec<LinkRef>,
-    /// Destinos salientes resueltos.
-    pub out: Vec<RelPath>,
-    /// Hrefs salientes que no resuelven a ningún fichero.
-    pub dangling: Vec<String>,
+    /// Quién enlaza aquí, con el enlace completo (una entrada por **enlace**).
+    pub inbound: Vec<LinkReference>,
+    /// Los enlaces salientes del documento, resueltos y en orden de aparición. Incluye los
+    /// externos, los anchors y los colgantes: la clasificación va dentro de cada
+    /// [`ResolvedLink::target`], no en listas separadas.
+    pub out: Vec<ResolvedLink>,
 }
 }
 

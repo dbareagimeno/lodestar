@@ -9,7 +9,7 @@ use std::collections::BTreeSet;
 use serde::{Deserialize, Serialize};
 
 use crate::model;
-use crate::types::{FileMap, RelPath};
+use crate::types::{FileMap, Inventory, RelPath};
 
 /// Umbral de celdas (n×m) del LCS antes de caer a un diff grueso. ~2M celdas ≈ pocos MB.
 const MAX_LCS_CELLS: usize = 2_000_000;
@@ -138,6 +138,9 @@ pub fn diff_snap(a: &FileMap, b: &FileMap) -> OkfDiff {
         v.sort_by(|x, y| model::sort_paths_cmp(x.as_str(), y.as_str()));
         v
     };
+    // Inventario de cada lado: un enlace se resuelve contra los documentos de SU workspace.
+    let inv_a = Inventory::from_documents(a);
+    let inv_b = Inventory::from_documents(b);
     let mut files: Vec<FileDiff> = Vec::new();
     let mut generated: Vec<GeneratedChange> = Vec::new();
     let mut stats = DiffStats::default();
@@ -185,10 +188,10 @@ pub fn diff_snap(a: &FileMap, b: &FileMap) -> OkfDiff {
             .unwrap_or_default();
         let body = collapse_diff(line_diff(&a_body, &b_body));
         let la: BTreeSet<RelPath> = av
-            .map(|r| out_link_paths(p, model::split_front(r).body(r)))
+            .map(|r| out_link_paths(p, model::split_front(r).body(r), &inv_a))
             .unwrap_or_default();
         let lb: BTreeSet<RelPath> = bv
-            .map(|r| out_link_paths(p, model::split_front(r).body(r)))
+            .map(|r| out_link_paths(p, model::split_front(r).body(r), &inv_b))
             .unwrap_or_default();
         let links_added = lb.difference(&la).cloned().collect();
         let links_removed = la.difference(&lb).cloned().collect();
@@ -212,10 +215,14 @@ pub fn diff_snap(a: &FileMap, b: &FileMap) -> OkfDiff {
     }
 }
 
-fn out_link_paths(p: &RelPath, body: &str) -> BTreeSet<RelPath> {
-    model::out_links(p.as_str(), body)
-        .into_iter()
-        .filter_map(|t| RelPath::new(&t).ok())
+/// Destinos **internos** (documentos y fantasmas) de los enlaces del cuerpo, ya normalizados
+/// desde `p`. Es la misma extracción/resolución que usa el análisis (`links`, E17), no un segundo
+/// léxico de enlaces: aquí solo sirve para decir qué enlaces aparecieron o desaparecieron.
+fn out_link_paths(p: &RelPath, body: &str, inventory: &Inventory) -> BTreeSet<RelPath> {
+    crate::links::extract_links(body)
+        .iter()
+        .map(|raw| crate::links::resolve(raw, p, inventory))
+        .filter_map(|l| l.target.internal_path().cloned())
         .collect()
 }
 

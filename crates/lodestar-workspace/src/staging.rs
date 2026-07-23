@@ -162,9 +162,9 @@ impl Workspace {
     /// EXACTAMENTE con el de `App::knowledge_check` scope workspace sobre el mismo resultado. Para
     /// no duplicar la composición se reutiliza [`plan::validate_result`] — la MISMA función que
     /// `change_plan` usa para computar `canApply`/`diagnosticsAfter`, que a su vez compone
-    /// `analyze().per_file` + `validate_schema` + `validate_relations` (`plan::all_checks`) y
+    /// `analyze().diagnostics` + `validate_schema` + `validate_relations` (`plan::all_checks`) y
     /// declara `conformant == (errors == 0)`. Antes (E13-H01) el gate medía solo
-    /// `analyze().hard_fail` (los del documento) y NO ejecutaba la validación schema-driven, así que un
+    /// `analyze().hard_fail()` (los del documento) y NO ejecutaba la validación schema-driven, así que un
     /// `SCHEMA-REQFIELD`/`REL-*` (level `err`) pasaba el gate y `change_apply` publicaba un
     /// resultado que `knowledge_check` declararía no conforme: gate transaccional y motor de
     /// conformidad DIVERGÍAN. Reusar `validate_result` cierra esa divergencia por construcción.

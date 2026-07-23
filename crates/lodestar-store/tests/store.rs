@@ -35,18 +35,26 @@ fn assert_matches_core(store: &Store, files: &FileMap) {
     let doc_set = DocumentSet::from_files(files.clone());
     let a = doc_set.analyze();
 
+    // MIGRADO en E17-H04: `hard_fail`/`warn_count` son métodos derivados de `diagnostics`.
     let (hf, wc) = store.validation_counts().unwrap();
-    assert_eq!(hf, a.hard_fail, "hard_fail difiere (gana el core)");
-    assert_eq!(wc, a.warn_count, "warn_count difiere (gana el core)");
+    assert_eq!(hf, a.hard_fail(), "hard_fail difiere (gana el core)");
+    assert_eq!(wc, a.warn_count(), "warn_count difiere (gana el core)");
 
     assert_eq!(
         sorted(store.isolated().unwrap()),
         sorted(a.isolated.clone()),
         "isolated difiere"
     );
+    // MIGRADO en E17-H04: `Analysis::dangling` es una lista de ENLACES rotos (origen + destino +
+    // href), y la síntesis SQL sigue devolviendo los destinos fantasma. Se comparan los destinos,
+    // deduplicados, que es lo que ambas vistas dicen del grafo.
+    let mut destinos_colgantes: Vec<RelPath> =
+        a.dangling.iter().map(|d| d.target.clone()).collect();
+    destinos_colgantes.sort();
+    destinos_colgantes.dedup();
     assert_eq!(
         sorted(store.dangling().unwrap()),
-        sorted(a.dangling.clone()),
+        destinos_colgantes,
         "dangling difiere"
     );
     assert_eq!(
@@ -55,7 +63,15 @@ fn assert_matches_core(store: &Store, files: &FileMap) {
         "el inventario de documentos difiere"
     );
     for p in &a.documents {
-        let mut expected = a.inn.get(p).cloned().unwrap_or_default();
+        // MIGRADO en E17-H04: `inn` pasó a `incoming`, con una entrada por ENLACE; el store
+        // sintetiza vecinos (`SELECT DISTINCT src`), así que se comparan los orígenes distintos.
+        let mut expected: Vec<RelPath> = a
+            .incoming
+            .get(p)
+            .into_iter()
+            .flatten()
+            .map(|r| r.from.clone())
+            .collect();
         expected.sort();
         expected.dedup();
         assert_eq!(
@@ -297,8 +313,8 @@ fn documentstore_sirve_workspace_identico() {
     let from_disk = DocumentSet::from_files(files.clone());
     let from_store = store.document_set();
     assert_eq!(
-        from_store.analyze().hard_fail,
-        from_disk.analyze().hard_fail
+        from_store.analyze().hard_fail(),
+        from_disk.analyze().hard_fail()
     );
     assert_eq!(from_store.files().len(), from_disk.files().len());
     assert_eq!(from_store.analyze(), from_disk.analyze());

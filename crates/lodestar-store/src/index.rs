@@ -1,19 +1,33 @@
 //! Motor de indexación: extracción de filas desde el core y upsert/delete transaccional
 //! (`ARCHITECTURE.md §5`). El store **no reimplementa checks**: los diagnostics locales salen
-//! de `core::analyze`; `LINK-STUB` (no local) se **sintetiza** al leer (ver `synth`).
+//! de `core::analyze`; los de enlace (no locales) se **sintetizan** al leer (ver `synth`).
 
 use rusqlite::{params, Transaction};
 
+use lodestar_core::links;
 use lodestar_core::model;
-use lodestar_core::types::{CheckCode, FileMap, RelPath, Severity};
+use lodestar_core::types::{CheckCode, FileMap, Inventory, RelPath, Severity};
 use lodestar_core::DocumentSet;
 
 use crate::error::StoreError;
 
-/// Diagnostics **locales** de un fichero (todos menos `LINK-STUB`, que se sintetiza al leer).
+/// ¿Es un diagnóstico de **enlace**? Esos no se materializan: dependen del inventario entero
+/// (crear un fichero repara el enlace roto de otro documento), así que materializarlos obligaría a
+/// invalidar en cascada. Se sintetizan al leer (`synth::link_diagnostics`, `§10` fila 10).
+pub(crate) fn es_de_enlace(code: CheckCode) -> bool {
+    matches!(
+        code,
+        CheckCode::LinkTargetMissing
+            | CheckCode::LinkEscapesWorkspace
+            | CheckCode::LinkCaseMismatch
+    )
+}
+
+/// Diagnostics **locales** de un fichero (todos menos los de enlace, que se sintetizan al leer).
 ///
 /// `ORPHAN` desapareció del filtro con E16-H02: el core ya no lo emite (el aislamiento es una
-/// propiedad del grafo, no un diagnóstico), así que no hay nada que filtrar.
+/// propiedad del grafo, no un diagnóstico). E17-H03 sustituyó el filtro de `LINK-STUB` por el de
+/// la familia entera de enlaces.
 ///
 /// Se computan con el core (autoridad) sobre un workspace de un solo fichero: como los checks
 /// locales dependen solo del contenido propio, el resultado es idéntico al del workspace completo.
@@ -23,12 +37,12 @@ fn local_diagnostics(path: &RelPath, raw: &str) -> Vec<lodestar_core::types::Che
     let doc_set = DocumentSet::from_files(fm);
     doc_set
         .analyze()
-        .per_file
+        .diagnostics
         .get(path)
         .cloned()
         .unwrap_or_default()
         .into_iter()
-        .filter(|c| !matches!(c.code, CheckCode::LinkStub))
+        .filter(|c| !es_de_enlace(c.code))
         .collect()
 }
 
@@ -119,10 +133,29 @@ pub(crate) fn upsert_file(
 
     // Enlaces salientes: SIEMPRE del cuerpo, para cualquier documento (E16-H02 — el core hace lo
     // mismo desde `compute_analysis`, sin ramas por basename).
-    for (href, dst) in model::out_links_with_href(p, &parsed.body) {
+    //
+    // Se materializan las **aristas del grafo**: los destinos internos (documentos y fantasmas),
+    // con su path ya normalizado, que es lo que consultan `backlinks`/`isolated`/`dangling`/
+    // `blast_radius`. Un enlace externo, un anchor propio o uno a un fichero del proyecto no
+    // conectan con ningún documento y no son filas de esta tabla (`§20.7`). El inventario es
+    // irrelevante para el path resuelto —`Document` y `Missing` llevan el mismo destino
+    // normalizado—, así que basta con el fichero que se está indexando: la extracción sigue siendo
+    // por-fichero e incremental.
+    let inventario = Inventory::default();
+    let mut vistos: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for raw_link in links::extract_links(&parsed.body) {
+        let resuelto = links::resolve(&raw_link, path, &inventario);
+        let Some(dst) = resuelto.target.internal_path() else {
+            continue;
+        };
+        // Una arista es única por (src, dst, href): enlazar dos veces con el MISMO href no
+        // duplica la fila (la tabla es la adyacencia, no la lista de enlaces del documento).
+        if !vistos.insert(format!("{dst}\u{0}{}", resuelto.href)) {
+            continue;
+        }
         tx.execute(
             "INSERT INTO links (src, dst, href) VALUES (?1,?2,?3)",
-            params![p, dst, href],
+            params![p, dst.as_str(), resuelto.href],
         )?;
     }
 
@@ -134,7 +167,7 @@ pub(crate) fn upsert_file(
         )?;
     }
 
-    // Diagnostics locales (el core es la autoridad; `LINK-STUB` se sintetiza al leer).
+    // Diagnostics locales (el core es la autoridad; los de enlace se sintetizan al leer).
     for check in local_diagnostics(path, raw) {
         let targets: Vec<String> = check
             .targets

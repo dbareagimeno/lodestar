@@ -63,8 +63,7 @@
 #     `OKF-IDX`, `OKF-LOG`. **Sin alias de compatibilidad**, misma razón que `orphans`→`isolated`.
 #   - SE RENOMBRAN: `OKF-FM02` → `FM-UNCLOSED`, `OKF-FM03` → `FM-YAML-INVALID`,
 #     `OKF-CONFLICT` → `DOC-CONFLICT-MARKER`.
-#   - SIGUEN: `LINK-STUB`/`LINK-REL` (hasta E17, que los sustituye por `LINK-TARGET-MISSING`/
-#     `LINK-ESCAPES-WORKSPACE`/`LINK-CASE-MISMATCH`), `DOC-NOT-UTF8`/`DOC-TOO-LARGE`/
+#   - SIGUEN (hasta E17, ver más abajo): `LINK-STUB`/`LINK-REL`, `DOC-NOT-UTF8`/`DOC-TOO-LARGE`/
 #     `PATH-NOT-UTF8`/`SYMLINK-UNSUPPORTED`/`LINK-CASE-MISMATCH` (descubrimiento, E15-H07) y
 #     `SCHEMA-*`/`REL-*`/`EXTREF-MISSING`, que `conform` ya NO produce (solo `core::schema` y
 #     `external_refs`) y que mueren del todo en E20.
@@ -98,6 +97,51 @@
 # `reserialized` llegan en E21. Efecto observable hoy: `change_apply` sobre un documento cuyo
 # frontmatter no es interpretable falla con `INVALID_SCHEMA`
 # (`CoreError::UnreadableFrontmatter`) en vez de reconstruir el bloque encima y perder metadata.
+#
+# E17-H03/H04/H05 (`ARCHITECTURE.md §20.6`/`§20.7`/`§20.9`/`§20.10`): **enlaces y grafo
+# universal**. La superficie de 10 tools NO cambia; cambian tres formas de wire y el catálogo de
+# `CheckCode`. **Sin alias** — v0.3 es incompatible con v0.2, misma razón que `orphans`→`isolated`.
+#
+#   - `CheckCode`: ENTRAN `LINK-TARGET-MISSING` (destino contenido en el workspace que no existe —
+#     `error` si el destino sería un documento `.md`, `warning` si sería otro fichero del proyecto,
+#     `§20.9`) y `LINK-ESCAPES-WORKSPACE` (`error`: el destino sale de la raíz y el motor no puede
+#     seguirlo ni reescribirlo). `LINK-CASE-MISMATCH` (`warning`) gana un SEGUNDO productor: además
+#     de las colisiones de capitalización del descubrimiento (`§20.5`), un enlace a una ruta que el
+#     inventario tiene *salvo capitalización*. Los tres llevan `range` (líneas del destino dentro
+#     del fichero), `targets` = [documento ORIGEN, el que hay que editar] y `related` = [destino
+#     perdido | ruta real del inventario].
+#     SALEN de la producción `LINK-STUB` y `LINK-REL`: ningún productor los emite (`conform` dejó
+#     de mirar enlaces). Un cliente no volverá a verlos.
+#     > Nota de implementación: las dos variantes siguen DECLARADAS en `core::types::CheckCode`
+#     > porque el test de la fase roja (`tests/diagnosticos.rs::link_missing_con_rango`) las nombra
+#     > en un `matches!` para asegurar que no reaparecen, y ese fichero no se puede tocar en la
+#     > fase verde. Borrarlas del enum es un cambio de una línea en cuanto esa guarda se retire.
+#   - `Analysis` (viaja en `lodestar check --json`; los agregados de `workspace_status` salen de
+#     ella) pasa a la forma de `§20.7`: `documents` · `outgoing: {RelPath: [ResolvedLink]}` ·
+#     `incoming: {RelPath: [LinkReference]}` · `isolated` · `dangling: [DanglingLink]` ·
+#     `diagnostics` (antes `perFile`). DESAPARECEN del wire `out`/`inn`/`perFile`/`hardFail`/
+#     `warnCount`: los dos contadores pasan a ser MÉTODOS derivados de `diagnostics` (`§20.7` fija
+#     seis campos y ninguno es un contador), con la misma semántica — `hardFail` = nº de FICHEROS
+#     con algún `err`, `warnCount` = nº de diagnósticos `warn`. `workspace_status.counts` no cambia
+#     de forma; `counts.links` cuenta ahora solo los enlaces INTERNOS (aristas del grafo).
+#   - `GraphNode` (`graph_query.nodes[]`, `neighborhood`): `{ id, title, ghost }` — pierde
+#     `type`/`status` (campos OKF, `§20.3`) y gana el TÍTULO DERIVADO de E16-H03. `ghost` sigue
+#     distinguiendo el destino `Missing` del documento real.
+#   - `knowledge_get.outgoingLinks` deja de ser `[RelPath]` y pasa a `[ResolvedLink]`:
+#     `{ href, text, span: {start,end}, kind, target: {kind,value?}, fragment }` — el href CRUDO
+#     byte a byte, el `span` de bytes del destino dentro del CUERPO y el destino ya clasificado
+#     (`LinkTarget`, `§20.6`: document/workspaceFile/externalUri/selfAnchor/missing/
+#     escapesWorkspace). `kind` ∈ inline/reference/collapsed/shortcut/autolink.
+#   - `knowledge_get.backlinks` (`Backlinks`): `inbound` pasa de `[{path, href}]` a
+#     `[LinkReference]` = `{ from, link: ResolvedLink }` — UNA entrada por ENLACE (un origen que
+#     enlaza dos veces aparece dos veces); `out` pasa de `[RelPath]` a `[ResolvedLink]`; DESAPARECE
+#     `dangling: [string]` (la clasificación vive dentro de cada `link.target`).
+#   - `impact_analyze.blockingReferences`: **siempre vacío**. Los bloqueos derivados de relaciones
+#     tipadas obligatorias desaparecieron con el modelo que los definía (`§20.10`: una relación es
+#     un enlace Markdown y nada más), y con ellos `summary.blockingReferences` (siempre 0) y el
+#     `risk: "high"` que provocaban. El CAMPO se conserva en el wire hasta que E20 retire
+#     `core::schema` entero. `directlyAffected`/`affectedDocuments` se calculan sobre el grafo
+#     universal, así que ahora incluyen enlaces de referencia (`[t][id]`) y cualquier profundidad.
 #
 # E10-H13 (decisión D6b, `docs/REFACTOR.md §13`, `DECISIONES.md §3`): las 10 tools activas declaran
 # `outputSchema` (JSON Schema derivado con `schemars::schema_for!` desde el tipo de respuesta real

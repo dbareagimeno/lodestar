@@ -13,7 +13,10 @@ use std::ops::Range;
 
 use pulldown_cmark::{Event, LinkType, Options, Parser, RefDefs, Tag, TagEnd};
 
-use crate::types::{Check, Inventory, LinkKind, LinkTarget, RawLink, RelPath, ResolvedLink};
+use crate::types::{
+    Check, CheckCode, Inventory, LinkKind, LinkTarget, Range as CheckRange, RawLink, RelPath,
+    ResolvedLink, Severity,
+};
 
 /// Extensiones de Markdown reconocidas al extraer enlaces.
 ///
@@ -357,6 +360,8 @@ fn clasificar(ruta: &str, from: &RelPath, inventory: &Inventory) -> LinkTarget {
         }
     };
 
+    // ¿El href **nombra** algún segmento propio, o es pura navegación de directorios?
+    let mut nombra_algo = false;
     for seg in segmentos.split('/') {
         match seg {
             "" | "." => continue,
@@ -367,8 +372,21 @@ fn clasificar(ruta: &str, from: &RelPath, inventory: &Inventory) -> LinkTarget {
                     return LinkTarget::EscapesWorkspace;
                 }
             }
-            s => partes.push(s),
+            s => {
+                nombra_algo = true;
+                partes.push(s);
+            }
         }
+    }
+
+    // Navegación pura (`./`, `..`, `../`, `../..`): el href no nombra nada, así que no designa
+    // ningún fichero — apunta al directorio del propio documento o a uno por encima. Un directorio
+    // no es un documento y `§20.6` prohíbe convertirlo en su `index.md`, y `LinkTarget` no tiene
+    // variante para directorios: cae en la única variante sin path, igual que el destino que
+    // normaliza a la raíz. Un href que SÍ nombra algo (`guias/`) sigue siendo un destino con path
+    // —`Missing("guias")`— aunque también sea un directorio.
+    if !nombra_algo {
+        return LinkTarget::EscapesWorkspace;
     }
 
     // El percent-decoding se aplica DESPUÉS de interpretar `.`/`..` (RFC 3986): así un `%2e%2e`
@@ -415,12 +433,10 @@ fn decodificar_segmento(seg: &str) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// E17-H03 — Diagnósticos de enlaces (STUB de la fase roja)
+// E17-H03 — Diagnósticos de enlaces (`ARCHITECTURE.md §20.9`)
 // ---------------------------------------------------------------------------
 
 /// Diagnósticos de enlaces de un documento (`ARCHITECTURE.md §20.9`, E17-H03).
-///
-/// **STUB de la fase roja**: firma + `todo!()`. La lógica es del implementador.
 ///
 /// `raw` es el documento **entero** (con su frontmatter) porque el `range` de un [`Check`] se
 /// expresa en líneas del **fichero**, mientras que el `span` de un [`ResolvedLink`] es un offset de
@@ -428,13 +444,118 @@ fn decodificar_segmento(seg: &str) -> String {
 /// [`crate::model::split_front`]. `links` son los enlaces ya resueltos del documento (los que
 /// produce [`resolve`]) — se pasan en vez de re-extraerlos para que el análisis los resuelva **una
 /// sola vez** (invariante #3).
+///
+/// El diagnóstico es **función pura del [`LinkTarget`]**: nunca vuelve a mirar el href para
+/// reinterpretar la clasificación de [`resolve`] (eso sería un segundo algoritmo divergente). De
+/// ahí salen tres reglas y una consecuencia conocida:
+///
+/// - [`LinkTarget::Missing`] produce **un solo** diagnóstico: `LINK-CASE-MISMATCH` (`Warn`) si el
+///   inventario tiene esa ruta salvo capitalización, y si no `LINK-TARGET-MISSING`.
+/// - La **severidad** de `LINK-TARGET-MISSING` la decide la familia del destino, no el disco: un
+///   destino ausente terminado en `.md` sería un documento (`danglingDocumentLinks: error`);
+///   cualquier otro, un fichero del proyecto (`missingWorkspaceFiles: warning`).
+/// - [`LinkTarget::EscapesWorkspace`] es `Err` y va **sin** `related`: el destino no es nombrable
+///   como `RelPath` — Lodestar no puede seguirlo, indexarlo ni reescribirlo en un `move_document`.
+/// - **Coste conocido y aceptado** (E17-H03): un enlace de **navegación pura** (`[x](../)`,
+///   `[x](./)` — hrefs que no nombran ningún segmento) designa un directorio, que [`resolve`]
+///   clasifica `EscapesWorkspace` por no tener variante propia, así que aquí sale un `Err` sobre un
+///   enlace que un render de GitHub sí resuelve. El arreglo correcto es **ampliar [`LinkTarget`]**
+///   (`§20.6`) con una variante para directorio/raíz, no parchear el diagnóstico: si esta función
+///   volviera a mirar el href para distinguir «escapa de verdad» de «apunta a un directorio»
+///   estaría reimplementando la clasificación con un segundo algoritmo divergente.
+///
+/// `targets` es siempre el **documento origen** (el fichero que hay que editar, y el que indexa
+/// `Analysis::diagnostics`); el path relacionado —el destino perdido o la ruta real del
+/// inventario— viaja en `related`.
 pub fn diagnose(
-    _path: &RelPath,
-    _raw: &str,
-    _links: &[ResolvedLink],
-    _inventory: &Inventory,
+    path: &RelPath,
+    raw: &str,
+    links: &[ResolvedLink],
+    inventory: &Inventory,
 ) -> Vec<Check> {
-    todo!("E17-H03: LINK-TARGET-MISSING / LINK-ESCAPES-WORKSPACE / LINK-CASE-MISMATCH")
+    let body_start = match crate::model::split_front(raw) {
+        crate::model::SplitFront::Bloque { body_start, .. } => body_start,
+        _ => 0,
+    };
+    let mut out: Vec<Check> = Vec::new();
+
+    for link in links {
+        let check = match &link.target {
+            LinkTarget::Missing(destino) => match inventory.find_ignoring_case(destino) {
+                Some(real) => Check::new(
+                    Severity::Warn,
+                    CheckCode::LinkCaseMismatch,
+                    format!(
+                        "El enlace apunta a «{destino}», pero la ruta real es «{real}»: la \
+                         capitalización no es portable entre sistemas de ficheros."
+                    ),
+                    vec![path.clone()],
+                )
+                .with_related(vec![real.clone()]),
+                None => {
+                    let es_documento = destino.as_str().to_lowercase().ends_with(".md");
+                    let (nivel, msg) = if es_documento {
+                        (
+                            Severity::Err,
+                            format!("El enlace apunta a un documento que no existe: «{destino}»."),
+                        )
+                    } else {
+                        (
+                            Severity::Warn,
+                            format!(
+                                "El enlace apunta a un fichero del proyecto que no existe: \
+                                 «{destino}»."
+                            ),
+                        )
+                    };
+                    Check::new(nivel, CheckCode::LinkTargetMissing, msg, vec![path.clone()])
+                        .with_related(vec![destino.clone()])
+                }
+            },
+            LinkTarget::EscapesWorkspace => Check::new(
+                Severity::Err,
+                CheckCode::LinkEscapesWorkspace,
+                format!(
+                    "El destino del enlace («{}») sale de la raíz del workspace: Lodestar no puede \
+                     seguirlo ni reescribirlo.",
+                    link.href
+                ),
+                vec![path.clone()],
+            ),
+            // Un documento, un fichero del proyecto que existe, una URI externa o un anchor propio
+            // no tienen nada que diagnosticar.
+            LinkTarget::Document(_)
+            | LinkTarget::WorkspaceFile(_)
+            | LinkTarget::ExternalUri(_)
+            | LinkTarget::SelfAnchor(_) => continue,
+        };
+        out.push(match rango_de_lineas(raw, body_start, &link.span) {
+            Some(range) => check.with_range(range),
+            None => check,
+        });
+    }
+
+    out
+}
+
+/// Traduce el `span` de bytes de un destino **dentro del cuerpo** al rango de líneas (1-based,
+/// ambas inclusive) que ocupa **dentro del fichero**: el sistema de coordenadas de [`Check`].
+///
+/// `None` si el span no cae dentro del fichero (no debería ocurrir con enlaces del propio cuerpo,
+/// pero un rango imposible no puede hacer pánico).
+fn rango_de_lineas(raw: &str, body_start: usize, span: &Range<usize>) -> Option<CheckRange> {
+    let inicio = body_start.checked_add(span.start)?;
+    let fin = body_start.checked_add(span.end)?;
+    // Indexar por un offset que no cae en frontera de carácter haría pánico: un rango imposible
+    // se descarta (el diagnóstico se emite sin `range`) en vez de tumbar el análisis.
+    if inicio > raw.len() || fin > raw.len() || !raw.is_char_boundary(inicio) {
+        return None;
+    }
+    let linea_de = |offset: usize| (raw[..offset].matches('\n').count() + 1) as u32;
+    Some(CheckRange {
+        start_line: linea_de(inicio),
+        end_line: linea_de(fin),
+    })
 }
 
 /// Percent-decoding de un **segmento** de path. Una secuencia `%XX` mal formada, o un resultado

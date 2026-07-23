@@ -272,7 +272,7 @@ impl WorkspaceConfig {
     /// Es lo que consume `lodestar check` sobre el veredicto del motor: la config solo puede
     /// **endurecer** la puerta (que los avisos también bloqueen), nunca relajarla.
     pub fn gate_blocked(&self, a: &Analysis) -> bool {
-        a.hard_fail > 0 || (self.gate.block_warnings && a.warn_count > 0)
+        a.hard_fail() > 0 || (self.gate.block_warnings && a.warn_count() > 0)
     }
 }
 

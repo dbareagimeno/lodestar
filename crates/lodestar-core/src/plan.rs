@@ -10,7 +10,7 @@
 //!
 //! Función pura [`validate_result`]: dado el `DocumentSet` hipotético resultante de un `ChangeSet` y
 //! el `Schema`, deriva un [`ValidationReport`] reusando el mismo universo de diagnósticos que
-//! `all_checks` (`analyze().per_file` + `validate_schema` + `validate_relations`). Junto con
+//! `all_checks` (`analyze().diagnostics` + `validate_schema` + `validate_relations`). Junto con
 //! [`PlanPolicy`] y [`can_apply`] (E12-H04) decide si el plan es aplicable.
 //!
 //! ## Heurística (documentada, no normativa — H02 solo fija el orden de magnitud)
@@ -49,10 +49,11 @@ use once_cell::sync::Lazy;
 use regex::{Captures, Regex};
 use serde::{Deserialize, Serialize};
 
+use crate::links;
 use crate::types::{
-    Check, CheckCode, EditSectionMode, FileMap, FrontmatterPatch, InboundLinksPolicy,
-    NormalizedOperation, ParsedFrontmatter, RelPath, RiskAssessment, RiskLevel, SemanticDiff,
-    Severity, ValidationReport, ValidationSummary,
+    Check, CheckCode, EditSectionMode, FileMap, FrontmatterPatch, InboundLinksPolicy, Inventory,
+    LinkKind, NormalizedOperation, ParsedFrontmatter, RawLink, RelPath, RiskAssessment, RiskLevel,
+    SemanticDiff, Severity, ValidationReport, ValidationSummary,
 };
 use crate::DocumentSet;
 
@@ -151,7 +152,7 @@ fn accion(op: &NormalizedOperation) -> &'static str {
 /// cercana a "cambió una relación" sin reimplementar la resolución de relaciones del `schema`.
 ///
 /// `diagnostics_introduced`/`diagnostics_resolved` comparan el conjunto COMPLETO de diagnósticos
-/// de cada workspace bajo `schema`: los diagnósticos de `DocumentSet::analyze().per_file` (`§20.9`) más
+/// de cada workspace bajo `schema`: los diagnósticos de `DocumentSet::analyze().diagnostics` (`§20.9`) más
 /// `validate_schema`/`validate_relations` (E10-H07/E11-H03) — el mismo universo que ve
 /// `lodestar check`. La identidad de un check para este diff es la tupla `(targets, code, msg)`:
 /// dos checks son "el mismo problema" si coinciden en los paths afectados, el código y el
@@ -226,7 +227,7 @@ pub fn semantic_diff(before: &DocumentSet, after: &DocumentSet, schema: &Schema)
 fn all_checks(doc_set: &DocumentSet, schema: &Schema) -> Vec<Check> {
     let mut out: Vec<Check> = doc_set
         .analyze()
-        .per_file
+        .diagnostics
         .values()
         .flatten()
         .cloned()
@@ -531,13 +532,18 @@ pub fn normalize_replace_body(
 //
 // A diferencia de las de contenido, estas producen VARIAS `NormalizedOperation` dentro del mismo
 // change set: el rename/borrado estructural MÁS la reescritura/eliminación de los enlaces entrantes.
-// Toda la verdad la da el core (`DocumentSet::backlinks`, `model::resolve_link`); nada de I/O.
+// Toda la verdad la da el core (`DocumentSet::backlinks`, `links::resolve`); nada de I/O.
 // ---------------------------------------------------------------------------
 
-/// Mismo léxico de enlace markdown que [`model::LINK_RE`] (un solo vocabulario de enlaces en el
-/// core), pero capturando además el TEXTO del enlace (grupo 1) junto al href (grupo 2). El patrón
-/// del interior del paréntesis es idéntico al de `LINK_RE`; el grupo de texto extra permite
-/// reescribir el href a un nuevo destino o "desenlazar" a texto plano.
+/// Léxico **textual** del enlace inline `[texto](href "title")`, con el TEXTO en el grupo 1 y el
+/// href en el grupo 2: es lo que permite reescribir el destino o "desenlazar" a texto plano.
+///
+/// No decide **a dónde apunta** un enlace —eso lo hace [`links::resolve`], la única verdad de
+/// resolución del core (E17-H02)—, solo dónde está escrito en el cuerpo para poder sustituirlo.
+/// Es una limitación conocida y acotada: la reescritura solo alcanza a los enlaces inline, no a
+/// las definiciones de un enlace de referencia. La sustitución por el `span` de bytes que ya trae
+/// cada [`crate::types::ResolvedLink`] —que sí las cubriría— es de `move_document` (`§20.11`,
+/// E21); E17 solo migra la **decisión** a la resolución nueva.
 static LINK_REWRITE_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r#"\[([^\]]*)\]\(([^)\s]+)(?:\s+"[^"]*")?\)"#).unwrap());
 
@@ -550,7 +556,8 @@ enum LinkAction<'a> {
 }
 
 /// Divide un href crudo en `(base, sufijo)`, donde el sufijo empieza en el primer `#` (fragmento) o
-/// `?` (query). `model::resolve_link` ignora ese sufijo al resolver; al reescribir lo conservamos.
+/// `?` (query). [`links::resolve`] ignora ese sufijo al resolver el path; al reescribir lo
+/// conservamos.
 fn split_href_suffix(href: &str) -> (&str, &str) {
     match href.find(['#', '?']) {
         Some(i) => (&href[..i], &href[i..]),
@@ -561,7 +568,7 @@ fn split_href_suffix(href: &str) -> (&str, &str) {
 /// Construye un href relativo desde el directorio de `source_path` hasta `target` (ambos paths de
 /// workspace normalizados), reusando el álgebra de directorios del core (`model::dir_of`). Es puro
 /// cálculo de rutas: sin `..` cuando comparten prefijo, con `./` cuando el destino queda en el mismo
-/// directorio (para que `resolve_link` lo trate inequívocamente como relativo, como el prototipo).
+/// directorio (para que se lea inequívocamente como relativo, como hacía el prototipo).
 fn relative_href(source_path: &str, target: &str) -> String {
     let from_dir = model::dir_of(source_path);
     let from_parts: Vec<&str> = from_dir.split('/').filter(|s| !s.is_empty()).collect();
@@ -602,27 +609,42 @@ fn retarget_href(old_href: &str, source_path: &str, to: &RelPath) -> String {
 }
 
 /// Reescribe el CUERPO de un documento entrante aplicando `action` SOLO a los enlaces markdown cuyo
-/// href resuelve (vía `model::resolve_link`, la misma verdad del core) al documento `target`. El
-/// resto de enlaces y de texto queda intacto — nunca se toca un enlace que apunte a otro sitio.
+/// href resuelve al documento `target`. El resto de enlaces y de texto queda intacto — nunca se
+/// toca un enlace que apunte a otro sitio.
+///
+/// La **decisión** («¿este href apunta al documento afectado?») la toma [`links::resolve`] contra
+/// el `inventory` del workspace, la única verdad de resolución del core (invariante #3): así un
+/// href externo, un anchor o un destino que escapa del workspace nunca se confunden con el target,
+/// y un enlace al documento afectado se reconoce escrito como se escriba (`./x.md`, `../a/x.md`,
+/// `/x.md`, con `%20`, con fragmento…).
 fn rewrite_body_links(
     body: &str,
-    source_path: &str,
+    source_path: &RelPath,
     target: &RelPath,
     action: &LinkAction,
+    inventory: &Inventory,
 ) -> String {
     LINK_REWRITE_RE
         .replace_all(body, |caps: &Captures| {
             let full = caps.get(0).map_or("", |m| m.as_str());
             let text = &caps[1];
             let href = &caps[2];
-            let resuelve =
-                model::resolve_link(href, source_path).and_then(|t| RelPath::new(&t).ok());
-            if resuelve.as_ref() != Some(target) {
+            let crudo = RawLink {
+                href: href.to_string(),
+                text: text.to_string(),
+                span: 0..0,
+                kind: LinkKind::Inline,
+            };
+            let resuelto = links::resolve(&crudo, source_path, inventory);
+            if resuelto.target.internal_path() != Some(target) {
                 return full.to_string();
             }
             match action {
                 LinkAction::Retarget(to) => {
-                    format!("[{text}]({})", retarget_href(href, source_path, to))
+                    format!(
+                        "[{text}]({})",
+                        retarget_href(href, source_path.as_str(), to)
+                    )
                 }
                 LinkAction::Remove => text.to_string(),
             }
@@ -655,11 +677,23 @@ pub fn normalize_move(
     }];
 
     if rewrite_inbound_links {
+        // Un origen que enlaza VARIAS veces al documento movido aparece una vez por enlace en
+        // `inbound` (E17-H04): se reescribe su cuerpo UNA sola vez —`rewrite_body_links` ya
+        // sustituye todos sus enlaces al target— y no se emiten dos `ReplaceBody` del mismo path.
+        let mut vistos: BTreeSet<RelPath> = BTreeSet::new();
         for link in doc_set.backlinks(from).inbound {
-            let source = link.path;
+            let source = link.from;
+            if !vistos.insert(source.clone()) {
+                continue;
+            }
             let body = document_body(doc_set, &source)?;
-            let new_body =
-                rewrite_body_links(&body, source.as_str(), from, &LinkAction::Retarget(to));
+            let new_body = rewrite_body_links(
+                &body,
+                &source,
+                from,
+                &LinkAction::Retarget(to),
+                doc_set.inventory(),
+            );
             ops.push(NormalizedOperation::ReplaceBody {
                 path: source,
                 body: new_body,
@@ -702,11 +736,20 @@ pub fn normalize_delete(
         }
         InboundLinksPolicy::RemoveLinks => {
             let mut ops = vec![delete];
+            let mut vistos: BTreeSet<RelPath> = BTreeSet::new();
             for link in inbound {
-                let source = link.path;
+                let source = link.from;
+                if !vistos.insert(source.clone()) {
+                    continue;
+                }
                 let body = document_body(doc_set, &source)?;
-                let new_body =
-                    rewrite_body_links(&body, source.as_str(), path, &LinkAction::Remove);
+                let new_body = rewrite_body_links(
+                    &body,
+                    &source,
+                    path,
+                    &LinkAction::Remove,
+                    doc_set.inventory(),
+                );
                 ops.push(NormalizedOperation::ReplaceBody {
                     path: source,
                     body: new_body,
@@ -893,7 +936,7 @@ pub fn normalize_transition_status(
 /// diagnósticos recomputados del workspace — E12-H07.
 ///
 /// Recompone el MISMO universo de diagnósticos que `lodestar check` (`all_checks`:
-/// `analyze().per_file` + `validate_schema` + `validate_relations`) y comprueba que exista un
+/// `analyze().diagnostics` + `validate_schema` + `validate_relations`) y comprueba que exista un
 /// [`crate::types::Fix`] con `fix_id == fix_id` y `safe == true`; si no, falla con
 /// [`CoreError::FixNotFound`]. Localizado el fix, deriva su arreglo a partir de
 /// `schema::rel_target_repairs` (la contraparte estructurada de los fixes de relación rota,

@@ -1,13 +1,15 @@
 //! Síntesis on-demand (`ARCHITECTURE.md §5`, `§10` fila 10): lo que invalidaría en cascada
-//! NO se materializa — se deriva al leer vía SQL/CTE. `LINK-STUB` y el aislamiento se sintetizan
-//! aquí (su definición canónica vive en el core; la paridad lo verifica).
+//! NO se materializa — se deriva al leer vía SQL/CTE. El aislamiento, los colgantes y los
+//! **diagnósticos de enlace** se sintetizan aquí (su definición canónica vive en el core; la
+//! paridad lo verifica).
 //!
 //! Invariante: estas consultas devuelven lo mismo que el `core` equivalente. Si difieren,
 //! es **bug de la cache** (gana el core) — lo captura el test de paridad.
 
 use rusqlite::Connection;
 
-use lodestar_core::types::RelPath;
+use lodestar_core::types::{Check, FileMap, RelPath};
+use lodestar_core::DocumentSet;
 
 use crate::error::StoreError;
 
@@ -25,24 +27,81 @@ fn rows_to_relpaths(
     Ok(out)
 }
 
-/// `hard_fail` = nº de ficheros con algún check `Err` (conteo, no `.max()`; `§10` fila 4).
-pub(crate) fn hard_fail(conn: &Connection) -> Result<usize, StoreError> {
-    let n: i64 = conn.query_row(
-        "SELECT COUNT(DISTINCT path) FROM diagnostics WHERE level = 'err'",
-        [],
-        |r| r.get(0),
-    )?;
-    Ok(n as usize)
+/// Diagnósticos de **enlace** del workspace, por documento (E17-H03).
+///
+/// No se materializan porque dependen del inventario entero —crear un fichero repara el enlace
+/// roto de otro documento, y renombrarlo puede introducir un `LINK-CASE-MISMATCH` en un tercero—,
+/// así que guardarlos obligaría a invalidar en cascada (`§10` fila 10, la razón por la que
+/// `LINK-STUB` tampoco se materializaba).
+///
+/// El veredicto lo da **el core**, no SQL: la cache sirve las filas (`files.path`/`files.raw`) y
+/// el core las clasifica con [`DocumentSet::analyze`]. Es el mismo patrón que
+/// [`search_substring`] — reproducir en SQL la resolución de `§20.6` (contención, percent-decoding,
+/// plegado Unicode de mayúsculas) sería un segundo algoritmo divergente, justo lo que prohíbe el
+/// invariante #3.
+fn link_diagnostics(conn: &Connection) -> Result<Vec<(RelPath, Vec<Check>)>, StoreError> {
+    let mut stmt = conn.prepare("SELECT path, raw FROM files ORDER BY path")?;
+    let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+    let mut files = FileMap::new();
+    for row in rows {
+        let (path, raw) = row?;
+        if let Ok(rp) = RelPath::new(&path) {
+            files.insert(rp, raw);
+        }
+    }
+    let doc_set = DocumentSet::from_files(files);
+    Ok(doc_set
+        .analyze()
+        .diagnostics
+        .iter()
+        .map(|(p, cs)| {
+            (
+                p.clone(),
+                cs.iter()
+                    .filter(|c| crate::index::es_de_enlace(c.code))
+                    .cloned()
+                    .collect(),
+            )
+        })
+        .collect())
 }
 
-/// `warn_count` = nº total de checks `Warn` (suma sobre ficheros).
+/// `hard_fail` = nº de ficheros con algún check `Err` (conteo, no `.max()`; `§10` fila 4).
+///
+/// Une los diagnósticos materializados (locales) con los de enlace sintetizados: un documento
+/// cuyo único error es un enlace roto cuenta igual que uno con el frontmatter sin cerrar.
+pub(crate) fn hard_fail(conn: &Connection) -> Result<usize, StoreError> {
+    let mut con_error: std::collections::BTreeSet<RelPath> = rows_to_relpaths(
+        conn,
+        "SELECT DISTINCT path FROM diagnostics WHERE level = 'err' ORDER BY path",
+        &[],
+    )?
+    .into_iter()
+    .collect();
+    for (path, checks) in link_diagnostics(conn)? {
+        if checks
+            .iter()
+            .any(|c| c.level == lodestar_core::types::Severity::Err)
+        {
+            con_error.insert(path);
+        }
+    }
+    Ok(con_error.len())
+}
+
+/// `warn_count` = nº total de checks `Warn` (suma sobre ficheros), materializados + sintetizados.
 pub(crate) fn warn_count(conn: &Connection) -> Result<usize, StoreError> {
     let n: i64 = conn.query_row(
         "SELECT COUNT(*) FROM diagnostics WHERE level = 'warn'",
         [],
         |r| r.get(0),
     )?;
-    Ok(n as usize)
+    let sintetizados: usize = link_diagnostics(conn)?
+        .iter()
+        .flat_map(|(_, cs)| cs.iter())
+        .filter(|c| c.level == lodestar_core::types::Severity::Warn)
+        .count();
+    Ok(n as usize + sintetizados)
 }
 
 /// Todos los documentos del workspace, en orden estable (E16-H02: ningún basename queda fuera).

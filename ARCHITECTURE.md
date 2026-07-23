@@ -1081,6 +1081,16 @@ pub enum LinkTarget {
 >    `.md` de un repo GitHub/GitLab, y el invariante *"ningún path público es absoluto"* de `§20.2`
 >    habla de las **rutas que Lodestar expone**, no de los hrefs que escribe el usuario en su
 >    contenido. La alternativa (`EscapesWorkspace`) rechazaría un patrón real y frecuente.
+> 2b. **Navegación pura** (E17-H03, fase verde): un href que **no nombra ningún segmento propio**
+>    —`.`, `./`, `..`, `../`, `../..`— designa un *directorio* (el del propio documento o uno por
+>    encima), no un fichero. Como `§20.6` prohíbe convertir un directorio en su `index.md` y
+>    `LinkTarget` no tiene variante para directorios, se clasifica **`EscapesWorkspace`**, la única
+>    variante sin path — el mismo caso degenerado que el destino que normaliza a la raíz, con el
+>    mismo *coste conocido* (un `Err` sobre un enlace que GitHub sí renderiza). Un href que **sí**
+>    nombra algo sigue teniendo path aunque también sea un directorio: `[x](guias/)` es
+>    `Missing("guias")`, nunca `guias/index.md`. **El arreglo correcto es ampliar `LinkTarget`** con
+>    una variante propia para directorio/raíz — candidato a E20/E21.
+>
 > 2. **Un `.md` que existe en disco pero está EXCLUIDO del descubrimiento** (p. ej. `vendor/dep.md`
 >    bajo un `.gitignore`) es **`WorkspaceFile`, no `Missing`**. Por eso la variante se define por
 >    «no es un documento del inventario» y no por «no es `.md`»: decir `Missing` de un fichero que
@@ -1103,12 +1113,34 @@ pub struct Analysis {
     pub incoming: BTreeMap<RelPath, Vec<LinkReference>>,
     pub isolated: Vec<RelPath>,          // sin enlaces internos entrantes NI salientes
     pub dangling: Vec<DanglingLink>,
-    pub diagnostics: BTreeMap<RelPath, Vec<Diagnostic>>,
+    pub diagnostics: BTreeMap<RelPath, Vec<Check>>,   // `Check` es el tipo de `§4.1` (invariante #4)
+}
+
+impl Analysis {                    // E17-H04: derivados, NO campos
+    pub fn hard_fail(&self) -> usize;   // nº de FICHEROS con algún `Err` (`§10` fila 4)
+    pub fn warn_count(&self) -> usize;  // nº de DIAGNÓSTICOS `Warn`
 }
 ```
 
 Un **documento aislado no es inválido**: es una propiedad consultable (`graph.isolated = true`) que
 no genera warning por defecto.
+
+Precisiones de E17-H04 (fase verde):
+
+- **`hard_fail`/`warn_count` son métodos derivados de `diagnostics`, no campos**: la lista de seis
+  campos de arriba es literal, y la puerta de CI (`WorkspaceConfig::gate_blocked`,
+  `workspace_status`, `knowledge_check`) los sigue consumiendo con la misma semántica. Así **no
+  puede existir** un contador desincronizado de la lista de la que sale (invariante #3).
+- **`outgoing` lleva TODOS los enlaces**, no solo las aristas: los externos, los anchors propios y
+  los que apuntan a ficheros del proyecto viajan también, porque los necesitan
+  `knowledge_get.outgoingLinks`, `move_document` y la tabla `links` del store v2 (`§20.12`). El
+  **grafo filtra**: nodo solo lo que es documento, arista solo `Document`/`Missing`
+  (`LinkTarget::is_internal`, la única definición de «enlace interno»).
+- **`incoming` es literalmente la inversa**: una entrada por **enlace** (un origen que enlaza dos
+  veces aparece dos veces) y el `ResolvedLink` que lleva es *el mismo* que su origen tiene en
+  `outgoing`. La deduplicación por vecino vive en el grafo, no en la lista.
+- **Aislado** = sin enlaces internos entrantes ni salientes. `Missing` **cuenta** como enlace
+  interno: enlazar a un fantasma es participar en el grafo.
 
 ### 20.8 Lenguaje de consulta (supersede §4.3)
 

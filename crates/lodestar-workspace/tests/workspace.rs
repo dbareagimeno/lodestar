@@ -40,7 +40,7 @@ fn crea_document_y_lo_escribe_por_el_unico_escritor() {
     assert!(
         !snap
             .analysis
-            .per_file
+            .diagnostics
             .get(&p)
             .map(|checks| checks.iter().any(|c| c.code.as_str() == "FMT-TS"))
             .unwrap_or(false),
@@ -89,9 +89,18 @@ fn open_live_emite_evento_y_acelera_lecturas() {
     let rx = ws.subscribe().unwrap();
 
     // Escribir por el único escritor dispara el update optimista de la cache → IndexEvent.
+    //
+    // MIGRADO en E17-H03: el cuerpo enlaza a `beta.md`, que no existe — y un enlace roto a un
+    // DOCUMENTO pasó a ser `Err` (`LINK-TARGET-MISSING`, `danglingDocumentLinks: error` de
+    // `§20.9`), donde antes era el `LINK-STUB` informativo del prototipo. Con la política por
+    // defecto (`allow_nonconformant: false`) la escritura se RECHAZA y no llega ningún evento, así
+    // que el enlace colgante —que este test necesita para comprobar `cache.dangling()`— exige
+    // pedirlo explícitamente.
     let p = RelPath::new("alfa.md").unwrap();
-    ws.create_document(&p, "Nota", Some("Alfa"), "# H\n\n[b](/beta.md)\n", false)
+    let outcome = ws
+        .create_document(&p, "Nota", Some("Alfa"), "# H\n\n[b](/beta.md)\n", true)
         .unwrap();
+    assert!(outcome.written, "el documento debe escribirse: {outcome:?}");
     let ev = rx
         .recv_timeout(std::time::Duration::from_secs(2))
         .expect("debe llegar un IndexEvent");
@@ -126,11 +135,27 @@ fn config_strictness_bloquea_avisos() {
     .unwrap();
     let cfg = WorkspaceConfig::load(dir.path()).unwrap();
     assert!(cfg.gate.block_warnings);
-    // un análisis con warns pero sin errores: bloquea solo si blockWarnings.
+    // Un análisis con warns pero sin errores: bloquea solo si blockWarnings. MIGRADO en
+    // E17-H04: `warn_count` dejó de ser un campo — se DERIVA de `diagnostics`, así que el
+    // análisis de prueba se construye con los diagnósticos de los que sale el recuento (que es
+    // justo la desincronización que el cambio hace imposible).
+    let doc = lodestar_core::types::RelPath::new("aviso.md").unwrap();
+    let aviso = |msg: &str| {
+        lodestar_core::types::Check::new(
+            lodestar_core::types::Severity::Warn,
+            lodestar_core::types::CheckCode::LinkCaseMismatch,
+            msg,
+            vec![doc.clone()],
+        )
+    };
     let analysis = lodestar_core::types::Analysis {
-        warn_count: 2,
+        diagnostics: [(doc.clone(), vec![aviso("uno"), aviso("dos")])]
+            .into_iter()
+            .collect(),
         ..Default::default()
     };
+    assert_eq!(analysis.warn_count(), 2);
+    assert_eq!(analysis.hard_fail(), 0);
     assert!(cfg.gate_blocked(&analysis));
     assert!(!WorkspaceConfig::default().gate_blocked(&analysis));
 }

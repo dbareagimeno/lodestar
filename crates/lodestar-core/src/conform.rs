@@ -7,35 +7,27 @@
 //! `OKF-IDX`, `OKF-LOG`) y se renombró lo que sobrevive: `OKF-FM02` → `FM-UNCLOSED`,
 //! `OKF-FM03` → `FM-YAML-INVALID`, `OKF-CONFLICT` → `DOC-CONFLICT-MARKER`.
 //!
-//! Siguen aquí `LINK-STUB`/`LINK-REL` hasta E17, que los sustituye por
-//! `LINK-TARGET-MISSING`/`LINK-ESCAPES-WORKSPACE`/`LINK-CASE-MISMATCH`.
+//! **E17-H03** retiró de aquí los dos códigos de enlace heredados del prototipo (`LINK-STUB`, el
+//! destino inexistente, y `LINK-REL`, «usa la ruta completa /…»): los enlaces se diagnostican en
+//! [`crate::links::diagnose`] a partir de la clasificación del destino (`§20.6`), con
+//! `LINK-TARGET-MISSING`/`LINK-ESCAPES-WORKSPACE`/`LINK-CASE-MISMATCH`. Este módulo se queda con lo
+//! que depende **solo del documento**, sin mirar el inventario.
 //!
 //! Mensajes en español canónico. El core produce `code` + `targets` + `range`, que es lo que una
 //! fachada necesita para localizar y para señalar el sitio.
-
-use std::collections::BTreeMap;
 
 use once_cell::sync::Lazy;
 use regex::Regex;
 
 use crate::model::{self, Parsed};
-use crate::types::{Check, CheckCode, FileMap, FmError, Range, RelPath, Severity};
+use crate::types::{Check, CheckCode, FmError, Range, RelPath, Severity};
 
 static CONFLICT_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?m)^(<{7}|={7}|>{7}|\|{7})").unwrap());
 
-/// Contexto de análisis necesario para validar un fichero (datos ya computados por `analyze`).
-pub(crate) struct ConformCtx<'a> {
-    pub files: &'a FileMap,
-    pub out: &'a BTreeMap<RelPath, Vec<RelPath>>,
-}
-
-/// Valida un fichero y devuelve sus `Check` del catálogo mínimo de `§20.9`.
-pub(crate) fn validate_file(
-    path: &RelPath,
-    parsed: &Parsed,
-    raw: &str,
-    ctx: &ConformCtx,
-) -> Vec<Check> {
+/// Valida un fichero y devuelve sus `Check` del catálogo mínimo de `§20.9` que dependen **solo de
+/// su contenido**. Los de enlace (que necesitan el inventario del workspace) los añade
+/// [`crate::links::diagnose`] desde `DocumentSet::analyze`.
+pub(crate) fn validate_file(path: &RelPath, parsed: &Parsed, raw: &str) -> Vec<Check> {
     let mut out: Vec<Check> = Vec::new();
 
     // DOC-CONFLICT-MARKER (hard-fail): marcadores de merge en cuerpo o frontmatter.
@@ -78,48 +70,9 @@ pub(crate) fn validate_file(
     // contenido (`OKF-TYPE`/`REC-*`/`FMT-*` retirados: el frontmatter es metadata arbitraria del
     // usuario, no un formato de Lodestar).
 
-    // LINK-STUB (info): destinos salientes que no existen como fichero.
-    let empty = Vec::new();
-    let outs = ctx.out.get(path).unwrap_or(&empty);
-    let dang: Vec<RelPath> = outs
-        .iter()
-        .filter(|t| !ctx.files.contains_key(*t))
-        .cloned()
-        .collect();
-    if !dang.is_empty() {
-        // El destino no existe: no hay frontmatter ni cuerpo del que derivar título, así que la
-        // cadena de `derived_title` se resuelve por su último eslabón (el nombre del fichero).
-        let titles: Vec<String> = dang
-            .iter()
-            .map(|t| model::derived_title(None, "", t))
-            .collect();
-        let verb = if dang.len() == 1 {
-            "enlace lleva"
-        } else {
-            "enlaces llevan"
-        };
-        out.push(Check::new(
-            Severity::Info,
-            CheckCode::LinkStub,
-            format!(
-                "{} {} a páginas que aún no existen: {}",
-                dang.len(),
-                verb,
-                titles.join(", ")
-            ),
-            dang,
-        ));
-    }
-
-    // LINK-REL (info): enlaces relativos.
-    if !model::raw_rel_links(&parsed.body).is_empty() {
-        out.push(Check::new(
-            Severity::Info,
-            CheckCode::LinkRel,
-            "Hay enlaces relativos; es mejor usar la ruta completa /…",
-            vec![path.clone()],
-        ));
-    }
+    // E17-H03: los diagnósticos de enlace (`LINK-TARGET-MISSING`/`LINK-ESCAPES-WORKSPACE`/
+    // `LINK-CASE-MISMATCH`) los emite `links::diagnose`: dependen del INVENTARIO del workspace, no
+    // del documento, y se derivan de la clasificación del destino, no de un segundo algoritmo.
 
     // E16-H02: `ORPHAN` ya NO se emite. El aislamiento (`Analysis::isolated`) es una propiedad
     // consultable del grafo, no un diagnóstico (`§20.7`). E16-H05: `BODY-STRUCT` tampoco — la

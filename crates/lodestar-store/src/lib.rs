@@ -281,7 +281,7 @@ impl Store {
         synth::isolated(&conn)
     }
 
-    /// Destinos colgantes sintetizados (`LINK-STUB`/ghosts).
+    /// Destinos colgantes sintetizados (los fantasmas del grafo: `LinkTarget::Missing`).
     pub fn dangling(&self) -> Result<Vec<RelPath>, StoreError> {
         let conn = self.conn.lock().unwrap();
         synth::dangling(&conn)

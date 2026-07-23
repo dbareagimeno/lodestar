@@ -3,23 +3,51 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::conform::{self, ConformCtx};
+use crate::conform;
+use crate::links;
 use crate::model::{self, Parsed};
 use crate::types::{
-    Analysis, Backlinks, Check, Direction, DocumentSummary, FrontmatterPatch, GraphModel,
-    GraphNode, LinkRef, Neighborhood, ParsedFrontmatter, RelPath, Severity, WriteOutcome,
+    Analysis, Backlinks, Check, DanglingLink, Direction, DocumentSummary, FrontmatterPatch,
+    GraphModel, GraphNode, Inventory, LinkReference, LinkTarget, Neighborhood, ParsedFrontmatter,
+    RelPath, ResolvedLink, Severity, WriteOutcome,
 };
 
 /// Workspace: un mapa de ficheros + el análisis derivado (cacheado).
 pub struct DocumentSet {
     files: crate::types::FileMap,
     parsed: BTreeMap<RelPath, Parsed>,
+    inventory: Inventory,
     analysis: once_cell::sync::OnceCell<Analysis>,
 }
 
 impl DocumentSet {
     /// Construye un `DocumentSet` desde un `FileMap`. Parsea cada fichero una vez (puro, sin I/O).
+    ///
+    /// El inventario que ve la resolución de enlaces son **solo** estos documentos: un enlace a un
+    /// fichero del proyecto que no sea `.md` se clasificará [`LinkTarget::Missing`]. Para declarar
+    /// esos ficheros, [`DocumentSet::with_other_files`].
     pub fn from_files(files: crate::types::FileMap) -> Self {
+        let inventory = Inventory::from_documents(&files);
+        Self::build(files, inventory)
+    }
+
+    /// Como [`DocumentSet::from_files`], pero declarando además los **ficheros del proyecto que no
+    /// son documentos** (código, imágenes, `.md` excluidos del descubrimiento…).
+    ///
+    /// Sin ellos, [`crate::links::resolve`] no puede distinguir un [`LinkTarget::WorkspaceFile`]
+    /// —el fichero existe, aunque no sea nodo del grafo— de un [`LinkTarget::Missing`], y un enlace
+    /// a código produciría un `LINK-TARGET-MISSING` espurio (`§20.6`, precisión 2).
+    pub fn with_other_files<I>(files: crate::types::FileMap, other_files: I) -> Self
+    where
+        I: IntoIterator<Item = RelPath>,
+    {
+        let inventory = Inventory::new(files.keys().cloned(), other_files);
+        Self::build(files, inventory)
+    }
+
+    /// Construye el agregado: parsea cada fichero una vez y guarda el inventario con el que se
+    /// resolverán los enlaces.
+    fn build(files: crate::types::FileMap, inventory: Inventory) -> Self {
         let parsed = files
             .iter()
             .map(|(p, raw)| (p.clone(), model::parse_file(p.as_str(), raw)))
@@ -27,6 +55,7 @@ impl DocumentSet {
         DocumentSet {
             files,
             parsed,
+            inventory,
             analysis: once_cell::sync::OnceCell::new(),
         }
     }
@@ -36,85 +65,93 @@ impl DocumentSet {
         &self.files
     }
 
+    /// El inventario con el que se resuelven los enlaces: los documentos de este `FileMap` más los
+    /// ficheros del proyecto declarados en [`DocumentSet::with_other_files`].
+    pub fn inventory(&self) -> &Inventory {
+        &self.inventory
+    }
+
     /// Análisis del workspace, cacheado con `OnceCell` (recomputar es idempotente).
     pub fn analyze(&self) -> &Analysis {
         self.analysis.get_or_init(|| self.compute_analysis())
     }
 
-    /// Computa el análisis: **todos** los `.md` son nodos (E16-H02, `§20.7`) — ningún basename
-    /// se salta el grafo ni recibe trato aparte.
+    /// Computa el **grafo universal** de `§20.7` (E17-H04): nodos = todos los documentos
+    /// descubiertos, aristas = los enlaces resueltos entre ellos. Ningún basename se salta el
+    /// grafo ni recibe trato aparte (E16-H02).
+    ///
+    /// Un solo recorrido resuelve cada enlace **una vez** (invariante #3): de ahí salen
+    /// `outgoing`, su inversa `incoming`, los colgantes, los aislados y los diagnósticos de
+    /// enlace, sin que ninguna de esas vistas recalcule nada por su cuenta.
     fn compute_analysis(&self) -> Analysis {
-        let mut documents: Vec<RelPath> = Vec::new();
-        let mut out: BTreeMap<RelPath, Vec<RelPath>> = BTreeMap::new();
-        let mut inn: BTreeMap<RelPath, Vec<RelPath>> = BTreeMap::new();
-        let mut dangling_set: BTreeSet<RelPath> = BTreeSet::new();
+        let documents: Vec<RelPath> = self.files.keys().cloned().collect();
 
-        // Adyacencia saliente: el cuerpo de cada documento, sin excepciones por nombre.
-        for path in self.files.keys() {
-            documents.push(path.clone());
+        // Salientes: TODOS los enlaces del cuerpo, en orden de aparición y ya clasificados.
+        let mut outgoing: BTreeMap<RelPath, Vec<ResolvedLink>> = BTreeMap::new();
+        for path in &documents {
             let body = &self.parsed[path].body;
-            let targets: Vec<RelPath> = model::out_links(path.as_str(), body)
-                .into_iter()
-                .filter_map(|t| RelPath::new(&t).ok())
+            let resueltos: Vec<ResolvedLink> = links::extract_links(body)
+                .iter()
+                .map(|raw| links::resolve(raw, path, &self.inventory))
                 .collect();
-            out.insert(path.clone(), targets);
+            outgoing.insert(path.clone(), resueltos);
         }
 
-        for p in &documents {
-            inn.entry(p.clone()).or_default();
-        }
-        // Inversión de aristas + dangling. Un enlace a un documento que existe es un entrante
-        // suyo, venga de donde venga; uno a un `.md` que no existe es colgante.
-        for p in &documents {
-            for t in out.get(p).cloned().unwrap_or_default() {
-                if self.files.contains_key(&t) {
-                    inn.entry(t.clone()).or_default().push(p.clone());
-                } else {
-                    dangling_set.insert(t.clone());
+        // Inversa + colgantes. Un enlace a un documento del inventario es un entrante suyo, venga
+        // de donde venga; uno a un destino contenido que no existe es un colgante con su origen.
+        let mut incoming: BTreeMap<RelPath, Vec<LinkReference>> =
+            documents.iter().map(|p| (p.clone(), Vec::new())).collect();
+        let mut dangling: Vec<DanglingLink> = Vec::new();
+        for from in &documents {
+            for link in &outgoing[from] {
+                match &link.target {
+                    LinkTarget::Document(t) => {
+                        // `Document` significa «está en el inventario»; solo los del `FileMap` son
+                        // nodos con entrada propia (un `.md` excluido del descubrimiento no lo es).
+                        if let Some(refs) = incoming.get_mut(t) {
+                            refs.push(LinkReference {
+                                from: from.clone(),
+                                link: link.clone(),
+                            });
+                        }
+                    }
+                    LinkTarget::Missing(t) => dangling.push(DanglingLink {
+                        from: from.clone(),
+                        target: t.clone(),
+                        link: link.clone(),
+                    }),
+                    _ => {}
                 }
             }
         }
 
-        // Conformidad por fichero.
-        let ctx = ConformCtx {
-            files: &self.files,
-            out: &out,
-        };
-        let mut per_file: BTreeMap<RelPath, Vec<Check>> = BTreeMap::new();
-        let mut hard_fail = 0usize;
-        let mut warn_count = 0usize;
+        // Diagnósticos por documento: los del documento en sí (`§20.9`) más los de sus enlaces
+        // (E17-H03), que necesitan el inventario completo y por eso se emiten aquí.
+        let mut diagnostics: BTreeMap<RelPath, Vec<Check>> = BTreeMap::new();
         for (path, raw) in &self.files {
-            let checks = conform::validate_file(path, &self.parsed[path], raw, &ctx);
-            if checks.iter().any(|c| c.level == Severity::Err) {
-                hard_fail += 1;
-            }
-            warn_count += checks.iter().filter(|c| c.level == Severity::Warn).count();
-            per_file.insert(path.clone(), checks);
+            let mut checks = conform::validate_file(path, &self.parsed[path], raw);
+            checks.extend(links::diagnose(path, raw, &outgoing[path], &self.inventory));
+            diagnostics.insert(path.clone(), checks);
         }
 
-        // Aislados (`§20.7`): ni entrantes ni salientes. Un enlace saliente cuenta aunque su
-        // destino no exista todavía — el documento participa en el grafo (tiene un nodo ghost por
-        // vecino), que es lo que «aislado» niega.
+        // Aislados (`§20.7`): sin enlaces INTERNOS entrantes ni salientes. Interno = `Document`
+        // (arista real) o `Missing` (arista a un fantasma: el documento participa en el grafo). Un
+        // enlace externo, un anchor propio o uno a código no conectan con ningún documento.
         let isolated: Vec<RelPath> = documents
             .iter()
             .filter(|p| {
-                inn.get(*p).map(|v| v.is_empty()).unwrap_or(true)
-                    && out.get(*p).map(|v| v.is_empty()).unwrap_or(true)
+                incoming[*p].is_empty() && !outgoing[*p].iter().any(|l| l.target.is_internal())
             })
             .cloned()
             .collect();
 
-        let dangling: Vec<RelPath> = dangling_set.into_iter().collect();
-
         Analysis {
             documents,
-            out,
-            inn,
-            dangling,
+            outgoing,
+            incoming,
             isolated,
-            per_file,
-            hard_fail,
-            warn_count,
+            dangling,
+            diagnostics,
         }
     }
 
@@ -131,7 +168,7 @@ impl DocumentSet {
                 let fm = parsed.frontmatter.as_ref();
                 let title = model::derived_title(fm, &parsed.body, p);
                 let invalid = a
-                    .per_file
+                    .diagnostics
                     .get(p)
                     .map(|cs| cs.iter().any(|c| c.level == Severity::Err))
                     .unwrap_or(false);
@@ -147,63 +184,18 @@ impl DocumentSet {
             .collect()
     }
 
-    /// Vecindad de enlaces de un documento.
+    /// Vecindad de enlaces de un documento: su porción de [`Analysis::incoming`]/
+    /// [`Analysis::outgoing`] tal cual, **sin recalcular nada** (invariante #3).
     ///
     /// Desde E16-H02 **no** hay `index_refs`: quien te enlaza entra por `inbound`, sea un
-    /// `index.md` o cualquier otro documento.
+    /// `index.md` o cualquier otro documento. Desde E17-H05 `inbound` lleva una entrada por
+    /// **enlace** (un origen que enlaza dos veces aparece dos veces, con sus dos hrefs) y `out`
+    /// son los enlaces resueltos completos, colgantes y externos incluidos.
     pub fn backlinks(&self, p: &RelPath) -> Backlinks {
-        let mut inbound: Vec<LinkRef> = Vec::new();
-        // Quién enlaza aquí, con el href usado.
-        for q in self.files.keys() {
-            if q == p {
-                continue;
-            }
-            let body = &self.parsed[q].body;
-            for cap in model::LINK_RE.captures_iter(body) {
-                if let Some(href) = cap.get(1) {
-                    if let Some(t) = model::resolve_link(href.as_str(), q.as_str()) {
-                        if RelPath::new(&t).ok().as_ref() == Some(p) {
-                            inbound.push(LinkRef {
-                                path: q.clone(),
-                                href: href.as_str().to_string(),
-                            });
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-        // Salientes resueltos vs colgantes: `analysis.out` dedupea y excluye el self-enlace, y
-        // los hrefs colgantes no se repiten.
-        let mut out_resolved: Vec<RelPath> = Vec::new();
-        let mut dangling: Vec<String> = Vec::new();
-        let mut seen_out: BTreeSet<RelPath> = BTreeSet::new();
-        let mut seen_dangling: BTreeSet<String> = BTreeSet::new();
-        if let Some(parsed) = self.parsed.get(p) {
-            for cap in model::LINK_RE.captures_iter(&parsed.body) {
-                if let Some(href) = cap.get(1) {
-                    if let Some(t) = model::resolve_link(href.as_str(), p.as_str()) {
-                        match RelPath::new(&t) {
-                            Ok(rp) if self.files.contains_key(&rp) => {
-                                if rp != *p && seen_out.insert(rp.clone()) {
-                                    out_resolved.push(rp);
-                                }
-                            }
-                            _ => {
-                                let h = href.as_str().to_string();
-                                if seen_dangling.insert(h.clone()) {
-                                    dangling.push(h);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        let a = self.analyze();
         Backlinks {
-            inbound,
-            out: out_resolved,
-            dangling,
+            inbound: a.incoming.get(p).cloned().unwrap_or_default(),
+            out: a.outgoing.get(p).cloned().unwrap_or_default(),
         }
     }
 
@@ -262,7 +254,7 @@ impl DocumentSet {
         files.insert(draft_path.clone(), raw);
         let tmp = DocumentSet::from_files(files);
         tmp.analyze()
-            .per_file
+            .diagnostics
             .get(&draft_path)
             .cloned()
             .unwrap_or_default()
@@ -347,8 +339,13 @@ impl DocumentSet {
                 hash: *blake3::hash(previo.as_bytes()).as_bytes(),
                 written: false,
                 rejected: Some(e.to_string()),
-                checks: self.analyze().per_file.get(p).cloned().unwrap_or_default(),
-                workspace_hard_fail: self.analyze().hard_fail,
+                checks: self
+                    .analyze()
+                    .diagnostics
+                    .get(p)
+                    .cloned()
+                    .unwrap_or_default(),
+                workspace_hard_fail: self.analyze().hard_fail(),
             },
         }
     }
@@ -365,7 +362,7 @@ impl DocumentSet {
         files.insert(p.clone(), raw.clone());
         let projected = DocumentSet::from_files(files);
         let analysis = projected.analyze();
-        let checks = analysis.per_file.get(p).cloned().unwrap_or_default();
+        let checks = analysis.diagnostics.get(p).cloned().unwrap_or_default();
         let has_err = checks.iter().any(|c| c.level == Severity::Err);
         let rejected = if has_err && !allow_nonconformant {
             Some(format!(
@@ -387,7 +384,7 @@ impl DocumentSet {
             written: rejected.is_none(),
             rejected,
             checks,
-            workspace_hard_fail: analysis.hard_fail,
+            workspace_hard_fail: analysis.hard_fail(),
         }
     }
 }

@@ -651,7 +651,7 @@ fn claves_wire<T: serde::Serialize>(v: &T) -> BTreeSet<String> {
 /// Deliberadamente por serialización y no por la variante `CheckCode::Orphan`: E16-H05 borra esa
 /// variante y el test debe sobrevivir a su desaparición sin dejar de significar lo mismo.
 fn codigos(a: &Analysis, p: &RelPath) -> Vec<String> {
-    a.per_file
+    a.diagnostics
         .get(p)
         .into_iter()
         .flatten()
@@ -793,21 +793,26 @@ fn enlace_desde_indice_es_arista() {
         "`index.md` es un documento más del análisis, no un fichero de servicio: {:?}",
         a.documents
     );
+    // MIGRADO en E17-H04: `out`/`inn` pasaron a `outgoing`/`incoming`, con el enlace resuelto.
     assert!(
-        a.out.get(&index).is_some_and(|t| t.contains(&alfa)),
+        a.outgoing
+            .get(&index)
+            .is_some_and(|ls| ls.iter().any(|l| l.target.internal_path() == Some(&alfa))),
         "el enlace del índice a `alfa.md` es una arista SALIENTE de `index.md`: {:?}",
-        a.out.get(&index)
+        a.outgoing.get(&index)
     );
     assert!(
-        a.inn.get(&alfa).is_some_and(|v| v.contains(&index)),
+        a.incoming
+            .get(&alfa)
+            .is_some_and(|v| v.iter().any(|r| r.from == index)),
         "y se invierte como cualquier otra: `alfa.md` tiene a `index.md` entre sus entrantes: {:?}",
-        a.inn.get(&alfa)
+        a.incoming.get(&alfa)
     );
 
     // Indistinguible de un enlace desde un documento cualquiera: `index.md` y `gamma.md` entran
     // por la MISMA puerta.
     let bl = b.backlinks(&alfa);
-    let entrantes: BTreeSet<&str> = bl.inbound.iter().map(|l| l.path.as_str()).collect();
+    let entrantes: BTreeSet<&str> = bl.inbound.iter().map(|l| l.from.as_str()).collect();
     assert!(
         entrantes.contains("index.md") && entrantes.contains("gamma.md"),
         "los entrantes de `alfa.md` son `index.md` Y `gamma.md`, sin distinción de origen: {entrantes:?}"
@@ -815,7 +820,7 @@ fn enlace_desde_indice_es_arista() {
     assert!(
         bl.inbound
             .iter()
-            .any(|l| l.path == index && l.href == "alfa.md"),
+            .any(|l| l.from == index && l.link.href == "alfa.md"),
         "el enlace del índice conserva su href como cualquier otro: {:?}",
         bl.inbound
     );
@@ -1903,7 +1908,7 @@ use lodestar_core::types::{Check, Range as RangoLineas, Severity};
 
 /// Los diagnósticos emitidos para `p` (vacío si no hay ninguno).
 fn diagnosticos<'a>(a: &'a Analysis, p: &RelPath) -> &'a [Check] {
-    a.per_file.get(p).map_or(&[], Vec::as_slice)
+    a.diagnostics.get(p).map_or(&[], Vec::as_slice)
 }
 
 /// Analiza un workspace de un solo documento y devuelve su análisis y su ruta.
@@ -1933,7 +1938,8 @@ fn sin_frontmatter_no_diagnostica() {
         diagnosticos(&a, &p)
     );
     assert_eq!(
-        a.hard_fail, 0,
+        a.hard_fail(),
+        0,
         "y no es un hard-fail: la puerta de CI no puede caerse por un README sin metadata"
     );
 
@@ -1976,7 +1982,7 @@ fn formato_de_tags_no_diagnostica() {
          `OKF-TYPE`, ni `REC-*`. Diagnósticos: {:?}",
         diagnosticos(&a, &p)
     );
-    assert_eq!(a.hard_fail, 0, "y desde luego no es un hard-fail");
+    assert_eq!(a.hard_fail(), 0, "y desde luego no es un hard-fail");
 
     // El caso simétrico: los mismos nombres con «buen» formato tampoco dicen nada (no hay `Pass`
     // que informe de conformidad: Lodestar ya no juzga especificaciones documentales).
@@ -2033,7 +2039,8 @@ fn frontmatter_sin_cierre() {
         "y apunta al documento afectado (`targets` nunca es null)"
     );
     assert_eq!(
-        a.hard_fail, 1,
+        a.hard_fail(),
+        1,
         "sigue siendo hard-fail: es de lo poco que queda en el catálogo"
     );
 }
@@ -2108,7 +2115,8 @@ fn marcadores_de_merge() {
         "con severidad error"
     );
     assert_eq!(
-        a.hard_fail, 1,
+        a.hard_fail(),
+        1,
         "y hard-fail: el documento está a medio mergear"
     );
 }
@@ -2154,7 +2162,7 @@ fn aislado_y_headings_no_diagnostican() {
             diagnosticos(a, &p)
         );
     }
-    assert_eq!(a.hard_fail, 0, "ninguno es hard-fail");
+    assert_eq!(a.hard_fail(), 0, "ninguno es hard-fail");
 
     // El aislamiento sigue siendo una PROPIEDAD consultable del grafo (`§20.7`, E16-H02): lo que
     // se retira es el diagnóstico, no la información.

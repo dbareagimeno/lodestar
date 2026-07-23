@@ -215,11 +215,11 @@ fn is_predicate(name: &str, path: &RelPath, fm: &ParsedFrontmatter, a: &Analysis
     match name {
         "isolated" => a.isolated.contains(path),
         "invalid" => a
-            .per_file
+            .diagnostics
             .get(path)
             .map(|cs| cs.iter().any(|c| c.level == Severity::Err))
             .unwrap_or(false),
-        "linked" => a.inn.get(path).map(|v| !v.is_empty()).unwrap_or(false),
+        "linked" => a.incoming.get(path).map(|v| !v.is_empty()).unwrap_or(false),
         "accepted" | "draft" | "review" | "deprecated" => fm
             .get_text("status")
             .map(|s| s.to_lowercase() == name)

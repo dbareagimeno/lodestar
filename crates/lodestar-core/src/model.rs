@@ -1,19 +1,17 @@
 //! Primitivas de modelo: parseo y serialización del documento (`ARCHITECTURE.md §4`, `§20.4`).
 //!
 //! El frontmatter es **metadata arbitraria del usuario** (`§20.4`, E16-H01): se conserva íntegro,
-//! con su tipo YAML real y su texto original. El resto del módulo sigue siendo el port de
-//! `resolveLink`, `normalize`, `outLinks`, `rawRelLinks`, quirks incluidos (`isISO` murió con
-//! `FMT-TS` en E16-H05).
+//! con su tipo YAML real y su texto original.
+//!
+//! **E17** se llevó de aquí los enlaces: `LINK_RE`, `resolveLink`/`resolve_link`, `outLinks`/
+//! `out_links`, `out_links_with_href` y `rawRelLinks`/`raw_rel_links` viven ahora en
+//! [`crate::links`], con un parser Markdown de verdad y la resolución por path de `§20.6` (sin
+//! `foo/` → `foo/index.md`, sin exigir `.md`, sin recortar los `..` sobrantes). `isISO` había
+//! muerto con `FMT-TS` en E16-H05.
 
-use once_cell::sync::Lazy;
-use regex::Regex;
 use serde_yaml::Value as Yaml;
 
 use crate::types::{FmError, ParsedFrontmatter};
-
-/// `[texto](href "title")` — el grupo 1 es el href. Global.
-pub(crate) static LINK_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r#"\[[^\]]*\]\(([^)\s]+)(?:\s+"[^"]*")?\)"#).unwrap());
 
 /// Resultado de [`split_front`]: dónde está (si está) el bloque de frontmatter de un documento.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -188,92 +186,6 @@ pub fn normalize(p: &str) -> String {
         }
     }
     parts.join("/")
-}
-
-/// Port de `resolveLink`: resuelve un href a un path del workspace, o `None` si no aplica.
-pub fn resolve_link(href: &str, from_path: &str) -> Option<String> {
-    // Esquema (http:, mailto:, …) → no es enlace interno.
-    if Regex::new(r"^[a-z]+:")
-        .unwrap()
-        .is_match(&href.to_ascii_lowercase())
-    {
-        return None;
-    }
-    if href.starts_with('#') {
-        return None;
-    }
-    let mut h = href
-        .split('#')
-        .next()
-        .unwrap_or("")
-        .split('?')
-        .next()
-        .unwrap_or("")
-        .to_string();
-    if h.is_empty() {
-        return None;
-    }
-    if h.ends_with('/') {
-        h.push_str("index.md");
-    }
-    if !h.ends_with(".md") {
-        return None;
-    }
-    let target = if let Some(stripped) = h.strip_prefix('/') {
-        stripped.to_string()
-    } else {
-        let base = dir_of(from_path);
-        normalize(&format!("{base}{h}"))
-    };
-    Some(target)
-}
-
-/// Port de `outLinks`: destinos salientes únicos del cuerpo (excluyendo el propio path).
-pub fn out_links(path: &str, body: &str) -> Vec<String> {
-    let mut seen = std::collections::BTreeSet::new();
-    let mut result = Vec::new();
-    for cap in LINK_RE.captures_iter(body) {
-        if let Some(href) = cap.get(1) {
-            if let Some(t) = resolve_link(href.as_str(), path) {
-                if t != path && seen.insert(t.clone()) {
-                    result.push(t);
-                }
-            }
-        }
-    }
-    result
-}
-
-/// Como [`out_links`], pero conserva el href **crudo** junto al destino resuelto.
-/// Mismo criterio (destinos únicos, excluye el propio path); útil para materializar `links` en la cache.
-pub fn out_links_with_href(path: &str, body: &str) -> Vec<(String, String)> {
-    let mut seen = std::collections::BTreeSet::new();
-    let mut result = Vec::new();
-    for cap in LINK_RE.captures_iter(body) {
-        if let Some(href) = cap.get(1) {
-            if let Some(t) = resolve_link(href.as_str(), path) {
-                if t != path && seen.insert(t.clone()) {
-                    result.push((href.as_str().to_string(), t));
-                }
-            }
-        }
-    }
-    result
-}
-
-/// Port de `rawRelLinks`: hrefs salientes que son relativos (`./` o `../`) y apuntan a `.md`.
-pub fn raw_rel_links(body: &str) -> Vec<String> {
-    let rel = Regex::new(r"^\.{1,2}/").unwrap();
-    let mut res = Vec::new();
-    for cap in LINK_RE.captures_iter(body) {
-        if let Some(href) = cap.get(1) {
-            let h = href.as_str();
-            if rel.is_match(h) && h.contains(".md") {
-                res.push(h.to_string());
-            }
-        }
-    }
-    res
 }
 
 /// Port de `sortPaths` = `a.localeCompare(b, undefined, {numeric:true})`: orden natural con

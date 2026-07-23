@@ -3,7 +3,42 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use crate::document_set::DocumentSet;
-use crate::types::{Direction, Edge, GraphModel, GraphNode, Neighborhood, RelPath};
+use crate::types::{Analysis, Direction, Edge, GraphModel, GraphNode, Neighborhood, RelPath};
+
+/// Destinos **internos** salientes de `p` (documentos y fantasmas), en orden de aparición y sin
+/// repetir: la adyacencia del grafo derivada de [`Analysis::outgoing`] (E17-H04).
+///
+/// Es el filtro que separa la lista de enlaces del grafo: `outgoing` lleva **todos** los enlaces
+/// del documento (externos, anchors, ficheros del proyecto), pero solo los que conectan con otro
+/// documento son aristas. La deduplicación mantiene el grafo como un conjunto de aristas: enlazar
+/// dos veces al mismo documento no duplica la arista (sí duplica la referencia entrante, que es
+/// una lista de enlaces, no de vecinos).
+pub(crate) fn salientes(a: &Analysis, p: &RelPath) -> Vec<RelPath> {
+    let mut vistos: BTreeSet<RelPath> = BTreeSet::new();
+    let mut out: Vec<RelPath> = Vec::new();
+    for link in a.outgoing.get(p).into_iter().flatten() {
+        if let Some(t) = link.target.internal_path() {
+            if vistos.insert(t.clone()) {
+                out.push(t.clone());
+            }
+        }
+    }
+    out
+}
+
+/// Orígenes **distintos** que enlazan a `p`, derivados de [`Analysis::incoming`] (la inversa de
+/// [`salientes`]). Deduplicados por la misma razón: un origen que enlaza dos veces es un solo
+/// vecino en el grafo.
+pub(crate) fn entrantes(a: &Analysis, p: &RelPath) -> Vec<RelPath> {
+    let mut vistos: BTreeSet<RelPath> = BTreeSet::new();
+    a.incoming
+        .get(p)
+        .into_iter()
+        .flatten()
+        .filter(|r| vistos.insert(r.from.clone()))
+        .map(|r| r.from.clone())
+        .collect()
+}
 
 /// Construye el `GraphModel` completo: nodos (documentos + ghosts) y aristas (con flag `dangling`).
 pub(crate) fn graph_model(doc_set: &DocumentSet) -> GraphModel {
@@ -12,20 +47,19 @@ pub(crate) fn graph_model(doc_set: &DocumentSet) -> GraphModel {
     let mut edges: Vec<Edge> = Vec::new();
 
     for src in &a.documents {
-        if let Some(targets) = a.out.get(src) {
-            for t in targets {
-                // E16-H02: se retiró el quirk del prototipo (`buildGraphModel:1850`) que
-                // descartaba las aristas/nodos a `index.md`/`log.md`. Todo destino es una arista.
-                let dangling = !doc_set.files().contains_key(t);
-                if dangling {
-                    node_ids.insert(t.clone()); // ghost
-                }
-                edges.push(Edge {
-                    source: src.clone(),
-                    target: t.clone(),
-                    dangling,
-                });
+        for t in salientes(a, src) {
+            // E16-H02: se retiró el quirk del prototipo (`buildGraphModel:1850`) que
+            // descartaba las aristas/nodos a `index.md`/`log.md`. Todo destino INTERNO es una
+            // arista; un fichero del proyecto o una URI externa no lo son (E17-H04).
+            let dangling = !doc_set.files().contains_key(&t);
+            if dangling {
+                node_ids.insert(t.clone()); // ghost
             }
+            edges.push(Edge {
+                source: src.clone(),
+                target: t,
+                dangling,
+            });
         }
     }
 
@@ -36,20 +70,26 @@ pub(crate) fn graph_model(doc_set: &DocumentSet) -> GraphModel {
     GraphModel { nodes, edges }
 }
 
-/// Construye el [`GraphNode`] de `id`: `ghost` si no hay fichero en disco para ese path,
-/// `type`/`status` tomados de su frontmatter cuando sí existe.
+/// Construye el [`GraphNode`] de `id`: su **título derivado** (E16-H03) y `ghost` si no hay
+/// fichero para ese path.
 ///
 /// Es la **única** definición de "qué es un nodo del grafo" (invariante #3, "una sola verdad
 /// computada"): tanto `graph_model`/`neighborhood` del core como `App::graph_query` de la fachada
 /// la reusan (esta última vía [`DocumentSet::node`]) en vez de reimplementar el criterio.
+///
+/// Un nodo **fantasma** no tiene ni frontmatter ni cuerpo del que derivar título, así que la
+/// cadena de [`crate::model::derived_title`] se resuelve por su último eslabón: el nombre del
+/// fichero sin `.md`.
 pub fn node_for(doc_set: &DocumentSet, id: &RelPath) -> GraphNode {
-    let exists = doc_set.files().contains_key(id);
-    let fm = doc_set.parsed(id).and_then(|p| p.frontmatter.as_ref());
+    let parsed = doc_set.parsed(id);
+    let title = match parsed {
+        Some(p) => crate::model::derived_title(p.frontmatter.as_ref(), &p.body, id),
+        None => crate::model::derived_title(None, "", id),
+    };
     GraphNode {
         id: id.clone(),
-        ghost: !exists,
-        r#type: fm.and_then(|f| f.get_text("type")),
-        status: fm.and_then(|f| f.get_text("status")),
+        title,
+        ghost: !doc_set.files().contains_key(id),
     }
 }
 
@@ -62,9 +102,6 @@ pub(crate) fn neighborhood(
     dir: Direction,
 ) -> Neighborhood {
     let a = doc_set.analyze();
-    // Adyacencia según dirección.
-    let out = &a.out;
-    let inn = &a.inn;
 
     let mut visited: BTreeSet<RelPath> = BTreeSet::new();
     let mut queue: VecDeque<(RelPath, u32)> = VecDeque::new();
@@ -79,20 +116,16 @@ pub(crate) fn neighborhood(
         }
         let mut neighbors: Vec<RelPath> = Vec::new();
         if matches!(dir, Direction::Out | Direction::Both) {
-            if let Some(ts) = out.get(&cur) {
-                for t in ts {
-                    let dangling = !doc_set.files().contains_key(t);
-                    edge_set.insert((cur.clone(), t.clone()), dangling);
-                    neighbors.push(t.clone());
-                }
+            for t in salientes(a, &cur) {
+                let dangling = !doc_set.files().contains_key(&t);
+                edge_set.insert((cur.clone(), t.clone()), dangling);
+                neighbors.push(t);
             }
         }
         if matches!(dir, Direction::In | Direction::Both) {
-            if let Some(ss) = inn.get(&cur) {
-                for s in ss {
-                    edge_set.insert((s.clone(), cur.clone()), false);
-                    neighbors.push(s.clone());
-                }
+            for s in entrantes(a, &cur) {
+                edge_set.insert((s.clone(), cur.clone()), false);
+                neighbors.push(s);
             }
         }
         for nb in neighbors {

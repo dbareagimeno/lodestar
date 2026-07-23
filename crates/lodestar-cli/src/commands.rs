@@ -23,7 +23,7 @@ use crate::sarif;
 /// (error del servicio o `.lodestar/config.yaml` inválido — lo detecta ya `App::open`).
 pub fn check(root: &Path, json: bool, sarif_out: bool) -> anyhow::Result<ExitCode> {
     // Motor completo (documento + schema-driven) en `App`, computado UNA sola vez: `full_analysis` corre
-    // `analyze()` y fusiona los `SCHEMA-*`/`REL-*` en `per_file` con la misma lógica que
+    // `analyze()` y fusiona los `SCHEMA-*`/`REL-*` en `diagnostics` con la misma lógica que
     // `knowledge_check`. De ese `Analysis` sale tanto el veredicto como la salida.
     let app = lodestar_app::App::open(root).map_err(|e| anyhow::anyhow!(e.to_string()))?;
     let analysis = app
@@ -36,7 +36,7 @@ pub fn check(root: &Path, json: bool, sarif_out: bool) -> anyhow::Result<ExitCod
     let conformant = !analysis
         .documents
         .iter()
-        .filter_map(|p| analysis.per_file.get(p))
+        .filter_map(|p| analysis.diagnostics.get(p))
         .flatten()
         .any(|c| c.level == Severity::Err);
 
@@ -52,7 +52,7 @@ pub fn check(root: &Path, json: bool, sarif_out: bool) -> anyhow::Result<ExitCod
 /// Imprime un `Analysis` en el formato pedido y devuelve el exit code (0 conforme / 1 bloqueado).
 /// `conformant` es el veredicto del motor completo (misma semántica que `knowledge_check`), que en
 /// `--json` se emite de forma ADITIVA junto a los campos históricos del `Analysis`; los `SCHEMA-*`/
-/// `REL-*` viajan dentro de `per_file` (y por tanto en `--sarif`/humano) al haberse fusionado en
+/// `REL-*` viajan dentro de `diagnostics` (y por tanto en `--sarif`/humano) al haberse fusionado en
 /// [`lodestar_app::App::full_analysis`]. `blocked` decide el exit code: lo endurece la strictness de
 /// `.lodestar/config.yaml` (`gate.blockWarnings`) sobre el veredicto del motor.
 pub fn render_analysis(
@@ -88,7 +88,7 @@ pub fn render_analysis(
 fn print_human(a: &lodestar_core::types::Analysis, blocked: bool) {
     let mut errs = 0usize;
     let mut warns = 0usize;
-    for (path, checks) in &a.per_file {
+    for (path, checks) in &a.diagnostics {
         for c in checks {
             match c.level {
                 Severity::Err => {
@@ -106,8 +106,8 @@ fn print_human(a: &lodestar_core::types::Analysis, blocked: bool) {
     println!(
         "\n{} documentos · {} con errores · {} avisos · {}",
         a.documents.len(),
-        // `errs` cuenta TODOS los diagnósticos `Err` de `per_file` (documento + `SCHEMA-*`/`REL-*`
-        // fusionados en `full_analysis`), no solo `a.hard_fail`: así el resumen humano es
+        // `errs` cuenta TODOS los diagnósticos `Err` de `diagnostics` (documento + `SCHEMA-*`/`REL-*`
+        // fusionados en `full_analysis`), no solo `a.hard_fail()`: así el resumen humano es
         // coherente con las líneas `✗` de arriba.
         errs,
         warns,

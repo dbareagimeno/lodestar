@@ -184,9 +184,9 @@ pub fn conformant() -> FileMap {
     ])
 }
 
-/// Workspace con un documento por cada diagnóstico que produce `conform` en el **catálogo mínimo**
-/// de `ARCHITECTURE.md §20.9` (E16-H05): `FM-UNCLOSED`, `FM-YAML-INVALID`, `DOC-CONFLICT-MARKER` y
-/// los dos de enlaces que siguen vivos hasta E17 (`LINK-STUB`, `LINK-REL`).
+/// Workspace con un documento por cada diagnóstico del **catálogo mínimo** de
+/// `ARCHITECTURE.md §20.9`: `FM-UNCLOSED`, `FM-YAML-INVALID`, `DOC-CONFLICT-MARKER` (E16-H05) y
+/// `LINK-TARGET-MISSING` (E17-H03, que sustituyó a los `LINK-STUB`/`LINK-REL` del prototipo).
 ///
 /// Ya **no** dispara el catálogo OKF (`OKF-FM01`, `OKF-TYPE`, `REC-*`, `FMT-*`, `BODY-STRUCT`,
 /// `ORPHAN`): esos códigos se retiraron. Los dos primeros documentos son justamente el contraste —
@@ -204,7 +204,10 @@ pub fn with_issues() -> FileMap {
         ("sin-cierre.md", "---\ntype: Concept\n"),
         // Bloque bien delimitado con YAML inválido → FM-YAML-INVALID (hard-fail, con rango).
         ("yaml-roto.md", "---\ntype: : :\n  - x\n---\n\n# H\n\ncuerpo\n"),
-        // Enlace a inexistente → LINK-STUB; enlace relativo → LINK-REL.
+        // Dos enlaces a documentos inexistentes → dos `LINK-TARGET-MISSING` (`Err`: el destino
+        // termina en `.md`, así que sería un documento). El enlace relativo, que hasta E17 era un
+        // diagnóstico en sí mismo (`LINK-REL`), hoy no dice nada: lo único que importa es si el
+        // destino existe.
         (
             "malo.md",
             "---\ntype: Nota\ntitle: Malo\ndescription: x\n---\n\n# H\n\n[falta](/no-existe.md) y [rel](./otro.md)\n",

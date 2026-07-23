@@ -23,8 +23,8 @@ use lodestar_core::types::{
     workspace_revision, Analysis, Backlinks, ChangeReceipt, ChangeSet, ChangeSetId, Check,
     Direction, DocumentRef, DocumentRevision, Edge, EditSectionMode, ErrorCode, FrontmatterPatch,
     GraphNode, InboundLinksPolicy, NormalizedOperation, ParsedFrontmatter, PlanHash, ReceiptId,
-    RelPath, RiskAssessment, SemanticDiff, Severity, ValidationReport, ValidationSummary,
-    WorkspaceRevision,
+    RelPath, ResolvedLink, RiskAssessment, SemanticDiff, Severity, ValidationReport,
+    ValidationSummary, WorkspaceRevision,
 };
 use lodestar_core::{CoreError, DocumentSet};
 use lodestar_workspace::{
@@ -392,7 +392,15 @@ impl App {
         let schema = WorkspaceSchema::load(root).map_err(WorkspaceError::Io)?;
 
         let revision = workspace_revision(files, &cfg.workspace.writable_roots);
-        let links = analysis.out.values().map(Vec::len).sum();
+        // Aristas del grafo: los enlaces INTERNOS (documentos y fantasmas). Los externos, los
+        // anchors propios y los que apuntan a ficheros del proyecto viajan en `Analysis::outgoing`
+        // pero no conectan documentos, así que no cuentan como enlaces del workspace (`§20.7`).
+        let links = analysis
+            .outgoing
+            .values()
+            .flatten()
+            .filter(|l| l.target.is_internal())
+            .count();
         let writes = profile.writes_enabled();
 
         Ok(WorkspaceStatus {
@@ -402,14 +410,14 @@ impl App {
             reference_roots: cfg.workspace.reference_roots.clone(),
             format_version: DEFAULT_FORMAT_VERSION.to_string(),
             schema_version: schema.version.clone(),
-            conformant: analysis.hard_fail == 0,
+            conformant: analysis.hard_fail() == 0,
             counts: StatusCounts {
                 documents: analysis.documents.len(),
                 links,
                 isolated: analysis.isolated.len(),
                 dangling: analysis.dangling.len(),
-                errors: analysis.hard_fail,
-                warnings: analysis.warn_count,
+                errors: analysis.hard_fail(),
+                warnings: analysis.warn_count(),
             },
             capabilities: StatusCapabilities {
                 writes,
@@ -559,7 +567,7 @@ impl App {
     /// [`Workspace::external_refs`] (E11-H04) — `{path, exists}` por cada referencia declarada.
     /// Los diagnósticos de referencia rota (`CheckCode::ExtrefMissing`) que produce esa llamada NO
     /// se mezclan en el campo `diagnostics` de esta proyección (que sigue viniendo, sin cambios,
-    /// de `Analysis::per_file` — invariante #3: una sola verdad computada por fuente); un agente
+    /// de `Analysis::diagnostics` — invariante #3: una sola verdad computada por fuente); un agente
     /// que quiera esos diagnósticos los deriva de `exists:false` en `externalReferences`.
     pub fn knowledge_get(
         &self,
@@ -594,7 +602,7 @@ impl App {
         let outgoing_links = wants("outgoingLinks").then(|| {
             doc_set
                 .analyze()
-                .out
+                .outgoing
                 .get(&path)
                 .cloned()
                 .unwrap_or_default()
@@ -603,7 +611,7 @@ impl App {
         let diagnostics = wants("diagnostics").then(|| {
             doc_set
                 .analyze()
-                .per_file
+                .diagnostics
                 .get(&path)
                 .cloned()
                 .unwrap_or_default()
@@ -691,7 +699,7 @@ impl App {
     /// (E10-H07, `validate_schema`, PURA) junto a los diagnósticos de `DocumentSet::analyze` (`§20.9`).
     ///
     /// **Composición de diagnósticos** (invariante #3 — una sola verdad computada): por cada
-    /// documento (`Analysis::documents`) se unen sus diagnósticos de documento (`Analysis::per_file`)
+    /// documento (`Analysis::documents`) se unen sus diagnósticos de documento (`Analysis::diagnostics`)
     /// con los checks de esquema (`validate_schema(&doc_set, &schema)`, agrupados por su `target`).
     /// Un workspace sin `.lodestar/schema.yaml` produce `Schema::default()` (vacío) y `validate_schema`
     /// devuelve cero checks, así que **el veredicto de un workspace sin esquema no cambia**. Los checks
@@ -749,7 +757,8 @@ impl App {
             if !allowed.contains(path) {
                 continue;
             }
-            let mut checks: Vec<Check> = analysis.per_file.get(path).cloned().unwrap_or_default();
+            let mut checks: Vec<Check> =
+                analysis.diagnostics.get(path).cloned().unwrap_or_default();
             if let Some(extra) = schema_by_path.get(path) {
                 checks.extend(extra.iter().cloned());
             }
@@ -872,13 +881,13 @@ impl App {
 
     /// Computa el `Analysis` **completo** del working tree: los diagnósticos de
     /// [`DocumentSet::analyze`] con los diagnósticos schema-driven (`SCHEMA-*`/`REL-*`) fusionados en
-    /// `per_file` por su path (`App::schema_diagnostics_by_path`). Es la fuente que alimenta la
+    /// `diagnostics` por su path (`App::schema_diagnostics_by_path`). Es la fuente que alimenta la
     /// **salida** de `lodestar check` (`--json`/`--sarif`/humano), de modo que el mismo motor que
     /// decide el veredicto (`knowledge_check`) también surface los diagnósticos que lo disparan —
     /// sin recomputar `analyze()` dos veces ni recomponer la validación schema-driven en la fachada.
     ///
-    /// Los contadores `hard_fail`/`warn_count` conservan su semántica (los rellena `analyze`);
-    /// la fusión solo **añade** checks a `per_file` (aditiva). Un workspace sin `schema.yaml` devuelve
+    /// Los contadores `hard_fail()`/`warn_count()` conservan su semántica (los DERIVA `Analysis` de
+    /// `diagnostics`, E17-H04); la fusión solo **añade** checks a `diagnostics` (aditiva). Un workspace sin `schema.yaml` devuelve
     /// exactamente el `Analysis` de `analyze()`.
     pub fn full_analysis(&self) -> Result<Analysis, ErrorCode> {
         let doc_set = self
@@ -889,7 +898,7 @@ impl App {
             WorkspaceSchema::load(self.workspace.root()).map_err(|_| ErrorCode::InternalIoError)?;
         let mut analysis = doc_set.analyze().clone();
         for (path, checks) in Self::schema_diagnostics_by_path(&doc_set, &schema) {
-            analysis.per_file.entry(path).or_default().extend(checks);
+            analysis.diagnostics.entry(path).or_default().extend(checks);
         }
         Ok(analysis)
     }
@@ -968,14 +977,18 @@ impl App {
                 let mut ids: BTreeSet<RelPath> = BTreeSet::new();
                 ids.insert(path.clone());
                 for lr in &bl.inbound {
-                    ids.insert(lr.path.clone());
+                    ids.insert(lr.from.clone());
                 }
                 let nodes = ids.iter().map(|id| doc_set.node(id)).collect();
+                // Un origen que enlaza VARIAS veces produce varias referencias entrantes pero UNA
+                // sola arista: el grafo es un conjunto de aristas (E17-H04).
+                let mut vistas: BTreeSet<RelPath> = BTreeSet::new();
                 let edges = bl
                     .inbound
                     .iter()
+                    .filter(|lr| vistas.insert(lr.from.clone()))
                     .map(|lr| Edge {
-                        source: lr.path.clone(),
+                        source: lr.from.clone(),
                         target: path.clone(),
                         dangling: false,
                     })
@@ -1004,20 +1017,21 @@ impl App {
             }
             "dangling" => {
                 let a = doc_set.analyze();
-                let dangling_set: BTreeSet<&RelPath> = a.dangling.iter().collect();
-                let mut edges: Vec<Edge> = Vec::new();
-                for src in &a.documents {
-                    for t in a.out.get(src).cloned().unwrap_or_default() {
-                        if dangling_set.contains(&t) {
-                            edges.push(Edge {
-                                source: src.clone(),
-                                target: t.clone(),
-                                dangling: true,
-                            });
-                        }
-                    }
-                }
-                let nodes = a.dangling.iter().map(|id| doc_set.node(id)).collect();
+                // Cada colgante ya trae su origen y su destino (E17-H04); dos enlaces rotos del
+                // mismo origen al mismo destino son una sola arista.
+                let mut vistas: BTreeSet<(RelPath, RelPath)> = BTreeSet::new();
+                let edges: Vec<Edge> = a
+                    .dangling
+                    .iter()
+                    .filter(|d| vistas.insert((d.from.clone(), d.target.clone())))
+                    .map(|d| Edge {
+                        source: d.from.clone(),
+                        target: d.target.clone(),
+                        dangling: true,
+                    })
+                    .collect();
+                let ids: BTreeSet<RelPath> = a.dangling.iter().map(|d| d.target.clone()).collect();
+                let nodes = ids.iter().map(|id| doc_set.node(id)).collect();
                 (nodes, edges)
             }
             "path_between" => {
@@ -1089,9 +1103,14 @@ impl App {
     }
 
     /// Analiza el **impacto** de un cambio hipotético sobre un documento sin materializarlo
-    /// (E11-H05, `ARCHITECTURE.md §19.6`, `REFACTOR §9.6/§17`): cuántos documentos se verían
-    /// afectados directa y transitivamente, qué **relaciones tipadas obligatorias** quedarían rotas
-    /// (bloqueos) y un nivel de riesgo derivado. No materializa ningún cambio (aplicar es E12/E13).
+    /// (E11-H05, `ARCHITECTURE.md §19.6`/`§20.10`, `REFACTOR §9.6/§17`): cuántos documentos se
+    /// verían afectados directa y transitivamente, y un nivel de riesgo derivado. No materializa
+    /// ningún cambio (aplicar es E12/E13).
+    ///
+    /// **E17-H05**: el impacto se calcula **solo sobre el grafo de enlaces**. Los tipos y las
+    /// relaciones tipadas del `schema.yaml` dejaron de mirarse (`§20.10`: una relación es un
+    /// enlace Markdown y nada más), así que un workspace con `type:` y relaciones declaradas
+    /// produce exactamente el mismo informe que uno sin nada de eso.
     ///
     /// - `directlyAffected` = nº de backlinks **directos** entrantes del `ref`
     ///   ([`DocumentSet::backlinks`]`.inbound`).
@@ -1099,12 +1118,12 @@ impl App {
     ///   ([`DocumentSet::neighborhood`]`(_, _, Direction::In)`, excluido el propio `ref`) — la **verdad
     ///   del core** (invariante #3); `Store::blast_radius` es la proyección SQL equivalente,
     ///   verificada idéntica por el test `impacto_paridad_core`.
-    /// - `blockingReferences` (solo para `kind == "delete"`): cada documento que declara una relación
-    ///   tipada del schema ([`lodestar_core::schema::RelationDef`], E11-H03) cuyo target es el `ref`
-    ///   — las dependencias estructurales que quedarían rotas al borrarlo. Para otros `kind` sin
-    ///   bloqueos estructurales, va vacío.
-    /// - `risk`: `"high"` si hay bloqueos o el nº de afectados directos es alto; `"medium"` para un
-    ///   impacto moderado; `"low"` en caso contrario.
+    /// - `blockingReferences`: **siempre vacío** desde E17-H05. Los bloqueos derivados de
+    ///   relaciones tipadas obligatorias desaparecieron con el modelo que los definía; el campo se
+    ///   conserva en el wire (`contracts/mcp.yml`) hasta que E20 retire `core::schema` entero, para
+    ///   no romper a un cliente que lo lea.
+    /// - `risk`: `"high"` si el nº de afectados directos es alto; `"medium"` para un impacto
+    ///   moderado; `"low"` en caso contrario.
     ///
     /// `Err(ErrorCode::DocumentNotFound)` si el `ref` no resuelve a un documento
     /// ([`App::resolve_ref`]).
@@ -1136,20 +1155,13 @@ impl App {
         affected_documents.sort();
         let transitively_affected = affected_documents.len();
 
-        // `blockingReferences`: relaciones tipadas obligatorias entrantes que romperían al borrar el
-        // `ref` (solo `kind == "delete"`; el resto de operaciones no tiene bloqueos estructurales
-        // en v1 — mover/deprecar/etc. no rompen la relación, solo requieren revisión).
-        let blocking_references = if kind == "delete" {
-            let schema = WorkspaceSchema::load(self.workspace.root())
-                .map_err(|_| ErrorCode::InternalIoError)?;
-            blocking_relations(&doc_set, &schema, &path)
-        } else {
-            Vec::new()
-        };
+        // `blockingReferences`: vacío por construcción (E17-H05). Se conserva en el wire —y con él
+        // su contador— hasta que E20 retire `core::schema`; ya no hay nada que lo alimente, porque
+        // una relación es un enlace Markdown y un enlace roto no bloquea, se reporta.
+        let blocking_references: Vec<BlockingReference> = Vec::new();
 
-        // Riesgo derivado (conjunto cerrado {"low","medium","high"}, wire en inglés).
-        let risk = if !blocking_references.is_empty() || directly_affected >= HIGH_IMPACT_BACKLINKS
-        {
+        // Riesgo derivado del GRAFO (conjunto cerrado {"low","medium","high"}, wire en inglés).
+        let risk = if directly_affected >= HIGH_IMPACT_BACKLINKS {
             "high"
         } else if directly_affected >= MEDIUM_IMPACT_BACKLINKS
             || transitively_affected >= MEDIUM_IMPACT_BACKLINKS
@@ -1159,14 +1171,9 @@ impl App {
             "low"
         };
 
-        // Recomendaciones accionables (texto español); vacías para un cambio de bajo riesgo.
+        // Recomendaciones accionables (texto español); vacías para un cambio de bajo riesgo. Solo
+        // hablan de ENLACES: el vocabulario de tipos y relaciones dejó de existir (`§20.3`).
         let mut recommendations = Vec::new();
-        if !blocking_references.is_empty() {
-            recommendations.push(format!(
-                "Actualiza o redirige las {} relaciones obligatorias entrantes antes de aplicar el cambio.",
-                blocking_references.len()
-            ));
-        }
         if directly_affected > 0 {
             recommendations.push(format!(
                 "Revisa los {directly_affected} enlaces entrantes que apuntan a este documento tras aplicar «{kind}»."
@@ -1472,9 +1479,9 @@ impl App {
             changed_paths,
             semantic_diff: plan.semantic_diff,
             validation: ApplyValidation {
-                conformant: analysis.hard_fail == 0,
-                errors: analysis.hard_fail,
-                warnings: analysis.warn_count,
+                conformant: analysis.hard_fail() == 0,
+                errors: analysis.hard_fail(),
+                warnings: analysis.warn_count(),
             },
         })
     }
@@ -2206,7 +2213,7 @@ impl PlanImpact {
 // `knowledge_check` — scope, informe y id estable de diagnóstico (E10-H12).
 //
 // Proyección de servicio (framing), NO dominio: viven en `lodestar-app`, no en `core::types`. Los
-// diagnósticos que porta (`Check`) sí son dominio puro del core (compuestos de `Analysis::per_file`
+// diagnósticos que porta (`Check`) sí son dominio puro del core (compuestos de `Analysis::diagnostics`
 // + `validate_schema`). Wire en camelCase.
 // ---------------------------------------------------------------------------
 
@@ -2391,69 +2398,10 @@ pub struct BlockingReference {
     pub reason: String,
 }
 
-/// Documentos que declaran una **relación tipada del schema** ([`lodestar_core::schema::RelationDef`],
-/// E11-H03) cuyo target es `target_path` — las dependencias estructurales que quedarían rotas al
-/// borrar el target (E11-H05). Reusa la misma lectura de campos de relación que
-/// `core::schema::validate_relations` (una secuencia YAML de paths o un único `String`). Emite un
-/// bloqueo por cada relación tipada de un documento que apunte al target (los enlaces sueltos de
-/// cuerpo Markdown NO cuentan: no son dependencias estructurales tipadas).
-fn blocking_relations(
-    doc_set: &DocumentSet,
-    schema: &Schema,
-    target_path: &RelPath,
-) -> Vec<BlockingReference> {
-    if schema.types.is_empty() {
-        return Vec::new();
-    }
-    let mut out = Vec::new();
-    for path in &doc_set.analyze().documents {
-        if path == target_path {
-            continue;
-        }
-        let Some(raw) = doc_set.files().get(path) else {
-            continue;
-        };
-        let parsed = model::parse_file(path.as_str(), raw);
-        let Some(fm) = parsed.frontmatter else {
-            continue;
-        };
-        let Some(tipo) = fm.get_text("type") else {
-            continue;
-        };
-        let Some(doctype) = schema.types.get(&tipo) else {
-            continue;
-        };
-        for rel_name in doctype.relations.keys() {
-            let apunta = relation_field_targets(&fm, rel_name)
-                .iter()
-                .any(|t| RelPath::new(t).ok().as_ref() == Some(target_path));
-            if apunta {
-                out.push(BlockingReference {
-                    path: path.clone(),
-                    reason: format!(
-                        "«{}» depende de este documento vía la relación tipada «{rel_name}».",
-                        path.as_str()
-                    ),
-                });
-            }
-        }
-    }
-    out
-}
-
-/// Lee el campo `rel_name` del frontmatter como lista de paths target: una secuencia YAML de
-/// `String` o un único `String` (misma forma que `core::schema`); vacío si el campo no está o su
-/// forma no es ninguna de las dos.
-fn relation_field_targets(fm: &ParsedFrontmatter, rel_name: &str) -> Vec<String> {
-    match fm.get_key(rel_name) {
-        Some(serde_yaml::Value::Sequence(seq)) => seq
-            .iter()
-            .filter_map(|v| v.as_str().map(str::to_string))
-            .collect(),
-        Some(serde_yaml::Value::String(s)) => vec![s.clone()],
-        _ => Vec::new(),
-    }
-}
+// E17-H05 retiró `blocking_relations`/`relation_field_targets`: los bloqueos estructurales salían
+// de las relaciones tipadas del `schema.yaml`, vocabulario que el modelo universal ya no tiene
+// (`§20.10`). `BlockingReference` sobrevive solo como forma del wire, siempre vacía, hasta que E20
+// retire `core::schema`.
 
 // ---------------------------------------------------------------------------
 // `knowledge_get` — tipos de proyección de servicio y extracción de secciones (E10-H10).
@@ -2480,9 +2428,13 @@ pub struct DocumentView {
     /// Cuerpo Markdown (completo o acotado por `sections`), si se pidió `"body"` en `include`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub body: Option<String>,
-    /// Enlaces salientes resueltos (`Analysis::out`), si se pidió `"outgoingLinks"`.
+    /// Enlaces salientes ya **resueltos y clasificados** (`Analysis::outgoing`), si se pidió
+    /// `"outgoingLinks"`. Desde E17-H05 no es una lista de paths: cada entrada lleva el href
+    /// crudo, el texto, el `span` de bytes del destino, la forma sintáctica y el `LinkTarget`
+    /// (`§20.6`) — es lo que un agente necesita para reescribir un destino sin volver a parsear
+    /// el Markdown.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub outgoing_links: Option<Vec<RelPath>>,
+    pub outgoing_links: Option<Vec<ResolvedLink>>,
     /// Vecindad de enlaces entrantes (`DocumentSet::backlinks`), si se pidió `"backlinks"`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backlinks: Option<Backlinks>,
@@ -2490,7 +2442,7 @@ pub struct DocumentView {
     /// `referenceRoots`, si se pidió `"externalReferences"`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub external_references: Option<Vec<ExternalReference>>,
-    /// Checks de conformidad del documento (`Analysis::per_file`), si se pidió `"diagnostics"`.
+    /// Checks de conformidad del documento (`Analysis::diagnostics`), si se pidió `"diagnostics"`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub diagnostics: Option<Vec<Check>>,
 }
