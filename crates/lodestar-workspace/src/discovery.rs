@@ -14,7 +14,7 @@
 //! nombre de fichero, de modo que **mismo árbol ⇒ mismo inventario y mismos diagnósticos, en el
 //! mismo orden**, con independencia del orden que devuelva el sistema de ficheros.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use ignore::gitignore::GitignoreBuilder;
@@ -109,6 +109,22 @@ impl Default for DiscoveryPolicy {
 pub struct Discovered {
     /// Documentos descubiertos (ruta relativa a la raíz → contenido UTF-8).
     pub files: FileMap,
+    /// Los demás ficheros **que el walker visita**: todo lo que existe bajo la raíz y no acabó en
+    /// [`Discovered::files`] — código, imágenes, los `.md` que no pasan `include`, y también los
+    /// que quedaron fuera del inventario por symlink, tamaño o codificación.
+    ///
+    /// Es lo que permite a [`lodestar_core::links::resolve`] clasificar un enlace a un fichero del
+    /// proyecto como [`lodestar_core::types::LinkTarget::WorkspaceFile`] («existe, pero no es nodo
+    /// del grafo») en vez de como `Missing` (`ARCHITECTURE.md §20.6`, precisión 2). Va en el propio
+    /// resultado del descubrimiento —y no en una función aparte— porque el walker **ya visita**
+    /// estas entradas: recolectarlas cuesta un `insert` por entrada y **cero I/O extra** (no se lee
+    /// su contenido), mientras que una segunda pasada pagaría otro recorrido completo del árbol.
+    ///
+    /// No contiene **directorios** (no son ficheros y `LinkTarget` no los modela: un enlace a
+    /// `guias/` sigue siendo `Missing("guias")`, ver `§20.6` precisión 2b) ni nada **podado** por
+    /// `exclude`/`.gitignore`/`.lodestarignore`, que por definición no se visita — el límite
+    /// conocido y aceptado de `§20.6`.
+    pub other_files: BTreeSet<RelPath>,
     /// Diagnósticos de descubrimiento (`§20.9`), en orden determinista.
     pub diagnostics: Vec<Check>,
 }
@@ -119,6 +135,10 @@ pub struct Discovered {
 /// representable produce un diagnóstico y el recorrido continúa — un solo fichero roto no puede
 /// dejar muerta la lectura del workspace entero. Los diagnósticos incluyen los de
 /// [`case_collisions`] sobre el inventario resultante.
+///
+/// Todo lo que el walker **visita** y no acaba en [`Discovered::files`] —salvo los directorios—
+/// acaba en [`Discovered::other_files`]: es el inventario de «existe, pero no es un documento» que
+/// necesita la clasificación de enlaces de `§20.6`.
 ///
 /// # Orden de precedencia
 ///
@@ -168,6 +188,7 @@ pub fn discover(root: &Path, policy: &DiscoveryPolicy) -> Result<Discovered, Wor
     }
 
     let mut files = FileMap::new();
+    let mut other_files: BTreeSet<RelPath> = BTreeSet::new();
     let mut diagnostics: Vec<Check> = Vec::new();
 
     for entry in builder.build() {
@@ -188,12 +209,25 @@ pub fn discover(root: &Path, policy: &DiscoveryPolicy) -> Result<Discovered, Wor
         let rel = path.strip_prefix(root).unwrap_or(path);
         let file_type = entry.file_type();
 
+        // Un directorio nunca entra en el inventario NI en `other_files` (`LinkTarget` no modela
+        // directorios, `§20.6` precisión 2b), y tampoco se le aplica el filtro `include`: podarlo
+        // aquí cortaría el descenso a los documentos que sí casan.
+        if file_type.is_some_and(|t| t.is_dir()) {
+            continue;
+        }
+
         // Filtro `include`, el ÚLTIMO de la cadena de precedencia (ver la doc de esta función).
-        // Se salta para directorios —nunca entran en el inventario y podarlos aquí cortaría el
-        // descenso— y se aplica a todo lo demás, symlinks incluidos: un `enlace.txt` no es un
-        // documento que Lodestar «no esté viendo», así que no merece diagnóstico.
-        let es_dir = file_type.is_some_and(|t| t.is_dir());
-        if !es_dir && !incluido(&include, path) {
+        // Se aplica a todo no-directorio, symlinks incluidos: un `enlace.txt` no es un documento
+        // que Lodestar «no esté viendo», así que no merece diagnóstico. Lo que no pasa el filtro no
+        // desaparece: es un fichero del proyecto que EXISTE, así que va a `other_files` para que un
+        // enlace a él sea `WorkspaceFile` y no `Missing`.
+        if !incluido(&include, path) {
+            // Una ruta no representable se salta **en silencio** aquí: `PATH-NOT-UTF8` denuncia un
+            // documento que Lodestar no puede ver, y esto no es un documento (igual que el filtro
+            // `include` no emite diagnóstico).
+            if let Ok(rp) = rel_path_from(rel) {
+                other_files.insert(rp);
+            }
             continue;
         }
 
@@ -201,22 +235,31 @@ pub fn discover(root: &Path, policy: &DiscoveryPolicy) -> Result<Discovered, Wor
         // que enterarse de que hay un documento que Lodestar no está viendo.
         if file_type.is_some_and(|t| t.is_symlink()) {
             diagnostics.push(match rel_path_from(rel) {
-                Ok(rp) => Check::new(
-                    Severity::Warn,
-                    CheckCode::SymlinkUnsupported,
-                    format!(
-                        "«{}» es un enlace simbólico: Lodestar no sigue symlinks, así que el \
-                         documento no entra en el inventario",
-                        rp.as_str()
-                    ),
-                    vec![rp],
-                ),
+                Ok(rp) => {
+                    let diag = Check::new(
+                        Severity::Warn,
+                        CheckCode::SymlinkUnsupported,
+                        format!(
+                            "«{}» es un enlace simbólico: Lodestar no sigue symlinks, así que el \
+                             documento no entra en el inventario",
+                            rp.as_str()
+                        ),
+                        vec![rp.clone()],
+                    );
+                    // No es documento, pero la ruta existe: un enlace a ella no «falta».
+                    other_files.insert(rp);
+                    diag
+                }
                 Err(diag) => diag,
             });
             continue;
         }
         if !file_type.is_some_and(|t| t.is_file()) {
-            continue; // directorios, FIFOs, sockets…
+            // FIFOs, sockets…: no son documentos, pero existen.
+            if let Ok(rp) = rel_path_from(rel) {
+                other_files.insert(rp);
+            }
+            continue;
         }
 
         let rp = match rel_path_from(rel) {
@@ -233,6 +276,8 @@ pub fn discover(root: &Path, policy: &DiscoveryPolicy) -> Result<Discovered, Wor
         let size = entry.metadata().map(|m| m.len()).ok();
         if size.is_some_and(|n| n > policy.max_document_bytes as u64) {
             diagnostics.push(demasiado_grande(&rp, size, policy.max_document_bytes));
+            // Fuera del inventario, pero en disco: `WorkspaceFile`, no `Missing`.
+            other_files.insert(rp);
             continue;
         }
         let bytes = match std::fs::read(path) {
@@ -242,6 +287,7 @@ pub fn discover(root: &Path, policy: &DiscoveryPolicy) -> Result<Discovered, Wor
                     "lodestar: aviso: se salta {} (ilegible): {e}",
                     path.display()
                 );
+                other_files.insert(rp);
                 continue;
             }
         };
@@ -252,6 +298,7 @@ pub fn discover(root: &Path, policy: &DiscoveryPolicy) -> Result<Discovered, Wor
                 Some(bytes.len() as u64),
                 policy.max_document_bytes,
             ));
+            other_files.insert(rp);
             continue;
         }
         match String::from_utf8(bytes) {
@@ -268,8 +315,9 @@ pub fn discover(root: &Path, policy: &DiscoveryPolicy) -> Result<Discovered, Wor
                          documento no entra en el inventario",
                         rp.as_str()
                     ),
-                    vec![rp],
+                    vec![rp.clone()],
                 ));
+                other_files.insert(rp);
             }
         }
     }
@@ -278,7 +326,11 @@ pub fn discover(root: &Path, policy: &DiscoveryPolicy) -> Result<Discovered, Wor
     diagnostics.extend(case_collisions(&files));
     diagnostics.sort_by(|a, b| clave_orden(a).cmp(&clave_orden(b)));
 
-    Ok(Discovered { files, diagnostics })
+    Ok(Discovered {
+        files,
+        other_files,
+        diagnostics,
+    })
 }
 
 impl Workspace {

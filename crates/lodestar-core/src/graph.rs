@@ -9,8 +9,9 @@ use crate::types::{Analysis, Direction, Edge, GraphModel, GraphNode, Neighborhoo
 /// repetir: la adyacencia del grafo derivada de [`Analysis::outgoing`] (E17-H04).
 ///
 /// Es el filtro que separa la lista de enlaces del grafo: `outgoing` lleva **todos** los enlaces
-/// del documento (externos, anchors, ficheros del proyecto), pero solo los que conectan con otro
-/// documento son aristas. La deduplicación mantiene el grafo como un conjunto de aristas: enlazar
+/// del documento (externos, anchors, ficheros del proyecto, enlaces rotos a código), pero solo los
+/// que conectan con otro documento —[`crate::types::LinkTarget::internal_path`], la única
+/// definición— son aristas. La deduplicación mantiene el grafo como un conjunto de aristas: enlazar
 /// dos veces al mismo documento no duplica la arista (sí duplica la referencia entrante, que es
 /// una lista de enlaces, no de vecinos).
 pub(crate) fn salientes(a: &Analysis, p: &RelPath) -> Vec<RelPath> {
@@ -50,7 +51,8 @@ pub(crate) fn graph_model(doc_set: &DocumentSet) -> GraphModel {
         for t in salientes(a, src) {
             // E16-H02: se retiró el quirk del prototipo (`buildGraphModel:1850`) que
             // descartaba las aristas/nodos a `index.md`/`log.md`. Todo destino INTERNO es una
-            // arista; un fichero del proyecto o una URI externa no lo son (E17-H04).
+            // arista; un fichero del proyecto, una URI externa o un enlace roto a algo que no
+            // sería un documento Markdown no lo son (E17-H04, `§20.7`).
             let dangling = !doc_set.files().contains_key(&t);
             if dangling {
                 node_ids.insert(t.clone()); // ghost

@@ -452,8 +452,10 @@ fn decodificar_segmento(seg: &str) -> String {
 /// - [`LinkTarget::Missing`] produce **un solo** diagnóstico: `LINK-CASE-MISMATCH` (`Warn`) si el
 ///   inventario tiene esa ruta salvo capitalización, y si no `LINK-TARGET-MISSING`.
 /// - La **severidad** de `LINK-TARGET-MISSING` la decide la familia del destino, no el disco: un
-///   destino ausente terminado en `.md` sería un documento (`danglingDocumentLinks: error`);
-///   cualquier otro, un fichero del proyecto (`missingWorkspaceFiles: warning`).
+///   destino ausente terminado en `.md` ([`RelPath::is_markdown`]) sería un documento
+///   (`danglingDocumentLinks: error`); cualquier otro, un fichero del proyecto
+///   (`missingWorkspaceFiles: warning`). Es el **mismo** discriminador con el que
+///   [`LinkTarget::internal_path`] decide si ese destino es además un fantasma del grafo.
 /// - [`LinkTarget::EscapesWorkspace`] es `Err` y va **sin** `related`: el destino no es nombrable
 ///   como `RelPath` — Lodestar no puede seguirlo, indexarlo ni reescribirlo en un `move_document`.
 /// - **Coste conocido y aceptado** (E17-H03): un enlace de **navegación pura** (`[x](../)`,
@@ -493,8 +495,10 @@ pub fn diagnose(
                 )
                 .with_related(vec![real.clone()]),
                 None => {
-                    let es_documento = destino.as_str().to_lowercase().ends_with(".md");
-                    let (nivel, msg) = if es_documento {
+                    // Mismo discriminador de familia que usa el grafo para decidir si un destino
+                    // ausente es un fantasma (`LinkTarget::internal_path`): si divergieran, habría
+                    // nodos que la conformidad no considera documentos.
+                    let (nivel, msg) = if destino.is_markdown() {
                         (
                             Severity::Err,
                             format!("El enlace apunta a un documento que no existe: «{destino}»."),

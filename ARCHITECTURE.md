@@ -1144,6 +1144,15 @@ Precisiones de E17-H04 (fase verde):
   `knowledge_get.outgoingLinks`, `move_document` y la tabla `links` del store v2 (`§20.12`). El
   **grafo filtra**: nodo solo lo que es documento, arista solo `Document`/`Missing`
   (`LinkTarget::is_internal`, la única definición de «enlace interno»).
+- **Precisión (E17, cableado de `other_files`): un `Missing` solo es fantasma si su destino sería un
+  documento Markdown** (`RelPath::is_markdown`). Los nodos son «todos los documentos **Markdown**
+  descubiertos», así que un enlace roto a código (`[x](src/no_existe.rs)`) **no** mete un vértice
+  `.rs` en el grafo: sigue siendo un colgante de `Analysis::dangling` con su `LINK-TARGET-MISSING`
+  (`warn`), pero no es un nodo. El filtro se aplica **solo** a `Missing`: un destino `Document` está
+  en el inventario y es un documento aunque `discovery.include` admita otra extensión — decidirlo
+  por el nombre sería la clasificación por extensión que `§20.6` prohíbe. Es el mismo discriminador
+  que ya decidía la severidad de `LINK-TARGET-MISSING`, y por eso se comparte: si divergieran,
+  habría nodos del grafo que la conformidad no considera documentos.
 - **`incoming` es literalmente la inversa**: una entrada por **enlace** (un origen que enlaza dos
   veces aparece dos veces) y el `ResolvedLink` que lleva es *el mismo* que su origen tiene en
   `outgoing`. La deduplicación por vecino vive en el grafo, no en la lista.

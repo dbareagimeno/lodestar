@@ -115,6 +115,10 @@ impl DocumentSet {
                             });
                         }
                     }
+                    // Colgante = TODO `Missing`, sin filtrar por familia: un enlace roto a código
+                    // es un enlace roto (`LINK-TARGET-MISSING`), aunque su destino no llegue a ser
+                    // un fantasma del grafo (`LinkTarget::internal_path`). `counts.dangling` cuenta
+                    // enlaces rotos, no vértices.
                     LinkTarget::Missing(t) => dangling.push(DanglingLink {
                         from: from.clone(),
                         target: t.clone(),
@@ -135,8 +139,9 @@ impl DocumentSet {
         }
 
         // Aislados (`§20.7`): sin enlaces INTERNOS entrantes ni salientes. Interno = `Document`
-        // (arista real) o `Missing` (arista a un fantasma: el documento participa en el grafo). Un
-        // enlace externo, un anchor propio o uno a código no conectan con ningún documento.
+        // (arista real) o `Missing` de un destino que sería un documento Markdown (arista a un
+        // fantasma: el documento participa en el grafo). Un enlace externo, un anchor propio o uno
+        // a código —exista o no— no conectan con ningún documento (`LinkTarget::internal_path`).
         let isolated: Vec<RelPath> = documents
             .iter()
             .filter(|p| {

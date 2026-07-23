@@ -141,6 +141,14 @@ pub(crate) fn upsert_file(
     // irrelevante para el path resuelto —`Document` y `Missing` llevan el mismo destino
     // normalizado—, así que basta con el fichero que se está indexando: la extracción sigue siendo
     // por-fichero e incremental.
+    //
+    // Con el inventario vacío TODO destino interno se resuelve `Missing`, así que aquí el filtro de
+    // `internal_path` se aplica por extensión (`RelPath::is_markdown`). Coincide con el core
+    // mientras los documentos sean `.md`, que es lo que descubre la política por defecto
+    // (`discovery.include = **/*.md`); un `include` que admitiera otras extensiones haría que la
+    // cache perdiera esas aristas mientras el core (que sí tiene inventario) las conserva. Es el
+    // precio de indexar fichero a fichero, y la cache es derivada y desechable: cuando podrían
+    // discrepar, **gana el core** (invariante #3).
     let inventario = Inventory::default();
     let mut vistos: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     for raw_link in links::extract_links(&parsed.body) {

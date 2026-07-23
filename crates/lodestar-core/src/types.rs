@@ -82,6 +82,24 @@ impl RelPath {
         let base = self.basename();
         base.strip_suffix(".md").unwrap_or(base)
     }
+
+    /// ¿Esta ruta **sería** un documento Markdown? Extensión `.md`, sin distinguir capitalización.
+    ///
+    /// Es el **único** discriminador de familia del motor (invariante #3), y solo se usa para
+    /// juzgar rutas que **no están en el inventario**: qué es un documento se decide siempre por
+    /// pertenencia al inventario ([`Inventory::contains_document`]), nunca por el nombre — `§20.6`
+    /// prohíbe expresamente clasificar enlaces por extensión. Pero de un destino que no existe no
+    /// hay inventario al que preguntar, y hay que decidir igualmente dos cosas:
+    ///
+    /// - la severidad de `LINK-TARGET-MISSING` (documento ausente = `Err`; fichero del proyecto
+    ///   ausente = `Warn`), y
+    /// - si el destino es un **fantasma del grafo** ([`LinkTarget::internal_path`]).
+    ///
+    /// Las dos preguntas comparten esta respuesta a propósito: si divergieran, el grafo tendría
+    /// nodos que la conformidad no considera documentos, o al revés.
+    pub fn is_markdown(&self) -> bool {
+        self.0.to_lowercase().ends_with(".md")
+    }
 }
 
 impl std::fmt::Display for RelPath {
@@ -651,16 +669,26 @@ pub enum LinkTarget {
 impl LinkTarget {
     /// El destino si el enlace conecta con **otro documento** del grafo, o `None` si no.
     ///
-    /// Interno = [`LinkTarget::Document`] (arista real) o [`LinkTarget::Missing`] (arista a un
-    /// fantasma: el documento *participa* en el grafo aunque el otro extremo no exista todavía).
-    /// Una URI externa, un anchor propio, un escape o un fichero del proyecto **no** conectan con
-    /// ningún documento (`§20.7`).
+    /// Interno = [`LinkTarget::Document`] (arista real) o [`LinkTarget::Missing`] **de un destino
+    /// que sería un documento Markdown** ([`RelPath::is_markdown`]): la arista a un fantasma, el
+    /// documento que aún no existe pero al que ya se enlaza. Una URI externa, un anchor propio, un
+    /// escape o un fichero del proyecto **no** conectan con ningún documento (`§20.7`).
+    ///
+    /// El filtro por familia solo se aplica a `Missing`, y es lo que impide que un enlace roto a
+    /// código (`[x](src/no_existe.rs)`) meta un vértice `.rs` en el grafo de conocimiento, cuyos
+    /// nodos son «todos los documentos **Markdown** descubiertos» (`§20.7`). A `Document` no se le
+    /// aplica —ni puede aplicársele—: ese destino **está** en el inventario, así que es un documento
+    /// aunque la política de descubrimiento admita otras extensiones; decidirlo por el nombre sería
+    /// justo la clasificación por extensión que `§20.6` prohíbe. Un enlace roto a código sigue
+    /// siendo un colgante diagnosticado (`LINK-TARGET-MISSING`, `Warn`) y sigue apareciendo en
+    /// [`Analysis::dangling`]: lo que no es, es un nodo.
     ///
     /// Es la **única** definición de «enlace interno» (invariante #3): la reusan el grafo, los
-    /// aislados, los colgantes, la reescritura de `move_document` y la tabla `links` de la cache.
+    /// aislados, la reescritura de `move_document` y la tabla `links` de la cache.
     pub fn internal_path(&self) -> Option<&RelPath> {
         match self {
-            LinkTarget::Document(p) | LinkTarget::Missing(p) => Some(p),
+            LinkTarget::Document(p) => Some(p),
+            LinkTarget::Missing(p) if p.is_markdown() => Some(p),
             _ => None,
         }
     }

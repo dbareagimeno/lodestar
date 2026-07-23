@@ -126,7 +126,9 @@
 #     de forma; `counts.links` cuenta ahora solo los enlaces INTERNOS (aristas del grafo).
 #   - `GraphNode` (`graph_query.nodes[]`, `neighborhood`): `{ id, title, ghost }` — pierde
 #     `type`/`status` (campos OKF, `§20.3`) y gana el TÍTULO DERIVADO de E16-H03. `ghost` sigue
-#     distinguiendo el destino `Missing` del documento real.
+#     distinguiendo el destino `Missing` del documento real. Precisión de E17 (cableado de
+#     `other_files`): solo hay nodo fantasma si el destino ausente SERÍA un documento Markdown
+#     (`§20.7`); un enlace roto a código no aporta nodo ni arista, aunque siga siendo colgante.
 #   - `knowledge_get.outgoingLinks` deja de ser `[RelPath]` y pasa a `[ResolvedLink]`:
 #     `{ href, text, span: {start,end}, kind, target: {kind,value?}, fragment }` — el href CRUDO
 #     byte a byte, el `span` de bytes del destino dentro del CUERPO y el destino ya clasificado

@@ -125,6 +125,11 @@ impl Workspace {
     /// solo necesita el inventario, y exponerlos a las fachadas es parte de la validación genérica
     /// de E20 (`§20.9`). Quien los necesite hoy llama a [`discovery::discover`] directamente.
     ///
+    /// Con [`discovery::Discovered::other_files`] pasa lo mismo, y por el mismo motivo: los
+    /// llamadores de este atajo (revisión, staging, publicación, recuperación) comparan y escriben
+    /// documentos, no resuelven enlaces. Quien sí los resuelve es [`Workspace::document_set`], que
+    /// por eso llama a [`discovery::discover`] y no a esta función.
+    ///
     /// # Errores
     /// - [`WorkspaceError::Io`] si la política trae un glob inválido.
     pub(crate) fn discover_files(&self) -> Result<FileMap, WorkspaceError> {
@@ -253,8 +258,24 @@ impl Workspace {
     // --- lectura ----------------------------------------------------------
 
     /// Carga el workspace desde disco (el core es la autoridad).
+    ///
+    /// Se construye con [`DocumentSet::with_other_files`] —y no con `from_files`— porque el
+    /// [`lodestar_core::types::Inventory`] que resuelve los enlaces necesita saber también qué
+    /// ficheros del proyecto **no** son documentos: sin ellos, un enlace a `src/auth/token.rs` que
+    /// existe en disco se clasificaría [`lodestar_core::types::LinkTarget::Missing`] y emitiría un
+    /// `LINK-TARGET-MISSING` espurio (`ARCHITECTURE.md §20.6`, precisión 2). Quien hace I/O es
+    /// quien construye el inventario: el core sigue puro (invariante #2).
+    ///
+    /// Por eso no pasa por el atajo interno `discover_files`, que descarta esa mitad del resultado.
+    ///
+    /// # Errores
+    /// - [`WorkspaceError::Io`] si la política de descubrimiento trae un glob inválido.
     pub fn document_set(&self) -> Result<DocumentSet, WorkspaceError> {
-        Ok(DocumentSet::from_files(self.discover_files()?))
+        let descubierto = discovery::discover(&self.root, &self.discovery_policy())?;
+        Ok(DocumentSet::with_other_files(
+            descubierto.files,
+            descubierto.other_files,
+        ))
     }
 
     /// Snapshot unificado: files + analysis + graph, todo junto.
