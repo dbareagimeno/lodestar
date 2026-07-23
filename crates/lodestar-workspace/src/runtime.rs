@@ -3,7 +3,7 @@
 //! abrir el bundle; `journal`/`audit.jsonl` los crea E13 perezosamente cuando existan — aquí solo
 //! se garantizan los subdirectorios base.
 //!
-//! El walker de conocimiento (`io::load_bundle`) y el watcher siguen excluyendo `.lodestar/`
+//! El walker de conocimiento (`discovery::discover`) y el watcher siguen excluyendo `.lodestar/`
 //! entero (runtime incluido) del índice de conceptos; la config canónica se lee aparte, por
 //! `WorkspaceConfig::load` (out-of-band, no como concept).
 

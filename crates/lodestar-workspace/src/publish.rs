@@ -53,7 +53,7 @@ impl Workspace {
         journal: &mut Journal,
     ) -> Result<WorkspaceRevision, WorkspaceError> {
         // Estado de partida y resultado previsto por el plan (misma lógica que el staging).
-        let canonical = io::load_bundle(&self.root)?;
+        let canonical = self.discover_files()?;
         let result = plan::apply_normalized_ops(&canonical, &change_set.operations)?;
         self.publish_result(&result, journal)
     }
@@ -99,7 +99,7 @@ impl Workspace {
             ));
         }
 
-        let canonical = io::load_bundle(&self.root)?;
+        let canonical = self.discover_files()?;
 
         // Conjunto de paths afectados, en orden determinista por `RelPath` (BTreeSet).
         //

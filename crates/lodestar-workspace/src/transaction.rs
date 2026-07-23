@@ -35,7 +35,7 @@ use lodestar_core::plan;
 use lodestar_core::types::{ChangeSet, ChangeSetId, FileMap, RelPath, WorkspaceRevision};
 
 use crate::config::WorkspaceConfig;
-use crate::{io, Workspace, WorkspaceError};
+use crate::{Workspace, WorkspaceError};
 
 /// Deriva el identificador de transacción de un [`ChangeSetId`]: el hash **desnudo** (sin el prefijo
 /// `changeset:`). Ese mismo id nombra —tras el saneado común de `:`/`/`/`\`— el write-ahead journal
@@ -120,7 +120,7 @@ impl Workspace {
         //     reescriba por su cuenta). El conjunto AFECTADO se computa por diferencia contra el
         //     canónico, así que journal y copias cubren justo ese lote (contrato H06: un `Move`
         //     sigue cubierto).
-        let canonical = io::load_bundle(&self.root)?;
+        let canonical = self.discover_files()?;
         let result_files = plan::apply_normalized_ops(&canonical, &change_set.operations)?;
         let affected = affected_paths(&canonical, &result_files);
 

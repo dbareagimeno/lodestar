@@ -20,7 +20,7 @@
 //! `WORKSPACE_RECOVERY_REQUIRED`.
 //!
 //! Runtime, no canónico: el árbol de recuperación vive bajo `.lodestar/runtime/`, que el walker de
-//! conocimiento (`io::load_bundle`) y el watcher excluyen (E9-H06) y `WorkspaceRevision` ignora
+//! conocimiento (`discovery::discover`) y el watcher excluyen (E9-H06) y `WorkspaceRevision` ignora
 //! (E10-H03), por lo que no viola «los `.md` son la única fuente de verdad» (invariante #1).
 //! Copiar el original solo **lee** el canónico: nunca lo modifica.
 
@@ -470,7 +470,7 @@ impl Workspace {
         //     resultado hipotético de la reversión (canónico con backups restaurados / creados
         //     borrados) para estampar la `resultRevision` en el journal ANTES de tocar el canónico.
         let previous = self.workspace_revision()?;
-        let canonical = io::load_bundle(&self.root)?;
+        let canonical = self.discover_files()?;
         let mut result_files = canonical.clone();
         for (rel, content) in &backups {
             result_files.insert(rel.clone(), content.clone());

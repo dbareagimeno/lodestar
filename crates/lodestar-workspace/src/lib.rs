@@ -13,13 +13,16 @@ use std::sync::Arc;
 
 use crossbeam_channel::Receiver;
 use lodestar_core::types::{
-    Analysis, Backlinks, Direction, FrontmatterPatch, GraphModel, Neighborhood, RelPath,
+    Analysis, Backlinks, Direction, FileMap, FrontmatterPatch, GraphModel, Neighborhood, RelPath,
     WorkspaceRevision, WriteOutcome,
 };
 use lodestar_core::Bundle;
 use lodestar_store::{IndexEvent, Store, Watcher};
 
+use crate::discovery::DiscoveryPolicy;
+
 pub mod config;
+pub mod discovery;
 mod error;
 mod external_refs;
 mod gitignore;
@@ -79,6 +82,33 @@ impl Workspace {
         Config::load(&self.root).unwrap_or_default()
     }
 
+    /// La [`DiscoveryPolicy`] efectiva del workspace (`ARCHITECTURE.md §20.5`).
+    ///
+    /// **Punto de inyección único** de la política: hoy son los valores por defecto de `§20.5`;
+    /// E15-H08 la construirá desde `.lodestar/config.yaml` (`discovery.*`) sin que ninguno de los
+    /// llamadores tenga que cambiar.
+    pub fn discovery_policy(&self) -> DiscoveryPolicy {
+        DiscoveryPolicy::default()
+    }
+
+    /// El inventario `.md` del workspace según [`Workspace::discovery_policy`] (E15-H07).
+    ///
+    /// Es el **único** camino de lectura del conocimiento canónico desde disco: sustituye al
+    /// `io::load_bundle` de v0.2.x en todos sus llamadores, de modo que el bundle, la
+    /// [`WorkspaceRevision`] y el motor transaccional vean exactamente el mismo conjunto de
+    /// documentos (si divergieran, el control optimista protegería ficheros que el plan ni
+    /// siquiera ve).
+    ///
+    /// Los diagnósticos de descubrimiento se descartan aquí a propósito: el conjunto de llamadores
+    /// solo necesita el inventario, y exponerlos a las fachadas es parte de la validación genérica
+    /// de E20 (`§20.9`). Quien los necesite hoy llama a [`discovery::discover`] directamente.
+    ///
+    /// # Errores
+    /// - [`WorkspaceError::Io`] si la política trae un glob inválido.
+    pub(crate) fn discover_files(&self) -> Result<FileMap, WorkspaceError> {
+        Ok(discovery::discover(&self.root, &self.discovery_policy())?.files)
+    }
+
     /// El directorio raíz del bundle abierto (E10-H08: lo expone `App::workspace_status` como
     /// `root` de la proyección de estado).
     pub fn root(&self) -> &Path {
@@ -97,7 +127,7 @@ impl Workspace {
     /// # Errores
     /// - [`WorkspaceError::Io`] si falla la lectura del canónico.
     pub fn workspace_revision(&self) -> Result<WorkspaceRevision, WorkspaceError> {
-        let files = io::load_bundle(&self.root)?;
+        let files = self.discover_files()?;
         let cfg = WorkspaceConfig::load(&self.root).unwrap_or_default();
         Ok(lodestar_core::types::workspace_revision(
             &files,
@@ -193,7 +223,7 @@ impl Workspace {
 
     /// Carga el bundle desde disco (el core es la autoridad).
     pub fn bundle(&self) -> Result<Bundle, WorkspaceError> {
-        Ok(Bundle::from_files(io::load_bundle(&self.root)?))
+        Ok(Bundle::from_files(self.discover_files()?))
     }
 
     /// Snapshot unificado: files + analysis + graph, todo junto.

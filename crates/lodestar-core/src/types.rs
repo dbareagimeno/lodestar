@@ -154,7 +154,9 @@ pub enum Severity {
 }
 
 schema_derive! {
-/// Los 15 códigos OKF. UNA sola enum. El valor de wire ES la cadena con guion (rename por variante).
+/// Los códigos de diagnóstico. UNA sola enum: los 15 OKF clásicos, las familias schema-driven de
+/// `§19.3` y los de descubrimiento universal de `§20.9` (E15-H07). El valor de wire ES la cadena
+/// con guion (rename por variante).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum CheckCode {
     #[serde(rename = "OKF-FM01")]
@@ -210,6 +212,30 @@ pub enum CheckCode {
     /// OKF, no a un concept — semánticamente distinto de los tres.
     #[serde(rename = "EXTREF-MISSING")]
     ExtrefMissing,
+    // --- Descubrimiento universal (E15-H07, `ARCHITECTURE.md §20.5`/`§20.9`) ---
+    // Los produce `lodestar_workspace::discovery`, no `conform`: describen lo que Lodestar NO
+    // pudo incorporar al inventario (o lo que no es portable), no el incumplimiento de una
+    // especificación documental. Conviven con los `OKF-*` hasta E16.
+    /// Un `.md` cuyos bytes no son UTF-8 válido: no se puede interpretar, así que no entra en el
+    /// inventario.
+    #[serde(rename = "DOC-NOT-UTF8")]
+    DocNotUtf8,
+    /// Un `.md` por encima del tamaño máximo por documento de la política de descubrimiento.
+    #[serde(rename = "DOC-TOO-LARGE")]
+    DocTooLarge,
+    /// Una ruta no representable (bytes no UTF-8 en Unix, surrogate suelto en Windows) o que no es
+    /// una ruta relativa válida del workspace. Su `Check` va SIN `targets`: no hay `RelPath` que
+    /// construir — ese es justamente el problema (invariante #6).
+    #[serde(rename = "PATH-NOT-UTF8")]
+    PathNotUtf8,
+    /// Un enlace simbólico encontrado en el árbol: Lodestar no los sigue, y en vez de ignorarlo en
+    /// silencio se reporta el documento que queda fuera del inventario.
+    #[serde(rename = "SYMLINK-UNSUPPORTED")]
+    SymlinkUnsupported,
+    /// Rutas que solo difieren en capitalización: en un volumen case-insensitive son el mismo
+    /// fichero, así que el workspace no es portable.
+    #[serde(rename = "LINK-CASE-MISMATCH")]
+    LinkCaseMismatch,
 }
 }
 
@@ -238,6 +264,11 @@ impl CheckCode {
             CheckCode::RelCard => "REL-CARD",
             CheckCode::RelType => "REL-TYPE",
             CheckCode::ExtrefMissing => "EXTREF-MISSING",
+            CheckCode::DocNotUtf8 => "DOC-NOT-UTF8",
+            CheckCode::DocTooLarge => "DOC-TOO-LARGE",
+            CheckCode::PathNotUtf8 => "PATH-NOT-UTF8",
+            CheckCode::SymlinkUnsupported => "SYMLINK-UNSUPPORTED",
+            CheckCode::LinkCaseMismatch => "LINK-CASE-MISMATCH",
         }
     }
 }

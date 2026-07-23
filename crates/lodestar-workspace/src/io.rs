@@ -1,58 +1,13 @@
-//! El **único escritor**: lectura del bundle y escritura atómica temp+rename (`§6`).
+//! El **único escritor**: escritura atómica temp+rename (`§6`).
+//!
+//! La **lectura** del inventario vive desde E15-H07 en [`crate::discovery`]: el `load_bundle` que
+//! ocupaba este módulo se retiró al quedar sin llamadores (`ARCHITECTURE.md §20.5`).
 
 use std::path::{Path, PathBuf};
 
-use lodestar_core::types::{FileMap, RelPath};
+use lodestar_core::types::RelPath;
 
 use crate::error::WorkspaceError;
-
-/// Carga todos los `.md` del bundle a un `FileMap` (excluye `.lodestar/` y `.git/`).
-pub fn load_bundle(root: &Path) -> Result<FileMap, WorkspaceError> {
-    let mut files = FileMap::new();
-    let walker = ignore::WalkBuilder::new(root)
-        .hidden(false)
-        .git_ignore(true)
-        .filter_entry(|e| {
-            let name = e.file_name().to_string_lossy();
-            name != ".lodestar" && name != ".git"
-        })
-        .build();
-    for entry in walker {
-        // Un `.md` no-UTF8 o ilegible NO aborta la carga entera (dejaría toda lectura de la
-        // workspace muerta por un solo fichero): se salta con diagnóstico, como hace
-        // `vcs::tree_files` con los blobs no-UTF8.
-        let entry = match entry {
-            Ok(e) => e,
-            Err(e) => {
-                eprintln!("lodestar: aviso: entrada ilegible en el bundle: {e}");
-                continue;
-            }
-        };
-        let path = entry.path();
-        if !path.is_file() || path.extension().map(|e| e != "md").unwrap_or(true) {
-            continue;
-        }
-        let rel = path
-            .strip_prefix(root)
-            .unwrap_or(path)
-            .to_string_lossy()
-            .replace('\\', "/");
-        if let Ok(rp) = RelPath::new(&rel) {
-            match std::fs::read_to_string(path) {
-                Ok(content) => {
-                    files.insert(rp, content);
-                }
-                Err(e) => {
-                    eprintln!(
-                        "lodestar: aviso: se salta {} (no UTF-8 o ilegible): {e}",
-                        path.display()
-                    );
-                }
-            }
-        }
-    }
-    Ok(files)
-}
 
 /// Escritura atómica (temp + fsync + rename) — el único camino de escritura de un `.md`.
 ///

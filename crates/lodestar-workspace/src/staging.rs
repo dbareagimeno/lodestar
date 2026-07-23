@@ -7,7 +7,7 @@
 //! único escritor (temp+rename) llega en E13-H05; aquí solo se prepara y se valida el resultado.
 //!
 //! Runtime, no canónico: el árbol de staging vive bajo `.lodestar/runtime/`, que el walker de
-//! conocimiento (`io::load_bundle`) y el watcher ya excluyen (E9-H06) y `WorkspaceRevision`
+//! conocimiento (`discovery::discover`) y el watcher ya excluyen (E9-H06) y `WorkspaceRevision`
 //! ignora (E10-H03). Por eso se escribe con `std::fs::write` normal — el protocolo atómico del
 //! único-escritor (`io::write_atomic`) protege los `.md` canónicos, no este scratch desechable.
 
@@ -18,7 +18,7 @@ use lodestar_core::types::{ChangeSet, ChangeSetId, FileMap, RelPath};
 use lodestar_core::Bundle;
 
 use crate::error::WorkspaceError;
-use crate::{io, Workspace, WorkspaceSchema};
+use crate::{Workspace, WorkspaceSchema};
 
 /// Directorio de staging materializado: contiene el árbol `.md` resultante de aplicar un
 /// [`ChangeSet`] sobre el canónico, bajo `.lodestar/runtime/staging/<changeSetId saneado>/`.
@@ -54,7 +54,7 @@ fn staging_dir_name(id: &ChangeSetId) -> String {
 
 /// Lee todos los `.md` bajo `root` a un [`FileMap`] con claves relativas a `root`.
 ///
-/// Recorrido propio (no `io::load_bundle`) a propósito: el árbol de staging vive dentro de
+/// Recorrido propio (no `discovery::discover`) a propósito: el árbol de staging vive dentro de
 /// `.lodestar/`, que las reglas de `.gitignore` del bundle marcan como ignorado — un walker que
 /// respete git ignoraría el árbol entero. Aquí solo interesa el contenido literal del staging.
 fn read_tree(root: &Path) -> Result<FileMap, WorkspaceError> {
@@ -99,7 +99,7 @@ impl Workspace {
         &self,
         change_set: &ChangeSet,
     ) -> Result<StagingDir, WorkspaceError> {
-        let canonical = io::load_bundle(&self.root)?;
+        let canonical = self.discover_files()?;
         let result = plan::apply_normalized_ops(&canonical, &change_set.operations)?;
         self.materialize_staging_result(&change_set.id, &result)
     }
