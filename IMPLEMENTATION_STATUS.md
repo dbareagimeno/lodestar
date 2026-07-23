@@ -726,3 +726,30 @@ superficie de producto; git queda como crate dormido) y `DECISIONES.md §0`. Des
   `title_from_path_boundaries_como_js` — el prototipo dejó de arbitrar en E15-H04. `model::Heading`
   gana el campo `level` para poder distinguir el H1 del primer heading. Un `title` no escalar (lista,
   mapa, `null`) o vacío cae al siguiente eslabón, y **nunca** se reescribe el dato del usuario.
+- ✅ **E16-H02/H03** — **Ningún fichero reservado + título derivado**. Fuera `FileKind`,
+  `file_kind`, `is_reserved`, `RelPath::is_reserved`/`concept_id`, la rama de reservados de
+  `parse_file`, `root_okf_version`, el gating «reservado antes de negar» de la query y el quirk de
+  `graph.rs`. `Analysis` pierde `in_index`/`okf_version`; `Backlinks` pierde `index_refs`;
+  `orphans` → `isolated` **con definición nueva** (sin entrantes NI salientes) y deja de ser
+  diagnóstico. `derived_title` = `title` escalar → primer H1 → nombre del fichero; muere
+  `title_from_path` con su Title Case heredado del quirk `\b` de JS. Radio hasta el store
+  (`files.kind` y `links.src_is_index` fuera, `USER_VERSION` 2→3). Contrato: `graph_query`
+  `"orphans"` → `"isolated"` **sin alias** (la semántica cambió: un alias devolvería otra cosa bajo
+  el mismo nombre). 271 tests.
+- ✅ **E16-H04/H05** — **Patch quirúrgico + catálogo mínimo**. `patch_frontmatter` edita el **texto
+  crudo** del bloque línea a línea con un splice del `span`, sin round-trip por `serde_yaml` en el
+  camino feliz; un comentario YAML del usuario sobrevive (es el testigo de que no hubo round-trip).
+  Verificación cruzada contra el `Mapping` parseado para descartar claves duplicadas, anchors y
+  alias. **Cierra un riesgo de pérdida de datos que no tenía criterio**: la frontera no es «no tengo
+  mapa que parchear» sino «hay un bloque del usuario que no sé leer y no voy a pisar» — decidido
+  sobre `split_front`, no sobre `frontmatter.is_none()`, que confunde ausencia con ilegibilidad.
+  Llega a producción vía `merge_frontmatter` y `plan::apply_one`. `CheckCode` pasa al catálogo de
+  `§20.9`: ni un `OKF-*`. 282 tests.
+- ✅ **E16-H06** — **`Concept` → `Document`** (cierra E16). 54 ficheros; `core::bundle` →
+  `core::document_set`; wire `CONCEPT_NOT_FOUND` → `DOCUMENT_NOT_FOUND` sin alias. **E16 COMPLETA.**
+  283 tests.
+- ⚠️ **Deuda declarada al cerrar E16**: (1) `Severity::Warn` se ha quedado **sin productor** en
+  `all_checks`, así que `PlanPolicy::allowWarnings` y `gate.blockWarnings` son inalcanzables desde
+  datos reales hasta que E17 traiga `LINK-CASE-MISMATCH` y E20 la política de severidades; (2) la
+  pareja `Conformant → Valid` de `§20.3` está a medias — ver `DECISIONES.md §12`… perdón, **§13**;
+  (3) `core::types` sigue documentando el `.d.ts` generado por ts-rs, falso desde que se retiró la UI.

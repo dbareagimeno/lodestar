@@ -260,6 +260,28 @@ Pendientes de priorización (no bloquean el núcleo):
   propiedad y la ficción de "todo es string" se note. No bloquea: se puede empezar por (a) y migrar
   a (b) sin romper el wire, porque el tipo viaja en `value_type`.
 
+## 13. `Conformant → Valid`: la mitad que falta de `§20.3` — 🟠 ABIERTA
+
+- **Contexto** (detectado al implementar E16-H06): la tabla de terminología de `§20.3` manda dos
+  sustituciones emparejadas, `Conformance → Validation` y `Conformant → Valid`. La primera está
+  hecha (`ApplyConformance` → `ApplyValidation`, `Store::conformance_counts` →
+  `validation_counts`…). La segunda **no**, y el resultado es una asimetría visible en el wire:
+  `ApplyValidation { conformant, errors, warnings }` — el contenedor habla de *validación* y el
+  veredicto sigue hablando de *conformidad*.
+- **Por qué no se cerró**: `conformant` no aparece solo como campo. Está en
+  `ErrorCode::NonconformantResult` (wire `NONCONFORMANT_RESULT`), que es **una de las 16 filas
+  congeladas** del catálogo de errores de `§19.3`, y en `PlanPolicy::requireConformantResult` y
+  `allowNonconformant`, que son superficie de `change_plan`. No es un renombre léxico: toca el
+  contrato de errores.
+- **Qué decidir**: (a) completar la pareja y aceptar el cambio de wire
+  (`NONCONFORMANT_RESULT` → `INVALID_RESULT`, `requireConformantResult` → `requireValidResult`),
+  aprovechando que v0.3 ya es incompatible; (b) dejar `conformant` como término del **veredicto**
+  y documentar en `§20.3` que la sustitución solo aplica al *sustantivo*, no al *adjetivo*.
+- **Recomendación**: **(a)**, y hacerlo en **E21**, que es cuando se toca el motor transaccional y
+  su contrato de errores. Hacerlo ahora significaría abrir el catálogo congelado dos veces.
+  Mientras tanto la asimetría es fea pero inocua: `core::types::ValidationReport` ya tenía esa
+  misma forma antes de la migración, así que no se ha introducido una discrepancia nueva.
+
 ---
 
 ### Resumen de la recomendación
