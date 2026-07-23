@@ -172,7 +172,7 @@ pub fn materialize_disk_only(root: &Path, size_limit: usize) -> std::io::Result<
 /// Bundle conforme mínimo: un index raíz + un concept válido que se enlazan mutuamente.
 pub fn conformant() -> FileMap {
     file_map(&[
-        ("index.md", "---\nokf_version: \"0.1\"\n---\n\n# Bundle\n\n# Concept\n\n* [Alfa](alfa.md)\n"),
+        ("index.md", "---\ntype: Index\ntitle: Bundle\ndescription: Índice del bundle\nokf_version: \"0.1\"\n---\n\n# Bundle\n\n# Concept\n\n* [Alfa](alfa.md)\n"),
         (
             "alfa.md",
             "---\ntype: Concept\ntitle: Alfa\ndescription: Primer concept\n---\n\n# Resumen\n\nEnlaza a [Beta](/beta.md).\n",
@@ -211,7 +211,7 @@ pub fn synthetic(n: usize) -> FileMap {
     let mut pairs: Vec<(RelPath, String)> = Vec::with_capacity(n + 1);
     pairs.push((
         RelPath::new("index.md").unwrap(),
-        "---\nokf_version: \"0.1\"\n---\n\n# Bundle\n".to_string(),
+        "---\ntype: Index\ntitle: Bundle\ndescription: Índice del bundle\nokf_version: \"0.1\"\n---\n\n# Bundle\n".to_string(),
     ));
     for i in 0..n {
         let next = (i + 1) % n;

@@ -40,9 +40,9 @@ fn assert_matches_core(store: &Store, files: &FileMap) {
     assert_eq!(wc, a.warn_count, "warn_count difiere (gana el core)");
 
     assert_eq!(
-        sorted(store.orphans().unwrap()),
-        sorted(a.orphans.clone()),
-        "orphans difiere"
+        sorted(store.isolated().unwrap()),
+        sorted(a.isolated.clone()),
+        "isolated difiere"
     );
     assert_eq!(
         sorted(store.dangling().unwrap()),
@@ -50,13 +50,9 @@ fn assert_matches_core(store: &Store, files: &FileMap) {
         "dangling difiere"
     );
     assert_eq!(
-        store
-            .in_index()
-            .unwrap()
-            .into_iter()
-            .collect::<BTreeSet<_>>(),
-        a.in_index.iter().cloned().collect::<BTreeSet<_>>(),
-        "in_index difiere"
+        sorted(store.concepts().unwrap()),
+        sorted(a.concepts.clone()),
+        "el inventario de documentos difiere"
     );
     for p in &a.concepts {
         let mut expected = a.inn.get(p).cloned().unwrap_or_default();
@@ -80,7 +76,8 @@ fn abrir_crea_esquema_y_reabrir_es_idempotente() {
     }
     // Reabrir no rompe y ve el mismo contenido.
     let store = Store::open_and_build(dir.path()).unwrap();
-    assert_eq!(store.concepts().unwrap().len(), 2);
+    // 3 = los 3 `.md` del fixture: desde E16-H02 `index.md` es un documento más del inventario.
+    assert_eq!(store.concepts().unwrap().len(), 3);
     assert!(dir.path().join(".lodestar/index.db").exists());
 }
 
@@ -158,7 +155,7 @@ fn property_incremental_igual_core() {
             // crear/modificar con un enlace pseudo-aleatorio
             let target = names[1 + (next() % (names.len() - 1))];
             let raw = if name == "index.md" {
-                format!("---\nokf_version: \"0.1\"\n---\n\n# Bundle\n\n* [x](/{target})\n")
+                format!("---\ntype: Index\ntitle: Bundle\ndescription: Índice del bundle\nokf_version: \"0.1\"\n---\n\n# Bundle\n\n* [x](/{target})\n")
             } else {
                 format!(
                     "---\ntype: Concept\ntitle: {name}\ndescription: d\n---\n\n# H\n\n[l](/{target})\n"

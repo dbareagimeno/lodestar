@@ -232,7 +232,7 @@ impl Workspace {
             .ok_or(WorkspaceError::NoCache)
     }
 
-    /// Acceso a la cache incremental (para consultas aceleradas: backlinks/orphans/FTS).
+    /// Acceso a la cache incremental (para consultas aceleradas: backlinks/aislados/FTS).
     pub fn cache(&self) -> Option<&Arc<Store>> {
         self.cache.as_ref()
     }
@@ -363,7 +363,7 @@ impl Workspace {
             .map_err(|e| WorkspaceError::Io(e.to_string()))
     }
 
-    /// Lista las filas del árbol de concepts (título/orphan/invalid resueltos por el core).
+    /// Lista las filas del árbol de documentos (título/isolated/invalid resueltos por el core).
     pub fn list_concepts(
         &self,
     ) -> Result<Vec<lodestar_core::types::ConceptSummary>, WorkspaceError> {

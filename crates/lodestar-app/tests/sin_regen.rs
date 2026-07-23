@@ -31,8 +31,8 @@ fn escribe(root: &Path, rel: &str, contenido: &str) {
     std::fs::write(ruta, contenido).unwrap();
 }
 
-/// Política permisiva: el criterio no depende del veredicto de conformidad (un documento que no
-/// está listado por ningún índice es, a lo sumo, un huérfano → warning).
+/// Política permisiva: el criterio no depende del veredicto de conformidad (desde E16-H02 un
+/// documento sin enlaces ni siquiera genera diagnóstico: el aislamiento es una propiedad).
 fn policy_permisiva() -> PlanPolicy {
     PlanPolicy {
         require_conformant_result: false,
@@ -82,7 +82,7 @@ fn apply_no_regenera_indices() {
 
     // (1) Un `index.md` escrito a mano y DESACTUALIZADO: menciona `alfa.md`, no menciona el
     //     documento que se creará, y su prosa no es la que emitiría ningún generador.
-    let index_original = "---\nokf_version: \"0.1\"\n---\n\n# Mi proyecto\n\n\
+    let index_original = "---\ntype: Index\ntitle: Bundle\ndescription: Índice del bundle\nokf_version: \"0.1\"\n---\n\n# Mi proyecto\n\n\
                           Índice mantenido a mano.\n\n* [Alfa](/alfa.md)\n";
     escribe(root, "index.md", index_original);
     escribe(

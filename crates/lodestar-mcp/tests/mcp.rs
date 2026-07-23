@@ -50,7 +50,7 @@ fn bundle_min() -> tempfile::TempDir {
     write(
         dir.path(),
         "index.md",
-        "---\nokf_version: \"0.1\"\n---\n\n# Bundle\n",
+        "---\ntype: Index\ntitle: Bundle\ndescription: Índice del bundle\nokf_version: \"0.1\"\n---\n\n# Bundle\n",
     );
     dir
 }
@@ -256,17 +256,17 @@ fn roundtrip_profile(
     out
 }
 
-/// Bundle con **exactamente 3 conceptos huérfanos**: un `index.md` raíz que NO enlaza a ninguno
-/// (in_index vacío) más 3 `.md` conceptuales que no se enlazan entre sí ni reciben backlinks. Un
-/// huérfano = concepto sin enlaces entrantes y ausente del índice (`bundle.rs` `compute_analysis`),
-/// así que los 3 lo son y nadie más (index.md/log.md no cuentan como concepto).
-fn bundle_con_tres_orphans() -> tempfile::TempDir {
+/// Bundle con **exactamente 4 documentos aislados**: un `index.md` raíz que no enlaza a nadie más
+/// 3 `.md` que no se enlazan entre sí ni reciben enlaces. Desde E16-H02 aislado = documento sin
+/// enlaces internos entrantes NI salientes (`§20.7`) e `index.md` es un documento más del
+/// inventario: sin enlaces de ningún tipo, también está aislado.
+fn bundle_con_cuatro_aislados() -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
     // index.md sin enlaces salientes: no "adopta" a ningún concepto.
     write(
         dir.path(),
         "index.md",
-        "---\nokf_version: \"0.1\"\n---\n\n# Bundle\n",
+        "---\ntype: Index\ntitle: Bundle\ndescription: Índice del bundle\nokf_version: \"0.1\"\n---\n\n# Bundle\n",
     );
     for slug in ["uno", "dos", "tres"] {
         write(
@@ -281,11 +281,14 @@ fn bundle_con_tres_orphans() -> tempfile::TempDir {
 }
 
 /// E10-H08 · Criterio `status_counts` (benchmark §17):
-/// Dado un workspace con 3 orphans, Cuando se llama `workspace_status`, Entonces
-/// `counts.orphans == 3` y `workspaceRevision` está presente (formato `blake3:…`).
+/// Dado un workspace con 4 documentos aislados, Cuando se llama `workspace_status`, Entonces
+/// `counts.isolated == 4` y `workspaceRevision` está presente (formato `blake3:…`).
+///
+/// El conteo cambió de 3 a 4 con E16-H02: `counts.orphans` pasó a `counts.isolated` y el
+/// `index.md` del fixture —sin enlaces entrantes ni salientes— ya es un documento del inventario.
 #[test]
 fn status_counts() {
-    let dir = bundle_con_tres_orphans();
+    let dir = bundle_con_cuatro_aislados();
     let resp = roundtrip(
         dir.path(),
         &[
@@ -295,9 +298,9 @@ fn status_counts() {
     );
     let sc = &resp[0]["result"]["structuredContent"];
     assert_eq!(
-        sc["counts"]["orphans"].as_u64(),
-        Some(3),
-        "workspace_status debe reportar counts.orphans == 3: {resp:?}"
+        sc["counts"]["isolated"].as_u64(),
+        Some(4),
+        "workspace_status debe reportar counts.isolated == 4: {resp:?}"
     );
     let rev = sc["workspaceRevision"].as_str().unwrap_or("");
     assert!(
@@ -312,7 +315,7 @@ fn status_counts() {
 /// que devuelva `false` siempre pasaría el criterio sin implementar la lógica del perfil.)
 #[test]
 fn status_capabilities_readonly() {
-    let dir = bundle_con_tres_orphans();
+    let dir = bundle_con_cuatro_aislados();
     let call = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"workspace_status","arguments":{}}}"#;
 
     let ro = roundtrip_profile(dir.path(), "readonly", &[call], 1);
@@ -388,7 +391,7 @@ fn bundle_autenticacion() -> tempfile::TempDir {
     write(
         dir.path(),
         "index.md",
-        "---\nokf_version: \"0.1\"\n---\n\n# Bundle\n\n* [Auth](auth.md)\n",
+        "---\ntype: Index\ntitle: Bundle\ndescription: Índice del bundle\nokf_version: \"0.1\"\n---\n\n# Bundle\n\n* [Auth](auth.md)\n",
     );
     write(
         dir.path(),
@@ -464,7 +467,7 @@ fn bundle_tipos_mixtos() -> tempfile::TempDir {
     write(
         dir.path(),
         "index.md",
-        "---\nokf_version: \"0.1\"\n---\n\n# Bundle\n",
+        "---\ntype: Index\ntitle: Bundle\ndescription: Índice del bundle\nokf_version: \"0.1\"\n---\n\n# Bundle\n",
     );
     for slug in ["dec-uno", "dec-dos"] {
         write(
@@ -543,7 +546,7 @@ fn bundle_cincuenta() -> tempfile::TempDir {
     write(
         dir.path(),
         "index.md",
-        "---\nokf_version: \"0.1\"\n---\n\n# Bundle\n",
+        "---\ntype: Index\ntitle: Bundle\ndescription: Índice del bundle\nokf_version: \"0.1\"\n---\n\n# Bundle\n",
     );
     for i in 0..50 {
         let slug = format!("c{i:02}");
@@ -706,7 +709,7 @@ fn bundle_get_revision() -> tempfile::TempDir {
     write(
         dir.path(),
         "index.md",
-        "---\nokf_version: \"0.1\"\n---\n\n# Bundle\n\n* [Alfa](alfa.md)\n",
+        "---\ntype: Index\ntitle: Bundle\ndescription: Índice del bundle\nokf_version: \"0.1\"\n---\n\n# Bundle\n\n* [Alfa](alfa.md)\n",
     );
     write(
         dir.path(),
@@ -769,7 +772,7 @@ fn bundle_get_secciones() -> tempfile::TempDir {
     write(
         dir.path(),
         "index.md",
-        "---\nokf_version: \"0.1\"\n---\n\n# Bundle\n\n* [Rotacion](decisiones/rotacion.md)\n",
+        "---\ntype: Index\ntitle: Bundle\ndescription: Índice del bundle\nokf_version: \"0.1\"\n---\n\n# Bundle\n\n* [Rotacion](decisiones/rotacion.md)\n",
     );
     write(
         dir.path(),
@@ -921,7 +924,7 @@ fn bundle_con_schema() -> tempfile::TempDir {
     write(
         dir.path(),
         "index.md",
-        "---\nokf_version: \"0.1\"\n---\n\n# Bundle\n",
+        "---\ntype: Index\ntitle: Bundle\ndescription: Índice del bundle\nokf_version: \"0.1\"\n---\n\n# Bundle\n",
     );
     write(
         dir.path(),
@@ -1148,7 +1151,7 @@ fn bundle_editado_a_mano() -> tempfile::TempDir {
     write(
         dir.path(),
         "index.md",
-        "---\nokf_version: \"0.1\"\n---\n\n# Bundle\n\n* [Editado](editado-a-mano.md)\n",
+        "---\ntype: Index\ntitle: Bundle\ndescription: Índice del bundle\nokf_version: \"0.1\"\n---\n\n# Bundle\n\n* [Editado](editado-a-mano.md)\n",
     );
     // Frontmatter válido como bloque pero SIN `type` → OKF-TYPE (Err). Simula a alguien que editó
     // el .md a pelo y olvidó el campo obligatorio.
@@ -1217,7 +1220,7 @@ fn bundle_affected() -> tempfile::TempDir {
     write(
         dir.path(),
         "index.md",
-        "---\nokf_version: \"0.1\"\n---\n\n# Bundle\n\n* [Centro](centro.md)\n",
+        "---\ntype: Index\ntitle: Bundle\ndescription: Índice del bundle\nokf_version: \"0.1\"\n---\n\n# Bundle\n\n* [Centro](centro.md)\n",
     );
     // A: conforme, enlaza a B.
     write(
@@ -1286,7 +1289,7 @@ fn bundle_dos_diagnosticos() -> tempfile::TempDir {
     write(
         dir.path(),
         "index.md",
-        "---\nokf_version: \"0.1\"\n---\n\n# Bundle\n\n* [Uno](uno.md)\n* [Dos](dos.md)\n",
+        "---\ntype: Index\ntitle: Bundle\ndescription: Índice del bundle\nokf_version: \"0.1\"\n---\n\n# Bundle\n\n* [Uno](uno.md)\n* [Dos](dos.md)\n",
     );
     for slug in ["uno", "dos"] {
         write(
@@ -1450,7 +1453,7 @@ fn tools_declaran_outputschema() {
 //
 // WIRE DE ENTRADA asumido (el implementador puede refinar los tipos internos, no el wire):
 //   arguments: {
-//     operation: "backlinks" | "outgoing" | "neighborhood" | "orphans" | "dangling",
+//     operation: "backlinks" | "outgoing" | "neighborhood" | "isolated" | "dangling",
 //     ref?:       { path: "<RelPath>" },       // ConceptRef; obligatorio en backlinks/outgoing/neighborhood
 //     depth?:     <n>,                          // solo neighborhood (por defecto 1)
 //     direction?: "out" | "in" | "both",       // solo neighborhood (por defecto "out")
@@ -1469,7 +1472,7 @@ fn tools_declaran_outputschema() {
 // FIRMA DE SERVICIO ASUMIDA (el implementador la crea con su propia elección de tipos internos):
 //   App::graph_query(operation, ref?, depth?, direction?, limit?, cursor?)
 //       -> Result<{ nodes, edges, summary{nodeCount,edgeCount,truncated}, nextCursor }, _>
-//   Reusa `Bundle::backlinks`/`Bundle::neighborhood` y `Analysis::orphans`/`dangling` (verdad del
+//   Reusa `Bundle::backlinks`/`Bundle::neighborhood` y `Analysis::isolated`/`dangling` (verdad del
 //   core, invariante #3).
 // ---------------------------------------------------------------------------
 
@@ -1521,14 +1524,14 @@ fn como_conjunto(vals: &[serde_json::Value]) -> std::collections::BTreeSet<Strin
 /// Bundle: `a.md`/`b.md`/`c.md` enlazan a `objetivo.md`; `d.md` es un decoy que enlaza a OTRO
 /// concepto (`a.md`), no a `objetivo.md`, para que el criterio no sea vacuo (un stub que devolviera
 /// todos los conceptos incluiría a `d` como fuente y fallaría). `index.md` NO lista `objetivo.md`
-/// (evita que `index_refs` añada una arista desde un fichero reservado).
+/// (así el índice no aporta aristas entrantes al target).
 #[test]
 fn graph_backlinks() {
     let dir = tempfile::tempdir().unwrap();
     write(
         dir.path(),
         "index.md",
-        "---\nokf_version: \"0.1\"\n---\n\n# Bundle\n\n* [A](a.md)\n* [B](b.md)\n* [C](c.md)\n* [D](d.md)\n",
+        "---\ntype: Index\ntitle: Bundle\ndescription: Índice del bundle\nokf_version: \"0.1\"\n---\n\n# Bundle\n\n* [A](a.md)\n* [B](b.md)\n* [C](c.md)\n* [D](d.md)\n",
     );
     write(
         dir.path(),
@@ -1624,7 +1627,7 @@ fn bundle_vecindario() -> tempfile::TempDir {
     write(
         dir.path(),
         "index.md",
-        "---\nokf_version: \"0.1\"\n---\n\n# Bundle\n",
+        "---\ntype: Index\ntitle: Bundle\ndescription: Índice del bundle\nokf_version: \"0.1\"\n---\n\n# Bundle\n",
     );
     write(
         dir.path(),
@@ -1714,20 +1717,22 @@ fn graph_neighborhood_paridad() {
     );
 }
 
-/// E11-H01 · Criterio `graph_orphans`:
-/// Dado un bundle con conceptos huérfanos, Cuando se llama `graph_query(operation:orphans)`,
-/// Entonces lista exactamente esos paths (los conceptos sin enlaces entrantes y ausentes del índice).
+/// E11-H01 · Criterio `graph_orphans`, MIGRADO a `isolated` en E16-H02:
+/// Dado un bundle con documentos aislados, Cuando se llama `graph_query(operation:isolated)`,
+/// Entonces lista exactamente esos paths (los documentos sin enlaces internos entrantes NI
+/// salientes, `§20.7`).
 ///
-/// Bundle: `uno`/`dos`/`tres` son huérfanos (no listados en index, sin backlinks); `visible.md` SÍ
-/// está en el índice → NO es huérfano. El no-huérfano hace el criterio no vacuo (un stub que
-/// devolviera todos los conceptos incluiría `visible.md` y fallaría).
+/// Bundle: `uno`/`dos`/`tres` no tienen enlaces de ningún tipo → aislados; `visible.md` recibe uno
+/// (desde `index.md`) e `index.md` emite uno → **ninguno de los dos** está aislado. Esos dos hacen
+/// el criterio no vacuo por partida doble: excluyen tanto al stub que devolviera todos los
+/// documentos como al que confundiera «aislado» con «sin entrantes» (que incluiría `index.md`).
 #[test]
-fn graph_orphans() {
+fn graph_isolated() {
     let dir = tempfile::tempdir().unwrap();
     write(
         dir.path(),
         "index.md",
-        "---\nokf_version: \"0.1\"\n---\n\n# Bundle\n\n* [Visible](visible.md)\n",
+        "---\ntype: Index\ntitle: Bundle\ndescription: Índice del bundle\nokf_version: \"0.1\"\n---\n\n# Bundle\n\n* [Visible](visible.md)\n",
     );
     write(
         dir.path(),
@@ -1747,7 +1752,7 @@ fn graph_orphans() {
     let resp = roundtrip(
         dir.path(),
         &[
-            r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"graph_query","arguments":{"operation":"orphans"}}}"#,
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"graph_query","arguments":{"operation":"isolated"}}}"#,
         ],
         1,
     );
@@ -1759,12 +1764,12 @@ fn graph_orphans() {
             .iter()
             .map(|s| s.to_string())
             .collect::<std::collections::BTreeSet<String>>(),
-        "graph_query(orphans) debe listar exactamente los 3 conceptos huérfanos: {resp:?}"
+        "graph_query(isolated) debe listar exactamente los 3 documentos aislados: {resp:?}"
     );
-    // No vacuo: el concepto listado en el índice NO es huérfano.
+    // No vacuo: quien recibe un enlace y quien lo emite NO están aislados.
     assert!(
-        !ids.contains("visible.md"),
-        "«visible.md» está en el índice y no debe aparecer como huérfano: {resp:?}"
+        !ids.contains("visible.md") && !ids.contains("index.md"),
+        "«visible.md» (entrante) e «index.md» (saliente) no están aislados: {resp:?}"
     );
 }
 
@@ -1790,7 +1795,7 @@ fn graph_dangling() {
     write(
         dir.path(),
         "index.md",
-        "---\nokf_version: \"0.1\"\n---\n\n# Bundle\n",
+        "---\ntype: Index\ntitle: Bundle\ndescription: Índice del bundle\nokf_version: \"0.1\"\n---\n\n# Bundle\n",
     );
     write(
         dir.path(),
@@ -1834,16 +1839,17 @@ fn graph_dangling() {
 /// Dado un `limit` menor que el nº de nodos, Cuando se llama, Entonces `summary.truncated == true` y
 /// `nextCursor` está presente (no nulo).
 ///
-/// Bundle con **10 conceptos huérfanos** (`o00`…`o09`): `graph_query(orphans, limit:5)` trunca. Para
-/// que el criterio NO sea vacuo (un stub que devolviera siempre `truncated:true` lo pasaría) se hace
-/// una segunda llamada con `limit:20 >= 10`: entonces `truncated == false` y `nextCursor == null`.
+/// Bundle con **11 documentos aislados** (`o00`…`o09` más el `index.md`, que desde E16-H02 es un
+/// documento más y tampoco tiene enlaces): `graph_query(isolated, limit:5)` trunca. Para que el
+/// criterio NO sea vacuo (un stub que devolviera siempre `truncated:true` lo pasaría) se hace una
+/// segunda llamada con `limit:20 >= 11`: entonces `truncated == false` y `nextCursor == null`.
 #[test]
 fn graph_truncado() {
     let dir = tempfile::tempdir().unwrap();
     write(
         dir.path(),
         "index.md",
-        "---\nokf_version: \"0.1\"\n---\n\n# Bundle\n",
+        "---\ntype: Index\ntitle: Bundle\ndescription: Índice del bundle\nokf_version: \"0.1\"\n---\n\n# Bundle\n",
     );
     for i in 0..10 {
         let slug = format!("o{i:02}");
@@ -1860,7 +1866,7 @@ fn graph_truncado() {
     let trunc = roundtrip(
         dir.path(),
         &[
-            r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"graph_query","arguments":{"operation":"orphans","limit":5}}}"#,
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"graph_query","arguments":{"operation":"isolated","limit":5}}}"#,
         ],
         1,
     );
@@ -1868,7 +1874,7 @@ fn graph_truncado() {
     assert_eq!(
         sc["summary"]["truncated"],
         serde_json::Value::Bool(true),
-        "con limit:5 < 10 nodos, summary.truncated debe ser true: {trunc:?}"
+        "con limit:5 < 11 nodos, summary.truncated debe ser true: {trunc:?}"
     );
     let cursor = sc["nextCursor"].as_str().unwrap_or_else(|| {
         panic!("con la salida truncada, `nextCursor` debe ser un string no nulo: {trunc:?}")
@@ -1887,7 +1893,7 @@ fn graph_truncado() {
     let full = roundtrip(
         dir.path(),
         &[
-            r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"graph_query","arguments":{"operation":"orphans","limit":20}}}"#,
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"graph_query","arguments":{"operation":"isolated","limit":20}}}"#,
         ],
         1,
     );
@@ -1895,7 +1901,7 @@ fn graph_truncado() {
     assert_eq!(
         sc_full["summary"]["truncated"],
         serde_json::Value::Bool(false),
-        "con limit:20 >= 10 nodos, summary.truncated debe ser false: {full:?}"
+        "con limit:20 >= 11 nodos, summary.truncated debe ser false: {full:?}"
     );
     assert!(
         sc_full["nextCursor"].is_null(),
@@ -1903,8 +1909,8 @@ fn graph_truncado() {
     );
     assert_eq!(
         graph_nodes(&full[0]).len(),
-        10,
-        "sin truncar, deben aparecer los 10 huérfanos: {full:?}"
+        11,
+        "sin truncar, deben aparecer los 11 documentos aislados: {full:?}"
     );
 }
 
@@ -1972,16 +1978,16 @@ fn graph_truncado() {
 
 /// Bundle con un concepto `target.md` al que apuntan **exactamente 30** conceptos vía un enlace de
 /// cuerpo Markdown (`[t](/target.md)`), y NINGÚN otro backlink. El `index.md` NO lista `target.md`
-/// (así `Backlinks::index_refs` queda vacío) y los 30 emisores no reciben backlinks entre sí, de
+/// (así el índice no aporta entrantes) y los 30 emisores no reciben backlinks entre sí, de
 /// modo que `directlyAffected` del target es 30 bajo cualquier lectura (inbound-solo o
 /// inbound+index). Deterministas por slug (`emisor00`…`emisor29`).
 fn bundle_treinta_backlinks() -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
-    // index.md sin enlaces salientes: no "adopta" al target (index_refs vacío).
+    // index.md sin enlaces salientes: no aporta ningún entrante al target.
     write(
         dir.path(),
         "index.md",
-        "---\nokf_version: \"0.1\"\n---\n\n# Bundle\n",
+        "---\ntype: Index\ntitle: Bundle\ndescription: Índice del bundle\nokf_version: \"0.1\"\n---\n\n# Bundle\n",
     );
     write(
         dir.path(),
@@ -2038,7 +2044,7 @@ fn bundle_delete_bloqueos() -> tempfile::TempDir {
     write(
         dir.path(),
         "index.md",
-        "---\nokf_version: \"0.1\"\n---\n\n# Bundle\n",
+        "---\ntype: Index\ntitle: Bundle\ndescription: Índice del bundle\nokf_version: \"0.1\"\n---\n\n# Bundle\n",
     );
     write(
         dir.path(),
@@ -2209,7 +2215,7 @@ fn bundle_cinco_relacionados() -> tempfile::TempDir {
     write(
         dir.path(),
         "index.md",
-        "---\nokf_version: \"0.1\"\n---\n\n# Bundle\n\n* [A](a.md)\n* [B](b.md)\n* [C](c.md)\n* [D](d.md)\n",
+        "---\ntype: Index\ntitle: Bundle\ndescription: Índice del bundle\nokf_version: \"0.1\"\n---\n\n# Bundle\n\n* [A](a.md)\n* [B](b.md)\n* [C](c.md)\n* [D](d.md)\n",
     );
     // Anillo a→b→c→d→a: un cluster relacionado (los enlaces de cuerpo los conectan).
     for (slug, next) in [("a", "b"), ("b", "c"), ("c", "d"), ("d", "a")] {
@@ -2815,7 +2821,7 @@ fn bundle_writable_restringido() -> tempfile::TempDir {
     write(
         dir.path(),
         "index.md",
-        "---\nokf_version: \"0.1\"\n---\n\n# Bundle\n",
+        "---\ntype: Index\ntitle: Bundle\ndescription: Índice del bundle\nokf_version: \"0.1\"\n---\n\n# Bundle\n",
     );
     // Un concepto conforme dentro de la raíz escribible.
     write(
@@ -3782,7 +3788,7 @@ fn ws_con_padre() -> (tempfile::TempDir, std::path::PathBuf) {
     write(
         &ws,
         "index.md",
-        "---\nokf_version: \"0.1\"\n---\n\n# Bundle\n",
+        "---\ntype: Index\ntitle: Bundle\ndescription: Índice del bundle\nokf_version: \"0.1\"\n---\n\n# Bundle\n",
     );
     write(
         &ws,

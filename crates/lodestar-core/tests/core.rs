@@ -255,7 +255,9 @@ fn conformidad_dispara_cada_codigo() {
     assert!(codes_of(&b, "sin-tipo.md").contains(&"OKF-TYPE".to_string()));
     assert!(codes_of(&b, "sin-tipo.md").contains(&"REC-TITLE".to_string()));
     assert!(codes_of(&b, "sin-tipo.md").contains(&"BODY-STRUCT".to_string()));
-    assert!(codes_of(&b, "sin-tipo.md").contains(&"ORPHAN".to_string()));
+    // `ORPHAN` murió con E16-H02: el aislamiento es una propiedad del grafo
+    // (`Analysis::isolated`), no un diagnóstico.
+    assert!(!codes_of(&b, "sin-tipo.md").contains(&"ORPHAN".to_string()));
     let malo = codes_of(&b, "malo.md");
     assert!(malo.contains(&"FMT-TAGS".to_string()));
     assert!(malo.contains(&"FMT-TS".to_string()));
@@ -294,18 +296,22 @@ fn analyze_backlinks_son_inversa_de_out() {
     let pb = RelPath::new("b.md").unwrap();
     assert_eq!(a.out[&pa], vec![pb.clone()]);
     assert_eq!(a.inn[&pb], vec![pa.clone()]);
-    assert!(a.orphans.contains(&pa)); // nadie enlaza a 'a'
+    // `a.md` no tiene entrantes, pero SÍ salientes → NO está aislado (`§20.7`, E16-H02).
+    assert!(!a.isolated.contains(&pa));
+    // `b.md` tiene entrantes → tampoco.
+    assert!(!a.isolated.contains(&pb));
 }
 
 // --- E1-H09: list_concepts / backlinks --------------------------------------
 
 #[test]
-fn list_concepts_marca_invalid_y_orphan() {
+fn list_concepts_marca_invalid_e_isolated() {
     let b = Bundle::from_files(fm(&[("malo.md", "# sin fm\n")]));
     let cs = b.list_concepts();
     let c = cs.iter().find(|c| c.path.as_str() == "malo.md").unwrap();
     assert!(c.invalid);
-    assert!(c.orphan);
+    // Único documento del workspace: sin entrantes ni salientes → aislado (E16-H02).
+    assert!(c.isolated);
 }
 
 // --- E1-H11: query ----------------------------------------------------------
@@ -474,11 +480,12 @@ fn create_concept_genera_heading_por_defecto_cuando_body_vacio() {
         "el heading sin tipo no debe tener separador: {}",
         sin_tipo.raw
     );
-    // title None → deriva del path con title_from_path (`mi-cosa` → `Mi Cosa`).
+    // title None → último eslabón de `derived_title`: el nombre del fichero tal cual, sin `.md`
+    // y sin Title Case (E16-H03 retiró `title_from_path`).
     let sin_titulo = b.create_concept(&p, "Nota", None, "", None, false);
     assert!(
-        sin_titulo.raw.contains("# Nota - Mi Cosa\n"),
-        "el título debe derivar del path: {}",
+        sin_titulo.raw.contains("# Nota - mi-cosa\n"),
+        "el título debe derivar del nombre del fichero: {}",
         sin_titulo.raw
     );
     // body no vacío → se respeta tal cual, sin generar default.
@@ -582,14 +589,6 @@ fn fmt_ts_rechaza_iso_con_basura() {
 }
 
 #[test]
-fn title_from_path_boundaries_como_js() {
-    // \b\w del proto: el acento y el punto abren palabra (quirk incluido, es la spec).
-    assert_eq!(model::title_from_path("año.md"), "AñO");
-    assert_eq!(model::title_from_path("foo.bar.md"), "Foo.Bar");
-    assert_eq!(model::title_from_path("mi-nota_2.md"), "Mi Nota 2");
-}
-
-#[test]
 fn fm_diff_sin_cambio_fantasma_por_string_vacio() {
     // Añadir `description: ""` no es un cambio (fmFmt(undefined) === fmFmt("")).
     let a = "---\ntype: N\ntitle: X\n---\n\n# H\n";
@@ -625,19 +624,21 @@ fn diff_snap_ordena_numeric_aware() {
 }
 
 #[test]
-fn backlinks_out_dedup_sin_self_ni_reservados() {
+fn backlinks_out_dedup_sin_self() {
     let b = Bundle::from_files(fm(&[
         (
             "x.md",
             "---\ntype: N\ntitle: X\ndescription: d\n---\n\n[a](/a.md) [a](/a.md) [idx](/index.md) [yo](/x.md)\n",
         ),
         ("a.md", "---\ntype: N\ntitle: A\ndescription: d\n---\n\n# H\n"),
-        ("index.md", "---\nokf_version: \"0.1\"\n---\n\n# B\n\n* [x](x.md)\n"),
+        ("index.md", "---\ntype: Index\ntitle: Bundle\ndescription: Índice del bundle\nokf_version: \"0.1\"\n---\n\n# B\n\n* [x](x.md)\n"),
     ]));
     let bl = b.backlinks(&RelPath::new("x.md").unwrap());
+    // Se dedupea `/a.md` y se excluye el self-enlace; `index.md` SÍ aparece: desde E16-H02 no es
+    // un destino reservado, sino un documento como cualquier otro.
     assert_eq!(
         bl.out.iter().map(|p| p.as_str()).collect::<Vec<_>>(),
-        vec!["a.md"]
+        vec!["a.md", "index.md"]
     );
 }
 
@@ -1413,7 +1414,7 @@ fn bundle_con_7_backlinks(status_core: &str) -> Bundle {
     }
     files.insert(
         RelPath::new("index.md").unwrap(),
-        "---\nokf_version: \"0.1\"\n---\n\n# B\n".to_string(),
+        "---\ntype: Index\ntitle: Bundle\ndescription: Índice del bundle\nokf_version: \"0.1\"\n---\n\n# B\n".to_string(),
     );
     Bundle::from_files(files)
 }
@@ -1477,20 +1478,20 @@ fn riesgo_bajo_aislado() {
         );
         files.insert(
             RelPath::new("index.md").unwrap(),
-            "---\nokf_version: \"0.1\"\n---\n\n# B\n".to_string(),
+            "---\ntype: Index\ntitle: Bundle\ndescription: Índice del bundle\nokf_version: \"0.1\"\n---\n\n# B\n".to_string(),
         );
         Bundle::from_files(files)
     };
     let antes = construir("Antes");
     let despues = construir("Despues");
 
-    // Precondición del fixture: `sola.md` no recibe backlinks entrantes ni referencias de index.
+    // Precondición del fixture: `sola.md` no recibe ningún enlace entrante (desde E16-H02 los de
+    // un `index.md` serían entrantes normales, no una lista aparte).
     let bl = antes.backlinks(&RelPath::new("sola.md").unwrap());
     assert!(
-        bl.inbound.is_empty() && bl.index_refs.is_empty(),
-        "el fixture debe dejar sola.md sin backlinks, fue inbound={:?} index_refs={:?}",
+        bl.inbound.is_empty(),
+        "el fixture debe dejar sola.md sin backlinks, fue inbound={:?}",
         bl.inbound,
-        bl.index_refs,
     );
 
     // `patch_frontmatter` que solo cambia el título (cambio aislado, sin tocar relaciones).
@@ -1925,7 +1926,7 @@ fn create_usa_plantilla() {
     // Bundle mínimo (solo el index raíz): el concepto a crear todavía no existe.
     let b = Bundle::from_files(fm(&[(
         "index.md",
-        "---\nokf_version: \"0.1\"\n---\n\n# B\n",
+        "---\ntype: Index\ntitle: Bundle\ndescription: Índice del bundle\nokf_version: \"0.1\"\n---\n\n# B\n",
     )]));
 
     // Schema: el `DocType decision` trae una `bodyTemplate` con un marcador inequívoco y `{title}`.
@@ -2214,7 +2215,7 @@ fn move_reescribe_entrantes() {
     let mut files: FileMap = FileMap::new();
     files.insert(
         RelPath::new("index.md").unwrap(),
-        "---\nokf_version: \"0.1\"\n---\n\n# B\n".to_string(),
+        "---\ntype: Index\ntitle: Bundle\ndescription: Índice del bundle\nokf_version: \"0.1\"\n---\n\n# B\n".to_string(),
     );
     files.insert(
         from.clone(),
@@ -2318,7 +2319,7 @@ fn delete_referenciado_rechaza() {
     assert_eq!(ErrorCode::InboundLinksExist.as_str(), "INBOUND_LINKS_EXIST");
 
     let b = Bundle::from_files(fm(&[
-        ("index.md", "---\nokf_version: \"0.1\"\n---\n\n# B\n"),
+        ("index.md", "---\ntype: Index\ntitle: Bundle\ndescription: Índice del bundle\nokf_version: \"0.1\"\n---\n\n# B\n"),
         (
             "target.md",
             "---\ntype: N\ntitle: Target\ndescription: d\n---\n\n# Target\n",
@@ -2356,7 +2357,7 @@ fn delete_remove_links() {
     let target = RelPath::new("target.md").unwrap();
 
     let b = Bundle::from_files(fm(&[
-        ("index.md", "---\nokf_version: \"0.1\"\n---\n\n# B\n"),
+        ("index.md", "---\ntype: Index\ntitle: Bundle\ndescription: Índice del bundle\nokf_version: \"0.1\"\n---\n\n# B\n"),
         (
             "target.md",
             "---\ntype: N\ntitle: Target\ndescription: d\n---\n\n# Target\n",

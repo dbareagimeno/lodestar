@@ -46,7 +46,7 @@ fn app_con_bundle() -> (tempfile::TempDir, App) {
     escribe(
         dir.path(),
         "index.md",
-        "---\nokf_version: \"0.1\"\n---\n\n# Bundle\n\n* [Alfa](alfa.md)\n",
+        "---\ntype: Index\ntitle: Bundle\ndescription: Índice del bundle\nokf_version: \"0.1\"\n---\n\n# Bundle\n\n* [Alfa](alfa.md)\n",
     );
     escribe(
         dir.path(),

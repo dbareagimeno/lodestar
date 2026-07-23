@@ -1,6 +1,6 @@
 //! Síntesis on-demand (`ARCHITECTURE.md §5`, `§10` fila 10): lo que invalidaría en cascada
-//! NO se materializa — se deriva al leer vía SQL/CTE. `LINK-STUB`/`ORPHAN` se sintetizan aquí
-//! (su definición canónica vive en el core; la paridad lo verifica).
+//! NO se materializa — se deriva al leer vía SQL/CTE. `LINK-STUB` y el aislamiento se sintetizan
+//! aquí (su definición canónica vive en el core; la paridad lo verifica).
 //!
 //! Invariante: estas consultas devuelven lo mismo que el `core` equivalente. Si difieren,
 //! es **bug de la cache** (gana el core) — lo captura el test de paridad.
@@ -45,61 +45,43 @@ pub(crate) fn warn_count(conn: &Connection) -> Result<usize, StoreError> {
     Ok(n as usize)
 }
 
-/// Concepts (ficheros no reservados), en orden estable.
+/// Todos los documentos del workspace, en orden estable (E16-H02: ningún basename queda fuera).
 pub(crate) fn concepts(conn: &Connection) -> Result<Vec<RelPath>, StoreError> {
-    rows_to_relpaths(
-        conn,
-        "SELECT path FROM files WHERE kind = 'concept' ORDER BY path",
-        &[],
-    )
+    rows_to_relpaths(conn, "SELECT path FROM files ORDER BY path", &[])
 }
 
-/// Paths listados por algún `index.md` (de ahí se deriva `in_index`).
-pub(crate) fn in_index(conn: &Connection) -> Result<Vec<RelPath>, StoreError> {
-    rows_to_relpaths(
-        conn,
-        "SELECT DISTINCT dst FROM links WHERE src_is_index = 1 ORDER BY dst",
-        &[],
-    )
-}
-
-/// Backlinks de un concept (`inn[path]`): concepts que lo enlazan y él existe como concept.
+/// Backlinks de un documento (`inn[path]`): quien lo enlaza, venga de donde venga.
 pub(crate) fn backlinks(conn: &Connection, path: &RelPath) -> Result<Vec<RelPath>, StoreError> {
     rows_to_relpaths(
         conn,
         r#"SELECT DISTINCT l.src
            FROM links l JOIN files f ON f.path = l.dst
-           WHERE l.src_is_index = 0 AND l.dst = ?1 AND f.kind = 'concept'
+           WHERE l.dst = ?1
            ORDER BY l.src"#,
         &[&path.as_str()],
     )
 }
 
-/// Huérfanos: concepts sin backlinks entrantes y que no están en ningún `index.md`.
-pub(crate) fn orphans(conn: &Connection) -> Result<Vec<RelPath>, StoreError> {
+/// Aislados (`Analysis::isolated`, `§20.7`): documentos sin enlaces internos entrantes **ni**
+/// salientes. Es la misma definición del core — la paridad lo verifica.
+pub(crate) fn isolated(conn: &Connection) -> Result<Vec<RelPath>, StoreError> {
     rows_to_relpaths(
         conn,
         r#"SELECT f.path FROM files f
-           WHERE f.kind = 'concept'
-             AND NOT EXISTS (
-                 SELECT 1 FROM links l WHERE l.src_is_index = 0 AND l.dst = f.path
-             )
-             AND NOT EXISTS (
-                 SELECT 1 FROM links l2 WHERE l2.src_is_index = 1 AND l2.dst = f.path
-             )
+           WHERE NOT EXISTS (SELECT 1 FROM links l WHERE l.dst = f.path)
+             AND NOT EXISTS (SELECT 1 FROM links o WHERE o.src = f.path)
            ORDER BY f.path"#,
         &[],
     )
 }
 
-/// Destinos colgantes (ghosts): enlaces de concepts a algo que no existe como concept/index.
-/// Coincide con `core`: `!existe` o (existe y es `log.md`).
+/// Destinos colgantes (ghosts): enlaces a un `.md` que no existe en el workspace.
 pub(crate) fn dangling(conn: &Connection) -> Result<Vec<RelPath>, StoreError> {
     rows_to_relpaths(
         conn,
         r#"SELECT DISTINCT l.dst
            FROM links l LEFT JOIN files f ON f.path = l.dst
-           WHERE l.src_is_index = 0 AND (f.path IS NULL OR f.kind = 'log')
+           WHERE f.path IS NULL
            ORDER BY l.dst"#,
         &[],
     )
@@ -121,7 +103,7 @@ pub(crate) fn blast_radius(
                FROM links l
                JOIN br ON l.dst = br.path
                JOIN files f ON f.path = l.dst
-               WHERE l.src_is_index = 0 AND f.kind = 'concept' AND br.d < ?2
+               WHERE br.d < ?2
            )
            SELECT DISTINCT path FROM br ORDER BY path"#,
         &[&root.as_str(), &depth],

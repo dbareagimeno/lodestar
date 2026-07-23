@@ -3,9 +3,6 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use once_cell::sync::Lazy;
-use regex::Regex;
-
 use crate::conform::{self, ConformCtx};
 use crate::model::{self, Parsed};
 use crate::types::{
@@ -13,10 +10,7 @@ use crate::types::{
     LinkRef, Neighborhood, ParsedFrontmatter, RelPath, Severity, WriteOutcome,
 };
 
-static OKF_VER_VAL_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r#"(?m)^\s*okf_version\s*:\s*['"]?([^'"\r\n]+?)['"]?\s*$"#).unwrap());
-
-/// Bundle OKF: un mapa de ficheros + el análisis derivado (cacheado).
+/// Bundle: un mapa de ficheros + el análisis derivado (cacheado).
 pub struct Bundle {
     files: crate::types::FileMap,
     parsed: BTreeMap<RelPath, Parsed>,
@@ -47,27 +41,16 @@ impl Bundle {
         self.analysis.get_or_init(|| self.compute_analysis())
     }
 
+    /// Computa el análisis: **todos** los `.md` son nodos (E16-H02, `§20.7`) — ningún basename
+    /// se salta el grafo ni recibe trato aparte.
     fn compute_analysis(&self) -> Analysis {
         let mut concepts: Vec<RelPath> = Vec::new();
         let mut out: BTreeMap<RelPath, Vec<RelPath>> = BTreeMap::new();
         let mut inn: BTreeMap<RelPath, Vec<RelPath>> = BTreeMap::new();
-        let mut in_index: BTreeSet<RelPath> = BTreeSet::new();
         let mut dangling_set: BTreeSet<RelPath> = BTreeSet::new();
 
-        // Adyacencia saliente + in_index (port de analyzeBundle).
-        for (path, raw) in &self.files {
-            let bn = path.basename();
-            if bn == "index.md" {
-                for t in model::out_links(path.as_str(), raw) {
-                    if let Ok(rp) = RelPath::new(&t) {
-                        in_index.insert(rp);
-                    }
-                }
-                continue;
-            }
-            if bn == "log.md" {
-                continue;
-            }
+        // Adyacencia saliente: el cuerpo de cada documento, sin excepciones por nombre.
+        for path in self.files.keys() {
             concepts.push(path.clone());
             let body = &self.parsed[path].body;
             let targets: Vec<RelPath> = model::out_links(path.as_str(), body)
@@ -80,14 +63,12 @@ impl Bundle {
         for p in &concepts {
             inn.entry(p.clone()).or_default();
         }
-        // Inversión de aristas + dangling.
+        // Inversión de aristas + dangling. Un enlace a un documento que existe es un entrante
+        // suyo, venga de donde venga; uno a un `.md` que no existe es colgante.
         for p in &concepts {
             for t in out.get(p).cloned().unwrap_or_default() {
-                let exists = self.files.contains_key(&t);
-                if exists && !t.is_reserved() {
+                if self.files.contains_key(&t) {
                     inn.entry(t.clone()).or_default().push(p.clone());
-                } else if exists && t.basename() == "index.md" {
-                    // enlaces a index.md no cuentan como backlink ni como dangling
                 } else {
                     dangling_set.insert(t.clone());
                 }
@@ -98,8 +79,6 @@ impl Bundle {
         let ctx = ConformCtx {
             files: &self.files,
             out: &out,
-            inn: &inn,
-            in_index: &in_index,
         };
         let mut per_file: BTreeMap<RelPath, Vec<Check>> = BTreeMap::new();
         let mut hard_fail = 0usize;
@@ -113,10 +92,15 @@ impl Bundle {
             per_file.insert(path.clone(), checks);
         }
 
-        // Huérfanos (isRootish siempre false en el prototipo).
-        let orphans: Vec<RelPath> = concepts
+        // Aislados (`§20.7`): ni entrantes ni salientes. Un enlace saliente cuenta aunque su
+        // destino no exista todavía — el documento participa en el grafo (tiene un nodo ghost por
+        // vecino), que es lo que «aislado» niega.
+        let isolated: Vec<RelPath> = concepts
             .iter()
-            .filter(|p| inn.get(*p).map(|v| v.is_empty()).unwrap_or(true) && !in_index.contains(*p))
+            .filter(|p| {
+                inn.get(*p).map(|v| v.is_empty()).unwrap_or(true)
+                    && out.get(*p).map(|v| v.is_empty()).unwrap_or(true)
+            })
             .cloned()
             .collect();
 
@@ -126,39 +110,26 @@ impl Bundle {
             concepts,
             out,
             inn,
-            in_index,
             dangling,
-            orphans,
+            isolated,
             per_file,
             hard_fail,
             warn_count,
-            okf_version: self.root_okf_version(),
         }
-    }
-
-    fn root_okf_version(&self) -> Option<String> {
-        let idx = RelPath::new("index.md").ok()?;
-        let raw = self.files.get(&idx)?;
-        OKF_VER_VAL_RE
-            .captures(raw)
-            .map(|c| c[1].trim().to_string())
     }
 
     // --- lectura semántica ------------------------------------------------
 
-    /// Filas del árbol de concepts con `orphan`/`invalid` resueltos (port de `fileRow`).
+    /// Filas del árbol de documentos con `isolated`/`invalid` resueltos.
     pub fn list_concepts(&self) -> Vec<ConceptSummary> {
         let a = self.analyze();
-        let orphan_set: BTreeSet<&RelPath> = a.orphans.iter().collect();
+        let isolated_set: BTreeSet<&RelPath> = a.isolated.iter().collect();
         a.concepts
             .iter()
             .map(|p| {
                 let parsed = &self.parsed[p];
                 let fm = parsed.frontmatter.as_ref();
-                let title = fm
-                    .and_then(|f| f.get_text("title"))
-                    .filter(|s| !s.is_empty())
-                    .unwrap_or_else(|| model::title_from_path(p.as_str()));
+                let title = model::derived_title(fm, &parsed.body, p);
                 let invalid = a
                     .per_file
                     .get(p)
@@ -169,19 +140,22 @@ impl Bundle {
                     title,
                     r#type: fm.and_then(|f| f.get_text("type")),
                     status: fm.and_then(|f| f.get_text("status")),
-                    orphan: orphan_set.contains(p),
+                    isolated: isolated_set.contains(p),
                     invalid,
                 }
             })
             .collect()
     }
 
-    /// Vecindad de enlaces de un concept (port del panel de backlinks).
+    /// Vecindad de enlaces de un documento.
+    ///
+    /// Desde E16-H02 **no** hay `index_refs`: quien te enlaza entra por `inbound`, sea un
+    /// `index.md` o cualquier otro documento.
     pub fn backlinks(&self, p: &RelPath) -> Backlinks {
         let mut inbound: Vec<LinkRef> = Vec::new();
         // Quién enlaza aquí, con el href usado.
         for q in self.files.keys() {
-            if q == p || q.is_reserved() {
+            if q == p {
                 continue;
             }
             let body = &self.parsed[q].body;
@@ -199,23 +173,8 @@ impl Bundle {
                 }
             }
         }
-        // index.md que lo listan.
-        let a = self.analyze();
-        let index_refs: Vec<RelPath> = self
-            .files
-            .keys()
-            .filter(|k| k.basename() == "index.md")
-            .filter(|k| {
-                let raw = &self.files[*k];
-                model::out_links(k.as_str(), raw)
-                    .into_iter()
-                    .filter_map(|t| RelPath::new(&t).ok())
-                    .any(|t| &t == p)
-            })
-            .cloned()
-            .collect();
-        // Salientes resueltos vs colgantes. Como el panel del proto (usa `analysis.out`, que
-        // dedupea y excluye self), sin destinos reservados y sin hrefs colgantes repetidos.
+        // Salientes resueltos vs colgantes: `analysis.out` dedupea y excluye el self-enlace, y
+        // los hrefs colgantes no se repiten.
         let mut out_resolved: Vec<RelPath> = Vec::new();
         let mut dangling: Vec<String> = Vec::new();
         let mut seen_out: BTreeSet<RelPath> = BTreeSet::new();
@@ -226,7 +185,7 @@ impl Bundle {
                     if let Some(t) = model::resolve_link(href.as_str(), p.as_str()) {
                         match RelPath::new(&t) {
                             Ok(rp) if self.files.contains_key(&rp) => {
-                                if rp != *p && !rp.is_reserved() && seen_out.insert(rp.clone()) {
+                                if rp != *p && seen_out.insert(rp.clone()) {
                                     out_resolved.push(rp);
                                 }
                             }
@@ -241,10 +200,8 @@ impl Bundle {
                 }
             }
         }
-        let _ = a;
         Backlinks {
             inbound,
-            index_refs,
             out: out_resolved,
             dangling,
         }
@@ -319,8 +276,10 @@ impl Bundle {
     ///
     /// Si `body` está vacío (tras `trim`) se genera un heading por defecto único en el core: con
     /// `ty` no vacío `# {ty} - {título}\n`, y `# {título}\n` cuando `ty` está vacío. El `título` es
-    /// el `title` recibido o, en su defecto, el derivado del path (`title_from_path`). Las fachadas
-    /// no inyectan plantilla: pasan `""` para delegar aquí el default.
+    /// el `title` recibido o, en su defecto, el último eslabón de
+    /// [`model::derived_title`] — el nombre del fichero sin `.md` (el documento aún no tiene ni
+    /// frontmatter ni cuerpo de los que derivarlo). Las fachadas no inyectan plantilla: pasan `""`
+    /// para delegar aquí el default.
     pub fn create_concept(
         &self,
         p: &RelPath,
@@ -332,7 +291,7 @@ impl Bundle {
     ) -> WriteOutcome {
         let resolved_title = title
             .map(|s| s.to_string())
-            .unwrap_or_else(|| model::title_from_path(p.as_str()));
+            .unwrap_or_else(|| model::derived_title(None, "", p));
         let default_body = if ty.is_empty() {
             format!("# {resolved_title}\n")
         } else {

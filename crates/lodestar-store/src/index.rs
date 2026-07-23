@@ -1,16 +1,19 @@
 //! Motor de indexación: extracción de filas desde el core y upsert/delete transaccional
 //! (`ARCHITECTURE.md §5`). El store **no reimplementa checks**: los diagnostics locales salen
-//! de `core::analyze`; ORPHAN/LINK-STUB (no locales) se **sintetizan** al leer (ver `synth`).
+//! de `core::analyze`; `LINK-STUB` (no local) se **sintetiza** al leer (ver `synth`).
 
 use rusqlite::{params, Transaction};
 
 use lodestar_core::model;
-use lodestar_core::types::{CheckCode, FileKind, FileMap, RelPath, Severity};
+use lodestar_core::types::{CheckCode, FileMap, RelPath, Severity};
 use lodestar_core::Bundle;
 
 use crate::error::StoreError;
 
-/// Diagnostics **locales** de un fichero (todos menos ORPHAN/LINK-STUB, que se sintetizan).
+/// Diagnostics **locales** de un fichero (todos menos `LINK-STUB`, que se sintetiza al leer).
+///
+/// `ORPHAN` desapareció del filtro con E16-H02: el core ya no lo emite (el aislamiento es una
+/// propiedad del grafo, no un diagnóstico), así que no hay nada que filtrar.
 ///
 /// Se computan con el core (autoridad) sobre un bundle de un solo fichero: como los checks
 /// locales dependen solo del contenido propio, el resultado es idéntico al del bundle completo.
@@ -25,16 +28,8 @@ fn local_diagnostics(path: &RelPath, raw: &str) -> Vec<lodestar_core::types::Che
         .cloned()
         .unwrap_or_default()
         .into_iter()
-        .filter(|c| !matches!(c.code, CheckCode::Orphan | CheckCode::LinkStub))
+        .filter(|c| !matches!(c.code, CheckCode::LinkStub))
         .collect()
-}
-
-fn kind_str(kind: FileKind) -> &'static str {
-    match kind {
-        FileKind::Concept => "concept",
-        FileKind::Index => "index",
-        FileKind::Log => "log",
-    }
 }
 
 fn level_str(level: Severity) -> &'static str {
@@ -84,7 +79,6 @@ pub(crate) fn upsert_file(
     delete_file(tx, path)?;
 
     let parsed = model::parse_file(path.as_str(), raw);
-    let kind = parsed.kind;
     let fm = parsed.frontmatter.clone().unwrap_or_default();
     let hash = blake3::hash(raw.as_bytes());
     // La cache materializa el frontmatter ARBITRARIO tal cual (E16-H01): el `value` YAML entero,
@@ -94,12 +88,11 @@ pub(crate) fn upsert_file(
 
     tx.execute(
         r#"INSERT INTO files
-           (path, kind, type, title, description, status, resource,
+           (path, type, title, description, status, resource,
             frontmatter_json, body, raw, hash, mtime, size)
-           VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)"#,
+           VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)"#,
         params![
             p,
-            kind_str(kind),
             fm.get_text("type"),
             fm.get_text("title"),
             fm.get_text("description"),
@@ -124,19 +117,13 @@ pub(crate) fn upsert_file(
         ],
     )?;
 
-    // Enlaces salientes. Index usa el raw entero; concept usa el cuerpo; log no enlaza (como el core).
-    let (link_source, is_index) = match kind {
-        FileKind::Index => (raw, 1i64),
-        FileKind::Concept => (parsed.body.as_str(), 0i64),
-        FileKind::Log => ("", 0i64),
-    };
-    if !link_source.is_empty() {
-        for (href, dst) in model::out_links_with_href(p, link_source) {
-            tx.execute(
-                "INSERT INTO links (src, dst, href, src_is_index) VALUES (?1,?2,?3,?4)",
-                params![p, dst, href, is_index],
-            )?;
-        }
+    // Enlaces salientes: SIEMPRE del cuerpo, para cualquier documento (E16-H02 — el core hace lo
+    // mismo desde `compute_analysis`, sin ramas por basename).
+    for (href, dst) in model::out_links_with_href(p, &parsed.body) {
+        tx.execute(
+            "INSERT INTO links (src, dst, href) VALUES (?1,?2,?3)",
+            params![p, dst, href],
+        )?;
     }
 
     // Etiquetas.
@@ -147,7 +134,7 @@ pub(crate) fn upsert_file(
         )?;
     }
 
-    // Diagnostics locales (el core es la autoridad; ORPHAN/LINK-STUB se sintetizan).
+    // Diagnostics locales (el core es la autoridad; `LINK-STUB` se sintetiza al leer).
     for check in local_diagnostics(path, raw) {
         let targets: Vec<String> = check
             .targets

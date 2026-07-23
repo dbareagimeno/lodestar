@@ -1,7 +1,9 @@
 //! Query: un único tokenizer + matcher con semántica de **subcadena** (`ARCHITECTURE.md §4.3`).
 //!
-//! Port fiel de `tokenizeQuery`/`matchToken`/`isPredicate`/`fieldMatch`/`valueIncludes`/`fmGet`/`fmPresent`.
-//! Conserva los quirks: gating de fichero reservado ANTES de negar, flip `!val`, campo ASCII `[\w\-]+`.
+//! Port de `tokenizeQuery`/`matchToken`/`isPredicate`/`fieldMatch`/`valueIncludes`/`fmGet`/`fmPresent`.
+//! Conserva los quirks del prototipo salvo el **gating de fichero reservado**, retirado en E16-H02
+//! (ningún nombre de fichero activa reglas especiales): siguen vivos el flip `!val` y el campo
+//! ASCII `[\w\-]+`.
 
 use serde_yaml::Value as Yaml;
 
@@ -107,26 +109,13 @@ fn match_token(
     body: &str,
     a: &Analysis,
 ) -> bool {
-    let reserved = path.is_reserved();
     let val = t.val.to_lowercase();
     // Quirk: un campo VACÍO (`":foo"`) es falsy en JS → el proto lo trata como texto suelto.
     let field = t.field.as_ref().filter(|f| !f.is_empty());
     let field_name = field.map(|f| f.to_lowercase());
-    let is_field_token = field.is_some()
-        && !matches!(
-            field_name.as_deref(),
-            Some("has") | Some("no") | Some("is") | Some("body")
-        );
 
-    // Quirk: gating de fichero reservado ANTES de negar.
-    if reserved
-        && (is_field_token
-            || field_name.as_deref() == Some("has")
-            || field_name.as_deref() == Some("no")
-            || (field_name.as_deref() == Some("is") && val != "reserved"))
-    {
-        return false;
-    }
+    // E16-H02: se retiró el gating de fichero reservado (el quirk «reservado ANTES de negar» del
+    // prototipo). Ningún nombre de fichero excluye a un documento de la consulta.
 
     let res = if let Some(field) = field {
         match field_name.as_deref() {
@@ -220,15 +209,16 @@ fn value_includes(raw: &Yaml, val: &str) -> bool {
     }
 }
 
+/// Predicados `is:…`. E16-H02 retiró `is:reserved` (ningún nombre de fichero es especial) y
+/// sustituyó `is:orphan` por `is:isolated`, con la definición de `§20.7`.
 fn is_predicate(name: &str, path: &RelPath, fm: &ParsedFrontmatter, a: &Analysis) -> bool {
     match name {
-        "orphan" => a.orphans.contains(path),
+        "isolated" => a.isolated.contains(path),
         "invalid" => a
             .per_file
             .get(path)
             .map(|cs| cs.iter().any(|c| c.level == Severity::Err))
             .unwrap_or(false),
-        "reserved" => path.is_reserved(),
         "linked" => a.inn.get(path).map(|v| !v.is_empty()).unwrap_or(false),
         "accepted" | "draft" | "review" | "deprecated" => fm
             .get_text("status")

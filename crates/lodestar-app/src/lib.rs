@@ -237,8 +237,9 @@ pub struct StatusCounts {
     pub concepts: usize,
     /// Nº total de enlaces salientes resueltos (suma de `Analysis::out` sobre todos los conceptos).
     pub links: usize,
-    /// Nº de conceptos huérfanos (`Analysis::orphans`).
-    pub orphans: usize,
+    /// Nº de documentos **aislados** —sin enlaces internos entrantes ni salientes—
+    /// (`Analysis::isolated`). Antes `orphans`, con otra definición (E16-H02).
+    pub isolated: usize,
     /// Nº de enlaces colgantes (`Analysis::dangling`).
     pub dangling: usize,
     /// Nº de ficheros con al menos un check `Err` (`Analysis::hard_fail`).
@@ -294,8 +295,9 @@ pub struct WorkspaceStatus {
     pub knowledge_roots: Vec<RelPath>,
     /// Raíces visibles pero no escribibles (`WorkspaceConfig::workspace.reference_roots`).
     pub reference_roots: Vec<RelPath>,
-    /// Versión del formato OKF del `index.md` raíz (`Analysis::okf_version`), o `"0.2"` si no
-    /// está declarada.
+    /// Versión del formato de documento que sirve el motor. **Constante** desde E16-H02: el motor
+    /// ya no lee `okf_version` del `index.md` raíz — esa clave es metadata del usuario como
+    /// cualquier otra (`§20.13`) y ningún nombre de fichero activa reglas especiales.
     pub format_version: String,
     /// Versión del formato de `.lodestar/schema.yaml` (`Schema::version`; `"1"` si no hay schema).
     pub schema_version: String,
@@ -309,8 +311,8 @@ pub struct WorkspaceStatus {
     pub recovery: StatusRecovery,
 }
 
-/// Versión del formato OKF asumida cuando el `index.md` raíz no declara `okf_version`
-/// (`ARCHITECTURE.md §19.6`).
+/// Versión del formato de documento que reporta `workspace_status` (`ARCHITECTURE.md §19.6`).
+/// Desde E16-H02 es un valor fijo: ya no se deriva de ningún documento del workspace.
 const DEFAULT_FORMAT_VERSION: &str = "0.2";
 
 /// Fachada fina de servicios de caso de uso sobre un [`Workspace`] abierto.
@@ -391,16 +393,13 @@ impl App {
             root: root.display().to_string(),
             knowledge_roots: cfg.workspace.writable_roots.clone(),
             reference_roots: cfg.workspace.reference_roots.clone(),
-            format_version: analysis
-                .okf_version
-                .clone()
-                .unwrap_or_else(|| DEFAULT_FORMAT_VERSION.to_string()),
+            format_version: DEFAULT_FORMAT_VERSION.to_string(),
             schema_version: schema.version.clone(),
             conformant: analysis.hard_fail == 0,
             counts: StatusCounts {
                 concepts: analysis.concepts.len(),
                 links,
-                orphans: analysis.orphans.len(),
+                isolated: analysis.isolated.len(),
                 dangling: analysis.dangling.len(),
                 errors: analysis.hard_fail,
                 warnings: analysis.warn_count,
@@ -476,10 +475,7 @@ impl App {
                 continue;
             }
 
-            let title = fm
-                .get_text("title")
-                .filter(|s| !s.is_empty())
-                .unwrap_or_else(|| model::title_from_path(path.as_str()));
+            let title = model::derived_title(Some(&fm), &parsed.body, path);
             let snippet = {
                 let s = snippet_of(&parsed.body, &needle);
                 if s.is_empty() {
@@ -889,7 +885,7 @@ impl App {
     /// (`find_backlinks`/`neighborhood`/`find_orphans`/`find_dangling`, E11-H01,
     /// `ARCHITECTURE.md §19.6`, `REFACTOR §9.5/§15`).
     ///
-    /// `operation` ∈ `"backlinks"`/`"outgoing"`/`"neighborhood"`/`"orphans"`/`"dangling"`:
+    /// `operation` ∈ `"backlinks"`/`"outgoing"`/`"neighborhood"`/`"isolated"`/`"dangling"`:
     /// - `backlinks`/`outgoing`/`neighborhood` requieren `r` (resuelto con [`App::resolve_ref`]);
     ///   su ausencia es `Err(ErrorCode::ConceptNotFound)` — no hay un código de "falta parámetro"
     ///   dedicado en el catálogo de 16 códigos estables, y es el mismo error que produciría un
@@ -897,17 +893,18 @@ impl App {
     /// - `backlinks` reusa [`Bundle::backlinks`] (invariante #3, "una sola verdad computada"):
     ///   `nodes` = el propio concepto + sus fuentes entrantes (`inbound`); `edges` = fuente→ref.
     /// - `outgoing` reusa [`Bundle::neighborhood`] con `Direction::Out` a profundidad 1: mismo
-    ///   filtrado de reservados/dangling que `graph_model`/`neighborhood` (invariante #3), así que
-    ///   no reimplementa ese criterio en esta capa.
+    ///   tratamiento de dangling que `graph_model`/`neighborhood` (invariante #3), así que no
+    ///   reimplementa ese criterio en esta capa.
     /// - `neighborhood` reexpone [`Bundle::neighborhood`]`(ref, depth, direction)` **tal cual**
     ///   (paridad exacta con el core — el criterio `graph_neighborhood_paridad` lo compara
     ///   directamente contra la salida del core). `depth` por defecto 1; `direction` por defecto
     ///   `"out"` (cualquier valor no reconocido cae también a `Out`, mismo criterio que la tool
     ///   heredada `neighborhood`).
-    /// - `orphans`/`dangling` no requieren `r`: se computan de [`Analysis::orphans`]/
-    ///   [`Analysis::dangling`] directamente. `orphans` no tiene `edges` (son nodos sin entrantes,
-    ///   no hay arista que mostrar); `dangling` empareja cada target colgante con las aristas
-    ///   `origen→target` que lo referencian (recorriendo `Analysis::out`).
+    /// - `isolated`/`dangling` no requieren `r`: se computan de [`Analysis::isolated`]/
+    ///   [`Analysis::dangling`] directamente. `isolated` (antes `orphans`, E16-H02: documentos sin
+    ///   enlaces entrantes NI salientes) no tiene `edges` — por definición no hay ninguna que
+    ///   mostrar; `dangling` empareja cada target colgante con las aristas `origen→target` que lo
+    ///   referencian (recorriendo `Analysis::out`).
     ///
     /// **Operaciones estructurales (E11-H02)**, funciones puras del core reexpuestas en la misma
     /// forma `{nodes,edges}` (invariante #3):
@@ -987,9 +984,9 @@ impl App {
                 let nb = bundle.neighborhood(&path, depth.unwrap_or(1), dir);
                 (nb.nodes, nb.edges)
             }
-            "orphans" => {
+            "isolated" => {
                 let a = bundle.analyze();
-                let nodes = a.orphans.iter().map(|id| bundle.node(id)).collect();
+                let nodes = a.isolated.iter().map(|id| bundle.node(id)).collect();
                 (nodes, Vec::new())
             }
             "dangling" => {

@@ -118,9 +118,15 @@ pub struct OkfDiff {
 }
 }
 
-/// `true` si el path es un artefacto generado (index/log/tags). Port de `isGenerated`.
+/// `true` si el path es un artefacto **generado** (index/log/tags). Port de `isGenerated`.
+///
+/// Es lo único que sigue mirando el basename, y no como clase de documento: describe qué ficheros
+/// **produce** el generador (`lodestar index`/`tags`), para que el diff no los cuente como cambio
+/// del usuario. El modelo documental ya no distingue por nombre (E16-H02); retirar la semántica
+/// especial de los artefactos generados es trabajo posterior
+/// (`REFACTOR_PHASE_2 §Fase 8 (Eliminar)`).
 pub fn is_generated(p: &RelPath) -> bool {
-    p.is_reserved() || p.as_str().starts_with("tags/")
+    matches!(p.basename(), "index.md" | "log.md") || p.as_str().starts_with("tags/")
 }
 
 /// Diff entre dos file-maps (árbol vs árbol, o HEAD vs working). Port de `diffSnap`.
@@ -448,5 +454,5 @@ fn page_title(a: &FileMap, b: &FileMap, p: &RelPath) -> String {
             }
         }
     }
-    model::title_from_path(p.as_str())
+    model::derived_title(None, "", p)
 }

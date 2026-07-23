@@ -8,7 +8,7 @@
 #   - Los TIPOS NO se definen aquí: se REFERENCIAN por nombre de `lodestar_core::types` /
 #     `lodestar_core::schema` / `lodestar_app` (invariante #4 — un solo contrato de tipos).
 #     Los retornos se envuelven en un objeto json (el spec MCP exige que `structuredContent`
-#     sea objeto, nunca array): p. ej. `{ paths: Vec<RelPath> }`, `{ orphans: Vec<RelPath> }`.
+#     sea objeto, nunca array): p. ej. `{ paths: Vec<RelPath> }`, `{ isolated: Vec<RelPath> }`.
 #   - Nombres de tool CONGELADOS (ARCHITECTURE.md §19.6). `fuente:` = fichero:línea aproximada.
 #
 # INVARIANTES: shells finos sobre `App`/`Workspace`, CERO lógica OKF propia (misma verdad que
@@ -38,6 +38,20 @@
 # en core/store/workspace (backlinks, orphans, dangling, query, conformidad, create, generate…): se
 # retira la EXPOSICIÓN, no la mecánica. Hoy (tras E14-H06) la superficie es de EXACTAMENTE 10 tools
 # activas — las 10 objetivo. Su reemplazo semántico 1:1 está en §15 «Migración».
+#
+# E16-H02/H03 (`ARCHITECTURE.md §20.4`/`§20.7`): ningún nombre de fichero activa reglas especiales.
+# La superficie de 10 tools NO cambia, pero sí la FORMA de dos tipos del wire y una operación:
+#   - `Analysis` pierde `inIndex`/`okfVersion` y `orphans` pasa a `isolated` **con otra definición**
+#     (sin enlaces internos entrantes NI salientes, `§20.7`); deja de ser un diagnóstico — el código
+#     `ORPHAN` ya no se emite.
+#   - `Backlinks` pierde `indexRefs`: un `index.md` que te enlaza es un entrante más de `inbound`.
+#   - `graph_query.operation`: `"orphans"` → `"isolated"`. **Sin alias de compatibilidad** — v0.3 es
+#     incompatible con v0.2 por diseño y un alias perpetuaría el nombre de un concepto que ya no
+#     existe (y cuya semántica cambió: mantenerlo devolvería otra cosa bajo el mismo nombre, que es
+#     peor que un error explícito). Un `"orphans"` hoy es `INVALID_SCHEMA`.
+#   - `workspace_status.counts.orphans` → `counts.isolated` (mismo cambio de definición).
+#   - `ConceptSummary.orphan` → `.isolated`; `title` lo deriva ahora `model::derived_title`
+#     (frontmatter.title → primer H1 → nombre del fichero, sin Title Case).
 #
 # E10-H13 (decisión D6b, `docs/REFACTOR.md §13`, `DECISIONES.md §3`): las 10 tools activas declaran
 # `outputSchema` (JSON Schema derivado con `schemars::schema_for!` desde el tipo de respuesta real
@@ -111,7 +125,9 @@ tools:
     errores: ["WorkspaceError"]
     semantica: >-
       Config activa, capacidades del perfil de arranque (`readonly`/`standard`),
-      conformidad y recuento agregado (concepts/links/orphans/dangling/errors/warnings).
+      conformidad y recuento agregado (concepts/links/isolated/dangling/errors/warnings).
+      `counts.isolated` sustituye a `counts.orphans` (E16-H02, misma redefinición). `formatVersion`
+      es CONSTANTE desde E16-H02: el motor ya no lee `okf_version` del `index.md` raíz.
       La primera tool que debe llamar un agente en cada sesión. `recovery.pendingTransaction`
       siempre `false` hasta E13-H06.
 
@@ -189,7 +205,7 @@ tools:
     fuente: crates/lodestar-mcp/src/tools.rs:120
     historia: E11-H01, E11-H02 (amplía el enum operation con path_between/cycles/components)
     params:
-      - { nombre: operation, tipo: string, requerido: true, valores: ["backlinks", "outgoing", "neighborhood", "orphans", "dangling", "path_between", "cycles", "components"], semantica: "backlinks/outgoing/neighborhood requieren «ref»; path_between requiere «ref» (origen) y «to» (destino); orphans/dangling/cycles/components no requieren refs" }
+      - { nombre: operation, tipo: string, requerido: true, valores: ["backlinks", "outgoing", "neighborhood", "isolated", "dangling", "path_between", "cycles", "components"], semantica: "backlinks/outgoing/neighborhood requieren «ref»; path_between requiere «ref» (origen) y «to» (destino); isolated/dangling/cycles/components no requieren refs. «isolated» sustituye a «orphans» (E16-H02): documentos SIN enlaces internos entrantes NI salientes — es una propiedad del grafo, no un diagnóstico. SIN alias: v0.3 es incompatible con v0.2, un «orphans» hoy es INVALID_SCHEMA" }
       - { nombre: ref, tipo: "object (ConceptRef)", requerido: false, semantica: "{ path: RelPath }, concepto centro — requerido en backlinks/outgoing/neighborhood y como origen en path_between; su ausencia en esas operaciones es CONCEPT_NOT_FOUND" }
       - { nombre: to, tipo: "object (ConceptRef)", requerido: false, semantica: "{ path: RelPath }, destino del camino — SOLO path_between; su ausencia (o la de ref) en path_between es CONCEPT_NOT_FOUND" }
       - { nombre: depth, tipo: integer, default: 1, minimo: 1, semantica: "solo neighborhood" }
@@ -203,7 +219,7 @@ tools:
       Consulta el grafo: `backlinks` reusa Bundle::backlinks (nodes = ref + fuentes entrantes,
       edges = fuente→ref); `outgoing` reusa Bundle::neighborhood(ref,1,Out); `neighborhood`
       reexpone Bundle::neighborhood(ref,depth,direction) TAL CUAL (paridad exacta con el core,
-      invariante #3); `orphans`/`dangling` proyectan Analysis::orphans/Analysis::dangling.
+      invariante #3); `isolated`/`dangling` proyectan Analysis::isolated/Analysis::dangling.
       Estructurales (E11-H02, funciones puras del core): `path_between` reusa
       Bundle::path_between(ref,to) (camino más corto dirigido; nodes = el camino, edges = enlaces
       consecutivos; sin camino → vacío, nunca error); `cycles` reusa Bundle::cycles (nodes = unión
@@ -344,7 +360,7 @@ migracion:
   reemplazos:
     - { vieja: query, nueva: knowledge_search, estado: "RETIRADA en E14-H06 → knowledge_search (reemplazo desde E10-H09)" }
     - { vieja: conformance_check, nueva: knowledge_check, estado: "RETIRADA en E14-H06 → knowledge_check (reemplazo desde E10-H12)" }
-    - { viejas: [find_backlinks, find_orphans, find_dangling, neighborhood], nueva: graph_query, estado: "RETIRADAS en E14-H06 → graph_query (reemplazo desde E11-H01: operations backlinks/orphans/dangling/neighborhood)" }
+    - { viejas: [find_backlinks, find_orphans, find_dangling, neighborhood], nueva: graph_query, estado: "RETIRADAS en E14-H06 → graph_query (reemplazo desde E11-H01: operations backlinks/isolated/dangling/neighborhood; «orphans» pasó a «isolated» en E16-H02)" }
     - { viejas: [create_concept, update_frontmatter], nuevas: [change_plan, change_apply], estado: "RETIRADAS en E14-H06 → change_plan + change_apply (escritura validada por el único escritor; ops create/patch_frontmatter, E12-H08/E13)" }
     - { viejas: [generate_index, generate_tag_indexes], nueva: "—", estado: "RETIRADAS en E14-H06 → CLI (`index`/`tags`) + auto-regen transaccional; capacidad BORRADA en E15-H02 (core::generate, subcomandos y auto-regen del apply: ningún fichero tiene semántica de catálogo, ARCHITECTURE.md §20.13)" }
   superficie_objetivo: >-

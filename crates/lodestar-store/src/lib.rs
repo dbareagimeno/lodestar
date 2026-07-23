@@ -4,7 +4,7 @@
 //! `rusqlite`/`notify`/`crossbeam` viven **solo aquí**. El core sigue siendo la autoridad: cuando
 //! SQL y core podrían discrepar, **gana el core** (lo verifica el test de paridad). Materializa lo
 //! barato (`files`/`links`/`tags`/`diagnostics` + FTS5) y **sintetiza on-demand** lo que invalidaría
-//! en cascada (backlinks/orphans/dangling/blast-radius).
+//! en cascada (backlinks/aislados/dangling/blast-radius).
 
 #![doc(html_no_source)]
 
@@ -262,34 +262,29 @@ impl Store {
         Ok((synth::hard_fail(&conn)?, synth::warn_count(&conn)?))
     }
 
-    /// Concepts (no reservados), en orden estable.
+    /// Todos los documentos del workspace, en orden estable.
     pub fn concepts(&self) -> Result<Vec<RelPath>, StoreError> {
         let conn = self.conn.lock().unwrap();
         synth::concepts(&conn)
     }
 
-    /// Backlinks entrantes de un concept (sintetizados sobre `links.dst`).
+    /// Backlinks entrantes de un documento (sintetizados sobre `links.dst`).
     pub fn backlinks(&self, path: &RelPath) -> Result<Vec<RelPath>, StoreError> {
         let conn = self.conn.lock().unwrap();
         synth::backlinks(&conn, path)
     }
 
-    /// Huérfanos sintetizados (`ORPHAN`).
-    pub fn orphans(&self) -> Result<Vec<RelPath>, StoreError> {
+    /// Documentos **aislados** sintetizados (`Analysis::isolated`): sin entrantes ni salientes.
+    /// Sustituye a `orphans()`, retirado con su definición en E16-H02.
+    pub fn isolated(&self) -> Result<Vec<RelPath>, StoreError> {
         let conn = self.conn.lock().unwrap();
-        synth::orphans(&conn)
+        synth::isolated(&conn)
     }
 
     /// Destinos colgantes sintetizados (`LINK-STUB`/ghosts).
     pub fn dangling(&self) -> Result<Vec<RelPath>, StoreError> {
         let conn = self.conn.lock().unwrap();
         synth::dangling(&conn)
-    }
-
-    /// Paths listados por algún `index.md`.
-    pub fn in_index(&self) -> Result<Vec<RelPath>, StoreError> {
-        let conn = self.conn.lock().unwrap();
-        synth::in_index(&conn)
     }
 
     /// Blast-radius direccional (`Direction::In`): CTE recursivo sobre aristas inversas.

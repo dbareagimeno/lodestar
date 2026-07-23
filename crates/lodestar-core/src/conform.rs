@@ -1,29 +1,27 @@
-//! Conformidad: los 15 checks OKF (`ARCHITECTURE.md §4.1`, `§13.6`). Port de `validateFile`.
+//! Conformidad: los checks OKF que quedan vivos (`ARCHITECTURE.md §4.1`, `§13.6`). Port de
+//! `validateFile`, menos lo que E16-H02 retiró (`OKF-IDX`/`OKF-LOG`, que dependían de la clase de
+//! fichero, y `ORPHAN`, que era el aislamiento disfrazado de diagnóstico). La reducción al catálogo
+//! mínimo de `§20.9` es E16-H05.
 //!
 //! Mensajes en español canónico (reproducen el prototipo). La externalización i18n keyed por
 //! código es E8-H03; el core ya produce `code` + `targets`, que es lo que la UI necesita para localizar.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use once_cell::sync::Lazy;
 use regex::Regex;
 use serde_yaml::Value as Yaml;
 
 use crate::model::{self, Parsed};
-use crate::types::{Check, CheckCode, FileKind, FileMap, FmError, RelPath, Severity};
+use crate::types::{Check, CheckCode, FileMap, FmError, RelPath, Severity};
 
 static CONFLICT_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?m)^(<{7}|={7}|>{7}|\|{7})").unwrap());
 static HEADING_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?m)^#{1,6}\s").unwrap());
-static OKF_VER_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"^\s*okf_version\s*:").unwrap());
-static LOG_HEAD_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?m)^##\s+(.+)$").unwrap());
-static LOG_DATE_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"^##\s+\d{4}-\d{2}-\d{2}\s*$").unwrap());
 
 /// Contexto de análisis necesario para validar un fichero (datos ya computados por `analyze`).
 pub(crate) struct ConformCtx<'a> {
     pub files: &'a FileMap,
     pub out: &'a BTreeMap<RelPath, Vec<RelPath>>,
-    pub inn: &'a BTreeMap<RelPath, Vec<RelPath>>,
-    pub in_index: &'a BTreeSet<RelPath>,
 }
 
 /// Valida un fichero y devuelve sus `Check`. Port fiel de `validateFile` + `OKF-CONFLICT` (nuevo).
@@ -45,17 +43,9 @@ pub(crate) fn validate_file(
         ));
     }
 
-    match parsed.kind {
-        FileKind::Index => {
-            validate_index(path, raw, &mut out);
-            return out;
-        }
-        FileKind::Log => {
-            validate_log(raw, &mut out);
-            return out;
-        }
-        FileKind::Concept => {}
-    }
+    // E16-H02: sin ramas por nombre de fichero. `validate_index`/`validate_log` (y con ellas
+    // `OKF-IDX`/`OKF-LOG`) desaparecieron: `index.md` y `log.md` se validan como cualquier otro
+    // documento. La reducción del catálogo al mínimo de `§20.9` es E16-H05.
 
     // Errores de frontmatter (early-return como el prototipo).
     match &parsed.fm_err {
@@ -167,9 +157,11 @@ pub(crate) fn validate_file(
         .cloned()
         .collect();
     if !dang.is_empty() {
+        // El destino no existe: no hay frontmatter ni cuerpo del que derivar título, así que la
+        // cadena de `derived_title` se resuelve por su último eslabón (el nombre del fichero).
         let titles: Vec<String> = dang
             .iter()
-            .map(|t| model::title_from_path(t.as_str()))
+            .map(|t| model::derived_title(None, "", t))
             .collect();
         let verb = if dang.len() == 1 {
             "enlace lleva"
@@ -199,16 +191,8 @@ pub(crate) fn validate_file(
         ));
     }
 
-    // ORPHAN (info): nadie enlaza aquí y no está en ningún index.
-    let inn_empty = ctx.inn.get(path).map(|v| v.is_empty()).unwrap_or(true);
-    if inn_empty && !ctx.in_index.contains(path) {
-        out.push(Check::new(
-            Severity::Info,
-            CheckCode::Orphan,
-            "Ninguna otra página enlaza a esta.",
-            vec![path.clone()],
-        ));
-    }
+    // E16-H02: `ORPHAN` ya NO se emite. El aislamiento (`Analysis::isolated`) es una propiedad
+    // consultable del grafo, no un diagnóstico (`§20.7`).
 
     // BODY-STRUCT (info): el cuerpo no tiene encabezados.
     if !HEADING_RE.is_match(&parsed.body) {
@@ -221,39 +205,6 @@ pub(crate) fn validate_file(
     }
 
     out
-}
-
-fn validate_index(path: &RelPath, raw: &str, out: &mut Vec<Check>) {
-    let sf = model::split_front(raw);
-    if let Some(fm_text) = sf.fm_text(raw) {
-        if !fm_text.trim().is_empty() {
-            let is_root = path.dir().is_empty();
-            let single_line = fm_text.trim().lines().count() == 1;
-            let ok_fm = is_root && OKF_VER_RE.is_match(fm_text) && single_line;
-            if !ok_fm {
-                out.push(Check::new(
-                    Severity::Warn,
-                    CheckCode::OkfIdx,
-                    "Esta página de índice no debería llevar metadatos al inicio.",
-                    vec![path.clone()],
-                ));
-            }
-        }
-    }
-}
-
-fn validate_log(raw: &str, out: &mut Vec<Check>) {
-    let bad = LOG_HEAD_RE
-        .find_iter(raw)
-        .any(|m| !LOG_DATE_RE.is_match(m.as_str()));
-    if bad {
-        out.push(Check::new(
-            Severity::Warn,
-            CheckCode::OkfLog,
-            "Las fechas del historial deben escribirse como AAAA-MM-DD.",
-            vec![],
-        ));
-    }
 }
 
 /// `true` si un valor YAML es "truthy" al estilo JS (no null, no cadena vacía, no lista vacía, no false/0).

@@ -547,7 +547,7 @@ superficie de producto; git queda como crate dormido) y `DECISIONES.md §0`. Des
 | Épica | Estado | Detalle |
 |---|---|---|
 | **E15** Workspace universal | 🟡 En curso | Retirada de vcs/generadores/init-zip/prototipo · raíz = `cwd` · descubrimiento recursivo · config opcional. |
-| **E16** Modelo documental genérico | ⚪ Pendiente | `ParsedFrontmatter` YAML arbitrario · sin ficheros reservados · título derivado · patch quirúrgico · diagnósticos mínimos · `Concept`→`Document`. |
+| **E16** Modelo documental genérico | 🟡 En curso | ✅ H01 `ParsedFrontmatter` YAML arbitrario · ✅ H02 sin ficheros reservados · ✅ H03 título derivado · ⚪ H04 patch quirúrgico · ⚪ H05 diagnósticos mínimos · ⚪ H06 `Concept`→`Document`. |
 | **E17** Enlaces y grafo universal | ⚪ Pendiente | Parser de enlaces (`pulldown-cmark`) · `LinkTarget` · diagnósticos de enlace · `Analysis` nueva · superficie de grafo. |
 | **E18** Store v2 | ⚪ Pendiente | DDL nuevo, metadata anidada, links genéricos, cold rebuild, paridad core/store. |
 | **E19** Lenguaje de consulta | ⚪ Pendiente | Parser · AST · type checking · namespaces · filtro JSON equivalente. |
@@ -698,3 +698,31 @@ superficie de producto; git queda como crate dormido) y `DECISIONES.md §0`. Des
     se comen la indentación, así que su YAML anidado llegaba aplanado. Auditadas las 45 apariciones
     del patrón en los 6 ficheros de test de la migración: ninguna otra estaba rota — E16-H01 es la
     primera historia cuyas fixtures necesitan YAML **anidado**.
+
+- ✅ **E16-H02** — **Ningún nombre de fichero activa reglas especiales**. Mueren `FileKind`,
+  `model::file_kind`/`is_reserved`/`concept_id`, `RelPath::is_reserved`/`concept_id`,
+  `Bundle::root_okf_version`, la rama de reservados de `parse_file`, `Parsed::kind`,
+  `validate_index`/`validate_log` (con ellas `OKF-IDX`/`OKF-LOG` se quedan sin productor), el check
+  `ORPHAN`, el gating de fichero reservado de `query.rs` (con `is:reserved`) y el quirk de
+  `graph_model`/`neighborhood` que descartaba las aristas a `index.md`/`log.md`. `compute_analysis`
+  toma **todos** los `.md` como nodos. `Analysis` pierde `in_index`/`okf_version` y `orphans` pasa a
+  `isolated` con la definición de `§20.7` (sin entrantes **ni** salientes); `Backlinks` pierde
+  `index_refs`; `ConceptSummary.orphan` → `.isolated`; `is:orphan` → `is:isolated`.
+  - **Cara del store**: el DDL pierde `files.kind` y `links.src_is_index` (`USER_VERSION` 2 → 3, la
+    cache se reconstruye sola), `Store::orphans`/`in_index` → `Store::isolated`, y los enlaces se
+    extraen SIEMPRE del cuerpo. La paridad SQL == core sigue verde.
+  - **Frontera MCP sincronizada** (`contracts/mcp.yml`): `graph_query.operation` `"orphans"` →
+    `"isolated"` **sin alias** (v0.3 es incompatible por diseño; un alias devolvería otra cosa bajo
+    el mismo nombre), `workspace_status.counts.orphans` → `counts.isolated`, y `formatVersion` pasa
+    a constante — el motor ya no lee `okf_version` del `index.md` raíz (`§20.13`).
+  - **Efecto de segundo orden asumido**: mientras `OKF-TYPE` siga vivo (muere en E16-H05), un
+    `index.md` sin `type` es un hard-fail. Los 55 fixtures `index.md` de la suite declaran ahora
+    `type`/`title`/`description`; es deuda transitoria que E16-H05 barre.
+
+- ✅ **E16-H03** — **Título derivado**. `model::derived_title(fm, body, path)`: `frontmatter.title`
+  (si es escalar y no vacío) → primer **H1** del cuerpo → nombre del fichero sin `.md`. Función pura
+  y **total** (`String`, no `Option`). Muere `model::title_from_path` y con ella el Title Case con el
+  quirk del `\b` de JS (`año.md` → `AñO`), junto al test de paridad
+  `title_from_path_boundaries_como_js` — el prototipo dejó de arbitrar en E15-H04. `model::Heading`
+  gana el campo `level` para poder distinguir el H1 del primer heading. Un `title` no escalar (lista,
+  mapa, `null`) o vacío cae al siguiente eslabón, y **nunca** se reescribe el dato del usuario.

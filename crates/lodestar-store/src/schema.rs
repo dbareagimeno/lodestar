@@ -10,7 +10,10 @@ use crate::error::StoreError;
 /// - `1` — esquema de v0.2 (incluía la tabla git `commit_conformance`).
 /// - `2` — E15-H01: git desaparece del repo; el DDL pierde `commit_conformance`. Una cache de v0.2
 ///   se detecta antigua por este número y se reconstruye limpia.
-pub const USER_VERSION: i64 = 2;
+/// - `3` — E16-H02: ningún nombre de fichero activa reglas especiales. El DDL pierde `files.kind`
+///   (todos los `.md` son documentos) y `links.src_is_index` (la pertenencia por índices no
+///   existe).
+pub const USER_VERSION: i64 = 3;
 
 /// Aplica los `PRAGMA` de sesión (WAL + claves foráneas + busy_timeout).
 pub(crate) fn apply_pragmas(conn: &Connection) -> Result<(), StoreError> {
@@ -36,8 +39,10 @@ pub(crate) fn set_user_version(conn: &Connection) -> Result<(), StoreError> {
 /// Crea el esquema completo si no existe. Idempotente (`IF NOT EXISTS`).
 ///
 /// - `files`: frontmatter promovido a columnas + `frontmatter_json` para el resto + `body` + `raw`
-///   (permite servir el `FileMap` exacto vía `ConceptStore`) + `hash` blake3 + `mtime`/`size` + `kind`.
-/// - `links`: una sola tabla con flag `src_is_index` (de ahí se deriva `in_index`).
+///   (permite servir el `FileMap` exacto vía `ConceptStore`) + `hash` blake3 + `mtime`/`size`.
+///   **Sin `kind`** desde E16-H02: todos los `.md` son documentos.
+/// - `links`: una sola tabla `(src, dst, href)`. **Sin `src_is_index`** desde E16-H02: un enlace
+///   desde un `index.md` es una arista como cualquier otra.
 /// - `tags`: `(path, tag)`.
 /// - `diagnostics`: solo checks **locales** (una columna por campo del `Check`).
 /// - `files_fts`: FTS5 sobre `(title, description, body)` como acelerador (nunca único pre-filtro).
@@ -46,7 +51,6 @@ pub(crate) fn create_schema(conn: &Connection) -> Result<(), StoreError> {
         r#"
         CREATE TABLE IF NOT EXISTS files (
             path             TEXT PRIMARY KEY,
-            kind             TEXT NOT NULL,
             type             TEXT,
             title            TEXT,
             description      TEXT,
@@ -63,8 +67,7 @@ pub(crate) fn create_schema(conn: &Connection) -> Result<(), StoreError> {
         CREATE TABLE IF NOT EXISTS links (
             src          TEXT NOT NULL,
             dst          TEXT NOT NULL,
-            href         TEXT NOT NULL,
-            src_is_index INTEGER NOT NULL DEFAULT 0
+            href         TEXT NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_links_dst ON links(dst);
         CREATE INDEX IF NOT EXISTS idx_links_src ON links(src);
@@ -105,9 +108,9 @@ pub(crate) fn create_schema(conn: &Connection) -> Result<(), StoreError> {
 pub(crate) fn schema_is_current(conn: &Connection) -> Result<bool, StoreError> {
     // Cada entrada lista las columnas que el resto del store da por hechas.
     let probes = [
-        "SELECT path, kind, type, title, description, status, resource, \
+        "SELECT path, type, title, description, status, resource, \
          frontmatter_json, body, raw, hash, mtime, size FROM files LIMIT 0",
-        "SELECT src, dst, href, src_is_index FROM links LIMIT 0",
+        "SELECT src, dst, href FROM links LIMIT 0",
         "SELECT path, tag FROM tags LIMIT 0",
         "SELECT path, code, level, msg, targets_json FROM diagnostics LIMIT 0",
         "SELECT path, title, description, body FROM files_fts LIMIT 0",

@@ -59,8 +59,8 @@ fn escribe(root: &Path, rel: &str, contenido: &str) {
     std::fs::write(ruta, contenido).unwrap();
 }
 
-/// Política permisiva: no exige resultado conforme (los conceptos nuevos quedan huérfanos → warning,
-/// nunca hard-fail), así el plan/apply no se rechaza por conformidad y el test aísla la concurrencia.
+/// Política permisiva: no exige resultado conforme, así el plan/apply no se rechaza por
+/// conformidad y el test aísla la concurrencia.
 fn policy_permisiva() -> PlanPolicy {
     PlanPolicy {
         require_conformant_result: false,
@@ -100,7 +100,7 @@ fn genera_bundle_grande(root: &Path) {
     escribe(
         root,
         "index.md",
-        "---\nokf_version: \"0.1\"\n---\n\n# Bundle grande\n",
+        "---\ntype: Index\ntitle: Bundle\ndescription: Índice del bundle\nokf_version: \"0.1\"\n---\n\n# Bundle grande\n",
     );
     for i in 0..N_CONCEPTOS {
         escribe(
@@ -221,7 +221,7 @@ fn bench_concurrencia_segura() {
     escribe(
         dir.path(),
         "index.md",
-        "---\nokf_version: \"0.1\"\n---\n\n# Bundle\n\n* [Alfa](alfa.md)\n",
+        "---\ntype: Index\ntitle: Bundle\ndescription: Índice del bundle\nokf_version: \"0.1\"\n---\n\n# Bundle\n\n* [Alfa](alfa.md)\n",
     );
     escribe(
         dir.path(),

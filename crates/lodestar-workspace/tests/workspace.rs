@@ -99,7 +99,10 @@ fn open_live_emite_evento_y_acelera_lecturas() {
         .unwrap()
         .iter()
         .any(|d| d.as_str() == "beta.md"));
-    assert!(cache.orphans().unwrap().contains(&p));
+    assert!(cache.concepts().unwrap().contains(&p));
+    // `alfa.md` enlaza a `beta.md` (colgante): tiene salientes, así que NO está aislado —
+    // la definición de `isolated` de E16-H02 (`§20.7`) exige cero entrantes Y cero salientes.
+    assert!(!cache.isolated().unwrap().contains(&p));
 }
 
 /// La strictness de la puerta (`gate.blockWarnings`) en el **formato nuevo** (E15-H08): el
@@ -153,7 +156,7 @@ fn escritorio_crear_workspace_con_cache_vieja_funciona() {
     //     retiró `init`).
     std::fs::write(
         root.join("index.md"),
-        "---\nokf_version: \"0.1\"\n---\n\n# Bundle\n",
+        "---\ntype: Index\ntitle: Bundle\ndescription: Índice del bundle\nokf_version: \"0.1\"\n---\n\n# Bundle\n",
     )
     .unwrap();
 

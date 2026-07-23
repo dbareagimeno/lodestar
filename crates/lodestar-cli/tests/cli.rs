@@ -25,7 +25,7 @@ fn check_conforme_exit_0() {
     write(
         &dir,
         "index.md",
-        "---\nokf_version: \"0.1\"\n---\n\n# Bundle\n",
+        "---\ntype: Index\ntitle: Bundle\ndescription: Índice del bundle\nokf_version: \"0.1\"\n---\n\n# Bundle\n",
     );
     write(
         &dir,
@@ -117,7 +117,7 @@ fn check_rev_es_uso() {
     write(
         &dir,
         "index.md",
-        "---\nokf_version: \"0.1\"\n---\n\n# Bundle\n",
+        "---\ntype: Index\ntitle: Bundle\ndescription: Índice del bundle\nokf_version: \"0.1\"\n---\n\n# Bundle\n",
     );
     let status = bin()
         .arg("--path")
@@ -140,7 +140,7 @@ fn check_working_tree_conforme() {
     write(
         &dir,
         "index.md",
-        "---\nokf_version: \"0.1\"\n---\n\n# Bundle\n",
+        "---\ntype: Index\ntitle: Bundle\ndescription: Índice del bundle\nokf_version: \"0.1\"\n---\n\n# Bundle\n",
     );
     write(
         &dir,
@@ -183,7 +183,7 @@ fn check_falla_schema() {
     write(
         &dir,
         "index.md",
-        "---\nokf_version: \"0.1\"\n---\n\n# Bundle\n",
+        "---\ntype: Index\ntitle: Bundle\ndescription: Índice del bundle\nokf_version: \"0.1\"\n---\n\n# Bundle\n",
     );
     // Concepto de tipo Nota, OKF-conforme, pero SIN el campo `owner` que el schema exige.
     write(
@@ -212,7 +212,7 @@ fn check_conforme_json() {
     write(
         &dir,
         "index.md",
-        "---\nokf_version: \"0.1\"\n---\n\n# Bundle\n",
+        "---\ntype: Index\ntitle: Bundle\ndescription: Índice del bundle\nokf_version: \"0.1\"\n---\n\n# Bundle\n",
     );
     // Concepto de tipo Nota que SÍ trae `owner` → satisface el schema.
     write(
@@ -252,7 +252,7 @@ fn check_caza_edicion_directa() {
     write(
         &dir,
         "index.md",
-        "---\nokf_version: \"0.1\"\n---\n\n# Bundle\n",
+        "---\ntype: Index\ntitle: Bundle\ndescription: Índice del bundle\nokf_version: \"0.1\"\n---\n\n# Bundle\n",
     );
     write_schema_nota_requiere_owner(&dir);
     // Estado inicial válido (satisface el schema).
@@ -282,7 +282,7 @@ fn bundle_con_schema_reqfield(dir: &std::path::Path) {
     write(
         dir,
         "index.md",
-        "---\nokf_version: \"0.1\"\n---\n\n# Bundle\n",
+        "---\ntype: Index\ntitle: Bundle\ndescription: Índice del bundle\nokf_version: \"0.1\"\n---\n\n# Bundle\n",
     );
     write(
         dir,
@@ -511,7 +511,7 @@ fn cli_no_asciende() {
     write(
         &proyecto,
         "index.md",
-        "---\nokf_version: \"0.1\"\n---\n\n# Bundle\n",
+        "---\ntype: Index\ntitle: Bundle\ndescription: Índice del bundle\nokf_version: \"0.1\"\n---\n\n# Bundle\n",
     );
     // Hard fail OKF que vive SOLO en el ancestro.
     write(&proyecto, "malo.md", "# sin frontmatter\n");

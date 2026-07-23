@@ -3,7 +3,7 @@
 //! Todas las fachadas hacen `use` de estos tipos; no hay capa DTO paralela (principio #4).
 //! El `.d.ts` de TypeScript se genera desde aquí (ts-rs/specta) en E0-H04/E6-H03.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
@@ -73,14 +73,14 @@ impl RelPath {
         }
     }
 
-    /// Id de concepto: la ruta sin la extensión `.md`. Port de `conceptId` aplicado al path.
-    pub fn concept_id(&self) -> String {
-        self.0.strip_suffix(".md").unwrap_or(&self.0).to_string()
-    }
-
-    /// `true` si el fichero es reservado (`index.md`/`log.md`).
-    pub fn is_reserved(&self) -> bool {
-        matches!(self.basename(), "index.md" | "log.md")
+    /// El nombre del fichero **sin** la extensión `.md` — el último eslabón de la cadena de
+    /// [`crate::model::derived_title`] (`ARCHITECTURE.md §20.4`).
+    ///
+    /// > `concept_id`/`is_reserved` se retiraron en E16-H02: ningún nombre de fichero activa
+    /// > reglas especiales (`REFACTOR_PHASE_2 §Principio 4`).
+    pub fn stem(&self) -> &str {
+        let base = self.basename();
+        base.strip_suffix(".md").unwrap_or(base)
     }
 }
 
@@ -380,7 +380,7 @@ impl Check {
 }
 
 // ---------------------------------------------------------------------------
-// Modelo documental genérico: FieldPath · ParsedFrontmatter · FileKind · FmError
+// Modelo documental genérico: FieldPath · ParsedFrontmatter · FmError
 // (`ARCHITECTURE.md §20.4`, E16-H01 — supersede los 7 campos tipados de `§4.1`)
 // ---------------------------------------------------------------------------
 
@@ -553,14 +553,6 @@ fn scalar_text(v: &serde_yaml::Value) -> Option<String> {
     }
 }
 
-/// Clase de fichero. `reserved = kind != Concept`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FileKind {
-    Concept,
-    Index,
-    Log,
-}
-
 /// Error de frontmatter (es un dato, no un `Result`: `parse_file` nunca falla por contenido).
 ///
 /// **No** hay variante «falta el frontmatter»: desde E16-H01 un documento sin bloque es válido y
@@ -576,24 +568,29 @@ pub enum FmError {
 // ---------------------------------------------------------------------------
 
 schema_derive! {
-/// El resultado de `analyze()`. Nombres = los del prototipo (`inn`, `perFile`, `out`). camelCase en wire.
+/// El resultado de `analyze()`. Nombres heredados del prototipo (`inn`, `perFile`, `out`);
+/// camelCase en wire. La forma final con `ResolvedLink`/`DanglingLink` de `§20.7` es E17-H04.
+///
+/// **E16-H02** retiró `in_index`/`okf_version` (y `Backlinks::index_refs`): la pertenencia
+/// determinada por índices no existe — `index.md` es un documento como cualquier otro y sus
+/// enlaces son aristas normales. `orphans` pasó a [`Analysis::isolated`] **con definición nueva**.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Analysis {
+    /// **Todos** los documentos del workspace: ningún basename se salta el análisis (`§20.7`).
     pub concepts: Vec<RelPath>,
-    /// Adyacencia de strings (destinos salientes resueltos por concepto).
+    /// Adyacencia de strings (destinos salientes resueltos por documento).
     pub out: BTreeMap<RelPath, Vec<RelPath>>,
     /// Backlinks (la inversa de `out`).
     pub inn: BTreeMap<RelPath, Vec<RelPath>>,
-    pub in_index: BTreeSet<RelPath>,
     pub dangling: Vec<RelPath>,
-    pub orphans: Vec<RelPath>,
+    /// Documentos **aislados** (`§20.7`): sin enlaces internos entrantes **ni** salientes. Es una
+    /// propiedad consultable, **no** un diagnóstico (el código `ORPHAN` murió con E16-H02).
+    pub isolated: Vec<RelPath>,
     pub per_file: BTreeMap<RelPath, Vec<Check>>,
     /// `hard_fail` = nº de ficheros con algún `Err` (conteo, no `.max()`). (`§10` fila 4.)
     pub hard_fail: usize,
     pub warn_count: usize,
-    /// Del `index.md` raíz; `None` si falta. Se expone en la conformidad (`§12`).
-    pub okf_version: Option<String>,
 }
 }
 
@@ -655,7 +652,8 @@ pub struct Neighborhood {
 // ---------------------------------------------------------------------------
 
 schema_derive! {
-/// Fila del árbol de concepts. `title` ya resuelto (fm.title o del path); `invalid` = algún Check Err.
+/// Fila del árbol de documentos. `title` ya resuelto por [`crate::model::derived_title`];
+/// `invalid` = algún Check `Err`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConceptSummary {
@@ -663,7 +661,9 @@ pub struct ConceptSummary {
     pub title: String,
     pub r#type: Option<String>,
     pub status: Option<String>,
-    pub orphan: bool,
+    /// Sin enlaces internos entrantes ni salientes ([`Analysis::isolated`]). Antes `orphan`, con
+    /// otra definición ("sin entrantes y no listado en un índice") — E16-H02.
+    pub isolated: bool,
     pub invalid: bool,
 }
 }
@@ -678,14 +678,15 @@ pub struct LinkRef {
 }
 
 schema_derive! {
-/// Vecindad de enlaces de un concept (port del panel de backlinks).
+/// Vecindad de enlaces de un documento.
+///
+/// **E16-H02** retiró `index_refs`: un `index.md` que te enlaza es un entrante más de `inbound`,
+/// no una relación de pertenencia aparte (`REFACTOR_PHASE_2 §Fase 8 (Eliminar)`).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Backlinks {
     /// Quién enlaza aquí (con el href usado).
     pub inbound: Vec<LinkRef>,
-    /// `index.md` que lo listan.
-    pub index_refs: Vec<RelPath>,
     /// Destinos salientes resueltos.
     pub out: Vec<RelPath>,
     /// Hrefs salientes que no resuelven a ningún fichero.

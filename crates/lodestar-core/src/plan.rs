@@ -344,7 +344,7 @@ pub fn normalize_create(
 ) -> Result<NormalizedOperation, CoreError> {
     let resolved_title = title
         .map(|s| s.to_string())
-        .unwrap_or_else(|| model::title_from_path(path.as_str()));
+        .unwrap_or_else(|| model::derived_title(None, "", path));
 
     let resolved_body = match body {
         Some(b) => Some(b),
@@ -1000,10 +1000,9 @@ fn apply_one(files: &mut FileMap, op: &NormalizedOperation) -> Result<(), CoreEr
             crate::bundle::apply_patch(&mut map, frontmatter.clone());
             let fm = ParsedFrontmatter::from_mapping(map);
             let body = body.clone().unwrap_or_else(|| {
-                let title = fm
-                    .get_text("title")
-                    .filter(|s| !s.is_empty())
-                    .unwrap_or_else(|| model::title_from_path(path.as_str()));
+                // Sin cuerpo todavía: la cadena de `derived_title` se resuelve por el `title` del
+                // frontmatter o, en su defecto, por el nombre del fichero.
+                let title = model::derived_title(Some(&fm), "", path);
                 format!("# {title}\n")
             });
             files.insert(path.clone(), model::build_raw(Some(&fm), &body));

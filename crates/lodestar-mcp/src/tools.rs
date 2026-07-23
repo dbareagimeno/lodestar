@@ -70,9 +70,9 @@ pub fn list() -> Value {
              "cursor": { "type": "string", "description": "Cursor opaco de paginación devuelto en «nextCursor»." }
          }, "required": ["scope"], "additionalProperties": false },
          "outputSchema": schemas::knowledge_check_schema()},
-        {"name": "graph_query", "description": "Consulta el grafo: backlinks/outgoing/neighborhood/orphans/dangling/path_between/cycles/components en una sola tool (consolida find_backlinks/find_orphans/find_dangling/neighborhood).",
+        {"name": "graph_query", "description": "Consulta el grafo: backlinks/outgoing/neighborhood/isolated/dangling/path_between/cycles/components en una sola tool (consolida find_backlinks/find_orphans/find_dangling/neighborhood).",
          "inputSchema": { "type": "object", "properties": {
-             "operation": { "type": "string", "enum": ["backlinks", "outgoing", "neighborhood", "orphans", "dangling", "path_between", "cycles", "components"], "description": "Qué subgrafo computar. «backlinks»/«outgoing»/«neighborhood» requieren «ref»; «path_between» requiere «ref» (origen) y «to» (destino); «orphans»/«dangling»/«cycles»/«components» no requieren refs." },
+             "operation": { "type": "string", "enum": ["backlinks", "outgoing", "neighborhood", "isolated", "dangling", "path_between", "cycles", "components"], "description": "Qué subgrafo computar. «backlinks»/«outgoing»/«neighborhood» requieren «ref»; «path_between» requiere «ref» (origen) y «to» (destino); «isolated»/«dangling»/«cycles»/«components» no requieren refs. «isolated» = documentos sin enlaces internos entrantes NI salientes (antes «orphans»)." },
              "ref": { "type": "object", "description": "ConceptRef: el concepto centro (requerido en backlinks/outgoing/neighborhood; origen en path_between).", "properties": {
                  "path": { "type": "string", "description": "Ruta relativa del concepto (p. ej. «notas/alfa.md»)." }
              }, "required": ["path"], "additionalProperties": false },
@@ -400,7 +400,7 @@ mod tests {
     fn app_with_fixture() -> (tempfile::TempDir, App) {
         let dir = tempfile::tempdir().unwrap();
         for (p, c) in [
-            ("index.md", "---\nokf_version: \"0.1\"\n---\n\n# Bundle\n\n* [Alfa](alfa.md)\n"),
+            ("index.md", "---\ntype: Index\ntitle: Bundle\ndescription: Índice del bundle\nokf_version: \"0.1\"\n---\n\n# Bundle\n\n* [Alfa](alfa.md)\n"),
             (
                 "alfa.md",
                 "---\ntype: Concept\ntitle: Alfa\ndescription: d\n---\n\n# H\n\n[huerfano falta](/no-existe.md)\n",
@@ -420,8 +420,8 @@ mod tests {
     // `golden_orphans_y_dangling_igual_workspace` y `golden_query_igual_workspace` se RETIRARON al
     // retirar las tools heredadas `find_backlinks`/`find_orphans`/`find_dangling`/`query`. Su
     // cobertura vive hoy en la superficie objetivo (e2e en `tests/mcp.rs`): `find_backlinks` →
-    // `graph_query(backlinks)` (`graph_backlinks`); `find_orphans` → `graph_query(orphans)`
-    // (`graph_orphans`); `find_dangling` → `graph_query(dangling)` (`graph_dangling`); `query` →
+    // `graph_query(backlinks)` (`graph_backlinks`); `find_orphans` → `graph_query(isolated)`
+    // (`graph_isolated`); `find_dangling` → `graph_query(dangling)` (`graph_dangling`); `query` →
     // `knowledge_search` (`search_sin_cuerpos`/`search_filtra_tipo`/`search_paginacion`). El golden
     // cross-fachada de que la tool == el `Workspace` directo lo sigue verificando
     // `golden_workspace_status_igual_app` para una tool objetivo.

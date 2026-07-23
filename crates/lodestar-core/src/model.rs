@@ -8,7 +8,7 @@ use once_cell::sync::Lazy;
 use regex::Regex;
 use serde_yaml::Value as Yaml;
 
-use crate::types::{FileKind, FmError, ParsedFrontmatter};
+use crate::types::{FmError, ParsedFrontmatter};
 
 /// `[texto](href "title")` — el grupo 1 es el href. Global.
 pub(crate) static LINK_RE: Lazy<Regex> =
@@ -129,42 +129,49 @@ pub fn dir_of(p: &str) -> String {
     }
 }
 
-/// Id de concepto: la ruta sin `.md`. Port de `conceptId`.
-pub fn concept_id(p: &str) -> String {
-    p.strip_suffix(".md").unwrap_or(p).to_string()
-}
-
-/// `true` si el basename es reservado.
-pub fn is_reserved(p: &str) -> bool {
-    matches!(basename(p), "index.md" | "log.md")
-}
-
-/// Port de `titleFromPath`: `replace(/\b\w/g, c=>c.toUpperCase())`. El boundary `\b` de JS es
-/// «char `\w` precedido de no-`\w`» con `\w = [A-Za-z0-9_]`: un acento o un punto también abren
-/// palabra (`año` → `AñO`, `foo.bar` → `Foo.Bar`) — quirk incluido, es la spec.
-pub fn title_from_path(p: &str) -> String {
-    let base = concept_id(basename(p)).replace(['-', '_'], " ");
-    let mut out = String::with_capacity(base.len());
-    let mut prev_is_word = false;
-    for ch in base.chars() {
-        let is_word = ch.is_ascii_alphanumeric() || ch == '_';
-        if is_word && !prev_is_word {
-            out.extend(ch.to_uppercase());
-        } else {
-            out.push(ch);
-        }
-        prev_is_word = is_word;
+/// Título **presentable** de un documento (`ARCHITECTURE.md §20.4`,
+/// `REFACTOR_PHASE_2 §Fase 4`). La cadena es:
+///
+/// ```text
+/// frontmatter.title  →  primer heading H1 del cuerpo  →  nombre del fichero (sin `.md`)
+/// ```
+///
+/// Es **solo una heurística de presentación**: `title` no es una propiedad reservada — se lee
+/// como cualquier otra clave del frontmatter y **nunca** se reescribe (un `title: 42` se presenta
+/// como `"42"` pero sigue siendo el número 42 para la consulta).
+///
+/// Función **pura** y **total**: devuelve `String`, no `Option`, porque el último eslabón —el
+/// nombre del fichero— existe siempre. Un `title` sin rendición textual (lista, mapa, `null`) o
+/// vacío no es un título presentable: la cadena continúa, sin error.
+///
+/// Recibe las tres piezas por separado —y no un [`Parsed`]— para que un consumidor que ya tenga
+/// el frontmatter y el cuerpo (la cache, p. ej.) no tenga que re-parsear el documento entero.
+pub fn derived_title(
+    fm: Option<&ParsedFrontmatter>,
+    body: &str,
+    path: &crate::types::RelPath,
+) -> String {
+    if let Some(t) = fm
+        .and_then(|f| f.get_text("title"))
+        .filter(|s| !s.is_empty())
+    {
+        return t;
     }
-    out
+    if let Some(h1) = first_h1(body) {
+        return h1.to_string();
+    }
+    path.stem().to_string()
 }
 
-/// Clase del fichero a partir del path.
-pub fn file_kind(p: &str) -> FileKind {
-    match basename(p) {
-        "index.md" => FileKind::Index,
-        "log.md" => FileKind::Log,
-        _ => FileKind::Concept,
-    }
+/// Texto del **primer heading de nivel 1** del cuerpo, ya recortado, o `None` si no hay ninguno.
+///
+/// Reutiliza [`parse_headings`], que reconoce los bloques de código fenceados: un `#` dentro de
+/// un ` ``` ` es contenido del bloque, no un heading.
+fn first_h1(body: &str) -> Option<&str> {
+    parse_headings(body)
+        .into_iter()
+        .find(|h| h.level == 1)
+        .map(|h| h.title)
 }
 
 /// Port de `normalize`: colapsa `.`/`..`/segmentos vacíos.
@@ -421,7 +428,6 @@ pub fn build_raw(fm: Option<&ParsedFrontmatter>, body: &str) -> String {
 
 /// Resultado del parseo de un documento (sin el `raw`, que ya tiene el llamante).
 pub struct Parsed {
-    pub kind: FileKind,
     /// El frontmatter del documento, o `None` si no tiene bloque (estado **válido**, `§20.4`).
     pub frontmatter: Option<ParsedFrontmatter>,
     pub fm_err: Option<FmError>,
@@ -433,28 +439,20 @@ pub struct Parsed {
 ///
 /// Un documento **sin** frontmatter es válido: `frontmatter: None`, `fm_err: None` y el cuerpo es
 /// el fichero entero.
-pub fn parse_file(path: &str, raw: &str) -> Parsed {
-    let kind = file_kind(path);
-    if kind != FileKind::Concept {
-        // Reservados: el cuerpo es el raw entero, sin frontmatter. (E16-H02 retira esta rama.)
-        return Parsed {
-            kind,
-            frontmatter: None,
-            fm_err: None,
-            body: raw.to_string(),
-        };
-    }
+///
+/// **No ramifica por nombre de fichero** (E16-H02, `REFACTOR_PHASE_2 §Principio 4`): `index.md`,
+/// `log.md`, `README.md` y `docs/decisions/auth.md` se parsean exactamente igual. El `path` solo
+/// se conserva en la firma porque es la identidad del documento para los llamantes.
+pub fn parse_file(_path: &str, raw: &str) -> Parsed {
     let sf = split_front(raw);
     let body = sf.body(raw).to_string();
     match &sf {
         SplitFront::Sin => Parsed {
-            kind,
             frontmatter: None,
             fm_err: None,
             body,
         },
         SplitFront::SinCerrar => Parsed {
-            kind,
             frontmatter: None,
             fm_err: Some(FmError::Unclosed),
             body,
@@ -463,7 +461,6 @@ pub fn parse_file(path: &str, raw: &str) -> Parsed {
             let texto = &raw[span.clone()];
             match parse_yaml(texto) {
                 Ok(value) => Parsed {
-                    kind,
                     frontmatter: Some(ParsedFrontmatter {
                         value,
                         raw: texto.to_string(),
@@ -473,7 +470,6 @@ pub fn parse_file(path: &str, raw: &str) -> Parsed {
                     body,
                 },
                 Err(e) => Parsed {
-                    kind,
                     frontmatter: None,
                     fm_err: Some(FmError::Malformed(e)),
                     body,
@@ -497,6 +493,9 @@ pub fn parse_file(path: &str, raw: &str) -> Parsed {
 /// Tipo opaco: los campos son privados del módulo (solo [`parse_headings`]/[`locate_section`] los
 /// tocan); los llamantes externos lo manejan como un `Vec<Heading>` sin inspeccionarlo.
 pub struct Heading<'a> {
+    /// Nivel ATX del heading (1..=6). Lo necesita [`derived_title`] para quedarse con el primer
+    /// **H1** (no con el primer heading a secas).
+    level: usize,
     /// Texto del heading, recortado.
     title: &'a str,
     /// Offset de byte donde empieza la línea del heading (para comprobar pertenencia a un rango).
@@ -549,6 +548,7 @@ pub fn parse_headings(body: &str) -> Vec<Heading<'_>> {
                 .map(|&(_, _, ls, _)| ls)
                 .unwrap_or(body_len);
             Heading {
+                level,
                 title,
                 line_start,
                 content_start,

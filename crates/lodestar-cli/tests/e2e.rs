@@ -49,7 +49,7 @@ fn run(dir: &Path, args: &[&str]) -> i32 {
 #[test]
 fn config_invalida_es_error_de_runtime() {
     let dir = temp_dir("yaml-roto");
-    write(&dir, "index.md", "---\nokf_version: \"0.1\"\n---\n\n# B\n");
+    write(&dir, "index.md", "---\ntype: Index\ntitle: Bundle\ndescription: Índice del bundle\nokf_version: \"0.1\"\n---\n\n# B\n");
     // Secuencia de flujo YAML sin cerrar: parseo inválido garantizado.
     write(
         &dir,
@@ -63,7 +63,7 @@ fn config_invalida_es_error_de_runtime() {
 #[test]
 fn md_no_utf8_no_aborta_el_check() {
     let dir = temp_dir("no-utf8");
-    write(&dir, "index.md", "---\nokf_version: \"0.1\"\n---\n\n# B\n");
+    write(&dir, "index.md", "---\ntype: Index\ntitle: Bundle\ndescription: Índice del bundle\nokf_version: \"0.1\"\n---\n\n# B\n");
     write(&dir, "buena.md", CONCEPT_B);
     std::fs::write(dir.join("latin1.md"), b"---\ntype: Nota\n---\n\n# a\xf1o\n").unwrap();
     assert_eq!(run(&dir, &["check"]), 0);

@@ -192,7 +192,7 @@ fn snapshot_md(root: &std::path::Path) -> std::collections::BTreeMap<String, Str
 // Bundles de benchmark.
 // ---------------------------------------------------------------------------
 
-const INDEX: &str = "---\nokf_version: \"0.1\"\n---\n\n# Bundle\n";
+const INDEX: &str = "---\ntype: Index\ntitle: Bundle\ndescription: Índice del bundle\nokf_version: \"0.1\"\n---\n\n# Bundle\n";
 
 /// Bundle mínimo (solo `index.md`).
 fn bundle_min() -> tempfile::TempDir {
@@ -278,7 +278,7 @@ fn bundle_cinco_relacionados() -> tempfile::TempDir {
     write(
         dir.path(),
         "index.md",
-        "---\nokf_version: \"0.1\"\n---\n\n# Bundle\n\n* [A](a.md)\n* [B](b.md)\n* [C](c.md)\n* [D](d.md)\n",
+        "---\ntype: Index\ntitle: Bundle\ndescription: Índice del bundle\nokf_version: \"0.1\"\n---\n\n# Bundle\n\n* [A](a.md)\n* [B](b.md)\n* [C](c.md)\n* [D](d.md)\n",
     );
     for (slug, next) in [("a", "b"), ("b", "c"), ("c", "d"), ("d", "a")] {
         let up = slug.to_uppercase();
@@ -334,7 +334,7 @@ fn escenario_01_buscar_por_significado() {
     write(
         dir.path(),
         "index.md",
-        "---\nokf_version: \"0.1\"\n---\n\n# Bundle\n\n* [Auth](auth.md)\n",
+        "---\ntype: Index\ntitle: Bundle\ndescription: Índice del bundle\nokf_version: \"0.1\"\n---\n\n# Bundle\n\n* [Auth](auth.md)\n",
     );
     write(
         dir.path(),
@@ -546,7 +546,7 @@ fn escenario_05_borrar_referenciado() {
     write(
         dir.path(),
         "index.md",
-        "---\nokf_version: \"0.1\"\n---\n\n# Bundle\n\n* [A](a.md)\n* [B](b.md)\n* [C](c.md)\n",
+        "---\ntype: Index\ntitle: Bundle\ndescription: Índice del bundle\nokf_version: \"0.1\"\n---\n\n# Bundle\n\n* [A](a.md)\n* [B](b.md)\n* [C](c.md)\n",
     );
     write(
         dir.path(),
@@ -991,7 +991,7 @@ fn escenario_15_editar_markdown_invalido() {
     write(
         dir.path(),
         "index.md",
-        "---\nokf_version: \"0.1\"\n---\n\n# Bundle\n\n* [Editado](editado-a-mano.md)\n",
+        "---\ntype: Index\ntitle: Bundle\ndescription: Índice del bundle\nokf_version: \"0.1\"\n---\n\n# Bundle\n\n* [Editado](editado-a-mano.md)\n",
     );
     // Frontmatter válido como bloque pero SIN `type` (alguien lo editó a mano) ⇒ OKF-TYPE (hard-fail).
     write(
