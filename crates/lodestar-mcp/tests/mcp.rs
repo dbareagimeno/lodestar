@@ -3828,18 +3828,40 @@ fn ficheros_bajo(dir: &std::path::Path) -> Vec<String> {
 }
 
 /// Llamada `tools/call` a `knowledge_get` (camino de LECTURA) con la ruta cruda `path`.
+///
+/// El JSON se **serializa**, no se interpola en un literal: `path` es una ruta cruda del sistema y
+/// en Windows lleva backslashes (`C:\Users\runneradmin\AppData\Local\Temp\…`). Interpolada dentro
+/// de una cadena JSON, `\U`/`\A`/`\L`/`\T` no son escapes válidos y la línea entera dejaría de
+/// parsear: el servidor respondería `-32700` (parse error de protocolo) y el test estaría
+/// aseverando sobre una respuesta que no es la que quiere probar. `serde_json` escapa la ruta.
 fn llamada_get(id: u32, path: &str) -> String {
-    format!(
-        r#"{{"jsonrpc":"2.0","id":{id},"method":"tools/call","params":{{"name":"knowledge_get","arguments":{{"ref":{{"path":"{path}"}},"include":["body"]}}}}}}"#
-    )
+    serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "method": "tools/call",
+        "params": {
+            "name": "knowledge_get",
+            "arguments": { "ref": { "path": path }, "include": ["body"] }
+        }
+    })
+    .to_string()
 }
 
 /// Llamada `tools/call` a `change_plan` con una op `create` sobre la ruta cruda `path` (camino de
 /// ESCRITURA: es el que podría materializar un fichero fuera del workspace).
+///
+/// Serializada con `serde_json` por la misma razón que [`llamada_get`].
 fn llamada_plan_create(id: u32, path: &str) -> String {
-    format!(
-        r#"{{"jsonrpc":"2.0","id":{id},"method":"tools/call","params":{{"name":"change_plan","arguments":{{"operations":[{{"op":"create","path":"{path}"}}]}}}}}}"#
-    )
+    serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "method": "tools/call",
+        "params": {
+            "name": "change_plan",
+            "arguments": { "operations": [{ "op": "create", "path": path }] }
+        }
+    })
+    .to_string()
 }
 
 /// Comprueba que una respuesta de tool es un **rechazo de ejecución reconocible**: `isError: true`

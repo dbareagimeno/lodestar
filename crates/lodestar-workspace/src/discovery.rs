@@ -17,7 +17,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use ignore::overrides::OverrideBuilder;
+use ignore::overrides::{Override, OverrideBuilder};
 use ignore::WalkBuilder;
 use lodestar_core::types::{Check, CheckCode, FileMap, RelPath, Severity};
 
@@ -47,6 +47,15 @@ pub const DEFAULT_MAX_DOCUMENT_BYTES: usize = 10 * 1024 * 1024;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiscoveryPolicy {
     /// Globs (estilo `.gitignore`) de lo que **entra** en el inventario. Por defecto `**/*.md`.
+    ///
+    /// Es un **filtro final sobre los ficheros supervivientes**, no una lista blanca que mande
+    /// sobre el resto de la política: lo que `exclude`, `.gitignore` o `.lodestarignore` hayan
+    /// dejado fuera sigue fuera aunque case con un `include` (ver [`discover`], «orden de
+    /// precedencia»). Un `include` vacío no incluye nada.
+    ///
+    /// No se aplica a **directorios**: un directorio no entra nunca en el inventario, y podarlo
+    /// por `include` cortaría el descenso a los documentos que sí casan (`**/*.md` no casa con
+    /// `docs/`, pero sí con `docs/api.md`).
     pub include: Vec<String>,
     /// Globs de lo que queda **fuera**, con prioridad sobre `include`. Por defecto `.git/**` y
     /// **`.lodestar/**` entero** ([`CONTROL_PLANE_EXCLUDE`]) — no solo `runtime/`. `.lodestar/**`
@@ -105,13 +114,32 @@ pub struct Discovered {
 /// dejar muerta la lectura del workspace entero. Los diagnósticos incluyen los de
 /// [`case_collisions`] sobre el inventario resultante.
 ///
+/// # Orden de precedencia
+///
+/// De mayor a menor, y **en este orden**:
+///
+/// 1. [`DiscoveryPolicy::exclude`] — política explícita del usuario, va en el `Override` del
+///    walker, que en `ignore` tiene la precedencia más alta y **cortocircuita** el resto.
+/// 2. `.gitignore` / `.lodestarignore` del árbol.
+/// 3. [`DiscoveryPolicy::include`] — **filtro final** sobre lo que sobrevivió a 1 y 2.
+///
+/// Que `include` vaya el último no es un detalle de implementación: es la diferencia entre que un
+/// `.gitignore` con `secreto.md` funcione o no. En `ignore`, **cualquier** match del `Override`
+/// —whitelist o ignore— corta y decide (`dir.rs`: *«Overrides have the highest precedence»*), así
+/// que meter `include` ahí como lista blanca haría que todo `.md` quedase whitelisteado **antes**
+/// de que se consultara ningún fichero de ignore, y los patrones de fichero de `.gitignore`
+/// dejarían de aplicarse por completo (los de directorio se salvarían de rebote, porque el
+/// `Override` no aplica whitelist a directorios). Por eso el `Override` se reserva para `exclude`
+/// y el `include` se evalúa aquí, contra el fichero ya superviviente.
+///
 /// # Errores
 /// - [`WorkspaceError::Io`] si algún glob de `policy` es inválido (desde E15-H08 la política puede
 ///   venir del `config.yaml` del usuario, así que es alcanzable con un glob mal escrito).
 pub fn discover(root: &Path, policy: &DiscoveryPolicy) -> Result<Discovered, WorkspaceError> {
+    let include = build_include(root, policy)?;
     let mut builder = WalkBuilder::new(root);
     builder
-        .overrides(build_overrides(root, policy)?)
+        .overrides(build_excludes(root, policy)?)
         // Un directorio oculto (`.oculto/`) es conocimiento como cualquier otro: solo lo excluyen
         // los globs y los ficheros de ignore.
         .hidden(false)
@@ -153,6 +181,15 @@ pub fn discover(root: &Path, policy: &DiscoveryPolicy) -> Result<Discovered, Wor
         let path = entry.path();
         let rel = path.strip_prefix(root).unwrap_or(path);
         let file_type = entry.file_type();
+
+        // Filtro `include`, el ÚLTIMO de la cadena de precedencia (ver la doc de esta función).
+        // Se salta para directorios —nunca entran en el inventario y podarlos aquí cortaría el
+        // descenso— y se aplica a todo lo demás, symlinks incluidos: un `enlace.txt` no es un
+        // documento que Lodestar «no esté viendo», así que no merece diagnóstico.
+        let es_dir = file_type.is_some_and(|t| t.is_dir());
+        if !es_dir && !incluido(&include, path) {
+            continue;
+        }
 
         // Symlink: no se sigue (política) pero TAMPOCO se ignora en silencio — el usuario tiene
         // que enterarse de que hay un documento que Lodestar no está viendo.
@@ -342,36 +379,63 @@ fn clave_orden(c: &Check) -> (&'static str, Vec<&str>, &str) {
     )
 }
 
-/// Traduce `include`/`exclude` al `Override` de `ignore`, que aplica semántica `.gitignore` a los
-/// globs **durante** el recorrido (y por tanto poda directorios en vez de filtrar a posteriori).
+/// El error de un glob inválido de la política, con el glob culpable en el mensaje.
+fn glob_invalido(glob: &str, e: ignore::Error) -> WorkspaceError {
+    WorkspaceError::Io(format!(
+        "glob inválido en la política de descubrimiento «{glob}»: {e}"
+    ))
+}
+
+/// Traduce **solo** [`DiscoveryPolicy::exclude`] al `Override` del walker, que es lo que le da la
+/// precedencia máxima que la política explícita del usuario debe tener (por encima de los
+/// `.gitignore`/`.lodestarignore` del árbol) y lo que permite **podar directorios durante** el
+/// recorrido en vez de filtrar a posteriori.
 ///
-/// - Los `include` entran tal cual (whitelist): lo que no case con ninguno queda fuera.
-/// - Los `exclude` entran negados y **después**, para que ganen (última regla que casa manda).
-/// - Cada `exclude` con forma `pre/**` añade además `pre` para **podar el directorio** entero: en
+/// - Los globs entran **negados**: en la semántica invertida de `OverrideBuilder`, un `!` al
+///   principio significa «ignora esto».
+/// - Cada `exclude` con forma `pre/**` añade además `pre` para podar el directorio entero: en
 ///   semántica `.gitignore`, `.git/**` casa con lo que hay dentro de `.git` pero no con `.git`, y
 ///   sin la poda se recorrería el repo git completo para tirar cada entrada una a una.
-fn build_overrides(
-    root: &Path,
-    policy: &DiscoveryPolicy,
-) -> Result<ignore::overrides::Override, WorkspaceError> {
+///
+/// El `include` **no** entra aquí a propósito; ver la doc de [`discover`].
+fn build_excludes(root: &Path, policy: &DiscoveryPolicy) -> Result<Override, WorkspaceError> {
     let mut builder = OverrideBuilder::new(root);
-    let glob_err = |g: &str, e: ignore::Error| {
-        WorkspaceError::Io(format!(
-            "glob inválido en la política de descubrimiento «{g}»: {e}"
-        ))
-    };
-    for glob in &policy.include {
-        builder.add(glob).map_err(|e| glob_err(glob, e))?;
-    }
     for glob in &policy.exclude {
         if let Some(dir) = glob.strip_suffix("/**") {
             let podado = format!("!{dir}");
-            builder.add(&podado).map_err(|e| glob_err(glob, e))?;
+            builder.add(&podado).map_err(|e| glob_invalido(glob, e))?;
         }
         let negado = format!("!{glob}");
-        builder.add(&negado).map_err(|e| glob_err(glob, e))?;
+        builder.add(&negado).map_err(|e| glob_invalido(glob, e))?;
     }
     builder
         .build()
         .map_err(|e| WorkspaceError::Io(format!("política de descubrimiento inválida: {e}")))
+}
+
+/// Compila [`DiscoveryPolicy::include`] como matcher **independiente** del walker.
+///
+/// Se usa un `Override` (y no un `GlobSet` a pelo) para que los globs de `include` conserven
+/// exactamente la misma semántica `.gitignore` que tenían cuando iban dentro del `Override` del
+/// walker —`**/*.md` casa igual en la raíz que a diez niveles— y para que un glob mal escrito dé
+/// el mismo error que los de `exclude`. Lo que cambia no es cómo casa `include`, sino **cuándo** se
+/// consulta: ver [`discover`].
+fn build_include(root: &Path, policy: &DiscoveryPolicy) -> Result<Override, WorkspaceError> {
+    let mut builder = OverrideBuilder::new(root);
+    for glob in &policy.include {
+        builder.add(glob).map_err(|e| glob_invalido(glob, e))?;
+    }
+    builder
+        .build()
+        .map_err(|e| WorkspaceError::Io(format!("política de descubrimiento inválida: {e}")))
+}
+
+/// ¿Pasa `path` (un no-directorio) el filtro `include`?
+///
+/// Se consulta con la ruta completa que entrega el walker, igual que hace `ignore` con su propio
+/// `Override`: el matcher se construyó con la misma raíz y le quita el prefijo él solo. Un
+/// `include` vacío da un matcher vacío, que no casa con nada — coherente con «la config limita,
+/// nunca habilita»: una lista blanca sin entradas no incluye nada.
+fn incluido(include: &Override, path: &Path) -> bool {
+    include.matched(path, false).is_whitelist()
 }

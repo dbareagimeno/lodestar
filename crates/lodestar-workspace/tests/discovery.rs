@@ -707,3 +707,159 @@ fn lodestar_interno_no_es_conocimiento() {
         anterior = actual;
     }
 }
+
+// ---------------------------------------------------------------------------
+// Criterio 11 (regresión): los patrones de FICHERO de los ignore también aplican
+// ---------------------------------------------------------------------------
+
+/// **Dado** un `.gitignore` con patrones **de fichero** (`secreto.md`, `*.local.md`,
+/// `docs/api/*.md`), **Cuando** se descubre, **Entonces** ninguno de esos documentos entra en el
+/// inventario.
+///
+/// ## Por qué hace falta un test aparte de `respeta_gitignore`
+///
+/// `respeta_gitignore` usa `vendor/` — un patrón **de directorio**. Y un patrón de directorio puede
+/// funcionar por la razón equivocada: `ignore` no aplica la whitelist de un `Override` a los
+/// directorios, así que el directorio se poda antes de descender y sus ficheros no llegan a
+/// evaluarse nunca. Los patrones **de fichero** no tienen esa red: se evalúan fichero a fichero,
+/// después del `Override`, y en `ignore` *cualquier* match del `Override` —whitelist incluida—
+/// cortocircuita y decide (`dir.rs`: «Overrides have the highest precedence»).
+///
+/// Consecuencia: una implementación que meta el `include` (`**/*.md`) como whitelist del `Override`
+/// deja **todo** `.md` whitelisteado antes de que se consulte ningún fichero de ignore, y los
+/// patrones de fichero dejan de aplicarse **por completo** — en cualquier proyecto, con `.git/` o
+/// sin él. Es una regresión silenciosa (nada falla; simplemente el `.gitignore` deja de valer para
+/// ficheros) que `respeta_gitignore` no puede ver.
+///
+/// Se cubren las tres formas de patrón de fichero que un usuario escribe de verdad:
+/// nombre exacto en la raíz, comodín de sufijo, y comodín acotado a un directorio.
+#[test]
+fn respeta_gitignore_con_patrones_de_fichero() {
+    let dir = tempfile::tempdir().unwrap();
+    lodestar_fixtures::materialize(&lodestar_fixtures::arbitrary(), dir.path()).unwrap();
+
+    let ignorados = [
+        "secreto.md",           // nombre exacto
+        "notas.local.md",       // `*.local.md`
+        "docs/api/generado.md", // `docs/api/*.md`
+        "one/apuntes.local.md", // el comodín aplica a cualquier profundidad
+    ];
+    for rel in ignorados {
+        let destino = dir.path().join(rel);
+        std::fs::create_dir_all(destino.parent().unwrap()).unwrap();
+        std::fs::write(&destino, "# No debe entrar en el inventario\n").unwrap();
+    }
+    // Vecino del patrón acotado que SÍ debe entrar: `docs/api/*.md` no alcanza a `docs/guia.md`.
+    std::fs::write(dir.path().join("docs/guia.md"), "# Guía\n").unwrap();
+    std::fs::write(
+        dir.path().join(".gitignore"),
+        "secreto.md\n*.local.md\ndocs/api/*.md\n",
+    )
+    .unwrap();
+
+    let d = discover(dir.path(), &politica()).unwrap();
+
+    for rel in ignorados {
+        assert!(
+            !contiene(&d.files, rel),
+            "`{rel}` está cubierto por un patrón de FICHERO del `.gitignore`: no puede entrar en \
+             el inventario. Si entra, el `include` de la política está actuando como whitelist del \
+             `Override` y cortocircuitando los ficheros de ignore. Inventario: {:?}",
+            rutas(&d.files)
+        );
+    }
+    assert_eq!(
+        rutas(&d.files),
+        vec![
+            "README.md",
+            "docs/guia.md",
+            "one/first.md",
+            "three/levels/deep/third.md",
+            "two/levels/second.md",
+        ],
+        "…y respetar los patrones de fichero no puede llevarse por delante ningún documento que \
+         el `.gitignore` no nombra (`docs/api/*.md` no alcanza a `docs/guia.md`)"
+    );
+}
+
+/// La misma regresión, por el otro fichero de exclusiones: **Dado** un `.lodestarignore` con
+/// patrones de fichero, **Cuando** se descubre, **Entonces** esos documentos quedan fuera.
+///
+/// Va aparte de `respeta_lodestarignore` (que usa `borradores/`, un patrón de directorio) por la
+/// misma razón que su gemelo de `.gitignore`: el patrón de directorio sobrevive por accidente al
+/// cortocircuito del `Override`, el de fichero no. Y va aparte del gemelo porque son **dos
+/// matchers distintos** de `ignore` (`git_ignore` vs `add_custom_ignore_filename`): arreglar uno no
+/// arregla el otro, y `.lodestarignore` es además el único mecanismo de exclusión por fichero que
+/// le queda a un proyecto que no usa git.
+///
+/// Se comprueba además que sigue siendo **independiente** del `.gitignore`: el escenario declara
+/// los dos ficheros con patrones distintos y exige que ambos se apliquen.
+#[test]
+fn respeta_lodestarignore_con_patrones_de_fichero() {
+    let dir = tempfile::tempdir().unwrap();
+    lodestar_fixtures::materialize(&lodestar_fixtures::arbitrary(), dir.path()).unwrap();
+
+    for rel in ["privado.md", "one/apuntes.wip.md", "two/levels/ignorado.md"] {
+        std::fs::write(dir.path().join(rel), "# No debe entrar en el inventario\n").unwrap();
+    }
+    std::fs::write(dir.path().join("del-gitignore.md"), "# Tampoco\n").unwrap();
+    std::fs::write(
+        dir.path().join(".lodestarignore"),
+        "privado.md\n*.wip.md\ntwo/levels/ignorado.md\n",
+    )
+    .unwrap();
+    // Los dos mecanismos son independientes y deben aplicarse a la vez.
+    std::fs::write(dir.path().join(".gitignore"), "del-gitignore.md\n").unwrap();
+
+    let d = discover(dir.path(), &politica()).unwrap();
+
+    assert_eq!(
+        rutas(&d.files),
+        vec![
+            "README.md",
+            "one/first.md",
+            "three/levels/deep/third.md",
+            "two/levels/second.md",
+        ],
+        "los patrones de FICHERO del `.lodestarignore` (nombre exacto, comodín y ruta concreta) \
+         deben excluir sus documentos, y el `.gitignore` seguir aplicándose en paralelo"
+    );
+}
+
+/// El `exclude` de la política **gana** a los ficheros de ignore, también cuando estos
+/// *whitelistean* explícitamente el documento.
+///
+/// Es la mitad que el arreglo de la regresión no puede llevarse por delante: `exclude` es política
+/// explícita del usuario y por eso vive en el `Override` del walker, que tiene la precedencia más
+/// alta. Un `.gitignore` con `!secreto.md` (un des-ignore) no puede resucitar lo que la política
+/// excluyó.
+#[test]
+fn exclude_gana_a_los_ficheros_de_ignore() {
+    let dir = tempfile::tempdir().unwrap();
+    lodestar_fixtures::materialize(&lodestar_fixtures::arbitrary(), dir.path()).unwrap();
+    std::fs::write(
+        dir.path().join("secreto.md"),
+        "# Excluido por la política\n",
+    )
+    .unwrap();
+    // El `.gitignore` intenta lo contrario de lo que dice la política: primero lo ignora, luego lo
+    // des-ignora. Gane quien gane dentro del `.gitignore`, la política manda.
+    std::fs::write(dir.path().join(".gitignore"), "secreto.md\n!secreto.md\n").unwrap();
+
+    let d = discover(
+        dir.path(),
+        &DiscoveryPolicy {
+            exclude: vec!["secreto.md".to_string()],
+            max_document_bytes: LIMITE,
+            ..DiscoveryPolicy::default()
+        },
+    )
+    .unwrap();
+
+    assert!(
+        !contiene(&d.files, "secreto.md"),
+        "el `exclude` de la política es explícito y tiene la precedencia más alta: ni un \
+         `!secreto.md` del `.gitignore` puede reabrirlo. Inventario: {:?}",
+        rutas(&d.files)
+    );
+}
