@@ -39,7 +39,10 @@ fn check_conforme_exit_0() {
 #[test]
 fn check_hard_fail_exit_1() {
     let dir = temp_dir("hardfail");
-    write(&dir, "malo.md", "# sin frontmatter\n");
+    // MIGRADO en E16-H05: el hard fail era «sin frontmatter» (`OKF-FM01`), que dejó de ser un
+    // error. Hoy lo es un bloque que abre y no cierra (`FM-UNCLOSED`): Lodestar no puede
+    // interpretar el documento.
+    write(&dir, "malo.md", "---\ntype: Nota\n");
     let status = bin().arg("--path").arg(&dir).arg("check").status().unwrap();
     assert_eq!(status.code(), Some(1));
 }
@@ -66,7 +69,7 @@ fn check_json_es_valido() {
 #[test]
 fn check_sarif_es_valido() {
     let dir = temp_dir("sarif");
-    write(&dir, "malo.md", "# sin frontmatter\n");
+    write(&dir, "malo.md", "---\ntype: Nota\n");
     let out = bin()
         .arg("--path")
         .arg(&dir)
@@ -79,7 +82,7 @@ fn check_sarif_es_valido() {
         .as_array()
         .unwrap()
         .iter()
-        .any(|r| r["ruleId"] == "OKF-FM01"));
+        .any(|r| r["ruleId"] == "FM-UNCLOSED"));
 }
 
 // --- E9-H02: retirar los subcomandos git de la CLI (conservando `check`) ---
@@ -498,7 +501,8 @@ fn init_es_uso() {
 ///
 /// El escenario está montado para que el veredicto sea **distinto** en cada caso, de modo que el
 /// test no pueda pasar por casualidad:
-///   · el ANCESTRO contiene `malo.md` (sin frontmatter ⇒ `OKF-FM01`, hard fail) ⇒ juzgarlo da exit 1;
+///   · el ANCESTRO contiene `malo.md` (frontmatter sin cerrar ⇒ `FM-UNCLOSED`, hard fail) ⇒
+///     juzgarlo da exit 1;
 ///   · el SUBDIRECTORIO contiene solo un `a.md` conforme ⇒ juzgarlo da exit 0.
 /// Además se comprueba el inventario juzgado (`concepts` del `--json`, campo ya existente en el
 /// wire): desde el subdirectorio debe ser exactamente `["a.md"]`, no `["malo.md","sub/a.md"]`.
@@ -513,8 +517,10 @@ fn cli_no_asciende() {
         "index.md",
         "---\ntype: Index\ntitle: Bundle\ndescription: Índice del bundle\nokf_version: \"0.1\"\n---\n\n# Bundle\n",
     );
-    // Hard fail OKF que vive SOLO en el ancestro.
-    write(&proyecto, "malo.md", "# sin frontmatter\n");
+    // Hard fail que vive SOLO en el ancestro. MIGRADO en E16-H05: «sin frontmatter» dejó de
+    // serlo, así que la premisa del escenario —que el ancestro dé exit 1— se sostiene ahora con
+    // un bloque sin cerrar.
+    write(&proyecto, "malo.md", "---\ntype: Nota\n");
     // El subdirectorio, juzgado por sí mismo, es conforme.
     let sub = proyecto.join("sub");
     write(

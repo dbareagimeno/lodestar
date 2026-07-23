@@ -71,6 +71,17 @@ pub enum CoreError {
     /// mapea a `ErrorCode::InternalIoError`. El payload nombra la variante recibida.
     #[error("operación no aplicable (no normalizada a forma terminal): {0}")]
     OperationNotApplicable(String),
+
+    /// Al parchear el frontmatter de un documento (E16-H04,
+    /// [`crate::model::patch_frontmatter`]) el bloque existe pero Lodestar **no puede
+    /// interpretarlo**: abre `---` y nunca cierra, o su YAML es sintácticamente inválido.
+    ///
+    /// No hay mapa sobre el que aplicar el merge-patch, y reconstruir el bloque desde cero
+    /// **borraría la metadata del usuario** — la operación falla y el documento queda intacto.
+    /// El payload es un mensaje legible con el motivo, para que el agente sepa qué reparar.
+    /// Mapea a `ErrorCode::InvalidSchema`.
+    #[error("el frontmatter del documento no es interpretable: {0}")]
+    UnreadableFrontmatter(String),
 }
 
 /// Resultado de conveniencia del núcleo.

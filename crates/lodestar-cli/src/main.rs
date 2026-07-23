@@ -1,7 +1,7 @@
 //! `lodestar` — fachada CLI (`ARCHITECTURE.md §7.3`). Puerta de CI con exit codes congelados.
 //!
 //! Cada subcomando resuelve el root → construye el `Bundle` (efímero, sobre el core) → serializa.
-//! **Cero lógica OKF aquí**: toda la semántica vive en `lodestar-core`.
+//! **Cero lógica de dominio aquí**: toda la semántica vive en `lodestar-core`.
 //!
 //! Exit codes (congelados): `0` conforme · `1` hard-fail · `2` uso · `3` runtime/IO. El `4` (drift
 //! de generadores) se retiró con los generadores en E15-H02: sin `index`/`tags` no hay drift.
@@ -14,7 +14,7 @@ use clap::{Parser, Subcommand};
 mod commands;
 mod sarif;
 
-/// Editor local-first de bases de conocimiento OKF — interfaz de línea de comandos.
+/// Motor de integridad semántica para bases de conocimiento Markdown — línea de comandos.
 #[derive(Parser)]
 #[command(name = "lodestar", version, about)]
 struct Cli {

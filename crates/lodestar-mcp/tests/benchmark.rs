@@ -993,11 +993,16 @@ fn escenario_15_editar_markdown_invalido() {
         "index.md",
         "---\ntype: Index\ntitle: Bundle\ndescription: Índice del bundle\nokf_version: \"0.1\"\n---\n\n# Bundle\n\n* [Editado](editado-a-mano.md)\n",
     );
-    // Frontmatter válido como bloque pero SIN `type` (alguien lo editó a mano) ⇒ OKF-TYPE (hard-fail).
+    // RECOMPUESTO en E16-H05: el escenario se apoyaba en `OKF-TYPE` (frontmatter sin `type`), y
+    // ese código se retiró — un `.md` sin `type` es un documento de primera clase. El escenario
+    // §17 sigue siendo el mismo («alguien editó el Markdown a mano y lo dejó inválido; el motor
+    // lo caza»), pero con el catálogo mínimo de `§20.9`: aquí el frontmatter está delimitado y su
+    // YAML es sintácticamente inválido ⇒ `FM-YAML-INVALID` (hard-fail), que es exactamente lo que
+    // impide a Lodestar interpretar y modificar el documento con seguridad.
     write(
         dir.path(),
         "editado-a-mano.md",
-        "---\ntitle: Editado a mano\ndescription: a pelo\n---\n\n# Nota\n\ncuerpo sin tipo.\n",
+        "---\ntitle: : :\n  - a pelo\ndescription: a pelo\n---\n\n# Nota\n\ncuerpo.\n",
     );
 
     let resp = roundtrip(
@@ -1021,8 +1026,19 @@ fn escenario_15_editar_markdown_invalido() {
         })
         .collect();
     assert!(
-        del_fichero.iter().any(|d| d["code"] == "OKF-TYPE"),
-        "knowledge_check debe cazar el Markdown editado a mano con OKF-TYPE: {resp:?}"
+        del_fichero.iter().any(|d| d["code"] == "FM-YAML-INVALID"),
+        "knowledge_check debe cazar el Markdown editado a mano con FM-YAML-INVALID: {resp:?}"
+    );
+    // Y el diagnóstico acota el bloque: `§20.9` exige rango para `FM-YAML-INVALID`, y aquí son
+    // las líneas 2..4 (1-based, delimitadores excluidos).
+    let con_rango = del_fichero
+        .iter()
+        .find(|d| d["code"] == "FM-YAML-INVALID")
+        .expect("ya comprobado arriba");
+    assert_eq!(
+        con_rango["range"],
+        json!({ "startLine": 2, "endLine": 4 }),
+        "el diagnóstico de frontmatter ilegible debe acotar las líneas del bloque: {resp:?}"
     );
     assert_eq!(
         sc(&resp[0])["conformant"],

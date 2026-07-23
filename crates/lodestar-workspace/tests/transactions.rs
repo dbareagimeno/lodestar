@@ -244,14 +244,16 @@ fn staging_no_conforme_aborta() {
 
     let antes = canonical_md(dir.path());
 
-    // Change set cuyo resultado es NO conforme: un `Create` con `type` vacío (hard-fail de esquema,
-    // mismo motivo que `create_concept("")` rechaza en `create_concept_no_conforme_no_escribe`).
+    // Change set cuyo resultado es NO conforme. MIGRADO en E16-H05: era un `Create` con `type`
+    // vacío (`OKF-TYPE`), retirado del catálogo; hoy es un cuerpo con marcadores de merge sin
+    // resolver (`DOC-CONFLICT-MARKER`), mismo motivo por el que rechaza
+    // `create_concept_no_conforme_no_escribe`.
     let cs = change_set(
         "changeset:no-conforme",
         vec![NormalizedOperation::Create {
             path: RelPath::new("malo.md").unwrap(),
-            frontmatter: patch(&[("type", ""), ("title", "Malo")]),
-            body: Some("# Malo\n".to_string()),
+            frontmatter: patch(&[("type", "Nota"), ("title", "Malo")]),
+            body: Some("# Malo\n\n<<<<<<< HEAD\nuno\n=======\ndos\n>>>>>>> rama\n".to_string()),
         }],
     );
 

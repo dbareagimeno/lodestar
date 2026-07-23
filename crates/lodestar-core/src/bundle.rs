@@ -331,17 +331,26 @@ impl Bundle {
     }
 
     /// Aplica un patch de frontmatter (merge-patch RFC 7386: `Some` escribe, `None` borra).
+    ///
+    /// Delega en [`model::patch_frontmatter`] (E16-H04, invariante #3: una sola verdad de
+    /// patcheo), así que la edición es **quirúrgica** siempre que se puede: las líneas que el
+    /// patch no toca llegan al `.md` byte a byte. Si el frontmatter del documento no es
+    /// interpretable, la escritura se **rechaza** (`written: false`) en vez de reconstruir el
+    /// bloque encima y borrar la metadata del usuario.
     pub fn merge_frontmatter(&self, p: &RelPath, patch: FrontmatterPatch) -> WriteOutcome {
-        let parsed = self.parsed.get(p);
-        let mut map = parsed
-            .and_then(|x| x.frontmatter.as_ref())
-            .map(|fm| fm.mapping().clone())
-            .unwrap_or_default();
-        let body = parsed.map(|x| x.body.clone()).unwrap_or_default();
-        apply_patch(&mut map, patch);
-        let fm = ParsedFrontmatter::from_mapping(map);
-        let raw = model::build_raw(Some(&fm), &body);
-        self.outcome_for_write(p, raw, false)
+        let previo = self.files.get(p).cloned().unwrap_or_default();
+        match model::patch_frontmatter(&previo, &patch) {
+            Ok(patched) => self.outcome_for_write(p, patched.raw, false),
+            Err(e) => WriteOutcome {
+                path: p.clone(),
+                raw: previo.clone(),
+                hash: *blake3::hash(previo.as_bytes()).as_bytes(),
+                written: false,
+                rejected: Some(e.to_string()),
+                checks: self.analyze().per_file.get(p).cloned().unwrap_or_default(),
+                bundle_hard_fail: self.analyze().hard_fail,
+            },
+        }
     }
 
     /// Computa el `WriteOutcome` de escribir `raw` en `p`: hash, checks y rechazo si introduce `Err`.

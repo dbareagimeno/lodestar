@@ -61,11 +61,14 @@ fn severity_wire_minusculas() {
 
 #[test]
 fn checkcode_wire_con_guion() {
+    // E16-H05: el catálogo pasó al mínimo de `§20.9` — `OKF-FM01` desapareció y `OKF-FM02`/
+    // `OKF-FM03`/`OKF-CONFLICT` se renombraron. Lo que este test fija sigue siendo lo mismo: el
+    // valor de wire ES la cadena con guion, y `as_str` coincide con la serialización.
     assert_eq!(
-        serde_json::to_string(&CheckCode::OkfFm01).unwrap(),
-        "\"OKF-FM01\""
+        serde_json::to_string(&CheckCode::FmUnclosed).unwrap(),
+        "\"FM-UNCLOSED\""
     );
-    assert_eq!(CheckCode::OkfConflict.as_str(), "OKF-CONFLICT");
+    assert_eq!(CheckCode::DocConflictMarker.as_str(), "DOC-CONFLICT-MARKER");
 }
 
 // --- E10-H06: extensión de `Check` + familias `SCHEMA-*` / `REL-*` -----------
@@ -90,10 +93,10 @@ fn schema_code_wire() {
 
 #[test]
 fn check_extension_retrocompat() {
-    // Un `Check` de un código OKF clásico, construido SIN fixes/range/id/related.
+    // Un `Check` clásico, construido SIN fixes/range/id/related.
     let c = Check::new(
         Severity::Err,
-        CheckCode::OkfFm01,
+        CheckCode::FmUnclosed,
         "falta frontmatter",
         vec![RelPath::new("a/b.md").unwrap()],
     );
@@ -102,7 +105,7 @@ fn check_extension_retrocompat() {
     // Retro-compat: los 4 campos clásicos NO cambian de forma ni de valor respecto al wire
     // actual (un consumidor viejo del `Check` no se rompe).
     assert_eq!(v["level"], serde_json::json!("err"));
-    assert_eq!(v["code"], serde_json::json!("OKF-FM01"));
+    assert_eq!(v["code"], serde_json::json!("FM-UNCLOSED"));
     assert_eq!(v["msg"], serde_json::json!("falta frontmatter"));
     assert_eq!(v["targets"], serde_json::json!(["a/b.md"]));
 
@@ -111,20 +114,25 @@ fn check_extension_retrocompat() {
     assert_eq!(
         v["fixes"],
         serde_json::json!([]),
-        "un Check OKF clásico debe serializar `fixes` como []",
+        "un Check clásico debe serializar `fixes` como []",
     );
     assert!(
         v.get("range").is_none_or(serde_json::Value::is_null),
-        "un Check OKF clásico debe serializar `range` ausente o null",
+        "un Check clásico debe serializar `range` ausente o null",
     );
 }
 
 #[test]
 fn check_campos_nuevos_por_defecto() {
-    // Los 15 checks OKF dejan los campos nuevos en su valor por defecto. Este test fija los
-    // NOMBRES Rust de los campos aditivos (id/range/related/fixes) que el diseño D-CheckCode
-    // dicta; su presencia hace ROJO por API ausente hasta que se implementen.
-    let c = Check::new(Severity::Info, CheckCode::RecTitle, "sin título", vec![]);
+    // Un `Check` construido por el constructor clásico deja los campos aditivos en su valor por
+    // defecto. Este test fija los NOMBRES Rust de los campos (id/range/related/fixes) que el
+    // diseño D-CheckCode dicta.
+    let c = Check::new(
+        Severity::Info,
+        CheckCode::LinkRel,
+        "enlace relativo",
+        vec![],
+    );
     assert!(c.id.is_none());
     assert!(c.range.is_none());
     assert!(c.related.is_empty());
@@ -236,10 +244,14 @@ fn codes_of(b: &Bundle, path: &str) -> Vec<String> {
         .collect()
 }
 
+/// MIGRADO en E16-H05: era el catálogo OKF entero; ahora es el **catálogo mínimo** de `§20.9`.
+/// Sigue siendo el mismo test —«cada código que `conform` puede producir, se produce»—, pero la
+/// lista de códigos es otra, y la mitad del fixture pasa a probar el SILENCIO: lo que antes eran
+/// seis incumplimientos hoy son, en su mayoría, documentos perfectamente válidos.
 #[test]
 fn conformidad_dispara_cada_codigo() {
     let b = Bundle::from_files(fm(&[
-        ("sin-fm.md", "# Solo cuerpo\n"),
+        ("sin-fm.md", "Solo cuerpo, sin encabezados.\n"),
         ("sin-cierre.md", "---\ntype: Concept\n"),
         ("malo-yaml.md", "---\ntype: : :\n  - x\n: bad\n---\n\n# H\n"),
         ("sin-tipo.md", "---\ntitle: \n---\n\ncuerpo\n"),
@@ -249,28 +261,36 @@ fn conformidad_dispara_cada_codigo() {
         ),
         ("conflicto.md", "---\ntype: N\ntitle: C\ndescription: d\n---\n\n# H\n\n<<<<<<< HEAD\na\n=======\nb\n>>>>>>> r\n"),
     ]));
-    assert!(codes_of(&b, "sin-fm.md").contains(&"OKF-FM01".to_string()));
-    assert!(codes_of(&b, "sin-cierre.md").contains(&"OKF-FM02".to_string()));
-    assert!(codes_of(&b, "malo-yaml.md").contains(&"OKF-FM03".to_string()));
-    assert!(codes_of(&b, "sin-tipo.md").contains(&"OKF-TYPE".to_string()));
-    assert!(codes_of(&b, "sin-tipo.md").contains(&"REC-TITLE".to_string()));
-    assert!(codes_of(&b, "sin-tipo.md").contains(&"BODY-STRUCT".to_string()));
+    // Lo que Lodestar NO puede interpretar o modificar con seguridad: los tres códigos vivos.
+    assert!(codes_of(&b, "sin-cierre.md").contains(&"FM-UNCLOSED".to_string()));
+    assert!(codes_of(&b, "malo-yaml.md").contains(&"FM-YAML-INVALID".to_string()));
+    assert!(codes_of(&b, "conflicto.md").contains(&"DOC-CONFLICT-MARKER".to_string()));
+    // Enlaces: vivos hasta E17, que los sustituye por `LINK-TARGET-MISSING`/`LINK-CASE-MISMATCH`.
+    let malo = codes_of(&b, "malo.md");
+    assert!(malo.contains(&"LINK-STUB".to_string()));
+    assert!(malo.contains(&"LINK-REL".to_string()));
+
+    // Y el otro lado del catálogo mínimo: un `.md` cualquiera NO incumple nada. Un documento sin
+    // frontmatter, uno sin `type` ni encabezados y una metadata «mal formateada» son válidos y
+    // silenciosos — se acabaron `OKF-FM01`, `OKF-TYPE`, `REC-*`, `BODY-STRUCT` y `FMT-*`.
+    assert_eq!(codes_of(&b, "sin-fm.md"), Vec::<String>::new());
+    assert_eq!(codes_of(&b, "sin-tipo.md"), Vec::<String>::new());
+    assert!(
+        !malo.contains(&"FMT-TAGS".to_string()) && !malo.contains(&"FMT-TS".to_string()),
+        "el formato de `tags`/`timestamp` es cosa del usuario: {malo:?}"
+    );
     // `ORPHAN` murió con E16-H02: el aislamiento es una propiedad del grafo
     // (`Analysis::isolated`), no un diagnóstico.
     assert!(!codes_of(&b, "sin-tipo.md").contains(&"ORPHAN".to_string()));
-    let malo = codes_of(&b, "malo.md");
-    assert!(malo.contains(&"FMT-TAGS".to_string()));
-    assert!(malo.contains(&"FMT-TS".to_string()));
-    assert!(malo.contains(&"LINK-STUB".to_string()));
-    assert!(malo.contains(&"LINK-REL".to_string()));
-    assert!(codes_of(&b, "conflicto.md").contains(&"OKF-CONFLICT".to_string()));
 }
 
 #[test]
 fn hard_fail_cuenta_ficheros_no_max() {
-    // 1 fichero con Err + 1 conforme → hard_fail == 1 (no se "tapa" con un Pass).
+    // 1 fichero con Err + 1 sin problemas → hard_fail == 1 (no se "tapa" ni se suma dos veces).
+    // MIGRADO en E16-H05: el fichero con `Err` era «sin frontmatter» (`OKF-FM01`), que ya no es
+    // un error; hoy lo es uno cuyo frontmatter Lodestar no sabe leer (`FM-UNCLOSED`).
     let b = Bundle::from_files(fm(&[
-        ("malo.md", "# sin frontmatter\n"),
+        ("malo.md", "---\ntype: Nota\n"),
         (
             "bueno.md",
             "---\ntype: Nota\ntitle: B\ndescription: d\n---\n\n# H\n\n[x](/malo.md)\n",
@@ -306,7 +326,9 @@ fn analyze_backlinks_son_inversa_de_out() {
 
 #[test]
 fn list_concepts_marca_invalid_e_isolated() {
-    let b = Bundle::from_files(fm(&[("malo.md", "# sin fm\n")]));
+    // MIGRADO en E16-H05: `invalid` = «tiene algún diagnóstico de severidad `Err`». El documento
+    // sin frontmatter dejó de tenerlos, así que el fixture pasa a uno con el bloque sin cerrar.
+    let b = Bundle::from_files(fm(&[("malo.md", "---\ntype: Nota\n")]));
     let cs = b.list_concepts();
     let c = cs.iter().find(|c| c.path.as_str() == "malo.md").unwrap();
     assert!(c.invalid);
@@ -413,14 +435,18 @@ fn diff_guarda_no_revienta_con_fichero_grande() {
 
 #[test]
 fn create_concept_rechaza_no_conforme() {
+    // MIGRADO en E16-H05: el rechazo se probaba con `type` vacío (`OKF-TYPE`), que ya no es un
+    // error — un documento sin `type` es válido. Lo que sigue en pie es la MECÁNICA: un resultado
+    // con severidad `Err` se rechaza sin escribir y sin devolver `Err` del `Result`. Hoy el
+    // disparador es un cuerpo con marcadores de merge sin resolver (`DOC-CONFLICT-MARKER`).
     let b = Bundle::from_files(fm(&[]));
     let p = RelPath::new("nuevo.md").unwrap();
-    // type vacío → rechazado (no Err de Result).
-    let outcome = b.create_concept(&p, "", Some("Nuevo"), "# H\n", None, false);
+    let conflictivo = "# H\n\n<<<<<<< HEAD\nuno\n=======\ndos\n>>>>>>> rama\n";
+    let outcome = b.create_concept(&p, "Nota", Some("Nuevo"), conflictivo, None, false);
     assert!(!outcome.written);
     assert!(outcome.rejected.is_some());
-    // con type válido → escribible.
-    let ok = b.create_concept(&p, "Nota", Some("Nuevo"), "# H\n", None, false);
+    // Sin el conflicto → escribible. (Y sin `type`, también: ya no hay regla que lo exija.)
+    let ok = b.create_concept(&p, "", Some("Nuevo"), "# H\n", None, false);
     assert!(ok.written);
     assert!(ok.rejected.is_none());
 }
@@ -522,7 +548,7 @@ fn fm_escalares_no_string_no_invierten_el_veredicto() {
     // MIGRADO en E16-H01 (antes `fm_escalares_no_string_se_coercen_como_js`): la coerción `String(v)`
     // del prototipo desapareció, pero la garantía que protegía este test sigue viva y es la que
     // importa — un escalar no-string en una clave cualquiera NO convierte el fichero entero en
-    // OKF-FM03 (hard-fail), que invertiría el veredicto de la puerta de CI. Lo que cambia es que
+    // FM-YAML-INVALID (hard-fail), que invertiría el veredicto de la puerta de CI. Lo que cambia es que
     // ahora el valor conserva su TIPO YAML en vez de convertirse en texto.
     let b = Bundle::from_files(fm(&[(
         "n.md",
@@ -531,7 +557,7 @@ fn fm_escalares_no_string_no_invierten_el_veredicto() {
     let a = b.analyze();
     assert_eq!(a.hard_fail, 0, "el veredicto no puede invertirse: {a:?}");
     let checks = &a.per_file[&RelPath::new("n.md").unwrap()];
-    assert!(!checks.iter().any(|c| c.code == CheckCode::OkfFm03));
+    assert!(!checks.iter().any(|c| c.code == CheckCode::FmYamlInvalid));
 
     // El tipo YAML real sobrevive al parseo (ya no hay coerción a string).
     let parsed = model::parse_file("n.md", &b.files()[&RelPath::new("n.md").unwrap()]);
@@ -569,24 +595,43 @@ fn fm_null_explicito_cuenta_como_presente() {
     let con_type = b.query("has:type");
     assert!(con_type.iter().any(|p| p.as_str() == "connull.md"));
     assert!(!con_type.iter().any(|p| p.as_str() == "sintipo.md"));
-    // …y buildRaw lo conserva (`type: null`), no lo borra en silencio.
+    // …y la escritura lo conserva, no lo borra en silencio.
+    //
+    // MIGRADO en E16-H05/H04: este trozo aserraba el resultado de un patch VACÍO. Desde que
+    // `merge_frontmatter` delega en el patch quirúrgico (E16-H04), un patch vacío es un no-op
+    // REAL —devuelve el documento byte a byte, sin round-trip— así que ya no dice nada sobre la
+    // serialización. La intención («un `null` explícito sobrevive a la escritura») se conserva
+    // por los dos caminos que sí escriben:
     let p = RelPath::new("connull.md").unwrap();
-    let outcome = b.merge_frontmatter(&p, FrontmatterPatch(BTreeMap::new()));
-    assert!(outcome.raw.contains("type: null"), "raw: {:?}", outcome.raw);
+
+    //   (a) camino quirúrgico: un patch sobre OTRA clave deja la línea `type:` intacta y `type`
+    //       sigue presente con valor nulo.
+    let mut patch = BTreeMap::new();
+    patch.insert(
+        "title".to_string(),
+        Some(serde_yaml::Value::String("Otro".into())),
+    );
+    let outcome = b.merge_frontmatter(&p, FrontmatterPatch(patch));
+    assert!(outcome.written, "rejected: {:?}", outcome.rejected);
+    let re = model::parse_frontmatter(&outcome.raw).expect("el resultado tiene frontmatter");
+    assert_eq!(
+        re.get_key("type"),
+        Some(&serde_yaml::Value::Null),
+        "el `null` explícito sigue presente tras el patch: {:?}",
+        outcome.raw
+    );
+
+    //   (b) camino de reserialización: `build_raw` lo vuelca como `type: null`, no lo descarta.
+    let parsed = model::parse_file("connull.md", &b.files()[&p]);
+    let raw = model::build_raw(parsed.frontmatter.as_ref(), &parsed.body);
+    assert!(raw.contains("type: null"), "raw: {raw:?}");
 }
 
-#[test]
-fn fmt_ts_rechaza_iso_con_basura() {
-    // El proto valida con Date.parse el string ENTERO: `2024-01-15hello` y `T99:99` son FMT-TS.
-    let ok = serde_yaml::Value::String("2024-01-15".into());
-    let ok_t = serde_yaml::Value::String("2024-01-15T10:30:00Z".into());
-    let bad_tail = serde_yaml::Value::String("2024-01-15hello".into());
-    let bad_hour = serde_yaml::Value::String("2024-01-15T99:99".into());
-    assert!(model::is_iso(&ok));
-    assert!(model::is_iso(&ok_t));
-    assert!(!model::is_iso(&bad_tail));
-    assert!(!model::is_iso(&bad_hour));
-}
+// BORRADO en E16-H05: `fmt_ts_rechaza_iso_con_basura`. Fijaba la paridad de `model::is_iso` con
+// el `Date.parse` del prototipo, que existía SOLO para alimentar `FMT-TS`. Retirado el check (una
+// fecha del frontmatter es metadata arbitraria del usuario, `§20.9`), la función se borró y el
+// test se queda sin sujeto: no hay nada que migrar, porque el comportamiento que probaba ya no
+// debe existir.
 
 #[test]
 fn fm_diff_sin_cambio_fantasma_por_string_vacio() {
@@ -1817,38 +1862,37 @@ fn plan_warnings_permitido() {
     use lodestar_core::plan::{can_apply, validate_result, PlanPolicy};
     use lodestar_core::schema::Schema;
 
-    // Bundle hipotético con SOLO warnings: concepto conforme (type/title/description presentes,
-    // cuerpo con encabezado) salvo `tags` como escalar → `FMT-TAGS`/Warn. Sin schema activo, no
-    // hay checks SCHEMA-*; sin enlaces rotos, no hay más que el warning (y algún Info como ORPHAN,
-    // que no afecta a la conformidad).
+    // MIGRADO en E16-H05: el fixture disparaba `FMT-TAGS`/Warn con `tags` como escalar, y ese
+    // código se retiró — el catálogo mínimo de `§20.9` no tiene HOY ningún productor de `Warn`
+    // dentro de `all_checks` (los tres códigos vivos de `conform` son `Err`, y `LINK-STUB`/
+    // `LINK-REL` son `Info`). Así que el criterio se prueba en dos mitades:
+    //   (a) sobre un bundle real: sin errores → conforme y aplicable;
+    //   (b) sobre un `ValidationReport` construido a mano con warnings: es la ÚNICA forma de
+    //       ejercitar hoy la rama `allowWarnings` de `can_apply`, y sigue siendo el contrato que
+    //       el criterio fija (E17/E20 devolverán códigos `Warn` al catálogo).
     let hipotetico = Bundle::from_files(fm(&[(
         "nota.md",
         "---\ntype: Nota\ntitle: T\ndescription: d\ntags: uno\n---\n\n# H\n\ncuerpo\n",
     )]));
 
-    // Precondición del fixture: 0 errores duros (solo warnings) sobre el análisis base.
+    // Precondición del fixture: 0 errores duros.
     assert_eq!(
         hipotetico.analyze().hard_fail,
         0,
-        "el bundle hipotético no debe tener ningún Err (solo warnings)",
+        "el bundle hipotético no debe tener ningún Err",
     );
 
     let report = validate_result(&hipotetico, &Schema::default());
 
     assert_eq!(
         report.summary.errors, 0,
-        "un resultado con solo warnings tiene 0 errores; summary = {:?}",
+        "un resultado sin errores tiene 0 errores; summary = {:?}",
         report.summary,
     );
     assert!(
         report.conformant,
         "sin errores el resultado es conforme (`conformant == true`); report = {:?}",
         report,
-    );
-    assert!(
-        report.summary.warnings >= 1,
-        "el fixture debe producir al menos un warning (FMT-TAGS); summary = {:?}",
-        report.summary,
     );
 
     let policy = PlanPolicy {
@@ -1858,6 +1902,25 @@ fn plan_warnings_permitido() {
     assert!(
         can_apply(&report, &policy),
         "con resultado conforme y `allowWarnings:true`, el plan es aplicable",
+    );
+
+    // (b) La rama `allowWarnings` propiamente dicha: un resultado conforme CON warnings es
+    //     aplicable si la política los permite, y solo entonces.
+    let mut con_warnings = report.clone();
+    con_warnings.summary.warnings = 2;
+    assert!(
+        can_apply(&con_warnings, &policy),
+        "con `allowWarnings:true`, los warnings no bloquean; report = {con_warnings:?}",
+    );
+    assert!(
+        !can_apply(
+            &con_warnings,
+            &PlanPolicy {
+                require_conformant_result: true,
+                allow_warnings: false,
+            }
+        ),
+        "con `allowWarnings:false`, un solo warning bloquea el plan; report = {con_warnings:?}",
     );
 }
 

@@ -8,9 +8,9 @@ use lodestar_core::types::Severity;
 use crate::sarif;
 
 /// `lodestar check`: la puerta de CI sobre el **working tree**. Juzga la conformidad **completa**
-/// (OKF + `SCHEMA-*` + `REL-*` + refs externas) con el **mismo motor** que
+/// (documento + `SCHEMA-*` + `REL-*` + refs externas) con el **mismo motor** que
 /// [`lodestar_app::App::knowledge_check`] scope `workspace` (invariante #3 — una sola verdad
-/// computada): ambos comparten la fusión OKF+schema-driven de
+/// computada): ambos comparten la fusión documento+schema-driven de
 /// `App::schema_diagnostics_by_path`. La CLI es una fachada fina y **no** recompone la validación
 /// schema-driven a mano.
 ///
@@ -22,7 +22,7 @@ use crate::sarif;
 /// (`gate.blockWarnings`). Exit codes congelados: `0` conforme · `1` bloqueado · `3` runtime/IO
 /// (error del servicio o `.lodestar/config.yaml` inválido — lo detecta ya `App::open`).
 pub fn check(root: &Path, json: bool, sarif_out: bool) -> anyhow::Result<ExitCode> {
-    // Motor completo (OKF + schema-driven) en `App`, computado UNA sola vez: `full_analysis` corre
+    // Motor completo (documento + schema-driven) en `App`, computado UNA sola vez: `full_analysis` corre
     // `analyze()` y fusiona los `SCHEMA-*`/`REL-*` en `per_file` con la misma lógica que
     // `knowledge_check`. De ese `Analysis` sale tanto el veredicto como la salida.
     let app = lodestar_app::App::open(root).map_err(|e| anyhow::anyhow!(e.to_string()))?;
@@ -44,7 +44,7 @@ pub fn check(root: &Path, json: bool, sarif_out: bool) -> anyhow::Result<ExitCod
     // `blockWarnings: true` y un typo en el YAML, la puerta de CI se relajaría sin ningún aviso.
     // El error lo levanta ya `App::open` (la config se valida una vez, al abrir el workspace). El
     // motor cubre los `Err` (incluidos los schema-driven) vía `conformant`; la config solo puede
-    // endurecer la puerta para que los avisos OKF también bloqueen.
+    // endurecer la puerta para que los avisos también bloqueen.
     let blocked = !conformant || app.workspace().config().gate_blocked(&analysis);
     render_analysis(&analysis, conformant, json, sarif_out, blocked)
 }
@@ -54,7 +54,7 @@ pub fn check(root: &Path, json: bool, sarif_out: bool) -> anyhow::Result<ExitCod
 /// `--json` se emite de forma ADITIVA junto a los campos históricos del `Analysis`; los `SCHEMA-*`/
 /// `REL-*` viajan dentro de `per_file` (y por tanto en `--sarif`/humano) al haberse fusionado en
 /// [`lodestar_app::App::full_analysis`]. `blocked` decide el exit code: lo endurece la strictness de
-/// `.lodestar/config.yaml` (`gate.blockWarnings`, avisos OKF) sobre el veredicto del motor.
+/// `.lodestar/config.yaml` (`gate.blockWarnings`) sobre el veredicto del motor.
 pub fn render_analysis(
     analysis: &lodestar_core::types::Analysis,
     conformant: bool,
@@ -106,8 +106,8 @@ fn print_human(a: &lodestar_core::types::Analysis, blocked: bool) {
     println!(
         "\n{} concepts · {} con errores · {} avisos · {}",
         a.concepts.len(),
-        // `errs` cuenta TODOS los diagnósticos `Err` de `per_file` (OKF + `SCHEMA-*`/`REL-*`
-        // fusionados en `full_analysis`), no solo `a.hard_fail` (OKF): así el resumen humano es
+        // `errs` cuenta TODOS los diagnósticos `Err` de `per_file` (documento + `SCHEMA-*`/`REL-*`
+        // fusionados en `full_analysis`), no solo `a.hard_fail`: así el resumen humano es
         // coherente con las líneas `✗` de arriba.
         errs,
         warns,

@@ -151,7 +151,7 @@ impl Workspace {
     /// Valida un staging materializado contra la política de conformidad **completa** antes de
     /// publicar (E13-H01; conformidad schema-driven añadida en E14-H04). Construye un [`Bundle`]
     /// desde el árbol de staging y evalúa el **mismo universo de diagnósticos** que
-    /// `App::knowledge_check`/`lodestar check`: los 15 checks OKF de [`Bundle::analyze`] MÁS la
+    /// `App::knowledge_check`/`lodestar check`: los diagnósticos de [`Bundle::analyze`] (`§20.9`) MÁS la
     /// validación schema-driven (`SCHEMA-*`/`REL-*`, `core::schema::validate_schema` +
     /// `validate_relations`) contra el esquema del workspace. Si el resultado deja **cualquier**
     /// diagnóstico de nivel `err`, **aborta sin tocar el canónico** y limpia el directorio de
@@ -164,7 +164,7 @@ impl Workspace {
     /// `change_plan` usa para computar `canApply`/`diagnosticsAfter`, que a su vez compone
     /// `analyze().per_file` + `validate_schema` + `validate_relations` (`plan::all_checks`) y
     /// declara `conformant == (errors == 0)`. Antes (E13-H01) el gate medía solo
-    /// `analyze().hard_fail` (los checks OKF) y NO ejecutaba la validación schema-driven, así que un
+    /// `analyze().hard_fail` (los del documento) y NO ejecutaba la validación schema-driven, así que un
     /// `SCHEMA-REQFIELD`/`REL-*` (level `err`) pasaba el gate y `change_apply` publicaba un
     /// resultado que `knowledge_check` declararía no conforme: gate transaccional y motor de
     /// conformidad DIVERGÍAN. Reusar `validate_result` cierra esa divergencia por construcción.
@@ -181,7 +181,7 @@ impl Workspace {
         let bundle = Bundle::from_files(files);
         // Esquema del workspace (el mismo que carga `App::knowledge_check`); su ausencia no es error.
         let schema = WorkspaceSchema::load(&self.root).map_err(WorkspaceError::Io)?;
-        // Conformidad COMPLETA (OKF + SCHEMA-* + REL-*): misma composición y mismo criterio
+        // Conformidad COMPLETA (documento + SCHEMA-* + REL-*): misma composición y mismo criterio
         // (`conformant == errors == 0`) que `change_plan`/`knowledge_check` (invariante #3).
         let report = plan::validate_result(&bundle, &schema);
         if !report.conformant {

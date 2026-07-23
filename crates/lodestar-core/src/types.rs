@@ -153,42 +153,37 @@ pub enum Severity {
 }
 
 schema_derive! {
-/// Los códigos de diagnóstico. UNA sola enum: los 15 OKF clásicos, las familias schema-driven de
-/// `§19.3` y los de descubrimiento universal de `§20.9` (E15-H07). El valor de wire ES la cadena
-/// con guion (rename por variante).
+/// Los códigos de diagnóstico. UNA sola enum, hoy el **catálogo mínimo** de `ARCHITECTURE.md
+/// §20.9` (E16-H05): Lodestar solo informa de lo que le impide *interpretar o modificar con
+/// seguridad* un documento, no de si cumple una especificación documental. El valor de wire ES la
+/// cadena con guion (rename por variante).
+///
+/// El catálogo OKF (`OKF-FM01`, `OKF-TYPE`, `REC-TITLE`, `REC-DESC`, `FMT-TAGS`, `FMT-TS`,
+/// `BODY-STRUCT`, `ORPHAN`, `OKF-IDX`, `OKF-LOG`) se **retiró**; `OKF-FM02`/`OKF-FM03`/
+/// `OKF-CONFLICT` se renombraron a `FM-UNCLOSED`/`FM-YAML-INVALID`/`DOC-CONFLICT-MARKER`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum CheckCode {
-    #[serde(rename = "OKF-FM01")]
-    OkfFm01,
-    #[serde(rename = "OKF-FM02")]
-    OkfFm02,
-    #[serde(rename = "OKF-FM03")]
-    OkfFm03,
-    #[serde(rename = "OKF-TYPE")]
-    OkfType,
-    #[serde(rename = "REC-TITLE")]
-    RecTitle,
-    #[serde(rename = "REC-DESC")]
-    RecDesc,
-    #[serde(rename = "FMT-TAGS")]
-    FmtTags,
-    #[serde(rename = "FMT-TS")]
-    FmtTs,
+    // --- Frontmatter no interpretable (`§20.9`) ---
+    /// El bloque de frontmatter abre `---` y nunca cierra: el documento no se puede interpretar.
+    #[serde(rename = "FM-UNCLOSED")]
+    FmUnclosed,
+    /// El bloque está delimitado pero su YAML es sintácticamente inválido. Lleva el `range` de las
+    /// líneas de contenido del bloque (delimitadores excluidos), derivado del `span` de
+    /// [`ParsedFrontmatter`].
+    #[serde(rename = "FM-YAML-INVALID")]
+    FmYamlInvalid,
+    /// Marcadores de conflicto de merge sin resolver: el documento está a medio mergear y no se
+    /// puede modificar con seguridad.
+    #[serde(rename = "DOC-CONFLICT-MARKER")]
+    DocConflictMarker,
+    // --- Enlaces (E17 los sustituye por `LINK-TARGET-MISSING`/`LINK-ESCAPES-WORKSPACE`) ---
     #[serde(rename = "LINK-STUB")]
     LinkStub,
     #[serde(rename = "LINK-REL")]
     LinkRel,
-    #[serde(rename = "ORPHAN")]
-    Orphan,
-    #[serde(rename = "BODY-STRUCT")]
-    BodyStruct,
-    #[serde(rename = "OKF-IDX")]
-    OkfIdx,
-    #[serde(rename = "OKF-LOG")]
-    OkfLog,
-    #[serde(rename = "OKF-CONFLICT")]
-    OkfConflict,
     // --- Familias schema-driven (decisión D-CheckCode, `ARCHITECTURE.md §19.3`) ---
+    // `conform` ya NO las produce (E16-H05): solo las emiten `core::schema` y `external_refs`,
+    // fuera de `Bundle::analyze`. Mueren del todo en E20, con `core::schema`.
     // Variantes ESTÁTICAS acotadas (no hay espacio de códigos dinámico). El core aún no las
     // produce (eso es E10-H07/E11-H03) — esta historia solo fija el contrato de wire. La clave
     // i18n por código (§12) se satisface con `Check.msg`, que el core emite inline (no hay
@@ -214,7 +209,7 @@ pub enum CheckCode {
     // --- Descubrimiento universal (E15-H07, `ARCHITECTURE.md §20.5`/`§20.9`) ---
     // Los produce `lodestar_workspace::discovery`, no `conform`: describen lo que Lodestar NO
     // pudo incorporar al inventario (o lo que no es portable), no el incumplimiento de una
-    // especificación documental. Conviven con los `OKF-*` hasta E16.
+    // especificación documental.
     /// Un `.md` cuyos bytes no son UTF-8 válido: no se puede interpretar, así que no entra en el
     /// inventario.
     #[serde(rename = "DOC-NOT-UTF8")]
@@ -239,24 +234,14 @@ pub enum CheckCode {
 }
 
 impl CheckCode {
-    /// El valor de wire (cadena con guion), p. ej. `"OKF-FM01"`.
+    /// El valor de wire (cadena con guion), p. ej. `"FM-YAML-INVALID"`.
     pub fn as_str(self) -> &'static str {
         match self {
-            CheckCode::OkfFm01 => "OKF-FM01",
-            CheckCode::OkfFm02 => "OKF-FM02",
-            CheckCode::OkfFm03 => "OKF-FM03",
-            CheckCode::OkfType => "OKF-TYPE",
-            CheckCode::RecTitle => "REC-TITLE",
-            CheckCode::RecDesc => "REC-DESC",
-            CheckCode::FmtTags => "FMT-TAGS",
-            CheckCode::FmtTs => "FMT-TS",
+            CheckCode::FmUnclosed => "FM-UNCLOSED",
+            CheckCode::FmYamlInvalid => "FM-YAML-INVALID",
+            CheckCode::DocConflictMarker => "DOC-CONFLICT-MARKER",
             CheckCode::LinkStub => "LINK-STUB",
             CheckCode::LinkRel => "LINK-REL",
-            CheckCode::Orphan => "ORPHAN",
-            CheckCode::BodyStruct => "BODY-STRUCT",
-            CheckCode::OkfIdx => "OKF-IDX",
-            CheckCode::OkfLog => "OKF-LOG",
-            CheckCode::OkfConflict => "OKF-CONFLICT",
             CheckCode::SchemaReqfield => "SCHEMA-REQFIELD",
             CheckCode::SchemaStatus => "SCHEMA-STATUS",
             CheckCode::RelTarget => "REL-TARGET",
@@ -273,9 +258,10 @@ impl CheckCode {
 }
 
 schema_derive! {
-/// Rango de líneas (1-based, como el resto de referencias a línea del core) que acota un `Check`
-/// dentro de un fichero. Aditivo (E10-H06, `ARCHITECTURE.md §19.3`); los checks OKF clásicos no
-/// lo rellenan.
+/// Rango de líneas (1-based, **ambas inclusive**) que acota un `Check` dentro de un fichero.
+/// Aditivo (E10-H06, `ARCHITECTURE.md §19.3`); lo rellena quien conoce la posición del problema
+/// — p. ej. `FM-YAML-INVALID`, con las líneas de contenido del bloque de frontmatter
+/// (delimitadores excluidos, `§20.9`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Range {
@@ -310,7 +296,7 @@ pub struct Check {
     pub msg: String,
     pub targets: Vec<RelPath>,
     /// Identificador estable del diagnóstico dentro de una revisión (p. ej. `diag:blake3:…`,
-    /// E10-H12). Ausente para los checks OKF clásicos hasta que un productor lo rellene.
+    /// E10-H12). Ausente hasta que un productor lo rellene.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
     /// Rango de líneas del fichero afectado, si se conoce.

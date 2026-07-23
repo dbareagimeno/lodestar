@@ -22,7 +22,7 @@ mod tools;
 /// en el orden en que se espera usarlas. Los nombres de tool son identificadores (no se traducen);
 /// el resto va en español, el idioma del repo (E14-H03).
 const SERVER_INSTRUCTIONS: &str = "\
-Motor headless de integridad semántica (OKF) para agentes. Flujo recomendado en cada sesión \
+Motor headless de integridad semántica para agentes. Flujo recomendado en cada sesión \
 (10 pasos, en orden):
 
 1. `workspace_status`: oriéntate primero — config activa, capacidades del perfil, conformidad y \

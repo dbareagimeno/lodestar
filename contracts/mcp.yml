@@ -53,6 +53,31 @@
 #   - `ConceptSummary.orphan` → `.isolated`; `title` lo deriva ahora `model::derived_title`
 #     (frontmatter.title → primer H1 → nombre del fichero, sin Title Case).
 #
+# E16-H05 (`ARCHITECTURE.md §20.9`): `CheckCode` —el enum de wire de `Check.code`, que viaja en
+# `knowledge_check.diagnostics[]`, `workspace_status` y `change_plan.validation`— pasa al CATÁLOGO
+# MÍNIMO. La superficie de 10 tools NO cambia y `Check` conserva su forma
+# (`level`/`code`/`msg`/`targets` + `id`/`range`/`related`/`fixes`, `§10` fila #3): cambia el
+# conjunto de valores admisibles de `code`.
+#   - SE BORRAN: `OKF-FM01` (la falta de frontmatter deja de ser error), `OKF-TYPE`, `REC-TITLE`,
+#     `REC-DESC`, `FMT-TAGS`, `FMT-TS`, `BODY-STRUCT`, `ORPHAN` (sin productor desde E16-H02),
+#     `OKF-IDX`, `OKF-LOG`. **Sin alias de compatibilidad**, misma razón que `orphans`→`isolated`.
+#   - SE RENOMBRAN: `OKF-FM02` → `FM-UNCLOSED`, `OKF-FM03` → `FM-YAML-INVALID`,
+#     `OKF-CONFLICT` → `DOC-CONFLICT-MARKER`.
+#   - SIGUEN: `LINK-STUB`/`LINK-REL` (hasta E17, que los sustituye por `LINK-TARGET-MISSING`/
+#     `LINK-ESCAPES-WORKSPACE`/`LINK-CASE-MISMATCH`), `DOC-NOT-UTF8`/`DOC-TOO-LARGE`/
+#     `PATH-NOT-UTF8`/`SYMLINK-UNSUPPORTED`/`LINK-CASE-MISMATCH` (descubrimiento, E15-H07) y
+#     `SCHEMA-*`/`REL-*`/`EXTREF-MISSING`, que `conform` ya NO produce (solo `core::schema` y
+#     `external_refs`) y que mueren del todo en E20.
+#   - `FM-YAML-INVALID` rellena `range` con las líneas de CONTENIDO del bloque de frontmatter
+#     (1-based, ambas inclusive, delimitadores excluidos).
+#
+# E16-H04 (`ARCHITECTURE.md §20.4`): el patch de frontmatter pasa a ser QUIRÚRGICO
+# (`core::model::patch_frontmatter`) — las líneas que el patch no toca se conservan byte a byte.
+# No cambia ningún tipo del wire: la operación MCP `patch_frontmatter` y su bandera
+# `reserialized` llegan en E21. Efecto observable hoy: `change_apply` sobre un documento cuyo
+# frontmatter no es interpretable falla con `INVALID_SCHEMA`
+# (`CoreError::UnreadableFrontmatter`) en vez de reconstruir el bloque encima y perder metadata.
+#
 # E10-H13 (decisión D6b, `docs/REFACTOR.md §13`, `DECISIONES.md §3`): las 10 tools activas declaran
 # `outputSchema` (JSON Schema derivado con `schemars::schema_for!` desde el tipo de respuesta real
 # de `lodestar-app`, vía los helpers de `lodestar_app::schemas::*`).
@@ -191,10 +216,13 @@ tools:
     output_schema: "sí — schemars::schema_for!(CheckReport), vía lodestar_app::schemas::knowledge_check_schema()"
     errores: ["CONCEPT_NOT_FOUND (ref inexistente en scope concept/affected)", "WorkspaceError"]
     semantica: >-
-      Audita conocimiento (checks OKF de Bundle::analyze + checks schema-driven de
+      Audita conocimiento (diagnósticos de Bundle::analyze + checks schema-driven de
       core::schema::validate_schema, E10-H07) con scope y severidad mínima. Cada diagnóstico
       lleva un `id` estable dentro de una revisión (`diag:blake3:<hex>`, determinista, sin
       timestamps/orden/caché). Reemplaza semánticamente a `conformance_check` (ver §15).
+      E16-H05 (`ARCHITECTURE.md §20.9`): responde «¿puede Lodestar interpretar y modificar este
+      workspace de forma consistente y segura?», NO «¿cumple una especificación documental?» —
+      ver el catálogo de `Check.code` en la cabecera de este contrato.
 
   # -------------------------------------------------------------------------
   # Tool nueva de E11-H01 (consolidación del grafo, §19.6). Declara `outputSchema`

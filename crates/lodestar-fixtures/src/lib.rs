@@ -184,21 +184,32 @@ pub fn conformant() -> FileMap {
     ])
 }
 
-/// Bundle con un concept que dispara cada familia de checks (FM, type, recomendaciones, links, etc.).
+/// Workspace con un documento por cada diagnóstico que produce `conform` en el **catálogo mínimo**
+/// de `ARCHITECTURE.md §20.9` (E16-H05): `FM-UNCLOSED`, `FM-YAML-INVALID`, `DOC-CONFLICT-MARKER` y
+/// los dos de enlaces que siguen vivos hasta E17 (`LINK-STUB`, `LINK-REL`).
+///
+/// Ya **no** dispara el catálogo OKF (`OKF-FM01`, `OKF-TYPE`, `REC-*`, `FMT-*`, `BODY-STRUCT`,
+/// `ORPHAN`): esos códigos se retiraron. Los dos primeros documentos son justamente el contraste —
+/// un `.md` pelado y un frontmatter con metadata «rara» son válidos y **silenciosos**.
 pub fn with_issues() -> FileMap {
     file_map(&[
-        // Sin frontmatter → OKF-FM01.
-        ("sin-fm.md", "# Solo cuerpo\n"),
-        // Frontmatter sin cerrar → OKF-FM02.
+        // Sin frontmatter, sin encabezados y sin enlaces: VÁLIDO y silencioso.
+        ("sin-fm.md", "Solo cuerpo, sin encabezados.\n"),
+        // Metadata arbitraria del usuario (antes `FMT-TAGS`/`FMT-TS`/`REC-*`): también silencioso.
+        (
+            "metadata-libre.md",
+            "---\ntitle: \ntags: uno\ntimestamp: ayer\n---\n\ncuerpo sin encabezado\n",
+        ),
+        // Frontmatter sin cerrar → FM-UNCLOSED (hard-fail).
         ("sin-cierre.md", "---\ntype: Concept\n"),
-        // type ausente → OKF-TYPE; sin title/desc → REC-*; sin encabezado → BODY-STRUCT; huérfano → ORPHAN.
-        ("sin-tipo.md", "---\ntitle: \n---\n\ncuerpo sin encabezado\n"),
-        // tags no-lista → FMT-TAGS; timestamp no-ISO → FMT-TS; enlace a inexistente → LINK-STUB; relativo → LINK-REL.
+        // Bloque bien delimitado con YAML inválido → FM-YAML-INVALID (hard-fail, con rango).
+        ("yaml-roto.md", "---\ntype: : :\n  - x\n---\n\n# H\n\ncuerpo\n"),
+        // Enlace a inexistente → LINK-STUB; enlace relativo → LINK-REL.
         (
             "malo.md",
-            "---\ntype: Nota\ntitle: Malo\ndescription: x\ntags: uno\ntimestamp: ayer\n---\n\n# H\n\n[falta](/no-existe.md) y [rel](./otro.md)\n",
+            "---\ntype: Nota\ntitle: Malo\ndescription: x\n---\n\n# H\n\n[falta](/no-existe.md) y [rel](./otro.md)\n",
         ),
-        // Marcadores de conflicto → OKF-CONFLICT.
+        // Marcadores de conflicto → DOC-CONFLICT-MARKER (hard-fail).
         (
             "conflicto.md",
             "---\ntype: Nota\ntitle: C\ndescription: d\n---\n\n# H\n\n<<<<<<< HEAD\nuno\n=======\ndos\n>>>>>>> rama\n",

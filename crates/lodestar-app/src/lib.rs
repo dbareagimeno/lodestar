@@ -118,6 +118,13 @@ pub struct ResourceLink {
 /// - `FixNotFound` → `ConceptNotFound` (`apply_fix` con un `fixId` inexistente/no aplicable, E12-H07).
 /// - `InvalidFieldPath` → `InvalidSchema` (ruta a propiedad de frontmatter mal formada, E16-H01:
 ///   entrada del agente que no designa ningún campo).
+/// - `UnreadableFrontmatter` → `InvalidSchema` (E16-H04: el bloque de frontmatter del documento
+///   no se puede interpretar, así que no se puede parchear). Se descartan `ConceptNotFound` —el
+///   documento **existe**, y decir lo contrario mandaría al agente a buscar una ruta correcta— e
+///   `InternalIoError` —culparía al motor de un estado del fichero del usuario, cuando lo que hay
+///   es una **precondición de la operación** incumplida por el dato de entrada, exactamente igual
+///   que `ReplaceTextMismatch`/`InvalidStatusTransition`. `InvalidSchema` es además accionable: le
+///   dice al agente que repare el documento (o lo escriba crudo) antes de tocar su metadata.
 pub fn error_code(err: &CoreError) -> ErrorCode {
     match err {
         CoreError::InvalidRelPath(_) => ErrorCode::PermissionDenied,
@@ -132,6 +139,7 @@ pub fn error_code(err: &CoreError) -> ErrorCode {
         // Invariante interno (E12-H08): el aplicador recibió una op sin normalizar a forma
         // terminal — fallo de infraestructura, no del agente.
         CoreError::OperationNotApplicable(_) => ErrorCode::InternalIoError,
+        CoreError::UnreadableFrontmatter(_) => ErrorCode::InvalidSchema,
     }
 }
 
@@ -675,10 +683,10 @@ impl App {
 
     /// Audita el conocimiento con scopes y severidad mínima (E10-H12, `ARCHITECTURE.md §19.6`,
     /// `REFACTOR §10/§17`). Es la tool que **cablea por primera vez** la validación schema-driven
-    /// (E10-H07, `validate_schema`, PURA) junto a los 15 checks OKF de `Bundle::analyze`.
+    /// (E10-H07, `validate_schema`, PURA) junto a los diagnósticos de `Bundle::analyze` (`§20.9`).
     ///
     /// **Composición de diagnósticos** (invariante #3 — una sola verdad computada): por cada
-    /// concepto (`Analysis::concepts`) se unen sus checks de conformidad OKF (`Analysis::per_file`)
+    /// concepto (`Analysis::concepts`) se unen sus diagnósticos de documento (`Analysis::per_file`)
     /// con los checks de esquema (`validate_schema(&bundle, &schema)`, agrupados por su `target`).
     /// Un bundle sin `.lodestar/schema.yaml` produce `Schema::default()` (vacío) y `validate_schema`
     /// devuelve cero checks, así que **el veredicto de un bundle sin esquema no cambia**. Los checks
@@ -699,7 +707,7 @@ impl App {
     /// el conjunto de diagnósticos del scope, antes de aplicar `minimum_severity` o la paginación —
     /// son un agregado del scope, no de la página devuelta. `minimum_severity` (por defecto `Info`,
     /// que ya excluye los `Pass`) eleva el umbral de lo que se **devuelve** en `diagnostics`.
-    /// `include_suggested_fixes == false` vacía `fixes` (hoy siempre vacío: los checks OKF/schema no
+    /// `include_suggested_fixes == false` vacía `fixes` (hoy siempre vacío: los checks de documento/schema no
     /// proponen fixes todavía — E12-H07). `limit`/`cursor` paginan de forma determinista sobre el
     /// orden total estable `(path, code, id)` (mismo patrón de cursor-offset opaco que
     /// `knowledge_search`); `limit` por defecto 100 (`REFACTOR §10`), `next_cursor` `None` al agotar.
@@ -722,7 +730,7 @@ impl App {
 
         let revision = workspace_revision(bundle.files(), &cfg.workspace.writable_roots);
 
-        // Checks schema-driven agrupados por su path (`target`): así se unen a los OKF por path.
+        // Checks schema-driven agrupados por su path (`target`): así se unen a los de documento por path.
         // Fuente ÚNICA de esta fusión (invariante #3): la comparten esta tool y la salida de
         // `lodestar check` vía [`App::schema_diagnostics_by_path`].
         let schema_by_path = Self::schema_diagnostics_by_path(&bundle, &schema);
@@ -730,7 +738,7 @@ impl App {
         // Conjunto de paths del scope.
         let allowed = self.scope_paths(&bundle, analysis, scope)?;
 
-        // Compón (path, check) uniendo OKF + schema por cada concepto del scope, con id estable.
+        // Compón (path, check) uniendo documento + schema por cada concepto del scope, con id estable.
         let mut items: Vec<(RelPath, Check)> = Vec::new();
         for path in &analysis.concepts {
             if !allowed.contains(path) {
@@ -831,7 +839,7 @@ impl App {
     }
 
     /// Diagnósticos schema-driven (`validate_schema` + `validate_relations`, PUROS) agrupados por
-    /// su `target` path. Es la **fuente única** (invariante #3) de la fusión OKF+schema que
+    /// su `target` path. Es la **fuente única** (invariante #3) de la fusión documento+schema que
     /// comparten [`App::knowledge_check`] (con scope/severidad/paginación encima) y la salida de
     /// `lodestar check` (vía [`App::full_analysis`]): la lógica de qué diagnósticos schema-driven
     /// existen y bajo qué path se listan vive **una sola vez**.
@@ -857,14 +865,14 @@ impl App {
         by_path
     }
 
-    /// Computa el `Analysis` **completo** del working tree: los 15 checks OKF de
+    /// Computa el `Analysis` **completo** del working tree: los diagnósticos de
     /// [`Bundle::analyze`] con los diagnósticos schema-driven (`SCHEMA-*`/`REL-*`) fusionados en
     /// `per_file` por su path (`App::schema_diagnostics_by_path`). Es la fuente que alimenta la
     /// **salida** de `lodestar check` (`--json`/`--sarif`/humano), de modo que el mismo motor que
     /// decide el veredicto (`knowledge_check`) también surface los diagnósticos que lo disparan —
     /// sin recomputar `analyze()` dos veces ni recomponer la validación schema-driven en la fachada.
     ///
-    /// Los contadores `hard_fail`/`warn_count` conservan su semántica OKF (los rellena `analyze`);
+    /// Los contadores `hard_fail`/`warn_count` conservan su semántica (los rellena `analyze`);
     /// la fusión solo **añade** checks a `per_file` (aditiva). Un bundle sin `schema.yaml` devuelve
     /// exactamente el `Analysis` de `analyze()`.
     pub fn full_analysis(&self) -> Result<Analysis, ErrorCode> {

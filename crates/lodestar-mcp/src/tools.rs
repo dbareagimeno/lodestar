@@ -1,7 +1,8 @@
 //! Handlers de las tools del MCP (`ARCHITECTURE.md §7.2`). Cada uno = shell sobre `Workspace`.
 //!
 //! Scope = **semántica, no CRUD**. El valor es lo que los ficheros crudos no dan barato:
-//! backlinks resueltos, huérfanos, dangling, impacto, la puerta OKF, query y escrituras validadas.
+//! backlinks resueltos, aislados, dangling, impacto, la puerta de validación, query y escrituras
+//! validadas.
 
 use lodestar_app::{schemas, App, CheckScope, Profile, SearchFilters};
 use lodestar_core::plan::PlanPolicy;
@@ -52,7 +53,7 @@ pub fn list() -> Value {
              "type": { "type": "string", "description": "Nombre del DocType a inspeccionar (solo con mode «type»)." }
          }, "required": ["mode"], "additionalProperties": false },
          "outputSchema": schemas::schema_inspect_schema()},
-        {"name": "knowledge_check", "description": "Audita el conocimiento (checks OKF + esquema) con scopes y severidad mínima; diagnósticos con id estable y paginación por cursor.",
+        {"name": "knowledge_check", "description": "Audita el conocimiento (diagnósticos del documento + esquema) con scopes y severidad mínima; diagnósticos con id estable y paginación por cursor.",
          "inputSchema": { "type": "object", "properties": {
              "scope": { "type": "object", "description": "Qué auditar. Discriminado por «kind».", "properties": {
                  "kind": { "type": "string", "enum": ["workspace", "concept", "paths", "affected"] },
@@ -390,7 +391,7 @@ fn to_json<T: serde::Serialize>(v: &T) -> ToolResult {
 #[cfg(test)]
 mod tests {
     //! Golden cross-fachada (E7-H06): la salida de cada tool == la del `Workspace` directo.
-    //! Verifica que la fachada MCP es un shell fino sin lógica OKF propia (`§2`, `§7`).
+    //! Verifica que la fachada MCP es un shell fino sin lógica de dominio propia (`§2`, `§7`).
     use super::*;
 
     /// Como antes (`Workspace` efímero sobre un fixture en disco), pero envuelto en `App` —

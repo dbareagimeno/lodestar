@@ -50,10 +50,15 @@ fn crea_concept_y_lo_escribe_por_el_unico_escritor() {
 
 #[test]
 fn create_concept_no_conforme_no_escribe() {
+    // MIGRADO en E16-H05: el rechazo se disparaba con `type` vacío (`OKF-TYPE`), que dejó de ser
+    // un error. La mecánica que este test protege —un resultado con `Err` no llega al disco— se
+    // prueba ahora con un cuerpo que lleva marcadores de merge sin resolver
+    // (`DOC-CONFLICT-MARKER`, del catálogo mínimo de `§20.9`).
     let (dir, ws) = setup();
     let p = RelPath::new("malo.md").unwrap();
+    let conflictivo = "# H\n\n<<<<<<< HEAD\nuno\n=======\ndos\n>>>>>>> rama\n";
     let outcome = ws
-        .create_concept(&p, "", Some("Malo"), "# H\n", false)
+        .create_concept(&p, "Nota", Some("Malo"), conflictivo, false)
         .unwrap();
     assert!(!outcome.written);
     assert!(outcome.rejected.is_some());

@@ -420,7 +420,7 @@ mod time_tests {
     use super::now_iso8601;
 
     #[test]
-    fn now_iso8601_tiene_formato_y_es_iso_para_el_core() {
+    fn now_iso8601_tiene_formato() {
         let s = now_iso8601();
         // Forma exacta: `YYYY-MM-DDTHH:MM:SSZ` (20 caracteres, sin milisegundos).
         assert_eq!(s.len(), 20, "formato inesperado: {s}");
@@ -428,11 +428,7 @@ mod time_tests {
             s.ends_with('Z') && s.as_bytes()[10] == b'T',
             "formato inesperado: {s}"
         );
-        // El core debe aceptarlo como ISO (si no, FMT-TS marcaría warn en toda página creada).
-        let v = serde_yaml::Value::String(s.clone());
-        assert!(
-            lodestar_core::model::is_iso(&v),
-            "el core no reconoce como ISO: {s}"
-        );
+        // La mitad «y el core lo reconoce como ISO» murió con `FMT-TS` (E16-H05): el core ya no
+        // juzga el formato de una fecha del frontmatter — es metadata arbitraria del usuario.
     }
 }

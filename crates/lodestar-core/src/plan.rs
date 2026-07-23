@@ -151,7 +151,7 @@ fn accion(op: &NormalizedOperation) -> &'static str {
 /// cercana a "cambió una relación" sin reimplementar la resolución de relaciones del `schema`.
 ///
 /// `diagnostics_introduced`/`diagnostics_resolved` comparan el conjunto COMPLETO de diagnósticos
-/// de cada bundle bajo `schema`: los 15 checks OKF (`Bundle::analyze().per_file`) más
+/// de cada bundle bajo `schema`: los diagnósticos de `Bundle::analyze().per_file` (`§20.9`) más
 /// `validate_schema`/`validate_relations` (E10-H07/E11-H03) — el mismo universo que ve
 /// `lodestar check`. La identidad de un check para este diff es la tupla `(targets, code, msg)`:
 /// dos checks son "el mismo problema" si coinciden en los paths afectados, el código y el
@@ -219,7 +219,7 @@ pub fn semantic_diff(before: &Bundle, after: &Bundle, schema: &Schema) -> Semant
     }
 }
 
-/// Conjunto completo de diagnósticos de `bundle` bajo `schema`: los 15 checks OKF clásicos
+/// Conjunto completo de diagnósticos de `bundle` bajo `schema`: los de `Bundle::analyze` (`§20.9`)
 /// (`Bundle::analyze`) más las extensiones de esquema (`validate_schema`/`validate_relations`) —
 /// el mismo universo que ve `lodestar check`. Descarta `Severity::Pass`: no es un diagnóstico,
 /// es la ausencia de uno.
@@ -247,7 +247,7 @@ fn check_key(c: &Check) -> (Vec<RelPath>, CheckCode, String) {
 /// Valida el `Bundle` hipotético resultante de un `ChangeSet` bajo `schema` — E12-H04.
 ///
 /// Reusa `all_checks` (el mismo universo de diagnósticos que `semantic_diff` y `lodestar
-/// check`: los 15 checks OKF de `Bundle::analyze` más `validate_schema`/`validate_relations`,
+/// check`: los diagnósticos de `Bundle::analyze` (`§20.9`) más `validate_schema`/`validate_relations`,
 /// sin `Severity::Pass`). `summary` cuenta por severidad; `conformant` se computa explícitamente
 /// como `summary.errors == 0` (no se reusa `ValidationSummary::default().conformant`, que sería
 /// `false` por defecto — aquí "conforme" significa "sin errores duros", con o sin warnings).
@@ -1008,10 +1008,12 @@ fn apply_one(files: &mut FileMap, op: &NormalizedOperation) -> Result<(), CoreEr
             files.insert(path.clone(), model::build_raw(Some(&fm), &body));
         }
         NormalizedOperation::PatchFrontmatter { path, patch } => {
-            let (mut map, body) = parsed_of(files, path);
-            crate::bundle::apply_patch(&mut map, patch.clone());
-            let fm = ParsedFrontmatter::from_mapping(map);
-            files.insert(path.clone(), model::build_raw(Some(&fm), &body));
+            // Por el patch QUIRÚRGICO (E16-H04, invariante #3: una sola verdad de patcheo): las
+            // líneas que el patch no toca sobreviven byte a byte, y un frontmatter ilegible hace
+            // fallar la operación en vez de reconstruirse encima.
+            let raw = files.get(path).cloned().unwrap_or_default();
+            let patched = model::patch_frontmatter(&raw, patch)?;
+            files.insert(path.clone(), patched.raw);
         }
         NormalizedOperation::ReplaceBody { path, body } => {
             let (map, _) = parsed_of(files, path);

@@ -1142,10 +1142,13 @@ fn diags_cubren(diags: &[serde_json::Value], path: &str) -> bool {
         .any(|d| diag_targets(d).iter().any(|t| t == path))
 }
 
-/// Bundle con un `.md` **editado a mano** cuyo frontmatter es inválido: le falta el campo
-/// obligatorio `type`, lo que dispara el check hard-fail `OKF-TYPE` (severidad `Err`) sobre ese
-/// path (`conform.rs`: "Falta indicar de qué tipo es esta página."). El bundle es por lo demás
-/// válido (tiene `index.md`), así que el ÚNICO error viene de la edición directa.
+/// Bundle con un `.md` **editado a mano** cuyo frontmatter es inválido.
+///
+/// MIGRADO en E16-H05: el disparador era la falta del campo `type` (`OKF-TYPE`), y un documento
+/// sin `type` pasó a ser perfectamente válido. Hoy el `.md` editado a mano tiene el frontmatter
+/// **sintácticamente roto** → `FM-YAML-INVALID` (severidad `Err`), que es exactamente el mismo
+/// escenario contado con el catálogo mínimo de `§20.9`: alguien lo escribió a pelo y lo dejó
+/// ilegible. El bundle es por lo demás válido, así que el ÚNICO error viene de la edición directa.
 fn bundle_editado_a_mano() -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
     write(
@@ -1153,12 +1156,12 @@ fn bundle_editado_a_mano() -> tempfile::TempDir {
         "index.md",
         "---\ntype: Index\ntitle: Bundle\ndescription: Índice del bundle\nokf_version: \"0.1\"\n---\n\n# Bundle\n\n* [Editado](editado-a-mano.md)\n",
     );
-    // Frontmatter válido como bloque pero SIN `type` → OKF-TYPE (Err). Simula a alguien que editó
-    // el .md a pelo y olvidó el campo obligatorio.
+    // Bloque bien delimitado pero con YAML inválido → FM-YAML-INVALID (Err). Simula a alguien que
+    // editó el .md a pelo y rompió la sintaxis.
     write(
         dir.path(),
         "editado-a-mano.md",
-        "---\ntitle: Editado a mano\ndescription: alguien lo escribió a pelo\n---\n\n# Nota\n\ncuerpo suelto sin tipo.\n",
+        "---\ntitle: : :\n  - roto\ndescription: alguien lo escribió a pelo\n---\n\n# Nota\n\ncuerpo suelto.\n",
     );
     dir
 }
@@ -1187,10 +1190,10 @@ fn check_detecta_edicion_directa() {
         !del_fichero.is_empty(),
         "knowledge_check(workspace) debe reportar el diagnóstico de «editado-a-mano.md»: {resp:?}"
     );
-    // Y es exactamente el hard-fail OKF-TYPE (frontmatter sin `type`) — no un warning cualquiera.
+    // Y es exactamente el hard-fail FM-YAML-INVALID — no un warning cualquiera.
     assert!(
-        del_fichero.iter().any(|d| d["code"] == "OKF-TYPE"),
-        "el diagnóstico de «editado-a-mano.md» debe ser OKF-TYPE (falta el campo `type`): {resp:?}"
+        del_fichero.iter().any(|d| d["code"] == "FM-YAML-INVALID"),
+        "el diagnóstico de «editado-a-mano.md» debe ser FM-YAML-INVALID (frontmatter ilegible): {resp:?}"
     );
 
     // Veredicto global: NO conforme (hay al menos un error).
@@ -1206,11 +1209,17 @@ fn check_detecta_edicion_directa() {
 ///
 ///   index.md ──► centro.md ◄──► vecino.md ◄──► c.md          lejano.md   (aislado)
 ///
-/// - `centro.md` (A): el ref; conforme. Enlaza a `vecino.md`.
-/// - `vecino.md` (B, distancia 1): frontmatter sin `type` → diagnóstico OKF-TYPE. Enlaza a `centro`
+/// MIGRADO en E16-H05: los tres documentos con diagnóstico lo obtenían por no tener `type`
+/// (`OKF-TYPE`, retirado). Hoy lo obtienen por llevar **marcadores de merge sin resolver**
+/// (`DOC-CONFLICT-MARKER`, `Err`), que es un diagnóstico del catálogo mínimo y —a diferencia de un
+/// frontmatter ilegible— deja el cuerpo y sus **enlaces** intactos, que es lo que este escenario
+/// necesita para que el vecindario exista.
+///
+/// - `centro.md` (A): el ref; sin diagnóstico. Enlaza a `vecino.md`.
+/// - `vecino.md` (B, distancia 1): con marcadores → `DOC-CONFLICT-MARKER`. Enlaza a `centro`
 ///   y a `c` (así, en CUALQUIER dirección, B está a distancia 1 y C a distancia 2 de A).
-/// - `c.md` (C, distancia 2): frontmatter sin `type` → diagnóstico OKF-TYPE. Enlaza a `vecino`.
-/// - `lejano.md` (D, NO conectado): frontmatter sin `type` → diagnóstico OKF-TYPE. Su diagnóstico
+/// - `c.md` (C, distancia 2): con marcadores → `DOC-CONFLICT-MARKER`. Enlaza a `vecino`.
+/// - `lejano.md` (D, NO conectado): con marcadores → `DOC-CONFLICT-MARKER`. Su diagnóstico
 ///   DEBE quedar fuera del scope `affected {refs:[centro], depth:2}`.
 ///
 /// El criterio es inequívoco: con `depth:2` el vecindario de A es exactamente {centro, vecino, c};
@@ -1228,23 +1237,24 @@ fn bundle_affected() -> tempfile::TempDir {
         "centro.md",
         "---\ntype: concept\ntitle: Centro\ndescription: nodo raíz del vecindario\n---\n\n# Centro\n\n[Vecino](vecino.md)\n",
     );
-    // B (distancia 1): sin `type` → OKF-TYPE. Enlaza a A y a C (bidireccional).
+    // B (distancia 1): con marcadores → DOC-CONFLICT-MARKER. Enlaza a A y a C (bidireccional).
     write(
         dir.path(),
         "vecino.md",
-        "---\ntitle: Vecino\ndescription: a distancia 1 de centro\n---\n\n# Vecino\n\n[Centro](centro.md)\n\n[C](c.md)\n",
+        "---\ntitle: Vecino\ndescription: a distancia 1 de centro\n---\n\n# Vecino\n\n[Centro](centro.md)\n\n[C](c.md)\n\n<<<<<<< HEAD\nuno\n=======\ndos\n>>>>>>> rama\n",
     );
-    // C (distancia 2): sin `type` → OKF-TYPE. Enlaza a B (bidireccional).
+    // C (distancia 2): con marcadores → DOC-CONFLICT-MARKER. Enlaza a B (bidireccional).
     write(
         dir.path(),
         "c.md",
-        "---\ntitle: C\ndescription: a distancia 2 de centro\n---\n\n# C\n\n[Vecino](vecino.md)\n",
+        "---\ntitle: C\ndescription: a distancia 2 de centro\n---\n\n# C\n\n[Vecino](vecino.md)\n\n<<<<<<< HEAD\nuno\n=======\ndos\n>>>>>>> rama\n",
     );
-    // D (lejano, aislado): sin `type` → OKF-TYPE. Sin ningún enlace desde/hacia el vecindario.
+    // D (lejano, aislado): con marcadores → DOC-CONFLICT-MARKER. Sin ningún enlace desde/hacia el
+    // vecindario.
     write(
         dir.path(),
         "lejano.md",
-        "---\ntitle: Lejano\ndescription: desconectado del vecindario\n---\n\n# Lejano\n\ncuerpo sin enlaces.\n",
+        "---\ntitle: Lejano\ndescription: desconectado del vecindario\n---\n\n# Lejano\n\ncuerpo sin enlaces.\n\n<<<<<<< HEAD\nuno\n=======\ndos\n>>>>>>> rama\n",
     );
     dir
 }
@@ -1282,8 +1292,10 @@ fn check_scope_affected() {
     );
 }
 
-/// Bundle con DOS ficheros no conformes (frontmatter sin `type` → OKF-TYPE), para que el conjunto de
-/// `id` de diagnóstico sea significativo (≥1, aquí ≥2) al comparar estabilidad entre revisiones.
+/// Bundle con DOS ficheros con diagnóstico, para que el conjunto de `id` sea significativo (≥1,
+/// aquí ≥2) al comparar estabilidad entre revisiones. MIGRADO en E16-H05: el disparador era el
+/// frontmatter sin `type` (`OKF-TYPE`, retirado); hoy es un frontmatter con YAML inválido
+/// (`FM-YAML-INVALID`).
 fn bundle_dos_diagnosticos() -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
     write(
@@ -1295,7 +1307,9 @@ fn bundle_dos_diagnosticos() -> tempfile::TempDir {
         write(
             dir.path(),
             &format!("{slug}.md"),
-            &format!("---\ntitle: {slug}\ndescription: sin type\n---\n\n# H\n\ncuerpo.\n"),
+            &format!(
+                "---\ntitle: : :\n  - {slug}\ndescription: yaml roto\n---\n\n# H\n\ncuerpo.\n"
+            ),
         );
     }
     dir
