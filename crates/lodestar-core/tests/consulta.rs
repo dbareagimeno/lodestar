@@ -35,11 +35,13 @@
 
 use lodestar_core::eval::{evaluate, EvalDocument};
 use lodestar_core::model;
+use lodestar_core::parse::parse;
 use lodestar_core::types::ComparisonOperator as Op;
 use lodestar_core::types::{
     Analysis, Expression, FieldPath, FunctionName, ParsedFrontmatter, QueryValue, RelPath,
     TypeError, ValueType,
 };
+use lodestar_core::DocumentSet;
 
 // --- Utilidades --------------------------------------------------------------
 
@@ -674,5 +676,423 @@ fn tipos_heterogeneos() {
         eval(&cmp("priority", Op::Eq, num(2)), &textual),
         Ok(false),
         "`priority = 2` sobre el documento textual es FALSE (string \"high\" vs número 2)"
+    );
+}
+
+// =============================================================================
+// Utilidades añadidas para E19-H02/H04
+// =============================================================================
+
+/// Conjunción `And(ramas)`.
+fn and(ramas: Vec<Expression>) -> Expression {
+    Expression::And(ramas)
+}
+
+/// Disyunción `Or(ramas)`.
+fn or(ramas: Vec<Expression>) -> Expression {
+    Expression::Or(ramas)
+}
+
+/// Negación `Not(inner)`.
+fn not(inner: Expression) -> Expression {
+    Expression::Not(Box::new(inner))
+}
+
+/// Literal booleano.
+fn qbool(b: bool) -> QueryValue {
+    QueryValue::Bool(b)
+}
+
+/// El literal `null`.
+fn qnull() -> QueryValue {
+    QueryValue::Null
+}
+
+// =============================================================================
+// E19-H02 — El parser textual (`where`)
+// =============================================================================
+//
+// La firma que fija esta fase: `lodestar_core::parse::parse(&str) -> Result<Expression, ParseError>`
+// (módulo NUEVO `parse`, no la DSL de subcadena de `query.rs`, que se retira en E19-H05). El parser
+// traduce la consulta textual al MISMO `Expression` de H01, sin coerción: el tipo de un literal nace
+// de su forma sintáctica (comillas → string; sin comillas → número/booleano/`null` por su escritura).
+//
+// **Decisión de criterio (abreviatura de namespace)**: `frontmatter.X` y `X` a secas producen el
+// `FieldPath` DESNUDO (`["X"]`), NO `["frontmatter", "X"]` — el prefijo `frontmatter.` se normaliza
+// fuera. Es la única forma consistente con el evaluador YA VERDE de H01 (que va directo a
+// `ParsedFrontmatter::get(field)`) y con el reparto de H04 (primer segmento `document`/`graph` =
+// namespace; cualquier otro = frontmatter). Los tests `abreviatura_de_namespace` y
+// `dot_notation_textual` clavan esa forma.
+
+/// Criterio: `and` (`and_ok`).
+#[test]
+fn and_ok() {
+    assert_eq!(
+        parse(r#"type = "decision" and status = "accepted""#).unwrap(),
+        and(vec![
+            cmp("type", Op::Eq, qstr("decision")),
+            cmp("status", Op::Eq, qstr("accepted")),
+        ]),
+        "`a and b` es una conjunción de las dos comparaciones"
+    );
+}
+
+/// Criterio: `or` (`or_ok`).
+#[test]
+fn or_ok() {
+    assert_eq!(
+        parse(r#"status = "draft" or status = "review""#).unwrap(),
+        or(vec![
+            cmp("status", Op::Eq, qstr("draft")),
+            cmp("status", Op::Eq, qstr("review")),
+        ]),
+        "`a or b` es una disyunción de las dos comparaciones"
+    );
+}
+
+/// Criterio: `not` (`not_ok`).
+#[test]
+fn not_ok() {
+    assert_eq!(
+        parse(r#"not tags contains "archived""#).unwrap(),
+        not(cmp("tags", Op::Contains, qstr("archived"))),
+        "`not` niega la comparación que le sigue"
+    );
+}
+
+/// Criterio: paréntesis (`parentesis`).
+#[test]
+fn parentesis() {
+    // (1) Un grupo entre paréntesis es exactamente su contenido, sin envoltura extra.
+    assert_eq!(
+        parse(r#"(status = "draft" or status = "review")"#).unwrap(),
+        or(vec![
+            cmp("status", Op::Eq, qstr("draft")),
+            cmp("status", Op::Eq, qstr("review")),
+        ]),
+        "los paréntesis alrededor de una expresión no añaden ningún nodo"
+    );
+    // (2) Los paréntesis REAGRUPAN contra la precedencia natural: sin ellos el `and` ataría primero;
+    //     con ellos, el `or` queda anidado bajo el `and`.
+    assert_eq!(
+        parse(r#"type = "decision" and (status = "draft" or status = "review")"#).unwrap(),
+        and(vec![
+            cmp("type", Op::Eq, qstr("decision")),
+            or(vec![
+                cmp("status", Op::Eq, qstr("draft")),
+                cmp("status", Op::Eq, qstr("review")),
+            ]),
+        ]),
+        "los paréntesis fuerzan el `or` bajo el `and`"
+    );
+}
+
+/// Criterio: precedencia `not` > `and` > `or` (`precedencia`).
+#[test]
+fn precedencia() {
+    // `a or b and c` = `a or (b and c)`: el `and` liga más fuerte que el `or`.
+    assert_eq!(
+        parse(r#"status = "a" or status = "b" and status = "c""#).unwrap(),
+        or(vec![
+            cmp("status", Op::Eq, qstr("a")),
+            and(vec![
+                cmp("status", Op::Eq, qstr("b")),
+                cmp("status", Op::Eq, qstr("c")),
+            ]),
+        ]),
+        "`and` liga más que `or`: `a or b and c` = `a or (b and c)`"
+    );
+    // `not a and b` = `(not a) and b`: el `not` liga más fuerte que el `and`.
+    assert_eq!(
+        parse(r#"not status = "a" and status = "b""#).unwrap(),
+        and(vec![
+            not(cmp("status", Op::Eq, qstr("a"))),
+            cmp("status", Op::Eq, qstr("b")),
+        ]),
+        "`not` liga más que `and`: `not a and b` = `(not a) and b`"
+    );
+}
+
+/// Criterio: dot-notation (`dot_notation_textual`).
+#[test]
+fn dot_notation_textual() {
+    let expr = parse(r#"service.tier = "critical""#).unwrap();
+    assert_eq!(
+        expr,
+        cmp("service.tier", Op::Eq, qstr("critical")),
+        "`service.tier = \"critical\"` es una `Comparison` con `FieldPath` de dos segmentos"
+    );
+    // El `FieldPath` es EXACTAMENTE los dos segmentos (no una clave literal con punto).
+    let Expression::Comparison { field, .. } = &expr else {
+        panic!("un `campo = valor` parsea a una `Comparison`: {expr:?}");
+    };
+    assert_eq!(
+        field.segments(),
+        ["service", "tier"],
+        "la dot-notation parte por puntos en dos segmentos"
+    );
+}
+
+/// Criterio: abreviatura de namespace (`abreviatura_de_namespace`).
+#[test]
+fn abreviatura_de_namespace() {
+    let abreviado = parse(r#"status = "accepted""#).unwrap();
+    let explicito = parse(r#"frontmatter.status = "accepted""#).unwrap();
+
+    assert_eq!(
+        abreviado, explicito,
+        "`status = ...` y `frontmatter.status = ...` producen el MISMO `Expression`"
+    );
+    // …y ese AST lleva la ruta de frontmatter DESNUDA: `frontmatter.` se normaliza fuera, para que
+    // el evaluador de H01 —que va directo a `ParsedFrontmatter::get(field)`— la resuelva sin conocer
+    // el prefijo, y `document`/`graph` queden como únicos primeros segmentos reservados (E19-H04).
+    assert_eq!(
+        abreviado,
+        cmp("status", Op::Eq, qstr("accepted")),
+        "la abreviatura resuelve a `FieldPath([\"status\"])`, no a `[\"frontmatter\", \"status\"]`"
+    );
+}
+
+/// Criterio: literales por forma (`literales_por_forma`).
+#[test]
+fn literales_por_forma() {
+    // Un número sin comillas es NÚMERO.
+    assert_eq!(
+        parse("priority = 2").unwrap(),
+        cmp("priority", Op::Eq, num(2)),
+        "`2` sin comillas es un literal numérico"
+    );
+    // Un booleano sin comillas es BOOLEANO.
+    assert_eq!(
+        parse("reviewed = true").unwrap(),
+        cmp("reviewed", Op::Eq, qbool(true)),
+        "`true` sin comillas es un literal booleano"
+    );
+    // `null` sin comillas es NULL.
+    assert_eq!(
+        parse("deprecated = null").unwrap(),
+        cmp("deprecated", Op::Eq, qnull()),
+        "`null` sin comillas es el literal nulo"
+    );
+    // Lo MISMO entre comillas es STRING: `"2"` no se coerciona al número 2 (la red anti-`get_text`
+    // empieza ya en el parser — el tipo del literal nace de su forma sintáctica).
+    assert_eq!(
+        parse(r#"label = "2""#).unwrap(),
+        cmp("label", Op::Eq, qstr("2")),
+        "`\"2\"` entre comillas es un string, no el número 2"
+    );
+    // El contraste vivo: mismo campo, misma cifra, distinto tipo según las comillas.
+    assert_ne!(
+        parse("count = 2").unwrap(),
+        parse(r#"count = "2""#).unwrap(),
+        "`count = 2` (número) y `count = \"2\"` (string) son AST distintos: el parser no coerciona"
+    );
+}
+
+/// Criterio: consulta malformada (`parseo_malformado_es_error`).
+#[test]
+fn parseo_malformado_es_error() {
+    // El caso rector: un operador sin operando derecho es `Err`, NO un panic ni una query vacía.
+    assert!(
+        parse("status =").is_err(),
+        "`status =` sin valor es un `Err`"
+    );
+    // Otras formas rotas, también `Err` sin panic: un paréntesis sin cerrar y la consulta vacía
+    // (`§Fase 5`: los errores son `Result`, «no queries vacías»).
+    assert!(
+        parse(r#"(status = "a""#).is_err(),
+        "un paréntesis sin cerrar es un `Err`"
+    );
+    assert!(parse("").is_err(), "la consulta vacía es un `Err`");
+}
+
+// =============================================================================
+// E19-H04 — Namespaces calculados (`document.*`, `graph.*`)
+// =============================================================================
+//
+// A diferencia de H01 (que dejaba `document.*`/`graph.*` sin resolver), aquí el evaluador SÍ los
+// evalúa: `document.*` desde el propio [`EvalDocument`] y `graph.*` desde el [`Analysis`] (que ya
+// viaja en la firma `evaluate(expr, doc, analysis)` de H01 — ningún cambio de firma es necesario).
+//
+// **Decisiones de criterio**:
+//   - **Cómo se distingue namespace de frontmatter**: el PRIMER segmento del `FieldPath` decide.
+//     `document`/`graph` son reservados; cualquier otro (incluida la abreviatura de `frontmatter.X`)
+//     va al frontmatter. `namespace_graph_isolated` fuerza que esto sea correcto: una clave de
+//     usuario `isolated` en el frontmatter NO puede colarse como `graph.isolated`.
+//   - **Sin romper la regla de tipos de H01**: los valores calculados se comparan como su tipo
+//     natural — `document.path` como string, `document.has_frontmatter`/`graph.isolated` como
+//     booleanos, `graph.backlinks`/`graph.dangling_links` como números—, así que `graph.backlinks =
+//     "0"` (string) seguiría siendo `false` y `graph.backlinks >= "x"` un error, igual que cualquier
+//     número de frontmatter. Los tests comparan cada namespace con el `QueryValue` de su tipo.
+//   - **`Analysis` de verdad**: se construye un `DocumentSet` con enlaces reales y se usa su
+//     `analyze()`, no un `Analysis` fabricado a mano — así el test no miente sobre lo que el grafo
+//     calcula (mismo enfoque que `grafo.rs`).
+
+/// Evalúa `expr` sobre el documento `path` de un `DocumentSet` **real**: su frontmatter y su cuerpo
+/// salen del `.md`, y el `Analysis` (backlinks/dangling/isolated) lo calcula el grafo de verdad —no
+/// un `Analysis` fabricado—, de modo que el test no puede mentir sobre lo que el grafo computa. Es el
+/// contraste con el helper `eval` de H01, que usa `Analysis::default()` porque H01 no toca el grafo.
+fn eval_en(ds: &DocumentSet, path: &str, expr: &Expression) -> Result<bool, TypeError> {
+    let p = rp(path);
+    let raw = ds
+        .files()
+        .get(&p)
+        .unwrap_or_else(|| panic!("`{path}` debe estar en el `DocumentSet`"));
+    let parsed = model::parse_file(path, raw);
+    let doc = EvalDocument {
+        path: &p,
+        frontmatter: parsed.frontmatter.as_ref(),
+        body: &parsed.body,
+    };
+    evaluate(expr, &doc, ds.analyze())
+}
+
+/// Criterio: `document.path starts_with "docs/"` (`namespace_document_path`).
+#[test]
+fn namespace_document_path() {
+    let ds = DocumentSet::from_files(lodestar_fixtures::file_map(&[
+        ("docs/guia.md", "# Guía\n\nBajo docs.\n"),
+        ("README.md", "# Readme\n\nEn la raíz.\n"),
+    ]));
+    let expr = cmp("document.path", Op::StartsWith, qstr("docs/"));
+
+    assert_eq!(
+        eval_en(&ds, "docs/guia.md", &expr),
+        Ok(true),
+        "`document.path` resuelve la ruta REAL del documento, no una clave de frontmatter"
+    );
+    // No vacuo: la ruta de la raíz no empieza por `docs/` — el namespace lee la ruta de verdad.
+    assert_eq!(
+        eval_en(&ds, "README.md", &expr),
+        Ok(false),
+        "`README.md` no empieza por `docs/`"
+    );
+}
+
+/// Criterio: `document.has_frontmatter = false` (`namespace_has_frontmatter`).
+#[test]
+fn namespace_has_frontmatter() {
+    let ds = DocumentSet::from_files(lodestar_fixtures::file_map(&[
+        ("con-fm.md", "---\nstatus: accepted\n---\n\n# Con bloque\n"),
+        ("sin-fm.md", "# Sin bloque\n\nNi rastro de frontmatter.\n"),
+    ]));
+    let sin_bloque = cmp("document.has_frontmatter", Op::Eq, qbool(false));
+
+    // Selecciona los documentos SIN bloque.
+    assert_eq!(
+        eval_en(&ds, "sin-fm.md", &sin_bloque),
+        Ok(true),
+        "`document.has_frontmatter = false` casa el documento sin bloque"
+    );
+    // No vacuo: el que tiene bloque no casa.
+    assert_eq!(
+        eval_en(&ds, "con-fm.md", &sin_bloque),
+        Ok(false),
+        "…y NO el documento con bloque"
+    );
+    // El booleano calculado se compara con `QueryValue::Bool` como cualquier booleano de
+    // frontmatter, sin romper la regla de tipos de H01.
+    assert_eq!(
+        eval_en(
+            &ds,
+            "con-fm.md",
+            &cmp("document.has_frontmatter", Op::Eq, qbool(true)),
+        ),
+        Ok(true),
+        "`document.has_frontmatter = true` casa el documento con bloque"
+    );
+}
+
+/// Criterio: `graph.backlinks = 0` (`namespace_graph_backlinks`).
+#[test]
+fn namespace_graph_backlinks() {
+    let ds = DocumentSet::from_files(lodestar_fixtures::file_map(&[
+        ("target.md", "# Target\n\nMe enlazan.\n"),
+        ("source.md", "# Source\n\nVer [target](target.md).\n"),
+    ]));
+    let sin_backlinks = cmp("graph.backlinks", Op::Eq, num(0));
+
+    // `source.md` no recibe enlaces: 0 backlinks.
+    assert_eq!(
+        eval_en(&ds, "source.md", &sin_backlinks),
+        Ok(true),
+        "`graph.backlinks = 0` casa el documento no enlazado"
+    );
+    // No vacuo: `target.md` recibe un enlace desde `source.md`.
+    assert_eq!(
+        eval_en(&ds, "target.md", &sin_backlinks),
+        Ok(false),
+        "`target.md` recibe un enlace: no tiene 0 backlinks"
+    );
+    // El contador es un NÚMERO calculado: el orden funciona como con cualquier número de frontmatter.
+    assert_eq!(
+        eval_en(&ds, "target.md", &cmp("graph.backlinks", Op::Ge, num(1))),
+        Ok(true),
+        "`graph.backlinks >= 1` casa el documento enlazado: el namespace de grafo es numérico"
+    );
+}
+
+/// Criterio: `graph.dangling_links > 0` (`namespace_graph_dangling`).
+#[test]
+fn namespace_graph_dangling() {
+    let ds = DocumentSet::from_files(lodestar_fixtures::file_map(&[
+        ("roto.md", "# Roto\n\nVer [lo que falta](no-existe.md).\n"),
+        ("sano.md", "# Sano\n\nVer [roto](roto.md).\n"),
+    ]));
+    let con_rotos = cmp("graph.dangling_links", Op::Gt, num(0));
+
+    // `roto.md` tiene un enlace a un destino inexistente.
+    assert_eq!(
+        eval_en(&ds, "roto.md", &con_rotos),
+        Ok(true),
+        "`graph.dangling_links > 0` casa el documento con un enlace roto"
+    );
+    // No vacuo: `sano.md` enlaza a `roto.md`, que existe → ningún colgante.
+    assert_eq!(
+        eval_en(&ds, "sano.md", &con_rotos),
+        Ok(false),
+        "`sano.md` enlaza a un documento que existe: 0 colgantes"
+    );
+}
+
+/// Criterio: `graph.isolated = true` y la NO interferencia de una clave de frontmatter `isolated`
+/// (`namespace_graph_isolated`).
+#[test]
+fn namespace_graph_isolated() {
+    // `aislado.md` no enlaza ni es enlazado → aislado en el grafo. Su frontmatter lleva un DECOY:
+    // una clave `isolated: false`, para forzar que `graph.isolated` NO se confunda con ella.
+    let ds = DocumentSet::from_files(lodestar_fixtures::file_map(&[
+        (
+            "aislado.md",
+            "---\nisolated: false\n---\n\n# Aislado\n\nNi enlazo ni me enlazan.\n",
+        ),
+        ("a.md", "# A\n\nVer [b](b.md).\n"),
+        ("b.md", "# B\n\nMe enlazan.\n"),
+    ]));
+
+    // (1) El namespace de grafo dice la verdad del GRAFO: `aislado.md` está aislado.
+    assert_eq!(
+        eval_en(&ds, "aislado.md", &cmp("graph.isolated", Op::Eq, qbool(true))),
+        Ok(true),
+        "`graph.isolated = true` casa el documento aislado en el grafo"
+    );
+    // (2) No vacuo: un documento conectado no está aislado.
+    assert_eq!(
+        eval_en(&ds, "a.md", &cmp("graph.isolated", Op::Eq, qbool(true))),
+        Ok(false),
+        "`a.md` participa en el grafo: no está aislado"
+    );
+    // (3) La clave de frontmatter `isolated` NO interfiere: el namespace es EXPLÍCITO. Bare
+    //     `isolated` lee el frontmatter (`false`); `graph.isolated` lee el grafo (`true`). Dan
+    //     respuestas OPUESTAS sobre el MISMO documento.
+    assert_eq!(
+        eval_en(&ds, "aislado.md", &cmp("isolated", Op::Eq, qbool(false))),
+        Ok(true),
+        "bare `isolated = false` lee la clave de frontmatter (que vale `false`)"
+    );
+    assert_eq!(
+        eval_en(&ds, "aislado.md", &cmp("isolated", Op::Eq, qbool(true))),
+        Ok(false),
+        "bare `isolated = true` NO se cuela al grafo: la clave de frontmatter vale `false`"
     );
 }

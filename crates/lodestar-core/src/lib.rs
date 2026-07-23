@@ -18,6 +18,7 @@ pub mod error;
 pub mod eval;
 pub mod links;
 pub mod model;
+pub mod parse;
 pub mod plan;
 pub mod query;
 pub mod schema;
