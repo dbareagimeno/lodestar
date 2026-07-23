@@ -35,6 +35,13 @@ pub const CACHE_DIR: &str = ".lodestar";
 /// Nombre del fichero de base de datos de la cache.
 pub const DB_FILE: &str = "index.db";
 
+/// Un enlace saliente **clasificado** tal cual lo materializa la tabla `links` del store v2:
+/// `(raw_href, target_kind, target_path, fragment)` (`§20.12`, E18-H04). `target_kind` es el
+/// discriminante serde de `LinkTarget`; `target_path` y `fragment` son `None` para los destinos sin
+/// path (externo, anchor propio, escape). Es la proyección a tuplas de `Analysis::outgoing` con la
+/// que el test de paridad compara la clasificación del core (invariante #3).
+pub type OutgoingLink = (String, String, Option<String>, Option<String>);
+
 /// La cache de un workspace: base SQLite + bus de eventos. Compuesta por la workspace (E5).
 pub struct Store {
     root: PathBuf,
@@ -353,15 +360,9 @@ impl Store {
     /// leída de la tabla `links`. Es la superficie pública por la que el test de paridad compara la
     /// clasificación de `Analysis::outgoing` (invariante #3: cuando core y cache podrían discrepar,
     /// gana el core).
-    ///
-    /// STUB de la fase roja (E18-H04): la firma existe para que el test compile; el implementador
-    /// la puebla desde la tabla `links` materializada.
-    pub fn outgoing_links(
-        &self,
-        source: &RelPath,
-    ) -> Result<Vec<(String, String, Option<String>, Option<String>)>, StoreError> {
-        let _ = source;
-        todo!("E18-H04: exponer los enlaces salientes clasificados desde la tabla `links`")
+    pub fn outgoing_links(&self, source: &RelPath) -> Result<Vec<OutgoingLink>, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        synth::outgoing_links(&conn, source)
     }
 
     /// Un `DocumentSet` del core servido desde la cache (vía el trait [`DocumentStore`]).
@@ -398,6 +399,15 @@ impl DocumentStore for Store {
             |r| r.get::<_, String>(0),
         )
         .ok()
+    }
+
+    /// Los ficheros del proyecto que **no** son documentos (código, imágenes…), materializados en la
+    /// tabla `other_files`. Es lo que permite que `DocumentSet::from_store` clasifique un enlace a
+    /// código como `WorkspaceFile` y no como `Missing` (E18-H04), con el mismo inventario que ve el
+    /// core al analizar el disco.
+    fn other_files(&self) -> Vec<RelPath> {
+        let conn = self.conn.lock().unwrap();
+        synth::read_other_files(&conn).unwrap_or_default()
     }
 }
 

@@ -17,6 +17,17 @@ pub trait DocumentStore {
     /// El contenido crudo (`.md`) de una ruta, o `None` si no existe.
     fn raw(&self, path: &RelPath) -> Option<String>;
 
+    /// Los ficheros del proyecto que **no** son documentos (código, imágenes, `.md` excluidos del
+    /// descubrimiento…): el inventario que declara un [`crate::types::LinkTarget::WorkspaceFile`].
+    ///
+    /// Por defecto **vacío**: un [`FileMap`] en RAM no conoce el resto del proyecto. Una impl que sí
+    /// lo conozca (la cache SQL) lo sobreescribe para que [`DocumentSet::from_store`] resuelva los
+    /// enlaces con el mismo inventario que el core (invariante #3), sin degradar un `WorkspaceFile`
+    /// a `Missing`.
+    fn other_files(&self) -> Vec<RelPath> {
+        Vec::new()
+    }
+
     /// Reconstruye el `FileMap` completo desde el store (por defecto vía `paths`+`raw`).
     fn file_map(&self) -> FileMap {
         self.paths()
@@ -40,9 +51,11 @@ impl DocumentStore for FileMap {
 }
 
 impl DocumentSet {
-    /// Construye un `DocumentSet` sirviendo el corpus desde un [`DocumentStore`] (SQL o en RAM).
-    /// El análisis resultante es idéntico al de [`DocumentSet::from_files`] sobre el mismo corpus.
+    /// Construye un `DocumentSet` sirviendo el corpus desde un [`DocumentStore`] (SQL o en RAM),
+    /// declarando además sus [`DocumentStore::other_files`] para que la resolución de enlaces
+    /// clasifique los `WorkspaceFile` igual que el core sobre disco (E18-H04). El análisis resultante
+    /// es idéntico al de [`DocumentSet::with_other_files`] sobre el mismo corpus e inventario.
     pub fn from_store<S: DocumentStore + ?Sized>(store: &S) -> Self {
-        DocumentSet::from_files(store.file_map())
+        DocumentSet::with_other_files(store.file_map(), store.other_files())
     }
 }

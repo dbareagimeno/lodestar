@@ -49,7 +49,12 @@ fn link_diagnostics(conn: &Connection) -> Result<Vec<(RelPath, Vec<Check>)>, Sto
             files.insert(rp, raw);
         }
     }
-    let doc_set = DocumentSet::from_files(files);
+    // El inventario debe declarar los `other_files` (código, imágenes…) igual que el core (E18-H04):
+    // sin ellos, un enlace a un fichero del proyecto (`[c](src/x.rs)`) se resolvería `Missing` y
+    // emitiría un `LINK-TARGET-MISSING` (`warn`) que el core, con el inventario completo, clasifica
+    // `WorkspaceFile` silencioso. Es la asimetría que inflaba `warn_count` en la cache; el core es la
+    // autoridad, así que la cache resuelve con el MISMO inventario (invariante #3).
+    let doc_set = DocumentSet::with_other_files(files, read_other_files(conn)?);
     Ok(doc_set
         .analyze()
         .diagnostics
@@ -184,9 +189,55 @@ pub(crate) fn fts_candidates(conn: &Connection, needle: &str) -> Result<Vec<RelP
     let escaped = format!("\"{}\"", needle.replace('"', "\"\""));
     rows_to_relpaths(
         conn,
-        "SELECT path FROM files_fts WHERE files_fts MATCH ?1 ORDER BY path",
+        "SELECT path FROM documents_fts WHERE documents_fts MATCH ?1 ORDER BY path",
         &[&escaped],
     )
+}
+
+/// Los `other_files` materializados (los ficheros del proyecto que **no** son documentos): el
+/// inventario con el que la síntesis de diagnósticos y `DocumentSet::from_store` clasifican un
+/// enlace como `WorkspaceFile` en vez de `Missing` (E18-H04). La tabla `other_files` la vuelca el
+/// único escritor en cada walk completo (`lib::write_other_files`).
+pub(crate) fn read_other_files(conn: &Connection) -> Result<Vec<RelPath>, StoreError> {
+    let mut stmt = conn.prepare("SELECT path FROM other_files")?;
+    let iter = stmt.query_map([], |r| r.get::<_, String>(0))?;
+    let mut out = Vec::new();
+    for s in iter {
+        if let Ok(rp) = RelPath::new(&s?) {
+            out.push(rp);
+        }
+    }
+    Ok(out)
+}
+
+/// Enlaces salientes de un documento **con su clasificación** (`Analysis::outgoing`, `§20.12`): una
+/// tupla `(raw_href, target_kind, target_path, fragment)` por enlace del cuerpo, leída tal cual de
+/// la tabla `links` materializada. Devuelve TODAS las clases de destino (no solo las aristas del
+/// grafo): externos, anchors propios y ficheros del proyecto incluidos.
+///
+/// La cache no reclasifica nada: `target_kind`/`target_path`/`fragment` los escribió
+/// `index::upsert_file` proyectando el `LinkTarget` que resolvió el core. Es la superficie por la
+/// que el test de paridad compara la clasificación de enlaces (invariante #3: gana el core).
+pub(crate) fn outgoing_links(
+    conn: &Connection,
+    source: &RelPath,
+) -> Result<Vec<crate::OutgoingLink>, StoreError> {
+    let mut stmt = conn.prepare(
+        "SELECT raw_href, target_kind, target_path, fragment FROM links WHERE source_path = ?1",
+    )?;
+    let rows = stmt.query_map([source.as_str()], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, Option<String>>(2)?,
+            r.get::<_, Option<String>>(3)?,
+        ))
+    })?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row?);
+    }
+    Ok(out)
 }
 
 /// Búsqueda de subcadena con la MISMA función del core (`query::loose_text_match`): basename +

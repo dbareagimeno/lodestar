@@ -1533,7 +1533,8 @@ fn diagnostics_conserva_el_rango() {
 #[test]
 fn fts_encuentra_valores_de_frontmatter() {
     let dir = tempfile::tempdir().unwrap();
-    let raw = "---\nowners: [platform, security]\n---\n\n# Servicio\n\nCuerpo sin la palabra clave.\n";
+    let raw =
+        "---\nowners: [platform, security]\n---\n\n# Servicio\n\nCuerpo sin la palabra clave.\n";
     std::fs::write(dir.path().join("svc.md"), raw).unwrap();
     let store = Store::open_and_build(dir.path()).unwrap();
     assert!(
@@ -1840,7 +1841,7 @@ fn paridad_incremental_con_enlaces_clasificados() {
         }
 
         // (1) La `Analysis` completa coincide, con `other_files` declarados en ambos lados.
-        assert_paridad_con_inventario(&store, &mirror, &[rs.clone()]);
+        assert_paridad_con_inventario(&store, &mirror, std::slice::from_ref(&rs));
 
         // (2) La metadata anidada materializada sigue siendo la del core (`walk`) tras cada
         //     edición: ni una fila inventada ni un valor coercionado.

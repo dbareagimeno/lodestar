@@ -20,7 +20,12 @@ use crate::error::StoreError;
 ///   clases de destino; `diagnostics` gana `range_json` y renombra sus columnas. `other_files`
 ///   materializa el inventario de ficheros del proyecto (no-`.md`) que clasifica los enlaces
 ///   `workspaceFile`.
-pub const USER_VERSION: i64 = 4;
+/// - `5` — E18-H03 (FTS sin campos privilegiados, `§20.12`): `files_fts(path, title, description,
+///   body)` → `documents_fts(path, title, body, frontmatter_text)`. `description` deja de ser un
+///   campo privilegiado; `frontmatter_text` concatena los **valores textuales** de la metadata
+///   genérica (`§20.12`). El cambio de forma del FTS exige bump (una cache v4 se detecta antigua y
+///   se reconstruye).
+pub const USER_VERSION: i64 = 5;
 
 /// Aplica los `PRAGMA` de sesión (WAL + claves foráneas + busy_timeout).
 pub(crate) fn apply_pragmas(conn: &Connection) -> Result<(), StoreError> {
@@ -61,8 +66,10 @@ pub(crate) fn set_user_version(conn: &Connection) -> Result<(), StoreError> {
 ///   (`LinkTarget::internal_path().is_some()`), materializado por el core para no reimplementar
 ///   `is_markdown` en SQL.
 /// - `diagnostics`: solo checks **locales** (los de enlace se sintetizan al leer), con `range_json`.
-/// - `files_fts`: FTS5 como acelerador (nunca único pre-filtro). Su rediseño sin campos
-///   privilegiados es E18-H03; aquí se conserva para que `fts_candidates` siga acelerando.
+/// - `documents_fts`: FTS5 como acelerador (nunca único pre-filtro), **sin campos privilegiados**
+///   (E18-H03, `§20.12`): indexa `path`, título derivado, `body` y `frontmatter_text` —la
+///   concatenación de los valores textuales de la metadata genérica—, en vez del antiguo
+///   `description`. Lo puebla `index::upsert_file` desde la tabla `metadata` (una sola verdad).
 pub(crate) fn create_schema(conn: &Connection) -> Result<(), StoreError> {
     conn.execute_batch(
         r#"
@@ -112,8 +119,8 @@ pub(crate) fn create_schema(conn: &Connection) -> Result<(), StoreError> {
         CREATE INDEX IF NOT EXISTS idx_diag_doc ON diagnostics(document_path);
         CREATE INDEX IF NOT EXISTS idx_diag_severity ON diagnostics(severity);
 
-        CREATE VIRTUAL TABLE IF NOT EXISTS files_fts USING fts5(
-            path UNINDEXED, title, description, body
+        CREATE VIRTUAL TABLE IF NOT EXISTS documents_fts USING fts5(
+            path UNINDEXED, title, body, frontmatter_text
         );
         "#,
     )?;
@@ -138,7 +145,7 @@ pub(crate) fn schema_is_current(conn: &Connection) -> Result<bool, StoreError> {
         "SELECT source_path, raw_href, target_kind, target_path, fragment, resolved, is_edge \
          FROM links LIMIT 0",
         "SELECT document_path, code, severity, message, range_json FROM diagnostics LIMIT 0",
-        "SELECT path, title, description, body FROM files_fts LIMIT 0",
+        "SELECT path, title, body, frontmatter_text FROM documents_fts LIMIT 0",
     ];
     for sql in probes {
         if conn.prepare(sql).is_err() {
@@ -152,15 +159,17 @@ pub(crate) fn schema_is_current(conn: &Connection) -> Result<bool, StoreError> {
 pub(crate) fn drop_schema(conn: &Connection) -> Result<(), StoreError> {
     conn.execute_batch(
         r#"
-        DROP TABLE IF EXISTS files_fts;
+        DROP TABLE IF EXISTS documents_fts;
         DROP TABLE IF EXISTS diagnostics;
         DROP TABLE IF EXISTS links;
         DROP TABLE IF EXISTS other_files;
         DROP TABLE IF EXISTS metadata;
         DROP TABLE IF EXISTS documents;
         -- Legado de esquemas anteriores: se dropean para que una cache antigua reconstruida no
-        -- arrastre tablas huérfanas. `files`/`tags` son de v0.3 (store v1, E16); `commit_conformance`
-        -- de v0.2 (tabla git, retirada en E15-H01).
+        -- arrastre tablas huérfanas. `files_fts` es el FTS de v4 (renombrado a `documents_fts` en
+        -- E18-H03); `files`/`tags` son de v0.3 (store v1, E16); `commit_conformance` de v0.2 (tabla
+        -- git, retirada en E15-H01).
+        DROP TABLE IF EXISTS files_fts;
         DROP TABLE IF EXISTS files;
         DROP TABLE IF EXISTS tags;
         DROP TABLE IF EXISTS commit_conformance;
@@ -178,7 +187,7 @@ pub(crate) fn truncate_all(conn: &Connection) -> Result<(), StoreError> {
         DELETE FROM other_files;
         DELETE FROM links;
         DELETE FROM diagnostics;
-        DELETE FROM files_fts;
+        DELETE FROM documents_fts;
         "#,
     )?;
     Ok(())

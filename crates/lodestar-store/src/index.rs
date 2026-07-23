@@ -114,7 +114,7 @@ pub(crate) fn delete_file(tx: &Transaction, path: &RelPath) -> Result<(), StoreE
         "DELETE FROM diagnostics WHERE document_path = ?1",
         params![p],
     )?;
-    tx.execute("DELETE FROM files_fts WHERE path = ?1", params![p])?;
+    tx.execute("DELETE FROM documents_fts WHERE path = ?1", params![p])?;
     Ok(())
 }
 
@@ -165,36 +165,43 @@ pub(crate) fn upsert_file(
         ],
     )?;
 
-    // FTS5: `title` derivado + `description` (valor textual de esa clave, si la hay) + `body`. El
-    // rediseño sin campos privilegiados es E18-H03; aquí solo es un acelerador.
-    tx.execute(
-        "INSERT INTO files_fts (path, title, description, body) VALUES (?1,?2,?3,?4)",
-        params![
-            p,
-            title,
-            fm.as_ref()
-                .and_then(|f| f.get_text("description"))
-                .unwrap_or_default(),
-            parsed.body,
-        ],
-    )?;
-
     // Metadata genérica: una fila por propiedad direccionable del frontmatter (`walk`, E18-H01),
     // mapas intermedios incluidos y listas como hoja. `walk` ES la única verdad de acceso: la cache
     // nunca navega el `Value` por su cuenta (invariante #3).
+    //
+    // El mismo recorrido alimenta el FTS (E18-H03): los valores TEXTUALES de la metadata van a
+    // `frontmatter_text`. Son los escalares `string` —también las hojas string de un objeto, que
+    // `walk` aplana en filas `string` con su field path— y las `array`, cuya representación JSON
+    // conserva las cadenas que contienen (una lista no se desciende: `owners: [platform, security]`
+    // es una sola fila `array`, y sin su `value_json` la palabra «security» no sería indexable).
+    // Números y booleanos no aportan al texto libre (`§20.12`), así que se excluyen. Se recogen del
+    // mismo `walk` que puebla `metadata` para no volver a navegar el `Value`.
+    let mut fts_frontmatter: Vec<String> = Vec::new();
     if let Some(f) = fm.as_ref() {
         for (field_path, valor) in f.walk() {
+            let vtype = value_type(valor);
             let value_json = serde_json::to_string(
                 &serde_json::to_value(valor).unwrap_or(serde_json::Value::Null),
             )
             .unwrap_or_else(|_| "null".to_string());
+            if vtype == "string" || vtype == "array" {
+                fts_frontmatter.push(value_json.clone());
+            }
             tx.execute(
                 "INSERT INTO metadata (document_path, field_path, value_json, value_type) \
                  VALUES (?1,?2,?3,?4)",
-                params![p, field_path.to_string(), value_json, value_type(valor)],
+                params![p, field_path.to_string(), value_json, vtype],
             )?;
         }
     }
+
+    // FTS5 sin campos privilegiados (E18-H03, `§20.12`): `path` + título derivado + `body` +
+    // `frontmatter_text` (los valores textuales de la metadata, recogidos arriba). `description`
+    // deja de tener trato especial: es metadata como cualquier otra. Sigue siendo solo un acelerador.
+    tx.execute(
+        "INSERT INTO documents_fts (path, title, body, frontmatter_text) VALUES (?1,?2,?3,?4)",
+        params![p, title, parsed.body, fts_frontmatter.join(" ")],
+    )?;
 
     // Enlaces: TODOS los del cuerpo, en orden de aparición, con su clasificación (`§20.6`). A
     // diferencia del store v1 —que solo guardaba las aristas internas resueltas— aquí se materializa
