@@ -34,6 +34,13 @@
 //! `outgoingLinks` deja de ser una lista de paths (`Analysis::out`) y pasa a ser la lista de
 //! **enlaces resueltos**: es lo que necesita un agente para reescribir un destino sin volver a
 //! parsear el Markdown, y lo que `§20.12` guarda en la tabla `links` del store v2.
+//!
+//! ---
+//!
+//! **Añadido después de E17-H05** (cierre del hueco de cableado de `LinkTarget::WorkspaceFile`):
+//! `knowledge_get_clasifica_enlace_a_codigo`, al final del fichero. No es un criterio de E17-H05
+//! sino de `REFACTOR_PHASE_2 §Fase 7`; vive aquí porque su superficie es la misma
+//! (`knowledge_get` + `outgoingLinks[].target`) y reutiliza este arnés.
 
 use std::collections::BTreeSet;
 use std::io::{BufRead, BufReader, Write};
@@ -451,5 +458,117 @@ fn knowledge_get_enlaces() {
         de_referencia["link"]["kind"].as_str(),
         Some("reference"),
         "…y su forma sintáctica se conserva: {doc}"
+    );
+}
+
+// =============================================================================
+// Cableado de `WorkspaceFile` hasta la frontera (`§20.6`, `REFACTOR_PHASE_2 §Fase 7`)
+// =============================================================================
+
+/// **Dado** un workspace con un `README.md` que enlaza a un fichero de código que **existe** y a
+/// otro que **no**, **Cuando** un agente pide `knowledge_get` con `include: ["outgoingLinks"]`,
+/// **Entonces** el primero viaja por el wire como `{"kind":"workspaceFile", …}` y solo el segundo
+/// como `{"kind":"missing", …}`.
+///
+/// Es el mismo escenario que `lodestar-workspace/tests/enlaces.rs::enlace_a_codigo_llega_al_
+/// producto`, visto desde donde lo ve el agente. Los dos hacen falta: aquel localiza el hueco (el
+/// inventario que construye el descubrimiento), este comprueba que la clasificación **sale** por
+/// la frontera MCP con su forma de wire, que es la única superficie del motor headless.
+///
+/// `REFACTOR_PHASE_2 §Fase 7` lo pide literalmente: «Lodestar debe indicar que el archivo
+/// **existe**, pero no incorporarlo como nodo Markdown del grafo». Verificado sobre el binario
+/// antes de escribirlo: hoy el fichero que existe también sale `missing`.
+#[test]
+fn knowledge_get_clasifica_enlace_a_codigo() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "README.md",
+        "# Proyecto\n\nLa rotación la implementa el [servicio de tokens]\
+         (src/auth/token_service.rs), no el [servicio viejo](src/auth/no_existe.rs).\n",
+    );
+    // El fichero de código EXISTE. No es `.md`, así que no es nodo del grafo — pero está en disco.
+    write(
+        dir.path(),
+        "src/auth/token_service.rs",
+        "// Destino de un enlace WorkspaceFile.\npub struct TokenService;\n",
+    );
+
+    let resp = roundtrip(
+        dir.path(),
+        &[
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"knowledge_get","arguments":{"ref":{"path":"README.md"},"include":["outgoingLinks","diagnostics"]}}}"#,
+        ],
+        1,
+    );
+    let doc = &sc(&resp[0])["document"];
+    let salientes = doc["outgoingLinks"]
+        .as_array()
+        .unwrap_or_else(|| panic!("`outgoingLinks` debe ser un array de enlaces resueltos: {doc}"));
+
+    /// El destino clasificado del saliente con este href crudo (búsqueda por href, no por índice).
+    fn target_de<'a>(salientes: &'a [serde_json::Value], href: &str) -> &'a serde_json::Value {
+        &salientes
+            .iter()
+            .find(|l| l["href"] == href)
+            .unwrap_or_else(|| panic!("debe haber un saliente con href «{href}»: {salientes:?}"))
+            ["target"]
+    }
+
+    assert_eq!(
+        *target_de(salientes, "src/auth/token_service.rs"),
+        serde_json::json!({
+            "kind": "workspaceFile",
+            "value": "src/auth/token_service.rs"
+        }),
+        "el fichero de código EXISTE en disco: el agente tiene que ver `workspaceFile` —«existe, \
+         pero no es nodo del grafo»—, no `missing`. Si sale `missing`, la clasificación de \
+         E17-H02 no llega a la frontera: {doc}"
+    );
+    // No vacuo: la clasificación no es por extensión, es por el inventario.
+    assert_eq!(
+        *target_de(salientes, "src/auth/no_existe.rs"),
+        serde_json::json!({ "kind": "missing", "value": "src/auth/no_existe.rs" }),
+        "…mientras que el fichero de código que NO está en disco sigue siendo `missing`: {doc}"
+    );
+
+    // Consecuencia observable para el agente: el enlace vivo no genera ruido de destino perdido.
+    let perdidos: Vec<String> = doc["diagnostics"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .iter()
+        .filter(|c| c["code"] == "LINK-TARGET-MISSING")
+        .flat_map(|c| {
+            c["related"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+                .iter()
+                .map(|r| r.as_str().unwrap_or_default().to_string())
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    assert!(
+        !perdidos.contains(&"src/auth/token_service.rs".to_string()),
+        "un fichero del proyecto que está en disco no puede reportarse como destino perdido: {doc}"
+    );
+    assert!(
+        perdidos.contains(&"src/auth/no_existe.rs".to_string()),
+        "…pero el que no está sí, y con severidad warning (`missingWorkspaceFiles`): {doc}"
+    );
+
+    // Y no se cuela como nodo: el grafo del workspace es solo de documentos Markdown.
+    let grafo = roundtrip(
+        dir.path(),
+        &[
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"graph_query","arguments":{"operation":"neighborhood","ref":{"path":"README.md"},"depth":1}}}"#,
+        ],
+        1,
+    );
+    assert!(
+        !ids(&nodos(&grafo[0])).iter().any(|id| id.ends_with(".rs")),
+        "«existe» no es «es nodo»: un fichero de código nunca aparece en el grafo: {:?}",
+        grafo[0]
     );
 }

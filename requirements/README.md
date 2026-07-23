@@ -72,7 +72,7 @@ planes de **E12**; **E14** cierra. Ninguna historia del giro está **[BLOQUEADA]
 | **E17** — Enlaces y grafo universal | 3 + 4 | Parser de enlaces · `LinkTarget` · diagnósticos de enlace · `Analysis` nueva · superficie de grafo | [epica-17-enlaces-grafo.md](epica-17-enlaces-grafo.md) |
 | **E18** — Store v2 | 5 | DDL nuevo · metadata anidada · links genéricos · cold rebuild · paridad core/store | *(pendiente)* |
 | **E19** — Lenguaje de consulta | 6 | Parser · AST · type checking · namespaces · filtro JSON equivalente | *(pendiente)* |
-| **E20** — Inspección y validación genéricas | 7 + 8 | `metadata_inspect` (retira `core::schema`) · política `rejectNewErrors`/`allowExistingErrors` | *(pendiente)* |
+| **E20** — Inspección y validación genéricas | 7 + 8 | `metadata_inspect` (retira `core::schema`) · política `rejectNewErrors`/`allowExistingErrors` · **cablear los diagnósticos de descubrimiento** (ver abajo) | *(pendiente)* |
 | **E21** — Contrato MCP y transacciones genéricas | 9 + 10 | Contrato nuevo · 8 operaciones universales · selecciones masivas por consulta | *(pendiente)* |
 | **E22** — Migración y limpieza pública | 11 | `migrate-from-okf --dry-run` · docs · README · publicación incompatible | *(pendiente)* |
 
@@ -81,6 +81,16 @@ descubrimiento universal no hay nada que modelar); **E16** cambia el modelo docu
 diagnósticos; **E17** depende de E16 (los enlaces se extraen de documentos ya genéricos); **E18** y
 **E19** consumen el modelo y el grafo de E16/E17; **E20** retira `core::schema`; **E21** cierra la
 frontera; **E22** publica.
+
+**Hueco de cableado pendiente, con dueño (E20)**: `discovery::discover` computa los diagnósticos de
+`§20.9` —`DOC-NOT-UTF8`, `DOC-TOO-LARGE`, `SYMLINK-UNSUPPORTED`, `PATH-NOT-UTF8` y las colisiones de
+capitalización (`LINK-CASE-MISMATCH`)— de forma determinista, y su único llamador
+(`Workspace::discover_files`) **los descarta**. Ni `knowledge_check` ni `lodestar check` los ven: hoy
+la mitad del catálogo de `§20.9` es invisible. Está documentado como diferido en el propio
+`discover_files`, no es un descuido silencioso, pero es la misma forma de hueco que E15-H07 y el
+cableado de `other_files` de E17 (capacidad computada que no llega al producto). El call-site es el
+mismo que ya se toca, así que es barato — lo que falta es el criterio de **política de severidad**,
+que es precisamente lo que E20 aporta.
 
 **Nota sobre el prototipo**: desde `E15-H04` el prototipo JS (`prototype/index.html`) **deja de ser la
 spec de comportamiento** y el arnés diferencial se retira. La spec de la migración es

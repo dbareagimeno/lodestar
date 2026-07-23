@@ -1091,12 +1091,20 @@ pub enum LinkTarget {
 >    `Missing("guias")`, nunca `guias/index.md`. **El arreglo correcto es ampliar `LinkTarget`** con
 >    una variante propia para directorio/raíz — candidato a E20/E21.
 >
-> 2. **Un `.md` que existe en disco pero está EXCLUIDO del descubrimiento** (p. ej. `vendor/dep.md`
->    bajo un `.gitignore`) es **`WorkspaceFile`, no `Missing`**. Por eso la variante se define por
->    «no es un documento del inventario» y no por «no es `.md`»: decir `Missing` de un fichero que
->    está ahí sería mentir sobre el disco y produciría un `LINK-TARGET-MISSING` espurio sobre un
->    enlace que el usuario ve funcionar. Consecuencia para quien construye el `Inventory`: los `.md`
->    excluidos van en `other_files`, no en `documents`.
+> 2. **Un `.md` que existe en disco pero está EXCLUIDO del descubrimiento** es **`WorkspaceFile`, no
+>    `Missing`**. Por eso la variante se define por «no es un documento del inventario» y no por «no
+>    es `.md`»: decir `Missing` de un fichero que está ahí sería mentir sobre el disco y produciría
+>    un `LINK-TARGET-MISSING` espurio sobre un enlace que el usuario ve funcionar. Consecuencia para
+>    quien construye el `Inventory`: los `.md` excluidos van en `other_files`, no en `documents`.
+>
+>    **Límite conocido y aceptado** (E17, cableado de `other_files`): esto solo alcanza a los
+>    ficheros que el walker **visita**. Los que quedan **podados** —por `discovery.exclude`
+>    (`.git/**`, `.lodestar/**`) o por un `.gitignore`/`.lodestarignore` del árbol— nunca se
+>    visitan, así que un enlace a ellos sigue siendo `Missing`. Cubrirlo exigiría **dejar de podar
+>    directorios ignorados**, es decir recorrer `.git/` y `node_modules/` enteros en cada análisis:
+>    una regresión directa del descubrimiento de E15 a cambio de un caso marginal. Se acepta el
+>    coste. (El ejemplo que esta precisión usaba antes, `vendor/dep.md` bajo `.gitignore`, cae
+>    justo en el lado podado — por eso se ha retirado del texto.)
 
 **Prohibido**: buscar por basename o título, añadir `.md` automáticamente, resolver un directorio
 como `index.md`, tratar `README.md` como fallback, interpretar aliases o resolver ambigüedades por
