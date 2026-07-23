@@ -650,3 +650,862 @@ fn impacto_paridad_core() {
         "el nodo desconectado no debe estar en el blast-radius"
     );
 }
+
+// ===========================================================================
+// E18 — Store v2 (`ARCHITECTURE.md §20.12`, `REFACTOR_PHASE_2 §Fase 9`)
+// ===========================================================================
+//
+// Las tablas del store son INTERNAS (el store es su dueño único, la historia no abre frontera
+// MCP), así que estos tests las consultan por SQL con una segunda conexión, igual que ya hacen
+// `cache_v2_se_reconstruye` y `esquema_viejo_con_misma_version_se_reconstruye`. No se añade API
+// pública para observarlas: el DDL es el sujeto del test.
+//
+// DECISIONES DE CRITERIO PROPIO que estos tests fijan (la historia deja la forma exacta abierta):
+//
+//   1. `value_type` es un **catálogo cerrado de 6**: `string|number|boolean|null|array|object`.
+//      Son los tipos que `§20.8` prohíbe coercionar entre sí («sin coerción implícita entre
+//      string/número, string/booleano, escalar/lista, lista/objeto»), así que son exactamente los
+//      que E19 necesita para decidir que `priority >= "high"` es un error de tipo y los que E20
+//      necesita para comunicar heterogeneidad en `inferredTypes`.
+//
+//   2. **Una lista es UNA fila**, con el array entero en `value_json` — no una fila por elemento.
+//      Razón: `FieldPath` no direcciona posiciones (`§20.8` es dot-notation sobre mapas), así que
+//      `owners.0` sería un path que `ParsedFrontmatter::get` NO resuelve; materializarlo obligaría
+//      a un segundo navegador del `Value` que no es la única verdad de acceso (invariante #3), que
+//      es justo lo que la historia prohíbe. Y no hace falta: `owners contains "security"` (E19) y
+//      el recuento de valores frecuentes (E20) operan sobre el valor de la lista, que está entero
+//      en `value_json`. Es el mismo reparto que ya practica `synth.rs` — SQL sirve las filas, el
+//      core dictamina.
+//
+//   3. **Los mapas intermedios SÍ tienen fila** (`service` además de `service.name`): son
+//      propiedades direccionables por `get`, y `has(service)` (E19) y el catálogo de propiedades
+//      (E20) las necesitan. La regla queda entonces en una sola frase, verificable:
+//      **hay exactamente una fila por propiedad direccionable por `ParsedFrontmatter::get`**
+//      (equivalentemente: por cada par de `ParsedFrontmatter::walk`, ver
+//      `crates/lodestar-core/tests/documento.rs`).
+//
+//   4. `target_kind` es el **discriminante serde de `LinkTarget`** (`document`, `workspaceFile`,
+//      `externalUri`, `selfAnchor`, `missing`, `escapesWorkspace`): la etiqueta que el propio enum
+//      ya define para el wire (`#[serde(tag = "kind", …, rename_all = "camelCase")]`). No se
+//      inventa un vocabulario paralelo de la cache — la columna es la proyección a texto de la
+//      clasificación del core, y los tests lo comprueban **derivándola del enum**, no copiándola.
+
+/// Conexión de solo lectura a la cache de `root` (las tablas son internas: se consultan por SQL).
+fn conexion(root: &Path) -> rusqlite::Connection {
+    rusqlite::Connection::open(root.join(".lodestar").join("index.db")).unwrap()
+}
+
+/// Los 6 valores admitidos de `metadata.value_type` (decisión 1 de la cabecera).
+const TIPOS_VALIDOS: [&str; 6] = ["string", "number", "boolean", "null", "array", "object"];
+
+/// Una fila de la tabla `metadata` del store v2 (`§20.12`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FilaMetadata {
+    field_path: String,
+    value_json: String,
+    value_type: String,
+}
+
+impl FilaMetadata {
+    /// El `value_json` ya parseado (se compara el VALOR, no el texto: el orden de las claves de un
+    /// objeto serializado no es parte del contrato).
+    fn valor(&self) -> serde_json::Value {
+        serde_json::from_str(&self.value_json).unwrap_or_else(|e| {
+            panic!(
+                "`value_json` de `{}` no es JSON válido ({e}): {:?}",
+                self.field_path, self.value_json
+            )
+        })
+    }
+}
+
+/// Filas de `metadata` de un documento, ordenadas por `field_path`.
+fn filas_metadata(root: &Path, doc: &str) -> Vec<FilaMetadata> {
+    let conn = conexion(root);
+    let mut stmt = conn
+        .prepare(
+            "SELECT field_path, value_json, value_type FROM metadata \
+             WHERE document_path = ?1 ORDER BY field_path",
+        )
+        .expect(
+            "el store v2 debe materializar la tabla `metadata(document_path, field_path, \
+             value_json, value_type)` (`§20.12`, E18-H01)",
+        );
+    let filas = stmt
+        .query_map([doc], |r| {
+            Ok(FilaMetadata {
+                field_path: r.get(0)?,
+                value_json: r.get(1)?,
+                value_type: r.get(2)?,
+            })
+        })
+        .unwrap();
+    filas.map(|f| f.unwrap()).collect()
+}
+
+/// La fila de un `field_path` concreto (falla con un mensaje útil si no está).
+fn fila_de<'a>(filas: &'a [FilaMetadata], field_path: &str) -> &'a FilaMetadata {
+    filas
+        .iter()
+        .find(|f| f.field_path == field_path)
+        .unwrap_or_else(|| {
+            panic!(
+                "falta la fila `{field_path}`; hay: {:?}",
+                filas.iter().map(|f| &f.field_path).collect::<Vec<_>>()
+            )
+        })
+}
+
+/// El valor YAML de `v` convertido a JSON, que es la forma canónica con la que se compara
+/// `value_json` (parseado, no como texto).
+fn a_json(v: &serde_yaml::Value) -> serde_json::Value {
+    serde_json::to_value(v).expect("el frontmatter de estos tests es representable en JSON")
+}
+
+/// **Cruce con la única verdad de acceso (invariante #3)**: cada fila de `metadata` debe ser
+/// exactamente lo que `ParsedFrontmatter::get` devuelve para ese `field_path`, y el conjunto de
+/// filas debe cubrir **todas** las propiedades direccionables — ni una de más (paths inventados
+/// que `get` no resuelve) ni una de menos.
+///
+/// Es la aserción que impide que el store acabe con un segundo navegador del `Value` en SQL, que
+/// es lo que la historia prohíbe explícitamente.
+fn assert_metadata_coincide_con_el_core(raw: &str, filas: &[FilaMetadata]) {
+    let parsed = lodestar_core::model::parse_file("x.md", raw);
+    let fm = parsed
+        .frontmatter
+        .expect("el documento de este test tiene frontmatter");
+
+    for fila in filas {
+        let path = lodestar_core::types::FieldPath::parse(&fila.field_path)
+            .unwrap_or_else(|e| panic!("`{}` no es un FieldPath válido: {e:?}", fila.field_path));
+        let valor = fm.get(&path).unwrap_or_else(|| {
+            panic!(
+                "la cache materializó `{}`, pero `ParsedFrontmatter::get` no lo resuelve: el \
+                 recorrido sería un segundo navegador del `Value` (invariante #3)",
+                fila.field_path
+            )
+        });
+        assert_eq!(
+            fila.valor(),
+            a_json(valor),
+            "el `value_json` de `{}` no es el valor que devuelve el core",
+            fila.field_path
+        );
+        assert!(
+            TIPOS_VALIDOS.contains(&fila.value_type.as_str()),
+            "`value_type` fuera del catálogo cerrado {TIPOS_VALIDOS:?}: {:?}",
+            fila.value_type
+        );
+    }
+}
+
+// --- E18-H01: DDL v2 (`documents` y `metadata`) ------------------------------
+
+/// `metadata_indexa_paths_anidados` — **Dado** un documento con `service: {name: auth, tier:
+/// critical}`, **Cuando** se indexa, **Entonces** hay filas `service.name` y `service.tier` con su
+/// valor y su tipo.
+///
+/// Además del criterio, fija la regla completa del recorrido (decisión 3): el mapa intermedio
+/// `service` **también** tiene fila, y no hay ninguna otra — el conjunto de filas es exactamente
+/// el de propiedades direccionables por `ParsedFrontmatter::get`.
+///
+/// Fase ROJA: la tabla `metadata` no existe (hoy el frontmatter se materializa entero como texto
+/// en `files.frontmatter_json`, sin indexar por field path).
+#[test]
+fn metadata_indexa_paths_anidados() {
+    let dir = tempfile::tempdir().unwrap();
+    let raw = "---\nservice:\n  name: auth\n  tier: critical\n---\n\n# Servicio de auth\n";
+    std::fs::write(dir.path().join("svc.md"), raw).unwrap();
+
+    let store = Store::open_and_build(dir.path()).unwrap();
+    assert!(
+        store.documents().unwrap().contains(&rp("svc.md")),
+        "guarda anti-vacuidad: el documento está indexado"
+    );
+
+    let filas = filas_metadata(dir.path(), "svc.md");
+
+    // (1) El criterio: las dos propiedades anidadas, con su valor y su tipo.
+    assert_eq!(
+        fila_de(&filas, "service.name").valor(),
+        serde_json::json!("auth")
+    );
+    assert_eq!(fila_de(&filas, "service.name").value_type, "string");
+    assert_eq!(
+        fila_de(&filas, "service.tier").valor(),
+        serde_json::json!("critical")
+    );
+    assert_eq!(fila_de(&filas, "service.tier").value_type, "string");
+
+    // (2) El mapa intermedio es una propiedad direccionable y tiene fila propia, con el objeto
+    //     entero (lo necesitan `has(service)` de E19 y el catálogo de propiedades de E20).
+    assert_eq!(
+        fila_de(&filas, "service").valor(),
+        serde_json::json!({"name": "auth", "tier": "critical"})
+    );
+    assert_eq!(fila_de(&filas, "service").value_type, "object");
+
+    // (3) Y NADA más: el recorrido no inventa paths (ni `service.name.x`, ni la raíz).
+    let paths: Vec<&str> = filas.iter().map(|f| f.field_path.as_str()).collect();
+    assert_eq!(paths, vec!["service", "service.name", "service.tier"]);
+
+    // (4) Cruce con la única verdad de acceso.
+    assert_metadata_coincide_con_el_core(raw, &filas);
+}
+
+/// `metadata_conserva_el_tipo` — **Dado** un documento con `priority: 2` y otro con
+/// `priority: "alta"`, **Cuando** se indexan, **Entonces** las dos filas conservan tipos distintos
+/// (`number` y `string`).
+///
+/// Extiende el criterio al **catálogo cerrado de 6** (decisión 1 de la cabecera): sin `boolean`,
+/// `null`, `array` y `object` distinguibles, E19 no puede rechazar `priority >= "high"` como error
+/// de tipo ni E20 comunicar la heterogeneidad de una propiedad.
+///
+/// Fase ROJA: no hay tabla `metadata` (hoy el tipo solo sobrevive dentro del JSON del frontmatter
+/// completo, no como columna consultable).
+#[test]
+fn metadata_conserva_el_tipo() {
+    let dir = tempfile::tempdir().unwrap();
+    let raw_a = "---\npriority: 2\n---\n\n# A\n";
+    let raw_b = "---\npriority: \"alta\"\n---\n\n# B\n";
+    let raw_c = "---\nactivo: true\nvacio: null\nowners: [platform]\nservice:\n  tier: critical\n---\n\n# C\n";
+    std::fs::write(dir.path().join("a.md"), raw_a).unwrap();
+    std::fs::write(dir.path().join("b.md"), raw_b).unwrap();
+    std::fs::write(dir.path().join("c.md"), raw_c).unwrap();
+
+    let store = Store::open_and_build(dir.path()).unwrap();
+    assert_eq!(
+        store.documents().unwrap().len(),
+        3,
+        "guarda anti-vacuidad: los tres documentos están indexados"
+    );
+
+    // (1) El criterio: la MISMA propiedad con dos tipos distintos en dos documentos.
+    let a = filas_metadata(dir.path(), "a.md");
+    let b = filas_metadata(dir.path(), "b.md");
+    assert_eq!(fila_de(&a, "priority").value_type, "number");
+    assert_eq!(fila_de(&a, "priority").valor(), serde_json::json!(2));
+    assert_eq!(fila_de(&b, "priority").value_type, "string");
+    assert_eq!(fila_de(&b, "priority").valor(), serde_json::json!("alta"));
+    assert_ne!(
+        fila_de(&a, "priority").value_type,
+        fila_de(&b, "priority").value_type,
+        "sin tipos distintos, `priority: 2` y `priority: \"alta\"` serían el mismo dato y la \
+         comparación sin coerción de `§20.8` no podría existir"
+    );
+
+    // (2) El resto del catálogo cerrado, cada uno con su valor JSON.
+    let c = filas_metadata(dir.path(), "c.md");
+    assert_eq!(fila_de(&c, "activo").value_type, "boolean");
+    assert_eq!(fila_de(&c, "activo").valor(), serde_json::json!(true));
+    // Una clave presente con valor `null` NO es una clave ausente (`§20.4`): tiene fila, con tipo
+    // propio.
+    assert_eq!(fila_de(&c, "vacio").value_type, "null");
+    assert_eq!(fila_de(&c, "vacio").valor(), serde_json::Value::Null);
+    assert_eq!(fila_de(&c, "owners").value_type, "array");
+    assert_eq!(fila_de(&c, "service").value_type, "object");
+    assert_eq!(fila_de(&c, "service.tier").value_type, "string");
+
+    // (3) El catálogo es CERRADO: ninguna fila de la cache usa un tipo fuera de los seis.
+    let conn = conexion(dir.path());
+    let mut stmt = conn
+        .prepare("SELECT DISTINCT value_type FROM metadata ORDER BY value_type")
+        .expect("la tabla `metadata` debe existir");
+    let tipos: Vec<String> = stmt
+        .query_map([], |r| r.get::<_, String>(0))
+        .unwrap()
+        .map(|t| t.unwrap())
+        .collect();
+    for t in &tipos {
+        assert!(
+            TIPOS_VALIDOS.contains(&t.as_str()),
+            "`value_type` fuera del catálogo cerrado {TIPOS_VALIDOS:?}: {t:?}"
+        );
+    }
+    let mut esperados = TIPOS_VALIDOS.map(String::from);
+    esperados.sort();
+    assert_eq!(
+        tipos,
+        esperados.to_vec(),
+        "el fixture cubre los seis tipos del catálogo cerrado; tipos observados: {tipos:?}"
+    );
+
+    assert_metadata_coincide_con_el_core(raw_c, &c);
+}
+
+/// `metadata_roundtrip_json` — **Dado** un documento con listas y objetos anidados en listas,
+/// **Cuando** se indexa, **Entonces** el `value_json` permite reconstruir el valor original.
+///
+/// «Reconstruir» se juzga en serio: con las filas de **primer nivel** se rearma el frontmatter
+/// entero y se compara con el que devuelve el core. Eso es lo que fija la decisión 2 (una lista es
+/// una fila, con el array entero): si la cache aplanara `contacts` en filas por elemento, la
+/// reconstrucción perdería la forma y este test lo vería.
+///
+/// Fase ROJA: no hay tabla `metadata`.
+#[test]
+fn metadata_roundtrip_json() {
+    let dir = tempfile::tempdir().unwrap();
+    let raw = concat!(
+        "---\n",
+        "owners: [platform, security]\n",
+        "contacts:\n",
+        "  - nombre: Ana\n",
+        "    rol: sre\n",
+        "  - nombre: Bea\n",
+        "matriz:\n",
+        "  - [1, 2]\n",
+        "  - [3]\n",
+        "service:\n",
+        "  name: auth\n",
+        "  equipos:\n",
+        "    - core\n",
+        "---\n",
+        "\n",
+        "# Documento con listas\n",
+    );
+    std::fs::write(dir.path().join("listas.md"), raw).unwrap();
+    let store = Store::open_and_build(dir.path()).unwrap();
+    assert!(store.documents().unwrap().contains(&rp("listas.md")));
+
+    let filas = filas_metadata(dir.path(), "listas.md");
+
+    // (1) La lista de mapas viaja ENTERA y con su forma: es el caso que tienta a aplanar.
+    assert_eq!(fila_de(&filas, "contacts").value_type, "array");
+    assert_eq!(
+        fila_de(&filas, "contacts").valor(),
+        serde_json::json!([{"nombre": "Ana", "rol": "sre"}, {"nombre": "Bea"}]),
+        "el objeto anidado dentro de la lista debe poder reconstruirse desde `value_json`"
+    );
+    // Listas de listas incluidas.
+    assert_eq!(
+        fila_de(&filas, "matriz").valor(),
+        serde_json::json!([[1, 2], [3]])
+    );
+    // Una lista colgando de un mapa sigue siendo una hoja, con su propio field path.
+    assert_eq!(
+        fila_de(&filas, "service.equipos").valor(),
+        serde_json::json!(["core"])
+    );
+
+    // (2) No hay filas POR DENTRO de una lista (`contacts.0.nombre` no es direccionable).
+    for f in &filas {
+        assert!(
+            !f.field_path.starts_with("contacts.")
+                && !f.field_path.starts_with("owners.")
+                && !f.field_path.starts_with("matriz.")
+                && !f.field_path.starts_with("service.equipos."),
+            "`{}` desciende por dentro de una lista: `FieldPath` no direcciona posiciones",
+            f.field_path
+        );
+    }
+
+    // (3) ROUND-TRIP de verdad: con las filas de primer nivel se rearma el frontmatter entero.
+    let mut reconstruido = serde_json::Map::new();
+    for f in &filas {
+        if !f.field_path.contains('.') {
+            reconstruido.insert(f.field_path.clone(), f.valor());
+        }
+    }
+    let esperado = a_json(
+        &lodestar_core::model::parse_file("listas.md", raw)
+            .frontmatter
+            .expect("tiene frontmatter")
+            .value,
+    );
+    assert_eq!(
+        serde_json::Value::Object(reconstruido),
+        esperado,
+        "las filas de `metadata` deben permitir reconstruir el frontmatter original"
+    );
+
+    // (4) Y cada fila sigue siendo lo que dice el core.
+    assert_metadata_coincide_con_el_core(raw, &filas);
+}
+
+/// `PRAGMA user_version` que estampó **v0.3** (la versión de E16-H02: sin `files.kind` ni
+/// `links.src_is_index`, todavía con la tabla `tags` y con las columnas OKF promovidas).
+///
+/// Dato **histórico**, como `USER_VERSION_V02`: el test lo usa para fabricar una cache antigua y
+/// nunca asevera contra el número nuevo (que lee de disco), así que sobrevive a cualquier bump.
+const USER_VERSION_V03: i64 = 3;
+
+/// DDL exacto que escribía v0.3 (`schema.rs` antes de E18-H01).
+const DDL_V03: &str = r#"
+    CREATE TABLE files (
+        path TEXT PRIMARY KEY, type TEXT, title TEXT, description TEXT, status TEXT,
+        resource TEXT, frontmatter_json TEXT NOT NULL DEFAULT '{}',
+        body TEXT NOT NULL DEFAULT '', raw TEXT NOT NULL DEFAULT '', hash BLOB NOT NULL,
+        mtime INTEGER NOT NULL DEFAULT 0, size INTEGER NOT NULL DEFAULT 0
+    );
+    CREATE TABLE links (src TEXT NOT NULL, dst TEXT NOT NULL, href TEXT NOT NULL);
+    CREATE TABLE tags (path TEXT NOT NULL, tag TEXT NOT NULL);
+    CREATE TABLE diagnostics (
+        path TEXT NOT NULL, code TEXT NOT NULL, level TEXT NOT NULL, msg TEXT NOT NULL,
+        targets_json TEXT NOT NULL DEFAULT '[]'
+    );
+    CREATE VIRTUAL TABLE files_fts USING fts5(path UNINDEXED, title, description, body);
+"#;
+
+/// `cache_v3_se_reconstruye` — **Dado** una cache de v0.3 con el DDL viejo, **Cuando** se abre,
+/// **Entonces** se detecta antigua y se reconstruye.
+///
+/// **Sin acoplarse al número de versión nuevo** (igual que `cache_v2_se_reconstruye`): estampa la
+/// versión histórica de v0.3 y asevera que, tras abrir, la cache quedó estampada con una
+/// **distinta**. Cualquier bump futuro lo mantiene verde.
+///
+/// Verifica además el **criterio de salida de la épica** sobre el esquema nuevo: ni columnas OKF
+/// promovidas ni tabla `tags`, y `documents` con la forma de `§20.12` — incluido que `title` es el
+/// **título derivado** (`§20.4`), no el campo `title` del usuario.
+///
+/// Fase ROJA: hoy `USER_VERSION == 3 == USER_VERSION_V03` y `schema_is_current` acepta el DDL de
+/// v0.3 tal cual (es el vigente), así que no se detecta antigua; y la cache nueva sigue trayendo
+/// `tags` y `files` con las columnas OKF.
+#[test]
+fn cache_v3_se_reconstruye() {
+    // (1) Un proyecto con un `.md` SIN `title:` en el frontmatter (su título derivado sale del H1)
+    //     y una cache fabricada a mano con el esquema y la versión de v0.3.
+    let dir = tempfile::tempdir().unwrap();
+    let raw = "---\ntipo: nota\n---\n\n# Título del H1\n\nCuerpo.\n";
+    std::fs::write(dir.path().join("a.md"), raw).unwrap();
+    let db_dir = dir.path().join(".lodestar");
+    std::fs::create_dir_all(&db_dir).unwrap();
+    {
+        let conn = rusqlite::Connection::open(db_dir.join("index.db")).unwrap();
+        conn.execute_batch(DDL_V03).unwrap();
+        // Una fila de la tabla OKF `tags`, para que la cache de v0.3 sea genuina.
+        conn.execute("INSERT INTO tags (path, tag) VALUES ('a.md', 'nota')", [])
+            .unwrap();
+        conn.pragma_update(None, "user_version", USER_VERSION_V03)
+            .unwrap();
+    }
+    assert_eq!(
+        user_version_de(dir.path()),
+        USER_VERSION_V03,
+        "guarda anti-vacuidad: la cache de partida está estampada con la versión de v0.3"
+    );
+
+    // (2) Abrir con el código nuevo: sin error y sirviendo el contenido actual de los `.md`.
+    let store =
+        Store::open_and_build(dir.path()).expect("una cache v0.3 no puede romper la apertura");
+    assert!(
+        store.documents().unwrap().contains(&rp("a.md")),
+        "tras la reconstrucción, la cache debe servir el contenido actual de los `.md`"
+    );
+
+    // (3) Se detectó como antigua: quedó estampada con una versión DISTINTA de la de v0.3.
+    assert_ne!(
+        user_version_de(dir.path()),
+        USER_VERSION_V03,
+        "la cache de v0.3 debe detectarse antigua (bump de `USER_VERSION`) y reconstruirse"
+    );
+
+    // (4) El esquema nuevo tiene la forma de `§20.12`…
+    let conn = conexion(dir.path());
+    assert!(
+        conn.prepare(
+            "SELECT path, title, body, raw, frontmatter_json, content_hash FROM documents LIMIT 0"
+        )
+        .is_ok(),
+        "el DDL v2 debe crear `documents(path, title, body, raw, frontmatter_json, content_hash)`"
+    );
+    // …y NINGUNA columna promovida de OKF ni la tabla `tags` (criterio de salida de la épica: el
+    // frontmatter es metadata arbitraria, `tags` es una propiedad como cualquier otra).
+    for columna in ["type", "status", "description", "resource"] {
+        assert!(
+            conn.prepare(&format!("SELECT {columna} FROM documents LIMIT 0"))
+                .is_err(),
+            "`documents` no debe promover el campo OKF `{columna}` a columna"
+        );
+    }
+    assert!(
+        conn.prepare("SELECT tag FROM tags LIMIT 0").is_err(),
+        "la tabla `tags` era el índice del campo OKF `tags`: se retira (ahora es metadata)"
+    );
+
+    // (5) `title` es el TÍTULO DERIVADO (`§20.4`), no el campo del usuario: este documento no
+    //     tiene `title:` en el frontmatter y aun así la columna trae el H1.
+    let title: String = conn
+        .query_row("SELECT title FROM documents WHERE path = 'a.md'", [], |r| {
+            r.get(0)
+        })
+        .expect("`documents` debe tener la fila del documento indexado");
+    let parsed = lodestar_core::model::parse_file("a.md", raw);
+    let derivado =
+        lodestar_core::model::derived_title(parsed.frontmatter.as_ref(), &parsed.body, &rp("a.md"));
+    assert_eq!(
+        title, derivado,
+        "`documents.title` debe ser el título derivado del core, no el campo `title` del usuario"
+    );
+    assert_eq!(title, "Título del H1");
+}
+
+// --- E18-H02: `links` y `diagnostics` genéricos ------------------------------
+
+/// Una fila de la tabla `links` del store v2 (`§20.12`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FilaEnlace {
+    raw_href: String,
+    target_kind: String,
+    target_path: Option<String>,
+    fragment: Option<String>,
+    resolved: i64,
+}
+
+/// Filas de `links` de un documento origen, ordenadas por `raw_href`.
+fn filas_enlaces(root: &Path, source: &str) -> Vec<FilaEnlace> {
+    let conn = conexion(root);
+    let mut stmt = conn
+        .prepare(
+            "SELECT raw_href, target_kind, target_path, fragment, resolved FROM links \
+             WHERE source_path = ?1 ORDER BY raw_href",
+        )
+        .expect(
+            "el store v2 debe materializar `links(source_path, raw_href, target_kind, \
+             target_path, fragment, resolved)` (`§20.12`, E18-H02)",
+        );
+    let filas = stmt
+        .query_map([source], |r| {
+            Ok(FilaEnlace {
+                raw_href: r.get(0)?,
+                target_kind: r.get(1)?,
+                target_path: r.get(2)?,
+                fragment: r.get(3)?,
+                resolved: r.get(4)?,
+            })
+        })
+        .unwrap();
+    filas.map(|f| f.unwrap()).collect()
+}
+
+/// El discriminante serde de un [`lodestar_core::types::LinkTarget`] — la etiqueta `kind` que el
+/// enum ya define para el wire. Es la fuente de la que sale `links.target_kind`: la cache proyecta
+/// la clasificación del core, no inventa un vocabulario propio.
+fn kind_de(target: &lodestar_core::types::LinkTarget) -> String {
+    serde_json::to_value(target).unwrap()["kind"]
+        .as_str()
+        .expect("`LinkTarget` va etiquetado con `kind`")
+        .to_string()
+}
+
+/// Documento con un enlace de **cada** clase de `LinkTarget` (`§20.6`), más los ficheros a los que
+/// apuntan. Devuelve el `FileMap` de documentos; el fichero de proyecto se escribe aparte.
+fn ws_seis_clases() -> FileMap {
+    let mut files = FileMap::new();
+    files.insert(
+        rp("raiz.md"),
+        concat!(
+            "# Raíz\n",
+            "\n",
+            "Documento: [d](docs/auth.md).\n",
+            "Fichero del proyecto: [c](src/auth/token_service.rs).\n",
+            "Externo: [e](https://example.com/x).\n",
+            "Anchor propio: [s](#raiz).\n",
+            "Inexistente: [m](no-existe.md).\n",
+            "Escape: [x](../../../etc/passwd).\n",
+        )
+        .into(),
+    );
+    files.insert(
+        rp("docs/auth.md"),
+        "# Auth\n\n## La sección\n\nContenido.\n".into(),
+    );
+    files
+}
+
+/// `links_materializa_las_5_clases` — **Dado** un documento con enlaces de los 5 tipos, **Cuando**
+/// se indexa, **Entonces** cada uno tiene su `target_kind` y los externos/anchors conservan su
+/// `raw_href`.
+///
+/// Cubre las **seis** variantes de `LinkTarget` (`§20.6` define 6: la historia dice «5 tipos»
+/// contando las clases del fixture heredado; cubrirlas todas es un superconjunto estricto).
+///
+/// **Cierra la asimetría declarada al cerrar E17** (`IMPLEMENTATION_STATUS`, aviso 2): hoy la
+/// cache resuelve con `Inventory::default()`, así que TODO destino interno sale `Missing` y el
+/// fichero de proyecto ni siquiera se materializa. Con `target_kind` en la tabla eso deja de ser
+/// invisible: `document` vs `missing` vs `workspaceFile` son tres filas distintas y el store
+/// necesita el inventario real (documentos **y** `other_files`) para escribirlas. Se juzga aquí y
+/// no en H04 porque sin inventario el criterio «cada uno tiene su `target_kind`» es inalcanzable:
+/// no hay 5 clases que materializar, hay 2.
+///
+/// Fase ROJA: la tabla `links` no tiene esas columnas (hoy es `(src, dst, href)`) y solo guarda
+/// aristas internas.
+#[test]
+fn links_materializa_las_5_clases() {
+    let dir = tempfile::tempdir().unwrap();
+    let files = ws_seis_clases();
+    write_all(dir.path(), &files);
+    // Fichero del proyecto que NO es documento: el destino de un enlace `workspaceFile`.
+    std::fs::create_dir_all(dir.path().join("src/auth")).unwrap();
+    std::fs::write(
+        dir.path().join("src/auth/token_service.rs"),
+        "// Destino de un enlace WorkspaceFile.\n",
+    )
+    .unwrap();
+
+    let store = Store::open_and_build(dir.path()).unwrap();
+    assert_eq!(
+        sorted(store.documents().unwrap()),
+        vec![rp("docs/auth.md"), rp("raiz.md")],
+        "guarda anti-vacuidad: el `.rs` no es documento, los dos `.md` sí"
+    );
+
+    let filas = filas_enlaces(dir.path(), "raiz.md");
+
+    // (1) Las seis clases, con su `target_kind`, su `target_path` y el `raw_href` intacto (los
+    //     externos y los anchors NO tienen path: la columna es NULL, no una cadena vacía).
+    let observado: Vec<(&str, &str, Option<&str>)> = filas
+        .iter()
+        .map(|f| {
+            (
+                f.raw_href.as_str(),
+                f.target_kind.as_str(),
+                f.target_path.as_deref(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        observado,
+        vec![
+            ("#raiz", "selfAnchor", None),
+            ("../../../etc/passwd", "escapesWorkspace", None),
+            ("docs/auth.md", "document", Some("docs/auth.md")),
+            ("https://example.com/x", "externalUri", None),
+            ("no-existe.md", "missing", Some("no-existe.md")),
+            (
+                "src/auth/token_service.rs",
+                "workspaceFile",
+                Some("src/auth/token_service.rs")
+            ),
+        ],
+        "cada enlace debe materializarse con su clasificación y su href original"
+    );
+
+    // (2) El vocabulario de `target_kind` NO es de la cache: es el discriminante serde del
+    //     `LinkTarget` que computa el core con el MISMO inventario (documentos + other_files).
+    let ds = DocumentSet::with_other_files(files, [rp("src/auth/token_service.rs")]);
+    let salientes = ds
+        .analyze()
+        .outgoing
+        .get(&rp("raiz.md"))
+        .expect("`raiz.md` tiene salientes")
+        .clone();
+    assert_eq!(
+        salientes.len(),
+        filas.len(),
+        "la cache debe materializar TODOS los enlaces del documento, no solo las aristas del grafo"
+    );
+    for link in &salientes {
+        let fila = filas
+            .iter()
+            .find(|f| f.raw_href == link.href)
+            .unwrap_or_else(|| panic!("falta la fila del enlace `{}`", link.href));
+        assert_eq!(
+            fila.target_kind,
+            kind_de(&link.target),
+            "`target_kind` de `{}` debe ser el discriminante del `LinkTarget` del core",
+            link.href
+        );
+    }
+
+    // (3) `resolved` en los dos casos en los que la palabra no admite lectura: un destino que
+    //     existe está resuelto; un destino que no existe, no. (El resto de clases queda abierto:
+    //     no lo fija ningún criterio de la historia.)
+    let resolved_de = |href: &str| {
+        filas
+            .iter()
+            .find(|f| f.raw_href == href)
+            .unwrap_or_else(|| panic!("falta la fila de `{href}`"))
+            .resolved
+    };
+    assert_eq!(
+        resolved_de("docs/auth.md"),
+        1,
+        "un enlace a un documento que existe está resuelto"
+    );
+    assert_eq!(
+        resolved_de("no-existe.md"),
+        0,
+        "un enlace a un destino inexistente NO está resuelto"
+    );
+}
+
+/// `links_separa_el_fragmento` — **Dado** un enlace con fragmento, **Cuando** se indexa,
+/// **Entonces** `fragment` está poblado y `target_path` no lo incluye.
+///
+/// Fase ROJA: la tabla `links` no tiene columnas `fragment`/`target_path`.
+#[test]
+fn links_separa_el_fragmento() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut files = FileMap::new();
+    files.insert(
+        rp("raiz.md"),
+        concat!(
+            "# Raíz\n",
+            "\n",
+            "A una sección de otro documento: [f](docs/auth.md#la-seccion).\n",
+            "A una sección propia: [s](#raiz).\n",
+        )
+        .into(),
+    );
+    files.insert(
+        rp("docs/auth.md"),
+        "# Auth\n\n## La sección\n\nContenido.\n".into(),
+    );
+    write_all(dir.path(), &files);
+    let store = Store::open_and_build(dir.path()).unwrap();
+    assert!(store.documents().unwrap().contains(&rp("raiz.md")));
+
+    let filas = filas_enlaces(dir.path(), "raiz.md");
+
+    // (1) El criterio: el fragmento va en su columna y el destino no lo arrastra…
+    let con_fragmento = filas
+        .iter()
+        .find(|f| f.raw_href == "docs/auth.md#la-seccion")
+        .unwrap_or_else(|| panic!("falta la fila del enlace con fragmento; hay: {filas:?}"));
+    assert_eq!(con_fragmento.fragment.as_deref(), Some("la-seccion"));
+    assert_eq!(
+        con_fragmento.target_path.as_deref(),
+        Some("docs/auth.md"),
+        "`target_path` es el destino normalizado SIN el fragmento"
+    );
+    // …y el `raw_href` sigue siendo el href original, byte a byte (lo necesita `move_document`).
+    assert_eq!(con_fragmento.raw_href, "docs/auth.md#la-seccion");
+    assert_eq!(
+        con_fragmento.target_kind, "document",
+        "el fragmento no cambia la clasificación del destino"
+    );
+
+    // (2) Un anchor propio es fragmento puro: sin `target_path`.
+    let anchor = filas
+        .iter()
+        .find(|f| f.raw_href == "#raiz")
+        .unwrap_or_else(|| panic!("falta la fila del anchor propio; hay: {filas:?}"));
+    assert_eq!(anchor.fragment.as_deref(), Some("raiz"));
+    assert_eq!(anchor.target_path, None);
+    assert_eq!(anchor.target_kind, "selfAnchor");
+
+    // (3) Ningún destino materializado lleva almohadilla: el fragmento vive SOLO en su columna.
+    for f in &filas {
+        assert!(
+            !f.target_path.as_deref().unwrap_or("").contains('#'),
+            "`target_path` no puede incluir el fragmento: {f:?}"
+        );
+    }
+}
+
+/// Una fila de la tabla `diagnostics` del store v2 (`§20.12`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FilaDiag {
+    code: String,
+    severity: String,
+    message: String,
+    range_json: Option<String>,
+}
+
+/// Filas de `diagnostics` de un documento, ordenadas por `code`.
+fn filas_diagnostics(root: &Path, doc: &str) -> Vec<FilaDiag> {
+    let conn = conexion(root);
+    let mut stmt = conn
+        .prepare(
+            "SELECT code, severity, message, range_json FROM diagnostics \
+             WHERE document_path = ?1 ORDER BY code",
+        )
+        .expect(
+            "el store v2 debe materializar `diagnostics(document_path, code, severity, message, \
+             range_json)` (`§20.12`, E18-H02)",
+        );
+    let filas = stmt
+        .query_map([doc], |r| {
+            Ok(FilaDiag {
+                code: r.get(0)?,
+                severity: r.get(1)?,
+                message: r.get(2)?,
+                range_json: r.get(3)?,
+            })
+        })
+        .unwrap();
+    filas.map(|f| f.unwrap()).collect()
+}
+
+/// `diagnostics_conserva_el_rango` — **Dado** un `FM-YAML-INVALID`, **Cuando** se indexa,
+/// **Entonces** su `range_json` sobrevive al round-trip.
+///
+/// El round-trip se juzga contra el `Check` del **core** (autoridad): el `Range` deserializado de
+/// la columna debe ser el mismo objeto que el core produce, no un texto parecido. Y un
+/// diagnóstico **sin** rango deja la columna a `NULL`, que es lo que distingue «no se conoce la
+/// posición» de «la posición es la línea 0».
+///
+/// Fase ROJA: la tabla `diagnostics` no tiene `range_json` (ni las columnas renombradas
+/// `document_path`/`severity`/`message`), así que el rango que el core ya calcula desde E16-H05 se
+/// pierde al materializar.
+#[test]
+fn diagnostics_conserva_el_rango() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut files = FileMap::new();
+    // YAML sintácticamente inválido (una lista sin cerrar) → `FM-YAML-INVALID` con rango.
+    files.insert(
+        rp("malo.md"),
+        "---\ntitulo: [sin cerrar\notro: 1\n---\n\n# Cuerpo\n".into(),
+    );
+    // Marcadores de merge → `DOC-CONFLICT-MARKER`, que NO lleva rango.
+    files.insert(
+        rp("conflicto.md"),
+        "# Conflicto\n\n<<<<<<< HEAD\nmío\n=======\ntuyo\n>>>>>>> otra\n".into(),
+    );
+    write_all(dir.path(), &files);
+    let store = Store::open_and_build(dir.path()).unwrap();
+    assert_eq!(store.documents().unwrap().len(), 2);
+
+    // El veredicto de referencia es el del core (una sola verdad computada).
+    let ds = DocumentSet::from_files(files.clone());
+    let esperado = ds
+        .analyze()
+        .diagnostics
+        .get(&rp("malo.md"))
+        .and_then(|cs| cs.first().cloned())
+        .expect("el core debe diagnosticar el frontmatter inválido");
+    assert_eq!(esperado.code.as_str(), "FM-YAML-INVALID");
+    let rango_core = esperado
+        .range
+        .expect("`FM-YAML-INVALID` trae rango desde E16-H05");
+
+    let filas = filas_diagnostics(dir.path(), "malo.md");
+    assert_eq!(filas.len(), 1, "un solo diagnóstico local: {filas:?}");
+    let fila = &filas[0];
+    assert_eq!(fila.code, "FM-YAML-INVALID");
+    assert_eq!(
+        fila.severity,
+        serde_json::to_value(esperado.level)
+            .unwrap()
+            .as_str()
+            .unwrap(),
+        "`severity` es el valor de wire del `Severity` del core"
+    );
+    assert_eq!(
+        fila.message, esperado.msg,
+        "`message` es el mensaje del core"
+    );
+
+    // (1) El criterio: el rango sobrevive al round-trip por la columna.
+    let texto = fila
+        .range_json
+        .as_deref()
+        .expect("`range_json` debe estar poblado para `FM-YAML-INVALID`");
+    let rango: lodestar_core::types::Range = serde_json::from_str(texto)
+        .unwrap_or_else(|e| panic!("`range_json` no deserializa a `Range` ({e}): {texto:?}"));
+    assert_eq!(
+        rango, rango_core,
+        "el rango materializado debe ser el que calcula el core"
+    );
+    // Guarda anti-vacuidad: el rango señala las líneas del bloque de frontmatter, no un 0..0.
+    assert_eq!((rango.start_line, rango.end_line), (2, 3));
+
+    // (2) Un diagnóstico sin rango deja la columna a NULL (ausencia, no un rango falso).
+    let sin_rango = filas_diagnostics(dir.path(), "conflicto.md");
+    assert_eq!(sin_rango.len(), 1, "{sin_rango:?}");
+    assert_eq!(sin_rango[0].code, "DOC-CONFLICT-MARKER");
+    assert_eq!(
+        sin_rango[0].range_json, None,
+        "sin rango conocido, `range_json` es NULL"
+    );
+}

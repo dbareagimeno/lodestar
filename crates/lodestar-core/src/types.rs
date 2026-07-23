@@ -558,6 +558,32 @@ impl ParsedFrontmatter {
         self.get_key(key).is_some()
     }
 
+    /// Recorrido **recursivo** de toda la metadata direccionable: pares `(FieldPath, &Value)` en
+    /// profundidad, **orden de aparición** y padre antes que hijos (`service`, `service.name`,
+    /// `service.tier`).
+    ///
+    /// Es la pieza que el store v2 necesita para materializar la tabla `metadata` (`§20.12`,
+    /// E18-H01) **sin escribir un segundo navegador del `Value`** (invariante #3), y la que
+    /// heredan el evaluador de consultas (E19) y `metadata_inspect` (E20).
+    ///
+    /// **Invariante rector**: para todo par `(path, value)` devuelto,
+    /// `self.get(&path) == Some(value)`. De él se siguen las cuatro reglas del recorrido:
+    ///
+    /// - Se **desciende solo por mapas** (igual que [`Self::get`]), y los mapas intermedios se
+    ///   emiten **también** como par propio: `service` además de `service.name`/`service.tier`.
+    /// - Una **lista es una hoja**: [`FieldPath`] no direcciona posiciones, así que emitir
+    ///   `owners.0` inventaría paths que [`Self::get`] no resuelve. El valor entero —con los mapas
+    ///   que contenga— viaja en el par de la propia lista.
+    /// - Una clave **no escalar** (una lista o un mapa como clave, legales en YAML) no es
+    ///   direccionable: ni ella ni su subárbol se emiten.
+    /// - Si dos claves del mismo mapa **rinden al mismo texto** (`1:` y `"1":`), se emite solo la
+    ///   primera: es la que resuelve [`Self::get`].
+    ///
+    /// La raíz no se emite: [`FieldPath`] es no vacío por construcción.
+    pub fn walk(&self) -> Vec<(FieldPath, &serde_yaml::Value)> {
+        todo!("E18-H01 (fase roja): recorrido recursivo de la metadata direccionable")
+    }
+
     /// Pares clave→valor de primer nivel, en **orden de aparición**. Las claves se rinden a texto
     /// (las no escalares se omiten: no son direccionables por [`FieldPath`]).
     pub fn entries(&self) -> Vec<(String, &serde_yaml::Value)> {

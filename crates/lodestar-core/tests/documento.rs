@@ -2172,3 +2172,134 @@ fn aislado_y_headings_no_diagnostican() {
         a.isolated
     );
 }
+
+// ---------------------------------------------------------------------------
+// E18-H01 — El recorrido recursivo de la metadata (la pieza que heredan E19/E20)
+// ---------------------------------------------------------------------------
+//
+// UBICACIÓN Y RAZÓN DE SER: los cuatro criterios de E18-H01 son del store
+// (`crates/lodestar-store/tests/store.rs`), pero la historia exige que el recorrido que puebla la
+// tabla `metadata` **reutilice `FieldPath`/`ParsedFrontmatter::get` del core**, «nunca un segundo
+// navegador del `Value` en SQL» (invariante #3). Hoy el core no expone ese recorrido: `entries()`
+// solo da el primer nivel. Este test fija la firma que falta —y que van a heredar el evaluador de
+// consultas (E19) y `metadata_inspect` (E20)— junto al resto de la spec de `ParsedFrontmatter`:
+//
+// ```ignore
+// impl ParsedFrontmatter {
+//     /// Pares (FieldPath, &Value) en profundidad y orden de aparición, padre antes que hijos.
+//     pub fn walk(&self) -> Vec<(FieldPath, &serde_yaml::Value)>;
+// }
+// ```
+//
+// El invariante rector es uno solo: **para todo par devuelto, `get(path) == Some(value)`**. Es lo
+// que impide que la cache materialice paths que la única verdad de acceso no sabe resolver.
+
+/// Frontmatter de referencia del recorrido: mapas anidados a dos niveles, una lista de escalares,
+/// una lista de mapas (el caso que tienta a inventar `contacts.0.nombre`) y una lista colgando de
+/// un mapa.
+const FM_ANIDADO: &str = concat!(
+    "---\n",
+    "service:\n",
+    "  name: auth\n",
+    "  tier: critical\n",
+    "priority: 2\n",
+    "owners: [platform, security]\n",
+    "contacts:\n",
+    "  - nombre: Ana\n",
+    "    rol: sre\n",
+    "  - nombre: Bea\n",
+    "release:\n",
+    "  target:\n",
+    "    date: \"2026-07-23\"\n",
+    "---\n",
+    "\n",
+    "# Servicio\n",
+);
+
+/// **Dado** un frontmatter con mapas anidados y listas, **Cuando** se recorre con `walk()`,
+/// **Entonces** aparece un par por cada propiedad direccionable por `get` —mapas intermedios
+/// incluidos—, en orden de aparición y con el padre antes que sus hijos, y **ninguno** por dentro
+/// de una lista.
+///
+/// Fase ROJA: `ParsedFrontmatter::walk` no existe (se añade como stub `todo!()` para que el resto
+/// del target siga compilando), así que el test entra en pánico en el `todo!()`.
+#[test]
+fn walk_recorre_la_metadata_direccionable() {
+    let parsed = model::parse_file("servicio.md", FM_ANIDADO);
+    let pf = parsed
+        .frontmatter
+        .expect("el documento de referencia tiene frontmatter");
+
+    let pares = pf.walk();
+    let paths: Vec<String> = pares.iter().map(|(p, _)| p.to_string()).collect();
+
+    // (1) Cobertura y ORDEN: profundidad, aparición, padre antes que hijos. Los mapas intermedios
+    //     (`service`, `release`, `release.target`) son propiedades direccionables y tienen par
+    //     propio: `has(service)` (E19) y el catálogo de propiedades (E20) los necesitan.
+    assert_eq!(
+        paths,
+        vec![
+            "service",
+            "service.name",
+            "service.tier",
+            "priority",
+            "owners",
+            "contacts",
+            "release",
+            "release.target",
+            "release.target.date",
+        ],
+        "`walk()` debe recorrer en profundidad y en orden de aparición, emitiendo también los \
+         mapas intermedios"
+    );
+
+    // (2) INVARIANTE RECTOR: cada par es exactamente lo que devuelve la única verdad de acceso.
+    //     Si esto se cumple, la tabla `metadata` del store no puede inventar paths.
+    for (path, valor) in &pares {
+        assert_eq!(
+            pf.get(path),
+            Some(*valor),
+            "`walk()` emitió `{path}`, pero `get(\"{path}\")` no devuelve ese mismo valor: el \
+             recorrido sería un segundo navegador del `Value` (invariante #3)"
+        );
+    }
+
+    // (3) Las LISTAS son hojas: `FieldPath` no direcciona posiciones, así que `owners.0` o
+    //     `contacts.0.nombre` serían paths que `get` no resuelve.
+    for path in &paths {
+        assert!(
+            !path.starts_with("owners.") && !path.starts_with("contacts."),
+            "`{path}` desciende por dentro de una lista: `FieldPath` no direcciona posiciones"
+        );
+    }
+
+    // (4) …y el valor de la lista viaja ENTERO en su propio par (con los mapas que contenga),
+    //     que es lo que `owners contains "security"` (E19) y el recuento de valores (E20) usan.
+    let (_, contacts) = pares
+        .iter()
+        .find(|(p, _)| p == &fp("contacts"))
+        .expect("`contacts` debe tener su par");
+    let elementos = contacts
+        .as_sequence()
+        .expect("`contacts` es una lista y su par la lleva entera");
+    assert_eq!(elementos.len(), 2, "la lista no se trunca: {contacts:?}");
+    assert_eq!(
+        elementos[0]
+            .as_mapping()
+            .and_then(|m| m.iter().find(|(k, _)| k.as_str() == Some("rol")))
+            .and_then(|(_, v)| v.as_str()),
+        Some("sre"),
+        "los mapas de dentro de la lista se conservan tal cual en el valor de la lista"
+    );
+
+    // (5) Y el tipo YAML real sobrevive al recorrido (no hay coerción: `2` sigue siendo número).
+    let (_, priority) = pares
+        .iter()
+        .find(|(p, _)| p == &fp("priority"))
+        .expect("`priority` debe tener su par");
+    assert_eq!(
+        priority.as_i64(),
+        Some(2),
+        "`walk()` no coerciona: `priority` sigue siendo el número 2, no \"2\" ({priority:?})"
+    );
+}
