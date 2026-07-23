@@ -753,3 +753,35 @@ superficie de producto; git queda como crate dormido) y `DECISIONES.md §0`. Des
   datos reales hasta que E17 traiga `LINK-CASE-MISMATCH` y E20 la política de severidades; (2) la
   pareja `Conformant → Valid` de `§20.3` está a medias — ver `DECISIONES.md §12`… perdón, **§13**;
   (3) `core::types` sigue documentando el `.d.ts` generado por ts-rs, falso desde que se retiró la UI.
+
+### E17 — Enlaces y grafo universal
+
+- ✅ **E17-H01/H02** — **Extracción y resolución de enlaces**. Entra `pulldown-cmark` en el core
+  (puro: arrastra solo `bitflags`/`memchr`/`unicase`). El `href` se deriva del **span**, no del
+  `dest_url` del parser, así que `body[span] == href` es cierto por construcción y el destino llega
+  crudo — lo que necesita `move_document` para reescribir el byte exacto. En un enlace de
+  **referencia** el span cae dentro de la **definición**.
+  - **Hallazgo que evita inventar enlaces**: se activan `ENABLE_TASKLISTS` y `ENABLE_FOOTNOTES`
+    porque sin ellas el `[x]` de `- [x] hecho` es sintácticamente un enlace corto, y con un `[x]: …`
+    en el documento se convierte en una arista del grafo que nadie escribió.
+  - **Bug real corregido**: la contención cuenta **profundidad**, no recorta. `model::normalize`
+    colapsaba `..` con `pop()` sobre vector vacío (no-op silencioso), así que `docs/auth.md` +
+    `../../docs/auth.md` —que sale del workspace y vuelve a entrar— resolvía a un `Document`
+    válido. El percent-decoding va **después** de interpretar `.`/`..` (RFC 3986).
+- ✅ **E17-H03/H04/H05** — **Diagnósticos, `Analysis` nueva y superficie**. Muere el parser
+  heredado (`LINK_RE`, `resolve_link`, `out_links*`, `raw_rel_links`) con sus 12+ consumidores
+  migrados. `Analysis` pasa a los seis campos de `§20.7`, con `hard_fail`/`warn_count` como
+  **métodos derivados** (un contador que no puede desincronizarse de su lista). `LinkReference` y
+  `DanglingLink` **anidan** el `ResolvedLink`, así que `incoming` es literalmente la inversa de
+  `outgoing`. El store materializa las **aristas** pero **sintetiza** los diagnósticos de enlace,
+  porque dependen del inventario entero (crear un fichero repara el enlace de otro).
+  **315 tests · E17 COMPLETA.**
+  - **Cambio de comportamiento**: un enlace a un documento inexistente es ahora `Err`, así que
+    `create_document` con la política por defecto **rechaza** crear un documento con un enlace
+    «hacia el futuro» (consecuencia de `danglingDocumentLinks: error`, `§20.9`).
+  - **Coste conocido**: un enlace a la **raíz** del workspace da `LINK-ESCAPES-WORKSPACE`, porque un
+    destino que normaliza a la raíz no es nombrable como `RelPath`. El arreglo correcto es ampliar
+    `LinkTarget`, no parchear el diagnóstico → E20/E21.
+  - **Deuda de test**: la guarda de `diagnosticos.rs:208` nombra `LinkStub`/`LinkRel`, las variantes
+    que la historia manda borrar. Se conservan **declaradas y sin productor**; retirarlas es una
+    línea cuando se retire esa guarda.
