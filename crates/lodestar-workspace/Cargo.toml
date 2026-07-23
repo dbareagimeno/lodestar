@@ -38,6 +38,9 @@ test-failpoints = []
 workspace = true
 
 [dev-dependencies]
+# Workspaces de prueba compartidos (E15-H05): `arbitrary`, `with_edge_cases`, `materialize` y
+# `materialize_disk_only`, consumidos por `tests/discovery.rs` (E15-H07).
+lodestar-fixtures = { workspace = true }
 tempfile = "3"
 serde_yaml = { workspace = true }
 # Solo para fabricar a mano una cache con esquema viejo en el test de regresión e2e.

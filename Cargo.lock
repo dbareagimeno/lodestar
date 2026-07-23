@@ -569,6 +569,7 @@ dependencies = [
  "crossbeam-channel",
  "ignore",
  "lodestar-core",
+ "lodestar-fixtures",
  "lodestar-store",
  "rusqlite",
  "schemars",

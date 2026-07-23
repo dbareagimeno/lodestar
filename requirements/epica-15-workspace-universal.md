@@ -222,6 +222,9 @@ y la suite en verde.
   - Añadir a `CheckCode` los códigos nuevos de descubrimiento. Los `OKF-*` conviven hasta E16.
   - El inventario es completo y **determinista**: mismo árbol ⇒ mismo orden (lo garantiza `FileMap`
     = `BTreeMap<RelPath, _>`).
+  - **Cablear el módulo**: sustituir las **7 llamadas** a `io::load_bundle` (`lib.rs:100,196`,
+    `transaction.rs:123`, `staging.rs:102`, `recovery.rs:473`, `publish.rs:56,102`) por
+    `discovery::discover`. Sin esto el descubrimiento nuevo no llega al producto.
 - **Fuera de alcance**: reaccionar a cambios en vivo (el watcher de `lodestar-store` ya existe;
   su reconfiguración a la política nueva es parte de E18).
 - **Criterios de aceptación**:
@@ -241,8 +244,17 @@ y la suite en verde.
     case-insensitive, **Entonces** se emite un diagnóstico de portabilidad → `colision_capitalizacion`.
   - **Dado** un `.md` con espacios en el path, **Cuando** se descubre, **Entonces** entra en el
     inventario con su ruta exacta → `paths_con_espacios`.
+  - **[Añadido tras la fase roja]** **Dado** un workspace con documentos a tres niveles y un
+    `.gitignore` que excluye `vendor/`, **Cuando** se abre con `Workspace::bundle()`, **Entonces**
+    el bundle contiene los documentos profundos y **no** contiene `vendor/dep.md` →
+    `bundle_usa_la_politica_de_descubrimiento`. Sin este criterio, el módulo podía nacer sin
+    cablear y pasar los 7 tests anteriores: el descubrimiento no llegaría al producto.
+  - **[Añadido tras la fase roja]** `PATH-NOT-UTF8` no tiene escenario de disco portable (imposible
+    en Windows y en APFS). Se cubre con un **test unitario de la función pura de conversión de
+    path**, no con un fixture → `path_no_utf8_diagnostica`.
 - **Dependencias**: E15-H05 (fixtures), E15-H06 (raíz).
-- **Pruebas**: `crates/lodestar-workspace/tests/discovery.rs` (fichero nuevo), con los 7 nombres.
+- **Pruebas**: `crates/lodestar-workspace/tests/discovery.rs` (fichero nuevo), con los 7 nombres
+  más los 2 añadidos tras la fase roja.
 - **Frontera (mcp.yml)**: no (cambia `CheckCode`, que sí está en el contrato → `/contrato --check`).
 
 ### E15-H08 — Configuración opcional del workspace
