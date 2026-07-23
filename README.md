@@ -117,7 +117,8 @@ construir, esa rama; este repo es un motor headless (CLI + MCP).
 
 ### Servidor MCP (agentes)
 ```bash
-cargo run -p lodestar-mcp -- <ruta-al-bundle>   # JSON-RPC por stdio, 10 tools (sin git desde E9-H01)
+cargo run -p lodestar-mcp                      # JSON-RPC por stdio, 10 tools; la raíz es el cwd
+cargo run -p lodestar-mcp -- --root <dir>      # …o el directorio que se le indique (E15-H06)
 ```
 
 ## Estructura del repo

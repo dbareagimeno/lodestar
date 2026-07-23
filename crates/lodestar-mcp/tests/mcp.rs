@@ -20,6 +20,7 @@ fn write(dir: &std::path::Path, rel: &str, content: &str) {
 /// Arranca el servidor sobre un bundle, envía `lines` y devuelve las primeras `expect` respuestas.
 fn roundtrip(dir: &std::path::Path, lines: &[&str], expect: usize) -> Vec<serde_json::Value> {
     let mut child = Command::new(env!("CARGO_BIN_EXE_lodestar-mcp"))
+        .arg("--root")
         .arg(dir)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -228,6 +229,7 @@ fn roundtrip_profile(
     expect: usize,
 ) -> Vec<serde_json::Value> {
     let mut child = Command::new(env!("CARGO_BIN_EXE_lodestar-mcp"))
+        .arg("--root")
         .arg(dir)
         .arg("--profile")
         .arg(profile)
@@ -328,19 +330,10 @@ fn status_capabilities_readonly() {
     );
 }
 
-/// Un directorio que no es un bundle → exit 3 (no un servidor "feliz" sobre la nada).
-#[test]
-fn directorio_no_bundle_sale_con_3() {
-    let dir = tempfile::tempdir().unwrap();
-    let status = Command::new(env!("CARGO_BIN_EXE_lodestar-mcp"))
-        .arg(dir.path())
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .unwrap();
-    assert_eq!(status.code(), Some(3));
-}
+// NOTA E15-H06: el test `directorio_no_bundle_sale_con_3` se BORRÓ. Afirmaba que un directorio
+// sin `index.md`/`.lodestar/` aborta con exit 3 — exactamente el gate que esta historia elimina
+// (`ARCHITECTURE.md §20.1`: «cd my-project && lodestar-mcp funciona»). Su contrario es hoy
+// `arranca_en_directorio_arbitrario`.
 
 // ---------------------------------------------------------------------------
 // E10-H09 — Tool `knowledge_search` (sustituye `query`).

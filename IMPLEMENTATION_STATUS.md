@@ -20,7 +20,7 @@
 cargo test --workspace          # ~113 tests (incl. 6 diferenciales JS-vs-Rust; core, store, cli, vcs, workspace, mcp)
 cargo run -p lodestar-cli -- check --path <bundle>     # la puerta de CI (exit 0/1)
 cargo run -p lodestar-cli -- log | last-conforming | branch | switch | merge | hooks
-cargo run -p lodestar-mcp -- <bundle>                  # servidor MCP por stdio
+cargo run -p lodestar-mcp [-- --root <dir>]            # servidor MCP por stdio (raíz = cwd)
 ```
 (La app de escritorio —`frontend/` + `src-tauri/`, binario `lodestar-desktop`— se retiró de `main`
 a la rama `experimental/ui-desktop`; ya no se construye ni se ejecuta desde este repo headless.)
@@ -619,7 +619,21 @@ superficie de producto; git queda como crate dormido) y `DECISIONES.md §0`. Des
     que se validó); `RELEASING.md` publicando `lodestar-vcs` y omitiendo `lodestar-app`.
   - *Hueco preexistente, no regresión*: `reindex` no tiene ningún test que lo ejecute, y ahora es la
     mitad de la superficie de la CLI. Pendiente.
-- 🟡 **E15-H06** (raíz = `cwd`) — fase roja commiteada: `arranca_en_directorio_arbitrario`,
-  `root_explicito_gana`, `cli_no_asciende` (rojos) + `rechaza_absoluta`, `rechaza_escape` (guardas
-  que elevan la validación de `RelPath` a contrato de la frontera, con cebo real fuera de la raíz
-  para que no pasen en falso).
+- ✅ **E15-H06** — **La raíz del workspace es el `cwd`**. El MCP pierde el gate que abortaba con
+  exit 3 si no había `index.md`/`.lodestar/`: cualquier directorio es un workspace. `parse_args`
+  pasa a `[--root <dir>] [--profile …]` — **el argumento posicional se retira** (v0.3 es
+  incompatible; un argumento no reconocido sale con exit 2 y `USAGE`, en vez de arrancar en silencio
+  sobre el cwd equivocado). La raíz se **canonicaliza una sola vez al arrancar** y no cambia en toda
+  la sesión (`§20.5`). En la CLI, `resolve_root` deja de ascender por los ancestros. Contrato:
+  `meta.arranque` reescrito y `meta.paths` **nuevo** en `contracts/mcp.yml` (absolutas y `..` se
+  rechazan vía `RelPath` con `isError` en el result, nunca error de protocolo, y sin tocar disco).
+  Arnés migrado (`.arg(dir)` → `.arg("--root").arg(dir)`) en los 3 helpers que cubren ~82
+  invocaciones, sin tocar ninguna aserción. Tests: `arranca_en_directorio_arbitrario`,
+  `root_explicito_gana`, `cli_no_asciende` + las guardas `rechaza_absoluta`/`rechaza_escape` (con
+  cebo real fuera de la raíz, en lectura y en escritura). Borrado el obsoleto
+  `directorio_no_bundle_sale_con_3`, que era la negación literal de la historia. **232 tests**.
+  - **Verificado a mano**: `cd` a un proyecto de 7 `.md` repartidos en `docs/`, `packages/*/docs/`,
+    `knowledge/roadmap/` y la raíz, **sin** `index.md`, `.lodestar/` ni frontmatter → el servidor
+    arranca, `workspace_status` reporta los 7, y `graph_query` resuelve el enlace raíz →
+    `packages/api/docs/endpoints.md` y el de vuelta `../../../README.md` **en el mismo grafo**. Es
+    el `§Resultado esperado` de `docs/REFACTOR_PHASE_2.md`.

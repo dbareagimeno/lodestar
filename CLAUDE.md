@@ -89,7 +89,8 @@ cargo doc --workspace --no-deps --locked   # con RUSTDOCFLAGS="-D warnings"
 
 ### MCP
 ```bash
-cargo run -p lodestar-mcp -- <bundle>   # servidor MCP JSON-RPC por stdio (10 tools, sin git; stdout puro)
+cargo run -p lodestar-mcp                 # la raíz del workspace es el cwd (E15-H06); stdout puro
+cargo run -p lodestar-mcp -- --root <dir> # …o el directorio indicado. No hay argumento posicional.
 ```
 La app de escritorio (Tauri v2 + Svelte 5) se **retiró de `main`** con el giro headless y vive en la
 rama `experimental/ui-desktop`; sus comandos de desarrollo (`npm run dev`, `cargo run -p

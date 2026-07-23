@@ -47,7 +47,7 @@ meta:
   fachada: lodestar-mcp (JSON-RPC por stdio; stdout puro, logs a stderr)
   fuente_registro: crates/lodestar-mcp/src/tools.rs:27    # tools::list()
   fuente_despacho: crates/lodestar-mcp/src/tools.rs:134   # tools::call()
-  fuente_bucle: crates/lodestar-mcp/src/main.rs:101       # handle()
+  fuente_bucle: crates/lodestar-mcp/src/main.rs:166       # handle()
   protocolo:
     metodos: [initialize, ping, "tools/list", "tools/call"]
     protocol_versions_aceptadas: ["2024-11-05", "2025-03-26", "2025-06-18"]
@@ -57,7 +57,7 @@ meta:
       graph_query/impact_analyze → change_plan → change_apply → knowledge_check → change_revert
       (main.rs SERVER_INSTRUCTIONS, E14-H03).
   perfiles:
-    # `lodestar-mcp <bundle> [--profile readonly|standard]`, `standard` por defecto
+    # `lodestar-mcp [--root <dir>] [--profile readonly|standard]`, `standard` por defecto
     # (main.rs parse_args; lodestar_app::Profile). El perfil NO viaja por el wire: el cliente solo
     # ve su efecto. Fuente única del efecto = `Profile::writes_enabled()` (standard ⇒ true) +
     # `tools::is_change_tool` (E14-H03).
@@ -68,10 +68,10 @@ meta:
     standard: >-
       Superficie completa (tools de lectura + las 3 de cambio). `capabilities.writes` == true.
   errores_protocolo:
-    - "-32700 Parse error (JSON imparseable), id null (main.rs:86)"
-    - "-32600 Invalid Request (no es objeto / batch no soportado) (main.rs:107)"
-    - "-32601 método no soportado (main.rs:158)"
-    - "-32602 tool desconocida (tools/call con nombre no registrado) (main.rs:140)"
+    - "-32700 Parse error (JSON imparseable), id null (main.rs:151)"
+    - "-32600 Invalid Request (no es objeto / batch no soportado) (main.rs:172)"
+    - "-32601 método no soportado (main.rs:227)"
+    - "-32602 tool desconocida (tools/call con nombre no registrado) (main.rs:209)"
   errores_ejecucion: >-
     Un error de ejecución de tool NO viaja como error JSON-RPC: va en el result como
     { content:[{type:text,text:msg}], isError:true } para que el modelo lo vea y corrija.
@@ -79,7 +79,21 @@ meta:
     E10 mapean el error a un texto que lleva el código estable de `ErrorCode::as_str()`
     (p. ej. «CONCEPT_NOT_FOUND»/«INVALID_SCHEMA»), NUNCA el `Debug` de la variante Rust
     (`tools.rs`, casos `knowledge_get`/`schema_inspect`/`knowledge_check`).
-  arranque: "Exige index.md o .lodestar/ en el root, si no exit 3 (main.rs:55)."
+  arranque: >-
+    `lodestar-mcp [--root <dir>] [--profile readonly|standard]` (main.rs parse_args, E15-H06,
+    `ARCHITECTURE.md §20.5`). Sin `--root` la raíz es `std::env::current_dir()`. NO hay argumento
+    posicional (v0.3 es incompatible con v0.2: el bundle posicional se retiró sin alias) y NO se
+    exige `index.md` ni `.lodestar/` — cualquier directorio es un workspace válido («cd my-project
+    && lodestar-mcp funciona», §20.1). La raíz se canonicaliza UNA vez al arrancar y queda fija
+    toda la sesión. Exit codes de arranque: 2 uso (`--root` sin valor, `--profile` inválido,
+    argumento no reconocido) · 3 raíz irresoluble o workspace no abrible.
+  paths: >-
+    Todo `path` de argumentos de tool es RELATIVO a la raíz y pasa por `RelPath::new`
+    (`lodestar-core/src/types.rs`), el único chokepoint: las rutas ABSOLUTAS y las que contienen
+    `..` se rechazan como error de EJECUCIÓN de la tool (`isError: true` en el result, mensaje
+    legible; nunca error de protocolo) y no tocan disco — ni en el camino de lectura
+    (`knowledge_get`) ni en el de escritura (`change_plan`). Tests: `rechaza_absoluta`,
+    `rechaza_escape` (E15-H06).
 
 tools:
   # -------------------------------------------------------------------------

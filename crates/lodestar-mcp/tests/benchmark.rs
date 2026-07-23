@@ -69,6 +69,7 @@ fn write(dir: &std::path::Path, rel: &str, content: &str) {
 /// `expect` respuestas JSON-RPC. stdout debe ser JSON-RPC puro.
 fn roundtrip(dir: &std::path::Path, lines: &[String], expect: usize) -> Vec<Value> {
     let mut child = Command::new(env!("CARGO_BIN_EXE_lodestar-mcp"))
+        .arg("--root")
         .arg(dir)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

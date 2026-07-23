@@ -18,7 +18,7 @@ mod sarif;
 #[derive(Parser)]
 #[command(name = "lodestar", version, about)]
 struct Cli {
-    /// Raíz del bundle (por defecto: el directorio actual o el ancestro con `index.md`/`.lodestar`).
+    /// Raíz del workspace (por defecto: el directorio actual; nunca se asciende a los ancestros).
     #[arg(long, global = true)]
     path: Option<PathBuf>,
     #[command(subcommand)]
@@ -42,21 +42,16 @@ enum Command {
     Reindex,
 }
 
-/// Resuelve el root del bundle: `--path`, o sube desde el cwd buscando `index.md`/`.lodestar`.
+/// Resuelve la raíz del workspace: `--path` si se da, si no el **cwd tal cual**
+/// (`ARCHITECTURE.md §20.5`, E15-H06).
+///
+/// **No asciende por los ancestros**: el ascenso buscando `index.md`/`.lodestar` desaparece con la
+/// unidad «bundle» — la raíz es el directorio donde se invoca, y lo que se juzga es ese directorio,
+/// nunca un proyecto que lo contenga.
 fn resolve_root(explicit: Option<&Path>) -> PathBuf {
-    if let Some(p) = explicit {
-        return p.to_path_buf();
-    }
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let mut cur = cwd.as_path();
-    loop {
-        if cur.join("index.md").is_file() || cur.join(".lodestar").is_dir() {
-            return cur.to_path_buf();
-        }
-        match cur.parent() {
-            Some(p) => cur = p,
-            None => return cwd,
-        }
+    match explicit {
+        Some(p) => p.to_path_buf(),
+        None => std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
     }
 }
 
