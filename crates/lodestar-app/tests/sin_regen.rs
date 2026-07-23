@@ -2,13 +2,13 @@
 //!
 //! E13-H11 metió la auto-regeneración de los generados dentro de la transacción de publicación
 //! (`crates/lodestar-workspace/src/transaction.rs::augment_with_regenerated`). E15 borra los
-//! generadores (`core::generate`, `Bundle::gen_index`/`gen_tag_indexes`) porque «ningún fichero
+//! generadores (`core::generate`, `DocumentSet::gen_index`/`gen_tag_indexes`) porque «ningún fichero
 //! tiene semántica de catálogo» — así que la transacción debe publicar **exactamente** lo que pide
 //! el change set y nada más: un `index.md` del proyecto es un documento más, propiedad del usuario,
 //! que Lodestar no reescribe por su cuenta.
 //!
 //! Este fichero **sustituye** a `regen.rs` (que fija el comportamiento contrario y lo retira el
-//! implementador). Deliberadamente **no** usa `Bundle::gen_index`/`gen_tag_indexes` para montar el
+//! implementador). Deliberadamente **no** usa `DocumentSet::gen_index`/`gen_tag_indexes` para montar el
 //! estado de partida: esas funciones desaparecen en E15-H02 y el test debe seguir compilando.
 //!
 //! ## Fase ROJA (documentada)

@@ -1,4 +1,4 @@
-//! El agregado [`Bundle`] (`ARCHITECTURE.md §4.2`): construcción desde un `FileMap`,
+//! El agregado [`DocumentSet`] (`ARCHITECTURE.md §4.2`): construcción desde un `FileMap`,
 //! `analyze()` cacheado y la superficie de lectura/escritura semántica.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -6,25 +6,25 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::conform::{self, ConformCtx};
 use crate::model::{self, Parsed};
 use crate::types::{
-    Analysis, Backlinks, Check, ConceptSummary, Direction, FrontmatterPatch, GraphModel, GraphNode,
-    LinkRef, Neighborhood, ParsedFrontmatter, RelPath, Severity, WriteOutcome,
+    Analysis, Backlinks, Check, Direction, DocumentSummary, FrontmatterPatch, GraphModel,
+    GraphNode, LinkRef, Neighborhood, ParsedFrontmatter, RelPath, Severity, WriteOutcome,
 };
 
-/// Bundle: un mapa de ficheros + el análisis derivado (cacheado).
-pub struct Bundle {
+/// Workspace: un mapa de ficheros + el análisis derivado (cacheado).
+pub struct DocumentSet {
     files: crate::types::FileMap,
     parsed: BTreeMap<RelPath, Parsed>,
     analysis: once_cell::sync::OnceCell<Analysis>,
 }
 
-impl Bundle {
-    /// Construye un `Bundle` desde un `FileMap`. Parsea cada fichero una vez (puro, sin I/O).
+impl DocumentSet {
+    /// Construye un `DocumentSet` desde un `FileMap`. Parsea cada fichero una vez (puro, sin I/O).
     pub fn from_files(files: crate::types::FileMap) -> Self {
         let parsed = files
             .iter()
             .map(|(p, raw)| (p.clone(), model::parse_file(p.as_str(), raw)))
             .collect();
-        Bundle {
+        DocumentSet {
             files,
             parsed,
             analysis: once_cell::sync::OnceCell::new(),
@@ -36,7 +36,7 @@ impl Bundle {
         &self.files
     }
 
-    /// Análisis del bundle, cacheado con `OnceCell` (recomputar es idempotente).
+    /// Análisis del workspace, cacheado con `OnceCell` (recomputar es idempotente).
     pub fn analyze(&self) -> &Analysis {
         self.analysis.get_or_init(|| self.compute_analysis())
     }
@@ -44,14 +44,14 @@ impl Bundle {
     /// Computa el análisis: **todos** los `.md` son nodos (E16-H02, `§20.7`) — ningún basename
     /// se salta el grafo ni recibe trato aparte.
     fn compute_analysis(&self) -> Analysis {
-        let mut concepts: Vec<RelPath> = Vec::new();
+        let mut documents: Vec<RelPath> = Vec::new();
         let mut out: BTreeMap<RelPath, Vec<RelPath>> = BTreeMap::new();
         let mut inn: BTreeMap<RelPath, Vec<RelPath>> = BTreeMap::new();
         let mut dangling_set: BTreeSet<RelPath> = BTreeSet::new();
 
         // Adyacencia saliente: el cuerpo de cada documento, sin excepciones por nombre.
         for path in self.files.keys() {
-            concepts.push(path.clone());
+            documents.push(path.clone());
             let body = &self.parsed[path].body;
             let targets: Vec<RelPath> = model::out_links(path.as_str(), body)
                 .into_iter()
@@ -60,12 +60,12 @@ impl Bundle {
             out.insert(path.clone(), targets);
         }
 
-        for p in &concepts {
+        for p in &documents {
             inn.entry(p.clone()).or_default();
         }
         // Inversión de aristas + dangling. Un enlace a un documento que existe es un entrante
         // suyo, venga de donde venga; uno a un `.md` que no existe es colgante.
-        for p in &concepts {
+        for p in &documents {
             for t in out.get(p).cloned().unwrap_or_default() {
                 if self.files.contains_key(&t) {
                     inn.entry(t.clone()).or_default().push(p.clone());
@@ -95,7 +95,7 @@ impl Bundle {
         // Aislados (`§20.7`): ni entrantes ni salientes. Un enlace saliente cuenta aunque su
         // destino no exista todavía — el documento participa en el grafo (tiene un nodo ghost por
         // vecino), que es lo que «aislado» niega.
-        let isolated: Vec<RelPath> = concepts
+        let isolated: Vec<RelPath> = documents
             .iter()
             .filter(|p| {
                 inn.get(*p).map(|v| v.is_empty()).unwrap_or(true)
@@ -107,7 +107,7 @@ impl Bundle {
         let dangling: Vec<RelPath> = dangling_set.into_iter().collect();
 
         Analysis {
-            concepts,
+            documents,
             out,
             inn,
             dangling,
@@ -121,10 +121,10 @@ impl Bundle {
     // --- lectura semántica ------------------------------------------------
 
     /// Filas del árbol de documentos con `isolated`/`invalid` resueltos.
-    pub fn list_concepts(&self) -> Vec<ConceptSummary> {
+    pub fn list_documents(&self) -> Vec<DocumentSummary> {
         let a = self.analyze();
         let isolated_set: BTreeSet<&RelPath> = a.isolated.iter().collect();
-        a.concepts
+        a.documents
             .iter()
             .map(|p| {
                 let parsed = &self.parsed[p];
@@ -135,7 +135,7 @@ impl Bundle {
                     .get(p)
                     .map(|cs| cs.iter().any(|c| c.level == Severity::Err))
                     .unwrap_or(false);
-                ConceptSummary {
+                DocumentSummary {
                     path: p.clone(),
                     title,
                     r#type: fm.and_then(|f| f.get_text("type")),
@@ -207,12 +207,12 @@ impl Bundle {
         }
     }
 
-    /// Subgrafo dirigido alrededor de un concept.
+    /// Subgrafo dirigido alrededor de un documento.
     pub fn neighborhood(&self, p: &RelPath, depth: u32, dir: Direction) -> Neighborhood {
         crate::graph::neighborhood(self, p, depth, dir)
     }
 
-    /// Modelo de grafo completo del bundle.
+    /// Modelo de grafo completo del workspace.
     pub fn graph_model(&self) -> GraphModel {
         crate::graph::graph_model(self)
     }
@@ -260,7 +260,7 @@ impl Bundle {
         let draft_path = RelPath::new("__draft__.md").expect("path constante válido");
         let mut files = self.files.clone();
         files.insert(draft_path.clone(), raw);
-        let tmp = Bundle::from_files(files);
+        let tmp = DocumentSet::from_files(files);
         tmp.analyze()
             .per_file
             .get(&draft_path)
@@ -268,7 +268,7 @@ impl Bundle {
             .unwrap_or_default()
     }
 
-    /// Crea un concept validado. Rechaza por defecto si introduciría un `Err` (regla dura: `type`).
+    /// Crea un documento validado. Rechaza por defecto si introduciría un `Err` (regla dura: `type`).
     ///
     /// `timestamp` es el instante de creación en ISO-8601 (paridad con el prototipo, que escribe
     /// `timestamp: now()`). El core es **puro**: no computa el reloj; el llamante (la workspace,
@@ -280,7 +280,7 @@ impl Bundle {
     /// [`model::derived_title`] — el nombre del fichero sin `.md` (el documento aún no tiene ni
     /// frontmatter ni cuerpo de los que derivarlo). Las fachadas no inyectan plantilla: pasan `""`
     /// para delegar aquí el default.
-    pub fn create_concept(
+    pub fn create_document(
         &self,
         p: &RelPath,
         ty: &str,
@@ -321,7 +321,7 @@ impl Bundle {
 
     /// Valida y prepara la escritura de contenido **crudo** en `p` (el editor guarda lo que el
     /// usuario tecleó, sin canonicalizar). Rechaza por defecto si introduciría un `Err`.
-    pub fn write_concept_raw(
+    pub fn write_document_raw(
         &self,
         p: &RelPath,
         raw: &str,
@@ -348,7 +348,7 @@ impl Bundle {
                 written: false,
                 rejected: Some(e.to_string()),
                 checks: self.analyze().per_file.get(p).cloned().unwrap_or_default(),
-                bundle_hard_fail: self.analyze().hard_fail,
+                workspace_hard_fail: self.analyze().hard_fail,
             },
         }
     }
@@ -363,7 +363,7 @@ impl Bundle {
         let hash = *blake3::hash(raw.as_bytes()).as_bytes();
         let mut files = self.files.clone();
         files.insert(p.clone(), raw.clone());
-        let projected = Bundle::from_files(files);
+        let projected = DocumentSet::from_files(files);
         let analysis = projected.analyze();
         let checks = analysis.per_file.get(p).cloned().unwrap_or_default();
         let has_err = checks.iter().any(|c| c.level == Severity::Err);
@@ -387,7 +387,7 @@ impl Bundle {
             written: rejected.is_none(),
             rejected,
             checks,
-            bundle_hard_fail: analysis.hard_fail,
+            workspace_hard_fail: analysis.hard_fail,
         }
     }
 }
@@ -399,7 +399,7 @@ impl Bundle {
 /// Escribir sobre una clave existente conserva su posición y borrar usa `shift_remove` (no
 /// `swap_remove`): el orden de aparición del resto de claves queda intacto.
 ///
-/// `pub(crate)`: además de [`Bundle::merge_frontmatter`], lo reutiliza `crate::plan`
+/// `pub(crate)`: además de [`DocumentSet::merge_frontmatter`], lo reutiliza `crate::plan`
 /// (E12-H08, `apply_normalized_ops`) para materializar en memoria un `Create`/`PatchFrontmatter`
 /// sobre el `FileMap` hipotético — una sola lógica de merge-patch en todo el core (invariante #3
 /// de `CLAUDE.md`), nunca reimplementada.

@@ -2,9 +2,9 @@
 //! `REFACTOR §4.2/§17`, E9-H05).
 //!
 //! Los campos de frontmatter `implemented_by`/`verified_by` (E9-H05) apuntan a ficheros de
-//! **código**, no a concepts del OKF — ni `Bundle::analyze` (`LINK-STUB`/`LINK-REL`, enlaces
-//! `[[wiki]]`/Markdown ENTRE concepts) ni `validate_relations` (`REL-TARGET`, relaciones tipadas a
-//! concepts) los cubre. Comprobar si existen en disco es **I/O**, así que vive aquí (en la
+//! **código**, no a documentos del workspace — ni `DocumentSet::analyze` (`LINK-STUB`/`LINK-REL`,
+//! enlaces `[[wiki]]`/Markdown ENTRE documentos) ni `validate_relations` (`REL-TARGET`, relaciones
+//! tipadas a documentos) los cubre. Comprobar si existen en disco es **I/O**, así que vive aquí (en la
 //! workspace) y no en `lodestar-core` (invariante #2 de `CLAUDE.md`: el core no abre ficheros). El
 //! core solo aporta el tipo `Check`/`CheckCode` con el que se construye el diagnóstico.
 
@@ -19,7 +19,7 @@ use crate::Workspace;
 /// del core).
 const EXTERNAL_REF_FIELDS: [&str; 2] = ["implemented_by", "verified_by"];
 
-/// Una referencia externa (`implemented_by`/`verified_by`) de un concepto, resuelta contra disco.
+/// Una referencia externa (`implemented_by`/`verified_by`) de un documento, resuelta contra disco.
 /// Wire camelCase `{path, exists}` (alimenta `externalReferences` de `knowledge_get`, E10-H10).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
@@ -29,25 +29,25 @@ pub struct ExternalReference {
     /// path inválido como referencia externa se resuelve igualmente, con `exists:false`, en vez de
     /// descartarse en silencio).
     pub path: String,
-    /// `true` si existe un fichero real en disco bajo ese path, relativo al root del bundle.
+    /// `true` si existe un fichero real en disco bajo ese path, relativo al root del workspace.
     pub exists: bool,
 }
 
-/// Informe de validación de las referencias externas de UN concepto contra `referenceRoots`.
+/// Informe de validación de las referencias externas de UN documento contra `referenceRoots`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExternalRefsReport {
-    /// Cada referencia declarada por el concepto, con su existencia resuelta.
+    /// Cada referencia declarada por el documento, con su existencia resuelta.
     pub references: Vec<ExternalReference>,
     /// Un diagnóstico (`CheckCode::ExtrefMissing`, `Severity::Warn`) por cada referencia rota.
     pub diagnostics: Vec<Check>,
 }
 
 impl Workspace {
-    /// Resuelve las referencias externas (`implemented_by`/`verified_by`) del concepto contra
+    /// Resuelve las referencias externas (`implemented_by`/`verified_by`) del documento contra
     /// disco y produce los diagnósticos de referencia rota.
     ///
-    /// Un concepto sin frontmatter (o sin ninguno de los dos campos) devuelve un informe vacío,
-    /// no un error. `Err` solo si el concepto mismo no existe en el bundle.
+    /// Un documento sin frontmatter (o sin ninguno de los dos campos) devuelve un informe vacío,
+    /// no un error. `Err` solo si el documento mismo no existe en el workspace.
     ///
     /// **Invariante #6** (`RelPath` es el único chokepoint de path-traversal): el path crudo del
     /// frontmatter NUNCA toca disco directamente. Antes de cualquier `join`/`is_file`:
@@ -61,12 +61,12 @@ impl Workspace {
     /// En ambos casos de rechazo, la referencia sale con `exists:false` (nunca `true`): sin esto,
     /// `join` sobre una cadena absoluta o `unchecked` permitiría usar `knowledge_get` como oráculo
     /// de existencia de ficheros arbitrarios del host (`ref_externa_traversal`, hallado por juez).
-    pub fn external_refs(&self, concept: &RelPath) -> Result<ExternalRefsReport, WorkspaceError> {
-        let bundle = self.bundle()?;
-        let raw = bundle.files().get(concept).ok_or_else(|| {
-            WorkspaceError::Io(format!("concepto no encontrado: {}", concept.as_str()))
+    pub fn external_refs(&self, document: &RelPath) -> Result<ExternalRefsReport, WorkspaceError> {
+        let doc_set = self.document_set()?;
+        let raw = doc_set.files().get(document).ok_or_else(|| {
+            WorkspaceError::Io(format!("documento no encontrado: {}", document.as_str()))
         })?;
-        let parsed = model::parse_file(concept.as_str(), raw);
+        let parsed = model::parse_file(document.as_str(), raw);
         let Some(fm) = parsed.frontmatter else {
             return Ok(ExternalRefsReport {
                 references: Vec::new(),
@@ -96,9 +96,9 @@ impl Workspace {
                         CheckCode::ExtrefMissing,
                         format!(
                             "«{}» declara «{field}: {raw_path}», que no existe en disco.",
-                            concept.as_str()
+                            document.as_str()
                         ),
-                        vec![concept.clone()],
+                        vec![document.clone()],
                     );
                     // `related` lleva el path roto cuando es un `RelPath` válido (mismo criterio
                     // que `REL-TARGET`, `schema.rs`); si no lo es, el `msg` ya lo menciona.
@@ -122,7 +122,7 @@ impl Workspace {
     /// Guard del único escritor: `Err(WorkspaceError::PermissionDenied)` si `path` queda **fuera
     /// del inventario** del descubrimiento (E15-H09), si cae bajo un `referenceRoot` (inmutable) o,
     /// cuando `writableRoots` es una lista explícita no vacía, fuera de todos ellos; `Ok(())` en
-    /// caso contrario (incluye el caso `writableRoots` vacío = todo el bundle escribible salvo
+    /// caso contrario (incluye el caso `writableRoots` vacío = todo el workspace escribible salvo
     /// `referenceRoots`, mismo criterio que [`lodestar_core::types::workspace_revision`]).
     ///
     /// Contención por SEGMENTOS de path (reusa [`lodestar_core::types::under_root`]), nunca por

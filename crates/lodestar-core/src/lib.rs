@@ -21,14 +21,14 @@ pub mod query;
 pub mod schema;
 pub mod types;
 
-mod bundle;
 mod conform;
+mod document_set;
 mod graph;
 mod store_trait;
 
-pub use bundle::Bundle;
+pub use document_set::DocumentSet;
 pub use error::CoreError;
-pub use store_trait::ConceptStore;
+pub use store_trait::DocumentStore;
 pub use types::*;
 
 #[cfg(feature = "render")]

@@ -1,4 +1,4 @@
-//! Configuración **por-bundle**: `<root>/.lodestar/config.yaml` (`ARCHITECTURE.md §20.5`, `§20.9`;
+//! Configuración **por-workspace**: `<root>/.lodestar/config.yaml` (`ARCHITECTURE.md §20.5`, `§20.9`;
 //! `DECISIONES.md §0` D4/D5).
 //!
 //! Desde E15-H08 es el **único** fichero de configuración del motor: el `lodestar.toml` legado

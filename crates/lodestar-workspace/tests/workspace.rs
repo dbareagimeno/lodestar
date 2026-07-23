@@ -14,11 +14,11 @@ fn setup() -> (tempfile::TempDir, Workspace) {
 }
 
 #[test]
-fn crea_concept_y_lo_escribe_por_el_unico_escritor() {
+fn crea_document_y_lo_escribe_por_el_unico_escritor() {
     let (dir, ws) = setup();
     let p = RelPath::new("alfa.md").unwrap();
     let outcome = ws
-        .create_concept(&p, "Nota", Some("Alfa"), "# H\n\ncuerpo\n", false)
+        .create_document(&p, "Nota", Some("Alfa"), "# H\n\ncuerpo\n", false)
         .unwrap();
     assert!(outcome.written);
     assert!(dir.path().join("alfa.md").is_file());
@@ -33,7 +33,7 @@ fn crea_concept_y_lo_escribe_por_el_unico_escritor() {
     // el snapshot lo refleja
     assert!(snap
         .analysis
-        .concepts
+        .documents
         .iter()
         .any(|c| c.as_str() == "alfa.md"));
     // ninguna página creada debe nacer con un warn de timestamp mal formado.
@@ -49,7 +49,7 @@ fn crea_concept_y_lo_escribe_por_el_unico_escritor() {
 }
 
 #[test]
-fn create_concept_no_conforme_no_escribe() {
+fn create_document_no_conforme_no_escribe() {
     // MIGRADO en E16-H05: el rechazo se disparaba con `type` vacío (`OKF-TYPE`), que dejó de ser
     // un error. La mecánica que este test protege —un resultado con `Err` no llega al disco— se
     // prueba ahora con un cuerpo que lleva marcadores de merge sin resolver
@@ -58,7 +58,7 @@ fn create_concept_no_conforme_no_escribe() {
     let p = RelPath::new("malo.md").unwrap();
     let conflictivo = "# H\n\n<<<<<<< HEAD\nuno\n=======\ndos\n>>>>>>> rama\n";
     let outcome = ws
-        .create_concept(&p, "Nota", Some("Malo"), conflictivo, false)
+        .create_document(&p, "Nota", Some("Malo"), conflictivo, false)
         .unwrap();
     assert!(!outcome.written);
     assert!(outcome.rejected.is_some());
@@ -69,7 +69,7 @@ fn create_concept_no_conforme_no_escribe() {
 fn merge_frontmatter_null_borra_y_escribe() {
     let (_dir, ws) = setup();
     let p = RelPath::new("x.md").unwrap();
-    ws.create_concept(&p, "Nota", Some("X"), "# H\n", false)
+    ws.create_document(&p, "Nota", Some("X"), "# H\n", false)
         .unwrap();
     let mut patch = std::collections::BTreeMap::new();
     patch.insert("status".to_string(), None);
@@ -90,7 +90,7 @@ fn open_live_emite_evento_y_acelera_lecturas() {
 
     // Escribir por el único escritor dispara el update optimista de la cache → IndexEvent.
     let p = RelPath::new("alfa.md").unwrap();
-    ws.create_concept(&p, "Nota", Some("Alfa"), "# H\n\n[b](/beta.md)\n", false)
+    ws.create_document(&p, "Nota", Some("Alfa"), "# H\n\n[b](/beta.md)\n", false)
         .unwrap();
     let ev = rx
         .recv_timeout(std::time::Duration::from_secs(2))
@@ -104,7 +104,7 @@ fn open_live_emite_evento_y_acelera_lecturas() {
         .unwrap()
         .iter()
         .any(|d| d.as_str() == "beta.md"));
-    assert!(cache.concepts().unwrap().contains(&p));
+    assert!(cache.documents().unwrap().contains(&p));
     // `alfa.md` enlaza a `beta.md` (colgante): tiene salientes, así que NO está aislado —
     // la definición de `isolated` de E16-H02 (`§20.7`) exige cero entrantes Y cero salientes.
     assert!(!cache.isolated().unwrap().contains(&p));
@@ -172,10 +172,10 @@ fn escritorio_crear_workspace_con_cache_vieja_funciona() {
     let snap = ws.snapshot().unwrap();
     assert!(snap.files.keys().any(|p| p.as_str() == "index.md"));
 
-    // (5) Crear un concept nuevo funciona (este era el flujo que reventaba).
+    // (5) Crear un documento nuevo funciona (este era el flujo que reventaba).
     let p = RelPath::new("nuevo.md").unwrap();
     let outcome = ws
-        .create_concept(&p, "Nota", Some("Nuevo"), "# H\n\ncuerpo\n", false)
+        .create_document(&p, "Nota", Some("Nuevo"), "# H\n\ncuerpo\n", false)
         .unwrap();
     assert!(outcome.written);
     assert!(root.join("nuevo.md").is_file());
@@ -189,7 +189,7 @@ fn escritorio_crear_workspace_con_cache_vieja_funciona() {
 //   WorkspaceConfig { workspace: { writable_roots: Vec<RelPath>, reference_roots: Vec<RelPath>,
 //                                  ignored: Vec<String> }, gate, transactions }
 // cargado con `WorkspaceConfig::load(root)` desde `.lodestar/config.yaml` (YAML, claves camelCase).
-// Los defaults son seguros: un bundle sin `config.yaml` NO es error.
+// Los defaults son seguros: un workspace sin `config.yaml` NO es error.
 // ---------------------------------------------------------------------------
 
 /// Escribe `<root>/.lodestar/config.yaml` con el contenido dado (crea `.lodestar/` si falta).
@@ -216,9 +216,9 @@ fn carga_writable_roots() {
     );
 }
 
-/// Criterio: bundle SIN `config.yaml` → defaults seguros (NO error) y `ignored` contiene
+/// Criterio: workspace SIN `config.yaml` → defaults seguros (NO error) y `ignored` contiene
 /// `.lodestar/runtime`. (No aseveramos el valor exacto de `writable_roots` por defecto: la
-/// representación del root "todo el bundle" es una decisión de diseño del implementador —
+/// representación del root "todo el workspace" es una decisión de diseño del implementador —
 /// `RelPath::new(".")` es inválido — y no debemos cerrarla desde el test.)
 #[test]
 fn defaults_sin_config() {
@@ -227,7 +227,7 @@ fn defaults_sin_config() {
     // Deliberadamente NO escribimos `.lodestar/config.yaml`.
 
     let cfg = WorkspaceConfig::load(dir.path())
-        .expect("un bundle sin config.yaml debe cargar defaults seguros, no fallar");
+        .expect("un workspace sin config.yaml debe cargar defaults seguros, no fallar");
 
     assert!(
         cfg.workspace
@@ -333,12 +333,12 @@ fn esta_ignorado(gi: &ignore::gitignore::Gitignore, rel: &str, es_dir: bool) -> 
     gi.matched_path_or_any_parents(rel, es_dir).is_ignore()
 }
 
-/// Criterio: bundle recién abierto → el `.gitignore` ignora `.lodestar/index.db` y
+/// Criterio: workspace recién abierto → el `.gitignore` ignora `.lodestar/index.db` y
 /// `.lodestar/runtime/` pero **no** `.lodestar/config.yaml`.
 #[test]
 fn gitignore_parte_lodestar() {
     let dir = tempfile::tempdir().unwrap();
-    let root = dir.path().join("bundle");
+    let root = dir.path().join("workspace");
     // Abrir un directorio cualquiera es la ruta canónica de "recién abierto" (E15-H03: ya no
     // hay `init` que monte scaffold).
     std::fs::create_dir_all(&root).unwrap();
@@ -387,7 +387,7 @@ fn runtime_no_indexa() {
 
     // (2) Control positivo: un `.md` de CONOCIMIENTO real por el único escritor debe emitir evento.
     let real = RelPath::new("real.md").unwrap();
-    ws.create_concept(&real, "Nota", Some("Real"), "# H\n\ncuerpo\n", false)
+    ws.create_document(&real, "Nota", Some("Real"), "# H\n\ncuerpo\n", false)
         .unwrap();
 
     // (3) Drena el bus una ventana amplia (cubre el debounce ~250 ms). NINGÚN evento puede
@@ -483,8 +483,8 @@ fn escribe_schema_yaml(root: &std::path::Path, contenido: &str) {
     std::fs::write(dir.join("schema.yaml"), contenido).unwrap();
 }
 
-/// Criterio `sin_schema_permisivo`: un bundle SIN `.lodestar/schema.yaml` → `Schema` vacío
-/// permisivo (types vacío) y **sin error** (compat con bundles OKF actuales).
+/// Criterio `sin_schema_permisivo`: un workspace SIN `.lodestar/schema.yaml` → `Schema` vacío
+/// permisivo (types vacío) y **sin error** (compat con workspaces OKF actuales).
 #[test]
 fn sin_schema_permisivo() {
     use lodestar_workspace::WorkspaceSchema;
@@ -492,7 +492,7 @@ fn sin_schema_permisivo() {
     // Deliberadamente NO escribimos `.lodestar/schema.yaml`.
 
     let schema = WorkspaceSchema::load(dir.path())
-        .expect("un bundle sin schema.yaml debe cargar un Schema permisivo, no fallar");
+        .expect("un workspace sin schema.yaml debe cargar un Schema permisivo, no fallar");
 
     assert!(
         schema.types.is_empty(),
@@ -556,7 +556,7 @@ types:
 #[test]
 fn abre_sin_repo_git() {
     let dir = tempfile::tempdir().unwrap();
-    // Un `.md` cualquiera: el directorio es un proyecto normal, no un bundle ceremonioso.
+    // Un `.md` cualquiera: el directorio es un proyecto normal, no un workspace ceremonioso.
     std::fs::write(
         dir.path().join("notas.md"),
         "---\ntype: Nota\ntitle: Notas\ndescription: d\n---\n\n# H\n\ncuerpo\n",
@@ -583,10 +583,10 @@ fn abre_sin_repo_git() {
         .expect("el snapshot debe computarse sin repo git");
     assert!(
         snap.analysis
-            .concepts
+            .documents
             .iter()
             .any(|c| c.as_str() == "notas.md"),
         "el análisis debe ver el `.md` del directorio: {:?}",
-        snap.analysis.concepts
+        snap.analysis.documents
     );
 }

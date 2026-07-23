@@ -1,6 +1,6 @@
 //! Tests de `lodestar-store` (E3): apertura/DDL, cold rebuild, incremental con gate por hash,
 //! FTS5 (subcadena + escapado), **paridad SQL == core**, property incremental==core, bus de
-//! eventos, reconcile y `ConceptStore`.
+//! eventos, reconcile y `DocumentStore`.
 
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use lodestar_core::types::{Direction, FileMap, RelPath};
-use lodestar_core::Bundle;
+use lodestar_core::DocumentSet;
 use lodestar_store::Store;
 
 fn write_all(root: &Path, files: &FileMap) {
@@ -32,10 +32,10 @@ fn sorted(mut v: Vec<RelPath>) -> Vec<RelPath> {
 
 /// Comprueba que la síntesis del store coincide con `core::analyze` sobre el mismo corpus.
 fn assert_matches_core(store: &Store, files: &FileMap) {
-    let bundle = Bundle::from_files(files.clone());
-    let a = bundle.analyze();
+    let doc_set = DocumentSet::from_files(files.clone());
+    let a = doc_set.analyze();
 
-    let (hf, wc) = store.conformance_counts().unwrap();
+    let (hf, wc) = store.validation_counts().unwrap();
     assert_eq!(hf, a.hard_fail, "hard_fail difiere (gana el core)");
     assert_eq!(wc, a.warn_count, "warn_count difiere (gana el core)");
 
@@ -50,11 +50,11 @@ fn assert_matches_core(store: &Store, files: &FileMap) {
         "dangling difiere"
     );
     assert_eq!(
-        sorted(store.concepts().unwrap()),
-        sorted(a.concepts.clone()),
+        sorted(store.documents().unwrap()),
+        sorted(a.documents.clone()),
         "el inventario de documentos difiere"
     );
-    for p in &a.concepts {
+    for p in &a.documents {
         let mut expected = a.inn.get(p).cloned().unwrap_or_default();
         expected.sort();
         expected.dedup();
@@ -72,12 +72,12 @@ fn abrir_crea_esquema_y_reabrir_es_idempotente() {
     write_all(dir.path(), &lodestar_fixtures::conformant());
     {
         let store = Store::open_and_build(dir.path()).unwrap();
-        assert!(!store.concepts().unwrap().is_empty());
+        assert!(!store.documents().unwrap().is_empty());
     }
     // Reabrir no rompe y ve el mismo contenido.
     let store = Store::open_and_build(dir.path()).unwrap();
     // 3 = los 3 `.md` del fixture: desde E16-H02 `index.md` es un documento más del inventario.
-    assert_eq!(store.concepts().unwrap().len(), 3);
+    assert_eq!(store.documents().unwrap().len(), 3);
     assert!(dir.path().join(".lodestar/index.db").exists());
 }
 
@@ -86,9 +86,9 @@ fn cold_rebuild_es_idempotente() {
     let dir = tempfile::tempdir().unwrap();
     write_all(dir.path(), &lodestar_fixtures::conformant());
     let store = Store::open_and_build(dir.path()).unwrap();
-    let before = sorted(store.concepts().unwrap());
+    let before = sorted(store.documents().unwrap());
     store.rebuild().unwrap();
-    let after = sorted(store.concepts().unwrap());
+    let after = sorted(store.documents().unwrap());
     assert_eq!(before, after, "un segundo rebuild debe ser idempotente");
 }
 
@@ -226,8 +226,8 @@ fn blast_radius_igual_neighborhood_in() {
     write_all(dir.path(), &files);
     let store = Store::open_and_build(dir.path()).unwrap();
 
-    let bundle = Bundle::from_files(files.clone());
-    let nb = bundle.neighborhood(&rp("c.md"), 5, Direction::In);
+    let doc_set = DocumentSet::from_files(files.clone());
+    let nb = doc_set.neighborhood(&rp("c.md"), 5, Direction::In);
     let core_set: BTreeSet<RelPath> = nb.nodes.iter().map(|n| n.id.clone()).collect();
     let sql_set: BTreeSet<RelPath> = store
         .blast_radius(&rp("c.md"), 5)
@@ -288,14 +288,14 @@ fn reconcile_repara_drift_fuera_de_banda() {
 }
 
 #[test]
-fn conceptstore_sirve_bundle_identico() {
+fn documentstore_sirve_workspace_identico() {
     let dir = tempfile::tempdir().unwrap();
     let files = lodestar_fixtures::with_issues();
     write_all(dir.path(), &files);
     let store = Store::open_and_build(dir.path()).unwrap();
 
-    let from_disk = Bundle::from_files(files.clone());
-    let from_store = store.bundle();
+    let from_disk = DocumentSet::from_files(files.clone());
+    let from_store = store.document_set();
     assert_eq!(
         from_store.analyze().hard_fail,
         from_disk.analyze().hard_fail
@@ -339,7 +339,7 @@ fn fichero_no_utf8_no_congela_la_cache() {
     .unwrap();
     let store = Store::open_and_build(dir.path()).unwrap();
     // La buena está indexada; la ilegible se saltó con diagnóstico (no venenó el walk).
-    assert!(store.concepts().unwrap().contains(&rp("buena.md")));
+    assert!(store.documents().unwrap().contains(&rp("buena.md")));
     // Y el reconcile sigue vivo (repara drift a pesar del fichero no-UTF8).
     std::fs::write(
         dir.path().join("nueva.md"),
@@ -402,8 +402,8 @@ fn esquema_viejo_con_misma_version_se_reconstruye() {
             0,
         )
         .unwrap();
-    assert!(store.concepts().unwrap().contains(&rp("a.md")));
-    assert!(store.concepts().unwrap().contains(&rp("b.md")));
+    assert!(store.documents().unwrap().contains(&rp("a.md")));
+    assert!(store.documents().unwrap().contains(&rp("b.md")));
 
     // Y la tabla `files` reconstruida ya tiene la columna `hash`.
     let conn = rusqlite::Connection::open(db_dir.join("index.db")).unwrap();
@@ -499,7 +499,7 @@ fn cache_v2_se_reconstruye() {
     let store =
         Store::open_and_build(dir.path()).expect("una cache v0.2 no puede romper la apertura");
     assert!(
-        store.concepts().unwrap().contains(&rp("a.md")),
+        store.documents().unwrap().contains(&rp("a.md")),
         "tras la reconstrucción, la cache debe servir el contenido actual de los `.md`"
     );
 
@@ -536,7 +536,7 @@ fn cache_corrupta_se_recrea_sola() {
     std::fs::create_dir_all(&db_dir).unwrap();
     std::fs::write(db_dir.join("index.db"), b"esto no es una base sqlite").unwrap();
     let store = Store::open_and_build(dir.path()).unwrap();
-    assert!(store.concepts().unwrap().contains(&rp("a.md")));
+    assert!(store.documents().unwrap().contains(&rp("a.md")));
 }
 
 // --- E11-H05: `impact_analyze` reusa el blast-radius; verificado idéntico al core ------------
@@ -544,13 +544,13 @@ fn cache_corrupta_se_recrea_sola() {
 // UBICACIÓN (documentada): el criterio `impacto_paridad_core` de la historia E11-H05 es una
 // paridad **store vs core** — el `Store::blast_radius` (CTE recursivo, el bloque que
 // `transitivelyAffected` de `impact_analyze` reusa) debe alcanzar EXACTAMENTE el mismo conjunto de
-// paths que `Bundle::neighborhood(In)` del core (invariante #3: "gana el core"; SQLite solo
+// paths que `DocumentSet::neighborhood(In)` del core (invariante #3: "gana el core"; SQLite solo
 // acelera). No tiene superficie de wire ni depende de la tool MCP, así que vive junto al bloque que
 // verifica (`lodestar-store`), no en `crates/lodestar-mcp/tests/`. El parent autorizó explícitamente
 // esta ubicación ("puede vivir en crates/lodestar-store/tests/ … elige dónde encaja; documenta").
 //
 // NOTA SOBRE EL COLOR (honestidad de fase): este test es **VERDE desde ya**, no rojo. Verifica un
-// invariante que YA se sostiene porque `Store::blast_radius` y `Bundle::neighborhood` YA existen
+// invariante que YA se sostiene porque `Store::blast_radius` y `DocumentSet::neighborhood` YA existen
 // (E11-H05 los REUSA, no los crea). Su valor es de guarda de regresión: sella que el bloque que
 // `impact_analyze` reusa es paridad-exacta con el core antes de construir la tool encima. El ROJO de
 // la historia lo aportan los dos criterios de comportamiento (`impacto_move_30`,
@@ -604,9 +604,9 @@ fn impacto_paridad_core() {
     write_all(dir.path(), &files);
     let store = Store::open_and_build(dir.path()).unwrap();
 
-    let bundle = Bundle::from_files(files.clone());
+    let doc_set = DocumentSet::from_files(files.clone());
     // Profundidad grande para alcanzar todo el alcance transitivo, no solo el vecindario inmediato.
-    let core_set: BTreeSet<RelPath> = bundle
+    let core_set: BTreeSet<RelPath> = doc_set
         .neighborhood(&rp("f.md"), 10, Direction::In)
         .nodes
         .iter()

@@ -2,21 +2,21 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-use crate::bundle::Bundle;
+use crate::document_set::DocumentSet;
 use crate::types::{Direction, Edge, GraphModel, GraphNode, Neighborhood, RelPath};
 
-/// Construye el `GraphModel` completo: nodos (concepts + ghosts) y aristas (con flag `dangling`).
-pub(crate) fn graph_model(bundle: &Bundle) -> GraphModel {
-    let a = bundle.analyze();
-    let mut node_ids: BTreeSet<RelPath> = a.concepts.iter().cloned().collect();
+/// Construye el `GraphModel` completo: nodos (documentos + ghosts) y aristas (con flag `dangling`).
+pub(crate) fn graph_model(doc_set: &DocumentSet) -> GraphModel {
+    let a = doc_set.analyze();
+    let mut node_ids: BTreeSet<RelPath> = a.documents.iter().cloned().collect();
     let mut edges: Vec<Edge> = Vec::new();
 
-    for src in &a.concepts {
+    for src in &a.documents {
         if let Some(targets) = a.out.get(src) {
             for t in targets {
                 // E16-H02: se retiró el quirk del prototipo (`buildGraphModel:1850`) que
                 // descartaba las aristas/nodos a `index.md`/`log.md`. Todo destino es una arista.
-                let dangling = !bundle.files().contains_key(t);
+                let dangling = !doc_set.files().contains_key(t);
                 if dangling {
                     node_ids.insert(t.clone()); // ghost
                 }
@@ -31,7 +31,7 @@ pub(crate) fn graph_model(bundle: &Bundle) -> GraphModel {
 
     let nodes = node_ids
         .into_iter()
-        .map(|id| node_for(bundle, &id))
+        .map(|id| node_for(doc_set, &id))
         .collect();
     GraphModel { nodes, edges }
 }
@@ -41,10 +41,10 @@ pub(crate) fn graph_model(bundle: &Bundle) -> GraphModel {
 ///
 /// Es la **única** definición de "qué es un nodo del grafo" (invariante #3, "una sola verdad
 /// computada"): tanto `graph_model`/`neighborhood` del core como `App::graph_query` de la fachada
-/// la reusan (esta última vía [`Bundle::node`]) en vez de reimplementar el criterio.
-pub fn node_for(bundle: &Bundle, id: &RelPath) -> GraphNode {
-    let exists = bundle.files().contains_key(id);
-    let fm = bundle.parsed(id).and_then(|p| p.frontmatter.as_ref());
+/// la reusan (esta última vía [`DocumentSet::node`]) en vez de reimplementar el criterio.
+pub fn node_for(doc_set: &DocumentSet, id: &RelPath) -> GraphNode {
+    let exists = doc_set.files().contains_key(id);
+    let fm = doc_set.parsed(id).and_then(|p| p.frontmatter.as_ref());
     GraphNode {
         id: id.clone(),
         ghost: !exists,
@@ -56,12 +56,12 @@ pub fn node_for(bundle: &Bundle, id: &RelPath) -> GraphNode {
 /// Subgrafo dirigido a profundidad `depth` desde `root`.
 /// `Out`=dependencias salientes · `In`=blast-radius (aristas inversas) · `Both`=ambas.
 pub(crate) fn neighborhood(
-    bundle: &Bundle,
+    doc_set: &DocumentSet,
     root: &RelPath,
     depth: u32,
     dir: Direction,
 ) -> Neighborhood {
-    let a = bundle.analyze();
+    let a = doc_set.analyze();
     // Adyacencia según dirección.
     let out = &a.out;
     let inn = &a.inn;
@@ -81,7 +81,7 @@ pub(crate) fn neighborhood(
         if matches!(dir, Direction::Out | Direction::Both) {
             if let Some(ts) = out.get(&cur) {
                 for t in ts {
-                    let dangling = !bundle.files().contains_key(t);
+                    let dangling = !doc_set.files().contains_key(t);
                     edge_set.insert((cur.clone(), t.clone()), dangling);
                     neighbors.push(t.clone());
                 }
@@ -102,7 +102,7 @@ pub(crate) fn neighborhood(
         }
     }
 
-    let nodes = visited.iter().map(|id| node_for(bundle, id)).collect();
+    let nodes = visited.iter().map(|id| node_for(doc_set, id)).collect();
     let edges = edge_set
         .into_iter()
         .map(|((source, target), dangling)| Edge {
@@ -122,13 +122,13 @@ pub(crate) fn neighborhood(
 // E11-H02: operaciones estructurales del grafo (`path_between`/`cycles`/`components`).
 //
 // Todas parten de la MISMA representación que `graph_model`/`neighborhood` (invariante #3): el
-// `GraphModel` completo, con sus nodos (concepts + ghosts) y aristas ya filtradas del quirk de
-// ficheros reservados. No se construye ningún grafo paralelo.
+// `GraphModel` completo, con sus nodos (documentos + ghosts) y sus aristas. No se construye ningún
+// grafo paralelo. (El quirk de ficheros reservados que aquí se filtraba murió con E16-H02.)
 // ---------------------------------------------------------------------------
 
 /// Adyacencia **dirigida** derivada de un [`GraphModel`]: conjunto de nodos y, por cada nodo, sus
-/// destinos salientes. Reusa las aristas ya computadas por `graph_model` (mismo filtrado de
-/// reservados y misma inclusión de ghosts que el resto del módulo).
+/// destinos salientes. Reusa las aristas ya computadas por `graph_model` (misma inclusión de
+/// ghosts que el resto del módulo).
 fn adyacencia_dirigida(
     model: &GraphModel,
 ) -> (BTreeSet<RelPath>, BTreeMap<RelPath, BTreeSet<RelPath>>) {
@@ -147,8 +147,8 @@ fn adyacencia_dirigida(
 /// grafo — **nunca** un error. BFS sobre la adyacencia dirigida del `GraphModel`; los vecinos se
 /// recorren en orden de `RelPath` (`BTreeSet`), así el camino elegido entre varios igual de cortos
 /// es determinista.
-pub(crate) fn path_between(bundle: &Bundle, a: &RelPath, b: &RelPath) -> Vec<RelPath> {
-    let model = graph_model(bundle);
+pub(crate) fn path_between(doc_set: &DocumentSet, a: &RelPath, b: &RelPath) -> Vec<RelPath> {
+    let model = graph_model(doc_set);
     let (nodes, out) = adyacencia_dirigida(&model);
     if !nodes.contains(a) || !nodes.contains(b) {
         return Vec::new();
@@ -191,8 +191,8 @@ pub(crate) fn path_between(bundle: &Bundle, a: &RelPath, b: &RelPath) -> Vec<Rel
 /// fuertemente conexa (SCC) no trivial: una SCC de más de un nodo, o un único nodo con arista a sí
 /// mismo. Los nodos acíclicos no aparecen. Los ciclos, y los nodos dentro de cada uno, se devuelven
 /// ordenados por `RelPath` (determinista).
-pub(crate) fn cycles(bundle: &Bundle) -> Vec<Vec<RelPath>> {
-    let model = graph_model(bundle);
+pub(crate) fn cycles(doc_set: &DocumentSet) -> Vec<Vec<RelPath>> {
+    let model = graph_model(doc_set);
     let (nodes, out) = adyacencia_dirigida(&model);
 
     let mut result: Vec<Vec<RelPath>> = Vec::new();
@@ -285,10 +285,10 @@ fn tarjan_sccs(
 }
 
 /// Componentes conexas por conectividad **no dirigida** del grafo de enlaces. Cada componente es el
-/// conjunto de sus nodos (concepts + ghosts). Los nodos aislados forman su propia componente
+/// conjunto de sus nodos (documentos + ghosts). Los nodos aislados forman su propia componente
 /// unitaria. BFS sobre la adyacencia simetrizada; componentes y nodos ordenados por `RelPath`.
-pub(crate) fn components(bundle: &Bundle) -> Vec<Vec<RelPath>> {
-    let model = graph_model(bundle);
+pub(crate) fn components(doc_set: &DocumentSet) -> Vec<Vec<RelPath>> {
+    let model = graph_model(doc_set);
     let nodes: BTreeSet<RelPath> = model.nodes.iter().map(|n| n.id.clone()).collect();
 
     // Adyacencia no dirigida: cada arista conecta en ambos sentidos.

@@ -7,7 +7,7 @@
 
 use serde_yaml::Value as Yaml;
 
-use crate::bundle::Bundle;
+use crate::document_set::DocumentSet;
 use crate::types::{Analysis, ParsedFrontmatter, RelPath, Severity};
 
 /// Un token de la DSL.
@@ -78,27 +78,27 @@ pub fn tokenize_query(q: &str) -> Vec<Token> {
     out
 }
 
-/// Filtra los paths del bundle que casan con TODOS los tokens (vacío = todos).
-pub fn query(bundle: &Bundle, dsl: &str) -> Vec<RelPath> {
+/// Filtra los paths del workspace que casan con TODOS los tokens (vacío = todos).
+pub fn query(doc_set: &DocumentSet, dsl: &str) -> Vec<RelPath> {
     let tokens = tokenize_query(dsl.trim());
-    let analysis = bundle.analyze();
-    bundle
+    let analysis = doc_set.analyze();
+    doc_set
         .files()
         .keys()
-        .filter(|p| match_file(bundle, p, &tokens, analysis))
+        .filter(|p| match_file(doc_set, p, &tokens, analysis))
         .cloned()
         .collect()
 }
 
-fn match_file(bundle: &Bundle, path: &RelPath, tokens: &[Token], a: &Analysis) -> bool {
+fn match_file(doc_set: &DocumentSet, path: &RelPath, tokens: &[Token], a: &Analysis) -> bool {
     if tokens.is_empty() {
         return true;
     }
-    let fm = bundle
+    let fm = doc_set
         .parsed(path)
         .and_then(|p| p.frontmatter.clone())
         .unwrap_or_default();
-    let body = bundle.parsed(path).map(|p| p.body.as_str()).unwrap_or("");
+    let body = doc_set.parsed(path).map(|p| p.body.as_str()).unwrap_or("");
     tokens.iter().all(|t| match_token(t, path, &fm, body, a))
 }
 

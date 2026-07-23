@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use lodestar_core::diff::{self, ChangeKind, MessageHint};
 use lodestar_core::model;
 use lodestar_core::types::*;
-use lodestar_core::Bundle;
+use lodestar_core::DocumentSet;
 // E10-H03: función pura aún NO implementada (fase roja). Se espera reachable en el crate root
 // (p. ej. re-exportada vía `pub use types::*`).
 use lodestar_core::workspace_revision;
@@ -165,20 +165,20 @@ fn error_code_wire() {
     );
 }
 
-// --- E10-H04: `ConceptRef` (identidad por path, id opcional/diferido) --------
+// --- E10-H04: `DocumentRef` (identidad por path, id opcional/diferido) --------
 //
-// Fase ROJA: el struct `ConceptRef { path: RelPath, id: Option<ConceptId> }` (`REFACTOR §6.1`)
+// Fase ROJA: el struct `DocumentRef { path: RelPath, id: Option<DocumentId> }` (`REFACTOR §6.1`)
 // todavía NO existe en producción. Se espera reachable vía `use lodestar_core::types::*` (mismo
 // patrón que `RelPath`/`ErrorCode`), con una deserialización que acepta `{ "path": … }` y deja el
-// `id` ausente como `None`. Estos tests hacen ROJO por API ausente (símbolo `ConceptRef`) hasta que
-// se implemente. La resolución contra un bundle (`CONCEPT_NOT_FOUND`) se prueba en `lodestar-app`
-// (`tests/concept_ref.rs`), porque exige un `Workspace` abierto y el core es puro.
+// `id` ausente como `None`. Estos tests hacen ROJO por API ausente (símbolo `DocumentRef`) hasta que
+// se implemente. La resolución contra un workspace (`DOCUMENT_NOT_FOUND`) se prueba en `lodestar-app`
+// (`tests/document_ref.rs`), porque exige un `Workspace` abierto y el core es puro.
 
 #[test]
 fn ref_por_path() {
-    // Criterio `ref_por_path`: `{ "path": "a/b.md" }` deserializa a un `ConceptRef` cuyo `path` es
+    // Criterio `ref_por_path`: `{ "path": "a/b.md" }` deserializa a un `DocumentRef` cuyo `path` es
     // el `RelPath` validado y cuyo `id` queda ausente (`None`) — el id es opcional/diferido.
-    let referencia: ConceptRef =
+    let referencia: DocumentRef =
         serde_json::from_str(r#"{"path":"a/b.md"}"#).expect("`{ path: a/b.md }` debe deserializar");
     assert_eq!(
         referencia.path,
@@ -187,7 +187,7 @@ fn ref_por_path() {
     );
     assert!(
         referencia.id.is_none(),
-        "sin clave `id` en el JSON, `ConceptRef::id` debe quedar `None`, es {:?}",
+        "sin clave `id` en el JSON, `DocumentRef::id` debe quedar `None`, es {:?}",
         referencia.id,
     );
 }
@@ -196,11 +196,11 @@ fn ref_por_path() {
 fn ref_rechaza_traversal() {
     // Criterio `ref_rechaza_traversal`: `{ "path": "../x" }` NO debe deserializar — `RelPath`
     // rechaza el `..` en su `Deserialize` (invariante #6, único chokepoint de path-traversal), y
-    // `ConceptRef` hereda ese rechazo por delegar en el `RelPath` de su campo `path`.
-    let resultado = serde_json::from_str::<ConceptRef>(r#"{"path":"../x"}"#);
+    // `DocumentRef` hereda ese rechazo por delegar en el `RelPath` de su campo `path`.
+    let resultado = serde_json::from_str::<DocumentRef>(r#"{"path":"../x"}"#);
     assert!(
         resultado.is_err(),
-        "un `ConceptRef` con `path` de traversal (`../x`) debe fallar al deserializar, dio {resultado:?}",
+        "un `DocumentRef` con `path` de traversal (`../x`) debe fallar al deserializar, dio {resultado:?}",
     );
 }
 
@@ -236,7 +236,7 @@ fn resolve_link_casos() {
 
 // --- E1-H06/H07: conformidad y analyze --------------------------------------
 
-fn codes_of(b: &Bundle, path: &str) -> Vec<String> {
+fn codes_of(b: &DocumentSet, path: &str) -> Vec<String> {
     let p = RelPath::new(path).unwrap();
     b.analyze().per_file[&p]
         .iter()
@@ -250,7 +250,7 @@ fn codes_of(b: &Bundle, path: &str) -> Vec<String> {
 /// seis incumplimientos hoy son, en su mayoría, documentos perfectamente válidos.
 #[test]
 fn conformidad_dispara_cada_codigo() {
-    let b = Bundle::from_files(fm(&[
+    let b = DocumentSet::from_files(fm(&[
         ("sin-fm.md", "Solo cuerpo, sin encabezados.\n"),
         ("sin-cierre.md", "---\ntype: Concept\n"),
         ("malo-yaml.md", "---\ntype: : :\n  - x\n: bad\n---\n\n# H\n"),
@@ -289,7 +289,7 @@ fn hard_fail_cuenta_ficheros_no_max() {
     // 1 fichero con Err + 1 sin problemas → hard_fail == 1 (no se "tapa" ni se suma dos veces).
     // MIGRADO en E16-H05: el fichero con `Err` era «sin frontmatter» (`OKF-FM01`), que ya no es
     // un error; hoy lo es uno cuyo frontmatter Lodestar no sabe leer (`FM-UNCLOSED`).
-    let b = Bundle::from_files(fm(&[
+    let b = DocumentSet::from_files(fm(&[
         ("malo.md", "---\ntype: Nota\n"),
         (
             "bueno.md",
@@ -301,7 +301,7 @@ fn hard_fail_cuenta_ficheros_no_max() {
 
 #[test]
 fn analyze_backlinks_son_inversa_de_out() {
-    let b = Bundle::from_files(fm(&[
+    let b = DocumentSet::from_files(fm(&[
         (
             "a.md",
             "---\ntype: N\ntitle: A\ndescription: d\n---\n\n# H\n\n[b](/b.md)\n",
@@ -322,14 +322,14 @@ fn analyze_backlinks_son_inversa_de_out() {
     assert!(!a.isolated.contains(&pb));
 }
 
-// --- E1-H09: list_concepts / backlinks --------------------------------------
+// --- E1-H09: list_documents / backlinks --------------------------------------
 
 #[test]
-fn list_concepts_marca_invalid_e_isolated() {
+fn list_documents_marca_invalid_e_isolated() {
     // MIGRADO en E16-H05: `invalid` = «tiene algún diagnóstico de severidad `Err`». El documento
     // sin frontmatter dejó de tenerlos, así que el fixture pasa a uno con el bloque sin cerrar.
-    let b = Bundle::from_files(fm(&[("malo.md", "---\ntype: Nota\n")]));
-    let cs = b.list_concepts();
+    let b = DocumentSet::from_files(fm(&[("malo.md", "---\ntype: Nota\n")]));
+    let cs = b.list_documents();
     let c = cs.iter().find(|c| c.path.as_str() == "malo.md").unwrap();
     assert!(c.invalid);
     // Único documento del workspace: sin entrantes ni salientes → aislado (E16-H02).
@@ -338,7 +338,7 @@ fn list_concepts_marca_invalid_e_isolated() {
 
 // --- E1-H11: query ----------------------------------------------------------
 
-fn query_set(b: &Bundle, dsl: &str) -> Vec<String> {
+fn query_set(b: &DocumentSet, dsl: &str) -> Vec<String> {
     b.query(dsl)
         .iter()
         .map(|p| p.as_str().to_string())
@@ -347,7 +347,7 @@ fn query_set(b: &Bundle, dsl: &str) -> Vec<String> {
 
 #[test]
 fn query_operadores() {
-    let b = Bundle::from_files(fm(&[
+    let b = DocumentSet::from_files(fm(&[
         (
             "a.md",
             "---\ntype: Nota\ntitle: Alfa\nstatus: draft\ntags:\n  - x\n---\n\n# H\n\nhola mundo\n",
@@ -434,30 +434,30 @@ fn diff_guarda_no_revienta_con_fichero_grande() {
 // --- E1-H13: escritura validada ---------------------------------------------
 
 #[test]
-fn create_concept_rechaza_no_conforme() {
+fn create_document_rechaza_no_conforme() {
     // MIGRADO en E16-H05: el rechazo se probaba con `type` vacío (`OKF-TYPE`), que ya no es un
     // error — un documento sin `type` es válido. Lo que sigue en pie es la MECÁNICA: un resultado
     // con severidad `Err` se rechaza sin escribir y sin devolver `Err` del `Result`. Hoy el
     // disparador es un cuerpo con marcadores de merge sin resolver (`DOC-CONFLICT-MARKER`).
-    let b = Bundle::from_files(fm(&[]));
+    let b = DocumentSet::from_files(fm(&[]));
     let p = RelPath::new("nuevo.md").unwrap();
     let conflictivo = "# H\n\n<<<<<<< HEAD\nuno\n=======\ndos\n>>>>>>> rama\n";
-    let outcome = b.create_concept(&p, "Nota", Some("Nuevo"), conflictivo, None, false);
+    let outcome = b.create_document(&p, "Nota", Some("Nuevo"), conflictivo, None, false);
     assert!(!outcome.written);
     assert!(outcome.rejected.is_some());
     // Sin el conflicto → escribible. (Y sin `type`, también: ya no hay regla que lo exija.)
-    let ok = b.create_concept(&p, "", Some("Nuevo"), "# H\n", None, false);
+    let ok = b.create_document(&p, "", Some("Nuevo"), "# H\n", None, false);
     assert!(ok.written);
     assert!(ok.rejected.is_none());
 }
 
 #[test]
-fn create_concept_incluye_timestamp_en_su_posicion_canonica() {
-    let b = Bundle::from_files(fm(&[]));
+fn create_document_incluye_timestamp_en_su_posicion_canonica() {
+    let b = DocumentSet::from_files(fm(&[]));
     let p = RelPath::new("nuevo.md").unwrap();
     // Con timestamp: aparece antes de `status`. Desde E16-H01 el orden del `.md` es el orden de
     // inserción de las claves (el `Mapping` de serde_yaml lo preserva), no una lista canónica.
-    let ok = b.create_concept(
+    let ok = b.create_document(
         &p,
         "Nota",
         Some("Nuevo"),
@@ -479,7 +479,7 @@ fn create_concept_incluye_timestamp_en_su_posicion_canonica() {
         ok.raw
     );
     // Sin timestamp: no se emite la clave.
-    let sin = b.create_concept(&p, "Nota", Some("Nuevo"), "# H\n", None, false);
+    let sin = b.create_document(&p, "Nota", Some("Nuevo"), "# H\n", None, false);
     assert!(
         !sin.raw.contains("timestamp:"),
         "no debía emitir timestamp: {}",
@@ -488,11 +488,11 @@ fn create_concept_incluye_timestamp_en_su_posicion_canonica() {
 }
 
 #[test]
-fn create_concept_genera_heading_por_defecto_cuando_body_vacio() {
-    let b = Bundle::from_files(fm(&[]));
+fn create_document_genera_heading_por_defecto_cuando_body_vacio() {
+    let b = DocumentSet::from_files(fm(&[]));
     // body vacío + ty no vacío → `# {ty} - {title}`.
     let p = RelPath::new("mi-cosa.md").unwrap();
-    let con_tipo = b.create_concept(&p, "Nota", Some("Mi Cosa"), "", None, false);
+    let con_tipo = b.create_document(&p, "Nota", Some("Mi Cosa"), "", None, false);
     assert!(con_tipo.written);
     assert!(
         con_tipo.raw.contains("# Nota - Mi Cosa\n"),
@@ -500,7 +500,7 @@ fn create_concept_genera_heading_por_defecto_cuando_body_vacio() {
         con_tipo.raw
     );
     // ty vacío → `# {title}` (sin separador colgante). type vacío rechaza, pero el raw se computa.
-    let sin_tipo = b.create_concept(&p, "", Some("Mi Cosa"), "", None, false);
+    let sin_tipo = b.create_document(&p, "", Some("Mi Cosa"), "", None, false);
     assert!(
         sin_tipo.raw.contains("# Mi Cosa\n") && !sin_tipo.raw.contains("# Mi Cosa -"),
         "el heading sin tipo no debe tener separador: {}",
@@ -508,14 +508,14 @@ fn create_concept_genera_heading_por_defecto_cuando_body_vacio() {
     );
     // title None → último eslabón de `derived_title`: el nombre del fichero tal cual, sin `.md`
     // y sin Title Case (E16-H03 retiró `title_from_path`).
-    let sin_titulo = b.create_concept(&p, "Nota", None, "", None, false);
+    let sin_titulo = b.create_document(&p, "Nota", None, "", None, false);
     assert!(
         sin_titulo.raw.contains("# Nota - mi-cosa\n"),
         "el título debe derivar del nombre del fichero: {}",
         sin_titulo.raw
     );
     // body no vacío → se respeta tal cual, sin generar default.
-    let con_body = b.create_concept(&p, "Nota", Some("Mi Cosa"), "# H\n", None, false);
+    let con_body = b.create_document(&p, "Nota", Some("Mi Cosa"), "# H\n", None, false);
     assert!(
         con_body.raw.contains("# H\n") && !con_body.raw.contains("# Nota - Mi Cosa"),
         "un body explícito no debe reemplazarse: {}",
@@ -525,7 +525,7 @@ fn create_concept_genera_heading_por_defecto_cuando_body_vacio() {
 
 #[test]
 fn merge_frontmatter_null_borra() {
-    let b = Bundle::from_files(fm(&[(
+    let b = DocumentSet::from_files(fm(&[(
         "x.md",
         "---\ntype: N\ntitle: X\ndescription: d\nstatus: draft\n---\n\n# H\n",
     )]));
@@ -550,7 +550,7 @@ fn fm_escalares_no_string_no_invierten_el_veredicto() {
     // importa — un escalar no-string en una clave cualquiera NO convierte el fichero entero en
     // FM-YAML-INVALID (hard-fail), que invertiría el veredicto de la puerta de CI. Lo que cambia es que
     // ahora el valor conserva su TIPO YAML en vez de convertirse en texto.
-    let b = Bundle::from_files(fm(&[(
+    let b = DocumentSet::from_files(fm(&[(
         "n.md",
         "---\ntype: 123\ntitle: 2024\ndescription: true\n---\n\n# H\n\ncuerpo\n",
     )]));
@@ -573,7 +573,7 @@ fn fm_escalares_no_string_no_invierten_el_veredicto() {
         "`description: true` debe seguir siendo el booleano true"
     );
     // …y las proyecciones de presentación siguen viéndolo como texto (columnas de cache, DTO).
-    let resumen = b.list_concepts();
+    let resumen = b.list_documents();
     let fila = resumen
         .iter()
         .find(|c| c.path.as_str() == "n.md")
@@ -585,7 +585,7 @@ fn fm_escalares_no_string_no_invierten_el_veredicto() {
 #[test]
 fn fm_null_explicito_cuenta_como_presente() {
     // `type:` (null) → presente para has:/no: (fmPresent de JS: null !== undefined)…
-    let b = Bundle::from_files(fm(&[
+    let b = DocumentSet::from_files(fm(&[
         (
             "connull.md",
             "---\ntype:\ntitle: A\ndescription: d\n---\n\n# H\n",
@@ -670,7 +670,7 @@ fn diff_snap_ordena_numeric_aware() {
 
 #[test]
 fn backlinks_out_dedup_sin_self() {
-    let b = Bundle::from_files(fm(&[
+    let b = DocumentSet::from_files(fm(&[
         (
             "x.md",
             "---\ntype: N\ntitle: X\ndescription: d\n---\n\n[a](/a.md) [a](/a.md) [idx](/index.md) [yo](/x.md)\n",
@@ -690,7 +690,7 @@ fn backlinks_out_dedup_sin_self() {
 #[test]
 fn query_campo_vacio_es_texto_suelto() {
     // `":foo"` → field vacío es falsy en JS → texto suelto (busca "foo"), no field-match de "".
-    let b = Bundle::from_files(fm(&[(
+    let b = DocumentSet::from_files(fm(&[(
         "foo-nota.md",
         "---\ntype: N\ntitle: T\ndescription: d\n---\n\n# H\n",
     )]));
@@ -702,7 +702,7 @@ fn query_campo_vacio_es_texto_suelto() {
 //
 // La función pura `workspace_revision(files: &FileMap, writable: &[RelPath])` (aún NO
 // implementada) calcula una identidad determinista del contenido escribible del workspace:
-// filtra a los `writableRoots` (slice vacío = todo el bundle es escribible, coherente con
+// filtra a los `writableRoots` (slice vacío = todo el workspace es escribible, coherente con
 // E9-H05), EXCLUYE todo `.lodestar/` y cualquier root fuera de `writable` (referenceRoots),
 // ordena por `RelPath`, hashea cada contenido con blake3 y combina path+hash en un hash raíz.
 // Estos tests aseveran PROPIEDADES (determinismo, exclusión, sensibilidad), nunca el hash
@@ -727,7 +727,7 @@ fn revision_independiente_del_orden() {
     inverso.insert(b.clone(), "contenido B".to_string());
     inverso.insert(a.clone(), "contenido A".to_string());
 
-    // writable vacío = todo el bundle es escribible.
+    // writable vacío = todo el workspace es escribible.
     assert_eq!(
         workspace_revision(&ascendente, &[]),
         workspace_revision(&inverso, &[]),
@@ -856,19 +856,19 @@ types:
 }
 
 // --- E10-H07: validación schema-driven (`core::schema::validate_schema`) -----
-// Función PURA `validate_schema(&Bundle, &Schema) -> Vec<Check>`: por cada concepto con
+// Función PURA `validate_schema(&DocumentSet, &Schema) -> Vec<Check>`: por cada documento con
 // `type` conocido comprueba `required_fields` (falta → SCHEMA-REQFIELD/Err) y `status ∈
 // allowed_statuses` (fuera → SCHEMA-STATUS/Err). Aditiva: sin schema, cero checks.
 
 /// Criterio `falta_campo_obligatorio`: `DocType decision` con `requiredFields:[rationale]` y un
-/// concepto `decision` SIN `rationale` → un `Check{code:SCHEMA-REQFIELD, level:Err}` sobre ese path,
+/// documento `decision` SIN `rationale` → un `Check{code:SCHEMA-REQFIELD, level:Err}` sobre ese path,
 /// con `msg` no vacío que nombra el campo que falta.
 #[test]
 fn falta_campo_obligatorio() {
     use lodestar_core::schema::{validate_schema, DocType, Schema};
 
-    // Bundle: un concepto `type: decision` SIN el campo obligatorio `rationale`.
-    let b = Bundle::from_files(fm(&[(
+    // Workspace: un documento `type: decision` SIN el campo obligatorio `rationale`.
+    let b = DocumentSet::from_files(fm(&[(
         "d.md",
         "---\ntype: decision\ntitle: Migrar a Rust\nstatus: proposed\n---\n\n# H\n\ncuerpo\n",
     )]));
@@ -898,7 +898,7 @@ fn falta_campo_obligatorio() {
     );
     assert!(
         reqfield.targets.contains(&path),
-        "el check debe apuntar al path del concepto; targets: {:?}",
+        "el check debe apuntar al path del documento; targets: {:?}",
         reqfield.targets
     );
     assert!(
@@ -912,15 +912,15 @@ fn falta_campo_obligatorio() {
     );
 }
 
-/// Criterio `status_no_permitido`: un concepto con `status: invented` fuera de `allowedStatuses`
+/// Criterio `status_no_permitido`: un documento con `status: invented` fuera de `allowedStatuses`
 /// → `Check{code:SCHEMA-STATUS, level:Err}` con `msg` no vacío que nombra el status inválido.
 /// `required_fields` se deja VACÍO para aislar este criterio del de campos obligatorios.
 #[test]
 fn status_no_permitido() {
     use lodestar_core::schema::{validate_schema, DocType, Schema};
 
-    // Concepto con `status: invented`, fuera de los estados permitidos.
-    let b = Bundle::from_files(fm(&[(
+    // Documento con `status: invented`, fuera de los estados permitidos.
+    let b = DocumentSet::from_files(fm(&[(
         "d.md",
         "---\ntype: decision\ntitle: X\nstatus: invented\n---\n\n# H\n\ncuerpo\n",
     )]));
@@ -958,13 +958,13 @@ fn status_no_permitido() {
     );
 }
 
-/// Criterio `sin_schema_sin_checks`: el mismo bundle validado contra `Schema::default()` (bundle
-/// sin `schema.yaml`) NO produce ningún check schema-driven (compat con bundles OKF actuales).
+/// Criterio `sin_schema_sin_checks`: el mismo workspace validado contra `Schema::default()` (doc_set
+/// sin `schema.yaml`) NO produce ningún check schema-driven (compat con workspaces OKF actuales).
 #[test]
 fn sin_schema_sin_checks() {
     use lodestar_core::schema::{validate_schema, Schema};
 
-    let b = Bundle::from_files(fm(&[(
+    let b = DocumentSet::from_files(fm(&[(
         "d.md",
         "---\ntype: decision\ntitle: X\nstatus: invented\n---\n\n# H\n\ncuerpo\n",
     )]));
@@ -974,7 +974,7 @@ fn sin_schema_sin_checks() {
     assert_eq!(
         checks,
         Vec::<Check>::new(),
-        "un bundle sin schema no debe producir checks schema-driven"
+        "un workspace sin schema no debe producir checks schema-driven"
     );
 }
 
@@ -984,29 +984,29 @@ fn sin_schema_sin_checks() {
 // no existe todavía en `crates/lodestar-core/src/schema.rs`). Firma asumida (paralela a
 // `validate_schema` de E10-H07):
 //
-//   pub fn validate_relations(bundle: &Bundle, schema: &Schema) -> Vec<Check>;
+//   pub fn validate_relations(doc_set: &DocumentSet, schema: &Schema) -> Vec<Check>;
 //
-// Por cada concepto cuyo `type` está declarado en el schema, y por cada relación declarada en
+// Por cada documento cuyo `type` está declarado en el schema, y por cada relación declarada en
 // su `DocType.relations` (BTreeMap<nombre, RelationDef>), lee el campo del frontmatter con ese
 // NOMBRE (vive en `Frontmatter.extra`, valor = secuencia YAML de paths target) y comprueba:
-//   1. target existe como concepto del bundle → si no, `CheckCode::RelTarget` (Err).
+//   1. target existe como documento del workspace → si no, `CheckCode::RelTarget` (Err).
 //   2. el `type` del target ∈ `RelationDef.target_types` (vacío = cualquiera) → si no,
 //      `CheckCode::RelType` (Err).
 //   3. nº de targets respeta `RelationDef.cardinality` ("one" ⇒ máx. 1) → si no,
 //      `CheckCode::RelCard` (Err).
-// Cada `Check` con `level: Err`, `msg` en español no vacío, `targets` = [path del concepto
+// Cada `Check` con `level: Err`, `msg` en español no vacío, `targets` = [path del documento
 // origen] y `range` al campo de la relación. Los paths target del frontmatter se representan
 // como el `RelPath` del fichero destino tal cual (p. ej. `capitulo.md`), sin barra inicial.
 
 /// Criterio `relacion_target_roto`: una relación `appears_in` a un target inexistente →
-/// `Check{code:REL-TARGET, level:Err}` sobre el concepto origen, con `msg` no vacío y `range`
+/// `Check{code:REL-TARGET, level:Err}` sobre el documento origen, con `msg` no vacío y `range`
 /// presente (acota el campo de la relación).
 #[test]
 fn relacion_target_roto() {
     use lodestar_core::schema::{validate_relations, DocType, RelationDef, Schema};
 
-    // Concepto `character` con `appears_in` a un capítulo que no existe en el bundle.
-    let b = Bundle::from_files(fm(&[(
+    // Documento `character` con `appears_in` a un capítulo que no existe en el workspace.
+    let b = DocumentSet::from_files(fm(&[(
         "juan.md",
         "---\ntype: character\ntitle: Juan\nappears_in:\n  - capitulo_fantasma.md\n---\n\n# Juan\n\ncuerpo\n",
     )]));
@@ -1042,7 +1042,7 @@ fn relacion_target_roto() {
     );
     assert!(
         target.targets.contains(&path),
-        "el check debe apuntar al concepto origen; targets: {:?}",
+        "el check debe apuntar al documento origen; targets: {:?}",
         target.targets
     );
     assert!(!target.msg.is_empty(), "el msg del check no debe ser vacío");
@@ -1052,15 +1052,15 @@ fn relacion_target_roto() {
     );
 }
 
-/// Criterio `relacion_tipo_invalido`: una relación a un concepto cuyo `type` NO está en
-/// `RelationDef.target_types` → `Check{code:REL-TYPE, level:Err}` sobre el concepto origen, con
+/// Criterio `relacion_tipo_invalido`: una relación a un documento cuyo `type` NO está en
+/// `RelationDef.target_types` → `Check{code:REL-TYPE, level:Err}` sobre el documento origen, con
 /// `msg` no vacío. El target EXISTE y la cardinalidad se respeta (aísla el criterio del tipo).
 #[test]
 fn relacion_tipo_invalido() {
     use lodestar_core::schema::{validate_relations, DocType, RelationDef, Schema};
 
     // `juan` (character) → appears_in `espada` (type item), pero `appears_in` solo admite `chapter`.
-    let b = Bundle::from_files(fm(&[
+    let b = DocumentSet::from_files(fm(&[
         (
             "juan.md",
             "---\ntype: character\ntitle: Juan\nappears_in:\n  - espada.md\n---\n\n# Juan\n\ncuerpo\n",
@@ -1110,21 +1110,21 @@ fn relacion_tipo_invalido() {
     );
     assert!(
         tipo.targets.contains(&path),
-        "el check debe apuntar al concepto origen; targets: {:?}",
+        "el check debe apuntar al documento origen; targets: {:?}",
         tipo.targets
     );
     assert!(!tipo.msg.is_empty(), "el msg del check no debe ser vacío");
 }
 
 /// Criterio `relacion_cardinalidad`: una relación de cardinalidad `one` con DOS targets →
-/// `Check{code:REL-CARD, level:Err}` sobre el concepto origen, con `msg` no vacío. Ambos targets
+/// `Check{code:REL-CARD, level:Err}` sobre el documento origen, con `msg` no vacío. Ambos targets
 /// existen y son de tipo válido (`target_types` vacío = cualquiera) para aislar el criterio.
 #[test]
 fn relacion_cardinalidad() {
     use lodestar_core::schema::{validate_relations, DocType, RelationDef, Schema};
 
     // `mentor` es cardinalidad "one" pero `juan` declara DOS mentores (ambos existen, tipo libre).
-    let b = Bundle::from_files(fm(&[
+    let b = DocumentSet::from_files(fm(&[
         (
             "juan.md",
             "---\ntype: character\ntitle: Juan\nmentor:\n  - pedro.md\n  - ana.md\n---\n\n# Juan\n\ncuerpo\n",
@@ -1169,7 +1169,7 @@ fn relacion_cardinalidad() {
     );
     assert!(
         card.targets.contains(&path),
-        "el check debe apuntar al concepto origen; targets: {:?}",
+        "el check debe apuntar al documento origen; targets: {:?}",
         card.targets
     );
     assert!(!card.msg.is_empty(), "el msg del check no debe ser vacío");
@@ -1180,9 +1180,9 @@ fn relacion_cardinalidad() {
 // Operaciones puras del core sobre el grafo de enlaces (aristas = `out_links`/`resolve_link`,
 // la MISMA representación que `analyze().out`/`inn` y `graph_model`/`neighborhood`). Firmas
 // asumidas (fase roja — aún NO existen en `crates/lodestar-core/src/graph.rs`; se exponen como
-// métodos de `Bundle`, en línea con `neighborhood`/`graph_model`/`backlinks`):
+// métodos de `DocumentSet`, en línea con `neighborhood`/`graph_model`/`backlinks`):
 //
-//   impl Bundle {
+//   impl DocumentSet {
 //       /// Camino más corto DIRIGIDO de `a` a `b` (siguiendo aristas salientes), incluyendo
 //       /// ambos extremos. `[a, .., b]`. Vacío (`vec![]`) si no hay camino — NUNCA error.
 //       pub fn path_between(&self, a: &RelPath, b: &RelPath) -> Vec<RelPath>;
@@ -1194,11 +1194,11 @@ fn relacion_cardinalidad() {
 //       pub fn components(&self) -> Vec<Vec<RelPath>>;
 //   }
 //
-// Fixtures: cada concepto lleva frontmatter válido (`type`/`title`/`description`) para ser
-// concepto real; las aristas se montan con enlaces markdown `[x](/x.md)` en el cuerpo (mismo
+// Fixtures: cada documento lleva frontmatter válido (`type`/`title`/`description`) para ser
+// documento real; las aristas se montan con enlaces markdown `[x](/x.md)` en el cuerpo (mismo
 // patrón que `analyze_backlinks_son_inversa_de_out`), sin ghosts ni reservados.
 
-/// Nodo concepto con `body` como cuerpo (donde van los enlaces markdown que forman aristas).
+/// Nodo documento con `body` como cuerpo (donde van los enlaces markdown que forman aristas).
 fn nodo(title: &str, body: &str) -> String {
     format!("---\ntype: N\ntitle: {title}\ndescription: d\n---\n\n# H\n\n{body}\n")
 }
@@ -1207,7 +1207,7 @@ fn nodo(title: &str, body: &str) -> String {
 /// dirigido, incluyendo los dos extremos).
 #[test]
 fn path_between_directo() {
-    let b = Bundle::from_files(fm(&[
+    let b = DocumentSet::from_files(fm(&[
         ("a.md", &nodo("A", "[b](/b.md)")),
         ("b.md", &nodo("B", "[c](/c.md)")),
         ("c.md", &nodo("C", "cuerpo")),
@@ -1228,7 +1228,7 @@ fn path_between_directo() {
 /// NO debe aparecer en ningún ciclo reportado.
 #[test]
 fn detecta_ciclo() {
-    let b = Bundle::from_files(fm(&[
+    let b = DocumentSet::from_files(fm(&[
         ("a.md", &nodo("A", "[b](/b.md)")),
         ("b.md", &nodo("B", "[a](/a.md)")),
         // D enlaza a A pero nadie enlaza a D: entra al ciclo pero no forma parte de él.
@@ -1256,7 +1256,7 @@ fn detecta_ciclo() {
 /// componentes, y cada nodo pertenece a exactamente una.
 #[test]
 fn dos_componentes() {
-    let b = Bundle::from_files(fm(&[
+    let b = DocumentSet::from_files(fm(&[
         ("a.md", &nodo("A", "[b](/b.md)")),
         ("b.md", &nodo("B", "cuerpo")),
         ("c.md", &nodo("C", "[d](/d.md)")),
@@ -1287,7 +1287,7 @@ fn dos_componentes() {
 /// (`vec![]`), NO un error.
 #[test]
 fn sin_camino() {
-    let b = Bundle::from_files(fm(&[
+    let b = DocumentSet::from_files(fm(&[
         ("a.md", &nodo("A", "[b](/b.md)")),
         ("b.md", &nodo("B", "cuerpo")),
         // C aislado: ni sale ni entra hacia el grupo de A.
@@ -1310,7 +1310,7 @@ fn sin_camino() {
 // Fase ROJA: los tipos del plan (`ChangeSet`, `NormalizedOperation`, los newtypes
 // `ChangeSetId`/`PlanHash`/`ReceiptId`, y los tipos de análisis `RiskAssessment`/`RiskLevel`/
 // `SemanticDiff`/`ValidationReport`) todavía NO existen en producción. Se esperan alcanzables vía
-// `use lodestar_core::types::*` (mismo patrón que `WorkspaceRevision`/`ConceptRef`). Estos tests
+// `use lodestar_core::types::*` (mismo patrón que `WorkspaceRevision`/`DocumentRef`). Estos tests
 // hacen ROJO por API ausente (símbolos inexistentes) hasta que E12-H01 los defina en `core::types`.
 //
 // Forma ASUMIDA del contrato (solo lo que el criterio de aceptación fija; la forma interna de
@@ -1424,8 +1424,8 @@ fn changeset_roundtrip() {
 //
 //     pub fn assess_risk(
 //         ops: &[NormalizedOperation],
-//         bundle_before: &Bundle,
-//         bundle_after: &Bundle,
+//         workspace_before: &DocumentSet,
+//         workspace_after: &DocumentSet,
 //     ) -> RiskAssessment
 //
 // Hasta que E12-H02 la defina, estos dos tests hacen ROJO por SÍMBOLO AUSENTE (compile-fail: el
@@ -1434,16 +1434,16 @@ fn changeset_roundtrip() {
 //
 // Representación del `deprecate` (el enunciado admite dos): se modela como
 // `NormalizedOperation::TransitionStatus { path, to: "deprecated" }` — la variante semántica cuyo
-// nombre expresa el ciclo de vida (E12-H07). El `bundle_after` refleja ese estado deprecado para
-// que `before`/`after` sean coherentes; los backlinks del concepto no cambian con la transición.
+// nombre expresa el ciclo de vida (E12-H07). El `workspace_after` refleja ese estado deprecado para
+// que `before`/`after` sean coherentes; los backlinks del documento no cambian con la transición.
 //
-// Los tests aseveran PROPIEDADES (nivel de riesgo, razón no vacía que menciona el concepto o los
+// Los tests aseveran PROPIEDADES (nivel de riesgo, razón no vacía que menciona el documento o los
 // backlinks), nunca el texto exacto de la razón ni el umbral interno de la heurística.
 
-/// Bundle con un concepto `core.md` (en el `status` dado) al que apuntan 7 conceptos referentes,
+/// Workspace con un documento `core.md` (en el `status` dado) al que apuntan 7 documentos referentes,
 /// más un `index.md` mínimo. Sirve para construir el `before` (activo) y el `after` (deprecado) del
 /// criterio `riesgo_deprecate_backlinks`.
-fn bundle_con_7_backlinks(status_core: &str) -> Bundle {
+fn workspace_con_7_backlinks(status_core: &str) -> DocumentSet {
     let mut files: FileMap = FileMap::new();
     files.insert(
         RelPath::new("core.md").unwrap(),
@@ -1461,15 +1461,15 @@ fn bundle_con_7_backlinks(status_core: &str) -> Bundle {
         RelPath::new("index.md").unwrap(),
         "---\ntype: Index\ntitle: Bundle\ndescription: Índice del bundle\nokf_version: \"0.1\"\n---\n\n# B\n".to_string(),
     );
-    Bundle::from_files(files)
+    DocumentSet::from_files(files)
 }
 
-/// Criterio `riesgo_deprecate_backlinks`: **Dado** un `deprecate` sobre un concepto con 7 backlinks,
+/// Criterio `riesgo_deprecate_backlinks`: **Dado** un `deprecate` sobre un documento con 7 backlinks,
 /// **Cuando** se evalúa, **Entonces** `level >= Medium` con una razón que lo menciona.
 #[test]
 fn riesgo_deprecate_backlinks() {
-    let antes = bundle_con_7_backlinks("active");
-    let despues = bundle_con_7_backlinks("deprecated");
+    let antes = workspace_con_7_backlinks("active");
+    let despues = workspace_con_7_backlinks("deprecated");
 
     // Precondición del fixture: `core.md` recibe exactamente 7 backlinks entrantes (r1..r7).
     let entrantes = antes
@@ -1490,20 +1490,20 @@ fn riesgo_deprecate_backlinks() {
 
     assert!(
         risk.level >= RiskLevel::Medium,
-        "deprecar un concepto con 7 backlinks debe ser al menos Medium, fue {:?}",
+        "deprecar un documento con 7 backlinks debe ser al menos Medium, fue {:?}",
         risk.level,
     );
     assert!(
         !risk.reasons.is_empty(),
         "un riesgo >= Medium debe justificarse con al menos una razón",
     );
-    // La razón debe mencionar el concepto afectado (`core`) o el alcance del blast-radius (los
+    // La razón debe mencionar el documento afectado (`core`) o el alcance del blast-radius (los
     // 7 backlinks) — propiedad, no texto exacto.
     assert!(
         risk.reasons
             .iter()
             .any(|r| r.contains("core") || r.contains('7')),
-        "alguna razón debe mencionar el concepto (`core`) o sus backlinks (7); razones = {:?}",
+        "alguna razón debe mencionar el documento (`core`) o sus backlinks (7); razones = {:?}",
         risk.reasons,
     );
 }
@@ -1512,8 +1512,8 @@ fn riesgo_deprecate_backlinks() {
 /// **Cuando** se evalúa, **Entonces** `level: Low`.
 #[test]
 fn riesgo_bajo_aislado() {
-    // Concepto `sola.md` sin ningún referente: nadie le apunta. `index.md` tampoco lo lista.
-    let construir = |titulo: &str| -> Bundle {
+    // Documento `sola.md` sin ningún referente: nadie le apunta. `index.md` tampoco lo lista.
+    let construir = |titulo: &str| -> DocumentSet {
         let mut files: FileMap = FileMap::new();
         files.insert(
             RelPath::new("sola.md").unwrap(),
@@ -1525,7 +1525,7 @@ fn riesgo_bajo_aislado() {
             RelPath::new("index.md").unwrap(),
             "---\ntype: Index\ntitle: Bundle\ndescription: Índice del bundle\nokf_version: \"0.1\"\n---\n\n# B\n".to_string(),
         );
-        Bundle::from_files(files)
+        DocumentSet::from_files(files)
     };
     let antes = construir("Antes");
     let despues = construir("Despues");
@@ -1555,7 +1555,7 @@ fn riesgo_bajo_aislado() {
     assert_eq!(
         risk.level,
         RiskLevel::Low,
-        "un patch de frontmatter sobre un concepto aislado debe ser riesgo Low, fue {:?} (razones {:?})",
+        "un patch de frontmatter sobre un documento aislado debe ser riesgo Low, fue {:?} (razones {:?})",
         risk.level,
         risk.reasons,
     );
@@ -1569,8 +1569,8 @@ fn riesgo_bajo_aislado() {
 // dependencia de schema). Firma ASUMIDA:
 //
 //     pub fn semantic_diff(
-//         before: &Bundle,
-//         after: &Bundle,
+//         before: &DocumentSet,
+//         after: &DocumentSet,
 //         schema: &Schema,
 //     ) -> SemanticDiff
 //
@@ -1600,11 +1600,11 @@ fn diff_created_modified() {
     let b = RelPath::new("b.md").unwrap();
 
     // `before`: solo B. `after`: A nuevo + B con el cuerpo modificado.
-    let before = Bundle::from_files(fm(&[(
+    let before = DocumentSet::from_files(fm(&[(
         "b.md",
         "---\ntype: N\ntitle: B\ndescription: d\nstatus: draft\n---\n\n# B\n\ncuerpo original\n",
     )]));
-    let after = Bundle::from_files(fm(&[
+    let after = DocumentSet::from_files(fm(&[
         (
             "a.md",
             "---\ntype: N\ntitle: A\ndescription: d\nstatus: draft\n---\n\n# A\n\ncuerpo nuevo\n",
@@ -1648,12 +1648,12 @@ fn diff_resuelve_diagnostico() {
     );
 
     // `before`: `d.md` (decision) SIN `rationale` → viola SCHEMA-REQFIELD.
-    let before = Bundle::from_files(fm(&[(
+    let before = DocumentSet::from_files(fm(&[(
         "d.md",
         "---\ntype: decision\ntitle: Migrar\nstatus: proposed\n---\n\n# H\n\ncuerpo\n",
     )]));
-    // `after`: el mismo concepto CON `rationale` → deja de violar SCHEMA-REQFIELD.
-    let after = Bundle::from_files(fm(&[(
+    // `after`: el mismo documento CON `rationale` → deja de violar SCHEMA-REQFIELD.
+    let after = DocumentSet::from_files(fm(&[(
         "d.md",
         "---\ntype: decision\ntitle: Migrar\nstatus: proposed\nrationale: porque sí\n---\n\n# H\n\ncuerpo\n",
     )]));
@@ -1721,7 +1721,7 @@ fn diff_introduce_diagnostico() {
         "---\ntype: chapter\ntitle: Capitulo\n---\n\n# Capitulo\n\ncuerpo\n",
     );
     // `before`: `juan.appears_in` → `cap.md` (existe, tipo válido): relación conforme.
-    let before = Bundle::from_files(fm(&[
+    let before = DocumentSet::from_files(fm(&[
         (
             "juan.md",
             "---\ntype: character\ntitle: Juan\nappears_in:\n  - cap.md\n---\n\n# Juan\n\ncuerpo\n",
@@ -1729,7 +1729,7 @@ fn diff_introduce_diagnostico() {
         cap,
     ]));
     // `after`: `juan.appears_in` → `capitulo_fantasma.md` (inexistente): rompe la relación.
-    let after = Bundle::from_files(fm(&[
+    let after = DocumentSet::from_files(fm(&[
         (
             "juan.md",
             "---\ntype: character\ntitle: Juan\nappears_in:\n  - capitulo_fantasma.md\n---\n\n# Juan\n\ncuerpo\n",
@@ -1771,7 +1771,7 @@ fn diff_introduce_diagnostico() {
 // `assess_risk`/`semantic_diff`: análisis del plan, y necesita el `Schema` para contar los checks
 // schema-driven —SCHEMA-*/REL-*— del resultado hipotético). Firmas ASUMIDAS:
 //
-//     pub fn validate_result(bundle: &Bundle, schema: &Schema) -> ValidationReport
+//     pub fn validate_result(doc_set: &DocumentSet, schema: &Schema) -> ValidationReport
 //
 //     pub struct PlanPolicy {
 //         pub require_conformant_result: bool,  // wire `requireConformantResult`
@@ -1781,7 +1781,7 @@ fn diff_introduce_diagnostico() {
 //
 // Semántica ASUMIDA (spec E12-H04, `REFACTOR §11.1`):
 //   - `validate_result` compone `analyze()` + `validate_schema` + `validate_relations` sobre el
-//     bundle hipotético; `summary` cuenta Err/Warn/Info; `conformant = (summary.errors == 0)`;
+//     `DocumentSet` hipotético; `summary` cuenta Err/Warn/Info; `conformant = (summary.errors == 0)`;
 //     `diagnostics` acumula los `Check`.
 //   - `can_apply`: si `require_conformant_result` y NO conforme → false; si `!allow_warnings` y hay
 //     warnings → false; en otro caso → true.
@@ -1796,10 +1796,10 @@ fn diff_introduce_diagnostico() {
 // representación interna ni el orden de los diagnósticos.
 
 /// Criterio `plan_no_conforme_rechaza`: **Dado** un plan cuyo resultado introduce un `Err` (un
-/// concepto `decision` sin el campo obligatorio `rationale` → `SCHEMA-REQFIELD`/Err) y
+/// documento `decision` sin el campo obligatorio `rationale` → `SCHEMA-REQFIELD`/Err) y
 /// `policy.requireConformantResult:true`, **Cuando** se valida, **Entonces** `conformant:false` y
 /// el plan NO es aplicable (`can_apply == false`).
-/// (Benchmark §17: "Crear un concepto sin campo obligatorio → plan rechazado".)
+/// (Benchmark §17: "Crear un documento sin campo obligatorio → plan rechazado".)
 #[test]
 fn plan_no_conforme_rechaza() {
     use lodestar_core::plan::{can_apply, validate_result, PlanPolicy};
@@ -1816,8 +1816,8 @@ fn plan_no_conforme_rechaza() {
         },
     );
 
-    // Bundle hipotético resultante del plan: un concepto `decision` SIN `rationale` → Err duro.
-    let hipotetico = Bundle::from_files(fm(&[(
+    // DocumentSet hipotético resultante del plan: un documento `decision` SIN `rationale` → Err duro.
+    let hipotetico = DocumentSet::from_files(fm(&[(
         "d.md",
         "---\ntype: decision\ntitle: Migrar a Rust\nstatus: proposed\n---\n\n# H\n\ncuerpo\n",
     )]));
@@ -1827,7 +1827,7 @@ fn plan_no_conforme_rechaza() {
         validate_schema(&hipotetico, &schema)
             .iter()
             .any(|c| c.code == CheckCode::SchemaReqfield && c.level == Severity::Err),
-        "el bundle hipotético debe introducir un `SCHEMA-REQFIELD`/Err",
+        "el workspace hipotético debe introducir un `SCHEMA-REQFIELD`/Err",
     );
 
     let report = validate_result(&hipotetico, &schema);
@@ -1866,11 +1866,11 @@ fn plan_warnings_permitido() {
     // código se retiró — el catálogo mínimo de `§20.9` no tiene HOY ningún productor de `Warn`
     // dentro de `all_checks` (los tres códigos vivos de `conform` son `Err`, y `LINK-STUB`/
     // `LINK-REL` son `Info`). Así que el criterio se prueba en dos mitades:
-    //   (a) sobre un bundle real: sin errores → conforme y aplicable;
+    //   (a) sobre un workspace real: sin errores → conforme y aplicable;
     //   (b) sobre un `ValidationReport` construido a mano con warnings: es la ÚNICA forma de
     //       ejercitar hoy la rama `allowWarnings` de `can_apply`, y sigue siendo el contrato que
     //       el criterio fija (E17/E20 devolverán códigos `Warn` al catálogo).
-    let hipotetico = Bundle::from_files(fm(&[(
+    let hipotetico = DocumentSet::from_files(fm(&[(
         "nota.md",
         "---\ntype: Nota\ntitle: T\ndescription: d\ntags: uno\n---\n\n# H\n\ncuerpo\n",
     )]));
@@ -1879,7 +1879,7 @@ fn plan_warnings_permitido() {
     assert_eq!(
         hipotetico.analyze().hard_fail,
         0,
-        "el bundle hipotético no debe tener ningún Err",
+        "el workspace hipotético no debe tener ningún Err",
     );
 
     let report = validate_result(&hipotetico, &Schema::default());
@@ -1932,15 +1932,15 @@ fn plan_warnings_permitido() {
 // autor de tests; el implementador queda vinculado a ellas):
 //
 //   pub fn normalize_create(
-//       bundle: &Bundle, schema: &Schema, path: &RelPath,
+//       doc_set: &DocumentSet, schema: &Schema, path: &RelPath,
 //       doctype: &str, title: Option<&str>, body: Option<String>,
 //   ) -> Result<NormalizedOperation, CoreError>;
 //   pub fn normalize_replace_text(
-//       bundle: &Bundle, path: &RelPath,
+//       doc_set: &DocumentSet, path: &RelPath,
 //       find: &str, replace: &str, expected_occurrences: Option<usize>,
 //   ) -> Result<NormalizedOperation, CoreError>;
 //   pub fn normalize_edit_section(
-//       bundle: &Bundle, path: &RelPath,
+//       doc_set: &DocumentSet, path: &RelPath,
 //       heading_path: &[String], mode: EditSectionMode, content: &str,
 //   ) -> Result<NormalizedOperation, CoreError>;
 //
@@ -1986,8 +1986,8 @@ fn cuerpo_resuelto(op: &NormalizedOperation) -> &str {
 fn create_usa_plantilla() {
     use lodestar_core::schema::{DocType, Schema};
 
-    // Bundle mínimo (solo el index raíz): el concepto a crear todavía no existe.
-    let b = Bundle::from_files(fm(&[(
+    // Workspace mínimo (solo el index raíz): el documento a crear todavía no existe.
+    let b = DocumentSet::from_files(fm(&[(
         "index.md",
         "---\ntype: Index\ntitle: Bundle\ndescription: Índice del bundle\nokf_version: \"0.1\"\n---\n\n# B\n",
     )]));
@@ -2015,7 +2015,7 @@ fn create_usa_plantilla() {
         None, // sin body ⇒ debe salir de la plantilla
     ) {
         Ok(op) => op,
-        Err(_) => panic!("crear un concepto con plantilla válida no debe fallar la normalización"),
+        Err(_) => panic!("crear un documento con plantilla válida no debe fallar la normalización"),
     };
 
     let NormalizedOperation::Create {
@@ -2052,7 +2052,7 @@ fn create_usa_plantilla() {
 #[test]
 fn replace_text_ocurrencias() {
     // Cuerpo con la palabra `token` EXACTAMENTE dos veces.
-    let b = Bundle::from_files(fm(&[(
+    let b = DocumentSet::from_files(fm(&[(
         "auth.md",
         "---\ntype: guide\ntitle: Auth\ndescription: d\nstatus: draft\n---\n\n# Auth\n\n\
          El token se envía en el header. Renueva el token cada hora.\n",
@@ -2087,7 +2087,7 @@ fn edit_section_acotado() {
                ## Token rotation\n\nRotar cada 90 días.\n\n\
                ## Password policy\n\nMínimo 12 caracteres.\n\n\
                # Deployment\n\nDesplegar con CI.\n";
-    let b = Bundle::from_files(fm(&[("seguridad.md", raw)]));
+    let b = DocumentSet::from_files(fm(&[("seguridad.md", raw)]));
     let path = RelPath::new("seguridad.md").unwrap();
 
     let heading_path = vec!["Security".to_string(), "Token rotation".to_string()];
@@ -2162,7 +2162,7 @@ Texto después del bloque de código.
 
 Ver el manual.
 "#;
-    let b = Bundle::from_files(fm(&[("uso.md", raw)]));
+    let b = DocumentSet::from_files(fm(&[("uso.md", raw)]));
     let path = RelPath::new("uso.md").unwrap();
 
     let heading_path = vec!["Uso".to_string()];
@@ -2219,20 +2219,20 @@ Ver el manual.
 // Firmas ASUMIDAS (documentadas por el autor de tests; el implementador queda vinculado a ellas):
 //
 //   pub fn normalize_move(
-//       bundle: &Bundle, from: &RelPath, to: &RelPath, rewrite_inbound_links: bool,
+//       doc_set: &DocumentSet, from: &RelPath, to: &RelPath, rewrite_inbound_links: bool,
 //   ) -> Result<Vec<NormalizedOperation>, CoreError>;
 //   pub fn normalize_delete(
-//       bundle: &Bundle, path: &RelPath, policy: InboundLinksPolicy,
+//       doc_set: &DocumentSet, path: &RelPath, policy: InboundLinksPolicy,
 //   ) -> Result<Vec<NormalizedOperation>, CoreError>;
 //
 // Forma RESUELTA del `Vec` de salida (contrato que estos tests fijan):
 //   * `normalize_move(.., rewrite:true)` → un `NormalizedOperation::Move { from, to, .. }` MÁS,
-//     por cada concepto que enlaza a `from`, una operación que reescribe ese enlace a `to`. Como el
+//     por cada documento que enlaza a `from`, una operación que reescribe ese enlace a `to`. Como el
 //     enlace vive en el CUERPO (`[x](/from.md)`), la reescritura natural es un `ReplaceBody` del
-//     concepto entrante con el href actualizado a `/to.md`. Estos tests NO exigen la variante exacta
+//     documento entrante con el href actualizado a `/to.md`. Estos tests NO exigen la variante exacta
 //     (aceptan cualquier op de contenido cuyo `path` sea el entrante), pero SÍ exigen que el enlace
 //     quede realmente reescrito: la op referencia `/destino.md` y ya NO `/target.md`.
-//   * `normalize_delete(.., Reject)` sobre un concepto con entrantes → `Err`. El error DEBE ser la
+//   * `normalize_delete(.., Reject)` sobre un documento con entrantes → `Err`. El error DEBE ser la
 //     variante de `CoreError` que mapea a `ErrorCode::InboundLinksExist` (wire "INBOUND_LINKS_EXIST",
 //     definido en `types.rs`). Como hoy `CoreError` NO tiene esa variante, el implementador debe
 //     añadirla con ese nombre (`CoreError::InboundLinksExist`, alineado con `ErrorCode`). La aserción
@@ -2246,7 +2246,7 @@ Ver el manual.
 // (compile-fail: `plan::normalize_move`/`plan::normalize_delete` — y la variante de error — no
 // existen), lo que impide compilar el binario de tests del crate. Es el rojo esperado.
 
-/// Path del concepto tocado por una op de CONTENIDO (reescritura o eliminación de enlace). Las ops
+/// Path del documento tocado por una op de CONTENIDO (reescritura o eliminación de enlace). Las ops
 /// estructurales (`Move`/`Delete`) devuelven `None`: se filtran para aislar las ops de enlace.
 fn path_op_enlace(op: &NormalizedOperation) -> Option<RelPath> {
     match op {
@@ -2273,7 +2273,7 @@ fn move_reescribe_entrantes() {
     let from = RelPath::new("target.md").unwrap();
     let to = RelPath::new("destino.md").unwrap();
 
-    // Bundle: index raíz + `target.md` + 30 conceptos `r1.md`..`r30.md`, cada uno con un enlace de
+    // Workspace: index raíz + `target.md` + 30 documentos `r1.md`..`r30.md`, cada uno con un enlace de
     // cuerpo `[target](/target.md)`.
     let mut files: FileMap = FileMap::new();
     files.insert(
@@ -2294,7 +2294,7 @@ fn move_reescribe_entrantes() {
         entrantes_esperados.push(p);
     }
     let entrantes_esperados = paths_ordenados(entrantes_esperados);
-    let b = Bundle::from_files(files);
+    let b = DocumentSet::from_files(files);
 
     // Precondición del fixture: `target.md` recibe exactamente 30 backlinks entrantes.
     let inbound = b.backlinks(&from).inbound.len();
@@ -2304,7 +2304,7 @@ fn move_reescribe_entrantes() {
     );
 
     let ops = lodestar_core::plan::normalize_move(&b, &from, &to, true)
-        .expect("mover un concepto con backlinks y rewrite:true no debe fallar la normalización");
+        .expect("mover un documento con backlinks y rewrite:true no debe fallar la normalización");
 
     // 1) Hay exactamente UN rename `Move { from: target, to: destino }`.
     let moves: Vec<&NormalizedOperation> = ops
@@ -2339,7 +2339,7 @@ fn move_reescribe_entrantes() {
                 path_op_enlace(op).unwrap_or_else(|| {
                     panic!(
                         "toda op no-`Move` del change set debe ser una reescritura de contenido de \
-                         un concepto entrante; fue {op:?}",
+                         un documento entrante; fue {op:?}",
                     )
                 })
             })
@@ -2367,7 +2367,7 @@ fn move_reescribe_entrantes() {
 }
 
 /// Criterio `delete_referenciado_rechaza`: **Dado** un `delete` con `inboundLinksPolicy` por defecto
-/// (`reject`) sobre un concepto referenciado, **Cuando** se normaliza, **Entonces** se rechaza con
+/// (`reject`) sobre un documento referenciado, **Cuando** se normaliza, **Entonces** se rechaza con
 /// `INBOUND_LINKS_EXIST`.
 ///
 /// Cómo se asevera el rechazo: `normalize_delete(.., Reject)` devuelve `Err`, y el `Debug` del error
@@ -2381,7 +2381,7 @@ fn delete_referenciado_rechaza() {
     // Guarda de coherencia con `types.rs`: el `ErrorCode` esperado mapea a este wire.
     assert_eq!(ErrorCode::InboundLinksExist.as_str(), "INBOUND_LINKS_EXIST");
 
-    let b = Bundle::from_files(fm(&[
+    let b = DocumentSet::from_files(fm(&[
         ("index.md", "---\ntype: Index\ntitle: Bundle\ndescription: Índice del bundle\nokf_version: \"0.1\"\n---\n\n# B\n"),
         (
             "target.md",
@@ -2401,7 +2401,7 @@ fn delete_referenciado_rechaza() {
 
     let err = lodestar_core::plan::normalize_delete(&b, &target, InboundLinksPolicy::Reject)
         .expect_err(
-            "borrar un concepto referenciado con la política por defecto `reject` debe fallar",
+            "borrar un documento referenciado con la política por defecto `reject` debe fallar",
         );
 
     let dbg = format!("{err:?}");
@@ -2412,14 +2412,14 @@ fn delete_referenciado_rechaza() {
     );
 }
 
-/// Criterio `delete_remove_links`: **Dado** un `delete` con `remove_links` sobre un concepto
+/// Criterio `delete_remove_links`: **Dado** un `delete` con `remove_links` sobre un documento
 /// referenciado, **Cuando** se normaliza, **Entonces** el change set incluye el borrado MÁS quitar
-/// esos enlaces en los conceptos entrantes.
+/// esos enlaces en los documentos entrantes.
 #[test]
 fn delete_remove_links() {
     let target = RelPath::new("target.md").unwrap();
 
-    let b = Bundle::from_files(fm(&[
+    let b = DocumentSet::from_files(fm(&[
         ("index.md", "---\ntype: Index\ntitle: Bundle\ndescription: Índice del bundle\nokf_version: \"0.1\"\n---\n\n# B\n"),
         (
             "target.md",
@@ -2447,7 +2447,7 @@ fn delete_remove_links() {
     ]);
 
     let ops = lodestar_core::plan::normalize_delete(&b, &target, InboundLinksPolicy::RemoveLinks)
-        .expect("borrar con `remove_links` sobre un concepto referenciado no debe fallar");
+        .expect("borrar con `remove_links` sobre un documento referenciado no debe fallar");
 
     // 1) Hay exactamente un `Delete { path: target }`.
     let deletes: Vec<&NormalizedOperation> = ops
@@ -2475,7 +2475,7 @@ fn delete_remove_links() {
             .map(|op| {
                 path_op_enlace(op).unwrap_or_else(|| {
                     panic!(
-                        "toda op no-`Delete` del change set debe quitar el enlace de un concepto \
+                        "toda op no-`Delete` del change set debe quitar el enlace de un documento \
                          entrante; fue {op:?}",
                     )
                 })
@@ -2513,18 +2513,18 @@ fn delete_remove_links() {
 // Firmas ASUMIDAS (documentadas por el autor de tests; vinculan al implementador):
 //
 //   pub fn normalize_add_relation(
-//       bundle: &Bundle, schema: &Schema,
+//       doc_set: &DocumentSet, schema: &Schema,
 //       source: &RelPath, relation: &str, target: &RelPath,
 //   ) -> Result<NormalizedOperation, CoreError>;
 //   pub fn normalize_remove_relation(
-//       bundle: &Bundle, schema: &Schema,
+//       doc_set: &DocumentSet, schema: &Schema,
 //       source: &RelPath, relation: &str, target: &RelPath,
 //   ) -> Result<NormalizedOperation, CoreError>;
 //   pub fn normalize_transition_status(
-//       bundle: &Bundle, schema: &Schema, reference: &RelPath, to: &str,
+//       doc_set: &DocumentSet, schema: &Schema, reference: &RelPath, to: &str,
 //   ) -> Result<NormalizedOperation, CoreError>;
 //   pub fn normalize_apply_fix(
-//       bundle: &Bundle, schema: &Schema, fix_id: &str,
+//       doc_set: &DocumentSet, schema: &Schema, fix_id: &str,
 //   ) -> Result<NormalizedOperation, CoreError>;
 //
 // Contrato que estos tests fijan:
@@ -2539,14 +2539,14 @@ fn delete_remove_links() {
 //     Si `to` no está permitido → `Err` (rechazo; la spec no fija un wire concreto, así que solo
 //     se exige `is_err`). Si está permitido → `Ok(PatchFrontmatter{ status: to })` (discriminador
 //     contra un stub que siempre falle).
-//   * `normalize_apply_fix` recomputa los diagnósticos del bundle bajo el schema (analyze +
+//   * `normalize_apply_fix` recomputa los diagnósticos del workspace bajo el schema (analyze +
 //     validate_schema + validate_relations) y materializa el `Fix` `safe` cuyo `fix_id` casa.
 //
 // DIAGNÓSTICO FIXABLE ASUMIDO (decisión del autor, documentada para el implementador):
 //   El diagnóstico `REL-TARGET` de una relación tipada ROTA (un target que no existe como
-//   concepto) debe emitir un `Fix { fix_id, title, safe: true }` cuyo arreglo es «quitar la
+//   documento) debe emitir un `Fix { fix_id, title, safe: true }` cuyo arreglo es «quitar la
 //   relación rota». El `fix_id` es estable (derivable del diagnóstico). `normalize_apply_fix`
-//   resuelve ese fix a un `PatchFrontmatter` sobre el concepto origen que QUITA el target roto del
+//   resuelve ese fix a un `PatchFrontmatter` sobre el documento origen que QUITA el target roto del
 //   campo de la relación (deja de referenciarlo). El test obtiene el `fix_id` recomputando
 //   `validate_relations` y leyendo `check.fixes[].fix_id` del primer fix `safe`; hoy los checks NO
 //   emiten fixes, así que el implementador debe hacer que `validate_relations` adjunte ese `Fix`.
@@ -2573,7 +2573,7 @@ fn add_relation_invalida() {
     );
 
     // `heroe` (character) quiere añadir `mentor -> espada`, pero `espada` es `item`, no `character`.
-    let b = Bundle::from_files(fm(&[
+    let b = DocumentSet::from_files(fm(&[
         (
             "heroe.md",
             "---\ntype: character\ntitle: Heroe\n---\n\n# Heroe\n\ncuerpo\n",
@@ -2634,7 +2634,7 @@ fn add_relation_invalida() {
 fn transicion_invalida() {
     use lodestar_core::schema::{DocType, Schema};
 
-    let b = Bundle::from_files(fm(&[(
+    let b = DocumentSet::from_files(fm(&[(
         "d1.md",
         "---\ntype: decision\ntitle: D1\nstatus: proposed\n---\n\n# D1\n\ncuerpo\n",
     )]));
@@ -2665,7 +2665,7 @@ fn transicion_invalida() {
     };
     assert_eq!(
         path, &reference,
-        "el patch debe recaer sobre el concepto transicionado"
+        "el patch debe recaer sobre el documento transicionado"
     );
     assert!(
         patch.0.contains_key("status"),
@@ -2683,13 +2683,13 @@ fn transicion_invalida() {
 /// Diagnóstico fixable asumido (ver cabecera de sección): una relación tipada ROTA (`REL-TARGET`)
 /// cuyo `Fix` `safe` es «quitar la relación rota». El test obtiene el `fix_id` recomputando
 /// `validate_relations` y leyendo el primer `Fix` `safe`; luego exige que `normalize_apply_fix`
-/// resuelva a un `PatchFrontmatter` sobre el concepto origen que YA NO referencia el target roto.
+/// resuelva a un `PatchFrontmatter` sobre el documento origen que YA NO referencia el target roto.
 #[test]
 fn apply_fix_safe() {
     use lodestar_core::schema::{validate_relations, DocType, RelationDef, Schema};
 
     // `heroe` (character) declara `mentor -> fantasma.md`, pero `fantasma.md` NO existe → REL-TARGET.
-    let b = Bundle::from_files(fm(&[(
+    let b = DocumentSet::from_files(fm(&[(
         "heroe.md",
         "---\ntype: character\ntitle: Heroe\nmentor:\n  - fantasma.md\n---\n\n# Heroe\n\ncuerpo\n",
     )]));
@@ -2738,7 +2738,7 @@ fn apply_fix_safe() {
     };
     assert_eq!(
         path, &source,
-        "el patch debe recaer sobre el concepto de la relación rota"
+        "el patch debe recaer sobre el documento de la relación rota"
     );
     assert!(
         patch.0.contains_key("mentor"),

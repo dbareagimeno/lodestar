@@ -612,11 +612,11 @@ fn no_borra_desconocidas() {
 //
 // **Lo que estas pruebas NO fijan**: la forma final de `Analysis` (`documents`/`outgoing`/
 // `incoming`/`dangling`/`diagnostics` con `ResolvedLink`/`DanglingLink` es E17-H04) ni el
-// renombre `concepts` → `documents` (E16-H06). Aquí se usan los nombres vigentes —
-// `concepts`/`out`/`inn`/`per_file` — porque esta historia solo RETIRA campos.
+// renombre `concepts` → `documents` (ya hecho en E16-H06). Aquí se usan los nombres vigentes —
+// `documents`/`out`/`inn`/`per_file` — porque esta historia solo RETIRA campos.
 
 use lodestar_core::types::{Analysis, FileMap, RelPath};
-use lodestar_core::Bundle;
+use lodestar_core::DocumentSet;
 
 /// `RelPath` para rutas obviamente válidas (invariante #6: nunca un string crudo).
 fn rp(p: &str) -> RelPath {
@@ -779,19 +779,19 @@ fn index_md_es_documento_normal() {
 /// Criterio 2: un enlace desde `index.md` es una **arista** normal, no una relación de
 /// pertenencia.
 ///
-/// Hoy `compute_analysis` (`bundle.rs:57-70`) se salta el índice como origen y vuelca sus enlaces
-/// en `in_index`; `backlinks` (`bundle.rs:182-216`) los aparta en `index_refs`.
+/// Hoy `compute_analysis` (`document_set.rs:57-70`) se salta el índice como origen y vuelca sus enlaces
+/// en `in_index`; `backlinks` (`document_set.rs:182-216`) los aparta en `index_refs`.
 #[test]
 fn enlace_desde_indice_es_arista() {
-    let b = Bundle::from_files(ws_enlaces());
+    let b = DocumentSet::from_files(ws_enlaces());
     let a = b.analyze();
     let index = rp("index.md");
     let alfa = rp("alfa.md");
 
     assert!(
-        a.concepts.contains(&index),
+        a.documents.contains(&index),
         "`index.md` es un documento más del análisis, no un fichero de servicio: {:?}",
-        a.concepts
+        a.documents
     );
     assert!(
         a.out.get(&index).is_some_and(|t| t.contains(&alfa)),
@@ -836,7 +836,7 @@ fn enlace_desde_indice_es_arista() {
 /// Criterio 3: un documento sin entrantes pero **con** salientes NO es aislado (`§20.7`).
 #[test]
 fn con_salientes_no_es_aislado() {
-    let b = Bundle::from_files(ws_enlaces());
+    let b = DocumentSet::from_files(ws_enlaces());
     let a = b.analyze();
 
     assert!(
@@ -873,7 +873,7 @@ fn con_salientes_no_es_aislado() {
 /// OKF cae en E16-H05 y no puede bloquear a esta historia.
 #[test]
 fn aislado_no_es_error() {
-    let b = Bundle::from_files(ws_enlaces());
+    let b = DocumentSet::from_files(ws_enlaces());
     let a = b.analyze();
     let solo = rp("solo.md");
 
@@ -923,7 +923,7 @@ fn okf_version_es_metadata_normal() {
     );
 
     // (b) Como concepto del motor, desaparece: `Analysis` no lo promociona a campo propio.
-    let b = Bundle::from_files(ws_enlaces());
+    let b = DocumentSet::from_files(ws_enlaces());
     let a = b.analyze();
     let cl = claves_wire(a);
     assert!(
@@ -947,7 +947,7 @@ fn okf_version_es_metadata_normal() {
 // // lodestar_core::model
 // /// Título presentable de un documento. Función PURA (el core no hace I/O) y total: siempre
 // /// devuelve algo, porque el último eslabón de la cadena —el nombre del fichero— existe
-// /// siempre. La consumen `ConceptSummary`/`DocumentSummary` y `GraphNode` (E17-H05) y el FTS
+// /// siempre. La consumen `DocumentSummary`/`DocumentSummary` y `GraphNode` (E17-H05) y el FTS
 // /// del store (E18); recibe las tres piezas por separado —y no un `&Parsed`— para que el store
 // /// pueda derivarlo sin re-parsear el documento entero.
 // pub fn derived_title(
@@ -1001,7 +1001,7 @@ fn titulo_frontmatter_gana() {
     );
 
     // Un `title` vacío no es un título presentable: la cadena continúa. (Es la semántica que ya
-    // tiene `Bundle::list_concepts` con su `.filter(|s| !s.is_empty())`, `bundle.rs:160`.)
+    // tiene `DocumentSet::list_documents` con su `.filter(|s| !s.is_empty())`, `document_set.rs:160`.)
     let vacio = concat!(
         "---\n",
         "title: \"\"\n",
@@ -1235,7 +1235,7 @@ fn title_no_es_reservada() {
 //
 // /// Aplica un patch de frontmatter sobre el texto crudo de UN documento. Pura (`§CLAUDE` #2):
 // /// ni toca disco ni necesita el resto del workspace — por eso recibe el `raw` entero y no un
-// /// `&Bundle`: el patch quirúrgico necesita el `span` del bloque DENTRO del documento.
+// /// `&DocumentSet`: el patch quirúrgico necesita el `span` del bloque DENTRO del documento.
 // pub fn patch_frontmatter(
 //     raw: &str,
 //     patch: &FrontmatterPatch,
@@ -1282,7 +1282,7 @@ fn title_no_es_reservada() {
 // `patch_sobre_frontmatter_ilegible_falla`.
 //
 // La variante **debe ser nueva**: `CoreError::UnreadableFrontmatter`. Ninguna existente sirve —
-// `NormalizeTargetNotFound` mapea a `ConceptNotFound` y mentiría (el documento existe), y
+// `NormalizeTargetNotFound` mapea a `DocumentNotFound` y mentiría (el documento existe), y
 // `OperationNotApplicable` mapea a `InternalIoError`, que culparía al motor de un estado del
 // fichero del usuario. El agente necesita oír «el frontmatter de este documento no es
 // interpretable: repáralo (o escríbelo crudo) antes de tocar su metadata». Su mapeo a `ErrorCode`
@@ -1908,7 +1908,7 @@ fn diagnosticos<'a>(a: &'a Analysis, p: &RelPath) -> &'a [Check] {
 
 /// Analiza un workspace de un solo documento y devuelve su análisis y su ruta.
 fn analiza_uno(path: &str, raw: &str) -> (Analysis, RelPath) {
-    let b = Bundle::from_files(mapa(&[(path, raw)]));
+    let b = DocumentSet::from_files(mapa(&[(path, raw)]));
     (b.analyze().clone(), rp(path))
 }
 
@@ -2130,7 +2130,7 @@ fn aislado_y_headings_no_diagnostican() {
         "\n",
         "###### Y un H6\n",
     );
-    let b = Bundle::from_files(mapa(&[
+    let b = DocumentSet::from_files(mapa(&[
         (
             "docs/aislado.md",
             "---\nstatus: draft\n---\n\n# Aislado\n\nNi entrantes ni salientes.\n",

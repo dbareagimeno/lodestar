@@ -10,7 +10,7 @@ use std::path::Path;
 
 use lodestar_core::schema::Schema;
 
-/// Ruta del fichero de esquemas, relativa al root del bundle.
+/// Ruta del fichero de esquemas, relativa al root del workspace.
 pub const SCHEMA_FILE: &str = ".lodestar/schema.yaml";
 
 /// Loader de `.lodestar/schema.yaml`.
@@ -19,7 +19,7 @@ pub struct WorkspaceSchema;
 impl WorkspaceSchema {
     /// Carga `<root>/.lodestar/schema.yaml` si existe; si no, devuelve `Schema::default()` (vacío
     /// y permisivo — mismo patrón que `Config::load`/`WorkspaceConfig::load`: la ausencia de
-    /// fichero no es un error, compat con bundles OKF actuales sin esquema declarado). YAML
+    /// fichero no es un error, compat con workspaces OKF actuales sin esquema declarado). YAML
     /// presente pero malformado sí es un error explícito.
     ///
     /// Rellena `DocType::name` desde la clave del mapa `types` cuando el YAML no lo trae

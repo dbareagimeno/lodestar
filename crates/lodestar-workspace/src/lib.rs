@@ -16,7 +16,7 @@ use lodestar_core::types::{
     Analysis, Backlinks, Direction, FileMap, FrontmatterPatch, GraphModel, Neighborhood, RelPath,
     WorkspaceRevision, WriteOutcome,
 };
-use lodestar_core::Bundle;
+use lodestar_core::DocumentSet;
 use lodestar_store::{IndexEvent, Store, Watcher};
 
 use crate::discovery::DiscoveryPolicy;
@@ -45,11 +45,11 @@ pub use journal::{Journal, JournalState, OpState};
 pub use lock::WorkspaceLock;
 pub use recovery::RecoveryDir;
 pub use schema::WorkspaceSchema;
-pub use snapshot::BundleSnapshot;
+pub use snapshot::WorkspaceSnapshot;
 pub use staging::StagingDir;
 pub use transaction::transaction_id;
 
-/// Handle unificado de un bundle abierto.
+/// Handle unificado de un workspace abierto.
 pub struct Workspace {
     root: PathBuf,
     /// Configuración de la sesión (`.lodestar/config.yaml`), leída **una sola vez** al abrir.
@@ -116,7 +116,7 @@ impl Workspace {
     /// El inventario `.md` del workspace según [`Workspace::discovery_policy`] (E15-H07).
     ///
     /// Es el **único** camino de lectura del conocimiento canónico desde disco: sustituye al
-    /// `io::load_bundle` de v0.2.x en todos sus llamadores, de modo que el bundle, la
+    /// `io::load_bundle` de v0.2.x en todos sus llamadores, de modo que el workspace, la
     /// [`WorkspaceRevision`] y el motor transaccional vean exactamente el mismo conjunto de
     /// documentos (si divergieran, el control optimista protegería ficheros que el plan ni
     /// siquiera ve).
@@ -131,7 +131,7 @@ impl Workspace {
         Ok(discovery::discover(&self.root, &self.discovery_policy())?.files)
     }
 
-    /// El directorio raíz del bundle abierto (E10-H08: lo expone `App::workspace_status` como
+    /// El directorio raíz del workspace abierto (E10-H08: lo expone `App::workspace_status` como
     /// `root` de la proyección de estado).
     pub fn root(&self) -> &Path {
         &self.root
@@ -252,49 +252,49 @@ impl Workspace {
 
     // --- lectura ----------------------------------------------------------
 
-    /// Carga el bundle desde disco (el core es la autoridad).
-    pub fn bundle(&self) -> Result<Bundle, WorkspaceError> {
-        Ok(Bundle::from_files(self.discover_files()?))
+    /// Carga el workspace desde disco (el core es la autoridad).
+    pub fn document_set(&self) -> Result<DocumentSet, WorkspaceError> {
+        Ok(DocumentSet::from_files(self.discover_files()?))
     }
 
     /// Snapshot unificado: files + analysis + graph, todo junto.
-    pub fn snapshot(&self) -> Result<BundleSnapshot, WorkspaceError> {
-        let bundle = self.bundle()?;
-        Ok(BundleSnapshot {
-            files: bundle.files().clone(),
-            analysis: bundle.analyze().clone(),
-            graph: bundle.graph_model(),
+    pub fn snapshot(&self) -> Result<WorkspaceSnapshot, WorkspaceError> {
+        let doc_set = self.document_set()?;
+        Ok(WorkspaceSnapshot {
+            files: doc_set.files().clone(),
+            analysis: doc_set.analyze().clone(),
+            graph: doc_set.graph_model(),
         })
     }
 
     /// Análisis (conformidad/grafo derivados).
     pub fn analyze(&self) -> Result<Analysis, WorkspaceError> {
-        Ok(self.bundle()?.analyze().clone())
+        Ok(self.document_set()?.analyze().clone())
     }
 
-    /// Vecindad de enlaces de un concept.
+    /// Vecindad de enlaces de un documento.
     pub fn backlinks(&self, p: &RelPath) -> Result<Backlinks, WorkspaceError> {
-        Ok(self.bundle()?.backlinks(p))
+        Ok(self.document_set()?.backlinks(p))
     }
 
-    /// Subgrafo dirigido alrededor de un concept.
+    /// Subgrafo dirigido alrededor de un documento.
     pub fn neighborhood(
         &self,
         p: &RelPath,
         depth: u32,
         dir: Direction,
     ) -> Result<Neighborhood, WorkspaceError> {
-        Ok(self.bundle()?.neighborhood(p, depth, dir))
+        Ok(self.document_set()?.neighborhood(p, depth, dir))
     }
 
     /// Grafo completo.
     pub fn graph_model(&self) -> Result<GraphModel, WorkspaceError> {
-        Ok(self.bundle()?.graph_model())
+        Ok(self.document_set()?.graph_model())
     }
 
     /// Query estructurada (devuelve paths).
     pub fn query(&self, dsl: &str) -> Result<Vec<RelPath>, WorkspaceError> {
-        Ok(self.bundle()?.query(dsl))
+        Ok(self.document_set()?.query(dsl))
     }
 
     // --- escritura validada (por el ÚNICO escritor) -----------------------
@@ -304,8 +304,8 @@ impl Workspace {
     /// transacción anterior se interrumpió a mitad y [`Workspace::recover`] aún no la
     /// completó/restauró. El gate se comprueba ANTES de tocar el canónico —para no publicar sobre
     /// un estado a medio recuperar (principio «nunca un estado parcial silencioso»)— en toda
-    /// escritura de alto nivel del canónico ([`Workspace::create_concept`],
-    /// [`Workspace::write_concept`], [`Workspace::merge_frontmatter`]) y en [`Workspace::publish`]
+    /// escritura de alto nivel del canónico ([`Workspace::create_document`],
+    /// [`Workspace::write_document`], [`Workspace::merge_frontmatter`]) y en [`Workspace::publish`]
     /// (que excluye su propio journal en curso). La restauración de `recover` NO pasa por aquí: escribe por `io::write_atomic`/
     /// `io::delete` directamente, de modo que puede reparar el canónico con el gate levantado.
     fn guard_recovery(&self) -> Result<(), WorkspaceError> {
@@ -319,8 +319,8 @@ impl Workspace {
         Ok(())
     }
 
-    /// Crea un concept validado y lo escribe por el único escritor (si es conforme).
-    pub fn create_concept(
+    /// Crea un documento validado y lo escribe por el único escritor (si es conforme).
+    pub fn create_document(
         &self,
         p: &RelPath,
         ty: &str,
@@ -329,9 +329,9 @@ impl Workspace {
         allow_nonconformant: bool,
     ) -> Result<WriteOutcome, WorkspaceError> {
         self.guard_recovery()?;
-        let bundle = self.bundle()?;
+        let doc_set = self.document_set()?;
         let now = now_iso8601();
-        let outcome = bundle.create_concept(p, ty, title, body, Some(&now), allow_nonconformant);
+        let outcome = doc_set.create_document(p, ty, title, body, Some(&now), allow_nonconformant);
         if outcome.written {
             io::write_atomic(&self.root, &outcome.path, &outcome.raw)?;
             self.cache_upsert(&outcome.path, &outcome.raw);
@@ -339,17 +339,17 @@ impl Workspace {
         Ok(outcome)
     }
 
-    /// Escribe contenido **crudo** en un concept (editor multi-escritor), validado por el core.
+    /// Escribe contenido **crudo** en un documento (editor multi-escritor), validado por el core.
     /// Rechazo = `written:false` (no un `Err`). Escribe por el único escritor si es conforme.
-    pub fn write_concept(
+    pub fn write_document(
         &self,
         p: &RelPath,
         raw: &str,
         allow_nonconformant: bool,
     ) -> Result<WriteOutcome, WorkspaceError> {
         self.guard_recovery()?;
-        let bundle = self.bundle()?;
-        let outcome = bundle.write_concept_raw(p, raw, allow_nonconformant);
+        let doc_set = self.document_set()?;
+        let outcome = doc_set.write_document_raw(p, raw, allow_nonconformant);
         if outcome.written {
             io::write_atomic(&self.root, &outcome.path, &outcome.raw)?;
             self.cache_upsert(&outcome.path, &outcome.raw);
@@ -357,17 +357,17 @@ impl Workspace {
         Ok(outcome)
     }
 
-    /// Lee el contenido crudo de un concept desde disco.
-    pub fn read_concept(&self, p: &RelPath) -> Result<String, WorkspaceError> {
+    /// Lee el contenido crudo de un documento desde disco.
+    pub fn read_document(&self, p: &RelPath) -> Result<String, WorkspaceError> {
         std::fs::read_to_string(self.root.join(p.as_str()))
             .map_err(|e| WorkspaceError::Io(e.to_string()))
     }
 
     /// Lista las filas del árbol de documentos (título/isolated/invalid resueltos por el core).
-    pub fn list_concepts(
+    pub fn list_documents(
         &self,
-    ) -> Result<Vec<lodestar_core::types::ConceptSummary>, WorkspaceError> {
-        Ok(self.bundle()?.list_concepts())
+    ) -> Result<Vec<lodestar_core::types::DocumentSummary>, WorkspaceError> {
+        Ok(self.document_set()?.list_documents())
     }
 
     /// Aplica un patch de frontmatter (null-borra) y lo escribe si es conforme.
@@ -377,8 +377,8 @@ impl Workspace {
         patch: FrontmatterPatch,
     ) -> Result<WriteOutcome, WorkspaceError> {
         self.guard_recovery()?;
-        let bundle = self.bundle()?;
-        let outcome = bundle.merge_frontmatter(p, patch);
+        let doc_set = self.document_set()?;
+        let outcome = doc_set.merge_frontmatter(p, patch);
         if outcome.written {
             io::write_atomic(&self.root, &outcome.path, &outcome.raw)?;
             self.cache_upsert(&outcome.path, &outcome.raw);
@@ -391,7 +391,7 @@ impl Workspace {
 ///
 /// Paridad con el prototipo, que escribe `new Date().toISOString().replace(/\.\d+Z$/,"Z")`
 /// (truncando los milisegundos). El core es puro y no toca el reloj; la workspace —único escritor
-/// con I/O— computa el instante y lo inyecta en `create_concept`. Se formatea a mano (algoritmo
+/// con I/O— computa el instante y lo inyecta en `create_document`. Se formatea a mano (algoritmo
 /// civil-desde-días de Howard Hinnant) para no arrastrar una dependencia de fecha/hora.
 fn now_iso8601() -> String {
     let secs = std::time::SystemTime::now()

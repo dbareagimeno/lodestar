@@ -6,7 +6,7 @@ use rusqlite::{params, Transaction};
 
 use lodestar_core::model;
 use lodestar_core::types::{CheckCode, FileMap, RelPath, Severity};
-use lodestar_core::Bundle;
+use lodestar_core::DocumentSet;
 
 use crate::error::StoreError;
 
@@ -15,13 +15,13 @@ use crate::error::StoreError;
 /// `ORPHAN` desapareció del filtro con E16-H02: el core ya no lo emite (el aislamiento es una
 /// propiedad del grafo, no un diagnóstico), así que no hay nada que filtrar.
 ///
-/// Se computan con el core (autoridad) sobre un bundle de un solo fichero: como los checks
-/// locales dependen solo del contenido propio, el resultado es idéntico al del bundle completo.
+/// Se computan con el core (autoridad) sobre un workspace de un solo fichero: como los checks
+/// locales dependen solo del contenido propio, el resultado es idéntico al del workspace completo.
 fn local_diagnostics(path: &RelPath, raw: &str) -> Vec<lodestar_core::types::Check> {
     let mut fm = FileMap::new();
     fm.insert(path.clone(), raw.to_string());
-    let bundle = Bundle::from_files(fm);
-    bundle
+    let doc_set = DocumentSet::from_files(fm);
+    doc_set
         .analyze()
         .per_file
         .get(path)

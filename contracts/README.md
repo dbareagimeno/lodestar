@@ -8,9 +8,9 @@
 ## Qué es (y qué NO es) un contrato aquí
 
 - **Los tipos NO se definen aquí.** El invariante #4 del repo manda: los tipos viven **una sola
-  vez** en `crates/lodestar-core/src/types.rs` (y su espejo generado/manual
-  `frontend/src/lib/ipc/types.ts`). En los YAML, los tipos se **referencian por nombre**
-  (`Analysis`, `BundleSnapshot`, `Check`, `RelPath`…). Si un YAML redefine la forma de un tipo,
+  vez** en `crates/lodestar-core/src/types.rs` (ya no hay espejo TS: se fue con la UI a
+  `experimental/ui-desktop`). En los YAML, los tipos se **referencian por nombre**
+  (`Analysis`, `WorkspaceSnapshot`, `Check`, `RelPath`…). Si un YAML redefine la forma de un tipo,
   es un bug del contrato.
 - **La superficie sí se define aquí**: nombres de comandos/eventos/tools (congelados por
   `ARCHITECTURE.md`), parámetros, retorno, errores y semántica (incluidos los invariantes que la

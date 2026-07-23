@@ -17,7 +17,7 @@
 //! ## Estado rojo/verde (honesto, para el implementador)
 //!   - `bench_search_payload_acotado`: **VERDE (composición/regresión)**. `knowledge_search` YA acota
 //!     el payload desde E10-H09: [`SearchResult`] no expone `body`, solo `snippet` + metadatos. Este
-//!     test **fija esa garantía como no-regresión de escala**: con ~10k conceptos de cuerpo grande,
+//!     test **fija esa garantía como no-regresión de escala**: con ~10k documentos de cuerpo grande,
 //!     ningún cuerpo completo viaja en la respuesta y el payload es estrictamente menor que la suma de
 //!     los cuerpos que representa. NO es un rojo artificial: si una optimización futura reintrodujera
 //!     el `body` en la respuesta, este test lo cazaría.
@@ -50,7 +50,7 @@ use lodestar_app::{App, Profile, SearchFilters};
 use lodestar_core::plan::PlanPolicy;
 use lodestar_core::types::ErrorCode;
 
-/// Escribe un `.md` (creando los directorios intermedios) dentro del bundle temporal.
+/// Escribe un `.md` (creando los directorios intermedios) dentro del workspace temporal.
 fn escribe(root: &Path, rel: &str, contenido: &str) {
     let ruta = root.join(rel);
     if let Some(dir) = ruta.parent() {
@@ -71,32 +71,32 @@ fn policy_permisiva() -> PlanPolicy {
 // ===========================================================================
 // E14-H05 · Criterio 1 — `bench_search_payload_acotado`.
 //
-// Dado una fixture de ~10k conceptos (cuerpos grandes), Cuando se mide `knowledge_search`, Entonces
+// Dado una fixture de ~10k documentos (cuerpos grandes), Cuando se mide `knowledge_search`, Entonces
 // la latencia se registra Y el payload queda acotado (resúmenes/snippets, NO el cuerpo entero).
 // ===========================================================================
 
-/// Nº de conceptos sintéticos: respeta el «~10k» de la spec (search es O(n), representativo de escala).
+/// Nº de documentos sintéticos: respeta el «~10k» de la spec (search es O(n), representativo de escala).
 const N_CONCEPTOS: usize = 10_000;
 
-/// Marca única enterrada al FINAL del cuerpo de cada concepto, lejos de cualquier término buscado y
+/// Marca única enterrada al FINAL del cuerpo de cada documento, lejos de cualquier término buscado y
 /// más allá de la ventana del snippet (160 chars): si aparece en la respuesta, un cuerpo completo
 /// viajó. Sirve de centinela robusto de «payload NO incluye el body».
 const CENTINELA: &str = "CENTINELA-CUERPO-QUE-NO-DEBE-VIAJAR";
 
-/// Cuerpo grande (~2 KB) por concepto: un arranque con el término buscable, mucho relleno, y el
+/// Cuerpo grande (~2 KB) por documento: un arranque con el término buscable, mucho relleno, y el
 /// centinela al final (bien pasado el snippet window de 160 chars).
 fn cuerpo_grande(i: usize) -> String {
-    let relleno = "Contenido de relleno sintetico para dar cuerpo al concepto. ".repeat(40);
+    let relleno = "Contenido de relleno sintetico para dar cuerpo al documento. ".repeat(40);
     format!(
-        "# Concepto {i}\n\nEste concepto sintetico numero {i} describe un tema de prueba.\n\n{relleno}\n\n{CENTINELA}-{i}\n"
+        "# Documento {i}\n\nEste documento sintetico numero {i} describe un tema de prueba.\n\n{relleno}\n\n{CENTINELA}-{i}\n"
     )
 }
 
-/// Construye en `root` un bundle con `N_CONCEPTOS` conceptos de cuerpo grande. El `index.md` es
+/// Construye en `root` un workspace con `N_CONCEPTOS` documentos de cuerpo grande. El `index.md` es
 /// mínimo (no lista los 10k: la conformidad no importa para search, y listar 10k enlaces solo
-/// ralentizaría sin cambiar el conjunto que casa). Cada concepto casa el término «concepto» por su
+/// ralentizaría sin cambiar el conjunto que casa). Cada documento casa el término «documento» por su
 /// título/descripción/cuerpo.
-fn genera_bundle_grande(root: &Path) {
+fn genera_workspace_grande(root: &Path) {
     escribe(
         root,
         "index.md",
@@ -105,9 +105,9 @@ fn genera_bundle_grande(root: &Path) {
     for i in 0..N_CONCEPTOS {
         escribe(
             root,
-            &format!("c/concepto-{i:05}.md"),
+            &format!("c/documento-{i:05}.md"),
             &format!(
-                "---\ntype: Concept\ntitle: Concepto {i}\ndescription: concepto sintetico numero {i}\n---\n\n{}",
+                "---\ntype: Concept\ntitle: Documento {i}\ndescription: documento sintetico numero {i}\n---\n\n{}",
                 cuerpo_grande(i)
             ),
         );
@@ -119,25 +119,25 @@ fn bench_search_payload_acotado() {
     let dir = tempfile::tempdir().unwrap();
 
     let t_gen = Instant::now();
-    genera_bundle_grande(dir.path());
+    genera_workspace_grande(dir.path());
     let gen_ms = t_gen.elapsed().as_millis();
 
     let t_open = Instant::now();
-    let app = App::open(dir.path()).expect("el bundle grande debe abrir");
+    let app = App::open(dir.path()).expect("el workspace grande debe abrir");
     let open_ms = t_open.elapsed().as_millis();
 
     // Página completa (tope 100) para tener suficientes resultados sobre los que medir la cota.
     let filtros = SearchFilters::default();
     let t_search = Instant::now();
     let res = app
-        .knowledge_search("concepto", &filtros, None, Some(100), None)
-        .expect("knowledge_search debe responder sobre el bundle grande");
+        .knowledge_search("documento", &filtros, None, Some(100), None)
+        .expect("knowledge_search debe responder sobre el workspace grande");
     let search_ms = t_search.elapsed().as_millis();
 
     // (Registro de latencia — SIN umbral duro; solo se mide/imprime, para no hacer el test frágil.)
     let payload = serde_json::to_string(&res).expect("SearchResults debe serializar");
     eprintln!(
-        "[bench_search] conceptos={N_CONCEPTOS} gen={gen_ms}ms open={open_ms}ms search={search_ms}ms \
+        "[bench_search] documentos={N_CONCEPTOS} gen={gen_ms}ms open={open_ms}ms search={search_ms}ms \
          resultados_pagina={} total_aprox={} payload_bytes={}",
         res.results.len(),
         res.total_approximate,
@@ -147,7 +147,7 @@ fn bench_search_payload_acotado() {
     // --- Propiedad funcional 1: la búsqueda SÍ casó (no vacua) y devolvió una página no trivial. ---
     assert_eq!(
         res.total_approximate, N_CONCEPTOS,
-        "todos los conceptos casan «concepto»; total_approximate debe ser {N_CONCEPTOS}"
+        "todos los documentos casan «documento»; total_approximate debe ser {N_CONCEPTOS}"
     );
     assert_eq!(
         res.results.len(),
@@ -182,10 +182,10 @@ fn bench_search_payload_acotado() {
         let i: usize = r
             .path
             .as_str()
-            .trim_start_matches("c/concepto-")
+            .trim_start_matches("c/documento-")
             .trim_end_matches(".md")
             .parse()
-            .expect("path de concepto sintético");
+            .expect("path de documento sintético");
         suma_cuerpos += cuerpo_grande(i).len();
     }
 
@@ -226,12 +226,12 @@ fn bench_concurrencia_segura() {
     escribe(
         dir.path(),
         "alfa.md",
-        "---\ntype: Concept\ntitle: Alfa\ndescription: concepto base\n---\n\n# Resumen\n\ncuerpo\n",
+        "---\ntype: Concept\ntitle: Alfa\ndescription: documento base\n---\n\n# Resumen\n\ncuerpo\n",
     );
 
     // Planifica AMBAS operaciones sobre la misma base r0 (planificar no toca el canónico). Cada
     // create escribe un fichero DISTINTO, así el ganador es identificable por su `.md`.
-    let app = App::open(dir.path()).expect("el bundle debe abrir");
+    let app = App::open(dir.path()).expect("el workspace debe abrir");
     let plan_a = app
         .change_plan(
             None,
@@ -258,16 +258,16 @@ fn bench_concurrencia_segura() {
     let id_b = plan_b.change_set_id.clone();
     let raiz = dir.path().to_path_buf();
 
-    // Dos publicadores concurrentes: cada hilo abre su propio `App` sobre el MISMO bundle root y
+    // Dos publicadores concurrentes: cada hilo abre su propio `App` sobre el MISMO workspace root y
     // aplica su plan. Comparten el lock de fichero del sistema (E13-H02).
     let raiz_a = raiz.clone();
     let h_a = std::thread::spawn(move || {
-        let app = App::open(&raiz_a).expect("A abre el bundle");
+        let app = App::open(&raiz_a).expect("A abre el workspace");
         app.change_apply(&id_a, None)
     });
     let raiz_b = raiz.clone();
     let h_b = std::thread::spawn(move || {
-        let app = App::open(&raiz_b).expect("B abre el bundle");
+        let app = App::open(&raiz_b).expect("B abre el workspace");
         app.change_apply(&id_b, None)
     });
 
@@ -308,7 +308,7 @@ fn bench_concurrencia_segura() {
 
     // El workspace reabierto es conforme (sin hard-fails / estado parcial) y su revisión coincide con
     // la que reportó el ganador (durabilidad/coherencia, sin parciales).
-    let app = App::open(&raiz).expect("el bundle debe reabrir tras la concurrencia");
+    let app = App::open(&raiz).expect("el workspace debe reabrir tras la concurrencia");
     let status = app
         .workspace_status(Profile::Standard)
         .expect("workspace_status tras la concurrencia");

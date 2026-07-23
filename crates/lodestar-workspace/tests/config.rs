@@ -11,7 +11,7 @@
 //! 1. **Su ausencia no impide nada** — un directorio sin `.lodestar/` se abre con la política por
 //!    defecto de `§20.5` y Lodestar no le escribe ninguna config encima.
 //! 2. **Lo que declara se obedece** — un `discovery.exclude` del usuario llega al inventario real
-//!    del producto (`Workspace::bundle`), no solo a una struct.
+//!    del producto (`Workspace::document_set`), no solo a una struct.
 //! 3. **Rota es un error, no un default** — un YAML malformado nunca degrada en silencio a la
 //!    política por defecto: un typo relajaría las restricciones del usuario sin avisar.
 //! 4. **Hay un suelo duro que no puede levantar** — `.lodestar/**` queda fuera del inventario
@@ -83,8 +83,8 @@ fn rutas(files: &FileMap) -> Vec<&str> {
 ///
 /// - **la política efectiva** que sirve el punto de inyección único (`Workspace::discovery_policy`)
 ///   es literalmente `DiscoveryPolicy::default()`;
-/// - **el inventario real** que produce (`bundle()`), porque una política correcta que no se cabléa
-///   no vale de nada (misma lección que `bundle_usa_la_politica_de_descubrimiento` en E15-H07);
+/// - **el inventario real** que produce (`document_set()`), porque una política correcta que no se cabléa
+///   no vale de nada (misma lección que `workspace_usa_la_politica_de_descubrimiento` en E15-H07);
 /// - **los defaults de la sección `discovery` del YAML**, que tienen que ser los mismos: si
 ///   divergieran, escribir la sección entera con los valores «de fábrica» daría un descubrimiento
 ///   distinto que no escribirla — una config que *habilita* en vez de limitar.
@@ -110,9 +110,11 @@ fn sin_config_funciona() {
     );
 
     // --- (2) …y llega al inventario real -------------------------------------------
-    let bundle = ws.bundle().expect("el inventario debe cargarse sin config");
+    let doc_set = ws
+        .document_set()
+        .expect("el inventario debe cargarse sin config");
     assert_eq!(
-        rutas(bundle.files()),
+        rutas(doc_set.files()),
         DOCUMENTOS_ARBITRARY.to_vec(),
         "sin config se descubre todo el árbol `.md` a cualquier profundidad"
     );
@@ -158,7 +160,7 @@ fn sin_config_funciona() {
 /// El test no se conforma con que la struct traiga el glob: exige que el glob llegue **al producto**
 /// por los dos caminos que leen conocimiento del disco, y que ambos vean lo mismo:
 ///
-/// - `bundle()` — el inventario que alimenta análisis, grafo, búsqueda y las dos fachadas;
+/// - `document_set()` — el inventario que alimenta análisis, grafo, búsqueda y las dos fachadas;
 /// - `workspace_revision()` — el control optimista del motor transaccional.
 ///
 /// Si el `exclude` llegara solo al primero, un documento excluido seguiría moviendo la revisión del
@@ -185,15 +187,15 @@ fn exclude_configurado() {
     );
 
     // --- …y el inventario del producto lo obedece ------------------------------------
-    let bundle = ws.bundle().unwrap();
+    let doc_set = ws.document_set().unwrap();
     assert!(
-        !contiene(bundle.files(), "notas/x.md"),
+        !contiene(doc_set.files(), "notas/x.md"),
         "`notas/**` está excluido por la config: `notas/x.md` no puede estar en el inventario. \
          Inventario: {:?}",
-        rutas(bundle.files())
+        rutas(doc_set.files())
     );
     assert_eq!(
-        rutas(bundle.files()),
+        rutas(doc_set.files()),
         DOCUMENTOS_ARBITRARY.to_vec(),
         "excluir `notas/**` no puede llevarse por delante ningún otro documento"
     );
@@ -209,7 +211,7 @@ fn exclude_configurado() {
         ws.workspace_revision().unwrap(),
         rev_inicial,
         "un documento excluido por la config NO forma parte de la revisión del workspace: si la \
-         mueve, `workspace_revision` descubre un conjunto distinto del de `bundle()` y el control \
+         mueve, `workspace_revision` descubre un conjunto distinto del de `document_set()` y el control \
          optimista pasa a dar conflictos por ficheros que el plan no ve"
     );
 
@@ -277,10 +279,10 @@ fn config_malformada_es_error() {
     // calculado con una política que el usuario no escribió.
     if let Ok(ws) = Workspace::open_ephemeral(dir.path()) {
         assert!(
-            ws.bundle().is_err(),
+            ws.document_set().is_err(),
             "con la config malformada, ninguna vía puede devolver un inventario: se habría \
              calculado con defaults que el usuario nunca declaró. Inventario servido: {:?}",
-            ws.bundle().map(|b| rutas(b.files()).len())
+            ws.document_set().map(|b| rutas(b.files()).len())
         );
     }
 }
@@ -322,18 +324,18 @@ fn lodestar_toml_ignorado() {
 
     let ws = Workspace::open(dir.path())
         .expect("un `lodestar.toml` en la raíz no puede impedir abrir el workspace");
-    let bundle = ws.bundle().unwrap();
+    let doc_set = ws.document_set().unwrap();
 
     assert!(
-        contiene(bundle.files(), "one/first.md"),
+        contiene(doc_set.files(), "one/first.md"),
         "`lodestar.toml` es un fichero más del proyecto: su `[discovery]` no puede excluir nada. \
          Inventario: {:?}",
-        rutas(bundle.files())
+        rutas(doc_set.files())
     );
     assert!(
-        !contiene(bundle.files(), "two/levels/second.md"),
+        !contiene(doc_set.files(), "two/levels/second.md"),
         "…mientras que el `discovery.exclude` de `.lodestar/config.yaml` sí manda. Inventario: {:?}",
-        rutas(bundle.files())
+        rutas(doc_set.files())
     );
     assert!(
         !ws.discovery_policy().exclude.iter().any(|g| g == "one/**"),
@@ -357,7 +359,7 @@ fn lodestar_toml_ignorado() {
          ya no lo lee, así que no tiene nada que decir sobre su sintaxis",
     );
     assert_eq!(
-        rutas(ws.bundle().unwrap().files()),
+        rutas(ws.document_set().unwrap().files()),
         DOCUMENTOS_ARBITRARY.to_vec(),
         "y el inventario debe ser el completo, como si el fichero no existiera"
     );
@@ -431,8 +433,8 @@ fn exclude_vacio_no_reabre_lodestar() {
     );
 
     let ws = Workspace::open(dir.path()).unwrap();
-    let bundle = ws.bundle().unwrap();
-    let files = bundle.files();
+    let doc_set = ws.document_set().unwrap();
+    let files = doc_set.files();
 
     // --- Mitad 1: lo apagable se apaga de verdad -------------------------------------
     assert!(

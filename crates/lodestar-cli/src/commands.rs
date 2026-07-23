@@ -17,7 +17,7 @@ use crate::sarif;
 /// La salida (`--json`/`--sarif`/humano) se renderiza desde un **único** `Analysis` completo
 /// ([`lodestar_app::App::full_analysis`], un solo `analyze()`): así los diagnósticos `SCHEMA-*`/
 /// `REL-*` que disparan el fallo se **surface an** en el wire, no solo el veredicto. El veredicto
-/// `conformant` (== sin `Err` entre los conceptos, misma semántica que `knowledge_check`) decide el
+/// `conformant` (== sin `Err` entre los documentos, misma semántica que `knowledge_check`) decide el
 /// bloqueo; además, `.lodestar/config.yaml` puede endurecer la puerta bloqueando también avisos
 /// (`gate.blockWarnings`). Exit codes congelados: `0` conforme · `1` bloqueado · `3` runtime/IO
 /// (error del servicio o `.lodestar/config.yaml` inválido — lo detecta ya `App::open`).
@@ -30,11 +30,11 @@ pub fn check(root: &Path, json: bool, sarif_out: bool) -> anyhow::Result<ExitCod
         .full_analysis()
         .map_err(|e| anyhow::anyhow!(e.as_str().to_string()))?;
 
-    // Veredicto == sin `Err` entre los conceptos, misma semántica que `knowledge_check` scope
-    // `workspace` (que también itera `analysis.concepts`): así la fachada no reimplementa el motor,
+    // Veredicto == sin `Err` entre los documentos, misma semántica que `knowledge_check` scope
+    // `workspace` (que también itera `analysis.documents`): así la fachada no reimplementa el motor,
     // solo lee el mismo `Analysis`.
     let conformant = !analysis
-        .concepts
+        .documents
         .iter()
         .filter_map(|p| analysis.per_file.get(p))
         .flatten()
@@ -63,7 +63,7 @@ pub fn render_analysis(
     blocked: bool,
 ) -> anyhow::Result<ExitCode> {
     if json {
-        // Aditivo: serializar el `Analysis` (conserva `concepts`/`hardFail`/… en el wire) y añadir
+        // Aditivo: serializar el `Analysis` (conserva `documents`/`hardFail`/… en el wire) y añadir
         // el veredicto `conformant` del motor completo sin tocar el resto del objeto.
         let mut value = serde_json::to_value(analysis)?;
         if let serde_json::Value::Object(map) = &mut value {
@@ -104,8 +104,8 @@ fn print_human(a: &lodestar_core::types::Analysis, blocked: bool) {
         }
     }
     println!(
-        "\n{} concepts · {} con errores · {} avisos · {}",
-        a.concepts.len(),
+        "\n{} documentos · {} con errores · {} avisos · {}",
+        a.documents.len(),
         // `errs` cuenta TODOS los diagnósticos `Err` de `per_file` (documento + `SCHEMA-*`/`REL-*`
         // fusionados en `full_analysis`), no solo `a.hard_fail`: así el resumen humano es
         // coherente con las líneas `✗` de arriba.

@@ -3,7 +3,7 @@ name = "lodestar-fixtures"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Bundles de ejemplo reusables por los tests de todos los crates."
+description = "Workspaces de ejemplo reusables por los tests de todos los crates."
 # Solo para tests: nunca se publica en crates.io.
 publish = false
 

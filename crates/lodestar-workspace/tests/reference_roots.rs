@@ -15,13 +15,13 @@
 //! -------------------------------------------------------------------------------------------------
 //! API OBJETIVO ASUMIDA (documentada para el implementador — los tests son el contrato de "hecho"):
 //!
-//!   // Referencia externa de un concepto (`implemented_by`/`verified_by`) resuelta contra disco.
+//!   // Referencia externa de un documento (`implemented_by`/`verified_by`) resuelta contra disco.
 //!   pub struct ExternalReference {
 //!       pub path: String,   // el path crudo del frontmatter, p. ej. "src/x.rs"
 //!       pub exists: bool,   // si el fichero existe en disco bajo un `referenceRoot`
 //!   }
 //!
-//!   // Informe de validación de las referencias externas de UN concepto contra `referenceRoots`.
+//!   // Informe de validación de las referencias externas de UN documento contra `referenceRoots`.
 //!   pub struct ExternalRefsReport {
 //!       pub references: Vec<ExternalReference>,   // {path, exists} — alimenta knowledge_get (E10-H10)
 //!       pub diagnostics: Vec<lodestar_core::types::Check>, // referencia externa rota (nuevo código
@@ -30,9 +30,9 @@
 //!   }
 //!
 //!   impl Workspace {
-//!       // Resuelve las referencias externas del concepto contra `referenceRoots` del
+//!       // Resuelve las referencias externas del documento contra `referenceRoots` del
 //!       // `.lodestar/config.yaml` y produce los diagnósticos de referencia rota.
-//!       pub fn external_refs(&self, concept: &RelPath)
+//!       pub fn external_refs(&self, document: &RelPath)
 //!           -> Result<ExternalRefsReport, WorkspaceError>;
 //!
 //!       // Guard del único escritor: `Err` si `path` cae bajo un `referenceRoot` (inmutable),
@@ -61,8 +61,8 @@ fn escribe_config(root: &std::path::Path, writable: &str, reference: &str) {
     .unwrap();
 }
 
-/// Escribe un concepto conforme bajo `knowledge/` con un `implemented_by` dado (lista de un path).
-fn escribe_concepto_con_implemented_by(root: &std::path::Path, rel: &str, code_path: &str) {
+/// Escribe un documento conforme bajo `knowledge/` con un `implemented_by` dado (lista de un path).
+fn escribe_documento_con_implemented_by(root: &std::path::Path, rel: &str, code_path: &str) {
     let target = root.join(rel);
     std::fs::create_dir_all(target.parent().unwrap()).unwrap();
     let raw = format!(
@@ -81,7 +81,7 @@ fn diag_menciona(diagnostics: &[Check], needle: &str) -> bool {
     })
 }
 
-/// Criterio `ref_externa_rota`: un concepto con `implemented_by: [src/no_existe.rs]` inexistente
+/// Criterio `ref_externa_rota`: un documento con `implemented_by: [src/no_existe.rs]` inexistente
 /// → un diagnóstico de referencia externa rota para ese path (benchmark §17: "Referenciar un
 /// archivo de código inexistente → diagnóstico").
 #[test]
@@ -89,15 +89,15 @@ fn ref_externa_rota() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
     escribe_config(root, "knowledge", "src");
-    // El concepto declara un path bajo el `referenceRoot` `src` que NO existe en disco.
-    escribe_concepto_con_implemented_by(root, "knowledge/concepto.md", "src/no_existe.rs");
+    // El documento declara un path bajo el `referenceRoot` `src` que NO existe en disco.
+    escribe_documento_con_implemented_by(root, "knowledge/documento.md", "src/no_existe.rs");
     // Deliberadamente NO creamos `src/no_existe.rs`.
 
     let ws = Workspace::open(root).unwrap();
-    let concepto = RelPath::new("knowledge/concepto.md").unwrap();
+    let documento = RelPath::new("knowledge/documento.md").unwrap();
 
     let report = ws
-        .external_refs(&concepto)
+        .external_refs(&documento)
         .expect("la validación de referencias externas no debe fallar por I/O aquí");
 
     // La referencia se resuelve como inexistente...
@@ -136,24 +136,24 @@ fn ref_externa_rota() {
 /// (invariante #6: `RelPath` es el único chokepoint de path-traversal). El contrato: un path
 /// externo inválido/fuera de `referenceRoots` NUNCA se marca `exists:true`.
 ///
-/// El vector de `..` es DETERMINISTA con independencia del entorno: montamos el bundle en un
-/// subdirectorio y colocamos `secreto.txt` en su PADRE (fuera del bundle). Con el `root.join`
+/// El vector de `..` es DETERMINISTA con independencia del entorno: montamos el workspace en un
+/// subdirectorio y colocamos `secreto.txt` en su PADRE (fuera del workspace). Con el `root.join`
 /// crudo actual, `../secreto.txt` escapa a ese fichero real → `exists:true` (fallo). La
 /// implementación correcta lo rechaza en `RelPath::new` → `exists:false`. El vector absoluto
 /// (`/etc/hosts`) refuerza el caso (en Unix, `join` de una ruta absoluta reemplaza la base).
 #[test]
 fn ref_externa_traversal() {
     let dir = tempfile::tempdir().unwrap();
-    // El bundle vive en un SUBdirectorio; el "secreto" está fuera de él, en el padre.
-    let root = dir.path().join("bundle");
+    // El workspace vive en un SUBdirectorio; el "secreto" está fuera de él, en el padre.
+    let root = dir.path().join("workspace");
     std::fs::create_dir_all(&root).unwrap();
     std::fs::write(dir.path().join("secreto.txt"), "datos sensibles\n").unwrap();
 
     escribe_config(&root, "knowledge", "src");
-    // Concepto con DOS vectores de ataque: absoluto (`implemented_by`) y traversal (`verified_by`).
+    // Documento con DOS vectores de ataque: absoluto (`implemented_by`) y traversal (`verified_by`).
     std::fs::create_dir_all(root.join("knowledge")).unwrap();
     std::fs::write(
-        root.join("knowledge/concepto.md"),
+        root.join("knowledge/documento.md"),
         "---\ntype: Nota\ntitle: C\ndescription: d\n\
          implemented_by:\n  - /etc/hosts\n\
          verified_by:\n  - ../secreto.txt\n---\n\n# C\n\ncuerpo\n",
@@ -161,9 +161,9 @@ fn ref_externa_traversal() {
     .unwrap();
 
     let ws = Workspace::open(&root).unwrap();
-    let concepto = RelPath::new("knowledge/concepto.md").unwrap();
+    let documento = RelPath::new("knowledge/documento.md").unwrap();
 
-    let report = ws.external_refs(&concepto).unwrap();
+    let report = ws.external_refs(&documento).unwrap();
 
     // Ningún path absoluto o con `..` puede resolverse como existente (sería un oráculo del host).
     // (Un implementador correcto puede INCLUIRLOS con exists:false o DESCARTARLOS; ambas cumplen
@@ -177,14 +177,14 @@ fn ref_externa_traversal() {
             (r.path.clone(), r.exists)
         );
     }
-    // Refuerzo explícito del vector determinista: `../secreto.txt` (fichero real fuera del bundle)
+    // Refuerzo explícito del vector determinista: `../secreto.txt` (fichero real fuera del workspace)
     // NUNCA debe verse como existente.
     assert!(
         !report
             .references
             .iter()
             .any(|r| r.path == "../secreto.txt" && r.exists),
-        "el traversal `../secreto.txt` escapó del bundle y se resolvió como existente; refs: {:?}",
+        "el traversal `../secreto.txt` escapó del workspace y se resolvió como existente; refs: {:?}",
         report
             .references
             .iter()
@@ -200,15 +200,15 @@ fn ref_externa_ok() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
     escribe_config(root, "knowledge", "src");
-    escribe_concepto_con_implemented_by(root, "knowledge/concepto.md", "src/existe.rs");
+    escribe_documento_con_implemented_by(root, "knowledge/documento.md", "src/existe.rs");
     // El fichero de código referenciado SÍ existe bajo el `referenceRoot` `src`.
     std::fs::create_dir_all(root.join("src")).unwrap();
     std::fs::write(root.join("src/existe.rs"), "// real\n").unwrap();
 
     let ws = Workspace::open(root).unwrap();
-    let concepto = RelPath::new("knowledge/concepto.md").unwrap();
+    let documento = RelPath::new("knowledge/documento.md").unwrap();
 
-    let report = ws.external_refs(&concepto).unwrap();
+    let report = ws.external_refs(&documento).unwrap();
 
     assert!(
         report

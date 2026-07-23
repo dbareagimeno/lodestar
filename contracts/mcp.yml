@@ -50,7 +50,7 @@
 #     existe (y cuya semántica cambió: mantenerlo devolvería otra cosa bajo el mismo nombre, que es
 #     peor que un error explícito). Un `"orphans"` hoy es `INVALID_SCHEMA`.
 #   - `workspace_status.counts.orphans` → `counts.isolated` (mismo cambio de definición).
-#   - `ConceptSummary.orphan` → `.isolated`; `title` lo deriva ahora `model::derived_title`
+#   - `DocumentSummary.orphan` → `.isolated`; `title` lo deriva ahora `model::derived_title`
 #     (frontmatter.title → primer H1 → nombre del fichero, sin Title Case).
 #
 # E16-H05 (`ARCHITECTURE.md §20.9`): `CheckCode` —el enum de wire de `Check.code`, que viaja en
@@ -70,6 +70,27 @@
 #     `external_refs`) y que mueren del todo en E20.
 #   - `FM-YAML-INVALID` rellena `range` con las líneas de CONTENIDO del bloque de frontmatter
 #     (1-based, ambas inclusive, delimitadores excluidos).
+#
+# E16-H06 (CIERRE de E16, `ARCHITECTURE.md §20.3`): la API pública deja de hablar de OKF. Los
+# NOMBRES DE LAS 10 TOOLS NO CAMBIAN (superficie congelada, `§19.6`/`§20.10`): cambian los tipos que
+# referencia este contrato y unos pocos identificadores de wire. **Sin alias** — v0.3 es
+# incompatible con v0.2, misma razón que `orphans`→`isolated`.
+#   - Tipos referenciados: `Bundle` → `DocumentSet`, `ConceptRef` → `DocumentRef`,
+#     `ConceptId` → `DocumentId`, `ConceptSummary` → `DocumentSummary`,
+#     `ConceptRevision` → `DocumentRevision`, `ConceptStore` → `DocumentStore`,
+#     `ConceptView` → `DocumentView`, `BundleSnapshot` → `WorkspaceSnapshot`,
+#     `ApplyConformance` → `ApplyValidation`.
+#   - WIRE (rompe): `ErrorCode` `CONCEPT_NOT_FOUND` → `DOCUMENT_NOT_FOUND` (criterio
+#     `error_code_documento`); `Analysis.concepts` → `.documents`;
+#     `CheckScope.kind: "concept"` → `"document"`; `knowledge_get` devuelve `{ document: … }` en vez
+#     de `{ concept: … }`; `impact_analyze`/`change_plan` sirven `affectedConcepts` →
+#     `affectedDocuments`; `change_apply` sirve `conformance` → `validation` (mismo objeto
+#     `{ conformant, errors, warnings }`); `impact_analyze.proposedOperation.kind`
+#     `"replace_concept"` → `"replace_document"`.
+#   - NO cambian (deliberado): `conformant`/`requireConformantResult`/`allowNonconformant` y el
+#     código `NONCONFORMANT_RESULT` — el catálogo de 16 `ErrorCode` sigue congelado salvo la fila
+#     renombrada aquí, y `Conformant → Valid` de `§20.3` queda pendiente de una historia propia.
+#     `okf_version` sigue siendo metadata del usuario (`§20.13`), no terminología del motor.
 #
 # E16-H04 (`ARCHITECTURE.md §20.4`): el patch de frontmatter pasa a ser QUIRÚRGICO
 # (`core::model::patch_frontmatter`) — las líneas que el patch no toca se conservan byte a byte.
@@ -116,12 +137,12 @@ meta:
     { content:[{type:text,text:msg}], isError:true } para que el modelo lo vea y corrija.
     Éxito → { content:[{type:text,text:json}], structuredContent:<objeto> }. Las 5 tools de
     E10 mapean el error a un texto que lleva el código estable de `ErrorCode::as_str()`
-    (p. ej. «CONCEPT_NOT_FOUND»/«INVALID_SCHEMA»), NUNCA el `Debug` de la variante Rust
+    (p. ej. «DOCUMENT_NOT_FOUND»/«INVALID_SCHEMA»), NUNCA el `Debug` de la variante Rust
     (`tools.rs`, casos `knowledge_get`/`schema_inspect`/`knowledge_check`).
   arranque: >-
     `lodestar-mcp [--root <dir>] [--profile readonly|standard]` (main.rs parse_args, E15-H06,
     `ARCHITECTURE.md §20.5`). Sin `--root` la raíz es `std::env::current_dir()`. NO hay argumento
-    posicional (v0.3 es incompatible con v0.2: el bundle posicional se retiró sin alias) y NO se
+    posicional (v0.3 es incompatible con v0.2: el workspace posicional se retiró sin alias) y NO se
     exige `index.md` ni `.lodestar/` — cualquier directorio es un workspace válido («cd my-project
     && lodestar-mcp funciona», §20.1). La raíz se canonicaliza UNA vez al arrancar y queda fija
     toda la sesión. Exit codes de arranque: 2 uso (`--root` sin valor, `--profile` inválido,
@@ -150,7 +171,7 @@ tools:
     errores: ["WorkspaceError"]
     semantica: >-
       Config activa, capacidades del perfil de arranque (`readonly`/`standard`),
-      conformidad y recuento agregado (concepts/links/isolated/dangling/errors/warnings).
+      conformidad y recuento agregado (documents/links/isolated/dangling/errors/warnings).
       `counts.isolated` sustituye a `counts.orphans` (E16-H02, misma redefinición). `formatVersion`
       es CONSTANTE desde E16-H02: el motor ya no lee `okf_version` del `index.md` raíz.
       La primera tool que debe llamar un agente en cada sesión. `recovery.pendingTransaction`
@@ -160,7 +181,7 @@ tools:
     fuente: crates/lodestar-mcp/src/tools.rs:214
     historia: E10-H09
     params:
-      - { nombre: text, tipo: string, requerido: false, semantica: "texto libre, subcadena (misma DSL que el prototipo); vacío = todos los conceptos" }
+      - { nombre: text, tipo: string, requerido: false, semantica: "texto libre, subcadena (misma DSL que el prototipo); vacío = todos los documentos" }
       - { nombre: filters, tipo: "object (SearchFilters)", requerido: false, semantica: "types/statuses/tags (listas, case-insensitive) + pathPrefix; filtros avanzados (references/referencedBy/linkedTo/is:*/has:*) admitidos por el deserializador pero SIN criterio todavía — se ignoran" }
       - { nombre: sort, tipo: string, requerido: false, semantica: "reservado; el orden es siempre determinista (score desc, path asc)" }
       - { nombre: limit, tipo: integer, default: 20, minimo: 1, maximo: 100 }
@@ -169,7 +190,7 @@ tools:
     output_schema: "sí — schemars::schema_for!(SearchResults), vía lodestar_app::schemas::knowledge_search_schema()"
     errores: ["WorkspaceError"]
     semantica: >-
-      Localiza conceptos por texto+filtros con snippet compacto y `revision` (ConceptRevision),
+      Localiza documentos por texto+filtros con snippet compacto y `revision` (DocumentRevision),
       sin devolver cuerpos completos. Paginación por cursor-offset autosuficiente (reanuda
       idéntico en un proceso fresco). Reemplaza semánticamente a `query` (ver §15).
 
@@ -177,15 +198,15 @@ tools:
     fuente: crates/lodestar-mcp/src/tools.rs:231
     historia: E10-H10
     params:
-      - { nombre: ref, tipo: "object (ConceptRef)", requerido: true, semantica: "{ path: RelPath }, identidad del concepto" }
+      - { nombre: ref, tipo: "object (DocumentRef)", requerido: true, semantica: "{ path: RelPath }, identidad del documento" }
       - { nombre: include, tipo: "array<string>", requerido: false, semantica: "campos a poblar: frontmatter/body/revision/outgoingLinks/backlinks/diagnostics/externalReferences; un campo no pedido queda ausente (None), nunca un valor por defecto disfrazado. Desde E16-H01 «frontmatter» es el YAML ARBITRARIO del documento (objeto libre con las claves del usuario, tipos YAML reales: numero/booleano/null/lista/objeto), NO la proyeccion de 7 campos conocidos del extinto core::types::Frontmatter; un documento sin bloque devuelve {}" }
       - { nombre: sections, tipo: "array<array<string>>", requerido: false, semantica: "headingPaths para acotar «body» (solo si «body» ∈ include), p. ej. [[\"Security\",\"Token rotation\"]]" }
-    retorno: "json { concept: ConceptView } — envoltorio de un solo campo, NO ConceptView a secas (lodestar_app::KnowledgeGetResponse describe esta forma exacta)"
+    retorno: "json { document: DocumentView } — envoltorio de un solo campo, NO DocumentView a secas (lodestar_app::KnowledgeGetResponse describe esta forma exacta)"
     output_schema: "sí — schemars::schema_for!(KnowledgeGetResponse), vía lodestar_app::schemas::knowledge_get_schema()"
-    errores: ["«falta el parámetro «ref»»", "CONCEPT_NOT_FOUND", "WorkspaceError"]
+    errores: ["«falta el parámetro «ref»»", "DOCUMENT_NOT_FOUND", "WorkspaceError"]
     semantica: >-
-      Obtiene un concepto concreto con `include` selectivo y selección de secciones.
-      `revision` (== ConceptRevision, blake3 del contenido en disco) se calcula SIEMPRE,
+      Obtiene un documento concreto con `include` selectivo y selección de secciones.
+      `revision` (== DocumentRevision, blake3 del contenido en disco) se calcula SIEMPRE,
       independiente de `include`. `externalReferences` siempre vacío en esta historia
       (E11-H04 fuera de alcance).
 
@@ -201,22 +222,22 @@ tools:
     semantica: >-
       Descubre el catálogo de tipos (`.lodestar/schema.yaml`) ANTES de escribir: DocType
       concreto (`requiredFields`/`allowedStatuses`/`fields`/`relations`/`rules`/`bodyTemplate`)
-      o el catálogo completo. Bundle sin schema.yaml → catalog vacío, NO error (compat).
+      o el catálogo completo. Workspace sin schema.yaml → catalog vacío, NO error (compat).
 
   - nombre: knowledge_check
     fuente: crates/lodestar-mcp/src/tools.rs:265
     historia: E10-H12
     params:
-      - { nombre: scope, tipo: "object (CheckScope)", requerido: true, semantica: "discriminado por «kind»: workspace (todos) | concept{ref} | paths{paths} | affected{refs,depth} (vecindario/blast-radius, Bundle::neighborhood Direction::Both)" }
+      - { nombre: scope, tipo: "object (CheckScope)", requerido: true, semantica: "discriminado por «kind»: workspace (todos) | document{ref} | paths{paths} | affected{refs,depth} (vecindario/blast-radius, DocumentSet::neighborhood Direction::Both)" }
       - { nombre: minimumSeverity, tipo: string, requerido: false, valores: ["err", "warn", "info"], default: "info (ya excluye Pass)", semantica: "umbral de lo DEVUELTO; summary/conformant se computan sobre todo el scope, antes del umbral" }
       - { nombre: includeSuggestedFixes, tipo: boolean, default: false, semantica: "false vacía «fixes» en cada diagnóstico (hoy siempre vacío: E12-H07 los produce)" }
       - { nombre: limit, tipo: integer, default: 100, minimo: 1, maximo: 1000 }
       - { nombre: cursor, tipo: string, requerido: false, semantica: "cursor opaco de paginación devuelto en nextCursor" }
     retorno: "CheckReport (lodestar_app): { conformant, summary: CheckSummary, diagnostics: [Check], workspaceRevision, nextCursor } — json directo, sin envelope"
     output_schema: "sí — schemars::schema_for!(CheckReport), vía lodestar_app::schemas::knowledge_check_schema()"
-    errores: ["CONCEPT_NOT_FOUND (ref inexistente en scope concept/affected)", "WorkspaceError"]
+    errores: ["DOCUMENT_NOT_FOUND (ref inexistente en scope document/affected)", "WorkspaceError"]
     semantica: >-
-      Audita conocimiento (diagnósticos de Bundle::analyze + checks schema-driven de
+      Audita conocimiento (diagnósticos de DocumentSet::analyze + checks schema-driven de
       core::schema::validate_schema, E10-H07) con scope y severidad mínima. Cada diagnóstico
       lleva un `id` estable dentro de una revisión (`diag:blake3:<hex>`, determinista, sin
       timestamps/orden/caché). Reemplaza semánticamente a `conformance_check` (ver §15).
@@ -234,25 +255,25 @@ tools:
     historia: E11-H01, E11-H02 (amplía el enum operation con path_between/cycles/components)
     params:
       - { nombre: operation, tipo: string, requerido: true, valores: ["backlinks", "outgoing", "neighborhood", "isolated", "dangling", "path_between", "cycles", "components"], semantica: "backlinks/outgoing/neighborhood requieren «ref»; path_between requiere «ref» (origen) y «to» (destino); isolated/dangling/cycles/components no requieren refs. «isolated» sustituye a «orphans» (E16-H02): documentos SIN enlaces internos entrantes NI salientes — es una propiedad del grafo, no un diagnóstico. SIN alias: v0.3 es incompatible con v0.2, un «orphans» hoy es INVALID_SCHEMA" }
-      - { nombre: ref, tipo: "object (ConceptRef)", requerido: false, semantica: "{ path: RelPath }, concepto centro — requerido en backlinks/outgoing/neighborhood y como origen en path_between; su ausencia en esas operaciones es CONCEPT_NOT_FOUND" }
-      - { nombre: to, tipo: "object (ConceptRef)", requerido: false, semantica: "{ path: RelPath }, destino del camino — SOLO path_between; su ausencia (o la de ref) en path_between es CONCEPT_NOT_FOUND" }
+      - { nombre: ref, tipo: "object (DocumentRef)", requerido: false, semantica: "{ path: RelPath }, documento centro — requerido en backlinks/outgoing/neighborhood y como origen en path_between; su ausencia en esas operaciones es DOCUMENT_NOT_FOUND" }
+      - { nombre: to, tipo: "object (DocumentRef)", requerido: false, semantica: "{ path: RelPath }, destino del camino — SOLO path_between; su ausencia (o la de ref) en path_between es DOCUMENT_NOT_FOUND" }
       - { nombre: depth, tipo: integer, default: 1, minimo: 1, semantica: "solo neighborhood" }
       - { nombre: direction, tipo: "string (Direction)", valores: ["out", "in", "both"], default: "out  # cualquier otro → Out", semantica: "solo neighborhood" }
       - { nombre: limit, tipo: integer, requerido: false, semantica: "trunca el nº de nodos de la página (orden total estable por id); sin limit o limit>=total → sin truncar" }
       - { nombre: cursor, tipo: string, requerido: false, semantica: "cursor opaco de paginación (offset hex, mismo esquema que knowledge_search/knowledge_check) devuelto en nextCursor" }
     retorno: "GraphQueryResult (lodestar_app): { nodes: [GraphNode], edges: [Edge], summary: { nodeCount, edgeCount, truncated }, nextCursor } — json directo, sin envelope. nodes/edges == core::types::GraphNode/Edge, reexpuestos sin capa DTO paralela"
     output_schema: "sí — schemars::schema_for!(GraphQueryResult), vía lodestar_app::schemas::graph_query_schema()"
-    errores: ["«falta el parámetro «operation»»", "CONCEPT_NOT_FOUND (ref/to ausente o no resuelve en backlinks/outgoing/neighborhood/path_between)", "INVALID_SCHEMA (operation desconocida)", "WorkspaceError"]
+    errores: ["«falta el parámetro «operation»»", "DOCUMENT_NOT_FOUND (ref/to ausente o no resuelve en backlinks/outgoing/neighborhood/path_between)", "INVALID_SCHEMA (operation desconocida)", "WorkspaceError"]
     semantica: >-
-      Consulta el grafo: `backlinks` reusa Bundle::backlinks (nodes = ref + fuentes entrantes,
-      edges = fuente→ref); `outgoing` reusa Bundle::neighborhood(ref,1,Out); `neighborhood`
-      reexpone Bundle::neighborhood(ref,depth,direction) TAL CUAL (paridad exacta con el core,
+      Consulta el grafo: `backlinks` reusa DocumentSet::backlinks (nodes = ref + fuentes entrantes,
+      edges = fuente→ref); `outgoing` reusa DocumentSet::neighborhood(ref,1,Out); `neighborhood`
+      reexpone DocumentSet::neighborhood(ref,depth,direction) TAL CUAL (paridad exacta con el core,
       invariante #3); `isolated`/`dangling` proyectan Analysis::isolated/Analysis::dangling.
       Estructurales (E11-H02, funciones puras del core): `path_between` reusa
-      Bundle::path_between(ref,to) (camino más corto dirigido; nodes = el camino, edges = enlaces
-      consecutivos; sin camino → vacío, nunca error); `cycles` reusa Bundle::cycles (nodes = unión
+      DocumentSet::path_between(ref,to) (camino más corto dirigido; nodes = el camino, edges = enlaces
+      consecutivos; sin camino → vacío, nunca error); `cycles` reusa DocumentSet::cycles (nodes = unión
       de nodos en algún ciclo/SCC no trivial, edges = enlaces internos a ese conjunto); `components`
-      reusa Bundle::components (sirve el grafo completo — nodes/edges de graph_model — porque las
+      reusa DocumentSet::components (sirve el grafo completo — nodes/edges de graph_model — porque las
       componentes particionan todo el grafo; el cliente reconstruye la partición).
       Las edges devueltas se acotan a los nodes que sobreviven a la página. Consolida
       semánticamente a `find_backlinks`/`find_orphans`/`find_dangling`/`neighborhood` (ver §15),
@@ -262,20 +283,20 @@ tools:
     fuente: crates/lodestar-mcp/src/tools.rs
     historia: E11-H05
     params:
-      - { nombre: ref, tipo: "object (ConceptRef)", requerido: true, semantica: "{ path: RelPath }, el concepto sobre el que se propone el cambio; si no resuelve a un concepto → CONCEPT_NOT_FOUND" }
+      - { nombre: ref, tipo: "object (DocumentRef)", requerido: true, semantica: "{ path: RelPath }, el documento sobre el que se propone el cambio; si no resuelve a un documento → DOCUMENT_NOT_FOUND" }
       - { nombre: proposedOperation, tipo: "object", requerido: true, semantica: "{ kind }, el cambio hipotético a evaluar" }
-      - { nombre: "proposedOperation.kind", tipo: string, requerido: true, valores: ["move", "delete", "deprecate", "transition_status", "change_relation", "replace_concept"], semantica: "tipo de operación; SOLO «delete» computa bloqueos estructurales en v1 (el resto no rompe relaciones, solo requiere revisión)" }
+      - { nombre: "proposedOperation.kind", tipo: string, requerido: true, valores: ["move", "delete", "deprecate", "transition_status", "change_relation", "replace_document"], semantica: "tipo de operación; SOLO «delete» computa bloqueos estructurales en v1 (el resto no rompe relaciones, solo requiere revisión)" }
       - { nombre: depth, tipo: integer, requerido: false, minimo: 1, semantica: "profundidad del blast-radius entrante; por defecto cubre todo el alcance transitivo (neighborhood(In) a profundidad máxima)" }
-    retorno: "ImpactReport (lodestar_app): { summary: { directlyAffected, transitivelyAffected, blockingReferences, risk }, affectedConcepts: [RelPath], blockingReferences: [{ path, reason }], recommendations: [string] } — json directo, sin envelope"
+    retorno: "ImpactReport (lodestar_app): { summary: { directlyAffected, transitivelyAffected, blockingReferences, risk }, affectedDocuments: [RelPath], blockingReferences: [{ path, reason }], recommendations: [string] } — json directo, sin envelope"
     output_schema: "sí — schemars::schema_for!(ImpactReport), vía lodestar_app::schemas::impact_analyze_schema()"
-    errores: ["«falta el parámetro «ref»»", "«falta el parámetro «proposedOperation.kind»»", "CONCEPT_NOT_FOUND (ref no resuelve)", "INTERNAL_IO_ERROR (carga de schema)", "WorkspaceError"]
+    errores: ["«falta el parámetro «ref»»", "«falta el parámetro «proposedOperation.kind»»", "DOCUMENT_NOT_FOUND (ref no resuelve)", "INTERNAL_IO_ERROR (carga de schema)", "WorkspaceError"]
     semantica: >-
       Analiza el impacto de un cambio hipotético sobre `ref` SIN materializarlo (aplicar es
-      E12/E13). `directlyAffected` = nº de backlinks directos entrantes (Bundle::backlinks.inbound).
-      `transitivelyAffected` = tamaño del blast-radius entrante (Bundle::neighborhood(ref, ∞,
+      E12/E13). `directlyAffected` = nº de backlinks directos entrantes (DocumentSet::backlinks.inbound).
+      `transitivelyAffected` = tamaño del blast-radius entrante (DocumentSet::neighborhood(ref, ∞,
       Direction::In) excluido el propio ref) — verdad del core (invariante #3), idéntico a
-      Store::blast_radius (verificado por el test impacto_paridad_core). `affectedConcepts` = esos
-      paths del blast-radius (orden estable). `blockingReferences` (SOLO kind:delete) = cada concepto
+      Store::blast_radius (verificado por el test impacto_paridad_core). `affectedDocuments` = esos
+      paths del blast-radius (orden estable). `blockingReferences` (SOLO kind:delete) = cada documento
       que declara una relación tipada del schema (RelationDef, E11-H03) cuyo target es el ref, como
       { path, reason }; los enlaces sueltos de cuerpo Markdown NO cuentan (solo dependencias
       estructurales tipadas). `risk` ∈ {"low","medium","high"} (wire inglés): «high» si hay bloqueos
@@ -288,21 +309,21 @@ tools:
     perfil: standard
     params:
       - { nombre: expectedWorkspaceRevision, tipo: string, requerido: false, semantica: "control optimista a nivel de workspace («blake3:…»); si se omite se toma la revisión actual, si no coincide → REVISION_CONFLICT" }
-      - { nombre: operations, tipo: "array<object>", requerido: true, semantica: "operaciones propuestas, discriminadas por «op»; cada op puede llevar «expectedRevision» (ConceptRevision, control optimista por concepto)" }
+      - { nombre: operations, tipo: "array<object>", requerido: true, semantica: "operaciones propuestas, discriminadas por «op»; cada op puede llevar «expectedRevision» (DocumentRevision, control optimista por documento)" }
       - { nombre: "operations[].op", tipo: string, requerido: true, valores: ["create", "patch_frontmatter", "replace_body", "replace_text", "edit_section", "move", "delete", "add_relation", "remove_relation", "transition_status", "apply_fix"], semantica: "las 11 operaciones de REFACTOR §11.1; cada una se despacha a su normalizador del core (E12-H05/H06/H07)" }
-      - { nombre: "operations[].expectedRevision", tipo: string, requerido: false, semantica: "ConceptRevision que el agente cree vigente («blake3:…»); si el concepto cambió → REVISION_CONFLICT" }
+      - { nombre: "operations[].expectedRevision", tipo: string, requerido: false, semantica: "DocumentRevision que el agente cree vigente («blake3:…»); si el documento cambió → REVISION_CONFLICT" }
       - { nombre: policy, tipo: object, requerido: false, semantica: "{ requireConformantResult?, allowWarnings? } (PlanPolicy, E12-H04); por defecto exige conformidad y permite warnings" }
-    retorno: "PlanResult (lodestar_app): { changeSetId, baseWorkspaceRevision, planHash, canApply, expiresAt, normalizedOperations: [NormalizedOperation], risk, semanticDiff, impact: { affectedConcepts, affectedCount }, diagnosticsBefore, diagnosticsAfter } — json directo, sin envelope"
+    retorno: "PlanResult (lodestar_app): { changeSetId, baseWorkspaceRevision, planHash, canApply, expiresAt, normalizedOperations: [NormalizedOperation], risk, semanticDiff, impact: { affectedDocuments, affectedCount }, diagnosticsBefore, diagnosticsAfter } — json directo, sin envelope"
     output_schema: "sí — schemars::schema_for!(PlanResult), vía lodestar_app::schemas::change_plan_schema()"
-    errores: ["REVISION_CONFLICT (workspace o concepto cambiado)", "INVALID_SCHEMA (op desconocida o parámetro inválido)", "CONCEPT_NOT_FOUND (objetivo de normalización inexistente)", "INBOUND_LINKS_EXIST (delete «reject» con entrantes)", "RELATION_CONSTRAINT_VIOLATION (add_relation viola RelationDef)", "PERMISSION_DENIED (path-traversal)", "INTERNAL_IO_ERROR (carga de config/schema)", "WorkspaceError"]
+    errores: ["REVISION_CONFLICT (workspace o documento cambiado)", "INVALID_SCHEMA (op desconocida o parámetro inválido)", "DOCUMENT_NOT_FOUND (objetivo de normalización inexistente)", "INBOUND_LINKS_EXIST (delete «reject» con entrantes)", "RELATION_CONSTRAINT_VIOLATION (add_relation viola RelationDef)", "PERMISSION_DENIED (path-traversal)", "INTERNAL_IO_ERROR (carga de config/schema)", "WorkspaceError"]
     semantica: >-
       Orquesta un plan de cambios SIN escribir (invariante #1; aplicar es change_apply, E13): toda
-      la simulación es sobre un Bundle en memoria. Verifica `expectedWorkspaceRevision` (o toma la
+      la simulación es sobre un DocumentSet en memoria. Verifica `expectedWorkspaceRevision` (o toma la
       actual como `baseWorkspaceRevision` = workspace_revision sobre las raíces escribibles) y, por
-      cada op con `expectedRevision`, la ConceptRevision (blake3 del .md) del concepto objetivo →
+      cada op con `expectedRevision`, la DocumentRevision (blake3 del .md) del documento objetivo →
       REVISION_CONFLICT si difiere. Normaliza TODAS las ops a un ÚNICO change set (una op de
       estructura puede producir varias NormalizedOperation, p. ej. move + N ReplaceBody), construye
-      el bundle hipotético (plan::apply_normalized_ops) y deriva semanticDiff (E12-H03), risk
+      el workspace hipotético (plan::apply_normalized_ops) y deriva semanticDiff (E12-H03), risk
       (E12-H02) y validación antes/después (E12-H04); `canApply` = can_apply(report, policy).
       `planHash` DETERMINISTA = blake3(baseWorkspaceRevision ‖ serialización JSON canónica de las
       normalizedOperations) — mismo input+base ⇒ mismo hash, input distinto ⇒ hash distinto; NO
@@ -316,16 +337,16 @@ tools:
     params:
       - { nombre: changeSetId, tipo: string, requerido: true, semantica: "el «changeset:<hash>» que devolvió change_plan (E12-H08); el plan se recupera de `.lodestar/runtime/plans/` por este id (E12-H09)" }
       - { nombre: expectedWorkspaceRevision, tipo: string, requerido: false, semantica: "control optimista a nivel de workspace («blake3:…»); si se omite se adopta la revisión actual, si no coincide → REVISION_CONFLICT" }
-    retorno: "ApplyResult (lodestar_app): { receiptId, applied, previousWorkspaceRevision, workspaceRevision, changedPaths, semanticDiff, conformance: { conformant, errors, warnings } } — json directo, sin envelope"
+    retorno: "ApplyResult (lodestar_app): { receiptId, applied, previousWorkspaceRevision, workspaceRevision, changedPaths, semanticDiff, validation: { conformant, errors, warnings } } — json directo, sin envelope"
     output_schema: "sí — schemars::schema_for!(ApplyResult), vía lodestar_app::schemas::change_apply_schema()"
-    errores: ["PLAN_EXPIRED (plan caducado)", "PLAN_STALE (plan ausente/ilegible, o el bundle cambió bajo él ⇒ planHash recomputado difiere)", "REVISION_CONFLICT (expectedWorkspaceRevision no coincide, o la base cambió entre plan y apply)", "PERMISSION_DENIED (un path afectado cae fuera de writableRoots / bajo un referenceRoot)", "NONCONFORMANT_RESULT (el resultado hipotético no es conforme)", "WORKSPACE_RECOVERY_REQUIRED (recuperación pendiente no completada)", "INTERNAL_IO_ERROR (carga de config, IO de la transacción)", "WorkspaceError"]
+    errores: ["PLAN_EXPIRED (plan caducado)", "PLAN_STALE (plan ausente/ilegible, o el workspace cambió bajo él ⇒ planHash recomputado difiere)", "REVISION_CONFLICT (expectedWorkspaceRevision no coincide, o la base cambió entre plan y apply)", "PERMISSION_DENIED (un path afectado cae fuera de writableRoots / bajo un referenceRoot)", "NONCONFORMANT_RESULT (el resultado hipotético no es conforme)", "WORKSPACE_RECOVERY_REQUIRED (recuperación pendiente no completada)", "INTERNAL_IO_ERROR (carga de config, IO de la transacción)", "WorkspaceError"]
     semantica: >-
       Aplica un plan vigente por el ÚNICO ESCRITOR (invariante #5) con la mecánica de publicación
       recuperable de E13 (invariante «nunca un estado parcial silencioso»). Pasos de plan: carga el
       plan persistido (PLAN_EXPIRED si caducó, PLAN_STALE si no existe) → verifica
       `expectedWorkspaceRevision` si viene → RE-VERIFICA el `planHash` recomputándolo sobre la base
       ACTUAL del workspace (`blake3(revisiónActual ‖ normalizedOperations)`, la misma función que
-      change_plan); si difiere del persistido, el bundle cambió bajo el plan ⇒ PLAN_STALE y NO
+      change_plan); si difiere del persistido, el workspace cambió bajo el plan ⇒ PLAN_STALE y NO
       escribe. Luego delega en `Workspace::apply_transaction`, que ejecuta EN ORDEN: lock de
       publicación (E13-H02) → cálculo del conjunto afectado real (creados/modificados/borrados) →
       `assert_writable` de cada afectado ANTES de tocar el canónico (E11-H04 → PERMISSION_DENIED) →

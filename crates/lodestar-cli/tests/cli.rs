@@ -62,7 +62,7 @@ fn check_json_es_valido() {
         .output()
         .unwrap();
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert!(v.get("concepts").is_some());
+    assert!(v.get("documents").is_some());
     assert!(v.get("hardFail").is_some(), "wire camelCase");
 }
 
@@ -135,7 +135,7 @@ fn check_rev_es_uso() {
     );
 }
 
-/// E9-H02 `check_working_tree_conforme`: **Dado** `lodestar check` sobre un bundle conforme,
+/// E9-H02 `check_working_tree_conforme`: **Dado** `lodestar check` sobre un workspace conforme,
 /// **Entonces** exit `0`. La puerta de CI sobre el working tree sigue viva (no-regresión).
 #[test]
 fn check_working_tree_conforme() {
@@ -162,10 +162,10 @@ fn check_working_tree_conforme() {
 //
 // `lodestar check` (working tree, sin flags git) debe juzgar con el MISMO motor que
 // `knowledge_check` scope `workspace`: OKF + SCHEMA-* + REL-* + refs externas. Hoy el comando
-// solo corre `Bundle::analyze()` (los 15 checks OKF) y NO carga `.lodestar/schema.yaml`, así que
+// solo corre `DocumentSet::analyze()` (los 15 checks OKF) y NO carga `.lodestar/schema.yaml`, así que
 // una violación schema-driven pasa desapercibida. Estos tres tests fijan el contrato de la puerta.
 
-/// Escribe el schema de bundle en `.lodestar/schema.yaml` (loader `WorkspaceSchema::load`, wire
+/// Escribe el schema de workspace en `.lodestar/schema.yaml` (loader `WorkspaceSchema::load`, wire
 /// camelCase). Aquí: el `DocType` «Nota» exige el campo obligatorio `owner` (un extra), cuya
 /// ausencia dispara `SCHEMA-REQFIELD` (E10-H07, `core::schema::validate_schema`).
 fn write_schema_nota_requiere_owner(dir: &std::path::Path) {
@@ -176,8 +176,8 @@ fn write_schema_nota_requiere_owner(dir: &std::path::Path) {
     );
 }
 
-/// E14-H01 `check_falla_schema`: **Dado** un bundle con un `SCHEMA-REQFIELD`, **Cuando** se corre
-/// `lodestar check`, **Entonces** exit `1`. El bundle es OKF-conforme (frontmatter válido, sin
+/// E14-H01 `check_falla_schema`: **Dado** un workspace con un `SCHEMA-REQFIELD`, **Cuando** se corre
+/// `lodestar check`, **Entonces** exit `1`. El workspace es OKF-conforme (frontmatter válido, sin
 /// hard-fail OKF): el ÚNICO motivo de bloqueo es la conformidad schema-driven, así que si `check`
 /// no la corriese sobre el working tree saldría `0` (rojo actual).
 #[test]
@@ -188,7 +188,7 @@ fn check_falla_schema() {
         "index.md",
         "---\ntype: Index\ntitle: Bundle\ndescription: Índice del bundle\nokf_version: \"0.1\"\n---\n\n# Bundle\n",
     );
-    // Concepto de tipo Nota, OKF-conforme, pero SIN el campo `owner` que el schema exige.
+    // Documento de tipo Nota, OKF-conforme, pero SIN el campo `owner` que el schema exige.
     write(
         &dir,
         "a.md",
@@ -204,8 +204,8 @@ fn check_falla_schema() {
     );
 }
 
-/// E14-H01 `check_conforme_json`: **Dado** un bundle conforme con schema, **Cuando** se corre
-/// `lodestar check --json`, **Entonces** exit `0` y JSON con `conformant: true`. El concepto
+/// E14-H01 `check_conforme_json`: **Dado** un workspace conforme con schema, **Cuando** se corre
+/// `lodestar check --json`, **Entonces** exit `0` y JSON con `conformant: true`. El documento
 /// satisface el `requiredFields` del schema (tiene `owner`), demostrando que el motor schema-driven
 /// SÍ se ejecuta y da veredicto conforme. Hoy el JSON serializa un `Analysis` sin campo
 /// `conformant` → rojo por aserción.
@@ -217,7 +217,7 @@ fn check_conforme_json() {
         "index.md",
         "---\ntype: Index\ntitle: Bundle\ndescription: Índice del bundle\nokf_version: \"0.1\"\n---\n\n# Bundle\n",
     );
-    // Concepto de tipo Nota que SÍ trae `owner` → satisface el schema.
+    // Documento de tipo Nota que SÍ trae `owner` → satisface el schema.
     write(
         &dir,
         "a.md",
@@ -234,7 +234,7 @@ fn check_conforme_json() {
     assert_eq!(
         out.status.code(),
         Some(0),
-        "bundle conforme con schema → exit 0"
+        "workspace conforme con schema → exit 0"
     );
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(
@@ -246,7 +246,7 @@ fn check_conforme_json() {
 
 /// E14-H01 `check_caza_edicion_directa`: **Dado** un `.md` editado a mano e inválido (schema-driven),
 /// **Cuando** corre CI, **Entonces** la puerta lo caza (exit `1`). Escenario §17 del benchmark
-/// «Editar directamente un Markdown inválido → detectado»: se parte de un concepto válido (con
+/// «Editar directamente un Markdown inválido → detectado»: se parte de un documento válido (con
 /// `owner`) y se SOBRESCRIBE a mano por una versión sin `owner`, simulando una edición directa del
 /// fichero que rompe el schema. `check` sobre el working tree debe detectarlo.
 #[test]
@@ -279,9 +279,9 @@ fn check_caza_edicion_directa() {
     );
 }
 
-/// Monta el bundle con `SCHEMA-REQFIELD` de `check_falla_schema` (concepto Nota SIN `owner`,
+/// Monta el workspace con `SCHEMA-REQFIELD` de `check_falla_schema` (documento Nota SIN `owner`,
 /// schema que lo exige) en `dir`. Reutilizado por los tests de surfaceo en `--sarif`/`--json`.
-fn bundle_con_schema_reqfield(dir: &std::path::Path) {
+fn workspace_con_schema_reqfield(dir: &std::path::Path) {
     write(
         dir,
         "index.md",
@@ -297,7 +297,7 @@ fn bundle_con_schema_reqfield(dir: &std::path::Path) {
 
 /// E14-H01 (reserva del juez) `check_sarif_lista_schema`: la puerta bloquea (exit 1) con el motor
 /// schema-driven, pero el SARIF debe además SURFACEAR el diagnóstico que dispara ese fallo, no solo
-/// los checks OKF. **Dado** el bundle con `SCHEMA-REQFIELD`, **Cuando** `lodestar check --sarif`,
+/// los checks OKF. **Dado** el workspace con `SCHEMA-REQFIELD`, **Cuando** `lodestar check --sarif`,
 /// **Entonces** exit 1 Y `runs[0].results` contiene al menos un result con
 /// `ruleId == "SCHEMA-REQFIELD"` (misma forma SARIF que `check_sarif_es_valido`, que usa `ruleId`).
 /// Hoy `to_sarif(&Analysis)` solo itera `per_file`, y `analyze()` no coloca los SCHEMA-* ahí → el
@@ -305,7 +305,7 @@ fn bundle_con_schema_reqfield(dir: &std::path::Path) {
 #[test]
 fn check_sarif_lista_schema() {
     let dir = temp_dir("sarif-schema");
-    bundle_con_schema_reqfield(&dir);
+    workspace_con_schema_reqfield(&dir);
 
     let out = bin()
         .arg("--path")
@@ -327,18 +327,18 @@ fn check_sarif_lista_schema() {
     );
 }
 
-/// E14-H01 (reserva del juez) `check_json_lista_schema`: análogo en `--json`. **Dado** el bundle con
+/// E14-H01 (reserva del juez) `check_json_lista_schema`: análogo en `--json`. **Dado** el workspace con
 /// `SCHEMA-REQFIELD`, **Cuando** `lodestar check --json`, **Entonces** exit 1 Y el JSON expone el
 /// diagnóstico de forma accionable. La salida serializa un `Analysis` cuyo `perFile`
 /// (`BTreeMap<RelPath, Vec<Check>>`) lista los `Check`, cada uno con su campo `code` (wire
 /// `"SCHEMA-REQFIELD"`). Aseveramos que algún check de algún fichero tiene `code == "SCHEMA-REQFIELD"`
-/// — campo ya existente en el wire (`check_json_es_valido` fija `concepts`/`hardFail`), sin inventar
+/// — campo ya existente en el wire (`check_json_es_valido` fija `documents`/`hardFail`), sin inventar
 /// campos nuevos: el implementador solo debe INYECTAR los SCHEMA-*/REL- en `perFile` de forma
 /// aditiva. Hoy `analyze()` no los coloca ahí → rojo por aserción.
 #[test]
 fn check_json_lista_schema() {
     let dir = temp_dir("json-schema");
-    bundle_con_schema_reqfield(&dir);
+    workspace_con_schema_reqfield(&dir);
 
     let out = bin()
         .arg("--path")
@@ -504,7 +504,7 @@ fn init_es_uso() {
 ///   · el ANCESTRO contiene `malo.md` (frontmatter sin cerrar ⇒ `FM-UNCLOSED`, hard fail) ⇒
 ///     juzgarlo da exit 1;
 ///   · el SUBDIRECTORIO contiene solo un `a.md` conforme ⇒ juzgarlo da exit 0.
-/// Además se comprueba el inventario juzgado (`concepts` del `--json`, campo ya existente en el
+/// Además se comprueba el inventario juzgado (`documents` del `--json`, campo ya existente en el
 /// wire): desde el subdirectorio debe ser exactamente `["a.md"]`, no `["malo.md","sub/a.md"]`.
 ///
 /// Fase ROJA: hoy `resolve_root` sube hasta el ancestro (tiene `index.md`), juzga el proyecto
@@ -542,14 +542,14 @@ fn cli_no_asciende() {
         .unwrap();
 
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    let concepts: Vec<&str> = v["concepts"]
+    let documents: Vec<&str> = v["documents"]
         .as_array()
-        .expect("`check --json` expone `concepts`")
+        .expect("`check --json` expone `documents`")
         .iter()
         .filter_map(serde_json::Value::as_str)
         .collect();
     assert_eq!(
-        concepts,
+        documents,
         vec!["a.md"],
         "`check` debe juzgar el cwd (solo `a.md`), no ascender al ancestro"
     );

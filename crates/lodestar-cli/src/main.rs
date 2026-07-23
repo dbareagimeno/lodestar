@@ -1,6 +1,6 @@
 //! `lodestar` — fachada CLI (`ARCHITECTURE.md §7.3`). Puerta de CI con exit codes congelados.
 //!
-//! Cada subcomando resuelve el root → construye el `Bundle` (efímero, sobre el core) → serializa.
+//! Cada subcomando resuelve el root → construye el `DocumentSet` (efímero, sobre el core) → serializa.
 //! **Cero lógica de dominio aquí**: toda la semántica vive en `lodestar-core`.
 //!
 //! Exit codes (congelados): `0` conforme · `1` hard-fail · `2` uso · `3` runtime/IO. El `4` (drift
@@ -27,7 +27,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// La puerta de CI: ¿es conforme el bundle? (exit 0/1). Juzga siempre el **working tree**
+    /// La puerta de CI: ¿es conforme el workspace? (exit 0/1). Juzga siempre el **working tree**
     /// (scope workspace) — git salió de la superficie en E9-H02 y del repo en E15-H01, así que no
     /// hay `--staged`/`--rev`/`--range` que valgan.
     Check {
@@ -46,7 +46,7 @@ enum Command {
 /// (`ARCHITECTURE.md §20.5`, E15-H06).
 ///
 /// **No asciende por los ancestros**: el ascenso buscando `index.md`/`.lodestar` desaparece con la
-/// unidad «bundle» — la raíz es el directorio donde se invoca, y lo que se juzga es ese directorio,
+/// unidad «workspace» — la raíz es el directorio donde se invoca, y lo que se juzga es ese directorio,
 /// nunca un proyecto que lo contenga.
 fn resolve_root(explicit: Option<&Path>) -> PathBuf {
     match explicit {

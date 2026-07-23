@@ -14,7 +14,7 @@ use crate::error::WorkspaceError;
 /// - `sync_all` antes del rename: sin él, una caída de energía podía persistir el rename con
 ///   los datos sin volcar → `.md` truncado (y los `.md` son LA fuente de verdad, sin copia).
 /// - Temporal ÚNICO por proceso+secuencia: con nombre fijo, dos procesos escritores (app +
-///   agente MCP) sobre el mismo concept se pisaban el temp y publicaban contenido a medias.
+///   agente MCP) sobre el mismo documento se pisaban el temp y publicaban contenido a medias.
 pub fn write_atomic(root: &Path, rel: &RelPath, content: &str) -> Result<(), WorkspaceError> {
     let target = root.join(rel.as_str());
     if let Some(parent) = target.parent() {

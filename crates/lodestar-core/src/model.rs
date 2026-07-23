@@ -190,7 +190,7 @@ pub fn normalize(p: &str) -> String {
     parts.join("/")
 }
 
-/// Port de `resolveLink`: resuelve un href a un path del bundle, o `None` si no aplica.
+/// Port de `resolveLink`: resuelve un href a un path del workspace, o `None` si no aplica.
 pub fn resolve_link(href: &str, from_path: &str) -> Option<String> {
     // Esquema (http:, mailto:, …) → no es enlace interno.
     if Regex::new(r"^[a-z]+:")
@@ -412,7 +412,7 @@ pub struct PatchedDocument {
 /// Aplica un `FrontmatterPatch` sobre el texto crudo de **un** documento (`§20.4`, E16-H04).
 ///
 /// Función **pura**: ni toca disco ni necesita el resto del workspace. Recibe el `raw` entero
-/// (y no un `&Bundle`) porque la edición quirúrgica necesita el `span` del bloque **dentro** del
+/// (y no un `&DocumentSet`) porque la edición quirúrgica necesita el `span` del bloque **dentro** del
 /// documento.
 ///
 /// # Los tres caminos
@@ -454,7 +454,7 @@ pub fn patch_frontmatter(
         // Sin bloque: se crea uno con las claves que el patch escribe (`§20.4`).
         SplitFront::Sin => {
             let mut map = serde_yaml::Mapping::new();
-            crate::bundle::apply_patch(&mut map, patch.clone());
+            crate::document_set::apply_patch(&mut map, patch.clone());
             if map.is_empty() {
                 // Un patch que solo borra claves inexistentes no toca el documento.
                 return Ok(PatchedDocument {
@@ -499,7 +499,7 @@ pub fn patch_frontmatter(
         }),
         None => {
             let mut mapa = mapa;
-            crate::bundle::apply_patch(&mut mapa, patch.clone());
+            crate::document_set::apply_patch(&mut mapa, patch.clone());
             Ok(PatchedDocument {
                 raw: splice(raw, &span, &dump_mapping(&mapa)),
                 reserialized: true,

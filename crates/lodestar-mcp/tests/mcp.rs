@@ -17,7 +17,7 @@ fn write(dir: &std::path::Path, rel: &str, content: &str) {
 // las tools la fija `tools_list_solo_objetivo`; el `serverInfo.name` se migró a
 // `initialize_ecoa_version_soportada`.
 
-/// Arranca el servidor sobre un bundle, envía `lines` y devuelve las primeras `expect` respuestas.
+/// Arranca el servidor sobre un workspace, envía `lines` y devuelve las primeras `expect` respuestas.
 fn roundtrip(dir: &std::path::Path, lines: &[&str], expect: usize) -> Vec<serde_json::Value> {
     let mut child = Command::new(env!("CARGO_BIN_EXE_lodestar-mcp"))
         .arg("--root")
@@ -45,7 +45,7 @@ fn roundtrip(dir: &std::path::Path, lines: &[&str], expect: usize) -> Vec<serde_
     out
 }
 
-fn bundle_min() -> tempfile::TempDir {
+fn workspace_min() -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
     write(
         dir.path(),
@@ -59,7 +59,7 @@ fn bundle_min() -> tempfile::TempDir {
 /// tool desconocida → -32602, error de EJECUCIÓN de tool → result con isError (no error JSON-RPC).
 #[test]
 fn protocolo_errores_y_ping() {
-    let dir = bundle_min();
+    let dir = workspace_min();
     let resp = roundtrip(
         dir.path(),
         &[
@@ -76,7 +76,7 @@ fn protocolo_errores_y_ping() {
     assert_eq!(resp[1]["result"], serde_json::json!({}));
     assert_eq!(resp[2]["error"]["code"], -32601);
     assert_eq!(resp[3]["error"]["code"], -32602);
-    // Ruta inválida (`../` fuera del bundle) = error de EJECUCIÓN de la tool → isError en el result,
+    // Ruta inválida (`../` fuera del workspace) = error de EJECUCIÓN de la tool → isError en el result,
     // no un error de protocolo. Vehículo migrado en E14-H06 de la tool heredada `find_backlinks` a la
     // tool objetivo `knowledge_get` (la propiedad probada es del protocolo, no de la tool retirada).
     assert_eq!(resp[4]["result"]["isError"], true);
@@ -86,7 +86,7 @@ fn protocolo_errores_y_ping() {
 /// tools/list lleva inputSchema (obligatorio en el spec) y structuredContent siempre es objeto.
 #[test]
 fn tools_list_schema_y_structured_content_objeto() {
-    let dir = bundle_min();
+    let dir = workspace_min();
     write(
         dir.path(),
         "a.md",
@@ -129,7 +129,7 @@ fn tools_list_schema_y_structured_content_objeto() {
 
 // NOTA E14-H06: los tests `create_concept_escribe_y_query_lo_ve` y
 // `create_concept_sin_body_genera_heading_por_defecto` se RETIRARON al retirar las tools heredadas
-// `create_concept`/`query`/`conformance_check`. La escritura validada de un concepto la cubre hoy el
+// `create_concept`/`query`/`conformance_check`. La escritura validada de un documento la cubre hoy el
 // par `change_plan` + `change_apply` (`plan_un_solo_changeset`, `apply_ok`: la op `create` planifica
 // y `change_apply` escribe el `.md` por el único escritor), su localización posterior la cubre
 // `knowledge_search`, y la conformidad `knowledge_check`.
@@ -142,7 +142,7 @@ fn tools_list_schema_y_structured_content_objeto() {
 /// initialize ecoa la protocolVersion del cliente si la soporta.
 #[test]
 fn initialize_ecoa_version_soportada() {
-    let dir = bundle_min();
+    let dir = workspace_min();
     let resp = roundtrip(
         dir.path(),
         &[
@@ -162,7 +162,7 @@ fn initialize_ecoa_version_soportada() {
 /// ninguna de las 3 tools git (`history`/`last_conforming_commit`/`commit`) en el catálogo.
 #[test]
 fn list_sin_tools_git() {
-    let dir = bundle_min();
+    let dir = workspace_min();
     let resp = roundtrip(
         dir.path(),
         &[r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#],
@@ -188,7 +188,7 @@ fn list_sin_tools_git() {
 /// error de tool desconocida (`-32602`) y NO la ejecuta (sin `result`).
 #[test]
 fn call_commit_desconocida() {
-    let dir = bundle_min();
+    let dir = workspace_min();
     let resp = roundtrip(
         dir.path(),
         &[
@@ -215,11 +215,11 @@ fn call_commit_desconocida() {
 // arranca el servidor, así que el arnés tiene que poder lanzar el server con `--profile readonly`;
 // `status_counts` va por el mismo camino para ejercitar la tool tal y como la ve un cliente MCP.
 //
-// CLI asumida (aún NO implementada — de ahí el ROJO): `lodestar-mcp <bundle> [--profile
+// CLI asumida (aún NO implementada — de ahí el ROJO): `lodestar-mcp <workspace> [--profile
 // readonly|standard]`, por defecto `standard`. `capabilities.writes` = (perfil == standard).
 // ---------------------------------------------------------------------------
 
-/// Como [`roundtrip`], pero arranca el servidor con `--profile <profile>` tras el bundle.
+/// Como [`roundtrip`], pero arranca el servidor con `--profile <profile>` tras el workspace.
 /// El perfil aún no existe en producción: este helper documenta la superficie CLI que la historia
 /// introduce y produce el ROJO cuando el flag / la tool todavía no están.
 fn roundtrip_profile(
@@ -256,13 +256,13 @@ fn roundtrip_profile(
     out
 }
 
-/// Bundle con **exactamente 4 documentos aislados**: un `index.md` raíz que no enlaza a nadie más
+/// Workspace con **exactamente 4 documentos aislados**: un `index.md` raíz que no enlaza a nadie más
 /// 3 `.md` que no se enlazan entre sí ni reciben enlaces. Desde E16-H02 aislado = documento sin
 /// enlaces internos entrantes NI salientes (`§20.7`) e `index.md` es un documento más del
 /// inventario: sin enlaces de ningún tipo, también está aislado.
-fn bundle_con_cuatro_aislados() -> tempfile::TempDir {
+fn workspace_con_cuatro_aislados() -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
-    // index.md sin enlaces salientes: no "adopta" a ningún concepto.
+    // index.md sin enlaces salientes: no "adopta" a ningún documento.
     write(
         dir.path(),
         "index.md",
@@ -288,7 +288,7 @@ fn bundle_con_cuatro_aislados() -> tempfile::TempDir {
 /// `index.md` del fixture —sin enlaces entrantes ni salientes— ya es un documento del inventario.
 #[test]
 fn status_counts() {
-    let dir = bundle_con_cuatro_aislados();
+    let dir = workspace_con_cuatro_aislados();
     let resp = roundtrip(
         dir.path(),
         &[
@@ -315,7 +315,7 @@ fn status_counts() {
 /// que devuelva `false` siempre pasaría el criterio sin implementar la lógica del perfil.)
 #[test]
 fn status_capabilities_readonly() {
-    let dir = bundle_con_cuatro_aislados();
+    let dir = workspace_con_cuatro_aislados();
     let call = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"workspace_status","arguments":{}}}"#;
 
     let ro = roundtrip_profile(dir.path(), "readonly", &[call], 1);
@@ -333,7 +333,7 @@ fn status_capabilities_readonly() {
     );
 }
 
-// NOTA E15-H06: el test `directorio_no_bundle_sale_con_3` se BORRÓ. Afirmaba que un directorio
+// NOTA E15-H06: el test `directorio_no_workspace_sale_con_3` se BORRÓ. Afirmaba que un directorio
 // sin `index.md`/`.lodestar/` aborta con exit 3 — exactamente el gate que esta historia elimina
 // (`ARCHITECTURE.md §20.1`: «cd my-project && lodestar-mcp funciona»). Su contrario es hoy
 // `arranca_en_directorio_arbitrario`.
@@ -384,9 +384,9 @@ fn search_paths(resp: &serde_json::Value) -> Vec<String> {
         .collect()
 }
 
-/// Bundle con un concepto que casa el texto «autenticación» (en título y cuerpo) más un decoy que
+/// Workspace con un documento que casa el texto «autenticación» (en título y cuerpo) más un decoy que
 /// NO casa: así el criterio no es vacuo (un stub que devuelva todo incluiría el decoy y fallaría).
-fn bundle_autenticacion() -> tempfile::TempDir {
+fn workspace_autenticacion() -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
     write(
         dir.path(),
@@ -401,17 +401,17 @@ fn bundle_autenticacion() -> tempfile::TempDir {
     write(
         dir.path(),
         "bici.md",
-        "---\ntype: concept\ntitle: Bicicletas\ndescription: sobre ruedas\n---\n\n# H\n\nnada que ver con el tema.\n",
+        "---\ntype: document\ntitle: Bicicletas\ndescription: sobre ruedas\n---\n\n# H\n\nnada que ver con el tema.\n",
     );
     dir
 }
 
 /// E10-H09 · Criterio `search_sin_cuerpos` (benchmark §17: "Encontrar una decisión por significado"):
-/// Dado un corpus con un concepto que casa «autenticación», Cuando se busca ese texto, Entonces
+/// Dado un corpus con un documento que casa «autenticación», Cuando se busca ese texto, Entonces
 /// aparece con `snippet` y `revision`, y SIN `body`.
 #[test]
 fn search_sin_cuerpos() {
-    let dir = bundle_autenticacion();
+    let dir = workspace_autenticacion();
     let resp = roundtrip(
         dir.path(),
         &[
@@ -424,11 +424,11 @@ fn search_sin_cuerpos() {
         panic!("knowledge_search debe devolver structuredContent.results (array): {resp:?}")
     });
 
-    // El concepto que casa aparece.
+    // El documento que casa aparece.
     let auth = results
         .iter()
         .find(|r| r["path"] == "auth.md")
-        .unwrap_or_else(|| panic!("el concepto que casa «autenticación» debe aparecer: {resp:?}"));
+        .unwrap_or_else(|| panic!("el documento que casa «autenticación» debe aparecer: {resp:?}"));
 
     // `snippet` no vacío.
     let snippet = auth["snippet"].as_str().unwrap_or("");
@@ -437,7 +437,7 @@ fn search_sin_cuerpos() {
         "el result debe traer un `snippet` no vacío: {auth:?}"
     );
 
-    // `revision` con formato de identidad de contenido `blake3:…` (ConceptRevision, E10-H03).
+    // `revision` con formato de identidad de contenido `blake3:…` (DocumentRevision, E10-H03).
     let revision = auth["revision"].as_str().unwrap_or("");
     assert!(
         revision.starts_with("blake3:"),
@@ -453,16 +453,16 @@ fn search_sin_cuerpos() {
         );
     }
 
-    // No vacuo: un concepto que no casa el texto NO debe aparecer.
+    // No vacuo: un documento que no casa el texto NO debe aparecer.
     assert!(
         !results.iter().any(|r| r["path"] == "bici.md"),
-        "un concepto que no casa «autenticación» no debe aparecer en los resultados: {resp:?}"
+        "un documento que no casa «autenticación» no debe aparecer en los resultados: {resp:?}"
     );
 }
 
-/// Bundle con conceptos `type:decision` mezclados con otros tipos, todos con el mismo texto en el
+/// Workspace con documentos `type:decision` mezclados con otros tipos, todos con el mismo texto en el
 /// cuerpo para que el único discriminante sea el filtro de tipo.
-fn bundle_tipos_mixtos() -> tempfile::TempDir {
+fn workspace_tipos_mixtos() -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
     write(
         dir.path(),
@@ -485,17 +485,17 @@ fn bundle_tipos_mixtos() -> tempfile::TempDir {
     );
     write(
         dir.path(),
-        "concepto.md",
-        "---\ntype: concept\ntitle: Concepto\ndescription: arquitectura\n---\n\n# H\n\ncuerpo sobre arquitectura.\n",
+        "documento.md",
+        "---\ntype: document\ntitle: Documento\ndescription: arquitectura\n---\n\n# H\n\ncuerpo sobre arquitectura.\n",
     );
     dir
 }
 
 /// E10-H09 · Criterio `search_filtra_tipo`:
-/// Dado `filters.types:[decision]`, Cuando se busca, Entonces solo aparecen conceptos `type:decision`.
+/// Dado `filters.types:[decision]`, Cuando se busca, Entonces solo aparecen documentos `type:decision`.
 #[test]
 fn search_filtra_tipo() {
-    let dir = bundle_tipos_mixtos();
+    let dir = workspace_tipos_mixtos();
     let resp = roundtrip(
         dir.path(),
         &[
@@ -516,14 +516,14 @@ fn search_filtra_tipo() {
     for r in &results {
         assert_eq!(
             r["type"], "decision",
-            "`filters.types:[decision]` solo debe devolver conceptos type:decision, apareció: {r:?}"
+            "`filters.types:[decision]` solo debe devolver documentos type:decision, apareció: {r:?}"
         );
     }
 
-    // No vacuo (segunda cara): un concepto de otro tipo NO aparece.
+    // No vacuo (segunda cara): un documento de otro tipo NO aparece.
     assert!(
         !results.iter().any(|r| r["path"] == "nota.md"),
-        "un concepto `type:nota` no debe aparecer al filtrar por decision: {resp:?}"
+        "un documento `type:nota` no debe aparecer al filtrar por decision: {resp:?}"
     );
 }
 
@@ -538,10 +538,10 @@ fn search_paths_values(resp: &serde_json::Value) -> Vec<serde_json::Value> {
         .clone()
 }
 
-/// Bundle con **50 conceptos** que casan todos el texto «paginacion» (en `description` y cuerpo),
+/// Workspace con **50 documentos** que casan todos el texto «paginacion» (en `description` y cuerpo),
 /// deterministas por slug (`c00`…`c49`). El `index.md` no contiene el token y no cuenta como
-/// concepto, así que la búsqueda casa exactamente 50.
-fn bundle_cincuenta() -> tempfile::TempDir {
+/// documento, así que la búsqueda casa exactamente 50.
+fn workspace_cincuenta() -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
     write(
         dir.path(),
@@ -554,7 +554,7 @@ fn bundle_cincuenta() -> tempfile::TempDir {
             dir.path(),
             &format!("{slug}.md"),
             &format!(
-                "---\ntype: concept\ntitle: Concepto {i:02}\ndescription: paginacion\n---\n\n# H\n\ncuerpo paginacion numero {i:02}.\n"
+                "---\ntype: document\ntitle: Documento {i:02}\ndescription: paginacion\n---\n\n# H\n\ncuerpo paginacion numero {i:02}.\n"
             ),
         );
     }
@@ -567,7 +567,7 @@ fn bundle_cincuenta() -> tempfile::TempDir {
 /// `nextCursor` presente hasta agotar, unión == 50 sin repetidos, y solapamiento nulo 1↔2.
 #[test]
 fn search_paginacion() {
-    let dir = bundle_cincuenta();
+    let dir = workspace_cincuenta();
 
     // Construye una línea `tools/call knowledge_search` con `limit:20` y un `cursor` opcional.
     let req = |cursor: Option<&str>| -> String {
@@ -632,14 +632,14 @@ fn search_paginacion() {
     assert_eq!(
         paths3.len(),
         10,
-        "la página 3 debe traer los 10 conceptos restantes: {p3:?}"
+        "la página 3 debe traer los 10 documentos restantes: {p3:?}"
     );
     assert!(
         sc3["nextCursor"].is_null(),
         "agotados los 50 resultados `nextCursor` debe ser null: {p3:?}"
     );
 
-    // No repite ni omite: la unión de las 3 páginas cubre los 50 conceptos, todos únicos.
+    // No repite ni omite: la unión de las 3 páginas cubre los 50 documentos, todos únicos.
     let mut union: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     for page in [&paths1, &paths2, &paths3] {
         for path in page {
@@ -652,7 +652,7 @@ fn search_paginacion() {
     assert_eq!(
         union.len(),
         50,
-        "la unión de las 3 páginas debe cubrir los 50 conceptos sin omisiones"
+        "la unión de las 3 páginas debe cubrir los 50 documentos sin omisiones"
     );
 
     // Solapamiento nulo explícito entre página 1 y 2 (redacción literal del criterio).
@@ -668,8 +668,8 @@ fn search_paginacion() {
 //
 // UBICACIÓN: los 3 criterios se ejercitan **e2e por la tool MCP** (campo Pruebas de la historia:
 // `crates/lodestar-mcp/tests/`), igual que E10-H09. Razón deliberada (misma que H09): lo que hay que
-// fijar es el contrato de **wire** (forma de `arguments`, forma del `concept` en `structuredContent`,
-// acotado de body por sección, cómo aflora el error `CONCEPT_NOT_FOUND`) sin acoplar los tests a los
+// fijar es el contrato de **wire** (forma de `arguments`, forma del `document` en `structuredContent`,
+// acotado de body por sección, cómo aflora el error `DOCUMENT_NOT_FOUND`) sin acoplar los tests a los
 // nombres de tipos Rust internos que el implementador aún no ha elegido (el tipo de retorno del
 // servicio, el enum/lista de `include`, etc.). El parent ofreció como alternativa probar
 // `App::knowledge_get` directo; se opta por e2e para (a) no fijar el tipo de retorno interno y (b) no
@@ -682,29 +682,29 @@ fn search_paginacion() {
 //
 // CONTRATO DE WIRE fijado por esta historia (lo que el implementador debe respetar):
 //   arguments: {
-//     ref: { path: "<RelPath>" },                 // ConceptRef (E10-H04); deser de { "path": … }
+//     ref: { path: "<RelPath>" },                 // DocumentRef (E10-H04); deser de { "path": … }
 //     include?: [ "frontmatter" | "body" | "revision" | "outgoingLinks" | "backlinks"
 //                 | "diagnostics" | "externalReferences" ],   // selectivo: qué campos se pueblan
 //     sections?: [ [ "<heading>", "<subheading>", … ] ]       // cada headingPath acota el body
 //   }
 //   structuredContent: {
-//     concept: { path, revision, frontmatter?, body?, outgoingLinks?, backlinks?,
+//     document: { path, revision, frontmatter?, body?, outgoingLinks?, backlinks?,
 //                externalReferences?, diagnostics? }
 //   }
-// `concept.revision` == `ConceptRevision` (E10-H03), formato `blake3:…`, presente siempre (identidad).
+// `document.revision` == `DocumentRevision` (E10-H03), formato `blake3:…`, presente siempre (identidad).
 // Un campo NO pedido en `include` NO se puebla (queda nulo/ausente).
 //
 // FIRMA DE SERVICIO ASUMIDA (el implementador la crea con su propia elección de tipos internos):
-//   App::knowledge_get(r: &ConceptRef, include: &[…], sections: Option<&[…]>)
-//       -> Result<{ concept: { path, revision, frontmatter, body, outgoingLinks, backlinks,
+//   App::knowledge_get(r: &DocumentRef, include: &[…], sections: Option<&[…]>)
+//       -> Result<{ document: { path, revision, frontmatter, body, outgoingLinks, backlinks,
 //                              externalReferences, diagnostics } }, ErrorCode>
-//   con `CONCEPT_NOT_FOUND` cuando `resolve_ref` no encuentra el path (E10-H04).
+//   con `DOCUMENT_NOT_FOUND` cuando `resolve_ref` no encuentra el path (E10-H04).
 // ---------------------------------------------------------------------------
 
-/// Bundle con un concepto conforme `alfa.md` (frontmatter completo) para los casos que solo necesitan
-/// un concepto existente al que pedirle `revision`/`frontmatter`, y para el caso inexistente (pedir un
-/// path que NO está en el bundle).
-fn bundle_get_revision() -> tempfile::TempDir {
+/// Workspace con un documento conforme `alfa.md` (frontmatter completo) para los casos que solo necesitan
+/// un documento existente al que pedirle `revision`/`frontmatter`, y para el caso inexistente (pedir un
+/// path que NO está en el workspace).
+fn workspace_get_revision() -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
     write(
         dir.path(),
@@ -714,18 +714,18 @@ fn bundle_get_revision() -> tempfile::TempDir {
     write(
         dir.path(),
         "alfa.md",
-        "---\ntype: decision\ntitle: Alfa\ndescription: Primer concepto\nstatus: accepted\ntags: [seguridad]\n---\n\n# Resumen\n\nCuerpo del concepto alfa.\n",
+        "---\ntype: decision\ntitle: Alfa\ndescription: Primer documento\nstatus: accepted\ntags: [seguridad]\n---\n\n# Resumen\n\nCuerpo del documento alfa.\n",
     );
     dir
 }
 
 /// E10-H10 · Criterio `get_incluye_revision`:
-/// Dado un concepto existente, Cuando se pide con `include:[frontmatter,revision]`, Entonces devuelve
-/// la `revision` (== `ConceptRevision`, formato `blake3:…`) y el `frontmatter`. Se añade que un campo
+/// Dado un documento existente, Cuando se pide con `include:[frontmatter,revision]`, Entonces devuelve
+/// la `revision` (== `DocumentRevision`, formato `blake3:…`) y el `frontmatter`. Se añade que un campo
 /// NO pedido (`body`) queda sin poblar, para que el `include` selectivo sea significativo (no vacuo).
 #[test]
 fn get_incluye_revision() {
-    let dir = bundle_get_revision();
+    let dir = workspace_get_revision();
     let resp = roundtrip(
         dir.path(),
         &[
@@ -733,32 +733,32 @@ fn get_incluye_revision() {
         ],
         1,
     );
-    let concept = &resp[0]["result"]["structuredContent"]["concept"];
+    let document = &resp[0]["result"]["structuredContent"]["document"];
 
-    // `revision` presente y con formato de identidad de contenido `blake3:…` (ConceptRevision, E10-H03).
-    let revision = concept["revision"].as_str().unwrap_or_else(|| {
-        panic!("knowledge_get debe devolver concept.revision (string «blake3:…»): {resp:?}")
+    // `revision` presente y con formato de identidad de contenido `blake3:…` (DocumentRevision, E10-H03).
+    let revision = document["revision"].as_str().unwrap_or_else(|| {
+        panic!("knowledge_get debe devolver document.revision (string «blake3:…»): {resp:?}")
     });
     assert!(
         revision.starts_with("blake3:"),
-        "concept.revision debe tener formato «blake3:…»: {resp:?}"
+        "document.revision debe tener formato «blake3:…»: {resp:?}"
     );
 
     // `frontmatter` presente (objeto no nulo) porque se pidió en `include`.
     assert!(
-        concept["frontmatter"].is_object(),
-        "con include:[frontmatter] el concept debe traer un `frontmatter` (objeto): {resp:?}"
+        document["frontmatter"].is_object(),
+        "con include:[frontmatter] el documento debe traer un `frontmatter` (objeto): {resp:?}"
     );
 
     // `include` selectivo: `body` NO se pidió ⇒ no se puebla (nulo o ausente). Sin esta comprobación
     // el criterio sería vacuo (una impl que devuelve todos los campos siempre lo cumpliría igual).
     assert!(
-        concept["body"].is_null(),
+        document["body"].is_null(),
         "con include:[frontmatter,revision] el `body` NO debe poblarse: {resp:?}"
     );
 }
 
-/// Bundle con un concepto cuyo cuerpo tiene una jerarquía de headings clara: `## Security` con la
+/// Workspace con un documento cuyo cuerpo tiene una jerarquía de headings clara: `## Security` con la
 /// subsección objetivo `### Token rotation`, más secciones/subsecciones hermanas que DEBEN quedar
 /// fuera al acotar por `sections:[["Security","Token rotation"]]`. Cada bloque lleva un marcador único
 /// para que las comprobaciones de subcadena sean inequívocas:
@@ -767,7 +767,7 @@ fn get_incluye_revision() {
 ///     fuera; su exclusión obliga a que el 2º nivel del headingPath cuente, no solo `## Security`).
 ///   - `TOKEN-HERMANA-TOP-EXCLUIR` → bajo `## Otra seccion` (sección hermana de nivel superior; fuera).
 ///   - `TOKEN-OVERVIEW-EXCLUIR`   → bajo `## Overview` (otra sección de nivel superior; fuera).
-fn bundle_get_secciones() -> tempfile::TempDir {
+fn workspace_get_secciones() -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
     write(
         dir.path(),
@@ -816,7 +816,7 @@ Contenido de una seccion hermana de nivel superior. TOKEN-HERMANA-TOP-EXCLUIR.\n
 /// esa subsección: contiene su texto y NO contiene el de sus secciones/subsecciones hermanas.
 #[test]
 fn get_por_seccion() {
-    let dir = bundle_get_secciones();
+    let dir = workspace_get_secciones();
     let resp = roundtrip(
         dir.path(),
         &[
@@ -824,9 +824,9 @@ fn get_por_seccion() {
         ],
         1,
     );
-    let concept = &resp[0]["result"]["structuredContent"]["concept"];
-    let body = concept["body"].as_str().unwrap_or_else(|| {
-        panic!("knowledge_get con include:[body] debe devolver concept.body (string): {resp:?}")
+    let document = &resp[0]["result"]["structuredContent"]["document"];
+    let body = document["body"].as_str().unwrap_or_else(|| {
+        panic!("knowledge_get con include:[body] debe devolver document.body (string): {resp:?}")
     });
 
     // CONTIENE el texto de la subsección pedida (## Security → ### Token rotation).
@@ -853,13 +853,13 @@ fn get_por_seccion() {
 }
 
 /// E10-H10 · Criterio `get_inexistente`:
-/// Dado un path inexistente, Cuando se pide, Entonces `CONCEPT_NOT_FOUND`. En la superficie MCP un
-/// concepto inexistente es un error de EJECUCIÓN de la tool (no un fallo de protocolo): aflora como
-/// `result.isError == true` con el código estable `CONCEPT_NOT_FOUND` visible al agente (ErrorCode
+/// Dado un path inexistente, Cuando se pide, Entonces `DOCUMENT_NOT_FOUND`. En la superficie MCP un
+/// documento inexistente es un error de EJECUCIÓN de la tool (no un fallo de protocolo): aflora como
+/// `result.isError == true` con el código estable `DOCUMENT_NOT_FOUND` visible al agente (ErrorCode
 /// wire de E10-H02, `REFACTOR §13` / invariante #4), no como un error JSON-RPC.
 #[test]
 fn get_inexistente() {
-    let dir = bundle_get_revision(); // tiene `alfa.md`; pedimos un path que NO existe.
+    let dir = workspace_get_revision(); // tiene `alfa.md`; pedimos un path que NO existe.
     let resp = roundtrip(
         dir.path(),
         &[
@@ -870,17 +870,17 @@ fn get_inexistente() {
     // Error de ejecución de la tool → isError en el result, no un error JSON-RPC de transporte.
     assert_eq!(
         resp[0]["result"]["isError"], true,
-        "un ConceptRef a un path inexistente debe dar isError en knowledge_get: {resp:?}"
+        "un DocumentRef a un path inexistente debe dar isError en knowledge_get: {resp:?}"
     );
     assert!(
         resp[0]["error"].is_null(),
-        "un concepto inexistente NO debe ser un error de protocolo JSON-RPC: {resp:?}"
+        "un documento inexistente NO debe ser un error de protocolo JSON-RPC: {resp:?}"
     );
-    // El código estable `CONCEPT_NOT_FOUND` debe ser visible en la respuesta (no un mensaje opaco).
+    // El código estable `DOCUMENT_NOT_FOUND` debe ser visible en la respuesta (no un mensaje opaco).
     let texto = resp[0].to_string();
     assert!(
-        texto.contains("CONCEPT_NOT_FOUND"),
-        "el error debe exponer el código estable «CONCEPT_NOT_FOUND»: {resp:?}"
+        texto.contains("DOCUMENT_NOT_FOUND"),
+        "el error debe exponer el código estable «DOCUMENT_NOT_FOUND»: {resp:?}"
     );
 }
 
@@ -914,12 +914,12 @@ fn get_inexistente() {
 //   App::schema_inspect(mode) -> Result<SchemaInspection, WorkspaceError>
 // ---------------------------------------------------------------------------
 
-/// Bundle con un `.lodestar/schema.yaml` que declara DOS `DocType`s: `decision` (con
+/// Workspace con un `.lodestar/schema.yaml` que declara DOS `DocType`s: `decision` (con
 /// `requiredFields`/`allowedStatuses`/`bodyTemplate` completos, el sujeto de `inspect_type`) y
 /// `note` (para que `inspect_catalog` no sea vacuo: un stub que devolviera un único tipo cableado a
 /// mano fallaría al no listar los dos). Formato de wire camelCase idéntico al que ya carga el
 /// loader (`crates/lodestar-workspace/tests/workspace.rs::loader_carga_schema_yaml`).
-fn bundle_con_schema() -> tempfile::TempDir {
+fn workspace_con_schema() -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
     write(
         dir.path(),
@@ -960,7 +960,7 @@ types:
 /// sus `requiredFields`/`allowedStatuses`/`bodyTemplate`.
 #[test]
 fn inspect_type() {
-    let dir = bundle_con_schema();
+    let dir = workspace_con_schema();
     let resp = roundtrip(
         dir.path(),
         &[
@@ -1005,7 +1005,7 @@ fn inspect_type() {
 /// `decision` y `note`).
 #[test]
 fn inspect_catalog() {
-    let dir = bundle_con_schema();
+    let dir = workspace_con_schema();
     let resp = roundtrip(
         dir.path(),
         &[
@@ -1029,12 +1029,12 @@ fn inspect_catalog() {
 }
 
 /// E10-H11 · Criterio `inspect_sin_schema`:
-/// Dado un bundle SIN `.lodestar/schema.yaml`, Cuando se llama `catalog`, Entonces catálogo vacío
-/// (no error). El bundle es válido (tiene `index.md`) pero no declara esquema → `types == []`, sin
+/// Dado un workspace SIN `.lodestar/schema.yaml`, Cuando se llama `catalog`, Entonces catálogo vacío
+/// (no error). El workspace es válido (tiene `index.md`) pero no declara esquema → `types == []`, sin
 /// que la ausencia de esquema se convierta en un fallo.
 #[test]
 fn inspect_sin_schema() {
-    let dir = bundle_min(); // index.md, deliberadamente SIN `.lodestar/schema.yaml`.
+    let dir = workspace_min(); // index.md, deliberadamente SIN `.lodestar/schema.yaml`.
     let resp = roundtrip(
         dir.path(),
         &[
@@ -1045,11 +1045,11 @@ fn inspect_sin_schema() {
     // No es un fallo: ni error JSON-RPC de transporte ni error de ejecución de la tool.
     assert!(
         resp[0]["error"].is_null(),
-        "un bundle sin schema NO debe producir un error de protocolo: {resp:?}"
+        "un workspace sin schema NO debe producir un error de protocolo: {resp:?}"
     );
     assert!(
         resp[0]["result"]["isError"].as_bool() != Some(true),
-        "un bundle sin schema NO debe producir isError: {resp:?}"
+        "un workspace sin schema NO debe producir isError: {resp:?}"
     );
     // Catálogo vacío.
     let types = resp[0]["result"]["structuredContent"]["types"]
@@ -1061,7 +1061,7 @@ fn inspect_sin_schema() {
         });
     assert!(
         types.is_empty(),
-        "un bundle sin schema.yaml debe dar un catálogo vacío: {resp:?}"
+        "un workspace sin schema.yaml debe dar un catálogo vacío: {resp:?}"
     );
 }
 
@@ -1084,7 +1084,7 @@ fn inspect_sin_schema() {
 // WIRE DE ENTRADA asumido (el implementador puede refinar los tipos internos, no el wire):
 //   arguments: {
 //     scope: { kind: "workspace" }
-//          | { kind: "concept",  ref: { path } }
+//          | { kind: "document",  ref: { path } }
 //          | { kind: "paths",    paths: [ "<RelPath>", … ] }
 //          | { kind: "affected", refs: [ { path } ], depth: <n> },
 //     minimumSeverity?: "err" | "warn" | "info",   // omitido = todos los niveles
@@ -1107,8 +1107,8 @@ fn inspect_sin_schema() {
 // FIRMA DE SERVICIO ASUMIDA (el implementador la crea con su propia elección de tipos internos):
 //   App::knowledge_check(scope, minimum_severity, include_suggested_fixes, limit, cursor)
 //       -> Result<{ conformant, summary, diagnostics, workspaceRevision, nextCursor }, _>
-//   Compone `Bundle::analyze` (los 15 checks OKF) + `validate_schema(bundle, schema)` (E10-H07);
-//   `affected` acota por vecindad (`Bundle::neighborhood` / `Store::blast_radius`).
+//   Compone `DocumentSet::analyze` (los 15 checks OKF) + `validate_schema(doc_set, schema)` (E10-H07);
+//   `affected` acota por vecindad (`DocumentSet::neighborhood` / `Store::blast_radius`).
 // ---------------------------------------------------------------------------
 
 /// Extrae los diagnósticos (`structuredContent.diagnostics`) de una respuesta `knowledge_check`. Si
@@ -1142,14 +1142,14 @@ fn diags_cubren(diags: &[serde_json::Value], path: &str) -> bool {
         .any(|d| diag_targets(d).iter().any(|t| t == path))
 }
 
-/// Bundle con un `.md` **editado a mano** cuyo frontmatter es inválido.
+/// Workspace con un `.md` **editado a mano** cuyo frontmatter es inválido.
 ///
 /// MIGRADO en E16-H05: el disparador era la falta del campo `type` (`OKF-TYPE`), y un documento
 /// sin `type` pasó a ser perfectamente válido. Hoy el `.md` editado a mano tiene el frontmatter
 /// **sintácticamente roto** → `FM-YAML-INVALID` (severidad `Err`), que es exactamente el mismo
 /// escenario contado con el catálogo mínimo de `§20.9`: alguien lo escribió a pelo y lo dejó
-/// ilegible. El bundle es por lo demás válido, así que el ÚNICO error viene de la edición directa.
-fn bundle_editado_a_mano() -> tempfile::TempDir {
+/// ilegible. El workspace es por lo demás válido, así que el ÚNICO error viene de la edición directa.
+fn workspace_editado_a_mano() -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
     write(
         dir.path(),
@@ -1171,7 +1171,7 @@ fn bundle_editado_a_mano() -> tempfile::TempDir {
 /// `workspace`, Entonces aparece el diagnóstico de ese path y el veredicto es no conforme.
 #[test]
 fn check_detecta_edicion_directa() {
-    let dir = bundle_editado_a_mano();
+    let dir = workspace_editado_a_mano();
     let resp = roundtrip(
         dir.path(),
         &[
@@ -1204,7 +1204,7 @@ fn check_detecta_edicion_directa() {
     );
 }
 
-/// Bundle para `check_scope_affected`. Grafo de vecindad **bidireccional** (robusto a la dirección
+/// Workspace para `check_scope_affected`. Grafo de vecindad **bidireccional** (robusto a la dirección
 /// que use el implementador — out/in/both) alrededor del ref `centro.md`:
 ///
 ///   index.md ──► centro.md ◄──► vecino.md ◄──► c.md          lejano.md   (aislado)
@@ -1224,7 +1224,7 @@ fn check_detecta_edicion_directa() {
 ///
 /// El criterio es inequívoco: con `depth:2` el vecindario de A es exactamente {centro, vecino, c};
 /// `lejano` está a distancia infinita y no puede colarse.
-fn bundle_affected() -> tempfile::TempDir {
+fn workspace_affected() -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
     write(
         dir.path(),
@@ -1235,7 +1235,7 @@ fn bundle_affected() -> tempfile::TempDir {
     write(
         dir.path(),
         "centro.md",
-        "---\ntype: concept\ntitle: Centro\ndescription: nodo raíz del vecindario\n---\n\n# Centro\n\n[Vecino](vecino.md)\n",
+        "---\ntype: document\ntitle: Centro\ndescription: nodo raíz del vecindario\n---\n\n# Centro\n\n[Vecino](vecino.md)\n",
     );
     // B (distancia 1): con marcadores → DOC-CONFLICT-MARKER. Enlaza a A y a C (bidireccional).
     write(
@@ -1262,10 +1262,10 @@ fn bundle_affected() -> tempfile::TempDir {
 /// E10-H12 · Criterio `check_scope_affected`:
 /// Dado `scope:affected` con un ref (`centro.md`) y `depth:2`, Cuando se llama `knowledge_check`,
 /// Entonces solo aparecen diagnósticos del vecindario (vecino a distancia 1 y c a distancia 2), y
-/// NO el del concepto lejano y desconectado.
+/// NO el del documento lejano y desconectado.
 #[test]
 fn check_scope_affected() {
-    let dir = bundle_affected();
+    let dir = workspace_affected();
     let resp = roundtrip(
         dir.path(),
         &[
@@ -1285,18 +1285,18 @@ fn check_scope_affected() {
         diags_cubren(&diags, "c.md"),
         "el diagnóstico de «c.md» (distancia 2) debe estar en el scope affected con depth:2: {resp:?}"
     );
-    // El concepto LEJANO y desconectado NO debe aparecer: es lo que hace inequívoco el scope.
+    // El documento LEJANO y desconectado NO debe aparecer: es lo que hace inequívoco el scope.
     assert!(
         !diags_cubren(&diags, "lejano.md"),
         "el diagnóstico de «lejano.md» (desconectado) NO debe estar en el scope affected: {resp:?}"
     );
 }
 
-/// Bundle con DOS ficheros con diagnóstico, para que el conjunto de `id` sea significativo (≥1,
+/// Workspace con DOS ficheros con diagnóstico, para que el conjunto de `id` sea significativo (≥1,
 /// aquí ≥2) al comparar estabilidad entre revisiones. MIGRADO en E16-H05: el disparador era el
 /// frontmatter sin `type` (`OKF-TYPE`, retirado); hoy es un frontmatter con YAML inválido
 /// (`FM-YAML-INVALID`).
-fn bundle_dos_diagnosticos() -> tempfile::TempDir {
+fn workspace_dos_diagnosticos() -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
     write(
         dir.path(),
@@ -1338,15 +1338,15 @@ fn diag_ids(resp: &serde_json::Value) -> std::collections::BTreeSet<String> {
 }
 
 /// E10-H12 · Criterio `check_ids_estables`:
-/// Dada la misma revisión dos veces (dos servidores frescos sobre el MISMO bundle sin cambios),
+/// Dada la misma revisión dos veces (dos servidores frescos sobre el MISMO workspace sin cambios),
 /// Cuando se hace `knowledge_check` de scope `workspace`, Entonces el conjunto de `id` de
 /// diagnóstico coincide entre ambas llamadas (misma revisión → mismos ids).
 #[test]
 fn check_ids_estables() {
-    let dir = bundle_dos_diagnosticos();
+    let dir = workspace_dos_diagnosticos();
     let call = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"knowledge_check","arguments":{"scope":{"kind":"workspace"}}}}"#;
 
-    // Dos procesos frescos sobre el mismo bundle: misma revisión de workspace.
+    // Dos procesos frescos sobre el mismo workspace: misma revisión de workspace.
     let a = roundtrip(dir.path(), &[call], 1);
     let b = roundtrip(dir.path(), &[call], 1);
 
@@ -1356,7 +1356,7 @@ fn check_ids_estables() {
     // Significativo: hay al menos un diagnóstico (si no, la igualdad sería vacua).
     assert!(
         !ids_a.is_empty(),
-        "el bundle debe producir al menos un diagnóstico para que el criterio no sea vacuo: {a:?}"
+        "el workspace debe producir al menos un diagnóstico para que el criterio no sea vacuo: {a:?}"
     );
     // Misma revisión → mismos ids.
     assert_eq!(
@@ -1394,7 +1394,7 @@ fn check_ids_estables() {
 /// añadiera `outputSchema` a una tool no pasaría.
 #[test]
 fn tools_declaran_outputschema() {
-    let dir = bundle_min();
+    let dir = workspace_min();
     let resp = roundtrip(
         dir.path(),
         &[r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#],
@@ -1452,8 +1452,8 @@ fn tools_declaran_outputschema() {
 // (`App::graph_query`, el enum de operación, el tipo del subgrafo, etc.).
 //
 // El criterio de PARIDAD (`graph_neighborhood_paridad`) se comprueba comparando la salida de wire de
-// la tool contra la **verdad del core** (`Bundle::neighborhood`, invariante #3): se abre el MISMO
-// bundle en proceso con `App::open` y se computa `neighborhood(path, 2, Both)`; los `nodes`/`edges`
+// la tool contra la **verdad del core** (`DocumentSet::neighborhood`, invariante #3): se abre el MISMO
+// workspace en proceso con `App::open` y se computa `neighborhood(path, 2, Both)`; los `nodes`/`edges`
 // del wire deben coincidir (como conjuntos) con los del core. Esto ancla la tool a la lógica pura del
 // core en vez de a una reimplementación paralela. Se hace de forma SECUENCIAL (el proceso hijo del
 // `roundtrip` ya terminó — `child.wait()` — antes de abrir el `App`, así no compiten por
@@ -1468,7 +1468,7 @@ fn tools_declaran_outputschema() {
 // WIRE DE ENTRADA asumido (el implementador puede refinar los tipos internos, no el wire):
 //   arguments: {
 //     operation: "backlinks" | "outgoing" | "neighborhood" | "isolated" | "dangling",
-//     ref?:       { path: "<RelPath>" },       // ConceptRef; obligatorio en backlinks/outgoing/neighborhood
+//     ref?:       { path: "<RelPath>" },       // DocumentRef; obligatorio en backlinks/outgoing/neighborhood
 //     depth?:     <n>,                          // solo neighborhood (por defecto 1)
 //     direction?: "out" | "in" | "both",       // solo neighborhood (por defecto "out")
 //     limit?:     <n>,                          // trunca el nº de nodos devueltos
@@ -1486,7 +1486,7 @@ fn tools_declaran_outputschema() {
 // FIRMA DE SERVICIO ASUMIDA (el implementador la crea con su propia elección de tipos internos):
 //   App::graph_query(operation, ref?, depth?, direction?, limit?, cursor?)
 //       -> Result<{ nodes, edges, summary{nodeCount,edgeCount,truncated}, nextCursor }, _>
-//   Reusa `Bundle::backlinks`/`Bundle::neighborhood` y `Analysis::isolated`/`dangling` (verdad del
+//   Reusa `DocumentSet::backlinks`/`DocumentSet::neighborhood` y `Analysis::isolated`/`dangling` (verdad del
 //   core, invariante #3).
 // ---------------------------------------------------------------------------
 
@@ -1532,12 +1532,12 @@ fn como_conjunto(vals: &[serde_json::Value]) -> std::collections::BTreeSet<Strin
 }
 
 /// E11-H01 · Criterio `graph_backlinks`:
-/// Dado un concepto (`objetivo.md`) con **3 backlinks**, Cuando se llama
+/// Dado un documento (`objetivo.md`) con **3 backlinks**, Cuando se llama
 /// `graph_query(operation:backlinks, ref:{path})`, Entonces los 3 aparecen en `nodes`/`edges`.
 ///
-/// Bundle: `a.md`/`b.md`/`c.md` enlazan a `objetivo.md`; `d.md` es un decoy que enlaza a OTRO
-/// concepto (`a.md`), no a `objetivo.md`, para que el criterio no sea vacuo (un stub que devolviera
-/// todos los conceptos incluiría a `d` como fuente y fallaría). `index.md` NO lista `objetivo.md`
+/// Workspace: `a.md`/`b.md`/`c.md` enlazan a `objetivo.md`; `d.md` es un decoy que enlaza a OTRO
+/// documento (`a.md`), no a `objetivo.md`, para que el criterio no sea vacuo (un stub que devolviera
+/// todos los documentos incluiría a `d` como fuente y fallaría). `index.md` NO lista `objetivo.md`
 /// (así el índice no aporta aristas entrantes al target).
 #[test]
 fn graph_backlinks() {
@@ -1550,14 +1550,14 @@ fn graph_backlinks() {
     write(
         dir.path(),
         "objetivo.md",
-        "---\ntype: concept\ntitle: Objetivo\ndescription: recibe 3 backlinks\n---\n\n# Objetivo\n\ncuerpo.\n",
+        "---\ntype: document\ntitle: Objetivo\ndescription: recibe 3 backlinks\n---\n\n# Objetivo\n\ncuerpo.\n",
     );
     for slug in ["a", "b", "c"] {
         write(
             dir.path(),
             &format!("{slug}.md"),
             &format!(
-                "---\ntype: concept\ntitle: {slug}\ndescription: enlaza al objetivo\n---\n\n# {slug}\n\n[Objetivo](objetivo.md)\n"
+                "---\ntype: document\ntitle: {slug}\ndescription: enlaza al objetivo\n---\n\n# {slug}\n\n[Objetivo](objetivo.md)\n"
             ),
         );
     }
@@ -1565,7 +1565,7 @@ fn graph_backlinks() {
     write(
         dir.path(),
         "d.md",
-        "---\ntype: concept\ntitle: D\ndescription: no enlaza al objetivo\n---\n\n# D\n\n[A](a.md)\n",
+        "---\ntype: document\ntitle: D\ndescription: no enlaza al objetivo\n---\n\n# D\n\n[A](a.md)\n",
     );
 
     let resp = roundtrip(
@@ -1628,15 +1628,15 @@ fn graph_backlinks() {
     );
 }
 
-/// Bundle con un vecindario dirigido no trivial alrededor de `centro.md`, con aristas de entrada y de
+/// Workspace con un vecindario dirigido no trivial alrededor de `centro.md`, con aristas de entrada y de
 /// salida a distancia 1 y 2, más un `lejano.md` aislado que DEBE quedar fuera de
 /// `neighborhood(centro, 2, Both)`:
 ///
 ///   abuelo.md ──► raiz.md ──► centro.md ──► vecino.md ──► c.md        lejano.md (aislado)
 ///
 /// `neighborhood(centro, 2, Both)` = {centro, vecino, c (out, d2), raiz, abuelo (in, d2)}; `lejano`
-/// a distancia infinita. `index.md` no enlaza a conceptos (evita ruido de aristas reservadas).
-fn bundle_vecindario() -> tempfile::TempDir {
+/// a distancia infinita. `index.md` no enlaza a documentos (evita ruido de aristas reservadas).
+fn workspace_vecindario() -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
     write(
         dir.path(),
@@ -1646,45 +1646,45 @@ fn bundle_vecindario() -> tempfile::TempDir {
     write(
         dir.path(),
         "centro.md",
-        "---\ntype: concept\ntitle: Centro\ndescription: raiz del vecindario\n---\n\n# Centro\n\n[Vecino](vecino.md)\n",
+        "---\ntype: document\ntitle: Centro\ndescription: raiz del vecindario\n---\n\n# Centro\n\n[Vecino](vecino.md)\n",
     );
     write(
         dir.path(),
         "vecino.md",
-        "---\ntype: concept\ntitle: Vecino\ndescription: salida a distancia 1\n---\n\n# Vecino\n\n[C](c.md)\n",
+        "---\ntype: document\ntitle: Vecino\ndescription: salida a distancia 1\n---\n\n# Vecino\n\n[C](c.md)\n",
     );
     write(
         dir.path(),
         "c.md",
-        "---\ntype: concept\ntitle: C\ndescription: salida a distancia 2\n---\n\n# C\n\ncuerpo.\n",
+        "---\ntype: document\ntitle: C\ndescription: salida a distancia 2\n---\n\n# C\n\ncuerpo.\n",
     );
     write(
         dir.path(),
         "raiz.md",
-        "---\ntype: concept\ntitle: Raiz\ndescription: entrada a distancia 1\n---\n\n# Raiz\n\n[Centro](centro.md)\n",
+        "---\ntype: document\ntitle: Raiz\ndescription: entrada a distancia 1\n---\n\n# Raiz\n\n[Centro](centro.md)\n",
     );
     write(
         dir.path(),
         "abuelo.md",
-        "---\ntype: concept\ntitle: Abuelo\ndescription: entrada a distancia 2\n---\n\n# Abuelo\n\n[Raiz](raiz.md)\n",
+        "---\ntype: document\ntitle: Abuelo\ndescription: entrada a distancia 2\n---\n\n# Abuelo\n\n[Raiz](raiz.md)\n",
     );
     write(
         dir.path(),
         "lejano.md",
-        "---\ntype: concept\ntitle: Lejano\ndescription: desconectado\n---\n\n# Lejano\n\ncuerpo sin enlaces.\n",
+        "---\ntype: document\ntitle: Lejano\ndescription: desconectado\n---\n\n# Lejano\n\ncuerpo sin enlaces.\n",
     );
     dir
 }
 
 /// E11-H01 · Criterio `graph_neighborhood_paridad`:
 /// Dado `operation:neighborhood, depth:2, direction:both`, Cuando se llama, Entonces el subgrafo
-/// (`nodes`/`edges`) casa **exactamente** con `Bundle::neighborhood(path, 2, Both)` del core
+/// (`nodes`/`edges`) casa **exactamente** con `DocumentSet::neighborhood(path, 2, Both)` del core
 /// (invariante #3: el grafo es una verdad computada del core).
 #[test]
 fn graph_neighborhood_paridad() {
     use lodestar_core::types::{Direction, RelPath};
 
-    let dir = bundle_vecindario();
+    let dir = workspace_vecindario();
 
     // 1) Salida de wire de la tool.
     let resp = roundtrip(
@@ -1697,9 +1697,9 @@ fn graph_neighborhood_paridad() {
     let wire_nodes = como_conjunto(&graph_nodes(&resp[0]));
     let wire_edges = como_conjunto(&graph_edges(&resp[0]));
 
-    // 2) Verdad del core: se abre el MISMO bundle en proceso (el hijo del roundtrip ya terminó) y se
+    // 2) Verdad del core: se abre el MISMO workspace en proceso (el hijo del roundtrip ya terminó) y se
     //    computa `neighborhood(centro, 2, Both)` con la lógica pura del core.
-    let app = lodestar_app::App::open(dir.path()).expect("el bundle temporal debe abrir");
+    let app = lodestar_app::App::open(dir.path()).expect("el workspace temporal debe abrir");
     let centro = RelPath::new("centro.md").unwrap();
     let nb = app
         .workspace()
@@ -1717,26 +1717,26 @@ fn graph_neighborhood_paridad() {
     let core_ids = graph_node_ids(nb_json["nodes"].as_array().unwrap());
     assert!(
         !core_ids.contains("lejano.md"),
-        "el concepto aislado «lejano.md» no debe estar en el vecindario del core: {nb_json:?}"
+        "el documento aislado «lejano.md» no debe estar en el vecindario del core: {nb_json:?}"
     );
 
     // Paridad: los nodos y aristas del wire coinciden (como conjuntos) con los del core.
     assert_eq!(
         wire_nodes, core_nodes,
-        "los `nodes` de graph_query(neighborhood) deben casar con Bundle::neighborhood del core: {resp:?}"
+        "los `nodes` de graph_query(neighborhood) deben casar con DocumentSet::neighborhood del core: {resp:?}"
     );
     assert_eq!(
         wire_edges, core_edges,
-        "los `edges` de graph_query(neighborhood) deben casar con Bundle::neighborhood del core: {resp:?}"
+        "los `edges` de graph_query(neighborhood) deben casar con DocumentSet::neighborhood del core: {resp:?}"
     );
 }
 
 /// E11-H01 · Criterio `graph_orphans`, MIGRADO a `isolated` en E16-H02:
-/// Dado un bundle con documentos aislados, Cuando se llama `graph_query(operation:isolated)`,
+/// Dado un workspace con documentos aislados, Cuando se llama `graph_query(operation:isolated)`,
 /// Entonces lista exactamente esos paths (los documentos sin enlaces internos entrantes NI
 /// salientes, `§20.7`).
 ///
-/// Bundle: `uno`/`dos`/`tres` no tienen enlaces de ningún tipo → aislados; `visible.md` recibe uno
+/// Workspace: `uno`/`dos`/`tres` no tienen enlaces de ningún tipo → aislados; `visible.md` recibe uno
 /// (desde `index.md`) e `index.md` emite uno → **ninguno de los dos** está aislado. Esos dos hacen
 /// el criterio no vacuo por partida doble: excluyen tanto al stub que devolviera todos los
 /// documentos como al que confundiera «aislado» con «sin entrantes» (que incluiría `index.md`).
@@ -1751,14 +1751,14 @@ fn graph_isolated() {
     write(
         dir.path(),
         "visible.md",
-        "---\ntype: concept\ntitle: Visible\ndescription: listado en el indice\n---\n\n# Visible\n\ncuerpo.\n",
+        "---\ntype: document\ntitle: Visible\ndescription: listado en el indice\n---\n\n# Visible\n\ncuerpo.\n",
     );
     for slug in ["uno", "dos", "tres"] {
         write(
             dir.path(),
             &format!("{slug}.md"),
             &format!(
-                "---\ntype: concept\ntitle: {slug}\ndescription: huerfano\n---\n\n# {slug}\n\ncuerpo suelto.\n"
+                "---\ntype: document\ntitle: {slug}\ndescription: huerfano\n---\n\n# {slug}\n\ncuerpo suelto.\n"
             ),
         );
     }
@@ -1788,7 +1788,7 @@ fn graph_isolated() {
 }
 
 /// E11-H01 · Operación `dangling` de `graph_query`.
-/// Dado un bundle con un enlace colgante (a una página inexistente), Cuando se llama
+/// Dado un workspace con un enlace colgante (a una página inexistente), Cuando se llama
 /// `graph_query(operation:dangling)`, Entonces el target colgante aparece listado como nodo (fantasma)
 /// y un target que sí resuelve NO aparece.
 ///
@@ -1800,7 +1800,7 @@ fn graph_isolated() {
 /// colgantes son los nodos devueltos (que es como `graph_query(dangling)` proyecta `Analysis::dangling`,
 /// invariante #3).
 ///
-/// Bundle: `fuente.md` enlaza a `inexistente.md` (colgante) y `otro.md` enlaza a `existe.md` (que sí
+/// Workspace: `fuente.md` enlaza a `inexistente.md` (colgante) y `otro.md` enlaza a `existe.md` (que sí
 /// existe → NO colgante). El enlace que resuelve hace el criterio no vacuo (un stub que devolviera
 /// todos los targets incluiría `existe.md` y fallaría).
 #[test]
@@ -1814,17 +1814,17 @@ fn graph_dangling() {
     write(
         dir.path(),
         "fuente.md",
-        "---\ntype: concept\ntitle: Fuente\ndescription: enlaza a algo inexistente\n---\n\n# Fuente\n\n[Roto](inexistente.md)\n",
+        "---\ntype: document\ntitle: Fuente\ndescription: enlaza a algo inexistente\n---\n\n# Fuente\n\n[Roto](inexistente.md)\n",
     );
     write(
         dir.path(),
         "otro.md",
-        "---\ntype: concept\ntitle: Otro\ndescription: enlaza a algo que existe\n---\n\n# Otro\n\n[Existe](existe.md)\n",
+        "---\ntype: document\ntitle: Otro\ndescription: enlaza a algo que existe\n---\n\n# Otro\n\n[Existe](existe.md)\n",
     );
     write(
         dir.path(),
         "existe.md",
-        "---\ntype: concept\ntitle: Existe\ndescription: destino real\n---\n\n# Existe\n\ncuerpo.\n",
+        "---\ntype: document\ntitle: Existe\ndescription: destino real\n---\n\n# Existe\n\ncuerpo.\n",
     );
 
     let resp = roundtrip(
@@ -1853,7 +1853,7 @@ fn graph_dangling() {
 /// Dado un `limit` menor que el nº de nodos, Cuando se llama, Entonces `summary.truncated == true` y
 /// `nextCursor` está presente (no nulo).
 ///
-/// Bundle con **11 documentos aislados** (`o00`…`o09` más el `index.md`, que desde E16-H02 es un
+/// Workspace con **11 documentos aislados** (`o00`…`o09` más el `index.md`, que desde E16-H02 es un
 /// documento más y tampoco tiene enlaces): `graph_query(isolated, limit:5)` trunca. Para que el
 /// criterio NO sea vacuo (un stub que devolviera siempre `truncated:true` lo pasaría) se hace una
 /// segunda llamada con `limit:20 >= 11`: entonces `truncated == false` y `nextCursor == null`.
@@ -1871,7 +1871,7 @@ fn graph_truncado() {
             dir.path(),
             &format!("{slug}.md"),
             &format!(
-                "---\ntype: concept\ntitle: Orphan {i:02}\ndescription: huerfano\n---\n\n# H\n\ncuerpo suelto {i:02}.\n"
+                "---\ntype: document\ntitle: Orphan {i:02}\ndescription: huerfano\n---\n\n# H\n\ncuerpo suelto {i:02}.\n"
             ),
         );
     }
@@ -1935,7 +1935,7 @@ fn graph_truncado() {
 // ejercitan **e2e por la tool MCP** (campo Pruebas de la historia: `crates/lodestar-mcp/tests/`),
 // coherente con E10-H08…H12 y E11-H01. Lo que hay que fijar aquí es el contrato de **wire**
 // (forma de `arguments` con `ref`/`proposedOperation`/`depth`, forma del `structuredContent` con
-// `summary`/`affectedConcepts`/`blockingReferences`/`recommendations`) sin acoplar los tests a los
+// `summary`/`affectedDocuments`/`blockingReferences`/`recommendations`) sin acoplar los tests a los
 // tipos internos que el implementador aún no ha creado (`App::impact_analyze`, el enum de `kind`,
 // el struct de `summary`, etc.). El tercer criterio (`impacto_paridad_core`) NO vive aquí: es una
 // paridad **store vs core** (invariante #3, el bloque que `impact_analyze` reusa), sin superficie
@@ -1950,10 +1950,10 @@ fn graph_truncado() {
 //
 // WIRE DE ENTRADA asumido (el implementador puede refinar los tipos internos, no el wire):
 //   arguments: {
-//     ref: { path: "<RelPath>" },                       // ConceptRef (E10-H04); deser de { path }
+//     ref: { path: "<RelPath>" },                       // DocumentRef (E10-H04); deser de { path }
 //     proposedOperation: {
 //       kind: "move" | "delete" | "deprecate" | "transition_status"
-//           | "change_relation" | "replace_concept"
+//           | "change_relation" | "replace_document"
 //     },
 //     depth?: integer                                    // profundidad del blast-radius; def. impl.
 //   }
@@ -1961,12 +1961,12 @@ fn graph_truncado() {
 // WIRE DE SALIDA asumido (`structuredContent`, `ARCHITECTURE.md §19.6`, `REFACTOR §9.6`):
 //   {
 //     summary: {
-//       directlyAffected: number,        // nº de backlinks DIRECTOS del ref (Bundle::backlinks)
+//       directlyAffected: number,        // nº de backlinks DIRECTOS del ref (DocumentSet::backlinks)
 //       transitivelyAffected: number,    // tamaño del blast-radius (== neighborhood(In) del core)
 //       blockingReferences: number,      // == blockingReferences.len()
 //       risk: "low" | "medium" | "high"  // nivel derivado de nº de afectados/bloqueos
 //     },
-//     affectedConcepts: [ … ],           // conceptos alcanzados (paths / nodos)
+//     affectedDocuments: [ … ],           // documentos alcanzados (paths / nodos)
 //     blockingReferences: [ { path: "<RelPath>", reason: "<texto>" } ],
 //     recommendations: [ … ]             // acciones sugeridas (texto)
 //   }
@@ -1975,27 +1975,27 @@ fn graph_truncado() {
 //   - `summary.risk` es un string en INGLÉS del conjunto cerrado {"low","medium","high"},
 //     coherente con el resto del wire camelCase/inglés (`direction:"in"`, `minimumSeverity:"err"`,
 //     claves `directlyAffected`/`blockingReferences`). El NIVEL ALTO es exactamente `"high"`.
-//   - Un `blockingReference` (para `kind:"delete"`) = un concepto que declara una **relación
+//   - Un `blockingReference` (para `kind:"delete"`) = un documento que declara una **relación
 //     tipada del schema** (`RelationDef`, E11-H03) cuyo target es el `ref`. Cada blocker es
-//     `{ path, reason }`: `path` = el concepto que depende del ref; `reason` = texto no vacío que
+//     `{ path, reason }`: `path` = el documento que depende del ref; `reason` = texto no vacío que
 //     explica el bloqueo (p. ej. el nombre de la relación que quedaría rota). Esta es la lectura
 //     literal del alcance de la historia ("relaciones obligatorias que quedarían rotas"): las
 //     dependencias estructurales tipadas, NO los enlaces sueltos de cuerpo Markdown.
 //
 // FIRMA DE SERVICIO ASUMIDA (el implementador la crea con su propia elección de tipos internos):
-//   App::impact_analyze(ref: &ConceptRef, proposed_operation_kind, depth: Option<u32>)
-//       -> Result<{ summary, affectedConcepts, blockingReferences, recommendations }, _>
-//   `directlyAffected` compone `Bundle::backlinks`; `transitivelyAffected` reusa
+//   App::impact_analyze(ref: &DocumentRef, proposed_operation_kind, depth: Option<u32>)
+//       -> Result<{ summary, affectedDocuments, blockingReferences, recommendations }, _>
+//   `directlyAffected` compone `DocumentSet::backlinks`; `transitivelyAffected` reusa
 //   `Store::blast_radius` (verificado idéntico a `neighborhood(In)` por `impacto_paridad_core`);
 //   `blockingReferences` compone `validate_relations`/`RelationDef` (E11-H03).
 // ---------------------------------------------------------------------------
 
-/// Bundle con un concepto `target.md` al que apuntan **exactamente 30** conceptos vía un enlace de
+/// Workspace con un documento `target.md` al que apuntan **exactamente 30** documentos vía un enlace de
 /// cuerpo Markdown (`[t](/target.md)`), y NINGÚN otro backlink. El `index.md` NO lista `target.md`
 /// (así el índice no aporta entrantes) y los 30 emisores no reciben backlinks entre sí, de
 /// modo que `directlyAffected` del target es 30 bajo cualquier lectura (inbound-solo o
 /// inbound+index). Deterministas por slug (`emisor00`…`emisor29`).
-fn bundle_treinta_backlinks() -> tempfile::TempDir {
+fn workspace_treinta_backlinks() -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
     // index.md sin enlaces salientes: no aporta ningún entrante al target.
     write(
@@ -2006,7 +2006,7 @@ fn bundle_treinta_backlinks() -> tempfile::TempDir {
     write(
         dir.path(),
         "target.md",
-        "---\ntype: Concept\ntitle: Target\ndescription: el concepto a mover\n---\n\n# Target\n\ncuerpo\n",
+        "---\ntype: Concept\ntitle: Target\ndescription: el documento a mover\n---\n\n# Target\n\ncuerpo\n",
     );
     for i in 0..30 {
         let slug = format!("emisor{i:02}");
@@ -2021,12 +2021,12 @@ fn bundle_treinta_backlinks() -> tempfile::TempDir {
     dir
 }
 
-/// E11-H05 · Criterio `impacto_move_30` (benchmark §17: "Mover un concepto con 30 backlinks"):
-/// Dado un concepto con 30 backlinks, Cuando `impact_analyze(kind:move)`, Entonces
+/// E11-H05 · Criterio `impacto_move_30` (benchmark §17: "Mover un documento con 30 backlinks"):
+/// Dado un documento con 30 backlinks, Cuando `impact_analyze(kind:move)`, Entonces
 /// `summary.directlyAffected == 30`.
 #[test]
 fn impacto_move_30() {
-    let dir = bundle_treinta_backlinks();
+    let dir = workspace_treinta_backlinks();
     let resp = roundtrip(
         dir.path(),
         &[
@@ -2042,18 +2042,18 @@ fn impacto_move_30() {
         });
     assert_eq!(
         directly, 30,
-        "un concepto con 30 backlinks debe dar summary.directlyAffected == 30: {resp:?}"
+        "un documento con 30 backlinks debe dar summary.directlyAffected == 30: {resp:?}"
     );
 }
 
-/// Bundle con un `.lodestar/schema.yaml` que declara una relación tipada **obligatoria**
-/// (estructural) `depends_on` del tipo `task` hacia tipos `component`, y **3 conceptos `task`** que
+/// Workspace con un `.lodestar/schema.yaml` que declara una relación tipada **obligatoria**
+/// (estructural) `depends_on` del tipo `task` hacia tipos `component`, y **3 documentos `task`** que
 /// declaran esa relación apuntando al target `component.md`. Al borrar `component.md`, esas 3
 /// relaciones tipadas quedarían rotas → 3 `blockingReferences`. Un decoy `nota.md` (tipo `note`,
 /// SIN la relación) NO debe contar como bloqueo, para que el criterio no sea vacuo (un stub que
-/// contara "cualquier concepto" daría 4). Wire camelCase idéntico al loader
+/// contara "cualquier documento" daría 4). Wire camelCase idéntico al loader
 /// (`crates/lodestar-workspace/tests/workspace.rs`), con `targetTypes`/`cardinality` de `RelationDef`.
-fn bundle_delete_bloqueos() -> tempfile::TempDir {
+fn workspace_delete_bloqueos() -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
     write(
         dir.path(),
@@ -2106,13 +2106,13 @@ types:
     dir
 }
 
-/// E11-H05 · Criterio `impacto_delete_bloqueos` (benchmark §17: "Borrar un concepto referenciado →
+/// E11-H05 · Criterio `impacto_delete_bloqueos` (benchmark §17: "Borrar un documento referenciado →
 /// rechazo con blockers"):
-/// Dado un concepto con 3 relaciones obligatorias entrantes, Cuando `impact_analyze(kind:delete)`,
+/// Dado un documento con 3 relaciones obligatorias entrantes, Cuando `impact_analyze(kind:delete)`,
 /// Entonces `blockingReferences.len() == 3` y `summary.risk == "high"`.
 #[test]
 fn impacto_delete_bloqueos() {
-    let dir = bundle_delete_bloqueos();
+    let dir = workspace_delete_bloqueos();
     let resp = roundtrip(
         dir.path(),
         &[
@@ -2153,7 +2153,7 @@ fn impacto_delete_bloqueos() {
     // No vacuo: el decoy `nota.md` (sin relación tipada al target) NO debe ser un blocker.
     assert!(
         !blockers.iter().any(|b| b["path"] == "nota.md"),
-        "un concepto sin relación tipada al target NO debe contar como bloqueo: {resp:?}"
+        "un documento sin relación tipada al target NO debe contar como bloqueo: {resp:?}"
     );
 
     // `summary.blockingReferences` (contador) coherente con la lista.
@@ -2166,7 +2166,7 @@ fn impacto_delete_bloqueos() {
     // Nivel de riesgo ALTO fijado como `"high"` (conjunto cerrado {low,medium,high}, wire inglés).
     assert_eq!(
         sc["summary"]["risk"], "high",
-        "borrar un concepto con 3 relaciones obligatorias entrantes ⇒ summary.risk == «high»: {resp:?}"
+        "borrar un documento con 3 relaciones obligatorias entrantes ⇒ summary.risk == «high»: {resp:?}"
     );
 }
 
@@ -2202,8 +2202,8 @@ fn impacto_delete_bloqueos() {
 //     ],
 //     policy: { "requireConformantResult"?: bool, "allowWarnings"?: bool }
 //   }
-//   `expectedRevision` es OPCIONAL por op y es el `ConceptRevision` (E10-H03, «blake3:…») que el
-//   agente cree vigente; si el concepto cambió (revisión actual distinta) → `REVISION_CONFLICT`.
+//   `expectedRevision` es OPCIONAL por op y es el `DocumentRevision` (E10-H03, «blake3:…») que el
+//   agente cree vigente; si el documento cambió (revisión actual distinta) → `REVISION_CONFLICT`.
 //
 // WIRE DE SALIDA asumido (`structuredContent`, `REFACTOR §11.1`, `ARCHITECTURE.md §19.5`):
 //   {
@@ -2212,7 +2212,7 @@ fn impacto_delete_bloqueos() {
 //     risk, semanticDiff, impact, diagnosticsBefore, diagnosticsAfter
 //   }
 //   `planHash` es DETERMINISTA: mismo `operations` + misma `baseWorkspaceRevision` ⇒ mismo `planHash`.
-//   `change_plan` NO escribe: toda la simulación es sobre un `Bundle` en memoria (invariante #1, la
+//   `change_plan` NO escribe: toda la simulación es sobre un `DocumentSet` en memoria (invariante #1, la
 //   escritura real es E13).
 //
 // FIRMA DE SERVICIO ASUMIDA (el implementador la crea con su propia elección de tipos internos):
@@ -2220,11 +2220,11 @@ fn impacto_delete_bloqueos() {
 //       -> Result<ChangeSet-o-PlanResult, ErrorCode>   // con `REVISION_CONFLICT` en discrepancia
 // ---------------------------------------------------------------------------
 
-/// Bundle con un cluster de **4 conceptos relacionados** conformes (`a`/`b`/`c`/`d`, enlazados en
+/// Workspace con un cluster de **4 documentos relacionados** conformes (`a`/`b`/`c`/`d`, enlazados en
 /// anillo y listados en el índice) sobre el que las pruebas montan una propuesta de 5 operaciones
-/// (1 `create` del 5º concepto + 4 `patch_frontmatter` sobre los existentes). Todos llevan
-/// `type`/`title`/`description` → el bundle base es conforme, así que un plan sin errores es posible.
-fn bundle_cinco_relacionados() -> tempfile::TempDir {
+/// (1 `create` del 5º documento + 4 `patch_frontmatter` sobre los existentes). Todos llevan
+/// `type`/`title`/`description` → el workspace base es conforme, así que un plan sin errores es posible.
+fn workspace_cinco_relacionados() -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
     write(
         dir.path(),
@@ -2307,13 +2307,13 @@ fn snapshot_md(root: &std::path::Path) -> std::collections::BTreeMap<String, Str
     map
 }
 
-/// Las 5 operaciones de la propuesta base: 1 `create` del 5º concepto + 4 `patch_frontmatter` sobre
+/// Las 5 operaciones de la propuesta base: 1 `create` del 5º documento + 4 `patch_frontmatter` sobre
 /// el cluster `a`/`b`/`c`/`d`. Los `patch` son inocuos (actualizan `description`) para que el plan
 /// pueda ser conforme; lo que fija el criterio es que salgan **5** `normalizedOperations`.
 fn cinco_operaciones() -> serde_json::Value {
     serde_json::json!([
         { "op": "create", "path": "nuevo.md", "type": "Concept", "title": "Nuevo",
-          "body": "# Nuevo\n\ncuerpo del quinto concepto\n" },
+          "body": "# Nuevo\n\ncuerpo del quinto documento\n" },
         { "op": "patch_frontmatter", "ref": { "path": "a.md" }, "patch": { "description": "a actualizada por el plan" } },
         { "op": "patch_frontmatter", "ref": { "path": "b.md" }, "patch": { "description": "b actualizada por el plan" } },
         { "op": "patch_frontmatter", "ref": { "path": "c.md" }, "patch": { "description": "c actualizada por el plan" } },
@@ -2327,13 +2327,13 @@ fn policy_permisiva() -> serde_json::Value {
     serde_json::json!({ "requireConformantResult": false, "allowWarnings": true })
 }
 
-/// E12-H08 · Criterio `plan_un_solo_changeset` (benchmark §17: "Cambiar cinco conceptos relacionados
+/// E12-H08 · Criterio `plan_un_solo_changeset` (benchmark §17: "Cambiar cinco documentos relacionados
 /// → un único change set"):
-/// Dado una propuesta de 5 operaciones sobre conceptos relacionados, Cuando se planifica, Entonces
+/// Dado una propuesta de 5 operaciones sobre documentos relacionados, Cuando se planifica, Entonces
 /// se obtiene un **único** `ChangeSet` (un solo `changeSetId`) con `normalizedOperations` de los 5.
 #[test]
 fn plan_un_solo_changeset() {
-    let dir = bundle_cinco_relacionados();
+    let dir = workspace_cinco_relacionados();
     let line = change_plan_line(None, cinco_operaciones(), policy_permisiva());
     let resp = roundtrip(dir.path(), &[line.as_str()], 1);
     let sc = plan_sc(&resp[0]);
@@ -2364,15 +2364,15 @@ fn plan_un_solo_changeset() {
     );
 }
 
-/// E12-H08 · Criterio `plan_revision_conflict` (benchmark §17: "Modificar un concepto cambiado
+/// E12-H08 · Criterio `plan_revision_conflict` (benchmark §17: "Modificar un documento cambiado
 /// externamente → REVISION_CONFLICT"):
-/// Dado el `expectedRevision` de un concepto que luego cambia EN DISCO, Cuando se planifica una op
+/// Dado el `expectedRevision` de un documento que luego cambia EN DISCO, Cuando se planifica una op
 /// sobre él con esa revisión vieja, Entonces `REVISION_CONFLICT`.
 #[test]
 fn plan_revision_conflict() {
-    let dir = bundle_cinco_relacionados();
+    let dir = workspace_cinco_relacionados();
 
-    // 1) Revisión actual de `a.md` (ConceptRevision, «blake3:…»), vía knowledge_get (tool existente).
+    // 1) Revisión actual de `a.md` (DocumentRevision, «blake3:…»), vía knowledge_get (tool existente).
     let get = roundtrip(
         dir.path(),
         &[
@@ -2380,10 +2380,10 @@ fn plan_revision_conflict() {
         ],
         1,
     );
-    let old_rev = get[0]["result"]["structuredContent"]["concept"]["revision"]
+    let old_rev = get[0]["result"]["structuredContent"]["document"]["revision"]
         .as_str()
         .unwrap_or_else(|| {
-            panic!("knowledge_get debe devolver concept.revision de «a.md»: {get:?}")
+            panic!("knowledge_get debe devolver document.revision de «a.md»: {get:?}")
         })
         .to_string();
     assert!(
@@ -2391,7 +2391,7 @@ fn plan_revision_conflict() {
         "la revisión de partida debe tener formato «blake3:…»: {old_rev}"
     );
 
-    // 2) `a.md` cambia EN DISCO (otro contenido ⇒ otra ConceptRevision): simula un cambio externo.
+    // 2) `a.md` cambia EN DISCO (otro contenido ⇒ otra DocumentRevision): simula un cambio externo.
     write(
         dir.path(),
         "a.md",
@@ -2425,16 +2425,16 @@ fn plan_revision_conflict() {
 }
 
 /// E12-H08 · Criterio `plan_hash_determinista`:
-/// Dado el mismo `operations` y la misma `baseWorkspaceRevision` (mismo bundle sin cambios entre
+/// Dado el mismo `operations` y la misma `baseWorkspaceRevision` (mismo workspace sin cambios entre
 /// medias), Cuando se planifica dos veces, Entonces el `planHash` coincide. Para que NO sea vacuo
 /// (un stub con hash constante lo pasaría) se añade una tercera llamada con un input DISTINTO y se
 /// exige que su `planHash` difiera.
 #[test]
 fn plan_hash_determinista() {
-    let dir = bundle_cinco_relacionados();
+    let dir = workspace_cinco_relacionados();
     let line = change_plan_line(None, cinco_operaciones(), policy_permisiva());
 
-    // Dos servidores frescos sobre el MISMO bundle (misma baseWorkspaceRevision), mismo input.
+    // Dos servidores frescos sobre el MISMO workspace (misma baseWorkspaceRevision), mismo input.
     let a = roundtrip(dir.path(), &[line.as_str()], 1);
     let b = roundtrip(dir.path(), &[line.as_str()], 1);
 
@@ -2455,11 +2455,11 @@ fn plan_hash_determinista() {
         "mismo input + misma baseWorkspaceRevision ⇒ mismo planHash: {a:?} vs {b:?}"
     );
 
-    // La base sobre la que se computa el plan también coincide (mismo bundle, misma revisión).
+    // La base sobre la que se computa el plan también coincide (mismo workspace, misma revisión).
     assert_eq!(
         plan_sc(&a[0])["baseWorkspaceRevision"],
         plan_sc(&b[0])["baseWorkspaceRevision"],
-        "sobre el mismo bundle la baseWorkspaceRevision debe coincidir: {a:?} vs {b:?}"
+        "sobre el mismo workspace la baseWorkspaceRevision debe coincidir: {a:?} vs {b:?}"
     );
 
     // No vacuo: un input DISTINTO (otras ops) debe producir un planHash distinto.
@@ -2485,7 +2485,7 @@ fn plan_hash_determinista() {
 /// (invariante #1; la escritura real es E13).
 #[test]
 fn plan_no_escribe() {
-    let dir = bundle_cinco_relacionados();
+    let dir = workspace_cinco_relacionados();
 
     // Estado del conocimiento en disco ANTES.
     let antes = snapshot_md(dir.path());
@@ -2515,7 +2515,7 @@ fn plan_no_escribe() {
         "change_plan NO debe escribir: los .md en disco deben quedar idénticos"
     );
 
-    // La op `create nuevo.md` NO debe materializar el fichero en disco (solo en el bundle en memoria).
+    // La op `create nuevo.md` NO debe materializar el fichero en disco (solo en el workspace en memoria).
     assert!(
         !dir.path().join("nuevo.md").exists(),
         "una op `create` en change_plan NO debe crear el .md en disco: {resp:?}"
@@ -2550,13 +2550,13 @@ fn plan_no_escribe() {
 //     receiptId, applied,                         // applied:true al publicar; receiptId del recibo (H07)
 //     previousWorkspaceRevision, workspaceRevision,   // «blake3:…» antes/después de la transacción
 //     changedPaths, semanticDiff,
-//     conformance: { conformant, errors, warnings }
+//     validation: { conformant, errors, warnings }
 //   }
 //   El `workspaceRevision` devuelto es la revisión resultante: tras un apply OK el workspace «queda
 //   en» ella (comprobado contra `workspace_status`). Los errores de EJECUCIÓN (`PLAN_STALE`,
 //   `PLAN_EXPIRED`, `PERMISSION_DENIED`) afloran como `result.isError == true` con el código estable
 //   wire visible (ErrorCode `as_str()`, E10-H02 / invariante #4 / `REFACTOR §13`), NUNCA como error
-//   JSON-RPC de transporte — mismo patrón que `CONCEPT_NOT_FOUND`/`REVISION_CONFLICT`.
+//   JSON-RPC de transporte — mismo patrón que `DOCUMENT_NOT_FOUND`/`REVISION_CONFLICT`.
 //
 // FIRMA DE SERVICIO ASUMIDA (el implementador la crea con su propia elección de tipos internos):
 //   App::change_apply(change_set_id: &ChangeSetId, expected_workspace_revision: Option<WorkspaceRevision>)
@@ -2569,7 +2569,7 @@ fn plan_no_escribe() {
 // (E12-H09), así que `change_apply` puede recuperarlo por `changeSetId` desde un servidor FRESCO (no
 // hace falta la misma sesión stdio). Todos los tests hacen: (1) un `roundtrip` con `change_plan` para
 // obtener el `changeSetId` y la `baseWorkspaceRevision`; (2) —tras la manipulación que fije el
-// escenario— un segundo `roundtrip` (servidor fresco, mismo bundle) con `change_apply`.
+// escenario— un segundo `roundtrip` (servidor fresco, mismo workspace) con `change_apply`.
 // ---------------------------------------------------------------------------
 
 /// Construye la línea `tools/call change_apply` con el `changeSetId` y un `expectedWorkspaceRevision`
@@ -2630,7 +2630,7 @@ fn force_plan_expired(root: &std::path::Path, change_set_id: &str) {
     std::fs::write(&path, serde_json::to_vec(&plan).unwrap()).unwrap();
 }
 
-/// E13-H08 · Criterio `apply_ok` (benchmark §17: "Crear un concepto válido → plan aceptado y aplicado"):
+/// E13-H08 · Criterio `apply_ok` (benchmark §17: "Crear un documento válido → plan aceptado y aplicado"):
 /// Dado un plan válido y vigente, Cuando se aplica, Entonces `applied:true` y el workspace queda en el
 /// `resultWorkspaceRevision` que el plan previó. Se comprueba (a) `applied==true`; (b) que
 /// `previousWorkspaceRevision` == la `baseWorkspaceRevision` del plan (se aplicó sobre la base
@@ -2640,13 +2640,13 @@ fn force_plan_expired(root: &std::path::Path, change_set_id: &str) {
 /// workspace «queda en» esa revisión resultante).
 #[test]
 fn apply_ok() {
-    let dir = bundle_min();
+    let dir = workspace_min();
 
-    // (1) Plan válido: crear un concepto conforme (type/title/body ⇒ conforme, cf.
+    // (1) Plan válido: crear un documento conforme (type/title/body ⇒ conforme, cf.
     // `create_concept_escribe_y_query_lo_ve`). Servidor fresco; el plan se persiste en runtime.
     let ops = serde_json::json!([
         { "op": "create", "path": "nuevo.md", "type": "Nota", "title": "Nuevo",
-          "body": "# Resumen\n\ncuerpo del concepto nuevo\n" },
+          "body": "# Resumen\n\ncuerpo del documento nuevo\n" },
     ]);
     let plan = roundtrip(
         dir.path(),
@@ -2659,7 +2659,7 @@ fn apply_ok() {
         .unwrap_or_else(|| panic!("change_plan debe devolver `baseWorkspaceRevision`: {plan:?}"))
         .to_string();
 
-    // (2) Aplicar el plan por su `changeSetId` (servidor fresco, mismo bundle) + `workspace_status`.
+    // (2) Aplicar el plan por su `changeSetId` (servidor fresco, mismo workspace) + `workspace_status`.
     let status_line = r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"workspace_status","arguments":{}}}"#;
     let resp = roundtrip(
         dir.path(),
@@ -2705,7 +2705,7 @@ fn apply_ok() {
     );
     let contenido = std::fs::read_to_string(&creado).unwrap();
     assert!(
-        contenido.contains("cuerpo del concepto nuevo"),
+        contenido.contains("cuerpo del documento nuevo"),
         "el `.md` canónico debe reflejar el cuerpo del plan: {contenido:?}"
     );
 
@@ -2720,7 +2720,7 @@ fn apply_ok() {
 }
 
 /// E13-H08 · Criterio `apply_plan_stale`:
-/// Dado un plan cuya `planHash` ya no casa (el bundle cambió bajo él), Cuando se aplica, Entonces
+/// Dado un plan cuya `planHash` ya no casa (el workspace cambió bajo él), Cuando se aplica, Entonces
 /// `PLAN_STALE` y no escribe. El drift se fuerza reescribiendo EN DISCO un `.md` que el plan toca
 /// (`a.md`): cambia la `baseWorkspaceRevision` actual ⇒ el `planHash` recomputado en
 /// `change_apply` (paso «re-normalizar y validar → verificar planHash», `REFACTOR §11.2`) difiere del
@@ -2728,7 +2728,7 @@ fn apply_ok() {
 /// `planHash` (no un `REVISION_CONFLICT` del control optimista de workspace).
 #[test]
 fn apply_plan_stale() {
-    let dir = bundle_cinco_relacionados();
+    let dir = workspace_cinco_relacionados();
 
     // (1) Plan: un patch sobre `a.md` que fijaría una descripción reconocible.
     let ops = serde_json::json!([
@@ -2742,7 +2742,7 @@ fn apply_plan_stale() {
     );
     let id = plan_change_set_id(&plan[0]);
 
-    // (2) El bundle cambia BAJO el plan: `a.md` se reescribe en disco con OTRO contenido (otra
+    // (2) El workspace cambia BAJO el plan: `a.md` se reescribe en disco con OTRO contenido (otra
     // WorkspaceRevision base ⇒ otro planHash recomputado).
     write(
         dir.path(),
@@ -2781,10 +2781,10 @@ fn apply_plan_stale() {
 /// E13-H08 · Criterio `apply_plan_expired`:
 /// Dado un plan caducado, Cuando se aplica, Entonces `PLAN_EXPIRED`. Se fuerza la caducidad
 /// reescribiendo el `expiresAt` del plan persistido a un instante pasado (E12-H09), SIN tocar el
-/// bundle (así el discriminante es la caducidad, no un PLAN_STALE por drift).
+/// workspace (así el discriminante es la caducidad, no un PLAN_STALE por drift).
 #[test]
 fn apply_plan_expired() {
-    let dir = bundle_cinco_relacionados();
+    let dir = workspace_cinco_relacionados();
 
     // (1) Plan válido sobre `a.md`.
     let ops = serde_json::json!([
@@ -2826,22 +2826,22 @@ fn apply_plan_expired() {
     );
 }
 
-/// Bundle con `writableRoots:[knowledge]` y `referenceRoots:[src]`: `knowledge/` es la única raíz
+/// Workspace con `writableRoots:[knowledge]` y `referenceRoots:[src]`: `knowledge/` es la única raíz
 /// escribible; `src/` es una raíz de referencia (visible, NUNCA escribible, E11-H04). Un plan que
 /// intente CREAR un `.md` bajo `src/` debe rechazarse al aplicar (`PERMISSION_DENIED`).
-fn bundle_writable_restringido() -> tempfile::TempDir {
+fn workspace_writable_restringido() -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
-    // Marcador de bundle en la raíz.
+    // Marcador de workspace en la raíz.
     write(
         dir.path(),
         "index.md",
         "---\ntype: Index\ntitle: Bundle\ndescription: Índice del bundle\nokf_version: \"0.1\"\n---\n\n# Bundle\n",
     );
-    // Un concepto conforme dentro de la raíz escribible.
+    // Un documento conforme dentro de la raíz escribible.
     write(
         dir.path(),
-        "knowledge/concepto.md",
-        "---\ntype: Concept\ntitle: Concepto\ndescription: dentro de knowledge\n---\n\n# H\n\ncuerpo\n",
+        "knowledge/documento.md",
+        "---\ntype: Concept\ntitle: Documento\ndescription: dentro de knowledge\n---\n\n# H\n\ncuerpo\n",
     );
     // Un fichero cualquiera bajo la raíz de referencia (código adoptado, no conocimiento).
     write(dir.path(), "src/existente.rs", "fn main() {}\n");
@@ -2867,7 +2867,7 @@ fn bundle_writable_restringido() -> tempfile::TempDir {
 /// forma independiente del punto de rechazo, que NO se materializa nada bajo `src/`.
 #[test]
 fn apply_fuera_de_writable() {
-    let dir = bundle_writable_restringido();
+    let dir = workspace_writable_restringido();
 
     // (1) Plan con un create bajo `src/` (fuera de `writableRoots`). change_plan no valida writable,
     // así que produce el plan (documentado arriba): exigimos un `changeSetId` para que el rojo lo
@@ -3022,12 +3022,12 @@ fn purge_receipts(root: &std::path::Path) {
 /// (d) que un `workspace_status` posterior reporta EXACTAMENTE esa revisión restaurada.
 #[test]
 fn revert_reciente() {
-    let dir = bundle_min();
+    let dir = workspace_min();
 
-    // (1) Plan válido: crear un concepto conforme (mismo patrón que `apply_ok`).
+    // (1) Plan válido: crear un documento conforme (mismo patrón que `apply_ok`).
     let ops = serde_json::json!([
         { "op": "create", "path": "nuevo.md", "type": "Nota", "title": "Nuevo",
-          "body": "# Resumen\n\ncuerpo del concepto nuevo\n" },
+          "body": "# Resumen\n\ncuerpo del documento nuevo\n" },
     ]);
     let plan = roundtrip(
         dir.path(),
@@ -3051,7 +3051,7 @@ fn revert_reciente() {
         "precondición: el apply debe haber creado `nuevo.md` antes de revertir: {applied:?}"
     );
 
-    // (3) Revertir por el `receiptId` (servidor fresco, mismo bundle) + `workspace_status`.
+    // (3) Revertir por el `receiptId` (servidor fresco, mismo workspace) + `workspace_status`.
     let status_line = r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"workspace_status","arguments":{}}}"#;
     let resp = roundtrip(
         dir.path(),
@@ -3106,12 +3106,12 @@ fn revert_reciente() {
 /// `REVISION_CONFLICT` del control optimista de workspace.
 #[test]
 fn revert_fichero_alterado() {
-    let dir = bundle_min();
+    let dir = workspace_min();
 
     // (1) Plan + apply de un `create` (el único fichero afectado es `nuevo.md`).
     let ops = serde_json::json!([
         { "op": "create", "path": "nuevo.md", "type": "Nota", "title": "Nuevo",
-          "body": "# Resumen\n\ncuerpo del concepto nuevo\n" },
+          "body": "# Resumen\n\ncuerpo del documento nuevo\n" },
     ]);
     let plan = roundtrip(
         dir.path(),
@@ -3171,12 +3171,12 @@ fn revert_fichero_alterado() {
 /// fichero-alterado y el test no es vacuo); y (c) no revierte: el `.md` del apply permanece en disco.
 #[test]
 fn revert_caducado() {
-    let dir = bundle_min();
+    let dir = workspace_min();
 
     // (1) Plan + apply de un `create`.
     let ops = serde_json::json!([
         { "op": "create", "path": "nuevo.md", "type": "Nota", "title": "Nuevo",
-          "body": "# Resumen\n\ncuerpo del concepto nuevo\n" },
+          "body": "# Resumen\n\ncuerpo del documento nuevo\n" },
     ]);
     let plan = roundtrip(
         dir.path(),
@@ -3272,7 +3272,7 @@ fn nombres_de_tools(resp: &serde_json::Value) -> std::collections::BTreeSet<Stri
 /// (control para no ser vacuo: si el perfil se ignorase, standard también las ocultaría/mostraría).
 #[test]
 fn perfil_readonly_sin_cambio() {
-    let dir = bundle_min();
+    let dir = workspace_min();
     let list = r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#;
 
     // --- readonly: sin tools de cambio, con tools de lectura ---
@@ -3316,7 +3316,7 @@ fn perfil_readonly_sin_cambio() {
 /// mencionando las 10 tools EN ORDEN (no solo un string no vacío).
 #[test]
 fn instrucciones_flujo() {
-    let dir = bundle_min();
+    let dir = workspace_min();
     let resp = roundtrip(
         dir.path(),
         &[r#"{"jsonrpc":"2.0","id":1,"method":"initialize"}"#],
@@ -3402,7 +3402,7 @@ fn instrucciones_flujo() {
 ///   perfil, no validación de argumento.
 #[test]
 fn perfil_readonly_rechaza_cambio() {
-    let dir = bundle_cinco_relacionados();
+    let dir = workspace_cinco_relacionados();
 
     // --- change_plan: bajo standard produce un plan válido; bajo readonly no debe producirlo ---
     let plan_line = change_plan_line(None, cinco_operaciones(), policy_permisiva());
@@ -3521,7 +3521,7 @@ const TOOLS_HEREDADAS: [&str; 10] = [
 /// «10 objetivo» de «5 objetivo + 5 heredadas».
 #[test]
 fn tools_list_solo_objetivo() {
-    let dir = bundle_min();
+    let dir = workspace_min();
     let resp = roundtrip_profile(
         dir.path(),
         "standard",
@@ -3573,7 +3573,7 @@ fn tools_list_solo_objetivo() {
 /// heredada RETIRADA es, tras la retirada, exactamente el mismo caso que una tool inexistente.
 #[test]
 fn tool_heredada_retirada() {
-    let dir = bundle_min();
+    let dir = workspace_min();
     // Un argumento plausible por tool heredada, para descartar que el rechazo venga de un argumento
     // ausente en vez de la retirada de la tool.
     let args = |name: &str| -> &'static str {
@@ -3625,14 +3625,14 @@ fn tool_heredada_retirada() {
 //     usa `roundtrip`/`roundtrip_profile` (que pasan la raíz como posicional): usan
 //     [`roundtrip_en`], que ejercita la superficie nueva y que sigue siendo válida cuando el
 //     posicional desaparezca.
-//   · desaparece el gate «esto no es un bundle lodestar» (exit 3): cualquier directorio vale.
+//   · desaparece el gate «esto no es un workspace lodestar» (exit 3): cualquier directorio vale.
 // ---------------------------------------------------------------------------
 
 /// Como [`roundtrip`], pero arranca el servidor con el **cwd** en `cwd` y exactamente los
 /// argumentos `args` (ninguno posicional). Es el arnés de la superficie de arranque de E15-H06:
 /// `&[]` ejercita «la raíz es el cwd» y `&["--root", dir]` ejercita la raíz explícita.
 ///
-/// Si el servidor aborta al arrancar (hoy: exit 3 por el gate de bundle), el vector devuelto sale
+/// Si el servidor aborta al arrancar (hoy: exit 3 por el gate de workspace), el vector devuelto sale
 /// **vacío** — de ahí que cada test asserte primero cuántas respuestas llegaron, para que el rojo
 /// se lea como «el servidor no arrancó» y no como un índice fuera de rango.
 fn roundtrip_en(
@@ -3729,7 +3729,7 @@ fn arranca_en_directorio_arbitrario() {
 ///     segunda parte, un servidor que solo guardara la ruta pero leyera el cwd pasaría el test.
 ///
 /// Fase ROJA: hoy la raíz es un argumento POSICIONAL, así que `--root` se toma como si fuera la
-/// ruta del bundle (`root = "--root"`), el gate de bundle falla y el proceso sale con 3.
+/// ruta del workspace (`root = "--root"`), el gate de workspace falla y el proceso sale con 3.
 #[test]
 fn root_explicito_gana() {
     let raiz = tempfile::tempdir().unwrap();

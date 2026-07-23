@@ -6,7 +6,7 @@
 
 use lodestar_app::{schemas, App, CheckScope, Profile, SearchFilters};
 use lodestar_core::plan::PlanPolicy;
-use lodestar_core::types::{ChangeSetId, ConceptRef, ReceiptId, Severity, WorkspaceRevision};
+use lodestar_core::types::{ChangeSetId, DocumentRef, ReceiptId, Severity, WorkspaceRevision};
 #[cfg(test)]
 use lodestar_workspace::Workspace;
 use serde_json::{json, Value};
@@ -22,9 +22,9 @@ pub fn list() -> Value {
     json!([
         {"name": "workspace_status", "description": "Config activa, capacidades del perfil, conformidad y recuento agregado del workspace (llámala primero en cada sesión).", "inputSchema": empty,
          "outputSchema": schemas::workspace_status_schema()},
-        {"name": "knowledge_search", "description": "Localiza conceptos por texto y filtros, con snippets y paginación por cursor (nunca devuelve cuerpos).",
+        {"name": "knowledge_search", "description": "Localiza documentos por texto y filtros, con snippets y paginación por cursor (nunca devuelve cuerpos).",
          "inputSchema": { "type": "object", "properties": {
-             "text": { "type": "string", "description": "Texto libre (subcadena, misma semántica que la DSL del prototipo). Vacío = todos los conceptos." },
+             "text": { "type": "string", "description": "Texto libre (subcadena, misma semántica que la DSL del prototipo). Vacío = todos los documentos." },
              "filters": { "type": "object", "description": "Filtros: types/statuses/tags (listas) y pathPrefix (string).", "properties": {
                  "types": { "type": "array", "items": { "type": "string" } },
                  "statuses": { "type": "array", "items": { "type": "string" } },
@@ -36,10 +36,10 @@ pub fn list() -> Value {
              "cursor": { "type": "string", "description": "Cursor opaco de paginación devuelto en «nextCursor»." }
          }, "additionalProperties": false },
          "outputSchema": schemas::knowledge_search_schema()},
-        {"name": "knowledge_get", "description": "Obtiene un concepto concreto con `include` selectivo y selección de secciones por headingPath.",
+        {"name": "knowledge_get", "description": "Obtiene un documento concreto con `include` selectivo y selección de secciones por headingPath.",
          "inputSchema": { "type": "object", "properties": {
-             "ref": { "type": "object", "description": "ConceptRef: identidad del concepto a leer.", "properties": {
-                 "path": { "type": "string", "description": "Ruta relativa del concepto (p. ej. «notas/alfa.md»)." }
+             "ref": { "type": "object", "description": "DocumentRef: identidad del documento a leer.", "properties": {
+                 "path": { "type": "string", "description": "Ruta relativa del documento (p. ej. «notas/alfa.md»)." }
              }, "required": ["path"], "additionalProperties": false },
              "include": { "type": "array", "description": "Campos a poblar; un campo no pedido queda sin poblar.",
                  "items": { "type": "string", "enum": ["frontmatter", "body", "revision", "outgoingLinks", "backlinks", "diagnostics", "externalReferences"] } },
@@ -56,12 +56,12 @@ pub fn list() -> Value {
         {"name": "knowledge_check", "description": "Audita el conocimiento (diagnósticos del documento + esquema) con scopes y severidad mínima; diagnósticos con id estable y paginación por cursor.",
          "inputSchema": { "type": "object", "properties": {
              "scope": { "type": "object", "description": "Qué auditar. Discriminado por «kind».", "properties": {
-                 "kind": { "type": "string", "enum": ["workspace", "concept", "paths", "affected"] },
-                 "ref": { "type": "object", "description": "ConceptRef (solo con kind «concept»).", "properties": {
+                 "kind": { "type": "string", "enum": ["workspace", "document", "paths", "affected"] },
+                 "ref": { "type": "object", "description": "DocumentRef (solo con kind «document»).", "properties": {
                      "path": { "type": "string" }
                  }, "required": ["path"] },
                  "paths": { "type": "array", "description": "Lista de paths (solo con kind «paths»).", "items": { "type": "string" } },
-                 "refs": { "type": "array", "description": "ConceptRefs centro del vecindario (solo con kind «affected»).",
+                 "refs": { "type": "array", "description": "DocumentRefs centro del vecindario (solo con kind «affected»).",
                      "items": { "type": "object", "properties": { "path": { "type": "string" } }, "required": ["path"] } },
                  "depth": { "type": "integer", "minimum": 1, "default": 1, "description": "Distancia máxima del vecindario (solo con kind «affected»)." }
              }, "required": ["kind"] },
@@ -74,11 +74,11 @@ pub fn list() -> Value {
         {"name": "graph_query", "description": "Consulta el grafo: backlinks/outgoing/neighborhood/isolated/dangling/path_between/cycles/components en una sola tool (consolida find_backlinks/find_orphans/find_dangling/neighborhood).",
          "inputSchema": { "type": "object", "properties": {
              "operation": { "type": "string", "enum": ["backlinks", "outgoing", "neighborhood", "isolated", "dangling", "path_between", "cycles", "components"], "description": "Qué subgrafo computar. «backlinks»/«outgoing»/«neighborhood» requieren «ref»; «path_between» requiere «ref» (origen) y «to» (destino); «isolated»/«dangling»/«cycles»/«components» no requieren refs. «isolated» = documentos sin enlaces internos entrantes NI salientes (antes «orphans»)." },
-             "ref": { "type": "object", "description": "ConceptRef: el concepto centro (requerido en backlinks/outgoing/neighborhood; origen en path_between).", "properties": {
-                 "path": { "type": "string", "description": "Ruta relativa del concepto (p. ej. «notas/alfa.md»)." }
+             "ref": { "type": "object", "description": "DocumentRef: el documento centro (requerido en backlinks/outgoing/neighborhood; origen en path_between).", "properties": {
+                 "path": { "type": "string", "description": "Ruta relativa del documento (p. ej. «notas/alfa.md»)." }
              }, "required": ["path"], "additionalProperties": false },
-             "to": { "type": "object", "description": "ConceptRef destino, solo «path_between» (extremo final del camino dirigido).", "properties": {
-                 "path": { "type": "string", "description": "Ruta relativa del concepto destino." }
+             "to": { "type": "object", "description": "DocumentRef destino, solo «path_between» (extremo final del camino dirigido).", "properties": {
+                 "path": { "type": "string", "description": "Ruta relativa del documento destino." }
              }, "required": ["path"], "additionalProperties": false },
              "depth": { "type": "integer", "minimum": 1, "default": 1, "description": "Solo «neighborhood»." },
              "direction": { "type": "string", "enum": ["out", "in", "both"], "default": "out", "description": "Solo «neighborhood»." },
@@ -86,13 +86,13 @@ pub fn list() -> Value {
              "cursor": { "type": "string", "description": "Cursor opaco de paginación devuelto en «nextCursor»." }
          }, "required": ["operation"], "additionalProperties": false },
          "outputSchema": schemas::graph_query_schema()},
-        {"name": "impact_analyze", "description": "Analiza el impacto de un cambio hipotético sobre un concepto (sin aplicarlo): afectados directos/transitivos, relaciones tipadas obligatorias que romperían (bloqueos) y nivel de riesgo. Reusa el blast-radius entrante y las relaciones del schema.",
+        {"name": "impact_analyze", "description": "Analiza el impacto de un cambio hipotético sobre un documento (sin aplicarlo): afectados directos/transitivos, relaciones tipadas obligatorias que romperían (bloqueos) y nivel de riesgo. Reusa el blast-radius entrante y las relaciones del schema.",
          "inputSchema": { "type": "object", "properties": {
-             "ref": { "type": "object", "description": "ConceptRef: el concepto sobre el que se propone el cambio.", "properties": {
-                 "path": { "type": "string", "description": "Ruta relativa del concepto (p. ej. «notas/alfa.md»)." }
+             "ref": { "type": "object", "description": "DocumentRef: el documento sobre el que se propone el cambio.", "properties": {
+                 "path": { "type": "string", "description": "Ruta relativa del documento (p. ej. «notas/alfa.md»)." }
              }, "required": ["path"], "additionalProperties": false },
              "proposedOperation": { "type": "object", "description": "El cambio hipotético a evaluar.", "properties": {
-                 "kind": { "type": "string", "enum": ["move", "delete", "deprecate", "transition_status", "change_relation", "replace_concept"], "description": "Tipo de operación propuesta. Solo «delete» computa bloqueos estructurales en v1." }
+                 "kind": { "type": "string", "enum": ["move", "delete", "deprecate", "transition_status", "change_relation", "replace_document"], "description": "Tipo de operación propuesta. Solo «delete» computa bloqueos estructurales en v1." }
              }, "required": ["kind"], "additionalProperties": false },
              "depth": { "type": "integer", "minimum": 1, "description": "Profundidad del blast-radius entrante; por defecto cubre todo el alcance transitivo." }
          }, "required": ["ref", "proposedOperation"], "additionalProperties": false },
@@ -100,12 +100,12 @@ pub fn list() -> Value {
         {"name": "change_plan", "description": "Planifica un cambio complejo SIN escribir: normaliza las operaciones propuestas, simula su aplicación en memoria y valida el resultado. Devuelve un único change set (normalizedOperations, semanticDiff, risk, impact, diagnosticsBefore/After) con un planHash determinista. No toca disco (aplicar es change_apply, E13).",
          "inputSchema": { "type": "object", "properties": {
              "expectedWorkspaceRevision": { "type": "string", "description": "Control optimista a nivel de workspace («blake3:…»). Si se omite, se toma la revisión actual; si no coincide → REVISION_CONFLICT." },
-             "operations": { "type": "array", "description": "Operaciones propuestas, discriminadas por «op» (create/patch_frontmatter/replace_body/replace_text/edit_section/move/delete/add_relation/remove_relation/transition_status/apply_fix). Cada op puede llevar «expectedRevision» (ConceptRevision «blake3:…») para control optimista por concepto.",
+             "operations": { "type": "array", "description": "Operaciones propuestas, discriminadas por «op» (create/patch_frontmatter/replace_body/replace_text/edit_section/move/delete/add_relation/remove_relation/transition_status/apply_fix). Cada op puede llevar «expectedRevision» (DocumentRevision «blake3:…») para control optimista por documento.",
                  "items": { "type": "object", "properties": {
                      "op": { "type": "string", "enum": ["create", "patch_frontmatter", "replace_body", "replace_text", "edit_section", "move", "delete", "add_relation", "remove_relation", "transition_status", "apply_fix"] },
                      "path": { "type": "string" },
                      "ref": { "type": "object", "properties": { "path": { "type": "string" } } },
-                     "expectedRevision": { "type": "string", "description": "ConceptRevision que el agente cree vigente («blake3:…»); si el concepto cambió → REVISION_CONFLICT." }
+                     "expectedRevision": { "type": "string", "description": "DocumentRevision que el agente cree vigente («blake3:…»); si el documento cambió → REVISION_CONFLICT." }
                  }, "required": ["op"] } },
              "policy": { "type": "object", "description": "Política de aplicación del plan.", "properties": {
                  "requireConformantResult": { "type": "boolean", "description": "Si true, un resultado no conforme bloquea canApply." },
@@ -113,7 +113,7 @@ pub fn list() -> Value {
              } }
          }, "required": ["operations"], "additionalProperties": false },
          "outputSchema": schemas::change_plan_schema()},
-        {"name": "change_apply", "description": "Aplica un plan previamente calculado y vigente por el ÚNICO ESCRITOR, con todas las salvaguardas transaccionales (staging → lock → copias de recuperación → write-ahead journal → renames atómicos → receipt). Verifica caducidad (PLAN_EXPIRED) y planHash (PLAN_STALE si el bundle cambió bajo el plan) y rechaza escrituras fuera de writableRoots (PERMISSION_DENIED). Devuelve el recibo con las revisiones antes/después y el semanticDiff.",
+        {"name": "change_apply", "description": "Aplica un plan previamente calculado y vigente por el ÚNICO ESCRITOR, con todas las salvaguardas transaccionales (staging → lock → copias de recuperación → write-ahead journal → renames atómicos → receipt). Verifica caducidad (PLAN_EXPIRED) y planHash (PLAN_STALE si el workspace cambió bajo el plan) y rechaza escrituras fuera de writableRoots (PERMISSION_DENIED). Devuelve el recibo con las revisiones antes/después y el semanticDiff.",
          "inputSchema": { "type": "object", "properties": {
              "changeSetId": { "type": "string", "description": "El «changeset:<hash>» que devolvió change_plan (E12-H08); el plan se recupera de runtime por este id." },
              "expectedWorkspaceRevision": { "type": "string", "description": "Control optimista a nivel de workspace («blake3:…»). Si se omite, se adopta la revisión actual; si no coincide → REVISION_CONFLICT." }
@@ -203,7 +203,7 @@ pub fn call(app: &App, profile: Profile, name: &str, params: &Value) -> ToolResu
             to_json(&results)
         }
         "knowledge_get" => {
-            let r: ConceptRef = match params.get("ref") {
+            let r: DocumentRef = match params.get("ref") {
                 Some(v) => serde_json::from_value(v.clone()).map_err(|e| e.to_string())?,
                 None => return Err("falta el parámetro «ref»".to_string()),
             };
@@ -216,12 +216,12 @@ pub fn call(app: &App, profile: Profile, name: &str, params: &Value) -> ToolResu
                 None => None,
             };
             // Mapeo de error a wire (E10-H02): el texto que ve el agente lleva el código estable
-            // `ErrorCode::as_str()` (p. ej. «CONCEPT_NOT_FOUND»), NUNCA el `Debug` de la variante
-            // (`ConceptNotFound`) — el catálogo de 16 códigos es el contrato, no el nombre Rust.
-            let concept = app
+            // `ErrorCode::as_str()` (p. ej. «DOCUMENT_NOT_FOUND»), NUNCA el `Debug` de la variante
+            // (`DocumentNotFound`) — el catálogo de 16 códigos es el contrato, no el nombre Rust.
+            let document = app
                 .knowledge_get(&r, &include, sections.as_deref())
                 .map_err(|e| e.as_str().to_string())?;
-            Ok(json!({ "concept": to_json(&concept)? }))
+            Ok(json!({ "document": to_json(&document)? }))
         }
         "schema_inspect" => {
             let mode = params
@@ -270,12 +270,12 @@ pub fn call(app: &App, profile: Profile, name: &str, params: &Value) -> ToolResu
                 .get("operation")
                 .and_then(Value::as_str)
                 .ok_or("falta el parámetro «operation»")?;
-            let r: Option<ConceptRef> = match params.get("ref") {
+            let r: Option<DocumentRef> = match params.get("ref") {
                 Some(v) => Some(serde_json::from_value(v.clone()).map_err(|e| e.to_string())?),
                 None => None,
             };
             // Segundo extremo, solo para `path_between` (destino del camino dirigido).
-            let to: Option<ConceptRef> = match params.get("to") {
+            let to: Option<DocumentRef> = match params.get("to") {
                 Some(v) => Some(serde_json::from_value(v.clone()).map_err(|e| e.to_string())?),
                 None => None,
             };
@@ -305,7 +305,7 @@ pub fn call(app: &App, profile: Profile, name: &str, params: &Value) -> ToolResu
             to_json(&result)
         }
         "impact_analyze" => {
-            let r: ConceptRef = match params.get("ref") {
+            let r: DocumentRef = match params.get("ref") {
                 Some(v) => serde_json::from_value(v.clone()).map_err(|e| e.to_string())?,
                 None => return Err("falta el parámetro «ref»".to_string()),
             };

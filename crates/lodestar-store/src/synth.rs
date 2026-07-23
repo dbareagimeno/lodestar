@@ -46,7 +46,7 @@ pub(crate) fn warn_count(conn: &Connection) -> Result<usize, StoreError> {
 }
 
 /// Todos los documentos del workspace, en orden estable (E16-H02: ningún basename queda fuera).
-pub(crate) fn concepts(conn: &Connection) -> Result<Vec<RelPath>, StoreError> {
+pub(crate) fn documents(conn: &Connection) -> Result<Vec<RelPath>, StoreError> {
     rows_to_relpaths(conn, "SELECT path FROM files ORDER BY path", &[])
 }
 

@@ -21,12 +21,12 @@ use lodestar_core::plan::{self, PlanPolicy};
 use lodestar_core::schema::{validate_relations, validate_schema, DocType, Schema};
 use lodestar_core::types::{
     workspace_revision, Analysis, Backlinks, ChangeReceipt, ChangeSet, ChangeSetId, Check,
-    ConceptRef, ConceptRevision, Direction, Edge, EditSectionMode, ErrorCode, FrontmatterPatch,
+    Direction, DocumentRef, DocumentRevision, Edge, EditSectionMode, ErrorCode, FrontmatterPatch,
     GraphNode, InboundLinksPolicy, NormalizedOperation, ParsedFrontmatter, PlanHash, ReceiptId,
     RelPath, RiskAssessment, SemanticDiff, Severity, ValidationReport, ValidationSummary,
     WorkspaceRevision,
 };
-use lodestar_core::{Bundle, CoreError};
+use lodestar_core::{CoreError, DocumentSet};
 use lodestar_workspace::{
     transaction_id, ExternalReference, Workspace, WorkspaceError, WorkspaceSchema,
 };
@@ -77,9 +77,9 @@ impl<T> Envelope<T> {
 }
 
 /// Enlace a un recurso adicional referenciado desde una respuesta (`resourceLinks` del envelope,
-/// `docs/REFACTOR.md §13`), p. ej. un concepto relacionado que el agente puede pedir con
+/// `docs/REFACTOR.md §13`), p. ej. un documento relacionado que el agente puede pedir con
 /// `knowledge_get` a continuación. Forma mínima: URI del recurso (dirección estable, no
-/// necesariamente un `RelPath` — puede referirse a recursos fuera del bundle) y un título
+/// necesariamente un `RelPath` — puede referirse a recursos fuera del workspace) y un título
 /// legible opcional.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -104,22 +104,22 @@ pub struct ResourceLink {
 /// Mapea un [`CoreError`] a su [`ErrorCode`] estable de protocolo.
 ///
 /// `InvalidRelPath` (el único chokepoint de path-traversal, invariante #6 de `CLAUDE.md`) mapea a
-/// `PermissionDenied`: un intento de escapar del bundle es semánticamente un permiso denegado, no
+/// `PermissionDenied`: un intento de escapar del workspace es semánticamente un permiso denegado, no
 /// un error de esquema. El resto son mapeos razonables a falta de que E12/E13 los produzcan en
 /// flujos reales (fuera de alcance de esta historia):
 /// - `SizeGuardExceeded` → `ResultTooLarge` (guarda de tamaño excedida en una operación).
 /// - `ReplaceTextMismatch` → `InvalidSchema` (precondición de `replace_text` incumplida, E12-H05).
-/// - `NormalizeTargetNotFound` → `ConceptNotFound` (path/sección objetivo inexistente, E12-H05).
+/// - `NormalizeTargetNotFound` → `DocumentNotFound` (path/sección objetivo inexistente, E12-H05).
 /// - `InboundLinksExist` → `InboundLinksExist` (borrar `reject` con entrantes, E12-H06).
 /// - `RelationConstraintViolation` → `RelationConstraintViolation` (`add_relation` viola la
 ///   `RelationDef`, E12-H07).
 /// - `InvalidStatusTransition` → `InvalidSchema` (transición a un estado fuera de `allowedStatuses`,
 ///   E12-H07: precondición de lifecycle incumplida).
-/// - `FixNotFound` → `ConceptNotFound` (`apply_fix` con un `fixId` inexistente/no aplicable, E12-H07).
+/// - `FixNotFound` → `DocumentNotFound` (`apply_fix` con un `fixId` inexistente/no aplicable, E12-H07).
 /// - `InvalidFieldPath` → `InvalidSchema` (ruta a propiedad de frontmatter mal formada, E16-H01:
 ///   entrada del agente que no designa ningún campo).
 /// - `UnreadableFrontmatter` → `InvalidSchema` (E16-H04: el bloque de frontmatter del documento
-///   no se puede interpretar, así que no se puede parchear). Se descartan `ConceptNotFound` —el
+///   no se puede interpretar, así que no se puede parchear). Se descartan `DocumentNotFound` —el
 ///   documento **existe**, y decir lo contrario mandaría al agente a buscar una ruta correcta— e
 ///   `InternalIoError` —culparía al motor de un estado del fichero del usuario, cuando lo que hay
 ///   es una **precondición de la operación** incumplida por el dato de entrada, exactamente igual
@@ -131,11 +131,11 @@ pub fn error_code(err: &CoreError) -> ErrorCode {
         CoreError::InvalidFieldPath(_) => ErrorCode::InvalidSchema,
         CoreError::SizeGuardExceeded(_) => ErrorCode::ResultTooLarge,
         CoreError::ReplaceTextMismatch(_, _) => ErrorCode::InvalidSchema,
-        CoreError::NormalizeTargetNotFound(_) => ErrorCode::ConceptNotFound,
+        CoreError::NormalizeTargetNotFound(_) => ErrorCode::DocumentNotFound,
         CoreError::InboundLinksExist(_) => ErrorCode::InboundLinksExist,
         CoreError::RelationConstraintViolation(_) => ErrorCode::RelationConstraintViolation,
         CoreError::InvalidStatusTransition(_) => ErrorCode::InvalidSchema,
-        CoreError::FixNotFound(_) => ErrorCode::ConceptNotFound,
+        CoreError::FixNotFound(_) => ErrorCode::DocumentNotFound,
         // Invariante interno (E12-H08): el aplicador recibió una op sin normalizar a forma
         // terminal — fallo de infraestructura, no del agente.
         CoreError::OperationNotApplicable(_) => ErrorCode::InternalIoError,
@@ -219,8 +219,8 @@ impl ErrorEnvelope {
 /// arranque del proceso).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Profile {
-    /// Solo las tools de lectura/verificación — sin `create_concept`/`update_frontmatter` ni,
-    /// más adelante, `change_plan`/`change_apply`/`change_revert`.
+    /// Solo las tools de lectura/verificación — sin las tres de cambio (`change_plan`/
+    /// `change_apply`/`change_revert`), que además de ocultarse se **rechazan** si se invocan.
     Readonly,
     /// Añade las tools de cambio a las de lectura/verificación (perfil por defecto).
     Standard,
@@ -236,14 +236,14 @@ impl Profile {
     }
 }
 
-/// Recuento agregado de conceptos/enlaces/diagnósticos de un workspace (`counts` de
+/// Recuento agregado de documentos/enlaces/diagnósticos de un workspace (`counts` de
 /// `WorkspaceStatus`, `docs/REFACTOR.md §9.1`).
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct StatusCounts {
-    /// Nº de conceptos (`Analysis::concepts`).
-    pub concepts: usize,
-    /// Nº total de enlaces salientes resueltos (suma de `Analysis::out` sobre todos los conceptos).
+    /// Nº de documentos (`Analysis::documents`).
+    pub documents: usize,
+    /// Nº total de enlaces salientes resueltos (suma de `Analysis::out` sobre todos los documentos).
     pub links: usize,
     /// Nº de documentos **aislados** —sin enlaces internos entrantes ni salientes—
     /// (`Analysis::isolated`). Antes `orphans`, con otra definición (E16-H02).
@@ -261,8 +261,7 @@ pub struct StatusCounts {
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct StatusCapabilities {
-    /// `true` si el perfil admite tools de cambio (`create_concept`/`update_frontmatter` hoy;
-    /// `change_plan`/`change_apply` en E12).
+    /// `true` si el perfil admite tools de cambio (`change_plan`/`change_apply`/`change_revert`).
     pub writes: bool,
     /// `true` si el perfil admite transacciones (`change_apply`, E13). Hoy igual a `writes`: la
     /// mecánica transaccional real es de E13, pero el perfil que la habilitará es el mismo que
@@ -297,7 +296,7 @@ pub struct StatusRecovery {
 pub struct WorkspaceStatus {
     /// Revisión determinista de las raíces escribibles (`WorkspaceRevision`, E10-H03).
     pub workspace_revision: WorkspaceRevision,
-    /// Directorio raíz del bundle abierto.
+    /// Directorio raíz del workspace abierto.
     pub root: String,
     /// Raíces de escritura/lectura (`WorkspaceConfig::workspace.writable_roots`).
     pub knowledge_roots: Vec<RelPath>,
@@ -309,9 +308,9 @@ pub struct WorkspaceStatus {
     pub format_version: String,
     /// Versión del formato de `.lodestar/schema.yaml` (`Schema::version`; `"1"` si no hay schema).
     pub schema_version: String,
-    /// `true` si el bundle no tiene ningún check `Err` (`Analysis::hard_fail == 0`).
+    /// `true` si el workspace no tiene ningún check `Err` (`Analysis::hard_fail == 0`).
     pub conformant: bool,
-    /// Recuento agregado de conceptos/enlaces/diagnósticos.
+    /// Recuento agregado de documentos/enlaces/diagnósticos.
     pub counts: StatusCounts,
     /// Capacidades habilitadas por el perfil de arranque.
     pub capabilities: StatusCapabilities,
@@ -335,7 +334,7 @@ pub struct App {
 }
 
 impl App {
-    /// Abre el bundle en `root` y construye la fachada de servicios. Delega en
+    /// Abre el workspace en `root` y construye la fachada de servicios. Delega en
     /// [`Workspace::open`] — mismas garantías (descubrimiento de git best-effort, identidad desde
     /// `lodestar.toml`, cache incremental **no** activada).
     pub fn open(root: &Path) -> Result<Self, WorkspaceError> {
@@ -354,26 +353,26 @@ impl App {
         &self.workspace
     }
 
-    /// Resuelve un [`ConceptRef`] al `RelPath` del concepto que referencia (E10-H04).
+    /// Resuelve un [`DocumentRef`] al `RelPath` del documento que referencia (E10-H04).
     ///
     /// v2 resuelve identidad **únicamente por `path`**: comprueba contra la lista autoritativa de
-    /// concepts que computa el core (`Analysis::concepts`, invariante #3 — "una sola verdad
-    /// computada"), no contra la mera presencia de un fichero en el `FileMap` (así un `.md`
-    /// reservado como `index.md`/`log.md`, que el core no cuenta como concept, tampoco resuelve
-    /// aquí). Si el `path` no está en esa lista, `Err(ErrorCode::ConceptNotFound)`.
+    /// documentos que computa el core (`Analysis::documents`, invariante #3 — "una sola verdad
+    /// computada"), no contra la mera presencia de un fichero en el `FileMap` — así la resolución
+    /// pasa por el mismo inventario que analiza el core, sin criterios paralelos. Si el `path` no
+    /// está en esa lista, `Err(ErrorCode::DocumentNotFound)`.
     ///
     /// `ErrorCode::AmbiguousReference` queda RESERVADO para cuando exista resolución por `id`
-    /// (`REFACTOR §6.1`) — no-goal de esta historia (IDs estables/federación). En v2 `ConceptRef.id`
+    /// (`REFACTOR §6.1`) — no-goal de esta historia (IDs estables/federación). En v2 `DocumentRef.id`
     /// es siempre `None`, así que esta función nunca lo produce todavía.
-    pub fn resolve_ref(&self, r: &ConceptRef) -> Result<RelPath, ErrorCode> {
+    pub fn resolve_ref(&self, r: &DocumentRef) -> Result<RelPath, ErrorCode> {
         let analysis = self
             .workspace
             .analyze()
             .map_err(|e| workspace_error_code(&e))?;
-        if analysis.concepts.contains(&r.path) {
+        if analysis.documents.contains(&r.path) {
             Ok(r.path.clone())
         } else {
-            Err(ErrorCode::ConceptNotFound)
+            Err(ErrorCode::DocumentNotFound)
         }
     }
 
@@ -381,13 +380,13 @@ impl App {
     /// conformidad y recuento agregado — la primera tool que debe llamar un agente en cada
     /// sesión (`docs/REFACTOR.md §7`).
     ///
-    /// Compone `Bundle::analyze` (una sola verdad computada, invariante #3) +
+    /// Compone `DocumentSet::analyze` (una sola verdad computada, invariante #3) +
     /// `core::types::workspace_revision` (E10-H03) + `WorkspaceConfig::load`/`WorkspaceSchema::load`
     /// (I/O de `workspace`, nunca del core) — sin lógica de dominio propia.
     pub fn workspace_status(&self, profile: Profile) -> Result<WorkspaceStatus, WorkspaceError> {
-        let bundle = self.workspace.bundle()?;
-        let files = bundle.files();
-        let analysis = bundle.analyze();
+        let doc_set = self.workspace.document_set()?;
+        let files = doc_set.files();
+        let analysis = doc_set.analyze();
         let root = self.workspace.root();
         let cfg = self.workspace.config();
         let schema = WorkspaceSchema::load(root).map_err(WorkspaceError::Io)?;
@@ -405,7 +404,7 @@ impl App {
             schema_version: schema.version.clone(),
             conformant: analysis.hard_fail == 0,
             counts: StatusCounts {
-                concepts: analysis.concepts.len(),
+                documents: analysis.documents.len(),
                 links,
                 isolated: analysis.isolated.len(),
                 dangling: analysis.dangling.len(),
@@ -425,14 +424,14 @@ impl App {
         })
     }
 
-    /// Localiza conceptos por texto y filtros, con snippets y paginación por cursor, **sin devolver
+    /// Localiza documentos por texto y filtros, con snippets y paginación por cursor, **sin devolver
     /// cuerpos completos** (E10-H09, `ARCHITECTURE.md §19.6`, `REFACTOR §9.2/§15`).
     ///
-    /// La **verdad** del casado la da el core (invariante #3): el conjunto de conceptos que casan
+    /// La **verdad** del casado la da el core (invariante #3): el conjunto de documentos que casan
     /// `text` se computa con la misma semántica de subcadena de la DSL del prototipo
-    /// (`Bundle::query` → `tokenize_query`/`match_token`), intersectada con la lista autoritativa de
-    /// conceptos (`Analysis::concepts`, así los reservados `index.md`/`log.md` nunca aparecen). Un
-    /// `text` vacío casa todos los conceptos.
+    /// (`DocumentSet::query` → `tokenize_query`/`match_token`), intersectada con la lista autoritativa de
+    /// documentos (`Analysis::documents`: **todos** los `.md` del workspace, sin nombres con trato
+    /// especial desde E16-H02). Un `text` vacío casa todos los documentos.
     ///
     /// Los `filters` baratos se aplican aquí (`types`/`statuses`/`tags`/`pathPrefix`); los filtros
     /// avanzados del contrato (`references`/`referencedBy`/`linkedTo`/`is:*`/`has:*`) quedan
@@ -450,7 +449,7 @@ impl App {
     /// `sort` queda reservado para una futura elección de criterio explícito; hoy el orden es siempre
     /// el determinista descrito arriba.
     ///
-    /// Cada resultado lleva `revision` = [`ConceptRevision`] del contenido en disco (blake3, E10-H03)
+    /// Cada resultado lleva `revision` = [`DocumentRevision`] del contenido en disco (blake3, E10-H03)
     /// y un `snippet` compacto NO vacío; la estructura [`SearchResult`] **no tiene** campo `body`, así
     /// que es imposible filtrar el cuerpo completo por esta vía.
     pub fn knowledge_search(
@@ -461,17 +460,17 @@ impl App {
         limit: Option<usize>,
         cursor: Option<&str>,
     ) -> Result<SearchResults, WorkspaceError> {
-        let bundle = self.workspace.bundle()?;
-        let analysis = bundle.analyze();
-        let files = bundle.files();
+        let doc_set = self.workspace.document_set()?;
+        let analysis = doc_set.analyze();
+        let files = doc_set.files();
 
         let text_trim = text.trim();
         let needle = text_trim.to_lowercase();
-        // Casado de texto reusando la verdad del core (subcadena); intersección con conceptos.
-        let matched_text: BTreeSet<RelPath> = bundle.query(text_trim).into_iter().collect();
+        // Casado de texto reusando la verdad del core (subcadena); intersección con documentos.
+        let matched_text: BTreeSet<RelPath> = doc_set.query(text_trim).into_iter().collect();
 
         let mut results: Vec<SearchResult> = Vec::new();
-        for path in &analysis.concepts {
+        for path in &analysis.documents {
             if !matched_text.contains(path) {
                 continue;
             }
@@ -497,7 +496,7 @@ impl App {
                     s
                 }
             };
-            let revision = ConceptRevision::from_hash(*blake3::hash(raw.as_bytes()).as_bytes());
+            let revision = DocumentRevision::from_hash(*blake3::hash(raw.as_bytes()).as_bytes());
 
             results.push(SearchResult {
                 path: path.clone(),
@@ -536,18 +535,18 @@ impl App {
         })
     }
 
-    /// Obtiene un concepto concreto, con `include` selectivo y selección de secciones por
+    /// Obtiene un documento concreto, con `include` selectivo y selección de secciones por
     /// `headingPath` (E10-H10, `ARCHITECTURE.md §19.6`, `REFACTOR §9.3`).
     ///
-    /// Resuelve con [`App::resolve_ref`] (E10-H04) — `Err(ErrorCode::ConceptNotFound)` si el path
-    /// no está en la lista autoritativa de conceptos. `revision` (== [`ConceptRevision`], E10-H03)
+    /// Resuelve con [`App::resolve_ref`] (E10-H04) — `Err(ErrorCode::DocumentNotFound)` si el path
+    /// no está en la lista autoritativa de documentos. `revision` (== [`DocumentRevision`], E10-H03)
     /// se calcula **siempre**, sin depender de `include`: es la identidad de contenido, no un
     /// campo opcional.
     ///
     /// `include` es la lista de campos wire pedidos (`"frontmatter"`, `"body"`, `"outgoingLinks"`,
     /// `"backlinks"`, `"diagnostics"`, `"externalReferences"`; `"revision"` es aceptado pero no-op,
     /// ya que ese campo siempre se puebla). Un campo **no** pedido queda en `None` en el
-    /// [`ConceptView`] — nunca en su valor por defecto "vacío" disfrazado de "no pedido", para que
+    /// [`DocumentView`] — nunca en su valor por defecto "vacío" disfrazado de "no pedido", para que
     /// el `include` selectivo sea significativo (criterio `get_incluye_revision`).
     ///
     /// `sections`, si está presente y no vacío, acota el `body` devuelto (solo aplica si `body` fue
@@ -564,23 +563,23 @@ impl App {
     /// que quiera esos diagnósticos los deriva de `exists:false` en `externalReferences`.
     pub fn knowledge_get(
         &self,
-        r: &ConceptRef,
+        r: &DocumentRef,
         include: &[String],
         sections: Option<&[Vec<String>]>,
-    ) -> Result<ConceptView, ErrorCode> {
+    ) -> Result<DocumentView, ErrorCode> {
         let path = self.resolve_ref(r)?;
-        let bundle = self
+        let doc_set = self
             .workspace
-            .bundle()
+            .document_set()
             .map_err(|e| workspace_error_code(&e))?;
-        let files = bundle.files();
-        // `resolve_ref` ya comprobó que `path` está en `Analysis::concepts`, que se computa a
+        let files = doc_set.files();
+        // `resolve_ref` ya comprobó que `path` está en `Analysis::documents`, que se computa a
         // partir de este mismo `FileMap` (invariante #3) — así que el fichero existe.
         let raw = files
             .get(&path)
             .expect("resolve_ref garantiza presencia en el FileMap");
         let parsed = model::parse_file(path.as_str(), raw);
-        let revision = ConceptRevision::from_hash(*blake3::hash(raw.as_bytes()).as_bytes());
+        let revision = DocumentRevision::from_hash(*blake3::hash(raw.as_bytes()).as_bytes());
 
         let wants = |field: &str| include.iter().any(|s| s == field);
 
@@ -592,11 +591,17 @@ impl App {
             Some(secs) if !secs.is_empty() => model::extract_sections(&parsed.body, secs),
             _ => parsed.body.clone(),
         });
-        let outgoing_links = wants("outgoingLinks")
-            .then(|| bundle.analyze().out.get(&path).cloned().unwrap_or_default());
-        let backlinks = wants("backlinks").then(|| bundle.backlinks(&path));
+        let outgoing_links = wants("outgoingLinks").then(|| {
+            doc_set
+                .analyze()
+                .out
+                .get(&path)
+                .cloned()
+                .unwrap_or_default()
+        });
+        let backlinks = wants("backlinks").then(|| doc_set.backlinks(&path));
         let diagnostics = wants("diagnostics").then(|| {
-            bundle
+            doc_set
                 .analyze()
                 .per_file
                 .get(&path)
@@ -613,7 +618,7 @@ impl App {
             None
         };
 
-        Ok(ConceptView {
+        Ok(DocumentView {
             path,
             revision,
             frontmatter,
@@ -636,7 +641,7 @@ impl App {
     /// semántica rica para ellos sin un criterio que la ejerza arriesgaría fijar una forma de wire
     /// que luego hubiera que romper, así que devuelven `Err(ErrorCode::InvalidSchema)` con un
     /// mensaje explícito — igual que un modo realmente desconocido (`mode` sin reconocer nunca
-    /// entra en pánico). Un bundle sin `.lodestar/schema.yaml` NO es un error:
+    /// entra en pánico). Un workspace sin `.lodestar/schema.yaml` NO es un error:
     /// `WorkspaceSchema::load` ya devuelve `Schema::default()` (vacío y permisivo, E10-H05), así
     /// que `catalog` da `types: []` (criterio `inspect_sin_schema`).
     ///
@@ -683,20 +688,20 @@ impl App {
 
     /// Audita el conocimiento con scopes y severidad mínima (E10-H12, `ARCHITECTURE.md §19.6`,
     /// `REFACTOR §10/§17`). Es la tool que **cablea por primera vez** la validación schema-driven
-    /// (E10-H07, `validate_schema`, PURA) junto a los diagnósticos de `Bundle::analyze` (`§20.9`).
+    /// (E10-H07, `validate_schema`, PURA) junto a los diagnósticos de `DocumentSet::analyze` (`§20.9`).
     ///
     /// **Composición de diagnósticos** (invariante #3 — una sola verdad computada): por cada
-    /// concepto (`Analysis::concepts`) se unen sus diagnósticos de documento (`Analysis::per_file`)
-    /// con los checks de esquema (`validate_schema(&bundle, &schema)`, agrupados por su `target`).
-    /// Un bundle sin `.lodestar/schema.yaml` produce `Schema::default()` (vacío) y `validate_schema`
-    /// devuelve cero checks, así que **el veredicto de un bundle sin esquema no cambia**. Los checks
+    /// documento (`Analysis::documents`) se unen sus diagnósticos de documento (`Analysis::per_file`)
+    /// con los checks de esquema (`validate_schema(&doc_set, &schema)`, agrupados por su `target`).
+    /// Un workspace sin `.lodestar/schema.yaml` produce `Schema::default()` (vacío) y `validate_schema`
+    /// devuelve cero checks, así que **el veredicto de un workspace sin esquema no cambia**. Los checks
     /// `Pass` (no son hallazgos) se descartan.
     ///
-    /// **Scopes** (`scope`): `workspace` = todos los conceptos; `concept{ref}` = solo ese concepto
-    /// (resuelto con [`App::resolve_ref`], `CONCEPT_NOT_FOUND` si no existe); `paths{paths}` = esos
+    /// **Scopes** (`scope`): `workspace` = todos los documentos; `document{ref}` = solo ese documento
+    /// (resuelto con [`App::resolve_ref`], `DOCUMENT_NOT_FOUND` si no existe); `paths{paths}` = esos
     /// paths; `affected{refs,depth}` = el vecindario a distancia ≤ `depth` de cada `ref`
-    /// (`Bundle::neighborhood(_, depth, Direction::Both)`, unión de los nodos alcanzados más los
-    /// propios refs) — los conceptos desconectados quedan fuera.
+    /// (`DocumentSet::neighborhood(_, depth, Direction::Both)`, unión de los nodos alcanzados más los
+    /// propios refs) — los documentos desconectados quedan fuera.
     ///
     /// **IDs estables dentro de una revisión**: cada diagnóstico lleva
     /// `diag:blake3:<hex>` con `hex = blake3(path ‖ 0x00 ‖ code ‖ 0x00 ‖ range ‖ 0x00 ‖ msg)`.
@@ -719,28 +724,28 @@ impl App {
         limit: Option<usize>,
         cursor: Option<&str>,
     ) -> Result<CheckReport, ErrorCode> {
-        let bundle = self
+        let doc_set = self
             .workspace
-            .bundle()
+            .document_set()
             .map_err(|e| workspace_error_code(&e))?;
-        let analysis = bundle.analyze();
+        let analysis = doc_set.analyze();
         let root = self.workspace.root();
         let cfg = self.workspace.config();
         let schema = WorkspaceSchema::load(root).map_err(|_| ErrorCode::InternalIoError)?;
 
-        let revision = workspace_revision(bundle.files(), &cfg.workspace.writable_roots);
+        let revision = workspace_revision(doc_set.files(), &cfg.workspace.writable_roots);
 
         // Checks schema-driven agrupados por su path (`target`): así se unen a los de documento por path.
         // Fuente ÚNICA de esta fusión (invariante #3): la comparten esta tool y la salida de
         // `lodestar check` vía [`App::schema_diagnostics_by_path`].
-        let schema_by_path = Self::schema_diagnostics_by_path(&bundle, &schema);
+        let schema_by_path = Self::schema_diagnostics_by_path(&doc_set, &schema);
 
         // Conjunto de paths del scope.
-        let allowed = self.scope_paths(&bundle, analysis, scope)?;
+        let allowed = self.scope_paths(&doc_set, analysis, scope)?;
 
-        // Compón (path, check) uniendo documento + schema por cada concepto del scope, con id estable.
+        // Compón (path, check) uniendo documento + schema por cada documento del scope, con id estable.
         let mut items: Vec<(RelPath, Check)> = Vec::new();
-        for path in &analysis.concepts {
+        for path in &analysis.documents {
             if !allowed.contains(path) {
                 continue;
             }
@@ -812,13 +817,13 @@ impl App {
     /// [`App::knowledge_check`] para la semántica de cada variante.
     fn scope_paths(
         &self,
-        bundle: &Bundle,
+        doc_set: &DocumentSet,
         analysis: &Analysis,
         scope: &CheckScope,
     ) -> Result<BTreeSet<RelPath>, ErrorCode> {
         match scope {
-            CheckScope::Workspace => Ok(analysis.concepts.iter().cloned().collect()),
-            CheckScope::Concept { r#ref } => {
+            CheckScope::Workspace => Ok(analysis.documents.iter().cloned().collect()),
+            CheckScope::Document { r#ref } => {
                 let path = self.resolve_ref(r#ref)?;
                 Ok(std::iter::once(path).collect())
             }
@@ -827,7 +832,7 @@ impl App {
                 let mut set: BTreeSet<RelPath> = BTreeSet::new();
                 for r in refs {
                     let path = self.resolve_ref(r)?;
-                    let nb = bundle.neighborhood(&path, *depth, Direction::Both);
+                    let nb = doc_set.neighborhood(&path, *depth, Direction::Both);
                     for node in &nb.nodes {
                         set.insert(node.id.clone());
                     }
@@ -844,16 +849,16 @@ impl App {
     /// `lodestar check` (vía [`App::full_analysis`]): la lógica de qué diagnósticos schema-driven
     /// existen y bajo qué path se listan vive **una sola vez**.
     ///
-    /// Aditivo (E10-H07/E11-H03): un bundle sin `.lodestar/schema.yaml` produce `Schema::default()`
+    /// Aditivo (E10-H07/E11-H03): un workspace sin `.lodestar/schema.yaml` produce `Schema::default()`
     /// (vacío) y estas funciones devuelven cero checks, así que el conjunto de diagnósticos no cambia.
     fn schema_diagnostics_by_path(
-        bundle: &Bundle,
+        doc_set: &DocumentSet,
         schema: &Schema,
     ) -> BTreeMap<RelPath, Vec<Check>> {
         let mut by_path: BTreeMap<RelPath, Vec<Check>> = BTreeMap::new();
-        for check in validate_schema(bundle, schema)
+        for check in validate_schema(doc_set, schema)
             .into_iter()
-            .chain(validate_relations(bundle, schema))
+            .chain(validate_relations(doc_set, schema))
         {
             for target in &check.targets {
                 by_path
@@ -866,24 +871,24 @@ impl App {
     }
 
     /// Computa el `Analysis` **completo** del working tree: los diagnósticos de
-    /// [`Bundle::analyze`] con los diagnósticos schema-driven (`SCHEMA-*`/`REL-*`) fusionados en
+    /// [`DocumentSet::analyze`] con los diagnósticos schema-driven (`SCHEMA-*`/`REL-*`) fusionados en
     /// `per_file` por su path (`App::schema_diagnostics_by_path`). Es la fuente que alimenta la
     /// **salida** de `lodestar check` (`--json`/`--sarif`/humano), de modo que el mismo motor que
     /// decide el veredicto (`knowledge_check`) también surface los diagnósticos que lo disparan —
     /// sin recomputar `analyze()` dos veces ni recomponer la validación schema-driven en la fachada.
     ///
     /// Los contadores `hard_fail`/`warn_count` conservan su semántica (los rellena `analyze`);
-    /// la fusión solo **añade** checks a `per_file` (aditiva). Un bundle sin `schema.yaml` devuelve
+    /// la fusión solo **añade** checks a `per_file` (aditiva). Un workspace sin `schema.yaml` devuelve
     /// exactamente el `Analysis` de `analyze()`.
     pub fn full_analysis(&self) -> Result<Analysis, ErrorCode> {
-        let bundle = self
+        let doc_set = self
             .workspace
-            .bundle()
+            .document_set()
             .map_err(|e| workspace_error_code(&e))?;
         let schema =
             WorkspaceSchema::load(self.workspace.root()).map_err(|_| ErrorCode::InternalIoError)?;
-        let mut analysis = bundle.analyze().clone();
-        for (path, checks) in Self::schema_diagnostics_by_path(&bundle, &schema) {
+        let mut analysis = doc_set.analyze().clone();
+        for (path, checks) in Self::schema_diagnostics_by_path(&doc_set, &schema) {
             analysis.per_file.entry(path).or_default().extend(checks);
         }
         Ok(analysis)
@@ -895,15 +900,15 @@ impl App {
     ///
     /// `operation` ∈ `"backlinks"`/`"outgoing"`/`"neighborhood"`/`"isolated"`/`"dangling"`:
     /// - `backlinks`/`outgoing`/`neighborhood` requieren `r` (resuelto con [`App::resolve_ref`]);
-    ///   su ausencia es `Err(ErrorCode::ConceptNotFound)` — no hay un código de "falta parámetro"
+    ///   su ausencia es `Err(ErrorCode::DocumentNotFound)` — no hay un código de "falta parámetro"
     ///   dedicado en el catálogo de 16 códigos estables, y es el mismo error que produciría un
     ///   `ref` que no resuelve, así que reusarlo aquí no inventa semántica nueva.
-    /// - `backlinks` reusa [`Bundle::backlinks`] (invariante #3, "una sola verdad computada"):
-    ///   `nodes` = el propio concepto + sus fuentes entrantes (`inbound`); `edges` = fuente→ref.
-    /// - `outgoing` reusa [`Bundle::neighborhood`] con `Direction::Out` a profundidad 1: mismo
+    /// - `backlinks` reusa [`DocumentSet::backlinks`] (invariante #3, "una sola verdad computada"):
+    ///   `nodes` = el propio documento + sus fuentes entrantes (`inbound`); `edges` = fuente→ref.
+    /// - `outgoing` reusa [`DocumentSet::neighborhood`] con `Direction::Out` a profundidad 1: mismo
     ///   tratamiento de dangling que `graph_model`/`neighborhood` (invariante #3), así que no
     ///   reimplementa ese criterio en esta capa.
-    /// - `neighborhood` reexpone [`Bundle::neighborhood`]`(ref, depth, direction)` **tal cual**
+    /// - `neighborhood` reexpone [`DocumentSet::neighborhood`]`(ref, depth, direction)` **tal cual**
     ///   (paridad exacta con el core — el criterio `graph_neighborhood_paridad` lo compara
     ///   directamente contra la salida del core). `depth` por defecto 1; `direction` por defecto
     ///   `"out"` (cualquier valor no reconocido cae también a `Out`, mismo criterio que la tool
@@ -916,18 +921,18 @@ impl App {
     ///
     /// **Operaciones estructurales (E11-H02)**, funciones puras del core reexpuestas en la misma
     /// forma `{nodes,edges}` (invariante #3):
-    /// - `path_between` requiere `r` (origen) y `to` (destino); reusa [`Bundle::path_between`]
+    /// - `path_between` requiere `r` (origen) y `to` (destino); reusa [`DocumentSet::path_between`]
     ///   (camino más corto dirigido). `nodes` = los nodos del camino, `edges` = los enlaces
-    ///   consecutivos `[a→..→b]`. Si algún ref no resuelve → `Err(ErrorCode::ConceptNotFound)`; si
+    ///   consecutivos `[a→..→b]`. Si algún ref no resuelve → `Err(ErrorCode::DocumentNotFound)`; si
     ///   no hay camino, `nodes`/`edges` vacíos (nunca error). **Nota**: la paginación genérica
     ///   ordena `nodes` por `id`, así que el orden del camino se recupera de `edges`, no de `nodes`.
-    /// - `cycles` no requiere `r`: reusa [`Bundle::cycles`]. `nodes` = la unión de los nodos que
+    /// - `cycles` no requiere `r`: reusa [`DocumentSet::cycles`]. `nodes` = la unión de los nodos que
     ///   participan en algún ciclo (SCC no trivial); `edges` = los enlaces del grafo internos a ese
     ///   conjunto. La partición en ciclos concretos la da el core; aquí se sirve el subgrafo cíclico
     ///   agregado (coherente con la forma `{nodes,edges}` de esta tool).
-    /// - `components` no requiere `r`: reusa [`Bundle::components`]. Como las componentes conexas
+    /// - `components` no requiere `r`: reusa [`DocumentSet::components`]. Como las componentes conexas
     ///   particionan **todo** el grafo, se sirve el grafo completo (`nodes`/`edges` de
-    ///   [`Bundle::graph_model`]); el cliente reconstruye la partición con [`Bundle::components`] o
+    ///   [`DocumentSet::graph_model`]); el cliente reconstruye la partición con [`DocumentSet::components`] o
     ///   recorriendo las aristas.
     ///
     /// **Paginación**: orden total y estable de `nodes` por `id` (mismo criterio que
@@ -944,28 +949,28 @@ impl App {
     pub fn graph_query(
         &self,
         operation: &str,
-        r: Option<&ConceptRef>,
-        to: Option<&ConceptRef>,
+        r: Option<&DocumentRef>,
+        to: Option<&DocumentRef>,
         depth: Option<u32>,
         direction: Option<&str>,
         limit: Option<usize>,
         cursor: Option<&str>,
     ) -> Result<GraphQueryResult, ErrorCode> {
-        let bundle = self
+        let doc_set = self
             .workspace
-            .bundle()
+            .document_set()
             .map_err(|e| workspace_error_code(&e))?;
 
         let (mut nodes, mut edges): (Vec<GraphNode>, Vec<Edge>) = match operation {
             "backlinks" => {
-                let path = self.resolve_ref(r.ok_or(ErrorCode::ConceptNotFound)?)?;
-                let bl = bundle.backlinks(&path);
+                let path = self.resolve_ref(r.ok_or(ErrorCode::DocumentNotFound)?)?;
+                let bl = doc_set.backlinks(&path);
                 let mut ids: BTreeSet<RelPath> = BTreeSet::new();
                 ids.insert(path.clone());
                 for lr in &bl.inbound {
                     ids.insert(lr.path.clone());
                 }
-                let nodes = ids.iter().map(|id| bundle.node(id)).collect();
+                let nodes = ids.iter().map(|id| doc_set.node(id)).collect();
                 let edges = bl
                     .inbound
                     .iter()
@@ -978,30 +983,30 @@ impl App {
                 (nodes, edges)
             }
             "outgoing" => {
-                let path = self.resolve_ref(r.ok_or(ErrorCode::ConceptNotFound)?)?;
-                let nb = bundle.neighborhood(&path, 1, Direction::Out);
+                let path = self.resolve_ref(r.ok_or(ErrorCode::DocumentNotFound)?)?;
+                let nb = doc_set.neighborhood(&path, 1, Direction::Out);
                 (nb.nodes, nb.edges)
             }
             "neighborhood" => {
-                let path = self.resolve_ref(r.ok_or(ErrorCode::ConceptNotFound)?)?;
+                let path = self.resolve_ref(r.ok_or(ErrorCode::DocumentNotFound)?)?;
                 let dir = match direction {
                     Some("in") => Direction::In,
                     Some("both") => Direction::Both,
                     _ => Direction::Out,
                 };
-                let nb = bundle.neighborhood(&path, depth.unwrap_or(1), dir);
+                let nb = doc_set.neighborhood(&path, depth.unwrap_or(1), dir);
                 (nb.nodes, nb.edges)
             }
             "isolated" => {
-                let a = bundle.analyze();
-                let nodes = a.isolated.iter().map(|id| bundle.node(id)).collect();
+                let a = doc_set.analyze();
+                let nodes = a.isolated.iter().map(|id| doc_set.node(id)).collect();
                 (nodes, Vec::new())
             }
             "dangling" => {
-                let a = bundle.analyze();
+                let a = doc_set.analyze();
                 let dangling_set: BTreeSet<&RelPath> = a.dangling.iter().collect();
                 let mut edges: Vec<Edge> = Vec::new();
-                for src in &a.concepts {
+                for src in &a.documents {
                     for t in a.out.get(src).cloned().unwrap_or_default() {
                         if dangling_set.contains(&t) {
                             edges.push(Edge {
@@ -1012,31 +1017,31 @@ impl App {
                         }
                     }
                 }
-                let nodes = a.dangling.iter().map(|id| bundle.node(id)).collect();
+                let nodes = a.dangling.iter().map(|id| doc_set.node(id)).collect();
                 (nodes, edges)
             }
             "path_between" => {
-                let from = self.resolve_ref(r.ok_or(ErrorCode::ConceptNotFound)?)?;
-                let dest = self.resolve_ref(to.ok_or(ErrorCode::ConceptNotFound)?)?;
-                let path = bundle.path_between(&from, &dest);
-                let nodes = path.iter().map(|id| bundle.node(id)).collect();
+                let from = self.resolve_ref(r.ok_or(ErrorCode::DocumentNotFound)?)?;
+                let dest = self.resolve_ref(to.ok_or(ErrorCode::DocumentNotFound)?)?;
+                let path = doc_set.path_between(&from, &dest);
+                let nodes = path.iter().map(|id| doc_set.node(id)).collect();
                 // Aristas consecutivas del camino; `dangling` si el destino no es un fichero real.
                 let edges = path
                     .windows(2)
                     .map(|w| Edge {
                         source: w[0].clone(),
                         target: w[1].clone(),
-                        dangling: !bundle.files().contains_key(&w[1]),
+                        dangling: !doc_set.files().contains_key(&w[1]),
                     })
                     .collect();
                 (nodes, edges)
             }
             "cycles" => {
                 // Unión de los nodos que participan en algún ciclo (SCC no trivial).
-                let en_ciclo: BTreeSet<RelPath> = bundle.cycles().into_iter().flatten().collect();
-                let nodes = en_ciclo.iter().map(|id| bundle.node(id)).collect();
+                let en_ciclo: BTreeSet<RelPath> = doc_set.cycles().into_iter().flatten().collect();
+                let nodes = en_ciclo.iter().map(|id| doc_set.node(id)).collect();
                 // Aristas del grafo internas al conjunto cíclico.
-                let edges = bundle
+                let edges = doc_set
                     .graph_model()
                     .edges
                     .into_iter()
@@ -1046,8 +1051,8 @@ impl App {
             }
             "components" => {
                 // Las componentes particionan todo el grafo: se sirve el grafo completo y el
-                // cliente reconstruye la partición (Bundle::components) si la necesita.
-                let model = bundle.graph_model();
+                // cliente reconstruye la partición (DocumentSet::components) si la necesita.
+                let model = doc_set.graph_model();
                 (model.nodes, model.edges)
             }
             // Ninguna historia ejerce todavía una `operation` fuera de las anteriores; mismo
@@ -1083,53 +1088,53 @@ impl App {
         })
     }
 
-    /// Analiza el **impacto** de un cambio hipotético sobre un concepto sin materializarlo
-    /// (E11-H05, `ARCHITECTURE.md §19.6`, `REFACTOR §9.6/§17`): cuántos conceptos se verían
+    /// Analiza el **impacto** de un cambio hipotético sobre un documento sin materializarlo
+    /// (E11-H05, `ARCHITECTURE.md §19.6`, `REFACTOR §9.6/§17`): cuántos documentos se verían
     /// afectados directa y transitivamente, qué **relaciones tipadas obligatorias** quedarían rotas
     /// (bloqueos) y un nivel de riesgo derivado. No materializa ningún cambio (aplicar es E12/E13).
     ///
     /// - `directlyAffected` = nº de backlinks **directos** entrantes del `ref`
-    ///   ([`Bundle::backlinks`]`.inbound`).
+    ///   ([`DocumentSet::backlinks`]`.inbound`).
     /// - `transitivelyAffected` = tamaño del blast-radius entrante
-    ///   ([`Bundle::neighborhood`]`(_, _, Direction::In)`, excluido el propio `ref`) — la **verdad
+    ///   ([`DocumentSet::neighborhood`]`(_, _, Direction::In)`, excluido el propio `ref`) — la **verdad
     ///   del core** (invariante #3); `Store::blast_radius` es la proyección SQL equivalente,
     ///   verificada idéntica por el test `impacto_paridad_core`.
-    /// - `blockingReferences` (solo para `kind == "delete"`): cada concepto que declara una relación
+    /// - `blockingReferences` (solo para `kind == "delete"`): cada documento que declara una relación
     ///   tipada del schema ([`lodestar_core::schema::RelationDef`], E11-H03) cuyo target es el `ref`
     ///   — las dependencias estructurales que quedarían rotas al borrarlo. Para otros `kind` sin
     ///   bloqueos estructurales, va vacío.
     /// - `risk`: `"high"` si hay bloqueos o el nº de afectados directos es alto; `"medium"` para un
     ///   impacto moderado; `"low"` en caso contrario.
     ///
-    /// `Err(ErrorCode::ConceptNotFound)` si el `ref` no resuelve a un concepto
+    /// `Err(ErrorCode::DocumentNotFound)` si el `ref` no resuelve a un documento
     /// ([`App::resolve_ref`]).
     pub fn impact_analyze(
         &self,
-        r: &ConceptRef,
+        r: &DocumentRef,
         kind: &str,
         depth: Option<u32>,
     ) -> Result<ImpactReport, ErrorCode> {
         let path = self.resolve_ref(r)?;
-        let bundle = self
+        let doc_set = self
             .workspace
-            .bundle()
+            .document_set()
             .map_err(|e| workspace_error_code(&e))?;
 
         // `directlyAffected`: backlinks DIRECTOS entrantes (verdad del core).
-        let directly_affected = bundle.backlinks(&path).inbound.len();
+        let directly_affected = doc_set.backlinks(&path).inbound.len();
 
         // `transitivelyAffected`: blast-radius entrante (`neighborhood(In)`), excluido el propio
         // `ref`. Profundidad grande por defecto para cubrir todo el alcance transitivo, no solo el
         // vecindario inmediato (paridad con `Store::blast_radius`, invariante #3).
-        let nb = bundle.neighborhood(&path, depth.unwrap_or(u32::MAX), Direction::In);
-        let mut affected_concepts: Vec<RelPath> = nb
+        let nb = doc_set.neighborhood(&path, depth.unwrap_or(u32::MAX), Direction::In);
+        let mut affected_documents: Vec<RelPath> = nb
             .nodes
             .into_iter()
             .map(|n| n.id)
             .filter(|id| id != &path)
             .collect();
-        affected_concepts.sort();
-        let transitively_affected = affected_concepts.len();
+        affected_documents.sort();
+        let transitively_affected = affected_documents.len();
 
         // `blockingReferences`: relaciones tipadas obligatorias entrantes que romperían al borrar el
         // `ref` (solo `kind == "delete"`; el resto de operaciones no tiene bloqueos estructurales
@@ -1137,7 +1142,7 @@ impl App {
         let blocking_references = if kind == "delete" {
             let schema = WorkspaceSchema::load(self.workspace.root())
                 .map_err(|_| ErrorCode::InternalIoError)?;
-            blocking_relations(&bundle, &schema, &path)
+            blocking_relations(&doc_set, &schema, &path)
         } else {
             Vec::new()
         };
@@ -1164,7 +1169,7 @@ impl App {
         }
         if directly_affected > 0 {
             recommendations.push(format!(
-                "Revisa los {directly_affected} enlaces entrantes que apuntan a este concepto tras aplicar «{kind}»."
+                "Revisa los {directly_affected} enlaces entrantes que apuntan a este documento tras aplicar «{kind}»."
             ));
         }
 
@@ -1175,28 +1180,28 @@ impl App {
                 blocking_references: blocking_references.len(),
                 risk: risk.to_string(),
             },
-            affected_concepts,
+            affected_documents,
             blocking_references,
             recommendations,
         })
     }
 
     /// Orquesta un plan de cambios (`change_plan`, E12-H08, `ARCHITECTURE.md §19.5/§19.6`): normaliza
-    /// las operaciones propuestas, simula su aplicación sobre un `Bundle` **en memoria** y valida el
+    /// las operaciones propuestas, simula su aplicación sobre un `DocumentSet` **en memoria** y valida el
     /// resultado — **sin tocar disco** (invariante #1 de `CLAUDE.md`; la escritura real es E13).
     ///
     /// Pasos:
-    /// 1. Toma el bundle actual (`Workspace::bundle`, en memoria) y calcula
+    /// 1. Toma el workspace actual (`Workspace::document_set`, en memoria) y calcula
     ///    `baseWorkspaceRevision` = [`workspace_revision`] sobre las raíces escribibles. Si
     ///    `expected_workspace_revision` viene y **no** coincide → [`ErrorCode::RevisionConflict`]
     ///    (control optimista a nivel de workspace); si viene `None`, se adopta la revisión actual.
     /// 2. **Control optimista por operación**: cada op cruda con `expectedRevision` se compara con la
-    ///    [`ConceptRevision`] actual del concepto objetivo (`blake3` del `.md` en disco/memoria); si
-    ///    difiere (o el concepto ya no existe) → [`ErrorCode::RevisionConflict`].
+    ///    [`DocumentRevision`] actual del documento objetivo (`blake3` del `.md` en disco/memoria); si
+    ///    difiere (o el documento ya no existe) → [`ErrorCode::RevisionConflict`].
     /// 3. Despacha cada op cruda a su normalizador del core (E12-H05/H06/H07 y los de contenido
     ///    `patch_frontmatter`/`replace_body`), acumulando TODAS las [`NormalizedOperation`] en un
     ///    **único** `ChangeSet` (una op de estructura puede producir varias).
-    /// 4. Construye el bundle hipotético con [`plan::apply_normalized_ops`] y deriva
+    /// 4. Construye el workspace hipotético con [`plan::apply_normalized_ops`] y deriva
     ///    [`plan::semantic_diff`], [`plan::assess_risk`] y [`plan::validate_result`] (antes y
     ///    después); `canApply` = [`plan::can_apply`] bajo `policy`.
     ///    - **Guard de descubrimiento** (E15-H09, `REFACTOR_PHASE_2 §Principio 8`): cada path que
@@ -1222,14 +1227,14 @@ impl App {
         raw_ops: &Value,
         policy: PlanPolicy,
     ) -> Result<PlanResult, ErrorCode> {
-        let bundle = self
+        let doc_set = self
             .workspace
-            .bundle()
+            .document_set()
             .map_err(|e| workspace_error_code(&e))?;
         let root = self.workspace.root();
         let cfg = self.workspace.config();
         let schema = WorkspaceSchema::load(root).map_err(|_| ErrorCode::InternalIoError)?;
-        let files = bundle.files();
+        let files = doc_set.files();
         let writable = &cfg.workspace.writable_roots;
 
         // (1) Revisión base del workspace + control optimista a nivel de workspace.
@@ -1248,19 +1253,19 @@ impl App {
             if let Some(expected) = raw.get("expectedRevision").and_then(Value::as_str) {
                 let target = op_target_path(raw)?;
                 let actual = files.get(&target).map(|raw_md| {
-                    ConceptRevision::from_hash(*blake3::hash(raw_md.as_bytes()).as_bytes())
+                    DocumentRevision::from_hash(*blake3::hash(raw_md.as_bytes()).as_bytes())
                 });
                 if actual.as_ref().map(|r| r.0.as_str()) != Some(expected) {
                     return Err(ErrorCode::RevisionConflict);
                 }
             }
-            normalized.extend(normalize_raw_op(&bundle, &schema, raw)?);
+            normalized.extend(normalize_raw_op(&doc_set, &schema, raw)?);
         }
 
-        // (4) Bundle hipotético + análisis del plan (todo en memoria, sin escribir).
+        // (4) DocumentSet hipotético + análisis del plan (todo en memoria, sin escribir).
         let after_files =
             plan::apply_normalized_ops(files, &normalized).map_err(|e| error_code(&e))?;
-        let after = Bundle::from_files(after_files);
+        let after = DocumentSet::from_files(after_files);
 
         // (4-bis) Guard de descubrimiento (E15-H09): ningún path que el plan escribiría puede
         //     quedar fuera del inventario. Se comprueban los creados/modificados —los borrados
@@ -1275,9 +1280,9 @@ impl App {
             }
         }
 
-        let risk = plan::assess_risk(&normalized, &bundle, &after);
-        let semantic_diff = plan::semantic_diff(&bundle, &after, &schema);
-        let before_report = plan::validate_result(&bundle, &schema);
+        let risk = plan::assess_risk(&normalized, &doc_set, &after);
+        let semantic_diff = plan::semantic_diff(&doc_set, &after, &schema);
+        let before_report = plan::validate_result(&doc_set, &schema);
         let after_report = plan::validate_result(&after, &schema);
         let can_apply = plan::can_apply(&after_report, &policy);
         let impact = PlanImpact::from_diff(&semantic_diff);
@@ -1356,7 +1361,7 @@ impl App {
     ///    con la revisión actual → `Err(RevisionConflict)`.
     /// 3. **Verificar `planHash`**: recomputa el hash determinista sobre la base ACTUAL del workspace
     ///    (`compute_plan_hash(revisión_actual, plan.normalizedOperations)`, la misma función que
-    ///    `change_plan`) y lo compara con el `planHash` persistido; si difiere, el bundle cambió bajo
+    ///    `change_plan`) y lo compara con el `planHash` persistido; si difiere, el workspace cambió bajo
     ///    el plan → `Err(PlanStale)` y **no escribe**. (El `planHash` mezcla la base y las
     ///    operaciones, así que un cambio del canónico bajo el plan lo invalida.)
     /// 4. **Transacción**: [`Workspace::apply_transaction`] publica por el único escritor (staging →
@@ -1405,11 +1410,11 @@ impl App {
         let plan = self.load_plan(change_set_id)?;
 
         let cfg = self.workspace.config();
-        let bundle = self
+        let doc_set = self
             .workspace
-            .bundle()
+            .document_set()
             .map_err(|e| workspace_error_code(&e))?;
-        let current_base = workspace_revision(bundle.files(), &cfg.workspace.writable_roots);
+        let current_base = workspace_revision(doc_set.files(), &cfg.workspace.writable_roots);
 
         // (2) Control optimista a nivel de workspace (si el llamante fijó una expectativa).
         if let Some(expected) = &expected_workspace_revision {
@@ -1418,7 +1423,7 @@ impl App {
             }
         }
 
-        // (3) Verificar `planHash` sobre la base ACTUAL: si el bundle cambió bajo el plan, el hash
+        // (3) Verificar `planHash` sobre la base ACTUAL: si el workspace cambió bajo el plan, el hash
         //     recomputado difiere del persistido → PLAN_STALE (no se escribe).
         let recomputed = compute_plan_hash(&current_base, &plan.normalized_operations);
         if recomputed != plan.plan_hash {
@@ -1466,7 +1471,7 @@ impl App {
             workspace_revision: result,
             changed_paths,
             semantic_diff: plan.semantic_diff,
-            conformance: ApplyConformance {
+            validation: ApplyValidation {
                 conformant: analysis.hard_fail == 0,
                 errors: analysis.hard_fail,
                 warnings: analysis.warn_count,
@@ -1536,11 +1541,11 @@ impl App {
 
         // (2) Revisión actual del conocimiento escribible.
         let cfg = self.workspace.config();
-        let bundle = self
+        let doc_set = self
             .workspace
-            .bundle()
+            .document_set()
             .map_err(|e| workspace_error_code(&e))?;
-        let current = workspace_revision(bundle.files(), &cfg.workspace.writable_roots);
+        let current = workspace_revision(doc_set.files(), &cfg.workspace.writable_roots);
 
         // (3) Control optimista a nivel de workspace (si el llamante fijó una expectativa).
         if let Some(expected) = &expected_workspace_revision {
@@ -1670,7 +1675,7 @@ fn plan_to_change_set(plan: &PlanResult) -> ChangeSet {
 /// Resultado de `change_apply` (E13-H08): el recibo de una transacción **aplicada** por el único
 /// escritor. Proyección de servicio (framing, no dominio); wire en camelCase — `receiptId`,
 /// `applied`, `previousWorkspaceRevision`, `workspaceRevision`, `changedPaths`, `semanticDiff`,
-/// `conformance`. `workspaceRevision` es la revisión resultante: tras un apply OK el workspace
+/// `validation`. `workspaceRevision` es la revisión resultante: tras un apply OK el workspace
 /// «queda en» ella. Sin `Eq` (transitivo desde [`SemanticDiff`]).
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -1688,14 +1693,14 @@ pub struct ApplyResult {
     /// Diff semántico del plan aplicado (una sola verdad de diff, invariante #3).
     pub semantic_diff: SemanticDiff,
     /// Conformidad del workspace ya publicado.
-    pub conformance: ApplyConformance,
+    pub validation: ApplyValidation,
 }
 
-/// Veredicto de conformidad del workspace tras aplicar la transacción (`conformance` de
+/// Veredicto de conformidad del workspace tras aplicar la transacción (`validation` de
 /// [`ApplyResult`]). Mismo desglose que `hardFail`/`warnCount` de [`Analysis`]. Wire en camelCase.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
-pub struct ApplyConformance {
+pub struct ApplyValidation {
     /// `true` si el workspace publicado no tiene ningún check `Err` (`hardFail == 0`).
     pub conformant: bool,
     /// Nº de ficheros con al menos un check `Err`.
@@ -1868,7 +1873,7 @@ fn try_append_audit(root: &Path, entry: &AuditEntry) -> std::io::Result<()> {
 /// instante futuro. `expiresAt` es wall-clock y **no** entra en el `planHash`.
 const PLAN_TTL_SECS: u64 = 3600;
 
-/// El concepto cuya [`ConceptRevision`] guarda el control optimista de una op cruda: `ref.path`,
+/// El documento cuya [`DocumentRevision`] guarda el control optimista de una op cruda: `ref.path`,
 /// `path`, `from` (move) o `source` (relaciones), en ese orden. `Err(InvalidSchema)` si la op trae
 /// `expectedRevision` pero no un objetivo identificable.
 fn op_target_path(op: &Value) -> Result<RelPath, ErrorCode> {
@@ -1910,7 +1915,7 @@ fn op_rel_field(op: &Value, key: &str) -> Result<RelPath, ErrorCode> {
 /// desconocido o un parámetro inválido → `Err(ErrorCode::InvalidSchema)`; los errores del core se
 /// mapean con [`error_code`].
 fn normalize_raw_op(
-    bundle: &Bundle,
+    doc_set: &DocumentSet,
     schema: &Schema,
     op: &Value,
 ) -> Result<Vec<NormalizedOperation>, ErrorCode> {
@@ -1925,14 +1930,14 @@ fn normalize_raw_op(
             let ty = op.get("type").and_then(Value::as_str).unwrap_or("");
             let title = op.get("title").and_then(Value::as_str);
             let body = op.get("body").and_then(Value::as_str).map(str::to_string);
-            plan::normalize_create(bundle, schema, &path, ty, title, body)
+            plan::normalize_create(doc_set, schema, &path, ty, title, body)
                 .map(one)
                 .map_err(|e| error_code(&e))
         }
         "patch_frontmatter" => {
             let path = op_ref_path(op)?;
             let patch = op_patch(op)?;
-            plan::normalize_patch_frontmatter(bundle, &path, patch)
+            plan::normalize_patch_frontmatter(doc_set, &path, patch)
                 .map(one)
                 .map_err(|e| error_code(&e))
         }
@@ -1943,7 +1948,7 @@ fn normalize_raw_op(
                 .and_then(Value::as_str)
                 .unwrap_or("")
                 .to_string();
-            plan::normalize_replace_body(bundle, &path, body)
+            plan::normalize_replace_body(doc_set, &path, body)
                 .map(one)
                 .map_err(|e| error_code(&e))
         }
@@ -1955,7 +1960,7 @@ fn normalize_raw_op(
                 .get("expectedOccurrences")
                 .and_then(Value::as_u64)
                 .map(|n| n as usize);
-            plan::normalize_replace_text(bundle, &path, find, replace, expected)
+            plan::normalize_replace_text(doc_set, &path, find, replace, expected)
                 .map(one)
                 .map_err(|e| error_code(&e))
         }
@@ -1977,7 +1982,7 @@ fn normalize_raw_op(
                 _ => EditSectionMode::Replace,
             };
             let content = op.get("content").and_then(Value::as_str).unwrap_or("");
-            plan::normalize_edit_section(bundle, &path, &heading_path, mode, content)
+            plan::normalize_edit_section(doc_set, &path, &heading_path, mode, content)
                 .map(one)
                 .map_err(|e| error_code(&e))
         }
@@ -1988,7 +1993,7 @@ fn normalize_raw_op(
                 .get("rewriteInboundLinks")
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
-            plan::normalize_move(bundle, &from, &to, rewrite).map_err(|e| error_code(&e))
+            plan::normalize_move(doc_set, &from, &to, rewrite).map_err(|e| error_code(&e))
         }
         "delete" => {
             let path = op_ref_path(op)?;
@@ -1998,7 +2003,7 @@ fn normalize_raw_op(
                 Some("create_stub") => InboundLinksPolicy::CreateStub,
                 _ => InboundLinksPolicy::Reject,
             };
-            plan::normalize_delete(bundle, &path, policy).map_err(|e| error_code(&e))
+            plan::normalize_delete(doc_set, &path, policy).map_err(|e| error_code(&e))
         }
         "add_relation" => {
             let source = op_source_path(op)?;
@@ -2007,7 +2012,7 @@ fn normalize_raw_op(
                 .and_then(Value::as_str)
                 .ok_or(ErrorCode::InvalidSchema)?;
             let target = op_rel_field(op, "target")?;
-            plan::normalize_add_relation(bundle, schema, &source, relation, &target)
+            plan::normalize_add_relation(doc_set, schema, &source, relation, &target)
                 .map(one)
                 .map_err(|e| error_code(&e))
         }
@@ -2018,7 +2023,7 @@ fn normalize_raw_op(
                 .and_then(Value::as_str)
                 .ok_or(ErrorCode::InvalidSchema)?;
             let target = op_rel_field(op, "target")?;
-            plan::normalize_remove_relation(bundle, schema, &source, relation, &target)
+            plan::normalize_remove_relation(doc_set, schema, &source, relation, &target)
                 .map(one)
                 .map_err(|e| error_code(&e))
         }
@@ -2028,7 +2033,7 @@ fn normalize_raw_op(
                 .get("to")
                 .and_then(Value::as_str)
                 .ok_or(ErrorCode::InvalidSchema)?;
-            plan::normalize_transition_status(bundle, schema, &path, to)
+            plan::normalize_transition_status(doc_set, schema, &path, to)
                 .map(one)
                 .map_err(|e| error_code(&e))
         }
@@ -2037,7 +2042,7 @@ fn normalize_raw_op(
                 .get("fixId")
                 .and_then(Value::as_str)
                 .ok_or(ErrorCode::InvalidSchema)?;
-            plan::normalize_apply_fix(bundle, schema, fix_id)
+            plan::normalize_apply_fix(doc_set, schema, fix_id)
                 .map(one)
                 .map_err(|e| error_code(&e))
         }
@@ -2154,25 +2159,25 @@ pub struct PlanResult {
     pub normalized_operations: Vec<NormalizedOperation>,
     /// Evaluación de riesgo del plan (E12-H02).
     pub risk: RiskAssessment,
-    /// Diff semántico entre el bundle actual y el hipotético (E12-H03).
+    /// Diff semántico entre el workspace actual y el hipotético (E12-H03).
     pub semantic_diff: SemanticDiff,
-    /// Resumen de impacto (conceptos afectados).
+    /// Resumen de impacto (documentos afectados).
     pub impact: PlanImpact,
-    /// Conteo de diagnósticos del bundle ANTES del plan.
+    /// Conteo de diagnósticos del workspace ANTES del plan.
     pub diagnostics_before: ValidationSummary,
-    /// Conteo de diagnósticos del bundle hipotético DESPUÉS del plan.
+    /// Conteo de diagnósticos del workspace hipotético DESPUÉS del plan.
     pub diagnostics_after: ValidationSummary,
 }
 
-/// Resumen de impacto de un plan (E12-H08): los conceptos que el plan crea/modifica/borra/mueve, y
+/// Resumen de impacto de un plan (E12-H08): los documentos que el plan crea/modifica/borra/mueve, y
 /// su recuento. Derivado del [`SemanticDiff`] (una sola verdad de diff, invariante #3). Wire en
 /// camelCase.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct PlanImpact {
-    /// Conceptos afectados por el plan (unión de creados/modificados/borrados/movidos), orden estable.
-    pub affected_concepts: Vec<RelPath>,
-    /// Número de conceptos afectados (`affected_concepts.len()`).
+    /// Documentos afectados por el plan (unión de creados/modificados/borrados/movidos), orden estable.
+    pub affected_documents: Vec<RelPath>,
+    /// Número de documentos afectados (`affected_documents.len()`).
     pub affected_count: usize,
 }
 
@@ -2188,10 +2193,10 @@ impl PlanImpact {
             set.insert(m.from.clone());
             set.insert(m.to.clone());
         }
-        let affected_concepts: Vec<RelPath> = set.into_iter().collect();
-        let affected_count = affected_concepts.len();
+        let affected_documents: Vec<RelPath> = set.into_iter().collect();
+        let affected_count = affected_documents.len();
         PlanImpact {
-            affected_concepts,
+            affected_documents,
             affected_count,
         }
     }
@@ -2211,18 +2216,18 @@ const DEFAULT_CHECK_LIMIT: usize = 100;
 const MAX_CHECK_LIMIT: usize = 1000;
 
 /// Scope de auditoría de [`App::knowledge_check`] (`ARCHITECTURE.md §19.6`, `REFACTOR §10`). El
-/// discriminante de wire es `kind` (camelCase): `workspace` (todos los conceptos), `concept` (uno,
+/// discriminante de wire es `kind` (camelCase): `workspace` (todos los documentos), `document` (uno,
 /// por `ref`), `paths` (una lista explícita) y `affected` (el vecindario/blast-radius de unos
 /// `refs` a distancia ≤ `depth`).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum CheckScope {
-    /// Todos los conceptos del workspace.
+    /// Todos los documentos del workspace.
     Workspace,
-    /// Un único concepto, identificado por `ref` (`ConceptRef`).
-    Concept {
-        /// El concepto a auditar.
-        r#ref: ConceptRef,
+    /// Un único documento, identificado por `ref` (`DocumentRef`).
+    Document {
+        /// El documento a auditar.
+        r#ref: DocumentRef,
     },
     /// Una lista explícita de paths.
     Paths {
@@ -2231,8 +2236,8 @@ pub enum CheckScope {
     },
     /// El vecindario (blast-radius) de unos `refs` a distancia ≤ `depth`.
     Affected {
-        /// Los conceptos centro del vecindario.
-        refs: Vec<ConceptRef>,
+        /// Los documentos centro del vecindario.
+        refs: Vec<DocumentRef>,
         /// Distancia máxima de exploración (por defecto 1 si el cliente la omite).
         #[serde(default = "default_affected_depth")]
         depth: u32,
@@ -2336,12 +2341,12 @@ pub struct GraphQuerySummary {
 //
 // Proyección de servicio (framing), NO dominio: vive en `lodestar-app`, no en `core::types`. Los
 // recuentos y los `blockingReferences` los computa `App::impact_analyze` componiendo el core
-// (`Bundle::backlinks`/`neighborhood` + `RelationDef` del schema); esta capa solo les da forma de
+// (`DocumentSet::backlinks`/`neighborhood` + `RelationDef` del schema); esta capa solo les da forma de
 // wire (camelCase). Wire en camelCase.
 // ---------------------------------------------------------------------------
 
 /// Umbral de backlinks directos a partir del cual el impacto de un cambio se considera **alto**
-/// (E11-H05): mover/borrar un concepto con muchos enlaces entrantes es intrínsecamente arriesgado.
+/// (E11-H05): mover/borrar un documento con muchos enlaces entrantes es intrínsecamente arriesgado.
 const HIGH_IMPACT_BACKLINKS: usize = 20;
 /// Umbral de afectados (directos o transitivos) a partir del cual el impacto se considera **medio**.
 const MEDIUM_IMPACT_BACKLINKS: usize = 5;
@@ -2352,8 +2357,8 @@ const MEDIUM_IMPACT_BACKLINKS: usize = 5;
 pub struct ImpactReport {
     /// Recuentos agregados y nivel de riesgo del cambio propuesto.
     pub summary: ImpactSummary,
-    /// Conceptos alcanzados por el blast-radius entrante (excluido el propio `ref`), orden estable.
-    pub affected_concepts: Vec<RelPath>,
+    /// Documentos alcanzados por el blast-radius entrante (excluido el propio `ref`), orden estable.
+    pub affected_documents: Vec<RelPath>,
     /// Relaciones tipadas obligatorias entrantes que quedarían rotas (solo para `kind:"delete"`).
     pub blocking_references: Vec<BlockingReference>,
     /// Acciones sugeridas antes de aplicar el cambio (texto en español); vacío si el riesgo es bajo.
@@ -2364,7 +2369,7 @@ pub struct ImpactReport {
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ImpactSummary {
-    /// Nº de backlinks **directos** entrantes del `ref` (`Bundle::backlinks.inbound`).
+    /// Nº de backlinks **directos** entrantes del `ref` (`DocumentSet::backlinks.inbound`).
     pub directly_affected: usize,
     /// Tamaño del blast-radius entrante (`neighborhood(In)`, excluido el propio `ref`).
     pub transitively_affected: usize,
@@ -2375,25 +2380,25 @@ pub struct ImpactSummary {
 }
 
 /// Una relación tipada entrante que quedaría rota si se aplicara el cambio (E11-H05). `path` es el
-/// concepto que depende del `ref`; `reason` explica el bloqueo (nombre de la relación rota). Wire
+/// documento que depende del `ref`; `reason` explica el bloqueo (nombre de la relación rota). Wire
 /// en camelCase.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct BlockingReference {
-    /// El concepto origen que declara la relación tipada hacia el `ref`.
+    /// El documento origen que declara la relación tipada hacia el `ref`.
     pub path: RelPath,
     /// Texto (no vacío) que explica por qué bloquea (la relación tipada que se rompería).
     pub reason: String,
 }
 
-/// Conceptos que declaran una **relación tipada del schema** ([`lodestar_core::schema::RelationDef`],
+/// Documentos que declaran una **relación tipada del schema** ([`lodestar_core::schema::RelationDef`],
 /// E11-H03) cuyo target es `target_path` — las dependencias estructurales que quedarían rotas al
 /// borrar el target (E11-H05). Reusa la misma lectura de campos de relación que
 /// `core::schema::validate_relations` (una secuencia YAML de paths o un único `String`). Emite un
-/// bloqueo por cada relación tipada de un concepto que apunte al target (los enlaces sueltos de
+/// bloqueo por cada relación tipada de un documento que apunte al target (los enlaces sueltos de
 /// cuerpo Markdown NO cuentan: no son dependencias estructurales tipadas).
 fn blocking_relations(
-    bundle: &Bundle,
+    doc_set: &DocumentSet,
     schema: &Schema,
     target_path: &RelPath,
 ) -> Vec<BlockingReference> {
@@ -2401,11 +2406,11 @@ fn blocking_relations(
         return Vec::new();
     }
     let mut out = Vec::new();
-    for path in &bundle.analyze().concepts {
+    for path in &doc_set.analyze().documents {
         if path == target_path {
             continue;
         }
-        let Some(raw) = bundle.files().get(path) else {
+        let Some(raw) = doc_set.files().get(path) else {
             continue;
         };
         let parsed = model::parse_file(path.as_str(), raw);
@@ -2426,7 +2431,7 @@ fn blocking_relations(
                 out.push(BlockingReference {
                     path: path.clone(),
                     reason: format!(
-                        "«{}» depende de este concepto vía la relación tipada «{rel_name}».",
+                        "«{}» depende de este documento vía la relación tipada «{rel_name}».",
                         path.as_str()
                     ),
                 });
@@ -2458,15 +2463,15 @@ fn relation_field_targets(fm: &ParsedFrontmatter, rel_name: &str) -> Vec<String>
 // nueva de esta épica, no un port) — implementación propia. Wire en camelCase.
 // ---------------------------------------------------------------------------
 
-/// Proyección de un concepto para `knowledge_get`. `path`/`revision` siempre presentes; el resto
+/// Proyección de un documento para `knowledge_get`. `path`/`revision` siempre presentes; el resto
 /// es `None` cuando no se pidió en `include` (selectividad significativa, no vacua).
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
-pub struct ConceptView {
-    /// Ruta relativa del concepto (su identidad en v2).
+pub struct DocumentView {
+    /// Ruta relativa del documento (su identidad en v2).
     pub path: RelPath,
-    /// Identidad de contenido (`blake3:…`, == [`ConceptRevision`] de E10-H03). Siempre presente.
-    pub revision: ConceptRevision,
+    /// Identidad de contenido (`blake3:…`, == [`DocumentRevision`] de E10-H03). Siempre presente.
+    pub revision: DocumentRevision,
     /// Frontmatter del documento —metadata **arbitraria** del usuario, siempre un objeto YAML—,
     /// si se pidió `"frontmatter"` en `include` (`ARCHITECTURE.md §20.4`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2478,14 +2483,14 @@ pub struct ConceptView {
     /// Enlaces salientes resueltos (`Analysis::out`), si se pidió `"outgoingLinks"`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outgoing_links: Option<Vec<RelPath>>,
-    /// Vecindad de enlaces entrantes (`Bundle::backlinks`), si se pidió `"backlinks"`.
+    /// Vecindad de enlaces entrantes (`DocumentSet::backlinks`), si se pidió `"backlinks"`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backlinks: Option<Backlinks>,
     /// Referencias externas (`implemented_by`/`verified_by`, E11-H04) resueltas contra
     /// `referenceRoots`, si se pidió `"externalReferences"`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub external_references: Option<Vec<ExternalReference>>,
-    /// Checks de conformidad del concepto (`Analysis::per_file`), si se pidió `"diagnostics"`.
+    /// Checks de conformidad del documento (`Analysis::per_file`), si se pidió `"diagnostics"`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub diagnostics: Option<Vec<Check>>,
 }
@@ -2513,29 +2518,29 @@ const MAX_SEARCH_LIMIT: usize = 100;
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SearchFilters {
-    /// Restringe a conceptos cuyo `type` (frontmatter) esté en esta lista (comparación
+    /// Restringe a documentos cuyo `type` (frontmatter) esté en esta lista (comparación
     /// case-insensitive).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub types: Option<Vec<String>>,
-    /// Restringe a conceptos cuyo `status` esté en esta lista (case-insensitive).
+    /// Restringe a documentos cuyo `status` esté en esta lista (case-insensitive).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub statuses: Option<Vec<String>>,
-    /// Restringe a conceptos que tengan al menos uno de estos `tags` (case-insensitive).
+    /// Restringe a documentos que tengan al menos uno de estos `tags` (case-insensitive).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tags: Option<Vec<String>>,
-    /// Restringe a conceptos cuyo `path` empiece por este prefijo.
+    /// Restringe a documentos cuyo `path` empiece por este prefijo.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path_prefix: Option<String>,
 }
 
-/// Un resultado de `knowledge_search` — proyección de un concepto para localizarlo, **nunca su
+/// Un resultado de `knowledge_search` — proyección de un documento para localizarlo, **nunca su
 /// cuerpo completo** (invariante de la historia). Wire en camelCase.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct SearchResult {
-    /// Ruta relativa del concepto (su identidad en v2, E10-H04).
+    /// Ruta relativa del documento (su identidad en v2, E10-H04).
     pub path: RelPath,
-    /// Id estable del concepto, cuando exista (no-goal en v2 → siempre ausente).
+    /// Id estable del documento, cuando exista (no-goal en v2 → siempre ausente).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
     /// `type` del frontmatter.
@@ -2555,8 +2560,8 @@ pub struct SearchResult {
     pub snippet: String,
     /// Puntuación de relevancia (mayor = más relevante). Base simple por frecuencia del texto.
     pub score: f64,
-    /// Revisión de contenido del concepto (`blake3:…`, == [`ConceptRevision`] de E10-H03).
-    pub revision: ConceptRevision,
+    /// Revisión de contenido del documento (`blake3:…`, == [`DocumentRevision`] de E10-H03).
+    pub revision: DocumentRevision,
 }
 
 /// Respuesta de `knowledge_search`: la página de resultados, el cursor a la siguiente página (o
@@ -2569,11 +2574,11 @@ pub struct SearchResults {
     pub results: Vec<SearchResult>,
     /// Cursor opaco a la siguiente página, o `None` si no quedan más resultados.
     pub next_cursor: Option<String>,
-    /// Número total de conceptos que casan (todas las páginas juntas).
+    /// Número total de documentos que casan (todas las páginas juntas).
     pub total_approximate: usize,
 }
 
-/// `true` si el concepto pasa todos los filtros baratos activos.
+/// `true` si el documento pasa todos los filtros baratos activos.
 fn passes_filters(path: &RelPath, fm: &ParsedFrontmatter, filters: &SearchFilters) -> bool {
     if let Some(types) = &filters.types {
         let ty = fm.get_text("type").unwrap_or_default().to_lowercase();
@@ -2627,7 +2632,7 @@ fn scalar_string(v: &serde_yaml::Value) -> Option<String> {
 }
 
 /// Puntuación simple: nº de apariciones del texto (minúsculas) en el contenido crudo; `1.0` para un
-/// texto vacío (todos los conceptos empatan y el orden lo decide el `path`).
+/// texto vacío (todos los documentos empatan y el orden lo decide el `path`).
 fn score_of(raw: &str, needle_lower: &str) -> f64 {
     if needle_lower.is_empty() {
         return 1.0;
@@ -2728,20 +2733,20 @@ pub struct SchemaInspection {
 // ---------------------------------------------------------------------------
 // `outputSchema` (E10-H13, `ARCHITECTURE.md §19.6`, decisión **D6b**, `docs/REFACTOR.md §13`).
 //
-// La tool MCP `knowledge_get` no sirve `ConceptView` a secas: la envuelve en `{ "concept": … }`
+// La tool MCP `knowledge_get` no sirve `DocumentView` a secas: la envuelve en `{ "document": … }`
 // (`lodestar-mcp/src/tools.rs`, caso `"knowledge_get"`). El `outputSchema` declarado en
 // `tools/list` debe describir la forma de wire REAL, así que aquí vive un wrapper mínimo — solo
 // para derivar su `JsonSchema`, nunca construido por ningún servicio (`App::knowledge_get` sigue
-// devolviendo `ConceptView`; el envoltorio lo aplica la fachada MCP).
+// devolviendo `DocumentView`; el envoltorio lo aplica la fachada MCP).
 // ---------------------------------------------------------------------------
 
 /// Forma de wire de la respuesta de la tool `knowledge_get` (envoltorio de un único campo
-/// `concept`) — usado solo para derivar su `outputSchema`, ver nota de módulo arriba.
+/// `document`) — usado solo para derivar su `outputSchema`, ver nota de módulo arriba.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct KnowledgeGetResponse {
-    /// El concepto pedido.
-    pub concept: ConceptView,
+    /// El documento pedido.
+    pub document: DocumentView,
 }
 
 /// Los `outputSchema` (JSON Schema, vía `schemars`) de las 5 tools de lectura/verificación de
@@ -2776,8 +2781,8 @@ pub mod schemas {
         schema_of::<SearchResults>()
     }
 
-    /// `outputSchema` de `knowledge_get` (== [`KnowledgeGetResponse`], el envoltorio `{ concept }`
-    /// que sirve de verdad la tool — no [`super::ConceptView`] a secas).
+    /// `outputSchema` de `knowledge_get` (== [`KnowledgeGetResponse`], el envoltorio `{ document }`
+    /// que sirve de verdad la tool — no [`super::DocumentView`] a secas).
     pub fn knowledge_get_schema() -> Value {
         schema_of::<KnowledgeGetResponse>()
     }

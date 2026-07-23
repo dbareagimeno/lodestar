@@ -6,7 +6,7 @@
 //! `lodestar-mcp`, le habla JSON-RPC y asevera sobre las respuestas y el disco. La mayoría de los
 //! mecanismos ya existen (las tools se cerraron en E10-H09…E13-H09, dependencia E13-H09), así que
 //! esta historia es de **composición/regresión e2e**: verifica que el conjunto de las 10 tools cubre
-//! los escenarios de producto de punta a punta sobre un bundle de benchmark realista.
+//! los escenarios de producto de punta a punta sobre un workspace de benchmark realista.
 //!
 //! ## Códigos de error REALES (los que emite el motor HOY, no los idealizados de §17)
 //! El catálogo `ErrorCode` (`lodestar-core::types`, invariante #4) está congelado en 16 variantes;
@@ -44,7 +44,7 @@
 //! (tras) la publicación» con estado determinista; el borde de crash A MITAD lo cubre E13-H06.
 //!
 //! ## Estructura
-//! Cada escenario es una función `escenario_NN_*()` autocontenida (su propio bundle temporal + sus
+//! Cada escenario es una función `escenario_NN_*()` autocontenida (su propio workspace temporal + sus
 //! aserciones e2e). Hay UN `#[test]` por fila (`bench_NN_*`, diagnóstico granular: una fila que
 //! falla se nombra a sí misma) y un `#[test] benchmark_15_escenarios` que ejerce las 15 en secuencia
 //! (el test que nombra la spec, el viaje completo). Ambas formas son reales y no vacuas.
@@ -189,21 +189,21 @@ fn snapshot_md(root: &std::path::Path) -> std::collections::BTreeMap<String, Str
 }
 
 // ---------------------------------------------------------------------------
-// Bundles de benchmark.
+// Workspaces de benchmark.
 // ---------------------------------------------------------------------------
 
 const INDEX: &str = "---\ntype: Index\ntitle: Bundle\ndescription: Índice del bundle\nokf_version: \"0.1\"\n---\n\n# Bundle\n";
 
-/// Bundle mínimo (solo `index.md`).
-fn bundle_min() -> tempfile::TempDir {
+/// Workspace mínimo (solo `index.md`).
+fn workspace_min() -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
     write(dir.path(), "index.md", INDEX);
     dir
 }
 
-/// Bundle con `.lodestar/schema.yaml` que declara `decision` con `requiredFields:[title,status,
+/// Workspace con `.lodestar/schema.yaml` que declara `decision` con `requiredFields:[title,status,
 /// rationale]` (para el escenario 3) y `note` (segundo tipo).
-fn bundle_schema_decision() -> tempfile::TempDir {
+fn workspace_schema_decision() -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
     write(dir.path(), "index.md", INDEX);
     write(
@@ -226,9 +226,9 @@ types:
     dir
 }
 
-/// Bundle con schema `task.depends_on -> [component]` y conceptos `component`/`note`/`task`
+/// Workspace con schema `task.depends_on -> [component]` y documentos `component`/`note`/`task`
 /// (escenarios 8 y 9).
-fn bundle_relaciones(task_depends_on: &str) -> tempfile::TempDir {
+fn workspace_relaciones(task_depends_on: &str) -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
     write(dir.path(), "index.md", INDEX);
     write(
@@ -272,8 +272,8 @@ types:
     dir
 }
 
-/// Bundle con 4 conceptos relacionados en anillo (`a`/`b`/`c`/`d`), conformes (escenario 7).
-fn bundle_cinco_relacionados() -> tempfile::TempDir {
+/// Workspace con 4 documentos relacionados en anillo (`a`/`b`/`c`/`d`), conformes (escenario 7).
+fn workspace_cinco_relacionados() -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
     write(
         dir.path(),
@@ -297,7 +297,7 @@ fn bundle_cinco_relacionados() -> tempfile::TempDir {
 fn cinco_operaciones() -> Value {
     json!([
         { "op": "create", "path": "nuevo.md", "type": "Concept", "title": "Nuevo",
-          "body": "# Nuevo\n\ncuerpo del quinto concepto\n" },
+          "body": "# Nuevo\n\ncuerpo del quinto documento\n" },
         { "op": "patch_frontmatter", "ref": { "path": "a.md" }, "patch": { "description": "a v2" } },
         { "op": "patch_frontmatter", "ref": { "path": "b.md" }, "patch": { "description": "b v2" } },
         { "op": "patch_frontmatter", "ref": { "path": "c.md" }, "patch": { "description": "c v2" } },
@@ -305,14 +305,14 @@ fn cinco_operaciones() -> Value {
     ])
 }
 
-/// Bundle con `target.md` referenciado por EXACTAMENTE 30 emisores de cuerpo (escenario 4).
-fn bundle_treinta_backlinks() -> tempfile::TempDir {
+/// Workspace con `target.md` referenciado por EXACTAMENTE 30 emisores de cuerpo (escenario 4).
+fn workspace_treinta_backlinks() -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
     write(dir.path(), "index.md", INDEX);
     write(
         dir.path(),
         "target.md",
-        "---\ntype: Concept\ntitle: Target\ndescription: el concepto a mover\n---\n\n# Target\n\ncuerpo\n",
+        "---\ntype: Concept\ntitle: Target\ndescription: el documento a mover\n---\n\n# Target\n\ncuerpo\n",
     );
     for i in 0..30 {
         write(
@@ -344,7 +344,7 @@ fn escenario_01_buscar_por_significado() {
     write(
         dir.path(),
         "bici.md",
-        "---\ntype: concept\ntitle: Bicicletas\ndescription: sobre ruedas\n---\n\n# H\n\nnada que ver con el tema.\n",
+        "---\ntype: document\ntitle: Bicicletas\ndescription: sobre ruedas\n---\n\n# H\n\nnada que ver con el tema.\n",
     );
 
     // (1) knowledge_search por significado: encuentra la decisión, no el decoy.
@@ -379,20 +379,20 @@ fn escenario_01_buscar_por_significado() {
         )],
         1,
     );
-    let concept = &sc(&get[0])["concept"];
+    let document = &sc(&get[0])["document"];
     assert!(
-        concept["revision"]
+        document["revision"]
             .as_str()
             .unwrap_or("")
             .starts_with("blake3:"),
         "knowledge_get debe traer revision «blake3:…»: {get:?}"
     );
     assert!(
-        concept["frontmatter"].is_object(),
+        document["frontmatter"].is_object(),
         "knowledge_get debe traer el frontmatter: {get:?}"
     );
     assert!(
-        concept["body"]
+        document["body"]
             .as_str()
             .unwrap_or("")
             .contains("tokens rotatorios"),
@@ -401,13 +401,13 @@ fn escenario_01_buscar_por_significado() {
 }
 
 // ===========================================================================
-// Escenario 2 — Crear un concepto válido → plan aceptado y aplicado.
+// Escenario 2 — Crear un documento válido → plan aceptado y aplicado.
 // ===========================================================================
 fn escenario_02_crear_valido() {
-    let dir = bundle_min();
+    let dir = workspace_min();
     let ops = json!([
         { "op": "create", "path": "nuevo.md", "type": "Nota", "title": "Nuevo",
-          "body": "# Resumen\n\ncuerpo del concepto nuevo\n" },
+          "body": "# Resumen\n\ncuerpo del documento nuevo\n" },
     ]);
     // (1) Plan aceptado: canApply true bajo política estricta (conforme).
     let plan = roundtrip(
@@ -436,17 +436,17 @@ fn escenario_02_crear_valido() {
 }
 
 // ===========================================================================
-// Escenario 3 — Crear un concepto sin campo obligatorio → plan rechazado.
+// Escenario 3 — Crear un documento sin campo obligatorio → plan rechazado.
 //
 // Dos superficies deben rechazarlo para que «sin campo obligatorio» NUNCA acabe publicado:
 //   (1) change_plan: canApply:false + diagnosticsAfter.errors>=1  → VERDE (change_plan usa
 //       `plan::validate_result`, que SÍ incluye la validación schema-driven).
 //   (2) change_apply: NONCONFORMANT_RESULT y no escribe            → ROJO (HUECO REAL).
 //
-// HUECO (fase roja para el implementador de E14-H04): `change_apply` PUBLICA el concepto no
-// conforme y reporta `conformance.conformant:true` pese a los `SCHEMA-REQFIELD` (level err). Causa:
+// HUECO (fase roja para el implementador de E14-H04): `change_apply` PUBLICA el documento no
+// conforme y reporta `validation.conformant:true` pese a los `SCHEMA-REQFIELD` (level err). Causa:
 // `Workspace::validate_staging` (E13-H01, `crates/lodestar-workspace/src/staging.rs`) mide solo
-// `bundle.analyze().hard_fail` (los 15 checks OKF) y NO ejecuta `validate_schema`/`validate_relations`
+// `doc_set.analyze().hard_fail` (los 15 checks OKF) y NO ejecuta `validate_schema`/`validate_relations`
 // — así un `SCHEMA-REQFIELD` no cuenta como fallo duro y la publicación pasa el gate. Es una
 // divergencia del invariante #3 (una sola verdad computada): `knowledge_check`/`lodestar check` sobre
 // el mismo resultado dirían `conformant:false`, pero el gate del único-escritor dice `true`. Cerrarlo:
@@ -454,7 +454,7 @@ fn escenario_02_crear_valido() {
 // persistido con `canApply:false`).
 // ===========================================================================
 fn escenario_03_crear_sin_campo_obligatorio() {
-    let dir = bundle_schema_decision();
+    let dir = workspace_schema_decision();
     // `decision` requiere [title, status, rationale]; el create solo aporta type+title ⇒ faltan
     // status y rationale ⇒ SCHEMA-REQFIELD ⇒ resultado no conforme.
     let ops = json!([
@@ -485,7 +485,7 @@ fn escenario_03_crear_sin_campo_obligatorio() {
 
     // (2) change_apply DEBE rechazar el plan no conforme: «sin campo obligatorio» no puede acabar
     //     escrito en el canónico. HOY es ROJO — el gate de staging no valida schema-driven (ver la
-    //     nota de HUECO de la cabecera), así que publica el concepto reportando conformant:true.
+    //     nota de HUECO de la cabecera), así que publica el documento reportando conformant:true.
     let applied = roundtrip(dir.path(), &[change_apply_line(2, &id)], 1);
     assert!(
         es_error_con(&applied[0], "NONCONFORMANT_RESULT"),
@@ -501,10 +501,10 @@ fn escenario_03_crear_sin_campo_obligatorio() {
 }
 
 // ===========================================================================
-// Escenario 4 — Mover un concepto con 30 backlinks → enlaces actualizados dentro del mismo plan.
+// Escenario 4 — Mover un documento con 30 backlinks → enlaces actualizados dentro del mismo plan.
 // ===========================================================================
 fn escenario_04_mover_30_backlinks() {
-    let dir = bundle_treinta_backlinks();
+    let dir = workspace_treinta_backlinks();
     let antes = snapshot_md(dir.path());
 
     let ops = json!([
@@ -539,7 +539,7 @@ fn escenario_04_mover_30_backlinks() {
 }
 
 // ===========================================================================
-// Escenario 5 — Borrar un concepto referenciado → rechazo con blockers (INBOUND_LINKS_EXIST).
+// Escenario 5 — Borrar un documento referenciado → rechazo con blockers (INBOUND_LINKS_EXIST).
 // ===========================================================================
 fn escenario_05_borrar_referenciado() {
     let dir = tempfile::tempdir().unwrap();
@@ -551,14 +551,14 @@ fn escenario_05_borrar_referenciado() {
     write(
         dir.path(),
         "objetivo.md",
-        "---\ntype: concept\ntitle: Objetivo\ndescription: referenciado por 3\n---\n\n# Objetivo\n\ncuerpo\n",
+        "---\ntype: document\ntitle: Objetivo\ndescription: referenciado por 3\n---\n\n# Objetivo\n\ncuerpo\n",
     );
     for slug in ["a", "b", "c"] {
         write(
             dir.path(),
             &format!("{slug}.md"),
             &format!(
-                "---\ntype: concept\ntitle: {slug}\ndescription: enlaza al objetivo\n---\n\n# {slug}\n\n[Objetivo](objetivo.md)\n"
+                "---\ntype: document\ntitle: {slug}\ndescription: enlaza al objetivo\n---\n\n# {slug}\n\n[Objetivo](objetivo.md)\n"
             ),
         );
     }
@@ -572,7 +572,7 @@ fn escenario_05_borrar_referenciado() {
     );
     assert!(
         es_error_con(&resp[0], "INBOUND_LINKS_EXIST"),
-        "borrar un concepto referenciado debe rechazarse con INBOUND_LINKS_EXIST: {resp:?}"
+        "borrar un documento referenciado debe rechazarse con INBOUND_LINKS_EXIST: {resp:?}"
     );
     assert!(
         dir.path().join("objetivo.md").is_file(),
@@ -581,10 +581,10 @@ fn escenario_05_borrar_referenciado() {
 }
 
 // ===========================================================================
-// Escenario 6 — Modificar un concepto cambiado externamente → REVISION_CONFLICT.
+// Escenario 6 — Modificar un documento cambiado externamente → REVISION_CONFLICT.
 // ===========================================================================
 fn escenario_06_conflicto_revision() {
-    let dir = bundle_cinco_relacionados();
+    let dir = workspace_cinco_relacionados();
 
     // (1) Revisión actual de a.md.
     let get = roundtrip(
@@ -596,7 +596,7 @@ fn escenario_06_conflicto_revision() {
         )],
         1,
     );
-    let old_rev = sc(&get[0])["concept"]["revision"]
+    let old_rev = sc(&get[0])["document"]["revision"]
         .as_str()
         .unwrap_or_else(|| panic!("knowledge_get debe devolver revision de a.md: {get:?}"))
         .to_string();
@@ -625,10 +625,10 @@ fn escenario_06_conflicto_revision() {
 }
 
 // ===========================================================================
-// Escenario 7 — Cambiar cinco conceptos relacionados → un único change set.
+// Escenario 7 — Cambiar cinco documentos relacionados → un único change set.
 // ===========================================================================
-fn escenario_07_cinco_conceptos() {
-    let dir = bundle_cinco_relacionados();
+fn escenario_07_cinco_documentos() {
+    let dir = workspace_cinco_relacionados();
     let plan = roundtrip(
         dir.path(),
         &[change_plan_line(1, cinco_operaciones(), policy_permisiva())],
@@ -650,7 +650,7 @@ fn escenario_07_cinco_conceptos() {
 // Escenario 8 — Introducir una relación inválida → error antes de escribir (RELATION_CONSTRAINT_VIOLATION).
 // ===========================================================================
 fn escenario_08_relacion_invalida() {
-    let dir = bundle_relaciones(""); // tarea.md sin depends_on todavía.
+    let dir = workspace_relaciones(""); // tarea.md sin depends_on todavía.
     let antes = snapshot_md(dir.path());
 
     // add_relation depends_on de la tarea hacia `nota.md` (tipo note), pero depends_on solo admite
@@ -679,7 +679,7 @@ fn escenario_08_relacion_invalida() {
 // ===========================================================================
 fn escenario_09_safe_fixes() {
     // tarea.md declara depends_on hacia un target INEXISTENTE ⇒ REL-TARGET con un `Fix { safe }`.
-    let dir = bundle_relaciones("depends_on:\n  - inexistente.md\n");
+    let dir = workspace_relaciones("depends_on:\n  - inexistente.md\n");
 
     // (1) knowledge_check con fixes sugeridos: localiza el diagnóstico REL-TARGET y su fixId.
     let check = roundtrip(
@@ -742,7 +742,7 @@ fn escenario_09_safe_fixes() {
 // Escenario 10 — Revisar un refactor → diff semántico en change_plan.
 // ===========================================================================
 fn escenario_10_diff_refactor() {
-    let dir = bundle_cinco_relacionados();
+    let dir = workspace_cinco_relacionados();
     // Un refactor de a.md: cambia el frontmatter Y el cuerpo.
     let ops = json!([
         { "op": "patch_frontmatter", "ref": { "path": "a.md" }, "patch": { "description": "refactor" } },
@@ -782,10 +782,10 @@ fn escenario_10_diff_refactor() {
 // Escenario 11 — Recuperar un cambio reciente → change_revert.
 // ===========================================================================
 fn escenario_11_revert() {
-    let dir = bundle_min();
+    let dir = workspace_min();
     let ops = json!([
         { "op": "create", "path": "nuevo.md", "type": "Nota", "title": "Nuevo",
-          "body": "# Resumen\n\ncuerpo del concepto nuevo\n" },
+          "body": "# Resumen\n\ncuerpo del documento nuevo\n" },
     ]);
     // Plan → apply (captura receiptId + revisión previa).
     let plan = roundtrip(
@@ -835,7 +835,7 @@ fn escenario_11_revert() {
 // estado parcial.
 // ===========================================================================
 fn escenario_12_crash_recuperacion() {
-    let dir = bundle_min();
+    let dir = workspace_min();
     let ops = json!([
         { "op": "create", "path": "nuevo.md", "type": "Nota", "title": "Nuevo",
           "body": "# Resumen\n\ncuerpo publicado\n" },
@@ -894,8 +894,8 @@ fn escenario_13_fuera_writable() {
     write(dir.path(), "index.md", INDEX);
     write(
         dir.path(),
-        "knowledge/concepto.md",
-        "---\ntype: Concept\ntitle: Concepto\ndescription: dentro de knowledge\n---\n\n# H\n\ncuerpo\n",
+        "knowledge/documento.md",
+        "---\ntype: Concept\ntitle: Documento\ndescription: dentro de knowledge\n---\n\n# H\n\ncuerpo\n",
     );
     write(dir.path(), "src/existente.rs", "fn main() {}\n");
     write(
@@ -941,7 +941,7 @@ fn escenario_14_ref_codigo_inexistente() {
         ".lodestar/config.yaml",
         "workspace:\n  writableRoots: [knowledge]\n  referenceRoots: [src]\n",
     );
-    // Un concepto con dos referencias de código: una que existe y una que NO.
+    // Un documento con dos referencias de código: una que existe y una que NO.
     write(
         dir.path(),
         "knowledge/tarea.md",
@@ -957,7 +957,7 @@ fn escenario_14_ref_codigo_inexistente() {
         )],
         1,
     );
-    let refs = sc(&resp[0])["concept"]["externalReferences"]
+    let refs = sc(&resp[0])["document"]["externalReferences"]
         .as_array()
         .unwrap_or_else(|| panic!("knowledge_get debe devolver externalReferences: {resp:?}"));
 
@@ -1076,8 +1076,8 @@ fn bench_06_conflicto_revision() {
     escenario_06_conflicto_revision();
 }
 #[test]
-fn bench_07_cinco_conceptos() {
-    escenario_07_cinco_conceptos();
+fn bench_07_cinco_documentos() {
+    escenario_07_cinco_documentos();
 }
 #[test]
 fn bench_08_relacion_invalida() {
@@ -1124,7 +1124,7 @@ fn benchmark_15_escenarios() {
     escenario_04_mover_30_backlinks();
     escenario_05_borrar_referenciado();
     escenario_06_conflicto_revision();
-    escenario_07_cinco_conceptos();
+    escenario_07_cinco_documentos();
     escenario_08_relacion_invalida();
     escenario_09_safe_fixes();
     escenario_10_diff_refactor();

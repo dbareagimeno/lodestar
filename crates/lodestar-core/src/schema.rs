@@ -1,4 +1,4 @@
-//! `core::schema` — el catálogo de tipos de un bundle (`DocType`, campos, relaciones tipadas,
+//! `core::schema` — el catálogo de tipos de un workspace (`DocType`, campos, relaciones tipadas,
 //! plantillas), **puro** (`ARCHITECTURE.md §19.2`, `docs/REFACTOR.md §4/§9.4`).
 //!
 //! Este módulo solo modela y deserializa: **nunca abre ficheros**. La lectura de
@@ -8,8 +8,8 @@
 //! (`requiredFields`/`allowedStatuses`/`bodyTemplate`/`targetTypes`) mapeadas a los campos
 //! `snake_case` de estos tipos — mismo convenio que `WorkspaceConfig`.
 //!
-//! Un bundle **sin** `schema.yaml` se modela como [`Schema::default()`]: `types` vacío, lo que
-//! deja el bundle sin restricciones adicionales (compat con bundles OKF actuales que no declaran
+//! Un workspace **sin** `schema.yaml` se modela como [`Schema::default()`]: `types` vacío, lo que
+//! deja el workspace sin restricciones adicionales (compat con workspaces OKF actuales que no declaran
 //! esquema). La validación schema-driven (`SCHEMA-REQFIELD`/`SCHEMA-STATUS`) vive en
 //! [`validate_schema`] (E10-H07): función **pura y separada** de `analyze`/`validate_file` — no
 //! se integra ahí (aditiva por composición del llamante, no por acoplamiento del core).
@@ -18,14 +18,14 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::model;
 use crate::types::{Check, CheckCode, Fix, ParsedFrontmatter, Range, RelPath, Severity};
-use crate::Bundle;
+use crate::DocumentSet;
 
 use serde::{Deserialize, Serialize};
 
-/// Catálogo de esquemas de un bundle: versión + `DocType`s indexados por nombre de tipo.
+/// Catálogo de esquemas de un workspace: versión + `DocType`s indexados por nombre de tipo.
 ///
 /// `Schema::default()` es el esquema **vacío y permisivo** (sin `DocType`s declarados): el que
-/// se usa cuando un bundle no tiene `.lodestar/schema.yaml`.
+/// se usa cuando un workspace no tiene `.lodestar/schema.yaml`.
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -80,7 +80,7 @@ pub struct DocType {
     /// Reglas adicionales en lenguaje libre (documentales; sin mecánica de validación asociada
     /// todavía).
     pub rules: Vec<String>,
-    /// Plantilla de cuerpo para `create_concept` de este tipo (aplicación en E12-H05).
+    /// Plantilla de cuerpo para `create_document` de este tipo (aplicación en E12-H05).
     pub body_template: Option<String>,
 }
 
@@ -119,25 +119,25 @@ fn default_cardinality() -> String {
     "many".to_string()
 }
 
-/// Valida los conceptos de `bundle` contra el catálogo `schema` (E10-H07, `ARCHITECTURE.md
-/// §19.2/§19.3`): para cada concepto cuyo `type` está declarado en `schema.types`, comprueba que
+/// Valida los documentos de `doc_set` contra el catálogo `schema` (E10-H07, `ARCHITECTURE.md
+/// §19.2/§19.3`): para cada documento cuyo `type` está declarado en `schema.types`, comprueba que
 /// estén presentes sus `required_fields` (ausente → [`CheckCode::SchemaReqfield`]) y que
 /// `status`, si no está vacío, esté en `allowed_statuses` cuando este último no está vacío
 /// (fuera → [`CheckCode::SchemaStatus`]). Ambos con severidad [`Severity::Err`].
 ///
-/// Función **pura y separada** de `Bundle::analyze`/`conform::validate_file`: no se llama desde
-/// ninguna de las dos, así que un bundle sin `schema.yaml` (`Schema::default()`, `types` vacío)
+/// Función **pura y separada** de `DocumentSet::analyze`/`conform::validate_file`: no se llama desde
+/// ninguna de las dos, así que un workspace sin `schema.yaml` (`Schema::default()`, `types` vacío)
 /// no cambia su veredicto de conformidad actual (aditiva por composición del llamante). Un
-/// concepto cuyo `type` no está declarado en el schema se ignora (el catálogo es permisivo, no
+/// documento cuyo `type` no está declarado en el schema se ignora (el catálogo es permisivo, no
 /// exhaustivo) — mismo criterio que `sin_schema_permisivo` (E10-H05).
-pub fn validate_schema(bundle: &Bundle, schema: &Schema) -> Vec<Check> {
+pub fn validate_schema(doc_set: &DocumentSet, schema: &Schema) -> Vec<Check> {
     if schema.types.is_empty() {
         return Vec::new();
     }
 
     let mut out = Vec::new();
-    for path in &bundle.analyze().concepts {
-        let Some(raw) = bundle.files().get(path) else {
+    for path in &doc_set.analyze().documents {
+        let Some(raw) = doc_set.files().get(path) else {
             continue;
         };
         let parsed = model::parse_file(path.as_str(), raw);
@@ -180,35 +180,35 @@ pub fn validate_schema(bundle: &Bundle, schema: &Schema) -> Vec<Check> {
 }
 
 /// Valida las relaciones tipadas del frontmatter contra su [`RelationDef`] (E11-H03,
-/// `ARCHITECTURE.md §19.2/§19.3`): para cada concepto cuyo `type` está declarado en
+/// `ARCHITECTURE.md §19.2/§19.3`): para cada documento cuyo `type` está declarado en
 /// `schema.types`, y por cada relación declarada en `doctype.relations`, lee el campo
 /// homónimo del frontmatter (una secuencia YAML de paths target, o un único `String`) y
 /// comprueba:
 ///
-/// 1. cada target existe como concepto del bundle → si no, [`CheckCode::RelTarget`];
+/// 1. cada target existe como documento del workspace → si no, [`CheckCode::RelTarget`];
 /// 2. el `type` del target, si el target existe, está en `RelationDef::target_types` (vacío =
 ///    cualquier tipo) → si no, [`CheckCode::RelType`];
 /// 3. el nº de targets respeta `RelationDef::cardinality` (`"one"` ⇒ máx. 1) → si no,
 ///    [`CheckCode::RelCard`].
 ///
-/// Todos los `Check` son [`Severity::Err`], con `targets = [path del concepto origen]` y, cuando
+/// Todos los `Check` son [`Severity::Err`], con `targets = [path del documento origen]` y, cuando
 /// se localiza la línea del campo en el frontmatter crudo, `range` relleno.
 ///
-/// Función **pura y separada** de `Bundle::analyze`/`conform::validate_file`/[`validate_schema`]:
-/// no se llama desde ninguna, así que un bundle sin relaciones tipadas (o sin `schema.yaml`) no
+/// Función **pura y separada** de `DocumentSet::analyze`/`conform::validate_file`/[`validate_schema`]:
+/// no se llama desde ninguna, así que un workspace sin relaciones tipadas (o sin `schema.yaml`) no
 /// cambia su veredicto de conformidad actual (aditiva por composición del llamante). Un campo de
-/// relación ausente del frontmatter no se valida (nada que comprobar); un concepto cuyo `type` no
+/// relación ausente del frontmatter no se valida (nada que comprobar); un documento cuyo `type` no
 /// está en el schema se ignora — mismo criterio que [`validate_schema`].
-pub fn validate_relations(bundle: &Bundle, schema: &Schema) -> Vec<Check> {
+pub fn validate_relations(doc_set: &DocumentSet, schema: &Schema) -> Vec<Check> {
     if schema.types.is_empty() {
         return Vec::new();
     }
 
-    let concepts: BTreeSet<&RelPath> = bundle.analyze().concepts.iter().collect();
+    let documents: BTreeSet<&RelPath> = doc_set.analyze().documents.iter().collect();
 
     let mut out = Vec::new();
-    for path in &bundle.analyze().concepts {
-        let Some(raw) = bundle.files().get(path) else {
+    for path in &doc_set.analyze().documents {
+        let Some(raw) = doc_set.files().get(path) else {
             continue;
         };
         let parsed = model::parse_file(path.as_str(), raw);
@@ -265,7 +265,7 @@ pub fn validate_relations(bundle: &Bundle, schema: &Schema) -> Vec<Check> {
                     continue;
                 };
 
-                if !concepts.contains(&target_path) {
+                if !documents.contains(&target_path) {
                     let mut check = Check::new(
                         Severity::Err,
                         CheckCode::RelTarget,
@@ -282,7 +282,7 @@ pub fn validate_relations(bundle: &Bundle, schema: &Schema) -> Vec<Check> {
                 }
 
                 if !reldef.target_types.is_empty() {
-                    if let Some(target_type) = target_type_of(bundle, &target_path) {
+                    if let Some(target_type) = target_type_of(doc_set, &target_path) {
                         if !reldef.target_types.iter().any(|t| t == &target_type) {
                             let mut check = Check::new(
                                 Severity::Err,
@@ -321,9 +321,9 @@ pub(crate) fn relation_targets(fm: &ParsedFrontmatter, rel_name: &str) -> Option
     }
 }
 
-/// El `type` del concepto en `target`, si existe en el bundle y parsea con frontmatter válido.
-pub(crate) fn target_type_of(bundle: &Bundle, target: &RelPath) -> Option<String> {
-    let raw = bundle.files().get(target)?;
+/// El `type` del documento en `target`, si existe en el workspace y parsea con frontmatter válido.
+pub(crate) fn target_type_of(doc_set: &DocumentSet, target: &RelPath) -> Option<String> {
+    let raw = doc_set.files().get(target)?;
     let parsed = model::parse_file(target.as_str(), raw);
     parsed.frontmatter.and_then(|fm| fm.get_text("type"))
 }
@@ -334,7 +334,7 @@ pub(crate) fn target_type_of(bundle: &Bundle, target: &RelPath) -> Option<String
 pub(crate) struct RelTargetRepair {
     /// Id estable del fix (idéntico al del `Fix` que adjunta [`validate_relations`]).
     pub fix_id: String,
-    /// Concepto origen (dueño del campo de relación) sobre el que recae el patch correctivo.
+    /// Documento origen (dueño del campo de relación) sobre el que recae el patch correctivo.
     pub source: RelPath,
     /// Nombre del campo de relación en el frontmatter (p. ej. `mentor`).
     pub rel_name: String,
@@ -344,7 +344,7 @@ pub(crate) struct RelTargetRepair {
 
 /// `fix_id` estable y determinista de una relación rota (`REL-TARGET`): `fix:blake3:<hex>` con
 /// `hex = blake3(source ‖ 0x00 ‖ rel_name ‖ 0x00 ‖ target)`. Derivado **solo** del diagnóstico
-/// (nunca de timestamps, orden ni caché), así el mismo bundle produce el mismo `fix_id` entre
+/// (nunca de timestamps, orden ni caché), así el mismo workspace produce el mismo `fix_id` entre
 /// procesos frescos → [`crate::plan::normalize_apply_fix`] puede re-localizarlo recomputando los
 /// checks.
 fn rel_target_fix_id(source: &str, rel_name: &str, target: &str) -> String {
@@ -371,21 +371,21 @@ fn rel_target_fix(source: &RelPath, rel_name: &str, target: &str) -> Fix {
     }
 }
 
-/// Recomputa los arreglos de relaciones tipadas ROTAS del bundle bajo `schema` — E12-H07. Espeja
+/// Recomputa los arreglos de relaciones tipadas ROTAS del workspace bajo `schema` — E12-H07. Espeja
 /// exactamente la detección de `REL-TARGET` de [`validate_relations`] (target con ruta inválida o
-/// que no existe como concepto), y devuelve, por cada uno, el [`RelTargetRepair`] con su `fix_id`
+/// que no existe como documento), y devuelve, por cada uno, el [`RelTargetRepair`] con su `fix_id`
 /// estable. Es la contraparte estructurada de los `Fix` que adjunta `validate_relations`: comparten
 /// `rel_target_fix_id`, así que los `fix_id` coinciden. **Pura**.
-pub(crate) fn rel_target_repairs(bundle: &Bundle, schema: &Schema) -> Vec<RelTargetRepair> {
+pub(crate) fn rel_target_repairs(doc_set: &DocumentSet, schema: &Schema) -> Vec<RelTargetRepair> {
     if schema.types.is_empty() {
         return Vec::new();
     }
 
-    let concepts: BTreeSet<&RelPath> = bundle.analyze().concepts.iter().collect();
+    let documents: BTreeSet<&RelPath> = doc_set.analyze().documents.iter().collect();
 
     let mut out = Vec::new();
-    for path in &bundle.analyze().concepts {
-        let Some(raw) = bundle.files().get(path) else {
+    for path in &doc_set.analyze().documents {
+        let Some(raw) = doc_set.files().get(path) else {
             continue;
         };
         let parsed = model::parse_file(path.as_str(), raw);
@@ -405,7 +405,7 @@ pub(crate) fn rel_target_repairs(bundle: &Bundle, schema: &Schema) -> Vec<RelTar
             };
             for target_str in &targets {
                 let roto = match RelPath::new(target_str) {
-                    Ok(target_path) => !concepts.contains(&target_path),
+                    Ok(target_path) => !documents.contains(&target_path),
                     Err(_) => true,
                 };
                 if roto {

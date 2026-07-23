@@ -8,7 +8,7 @@
 //!   escribe TODOS los ficheros resultantes del plan (reusando `plan::apply_normalized_ops` sobre
 //!   el `FileMap` canónico) bajo `.lodestar/runtime/staging/<changeSetId>/`. No toca el canónico.
 //! - `Workspace::validate_staging(&self, staging: &StagingDir) -> Result<(), WorkspaceError>`
-//!   construye un `Bundle` desde el árbol de staging (canónico + staging), corre `analyze` y, si el
+//!   construye un `DocumentSet` desde el árbol de staging (canónico + staging), corre `analyze` y, si el
 //!   resultado no cumple la política (gate estricto: `hard_fail > 0`), aborta SIN tocar el canónico
 //!   y limpia el staging. El `Err` mapea al wire `NONCONFORMANT_RESULT` (`WorkspaceError::code()`).
 //! - `StagingDir::path(&self) -> &Path` expone el directorio de staging materializado.
@@ -182,8 +182,8 @@ fn staging_no_toca_canonico() {
     let dir = tempfile::tempdir().unwrap();
     let ws = Workspace::open(dir.path()).unwrap();
 
-    // Concepto canónico previo, para comprobar que la materialización no lo altera.
-    ws.create_concept(
+    // Documento canónico previo, para comprobar que la materialización no lo altera.
+    ws.create_document(
         &RelPath::new("raiz.md").unwrap(),
         "Nota",
         Some("Raiz"),
@@ -247,7 +247,7 @@ fn staging_no_conforme_aborta() {
     // Change set cuyo resultado es NO conforme. MIGRADO en E16-H05: era un `Create` con `type`
     // vacío (`OKF-TYPE`), retirado del catálogo; hoy es un cuerpo con marcadores de merge sin
     // resolver (`DOC-CONFLICT-MARKER`), mismo motivo por el que rechaza
-    // `create_concept_no_conforme_no_escribe`.
+    // `create_document_no_conforme_no_escribe`.
     let cs = change_set(
         "changeset:no-conforme",
         vec![NormalizedOperation::Create {
@@ -327,7 +327,7 @@ fn revision_base_cambiada() {
     let ws = Workspace::open(dir.path()).unwrap();
 
     // Estado inicial sobre el que se "planificó".
-    ws.create_concept(
+    ws.create_document(
         &RelPath::new("base.md").unwrap(),
         "Nota",
         Some("Base"),
@@ -345,8 +345,8 @@ fn revision_base_cambiada() {
     ws.reverify_base_revision(&r1)
         .expect("sin cambios, re-verificar la revisión base debe ser Ok");
 
-    // El workspace cambia ENTRE plan y apply: otro escritor introduce un concepto.
-    ws.create_concept(
+    // El workspace cambia ENTRE plan y apply: otro escritor introduce un documento.
+    ws.create_document(
         &RelPath::new("intruso.md").unwrap(),
         "Nota",
         Some("Intruso"),
@@ -750,15 +750,15 @@ fn publica_lote() {
 /// calculada coincide con la `resultWorkspaceRevision` que el plan previó. El esperado se obtiene
 /// aplicando el plan sobre el canónico (`plan::apply_normalized_ops`) y hasheando el resultado con
 /// la misma lógica del core (`types::workspace_revision`, writableRoots por defecto = vacío en un
-/// bundle recién abierto). Se comprueba tanto el valor devuelto por `publish` como el que
+/// workspace recién abierto). Se comprueba tanto el valor devuelto por `publish` como el que
 /// `Workspace::workspace_revision()` calcula del canónico ya publicado.
 #[test]
 fn revision_resultante_coincide() {
     let dir = tempfile::tempdir().unwrap();
     let ws = Workspace::open(dir.path()).unwrap();
 
-    // Un concepto canónico previo, para que la publicación opere sobre una base no vacía.
-    ws.create_concept(
+    // Un documento canónico previo, para que la publicación opere sobre una base no vacía.
+    ws.create_document(
         &RelPath::new("raiz.md").unwrap(),
         "Nota",
         Some("Raiz"),
@@ -1105,12 +1105,12 @@ mod recuperacion {
         }
     }
 
-    /// Abre un bundle con 3 conceptos canónicos conocidos (`uno/dos/tres.md`) y devuelve el
+    /// Abre un workspace con 3 documentos canónicos conocidos (`uno/dos/tres.md`) y devuelve el
     /// workspace + el `FileMap` canónico ORIGINAL (el estado "antes de la transacción").
-    fn bundle_con_tres(root: &Path) -> (Workspace, FileMap) {
+    fn workspace_con_tres(root: &Path) -> (Workspace, FileMap) {
         let ws = Workspace::open(root).unwrap();
         for (p, t) in [("uno.md", "Uno"), ("dos.md", "Dos"), ("tres.md", "Tres")] {
-            ws.create_concept(
+            ws.create_document(
                 &RelPath::new(p).unwrap(),
                 "Nota",
                 Some(t),
@@ -1123,7 +1123,7 @@ mod recuperacion {
         (ws, original)
     }
 
-    /// Change set de 3 **modificaciones** (`ReplaceBody`) de los conceptos existentes.
+    /// Change set de 3 **modificaciones** (`ReplaceBody`) de los documentos existentes.
     fn cs_modifica_tres(id: &str) -> ChangeSet {
         change_set(
             id,
@@ -1144,7 +1144,7 @@ mod recuperacion {
         )
     }
 
-    /// Change set de 3 **creaciones** de conceptos nuevos (`a/b/c.md`): ejercita la ruta de
+    /// Change set de 3 **creaciones** de documentos nuevos (`a/b/c.md`): ejercita la ruta de
     /// recuperación por `.absent` (borrar los creados al restaurar).
     fn cs_crea_tres(id: &str) -> ChangeSet {
         change_set(
@@ -1259,7 +1259,7 @@ mod recuperacion {
     #[test]
     fn recovery_restaura_desde_medio() {
         let dir = tempfile::tempdir().unwrap();
-        let (ws, original) = bundle_con_tres(dir.path());
+        let (ws, original) = workspace_con_tres(dir.path());
 
         let cs = cs_modifica_tres("recovery-restaura-desde-medio");
         let result = plan::apply_normalized_ops(&original, &cs.operations).unwrap();
@@ -1295,7 +1295,7 @@ mod recuperacion {
     #[test]
     fn recovery_completa() {
         let dir = tempfile::tempdir().unwrap();
-        let (ws, original) = bundle_con_tres(dir.path());
+        let (ws, original) = workspace_con_tres(dir.path());
 
         let cs = cs_modifica_tres("recovery-completa");
         let result = plan::apply_normalized_ops(&original, &cs.operations).unwrap();
@@ -1335,7 +1335,7 @@ mod recuperacion {
     #[test]
     fn recovery_bloquea_escritura() {
         let dir = tempfile::tempdir().unwrap();
-        let (ws, original) = bundle_con_tres(dir.path());
+        let (ws, original) = workspace_con_tres(dir.path());
 
         let cs = cs_modifica_tres("recovery-bloquea-escritura");
         // Deja una transacción a medias (journal `applying`): la recuperación queda PENDIENTE.
@@ -1352,7 +1352,7 @@ mod recuperacion {
         let ws2 = Workspace::open(dir.path()).unwrap();
 
         // Una escritura con recuperación pendiente debe rechazarse con WORKSPACE_RECOVERY_REQUIRED.
-        match ws2.create_concept(
+        match ws2.create_document(
             &RelPath::new("nuevo.md").unwrap(),
             "Nota",
             Some("Nuevo"),
@@ -1366,7 +1366,7 @@ mod recuperacion {
             ),
             Ok(outcome) => panic!(
                 "una escritura con recuperación pendiente debía fallar con \
-                 WORKSPACE_RECOVERY_REQUIRED, pero create_concept escribió (written={})",
+                 WORKSPACE_RECOVERY_REQUIRED, pero create_document escribió (written={})",
                 outcome.written
             ),
         }
@@ -1376,7 +1376,7 @@ mod recuperacion {
             !dir.path().join("nuevo.md").exists(),
             "la escritura bloqueada no debía tocar el canónico"
         );
-        // El bundle sigue conteniendo los 3 originales (no se perdió nada del canónico previo).
+        // El workspace sigue conteniendo los 3 originales (no se perdió nada del canónico previo).
         let _ = original;
     }
 
@@ -1387,14 +1387,14 @@ mod recuperacion {
     /// (todo el original íntegro, o todo el resultado íntegro), nunca una mezcla.
     #[test]
     fn recovery_sin_parciales() {
-        // Cada forma de change set se fabrica desde el bundle base (3 conceptos existentes).
+        // Cada forma de change set se fabrica desde el workspace base (3 documentos existentes).
         type FormaCs = (&'static str, fn(&str) -> ChangeSet);
         let formas: &[FormaCs] = &[("modifica", cs_modifica_tres), ("crea", cs_crea_tres)];
 
         for (forma, build_cs) in formas {
             for &fp in TODOS_LOS_FAILPOINTS {
                 let dir = tempfile::tempdir().unwrap();
-                let (ws, original) = bundle_con_tres(dir.path());
+                let (ws, original) = workspace_con_tres(dir.path());
 
                 let id = format!("recovery-sin-parciales-{forma}-{fp:?}");
                 let cs = build_cs(&id);

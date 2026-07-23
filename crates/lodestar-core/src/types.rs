@@ -20,7 +20,7 @@ macro_rules! schema_derive {
 // ---------------------------------------------------------------------------
 
 schema_derive! {
-/// Ruta relativa al root del bundle. `RelPath::new` rechaza absolutas y `..`, y normaliza
+/// Ruta relativa al root del workspace. `RelPath::new` rechaza absolutas y `..`, y normaliza
 /// (separadores a `/`, colapsa `.` y `//`). Prohibido `type RelPath = String`.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 pub struct RelPath(String);
@@ -36,7 +36,7 @@ impl RelPath {
             return Err(crate::CoreError::InvalidRelPath(s.to_string()));
         }
         // Unidad Windows (`C:` / `c:` al inicio): `root.join("C:/x")` DESCARTA el root en Windows
-        // → escritura fuera del bundle (zip-slip). También cubre `C:evil.md` (relativa a unidad).
+        // → escritura fuera del workspace (zip-slip). También cubre `C:evil.md` (relativa a unidad).
         let b = s.as_bytes();
         if b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':' {
             return Err(crate::CoreError::InvalidRelPath(s.to_string()));
@@ -106,32 +106,32 @@ impl<'de> Deserialize<'de> for RelPath {
     }
 }
 
-/// Mapa de ficheros del bundle: lo que come `Bundle::from_files` y lo que devuelve `vcs.tree_files`.
+/// Mapa de ficheros del workspace: lo que come `DocumentSet::from_files` y lo que devuelve `vcs.tree_files`.
 pub type FileMap = BTreeMap<RelPath, String>;
 
 // ---------------------------------------------------------------------------
-// ConceptRef / ConceptId — identidad por path (E10-H04). `id` queda diferido/reservado.
+// DocumentRef / DocumentId — identidad por path (E10-H04). `id` queda diferido/reservado.
 // ---------------------------------------------------------------------------
 
 schema_derive! {
-/// Id estable de concepto — newtype **diferido**: IDs estables/federación son no-goal de esta
-/// historia (`REFACTOR §16`). Existe ya en el wire de `ConceptRef` para no romper compatibilidad
+/// Id estable de documento — newtype **diferido**: IDs estables/federación son no-goal de esta
+/// historia (`REFACTOR §16`). Existe ya en el wire de `DocumentRef` para no romper compatibilidad
 /// cuando se implemente la resolución por id, pero ningún flujo actual lo produce ni lo consume.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ConceptId(pub String);
+pub struct DocumentId(pub String);
 }
 
 schema_derive! {
-/// Referencia a un concepto, usada por todas las tools de lectura/escritura (`ARCHITECTURE.md
+/// Referencia a un documento, usada por todas las tools de lectura/escritura (`ARCHITECTURE.md
 /// §19.3`). v2 resuelve identidad **únicamente por `path`**: `id` es opcional y su resolución
 /// queda diferida (`REFACTOR §6.1`, no-goal IDs estables/federación). `{ "path": "a/b.md" }`
 /// deserializa con `id: None`; `path` hereda la validación de `RelPath` — rechaza `..`/absolutas
 /// (invariante #6, único chokepoint de path-traversal).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ConceptRef {
+pub struct DocumentRef {
     pub path: RelPath,
     #[serde(default)]
-    pub id: Option<ConceptId>,
+    pub id: Option<DocumentId>,
 }
 }
 
@@ -183,7 +183,7 @@ pub enum CheckCode {
     LinkRel,
     // --- Familias schema-driven (decisión D-CheckCode, `ARCHITECTURE.md §19.3`) ---
     // `conform` ya NO las produce (E16-H05): solo las emiten `core::schema` y `external_refs`,
-    // fuera de `Bundle::analyze`. Mueren del todo en E20, con `core::schema`.
+    // fuera de `DocumentSet::analyze`. Mueren del todo en E20, con `core::schema`.
     // Variantes ESTÁTICAS acotadas (no hay espacio de códigos dinámico). El core aún no las
     // produce (eso es E10-H07/E11-H03) — esta historia solo fija el contrato de wire. La clave
     // i18n por código (§12) se satisface con `Check.msg`, que el core emite inline (no hay
@@ -201,9 +201,9 @@ pub enum CheckCode {
     RelType,
     /// Referencia externa (`implemented_by`/`verified_by`, E9-H05) a un fichero de código bajo
     /// `referenceRoots` que no existe en disco (E11-H04). Variante propia, no reuso de
-    /// `LINK-STUB`/`LINK-REL` (enlaces ENTRE concepts del bundle) ni `REL-TARGET` (relaciones
-    /// tipadas a concepts): un `implemented_by`/`verified_by` apunta a código fuera del dominio
-    /// OKF, no a un concept — semánticamente distinto de los tres.
+    /// `LINK-STUB`/`LINK-REL` (enlaces ENTRE documentos del workspace) ni `REL-TARGET` (relaciones
+    /// tipadas a documentos): un `implemented_by`/`verified_by` apunta a código fuera del dominio
+    /// OKF, no a un documento — semánticamente distinto de los tres.
     #[serde(rename = "EXTREF-MISSING")]
     ExtrefMissing,
     // --- Descubrimiento universal (E15-H07, `ARCHITECTURE.md §20.5`/`§20.9`) ---
@@ -454,7 +454,7 @@ impl Default for ParsedFrontmatter {
 impl ParsedFrontmatter {
     /// Construye un `ParsedFrontmatter` **sintético** a partir de un mapa YAML ya editado, que no
     /// procede de ningún documento: `raw` es la serialización canónica del mapa y `span` la cubre
-    /// entera. Lo usan los flujos de escritura (merge-patch, creación de conceptos), que componen
+    /// entera. Lo usan los flujos de escritura (merge-patch, creación de documentos), que componen
     /// frontmatter en memoria antes de que exista el `.md`.
     pub fn from_mapping(map: serde_yaml::Mapping) -> Self {
         let value = serde_yaml::Value::Mapping(map);
@@ -550,7 +550,7 @@ pub enum FmError {
 }
 
 // ---------------------------------------------------------------------------
-// Análisis del bundle: Analysis (§4.1, §10 filas 4/5)
+// Análisis del workspace: Analysis (§4.1, §10 filas 4/5)
 // ---------------------------------------------------------------------------
 
 schema_derive! {
@@ -564,7 +564,7 @@ schema_derive! {
 #[serde(rename_all = "camelCase")]
 pub struct Analysis {
     /// **Todos** los documentos del workspace: ningún basename se salta el análisis (`§20.7`).
-    pub concepts: Vec<RelPath>,
+    pub documents: Vec<RelPath>,
     /// Adyacencia de strings (destinos salientes resueltos por documento).
     pub out: BTreeMap<RelPath, Vec<RelPath>>,
     /// Backlinks (la inversa de `out`).
@@ -623,7 +623,7 @@ pub enum Direction {
 }
 
 schema_derive! {
-/// Subgrafo dirigido alrededor de un concept (`root` = el centro).
+/// Subgrafo dirigido alrededor de un documento (`root` = el centro).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Neighborhood {
@@ -634,7 +634,7 @@ pub struct Neighborhood {
 }
 
 // ---------------------------------------------------------------------------
-// DTOs de lectura de Bundle (§4.2)
+// DTOs de lectura de DocumentSet (§4.2)
 // ---------------------------------------------------------------------------
 
 schema_derive! {
@@ -642,7 +642,7 @@ schema_derive! {
 /// `invalid` = algún Check `Err`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ConceptSummary {
+pub struct DocumentSummary {
     pub path: RelPath,
     pub title: String,
     pub r#type: Option<String>,
@@ -706,13 +706,13 @@ pub struct WriteOutcome {
     pub written: bool,
     pub rejected: Option<String>,
     pub checks: Vec<Check>,
-    pub bundle_hard_fail: usize,
+    pub workspace_hard_fail: usize,
 }
 
 // ---------------------------------------------------------------------------
-// Identidad de contenido determinista: `ConceptRevision` / `WorkspaceRevision`
+// Identidad de contenido determinista: `DocumentRevision` / `WorkspaceRevision`
 // (E10-H03, `ARCHITECTURE.md §19.3`, `REFACTOR §6.2/§6.3`). Eleva blake3 (ya usado en
-// `WriteOutcome.hash`, `bundle.rs`) a identidad expuesta. Wire = string `"blake3:<hex>"`.
+// `WriteOutcome.hash`, `document_set.rs`) a identidad expuesta. Wire = string `"blake3:<hex>"`.
 // ---------------------------------------------------------------------------
 
 schema_derive! {
@@ -720,14 +720,14 @@ schema_derive! {
 /// Wire = el string tal cual (sin envoltorio de objeto).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
-pub struct ConceptRevision(pub String);
+pub struct DocumentRevision(pub String);
 }
 
-impl ConceptRevision {
+impl DocumentRevision {
     /// Construye la revisión a partir de un hash blake3 crudo (el mismo patrón que
     /// `WriteOutcome.hash`).
     pub fn from_hash(hash: [u8; 32]) -> Self {
-        ConceptRevision(format!("blake3:{}", blake3::Hash::from(hash).to_hex()))
+        DocumentRevision(format!("blake3:{}", blake3::Hash::from(hash).to_hex()))
     }
 }
 
@@ -769,7 +769,7 @@ fn under_lodestar(path: &RelPath) -> bool {
 /// - Excluye SIEMPRE todo lo bajo `.lodestar/` (cachés/índices/runtime, nunca fuente de verdad).
 /// - Si `writable` no está vacío, incluye SOLO los ficheros bajo alguno de esos roots (prefijo por
 ///   segmentos, `under_root`); esto excluye de forma natural los `referenceRoots` (solo lectura).
-/// - Si `writable` está vacío, incluye todo lo que no sea `.lodestar/` (todo el bundle es
+/// - Si `writable` está vacío, incluye todo lo que no sea `.lodestar/` (todo el workspace es
 ///   escribible, coherente con E9-H05).
 ///
 /// Determinismo: itera `files` en su orden natural (`FileMap` es `BTreeMap<RelPath, _>`, ya
@@ -812,8 +812,8 @@ pub enum ErrorCode {
     WorkspaceNotFound,
     #[serde(rename = "WORKSPACE_RECOVERY_REQUIRED")]
     WorkspaceRecoveryRequired,
-    #[serde(rename = "CONCEPT_NOT_FOUND")]
-    ConceptNotFound,
+    #[serde(rename = "DOCUMENT_NOT_FOUND")]
+    DocumentNotFound,
     #[serde(rename = "AMBIGUOUS_REFERENCE")]
     AmbiguousReference,
     #[serde(rename = "REVISION_CONFLICT")]
@@ -850,7 +850,7 @@ impl ErrorCode {
         match self {
             ErrorCode::WorkspaceNotFound => "WORKSPACE_NOT_FOUND",
             ErrorCode::WorkspaceRecoveryRequired => "WORKSPACE_RECOVERY_REQUIRED",
-            ErrorCode::ConceptNotFound => "CONCEPT_NOT_FOUND",
+            ErrorCode::DocumentNotFound => "DOCUMENT_NOT_FOUND",
             ErrorCode::AmbiguousReference => "AMBIGUOUS_REFERENCE",
             ErrorCode::RevisionConflict => "REVISION_CONFLICT",
             ErrorCode::PlanStale => "PLAN_STALE",
@@ -879,7 +879,7 @@ impl ErrorCode {
 
 schema_derive! {
 /// Identificador de un `ChangeSet` (plan). Newtype string transparente, mismo patrón que
-/// [`WorkspaceRevision`]/[`ConceptRevision`].
+/// [`WorkspaceRevision`]/[`DocumentRevision`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct ChangeSetId(pub String);
@@ -937,7 +937,7 @@ pub struct MovedPath {
 }
 
 schema_derive! {
-/// Diff semántico entre el bundle actual y el hipotético resultante de aplicar un `ChangeSet`
+/// Diff semántico entre el workspace actual y el hipotético resultante de aplicar un `ChangeSet`
 /// (E12-H03 lo calcula; aquí solo la forma). `frontmatter_changes`/`body_changes`/
 /// `relation_changes` son los paths afectados por cada categoría — una forma mínima razonable;
 /// E12-H03 puede reusar [`crate::diff::OkfDiff`] como referencia sin que sea obligatorio aquí.
@@ -970,7 +970,7 @@ pub struct ValidationSummary {
 }
 
 schema_derive! {
-/// Veredicto de conformidad del bundle hipotético resultante de un `ChangeSet` (E12-H04 lo
+/// Veredicto de conformidad del workspace hipotético resultante de un `ChangeSet` (E12-H04 lo
 /// calcula sobre `analyze()`; aquí solo la forma). `Default` = conformidad vacía (sin
 /// diagnósticos, `conformant: false` — coherente con "nada analizado todavía").
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -995,8 +995,8 @@ pub enum EditSectionMode {
 }
 
 schema_derive! {
-/// Política ante enlaces entrantes al borrar un concepto (E12-H06). `Reject` es el default del
-/// prototipo/spec — un `delete` sobre un concepto referenciado se rechaza salvo que se pida
+/// Política ante enlaces entrantes al borrar un documento (E12-H06). `Reject` es el default del
+/// prototipo/spec — un `delete` sobre un documento referenciado se rechaza salvo que se pida
 /// explícitamente otra política.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -1023,7 +1023,7 @@ schema_derive! {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum NormalizedOperation {
-    /// Crea un concepto nuevo. `body: None` ⇒ se rellena con la `bodyTemplate` del `DocType`
+    /// Crea un documento nuevo. `body: None` ⇒ se rellena con la `bodyTemplate` del `DocType`
     /// (E12-H05); aquí la resolución de la plantilla NO ocurre todavía.
     Create {
         path: RelPath,
@@ -1037,7 +1037,7 @@ pub enum NormalizedOperation {
         #[cfg_attr(feature = "schemars", schemars(skip))]
         patch: FrontmatterPatch,
     },
-    /// Sustituye el cuerpo completo del concepto.
+    /// Sustituye el cuerpo completo del documento.
     ReplaceBody { path: RelPath, body: String },
     /// Edita SOLO la subsección acotada por `heading_path` (p. ej. `["Security", "Token
     /// rotation"]`), con el modo indicado.
@@ -1055,14 +1055,14 @@ pub enum NormalizedOperation {
         replace: String,
         expected_occurrences: Option<usize>,
     },
-    /// Mueve/renombra un concepto; `rewrite_inbound_links` decide si sus backlinks se reescriben
+    /// Mueve/renombra un documento; `rewrite_inbound_links` decide si sus backlinks se reescriben
     /// dentro del mismo change set (E12-H06).
     Move {
         from: RelPath,
         to: RelPath,
         rewrite_inbound_links: bool,
     },
-    /// Borra un concepto, sujeto a `inbound_links_policy` si está referenciado (E12-H06).
+    /// Borra un documento, sujeto a `inbound_links_policy` si está referenciado (E12-H06).
     Delete {
         path: RelPath,
         inbound_links_policy: InboundLinksPolicy,
@@ -1079,7 +1079,7 @@ pub enum NormalizedOperation {
         relation: String,
         target: RelPath,
     },
-    /// Transiciona el `status` de un concepto (validado contra `allowedStatuses`/lifecycle,
+    /// Transiciona el `status` de un documento (validado contra `allowedStatuses`/lifecycle,
     /// E12-H07).
     TransitionStatus { path: RelPath, to: String },
     /// Materializa un `Fix` `safe` sugerido por un diagnóstico previo (`Fix.fix_id`).

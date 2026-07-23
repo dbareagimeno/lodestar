@@ -20,11 +20,11 @@ pub enum CoreError {
     #[error("ruta de campo inválida: {0}")]
     InvalidFieldPath(String),
 
-    /// Al normalizar un `delete` con la política por defecto `reject` (E12-H06), el concepto a
-    /// borrar todavía tiene enlaces entrantes. Lleva el path del concepto referenciado. Mapea a
+    /// Al normalizar un `delete` con la política por defecto `reject` (E12-H06), el documento a
+    /// borrar todavía tiene enlaces entrantes. Lleva el path del documento referenciado. Mapea a
     /// `ErrorCode::InboundLinksExist` (wire `"INBOUND_LINKS_EXIST"`).
     #[error(
-        "el concepto «{0}» tiene enlaces entrantes; no se puede borrar con la política «reject»"
+        "el documento «{0}» tiene enlaces entrantes; no se puede borrar con la política «reject»"
     )]
     InboundLinksExist(RelPath),
 
@@ -37,29 +37,29 @@ pub enum CoreError {
     #[error("replace_text: se esperaban {0} coincidencias pero se encontraron {1}")]
     ReplaceTextMismatch(usize, usize),
 
-    /// Al normalizar una operación de contenido (E12-H05), el concepto o la sección referida no
-    /// existe en el bundle (path sin fichero, o `heading_path` que no casa con ningún heading).
+    /// Al normalizar una operación de contenido (E12-H05), el documento o la sección referida no
+    /// existe en el workspace (path sin fichero, o `heading_path` que no casa con ningún heading).
     #[error("objetivo de normalización no encontrado: {0}")]
     NormalizeTargetNotFound(String),
 
     /// Al normalizar `add_relation`/`remove_relation` (E12-H07), la relación viola su
     /// [`crate::schema::RelationDef`]: el `type` del target no está en `target_types` (vacío =
     /// cualquier tipo), o la cardinalidad `"one"` se superaría. El payload es un mensaje legible
-    /// en español con el detalle del incumplimiento (concepto origen, relación, target y motivo).
+    /// en español con el detalle del incumplimiento (documento origen, relación, target y motivo).
     /// Mapea a `ErrorCode::RelationConstraintViolation` (wire `"RELATION_CONSTRAINT_VIOLATION"`).
     #[error("restricción de relación violada: {0}")]
     RelationConstraintViolation(String),
 
     /// Al normalizar `transition_status` (E12-H07), el estado destino no está en los
-    /// `allowed_statuses` del `DocType` del concepto (cuando esa lista no está vacía). El payload
+    /// `allowed_statuses` del `DocType` del documento (cuando esa lista no está vacía). El payload
     /// es un mensaje legible con el estado rechazado y los permitidos. Mapea a
     /// `ErrorCode::InvalidSchema` (precondición de lifecycle incumplida).
     #[error("transición de estado no permitida: {0}")]
     InvalidStatusTransition(String),
 
     /// Al normalizar `apply_fix` (E12-H07), el `fix_id` pedido no corresponde a ningún `Fix`
-    /// `safe` de los diagnósticos recomputados del bundle (desconocido, ya resuelto, o no `safe`).
-    /// El payload es el `fix_id` no encontrado. Mapea a `ErrorCode::ConceptNotFound`.
+    /// `safe` de los diagnósticos recomputados del workspace (desconocido, ya resuelto, o no `safe`).
+    /// El payload es el `fix_id` no encontrado. Mapea a `ErrorCode::DocumentNotFound`.
     #[error("fix no encontrado o no aplicable: {0}")]
     FixNotFound(String),
 

@@ -429,7 +429,7 @@ fn paths_con_espacios() {
 // ---------------------------------------------------------------------------
 
 /// **Dado** un workspace con documentos a tres niveles y un `.gitignore` que excluye `vendor/`,
-/// **Cuando** se abre con `Workspace::bundle()`, **Entonces** el bundle contiene los documentos
+/// **Cuando** se abre con `Workspace::document_set()`, **Entonces** el workspace contiene los documentos
 /// profundos y **no** contiene `vendor/dep.md`.
 ///
 /// Este es el único test ejecutable de que `discovery` **sustituye** a `io::load_bundle` en las 7
@@ -438,11 +438,11 @@ fn paths_con_espacios() {
 ///
 /// Cubre **dos** de los 7 puntos de cableado, no uno, y a propósito:
 ///
-/// - `Workspace::bundle()` (`lib.rs:196`) — la lectura de conocimiento que alimenta `snapshot()`,
+/// - `Workspace::document_set()` (`lib.rs:196`) — la lectura de conocimiento que alimenta `snapshot()`,
 ///   `analysis()` y por tanto a las dos fachadas.
 /// - `Workspace::workspace_revision()` (`lib.rs:100`) — el control optimista del motor
 ///   transaccional. Es el que **más daño hace si se olvida**: si `workspace_revision` descubriera
-///   un conjunto de ficheros distinto del de `bundle()`, el hash de base cubriría documentos que
+///   un conjunto de ficheros distinto del de `document_set()`, el hash de base cubriría documentos que
 ///   el plan no ve (y al revés), y `reverify_base_revision` empezaría a dar conflictos fantasma —
 ///   o, peor, a no darlos. La forma de fijarlo sin acoplarse al hash concreto es comprobar **de
 ///   qué depende**: un fichero excluido por la política no puede mover la revisión; un documento
@@ -452,20 +452,20 @@ fn paths_con_espacios() {
 /// `publish.rs:56,102`) computan el canónico para el diff/journal transaccional y ya están
 /// cubiertos por regresión en `tests/transactions.rs`; no los duplico aquí.
 #[test]
-fn bundle_usa_la_politica_de_descubrimiento() {
+fn workspace_usa_la_politica_de_descubrimiento() {
     let dir = tempfile::tempdir().unwrap();
     lodestar_fixtures::materialize(&lodestar_fixtures::arbitrary(), dir.path()).unwrap();
     // Aporta `.gitignore` con `vendor/` + `vendor/dep.md`, y `.lodestarignore` + `borradores/`.
     // El `enorme.md` que también crea se dimensiona contra LIMITE, pero aquí la política es la
-    // POR DEFECTO (`bundle()` no recibe una a medida hasta E15-H08), así que este test no asierta
+    // POR DEFECTO (`document_set()` no recibe una a medida hasta E15-H08), así que este test no asierta
     // nada sobre él: sigue siendo válido cualquiera que sea el `max_document_bytes` por defecto.
     lodestar_fixtures::materialize_disk_only(dir.path(), LIMITE).unwrap();
 
     let ws = lodestar_workspace::Workspace::open(dir.path()).unwrap();
 
-    // --- `bundle()` ---------------------------------------------------------------
-    let bundle = ws.bundle().unwrap();
-    let files = bundle.files();
+    // --- `document_set()` ---------------------------------------------------------------
+    let doc_set = ws.document_set().unwrap();
+    let files = doc_set.files();
     for profundo in [
         "README.md",
         "one/first.md",
@@ -474,26 +474,26 @@ fn bundle_usa_la_politica_de_descubrimiento() {
     ] {
         assert!(
             contiene(files, profundo),
-            "`bundle()` debe descubrir a cualquier profundidad: falta {profundo} \
-             (bundle: {:?})",
+            "`document_set()` debe descubrir a cualquier profundidad: falta {profundo} \
+             (doc_set: {:?})",
             rutas(files)
         );
     }
     assert!(
         !contiene(files, "vendor/dep.md"),
-        "`bundle()` debe aplicar la política de descubrimiento (`.gitignore`), no el walker \
-         viejo de `io::load_bundle`. Bundle: {:?}",
+        "`document_set()` debe aplicar la política de descubrimiento (`.gitignore`), no el walker \
+         viejo de `io::load_bundle`. Workspace: {:?}",
         rutas(files)
     );
     assert!(
         !contiene(files, "borradores/wip.md"),
-        "`bundle()` debe aplicar también el `.lodestarignore`. Bundle: {:?}",
+        "`document_set()` debe aplicar también el `.lodestarignore`. Workspace: {:?}",
         rutas(files)
     );
 
     // --- `workspace_revision()` ---------------------------------------------------
     // Misma política ⇒ mismo conjunto de ficheros ⇒ la revisión depende exactamente de lo que
-    // el bundle ve. No se asierta el hash (es opaco): se asierta de qué depende.
+    // el workspace ve. No se asierta el hash (es opaco): se asierta de qué depende.
     let rev_inicial = ws.workspace_revision().unwrap();
 
     std::fs::write(
@@ -505,7 +505,7 @@ fn bundle_usa_la_politica_de_descubrimiento() {
         ws.workspace_revision().unwrap(),
         rev_inicial,
         "un fichero excluido por la política NO forma parte de la revisión del workspace: si la \
-         mueve, `workspace_revision` está descubriendo un conjunto distinto del de `bundle()` y \
+         mueve, `workspace_revision` está descubriendo un conjunto distinto del de `document_set()` y \
          el control optimista pasa a proteger ficheros que el plan ni siquiera ve"
     );
 
@@ -616,7 +616,7 @@ fn path_no_representable() -> std::ffi::OsString {
 /// `.lodestar/` (decisión D5 — `.lodestar/` nunca es fuente de verdad). Un documento así sería
 /// escribible por el motor transaccional y **sus cambios jamás moverían la revisión del
 /// workspace**: el control optimista dejaría de protegerlo en silencio. Es el mismo fallo que
-/// [`bundle_usa_la_politica_de_descubrimiento`] previene entre `bundle()` y
+/// [`workspace_usa_la_politica_de_descubrimiento`] previene entre `document_set()` y
 /// `workspace_revision()`, entrando por el otro lado.
 ///
 /// ## Por qué se cierra por el lado del descubrimiento

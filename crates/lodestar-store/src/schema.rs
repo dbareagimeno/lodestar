@@ -39,7 +39,7 @@ pub(crate) fn set_user_version(conn: &Connection) -> Result<(), StoreError> {
 /// Crea el esquema completo si no existe. Idempotente (`IF NOT EXISTS`).
 ///
 /// - `files`: frontmatter promovido a columnas + `frontmatter_json` para el resto + `body` + `raw`
-///   (permite servir el `FileMap` exacto vía `ConceptStore`) + `hash` blake3 + `mtime`/`size`.
+///   (permite servir el `FileMap` exacto vía `DocumentStore`) + `hash` blake3 + `mtime`/`size`.
 ///   **Sin `kind`** desde E16-H02: todos los `.md` son documentos.
 /// - `links`: una sola tabla `(src, dst, href)`. **Sin `src_is_index`** desde E16-H02: un enlace
 ///   desde un `index.md` es una arista como cualquier otra.

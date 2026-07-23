@@ -27,13 +27,13 @@ Motor headless de integridad semántica para agentes. Flujo recomendado en cada 
 
 1. `workspace_status`: oriéntate primero — config activa, capacidades del perfil, conformidad y \
 recuento agregado del workspace.
-2. `knowledge_search`: localiza conceptos por texto y filtros (snippets y revisión, nunca cuerpos \
+2. `knowledge_search`: localiza documentos por texto y filtros (snippets y revisión, nunca cuerpos \
 completos).
-3. `knowledge_get`: lee un concepto concreto con `include` selectivo y secciones acotadas.
+3. `knowledge_get`: lee un documento concreto con `include` selectivo y secciones acotadas.
 4. `schema_inspect`: descubre el catálogo de tipos y sus reglas (`.lodestar/schema.yaml`) antes de \
 proponer cambios.
 5. `graph_query`: consulta el grafo (backlinks, huérfanos, vecindario, caminos) para entender el \
-contexto de un concepto.
+contexto de un documento.
 6. `impact_analyze`: evalúa el impacto de un cambio hipotético (afectados, bloqueos, riesgo) antes \
 de proponerlo.
 7. `change_plan`: planifica el cambio SIN escribir — normaliza, simula en memoria y valida; \
@@ -123,7 +123,7 @@ fn main() {
         }
     };
     // Cualquier directorio es un workspace válido: no hace falta `index.md`, ni `.lodestar/`, ni
-    // `lodestar init` (`§20.1`). El gate de «esto no es un bundle» se retiró en E15-H06.
+    // `lodestar init` (`§20.1`). El gate de «esto no es un workspace» se retiró en E15-H06.
     let app = match App::open(&root) {
         Ok(app) => app,
         Err(e) => {

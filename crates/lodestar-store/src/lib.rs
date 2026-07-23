@@ -1,6 +1,6 @@
 //! `lodestar-store` — cache **derivada y desechable** (SQLite/FTS5) + watcher (`ARCHITECTURE.md §5`).
 //!
-//! Dueño único del DDL en `<bundle>/.lodestar/index.db` (WAL, gitignored, siempre reconstruible).
+//! Dueño único del DDL en `<workspace>/.lodestar/index.db` (WAL, gitignored, siempre reconstruible).
 //! `rusqlite`/`notify`/`crossbeam` viven **solo aquí**. El core sigue siendo la autoridad: cuando
 //! SQL y core podrían discrepar, **gana el core** (lo verifica el test de paridad). Materializa lo
 //! barato (`files`/`links`/`tags`/`diagnostics` + FTS5) y **sintetiza on-demand** lo que invalidaría
@@ -14,7 +14,7 @@ use std::sync::Mutex;
 use rusqlite::Connection;
 
 use lodestar_core::types::RelPath;
-use lodestar_core::{Bundle, ConceptStore};
+use lodestar_core::{DocumentSet, DocumentStore};
 
 mod error;
 mod event;
@@ -30,12 +30,12 @@ pub use watch::Watcher;
 use crossbeam_channel::Receiver;
 use event::Bus;
 
-/// Subdirectorio (relativo al bundle) donde vive la cache. Gitignored.
+/// Subdirectorio (relativo al workspace) donde vive la cache. Gitignored.
 pub const CACHE_DIR: &str = ".lodestar";
 /// Nombre del fichero de base de datos de la cache.
 pub const DB_FILE: &str = "index.db";
 
-/// La cache de un bundle: base SQLite + bus de eventos. Compuesta por la workspace (E5).
+/// La cache de un workspace: base SQLite + bus de eventos. Compuesta por la workspace (E5).
 pub struct Store {
     root: PathBuf,
     conn: Mutex<Connection>,
@@ -72,7 +72,7 @@ impl Store {
         Ok(store)
     }
 
-    /// El root del bundle.
+    /// El root del workspace.
     pub fn root(&self) -> &Path {
         &self.root
     }
@@ -220,7 +220,7 @@ impl Store {
         for entry in walker {
             // Un fichero ilegible o no-UTF8 NO puede abortar el walk entero: eso congelaría
             // TODAS las reconciliaciones de la cache para siempre (el error del watcher se
-            // descarta). Se salta con diagnóstico y el resto del bundle sigue vivo.
+            // descarta). Se salta con diagnóstico y el resto del workspace sigue vivo.
             let entry = match entry {
                 Ok(e) => e,
                 Err(e) => {
@@ -257,15 +257,15 @@ impl Store {
     // --- síntesis / agregados (SQL == core, verificado por paridad) -------
 
     /// `hard_fail`/`warn_count` derivados de la tabla `diagnostics`.
-    pub fn conformance_counts(&self) -> Result<(usize, usize), StoreError> {
+    pub fn validation_counts(&self) -> Result<(usize, usize), StoreError> {
         let conn = self.conn.lock().unwrap();
         Ok((synth::hard_fail(&conn)?, synth::warn_count(&conn)?))
     }
 
     /// Todos los documentos del workspace, en orden estable.
-    pub fn concepts(&self) -> Result<Vec<RelPath>, StoreError> {
+    pub fn documents(&self) -> Result<Vec<RelPath>, StoreError> {
         let conn = self.conn.lock().unwrap();
-        synth::concepts(&conn)
+        synth::documents(&conn)
     }
 
     /// Backlinks entrantes de un documento (sintetizados sobre `links.dst`).
@@ -305,16 +305,16 @@ impl Store {
         synth::search_substring(&conn, needle)
     }
 
-    /// Un `Bundle` del core servido desde la cache (vía el trait [`ConceptStore`]).
-    /// Su análisis es idéntico al de `Bundle::from_files` sobre el mismo corpus.
-    pub fn bundle(&self) -> Bundle {
-        Bundle::from_store(self)
+    /// Un `DocumentSet` del core servido desde la cache (vía el trait [`DocumentStore`]).
+    /// Su análisis es idéntico al de `DocumentSet::from_files` sobre el mismo corpus.
+    pub fn document_set(&self) -> DocumentSet {
+        DocumentSet::from_store(self)
     }
 }
 
 /// El store sirve el corpus al core sin materializar todos los cuerpos en RAM de golpe
 /// (lee `raw` por path desde SQL). El core sigue puro: la impl SQL vive aquí.
-impl ConceptStore for Store {
+impl DocumentStore for Store {
     fn paths(&self) -> Vec<RelPath> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = match conn.prepare("SELECT path FROM files ORDER BY path") {

@@ -202,8 +202,8 @@ fn no_se_escribe_en_lo_ignorado() {
     // Precondición (test no vacuo): `vendor/` está REALMENTE fuera del inventario.
     let inventario = app
         .workspace()
-        .bundle()
-        .expect("el bundle debe cargarse")
+        .document_set()
+        .expect("el workspace debe cargarse")
         .files()
         .keys()
         .map(|p| p.as_str().to_string())

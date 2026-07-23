@@ -39,7 +39,7 @@ use lodestar_app::{App, PlanResult};
 use lodestar_core::plan::PlanPolicy;
 use lodestar_core::types::{ChangeSetId, ErrorCode};
 
-/// Escribe un `.md` (creando los directorios intermedios) dentro del bundle temporal.
+/// Escribe un `.md` (creando los directorios intermedios) dentro del workspace temporal.
 fn escribe(root: &Path, rel: &str, contenido: &str) {
     let ruta = root.join(rel);
     if let Some(dir) = ruta.parent() {
@@ -48,10 +48,10 @@ fn escribe(root: &Path, rel: &str, contenido: &str) {
     std::fs::write(ruta, contenido).unwrap();
 }
 
-/// Monta un `App` sobre un bundle temporal con un index raíz + un concept conforme (`alfa.md`).
+/// Monta un `App` sobre un workspace temporal con un index raíz + un documento conforme (`alfa.md`).
 /// `App::open` crea el scaffold `.lodestar/runtime/{plans,receipts,staging}` (E9-H06). El `TempDir`
 /// se devuelve para mantener el directorio vivo mientras dure el test.
-fn app_con_bundle() -> (tempfile::TempDir, App) {
+fn app_con_workspace() -> (tempfile::TempDir, App) {
     let dir = tempfile::tempdir().unwrap();
     escribe(
         dir.path(),
@@ -63,7 +63,7 @@ fn app_con_bundle() -> (tempfile::TempDir, App) {
         "alfa.md",
         "---\ntype: Concept\ntitle: Alfa\ndescription: Primer concept\n---\n\n# Resumen\n\ncuerpo\n",
     );
-    let app = App::open(dir.path()).expect("el bundle temporal debe abrir");
+    let app = App::open(dir.path()).expect("el workspace temporal debe abrir");
     (dir, app)
 }
 
@@ -85,7 +85,7 @@ fn policy_permisiva() -> PlanPolicy {
     }
 }
 
-/// Directorio de planes runtime del bundle.
+/// Directorio de planes runtime del workspace.
 fn plans_dir(root: &Path) -> PathBuf {
     root.join(".lodestar").join("runtime").join("plans")
 }
@@ -128,7 +128,7 @@ fn hash_desnudo(id: &ChangeSetId) -> String {
 /// `.lodestar/runtime/plans/<id>.json` y su contenido lleva el `planHash` que devolvió el plan.
 #[test]
 fn plan_persistido() {
-    let (dir, app) = app_con_bundle();
+    let (dir, app) = app_con_workspace();
     let plan = app
         .change_plan(None, &una_operacion(), policy_permisiva())
         .expect("el `change_plan` debe tener éxito y producir un plan");
@@ -163,7 +163,7 @@ fn plan_persistido() {
 /// un error de deserialización distinto).
 #[test]
 fn plan_caducado() {
-    let (dir, app) = app_con_bundle();
+    let (dir, app) = app_con_workspace();
     let plan = app
         .change_plan(None, &una_operacion(), policy_permisiva())
         .expect("el `change_plan` debe tener éxito y producir un plan");
@@ -191,7 +191,7 @@ fn plan_caducado() {
 /// devolver `PlanExpired` siempre.
 #[test]
 fn plan_vigente_carga() {
-    let (_dir, app) = app_con_bundle();
+    let (_dir, app) = app_con_workspace();
     let plan = app
         .change_plan(None, &una_operacion(), policy_permisiva())
         .expect("el `change_plan` debe tener éxito y producir un plan");
@@ -215,7 +215,7 @@ fn plan_vigente_carga() {
 /// R1==R2 trivialmente).
 #[test]
 fn plan_fuera_de_revision() {
-    let (dir, app) = app_con_bundle();
+    let (dir, app) = app_con_workspace();
 
     // R1: revisión base que computa `change_plan` (sobre el disco PRE-persistencia). Esta llamada
     // persiste el plan en `.lodestar/runtime/plans/`.
@@ -229,7 +229,7 @@ fn plan_fuera_de_revision() {
 
     // R2: revisión base que computa un `App` reabierto (lectura fresca del disco, que ya incluye el
     // plan runtime en `.lodestar/`).
-    let app2 = App::open(dir.path()).expect("reabrir el bundle debe funcionar");
+    let app2 = App::open(dir.path()).expect("reabrir el workspace debe funcionar");
     let plan2 = app2
         .change_plan(None, &una_operacion(), policy_permisiva())
         .expect("el segundo `change_plan` debe tener éxito");
