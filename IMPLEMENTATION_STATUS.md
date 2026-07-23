@@ -593,3 +593,14 @@ superficie de producto; git queda como crate dormido) y `DECISIONES.md §0`. Des
   `prototype/` como referencia histórica de v0.2.x (el directorio **se conserva**). El job
   `core-purity` añade `zip` a la lista prohibida y un guard nuevo verifica que
   `cargo tree --workspace` no muestre `git2`/`lodestar-vcs`/`zip`.
+- ⚠️ **Cobertura perdida a propósito en el bloque de retirada** (queda registrada, no es deuda a
+  saldar): (1) al morir `import` desaparece la única superficie de **zip-slip**, así que esa mitad
+  del invariante #6 deja de ser alcanzable — el chokepoint `RelPath` sigue testado para absolutas y
+  `..`; (2) `tags_ordenados_con_locale_compare` era el único test de la colación `localeCompare` de
+  tags, pero su única superficie observable era `gen_tag_indexes`: sin generador no hay dónde
+  observarla (`locale_cmp` sobrevive en `core::model`, hoy sin consumidor — candidato a borrarse en
+  E16 si sigue huérfano).
+- 📌 **Punteros de proceso actualizados**: `.claude/agents/*` (autor-tests, implementador,
+  historiador, planificador), `.claude/README.md`, `DECISIONES.md §9` y
+  `requirements/paridad-auditoria.md` daban por vivo el arnés diferencial y el `npm ci` de
+  `prototype/harness/`; ahora lo declaran retirado en `E15-H04`.
