@@ -94,6 +94,15 @@ parte de un parser Markdown, y la reescritura de `move_document` necesita offset
     del grafo. Requiere consultar el árbol de ficheros, no solo el inventario de `.md`.
   - Retirar del algoritmo: la conversión `foo/` → `foo/index.md`, el requisito de que el destino
     termine en `.md` para considerarse interno, y el filtro de "href relativo" de `raw_rel_links`.
+- **Decisiones cerradas tras la fase roja** (el autor las dejó abiertas; ver `ARCHITECTURE.md §20.6`):
+  - **Href raíz-absoluto `/beta.md`** → relativo a la **raíz del workspace**, como hoy. Determinista,
+    sin heurística, y coincide con cómo renderiza GitHub los `.md` de un repo. Conserva verdes los
+    ~20 fixtures que lo usan.
+  - **Un `.md` existente pero excluido del descubrimiento** → **`WorkspaceFile`**, no `Missing`:
+    decir «falta» de un fichero que está ahí sería mentir y daría un `LINK-TARGET-MISSING` espurio.
+    Los `.md` excluidos van en `Inventory::other_files`.
+  - **La query (`?v=1`)** no se modela como campo: el href crudo la conserva. Aditivo si E21 la
+    necesita.
 - **Fuera de alcance**: los diagnósticos que se derivan de la clasificación (E17-H03).
 - **Criterios de aceptación**:
   - **Dado** `README.md` en la raíz con `[x](packages/api/docs/endpoints.md)`, **Cuando** se resuelve,

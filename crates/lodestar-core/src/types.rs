@@ -3,7 +3,7 @@
 //! Todas las fachadas hacen `use` de estos tipos; no hay capa DTO paralela (principio #4).
 //! El `.d.ts` de TypeScript se genera desde aquí (ts-rs/specta) en E0-H04/E6-H03.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -547,6 +547,136 @@ fn scalar_text(v: &serde_yaml::Value) -> Option<String> {
 pub enum FmError {
     Unclosed,
     Malformed(String),
+}
+
+// ---------------------------------------------------------------------------
+// Enlaces: LinkKind · RawLink · LinkTarget · ResolvedLink · Inventory (§20.6, E17-H01/H02)
+// ---------------------------------------------------------------------------
+//
+// > **STUB de la fase roja de E17-H01/H02**: los tipos existen para que `tests/enlaces.rs`
+// > compile; `crate::links` está sin implementar. Viven en `types` y no en `links` por el
+// > invariante #4 (`LinkTarget` viaja en el wire de `knowledge_get.outgoingLinks`); las derivas de
+// > serialización las añade el implementador.
+
+/// Sintaxis con la que se escribió un enlace Markdown (`§20.6`). Es el `link_type` del parser:
+/// clasifica **la forma**, no el destino (eso es [`LinkTarget`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LinkKind {
+    /// `[texto](destino)`.
+    Inline,
+    /// `[texto][id]` con su definición `[id]: destino`.
+    Reference,
+    /// `[id][]`.
+    Collapsed,
+    /// `[id]`.
+    Shortcut,
+    /// `<https://example.com>`.
+    Autolink,
+}
+
+/// Un enlace tal como aparece en el cuerpo, **sin resolver** (E17-H01).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RawLink {
+    /// El destino **crudo**, tal como está escrito: sin percent-decoding, con su fragmento y su
+    /// query. En un enlace de referencia es el destino de la **definición**.
+    pub href: String,
+    /// El texto visible del enlace, en plano.
+    pub text: String,
+    /// Rango de **bytes del destino** dentro del cuerpo (no del enlace entero): `body[span]` es
+    /// `href`. Lo consumen el `range` de los diagnósticos (`§20.9`) y la reescritura quirúrgica de
+    /// `move_document` (`§20.11`).
+    pub span: std::ops::Range<usize>,
+    /// La forma sintáctica del enlace.
+    pub kind: LinkKind,
+}
+
+/// Clasificación del destino de un enlace (`ARCHITECTURE.md §20.6`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LinkTarget {
+    /// Otro documento Markdown del inventario → **arista del grafo**.
+    Document(RelPath),
+    /// Fichero del proyecto que existe pero **no** es documento (p. ej. código): no es nodo.
+    WorkspaceFile(RelPath),
+    /// URI con esquema (`https:`, `mailto:`…).
+    ExternalUri(String),
+    /// Anchor del propio documento, **sin** la almohadilla.
+    SelfAnchor(String),
+    /// Destino contenido en el workspace que no existe, con su path ya normalizado.
+    Missing(RelPath),
+    /// El destino sale de la raíz del workspace. No lleva path: no hay `RelPath` que lo represente.
+    EscapesWorkspace,
+}
+
+/// Un enlace ya resuelto y clasificado (E17-H02).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedLink {
+    /// El href **original**, byte a byte (paso 10 del algoritmo de `§20.6`).
+    pub href: String,
+    /// El texto visible del enlace.
+    pub text: String,
+    /// Rango de bytes del destino dentro del cuerpo del documento origen.
+    pub span: std::ops::Range<usize>,
+    /// La forma sintáctica del enlace.
+    pub kind: LinkKind,
+    /// El destino clasificado.
+    pub target: LinkTarget,
+    /// El fragmento (`#seccion`) **sin** la almohadilla, si lo había. Vive aquí y no dentro de
+    /// [`LinkTarget`] porque es ortogonal a la clasificación — y porque es una columna propia de
+    /// `links(…, fragment, …)` en el store v2 (`§20.12`).
+    pub fragment: Option<String>,
+}
+
+/// Lo que el motor sabe que existe en el workspace, sin tocar el disco (invariante #2).
+///
+/// Separa **documentos** (los `.md` descubiertos, nodos potenciales del grafo) de los **demás
+/// ficheros** del proyecto (código, imágenes, …), que `resolve` necesita para poder clasificar un
+/// destino como [`LinkTarget::WorkspaceFile`] en vez de como [`LinkTarget::Missing`]. Quien hace
+/// I/O —el descubrimiento de `lodestar-workspace`— es quien lo construye.
+#[allow(dead_code)] // STUB de la fase roja: los campos los lee el implementador.
+pub struct Inventory {
+    documents: BTreeSet<RelPath>,
+    other_files: BTreeSet<RelPath>,
+}
+
+impl Inventory {
+    /// Inventario completo: documentos Markdown + resto de ficheros del proyecto.
+    ///
+    /// > **STUB de la fase roja de E17-H02**: sin implementar.
+    pub fn new<D, F>(documents: D, other_files: F) -> Inventory
+    where
+        D: IntoIterator<Item = RelPath>,
+        F: IntoIterator<Item = RelPath>,
+    {
+        let _ = (
+            documents.into_iter().count(),
+            other_files.into_iter().count(),
+        );
+        todo!("E17-H02: inventario de documentos y ficheros del workspace")
+    }
+
+    /// Atajo: solo los documentos de un [`FileMap`], sin ficheros no-Markdown conocidos.
+    ///
+    /// > **STUB de la fase roja de E17-H02**: sin implementar.
+    pub fn from_documents(files: &FileMap) -> Inventory {
+        let _ = files;
+        todo!("E17-H02: inventario a partir de los documentos")
+    }
+
+    /// ¿Hay un documento Markdown en esa ruta exacta?
+    ///
+    /// > **STUB de la fase roja de E17-H02**: sin implementar.
+    pub fn contains_document(&self, path: &RelPath) -> bool {
+        let _ = path;
+        todo!("E17-H02: pertenencia al inventario de documentos")
+    }
+
+    /// ¿Existe un fichero del proyecto (no Markdown) en esa ruta exacta?
+    ///
+    /// > **STUB de la fase roja de E17-H02**: sin implementar.
+    pub fn contains_file(&self, path: &RelPath) -> bool {
+        let _ = path;
+        todo!("E17-H02: pertenencia al inventario de ficheros")
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -15,6 +15,7 @@
 
 pub mod diff;
 pub mod error;
+pub mod links;
 pub mod model;
 pub mod plan;
 pub mod query;

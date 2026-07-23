@@ -1068,11 +1068,25 @@ normalizado.
 
 ```rust
 pub enum LinkTarget {
-    Document(RelPath),        // otro .md del inventario → arista del grafo
-    WorkspaceFile(RelPath),   // fichero del proyecto que NO es .md (p. ej. código): existe, pero NO es nodo
+    Document(RelPath),        // otro .md del INVENTARIO → arista del grafo
+    WorkspaceFile(RelPath),   // fichero del proyecto que NO es un documento del inventario: existe, pero NO es nodo
     ExternalUri(String), SelfAnchor(String), Missing(RelPath), EscapesWorkspace,
 }
 ```
+
+> **Dos precisiones decididas en E17-H02**, que `REFACTOR_PHASE_2 §Fase 7` no cubre:
+>
+> 1. **Href raíz-absoluto (`/beta.md`)**: se resuelve **relativo a la raíz del workspace**. Es
+>    determinista y sin heurística (que es lo que prohíbe `§20.7`), coincide con cómo renderizan los
+>    `.md` de un repo GitHub/GitLab, y el invariante *"ningún path público es absoluto"* de `§20.2`
+>    habla de las **rutas que Lodestar expone**, no de los hrefs que escribe el usuario en su
+>    contenido. La alternativa (`EscapesWorkspace`) rechazaría un patrón real y frecuente.
+> 2. **Un `.md` que existe en disco pero está EXCLUIDO del descubrimiento** (p. ej. `vendor/dep.md`
+>    bajo un `.gitignore`) es **`WorkspaceFile`, no `Missing`**. Por eso la variante se define por
+>    «no es un documento del inventario» y no por «no es `.md`»: decir `Missing` de un fichero que
+>    está ahí sería mentir sobre el disco y produciría un `LINK-TARGET-MISSING` espurio sobre un
+>    enlace que el usuario ve funcionar. Consecuencia para quien construye el `Inventory`: los `.md`
+>    excluidos van en `other_files`, no en `documents`.
 
 **Prohibido**: buscar por basename o título, añadir `.md` automáticamente, resolver un directorio
 como `index.md`, tratar `README.md` como fallback, interpretar aliases o resolver ambigüedades por
