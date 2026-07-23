@@ -13,7 +13,7 @@ use std::sync::Mutex;
 
 use rusqlite::Connection;
 
-use lodestar_core::types::RelPath;
+use lodestar_core::types::{Inventory, RelPath};
 use lodestar_core::{DocumentSet, DocumentStore};
 
 mod error;
@@ -87,13 +87,22 @@ impl Store {
     /// Cold rebuild: `WalkBuilder` → `core::parse_file` → upsert en **una** transacción.
     /// Reemplaza todo el contenido de la cache. Emite un `IndexEvent` con todos los paths.
     pub fn rebuild(&self) -> Result<(), StoreError> {
-        let disk = self.walk_disk()?;
+        let (disk, others) = self.walk_disk()?;
+        // El inventario de esta reconstrucción es el disco entero: documentos (`.md`) + el resto de
+        // ficheros del proyecto. Es lo que clasifica un enlace como `workspaceFile` en vez de
+        // `missing` (E18-H02). Se computa ANTES del bucle para que cada `upsert_file` vea el
+        // workspace completo, no solo los documentos ya insertados.
+        let inventory = Inventory::new(
+            disk.iter().map(|(p, _, _, _)| p.clone()),
+            others.iter().cloned(),
+        );
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction()?;
         schema::truncate_all(&tx)?;
+        write_other_files(&tx, &others)?;
         let mut changed = Vec::new();
         for (path, content, mtime, size) in &disk {
-            index::upsert_file(&tx, path, content, *mtime, *size)?;
+            index::upsert_file(&tx, path, content, *mtime, *size, &inventory)?;
             changed.push(path.clone());
         }
         tx.commit()?;
@@ -121,8 +130,15 @@ impl Store {
             if current_hash(&conn, path)?.as_deref() == Some(new_hash.as_bytes().as_slice()) {
                 false
             } else {
+                // El inventario se reconstruye de la cache (documentos + `other_files` conocidos, más
+                // el propio `path`, que quizá aún no esté indexado). Un fichero de proyecto añadido
+                // sin rebuild deja el inventario retrasado: es la misma limitación de cascada que
+                // aceptan los diagnósticos de enlace (la paridad plena es E18-H04) — la clasificación
+                // de grafo (`is_edge`/`target_path`) no depende del inventario, solo el `target_kind`
+                // cosmético de un `workspaceFile`.
+                let inventory = build_inventory_from_db(&conn, path)?;
                 let tx = conn.transaction()?;
-                index::upsert_file(&tx, path, content, mtime, size)?;
+                index::upsert_file(&tx, path, content, mtime, size, &inventory)?;
                 tx.commit()?;
                 true
             }
@@ -161,7 +177,13 @@ impl Store {
     /// Reconcilia la cache con el disco: upsert de lo cambiado (gate por hash) y borrado de lo
     /// que ya no existe. Repara drift tras tormentas de eventos. Emite un `IndexEvent` con el delta.
     pub fn reconcile_all(&self) -> Result<IndexEvent, StoreError> {
-        let disk = self.walk_disk()?;
+        let (disk, others) = self.walk_disk()?;
+        // Inventario fresco del disco (documentos + `other_files`): los documentos que se re-upserten
+        // se clasifican contra el workspace completo actual.
+        let inventory = Inventory::new(
+            disk.iter().map(|(p, _, _, _)| p.clone()),
+            others.iter().cloned(),
+        );
         let event = {
             let mut conn = self.conn.lock().unwrap();
             let cached = cached_paths(&conn)?;
@@ -169,6 +191,7 @@ impl Store {
                 disk.iter().map(|(p, _, _, _)| p.clone()).collect();
 
             let tx = conn.transaction()?;
+            write_other_files(&tx, &others)?;
             let mut changed = Vec::new();
             for (path, content, mtime, size) in &disk {
                 let new_hash = blake3::hash(content.as_bytes());
@@ -191,7 +214,7 @@ impl Store {
                     {
                         continue;
                     }
-                    index::upsert_file(&tx, path, content, mtime, size)?;
+                    index::upsert_file(&tx, path, content, mtime, size, &inventory)?;
                     changed.push(path.clone());
                 }
             }
@@ -207,8 +230,22 @@ impl Store {
         Ok(event)
     }
 
-    fn walk_disk(&self) -> Result<Vec<(RelPath, String, i64, i64)>, StoreError> {
-        let mut out = Vec::new();
+    /// Recorre el disco una vez y separa **documentos** (`.md`, con su contenido) de los demás
+    /// ficheros del proyecto (`other_files`, solo su path): el inventario que necesita la resolución
+    /// de enlaces para clasificar un `workspaceFile` (E18-H02). Un `.md` ilegible/no-UTF8 se salta
+    /// con aviso; un no-`.md` entra en `other_files` sin leerse (solo importa que existe).
+    #[allow(clippy::type_complexity)]
+    fn walk_disk(
+        &self,
+    ) -> Result<
+        (
+            Vec<(RelPath, String, i64, i64)>,
+            std::collections::BTreeSet<RelPath>,
+        ),
+        StoreError,
+    > {
+        let mut docs = Vec::new();
+        let mut others = std::collections::BTreeSet::new();
         let walker = ignore::WalkBuilder::new(&self.root)
             .hidden(false)
             .git_ignore(true)
@@ -229,7 +266,7 @@ impl Store {
                 }
             };
             let path = entry.path();
-            if !path.is_file() || path.extension().map(|e| e != "md").unwrap_or(true) {
+            if !path.is_file() {
                 continue;
             }
             let rel = path
@@ -238,6 +275,12 @@ impl Store {
                 .to_string_lossy()
                 .replace('\\', "/");
             let Ok(rp) = RelPath::new(&rel) else { continue };
+            // Un no-`.md` es un fichero del proyecto: se registra su path (sin leer su contenido) para
+            // que un enlace hacia él se clasifique `workspaceFile` y no `missing`.
+            if path.extension().map(|e| e != "md").unwrap_or(true) {
+                others.insert(rp);
+                continue;
+            }
             let content = match std::fs::read_to_string(path) {
                 Ok(c) => c,
                 Err(e) => {
@@ -249,9 +292,9 @@ impl Store {
                 }
             };
             let (mtime, size) = fs_meta(path);
-            out.push((rp, content, mtime, size));
+            docs.push((rp, content, mtime, size));
         }
-        Ok(out)
+        Ok((docs, others))
     }
 
     // --- síntesis / agregados (SQL == core, verificado por paridad) -------
@@ -317,7 +360,7 @@ impl Store {
 impl DocumentStore for Store {
     fn paths(&self) -> Vec<RelPath> {
         let conn = self.conn.lock().unwrap();
-        let mut stmt = match conn.prepare("SELECT path FROM files ORDER BY path") {
+        let mut stmt = match conn.prepare("SELECT path FROM documents ORDER BY path") {
             Ok(s) => s,
             Err(_) => return Vec::new(),
         };
@@ -334,12 +377,57 @@ impl DocumentStore for Store {
     fn raw(&self, path: &RelPath) -> Option<String> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
-            "SELECT raw FROM files WHERE path = ?1",
+            "SELECT raw FROM documents WHERE path = ?1",
             [path.as_str()],
             |r| r.get::<_, String>(0),
         )
         .ok()
     }
+}
+
+/// Reescribe la tabla `other_files` con el conjunto dado (los ficheros de proyecto no-`.md`). Se
+/// vuelca entera en cada walk completo: es pequeña y así el inventario no arrastra ficheros ya
+/// borrados.
+fn write_other_files(
+    tx: &rusqlite::Transaction,
+    others: &std::collections::BTreeSet<RelPath>,
+) -> Result<(), StoreError> {
+    tx.execute("DELETE FROM other_files", [])?;
+    for p in others {
+        tx.execute(
+            "INSERT OR IGNORE INTO other_files (path) VALUES (?1)",
+            [p.as_str()],
+        )?;
+    }
+    Ok(())
+}
+
+/// Reconstruye el [`Inventory`] desde la cache: los documentos indexados + los `other_files`
+/// conocidos, más `current` (el documento que se está upserteando, que quizá aún no esté en la
+/// tabla). Es la vista del workspace que usa un upsert incremental para clasificar sus enlaces.
+fn build_inventory_from_db(conn: &Connection, current: &RelPath) -> Result<Inventory, StoreError> {
+    let mut documents: std::collections::BTreeSet<RelPath> = std::collections::BTreeSet::new();
+    {
+        let mut stmt = conn.prepare("SELECT path FROM documents")?;
+        let iter = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        for s in iter {
+            if let Ok(rp) = RelPath::new(&s?) {
+                documents.insert(rp);
+            }
+        }
+    }
+    documents.insert(current.clone());
+    let mut others: std::collections::BTreeSet<RelPath> = std::collections::BTreeSet::new();
+    {
+        let mut stmt = conn.prepare("SELECT path FROM other_files")?;
+        let iter = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        for s in iter {
+            if let Ok(rp) = RelPath::new(&s?) {
+                others.insert(rp);
+            }
+        }
+    }
+    Ok(Inventory::new(documents, others))
 }
 
 /// Abre la conexión y migra el esquema. El check de `user_version` va ANTES de crear el DDL
@@ -368,7 +456,7 @@ fn open_and_migrate(db: &Path) -> Result<Connection, StoreError> {
 fn current_hash(conn: &Connection, path: &RelPath) -> Result<Option<Vec<u8>>, StoreError> {
     Ok(conn
         .query_row(
-            "SELECT hash FROM files WHERE path = ?1",
+            "SELECT content_hash FROM documents WHERE path = ?1",
             [path.as_str()],
             |r| r.get::<_, Vec<u8>>(0),
         )
@@ -381,7 +469,7 @@ fn current_hash_tx(
 ) -> Result<Option<Vec<u8>>, StoreError> {
     Ok(tx
         .query_row(
-            "SELECT hash FROM files WHERE path = ?1",
+            "SELECT content_hash FROM documents WHERE path = ?1",
             [path.as_str()],
             |r| r.get::<_, Vec<u8>>(0),
         )
@@ -389,7 +477,7 @@ fn current_hash_tx(
 }
 
 fn cached_paths(conn: &Connection) -> Result<std::collections::BTreeSet<RelPath>, StoreError> {
-    let mut stmt = conn.prepare("SELECT path FROM files")?;
+    let mut stmt = conn.prepare("SELECT path FROM documents")?;
     let iter = stmt.query_map([], |r| r.get::<_, String>(0))?;
     let mut out = std::collections::BTreeSet::new();
     for s in iter {

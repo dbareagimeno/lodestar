@@ -40,7 +40,7 @@ fn rows_to_relpaths(
 /// plegado Unicode de mayúsculas) sería un segundo algoritmo divergente, justo lo que prohíbe el
 /// invariante #3.
 fn link_diagnostics(conn: &Connection) -> Result<Vec<(RelPath, Vec<Check>)>, StoreError> {
-    let mut stmt = conn.prepare("SELECT path, raw FROM files ORDER BY path")?;
+    let mut stmt = conn.prepare("SELECT path, raw FROM documents ORDER BY path")?;
     let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
     let mut files = FileMap::new();
     for row in rows {
@@ -73,7 +73,7 @@ fn link_diagnostics(conn: &Connection) -> Result<Vec<(RelPath, Vec<Check>)>, Sto
 pub(crate) fn hard_fail(conn: &Connection) -> Result<usize, StoreError> {
     let mut con_error: std::collections::BTreeSet<RelPath> = rows_to_relpaths(
         conn,
-        "SELECT DISTINCT path FROM diagnostics WHERE level = 'err' ORDER BY path",
+        "SELECT DISTINCT document_path FROM diagnostics WHERE severity = 'err' ORDER BY document_path",
         &[],
     )?
     .into_iter()
@@ -92,7 +92,7 @@ pub(crate) fn hard_fail(conn: &Connection) -> Result<usize, StoreError> {
 /// `warn_count` = nº total de checks `Warn` (suma sobre ficheros), materializados + sintetizados.
 pub(crate) fn warn_count(conn: &Connection) -> Result<usize, StoreError> {
     let n: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM diagnostics WHERE level = 'warn'",
+        "SELECT COUNT(*) FROM diagnostics WHERE severity = 'warn'",
         [],
         |r| r.get(0),
     )?;
@@ -106,42 +106,50 @@ pub(crate) fn warn_count(conn: &Connection) -> Result<usize, StoreError> {
 
 /// Todos los documentos del workspace, en orden estable (E16-H02: ningún basename queda fuera).
 pub(crate) fn documents(conn: &Connection) -> Result<Vec<RelPath>, StoreError> {
-    rows_to_relpaths(conn, "SELECT path FROM files ORDER BY path", &[])
+    rows_to_relpaths(conn, "SELECT path FROM documents ORDER BY path", &[])
 }
 
-/// Backlinks de un documento (`inn[path]`): quien lo enlaza, venga de donde venga.
+/// Backlinks de un documento (`incoming[path]`): quien lo enlaza, venga de donde venga.
+///
+/// Solo las **aristas del grafo** (`is_edge = 1`): un enlace externo o a un fichero del proyecto no
+/// es un entrante. La forma es la del store v1 —`source_path`/`target_path` sustituyen a `src`/`dst`—
+/// y el JOIN con `documents` restringe a destinos que existen, como antes.
 pub(crate) fn backlinks(conn: &Connection, path: &RelPath) -> Result<Vec<RelPath>, StoreError> {
     rows_to_relpaths(
         conn,
-        r#"SELECT DISTINCT l.src
-           FROM links l JOIN files f ON f.path = l.dst
-           WHERE l.dst = ?1
-           ORDER BY l.src"#,
+        r#"SELECT DISTINCT l.source_path
+           FROM links l JOIN documents f ON f.path = l.target_path
+           WHERE l.target_path = ?1 AND l.is_edge = 1
+           ORDER BY l.source_path"#,
         &[&path.as_str()],
     )
 }
 
 /// Aislados (`Analysis::isolated`, `§20.7`): documentos sin enlaces internos entrantes **ni**
-/// salientes. Es la misma definición del core — la paridad lo verifica.
+/// salientes. Es la misma definición del core — la paridad lo verifica. El filtro `is_edge = 1` es
+/// esencial ahora que `links` guarda TODAS las clases: un documento con solo enlaces externos sigue
+/// estando aislado.
 pub(crate) fn isolated(conn: &Connection) -> Result<Vec<RelPath>, StoreError> {
     rows_to_relpaths(
         conn,
-        r#"SELECT f.path FROM files f
-           WHERE NOT EXISTS (SELECT 1 FROM links l WHERE l.dst = f.path)
-             AND NOT EXISTS (SELECT 1 FROM links o WHERE o.src = f.path)
+        r#"SELECT f.path FROM documents f
+           WHERE NOT EXISTS (SELECT 1 FROM links l WHERE l.target_path = f.path AND l.is_edge = 1)
+             AND NOT EXISTS (SELECT 1 FROM links o WHERE o.source_path = f.path AND o.is_edge = 1)
            ORDER BY f.path"#,
         &[],
     )
 }
 
-/// Destinos colgantes (ghosts): enlaces a un `.md` que no existe en el workspace.
+/// Destinos colgantes (ghosts): aristas del grafo (`is_edge = 1`) hacia un documento que no existe.
+/// El `is_edge = 1` descarta los `workspaceFile` (existen, pero no son documentos) y los destinos
+/// sin path.
 pub(crate) fn dangling(conn: &Connection) -> Result<Vec<RelPath>, StoreError> {
     rows_to_relpaths(
         conn,
-        r#"SELECT DISTINCT l.dst
-           FROM links l LEFT JOIN files f ON f.path = l.dst
-           WHERE f.path IS NULL
-           ORDER BY l.dst"#,
+        r#"SELECT DISTINCT l.target_path
+           FROM links l LEFT JOIN documents f ON f.path = l.target_path
+           WHERE l.is_edge = 1 AND f.path IS NULL
+           ORDER BY l.target_path"#,
         &[],
     )
 }
@@ -158,11 +166,11 @@ pub(crate) fn blast_radius(
         r#"WITH RECURSIVE br(path, d) AS (
                SELECT ?1, 0
                UNION
-               SELECT l.src, br.d + 1
+               SELECT l.source_path, br.d + 1
                FROM links l
-               JOIN br ON l.dst = br.path
-               JOIN files f ON f.path = l.dst
-               WHERE br.d < ?2
+               JOIN br ON l.target_path = br.path
+               JOIN documents f ON f.path = l.target_path
+               WHERE l.is_edge = 1 AND br.d < ?2
            )
            SELECT DISTINCT path FROM br ORDER BY path"#,
         &[&root.as_str(), &depth],
@@ -190,7 +198,7 @@ pub(crate) fn search_substring(
     needle: &str,
 ) -> Result<Vec<RelPath>, StoreError> {
     let needle_lower = needle.to_lowercase();
-    let mut stmt = conn.prepare("SELECT path, raw FROM files ORDER BY path")?;
+    let mut stmt = conn.prepare("SELECT path, raw FROM documents ORDER BY path")?;
     let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
     let mut out = Vec::new();
     for row in rows {

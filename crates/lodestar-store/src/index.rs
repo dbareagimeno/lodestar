@@ -1,13 +1,14 @@
 //! Motor de indexación: extracción de filas desde el core y upsert/delete transaccional
-//! (`ARCHITECTURE.md §5`). El store **no reimplementa checks**: los diagnostics locales salen
-//! de `core::analyze`; los de enlace (no locales) se **sintetizan** al leer (ver `synth`).
+//! (`ARCHITECTURE.md §5`, store v2 `§20.12`). El store **no reimplementa checks**: los diagnostics
+//! locales salen de `core::analyze`; los de enlace (no locales) se **sintetizan** al leer (ver
+//! `synth`). La clasificación de enlaces (`target_kind`) y la metadata (`walk`) son proyecciones de
+//! la única verdad del core, nunca un segundo navegador (invariante #3).
 
 use rusqlite::{params, Transaction};
 
 use lodestar_core::links;
 use lodestar_core::model;
-use lodestar_core::types::{CheckCode, FileMap, Inventory, RelPath, Severity};
-use lodestar_core::DocumentSet;
+use lodestar_core::types::{CheckCode, Inventory, LinkTarget, RelPath, Severity};
 
 use crate::error::StoreError;
 
@@ -25,16 +26,13 @@ pub(crate) fn es_de_enlace(code: CheckCode) -> bool {
 
 /// Diagnostics **locales** de un fichero (todos menos los de enlace, que se sintetizan al leer).
 ///
-/// `ORPHAN` desapareció del filtro con E16-H02: el core ya no lo emite (el aislamiento es una
-/// propiedad del grafo, no un diagnóstico). E17-H03 sustituyó el filtro de `LINK-STUB` por el de
-/// la familia entera de enlaces.
-///
 /// Se computan con el core (autoridad) sobre un workspace de un solo fichero: como los checks
-/// locales dependen solo del contenido propio, el resultado es idéntico al del workspace completo.
+/// locales dependen solo del contenido propio, el resultado —incluido el `range`— es idéntico al
+/// del workspace completo.
 fn local_diagnostics(path: &RelPath, raw: &str) -> Vec<lodestar_core::types::Check> {
-    let mut fm = FileMap::new();
+    let mut fm = lodestar_core::types::FileMap::new();
     fm.insert(path.clone(), raw.to_string());
-    let doc_set = DocumentSet::from_files(fm);
+    let doc_set = lodestar_core::DocumentSet::from_files(fm);
     doc_set
         .analyze()
         .diagnostics
@@ -46,7 +44,8 @@ fn local_diagnostics(path: &RelPath, raw: &str) -> Vec<lodestar_core::types::Che
         .collect()
 }
 
-fn level_str(level: Severity) -> &'static str {
+/// El valor de wire de un [`Severity`] (`§20.9`), que es la columna `diagnostics.severity`.
+fn severity_str(level: Severity) -> &'static str {
     match level {
         Severity::Pass => "pass",
         Severity::Info => "info",
@@ -55,142 +54,187 @@ fn level_str(level: Severity) -> &'static str {
     }
 }
 
-/// Extrae las etiquetas (solo si `tags` es una lista; escalares → string).
-fn extract_tags(fm: &lodestar_core::types::ParsedFrontmatter) -> Vec<String> {
-    match fm.get_key("tags") {
-        Some(serde_yaml::Value::Sequence(items)) => items
-            .iter()
-            .filter_map(|v| match v {
-                serde_yaml::Value::String(s) => Some(s.clone()),
-                serde_yaml::Value::Number(n) => Some(n.to_string()),
-                serde_yaml::Value::Bool(b) => Some(b.to_string()),
-                _ => None,
-            })
-            .collect(),
-        _ => Vec::new(),
+/// El `value_type` de un valor YAML: el **catálogo cerrado de 6** de `§20.8` (`string`, `number`,
+/// `boolean`, `null`, `array`, `object`). Un valor con tag YAML (`!Foo x`) se clasifica por su
+/// valor interior — la etiqueta no cambia la forma del dato.
+fn value_type(v: &serde_yaml::Value) -> &'static str {
+    match v {
+        serde_yaml::Value::Null => "null",
+        serde_yaml::Value::Bool(_) => "boolean",
+        serde_yaml::Value::Number(_) => "number",
+        serde_yaml::Value::String(_) => "string",
+        serde_yaml::Value::Sequence(_) => "array",
+        serde_yaml::Value::Mapping(_) => "object",
+        serde_yaml::Value::Tagged(t) => value_type(&t.value),
     }
 }
 
-/// Borra todas las filas materializadas de un path (en todas las tablas).
+/// El discriminante serde de un [`LinkTarget`] (`document`, `workspaceFile`, `externalUri`,
+/// `selfAnchor`, `missing`, `escapesWorkspace`): la etiqueta `kind` que el propio enum define para
+/// el wire. La columna `links.target_kind` es la **proyección** de esa clasificación del core, no un
+/// vocabulario paralelo de la cache (invariante #3).
+fn target_kind(target: &LinkTarget) -> String {
+    serde_json::to_value(target)
+        .ok()
+        .and_then(|v| v.get("kind").and_then(|k| k.as_str()).map(str::to_string))
+        .unwrap_or_default()
+}
+
+/// El path de destino sin fragmento (la columna `links.target_path`), o `None` para los destinos
+/// sin path (externo, anchor propio, escape).
+fn target_path(target: &LinkTarget) -> Option<String> {
+    match target {
+        LinkTarget::Document(p) | LinkTarget::WorkspaceFile(p) | LinkTarget::Missing(p) => {
+            Some(p.as_str().to_string())
+        }
+        LinkTarget::ExternalUri(_) | LinkTarget::SelfAnchor(_) | LinkTarget::EscapesWorkspace => {
+            None
+        }
+    }
+}
+
+/// ¿El enlace apunta a algo que **existe** en el workspace? Solo un documento o un fichero del
+/// proyecto son destinos concretos presentes; un `missing`, un escape, un anchor sin verificar o
+/// una URI externa (que el motor no resuelve) cuentan como no resueltos. Los dos casos que la
+/// historia fija (`document` → resuelto, `missing` → no) caen aquí sin ambigüedad.
+fn is_resolved(target: &LinkTarget) -> bool {
+    matches!(
+        target,
+        LinkTarget::Document(_) | LinkTarget::WorkspaceFile(_)
+    )
+}
+
+/// Borra todas las filas materializadas de un path (en todas las tablas de documento).
 pub(crate) fn delete_file(tx: &Transaction, path: &RelPath) -> Result<(), StoreError> {
     let p = path.as_str();
-    tx.execute("DELETE FROM files WHERE path = ?1", params![p])?;
-    tx.execute("DELETE FROM links WHERE src = ?1", params![p])?;
-    tx.execute("DELETE FROM tags WHERE path = ?1", params![p])?;
-    tx.execute("DELETE FROM diagnostics WHERE path = ?1", params![p])?;
+    tx.execute("DELETE FROM documents WHERE path = ?1", params![p])?;
+    tx.execute("DELETE FROM metadata WHERE document_path = ?1", params![p])?;
+    tx.execute("DELETE FROM links WHERE source_path = ?1", params![p])?;
+    tx.execute(
+        "DELETE FROM diagnostics WHERE document_path = ?1",
+        params![p],
+    )?;
     tx.execute("DELETE FROM files_fts WHERE path = ?1", params![p])?;
     Ok(())
 }
 
-/// Upsert de un fichero: borra sus filas previas e inserta las nuevas (files/links/tags/diagnostics/fts).
+/// Upsert de un documento: borra sus filas previas e inserta las nuevas
+/// (documents/metadata/links/diagnostics/fts).
+///
+/// `inventory` es el inventario del workspace (documentos + `other_files`) con el que se resuelven y
+/// clasifican los enlaces: es lo que distingue un `workspaceFile` de un `missing` (E18-H02). Lo
+/// aporta el llamante —fresco del disco en un rebuild, reconstruido de la cache en un upsert
+/// incremental— porque la clasificación de un enlace depende del workspace entero, no solo del
+/// documento que se indexa.
 pub(crate) fn upsert_file(
     tx: &Transaction,
     path: &RelPath,
     raw: &str,
     mtime: i64,
     size: i64,
+    inventory: &Inventory,
 ) -> Result<(), StoreError> {
     delete_file(tx, path)?;
 
     let parsed = model::parse_file(path.as_str(), raw);
-    let fm = parsed.frontmatter.clone().unwrap_or_default();
+    let fm = parsed.frontmatter.clone();
     let hash = blake3::hash(raw.as_bytes());
-    // La cache materializa el frontmatter ARBITRARIO tal cual (E16-H01): el `value` YAML entero,
-    // no una proyección de campos conocidos.
-    let fm_json = serde_json::to_string(&fm.value).unwrap_or_else(|_| "{}".to_string());
+    // El título DERIVADO (`§20.4`): frontmatter.title → primer H1 → nombre del fichero. No es el
+    // campo `title` del usuario (que sigue siendo metadata como cualquiera).
+    let title = model::derived_title(fm.as_ref(), &parsed.body, path);
+    // La cache materializa el frontmatter ARBITRARIO tal cual (E16-H01): el `value` YAML entero.
+    let fm_json = fm
+        .as_ref()
+        .map(|f| serde_json::to_string(&f.value).unwrap_or_else(|_| "{}".to_string()))
+        .unwrap_or_else(|| "{}".to_string());
     let p = path.as_str();
 
     tx.execute(
-        r#"INSERT INTO files
-           (path, type, title, description, status, resource,
-            frontmatter_json, body, raw, hash, mtime, size)
-           VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)"#,
+        r#"INSERT INTO documents
+           (path, title, body, raw, frontmatter_json, content_hash, mtime, size)
+           VALUES (?1,?2,?3,?4,?5,?6,?7,?8)"#,
         params![
             p,
-            fm.get_text("type"),
-            fm.get_text("title"),
-            fm.get_text("description"),
-            fm.get_text("status"),
-            fm.get_text("resource"),
-            fm_json,
+            title,
             parsed.body,
             raw,
+            fm_json,
             hash.as_bytes().as_slice(),
             mtime,
             size,
         ],
     )?;
 
+    // FTS5: `title` derivado + `description` (valor textual de esa clave, si la hay) + `body`. El
+    // rediseño sin campos privilegiados es E18-H03; aquí solo es un acelerador.
     tx.execute(
         "INSERT INTO files_fts (path, title, description, body) VALUES (?1,?2,?3,?4)",
         params![
             p,
-            fm.get_text("title").unwrap_or_default(),
-            fm.get_text("description").unwrap_or_default(),
+            title,
+            fm.as_ref()
+                .and_then(|f| f.get_text("description"))
+                .unwrap_or_default(),
             parsed.body,
         ],
     )?;
 
-    // Enlaces salientes: SIEMPRE del cuerpo, para cualquier documento (E16-H02 — el core hace lo
-    // mismo desde `compute_analysis`, sin ramas por basename).
-    //
-    // Se materializan las **aristas del grafo**: los destinos internos (documentos y fantasmas),
-    // con su path ya normalizado, que es lo que consultan `backlinks`/`isolated`/`dangling`/
-    // `blast_radius`. Un enlace externo, un anchor propio o uno a un fichero del proyecto no
-    // conectan con ningún documento y no son filas de esta tabla (`§20.7`). El inventario es
-    // irrelevante para el path resuelto —`Document` y `Missing` llevan el mismo destino
-    // normalizado—, así que basta con el fichero que se está indexando: la extracción sigue siendo
-    // por-fichero e incremental.
-    //
-    // Con el inventario vacío TODO destino interno se resuelve `Missing`, así que aquí el filtro de
-    // `internal_path` se aplica por extensión (`RelPath::is_markdown`). Coincide con el core
-    // mientras los documentos sean `.md`, que es lo que descubre la política por defecto
-    // (`discovery.include = **/*.md`); un `include` que admitiera otras extensiones haría que la
-    // cache perdiera esas aristas mientras el core (que sí tiene inventario) las conserva. Es el
-    // precio de indexar fichero a fichero, y la cache es derivada y desechable: cuando podrían
-    // discrepar, **gana el core** (invariante #3).
-    let inventario = Inventory::default();
-    let mut vistos: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-    for raw_link in links::extract_links(&parsed.body) {
-        let resuelto = links::resolve(&raw_link, path, &inventario);
-        let Some(dst) = resuelto.target.internal_path() else {
-            continue;
-        };
-        // Una arista es única por (src, dst, href): enlazar dos veces con el MISMO href no
-        // duplica la fila (la tabla es la adyacencia, no la lista de enlaces del documento).
-        if !vistos.insert(format!("{dst}\u{0}{}", resuelto.href)) {
-            continue;
+    // Metadata genérica: una fila por propiedad direccionable del frontmatter (`walk`, E18-H01),
+    // mapas intermedios incluidos y listas como hoja. `walk` ES la única verdad de acceso: la cache
+    // nunca navega el `Value` por su cuenta (invariante #3).
+    if let Some(f) = fm.as_ref() {
+        for (field_path, valor) in f.walk() {
+            let value_json = serde_json::to_string(
+                &serde_json::to_value(valor).unwrap_or(serde_json::Value::Null),
+            )
+            .unwrap_or_else(|_| "null".to_string());
+            tx.execute(
+                "INSERT INTO metadata (document_path, field_path, value_json, value_type) \
+                 VALUES (?1,?2,?3,?4)",
+                params![p, field_path.to_string(), value_json, value_type(valor)],
+            )?;
         }
+    }
+
+    // Enlaces: TODOS los del cuerpo, en orden de aparición, con su clasificación (`§20.6`). A
+    // diferencia del store v1 —que solo guardaba las aristas internas resueltas— aquí se materializa
+    // cada enlace con su `target_kind`, de modo que la cache puede responder por externos, anchors y
+    // ficheros del proyecto. `is_edge` (= `internal_path().is_some()`) marca las aristas del grafo:
+    // lo computa el core para no reimplementar `is_markdown` en SQL, y es lo que filtran las
+    // consultas de grafo de `synth` (backlinks/aislados/colgantes/blast-radius).
+    for raw_link in links::extract_links(&parsed.body) {
+        let resuelto = links::resolve(&raw_link, path, inventory);
         tx.execute(
-            "INSERT INTO links (src, dst, href) VALUES (?1,?2,?3)",
-            params![p, dst.as_str(), resuelto.href],
+            r#"INSERT INTO links
+               (source_path, raw_href, target_kind, target_path, fragment, resolved, is_edge)
+               VALUES (?1,?2,?3,?4,?5,?6,?7)"#,
+            params![
+                p,
+                resuelto.href,
+                target_kind(&resuelto.target),
+                target_path(&resuelto.target),
+                resuelto.fragment,
+                is_resolved(&resuelto.target) as i64,
+                resuelto.target.internal_path().is_some() as i64,
+            ],
         )?;
     }
 
-    // Etiquetas.
-    for tag in extract_tags(&fm) {
-        tx.execute(
-            "INSERT INTO tags (path, tag) VALUES (?1, ?2)",
-            params![p, tag],
-        )?;
-    }
-
-    // Diagnostics locales (el core es la autoridad; los de enlace se sintetizan al leer).
+    // Diagnostics locales (el core es la autoridad; los de enlace se sintetizan al leer). `range` va
+    // serializado a `range_json` (E18-H02), o `NULL` si el diagnóstico no conoce su posición.
     for check in local_diagnostics(path, raw) {
-        let targets: Vec<String> = check
-            .targets
-            .iter()
-            .map(|t| t.as_str().to_string())
-            .collect();
-        let targets_json = serde_json::to_string(&targets).unwrap_or_else(|_| "[]".to_string());
+        let range_json = check
+            .range
+            .map(|r| serde_json::to_string(&r).unwrap_or_else(|_| "null".to_string()));
         tx.execute(
-            "INSERT INTO diagnostics (path, code, level, msg, targets_json) VALUES (?1,?2,?3,?4,?5)",
+            "INSERT INTO diagnostics (document_path, code, severity, message, range_json) \
+             VALUES (?1,?2,?3,?4,?5)",
             params![
                 p,
                 check.code.as_str(),
-                level_str(check.level),
+                severity_str(check.level),
                 check.msg,
-                targets_json,
+                range_json,
             ],
         )?;
     }

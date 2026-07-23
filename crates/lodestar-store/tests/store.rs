@@ -421,11 +421,13 @@ fn esquema_viejo_con_misma_version_se_reconstruye() {
     assert!(store.documents().unwrap().contains(&rp("a.md")));
     assert!(store.documents().unwrap().contains(&rp("b.md")));
 
-    // Y la tabla `files` reconstruida ya tiene la columna `hash`.
+    // Y la tabla `documents` reconstruida ya tiene la columna `content_hash` (store v2, E18-H01:
+    // `files.hash` → `documents.content_hash`).
     let conn = rusqlite::Connection::open(db_dir.join("index.db")).unwrap();
     assert!(
-        conn.prepare("SELECT hash FROM files LIMIT 0").is_ok(),
-        "la tabla files debe tener la columna hash tras el rebuild limpio"
+        conn.prepare("SELECT content_hash FROM documents LIMIT 0")
+            .is_ok(),
+        "la tabla documents debe tener la columna content_hash tras el rebuild limpio"
     );
 }
 

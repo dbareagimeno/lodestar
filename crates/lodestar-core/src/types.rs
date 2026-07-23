@@ -581,7 +581,10 @@ impl ParsedFrontmatter {
     ///
     /// La raíz no se emite: [`FieldPath`] es no vacío por construcción.
     pub fn walk(&self) -> Vec<(FieldPath, &serde_yaml::Value)> {
-        todo!("E18-H01 (fase roja): recorrido recursivo de la metadata direccionable")
+        let mut out = Vec::new();
+        let mut prefijo: Vec<String> = Vec::new();
+        walk_mapping(&self.value, &mut prefijo, &mut out);
+        out
     }
 
     /// Pares clave→valor de primer nivel, en **orden de aparición**. Las claves se rinden a texto
@@ -591,6 +594,44 @@ impl ParsedFrontmatter {
             .iter()
             .filter_map(|(k, v)| scalar_text(k).map(|k| (k, v)))
             .collect()
+    }
+}
+
+/// Recorre en profundidad el mapa `valor`, acumulando en `out` un par `(FieldPath, &Value)` por
+/// cada propiedad **direccionable por [`ParsedFrontmatter::get`]**, con `prefijo` como camino de
+/// segmentos hasta este nivel. Reflejo exacto de [`lookup`] (la única verdad de acceso): de ahí se
+/// sigue el invariante rector `get(path) == Some(value)` para todo par emitido.
+fn walk_mapping<'a>(
+    valor: &'a serde_yaml::Value,
+    prefijo: &mut Vec<String>,
+    out: &mut Vec<(FieldPath, &'a serde_yaml::Value)>,
+) {
+    let Some(mapa) = valor.as_mapping() else {
+        return;
+    };
+    // Dedup por el TEXTO de la clave dentro de este mismo mapa: si dos claves rinden al mismo
+    // texto (`1:` y `"1":`), `get`/`lookup` resuelve la primera, así que solo esa se emite.
+    let mut vistos: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for (clave, hijo) in mapa {
+        // Una clave no escalar (lista/mapa como clave, legales en YAML) no es direccionable.
+        let Some(texto) = scalar_text(clave) else {
+            continue;
+        };
+        if !vistos.insert(texto.clone()) {
+            continue;
+        }
+        prefijo.push(texto);
+        // Un segmento vacío (clave `""`) no construye un `FieldPath` válido: ni se emite el par ni
+        // se desciende por su subárbol (sería inalcanzable por `get`). El resto sí.
+        if let Ok(path) = FieldPath::from_segments(prefijo.iter().cloned()) {
+            out.push((path, hijo));
+            // Se desciende SOLO por mapas: una lista es una hoja (su valor entero viaja en su par;
+            // `FieldPath` no direcciona posiciones).
+            if hijo.is_mapping() {
+                walk_mapping(hijo, prefijo, out);
+            }
+        }
+        prefijo.pop();
     }
 }
 
