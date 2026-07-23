@@ -57,6 +57,33 @@ planificación); **E12** depende de **E11** (el impacto alimenta el riesgo del p
 planes de **E12**; **E14** cierra. Ninguna historia del giro está **[BLOQUEADA]**: las decisiones de diseño
 (D0–D6/D-CheckCode/D-check) se ratificaron en la puerta 1 (`DECISIONES.md §0`, `ARCHITECTURE.md §19`).
 
+## Mapa de épicas de la migración a Markdown universal (alineadas con `ARCHITECTURE.md §20.14`)
+
+> Migración de **OKF a workspaces Markdown universales** (`ARCHITECTURE.md §20`, ratificada
+> 2026-07-23; fuente: `docs/REFACTOR_PHASE_2.md`). Lodestar deja de exigir un formato documental
+> propio y opera sobre cualquier red de `.md` de un proyecto. **v0.3.0 es incompatible con v0.2.x.**
+
+| Épica | PRs `§20.14` | Área | Doc |
+|---|---|---|---|
+| **E15** — Workspace universal | 0 + 1 | Retirada de vcs/generadores/init-zip/prototipo · `cwd` como root · descubrimiento recursivo · config opcional | [epica-15-workspace-universal.md](epica-15-workspace-universal.md) |
+| **E16** — Modelo documental genérico | 2 | `ParsedFrontmatter` YAML arbitrario · sin ficheros reservados · título derivado · patch quirúrgico · diagnósticos mínimos · `Concept`→`Document` | [epica-16-modelo-documental.md](epica-16-modelo-documental.md) |
+| **E17** — Enlaces y grafo universal | 3 + 4 | Parser de enlaces · `LinkTarget` · diagnósticos de enlace · `Analysis` nueva · superficie de grafo | [epica-17-enlaces-grafo.md](epica-17-enlaces-grafo.md) |
+| **E18** — Store v2 | 5 | DDL nuevo · metadata anidada · links genéricos · cold rebuild · paridad core/store | *(pendiente)* |
+| **E19** — Lenguaje de consulta | 6 | Parser · AST · type checking · namespaces · filtro JSON equivalente | *(pendiente)* |
+| **E20** — Inspección y validación genéricas | 7 + 8 | `metadata_inspect` (retira `core::schema`) · política `rejectNewErrors`/`allowExistingErrors` | *(pendiente)* |
+| **E21** — Contrato MCP y transacciones genéricas | 9 + 10 | Contrato nuevo · 8 operaciones universales · selecciones masivas por consulta | *(pendiente)* |
+| **E22** — Migración y limpieza pública | 11 | `migrate-from-okf --dry-run` · docs · README · publicación incompatible | *(pendiente)* |
+
+**Orden de construcción (E15–E22)**: estrictamente secuencial. **E15 es prerrequisito de todo** (sin
+descubrimiento universal no hay nada que modelar); **E16** cambia el modelo documental y arrastra los
+diagnósticos; **E17** depende de E16 (los enlaces se extraen de documentos ya genéricos); **E18** y
+**E19** consumen el modelo y el grafo de E16/E17; **E20** retira `core::schema`; **E21** cierra la
+frontera; **E22** publica.
+
+**Nota sobre el prototipo**: desde `E15-H04` el prototipo JS (`prototype/index.html`) **deja de ser la
+spec de comportamiento** y el arnés diferencial se retira. La spec de la migración es
+`docs/REFACTOR_PHASE_2.md`; `prototype/` queda como referencia histórica de v0.2.x.
+
 ## Formato de una historia
 
 Cada historia tiene un identificador estable `E<épica>-H<nn>` y esta plantilla:
