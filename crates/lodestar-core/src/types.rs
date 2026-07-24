@@ -1536,9 +1536,9 @@ pub struct ChangeReceipt {
 //  de `§4.3`/`query.rs`, que se retira en E19-H05).
 // ---------------------------------------------------------------------------
 //
-// **STUBS de la fase ROJA de E19-H01**: aquí solo se congela la FORMA del AST y de sus tipos de
-// apoyo (el contrato de wire que toda E19 hereda). La lógica del evaluador vive en
-// [`crate::eval::evaluate`] (hoy `todo!()`); el parser textual es E19-H02 y el filtro JSON E19-H03.
+// Aquí se define solo la FORMA del AST y de sus tipos de apoyo (el contrato de wire que toda E19
+// hereda). La lógica del evaluador vive en [`crate::eval::evaluate`] (E19-H01/H04) y la del parser
+// textual en [`crate::parse::parse`] (E19-H02); el filtro JSON es E19-H03.
 
 /// Un valor literal **tipado** de una consulta: el operando derecho de una [`Expression::Comparison`]
 /// y el argumento de una [`Expression::Function`] (`§20.8`, `§Fase 5 (AST unificado)`).

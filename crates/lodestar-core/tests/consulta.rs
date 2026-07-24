@@ -1072,7 +1072,11 @@ fn namespace_graph_isolated() {
 
     // (1) El namespace de grafo dice la verdad del GRAFO: `aislado.md` está aislado.
     assert_eq!(
-        eval_en(&ds, "aislado.md", &cmp("graph.isolated", Op::Eq, qbool(true))),
+        eval_en(
+            &ds,
+            "aislado.md",
+            &cmp("graph.isolated", Op::Eq, qbool(true))
+        ),
         Ok(true),
         "`graph.isolated = true` casa el documento aislado en el grafo"
     );

@@ -10,8 +10,14 @@
 //! [`crate::types::ParsedFrontmatter::get`] (que devuelve el `serde_yaml::Value` con su tipo),
 //! **nunca** sobre `get_text` (que renderiza a `String` y reintroduciría la coerción).
 //!
-//! **STUB de la fase ROJA de E19-H01**: [`evaluate`] es `todo!()`. Su lógica es la fase verde.
+//! **Namespaces calculados (E19-H04)**: además del frontmatter, una comparación puede leer
+//! `document.path|title|has_frontmatter` (desde el propio documento) y
+//! `graph.backlinks|outgoing_links|dangling_links|isolated` (desde el [`Analysis`]). El resolutor
+//! **sintetiza un `serde_yaml::Value` del tipo natural** de cada propiedad y lo pasa por la **misma**
+//! maquinaria de comparación que el frontmatter, de modo que la regla de tipos de H01 vale igual
+//! (`graph.backlinks = "0"` es `false`, `graph.backlinks >= "x"` es un [`TypeError`]).
 
+use std::borrow::Cow;
 use std::cmp::Ordering;
 
 use crate::types::{
@@ -22,16 +28,16 @@ use crate::types::{
 /// La vista de un documento que el evaluador necesita para resolver una [`Expression`].
 ///
 /// Es una **vista prestada** (no posee nada): se construye por documento al filtrar un workspace.
-/// Lleva de entrada lo justo para E19-H01 (el `frontmatter`, sobre el que van las comparaciones) y
-/// deja la puerta abierta a E19-H04 sin cambiar la firma de [`evaluate`]: `path` y `body` alimentan
-/// el namespace `document.*` (`document.path`/`document.title`/`document.has_frontmatter`) y, junto
-/// al [`Analysis`], el namespace `graph.*` — que **no** se evalúan aquí.
+/// Lleva las comparaciones de frontmatter (el `frontmatter`) y también alimenta los namespaces
+/// calculados de E19-H04 sin cambiar la firma de [`evaluate`]: `path` y `body` resuelven
+/// `document.*` (`document.path`/`document.title`/`document.has_frontmatter`) y, junto al
+/// [`Analysis`], el namespace `graph.*`.
 pub struct EvalDocument<'a> {
-    /// La ruta del documento (identidad para cruzar con [`Analysis`] en E19-H04).
+    /// La ruta del documento (identidad para cruzar con [`Analysis`] en el namespace `graph.*`).
     pub path: &'a RelPath,
     /// El frontmatter parseado, o `None` si el documento no tiene bloque (estado válido, `§20.4`).
     pub frontmatter: Option<&'a ParsedFrontmatter>,
-    /// El cuerpo del documento (para `document.title` en E19-H04).
+    /// El cuerpo del documento (para `document.title`).
     pub body: &'a str,
 }
 
@@ -44,13 +50,8 @@ pub struct EvalDocument<'a> {
 /// - `contains`/`contains_any`/`contains_all` exigen que el campo sea lista (excepción: `contains`
 ///   sobre un string es subcadena); sobre un escalar no string es `Err(TypeError::NotAList)`.
 /// - Un campo **inexistente** en una comparación es `Ok(false)`, nunca error.
-///
-/// `analysis` queda en la firma para el namespace `graph.*` de E19-H04; E19-H01 no lo consulta.
-// `analysis` hoy solo viaja por la recursión de los conectores lógicos (ningún operando hoja lo
-// lee): es deliberado —lo consumirá el evaluador de `graph.*` en E19-H04 sin cambiar esta firma,
-// que es el contrato `evaluate(expr, doc, analysis)`—, así que se silencia el lint en vez de
-// mutilar la firma con un `_analysis`.
-#[allow(clippy::only_used_in_recursion)]
+/// - El primer segmento del campo despacha el namespace: `document.*`/`graph.*` se resuelven de
+///   [`EvalDocument`]/`analysis`; cualquier otro va al frontmatter (E19-H04).
 pub fn evaluate(
     expr: &Expression,
     doc: &EvalDocument<'_>,
@@ -61,7 +62,7 @@ pub fn evaluate(
             field,
             operator,
             value,
-        } => eval_comparison(field, *operator, value, doc),
+        } => eval_comparison(field, *operator, value, doc, analysis),
         Expression::Function { name, arguments } => Ok(eval_function(*name, arguments, doc)),
         // Los conectores lógicos evalúan con cortocircuito: `And` se detiene en la primera rama
         // falsa y `Or` en la primera verdadera, de modo que un error de tipo de una rama posterior
@@ -87,21 +88,24 @@ pub fn evaluate(
     }
 }
 
-/// Evalúa una comparación `campo operador valor` sobre el frontmatter de `doc`.
+/// Evalúa una comparación `campo operador valor` resolviendo el campo por su namespace.
 ///
-/// El acceso va **siempre** por [`ParsedFrontmatter::get`] (el `Value` con su tipo), nunca por
-/// `get_text` (aviso rector de `§20.8`). Un campo **inexistente** cortocircuita a `Ok(false)`
-/// **antes** de tipar: no se puede errar sobre un tipo que no se tiene.
+/// El acceso de frontmatter va **siempre** por [`ParsedFrontmatter::get`] (el `Value` con su tipo),
+/// nunca por `get_text` (aviso rector de `§20.8`); los namespaces `document.*`/`graph.*` sintetizan
+/// un `Value` de su tipo natural y entran por la **misma** maquinaria. Un campo **inexistente**
+/// —incluida una sub-clave de namespace desconocida— cortocircuita a `Ok(false)` **antes** de tipar:
+/// no se puede errar sobre un tipo que no se tiene.
 fn eval_comparison(
     field: &FieldPath,
     operator: ComparisonOperator,
     literal: &QueryValue,
     doc: &EvalDocument<'_>,
+    analysis: &Analysis,
 ) -> Result<bool, TypeError> {
-    let Some(valor) = doc.frontmatter.and_then(|fm| fm.get(field)) else {
+    let Some(resuelto) = resolver_campo(field, doc, analysis) else {
         return Ok(false);
     };
-    let valor = untag(valor);
+    let valor = untag(resuelto.as_ref());
 
     use ComparisonOperator as C;
     match operator {
@@ -112,6 +116,87 @@ fn eval_comparison(
         C::StartsWith | C::EndsWith => Ok(eval_afijo(operator, valor, literal)),
         C::ContainsAny | C::ContainsAll => eval_contains_lista(field, operator, valor, literal),
     }
+}
+
+/// Resuelve el valor de un campo según su namespace (el **primer segmento** del [`FieldPath`], `§20.8`):
+///
+/// - `document.*` → desde el propio [`EvalDocument`] (ruta/título/existencia de bloque).
+/// - `graph.*` → desde el [`Analysis`] (backlinks/salientes/colgantes/aislamiento).
+/// - cualquier otro primer segmento → frontmatter (la abreviatura de `frontmatter.` ya se normalizó
+///   en el parser, `E19-H02`).
+///
+/// El frontmatter se **presta** ([`Cow::Borrowed`]); los namespaces calculados **sintetizan** un
+/// `Value` de su tipo natural ([`Cow::Owned`]) para que la comparación los trate igual que cualquier
+/// valor tipado. `None` = propiedad ausente (una sub-clave de namespace desconocida, `graph.foo`,
+/// también) → la comparación cortocircuita a `Ok(false)`.
+fn resolver_campo<'a>(
+    field: &FieldPath,
+    doc: &EvalDocument<'a>,
+    analysis: &'a Analysis,
+) -> Option<Cow<'a, serde_yaml::Value>> {
+    match field.segments().first().map(String::as_str) {
+        Some("document") => resolver_document(field, doc).map(Cow::Owned),
+        Some("graph") => resolver_graph(field, doc, analysis).map(Cow::Owned),
+        _ => doc
+            .frontmatter
+            .and_then(|fm| fm.get(field))
+            .map(Cow::Borrowed),
+    }
+}
+
+/// Sintetiza el valor de un campo `document.*` (`§20.8`, E19-H04). Exige exactamente dos segmentos
+/// (`document.<clave>`); una sub-clave desconocida es `None`.
+fn resolver_document(field: &FieldPath, doc: &EvalDocument<'_>) -> Option<serde_yaml::Value> {
+    let [_, clave] = field.segments() else {
+        return None;
+    };
+    Some(match clave.as_str() {
+        "path" => serde_yaml::Value::String(doc.path.as_str().to_string()),
+        "title" => serde_yaml::Value::String(crate::model::derived_title(
+            doc.frontmatter,
+            doc.body,
+            doc.path,
+        )),
+        "has_frontmatter" => serde_yaml::Value::Bool(doc.frontmatter.is_some()),
+        _ => return None,
+    })
+}
+
+/// Sintetiza el valor de un campo `graph.*` (`§20.8`, E19-H04) desde el [`Analysis`] real del
+/// workspace. Los contadores son números; `isolated` un booleano. Una sub-clave desconocida es
+/// `None`. `outgoing_links` cuenta las aristas **internas** salientes (la definición canónica de
+/// enlace interno, [`crate::types::LinkTarget::is_internal`]), simétrica con `backlinks`.
+fn resolver_graph(
+    field: &FieldPath,
+    doc: &EvalDocument<'_>,
+    analysis: &Analysis,
+) -> Option<serde_yaml::Value> {
+    let [_, clave] = field.segments() else {
+        return None;
+    };
+    let path = doc.path;
+    Some(match clave.as_str() {
+        "backlinks" => valor_conteo(analysis.incoming.get(path).map_or(0, Vec::len)),
+        "outgoing_links" => valor_conteo(
+            analysis
+                .outgoing
+                .get(path)
+                .map_or(0, |ls| ls.iter().filter(|l| l.target.is_internal()).count()),
+        ),
+        "dangling_links" => {
+            valor_conteo(analysis.dangling.iter().filter(|d| &d.from == path).count())
+        }
+        "isolated" => serde_yaml::Value::Bool(analysis.isolated.contains(path)),
+        _ => return None,
+    })
+}
+
+/// Envuelve un conteo (`usize`) como un `serde_yaml::Value::Number` **entero**, construido por el
+/// mismo camino (`i64`) que un literal numérico de la consulta, de modo que `graph.backlinks = 0`
+/// case por igualdad de tipo y valor sin depender de cómo `serde_yaml::Number` compara enteros de
+/// distinta representación.
+fn valor_conteo(n: usize) -> serde_yaml::Value {
+    serde_yaml::Value::Number((n as i64).into())
 }
 
 /// `has(x)`/`missing(x)`: existencia de la propiedad, **nunca** error de tipo. El argumento nombra
