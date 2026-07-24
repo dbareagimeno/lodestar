@@ -10,7 +10,7 @@
 //! directamente de `rusqlite`/`git2`/`tokio` (invariante #2 de `CLAUDE.md`, verificado por
 //! `cargo tree -p lodestar-app`).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -1274,22 +1274,33 @@ impl App {
             }
         }
 
-        let ops_arr = raw_ops.as_array().ok_or(ErrorCode::InvalidSchema)?;
-
-        // (2)+(3) Control optimista por op y normalización, acumulando en un único change set.
-        let mut normalized: Vec<NormalizedOperation> = Vec::new();
-        for raw in ops_arr {
-            if let Some(expected) = raw.get("expectedRevision").and_then(Value::as_str) {
-                let target = op_target_path(raw)?;
-                let actual = files.get(&target).map(|raw_md| {
-                    DocumentRevision::from_hash(*blake3::hash(raw_md.as_bytes()).as_bytes())
-                });
-                if actual.as_ref().map(|r| r.0.as_str()) != Some(expected) {
-                    return Err(ErrorCode::RevisionConflict);
+        // (2)+(3) Normalización, acumulando en un ÚNICO change set. Dos formas de wire:
+        //   · Array de ops sueltas `[ {op, …}, … ]` (E12-H08), con control optimista por op.
+        //   · Selección masiva `{ selection: {where|filter}, operation: {<op>: {…}} }` (E21-H02):
+        //     la consulta E19 elige documentos del workspace y la operación se expande a una
+        //     `NormalizedOperation` por documento seleccionado, capturando su `DocumentRevision`.
+        let (normalized, captured_revisions): (
+            Vec<NormalizedOperation>,
+            BTreeMap<RelPath, DocumentRevision>,
+        ) = if raw_ops.get("selection").is_some() {
+            expand_selection(&doc_set, raw_ops)?
+        } else {
+            let ops_arr = raw_ops.as_array().ok_or(ErrorCode::InvalidSchema)?;
+            let mut normalized: Vec<NormalizedOperation> = Vec::new();
+            for raw in ops_arr {
+                if let Some(expected) = raw.get("expectedRevision").and_then(Value::as_str) {
+                    let target = op_target_path(raw)?;
+                    let actual = files.get(&target).map(|raw_md| {
+                        DocumentRevision::from_hash(*blake3::hash(raw_md.as_bytes()).as_bytes())
+                    });
+                    if actual.as_ref().map(|r| r.0.as_str()) != Some(expected) {
+                        return Err(ErrorCode::RevisionConflict);
+                    }
                 }
+                normalized.extend(normalize_raw_op(&doc_set, raw)?);
             }
-            normalized.extend(normalize_raw_op(&doc_set, raw)?);
-        }
+            (normalized, BTreeMap::new())
+        };
 
         // (4) DocumentSet hipotético + análisis del plan (todo en memoria, sin escribir).
         let after_files =
@@ -1333,6 +1344,7 @@ impl App {
             risk,
             semantic_diff,
             impact,
+            captured_revisions,
             diagnostics_before: before_report.summary,
             diagnostics_after: after_report.summary,
         };
@@ -2026,10 +2038,25 @@ fn normalize_raw_op(
         "delete" => {
             let path = op_ref_path(op)?;
             let policy = match op.get("inboundLinksPolicy").and_then(Value::as_str) {
+                Some("reject") => InboundLinksPolicy::Reject,
                 Some("retarget") => InboundLinksPolicy::Retarget,
                 Some("remove_links") => InboundLinksPolicy::RemoveLinks,
                 Some("create_stub") => InboundLinksPolicy::CreateStub,
-                _ => InboundLinksPolicy::Reject,
+                // Política ausente: `§Fase 12` exige elegirla EXPLÍCITAMENTE cuando hay algo que
+                // decidir — es decir, cuando el documento tiene enlaces entrantes. No se defaultea
+                // a `reject` en silencio: un `delete` con backlinks y sin política es una op mal
+                // formada (`INVALID_SCHEMA`: falta un campo requerido), DISTINTO del
+                // `INBOUND_LINKS_EXIST` que produce un `reject` explícito con backlinks. Sin
+                // backlinks no hay nada que decidir, así que se permite (borrado limpio).
+                None => {
+                    if doc_set.backlinks(&path).inbound.is_empty() {
+                        InboundLinksPolicy::Reject
+                    } else {
+                        return Err(ErrorCode::InvalidSchema);
+                    }
+                }
+                // Un valor de política no reconocido es una op mal formada.
+                Some(_) => return Err(ErrorCode::InvalidSchema),
             };
             plan::normalize_delete(doc_set, &path, policy).map_err(|e| error_code(&e))
         }
@@ -2044,6 +2071,139 @@ fn normalize_raw_op(
         }
         _ => Err(ErrorCode::InvalidSchema),
     }
+}
+
+/// Expande la forma-objeto de **selección masiva** de `change_plan` (E21-H02, `§Fase 12`):
+///
+/// ```json
+/// { "selection": { "where": "<consulta E19>" | "filter": { … } },
+///   "operation":  { "<op universal>": { <parámetros> } } }
+/// ```
+///
+/// La consulta E19 (`selection.where` textual o `selection.filter` JSON, traducidas al MISMO
+/// [`Expression`] que `knowledge_search`) se evalúa contra **cada** documento del workspace; los que
+/// casan reciben **una** [`NormalizedOperation`] cada uno, expandiendo la `operation` (que codifica el
+/// tipo como CLAVE, `{patch_frontmatter: {…}}`) con ese `path`. Solo se admiten las ops con sentido en
+/// masa (`patch_frontmatter`/`replace_text`/`delete`/`apply_fix`); `create` no aplica a documentos
+/// existentes. Cada documento seleccionado captura además su [`DocumentRevision`] actual (el mismo
+/// blake3 que reporta `knowledge_get`) — el *snapshot de revisiones* de `§Fase 12`.
+///
+/// Una selección que no casa ningún documento devuelve un plan **vacío**, sin error. Un `where`/
+/// `filter` malformado, una `operation` que no es un objeto de una sola clave, o una op no admitida →
+/// `Err(ErrorCode::InvalidSchema)`. Un `TypeError` al evaluar la consulta sobre un documento concreto
+/// lo **excluye** de la selección (no casa), sin abortar el plan — coherente con `knowledge_search`.
+fn expand_selection(
+    doc_set: &DocumentSet,
+    raw: &Value,
+) -> Result<
+    (
+        Vec<NormalizedOperation>,
+        BTreeMap<RelPath, DocumentRevision>,
+    ),
+    ErrorCode,
+> {
+    let selection = raw.get("selection").ok_or(ErrorCode::InvalidSchema)?;
+    let operation = raw.get("operation").ok_or(ErrorCode::InvalidSchema)?;
+
+    let where_expr = selection.get("where").and_then(Value::as_str);
+    let filter = selection.get("filter");
+    let expr = build_selection_expression(where_expr, filter)?;
+
+    let (op_kind, op_params) = single_operation(operation)?;
+
+    let analysis = doc_set.analyze();
+    let files = doc_set.files();
+
+    let mut normalized: Vec<NormalizedOperation> = Vec::new();
+    let mut captured: BTreeMap<RelPath, DocumentRevision> = BTreeMap::new();
+    for path in &analysis.documents {
+        let Some(raw_md) = files.get(path) else {
+            continue;
+        };
+        let parsed = model::parse_file(path.as_str(), raw_md);
+        let doc = EvalDocument {
+            path,
+            frontmatter: parsed.frontmatter.as_ref(),
+            body: &parsed.body,
+        };
+        // Un `TypeError` sobre ESTE documento lo excluye (no casa), sin propagarse al plan entero.
+        if !matches!(evaluate(&expr, &doc, analysis), Ok(true)) {
+            continue;
+        }
+        let raw_op = build_selected_op(op_kind, op_params, path)?;
+        normalized.extend(normalize_raw_op(doc_set, &raw_op)?);
+        captured.insert(
+            path.clone(),
+            DocumentRevision::from_hash(*blake3::hash(raw_md.as_bytes()).as_bytes()),
+        );
+    }
+
+    Ok((normalized, captured))
+}
+
+/// Traduce la consulta de una [`expand_selection`] (`where` textual o `filter` JSON) al [`Expression`]
+/// del core (E19), igual que `knowledge_search`. Exige **al menos** una de las dos (una selección sin
+/// criterio es una op mal formada) y, si vienen ambas, las combina con `and` (intersección).
+/// `Err(ErrorCode::InvalidSchema)` si falta el criterio o alguno es malformado.
+fn build_selection_expression(
+    where_expr: Option<&str>,
+    filter: Option<&Value>,
+) -> Result<Expression, ErrorCode> {
+    let del_where = match where_expr.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(w) => Some(lodestar_core::parse::parse(w).map_err(|_| ErrorCode::InvalidSchema)?),
+        None => None,
+    };
+    let del_filter = match filter {
+        Some(f) => Some(lodestar_core::filter::from_json(f).map_err(|_| ErrorCode::InvalidSchema)?),
+        None => None,
+    };
+    match (del_where, del_filter) {
+        (None, None) => Err(ErrorCode::InvalidSchema),
+        (Some(e), None) | (None, Some(e)) => Ok(e),
+        (Some(w), Some(f)) => Ok(Expression::And(vec![w, f])),
+    }
+}
+
+/// Extrae de la `operation` de una selección masiva su `(tipo, parámetros)`: la op codifica el tipo
+/// como CLAVE (`{patch_frontmatter: {…}}`), así que debe ser un objeto de **exactamente una** clave, y
+/// esa clave una op con sentido en masa. `create` no aplica a una selección de documentos existentes;
+/// `move` tampoco (un solo `to` no puede servir para N documentos). `Err(ErrorCode::InvalidSchema)`
+/// en cualquier otro caso.
+fn single_operation(operation: &Value) -> Result<(&str, &Value), ErrorCode> {
+    let obj = operation.as_object().ok_or(ErrorCode::InvalidSchema)?;
+    if obj.len() != 1 {
+        return Err(ErrorCode::InvalidSchema);
+    }
+    let (kind, params) = obj.iter().next().ok_or(ErrorCode::InvalidSchema)?;
+    match kind.as_str() {
+        "patch_frontmatter" | "replace_text" | "delete" | "apply_fix" => Ok((kind, params)),
+        _ => Err(ErrorCode::InvalidSchema),
+    }
+}
+
+/// Construye la op cruda `{op, ref:{path}, …}` para un documento seleccionado, de forma que
+/// [`normalize_raw_op`] la despache igual que si la hubiera enviado el agente sueltamente. El valor de
+/// `patch_frontmatter` ES el merge-patch (va bajo la clave `patch`); las demás ops llevan sus
+/// parámetros sueltos (`find`/`replace`, `inboundLinksPolicy`, `fixId`…).
+fn build_selected_op(kind: &str, params: &Value, path: &RelPath) -> Result<Value, ErrorCode> {
+    let mut obj = serde_json::Map::new();
+    obj.insert("op".to_string(), Value::String(kind.to_string()));
+    obj.insert(
+        "ref".to_string(),
+        serde_json::json!({ "path": path.as_str() }),
+    );
+    if kind == "patch_frontmatter" {
+        if !params.is_object() {
+            return Err(ErrorCode::InvalidSchema);
+        }
+        obj.insert("patch".to_string(), params.clone());
+    } else {
+        let extra = params.as_object().ok_or(ErrorCode::InvalidSchema)?;
+        for (k, v) in extra {
+            obj.insert(k.clone(), v.clone());
+        }
+    }
+    Ok(Value::Object(obj))
 }
 
 /// Convierte el campo `patch` de una op cruda en un [`FrontmatterPatch`] (merge-patch RFC 7386:
@@ -2147,6 +2307,12 @@ pub struct PlanResult {
     pub semantic_diff: SemanticDiff,
     /// Resumen de impacto (documentos afectados).
     pub impact: PlanImpact,
+    /// Revisiones capturadas por documento seleccionado en una **selección masiva** (E21-H02):
+    /// `path → DocumentRevision` (`"blake3:…"`), una entrada por documento que casó la consulta —
+    /// el *snapshot de revisiones* de `§Fase 12` (query → documentos → snapshot → … → change plan).
+    /// Vacío (`{}`) para la forma de array de operaciones sueltas, que no nace de una selección.
+    #[serde(default)]
+    pub captured_revisions: BTreeMap<RelPath, DocumentRevision>,
     /// Conteo de diagnósticos del workspace ANTES del plan.
     pub diagnostics_before: ValidationSummary,
     /// Conteo de diagnósticos del workspace hipotético DESPUÉS del plan.

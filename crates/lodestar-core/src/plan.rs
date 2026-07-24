@@ -516,14 +516,15 @@ pub fn normalize_replace_body(
 // ---------------------------------------------------------------------------
 
 /// Léxico **textual** del enlace inline `[texto](href "title")`, con el TEXTO en el grupo 1 y el
-/// href en el grupo 2: es lo que permite reescribir el destino o "desenlazar" a texto plano.
+/// href en el grupo 2: es lo que permite "desenlazar" un enlace inline a texto plano.
 ///
 /// No decide **a dónde apunta** un enlace —eso lo hace [`links::resolve`], la única verdad de
 /// resolución del core (E17-H02)—, solo dónde está escrito en el cuerpo para poder sustituirlo.
-/// Es una limitación conocida y acotada: la reescritura solo alcanza a los enlaces inline, no a
-/// las definiciones de un enlace de referencia. La sustitución por el `span` de bytes que ya trae
-/// cada [`crate::types::ResolvedLink`] —que sí las cubriría— es de `move_document` (`§20.11`,
-/// E21); E17 solo migra la **decisión** a la resolución nueva.
+/// Es una limitación conocida y acotada: solo alcanza a los enlaces inline, no a las definiciones
+/// de un enlace de referencia. Desde E21-H03 la reescritura de `move_document` NO la usa —va por el
+/// `span` de bytes de cada [`crate::types::ResolvedLink`] ([`retarget_body_links`]), que sí cubre las
+/// definiciones `[id]: destino`—; esta regex queda solo para el "desenlazado" de `delete remove_links`
+/// ([`remove_inline_links`]), cuya política los tests fijan sobre enlaces inline.
 static LINK_REWRITE_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r#"\[([^\]]*)\]\(([^)\s]+)(?:\s+"[^"]*")?\)"#).unwrap());
 
@@ -597,11 +598,69 @@ fn retarget_href(old_href: &str, source_path: &str, to: &RelPath) -> String {
 /// href externo, un anchor o un destino que escapa del workspace nunca se confunden con el target,
 /// y un enlace al documento afectado se reconoce escrito como se escriba (`./x.md`, `../a/x.md`,
 /// `/x.md`, con `%20`, con fragmento…).
+///
+/// Dos caminos según la acción:
+/// - [`LinkAction::Retarget`] (`move`): reescribe el destino **por el `span` de bytes** de cada
+///   enlace (E21-H03) — así alcanza también las **definiciones** de un enlace de referencia
+///   (`[id]: destino`), no solo los inline.
+/// - [`LinkAction::Remove`] (`delete remove_links`): "desenlaza" a texto plano; la política se fija
+///   sobre enlaces **inline**, así que se resuelve con la sustitución textual de [`LINK_REWRITE_RE`].
 fn rewrite_body_links(
     body: &str,
     source_path: &RelPath,
     target: &RelPath,
     action: &LinkAction,
+    inventory: &Inventory,
+) -> String {
+    match action {
+        LinkAction::Retarget(to) => retarget_body_links(body, source_path, target, to, inventory),
+        LinkAction::Remove => remove_inline_links(body, source_path, target, inventory),
+    }
+}
+
+/// Reescribe, **por el `span` de bytes del destino**, cada enlace del cuerpo que resuelve a `target`
+/// para que apunte a `to`, conservando label y fragmento (E21-H03, `§20.11`).
+///
+/// A diferencia de la sustitución por regex, el `span` de [`links::extract_links`]/[`links::resolve`]
+/// (E17-H01) apunta al destino **tal como está escrito** —en un enlace de referencia, dentro de su
+/// definición `[id]: destino`—, así que la reescritura alcanza también los enlaces de referencia, no
+/// solo los inline. El nuevo destino lo calcula [`retarget_href`] a partir del texto del span
+/// (`body[span]`, que incluye su `#fragmento`/`?query`), preservando estilo absoluto/relativo y sufijo.
+///
+/// Los spans se aplican de **mayor a menor offset** para que cada sustitución no invalide los de los
+/// siguientes, y se **deduplican**: varios usos de la misma definición de referencia comparten el
+/// mismo span y deben reescribirse una sola vez.
+fn retarget_body_links(
+    body: &str,
+    source_path: &RelPath,
+    target: &RelPath,
+    to: &RelPath,
+    inventory: &Inventory,
+) -> String {
+    let mut spans: Vec<std::ops::Range<usize>> = links::extract_links(body)
+        .iter()
+        .map(|raw| links::resolve(raw, source_path, inventory))
+        .filter(|link| link.target.internal_path() == Some(target))
+        .map(|link| link.span.clone())
+        .collect();
+    spans.sort_by_key(|span| std::cmp::Reverse(span.start));
+    spans.dedup();
+
+    let mut out = body.to_string();
+    for span in spans {
+        let nuevo = retarget_href(&out[span.clone()], source_path.as_str(), to);
+        out.replace_range(span, &nuevo);
+    }
+    out
+}
+
+/// "Desenlaza" a texto plano los enlaces **inline** cuyo href resuelve a `target`, dejando su texto
+/// visible (usado por `delete remove_links`). Un enlace a otro destino queda intacto; la decisión la
+/// da [`links::resolve`] (invariante #3), no el patrón textual.
+fn remove_inline_links(
+    body: &str,
+    source_path: &RelPath,
+    target: &RelPath,
     inventory: &Inventory,
 ) -> String {
     LINK_REWRITE_RE
@@ -619,15 +678,7 @@ fn rewrite_body_links(
             if resuelto.target.internal_path() != Some(target) {
                 return full.to_string();
             }
-            match action {
-                LinkAction::Retarget(to) => {
-                    format!(
-                        "[{text}]({})",
-                        retarget_href(href, source_path.as_str(), to)
-                    )
-                }
-                LinkAction::Remove => text.to_string(),
-            }
+            text.to_string()
         })
         .into_owned()
 }

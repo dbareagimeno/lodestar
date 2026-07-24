@@ -483,8 +483,10 @@ fn escenario_05_borrar_referenciado() {
         );
     }
 
-    // delete con la política por defecto (Reject): los 3 entrantes son blockers ⇒ INBOUND_LINKS_EXIST.
-    let ops = json!([ { "op": "delete", "ref": { "path": "objetivo.md" } } ]);
+    // delete con política `reject` EXPLÍCITA (E21-H03, §Fase 12: un delete sin política y con
+    // backlinks es INVALID_SCHEMA, no un `reject` en silencio): los 3 entrantes son blockers ⇒
+    // INBOUND_LINKS_EXIST.
+    let ops = json!([ { "op": "delete", "ref": { "path": "objetivo.md" }, "inboundLinksPolicy": "reject" } ]);
     let resp = roundtrip(
         dir.path(),
         &[change_plan_line(1, ops, policy_permisiva())],
