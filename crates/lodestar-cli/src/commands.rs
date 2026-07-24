@@ -3,7 +3,7 @@
 use std::path::Path;
 use std::process::ExitCode;
 
-use lodestar_core::types::Severity;
+use lodestar_core::types::{RelPath, Severity};
 
 use crate::sarif;
 
@@ -136,4 +136,149 @@ pub fn reindex(root: &Path) -> anyhow::Result<ExitCode> {
         root.join(".lodestar/index.db").display()
     );
     Ok(ExitCode::SUCCESS)
+}
+
+/// `lodestar migrate-from-okf --dry-run`: diagnóstico de cortesía para repos OKF legados
+/// (`REFACTOR_PHASE_2 §Fase 14`, `ARCHITECTURE.md §20.13`).
+///
+/// Recorre el workspace, LISTA las convenciones OKF que `§Fase 14` enumera —`index.md` raíz,
+/// índices anidados, metadata `okf_version`, índices de tags generados— y declara explícitamente
+/// que **no modificó ningún fichero**. Nunca es una puerta: mientras pueda leer el workspace sale
+/// `0` (no exit `1` por «detectó OKF»); solo `3` si no puede leerlo. El informe va a **stdout**; los
+/// errores, a stderr.
+///
+/// **Cero escrituras** (invariante de la historia): abre en modo **hermético** con
+/// [`Workspace::open_ephemeral`](lodestar_workspace::Workspace::open_ephemeral) —que **no** toca
+/// `.gitignore` ni crea el scaffold de `.lodestar/runtime/`, a diferencia de
+/// [`App::open`](lodestar_app::App::open)— y solo lee el inventario descubierto. La detección reusa
+/// el descubrimiento (E15) y el parseo de frontmatter (E16): no reimplementa ni lo uno ni lo otro.
+///
+/// Sin `--dry-run` es **error de uso** (exit `2`): en v0.3 solo existe la forma diagnóstica; exigir
+/// el flag explícito deja la palabra libre para una futura forma «aplicadora» sin invocarla por
+/// accidente. No es un alias del dry-run.
+pub fn migrate_from_okf(root: &Path, dry_run: bool) -> anyhow::Result<ExitCode> {
+    if !dry_run {
+        eprintln!(
+            "error: `migrate-from-okf` requiere `--dry-run`. En v0.3 solo existe la forma \
+             diagnóstica (no modifica ficheros); no hay alias implícito."
+        );
+        return Ok(ExitCode::from(2));
+    }
+
+    // Modo HERMÉTICO: `open_ephemeral` no escribe nada en el workspace (ni `.gitignore` ni el
+    // scaffold de runtime que `App::open`/`Workspace::open` crearían), así el diagnóstico no puede
+    // dejar rastro en disco. Se envuelve en `App` como capa de servicios (invariante de fachada).
+    let ws = lodestar_workspace::Workspace::open_ephemeral(root)
+        .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+    let app = lodestar_app::App::from_workspace(ws);
+    let doc_set = app
+        .workspace()
+        .document_set()
+        .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+
+    // --- Detección de las convenciones OKF de `§Fase 14` -----------------------------------------
+    // Los generadores se borraron en E15, así que no hay rastro del generador: se detecta por
+    // convención heurística de cortesía (no tiene que ser perfecta).
+    let mut root_index: Option<String> = None;
+    let mut nested_indexes: Vec<String> = Vec::new();
+    let mut okf_version_docs: Vec<String> = Vec::new();
+    let mut tag_indexes: Vec<String> = Vec::new();
+
+    for (path, content) in doc_set.files() {
+        let rel = path.as_str();
+        // `index.md`: raíz (sin directorio contenedor) vs anidado (`<dir>/index.md`).
+        if path.basename() == "index.md" {
+            if path.dir().is_empty() {
+                root_index = Some(rel.to_string());
+            } else {
+                nested_indexes.push(rel.to_string());
+            }
+        }
+        // Índice de tags generado: un `.md` bajo un directorio `tags/`.
+        if es_indice_de_tags(path) {
+            tag_indexes.push(rel.to_string());
+        }
+        // Metadata `okf_version`: frontmatter con esa clave. Reusa el parseo de E16
+        // (`model::parse_file`) y el único accesor de metadata (`ParsedFrontmatter::contains_key`).
+        if lodestar_core::model::parse_file(rel, content)
+            .frontmatter
+            .is_some_and(|fm| fm.contains_key("okf_version"))
+        {
+            okf_version_docs.push(rel.to_string());
+        }
+    }
+
+    // --- Informe (stdout) ------------------------------------------------------------------------
+    println!("Diagnóstico migrate-from-okf (--dry-run)\n");
+
+    let algo_detectado = root_index.is_some()
+        || !nested_indexes.is_empty()
+        || !okf_version_docs.is_empty()
+        || !tag_indexes.is_empty();
+
+    if !algo_detectado {
+        // Workspace sin convenciones OKF: nada que migrar. No se menciona `okf_version` (el informe
+        // solo lo nombra cuando lo detecta de verdad — discriminante de `dry_run_workspace_limpio`).
+        println!("No se detectaron convenciones OKF legadas: no hay nada que migrar.");
+        println!("No se modificó ningún fichero.");
+        return Ok(ExitCode::SUCCESS);
+    }
+
+    println!(
+        "Se detectaron convenciones OKF legadas. Los documentos siguen siendo Markdown válido.\n"
+    );
+    println!("Detectado:");
+    if let Some(idx) = &root_index {
+        println!("- index.md raíz: {idx}");
+    }
+    if !nested_indexes.is_empty() {
+        println!(
+            "- índices anidados ({}): {}",
+            nested_indexes.len(),
+            nested_indexes.join(", ")
+        );
+    }
+    if !okf_version_docs.is_empty() {
+        println!(
+            "- metadata okf_version ({}): {}",
+            okf_version_docs.len(),
+            okf_version_docs.join(", ")
+        );
+    }
+    if !tag_indexes.is_empty() {
+        println!(
+            "- índices de tags generados ({}): {}",
+            tag_indexes.len(),
+            tag_indexes.join(", ")
+        );
+    }
+
+    // Garantía dura de cero cambios (la verifica `dry_run_no_modifica` byte a byte); el ancla laxa
+    // `modif` vive en esta frase.
+    println!("\nNo se modificó ningún fichero.");
+
+    // Recomendaciones de `§Fase 14` (cortesía), cada una condicionada a su convención detectada: en
+    // un workspace sin `okf_version` el informe nunca sugiere «eliminar okf_version».
+    println!("\nLimpieza recomendada:");
+    if root_index.is_some() || !nested_indexes.is_empty() {
+        println!("- Trata los índices como documentos de navegación opcionales.");
+    }
+    if !okf_version_docs.is_empty() {
+        println!("- Elimina okf_version cuando convenga.");
+    }
+    if !tag_indexes.is_empty() {
+        println!("- Revisa los índices de tags generados antes de borrarlos.");
+    }
+
+    Ok(ExitCode::SUCCESS)
+}
+
+/// ¿Es `path` un **índice de tags** generado? Heurística de cortesía de `§Fase 14`: un `.md` con un
+/// segmento de directorio `tags` (lo que producía el retirado `gen_tag_indexes`). Un fichero en la
+/// raíz —sin directorio contenedor— nunca lo es.
+fn es_indice_de_tags(path: &RelPath) -> bool {
+    match path.as_str().rsplit_once('/') {
+        Some((dirs, _fichero)) => dirs.split('/').any(|seg| seg == "tags"),
+        None => false,
+    }
 }

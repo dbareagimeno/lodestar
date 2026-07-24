@@ -40,6 +40,14 @@ enum Command {
     },
     /// Reconstruye la cache `.lodestar/index.db` desde los `.md`.
     Reindex,
+    /// Diagnostica convenciones OKF legadas (índices, `okf_version`, índices de tags) **sin
+    /// modificar ningún fichero**. Requiere `--dry-run`: en v0.3 solo existe la forma diagnóstica.
+    #[command(name = "migrate-from-okf")]
+    MigrateFromOkf {
+        /// Modo diagnóstico (obligatorio): recorre el workspace y reporta, sin tocar nada.
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 /// Resuelve la raíz del workspace: `--path` si se da, si no el **cwd tal cual**
@@ -61,6 +69,7 @@ fn main() -> ExitCode {
     let result = match cli.command {
         Command::Check { json, sarif } => commands::check(&root, json, sarif),
         Command::Reindex => commands::reindex(&root),
+        Command::MigrateFromOkf { dry_run } => commands::migrate_from_okf(&root, dry_run),
     };
     match result {
         Ok(code) => code,
