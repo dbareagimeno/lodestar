@@ -73,8 +73,8 @@ planes de **E12**; **E14** cierra. Ninguna historia del giro está **[BLOQUEADA]
 | **E18** — Store v2 | 5 | DDL nuevo · metadata anidada · links genéricos · cold rebuild · paridad core/store | [epica-18-store-v2.md](epica-18-store-v2.md) |
 | **E19** — Lenguaje de consulta | 6 | Parser · AST · type checking · namespaces · filtro JSON equivalente | [epica-19-lenguaje-consulta.md](epica-19-lenguaje-consulta.md) |
 | **E20** — Inspección y validación genéricas | 7 + 8 | `metadata_inspect` (retira `core::schema`) · política `rejectNewErrors`/`allowExistingErrors` · **cablear los diagnósticos de descubrimiento** (ver abajo) | *(pendiente)* |
-| **E21** — Contrato MCP y transacciones genéricas | 9 + 10 | Contrato nuevo · 8 operaciones universales · selecciones masivas por consulta | *(pendiente)* |
-| **E22** — Migración y limpieza pública | 11 | `migrate-from-okf --dry-run` · docs · README · publicación incompatible | *(pendiente)* |
+| **E21** — Contrato MCP y transacciones genéricas | 9 + 10 | Contrato nuevo · 8 operaciones universales · selecciones masivas por consulta | [epica-21-transacciones-genericas.md](epica-21-transacciones-genericas.md) |
+| **E22** — Migración y limpieza pública | 11 | `migrate-from-okf --dry-run` · docs · README · publicación incompatible · **e2e final** | [epica-22-migracion-publicacion.md](epica-22-migracion-publicacion.md) |
 
 **Orden de construcción (E15–E22)**: estrictamente secuencial. **E15 es prerrequisito de todo** (sin
 descubrimiento universal no hay nada que modelar); **E16** cambia el modelo documental y arrastra los
