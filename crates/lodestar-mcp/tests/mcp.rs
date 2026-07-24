@@ -2233,6 +2233,192 @@ fn plan_no_escribe() {
 }
 
 // ---------------------------------------------------------------------------
+// E21-H01 — Retirar las 5 operaciones semánticas del contrato transaccional.
+//
+// UBICACIÓN: los 3 criterios se ejercitan **e2e por la frontera MCP** (campo Pruebas de la historia:
+// `crates/lodestar-mcp/tests/`), porque lo que E21-H01 cambia es el CONTRATO DE WIRE: qué `op`
+// acepta `change_plan` y qué `kind` acepta `impact_analyze.proposedOperation`. Se fija aquí para que
+// la superficie observable (¿plan o error?, ¿qué código?) quede clavada, no los tipos internos que
+// el implementador retirará (`NormalizedOperation::{AddRelation,RemoveRelation,TransitionStatus}`,
+// las ramas de `normalize_raw_op`, los `kind` del `inputSchema`).
+//
+// FASE ROJA (estado ANTES de E21-H01, todo commiteado y verde):
+//   - `transition_status_retirada`: HOY `normalize_raw_op` SÍ despacha `op:"transition_status"`
+//     (produce un `PatchFrontmatter{status:to}`), así que `change_plan` devuelve un PLAN válido, sin
+//     `isError`. El test exige un error → hace ROJO porque el plan tiene éxito. Tras retirar la rama
+//     del despacho, `op:"transition_status"` cae en `_ => Err(ErrorCode::InvalidSchema)` → verde.
+//   - `impact_sin_ops_semanticas`: HOY `App::impact_analyze` NO valida `kind` (lo usa como texto de
+//     recomendación), así que `kind:"deprecate"` devuelve un INFORME válido, sin `isError`. El test
+//     exige un error → hace ROJO. Tras restringir `kind` a {move, delete} (los que `§20.10` lista
+//     para impacto) → `INVALID_SCHEMA` → verde.
+//   - `patch_hace_de_transicion`: NO es un test rojo. Es el GUARDIÁN de equivalencia que `§Fase 12`
+//     promete ("un transition_status es un patch_frontmatter"): pasa HOY y debe seguir pasando tras
+//     E21-H01, porque `patch_frontmatter` —operación universal— no cambia. Documenta que retirar las
+//     semánticas NO pierde capacidad. (Reportado como no-rojo en la salida de esta fase.)
+//
+// FORMA DEL ERROR PARA UNA OP RETIRADA (decisión de criterio, ver informe): el código estable de
+// wire es `INVALID_SCHEMA` (`ErrorCode::InvalidSchema`, E10-H02 / invariante #4). Es el MISMO código
+// con que `normalize_raw_op` ya rechaza hoy cualquier `op` no reconocida (`_ => InvalidSchema`) y
+// cualquier parámetro mal formado; retirar `transition_status`/`add_relation`/`remove_relation` del
+// match las convierte, sin más, en "op desconocida" → `INVALID_SCHEMA`. Para `impact_analyze` se fija
+// el mismo código: un `kind` fuera de {move, delete} es un esquema de entrada inválido. Aflora como
+// error de EJECUCIÓN de la tool (`result.isError == true`), NUNCA como error de protocolo JSON-RPC.
+// ---------------------------------------------------------------------------
+
+/// Workspace mínimo y válido con un documento `decision.md` que lleva `status: draft` en su
+/// frontmatter (más un `index.md` que lo enlaza). El `type`/`status` son metadata YAML arbitraria
+/// (modelo universal, `§20.10`), no semántica OKF. Base común de los tres criterios de E21-H01:
+/// la op semántica retirada (`transition_status`), el `kind` semántico retirado de `impact_analyze`
+/// (`deprecate`) y la equivalencia sin pérdida (`patch_frontmatter` que fija `status: accepted`).
+fn workspace_decision_draft() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "index.md",
+        "---\ntitle: Índice\n---\n\n# Índice\n\n* [Decisión](decision.md)\n",
+    );
+    write(
+        dir.path(),
+        "decision.md",
+        "---\ntype: decision\ntitle: Decisión de autenticación\nstatus: draft\n---\n\n# Decisión\n\ncuerpo\n",
+    );
+    dir
+}
+
+/// E21-H01 · Criterio `transition_status_retirada`:
+/// **Dado** un `change_plan` con `op: "transition_status"`, **Cuando** se procesa, **Entonces** es un
+/// error (op desconocida) — no un plan. Fija que la operación semántica retirada deja de existir en la
+/// superficie transaccional (`§Fase 12`).
+#[test]
+fn transition_status_retirada() {
+    let dir = workspace_decision_draft();
+    // Un change_plan cuyo ÚNICO op es la operación semántica retirada. El `ref.path` resuelve a un
+    // documento EXISTENTE, así que la única razón posible de error es que `transition_status` ya no
+    // sea una op reconocida (no un objetivo inexistente ni un parámetro mal formado).
+    let ops = serde_json::json!([
+        { "op": "transition_status", "ref": { "path": "decision.md" }, "to": "accepted" }
+    ]);
+    let line = change_plan_line(None, ops, policy_permisiva());
+    let resp = roundtrip(dir.path(), &[line.as_str()], 1);
+
+    // Superficie observable: es un error de EJECUCIÓN de la tool, NO un plan.
+    assert_eq!(
+        resp[0]["result"]["isError"], true,
+        "una op retirada (`transition_status`) debe dar isError en change_plan, no un plan: {resp:?}"
+    );
+    assert!(
+        resp[0]["error"].is_null(),
+        "una op desconocida es un error de EJECUCIÓN de la tool, no un error de protocolo JSON-RPC: {resp:?}"
+    );
+    assert!(
+        resp[0]["result"]["structuredContent"].is_null(),
+        "una op retirada NO debe producir structuredContent (no hay change set): {resp:?}"
+    );
+    // Código estable de wire: op desconocida = INVALID_SCHEMA (el mismo con que `normalize_raw_op`
+    // rechaza hoy cualquier `op` no reconocida).
+    let texto = resp[0].to_string();
+    assert!(
+        texto.contains("INVALID_SCHEMA"),
+        "el error de una op retirada debe exponer el código estable «INVALID_SCHEMA»: {resp:?}"
+    );
+}
+
+/// E21-H01 · Criterio `impact_sin_ops_semanticas`:
+/// **Dado** un `impact_analyze` con `proposedOperation.kind: "deprecate"`, **Entonces** es un error.
+/// El `kind` queda restringido a las operaciones que `§20.10` lista para impacto (`move`/`delete`);
+/// los `kind` semánticos (`deprecate`/`transition_status`/`change_relation`/`replace_document`) se
+/// retiran del `inputSchema` y se rechazan.
+#[test]
+fn impact_sin_ops_semanticas() {
+    let dir = workspace_decision_draft();
+    // El `ref` apunta a un documento EXISTENTE: la única razón posible de error es el `kind`
+    // semántico retirado (`deprecate`), no un objetivo irresoluble.
+    let resp = roundtrip(
+        dir.path(),
+        &[
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"impact_analyze","arguments":{"ref":{"path":"decision.md"},"proposedOperation":{"kind":"deprecate"}}}}"#,
+        ],
+        1,
+    );
+
+    assert_eq!(
+        resp[0]["result"]["isError"], true,
+        "un `kind` semántico retirado (`deprecate`) debe dar isError en impact_analyze: {resp:?}"
+    );
+    assert!(
+        resp[0]["error"].is_null(),
+        "un `kind` no soportado es un error de EJECUCIÓN de la tool, no un error de protocolo JSON-RPC: {resp:?}"
+    );
+    assert!(
+        resp[0]["result"]["structuredContent"].is_null(),
+        "un `kind` retirado NO debe producir un informe de impacto: {resp:?}"
+    );
+    let texto = resp[0].to_string();
+    assert!(
+        texto.contains("INVALID_SCHEMA"),
+        "el error de un `kind` retirado debe exponer el código estable «INVALID_SCHEMA»: {resp:?}"
+    );
+}
+
+/// E21-H01 · Criterio `patch_hace_de_transicion` (equivalencia sin pérdida de capacidad, `§Fase 12`):
+/// **Dado** un `change_plan` con `op: "patch_frontmatter"` que fija `status: "accepted"` sobre un
+/// documento en `status: "draft"`, **Entonces** funciona: el plan resultante fija `status: accepted`.
+/// La «transición» sobrevive como patch de una propiedad de frontmatter arbitraria. NO es un test
+/// rojo: `patch_frontmatter` no cambia con E21-H01; es el guardián de que retirar `transition_status`
+/// no pierde capacidad.
+#[test]
+fn patch_hace_de_transicion() {
+    let dir = workspace_decision_draft();
+    let ops = serde_json::json!([
+        { "op": "patch_frontmatter", "ref": { "path": "decision.md" }, "patch": { "status": "accepted" } }
+    ]);
+    let line = change_plan_line(None, ops, policy_permisiva());
+    let resp = roundtrip(dir.path(), &[line.as_str()], 1);
+    let sc = plan_sc(&resp[0]);
+
+    // No es un error: el patch produce un plan.
+    assert!(
+        resp[0]["result"]["isError"].as_bool() != Some(true),
+        "un patch_frontmatter que fija `status` debe producir un plan, no isError: {resp:?}"
+    );
+
+    // El plan lleva UNA op normalizada `patch_frontmatter` que fija `status: accepted` sobre
+    // `decision.md`: la transición `draft → accepted` expresada como patch.
+    let normalized = sc["normalizedOperations"].as_array().unwrap_or_else(|| {
+        panic!("change_plan debe devolver normalizedOperations (array): {resp:?}")
+    });
+    assert_eq!(
+        normalized.len(),
+        1,
+        "una sola op cruda ⇒ una sola op normalizada: {resp:?}"
+    );
+    let op = &normalized[0];
+    assert_eq!(
+        op["op"], "patch_frontmatter",
+        "la op normalizada debe ser un patch_frontmatter (no una op semántica): {resp:?}"
+    );
+    assert_eq!(
+        op["path"], "decision.md",
+        "el patch debe apuntar a decision.md: {resp:?}"
+    );
+    assert_eq!(
+        op["patch"]["status"], "accepted",
+        "el patch debe fijar `status` a «accepted» (la transición como patch): {resp:?}"
+    );
+
+    // Efecto observable en el diff semántico: `decision.md` está entre los documentos con cambio de
+    // frontmatter — corrobora que la propiedad `status` cambia sin operación semántica dedicada.
+    let fm_changes = sc["semanticDiff"]["frontmatterChanges"]
+        .as_array()
+        .unwrap_or_else(|| panic!("el semanticDiff debe traer frontmatterChanges (array): {resp:?}"));
+    let cambia_decision = fm_changes.iter().any(|p| p == "decision.md");
+    assert!(
+        cambia_decision,
+        "el semanticDiff debe registrar decision.md como cambio de frontmatter (draft→accepted): {resp:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // E13-H08 — Tool `change_apply` (orquestación del proceso de 15 pasos, `REFACTOR §11.2/§17`).
 //
 // UBICACIÓN: los 4 criterios se ejercitan **e2e por la tool MCP** (campo Pruebas de la historia:
