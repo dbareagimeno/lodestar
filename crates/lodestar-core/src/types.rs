@@ -5,7 +5,6 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 
 /// Macro interna: deriva `JsonSchema` solo con la feature `schemars` (para el outputSchema del MCP).
@@ -21,7 +20,7 @@ macro_rules! schema_derive {
 // ---------------------------------------------------------------------------
 
 schema_derive! {
-/// Ruta relativa al root del bundle. `RelPath::new` rechaza absolutas y `..`, y normaliza
+/// Ruta relativa al root del workspace. `RelPath::new` rechaza absolutas y `..`, y normaliza
 /// (separadores a `/`, colapsa `.` y `//`). Prohibido `type RelPath = String`.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 pub struct RelPath(String);
@@ -37,7 +36,7 @@ impl RelPath {
             return Err(crate::CoreError::InvalidRelPath(s.to_string()));
         }
         // Unidad Windows (`C:` / `c:` al inicio): `root.join("C:/x")` DESCARTA el root en Windows
-        // → escritura fuera del bundle (zip-slip). También cubre `C:evil.md` (relativa a unidad).
+        // → escritura fuera del workspace (zip-slip). También cubre `C:evil.md` (relativa a unidad).
         let b = s.as_bytes();
         if b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':' {
             return Err(crate::CoreError::InvalidRelPath(s.to_string()));
@@ -74,14 +73,32 @@ impl RelPath {
         }
     }
 
-    /// Id de concepto: la ruta sin la extensión `.md`. Port de `conceptId` aplicado al path.
-    pub fn concept_id(&self) -> String {
-        self.0.strip_suffix(".md").unwrap_or(&self.0).to_string()
+    /// El nombre del fichero **sin** la extensión `.md` — el último eslabón de la cadena de
+    /// [`crate::model::derived_title`] (`ARCHITECTURE.md §20.4`).
+    ///
+    /// > `concept_id`/`is_reserved` se retiraron en E16-H02: ningún nombre de fichero activa
+    /// > reglas especiales (`REFACTOR_PHASE_2 §Principio 4`).
+    pub fn stem(&self) -> &str {
+        let base = self.basename();
+        base.strip_suffix(".md").unwrap_or(base)
     }
 
-    /// `true` si el fichero es reservado (`index.md`/`log.md`).
-    pub fn is_reserved(&self) -> bool {
-        matches!(self.basename(), "index.md" | "log.md")
+    /// ¿Esta ruta **sería** un documento Markdown? Extensión `.md`, sin distinguir capitalización.
+    ///
+    /// Es el **único** discriminador de familia del motor (invariante #3), y solo se usa para
+    /// juzgar rutas que **no están en el inventario**: qué es un documento se decide siempre por
+    /// pertenencia al inventario ([`Inventory::contains_document`]), nunca por el nombre — `§20.6`
+    /// prohíbe expresamente clasificar enlaces por extensión. Pero de un destino que no existe no
+    /// hay inventario al que preguntar, y hay que decidir igualmente dos cosas:
+    ///
+    /// - la severidad de `LINK-TARGET-MISSING` (documento ausente = `Err`; fichero del proyecto
+    ///   ausente = `Warn`), y
+    /// - si el destino es un **fantasma del grafo** ([`LinkTarget::internal_path`]).
+    ///
+    /// Las dos preguntas comparten esta respuesta a propósito: si divergieran, el grafo tendría
+    /// nodos que la conformidad no considera documentos, o al revés.
+    pub fn is_markdown(&self) -> bool {
+        self.0.to_lowercase().ends_with(".md")
     }
 }
 
@@ -107,32 +124,32 @@ impl<'de> Deserialize<'de> for RelPath {
     }
 }
 
-/// Mapa de ficheros del bundle: lo que come `Bundle::from_files` y lo que devuelve `vcs.tree_files`.
+/// Mapa de ficheros del workspace: lo que come `DocumentSet::from_files` y lo que devuelve `vcs.tree_files`.
 pub type FileMap = BTreeMap<RelPath, String>;
 
 // ---------------------------------------------------------------------------
-// ConceptRef / ConceptId — identidad por path (E10-H04). `id` queda diferido/reservado.
+// DocumentRef / DocumentId — identidad por path (E10-H04). `id` queda diferido/reservado.
 // ---------------------------------------------------------------------------
 
 schema_derive! {
-/// Id estable de concepto — newtype **diferido**: IDs estables/federación son no-goal de esta
-/// historia (`REFACTOR §16`). Existe ya en el wire de `ConceptRef` para no romper compatibilidad
+/// Id estable de documento — newtype **diferido**: IDs estables/federación son no-goal de esta
+/// historia (`REFACTOR §16`). Existe ya en el wire de `DocumentRef` para no romper compatibilidad
 /// cuando se implemente la resolución por id, pero ningún flujo actual lo produce ni lo consume.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ConceptId(pub String);
+pub struct DocumentId(pub String);
 }
 
 schema_derive! {
-/// Referencia a un concepto, usada por todas las tools de lectura/escritura (`ARCHITECTURE.md
+/// Referencia a un documento, usada por todas las tools de lectura/escritura (`ARCHITECTURE.md
 /// §19.3`). v2 resuelve identidad **únicamente por `path`**: `id` es opcional y su resolución
 /// queda diferida (`REFACTOR §6.1`, no-goal IDs estables/federación). `{ "path": "a/b.md" }`
 /// deserializa con `id: None`; `path` hereda la validación de `RelPath` — rechaza `..`/absolutas
 /// (invariante #6, único chokepoint de path-traversal).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ConceptRef {
+pub struct DocumentRef {
     pub path: RelPath,
     #[serde(default)]
-    pub id: Option<ConceptId>,
+    pub id: Option<DocumentId>,
 }
 }
 
@@ -154,98 +171,105 @@ pub enum Severity {
 }
 
 schema_derive! {
-/// Los 15 códigos OKF. UNA sola enum. El valor de wire ES la cadena con guion (rename por variante).
+/// Los códigos de diagnóstico. UNA sola enum, hoy el **catálogo mínimo** de `ARCHITECTURE.md
+/// §20.9` (E16-H05): Lodestar solo informa de lo que le impide *interpretar o modificar con
+/// seguridad* un documento, no de si cumple una especificación documental. El valor de wire ES la
+/// cadena con guion (rename por variante).
+///
+/// El catálogo OKF (`OKF-FM01`, `OKF-TYPE`, `REC-TITLE`, `REC-DESC`, `FMT-TAGS`, `FMT-TS`,
+/// `BODY-STRUCT`, `ORPHAN`, `OKF-IDX`, `OKF-LOG`) se **retiró**; `OKF-FM02`/`OKF-FM03`/
+/// `OKF-CONFLICT` se renombraron a `FM-UNCLOSED`/`FM-YAML-INVALID`/`DOC-CONFLICT-MARKER`.
+/// **E17-H03** retiró `LINK-STUB`/`LINK-REL` (el destino inexistente y el enlace relativo del
+/// prototipo) en favor de `LINK-TARGET-MISSING`/`LINK-ESCAPES-WORKSPACE`/`LINK-CASE-MISMATCH`,
+/// derivados de la clasificación de [`LinkTarget`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum CheckCode {
-    #[serde(rename = "OKF-FM01")]
-    OkfFm01,
-    #[serde(rename = "OKF-FM02")]
-    OkfFm02,
-    #[serde(rename = "OKF-FM03")]
-    OkfFm03,
-    #[serde(rename = "OKF-TYPE")]
-    OkfType,
-    #[serde(rename = "REC-TITLE")]
-    RecTitle,
-    #[serde(rename = "REC-DESC")]
-    RecDesc,
-    #[serde(rename = "FMT-TAGS")]
-    FmtTags,
-    #[serde(rename = "FMT-TS")]
-    FmtTs,
-    #[serde(rename = "LINK-STUB")]
-    LinkStub,
-    #[serde(rename = "LINK-REL")]
-    LinkRel,
-    #[serde(rename = "ORPHAN")]
-    Orphan,
-    #[serde(rename = "BODY-STRUCT")]
-    BodyStruct,
-    #[serde(rename = "OKF-IDX")]
-    OkfIdx,
-    #[serde(rename = "OKF-LOG")]
-    OkfLog,
-    #[serde(rename = "OKF-CONFLICT")]
-    OkfConflict,
-    // --- Familias schema-driven (decisión D-CheckCode, `ARCHITECTURE.md §19.3`) ---
-    // Variantes ESTÁTICAS acotadas (no hay espacio de códigos dinámico). El core aún no las
-    // produce (eso es E10-H07/E11-H03) — esta historia solo fija el contrato de wire. La clave
-    // i18n por código (§12) se satisface con `Check.msg`, que el core emite inline (no hay
-    // catálogo i18n en el core; el catálogo de `frontend/src/lib/i18n.ts` está congelado y
-    // fuera de alcance de esta historia).
-    #[serde(rename = "SCHEMA-REQFIELD")]
-    SchemaReqfield,
-    #[serde(rename = "SCHEMA-STATUS")]
-    SchemaStatus,
-    #[serde(rename = "REL-TARGET")]
-    RelTarget,
-    #[serde(rename = "REL-CARD")]
-    RelCard,
-    #[serde(rename = "REL-TYPE")]
-    RelType,
-    /// Referencia externa (`implemented_by`/`verified_by`, E9-H05) a un fichero de código bajo
-    /// `referenceRoots` que no existe en disco (E11-H04). Variante propia, no reuso de
-    /// `LINK-STUB`/`LINK-REL` (enlaces ENTRE concepts del bundle) ni `REL-TARGET` (relaciones
-    /// tipadas a concepts): un `implemented_by`/`verified_by` apunta a código fuera del dominio
-    /// OKF, no a un concept — semánticamente distinto de los tres.
-    #[serde(rename = "EXTREF-MISSING")]
-    ExtrefMissing,
+    // --- Frontmatter no interpretable (`§20.9`) ---
+    /// El bloque de frontmatter abre `---` y nunca cierra: el documento no se puede interpretar.
+    #[serde(rename = "FM-UNCLOSED")]
+    FmUnclosed,
+    /// El bloque está delimitado pero su YAML es sintácticamente inválido. Lleva el `range` de las
+    /// líneas de contenido del bloque (delimitadores excluidos), derivado del `span` de
+    /// [`ParsedFrontmatter`].
+    #[serde(rename = "FM-YAML-INVALID")]
+    FmYamlInvalid,
+    /// Marcadores de conflicto de merge sin resolver: el documento está a medio mergear y no se
+    /// puede modificar con seguridad.
+    #[serde(rename = "DOC-CONFLICT-MARKER")]
+    DocConflictMarker,
+    // Los códigos heredados del prototipo `LINK-STUB`/`LINK-REL` (sin productor desde E17-H03) se
+    // retiran del catálogo en E20-H03 junto con la maquinaria de schema: ya nada los nombra (la
+    // guarda de `diagnosticos.rs::link_missing_con_rango` que los sostenía se migró a los códigos
+    // vivos). Sus reemplazos son `LINK-TARGET-MISSING`/`LINK-ESCAPES-WORKSPACE`/`LINK-CASE-MISMATCH`.
+    // --- Enlaces (`§20.9`, E17-H03) ---
+    /// El destino de un enlace está contenido en el workspace pero **no existe** (`§20.9`).
+    /// Severidad `Err` si el destino sería un documento Markdown (`danglingDocumentLinks: error`) y
+    /// `Warn` si sería otro fichero del proyecto (`missingWorkspaceFiles: warning`). E17-H03.
+    #[serde(rename = "LINK-TARGET-MISSING")]
+    LinkTargetMissing,
+    /// El destino de un enlace sale de la raíz del workspace ([`LinkTarget::EscapesWorkspace`]):
+    /// Lodestar no puede seguirlo ni reescribirlo. E17-H03.
+    #[serde(rename = "LINK-ESCAPES-WORKSPACE")]
+    LinkEscapesWorkspace,
+    // Las familias schema-driven `SCHEMA-*`/`REL-*` y `EXTREF-MISSING` se RETIRAN en E20-H03: con
+    // `core::schema` desaparecen `validate_schema`/`validate_relations` (sus únicos productores) y el
+    // diagnóstico de referencias externas de `external_refs` (`§20.10`: el modelo es universal, sin
+    // schema, y una relación es un enlace Markdown). El catálogo vivo lo forman los códigos de
+    // frontmatter/enlace/descubrimiento de `§20.9`.
+    // --- Descubrimiento universal (E15-H07, `ARCHITECTURE.md §20.5`/`§20.9`) ---
+    // Los produce `lodestar_workspace::discovery`, no `conform`: describen lo que Lodestar NO
+    // pudo incorporar al inventario (o lo que no es portable), no el incumplimiento de una
+    // especificación documental.
+    /// Un `.md` cuyos bytes no son UTF-8 válido: no se puede interpretar, así que no entra en el
+    /// inventario.
+    #[serde(rename = "DOC-NOT-UTF8")]
+    DocNotUtf8,
+    /// Un `.md` por encima del tamaño máximo por documento de la política de descubrimiento.
+    #[serde(rename = "DOC-TOO-LARGE")]
+    DocTooLarge,
+    /// Una ruta no representable (bytes no UTF-8 en Unix, surrogate suelto en Windows) o que no es
+    /// una ruta relativa válida del workspace. Su `Check` va SIN `targets`: no hay `RelPath` que
+    /// construir — ese es justamente el problema (invariante #6).
+    #[serde(rename = "PATH-NOT-UTF8")]
+    PathNotUtf8,
+    /// Un enlace simbólico encontrado en el árbol: Lodestar no los sigue, y en vez de ignorarlo en
+    /// silencio se reporta el documento que queda fuera del inventario.
+    #[serde(rename = "SYMLINK-UNSUPPORTED")]
+    SymlinkUnsupported,
+    /// Rutas que solo difieren en capitalización: en un volumen case-insensitive son el mismo
+    /// fichero, así que el workspace no es portable.
+    ///
+    /// **Dos productores**: el descubrimiento (`§20.5`, colisiones entre ficheros del árbol) y —
+    /// desde E17-H03— [`crate::links::diagnose`], cuando un enlace apunta a una ruta que el
+    /// inventario tiene *salvo capitalización*.
+    #[serde(rename = "LINK-CASE-MISMATCH")]
+    LinkCaseMismatch,
 }
 }
 
 impl CheckCode {
-    /// El valor de wire (cadena con guion), p. ej. `"OKF-FM01"`.
+    /// El valor de wire (cadena con guion), p. ej. `"FM-YAML-INVALID"`.
     pub fn as_str(self) -> &'static str {
         match self {
-            CheckCode::OkfFm01 => "OKF-FM01",
-            CheckCode::OkfFm02 => "OKF-FM02",
-            CheckCode::OkfFm03 => "OKF-FM03",
-            CheckCode::OkfType => "OKF-TYPE",
-            CheckCode::RecTitle => "REC-TITLE",
-            CheckCode::RecDesc => "REC-DESC",
-            CheckCode::FmtTags => "FMT-TAGS",
-            CheckCode::FmtTs => "FMT-TS",
-            CheckCode::LinkStub => "LINK-STUB",
-            CheckCode::LinkRel => "LINK-REL",
-            CheckCode::Orphan => "ORPHAN",
-            CheckCode::BodyStruct => "BODY-STRUCT",
-            CheckCode::OkfIdx => "OKF-IDX",
-            CheckCode::OkfLog => "OKF-LOG",
-            CheckCode::OkfConflict => "OKF-CONFLICT",
-            CheckCode::SchemaReqfield => "SCHEMA-REQFIELD",
-            CheckCode::SchemaStatus => "SCHEMA-STATUS",
-            CheckCode::RelTarget => "REL-TARGET",
-            CheckCode::RelCard => "REL-CARD",
-            CheckCode::RelType => "REL-TYPE",
-            CheckCode::ExtrefMissing => "EXTREF-MISSING",
+            CheckCode::FmUnclosed => "FM-UNCLOSED",
+            CheckCode::FmYamlInvalid => "FM-YAML-INVALID",
+            CheckCode::DocConflictMarker => "DOC-CONFLICT-MARKER",
+            CheckCode::LinkTargetMissing => "LINK-TARGET-MISSING",
+            CheckCode::LinkEscapesWorkspace => "LINK-ESCAPES-WORKSPACE",
+            CheckCode::DocNotUtf8 => "DOC-NOT-UTF8",
+            CheckCode::DocTooLarge => "DOC-TOO-LARGE",
+            CheckCode::PathNotUtf8 => "PATH-NOT-UTF8",
+            CheckCode::SymlinkUnsupported => "SYMLINK-UNSUPPORTED",
+            CheckCode::LinkCaseMismatch => "LINK-CASE-MISMATCH",
         }
     }
 }
 
 schema_derive! {
-/// Rango de líneas (1-based, como el resto de referencias a línea del core) que acota un `Check`
-/// dentro de un fichero. Aditivo (E10-H06, `ARCHITECTURE.md §19.3`); los checks OKF clásicos no
-/// lo rellenan.
+/// Rango de líneas (1-based, **ambas inclusive**) que acota un `Check` dentro de un fichero.
+/// Aditivo (E10-H06, `ARCHITECTURE.md §19.3`); lo rellena quien conoce la posición del problema
+/// — p. ej. `FM-YAML-INVALID`, con las líneas de contenido del bloque de frontmatter
+/// (delimitadores excluidos, `§20.9`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Range {
@@ -280,7 +304,7 @@ pub struct Check {
     pub msg: String,
     pub targets: Vec<RelPath>,
     /// Identificador estable del diagnóstico dentro de una revisión (p. ej. `diag:blake3:…`,
-    /// E10-H12). Ausente para los checks OKF clásicos hasta que un productor lo rellene.
+    /// E10-H12). Ausente hasta que un productor lo rellene.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
     /// Rango de líneas del fichero afectado, si se conoce.
@@ -350,95 +374,583 @@ impl Check {
 }
 
 // ---------------------------------------------------------------------------
-// Modelo de fichero: Frontmatter · ParsedFile · FileKind · FmError (§4.1)
+// Modelo documental genérico: FieldPath · ParsedFrontmatter · FmError
+// (`ARCHITECTURE.md §20.4`, E16-H01 — supersede los 7 campos tipados de `§4.1`)
 // ---------------------------------------------------------------------------
 
-schema_derive! {
-/// Frontmatter: 7 KNOWN_FM tipados + `extra` para claves de productor. `tags`/`timestamp` se
-/// guardan RAW (`serde_yaml::Value`) para poder detectar FMT-TAGS (no-lista) y FMT-TS (no-ISO).
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct Frontmatter {
-    #[serde(rename = "type", default, skip_serializing_if = "Option::is_none")]
-    pub r#type: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub title: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub resource: Option<String>,
-    #[cfg_attr(feature = "schemars", schemars(skip))]
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tags: Option<serde_yaml::Value>,
-    #[cfg_attr(feature = "schemars", schemars(skip))]
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub timestamp: Option<serde_yaml::Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub status: Option<String>,
-    /// `IndexMap` (no `BTreeMap`) para preservar el **orden de aparición** de las claves de
-    /// productor, igual que `Object.keys(fm)` del prototipo (`buildRaw`). Con `BTreeMap` se
-    /// reordenaban alfabéticamente (divergencia de paridad).
-    #[cfg_attr(feature = "schemars", schemars(skip))]
-    #[serde(flatten)]
-    pub extra: IndexMap<String, serde_yaml::Value>,
-    /// Claves KNOWN de tipo string presentes con `null` explícito (`type:\n`). En JS `null !==
-    /// undefined`: cuentan como presentes (`fmPresent`) y `buildRaw` las serializa (`k: null`).
-    /// Con `Option<String>` el null se perdía como ausencia — esto conserva la distinción.
-    #[cfg_attr(feature = "schemars", schemars(skip))]
-    #[serde(skip)]
-    pub known_null: Vec<String>,
-}
+/// Ruta a una propiedad del frontmatter: una secuencia **no vacía** de segmentos ya resueltos.
+///
+/// Newtype validado (mismo patrón que [`RelPath`]) y no un `String` crudo: la dot-notation es una
+/// *sintaxis de entrada*, no la identidad del campo. Por eso hay dos constructores —
+/// [`FieldPath::parse`] parte por puntos (lo que teclea un agente) y
+/// [`FieldPath::from_segments`] no (la vía para direccionar una clave YAML que *contiene* un
+/// punto, p. ej. `sonar.projectKey`).
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct FieldPath(Vec<String>);
+
+impl FieldPath {
+    /// Construye un `FieldPath` desde dot-notation (`"service.tier"`,
+    /// `"release.target.date"`). **Siempre** parte por puntos: nunca resuelve a una clave literal
+    /// que los contenga.
+    ///
+    /// # Errores
+    /// [`crate::CoreError::InvalidFieldPath`] si el path está vacío o algún segmento lo está
+    /// (`""`, `"service."`, `"a..b"`).
+    pub fn parse(s: &str) -> Result<Self, crate::CoreError> {
+        Self::from_segments(s.split('.'))
+    }
+
+    /// Construye un `FieldPath` desde segmentos explícitos, **sin** partir por puntos: es la vía
+    /// para direccionar una clave YAML que contiene un punto (la usan el filtro JSON de la query
+    /// y el catálogo de metadata, que construyen paths sin pasar por la sintaxis textual).
+    ///
+    /// # Errores
+    /// [`crate::CoreError::InvalidFieldPath`] si la lista está vacía o algún segmento lo está.
+    pub fn from_segments<I, S>(segments: I) -> Result<Self, crate::CoreError>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        let segs: Vec<String> = segments.into_iter().map(Into::into).collect();
+        if segs.is_empty() || segs.iter().any(String::is_empty) {
+            return Err(crate::CoreError::InvalidFieldPath(segs.join(".")));
+        }
+        Ok(FieldPath(segs))
+    }
+
+    /// Los segmentos del path, en orden de descenso.
+    pub fn segments(&self) -> &[String] {
+        &self.0
+    }
 }
 
-/// Clase de fichero. `reserved = kind != Concept`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FileKind {
-    Concept,
-    Index,
-    Log,
+impl std::fmt::Display for FieldPath {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0.join("."))
+    }
+}
+
+impl Serialize for FieldPath {
+    /// Serializa como su **string punteado** (`"service.tier"`), la forma de wire de
+    /// `metadata_inspect` (E20-H03): un `FieldPath` es la identidad de un campo y en el wire viaja
+    /// como su dot-path (vía [`Display`](std::fmt::Display)), nunca como un array de segmentos. Las
+    /// claves de wire que lo envuelven (`name` en el catálogo, `field` en la inspección) las fija el
+    /// `#[serde(rename)]` del campo que lo contiene, no este `impl`.
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.collect_str(self)
+    }
+}
+
+/// Frontmatter parseado de un documento. **Es metadata arbitraria del usuario**: sin campos
+/// conocidos, sin lista cerrada, sin conversión automática de tipos y sin borrado de claves
+/// desconocidas (`ARCHITECTURE.md §20.4`).
+///
+/// La ausencia de frontmatter se modela con `Option<ParsedFrontmatter>` (`None`), **no** con
+/// `Value::Null`: «sin frontmatter» y «frontmatter vacío» son dos estados distintos del modelo.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ParsedFrontmatter {
+    /// El YAML del bloque. **Siempre** un `Mapping` (vacío si el bloque está vacío o su YAML no
+    /// es un mapa): el accesor y los catálogos de metadata necesitan una forma uniforme.
+    pub value: serde_yaml::Value,
+    /// Texto YAML **exacto** del bloque, sin los delimitadores `---`.
+    pub raw: String,
+    /// Rango de **bytes** que ocupa [`Self::raw`] dentro del raw del documento, de modo que
+    /// `documento[span] == raw`. Excluye los delimitadores: el patch quirúrgico sustituye
+    /// exactamente ese rango y los diagnósticos derivan de él su rango de reporte.
+    ///
+    /// En un `ParsedFrontmatter` **sintético** (el que construye [`ParsedFrontmatter::from_mapping`]
+    /// para los flujos de escritura, que aún no tienen documento) el span es relativo a su propio
+    /// `raw`.
+    pub span: std::ops::Range<usize>,
+}
+
+impl Default for ParsedFrontmatter {
+    fn default() -> Self {
+        ParsedFrontmatter::from_mapping(serde_yaml::Mapping::new())
+    }
+}
+
+impl ParsedFrontmatter {
+    /// Construye un `ParsedFrontmatter` **sintético** a partir de un mapa YAML ya editado, que no
+    /// procede de ningún documento: `raw` es la serialización canónica del mapa y `span` la cubre
+    /// entera. Lo usan los flujos de escritura (merge-patch, creación de documentos), que componen
+    /// frontmatter en memoria antes de que exista el `.md`.
+    pub fn from_mapping(map: serde_yaml::Mapping) -> Self {
+        let value = serde_yaml::Value::Mapping(map);
+        let raw = serde_yaml::to_string(&value)
+            .unwrap_or_default()
+            .trim_end()
+            .to_string();
+        let span = 0..raw.len();
+        ParsedFrontmatter { value, raw, span }
+    }
+
+    /// El `value` como `Mapping`. Siempre lo es por construcción; devuelve el mapa vacío si
+    /// alguien manipuló el campo público hasta dejarlo en otra forma.
+    pub fn mapping(&self) -> &serde_yaml::Mapping {
+        static VACIO: once_cell::sync::Lazy<serde_yaml::Mapping> =
+            once_cell::sync::Lazy::new(serde_yaml::Mapping::new);
+        self.value.as_mapping().unwrap_or(&VACIO)
+    }
+
+    /// **La** única verdad de acceso a metadata (invariante #3): resuelve un [`FieldPath`]
+    /// descendiendo por mapas anidados. Descender por un escalar, o por una clave que no existe,
+    /// es ausencia (`None`), nunca un error.
+    ///
+    /// Una clave presente con valor `null` devuelve `Some(&Value::Null)` — así se distingue de la
+    /// clave ausente.
+    pub fn get(&self, path: &FieldPath) -> Option<&serde_yaml::Value> {
+        let mut actual = &self.value;
+        for segmento in &path.0 {
+            actual = lookup(actual, segmento)?;
+        }
+        Some(actual)
+    }
+
+    /// Atajo de [`Self::get`] con un `FieldPath` de un **único segmento literal**: la clave de
+    /// primer nivel `key`, aunque contenga puntos.
+    pub fn get_key(&self, key: &str) -> Option<&serde_yaml::Value> {
+        lookup(&self.value, key)
+    }
+
+    /// El valor escalar de la clave de primer nivel `key` renderizado a texto, para las columnas
+    /// de la cache y los DTO de presentación. `None` si la clave falta o su valor **no** es un
+    /// escalar (`null`, lista y mapa no tienen texto: no se aplanan).
+    ///
+    /// Es *renderizado de salida*, no la coerción de parseo que E16-H01 retiró: el `value` sigue
+    /// conservando el tipo YAML real.
+    pub fn get_text(&self, key: &str) -> Option<String> {
+        self.get_key(key).and_then(scalar_text)
+    }
+
+    /// `true` si la clave de primer nivel `key` está presente (aunque su valor sea `null`).
+    pub fn contains_key(&self, key: &str) -> bool {
+        self.get_key(key).is_some()
+    }
+
+    /// Recorrido **recursivo** de toda la metadata direccionable: pares `(FieldPath, &Value)` en
+    /// profundidad, **orden de aparición** y padre antes que hijos (`service`, `service.name`,
+    /// `service.tier`).
+    ///
+    /// Es la pieza que el store v2 necesita para materializar la tabla `metadata` (`§20.12`,
+    /// E18-H01) **sin escribir un segundo navegador del `Value`** (invariante #3), y la que
+    /// heredan el evaluador de consultas (E19) y `metadata_inspect` (E20).
+    ///
+    /// **Invariante rector**: para todo par `(path, value)` devuelto,
+    /// `self.get(&path) == Some(value)`. De él se siguen las cuatro reglas del recorrido:
+    ///
+    /// - Se **desciende solo por mapas** (igual que [`Self::get`]), y los mapas intermedios se
+    ///   emiten **también** como par propio: `service` además de `service.name`/`service.tier`.
+    /// - Una **lista es una hoja**: [`FieldPath`] no direcciona posiciones, así que emitir
+    ///   `owners.0` inventaría paths que [`Self::get`] no resuelve. El valor entero —con los mapas
+    ///   que contenga— viaja en el par de la propia lista.
+    /// - Una clave **no escalar** (una lista o un mapa como clave, legales en YAML) no es
+    ///   direccionable: ni ella ni su subárbol se emiten.
+    /// - Si dos claves del mismo mapa **rinden al mismo texto** (`1:` y `"1":`), se emite solo la
+    ///   primera: es la que resuelve [`Self::get`].
+    ///
+    /// La raíz no se emite: [`FieldPath`] es no vacío por construcción.
+    pub fn walk(&self) -> Vec<(FieldPath, &serde_yaml::Value)> {
+        let mut out = Vec::new();
+        let mut prefijo: Vec<String> = Vec::new();
+        walk_mapping(&self.value, &mut prefijo, &mut out);
+        out
+    }
+
+    /// Pares clave→valor de primer nivel, en **orden de aparición**. Las claves se rinden a texto
+    /// (las no escalares se omiten: no son direccionables por [`FieldPath`]).
+    pub fn entries(&self) -> Vec<(String, &serde_yaml::Value)> {
+        self.mapping()
+            .iter()
+            .filter_map(|(k, v)| scalar_text(k).map(|k| (k, v)))
+            .collect()
+    }
+}
+
+/// Recorre en profundidad el mapa `valor`, acumulando en `out` un par `(FieldPath, &Value)` por
+/// cada propiedad **direccionable por [`ParsedFrontmatter::get`]**, con `prefijo` como camino de
+/// segmentos hasta este nivel. Reflejo exacto de [`lookup`] (la única verdad de acceso): de ahí se
+/// sigue el invariante rector `get(path) == Some(value)` para todo par emitido.
+fn walk_mapping<'a>(
+    valor: &'a serde_yaml::Value,
+    prefijo: &mut Vec<String>,
+    out: &mut Vec<(FieldPath, &'a serde_yaml::Value)>,
+) {
+    let Some(mapa) = valor.as_mapping() else {
+        return;
+    };
+    // Dedup por el TEXTO de la clave dentro de este mismo mapa: si dos claves rinden al mismo
+    // texto (`1:` y `"1":`), `get`/`lookup` resuelve la primera, así que solo esa se emite.
+    let mut vistos: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for (clave, hijo) in mapa {
+        // Una clave no escalar (lista/mapa como clave, legales en YAML) no es direccionable.
+        let Some(texto) = scalar_text(clave) else {
+            continue;
+        };
+        if !vistos.insert(texto.clone()) {
+            continue;
+        }
+        prefijo.push(texto);
+        // Un segmento vacío (clave `""`) no construye un `FieldPath` válido: ni se emite el par ni
+        // se desciende por su subárbol (sería inalcanzable por `get`). El resto sí.
+        if let Ok(path) = FieldPath::from_segments(prefijo.iter().cloned()) {
+            out.push((path, hijo));
+            // Se desciende SOLO por mapas: una lista es una hoja (su valor entero viaja en su par;
+            // `FieldPath` no direcciona posiciones).
+            if hijo.is_mapping() {
+                walk_mapping(hijo, prefijo, out);
+            }
+        }
+        prefijo.pop();
+    }
+}
+
+/// Busca `segmento` como clave de `valor` si este es un mapa. Compara por el **texto** de la
+/// clave, de modo que una clave escalar no-string (`1: x`) sigue siendo direccionable.
+fn lookup<'a>(valor: &'a serde_yaml::Value, segmento: &str) -> Option<&'a serde_yaml::Value> {
+    valor
+        .as_mapping()?
+        .iter()
+        .find(|(k, _)| scalar_text(k).as_deref() == Some(segmento))
+        .map(|(_, v)| v)
+}
+
+/// Texto de un escalar YAML (string, número o booleano). `None` para `null`, listas y mapas.
+///
+/// `pub(crate)`: es **la** única verdad de «texto de un escalar» del core (la usan [`lookup`],
+/// [`ParsedFrontmatter::get_text`] y el orden de `values` en `crate::metadata`), de modo que el
+/// número `2` y el string `"2"` rinden al mismo texto sin que nadie reimplemente ese render.
+pub(crate) fn scalar_text(v: &serde_yaml::Value) -> Option<String> {
+    match v {
+        serde_yaml::Value::String(s) => Some(s.clone()),
+        serde_yaml::Value::Number(n) => Some(n.to_string()),
+        serde_yaml::Value::Bool(b) => Some(b.to_string()),
+        _ => None,
+    }
 }
 
 /// Error de frontmatter (es un dato, no un `Result`: `parse_file` nunca falla por contenido).
+///
+/// **No** hay variante «falta el frontmatter»: desde E16-H01 un documento sin bloque es válido y
+/// se modela con `frontmatter: None` (`ARCHITECTURE.md §20.4`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FmError {
-    Missing,
     Unclosed,
     Malformed(String),
 }
 
-/// Fichero parseado. `parse_file` NUNCA devuelve `Err` por contenido: FM01/02/03 son Checks (datos).
-#[derive(Debug, Clone)]
-pub struct ParsedFile {
-    pub kind: FileKind,
-    pub fm: Option<Frontmatter>,
-    pub fm_err: Option<FmError>,
-    pub body: String,
-    pub raw: String,
+// ---------------------------------------------------------------------------
+// Enlaces: LinkKind · RawLink · LinkTarget · ResolvedLink · Inventory (§20.6, E17-H01/H02)
+// ---------------------------------------------------------------------------
+//
+// Viven en `types` y no en `links` por el invariante #4 (`LinkTarget` viaja en el wire de
+// `knowledge_get.outgoingLinks`). Las derivas de serialización se fijan aquí, **una vez**:
+// `LinkTarget` va etiquetado adyacente en camelCase —`{"kind":"document","value":"a/b.md"}`,
+// `{"kind":"escapesWorkspace"}`— para que la variante sin payload no cambie la forma de las
+// demás. Qué tool lo expone, y bajo qué campo, es E17-H05.
+
+schema_derive! {
+/// Sintaxis con la que se escribió un enlace Markdown (`§20.6`). Es el `link_type` del parser:
+/// clasifica **la forma**, no el destino (eso es [`LinkTarget`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum LinkKind {
+    /// `[texto](destino)`.
+    Inline,
+    /// `[texto][id]` con su definición `[id]: destino`.
+    Reference,
+    /// `[id][]`.
+    Collapsed,
+    /// `[id]`.
+    Shortcut,
+    /// `<https://example.com>`.
+    Autolink,
+}
+}
+
+schema_derive! {
+/// Un enlace tal como aparece en el cuerpo, **sin resolver** (E17-H01).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RawLink {
+    /// El destino **crudo**, tal como está escrito: sin percent-decoding, con su fragmento y su
+    /// query. En un enlace de referencia es el destino de la **definición**.
+    pub href: String,
+    /// El texto visible del enlace, en plano.
+    pub text: String,
+    /// Rango de **bytes del destino** dentro del cuerpo (no del enlace entero): `body[span]` es
+    /// `href`. Lo consumen el `range` de los diagnósticos (`§20.9`) y la reescritura quirúrgica de
+    /// `move_document` (`§20.11`).
+    pub span: std::ops::Range<usize>,
+    /// La forma sintáctica del enlace.
+    pub kind: LinkKind,
+}
+}
+
+schema_derive! {
+/// Clasificación del destino de un enlace (`ARCHITECTURE.md §20.6`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "value", rename_all = "camelCase")]
+pub enum LinkTarget {
+    /// Otro documento Markdown del inventario → **arista del grafo**.
+    Document(RelPath),
+    /// Fichero del proyecto que existe pero **no** es documento (p. ej. código): no es nodo.
+    WorkspaceFile(RelPath),
+    /// URI con esquema (`https:`, `mailto:`…).
+    ExternalUri(String),
+    /// Anchor del propio documento, **sin** la almohadilla.
+    SelfAnchor(String),
+    /// Destino contenido en el workspace que no existe, con su path ya normalizado.
+    Missing(RelPath),
+    /// El destino sale de la raíz del workspace. No lleva path: no hay `RelPath` que lo represente.
+    EscapesWorkspace,
+}
+}
+
+impl LinkTarget {
+    /// El destino si el enlace conecta con **otro documento** del grafo, o `None` si no.
+    ///
+    /// Interno = [`LinkTarget::Document`] (arista real) o [`LinkTarget::Missing`] **de un destino
+    /// que sería un documento Markdown** ([`RelPath::is_markdown`]): la arista a un fantasma, el
+    /// documento que aún no existe pero al que ya se enlaza. Una URI externa, un anchor propio, un
+    /// escape o un fichero del proyecto **no** conectan con ningún documento (`§20.7`).
+    ///
+    /// El filtro por familia solo se aplica a `Missing`, y es lo que impide que un enlace roto a
+    /// código (`[x](src/no_existe.rs)`) meta un vértice `.rs` en el grafo de conocimiento, cuyos
+    /// nodos son «todos los documentos **Markdown** descubiertos» (`§20.7`). A `Document` no se le
+    /// aplica —ni puede aplicársele—: ese destino **está** en el inventario, así que es un documento
+    /// aunque la política de descubrimiento admita otras extensiones; decidirlo por el nombre sería
+    /// justo la clasificación por extensión que `§20.6` prohíbe. Un enlace roto a código sigue
+    /// siendo un colgante diagnosticado (`LINK-TARGET-MISSING`, `Warn`) y sigue apareciendo en
+    /// [`Analysis::dangling`]: lo que no es, es un nodo.
+    ///
+    /// Es la **única** definición de «enlace interno» (invariante #3): la reusan el grafo, los
+    /// aislados, la reescritura de `move_document` y la tabla `links` de la cache.
+    pub fn internal_path(&self) -> Option<&RelPath> {
+        match self {
+            LinkTarget::Document(p) => Some(p),
+            LinkTarget::Missing(p) if p.is_markdown() => Some(p),
+            _ => None,
+        }
+    }
+
+    /// `true` si el enlace conecta con otro documento del grafo. Ver [`LinkTarget::internal_path`].
+    pub fn is_internal(&self) -> bool {
+        self.internal_path().is_some()
+    }
+}
+
+schema_derive! {
+/// Un enlace ya resuelto y clasificado (E17-H02).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResolvedLink {
+    /// El href **original**, byte a byte (paso 10 del algoritmo de `§20.6`).
+    pub href: String,
+    /// El texto visible del enlace.
+    pub text: String,
+    /// Rango de bytes del destino dentro del cuerpo del documento origen.
+    pub span: std::ops::Range<usize>,
+    /// La forma sintáctica del enlace.
+    pub kind: LinkKind,
+    /// El destino clasificado.
+    pub target: LinkTarget,
+    /// El fragmento (`#seccion`) **sin** la almohadilla, si lo había. Vive aquí y no dentro de
+    /// [`LinkTarget`] porque es ortogonal a la clasificación — y porque es una columna propia de
+    /// `links(…, fragment, …)` en el store v2 (`§20.12`).
+    pub fragment: Option<String>,
+}
+}
+
+schema_derive! {
+/// Un enlace visto **desde su destino**: quién lo escribe y cómo (`§20.7`, E17-H04).
+///
+/// Es el elemento de [`Analysis::incoming`], que es literalmente la inversa de
+/// [`Analysis::outgoing`]: `link` es **el mismo** [`ResolvedLink`] que su origen tiene entre sus
+/// salientes, no una copia recalculada (invariante #3). Anida el enlace en vez de copiar sus
+/// campos porque `move_document` necesita su `span` y su `kind` para reescribir el destino.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LinkReference {
+    /// El documento que escribe el enlace.
+    pub from: RelPath,
+    /// El enlace, ya resuelto y clasificado.
+    pub link: ResolvedLink,
+}
+}
+
+schema_derive! {
+/// Un enlace **roto**: quién lo escribe, qué destino pretendía y cómo lo escribió (`§20.7`,
+/// E17-H04).
+///
+/// Invariante: `link.target == LinkTarget::Missing(target)` — `target` es el payload de la
+/// variante, no un segundo cálculo. Sustituye al `Vec<RelPath>` de destinos perdidos de la forma
+/// anterior, que no permitía decir **quién** enlazaba mal.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DanglingLink {
+    /// El documento que contiene el enlace roto.
+    pub from: RelPath,
+    /// El destino pretendido, ya normalizado desde el origen.
+    pub target: RelPath,
+    /// El enlace tal como se escribió, ya resuelto.
+    pub link: ResolvedLink,
+}
+}
+
+/// Lo que el motor sabe que existe en el workspace, sin tocar el disco (invariante #2).
+///
+/// Separa **documentos** (los `.md` descubiertos, nodos potenciales del grafo) de los **demás
+/// ficheros** del proyecto (código, imágenes, …), que `resolve` necesita para poder clasificar un
+/// destino como [`LinkTarget::WorkspaceFile`] en vez de como [`LinkTarget::Missing`]. Quien hace
+/// I/O —el descubrimiento de `lodestar-workspace`— es quien lo construye.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Inventory {
+    documents: BTreeSet<RelPath>,
+    other_files: BTreeSet<RelPath>,
+    /// Índice auxiliar `ruta plegada a minúsculas → ruta REAL`, derivado de los dos anteriores.
+    /// Solo lo consume [`Inventory::find_ignoring_case`]; no forma parte de la identidad del
+    /// inventario más allá de lo que ya determinan `documents`/`other_files`.
+    folded: BTreeMap<String, RelPath>,
+}
+
+impl Inventory {
+    /// Inventario completo: documentos Markdown + resto de ficheros del proyecto.
+    ///
+    /// Los `.md` que existen en disco pero están **excluidos del descubrimiento** (un `vendor/`
+    /// bajo `.gitignore`, p. ej.) van en `other_files`, no en `documents`: existen —así que su
+    /// enlace no «falta»— pero no son nodos del grafo (`ARCHITECTURE.md §20.6`, precisión 2).
+    pub fn new<D, F>(documents: D, other_files: F) -> Inventory
+    where
+        D: IntoIterator<Item = RelPath>,
+        F: IntoIterator<Item = RelPath>,
+    {
+        Inventory::build(
+            documents.into_iter().collect(),
+            other_files.into_iter().collect(),
+        )
+    }
+
+    /// Atajo: solo los documentos de un [`FileMap`], sin ficheros no-Markdown conocidos.
+    pub fn from_documents(files: &FileMap) -> Inventory {
+        Inventory::build(files.keys().cloned().collect(), BTreeSet::new())
+    }
+
+    /// Construye el inventario y su índice plegado. Los documentos entran **antes** que el resto
+    /// de ficheros y en orden de `RelPath`, así que si dos rutas colisionan al plegar
+    /// capitalización gana siempre la misma (determinismo: el veredicto no depende del orden de
+    /// inserción del llamante).
+    fn build(documents: BTreeSet<RelPath>, other_files: BTreeSet<RelPath>) -> Inventory {
+        let mut folded: BTreeMap<String, RelPath> = BTreeMap::new();
+        for p in documents.iter().chain(other_files.iter()) {
+            folded
+                .entry(p.as_str().to_lowercase())
+                .or_insert_with(|| p.clone());
+        }
+        Inventory {
+            documents,
+            other_files,
+            folded,
+        }
+    }
+
+    /// La ruta **real** del inventario que coincide con `path` salvo capitalización, o `None` si
+    /// no hay ninguna. Con una coincidencia exacta devuelve la propia `path`.
+    ///
+    /// Es lo que convierte un destino ausente en `LINK-CASE-MISMATCH` (E17-H03): el veredicto sale
+    /// de este inventario **en memoria**, jamás del disco, así que es idéntico en un volumen
+    /// case-insensitive (APFS) y en uno que no lo es (ext4) — que es justo el problema de
+    /// portabilidad que el diagnóstico denuncia. El plegado es Unicode ([`str::to_lowercase`]),
+    /// no ASCII.
+    pub fn find_ignoring_case(&self, path: &RelPath) -> Option<&RelPath> {
+        self.folded.get(&path.as_str().to_lowercase())
+    }
+
+    /// ¿Hay un documento Markdown en esa ruta exacta?
+    ///
+    /// Comparación **exacta**, sin plegado de mayúsculas: `Docs/Auth.md` no es `docs/auth.md`. De
+    /// ahí sale el diagnóstico de portabilidad `LINK-CASE-MISMATCH` (E17-H03).
+    pub fn contains_document(&self, path: &RelPath) -> bool {
+        self.documents.contains(path)
+    }
+
+    /// ¿Existe un fichero del proyecto (no Markdown) en esa ruta exacta?
+    pub fn contains_file(&self, path: &RelPath) -> bool {
+        self.other_files.contains(path)
+    }
 }
 
 // ---------------------------------------------------------------------------
-// Análisis del bundle: Analysis (§4.1, §10 filas 4/5)
+// Análisis del workspace: Analysis (§4.1, §10 filas 4/5)
 // ---------------------------------------------------------------------------
 
 schema_derive! {
-/// El resultado de `analyze()`. Nombres = los del prototipo (`inn`, `perFile`, `out`). camelCase en wire.
+/// El resultado de `analyze()`: el **grafo universal** de `ARCHITECTURE.md §20.7` (E17-H04).
+/// Wire en camelCase.
+///
+/// Nodos = todos los documentos descubiertos; aristas = los enlaces resueltos entre ellos. Los
+/// seis campos son exactamente los de `§20.7`: **ninguno es un contador** — `hard_fail`/
+/// `warn_count` pasaron a ser [`Analysis::hard_fail`]/[`Analysis::warn_count`], derivados de
+/// `diagnostics`, de modo que no puede existir un recuento desincronizado de la lista de la que
+/// sale (invariante #3).
+///
+/// **E16-H02** retiró `in_index`/`okf_version` (y `Backlinks::index_refs`): la pertenencia
+/// determinada por índices no existe — `index.md` es un documento como cualquier otro y sus
+/// enlaces son aristas normales. **E17-H04** sustituyó la adyacencia de strings (`out`/`inn`) por
+/// los enlaces resueltos, `dangling: Vec<RelPath>` por [`DanglingLink`] y `per_file` por
+/// `diagnostics`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Analysis {
-    pub concepts: Vec<RelPath>,
-    /// Adyacencia de strings (destinos salientes resueltos por concepto).
-    pub out: BTreeMap<RelPath, Vec<RelPath>>,
-    /// Backlinks (la inversa de `out`).
-    pub inn: BTreeMap<RelPath, Vec<RelPath>>,
-    pub in_index: BTreeSet<RelPath>,
-    pub dangling: Vec<RelPath>,
-    pub orphans: Vec<RelPath>,
-    pub per_file: BTreeMap<RelPath, Vec<Check>>,
-    /// `hard_fail` = nº de ficheros con algún `Err` (conteo, no `.max()`). (`§10` fila 4.)
-    pub hard_fail: usize,
-    pub warn_count: usize,
-    /// Del `index.md` raíz; `None` si falta. Se expone en la conformidad (`§12`).
-    pub okf_version: Option<String>,
+    /// **Todos** los documentos del workspace, ordenados por `RelPath`: ningún basename se salta
+    /// el análisis (`§20.7`).
+    pub documents: Vec<RelPath>,
+    /// Enlaces salientes ya resueltos, en **orden de aparición** en el cuerpo. Una entrada por
+    /// documento (vector vacío si no enlaza a nadie). Lleva **todos** los enlaces —también los
+    /// externos, los anchors y los que apuntan a ficheros del proyecto—, no solo las aristas del
+    /// grafo: los necesitan `knowledge_get`, `move_document` y la tabla `links` del store v2. El
+    /// filtro de qué es arista lo hace el grafo, no esta lista.
+    pub outgoing: BTreeMap<RelPath, Vec<ResolvedLink>>,
+    /// La inversa de `outgoing`: quién enlaza a cada documento, con **una entrada por enlace**
+    /// (un origen que enlaza dos veces aparece dos veces). Una entrada por documento.
+    pub incoming: BTreeMap<RelPath, Vec<LinkReference>>,
+    /// Documentos **aislados** (`§20.7`): sin enlaces internos entrantes **ni** salientes. Es una
+    /// propiedad consultable, **no** un diagnóstico (el código `ORPHAN` murió con E16-H02).
+    pub isolated: Vec<RelPath>,
+    /// Los enlaces cuyo destino es [`LinkTarget::Missing`], con su origen y su href crudo.
+    pub dangling: Vec<DanglingLink>,
+    /// Diagnósticos por documento (antes `per_file`). Una entrada por documento.
+    pub diagnostics: BTreeMap<RelPath, Vec<Check>>,
 }
+}
+
+impl Analysis {
+    /// Nº de **ficheros** con al menos un diagnóstico [`Severity::Err`] (conteo de ficheros, no
+    /// `.max()` ni nº de diagnósticos — `§10` fila 4). Es lo que decide la puerta de CI
+    /// (`WorkspaceConfig::gate_blocked`, `lodestar check`).
+    ///
+    /// Derivado de `diagnostics` en cada llamada: `§20.7` no admite un campo contador, y así el
+    /// recuento no puede divergir de la lista de la que sale (invariante #3).
+    pub fn hard_fail(&self) -> usize {
+        self.diagnostics
+            .values()
+            .filter(|cs| cs.iter().any(|c| c.level == Severity::Err))
+            .count()
+    }
+
+    /// Nº total de **diagnósticos** [`Severity::Warn`] del workspace (suma sobre ficheros, no
+    /// conteo de ficheros — es la semántica histórica de `warn_count`). Derivado de `diagnostics`,
+    /// por la misma razón que [`Analysis::hard_fail`].
+    pub fn warn_count(&self) -> usize {
+        self.diagnostics
+            .values()
+            .flatten()
+            .filter(|c| c.level == Severity::Warn)
+            .count()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -455,13 +967,17 @@ pub struct GraphModel {
 }
 
 schema_derive! {
+/// Un nodo del grafo (`§20.7`, E17-H05).
+///
+/// Perdió `type`/`status` —campos OKF, que dejaron de ser vocabulario del modelo (`§20.3`)— y ganó
+/// el **título derivado** de E16-H03 ([`crate::model::derived_title`]). Conserva `ghost`, que
+/// distingue el nodo de un destino [`LinkTarget::Missing`] del de un documento real.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GraphNode {
     pub id: RelPath,
+    pub title: String,
     pub ghost: bool,
-    pub r#type: Option<String>,
-    pub status: Option<String>,
 }
 }
 
@@ -484,7 +1000,7 @@ pub enum Direction {
 }
 
 schema_derive! {
-/// Subgrafo dirigido alrededor de un concept (`root` = el centro).
+/// Subgrafo dirigido alrededor de un documento (`root` = el centro).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Neighborhood {
@@ -495,45 +1011,43 @@ pub struct Neighborhood {
 }
 
 // ---------------------------------------------------------------------------
-// DTOs de lectura de Bundle (§4.2)
+// DTOs de lectura de DocumentSet (§4.2)
 // ---------------------------------------------------------------------------
 
 schema_derive! {
-/// Fila del árbol de concepts. `title` ya resuelto (fm.title o del path); `invalid` = algún Check Err.
+/// Fila del árbol de documentos. `title` ya resuelto por [`crate::model::derived_title`];
+/// `invalid` = algún Check `Err`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ConceptSummary {
+pub struct DocumentSummary {
     pub path: RelPath,
     pub title: String,
     pub r#type: Option<String>,
     pub status: Option<String>,
-    pub orphan: bool,
+    /// Sin enlaces internos entrantes ni salientes ([`Analysis::isolated`]). Antes `orphan`, con
+    /// otra definición ("sin entrantes y no listado en un índice") — E16-H02.
+    pub isolated: bool,
     pub invalid: bool,
 }
 }
 
 schema_derive! {
-/// Un extremo de un enlace + el href crudo tal como aparece en el `.md` (port de `resolveLink`).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct LinkRef {
-    pub path: RelPath,
-    pub href: String,
-}
-}
-
-schema_derive! {
-/// Vecindad de enlaces de un concept (port del panel de backlinks).
+/// Vecindad de enlaces de un documento: su porción de [`Analysis::incoming`]/
+/// [`Analysis::outgoing`], sin recalcular nada (invariante #3).
+///
+/// **E16-H02** retiró `index_refs`: un `index.md` que te enlaza es un entrante más de `inbound`,
+/// no una relación de pertenencia aparte (`REFACTOR_PHASE_2 §Fase 8 (Eliminar)`). **E17-H05**
+/// pasó `inbound`/`out` a los tipos del grafo universal: el `LinkRef` `{path, href}` (que solo
+/// llevaba el href) desapareció, y `out` dejó de ser una lista de paths resueltos.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Backlinks {
-    /// Quién enlaza aquí (con el href usado).
-    pub inbound: Vec<LinkRef>,
-    /// `index.md` que lo listan.
-    pub index_refs: Vec<RelPath>,
-    /// Destinos salientes resueltos.
-    pub out: Vec<RelPath>,
-    /// Hrefs salientes que no resuelven a ningún fichero.
-    pub dangling: Vec<String>,
+    /// Quién enlaza aquí, con el enlace completo (una entrada por **enlace**).
+    pub inbound: Vec<LinkReference>,
+    /// Los enlaces salientes del documento, resueltos y en orden de aparición. Incluye los
+    /// externos, los anchors y los colgantes: la clasificación va dentro de cada
+    /// [`ResolvedLink::target`], no en listas separadas.
+    pub out: Vec<ResolvedLink>,
 }
 }
 
@@ -563,20 +1077,13 @@ pub struct WriteOutcome {
     pub written: bool,
     pub rejected: Option<String>,
     pub checks: Vec<Check>,
-    pub bundle_hard_fail: usize,
-}
-
-/// Plan de generación puro: la workspace lo aplica por el único camino de escritura.
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct Mutation {
-    pub writes: BTreeMap<RelPath, String>,
-    pub deletes: Vec<RelPath>,
+    pub workspace_hard_fail: usize,
 }
 
 // ---------------------------------------------------------------------------
-// Identidad de contenido determinista: `ConceptRevision` / `WorkspaceRevision`
+// Identidad de contenido determinista: `DocumentRevision` / `WorkspaceRevision`
 // (E10-H03, `ARCHITECTURE.md §19.3`, `REFACTOR §6.2/§6.3`). Eleva blake3 (ya usado en
-// `WriteOutcome.hash`, `bundle.rs`) a identidad expuesta. Wire = string `"blake3:<hex>"`.
+// `WriteOutcome.hash`, `document_set.rs`) a identidad expuesta. Wire = string `"blake3:<hex>"`.
 // ---------------------------------------------------------------------------
 
 schema_derive! {
@@ -584,14 +1091,14 @@ schema_derive! {
 /// Wire = el string tal cual (sin envoltorio de objeto).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
-pub struct ConceptRevision(pub String);
+pub struct DocumentRevision(pub String);
 }
 
-impl ConceptRevision {
+impl DocumentRevision {
     /// Construye la revisión a partir de un hash blake3 crudo (el mismo patrón que
     /// `WriteOutcome.hash`).
     pub fn from_hash(hash: [u8; 32]) -> Self {
-        ConceptRevision(format!("blake3:{}", blake3::Hash::from(hash).to_hex()))
+        DocumentRevision(format!("blake3:{}", blake3::Hash::from(hash).to_hex()))
     }
 }
 
@@ -633,7 +1140,7 @@ fn under_lodestar(path: &RelPath) -> bool {
 /// - Excluye SIEMPRE todo lo bajo `.lodestar/` (cachés/índices/runtime, nunca fuente de verdad).
 /// - Si `writable` no está vacío, incluye SOLO los ficheros bajo alguno de esos roots (prefijo por
 ///   segmentos, `under_root`); esto excluye de forma natural los `referenceRoots` (solo lectura).
-/// - Si `writable` está vacío, incluye todo lo que no sea `.lodestar/` (todo el bundle es
+/// - Si `writable` está vacío, incluye todo lo que no sea `.lodestar/` (todo el workspace es
 ///   escribible, coherente con E9-H05).
 ///
 /// Determinismo: itera `files` en su orden natural (`FileMap` es `BTreeMap<RelPath, _>`, ya
@@ -676,8 +1183,8 @@ pub enum ErrorCode {
     WorkspaceNotFound,
     #[serde(rename = "WORKSPACE_RECOVERY_REQUIRED")]
     WorkspaceRecoveryRequired,
-    #[serde(rename = "CONCEPT_NOT_FOUND")]
-    ConceptNotFound,
+    #[serde(rename = "DOCUMENT_NOT_FOUND")]
+    DocumentNotFound,
     #[serde(rename = "AMBIGUOUS_REFERENCE")]
     AmbiguousReference,
     #[serde(rename = "REVISION_CONFLICT")]
@@ -714,7 +1221,7 @@ impl ErrorCode {
         match self {
             ErrorCode::WorkspaceNotFound => "WORKSPACE_NOT_FOUND",
             ErrorCode::WorkspaceRecoveryRequired => "WORKSPACE_RECOVERY_REQUIRED",
-            ErrorCode::ConceptNotFound => "CONCEPT_NOT_FOUND",
+            ErrorCode::DocumentNotFound => "DOCUMENT_NOT_FOUND",
             ErrorCode::AmbiguousReference => "AMBIGUOUS_REFERENCE",
             ErrorCode::RevisionConflict => "REVISION_CONFLICT",
             ErrorCode::PlanStale => "PLAN_STALE",
@@ -733,163 +1240,6 @@ impl ErrorCode {
 }
 
 // ---------------------------------------------------------------------------
-// Tipos de versionado (git) — también en core::types (§4.4). Sin git2, sin I/O.
-// ---------------------------------------------------------------------------
-
-schema_derive! {
-/// SHA de commit. Newtype validado (hex). `git2::Oid` NUNCA cruza la frontera de vcs.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
-pub struct Sha(String);
-}
-
-impl Sha {
-    /// Construye un `Sha` validando que sea hex de 4..=64 caracteres.
-    pub fn new(s: &str) -> Result<Self, crate::CoreError> {
-        let ok = (4..=64).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_hexdigit());
-        if ok {
-            Ok(Sha(s.to_ascii_lowercase()))
-        } else {
-            Err(crate::CoreError::InvalidSha(s.to_string()))
-        }
-    }
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-    /// Forma corta (7 chars) para la UI.
-    pub fn short(&self) -> String {
-        self.0.chars().take(7).collect()
-    }
-}
-
-impl std::fmt::Display for Sha {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-impl<'de> Deserialize<'de> for Sha {
-    fn deserialize<D>(d: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let s = String::deserialize(d)?;
-        Sha::new(&s).map_err(serde::de::Error::custom)
-    }
-}
-
-schema_derive! {
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Author {
-    pub name: String,
-    pub email: String,
-}
-}
-
-schema_derive! {
-/// Una fila del historial. `time_unix` en SEGUNDOS unix (como git).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CommitRow {
-    pub id: Sha,
-    pub short: String,
-    pub message: String,
-    pub author: Author,
-    pub time_unix: i64,
-    pub parents: Vec<Sha>,
-    pub conformance: Option<CommitConformance>,
-}
-}
-
-schema_derive! {
-/// Conformidad de un commit = proyección de `Analysis` sobre su árbol. Cacheada CRUDA (sin strictness).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CommitConformance {
-    pub hard_fail: usize,
-    pub warn_count: usize,
-    pub conform: bool,
-}
-}
-
-/// Estado del repo — detecta merge/rebase en curso (bloquea el commit hasta resolver).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RepoState {
-    Clean,
-    Merging,
-    Rebasing,
-    CherryPicking,
-    Reverting,
-}
-
-schema_derive! {
-/// Una rama. `upstream` = rama remota de seguimiento (p.ej. "origin/main"), si la hay.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Branch {
-    pub name: String,
-    pub is_head: bool,
-    pub upstream: Option<String>,
-    pub ahead: usize,
-    pub behind: usize,
-}
-}
-
-/// Tipo de operación de red.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SyncKind {
-    Push,
-    Pull,
-}
-
-/// Resultado de una operación de red (push/pull) — vía binario `git`.
-#[derive(Debug, Clone)]
-pub struct SyncOutcome {
-    pub kind: SyncKind,
-    pub ok: bool,
-    pub summary: String,
-}
-
-impl Frontmatter {
-    /// Vista del frontmatter como pares clave→valor (known fields presentes + extras), al estilo
-    /// del objeto JS del prototipo. Útil para query (`fmGet`/`Object.values`).
-    pub fn as_pairs(&self) -> Vec<(String, serde_yaml::Value)> {
-        let mut v: Vec<(String, serde_yaml::Value)> = Vec::new();
-        let s = |x: &String| serde_yaml::Value::String(x.clone());
-        // Un known con null explícito se emite como par `(k, Null)` — presente, como en JS.
-        let push_known =
-            |v: &mut Vec<(String, serde_yaml::Value)>, k: &str, val: Option<serde_yaml::Value>| {
-                if let Some(val) = val {
-                    v.push((k.to_string(), val));
-                } else if self.known_null.iter().any(|n| n == k) {
-                    v.push((k.to_string(), serde_yaml::Value::Null));
-                }
-            };
-        push_known(&mut v, "type", self.r#type.as_ref().map(s));
-        push_known(&mut v, "title", self.title.as_ref().map(s));
-        push_known(&mut v, "description", self.description.as_ref().map(s));
-        push_known(&mut v, "resource", self.resource.as_ref().map(s));
-        push_known(&mut v, "tags", self.tags.clone());
-        push_known(&mut v, "timestamp", self.timestamp.clone());
-        push_known(&mut v, "status", self.status.as_ref().map(s));
-        for (k, val) in &self.extra {
-            v.push((k.clone(), val.clone()));
-        }
-        v
-    }
-}
-
-// Constantes canónicas del modelo OKF (port del prototipo).
-pub(crate) const KNOWN_FM: [&str; 7] = [
-    "type",
-    "title",
-    "description",
-    "resource",
-    "tags",
-    "timestamp",
-    "status",
-];
-
-// ---------------------------------------------------------------------------
 // Planificación (`ChangeSet`) — §4.1 vía `ARCHITECTURE.md §19.3`, `REFACTOR §6.4` (E12-H01)
 // ---------------------------------------------------------------------------
 //
@@ -900,7 +1250,7 @@ pub(crate) const KNOWN_FM: [&str; 7] = [
 
 schema_derive! {
 /// Identificador de un `ChangeSet` (plan). Newtype string transparente, mismo patrón que
-/// [`WorkspaceRevision`]/[`ConceptRevision`].
+/// [`WorkspaceRevision`]/[`DocumentRevision`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct ChangeSetId(pub String);
@@ -958,10 +1308,10 @@ pub struct MovedPath {
 }
 
 schema_derive! {
-/// Diff semántico entre el bundle actual y el hipotético resultante de aplicar un `ChangeSet`
+/// Diff semántico entre el workspace actual y el hipotético resultante de aplicar un `ChangeSet`
 /// (E12-H03 lo calcula; aquí solo la forma). `frontmatter_changes`/`body_changes`/
 /// `relation_changes` son los paths afectados por cada categoría — una forma mínima razonable;
-/// E12-H03 puede reusar [`crate::diff::OkfDiff`] como referencia sin que sea obligatorio aquí.
+/// E12-H03 puede reusar [`crate::diff::SnapshotDiff`] como referencia sin que sea obligatorio aquí.
 /// `Default` = diff vacío (plan sin efecto observable), usado por los tests de forma.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
@@ -991,7 +1341,7 @@ pub struct ValidationSummary {
 }
 
 schema_derive! {
-/// Veredicto de conformidad del bundle hipotético resultante de un `ChangeSet` (E12-H04 lo
+/// Veredicto de conformidad del workspace hipotético resultante de un `ChangeSet` (E12-H04 lo
 /// calcula sobre `analyze()`; aquí solo la forma). `Default` = conformidad vacía (sin
 /// diagnósticos, `conformant: false` — coherente con "nada analizado todavía").
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -1016,8 +1366,8 @@ pub enum EditSectionMode {
 }
 
 schema_derive! {
-/// Política ante enlaces entrantes al borrar un concepto (E12-H06). `Reject` es el default del
-/// prototipo/spec — un `delete` sobre un concepto referenciado se rechaza salvo que se pida
+/// Política ante enlaces entrantes al borrar un documento (E12-H06). `Reject` es el default del
+/// prototipo/spec — un `delete` sobre un documento referenciado se rechaza salvo que se pida
 /// explícitamente otra política.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -1032,9 +1382,12 @@ pub enum InboundLinksPolicy {
 
 schema_derive! {
 /// Una operación YA normalizada (resuelta a path(s) y contenido/patch concretos) dentro de un
-/// `ChangeSet`. Las 11 variantes del alcance de E12 (contenido: E12-H05 · estructura: E12-H06 ·
-/// semántica: E12-H07); aquí solo su forma — los campos son razonables para lo que cada operación
-/// resuelve, sin cerrar la lógica que los produce.
+/// `ChangeSet`. Las **8 operaciones universales** de `§20.11` (contenido: E12-H05 · estructura:
+/// E12-H06 · `apply_fix`: E12-H07); aquí solo su forma — los campos son razonables para lo que cada
+/// operación resuelve, sin cerrar la lógica que los produce. E21-H01 retiró las 3 operaciones
+/// semánticas (`add_relation`/`remove_relation`/`transition_status`): una relación es un enlace
+/// Markdown y un estado es una propiedad arbitraria del frontmatter (`§20.11`), así que ambas se
+/// expresan con las universales (una transición es un `PatchFrontmatter`).
 ///
 /// El tag de wire (`op`) usa los mismos nombres snake_case que `proposedOperation.kind`
 /// (`contracts/mcp.yml`) — un solo vocabulario de tipos de operación en el contrato.
@@ -1044,8 +1397,8 @@ schema_derive! {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum NormalizedOperation {
-    /// Crea un concepto nuevo. `body: None` ⇒ se rellena con la `bodyTemplate` del `DocType`
-    /// (E12-H05); aquí la resolución de la plantilla NO ocurre todavía.
+    /// Crea un documento nuevo. `body: None` ⇒ el escritor genera el heading por defecto (tras el
+    /// retiro de `core::schema` en E20-H03 ya no hay `bodyTemplate` de `DocType` que expandir).
     Create {
         path: RelPath,
         #[cfg_attr(feature = "schemars", schemars(skip))]
@@ -1058,7 +1411,7 @@ pub enum NormalizedOperation {
         #[cfg_attr(feature = "schemars", schemars(skip))]
         patch: FrontmatterPatch,
     },
-    /// Sustituye el cuerpo completo del concepto.
+    /// Sustituye el cuerpo completo del documento.
     ReplaceBody { path: RelPath, body: String },
     /// Edita SOLO la subsección acotada por `heading_path` (p. ej. `["Security", "Token
     /// rotation"]`), con el modo indicado.
@@ -1076,33 +1429,18 @@ pub enum NormalizedOperation {
         replace: String,
         expected_occurrences: Option<usize>,
     },
-    /// Mueve/renombra un concepto; `rewrite_inbound_links` decide si sus backlinks se reescriben
+    /// Mueve/renombra un documento; `rewrite_inbound_links` decide si sus backlinks se reescriben
     /// dentro del mismo change set (E12-H06).
     Move {
         from: RelPath,
         to: RelPath,
         rewrite_inbound_links: bool,
     },
-    /// Borra un concepto, sujeto a `inbound_links_policy` si está referenciado (E12-H06).
+    /// Borra un documento, sujeto a `inbound_links_policy` si está referenciado (E12-H06).
     Delete {
         path: RelPath,
         inbound_links_policy: InboundLinksPolicy,
     },
-    /// Añade una relación tipada (validada contra `RelationDef`, E12-H07).
-    AddRelation {
-        source: RelPath,
-        relation: String,
-        target: RelPath,
-    },
-    /// Quita una relación tipada existente.
-    RemoveRelation {
-        source: RelPath,
-        relation: String,
-        target: RelPath,
-    },
-    /// Transiciona el `status` de un concepto (validado contra `allowedStatuses`/lifecycle,
-    /// E12-H07).
-    TransitionStatus { path: RelPath, to: String },
     /// Materializa un `Fix` `safe` sugerido por un diagnóstico previo (`Fix.fix_id`).
     ApplyFix { fix_id: String },
 }
@@ -1153,5 +1491,311 @@ pub struct ChangeReceipt {
     pub result_revision: WorkspaceRevision,
     pub changed_paths: Vec<RelPath>,
     pub semantic_diff: SemanticDiff,
+}
+}
+
+// ---------------------------------------------------------------------------
+// Lenguaje de consulta tipado: QueryValue · ComparisonOperator · FunctionName ·
+// Expression · ValueType · TypeError
+// (`ARCHITECTURE.md §20.8`, `REFACTOR_PHASE_2 §Fase 5`, E19-H01 — supersede la DSL de subcadena
+//  de `§4.3`/`query.rs`, que se retira en E19-H05).
+// ---------------------------------------------------------------------------
+//
+// Aquí se define solo la FORMA del AST y de sus tipos de apoyo (el contrato de wire que toda E19
+// hereda). La lógica del evaluador vive en [`crate::eval::evaluate`] (E19-H01/H04) y la del parser
+// textual en [`crate::parse::parse`] (E19-H02); el filtro JSON es E19-H03.
+
+/// Un valor literal **tipado** de una consulta: el operando derecho de una [`Expression::Comparison`]
+/// y el argumento de una [`Expression::Function`] (`§20.8`, `§Fase 5 (AST unificado)`).
+///
+/// Refleja los cinco tipos escalares/compuestos que el lenguaje admite como literal —
+/// string/número/booleano/`null`/lista— y **conserva el tipo** (no hay coerción): es lo que permite
+/// que `priority = "2"` (string) y `priority = 2` (número) sean literales distintos y no el mismo
+/// valor renderizado a texto.
+///
+/// **Forma serde (contrato de wire, `§20.10`)**: `#[serde(untagged)]` para que el campo `value` del
+/// filtro JSON de E19-H03 deserialice desde el valor JSON **desnudo** (`"accepted"` → `String`, `2`
+/// → `Number`, `true` → `Bool`, `null` → `Null`, `["a","b"]` → `List`) sin envoltura. El número usa
+/// [`serde_yaml::Number`] —el mismo dominio numérico que [`ParsedFrontmatter::get`] devuelve— para
+/// que la comparación no tenga que cruzar representaciones. El orden de las variantes es el orden en
+/// que serde las prueba: `Null` primero (solo casa con `null`), la lista al final. **E19-H03 fija y
+/// testea el round-trip JSON exacto**; aquí solo se declara la forma.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum QueryValue {
+    /// El literal `null`.
+    Null,
+    /// Un booleano (`true`/`false`).
+    Bool(bool),
+    /// Un número (entero o real), en el dominio numérico de YAML.
+    Number(serde_yaml::Number),
+    /// Un string (el literal entrecomillado de la consulta textual).
+    String(String),
+    /// Una lista de literales — el operando de `contains_any`/`contains_all`.
+    List(Vec<QueryValue>),
+}
+
+/// Los operadores de una [`Expression::Comparison`] (`§20.8`, `§Fase 5 (Operadores mínimos)`).
+///
+/// **Un solo `Contains`**: `§Fase 5` lista `contains` bajo «Texto» *y* bajo «Listas»; no son dos
+/// operadores, sino uno cuyo significado lo decide el **tipo del campo** (subcadena sobre un string,
+/// pertenencia sobre una lista). `contains_any`/`contains_all` son exclusivos de listas.
+///
+/// **Forma serde (contrato de wire, `§20.10`)**: nombres largos —`equals`, `greater_than_or_equal`,
+/// …— porque el filtro JSON de E19-H03 usa `"operator": "equals"`, no el símbolo `=`. La consulta
+/// textual de E19-H02 mapea `=`/`>=`/… a estas variantes por su cuenta (el símbolo no es wire).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ComparisonOperator {
+    /// `=` — igualdad por **valor e igualdad de tipo** (cruce de tipos = `false`, no error).
+    #[serde(rename = "equals")]
+    Eq,
+    /// `!=` — la negación de [`ComparisonOperator::Eq`].
+    #[serde(rename = "not_equals")]
+    Ne,
+    /// `>` — orden estricto; exige ambos operandos numéricos o ambos string (cruce = `TypeError`).
+    #[serde(rename = "greater_than")]
+    Gt,
+    /// `>=` — orden no estricto; mismas reglas de tipo que [`ComparisonOperator::Gt`].
+    #[serde(rename = "greater_than_or_equal")]
+    Ge,
+    /// `<` — orden estricto.
+    #[serde(rename = "less_than")]
+    Lt,
+    /// `<=` — orden no estricto.
+    #[serde(rename = "less_than_or_equal")]
+    Le,
+    /// `contains` — subcadena si el campo es string, pertenencia si es lista (el tipo decide).
+    #[serde(rename = "contains")]
+    Contains,
+    /// `starts_with` — prefijo de texto (solo sobre string).
+    #[serde(rename = "starts_with")]
+    StartsWith,
+    /// `ends_with` — sufijo de texto (solo sobre string).
+    #[serde(rename = "ends_with")]
+    EndsWith,
+    /// `contains_any` — la lista del campo comparte al menos un elemento con el literal (solo lista).
+    #[serde(rename = "contains_any")]
+    ContainsAny,
+    /// `contains_all` — la lista del campo contiene todos los elementos del literal (solo lista).
+    #[serde(rename = "contains_all")]
+    ContainsAll,
+}
+
+/// Las funciones de **existencia** de una [`Expression::Function`] (`§20.8`, `§Fase 5 (Existencia)`).
+///
+/// `has(x)` es «la propiedad `x` está presente» y `missing(x)` su negación. Existencia se juzga con
+/// [`ParsedFrontmatter::get`] (presente aunque su valor sea `null`/`""`/`[]`), **no** con la vieja
+/// heurística `fmPresent` de `query.rs` (que trataba `""` y la lista vacía como ausencia).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FunctionName {
+    /// `has(x)` — la propiedad existe.
+    Has,
+    /// `missing(x)` — la propiedad no existe.
+    Missing,
+}
+
+/// El **AST unificado** del lenguaje de consulta (`§20.8`, `§Fase 5 (AST unificado)`): tanto la
+/// consulta textual `where` (E19-H02) como el filtro estructurado `filter` (E19-H03) se traducen a
+/// este único árbol, y **producen exactamente el mismo resultado**.
+///
+/// La evalúa [`crate::eval::evaluate`], que respeta los tipos YAML sin coerción (E19-H01).
+///
+/// **serde diferido a E19-H03**: `Comparison` lleva un [`FieldPath`], que hoy no es
+/// `Serialize`/`Deserialize`; el filtro JSON de E19-H03 —el único consumidor de wire de este
+/// árbol— añadirá esa capacidad y la forma etiquetada (`{and:[…]}`, `{field,operator,value}`) junto
+/// con su test de round-trip. En E19-H01 el AST se construye **en memoria** (por el evaluador y sus
+/// tests), así que aquí basta con `PartialEq` para poder compararlo.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Expression {
+    /// Una comparación `campo operador valor` (`priority >= 2`, `owners contains "security"`).
+    Comparison {
+        field: FieldPath,
+        operator: ComparisonOperator,
+        value: QueryValue,
+    },
+    /// Una llamada de existencia (`has(status)`, `missing(reviewed_at)`). El argumento nombra la
+    /// propiedad como [`QueryValue::String`] (la forma que impone el AST de `§20.8`,
+    /// `arguments: Vec<QueryValue>`); el evaluador lo reinterpreta como [`FieldPath`].
+    Function {
+        name: FunctionName,
+        arguments: Vec<QueryValue>,
+    },
+    /// Conjunción: verdadera si **todas** sus ramas lo son.
+    And(Vec<Expression>),
+    /// Disyunción: verdadera si **alguna** de sus ramas lo es.
+    Or(Vec<Expression>),
+    /// Negación.
+    Not(Box<Expression>),
+}
+
+/// El tipo YAML **observado** de un valor, para poblar los operandos de un [`TypeError`] («qué
+/// encontró»). Es la clasificación mínima que distingue las cinco familias que el lenguaje trata de
+/// forma distinta (escalar ordenable vs no ordenable vs lista vs mapa).
+///
+/// `PartialOrd`/`Ord` (E20-H01): [`ValueType`] es la clave del mapa `inferred_types` de
+/// [`FieldStats`]/[`FieldInspection`]; el orden de declaración da un [`BTreeMap`] determinista.
+///
+/// `Serialize` con `rename_all = "lowercase"` (E20-H03): en el wire de `metadata_inspect` cada tipo
+/// es la **clave en minúscula** de `inferredTypes` (`{"string": 5, "number": 1}`) — el `BTreeMap`
+/// con clave [`ValueType`] serializa a ese objeto. Es la forma que fija `§Fase 6`.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ValueType {
+    /// `null`.
+    Null,
+    /// Un booleano — **no** ordenable.
+    Bool,
+    /// Un número — ordenable entre números.
+    Number,
+    /// Un string — ordenable entre strings (lexicográfico) y contenedor de subcadenas.
+    String,
+    /// Una lista.
+    List,
+    /// Un mapa/objeto.
+    Mapping,
+}
+
+impl ValueType {
+    /// Clasifica un [`serde_yaml::Value`] en su [`ValueType`]. La usa el evaluador para poblar los
+    /// operandos de un [`TypeError`]; se declara aquí (no en `eval`) por vivir junto al enum.
+    pub fn of(value: &serde_yaml::Value) -> ValueType {
+        match value {
+            serde_yaml::Value::Null => ValueType::Null,
+            serde_yaml::Value::Bool(_) => ValueType::Bool,
+            serde_yaml::Value::Number(_) => ValueType::Number,
+            serde_yaml::Value::String(_) => ValueType::String,
+            serde_yaml::Value::Sequence(_) => ValueType::List,
+            serde_yaml::Value::Mapping(_) => ValueType::Mapping,
+            // `Tagged` (un `!Tag valor` de YAML) se clasifica por su valor interno.
+            serde_yaml::Value::Tagged(t) => ValueType::of(&t.value),
+        }
+    }
+}
+
+/// El error de tipo del evaluador (`§20.8`, `§Fase 5 (Semántica de tipos)`): la consecuencia de
+/// prohibir la coerción implícita. Es lo que separa este lenguaje de un grep — `priority >= "high"`
+/// **no** es `false`, es un error.
+///
+/// Lleva estructurado *qué esperaba* (la variante) y *qué encontró* (los [`ValueType`] de los
+/// operandos), de modo que E20/E21 puedan mapearlo a `ErrorCode::InvalidSchema` con un mensaje
+/// legible sin volver a inspeccionar el `Value`. Tipo **propio** —y no una variante de
+/// [`crate::CoreError`]— porque no es un fallo del núcleo sino un dato del `Result` del evaluador
+/// (mismo espíritu que [`FmError`]): un `where` mal tipado es entrada del agente, y quien lo
+/// traduce a protocolo (la fachada) decide su envoltorio.
+#[derive(Debug, Clone, PartialEq)]
+pub enum TypeError {
+    /// Una comparación de **orden** (`> >= < <=`) cuyos operandos no admiten orden entre sí: un
+    /// número frente a un string (**orden cruzado**), o un tipo no ordenable en cualquiera de los
+    /// lados (booleano, `null`, lista, mapa). El orden solo está definido entre dos números o entre
+    /// dos strings (lexicográfico). Contrasta con `=`/`!=`, que **nunca** es error: el cruce de
+    /// tipos en igualdad es `false`.
+    OrderNotDefined {
+        field: FieldPath,
+        operator: ComparisonOperator,
+        /// El tipo del **campo** (operando izquierdo).
+        field_type: ValueType,
+        /// El tipo del **literal** (operando derecho).
+        value_type: ValueType,
+    },
+    /// Un operador de **lista** (`contains`/`contains_any`/`contains_all`) sobre un campo que no es
+    /// lista. `contains` admite además un string (subcadena), así que solo es error sobre un
+    /// escalar **no string**; `contains_any`/`contains_all` son exclusivos de listas y son error
+    /// también sobre un string. Un campo **inexistente** no llega aquí: la ausencia es `false`.
+    NotAList {
+        field: FieldPath,
+        operator: ComparisonOperator,
+        /// El tipo que tenía el campo (nunca `List`).
+        found: ValueType,
+    },
+}
+
+// ---------------------------------------------------------------------------
+// Inspección de metadata: MetadataCatalog · FieldStats · FieldInspection · ValueCount
+// (`ARCHITECTURE.md §20.10`, `REFACTOR_PHASE_2 §Fase 6`, E20-H01/H02 — supersede `schema_inspect`)
+// ---------------------------------------------------------------------------
+//
+// La FORMA de los tipos de retorno de `crate::metadata::catalog`/`inspect_field`: el contrato de
+// wire que hereda la tool `metadata_inspect` (E20-H03). Aquí se fija el mapeo de wire (`§Fase 6`):
+//   · el `FieldPath` viaja como su string PUNTEADO (`Serialize` de `FieldPath`, arriba), bajo la
+//     clave `"name"` en el catálogo (`#[serde(rename)]`) y `"field"` en la inspección;
+//   · `inferred_types` (`BTreeMap<ValueType, usize>`) se aplana al objeto `{tipo-en-minúscula:
+//     conteo}` gracias al `Serialize` de `ValueType` (`rename_all = "lowercase"`);
+//   · `value` (`serde_yaml::Value`) conserva su tipo JSON natural (número/string/…), sin coerción.
+// Se conservan [`FieldPath`] y [`ValueType`] como identidad —«una sola verdad de qué es un campo y
+// de qué tipo» (invariante #3)—, no una representación paralela en `String`. El wire se DERIVA
+// (no hay capa DTO paralela, invariante #4). `Deserialize` no se deriva: el core PRODUCE estos
+// tipos (los computa `crate::metadata`), no los consume del wire; la tool solo serializa.
+
+schema_derive! {
+/// El **catálogo de propiedades** del workspace (`§Fase 6`, «Catálogo de propiedades»): una fila por
+/// `field_path` que aparece en algún documento. Wire: `{ "fields": [ … ] }`.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct MetadataCatalog {
+    /// Los campos del workspace, en orden **determinista** por [`FieldPath`].
+    pub fields: Vec<FieldStats>,
+}
+}
+
+schema_derive! {
+/// Estadísticas de un `field_path` en el catálogo (`§Fase 6`). Wire:
+/// `{ "name": "status", "presentIn": N, "inferredTypes": { "<tipo>": N } }`.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FieldStats {
+    /// El path de la propiedad, **tal como lo emite** [`ParsedFrontmatter::walk`]: incluye los mapas
+    /// intermedios (`service`) además de las hojas direccionables (`service.name`, `service.tier`),
+    /// para que el catálogo enumere el mismo conjunto de campos que indexa el store v2 (E18) — una
+    /// sola verdad de qué es un campo (invariante #3). En el wire es la clave **`name`** (`§Fase 6`),
+    /// con el `FieldPath` rendido a su string punteado.
+    #[serde(rename = "name")]
+    #[cfg_attr(feature = "schemars", schemars(with = "String"))]
+    pub field: FieldPath,
+    /// Nº de documentos en los que la propiedad aparece.
+    pub present_in: usize,
+    /// Tipos observados y su conteo, clasificando cada valor con [`ValueType::of`]. Invariante:
+    /// `inferred_types.values().sum() == present_in` (una observación de tipo por documento presente).
+    /// Wire: objeto `{tipo-en-minúscula: conteo}`.
+    pub inferred_types: BTreeMap<ValueType, usize>,
+}
+}
+
+schema_derive! {
+/// La **inspección de una propiedad** (`§Fase 6`, «Inspección de una propiedad»). Wire:
+/// `{ "field": "status", "presentIn": N, "missingIn": N, "inferredTypes": {…}, "values": [ … ] }`.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FieldInspection {
+    /// El path inspeccionado. En el wire es la clave **`field`** (`§Fase 6`), con el `FieldPath`
+    /// rendido a su string punteado.
+    #[cfg_attr(feature = "schemars", schemars(with = "String"))]
+    pub field: FieldPath,
+    /// Nº de documentos en los que aparece.
+    pub present_in: usize,
+    /// Nº de documentos en los que NO aparece. Invariante:
+    /// `present_in + missing_in == nº total de documentos del workspace`.
+    pub missing_in: usize,
+    /// Tipos observados y su conteo ([`ValueType::of`] de cada valor). Wire: objeto
+    /// `{tipo-en-minúscula: conteo}`.
+    pub inferred_types: BTreeMap<ValueType, usize>,
+    /// Los valores **escalares** más frecuentes con su conteo, en orden **determinista**: por conteo
+    /// descendente y, a igual conteo, por el texto del valor ascendente. Un valor lista u objeto
+    /// cuenta en `present_in`/`inferred_types` pero **no** aparece aquí (`§Fase 6`: solo escalares).
+    pub values: Vec<ValueCount>,
+}
+}
+
+schema_derive! {
+/// Un valor escalar observado y en cuántos documentos aparece (`§Fase 6`, `{value, count}`).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ValueCount {
+    /// El valor escalar, **con su tipo YAML real** (sin coerción: el número `2` y el string `"2"`
+    /// son valores distintos, con conteos distintos). En el wire conserva su tipo JSON natural.
+    #[cfg_attr(feature = "schemars", schemars(with = "serde_json::Value"))]
+    pub value: serde_yaml::Value,
+    /// Cuántos documentos tienen exactamente ese valor en la propiedad.
+    pub count: usize,
 }
 }

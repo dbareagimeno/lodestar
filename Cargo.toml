@@ -3,7 +3,6 @@ resolver = "2"
 members = [
   "crates/lodestar-core",
   "crates/lodestar-store",
-  "crates/lodestar-vcs",
   "crates/lodestar-workspace",
   "crates/lodestar-app",
   "crates/lodestar-cli",
@@ -12,7 +11,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/dbareagimeno/lodestar"
@@ -29,25 +28,22 @@ blake3 = "1"
 thiserror = "1"
 once_cell = "1"
 regex = "1"
-zip = { version = "2", default-features = false, features = ["deflate"] }
-indexmap = { version = "2", features = ["serde"] }
 unicode-normalization = "0.1"
+# Parser CommonMark del core (E17): puro, sin I/O ni runtime. `html` se activa por feature.
+pulldown-cmark = { version = "0.12", default-features = false }
 schemars = "0.8"
 # Crates internos. Los publicables llevan `version` junto al `path`: cargo usa el `path`
 # en el workspace y sustituye por la `version` (crates.io) al publicar.
-lodestar-core = { path = "crates/lodestar-core", version = "0.2.0" }
-lodestar-store = { path = "crates/lodestar-store", version = "0.2.0" }
-lodestar-vcs = { path = "crates/lodestar-vcs", version = "0.2.0" }
-lodestar-workspace = { path = "crates/lodestar-workspace", version = "0.2.0" }
-lodestar-app = { path = "crates/lodestar-app", version = "0.2.0" }
+lodestar-core = { path = "crates/lodestar-core", version = "0.3.0" }
+lodestar-store = { path = "crates/lodestar-store", version = "0.3.0" }
+lodestar-workspace = { path = "crates/lodestar-workspace", version = "0.3.0" }
+lodestar-app = { path = "crates/lodestar-app", version = "0.3.0" }
 # Solo-dev y `publish = false`: sin `version` para que cargo la descarte al empaquetar.
 lodestar-fixtures = { path = "crates/lodestar-fixtures" }
 # Fachadas / infra
 clap = { version = "4", features = ["derive"] }
 anyhow = "1"
 ignore = "0.4"
-# git2 sin features de red (https/ssh): la red va por el binario `git`. libgit2 vendored.
-git2 = { version = "0.19", default-features = false }
 
 [workspace.lints.clippy]
 all = "warn"

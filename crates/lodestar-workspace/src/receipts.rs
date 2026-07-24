@@ -28,7 +28,6 @@ use std::time::{Duration, SystemTime};
 
 use lodestar_core::types::{ChangeReceipt, ReceiptId};
 
-use crate::config::WorkspaceConfig;
 use crate::{Workspace, WorkspaceError};
 
 /// Nombre de fichero saneado para un `ReceiptId` (E13-H07), mismo criterio que staging (E13-H01,
@@ -178,8 +177,7 @@ impl Workspace {
     /// - [`WorkspaceError::Io`] si falla el borrado de un `.json` purgado o de su copia de
     ///   recuperación.
     pub fn gc_receipts(&self) -> Result<(), WorkspaceError> {
-        let cfg = WorkspaceConfig::load(&self.root).unwrap_or_default();
-        let ttl = parse_retention(&cfg.transactions.retain_receipts_for);
+        let ttl = parse_retention(&self.config().transactions.retain_receipts_for);
 
         let dir = self.receipts_dir();
         let Ok(read_dir) = std::fs::read_dir(&dir) else {
@@ -212,7 +210,7 @@ impl Workspace {
         let mut purge: BTreeSet<String> = BTreeSet::new();
 
         // (a) Excedentes: los más antiguos por encima de `maximumReceipts`.
-        let max = cfg.transactions.maximum_receipts;
+        let max = self.config().transactions.maximum_receipts;
         if entries.len() > max {
             let excess = entries.len() - max;
             for (_, _, stem) in entries.iter().take(excess) {

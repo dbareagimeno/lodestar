@@ -20,7 +20,7 @@
 //! `WORKSPACE_RECOVERY_REQUIRED`.
 //!
 //! Runtime, no canónico: el árbol de recuperación vive bajo `.lodestar/runtime/`, que el walker de
-//! conocimiento (`io::load_bundle`) y el watcher excluyen (E9-H06) y `WorkspaceRevision` ignora
+//! conocimiento (`discovery::discover`) y el watcher excluyen (E9-H06) y `WorkspaceRevision` ignora
 //! (E10-H03), por lo que no viola «los `.md` son la única fuente de verdad» (invariante #1).
 //! Copiar el original solo **lee** el canónico: nunca lo modifica.
 
@@ -31,7 +31,6 @@ use serde::Deserialize;
 
 use lodestar_core::types::{workspace_revision, RelPath, WorkspaceRevision};
 
-use crate::config::WorkspaceConfig;
 use crate::error::WorkspaceError;
 use crate::journal::JournalState;
 use crate::{io, Workspace};
@@ -470,7 +469,7 @@ impl Workspace {
         //     resultado hipotético de la reversión (canónico con backups restaurados / creados
         //     borrados) para estampar la `resultRevision` en el journal ANTES de tocar el canónico.
         let previous = self.workspace_revision()?;
-        let canonical = io::load_bundle(&self.root)?;
+        let canonical = self.discover_files()?;
         let mut result_files = canonical.clone();
         for (rel, content) in &backups {
             result_files.insert(rel.clone(), content.clone());
@@ -478,11 +477,8 @@ impl Workspace {
         for rel in &absent {
             result_files.remove(rel);
         }
-        let writable = WorkspaceConfig::load(&self.root)
-            .unwrap_or_default()
-            .workspace
-            .writable_roots;
-        let result_rev = workspace_revision(&result_files, &writable);
+        let writable = &self.config().workspace.writable_roots;
+        let result_rev = workspace_revision(&result_files, writable);
 
         // (7) Copias de recuperación de la INVERSA (respalda el estado actual) → la reversión es
         //     recuperable (E13-H04): si cae a mitad, `recover` restaura desde `recovery/<new>/`.

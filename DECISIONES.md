@@ -126,9 +126,13 @@
 - **Qué decidir**: ¿hay que soportar inglés u otro idioma en v1? Si no, esto queda cerrado.
 - **Recomendación**: mantener español-only en v1; la arquitectura ya no lo impide en el futuro.
 
-## 6. Semántica de `merge` local
+## 6. Semántica de `merge` local — ⚫ CERRADA/OBSOLETA (crate `vcs` borrado, §20)
 
-> **Superada por §0/§19 (2026-07-22)**: git sale de la superficie de producto; el crate `vcs` (con su
+> **Cerrada por §20 (2026-07-23)**: la migración a workspaces Markdown universales **borra** el crate
+> `lodestar-vcs` (E15-H01), no lo deja dormido. Ya no hay `merge` que decidir: si git volviera algún
+> día a la superficie, se rediseñaría desde cero. Se conserva el registro histórico.
+>
+> **Superada antes por §0/§19 (2026-07-22)**: git sale de la superficie de producto; el crate `vcs` (con su
 > `merge` a nivel de árbol) se conserva **dormido**, sin fachadas que lo expongan. Esta decisión queda
 > como diseño de referencia por si git vuelve.
 
@@ -145,7 +149,11 @@
   con §16) o prefieres delegar en el binario `git`?
 - **Recomendación**: confirmar el enfoque actual.
 
-## 7. `lodestar check --range a..b`
+## 7. `lodestar check --range a..b` — ⚫ CERRADA/OBSOLETA (sin git, §20)
+
+> **Cerrada por §20 (2026-07-23)**: `--staged`/`--rev`/`--range` se retiraron de la superficie en
+> E9-H02 quedando diferidos con el crate `vcs` dormido; al borrarse el crate en E15-H01 dejan de
+> tener implementación posible. `check` juzga el working tree y nada más. Registro histórico abajo.
 
 - **Estado**: `--range` juzga **la punta** del rango (equivale a `--rev b`).
 - **Qué decidir**: ¿basta con la punta o quieres verificar que **cada commit** del rango es conforme
@@ -153,7 +161,13 @@
 - **Recomendación**: dejar la punta por defecto y añadir `--each` si en algún momento hace falta el
   barrido por-commit.
 
-## 8. Esquema de `lodestar.toml`
+## 8. Esquema de `lodestar.toml` — ⚫ CERRADA/OBSOLETA (fichero retirado, §20)
+
+> **Cerrada por §20 (2026-07-23)**: `lodestar.toml` se **borra** en E15-H08. Su `[identity]` murió
+> con git (E15-H01) y su `[gate]` se absorbe en `.lodestar/config.yaml`, el único fichero de
+> configuración (`§20.5`). Lo que la pregunta abierta pedía —override de severidad por código y
+> exclusión de rutas— **se concede** en el formato nuevo: `discovery.exclude` y la sección
+> `validation:` de `§20.9`, que fija la severidad por familia de diagnóstico. Registro histórico:
 
 - **Estado**: soporta `[gate] block_warnings` (strictness) e `[identity] name/email` (override de
   autor/committer). Defaults seguros (solo `Err` bloquea; identidad por defecto).
@@ -170,11 +184,21 @@ Pendientes de priorización (no bloquean el núcleo):
   (`release.yml`, tres plataformas, bundles sin firmar); **queda la firma/notarización + updater**.
 - **Threat model** documentado (§12 seguridad); las piezas ya están (RelPath anti path/zip-slip,
   FTS5 escapado, git de red confinado al binario, libgit2 local sin hooks).
-- ~~Arnés diferencial JS-vs-Rust (E1-H18)~~ — **hecho**: `prototype/harness/` ejecuta las funciones
+- ~~Arnés diferencial JS-vs-Rust (E1-H18)~~ — **hecho y luego RETIRADO en `E15-H04`** (el prototipo
+  dejó de ser spec con la migración a Markdown universal, `ARCHITECTURE.md §20.13`). Histórico:
+  `prototype/harness/` ejecutaba las funciones
   puras del prototipo en node como oráculo y `tests/differential.rs` compara con el core (6 fixtures);
   cazó y cerró 6 divergencias de paridad.
 
 ## 10. Ghosts como primitiva de planificación + templates (siguiente feature, no iniciada)
+
+> **Parcialmente superada por §20 (2026-07-23)**: la primitiva **sobrevive y de hecho mejora** — un
+> ghost es un enlace a un `.md` inexistente, que en el modelo nuevo es un `LinkTarget::Missing`
+> (`§20.6`) con su `dangling` identificando origen y href crudo (`§20.7`), más informativo que el
+> `LINK-STUB` de antes. Lo que **muere** son las piezas OKF de la propuesta: el gesto de UI (la UI se
+> retiró de `main`) y los *templates por `type`* con `.lodestar/templates/` (`core::schema` se borra
+> en E20; `§20` no tiene tipos documentales). Si se retoma, el backlog de ghosts se lee hoy con
+> `graph_query(dangling)`.
 
 - **Contexto**: los *ghosts* («por escribir») ya existen y están portados: nodo con `ghost: bool` en
   `GraphModel` (`core/graph.rs`) derivado de enlaces a `.md` inexistentes, check `LINK-STUB` con
@@ -198,6 +222,76 @@ Pendientes de priorización (no bloquean el núcleo):
   tool MCP.
 - **Recomendación**: mantener el principio «ghost = derivado de enlaces»; cualquier variante que
   requiera una lista de ghosts persistida aparte contradice el invariante #1.
+
+## 11. `pulldown-cmark` en `lodestar-core` (E17) — 🟡 TOMADA, revisable
+
+- **Contexto**: la migración exige enlaces Markdown **de referencia** (`[t][id]` con su definición
+  `[id]: ../p.md` en otro punto del documento) y **offsets fiables** del destino dentro del cuerpo,
+  para reescribirlo en `move_document` (`§20.6`, `§20.11`). Hoy el parser son dos regex
+  (`crates/lodestar-core/src/model.rs:16-17,257-258`) que solo ven `[texto](href)`.
+- **Decidido (2026-07-23, al escribir la épica E17)**: adoptar `pulldown-cmark` como dependencia de
+  `lodestar-core`. Es **pura** (sin I/O, sin runtime, sin C), así que no viola el invariante #2 ni el
+  job `core-purity` del CI, que prohíbe `tokio`/`rusqlite`/`git2`/`notify`/`tauri`. Aporta
+  resolución nativa de referencias, `link_type` (que es exactamente la clasificación de `§20.6`) y
+  `OffsetIter`.
+- **Por qué queda anotada aquí**: es la **primera dependencia de parsing** que entra en el core, que
+  hasta ahora se autoabastecía con regex. Si prefieres no ampliar la superficie de dependencias del
+  core, la alternativa es extender la regex — pero no cubre enlaces de referencia sin reimplementar
+  buena parte de un parser Markdown, y los offsets serían menos fiables.
+- **Reversible**: solo afecta a `crates/lodestar-core/src/links.rs` (E17-H01). Dilo antes de que
+  E17 empiece y se replantea.
+
+## 12. Comparación de fechas en el lenguaje de consulta (E19) — 🟠 ABIERTA
+
+- **Contexto** (detectado en la fase roja de E16-H01): `REFACTOR_PHASE_2 §Fase 4` exige soportar
+  *"fechas interpretadas como valores YAML"*, y `§Fase 5` pide comparaciones tipadas sin coerción
+  implícita (`priority >= 2` funciona, `priority >= "high"` es error de tipo). Pero **`serde_yaml`
+  0.9.34 no tiene tipo timestamp**: un `2026-07-23` sin comillas se deserializa como `String`.
+- **Consecuencia**: hoy `reviewed_at > "2026-01-01"` sería una comparación de **strings**. Para
+  fechas ISO-8601 bien formadas el orden lexicográfico coincide con el cronológico, así que
+  «funciona» — pero silenciosamente, y deja de funcionar con formatos mixtos (`2026-7-3`), con
+  offsets de zona horaria distintos, o al comparar una fecha con un datetime.
+- **Qué decidir**: (a) declarar explícitamente que las fechas son strings y su comparación es
+  lexicográfica, documentándolo como limitación; (b) introducir un tipo fecha propio en el core que
+  reconozca ISO-8601 al indexar (`§20.12` guarda `value_type` en el store, así que hay sitio);
+  (c) cambiar de librería YAML por una que tipe timestamps.
+- **Recomendación**: **(a) para E19** —es lo barato y cubre el caso real, que son fechas ISO— y
+  reevaluar en E20, cuando `metadata_inspect` tenga que **comunicar** el tipo inferido de cada
+  propiedad y la ficción de "todo es string" se note. No bloquea: se puede empezar por (a) y migrar
+  a (b) sin romper el wire, porque el tipo viaja en `value_type`.
+
+## 13. `Conformant → Valid`: la mitad que falta de `§20.3` — 🟠 APLAZADA (revisada en E21-H04)
+
+- **Contexto** (detectado al implementar E16-H06): la tabla de terminología de `§20.3` manda dos
+  sustituciones emparejadas, `Conformance → Validation` y `Conformant → Valid`. La primera está
+  hecha (`ApplyConformance` → `ApplyValidation`, `Store::conformance_counts` →
+  `validation_counts`…). La segunda **no**, y el resultado es una asimetría visible en el wire:
+  `ApplyValidation { conformant, errors, warnings }` — el contenedor habla de *validación* y el
+  veredicto sigue hablando de *conformidad*.
+- **Por qué no se cerró**: `conformant` no aparece solo como campo. Está en
+  `ErrorCode::NonconformantResult` (wire `NONCONFORMANT_RESULT`), que es **una de las 16 filas
+  congeladas** del catálogo de errores de `§19.3`, y en `PlanPolicy::requireConformantResult` y
+  `allowNonconformant`, que son superficie de `change_plan`. No es un renombre léxico: toca el
+  contrato de errores.
+- **Qué decidir**: (a) completar la pareja y aceptar el cambio de wire
+  (`NONCONFORMANT_RESULT` → `INVALID_RESULT`, `requireConformantResult` → `requireValidResult`),
+  aprovechando que v0.3 ya es incompatible; (b) dejar `conformant` como término del **veredicto**
+  y documentar en `§20.3` que la sustitución solo aplica al *sustantivo*, no al *adjetivo*.
+- **Recomendación**: **(a)**, y hacerlo en **E21**, que es cuando se toca el motor transaccional y
+  su contrato de errores. Hacerlo ahora significaría abrir el catálogo congelado dos veces.
+  Mientras tanto la asimetría es fea pero inocua: `core::types::ValidationReport` ya tenía esa
+  misma forma antes de la migración, así que no se ha introducido una discrepancia nueva.
+- **Estado (E21-H04, cierre de E21)**: **APLAZADA, no cerrada**. E21-H04 hizo el renombre neutro
+  que sí era léxico y sin riesgo (`core::diff::OkfDiff` → `SnapshotDiff`) y repasó el contrato: en
+  la superficie viva de `mcp.yml` no queda vocabulario OKF salvo `conformant`/
+  `requireConformantResult`/`NONCONFORMANT_RESULT`, que son exactamente esta decisión. Completar la
+  opción (a) exige tocar `ErrorCode::NonconformantResult` —**una de las 16 filas congeladas** del
+  catálogo de errores (`§19.3`)— y la superficie de `change_plan`; eso **no** es un renombre léxico
+  y queda **fuera** del alcance de E21-H04 (la historia acota su repaso a lo que no abre el catálogo
+  congelado). La asimetría sigue siendo fea pero inocua. Se retoma en la historia que decida abrir
+  el catálogo de errores; hasta entonces `conformant`/`NONCONFORMANT_RESULT` se conservan tal cual y
+  su presencia en la superficie activa de `mcp.yml` es **deuda documentada**, no una discrepancia de
+  contrato.
 
 ---
 

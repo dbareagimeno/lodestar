@@ -1,25 +1,24 @@
-//! Tests de integración de `lodestar-workspace` (E5): único escritor, commit con checkpoint, restore.
+//! Tests de integración de `lodestar-workspace` (E5): único escritor y escrituras validadas.
+//!
+//! E15-H01 retiró git del repo: los tests de commit/restore/branch/merge/conformidad-por-commit
+//! desaparecieron con la capacidad, y `setup()` ya no inicializa repo alguno — abrir un directorio
+//! cualquiera es todo el arranque que hay.
 
-use lodestar_core::types::{Author, FrontmatterPatch, RelPath};
+use lodestar_core::types::{FrontmatterPatch, RelPath};
 use lodestar_workspace::Workspace;
 
 fn setup() -> (tempfile::TempDir, Workspace) {
     let dir = tempfile::tempdir().unwrap();
-    let mut ws = Workspace::open(dir.path()).unwrap();
-    ws.set_identity(Author {
-        name: "Test".into(),
-        email: "t@e.com".into(),
-    });
-    ws.init_vcs().unwrap();
+    let ws = Workspace::open(dir.path()).unwrap();
     (dir, ws)
 }
 
 #[test]
-fn crea_concept_y_lo_escribe_por_el_unico_escritor() {
+fn crea_document_y_lo_escribe_por_el_unico_escritor() {
     let (dir, ws) = setup();
     let p = RelPath::new("alfa.md").unwrap();
     let outcome = ws
-        .create_concept(&p, "Nota", Some("Alfa"), "# H\n\ncuerpo\n", false)
+        .create_document(&p, "Nota", Some("Alfa"), "# H\n\ncuerpo\n", false)
         .unwrap();
     assert!(outcome.written);
     assert!(dir.path().join("alfa.md").is_file());
@@ -34,14 +33,14 @@ fn crea_concept_y_lo_escribe_por_el_unico_escritor() {
     // el snapshot lo refleja
     assert!(snap
         .analysis
-        .concepts
+        .documents
         .iter()
         .any(|c| c.as_str() == "alfa.md"));
     // ninguna página creada debe nacer con un warn de timestamp mal formado.
     assert!(
         !snap
             .analysis
-            .per_file
+            .diagnostics
             .get(&p)
             .map(|checks| checks.iter().any(|c| c.code.as_str() == "FMT-TS"))
             .unwrap_or(false),
@@ -50,11 +49,16 @@ fn crea_concept_y_lo_escribe_por_el_unico_escritor() {
 }
 
 #[test]
-fn create_concept_no_conforme_no_escribe() {
+fn create_document_no_conforme_no_escribe() {
+    // MIGRADO en E16-H05: el rechazo se disparaba con `type` vacío (`OKF-TYPE`), que dejó de ser
+    // un error. La mecánica que este test protege —un resultado con `Err` no llega al disco— se
+    // prueba ahora con un cuerpo que lleva marcadores de merge sin resolver
+    // (`DOC-CONFLICT-MARKER`, del catálogo mínimo de `§20.9`).
     let (dir, ws) = setup();
     let p = RelPath::new("malo.md").unwrap();
+    let conflictivo = "# H\n\n<<<<<<< HEAD\nuno\n=======\ndos\n>>>>>>> rama\n";
     let outcome = ws
-        .create_concept(&p, "", Some("Malo"), "# H\n", false)
+        .create_document(&p, "Nota", Some("Malo"), conflictivo, false)
         .unwrap();
     assert!(!outcome.written);
     assert!(outcome.rejected.is_some());
@@ -65,7 +69,7 @@ fn create_concept_no_conforme_no_escribe() {
 fn merge_frontmatter_null_borra_y_escribe() {
     let (_dir, ws) = setup();
     let p = RelPath::new("x.md").unwrap();
-    ws.create_concept(&p, "Nota", Some("X"), "# H\n", false)
+    ws.create_document(&p, "Nota", Some("X"), "# H\n", false)
         .unwrap();
     let mut patch = std::collections::BTreeMap::new();
     patch.insert("status".to_string(), None);
@@ -78,69 +82,25 @@ fn merge_frontmatter_null_borra_y_escribe() {
 }
 
 #[test]
-fn commit_devuelve_conformidad_post_commit() {
-    let (_dir, ws) = setup();
-    let p = RelPath::new("ok.md").unwrap();
-    ws.create_concept(&p, "Nota", Some("Ok"), "# H\n\ncuerpo\n", false)
-        .unwrap();
-    let outcome = ws.commit("Añade Ok").unwrap();
-    assert!(outcome.conformance.conform);
-    // el log tiene el commit inicial + este
-    assert!(ws.vcs_log(10).unwrap().len() >= 2);
-}
-
-#[test]
-fn restore_hace_checkpoint_y_no_pierde_trabajo() {
-    let (dir, ws) = setup();
-    // commit 1: crea alfa
-    let alfa = RelPath::new("alfa.md").unwrap();
-    ws.create_concept(&alfa, "Nota", Some("Alfa"), "# H\n", false)
-        .unwrap();
-    let c1 = ws.commit("c1").unwrap();
-    // cambios sin commitear: crea beta
-    let beta = RelPath::new("beta.md").unwrap();
-    ws.create_concept(&beta, "Nota", Some("Beta"), "# H\n", false)
-        .unwrap();
-    assert!(dir.path().join("beta.md").is_file());
-    // restore al commit 1 → checkpoint automático preserva beta en el historial
-    ws.restore(&c1.sha).unwrap();
-    // beta ya no está en el working tree (restaurado a c1)...
-    assert!(!dir.path().join("beta.md").exists());
-    // ...pero el checkpoint lo dejó en el historial (no se perdió el trabajo).
-    let log = ws.vcs_log(20).unwrap();
-    assert!(log.iter().any(|c| c.message.contains("Checkpoint")));
-}
-
-#[test]
-fn generate_index_aplica_por_el_unico_escritor() {
-    let (dir, ws) = setup();
-    let p = RelPath::new("alfa.md").unwrap();
-    ws.create_concept(&p, "Concept", Some("Alfa"), "# H\n", false)
-        .unwrap();
-    let report = ws.generate_index("").unwrap();
-    assert!(report.written >= 1);
-    assert!(dir.path().join("index.md").is_file());
-    // segunda vez: sin cambios.
-    let report2 = ws.generate_index("").unwrap();
-    assert_eq!(report2.written, 0);
-}
-
-#[test]
 fn open_live_emite_evento_y_acelera_lecturas() {
     let dir = tempfile::tempdir().unwrap();
     let mut ws = Workspace::open(dir.path()).unwrap();
-    ws.set_identity(Author {
-        name: "Test".into(),
-        email: "t@e.com".into(),
-    });
-    ws.init_vcs().unwrap();
     ws.enable_cache().unwrap();
     let rx = ws.subscribe().unwrap();
 
     // Escribir por el único escritor dispara el update optimista de la cache → IndexEvent.
+    //
+    // MIGRADO en E17-H03: el cuerpo enlaza a `beta.md`, que no existe — y un enlace roto a un
+    // DOCUMENTO pasó a ser `Err` (`LINK-TARGET-MISSING`, `danglingDocumentLinks: error` de
+    // `§20.9`), donde antes era el `LINK-STUB` informativo del prototipo. Con la política por
+    // defecto (`allow_nonconformant: false`) la escritura se RECHAZA y no llega ningún evento, así
+    // que el enlace colgante —que este test necesita para comprobar `cache.dangling()`— exige
+    // pedirlo explícitamente.
     let p = RelPath::new("alfa.md").unwrap();
-    ws.create_concept(&p, "Nota", Some("Alfa"), "# H\n\n[b](/beta.md)\n", false)
+    let outcome = ws
+        .create_document(&p, "Nota", Some("Alfa"), "# H\n\n[b](/beta.md)\n", true)
         .unwrap();
+    assert!(outcome.written, "el documento debe escribirse: {outcome:?}");
     let ev = rx
         .recv_timeout(std::time::Duration::from_secs(2))
         .expect("debe llegar un IndexEvent");
@@ -153,275 +113,51 @@ fn open_live_emite_evento_y_acelera_lecturas() {
         .unwrap()
         .iter()
         .any(|d| d.as_str() == "beta.md"));
-    assert!(cache.orphans().unwrap().contains(&p));
+    assert!(cache.documents().unwrap().contains(&p));
+    // `alfa.md` enlaza a `beta.md` (colgante): tiene salientes, así que NO está aislado —
+    // la definición de `isolated` de E16-H02 (`§20.7`) exige cero entrantes Y cero salientes.
+    assert!(!cache.isolated().unwrap().contains(&p));
 }
 
-#[test]
-fn switch_de_rama_por_el_unico_escritor() {
-    let (dir, ws) = setup();
-    let alfa = RelPath::new("alfa.md").unwrap();
-    ws.create_concept(&alfa, "Nota", Some("Alfa"), "# H\n", false)
-        .unwrap();
-    ws.commit("main: alfa").unwrap();
-    // rama nueva con un fichero extra
-    ws.create_branch("feature", None).unwrap();
-    ws.switch("feature").unwrap();
-    let beta = RelPath::new("beta.md").unwrap();
-    ws.create_concept(&beta, "Nota", Some("Beta"), "# H\n", false)
-        .unwrap();
-    ws.commit("feature: beta").unwrap();
-    assert!(dir.path().join("beta.md").is_file());
-    // volver a main → beta desaparece del working tree (aplicado por el único escritor)
-    ws.switch("master").or_else(|_| ws.switch("main")).unwrap();
-    assert!(!dir.path().join("beta.md").exists());
-    assert!(dir.path().join("alfa.md").is_file());
-}
-
-#[test]
-fn merge_fast_forward_por_workspace() {
-    let (dir, ws) = setup();
-    let alfa = RelPath::new("alfa.md").unwrap();
-    ws.create_concept(&alfa, "Nota", Some("Alfa"), "# H\n", false)
-        .unwrap();
-    ws.commit("base").unwrap();
-    let base_branch = ws
-        .branches()
-        .unwrap()
-        .into_iter()
-        .find(|b| b.is_head)
-        .unwrap()
-        .name;
-    ws.create_branch("feature", None).unwrap();
-    ws.switch("feature").unwrap();
-    let beta = RelPath::new("beta.md").unwrap();
-    ws.create_concept(&beta, "Nota", Some("Beta"), "# H\n", false)
-        .unwrap();
-    ws.commit("feature: beta").unwrap();
-    ws.switch(&base_branch).unwrap();
-    // Merge limpio (sin conflictos): beta se integra en la rama base. Puede ser ff o merge de
-    // 3-vías según si la regeneración de index/tags dejó el árbol dirty (la ff pura se testea en vcs).
-    let report = ws.merge("feature").unwrap();
-    assert!(report.conflicted.is_empty());
-    assert!(dir.path().join("beta.md").is_file());
-}
-
+/// La strictness de la puerta (`gate.blockWarnings`) en el **formato nuevo** (E15-H08): el
+/// `lodestar.toml` legado se borró, así que lo que endurece `lodestar check` es ahora la sección
+/// `gate` de `.lodestar/config.yaml`. Mismo criterio de antes: por defecto solo los errores
+/// bloquean; con `blockWarnings: true` también los avisos.
 #[test]
 fn config_strictness_bloquea_avisos() {
-    use lodestar_workspace::Config;
+    use lodestar_workspace::WorkspaceConfig;
     let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join(".lodestar")).unwrap();
     std::fs::write(
-        dir.path().join("lodestar.toml"),
-        "[gate]\nblock_warnings = true\n\n[identity]\nname = \"Ana\"\nemail = \"ana@x.com\"\n",
+        dir.path().join(".lodestar/config.yaml"),
+        "gate:\n  blockWarnings: true\n",
     )
     .unwrap();
-    let cfg = Config::load(dir.path()).unwrap();
+    let cfg = WorkspaceConfig::load(dir.path()).unwrap();
     assert!(cfg.gate.block_warnings);
-    assert_eq!(cfg.author().unwrap().name, "Ana");
-    // un análisis con warns pero sin errores: bloquea solo si block_warnings.
+    // Un análisis con warns pero sin errores: bloquea solo si blockWarnings. MIGRADO en
+    // E17-H04: `warn_count` dejó de ser un campo — se DERIVA de `diagnostics`, así que el
+    // análisis de prueba se construye con los diagnósticos de los que sale el recuento (que es
+    // justo la desincronización que el cambio hace imposible).
+    let doc = lodestar_core::types::RelPath::new("aviso.md").unwrap();
+    let aviso = |msg: &str| {
+        lodestar_core::types::Check::new(
+            lodestar_core::types::Severity::Warn,
+            lodestar_core::types::CheckCode::LinkCaseMismatch,
+            msg,
+            vec![doc.clone()],
+        )
+    };
     let analysis = lodestar_core::types::Analysis {
-        warn_count: 2,
+        diagnostics: [(doc.clone(), vec![aviso("uno"), aviso("dos")])]
+            .into_iter()
+            .collect(),
         ..Default::default()
     };
+    assert_eq!(analysis.warn_count(), 2);
+    assert_eq!(analysis.hard_fail(), 0);
     assert!(cfg.gate_blocked(&analysis));
-    assert!(!Config::default().gate_blocked(&analysis));
-}
-
-#[test]
-fn conformance_cache_por_tree_oid() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut ws = Workspace::open(dir.path()).unwrap();
-    ws.set_identity(Author {
-        name: "Test".into(),
-        email: "t@e.com".into(),
-    });
-    ws.init_vcs().unwrap();
-    ws.enable_cache().unwrap();
-    let p = RelPath::new("ok.md").unwrap();
-    ws.create_concept(&p, "Nota", Some("Ok"), "# H\n\ncuerpo\n", false)
-        .unwrap();
-    let c = ws.commit("añade ok").unwrap();
-    // primera lectura computa y cachea; segunda debe salir de la cache (mismo resultado).
-    let a = ws.conformance_of(&c.sha).unwrap();
-    let b = ws.conformance_of(&c.sha).unwrap();
-    assert_eq!(a, b);
-    assert!(a.conform);
-}
-
-#[test]
-fn diff_working_vs_head() {
-    let (_dir, ws) = setup();
-    let p = RelPath::new("alfa.md").unwrap();
-    ws.create_concept(&p, "Nota", Some("Alfa"), "# H\n", false)
-        .unwrap();
-    ws.commit("c1").unwrap();
-    // edita sin commitear
-    ws.merge_frontmatter(&p, {
-        let mut m = std::collections::BTreeMap::new();
-        m.insert(
-            "status".to_string(),
-            Some(serde_yaml::Value::String("review".into())),
-        );
-        FrontmatterPatch(m)
-    })
-    .unwrap();
-    let diff = ws.diff_working().unwrap();
-    assert!(diff
-        .status_changes
-        .iter()
-        .any(|s| s.to.as_deref() == Some("review")));
-}
-
-// --- Regresiones de la revisión profunda: ciclo de merge y commits -----------
-
-#[test]
-fn merge_tres_vias_limpio_se_concluye_con_dos_padres() {
-    // base → dos ramas con ficheros DISJUNTOS pero divergentes (no ff) → merge → commit.
-    // Antes: MERGE_HEAD quedaba para siempre (RepoBusy eterno) y el commit tenía 1 padre.
-    let (_dir, ws) = setup();
-    let alfa = RelPath::new("alfa.md").unwrap();
-    ws.create_concept(&alfa, "Nota", Some("Alfa"), "# H\n", false)
-        .unwrap();
-    ws.commit("base").unwrap();
-    let base_branch = ws
-        .branches()
-        .unwrap()
-        .into_iter()
-        .find(|b| b.is_head)
-        .unwrap()
-        .name;
-    ws.create_branch("feature", None).unwrap();
-    ws.switch("feature").unwrap();
-    let beta = RelPath::new("beta.md").unwrap();
-    ws.create_concept(&beta, "Nota", Some("Beta"), "# H\n", false)
-        .unwrap();
-    ws.commit("feature: beta").unwrap();
-    ws.switch(&base_branch).unwrap();
-    let gamma = RelPath::new("gamma.md").unwrap();
-    ws.create_concept(&gamma, "Nota", Some("Gamma"), "# H\n", false)
-        .unwrap();
-    ws.commit("base: gamma").unwrap();
-
-    let report = ws.merge("feature").unwrap();
-    assert!(report.conflicted.is_empty());
-    assert!(!report.fast_forward);
-    // Concluir el merge NO puede estar bloqueado (RepoBusy) — es como funciona git.
-    let outcome = ws.commit("merge feature").unwrap();
-    let head = &ws.vcs_log(1).unwrap()[0];
-    assert_eq!(head.parents.len(), 2, "el commit de merge ratifica §13.6.3");
-    assert_eq!(head.id, outcome.sha);
-    // Y el estado del repo queda limpio: el siguiente commit normal funciona.
-    let delta = RelPath::new("delta.md").unwrap();
-    ws.create_concept(&delta, "Nota", Some("Delta"), "# H\n", false)
-        .unwrap();
-    ws.commit("post-merge").unwrap();
-}
-
-#[test]
-fn merge_con_conflicto_se_resuelve_y_concluye() {
-    let (dir, ws) = setup();
-    let f = RelPath::new("f.md").unwrap();
-    ws.create_concept(&f, "Nota", Some("F"), "# H\n\nbase\n", false)
-        .unwrap();
-    ws.commit("base").unwrap();
-    let base_branch = ws
-        .branches()
-        .unwrap()
-        .into_iter()
-        .find(|b| b.is_head)
-        .unwrap()
-        .name;
-    ws.create_branch("feature", None).unwrap();
-    ws.switch("feature").unwrap();
-    ws.write_concept(
-        &f,
-        "---\ntype: Nota\ntitle: F\ndescription: d\n---\n\n# H\n\nfeature\n",
-        true,
-    )
-    .unwrap();
-    ws.commit("feature").unwrap();
-    ws.switch(&base_branch).unwrap();
-    ws.write_concept(
-        &f,
-        "---\ntype: Nota\ntitle: F\ndescription: d\n---\n\n# H\n\nmain\n",
-        true,
-    )
-    .unwrap();
-    ws.commit("main").unwrap();
-
-    let report = ws.merge("feature").unwrap();
-    assert!(
-        report.conflicted.contains(&f),
-        "debe conflictar: {report:?}"
-    );
-    let raw = std::fs::read_to_string(dir.path().join("f.md")).unwrap();
-    assert!(raw.contains("<<<<<<<"), "marcadores para OKF-CONFLICT");
-    // Resuelve y concluye: el commit lleva 2 padres y el repo queda limpio.
-    ws.write_concept(
-        &f,
-        "---\ntype: Nota\ntitle: F\ndescription: d\n---\n\n# H\n\nresuelto\n",
-        true,
-    )
-    .unwrap();
-    ws.commit("resuelve el merge").unwrap();
-    assert_eq!(ws.vcs_log(1).unwrap()[0].parents.len(), 2);
-    let delta = RelPath::new("post.md").unwrap();
-    ws.create_concept(&delta, "Nota", Some("Post"), "# H\n", false)
-        .unwrap();
-    ws.commit("post").unwrap(); // ya sin estado Merging
-}
-
-#[test]
-fn switch_no_deja_suciedad_fantasma_ni_checkpoints_vacios() {
-    let (_dir, ws) = setup();
-    let alfa = RelPath::new("alfa.md").unwrap();
-    ws.create_concept(&alfa, "Nota", Some("Alfa"), "# H\n", false)
-        .unwrap();
-    ws.commit("base").unwrap();
-    let base_branch = ws
-        .branches()
-        .unwrap()
-        .into_iter()
-        .find(|b| b.is_head)
-        .unwrap()
-        .name;
-    ws.create_branch("feature", None).unwrap();
-    ws.switch("feature").unwrap();
-    let beta = RelPath::new("beta.md").unwrap();
-    ws.create_concept(&beta, "Nota", Some("Beta"), "# H\n", false)
-        .unwrap();
-    ws.commit("feature: beta").unwrap();
-    let n_before = ws.vcs_log(50).unwrap().len();
-    // Ida y vuelta sin tocar nada, terminando en la MISMA rama: NO deben aparecer commits
-    // nuevos (checkpoints espurios por el index desincronizado tras el switch).
-    ws.switch(&base_branch).unwrap();
-    ws.switch("feature").unwrap();
-    ws.switch(&base_branch).unwrap();
-    ws.switch("feature").unwrap();
-    let log = ws.vcs_log(50).unwrap();
-    assert_eq!(
-        log.len(),
-        n_before,
-        "checkpoints espurios: {:?}",
-        log.iter().map(|c| c.message.clone()).collect::<Vec<_>>()
-    );
-}
-
-#[test]
-fn init_bundle_scaffold_e_idempotente() {
-    let dir = tempfile::tempdir().unwrap();
-    let root = dir.path().join("nuevo");
-    // Primer arranque: crea directorio + index raíz + git con commit inicial.
-    let ws = Workspace::init_bundle(&root).unwrap();
-    assert!(root.join("index.md").is_file());
-    assert!(root.join(".git").is_dir());
-    assert!(ws.has_vcs());
-    assert!(!ws.vcs_log(5).unwrap().is_empty(), "commit inicial");
-    // Idempotente: sobre un bundle existente no duplica ni rompe nada.
-    let n = ws.vcs_log(10).unwrap().len();
-    let ws2 = Workspace::init_bundle(&root).unwrap();
-    assert_eq!(ws2.vcs_log(10).unwrap().len(), n);
-    // Y el bundle recién creado es conforme (abrible por open_bundle del escritorio).
-    assert_eq!(ws2.analyze().unwrap().hard_fail, 0);
+    assert!(!WorkspaceConfig::default().gate_blocked(&analysis));
 }
 
 #[test]
@@ -446,9 +182,13 @@ fn escritorio_crear_workspace_con_cache_vieja_funciona() {
         .unwrap();
     }
 
-    // (2) Scaffold del bundle (first-run del escritorio). Idempotente.
-    Workspace::init_bundle(root).unwrap();
-    assert!(root.join("index.md").is_file());
+    // (2) Un documento cualquiera en el directorio (ya no hay ceremonia de creación: E15-H03
+    //     retiró `init`).
+    std::fs::write(
+        root.join("index.md"),
+        "---\ntype: Index\ntitle: Bundle\ndescription: Índice del bundle\nokf_version: \"0.1\"\n---\n\n# Bundle\n",
+    )
+    .unwrap();
 
     // (3) Apertura en vivo: cache incremental + watcher (lo que hace la app al abrir).
     let ws = Workspace::open_live(root).unwrap();
@@ -457,10 +197,10 @@ fn escritorio_crear_workspace_con_cache_vieja_funciona() {
     let snap = ws.snapshot().unwrap();
     assert!(snap.files.keys().any(|p| p.as_str() == "index.md"));
 
-    // (5) Crear un concept nuevo funciona (este era el flujo que reventaba).
+    // (5) Crear un documento nuevo funciona (este era el flujo que reventaba).
     let p = RelPath::new("nuevo.md").unwrap();
     let outcome = ws
-        .create_concept(&p, "Nota", Some("Nuevo"), "# H\n\ncuerpo\n", false)
+        .create_document(&p, "Nota", Some("Nuevo"), "# H\n\ncuerpo\n", false)
         .unwrap();
     assert!(outcome.written);
     assert!(root.join("nuevo.md").is_file());
@@ -474,7 +214,7 @@ fn escritorio_crear_workspace_con_cache_vieja_funciona() {
 //   WorkspaceConfig { workspace: { writable_roots: Vec<RelPath>, reference_roots: Vec<RelPath>,
 //                                  ignored: Vec<String> }, gate, transactions }
 // cargado con `WorkspaceConfig::load(root)` desde `.lodestar/config.yaml` (YAML, claves camelCase).
-// Los defaults son seguros: un bundle sin `config.yaml` NO es error.
+// Los defaults son seguros: un workspace sin `config.yaml` NO es error.
 // ---------------------------------------------------------------------------
 
 /// Escribe `<root>/.lodestar/config.yaml` con el contenido dado (crea `.lodestar/` si falta).
@@ -501,9 +241,9 @@ fn carga_writable_roots() {
     );
 }
 
-/// Criterio: bundle SIN `config.yaml` → defaults seguros (NO error) y `ignored` contiene
+/// Criterio: workspace SIN `config.yaml` → defaults seguros (NO error) y `ignored` contiene
 /// `.lodestar/runtime`. (No aseveramos el valor exacto de `writable_roots` por defecto: la
-/// representación del root "todo el bundle" es una decisión de diseño del implementador —
+/// representación del root "todo el workspace" es una decisión de diseño del implementador —
 /// `RelPath::new(".")` es inválido — y no debemos cerrarla desde el test.)
 #[test]
 fn defaults_sin_config() {
@@ -512,7 +252,7 @@ fn defaults_sin_config() {
     // Deliberadamente NO escribimos `.lodestar/config.yaml`.
 
     let cfg = WorkspaceConfig::load(dir.path())
-        .expect("un bundle sin config.yaml debe cargar defaults seguros, no fallar");
+        .expect("un workspace sin config.yaml debe cargar defaults seguros, no fallar");
 
     assert!(
         cfg.workspace
@@ -601,8 +341,8 @@ fn ignored_conserva_obligatorios() {
 //   - El watcher/carga NO indexan `.lodestar/runtime/` (desechable), sí los canónicos.
 //   - En un repo ya adoptado (con `.lodestar/` trackeado entero) la apertura ajusta el
 //     `.gitignore` de forma idempotente.
-// La escritura del `.gitignore` pasa a hacerse como texto plano desde `lodestar-workspace`
-// (sin git2; `vcs` queda dormido, §19.2).
+// La escritura del `.gitignore` se hace como texto plano desde `lodestar-workspace` (sin git2, que
+// salió del repo con `lodestar-vcs` en E15-H01: `gitignore.rs` es lo único que sobrevive).
 // ---------------------------------------------------------------------------
 
 /// Construye un matcher de gitignore a partir del `<root>/.gitignore` real.
@@ -618,17 +358,16 @@ fn esta_ignorado(gi: &ignore::gitignore::Gitignore, rel: &str, es_dir: bool) -> 
     gi.matched_path_or_any_parents(rel, es_dir).is_ignore()
 }
 
-/// Criterio: bundle recién abierto → el `.gitignore` ignora `.lodestar/index.db` y
+/// Criterio: workspace recién abierto → el `.gitignore` ignora `.lodestar/index.db` y
 /// `.lodestar/runtime/` pero **no** `.lodestar/config.yaml`.
-///
-/// Fase ROJA: hoy `Vcs::init` escribe `/.lodestar/\n*.db…`, que ignora `.lodestar/` ENTERO
-/// (incluido `config.yaml`) → la aserción "config.yaml NO ignorado" falla.
 #[test]
 fn gitignore_parte_lodestar() {
     let dir = tempfile::tempdir().unwrap();
-    let root = dir.path().join("bundle");
-    // Scaffold de un bundle nuevo (la ruta canónica de "recién abierto/creado").
-    Workspace::init_bundle(&root).unwrap();
+    let root = dir.path().join("workspace");
+    // Abrir un directorio cualquiera es la ruta canónica de "recién abierto" (E15-H03: ya no
+    // hay `init` que monte scaffold).
+    std::fs::create_dir_all(&root).unwrap();
+    let _ws = Workspace::open(&root).unwrap();
 
     let gi = gitignore_de(&root);
 
@@ -673,7 +412,7 @@ fn runtime_no_indexa() {
 
     // (2) Control positivo: un `.md` de CONOCIMIENTO real por el único escritor debe emitir evento.
     let real = RelPath::new("real.md").unwrap();
-    ws.create_concept(&real, "Nota", Some("Real"), "# H\n\ncuerpo\n", false)
+    ws.create_document(&real, "Nota", Some("Real"), "# H\n\ncuerpo\n", false)
         .unwrap();
 
     // (3) Drena el bus una ventana amplia (cubre el debounce ~250 ms). NINGÚN evento puede
@@ -706,8 +445,6 @@ fn runtime_no_indexa() {
 /// Criterio: un repo ya adoptado con `.lodestar/` trackeado ENTERO (su `.gitignore` no lo ignora)
 /// → al abrir se ofrece/aplica ignorar solo `index.db` + `runtime/`, de forma idempotente.
 ///
-/// Fase ROJA: hoy la apertura solo toca `.git/info/exclude` (vía `ensure_cache_ignored`), nunca el
-/// `.gitignore` versionado del repo → el `.gitignore` sigue sin ignorar `index.db`/`runtime/`.
 #[test]
 fn adopcion_ajusta_gitignore() {
     let dir = tempfile::tempdir().unwrap();
@@ -718,7 +455,7 @@ fn adopcion_ajusta_gitignore() {
     std::fs::create_dir_all(root.join(".lodestar")).unwrap();
     std::fs::write(root.join(".lodestar/config.yaml"), "workspace: {}\n").unwrap();
 
-    // Abrir el workspace debe ajustar el `.gitignore` (texto plano, sin git2).
+    // Abrir el workspace debe ajustar el `.gitignore` (texto plano, sin git).
     let _ws = Workspace::open_live(root).unwrap();
     let tras_primera = std::fs::read_to_string(root.join(".gitignore")).unwrap();
 
@@ -750,78 +487,59 @@ fn adopcion_ajusta_gitignore() {
 }
 
 // ---------------------------------------------------------------------------
-// E10-H05 — Loader de esquemas: `.lodestar/schema.yaml` → `lodestar_core::schema::Schema`.
-//
-// Fase ROJA (ARCHITECTURE.md §19.2, REFACTOR §4/§9.4, patrón `WorkspaceConfig::load`):
-// el TIPO `Schema` vive en el CORE (puro); el LOADER (I/O) vive en `workspace` y NUNCA
-// deja que el core abra ficheros. API objetivo asumida (consistente con
-// `WorkspaceConfig::load`):
-//
-//     lodestar_workspace::WorkspaceSchema::load(root: &Path)
-//         -> Result<lodestar_core::schema::Schema, String>
-//
-// lee `<root>/.lodestar/schema.yaml`; ausencia de fichero ⇒ `Schema` vacío/permisivo
-// (NO error), igual que `Config::load`/`WorkspaceConfig::load`.
+// E20-H03 — RETIRADO el loader de esquemas: `WorkspaceSchema::load` y `.lodestar/schema.yaml`
+// desaparecen con `core::schema` (modelo universal, `§20.10`). Los tests `sin_schema_permisivo`/
+// `loader_carga_schema_yaml` se retiran; ya no hay esquema que cargar.
+
+// ---------------------------------------------------------------------------
+// E15-H01 — Borrar el crate `lodestar-vcs` y su cableado
 // ---------------------------------------------------------------------------
 
-/// Escribe `<root>/.lodestar/schema.yaml` con el contenido dado (crea `.lodestar/` si falta).
-fn escribe_schema_yaml(root: &std::path::Path, contenido: &str) {
-    let dir = root.join(".lodestar");
-    std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(dir.join("schema.yaml"), contenido).unwrap();
-}
-
-/// Criterio `sin_schema_permisivo`: un bundle SIN `.lodestar/schema.yaml` → `Schema` vacío
-/// permisivo (types vacío) y **sin error** (compat con bundles OKF actuales).
+/// `abre_sin_repo_git` — **Dado** un directorio que **no** es un repo git, **Cuando** se abre con
+/// [`Workspace::open`], **Entonces** abre sin error y sin rama de descubrimiento de repo
+/// (`requirements/epica-15-workspace-universal.md` § E15-H01).
+///
+/// // guarda: ya verde, debe seguir verde tras la retirada
+///
+/// Hoy pasa porque `Vcs::discover` devuelve `Ok(None)` cuando no hay repo; tras E15-H01 debe
+/// seguir pasando **sin** que exista siquiera esa rama. El test no menciona git en su API: fija
+/// que la apertura de un directorio arbitrario es un camino feliz, no una excepción tolerada.
+/// Se asevera además que la apertura **no crea** un `.git/` (no hay `git init` implícito) y que el
+/// workspace queda operativo (analiza el `.md` de disco).
 #[test]
-fn sin_schema_permisivo() {
-    use lodestar_workspace::WorkspaceSchema;
+fn abre_sin_repo_git() {
     let dir = tempfile::tempdir().unwrap();
-    // Deliberadamente NO escribimos `.lodestar/schema.yaml`.
-
-    let schema = WorkspaceSchema::load(dir.path())
-        .expect("un bundle sin schema.yaml debe cargar un Schema permisivo, no fallar");
-
+    // Un `.md` cualquiera: el directorio es un proyecto normal, no un workspace ceremonioso.
+    std::fs::write(
+        dir.path().join("notas.md"),
+        "---\ntype: Nota\ntitle: Notas\ndescription: d\n---\n\n# H\n\ncuerpo\n",
+    )
+    .unwrap();
+    // Guarda anti-vacuidad: el directorio temporal NO es (ni está dentro de) un repo git.
     assert!(
-        schema.types.is_empty(),
-        "sin schema.yaml, `types` debe estar vacío (permisivo); eran: {:?}",
-        schema.types.keys().collect::<Vec<_>>()
-    );
-}
-
-/// Criterio extra (evita vacuidad — ejercita el loader real de I/O): con un
-/// `.lodestar/schema.yaml` presente que declara un `DocType` `decision`, el loader lo
-/// deserializa a `Schema` y expone sus `required_fields`.
-#[test]
-fn loader_carga_schema_yaml() {
-    use lodestar_workspace::WorkspaceSchema;
-    let dir = tempfile::tempdir().unwrap();
-    escribe_schema_yaml(
-        dir.path(),
-        "\
-version: \"1\"
-types:
-  decision:
-    name: decision
-    requiredFields: [title, status, rationale]
-    allowedStatuses: [proposed, accepted]
-",
+        !dir.path().join(".git").exists(),
+        "el directorio de partida no debe ser un repo git"
     );
 
-    let schema =
-        WorkspaceSchema::load(dir.path()).expect("un schema.yaml válido debe cargar sin error");
+    let ws = Workspace::open(dir.path())
+        .expect("un directorio que no es repo git debe abrirse sin error");
 
-    let decision = schema
-        .types
-        .get("decision")
-        .expect("el loader debe deserializar el DocType `decision` del schema.yaml");
-    assert_eq!(
-        decision.required_fields,
-        vec![
-            "title".to_string(),
-            "status".to_string(),
-            "rationale".to_string()
-        ],
-        "el loader debe preservar `requiredFields` del wire camelCase"
+    // La apertura no fabrica un repo: git no participa en abrir un workspace.
+    assert!(
+        !dir.path().join(".git").exists(),
+        "`Workspace::open` no debe crear un repo git al abrir"
+    );
+
+    // Y el workspace queda operativo sobre el contenido de disco.
+    let snap = ws
+        .snapshot()
+        .expect("el snapshot debe computarse sin repo git");
+    assert!(
+        snap.analysis
+            .documents
+            .iter()
+            .any(|c| c.as_str() == "notas.md"),
+        "el análisis debe ver el `.md` del directorio: {:?}",
+        snap.analysis.documents
     );
 }

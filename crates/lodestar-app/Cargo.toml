@@ -17,7 +17,7 @@ categories = ["development-tools"]
 # detrás de esta feature (`schema_derive!` en `types.rs`), sin traer rusqlite/git2/tokio.
 lodestar-core = { workspace = true, features = ["schemars"] }
 # `features = ["schemars"]`: activa `JsonSchema` en `ExternalReference` (E11-H04), embebido en
-# `ConceptView::external_references` — mismo motivo que la feature homónima de `lodestar-core`.
+# `DocumentView::external_references` — mismo motivo que la feature homónima de `lodestar-core`.
 lodestar-workspace = { workspace = true, features = ["schemars"] }
 serde = { workspace = true }
 serde_json = { workspace = true }

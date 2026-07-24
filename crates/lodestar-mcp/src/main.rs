@@ -1,5 +1,9 @@
 //! Servidor MCP de lodestar (`ARCHITECTURE.md §7.2`).
 //!
+//! Superficie de arranque (`ARCHITECTURE.md §20.5`, E15-H06):
+//! `lodestar-mcp [--root <dir>] [--profile readonly|standard]`. Sin `--root` la raíz es el `cwd`,
+//! y **cualquier** directorio vale — no se exige `index.md`, `.lodestar/` ni `lodestar init`.
+//!
 //! **Logs solo a stderr; stdout = JSON-RPC.** Bucle de líneas JSON-RPC sobre stdio que despacha
 //! a los handlers de [`tools`]. La integración con el transporte oficial `rmcp` (handshake completo,
 //! resources, streaming) es el paso de producción de E7; este bucle implementa el subconjunto
@@ -18,18 +22,18 @@ mod tools;
 /// en el orden en que se espera usarlas. Los nombres de tool son identificadores (no se traducen);
 /// el resto va en español, el idioma del repo (E14-H03).
 const SERVER_INSTRUCTIONS: &str = "\
-Motor headless de integridad semántica (OKF) para agentes. Flujo recomendado en cada sesión \
+Motor headless de integridad semántica para agentes. Flujo recomendado en cada sesión \
 (10 pasos, en orden):
 
 1. `workspace_status`: oriéntate primero — config activa, capacidades del perfil, conformidad y \
 recuento agregado del workspace.
-2. `knowledge_search`: localiza conceptos por texto y filtros (snippets y revisión, nunca cuerpos \
+2. `knowledge_search`: localiza documentos por texto y filtros (snippets y revisión, nunca cuerpos \
 completos).
-3. `knowledge_get`: lee un concepto concreto con `include` selectivo y secciones acotadas.
-4. `schema_inspect`: descubre el catálogo de tipos y sus reglas (`.lodestar/schema.yaml`) antes de \
-proponer cambios.
+3. `knowledge_get`: lee un documento concreto con `include` selectivo y secciones acotadas.
+4. `metadata_inspect`: descubre las convenciones de metadata de la base (campos, tipos, valores \
+frecuentes) sin necesitar un schema, antes de proponer cambios.
 5. `graph_query`: consulta el grafo (backlinks, huérfanos, vecindario, caminos) para entender el \
-contexto de un concepto.
+contexto de un documento.
 6. `impact_analyze`: evalúa el impacto de un cambio hipotético (afectados, bloqueos, riesgo) antes \
 de proponerlo.
 7. `change_plan`: planifica el cambio SIN escribir — normaliza, simula en memoria y valida; \
@@ -42,9 +46,19 @@ recibo.
 Perfil `readonly`: solo los pasos de lectura y verificación (las tools de cambio no están \
 disponibles). Perfil `standard` (por defecto): el flujo completo.";
 
-/// Parsea `<bundle> [--profile readonly|standard]`: el bundle es el primer argumento
-/// posicional (sin tocar); `--profile` es una flag adicional, `standard` por defecto
-/// (`ARCHITECTURE.md §19.6`).
+/// Texto de uso (a stderr: stdout es JSON-RPC puro y nada más).
+const USAGE: &str = "\
+Uso: lodestar-mcp [--root <dir>] [--profile readonly|standard]
+
+  --root <dir>       Raíz del workspace. Por defecto: el directorio actual (`cwd`).
+  --profile <perfil> «standard» (por defecto) o «readonly» (sin las tools de cambio).
+  -h, --help         Muestra esta ayuda.";
+
+/// Parsea `[--root <dir>] [--profile readonly|standard]` (`ARCHITECTURE.md §20.5`).
+///
+/// **No hay argumento posicional**: la raíz es `--root` si se da y el `cwd` si no
+/// (`§20.1`, «arranque sin ceremonia»: `cd my-project && lodestar-mcp` funciona). Cualquier otro
+/// argumento es error de uso (exit 2).
 fn parse_args() -> (PathBuf, Profile) {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut root = None;
@@ -52,6 +66,16 @@ fn parse_args() -> (PathBuf, Profile) {
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
+            "--root" => {
+                i += 1;
+                match args.get(i) {
+                    Some(dir) => root = Some(PathBuf::from(dir)),
+                    None => {
+                        eprintln!("lodestar-mcp: --root necesita un directorio\n\n{USAGE}");
+                        std::process::exit(2);
+                    }
+                }
+            }
             "--profile" => {
                 i += 1;
                 profile = match args.get(i).map(String::as_str) {
@@ -66,8 +90,14 @@ fn parse_args() -> (PathBuf, Profile) {
                     }
                 };
             }
-            other if root.is_none() => root = Some(PathBuf::from(other)),
-            _ => {}
+            "-h" | "--help" => {
+                eprintln!("{USAGE}");
+                std::process::exit(0);
+            }
+            other => {
+                eprintln!("lodestar-mcp: argumento no reconocido «{other}»\n\n{USAGE}");
+                std::process::exit(2);
+            }
         }
         i += 1;
     }
@@ -79,19 +109,25 @@ fn parse_args() -> (PathBuf, Profile) {
 fn main() {
     let (root, profile) = parse_args();
 
-    // Un bundle de verdad tiene `index.md` o `.lodestar/`: sin esta comprobación el servidor
-    // arrancaría "feliz" sobre un directorio arbitrario y `create_concept` escribiría donde caiga.
-    if !root.join("index.md").is_file() && !root.join(".lodestar").is_dir() {
-        eprintln!(
-            "lodestar-mcp: {} no es un bundle lodestar (falta index.md o .lodestar/)",
-            root.display()
-        );
-        std::process::exit(3);
-    }
+    // La raíz se canonicaliza UNA sola vez al arrancar y queda fija toda la sesión
+    // (`ARCHITECTURE.md §20.5`): todas las rutas públicas son relativas a ella, así que no puede
+    // depender del `cwd` del proceso ni cambiar a mitad de sesión.
+    let root = match std::fs::canonicalize(&root) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!(
+                "lodestar-mcp: no se pudo resolver la raíz {}: {e}",
+                root.display()
+            );
+            std::process::exit(3);
+        }
+    };
+    // Cualquier directorio es un workspace válido: no hace falta `index.md`, ni `.lodestar/`, ni
+    // `lodestar init` (`§20.1`). El gate de «esto no es un workspace» se retiró en E15-H06.
     let app = match App::open(&root) {
         Ok(app) => app,
         Err(e) => {
-            eprintln!("lodestar-mcp: no se pudo abrir el bundle: {e}");
+            eprintln!("lodestar-mcp: no se pudo abrir el workspace: {e}");
             std::process::exit(3);
         }
     };

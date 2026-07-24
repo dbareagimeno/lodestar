@@ -40,10 +40,10 @@ use lodestar_app::App;
 use lodestar_core::plan::PlanPolicy;
 use lodestar_core::types::{ChangeSetId, ErrorCode, WorkspaceRevision};
 
-/// Ruta relativa (dentro del bundle) del fichero de auditoría runtime.
+/// Ruta relativa (dentro del workspace) del fichero de auditoría runtime.
 const AUDIT_REL: [&str; 3] = [".lodestar", "runtime", "audit.jsonl"];
 
-/// Escribe un `.md` (creando los directorios intermedios) dentro del bundle temporal.
+/// Escribe un `.md` (creando los directorios intermedios) dentro del workspace temporal.
 fn escribe(root: &Path, rel: &str, contenido: &str) {
     let ruta = root.join(rel);
     if let Some(dir) = ruta.parent() {
@@ -52,21 +52,21 @@ fn escribe(root: &Path, rel: &str, contenido: &str) {
     std::fs::write(ruta, contenido).unwrap();
 }
 
-/// Monta un `App` sobre un bundle temporal con un index raíz + un concept conforme (`alfa.md`).
+/// Monta un `App` sobre un workspace temporal con un index raíz + un documento conforme (`alfa.md`).
 /// El `TempDir` se devuelve para mantener el directorio vivo mientras dure el test.
-fn app_con_bundle() -> (tempfile::TempDir, App) {
+fn app_con_workspace() -> (tempfile::TempDir, App) {
     let dir = tempfile::tempdir().unwrap();
     escribe(
         dir.path(),
         "index.md",
-        "---\nokf_version: \"0.1\"\n---\n\n# Bundle\n\n* [Alfa](alfa.md)\n",
+        "---\ntype: Index\ntitle: Bundle\ndescription: Índice del bundle\nokf_version: \"0.1\"\n---\n\n# Bundle\n\n* [Alfa](alfa.md)\n",
     );
     escribe(
         dir.path(),
         "alfa.md",
         "---\ntype: Concept\ntitle: Alfa\ndescription: Primer concept\n---\n\n# Resumen\n\ncuerpo\n",
     );
-    let app = App::open(dir.path()).expect("el bundle temporal debe abrir");
+    let app = App::open(dir.path()).expect("el workspace temporal debe abrir");
     (dir, app)
 }
 
@@ -93,7 +93,7 @@ fn hash_desnudo(id: &ChangeSetId) -> String {
     id.0.strip_prefix("changeset:").unwrap_or(&id.0).to_string()
 }
 
-/// Ruta absoluta del fichero de auditoría del bundle.
+/// Ruta absoluta del fichero de auditoría del workspace.
 fn ruta_audit(root: &Path) -> PathBuf {
     let mut p = root.to_path_buf();
     for seg in AUDIT_REL {
@@ -150,7 +150,7 @@ fn linea_del_apply<'a>(lineas: &'a [serde_json::Value], id: &ChangeSetId) -> &'a
 /// (`change_apply`), el `changeSetId` y las revisiones base/resultado coherentes con el receipt.
 #[test]
 fn audit_registra_apply() {
-    let (dir, app) = app_con_bundle();
+    let (dir, app) = app_con_workspace();
     let plan = app
         .change_plan(None, &una_operacion(), policy_permisiva())
         .expect("el `change_plan` debe tener éxito y producir un plan");
@@ -194,7 +194,7 @@ fn audit_registra_apply() {
 /// registro; un audit trail cubre también los intentos rechazados).
 #[test]
 fn audit_registra_fallo() {
-    let (dir, app) = app_con_bundle();
+    let (dir, app) = app_con_workspace();
     let plan = app
         .change_plan(None, &una_operacion(), policy_permisiva())
         .expect("el `change_plan` debe tener éxito y producir un plan");

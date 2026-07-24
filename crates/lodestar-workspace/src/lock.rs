@@ -1,5 +1,5 @@
 //! Lock de publicación del workspace (E13-H02, `ARCHITECTURE.md §19.5`, `REFACTOR §5.2`):
-//! garantiza **un solo publicador a la vez** sobre un mismo bundle. Es control de concurrencia
+//! garantiza **un solo publicador a la vez** sobre un mismo workspace. Es control de concurrencia
 //! runtime, no estado canónico: el fichero de lock vive bajo `.lodestar/runtime/` (excluido del
 //! índice de conocimiento y del `WorkspaceRevision`), así que no viola el invariante #1 («los
 //! `.md` en disco son la única fuente de verdad»).
@@ -69,7 +69,7 @@ impl Workspace {
     pub fn acquire_lock(&self) -> Result<WorkspaceLock, WorkspaceError> {
         let path = self.lock_path();
 
-        // El scaffold runtime se crea al abrir el bundle, pero garantízalo por si el directorio se
+        // El scaffold runtime se crea al abrir el workspace, pero garantízalo por si el directorio se
         // borró en caliente (checkout limpio, `rm -rf .lodestar/runtime`, …).
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;

@@ -1,6 +1,6 @@
 //! `lodestar-workspace` — el handle unificado (`ARCHITECTURE.md §6`).
 //!
-//! Compone `lodestar-core` (puro) + `lodestar-vcs`. Es lo que ven las fachadas. Es el **único
+//! Compone `lodestar-core` (puro) + `lodestar-store`. Es lo que ven las fachadas. Es el **único
 //! escritor**: los comandos nunca escriben la cache; escriben el `.md` (atómico temp+rename).
 //!
 //! Nota de fase: la cache incremental (`lodestar-store`: SQLite/FTS5 + watcher, E3) es la capa de
@@ -9,20 +9,20 @@
 //! es correcto, solo que no incremental.
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use crossbeam_channel::Receiver;
-use lodestar_core::diff::OkfDiff;
 use lodestar_core::types::{
-    Analysis, Author, Backlinks, Branch, CommitConformance, CommitRow, Direction, FileMap,
-    FrontmatterPatch, GraphModel, Mutation, Neighborhood, RelPath, Sha, SyncOutcome,
-    WorkspaceRevision, WriteOutcome,
+    Analysis, Backlinks, Check, Direction, FileMap, FrontmatterPatch, GraphModel, Neighborhood,
+    RelPath, WorkspaceRevision, WriteOutcome,
 };
-use lodestar_core::Bundle;
+use lodestar_core::DocumentSet;
 use lodestar_store::{IndexEvent, Store, Watcher};
-use lodestar_vcs::{MergeOutcome, Vcs};
+
+use crate::discovery::DiscoveryPolicy;
 
 pub mod config;
+pub mod discovery;
 mod error;
 mod external_refs;
 mod gitignore;
@@ -33,27 +33,25 @@ mod publish;
 mod receipts;
 mod recovery;
 mod runtime;
-pub mod schema;
 mod snapshot;
 mod staging;
 mod transaction;
 
-pub use config::{Config, WorkspaceConfig};
+pub use config::WorkspaceConfig;
 pub use error::WorkspaceError;
 pub use external_refs::{ExternalReference, ExternalRefsReport};
 pub use journal::{Journal, JournalState, OpState};
 pub use lock::WorkspaceLock;
 pub use recovery::RecoveryDir;
-pub use schema::WorkspaceSchema;
-pub use snapshot::BundleSnapshot;
+pub use snapshot::WorkspaceSnapshot;
 pub use staging::StagingDir;
 pub use transaction::transaction_id;
 
-/// Handle unificado de un bundle abierto.
+/// Handle unificado de un workspace abierto.
 pub struct Workspace {
     root: PathBuf,
-    vcs: Option<Mutex<Vcs>>,
-    identity: Author,
+    /// Configuración de la sesión (`.lodestar/config.yaml`), leída **una sola vez** al abrir.
+    config: WorkspaceConfig,
     /// Cache incremental (SQLite/FTS5). `None` en modo efímero (CLI one-shot).
     cache: Option<Arc<Store>>,
     /// Watcher vivo (mantiene la observación de disco mientras exista).
@@ -61,35 +59,82 @@ pub struct Workspace {
 }
 
 impl Workspace {
-    /// Abre un bundle: descubre git (puede no haber). Identidad por defecto (override en E8-H01).
-    /// **No** activa la cache incremental (usa [`Workspace::open_live`] o [`Workspace::enable_cache`]).
+    /// Abre un workspace sobre un directorio cualquiera. **No** activa la cache incremental
+    /// (usa [`Workspace::open_live`] o [`Workspace::enable_cache`]).
+    ///
+    /// Abrir no exige ceremonia: no hay descubrimiento de repo, ni `init`, ni scaffold obligatorio
+    /// (`ARCHITECTURE.md §20.1`). Un directorio con `.md` sueltos —y **sin** `.lodestar/`— es un
+    /// workspace válido: la config es opcional y su ausencia da los defaults de `§20.5`.
+    ///
+    /// # Errores
+    /// - [`WorkspaceError::Io`] si `.lodestar/config.yaml` existe pero es inválido. Se comprueba
+    ///   **antes** de tocar nada del disco: desde que la config gobierna el descubrimiento
+    ///   (E15-H08), degradar a defaults ante un typo haría que Lodestar viera un conjunto de
+    ///   documentos distinto del que el usuario declaró sin decir una palabra.
     pub fn open(root: &Path) -> Result<Self, WorkspaceError> {
+        // La config se lee UNA vez por sesión: la raíz y su política son fijas mientras el
+        // workspace vive (`ARCHITECTURE.md §20.5`).
+        let config = WorkspaceConfig::load(root).map_err(WorkspaceError::Io)?;
         // Ajusta el `.gitignore` versionado (cache + runtime desechables, config canónica
         // preservada) y garantiza el scaffold de `.lodestar/runtime/` — ambos best-effort, no
-        // abortan la apertura (`ARCHITECTURE.md §19.4`, `DECISIONES.md §0` D5).
+        // abortan la apertura (`ARCHITECTURE.md §19.4`, `DECISIONES.md §0` D5). Ninguno de los dos
+        // escribe configuración: un workspace sin `.lodestar/config.yaml` sigue sin tenerlo tras
+        // abrirlo.
         gitignore::ensure_gitignore(root);
         runtime::ensure_runtime_scaffold(root);
-        let vcs = Vcs::discover(root)?.map(Mutex::new);
-        // La identidad de `lodestar.toml` (si existe) tiene prioridad sobre el defecto.
-        let identity = Config::load(root)
-            .ok()
-            .and_then(|c| c.author())
-            .unwrap_or_else(default_identity);
         Ok(Workspace {
             root: root.to_path_buf(),
-            vcs,
-            identity,
+            config,
             cache: None,
             _watcher: None,
         })
     }
 
-    /// La configuración efectiva del bundle (`lodestar.toml` + defaults).
-    pub fn config(&self) -> Config {
-        Config::load(&self.root).unwrap_or_default()
+    /// La configuración de la sesión (`.lodestar/config.yaml` + defaults seguros), leída una sola
+    /// vez al abrir. El `lodestar.toml` legado desapareció en E15-H08: hoy es un fichero más del
+    /// proyecto.
+    pub fn config(&self) -> &WorkspaceConfig {
+        &self.config
     }
 
-    /// El directorio raíz del bundle abierto (E10-H08: lo expone `App::workspace_status` como
+    /// La [`DiscoveryPolicy`] efectiva del workspace (`ARCHITECTURE.md §20.5`).
+    ///
+    /// **Punto de inyección único** de la política: se deriva de la sección `discovery` de la
+    /// config de la sesión ([`config::DiscoverySection::policy`]), que le añade el suelo duro
+    /// `.lodestar/**` — la config puede añadir exclusiones, nunca quitar esa.
+    ///
+    /// La firma es infalible a propósito: la validación del YAML ocurre **una vez**, al abrir
+    /// ([`Workspace::open`]), de modo que un workspace abierto siempre tiene una política válida y
+    /// ninguno de sus llamadores tiene que decidir qué hacer con un error de config a mitad de una
+    /// lectura.
+    pub fn discovery_policy(&self) -> DiscoveryPolicy {
+        self.config.discovery.policy()
+    }
+
+    /// El inventario `.md` del workspace según [`Workspace::discovery_policy`] (E15-H07).
+    ///
+    /// Es el **único** camino de lectura del conocimiento canónico desde disco: sustituye al
+    /// `io::load_bundle` de v0.2.x en todos sus llamadores, de modo que el workspace, la
+    /// [`WorkspaceRevision`] y el motor transaccional vean exactamente el mismo conjunto de
+    /// documentos (si divergieran, el control optimista protegería ficheros que el plan ni
+    /// siquiera ve).
+    ///
+    /// Los diagnósticos de descubrimiento se descartan aquí a propósito: el conjunto de llamadores
+    /// solo necesita el inventario, y exponerlos a las fachadas es parte de la validación genérica
+    /// de E20 (`§20.9`). Quien los necesite hoy llama a [`discovery::discover`] directamente.
+    ///
+    /// Con [`discovery::Discovered::other_files`] pasa lo mismo, y por el mismo motivo: los
+    /// llamadores de este atajo (revisión, staging, publicación, recuperación) comparan y escriben
+    /// documentos, no resuelven enlaces. Quien sí los resuelve es [`Workspace::document_set`], que
+    /// por eso llama a [`discovery::discover`] y no a esta función.
+    ///
+    /// # Errores
+    /// - [`WorkspaceError::Io`] si la política trae un glob inválido.
+    pub(crate) fn discover_files(&self) -> Result<FileMap, WorkspaceError> {
+        Ok(discovery::discover(&self.root, &self.discovery_policy())?.files)
+    }
+
+    /// El directorio raíz del workspace abierto (E10-H08: lo expone `App::workspace_status` como
     /// `root` de la proyección de estado).
     pub fn root(&self) -> &Path {
         &self.root
@@ -107,11 +152,10 @@ impl Workspace {
     /// # Errores
     /// - [`WorkspaceError::Io`] si falla la lectura del canónico.
     pub fn workspace_revision(&self) -> Result<WorkspaceRevision, WorkspaceError> {
-        let files = io::load_bundle(&self.root)?;
-        let cfg = WorkspaceConfig::load(&self.root).unwrap_or_default();
+        let files = self.discover_files()?;
         Ok(lodestar_core::types::workspace_revision(
             &files,
-            &cfg.workspace.writable_roots,
+            &self.config.workspace.writable_roots,
         ))
     }
 
@@ -137,19 +181,28 @@ impl Workspace {
         }
     }
 
-    /// Abre sin git (modo hermético, p. ej. CLI efímera).
+    /// Abre en modo hermético (p. ej. CLI efímera): sin tocar `.gitignore` ni el scaffold de
+    /// runtime, y sin cache incremental.
+    ///
+    /// «Hermético» se refiere a **no escribir** en el workspace, no a saltarse la validación: la
+    /// config se carga y se valida igual que en [`Workspace::open`]. Si no lo hiciera, esta vía
+    /// serviría un inventario calculado con una política de defaults que el usuario nunca escribió
+    /// — justo el fallo silencioso que la validación existe para evitar.
+    ///
+    /// # Errores
+    /// - [`WorkspaceError::Io`] si `.lodestar/config.yaml` existe pero es inválido.
     pub fn open_ephemeral(root: &Path) -> Result<Self, WorkspaceError> {
+        let config = WorkspaceConfig::load(root).map_err(WorkspaceError::Io)?;
         Ok(Workspace {
             root: root.to_path_buf(),
-            vcs: None,
-            identity: default_identity(),
+            config,
             cache: None,
             _watcher: None,
         })
     }
 
-    /// Abre un bundle **en vivo**: git + cache incremental construida + watcher arrancado.
-    /// Es lo que usan las fachadas interactivas (Tauri/MCP) para recibir `IndexEvent`.
+    /// Abre un workspace **en vivo**: cache incremental construida + watcher arrancado.
+    /// Es lo que usan las fachadas interactivas (MCP) para recibir `IndexEvent`.
     pub fn open_live(root: &Path) -> Result<Self, WorkspaceError> {
         let mut ws = Workspace::open(root)?;
         ws.enable_cache()?;
@@ -163,9 +216,7 @@ impl Workspace {
             return Ok(());
         }
         // El `.gitignore` ya quedó ajustado en `Workspace::open` (cache + runtime ignorados,
-        // ANTES de crear la cache) — ver `gitignore::ensure_gitignore`. Ya no se toca
-        // `.git/info/exclude` vía `Vcs::ensure_cache_ignored` (ese ajuste era no-versionado; el
-        // `.gitignore` del bundle es la fuente única, texto plano, sin `git2`).
+        // ANTES de crear la cache) — ver `gitignore::ensure_gitignore`: texto plano, sin git.
         let store = Arc::new(Store::open(&self.root)?);
         // Watcher ANTES del rebuild: un guardado externo durante el rebuild inicial genera
         // evento y se reconcilia; al revés quedaba una ventana ciega hasta el siguiente evento.
@@ -184,7 +235,7 @@ impl Workspace {
             .ok_or(WorkspaceError::NoCache)
     }
 
-    /// Acceso a la cache incremental (para consultas aceleradas: backlinks/orphans/FTS).
+    /// Acceso a la cache incremental (para consultas aceleradas: backlinks/aislados/FTS).
     pub fn cache(&self) -> Option<&Arc<Store>> {
         self.cache.as_ref()
     }
@@ -197,91 +248,83 @@ impl Workspace {
         }
     }
 
-    fn cache_remove(&self, path: &RelPath) {
-        if let Some(store) = &self.cache {
-            let _ = store.remove(path);
-        }
-    }
-
-    /// Fija la identidad de los commits (autor/committer).
-    pub fn set_identity(&mut self, author: Author) {
-        self.identity = author;
-    }
-
-    /// `true` si el bundle tiene un repo git.
-    pub fn has_vcs(&self) -> bool {
-        self.vcs.is_some()
-    }
-
-    /// Inicializa git en el bundle (first-run / "activar git").
-    pub fn init_vcs(&mut self) -> Result<(), WorkspaceError> {
-        let vcs = Vcs::init(&self.root, &self.identity)?;
-        self.vcs = Some(Mutex::new(vcs));
-        Ok(())
-    }
-
-    /// Scaffold de un bundle nuevo (equivale a `lodestar init`): crea el directorio, el
-    /// `index.md` raíz si falta y git (con commit inicial) si no hay repo. Idempotente sobre
-    /// un bundle existente. Es la ÚNICA implementación del scaffold: la usan la CLI y el
-    /// first-run del escritorio.
-    pub fn init_bundle(root: &Path) -> Result<Workspace, WorkspaceError> {
-        std::fs::create_dir_all(root).map_err(|e| WorkspaceError::Io(e.to_string()))?;
-        if !root.join("index.md").exists() {
-            let index = RelPath::new("index.md").expect("path constante válido");
-            io::write_atomic(root, &index, "---\nokf_version: \"0.1\"\n---\n\n# Bundle\n")?;
-        }
-        let mut ws = Workspace::open(root)?;
-        if !ws.has_vcs() {
-            ws.init_vcs()?;
-        }
-        Ok(ws)
-    }
+    // NOTA (E15-H02): el `cache_remove` simétrico se retiró con `apply_mutation` — su único
+    // llamador. Hoy ninguna escritura de alto nivel borra `.md` del canónico fuera de la
+    // transacción, y el borrado transaccional va por `publish_result`, que reconcilia la cache por
+    // el watcher. Si vuelve a hacer falta, es `store.remove(path)` con el mismo patrón de arriba.
 
     // --- lectura ----------------------------------------------------------
 
-    /// Carga el bundle desde disco (el core es la autoridad).
-    pub fn bundle(&self) -> Result<Bundle, WorkspaceError> {
-        Ok(Bundle::from_files(io::load_bundle(&self.root)?))
+    /// Carga el workspace desde disco (el core es la autoridad).
+    ///
+    /// Se construye con [`DocumentSet::with_other_files`] —y no con `from_files`— porque el
+    /// [`lodestar_core::types::Inventory`] que resuelve los enlaces necesita saber también qué
+    /// ficheros del proyecto **no** son documentos: sin ellos, un enlace a `src/auth/token.rs` que
+    /// existe en disco se clasificaría [`lodestar_core::types::LinkTarget::Missing`] y emitiría un
+    /// `LINK-TARGET-MISSING` espurio (`ARCHITECTURE.md §20.6`, precisión 2). Quien hace I/O es
+    /// quien construye el inventario: el core sigue puro (invariante #2).
+    ///
+    /// Por eso no pasa por el atajo interno `discover_files`, que descarta esa mitad del resultado.
+    ///
+    /// # Errores
+    /// - [`WorkspaceError::Io`] si la política de descubrimiento trae un glob inválido.
+    pub fn document_set(&self) -> Result<DocumentSet, WorkspaceError> {
+        Ok(self.document_set_with_discovery()?.0)
+    }
+
+    /// Como [`Workspace::document_set`], pero devuelve **también** los diagnósticos de descubrimiento
+    /// (`§20.9`: `DOC-NOT-UTF8`, `DOC-TOO-LARGE`, `SYMLINK-UNSUPPORTED`, `PATH-NOT-UTF8` y las
+    /// colisiones de capitalización del inventario) que [`Workspace::document_set`] descarta (E20-H04).
+    ///
+    /// Son diagnósticos de **workspace**, no de documento: describen ficheros que Lodestar no pudo
+    /// incorporar al inventario (y por tanto **no** están en [`Analysis::documents`] ni indexados por
+    /// un `RelPath` de [`Analysis::diagnostics`]) o propiedades de portabilidad del inventario
+    /// completo. Por eso viajan aparte, en un `Vec<Check>`, y no dentro del [`Analysis`]: el llamador
+    /// (`App::knowledge_check`, scope workspace) los añade al reporte junto a los de documento —ver
+    /// `ARCHITECTURE.md §20.9`—. Un `PATH-NOT-UTF8` va incluso **sin** `targets` (no hay `RelPath`
+    /// que construir, invariante #6).
+    ///
+    /// # Errores
+    /// - [`WorkspaceError::Io`] si la política de descubrimiento trae un glob inválido.
+    pub fn document_set_with_discovery(&self) -> Result<(DocumentSet, Vec<Check>), WorkspaceError> {
+        let descubierto = discovery::discover(&self.root, &self.discovery_policy())?;
+        let doc_set = DocumentSet::with_other_files(descubierto.files, descubierto.other_files);
+        Ok((doc_set, descubierto.diagnostics))
     }
 
     /// Snapshot unificado: files + analysis + graph, todo junto.
-    pub fn snapshot(&self) -> Result<BundleSnapshot, WorkspaceError> {
-        let bundle = self.bundle()?;
-        Ok(BundleSnapshot {
-            files: bundle.files().clone(),
-            analysis: bundle.analyze().clone(),
-            graph: bundle.graph_model(),
+    pub fn snapshot(&self) -> Result<WorkspaceSnapshot, WorkspaceError> {
+        let doc_set = self.document_set()?;
+        Ok(WorkspaceSnapshot {
+            files: doc_set.files().clone(),
+            analysis: doc_set.analyze().clone(),
+            graph: doc_set.graph_model(),
         })
     }
 
     /// Análisis (conformidad/grafo derivados).
     pub fn analyze(&self) -> Result<Analysis, WorkspaceError> {
-        Ok(self.bundle()?.analyze().clone())
+        Ok(self.document_set()?.analyze().clone())
     }
 
-    /// Vecindad de enlaces de un concept.
+    /// Vecindad de enlaces de un documento.
     pub fn backlinks(&self, p: &RelPath) -> Result<Backlinks, WorkspaceError> {
-        Ok(self.bundle()?.backlinks(p))
+        Ok(self.document_set()?.backlinks(p))
     }
 
-    /// Subgrafo dirigido alrededor de un concept.
+    /// Subgrafo dirigido alrededor de un documento.
     pub fn neighborhood(
         &self,
         p: &RelPath,
         depth: u32,
         dir: Direction,
     ) -> Result<Neighborhood, WorkspaceError> {
-        Ok(self.bundle()?.neighborhood(p, depth, dir))
+        Ok(self.document_set()?.neighborhood(p, depth, dir))
     }
 
     /// Grafo completo.
     pub fn graph_model(&self) -> Result<GraphModel, WorkspaceError> {
-        Ok(self.bundle()?.graph_model())
-    }
-
-    /// Query estructurada (devuelve paths).
-    pub fn query(&self, dsl: &str) -> Result<Vec<RelPath>, WorkspaceError> {
-        Ok(self.bundle()?.query(dsl))
+        Ok(self.document_set()?.graph_model())
     }
 
     // --- escritura validada (por el ÚNICO escritor) -----------------------
@@ -291,10 +334,9 @@ impl Workspace {
     /// transacción anterior se interrumpió a mitad y [`Workspace::recover`] aún no la
     /// completó/restauró. El gate se comprueba ANTES de tocar el canónico —para no publicar sobre
     /// un estado a medio recuperar (principio «nunca un estado parcial silencioso»)— en toda
-    /// escritura de alto nivel del canónico ([`Workspace::create_concept`],
-    /// [`Workspace::write_concept`], [`Workspace::merge_frontmatter`],
-    /// [`Workspace::apply_mutation`]) y en [`Workspace::publish`] (que excluye su propio journal en
-    /// curso). La restauración de `recover` NO pasa por aquí: escribe por `io::write_atomic`/
+    /// escritura de alto nivel del canónico ([`Workspace::create_document`],
+    /// [`Workspace::write_document`], [`Workspace::merge_frontmatter`]) y en [`Workspace::publish`]
+    /// (que excluye su propio journal en curso). La restauración de `recover` NO pasa por aquí: escribe por `io::write_atomic`/
     /// `io::delete` directamente, de modo que puede reparar el canónico con el gate levantado.
     fn guard_recovery(&self) -> Result<(), WorkspaceError> {
         if self.recovery_pending() {
@@ -307,8 +349,8 @@ impl Workspace {
         Ok(())
     }
 
-    /// Crea un concept validado y lo escribe por el único escritor (si es conforme).
-    pub fn create_concept(
+    /// Crea un documento validado y lo escribe por el único escritor (si es conforme).
+    pub fn create_document(
         &self,
         p: &RelPath,
         ty: &str,
@@ -317,9 +359,9 @@ impl Workspace {
         allow_nonconformant: bool,
     ) -> Result<WriteOutcome, WorkspaceError> {
         self.guard_recovery()?;
-        let bundle = self.bundle()?;
+        let doc_set = self.document_set()?;
         let now = now_iso8601();
-        let outcome = bundle.create_concept(p, ty, title, body, Some(&now), allow_nonconformant);
+        let outcome = doc_set.create_document(p, ty, title, body, Some(&now), allow_nonconformant);
         if outcome.written {
             io::write_atomic(&self.root, &outcome.path, &outcome.raw)?;
             self.cache_upsert(&outcome.path, &outcome.raw);
@@ -327,17 +369,17 @@ impl Workspace {
         Ok(outcome)
     }
 
-    /// Escribe contenido **crudo** en un concept (editor multi-escritor), validado por el core.
+    /// Escribe contenido **crudo** en un documento (editor multi-escritor), validado por el core.
     /// Rechazo = `written:false` (no un `Err`). Escribe por el único escritor si es conforme.
-    pub fn write_concept(
+    pub fn write_document(
         &self,
         p: &RelPath,
         raw: &str,
         allow_nonconformant: bool,
     ) -> Result<WriteOutcome, WorkspaceError> {
         self.guard_recovery()?;
-        let bundle = self.bundle()?;
-        let outcome = bundle.write_concept_raw(p, raw, allow_nonconformant);
+        let doc_set = self.document_set()?;
+        let outcome = doc_set.write_document_raw(p, raw, allow_nonconformant);
         if outcome.written {
             io::write_atomic(&self.root, &outcome.path, &outcome.raw)?;
             self.cache_upsert(&outcome.path, &outcome.raw);
@@ -345,17 +387,17 @@ impl Workspace {
         Ok(outcome)
     }
 
-    /// Lee el contenido crudo de un concept desde disco.
-    pub fn read_concept(&self, p: &RelPath) -> Result<String, WorkspaceError> {
+    /// Lee el contenido crudo de un documento desde disco.
+    pub fn read_document(&self, p: &RelPath) -> Result<String, WorkspaceError> {
         std::fs::read_to_string(self.root.join(p.as_str()))
             .map_err(|e| WorkspaceError::Io(e.to_string()))
     }
 
-    /// Lista las filas del árbol de concepts (título/orphan/invalid resueltos por el core).
-    pub fn list_concepts(
+    /// Lista las filas del árbol de documentos (título/isolated/invalid resueltos por el core).
+    pub fn list_documents(
         &self,
-    ) -> Result<Vec<lodestar_core::types::ConceptSummary>, WorkspaceError> {
-        Ok(self.bundle()?.list_concepts())
+    ) -> Result<Vec<lodestar_core::types::DocumentSummary>, WorkspaceError> {
+        Ok(self.document_set()?.list_documents())
     }
 
     /// Aplica un patch de frontmatter (null-borra) y lo escribe si es conforme.
@@ -365,421 +407,13 @@ impl Workspace {
         patch: FrontmatterPatch,
     ) -> Result<WriteOutcome, WorkspaceError> {
         self.guard_recovery()?;
-        let bundle = self.bundle()?;
-        let outcome = bundle.merge_frontmatter(p, patch);
+        let doc_set = self.document_set()?;
+        let outcome = doc_set.merge_frontmatter(p, patch);
         if outcome.written {
             io::write_atomic(&self.root, &outcome.path, &outcome.raw)?;
             self.cache_upsert(&outcome.path, &outcome.raw);
         }
         Ok(outcome)
-    }
-
-    /// Aplica una `Mutation` por el único escritor y devuelve `{written, removed, unchanged}`.
-    pub fn apply_mutation(&self, mutation: &Mutation) -> Result<ApplyReport, WorkspaceError> {
-        self.guard_recovery()?;
-        let mut written = 0;
-        let mut unchanged = 0;
-        for (path, content) in &mutation.writes {
-            let on_disk = std::fs::read_to_string(self.root.join(path.as_str())).ok();
-            if on_disk.as_deref() == Some(content.as_str()) {
-                unchanged += 1;
-            } else {
-                io::write_atomic(&self.root, path, content)?;
-                self.cache_upsert(path, content);
-                written += 1;
-            }
-        }
-        let mut removed = 0;
-        for path in &mutation.deletes {
-            if self.root.join(path.as_str()).exists() {
-                io::delete(&self.root, path)?;
-                self.cache_remove(path);
-                removed += 1;
-            }
-        }
-        Ok(ApplyReport {
-            written,
-            removed,
-            unchanged,
-        })
-    }
-
-    /// Genera y aplica el `index.md` de un directorio.
-    pub fn generate_index(&self, dir: &str) -> Result<ApplyReport, WorkspaceError> {
-        let mutation = self.bundle()?.gen_index(dir);
-        self.apply_mutation(&mutation)
-    }
-
-    /// Genera y aplica los índices de tags (purga obsoletos).
-    pub fn generate_tags(&self) -> Result<ApplyReport, WorkspaceError> {
-        let mutation = self.bundle()?.gen_tag_indexes();
-        self.apply_mutation(&mutation)
-    }
-
-    /// Exporta el bundle a un `.zip`.
-    pub fn export<W: std::io::Write + std::io::Seek>(&self, w: W) -> Result<(), WorkspaceError> {
-        self.bundle()?.export_zip(w).map_err(WorkspaceError::from)
-    }
-
-    // --- git (vía lodestar-vcs) -------------------------------------------
-
-    /// Conformidad del HEAD actual (usa la cache por tree-oid si está activa).
-    pub fn conformance(&self) -> Result<Option<CommitConformance>, WorkspaceError> {
-        let head = {
-            let guard = match &self.vcs {
-                Some(v) => v.lock().unwrap(),
-                None => return Ok(None),
-            };
-            guard.log(1)?.first().map(|r| r.id.clone())
-        };
-        match head {
-            Some(sha) => Ok(Some(self.conformance_of(&sha)?)),
-            None => Ok(None),
-        }
-    }
-
-    /// Conformidad de un commit concreto, cacheada por `tree_oid` en el store (`§10` fila 20):
-    /// solo recomputa (analyze sobre el árbol) en el primer acceso; luego sirve de la cache.
-    pub fn conformance_of(&self, sha: &Sha) -> Result<CommitConformance, WorkspaceError> {
-        let guard = self
-            .vcs
-            .as_ref()
-            .ok_or(WorkspaceError::NoVcs)?
-            .lock()
-            .unwrap();
-        let tree_oid = guard.tree_oid(sha)?;
-        if let Some(store) = &self.cache {
-            if let Some(cached) = store.get_conformance(&tree_oid)? {
-                return Ok(cached);
-            }
-            let computed = guard.conformance(sha)?;
-            store.put_conformance(&tree_oid, &computed)?;
-            return Ok(computed);
-        }
-        Ok(guard.conformance(sha)?)
-    }
-
-    /// Crea una rama local (opcionalmente desde un `Sha`). No toca el working tree.
-    pub fn create_branch(&self, name: &str, from: Option<&Sha>) -> Result<(), WorkspaceError> {
-        self.vcs
-            .as_ref()
-            .ok_or(WorkspaceError::NoVcs)?
-            .lock()
-            .unwrap()
-            .create_branch(name, from)?;
-        Ok(())
-    }
-
-    /// Cambia de rama por el único escritor: checkpoint si hay trabajo sin commitear, mueve `HEAD`,
-    /// aplica el árbol destino y regenera index/tags (`§16`).
-    pub fn switch(&self, name: &str) -> Result<ApplyReport, WorkspaceError> {
-        let (target_files, previous_branch) = {
-            let guard = self
-                .vcs
-                .as_ref()
-                .ok_or(WorkspaceError::NoVcs)?
-                .lock()
-                .unwrap();
-            if !guard.dirty_paths()?.is_empty() {
-                guard.commit(
-                    "Checkpoint automático antes de cambiar de rama",
-                    &self.identity,
-                )?;
-            }
-            let prev = guard.current_branch();
-            (guard.switch(name)?, prev)
-        };
-        // Si la aplicación falla a mitad (disco lleno, fichero ilegible…), HEAD ya apunta a la
-        // rama nueva pero el árbol quedaría mezclado — y el siguiente checkpoint commitearía
-        // contenido de la rama vieja sobre la nueva. Compensación: devolver HEAD a la original.
-        let apply = || -> Result<ApplyReport, WorkspaceError> {
-            let current = io::load_bundle(&self.root)?;
-            self.apply_mutation(&restore_mutation(&current, &target_files))
-        };
-        let report = match apply() {
-            Ok(r) => r,
-            Err(e) => {
-                if let (Some(prev), Some(v)) = (previous_branch, &self.vcs) {
-                    let _ = v.lock().unwrap().switch(&prev);
-                }
-                return Err(e);
-            }
-        };
-        // Tags ANTES que index: `gen_tags` puede crear/borrar `tags/` y el index raíz debe
-        // listar el estado final de los subdirectorios (si no, queda drift recién generado).
-        self.generate_tags()?;
-        self.generate_index("")?;
-        Ok(report)
-    }
-
-    /// Merge (local) de una rama en la actual, por el único escritor. Checkpoint previo; en
-    /// conflicto deja marcadores (`OKF-CONFLICT`) y `MERGE_HEAD` (bloquea el commit hasta resolver).
-    pub fn merge(&self, name: &str) -> Result<MergeReport, WorkspaceError> {
-        let outcome: MergeOutcome = {
-            let guard = self
-                .vcs
-                .as_ref()
-                .ok_or(WorkspaceError::NoVcs)?
-                .lock()
-                .unwrap();
-            if !guard.dirty_paths()?.is_empty() {
-                guard.commit("Checkpoint automático antes de hacer merge", &self.identity)?;
-            }
-            guard.merge(name)?
-        };
-        // Los artefactos GENERADOS (index/tags/log) que conflictan se auto-resuelven: no se
-        // escriben marcadores en ellos (se regeneran desde los concepts mergeados). Sin esto,
-        // cualquier merge donde ambas ramas añadieron páginas conflictaba en `index.md` y
-        // obligaba a resolver a mano un fichero derivado.
-        let (gen_conflicts, real_conflicts): (Vec<RelPath>, Vec<RelPath>) = outcome
-            .conflicted
-            .iter()
-            .cloned()
-            .partition(lodestar_core::diff::is_generated);
-        let mut merged_files = outcome.files.clone();
-        for p in &gen_conflicts {
-            merged_files.remove(p);
-        }
-        let report = if outcome.up_to_date {
-            ApplyReport {
-                written: 0,
-                removed: 0,
-                unchanged: 0,
-            }
-        } else {
-            let current = io::load_bundle(&self.root)?;
-            let mut mutation = restore_mutation(&current, &merged_files);
-            // Los generados excluidos no deben borrarse por ausencia: los recrea el generador.
-            mutation.deletes.retain(|p| !gen_conflicts.contains(p));
-            self.apply_mutation(&mutation)?
-        };
-        // Solo regenera artefactos si el merge quedó limpio (con conflictos reales, primero se
-        // resuelve; `commit` regenerará al concluir).
-        if real_conflicts.is_empty() && !outcome.up_to_date {
-            self.generate_tags()?;
-            self.generate_index("")?;
-        }
-        Ok(MergeReport {
-            report,
-            conflicted: real_conflicts,
-            fast_forward: outcome.fast_forward,
-            up_to_date: outcome.up_to_date,
-        })
-    }
-
-    /// Instala el hook `pre-commit` que corre `lodestar check`.
-    pub fn install_hooks(&self) -> Result<std::path::PathBuf, WorkspaceError> {
-        Ok(self
-            .vcs
-            .as_ref()
-            .ok_or(WorkspaceError::NoVcs)?
-            .lock()
-            .unwrap()
-            .install_hooks()?)
-    }
-
-    /// Historial de commits.
-    pub fn vcs_log(&self, limit: usize) -> Result<Vec<CommitRow>, WorkspaceError> {
-        match &self.vcs {
-            Some(v) => Ok(v.lock().unwrap().log(limit)?),
-            None => Ok(Vec::new()),
-        }
-    }
-
-    /// Ramas locales.
-    pub fn branches(&self) -> Result<Vec<Branch>, WorkspaceError> {
-        match &self.vcs {
-            Some(v) => Ok(v.lock().unwrap().branches()?),
-            None => Ok(Vec::new()),
-        }
-    }
-
-    /// Último commit conforme.
-    pub fn last_conforming(&self) -> Result<Option<Sha>, WorkspaceError> {
-        match &self.vcs {
-            Some(v) => Ok(v.lock().unwrap().last_conforming()?),
-            None => Ok(None),
-        }
-    }
-
-    /// Commit del working tree. Niega el commit si hay un rebase/cherry-pick/revert en curso
-    /// (`§13.6.3`); un **merge** pendiente SÍ se puede commitear (lo concluye: el vcs añade el
-    /// segundo padre y limpia el estado). El gate va ANTES de regenerar index/tags: si el
-    /// commit se niega, no se ensucia el árbol en mitad de la operación pendiente.
-    pub fn commit(&self, msg: &str) -> Result<CommitOutcome, WorkspaceError> {
-        {
-            let guard = self
-                .vcs
-                .as_ref()
-                .ok_or(WorkspaceError::NoVcs)?
-                .lock()
-                .unwrap();
-            match guard.repo_state() {
-                lodestar_core::types::RepoState::Clean
-                | lodestar_core::types::RepoState::Merging => {}
-                _ => return Err(WorkspaceError::RepoBusy),
-            }
-        }
-        // Regenera artefactos para que el commit sea coherente.
-        // Tags ANTES que index: `gen_tags` puede crear/borrar `tags/` y el index raíz debe
-        // listar el estado final de los subdirectorios (si no, queda drift recién generado).
-        self.generate_tags()?;
-        self.generate_index("")?;
-        let guard = self
-            .vcs
-            .as_ref()
-            .ok_or(WorkspaceError::NoVcs)?
-            .lock()
-            .unwrap();
-        let sha = guard.commit(msg, &self.identity)?;
-        let conformance = guard.conformance(&sha)?;
-        Ok(CommitOutcome { sha, conformance })
-    }
-
-    /// Restaura el working tree al árbol de un commit, por el único escritor.
-    /// Si hay cambios sin commitear, primero hace un **commit de checkpoint** (`§13.6.1`).
-    pub fn restore(&self, sha: &Sha) -> Result<ApplyReport, WorkspaceError> {
-        let target_files = {
-            let guard = self
-                .vcs
-                .as_ref()
-                .ok_or(WorkspaceError::NoVcs)?
-                .lock()
-                .unwrap();
-            // Checkpoint si hay trabajo sin commitear (no perder trabajo).
-            if !guard.dirty_paths()?.is_empty() {
-                guard.commit("Checkpoint automático antes de restaurar", &self.identity)?;
-            }
-            guard.tree_files(sha)?
-        };
-        // Computa la mutación (diff vs working tree actual) y aplica por el único escritor.
-        let current = io::load_bundle(&self.root)?;
-        let mutation = restore_mutation(&current, &target_files);
-        let report = self.apply_mutation(&mutation)?;
-        // Regenera index/tags tras aplicar.
-        // Tags ANTES que index: `gen_tags` puede crear/borrar `tags/` y el index raíz debe
-        // listar el estado final de los subdirectorios (si no, queda drift recién generado).
-        self.generate_tags()?;
-        self.generate_index("")?;
-        Ok(report)
-    }
-
-    /// Diff semántico del working tree vs HEAD (`OkfDiff` perezoso para el modo "Cambios").
-    pub fn diff_working(&self) -> Result<OkfDiff, WorkspaceError> {
-        let head_files = match &self.vcs {
-            Some(v) => {
-                let guard = v.lock().unwrap();
-                match guard.log(1)?.first() {
-                    Some(row) => guard.tree_files(&row.id)?,
-                    None => FileMap::new(),
-                }
-            }
-            None => FileMap::new(),
-        };
-        let working = io::load_bundle(&self.root)?;
-        Ok(lodestar_core::diff::diff_snap(&head_files, &working))
-    }
-
-    /// `git pull --ff-only` (red por binario `git`).
-    pub fn pull(&self) -> Result<SyncOutcome, WorkspaceError> {
-        Ok(self
-            .vcs
-            .as_ref()
-            .ok_or(WorkspaceError::NoVcs)?
-            .lock()
-            .unwrap()
-            .pull()?)
-    }
-
-    /// `git push` al upstream configurado (red por binario `git`).
-    pub fn push(&self) -> Result<SyncOutcome, WorkspaceError> {
-        Ok(self
-            .vcs
-            .as_ref()
-            .ok_or(WorkspaceError::NoVcs)?
-            .lock()
-            .unwrap()
-            .push()?)
-    }
-}
-
-/// Conteo de una aplicación de `Mutation`: el `--check` de CI sale de aquí.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ApplyReport {
-    pub written: usize,
-    pub removed: usize,
-    pub unchanged: usize,
-}
-
-/// Resultado de un commit: el `Sha` + su conformidad post-commit.
-#[derive(Debug, Clone)]
-pub struct CommitOutcome {
-    pub sha: Sha,
-    pub conformance: CommitConformance,
-}
-
-/// Resultado de un merge por la workspace.
-#[derive(Debug, Clone)]
-pub struct MergeReport {
-    /// Ficheros aplicados por el único escritor.
-    pub report: ApplyReport,
-    /// Paths con conflicto (llevan marcadores; hay que resolverlos antes de commitear).
-    pub conflicted: Vec<RelPath>,
-    /// `true` si fue fast-forward.
-    pub fast_forward: bool,
-    /// `true` si ya estaba al día.
-    pub up_to_date: bool,
-}
-
-impl Workspace {
-    /// Analiza el árbol de una revisión git (para `lodestar check --rev <REV>`).
-    pub fn analyze_rev(&self, rev: &str) -> Result<Analysis, WorkspaceError> {
-        let files = {
-            let guard = self
-                .vcs
-                .as_ref()
-                .ok_or(WorkspaceError::NoVcs)?
-                .lock()
-                .unwrap();
-            let sha = guard.resolve_rev(rev)?;
-            guard.tree_files(&sha)?
-        };
-        Ok(Bundle::from_files(files).analyze().clone())
-    }
-
-    /// Analiza el árbol **staged** (para `lodestar check --staged`).
-    pub fn analyze_staged(&self) -> Result<Analysis, WorkspaceError> {
-        let files = self
-            .vcs
-            .as_ref()
-            .ok_or(WorkspaceError::NoVcs)?
-            .lock()
-            .unwrap()
-            .staged_files()?;
-        Ok(Bundle::from_files(files).analyze().clone())
-    }
-}
-
-/// Computa la `Mutation` para llevar `current` al estado de `target` (restore/switch/merge).
-fn restore_mutation(current: &FileMap, target: &FileMap) -> Mutation {
-    let mut writes = std::collections::BTreeMap::new();
-    for (path, content) in target {
-        if current.get(path) != Some(content) {
-            writes.insert(path.clone(), content.clone());
-        }
-    }
-    let deletes = current
-        .keys()
-        .filter(|p| !target.contains_key(*p))
-        .cloned()
-        .collect();
-    Mutation { writes, deletes }
-}
-
-fn default_identity() -> Author {
-    Author {
-        name: "lodestar".to_string(),
-        email: "lodestar@localhost".to_string(),
     }
 }
 
@@ -787,7 +421,7 @@ fn default_identity() -> Author {
 ///
 /// Paridad con el prototipo, que escribe `new Date().toISOString().replace(/\.\d+Z$/,"Z")`
 /// (truncando los milisegundos). El core es puro y no toca el reloj; la workspace —único escritor
-/// con I/O— computa el instante y lo inyecta en `create_concept`. Se formatea a mano (algoritmo
+/// con I/O— computa el instante y lo inyecta en `create_document`. Se formatea a mano (algoritmo
 /// civil-desde-días de Howard Hinnant) para no arrastrar una dependencia de fecha/hora.
 fn now_iso8601() -> String {
     let secs = std::time::SystemTime::now()
@@ -816,7 +450,7 @@ mod time_tests {
     use super::now_iso8601;
 
     #[test]
-    fn now_iso8601_tiene_formato_y_es_iso_para_el_core() {
+    fn now_iso8601_tiene_formato() {
         let s = now_iso8601();
         // Forma exacta: `YYYY-MM-DDTHH:MM:SSZ` (20 caracteres, sin milisegundos).
         assert_eq!(s.len(), 20, "formato inesperado: {s}");
@@ -824,11 +458,7 @@ mod time_tests {
             s.ends_with('Z') && s.as_bytes()[10] == b'T',
             "formato inesperado: {s}"
         );
-        // El core debe aceptarlo como ISO (si no, FMT-TS marcaría warn en toda página creada).
-        let v = serde_yaml::Value::String(s.clone());
-        assert!(
-            lodestar_core::model::is_iso(&v),
-            "el core no reconoce como ISO: {s}"
-        );
+        // La mitad «y el core lo reconoce como ISO» murió con `FMT-TS` (E16-H05): el core ya no
+        // juzga el formato de una fecha del frontmatter — es metadata arbitraria del usuario.
     }
 }

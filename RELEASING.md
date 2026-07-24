@@ -72,8 +72,8 @@ quien la consume). `lodestar-fixtures` es `publish = false` y no se publica:
 ```bash
 cargo publish -p lodestar-core
 cargo publish -p lodestar-store
-cargo publish -p lodestar-vcs
 cargo publish -p lodestar-workspace
+cargo publish -p lodestar-app
 cargo publish -p lodestar-cli
 cargo publish -p lodestar-mcp
 ```

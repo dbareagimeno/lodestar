@@ -1,118 +1,117 @@
-//! Primitivas de modelo: parseo y serialización 1:1 del prototipo (`ARCHITECTURE.md §4`).
+//! Primitivas de modelo: parseo y serialización del documento (`ARCHITECTURE.md §4`, `§20.4`).
 //!
-//! Port fiel de `splitFront`, `parseYAML`, `dumpYAML`, `parseFile`, `buildRaw`, `resolveLink`,
-//! `normalize`, `outLinks`, `rawRelLinks`, `isISO`. Quirks incluidos.
+//! El frontmatter es **metadata arbitraria del usuario** (`§20.4`, E16-H01): se conserva íntegro,
+//! con su tipo YAML real y su texto original.
+//!
+//! **E17** se llevó de aquí los enlaces: `LINK_RE`, `resolveLink`/`resolve_link`, `outLinks`/
+//! `out_links`, `out_links_with_href` y `rawRelLinks`/`raw_rel_links` viven ahora en
+//! [`crate::links`], con un parser Markdown de verdad y la resolución por path de `§20.6` (sin
+//! `foo/` → `foo/index.md`, sin exigir `.md`, sin recortar los `..` sobrantes). `isISO` había
+//! muerto con `FMT-TS` en E16-H05.
 
-use once_cell::sync::Lazy;
-use regex::Regex;
 use serde_yaml::Value as Yaml;
 
-use crate::types::{FileKind, FmError, Frontmatter, KNOWN_FM};
+use crate::types::{FmError, ParsedFrontmatter};
 
-static SPLIT_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(?s)^---\r?\n(.*?)\r?\n---\r?\n?(.*)$").unwrap());
-
-/// `[texto](href "title")` — el grupo 1 es el href. Global.
-pub(crate) static LINK_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r#"\[[^\]]*\]\(([^)\s]+)(?:\s+"[^"]*")?\)"#).unwrap());
-
-/// Resultado de `split_front`. `fm_text == Some("")` = sin frontmatter; `None` = sin cierre.
-pub struct SplitFront {
-    pub fm_text: Option<String>,
-    pub body: String,
+/// Resultado de [`split_front`]: dónde está (si está) el bloque de frontmatter de un documento.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SplitFront {
+    /// El documento no abre bloque de frontmatter: el cuerpo es el documento entero. Es un estado
+    /// **válido** (`§20.4`), no un error.
+    Sin,
+    /// Bloque presente y cerrado. `span` es el rango de bytes de su TEXTO YAML (sin los
+    /// delimitadores `---`); `body_start` es el offset donde empieza el cuerpo.
+    Bloque {
+        span: std::ops::Range<usize>,
+        body_start: usize,
+    },
+    /// El documento abre `---` y nunca lo cierra: el cuerpo es el documento entero.
+    SinCerrar,
 }
 
-/// Port de `splitFront`: separa frontmatter del cuerpo.
-pub fn split_front(raw: &str) -> SplitFront {
-    if raw.starts_with("---") {
-        if let Some(c) = SPLIT_RE.captures(raw) {
-            return SplitFront {
-                fm_text: Some(c.get(1).map_or("", |m| m.as_str()).to_string()),
-                body: c.get(2).map_or("", |m| m.as_str()).to_string(),
-            };
+impl SplitFront {
+    /// El cuerpo del documento `raw` según este corte.
+    pub fn body<'a>(&self, raw: &'a str) -> &'a str {
+        match self {
+            SplitFront::Bloque { body_start, .. } => &raw[*body_start..],
+            _ => raw,
         }
-        // Empieza por `---` pero no cierra → sin cierre.
-        return SplitFront {
-            fm_text: None,
-            body: raw.to_string(),
-        };
     }
-    SplitFront {
-        fm_text: Some(String::new()),
-        body: raw.to_string(),
+
+    /// El texto YAML del bloque (sin delimitadores), o `None` si no hay bloque cerrado.
+    pub fn fm_text<'a>(&self, raw: &'a str) -> Option<&'a str> {
+        match self {
+            SplitFront::Bloque { span, .. } => Some(&raw[span.clone()]),
+            _ => None,
+        }
     }
 }
 
-/// Port de `parseYAML`: parsea el texto del frontmatter a un mapa. Devuelve `Err(msg)` si es inválido.
+/// Separa el bloque de frontmatter del cuerpo, **por bytes** (para poder devolver el `span` que
+/// necesitan el patch quirúrgico y los rangos de diagnóstico, `§20.4`/`§20.9`).
 ///
-/// La conversión mapa→`Frontmatter` es **manual** (no serde-derive): el prototipo acepta
-/// cualquier escalar YAML en los campos tipados (`type: 123` → página de tipo "123" vía
-/// `String(v)` en los puntos de uso), mientras que el derive fallaba el fichero ENTERO con
-/// `OKF-FM03` (hard-fail) — invirtiendo el veredicto de la puerta de CI. También conserva
-/// los `null` explícitos (presentes en JS) y stringifica claves no-string (`1: x` → `"1"`).
-pub fn parse_yaml(text: &str) -> Result<Frontmatter, String> {
+/// El bloque abre con `---` en la primera línea y cierra con la primera línea posterior que
+/// empieza por `---`. Un bloque **vacío** (`---\n---\n`) es un bloque presente con texto vacío —
+/// no un bloque sin cerrar, que era el veredicto del port del prototipo.
+pub fn split_front(raw: &str) -> SplitFront {
+    if !raw.starts_with("---") {
+        return SplitFront::Sin;
+    }
+    // Tras el `---` de apertura debe venir un salto de línea; si no, no hay bloque bien formado.
+    let after_open = if raw[3..].starts_with("\r\n") {
+        5
+    } else if raw[3..].starts_with('\n') {
+        4
+    } else {
+        return SplitFront::SinCerrar;
+    };
+
+    // El cierre puede venir inmediatamente (bloque vacío) o tras una o más líneas de contenido.
+    let (span, close_start) = if raw[after_open..].starts_with("---") {
+        (after_open..after_open, after_open)
+    } else {
+        let Some(nl) = raw[after_open..]
+            .match_indices('\n')
+            .map(|(i, _)| after_open + i)
+            .find(|i| raw[i + 1..].starts_with("---"))
+        else {
+            return SplitFront::SinCerrar;
+        };
+        // El `\r` de un CRLF pertenece al delimitador, no al texto del bloque.
+        let end = if raw[..nl].ends_with('\r') {
+            nl - 1
+        } else {
+            nl
+        };
+        (after_open..end, nl + 1)
+    };
+
+    // Tras el `---` de cierre se consume el salto de línea (CRLF o LF) si lo hay.
+    let mut body_start = close_start + 3;
+    if raw[body_start..].starts_with('\r') {
+        body_start += 1;
+    }
+    if raw[body_start..].starts_with('\n') {
+        body_start += 1;
+    }
+    SplitFront::Bloque { span, body_start }
+}
+
+/// Parsea el texto de un bloque de frontmatter. `Ok` es **siempre** un `Value::Mapping`: un bloque
+/// vacío (o cuyo YAML no es un mapa) produce el mapa vacío; `Err(msg)` solo si el YAML es
+/// sintácticamente inválido.
+///
+/// **No** convierte tipos ni descarta claves: `type: 2` es el número 2 y `status: true` el
+/// booleano `true` (E16-H01 retiró la coerción `String(v)` heredada del prototipo).
+pub fn parse_yaml(text: &str) -> Result<Yaml, String> {
     if text.trim().is_empty() {
-        return Ok(Frontmatter::default());
+        return Ok(Yaml::Mapping(serde_yaml::Mapping::new()));
     }
     match serde_yaml::from_str::<Yaml>(text) {
-        // Solo los mapeos producen frontmatter; cualquier otra cosa → frontmatter vacío (como el proto).
-        Ok(Yaml::Mapping(m)) => Ok(frontmatter_from_mapping(m)),
-        Ok(_) => Ok(Frontmatter::default()),
+        Ok(v @ Yaml::Mapping(_)) => Ok(v),
+        // Un YAML válido que no es un mapa no describe propiedades: frontmatter vacío.
+        Ok(_) => Ok(Yaml::Mapping(serde_yaml::Mapping::new())),
         Err(e) => Err(e.to_string()),
-    }
-}
-
-/// Convierte un mapping YAML a `Frontmatter` con la coerción del prototipo.
-fn frontmatter_from_mapping(m: serde_yaml::Mapping) -> Frontmatter {
-    let mut fm = Frontmatter::default();
-    for (k, v) in m {
-        let key = js_string(&k);
-        // Los 5 knowns string: null explícito se registra (presente); el resto se coerce a string.
-        let mut set = |slot: &mut Option<String>, name: &str, v: Yaml| match v {
-            Yaml::Null => fm_mark_null(&mut fm.known_null, name),
-            other => *slot = Some(js_string(&other)),
-        };
-        match key.as_str() {
-            "type" => set(&mut fm.r#type, "type", v),
-            "title" => set(&mut fm.title, "title", v),
-            "description" => set(&mut fm.description, "description", v),
-            "resource" => set(&mut fm.resource, "resource", v),
-            "status" => set(&mut fm.status, "status", v),
-            // tags/timestamp se guardan RAW (incluido `null`: presente, y FMT-TAGS lo ve).
-            "tags" => fm.tags = Some(v),
-            "timestamp" => fm.timestamp = Some(v),
-            _ => {
-                fm.extra.insert(key, v);
-            }
-        }
-    }
-    fm
-}
-
-fn fm_mark_null(nulls: &mut Vec<String>, name: &str) {
-    if !nulls.iter().any(|n| n == name) {
-        nulls.push(name.to_string());
-    }
-}
-
-/// Port de `String(v)` de JS para valores YAML: números/bools a texto, arrays `join(",")`
-/// (con `null` → `""` dentro del join, como `Array.prototype.toString`), mapas `[object Object]`.
-pub(crate) fn js_string(v: &Yaml) -> String {
-    match v {
-        Yaml::String(s) => s.clone(),
-        Yaml::Bool(b) => b.to_string(),
-        Yaml::Number(n) => n.to_string(),
-        Yaml::Null => "null".to_string(),
-        Yaml::Sequence(items) => items
-            .iter()
-            .map(|x| match x {
-                Yaml::Null => String::new(),
-                other => js_string(other),
-            })
-            .collect::<Vec<_>>()
-            .join(","),
-        Yaml::Mapping(_) => "[object Object]".to_string(),
-        Yaml::Tagged(t) => js_string(&t.value),
     }
 }
 
@@ -129,42 +128,49 @@ pub fn dir_of(p: &str) -> String {
     }
 }
 
-/// Id de concepto: la ruta sin `.md`. Port de `conceptId`.
-pub fn concept_id(p: &str) -> String {
-    p.strip_suffix(".md").unwrap_or(p).to_string()
-}
-
-/// `true` si el basename es reservado.
-pub fn is_reserved(p: &str) -> bool {
-    matches!(basename(p), "index.md" | "log.md")
-}
-
-/// Port de `titleFromPath`: `replace(/\b\w/g, c=>c.toUpperCase())`. El boundary `\b` de JS es
-/// «char `\w` precedido de no-`\w`» con `\w = [A-Za-z0-9_]`: un acento o un punto también abren
-/// palabra (`año` → `AñO`, `foo.bar` → `Foo.Bar`) — quirk incluido, es la spec.
-pub fn title_from_path(p: &str) -> String {
-    let base = concept_id(basename(p)).replace(['-', '_'], " ");
-    let mut out = String::with_capacity(base.len());
-    let mut prev_is_word = false;
-    for ch in base.chars() {
-        let is_word = ch.is_ascii_alphanumeric() || ch == '_';
-        if is_word && !prev_is_word {
-            out.extend(ch.to_uppercase());
-        } else {
-            out.push(ch);
-        }
-        prev_is_word = is_word;
+/// Título **presentable** de un documento (`ARCHITECTURE.md §20.4`,
+/// `REFACTOR_PHASE_2 §Fase 4`). La cadena es:
+///
+/// ```text
+/// frontmatter.title  →  primer heading H1 del cuerpo  →  nombre del fichero (sin `.md`)
+/// ```
+///
+/// Es **solo una heurística de presentación**: `title` no es una propiedad reservada — se lee
+/// como cualquier otra clave del frontmatter y **nunca** se reescribe (un `title: 42` se presenta
+/// como `"42"` pero sigue siendo el número 42 para la consulta).
+///
+/// Función **pura** y **total**: devuelve `String`, no `Option`, porque el último eslabón —el
+/// nombre del fichero— existe siempre. Un `title` sin rendición textual (lista, mapa, `null`) o
+/// vacío no es un título presentable: la cadena continúa, sin error.
+///
+/// Recibe las tres piezas por separado —y no un [`Parsed`]— para que un consumidor que ya tenga
+/// el frontmatter y el cuerpo (la cache, p. ej.) no tenga que re-parsear el documento entero.
+pub fn derived_title(
+    fm: Option<&ParsedFrontmatter>,
+    body: &str,
+    path: &crate::types::RelPath,
+) -> String {
+    if let Some(t) = fm
+        .and_then(|f| f.get_text("title"))
+        .filter(|s| !s.is_empty())
+    {
+        return t;
     }
-    out
+    if let Some(h1) = first_h1(body) {
+        return h1.to_string();
+    }
+    path.stem().to_string()
 }
 
-/// Clase del fichero a partir del path.
-pub fn file_kind(p: &str) -> FileKind {
-    match basename(p) {
-        "index.md" => FileKind::Index,
-        "log.md" => FileKind::Log,
-        _ => FileKind::Concept,
-    }
+/// Texto del **primer heading de nivel 1** del cuerpo, ya recortado, o `None` si no hay ninguno.
+///
+/// Reutiliza [`parse_headings`], que reconoce los bloques de código fenceados: un `#` dentro de
+/// un ` ``` ` es contenido del bloque, no un heading.
+fn first_h1(body: &str) -> Option<&str> {
+    parse_headings(body)
+        .into_iter()
+        .find(|h| h.level == 1)
+        .map(|h| h.title)
 }
 
 /// Port de `normalize`: colapsa `.`/`..`/segmentos vacíos.
@@ -180,125 +186,6 @@ pub fn normalize(p: &str) -> String {
         }
     }
     parts.join("/")
-}
-
-/// Port de `resolveLink`: resuelve un href a un path del bundle, o `None` si no aplica.
-pub fn resolve_link(href: &str, from_path: &str) -> Option<String> {
-    // Esquema (http:, mailto:, …) → no es enlace interno.
-    if Regex::new(r"^[a-z]+:")
-        .unwrap()
-        .is_match(&href.to_ascii_lowercase())
-    {
-        return None;
-    }
-    if href.starts_with('#') {
-        return None;
-    }
-    let mut h = href
-        .split('#')
-        .next()
-        .unwrap_or("")
-        .split('?')
-        .next()
-        .unwrap_or("")
-        .to_string();
-    if h.is_empty() {
-        return None;
-    }
-    if h.ends_with('/') {
-        h.push_str("index.md");
-    }
-    if !h.ends_with(".md") {
-        return None;
-    }
-    let target = if let Some(stripped) = h.strip_prefix('/') {
-        stripped.to_string()
-    } else {
-        let base = dir_of(from_path);
-        normalize(&format!("{base}{h}"))
-    };
-    Some(target)
-}
-
-/// Port de `outLinks`: destinos salientes únicos del cuerpo (excluyendo el propio path).
-pub fn out_links(path: &str, body: &str) -> Vec<String> {
-    let mut seen = std::collections::BTreeSet::new();
-    let mut result = Vec::new();
-    for cap in LINK_RE.captures_iter(body) {
-        if let Some(href) = cap.get(1) {
-            if let Some(t) = resolve_link(href.as_str(), path) {
-                if t != path && seen.insert(t.clone()) {
-                    result.push(t);
-                }
-            }
-        }
-    }
-    result
-}
-
-/// Como [`out_links`], pero conserva el href **crudo** junto al destino resuelto.
-/// Mismo criterio (destinos únicos, excluye el propio path); útil para materializar `links` en la cache.
-pub fn out_links_with_href(path: &str, body: &str) -> Vec<(String, String)> {
-    let mut seen = std::collections::BTreeSet::new();
-    let mut result = Vec::new();
-    for cap in LINK_RE.captures_iter(body) {
-        if let Some(href) = cap.get(1) {
-            if let Some(t) = resolve_link(href.as_str(), path) {
-                if t != path && seen.insert(t.clone()) {
-                    result.push((href.as_str().to_string(), t));
-                }
-            }
-        }
-    }
-    result
-}
-
-/// Port de `rawRelLinks`: hrefs salientes que son relativos (`./` o `../`) y apuntan a `.md`.
-pub fn raw_rel_links(body: &str) -> Vec<String> {
-    let rel = Regex::new(r"^\.{1,2}/").unwrap();
-    let mut res = Vec::new();
-    for cap in LINK_RE.captures_iter(body) {
-        if let Some(href) = cap.get(1) {
-            let h = href.as_str();
-            if rel.is_match(h) && h.contains(".md") {
-                res.push(h.to_string());
-            }
-        }
-    }
-    res
-}
-
-/// Port de `isISO`: `true` si es una fecha ISO **válida entera** (`Date.parse` + regex).
-/// La validación cubre el string completo: `2024-01-15hello` o `…T99:99` son NaN en
-/// `Date.parse` → FMT-TS, no silencio.
-pub fn is_iso(v: &serde_yaml::Value) -> bool {
-    static ISO_RE: Lazy<Regex> = Lazy::new(|| {
-        Regex::new(
-            r"^(\d{4})-(\d{2})-(\d{2})([T ](\d{2}):(\d{2})(:(\d{2})(\.\d+)?)?(Z|[+-]\d{2}:?\d{2})?)?$",
-        )
-        .unwrap()
-    });
-    let s = match v {
-        serde_yaml::Value::String(s) => s,
-        // serde_yaml tipa una fecha sin comillas como String; otros tipos no son ISO.
-        _ => return false,
-    };
-    let Some(c) = ISO_RE.captures(s) else {
-        return false;
-    };
-    let num = |i: usize| c.get(i).and_then(|m| m.as_str().parse::<u32>().ok());
-    let (Some(y), Some(m), Some(d)) = (num(1), num(2), num(3)) else {
-        return false;
-    };
-    if y < 1 || !(1..=12).contains(&m) || !(1..=31).contains(&d) {
-        return false;
-    }
-    match (num(5), num(6), num(8)) {
-        (None, _, _) => true,
-        // `24:00` es válido en ISO (y en `Date.parse`); 25+ no.
-        (Some(h), Some(min), sec) => h <= 24 && min <= 59 && sec.map(|x| x <= 59).unwrap_or(true),
-        _ => false,
-    }
 }
 
 /// Port de `sortPaths` = `a.localeCompare(b, undefined, {numeric:true})`: orden natural con
@@ -383,121 +270,404 @@ pub fn locale_cmp(a: &str, b: &str) -> std::cmp::Ordering {
     a.len().cmp(&b.len())
 }
 
-/// Construye la representación YAML canónica de un frontmatter ordenado (known fields primero).
-///
-/// Filtros de `buildRaw` (fieles al proto): los KNOWN descartan cadena vacía Y lista vacía;
-/// los extras SOLO cadena vacía (una lista vacía de productor se conserva). Un `null` explícito
-/// se serializa en ambos casos (`tags: null`).
-fn dump_frontmatter(fm: &Frontmatter) -> String {
-    let mut map = serde_yaml::Mapping::new();
-    let push_known = |map: &mut serde_yaml::Mapping, k: &str, v: Yaml| {
-        let empty = matches!(&v, Yaml::String(s) if s.is_empty())
-            || matches!(&v, Yaml::Sequence(s) if s.is_empty());
-        if !empty {
-            map.insert(Yaml::String(k.to_string()), v);
-        }
+/// Parsea **solo** el frontmatter de un documento, sin necesitar su path: para las utilidades que
+/// no tienen más que el raw (el diff, p. ej.). `None` si el documento no tiene bloque cerrado o su
+/// YAML es inválido.
+pub fn parse_frontmatter(raw: &str) -> Option<ParsedFrontmatter> {
+    let SplitFront::Bloque { span, .. } = split_front(raw) else {
+        return None;
     };
-    let is_null = |k: &str| fm.known_null.iter().any(|n| n == k);
-    // Orden KNOWN_FM (los null explícitos también se emiten, en su posición canónica).
-    match (&fm.r#type, is_null("type")) {
-        (Some(v), _) => push_known(&mut map, "type", Yaml::String(v.clone())),
-        (None, true) => push_known(&mut map, "type", Yaml::Null),
-        _ => {}
-    }
-    match (&fm.title, is_null("title")) {
-        (Some(v), _) => push_known(&mut map, "title", Yaml::String(v.clone())),
-        (None, true) => push_known(&mut map, "title", Yaml::Null),
-        _ => {}
-    }
-    match (&fm.description, is_null("description")) {
-        (Some(v), _) => push_known(&mut map, "description", Yaml::String(v.clone())),
-        (None, true) => push_known(&mut map, "description", Yaml::Null),
-        _ => {}
-    }
-    match (&fm.resource, is_null("resource")) {
-        (Some(v), _) => push_known(&mut map, "resource", Yaml::String(v.clone())),
-        (None, true) => push_known(&mut map, "resource", Yaml::Null),
-        _ => {}
-    }
-    if let Some(v) = &fm.tags {
-        push_known(&mut map, "tags", v.clone());
-    }
-    if let Some(v) = &fm.timestamp {
-        push_known(&mut map, "timestamp", v.clone());
-    }
-    match (&fm.status, is_null("status")) {
-        (Some(v), _) => push_known(&mut map, "status", Yaml::String(v.clone())),
-        (None, true) => push_known(&mut map, "status", Yaml::Null),
-        _ => {}
-    }
-    // Extras (claves de productor), en orden de aparición; solo se filtra la cadena vacía.
-    for (k, v) in &fm.extra {
-        if !KNOWN_FM.contains(&k.as_str()) && !matches!(v, Yaml::String(s) if s.is_empty()) {
-            map.insert(Yaml::String(k.clone()), v.clone());
+    let texto = &raw[span.clone()];
+    parse_yaml(texto).ok().map(|value| ParsedFrontmatter {
+        value,
+        raw: texto.to_string(),
+        span,
+    })
+}
+
+/// Reconstruye el `.md` a partir de su frontmatter y su cuerpo.
+///
+/// Sin frontmatter (`None`) el documento **es** su cuerpo: no se inventa un bloque vacío. Con
+/// frontmatter se serializa su `value`, que preserva el orden de aparición de las claves (el
+/// `Mapping` de `serde_yaml` es un `IndexMap`) y **no descarta ninguna**: ni la cadena vacía, ni
+/// la lista vacía, ni el `null` explícito — todos son valores del usuario (`§20.4`).
+///
+/// > La edición **quirúrgica** del bloque (reutilizar `raw`/`span` en vez de reserializar) es
+/// > E16-H04; aquí siempre se reserializa el `value`.
+pub fn build_raw(fm: Option<&ParsedFrontmatter>, body: &str) -> String {
+    let Some(fm) = fm else {
+        return body.to_string();
+    };
+    let y = serde_yaml::to_string(&fm.value)
+        .unwrap_or_default()
+        .trim_end()
+        .to_string();
+    let body_trimmed = body.trim_start_matches('\n');
+    format!("---\n{y}\n---\n\n{body_trimmed}")
+}
+
+/// El documento resultante de aplicar un [`crate::types::FrontmatterPatch`]
+/// (`ARCHITECTURE.md §20.4`, E16-H04).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PatchedDocument {
+    /// El `.md` **completo** resultante (frontmatter + cuerpo).
+    pub raw: String,
+    /// `true` si el bloque de frontmatter se **reserializó entero** en vez de editarse in situ —
+    /// es decir, si se ha perdido el texto original del bloque (formato, comillas, comentarios
+    /// YAML). Lo consume `change_plan` (E21) para declararlo en el plan.
+    ///
+    /// **Crear** un bloque donde no había ninguno **no** es reserialización: no se pierde texto
+    /// del usuario porque no había texto que perder.
+    pub reserialized: bool,
+}
+
+/// Aplica un `FrontmatterPatch` sobre el texto crudo de **un** documento (`§20.4`, E16-H04).
+///
+/// Función **pura**: ni toca disco ni necesita el resto del workspace. Recibe el `raw` entero
+/// (y no un `&DocumentSet`) porque la edición quirúrgica necesita el `span` del bloque **dentro** del
+/// documento.
+///
+/// # Los tres caminos
+///
+/// 1. **Quirúrgico** (`reserialized: false`) — se sustituyen o borran solo las líneas de las
+///    claves tocadas, y las claves nuevas se añaden al final del bloque. Se toma cuando **cada**
+///    clave del patch, o bien no existe en el bloque, o bien existe en el primer nivel con su
+///    valor escrito **en una sola línea** (`clave: escalar`, `clave: [a, b]` en flow style,
+///    `clave:` vacío). Las líneas no tocadas llegan al resultado **byte a byte**: el flow style
+///    sigue en flow, las comillas siguen como estaban y los comentarios YAML sobreviven.
+/// 2. **Reserialización** (`reserialized: true`) — se vuelca el mapa entero con `serde_yaml`,
+///    perdiendo el texto original del bloque pero **ningún dato**: se conservan todas las claves,
+///    su orden de aparición y sus tipos. Se toma cuando alguna clave tocada ocupa varias líneas
+///    (mapa o lista en block style, block scalar `|`/`>`) o cuando el bloque tiene una forma que
+///    impide localizar líneas con seguridad (claves duplicadas, anchors/alias, líneas de primer
+///    nivel que no son `clave: valor`).
+/// 3. **Creación** (`reserialized: false`) — el documento no tiene bloque: se antepone uno con las
+///    claves del patch y el documento original queda intacto como cuerpo.
+///
+/// El **cuerpo queda intacto byte a byte** en los tres casos: la operación solo reemplaza el rango
+/// de bytes del bloque (o antepone uno nuevo).
+///
+/// # Errores
+/// [`crate::CoreError::UnreadableFrontmatter`] si el documento **tiene** bloque pero Lodestar no
+/// puede interpretarlo (sin cerrar, o YAML inválido). Es deliberado y no un detalle: `parse_file`
+/// devuelve `frontmatter: None` tanto para «no hay bloque» como para «hay un bloque ilegible», así
+/// que una implementación guiada por `frontmatter.is_none()` reconstruiría el bloque **encima** del
+/// ilegible y borraría la metadata del usuario.
+pub fn patch_frontmatter(
+    raw: &str,
+    patch: &crate::types::FrontmatterPatch,
+) -> Result<PatchedDocument, crate::CoreError> {
+    let span = match split_front(raw) {
+        SplitFront::SinCerrar => {
+            return Err(crate::CoreError::UnreadableFrontmatter(
+                "el bloque abre «---» y nunca cierra".to_string(),
+            ));
+        }
+        // Sin bloque: se crea uno con las claves que el patch escribe (`§20.4`).
+        SplitFront::Sin => {
+            let mut map = serde_yaml::Mapping::new();
+            crate::document_set::apply_patch(&mut map, patch.clone());
+            if map.is_empty() {
+                // Un patch que solo borra claves inexistentes no toca el documento.
+                return Ok(PatchedDocument {
+                    raw: raw.to_string(),
+                    reserialized: false,
+                });
+            }
+            let bloque = dump_mapping(&map);
+            return Ok(PatchedDocument {
+                raw: format!("---\n{bloque}\n---\n\n{raw}"),
+                reserialized: false,
+            });
+        }
+        SplitFront::Bloque { span, .. } => span,
+    };
+
+    let texto = &raw[span.clone()];
+    let valor = parse_yaml(texto).map_err(crate::CoreError::UnreadableFrontmatter)?;
+    let mapa = valor
+        .as_mapping()
+        .cloned()
+        .unwrap_or_else(serde_yaml::Mapping::new);
+
+    // Claves de primer nivel del mapa parseado, rendidas a texto y en orden de aparición: es la
+    // referencia contra la que se valida el escaneo por líneas.
+    let claves: Vec<String> = mapa.keys().filter_map(yaml_key_text).collect();
+    let escaneo = scan_top_level(texto).filter(|entradas| {
+        entradas.len() == mapa.len()
+            && entradas.len() == claves.len()
+            && entradas.iter().map(|e| &e.clave).eq(claves.iter())
+    });
+
+    match plan_surgical(patch, escaneo.as_deref(), &claves) {
+        // Sin ediciones el documento no cambia: se devuelve byte a byte.
+        Some(edits) if edits.is_empty() => Ok(PatchedDocument {
+            raw: raw.to_string(),
+            reserialized: false,
+        }),
+        Some(edits) => Ok(PatchedDocument {
+            raw: splice(raw, &span, &apply_line_edits(texto, &edits)),
+            reserialized: false,
+        }),
+        None => {
+            let mut mapa = mapa;
+            crate::document_set::apply_patch(&mut mapa, patch.clone());
+            Ok(PatchedDocument {
+                raw: splice(raw, &span, &dump_mapping(&mapa)),
+                reserialized: true,
+            })
         }
     }
-    serde_yaml::to_string(&Yaml::Mapping(map))
+}
+
+/// Serializa un mapa YAML al texto de un bloque de frontmatter (**sin** los delimitadores ni el
+/// salto final: el `span` del bloque tampoco los incluye). El mapa vacío da la cadena vacía.
+fn dump_mapping(map: &serde_yaml::Mapping) -> String {
+    if map.is_empty() {
+        return String::new();
+    }
+    serde_yaml::to_string(&Yaml::Mapping(map.clone()))
         .unwrap_or_default()
         .trim_end()
         .to_string()
 }
 
-/// Port de `buildRaw`: reconstrucción canónica del `.md` (frontmatter ordenado + cuerpo).
-/// Es LA canonicalización del modelo OKF.
-pub fn build_raw(fm: &Frontmatter, body: &str) -> String {
-    let y = dump_frontmatter(fm);
-    let body_trimmed = body.trim_start_matches('\n');
-    format!("---\n{y}\n---\n\n{body_trimmed}")
+/// Sustituye el rango de bytes `span` de `raw` por `bloque`, añadiendo el salto de línea que el
+/// delimitador de cierre necesita si el bloque original estaba vacío (su `span` es el hueco
+/// `---\n|---`, sin el `\n` que ahora hace falta).
+fn splice(raw: &str, span: &std::ops::Range<usize>, bloque: &str) -> String {
+    let cola = &raw[span.end..];
+    let sep = if bloque.is_empty() || cola.starts_with('\n') || cola.starts_with("\r\n") {
+        ""
+    } else {
+        "\n"
+    };
+    format!("{}{bloque}{sep}{cola}", &raw[..span.start])
 }
 
-/// Resultado interno del parseo de un fichero (sin el `raw`, que añade el llamante).
+/// Una clave de primer nivel localizada en el TEXTO del bloque: su nombre y el rango de líneas
+/// (semiabierto) que ocupa su entrada, ya sin las líneas en blanco ni los comentarios de cola.
+struct TopLevelEntry {
+    clave: String,
+    inicio: usize,
+    fin: usize,
+}
+
+/// Texto de una clave YAML de primer nivel (solo escalares: las claves compuestas no son
+/// direccionables por [`crate::types::FieldPath`] ni por [`crate::types::FrontmatterPatch`]).
+fn yaml_key_text(k: &Yaml) -> Option<String> {
+    match k {
+        Yaml::String(s) => Some(s.clone()),
+        Yaml::Number(n) => Some(n.to_string()),
+        Yaml::Bool(b) => Some(b.to_string()),
+        _ => None,
+    }
+}
+
+/// Localiza las claves de **primer nivel** en el texto crudo de un bloque, línea a línea.
+///
+/// `None` si alguna línea sin indentar no es un `clave: valor` reconocible (una lista de primer
+/// nivel, un `...`, una clave entrecomillada con escapes) o si algún valor abre un anchor/alias
+/// YAML: en esos casos no se puede editar por líneas con seguridad y el llamante reserializa.
+fn scan_top_level(texto: &str) -> Option<Vec<TopLevelEntry>> {
+    let lineas: Vec<&str> = texto.split('\n').collect();
+    let mut entradas: Vec<TopLevelEntry> = Vec::new();
+    for (i, linea) in lineas.iter().enumerate() {
+        let l = linea.trim_end_matches('\r');
+        // Blancos, comentarios y continuaciones indentadas pertenecen a la entrada anterior (o a
+        // nadie): no abren una clave de primer nivel.
+        if l.trim().is_empty() || l.starts_with([' ', '\t']) || l.starts_with('#') {
+            continue;
+        }
+        let (clave, valor) = split_key_line(l)?;
+        // Anchors y alias quedan fuera de alcance (`§20.4`): editar una línea puede dejar un alias
+        // sin definición, así que se reserializa (que siempre es correcto).
+        if valor.trim_start().starts_with(['&', '*']) {
+            return None;
+        }
+        if let Some(previa) = entradas.last_mut() {
+            previa.fin = i;
+        }
+        entradas.push(TopLevelEntry {
+            clave,
+            inicio: i,
+            fin: lineas.len(),
+        });
+    }
+    // La cola de cada entrada no incluye sus líneas en blanco ni sus comentarios finales: un
+    // comentario entre dos claves flota, no pertenece a la de arriba.
+    for e in &mut entradas {
+        while e.fin > e.inicio + 1 {
+            let l = lineas[e.fin - 1].trim_end_matches('\r');
+            if l.trim().is_empty() || l.trim_start().starts_with('#') {
+                e.fin -= 1;
+            } else {
+                break;
+            }
+        }
+    }
+    Some(entradas)
+}
+
+/// Parte una línea de primer nivel en `(clave, resto tras los dos puntos)`. `None` si no tiene la
+/// forma `clave:` o `clave: valor` (la clave puede ir entrecomillada, sin escapes).
+fn split_key_line(l: &str) -> Option<(String, &str)> {
+    if let Some(comilla) = l.chars().next().filter(|c| *c == '"' || *c == '\'') {
+        let cuerpo = &l[1..];
+        let cierre = cuerpo.find(comilla)?;
+        let clave = &cuerpo[..cierre];
+        if clave.contains('\\') {
+            return None;
+        }
+        let resto = &cuerpo[cierre + 1..];
+        let valor = resto.strip_prefix(':')?;
+        return Some((clave.to_string(), valor));
+    }
+    // Sin comillas: los dos puntos que separan clave de valor van seguidos de espacio o fin de
+    // línea (`a: b`, `a:`), lo que deja intactos los `http://…` y los `12:30` de un valor.
+    let corte = l
+        .match_indices(':')
+        .find(|(i, _)| l[i + 1..].is_empty() || l[i + 1..].starts_with([' ', '\t']))?;
+    let clave = l[..corte.0].trim_end();
+    if clave.is_empty() || clave.starts_with('-') {
+        return None;
+    }
+    Some((clave.to_string(), &l[corte.0 + 1..]))
+}
+
+/// Una edición del bloque por líneas: sustituir `[inicio, fin)` por `lineas` (vacío = borrar).
+struct LineEdit {
+    inicio: usize,
+    fin: usize,
+    lineas: Vec<String>,
+}
+
+/// Decide si el patch se puede aplicar **quirúrgicamente** y, en tal caso, devuelve sus ediciones.
+///
+/// `None` = hay que reserializar el bloque entero: o el escaneo por líneas no es fiable
+/// (`entradas` es `None`), o alguna clave tocada ocupa más de una línea.
+fn plan_surgical(
+    patch: &crate::types::FrontmatterPatch,
+    entradas: Option<&[TopLevelEntry]>,
+    claves: &[String],
+) -> Option<Vec<LineEdit>> {
+    let mut edits: Vec<LineEdit> = Vec::new();
+    let mut anexos: Vec<String> = Vec::new();
+    for (clave, valor) in &patch.0 {
+        let existe = claves.iter().any(|k| k == clave);
+        match (existe, valor) {
+            // Borrar una clave que no está es un no-op: no necesita ni localizar ni reserializar.
+            (false, None) => continue,
+            // Clave nueva: se añade una línea al final del bloque.
+            (false, Some(v)) => {
+                entradas?;
+                anexos.extend(render_entry(clave, v));
+            }
+            (true, _) => {
+                let entrada = entradas?.iter().find(|e| &e.clave == clave)?;
+                if entrada.fin != entrada.inicio + 1 {
+                    // Valor multilínea (mapa/lista en block style, block scalar): tocarlo es
+                    // tocar la estructura entera → reserialización.
+                    return None;
+                }
+                edits.push(LineEdit {
+                    inicio: entrada.inicio,
+                    fin: entrada.fin,
+                    lineas: valor
+                        .as_ref()
+                        .map(|v| render_entry(clave, v))
+                        .unwrap_or_default(),
+                });
+            }
+        }
+    }
+    if !anexos.is_empty() {
+        let n = entradas.map_or(0, |e| e.iter().map(|e| e.fin).max().unwrap_or(0));
+        edits.push(LineEdit {
+            inicio: usize::MAX,
+            fin: n,
+            lineas: anexos,
+        });
+    }
+    Some(edits)
+}
+
+/// Serializa un par `clave: valor` a las líneas YAML que le corresponden.
+fn render_entry(clave: &str, valor: &Yaml) -> Vec<String> {
+    let mut map = serde_yaml::Mapping::new();
+    map.insert(Yaml::String(clave.to_string()), valor.clone());
+    dump_mapping(&map).split('\n').map(str::to_string).collect()
+}
+
+/// Aplica las ediciones sobre el texto del bloque, de atrás hacia delante para que los índices de
+/// línea sigan siendo válidos. El anexo (`inicio == usize::MAX`) se resuelve primero: va al final
+/// de la última entrada, antes de los comentarios de cola.
+fn apply_line_edits(texto: &str, edits: &[LineEdit]) -> String {
+    let mut lineas: Vec<String> = if texto.trim().is_empty() {
+        Vec::new()
+    } else {
+        texto.split('\n').map(str::to_string).collect()
+    };
+    let mut edits: Vec<&LineEdit> = edits.iter().collect();
+    edits.sort_by_key(|e| std::cmp::Reverse(e.inicio));
+    for e in edits {
+        let inicio = e.inicio.min(e.fin).min(lineas.len());
+        let fin = e.fin.min(lineas.len());
+        lineas.splice(inicio..fin, e.lineas.iter().cloned());
+    }
+    lineas.join("\n")
+}
+
+/// Resultado del parseo de un documento (sin el `raw`, que ya tiene el llamante).
 pub struct Parsed {
-    pub kind: FileKind,
-    pub fm: Option<Frontmatter>,
+    /// El frontmatter del documento, o `None` si no tiene bloque (estado **válido**, `§20.4`).
+    pub frontmatter: Option<ParsedFrontmatter>,
     pub fm_err: Option<FmError>,
     pub body: String,
 }
 
-/// Port de `parseFile`: NUNCA falla por contenido (FM01/02/03 son datos, no `Result`).
-pub fn parse_file(path: &str, raw: &str) -> Parsed {
-    let kind = file_kind(path);
+/// Parsea un documento. NUNCA falla por contenido: los errores de frontmatter son datos
+/// ([`FmError`]), no un `Result`.
+///
+/// Un documento **sin** frontmatter es válido: `frontmatter: None`, `fm_err: None` y el cuerpo es
+/// el fichero entero.
+///
+/// **No ramifica por nombre de fichero** (E16-H02, `REFACTOR_PHASE_2 §Principio 4`): `index.md`,
+/// `log.md`, `README.md` y `docs/decisions/auth.md` se parsean exactamente igual. El `path` solo
+/// se conserva en la firma porque es la identidad del documento para los llamantes.
+pub fn parse_file(_path: &str, raw: &str) -> Parsed {
     let sf = split_front(raw);
-    if kind != FileKind::Concept {
-        // Reservados: el cuerpo es el raw entero, sin frontmatter tipado.
-        return Parsed {
-            kind,
-            fm: None,
+    let body = sf.body(raw).to_string();
+    match &sf {
+        SplitFront::Sin => Parsed {
+            frontmatter: None,
             fm_err: None,
-            body: raw.to_string(),
-        };
-    }
-    match sf.fm_text {
-        None => Parsed {
-            kind,
-            fm: None,
+            body,
+        },
+        SplitFront::SinCerrar => Parsed {
+            frontmatter: None,
             fm_err: Some(FmError::Unclosed),
-            body: sf.body,
+            body,
         },
-        Some(t) if t.is_empty() => Parsed {
-            kind,
-            fm: None,
-            fm_err: Some(FmError::Missing),
-            body: sf.body,
-        },
-        Some(t) => match parse_yaml(&t) {
-            Ok(fm) => Parsed {
-                kind,
-                fm: Some(fm),
-                fm_err: None,
-                body: sf.body,
-            },
-            Err(e) => Parsed {
-                kind,
-                fm: None,
-                fm_err: Some(FmError::Malformed(e)),
-                body: sf.body,
-            },
-        },
+        SplitFront::Bloque { span, .. } => {
+            let texto = &raw[span.clone()];
+            match parse_yaml(texto) {
+                Ok(value) => Parsed {
+                    frontmatter: Some(ParsedFrontmatter {
+                        value,
+                        raw: texto.to_string(),
+                        span: span.clone(),
+                    }),
+                    fm_err: None,
+                    body,
+                },
+                Err(e) => Parsed {
+                    frontmatter: None,
+                    fm_err: Some(FmError::Malformed(e)),
+                    body,
+                },
+            }
+        }
     }
 }
 
@@ -515,6 +685,9 @@ pub fn parse_file(path: &str, raw: &str) -> Parsed {
 /// Tipo opaco: los campos son privados del módulo (solo [`parse_headings`]/[`locate_section`] los
 /// tocan); los llamantes externos lo manejan como un `Vec<Heading>` sin inspeccionarlo.
 pub struct Heading<'a> {
+    /// Nivel ATX del heading (1..=6). Lo necesita [`derived_title`] para quedarse con el primer
+    /// **H1** (no con el primer heading a secas).
+    level: usize,
     /// Texto del heading, recortado.
     title: &'a str,
     /// Offset de byte donde empieza la línea del heading (para comprobar pertenencia a un rango).
@@ -567,6 +740,7 @@ pub fn parse_headings(body: &str) -> Vec<Heading<'_>> {
                 .map(|&(_, _, ls, _)| ls)
                 .unwrap_or(body_len);
             Heading {
+                level,
                 title,
                 line_start,
                 content_start,

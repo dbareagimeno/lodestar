@@ -14,54 +14,53 @@ pub enum CoreError {
     #[error("ruta relativa inválida: {0}")]
     InvalidRelPath(String),
 
-    /// Al normalizar un `delete` con la política por defecto `reject` (E12-H06), el concepto a
-    /// borrar todavía tiene enlaces entrantes. Lleva el path del concepto referenciado. Mapea a
+    /// Ruta a propiedad de frontmatter inválida (vacía, o con algún segmento vacío como en
+    /// `"service."`). La construye [`crate::types::FieldPath`] — es un dato de entrada del agente,
+    /// no un panic.
+    #[error("ruta de campo inválida: {0}")]
+    InvalidFieldPath(String),
+
+    /// Al normalizar un `delete` con la política por defecto `reject` (E12-H06), el documento a
+    /// borrar todavía tiene enlaces entrantes. Lleva el path del documento referenciado. Mapea a
     /// `ErrorCode::InboundLinksExist` (wire `"INBOUND_LINKS_EXIST"`).
     #[error(
-        "el concepto «{0}» tiene enlaces entrantes; no se puede borrar con la política «reject»"
+        "el documento «{0}» tiene enlaces entrantes; no se puede borrar con la política «reject»"
     )]
     InboundLinksExist(RelPath),
-
-    /// SHA de git con formato inválido (no hexadecimal o longitud incorrecta).
-    #[error("sha inválido: {0}")]
-    InvalidSha(String),
 
     /// El contenido excede la guarda de tamaño de una operación (p. ej. diff/LCS).
     #[error("excedida la guarda de tamaño: {0}")]
     SizeGuardExceeded(String),
-
-    /// Error de escritura/serialización al exportar (p. ej. al construir el zip).
-    #[error("error de export/IO: {0}")]
-    Export(String),
 
     /// Al normalizar `replace_text` (E12-H05), el número de coincidencias de la cadena buscada no
     /// casa con el `expected_occurrences` declarado. Lleva `(esperadas, encontradas)`.
     #[error("replace_text: se esperaban {0} coincidencias pero se encontraron {1}")]
     ReplaceTextMismatch(usize, usize),
 
-    /// Al normalizar una operación de contenido (E12-H05), el concepto o la sección referida no
-    /// existe en el bundle (path sin fichero, o `heading_path` que no casa con ningún heading).
+    /// Al normalizar una operación de contenido (E12-H05), el documento o la sección referida no
+    /// existe en el workspace (path sin fichero, o `heading_path` que no casa con ningún heading).
     #[error("objetivo de normalización no encontrado: {0}")]
     NormalizeTargetNotFound(String),
 
-    /// Al normalizar `add_relation`/`remove_relation` (E12-H07), la relación viola su
-    /// [`crate::schema::RelationDef`]: el `type` del target no está en `target_types` (vacío =
-    /// cualquier tipo), o la cardinalidad `"one"` se superaría. El payload es un mensaje legible
-    /// en español con el detalle del incumplimiento (concepto origen, relación, target y motivo).
-    /// Mapea a `ErrorCode::RelationConstraintViolation` (wire `"RELATION_CONSTRAINT_VIOLATION"`).
+    /// Restricción de relación violada. **Sin productor desde E20-H03**: con el retiro de
+    /// `core::schema` (`§20.10`, modelo universal) `add_relation`/`remove_relation` dejan de validar
+    /// contra tipos/cardinalidad, así que esta variante ya no se construye. Se conserva para no
+    /// cambiar el catálogo de [`crate::CoreError`] (mapea a `ErrorCode::RelationConstraintViolation`)
+    /// hasta que Fase 12 retire las operaciones de relación por completo. El payload es un mensaje
+    /// legible con el detalle del incumplimiento.
     #[error("restricción de relación violada: {0}")]
     RelationConstraintViolation(String),
 
-    /// Al normalizar `transition_status` (E12-H07), el estado destino no está en los
-    /// `allowed_statuses` del `DocType` del concepto (cuando esa lista no está vacía). El payload
-    /// es un mensaje legible con el estado rechazado y los permitidos. Mapea a
-    /// `ErrorCode::InvalidSchema` (precondición de lifecycle incumplida).
+    /// Transición de estado no permitida. **Sin productor desde E20-H03**: `transition_status` deja
+    /// de validar `to` contra ninguna lista de estados permitidos (`status` es una propiedad de
+    /// frontmatter arbitraria, `§20.10`). Se conserva por la misma razón que
+    /// [`Self::RelationConstraintViolation`]; mapea a `ErrorCode::InvalidSchema`.
     #[error("transición de estado no permitida: {0}")]
     InvalidStatusTransition(String),
 
     /// Al normalizar `apply_fix` (E12-H07), el `fix_id` pedido no corresponde a ningún `Fix`
-    /// `safe` de los diagnósticos recomputados del bundle (desconocido, ya resuelto, o no `safe`).
-    /// El payload es el `fix_id` no encontrado. Mapea a `ErrorCode::ConceptNotFound`.
+    /// `safe` de los diagnósticos recomputados del workspace (desconocido, ya resuelto, o no `safe`).
+    /// El payload es el `fix_id` no encontrado. Mapea a `ErrorCode::DocumentNotFound`.
     #[error("fix no encontrado o no aplicable: {0}")]
     FixNotFound(String),
 
@@ -73,6 +72,17 @@ pub enum CoreError {
     /// mapea a `ErrorCode::InternalIoError`. El payload nombra la variante recibida.
     #[error("operación no aplicable (no normalizada a forma terminal): {0}")]
     OperationNotApplicable(String),
+
+    /// Al parchear el frontmatter de un documento (E16-H04,
+    /// [`crate::model::patch_frontmatter`]) el bloque existe pero Lodestar **no puede
+    /// interpretarlo**: abre `---` y nunca cierra, o su YAML es sintácticamente inválido.
+    ///
+    /// No hay mapa sobre el que aplicar el merge-patch, y reconstruir el bloque desde cero
+    /// **borraría la metadata del usuario** — la operación falla y el documento queda intacto.
+    /// El payload es un mensaje legible con el motivo, para que el agente sepa qué reparar.
+    /// Mapea a `ErrorCode::InvalidSchema`.
+    #[error("el frontmatter del documento no es interpretable: {0}")]
+    UnreadableFrontmatter(String),
 }
 
 /// Resultado de conveniencia del núcleo.

@@ -1,10 +1,10 @@
-//! Gestión del `.gitignore` versionado del bundle (texto plano, sin `git2` —
+//! Gestión del `.gitignore` versionado del workspace (texto plano, sin `git2` —
 //! `ARCHITECTURE.md §19.4`, `DECISIONES.md §0` D5). Ignora la cache derivada (`index.db`) y el
 //! runtime desechable (`runtime/`), pero deja versionados los ficheros canónicos de `.lodestar/`
-//! (`config.yaml`/`schema.yaml`/`templates/`).
+//! (`config.yaml`/`templates/`).
 //!
 //! Reemplaza a `Vcs::ensure_cache_ignored` (que tocaba `.git/info/exclude`, no versionado): ahora
-//! el ajuste vive en el `.gitignore` del propio bundle, para que un repo adoptado lo vea también
+//! el ajuste vive en el `.gitignore` del propio workspace, para que un repo adoptado lo vea también
 //! en `git status`/PR de otros colaboradores.
 
 use std::path::Path;
@@ -21,10 +21,10 @@ const MANAGED_ENTRIES: [&str; 2] = [".lodestar/index.db", ".lodestar/runtime/"];
 ///   byte) — evita duplicar líneas en aperturas sucesivas.
 /// - **Adopción**: si el fichero ignoraba `.lodestar/` entero (estilo viejo, el que escribía
 ///   `Vcs::init`), esa línea se sustituye por las entradas nuevas, de forma que
-///   `.lodestar/config.yaml`/`schema.yaml`/`templates/` pasan a quedar versionados.
+///   `.lodestar/config.yaml`/`templates/` pasan a quedar versionados.
 ///
 /// Best-effort: un fallo de escritura (p. ej. checkout de solo lectura) se reporta por stderr y
-/// no aborta la apertura del bundle — mismo criterio que el `ensure_cache_ignored` al que
+/// no aborta la apertura del workspace — mismo criterio que el `ensure_cache_ignored` al que
 /// reemplaza.
 pub(crate) fn ensure_gitignore(root: &Path) {
     let path = root.join(".gitignore");

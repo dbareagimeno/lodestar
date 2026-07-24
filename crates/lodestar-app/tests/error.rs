@@ -3,7 +3,7 @@
 //! Criterio de aceptación `mapeo_core_error`: un `CoreError::InvalidRelPath` (el que produce
 //! `RelPath::new("../x")` al rechazar un traversal) se mapea al código estable `PERMISSION_DENIED`
 //! — `RelPath` es el único chokepoint de path-traversal (invariante #6), y un intento de salir del
-//! bundle es semánticamente un permiso denegado.
+//! workspace es semánticamente un permiso denegado.
 //!
 //! Fase ROJA: NI `ErrorCode` (core) NI la función de mapeo del app existen todavía. Este test hace
 //! ROJO por símbolos ausentes hasta que E10-H02 los implemente.

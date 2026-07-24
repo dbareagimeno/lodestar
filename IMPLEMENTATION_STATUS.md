@@ -20,7 +20,7 @@
 cargo test --workspace          # ~113 tests (incl. 6 diferenciales JS-vs-Rust; core, store, cli, vcs, workspace, mcp)
 cargo run -p lodestar-cli -- check --path <bundle>     # la puerta de CI (exit 0/1)
 cargo run -p lodestar-cli -- log | last-conforming | branch | switch | merge | hooks
-cargo run -p lodestar-mcp -- <bundle>                  # servidor MCP por stdio
+cargo run -p lodestar-mcp [-- --root <dir>]            # servidor MCP por stdio (raíz = cwd)
 ```
 (La app de escritorio —`frontend/` + `src-tauri/`, binario `lodestar-desktop`— se retiró de `main`
 a la rama `experimental/ui-desktop`; ya no se construye ni se ejecuta desde este repo headless.)
@@ -535,3 +535,376 @@ superficie de producto; git queda como crate dormido) y `DECISIONES.md §0`. Des
   - **Pendiente al cierre de E14**: limpieza final de superficie `mcp.yml` → 10 tools objetivo (retirar
     `query`/`conformance_check`/`find_*`/`neighborhood`/`create_concept`/`update_frontmatter`/
     `generate_*`), descopada aquí desde E12/E13.
+
+---
+
+## Migración a workspaces Markdown universales (E15–E22) — EN CURSO
+
+> Rama `refactor/markdown-universal`. Diseño ratificado: `ARCHITECTURE.md §20` (2026-07-23; fuente:
+> `docs/REFACTOR_PHASE_2.md`). Lodestar deja de exigir OKF y opera sobre cualquier red de `.md` de un
+> proyecto. **v0.3.0 será incompatible con v0.2.x**; `v0.2.0` queda como última versión OKF.
+
+| Épica | Estado | Detalle |
+|---|---|---|
+| **E15** Workspace universal | 🟡 En curso | Retirada de vcs/generadores/init-zip/prototipo · raíz = `cwd` · descubrimiento recursivo · config opcional. |
+| **E16** Modelo documental genérico | 🟡 En curso | ✅ H01 `ParsedFrontmatter` YAML arbitrario · ✅ H02 sin ficheros reservados · ✅ H03 título derivado · ⚪ H04 patch quirúrgico · ⚪ H05 diagnósticos mínimos · ⚪ H06 `Concept`→`Document`. |
+| **E17** Enlaces y grafo universal | ⚪ Pendiente | Parser de enlaces (`pulldown-cmark`) · `LinkTarget` · diagnósticos de enlace · `Analysis` nueva · superficie de grafo. |
+| **E18** Store v2 | ⚪ Pendiente | DDL nuevo, metadata anidada, links genéricos, cold rebuild, paridad core/store. |
+| **E19** Lenguaje de consulta | ⚪ Pendiente | Parser · AST · type checking · namespaces · filtro JSON equivalente. |
+| **E20** Inspección y validación genéricas | ⚪ Pendiente | `metadata_inspect` (retira `core::schema`) · política `rejectNewErrors`/`allowExistingErrors`. |
+| **E21** Contrato MCP y transacciones genéricas | ⚪ Pendiente | Contrato nuevo · 8 operaciones universales · selecciones masivas por consulta. |
+| **E22** Migración y limpieza pública | ⚪ Pendiente | `migrate-from-okf --dry-run` · docs · README · publicación incompatible. |
+
+### E15 — Workspace universal
+
+- ✅ **Puerta de diseño** — `ARCHITECTURE.md §20` escrita y ratificada (adenda de 14 subsecciones;
+  notas de supersesión en §4, §10 y §19). Épicas E15/E16/E17 descompuestas en `requirements/`.
+- ✅ **E15-H05** — Fixtures de workspaces Markdown arbitrarios (`crates/lodestar-fixtures`):
+  `arbitrary()` (raíz + 3 niveles, enlaces cruzados en ambos sentidos, sin `index.md` ni
+  frontmatter), `with_edge_cases()` (espacios, `%20`, oculto, mismo basename en dos árboles,
+  capitalización errónea, código, externo, anchor, inexistente, escape), `materialize()` y
+  `materialize_disk_only()` (no UTF-8, sobre el límite, symlink, `.gitignore`, `.lodestarignore`).
+  **Aditivo**: los bundles OKF heredados siguen vivos hasta que E16/E17 retiren a sus consumidores.
+  4 tests.
+- ✅ **E15-H01** — `lodestar-vcs` **borrado** (crate, `git2`, `build.rs`, tests). Fuera del
+  `Workspace`: campos `vcs`/`identity`, `Vcs::discover`/`init`, `set_identity`, `has_vcs`,
+  `init_vcs`, `init_bundle`, `commit`/`restore`/`switch`/`merge`/`create_branch`/`branches`/
+  `vcs_log`/`last_conforming`/`conformance`/`conformance_of`/`install_hooks`/`push`/`pull`/
+  `diff_working`/`analyze_rev`/`analyze_staged`, `CommitOutcome`/`MergeReport`, y las variantes
+  `Vcs`/`NoVcs`/`RepoBusy` de `WorkspaceError` con su `From<VcsError>`. Fuera de `core::types`:
+  `Sha`/`Author`/`CommitRow`/`CommitConformance`/`RepoState`/`Branch`/`SyncKind`/`SyncOutcome` y
+  `CoreError::InvalidSha`. Store: tabla `commit_conformance` (DDL, probe, accesores) fuera y
+  **`USER_VERSION` 1 → 2** (una cache v0.2 se detecta antigua y se reconstruye limpia). `identity`
+  fuera de `Config`/`WorkspaceConfig`. **Conservado** `workspace/src/gitignore.rs` (texto plano).
+  Tests: `abre_sin_repo_git`, `cache_v2_se_reconstruye`.
+- ✅ **E15-H02** — Generadores **borrados**: `core::generate`, `Bundle::gen_index`/`gen_tag_indexes`,
+  `Workspace::generate_index`/`generate_tags`, subcomandos `index`/`tags` de la CLI y el **exit code
+  4** (drift), y la auto-regeneración de E13-H11 dentro de `apply_transaction` (el apply publica
+  exactamente el resultado del change set). `Mutation` se conserva (motor transaccional). Tests:
+  `help_sin_generadores`, `index_es_uso`, `apply_no_regenera_indices` (sustituye a `regen.rs`).
+- ✅ **E15-H03** — `init`/`export`/`import` **borrados** de la CLI (clap + dispatch), con
+  `Bundle::export_zip`, `CoreError::Export`, la dependencia `zip` (workspace, core y cli) y
+  `crates/lodestar-cli/src/bundle_io.rs` entero (quedó sin consumidores: `check` va por `App` y
+  `reindex` por `Workspace`). La CLI queda en `check` + `reindex`. Tests:
+  `help_solo_check_y_reindex`, `init_es_uso`.
+- ✅ **E15-H04** — Prototipo retirado como spec: `crates/lodestar-core/tests/differential.rs`
+  borrado y el CI sin node/`npm ci`. `CLAUDE.md`, `requirements/README.md` y `docs/WORKFLOWS.md`
+  declaran ahora `docs/REFACTOR_PHASE_2.md` + `ARCHITECTURE.md §20` como spec de comportamiento y
+  `prototype/` como referencia histórica de v0.2.x (el directorio **se conserva**). El job
+  `core-purity` añade `zip` a la lista prohibida y un guard nuevo verifica que
+  `cargo tree --workspace` no muestre `git2`/`lodestar-vcs`/`zip`.
+- ⚠️ **Cobertura perdida a propósito en el bloque de retirada** (queda registrada, no es deuda a
+  saldar): (1) al morir `import` desaparece la única superficie de **zip-slip**, así que esa mitad
+  del invariante #6 deja de ser alcanzable — el chokepoint `RelPath` sigue testado para absolutas y
+  `..`; (2) `tags_ordenados_con_locale_compare` era el único test de la colación `localeCompare` de
+  tags, pero su única superficie observable era `gen_tag_indexes`: sin generador no hay dónde
+  observarla (`locale_cmp` sobrevive en `core::model`, hoy sin consumidor — candidato a borrarse en
+  E16 si sigue huérfano).
+- 📌 **Punteros de proceso actualizados**: `.claude/agents/*` (autor-tests, implementador,
+  historiador, planificador), `.claude/README.md`, `DECISIONES.md §9` y
+  `requirements/paridad-auditoria.md` daban por vivo el arnés diferencial y el `npm ci` de
+  `prototype/harness/`; ahora lo declaran retirado en `E15-H04`.
+- ⚖️ **Juez ciego (H01–H04)**: **APROBADA CON RESERVAS**, 11/11 criterios cumplen. Hallazgos
+  corregidos después:
+  - *Isla de código muerto*: `Workspace::apply_mutation` quedó sin llamadores (sus consumidores eran
+    `generate_index`/`generate_tags`/`switch`/`merge`/`restore`, todos borrados). Borrados él,
+    `ApplyReport`, `core::types::Mutation` y `cache_remove`. La nota de "fuera de alcance" de
+    E15-H02 —que justificaba conservar `Mutation` porque «lo usa el motor transaccional»— era
+    **factualmente falsa** tras retirar la auto-regen; corregida en la épica.
+  - *Contrato desalineado*: la semántica normativa de `change_apply`/`change_revert` en
+    `contracts/mcp.yml` seguía anunciando la auto-regeneración de `index`/`tags`.
+  - *Menores*: exit code 4 aún en la tabla de `CLAUDE.md`; `ignore` huérfano en `lodestar-cli`;
+    doc-comments de `publish.rs`/`staging.rs` justificando la escisión `publish`/`publish_result`
+    por la auto-regen (la escisión **se conserva**: vale por sí sola, se publica exactamente el mapa
+    que se validó); `RELEASING.md` publicando `lodestar-vcs` y omitiendo `lodestar-app`.
+  - *Hueco preexistente, no regresión*: `reindex` no tiene ningún test que lo ejecute, y ahora es la
+    mitad de la superficie de la CLI. Pendiente.
+- ✅ **E15-H06** — **La raíz del workspace es el `cwd`**. El MCP pierde el gate que abortaba con
+  exit 3 si no había `index.md`/`.lodestar/`: cualquier directorio es un workspace. `parse_args`
+  pasa a `[--root <dir>] [--profile …]` — **el argumento posicional se retira** (v0.3 es
+  incompatible; un argumento no reconocido sale con exit 2 y `USAGE`, en vez de arrancar en silencio
+  sobre el cwd equivocado). La raíz se **canonicaliza una sola vez al arrancar** y no cambia en toda
+  la sesión (`§20.5`). En la CLI, `resolve_root` deja de ascender por los ancestros. Contrato:
+  `meta.arranque` reescrito y `meta.paths` **nuevo** en `contracts/mcp.yml` (absolutas y `..` se
+  rechazan vía `RelPath` con `isError` en el result, nunca error de protocolo, y sin tocar disco).
+  Arnés migrado (`.arg(dir)` → `.arg("--root").arg(dir)`) en los 3 helpers que cubren ~82
+  invocaciones, sin tocar ninguna aserción. Tests: `arranca_en_directorio_arbitrario`,
+  `root_explicito_gana`, `cli_no_asciende` + las guardas `rechaza_absoluta`/`rechaza_escape` (con
+  cebo real fuera de la raíz, en lectura y en escritura). Borrado el obsoleto
+  `directorio_no_bundle_sale_con_3`, que era la negación literal de la historia. **232 tests**.
+  - **Verificado a mano**: `cd` a un proyecto de 7 `.md` repartidos en `docs/`, `packages/*/docs/`,
+    `knowledge/roadmap/` y la raíz, **sin** `index.md`, `.lodestar/` ni frontmatter → el servidor
+    arranca, `workspace_status` reporta los 7, y `graph_query` resuelve el enlace raíz →
+    `packages/api/docs/endpoints.md` y el de vuelta `../../../README.md` **en el mismo grafo**. Es
+    el `§Resultado esperado` de `docs/REFACTOR_PHASE_2.md`.
+- ✅ **E15-H07** — **Descubrimiento recursivo universal**. Módulo `discovery` (`DiscoveryPolicy`,
+  `Discovered`, `discover`, `case_collisions`, `rel_path_from`) que sustituye a `io::load_bundle` en
+  sus **7 llamadores**, por un punto de inyección único (`Workspace::discovery_policy` +
+  `discover_files`) para que `bundle()`, `workspace_revision()` y el motor transaccional vean el
+  mismo inventario. 5 códigos nuevos en `CheckCode` (`DOC-NOT-UTF8`, `DOC-TOO-LARGE`,
+  `PATH-NOT-UTF8`, `SYMLINK-UNSUPPORTED`, `LINK-CASE-MISMATCH`), todos `Warn`. Determinismo
+  reforzado más allá de lo pedido: `parents(false)` + `git_global(false)` + `git_exclude(false)`, de
+  modo que el inventario dependa solo del árbol bajo la raíz. `io::load_bundle` borrado. 10 tests.
+  - **Corrección durante la historia**: la política excluye **`.lodestar/` entero**, no solo
+    `runtime/`. Un `.md` ahí sería nodo del grafo y escribible pero **ciego al control optimista**
+    (`workspace_revision` excluye todo `.lodestar/` por D5, y no puede dejar de hacerlo: `StagingDir`
+    materializa ahí copias `.md` de los documentos que está guardando — si contara,
+    `reverify_base_revision` fallaría *a causa del apply en curso*). `§20.5` enmendada.
+- ⚖️ **Juez ciego (H06 + H07)**: **RECHAZADAS** ambas, con 3/4 y 7/9 criterios cumplidos. Dos
+  bloqueantes reales:
+  - **H06** — `rechaza_absoluta` **falla en `windows-latest`**: el cebo (`C:\Users\…`) se interpola
+    crudo en un literal de cadena JSON y `\U`/`\A`/`\T` no son escapes válidos → el servidor
+    responde `-32700` y el test panica. Defecto de arnés, no de producto.
+  - **H07** — **regresión silenciosa**: los patrones de `.gitignore`/`.lodestarignore` **a nivel de
+    fichero** dejaron de aplicarse. `include: ["**/*.md"]` entra como whitelist del `Override`, y en
+    el crate `ignore` los overrides tienen precedencia absoluta y cortocircuitan. Los patrones de
+    **directorio** siguen funcionando por accidente (el override no aplica whitelist a directorios,
+    así que el directorio se poda antes de descender) — y por eso los dos tests que demuestran esos
+    criterios pasaban **por la razón equivocada**.
+  - Otros: symlinks de **directorio** sin diagnóstico (MAYOR-2); `.ignore` siempre aplicado y no
+    desactivable (`WalkBuilder::ignore` vale `true` por defecto y nunca se toca); `**/*.md` es
+    case-sensitive, así que `README.MD` no se descubre; `rel_path_from` normaliza `\`→`/` también en
+    Unix, donde `\` es legal, y un `a\b.md` puede enmascarar al `a/b.md` real. Los tres últimos son
+    heredados de `io::load_bundle`, no regresiones.
+  - **MAYOR-1 → historia nueva E15-H09**: `assert_writable` no consulta la política de
+    descubrimiento, así que se puede escribir en paths excluidos del inventario **y** de la revisión.
+    `REFACTOR_PHASE_2 §8` lo prohíbe explícitamente.
+- ✅ **E15-H09** — **La política de escritura respeta el descubrimiento** (cierra E15). Pieza nueva
+  `discovery::exclusion_reason`: la versión "una ruta suelta, sin recorrer el árbol" de `discover`,
+  necesaria porque el destino de un `create`/`move` **todavía no existe**. Reproduce el mismo orden
+  de precedencia reusando los constructores de `discover`, de modo que un «sí» significa literalmente
+  «ese path, una vez escrito, saldrá en el inventario». Se rechaza en `change_plan` **y** en
+  `assert_writable` (apply + revert): lo segundo no es redundante, porque el descubrimiento es estado
+  del árbol y un `.gitignore` que aparece entre plan y apply no mueve la `WorkspaceRevision` ni
+  invalida el `planHash`. El escenario 13 del benchmark sobrevive porque `change_plan` llama solo a
+  `assert_discoverable`, no a `assert_writable` entero. Cruce documentado: cuando `writableRoots`
+  permite lo que el descubrimiento excluye, **manda la exclusión** (es lista de permiso, no de
+  habilitación). 4 tests. **257 tests · E15 COMPLETA (H01–H09).**
+
+### E16 — Modelo documental genérico
+
+- ✅ **E16-H01** — **Frontmatter YAML arbitrario**. La cirugía más ancha de la migración: ~95 puntos
+  en 13 ficheros. Muere `Frontmatter` (7 campos tipados), `KNOWN_FM`, `known_null`, `as_pairs`,
+  `js_string`, `dump_frontmatter`, `FmError::Missing` y `types::ParsedFile` (jamás construido desde
+  E1); cae `indexmap` como dep directa del core. Nace
+  `ParsedFrontmatter { value, raw, span }` con `FieldPath` (newtype de **segmentos**, con `parse`
+  para dot-notation y `from_segments` para claves que contienen un punto) como **única verdad de
+  acceso a metadata**, que reutilizarán E18/E19/E20. `split_front` reescrito por bytes: corrige el
+  bug por el que `---\n---\n` se reportaba como frontmatter *sin cerrar*. 262 tests.
+  - **Aviso registrado para E19** (`§20.8`): las comparaciones deben ir sobre `get`, nunca sobre
+    `get_text` — construirlas sobre este último reintroduciría la coerción implícita **sin que
+    ningún test lo notara**.
+  - **Defecto de fixtures del autor, corregido por él**: las continuaciones de línea de Rust (`\`)
+    se comen la indentación, así que su YAML anidado llegaba aplanado. Auditadas las 45 apariciones
+    del patrón en los 6 ficheros de test de la migración: ninguna otra estaba rota — E16-H01 es la
+    primera historia cuyas fixtures necesitan YAML **anidado**.
+
+- ✅ **E16-H02** — **Ningún nombre de fichero activa reglas especiales**. Mueren `FileKind`,
+  `model::file_kind`/`is_reserved`/`concept_id`, `RelPath::is_reserved`/`concept_id`,
+  `Bundle::root_okf_version`, la rama de reservados de `parse_file`, `Parsed::kind`,
+  `validate_index`/`validate_log` (con ellas `OKF-IDX`/`OKF-LOG` se quedan sin productor), el check
+  `ORPHAN`, el gating de fichero reservado de `query.rs` (con `is:reserved`) y el quirk de
+  `graph_model`/`neighborhood` que descartaba las aristas a `index.md`/`log.md`. `compute_analysis`
+  toma **todos** los `.md` como nodos. `Analysis` pierde `in_index`/`okf_version` y `orphans` pasa a
+  `isolated` con la definición de `§20.7` (sin entrantes **ni** salientes); `Backlinks` pierde
+  `index_refs`; `ConceptSummary.orphan` → `.isolated`; `is:orphan` → `is:isolated`.
+  - **Cara del store**: el DDL pierde `files.kind` y `links.src_is_index` (`USER_VERSION` 2 → 3, la
+    cache se reconstruye sola), `Store::orphans`/`in_index` → `Store::isolated`, y los enlaces se
+    extraen SIEMPRE del cuerpo. La paridad SQL == core sigue verde.
+  - **Frontera MCP sincronizada** (`contracts/mcp.yml`): `graph_query.operation` `"orphans"` →
+    `"isolated"` **sin alias** (v0.3 es incompatible por diseño; un alias devolvería otra cosa bajo
+    el mismo nombre), `workspace_status.counts.orphans` → `counts.isolated`, y `formatVersion` pasa
+    a constante — el motor ya no lee `okf_version` del `index.md` raíz (`§20.13`).
+  - **Efecto de segundo orden asumido**: mientras `OKF-TYPE` siga vivo (muere en E16-H05), un
+    `index.md` sin `type` es un hard-fail. Los 55 fixtures `index.md` de la suite declaran ahora
+    `type`/`title`/`description`; es deuda transitoria que E16-H05 barre.
+
+- ✅ **E16-H03** — **Título derivado**. `model::derived_title(fm, body, path)`: `frontmatter.title`
+  (si es escalar y no vacío) → primer **H1** del cuerpo → nombre del fichero sin `.md`. Función pura
+  y **total** (`String`, no `Option`). Muere `model::title_from_path` y con ella el Title Case con el
+  quirk del `\b` de JS (`año.md` → `AñO`), junto al test de paridad
+  `title_from_path_boundaries_como_js` — el prototipo dejó de arbitrar en E15-H04. `model::Heading`
+  gana el campo `level` para poder distinguir el H1 del primer heading. Un `title` no escalar (lista,
+  mapa, `null`) o vacío cae al siguiente eslabón, y **nunca** se reescribe el dato del usuario.
+- ✅ **E16-H02/H03** — **Ningún fichero reservado + título derivado**. Fuera `FileKind`,
+  `file_kind`, `is_reserved`, `RelPath::is_reserved`/`concept_id`, la rama de reservados de
+  `parse_file`, `root_okf_version`, el gating «reservado antes de negar» de la query y el quirk de
+  `graph.rs`. `Analysis` pierde `in_index`/`okf_version`; `Backlinks` pierde `index_refs`;
+  `orphans` → `isolated` **con definición nueva** (sin entrantes NI salientes) y deja de ser
+  diagnóstico. `derived_title` = `title` escalar → primer H1 → nombre del fichero; muere
+  `title_from_path` con su Title Case heredado del quirk `\b` de JS. Radio hasta el store
+  (`files.kind` y `links.src_is_index` fuera, `USER_VERSION` 2→3). Contrato: `graph_query`
+  `"orphans"` → `"isolated"` **sin alias** (la semántica cambió: un alias devolvería otra cosa bajo
+  el mismo nombre). 271 tests.
+- ✅ **E16-H04/H05** — **Patch quirúrgico + catálogo mínimo**. `patch_frontmatter` edita el **texto
+  crudo** del bloque línea a línea con un splice del `span`, sin round-trip por `serde_yaml` en el
+  camino feliz; un comentario YAML del usuario sobrevive (es el testigo de que no hubo round-trip).
+  Verificación cruzada contra el `Mapping` parseado para descartar claves duplicadas, anchors y
+  alias. **Cierra un riesgo de pérdida de datos que no tenía criterio**: la frontera no es «no tengo
+  mapa que parchear» sino «hay un bloque del usuario que no sé leer y no voy a pisar» — decidido
+  sobre `split_front`, no sobre `frontmatter.is_none()`, que confunde ausencia con ilegibilidad.
+  Llega a producción vía `merge_frontmatter` y `plan::apply_one`. `CheckCode` pasa al catálogo de
+  `§20.9`: ni un `OKF-*`. 282 tests.
+- ✅ **E16-H06** — **`Concept` → `Document`** (cierra E16). 54 ficheros; `core::bundle` →
+  `core::document_set`; wire `CONCEPT_NOT_FOUND` → `DOCUMENT_NOT_FOUND` sin alias. **E16 COMPLETA.**
+  283 tests.
+- ⚠️ **Deuda declarada al cerrar E16**: (1) `Severity::Warn` se ha quedado **sin productor** en
+  `all_checks`, así que `PlanPolicy::allowWarnings` y `gate.blockWarnings` son inalcanzables desde
+  datos reales hasta que E17 traiga `LINK-CASE-MISMATCH` y E20 la política de severidades; (2) la
+  pareja `Conformant → Valid` de `§20.3` está a medias — ver `DECISIONES.md §12`… perdón, **§13**;
+  (3) `core::types` sigue documentando el `.d.ts` generado por ts-rs, falso desde que se retiró la UI.
+
+### E17 — Enlaces y grafo universal
+
+- ✅ **E17-H01/H02** — **Extracción y resolución de enlaces**. Entra `pulldown-cmark` en el core
+  (puro: arrastra solo `bitflags`/`memchr`/`unicase`). El `href` se deriva del **span**, no del
+  `dest_url` del parser, así que `body[span] == href` es cierto por construcción y el destino llega
+  crudo — lo que necesita `move_document` para reescribir el byte exacto. En un enlace de
+  **referencia** el span cae dentro de la **definición**.
+  - **Hallazgo que evita inventar enlaces**: se activan `ENABLE_TASKLISTS` y `ENABLE_FOOTNOTES`
+    porque sin ellas el `[x]` de `- [x] hecho` es sintácticamente un enlace corto, y con un `[x]: …`
+    en el documento se convierte en una arista del grafo que nadie escribió.
+  - **Bug real corregido**: la contención cuenta **profundidad**, no recorta. `model::normalize`
+    colapsaba `..` con `pop()` sobre vector vacío (no-op silencioso), así que `docs/auth.md` +
+    `../../docs/auth.md` —que sale del workspace y vuelve a entrar— resolvía a un `Document`
+    válido. El percent-decoding va **después** de interpretar `.`/`..` (RFC 3986).
+- ✅ **E17-H03/H04/H05** — **Diagnósticos, `Analysis` nueva y superficie**. Muere el parser
+  heredado (`LINK_RE`, `resolve_link`, `out_links*`, `raw_rel_links`) con sus 12+ consumidores
+  migrados. `Analysis` pasa a los seis campos de `§20.7`, con `hard_fail`/`warn_count` como
+  **métodos derivados** (un contador que no puede desincronizarse de su lista). `LinkReference` y
+  `DanglingLink` **anidan** el `ResolvedLink`, así que `incoming` es literalmente la inversa de
+  `outgoing`. El store materializa las **aristas** pero **sintetiza** los diagnósticos de enlace,
+  porque dependen del inventario entero (crear un fichero repara el enlace de otro).
+  **315 tests · E17 COMPLETA.**
+  - **Cambio de comportamiento**: un enlace a un documento inexistente es ahora `Err`, así que
+    `create_document` con la política por defecto **rechaza** crear un documento con un enlace
+    «hacia el futuro» (consecuencia de `danglingDocumentLinks: error`, `§20.9`).
+  - **Coste conocido**: un enlace a la **raíz** del workspace da `LINK-ESCAPES-WORKSPACE`, porque un
+    destino que normaliza a la raíz no es nombrable como `RelPath`. El arreglo correcto es ampliar
+    `LinkTarget`, no parchear el diagnóstico → E20/E21.
+  - **Deuda de test**: la guarda de `diagnosticos.rs:208` nombra `LinkStub`/`LinkRel`, las variantes
+    que la historia manda borrar. Se conservan **declaradas y sin productor**; retirarlas es una
+    línea cuando se retire esa guarda.
+- ✅ **Cableado de `other_files`** (cierre de E17). `DocumentSet::with_other_files` no tenía **ni un
+  llamador**: `Inventory::contains_file` devolvía siempre `false` y la rama `WorkspaceFile` era
+  código muerto en ejecución, así que **todo** enlace a código salía `Missing` — y sobre un destino
+  `.md` excluido eso es `Err`, o sea que **tumbaba la puerta de CI por un fichero que estaba ahí**.
+  `Discovered` gana `other_files` (todo lo que el walker **visita** y no acaba en el inventario;
+  cero I/O extra, medido en 4,4 ms sobre este repo con 48 documentos y 98 `other_files`).
+  - **Bug destapado y corregido**: los fantasmas del grafo se acotan a documentos Markdown. Todo
+    `Missing` se convertía en nodo sin mirar si el destino era siquiera un `.md`, contra `§20.7`.
+    Estaba oculto porque, mientras todo enlace a código era `Missing`, los ficheros de código eran
+    **siempre** fantasmas y ningún test lo miraba (`codigo_no_es_nodo` solo cubría el que sí existe).
+    El filtro por extensión se aplica **solo a `Missing`**, nunca a `Document`: un `Document` está en
+    el inventario y lo es aunque `discovery.include` admita otra extensión — filtrarlo por el nombre
+    sería la clasificación por extensión que `§20.6` prohíbe.
+  - **Verificado end-to-end**: las 5 clasificaciones de `§20.6` sobre un repo real, con el enlace de
+    **referencia** resuelto por su definición y **un solo** diagnóstico (el enlace realmente roto),
+    donde antes había dos. **317 tests.**
+- ⚠️ **Asimetrías declaradas al cerrar E17**: (1) el camino transaccional (`change_plan` y el gate de
+  staging) construye el `DocumentSet` **sin** `other_files`, así que un plan sobre un documento con
+  enlaces a código verá en `diagnosticsAfter` un `LINK-TARGET-MISSING` que el `before` ya no tiene;
+  (2) la cache resuelve con `Inventory::default()`, que solo coincide con el core mientras los
+  documentos sean `.md`; (3) los **diagnósticos de descubrimiento se siguen descartando** — con
+  dueño en E20, ver `requirements/README.md`.
+
+### E18 — Store v2
+
+- ✅ **E18-H01/H02** — **DDL v2**. `files` → `documents(path, title, body, raw, frontmatter_json,
+  content_hash)` sin las columnas OKF promovidas; `metadata(document_path, field_path, value_json,
+  value_type)` poblada con `ParsedFrontmatter::walk` —el reflejo exacto de `get`, así que
+  `get(path)==Some(value)` por construcción y no hay un segundo navegador del `Value`—; `links` gana
+  `target_kind`/`fragment`/`resolved`/**`is_edge`** (este último computado por el core: hace exactas
+  las consultas de grafo incluso bajo `upsert` incremental, porque no depende del inventario vivo);
+  `diagnostics` gana `range_json`. El store **materializa `other_files`** para clasificar los enlaces
+  a código, cerrando la asimetría de `Inventory::default()`. `walk` es la firma que heredan E19/E20.
+- ✅ **E18-H03/H04** — **FTS genérico + paridad completa** (cierra E18). `documents_fts(path, title,
+  body, frontmatter_text)` sin `description` privilegiado, alimentado en el mismo recorrido `walk`.
+  La paridad core↔store vuelve a comparar la `Analysis` **completa** del modelo nuevo, incluida la
+  clasificación de enlaces; la fase roja **verificó empíricamente** que la síntesis de diagnósticos
+  aún reconstruía el `DocumentSet` sin `other_files` (enlace a código: `warn_count` store=2 vs
+  core=1), y H04 lo cerró propagándolos a `synth::link_diagnostics` y al trait `DocumentStore`.
+  **329 tests · E18 COMPLETA.** El store se reconstruye sin un solo dato OKF.
+
+### E19 — Lenguaje de consulta genérico
+
+- ✅ **E19-H01** — **Evaluador tipado**. `Expression`/`ComparisonOperator`/`QueryValue`/`ValueType`/
+  `TypeError` en `core::types`; `eval::evaluate`. La asimetría rectora: orden cruzado (número vs
+  string) es `TypeError`, igualdad cruzada es `false`. Va **siempre** sobre `get`, nunca `get_text`.
+  `TypeError` es tipo propio (no variante de `CoreError`): un `where` mal tipado es entrada del
+  agente, no un fallo del núcleo.
+- ✅ **E19-H02/H04** — **Parser textual + namespaces**. `parse` es descenso recursivo a mano, cero
+  deps. La abreviatura normaliza a la forma **desnuda** (`frontmatter.status` → `["status"]`).
+  `document.*`/`graph.*` **sintetizan** un `Value` de su tipo natural y lo pasan por la **misma**
+  maquinaria de tipos de H01, así que `graph.backlinks >= "x"` es un `TypeError` gratis.
+- ✅ **E19-H03** — **Filtro JSON + equivalencia**. `filter::from_json` con un tipo wire intermedio;
+  `value`/`operator` deserializan solos por los atributos serde de H01. La equivalencia con el `where`
+  textual es **exacta** porque comparten `build_field_path` — mismo AST, comparado estructuralmente.
+- ✅ **E19-H05** — **Cableado a `knowledge_search`** (cierra E19). `where`/`filter` → `Expression`,
+  intersectados con el FTS de `text`. `SearchResult` pierde los campos OKF. La DSL de subcadena
+  (`query.rs`) se borra entera, pero `loose_text_match` se **reubica** en `text.rs` porque el store
+  lo invoca. Un `TypeError` por-documento **excluye** ese documento sin abortar la búsqueda.
+  **362 tests · E19 COMPLETA.**
+  - **Verificado end-to-end** sobre un proyecto real: `where "status = \"accepted\" and priority >= 2"`
+    y el `filter` JSON equivalente dan el **mismo** resultado; `owners contains "security"` filtra por
+    un valor de lista; `priority >= "high"` excluye los documentos con `priority` numérico (la regla
+    de tipos, viva a través de MCP).
+
+### E20 — Inspección de metadata y validación genérica
+
+- ✅ **E20-H01/H02** — **`metadata_inspect` (catálogo + campo)**. Funciones puras del core sobre
+  `ParsedFrontmatter::walk` (cuarto consumidor del mismo iterador: store, evaluador, namespaces,
+  catálogo — ninguno puede discrepar de qué es un campo). El catálogo incluye los mapas intermedios
+  (son direccionables); `values` cuenta solo escalares, orden determinista con desempate final por
+  `ValueType`. 368 tests.
+- ✅ **E20-H03** — **`metadata_inspect` sustituye a `schema_inspect`; `core::schema` borrado**. Muere
+  la última maquinaria de schema OKF: `DocType`/`RelationDef`/`validate_schema`/`.lodestar/schema.yaml`
+  y las variantes `SCHEMA-*`/`REL-*`/`EXTREF-MISSING`/`LINK-STUB`/`LINK-REL` de `CheckCode`.
+  **`referenceRoots` conservado** (sostiene la write policy, no era OKF); el gate de CI recompuesto
+  con `LINK-TARGET-MISSING`. Verificado e2e: `metadata_inspect` descubre el catálogo, `schema_inspect`
+  da «tool desconocida». 351 tests.
+- ✅ **E20-H04** — **Política de validación + diagnósticos de descubrimiento** (cierra E20). Salda la
+  deuda de E15-H07: los diagnósticos de descubrimiento (`DOC-NOT-UTF8`, `LINK-CASE-MISMATCH`…) llegan
+  al reporte de `knowledge_check`, por un canal aparte porque su target no es un documento. La
+  severidad por familia de `validation` se aplica (`ignore` suprime). El **gate diferencial**
+  `rejectNewErrors`/`allowExistingErrors`: un apply sobre un repo que ya tiene errores se permite si
+  no introduce otros nuevos —la comparación antes/después que hace a Lodestar usable sobre un proyecto
+  real—. **356 tests · E20 COMPLETA.**
+
+### E21 — Contrato MCP y transacciones genéricas
+
+- ✅ **E21-H01** — **Retiradas las 5 operaciones semánticas**. `NormalizedOperation` queda en las 8
+  universales; `impact_analyze.kind` restringido a `{move, delete}`. Sin pérdida de capacidad: un
+  `transition_status` es un `patch_frontmatter` (probado por test). La mecánica transaccional intacta.
+- ✅ **E21-H02/H03** — **Selecciones masivas + move/delete genéricos**. `change_plan` acepta
+  `{selection: {where|filter}, operation}` → una op por documento que casa; `capturedRevisions` con la
+  revisión de cada uno. `move_document` reescribe backlinks por el **`span`** (cubriendo las
+  definiciones de referencia que la regex no veía; spans procesados de mayor a menor offset).
+  `delete_document` **exige política explícita** (`§Fase 12`: no elegir en silencio).
+- ✅ **E21-H04** — **`OkfDiff` → `SnapshotDiff` + limpieza del contrato** (cierra E21). El diff de wire
+  ya era `types::SemanticDiff` (E12); el de `diff.rs` pasa a `SnapshotDiff` (neutro). Contrato sin
+  vocabulario OKF en superficie activa; `DECISIONES §13` (`Conformant → Valid`) documentada como
+  aplazada (toca el catálogo de errores congelado).
+
+### E22 — Migración de repos OKF y publicación
+
+- ✅ **E22-H01** — **`migrate-from-okf --dry-run`**. Diagnóstico de cortesía que detecta las
+  convenciones OKF legadas (`index.md` raíz, índices anidados, `okf_version`, índices de tags) **sin
+  modificar ningún fichero** (modo hermético `open_ephemeral`; verificado byte a byte). No es puerta:
+  exit 0 siempre que pueda leer.
+- ✅ **E22-H02/H03** — **README reescrito + v0.3.0 incompatible**. README con la definición de `§20.1`,
+  las 10 tools (verificadas 1:1), sin OKF/UI/git. Bump `0.2.0 → 0.3.0` y entrada de `CHANGELOG` con el
+  aviso de incompatibilidad.
+- ✅ **E22-H04** — **Verificación e2e de la migración completa**. `flujo_completo_migracion`
+  (`crates/lodestar-mcp/tests/e2e_migracion.rs`) recorre el flujo del `§Resultado esperado` por la
+  **superficie MCP JSON-RPC real** sobre un proyecto arbitrario sin `.lodestar/`/`index.md`/frontmatter:
+  descubrimiento → `workspace_status` → `knowledge_search` con `where` tipado (incl. la regla de tipos)
+  → equivalencia `where`/`filter` → `knowledge_get` con enlaces clasificados → `metadata_inspect` →
+  `graph_query` (backlinks globales, aislados) → **selección masiva** `change_plan` → `change_apply` →
+  `knowledge_check` → `change_revert`. **Todo verde.**
+  - **Bug de cableado que el e2e destapó (el 5º de la sesión con ese patrón)**: la **selección masiva
+    no llegaba a la superficie MCP**. `App::change_plan` sabía interpretar `{selection, operation}`
+    (E21-H02, probado por unit-test directo sobre `App`), pero el dispatch de `tools::call` extraía
+    solo `params["operations"]` (el array) y el `inputSchema` tenía `additionalProperties: false` +
+    `required: ["operations"]`, así que descartaba `selection`/`operation`. Corregidos dispatch y
+    schema. **Ningún test unitario lo cazó porque probaban `App`, no la frontera.**

@@ -7,6 +7,19 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Estado actual del repo (importante)
 
+> **⚠️ ACTUALIZACIÓN (v0.3.0, `ARCHITECTURE.md §20`, épicas E15–E22): el repo migró de OKF a
+> workspaces Markdown universales.** Lodestar ya **no exige OKF**: opera sobre cualquier red de `.md`
+> de un proyecto (`cd my-project && lodestar-mcp`, sin `init`/`.lodestar/`/`index.md`/frontmatter).
+> El frontmatter es YAML arbitrario, ningún nombre de fichero es especial, los enlaces se resuelven
+> por path, la consulta es un lenguaje tipado (`where`/`filter`), `metadata_inspect` sustituye a
+> `schema_inspect`, y se retiraron `core::schema`, el crate `lodestar-vcs`, los generadores
+> (`init`/`index`/`tags`/`export`/`import`) y el prototipo como spec. **§20 supersede a §19 y §13 en
+> modelo documental**; lo que sigue de §19 (motor headless, `lodestar-app`, modelo transaccional,
+> perfiles) se hereda íntegro. Las secciones de abajo describen el **giro headless previo (§19)** y
+> conservan terminología OKF (`bundle`/`concept`/conformidad) que §20 renombró — léelas como historia
+> del proyecto, no como estado vigente; la autoridad viva es `ARCHITECTURE.md §20` y
+> `docs/REFACTOR_PHASE_2.md`.
+
 **El repo COMPLETÓ el giro a motor headless de integridad semántica** (`ARCHITECTURE.md §19`,
 ratificado 2026-07-22 — supersede `§13` en superficie de producto; épicas `E9`–`E14` en
 `requirements/`). Lodestar deja de posicionarse como "editor local-first con git de primera clase"
@@ -21,14 +34,16 @@ Estado del giro — **E9–E14 COMPLETAS** (`IMPLEMENTATION_STATUS.md` tiene el 
   heredadas — `query`/`conformance_check`/`find_*`/`neighborhood`/`create_concept`/
   `update_frontmatter`/`generate_*` — a `contracts/mcp.yml §15`; ver `crates/lodestar-mcp/src/tools.rs`).
   Perfiles `readonly`/`standard` (`--profile`): readonly oculta Y rechaza las 3 tools de cambio.
-- **git fuera de la superficie**: la CLI no expone subcomandos git ni `--staged`/`--rev`/`--range`
-  en `check` — `check` sin flags juzga el **working tree** con conformidad completa (OKF + schema +
-  refs) como puerta de CI (E14-H01). El crate `lodestar-vcs` **se conserva dormido** (compila, tests
-  verdes; ninguna fachada lo invoca).
+- **git fuera de la superficie y, desde `E15-H01`, fuera del repo**: la CLI no expone subcomandos
+  git ni `--staged`/`--rev`/`--range` en `check` — `check` sin flags juzga el **working tree** con
+  conformidad completa (OKF + schema + refs) como puerta de CI (E14-H01). El crate `lodestar-vcs`
+  **se BORRÓ** en `E15-H01` (con `git2` y los tipos `Sha`/`Author`/`CommitRow`/…): ni `cargo tree`
+  ni el `Workspace` saben ya de git.
 - **Modelo transaccional recuperable** (E12–E13): `change_plan` (normaliza/simula/valida, planHash) →
   `change_apply` (staging → lock → backup → write-ahead journal → renames atómicos → receipt, con
   crash-recovery determinista) → `change_revert`. El gate de staging valida la conformidad completa
-  schema-driven (E14-H04, invariante #3). Auto-regen de `index`/`tags` dentro del apply (E13-H11).
+  schema-driven (E14-H04, invariante #3). La auto-regen de `index`/`tags` dentro del apply
+  (E13-H11) **se retiró en `E15-H02`**: el apply publica exactamente lo que pide el change set.
 - **Capa de servicios `lodestar-app`** introducida (envelope, códigos de error, casos de uso
   compartidos por MCP y CLI). **UI RETIRADA de `main`**: `frontend/` (Svelte) y `src-tauri/` se
   movieron íntegros a la rama `experimental/ui-desktop`; ya no forman parte del motor headless.
@@ -36,11 +51,11 @@ Estado del giro — **E9–E14 COMPLETAS** (`IMPLEMENTATION_STATUS.md` tiene el 
   (~10k conceptos, E14-H05).
 
 Herencia previa al giro — **las épicas E0–E8 están implementadas y verificadas**: Cargo workspace
-de crates de core/store/vcs/workspace + fachadas, CLI, MCP por stdio, store SQLite/FTS5 con watcher,
-vcs git (hoy dormido) y workspace con bus en vivo. La UI de escritorio (`src-tauri` + frontend
-Svelte 5) se construyó y verificó en E0–E8, pero se **retiró de `main` a la rama
-`experimental/ui-desktop`** con el giro headless (queda ahí íntegra como referencia, no como parte
-del producto). ~113 tests en verde, clippy `-D warnings` limpio.
+de crates de core/store/workspace + fachadas, CLI, MCP por stdio, store SQLite/FTS5 con watcher y
+workspace con bus en vivo (el crate `vcs`, construido en E4, se borró en `E15-H01`). La UI de
+escritorio (`src-tauri` + frontend Svelte 5) se construyó y verificó en E0–E8, pero se **retiró de
+`main` a la rama `experimental/ui-desktop`** con el giro headless (queda ahí íntegra como
+referencia, no como parte del producto). Suite en verde, clippy `-D warnings` limpio.
 
 Mapa de documentos — quién manda sobre qué:
 
@@ -51,10 +66,12 @@ Mapa de documentos — quién manda sobre qué:
   verificados. Actualízalo cuando cierres o abras trabajo.
 - **`DECISIONES.md`** — decisiones abiertas que requieren criterio del usuario (rmcp, ts-rs,
   packaging, semántica de `--range`…). **No las tomes por tu cuenta**: propón y pregunta.
-- **`prototype/index.html`** (~2900 líneas, HTML/JS vanilla + localStorage) — el **prototipo de
-  referencia**: define el *comportamiento* que el core porta 1:1. Sigue siendo la spec de
-  comportamiento; el arnés diferencial JS-vs-Rust (`prototype/harness/` +
-  `crates/lodestar-core/tests/differential.rs`) lo ejecuta como **oráculo** en node.
+- **`docs/REFACTOR_PHASE_2.md`** (+ `ARCHITECTURE.md §20`) — la **spec de comportamiento** vigente
+  para la migración a workspace universal de Markdown.
+- **`prototype/index.html`** (~2900 líneas, HTML/JS vanilla + localStorage) — **referencia
+  histórica de v0.2.x**, ya NO la spec: `E15-H04` retiró su papel de oráculo junto con el arnés
+  diferencial JS-vs-Rust (`crates/lodestar-core/tests/differential.rs`). Se conserva en el árbol
+  para documentar el origen del modelo OKF; el CI ya no necesita node.
 
 ## Comandos
 
@@ -65,28 +82,28 @@ cargo fmt --all --check
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 cargo doc --workspace --no-deps --locked   # con RUSTDOCFLAGS="-D warnings"
 ```
-- El arnés diferencial necesita sus deps: `npm ci` en `prototype/harness/` (sin ellas, explota
-  con `ERR_MODULE_NOT_FOUND` en vez de saltarse).
+- Sin node: `E15-H04` retiró el arnés diferencial, así que `cargo test` basta.
 - El CI también verifica la **pureza del core** (`cargo tree -p lodestar-core` sin
-  tokio/rusqlite/git2/notify/tauri) — no introduzcas esas deps en `lodestar-core`.
+  tokio/rusqlite/git2/notify/tauri/zip) y que el workspace entero no arrastre
+  `git2`/`lodestar-vcs`/`zip` (retirados en `E15-H01`/`E15-H03`).
 
 ### CLI (`cargo run -p lodestar-cli -- …`)
 - `check [--json|--sarif]` — la **puerta de CI**. Exit codes congelados: `0` conforme · `1`
-  hard-fail · `2` uso · `3` runtime/IO · `4` drift de generadores. Juzga siempre el **working
-  tree** (scope workspace); desde `E9-H02` **no** expone `--staged`/`--rev`/`--range` (git fuera de
-  la superficie de la CLI — quedan diferidos con el crate `vcs` dormido, ver `§19.1`).
-- `init [dir]` — bundle nuevo (index raíz, `.gitignore`, `git init` + commit inicial).
-- `index [dir] [--check]` · `tags [--check]` — generadores (`--check` detecta drift → exit 4).
-- `export [--out zip]` · `import [zip|dir]` — exporta / importa (zip del prototipo o directorio).
+  hard-fail · `2` uso · `3` runtime/IO. Juzga siempre el **working
+  tree** (scope workspace); desde `E9-H02` **no** expone `--staged`/`--rev`/`--range`, y desde
+  `E15-H01` no hay crate `vcs` que los soporte.
 - `reindex` — reconstruye la cache `.lodestar/index.db`.
+- **Retirados en E15**: `init` / `export` / `import` (`E15-H03`) e `index` / `tags` (`E15-H02`,
+  con el exit code `4` de drift). La CLI queda en `check` + `reindex`.
 - `--path <bundle>` es global; sin él sube desde el cwd buscando `index.md`/`.lodestar`.
 - **Sin subcomandos git** (`log`/`last-conforming`/`branch`/`switch`/`merge`/`pull`/`push`/`hooks`
-  retirados en `E9-H02`; la mecánica sigue en `lodestar-vcs`, dormida, por si vuelve a la
+  retirados en `E9-H02`; la mecánica se borró en `E15-H01`, no queda dormida por si vuelve a la
   superficie).
 
 ### MCP
 ```bash
-cargo run -p lodestar-mcp -- <bundle>   # servidor MCP JSON-RPC por stdio (10 tools, sin git; stdout puro)
+cargo run -p lodestar-mcp                 # la raíz del workspace es el cwd (E15-H06); stdout puro
+cargo run -p lodestar-mcp -- --root <dir> # …o el directorio indicado. No hay argumento posicional.
 ```
 La app de escritorio (Tauri v2 + Svelte 5) se **retiró de `main`** con el giro headless y vive en la
 rama `experimental/ui-desktop`; sus comandos de desarrollo (`npm run dev`, `cargo run -p
@@ -98,9 +115,9 @@ lodestar-tauri`, libs de sistema Tauri) ya no aplican a este repo headless.
 de conocimiento **OKF** (un directorio de `.md` con frontmatter YAML): sin GUI y sin git en la
 superficie, consumido por agentes vía MCP/CLI. Stack: **Rust + SQLite/FTS5 + MCP + CLI (clap)**. La
 app de escritorio (`Tauri v2 + Svelte 5/Vite`) se **retiró de `main`** con el giro headless y se
-conserva en la rama `experimental/ui-desktop`, ya fuera del producto. git sigue en el repo como capacidad **dormida**
-(`lodestar-vcs`, libgit2 local + binario `git` para red) — la mecánica del §13 se conserva por si
-la superficie vuelve a exponerlo, pero hoy ninguna fachada la invoca.
+conserva en la rama `experimental/ui-desktop`, ya fuera del producto. git **ya no está en el repo**:
+`E15-H01` borró `lodestar-vcs` y `git2` (`ARCHITECTURE.md §20.13`); la mecánica del §13 solo existe
+como documentación histórica.
 
 **Público objetivo: agentes (Claude Code, Codex, otros clientes MCP) y perfiles técnicos vía CLI.**
 Cuando git estaba en superficie se exponía con **vocabulario directo** (commit/rama/push/pull), sin
@@ -111,12 +128,11 @@ eufemismos — esa decisión sigue documentada en `§13` para si vuelve.
 Mapa del giro headless (`§19.2`; `lodestar-app` **ya existe** y las fachadas `lodestar-cli`/
 `lodestar-mcp` lo consumen como capa de servicios de caso de uso):
 ```
-lodestar-core   (PURO: modelo·conformidad·links·query·grafo·generación·export·diff. SIN I/O/DB/git/runtime)
-   ▲        ▲
-store      vcs  (store: rusqlite+FTS5+watcher notify, dueño del DDL .lodestar/index.db ·
-   ▲        ▲    vcs: libgit2 local + binario git para red, DORMIDO — mecánica conservada,
-   │        │    sin consumidor de fachada, NUNCA escribe el working tree)
-   └─ workspace ─┘  (GLUE: compone core+store+vcs · handle unificado · ÚNICO escritor · bus de eventos)
+lodestar-core   (PURO: modelo·conformidad·links·query·grafo·plan·diff. SIN I/O/DB/git/runtime)
+   ▲
+store           (rusqlite+FTS5+watcher notify, dueño del DDL .lodestar/index.db)
+   ▲
+workspace       (GLUE: compone core+store · handle unificado · ÚNICO escritor · bus de eventos)
         ▲
    lodestar-app   (servicios de caso de uso compartidos · envelope · códigos de error ·
                     CERO lógica de dominio; consumido por cli y mcp)
@@ -129,8 +145,9 @@ Las **dos únicas fachadas** son ahora `lodestar-cli` y `lodestar-mcp`; la facha
 
 ### Invariantes no negociables (no relitigar sin motivo fuerte)
 1. **Los `.md` en disco son la única fuente de verdad.** Todo lo demás se deriva y se reconstruye.
-2. **`lodestar-core` es puro** — sin `tauri`/`rusqlite`/`notify`/`tokio`/`git2`. Solo modelo + lógica
-   OKF. Lleva `#![forbid(unsafe_code)]`. (`rusqlite` vive solo en `store`; `git2` solo en `vcs`.)
+2. **`lodestar-core` es puro** — sin `tauri`/`rusqlite`/`notify`/`tokio`/`git2`/`zip`. Solo modelo +
+   lógica OKF. Lleva `#![forbid(unsafe_code)]`. (`rusqlite` vive solo en `store`; `git2` ya no vive
+   en ninguna parte: `E15-H01`.)
    El job `core-purity` del CI lo hace cumplir.
 3. **Una sola verdad computada**: backlinks, huérfanos, conformidad, query y grafo se computan con la
    misma lógica del core en las 3 fachadas. **SQLite es cache derivada/desechable**, verificada
@@ -143,19 +160,16 @@ Las **dos únicas fachadas** son ahora `lodestar-cli` y `lodestar-mcp`; la facha
    el espejo TS).
 5. **Un watcher = único escritor.** Los comandos **nunca** escriben la cache: escriben el `.md`
    (atómico temp+rename) y el watcher reconcilia (gate por hash blake3 que descarta echoes/no-ops).
-6. **`RelPath` es un newtype validado** (rechaza absolutas/`..`) — único chokepoint de path-traversal
-   (y de zip-slip en `import`). Prohibido `type RelPath = String`.
-7. **git con vocabulario directo** (commit/rama/push/pull — público técnico, sin eufemismos). **Transporte
-   híbrido**: libgit2 para lo local (no corre hooks al abrir/indexar = RCE-safe), binario `git` confinado a la
-   red (push/pull/fetch). Scope v1: ramas locales (crear/cambiar/merge) + push/pull a remotos ya configurados;
-   clone y gestión de remotos = no-goal. El `merge` es a nivel de árbol (libgit2 `merge_trees`): el vcs
-   devuelve el `FileMap` y la workspace lo aplica por el único escritor.
-   > **DORMIDO desde el giro headless** (`§19.1`): la mecánica de este invariante sigue viva en
-   > `lodestar-vcs`, pero ninguna fachada (MCP/CLI) la expone hoy — se documenta como referencia por
-   > si git vuelve a la superficie, no como comportamiento actual de producto.
+6. **`RelPath` es un newtype validado** (rechaza absolutas/`..`) — único chokepoint de
+   path-traversal. Prohibido `type RelPath = String`.
+7. ~~**git con vocabulario directo**~~ — **RETIRADO** (`ARCHITECTURE.md §20.13`, `E15-H01`). git
+   salió de la superficie con el giro headless (`§19.1`) y del repo con E15: no hay `lodestar-vcs`,
+   ni `git2`, ni tipos `Sha`/`CommitRow`/`Branch` en `core::types`. `§13` queda como histórico. Lo
+   único que sobrevive es `workspace/src/gitignore.rs`, que gestiona el `.gitignore` del proyecto
+   como **texto plano** para que la cache no se versione.
 
 ### Flujo de datos (resumen)
-Agente-vía-MCP / CLI / git-pull → escriben un `.md` atómico → `notify` watcher (gate hash
+Agente-vía-MCP / CLI / edición externa → escriben un `.md` atómico → `notify` watcher (gate hash
 blake3) → `store` upsert incremental a `.lodestar/index.db` + emite `IndexEvent` (crossbeam) →
 `workspace` recomputa `Analysis` + snapshot → MCP invalida resources / CLI one-shot. (Diagrama
 completo en §9; integración git en §13.)
@@ -169,13 +183,14 @@ parte del motor headless ni del flujo de desarrollo de v2; su diseño se documen
 
 ## Cómo trabajar aquí
 
-- **El prototipo sigue siendo la spec de comportamiento.** Al tocar lógica del core, busca la
-  función original (`splitFront`, `parseFile`, `buildRaw`, `resolveLink`, `analyzeBundle`, `chk`,
-  `tokenizeQuery`, `matchToken`, `confOf`, `diffSnap`/`fmDiff`/`lineDiff`/`collapseDiff`) y mantén su
-  semántica — incluidos sus quirks (p. ej. el gating de fichero reservado **antes** de negar en
-  query; `body:` y texto suelto son **subcadena**, no FTS). **El arnés diferencial JS-vs-Rust es la
-  red de seguridad**: ya cazó 6 divergencias reales (NFC en slugs, orden numérico de tags, `null` en
-  YAML vacío, aristas a reservados, orden de extras).
+- **La spec de comportamiento es `docs/REFACTOR_PHASE_2.md` + `ARCHITECTURE.md §20`**, no el
+  prototipo. Desde `E15-H04` `prototype/index.html` es **referencia histórica de v0.2.x**: sirve
+  para entender por qué el core hace lo que hace (los quirks portados 1:1 de `splitFront`,
+  `parseFile`, `buildRaw`, `resolveLink`, `analyzeBundle`, `chk`, `tokenizeQuery`, `matchToken`,
+  `confOf`, `diffSnap`/`fmDiff`/`lineDiff`/`collapseDiff` siguen ahí y siguen siendo el
+  comportamiento actual), pero **ya no arbitra**: donde el prototipo y la spec de v0.3 discrepen,
+  gana la spec. El arnés diferencial JS-vs-Rust se retiró con él; la red de seguridad de esa
+  semántica son ahora los tests de `crates/lodestar-core/tests/core.rs`.
 - **Antes de mergear**: el CI exige fmt + clippy `-D warnings` + build `--all-targets` + tests +
   doc + pureza del core. Ejecuta el subconjunto relevante en local.
 - **`ARCHITECTURE.md` es la autoridad** en diseño; `DECISIONES.md` lista lo que está abierto a

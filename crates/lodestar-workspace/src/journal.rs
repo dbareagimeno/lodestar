@@ -7,7 +7,7 @@
 //! contrato de recuperación.
 //!
 //! Runtime, no canónico: el journal vive bajo `.lodestar/runtime/`, que el walker de conocimiento
-//! (`io::load_bundle`) y el watcher ya excluyen (E9-H06) y `WorkspaceRevision` ignora (E10-H03), así
+//! (`discovery::discover`) y el watcher ya excluyen (E9-H06) y `WorkspaceRevision` ignora (E10-H03), así
 //! que no viola el invariante #1 («los `.md` en disco son la única fuente de verdad»).
 //!
 //! Durabilidad write-ahead: el journal se persiste con `write` + [`std::fs::File::sync_all`] (fsync

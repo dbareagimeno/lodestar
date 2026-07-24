@@ -170,7 +170,7 @@ fn detecta_escritura_externa() {
     let root = dir.path();
     escribe_config(root, "knowledge", "src");
 
-    // Un concepto writable canónico previo, conforme, sobre el que se "planifica".
+    // Un documento writable canónico previo, conforme, sobre el que se "planifica".
     std::fs::create_dir_all(root.join("knowledge")).unwrap();
     let nota_disk = root.join("knowledge/nota.md");
     std::fs::write(
