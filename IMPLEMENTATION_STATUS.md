@@ -870,3 +870,41 @@ superficie de producto; git queda como crate dormido) y `DECISIONES.md §0`. Des
   `rejectNewErrors`/`allowExistingErrors`: un apply sobre un repo que ya tiene errores se permite si
   no introduce otros nuevos —la comparación antes/después que hace a Lodestar usable sobre un proyecto
   real—. **356 tests · E20 COMPLETA.**
+
+### E21 — Contrato MCP y transacciones genéricas
+
+- ✅ **E21-H01** — **Retiradas las 5 operaciones semánticas**. `NormalizedOperation` queda en las 8
+  universales; `impact_analyze.kind` restringido a `{move, delete}`. Sin pérdida de capacidad: un
+  `transition_status` es un `patch_frontmatter` (probado por test). La mecánica transaccional intacta.
+- ✅ **E21-H02/H03** — **Selecciones masivas + move/delete genéricos**. `change_plan` acepta
+  `{selection: {where|filter}, operation}` → una op por documento que casa; `capturedRevisions` con la
+  revisión de cada uno. `move_document` reescribe backlinks por el **`span`** (cubriendo las
+  definiciones de referencia que la regex no veía; spans procesados de mayor a menor offset).
+  `delete_document` **exige política explícita** (`§Fase 12`: no elegir en silencio).
+- ✅ **E21-H04** — **`OkfDiff` → `SnapshotDiff` + limpieza del contrato** (cierra E21). El diff de wire
+  ya era `types::SemanticDiff` (E12); el de `diff.rs` pasa a `SnapshotDiff` (neutro). Contrato sin
+  vocabulario OKF en superficie activa; `DECISIONES §13` (`Conformant → Valid`) documentada como
+  aplazada (toca el catálogo de errores congelado).
+
+### E22 — Migración de repos OKF y publicación
+
+- ✅ **E22-H01** — **`migrate-from-okf --dry-run`**. Diagnóstico de cortesía que detecta las
+  convenciones OKF legadas (`index.md` raíz, índices anidados, `okf_version`, índices de tags) **sin
+  modificar ningún fichero** (modo hermético `open_ephemeral`; verificado byte a byte). No es puerta:
+  exit 0 siempre que pueda leer.
+- ✅ **E22-H02/H03** — **README reescrito + v0.3.0 incompatible**. README con la definición de `§20.1`,
+  las 10 tools (verificadas 1:1), sin OKF/UI/git. Bump `0.2.0 → 0.3.0` y entrada de `CHANGELOG` con el
+  aviso de incompatibilidad.
+- ✅ **E22-H04** — **Verificación e2e de la migración completa**. `flujo_completo_migracion`
+  (`crates/lodestar-mcp/tests/e2e_migracion.rs`) recorre el flujo del `§Resultado esperado` por la
+  **superficie MCP JSON-RPC real** sobre un proyecto arbitrario sin `.lodestar/`/`index.md`/frontmatter:
+  descubrimiento → `workspace_status` → `knowledge_search` con `where` tipado (incl. la regla de tipos)
+  → equivalencia `where`/`filter` → `knowledge_get` con enlaces clasificados → `metadata_inspect` →
+  `graph_query` (backlinks globales, aislados) → **selección masiva** `change_plan` → `change_apply` →
+  `knowledge_check` → `change_revert`. **Todo verde.**
+  - **Bug de cableado que el e2e destapó (el 5º de la sesión con ese patrón)**: la **selección masiva
+    no llegaba a la superficie MCP**. `App::change_plan` sabía interpretar `{selection, operation}`
+    (E21-H02, probado por unit-test directo sobre `App`), pero el dispatch de `tools::call` extraía
+    solo `params["operations"]` (el array) y el `inputSchema` tenía `additionalProperties: false` +
+    `required: ["operations"]`, así que descartaba `selection`/`operation`. Corregidos dispatch y
+    schema. **Ningún test unitario lo cazó porque probaban `App`, no la frontera.**

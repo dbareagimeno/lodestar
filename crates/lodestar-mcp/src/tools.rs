@@ -103,11 +103,16 @@ pub fn list() -> Value {
                      "ref": { "type": "object", "properties": { "path": { "type": "string" } } },
                      "expectedRevision": { "type": "string", "description": "DocumentRevision que el agente cree vigente («blake3:…»); si el documento cambió → REVISION_CONFLICT." }
                  }, "required": ["op"] } },
+             "selection": { "type": "object", "description": "Selección MASIVA por consulta (§20.11, alternativa a «operations»): «where» (lenguaje textual) o «filter» (JSON), como en knowledge_search. Requiere «operation».", "properties": {
+                 "where": { "type": "string" },
+                 "filter": { "type": "object" }
+             } },
+             "operation": { "type": "object", "description": "La operación a expandir sobre cada documento que casa la «selection», con el tipo como CLAVE (p. ej. {\"patch_frontmatter\": {\"status\": \"review\"}}). Solo las que tienen sentido en masa: patch_frontmatter/replace_text/delete/apply_fix." },
              "policy": { "type": "object", "description": "Política de aplicación del plan.", "properties": {
                  "requireConformantResult": { "type": "boolean", "description": "Si true, un resultado no conforme bloquea canApply." },
                  "allowWarnings": { "type": "boolean", "description": "Si false, cualquier warning bloquea canApply." }
              } }
-         }, "required": ["operations"], "additionalProperties": false },
+         }, "additionalProperties": false },
          "outputSchema": schemas::change_plan_schema()},
         {"name": "change_apply", "description": "Aplica un plan previamente calculado y vigente por el ÚNICO ESCRITOR, con todas las salvaguardas transaccionales (staging → lock → copias de recuperación → write-ahead journal → renames atómicos → receipt). Verifica caducidad (PLAN_EXPIRED) y planHash (PLAN_STALE si el workspace cambió bajo el plan) y rechaza escrituras fuera de writableRoots (PERMISSION_DENIED). Devuelve el recibo con las revisiones antes/después y el semanticDiff.",
          "inputSchema": { "type": "object", "properties": {
@@ -327,7 +332,16 @@ pub fn call(app: &App, profile: Profile, name: &str, params: &Value) -> ToolResu
                 .get("expectedWorkspaceRevision")
                 .and_then(Value::as_str)
                 .map(|s| WorkspaceRevision(s.to_string()));
-            let operations = params.get("operations").cloned().unwrap_or(Value::Null);
+            // `App::change_plan` acepta dos formas de wire: el array `operations` (ops sueltas) o el
+            // objeto `{selection, operation}` de la selección MASIVA por consulta (§20.11, E21-H02).
+            // El dispatch pasa la que venga: si hay `selection`, el objeto entero de params (que ya
+            // lleva `selection` + `operation`); si no, el array `operations`. (Sin esto, la selección
+            // masiva no llegaría a la superficie MCP aunque `App` la sepa interpretar.)
+            let raw_ops = if params.get("selection").is_some() {
+                params.clone()
+            } else {
+                params.get("operations").cloned().unwrap_or(Value::Null)
+            };
             let policy: PlanPolicy = match params.get("policy") {
                 Some(v) => serde_json::from_value(v.clone()).map_err(|e| e.to_string())?,
                 None => PlanPolicy::default(),
@@ -335,7 +349,7 @@ pub fn call(app: &App, profile: Profile, name: &str, params: &Value) -> ToolResu
             // Mismo mapeo de error a wire que las demás tools (E10-H02): el código estable
             // `ErrorCode::as_str()` (p. ej. «REVISION_CONFLICT»), nunca el `Debug` de la variante.
             let result = app
-                .change_plan(expected, &operations, policy)
+                .change_plan(expected, &raw_ops, policy)
                 .map_err(|e| e.as_str().to_string())?;
             to_json(&result)
         }
