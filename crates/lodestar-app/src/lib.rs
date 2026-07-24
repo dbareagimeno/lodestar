@@ -10,28 +10,26 @@
 //! directamente de `rusqlite`/`git2`/`tokio` (invariante #2 de `CLAUDE.md`, verificado por
 //! `cargo tree -p lodestar-app`).
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use lodestar_core::eval::{evaluate, EvalDocument};
+use lodestar_core::metadata;
 use lodestar_core::model;
 use lodestar_core::plan::{self, PlanPolicy};
-use lodestar_core::schema::{validate_relations, validate_schema, DocType, Schema};
 use lodestar_core::text::loose_text_match;
 use lodestar_core::types::{
     workspace_revision, Analysis, Backlinks, ChangeReceipt, ChangeSet, ChangeSetId, Check,
     Direction, DocumentRef, DocumentRevision, Edge, EditSectionMode, ErrorCode, Expression,
-    FrontmatterPatch, GraphNode, InboundLinksPolicy, NormalizedOperation, PlanHash, ReceiptId,
-    RelPath, ResolvedLink, RiskAssessment, SemanticDiff, Severity, ValidationReport,
-    ValidationSummary, WorkspaceRevision,
+    FieldInspection, FieldPath, FrontmatterPatch, GraphNode, InboundLinksPolicy, MetadataCatalog,
+    NormalizedOperation, PlanHash, ReceiptId, RelPath, ResolvedLink, RiskAssessment, SemanticDiff,
+    Severity, ValidationReport, ValidationSummary, WorkspaceRevision,
 };
 use lodestar_core::{CoreError, DocumentSet};
-use lodestar_workspace::{
-    transaction_id, ExternalReference, Workspace, WorkspaceError, WorkspaceSchema,
-};
+use lodestar_workspace::{transaction_id, ExternalReference, Workspace, WorkspaceError};
 
 /// Envelope común de protocolo (`ARCHITECTURE.md §19.6`, `docs/REFACTOR.md §13`, decisión **D3**).
 ///
@@ -113,10 +111,10 @@ pub struct ResourceLink {
 /// - `ReplaceTextMismatch` → `InvalidSchema` (precondición de `replace_text` incumplida, E12-H05).
 /// - `NormalizeTargetNotFound` → `DocumentNotFound` (path/sección objetivo inexistente, E12-H05).
 /// - `InboundLinksExist` → `InboundLinksExist` (borrar `reject` con entrantes, E12-H06).
-/// - `RelationConstraintViolation` → `RelationConstraintViolation` (`add_relation` viola la
-///   `RelationDef`, E12-H07).
-/// - `InvalidStatusTransition` → `InvalidSchema` (transición a un estado fuera de `allowedStatuses`,
-///   E12-H07: precondición de lifecycle incumplida).
+/// - `RelationConstraintViolation` → `RelationConstraintViolation` (E12-H07; sin productor desde
+///   E20-H03, ver [`CoreError`]).
+/// - `InvalidStatusTransition` → `InvalidSchema` (E12-H07; sin productor desde E20-H03, ver
+///   [`CoreError`]).
 /// - `FixNotFound` → `DocumentNotFound` (`apply_fix` con un `fixId` inexistente/no aplicable, E12-H07).
 /// - `InvalidFieldPath` → `InvalidSchema` (ruta a propiedad de frontmatter mal formada, E16-H01:
 ///   entrada del agente que no designa ningún campo).
@@ -272,7 +270,9 @@ pub struct StatusCapabilities {
     /// `true` si el perfil admite revertir la última transacción (`change_revert`, E13). Misma
     /// nota que `transactions`.
     pub revert: bool,
-    /// `true` si el servidor entiende `.lodestar/schema.yaml` (siempre, desde E10-H05).
+    /// Capacidad histórica de esquemas. **Desde E20-H03 el motor NO tiene esquemas** (`§20.10`,
+    /// modelo universal): `core::schema`/`.lodestar/schema.yaml` se retiraron. El campo se conserva
+    /// en el wire, fijo a `false`, para no romper a un cliente que lo lea.
     pub schemas: bool,
     /// `true` si el servidor entiende `referenceRoots` (siempre, desde E9-H05).
     pub external_references: bool,
@@ -308,7 +308,8 @@ pub struct WorkspaceStatus {
     /// ya no lee `okf_version` del `index.md` raíz — esa clave es metadata del usuario como
     /// cualquier otra (`§20.13`) y ningún nombre de fichero activa reglas especiales.
     pub format_version: String,
-    /// Versión del formato de `.lodestar/schema.yaml` (`Schema::version`; `"1"` si no hay schema).
+    /// Campo histórico de versión de esquema. Fijo a `"1"` desde E20-H03: el motor ya no tiene
+    /// esquemas (`§20.10`); se conserva en el wire para no romper a un cliente que lo lea.
     pub schema_version: String,
     /// `true` si el workspace no tiene ningún check `Err` (`Analysis::hard_fail == 0`).
     pub conformant: bool,
@@ -324,13 +325,18 @@ pub struct WorkspaceStatus {
 /// Desde E16-H02 es un valor fijo: ya no se deriva de ningún documento del workspace.
 const DEFAULT_FORMAT_VERSION: &str = "0.2";
 
+/// Versión del formato de esquema que reporta `workspace_status.schemaVersion`. Desde E20-H03 es un
+/// valor fijo: `core::schema` y `.lodestar/schema.yaml` se retiraron (modelo universal, `§20.10`),
+/// así que ya no hay un esquema del que derivarla. Se conserva en el wire (`"1"`) para no romper a un
+/// cliente que lea el campo.
+const DEFAULT_SCHEMA_VERSION: &str = "1";
+
 /// Fachada fina de servicios de caso de uso sobre un [`Workspace`] abierto.
 ///
 /// `App` es lo que consumen `lodestar-mcp` y `lodestar-cli`: un punto de entrada único que
 /// traduce peticiones de protocolo a operaciones del `Workspace` y envuelve las respuestas en
-/// [`Envelope`]. Expone `workspace_status` (E10-H08), `knowledge_search` (E10-H09) y
-/// `knowledge_get` (E10-H10); `schema_inspect`, `knowledge_check`, … se irán añadiendo en
-/// historias siguientes.
+/// [`Envelope`]. Expone `workspace_status` (E10-H08), `knowledge_search` (E10-H09),
+/// `knowledge_get` (E10-H10), `metadata_inspect` (E20-H03), `knowledge_check`, … .
 pub struct App {
     workspace: Workspace,
 }
@@ -383,15 +389,14 @@ impl App {
     /// sesión (`docs/REFACTOR.md §7`).
     ///
     /// Compone `DocumentSet::analyze` (una sola verdad computada, invariante #3) +
-    /// `core::types::workspace_revision` (E10-H03) + `WorkspaceConfig::load`/`WorkspaceSchema::load`
-    /// (I/O de `workspace`, nunca del core) — sin lógica de dominio propia.
+    /// `core::types::workspace_revision` (E10-H03) + `WorkspaceConfig::load` (I/O de `workspace`,
+    /// nunca del core) — sin lógica de dominio propia.
     pub fn workspace_status(&self, profile: Profile) -> Result<WorkspaceStatus, WorkspaceError> {
         let doc_set = self.workspace.document_set()?;
         let files = doc_set.files();
         let analysis = doc_set.analyze();
         let root = self.workspace.root();
         let cfg = self.workspace.config();
-        let schema = WorkspaceSchema::load(root).map_err(WorkspaceError::Io)?;
 
         let revision = workspace_revision(files, &cfg.workspace.writable_roots);
         // Aristas del grafo: los enlaces INTERNOS (documentos y fantasmas). Los externos, los
@@ -411,7 +416,7 @@ impl App {
             knowledge_roots: cfg.workspace.writable_roots.clone(),
             reference_roots: cfg.workspace.reference_roots.clone(),
             format_version: DEFAULT_FORMAT_VERSION.to_string(),
-            schema_version: schema.version.clone(),
+            schema_version: DEFAULT_SCHEMA_VERSION.to_string(),
             conformant: analysis.hard_fail() == 0,
             counts: StatusCounts {
                 documents: analysis.documents.len(),
@@ -425,7 +430,7 @@ impl App {
                 writes,
                 transactions: writes,
                 revert: writes,
-                schemas: true,
+                schemas: false,
                 external_references: true,
             },
             recovery: StatusRecovery {
@@ -587,11 +592,10 @@ impl App {
     /// `body` es el cuerpo completo.
     ///
     /// `externalReferences` resuelve `implemented_by`/`verified_by` contra disco vía
-    /// [`Workspace::external_refs`] (E11-H04) — `{path, exists}` por cada referencia declarada.
-    /// Los diagnósticos de referencia rota (`CheckCode::ExtrefMissing`) que produce esa llamada NO
-    /// se mezclan en el campo `diagnostics` de esta proyección (que sigue viniendo, sin cambios,
-    /// de `Analysis::diagnostics` — invariante #3: una sola verdad computada por fuente); un agente
-    /// que quiera esos diagnósticos los deriva de `exists:false` en `externalReferences`.
+    /// [`Workspace::external_refs`] (E11-H04) — `{path, exists}` por cada referencia declarada. Desde
+    /// E20-H03 esa llamada NO produce diagnósticos (el `EXTREF-MISSING` se retiró con `core::schema`);
+    /// el campo `diagnostics` de esta proyección viene solo de `Analysis::diagnostics` (invariante #3);
+    /// un agente que quiera detectar una ref rota la deriva de `exists:false` en `externalReferences`.
     pub fn knowledge_get(
         &self,
         r: &DocumentRef,
@@ -661,71 +665,56 @@ impl App {
         })
     }
 
-    /// Descubrimiento del catálogo de tipos (E10-H11, `ARCHITECTURE.md §19.2`, `docs/REFACTOR.md
-    /// §9.4`): lo que un agente consulta ANTES de escribir, para conocer los contratos (`DocType`s,
-    /// campos, relaciones, lifecycle, plantillas) declarados en `.lodestar/schema.yaml`.
+    /// Inspección genérica de metadata (E20-H03, `ARCHITECTURE.md §20.10`, `REFACTOR_PHASE_2 §Fase
+    /// 6`): lo que un agente consulta para **comprender las convenciones de una base desconocida sin
+    /// necesitar un schema**. Sustituye a `schema_inspect` (retirado con `core::schema`).
     ///
-    /// Solo los modos `"catalog"` (todos los `DocType`) y `"type"` (uno concreto, requiere
-    /// `type_name`) tienen criterio de aceptación en esta historia. El resto de modos de
-    /// `REFACTOR §9.4` (`field`/`relation`/`diagnosticCode`/`lifecycle`/`template`) quedan
-    /// **admitidos por el catálogo de modos pero sin proyección propia todavía**: inventar una
-    /// semántica rica para ellos sin un criterio que la ejerza arriesgaría fijar una forma de wire
-    /// que luego hubiera que romper, así que devuelven `Err(ErrorCode::InvalidSchema)` con un
-    /// mensaje explícito — igual que un modo realmente desconocido (`mode` sin reconocer nunca
-    /// entra en pánico). Un workspace sin `.lodestar/schema.yaml` NO es un error:
-    /// `WorkspaceSchema::load` ya devuelve `Schema::default()` (vacío y permisivo, E10-H05), así
-    /// que `catalog` da `types: []` (criterio `inspect_sin_schema`).
+    /// Dos modos, ambos servidos por las funciones **puras** del core (`core::metadata`, una sola
+    /// verdad de qué es un campo y de qué tipo, invariante #3):
+    /// - `"catalog"` → [`metadata::catalog`]: por cada `field_path` que aparece en algún documento,
+    ///   en cuántos documentos aparece y qué tipos toma (`MetadataCatalog`).
+    /// - `"field"` → [`metadata::inspect_field`]: para un `field` dado (dot-path, p. ej.
+    ///   `"service.tier"`), presencia/ausencia, tipos y valores escalares frecuentes
+    ///   (`FieldInspection`). Requiere el parámetro `field`; su ausencia o un dot-path inválido →
+    ///   `Err(ErrorCode::InvalidSchema)`.
     ///
-    /// Tipo inexistente en `mode: "type"` → `Err(ErrorCode::InvalidSchema)` (ningún criterio de
-    /// esta historia lo ejerce; se documenta la elección por si una historia futura la refina).
+    /// Un `mode` sin reconocer → `Err(ErrorCode::InvalidSchema)` (nunca entra en pánico). Un
+    /// workspace sin frontmatter en ningún documento NO es un error: el catálogo sale vacío.
     ///
-    /// `Result<_, ErrorCode>` (no `WorkspaceError`) — mismo patrón que [`App::resolve_ref`]/
-    /// [`App::knowledge_get`]: este es un servicio de cara a la fachada MCP/CLI, y el catálogo de
-    /// 16 códigos estables (E10-H02) es lo que el llamante necesita para construir el wire de
-    /// error, no la variante interna de `WorkspaceError`. El error de `WorkspaceSchema::load`
-    /// (YAML malformado — el único caso en que puede fallar, ya que la ausencia de fichero no es
-    /// error) mapea a `ErrorCode::InternalIoError` (fallo de IO/parseo, sin código más específico
-    /// en el catálogo de 16 todavía).
-    pub fn schema_inspect(
+    /// `Result<_, ErrorCode>` (no `WorkspaceError`) — mismo patrón que [`App::knowledge_get`]: es un
+    /// servicio de cara a la fachada MCP/CLI, y el catálogo de códigos estables es lo que el llamante
+    /// necesita para el wire de error.
+    pub fn metadata_inspect(
         &self,
         mode: &str,
-        type_name: Option<&str>,
-    ) -> Result<SchemaInspection, ErrorCode> {
-        let schema =
-            WorkspaceSchema::load(self.workspace.root()).map_err(|_| ErrorCode::InternalIoError)?;
+        field: Option<&str>,
+    ) -> Result<MetadataInspection, ErrorCode> {
+        let doc_set = self
+            .workspace
+            .document_set()
+            .map_err(|e| workspace_error_code(&e))?;
 
         match mode {
-            "catalog" => Ok(SchemaInspection {
-                schema_version: schema.version.clone(),
-                r#type: None,
-                types: Some(schema.types.into_values().collect()),
-            }),
-            "type" => {
-                let name = type_name.ok_or(ErrorCode::InvalidSchema)?;
-                let doc_type = schema
-                    .types
-                    .get(name)
-                    .cloned()
-                    .ok_or(ErrorCode::InvalidSchema)?;
-                Ok(SchemaInspection {
-                    schema_version: schema.version.clone(),
-                    r#type: Some(doc_type),
-                    types: None,
-                })
+            "catalog" => Ok(MetadataInspection::Catalog(metadata::catalog(&doc_set))),
+            "field" => {
+                let field = field.ok_or(ErrorCode::InvalidSchema)?;
+                let field_path = FieldPath::parse(field).map_err(|_| ErrorCode::InvalidSchema)?;
+                Ok(MetadataInspection::Field(metadata::inspect_field(
+                    &doc_set,
+                    &field_path,
+                )))
             }
             _ => Err(ErrorCode::InvalidSchema),
         }
     }
 
     /// Audita el conocimiento con scopes y severidad mínima (E10-H12, `ARCHITECTURE.md §19.6`,
-    /// `REFACTOR §10/§17`). Es la tool que **cablea por primera vez** la validación schema-driven
-    /// (E10-H07, `validate_schema`, PURA) junto a los diagnósticos de `DocumentSet::analyze` (`§20.9`).
+    /// `REFACTOR §10/§17`), sobre los diagnósticos de `DocumentSet::analyze` (`§20.9`).
     ///
     /// **Composición de diagnósticos** (invariante #3 — una sola verdad computada): por cada
-    /// documento (`Analysis::documents`) se unen sus diagnósticos de documento (`Analysis::diagnostics`)
-    /// con los checks de esquema (`validate_schema(&doc_set, &schema)`, agrupados por su `target`).
-    /// Un workspace sin `.lodestar/schema.yaml` produce `Schema::default()` (vacío) y `validate_schema`
-    /// devuelve cero checks, así que **el veredicto de un workspace sin esquema no cambia**. Los checks
+    /// documento (`Analysis::documents`) se toman sus diagnósticos de documento
+    /// (`Analysis::diagnostics`). Tras E20-H03 la validación schema-driven (`SCHEMA-*`/`REL-*`) se
+    /// retiró con `core::schema`, así que este es el único universo de diagnósticos. Los checks
     /// `Pass` (no son hallazgos) se descartan.
     ///
     /// **Scopes** (`scope`): `workspace` = todos los documentos; `document{ref}` = solo ese documento
@@ -743,8 +732,8 @@ impl App {
     /// el conjunto de diagnósticos del scope, antes de aplicar `minimum_severity` o la paginación —
     /// son un agregado del scope, no de la página devuelta. `minimum_severity` (por defecto `Info`,
     /// que ya excluye los `Pass`) eleva el umbral de lo que se **devuelve** en `diagnostics`.
-    /// `include_suggested_fixes == false` vacía `fixes` (hoy siempre vacío: los checks de documento/schema no
-    /// proponen fixes todavía — E12-H07). `limit`/`cursor` paginan de forma determinista sobre el
+    /// `include_suggested_fixes == false` vacía `fixes` (hoy siempre vacío: ningún check propone
+    /// fixes tras el retiro de `REL-TARGET` en E20-H03). `limit`/`cursor` paginan de forma determinista sobre el
     /// orden total estable `(path, code, id)` (mismo patrón de cursor-offset opaco que
     /// `knowledge_search`); `limit` por defecto 100 (`REFACTOR §10`), `next_cursor` `None` al agotar.
     pub fn knowledge_check(
@@ -760,31 +749,20 @@ impl App {
             .document_set()
             .map_err(|e| workspace_error_code(&e))?;
         let analysis = doc_set.analyze();
-        let root = self.workspace.root();
         let cfg = self.workspace.config();
-        let schema = WorkspaceSchema::load(root).map_err(|_| ErrorCode::InternalIoError)?;
 
         let revision = workspace_revision(doc_set.files(), &cfg.workspace.writable_roots);
-
-        // Checks schema-driven agrupados por su path (`target`): así se unen a los de documento por path.
-        // Fuente ÚNICA de esta fusión (invariante #3): la comparten esta tool y la salida de
-        // `lodestar check` vía [`App::schema_diagnostics_by_path`].
-        let schema_by_path = Self::schema_diagnostics_by_path(&doc_set, &schema);
 
         // Conjunto de paths del scope.
         let allowed = self.scope_paths(&doc_set, analysis, scope)?;
 
-        // Compón (path, check) uniendo documento + schema por cada documento del scope, con id estable.
+        // Compón (path, check) por cada documento del scope, con id estable.
         let mut items: Vec<(RelPath, Check)> = Vec::new();
         for path in &analysis.documents {
             if !allowed.contains(path) {
                 continue;
             }
-            let mut checks: Vec<Check> =
-                analysis.diagnostics.get(path).cloned().unwrap_or_default();
-            if let Some(extra) = schema_by_path.get(path) {
-                checks.extend(extra.iter().cloned());
-            }
+            let checks: Vec<Check> = analysis.diagnostics.get(path).cloned().unwrap_or_default();
             for mut check in checks {
                 // Los `Pass` no son diagnósticos: no computan en summary ni se devuelven.
                 if check.level == Severity::Pass {
@@ -875,55 +853,18 @@ impl App {
         }
     }
 
-    /// Diagnósticos schema-driven (`validate_schema` + `validate_relations`, PUROS) agrupados por
-    /// su `target` path. Es la **fuente única** (invariante #3) de la fusión documento+schema que
-    /// comparten [`App::knowledge_check`] (con scope/severidad/paginación encima) y la salida de
-    /// `lodestar check` (vía [`App::full_analysis`]): la lógica de qué diagnósticos schema-driven
-    /// existen y bajo qué path se listan vive **una sola vez**.
-    ///
-    /// Aditivo (E10-H07/E11-H03): un workspace sin `.lodestar/schema.yaml` produce `Schema::default()`
-    /// (vacío) y estas funciones devuelven cero checks, así que el conjunto de diagnósticos no cambia.
-    fn schema_diagnostics_by_path(
-        doc_set: &DocumentSet,
-        schema: &Schema,
-    ) -> BTreeMap<RelPath, Vec<Check>> {
-        let mut by_path: BTreeMap<RelPath, Vec<Check>> = BTreeMap::new();
-        for check in validate_schema(doc_set, schema)
-            .into_iter()
-            .chain(validate_relations(doc_set, schema))
-        {
-            for target in &check.targets {
-                by_path
-                    .entry(target.clone())
-                    .or_default()
-                    .push(check.clone());
-            }
-        }
-        by_path
-    }
-
-    /// Computa el `Analysis` **completo** del working tree: los diagnósticos de
-    /// [`DocumentSet::analyze`] con los diagnósticos schema-driven (`SCHEMA-*`/`REL-*`) fusionados en
-    /// `diagnostics` por su path (`App::schema_diagnostics_by_path`). Es la fuente que alimenta la
-    /// **salida** de `lodestar check` (`--json`/`--sarif`/humano), de modo que el mismo motor que
-    /// decide el veredicto (`knowledge_check`) también surface los diagnósticos que lo disparan —
-    /// sin recomputar `analyze()` dos veces ni recomponer la validación schema-driven en la fachada.
-    ///
-    /// Los contadores `hard_fail()`/`warn_count()` conservan su semántica (los DERIVA `Analysis` de
-    /// `diagnostics`, E17-H04); la fusión solo **añade** checks a `diagnostics` (aditiva). Un workspace sin `schema.yaml` devuelve
-    /// exactamente el `Analysis` de `analyze()`.
+    /// Computa el `Analysis` del working tree que alimenta la **salida** de `lodestar check`
+    /// (`--json`/`--sarif`/humano). Tras E20-H03 es exactamente el `Analysis` de
+    /// [`DocumentSet::analyze`] (`§20.9`): la validación schema-driven (`SCHEMA-*`/`REL-*`) se retiró
+    /// con `core::schema`, así que ya no hay diagnósticos que fusionar. Se conserva el método (en vez
+    /// de exponer `analyze()` directo) para no acoplar la CLI al `Workspace` y dejar un único punto
+    /// por si futuras historias vuelven a componer más fuentes de diagnóstico.
     pub fn full_analysis(&self) -> Result<Analysis, ErrorCode> {
         let doc_set = self
             .workspace
             .document_set()
             .map_err(|e| workspace_error_code(&e))?;
-        let schema =
-            WorkspaceSchema::load(self.workspace.root()).map_err(|_| ErrorCode::InternalIoError)?;
-        let mut analysis = doc_set.analyze().clone();
-        for (path, checks) in Self::schema_diagnostics_by_path(&doc_set, &schema) {
-            analysis.diagnostics.entry(path).or_default().extend(checks);
-        }
-        Ok(analysis)
+        Ok(doc_set.analyze().clone())
     }
 
     /// Consulta el grafo, consolidando en una sola tool lo que hoy son 4 tools separadas
@@ -1093,7 +1034,7 @@ impl App {
                 (model.nodes, model.edges)
             }
             // Ninguna historia ejerce todavía una `operation` fuera de las anteriores; mismo
-            // criterio que `schema_inspect` para un `mode` no reconocido — no hay un código de
+            // criterio que `metadata_inspect` para un `mode` no reconocido — no hay un código de
             // "argumento inválido" dedicado en el catálogo de 16.
             _ => return Err(ErrorCode::InvalidSchema),
         };
@@ -1143,8 +1084,8 @@ impl App {
     ///   verificada idéntica por el test `impacto_paridad_core`.
     /// - `blockingReferences`: **siempre vacío** desde E17-H05. Los bloqueos derivados de
     ///   relaciones tipadas obligatorias desaparecieron con el modelo que los definía; el campo se
-    ///   conserva en el wire (`contracts/mcp.yml`) hasta que E20 retire `core::schema` entero, para
-    ///   no romper a un cliente que lo lea.
+    ///   conserva en el wire (`contracts/mcp.yml`) aun tras el retiro de `core::schema` (E20-H03),
+    ///   para no romper a un cliente que lo lea — su retirada es una historia propia.
     /// - `risk`: `"high"` si el nº de afectados directos es alto; `"medium"` para un impacto
     ///   moderado; `"low"` en caso contrario.
     ///
@@ -1179,8 +1120,8 @@ impl App {
         let transitively_affected = affected_documents.len();
 
         // `blockingReferences`: vacío por construcción (E17-H05). Se conserva en el wire —y con él
-        // su contador— hasta que E20 retire `core::schema`; ya no hay nada que lo alimente, porque
-        // una relación es un enlace Markdown y un enlace roto no bloquea, se reporta.
+        // su contador— aun tras el retiro de `core::schema` (E20-H03); ya no hay nada que lo alimente,
+        // porque una relación es un enlace Markdown y un enlace roto no bloquea, se reporta.
         let blocking_references: Vec<BlockingReference> = Vec::new();
 
         // Riesgo derivado del GRAFO (conjunto cerrado {"low","medium","high"}, wire en inglés).
@@ -1263,7 +1204,6 @@ impl App {
             .map_err(|e| workspace_error_code(&e))?;
         let root = self.workspace.root();
         let cfg = self.workspace.config();
-        let schema = WorkspaceSchema::load(root).map_err(|_| ErrorCode::InternalIoError)?;
         let files = doc_set.files();
         let writable = &cfg.workspace.writable_roots;
 
@@ -1289,7 +1229,7 @@ impl App {
                     return Err(ErrorCode::RevisionConflict);
                 }
             }
-            normalized.extend(normalize_raw_op(&doc_set, &schema, raw)?);
+            normalized.extend(normalize_raw_op(&doc_set, raw)?);
         }
 
         // (4) DocumentSet hipotético + análisis del plan (todo en memoria, sin escribir).
@@ -1311,9 +1251,9 @@ impl App {
         }
 
         let risk = plan::assess_risk(&normalized, &doc_set, &after);
-        let semantic_diff = plan::semantic_diff(&doc_set, &after, &schema);
-        let before_report = plan::validate_result(&doc_set, &schema);
-        let after_report = plan::validate_result(&after, &schema);
+        let semantic_diff = plan::semantic_diff(&doc_set, &after);
+        let before_report = plan::validate_result(&doc_set);
+        let after_report = plan::validate_result(&after);
         let can_apply = plan::can_apply(&after_report, &policy);
         let impact = PlanImpact::from_diff(&semantic_diff);
 
@@ -1946,7 +1886,6 @@ fn op_rel_field(op: &Value, key: &str) -> Result<RelPath, ErrorCode> {
 /// mapean con [`error_code`].
 fn normalize_raw_op(
     doc_set: &DocumentSet,
-    schema: &Schema,
     op: &Value,
 ) -> Result<Vec<NormalizedOperation>, ErrorCode> {
     let kind = op
@@ -1960,7 +1899,7 @@ fn normalize_raw_op(
             let ty = op.get("type").and_then(Value::as_str).unwrap_or("");
             let title = op.get("title").and_then(Value::as_str);
             let body = op.get("body").and_then(Value::as_str).map(str::to_string);
-            plan::normalize_create(doc_set, schema, &path, ty, title, body)
+            plan::normalize_create(doc_set, &path, ty, title, body)
                 .map(one)
                 .map_err(|e| error_code(&e))
         }
@@ -2042,7 +1981,7 @@ fn normalize_raw_op(
                 .and_then(Value::as_str)
                 .ok_or(ErrorCode::InvalidSchema)?;
             let target = op_rel_field(op, "target")?;
-            plan::normalize_add_relation(doc_set, schema, &source, relation, &target)
+            plan::normalize_add_relation(doc_set, &source, relation, &target)
                 .map(one)
                 .map_err(|e| error_code(&e))
         }
@@ -2053,7 +1992,7 @@ fn normalize_raw_op(
                 .and_then(Value::as_str)
                 .ok_or(ErrorCode::InvalidSchema)?;
             let target = op_rel_field(op, "target")?;
-            plan::normalize_remove_relation(doc_set, schema, &source, relation, &target)
+            plan::normalize_remove_relation(doc_set, &source, relation, &target)
                 .map(one)
                 .map_err(|e| error_code(&e))
         }
@@ -2063,7 +2002,7 @@ fn normalize_raw_op(
                 .get("to")
                 .and_then(Value::as_str)
                 .ok_or(ErrorCode::InvalidSchema)?;
-            plan::normalize_transition_status(doc_set, schema, &path, to)
+            plan::normalize_transition_status(&path, to)
                 .map(one)
                 .map_err(|e| error_code(&e))
         }
@@ -2072,7 +2011,7 @@ fn normalize_raw_op(
                 .get("fixId")
                 .and_then(Value::as_str)
                 .ok_or(ErrorCode::InvalidSchema)?;
-            plan::normalize_apply_fix(doc_set, schema, fix_id)
+            plan::normalize_apply_fix(doc_set, fix_id)
                 .map(one)
                 .map_err(|e| error_code(&e))
         }
@@ -2236,8 +2175,8 @@ impl PlanImpact {
 // `knowledge_check` — scope, informe y id estable de diagnóstico (E10-H12).
 //
 // Proyección de servicio (framing), NO dominio: viven en `lodestar-app`, no en `core::types`. Los
-// diagnósticos que porta (`Check`) sí son dominio puro del core (compuestos de `Analysis::diagnostics`
-// + `validate_schema`). Wire en camelCase.
+// diagnósticos que porta (`Check`) sí son dominio puro del core (`Analysis::diagnostics`, `§20.9`;
+// tras E20-H03 ya no se fusionan `SCHEMA-*`/`REL-*`). Wire en camelCase.
 // ---------------------------------------------------------------------------
 
 /// Límite por defecto de diagnósticos por página de `knowledge_check` (`REFACTOR §10`).
@@ -2370,9 +2309,8 @@ pub struct GraphQuerySummary {
 // `REFACTOR §9.6/§17`).
 //
 // Proyección de servicio (framing), NO dominio: vive en `lodestar-app`, no en `core::types`. Los
-// recuentos y los `blockingReferences` los computa `App::impact_analyze` componiendo el core
-// (`DocumentSet::backlinks`/`neighborhood` + `RelationDef` del schema); esta capa solo les da forma de
-// wire (camelCase). Wire en camelCase.
+// recuentos los computa `App::impact_analyze` componiendo el core (`DocumentSet::backlinks`/
+// `neighborhood`); `blockingReferences` va siempre vacío desde E17-H05. Wire en camelCase.
 // ---------------------------------------------------------------------------
 
 /// Umbral de backlinks directos a partir del cual el impacto de un cambio se considera **alto**
@@ -2423,8 +2361,8 @@ pub struct BlockingReference {
 
 // E17-H05 retiró `blocking_relations`/`relation_field_targets`: los bloqueos estructurales salían
 // de las relaciones tipadas del `schema.yaml`, vocabulario que el modelo universal ya no tiene
-// (`§20.10`). `BlockingReference` sobrevive solo como forma del wire, siempre vacía, hasta que E20
-// retire `core::schema`.
+// (`§20.10`). `BlockingReference` sobrevive solo como forma del wire, siempre vacía, aun tras el
+// retiro de `core::schema` (E20-H03); su retirada del wire es una historia propia.
 
 // ---------------------------------------------------------------------------
 // `knowledge_get` — tipos de proyección de servicio y extracción de secciones (E10-H10).
@@ -2632,32 +2570,27 @@ fn decode_cursor(cursor: &str) -> usize {
 }
 
 // ---------------------------------------------------------------------------
-// `schema_inspect` — tipo de proyección de servicio (E10-H11).
+// `metadata_inspect` — envoltorio de respuesta de la tool (E20-H03, sustituye a `schema_inspect`).
 //
-// Proyección de servicio (framing), NO dominio: vive en `lodestar-app`, no en `core::types`. El
-// `DocType` que porta sí es dominio puro y se reexpone directo desde `core::schema` (ya serializa
-// camelCase con los nombres de wire exactos que pide la historia: `name`/`description`/
-// `requiredFields`/`allowedStatuses`/`fields`/`relations`/`rules`/`bodyTemplate`). Wire en
-// camelCase.
+// Es solo el discriminador de modo: un enum `untagged` que envuelve los tipos de wire del CORE
+// (`MetadataCatalog`/`FieldInspection`, `core::types`, con su serde ya fijado en E20-H03). No es una
+// capa DTO paralela (invariante #4): el contrato de tipos vive en `core::types`; esto es framing de
+// tool (qué proyección devuelve cada `mode`), igual que `KnowledgeGetResponse`.
 // ---------------------------------------------------------------------------
 
-/// Respuesta de `schema_inspect` (`ARCHITECTURE.md §19.2`, `docs/REFACTOR.md §9.4`).
+/// Respuesta de la tool `metadata_inspect` (`ARCHITECTURE.md §20.10`, `REFACTOR_PHASE_2 §Fase 6`).
 ///
-/// `type`/`types` son mutuamente excluyentes según el `mode` pedido: `"type"` puebla `type` y deja
-/// `types` en `None`; `"catalog"` puebla `types` (posiblemente vacío) y deja `type` en `None`. Un
-/// campo en `None` no se serializa (`skip_serializing_if`), así que el wire de cada modo solo
-/// lleva la clave que le corresponde.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct SchemaInspection {
-    /// Versión del formato de esquema (`Schema::version`; `"1"` si no hay `.lodestar/schema.yaml`).
-    pub schema_version: String,
-    /// El `DocType` pedido, cuando `mode == "type"`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub r#type: Option<DocType>,
-    /// Todos los `DocType` declarados, cuando `mode == "catalog"` (vacío si no hay schema).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub types: Option<Vec<DocType>>,
+/// `untagged`: serializa como el valor interno directo, así que `Catalog` da `{ "fields": [ … ] }`
+/// (la forma de [`MetadataCatalog`]) y `Field` da `{ "field": …, "presentIn": …, … }` (la de
+/// [`FieldInspection`]) — sin envoltorio ni discriminador extra. Solo `Serialize` (+ `JsonSchema`
+/// para el `outputSchema`): la tool PRODUCE esta respuesta, nunca la consume del wire.
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+#[serde(untagged)]
+pub enum MetadataInspection {
+    /// Modo `"catalog"`: el catálogo de propiedades del workspace.
+    Catalog(MetadataCatalog),
+    /// Modo `"field"`: la inspección de una propiedad concreta.
+    Field(FieldInspection),
 }
 
 // ---------------------------------------------------------------------------
@@ -2679,8 +2612,8 @@ pub struct KnowledgeGetResponse {
     pub document: DocumentView,
 }
 
-/// Los `outputSchema` (JSON Schema, vía `schemars`) de las 5 tools de lectura/verificación de
-/// E10 (`workspace_status`/`knowledge_search`/`knowledge_get`/`schema_inspect`/`knowledge_check`,
+/// Los `outputSchema` (JSON Schema, vía `schemars`) de las tools de lectura/verificación
+/// (`workspace_status`/`knowledge_search`/`knowledge_get`/`metadata_inspect`/`knowledge_check`, …,
 /// decisión **D6b**). `lodestar-mcp::tools::list` llama a estos helpers para poblar la clave
 /// `outputSchema` de cada tool — así el schema se deriva del tipo Rust real que sirve cada
 /// servicio (nunca se escribe a mano, no puede divergir silenciosamente del wire).
@@ -2688,8 +2621,8 @@ pub mod schemas {
     use serde_json::Value;
 
     use super::{
-        ApplyResult, CheckReport, GraphQueryResult, ImpactReport, KnowledgeGetResponse, PlanResult,
-        RevertResult, SchemaInspection, SearchResults, WorkspaceStatus,
+        ApplyResult, CheckReport, GraphQueryResult, ImpactReport, KnowledgeGetResponse,
+        MetadataInspection, PlanResult, RevertResult, SearchResults, WorkspaceStatus,
     };
 
     /// Deriva el JSON Schema de `T` y lo serializa a `serde_json::Value`. `schemars::schema_for!`
@@ -2717,9 +2650,9 @@ pub mod schemas {
         schema_of::<KnowledgeGetResponse>()
     }
 
-    /// `outputSchema` de `schema_inspect` (== [`SchemaInspection`]).
-    pub fn schema_inspect_schema() -> Value {
-        schema_of::<SchemaInspection>()
+    /// `outputSchema` de `metadata_inspect` (== [`MetadataInspection`]).
+    pub fn metadata_inspect_schema() -> Value {
+        schema_of::<MetadataInspection>()
     }
 
     /// `outputSchema` de `knowledge_check` (== [`CheckReport`]).

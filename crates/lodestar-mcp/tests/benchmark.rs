@@ -12,18 +12,19 @@
 //! El catálogo `ErrorCode` (`lodestar-core::types`, invariante #4) está congelado en 16 variantes;
 //! cada escenario asevera el código estable que el motor emite de verdad (verificado en
 //! `crates/lodestar-app/src/lib.rs` `error_code`/`workspace_error_code` y `types.rs`):
-//!   - Escenario 3 (crear sin campo obligatorio): §17 dice «Plan rechazado». El motor lo materializa
-//!     en DOS superficies: `change_plan` devuelve `canApply:false` con `diagnosticsAfter.errors>=1`,
-//!     y `change_apply` lo rechaza en el staging con **`NONCONFORMANT_RESULT`** (E13-H01). Se
-//!     aseveran ambas.
+//!   - Escenario 3 (crear un documento NO conforme): §17 dice «Plan rechazado». RECOMPUESTO en
+//!     E20-H03 con un código vivo (`LINK-TARGET-MISSING` por un enlace roto, ya que `SCHEMA-REQFIELD`
+//!     se retiró). El motor lo materializa en DOS superficies: `change_plan` devuelve `canApply:false`
+//!     con `diagnosticsAfter.errors>=1`, y `change_apply` lo rechaza en el staging con
+//!     **`NONCONFORMANT_RESULT`** (E14-H04). Se aseveran ambas.
 //!   - Escenario 5 (borrar referenciado): §17 dice «Rechazo con blockers». El motor emite
 //!     **`INBOUND_LINKS_EXIST`** al normalizar un `delete` con política `Reject` (los enlaces
 //!     entrantes SON los blockers).
 //!   - Escenario 6 (modificar cambiado externamente): §17 dice `REVISION_CONFLICT` y el motor emite
 //!     exactamente **`REVISION_CONFLICT`** (control optimista por op en `change_plan`). Sin
 //!     divergencia.
-//!   - Escenario 8 (relación inválida): **`RELATION_CONSTRAINT_VIOLATION`**, antes de escribir
-//!     (`change_plan` no toca disco).
+//!   - Escenario 8 (relación inválida): RETIRADO en E20-H03 (relaciones tipadas eliminadas con
+//!     `core::schema`; una relación es un enlace, sin restricción de tipo).
 //!   - Escenario 13 (fuera de writableRoots): **`PERMISSION_DENIED`** en `change_apply`.
 //!   - Escenario 14 (ref de código inexistente): el «diagnóstico» aflora en `knowledge_get` como una
 //!     `externalReference` con **`exists:false`** (el check `EXTREF-MISSING` es de la workspace, no
@@ -201,77 +202,8 @@ fn workspace_min() -> tempfile::TempDir {
     dir
 }
 
-/// Workspace con `.lodestar/schema.yaml` que declara `decision` con `requiredFields:[title,status,
-/// rationale]` (para el escenario 3) y `note` (segundo tipo).
-fn workspace_schema_decision() -> tempfile::TempDir {
-    let dir = tempfile::tempdir().unwrap();
-    write(dir.path(), "index.md", INDEX);
-    write(
-        dir.path(),
-        ".lodestar/schema.yaml",
-        "\
-version: \"1\"
-types:
-  decision:
-    name: decision
-    description: Una decision registrada
-    requiredFields: [title, status, rationale]
-    allowedStatuses: [proposed, accepted, rejected]
-  note:
-    name: note
-    description: Una nota libre
-    requiredFields: [title]
-",
-    );
-    dir
-}
-
-/// Workspace con schema `task.depends_on -> [component]` y documentos `component`/`note`/`task`
-/// (escenarios 8 y 9).
-fn workspace_relaciones(task_depends_on: &str) -> tempfile::TempDir {
-    let dir = tempfile::tempdir().unwrap();
-    write(dir.path(), "index.md", INDEX);
-    write(
-        dir.path(),
-        ".lodestar/schema.yaml",
-        "\
-version: \"1\"
-types:
-  component:
-    name: component
-    description: Un componente
-  note:
-    name: note
-    description: Una nota
-  task:
-    name: task
-    description: Una tarea que depende de un componente
-    relations:
-      depends_on:
-        targetTypes: [component]
-        cardinality: many
-",
-    );
-    write(
-        dir.path(),
-        "component.md",
-        "---\ntype: component\ntitle: Componente\ndescription: el nucleo\n---\n\n# Componente\n\ncuerpo\n",
-    );
-    write(
-        dir.path(),
-        "nota.md",
-        "---\ntype: note\ntitle: Nota\ndescription: irrelevante\n---\n\n# Nota\n\ncuerpo\n",
-    );
-    write(
-        dir.path(),
-        "tarea.md",
-        &format!(
-            "---\ntype: task\ntitle: Tarea\ndescription: depende de algo\n{task_depends_on}---\n\n# Tarea\n\ncuerpo\n"
-        ),
-    );
-    dir
-}
-
+// (E20-H03: los fixtures `workspace_schema_decision` y `workspace_relaciones`, que escribían un
+// `.lodestar/schema.yaml` con tipos/relaciones tipadas, se retiran con la maquinaria de schema.)
 /// Workspace con 4 documentos relacionados en anillo (`a`/`b`/`c`/`d`), conformes (escenario 7).
 fn workspace_cinco_relacionados() -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
@@ -436,30 +368,22 @@ fn escenario_02_crear_valido() {
 }
 
 // ===========================================================================
-// Escenario 3 — Crear un documento sin campo obligatorio → plan rechazado.
+// Escenario 3 — Crear un documento NO conforme → plan rechazado (RECOMPUESTO E20-H03).
 //
-// Dos superficies deben rechazarlo para que «sin campo obligatorio» NUNCA acabe publicado:
-//   (1) change_plan: canApply:false + diagnosticsAfter.errors>=1  → VERDE (change_plan usa
-//       `plan::validate_result`, que SÍ incluye la validación schema-driven).
-//   (2) change_apply: NONCONFORMANT_RESULT y no escribe            → ROJO (HUECO REAL).
-//
-// HUECO (fase roja para el implementador de E14-H04): `change_apply` PUBLICA el documento no
-// conforme y reporta `validation.conformant:true` pese a los `SCHEMA-REQFIELD` (level err). Causa:
-// `Workspace::validate_staging` (E13-H01, `crates/lodestar-workspace/src/staging.rs`) mide solo
-// `doc_set.analyze().hard_fail` (los 15 checks OKF) y NO ejecuta `validate_schema`/`validate_relations`
-// — así un `SCHEMA-REQFIELD` no cuenta como fallo duro y la publicación pasa el gate. Es una
-// divergencia del invariante #3 (una sola verdad computada): `knowledge_check`/`lodestar check` sobre
-// el mismo resultado dirían `conformant:false`, pero el gate del único-escritor dice `true`. Cerrarlo:
-// extender el gate de staging a la conformidad schema-driven (o que `change_apply` rechace un plan
-// persistido con `canApply:false`).
+// El escenario §17 sigue siendo el mismo («un create que deja el workspace no conforme NUNCA acaba
+// publicado»), pero con un código VIVO de `§20.9` en vez del retirado `SCHEMA-REQFIELD`: el nuevo
+// documento lleva un enlace a un `.md` inexistente ⇒ `LINK-TARGET-MISSING` (Err) ⇒ resultado no
+// conforme. Dos superficies deben rechazarlo:
+//   (1) change_plan: canApply:false + diagnosticsAfter.errors>=1 (usa `plan::validate_result`).
+//   (2) change_apply: NONCONFORMANT_RESULT y no escribe (gate de `validate_staging`, E14-H04).
 // ===========================================================================
-fn escenario_03_crear_sin_campo_obligatorio() {
-    let dir = workspace_schema_decision();
-    // `decision` requiere [title, status, rationale]; el create solo aporta type+title ⇒ faltan
-    // status y rationale ⇒ SCHEMA-REQFIELD ⇒ resultado no conforme.
+fn escenario_03_crear_no_conforme() {
+    let dir = workspace_min();
+    // El create añade un documento con un enlace a un `.md` que no existe ⇒ LINK-TARGET-MISSING (Err)
+    // ⇒ resultado no conforme.
     let ops = json!([
-        { "op": "create", "path": "dec.md", "type": "decision", "title": "Sin campos",
-          "body": "# Sin campos\n\ncuerpo\n" },
+        { "op": "create", "path": "dec.md", "type": "decision", "title": "No conforme",
+          "body": "# No conforme\n\n[roto](no-existe.md)\n" },
     ]);
 
     // (1) change_plan bajo política ESTRICTA: el plan se rechaza a sí mismo (canApply:false) y
@@ -472,7 +396,7 @@ fn escenario_03_crear_sin_campo_obligatorio() {
     assert_eq!(
         sc(&plan[0])["canApply"],
         Value::Bool(false),
-        "un create sin campos obligatorios NO debe ser aplicable (canApply:false): {plan:?}"
+        "un create que deja el workspace no conforme NO debe ser aplicable (canApply:false): {plan:?}"
     );
     assert!(
         sc(&plan[0])["diagnosticsAfter"]["errors"]
@@ -483,20 +407,16 @@ fn escenario_03_crear_sin_campo_obligatorio() {
     );
     let id = plan_id(&plan[0]);
 
-    // (2) change_apply DEBE rechazar el plan no conforme: «sin campo obligatorio» no puede acabar
-    //     escrito en el canónico. HOY es ROJO — el gate de staging no valida schema-driven (ver la
-    //     nota de HUECO de la cabecera), así que publica el documento reportando conformant:true.
+    // (2) change_apply DEBE rechazar el plan no conforme: un resultado no conforme no puede acabar
+    //     escrito en el canónico (gate de `validate_staging`, invariante #3).
     let applied = roundtrip(dir.path(), &[change_apply_line(2, &id)], 1);
     assert!(
         es_error_con(&applied[0], "NONCONFORMANT_RESULT"),
-        "HUECO: change_apply publica un create con SCHEMA-REQFIELD (err) en vez de rechazarlo con \
-         NONCONFORMANT_RESULT — el gate de validate_staging solo cuenta hard_fail OKF, no valida \
-         schema-driven (invariante #3): {applied:?}"
+        "change_apply debe rechazar un create no conforme con NONCONFORMANT_RESULT: {applied:?}"
     );
     assert!(
         !dir.path().join("dec.md").exists(),
-        "HUECO: un create no conforme por schema NO debe materializar el .md, pero change_apply lo \
-         escribe: {applied:?}"
+        "un create no conforme NO debe materializar el .md: {applied:?}"
     );
 }
 
@@ -647,96 +567,13 @@ fn escenario_07_cinco_documentos() {
 }
 
 // ===========================================================================
-// Escenario 8 — Introducir una relación inválida → error antes de escribir (RELATION_CONSTRAINT_VIOLATION).
+// Escenarios 8 y 9 — RETIRADOS en E20-H03.
+//   · 8 (relación inválida → RELATION_CONSTRAINT_VIOLATION): las relaciones tipadas y su validación
+//     desaparecen con `core::schema` (`§20.10`: una relación es un enlace, sin restricción de tipo).
+//   · 9 (safe fixes de REL-TARGET): el diagnóstico `REL-TARGET` y su `Fix{safe}` mueren con
+//     `validate_relations`; ya no hay fixes que aplicar. Ambos ejercitaban capacidades que E20
+//     elimina, no un hueco por cubrir.
 // ===========================================================================
-fn escenario_08_relacion_invalida() {
-    let dir = workspace_relaciones(""); // tarea.md sin depends_on todavía.
-    let antes = snapshot_md(dir.path());
-
-    // add_relation depends_on de la tarea hacia `nota.md` (tipo note), pero depends_on solo admite
-    // `component` ⇒ RELATION_CONSTRAINT_VIOLATION, antes de tocar disco.
-    let ops = json!([
-        { "op": "add_relation", "source": "tarea.md", "relation": "depends_on", "target": "nota.md" },
-    ]);
-    let resp = roundtrip(
-        dir.path(),
-        &[change_plan_line(1, ops, policy_permisiva())],
-        1,
-    );
-    assert!(
-        es_error_con(&resp[0], "RELATION_CONSTRAINT_VIOLATION"),
-        "una relación con target de tipo no admitido debe dar RELATION_CONSTRAINT_VIOLATION: {resp:?}"
-    );
-    assert_eq!(
-        antes,
-        snapshot_md(dir.path()),
-        "el error de relación inválida debe ocurrir ANTES de escribir"
-    );
-}
-
-// ===========================================================================
-// Escenario 9 — Corregir safe fixes → operaciones apply_fix.
-// ===========================================================================
-fn escenario_09_safe_fixes() {
-    // tarea.md declara depends_on hacia un target INEXISTENTE ⇒ REL-TARGET con un `Fix { safe }`.
-    let dir = workspace_relaciones("depends_on:\n  - inexistente.md\n");
-
-    // (1) knowledge_check con fixes sugeridos: localiza el diagnóstico REL-TARGET y su fixId.
-    let check = roundtrip(
-        dir.path(),
-        &[call(
-            1,
-            "knowledge_check",
-            json!({ "scope": { "kind": "workspace" }, "includeSuggestedFixes": true }),
-        )],
-        1,
-    );
-    let diags = sc(&check[0])["diagnostics"]
-        .as_array()
-        .unwrap_or_else(|| panic!("knowledge_check debe devolver diagnostics: {check:?}"));
-    let rel_target = diags
-        .iter()
-        .find(|d| d["code"] == "REL-TARGET")
-        .unwrap_or_else(|| {
-            panic!("debe haber un diagnóstico REL-TARGET por la relación rota: {check:?}")
-        });
-    let fix = rel_target["fixes"]
-        .as_array()
-        .and_then(|f| f.first())
-        .unwrap_or_else(|| panic!("el REL-TARGET debe traer un fix sugerido: {rel_target:?}"));
-    assert_eq!(
-        fix["safe"],
-        Value::Bool(true),
-        "el fix sugerido para REL-TARGET debe ser safe: {fix:?}"
-    );
-    let fix_id = fix["fixId"]
-        .as_str()
-        .unwrap_or_else(|| panic!("el fix debe llevar un fixId: {fix:?}"))
-        .to_string();
-
-    // (2) change_plan con una operación `apply_fix` sobre ese fixId: produce un plan real cuyo
-    //     resultado RESUELVE el REL-TARGET (semanticDiff.diagnosticsResolved lo recoge).
-    let ops = json!([ { "op": "apply_fix", "fixId": fix_id } ]);
-    let plan = roundtrip(
-        dir.path(),
-        &[change_plan_line(2, ops, policy_permisiva())],
-        1,
-    );
-    let s = sc(&plan[0]);
-    assert!(
-        s["normalizedOperations"]
-            .as_array()
-            .is_some_and(|o| !o.is_empty()),
-        "apply_fix debe producir >=1 operación normalizada: {plan:?}"
-    );
-    let resueltos = s["semanticDiff"]["diagnosticsResolved"]
-        .as_array()
-        .unwrap_or_else(|| panic!("el plan debe traer semanticDiff.diagnosticsResolved: {plan:?}"));
-    assert!(
-        resueltos.iter().any(|d| d["code"] == "REL-TARGET"),
-        "el safe fix debe RESOLVER el diagnóstico REL-TARGET: {plan:?}"
-    );
-}
 
 // ===========================================================================
 // Escenario 10 — Revisar un refactor → diff semántico en change_plan.
@@ -1060,8 +897,8 @@ fn bench_02_crear_valido() {
     escenario_02_crear_valido();
 }
 #[test]
-fn bench_03_crear_sin_campo_obligatorio() {
-    escenario_03_crear_sin_campo_obligatorio();
+fn bench_03_crear_no_conforme() {
+    escenario_03_crear_no_conforme();
 }
 #[test]
 fn bench_04_mover_30_backlinks() {
@@ -1079,14 +916,7 @@ fn bench_06_conflicto_revision() {
 fn bench_07_cinco_documentos() {
     escenario_07_cinco_documentos();
 }
-#[test]
-fn bench_08_relacion_invalida() {
-    escenario_08_relacion_invalida();
-}
-#[test]
-fn bench_09_safe_fixes() {
-    escenario_09_safe_fixes();
-}
+// bench_08_relacion_invalida / bench_09_safe_fixes: RETIRADOS en E20-H03 (capacidades eliminadas).
 #[test]
 fn bench_10_diff_refactor() {
     escenario_10_diff_refactor();
@@ -1113,20 +943,20 @@ fn bench_15_editar_markdown_invalido() {
 }
 
 // ---------------------------------------------------------------------------
-// E14-H04 · Criterio `benchmark_15_escenarios`: las 15 filas de §17 en un solo viaje e2e.
-// Es el test que nombra la spec; ejerce los 15 escenarios en secuencia sobre la superficie real.
+// E14-H04 · Criterio `benchmark_escenarios`: las filas de §17 en un solo viaje e2e.
+// Es el test que nombra la spec; ejerce los escenarios en secuencia sobre la superficie real. En
+// E20-H03 quedan 13 (los escenarios 8 y 9 —relación tipada inválida y safe fixes de REL-TARGET— se
+// retiraron con `core::schema`).
 // ---------------------------------------------------------------------------
 #[test]
-fn benchmark_15_escenarios() {
+fn benchmark_escenarios() {
     escenario_01_buscar_por_significado();
     escenario_02_crear_valido();
-    escenario_03_crear_sin_campo_obligatorio();
+    escenario_03_crear_no_conforme();
     escenario_04_mover_30_backlinks();
     escenario_05_borrar_referenciado();
     escenario_06_conflicto_revision();
     escenario_07_cinco_documentos();
-    escenario_08_relacion_invalida();
-    escenario_09_safe_fixes();
     escenario_10_diff_refactor();
     escenario_11_revert();
     escenario_12_crash_recuperacion();

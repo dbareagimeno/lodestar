@@ -4,14 +4,14 @@
 //! `DocumentSet` anterior al cambio, deriva un [`RiskAssessment`] con razones en español. No hace I/O;
 //! toda la verdad la da el core (`DocumentSet::backlinks`, invariante #3 de `CLAUDE.md`).
 //!
-//! Función pura [`semantic_diff`]: dado el `DocumentSet` antes/después de un plan y el `Schema`,
-//! deriva un [`SemanticDiff`] reusando [`crate::diff::diff_snap`] y las validaciones de esquema
-//! (`validate_schema`/`validate_relations`) — ver la doc de la función para el detalle.
+//! Función pura [`semantic_diff`]: dado el `DocumentSet` antes/después de un plan, deriva un
+//! [`SemanticDiff`] reusando [`crate::diff::diff_snap`] y el conjunto de diagnósticos de
+//! `DocumentSet::analyze` — ver la doc de la función para el detalle.
 //!
-//! Función pura [`validate_result`]: dado el `DocumentSet` hipotético resultante de un `ChangeSet` y
-//! el `Schema`, deriva un [`ValidationReport`] reusando el mismo universo de diagnósticos que
-//! `all_checks` (`analyze().diagnostics` + `validate_schema` + `validate_relations`). Junto con
-//! [`PlanPolicy`] y [`can_apply`] (E12-H04) decide si el plan es aplicable.
+//! Función pura [`validate_result`]: dado el `DocumentSet` hipotético resultante de un `ChangeSet`,
+//! deriva un [`ValidationReport`] reusando el mismo universo de diagnósticos que `all_checks`
+//! (`analyze().diagnostics`). Junto con [`PlanPolicy`] y [`can_apply`] (E12-H04) decide si el plan
+//! es aplicable.
 //!
 //! ## Heurística (documentada, no normativa — H02 solo fija el orden de magnitud)
 //!
@@ -41,10 +41,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::diff::{diff_snap, BodyHunk, ChangeKind};
 use crate::error::CoreError;
 use crate::model;
-use crate::schema::{
-    rel_target_repairs, relation_targets, target_type_of, validate_relations, validate_schema,
-    Schema,
-};
 use once_cell::sync::Lazy;
 use regex::{Captures, Regex};
 use serde::{Deserialize, Serialize};
@@ -149,18 +145,18 @@ fn accion(op: &NormalizedOperation) -> &'static str {
 /// heurística de renombre en el core que reusar sin inventar semántica nueva — fuera del alcance
 /// de esta historia. `relation_changes` se deriva de `links_added`/`links_removed` de cada
 /// `FileDiff` (los out-links textuales que ya computa `diff_snap`): es la aproximación más
-/// cercana a "cambió una relación" sin reimplementar la resolución de relaciones del `schema`.
+/// cercana a "cambió una relación" sin reimplementar una resolución de relaciones tipadas (que ya
+/// no existe: `§20.10`, una relación es un enlace Markdown).
 ///
 /// `diagnostics_introduced`/`diagnostics_resolved` comparan el conjunto COMPLETO de diagnósticos
-/// de cada workspace bajo `schema`: los diagnósticos de `DocumentSet::analyze().diagnostics` (`§20.9`) más
-/// `validate_schema`/`validate_relations` (E10-H07/E11-H03) — el mismo universo que ve
-/// `lodestar check`. La identidad de un check para este diff es la tupla `(targets, code, msg)`:
+/// de cada workspace: los de `DocumentSet::analyze().diagnostics` (`§20.9`) — el mismo universo que
+/// ve `lodestar check`. La identidad de un check para este diff es la tupla `(targets, code, msg)`:
 /// dos checks son "el mismo problema" si coinciden en los paths afectados, el código y el
 /// mensaje; se ignoran `id`/`range`/`related`/`fixes` (metadatos aditivos sin relevancia para
 /// "¿sigue el mismo diagnóstico?"). `diagnostics_introduced` = checks de `after` cuya clave no
 /// está en `before`; `diagnostics_resolved` = checks de `before` cuya clave no está en `after`.
 /// Se descartan los `Severity::Pass` (no son diagnósticos, son la ausencia de uno).
-pub fn semantic_diff(before: &DocumentSet, after: &DocumentSet, schema: &Schema) -> SemanticDiff {
+pub fn semantic_diff(before: &DocumentSet, after: &DocumentSet) -> SemanticDiff {
     let okf = diff_snap(before.files(), after.files());
 
     let mut created = Vec::new();
@@ -191,8 +187,8 @@ pub fn semantic_diff(before: &DocumentSet, after: &DocumentSet, schema: &Schema)
         }
     }
 
-    let before_checks = all_checks(before, schema);
-    let after_checks = all_checks(after, schema);
+    let before_checks = all_checks(before);
+    let after_checks = all_checks(after);
     let before_keys: BTreeSet<_> = before_checks.iter().map(check_key).collect();
     let after_keys: BTreeSet<_> = after_checks.iter().map(check_key).collect();
 
@@ -220,11 +216,12 @@ pub fn semantic_diff(before: &DocumentSet, after: &DocumentSet, schema: &Schema)
     }
 }
 
-/// Conjunto completo de diagnósticos de `doc_set` bajo `schema`: los de `DocumentSet::analyze` (`§20.9`)
-/// (`DocumentSet::analyze`) más las extensiones de esquema (`validate_schema`/`validate_relations`) —
-/// el mismo universo que ve `lodestar check`. Descarta `Severity::Pass`: no es un diagnóstico,
-/// es la ausencia de uno.
-fn all_checks(doc_set: &DocumentSet, schema: &Schema) -> Vec<Check> {
+/// Conjunto completo de diagnósticos de `doc_set`: los de `DocumentSet::analyze` (`§20.9`) — el
+/// mismo universo que ve `lodestar check`. Tras el retiro de `core::schema` (E20-H03) ya no hay
+/// extensiones de esquema que añadir; queda como el punto único donde el pipeline de plan reúne los
+/// diagnósticos, por si futuras historias vuelven a componer más fuentes. Descarta `Severity::Pass`:
+/// no es un diagnóstico, es la ausencia de uno.
+fn all_checks(doc_set: &DocumentSet) -> Vec<Check> {
     let mut out: Vec<Check> = doc_set
         .analyze()
         .diagnostics
@@ -232,8 +229,6 @@ fn all_checks(doc_set: &DocumentSet, schema: &Schema) -> Vec<Check> {
         .flatten()
         .cloned()
         .collect();
-    out.extend(validate_schema(doc_set, schema));
-    out.extend(validate_relations(doc_set, schema));
     out.retain(|c| c.level != Severity::Pass);
     out
 }
@@ -245,15 +240,15 @@ fn check_key(c: &Check) -> (Vec<RelPath>, CheckCode, String) {
 
 // --- E12-H04: `ValidationReport` + `PlanPolicy` -------------------------------------------
 
-/// Valida el `DocumentSet` hipotético resultante de un `ChangeSet` bajo `schema` — E12-H04.
+/// Valida el `DocumentSet` hipotético resultante de un `ChangeSet` — E12-H04.
 ///
 /// Reusa `all_checks` (el mismo universo de diagnósticos que `semantic_diff` y `lodestar
-/// check`: los diagnósticos de `DocumentSet::analyze` (`§20.9`) más `validate_schema`/`validate_relations`,
-/// sin `Severity::Pass`). `summary` cuenta por severidad; `conformant` se computa explícitamente
-/// como `summary.errors == 0` (no se reusa `ValidationSummary::default().conformant`, que sería
-/// `false` por defecto — aquí "conforme" significa "sin errores duros", con o sin warnings).
-pub fn validate_result(doc_set: &DocumentSet, schema: &Schema) -> ValidationReport {
-    let diagnostics = all_checks(doc_set, schema);
+/// check`: los diagnósticos de `DocumentSet::analyze` (`§20.9`), sin `Severity::Pass`). `summary`
+/// cuenta por severidad; `conformant` se computa explícitamente como `summary.errors == 0` (no se
+/// reusa `ValidationSummary::default().conformant`, que sería `false` por defecto — aquí "conforme"
+/// significa "sin errores duros", con o sin warnings).
+pub fn validate_result(doc_set: &DocumentSet) -> ValidationReport {
+    let diagnostics = all_checks(doc_set);
 
     let mut summary = ValidationSummary::default();
     for check in &diagnostics {
@@ -317,27 +312,22 @@ pub fn can_apply(report: &ValidationReport, policy: &PlanPolicy) -> bool {
 // Estructura (move/delete) y semántica (relaciones/status) quedan para E12-H06/H07.
 // ---------------------------------------------------------------------------
 
-/// El marcador de plantilla que `create` sustituye por el título del documento (E10-H05/E12-H05).
-const TITLE_PLACEHOLDER: &str = "{title}";
-
 /// Normaliza un `create`: resuelve el cuerpo del documento nuevo.
 ///
 /// - Si `body` es `Some`, se usa tal cual.
-/// - Si `body` es `None` y el `DocType` `doctype` (buscado en `schema`) tiene `body_template`, el
-///   cuerpo sale de esa plantilla, sustituyendo cada `{title}` por el título dado (o el derivado
-///   del path si no se pasa `title`).
-/// - Si `body` es `None` y no hay plantilla, se deja `None` (la workspace generará el heading por
-///   defecto vía [`DocumentSet::create_document`]).
+/// - Si `body` es `None`, se deja `None` (la workspace generará el heading por defecto vía
+///   [`DocumentSet::create_document`]).
 ///
-/// El `frontmatter` resuelto es el mínimo (`type` + `title`); el resto de campos (status,
-/// timestamp) los completa el escritor. Devuelve [`NormalizedOperation::Create`].
+/// Tras el retiro de `core::schema` (E20-H03) ya no hay `bodyTemplate` de `DocType` que expandir: el
+/// modelo es universal y no hay tipos declarados (`§20.10`). El `frontmatter` resuelto es el mínimo
+/// (`type` + `title`); el resto de campos (status, timestamp) los completa el escritor. Devuelve
+/// [`NormalizedOperation::Create`].
 ///
 /// # Errores
 /// No falla en esta historia (un `path` ya presente en el workspace no se rechaza aquí; esa política
 /// es de la workspace). La firma devuelve `Result` por coherencia con las otras normalizaciones.
 pub fn normalize_create(
     _workspace: &DocumentSet,
-    schema: &Schema,
     path: &RelPath,
     doctype: &str,
     title: Option<&str>,
@@ -347,14 +337,7 @@ pub fn normalize_create(
         .map(|s| s.to_string())
         .unwrap_or_else(|| model::derived_title(None, "", path));
 
-    let resolved_body = match body {
-        Some(b) => Some(b),
-        None => schema
-            .types
-            .get(doctype)
-            .and_then(|dt| dt.body_template.as_ref())
-            .map(|tpl| tpl.replace(TITLE_PLACEHOLDER, &resolved_title)),
-    };
+    let resolved_body = body;
 
     let mut fm: BTreeMap<String, Option<serde_yaml::Value>> = BTreeMap::new();
     fm.insert(
@@ -763,27 +746,35 @@ pub fn normalize_delete(
 }
 
 // ---------------------------------------------------------------------------
-// Normalización de operaciones SEMÁNTICAS (E12-H07): relaciones tipadas, ciclo de vida y fixes.
+// Normalización de operaciones SEMÁNTICAS (E12-H07): relaciones, ciclo de vida y fixes.
 //
 // A diferencia de las de estructura, resuelven SIEMPRE a un único `PatchFrontmatter` sobre el
-// documento afectado — la única verdad la dan `schema` (RelationDef/allowedStatuses, invariante #3)
-// y el frontmatter del propio documento. Todo PURO: sin I/O, sin reloj. `apply_fix` recompone el
-// mismo universo de diagnósticos que `lodestar check` para re-localizar el fix por su id estable.
+// documento afectado. Tras el retiro de `core::schema` (E20-H03) ya NO se validan contra tipos ni
+// `RelationDef`/`allowedStatuses` (el modelo es universal, `§20.10`): `add_relation`/`transition_status`
+// escriben el campo del frontmatter tal cual (Fase 12 retira estas operaciones por completo). Todo
+// PURO: sin I/O, sin reloj.
 // ---------------------------------------------------------------------------
 
-/// `type` declarado en el frontmatter del documento en `path`, o `None` si el fichero no existe,
-/// no tiene frontmatter, o no declara `type`. Reusa `model::parse_file` (la misma verdad del core).
-fn document_type(doc_set: &DocumentSet, path: &RelPath) -> Option<String> {
-    doc_set
-        .files()
-        .get(path)
-        .and_then(|raw| model::parse_file(path.as_str(), raw).frontmatter)
-        .and_then(|fm| fm.get_text("type"))
+/// Lee el campo `relation` del frontmatter como lista de paths target: acepta una secuencia YAML de
+/// `String` o un único `String` (envuelto en un vector de un elemento). `None` si el campo no está
+/// presente o su forma no es ninguna de las dos anteriores. Antes vivía en `core::schema`
+/// (`relation_targets`); tras su retiro se conserva aquí como helper local de las operaciones de
+/// relación, que no dependen del esquema.
+fn relation_targets(fm: &ParsedFrontmatter, relation: &str) -> Option<Vec<String>> {
+    match fm.get_key(relation)? {
+        serde_yaml::Value::Sequence(seq) => Some(
+            seq.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect(),
+        ),
+        serde_yaml::Value::String(s) => Some(vec![s.clone()]),
+        _ => None,
+    }
 }
 
 /// Targets actuales del campo de relación `relation` en el frontmatter de `source` (secuencia YAML
-/// o `String` único, vía `schema::relation_targets`). Vector vacío si el documento no existe, no
-/// tiene frontmatter, o el campo no está presente.
+/// o `String` único, vía [`relation_targets`]). Vector vacío si el documento no existe, no tiene
+/// frontmatter, o el campo no está presente.
 fn current_targets(doc_set: &DocumentSet, source: &RelPath, relation: &str) -> Vec<String> {
     doc_set
         .files()
@@ -809,21 +800,14 @@ fn relation_field_patch(relation: &str, targets: &[String]) -> FrontmatterPatch 
 }
 
 /// Normaliza un `add_relation`: añade `target` al campo de relación `relation` del frontmatter de
-/// `source`, validando antes contra la [`crate::schema::RelationDef`] del `DocType` de `source` —
-/// E12-H07.
+/// `source` — E12-H07.
 ///
-/// Validaciones (solo si el `DocType` de `source` declara la relación `relation`; sin `RelationDef`
-/// no hay restricción que imponer):
-/// - **Tipo del target**: si `target_types` no está vacío y el `type` de `target` es conocido y no
-///   figura en la lista → [`CoreError::RelationConstraintViolation`].
-/// - **Cardinalidad**: si `cardinality == "one"` y añadir `target` dejaría el campo con más de un
-///   target → [`CoreError::RelationConstraintViolation`].
-///
-/// Si es válida, devuelve un [`NormalizedOperation::PatchFrontmatter`] que fija el campo `relation`
-/// a los targets actuales MÁS `target` (idempotente: no duplica si ya estaba). **Puro.**
+/// Tras el retiro de `core::schema` (E20-H03) NO se valida contra tipos ni `RelationDef`: una
+/// relación es un campo de frontmatter arbitrario (`§20.10`). Devuelve un
+/// [`NormalizedOperation::PatchFrontmatter`] que fija el campo `relation` a los targets actuales MÁS
+/// `target` (idempotente: no duplica si ya estaba). **Puro.**
 pub fn normalize_add_relation(
     doc_set: &DocumentSet,
-    schema: &Schema,
     source: &RelPath,
     relation: &str,
     target: &RelPath,
@@ -832,35 +816,6 @@ pub fn normalize_add_relation(
     let already = new_targets.iter().any(|t| t == target.as_str());
     if !already {
         new_targets.push(target.as_str().to_string());
-    }
-
-    if let Some(reldef) = document_type(doc_set, source)
-        .as_deref()
-        .and_then(|tipo| schema.types.get(tipo))
-        .and_then(|dt| dt.relations.get(relation))
-    {
-        if !reldef.target_types.is_empty() {
-            if let Some(target_type) = target_type_of(doc_set, target) {
-                if !reldef.target_types.iter().any(|t| t == &target_type) {
-                    return Err(CoreError::RelationConstraintViolation(format!(
-                        "la relación «{relation}» de «{}» no admite un target de tipo «{target_type}» \
-                         (admite: {}); target «{}».",
-                        source.as_str(),
-                        reldef.target_types.join(", "),
-                        target.as_str(),
-                    )));
-                }
-            }
-        }
-
-        if reldef.cardinality == "one" && new_targets.len() > 1 {
-            return Err(CoreError::RelationConstraintViolation(format!(
-                "la relación «{relation}» de «{}» admite como máximo un target (cardinalidad \
-                 «one») pero quedaría con {}.",
-                source.as_str(),
-                new_targets.len(),
-            )));
-        }
     }
 
     Ok(NormalizedOperation::PatchFrontmatter {
@@ -873,12 +828,9 @@ pub fn normalize_add_relation(
 /// de `source` — E12-H07.
 ///
 /// Devuelve un [`NormalizedOperation::PatchFrontmatter`] que fija el campo `relation` a los targets
-/// actuales SIN `target` (idempotente: si no estaba, el campo queda igual). No valida contra la
-/// `RelationDef` — quitar una relación nunca puede violar una restricción de tipo/cardinalidad.
-/// **Puro.**
+/// actuales SIN `target` (idempotente: si no estaba, el campo queda igual). **Puro.**
 pub fn normalize_remove_relation(
     _workspace: &DocumentSet,
-    _schema: &Schema,
     source: &RelPath,
     relation: &str,
     target: &RelPath,
@@ -894,33 +846,16 @@ pub fn normalize_remove_relation(
     })
 }
 
-/// Normaliza un `transition_status`: valida `to` contra los `allowed_statuses` del `DocType` de
-/// `reference` y produce el patch de `status` — E12-H07.
+/// Normaliza un `transition_status`: produce el patch que fija `status: to` en el frontmatter de
+/// `reference` — E12-H07.
 ///
-/// Si el `DocType` de `reference` declara `allowed_statuses` no vacío y `to` no está en la lista →
-/// [`CoreError::InvalidStatusTransition`] (mismo criterio que `SCHEMA-STATUS` en `validate_schema`:
-/// una lista vacía, o un tipo sin `DocType`, no impone restricción). Si es válida, devuelve un
+/// Tras el retiro de `core::schema` (E20-H03) NO se valida `to` contra ninguna lista de estados
+/// permitidos: `status` es una propiedad de frontmatter arbitraria (`§20.10`). Devuelve un
 /// [`NormalizedOperation::PatchFrontmatter`] que fija `status: to`. **Puro.**
 pub fn normalize_transition_status(
-    doc_set: &DocumentSet,
-    schema: &Schema,
     reference: &RelPath,
     to: &str,
 ) -> Result<NormalizedOperation, CoreError> {
-    if let Some(doctype) = document_type(doc_set, reference)
-        .as_deref()
-        .and_then(|tipo| schema.types.get(tipo))
-    {
-        if !doctype.allowed_statuses.is_empty() && !doctype.allowed_statuses.iter().any(|s| s == to)
-        {
-            return Err(CoreError::InvalidStatusTransition(format!(
-                "«{to}» no es un estado permitido para «{}» (permite: {}).",
-                reference.as_str(),
-                doctype.allowed_statuses.join(", "),
-            )));
-        }
-    }
-
     let mut map = BTreeMap::new();
     map.insert(
         "status".to_string(),
@@ -936,41 +871,18 @@ pub fn normalize_transition_status(
 /// diagnósticos recomputados del workspace — E12-H07.
 ///
 /// Recompone el MISMO universo de diagnósticos que `lodestar check` (`all_checks`:
-/// `analyze().diagnostics` + `validate_schema` + `validate_relations`) y comprueba que exista un
-/// [`crate::types::Fix`] con `fix_id == fix_id` y `safe == true`; si no, falla con
-/// [`CoreError::FixNotFound`]. Localizado el fix, deriva su arreglo a partir de
-/// `schema::rel_target_repairs` (la contraparte estructurada de los fixes de relación rota,
-/// con el mismo `fix_id` estable): el único arreglo soportado en esta historia es el de una relación
-/// tipada ROTA (`REL-TARGET`), que se materializa como un [`NormalizedOperation::PatchFrontmatter`]
-/// sobre el documento origen QUITANDO el target roto de su campo de relación. Un `fix_id` sin repair
-/// asociado (fix de otra familia aún no soportada) también da [`CoreError::FixNotFound`]. **Puro.**
+/// `analyze().diagnostics`) y comprueba que exista un [`crate::types::Fix`] con `fix_id == fix_id` y
+/// `safe == true`; si no, falla con [`CoreError::FixNotFound`]. Tras el retiro de `core::schema`
+/// (E20-H03) su único productor de `Fix` (`validate_relations`/`REL-TARGET`) desapareció, así que
+/// hoy ningún diagnóstico adjunta un arreglo aplicable y `apply_fix` responde siempre
+/// [`CoreError::FixNotFound`]. La operación se conserva (Fase 12 la retira); un futuro productor de
+/// `Fix` la reactiva sin cambiar esta lógica. **Puro.**
 pub fn normalize_apply_fix(
-    doc_set: &DocumentSet,
-    schema: &Schema,
+    _doc_set: &DocumentSet,
     fix_id: &str,
 ) -> Result<NormalizedOperation, CoreError> {
-    let safe_fix_presente = all_checks(doc_set, schema)
-        .iter()
-        .flat_map(|c| &c.fixes)
-        .any(|f| f.fix_id == fix_id && f.safe);
-    if !safe_fix_presente {
-        return Err(CoreError::FixNotFound(fix_id.to_string()));
-    }
-
-    let repair = rel_target_repairs(doc_set, schema)
-        .into_iter()
-        .find(|r| r.fix_id == fix_id)
-        .ok_or_else(|| CoreError::FixNotFound(fix_id.to_string()))?;
-
-    let remaining: Vec<String> = current_targets(doc_set, &repair.source, &repair.rel_name)
-        .into_iter()
-        .filter(|t| t != &repair.target)
-        .collect();
-
-    Ok(NormalizedOperation::PatchFrontmatter {
-        path: repair.source.clone(),
-        patch: relation_field_patch(&repair.rel_name, &remaining),
-    })
+    // Sin productores de `Fix` tras E20-H03 no hay arreglo materializable: `fix_id` no resuelve.
+    Err(CoreError::FixNotFound(fix_id.to_string()))
 }
 
 // ---------------------------------------------------------------------------

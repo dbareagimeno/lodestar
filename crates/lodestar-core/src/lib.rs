@@ -22,7 +22,6 @@ pub mod metadata;
 pub mod model;
 pub mod parse;
 pub mod plan;
-pub mod schema;
 pub mod text;
 pub mod types;
 

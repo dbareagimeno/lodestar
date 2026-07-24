@@ -42,18 +42,19 @@ pub enum CoreError {
     #[error("objetivo de normalización no encontrado: {0}")]
     NormalizeTargetNotFound(String),
 
-    /// Al normalizar `add_relation`/`remove_relation` (E12-H07), la relación viola su
-    /// [`crate::schema::RelationDef`]: el `type` del target no está en `target_types` (vacío =
-    /// cualquier tipo), o la cardinalidad `"one"` se superaría. El payload es un mensaje legible
-    /// en español con el detalle del incumplimiento (documento origen, relación, target y motivo).
-    /// Mapea a `ErrorCode::RelationConstraintViolation` (wire `"RELATION_CONSTRAINT_VIOLATION"`).
+    /// Restricción de relación violada. **Sin productor desde E20-H03**: con el retiro de
+    /// `core::schema` (`§20.10`, modelo universal) `add_relation`/`remove_relation` dejan de validar
+    /// contra tipos/cardinalidad, así que esta variante ya no se construye. Se conserva para no
+    /// cambiar el catálogo de [`crate::CoreError`] (mapea a `ErrorCode::RelationConstraintViolation`)
+    /// hasta que Fase 12 retire las operaciones de relación por completo. El payload es un mensaje
+    /// legible con el detalle del incumplimiento.
     #[error("restricción de relación violada: {0}")]
     RelationConstraintViolation(String),
 
-    /// Al normalizar `transition_status` (E12-H07), el estado destino no está en los
-    /// `allowed_statuses` del `DocType` del documento (cuando esa lista no está vacía). El payload
-    /// es un mensaje legible con el estado rechazado y los permitidos. Mapea a
-    /// `ErrorCode::InvalidSchema` (precondición de lifecycle incumplida).
+    /// Transición de estado no permitida. **Sin productor desde E20-H03**: `transition_status` deja
+    /// de validar `to` contra ninguna lista de estados permitidos (`status` es una propiedad de
+    /// frontmatter arbitraria, `§20.10`). Se conserva por la misma razón que
+    /// [`Self::RelationConstraintViolation`]; mapea a `ErrorCode::InvalidSchema`.
     #[error("transición de estado no permitida: {0}")]
     InvalidStatusTransition(String),
 

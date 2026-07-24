@@ -71,25 +71,10 @@ fn checkcode_wire_con_guion() {
     assert_eq!(CheckCode::DocConflictMarker.as_str(), "DOC-CONFLICT-MARKER");
 }
 
-// --- E10-H06: extensión de `Check` + familias `SCHEMA-*` / `REL-*` -----------
+// --- E10-H06: extensión de `Check` (campos aditivos `id`/`range`/`related`/`fixes`) ----------
 //
-// Fase ROJA: las variantes `SchemaReqfield`/`RelTarget` y los campos nuevos de `Check`
-// (`id`/`range`/`related`/`fixes`) todavía NO existen en producción. Estos tests fijan
-// el WIRE de los códigos nuevos y la RETRO-COMPAT del `Check` clásico.
-
-#[test]
-fn schema_code_wire() {
-    // Criterio: `CheckCode::SchemaReqfield` → serializa `"SCHEMA-REQFIELD"`.
-    assert_eq!(
-        serde_json::to_value(CheckCode::SchemaReqfield).unwrap(),
-        serde_json::json!("SCHEMA-REQFIELD"),
-    );
-    // La familia REL-* comparte el mismo patrón de wire con guion (cubre ambas familias).
-    assert_eq!(
-        serde_json::to_value(CheckCode::RelTarget).unwrap(),
-        serde_json::json!("REL-TARGET"),
-    );
-}
+// (E20-H03: el test `schema_code_wire` de las familias `SCHEMA-*`/`REL-*` se retiró con
+// `core::schema`; esas variantes de `CheckCode` ya no existen.)
 
 #[test]
 fn check_extension_retrocompat() {
@@ -129,8 +114,8 @@ fn check_campos_nuevos_por_defecto() {
     // diseño D-CheckCode dicta.
     let c = Check::new(
         Severity::Info,
-        CheckCode::LinkRel,
-        "enlace relativo",
+        CheckCode::LinkTargetMissing,
+        "enlace roto",
         vec![],
     );
     assert!(c.id.is_none());
@@ -792,379 +777,14 @@ fn revision_sensible_al_contenido() {
 }
 
 // ---------------------------------------------------------------------------
-// E10-H05 — `core::schema`: tipo `Schema` + wire YAML camelCase.
-//
-// Fase ROJA (ARCHITECTURE.md §19.2, REFACTOR §4/§9.4): el módulo PURO `core::schema`
-// todavía NO existe. Este test fija el contrato de deserialización EN MEMORIA (el core
-// nunca abre ficheros: recibe el `Schema` ya deserializado desde un string):
-//   Schema { version: String, types: BTreeMap<String, DocType> }
-//   DocType { name, description, required_fields, allowed_statuses, fields,
-//             relations: BTreeMap<String, RelationDef>, rules, body_template }
-// El wire YAML usa claves camelCase (`requiredFields`/`allowedStatuses`/`bodyTemplate`/
-// `targetTypes`) mapeadas a los campos snake_case (mismo patrón que `WorkspaceConfig`).
+// E20-H03 — RETIRADOS: los tests de `core::schema` (E10-H05 `carga_doctype`, E10-H07
+// `falta_campo_obligatorio`/`status_no_permitido`/`sin_schema_sin_checks`, E11-H03
+// `relacion_target_roto`/`relacion_tipo_invalido`/`relacion_cardinalidad`) desaparecen con la
+// maquinaria de schema (`Schema`/`DocType`/`RelationDef`/`validate_schema`/`validate_relations`).
+// El modelo es universal (`§20.10`): no hay tipos, campos obligatorios ni relaciones tipadas que
+// validar. La inspección de metadata que los sustituye vive en `tests/` de `core::metadata`
+// (E20-H01/H02) y en `crates/lodestar-mcp/tests/mcp.rs` (E20-H03, tool `metadata_inspect`).
 // ---------------------------------------------------------------------------
-
-/// Criterio `carga_doctype`: un `Schema` con un `DocType` `decision`
-/// (`requiredFields`/`allowedStatuses`) deserializado desde YAML en memoria →
-/// `schema.types["decision"].required_fields == ["title","status","rationale"]`.
-#[test]
-fn carga_doctype() {
-    use lodestar_core::schema::Schema;
-
-    // YAML EN MEMORIA (no hay I/O: el core solo deserializa). Claves camelCase del wire.
-    let yaml = "\
-version: \"1\"
-types:
-  decision:
-    name: decision
-    description: Una decisión de arquitectura
-    requiredFields: [title, status, rationale]
-    allowedStatuses: [proposed, accepted, rejected, superseded]
-";
-
-    let schema: Schema =
-        serde_yaml::from_str(yaml).expect("un Schema válido debe deserializar desde YAML");
-
-    let decision = schema
-        .types
-        .get("decision")
-        .expect("el DocType `decision` debe existir en `schema.types`");
-
-    assert_eq!(
-        decision.required_fields,
-        vec![
-            "title".to_string(),
-            "status".to_string(),
-            "rationale".to_string()
-        ],
-        "requiredFields del wire camelCase debe mapear a `required_fields` preservando el orden"
-    );
-    assert!(
-        decision.allowed_statuses.iter().any(|s| s == "proposed"),
-        "allowedStatuses debe mapear a `allowed_statuses`; eran: {:?}",
-        decision.allowed_statuses
-    );
-}
-
-// --- E10-H07: validación schema-driven (`core::schema::validate_schema`) -----
-// Función PURA `validate_schema(&DocumentSet, &Schema) -> Vec<Check>`: por cada documento con
-// `type` conocido comprueba `required_fields` (falta → SCHEMA-REQFIELD/Err) y `status ∈
-// allowed_statuses` (fuera → SCHEMA-STATUS/Err). Aditiva: sin schema, cero checks.
-
-/// Criterio `falta_campo_obligatorio`: `DocType decision` con `requiredFields:[rationale]` y un
-/// documento `decision` SIN `rationale` → un `Check{code:SCHEMA-REQFIELD, level:Err}` sobre ese path,
-/// con `msg` no vacío que nombra el campo que falta.
-#[test]
-fn falta_campo_obligatorio() {
-    use lodestar_core::schema::{validate_schema, DocType, Schema};
-
-    // Workspace: un documento `type: decision` SIN el campo obligatorio `rationale`.
-    let b = DocumentSet::from_files(fm(&[(
-        "d.md",
-        "---\ntype: decision\ntitle: Migrar a Rust\nstatus: proposed\n---\n\n# H\n\ncuerpo\n",
-    )]));
-
-    // Schema: el `DocType decision` exige `rationale`.
-    let mut schema = Schema::default();
-    schema.types.insert(
-        "decision".to_string(),
-        DocType {
-            name: "decision".to_string(),
-            required_fields: vec!["rationale".to_string()],
-            ..DocType::default()
-        },
-    );
-
-    let checks = validate_schema(&b, &schema);
-
-    let path = RelPath::new("d.md").unwrap();
-    let reqfield = checks
-        .iter()
-        .find(|c| c.code == CheckCode::SchemaReqfield)
-        .expect("falta `rationale` → debe emitirse un Check SCHEMA-REQFIELD");
-    assert_eq!(
-        reqfield.level,
-        Severity::Err,
-        "un campo obligatorio ausente es un error duro"
-    );
-    assert!(
-        reqfield.targets.contains(&path),
-        "el check debe apuntar al path del documento; targets: {:?}",
-        reqfield.targets
-    );
-    assert!(
-        !reqfield.msg.is_empty(),
-        "el msg del check no debe ser vacío"
-    );
-    assert!(
-        reqfield.msg.contains("rationale"),
-        "el msg debe nombrar el campo que falta; msg: {:?}",
-        reqfield.msg
-    );
-}
-
-/// Criterio `status_no_permitido`: un documento con `status: invented` fuera de `allowedStatuses`
-/// → `Check{code:SCHEMA-STATUS, level:Err}` con `msg` no vacío que nombra el status inválido.
-/// `required_fields` se deja VACÍO para aislar este criterio del de campos obligatorios.
-#[test]
-fn status_no_permitido() {
-    use lodestar_core::schema::{validate_schema, DocType, Schema};
-
-    // Documento con `status: invented`, fuera de los estados permitidos.
-    let b = DocumentSet::from_files(fm(&[(
-        "d.md",
-        "---\ntype: decision\ntitle: X\nstatus: invented\n---\n\n# H\n\ncuerpo\n",
-    )]));
-
-    // Schema: `required_fields` VACÍO (aísla el criterio); solo restringe `status`.
-    let mut schema = Schema::default();
-    schema.types.insert(
-        "decision".to_string(),
-        DocType {
-            name: "decision".to_string(),
-            required_fields: Vec::new(),
-            allowed_statuses: vec!["proposed".to_string(), "accepted".to_string()],
-            ..DocType::default()
-        },
-    );
-
-    let checks = validate_schema(&b, &schema);
-
-    let status = checks
-        .iter()
-        .find(|c| c.code == CheckCode::SchemaStatus)
-        .expect(
-            "`status: invented` fuera de allowedStatuses → debe emitirse un Check SCHEMA-STATUS",
-        );
-    assert_eq!(
-        status.level,
-        Severity::Err,
-        "un status fuera del lifecycle declarado es un error duro"
-    );
-    assert!(!status.msg.is_empty(), "el msg del check no debe ser vacío");
-    assert!(
-        status.msg.contains("invented"),
-        "el msg debe nombrar el status no permitido; msg: {:?}",
-        status.msg
-    );
-}
-
-/// Criterio `sin_schema_sin_checks`: el mismo workspace validado contra `Schema::default()` (doc_set
-/// sin `schema.yaml`) NO produce ningún check schema-driven (compat con workspaces OKF actuales).
-#[test]
-fn sin_schema_sin_checks() {
-    use lodestar_core::schema::{validate_schema, Schema};
-
-    let b = DocumentSet::from_files(fm(&[(
-        "d.md",
-        "---\ntype: decision\ntitle: X\nstatus: invented\n---\n\n# H\n\ncuerpo\n",
-    )]));
-
-    let checks = validate_schema(&b, &Schema::default());
-
-    assert_eq!(
-        checks,
-        Vec::<Check>::new(),
-        "un workspace sin schema no debe producir checks schema-driven"
-    );
-}
-
-// --- E11-H03: relaciones tipadas (`core::schema::validate_relations`) ---------
-//
-// Función PURA aún NO implementada (fase roja — compila-falla porque `validate_relations`
-// no existe todavía en `crates/lodestar-core/src/schema.rs`). Firma asumida (paralela a
-// `validate_schema` de E10-H07):
-//
-//   pub fn validate_relations(doc_set: &DocumentSet, schema: &Schema) -> Vec<Check>;
-//
-// Por cada documento cuyo `type` está declarado en el schema, y por cada relación declarada en
-// su `DocType.relations` (BTreeMap<nombre, RelationDef>), lee el campo del frontmatter con ese
-// NOMBRE (vive en `Frontmatter.extra`, valor = secuencia YAML de paths target) y comprueba:
-//   1. target existe como documento del workspace → si no, `CheckCode::RelTarget` (Err).
-//   2. el `type` del target ∈ `RelationDef.target_types` (vacío = cualquiera) → si no,
-//      `CheckCode::RelType` (Err).
-//   3. nº de targets respeta `RelationDef.cardinality` ("one" ⇒ máx. 1) → si no,
-//      `CheckCode::RelCard` (Err).
-// Cada `Check` con `level: Err`, `msg` en español no vacío, `targets` = [path del documento
-// origen] y `range` al campo de la relación. Los paths target del frontmatter se representan
-// como el `RelPath` del fichero destino tal cual (p. ej. `capitulo.md`), sin barra inicial.
-
-/// Criterio `relacion_target_roto`: una relación `appears_in` a un target inexistente →
-/// `Check{code:REL-TARGET, level:Err}` sobre el documento origen, con `msg` no vacío y `range`
-/// presente (acota el campo de la relación).
-#[test]
-fn relacion_target_roto() {
-    use lodestar_core::schema::{validate_relations, DocType, RelationDef, Schema};
-
-    // Documento `character` con `appears_in` a un capítulo que no existe en el workspace.
-    let b = DocumentSet::from_files(fm(&[(
-        "juan.md",
-        "---\ntype: character\ntitle: Juan\nappears_in:\n  - capitulo_fantasma.md\n---\n\n# Juan\n\ncuerpo\n",
-    )]));
-
-    // Schema: `character.appears_in` apunta a tipos `chapter`, cardinalidad libre (`many`).
-    let mut schema = Schema::default();
-    schema.types.insert(
-        "character".to_string(),
-        DocType {
-            name: "character".to_string(),
-            relations: BTreeMap::from([(
-                "appears_in".to_string(),
-                RelationDef {
-                    target_types: vec!["chapter".to_string()],
-                    cardinality: "many".to_string(),
-                },
-            )]),
-            ..DocType::default()
-        },
-    );
-
-    let checks = validate_relations(&b, &schema);
-
-    let path = RelPath::new("juan.md").unwrap();
-    let target = checks
-        .iter()
-        .find(|c| c.code == CheckCode::RelTarget)
-        .expect("una relación a un target inexistente → debe emitirse un Check REL-TARGET");
-    assert_eq!(
-        target.level,
-        Severity::Err,
-        "una relación a un target inexistente es un error duro"
-    );
-    assert!(
-        target.targets.contains(&path),
-        "el check debe apuntar al documento origen; targets: {:?}",
-        target.targets
-    );
-    assert!(!target.msg.is_empty(), "el msg del check no debe ser vacío");
-    assert!(
-        target.range.is_some(),
-        "el check debe acotar el campo de la relación con un `range`"
-    );
-}
-
-/// Criterio `relacion_tipo_invalido`: una relación a un documento cuyo `type` NO está en
-/// `RelationDef.target_types` → `Check{code:REL-TYPE, level:Err}` sobre el documento origen, con
-/// `msg` no vacío. El target EXISTE y la cardinalidad se respeta (aísla el criterio del tipo).
-#[test]
-fn relacion_tipo_invalido() {
-    use lodestar_core::schema::{validate_relations, DocType, RelationDef, Schema};
-
-    // `juan` (character) → appears_in `espada` (type item), pero `appears_in` solo admite `chapter`.
-    let b = DocumentSet::from_files(fm(&[
-        (
-            "juan.md",
-            "---\ntype: character\ntitle: Juan\nappears_in:\n  - espada.md\n---\n\n# Juan\n\ncuerpo\n",
-        ),
-        (
-            "espada.md",
-            "---\ntype: item\ntitle: Espada\n---\n\n# Espada\n\ncuerpo\n",
-        ),
-    ]));
-
-    let mut schema = Schema::default();
-    for t in ["chapter", "item"] {
-        schema.types.insert(
-            t.to_string(),
-            DocType {
-                name: t.to_string(),
-                ..DocType::default()
-            },
-        );
-    }
-    schema.types.insert(
-        "character".to_string(),
-        DocType {
-            name: "character".to_string(),
-            relations: BTreeMap::from([(
-                "appears_in".to_string(),
-                RelationDef {
-                    target_types: vec!["chapter".to_string()],
-                    cardinality: "many".to_string(),
-                },
-            )]),
-            ..DocType::default()
-        },
-    );
-
-    let checks = validate_relations(&b, &schema);
-
-    let path = RelPath::new("juan.md").unwrap();
-    let tipo = checks
-        .iter()
-        .find(|c| c.code == CheckCode::RelType)
-        .expect("un target de `type` no permitido → debe emitirse un Check REL-TYPE");
-    assert_eq!(
-        tipo.level,
-        Severity::Err,
-        "un target de tipo no permitido es un error duro"
-    );
-    assert!(
-        tipo.targets.contains(&path),
-        "el check debe apuntar al documento origen; targets: {:?}",
-        tipo.targets
-    );
-    assert!(!tipo.msg.is_empty(), "el msg del check no debe ser vacío");
-}
-
-/// Criterio `relacion_cardinalidad`: una relación de cardinalidad `one` con DOS targets →
-/// `Check{code:REL-CARD, level:Err}` sobre el documento origen, con `msg` no vacío. Ambos targets
-/// existen y son de tipo válido (`target_types` vacío = cualquiera) para aislar el criterio.
-#[test]
-fn relacion_cardinalidad() {
-    use lodestar_core::schema::{validate_relations, DocType, RelationDef, Schema};
-
-    // `mentor` es cardinalidad "one" pero `juan` declara DOS mentores (ambos existen, tipo libre).
-    let b = DocumentSet::from_files(fm(&[
-        (
-            "juan.md",
-            "---\ntype: character\ntitle: Juan\nmentor:\n  - pedro.md\n  - ana.md\n---\n\n# Juan\n\ncuerpo\n",
-        ),
-        (
-            "pedro.md",
-            "---\ntype: character\ntitle: Pedro\n---\n\n# Pedro\n\ncuerpo\n",
-        ),
-        (
-            "ana.md",
-            "---\ntype: character\ntitle: Ana\n---\n\n# Ana\n\ncuerpo\n",
-        ),
-    ]));
-
-    let mut schema = Schema::default();
-    schema.types.insert(
-        "character".to_string(),
-        DocType {
-            name: "character".to_string(),
-            relations: BTreeMap::from([(
-                "mentor".to_string(),
-                RelationDef {
-                    target_types: Vec::new(),
-                    cardinality: "one".to_string(),
-                },
-            )]),
-            ..DocType::default()
-        },
-    );
-
-    let checks = validate_relations(&b, &schema);
-
-    let path = RelPath::new("juan.md").unwrap();
-    let card = checks
-        .iter()
-        .find(|c| c.code == CheckCode::RelCard)
-        .expect("cardinalidad `one` con dos targets → debe emitirse un Check REL-CARD");
-    assert_eq!(
-        card.level,
-        Severity::Err,
-        "exceder la cardinalidad declarada es un error duro"
-    );
-    assert!(
-        card.targets.contains(&path),
-        "el check debe apuntar al documento origen; targets: {:?}",
-        card.targets
-    );
-    assert!(!card.msg.is_empty(), "el msg del check no debe ser vacío");
-}
 
 // --- E11-H02: graph_query estructural (path_between / cycles / components) ----
 //
@@ -1585,8 +1205,6 @@ fn riesgo_bajo_aislado() {
 /// computa el diff, **Entonces** `created` contiene A y `modified` contiene B.
 #[test]
 fn diff_created_modified() {
-    use lodestar_core::schema::Schema;
-
     let a = RelPath::new("a.md").unwrap();
     let b = RelPath::new("b.md").unwrap();
 
@@ -1606,7 +1224,7 @@ fn diff_created_modified() {
         ),
     ]));
 
-    let diff = lodestar_core::plan::semantic_diff(&before, &after, &Schema::default());
+    let diff = lodestar_core::plan::semantic_diff(&before, &after);
 
     assert!(
         diff.created.contains(&a),
@@ -1620,136 +1238,109 @@ fn diff_created_modified() {
     );
 }
 
-/// Criterio `diff_resuelve_diagnostico`: **Dado** un plan que corrige un `SCHEMA-REQFIELD` (añade
-/// el campo obligatorio ausente), **Cuando** se computa el diff, **Entonces** ese diagnóstico
-/// aparece en `diagnosticsResolved`.
+/// Criterio `diff_resuelve_diagnostico` (RECOMPUESTO E20-H03): **Dado** un plan que corrige un
+/// enlace roto (`LINK-TARGET-MISSING`, código vivo de `§20.9` que sustituye al retirado
+/// `SCHEMA-REQFIELD`), **Cuando** se computa el diff, **Entonces** ese diagnóstico aparece en
+/// `diagnosticsResolved`.
 #[test]
 fn diff_resuelve_diagnostico() {
-    use lodestar_core::schema::{DocType, Schema};
-
-    // Schema: el `DocType decision` exige el campo obligatorio `rationale`.
-    let mut schema = Schema::default();
-    schema.types.insert(
-        "decision".to_string(),
-        DocType {
-            name: "decision".to_string(),
-            required_fields: vec!["rationale".to_string()],
-            ..DocType::default()
-        },
-    );
-
-    // `before`: `d.md` (decision) SIN `rationale` → viola SCHEMA-REQFIELD.
+    // `before`: `d.md` enlaza a un `.md` inexistente → `LINK-TARGET-MISSING` (Err).
     let before = DocumentSet::from_files(fm(&[(
         "d.md",
-        "---\ntype: decision\ntitle: Migrar\nstatus: proposed\n---\n\n# H\n\ncuerpo\n",
+        "---\ntype: decision\ntitle: Migrar\nstatus: proposed\n---\n\n# H\n\n[roto](no-existe.md)\n",
     )]));
-    // `after`: el mismo documento CON `rationale` → deja de violar SCHEMA-REQFIELD.
+    // `after`: el mismo documento SIN el enlace roto → deja de violar `LINK-TARGET-MISSING`.
     let after = DocumentSet::from_files(fm(&[(
         "d.md",
-        "---\ntype: decision\ntitle: Migrar\nstatus: proposed\nrationale: porque sí\n---\n\n# H\n\ncuerpo\n",
+        "---\ntype: decision\ntitle: Migrar\nstatus: proposed\n---\n\n# H\n\ncuerpo sin enlaces\n",
     )]));
 
     // Precondición del fixture: `before` viola el requisito y `after` lo cumple (aísla el criterio).
-    use lodestar_core::schema::validate_schema;
     assert!(
-        validate_schema(&before, &schema)
-            .iter()
-            .any(|c| c.code == CheckCode::SchemaReqfield),
-        "el fixture `before` debe violar SCHEMA-REQFIELD",
+        before
+            .analyze()
+            .diagnostics
+            .values()
+            .flatten()
+            .any(|c| c.code == CheckCode::LinkTargetMissing),
+        "el fixture `before` debe tener un LINK-TARGET-MISSING",
     );
     assert!(
-        !validate_schema(&after, &schema)
-            .iter()
-            .any(|c| c.code == CheckCode::SchemaReqfield),
-        "el fixture `after` debe corregir SCHEMA-REQFIELD",
+        after
+            .analyze()
+            .diagnostics
+            .values()
+            .flatten()
+            .all(|c| c.code != CheckCode::LinkTargetMissing),
+        "el fixture `after` debe corregir el LINK-TARGET-MISSING",
     );
 
-    let diff = lodestar_core::plan::semantic_diff(&before, &after, &schema);
+    let diff = lodestar_core::plan::semantic_diff(&before, &after);
 
     assert!(
         diff.diagnostics_resolved
             .iter()
-            .any(|c| c.code == CheckCode::SchemaReqfield),
-        "el `SCHEMA-REQFIELD` corregido debe aparecer en `diagnostics_resolved`; resolved = {:?}",
+            .any(|c| c.code == CheckCode::LinkTargetMissing),
+        "el `LINK-TARGET-MISSING` corregido debe aparecer en `diagnostics_resolved`; resolved = {:?}",
         diff.diagnostics_resolved,
     );
 }
 
-/// Criterio `diff_introduce_diagnostico`: **Dado** un plan que rompe una relación (target
-/// existente pasa a inexistente), **Cuando** se computa el diff, **Entonces** el diagnóstico
-/// `REL-TARGET`/`REL-TYPE` aparece en `diagnosticsIntroduced`.
+/// Criterio `diff_introduce_diagnostico` (RECOMPUESTO E20-H03): **Dado** un plan que rompe un enlace
+/// (target existente pasa a inexistente), **Cuando** se computa el diff, **Entonces** el diagnóstico
+/// `LINK-TARGET-MISSING` (código vivo, sustituye a `REL-TARGET`/`REL-TYPE`) aparece en
+/// `diagnosticsIntroduced`.
 #[test]
 fn diff_introduce_diagnostico() {
-    use lodestar_core::schema::{DocType, RelationDef, Schema};
-
-    // Schema: `character.appears_in` apunta a tipos `chapter`, cardinalidad libre (`many`).
-    let mut schema = Schema::default();
-    schema.types.insert(
-        "chapter".to_string(),
-        DocType {
-            name: "chapter".to_string(),
-            ..DocType::default()
-        },
-    );
-    schema.types.insert(
-        "character".to_string(),
-        DocType {
-            name: "character".to_string(),
-            relations: BTreeMap::from([(
-                "appears_in".to_string(),
-                RelationDef {
-                    target_types: vec!["chapter".to_string()],
-                    cardinality: "many".to_string(),
-                },
-            )]),
-            ..DocType::default()
-        },
-    );
-
-    // `cap.md` (chapter) existe en ambos estados; solo cambia el target de la relación de `juan`.
+    // `cap.md` existe en ambos estados; solo cambia el enlace del cuerpo de `juan`.
     let cap = (
         "cap.md",
         "---\ntype: chapter\ntitle: Capitulo\n---\n\n# Capitulo\n\ncuerpo\n",
     );
-    // `before`: `juan.appears_in` → `cap.md` (existe, tipo válido): relación conforme.
+    // `before`: `juan` enlaza a `cap.md` (existe): enlace conforme.
     let before = DocumentSet::from_files(fm(&[
         (
             "juan.md",
-            "---\ntype: character\ntitle: Juan\nappears_in:\n  - cap.md\n---\n\n# Juan\n\ncuerpo\n",
+            "---\ntype: character\ntitle: Juan\n---\n\n# Juan\n\n[cap](cap.md)\n",
         ),
         cap,
     ]));
-    // `after`: `juan.appears_in` → `capitulo_fantasma.md` (inexistente): rompe la relación.
+    // `after`: `juan` enlaza a `capitulo_fantasma.md` (inexistente): rompe el enlace.
     let after = DocumentSet::from_files(fm(&[
         (
             "juan.md",
-            "---\ntype: character\ntitle: Juan\nappears_in:\n  - capitulo_fantasma.md\n---\n\n# Juan\n\ncuerpo\n",
+            "---\ntype: character\ntitle: Juan\n---\n\n# Juan\n\n[cap](capitulo_fantasma.md)\n",
         ),
         cap,
     ]));
 
-    // Precondición: `before` no rompe la relación y `after` sí (aísla el criterio).
-    use lodestar_core::schema::validate_relations;
+    // Precondición: `before` no rompe el enlace y `after` sí (aísla el criterio).
     assert!(
-        !validate_relations(&before, &schema)
-            .iter()
-            .any(|c| c.code == CheckCode::RelTarget || c.code == CheckCode::RelType),
-        "el fixture `before` debe tener la relación conforme",
+        before
+            .analyze()
+            .diagnostics
+            .values()
+            .flatten()
+            .all(|c| c.code != CheckCode::LinkTargetMissing),
+        "el fixture `before` debe tener el enlace conforme",
     );
     assert!(
-        validate_relations(&after, &schema)
-            .iter()
-            .any(|c| c.code == CheckCode::RelTarget || c.code == CheckCode::RelType),
-        "el fixture `after` debe romper la relación",
+        after
+            .analyze()
+            .diagnostics
+            .values()
+            .flatten()
+            .any(|c| c.code == CheckCode::LinkTargetMissing),
+        "el fixture `after` debe romper el enlace",
     );
 
-    let diff = lodestar_core::plan::semantic_diff(&before, &after, &schema);
+    let diff = lodestar_core::plan::semantic_diff(&before, &after);
 
     assert!(
         diff.diagnostics_introduced
             .iter()
-            .any(|c| c.code == CheckCode::RelTarget || c.code == CheckCode::RelType),
-        "la relación rota debe aparecer como `REL-TARGET`/`REL-TYPE` en `diagnostics_introduced`; \
+            .any(|c| c.code == CheckCode::LinkTargetMissing),
+        "el enlace roto debe aparecer como `LINK-TARGET-MISSING` en `diagnostics_introduced`; \
          introduced = {:?}",
         diff.diagnostics_introduced,
     );
@@ -1786,42 +1377,33 @@ fn diff_introduce_diagnostico() {
 // Los tests aseveran PROPIEDADES (conformidad, conteos, decisión de la política), nunca la
 // representación interna ni el orden de los diagnósticos.
 
-/// Criterio `plan_no_conforme_rechaza`: **Dado** un plan cuyo resultado introduce un `Err` (un
-/// documento `decision` sin el campo obligatorio `rationale` → `SCHEMA-REQFIELD`/Err) y
-/// `policy.requireConformantResult:true`, **Cuando** se valida, **Entonces** `conformant:false` y
-/// el plan NO es aplicable (`can_apply == false`).
-/// (Benchmark §17: "Crear un documento sin campo obligatorio → plan rechazado".)
+/// Criterio `plan_no_conforme_rechaza` (RECOMPUESTO E20-H03): **Dado** un plan cuyo resultado
+/// introduce un `Err` (un documento con un enlace a un `.md` inexistente → `LINK-TARGET-MISSING`/Err,
+/// código vivo que sustituye a `SCHEMA-REQFIELD`) y `policy.requireConformantResult:true`, **Cuando**
+/// se valida, **Entonces** `conformant:false` y el plan NO es aplicable (`can_apply == false`).
+/// (Benchmark §17: "un resultado no conforme → plan rechazado".)
 #[test]
 fn plan_no_conforme_rechaza() {
     use lodestar_core::plan::{can_apply, validate_result, PlanPolicy};
-    use lodestar_core::schema::{validate_schema, DocType, Schema};
 
-    // Schema: el `DocType decision` exige el campo obligatorio `rationale`.
-    let mut schema = Schema::default();
-    schema.types.insert(
-        "decision".to_string(),
-        DocType {
-            name: "decision".to_string(),
-            required_fields: vec!["rationale".to_string()],
-            ..DocType::default()
-        },
-    );
-
-    // DocumentSet hipotético resultante del plan: un documento `decision` SIN `rationale` → Err duro.
+    // DocumentSet hipotético resultante del plan: un documento con un enlace roto → Err duro.
     let hipotetico = DocumentSet::from_files(fm(&[(
         "d.md",
-        "---\ntype: decision\ntitle: Migrar a Rust\nstatus: proposed\n---\n\n# H\n\ncuerpo\n",
+        "---\ntype: decision\ntitle: Migrar a Rust\nstatus: proposed\n---\n\n# H\n\n[roto](no-existe.md)\n",
     )]));
 
-    // Precondición del fixture: el resultado hipotético viola SCHEMA-REQFIELD (aísla el criterio).
+    // Precondición del fixture: el resultado hipotético introduce un LINK-TARGET-MISSING/Err.
     assert!(
-        validate_schema(&hipotetico, &schema)
-            .iter()
-            .any(|c| c.code == CheckCode::SchemaReqfield && c.level == Severity::Err),
-        "el workspace hipotético debe introducir un `SCHEMA-REQFIELD`/Err",
+        hipotetico
+            .analyze()
+            .diagnostics
+            .values()
+            .flatten()
+            .any(|c| c.code == CheckCode::LinkTargetMissing && c.level == Severity::Err),
+        "el workspace hipotético debe introducir un `LINK-TARGET-MISSING`/Err",
     );
 
-    let report = validate_result(&hipotetico, &schema);
+    let report = validate_result(&hipotetico);
 
     assert!(
         report.summary.errors >= 1,
@@ -1851,12 +1433,11 @@ fn plan_no_conforme_rechaza() {
 #[test]
 fn plan_warnings_permitido() {
     use lodestar_core::plan::{can_apply, validate_result, PlanPolicy};
-    use lodestar_core::schema::Schema;
 
     // MIGRADO en E16-H05: el fixture disparaba `FMT-TAGS`/Warn con `tags` como escalar, y ese
     // código se retiró — el catálogo mínimo de `§20.9` no tiene HOY ningún productor de `Warn`
-    // dentro de `all_checks` (los tres códigos vivos de `conform` son `Err`, y `LINK-STUB`/
-    // `LINK-REL` son `Info`). Así que el criterio se prueba en dos mitades:
+    // dentro de `all_checks` (los códigos vivos de documento son `Err`). Así que el criterio se
+    // prueba en dos mitades:
     //   (a) sobre un workspace real: sin errores → conforme y aplicable;
     //   (b) sobre un `ValidationReport` construido a mano con warnings: es la ÚNICA forma de
     //       ejercitar hoy la rama `allowWarnings` de `can_apply`, y sigue siendo el contrato que
@@ -1873,7 +1454,7 @@ fn plan_warnings_permitido() {
         "el workspace hipotético no debe tener ningún Err",
     );
 
-    let report = validate_result(&hipotetico, &Schema::default());
+    let report = validate_result(&hipotetico);
 
     assert_eq!(
         report.summary.errors, 0,
@@ -1969,72 +1550,10 @@ fn cuerpo_resuelto(op: &NormalizedOperation) -> &str {
     }
 }
 
-/// Criterio `create_usa_plantilla`: **Dado** un `create` SIN body para un `DocType` con
-/// `bodyTemplate`, **Cuando** se normaliza, **Entonces** el cuerpo sale de la plantilla (con
-/// `{title}` sustituido). Se aseveran PROPIEDADES (el cuerpo lleva el marcador distintivo de la
-/// plantilla, sustituye el título y no deja el placeholder crudo), no el texto exacto.
-#[test]
-fn create_usa_plantilla() {
-    use lodestar_core::schema::{DocType, Schema};
-
-    // Workspace mínimo (solo el index raíz): el documento a crear todavía no existe.
-    let b = DocumentSet::from_files(fm(&[(
-        "index.md",
-        "---\ntype: Index\ntitle: Bundle\ndescription: Índice del bundle\nokf_version: \"0.1\"\n---\n\n# B\n",
-    )]));
-
-    // Schema: el `DocType decision` trae una `bodyTemplate` con un marcador inequívoco y `{title}`.
-    let mut schema = Schema::default();
-    schema.types.insert(
-        "decision".to_string(),
-        DocType {
-            name: "decision".to_string(),
-            body_template: Some(
-                "## Contexto\n\nDecisión sobre {title}.\n\n## Consecuencias\n".to_string(),
-            ),
-            ..DocType::default()
-        },
-    );
-
-    let path = RelPath::new("decisiones/usar-rust.md").unwrap();
-    let op = match lodestar_core::plan::normalize_create(
-        &b,
-        &schema,
-        &path,
-        "decision",
-        Some("Usar Rust"),
-        None, // sin body ⇒ debe salir de la plantilla
-    ) {
-        Ok(op) => op,
-        Err(_) => panic!("crear un documento con plantilla válida no debe fallar la normalización"),
-    };
-
-    let NormalizedOperation::Create {
-        path: create_path,
-        body,
-        ..
-    } = &op
-    else {
-        panic!("`create` debe normalizarse a `NormalizedOperation::Create`, fue {op:?}");
-    };
-    assert_eq!(create_path, &path, "el path resuelto debe ser el pedido");
-
-    let cuerpo = body
-        .as_ref()
-        .expect("`create` sin body sobre un DocType con plantilla debe rellenar `body: Some(..)`");
-    assert!(
-        cuerpo.contains("## Contexto"),
-        "el cuerpo debe provenir de la plantilla (marcador `## Contexto`); cuerpo = {cuerpo:?}",
-    );
-    assert!(
-        cuerpo.contains("Usar Rust"),
-        "la plantilla debe sustituir `{{title}}` por el título; cuerpo = {cuerpo:?}",
-    );
-    assert!(
-        !cuerpo.contains("{title}"),
-        "el placeholder `{{title}}` no debe quedar crudo en el cuerpo; cuerpo = {cuerpo:?}",
-    );
-}
+// E20-H03 — RETIRADO `create_usa_plantilla`: `bodyTemplate` era un campo de `DocType`
+// (`core::schema`), que desaparece con el modelo universal (`§20.10`). `normalize_create` ya no
+// expande plantillas; `body: None` deja el cuerpo en `None` (lo cubre `escenario_02_crear_valido`
+// del benchmark, que crea un documento sin plantilla).
 
 /// Criterio `replace_text_ocurrencias`: **Dado** `replace_text` con `expectedOccurrences:1` y 2
 /// coincidencias, **Cuando** se normaliza, **Entonces** error (no aplica). Se añade un control
@@ -2490,254 +2009,14 @@ fn delete_remove_links() {
     }
 }
 
-// --- E12-H07: Normalización de operaciones SEMÁNTICAS -------------------------
-// (`add_relation` / `remove_relation` / `transition_status` / `apply_fix`)
-//
-// Fase ROJA: los normalizadores puros SEMÁNTICOS todavía NO existen en producción. Ubicación
-// ASUMIDA: el módulo `lodestar_core::plan` (junto a `normalize_create`/`normalize_move`/… — es
-// normalización de plan, y el core es puro, invariante #2). A diferencia de las de estructura,
-// estas producen la ESCRITURA CONCRETA ya resuelta (un `PatchFrontmatter`), siguiendo el mismo
-// criterio que E12-H05 (`normalize_edit_section` resuelve a `ReplaceBody`): las variantes
-// `AddRelation`/`RemoveRelation`/`TransitionStatus`/`ApplyFix` del enum son ops de ALTO NIVEL; el
-// normalizador las baja a la escritura resuelta que aplicará el único escritor.
-//
-// Firmas ASUMIDAS (documentadas por el autor de tests; vinculan al implementador):
-//
-//   pub fn normalize_add_relation(
-//       doc_set: &DocumentSet, schema: &Schema,
-//       source: &RelPath, relation: &str, target: &RelPath,
-//   ) -> Result<NormalizedOperation, CoreError>;
-//   pub fn normalize_remove_relation(
-//       doc_set: &DocumentSet, schema: &Schema,
-//       source: &RelPath, relation: &str, target: &RelPath,
-//   ) -> Result<NormalizedOperation, CoreError>;
-//   pub fn normalize_transition_status(
-//       doc_set: &DocumentSet, schema: &Schema, reference: &RelPath, to: &str,
-//   ) -> Result<NormalizedOperation, CoreError>;
-//   pub fn normalize_apply_fix(
-//       doc_set: &DocumentSet, schema: &Schema, fix_id: &str,
-//   ) -> Result<NormalizedOperation, CoreError>;
-//
-// Contrato que estos tests fijan:
-//   * `normalize_add_relation` valida el target contra la `RelationDef` del `DocType` del `source`
-//     (el `type` del target ∈ `RelationDef.target_types`, la cardinalidad no se viola). Si viola,
-//     `Err` de la variante de `CoreError` que mapea a `ErrorCode::RelationConstraintViolation`
-//     (wire "RELATION_CONSTRAINT_VIOLATION", ya definido en `types.rs`). Como hoy `CoreError` NO
-//     tiene esa variante, el implementador debe añadirla con ese nombre
-//     (`CoreError::RelationConstraintViolation`). La aserción es AGNÓSTICA al payload: comprueba
-//     que el nombre de la variante aparece en el `Debug` del error.
-//   * `normalize_transition_status` valida `to` contra `allowed_statuses` del `DocType` del `ref`.
-//     Si `to` no está permitido → `Err` (rechazo; la spec no fija un wire concreto, así que solo
-//     se exige `is_err`). Si está permitido → `Ok(PatchFrontmatter{ status: to })` (discriminador
-//     contra un stub que siempre falle).
-//   * `normalize_apply_fix` recomputa los diagnósticos del workspace bajo el schema (analyze +
-//     validate_schema + validate_relations) y materializa el `Fix` `safe` cuyo `fix_id` casa.
-//
-// DIAGNÓSTICO FIXABLE ASUMIDO (decisión del autor, documentada para el implementador):
-//   El diagnóstico `REL-TARGET` de una relación tipada ROTA (un target que no existe como
-//   documento) debe emitir un `Fix { fix_id, title, safe: true }` cuyo arreglo es «quitar la
-//   relación rota». El `fix_id` es estable (derivable del diagnóstico). `normalize_apply_fix`
-//   resuelve ese fix a un `PatchFrontmatter` sobre el documento origen que QUITA el target roto del
-//   campo de la relación (deja de referenciarlo). El test obtiene el `fix_id` recomputando
-//   `validate_relations` y leyendo `check.fixes[].fix_id` del primer fix `safe`; hoy los checks NO
-//   emiten fixes, así que el implementador debe hacer que `validate_relations` adjunte ese `Fix`.
-//
-// Hasta que E12-H07 defina los normalizadores (y el `Fix` de `REL-TARGET`), estos tres tests hacen
-// ROJO por SÍMBOLO AUSENTE (compile-fail: `plan::normalize_add_relation` /
-// `plan::normalize_transition_status` / `plan::normalize_apply_fix` — y la variante de error — no
-// existen), lo que impide compilar el binario de tests del crate. Es el rojo esperado.
-
-/// Criterio `add_relation_invalida`: **Dado** `add_relation` que viola la `RelationDef` (el `type`
-/// del target no está en `target_types`), **Cuando** se normaliza, **Entonces**
-/// `RELATION_CONSTRAINT_VIOLATION`.
-///
-/// Fixture aislado en el TIPO: `mentor` es cardinalidad `many` con `target_types:[character]`, así
-/// que añadir un target de tipo `item` viola SOLO la restricción de tipo (no la cardinalidad).
-#[test]
-fn add_relation_invalida() {
-    use lodestar_core::schema::{DocType, RelationDef, Schema};
-
-    // Guarda de coherencia con `types.rs`: el `ErrorCode` esperado mapea a este wire.
-    assert_eq!(
-        ErrorCode::RelationConstraintViolation.as_str(),
-        "RELATION_CONSTRAINT_VIOLATION"
-    );
-
-    // `heroe` (character) quiere añadir `mentor -> espada`, pero `espada` es `item`, no `character`.
-    let b = DocumentSet::from_files(fm(&[
-        (
-            "heroe.md",
-            "---\ntype: character\ntitle: Heroe\n---\n\n# Heroe\n\ncuerpo\n",
-        ),
-        (
-            "espada.md",
-            "---\ntype: item\ntitle: Espada\n---\n\n# Espada\n\ncuerpo\n",
-        ),
-    ]));
-
-    let mut schema = Schema::default();
-    schema.types.insert(
-        "item".to_string(),
-        DocType {
-            name: "item".to_string(),
-            ..DocType::default()
-        },
-    );
-    schema.types.insert(
-        "character".to_string(),
-        DocType {
-            name: "character".to_string(),
-            relations: BTreeMap::from([(
-                "mentor".to_string(),
-                RelationDef {
-                    target_types: vec!["character".to_string()],
-                    cardinality: "many".to_string(),
-                },
-            )]),
-            ..DocType::default()
-        },
-    );
-
-    let source = RelPath::new("heroe.md").unwrap();
-    let target = RelPath::new("espada.md").unwrap();
-
-    let err = lodestar_core::plan::normalize_add_relation(&b, &schema, &source, "mentor", &target)
-        .expect_err(
-            "añadir una relación a un target de tipo no permitido debe violar la `RelationDef`",
-        );
-
-    let dbg = format!("{err:?}");
-    assert!(
-        dbg.contains("RelationConstraintViolation"),
-        "el rechazo debe ser la variante de `CoreError` que mapea a \
-         `ErrorCode::RelationConstraintViolation` (wire \"RELATION_CONSTRAINT_VIOLATION\"); \
-         error = {err:?}",
-    );
-}
-
-/// Criterio `transicion_invalida`: **Dado** `transition_status` a un estado NO permitido, **Cuando**
-/// se normaliza, **Entonces** rechazo (`Err`).
-///
-/// Fixture: `DocType decision` con `allowedStatuses:[proposed, accepted]`; `d1.md` (decision) en
-/// `proposed`. Transicionar a `"inventado"` (fuera de la lista) → `Err`. Discriminador contra un
-/// stub que siempre falle: transicionar a `"accepted"` (permitido) → `Ok(PatchFrontmatter{status})`.
-#[test]
-fn transicion_invalida() {
-    use lodestar_core::schema::{DocType, Schema};
-
-    let b = DocumentSet::from_files(fm(&[(
-        "d1.md",
-        "---\ntype: decision\ntitle: D1\nstatus: proposed\n---\n\n# D1\n\ncuerpo\n",
-    )]));
-
-    let mut schema = Schema::default();
-    schema.types.insert(
-        "decision".to_string(),
-        DocType {
-            name: "decision".to_string(),
-            allowed_statuses: vec!["proposed".to_string(), "accepted".to_string()],
-            ..DocType::default()
-        },
-    );
-
-    let reference = RelPath::new("d1.md").unwrap();
-
-    // 1) Estado NO permitido → rechazo.
-    let err =
-        lodestar_core::plan::normalize_transition_status(&b, &schema, &reference, "inventado")
-            .expect_err("transicionar a un estado fuera de `allowedStatuses` debe rechazarse");
-    let _ = err; // el criterio solo exige `Err`; la spec no fija un wire concreto para el rechazo.
-
-    // 2) DISCRIMINADOR: estado permitido → `Ok` con la escritura correctora (`status: accepted`).
-    let op = lodestar_core::plan::normalize_transition_status(&b, &schema, &reference, "accepted")
-        .expect("transicionar a un estado permitido debe producir la escritura correctora");
-    let NormalizedOperation::PatchFrontmatter { path, patch } = &op else {
-        panic!("una transición válida debe resolverse a un `PatchFrontmatter`; fue {op:?}");
-    };
-    assert_eq!(
-        path, &reference,
-        "el patch debe recaer sobre el documento transicionado"
-    );
-    assert!(
-        patch.0.contains_key("status"),
-        "el patch de una transición válida debe fijar el campo `status`; patch = {patch:?}",
-    );
-    assert!(
-        format!("{patch:?}").contains("accepted"),
-        "el patch debe fijar `status: accepted`; patch = {patch:?}",
-    );
-}
-
-/// Criterio `apply_fix_safe`: **Dado** `apply_fix` con el `fixId` de un fix `safe`, **Cuando** se
-/// normaliza, **Entonces** produce la escritura correctora.
-///
-/// Diagnóstico fixable asumido (ver cabecera de sección): una relación tipada ROTA (`REL-TARGET`)
-/// cuyo `Fix` `safe` es «quitar la relación rota». El test obtiene el `fix_id` recomputando
-/// `validate_relations` y leyendo el primer `Fix` `safe`; luego exige que `normalize_apply_fix`
-/// resuelva a un `PatchFrontmatter` sobre el documento origen que YA NO referencia el target roto.
-#[test]
-fn apply_fix_safe() {
-    use lodestar_core::schema::{validate_relations, DocType, RelationDef, Schema};
-
-    // `heroe` (character) declara `mentor -> fantasma.md`, pero `fantasma.md` NO existe → REL-TARGET.
-    let b = DocumentSet::from_files(fm(&[(
-        "heroe.md",
-        "---\ntype: character\ntitle: Heroe\nmentor:\n  - fantasma.md\n---\n\n# Heroe\n\ncuerpo\n",
-    )]));
-
-    let mut schema = Schema::default();
-    schema.types.insert(
-        "character".to_string(),
-        DocType {
-            name: "character".to_string(),
-            relations: BTreeMap::from([(
-                "mentor".to_string(),
-                RelationDef {
-                    target_types: vec!["character".to_string()],
-                    cardinality: "many".to_string(),
-                },
-            )]),
-            ..DocType::default()
-        },
-    );
-
-    // Precondición: el diagnóstico REL-TARGET existe y emite un `Fix` `safe` (lo que el implementador
-    // debe añadir a `validate_relations`). De ahí sale el `fix_id` que consume `normalize_apply_fix`.
-    let checks = validate_relations(&b, &schema);
-    assert!(
-        checks.iter().any(|c| c.code == CheckCode::RelTarget),
-        "el fixture debe producir un diagnóstico REL-TARGET (relación rota); checks = {checks:?}",
-    );
-    let fix = checks
-        .iter()
-        .flat_map(|c| &c.fixes)
-        .find(|f| f.safe)
-        .expect(
-            "el diagnóstico REL-TARGET de una relación rota debe emitir un `Fix{ safe: true }` \
-             cuyo arreglo es «quitar la relación rota» (el implementador debe adjuntarlo en \
-             `validate_relations`)",
-        );
-    let fix_id = fix.fix_id.clone();
-
-    let op = lodestar_core::plan::normalize_apply_fix(&b, &schema, &fix_id)
-        .expect("aplicar un fix `safe` conocido debe producir la escritura correctora");
-
-    // La escritura correctora es un `PatchFrontmatter` sobre `heroe.md` que quita la relación rota.
-    let source = RelPath::new("heroe.md").unwrap();
-    let NormalizedOperation::PatchFrontmatter { path, patch } = &op else {
-        panic!("aplicar el fix debe resolverse a un `PatchFrontmatter`; fue {op:?}");
-    };
-    assert_eq!(
-        path, &source,
-        "el patch debe recaer sobre el documento de la relación rota"
-    );
-    assert!(
-        patch.0.contains_key("mentor"),
-        "el patch debe tocar el campo de la relación rota (`mentor`); patch = {patch:?}",
-    );
-    assert!(
-        !format!("{patch:?}").contains("fantasma"),
-        "el patch correctivo debe QUITAR el target roto `fantasma.md` del campo `mentor`, no \
-         conservarlo; patch = {patch:?}",
-    );
-}
+// ---------------------------------------------------------------------------
+// E20-H03 — RETIRADOS los tests E12-H07 de operaciones SEMÁNTICAS con validación de schema:
+//   · `add_relation_invalida` (validaba el target contra `RelationDef` → RELATION_CONSTRAINT_VIOLATION)
+//   · `transicion_invalida`   (validaba `to` contra `allowedStatuses` → InvalidStatusTransition)
+//   · `apply_fix_safe`        (materializaba el `Fix{safe}` del `REL-TARGET` de una relación rota)
+// Con `core::schema` desaparecen tipos, `RelationDef`, `allowedStatuses` y el productor de `Fix`
+// (`validate_relations`). Las operaciones `add_relation`/`transition_status` sobreviven SIN validar
+// (escriben el campo del frontmatter tal cual, `§20.10`) y `apply_fix` responde siempre
+// `FixNotFound` (ningún diagnóstico adjunta fixes); Fase 12 retira las tres. Su normalización
+// trivial ya no tiene criterio propio que fijar aquí.
+// ---------------------------------------------------------------------------

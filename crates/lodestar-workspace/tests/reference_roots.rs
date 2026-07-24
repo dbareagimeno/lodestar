@@ -47,7 +47,7 @@
 //! exists}]` que E11-H04 debe exponer en `knowledge_get` (hoy `Vec` vacío, E10-H10).
 //! -------------------------------------------------------------------------------------------------
 
-use lodestar_core::types::{Check, RelPath};
+use lodestar_core::types::RelPath;
 use lodestar_workspace::Workspace;
 
 /// Escribe `<root>/.lodestar/config.yaml` con `writableRoots`/`referenceRoots` dados.
@@ -71,19 +71,11 @@ fn escribe_documento_con_implemented_by(root: &std::path::Path, rel: &str, code_
     std::fs::write(&target, raw).unwrap();
 }
 
-/// `true` si algún diagnóstico menciona `needle` (en su mensaje, `targets` o `related`), para atar
-/// el diagnóstico a la referencia rota concreta sin fijar el `CheckCode` (decisión abierta).
-fn diag_menciona(diagnostics: &[Check], needle: &str) -> bool {
-    diagnostics.iter().any(|d| {
-        d.msg.contains(needle)
-            || d.targets.iter().any(|p| p.as_str().contains(needle))
-            || d.related.iter().any(|p| p.as_str().contains(needle))
-    })
-}
-
-/// Criterio `ref_externa_rota`: un documento con `implemented_by: [src/no_existe.rs]` inexistente
-/// → un diagnóstico de referencia externa rota para ese path (benchmark §17: "Referenciar un
-/// archivo de código inexistente → diagnóstico").
+/// Criterio `ref_externa_rota` (MIGRADO E20-H03): un documento con `implemented_by:
+/// [src/no_existe.rs]` inexistente → la referencia se resuelve con `exists:false`. El **diagnóstico**
+/// `EXTREF-MISSING` se retiró (DECISIÓN E20-H03: `referenceRoots` se conserva por la write policy,
+/// pero el diagnóstico de ref externa muere con `core::schema`); quien lo quiera lo deriva de
+/// `exists:false`. La superficie e2e (`knowledge_get(externalReferences)`) sigue en el benchmark §17.
 #[test]
 fn ref_externa_rota() {
     let dir = tempfile::tempdir().unwrap();
@@ -100,7 +92,7 @@ fn ref_externa_rota() {
         .external_refs(&documento)
         .expect("la validación de referencias externas no debe fallar por I/O aquí");
 
-    // La referencia se resuelve como inexistente...
+    // La referencia se resuelve como inexistente (exists:false); ya no hay diagnóstico asociado.
     assert!(
         report
             .references
@@ -111,20 +103,6 @@ fn ref_externa_rota() {
             .references
             .iter()
             .map(|r| (r.path.clone(), r.exists))
-            .collect::<Vec<_>>()
-    );
-    // ...y produce un diagnóstico de referencia externa rota que la menciona.
-    assert!(
-        !report.diagnostics.is_empty(),
-        "una referencia externa rota debe producir al menos un diagnóstico"
-    );
-    assert!(
-        diag_menciona(&report.diagnostics, "src/no_existe.rs"),
-        "el diagnóstico debe referirse al path roto `src/no_existe.rs`; eran: {:?}",
-        report
-            .diagnostics
-            .iter()
-            .map(|d| (d.code.as_str(), d.msg.clone()))
             .collect::<Vec<_>>()
     );
 }
@@ -194,7 +172,7 @@ fn ref_externa_traversal() {
 }
 
 /// Criterio `ref_externa_ok`: un `implemented_by` a un fichero real bajo `referenceRoots` →
-/// `exists:true` y sin diagnóstico.
+/// `exists:true`.
 #[test]
 fn ref_externa_ok() {
     let dir = tempfile::tempdir().unwrap();
@@ -220,15 +198,6 @@ fn ref_externa_ok() {
             .references
             .iter()
             .map(|r| (r.path.clone(), r.exists))
-            .collect::<Vec<_>>()
-    );
-    assert!(
-        report.diagnostics.is_empty(),
-        "una referencia externa que existe NO debe producir diagnóstico; eran: {:?}",
-        report
-            .diagnostics
-            .iter()
-            .map(|d| (d.code.as_str(), d.msg.clone()))
             .collect::<Vec<_>>()
     );
 }

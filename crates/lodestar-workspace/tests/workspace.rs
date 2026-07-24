@@ -487,81 +487,9 @@ fn adopcion_ajusta_gitignore() {
 }
 
 // ---------------------------------------------------------------------------
-// E10-H05 — Loader de esquemas: `.lodestar/schema.yaml` → `lodestar_core::schema::Schema`.
-//
-// Fase ROJA (ARCHITECTURE.md §19.2, REFACTOR §4/§9.4, patrón `WorkspaceConfig::load`):
-// el TIPO `Schema` vive en el CORE (puro); el LOADER (I/O) vive en `workspace` y NUNCA
-// deja que el core abra ficheros. API objetivo asumida (consistente con
-// `WorkspaceConfig::load`):
-//
-//     lodestar_workspace::WorkspaceSchema::load(root: &Path)
-//         -> Result<lodestar_core::schema::Schema, String>
-//
-// lee `<root>/.lodestar/schema.yaml`; ausencia de fichero ⇒ `Schema` vacío/permisivo
-// (NO error), igual que `Config::load`/`WorkspaceConfig::load`.
-// ---------------------------------------------------------------------------
-
-/// Escribe `<root>/.lodestar/schema.yaml` con el contenido dado (crea `.lodestar/` si falta).
-fn escribe_schema_yaml(root: &std::path::Path, contenido: &str) {
-    let dir = root.join(".lodestar");
-    std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(dir.join("schema.yaml"), contenido).unwrap();
-}
-
-/// Criterio `sin_schema_permisivo`: un workspace SIN `.lodestar/schema.yaml` → `Schema` vacío
-/// permisivo (types vacío) y **sin error** (compat con workspaces OKF actuales).
-#[test]
-fn sin_schema_permisivo() {
-    use lodestar_workspace::WorkspaceSchema;
-    let dir = tempfile::tempdir().unwrap();
-    // Deliberadamente NO escribimos `.lodestar/schema.yaml`.
-
-    let schema = WorkspaceSchema::load(dir.path())
-        .expect("un workspace sin schema.yaml debe cargar un Schema permisivo, no fallar");
-
-    assert!(
-        schema.types.is_empty(),
-        "sin schema.yaml, `types` debe estar vacío (permisivo); eran: {:?}",
-        schema.types.keys().collect::<Vec<_>>()
-    );
-}
-
-/// Criterio extra (evita vacuidad — ejercita el loader real de I/O): con un
-/// `.lodestar/schema.yaml` presente que declara un `DocType` `decision`, el loader lo
-/// deserializa a `Schema` y expone sus `required_fields`.
-#[test]
-fn loader_carga_schema_yaml() {
-    use lodestar_workspace::WorkspaceSchema;
-    let dir = tempfile::tempdir().unwrap();
-    escribe_schema_yaml(
-        dir.path(),
-        "\
-version: \"1\"
-types:
-  decision:
-    name: decision
-    requiredFields: [title, status, rationale]
-    allowedStatuses: [proposed, accepted]
-",
-    );
-
-    let schema =
-        WorkspaceSchema::load(dir.path()).expect("un schema.yaml válido debe cargar sin error");
-
-    let decision = schema
-        .types
-        .get("decision")
-        .expect("el loader debe deserializar el DocType `decision` del schema.yaml");
-    assert_eq!(
-        decision.required_fields,
-        vec![
-            "title".to_string(),
-            "status".to_string(),
-            "rationale".to_string()
-        ],
-        "el loader debe preservar `requiredFields` del wire camelCase"
-    );
-}
+// E20-H03 — RETIRADO el loader de esquemas: `WorkspaceSchema::load` y `.lodestar/schema.yaml`
+// desaparecen con `core::schema` (modelo universal, `§20.10`). Los tests `sin_schema_permisivo`/
+// `loader_carga_schema_yaml` se retiran; ya no hay esquema que cargar.
 
 // ---------------------------------------------------------------------------
 // E15-H01 — Borrar el crate `lodestar-vcs` y su cableado

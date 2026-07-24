@@ -43,13 +43,13 @@ pub fn list() -> Value {
                  "items": { "type": "array", "items": { "type": "string" } } }
          }, "required": ["ref"], "additionalProperties": false },
          "outputSchema": schemas::knowledge_get_schema()},
-        {"name": "schema_inspect", "description": "Descubre el catálogo de tipos (`.lodestar/schema.yaml`): un DocType concreto o el catálogo completo.",
+        {"name": "metadata_inspect", "description": "Descubre las convenciones de metadata de una base desconocida SIN necesitar un schema: el catálogo de propiedades (qué campos existen, en cuántos documentos y de qué tipos) o la inspección de una propiedad (presencia/ausencia, tipos y valores frecuentes).",
          "inputSchema": { "type": "object", "properties": {
-             "mode": { "type": "string", "description": "«catalog» (todos los DocType) o «type» (uno concreto, requiere «type»).", "enum": ["catalog", "type"] },
-             "type": { "type": "string", "description": "Nombre del DocType a inspeccionar (solo con mode «type»)." }
+             "mode": { "type": "string", "description": "«catalog» (todos los campos con presencia y tipos) o «field» (inspección de un campo concreto, requiere «field»).", "enum": ["catalog", "field"] },
+             "field": { "type": "string", "description": "Path punteado del campo a inspeccionar (p. ej. «status» o «service.tier»); solo con mode «field»." }
          }, "required": ["mode"], "additionalProperties": false },
-         "outputSchema": schemas::schema_inspect_schema()},
-        {"name": "knowledge_check", "description": "Audita el conocimiento (diagnósticos del documento + esquema) con scopes y severidad mínima; diagnósticos con id estable y paginación por cursor.",
+         "outputSchema": schemas::metadata_inspect_schema()},
+        {"name": "knowledge_check", "description": "Audita el conocimiento (diagnósticos de interpretabilidad y enlaces del documento) con scopes y severidad mínima; diagnósticos con id estable y paginación por cursor.",
          "inputSchema": { "type": "object", "properties": {
              "scope": { "type": "object", "description": "Qué auditar. Discriminado por «kind».", "properties": {
                  "kind": { "type": "string", "enum": ["workspace", "document", "paths", "affected"] },
@@ -82,7 +82,7 @@ pub fn list() -> Value {
              "cursor": { "type": "string", "description": "Cursor opaco de paginación devuelto en «nextCursor»." }
          }, "required": ["operation"], "additionalProperties": false },
          "outputSchema": schemas::graph_query_schema()},
-        {"name": "impact_analyze", "description": "Analiza el impacto de un cambio hipotético sobre un documento (sin aplicarlo): afectados directos/transitivos, relaciones tipadas obligatorias que romperían (bloqueos) y nivel de riesgo. Reusa el blast-radius entrante y las relaciones del schema.",
+        {"name": "impact_analyze", "description": "Analiza el impacto de un cambio hipotético sobre un documento (sin aplicarlo): afectados directos/transitivos y nivel de riesgo, sobre el grafo de enlaces. Reusa el blast-radius entrante.",
          "inputSchema": { "type": "object", "properties": {
              "ref": { "type": "object", "description": "DocumentRef: el documento sobre el que se propone el cambio.", "properties": {
                  "path": { "type": "string", "description": "Ruta relativa del documento (p. ej. «notas/alfa.md»)." }
@@ -220,16 +220,16 @@ pub fn call(app: &App, profile: Profile, name: &str, params: &Value) -> ToolResu
                 .map_err(|e| e.as_str().to_string())?;
             Ok(json!({ "document": to_json(&document)? }))
         }
-        "schema_inspect" => {
+        "metadata_inspect" => {
             let mode = params
                 .get("mode")
                 .and_then(Value::as_str)
                 .ok_or("falta el parámetro «mode»")?;
-            let type_name = params.get("type").and_then(Value::as_str);
+            let field = params.get("field").and_then(Value::as_str);
             // Mismo mapeo de error a wire que `knowledge_get` (E10-H02): el código estable
             // `ErrorCode::as_str()`, nunca el `Debug` de la variante.
             let inspection = app
-                .schema_inspect(mode, type_name)
+                .metadata_inspect(mode, field)
                 .map_err(|e| e.as_str().to_string())?;
             to_json(&inspection)
         }
@@ -255,7 +255,7 @@ pub fn call(app: &App, profile: Profile, name: &str, params: &Value) -> ToolResu
                 .and_then(Value::as_u64)
                 .map(|n| n as usize);
             let cursor = params.get("cursor").and_then(Value::as_str);
-            // Mismo mapeo de error a wire que `knowledge_get`/`schema_inspect` (E10-H02): el código
+            // Mismo mapeo de error a wire que `knowledge_get`/`metadata_inspect` (E10-H02): el código
             // estable `ErrorCode::as_str()`, nunca el `Debug` de la variante.
             let report = app
                 .knowledge_check(&scope, min_severity, include_fixes, limit, cursor)
@@ -286,7 +286,7 @@ pub fn call(app: &App, profile: Profile, name: &str, params: &Value) -> ToolResu
                 .and_then(Value::as_u64)
                 .map(|n| n as usize);
             let cursor = params.get("cursor").and_then(Value::as_str);
-            // Mismo mapeo de error a wire que `knowledge_get`/`schema_inspect`/`knowledge_check`
+            // Mismo mapeo de error a wire que `knowledge_get`/`metadata_inspect`/`knowledge_check`
             // (E10-H02): el código estable `ErrorCode::as_str()`, nunca el `Debug` de la variante.
             let result = app
                 .graph_query(

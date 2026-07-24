@@ -197,22 +197,10 @@ pub enum CheckCode {
     /// puede modificar con seguridad.
     #[serde(rename = "DOC-CONFLICT-MARKER")]
     DocConflictMarker,
-    // --- Enlaces heredados del prototipo: RETIRADOS en E17-H03 ---
-    //
-    // `LINK-STUB` («N enlaces llevan a páginas que aún no existen») y `LINK-REL` («es mejor usar
-    // la ruta completa /…») dejaron de tener productor: `conform` ya no los emite y ninguna otra
-    // puerta puede reintroducirlos — los sustituyen `LINK-TARGET-MISSING`/
-    // `LINK-ESCAPES-WORKSPACE`/`LINK-CASE-MISMATCH`, derivados de la clasificación del destino.
-    //
-    // Las dos variantes sobreviven **solo como nombres**, porque el test de la fase roja
-    // (`crates/lodestar-core/tests/diagnosticos.rs::link_missing_con_rango`) las nombra en un
-    // `matches!` para asegurar que no reaparecen, y ese fichero no se puede tocar. Borrarlas es un
-    // cambio de una línea en cuanto esa guarda se retire; hasta entonces, que estén aquí es lo que
-    // hace que la guarda verifique algo de verdad.
-    #[serde(rename = "LINK-STUB")]
-    LinkStub,
-    #[serde(rename = "LINK-REL")]
-    LinkRel,
+    // Los códigos heredados del prototipo `LINK-STUB`/`LINK-REL` (sin productor desde E17-H03) se
+    // retiran del catálogo en E20-H03 junto con la maquinaria de schema: ya nada los nombra (la
+    // guarda de `diagnosticos.rs::link_missing_con_rango` que los sostenía se migró a los códigos
+    // vivos). Sus reemplazos son `LINK-TARGET-MISSING`/`LINK-ESCAPES-WORKSPACE`/`LINK-CASE-MISMATCH`.
     // --- Enlaces (`§20.9`, E17-H03) ---
     /// El destino de un enlace está contenido en el workspace pero **no existe** (`§20.9`).
     /// Severidad `Err` si el destino sería un documento Markdown (`danglingDocumentLinks: error`) y
@@ -223,31 +211,11 @@ pub enum CheckCode {
     /// Lodestar no puede seguirlo ni reescribirlo. E17-H03.
     #[serde(rename = "LINK-ESCAPES-WORKSPACE")]
     LinkEscapesWorkspace,
-    // --- Familias schema-driven (decisión D-CheckCode, `ARCHITECTURE.md §19.3`) ---
-    // `conform` ya NO las produce (E16-H05): solo las emiten `core::schema` y `external_refs`,
-    // fuera de `DocumentSet::analyze`. Mueren del todo en E20, con `core::schema`.
-    // Variantes ESTÁTICAS acotadas (no hay espacio de códigos dinámico). El core aún no las
-    // produce (eso es E10-H07/E11-H03) — esta historia solo fija el contrato de wire. La clave
-    // i18n por código (§12) se satisface con `Check.msg`, que el core emite inline (no hay
-    // catálogo i18n en el core; el catálogo de `frontend/src/lib/i18n.ts` está congelado y
-    // fuera de alcance de esta historia).
-    #[serde(rename = "SCHEMA-REQFIELD")]
-    SchemaReqfield,
-    #[serde(rename = "SCHEMA-STATUS")]
-    SchemaStatus,
-    #[serde(rename = "REL-TARGET")]
-    RelTarget,
-    #[serde(rename = "REL-CARD")]
-    RelCard,
-    #[serde(rename = "REL-TYPE")]
-    RelType,
-    /// Referencia externa (`implemented_by`/`verified_by`, E9-H05) a un fichero de código bajo
-    /// `referenceRoots` que no existe en disco (E11-H04). Variante propia, no reuso de
-    /// `LINK-TARGET-MISSING` (destino de un **enlace Markdown**) ni de `REL-TARGET` (relaciones
-    /// tipadas a documentos): un `implemented_by`/`verified_by` apunta a código declarado en el
-    /// frontmatter, no a un enlace del cuerpo — semánticamente distinto de los dos.
-    #[serde(rename = "EXTREF-MISSING")]
-    ExtrefMissing,
+    // Las familias schema-driven `SCHEMA-*`/`REL-*` y `EXTREF-MISSING` se RETIRAN en E20-H03: con
+    // `core::schema` desaparecen `validate_schema`/`validate_relations` (sus únicos productores) y el
+    // diagnóstico de referencias externas de `external_refs` (`§20.10`: el modelo es universal, sin
+    // schema, y una relación es un enlace Markdown). El catálogo vivo lo forman los códigos de
+    // frontmatter/enlace/descubrimiento de `§20.9`.
     // --- Descubrimiento universal (E15-H07, `ARCHITECTURE.md §20.5`/`§20.9`) ---
     // Los produce `lodestar_workspace::discovery`, no `conform`: describen lo que Lodestar NO
     // pudo incorporar al inventario (o lo que no es portable), no el incumplimiento de una
@@ -286,17 +254,8 @@ impl CheckCode {
             CheckCode::FmUnclosed => "FM-UNCLOSED",
             CheckCode::FmYamlInvalid => "FM-YAML-INVALID",
             CheckCode::DocConflictMarker => "DOC-CONFLICT-MARKER",
-            // Sin productor desde E17-H03 (ver la nota de la enum).
-            CheckCode::LinkStub => "LINK-STUB",
-            CheckCode::LinkRel => "LINK-REL",
             CheckCode::LinkTargetMissing => "LINK-TARGET-MISSING",
             CheckCode::LinkEscapesWorkspace => "LINK-ESCAPES-WORKSPACE",
-            CheckCode::SchemaReqfield => "SCHEMA-REQFIELD",
-            CheckCode::SchemaStatus => "SCHEMA-STATUS",
-            CheckCode::RelTarget => "REL-TARGET",
-            CheckCode::RelCard => "REL-CARD",
-            CheckCode::RelType => "REL-TYPE",
-            CheckCode::ExtrefMissing => "EXTREF-MISSING",
             CheckCode::DocNotUtf8 => "DOC-NOT-UTF8",
             CheckCode::DocTooLarge => "DOC-TOO-LARGE",
             CheckCode::PathNotUtf8 => "PATH-NOT-UTF8",
@@ -468,6 +427,20 @@ impl FieldPath {
 impl std::fmt::Display for FieldPath {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.0.join("."))
+    }
+}
+
+impl Serialize for FieldPath {
+    /// Serializa como su **string punteado** (`"service.tier"`), la forma de wire de
+    /// `metadata_inspect` (E20-H03): un `FieldPath` es la identidad de un campo y en el wire viaja
+    /// como su dot-path (vía [`Display`](std::fmt::Display)), nunca como un array de segmentos. Las
+    /// claves de wire que lo envuelven (`name` en el catálogo, `field` en la inspección) las fija el
+    /// `#[serde(rename)]` del campo que lo contiene, no este `impl`.
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.collect_str(self)
     }
 }
 
@@ -1421,8 +1394,8 @@ schema_derive! {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum NormalizedOperation {
-    /// Crea un documento nuevo. `body: None` ⇒ se rellena con la `bodyTemplate` del `DocType`
-    /// (E12-H05); aquí la resolución de la plantilla NO ocurre todavía.
+    /// Crea un documento nuevo. `body: None` ⇒ el escritor genera el heading por defecto (tras el
+    /// retiro de `core::schema` en E20-H03 ya no hay `bodyTemplate` de `DocType` que expandir).
     Create {
         path: RelPath,
         #[cfg_attr(feature = "schemars", schemars(skip))]
@@ -1465,20 +1438,21 @@ pub enum NormalizedOperation {
         path: RelPath,
         inbound_links_policy: InboundLinksPolicy,
     },
-    /// Añade una relación tipada (validada contra `RelationDef`, E12-H07).
+    /// Añade una relación (un campo de frontmatter, E12-H07). Desde E20-H03 sin validación de tipo:
+    /// el modelo es universal (`§20.10`). Fase 12 retira esta operación.
     AddRelation {
         source: RelPath,
         relation: String,
         target: RelPath,
     },
-    /// Quita una relación tipada existente.
+    /// Quita una relación (campo de frontmatter) existente.
     RemoveRelation {
         source: RelPath,
         relation: String,
         target: RelPath,
     },
-    /// Transiciona el `status` de un documento (validado contra `allowedStatuses`/lifecycle,
-    /// E12-H07).
+    /// Transiciona el `status` de un documento (E12-H07). Desde E20-H03 sin validación de lifecycle:
+    /// `status` es una propiedad de frontmatter arbitraria (`§20.10`). Fase 12 retira esta operación.
     TransitionStatus { path: RelPath, to: String },
     /// Materializa un `Fix` `safe` sugerido por un diagnóstico previo (`Fix.fix_id`).
     ApplyFix { fix_id: String },
@@ -1674,7 +1648,13 @@ pub enum Expression {
 ///
 /// `PartialOrd`/`Ord` (E20-H01): [`ValueType`] es la clave del mapa `inferred_types` de
 /// [`FieldStats`]/[`FieldInspection`]; el orden de declaración da un [`BTreeMap`] determinista.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+///
+/// `Serialize` con `rename_all = "lowercase"` (E20-H03): en el wire de `metadata_inspect` cada tipo
+/// es la **clave en minúscula** de `inferredTypes` (`{"string": 5, "number": 1}`) — el `BTreeMap`
+/// con clave [`ValueType`] serializa a ese objeto. Es la forma que fija `§Fase 6`.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum ValueType {
     /// `null`.
     Null,
@@ -1750,61 +1730,85 @@ pub enum TypeError {
 // ---------------------------------------------------------------------------
 //
 // La FORMA de los tipos de retorno de `crate::metadata::catalog`/`inspect_field`: el contrato de
-// wire que hereda la tool `metadata_inspect` (E20-H03). Igual que `Expression`/`QueryValue`
-// (E19-H01) difirieron su serde a E19-H03, aquí NO se derivan `Serialize`/`Deserialize` ni
-// `JsonSchema`: E20-H03 fija el mapeo de wire (el `field` punteado —`"name"` en el catálogo,
-// `"field"` en la inspección de `§Fase 6`— y la clave de `inferred_types` a su nombre en minúscula,
-// `"string"`/`"number"`) junto con su round-trip. Aquí se conservan [`FieldPath`] y [`ValueType`]
-// como identidad —«una sola verdad de qué es un campo y de qué tipo» (invariante #3)—, no una
-// representación paralela en `String`.
+// wire que hereda la tool `metadata_inspect` (E20-H03). Aquí se fija el mapeo de wire (`§Fase 6`):
+//   · el `FieldPath` viaja como su string PUNTEADO (`Serialize` de `FieldPath`, arriba), bajo la
+//     clave `"name"` en el catálogo (`#[serde(rename)]`) y `"field"` en la inspección;
+//   · `inferred_types` (`BTreeMap<ValueType, usize>`) se aplana al objeto `{tipo-en-minúscula:
+//     conteo}` gracias al `Serialize` de `ValueType` (`rename_all = "lowercase"`);
+//   · `value` (`serde_yaml::Value`) conserva su tipo JSON natural (número/string/…), sin coerción.
+// Se conservan [`FieldPath`] y [`ValueType`] como identidad —«una sola verdad de qué es un campo y
+// de qué tipo» (invariante #3)—, no una representación paralela en `String`. El wire se DERIVA
+// (no hay capa DTO paralela, invariante #4). `Deserialize` no se deriva: el core PRODUCE estos
+// tipos (los computa `crate::metadata`), no los consume del wire; la tool solo serializa.
 
+schema_derive! {
 /// El **catálogo de propiedades** del workspace (`§Fase 6`, «Catálogo de propiedades»): una fila por
-/// `field_path` que aparece en algún documento.
-#[derive(Debug, Clone, PartialEq)]
+/// `field_path` que aparece en algún documento. Wire: `{ "fields": [ … ] }`.
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct MetadataCatalog {
     /// Los campos del workspace, en orden **determinista** por [`FieldPath`].
     pub fields: Vec<FieldStats>,
 }
+}
 
-/// Estadísticas de un `field_path` en el catálogo (`§Fase 6`).
-#[derive(Debug, Clone, PartialEq)]
+schema_derive! {
+/// Estadísticas de un `field_path` en el catálogo (`§Fase 6`). Wire:
+/// `{ "name": "status", "presentIn": N, "inferredTypes": { "<tipo>": N } }`.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct FieldStats {
     /// El path de la propiedad, **tal como lo emite** [`ParsedFrontmatter::walk`]: incluye los mapas
     /// intermedios (`service`) además de las hojas direccionables (`service.name`, `service.tier`),
     /// para que el catálogo enumere el mismo conjunto de campos que indexa el store v2 (E18) — una
-    /// sola verdad de qué es un campo (invariante #3).
+    /// sola verdad de qué es un campo (invariante #3). En el wire es la clave **`name`** (`§Fase 6`),
+    /// con el `FieldPath` rendido a su string punteado.
+    #[serde(rename = "name")]
+    #[cfg_attr(feature = "schemars", schemars(with = "String"))]
     pub field: FieldPath,
     /// Nº de documentos en los que la propiedad aparece.
     pub present_in: usize,
     /// Tipos observados y su conteo, clasificando cada valor con [`ValueType::of`]. Invariante:
     /// `inferred_types.values().sum() == present_in` (una observación de tipo por documento presente).
+    /// Wire: objeto `{tipo-en-minúscula: conteo}`.
     pub inferred_types: BTreeMap<ValueType, usize>,
 }
+}
 
-/// La **inspección de una propiedad** (`§Fase 6`, «Inspección de una propiedad»).
-#[derive(Debug, Clone, PartialEq)]
+schema_derive! {
+/// La **inspección de una propiedad** (`§Fase 6`, «Inspección de una propiedad»). Wire:
+/// `{ "field": "status", "presentIn": N, "missingIn": N, "inferredTypes": {…}, "values": [ … ] }`.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct FieldInspection {
-    /// El path inspeccionado.
+    /// El path inspeccionado. En el wire es la clave **`field`** (`§Fase 6`), con el `FieldPath`
+    /// rendido a su string punteado.
+    #[cfg_attr(feature = "schemars", schemars(with = "String"))]
     pub field: FieldPath,
     /// Nº de documentos en los que aparece.
     pub present_in: usize,
     /// Nº de documentos en los que NO aparece. Invariante:
     /// `present_in + missing_in == nº total de documentos del workspace`.
     pub missing_in: usize,
-    /// Tipos observados y su conteo ([`ValueType::of`] de cada valor).
+    /// Tipos observados y su conteo ([`ValueType::of`] de cada valor). Wire: objeto
+    /// `{tipo-en-minúscula: conteo}`.
     pub inferred_types: BTreeMap<ValueType, usize>,
     /// Los valores **escalares** más frecuentes con su conteo, en orden **determinista**: por conteo
     /// descendente y, a igual conteo, por el texto del valor ascendente. Un valor lista u objeto
     /// cuenta en `present_in`/`inferred_types` pero **no** aparece aquí (`§Fase 6`: solo escalares).
     pub values: Vec<ValueCount>,
 }
+}
 
+schema_derive! {
 /// Un valor escalar observado y en cuántos documentos aparece (`§Fase 6`, `{value, count}`).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ValueCount {
     /// El valor escalar, **con su tipo YAML real** (sin coerción: el número `2` y el string `"2"`
-    /// son valores distintos, con conteos distintos).
+    /// son valores distintos, con conteos distintos). En el wire conserva su tipo JSON natural.
+    #[cfg_attr(feature = "schemars", schemars(with = "serde_json::Value"))]
     pub value: serde_yaml::Value,
     /// Cuántos documentos tienen exactamente ese valor en la propiedad.
     pub count: usize,
+}
 }

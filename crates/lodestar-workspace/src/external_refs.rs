@@ -1,22 +1,27 @@
-//! Validación de paths externos (`referenceRoots`, E11-H04, `ARCHITECTURE.md §19.4/§19.7`,
-//! `REFACTOR §4.2/§17`, E9-H05).
+//! Paths externos (`referenceRoots`, E11-H04, `ARCHITECTURE.md §19.4/§19.7`, E9-H05).
 //!
-//! Los campos de frontmatter `implemented_by`/`verified_by` (E9-H05) apuntan a ficheros de
-//! **código**, no a documentos del workspace — ni `DocumentSet::analyze` (`LINK-STUB`/`LINK-REL`,
-//! enlaces `[[wiki]]`/Markdown ENTRE documentos) ni `validate_relations` (`REL-TARGET`, relaciones
-//! tipadas a documentos) los cubre. Comprobar si existen en disco es **I/O**, así que vive aquí (en la
-//! workspace) y no en `lodestar-core` (invariante #2 de `CLAUDE.md`: el core no abre ficheros). El
-//! core solo aporta el tipo `Check`/`CheckCode` con el que se construye el diagnóstico.
+//! Dos responsabilidades, ambas ancladas en `referenceRoots` del `.lodestar/config.yaml`:
+//! 1. [`Workspace::external_refs`]: resuelve contra disco los campos de frontmatter
+//!    `implemented_by`/`verified_by` (paths a ficheros de **código**) y devuelve `{path, exists}`
+//!    por cada uno — lo consume `knowledge_get(externalReferences)`. Comprobar la existencia en
+//!    disco es **I/O**, así que vive aquí y no en `lodestar-core` (invariante #2).
+//! 2. [`Workspace::assert_writable`]: la **write policy** del único escritor, que usa
+//!    `referenceRoots` como raíces «visibles pero NO escribibles» (inmutables).
+//!
+//! **DECISIÓN E20-H03**: el diagnóstico `EXTREF-MISSING` (una ref externa rota) se **retira** con el
+//! resto de la maquinaria schema (`§20.10`, modelo universal). `referenceRoots` se **conserva**
+//! porque sostiene la write policy de `assert_writable`, no solo aquel diagnóstico. `external_refs`
+//! sigue resolviendo `{path, exists}` para `knowledge_get`; quien quiera un diagnóstico de ref rota
+//! lo deriva de `exists:false`.
 
 use lodestar_core::model;
-use lodestar_core::types::{Check, CheckCode, RelPath, Severity};
+use lodestar_core::types::RelPath;
 
 use crate::error::WorkspaceError;
 use crate::Workspace;
 
 /// Campos de frontmatter que declaran referencias a ficheros externos (E9-H05). Cada uno admite
-/// una lista de paths o un único path (mismo criterio que las relaciones tipadas, `relation_targets`
-/// del core).
+/// una lista de paths o un único path.
 const EXTERNAL_REF_FIELDS: [&str; 2] = ["implemented_by", "verified_by"];
 
 /// Una referencia externa (`implemented_by`/`verified_by`) de un documento, resuelta contra disco.
@@ -33,18 +38,17 @@ pub struct ExternalReference {
     pub exists: bool,
 }
 
-/// Informe de validación de las referencias externas de UN documento contra `referenceRoots`.
+/// Informe de las referencias externas de UN documento, resueltas contra `referenceRoots`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExternalRefsReport {
     /// Cada referencia declarada por el documento, con su existencia resuelta.
     pub references: Vec<ExternalReference>,
-    /// Un diagnóstico (`CheckCode::ExtrefMissing`, `Severity::Warn`) por cada referencia rota.
-    pub diagnostics: Vec<Check>,
 }
 
 impl Workspace {
     /// Resuelve las referencias externas (`implemented_by`/`verified_by`) del documento contra
-    /// disco y produce los diagnósticos de referencia rota.
+    /// disco, devolviendo `{path, exists}` por cada una. Tras E20-H03 **no** produce diagnósticos
+    /// (el `EXTREF-MISSING` se retiró); un consumidor deriva la ref rota de `exists:false`.
     ///
     /// Un documento sin frontmatter (o sin ninguno de los dos campos) devuelve un informe vacío,
     /// no un error. `Err` solo si el documento mismo no existe en el workspace.
@@ -70,14 +74,12 @@ impl Workspace {
         let Some(fm) = parsed.frontmatter else {
             return Ok(ExternalRefsReport {
                 references: Vec::new(),
-                diagnostics: Vec::new(),
             });
         };
 
         let reference_roots = &self.config().workspace.reference_roots;
 
         let mut references = Vec::new();
-        let mut diagnostics = Vec::new();
         for field in EXTERNAL_REF_FIELDS {
             for raw_path in field_paths(&fm, field) {
                 // Único chokepoint de traversal: valida ANTES de tocar disco (paso 1), luego
@@ -90,33 +92,13 @@ impl Workspace {
                 });
                 let exists = contained.is_some_and(|rp| self.root().join(rp.as_str()).is_file());
 
-                if !exists {
-                    let mut check = Check::new(
-                        Severity::Warn,
-                        CheckCode::ExtrefMissing,
-                        format!(
-                            "«{}» declara «{field}: {raw_path}», que no existe en disco.",
-                            document.as_str()
-                        ),
-                        vec![document.clone()],
-                    );
-                    // `related` lleva el path roto cuando es un `RelPath` válido (mismo criterio
-                    // que `REL-TARGET`, `schema.rs`); si no lo es, el `msg` ya lo menciona.
-                    if let Some(related) = validated {
-                        check = check.with_related(vec![related]);
-                    }
-                    diagnostics.push(check);
-                }
                 references.push(ExternalReference {
                     path: raw_path,
                     exists,
                 });
             }
         }
-        Ok(ExternalRefsReport {
-            references,
-            diagnostics,
-        })
+        Ok(ExternalRefsReport { references })
     }
 
     /// Guard del único escritor: `Err(WorkspaceError::PermissionDenied)` si `path` queda **fuera
@@ -179,8 +161,7 @@ impl Workspace {
 }
 
 /// Lee un campo del frontmatter como lista de paths: una secuencia YAML de strings, o un único
-/// `String` (mismo criterio que `relation_targets` del core, `lodestar-core/src/schema.rs`, no
-/// reexportado porque es privado a ese módulo).
+/// `String`.
 fn field_paths(fm: &lodestar_core::types::ParsedFrontmatter, field: &str) -> Vec<String> {
     match fm.get_key(field) {
         Some(serde_yaml::Value::Sequence(seq)) => seq

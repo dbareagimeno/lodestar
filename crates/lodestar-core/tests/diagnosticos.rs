@@ -74,7 +74,6 @@
 //! ficheros.
 
 use lodestar_core::plan::{self, PlanPolicy};
-use lodestar_core::schema::Schema;
 use lodestar_core::types::{Check, CheckCode, Inventory, Range, RelPath, ResolvedLink, Severity};
 use lodestar_core::{links, model, DocumentSet};
 
@@ -204,15 +203,8 @@ fn link_missing_con_rango() {
         "un enlace a un documento que existe no produce diagnóstico: {:?}",
         codigos(&diagnosticos(&bueno, "docs/guia.md", &i))
     );
-
-    // Y los códigos heredados que esta historia retira NO reaparecen por otra puerta.
-    let cs = diagnosticos(DOC_MISSING, "docs/guia.md", &i);
-    assert!(
-        !cs.iter()
-            .any(|c| matches!(c.code, CheckCode::LinkStub | CheckCode::LinkRel)),
-        "`LINK-STUB`/`LINK-REL` se retiran del catálogo en E17-H03: {:?}",
-        codigos(&cs)
-    );
+    // (La guarda que aseveraba la no-reaparición de `LINK-STUB`/`LINK-REL` se retiró en E20-H03
+    // junto con esas variantes de `CheckCode`, ya sin productor.)
 }
 
 // =============================================================================
@@ -456,8 +448,8 @@ fn workspace_file_ausente_es_warning() {
 
     // --- Punta a punta: el warning vuelve a llegar al gate de aplicación ------------------
     //
-    // `plan::validate_result` compone el universo completo de diagnósticos que ve `lodestar check`
-    // (`Analysis` + schema). Con un enlace roto a un fichero del proyecto el workspace es
+    // `plan::validate_result` compone el universo de diagnósticos que ve `lodestar check`
+    // (`Analysis`, `§20.9`). Con un enlace roto a un fichero del proyecto el workspace es
     // CONFORME (0 errores) pero tiene 1 warning, así que `allowWarnings` deja de ser una rama
     // muerta: `false` bloquea el plan y `true` lo deja pasar.
     let files = lodestar_fixtures::file_map(&[(
@@ -465,7 +457,7 @@ fn workspace_file_ausente_es_warning() {
         "# Raíz\n\nAl servicio: [código](src/auth/no_existe.rs).\n",
     )]);
     let doc_set = DocumentSet::from_files(files);
-    let report = plan::validate_result(&doc_set, &Schema::default());
+    let report = plan::validate_result(&doc_set);
 
     assert_eq!(
         report.summary.errors, 0,

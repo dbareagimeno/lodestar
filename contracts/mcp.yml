@@ -6,7 +6,7 @@
 #
 # REGLAS (ver contracts/README.md):
 #   - Los TIPOS NO se definen aquí: se REFERENCIAN por nombre de `lodestar_core::types` /
-#     `lodestar_core::schema` / `lodestar_app` (invariante #4 — un solo contrato de tipos).
+#     `lodestar_app` (invariante #4 — un solo contrato de tipos).
 #     Los retornos se envuelven en un objeto json (el spec MCP exige que `structuredContent`
 #     sea objeto, nunca array): p. ej. `{ paths: Vec<RelPath> }`, `{ isolated: Vec<RelPath> }`.
 #   - Nombres de tool CONGELADOS (ARCHITECTURE.md §19.6). `fuente:` = fichero:línea aproximada.
@@ -23,7 +23,7 @@
 # E10 (§19, decisión "0. Giro a motor headless" — DECISIONES.md): la superficie MCP migra de las
 # 10 tools heredadas (tras la retirada de las 3 tools git en E9-H01) a un objetivo de 10 tools
 # nuevas (`docs/REFACTOR.md §8/§15/§16`). E10-H08…H12 AÑADEN las 5 tools de lectura/verificación
-# (`workspace_status`/`knowledge_search`/`knowledge_get`/`schema_inspect`/`knowledge_check`) que
+# (`workspace_status`/`knowledge_search`/`knowledge_get`/`metadata_inspect`/`knowledge_check`) que
 # sustituyen semánticamente a `query`/`conformance_check` y parte de `find_*`/`neighborhood`;
 # E11-H01 AÑADE `graph_query` (consolida `find_backlinks`/`find_orphans`/`find_dangling`/
 # `neighborhood`); E11-H05 AÑADE `impact_analyze`; E12-H08/E13 AÑADEN `change_plan`/`change_apply`/
@@ -63,10 +63,10 @@
 #     `OKF-IDX`, `OKF-LOG`. **Sin alias de compatibilidad**, misma razón que `orphans`→`isolated`.
 #   - SE RENOMBRAN: `OKF-FM02` → `FM-UNCLOSED`, `OKF-FM03` → `FM-YAML-INVALID`,
 #     `OKF-CONFLICT` → `DOC-CONFLICT-MARKER`.
-#   - SIGUEN (hasta E17, ver más abajo): `LINK-STUB`/`LINK-REL`, `DOC-NOT-UTF8`/`DOC-TOO-LARGE`/
-#     `PATH-NOT-UTF8`/`SYMLINK-UNSUPPORTED`/`LINK-CASE-MISMATCH` (descubrimiento, E15-H07) y
-#     `SCHEMA-*`/`REL-*`/`EXTREF-MISSING`, que `conform` ya NO produce (solo `core::schema` y
-#     `external_refs`) y que mueren del todo en E20.
+#   - SIGUEN: `DOC-NOT-UTF8`/`DOC-TOO-LARGE`/`PATH-NOT-UTF8`/`SYMLINK-UNSUPPORTED`/
+#     `LINK-CASE-MISMATCH` (descubrimiento, E15-H07).
+#   - RETIRADOS en E20-H03 con `core::schema`: `SCHEMA-*`/`REL-*`/`EXTREF-MISSING` (sin productor;
+#     modelo universal `§20.10`) y los heredados `LINK-STUB`/`LINK-REL` (ya sin productor desde E17).
 #   - `FM-YAML-INVALID` rellena `range` con las líneas de CONTENIDO del bloque de frontmatter
 #     (1-based, ambas inclusive, delimitadores excluidos).
 #
@@ -141,9 +141,10 @@
 #   - `impact_analyze.blockingReferences`: **siempre vacío**. Los bloqueos derivados de relaciones
 #     tipadas obligatorias desaparecieron con el modelo que los definía (`§20.10`: una relación es
 #     un enlace Markdown y nada más), y con ellos `summary.blockingReferences` (siempre 0) y el
-#     `risk: "high"` que provocaban. El CAMPO se conserva en el wire hasta que E20 retire
-#     `core::schema` entero. `directlyAffected`/`affectedDocuments` se calculan sobre el grafo
-#     universal, así que ahora incluyen enlaces de referencia (`[t][id]`) y cualquier profundidad.
+#     `risk: "high"` que provocaban. El CAMPO se conserva en el wire (E20-H03 retiró `core::schema`
+#     pero deja `blockingReferences` para no romper a un cliente que lo lea; su retirada es una
+#     historia propia). `directlyAffected`/`affectedDocuments` se calculan sobre el grafo universal,
+#     así que ahora incluyen enlaces de referencia (`[t][id]`) y cualquier profundidad.
 #
 # E10-H13 (decisión D6b, `docs/REFACTOR.md §13`, `DECISIONES.md §3`): las 10 tools activas declaran
 # `outputSchema` (JSON Schema derivado con `schemars::schema_for!` desde el tipo de respuesta real
@@ -159,7 +160,7 @@ meta:
     protocol_versions_aceptadas: ["2024-11-05", "2025-03-26", "2025-06-18"]
     instructions: >-
       La respuesta `initialize` incluye `instructions` (string): el flujo recomendado de 10 pasos
-      en orden — workspace_status → knowledge_search → knowledge_get → schema_inspect →
+      en orden — workspace_status → knowledge_search → knowledge_get → metadata_inspect →
       graph_query/impact_analyze → change_plan → change_apply → knowledge_check → change_revert
       (main.rs SERVER_INSTRUCTIONS, E14-H03).
   perfiles:
@@ -184,7 +185,7 @@ meta:
     Éxito → { content:[{type:text,text:json}], structuredContent:<objeto> }. Las 5 tools de
     E10 mapean el error a un texto que lleva el código estable de `ErrorCode::as_str()`
     (p. ej. «DOCUMENT_NOT_FOUND»/«INVALID_SCHEMA»), NUNCA el `Debug` de la variante Rust
-    (`tools.rs`, casos `knowledge_get`/`schema_inspect`/`knowledge_check`).
+    (`tools.rs`, casos `knowledge_get`/`metadata_inspect`/`knowledge_check`).
   arranque: >-
     `lodestar-mcp [--root <dir>] [--profile readonly|standard]` (main.rs parse_args, E15-H06,
     `ARCHITECTURE.md §20.5`). Sin `--root` la raíz es `std::env::current_dir()`. NO hay argumento
@@ -260,19 +261,22 @@ tools:
       independiente de `include`. `externalReferences` siempre vacío en esta historia
       (E11-H04 fuera de alcance).
 
-  - nombre: schema_inspect
-    fuente: crates/lodestar-mcp/src/tools.rs:252
-    historia: E10-H11
+  - nombre: metadata_inspect
+    fuente: crates/lodestar-mcp/src/tools.rs
+    historia: E20-H03
     params:
-      - { nombre: mode, tipo: string, requerido: true, valores: ["catalog", "type"], semantica: "modos field/relation/diagnosticCode/lifecycle/template de REFACTOR §9.4 quedan admitidos por el catálogo de modos pero SIN proyección propia en esta historia → INVALID_SCHEMA" }
-      - { nombre: type, tipo: string, requerido: false, semantica: "nombre del DocType a inspeccionar (solo con mode «type»); requerido cuando mode==«type»" }
-    retorno: "SchemaInspection (lodestar_app): { schemaVersion, type: Option<DocType>, types: Option<Vec<DocType>> } — mutuamente excluyentes según mode, json directo sin envelope"
-    output_schema: "sí — schemars::schema_for!(SchemaInspection), vía lodestar_app::schemas::schema_inspect_schema()"
-    errores: ["INVALID_SCHEMA (mode desconocido, mode «type» sin «type», o tipo inexistente)", "WorkspaceError (YAML malformado → INTERNAL_IO_ERROR)"]
+      - { nombre: mode, tipo: string, requerido: true, valores: ["catalog", "field"], semantica: "«catalog» = todos los campos con presencia y tipos; «field» = inspección de un campo concreto (requiere «field»)" }
+      - { nombre: field, tipo: string, requerido: false, semantica: "path punteado del campo a inspeccionar (p. ej. «status» o «service.tier»); requerido cuando mode==«field». Path inválido o ausente → INVALID_SCHEMA" }
+    retorno: "MetadataInspection (lodestar_app, enum untagged sobre core::types): mode «catalog» → MetadataCatalog { fields: [{ name (dot-path), presentIn, inferredTypes: {tipo-minúscula: conteo} }] }; mode «field» → FieldInspection { field (dot-path), presentIn, missingIn, inferredTypes: {…}, values: [{ value (tipo JSON natural), count }] }. Json directo sin envelope"
+    output_schema: "sí — schemars::schema_for!(MetadataInspection), vía lodestar_app::schemas::metadata_inspect_schema()"
+    errores: ["INVALID_SCHEMA (mode desconocido, o mode «field» sin «field» / con un dot-path inválido)", "WorkspaceError"]
     semantica: >-
-      Descubre el catálogo de tipos (`.lodestar/schema.yaml`) ANTES de escribir: DocType
-      concreto (`requiredFields`/`allowedStatuses`/`fields`/`relations`/`rules`/`bodyTemplate`)
-      o el catálogo completo. Workspace sin schema.yaml → catalog vacío, NO error (compat).
+      Descubre las convenciones de metadata de una base desconocida SIN necesitar un schema
+      (`§20.10`, `REFACTOR_PHASE_2 §Fase 6`; sustituye a `schema_inspect`, retirada con
+      `core::schema`). «catalog» lista cada campo del frontmatter con en cuántos documentos aparece
+      y qué tipos toma; «field» detalla presencia/ausencia, tipos y valores escalares frecuentes de
+      un campo. Puro sobre `core::metadata` (una sola verdad de qué es un campo y de qué tipo,
+      invariante #3). Un workspace sin frontmatter → catálogo vacío, NO error.
 
   - nombre: knowledge_check
     fuente: crates/lodestar-mcp/src/tools.rs:265
@@ -464,6 +468,6 @@ migracion:
     - { viejas: [generate_index, generate_tag_indexes], nueva: "—", estado: "RETIRADAS en E14-H06 → CLI (`index`/`tags`) + auto-regen transaccional; capacidad BORRADA en E15-H02 (core::generate, subcomandos y auto-regen del apply: ningún fichero tiene semántica de catálogo, ARCHITECTURE.md §20.13)" }
   superficie_objetivo: >-
     10 tools activas (alcanzado en E14-H06): workspace_status, knowledge_search, knowledge_get,
-    schema_inspect, knowledge_check, graph_query, impact_analyze, change_plan, change_apply,
+    metadata_inspect, knowledge_check, graph_query, impact_analyze, change_plan, change_apply,
     change_revert (`docs/REFACTOR.md §8`). Ninguna de las 10 tools heredadas sobrevive salvo por su
     reemplazo semántico listado arriba.

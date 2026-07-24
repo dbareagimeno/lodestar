@@ -18,7 +18,7 @@ use lodestar_core::types::{ChangeSet, ChangeSetId, FileMap, RelPath};
 use lodestar_core::DocumentSet;
 
 use crate::error::WorkspaceError;
-use crate::{Workspace, WorkspaceSchema};
+use crate::Workspace;
 
 /// Directorio de staging materializado: contiene el árbol `.md` resultante de aplicar un
 /// [`ChangeSet`] sobre el canónico, bajo `.lodestar/runtime/staging/<changeSetId saneado>/`.
@@ -148,42 +148,30 @@ impl Workspace {
         Ok(StagingDir { path: dir })
     }
 
-    /// Valida un staging materializado contra la política de conformidad **completa** antes de
-    /// publicar (E13-H01; conformidad schema-driven añadida en E14-H04). Construye un [`DocumentSet`]
-    /// desde el árbol de staging y evalúa el **mismo universo de diagnósticos** que
-    /// `App::knowledge_check`/`lodestar check`: los diagnósticos de [`DocumentSet::analyze`] (`§20.9`) MÁS la
-    /// validación schema-driven (`SCHEMA-*`/`REL-*`, `core::schema::validate_schema` +
-    /// `validate_relations`) contra el esquema del workspace. Si el resultado deja **cualquier**
-    /// diagnóstico de nivel `err`, **aborta sin tocar el canónico** y limpia el directorio de
-    /// staging, devolviendo [`WorkspaceError::NonconformantResult`]. Si es conforme, devuelve
-    /// `Ok(())` y el staging queda listo para publicarse.
+    /// Valida un staging materializado contra la política de conformidad antes de publicar (E13-H01).
+    /// Construye un [`DocumentSet`] desde el árbol de staging y evalúa el **mismo universo de
+    /// diagnósticos** que `App::knowledge_check`/`lodestar check`: los diagnósticos de
+    /// [`DocumentSet::analyze`] (`§20.9`). Si el resultado deja **cualquier** diagnóstico de nivel
+    /// `err`, **aborta sin tocar el canónico** y limpia el directorio de staging, devolviendo
+    /// [`WorkspaceError::NonconformantResult`]. Si es conforme, devuelve `Ok(())` y el staging queda
+    /// listo para publicarse.
     ///
     /// **Invariante #3 (una sola verdad computada)**: el veredicto del gate debe coincidir
     /// EXACTAMENTE con el de `App::knowledge_check` scope workspace sobre el mismo resultado. Para
     /// no duplicar la composición se reutiliza [`plan::validate_result`] — la MISMA función que
     /// `change_plan` usa para computar `canApply`/`diagnosticsAfter`, que a su vez compone
-    /// `analyze().diagnostics` + `validate_schema` + `validate_relations` (`plan::all_checks`) y
-    /// declara `conformant == (errors == 0)`. Antes (E13-H01) el gate medía solo
-    /// `analyze().hard_fail()` (los del documento) y NO ejecutaba la validación schema-driven, así que un
-    /// `SCHEMA-REQFIELD`/`REL-*` (level `err`) pasaba el gate y `change_apply` publicaba un
-    /// resultado que `knowledge_check` declararía no conforme: gate transaccional y motor de
-    /// conformidad DIVERGÍAN. Reusar `validate_result` cierra esa divergencia por construcción.
-    ///
-    /// El esquema se carga con [`WorkspaceSchema::load`] (I/O de `workspace`, nunca del core:
-    /// invariante #2 — el core es puro y recibe el `Schema` ya deserializado); un workspace sin
-    /// `.lodestar/schema.yaml` produce `Schema::default()` (vacío/permisivo) y la validación
-    /// schema-driven devuelve cero checks, así que el veredicto de un workspace sin esquema no cambia.
+    /// `analyze().diagnostics` (`plan::all_checks`) y declara `conformant == (errors == 0)`. (Tras
+    /// E20-H03 el universo de conformidad es solo el de descubrimiento/documento de `§20.9`: la
+    /// validación schema-driven `SCHEMA-*`/`REL-*` se retiró con `core::schema`.)
     ///
     /// El gate es estricto por diseño: cuenta solo `err` (no `warn`), nunca se publica un resultado
     /// con errores duros, con independencia de que la config bloquee o no los avisos.
     pub fn validate_staging(&self, staging: &StagingDir) -> Result<(), WorkspaceError> {
         let files = read_tree(staging.path())?;
         let doc_set = DocumentSet::from_files(files);
-        // Esquema del workspace (el mismo que carga `App::knowledge_check`); su ausencia no es error.
-        let schema = WorkspaceSchema::load(&self.root).map_err(WorkspaceError::Io)?;
-        // Conformidad COMPLETA (documento + SCHEMA-* + REL-*): misma composición y mismo criterio
-        // (`conformant == errors == 0`) que `change_plan`/`knowledge_check` (invariante #3).
-        let report = plan::validate_result(&doc_set, &schema);
+        // Conformidad del resultado (diagnósticos de documento, `§20.9`): misma composición y mismo
+        // criterio (`conformant == errors == 0`) que `change_plan`/`knowledge_check` (invariante #3).
+        let report = plan::validate_result(&doc_set);
         if !report.conformant {
             // Aborta: limpia el staging (best-effort) y no toca el canónico.
             let _ = std::fs::remove_dir_all(staging.path());

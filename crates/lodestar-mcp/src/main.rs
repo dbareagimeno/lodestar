@@ -30,8 +30,8 @@ recuento agregado del workspace.
 2. `knowledge_search`: localiza documentos por texto y filtros (snippets y revisión, nunca cuerpos \
 completos).
 3. `knowledge_get`: lee un documento concreto con `include` selectivo y secciones acotadas.
-4. `schema_inspect`: descubre el catálogo de tipos y sus reglas (`.lodestar/schema.yaml`) antes de \
-proponer cambios.
+4. `metadata_inspect`: descubre las convenciones de metadata de la base (campos, tipos, valores \
+frecuentes) sin necesitar un schema, antes de proponer cambios.
 5. `graph_query`: consulta el grafo (backlinks, huérfanos, vecindario, caminos) para entender el \
 contexto de un documento.
 6. `impact_analyze`: evalúa el impacto de un cambio hipotético (afectados, bloqueos, riesgo) antes \
