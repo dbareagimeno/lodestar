@@ -423,10 +423,12 @@ fn index_es_uso() {
     );
 }
 
-/// `help_solo_check_y_reindex` (E15-H03) — **Dado** `lodestar --help`, **Cuando** se imprime,
-/// **Entonces** los únicos subcomandos son `check` y `reindex` (más el `help` que añade clap).
+/// `help_solo_check_y_reindex` (E15-H03; ampliado en E22-H01) — **Dado** `lodestar --help`,
+/// **Cuando** se imprime, **Entonces** los subcomandos son `check`, `reindex` y `migrate-from-okf`
+/// (más el `help` que añade clap). Ninguno de OKF (`init`/`index`/`tags`/`export`/`import`).
 ///
-/// Fase ROJA: hoy el help ofrece además `init`, `index`, `tags`, `export` e `import`.
+/// `migrate-from-okf` (E22-H01) es un diagnóstico de cortesía para repos OKF legados, no un
+/// generador ni ceremonia de creación — no reintroduce la superficie retirada en E15.
 #[test]
 fn help_solo_check_y_reindex() {
     let mut subs = subcomandos_del_help();
@@ -435,11 +437,12 @@ fn help_solo_check_y_reindex() {
     let esperados = vec![
         "check".to_string(),
         "help".to_string(),
+        "migrate-from-okf".to_string(),
         "reindex".to_string(),
     ];
     assert_eq!(
         subs, esperados,
-        "la CLI debe quedar en `check` + `reindex` (más `help` de clap); ofrece: {subs:?}"
+        "la CLI debe quedar en `check` + `reindex` + `migrate-from-okf` (más `help` de clap); ofrece: {subs:?}"
     );
 }
 
@@ -531,5 +534,253 @@ fn cli_no_asciende() {
         out.status.code(),
         Some(0),
         "el subdirectorio es conforme por sí mismo → exit 0 (el hard fail es del ancestro)"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// E22-H01 — `migrate-from-okf --dry-run`: diagnóstico de convenciones OKF legadas
+// (`requirements/epica-22-migracion-publicacion.md`, `REFACTOR_PHASE_2 §Fase 14`,
+//  `ARCHITECTURE.md §20.13`).
+//
+// El comando es un DIAGNÓSTICO de cortesía: recorre el workspace, LISTA las convenciones OKF que
+// §Fase 14 enumera y afirma explícitamente que NO modificó ningún fichero. Nunca es una puerta —
+// mientras pueda leer el workspace sale 0 (no exit 1 por «detectó OKF»). La salida informativa va
+// a STDOUT; los errores, a stderr.
+//
+// CRITERIOS DE DETECCIÓN FIJADOS POR EL AUTOR DE TESTS (los generadores se borraron en E15, así que
+// no queda rastro del generador: se detecta por convención heurística de cortesía, no tiene que ser
+// perfecta):
+//   · index.md raíz        → un `index.md` en la raíz del workspace.
+//   · índice anidado       → un `index.md` que NO está en la raíz (`<dir>/index.md`).
+//   · metadata okf_version → un documento cuyo frontmatter lleva la clave `okf_version`.
+//   · índice de tags       → un `.md` bajo el directorio `tags/` (lo que producía `gen_tag_indexes`).
+//
+// SIN `--dry-run` (decisión del autor): `migrate-from-okf` sin el flag es ERROR DE USO (exit 2), NO
+// un alias del dry-run. En v0.3 solo existe la forma diagnóstica; exigir `--dry-run` explícito deja
+// la palabra libre para una futura forma «aplicadora» sin invocarla por accidente. Se fija en
+// `migrate_sin_dry_run_es_uso`.
+
+/// Monta bajo `dir` un workspace con las convenciones OKF que `§Fase 14` enumera: `index.md` raíz
+/// (con `okf_version`), un índice anidado (`seccion/index.md`), un índice de tags generado
+/// (`tags/algo.md`) y un documento normal cualquiera.
+fn workspace_okf(dir: &std::path::Path) {
+    // `index.md` raíz + metadata `okf_version`.
+    write(
+        dir,
+        "index.md",
+        "---\ntype: Index\ntitle: Bundle\ndescription: Índice del bundle\nokf_version: \"0.1\"\n---\n\n# Bundle\n",
+    );
+    // Índice anidado: un `index.md` que NO está en la raíz.
+    write(
+        dir,
+        "seccion/index.md",
+        "---\ntype: Index\ntitle: Sección\ndescription: Índice anidado\n---\n\n# Sección\n",
+    );
+    // Índice de tags generado: un `.md` bajo `tags/`.
+    write(
+        dir,
+        "tags/algo.md",
+        "---\ntype: Index\ntitle: \"Tag: algo\"\n---\n\n# Tag: algo\n",
+    );
+    // Documento normal (para que el workspace no sea solo índices).
+    write(
+        dir,
+        "a.md",
+        "---\ntype: Nota\ntitle: A\ndescription: d\n---\n\n# H\n\ncuerpo\n",
+    );
+}
+
+/// Snapshot determinista del árbol de ficheros bajo `dir`: lista ordenada de `(ruta relativa,
+/// bytes)`. Captura contenido Y existencia, así detecta tanto una modificación de contenido como un
+/// fichero creado o borrado (p. ej. un `.gitignore` o un `.lodestar/` que el comando escribiera sin
+/// querer — `Workspace::open` sí los tocaría, por lo que el diagnóstico debe abrir en modo
+/// hermético).
+fn snapshot_arbol(dir: &std::path::Path) -> Vec<(String, Vec<u8>)> {
+    fn recorrer(base: &std::path::Path, actual: &std::path::Path, acc: &mut Vec<(String, Vec<u8>)>) {
+        let mut entradas: Vec<std::path::PathBuf> = std::fs::read_dir(actual)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .collect();
+        entradas.sort();
+        for p in entradas {
+            if p.is_dir() {
+                recorrer(base, &p, acc);
+            } else {
+                let rel = p.strip_prefix(base).unwrap().to_string_lossy().into_owned();
+                acc.push((rel, std::fs::read(&p).unwrap()));
+            }
+        }
+    }
+    let mut acc = Vec::new();
+    recorrer(dir, dir, &mut acc);
+    acc.sort();
+    acc
+}
+
+/// E22-H01 `dry_run_detecta`: **Dado** un workspace con `index.md` raíz + `okf_version` + un índice
+/// de tags (más un índice anidado), **Cuando** se corre `migrate-from-okf --dry-run`, **Entonces**
+/// los detecta y los lista en su salida, y declara que no modificó nada.
+///
+/// Fase ROJA: hoy `migrate-from-okf` no existe como subcomando ⇒ clap responde «unrecognized
+/// subcommand» con exit 2 y stdout vacío, así que fallan tanto el exit 0 como las aserciones de
+/// listado.
+#[test]
+fn dry_run_detecta() {
+    let dir = temp_dir("mfo-detecta");
+    workspace_okf(&dir);
+
+    let out = bin()
+        .arg("--path")
+        .arg(&dir)
+        .args(["migrate-from-okf", "--dry-run"])
+        .output()
+        .unwrap();
+
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "el diagnóstico sale 0 mientras pueda leer el workspace (no es puerta); stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let lower = stdout.to_lowercase();
+
+    // index.md raíz: una línea que menciona `index.md` SIN separador de path (el anidado lleva `/`,
+    // así que esta comprobación no la satisface el `seccion/index.md`).
+    assert!(
+        stdout.lines().any(|l| l.contains("index.md") && !l.contains('/')),
+        "el informe debe listar el `index.md` raíz; stdout=\n{stdout}"
+    );
+    // Índice anidado.
+    assert!(
+        stdout.contains("seccion/index.md"),
+        "el informe debe listar el índice anidado `seccion/index.md`; stdout=\n{stdout}"
+    );
+    // Metadata `okf_version`: clave de frontmatter, token estable en cualquier idioma de salida.
+    assert!(
+        stdout.contains("okf_version"),
+        "el informe debe señalar la metadata `okf_version`; stdout=\n{stdout}"
+    );
+    // Índice de tags generado.
+    assert!(
+        stdout.contains("tags/algo.md"),
+        "el informe debe listar el índice de tags `tags/algo.md`; stdout=\n{stdout}"
+    );
+    // Declara explícitamente que no modificó nada. Ancla `modif`, común a «modified»/«modificó»/
+    // «modificar» — deliberadamente laxa en el texto: la garantía dura de «cero cambios» la aporta
+    // `dry_run_no_modifica` comparando el árbol byte a byte.
+    assert!(
+        lower.contains("modif"),
+        "el informe debe declarar que no modificó ningún fichero; stdout=\n{stdout}"
+    );
+}
+
+/// E22-H01 `dry_run_no_modifica`: **Dado** ese workspace OKF, **Cuando** se corre
+/// `migrate-from-okf --dry-run`, **Entonces** ningún fichero cambia (snapshot del árbol idéntico
+/// antes/después: mismo conjunto de rutas y mismos bytes).
+///
+/// Fase ROJA: `migrate-from-okf` no existe ⇒ exit 2. La aserción de exit 0 falla; el árbol queda
+/// intacto pero eso NO basta (ver la guarda anti-vacuo abajo).
+#[test]
+fn dry_run_no_modifica() {
+    let dir = temp_dir("mfo-no-modifica");
+    workspace_okf(&dir);
+
+    let antes = snapshot_arbol(&dir);
+
+    let out = bin()
+        .arg("--path")
+        .arg(&dir)
+        .args(["migrate-from-okf", "--dry-run"])
+        .output()
+        .unwrap();
+
+    // GUARDA ANTI-VACUO: sin esta aserción, un subcomando inexistente (exit 2, no escribe nada)
+    // dejaría el árbol intacto y el test pasaría SIN implementación. Exigir el exit 0 obliga a que
+    // el diagnóstico EXISTA y CORRA antes de que la comparación del árbol signifique algo.
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "el diagnóstico debe ejecutarse (exit 0) para que comparar el árbol sea significativo; stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let despues = snapshot_arbol(&dir);
+    assert_eq!(
+        antes, despues,
+        "`migrate-from-okf --dry-run` no debe modificar, crear ni borrar ningún fichero del árbol"
+    );
+}
+
+/// E22-H01 `dry_run_workspace_limpio`: **Dado** un workspace SIN convenciones OKF (la estructura
+/// arbitraria de `§Resultado esperado`: sin `index.md`, sin `okf_version`, sin `tags/`), **Cuando**
+/// se corre `migrate-from-okf --dry-run`, **Entonces** reporta que no hay nada que migrar y sale 0.
+///
+/// El discriminante robusto frente a `dry_run_detecta` es `okf_version`: sobre un workspace limpio
+/// el informe NO debe reportarla (mientras que sobre el OKF sí). Una sola implementación no puede
+/// satisfacer ambos salvo que detecte de verdad la convención.
+///
+/// Fase ROJA: `migrate-from-okf` no existe ⇒ exit 2 (falla el exit 0) y stdout vacío (falla el
+/// «reporta algo»).
+#[test]
+fn dry_run_workspace_limpio() {
+    let dir = temp_dir("mfo-limpio");
+    lodestar_fixtures::materialize(&lodestar_fixtures::arbitrary(), &dir).unwrap();
+
+    let out = bin()
+        .arg("--path")
+        .arg(&dir)
+        .args(["migrate-from-okf", "--dry-run"])
+        .output()
+        .unwrap();
+
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "un workspace sin OKF es diagnosticable y sale 0; stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(
+        !stdout.is_empty(),
+        "el diagnóstico debe reportar algo aunque no haya nada que migrar"
+    );
+    // Sin convenciones OKF, el informe no debe reportar `okf_version` como detectada (el ancla más
+    // específica: es una clave de frontmatter que solo aparecería si se hubiera encontrado).
+    assert!(
+        !stdout.contains("okf_version"),
+        "sobre un workspace limpio el informe no debe reportar `okf_version` detectada; stdout=\n{stdout}"
+    );
+}
+
+/// E22-H01 `migrate_sin_dry_run_es_uso` (decisión del autor sobre «sin `--dry-run`»):
+/// **Dado** `migrate-from-okf` **sin** `--dry-run`, **Cuando** se ejecuta, **Entonces** es error de
+/// uso (exit 2) y el mensaje guía hacia `--dry-run` — no es un alias del dry-run.
+///
+/// Fase ROJA (no vacuo): hoy el rojo es «unrecognized subcommand», cuyo mensaje **no** contiene
+/// `dry-run`; el exit 2 accidental del subcomando inexistente NO basta para pasar, porque además se
+/// exige que el error mencione `dry-run` — que solo aparecerá cuando el subcomando exista con el
+/// flag requerido.
+#[test]
+fn migrate_sin_dry_run_es_uso() {
+    let dir = temp_dir("mfo-sin-flag");
+    workspace_okf(&dir);
+
+    let out = bin()
+        .arg("--path")
+        .arg(&dir)
+        .arg("migrate-from-okf")
+        .output()
+        .unwrap();
+
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "`migrate-from-okf` sin `--dry-run` es error de uso (exit 2), no un alias del dry-run"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("dry-run"),
+        "el error de uso debe guiar hacia `--dry-run`; stderr=\n{stderr}"
     );
 }
