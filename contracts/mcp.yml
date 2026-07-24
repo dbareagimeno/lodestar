@@ -285,7 +285,7 @@ tools:
       - { nombre: field, tipo: string, requerido: false, semantica: "path punteado del campo a inspeccionar (p. ej. «status» o «service.tier»); requerido cuando mode==«field». Path inválido o ausente → INVALID_SCHEMA" }
     retorno: "MetadataInspection (lodestar_app, enum untagged sobre core::types): mode «catalog» → MetadataCatalog { fields: [{ name (dot-path), presentIn, inferredTypes: {tipo-minúscula: conteo} }] }; mode «field» → FieldInspection { field (dot-path), presentIn, missingIn, inferredTypes: {…}, values: [{ value (tipo JSON natural), count }] }. Json directo sin envelope"
     output_schema: "sí — schemars::schema_for!(MetadataInspection), vía lodestar_app::schemas::metadata_inspect_schema()"
-    errores: ["INVALID_SCHEMA (mode desconocido, o mode «field» sin «field» / con un dot-path inválido)", "WorkspaceError"]
+    errores: ["«falta el parámetro «mode»»", "INVALID_SCHEMA (mode desconocido, o mode «field» sin «field» / con un dot-path inválido)", "WorkspaceError"]
     semantica: >-
       Descubre las convenciones de metadata de una base desconocida SIN necesitar un schema
       (`§20.10`, `REFACTOR_PHASE_2 §Fase 6`; sustituye a `schema_inspect`, retirada con
@@ -364,17 +364,16 @@ tools:
       - { nombre: depth, tipo: integer, requerido: false, minimo: 1, semantica: "profundidad del blast-radius entrante; por defecto cubre todo el alcance transitivo (neighborhood(In) a profundidad máxima)" }
     retorno: "ImpactReport (lodestar_app): { summary: { directlyAffected, transitivelyAffected, blockingReferences, risk }, affectedDocuments: [RelPath], blockingReferences: [{ path, reason }], recommendations: [string] } — json directo, sin envelope"
     output_schema: "sí — schemars::schema_for!(ImpactReport), vía lodestar_app::schemas::impact_analyze_schema()"
-    errores: ["«falta el parámetro «ref»»", "«falta el parámetro «proposedOperation.kind»»", "DOCUMENT_NOT_FOUND (ref no resuelve)", "INTERNAL_IO_ERROR (carga de schema)", "WorkspaceError"]
+    errores: ["«falta el parámetro «ref»»", "«falta el parámetro «proposedOperation.kind»»", "DOCUMENT_NOT_FOUND (ref no resuelve)", "INVALID_SCHEMA (kind fuera de {move, delete})", "INTERNAL_IO_ERROR", "WorkspaceError"]
     semantica: >-
       Analiza el impacto de un cambio hipotético sobre `ref` SIN materializarlo (aplicar es
       E12/E13). `directlyAffected` = nº de backlinks directos entrantes (DocumentSet::backlinks.inbound).
       `transitivelyAffected` = tamaño del blast-radius entrante (DocumentSet::neighborhood(ref, ∞,
       Direction::In) excluido el propio ref) — verdad del core (invariante #3), idéntico a
       Store::blast_radius (verificado por el test impacto_paridad_core). `affectedDocuments` = esos
-      paths del blast-radius (orden estable). `blockingReferences` (SOLO kind:delete) = cada documento
-      que declara una relación tipada del schema (RelationDef, E11-H03) cuyo target es el ref, como
-      { path, reason }; los enlaces sueltos de cuerpo Markdown NO cuentan (solo dependencias
-      estructurales tipadas). `risk` ∈ {"low","medium","high"} (wire inglés): «high» si hay bloqueos
+      paths del blast-radius (orden estable). `blockingReferences` (SOLO kind:delete) queda **siempre vacío** desde E20-H03 (se retiró
+      core::schema/RelationDef; la forma de wire `[{ path, reason }]` se conserva por compatibilidad).
+      Un enlace Markdown roto por un delete se refleja en la validación del plan, no aquí. `risk` ∈ {"low","medium","high"} (wire inglés): «high» si hay bloqueos
       o los afectados directos son muchos, «medium» para impacto moderado, «low» si no. `recommendations`
       = acciones sugeridas (texto español), vacío si el riesgo es bajo.
 
@@ -393,7 +392,7 @@ tools:
       - { nombre: policy, tipo: object, requerido: false, semantica: "{ requireConformantResult?, allowWarnings? } (PlanPolicy, E12-H04); por defecto exige conformidad y permite warnings" }
     retorno: "PlanResult (lodestar_app): { changeSetId, baseWorkspaceRevision, planHash, canApply, expiresAt, normalizedOperations: [NormalizedOperation], risk, semanticDiff, impact: { affectedDocuments, affectedCount }, capturedRevisions: { «path»: «blake3:…» }, diagnosticsBefore, diagnosticsAfter } — json directo, sin envelope. `capturedRevisions` (E21-H02) lleva una entrada por documento de una selección masiva (su DocumentRevision, el snapshot de §Fase 12); vacío {} en la forma-array"
     output_schema: "sí — schemars::schema_for!(PlanResult), vía lodestar_app::schemas::change_plan_schema()"
-    errores: ["REVISION_CONFLICT (workspace o documento cambiado)", "INVALID_SCHEMA (op desconocida o parámetro inválido)", "DOCUMENT_NOT_FOUND (objetivo de normalización inexistente)", "INBOUND_LINKS_EXIST (delete «reject» con entrantes)", "RELATION_CONSTRAINT_VIOLATION (add_relation viola RelationDef)", "PERMISSION_DENIED (path-traversal)", "INTERNAL_IO_ERROR (carga de config/schema)", "WorkspaceError"]
+    errores: ["REVISION_CONFLICT (workspace o documento cambiado)", "INVALID_SCHEMA (op desconocida o parámetro inválido)", "DOCUMENT_NOT_FOUND (objetivo de normalización inexistente)", "INBOUND_LINKS_EXIST (delete «reject» con entrantes)", "PERMISSION_DENIED (path-traversal)", "INTERNAL_IO_ERROR (carga de config)", "WorkspaceError"]
     semantica: >-
       Orquesta un plan de cambios SIN escribir (invariante #1; aplicar es change_apply, E13): toda
       la simulación es sobre un DocumentSet en memoria. Acepta DOS formas de wire: la forma-ARRAY
