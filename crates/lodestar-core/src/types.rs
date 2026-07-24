@@ -1667,7 +1667,10 @@ pub enum Expression {
 /// El tipo YAML **observado** de un valor, para poblar los operandos de un [`TypeError`] («qué
 /// encontró»). Es la clasificación mínima que distingue las cinco familias que el lenguaje trata de
 /// forma distinta (escalar ordenable vs no ordenable vs lista vs mapa).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// `PartialOrd`/`Ord` (E20-H01): [`ValueType`] es la clave del mapa `inferred_types` de
+/// [`FieldStats`]/[`FieldInspection`]; el orden de declaración da un [`BTreeMap`] determinista.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ValueType {
     /// `null`.
     Null,
@@ -1735,4 +1738,69 @@ pub enum TypeError {
         /// El tipo que tenía el campo (nunca `List`).
         found: ValueType,
     },
+}
+
+// ---------------------------------------------------------------------------
+// Inspección de metadata: MetadataCatalog · FieldStats · FieldInspection · ValueCount
+// (`ARCHITECTURE.md §20.10`, `REFACTOR_PHASE_2 §Fase 6`, E20-H01/H02 — supersede `schema_inspect`)
+// ---------------------------------------------------------------------------
+//
+// La FORMA de los tipos de retorno de `crate::metadata::catalog`/`inspect_field`: el contrato de
+// wire que hereda la tool `metadata_inspect` (E20-H03). Igual que `Expression`/`QueryValue`
+// (E19-H01) difirieron su serde a E19-H03, aquí NO se derivan `Serialize`/`Deserialize` ni
+// `JsonSchema`: E20-H03 fija el mapeo de wire (el `field` punteado —`"name"` en el catálogo,
+// `"field"` en la inspección de `§Fase 6`— y la clave de `inferred_types` a su nombre en minúscula,
+// `"string"`/`"number"`) junto con su round-trip. Aquí se conservan [`FieldPath`] y [`ValueType`]
+// como identidad —«una sola verdad de qué es un campo y de qué tipo» (invariante #3)—, no una
+// representación paralela en `String`.
+
+/// El **catálogo de propiedades** del workspace (`§Fase 6`, «Catálogo de propiedades»): una fila por
+/// `field_path` que aparece en algún documento.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MetadataCatalog {
+    /// Los campos del workspace, en orden **determinista** por [`FieldPath`].
+    pub fields: Vec<FieldStats>,
+}
+
+/// Estadísticas de un `field_path` en el catálogo (`§Fase 6`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct FieldStats {
+    /// El path de la propiedad, **tal como lo emite** [`ParsedFrontmatter::walk`]: incluye los mapas
+    /// intermedios (`service`) además de las hojas direccionables (`service.name`, `service.tier`),
+    /// para que el catálogo enumere el mismo conjunto de campos que indexa el store v2 (E18) — una
+    /// sola verdad de qué es un campo (invariante #3).
+    pub field: FieldPath,
+    /// Nº de documentos en los que la propiedad aparece.
+    pub present_in: usize,
+    /// Tipos observados y su conteo, clasificando cada valor con [`ValueType::of`]. Invariante:
+    /// `inferred_types.values().sum() == present_in` (una observación de tipo por documento presente).
+    pub inferred_types: BTreeMap<ValueType, usize>,
+}
+
+/// La **inspección de una propiedad** (`§Fase 6`, «Inspección de una propiedad»).
+#[derive(Debug, Clone, PartialEq)]
+pub struct FieldInspection {
+    /// El path inspeccionado.
+    pub field: FieldPath,
+    /// Nº de documentos en los que aparece.
+    pub present_in: usize,
+    /// Nº de documentos en los que NO aparece. Invariante:
+    /// `present_in + missing_in == nº total de documentos del workspace`.
+    pub missing_in: usize,
+    /// Tipos observados y su conteo ([`ValueType::of`] de cada valor).
+    pub inferred_types: BTreeMap<ValueType, usize>,
+    /// Los valores **escalares** más frecuentes con su conteo, en orden **determinista**: por conteo
+    /// descendente y, a igual conteo, por el texto del valor ascendente. Un valor lista u objeto
+    /// cuenta en `present_in`/`inferred_types` pero **no** aparece aquí (`§Fase 6`: solo escalares).
+    pub values: Vec<ValueCount>,
+}
+
+/// Un valor escalar observado y en cuántos documentos aparece (`§Fase 6`, `{value, count}`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ValueCount {
+    /// El valor escalar, **con su tipo YAML real** (sin coerción: el número `2` y el string `"2"`
+    /// son valores distintos, con conteos distintos).
+    pub value: serde_yaml::Value,
+    /// Cuántos documentos tienen exactamente ese valor en la propiedad.
+    pub count: usize,
 }
