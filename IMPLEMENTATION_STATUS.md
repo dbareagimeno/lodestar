@@ -825,3 +825,27 @@ superficie de producto; git queda como crate dormido) y `DECISIONES.md §0`. Des
   aún reconstruía el `DocumentSet` sin `other_files` (enlace a código: `warn_count` store=2 vs
   core=1), y H04 lo cerró propagándolos a `synth::link_diagnostics` y al trait `DocumentStore`.
   **329 tests · E18 COMPLETA.** El store se reconstruye sin un solo dato OKF.
+
+### E19 — Lenguaje de consulta genérico
+
+- ✅ **E19-H01** — **Evaluador tipado**. `Expression`/`ComparisonOperator`/`QueryValue`/`ValueType`/
+  `TypeError` en `core::types`; `eval::evaluate`. La asimetría rectora: orden cruzado (número vs
+  string) es `TypeError`, igualdad cruzada es `false`. Va **siempre** sobre `get`, nunca `get_text`.
+  `TypeError` es tipo propio (no variante de `CoreError`): un `where` mal tipado es entrada del
+  agente, no un fallo del núcleo.
+- ✅ **E19-H02/H04** — **Parser textual + namespaces**. `parse` es descenso recursivo a mano, cero
+  deps. La abreviatura normaliza a la forma **desnuda** (`frontmatter.status` → `["status"]`).
+  `document.*`/`graph.*` **sintetizan** un `Value` de su tipo natural y lo pasan por la **misma**
+  maquinaria de tipos de H01, así que `graph.backlinks >= "x"` es un `TypeError` gratis.
+- ✅ **E19-H03** — **Filtro JSON + equivalencia**. `filter::from_json` con un tipo wire intermedio;
+  `value`/`operator` deserializan solos por los atributos serde de H01. La equivalencia con el `where`
+  textual es **exacta** porque comparten `build_field_path` — mismo AST, comparado estructuralmente.
+- ✅ **E19-H05** — **Cableado a `knowledge_search`** (cierra E19). `where`/`filter` → `Expression`,
+  intersectados con el FTS de `text`. `SearchResult` pierde los campos OKF. La DSL de subcadena
+  (`query.rs`) se borra entera, pero `loose_text_match` se **reubica** en `text.rs` porque el store
+  lo invoca. Un `TypeError` por-documento **excluye** ese documento sin abortar la búsqueda.
+  **362 tests · E19 COMPLETA.**
+  - **Verificado end-to-end** sobre un proyecto real: `where "status = \"accepted\" and priority >= 2"`
+    y el `filter` JSON equivalente dan el **mismo** resultado; `owners contains "security"` filtra por
+    un valor de lista; `priority >= "high"` excluye los documentos con `priority` numérico (la regla
+    de tipos, viva a través de MCP).
