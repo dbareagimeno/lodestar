@@ -3892,3 +3892,282 @@ fn rechaza_escape() {
         "un escape rechazado no debe escribir ningún .md: {nuevos_md:?}"
     );
 }
+
+// =============================================================================
+// E19-H05 — Cablear el lenguaje de consulta a `knowledge_search`
+// =============================================================================
+//
+// UBICACIÓN (decisión del autor de tests). Los 4 criterios se ejercitan **e2e por la tool MCP**
+// (frontera JSON-RPC), no contra `App::knowledge_search` directo, por tres razones:
+//   1. Lo que la historia cambia es el **contrato de wire**: los `arguments` (`where`/`filter`
+//      sustituyen a `filters`) y la **forma del `SearchResult`** (pierde `type`/`status`/
+//      `description`/`tags`). Probarlo por JSON-RPC fija ESE contrato sin acoplar los tests a la
+//      firma Rust interna que el implementador aún ha de diseñar (`knowledge_search(text, where,
+//      filter, …)`, la retirada de `SearchFilters`) — la misma razón deliberada que ya movió a e2e
+//      los tests de E10-H09 (ver el bloque de esa historia, arriba).
+//   2. Al no referenciar ningún símbolo Rust nuevo, estos tests **compilan contra el binario MCP
+//      actual** y el ROJO es puro fallo de aserción (no `todo!()` ni símbolo inexistente): NO hace
+//      falta ningún stub de producción. El dispatcher actual (`main.rs`/`tools.rs`) lee solo
+//      `text`/`filters`/`sort`/`limit`/`cursor` y NO valida `additionalProperties`, así que hoy
+//      IGNORA `where`/`filter` → la búsqueda devuelve TODOS los documentos (`text` vacío) y las
+//      aserciones muerden por la razón correcta (el lenguaje no está cableado).
+//   3. El test insignia `search_propiedad_de_grafo` es más fuerte e2e: demuestra que TODA la tubería
+//      (dispatch MCP → `App` → evaluador del core que ve el `Analysis`/grafo) está cableada, no solo
+//      una unidad.
+//
+// CONTRATO nuevo fijado (fase ROJA — el cableado del lenguaje aún NO existe):
+//   arguments: { text?: string, where?: string, filter?: object(§20.10), sort?, limit?, cursor? }
+//     · `where` (textual) y `filter` (JSON) → el MISMO `Expression` (E19-H01…H04) → filtro,
+//       intersectado con el FTS de `text` (como hoy).
+//   structuredContent.results[*]: conserva `path`, `title` (derivado) y `snippet` (+ `revision`,
+//     `score`, `id` genéricos); NO lleva `type`/`status`/`description`/`tags` privilegiados.
+//
+// NOTA para el implementador (fuera de mi alcance — NO son tests):
+//   · `contracts/mcp.yml` cambia: el `inputSchema` de `knowledge_search` pasa de `filters` a
+//     `where`/`filter`, y el `SearchResult` pierde los 4 campos OKF. Es superficie, no test; lo
+//     verifica `/contrato --check`, no un `#[test]`.
+//   · Rompen al retirar `SearchFilters`/`query`/DSL vieja (inventario en el informe): en este mismo
+//     fichero, `search_filtra_tipo`; en `lodestar-app/tests/escala.rs`,
+//     `bench_search_payload_acotado`; en `lodestar-core/tests/core.rs`, los tests de `DocumentSet::
+//     query`. Su migración/retirada es trabajo del implementador (no los toco: solo añado).
+
+/// Construye la línea JSON-RPC de un `tools/call` a `knowledge_search` con `arguments` arbitrarios.
+/// Usa `serde_json::json!` para no pelear con el escapado de comillas del `where`.
+fn ks_call(arguments: serde_json::Value) -> String {
+    serde_json::json!({
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": { "name": "knowledge_search", "arguments": arguments }
+    })
+    .to_string()
+}
+
+/// Workspace con documentos de distinto `status` en frontmatter y, por lo demás, texto/metadata
+/// indistinguibles: el único criterio que separa los aceptados es el valor de la propiedad `status`.
+fn workspace_estados() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "index.md",
+        "---\ntitle: Índice\n---\n\n# Índice\n\ncontenido común.\n",
+    );
+    write(
+        dir.path(),
+        "aceptada-uno.md",
+        "---\ntitle: Aceptada uno\nstatus: accepted\n---\n\n# Aceptada uno\n\ncontenido común.\n",
+    );
+    write(
+        dir.path(),
+        "aceptada-dos.md",
+        "---\ntitle: Aceptada dos\nstatus: accepted\n---\n\n# Aceptada dos\n\ncontenido común.\n",
+    );
+    write(
+        dir.path(),
+        "borrador.md",
+        "---\ntitle: Borrador\nstatus: draft\n---\n\n# Borrador\n\ncontenido común.\n",
+    );
+    write(
+        dir.path(),
+        "revision.md",
+        "---\ntitle: Revisión\nstatus: review\n---\n\n# Revisión\n\ncontenido común.\n",
+    );
+    dir
+}
+
+/// E19-H05 · Criterio `search_where`:
+/// Dado `knowledge_search {where: "status = \"accepted\""}`, Cuando se busca, Entonces solo aparecen
+/// los documentos cuyo `status` de frontmatter es `accepted` (los demás, y `index.md` sin `status`,
+/// quedan fuera). NO vacuo: los documentos de otro `status` deben quedar EXCLUIDOS (un stub que hoy
+/// ignora `where` los devuelve todos y muerde aquí).
+#[test]
+fn search_where() {
+    let dir = workspace_estados();
+    let resp = roundtrip(
+        dir.path(),
+        &[ks_call(serde_json::json!({ "where": "status = \"accepted\"" })).as_str()],
+        1,
+    );
+    let paths = search_paths(&resp[0]);
+    let tiene = |p: &str| paths.iter().any(|x| x == p);
+
+    assert!(
+        !paths.is_empty(),
+        "el `where` `status = \"accepted\"` debe devolver al menos un documento: {resp:?}"
+    );
+    for aceptada in ["aceptada-uno.md", "aceptada-dos.md"] {
+        assert!(
+            tiene(aceptada),
+            "el documento `{aceptada}` (status: accepted) debe aparecer con `where` status=accepted: {resp:?}"
+        );
+    }
+    for otra in ["borrador.md", "revision.md"] {
+        assert!(
+            !tiene(otra),
+            "el documento `{otra}` (status != accepted) NO debe aparecer: el `where` filtra por metadata: {resp:?}"
+        );
+    }
+    assert!(
+        !tiene("index.md"),
+        "`index.md` no tiene `status`: un campo ausente en una comparación es `false`, no debe casar `status = \"accepted\"`: {resp:?}"
+    );
+}
+
+/// E19-H05 · Criterio `search_filter_equivalente`:
+/// Dado el `filter` JSON equivalente al `where` anterior, Cuando se busca por ambas vías, Entonces
+/// devuelven EL MISMO conjunto de documentos — y ese conjunto es exactamente los aceptados. La
+/// equivalencia se prueba de PUNTA A PUNTA por la superficie de `knowledge_search` (la equivalencia
+/// a nivel de AST ya la cubre E19-H03; aquí NO se duplica). El ancla al conjunto esperado impide el
+/// pase vacuo de «ambas vías ignoran el filtro y devuelven todo».
+#[test]
+fn search_filter_equivalente() {
+    let dir = workspace_estados();
+
+    let por_where = roundtrip(
+        dir.path(),
+        &[ks_call(serde_json::json!({ "where": "status = \"accepted\"" })).as_str()],
+        1,
+    );
+    let mut set_where = search_paths(&por_where[0]);
+    set_where.sort();
+
+    let por_filter = roundtrip(
+        dir.path(),
+        &[ks_call(serde_json::json!({
+            "filter": { "field": "frontmatter.status", "operator": "equals", "value": "accepted" }
+        }))
+        .as_str()],
+        1,
+    );
+    let mut set_filter = search_paths(&por_filter[0]);
+    set_filter.sort();
+
+    // (1) Mismo conjunto por ambas vías: `where` textual y `filter` JSON son equivalentes.
+    assert_eq!(
+        set_where, set_filter,
+        "`where` y `filter` equivalentes deben devolver EL MISMO conjunto de documentos: \
+         where={por_where:?} filter={por_filter:?}"
+    );
+
+    // (2) Y ese conjunto es exactamente los aceptados (ancla no vacía ⇒ no vacuo).
+    let mut esperado = vec!["aceptada-dos.md".to_string(), "aceptada-uno.md".to_string()];
+    esperado.sort();
+    assert_eq!(
+        set_filter, esperado,
+        "el `filter` equivalente debe seleccionar exactamente los documentos con status=accepted, \
+         no todos los documentos: {por_filter:?}"
+    );
+}
+
+/// Workspace con documentos enlazados y no enlazados, indistinguibles por texto/metadata: solo el
+/// GRAFO los separa. `index.md` enlaza a `enlazado.md` (1 backlink); `huerfano.md` no recibe enlaces.
+fn workspace_enlaces() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "index.md",
+        "---\ntitle: Índice\n---\n\n# Índice\n\n* [Enlazado](enlazado.md)\n",
+    );
+    write(
+        dir.path(),
+        "enlazado.md",
+        "---\ntitle: Enlazado\n---\n\n# Enlazado\n\ncontenido idéntico.\n",
+    );
+    write(
+        dir.path(),
+        "huerfano.md",
+        "---\ntitle: Huérfano\n---\n\n# Huérfano\n\ncontenido idéntico.\n",
+    );
+    dir
+}
+
+/// E19-H05 · Criterio `search_propiedad_de_grafo` (TEST INSIGNIA):
+/// Dado `knowledge_search {where: "graph.backlinks = 0"}`, Cuando se busca, Entonces devuelve los
+/// documentos NO enlazados (`huerfano.md`) y EXCLUYE los enlazados (`enlazado.md`, con 1 backlink
+/// desde `index.md`). Es la prueba de que detrás está el evaluador NUEVO —que ve el grafo— y no un
+/// grep de subcadena, que no puede expresar `graph.backlinks = 0`. `enlazado.md` y `huerfano.md`
+/// tienen cuerpo/metadata idénticos: solo la propiedad calculada del grafo los distingue.
+#[test]
+fn search_propiedad_de_grafo() {
+    let dir = workspace_enlaces();
+    let resp = roundtrip(
+        dir.path(),
+        &[ks_call(serde_json::json!({ "where": "graph.backlinks = 0" })).as_str()],
+        1,
+    );
+    let paths = search_paths(&resp[0]);
+    let tiene = |p: &str| paths.iter().any(|x| x == p);
+
+    assert!(
+        !paths.is_empty(),
+        "`graph.backlinks = 0` debe devolver los documentos no enlazados: {resp:?}"
+    );
+    assert!(
+        tiene("huerfano.md"),
+        "`huerfano.md` no recibe enlaces (backlinks 0): debe aparecer con `graph.backlinks = 0`: {resp:?}"
+    );
+    assert!(
+        !tiene("enlazado.md"),
+        "`enlazado.md` recibe 1 backlink desde `index.md`: NO debe aparecer con `graph.backlinks = 0` \
+         (una consulta de subcadena no podría excluirlo — es la prueba del evaluador de grafo): {resp:?}"
+    );
+}
+
+/// Workspace con un documento cuyo frontmatter TIENE los antiguos campos privilegiados OKF
+/// (`type`/`status`/`description`/`tags`) poblados y un cuerpo que casa «autenticación».
+fn workspace_con_metadata() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "index.md",
+        "---\ntitle: Índice\n---\n\n# Índice\n\n* [doc](doc.md)\n",
+    );
+    write(
+        dir.path(),
+        "doc.md",
+        "---\ntype: decision\ntitle: Documento con metadata\nstatus: accepted\ndescription: Una descripción\ntags:\n  - seguridad\n  - redes\n---\n\n# Documento\n\ncuerpo sobre autenticación y redes.\n",
+    );
+    dir
+}
+
+/// E19-H05 · Criterio `search_result_sin_campos_okf`:
+/// Dado un documento cuyo frontmatter lleva `type`/`status`/`description`/`tags`, Cuando aparece en
+/// `knowledge_search`, Entonces el resultado del wire NO surfacea esos campos como privilegiados —
+/// aunque estén en el frontmatter— y sí conserva `path`, `title` (derivado) y `snippet`.
+#[test]
+fn search_result_sin_campos_okf() {
+    let dir = workspace_con_metadata();
+    let resp = roundtrip(
+        dir.path(),
+        &[ks_call(serde_json::json!({ "text": "autenticación" })).as_str()],
+        1,
+    );
+    let results = search_paths_values(&resp[0]);
+
+    let doc = results
+        .iter()
+        .find(|r| r["path"] == "doc.md")
+        .unwrap_or_else(|| panic!("el documento que casa «autenticación» debe aparecer: {resp:?}"));
+
+    // Conserva `path`, `title` (derivado) y `snippet`.
+    assert_eq!(
+        doc["path"], "doc.md",
+        "el resultado conserva `path` (identidad del documento): {doc:?}"
+    );
+    assert!(
+        !doc["title"].as_str().unwrap_or("").is_empty(),
+        "el resultado conserva un `title` derivado no vacío: {doc:?}"
+    );
+    assert!(
+        !doc["snippet"].as_str().unwrap_or("").is_empty(),
+        "el resultado conserva un `snippet` no vacío: {doc:?}"
+    );
+
+    // NO surfacea los antiguos campos privilegiados OKF, aunque estén en el frontmatter del documento.
+    for campo in ["type", "status", "description", "tags"] {
+        assert!(
+            doc.get(campo).is_none(),
+            "el resultado de `knowledge_search` NO debe llevar el campo privilegiado OKF `{campo}`: \
+             está en el frontmatter, pero deja de ser un campo de wire (el filtrado por metadata pasa \
+             por el lenguaje): {doc:?}"
+        );
+    }
+}
