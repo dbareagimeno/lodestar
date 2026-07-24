@@ -224,21 +224,25 @@ tools:
       siempre `false` hasta E13-H06.
 
   - nombre: knowledge_search
-    fuente: crates/lodestar-mcp/src/tools.rs:214
-    historia: E10-H09
+    fuente: crates/lodestar-mcp/src/tools.rs:188
+    historia: E10-H09; where/filter en E19-H05
     params:
-      - { nombre: text, tipo: string, requerido: false, semantica: "texto libre, subcadena (misma DSL que el prototipo); vacío = todos los documentos" }
-      - { nombre: filters, tipo: "object (SearchFilters)", requerido: false, semantica: "types/statuses/tags (listas, case-insensitive) + pathPrefix; filtros avanzados (references/referencedBy/linkedTo/is:*/has:*) admitidos por el deserializador pero SIN criterio todavía — se ignoran" }
+      - { nombre: text, tipo: string, requerido: false, semantica: "texto libre, subcadena sobre basename + valores de frontmatter + cuerpo (core::text::loose_text_match); vacío = todos los documentos" }
+      - { nombre: where, tipo: string, requerido: false, semantica: "consulta textual del lenguaje tipado (§20.8): comparaciones =/!=/>/>=/</<=, contains/starts_with/ends_with, contains_any/contains_all, has()/missing(), and/or/not, dot-notation y namespaces frontmatter.*/document.*/graph.*. Se traduce al mismo Expression que `filter` (core::parse::parse) y se intersecta con `text`" }
+      - { nombre: filter, tipo: "object (Expression JSON, §20.10)", requerido: false, semantica: "filtro estructurado equivalente a `where`: {field, operator, value} (operadores en nombres largos: equals/contains/…) o envolturas and/or/not/has/missing. Traduce al mismo Expression (core::filter::from_json). Si llegan `where` y `filter`, se combinan con AND (intersección)" }
       - { nombre: sort, tipo: string, requerido: false, semantica: "reservado; el orden es siempre determinista (score desc, path asc)" }
       - { nombre: limit, tipo: integer, default: 20, minimo: 1, maximo: 100 }
       - { nombre: cursor, tipo: string, requerido: false, semantica: "cursor opaco (offset codificado en hex) devuelto en nextCursor" }
-    retorno: "SearchResults (lodestar_app): { results: [SearchResult], nextCursor, totalApproximate } — json directo, sin envelope. SearchResult NUNCA lleva body"
+    retorno: "SearchResults (lodestar_app): { results: [SearchResult], nextCursor, totalApproximate } — json directo, sin envelope. SearchResult NUNCA lleva body; desde E19-H05 tampoco los campos privilegiados OKF type/status/description/tags — solo path, title (derivado), snippet, score, revision (+ id, siempre ausente en v2)"
     output_schema: "sí — schemars::schema_for!(SearchResults), vía lodestar_app::schemas::knowledge_search_schema()"
-    errores: ["WorkspaceError"]
+    errores: ["WorkspaceError (un `where`/`filter` malformado → WorkspaceError::Core genérico; el mapeo fino a INVALID_SCHEMA es E20)"]
     semantica: >-
-      Localiza documentos por texto+filtros con snippet compacto y `revision` (DocumentRevision),
-      sin devolver cuerpos completos. Paginación por cursor-offset autosuficiente (reanuda
-      idéntico en un proceso fresco). Reemplaza semánticamente a `query` (ver §15).
+      Localiza documentos por texto libre y por el lenguaje de consulta tipado (where/filter), con
+      snippet compacto y `revision` (DocumentRevision), sin devolver cuerpos completos. El filtrado
+      por metadata pasa enteramente por el lenguaje (§20.8/§20.10): `where` y `filter` equivalentes
+      producen el mismo resultado, y ambos se intersectan con el `text`. Paginación por cursor-offset
+      autosuficiente (reanuda idéntico en un proceso fresco). Reemplaza semánticamente a `query`
+      (ver §15).
 
   - nombre: knowledge_get
     fuente: crates/lodestar-mcp/src/tools.rs:231
@@ -448,7 +452,7 @@ migracion:
     cambio, sin retirar ninguna vieja en el camino). E14-H06 (cierre del giro headless,
     `ARCHITECTURE.md §19.6`) RETIRA las 10 heredadas de la superficie MCP en un único rewrite: salen
     de `tools::list()` y del despacho de `tools::call()`. La CAPACIDAD subyacente se conserva en
-    core/store/workspace (backlinks, orphans, dangling, query, conformidad, create, generate…): se
+    core/store/workspace (backlinks, orphans, dangling, conformidad, create…): se
     retira la EXPOSICIÓN como tool MCP, no la mecánica de dominio. Un nombre heredado invocado por
     `tools/call` cae en el brazo por defecto → tool desconocida (-32602), sin ejecutar (coherente con
     la retirada de las tools git en E9-H01).

@@ -3,8 +3,8 @@
 //!
 //! Evalúa una [`crate::types::Expression`] contra un documento **respetando los tipos YAML sin
 //! coerción**: `priority >= 2` funciona, `priority >= "high"` es un [`TypeError`], y la igualdad
-//! entre tipos distintos es `false` (no error). Sustituye la semántica de subcadena de
-//! [`crate::query`] (la DSL vieja, que se retira en E19-H05).
+//! entre tipos distintos es `false` (no error). Sustituyó la semántica de subcadena de la vieja DSL
+//! de tokens (`query.rs`), retirada en E19-H05.
 //!
 //! **Aviso rector (`§20.8`, heredado de E16-H01)**: las comparaciones van **siempre** sobre
 //! [`crate::types::ParsedFrontmatter::get`] (que devuelve el `serde_yaml::Value` con su tipo),

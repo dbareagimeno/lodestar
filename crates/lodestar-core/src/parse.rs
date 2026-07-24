@@ -5,7 +5,7 @@
 //! Traduce la consulta textual (`type = "decision" and (status = "draft" or status = "review")`) al
 //! [`crate::types::Expression`] de E19-H01 — el **mismo** AST al que el filtro JSON de E19-H03
 //! deserializa, de modo que `where` y `filter` producen exactamente el mismo resultado. No es la DSL
-//! de subcadena de [`crate::query`] (que se retira en E19-H05): aquí no hay tokens con semántica de
+//! de subcadena de la vieja `query.rs` (retirada en E19-H05): aquí no hay tokens con semántica de
 //! `contains`, sino literales tipados por su forma y operadores con precedencia.
 //!
 //! **Descenso recursivo escrito a mano** (sin `nom`/`pest`: el core es puro y minimalista, y una

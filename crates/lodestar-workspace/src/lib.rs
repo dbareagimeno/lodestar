@@ -313,11 +313,6 @@ impl Workspace {
         Ok(self.document_set()?.graph_model())
     }
 
-    /// Query estructurada (devuelve paths).
-    pub fn query(&self, dsl: &str) -> Result<Vec<RelPath>, WorkspaceError> {
-        Ok(self.document_set()?.query(dsl))
-    }
-
     // --- escritura validada (por el ÚNICO escritor) -----------------------
 
     /// Rechaza una escritura del canónico si hay una recuperación PENDIENTE (E13-H06): un

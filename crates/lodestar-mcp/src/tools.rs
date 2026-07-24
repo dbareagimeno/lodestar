@@ -4,7 +4,7 @@
 //! backlinks resueltos, aislados, dangling, impacto, la puerta de validación, query y escrituras
 //! validadas.
 
-use lodestar_app::{schemas, App, CheckScope, Profile, SearchFilters};
+use lodestar_app::{schemas, App, CheckScope, Profile};
 use lodestar_core::plan::PlanPolicy;
 use lodestar_core::types::{ChangeSetId, DocumentRef, ReceiptId, Severity, WorkspaceRevision};
 #[cfg(test)]
@@ -22,15 +22,11 @@ pub fn list() -> Value {
     json!([
         {"name": "workspace_status", "description": "Config activa, capacidades del perfil, conformidad y recuento agregado del workspace (llámala primero en cada sesión).", "inputSchema": empty,
          "outputSchema": schemas::workspace_status_schema()},
-        {"name": "knowledge_search", "description": "Localiza documentos por texto y filtros, con snippets y paginación por cursor (nunca devuelve cuerpos).",
+        {"name": "knowledge_search", "description": "Localiza documentos por texto libre y por el lenguaje de consulta tipado (where/filter), con snippets y paginación por cursor (nunca devuelve cuerpos).",
          "inputSchema": { "type": "object", "properties": {
-             "text": { "type": "string", "description": "Texto libre (subcadena, misma semántica que la DSL del prototipo). Vacío = todos los documentos." },
-             "filters": { "type": "object", "description": "Filtros: types/statuses/tags (listas) y pathPrefix (string).", "properties": {
-                 "types": { "type": "array", "items": { "type": "string" } },
-                 "statuses": { "type": "array", "items": { "type": "string" } },
-                 "tags": { "type": "array", "items": { "type": "string" } },
-                 "pathPrefix": { "type": "string" }
-             } },
+             "text": { "type": "string", "description": "Texto libre (subcadena sobre basename + valores de frontmatter + cuerpo). Vacío = todos los documentos." },
+             "where": { "type": "string", "description": "Consulta textual del lenguaje tipado (§20.8), p. ej. «status = \"accepted\" and graph.backlinks = 0». Se intersecta con «text» y con «filter»." },
+             "filter": { "type": "object", "description": "Filtro JSON estructurado (§20.10) equivalente a «where»: {field, operator, value} o envolturas and/or/not/has/missing. Si llegan «where» y «filter», se combinan con AND." },
              "sort": { "type": "string", "description": "Reservado: hoy el orden es siempre determinista (score desc, path asc)." },
              "limit": { "type": "integer", "minimum": 1, "maximum": 100, "default": 20 },
              "cursor": { "type": "string", "description": "Cursor opaco de paginación devuelto en «nextCursor»." }
@@ -187,10 +183,11 @@ pub fn call(app: &App, profile: Profile, name: &str, params: &Value) -> ToolResu
         }
         "knowledge_search" => {
             let text = params.get("text").and_then(Value::as_str).unwrap_or("");
-            let filters: SearchFilters = match params.get("filters") {
-                Some(v) => serde_json::from_value(v.clone()).map_err(|e| e.to_string())?,
-                None => SearchFilters::default(),
-            };
+            // `where`/`filter` (E19-H05): la consulta textual y el filtro JSON estructurado, ambos
+            // hacia el mismo `Expression` en la `App`. `where` es palabra reservada en Rust, así que
+            // la clave del wire se lee por string, no por campo.
+            let where_expr = params.get("where").and_then(Value::as_str);
+            let filter = params.get("filter");
             let sort = params.get("sort").and_then(Value::as_str);
             let limit = params
                 .get("limit")
@@ -198,7 +195,7 @@ pub fn call(app: &App, profile: Profile, name: &str, params: &Value) -> ToolResu
                 .map(|n| n as usize);
             let cursor = params.get("cursor").and_then(Value::as_str);
             let results = app
-                .knowledge_search(text, &filters, sort, limit, cursor)
+                .knowledge_search(text, where_expr, filter, sort, limit, cursor)
                 .map_err(|e| e.to_string())?;
             to_json(&results)
         }

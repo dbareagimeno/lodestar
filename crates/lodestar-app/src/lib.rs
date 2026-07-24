@@ -16,13 +16,15 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use lodestar_core::eval::{evaluate, EvalDocument};
 use lodestar_core::model;
 use lodestar_core::plan::{self, PlanPolicy};
 use lodestar_core::schema::{validate_relations, validate_schema, DocType, Schema};
+use lodestar_core::text::loose_text_match;
 use lodestar_core::types::{
     workspace_revision, Analysis, Backlinks, ChangeReceipt, ChangeSet, ChangeSetId, Check,
-    Direction, DocumentRef, DocumentRevision, Edge, EditSectionMode, ErrorCode, FrontmatterPatch,
-    GraphNode, InboundLinksPolicy, NormalizedOperation, ParsedFrontmatter, PlanHash, ReceiptId,
+    Direction, DocumentRef, DocumentRevision, Edge, EditSectionMode, ErrorCode, Expression,
+    FrontmatterPatch, GraphNode, InboundLinksPolicy, NormalizedOperation, PlanHash, ReceiptId,
     RelPath, ResolvedLink, RiskAssessment, SemanticDiff, Severity, ValidationReport,
     ValidationSummary, WorkspaceRevision,
 };
@@ -432,19 +434,25 @@ impl App {
         })
     }
 
-    /// Localiza documentos por texto y filtros, con snippets y paginación por cursor, **sin devolver
-    /// cuerpos completos** (E10-H09, `ARCHITECTURE.md §19.6`, `REFACTOR §9.2/§15`).
+    /// Localiza documentos por texto y por el **lenguaje de consulta tipado**, con snippets y
+    /// paginación por cursor, **sin devolver cuerpos completos** (E19-H05, `ARCHITECTURE.md §20.10`).
     ///
-    /// La **verdad** del casado la da el core (invariante #3): el conjunto de documentos que casan
-    /// `text` se computa con la misma semántica de subcadena de la DSL del prototipo
-    /// (`DocumentSet::query` → `tokenize_query`/`match_token`), intersectada con la lista autoritativa de
-    /// documentos (`Analysis::documents`: **todos** los `.md` del workspace, sin nombres con trato
-    /// especial desde E16-H02). Un `text` vacío casa todos los documentos.
+    /// La **verdad** del casado la da el core (invariante #3). Hay dos criterios, que se combinan por
+    /// **intersección** (un documento aparece si los pasa todos):
+    /// - `text`: subcadena case-insensitive sobre basename + valores de frontmatter + cuerpo, con la
+    ///   misma [`loose_text_match`] que usa la cache FTS. Un `text` vacío casa todos los documentos.
+    /// - `where_expr`/`filter`: la consulta textual (`§20.8`) y el filtro JSON estructurado
+    ///   (`§20.10`) se traducen al **mismo** [`Expression`] ([`lodestar_core::parse::parse`] /
+    ///   [`lodestar_core::filter::from_json`]) y se evalúan por documento con
+    ///   [`evaluate`] —el evaluador tipado que ve el frontmatter, el propio documento (`document.*`) y
+    ///   el grafo (`graph.*`)—, de modo que `where` y `filter` equivalentes dan el mismo resultado. Si
+    ///   llegan **ambos**, se combinan con `and` (intersección), coherente con cómo `text` ya se
+    ///   intersecta; ningún filtro por sí solo abre la selección.
     ///
-    /// Los `filters` baratos se aplican aquí (`types`/`statuses`/`tags`/`pathPrefix`); los filtros
-    /// avanzados del contrato (`references`/`referencedBy`/`linkedTo`/`is:*`/`has:*`) quedan
-    /// **admitidos pero sin criterio** en esta historia (se ignoran silenciosamente si llegan, no se
-    /// inventan con semántica dudosa — E10-H09 fuera de alcance).
+    /// El filtrado por metadata (antes los filtros OKF privilegiados `types`/`statuses`/`tags`/
+    /// `pathPrefix`, retirados en E19-H05) pasa **enteramente** por el lenguaje: `status =
+    /// "accepted"`, `type = "x"`, `tags contains "y"`, `document.path starts_with "docs/"`… — sin
+    /// campos privilegiados.
     ///
     /// **Orden determinista**: `score` descendente y, a igualdad, `path` ascendente — total y estable
     /// (los paths son únicos), así la partición en páginas es reproducible entre procesos frescos.
@@ -460,10 +468,18 @@ impl App {
     /// Cada resultado lleva `revision` = [`DocumentRevision`] del contenido en disco (blake3, E10-H03)
     /// y un `snippet` compacto NO vacío; la estructura [`SearchResult`] **no tiene** campo `body`, así
     /// que es imposible filtrar el cuerpo completo por esta vía.
+    ///
+    /// Un `where_expr`/`filter` **malformado** (no parseable) se surface como un
+    /// [`WorkspaceError::Core`] genérico —el mapeo fino a `INVALID_SCHEMA` es E20—; un
+    /// [`lodestar_core::types::TypeError`] al **evaluar** una expresión bien formada contra un
+    /// documento concreto (p. ej. `priority >= "high"` sobre un `priority` numérico) **excluye ese
+    /// documento** del resultado, sin abortar la búsqueda: el corpus es heterogéneo y un tipo
+    /// incompatible en un documento no debe tumbar la consulta sobre los demás.
     pub fn knowledge_search(
         &self,
         text: &str,
-        filters: &SearchFilters,
+        where_expr: Option<&str>,
+        filter: Option<&Value>,
         _sort: Option<&str>,
         limit: Option<usize>,
         cursor: Option<&str>,
@@ -474,20 +490,31 @@ impl App {
 
         let text_trim = text.trim();
         let needle = text_trim.to_lowercase();
-        // Casado de texto reusando la verdad del core (subcadena); intersección con documentos.
-        let matched_text: BTreeSet<RelPath> = doc_set.query(text_trim).into_iter().collect();
+        // Compila `where`/`filter` al mismo AST (E19-H01…H04). Ambos → `and` (intersección).
+        let expr = build_search_expression(where_expr, filter)?;
 
         let mut results: Vec<SearchResult> = Vec::new();
         for path in &analysis.documents {
-            if !matched_text.contains(path) {
-                continue;
-            }
             let Some(raw) = files.get(path) else { continue };
             let parsed = model::parse_file(path.as_str(), raw);
-            let fm = parsed.frontmatter.unwrap_or_default();
+            let fm = parsed.frontmatter.clone().unwrap_or_default();
 
-            if !passes_filters(path, &fm, filters) {
+            // (1) Intersección con el FTS de `text` (subcadena, verdad del core).
+            if !text_trim.is_empty() && !loose_text_match(path, &fm, &parsed.body, &needle) {
                 continue;
+            }
+
+            // (2) Intersección con el lenguaje de consulta. Un `TypeError` sobre ESTE documento lo
+            //     excluye (no casa), sin propagarse a la búsqueda entera.
+            if let Some(expr) = &expr {
+                let doc = EvalDocument {
+                    path,
+                    frontmatter: parsed.frontmatter.as_ref(),
+                    body: &parsed.body,
+                };
+                if !matches!(evaluate(expr, &doc, analysis), Ok(true)) {
+                    continue;
+                }
             }
 
             let title = model::derived_title(Some(&fm), &parsed.body, path);
@@ -509,11 +536,7 @@ impl App {
             results.push(SearchResult {
                 path: path.clone(),
                 id: None,
-                r#type: fm.get_text("type"),
                 title,
-                status: fm.get_text("status"),
-                description: fm.get_text("description"),
-                tags: tags_to_vec(fm.get_key("tags")),
                 snippet,
                 score: score_of(raw, &needle),
                 revision,
@@ -2459,34 +2482,14 @@ const DEFAULT_SEARCH_LIMIT: usize = 20;
 /// Tope duro de resultados por página (evita respuestas gigantes).
 const MAX_SEARCH_LIMIT: usize = 100;
 
-/// Filtros de `knowledge_search` (`ARCHITECTURE.md §19.6`). Todos opcionales; un campo ausente no
-/// filtra. Wire en camelCase (`pathPrefix`).
+/// Un resultado de `knowledge_search` — proyección **genérica** de un documento para localizarlo,
+/// **nunca su cuerpo completo** (invariante de la historia). Wire en camelCase.
 ///
-/// En esta historia se implementan los filtros **baratos y sin ambigüedad** (`types`/`statuses`/
-/// `tags`/`pathPrefix`). Los filtros avanzados del contrato (`references`/`referencedBy`/`linkedTo`/
-/// `is:*`/`has:*`) quedan **admitidos pero no ejercitados**: como el deserializador ignora las claves
-/// desconocidas, un cliente puede enviarlos sin error, pero no alteran el resultado todavía (se
-/// añadirán con su criterio en una historia posterior, para no inventar semántica dudosa).
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SearchFilters {
-    /// Restringe a documentos cuyo `type` (frontmatter) esté en esta lista (comparación
-    /// case-insensitive).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub types: Option<Vec<String>>,
-    /// Restringe a documentos cuyo `status` esté en esta lista (case-insensitive).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub statuses: Option<Vec<String>>,
-    /// Restringe a documentos que tengan al menos uno de estos `tags` (case-insensitive).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tags: Option<Vec<String>>,
-    /// Restringe a documentos cuyo `path` empiece por este prefijo.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub path_prefix: Option<String>,
-}
-
-/// Un resultado de `knowledge_search` — proyección de un documento para localizarlo, **nunca su
-/// cuerpo completo** (invariante de la historia). Wire en camelCase.
+/// Desde E19-H05 no lleva campos privilegiados de OKF (`type`/`status`/`description`/`tags`): el
+/// filtrado por metadata pasa por el lenguaje de consulta (`where`/`filter`), así que esos valores
+/// dejan de ser campos de wire aunque sigan en el frontmatter del documento (recuperables por
+/// `knowledge_get`). Conserva solo la identidad y lo derivado: `path`, `title`, `snippet`, `score`,
+/// `revision` (y `id`, no-goal en v2 → siempre ausente).
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct SearchResult {
@@ -2495,19 +2498,8 @@ pub struct SearchResult {
     /// Id estable del documento, cuando exista (no-goal en v2 → siempre ausente).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
-    /// `type` del frontmatter.
-    #[serde(rename = "type", default, skip_serializing_if = "Option::is_none")]
-    pub r#type: Option<String>,
     /// Título resuelto (`title` del frontmatter o derivado del path).
     pub title: String,
-    /// `status` del frontmatter.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub status: Option<String>,
-    /// `description` del frontmatter.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-    /// `tags` del frontmatter, normalizados a lista de strings.
-    pub tags: Vec<String>,
     /// Extracto compacto NO vacío alrededor del match (o del inicio del cuerpo). **No** es el cuerpo.
     pub snippet: String,
     /// Puntuación de relevancia (mayor = más relevante). Base simple por frecuencia del texto.
@@ -2530,57 +2522,43 @@ pub struct SearchResults {
     pub total_approximate: usize,
 }
 
-/// `true` si el documento pasa todos los filtros baratos activos.
-fn passes_filters(path: &RelPath, fm: &ParsedFrontmatter, filters: &SearchFilters) -> bool {
-    if let Some(types) = &filters.types {
-        let ty = fm.get_text("type").unwrap_or_default().to_lowercase();
-        if !types.iter().any(|t| t.to_lowercase() == ty) {
-            return false;
-        }
-    }
-    if let Some(statuses) = &filters.statuses {
-        let st = fm.get_text("status").unwrap_or_default().to_lowercase();
-        if !statuses.iter().any(|s| s.to_lowercase() == st) {
-            return false;
-        }
-    }
-    if let Some(want) = &filters.tags {
-        let have: BTreeSet<String> = tags_to_vec(fm.get_key("tags"))
-            .iter()
-            .map(|t| t.to_lowercase())
-            .collect();
-        if !want.iter().any(|t| have.contains(&t.to_lowercase())) {
-            return false;
-        }
-    }
-    if let Some(prefix) = &filters.path_prefix {
-        if !path.as_str().starts_with(prefix.as_str()) {
-            return false;
-        }
-    }
-    true
-}
-
-/// Normaliza los `tags` crudos del frontmatter (`serde_yaml::Value`) a una lista de strings.
-fn tags_to_vec(tags: Option<&serde_yaml::Value>) -> Vec<String> {
-    use serde_yaml::Value as Y;
-    match tags {
-        Some(Y::Sequence(seq)) => seq.iter().filter_map(scalar_string).collect(),
-        Some(Y::String(s)) if !s.is_empty() => vec![s.clone()],
-        Some(other) => scalar_string(other).into_iter().collect(),
-        None => Vec::new(),
-    }
-}
-
-/// Representa un escalar YAML como string (para normalizar tags); `None` para no-escalares.
-fn scalar_string(v: &serde_yaml::Value) -> Option<String> {
-    use serde_yaml::Value as Y;
-    match v {
-        Y::String(s) => Some(s.clone()),
-        Y::Number(n) => Some(n.to_string()),
-        Y::Bool(b) => Some(b.to_string()),
-        _ => None,
-    }
+/// Compila el `where` textual y/o el `filter` JSON de `knowledge_search` a un único [`Expression`]
+/// (E19-H01…H04), el que luego evalúa [`evaluate`] por documento.
+///
+/// - Ninguno → `Ok(None)` (no hay filtro de lenguaje; solo actúa el `text`).
+/// - Solo uno → su AST ([`lodestar_core::parse::parse`] para el textual,
+///   [`lodestar_core::filter::from_json`] para el JSON).
+/// - **Ambos** → se combinan con `and` (intersección), coherente con cómo `text` ya se intersecta;
+///   ningún test lo fija, pero es la elección menos sorprendente (un filtro extra solo puede
+///   restringir, nunca abrir la selección).
+///
+/// Un `where`/`filter` **malformado** se surface como [`WorkspaceError::Core`] genérico: el mapeo
+/// fino a `INVALID_SCHEMA` (con `location`/`suggestion`) es E20 y queda fuera de esta historia; aquí
+/// basta con no tragarse el error ni entrar en pánico.
+fn build_search_expression(
+    where_expr: Option<&str>,
+    filter: Option<&Value>,
+) -> Result<Option<Expression>, WorkspaceError> {
+    // Un `where` en blanco (solo espacios) se trata como ausente: no es una consulta malformada.
+    let del_where = match where_expr.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(w) => Some(
+            lodestar_core::parse::parse(w)
+                .map_err(|e| WorkspaceError::Core(format!("«where» inválido: {}", e.message)))?,
+        ),
+        None => None,
+    };
+    let del_filter = match filter {
+        Some(f) => Some(
+            lodestar_core::filter::from_json(f)
+                .map_err(|e| WorkspaceError::Core(format!("«filter» inválido: {}", e.message)))?,
+        ),
+        None => None,
+    };
+    Ok(match (del_where, del_filter) {
+        (None, None) => None,
+        (Some(e), None) | (None, Some(e)) => Some(e),
+        (Some(w), Some(f)) => Some(Expression::And(vec![w, f])),
+    })
 }
 
 /// Puntuación simple: nº de apariciones del texto (minúsculas) en el contenido crudo; `1.0` para un

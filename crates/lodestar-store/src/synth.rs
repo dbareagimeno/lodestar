@@ -240,7 +240,7 @@ pub(crate) fn outgoing_links(
     Ok(out)
 }
 
-/// Búsqueda de subcadena con la MISMA función del core (`query::loose_text_match`): basename +
+/// Búsqueda de subcadena con la MISMA función del core (`text::loose_text_match`): basename +
 /// cualquier valor de frontmatter + cuerpo, con lowercase Unicode. Antes era un LIKE de SQL que
 /// divergía en tres frentes (sin escapar `\`, `lower()` solo-ASCII —«PROGRAMACIÓN» no casaba—,
 /// y sin basename/fm). SQL solo sirve las filas; la verdad es del core. FTS solo acelera.
@@ -259,7 +259,7 @@ pub(crate) fn search_substring(
         };
         let parsed = lodestar_core::model::parse_file(rp.as_str(), &raw);
         let fm = parsed.frontmatter.unwrap_or_default();
-        if lodestar_core::query::loose_text_match(&rp, &fm, &parsed.body, &needle_lower) {
+        if lodestar_core::text::loose_text_match(&rp, &fm, &parsed.body, &needle_lower) {
             out.push(rp);
         }
     }

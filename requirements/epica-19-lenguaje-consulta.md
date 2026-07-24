@@ -166,6 +166,13 @@ fecha propio en esta épica.
   - `knowledge_search {where: "graph.backlinks = 0"}` devuelve los no enlazados →
     `search_propiedad_de_grafo`.
   - El resultado no lleva `type`/`status`/`tags` privilegiados → `search_result_sin_campos_okf`.
+- **Decisión tomada en la fase verde**: cuando una expresión **bien formada** produce un `TypeError`
+  al evaluarse contra un **documento concreto** (p. ej. `priority >= 2` sobre un documento cuyo
+  `priority` es `"alto"`, un string), ese documento se **excluye** del resultado, sin abortar la
+  búsqueda. Sobre un corpus heterogéneo, que un solo documento con un tipo incompatible tumbe la
+  consulta sobre los demás sería frágil y dependiente del orden. (Distinto de un `where`/`filter`
+  **malformado** —no parseable—, que sí es un error de la consulta entera; su mapeo a
+  `INVALID_SCHEMA` es E20.)
 - **Dependencias**: E19-H01…H04.
 - **Pruebas**: `crates/lodestar-mcp/tests/`, `crates/lodestar-app/tests/`.
 - **Frontera (mcp.yml)**: **sí**.

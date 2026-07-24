@@ -349,38 +349,13 @@ fn list_documents_marca_invalid_e_isolated() {
 }
 
 // --- E1-H11: query ----------------------------------------------------------
-
-fn query_set(b: &DocumentSet, dsl: &str) -> Vec<String> {
-    b.query(dsl)
-        .iter()
-        .map(|p| p.as_str().to_string())
-        .collect()
-}
-
-#[test]
-fn query_operadores() {
-    let b = DocumentSet::from_files(fm(&[
-        (
-            "a.md",
-            "---\ntype: Nota\ntitle: Alfa\nstatus: draft\ntags:\n  - x\n---\n\n# H\n\nhola mundo\n",
-        ),
-        (
-            "b.md",
-            "---\ntype: Metric\ntitle: Beta\nstatus: accepted\n---\n\n# H\n\notro\n",
-        ),
-    ]));
-    assert_eq!(query_set(&b, "type:nota"), vec!["a.md"]);
-    assert_eq!(query_set(&b, "type=metric"), vec!["b.md"]);
-    assert_eq!(query_set(&b, "is:draft"), vec!["a.md"]);
-    assert_eq!(query_set(&b, "is:accepted"), vec!["b.md"]);
-    assert_eq!(query_set(&b, "has:tags"), vec!["a.md"]);
-    assert_eq!(query_set(&b, "body:mundo"), vec!["a.md"]);
-    // negación y flip
-    assert_eq!(query_set(&b, "-type:nota"), vec!["b.md"]);
-    assert_eq!(query_set(&b, "type:!nota"), vec!["b.md"]);
-    // texto suelto en título
-    assert_eq!(query_set(&b, "beta"), vec!["b.md"]);
-}
+//
+// RETIRADO en E19-H05: `query_operadores` (y su helper `query_set`) ejercitaba la DSL de tokens con
+// semántica de subcadena (`type:nota`, `is:draft`, `has:tags`, `body:mundo`, negación `-`, flip `!`,
+// texto suelto), servida por `DocumentSet::query` → `query.rs`. Esa DSL se retiró entera al cablear
+// el lenguaje de consulta tipado a `knowledge_search`. Su cobertura la asume el nuevo lenguaje en
+// `tests/consulta.rs` (comparaciones tipadas, `has()`/`missing()`, `contains`, booleanos,
+// namespaces `graph.*`), cuya semántica es la que hoy filtra la búsqueda (E19-H01…H05).
 
 // --- E1-H17: diff -----------------------------------------------------------
 
@@ -595,19 +570,18 @@ fn fm_escalares_no_string_no_invierten_el_veredicto() {
 }
 
 #[test]
-fn fm_null_explicito_cuenta_como_presente() {
-    // `type:` (null) → presente para has:/no: (fmPresent de JS: null !== undefined)…
-    let b = DocumentSet::from_files(fm(&[
-        (
-            "connull.md",
-            "---\ntype:\ntitle: A\ndescription: d\n---\n\n# H\n",
-        ),
-        ("sintipo.md", "---\ntitle: B\ndescription: d\n---\n\n# H\n"),
-    ]));
-    let con_type = b.query("has:type");
-    assert!(con_type.iter().any(|p| p.as_str() == "connull.md"));
-    assert!(!con_type.iter().any(|p| p.as_str() == "sintipo.md"));
-    // …y la escritura lo conserva, no lo borra en silencio.
+fn fm_null_explicito_sobrevive_a_la_escritura() {
+    // Un `type:` con valor `null` explícito debe sobrevivir a la escritura, no borrarse en silencio.
+    //
+    // MIGRADO en E19-H05: la primera aserción de este test consultaba el `null` explícito con la
+    // vieja DSL (`b.query("has:type")`), que se retiró con `query.rs`. La existencia de una clave a
+    // `null` («cuenta como presente») la cubre ahora el lenguaje de consulta tipado en
+    // `tests/consulta.rs::has_ok` (`has(deprecated_field)` sobre `deprecated_field: null`); aquí se
+    // conserva la parte que la DSL nunca probó: que la escritura preserva el `null` explícito.
+    let b = DocumentSet::from_files(fm(&[(
+        "connull.md",
+        "---\ntype:\ntitle: A\ndescription: d\n---\n\n# H\n",
+    )]));
     //
     // MIGRADO en E16-H05/H04: este trozo aserraba el resultado de un patch VACÍO. Desde que
     // `merge_frontmatter` delega en el patch quirúrgico (E16-H04), un patch vacío es un no-op
@@ -710,16 +684,10 @@ fn backlinks_out_lista_todos_los_enlaces() {
     assert_eq!(vecinos, vec!["a.md", "index.md", "x.md"]);
 }
 
-#[test]
-fn query_campo_vacio_es_texto_suelto() {
-    // `":foo"` → field vacío es falsy en JS → texto suelto (busca "foo"), no field-match de "".
-    let b = DocumentSet::from_files(fm(&[(
-        "foo-nota.md",
-        "---\ntype: N\ntitle: T\ndescription: d\n---\n\n# H\n",
-    )]));
-    let hits = b.query(":foo");
-    assert!(hits.iter().any(|p| p.as_str() == "foo-nota.md"));
-}
+// RETIRADO en E19-H05: `query_campo_vacio_es_texto_suelto` fijaba un quirk de la vieja DSL (`":foo"`
+// con campo vacío degradaba a texto suelto, port de la falsedad de `""` en JS). La DSL entera se
+// retiró con `query.rs`; el `text` de `knowledge_search` sigue siendo subcadena, pero sin sintaxis
+// de campos (`campo:valor`), así que el quirk ya no existe ni tiene superficie que probar.
 
 // --- E10-H03: WorkspaceRevision (identidad de contenido determinista) ---------
 //

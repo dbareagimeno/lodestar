@@ -239,11 +239,6 @@ impl DocumentSet {
         crate::graph::components(self)
     }
 
-    /// Filtro de paths por la DSL de query (port fiel; devuelve paths).
-    pub fn query(&self, dsl: &str) -> Vec<RelPath> {
-        crate::query::query(self, dsl)
-    }
-
     /// Acceso interno al fichero parseado (para los submódulos del core).
     pub(crate) fn parsed(&self, p: &RelPath) -> Option<&Parsed> {
         self.parsed.get(p)

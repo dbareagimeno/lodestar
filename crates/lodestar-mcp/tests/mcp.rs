@@ -491,40 +491,42 @@ fn workspace_tipos_mixtos() -> tempfile::TempDir {
     dir
 }
 
-/// E10-H09 · Criterio `search_filtra_tipo`:
-/// Dado `filters.types:[decision]`, Cuando se busca, Entonces solo aparecen documentos `type:decision`.
+/// E10-H09 · Criterio `search_filtra_tipo` (MIGRADO en E19-H05 al lenguaje de consulta):
+/// El filtro por `type` dejó de ser un campo privilegiado (`filters.types`) y pasa por el `where`
+/// tipado. Dado `where: type = "decision"`, Cuando se busca, Entonces solo aparecen los documentos
+/// cuyo `type` de frontmatter es `decision` (los demás quedan fuera). El resultado ya no surfacea el
+/// campo `type` —eso lo fija `search_result_sin_campos_okf`—, así que la aserción es por `path`.
 #[test]
 fn search_filtra_tipo() {
     let dir = workspace_tipos_mixtos();
     let resp = roundtrip(
         dir.path(),
-        &[
-            r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"knowledge_search","arguments":{"text":"","filters":{"types":["decision"]}}}}"#,
-        ],
+        &[ks_call(serde_json::json!({ "where": "type = \"decision\"" })).as_str()],
         1,
     );
-    let results = search_paths_values(&resp[0]);
+    let paths = search_paths(&resp[0]);
+    let tiene = |p: &str| paths.iter().any(|x| x == p);
 
-    // No vacuo: debe haber al menos un resultado (si el filtro devolviese vacío, el `all` de abajo
-    // pasaría trivialmente).
+    // No vacuo: el filtro casa los documentos `type: decision` (si devolviese vacío, las
+    // exclusiones de abajo pasarían trivialmente).
     assert!(
-        !results.is_empty(),
-        "con `filters.types:[decision]` debe haber al menos un resultado: {resp:?}"
+        !paths.is_empty(),
+        "con `where` type=decision debe haber al menos un resultado: {resp:?}"
     );
-
-    // TODOS los resultados son `type:decision`.
-    for r in &results {
-        assert_eq!(
-            r["type"], "decision",
-            "`filters.types:[decision]` solo debe devolver documentos type:decision, apareció: {r:?}"
+    for decision in ["dec-uno.md", "dec-dos.md"] {
+        assert!(
+            tiene(decision),
+            "el documento `{decision}` (type: decision) debe aparecer con `where` type=decision: {resp:?}"
         );
     }
 
-    // No vacuo (segunda cara): un documento de otro tipo NO aparece.
-    assert!(
-        !results.iter().any(|r| r["path"] == "nota.md"),
-        "un documento `type:nota` no debe aparecer al filtrar por decision: {resp:?}"
-    );
+    // Un documento de otro tipo NO aparece: el `where` filtra por metadata, sin coerción.
+    for otro in ["nota.md", "documento.md", "index.md"] {
+        assert!(
+            !tiene(otro),
+            "un documento de `type` != decision (`{otro}`) no debe aparecer al filtrar por decision: {resp:?}"
+        );
+    }
 }
 
 /// Como [`search_paths`] pero devuelve los objetos `result` completos (no solo el `path`), para

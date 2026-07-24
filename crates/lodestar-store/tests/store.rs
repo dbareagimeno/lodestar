@@ -1517,7 +1517,7 @@ fn diagnostics_conserva_el_rango() {
 // El índice de texto deja de depender de `type`/`status`/`tags`/`description`: ha de indexar
 // path, título derivado, body y los VALORES TEXTUALES del frontmatter genérico (`§20.12`). Los
 // tests apuntan a `fts_candidates` (el índice FTS5 en sí), NO a `search` — `search` ya cubre el
-// frontmatter por la vía del core (`query::loose_text_match`), así que no distinguiría un FTS que
+// frontmatter por la vía del core (`text::loose_text_match`), así que no distinguiría un FTS que
 // privilegia `description` de uno que indexa metadata genérica. `fts_candidates` sí.
 //
 // Fase ROJA: hoy el FTS es `files_fts(path, title, description, body)` (index.rs), así que una
