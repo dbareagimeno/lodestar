@@ -344,7 +344,7 @@ tools:
     params:
       - { nombre: ref, tipo: "object (DocumentRef)", requerido: true, semantica: "{ path: RelPath }, el documento sobre el que se propone el cambio; si no resuelve a un documento → DOCUMENT_NOT_FOUND" }
       - { nombre: proposedOperation, tipo: "object", requerido: true, semantica: "{ kind }, el cambio hipotético a evaluar" }
-      - { nombre: "proposedOperation.kind", tipo: string, requerido: true, valores: ["move", "delete", "deprecate", "transition_status", "change_relation", "replace_document"], semantica: "tipo de operación; SOLO «delete» computa bloqueos estructurales en v1 (el resto no rompe relaciones, solo requiere revisión)" }
+      - { nombre: "proposedOperation.kind", tipo: string, requerido: true, valores: ["move", "delete"], semantica: "tipo de operación de impacto del modelo universal (§20.11, E21-H01); SOLO «delete» computa bloqueos estructurales en v1. Un kind fuera de {move, delete} → INVALID_SCHEMA" }
       - { nombre: depth, tipo: integer, requerido: false, minimo: 1, semantica: "profundidad del blast-radius entrante; por defecto cubre todo el alcance transitivo (neighborhood(In) a profundidad máxima)" }
     retorno: "ImpactReport (lodestar_app): { summary: { directlyAffected, transitivelyAffected, blockingReferences, risk }, affectedDocuments: [RelPath], blockingReferences: [{ path, reason }], recommendations: [string] } — json directo, sin envelope"
     output_schema: "sí — schemars::schema_for!(ImpactReport), vía lodestar_app::schemas::impact_analyze_schema()"
@@ -369,7 +369,7 @@ tools:
     params:
       - { nombre: expectedWorkspaceRevision, tipo: string, requerido: false, semantica: "control optimista a nivel de workspace («blake3:…»); si se omite se toma la revisión actual, si no coincide → REVISION_CONFLICT" }
       - { nombre: operations, tipo: "array<object>", requerido: true, semantica: "operaciones propuestas, discriminadas por «op»; cada op puede llevar «expectedRevision» (DocumentRevision, control optimista por documento)" }
-      - { nombre: "operations[].op", tipo: string, requerido: true, valores: ["create", "patch_frontmatter", "replace_body", "replace_text", "edit_section", "move", "delete", "add_relation", "remove_relation", "transition_status", "apply_fix"], semantica: "las 11 operaciones de REFACTOR §11.1; cada una se despacha a su normalizador del core (E12-H05/H06/H07)" }
+      - { nombre: "operations[].op", tipo: string, requerido: true, valores: ["create", "patch_frontmatter", "replace_body", "replace_text", "edit_section", "move", "delete", "apply_fix"], semantica: "las 8 operaciones universales de §20.11 (E21-H01 retiró add_relation/remove_relation/transition_status: una relación es un enlace Markdown, un estado es un patch de frontmatter); cada una se despacha a su normalizador del core. Una op fuera del enum → INVALID_SCHEMA" }
       - { nombre: "operations[].expectedRevision", tipo: string, requerido: false, semantica: "DocumentRevision que el agente cree vigente («blake3:…»); si el documento cambió → REVISION_CONFLICT" }
       - { nombre: policy, tipo: object, requerido: false, semantica: "{ requireConformantResult?, allowWarnings? } (PlanPolicy, E12-H04); por defecto exige conformidad y permite warnings" }
     retorno: "PlanResult (lodestar_app): { changeSetId, baseWorkspaceRevision, planHash, canApply, expiresAt, normalizedOperations: [NormalizedOperation], risk, semanticDiff, impact: { affectedDocuments, affectedCount }, diagnosticsBefore, diagnosticsAfter } — json directo, sin envelope"

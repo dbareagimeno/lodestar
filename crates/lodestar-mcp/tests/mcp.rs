@@ -1778,8 +1778,7 @@ fn graph_truncado() {
 //   arguments: {
 //     ref: { path: "<RelPath>" },                       // DocumentRef (E10-H04); deser de { path }
 //     proposedOperation: {
-//       kind: "move" | "delete" | "deprecate" | "transition_status"
-//           | "change_relation" | "replace_document"
+//       kind: "move" | "delete"                            // E21-H01: solo las de impacto (§20.10)
 //     },
 //     depth?: integer                                    // profundidad del blast-radius; def. impl.
 //   }
@@ -2410,7 +2409,9 @@ fn patch_hace_de_transicion() {
     // frontmatter — corrobora que la propiedad `status` cambia sin operación semántica dedicada.
     let fm_changes = sc["semanticDiff"]["frontmatterChanges"]
         .as_array()
-        .unwrap_or_else(|| panic!("el semanticDiff debe traer frontmatterChanges (array): {resp:?}"));
+        .unwrap_or_else(|| {
+            panic!("el semanticDiff debe traer frontmatterChanges (array): {resp:?}")
+        });
     let cambia_decision = fm_changes.iter().any(|p| p == "decision.md");
     assert!(
         cambia_decision,

@@ -1043,10 +1043,12 @@ fn changeset_roundtrip() {
 // módulo `plan`/`assess_risk` no existe), lo que impide compilar el binario de tests de este crate.
 // Es el rojo esperado y documentado.
 //
-// Representación del `deprecate` (el enunciado admite dos): se modela como
-// `NormalizedOperation::TransitionStatus { path, to: "deprecated" }` — la variante semántica cuyo
-// nombre expresa el ciclo de vida (E12-H07). El `workspace_after` refleja ese estado deprecado para
-// que `before`/`after` sean coherentes; los backlinks del documento no cambian con la transición.
+// Representación del `deprecate` (el enunciado admite dos): tras E21-H01 se modela como
+// `NormalizedOperation::PatchFrontmatter { path, patch: { status: "deprecated" } }` — una transición
+// es un patch de una propiedad de frontmatter arbitraria (`§20.11`), y `assess_risk` la reconoce
+// como operación que «encoge» el grafo idéntico a como trataba la retirada `transition_status`
+// (`patches_status_to_deprecated`). El `workspace_after` refleja ese estado deprecado para que
+// `before`/`after` sean coherentes; los backlinks del documento no cambian con la transición.
 //
 // Los tests aseveran PROPIEDADES (nivel de riesgo, razón no vacía que menciona el documento o los
 // backlinks), nunca el texto exacto de la razón ni el umbral interno de la heurística.
@@ -1092,9 +1094,14 @@ fn riesgo_deprecate_backlinks() {
         "el fixture debe dar 7 backlinks a core.md, dio {entrantes}",
     );
 
-    let ops = vec![NormalizedOperation::TransitionStatus {
+    let mut patch = BTreeMap::new();
+    patch.insert(
+        "status".to_string(),
+        Some(serde_yaml::Value::String("deprecated".into())),
+    );
+    let ops = vec![NormalizedOperation::PatchFrontmatter {
         path: RelPath::new("core.md").unwrap(),
-        to: "deprecated".to_string(),
+        patch: FrontmatterPatch(patch),
     }];
 
     let risk = lodestar_core::plan::assess_risk(&ops, &antes, &despues);

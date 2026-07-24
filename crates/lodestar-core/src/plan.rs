@@ -15,9 +15,9 @@
 //!
 //! ## Heurística (documentada, no normativa — H02 solo fija el orden de magnitud)
 //!
-//! Para cada operación que **encoge** el grafo de documentos — deprecar (`TransitionStatus{to:
-//! "deprecated"}` o un `PatchFrontmatter` cuyo patch pone `status: deprecated`), borrar
-//! (`Delete`) o mover (`Move`) — se mide su *blast radius*: los backlinks entrantes
+//! Para cada operación que **encoge** el grafo de documentos — deprecar (un `PatchFrontmatter` cuyo
+//! patch pone `status: deprecated`), borrar (`Delete`) o mover (`Move`) — se mide su *blast radius*:
+//! los backlinks entrantes
 //! (`DocumentSet::backlinks(&path).inbound`) que el documento afectado tenía en el workspace **antes**
 //! del cambio (después de deprecar/borrar/mover, esos backlinks quedan apuntando a algo
 //! deprecado, roto o movido). Umbral:
@@ -101,9 +101,6 @@ pub fn assess_risk(
 /// factor de riesgo bajo esta heurística).
 fn shrinking_path(op: &NormalizedOperation) -> Option<RelPath> {
     match op {
-        NormalizedOperation::TransitionStatus { path, to } if to == "deprecated" => {
-            Some(path.clone())
-        }
         NormalizedOperation::Delete { path, .. } => Some(path.clone()),
         NormalizedOperation::Move { from, .. } => Some(from.clone()),
         NormalizedOperation::PatchFrontmatter { path, patch }
@@ -746,126 +743,14 @@ pub fn normalize_delete(
 }
 
 // ---------------------------------------------------------------------------
-// Normalización de operaciones SEMÁNTICAS (E12-H07): relaciones, ciclo de vida y fixes.
+// Normalización de `apply_fix` (E12-H07): materializa un arreglo sugerido por un diagnóstico.
 //
-// A diferencia de las de estructura, resuelven SIEMPRE a un único `PatchFrontmatter` sobre el
-// documento afectado. Tras el retiro de `core::schema` (E20-H03) ya NO se validan contra tipos ni
-// `RelationDef`/`allowedStatuses` (el modelo es universal, `§20.10`): `add_relation`/`transition_status`
-// escriben el campo del frontmatter tal cual (Fase 12 retira estas operaciones por completo). Todo
-// PURO: sin I/O, sin reloj.
+// E21-H01 retiró las operaciones SEMÁNTICAS (`add_relation`/`remove_relation`/`transition_status`)
+// y sus helpers de relación: el modelo es universal (`§20.11`), una relación es un enlace Markdown y
+// un estado es una propiedad arbitraria del frontmatter, así que ambas se expresan con las
+// operaciones universales (una transición es un `PatchFrontmatter{status}`). Queda solo `apply_fix`,
+// que resuelve a la operación terminal que su `Fix` describa. PURO: sin I/O, sin reloj.
 // ---------------------------------------------------------------------------
-
-/// Lee el campo `relation` del frontmatter como lista de paths target: acepta una secuencia YAML de
-/// `String` o un único `String` (envuelto en un vector de un elemento). `None` si el campo no está
-/// presente o su forma no es ninguna de las dos anteriores. Antes vivía en `core::schema`
-/// (`relation_targets`); tras su retiro se conserva aquí como helper local de las operaciones de
-/// relación, que no dependen del esquema.
-fn relation_targets(fm: &ParsedFrontmatter, relation: &str) -> Option<Vec<String>> {
-    match fm.get_key(relation)? {
-        serde_yaml::Value::Sequence(seq) => Some(
-            seq.iter()
-                .filter_map(|v| v.as_str().map(str::to_string))
-                .collect(),
-        ),
-        serde_yaml::Value::String(s) => Some(vec![s.clone()]),
-        _ => None,
-    }
-}
-
-/// Targets actuales del campo de relación `relation` en el frontmatter de `source` (secuencia YAML
-/// o `String` único, vía [`relation_targets`]). Vector vacío si el documento no existe, no tiene
-/// frontmatter, o el campo no está presente.
-fn current_targets(doc_set: &DocumentSet, source: &RelPath, relation: &str) -> Vec<String> {
-    doc_set
-        .files()
-        .get(source)
-        .and_then(|raw| model::parse_file(source.as_str(), raw).frontmatter)
-        .and_then(|fm| relation_targets(&fm, relation))
-        .unwrap_or_default()
-}
-
-/// Construye un [`FrontmatterPatch`] que fija el campo `relation` a la secuencia YAML de `targets`
-/// (lista de paths). Una lista vacía deja el campo como `[]` (presente pero sin targets): el
-/// documento deja de referenciar, sin borrar la declaración del campo.
-fn relation_field_patch(relation: &str, targets: &[String]) -> FrontmatterPatch {
-    let seq = serde_yaml::Value::Sequence(
-        targets
-            .iter()
-            .map(|t| serde_yaml::Value::String(t.clone()))
-            .collect(),
-    );
-    let mut map = BTreeMap::new();
-    map.insert(relation.to_string(), Some(seq));
-    FrontmatterPatch(map)
-}
-
-/// Normaliza un `add_relation`: añade `target` al campo de relación `relation` del frontmatter de
-/// `source` — E12-H07.
-///
-/// Tras el retiro de `core::schema` (E20-H03) NO se valida contra tipos ni `RelationDef`: una
-/// relación es un campo de frontmatter arbitrario (`§20.10`). Devuelve un
-/// [`NormalizedOperation::PatchFrontmatter`] que fija el campo `relation` a los targets actuales MÁS
-/// `target` (idempotente: no duplica si ya estaba). **Puro.**
-pub fn normalize_add_relation(
-    doc_set: &DocumentSet,
-    source: &RelPath,
-    relation: &str,
-    target: &RelPath,
-) -> Result<NormalizedOperation, CoreError> {
-    let mut new_targets = current_targets(doc_set, source, relation);
-    let already = new_targets.iter().any(|t| t == target.as_str());
-    if !already {
-        new_targets.push(target.as_str().to_string());
-    }
-
-    Ok(NormalizedOperation::PatchFrontmatter {
-        path: source.clone(),
-        patch: relation_field_patch(relation, &new_targets),
-    })
-}
-
-/// Normaliza un `remove_relation`: quita `target` del campo de relación `relation` del frontmatter
-/// de `source` — E12-H07.
-///
-/// Devuelve un [`NormalizedOperation::PatchFrontmatter`] que fija el campo `relation` a los targets
-/// actuales SIN `target` (idempotente: si no estaba, el campo queda igual). **Puro.**
-pub fn normalize_remove_relation(
-    _workspace: &DocumentSet,
-    source: &RelPath,
-    relation: &str,
-    target: &RelPath,
-) -> Result<NormalizedOperation, CoreError> {
-    let remaining: Vec<String> = current_targets(_workspace, source, relation)
-        .into_iter()
-        .filter(|t| t != target.as_str())
-        .collect();
-
-    Ok(NormalizedOperation::PatchFrontmatter {
-        path: source.clone(),
-        patch: relation_field_patch(relation, &remaining),
-    })
-}
-
-/// Normaliza un `transition_status`: produce el patch que fija `status: to` en el frontmatter de
-/// `reference` — E12-H07.
-///
-/// Tras el retiro de `core::schema` (E20-H03) NO se valida `to` contra ninguna lista de estados
-/// permitidos: `status` es una propiedad de frontmatter arbitraria (`§20.10`). Devuelve un
-/// [`NormalizedOperation::PatchFrontmatter`] que fija `status: to`. **Puro.**
-pub fn normalize_transition_status(
-    reference: &RelPath,
-    to: &str,
-) -> Result<NormalizedOperation, CoreError> {
-    let mut map = BTreeMap::new();
-    map.insert(
-        "status".to_string(),
-        Some(serde_yaml::Value::String(to.to_string())),
-    );
-    Ok(NormalizedOperation::PatchFrontmatter {
-        path: reference.clone(),
-        patch: FrontmatterPatch(map),
-    })
-}
 
 /// Normaliza un `apply_fix`: materializa el `Fix` `safe` cuyo `fix_id` casa con `fix_id`, entre los
 /// diagnósticos recomputados del workspace — E12-H07.
@@ -1002,9 +887,6 @@ fn op_variant_name(op: &NormalizedOperation) -> String {
         NormalizedOperation::ReplaceText { .. } => "replace_text",
         NormalizedOperation::Move { .. } => "move",
         NormalizedOperation::Delete { .. } => "delete",
-        NormalizedOperation::AddRelation { .. } => "add_relation",
-        NormalizedOperation::RemoveRelation { .. } => "remove_relation",
-        NormalizedOperation::TransitionStatus { .. } => "transition_status",
         NormalizedOperation::ApplyFix { .. } => "apply_fix",
     }
     .to_string()

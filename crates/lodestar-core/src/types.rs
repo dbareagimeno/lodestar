@@ -1382,9 +1382,12 @@ pub enum InboundLinksPolicy {
 
 schema_derive! {
 /// Una operación YA normalizada (resuelta a path(s) y contenido/patch concretos) dentro de un
-/// `ChangeSet`. Las 11 variantes del alcance de E12 (contenido: E12-H05 · estructura: E12-H06 ·
-/// semántica: E12-H07); aquí solo su forma — los campos son razonables para lo que cada operación
-/// resuelve, sin cerrar la lógica que los produce.
+/// `ChangeSet`. Las **8 operaciones universales** de `§20.11` (contenido: E12-H05 · estructura:
+/// E12-H06 · `apply_fix`: E12-H07); aquí solo su forma — los campos son razonables para lo que cada
+/// operación resuelve, sin cerrar la lógica que los produce. E21-H01 retiró las 3 operaciones
+/// semánticas (`add_relation`/`remove_relation`/`transition_status`): una relación es un enlace
+/// Markdown y un estado es una propiedad arbitraria del frontmatter (`§20.11`), así que ambas se
+/// expresan con las universales (una transición es un `PatchFrontmatter`).
 ///
 /// El tag de wire (`op`) usa los mismos nombres snake_case que `proposedOperation.kind`
 /// (`contracts/mcp.yml`) — un solo vocabulario de tipos de operación en el contrato.
@@ -1438,22 +1441,6 @@ pub enum NormalizedOperation {
         path: RelPath,
         inbound_links_policy: InboundLinksPolicy,
     },
-    /// Añade una relación (un campo de frontmatter, E12-H07). Desde E20-H03 sin validación de tipo:
-    /// el modelo es universal (`§20.10`). Fase 12 retira esta operación.
-    AddRelation {
-        source: RelPath,
-        relation: String,
-        target: RelPath,
-    },
-    /// Quita una relación (campo de frontmatter) existente.
-    RemoveRelation {
-        source: RelPath,
-        relation: String,
-        target: RelPath,
-    },
-    /// Transiciona el `status` de un documento (E12-H07). Desde E20-H03 sin validación de lifecycle:
-    /// `status` es una propiedad de frontmatter arbitraria (`§20.10`). Fase 12 retira esta operación.
-    TransitionStatus { path: RelPath, to: String },
     /// Materializa un `Fix` `safe` sugerido por un diagnóstico previo (`Fix.fix_id`).
     ApplyFix { fix_id: String },
 }

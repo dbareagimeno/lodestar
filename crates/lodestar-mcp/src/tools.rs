@@ -88,7 +88,7 @@ pub fn list() -> Value {
                  "path": { "type": "string", "description": "Ruta relativa del documento (p. ej. «notas/alfa.md»)." }
              }, "required": ["path"], "additionalProperties": false },
              "proposedOperation": { "type": "object", "description": "El cambio hipotético a evaluar.", "properties": {
-                 "kind": { "type": "string", "enum": ["move", "delete", "deprecate", "transition_status", "change_relation", "replace_document"], "description": "Tipo de operación propuesta. Solo «delete» computa bloqueos estructurales en v1." }
+                 "kind": { "type": "string", "enum": ["move", "delete"], "description": "Tipo de operación propuesta (modelo universal, §20.10). Solo «delete» computa bloqueos estructurales en v1." }
              }, "required": ["kind"], "additionalProperties": false },
              "depth": { "type": "integer", "minimum": 1, "description": "Profundidad del blast-radius entrante; por defecto cubre todo el alcance transitivo." }
          }, "required": ["ref", "proposedOperation"], "additionalProperties": false },
@@ -96,9 +96,9 @@ pub fn list() -> Value {
         {"name": "change_plan", "description": "Planifica un cambio complejo SIN escribir: normaliza las operaciones propuestas, simula su aplicación en memoria y valida el resultado. Devuelve un único change set (normalizedOperations, semanticDiff, risk, impact, diagnosticsBefore/After) con un planHash determinista. No toca disco (aplicar es change_apply, E13).",
          "inputSchema": { "type": "object", "properties": {
              "expectedWorkspaceRevision": { "type": "string", "description": "Control optimista a nivel de workspace («blake3:…»). Si se omite, se toma la revisión actual; si no coincide → REVISION_CONFLICT." },
-             "operations": { "type": "array", "description": "Operaciones propuestas, discriminadas por «op» (create/patch_frontmatter/replace_body/replace_text/edit_section/move/delete/add_relation/remove_relation/transition_status/apply_fix). Cada op puede llevar «expectedRevision» (DocumentRevision «blake3:…») para control optimista por documento.",
+             "operations": { "type": "array", "description": "Operaciones propuestas, discriminadas por «op»; las 8 universales (§20.11): create/patch_frontmatter/replace_body/replace_text/edit_section/move/delete/apply_fix. Cada op puede llevar «expectedRevision» (DocumentRevision «blake3:…») para control optimista por documento.",
                  "items": { "type": "object", "properties": {
-                     "op": { "type": "string", "enum": ["create", "patch_frontmatter", "replace_body", "replace_text", "edit_section", "move", "delete", "add_relation", "remove_relation", "transition_status", "apply_fix"] },
+                     "op": { "type": "string", "enum": ["create", "patch_frontmatter", "replace_body", "replace_text", "edit_section", "move", "delete", "apply_fix"] },
                      "path": { "type": "string" },
                      "ref": { "type": "object", "properties": { "path": { "type": "string" } } },
                      "expectedRevision": { "type": "string", "description": "DocumentRevision que el agente cree vigente («blake3:…»); si el documento cambió → REVISION_CONFLICT." }

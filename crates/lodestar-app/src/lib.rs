@@ -1138,6 +1138,11 @@ impl App {
     /// - `risk`: `"high"` si el nº de afectados directos es alto; `"medium"` para un impacto
     ///   moderado; `"low"` en caso contrario.
     ///
+    /// `kind` está restringido a las operaciones que `§20.10` lista para impacto: `move` y `delete`.
+    /// E21-H01 retiró los `kind` semánticos (`deprecate`/`transition_status`/`change_relation`/
+    /// `replace_document`) del contrato — un `kind` fuera de `{move, delete}` es un esquema de entrada
+    /// inválido → `Err(ErrorCode::InvalidSchema)`.
+    ///
     /// `Err(ErrorCode::DocumentNotFound)` si el `ref` no resuelve a un documento
     /// ([`App::resolve_ref`]).
     pub fn impact_analyze(
@@ -1146,6 +1151,11 @@ impl App {
         kind: &str,
         depth: Option<u32>,
     ) -> Result<ImpactReport, ErrorCode> {
+        // E21-H01: `kind` restringido a las operaciones de impacto del modelo universal (`§20.10`).
+        // Los `kind` semánticos retirados caen aquí como esquema de entrada inválido.
+        if kind != "move" && kind != "delete" {
+            return Err(ErrorCode::InvalidSchema);
+        }
         let path = self.resolve_ref(r)?;
         let doc_set = self
             .workspace
@@ -2023,38 +2033,6 @@ fn normalize_raw_op(
             };
             plan::normalize_delete(doc_set, &path, policy).map_err(|e| error_code(&e))
         }
-        "add_relation" => {
-            let source = op_source_path(op)?;
-            let relation = op
-                .get("relation")
-                .and_then(Value::as_str)
-                .ok_or(ErrorCode::InvalidSchema)?;
-            let target = op_rel_field(op, "target")?;
-            plan::normalize_add_relation(doc_set, &source, relation, &target)
-                .map(one)
-                .map_err(|e| error_code(&e))
-        }
-        "remove_relation" => {
-            let source = op_source_path(op)?;
-            let relation = op
-                .get("relation")
-                .and_then(Value::as_str)
-                .ok_or(ErrorCode::InvalidSchema)?;
-            let target = op_rel_field(op, "target")?;
-            plan::normalize_remove_relation(doc_set, &source, relation, &target)
-                .map(one)
-                .map_err(|e| error_code(&e))
-        }
-        "transition_status" => {
-            let path = op_ref_path(op)?;
-            let to = op
-                .get("to")
-                .and_then(Value::as_str)
-                .ok_or(ErrorCode::InvalidSchema)?;
-            plan::normalize_transition_status(&path, to)
-                .map(one)
-                .map_err(|e| error_code(&e))
-        }
         "apply_fix" => {
             let fix_id = op
                 .get("fixId")
@@ -2066,18 +2044,6 @@ fn normalize_raw_op(
         }
         _ => Err(ErrorCode::InvalidSchema),
     }
-}
-
-/// `source` de una op de relación: `ref.path`, `path` o `source`.
-fn op_source_path(op: &Value) -> Result<RelPath, ErrorCode> {
-    let s = op
-        .get("ref")
-        .and_then(|r| r.get("path"))
-        .and_then(Value::as_str)
-        .or_else(|| op.get("source").and_then(Value::as_str))
-        .or_else(|| op.get("path").and_then(Value::as_str))
-        .ok_or(ErrorCode::InvalidSchema)?;
-    RelPath::new(s).map_err(|e| error_code(&e))
 }
 
 /// Convierte el campo `patch` de una op cruda en un [`FrontmatterPatch`] (merge-patch RFC 7386:
