@@ -596,7 +596,11 @@ fn workspace_okf(dir: &std::path::Path) {
 /// querer — `Workspace::open` sí los tocaría, por lo que el diagnóstico debe abrir en modo
 /// hermético).
 fn snapshot_arbol(dir: &std::path::Path) -> Vec<(String, Vec<u8>)> {
-    fn recorrer(base: &std::path::Path, actual: &std::path::Path, acc: &mut Vec<(String, Vec<u8>)>) {
+    fn recorrer(
+        base: &std::path::Path,
+        actual: &std::path::Path,
+        acc: &mut Vec<(String, Vec<u8>)>,
+    ) {
         let mut entradas: Vec<std::path::PathBuf> = std::fs::read_dir(actual)
             .unwrap()
             .map(|e| e.unwrap().path())
@@ -648,7 +652,9 @@ fn dry_run_detecta() {
     // index.md raíz: una línea que menciona `index.md` SIN separador de path (el anidado lleva `/`,
     // así que esta comprobación no la satisface el `seccion/index.md`).
     assert!(
-        stdout.lines().any(|l| l.contains("index.md") && !l.contains('/')),
+        stdout
+            .lines()
+            .any(|l| l.contains("index.md") && !l.contains('/')),
         "el informe debe listar el `index.md` raíz; stdout=\n{stdout}"
     );
     // Índice anidado.
