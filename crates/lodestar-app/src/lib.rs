@@ -709,13 +709,25 @@ impl App {
     }
 
     /// Audita el conocimiento con scopes y severidad mínima (E10-H12, `ARCHITECTURE.md §19.6`,
-    /// `REFACTOR §10/§17`), sobre los diagnósticos de `DocumentSet::analyze` (`§20.9`).
+    /// `REFACTOR §10/§17`), respondiendo la pregunta de `§20.9`: *"¿puede Lodestar interpretar y
+    /// modificar este workspace de forma consistente y segura?"* (no *"¿cumple una especificación
+    /// documental?"*).
     ///
     /// **Composición de diagnósticos** (invariante #3 — una sola verdad computada): por cada
     /// documento (`Analysis::documents`) se toman sus diagnósticos de documento
     /// (`Analysis::diagnostics`). Tras E20-H03 la validación schema-driven (`SCHEMA-*`/`REL-*`) se
-    /// retiró con `core::schema`, así que este es el único universo de diagnósticos. Los checks
-    /// `Pass` (no son hallazgos) se descartan.
+    /// retiró con `core::schema`. **En scope workspace** se añaden además los **diagnósticos de
+    /// descubrimiento** (`§20.9`, E20-H04): `DOC-NOT-UTF8`, `DOC-TOO-LARGE`, `SYMLINK-UNSUPPORTED`,
+    /// `PATH-NOT-UTF8` y las colisiones de capitalización del inventario, que describen ficheros que
+    /// Lodestar no pudo incorporar (su objetivo **no** es un documento, o no tienen objetivo) y por
+    /// eso el recorrido por `Analysis::documents` no los vería. Los checks `Pass` se descartan.
+    ///
+    /// **Política de severidad** (`§20.9`, E20-H04): cada diagnóstico se reclasifica por
+    /// [`lodestar_workspace::config::ValidationSection::effective_severity`] según la sección
+    /// `validation` de la config — un override (p. ej. `caseMismatch: error`) reclasifica **cada**
+    /// diagnóstico de esa familia, venga del documento o del descubrimiento; una familia a `ignore`
+    /// lo **suprime**. Con la config por defecto (los defaults de `§20.9` coinciden con las
+    /// severidades hardcodeadas) es la identidad.
     ///
     /// **Scopes** (`scope`): `workspace` = todos los documentos; `document{ref}` = solo ese documento
     /// (resuelto con [`App::resolve_ref`], `DOCUMENT_NOT_FOUND` si no existe); `paths{paths}` = esos
@@ -734,7 +746,8 @@ impl App {
     /// que ya excluye los `Pass`) eleva el umbral de lo que se **devuelve** en `diagnostics`.
     /// `include_suggested_fixes == false` vacía `fixes` (hoy siempre vacío: ningún check propone
     /// fixes tras el retiro de `REL-TARGET` en E20-H03). `limit`/`cursor` paginan de forma determinista sobre el
-    /// orden total estable `(path, code, id)` (mismo patrón de cursor-offset opaco que
+    /// orden total estable `(anchor, code, id)` —el `anchor` es el path del documento, o el primer
+    /// `target` del diagnóstico de descubrimiento— (mismo patrón de cursor-offset opaco que
     /// `knowledge_search`); `limit` por defecto 100 (`REFACTOR §10`), `next_cursor` `None` al agotar.
     pub fn knowledge_check(
         &self,
@@ -744,20 +757,25 @@ impl App {
         limit: Option<usize>,
         cursor: Option<&str>,
     ) -> Result<CheckReport, ErrorCode> {
-        let doc_set = self
+        let (doc_set, discovery_diagnostics) = self
             .workspace
-            .document_set()
+            .document_set_with_discovery()
             .map_err(|e| workspace_error_code(&e))?;
         let analysis = doc_set.analyze();
         let cfg = self.workspace.config();
+        // Política de severidad por familia (`§20.9`, E20-H04): reclasifica o suprime cada
+        // diagnóstico según `validation`. Con la config por defecto es la identidad.
+        let validation = &cfg.validation;
 
         let revision = workspace_revision(doc_set.files(), &cfg.workspace.writable_roots);
 
         // Conjunto de paths del scope.
         let allowed = self.scope_paths(&doc_set, analysis, scope)?;
 
-        // Compón (path, check) por cada documento del scope, con id estable.
-        let mut items: Vec<(RelPath, Check)> = Vec::new();
+        // Compón (anchor, check) por cada documento del scope, con id estable. El `anchor` es el
+        // path del documento (para el orden determinista); en los diagnósticos de descubrimiento sin
+        // documento-objetivo es su primer `target` (o cadena vacía si no tiene ninguno).
+        let mut items: Vec<(String, Check)> = Vec::new();
         for path in &analysis.documents {
             if !allowed.contains(path) {
                 continue;
@@ -768,11 +786,42 @@ impl App {
                 if check.level == Severity::Pass {
                     continue;
                 }
-                check.id = Some(diagnostic_id(path, &check));
+                // Aplica la política de severidad; `None` (familia a `ignore`) suprime el diagnóstico.
+                let Some(level) = validation.effective_severity(&check) else {
+                    continue;
+                };
+                check.level = level;
+                check.id = Some(diagnostic_id(path.as_str(), &check));
                 if !include_suggested_fixes {
                     check.fixes.clear();
                 }
-                items.push((path.clone(), check));
+                items.push((path.as_str().to_string(), check));
+            }
+        }
+
+        // Diagnósticos de **descubrimiento** (`§20.9`, E20-H04): son de workspace, no de documento
+        // (su objetivo no está en `analysis.documents` —un `.md` no-UTF8, un symlink— o no tiene
+        // objetivo —`PATH-NOT-UTF8`—), así que el bucle de arriba, que itera `analysis.documents`,
+        // nunca los vería. Se añaden **solo** en scope workspace: describen el inventario entero.
+        if matches!(scope, CheckScope::Workspace) {
+            for mut check in discovery_diagnostics {
+                if check.level == Severity::Pass {
+                    continue;
+                }
+                let Some(level) = validation.effective_severity(&check) else {
+                    continue;
+                };
+                check.level = level;
+                let anchor = check
+                    .targets
+                    .first()
+                    .map(|t| t.as_str().to_string())
+                    .unwrap_or_default();
+                check.id = Some(diagnostic_id(&anchor, &check));
+                if !include_suggested_fixes {
+                    check.fixes.clear();
+                }
+                items.push((anchor, check));
             }
         }
 
@@ -795,7 +844,7 @@ impl App {
         let floor = minimum_severity.unwrap_or(Severity::Info);
         items.retain(|(_, c)| c.level >= floor);
 
-        // Orden total estable para paginación determinista: (path, code, id).
+        // Orden total estable para paginación determinista: (anchor, code, id).
         items.sort_by(|(pa, ca), (pb, cb)| {
             pa.cmp(pb)
                 .then_with(|| ca.code.as_str().cmp(cb.code.as_str()))
@@ -2251,13 +2300,13 @@ pub struct CheckReport {
 /// `hex = blake3(path ‖ 0x00 ‖ code ‖ 0x00 ‖ range ‖ 0x00 ‖ msg)`. Determinista y derivado **solo**
 /// de los datos del diagnóstico (nunca de timestamps, orden ni caché), así que la misma revisión
 /// produce los mismos `id` incluso entre procesos frescos.
-fn diagnostic_id(path: &RelPath, check: &Check) -> String {
+fn diagnostic_id(path: &str, check: &Check) -> String {
     let range_repr = match &check.range {
         Some(r) => format!("{}:{}", r.start_line, r.end_line),
         None => String::new(),
     };
     let mut hasher = blake3::Hasher::new();
-    hasher.update(path.as_str().as_bytes());
+    hasher.update(path.as_bytes());
     hasher.update(b"\0");
     hasher.update(check.code.as_str().as_bytes());
     hasher.update(b"\0");

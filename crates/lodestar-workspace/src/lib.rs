@@ -13,8 +13,8 @@ use std::sync::Arc;
 
 use crossbeam_channel::Receiver;
 use lodestar_core::types::{
-    Analysis, Backlinks, Direction, FileMap, FrontmatterPatch, GraphModel, Neighborhood, RelPath,
-    WorkspaceRevision, WriteOutcome,
+    Analysis, Backlinks, Check, Direction, FileMap, FrontmatterPatch, GraphModel, Neighborhood,
+    RelPath, WorkspaceRevision, WriteOutcome,
 };
 use lodestar_core::DocumentSet;
 use lodestar_store::{IndexEvent, Store, Watcher};
@@ -269,11 +269,27 @@ impl Workspace {
     /// # Errores
     /// - [`WorkspaceError::Io`] si la política de descubrimiento trae un glob inválido.
     pub fn document_set(&self) -> Result<DocumentSet, WorkspaceError> {
+        Ok(self.document_set_with_discovery()?.0)
+    }
+
+    /// Como [`Workspace::document_set`], pero devuelve **también** los diagnósticos de descubrimiento
+    /// (`§20.9`: `DOC-NOT-UTF8`, `DOC-TOO-LARGE`, `SYMLINK-UNSUPPORTED`, `PATH-NOT-UTF8` y las
+    /// colisiones de capitalización del inventario) que [`Workspace::document_set`] descarta (E20-H04).
+    ///
+    /// Son diagnósticos de **workspace**, no de documento: describen ficheros que Lodestar no pudo
+    /// incorporar al inventario (y por tanto **no** están en [`Analysis::documents`] ni indexados por
+    /// un `RelPath` de [`Analysis::diagnostics`]) o propiedades de portabilidad del inventario
+    /// completo. Por eso viajan aparte, en un `Vec<Check>`, y no dentro del [`Analysis`]: el llamador
+    /// (`App::knowledge_check`, scope workspace) los añade al reporte junto a los de documento —ver
+    /// `ARCHITECTURE.md §20.9`—. Un `PATH-NOT-UTF8` va incluso **sin** `targets` (no hay `RelPath`
+    /// que construir, invariante #6).
+    ///
+    /// # Errores
+    /// - [`WorkspaceError::Io`] si la política de descubrimiento trae un glob inválido.
+    pub fn document_set_with_discovery(&self) -> Result<(DocumentSet, Vec<Check>), WorkspaceError> {
         let descubierto = discovery::discover(&self.root, &self.discovery_policy())?;
-        Ok(DocumentSet::with_other_files(
-            descubierto.files,
-            descubierto.other_files,
-        ))
+        let doc_set = DocumentSet::with_other_files(descubierto.files, descubierto.other_files);
+        Ok((doc_set, descubierto.diagnostics))
     }
 
     /// Snapshot unificado: files + analysis + graph, todo junto.

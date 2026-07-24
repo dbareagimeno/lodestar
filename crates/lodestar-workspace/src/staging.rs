@@ -11,12 +11,14 @@
 //! ignora (E10-H03). Por eso se escribe con `std::fs::write` normal — el protocolo atómico del
 //! único-escritor (`io::write_atomic`) protege los `.md` canónicos, no este scratch desechable.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use lodestar_core::plan;
-use lodestar_core::types::{ChangeSet, ChangeSetId, FileMap, RelPath};
+use lodestar_core::types::{ChangeSet, ChangeSetId, CheckCode, FileMap, RelPath, Severity};
 use lodestar_core::DocumentSet;
 
+use crate::config::ValidationSection;
 use crate::error::WorkspaceError;
 use crate::Workspace;
 
@@ -148,40 +150,90 @@ impl Workspace {
         Ok(StagingDir { path: dir })
     }
 
-    /// Valida un staging materializado contra la política de conformidad antes de publicar (E13-H01).
-    /// Construye un [`DocumentSet`] desde el árbol de staging y evalúa el **mismo universo de
-    /// diagnósticos** que `App::knowledge_check`/`lodestar check`: los diagnósticos de
-    /// [`DocumentSet::analyze`] (`§20.9`). Si el resultado deja **cualquier** diagnóstico de nivel
-    /// `err`, **aborta sin tocar el canónico** y limpia el directorio de staging, devolviendo
-    /// [`WorkspaceError::NonconformantResult`]. Si es conforme, devuelve `Ok(())` y el staging queda
-    /// listo para publicarse.
+    /// Valida un staging materializado contra la **política de cambios** antes de publicar (E13-H01,
+    /// gate diferencial de E20-H04). Compara el conjunto de **errores** del resultado (el árbol de
+    /// staging) contra el del canónico **actual** y decide con `transactions.rejectNewErrors`/
+    /// `allowExistingErrors` (`ARCHITECTURE.md §20.9`, `REFACTOR_PHASE_2 §Fase 10`):
     ///
-    /// **Invariante #3 (una sola verdad computada)**: el veredicto del gate debe coincidir
-    /// EXACTAMENTE con el de `App::knowledge_check` scope workspace sobre el mismo resultado. Para
-    /// no duplicar la composición se reutiliza [`plan::validate_result`] — la MISMA función que
-    /// `change_plan` usa para computar `canApply`/`diagnosticsAfter`, que a su vez compone
-    /// `analyze().diagnostics` (`plan::all_checks`) y declara `conformant == (errors == 0)`. (Tras
-    /// E20-H03 el universo de conformidad es solo el de descubrimiento/documento de `§20.9`: la
-    /// validación schema-driven `SCHEMA-*`/`REL-*` se retiró con `core::schema`.)
+    /// - `rejectNewErrors: true` (default) — el cambio **no** puede **introducir** errores nuevos:
+    ///   se rechaza si el resultado tiene algún error que el canónico no tenía.
+    /// - `allowExistingErrors: true` (default) — se **permite** aplicar sobre un workspace que ya
+    ///   tiene errores; una reparación parcial que no añade errores pasa aunque queden otros sin
+    ///   arreglar. `allowExistingErrors: false` reinstaura el gate estricto («cualquier error en el
+    ///   resultado rechaza»).
     ///
-    /// El gate es estricto por diseño: cuenta solo `err` (no `warn`), nunca se publica un resultado
-    /// con errores duros, con independencia de que la config bloquee o no los avisos.
+    /// Al rechazar, **aborta sin tocar el canónico** y limpia el directorio de staging, devolviendo
+    /// [`WorkspaceError::NonconformantResult`]. Si pasa, devuelve `Ok(())` y el staging queda listo
+    /// para publicarse.
+    ///
+    /// **Severidad configurable**: qué diagnóstico cuenta como error lo decide
+    /// [`ValidationSection::effective_severity`] (misma reclasificación por familia que
+    /// `App::knowledge_check`, invariante #3), no la severidad hardcodeada — así un
+    /// `validation.danglingDocumentLinks: ignore` no bloquea ni cuenta.
+    ///
+    /// **Identidad de diagnóstico** (para distinguir «error nuevo» de «error preexistente que sigue»):
+    /// `(código, targets, related)` — código + documento culpable + destino relacionado. No depende
+    /// del `id` efímero: un `LINK-TARGET-MISSING` de `roto.md` que existía antes y sigue después tiene
+    /// la misma clave (no es nuevo); uno de `nuevo.md` que no existía sí lo es.
+    ///
+    /// El **«antes»** se computa aquí dentro, vía `self` (que ya tiene acceso al canónico), para no
+    /// cambiar la firma del método (E20-H04).
     pub fn validate_staging(&self, staging: &StagingDir) -> Result<(), WorkspaceError> {
-        let files = read_tree(staging.path())?;
-        let doc_set = DocumentSet::from_files(files);
-        // Conformidad del resultado (diagnósticos de documento, `§20.9`): misma composición y mismo
-        // criterio (`conformant == errors == 0`) que `change_plan`/`knowledge_check` (invariante #3).
-        let report = plan::validate_result(&doc_set);
-        if !report.conformant {
+        let after_files = read_tree(staging.path())?;
+
+        // «Antes»: el canónico actual con su inventario completo (los `other_files` para clasificar
+        // enlaces a ficheros del proyecto igual que el resto del motor). El «después» reusa esos
+        // mismos `other_files`: una transacción solo escribe `.md`, así que los ficheros no-documento
+        // del proyecto son idénticos en ambos árboles, y resolver los enlaces con el mismo inventario
+        // evita que un enlace a código pase de `WorkspaceFile` a `Missing` y parezca un error nuevo.
+        let canonical = crate::discovery::discover(&self.root, &self.discovery_policy())?;
+        let before =
+            DocumentSet::with_other_files(canonical.files.clone(), canonical.other_files.clone());
+        let after = DocumentSet::with_other_files(after_files, canonical.other_files);
+
+        let cfg = self.config();
+        let before_errors = error_keys(&before, &cfg.validation);
+        let after_errors = error_keys(&after, &cfg.validation);
+
+        let introduces_new = after_errors.iter().any(|k| !before_errors.contains(k));
+        let reject = (cfg.transactions.reject_new_errors && introduces_new)
+            || (!cfg.transactions.allow_existing_errors && !after_errors.is_empty());
+
+        if reject {
             // Aborta: limpia el staging (best-effort) y no toca el canónico.
             let _ = std::fs::remove_dir_all(staging.path());
-            let errors = report.summary.errors;
+            let nuevos = after_errors.difference(&before_errors).count();
             return Err(WorkspaceError::NonconformantResult(format!(
-                "el resultado del plan deja {errors} fallo(s) duro(s) de conformidad"
+                "el resultado del plan no pasa la política de cambios: {nuevos} error(es) nuevo(s), \
+                 {} error(es) en total (rejectNewErrors={}, allowExistingErrors={})",
+                after_errors.len(),
+                cfg.transactions.reject_new_errors,
+                cfg.transactions.allow_existing_errors
             )));
         }
         Ok(())
     }
+}
+
+/// Clave de identidad de un diagnóstico independiente de su `id` efímero: código + documento(s)
+/// culpable(s) + destino(s) relacionado(s). Es lo que distingue un error **nuevo** de uno
+/// preexistente que sobrevive al cambio (E20-H04).
+type DiagKey = (CheckCode, Vec<RelPath>, Vec<RelPath>);
+
+/// El conjunto de claves de los diagnósticos de **error** de `doc_set` bajo la política `validation`
+/// (severidad efectiva, no la hardcodeada). Solo entran los que quedan en [`Severity::Err`] tras
+/// aplicar [`ValidationSection::effective_severity`] — los reclasificados a `Warn`/`ignore` no son
+/// errores y no cuentan para el gate diferencial.
+fn error_keys(doc_set: &DocumentSet, validation: &ValidationSection) -> BTreeSet<DiagKey> {
+    let mut set: BTreeSet<DiagKey> = BTreeSet::new();
+    for checks in doc_set.analyze().diagnostics.values() {
+        for check in checks {
+            if validation.effective_severity(check) == Some(Severity::Err) {
+                set.insert((check.code, check.targets.clone(), check.related.clone()));
+            }
+        }
+    }
+    set
 }
 
 #[cfg(test)]

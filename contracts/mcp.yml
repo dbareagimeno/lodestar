@@ -291,13 +291,18 @@ tools:
     output_schema: "sí — schemars::schema_for!(CheckReport), vía lodestar_app::schemas::knowledge_check_schema()"
     errores: ["DOCUMENT_NOT_FOUND (ref inexistente en scope document/affected)", "WorkspaceError"]
     semantica: >-
-      Audita conocimiento (diagnósticos de DocumentSet::analyze + checks schema-driven de
-      core::schema::validate_schema, E10-H07) con scope y severidad mínima. Cada diagnóstico
-      lleva un `id` estable dentro de una revisión (`diag:blake3:<hex>`, determinista, sin
-      timestamps/orden/caché). Reemplaza semánticamente a `conformance_check` (ver §15).
-      E16-H05 (`ARCHITECTURE.md §20.9`): responde «¿puede Lodestar interpretar y modificar este
-      workspace de forma consistente y segura?», NO «¿cumple una especificación documental?» —
-      ver el catálogo de `Check.code` en la cabecera de este contrato.
+      Audita conocimiento (diagnósticos de DocumentSet::analyze) con scope y severidad mínima. En
+      scope workspace añade los diagnósticos de DESCUBRIMIENTO (§20.9, E20-H04:
+      DOC-NOT-UTF8/DOC-TOO-LARGE/SYMLINK-UNSUPPORTED/PATH-NOT-UTF8 + colisiones de capitalización
+      del inventario), cuyo objetivo no es un documento (o no lo tienen). La severidad de cada
+      diagnóstico la fija la sección `validation` de la config por familia (E20-H04): un override
+      reclasifica cada diagnóstico de la familia, `ignore` lo suprime; con los defaults de §20.9 es
+      la identidad. Cada diagnóstico lleva un `id` estable dentro de una revisión
+      (`diag:blake3:<hex>`, determinista, sin timestamps/orden/caché). Reemplaza semánticamente a
+      `conformance_check` (ver §15). E16-H05/E20-H04 (`ARCHITECTURE.md §20.9`): responde «¿puede
+      Lodestar interpretar y modificar este workspace de forma consistente y segura?», NO «¿cumple
+      una especificación documental?» — ver el catálogo de `Check.code` en la cabecera de este
+      contrato.
 
   # -------------------------------------------------------------------------
   # Tool nueva de E11-H01 (consolidación del grafo, §19.6). Declara `outputSchema`
@@ -393,7 +398,7 @@ tools:
       - { nombre: expectedWorkspaceRevision, tipo: string, requerido: false, semantica: "control optimista a nivel de workspace («blake3:…»); si se omite se adopta la revisión actual, si no coincide → REVISION_CONFLICT" }
     retorno: "ApplyResult (lodestar_app): { receiptId, applied, previousWorkspaceRevision, workspaceRevision, changedPaths, semanticDiff, validation: { conformant, errors, warnings } } — json directo, sin envelope"
     output_schema: "sí — schemars::schema_for!(ApplyResult), vía lodestar_app::schemas::change_apply_schema()"
-    errores: ["PLAN_EXPIRED (plan caducado)", "PLAN_STALE (plan ausente/ilegible, o el workspace cambió bajo él ⇒ planHash recomputado difiere)", "REVISION_CONFLICT (expectedWorkspaceRevision no coincide, o la base cambió entre plan y apply)", "PERMISSION_DENIED (un path afectado cae fuera de writableRoots / bajo un referenceRoot)", "NONCONFORMANT_RESULT (el resultado hipotético no es conforme)", "WORKSPACE_RECOVERY_REQUIRED (recuperación pendiente no completada)", "INTERNAL_IO_ERROR (carga de config, IO de la transacción)", "WorkspaceError"]
+    errores: ["PLAN_EXPIRED (plan caducado)", "PLAN_STALE (plan ausente/ilegible, o el workspace cambió bajo él ⇒ planHash recomputado difiere)", "REVISION_CONFLICT (expectedWorkspaceRevision no coincide, o la base cambió entre plan y apply)", "PERMISSION_DENIED (un path afectado cae fuera de writableRoots / bajo un referenceRoot)", "NONCONFORMANT_RESULT (gate diferencial de E20-H04: el resultado INTRODUCE errores que el canónico no tenía con rejectNewErrors, o deja errores con allowExistingErrors:false)", "WORKSPACE_RECOVERY_REQUIRED (recuperación pendiente no completada)", "INTERNAL_IO_ERROR (carga de config, IO de la transacción)", "WorkspaceError"]
     semantica: >-
       Aplica un plan vigente por el ÚNICO ESCRITOR (invariante #5) con la mecánica de publicación
       recuperable de E13 (invariante «nunca un estado parcial silencioso»). Pasos de plan: carga el
@@ -404,7 +409,9 @@ tools:
       escribe. Luego delega en `Workspace::apply_transaction`, que ejecuta EN ORDEN: lock de
       publicación (E13-H02) → cálculo del conjunto afectado real (creados/modificados/borrados) →
       `assert_writable` de cada afectado ANTES de tocar el canónico (E11-H04 → PERMISSION_DENIED) →
-      staging + validación (E13-H01) → re-verificación de la base (E13-H02) → copias de recuperación
+      staging + gate diferencial de cambios (E13-H01/E20-H04: rechaza con NONCONFORMANT_RESULT solo
+      si el resultado introduce errores que el canónico no tenía, según rejectNewErrors/
+      allowExistingErrors) → re-verificación de la base (E13-H02) → copias de recuperación
       (E13-H04) → write-ahead journal `prepared` fsynced (E13-H03) → renames atómicos por el único
       escritor (E13-H05) → sellado (limpia staging/journal, CONSERVA las copias de recuperación).
       Tras publicar, persiste el ChangeReceipt (E13-H07, `receiptId` = id de transacción derivado del

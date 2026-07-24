@@ -85,15 +85,18 @@ fn policy_permisiva() -> PlanPolicy {
 /// Audita todo el workspace con `knowledge_check` (scope workspace, umbral `Info` para no filtrar
 /// nada salvo los `Pass`, límite holgado para que la paginación no oculte diagnósticos).
 fn check_workspace(app: &App) -> CheckReport {
-    app.knowledge_check(&CheckScope::Workspace, Some(Severity::Info), false, Some(1000), None)
-        .expect("knowledge_check(workspace) debe responder")
+    app.knowledge_check(
+        &CheckScope::Workspace,
+        Some(Severity::Info),
+        false,
+        Some(1000),
+        None,
+    )
+    .expect("knowledge_check(workspace) debe responder")
 }
 
 /// El primer diagnóstico del reporte con este código (si lo hay).
-fn diag_con_codigo<'a>(
-    report: &'a CheckReport,
-    code: CheckCode,
-) -> Option<&'a lodestar_core::types::Check> {
+fn diag_con_codigo(report: &CheckReport, code: CheckCode) -> Option<&lodestar_core::types::Check> {
     report.diagnostics.iter().find(|c| c.code == code)
 }
 
@@ -137,8 +140,16 @@ fn descubrimiento_llega_a_check() {
     let root = dir.path();
 
     // Documentos válidos y mutuamente enlazados (sin diagnósticos propios).
-    escribe(root, "README.md", "# Proyecto\n\nEmpieza por [lo primero](docs/uno.md).\n");
-    escribe(root, "docs/uno.md", "# Uno\n\nVuelve al [inicio](../README.md).\n");
+    escribe(
+        root,
+        "README.md",
+        "# Proyecto\n\nEmpieza por [lo primero](docs/uno.md).\n",
+    );
+    escribe(
+        root,
+        "docs/uno.md",
+        "# Uno\n\nVuelve al [inicio](../README.md).\n",
+    );
     // El `.md` no-UTF8: 0xF0 abre una secuencia de 4 bytes y 0x28 no es continuación válida.
     std::fs::write(root.join("binario.md"), [0xF0, 0x28, 0x8C, 0xBC]).unwrap();
 
@@ -167,8 +178,7 @@ fn descubrimiento_llega_a_check() {
         )
     });
     assert!(
-        diag.targets.iter().any(|t| t.as_str() == "binario.md")
-            || diag.msg.contains("binario.md"),
+        diag.targets.iter().any(|t| t.as_str() == "binario.md") || diag.msg.contains("binario.md"),
         "el DOC-NOT-UTF8 debe señalar al fichero culpable `binario.md`: {diag:?}"
     );
 }
@@ -192,7 +202,11 @@ fn descubrimiento_llega_a_check() {
 /// familia/código**: `caseMismatch` gobierna cualquier `LINK-CASE-MISMATCH`, venga del inventario o
 /// de un enlace. (Ese es el criterio que fija este test.)
 fn semilla_case_mismatch(root: &Path) {
-    escribe(root, "docs/auth.md", "# Auth\n\nDocumento real, en minúsculas.\n");
+    escribe(
+        root,
+        "docs/auth.md",
+        "# Auth\n\nDocumento real, en minúsculas.\n",
+    );
     escribe(
         root,
         "indice.md",
@@ -231,7 +245,8 @@ fn severidad_configurable_por_defecto_es_warning() {
     );
     // Sin más diagnósticos de error, el workspace es conforme por defecto.
     assert_eq!(
-        report.summary.errors, 0,
+        report.summary.errors,
+        0,
         "por defecto la colisión de capitalización no debe contar como error: {}",
         resumen(&report)
     );
@@ -252,7 +267,11 @@ fn severidad_configurable() {
     let root = dir.path();
     semilla_case_mismatch(root);
     // La config eleva la familia `caseMismatch` a `error`.
-    escribe(root, ".lodestar/config.yaml", "validation:\n  caseMismatch: error\n");
+    escribe(
+        root,
+        ".lodestar/config.yaml",
+        "validation:\n  caseMismatch: error\n",
+    );
 
     let app = App::open(root).expect("el workspace temporal debe abrir");
     let report = check_workspace(&app);
@@ -341,7 +360,8 @@ fn apply_sobre_errores_previos() {
     // Precondición no vacua: el error preexistente EXISTE antes del cambio.
     let antes = check_workspace(&app);
     assert!(
-        diag_con_codigo(&antes, CheckCode::LinkTargetMissing).is_some_and(|c| c.level == Severity::Err),
+        diag_con_codigo(&antes, CheckCode::LinkTargetMissing)
+            .is_some_and(|c| c.level == Severity::Err),
         "precondición: `roto.md` debe aportar un LINK-TARGET-MISSING de nivel error antes del \
          cambio. Diagnósticos: [{}]",
         resumen(&antes)
@@ -363,7 +383,10 @@ fn apply_sobre_errores_previos() {
             e.as_str()
         ),
     };
-    assert!(apply.applied, "el apply permitido debe reportar applied: true");
+    assert!(
+        apply.applied,
+        "el apply permitido debe reportar applied: true"
+    );
 
     // El error preexistente SIGUE ahí: no se reparó, solo se toleró (el criterio no pide que
     // desaparezca).

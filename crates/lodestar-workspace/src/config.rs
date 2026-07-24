@@ -14,7 +14,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use lodestar_core::types::{Analysis, RelPath};
+use lodestar_core::types::{Analysis, Check, CheckCode, RelPath, Severity};
 use serde::Deserialize;
 
 use crate::discovery::{DiscoveryPolicy, CONTROL_PLANE_EXCLUDE};
@@ -34,8 +34,8 @@ pub struct WorkspaceConfig {
     pub workspace: WorkspaceSection,
     /// Política de descubrimiento (`§20.5`): qué documentos forman el inventario.
     pub discovery: DiscoverySection,
-    /// Política de validación (`§20.9`): severidad por familia de diagnóstico. **Solo se carga**;
-    /// aplicarla es E20.
+    /// Política de validación (`§20.9`): severidad por familia de diagnóstico. Aplicada desde
+    /// E20-H04 vía [`ValidationSection::effective_severity`].
     pub validation: ValidationSection,
     /// Puerta de conformidad (strictness de `lodestar check`).
     pub gate: GateSection,
@@ -176,16 +176,81 @@ impl DiscoverySection {
 /// Sección `validation` (`ARCHITECTURE.md §20.9`): severidad por **familia de diagnóstico**
 /// (`malformedFrontmatter: error`, `isolatedDocuments: ignore`, …).
 ///
-/// Es un mapa abierto a propósito: las familias no son una lista cerrada en esta historia
-/// —aplicar la política es E20—, así que aquí solo se **carga sin perder datos**, conservando
-/// literalmente las claves del YAML. Lo único que se valida es la severidad, cuyo catálogo sí es
-/// cerrado ([`ValidationSeverity`]): un `warn` mal escrito es exactamente el typo que la regla
-/// «una config rota es un error, no un default» quiere cazar.
+/// Es un mapa abierto a propósito: las familias no son una lista cerrada, así que se **carga sin
+/// perder datos**, conservando literalmente las claves del YAML. Lo único que se valida es la
+/// severidad, cuyo catálogo sí es cerrado ([`ValidationSeverity`]): un `warn` mal escrito es
+/// exactamente el typo que la regla «una config rota es un error, no un default» quiere cazar.
+///
+/// Desde **E20-H04** la política se **aplica** vía [`ValidationSection::effective_severity`].
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
 #[serde(transparent)]
 pub struct ValidationSection {
     /// Familia de diagnóstico (tal cual aparece en el YAML) → severidad configurada.
     pub families: BTreeMap<String, ValidationSeverity>,
+}
+
+/// Familia `malformedFrontmatter` (`§20.9`): frontmatter no interpretable. Cubre `FM-UNCLOSED` y
+/// `FM-YAML-INVALID`. Default: `error`.
+pub const FAMILY_MALFORMED_FRONTMATTER: &str = "malformedFrontmatter";
+/// Familia `danglingDocumentLinks` (`§20.9`): enlace a un **documento** Markdown inexistente
+/// (`LINK-TARGET-MISSING` cuyo destino ausente sería un `.md`). Default: `error`.
+pub const FAMILY_DANGLING_DOCUMENT_LINKS: &str = "danglingDocumentLinks";
+/// Familia `missingWorkspaceFiles` (`§20.9`): enlace a un **fichero del proyecto** (no `.md`)
+/// inexistente (`LINK-TARGET-MISSING` cuyo destino ausente no sería un documento). Default:
+/// `warning`.
+pub const FAMILY_MISSING_WORKSPACE_FILES: &str = "missingWorkspaceFiles";
+/// Familia `caseMismatch` (`§20.9`): capitalización no portable (`LINK-CASE-MISMATCH`, venga del
+/// descubrimiento o de un enlace). Default: `warning`.
+pub const FAMILY_CASE_MISMATCH: &str = "caseMismatch";
+
+/// La **familia de diagnóstico** (`§20.9`) a la que pertenece un [`Check`], o `None` si su código
+/// no está gobernado por ninguna familia configurable (su severidad es intrínseca y no se puede
+/// reclasificar desde `validation`).
+///
+/// `LINK-TARGET-MISSING` se reparte en **dos** familias según la naturaleza del destino ausente
+/// (`related[0]`): un documento Markdown → `danglingDocumentLinks`; otro fichero del proyecto →
+/// `missingWorkspaceFiles`. Es el **mismo discriminador** ([`RelPath::is_markdown`]) con el que
+/// `links::diagnose` asigna la severidad hardcodeada, de modo que aplicar el default no cambia nada.
+///
+/// La familia `isolatedDocuments` de `§20.9` **no** aparece aquí: el documento aislado dejó de ser
+/// un diagnóstico (el código `ORPHAN` murió en E16-H02, es una propiedad consultable). Su default
+/// `ignore` es, por tanto, un no-op — no hay nada que suprimir.
+fn family_of(check: &Check) -> Option<&'static str> {
+    match check.code {
+        CheckCode::FmUnclosed | CheckCode::FmYamlInvalid => Some(FAMILY_MALFORMED_FRONTMATTER),
+        CheckCode::LinkCaseMismatch => Some(FAMILY_CASE_MISMATCH),
+        CheckCode::LinkTargetMissing => {
+            let markdown = check.related.first().is_some_and(RelPath::is_markdown);
+            Some(if markdown {
+                FAMILY_DANGLING_DOCUMENT_LINKS
+            } else {
+                FAMILY_MISSING_WORKSPACE_FILES
+            })
+        }
+        // `DOC-CONFLICT-MARKER`, `DOC-NOT-UTF8`, `DOC-TOO-LARGE`, `PATH-NOT-UTF8`,
+        // `SYMLINK-UNSUPPORTED`, `LINK-ESCAPES-WORKSPACE`: fuera de las 5 familias de `§20.9`, su
+        // severidad no es configurable.
+        _ => None,
+    }
+}
+
+impl ValidationSection {
+    /// La **severidad efectiva** de `check` bajo esta política (`§20.9`), o `None` si la familia
+    /// configurada lo **suprime** (`ignore`).
+    ///
+    /// - Familia configurada a `error`/`warning`/`ignore` → `Err`/`Warn`/`None`, sea cual sea el
+    ///   productor del diagnóstico (reclasifica **cada** diagnóstico de esa familia).
+    /// - Familia **no** mencionada en la config, o código **sin familia** (`family_of` devuelve
+    ///   `None`) → se conserva la severidad intrínseca que trae el [`Check`]. Como los defaults de
+    ///   `§20.9` coinciden con las severidades hardcodeadas, no declarar `validation` no cambia nada.
+    pub fn effective_severity(&self, check: &Check) -> Option<Severity> {
+        match family_of(check).and_then(|f| self.families.get(f)) {
+            Some(ValidationSeverity::Error) => Some(Severity::Err),
+            Some(ValidationSeverity::Warning) => Some(Severity::Warn),
+            Some(ValidationSeverity::Ignore) => None,
+            None => Some(check.level),
+        }
+    }
 }
 
 /// Severidad configurable de una familia de diagnóstico (`§20.9`). **Solo dato**: quien la aplique
@@ -222,10 +287,11 @@ pub struct TransactionsSection {
     /// Número máximo de recibos retenidos simultáneamente.
     pub maximum_receipts: usize,
     /// Un cambio no puede introducir errores nuevos ni empeorar los existentes (por defecto
-    /// `true`). **Solo se carga**: la mecánica es E20.
+    /// `true`). Aplicada en el gate diferencial de [`crate::Workspace::validate_staging`] (E20-H04).
     pub reject_new_errors: bool,
     /// Lodestar puede trabajar en un repositorio que ya tiene problemas, y una reparación parcial
-    /// se puede aplicar (por defecto `true`). **Solo se carga**: la mecánica es E20.
+    /// se puede aplicar (por defecto `true`). Aplicada en el gate diferencial de
+    /// [`crate::Workspace::validate_staging`] (E20-H04).
     pub allow_existing_errors: bool,
 }
 

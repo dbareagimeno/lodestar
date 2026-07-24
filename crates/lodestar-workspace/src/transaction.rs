@@ -20,7 +20,8 @@
 //! 5. `assert_writable(path)` para **cada** afectado — si alguno cae fuera de `writableRoots` (o bajo
 //!    `referenceRoots`), `Err(PermissionDenied)` ANTES de tocar el canónico (E11-H04).
 //! 6. `materialize_staging` + `validate_staging` — resultado hipotético validado sin tocar el
-//!    canónico (E13-H01).
+//!    canónico (E13-H01); el gate diferencial de E20-H04 (`rejectNewErrors`/`allowExistingErrors`)
+//!    rechaza solo si el resultado **introduce** errores que el canónico no tenía.
 //! 7. `reverify_base_revision` — control optimista bajo el lock (la base no cambió, E13-H02).
 //! 8. `backup_originals` — copias de recuperación **antes** de publicar (E13-H04).
 //! 9. `create_journal` — write-ahead journal `prepared`, fsynced antes del primer rename (E13-H03).

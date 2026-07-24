@@ -19,11 +19,12 @@ pub enum WorkspaceError {
     #[error("permiso denegado: {0}")]
     PermissionDenied(String),
     /// El resultado hipotético de un plan, materializado en staging (E13-H01,
-    /// [`crate::Workspace::validate_staging`]), NO cumple la política de conformidad estricta
-    /// (`hard_fail > 0`): publicarlo dejaría el conocimiento canónico no conforme. La validación
-    /// aborta sin tocar el canónico y limpia el staging; el `String` describe el motivo concreto
-    /// (recuento de fallos duros). Mapea al wire `NONCONFORMANT_RESULT`.
-    #[error("el resultado del plan no es conforme: {0}")]
+    /// [`crate::Workspace::validate_staging`]), NO pasa la **política de cambios** (E20-H04,
+    /// `§20.9`): con `rejectNewErrors` introduciría errores que el canónico no tenía, o con
+    /// `allowExistingErrors: false` el resultado deja errores. La validación aborta sin tocar el
+    /// canónico y limpia el staging; el `String` describe el motivo concreto (errores nuevos / total).
+    /// Mapea al wire `NONCONFORMANT_RESULT`.
+    #[error("el resultado del plan no pasa la política de cambios: {0}")]
     NonconformantResult(String),
     /// Conflicto de escritura optimista (E13-H02, [`crate::Workspace::reverify_base_revision`]):
     /// la [`lodestar_core::types::WorkspaceRevision`] del conocimiento escribible cambió entre que
