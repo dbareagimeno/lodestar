@@ -1152,8 +1152,8 @@ use serde_json::json;
 fn equivalen(donde: &str, filtro: serde_json::Value, esperado: Expression) {
     let del_texto =
         parse(donde).unwrap_or_else(|e| panic!("el `where` `{donde}` debe parsear: {e:?}"));
-    let del_json =
-        from_json(&filtro).unwrap_or_else(|e| panic!("el `filter` de `{donde}` debe deserializar: {e:?}"));
+    let del_json = from_json(&filtro)
+        .unwrap_or_else(|e| panic!("el `filter` de `{donde}` debe deserializar: {e:?}"));
     assert_eq!(
         del_texto, esperado,
         "el `where` `{donde}` produce el AST esperado"
@@ -1380,7 +1380,8 @@ fn equivalencia_resultado() {
         let sel_texto = seleccion(&ds, &parse(donde).unwrap());
         let sel_json = seleccion(
             &ds,
-            &from_json(&filtro).unwrap_or_else(|e| panic!("`filter` de `{donde}` no deserializa: {e:?}")),
+            &from_json(&filtro)
+                .unwrap_or_else(|e| panic!("`filter` de `{donde}` no deserializa: {e:?}")),
         );
 
         assert_eq!(

@@ -435,7 +435,12 @@ fn word_to_value(w: &str) -> QueryValue {
 /// que la ruta de frontmatter queda **desnuda** —la forma que el evaluador de H01 resuelve directo
 /// con `ParsedFrontmatter::get`—; `document.*`/`graph.*` conservan su primer segmento (son
 /// namespaces calculados, E19-H04). Un segmento vacío (`service.`, `a..b`) es `Err`.
-fn build_field_path(word: &str) -> Result<FieldPath, ParseError> {
+///
+/// `pub(crate)` porque el filtro JSON de E19-H03 ([`crate::filter::from_json`]) la **reutiliza** para
+/// normalizar su campo `field` de forma idéntica al textual — esa identidad es lo que garantiza que
+/// `where` y `filter` produzcan exactamente el mismo [`Expression`] (`§20.10`); reimplementarla
+/// abriría la puerta a que las dos superficies divergieran.
+pub(crate) fn build_field_path(word: &str) -> Result<FieldPath, ParseError> {
     let partes: Vec<&str> = word.split('.').collect();
     let partes: &[&str] = if partes.len() > 1 && partes[0] == "frontmatter" {
         &partes[1..]
