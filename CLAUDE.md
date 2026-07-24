@@ -7,6 +7,19 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Estado actual del repo (importante)
 
+> **⚠️ ACTUALIZACIÓN (v0.3.0, `ARCHITECTURE.md §20`, épicas E15–E22): el repo migró de OKF a
+> workspaces Markdown universales.** Lodestar ya **no exige OKF**: opera sobre cualquier red de `.md`
+> de un proyecto (`cd my-project && lodestar-mcp`, sin `init`/`.lodestar/`/`index.md`/frontmatter).
+> El frontmatter es YAML arbitrario, ningún nombre de fichero es especial, los enlaces se resuelven
+> por path, la consulta es un lenguaje tipado (`where`/`filter`), `metadata_inspect` sustituye a
+> `schema_inspect`, y se retiraron `core::schema`, el crate `lodestar-vcs`, los generadores
+> (`init`/`index`/`tags`/`export`/`import`) y el prototipo como spec. **§20 supersede a §19 y §13 en
+> modelo documental**; lo que sigue de §19 (motor headless, `lodestar-app`, modelo transaccional,
+> perfiles) se hereda íntegro. Las secciones de abajo describen el **giro headless previo (§19)** y
+> conservan terminología OKF (`bundle`/`concept`/conformidad) que §20 renombró — léelas como historia
+> del proyecto, no como estado vigente; la autoridad viva es `ARCHITECTURE.md §20` y
+> `docs/REFACTOR_PHASE_2.md`.
+
 **El repo COMPLETÓ el giro a motor headless de integridad semántica** (`ARCHITECTURE.md §19`,
 ratificado 2026-07-22 — supersede `§13` en superficie de producto; épicas `E9`–`E14` en
 `requirements/`). Lodestar deja de posicionarse como "editor local-first con git de primera clase"

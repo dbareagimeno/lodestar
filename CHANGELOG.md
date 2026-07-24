@@ -7,6 +7,63 @@ y el proyecto sigue [Versionado Semántico](https://semver.org/lang/es/).
 
 ## [No publicado]
 
+## [0.3.0] - 2026-07-24
+
+**Migración de OKF a workspaces Markdown universales** (`ARCHITECTURE.md §20`, ratificado el
+2026-07-23; épicas E15–E22; fuente `docs/REFACTOR_PHASE_2.md`). lodestar deja de exigir el formato
+documental propio **OKF** y pasa a operar sobre **cualquier red de ficheros Markdown contenida en un
+proyecto**: `cd my-project && lodestar-mcp` funciona sin `init`, sin `.lodestar/`, sin `index.md`,
+sin frontmatter obligatorio.
+
+> **⚠️ Versión INCOMPATIBLE con v0.2.x.** El modelo documental, la superficie MCP y el DDL del store
+> cambian. La cache `.lodestar/index.db` se reconstruye automáticamente; los `.md` OKF existentes
+> siguen siendo Markdown válido (ver `migrate-from-okf --dry-run`), pero pierden la semántica especial
+> de OKF.
+
+### Cambiado
+
+- **El `cwd` es el workspace** (E15): `lodestar-mcp` arranca desde cualquier directorio (`--root` para
+  fijarlo); descubrimiento recursivo de todos los `**/*.md` respetando `.gitignore`/`.lodestarignore`.
+- **Modelo documental genérico** (E16): el frontmatter es **YAML arbitrario** con sus tipos reales
+  (sin campos conocidos, sin `type` obligatorio); ningún nombre de fichero (`index.md`, `README.md`,
+  `log.md`) activa reglas especiales; título derivado (`frontmatter.title` → primer H1 → nombre del
+  fichero); `patch_frontmatter` **quirúrgico** que no reescribe el bloque salvo que sea necesario y
+  no puede destruir un frontmatter ilegible.
+- **Enlaces Markdown estándar** (E17): resueltos **solo por path** (inline, de referencia, con
+  fragmento, anchors, externos), clasificados en `LinkTarget` (documento / fichero del proyecto /
+  externo / self-anchor / roto / escapa). Grafo universal: todos los `.md` son nodos.
+- **Store v2** (E18): DDL `documents`/`metadata`/`links`/`diagnostics` sin columnas OKF; metadata
+  indexada por field path recursivo con su tipo; FTS sin campos privilegiados.
+- **Lenguaje de consulta tipado** (E19): `where` textual y `filter` JSON producen el mismo AST y el
+  mismo resultado; dot-notation, listas, existencia, namespaces `document.*`/`graph.*`; **sin coerción
+  implícita** (`priority >= "high"` es un error de tipo). Sustituye la DSL de subcadena.
+- **Validación genérica** (E20): diagnósticos mínimos de `§20.9` (nada de «falta `type`»);
+  `metadata_inspect` (catálogo de propiedades e inspección de campo) sustituye a `schema_inspect`;
+  política `rejectNewErrors`/`allowExistingErrors` (se puede reparar un repo que ya tiene problemas).
+- **Operaciones transaccionales universales** (E21): las 8 de `§20.11` (`create_document`,
+  `patch_frontmatter`, `replace_body`, `replace_text`, `edit_section`, `move_document`,
+  `delete_document`, `apply_fix`), selecciones masivas por consulta, y `move_document` que reescribe
+  los backlinks relativos (incluidas las definiciones de referencia). El motor transaccional
+  (staging/journal/locks/recovery/receipt/revert) **no cambia**.
+
+### Retirado
+
+- **OKF como formato obligatorio**: fuera `core::schema` (`DocType`, `requiredFields`,
+  `allowedStatuses`, relaciones tipadas, `.lodestar/schema.yaml`), los códigos `OKF-*`/`SCHEMA-*`/
+  `REL-*`, `in_index`/`okf_version` como semántica, y las 5 operaciones semánticas (`add_relation`,
+  `remove_relation`, `transition_status`, `deprecate`, `replace_concept`).
+- **git**: el crate `lodestar-vcs` se **borra** del repo (era una capacidad dormida).
+- **Generadores e intercambio**: `lodestar init`/`index`/`tags`/`export`/`import`.
+- **El prototipo JS** como spec de comportamiento (la spec pasa a ser `docs/REFACTOR_PHASE_2.md`).
+- Terminología OKF de la API pública: `Concept`→`Document`, `Bundle`→`DocumentSet`,
+  `Conformance`→`Validation`, `CONCEPT_NOT_FOUND`→`DOCUMENT_NOT_FOUND`.
+
+### Añadido
+
+- **`lodestar migrate-from-okf --dry-run`**: diagnóstico de cortesía que detecta convenciones OKF
+  legadas (`index.md` raíz, índices anidados, `okf_version`, índices de tags) **sin modificar ningún
+  fichero**.
+
 ## [0.2.0] - 2026-07-23
 
 **Giro a motor headless de integridad semántica** (`ARCHITECTURE.md §19`, ratificado el
