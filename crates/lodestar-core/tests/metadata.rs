@@ -90,17 +90,25 @@ fn ds(docs: Vec<(String, String)>) -> DocumentSet {
 /// `n` documentos con `status: <status>`, rutas únicas por prefijo.
 fn statuses(status: &str, n: usize) -> Vec<(String, String)> {
     (0..n)
-        .map(|i| (format!("{status}-{i}.md"), fm_doc(&format!("status: {status}"))))
+        .map(|i| {
+            (
+                format!("{status}-{i}.md"),
+                fm_doc(&format!("status: {status}")),
+            )
+        })
         .collect()
 }
 
 /// La entrada del catálogo para `field`, o panic con la lista de campos presentes.
 fn stats<'a>(cat: &'a MetadataCatalog, field: &str) -> &'a FieldStats {
     let target = fp(field);
-    cat.fields.iter().find(|e| e.field == target).unwrap_or_else(|| {
-        let listados: Vec<String> = cat.fields.iter().map(|e| e.field.to_string()).collect();
-        panic!("el catálogo debe listar `{field}`; lista {listados:?}");
-    })
+    cat.fields
+        .iter()
+        .find(|e| e.field == target)
+        .unwrap_or_else(|| {
+            let listados: Vec<String> = cat.fields.iter().map(|e| e.field.to_string()).collect();
+            panic!("el catálogo debe listar `{field}`; lista {listados:?}");
+        })
 }
 
 /// Los nombres de campo del catálogo, en su orden real (para clavar el determinismo del orden).
@@ -184,11 +192,17 @@ fn catalogo_paths_anidados() {
 
     // (2) Las hojas anidadas son campos propios con su presencia y su tipo (`§Fase 6`).
     let name = stats(&cat, "service.name");
-    assert_eq!(name.present_in, 2, "`service.name` aparece en los 2 documentos");
+    assert_eq!(
+        name.present_in, 2,
+        "`service.name` aparece en los 2 documentos"
+    );
     assert_eq!(name.inferred_types.get(&ValueType::String), Some(&2));
 
     let tier = stats(&cat, "service.tier");
-    assert_eq!(tier.present_in, 2, "`service.tier` aparece en los 2 documentos");
+    assert_eq!(
+        tier.present_in, 2,
+        "`service.tier` aparece en los 2 documentos"
+    );
     assert_eq!(tier.inferred_types.get(&ValueType::String), Some(&2));
 
     // (3) El mapa intermedio `service` aparece con tipo Mapping: informa al agente de que es un
@@ -207,8 +221,14 @@ fn catalogo_paths_anidados() {
 #[test]
 fn catalogo_vacio() {
     let docs = vec![
-        ("a.md".to_string(), "# A\n\nSolo cuerpo, sin frontmatter.\n".to_string()),
-        ("b.md".to_string(), "# B\n\nTampoco tengo frontmatter.\n".to_string()),
+        (
+            "a.md".to_string(),
+            "# A\n\nSolo cuerpo, sin frontmatter.\n".to_string(),
+        ),
+        (
+            "b.md".to_string(),
+            "# B\n\nTampoco tengo frontmatter.\n".to_string(),
+        ),
     ];
     let cat = catalog(&ds(docs));
 
@@ -239,7 +259,10 @@ fn inspecciona_valores_frecuentes() {
 
     let insp = inspect_field(&ds(docs), &fp("status"));
 
-    assert_eq!(insp.present_in, 105, "57 + 21 + 21 + 6 documentos tienen `status`");
+    assert_eq!(
+        insp.present_in, 105,
+        "57 + 21 + 21 + 6 documentos tienen `status`"
+    );
     assert_eq!(
         insp.inferred_types.get(&ValueType::String),
         Some(&105),

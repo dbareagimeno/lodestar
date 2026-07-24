@@ -646,7 +646,11 @@ fn lookup<'a>(valor: &'a serde_yaml::Value, segmento: &str) -> Option<&'a serde_
 }
 
 /// Texto de un escalar YAML (string, número o booleano). `None` para `null`, listas y mapas.
-fn scalar_text(v: &serde_yaml::Value) -> Option<String> {
+///
+/// `pub(crate)`: es **la** única verdad de «texto de un escalar» del core (la usan [`lookup`],
+/// [`ParsedFrontmatter::get_text`] y el orden de `values` en `crate::metadata`), de modo que el
+/// número `2` y el string `"2"` rinden al mismo texto sin que nadie reimplemente ese render.
+pub(crate) fn scalar_text(v: &serde_yaml::Value) -> Option<String> {
     match v {
         serde_yaml::Value::String(s) => Some(s.clone()),
         serde_yaml::Value::Number(n) => Some(n.to_string()),
