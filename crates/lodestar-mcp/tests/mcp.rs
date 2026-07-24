@@ -4173,3 +4173,250 @@ fn search_result_sin_campos_okf() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// E20-H03 — Sustituir `schema_inspect` por `metadata_inspect` y retirar `core::schema`.
+//
+// UBICACIÓN: los 3 criterios se ejercitan **e2e por la tool MCP** (campo Pruebas de la historia +
+// coherente con E10-H11 y E19-H05): lo que importa fijar aquí es el contrato de **wire** (nombre de
+// la tool en `tools/list`, forma del `structuredContent` del catálogo y de la inspección) sin
+// acoplar los tests a la firma interna que el implementador elija (`App::metadata_inspect`, un tipo
+// wire de `lodestar-app` o un `derive` directo sobre los tipos de `core::types`). Por eso NO hay
+// stub en `src/`: la tool ausente da un ROJO limpio en runtime.
+//
+// FASE ROJA: la tool `metadata_inspect` NO está en `tools::list()` todavía y la vieja
+// `schema_inspect` SÍ, así que:
+//   · `tool_es_metadata_inspect` falla por partida doble: `metadata_inspect` ausente Y
+//     `schema_inspect` presente.
+//   · `metadata_inspect_catalog`/`metadata_inspect_field` invocan una tool inexistente →
+//     `tools/call` responde `-32602` y `result` es `null` → los asserts que leen
+//     `structuredContent.*` fallan por AUSENCIA de la tool/servicio (no por un valor erróneo).
+//
+// CONTRATO DE WIRE que fija esta fase (los 4 tipos de retorno de E20-H01/H02
+// —`MetadataCatalog`/`FieldStats`/`FieldInspection`/`ValueCount`— quedaron SIN serde a propósito
+// para que H03 lo clave):
+//   arguments: { mode: "catalog" }                       -> catálogo de propiedades
+//            | { mode: "field", field: "<dot.path>" }    -> inspección de un campo
+//   structuredContent (mode "catalog"): {
+//     fields: [ { name: "<dot.path>", presentIn: N, inferredTypes: { "<tipo>": N, … } } ]
+//   }
+//   structuredContent (mode "field"): {
+//     field: "<dot.path>", presentIn: N, missingIn: N,
+//     inferredTypes: { "<tipo>": N, … },
+//     values: [ { value: <valor en su tipo JSON natural>, count: N } ]
+//   }
+// Decisiones de wire (autor de tests, clavadas por los asserts de abajo):
+//   · El path del campo es la clave `name` en el CATÁLOGO y `field` en la INSPECCIÓN (§Fase 6:
+//     `{"name":"status",…}` vs `{"field":"status",…}`); un `FieldPath` rinde a su string punteado
+//     (`"service.tier"`), no a un array de segmentos.
+//   · `inferredTypes` es un OBJETO `{nombre-de-tipo-en-minúscula: conteo}`, NO un array de pares:
+//     el `BTreeMap<ValueType, usize>` interno se aplana a `{ "string": N, "number": N }`.
+//   · `values[*].value` conserva su tipo JSON natural: un número es número, un string es string
+//     (sin coerción — el número `5` y el string `"5"` son valores distintos).
+// ---------------------------------------------------------------------------
+
+/// Workspace con metadata heterogénea sobre el campo `status`, servible por AMBOS modos de
+/// `metadata_inspect` (catálogo e inspección) con números coherentes entre sí:
+///   · `status` presente en 6 de 8 documentos (2 sin frontmatter → ausente);
+///   · tipos: 5 string (`accepted`×3, `draft`×2) + 1 number (`status: 5`);
+///   · valores escalares: `accepted`×3, `draft`×2, `5`(número)×1.
+///
+/// No vacuo por diseño: los conteos discriminan (present 6 ≠ total 8), los tipos son mixtos
+/// (string y number) y hay un valor NUMÉRICO — así el wire de `inferredTypes` (objeto por tipo) y
+/// el de `values` (tipo JSON natural) se ejercitan de verdad, no con un único string uniforme.
+fn workspace_metadata() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    for (slug, status) in [
+        ("p1", "accepted"),
+        ("p2", "accepted"),
+        ("p3", "accepted"),
+        ("p4", "draft"),
+        ("p5", "draft"),
+    ] {
+        write(
+            dir.path(),
+            &format!("{slug}.md"),
+            &format!("---\nstatus: {status}\n---\n\n# {slug}\n\ncuerpo.\n"),
+        );
+    }
+    // `status` NUMÉRICO: un `5` a secas es un número YAML, no un string (sin coerción).
+    write(
+        dir.path(),
+        "p6.md",
+        "---\nstatus: 5\n---\n\n# p6\n\ncuerpo.\n",
+    );
+    // 2 documentos SIN frontmatter → `status` ausente (missingIn == 2).
+    write(dir.path(), "p7.md", "# p7\n\nsin frontmatter.\n");
+    write(dir.path(), "p8.md", "# p8\n\nsin frontmatter.\n");
+    dir
+}
+
+/// E20-H03 · Criterio `tool_es_metadata_inspect`:
+/// Dado el MCP, Cuando se pide `tools/list`, Entonces aparece `metadata_inspect` y NO
+/// `schema_inspect`. Se asevera lo uno Y lo otro (presencia de la nueva, ausencia de la vieja): no
+/// basta con añadir `metadata_inspect` dejando `schema_inspect` en la superficie.
+#[test]
+fn tool_es_metadata_inspect() {
+    let dir = workspace_min();
+    let resp = roundtrip(
+        dir.path(),
+        &[r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#],
+        1,
+    );
+    let tools = nombres_de_tools(&resp[0]);
+    assert!(
+        tools.contains("metadata_inspect"),
+        "tools/list debe incluir la tool «metadata_inspect»: {tools:?}"
+    );
+    assert!(
+        !tools.contains("schema_inspect"),
+        "tools/list NO debe incluir la tool retirada «schema_inspect»: {tools:?}"
+    );
+}
+
+/// E20-H03 · Criterio `metadata_inspect_catalog`:
+/// Dado `metadata_inspect {mode: "catalog"}`, Cuando se llama, Entonces devuelve el catálogo de H01:
+/// `fields` con `name`/`presentIn`/`inferredTypes` (§Fase 6).
+#[test]
+fn metadata_inspect_catalog() {
+    let dir = workspace_metadata();
+    let resp = roundtrip(
+        dir.path(),
+        &[
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"metadata_inspect","arguments":{"mode":"catalog"}}}"#,
+        ],
+        1,
+    );
+    let sc = &resp[0]["result"]["structuredContent"];
+    let fields = sc["fields"].as_array().unwrap_or_else(|| {
+        panic!("metadata_inspect(catalog) debe devolver structuredContent.fields (array): {resp:?}")
+    });
+
+    // El campo `status` aparece con clave `name` (§Fase 6: `{"name":"status",…}`), no `field`.
+    let status = fields
+        .iter()
+        .find(|f| f["name"] == "status")
+        .unwrap_or_else(|| {
+            panic!("el catálogo debe listar el campo «status» bajo la clave `name`: {resp:?}")
+        });
+
+    // `presentIn`: en 6 de los 8 documentos (los conteos discriminan → no vacuo).
+    assert_eq!(
+        status["presentIn"].as_u64(),
+        Some(6),
+        "status.presentIn debe ser 6 (presente en 6 de 8 documentos): {status:?}"
+    );
+
+    // `inferredTypes` es un OBJETO {tipo-en-minúscula: conteo}, NO un array de pares.
+    let tipos = &status["inferredTypes"];
+    assert!(
+        tipos.is_object(),
+        "inferredTypes debe ser un objeto {{tipo: conteo}}, no un array de pares: {status:?}"
+    );
+    assert_eq!(
+        tipos["string"].as_u64(),
+        Some(5),
+        "inferredTypes.string debe ser 5 (accepted×3 + draft×2): {status:?}"
+    );
+    assert_eq!(
+        tipos["number"].as_u64(),
+        Some(1),
+        "inferredTypes.number debe ser 1 (`status: 5` es un número, sin coerción a string): {status:?}"
+    );
+}
+
+/// E20-H03 · Criterio `metadata_inspect_field`:
+/// Dado `metadata_inspect {mode: "field", field: "status"}`, Cuando se llama, Entonces devuelve la
+/// inspección de H02: `presentIn`/`missingIn`/`inferredTypes`/`values` con `value`/`count` (§Fase 6).
+#[test]
+fn metadata_inspect_field() {
+    let dir = workspace_metadata();
+    let resp = roundtrip(
+        dir.path(),
+        &[
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"metadata_inspect","arguments":{"mode":"field","field":"status"}}}"#,
+        ],
+        1,
+    );
+    let sc = &resp[0]["result"]["structuredContent"];
+    // Rojo limpio si la tool no existe: `structuredContent` nulo → panic explicando el porqué.
+    assert!(
+        sc.is_object(),
+        "metadata_inspect(field) debe devolver structuredContent (objeto): {resp:?}"
+    );
+
+    // El path inspeccionado viaja con la clave `field` (§Fase 6: `{"field":"status",…}`), no `name`.
+    assert_eq!(
+        sc["field"], "status",
+        "la inspección debe llevar `field` == «status» (string punteado del FieldPath): {resp:?}"
+    );
+
+    // Presencia/ausencia sobre el total: present 6 + missing 2 == 8 documentos.
+    assert_eq!(
+        sc["presentIn"].as_u64(),
+        Some(6),
+        "status.presentIn debe ser 6: {resp:?}"
+    );
+    assert_eq!(
+        sc["missingIn"].as_u64(),
+        Some(2),
+        "status.missingIn debe ser 2 (2 documentos sin frontmatter): {resp:?}"
+    );
+
+    // `inferredTypes` como objeto {tipo: conteo}, misma forma que en el catálogo.
+    let tipos = &sc["inferredTypes"];
+    assert!(
+        tipos.is_object(),
+        "inferredTypes debe ser un objeto {{tipo: conteo}}: {resp:?}"
+    );
+    assert_eq!(
+        tipos["string"].as_u64(),
+        Some(5),
+        "inferredTypes.string: {resp:?}"
+    );
+    assert_eq!(
+        tipos["number"].as_u64(),
+        Some(1),
+        "inferredTypes.number: {resp:?}"
+    );
+
+    // `values`: lista de `{value, count}` con el valor en su TIPO JSON natural.
+    let values = sc["values"].as_array().unwrap_or_else(|| {
+        panic!(
+            "metadata_inspect(field) debe devolver `values` (array de {{value, count}}): {resp:?}"
+        )
+    });
+
+    // Un valor STRING conserva su tipo string y su conteo (accepted×3).
+    let accepted = values
+        .iter()
+        .find(|v| v["value"] == "accepted")
+        .unwrap_or_else(|| panic!("`values` debe incluir el string «accepted»: {resp:?}"));
+    assert!(
+        accepted["value"].is_string(),
+        "el valor «accepted» debe viajar como string JSON: {accepted:?}"
+    );
+    assert_eq!(
+        accepted["count"].as_u64(),
+        Some(3),
+        "«accepted» aparece en 3 documentos: {accepted:?}"
+    );
+
+    // Un valor NUMÉRICO conserva su tipo número (no se convierte a `"5"`): clava el tipo JSON natural.
+    let numerico = values
+        .iter()
+        .find(|v| v["value"].is_number())
+        .unwrap_or_else(|| {
+            panic!("`values` debe incluir el valor NUMÉRICO como número JSON (no como string): {resp:?}")
+        });
+    assert_eq!(
+        numerico["value"].as_i64(),
+        Some(5),
+        "el valor numérico debe ser 5 (número, sin coerción a string): {numerico:?}"
+    );
+    assert_eq!(
+        numerico["count"].as_u64(),
+        Some(1),
+        "el valor numérico 5 aparece en 1 documento: {numerico:?}"
+    );
+}
