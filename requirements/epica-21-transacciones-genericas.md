@@ -113,6 +113,11 @@ masivas; E17 (`resolve`/`Inventory`, la reescritura de enlaces relativos) es la 
     se rechaza con `INBOUND_LINKS_EXIST` → `delete_rechaza_con_backlinks`.
   - **Dado** el mismo delete con política `remove_links`, **Entonces** los enlaces entrantes se
     eliminan y el plan lo refleja → `delete_remove_links`.
+  - **[Añadido tras la fase roja — gap de `§Fase 12`]** **Dado** un `delete_document` **sin**
+    `inboundLinksPolicy` sobre un documento con backlinks, **Entonces** se rechaza pidiendo una
+    política explícita — **no** se elige `reject` en silencio (`§Fase 12`: *"No elegir una política
+    automáticamente"*). Hoy defaultea a `reject`: hay que convertir la omisión en error →
+    `delete_exige_politica_explicita`.
 - **Dependencias**: E21-H01, E17.
 - **Pruebas**: `crates/lodestar-core/tests/`, `crates/lodestar-app/tests/`.
 - **Frontera (mcp.yml)**: **sí**.

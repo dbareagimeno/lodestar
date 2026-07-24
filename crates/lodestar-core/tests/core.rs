@@ -2027,3 +2027,199 @@ fn delete_remove_links() {
 // `FixNotFound` (ningún diagnóstico adjunta fixes); Fase 12 retira las tres. Su normalización
 // trivial ya no tiene criterio propio que fijar aquí.
 // ---------------------------------------------------------------------------
+
+// ===========================================================================
+// E21-H03 — `move_document` con reescritura de backlinks (`ARCHITECTURE.md §20.11`,
+// `REFACTOR_PHASE_2 §Fase 12 (Movimiento de documentos)`). Fase ROJA.
+//
+// A diferencia del test E12-H06 `move_reescribe_entrantes` (que usa enlaces raíz-absolutos
+// `/target.md`, insensibles a la profundidad del origen), estos dos fijan el CORAZÓN de la
+// historia:
+//   · `move_reescribe_backlinks` — 3 backlinks INLINE relativos desde profundidades DISTINTAS: el
+//     href recalculado es distinto desde cada origen (`docs/security/auth.md` vs `security/auth.md`
+//     vs `../../docs/security/auth.md`), y label + fragmento se conservan. Con la reescritura por
+//     regex vigente (`LINK_REWRITE_RE`) ya funciona para enlaces inline — es el GUARD que impedirá
+//     que la migración a reescritura por `span` (que exige `move_reescribe_referencia`) regrese el
+//     recálculo relativo.
+//   · `move_reescribe_referencia` — un backlink de REFERENCIA (`[t][id]` + `[id]: destino`): la
+//     definición debe reescribirse. La regex `LINK_REWRITE_RE` solo ve `[texto](href)` inline, NO
+//     las definiciones `[id]: href`, así que HOY este test es ROJO — fuerza la reescritura por el
+//     `span` de bytes del destino (E17-H01 lo dejó anotado como propio de `move_document`,
+//     `§20.11`), que sí alcanza la definición.
+// ===========================================================================
+
+/// Cuerpo (post-frontmatter) del `ReplaceBody` que reescribe el documento `path`, o `panic` si el
+/// change set no incluye ninguno para ese origen. Es la vista por la que se juzga qué quedó escrito
+/// en cada backlink reescrito.
+fn body_de_replace(ops: &[NormalizedOperation], path: &RelPath) -> String {
+    ops.iter()
+        .find_map(|op| match op {
+            NormalizedOperation::ReplaceBody { path: p, body } if p == path => Some(body.clone()),
+            _ => None,
+        })
+        .unwrap_or_else(|| {
+            panic!("el change set debe incluir un ReplaceBody para {path:?}: {ops:?}")
+        })
+}
+
+/// Los paths (ordenados y deduplicados) de los orígenes entrantes de un documento.
+fn origenes_entrantes(b: &DocumentSet, target: &RelPath) -> Vec<RelPath> {
+    paths_ordenados(
+        b.backlinks(target)
+            .inbound
+            .into_iter()
+            .map(|l| l.from)
+            .collect(),
+    )
+}
+
+/// Criterio `move_reescribe_backlinks`: **Dado** `docs/auth.md` con 3 backlinks desde profundidades
+/// DISTINTAS, **Cuando** se mueve a `docs/security/auth.md` con `rewriteInboundLinks`, **Entonces**
+/// los 3 orígenes tienen el enlace recalculado (relativo correcto desde cada uno) conservando su
+/// label (y su fragmento).
+///
+/// El recálculo relativo es el núcleo: desde la raíz el nuevo href es `docs/security/auth.md`; desde
+/// un hermano en `docs/` es `security/auth.md`; desde `pkg/a/b.md` (3 niveles) es
+/// `../../docs/security/auth.md`. Tres orígenes a la misma profundidad NO probarían nada — la gracia
+/// es que el destino relativo es DISTINTO desde cada uno.
+#[test]
+fn move_reescribe_backlinks() {
+    let from = RelPath::new("docs/auth.md").unwrap();
+    let to = RelPath::new("docs/security/auth.md").unwrap();
+
+    // Tres orígenes a profundidades 0/1/3, cada uno con un enlace INLINE relativo a `docs/auth.md`.
+    // El de `pkg/a/b.md` lleva label multi-palabra y fragmento, para fijar que ambos sobreviven.
+    let b = DocumentSet::from_files(fm(&[
+        (
+            "docs/auth.md",
+            "---\ntitle: Auth\n---\n\n# Auth\n\n## rotacion\n\ncuerpo\n",
+        ),
+        (
+            "README.md",
+            "---\ntitle: Readme\n---\n\nRaíz: [Autenticación](docs/auth.md).\n",
+        ),
+        (
+            "docs/otro.md",
+            "---\ntitle: Otro\n---\n\nHermano: [Auth](auth.md).\n",
+        ),
+        (
+            "pkg/a/b.md",
+            "---\ntitle: B\n---\n\nProfundo: [Ver rotación](../../docs/auth.md#rotacion).\n",
+        ),
+    ]));
+
+    // Precondición del fixture: los 3 documentos son backlinks de `docs/auth.md`.
+    let esperados = paths_ordenados(vec![
+        RelPath::new("README.md").unwrap(),
+        RelPath::new("docs/otro.md").unwrap(),
+        RelPath::new("pkg/a/b.md").unwrap(),
+    ]);
+    assert_eq!(
+        origenes_entrantes(&b, &from),
+        esperados,
+        "el fixture debe dejar `docs/auth.md` con backlinks desde README.md, docs/otro.md y pkg/a/b.md",
+    );
+
+    let ops = lodestar_core::plan::normalize_move(&b, &from, &to, true)
+        .expect("mover con backlinks relativos y rewrite:true no debe fallar la normalización");
+
+    // 1) Un único `Move` + una reescritura por cada uno de los 3 orígenes.
+    let moves = ops
+        .iter()
+        .filter(|op| matches!(op, NormalizedOperation::Move { .. }))
+        .count();
+    assert_eq!(moves, 1, "debe haber exactamente un `Move`; ops = {ops:?}");
+    let reescritos = paths_ordenados(ops.iter().filter_map(path_op_enlace).collect::<Vec<_>>());
+    assert_eq!(
+        reescritos, esperados,
+        "debe reescribirse exactamente cada uno de los 3 orígenes; reescritos = {reescritos:?}",
+    );
+
+    // 2) Cada origen recalcula su href relativo (distinto según su profundidad), conservando label y
+    //    fragmento. La aserción por substring exacto casa label + href + fragmento a la vez.
+    let readme = body_de_replace(&ops, &RelPath::new("README.md").unwrap());
+    assert!(
+        readme.contains("[Autenticación](docs/security/auth.md)"),
+        "desde la raíz el enlace debe recalcularse a `docs/security/auth.md` conservando el label; \
+         cuerpo = {readme:?}",
+    );
+    assert!(
+        !readme.contains("](docs/auth.md)"),
+        "el enlace de la raíz no debe conservar el destino viejo; cuerpo = {readme:?}",
+    );
+
+    let otro = body_de_replace(&ops, &RelPath::new("docs/otro.md").unwrap());
+    assert!(
+        otro.contains("[Auth](security/auth.md)"),
+        "desde un hermano en `docs/` el enlace debe recalcularse a `security/auth.md`; \
+         cuerpo = {otro:?}",
+    );
+    assert!(
+        !otro.contains("](auth.md)"),
+        "el enlace del hermano no debe conservar el destino viejo `auth.md`; cuerpo = {otro:?}",
+    );
+
+    let profundo = body_de_replace(&ops, &RelPath::new("pkg/a/b.md").unwrap());
+    assert!(
+        profundo.contains("[Ver rotación](../../docs/security/auth.md#rotacion)"),
+        "desde `pkg/a/b.md` (3 niveles) el enlace debe recalcularse a `../../docs/security/auth.md` \
+         conservando label y fragmento `#rotacion`; cuerpo = {profundo:?}",
+    );
+    assert!(
+        !profundo.contains("](../../docs/auth.md#"),
+        "el enlace profundo no debe conservar el destino viejo; cuerpo = {profundo:?}",
+    );
+}
+
+/// Criterio `move_reescribe_referencia`: **Dado** un backlink que es un enlace de REFERENCIA
+/// (`[t][id]` con su definición `[id]: destino`), **Cuando** el documento se mueve, **Entonces** la
+/// DEFINICIÓN se reescribe al nuevo destino relativo.
+///
+/// ROJO esperado HOY: `rewrite_body_links` reescribe con `LINK_REWRITE_RE`, una regex que solo casa
+/// enlaces inline `[texto](href)`; NO ve las definiciones `[id]: href` ni el uso `[t][id]`, así que
+/// el cuerpo del entrante vuelve intacto y la definición sigue apuntando al destino viejo. El
+/// arreglo es reescribir por el `span` de bytes del destino (que en un enlace de referencia cae
+/// dentro de su definición, E17-H01), no por regex — `§20.11`.
+#[test]
+fn move_reescribe_referencia() {
+    let from = RelPath::new("docs/auth.md").unwrap();
+    let to = RelPath::new("docs/security/auth.md").unwrap();
+
+    let b = DocumentSet::from_files(fm(&[
+        ("docs/auth.md", "---\ntitle: Auth\n---\n\n# Auth\n"),
+        (
+            "docs/otro.md",
+            "---\ntitle: Otro\n---\n\nVer [autenticación][auth].\n\n[auth]: auth.md\n",
+        ),
+    ]));
+
+    // Precondición: el enlace de referencia cuenta como backlink de `docs/auth.md`.
+    assert_eq!(
+        origenes_entrantes(&b, &from),
+        vec![RelPath::new("docs/otro.md").unwrap()],
+        "el enlace de referencia `[autenticación][auth]` + `[auth]: auth.md` debe ser un backlink \
+         de `docs/auth.md`",
+    );
+
+    let ops = lodestar_core::plan::normalize_move(&b, &from, &to, true).expect(
+        "mover con un backlink de referencia y rewrite:true no debe fallar la normalización",
+    );
+
+    let otro = body_de_replace(&ops, &RelPath::new("docs/otro.md").unwrap());
+
+    // El uso `[autenticación][auth]` se conserva intacto (solo cambia el destino, en la definición).
+    assert!(
+        otro.contains("[autenticación][auth]"),
+        "el uso del enlace de referencia debe conservarse; cuerpo = {otro:?}",
+    );
+    // Y la DEFINICIÓN se reescribe al nuevo destino relativo desde `docs/otro.md`: `security/auth.md`.
+    assert!(
+        otro.contains("[auth]: security/auth.md"),
+        "la DEFINICIÓN del enlace de referencia debe reescribirse a `[auth]: security/auth.md` \
+         (reescritura por el `span` del destino, no por la regex de enlaces inline); cuerpo = {otro:?}",
+    );
+    assert!(
+        !otro.contains("[auth]: auth.md"),
+        "la definición no debe conservar el destino viejo `auth.md`; cuerpo = {otro:?}",
+    );
+}
