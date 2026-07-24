@@ -146,6 +146,22 @@
 #     historia propia). `directlyAffected`/`affectedDocuments` se calculan sobre el grafo universal,
 #     así que ahora incluyen enlaces de referencia (`[t][id]`) y cualquier profundidad.
 #
+# E21-H04 (CIERRE de E21, `ARCHITECTURE.md §20.3`/`§20.11`): repaso final del contrato. La superficie
+# de 10 tools NO cambia y ningún tipo del wire cambia de forma. Dos cosas quedan registradas:
+#   - Renombre INTERNO del core `core::diff::OkfDiff` → `SnapshotDiff` (el diff de bajo nivel entre
+#     dos snapshots que `plan::semantic_diff` reusa). NO toca el wire: el campo `semanticDiff` de
+#     `change_plan`/`change_apply`/`change_revert` es `core::types::SemanticDiff` (E12), sin cambios.
+#     El nombre neutro no es `SemanticDiff` porque ese identificador ya lo lleva el tipo de wire.
+#   - La superficie ACTIVA de este contrato no lleva vocabulario OKF salvo `conformant`/
+#     `requireConformantResult`/`NONCONFORMANT_RESULT` (retorno de `change_apply`.validation, param
+#     `policy` de `change_plan`, código de error). Es EXACTAMENTE `DECISIONES.md §13`
+#     (`Conformant → Valid`), APLAZADA: completar la pareja de `§20.3` abriría el catálogo de 16
+#     `ErrorCode` congelados, y eso no es un renombre léxico — queda para una historia que decida
+#     abrir ese catálogo. Hasta entonces esos tres identificadores se conservan tal cual (deuda
+#     documentada, no discrepancia de contrato). Los comentarios de changelog de arriba
+#     (`# SE BORRAN: OKF-…`, `Bundle → DocumentSet`, retiradas de tools) son registro histórico y se
+#     conservan.
+#
 # E10-H13 (decisión D6b, `docs/REFACTOR.md §13`, `DECISIONES.md §3`): las 10 tools activas declaran
 # `outputSchema` (JSON Schema derivado con `schemars::schema_for!` desde el tipo de respuesta real
 # de `lodestar-app`, vía los helpers de `lodestar_app::schemas::*`).

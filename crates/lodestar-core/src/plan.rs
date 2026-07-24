@@ -154,7 +154,7 @@ fn accion(op: &NormalizedOperation) -> &'static str {
 /// está en `before`; `diagnostics_resolved` = checks de `before` cuya clave no está en `after`.
 /// Se descartan los `Severity::Pass` (no son diagnósticos, son la ausencia de uno).
 pub fn semantic_diff(before: &DocumentSet, after: &DocumentSet) -> SemanticDiff {
-    let okf = diff_snap(before.files(), after.files());
+    let snap = diff_snap(before.files(), after.files());
 
     let mut created = Vec::new();
     let mut modified = Vec::new();
@@ -163,7 +163,7 @@ pub fn semantic_diff(before: &DocumentSet, after: &DocumentSet) -> SemanticDiff 
     let mut body_changes = Vec::new();
     let mut relation_changes = Vec::new();
 
-    for fd in &okf.files {
+    for fd in &snap.files {
         match fd.kind {
             ChangeKind::Add => created.push(fd.path.clone()),
             ChangeKind::Mod => modified.push(fd.path.clone()),

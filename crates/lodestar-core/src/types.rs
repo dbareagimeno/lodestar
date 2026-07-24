@@ -1311,7 +1311,7 @@ schema_derive! {
 /// Diff semántico entre el workspace actual y el hipotético resultante de aplicar un `ChangeSet`
 /// (E12-H03 lo calcula; aquí solo la forma). `frontmatter_changes`/`body_changes`/
 /// `relation_changes` son los paths afectados por cada categoría — una forma mínima razonable;
-/// E12-H03 puede reusar [`crate::diff::OkfDiff`] como referencia sin que sea obligatorio aquí.
+/// E12-H03 puede reusar [`crate::diff::SnapshotDiff`] como referencia sin que sea obligatorio aquí.
 /// `Default` = diff vacío (plan sin efecto observable), usado por los tests de forma.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]

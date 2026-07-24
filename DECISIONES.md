@@ -260,7 +260,7 @@ Pendientes de priorización (no bloquean el núcleo):
   propiedad y la ficción de "todo es string" se note. No bloquea: se puede empezar por (a) y migrar
   a (b) sin romper el wire, porque el tipo viaja en `value_type`.
 
-## 13. `Conformant → Valid`: la mitad que falta de `§20.3` — 🟠 ABIERTA
+## 13. `Conformant → Valid`: la mitad que falta de `§20.3` — 🟠 APLAZADA (revisada en E21-H04)
 
 - **Contexto** (detectado al implementar E16-H06): la tabla de terminología de `§20.3` manda dos
   sustituciones emparejadas, `Conformance → Validation` y `Conformant → Valid`. La primera está
@@ -281,6 +281,17 @@ Pendientes de priorización (no bloquean el núcleo):
   su contrato de errores. Hacerlo ahora significaría abrir el catálogo congelado dos veces.
   Mientras tanto la asimetría es fea pero inocua: `core::types::ValidationReport` ya tenía esa
   misma forma antes de la migración, así que no se ha introducido una discrepancia nueva.
+- **Estado (E21-H04, cierre de E21)**: **APLAZADA, no cerrada**. E21-H04 hizo el renombre neutro
+  que sí era léxico y sin riesgo (`core::diff::OkfDiff` → `SnapshotDiff`) y repasó el contrato: en
+  la superficie viva de `mcp.yml` no queda vocabulario OKF salvo `conformant`/
+  `requireConformantResult`/`NONCONFORMANT_RESULT`, que son exactamente esta decisión. Completar la
+  opción (a) exige tocar `ErrorCode::NonconformantResult` —**una de las 16 filas congeladas** del
+  catálogo de errores (`§19.3`)— y la superficie de `change_plan`; eso **no** es un renombre léxico
+  y queda **fuera** del alcance de E21-H04 (la historia acota su repaso a lo que no abre el catálogo
+  congelado). La asimetría sigue siendo fea pero inocua. Se retoma en la historia que decida abrir
+  el catálogo de errores; hasta entonces `conformant`/`NONCONFORMANT_RESULT` se conservan tal cual y
+  su presencia en la superficie activa de `mcp.yml` es **deuda documentada**, no una discrepancia de
+  contrato.
 
 ---
 

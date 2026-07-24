@@ -1,6 +1,7 @@
-//! Diff semántico OKF (`ARCHITECTURE.md §4.4`, `§13.3`). Port de `diffSnap`/`fmDiff`/`lineDiff`/`collapseDiff`.
+//! Diff de snapshot entre dos [`FileMap`] (árbol vs árbol / HEAD vs working, `ARCHITECTURE.md
+//! §4.4`, `§13.3`). Port de `diffSnap`/`fmDiff`/`lineDiff`/`collapseDiff`.
 //!
-//! Es la **única verdad computada** del diff; lo renderizan igual las fachadas y el frontend.
+//! Es la **única verdad computada** del diff; lo renderizan igual las fachadas.
 //! El LCS lleva una **guarda de tamaño** (fallback grueso por umbral) para no reventar la memoria
 //! con ficheros enormes; la versión Hirschberg/dos-filas es una mejora aditiva futura.
 
@@ -106,10 +107,15 @@ pub enum MessageHint {
 }
 
 schema_derive! {
-/// El diff semántico OKF completo.
+/// El diff de snapshot completo entre dos [`FileMap`] (árbol vs árbol / HEAD vs working).
+///
+/// Nombre neutro por `§20.3` (la API pública deja de hablar de OKF; antes llevaba ese prefijo).
+/// No se llama `SemanticDiff` porque ese nombre ya lo lleva el diff de un `ChangeSet` en
+/// [`crate::types::SemanticDiff`] (E12, otra forma de wire): este es el diff de bajo nivel entre
+/// dos snapshots que aquél reusa vía [`crate::plan::semantic_diff`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct OkfDiff {
+pub struct SnapshotDiff {
     pub files: Vec<FileDiff>,
     pub generated: Vec<GeneratedChange>,
     pub stats: DiffStats,
@@ -130,7 +136,7 @@ pub fn is_generated(p: &RelPath) -> bool {
 }
 
 /// Diff entre dos file-maps (árbol vs árbol, o HEAD vs working). Port de `diffSnap`.
-pub fn diff_snap(a: &FileMap, b: &FileMap) -> OkfDiff {
+pub fn diff_snap(a: &FileMap, b: &FileMap) -> SnapshotDiff {
     // El proto ordena las claves con `sortPaths` (numeric-aware: `doc-2` < `doc-10`), no léxico.
     let keys: Vec<RelPath> = {
         let set: BTreeSet<RelPath> = a.keys().chain(b.keys()).cloned().collect();
@@ -206,7 +212,7 @@ pub fn diff_snap(a: &FileMap, b: &FileMap) -> OkfDiff {
     }
 
     let suggested = suggest_msg(a, b, &files, &stats, &status_changes);
-    OkfDiff {
+    SnapshotDiff {
         files,
         generated,
         stats,
