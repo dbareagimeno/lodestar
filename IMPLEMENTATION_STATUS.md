@@ -849,3 +849,24 @@ superficie de producto; git queda como crate dormido) y `DECISIONES.md §0`. Des
     y el `filter` JSON equivalente dan el **mismo** resultado; `owners contains "security"` filtra por
     un valor de lista; `priority >= "high"` excluye los documentos con `priority` numérico (la regla
     de tipos, viva a través de MCP).
+
+### E20 — Inspección de metadata y validación genérica
+
+- ✅ **E20-H01/H02** — **`metadata_inspect` (catálogo + campo)**. Funciones puras del core sobre
+  `ParsedFrontmatter::walk` (cuarto consumidor del mismo iterador: store, evaluador, namespaces,
+  catálogo — ninguno puede discrepar de qué es un campo). El catálogo incluye los mapas intermedios
+  (son direccionables); `values` cuenta solo escalares, orden determinista con desempate final por
+  `ValueType`. 368 tests.
+- ✅ **E20-H03** — **`metadata_inspect` sustituye a `schema_inspect`; `core::schema` borrado**. Muere
+  la última maquinaria de schema OKF: `DocType`/`RelationDef`/`validate_schema`/`.lodestar/schema.yaml`
+  y las variantes `SCHEMA-*`/`REL-*`/`EXTREF-MISSING`/`LINK-STUB`/`LINK-REL` de `CheckCode`.
+  **`referenceRoots` conservado** (sostiene la write policy, no era OKF); el gate de CI recompuesto
+  con `LINK-TARGET-MISSING`. Verificado e2e: `metadata_inspect` descubre el catálogo, `schema_inspect`
+  da «tool desconocida». 351 tests.
+- ✅ **E20-H04** — **Política de validación + diagnósticos de descubrimiento** (cierra E20). Salda la
+  deuda de E15-H07: los diagnósticos de descubrimiento (`DOC-NOT-UTF8`, `LINK-CASE-MISMATCH`…) llegan
+  al reporte de `knowledge_check`, por un canal aparte porque su target no es un documento. La
+  severidad por familia de `validation` se aplica (`ignore` suprime). El **gate diferencial**
+  `rejectNewErrors`/`allowExistingErrors`: un apply sobre un repo que ya tiene errores se permite si
+  no introduce otros nuevos —la comparación antes/después que hace a Lodestar usable sobre un proyecto
+  real—. **356 tests · E20 COMPLETA.**
