@@ -1100,3 +1100,322 @@ fn namespace_graph_isolated() {
         "bare `isolated = true` NO se cuela al grafo: la clave de frontmatter vale `false`"
     );
 }
+
+// =============================================================================
+// E19-H03 — El filtro JSON y la equivalencia
+// =============================================================================
+//
+// La firma que fija esta fase: `lodestar_core::filter::from_json(&serde_json::Value) ->
+// Result<Expression, FilterError>` (módulo NUEVO `filter`). Deserializa el `filter` estructurado de
+// `§20.10` al MISMO `Expression` de H01 al que `parse` traduce el `where` textual — que es lo que
+// garantiza que ambas formas «producen exactamente el mismo resultado» (`§Fase 5`, «AST unificado»).
+//
+// **Por qué `from_json(&serde_json::Value)` y no `impl Deserialize for Expression`**: `Expression`
+// NO es hoy `Deserialize` (su doc en `types.rs` lo difiere aquí), y la forma del wire NO es un
+// reflejo mecánico del AST — necesita LÓGICA de traducción que un `derive` no da:
+//   - `field: "frontmatter.status"` debe normalizar a la ruta DESNUDA `["status"]`, la MISMA
+//     abreviatura que aplica el parser textual (`parse::build_field_path`); un `FieldPath:
+//     Deserialize` genérico no la haría (no debe, para direccionar claves que contienen puntos).
+//   - `has`/`missing` mapean a `Expression::Function { arguments: vec![QueryValue::String(campo)] }`
+//     — una transformación de forma, no una deserialización directa.
+// Los sub-campos SÍ están ya cableados en el contrato de wire de H01 y no hace falta tocarlos: el
+// `value` deserializa por el `#[serde(untagged)]` de `QueryValue` (string/número/booleano/null/lista
+// desnudos) y el `operator` por los `#[serde(rename = "equals" | "greater_than_or_equal" | …)]` de
+// `ComparisonOperator` — esa es la TABLA de nombres largos del wire (fijada en H01), que estos tests
+// reutilizan tal cual (`equals`, `not_equals`, `greater_than`, `greater_than_or_equal`, `less_than`,
+// `less_than_or_equal`, `contains`, `contains_any`, `contains_all`, `starts_with`, `ends_with`).
+//
+// **Decisiones de criterio (autor de tests, documentadas y clavadas por los asserts)**:
+//   - Envoltura del nodo: `{and:[…]}` / `{or:[…]}` (listas) → `And`/`Or`; `{not: <nodo>}` (un
+//     objeto) → `Not`; `{field, operator, value}` → `Comparison`.
+//   - Existencia: `{has: {field: "…"}}` / `{missing: {field: "…"}}` → `Function` — se elige la forma
+//     objeto `{field: …}` por coherencia con la clave `field` de la comparación (y su campo también
+//     aplica la abreviatura de `frontmatter.`).
+//   - Malformado (`filtro_malformado_es_error`): operador desconocido, nodo sin forma o un JSON que
+//     no es objeto → `Err`, nunca panic (coherente con el `ParseError` del textual).
+//
+// **Por qué `equivalencia_ast` NO es vacuo**: cada pareja se ancla contra un `Expression` construido
+// a mano (`esperado`) y se exige que TANTO `parse(where)` COMO `from_json(filter)` sean iguales a él
+// —y entre sí—. Las 8 parejas son no triviales (una con `not`, una con lista, una con `>=` numérico,
+// una anidada con precedencia `and`/`or`) y comparan el AST COMPLETO por igualdad estructural: si el
+// JSON no normalizara `frontmatter.`, o envolviera `has` distinto, o dejara el número como string,
+// el AST diferiría del ancla y el assert mordería (algo que `equivalencia_resultado`, por sí solo,
+// podría no notar si dos ASTs distintos seleccionaran lo mismo en el fixture).
+
+use lodestar_core::filter::from_json;
+use serde_json::json;
+
+/// Afirma que la consulta textual `donde` (`where`) y el filtro JSON `filtro` producen el **mismo**
+/// [`Expression`], y que ese AST es EXACTAMENTE `esperado`. El ancla `esperado` (construido a mano)
+/// es lo que impide el test vacuo: si cualquiera de los dos caminos —el parser textual o el
+/// deserializador JSON— derivara a otra estructura, el `assert_eq!` mordería.
+fn equivalen(donde: &str, filtro: serde_json::Value, esperado: Expression) {
+    let del_texto =
+        parse(donde).unwrap_or_else(|e| panic!("el `where` `{donde}` debe parsear: {e:?}"));
+    let del_json =
+        from_json(&filtro).unwrap_or_else(|e| panic!("el `filter` de `{donde}` debe deserializar: {e:?}"));
+    assert_eq!(
+        del_texto, esperado,
+        "el `where` `{donde}` produce el AST esperado"
+    );
+    assert_eq!(
+        del_json, esperado,
+        "el `filter` de `{donde}` produce el MISMO AST que el `where`"
+    );
+    assert_eq!(
+        del_texto, del_json,
+        "`where` y `filter` producen el mismo Expression para `{donde}`"
+    );
+}
+
+/// Selecciona, en orden de `RelPath`, los documentos de `ds` que casan `expr`. Evalúa cada documento
+/// con su frontmatter real y el `Analysis` de verdad del grafo (mismo patrón que `eval_en`), de modo
+/// que el conjunto seleccionado no puede mentir sobre lo que el evaluador computa.
+fn seleccion(ds: &DocumentSet, expr: &Expression) -> Vec<RelPath> {
+    ds.files()
+        .iter()
+        .filter_map(|(p, raw)| {
+            let parsed = model::parse_file(p.as_str(), raw);
+            let doc = EvalDocument {
+                path: p,
+                frontmatter: parsed.frontmatter.as_ref(),
+                body: &parsed.body,
+            };
+            match evaluate(expr, &doc, ds.analyze()) {
+                Ok(true) => Some(p.clone()),
+                _ => None,
+            }
+        })
+        .collect()
+}
+
+/// Criterio: un filtro JSON con `and`/comparación/lista deserializa al `Expression` correcto
+/// (`filtro_json_deserializa`).
+///
+/// Cubre de una sola pieza: la envoltura `{and:[…]}`, la normalización de `frontmatter.` a la ruta
+/// desnuda, el mapeo del nombre largo de operador (`equals`, `contains_any`) y el `value` JSON
+/// desnudo tanto escalar (`"accepted"`) como lista (`["platform","security"]`).
+#[test]
+fn filtro_json_deserializa() {
+    let filtro = json!({
+        "and": [
+            { "field": "frontmatter.status", "operator": "equals", "value": "accepted" },
+            {
+                "field": "frontmatter.owners",
+                "operator": "contains_any",
+                "value": ["platform", "security"]
+            }
+        ]
+    });
+    let esperado = and(vec![
+        cmp("status", Op::Eq, qstr("accepted")),
+        cmp("owners", Op::ContainsAny, qlist(&["platform", "security"])),
+    ]);
+
+    assert_eq!(
+        from_json(&filtro).unwrap(),
+        esperado,
+        "el filtro JSON deserializa a `and` de una igualdad de string y un `contains_any` de lista, \
+         con la ruta `frontmatter.X` normalizada a `[\"X\"]`"
+    );
+}
+
+/// Criterio: para 6+ consultas de `§Fase 5`, `where` y `filter` dan el **mismo AST**
+/// (`equivalencia_ast`).
+///
+/// Ocho parejas no triviales que cubren comparación, orden numérico, texto, lista, `has`, `missing`,
+/// `not`, `and`, `or` y anidamiento con precedencia. Cada una se ancla contra un `Expression`
+/// construido a mano (ver [`equivalen`]) — el AST se compara COMPLETO, no «ambos seleccionan algo».
+#[test]
+fn equivalencia_ast() {
+    // (1) Comparación de igualdad + abreviatura de namespace (`frontmatter.status` → `["status"]`).
+    equivalen(
+        r#"status = "accepted""#,
+        json!({ "field": "frontmatter.status", "operator": "equals", "value": "accepted" }),
+        cmp("status", Op::Eq, qstr("accepted")),
+    );
+
+    // (2) Orden NUMÉRICO: nombre largo `greater_than_or_equal` → `Ge`, y `value: 2` (número JSON) →
+    //     `QueryValue::Number`, NO string (la red anti-coerción llega también al filtro JSON).
+    equivalen(
+        "priority >= 2",
+        json!({ "field": "frontmatter.priority", "operator": "greater_than_or_equal", "value": 2 }),
+        cmp("priority", Op::Ge, num(2)),
+    );
+
+    // (3) Operador de LISTA `contains_any` con literal lista.
+    equivalen(
+        r#"owners contains_any ["platform", "security"]"#,
+        json!({
+            "field": "frontmatter.owners",
+            "operator": "contains_any",
+            "value": ["platform", "security"]
+        }),
+        cmp("owners", Op::ContainsAny, qlist(&["platform", "security"])),
+    );
+
+    // (4) Existencia `has(...)`: `{has:{field}}` → `Function{Has}`, con `frontmatter.` normalizado.
+    equivalen(
+        "has(status)",
+        json!({ "has": { "field": "frontmatter.status" } }),
+        func(FunctionName::Has, "status"),
+    );
+
+    // (5) Existencia `missing(...)` con dot-notation preservada en el argumento.
+    equivalen(
+        "missing(service.tier)",
+        json!({ "missing": { "field": "service.tier" } }),
+        func(FunctionName::Missing, "service.tier"),
+    );
+
+    // (6) `not` de una comparación de texto: `{not: <nodo>}` → `Not`.
+    equivalen(
+        r#"not tags contains "archived""#,
+        json!({
+            "not": { "field": "frontmatter.tags", "operator": "contains", "value": "archived" }
+        }),
+        not(cmp("tags", Op::Contains, qstr("archived"))),
+    );
+
+    // (7) `and` de dos comparaciones (el ejemplo canónico de `§20.10`).
+    equivalen(
+        r#"status = "accepted" and owners contains "platform""#,
+        json!({ "and": [
+            { "field": "frontmatter.status", "operator": "equals", "value": "accepted" },
+            { "field": "frontmatter.owners", "operator": "contains", "value": "platform" }
+        ]}),
+        and(vec![
+            cmp("status", Op::Eq, qstr("accepted")),
+            cmp("owners", Op::Contains, qstr("platform")),
+        ]),
+    );
+
+    // (8) Anidamiento con PRECEDENCIA: `and` de tres ramas con un `or` entre paréntesis y un `not`
+    //     (`§Fase 5`, la consulta insignia). El textual aplana `a and b and c` a un `And` de tres;
+    //     el JSON `{and:[x,y,z]}` debe producir el MISMO `And` de tres con el `Or` anidado dentro.
+    equivalen(
+        r#"type = "decision" and (status = "draft" or status = "review") and not tags contains "archived""#,
+        json!({ "and": [
+            { "field": "frontmatter.type", "operator": "equals", "value": "decision" },
+            { "or": [
+                { "field": "frontmatter.status", "operator": "equals", "value": "draft" },
+                { "field": "frontmatter.status", "operator": "equals", "value": "review" }
+            ]},
+            { "not": { "field": "frontmatter.tags", "operator": "contains", "value": "archived" } }
+        ]}),
+        and(vec![
+            cmp("type", Op::Eq, qstr("decision")),
+            or(vec![
+                cmp("status", Op::Eq, qstr("draft")),
+                cmp("status", Op::Eq, qstr("review")),
+            ]),
+            not(cmp("tags", Op::Contains, qstr("archived"))),
+        ]),
+    );
+}
+
+/// Criterio: `where` y `filter` seleccionan el **mismo conjunto de documentos** sobre un workspace
+/// real (`equivalencia_resultado`).
+///
+/// Sobre un `DocumentSet` de verdad, `evaluate(parse(where))` y `evaluate(from_json(filter))` deben
+/// coincidir documento a documento. Cada caso exige además un subconjunto ESTRICTO y no vacío (la
+/// selección discrimina), para que la igualdad no sea trivialmente cierta.
+///
+/// **Ubicación** (decisión de criterio): va en el core y no en `crates/lodestar-app/tests/` (donde
+/// la sugería el campo *Pruebas* de la historia) porque el cableado a `knowledge_search` —la vía por
+/// la que `App` filtraría— es **E19-H05, fuera del alcance de H03**. El core (`DocumentSet` +
+/// `evaluate` + `from_json`) basta para probar la equivalencia de resultado sin anticipar ese
+/// cableado.
+#[test]
+fn equivalencia_resultado() {
+    let ds = DocumentSet::from_files(lodestar_fixtures::file_map(&[
+        (
+            "a.md",
+            "---\ntype: decision\nstatus: accepted\nowners:\n  - platform\n  - security\npriority: 2\ntags:\n  - core\n---\n\n# A\n",
+        ),
+        (
+            "b.md",
+            "---\ntype: decision\nstatus: draft\nowners:\n  - platform\npriority: 1\ntags:\n  - wip\n---\n\n# B\n",
+        ),
+        (
+            "c.md",
+            "---\ntype: guide\nstatus: review\nowners:\n  - security\npriority: 3\ntags:\n  - archived\n---\n\n# C\n",
+        ),
+        (
+            "d.md",
+            "---\ntype: decision\nstatus: review\nowners:\n  - legal\npriority: 5\ntags:\n  - archived\n---\n\n# D\n",
+        ),
+    ]));
+    let total = ds.files().len();
+
+    // (where textual, filter JSON, conjunto esperado). El esperado es un subconjunto estricto y no
+    // vacío en los tres casos.
+    let casos: Vec<(&str, serde_json::Value, Vec<&str>)> = vec![
+        (
+            r#"status = "accepted""#,
+            json!({ "field": "frontmatter.status", "operator": "equals", "value": "accepted" }),
+            vec!["a.md"],
+        ),
+        (
+            r#"owners contains "platform""#,
+            json!({ "field": "frontmatter.owners", "operator": "contains", "value": "platform" }),
+            vec!["a.md", "b.md"],
+        ),
+        (
+            r#"type = "decision" and (status = "draft" or status = "review") and not tags contains "archived""#,
+            json!({ "and": [
+                { "field": "frontmatter.type", "operator": "equals", "value": "decision" },
+                { "or": [
+                    { "field": "frontmatter.status", "operator": "equals", "value": "draft" },
+                    { "field": "frontmatter.status", "operator": "equals", "value": "review" }
+                ]},
+                { "not": { "field": "frontmatter.tags", "operator": "contains", "value": "archived" } }
+            ]}),
+            vec!["b.md"],
+        ),
+    ];
+
+    for (donde, filtro, esperado) in casos {
+        let esperado: Vec<RelPath> = esperado.iter().map(|p| rp(p)).collect();
+        let sel_texto = seleccion(&ds, &parse(donde).unwrap());
+        let sel_json = seleccion(
+            &ds,
+            &from_json(&filtro).unwrap_or_else(|e| panic!("`filter` de `{donde}` no deserializa: {e:?}")),
+        );
+
+        assert_eq!(
+            sel_texto, sel_json,
+            "`where` y `filter` seleccionan el MISMO conjunto para `{donde}`"
+        );
+        assert_eq!(
+            sel_json, esperado,
+            "`{donde}` selecciona exactamente el conjunto esperado"
+        );
+        assert!(
+            !sel_json.is_empty() && sel_json.len() < total,
+            "`{donde}` debe seleccionar un subconjunto estricto y no vacío (sel={sel_json:?}, total={total})"
+        );
+    }
+}
+
+/// Guarda (no es criterio formal, sí decisión de criterio del autor): un filtro JSON malformado es
+/// `Err`, nunca un panic — coherente con `parseo_malformado_es_error` del `where` textual.
+#[test]
+fn filtro_malformado_es_error() {
+    // Operador desconocido: `like` no está en la tabla de nombres largos.
+    assert!(
+        from_json(&json!({ "field": "frontmatter.status", "operator": "like", "value": "x" }))
+            .is_err(),
+        "un operador desconocido es `Err`"
+    );
+    // Objeto sin forma reconocible (ni `and`/`or`/`not`/`has`/`missing` ni `field`).
+    assert!(
+        from_json(&json!({})).is_err(),
+        "un nodo vacío/sin forma es `Err`"
+    );
+    // Un JSON que ni siquiera es un objeto de filtro.
+    assert!(
+        from_json(&json!("status = accepted")).is_err(),
+        "un filtro que no es objeto es `Err`"
+    );
+}

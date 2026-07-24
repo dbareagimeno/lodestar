@@ -16,6 +16,7 @@
 pub mod diff;
 pub mod error;
 pub mod eval;
+pub mod filter;
 pub mod links;
 pub mod model;
 pub mod parse;
