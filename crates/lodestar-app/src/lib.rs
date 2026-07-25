@@ -920,7 +920,8 @@ impl App {
     /// sobre los mismos ficheros. Ahora se componen las **dos** mitades que le faltaban:
     ///
     /// 1. **La política de severidad** de `validation` (`§20.9`): cada diagnóstico pasa por
-    ///    [`ValidationSection::effective_severity`], que lo reclasifica (`error`/`warning`) o lo
+    ///    [`lodestar_workspace::config::ValidationSection::effective_severity`], que lo reclasifica
+    ///    (`error`/`warning`) o lo
     ///    **suprime** (`ignore`). Con la config por defecto es la identidad, así que un workspace sin
     ///    `.lodestar/config.yaml` no cambia de veredicto.
     /// 2. **Los diagnósticos de descubrimiento** (`DOC-NOT-UTF8`, `DOC-TOO-LARGE`,
@@ -2020,10 +2021,19 @@ fn normalize_raw_op(
     match kind {
         "create" => {
             let path = op_rel_field(op, "path")?;
-            let ty = op.get("type").and_then(Value::as_str).unwrap_or("");
-            let title = op.get("title").and_then(Value::as_str);
+            // E23-H02: frontmatter ARBITRARIO y opcional. Ya no se leen `type`/`title` como campos
+            // privilegiados — el motor no impone ninguna clave (`§20.2` invariante 3) y el título se
+            // deriva (`§20.4`). Un `frontmatter` presente pero que no sea un objeto es una op mal
+            // formada, igual que en `patch_frontmatter`.
+            let frontmatter = match op.get("frontmatter") {
+                None | Some(Value::Null) => None,
+                Some(v) if v.is_object() => {
+                    Some(serde_json::from_value(v.clone()).map_err(|_| ErrorCode::InvalidSchema)?)
+                }
+                Some(_) => return Err(ErrorCode::InvalidSchema),
+            };
             let body = op.get("body").and_then(Value::as_str).map(str::to_string);
-            plan::normalize_create(doc_set, &path, ty, title, body)
+            plan::normalize_create(doc_set, &path, frontmatter, body)
                 .map(one)
                 .map_err(|e| error_code(&e))
         }
@@ -2092,9 +2102,7 @@ fn normalize_raw_op(
             let path = op_ref_path(op)?;
             let policy = match op.get("inboundLinksPolicy").and_then(Value::as_str) {
                 Some("reject") => InboundLinksPolicy::Reject,
-                Some("retarget") => InboundLinksPolicy::Retarget,
                 Some("remove_links") => InboundLinksPolicy::RemoveLinks,
-                Some("create_stub") => InboundLinksPolicy::CreateStub,
                 // Política ausente: `§Fase 12` exige elegirla EXPLÍCITAMENTE cuando hay algo que
                 // decidir — es decir, cuando el documento tiene enlaces entrantes. No se defaultea
                 // a `reject` en silencio: un `delete` con backlinks y sin política es una op mal
@@ -2108,7 +2116,10 @@ fn normalize_raw_op(
                         return Err(ErrorCode::InvalidSchema);
                     }
                 }
-                // Un valor de política no reconocido es una op mal formada.
+                // Un valor de política no reconocido es una op mal formada. Desde E23-H05 esto
+                // incluye `retarget` y `create_stub`, que se aceptaban sin ejecutarse: ahora se
+                // rechazan aquí, y la fachada MCP añade al mensaje cuáles son las válidas
+                // (`InboundLinksPolicy::WIRE_VALUES`).
                 Some(_) => return Err(ErrorCode::InvalidSchema),
             };
             plan::normalize_delete(doc_set, &path, policy).map_err(|e| error_code(&e))

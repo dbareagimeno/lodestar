@@ -235,8 +235,7 @@ fn bench_concurrencia_segura() {
         .change_plan(
             None,
             &serde_json::json!([
-                { "op": "create", "path": "alfa2.md", "type": "Concept", "title": "Alfa2",
-                  "body": "# Alfa2\n\ncuerpo del publicador A\n" }
+                { "op": "create", "path": "alfa2.md", "body": "# Alfa2\n\ncuerpo del publicador A\n" }
             ]),
             policy_permisiva(),
         )
@@ -245,8 +244,7 @@ fn bench_concurrencia_segura() {
         .change_plan(
             None,
             &serde_json::json!([
-                { "op": "create", "path": "beta.md", "type": "Concept", "title": "Beta",
-                  "body": "# Beta\n\ncuerpo del publicador B\n" }
+                { "op": "create", "path": "beta.md", "body": "# Beta\n\ncuerpo del publicador B\n" }
             ]),
             policy_permisiva(),
         )

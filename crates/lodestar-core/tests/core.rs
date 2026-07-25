@@ -2223,3 +2223,210 @@ fn move_reescribe_referencia() {
         "la definición no debe conservar el destino viejo `auth.md`; cuerpo = {otro:?}",
     );
 }
+
+// ===========================================================================
+// E23-H03 — `move` recalcula sus PROPIOS enlaces salientes (`ARCHITECTURE.md §20.11`,
+// `requirements/epica-23-cierre-migracion.md`). Fase ROJA.
+//
+// Los tests E12-H06/E21-H03 de arriba cubren la mitad ENTRANTE del `move` (los emisores que
+// apuntaban al documento movido). La otra mitad está sin hacer: los enlaces que el propio documento
+// movido emite hacia sus vecinas se quedan escritos como estaban, y desde la ubicación nueva ya no
+// resuelven. Reproducido con los binarios (E23, síntoma de la historia): mover `notas/alfa.md` —que
+// contiene `[b]: beta.md`— a `archivo/alfa.md` da `canApply:false` con `diagnosticsAfter.errors:1`
+// y el apply falla; con el documento SIN salientes, en cambio, todo funciona.
+//
+// Contrato que fijan estos dos tests (el «Alcance» de E23-H03): `normalize_move` emite, además del
+// `Move` y de los `ReplaceBody` de los emisores entrantes, la reescritura del CUERPO DEL PROPIO
+// DOCUMENTO MOVIDO con sus hrefs relativos recalculados desde la ubicación nueva.
+//
+// Las aserciones son **agnósticas a la forma** de esa op (un `ReplaceBody` sobre `from` antes del
+// rename, uno sobre `to` después, o un `Move` que porte el cuerpo nuevo): juzgan el RESULTADO —el
+// `.md` que queda en la ubicación nueva tras aplicar el change set en memoria con
+// `plan::apply_normalized_ops`, la misma simulación que alimenta `diagnosticsAfter`—. Así el
+// implementador elige la forma y el test sigue midiendo lo que importa.
+//
+// ROJO esperado HOY (por ASERCIÓN, no por compilación): `normalize_move` solo produce el `Move` +
+// las reescrituras entrantes, así que el cuerpo del documento movido vuelve intacto y sus hrefs
+// relativos siguen apuntando a los vecinos de la ubicación VIEJA.
+// ===========================================================================
+
+/// El `.md` **completo** que queda en `path` tras aplicar `ops` sobre `antes` con la simulación en
+/// memoria del core ([`lodestar_core::plan::apply_normalized_ops`]) — el mismo `FileMap` hipotético
+/// que `change_plan` valida. Panica si el documento no existe tras el cambio.
+fn raw_tras_aplicar(antes: &FileMap, ops: &[NormalizedOperation], path: &RelPath) -> String {
+    let despues = lodestar_core::plan::apply_normalized_ops(antes, ops)
+        .expect("aplicar en memoria las ops normalizadas de un `move` no debe fallar");
+    despues.get(path).cloned().unwrap_or_else(|| {
+        panic!(
+            "tras el `move` debe existir el documento {path:?}; ficheros = {:?}",
+            despues.keys().map(RelPath::as_str).collect::<Vec<_>>()
+        )
+    })
+}
+
+/// Los diagnósticos de severidad `Err` de un `FileMap` ya modificado — el universo que hace que
+/// `change_plan` diga `canApply:false` y que `change_apply` responda `NONCONFORMANT_RESULT`.
+fn errores_de(files: &FileMap) -> Vec<Check> {
+    DocumentSet::from_files(files.clone())
+        .analyze()
+        .diagnostics
+        .values()
+        .flatten()
+        .filter(|c| c.level == Severity::Err)
+        .cloned()
+        .collect()
+}
+
+/// `notas/alfa.md` (el documento a mover) con sus DOS formas de enlace saliente al vecino
+/// `notas/beta.md`: uno inline y una definición de referencia. Más `notas/beta.md` y `raiz.md`.
+fn workspace_alfa_con_salientes() -> FileMap {
+    fm(&[
+        (
+            "notas/alfa.md",
+            "---\ntitle: Alfa\n---\n\n# Alfa\n\n\
+             Inline: [Beta](beta.md).\n\n\
+             Referencia: [beta][b].\n\n\
+             [b]: beta.md\n",
+        ),
+        ("notas/beta.md", "---\ntitle: Beta\n---\n\n# Beta\n"),
+        ("raiz.md", "---\ntitle: Raíz\n---\n\n# Raíz\n"),
+    ])
+}
+
+/// Criterio `move_recalcula_salientes` (mitad del core; la versión que APLICA a disco vive en
+/// `crates/lodestar-mcp/tests/benchmark.rs`) — **Dado** `notas/alfa.md` con un enlace inline y una
+/// definición de referencia a `notas/beta.md`, **Cuando** se mueve a `archivo/alfa.md`, **Entonces**
+/// ambos hrefs quedan `../notas/beta.md` y el workspace resultante no gana ni un error.
+#[test]
+fn move_recalcula_salientes_normalizado() {
+    let from = RelPath::new("notas/alfa.md").unwrap();
+    let to = RelPath::new("archivo/alfa.md").unwrap();
+    let beta = RelPath::new("notas/beta.md").unwrap();
+
+    let files = workspace_alfa_con_salientes();
+    let b = DocumentSet::from_files(files.clone());
+
+    // Precondición del fixture: los dos salientes de `alfa` resuelven HOY a `notas/beta.md` (si no,
+    // el test no probaría nada) y el workspace de partida está limpio.
+    assert_eq!(
+        origenes_entrantes(&b, &beta),
+        vec![from.clone()],
+        "el fixture debe dejar `notas/beta.md` referenciado desde `notas/alfa.md`",
+    );
+    assert!(
+        errores_de(&files).is_empty(),
+        "precondición: el workspace de partida no tiene errores; los tenía: {:?}",
+        errores_de(&files),
+    );
+
+    let ops = lodestar_core::plan::normalize_move(&b, &from, &to, true)
+        .expect("mover un documento con enlaces salientes no debe fallar la normalización");
+
+    let raw = raw_tras_aplicar(&files, &ops, &to);
+
+    // 1) El enlace INLINE se recalcula desde la ubicación nueva (`archivo/` → `../notas/`).
+    assert!(
+        raw.contains("[Beta](../notas/beta.md)"),
+        "el enlace inline saliente debe recalcularse a `../notas/beta.md` desde la ubicación nueva \
+         `archivo/alfa.md`, conservando su label; documento movido =\n{raw}",
+    );
+    // 2) Y la DEFINICIÓN de referencia también (misma maquinaria por `span` que E21-H03).
+    assert!(
+        raw.contains("[b]: ../notas/beta.md"),
+        "la definición de referencia saliente debe recalcularse a `[b]: ../notas/beta.md`; \
+         documento movido =\n{raw}",
+    );
+    // 3) DISCRIMINADORES: ninguno de los dos conserva el href viejo (relativo a `notas/`).
+    assert!(
+        !raw.contains("](beta.md)"),
+        "el enlace inline no debe conservar el destino viejo `beta.md`; documento movido =\n{raw}",
+    );
+    assert!(
+        !raw.contains("[b]: beta.md"),
+        "la definición no debe conservar el destino viejo `beta.md`; documento movido =\n{raw}",
+    );
+    // 4) El uso del enlace de referencia (`[beta][b]`) es texto, no destino: intacto.
+    assert!(
+        raw.contains("Referencia: [beta][b]."),
+        "el USO del enlace de referencia no se toca (solo su definición); documento movido =\n{raw}",
+    );
+
+    // 5) La razón de ser de la historia: el resultado hipotético NO gana errores, así que el gate de
+    //    `change_plan`/`change_apply` deja de rechazar el move (hoy: 1 × LINK-TARGET-MISSING).
+    let despues = lodestar_core::plan::apply_normalized_ops(&files, &ops).unwrap();
+    let errores = errores_de(&despues);
+    assert!(
+        errores.is_empty(),
+        "mover un documento que enlaza a sus vecinas no debe introducir errores (es lo que hoy da \
+         `canApply:false` con `diagnosticsAfter.errors:1`); errores = {errores:?}",
+    );
+}
+
+/// Criterio `move_no_toca_externos_ni_anchors` — **Dado** el documento movido con además un
+/// `https://…`, un `#anchor` propio y un `/raiz.md` raíz-absoluto, **Cuando** se mueve, **Entonces**
+/// los tres quedan **intactos byte a byte** (solo se recalcula lo relativo interno).
+///
+/// Los tres son destinos INDEPENDIENTES de la ubicación del documento: una URI externa no es del
+/// workspace, un anchor apunta dentro del propio documento y un href raíz-absoluto se resuelve desde
+/// la raíz. Recalcularlos sería corromperlos — de ahí que este test sea el contrapeso del anterior:
+/// impide «arreglar» el saliente reescribiendo todos los hrefs a lo bruto.
+#[test]
+fn move_no_toca_externos_ni_anchors() {
+    let from = RelPath::new("notas/alfa.md").unwrap();
+    let to = RelPath::new("archivo/alfa.md").unwrap();
+
+    let mut files = workspace_alfa_con_salientes();
+    // El documento a mover gana los tres destinos que NO deben tocarse, junto a los dos relativos
+    // que SÍ (así un solo documento fija ambas mitades del criterio).
+    files.insert(
+        from.clone(),
+        "---\ntitle: Alfa\n---\n\n# Alfa\n\n\
+         ## seccion\n\n\
+         Inline: [Beta](beta.md).\n\n\
+         Externo: [Sitio](https://example.com/notas/beta.md).\n\n\
+         Ancla: [Sección](#seccion).\n\n\
+         Raíz: [Raíz](/raiz.md).\n\n\
+         [b]: beta.md\n"
+            .to_string(),
+    );
+    let b = DocumentSet::from_files(files.clone());
+
+    let ops = lodestar_core::plan::normalize_move(&b, &from, &to, true)
+        .expect("mover un documento con enlaces externos/anchors no debe fallar la normalización");
+
+    let raw = raw_tras_aplicar(&files, &ops, &to);
+
+    // 1) Lo relativo interno SÍ se recalcula (guarda de no vacuidad: si nada cambiara, los tres
+    //    «intactos» de abajo pasarían solos).
+    assert!(
+        raw.contains("[Beta](../notas/beta.md)") && raw.contains("[b]: ../notas/beta.md"),
+        "los salientes relativos internos deben recalcularse a `../notas/beta.md`; \
+         documento movido =\n{raw}",
+    );
+
+    // 2) Los tres destinos independientes de la ubicación quedan BYTE A BYTE como estaban.
+    for intacto in [
+        "Externo: [Sitio](https://example.com/notas/beta.md).",
+        "Ancla: [Sección](#seccion).",
+        "Raíz: [Raíz](/raiz.md).",
+    ] {
+        assert!(
+            raw.contains(intacto),
+            "«{intacto}» debe sobrevivir byte a byte al `move` (URI externa, anchor propio y href \
+             raíz-absoluto no dependen de dónde viva el documento); documento movido =\n{raw}",
+        );
+    }
+    // Y ningún `../` se ha colado en ellos (la forma concreta en que se corromperían).
+    assert!(
+        !raw.contains("../raiz.md") && !raw.contains("../../example.com"),
+        "recalcular un href raíz-absoluto o una URI externa los CORROMPE; documento movido =\n{raw}",
+    );
+
+    // 3) Coherencia final: el workspace resultante sigue sin errores.
+    let despues = lodestar_core::plan::apply_normalized_ops(&files, &ops).unwrap();
+    let errores = errores_de(&despues);
+    assert!(
+        errores.is_empty(),
+        "tras el move el workspace no debe tener errores; errores = {errores:?}",
+    );
+}

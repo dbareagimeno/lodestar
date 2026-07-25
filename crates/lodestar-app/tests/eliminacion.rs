@@ -201,3 +201,104 @@ fn delete_remove_links() {
         );
     }
 }
+
+// ===========================================================================
+// E23-H05 — Políticas de borrado honestas (`ARCHITECTURE.md §20.11`,
+// `requirements/epica-23-cierre-migracion.md`). Fase ROJA.
+//
+// `retarget` y `create_stub` se ACEPTAN hoy pero no se ejecutan: `plan::normalize_delete` las
+// despacha al brazo «implementación mínima» de E12-H06 y emite SOLO el borrado. El resultado no
+// corrompe nada (el gate diferencial lo frena), pero miente: el agente recibe «introduciría 1
+// error» cuando la verdad es «esa política no está implementada». Y sobre un documento SIN
+// backlinks no hay ni gate: el plan sale limpio, como si la política se hubiera aplicado.
+//
+// Decisión de la historia: **retirarlas**. `InboundLinksPolicy` queda en `reject` + `remove_links`,
+// y un valor retirado es `INVALID_SCHEMA`.
+//
+// Los criterios 2 y 3 (`delete_remove_links_aplicado`, `delete_revert_byte_a_byte`) se ejercen por
+// la superficie MCP en `crates/lodestar-mcp/tests/benchmark.rs`, que es donde se puede aplicar,
+// revertir y preguntar por la conformidad del workspace resultante.
+//
+// ROJO esperado HOY: por ASERCIÓN — `change_plan` devuelve `Ok(plan)` para ambas políticas.
+// ===========================================================================
+
+/// `delete_retarget_rechazado` — **Dado** un `delete` con `inboundLinksPolicy: "retarget"`,
+/// **Cuando** se planifica, **Entonces** se rechaza con `INVALID_SCHEMA`.
+///
+/// Se cubren las DOS políticas retiradas (`retarget` y `create_stub`: la historia las retira
+/// juntas) y los dos escenarios que hoy las dejan pasar: con backlinks (donde el gate diferencial
+/// disfraza el problema de «introduciría un error») y **sin** backlinks (donde no hay gate y el
+/// plan sale directamente limpio).
+///
+/// Controles anti-vacuos, imprescindibles porque «rechazar» es fácil de aprobar de más:
+///   · `remove_links` sobre el mismo documento sigue planificando (`Ok`);
+///   · `reject` sobre el mismo documento sigue dando `INBOUND_LINKS_EXIST` — un código DISTINTO,
+///     que demuestra que `INVALID_SCHEMA` señala el valor retirado y no «cualquier delete falla».
+#[test]
+fn delete_retarget_rechazado() {
+    let (_dir, app) = app_con_referenciado();
+
+    // (1) Las dos políticas retiradas, sobre un documento CON backlinks.
+    for politica in ["retarget", "create_stub"] {
+        let resultado = app.change_plan(
+            None,
+            &json!([
+                { "op": "delete", "ref": { "path": "objetivo.md" },
+                  "inboundLinksPolicy": politica }
+            ]),
+            policy_permisiva(),
+        );
+        assert!(
+            matches!(resultado, Err(ErrorCode::InvalidSchema)),
+            "`inboundLinksPolicy: {politica}` está RETIRADA (E23-H05): planificar debe rechazarse \
+             con INVALID_SCHEMA en vez de aceptar una política que el motor no ejecuta; dio \
+             {resultado:?}",
+        );
+    }
+
+    // (2) Y también sobre un documento SIN backlinks, donde hoy no hay gate que las disfrace: el
+    //     valor está retirado del enum, no «tolerado cuando no hay nada que decidir».
+    for politica in ["retarget", "create_stub"] {
+        let resultado = app.change_plan(
+            None,
+            &json!([
+                { "op": "delete", "ref": { "path": "index.md" },
+                  "inboundLinksPolicy": politica }
+            ]),
+            policy_permisiva(),
+        );
+        assert!(
+            matches!(resultado, Err(ErrorCode::InvalidSchema)),
+            "un valor retirado de `inboundLinksPolicy` ({politica}) debe rechazarse SIEMPRE, tenga \
+             o no backlinks el documento; dio {resultado:?}",
+        );
+    }
+
+    // (3) Controles anti-vacuos: las dos políticas que sobreviven siguen comportándose como antes.
+    let con_remove = app.change_plan(
+        None,
+        &json!([
+            { "op": "delete", "ref": { "path": "objetivo.md" },
+              "inboundLinksPolicy": "remove_links" }
+        ]),
+        policy_permisiva(),
+    );
+    assert!(
+        con_remove.is_ok(),
+        "retirar `retarget`/`create_stub` no puede romper `remove_links`, que sí está \
+         implementada; dio {con_remove:?}",
+    );
+    let con_reject = app.change_plan(
+        None,
+        &json!([
+            { "op": "delete", "ref": { "path": "objetivo.md" }, "inboundLinksPolicy": "reject" }
+        ]),
+        policy_permisiva(),
+    );
+    assert!(
+        matches!(con_reject, Err(ErrorCode::InboundLinksExist)),
+        "`reject` con backlinks debe seguir dando INBOUND_LINKS_EXIST (código DISTINTO de \
+         INVALID_SCHEMA: el rechazo de arriba señala el VALOR retirado, no «todo delete falla»); \
+         dio {con_reject:?}",
+    );
+}

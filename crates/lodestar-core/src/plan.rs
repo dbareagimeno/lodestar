@@ -36,7 +36,7 @@
 //! `SemanticDiff`, E12-H04 `ValidationReport` sí lo necesitan); esta heurística de riesgo solo
 //! necesita el workspace *antes* del cambio para medir backlinks del documento afectado.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 use crate::diff::{diff_snap, BodyHunk, ChangeKind};
 use crate::error::CoreError;
@@ -48,8 +48,8 @@ use serde::{Deserialize, Serialize};
 use crate::links;
 use crate::types::{
     Check, CheckCode, EditSectionMode, FileMap, FrontmatterPatch, InboundLinksPolicy, Inventory,
-    LinkKind, NormalizedOperation, ParsedFrontmatter, RawLink, RelPath, RiskAssessment, RiskLevel,
-    SemanticDiff, Severity, ValidationReport, ValidationSummary,
+    LinkKind, LinkTarget, NormalizedOperation, ParsedFrontmatter, RawLink, RelPath, RiskAssessment,
+    RiskLevel, SemanticDiff, Severity, ValidationReport, ValidationSummary,
 };
 use crate::DocumentSet;
 
@@ -309,47 +309,39 @@ pub fn can_apply(report: &ValidationReport, policy: &PlanPolicy) -> bool {
 // Estructura (move/delete) y semántica (relaciones/status) quedan para E12-H06/H07.
 // ---------------------------------------------------------------------------
 
-/// Normaliza un `create`: resuelve el cuerpo del documento nuevo.
+/// Normaliza un `create`: el documento nuevo es **exactamente** lo que pidió el llamador.
 ///
-/// - Si `body` es `Some`, se usa tal cual.
-/// - Si `body` es `None`, se deja `None` (la workspace generará el heading por defecto vía
-///   [`DocumentSet::create_document`]).
+/// - `frontmatter`: YAML **arbitrario y opcional**. `None` crea el `.md` **sin bloque de
+///   frontmatter** (no con uno vacío); `Some(patch)` escribe exactamente esas claves, con sus tipos
+///   YAML reales.
+/// - `body`: si es `Some`, se usa tal cual; si es `None`, [`apply_normalized_ops`] genera un heading
+///   por defecto a partir del título derivado (`§20.4`).
 ///
-/// Tras el retiro de `core::schema` (E20-H03) ya no hay `bodyTemplate` de `DocType` que expandir: el
-/// modelo es universal y no hay tipos declarados (`§20.10`). El `frontmatter` resuelto es el mínimo
-/// (`type` + `title`); el resto de campos (status, timestamp) los completa el escritor. Devuelve
-/// [`NormalizedOperation::Create`].
+/// # Por qué la firma no tiene `doctype` ni `title` (E23-H02)
+///
+/// Hasta E23-H02 esta función tomaba `doctype: &str` y `title: Option<&str>` y los insertaba
+/// **incondicionalmente** en el frontmatter, así que un `create` sin `type` producía en disco un
+/// `type: ''` —una clave OKF vacía— y un `title` que nadie había pedido. Eso contradice de frente el
+/// invariante 3 de `§20.2`: *el frontmatter **nunca** es obligatorio y sus claves **no** tienen
+/// semántica impuesta*. `type` dejó de ser un campo privilegiado cuando `core::schema` murió en
+/// E20-H03; el escritor era el último sitio donde seguía vivo.
+///
+/// El título **se deriva** (`frontmatter.title` → primer H1 → nombre del fichero, `model::derived_title`),
+/// no se materializa como metadata. Quien quiera un `title:` explícito lo pasa en `frontmatter`.
 ///
 /// # Errores
-/// No falla en esta historia (un `path` ya presente en el workspace no se rechaza aquí; esa política
-/// es de la workspace). La firma devuelve `Result` por coherencia con las otras normalizaciones.
+/// No falla (un `path` ya presente en el workspace no se rechaza aquí; esa política es de la
+/// workspace). La firma devuelve `Result` por coherencia con las otras normalizaciones.
 pub fn normalize_create(
     _workspace: &DocumentSet,
     path: &RelPath,
-    doctype: &str,
-    title: Option<&str>,
+    frontmatter: Option<FrontmatterPatch>,
     body: Option<String>,
 ) -> Result<NormalizedOperation, CoreError> {
-    let resolved_title = title
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| model::derived_title(None, "", path));
-
-    let resolved_body = body;
-
-    let mut fm: BTreeMap<String, Option<serde_yaml::Value>> = BTreeMap::new();
-    fm.insert(
-        "type".to_string(),
-        Some(serde_yaml::Value::String(doctype.to_string())),
-    );
-    fm.insert(
-        "title".to_string(),
-        Some(serde_yaml::Value::String(resolved_title)),
-    );
-
     Ok(NormalizedOperation::Create {
         path: path.clone(),
-        frontmatter: FrontmatterPatch(fm),
-        body: resolved_body,
+        frontmatter,
+        body,
     })
 }
 
@@ -654,6 +646,68 @@ fn retarget_body_links(
     out
 }
 
+/// Recalcula, **por el `span` de bytes del destino**, los enlaces del cuerpo de un documento que se
+/// mueve de `from` a `to`, para que sigan apuntando a los mismos ficheros desde la ubicación nueva
+/// (E23-H03, `§20.11`).
+///
+/// A diferencia de [`retarget_body_links`] —que cambia **el destino** de los enlaces que apuntan a
+/// un documento movido—, esta cambia **el origen**: el destino de cada enlace no se mueve, se mueve
+/// quien lo escribe, y un href relativo se interpreta desde el directorio de su documento.
+///
+/// Qué se toca y qué no, decidido por [`links::resolve`] contra el `inventory` (invariante #3, la
+/// única verdad de resolución del core):
+/// - **Se recalcula** todo enlace con path interno: [`LinkTarget::Document`],
+///   [`LinkTarget::WorkspaceFile`] (un enlace a código: `../src/token.rs` también se rompe al mover)
+///   y [`LinkTarget::Missing`] (un enlace ya roto se mantiene roto **apuntando al mismo sitio**, en
+///   vez de pasar a señalar un fichero distinto — no se inventa destino, se preserva la intención).
+/// - **No se tocan**: [`LinkTarget::ExternalUri`] (`https://…`), [`LinkTarget::SelfAnchor`]
+///   (`#seccion`, que sigue siendo del propio documento) ni [`LinkTarget::EscapesWorkspace`] (no hay
+///   path que recalcular).
+/// - Un href **raíz-absoluto** (`/docs/x.md`) no depende del origen: [`retarget_href`] conserva ese
+///   estilo y produce el mismo texto, así que queda intacto de hecho.
+///
+/// Nota sobre `internal_path()`: **no** sirve aquí, porque excluye `WorkspaceFile` y los `Missing`
+/// no-markdown. Usar ese helper dejaría los enlaces a código del documento movido rotos, que es el
+/// caso que más duele en un repo de software.
+fn rebase_body_links(body: &str, from: &RelPath, to: &RelPath, inventory: &Inventory) -> String {
+    // (span, destino) de cada enlace recalculable, de mayor a menor offset para que una sustitución
+    // no invalide los spans siguientes; deduplicado porque varios usos de una misma definición de
+    // referencia comparten span.
+    //
+    // Las definiciones de referencia entran por su propia vía (`links::reference_definitions`)
+    // porque una definición SIN usar no genera evento en el parser y `extract_links` —que emite por
+    // uso— no la vería. No es una arista del grafo, pero sí es un path relativo escrito por el
+    // usuario: dejarla sin recalcular la haría apuntar a otro sitio en silencio. Los spans de las
+    // usadas coinciden con los de su definición, así que el `dedup_by` de abajo los funde.
+    let mut objetivos: Vec<(std::ops::Range<usize>, RelPath)> = links::extract_links(body)
+        .into_iter()
+        .chain(links::reference_definitions(body))
+        .map(|raw| links::resolve(&raw, from, inventory))
+        .filter_map(|link| {
+            let destino = match &link.target {
+                LinkTarget::Document(p) | LinkTarget::WorkspaceFile(p) | LinkTarget::Missing(p) => {
+                    p.clone()
+                }
+                LinkTarget::ExternalUri(_)
+                | LinkTarget::SelfAnchor(_)
+                | LinkTarget::EscapesWorkspace => return None,
+            };
+            Some((link.span.clone(), destino))
+        })
+        .collect();
+    objetivos.sort_by_key(|(span, _)| std::cmp::Reverse(span.start));
+    objetivos.dedup_by(|a, b| a.0 == b.0);
+
+    let mut out = body.to_string();
+    for (span, destino) in objetivos {
+        // El href se recalcula como si lo escribiera el documento YA en `to`: mismo destino, origen
+        // nuevo. `retarget_href` conserva el sufijo `#fragmento`/`?query` y el estilo absoluto.
+        let nuevo = retarget_href(&out[span.clone()], to.as_str(), &destino);
+        out.replace_range(span, &nuevo);
+    }
+    out
+}
+
 /// "Desenlaza" a texto plano los enlaces **inline** cuyo href resuelve a `target`, dejando su texto
 /// visible (usado por `delete remove_links`). Un enlace a otro destino queda intacto; la decisión la
 /// da [`links::resolve`] (invariante #3), no el patrón textual.
@@ -683,14 +737,27 @@ fn remove_inline_links(
         .into_owned()
 }
 
-/// Normaliza un `move` (rename de un documento) — E12-H06.
+/// Normaliza un `move` (rename de un documento) — E12-H06, E23-H03.
 ///
-/// Produce siempre un [`NormalizedOperation::Move`] `{ from, to }`. Si `rewrite_inbound_links`,
-/// añade además, por cada documento que enlaza a `from` (los entrantes de `DocumentSet::backlinks(from)`,
-/// invariante #3 de `CLAUDE.md`), un [`NormalizedOperation::ReplaceBody`] con el cuerpo del entrante
-/// reescrito para que su enlace apunte a `to` (ver `rewrite_body_links` / `retarget_href`). Así,
-/// mover un documento con 30 backlinks y `rewriteInboundLinks:true` da 1 `Move` + 30 `ReplaceBody`,
-/// todo dentro del mismo change set.
+/// Produce siempre un [`NormalizedOperation::Move`] `{ from, to }`, seguido de un
+/// [`NormalizedOperation::ReplaceBody`] sobre el **propio documento movido** con sus enlaces
+/// salientes recalculados desde la ubicación nueva (ver `rebase_body_links`). Si
+/// `rewrite_inbound_links`, añade además, por cada documento que enlaza a `from` (los entrantes de
+/// `DocumentSet::backlinks(from)`, invariante #3 de `CLAUDE.md`), otro `ReplaceBody` con su enlace
+/// apuntando a `to` (ver `rewrite_body_links` / `retarget_href`).
+///
+/// # Por qué hay que recalcular los salientes (E23-H03)
+///
+/// Un enlace relativo se interpreta **desde el directorio del documento que lo contiene**, así que
+/// mover el documento cambia a dónde apunta cada uno de sus hrefs relativos sin tocar ni un byte de
+/// su texto. Hasta E23-H03 solo se reescribían los entrantes, y el resultado era que mover una nota
+/// que enlazaba a sus vecinas la dejaba con todos los enlaces rotos — lo que el gate diferencial de
+/// E20-H04 detectaba como «errores nuevos», haciendo el `move` **imposible** (`canApply: false`).
+/// Mover una nota que enlaza a sus vecinas es el caso normal en una base de conocimiento.
+///
+/// El `ReplaceBody` va **después** del `Move` y sobre `to`: cuando se aplica, el documento ya está
+/// en su ubicación nueva. Se emite solo si el recálculo cambia algo, para no meter una op no-op (ni
+/// un path afectado de más) en los planes donde el documento no tiene salientes relativos.
 ///
 /// # Errores
 /// [`CoreError::NormalizeTargetNotFound`] si algún documento entrante no tiene fichero en el workspace
@@ -706,6 +773,16 @@ pub fn normalize_move(
         to: to.clone(),
         rewrite_inbound_links,
     }];
+
+    // Los salientes del documento movido, recalculados desde `to`.
+    let cuerpo = document_body(doc_set, from)?;
+    let rebasado = rebase_body_links(&cuerpo, from, to, doc_set.inventory());
+    if rebasado != cuerpo {
+        ops.push(NormalizedOperation::ReplaceBody {
+            path: to.clone(),
+            body: rebasado,
+        });
+    }
 
     if rewrite_inbound_links {
         // Un origen que enlaza VARIAS veces al documento movido aparece una vez por enlace en
@@ -743,10 +820,9 @@ pub fn normalize_move(
 /// - [`InboundLinksPolicy::RemoveLinks`]: devuelve el `Delete` MÁS, por cada entrante, un
 ///   [`NormalizedOperation::ReplaceBody`] que quita el enlace al documento borrado dejando su texto
 ///   plano (ver `rewrite_body_links`).
-/// - [`InboundLinksPolicy::Retarget`] / [`InboundLinksPolicy::CreateStub`]: **implementación mínima**
-///   en esta historia — devuelven solo el `Delete`, sin manejar los entrantes. E12-H06 no fija
-///   criterio para ellas (a qué destino redirigir, qué contenido tendría el stub), así que no se
-///   inventa semántica aquí; queda para una historia posterior.
+///
+/// Ya no hay tercer camino: `Retarget`/`CreateStub` se **retiraron** en E23-H05 (ver
+/// [`InboundLinksPolicy`]), donde llevaban desde E12-H06 aceptándose sin ejecutarse.
 pub fn normalize_delete(
     doc_set: &DocumentSet,
     path: &RelPath,
@@ -788,8 +864,6 @@ pub fn normalize_delete(
             }
             Ok(ops)
         }
-        // Sin criterio en E12-H06: mínimo defensible, solo el borrado (ver doc).
-        InboundLinksPolicy::Retarget | InboundLinksPolicy::CreateStub => Ok(vec![delete]),
     }
 }
 
@@ -862,19 +936,21 @@ pub fn apply_normalized_ops(
     Ok(out)
 }
 
-/// Frontmatter (o el vacío por defecto) y cuerpo actuales del `.md` en `path` dentro de `files`.
-fn parsed_of(files: &FileMap, path: &RelPath) -> (serde_yaml::Mapping, String) {
+/// Frontmatter y cuerpo actuales del `.md` en `path` dentro de `files`.
+///
+/// El frontmatter es `None` cuando el documento **no tiene bloque** —no un mapping vacío—, porque
+/// esa distinción es la que separa «conservar el documento tal cual» de «inventarle un bloque». Ver
+/// el brazo `ReplaceBody` de [`apply_one`]: hasta E23-H03 aquí se devolvía
+/// `unwrap_or_default()`, y reescribir el cuerpo de un documento sin frontmatter le **inyectaba un
+/// `---\n{}\n---`**.
+fn parsed_of(files: &FileMap, path: &RelPath) -> (Option<serde_yaml::Mapping>, String) {
     match files.get(path) {
         Some(raw) => {
             let parsed = model::parse_file(path.as_str(), raw);
-            let map = parsed
-                .frontmatter
-                .as_ref()
-                .map(|fm| fm.mapping().clone())
-                .unwrap_or_default();
+            let map = parsed.frontmatter.as_ref().map(|fm| fm.mapping().clone());
             (map, parsed.body)
         }
-        None => (serde_yaml::Mapping::new(), String::new()),
+        None => (None, String::new()),
     }
 }
 
@@ -887,16 +963,21 @@ fn apply_one(files: &mut FileMap, op: &NormalizedOperation) -> Result<(), CoreEr
             frontmatter,
             body,
         } => {
-            let mut map = serde_yaml::Mapping::new();
-            crate::document_set::apply_patch(&mut map, frontmatter.clone());
-            let fm = ParsedFrontmatter::from_mapping(map);
+            // E23-H02: `None` ⇒ documento SIN bloque de frontmatter. `build_raw(None, …)` devuelve
+            // el cuerpo verbatim, así que el `.md` es exactamente lo que pidió el llamador — nada de
+            // un `---\n---` vacío, y desde luego nada de `type`/`title` inyectados.
+            let fm = frontmatter.as_ref().map(|patch| {
+                let mut map = serde_yaml::Mapping::new();
+                crate::document_set::apply_patch(&mut map, patch.clone());
+                ParsedFrontmatter::from_mapping(map)
+            });
             let body = body.clone().unwrap_or_else(|| {
-                // Sin cuerpo todavía: la cadena de `derived_title` se resuelve por el `title` del
-                // frontmatter o, en su defecto, por el nombre del fichero.
-                let title = model::derived_title(Some(&fm), "", path);
+                // Sin cuerpo: la cadena de `derived_title` se resuelve por el `title` del
+                // frontmatter (si el llamador lo pidió) o, en su defecto, por el nombre del fichero.
+                let title = model::derived_title(fm.as_ref(), "", path);
                 format!("# {title}\n")
             });
-            files.insert(path.clone(), model::build_raw(Some(&fm), &body));
+            files.insert(path.clone(), model::build_raw(fm.as_ref(), &body));
         }
         NormalizedOperation::PatchFrontmatter { path, patch } => {
             // Por el patch QUIRÚRGICO (E16-H04, invariante #3: una sola verdad de patcheo): las
@@ -907,9 +988,15 @@ fn apply_one(files: &mut FileMap, op: &NormalizedOperation) -> Result<(), CoreEr
             files.insert(path.clone(), patched.raw);
         }
         NormalizedOperation::ReplaceBody { path, body } => {
+            // El frontmatter del documento se conserva **incluida su ausencia** (E23-H03): un
+            // documento sin bloque sigue sin bloque. Antes se reconstruía con
+            // `ParsedFrontmatter::from_mapping(map)` sobre un mapping vacío por defecto, así que
+            // reescribir el cuerpo de un `README.md` sin frontmatter le colaba un `---\n{}\n---`.
+            // Y como `move` con `rewriteInboundLinks` reescribe el cuerpo de CADA emisor, mover un
+            // documento corrompía de una tacada todos sus enlazantes sin frontmatter.
             let (map, _) = parsed_of(files, path);
-            let fm = ParsedFrontmatter::from_mapping(map);
-            files.insert(path.clone(), model::build_raw(Some(&fm), body));
+            let fm = map.map(ParsedFrontmatter::from_mapping);
+            files.insert(path.clone(), model::build_raw(fm.as_ref(), body));
         }
         NormalizedOperation::Move { from, to, .. } => {
             if let Some(raw) = files.remove(from) {

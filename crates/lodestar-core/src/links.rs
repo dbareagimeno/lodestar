@@ -150,6 +150,47 @@ fn materializar(body: &str, marco: &Marco, defs: &RefDefs<'_>) -> Option<RawLink
     })
 }
 
+/// Todas las **definiciones** de enlace de referencia del cuerpo (`[id]: destino`), estén usadas o
+/// no, con el rango de bytes de su destino — E23-H03.
+///
+/// # Por qué existe aparte de [`extract_links`]
+///
+/// `extract_links` emite un [`RawLink`] por **uso**: recorre los eventos del parser, y un uso de
+/// referencia (`[texto][id]`) apunta al destino que vive en su definición. Una definición que nadie
+/// usa **no genera ningún evento**, así que `extract_links` no la ve — y es correcto que no la vea:
+/// no es un enlace de navegación, no debe ser una arista del grafo ni producir un diagnóstico de
+/// destino roto.
+///
+/// Pero sí es **texto del usuario con un path relativo dentro**. Al mover un documento hay que
+/// recalcularla como cualquier otro href, o queda apuntando a otro sitio en silencio. De ahí que
+/// esto sea una función propia, consumida **solo** por `plan::rebase_body_links`: reescribir es un
+/// problema distinto de modelar el grafo.
+///
+/// El `kind` es siempre [`LinkKind::Reference`] y el `text` va vacío: una definición no tiene texto
+/// visible.
+pub fn reference_definitions(body: &str) -> Vec<RawLink> {
+    let mut iter = Parser::new_ext(body, opciones()).into_offset_iter();
+    // Hay que agotar el iterador antes de consultar las definiciones (`reference_definitions` toma
+    // `&self` y iterar toma `&mut self`), igual que en `extract_links`.
+    iter.by_ref().for_each(drop);
+
+    iter.reference_definitions()
+        .iter()
+        .filter_map(|(_id, def)| {
+            let span = span_definicion(body, &def.span)?;
+            if !body.is_char_boundary(span.start) || !body.is_char_boundary(span.end) {
+                return None;
+            }
+            Some(RawLink {
+                href: body[span.clone()].to_string(),
+                text: String::new(),
+                span,
+                kind: LinkKind::Reference,
+            })
+        })
+        .collect()
+}
+
 /// El `link_type` del parser traducido al contrato de [`LinkKind`].
 ///
 /// Las variantes `…Unknown` solo las produce un *broken link callback*, que aquí no se instala

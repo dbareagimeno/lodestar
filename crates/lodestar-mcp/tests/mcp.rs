@@ -1902,8 +1902,9 @@ fn impacto_move_30() {
 //   arguments: {
 //     expectedWorkspaceRevision?: "blake3:…",   // omitido = se toma la revisión actual del workspace
 //     operations: [                              // ops CRUDAS, discriminadas por «op»
-//       { "op": "create",            "path": "<RelPath>", "type": "<DocType>",
-//                                    "title"?: "…", "body"?: "…" },
+//       { "op": "create",            "path": "<RelPath>",
+//                                    "frontmatter"?: { … },   // YAML ARBITRARIO y opcional (E23-H02)
+//                                    "body"?: "…" },
 //       { "op": "patch_frontmatter", "ref": { "path": "<RelPath>" },
 //                                    "patch": { … },               // merge-patch RFC 7386 (null borra)
 //                                    "expectedRevision"?: "blake3:…" },  // control optimista por op
@@ -2021,7 +2022,7 @@ fn snapshot_md(root: &std::path::Path) -> std::collections::BTreeMap<String, Str
 /// pueda ser conforme; lo que fija el criterio es que salgan **5** `normalizedOperations`.
 fn cinco_operaciones() -> serde_json::Value {
     serde_json::json!([
-        { "op": "create", "path": "nuevo.md", "type": "Concept", "title": "Nuevo",
+        { "op": "create", "path": "nuevo.md",
           "body": "# Nuevo\n\ncuerpo del quinto documento\n" },
         { "op": "patch_frontmatter", "ref": { "path": "a.md" }, "patch": { "description": "a actualizada por el plan" } },
         { "op": "patch_frontmatter", "ref": { "path": "b.md" }, "patch": { "description": "b actualizada por el plan" } },
@@ -2542,7 +2543,7 @@ fn apply_ok() {
     // (1) Plan válido: crear un documento conforme (type/title/body ⇒ conforme, cf.
     // `create_concept_escribe_y_query_lo_ve`). Servidor fresco; el plan se persiste en runtime.
     let ops = serde_json::json!([
-        { "op": "create", "path": "nuevo.md", "type": "Nota", "title": "Nuevo",
+        { "op": "create", "path": "nuevo.md",
           "body": "# Resumen\n\ncuerpo del documento nuevo\n" },
     ]);
     let plan = roundtrip(
@@ -2770,7 +2771,7 @@ fn apply_fuera_de_writable() {
     // así que produce el plan (documentado arriba): exigimos un `changeSetId` para que el rojo lo
     // dispare la ausencia de `change_apply`, no un rechazo prematuro en el plan.
     let ops = serde_json::json!([
-        { "op": "create", "path": "src/malicioso.md", "type": "Nota", "title": "Malo",
+        { "op": "create", "path": "src/malicioso.md",
           "body": "# Malo\n\nintento de escribir fuera de writableRoots\n" },
     ]);
     let plan = roundtrip(
@@ -2923,7 +2924,7 @@ fn revert_reciente() {
 
     // (1) Plan válido: crear un documento conforme (mismo patrón que `apply_ok`).
     let ops = serde_json::json!([
-        { "op": "create", "path": "nuevo.md", "type": "Nota", "title": "Nuevo",
+        { "op": "create", "path": "nuevo.md",
           "body": "# Resumen\n\ncuerpo del documento nuevo\n" },
     ]);
     let plan = roundtrip(
@@ -3007,7 +3008,7 @@ fn revert_fichero_alterado() {
 
     // (1) Plan + apply de un `create` (el único fichero afectado es `nuevo.md`).
     let ops = serde_json::json!([
-        { "op": "create", "path": "nuevo.md", "type": "Nota", "title": "Nuevo",
+        { "op": "create", "path": "nuevo.md",
           "body": "# Resumen\n\ncuerpo del documento nuevo\n" },
     ]);
     let plan = roundtrip(
@@ -3072,7 +3073,7 @@ fn revert_caducado() {
 
     // (1) Plan + apply de un `create`.
     let ops = serde_json::json!([
-        { "op": "create", "path": "nuevo.md", "type": "Nota", "title": "Nuevo",
+        { "op": "create", "path": "nuevo.md",
           "body": "# Resumen\n\ncuerpo del documento nuevo\n" },
     ]);
     let plan = roundtrip(

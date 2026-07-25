@@ -95,8 +95,7 @@ fn apply_no_regenera_indices() {
 
     // (2) Plan: crear un documento en la raíz (el ámbito del `index.md`).
     let ops = serde_json::json!([
-        { "op": "create", "path": "beta.md", "type": "Nota", "title": "Beta",
-          "body": "# Resumen\n\ncuerpo del documento beta\n" },
+        { "op": "create", "path": "beta.md", "body": "# Resumen\n\ncuerpo del documento beta\n" },
     ]);
     let plan = app
         .change_plan(None, &ops, policy_permisiva())

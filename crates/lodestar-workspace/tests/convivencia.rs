@@ -64,7 +64,7 @@ fn patch(pares: &[(&str, &str)]) -> FrontmatterPatch {
 fn create_conforme(path: &str, title: &str) -> NormalizedOperation {
     NormalizedOperation::Create {
         path: RelPath::new(path).unwrap(),
-        frontmatter: patch(&[("type", "Nota"), ("title", title)]),
+        frontmatter: Some(patch(&[("type", "Nota"), ("title", title)])),
         body: Some(format!("# {title}\n\ncuerpo\n")),
     }
 }

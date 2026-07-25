@@ -429,7 +429,7 @@ fn rechaza_errores_nuevos() {
     // Cambio que INTRODUCE un error NUEVO: crea un documento con un enlace a un `.md` inexistente
     // (destino distinto del enlace roto preexistente).
     let ops = json!([
-        { "op": "create", "path": "nuevo.md", "type": "Nota", "title": "Nuevo",
+        { "op": "create", "path": "nuevo.md",
           "body": "# Nuevo\n\nEnlace roto recién introducido: [otro](inexistente-nuevo.md).\n" },
     ]);
 

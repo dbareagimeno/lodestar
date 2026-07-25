@@ -136,11 +136,12 @@ fn change_set(id: &str, operations: Vec<NormalizedOperation>) -> ChangeSet {
     }
 }
 
-/// Un `Create` conforme (con `type` y `title`) que resuelve al `.md` `path`.
+/// Un `Create` válido que resuelve al `.md` `path`, con `type`/`title` como frontmatter
+/// **arbitrario** (E23-H02: el motor no privilegia ninguna clave; aquí son solo dos claves más).
 fn create_conforme(path: &str, ty: &str, title: &str) -> NormalizedOperation {
     NormalizedOperation::Create {
         path: RelPath::new(path).unwrap(),
-        frontmatter: patch(&[("type", ty), ("title", title)]),
+        frontmatter: Some(patch(&[("type", ty), ("title", title)])),
         body: Some(format!("# {title}\n\ncuerpo\n")),
     }
 }
@@ -252,7 +253,7 @@ fn staging_no_conforme_aborta() {
         "changeset:no-conforme",
         vec![NormalizedOperation::Create {
             path: RelPath::new("malo.md").unwrap(),
-            frontmatter: patch(&[("type", "Nota"), ("title", "Malo")]),
+            frontmatter: Some(patch(&[("type", "Nota"), ("title", "Malo")])),
             body: Some("# Malo\n\n<<<<<<< HEAD\nuno\n=======\ndos\n>>>>>>> rama\n".to_string()),
         }],
     );

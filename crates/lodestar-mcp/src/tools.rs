@@ -6,13 +6,38 @@
 
 use lodestar_app::{schemas, App, CheckScope, Profile};
 use lodestar_core::plan::PlanPolicy;
-use lodestar_core::types::{ChangeSetId, DocumentRef, ReceiptId, Severity, WorkspaceRevision};
+use lodestar_core::types::{
+    ChangeSetId, DocumentRef, InboundLinksPolicy, ReceiptId, Severity, WorkspaceRevision,
+};
 #[cfg(test)]
 use lodestar_workspace::Workspace;
 use serde_json::{json, Value};
 
 /// Error de tool con un mensaje legible (la fachada lo envuelve en el error JSON-RPC).
 pub type ToolResult = Result<Value, String>;
+
+/// El primer `inboundLinksPolicy` de `raw_ops` que **no** esté en
+/// [`InboundLinksPolicy::WIRE_VALUES`], o `None` si todos son válidos (E23-H05).
+///
+/// Recorre tanto el array `operations` como el `operation` de una selección masiva, que son las dos
+/// formas de wire que acepta `change_plan`.
+fn politica_de_borrado_invalida(raw_ops: &Value) -> Option<String> {
+    fn de_op(op: &Value) -> Option<String> {
+        // Forma suelta (`{"op":"delete", "inboundLinksPolicy":…}`) y forma de selección masiva
+        // (`{"delete": {"inboundLinksPolicy":…}}`), que anida los params bajo el tipo de op.
+        let directo = op.get("inboundLinksPolicy");
+        let anidado = op.get("delete").and_then(|d| d.get("inboundLinksPolicy"));
+        let valor = directo.or(anidado)?.as_str()?;
+        (!InboundLinksPolicy::WIRE_VALUES.contains(&valor)).then(|| valor.to_string())
+    }
+
+    match raw_ops {
+        Value::Array(ops) => ops.iter().find_map(de_op),
+        // Selección masiva: `{selection, operation}`; la op viaja en `operation`.
+        Value::Object(_) => raw_ops.get("operation").and_then(de_op),
+        _ => None,
+    }
+}
 
 /// Lista las tools con descripción e `inputSchema` (obligatorio en el spec MCP: sin él,
 /// los clientes conformes rechazan la tool o el modelo no sabe qué argumentos pasar).
@@ -346,6 +371,20 @@ pub fn call(app: &App, profile: Profile, name: &str, params: &Value) -> ToolResu
                 Some(v) => serde_json::from_value(v.clone()).map_err(|e| e.to_string())?,
                 None => PlanPolicy::default(),
             };
+            // E23-H05: validación de FORMA del enum, igual que las comprobaciones de «falta el
+            // parámetro «ref»» de las otras tools. `App` ya rechaza el valor con `INVALID_SCHEMA`,
+            // pero ese código pelado no le dice al agente cuáles son las válidas — y `retarget`/
+            // `create_stub` estuvieron aceptándose sin ejecutarse desde E12-H06, así que un cliente
+            // que las use viene de una versión donde «funcionaban». La lista sale de
+            // `InboundLinksPolicy::WIRE_VALUES`, la misma que declara el `inputSchema`.
+            if let Some(mala) = politica_de_borrado_invalida(&raw_ops) {
+                return Err(format!(
+                    "INVALID_SCHEMA: «{mala}» no es una política válida ante enlaces entrantes; \
+                     usa una de {:?}. «retarget» y «create_stub» se retiraron en E23-H05: se \
+                     aceptaban sin ejecutarse, dejando enlaces rotos.",
+                    InboundLinksPolicy::WIRE_VALUES
+                ));
+            }
             // Mismo mapeo de error a wire que las demás tools (E10-H02): el código estable
             // `ErrorCode::as_str()` (p. ej. «REVISION_CONFLICT»), nunca el `Debug` de la variante.
             let result = app

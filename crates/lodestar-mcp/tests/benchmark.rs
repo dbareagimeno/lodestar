@@ -228,8 +228,7 @@ fn workspace_cinco_relacionados() -> tempfile::TempDir {
 /// Las 5 operaciones del escenario 7: 1 `create` + 4 `patch_frontmatter`.
 fn cinco_operaciones() -> Value {
     json!([
-        { "op": "create", "path": "nuevo.md", "type": "Concept", "title": "Nuevo",
-          "body": "# Nuevo\n\ncuerpo del quinto documento\n" },
+        { "op": "create", "path": "nuevo.md", "body": "# Nuevo\n\ncuerpo del quinto documento\n" },
         { "op": "patch_frontmatter", "ref": { "path": "a.md" }, "patch": { "description": "a v2" } },
         { "op": "patch_frontmatter", "ref": { "path": "b.md" }, "patch": { "description": "b v2" } },
         { "op": "patch_frontmatter", "ref": { "path": "c.md" }, "patch": { "description": "c v2" } },
@@ -338,8 +337,7 @@ fn escenario_01_buscar_por_significado() {
 fn escenario_02_crear_valido() {
     let dir = workspace_min();
     let ops = json!([
-        { "op": "create", "path": "nuevo.md", "type": "Nota", "title": "Nuevo",
-          "body": "# Resumen\n\ncuerpo del documento nuevo\n" },
+        { "op": "create", "path": "nuevo.md", "body": "# Resumen\n\ncuerpo del documento nuevo\n" },
     ]);
     // (1) Plan aceptado: canApply true bajo política estricta (conforme).
     let plan = roundtrip(
@@ -382,8 +380,7 @@ fn escenario_03_crear_no_conforme() {
     // El create añade un documento con un enlace a un `.md` que no existe ⇒ LINK-TARGET-MISSING (Err)
     // ⇒ resultado no conforme.
     let ops = json!([
-        { "op": "create", "path": "dec.md", "type": "decision", "title": "No conforme",
-          "body": "# No conforme\n\n[roto](no-existe.md)\n" },
+        { "op": "create", "path": "dec.md", "body": "# No conforme\n\n[roto](no-existe.md)\n" },
     ]);
 
     // (1) change_plan bajo política ESTRICTA: el plan se rechaza a sí mismo (canApply:false) y
@@ -439,11 +436,33 @@ fn escenario_04_mover_30_backlinks() {
         .as_array()
         .unwrap_or_else(|| panic!("change_plan debe devolver normalizedOperations: {plan:?}"));
 
-    // El plan lleva el Move MÁS las 30 reescrituras de enlaces entrantes, todo en UN change set: 31.
+    // El plan lleva el Move MÁS las 30 reescrituras de enlaces entrantes, todo en UN change set.
+    //
+    // E23-H03 relaja el CONTEO exacto (era `== 31`) sin aflojar lo que este escenario mide: desde
+    // esa historia `normalize_move` reescribe también el CUERPO DEL PROPIO DOCUMENTO MOVIDO, y aquí
+    // `target.md` no tiene salientes, así que emitir esa op (32) o ahorrársela (31) son ambas
+    // implementaciones defendibles. Lo que sí se exige, y con más precisión que un conteo: 1 `Move`
+    // y exactamente 30 reescrituras de emisores, todo bajo un único changeSetId.
+    let moves = normalized.iter().filter(|op| op["op"] == "move").count();
     assert_eq!(
-        normalized.len(),
-        31,
-        "mover con 30 backlinks debe producir 1 Move + 30 reescrituras = 31 ops en un solo plan: {plan:?}"
+        moves, 1,
+        "el plan debe llevar exactamente un `move`: {plan:?}"
+    );
+    let emisores = normalized
+        .iter()
+        .filter(|op| {
+            op["op"] == "replace_body"
+                && op["path"].as_str().is_some_and(|p| p.starts_with("emisor"))
+        })
+        .count();
+    assert_eq!(
+        emisores, 30,
+        "mover con 30 backlinks debe reescribir los 30 emisores en el mismo plan: {plan:?}"
+    );
+    assert!(
+        normalized.len() <= 32,
+        "el plan no debe llevar ops de más (a lo sumo: 1 move + 30 emisores + el documento \
+         movido): {plan:?}"
     );
     assert!(
         !plan_id(&plan[0]).is_empty(),
@@ -623,8 +642,7 @@ fn escenario_10_diff_refactor() {
 fn escenario_11_revert() {
     let dir = workspace_min();
     let ops = json!([
-        { "op": "create", "path": "nuevo.md", "type": "Nota", "title": "Nuevo",
-          "body": "# Resumen\n\ncuerpo del documento nuevo\n" },
+        { "op": "create", "path": "nuevo.md", "body": "# Resumen\n\ncuerpo del documento nuevo\n" },
     ]);
     // Plan → apply (captura receiptId + revisión previa).
     let plan = roundtrip(
@@ -676,8 +694,7 @@ fn escenario_11_revert() {
 fn escenario_12_crash_recuperacion() {
     let dir = workspace_min();
     let ops = json!([
-        { "op": "create", "path": "nuevo.md", "type": "Nota", "title": "Nuevo",
-          "body": "# Resumen\n\ncuerpo publicado\n" },
+        { "op": "create", "path": "nuevo.md", "body": "# Resumen\n\ncuerpo publicado\n" },
     ]);
     let plan = roundtrip(
         dir.path(),
@@ -746,8 +763,7 @@ fn escenario_13_fuera_writable() {
     // Plan de un create bajo src/ (fuera de writableRoots): change_plan no valida writable, así que
     // produce el plan; el rechazo recae en change_apply (único escritor, assert_writable).
     let ops = json!([
-        { "op": "create", "path": "src/malicioso.md", "type": "Nota", "title": "Malo",
-          "body": "# Malo\n\nfuera de writableRoots\n" },
+        { "op": "create", "path": "src/malicioso.md", "body": "# Malo\n\nfuera de writableRoots\n" },
     ]);
     let plan = roundtrip(
         dir.path(),
@@ -950,6 +966,482 @@ fn bench_15_editar_markdown_invalido() {
 // E20-H03 quedan 13 (los escenarios 8 y 9 —relación tipada inválida y safe fixes de REL-TARGET— se
 // retiraron con `core::schema`).
 // ---------------------------------------------------------------------------
+// ===========================================================================
+// E23-H03 — `move` recalcula sus PROPIOS enlaces salientes, APLICANDO A DISCO
+// (`ARCHITECTURE.md §20.11`, `requirements/epica-23-cierre-migracion.md`). Fase ROJA.
+//
+// El defecto existe precisamente porque `escenario_04_mover_30_backlinks` **solo planifica** y
+// asevera que el disco NO cambió: la mitad saliente del move nunca se ejerció de punta a punta.
+// Estos tres cierran ese hueco por la superficie real (JSON-RPC → binario `lodestar-mcp`):
+// planifican, **aplican**, leen los `.md` publicados y revierten.
+//
+// Síntoma reproducido con los binarios: con `notas/alfa.md` que contiene `[b]: beta.md` y
+// `notas/beta.md` existente, planificar el move a `archivo/alfa.md` da `canApply:false` con
+// `diagnosticsAfter.errors:1` y el apply falla con `NONCONFORMANT_RESULT` — el documento movido se
+// lleva sus hrefs relativos escritos para la ubicación VIEJA.
+//
+// ROJO esperado HOY: por ASERCIÓN (`canApply` es `false`, así que el test se para en el plan).
+// ===========================================================================
+
+/// `notas/alfa.md`: el documento a mover. Enlaza a su vecina `notas/beta.md` de las DOS formas
+/// (inline + definición de referencia) y lleva además los tres destinos que **no** dependen de
+/// dónde viva el documento: una URI externa, un anchor propio y un href raíz-absoluto.
+const ALFA_CON_SALIENTES: &str = "---\ntitle: Alfa\n---\n\n# Alfa\n\n## seccion\n\n\
+     Inline: [Beta](beta.md).\n\n\
+     Referencia: [beta][b].\n\n\
+     Externo: [Sitio](https://example.com/notas/beta.md).\n\n\
+     Ancla: [Sección](#seccion).\n\n\
+     Raíz: [Raíz](/raiz.md).\n\n\
+     [b]: beta.md\n";
+
+/// Workspace del defecto: el documento con salientes, su vecina y el destino raíz-absoluto.
+fn workspace_move_salientes() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), "notas/alfa.md", ALFA_CON_SALIENTES);
+    write(
+        dir.path(),
+        "notas/beta.md",
+        "---\ntitle: Beta\n---\n\n# Beta\n\ncuerpo\n",
+    );
+    write(dir.path(), "raiz.md", "---\ntitle: Raíz\n---\n\n# Raíz\n");
+    dir
+}
+
+/// Las operaciones del move que fija la historia.
+fn ops_move_alfa() -> Value {
+    json!([
+        { "op": "move", "from": "notas/alfa.md", "to": "archivo/alfa.md",
+          "rewriteInboundLinks": true },
+    ])
+}
+
+/// Planifica `ops` bajo `policy` y devuelve `(changeSetId, respuesta)`, exigiendo `canApply:true`.
+/// Es donde muere hoy el rojo de E23-H03: el mensaje incluye el plan entero (con
+/// `diagnosticsAfter`), que es el diagnóstico útil.
+fn planifica_aplicable(dir: &std::path::Path, ops: Value, policy: Value) -> (String, Value) {
+    let plan = roundtrip(dir, &[change_plan_line(1, ops, policy)], 1);
+    assert_eq!(
+        sc(&plan[0])["canApply"],
+        Value::Bool(true),
+        "el plan debe ser aplicable (canApply:true): {plan:?}"
+    );
+    (plan_id(&plan[0]), plan[0].clone())
+}
+
+/// Aplica `id` exigiendo `applied:true` y devuelve el `receiptId`.
+fn aplica(dir: &std::path::Path, id: &str) -> String {
+    let applied = roundtrip(dir, &[change_apply_line(2, id)], 1);
+    assert_eq!(
+        sc(&applied[0])["applied"],
+        Value::Bool(true),
+        "el plan debe aplicarse (applied:true): {applied:?}"
+    );
+    sc(&applied[0])["receiptId"]
+        .as_str()
+        .unwrap_or_else(|| panic!("change_apply debe devolver receiptId: {applied:?}"))
+        .to_string()
+}
+
+/// `true` si `knowledge_check` (scope workspace) da el workspace por conforme — el equivalente e2e
+/// de «`lodestar check` sale 0» dentro de este binario de test.
+fn workspace_conforme(dir: &std::path::Path) -> (bool, Value) {
+    let resp = roundtrip(
+        dir,
+        &[call(
+            9,
+            "knowledge_check",
+            json!({ "scope": { "kind": "workspace" } }),
+        )],
+        1,
+    );
+    (
+        sc(&resp[0])["conformant"] == Value::Bool(true),
+        resp[0].clone(),
+    )
+}
+
+/// Lee un `.md` publicado (falla con un mensaje claro si no existe).
+fn lee(dir: &std::path::Path, rel: &str) -> String {
+    std::fs::read_to_string(dir.join(rel))
+        .unwrap_or_else(|e| panic!("«{rel}» debe existir en disco tras el apply: {e}"))
+}
+
+/// Criterio `move_recalcula_salientes` — **Dado** `notas/alfa.md` con un enlace inline y una
+/// definición de referencia a `notas/beta.md`, **Cuando** se mueve a `archivo/alfa.md` y se
+/// **aplica**, **Entonces** ambos hrefs quedan `../notas/beta.md` y el workspace queda conforme
+/// (`lodestar check` sale 0).
+///
+/// Y el criterio `move_no_toca_externos_ni_anchors` en su mitad e2e: la URI externa, el anchor
+/// propio y el href raíz-absoluto sobreviven **byte a byte** al viaje completo (su versión pura
+/// vive en `crates/lodestar-core/tests/core.rs`).
+#[test]
+fn move_recalcula_salientes() {
+    let dir = workspace_move_salientes();
+
+    // Política ESTRICTA a propósito: el criterio es que mover una nota que enlaza a sus vecinas
+    // deja el workspace consistente, así que el plan tiene que ser conforme por sí mismo.
+    let (id, _plan) = planifica_aplicable(dir.path(), ops_move_alfa(), policy_estricta());
+    aplica(dir.path(), &id);
+
+    let raw = lee(dir.path(), "archivo/alfa.md");
+    assert!(
+        !dir.path().join("notas/alfa.md").exists(),
+        "el documento movido no puede seguir en su ubicación vieja; disco =\n{raw}"
+    );
+
+    // 1) Los dos salientes relativos, recalculados desde `archivo/`.
+    assert!(
+        raw.contains("[Beta](../notas/beta.md)"),
+        "el enlace inline saliente debe quedar `../notas/beta.md` tras el move; \
+         `archivo/alfa.md` =\n{raw}"
+    );
+    assert!(
+        raw.contains("[b]: ../notas/beta.md"),
+        "la definición de referencia saliente debe quedar `[b]: ../notas/beta.md` tras el move; \
+         `archivo/alfa.md` =\n{raw}"
+    );
+    assert!(
+        !raw.contains("](beta.md)") && !raw.contains("[b]: beta.md"),
+        "ningún saliente puede conservar el destino viejo relativo a `notas/`; \
+         `archivo/alfa.md` =\n{raw}"
+    );
+
+    // 2) Y lo que NO depende de la ubicación sobrevive byte a byte.
+    for intacto in [
+        "Externo: [Sitio](https://example.com/notas/beta.md).",
+        "Ancla: [Sección](#seccion).",
+        "Raíz: [Raíz](/raiz.md).",
+    ] {
+        assert!(
+            raw.contains(intacto),
+            "«{intacto}» debe sobrevivir intacto al move; `archivo/alfa.md` =\n{raw}"
+        );
+    }
+
+    // 3) El veredicto del producto: el workspace queda conforme (equivale a `check` → exit 0).
+    let (conforme, resp) = workspace_conforme(dir.path());
+    assert!(
+        conforme,
+        "tras mover una nota que enlaza a sus vecinas el workspace debe quedar conforme \
+         (`lodestar check` sale 0): {resp:?}"
+    );
+}
+
+/// Criterio `move_completo_treinta_backlinks` — **Dado** un documento con 30 backlinks entrantes y
+/// enlaces salientes propios, **Cuando** se mueve y se **aplica**, **Entonces** los 30 emisores
+/// apuntan al destino nuevo y el documento movido conserva sus salientes válidos, **en una sola
+/// transacción**.
+///
+/// Es la unión de las dos mitades del `move` (entrante, ya cubierta por `escenario_04`, y saliente,
+/// el defecto de E23-H03) sobre el mismo change set: un único `changeSetId` y un único `receiptId`.
+#[test]
+fn move_completo_treinta_backlinks() {
+    let dir = workspace_move_salientes();
+    for i in 0..30 {
+        write(
+            dir.path(),
+            &format!("emisor{i:02}.md"),
+            &format!(
+                "---\ntitle: Emisor {i:02}\n---\n\n# Emisor {i:02}\n\nreferencia a [alfa](notas/alfa.md).\n"
+            ),
+        );
+    }
+
+    let (id, plan) = planifica_aplicable(dir.path(), ops_move_alfa(), policy_estricta());
+    assert!(
+        !id.is_empty(),
+        "las 31+ escrituras deben caber en un ÚNICO change set: {plan:?}"
+    );
+
+    // El plan lleva la mitad entrante (30 emisores) Y la saliente (el propio documento movido).
+    let normalized = sc(&plan)["normalizedOperations"]
+        .as_array()
+        .unwrap_or_else(|| panic!("change_plan debe devolver normalizedOperations: {plan:?}"))
+        .clone();
+    let emisores_reescritos = normalized
+        .iter()
+        .filter(|op| {
+            op["op"] == "replace_body"
+                && op["path"].as_str().is_some_and(|p| p.starts_with("emisor"))
+        })
+        .count();
+    assert_eq!(
+        emisores_reescritos, 30,
+        "el plan debe reescribir los 30 emisores entrantes: {plan:?}"
+    );
+    assert!(
+        normalized.iter().any(|op| {
+            op["op"] == "replace_body"
+                && matches!(
+                    op["path"].as_str(),
+                    Some("notas/alfa.md") | Some("archivo/alfa.md")
+                )
+        }),
+        "el plan debe incluir además la reescritura del PROPIO documento movido (sus salientes \
+         recalculados desde la ubicación nueva): {plan:?}"
+    );
+
+    let receipt = aplica(dir.path(), &id);
+    assert!(
+        !receipt.is_empty(),
+        "la transacción única debe devolver un receiptId"
+    );
+
+    // 1) Los 30 emisores apuntan al destino nuevo.
+    for i in 0..30 {
+        let emisor = lee(dir.path(), &format!("emisor{i:02}.md"));
+        assert!(
+            emisor.contains("[alfa](archivo/alfa.md)"),
+            "el emisor {i:02} debe apuntar al destino nuevo `archivo/alfa.md`; cuerpo =\n{emisor}"
+        );
+        assert!(
+            !emisor.contains("notas/alfa.md"),
+            "el emisor {i:02} no debe conservar el destino viejo; cuerpo =\n{emisor}"
+        );
+    }
+
+    // 2) Y el documento movido conserva sus salientes VÁLIDOS desde la ubicación nueva.
+    let movido = lee(dir.path(), "archivo/alfa.md");
+    assert!(
+        movido.contains("[Beta](../notas/beta.md)") && movido.contains("[b]: ../notas/beta.md"),
+        "el documento movido debe conservar sus salientes recalculados; \
+         `archivo/alfa.md` =\n{movido}"
+    );
+
+    let (conforme, resp) = workspace_conforme(dir.path());
+    assert!(
+        conforme,
+        "tras el move completo el workspace debe quedar conforme: {resp:?}"
+    );
+}
+
+/// Criterio `move_revert_completo` — **Dado** ese move aplicado, **Cuando** se hace
+/// `change_revert`, **Entonces** los 32 ficheros vuelven a su contenido previo.
+///
+/// Se compara el árbol `.md` ENTERO (snapshot antes/después), que es más fuerte que contar
+/// ficheros: cualquier byte distinto en cualquier `.md` —incluido el path del documento movido—
+/// hace fallar el test. Con una guarda de no vacuidad: entre medias el árbol tiene que haber
+/// cambiado de verdad.
+#[test]
+fn move_revert_completo() {
+    let dir = workspace_move_salientes();
+    for i in 0..30 {
+        write(
+            dir.path(),
+            &format!("emisor{i:02}.md"),
+            &format!(
+                "---\ntitle: Emisor {i:02}\n---\n\n# Emisor {i:02}\n\nreferencia a [alfa](notas/alfa.md).\n"
+            ),
+        );
+    }
+    let antes = snapshot_md(dir.path());
+    assert_eq!(
+        antes.len(),
+        33,
+        "el fixture son 30 emisores + alfa + beta + raiz"
+    );
+
+    let (id, _) = planifica_aplicable(dir.path(), ops_move_alfa(), policy_estricta());
+    let receipt = aplica(dir.path(), &id);
+
+    let tras_aplicar = snapshot_md(dir.path());
+    assert_ne!(
+        antes, tras_aplicar,
+        "guarda de no vacuidad: el apply del move TIENE que haber cambiado el árbol"
+    );
+
+    let reverted = roundtrip(dir.path(), &[change_revert_line(3, &receipt)], 1);
+    assert_eq!(
+        sc(&reverted[0])["reverted"],
+        Value::Bool(true),
+        "el receipt del move debe poder revertirse: {reverted:?}"
+    );
+
+    let despues = snapshot_md(dir.path());
+    assert_eq!(
+        despues, antes,
+        "revertir el move debe devolver TODOS los `.md` a su contenido previo, byte a byte \
+         (incluido el documento movido en su ubicación original y los 30 emisores)"
+    );
+}
+
+// ===========================================================================
+// E23-H05 — Políticas de borrado honestas, POR LA SUPERFICIE MCP
+// (`ARCHITECTURE.md §20.11`, `requirements/epica-23-cierre-migracion.md`). Fase ROJA.
+//
+// `delete_politica_retirada_nombra_validas` es el rojo: hoy `retarget`/`create_stub` se ACEPTAN y
+// el plan sale (con el borrado a secas), así que la respuesta no es un error y no nombra nada.
+// `delete_remove_links_aplicado` y `delete_revert_byte_a_byte` son los criterios 2 y 3 de la
+// historia: la política que SÍ sobrevive tiene que seguir funcionando de punta a punta (aplicar +
+// revertir). Son controles anti-regresión de la retirada — si están verdes hoy, su valor es que
+// sigan verdes después.
+// ===========================================================================
+
+/// Workspace con `objetivo.md` referenciado desde `a.md` y `b.md` (2 backlinks inline).
+fn workspace_borrado_con_backlinks() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "objetivo.md",
+        "---\ntitle: Objetivo\n---\n\n# Objetivo\n\ncuerpo\n",
+    );
+    for slug in ["a", "b"] {
+        write(
+            dir.path(),
+            &format!("{slug}.md"),
+            &format!(
+                "---\ntitle: {slug}\n---\n\n# {slug}\n\nApunta a [Objetivo](objetivo.md) y sigue.\n"
+            ),
+        );
+    }
+    dir
+}
+
+/// Criterio `delete_retarget_rechazado` (mitad de wire; la del `App` vive en
+/// `crates/lodestar-app/tests/eliminacion.rs`) — **Dado** un `delete` con
+/// `inboundLinksPolicy: "retarget"`, **Cuando** se planifica, **Entonces** se rechaza con
+/// `INVALID_SCHEMA` **y un mensaje que nombra las políticas válidas**.
+///
+/// El mensaje es parte del criterio: el valor de la política es lo que el agente escribió, así que
+/// el rechazo tiene que decirle cuáles quedan. Hoy `ErrorCode` viaja a la superficie como código
+/// pelado (`e.as_str()` en `tools.rs`), de modo que este test obliga a que el rechazo de un valor
+/// retirado lleve además el texto — sin tocar el catálogo congelado de 16 códigos.
+#[test]
+fn delete_politica_retirada_nombra_validas() {
+    let dir = workspace_borrado_con_backlinks();
+
+    for politica in ["retarget", "create_stub"] {
+        let resp = roundtrip(
+            dir.path(),
+            &[change_plan_line(
+                1,
+                json!([
+                    { "op": "delete", "ref": { "path": "objetivo.md" },
+                      "inboundLinksPolicy": politica }
+                ]),
+                policy_permisiva(),
+            )],
+            1,
+        );
+        assert!(
+            es_error_con(&resp[0], "INVALID_SCHEMA"),
+            "`inboundLinksPolicy: {politica}` está RETIRADA (E23-H05) y debe rechazarse con \
+             INVALID_SCHEMA, no aceptarse para producir un plan que no ejecuta la política: {resp:?}"
+        );
+        let texto = resp[0].to_string();
+        for valida in ["reject", "remove_links"] {
+            assert!(
+                texto.contains(valida),
+                "el rechazo de «{politica}» debe nombrar las políticas válidas (falta \
+                 «{valida}»): {resp:?}"
+            );
+        }
+        assert!(
+            dir.path().join("objetivo.md").is_file(),
+            "un delete rechazado no puede borrar nada: {resp:?}"
+        );
+    }
+
+    // Control anti-vacuo: la política viva no se rechaza (el filtro es del VALOR retirado, no del
+    // parámetro).
+    let ok = roundtrip(
+        dir.path(),
+        &[change_plan_line(
+            2,
+            json!([
+                { "op": "delete", "ref": { "path": "objetivo.md" },
+                  "inboundLinksPolicy": "remove_links" }
+            ]),
+            policy_permisiva(),
+        )],
+        1,
+    );
+    assert!(
+        !es_error_con(&ok[0], "INVALID_SCHEMA"),
+        "`remove_links` sigue siendo una política válida y debe planificar: {ok:?}"
+    );
+}
+
+/// Criterio `delete_remove_links_aplicado` — **Dado** un `delete` con
+/// `inboundLinksPolicy: "remove_links"` sobre un documento con 2 backlinks, **Cuando** se
+/// **aplica**, **Entonces** el `.md` desaparece, los 2 emisores conservan el texto sin el enlace, y
+/// `check` sale 0.
+#[test]
+fn delete_remove_links_aplicado() {
+    let dir = workspace_borrado_con_backlinks();
+
+    let (id, _) = planifica_aplicable(
+        dir.path(),
+        json!([
+            { "op": "delete", "ref": { "path": "objetivo.md" },
+              "inboundLinksPolicy": "remove_links" }
+        ]),
+        policy_estricta(),
+    );
+    aplica(dir.path(), &id);
+
+    assert!(
+        !dir.path().join("objetivo.md").exists(),
+        "el documento borrado debe desaparecer del disco"
+    );
+    for slug in ["a", "b"] {
+        let emisor = lee(dir.path(), &format!("{slug}.md"));
+        assert!(
+            !emisor.contains("objetivo.md"),
+            "tras `remove_links` el emisor {slug}.md no puede conservar el enlace; cuerpo =\n{emisor}"
+        );
+        assert!(
+            emisor.contains("Apunta a Objetivo y sigue."),
+            "`remove_links` desenlaza dejando el TEXTO del enlace en su sitio, sin comerse la \
+             frase; cuerpo =\n{emisor}"
+        );
+    }
+
+    let (conforme, resp) = workspace_conforme(dir.path());
+    assert!(
+        conforme,
+        "tras borrar con `remove_links` el workspace debe quedar conforme (`check` sale 0): {resp:?}"
+    );
+}
+
+/// Criterio `delete_revert_byte_a_byte` — **Dado** ese borrado aplicado, **Cuando** se hace
+/// `change_revert`, **Entonces** el documento vuelve **byte a byte** y los emisores recuperan sus
+/// enlaces.
+#[test]
+fn delete_revert_byte_a_byte() {
+    let dir = workspace_borrado_con_backlinks();
+    let antes = snapshot_md(dir.path());
+
+    let (id, _) = planifica_aplicable(
+        dir.path(),
+        json!([
+            { "op": "delete", "ref": { "path": "objetivo.md" },
+              "inboundLinksPolicy": "remove_links" }
+        ]),
+        policy_estricta(),
+    );
+    let receipt = aplica(dir.path(), &id);
+    assert_ne!(
+        antes,
+        snapshot_md(dir.path()),
+        "guarda de no vacuidad: el apply del borrado TIENE que haber cambiado el árbol"
+    );
+
+    let reverted = roundtrip(dir.path(), &[change_revert_line(3, &receipt)], 1);
+    assert_eq!(
+        sc(&reverted[0])["reverted"],
+        Value::Bool(true),
+        "el receipt del borrado debe poder revertirse: {reverted:?}"
+    );
+
+    assert_eq!(
+        snapshot_md(dir.path()),
+        antes,
+        "revertir el borrado debe devolver el documento BYTE A BYTE y restaurar los enlaces de los \
+         dos emisores"
+    );
+}
+
 #[test]
 fn benchmark_escenarios() {
     escenario_01_buscar_por_significado();

@@ -2303,3 +2303,168 @@ fn walk_recorre_la_metadata_direccionable() {
         "`walk()` no coerciona: `priority` sigue siendo el número 2, no \"2\" ({priority:?})"
     );
 }
+
+// ===========================================================================
+// E23-H02 — `create` sin residuo OKF (`ARCHITECTURE.md §20.2` invariante 3, `§20.4`;
+// `requirements/epica-23-cierre-migracion.md`). Fase ROJA.
+//
+// Síntoma reproducido con los binarios: `change_plan` con
+// `{"op":"create","path":"notas/nueva.md","body":"# Nueva"}` + `change_apply` escribe en disco
+//
+//     ---
+//     title: nueva
+//     type: ''
+//     ---
+//
+//     # Nueva
+//
+// Un `type` vacío heredado de OKF y un `title` que nadie pidió, en un producto cuyo invariante 3
+// dice que las claves del frontmatter **no tienen semántica impuesta**. La causa es
+// `plan::normalize_create`, que inserta `type` y `title` a fuego.
+//
+// ## Firma que fija esta fase roja (el «Alcance» de E23-H02)
+//
+// ```ignore
+// pub fn normalize_create(
+//     doc_set: &DocumentSet,
+//     path: &RelPath,
+//     frontmatter: Option<FrontmatterPatch>,   // ARBITRARIO: lo que pida el llamador, tal cual
+//     body: Option<String>,
+// ) -> Result<NormalizedOperation, CoreError>;
+// ```
+//
+// Desaparecen los parámetros privilegiados `doctype: &str` y `title: Option<&str>`. **Sin**
+// `frontmatter`, el `.md` sale SIN bloque de frontmatter (no un bloque vacío `---\n{}\n---`).
+//
+// ## Por qué viven aquí y no en `core.rs`
+//
+// Estos dos tests **no compilan** hasta que la firma cambie (arity + tipos), y un fallo de
+// compilación tumba el binario de test entero. `documento.rs` es el hogar del modelo documental
+// genérico (`§20.4`: frontmatter arbitrario, título derivado) y ya asume ese coste por diseño (ver
+// la cabecera del fichero); dejarlos en `core.rs` habría enmascarado el rojo POR ASERCIÓN de los
+// tests de E23-H03, que viven allí.
+//
+// ROJO esperado HOY: **compile-fail** (`normalize_create` toma 5 argumentos, no 4, y el tercero es
+// `&str`). Es el rojo por símbolo/firma ausente, el mismo patrón que E12-H05/H06.
+// ===========================================================================
+
+use lodestar_core::plan;
+
+/// El `.md` COMPLETO que produce un `create` normalizado: normaliza con la firma nueva y aplica la
+/// operación con la simulación en memoria del core ([`plan::apply_normalized_ops`]), que es
+/// exactamente la que materializa el contenido que luego escribe el único escritor.
+fn raw_creado(path: &str, frontmatter: Option<FrontmatterPatch>, body: Option<&str>) -> String {
+    let p = RelPath::new(path).expect("el path del fixture debe ser un RelPath válido");
+    let vacio = DocumentSet::from_files(FileMap::new());
+    let op = plan::normalize_create(&vacio, &p, frontmatter, body.map(str::to_string))
+        .expect("crear un documento nuevo no debe fallar la normalización");
+    let files = plan::apply_normalized_ops(&FileMap::new(), &[op])
+        .expect("aplicar en memoria un `create` normalizado no debe fallar");
+    files
+        .get(&p)
+        .cloned()
+        .unwrap_or_else(|| panic!("el `create` debe materializar el documento `{path}`"))
+}
+
+/// Criterio `create_sin_frontmatter_no_inyecta` — **Dado** un `create` SIN `frontmatter`,
+/// **Cuando** se aplica, **Entonces** el `.md` no contiene `type:` ni `title:` ni un bloque `---`
+/// vacío.
+///
+/// La aserción fuerte es la igualdad byte a byte con el cuerpo pedido: «no inyecta» significa que
+/// el documento es EXACTAMENTE lo que el llamador pidió, no que casualmente falten dos claves.
+#[test]
+fn create_sin_frontmatter_no_inyecta() {
+    let raw = raw_creado("notas/nueva.md", None, Some("# Nueva\n"));
+
+    assert!(
+        !raw.contains("type:"),
+        "un `create` sin `frontmatter` no puede inyectar la clave OKF `type` (§20.2 invariante 3: \
+         las claves del frontmatter no tienen semántica impuesta); documento =\n{raw}",
+    );
+    assert!(
+        !raw.contains("title:"),
+        "un `create` sin `frontmatter` no puede inyectar `title`: el título se DERIVA (§20.4), no \
+         se materializa como metadata que el usuario no pidió; documento =\n{raw}",
+    );
+    assert!(
+        model::parse_frontmatter(&raw).is_none(),
+        "sin `frontmatter` el `.md` sale SIN bloque de frontmatter, no con uno vacío; \
+         documento =\n{raw}",
+    );
+    assert!(
+        !raw.starts_with("---"),
+        "el documento no debe abrir con un delimitador de frontmatter; documento =\n{raw}",
+    );
+    assert_eq!(
+        raw, "# Nueva\n",
+        "el `.md` creado debe ser EXACTAMENTE el cuerpo pedido, sin residuo",
+    );
+}
+
+/// Criterio `create_frontmatter_arbitrario` — **Dado** un `create` con
+/// `frontmatter: {estado: "borrador", tags: [a, b]}`, **Cuando** se aplica, **Entonces** el `.md`
+/// lleva exactamente esas claves con sus tipos YAML.
+///
+/// «Exactamente» en los dos sentidos: ni falta ninguna de las pedidas (con su TIPO: `tags` sigue
+/// siendo una lista, no un string) ni sobra ninguna que el motor añada por su cuenta.
+#[test]
+fn create_frontmatter_arbitrario() {
+    let patch = FrontmatterPatch(
+        [
+            (
+                "estado".to_string(),
+                Some(Yaml::String("borrador".to_string())),
+            ),
+            (
+                "tags".to_string(),
+                Some(Yaml::Sequence(vec![
+                    Yaml::String("a".to_string()),
+                    Yaml::String("b".to_string()),
+                ])),
+            ),
+        ]
+        .into_iter()
+        .collect(),
+    );
+
+    let raw = raw_creado("notas/nueva.md", Some(patch), Some("# Nueva\n"));
+    let pf = model::parse_frontmatter(&raw).unwrap_or_else(|| {
+        panic!("un `create` CON `frontmatter` debe escribir su bloque; documento =\n{raw}")
+    });
+
+    // 1) Las claves son EXACTAMENTE las pedidas: nada de `type`/`title` de propina.
+    assert_eq!(
+        claves(&pf),
+        BTreeSet::from(["estado".to_string(), "tags".to_string()]),
+        "el frontmatter debe llevar exactamente las claves pedidas por el llamador; \
+         documento =\n{raw}",
+    );
+
+    // 2) Con sus tipos YAML reales (`§20.4`: sin coerción).
+    assert_eq!(
+        pf.get(&fp("estado")),
+        Some(&Yaml::String("borrador".to_string())),
+        "`estado` debe escribirse tal cual, como string; documento =\n{raw}",
+    );
+    let tags = pf
+        .get(&fp("tags"))
+        .unwrap_or_else(|| panic!("`tags` debe estar en el frontmatter; documento =\n{raw}"));
+    assert_eq!(
+        tags.as_sequence().map(Vec::len),
+        Some(2),
+        "`tags` debe seguir siendo una LISTA de 2 elementos, no un escalar aplanado ({tags:?}); \
+         documento =\n{raw}",
+    );
+    assert_eq!(
+        tags.as_sequence()
+            .map(|s| s.iter().filter_map(Yaml::as_str).collect::<Vec<_>>()),
+        Some(vec!["a", "b"]),
+        "los elementos de `tags` deben ser `a` y `b`, en ese orden; documento =\n{raw}",
+    );
+
+    // 3) Y el cuerpo pedido sigue ahí, tras el bloque.
+    assert!(
+        raw.ends_with("# Nueva\n"),
+        "el cuerpo pedido debe cerrar el documento; documento =\n{raw}",
+    );
+}

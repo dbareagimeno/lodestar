@@ -1368,16 +1368,34 @@ pub enum EditSectionMode {
 schema_derive! {
 /// Política ante enlaces entrantes al borrar un documento (E12-H06). `Reject` es el default del
 /// prototipo/spec — un `delete` sobre un documento referenciado se rechaza salvo que se pida
-/// explícitamente otra política.
+/// explícitamente otra política (`§20.11`: nunca se elige una en silencio).
+///
+/// # Las dos políticas retiradas (E23-H05)
+///
+/// `Retarget` y `CreateStub` existieron desde E12-H06 **declaradas pero no implementadas**:
+/// `normalize_delete` las despachaba al mismo brazo que emitía solo el `Delete`, sin tocar los
+/// entrantes. Se aceptaban en el wire y en `contracts/mcp.yml`, y el resultado era un borrado que
+/// dejaba enlaces rotos — que el gate diferencial de E20-H04 acababa rechazando con un
+/// «introduciría 1 error» que no era la verdad: la verdad era que la política no existía.
+///
+/// Se retiran en vez de implementarse porque ninguna de las dos tiene semántica que inventar sin
+/// pedirle más datos al llamador: `Retarget` no tiene campo donde indicar el destino al que
+/// redirigir, y `CreateStub` no tiene criterio de contenido para el stub. Un valor retirado es hoy
+/// `INVALID_SCHEMA` con un mensaje que nombra las válidas.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum InboundLinksPolicy {
     #[default]
     Reject,
-    Retarget,
     RemoveLinks,
-    CreateStub,
 }
+}
+
+impl InboundLinksPolicy {
+    /// Los valores válidos **en el wire**, en el mismo `snake_case` que produce `serde`. Fuente
+    /// única (invariante #4): la consumen el `inputSchema` de `change_plan`, el mensaje de error de
+    /// la fachada MCP y `contracts/mcp.yml`, para que no puedan divergir entre sí.
+    pub const WIRE_VALUES: [&'static str; 2] = ["reject", "remove_links"];
 }
 
 schema_derive! {
@@ -1401,8 +1419,16 @@ pub enum NormalizedOperation {
     /// retiro de `core::schema` en E20-H03 ya no hay `bodyTemplate` de `DocType` que expandir).
     Create {
         path: RelPath,
+        /// El frontmatter que pidió el llamador, **arbitrario y opcional** (E23-H02). `None` crea el
+        /// documento **sin bloque de frontmatter** —no con uno vacío—, que es lo que exige el
+        /// invariante 3 de `§20.2`: las claves del frontmatter no tienen semántica impuesta y
+        /// ninguna es obligatoria.
+        ///
+        /// Hasta E23-H02 este campo era un `FrontmatterPatch` no opcional que `normalize_create`
+        /// rellenaba **siempre** con `type` y `title`, así que todo documento creado por el motor
+        /// nacía con un `type: ''` heredado de OKF.
         #[cfg_attr(feature = "schemars", schemars(skip))]
-        frontmatter: FrontmatterPatch,
+        frontmatter: Option<FrontmatterPatch>,
         body: Option<String>,
     },
     /// Parchea el frontmatter existente (null en el patch = borra la clave, `FrontmatterPatch`).

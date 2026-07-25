@@ -142,9 +142,10 @@ fn asevera_rechazo_al_planificar(app: &App, root: &Path, ops: &Value, destino: &
 /// Control de NO vacuidad: el mismo `create`, pero a un path DESCUBIERTO, sí planifica. Sin esto,
 /// una implementación que rechazara todo pasaría los tres criterios.
 fn control_un_plan_normal_si_funciona(app: &App) {
+    // E23-H02: el `create` ya no lleva `type`/`title` (parámetros privilegiados retirados); aquí
+    // eran incidentales, así que se retiran sin sustituto.
     let ops = json!([
-        { "op": "create", "path": "beta.md", "type": "Nota", "title": "Beta",
-          "body": "# Resumen\n\ncuerpo visible\n" },
+        { "op": "create", "path": "beta.md", "body": "# Resumen\n\ncuerpo visible\n" },
     ]);
     app.change_plan(None, &ops, policy_permisiva()).expect(
         "control de no vacuidad: crear un documento en una ruta DESCUBIERTA debe seguir \
@@ -168,7 +169,7 @@ fn no_se_escribe_en_el_plano_de_control() {
     let app = App::open(root).expect("el workspace temporal debe abrir");
 
     let ops = json!([
-        { "op": "create", "path": ".lodestar/colado.md", "type": "Nota", "title": "Colado",
+        { "op": "create", "path": ".lodestar/colado.md",
           "body": "# Colado\n\ndocumento fuera del inventario\n" },
     ]);
     asevera_rechazo_al_planificar(&app, root, &ops, ".lodestar/colado.md");
@@ -215,7 +216,7 @@ fn no_se_escribe_en_lo_ignorado() {
     );
 
     let ops = json!([
-        { "op": "create", "path": "vendor/oculto.md", "type": "Nota", "title": "Oculto",
+        { "op": "create", "path": "vendor/oculto.md",
           "body": "# Oculto\n\ndocumento fuera del inventario\n" },
     ]);
     asevera_rechazo_al_planificar(&app, root, &ops, "vendor/oculto.md");
@@ -295,8 +296,7 @@ fn plan_valido_no_escribe_en_lo_ignorado_sobrevenido() {
 
     // (1) `vendor/` todavía NO está excluido: el plan es legítimo y se acepta.
     let ops = json!([
-        { "op": "create", "path": "vendor/oculto.md", "type": "Nota", "title": "Oculto",
-          "body": "# Oculto\n\ncuerpo\n" },
+        { "op": "create", "path": "vendor/oculto.md", "body": "# Oculto\n\ncuerpo\n" },
     ]);
     let plan = app
         .change_plan(None, &ops, policy_permisiva())
@@ -327,5 +327,239 @@ fn plan_valido_no_escribe_en_lo_ignorado_sobrevenido() {
     assert!(
         !root.join("vendor/oculto.md").exists(),
         "un apply rechazado por PERMISSION_DENIED no debe materializar el documento excluido"
+    );
+}
+
+// ===========================================================================
+// E23-H02 — `create` sin residuo OKF, POR LA FACHADA Y HASTA EL DISCO
+// (`ARCHITECTURE.md §20.2` invariante 3, `§20.4`; `requirements/epica-23-cierre-migracion.md`).
+// Fase ROJA.
+//
+// El síntoma de la historia es lo que queda ESCRITO en disco tras `change_plan` + `change_apply`:
+//
+//     ---
+//     title: nueva
+//     type: ''
+//     ---
+//
+//     # Nueva
+//
+// Los tests de firma pura (`plan::normalize_create`) viven en
+// `crates/lodestar-core/tests/documento.rs`; estos tres cierran el camino completo por
+// `App::change_plan`/`change_apply`, que es donde `normalize_raw_op` lee hoy `type`/`title` como
+// campos privilegiados y donde el `frontmatter` arbitrario de la op debe empezar a viajar.
+//
+// ROJO esperado HOY: por ASERCIÓN (el `.md` escrito trae `title:`/`type: ''`, el `frontmatter`
+// pedido se ignora y el título derivado sale del nombre de fichero en vez del H1).
+// ===========================================================================
+
+/// Aplica un `create` (una sola op) y devuelve el `.md` **tal como quedó en disco**. Falla con un
+/// mensaje explícito si el plan o el apply se rechazan: un `create` de estos no tiene por qué
+/// fallar, y confundir «se rechazó» con «se escribió mal» arruinaría el diagnóstico.
+fn crea_y_lee(app: &App, root: &Path, op: Value) -> String {
+    let plan = app
+        .change_plan(None, &json!([op]), policy_permisiva())
+        .expect("planificar un `create` bien formado no debe fallar");
+    let ruta = plan
+        .semantic_diff
+        .created
+        .first()
+        .cloned()
+        .unwrap_or_else(|| panic!("el plan de un `create` debe declarar el documento creado"));
+    app.change_apply(&plan.change_set_id, None)
+        .expect("aplicar un `create` bien formado no debe fallar");
+    std::fs::read_to_string(root.join(ruta.as_str()))
+        .unwrap_or_else(|e| panic!("el apply debe materializar «{}»: {e}", ruta.as_str()))
+}
+
+/// **Criterio 1** (`create_sin_frontmatter_no_inyecta`) — **Dado** un `create` sin `frontmatter`,
+/// **Cuando** se aplica, **Entonces** el `.md` en disco **no** contiene `type:` ni `title:` ni un
+/// bloque `---` vacío.
+#[test]
+fn create_sin_frontmatter_no_inyecta() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    semilla(root);
+    let app = App::open(root).expect("el workspace temporal debe abrir");
+
+    let raw = crea_y_lee(
+        &app,
+        root,
+        json!({ "op": "create", "path": "notas/nueva.md", "body": "# Nueva\n" }),
+    );
+
+    assert!(
+        !raw.contains("type:"),
+        "crear un documento no puede inyectar la clave OKF `type` (§20.2 invariante 3: las claves \
+         del frontmatter NO tienen semántica impuesta); disco =\n{raw}",
+    );
+    assert!(
+        !raw.contains("title:"),
+        "crear un documento no puede inyectar `title`: el título se DERIVA (§20.4), no se \
+         materializa como metadata que el usuario no pidió; disco =\n{raw}",
+    );
+    assert!(
+        !raw.starts_with("---"),
+        "sin `frontmatter` el `.md` sale SIN bloque de frontmatter, ni siquiera uno vacío; \
+         disco =\n{raw}",
+    );
+    assert_eq!(
+        raw, "# Nueva\n",
+        "el `.md` publicado debe ser EXACTAMENTE el cuerpo pedido, sin residuo",
+    );
+}
+
+/// **Criterio 2** (`create_frontmatter_arbitrario`) — **Dado** un `create` con
+/// `frontmatter: {estado: "borrador", tags: [a, b]}`, **Cuando** se aplica, **Entonces** el `.md`
+/// lleva exactamente esas claves con sus tipos YAML.
+///
+/// Es el otro lado del criterio 1: retirar `type`/`title` no puede significar «el `create` ya no
+/// escribe frontmatter», sino «escribe el que le pidan, arbitrario y sin claves de propina».
+#[test]
+fn create_frontmatter_arbitrario() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    semilla(root);
+    let app = App::open(root).expect("el workspace temporal debe abrir");
+
+    let raw = crea_y_lee(
+        &app,
+        root,
+        json!({ "op": "create", "path": "notas/nueva.md",
+                "frontmatter": { "estado": "borrador", "tags": ["a", "b"] },
+                "body": "# Nueva\n" }),
+    );
+
+    let pf = lodestar_core::model::parse_frontmatter(&raw).unwrap_or_else(|| {
+        panic!("un `create` CON `frontmatter` debe escribir su bloque; disco =\n{raw}")
+    });
+
+    // 1) Claves EXACTAMENTE las pedidas (ni falta ninguna ni sobra `type`/`title`).
+    let claves: Vec<String> = pf
+        .mapping()
+        .keys()
+        .filter_map(|k| k.as_str().map(str::to_string))
+        .collect();
+    assert_eq!(
+        claves,
+        vec!["estado".to_string(), "tags".to_string()],
+        "el frontmatter escrito debe llevar exactamente las claves pedidas; disco =\n{raw}",
+    );
+
+    // 2) Con sus tipos YAML reales (`§20.4`: sin coerción) — `tags` sigue siendo lista.
+    assert_eq!(
+        pf.get_key("estado").and_then(|v| v.as_str()),
+        Some("borrador"),
+        "`estado` debe escribirse tal cual, como string; disco =\n{raw}",
+    );
+    let tags = pf
+        .get_key("tags")
+        .unwrap_or_else(|| panic!("`tags` debe estar en el frontmatter; disco =\n{raw}"));
+    assert_eq!(
+        tags.as_sequence()
+            .map(|s| s.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>()),
+        Some(vec!["a", "b"]),
+        "`tags` debe seguir siendo una LISTA con `a` y `b`, no un escalar aplanado ({tags:?}); \
+         disco =\n{raw}",
+    );
+
+    // 3) Y el cuerpo pedido cierra el documento.
+    assert!(
+        raw.ends_with("# Nueva\n"),
+        "el cuerpo pedido debe cerrar el documento; disco =\n{raw}",
+    );
+}
+
+/// **Criterio 3** (`create_sin_frontmatter_titulo_derivado`) — **Dado** el documento creado sin
+/// frontmatter, **Cuando** se consulta el motor, **Entonces** el título derivado sale del primer H1
+/// o del nombre del fichero (`§20.4`).
+///
+/// **Nota del autor de tests**: el criterio nombra `knowledge_get`, pero `DocumentView`
+/// (`lodestar-app`) **no proyecta `title`** — no hay tal campo en su forma de wire. La superficie
+/// que sí expone el título derivado es `knowledge_search` (`SearchResult::title`, que llama a
+/// `model::derived_title`), así que el criterio se verifica por ahí y por `knowledge_get` se
+/// asevera lo que sí le corresponde: que el documento no tiene frontmatter que consultar. Si la
+/// historia quisiera el título en `knowledge_get`, sería una ampliación de `DocumentView` que su
+/// «Alcance» no pide (queda reportado).
+///
+/// Discriminador: el H1 (`Título del H1`) es DISTINTO del stem del fichero (`nueva`), y hoy el
+/// `title: nueva` inyectado gana la cadena de `derived_title` — o sea que el rojo es visible.
+#[test]
+fn create_sin_frontmatter_titulo_derivado() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    semilla(root);
+    let app = App::open(root).expect("el workspace temporal debe abrir");
+
+    // (a) Con H1: el título derivado es el H1, no el nombre del fichero.
+    crea_y_lee(
+        &app,
+        root,
+        json!({ "op": "create", "path": "notas/nueva.md",
+                "body": "# Título del H1\n\ncuerpo\n" }),
+    );
+    // (b) Sin cuerpo ni frontmatter: el título derivado cae al nombre del fichero.
+    crea_y_lee(
+        &app,
+        root,
+        json!({ "op": "create", "path": "notas/sin-cuerpo.md" }),
+    );
+
+    let resultados = app
+        .knowledge_search("", None, None, None, Some(100), None)
+        .expect("buscar sobre el workspace no debe fallar")
+        .results;
+    let titulo = |path: &str| -> String {
+        resultados
+            .iter()
+            .find(|r| r.path.as_str() == path)
+            .unwrap_or_else(|| {
+                panic!(
+                    "«{path}» debe aparecer en el inventario tras crearlo; resultados = {:?}",
+                    resultados
+                        .iter()
+                        .map(|r| r.path.as_str())
+                        .collect::<Vec<_>>()
+                )
+            })
+            .title
+            .clone()
+    };
+
+    assert_eq!(
+        titulo("notas/nueva.md"),
+        "Título del H1",
+        "sin frontmatter, el título derivado debe salir del primer H1 del cuerpo (§20.4), no de un \
+         `title` inyectado ni del nombre del fichero",
+    );
+    assert_eq!(
+        titulo("notas/sin-cuerpo.md"),
+        "sin-cuerpo",
+        "sin frontmatter y sin H1, el título derivado cae al nombre del fichero (§20.4)",
+    );
+
+    // Y `knowledge_get` confirma que no hay metadata que nadie pidió: el documento no trae
+    // frontmatter (o trae uno vacío), nunca `title`/`type`.
+    let vista = app
+        .knowledge_get(
+            &serde_json::from_value(json!({ "path": "notas/nueva.md" })).unwrap(),
+            &["frontmatter".to_string()],
+            None,
+        )
+        .expect("`knowledge_get` del documento creado no debe fallar");
+    let claves: Vec<String> = vista
+        .frontmatter
+        .as_ref()
+        .and_then(|v| v.as_mapping())
+        .map(|m| {
+            m.keys()
+                .filter_map(|k| k.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    assert!(
+        claves.is_empty(),
+        "el documento creado sin `frontmatter` no debe exponer ni una clave de metadata; \
+         claves = {claves:?}",
     );
 }
