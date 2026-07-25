@@ -39,6 +39,48 @@ fn politica_de_borrado_invalida(raw_ops: &Value) -> Option<String> {
     }
 }
 
+/// Schema de UNA operación de `change_plan.operations[]` — E23-H10.
+///
+/// Vive en su propia función por dos razones. La primera es mecánica: metido en el `json!` de
+/// [`list`] hacía saltar el límite de recursión del macro. La segunda importa más: es el documento
+/// que un cliente MCP lee para saber CÓMO escribir, así que merece estar donde se pueda revisar de
+/// un vistazo contra `normalize_raw_op` (`lodestar-app`), que es quien de verdad lee estos campos.
+///
+/// Hasta E23-H10 aquí solo se declaraban `op`/`path`/`ref`/`expectedRevision`: **ni uno** de los
+/// parámetros reales de 7 de las 8 operaciones. Para un producto cuyo público objetivo son agentes,
+/// era el mayor agujero de usabilidad de la superficie — el schema decía qué operaciones existen
+/// pero no cómo invocarlas, así que había que adivinar.
+///
+/// Se declaran **planas** (todas las propiedades juntas, cada una diciendo a qué op pertenece) en
+/// vez de con un `oneOf` por op: el servidor no valida contra este schema —es puramente
+/// declarativo— y un `oneOf` mal escrito confundiría al cliente sin que ningún test lo notara,
+/// mientras que la forma plana no puede rechazar una entrada válida.
+fn operacion_item_schema() -> Value {
+    json!({ "type": "object", "properties": {
+                     "op": { "type": "string", "enum": ["create", "patch_frontmatter", "replace_body", "replace_text", "edit_section", "move", "delete", "apply_fix"],
+                             "description": "Qué operación es. Determina qué otros campos se leen; los que no pertenecen a esta op se IGNORAN." },
+                     "path": { "type": "string", "description": "Ruta relativa del documento. Obligatoria en «create»; en «patch_frontmatter»/«replace_body»/«replace_text»/«edit_section»/«delete» es la alternativa corta a «ref.path» (se acepta cualquiera de las dos)." },
+                     "ref": { "type": "object", "description": "DocumentRef, alternativa a «path» en las ops que operan sobre un documento existente.",
+                              "properties": { "path": { "type": "string" } } },
+                     "expectedRevision": { "type": "string", "description": "DocumentRevision que el agente cree vigente («blake3:…»); si el documento cambió → REVISION_CONFLICT." },
+
+                     "frontmatter": { "type": "object", "description": "[create] Frontmatter YAML ARBITRARIO del documento nuevo. Opcional: sin él, el documento se crea SIN bloque de frontmatter (no uno vacío). Ninguna clave es obligatoria ni tiene semántica impuesta (§20.2 invariante 3); el título se DERIVA (frontmatter.title → primer H1 → nombre del fichero), no hace falta materializarlo." },
+                     "body": { "type": "string", "description": "[create, replace_body] Cuerpo Markdown (sin el bloque de frontmatter). En «create» es opcional: sin él se genera un heading con el título derivado. En «replace_body» sustituye el cuerpo entero conservando el frontmatter existente —incluida su AUSENCIA: un documento sin bloque no gana uno." },
+                     "patch": { "type": "object", "description": "[patch_frontmatter] Merge-patch RFC 7386 sobre el frontmatter: una clave con valor la fija, una clave con «null» la BORRA, y lo que no se menciona sobrevive byte a byte (patch quirúrgico, E16-H04). Sobre un frontmatter ilegible la operación falla en vez de reescribirlo encima." },
+                     "find": { "type": "string", "description": "[replace_text] Texto literal a buscar (no es una regex). Solo se busca en el CUERPO, nunca en el frontmatter." },
+                     "replace": { "type": "string", "description": "[replace_text] Texto literal de sustitución. Se sustituyen TODAS las ocurrencias." },
+                     "expectedOccurrences": { "type": "integer", "minimum": 0, "description": "[replace_text] Si se indica y el nº real de ocurrencias no coincide, la operación falla en vez de aplicar un cambio distinto del que el agente creía." },
+                     "headingPath": { "type": "array", "items": { "type": "string" }, "description": "[edit_section] Ruta de headings hasta la sección, p. ej. [\"Seguridad\",\"Rotación de tokens\"]. Si no existe → DOCUMENT_NOT_FOUND." },
+                     "mode": { "type": "string", "enum": ["replace", "append", "prepend"], "default": "replace", "description": "[edit_section] Qué hacer con «content» respecto al contenido actual de la sección." },
+                     "content": { "type": "string", "description": "[edit_section] Contenido Markdown de la sección." },
+                     "from": { "type": "string", "description": "[move] Ruta actual del documento." },
+                     "to": { "type": "string", "description": "[move] Ruta destino. Los enlaces relativos SALIENTES del propio documento se recalculan solos desde la ubicación nueva (E23-H03)." },
+                     "rewriteInboundLinks": { "type": "boolean", "default": false, "description": "[move] Si true, reescribe además los enlaces ENTRANTES de todos los documentos que apuntan al movido (incluidas las definiciones de referencia), en la misma transacción. Con false los backlinks quedan apuntando a la ruta vieja y se rompen: actívalo salvo que sepas lo que haces." },
+                     "inboundLinksPolicy": { "type": "string", "enum": ["reject", "remove_links"], "description": "[delete] Qué hacer con los enlaces entrantes. OBLIGATORIO cuando el documento tiene backlinks (§20.11 prohíbe elegir en silencio); sin backlinks no hay nada que decidir y puede omitirse. «reject» = fallar con INBOUND_LINKS_EXIST; «remove_links» = desenlazar en los emisores dejando su texto plano. («retarget» y «create_stub» se RETIRARON en E23-H05: se aceptaban sin ejecutarse.)" },
+                     "fixId": { "type": "string", "description": "[apply_fix] Identificador del arreglo sugerido por un diagnóstico. AVISO: hoy ningún diagnóstico produce «fixes», así que esta op siempre falla con DOCUMENT_NOT_FOUND." }
+                 }, "required": ["op"] })
+}
+
 /// Lista las tools con descripción e `inputSchema` (obligatorio en el spec MCP: sin él,
 /// los clientes conformes rechazan la tool o el modelo no sabe qué argumentos pasar).
 pub fn list() -> Value {
@@ -121,21 +163,22 @@ pub fn list() -> Value {
         {"name": "change_plan", "description": "Planifica un cambio complejo SIN escribir: normaliza las operaciones propuestas, simula su aplicación en memoria y valida el resultado. Devuelve un único change set (normalizedOperations, semanticDiff, risk, impact, diagnosticsBefore/After) con un planHash determinista. No toca disco (aplicar es change_apply, E13).",
          "inputSchema": { "type": "object", "properties": {
              "expectedWorkspaceRevision": { "type": "string", "description": "Control optimista a nivel de workspace («blake3:…»). Si se omite, se toma la revisión actual; si no coincide → REVISION_CONFLICT." },
-             "operations": { "type": "array", "description": "Operaciones propuestas, discriminadas por «op»; las 8 universales (§20.11): create/patch_frontmatter/replace_body/replace_text/edit_section/move/delete/apply_fix. Cada op puede llevar «expectedRevision» (DocumentRevision «blake3:…») para control optimista por documento.",
-                 "items": { "type": "object", "properties": {
-                     "op": { "type": "string", "enum": ["create", "patch_frontmatter", "replace_body", "replace_text", "edit_section", "move", "delete", "apply_fix"] },
-                     "path": { "type": "string" },
-                     "ref": { "type": "object", "properties": { "path": { "type": "string" } } },
-                     "expectedRevision": { "type": "string", "description": "DocumentRevision que el agente cree vigente («blake3:…»); si el documento cambió → REVISION_CONFLICT." }
-                 }, "required": ["op"] } },
+             "operations": { "type": "array", "description": "Operaciones propuestas, discriminadas por «op»; las 8 universales (§20.11). Cada entrada lleva «op» más los parámetros de ESA op (declarados abajo, cada uno indica a cuál pertenece), y opcionalmente «expectedRevision» para control optimista por documento.",
+                 "items": operacion_item_schema() },
              "selection": { "type": "object", "description": "Selección MASIVA por consulta (§20.11, alternativa a «operations»): «where» (lenguaje textual) o «filter» (JSON), como en knowledge_search. Requiere «operation».", "properties": {
                  "where": { "type": "string" },
                  "filter": { "type": "object" }
              } },
-             "operation": { "type": "object", "description": "La operación a expandir sobre cada documento que casa la «selection», con el tipo como CLAVE (p. ej. {\"patch_frontmatter\": {\"status\": \"review\"}}). Solo las que tienen sentido en masa: patch_frontmatter/replace_text/delete/apply_fix." },
+             "operation": { "type": "object", "description": "La operación a expandir sobre cada documento que casa la «selection», con el tipo como CLAVE y sus parámetros como valor (p. ej. {\"patch_frontmatter\": {\"status\": \"review\"}}). Los parámetros son los mismos que en «operations», sin repetir «op» ni el path (lo pone la selección). Solo las que tienen sentido en masa: patch_frontmatter/replace_text/delete/apply_fix.",
+                 "properties": {
+                     "patch_frontmatter": { "type": "object", "description": "El merge-patch a aplicar a cada documento seleccionado (mismo formato que «patch»)." },
+                     "replace_text": { "type": "object", "description": "{find, replace, expectedOccurrences?} como en la op suelta." },
+                     "delete": { "type": "object", "description": "{inboundLinksPolicy} como en la op suelta." },
+                     "apply_fix": { "type": "object", "description": "{fixId} como en la op suelta." }
+                 } },
              "policy": { "type": "object", "description": "Política de aplicación del plan.", "properties": {
-                 "requireValidResult": { "type": "boolean", "description": "Si true, un resultado no conforme bloquea canApply." },
-                 "allowWarnings": { "type": "boolean", "description": "Si false, cualquier warning bloquea canApply." }
+                 "requireValidResult": { "type": "boolean", "default": true, "description": "Si true (por defecto), un resultado NO VÁLIDO bloquea canApply." },
+                 "allowWarnings": { "type": "boolean", "default": true, "description": "Si false, cualquier warning bloquea canApply." }
              } }
          }, "additionalProperties": false },
          "outputSchema": schemas::change_plan_schema()},
