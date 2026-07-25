@@ -1197,8 +1197,8 @@ pub enum ErrorCode {
     PermissionDenied,
     #[serde(rename = "INVALID_SCHEMA")]
     InvalidSchema,
-    #[serde(rename = "NONCONFORMANT_RESULT")]
-    NonconformantResult,
+    #[serde(rename = "INVALID_RESULT")]
+    InvalidResult,
     #[serde(rename = "INBOUND_LINKS_EXIST")]
     InboundLinksExist,
     #[serde(rename = "RELATION_CONSTRAINT_VIOLATION")]
@@ -1228,7 +1228,7 @@ impl ErrorCode {
             ErrorCode::PlanExpired => "PLAN_EXPIRED",
             ErrorCode::PermissionDenied => "PERMISSION_DENIED",
             ErrorCode::InvalidSchema => "INVALID_SCHEMA",
-            ErrorCode::NonconformantResult => "NONCONFORMANT_RESULT",
+            ErrorCode::InvalidResult => "INVALID_RESULT",
             ErrorCode::InboundLinksExist => "INBOUND_LINKS_EXIST",
             ErrorCode::RelationConstraintViolation => "RELATION_CONSTRAINT_VIOLATION",
             ErrorCode::WriteConflict => "WRITE_CONFLICT",
@@ -1343,11 +1343,11 @@ pub struct ValidationSummary {
 schema_derive! {
 /// Veredicto de conformidad del workspace hipotético resultante de un `ChangeSet` (E12-H04 lo
 /// calcula sobre `analyze()`; aquí solo la forma). `Default` = conformidad vacía (sin
-/// diagnósticos, `conformant: false` — coherente con "nada analizado todavía").
+/// diagnósticos, `valid: false` — coherente con "nada analizado todavía").
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct ValidationReport {
-    pub conformant: bool,
+    pub valid: bool,
     pub summary: ValidationSummary,
     pub diagnostics: Vec<Check>,
 }

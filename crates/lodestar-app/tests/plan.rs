@@ -80,7 +80,7 @@ fn una_operacion() -> serde_json::Value {
 /// se produce con éxito (el criterio no depende del veredicto de conformidad).
 fn policy_permisiva() -> PlanPolicy {
     PlanPolicy {
-        require_conformant_result: false,
+        require_valid_result: false,
         allow_warnings: true,
     }
 }

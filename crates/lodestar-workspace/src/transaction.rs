@@ -93,7 +93,7 @@ impl Workspace {
     ///   del plan cambió entre plan y apply (E13-H02).
     /// - [`WorkspaceError::PermissionDenied`] si algún path afectado cae fuera de `writableRoots` o
     ///   bajo un `referenceRoot` (E11-H04) — comprobado **antes** de tocar el canónico.
-    /// - [`WorkspaceError::NonconformantResult`] si el resultado hipotético no es conforme (E13-H01).
+    /// - [`WorkspaceError::InvalidResult`] si el resultado hipotético no es conforme (E13-H01).
     /// - [`WorkspaceError::WorkspaceRecoveryRequired`] si una recuperación pendiente no se pudo
     ///   completar antes de publicar.
     /// - [`WorkspaceError::Core`]/[`WorkspaceError::Io`] ante un fallo de normalización o de IO.

@@ -1363,19 +1363,19 @@ fn diff_introduce_diagnostico() {
 //     pub fn validate_result(doc_set: &DocumentSet, schema: &Schema) -> ValidationReport
 //
 //     pub struct PlanPolicy {
-//         pub require_conformant_result: bool,  // wire `requireConformantResult`
+//         pub require_valid_result: bool,  // wire `requireValidResult`
 //         pub allow_warnings: bool,             // wire `allowWarnings`
 //     }
 //     pub fn can_apply(report: &ValidationReport, policy: &PlanPolicy) -> bool
 //
 // Semántica ASUMIDA (spec E12-H04, `REFACTOR §11.1`):
 //   - `validate_result` compone `analyze()` + `validate_schema` + `validate_relations` sobre el
-//     `DocumentSet` hipotético; `summary` cuenta Err/Warn/Info; `conformant = (summary.errors == 0)`;
+//     `DocumentSet` hipotético; `summary` cuenta Err/Warn/Info; `valid = (summary.errors == 0)`;
 //     `diagnostics` acumula los `Check`.
-//   - `can_apply`: si `require_conformant_result` y NO conforme → false; si `!allow_warnings` y hay
+//   - `can_apply`: si `require_valid_result` y NO conforme → false; si `!allow_warnings` y hay
 //     warnings → false; en otro caso → true.
 //
-// El tipo `ValidationReport { conformant, summary{errors,warnings,info}, diagnostics }` (E12-H01)
+// El tipo `ValidationReport { valid, summary{errors,warnings,info}, diagnostics }` (E12-H01)
 // ya existe en `core::types`. Hasta que E12-H04 defina `validate_result`/`can_apply`/`PlanPolicy`,
 // estos dos tests hacen ROJO por SÍMBOLO AUSENTE (compile-fail: `plan::validate_result`,
 // `plan::can_apply` y `plan::PlanPolicy` no existen), lo que impide compilar el binario de tests
@@ -1386,8 +1386,8 @@ fn diff_introduce_diagnostico() {
 
 /// Criterio `plan_no_conforme_rechaza` (RECOMPUESTO E20-H03): **Dado** un plan cuyo resultado
 /// introduce un `Err` (un documento con un enlace a un `.md` inexistente → `LINK-TARGET-MISSING`/Err,
-/// código vivo que sustituye a `SCHEMA-REQFIELD`) y `policy.requireConformantResult:true`, **Cuando**
-/// se valida, **Entonces** `conformant:false` y el plan NO es aplicable (`can_apply == false`).
+/// código vivo que sustituye a `SCHEMA-REQFIELD`) y `policy.requireValidResult:true`, **Cuando**
+/// se valida, **Entonces** `valid:false` y el plan NO es aplicable (`can_apply == false`).
 /// (Benchmark §17: "un resultado no conforme → plan rechazado".)
 #[test]
 fn plan_no_conforme_rechaza() {
@@ -1418,24 +1418,24 @@ fn plan_no_conforme_rechaza() {
         report.summary,
     );
     assert!(
-        !report.conformant,
-        "con errores el resultado NO es conforme (`conformant == false`); report = {:?}",
+        !report.valid,
+        "con errores el resultado NO es conforme (`valid == false`); report = {:?}",
         report,
     );
 
     let policy = PlanPolicy {
-        require_conformant_result: true,
+        require_valid_result: true,
         allow_warnings: true,
     };
     assert!(
         !can_apply(&report, &policy),
-        "con `requireConformantResult:true` y resultado no conforme, el plan NO es aplicable",
+        "con `requireValidResult:true` y resultado no conforme, el plan NO es aplicable",
     );
 }
 
 /// Criterio `plan_warnings_permitido`: **Dado** un plan con SOLO warnings (ningún `Err`) y
 /// `allowWarnings:true`, **Cuando** se valida, **Entonces** el resultado es conforme
-/// (`conformant:true`, 0 errores, `summary.warnings >= 1`) y el plan es aplicable
+/// (`valid:true`, 0 errores, `summary.warnings >= 1`) y el plan es aplicable
 /// (`can_apply == true`).
 #[test]
 fn plan_warnings_permitido() {
@@ -1469,13 +1469,13 @@ fn plan_warnings_permitido() {
         report.summary,
     );
     assert!(
-        report.conformant,
-        "sin errores el resultado es conforme (`conformant == true`); report = {:?}",
+        report.valid,
+        "sin errores el resultado es conforme (`valid == true`); report = {:?}",
         report,
     );
 
     let policy = PlanPolicy {
-        require_conformant_result: true,
+        require_valid_result: true,
         allow_warnings: true,
     };
     assert!(
@@ -1495,7 +1495,7 @@ fn plan_warnings_permitido() {
         !can_apply(
             &con_warnings,
             &PlanPolicy {
-                require_conformant_result: true,
+                require_valid_result: true,
                 allow_warnings: false,
             }
         ),
@@ -2265,7 +2265,7 @@ fn raw_tras_aplicar(antes: &FileMap, ops: &[NormalizedOperation], path: &RelPath
 }
 
 /// Los diagnósticos de severidad `Err` de un `FileMap` ya modificado — el universo que hace que
-/// `change_plan` diga `canApply:false` y que `change_apply` responda `NONCONFORMANT_RESULT`.
+/// `change_plan` diga `canApply:false` y que `change_apply` responda `INVALID_RESULT`.
 fn errores_de(files: &FileMap) -> Vec<Check> {
     DocumentSet::from_files(files.clone())
         .analyze()

@@ -23,9 +23,9 @@ pub enum WorkspaceError {
     /// `§20.9`): con `rejectNewErrors` introduciría errores que el canónico no tenía, o con
     /// `allowExistingErrors: false` el resultado deja errores. La validación aborta sin tocar el
     /// canónico y limpia el staging; el `String` describe el motivo concreto (errores nuevos / total).
-    /// Mapea al wire `NONCONFORMANT_RESULT`.
+    /// Mapea al wire `INVALID_RESULT`.
     #[error("el resultado del plan no pasa la política de cambios: {0}")]
-    NonconformantResult(String),
+    InvalidResult(String),
     /// Conflicto de escritura optimista (E13-H02, [`crate::Workspace::reverify_base_revision`]):
     /// la [`lodestar_core::types::WorkspaceRevision`] del conocimiento escribible cambió entre que
     /// se planificó (`baseWorkspaceRevision`) y el momento del apply — otro escritor (humano,
@@ -55,7 +55,7 @@ impl WorkspaceError {
             WorkspaceError::NoCache => "NO_CACHE",
             WorkspaceError::Store(_) => "STORE",
             WorkspaceError::PermissionDenied(_) => "PERMISSION_DENIED",
-            WorkspaceError::NonconformantResult(_) => "NONCONFORMANT_RESULT",
+            WorkspaceError::InvalidResult(_) => "INVALID_RESULT",
             WorkspaceError::WriteConflict(_) => "WRITE_CONFLICT",
             WorkspaceError::WorkspaceRecoveryRequired(_) => "WORKSPACE_RECOVERY_REQUIRED",
         }

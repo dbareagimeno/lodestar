@@ -16,7 +16,7 @@
 //!     E20-H03 con un código vivo (`LINK-TARGET-MISSING` por un enlace roto, ya que `SCHEMA-REQFIELD`
 //!     se retiró). El motor lo materializa en DOS superficies: `change_plan` devuelve `canApply:false`
 //!     con `diagnosticsAfter.errors>=1`, y `change_apply` lo rechaza en el staging con
-//!     **`NONCONFORMANT_RESULT`** (E14-H04). Se aseveran ambas.
+//!     **`INVALID_RESULT`** (E14-H04). Se aseveran ambas.
 //!   - Escenario 5 (borrar referenciado): §17 dice «Rechazo con blockers». El motor emite
 //!     **`INBOUND_LINKS_EXIST`** al normalizar un `delete` con política `Reject` (los enlaces
 //!     entrantes SON los blockers).
@@ -30,7 +30,7 @@
 //!     `externalReference` con **`exists:false`** (el check `EXTREF-MISSING` es de la workspace, no
 //!     lo fusiona `knowledge_check`; su superficie e2e es `knowledge_get(include:[externalReferences])`).
 //!   - Escenario 15 (Markdown inválido a mano): el check **`OKF-TYPE`** (hard-fail) vía
-//!     `knowledge_check` scope workspace, `conformant:false`.
+//!     `knowledge_check` scope workspace, `valid:false`.
 //!
 //! ## Escenario 12 (crash durante publicación)
 //! La PRUEBA AUTORITATIVA de recuperación determinista es el property test
@@ -124,12 +124,12 @@ fn es_error_con(resp: &Value, code: &str) -> bool {
 
 /// Política permisiva: no exige resultado conforme, admite warnings.
 fn policy_permisiva() -> Value {
-    json!({ "requireConformantResult": false, "allowWarnings": true })
+    json!({ "requireValidResult": false, "allowWarnings": true })
 }
 
 /// Política estricta: exige resultado conforme (para probar «plan rechazado»).
 fn policy_estricta() -> Value {
-    json!({ "requireConformantResult": true, "allowWarnings": true })
+    json!({ "requireValidResult": true, "allowWarnings": true })
 }
 
 /// Línea `change_plan` con `operations`/`policy`.
@@ -373,7 +373,7 @@ fn escenario_02_crear_valido() {
 // documento lleva un enlace a un `.md` inexistente ⇒ `LINK-TARGET-MISSING` (Err) ⇒ resultado no
 // conforme. Dos superficies deben rechazarlo:
 //   (1) change_plan: canApply:false + diagnosticsAfter.errors>=1 (usa `plan::validate_result`).
-//   (2) change_apply: NONCONFORMANT_RESULT y no escribe (gate de `validate_staging`, E14-H04).
+//   (2) change_apply: INVALID_RESULT y no escribe (gate de `validate_staging`, E14-H04).
 // ===========================================================================
 fn escenario_03_crear_no_conforme() {
     let dir = workspace_min();
@@ -408,8 +408,8 @@ fn escenario_03_crear_no_conforme() {
     //     escrito en el canónico (gate de `validate_staging`, invariante #3).
     let applied = roundtrip(dir.path(), &[change_apply_line(2, &id)], 1);
     assert!(
-        es_error_con(&applied[0], "NONCONFORMANT_RESULT"),
-        "change_apply debe rechazar un create no conforme con NONCONFORMANT_RESULT: {applied:?}"
+        es_error_con(&applied[0], "INVALID_RESULT"),
+        "change_apply debe rechazar un create no conforme con INVALID_RESULT: {applied:?}"
     );
     assert!(
         !dir.path().join("dec.md").exists(),
@@ -736,7 +736,7 @@ fn escenario_12_crash_recuperacion() {
         "el .md publicado debe persistir íntegro tras reabrir: {contenido:?}"
     );
     assert_eq!(
-        sc(&post[1])["conformant"],
+        sc(&post[1])["valid"],
         Value::Bool(true),
         "el workspace recuperado debe quedar conforme (sin parciales): {post:?}"
     );
@@ -896,7 +896,7 @@ fn escenario_15_editar_markdown_invalido() {
         "el diagnóstico de frontmatter ilegible debe acotar las líneas del bloque: {resp:?}"
     );
     assert_eq!(
-        sc(&resp[0])["conformant"],
+        sc(&resp[0])["valid"],
         Value::Bool(false),
         "un frontmatter inválido debe dejar el workspace NO conforme: {resp:?}"
     );
@@ -977,7 +977,7 @@ fn bench_15_editar_markdown_invalido() {
 //
 // Síntoma reproducido con los binarios: con `notas/alfa.md` que contiene `[b]: beta.md` y
 // `notas/beta.md` existente, planificar el move a `archivo/alfa.md` da `canApply:false` con
-// `diagnosticsAfter.errors:1` y el apply falla con `NONCONFORMANT_RESULT` — el documento movido se
+// `diagnosticsAfter.errors:1` y el apply falla con `INVALID_RESULT` — el documento movido se
 // lleva sus hrefs relativos escritos para la ubicación VIEJA.
 //
 // ROJO esperado HOY: por ASERCIÓN (`canApply` es `false`, así que el test se para en el plan).
@@ -1054,10 +1054,7 @@ fn workspace_conforme(dir: &std::path::Path) -> (bool, Value) {
         )],
         1,
     );
-    (
-        sc(&resp[0])["conformant"] == Value::Bool(true),
-        resp[0].clone(),
-    )
+    (sc(&resp[0])["valid"] == Value::Bool(true), resp[0].clone())
 }
 
 /// Lee un `.md` publicado (falla con un mensaje claro si no existe).

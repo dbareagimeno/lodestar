@@ -241,8 +241,8 @@ fn check_key(c: &Check) -> (Vec<RelPath>, CheckCode, String) {
 ///
 /// Reusa `all_checks` (el mismo universo de diagnósticos que `semantic_diff` y `lodestar
 /// check`: los diagnósticos de `DocumentSet::analyze` (`§20.9`), sin `Severity::Pass`). `summary`
-/// cuenta por severidad; `conformant` se computa explícitamente como `summary.errors == 0` (no se
-/// reusa `ValidationSummary::default().conformant`, que sería `false` por defecto — aquí "conforme"
+/// cuenta por severidad; `valid` se computa explícitamente como `summary.errors == 0` (no se
+/// reusa `ValidationSummary::default().valid`, que sería `false` por defecto — aquí "conforme"
 /// significa "sin errores duros", con o sin warnings).
 pub fn validate_result(doc_set: &DocumentSet) -> ValidationReport {
     let diagnostics = all_checks(doc_set);
@@ -258,19 +258,19 @@ pub fn validate_result(doc_set: &DocumentSet) -> ValidationReport {
     }
 
     ValidationReport {
-        conformant: summary.errors == 0,
+        valid: summary.errors == 0,
         summary,
         diagnostics,
     }
 }
 
 /// Política de aplicación de un plan — E12-H04. Wire camelCase
-/// (`requireConformantResult`/`allowWarnings`) por coherencia con el resto del contrato de plan.
+/// (`requireValidResult`/`allowWarnings`) por coherencia con el resto del contrato de plan.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PlanPolicy {
-    /// Si `true`, un [`ValidationReport`] no conforme (`conformant == false`) bloquea `can_apply`.
-    pub require_conformant_result: bool,
+    /// Si `true`, un [`ValidationReport`] no conforme (`valid == false`) bloquea `can_apply`.
+    pub require_valid_result: bool,
     /// Si `false`, cualquier warning (`summary.warnings > 0`) bloquea `can_apply`, incluso con
     /// resultado conforme.
     pub allow_warnings: bool,
@@ -281,17 +281,17 @@ impl Default for PlanPolicy {
     /// avisos, solo por errores duros).
     fn default() -> Self {
         Self {
-            require_conformant_result: true,
+            require_valid_result: true,
             allow_warnings: true,
         }
     }
 }
 
 /// Decide si un plan cuyo resultado hipotético dio `report` es aplicable bajo `policy` —
-/// E12-H04. `false` si `policy.require_conformant_result` y `!report.conformant`; `false` si
+/// E12-H04. `false` si `policy.require_valid_result` y `!report.valid`; `false` si
 /// `!policy.allow_warnings` y `report.summary.warnings > 0`; `true` en cualquier otro caso.
 pub fn can_apply(report: &ValidationReport, policy: &PlanPolicy) -> bool {
-    if policy.require_conformant_result && !report.conformant {
+    if policy.require_valid_result && !report.valid {
         return false;
     }
     if !policy.allow_warnings && report.summary.warnings > 0 {

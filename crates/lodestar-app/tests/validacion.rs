@@ -36,7 +36,7 @@
 //!   por defecto (`Warn`) ya pasa hoy y es el control anti-vacuidad **dentro** del mismo test.
 //! - `apply_sobre_errores_previos` — **ROJO**: hoy el gate rechaza **cualquier** resultado con
 //!   errores (`validate_staging` exige `errors == 0`), así que una reparación parcial sobre un
-//!   workspace que ya tenía un enlace roto se rechaza con `NONCONFORMANT_RESULT`. El test espera que
+//!   workspace que ya tenía un enlace roto se rechaza con `INVALID_RESULT`. El test espera que
 //!   el apply se **permita**.
 //! - `rechaza_errores_nuevos` — **GUARDA (verde hoy)**: introducir un error nuevo debe rechazarse, y
 //!   el gate absoluto de hoy ya lo rechaza (por la razón «hay errores», no por «hay errores
@@ -77,7 +77,7 @@ fn escribe(root: &Path, rel: &str, contenido: &str) {
 /// `change_plan`. Sin esto un plan podría marcarse no-aplicable por una razón distinta de la fijada.
 fn policy_permisiva() -> PlanPolicy {
     PlanPolicy {
-        require_conformant_result: false,
+        require_valid_result: false,
         allow_warnings: true,
     }
 }
@@ -251,7 +251,7 @@ fn severidad_configurable_por_defecto_es_warning() {
         resumen(&report)
     );
     assert!(
-        report.conformant,
+        report.valid,
         "por defecto (colisión = aviso) el workspace es conforme"
     );
 }
@@ -295,7 +295,7 @@ fn severidad_configurable() {
         resumen(&report)
     );
     assert!(
-        !report.conformant,
+        !report.valid,
         "con la colisión elevada a error, el workspace deja de ser conforme"
     );
 }
@@ -347,8 +347,8 @@ fn planifica_y_aplica(app: &App, ops: &Value) -> Result<lodestar_app::ApplyResul
 /// «el error desaparece» sino «el apply se **permite** pese al error preexistente».
 ///
 /// ROJO hoy: `Workspace::validate_staging` rechaza cualquier resultado con `errors > 0`
-/// (`conformant == errors == 0`). Como `roto.md` sigue roto en el árbol resultante, hoy el apply se
-/// rechaza con `NONCONFORMANT_RESULT`; este test espera `Ok`.
+/// (`valid == errors == 0`). Como `roto.md` sigue roto en el árbol resultante, hoy el apply se
+/// rechaza con `INVALID_RESULT`; este test espera `Ok`.
 #[test]
 fn apply_sobre_errores_previos() {
     let dir = tempfile::tempdir().unwrap();
@@ -444,8 +444,8 @@ fn rechaza_errores_nuevos() {
     };
     assert_eq!(
         err,
-        ErrorCode::NonconformantResult,
-        "introducir un error nuevo debe rechazarse con NONCONFORMANT_RESULT; era: {} ({err:?})",
+        ErrorCode::InvalidResult,
+        "introducir un error nuevo debe rechazarse con INVALID_RESULT; era: {} ({err:?})",
         err.as_str()
     );
 
@@ -467,7 +467,7 @@ fn rechaza_errores_nuevos() {
 // Este test es su complemento en esta capa y fija DÓNDE vive la corrección: en
 // `App::full_analysis()` —el punto que comparten `lodestar check` y cualquier futura fachada—, no en
 // `commands.rs`. El alcance de la historia lo dice explícitamente: «`commands.rs` no cambia de
-// forma: sigue derivando `conformant` de la ausencia de `Err`, pero sobre el análisis correcto».
+// forma: sigue derivando `valid` de la ausencia de `Err`, pero sobre el análisis correcto».
 // Sin este test, un parche que recompusiera la política dentro de la CLI pasaría los tests de
 // `cli.rs` y dejaría la asimetría intacta para el siguiente consumidor.
 // ===========================================================================

@@ -273,7 +273,7 @@ Pendientes de priorización (no bloquean el núcleo):
   romper el wire, porque el tipo viaja en `value_type` (`§20.12`). Se hará si aparece un caso real
   con formatos mixtos, no antes.
 
-## 13. `Conformant → Valid`: la mitad que falta de `§20.3` — 🟠 APLAZADA (revisada en E21-H04)
+## 13. `Conformant → Valid`: la mitad que falta de `§20.3` — ✅ CERRADA en (a) (E23-H14)
 
 - **Contexto** (detectado al implementar E16-H06): la tabla de terminología de `§20.3` manda dos
   sustituciones emparejadas, `Conformance → Validation` y `Conformant → Valid`. La primera está
@@ -305,6 +305,24 @@ Pendientes de priorización (no bloquean el núcleo):
   el catálogo de errores; hasta entonces `conformant`/`NONCONFORMANT_RESULT` se conservan tal cual y
   su presencia en la superficie activa de `mcp.yml` es **deuda documentada**, no una discrepancia de
   contrato.
+- **Resolución (E23-H14, 2026-07-25): (a)**, decidida por el usuario. Se abre el catálogo de 16
+  códigos —**la única vez**— porque el momento es ahora o nunca: v0.3.0 ya es incompatible con
+  v0.2.x, así que romper el wire cuesta **cero** hoy y deja de costarlo en cuanto se publique. Y
+  porque era el **único** de los 29 criterios de aceptación de `REFACTOR_PHASE_2` demostrablemente
+  incumplido: *«no existe terminología OKF en la API pública»*.
+  Renombres aplicados (69 apariciones en 12 ficheros de producción + 16 de test):
+  `conformant` → `valid` · `requireConformantResult` → `requireValidResult` · `allowNonconformant`
+  → `allowInvalid` · `NONCONFORMANT_RESULT` → `INVALID_RESULT` ·
+  `ErrorCode::NonconformantResult` → `ErrorCode::InvalidResult` ·
+  `WorkspaceError::NonconformantResult` → `WorkspaceError::InvalidResult`. El catálogo **sigue
+  teniendo 16 filas**: se sustituye una, no se añade ninguna.
+  También la salida humana de `lodestar check`: `CONFORME`/`NO CONFORME` → `VÁLIDO`/`NO VÁLIDO`. No
+  lo exigía la tabla de `§20.3` —que habla de la API—, pero es la aparición más visible del término
+  retirado: la línea que un humano lee en cada ejecución de CI.
+  **No se tocaron** los documentos históricos (`docs/REFACTOR.md`,
+  `docs/REFACTOR_DISENO_PROPUESTA.md`) ni las tablas de terminología que **documentan el propio
+  renombre** (`§20.3`, `REFACTOR_PHASE_2 §Terminología`): ahí `Conformant` es el término de partida
+  y sustituirlo las dejaría diciendo «Valid → Valid».
 
 ## 14. El store (épica E18) no tiene ningún consumidor — 🟠 ABIERTA (E23-H16)
 

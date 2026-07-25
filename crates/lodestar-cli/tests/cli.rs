@@ -87,10 +87,10 @@ fn check_json_es_valido() {
     assert!(v.get("documents").is_some());
     // MIGRADO en E17-H04: el wire del `Analysis` son los SEIS campos de `§20.7` y ninguno es un
     // contador — `hardFail`/`warnCount` pasaron a métodos derivados de `diagnostics`. El veredicto
-    // que consume CI sigue viajando aparte, en `conformant` (lo añade la CLI).
+    // que consume CI sigue viajando aparte, en `valid` (lo añade la CLI).
     assert!(v.get("diagnostics").is_some(), "wire camelCase");
     assert!(v.get("outgoing").is_some() && v.get("incoming").is_some());
-    assert_eq!(v.get("conformant"), Some(&serde_json::Value::Bool(true)));
+    assert_eq!(v.get("valid"), Some(&serde_json::Value::Bool(true)));
     assert!(
         v.get("hardFail").is_none() && v.get("warnCount").is_none() && v.get("perFile").is_none(),
         "los campos retirados no reaparecen en el wire: {v}"
@@ -243,7 +243,7 @@ fn check_falla() {
 }
 
 /// E14-H01 `check_conforme_json`: **Dado** un workspace conforme, **Cuando** se corre
-/// `lodestar check --json`, **Entonces** exit `0` y JSON con `conformant: true`. El documento no
+/// `lodestar check --json`, **Entonces** exit `0` y JSON con `valid: true`. El documento no
 /// tiene enlaces rotos ni ningún otro hard-fail, así que el motor da veredicto conforme.
 #[test]
 fn check_conforme_json() {
@@ -269,9 +269,9 @@ fn check_conforme_json() {
     assert_eq!(out.status.code(), Some(0), "workspace conforme → exit 0");
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(
-        v.get("conformant").and_then(serde_json::Value::as_bool),
+        v.get("valid").and_then(serde_json::Value::as_bool),
         Some(true),
-        "el JSON de `check` debe exponer el veredicto `conformant: true` (mismo motor que knowledge_check)"
+        "el JSON de `check` debe exponer el veredicto `valid: true` (mismo motor que knowledge_check)"
     );
 }
 
@@ -835,7 +835,7 @@ fn migrate_sin_dry_run_es_uso() {
 // SÍNTOMA REPRODUCIDO (no deducido): con `.lodestar/config.yaml` →
 // `validation: {danglingDocumentLinks: ignore, malformedFrontmatter: ignore}` sobre un workspace con
 // un enlace roto y un YAML ilegible, `lodestar check` imprime `NO CONFORME` y sale **1** mientras que
-// `knowledge_check` responde `conformant: true` con `summary.errors: 0`. Dos veredictos
+// `knowledge_check` responde `valid: true` con `summary.errors: 0`. Dos veredictos
 // contradictorios sobre el MISMO workspace, con el mismo motor debajo.
 //
 // CAUSA: `App::full_analysis()` va por `document_set().analyze()` a secas —sin la política de
@@ -936,13 +936,13 @@ fn codigos_del_json(v: &serde_json::Value) -> Vec<String> {
 /// **Dado** un workspace con un enlace roto y un YAML ilegible, con
 /// `validation: {danglingDocumentLinks: ignore, malformedFrontmatter: ignore}`, **Cuando** se corre
 /// `lodestar check` y se llama a `knowledge_check(scope: workspace)`, **Entonces** ambos dicen
-/// **conforme** (exit 0 / `conformant: true`).
+/// **conforme** (exit 0 / `valid: true`).
 ///
 /// ROJO hoy (reproducido con los binarios, no deducido): `knowledge_check` ya responde
-/// `conformant: true` con `errors: 0` —aplica `ValidationSection::effective_severity`, que suprime
-/// las dos familias puestas a `ignore`—, pero `lodestar check` sale **1** con `conformant: false`,
+/// `valid: true` con `errors: 0` —aplica `ValidationSection::effective_severity`, que suprime
+/// las dos familias puestas a `ignore`—, pero `lodestar check` sale **1** con `valid: false`,
 /// porque `App::full_analysis()` va por `document_set().analyze()` a secas y ve las severidades
-/// intrínsecas. La aserción que falla es la del exit code / `conformant` de la CLI.
+/// intrínsecas. La aserción que falla es la del exit code / `valid` de la CLI.
 #[test]
 fn check_y_knowledge_check_coinciden_con_ignore() {
     let dir = temp_dir("h01-coinciden-ignore");
@@ -963,7 +963,7 @@ fn check_y_knowledge_check_coinciden_con_ignore() {
         resumen_reporte(&report)
     );
     assert!(
-        report.conformant,
+        report.valid,
         "precondición del síntoma: knowledge_check debe declarar el workspace conforme con las dos \
          familias a `ignore`. Diagnósticos: [{}]",
         resumen_reporte(&report)
@@ -980,9 +980,9 @@ fn check_y_knowledge_check_coinciden_con_ignore() {
         codigos_del_json(&json)
     );
     assert_eq!(
-        json.get("conformant").and_then(serde_json::Value::as_bool),
+        json.get("valid").and_then(serde_json::Value::as_bool),
         Some(true),
-        "el `conformant` del `check --json` debe coincidir con el de knowledge_check (true): {json}"
+        "el `valid` del `check --json` debe coincidir con el de knowledge_check (true): {json}"
     );
     // Y los diagnósticos suprimidos tampoco deben viajar en la salida: una familia a `ignore` no se
     // reporta (`§20.9`), ni siquiera como informativa.
@@ -998,10 +998,10 @@ fn check_y_knowledge_check_coinciden_con_ignore() {
 
 /// **E23-H01** · Criterio `check_y_knowledge_check_coinciden_con_error` (**control anti-vacuo**):
 /// **Dado** el mismo workspace con `validation: {danglingDocumentLinks: error}`, **Cuando** se corre
-/// lo mismo, **Entonces** ambos dicen **NO conforme** (exit 1 / `conformant: false`).
+/// lo mismo, **Entonces** ambos dicen **NO conforme** (exit 1 / `valid: false`).
 ///
 /// Su función es impedir que «coinciden» se satisfaga devolviendo siempre `conforme`: una
-/// implementación que hiciera `conformant = true` a secas pasaría el test del `ignore` y **rompería
+/// implementación que hiciera `valid = true` a secas pasaría el test del `ignore` y **rompería
 /// este**. Es una GUARDA, verde hoy (el gate absoluto actual ya bloquea con cualquier `Err`): en
 /// aislamiento no puede ir roja mientras `full_analysis` ignore la config, porque la severidad
 /// configurada aquí coincide con la intrínseca. Su valor es de regresión sobre la implementación
@@ -1024,7 +1024,7 @@ fn check_y_knowledge_check_coinciden_con_error() {
         resumen_reporte(&report)
     );
     assert!(
-        !report.conformant,
+        !report.valid,
         "con `danglingDocumentLinks: error` knowledge_check NO debe declarar conforme el \
          workspace. Diagnósticos: [{}]",
         resumen_reporte(&report)
@@ -1037,9 +1037,9 @@ fn check_y_knowledge_check_coinciden_con_error() {
         "`lodestar check` debe coincidir con knowledge_check (no conforme ⇒ exit 1): {json}"
     );
     assert_eq!(
-        json.get("conformant").and_then(serde_json::Value::as_bool),
+        json.get("valid").and_then(serde_json::Value::as_bool),
         Some(false),
-        "el `conformant` del `check --json` debe coincidir con el de knowledge_check (false): {json}"
+        "el `valid` del `check --json` debe coincidir con el de knowledge_check (false): {json}"
     );
     // Y el diagnóstico que dispara el bloqueo se surfacea (no solo el veredicto).
     let codigos = codigos_del_json(&json);
@@ -1208,7 +1208,7 @@ fn corre_reindex(root: &std::path::Path) -> (Option<i32>, String) {
 fn snapshot_canonico(dir: &std::path::Path) -> Vec<(String, Vec<u8>)> {
     snapshot_arbol(dir)
         .into_iter()
-        .filter(|(rel, _)| !rel.starts_with(".lodestar/") && rel != ".gitignore")
+        .filter(|(rel, _)| !rel.starts_with(".lodestar") && rel != ".gitignore")
         .collect()
 }
 

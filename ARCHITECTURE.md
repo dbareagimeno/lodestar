@@ -810,8 +810,10 @@ Se congelan en `lodestar-core::types` (salvo el envelope, que va en `lodestar-ap
 - **Códigos de error** (§13 de REFACTOR): enum estable en `core::types` (patrón `CheckCode`, wire por
   `#[serde(rename)]`): `WORKSPACE_NOT_FOUND`, `WORKSPACE_RECOVERY_REQUIRED`, `CONCEPT_NOT_FOUND`,
   `AMBIGUOUS_REFERENCE`, `REVISION_CONFLICT`, `PLAN_STALE`, `PLAN_EXPIRED`, `PERMISSION_DENIED`,
-  `INVALID_SCHEMA`, `NONCONFORMANT_RESULT`, `INBOUND_LINKS_EXIST`, `RELATION_CONSTRAINT_VIOLATION`,
+  `INVALID_SCHEMA`, `INVALID_RESULT`, `INBOUND_LINKS_EXIST`, `RELATION_CONSTRAINT_VIOLATION`,
   `WRITE_CONFLICT`, `RESULT_TOO_LARGE`, `RECOVERY_FAILED`, `INTERNAL_IO_ERROR`.
+  (`NONCONFORMANT_RESULT` → `INVALID_RESULT` en `E23-H14`, la única vez que se abre este catálogo:
+  ver `§20.3`. `CONCEPT_NOT_FOUND` pasó a `DOCUMENT_NOT_FOUND` en `E16-H06`. Siguen siendo 16.)
 
 **Extensión del tipo `Check`** (aditiva, sin forkear — invariante #4): gana campos **opcionales**
 `id: Option<_>`, `range: Option<Range>` (`startLine`/`endLine`), `related: Vec<_>`,
@@ -989,6 +991,19 @@ Se **añaden** a los invariantes #1–#6 de `CLAUDE.md`, que siguen íntegros. L
 | Conformance / Conformant | Validation / Valid |
 | Orphan | Isolated document |
 | Bundle revision | Workspace revision |
+
+> **La pareja `Conformance / Conformant` está completa desde `E23-H14`** (2026-07-25). El sustantivo
+> se sustituyó en E16 (`ApplyConformance` → `ApplyValidation`, `Store::conformance_counts` →
+> `validation_counts`), pero el **adjetivo** sobrevivió tres épicas más en la superficie activa
+> —`conformant`, `requireConformantResult`, `allowNonconformant` y el código de error
+> `NONCONFORMANT_RESULT`—, porque completarlo obligaba a **abrir el catálogo de 16 códigos** de
+> `§19.3`, declarado congelado. Era el **único** de los 29 criterios de aceptación de
+> `REFACTOR_PHASE_2` demostrablemente incumplido («no existe terminología OKF en la API pública»).
+> Se cerró aprovechando que v0.3.0 ya es incompatible con v0.2.x: romper el wire costaba cero
+> entonces y dejaba de costarlo en cuanto se publicara. Ver `DECISIONES.md §13`.
+>
+> Wire resultante: `conformant` → `valid` · `requireConformantResult` → `requireValidResult` ·
+> `allowNonconformant` → `allowInvalid` · `NONCONFORMANT_RESULT` → `INVALID_RESULT`.
 
 ### 20.4 Modelo documental (supersede §4.1 en frontmatter y clases de fichero)
 

@@ -896,7 +896,7 @@ fn get_inexistente() {
 //
 // UBICACIÓN: los 3 criterios se ejercitan **e2e por la tool MCP** (campo Pruebas de la historia:
 // `crates/lodestar-mcp/tests/`), coherente con E10-H08…H11. Lo que hay que fijar es el contrato de
-// **wire** (forma de `scope`, forma del `structuredContent` con `conformant`/`summary`/
+// **wire** (forma de `scope`, forma del `structuredContent` con `valid`/`summary`/
 // `diagnostics`/`workspaceRevision`/`nextCursor`, y que cada diagnóstico lleve `id`/`code`/`targets`)
 // sin acoplar los tests a los tipos internos que el implementador aún no ha creado
 // (`App::knowledge_check`, el enum de scope, etc.).
@@ -921,7 +921,7 @@ fn get_inexistente() {
 //
 // WIRE DE SALIDA asumido (`structuredContent`, `ARCHITECTURE.md §19.6`, `REFACTOR §10`):
 //   {
-//     conformant: bool,
+//     valid: bool,
 //     summary: { errors, warnings, info },
 //     diagnostics: [ { level, code, msg, targets, id, range?, related, fixes } ],  // Check (E10-H06)
 //     workspaceRevision: "blake3:…",
@@ -932,7 +932,7 @@ fn get_inexistente() {
 //
 // FIRMA DE SERVICIO ASUMIDA (el implementador la crea con su propia elección de tipos internos):
 //   App::knowledge_check(scope, minimum_severity, include_suggested_fixes, limit, cursor)
-//       -> Result<{ conformant, summary, diagnostics, workspaceRevision, nextCursor }, _>
+//       -> Result<{ valid, summary, diagnostics, workspaceRevision, nextCursor }, _>
 //   Compone `DocumentSet::analyze` (los 15 checks OKF) + `validate_schema(doc_set, schema)` (E10-H07);
 //   `affected` acota por vecindad (`DocumentSet::neighborhood` / `Store::blast_radius`).
 // ---------------------------------------------------------------------------
@@ -1024,7 +1024,7 @@ fn check_detecta_edicion_directa() {
 
     // Veredicto global: NO conforme (hay al menos un error).
     assert_eq!(
-        resp[0]["result"]["structuredContent"]["conformant"],
+        resp[0]["result"]["structuredContent"]["valid"],
         serde_json::Value::Bool(false),
         "con un frontmatter inválido el workspace NO debe ser conforme: {resp:?}"
     );
@@ -1910,7 +1910,7 @@ fn impacto_move_30() {
 //                                    "expectedRevision"?: "blake3:…" },  // control optimista por op
 //       …                                        // (las 11 ops del REFACTOR §11.1)
 //     ],
-//     policy: { "requireConformantResult"?: bool, "allowWarnings"?: bool }
+//     policy: { "requireValidResult"?: bool, "allowWarnings"?: bool }
 //   }
 //   `expectedRevision` es OPCIONAL por op y es el `DocumentRevision` (E10-H03, «blake3:…») que el
 //   agente cree vigente; si el documento cambió (revisión actual distinta) → `REVISION_CONFLICT`.
@@ -2034,7 +2034,7 @@ fn cinco_operaciones() -> serde_json::Value {
 /// Política permisiva (no exige resultado conforme, admite warnings): así el criterio de
 /// `plan_un_solo_changeset`/`plan_hash_determinista` no depende del veredicto de conformidad.
 fn policy_permisiva() -> serde_json::Value {
-    serde_json::json!({ "requireConformantResult": false, "allowWarnings": true })
+    serde_json::json!({ "requireValidResult": false, "allowWarnings": true })
 }
 
 /// E12-H08 · Criterio `plan_un_solo_changeset` (benchmark §17: "Cambiar cinco documentos relacionados
@@ -2448,7 +2448,7 @@ fn patch_hace_de_transicion() {
 //     receiptId, applied,                         // applied:true al publicar; receiptId del recibo (H07)
 //     previousWorkspaceRevision, workspaceRevision,   // «blake3:…» antes/después de la transacción
 //     changedPaths, semanticDiff,
-//     validation: { conformant, errors, warnings }
+//     validation: { valid, errors, warnings }
 //   }
 //   El `workspaceRevision` devuelto es la revisión resultante: tras un apply OK el workspace «queda
 //   en» ella (comprobado contra `workspace_status`). Los errores de EJECUCIÓN (`PLAN_STALE`,

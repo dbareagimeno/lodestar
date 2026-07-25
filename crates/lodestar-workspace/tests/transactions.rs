@@ -10,7 +10,7 @@
 //! - `Workspace::validate_staging(&self, staging: &StagingDir) -> Result<(), WorkspaceError>`
 //!   construye un `DocumentSet` desde el árbol de staging (canónico + staging), corre `analyze` y, si el
 //!   resultado no cumple la política (gate estricto: `hard_fail > 0`), aborta SIN tocar el canónico
-//!   y limpia el staging. El `Err` mapea al wire `NONCONFORMANT_RESULT` (`WorkspaceError::code()`).
+//!   y limpia el staging. El `Err` mapea al wire `INVALID_RESULT` (`WorkspaceError::code()`).
 //! - `StagingDir::path(&self) -> &Path` expone el directorio de staging materializado.
 //!
 //! Firmas asumidas de E13-H02 (fase ROJA; el implementador debe respetarlas):
@@ -237,7 +237,7 @@ fn staging_no_toca_canonico() {
 }
 
 /// **E13-H01** · Criterio: dado un staging que resultaría NO conforme (política estricta), al
-/// validarlo aborta con `NONCONFORMANT_RESULT` y limpia el staging.
+/// validarlo aborta con `INVALID_RESULT` y limpia el staging.
 #[test]
 fn staging_no_conforme_aborta() {
     let dir = tempfile::tempdir().unwrap();
@@ -267,8 +267,8 @@ fn staging_no_conforme_aborta() {
         .expect_err("un staging no conforme debe abortar la validación");
     assert_eq!(
         err.code(),
-        "NONCONFORMANT_RESULT",
-        "el error de validación no mapea a NONCONFORMANT_RESULT: {err:?}"
+        "INVALID_RESULT",
+        "el error de validación no mapea a INVALID_RESULT: {err:?}"
     );
 
     // El staging quedó limpio (el directorio del changeSetId no persiste).

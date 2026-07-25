@@ -33,7 +33,7 @@ fn escribe(root: &Path, rel: &str, contenido: &str) {
 /// conformidad del resultado.
 fn policy_permisiva() -> PlanPolicy {
     PlanPolicy {
-        require_conformant_result: false,
+        require_valid_result: false,
         allow_warnings: true,
     }
 }

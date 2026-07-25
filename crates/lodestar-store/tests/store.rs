@@ -85,7 +85,7 @@ fn assert_matches_core(store: &Store, files: &FileMap) {
 #[test]
 fn abrir_crea_esquema_y_reabrir_es_idempotente() {
     let dir = tempfile::tempdir().unwrap();
-    write_all(dir.path(), &lodestar_fixtures::conformant());
+    write_all(dir.path(), &lodestar_fixtures::valid());
     {
         let store = Store::open_and_build(dir.path()).unwrap();
         assert!(!store.documents().unwrap().is_empty());
@@ -100,7 +100,7 @@ fn abrir_crea_esquema_y_reabrir_es_idempotente() {
 #[test]
 fn cold_rebuild_es_idempotente() {
     let dir = tempfile::tempdir().unwrap();
-    write_all(dir.path(), &lodestar_fixtures::conformant());
+    write_all(dir.path(), &lodestar_fixtures::valid());
     let store = Store::open_and_build(dir.path()).unwrap();
     let before = sorted(store.documents().unwrap());
     store.rebuild().unwrap();
@@ -109,9 +109,9 @@ fn cold_rebuild_es_idempotente() {
 }
 
 #[test]
-fn paridad_sql_igual_core_conformant() {
+fn paridad_sql_igual_core_valid() {
     let dir = tempfile::tempdir().unwrap();
-    let files = lodestar_fixtures::conformant();
+    let files = lodestar_fixtures::valid();
     write_all(dir.path(), &files);
     let store = Store::open_and_build(dir.path()).unwrap();
     assert_matches_core(&store, &files);
@@ -284,7 +284,7 @@ fn bus_emite_indexevent_en_cambio() {
 #[test]
 fn reconcile_repara_drift_fuera_de_banda() {
     let dir = tempfile::tempdir().unwrap();
-    let mut files = lodestar_fixtures::conformant();
+    let mut files = lodestar_fixtures::valid();
     write_all(dir.path(), &files);
     let store = Store::open_and_build(dir.path()).unwrap();
 
@@ -323,7 +323,7 @@ fn documentstore_sirve_workspace_identico() {
 #[test]
 fn watcher_reconcilia_en_vivo() {
     let dir = tempfile::tempdir().unwrap();
-    write_all(dir.path(), &lodestar_fixtures::conformant());
+    write_all(dir.path(), &lodestar_fixtures::valid());
     let store = Arc::new(Store::open_and_build(dir.path()).unwrap());
     let rx = store.subscribe();
     let _w = store.watch().unwrap();

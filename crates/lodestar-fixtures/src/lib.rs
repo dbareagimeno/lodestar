@@ -6,7 +6,7 @@
 //!   [`materialize_disk_only`]) — los que exige `ARCHITECTURE.md §20.5` y
 //!   `REFACTOR_PHASE_2 §Tests imprescindibles`: estructuras de carpetas arbitrarias, sin `index.md`
 //!   ni frontmatter obligatorio, con los casos límite del descubrimiento.
-//! - **Bundles OKF heredados** ([`conformant`], [`with_issues`], [`synthetic`]) — de v0.2.x, vivos
+//! - **Bundles OKF heredados** ([`valid`], [`with_issues`], [`synthetic`]) — de v0.2.x, vivos
 //!   solo mientras existan sus consumidores (los retiran E16/E17 al cambiar el modelo documental).
 //!
 //! Todos son deterministas: misma llamada ⇒ mismos bytes.
@@ -170,7 +170,7 @@ pub fn materialize_disk_only(root: &Path, size_limit: usize) -> std::io::Result<
 // ---------------------------------------------------------------------------
 
 /// Bundle conforme mínimo: un index raíz + un concept válido que se enlazan mutuamente.
-pub fn conformant() -> FileMap {
+pub fn valid() -> FileMap {
     file_map(&[
         ("index.md", "---\ntype: Index\ntitle: Bundle\ndescription: Índice del bundle\nokf_version: \"0.1\"\n---\n\n# Bundle\n\n# Concept\n\n* [Alfa](alfa.md)\n"),
         (

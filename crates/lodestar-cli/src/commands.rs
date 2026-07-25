@@ -15,11 +15,11 @@ use crate::sarif;
 ///
 /// (Antes de E23-H01 esto no era cierto: `full_analysis` ignoraba la config y los diagnósticos de
 /// descubrimiento, así que con `validation: {danglingDocumentLinks: ignore}` la CLI salía 1 y el MCP
-/// decía `conformant: true` sobre los mismos ficheros.)
+/// decía `valid: true` sobre los mismos ficheros.)
 ///
 /// La salida (`--json`/`--sarif`/humano) se renderiza desde ese **único** `Analysis`, así que los
 /// diagnósticos que disparan el fallo se surfacean en el wire, no solo el veredicto. El veredicto
-/// `conformant` (== sin `Err`, misma semántica que `knowledge_check`) decide el bloqueo; además,
+/// `valid` (== sin `Err`, misma semántica que `knowledge_check`) decide el bloqueo; además,
 /// `.lodestar/config.yaml` puede endurecer la puerta bloqueando también avisos
 /// (`gate.blockWarnings`). Exit codes congelados: `0` conforme · `1` bloqueado · `3` runtime/IO
 /// (error del servicio o `.lodestar/config.yaml` inválido — lo detecta ya `App::open`).
@@ -37,7 +37,7 @@ pub fn check(root: &Path, json: bool, sarif_out: bool) -> anyhow::Result<ExitCod
     // descubrimiento entran bajo la clave del fichero que describen, que por definición **no** es un
     // documento del inventario — filtrar por `documents` los dejaría fuera del veredicto pero
     // dentro de la salida, que es precisamente la clase de divergencia que la historia cierra.
-    let conformant = !analysis
+    let valid = !analysis
         .diagnostics
         .values()
         .flatten()
@@ -46,34 +46,31 @@ pub fn check(root: &Path, json: bool, sarif_out: bool) -> anyhow::Result<ExitCod
     // Un `.lodestar/config.yaml` inválido es exit 3, NO defaults silenciosos: con
     // `blockWarnings: true` y un typo en el YAML, la puerta de CI se relajaría sin ningún aviso.
     // El error lo levanta ya `App::open` (la config se valida una vez, al abrir el workspace). El
-    // motor cubre los `Err` (incluidos los schema-driven) vía `conformant`; la config solo puede
+    // motor cubre los `Err` (incluidos los schema-driven) vía `valid`; la config solo puede
     // endurecer la puerta para que los avisos también bloqueen.
-    let blocked = !conformant || app.workspace().config().gate_blocked(&analysis);
-    render_analysis(&analysis, conformant, json, sarif_out, blocked)
+    let blocked = !valid || app.workspace().config().gate_blocked(&analysis);
+    render_analysis(&analysis, valid, json, sarif_out, blocked)
 }
 
 /// Imprime un `Analysis` en el formato pedido y devuelve el exit code (0 conforme / 1 bloqueado).
-/// `conformant` es el veredicto del motor completo (misma semántica que `knowledge_check`), que en
+/// `valid` es el veredicto del motor completo (misma semántica que `knowledge_check`), que en
 /// `--json` se emite de forma ADITIVA junto a los campos históricos del `Analysis`; los `SCHEMA-*`/
 /// `REL-*` viajan dentro de `diagnostics` (y por tanto en `--sarif`/humano) al haberse fusionado en
 /// [`lodestar_app::App::full_analysis`]. `blocked` decide el exit code: lo endurece la strictness de
 /// `.lodestar/config.yaml` (`gate.blockWarnings`) sobre el veredicto del motor.
 pub fn render_analysis(
     analysis: &lodestar_core::types::Analysis,
-    conformant: bool,
+    valid: bool,
     json: bool,
     sarif_out: bool,
     blocked: bool,
 ) -> anyhow::Result<ExitCode> {
     if json {
         // Aditivo: serializar el `Analysis` (conserva `documents`/`hardFail`/… en el wire) y añadir
-        // el veredicto `conformant` del motor completo sin tocar el resto del objeto.
+        // el veredicto `valid` del motor completo sin tocar el resto del objeto.
         let mut value = serde_json::to_value(analysis)?;
         if let serde_json::Value::Object(map) = &mut value {
-            map.insert(
-                "conformant".to_string(),
-                serde_json::Value::Bool(conformant),
-            );
+            map.insert("valid".to_string(), serde_json::Value::Bool(valid));
         }
         println!("{}", serde_json::to_string_pretty(&value)?);
     } else if sarif_out {
@@ -115,14 +112,16 @@ fn print_human(a: &lodestar_core::types::Analysis, blocked: bool) {
         errs,
         warns,
         if blocked {
-            // Cubre también el gate estricto: no imprimir «CONFORME» con exit code 1.
+            // Cubre también el gate estricto: no imprimir «VÁLIDO» con exit code 1.
+            // E23-H14: «CONFORME» → «VÁLIDO». `§20.3` retira *conformidad* del vocabulario, y esta
+            // línea es la aparición más visible del término: la que lee un humano en cada CI.
             if errs == 0 {
-                "NO CONFORME (avisos bloqueados por .lodestar/config.yaml)"
+                "NO VÁLIDO (avisos bloqueados por .lodestar/config.yaml)"
             } else {
-                "NO CONFORME"
+                "NO VÁLIDO"
             }
         } else {
-            "CONFORME"
+            "VÁLIDO"
         }
     );
 }

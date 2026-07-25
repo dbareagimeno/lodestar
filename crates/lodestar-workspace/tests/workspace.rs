@@ -93,7 +93,7 @@ fn open_live_emite_evento_y_acelera_lecturas() {
     // MIGRADO en E17-H03: el cuerpo enlaza a `beta.md`, que no existe — y un enlace roto a un
     // DOCUMENTO pasó a ser `Err` (`LINK-TARGET-MISSING`, `danglingDocumentLinks: error` de
     // `§20.9`), donde antes era el `LINK-STUB` informativo del prototipo. Con la política por
-    // defecto (`allow_nonconformant: false`) la escritura se RECHAZA y no llega ningún evento, así
+    // defecto (`allow_invalid: false`) la escritura se RECHAZA y no llega ningún evento, así
     // que el enlace colgante —que este test necesita para comprobar `cache.dangling()`— exige
     // pedirlo explícitamente.
     let p = RelPath::new("alfa.md").unwrap();

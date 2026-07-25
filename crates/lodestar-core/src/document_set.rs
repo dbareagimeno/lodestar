@@ -279,7 +279,7 @@ impl DocumentSet {
         title: Option<&str>,
         body: &str,
         timestamp: Option<&str>,
-        allow_nonconformant: bool,
+        allow_invalid: bool,
     ) -> WriteOutcome {
         let resolved_title = title
             .map(|s| s.to_string())
@@ -308,18 +308,13 @@ impl DocumentSet {
             body
         };
         let raw = model::build_raw(Some(&fm), body);
-        self.outcome_for_write(p, raw, allow_nonconformant)
+        self.outcome_for_write(p, raw, allow_invalid)
     }
 
     /// Valida y prepara la escritura de contenido **crudo** en `p` (el editor guarda lo que el
     /// usuario tecleó, sin canonicalizar). Rechaza por defecto si introduciría un `Err`.
-    pub fn write_document_raw(
-        &self,
-        p: &RelPath,
-        raw: &str,
-        allow_nonconformant: bool,
-    ) -> WriteOutcome {
-        self.outcome_for_write(p, raw.to_string(), allow_nonconformant)
+    pub fn write_document_raw(&self, p: &RelPath, raw: &str, allow_invalid: bool) -> WriteOutcome {
+        self.outcome_for_write(p, raw.to_string(), allow_invalid)
     }
 
     /// Aplica un patch de frontmatter (merge-patch RFC 7386: `Some` escribe, `None` borra).
@@ -351,12 +346,7 @@ impl DocumentSet {
     }
 
     /// Computa el `WriteOutcome` de escribir `raw` en `p`: hash, checks y rechazo si introduce `Err`.
-    fn outcome_for_write(
-        &self,
-        p: &RelPath,
-        raw: String,
-        allow_nonconformant: bool,
-    ) -> WriteOutcome {
+    fn outcome_for_write(&self, p: &RelPath, raw: String, allow_invalid: bool) -> WriteOutcome {
         let hash = *blake3::hash(raw.as_bytes()).as_bytes();
         let mut files = self.files.clone();
         files.insert(p.clone(), raw.clone());
@@ -364,7 +354,7 @@ impl DocumentSet {
         let analysis = projected.analyze();
         let checks = analysis.diagnostics.get(p).cloned().unwrap_or_default();
         let has_err = checks.iter().any(|c| c.level == Severity::Err);
-        let rejected = if has_err && !allow_nonconformant {
+        let rejected = if has_err && !allow_invalid {
             Some(format!(
                 "La página no es conforme: {}",
                 checks

@@ -86,7 +86,7 @@ fn semilla(root: &Path) {
 /// conformidad — sin esto un plan podría fallar por una razón distinta de la que se está fijando.
 fn policy_permisiva() -> PlanPolicy {
     PlanPolicy {
-        require_conformant_result: false,
+        require_valid_result: false,
         allow_warnings: true,
     }
 }

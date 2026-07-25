@@ -19,7 +19,7 @@
 > como **historia del proyecto**; la autoridad viva es `ARCHITECTURE.md §20`.
 >
 > Lo pendiente está en [`DECISIONES.md`](DECISIONES.md): fechas en el lenguaje de consulta (§12),
-> `Conformant → Valid` (§13) y el **store sin consumidor** (§14, abierto en E23-H16).
+> `Valid → Valid` (§13) y el **store sin consumidor** (§14, abierto en E23-H16).
 
 ## Cómo correrlo
 
@@ -180,7 +180,7 @@ demás está abierto a criterio del usuario:
    retira.
 2. **`DECISIONES §12`** — las fechas se comparan lexicográficamente (`serde_yaml` no tipa
    timestamps). Documentarlo o introducir un tipo fecha.
-3. **`DECISIONES §13`** — `Conformant → Valid`: la mitad que falta de `§20.3`; toca el catálogo de
+3. **`DECISIONES §13`** — `Valid → Valid`: la mitad que falta de `§20.3`; toca el catálogo de
    errores congelado.
 4. **`docs/PROPUESTA_CLI.md`** — la CLI como gestor de KB (hoy solo es puerta de CI). Pendiente de
    `/planificar` en una PR posterior.
@@ -280,7 +280,7 @@ superficie de producto; git queda como crate dormido) y `DECISIONES.md §0`. Des
   - ✅ **E10-H12** — Tool `knowledge_check` (sustituye `conformance_check`): compone `analyze`
     (OKF) + `validate_schema` (E10-H07, cableado por 1ª vez) con scopes workspace/concept/paths/
     affected (vecindario vía `neighborhood`, sin off-by-one); ids de diagnóstico estables
-    (`diag:blake3:` solo de datos del diagnóstico); `conformant`/`summary` computados antes de
+    (`diag:blake3:` solo de datos del diagnóstico); `valid`/`summary` computados antes de
     minimumSeverity/paginación. Juez ciego: APROBADA (3/3).
   - ✅ **E10-H13** — `outputSchema` (schemars) en las 5 tools nuevas, derivado del tipo Rust real
     (`schema_for!`, no divergible); `contracts/mcp.yml` reescrito (15 tools: 10 heredadas + 5 nuevas)
@@ -334,7 +334,7 @@ superficie de producto; git queda como crate dormido) y `DECISIONES.md §0`. Des
     (analyze+validate_schema+validate_relations) por clave (targets,code,msg). `moved` vacío (diff_snap
     no detecta renames → H06/H08). Juez ciego: APROBADA (3/3).
   - ✅ **E12-H04** — `core::plan::validate_result(bundle, schema)` → `ValidationReport` (reusa
-    all_checks; conformant=errors==0 explícito) + `PlanPolicy{requireConformantResult,allowWarnings}`
+    all_checks; valid=errors==0 explícito) + `PlanPolicy{requireValidResult,allowWarnings}`
     + `can_apply(report, policy)` (los dos ejes). Juez ciego: APROBADA (2/2).
   - ✅ **E12-H05** — Normalización de contenido: `normalize_create` (usa bodyTemplate + {title}),
     `normalize_replace_text` (error si conteo != expectedOccurrences), `normalize_edit_section` (acota
@@ -371,8 +371,8 @@ superficie de producto; git queda como crate dormido) y `DECISIONES.md §0`. Des
   - ✅ **E13-H01** — Staging: `Workspace::materialize_staging(&ChangeSet)` computa el resultado con
     `apply_normalized_ops` y lo escribe en `.lodestar/runtime/staging/<id saneado>/` SIN tocar el
     canónico (invariante #1; runtime desechable); `validate_staging` construye el Bundle del resultado,
-    aplica el gate estricto y limpia + `NONCONFORMANT_RESULT` si no conforme. `WorkspaceError::
-    NonconformantResult`. Juez ciego: APROBADA (2/2).
+    aplica el gate estricto y limpia + `INVALID_RESULT` si no conforme. `WorkspaceError::
+    InvalidResult`. Juez ciego: APROBADA (2/2).
   - ✅ **E13-H02** — Lock de workspace: `acquire_lock` con creación atómica exclusiva
     (`create_new` = O_CREAT|O_EXCL, sin TOCTOU) en `.lodestar/runtime/lock.json`; `WorkspaceLock` RAII
     cuyo Drop libera best-effort (seguro en unwind, sin doble-panic). `reverify_base_revision` →
@@ -450,19 +450,19 @@ superficie de producto; git queda como crate dormido) y `DECISIONES.md §0`. Des
     SCHEMA-* + REL-* + refs externas). La fusión OKF+schema/rel vive en UN solo sitio compartido
     (`App::schema_diagnostics_by_path`), consumido por `knowledge_check` y por `App::full_analysis`
     (invariante #3, una sola verdad computada; sin doble `analyze()`). La CLI es fachada fina que
-    consume `full_analysis` y deriva `conformant` con la misma regla del motor. Salida humana / `--json`
-    (campo `conformant` aditivo + `perFile` con los `SCHEMA-*`/`REL-*`) / SARIF (`ruleId` schema/rel)
+    consume `full_analysis` y deriva `valid` con la misma regla del motor. Salida humana / `--json`
+    (campo `valid` aditivo + `perFile` con los `SCHEMA-*`/`REL-*`) / SARIF (`ruleId` schema/rel)
     surfacean los diagnósticos del motor completo, no solo el veredicto. Exit codes CONGELADOS
     (`0`/`1`/`2`/`3`) intactos; `blocked` es superconjunto del anterior (nada que bloqueaba deja de
-    hacerlo). Sin cambios en `core::types` (invariante #4; `conformant` inyectado en la fachada). Tests
+    hacerlo). Sin cambios en `core::types` (invariante #4; `valid` inyectado en la fachada). Tests
     `check_falla_schema`/`check_conforme_json`/`check_caza_edicion_directa` + surfacing
     `check_sarif_lista_schema`/`check_json_lista_schema` en `crates/lodestar-cli/tests/cli.rs`. Juez
     ciego (2 pasadas): la 1ª APROBADA CON RESERVAS (salida no surfaceaba schema/rel) → cerrada con
     micro-ciclo rojo→verde; la 2ª (historia completa, no-regresión MCP 41 tests verdes) **APROBADA
     (6/6)**. Hallazgos menores heredados (no bloqueantes): (1) `check` abre el `App` completo → puede
     materializar la cache `store` como efecto de un comando read-only (mismo camino que MCP, coherente
-    con invariante #5); (2) `conformant` juzga solo `concepts` mientras `gate_blocked` cuenta `Err` de
-    todos los ficheros (p. ej. `index.md`) → un error solo en `index.md` da `conformant:true` pero exit
+    con invariante #5); (2) `valid` juzga solo `concepts` mientras `gate_blocked` cuenta `Err` de
+    todos los ficheros (p. ej. `index.md`) → un error solo en `index.md` da `valid:true` pero exit
     1 vía gate — es exactamente la semántica de `knowledge_check` que la historia manda replicar.
   - ✅ **E14-H02** — Convivencia con proyectos de software (config por proyecto + detección de escritura
     externa): **historia de composición/regresión** — el comportamiento ya emerge de E9-H05
@@ -510,10 +510,10 @@ superficie de producto; git queda como crate dormido) y `DECISIONES.md §0`. Des
     e2e tras reabrir. **El benchmark destapó un hueco real de seguridad (invariante #3) que la fase verde
     cerró**: `Workspace::validate_staging` medía solo `analyze().hard_fail` (OKF) y NO la conformidad
     schema-driven → `change_apply` podía **publicar** un resultado con `SCHEMA-*`/`REL-*` err reportando
-    `conformant:true` (mientras `knowledge_check`/`lodestar check` lo dirían no-conforme). Arreglo: el gate
+    `valid:true` (mientras `knowledge_check`/`lodestar check` lo dirían no-conforme). Arreglo: el gate
     usa ahora `plan::validate_result(&bundle, &schema)` — la MISMA función del core que `change_plan` usa
     para `canApply` (OKF `per_file` + `validate_schema` + `validate_relations`, cuenta solo `err`,
-    `conformant == errors==0`) — así el gate transaccional y `change_plan`/`knowledge_check` convergen por
+    `valid == errors==0`) — así el gate transaccional y `change_plan`/`knowledge_check` convergen por
     construcción, no por lógica duplicada. Corre ANTES de backup/journal/publish (no toca el canónico).
     Layering intacto (`lodestar-workspace`→`core`, NO `app`; schema cargado con `WorkspaceSchema::load`).
     Sin regresión (E13-H11 regen, recovery con failpoints, 44 MCP verdes). Juez ciego (equivalencia del
@@ -781,7 +781,7 @@ superficie de producto; git queda como crate dormido) y `DECISIONES.md §0`. Des
 - ⚠️ **Deuda declarada al cerrar E16**: (1) `Severity::Warn` se ha quedado **sin productor** en
   `all_checks`, así que `PlanPolicy::allowWarnings` y `gate.blockWarnings` son inalcanzables desde
   datos reales hasta que E17 traiga `LINK-CASE-MISMATCH` y E20 la política de severidades; (2) la
-  pareja `Conformant → Valid` de `§20.3` está a medias — ver `DECISIONES.md §12`… perdón, **§13**;
+  pareja `Valid → Valid` de `§20.3` está a medias — ver `DECISIONES.md §12`… perdón, **§13**;
   (3) `core::types` sigue documentando el `.d.ts` generado por ts-rs, falso desde que se retiró la UI.
 
 ### E17 — Enlaces y grafo universal
@@ -913,7 +913,7 @@ superficie de producto; git queda como crate dormido) y `DECISIONES.md §0`. Des
   `delete_document` **exige política explícita** (`§Fase 12`: no elegir en silencio).
 - ✅ **E21-H04** — **`OkfDiff` → `SnapshotDiff` + limpieza del contrato** (cierra E21). El diff de wire
   ya era `types::SemanticDiff` (E12); el de `diff.rs` pasa a `SnapshotDiff` (neutro). Contrato sin
-  vocabulario OKF en superficie activa; `DECISIONES §13` (`Conformant → Valid`) documentada como
+  vocabulario OKF en superficie activa; `DECISIONES §13` (`Valid → Valid`) documentada como
   aplazada (toca el catálogo de errores congelado).
 
 ### E22 — Migración de repos OKF y publicación

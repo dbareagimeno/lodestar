@@ -84,11 +84,11 @@
 #     `CheckScope.kind: "concept"` → `"document"`; `knowledge_get` devuelve `{ document: … }` en vez
 #     de `{ concept: … }`; `impact_analyze`/`change_plan` sirven `affectedConcepts` →
 #     `affectedDocuments`; `change_apply` sirve `conformance` → `validation` (mismo objeto
-#     `{ conformant, errors, warnings }`); `impact_analyze.proposedOperation.kind`
+#     `{ valid, errors, warnings }`); `impact_analyze.proposedOperation.kind`
 #     `"replace_concept"` → `"replace_document"`.
-#   - NO cambian (deliberado): `conformant`/`requireConformantResult`/`allowNonconformant` y el
-#     código `NONCONFORMANT_RESULT` — el catálogo de 16 `ErrorCode` sigue congelado salvo la fila
-#     renombrada aquí, y `Conformant → Valid` de `§20.3` queda pendiente de una historia propia.
+#   - NO cambian (deliberado): `valid`/`requireValidResult`/`allowInvalid` y el
+#     código `INVALID_RESULT` — el catálogo de 16 `ErrorCode` sigue congelado salvo la fila
+#     renombrada aquí, y `Valid → Valid` de `§20.3` queda pendiente de una historia propia.
 #     `okf_version` sigue siendo metadata del usuario (`§20.13`), no terminología del motor.
 #
 # E16-H04 (`ARCHITECTURE.md §20.4`): el patch de frontmatter pasa a ser QUIRÚRGICO
@@ -152,10 +152,10 @@
 #     dos snapshots que `plan::semantic_diff` reusa). NO toca el wire: el campo `semanticDiff` de
 #     `change_plan`/`change_apply`/`change_revert` es `core::types::SemanticDiff` (E12), sin cambios.
 #     El nombre neutro no es `SemanticDiff` porque ese identificador ya lo lleva el tipo de wire.
-#   - La superficie ACTIVA de este contrato no lleva vocabulario OKF salvo `conformant`/
-#     `requireConformantResult`/`NONCONFORMANT_RESULT` (retorno de `change_apply`.validation, param
+#   - La superficie ACTIVA de este contrato no lleva vocabulario OKF salvo `valid`/
+#     `requireValidResult`/`INVALID_RESULT` (retorno de `change_apply`.validation, param
 #     `policy` de `change_plan`, código de error). Es EXACTAMENTE `DECISIONES.md §13`
-#     (`Conformant → Valid`), APLAZADA: completar la pareja de `§20.3` abriría el catálogo de 16
+#     (`Valid → Valid`), APLAZADA: completar la pareja de `§20.3` abriría el catálogo de 16
 #     `ErrorCode` congelados, y eso no es un renombre léxico — queda para una historia que decida
 #     abrir ese catálogo. Hasta entonces esos tres identificadores se conservan tal cual (deuda
 #     documentada, no discrepancia de contrato). Los comentarios de changelog de arriba
@@ -302,11 +302,11 @@ tools:
     historia: E10-H12
     params:
       - { nombre: scope, tipo: "object (CheckScope)", requerido: true, semantica: "discriminado por «kind»: workspace (todos) | document{ref} | paths{paths} | affected{refs,depth} (vecindario/blast-radius, DocumentSet::neighborhood Direction::Both)" }
-      - { nombre: minimumSeverity, tipo: string, requerido: false, valores: ["err", "warn", "info"], default: "info (ya excluye Pass)", semantica: "umbral de lo DEVUELTO; summary/conformant se computan sobre todo el scope, antes del umbral" }
+      - { nombre: minimumSeverity, tipo: string, requerido: false, valores: ["err", "warn", "info"], default: "info (ya excluye Pass)", semantica: "umbral de lo DEVUELTO; summary/valid se computan sobre todo el scope, antes del umbral" }
       - { nombre: includeSuggestedFixes, tipo: boolean, default: false, semantica: "false vacía «fixes» en cada diagnóstico (hoy siempre vacío: E12-H07 los produce)" }
       - { nombre: limit, tipo: integer, default: 100, minimo: 1, maximo: 1000 }
       - { nombre: cursor, tipo: string, requerido: false, semantica: "cursor opaco de paginación devuelto en nextCursor" }
-    retorno: "CheckReport (lodestar_app): { conformant, summary: CheckSummary, diagnostics: [Check], workspaceRevision, nextCursor } — json directo, sin envelope"
+    retorno: "CheckReport (lodestar_app): { valid, summary: CheckSummary, diagnostics: [Check], workspaceRevision, nextCursor } — json directo, sin envelope"
     output_schema: "sí — schemars::schema_for!(CheckReport), vía lodestar_app::schemas::knowledge_check_schema()"
     errores: ["DOCUMENT_NOT_FOUND (ref inexistente en scope document/affected)", "WorkspaceError"]
     semantica: >-
@@ -392,7 +392,7 @@ tools:
       - { nombre: "operations[].inboundLinksPolicy", tipo: string, requerido: "obligatorio para «delete» cuando el documento tiene backlinks (E21-H03, §Fase 12)", valores: ["reject", "remove_links"], semantica: "política ante enlaces entrantes de un «delete». §Fase 12 prohíbe elegirla en silencio: un «delete» con backlinks y SIN esta clave → INVALID_SCHEMA (falta un campo requerido), distinto del INBOUND_LINKS_EXIST que da «reject» explícito con backlinks. Sin backlinks no hay nada que decidir y la omisión se permite. Un valor no reconocido → INVALID_SCHEMA, con un mensaje que NOMBRA las válidas (E23-H05). «retarget» y «create_stub» se RETIRARON en E23-H05: estaban declaradas desde E12-H06 pero no implementadas (normalize_delete emitía solo el Delete, dejando los entrantes rotos), así que se aceptaban sin ejecutarse. No se implementan porque ninguna tiene semántica que inventar sin más datos del llamador: «retarget» no tiene campo de destino y «create_stub» no tiene criterio de contenido. Los valores válidos viven UNA vez, en core::types::InboundLinksPolicy::WIRE_VALUES" }
       - { nombre: selection, tipo: object, requerido: "condicional (forma-objeto de selección masiva, E21-H02)", semantica: "{ where: «<consulta E19>» | filter: {…} } — la consulta tipada (§20.8/§20.10, el MISMO Expression que knowledge_search) selecciona documentos del workspace; junto a «operation» sustituye al array «operations». Sin criterio (ni where ni filter), o malformado → INVALID_SCHEMA" }
       - { nombre: operation, tipo: object, requerido: "condicional (con selection)", semantica: "{ <op universal>: {<parámetros>} } — la op codifica su tipo como CLAVE (p. ej. { patch_frontmatter: { status: \"review\" } }) y se expande a UNA NormalizedOperation por documento seleccionado. Solo ops con sentido en masa: patch_frontmatter | replace_text | delete | apply_fix (create/move no aplican a una selección de documentos existentes). Objeto que no sea de una sola clave admitida → INVALID_SCHEMA" }
-      - { nombre: policy, tipo: object, requerido: false, semantica: "{ requireConformantResult?, allowWarnings? } (PlanPolicy, E12-H04); por defecto exige conformidad y permite warnings" }
+      - { nombre: policy, tipo: object, requerido: false, semantica: "{ requireValidResult?, allowWarnings? } (PlanPolicy, E12-H04); por defecto exige conformidad y permite warnings" }
     retorno: "PlanResult (lodestar_app): { changeSetId, baseWorkspaceRevision, planHash, canApply, expiresAt, normalizedOperations: [NormalizedOperation], risk, semanticDiff, impact: { affectedDocuments, affectedCount }, capturedRevisions: { «path»: «blake3:…» }, diagnosticsBefore, diagnosticsAfter } — json directo, sin envelope. `capturedRevisions` (E21-H02) lleva una entrada por documento de una selección masiva (su DocumentRevision, el snapshot de §Fase 12); vacío {} en la forma-array"
     output_schema: "sí — schemars::schema_for!(PlanResult), vía lodestar_app::schemas::change_plan_schema()"
     errores: ["REVISION_CONFLICT (workspace o documento cambiado)", "INVALID_SCHEMA (op desconocida o parámetro inválido)", "DOCUMENT_NOT_FOUND (objetivo de normalización inexistente)", "INBOUND_LINKS_EXIST (delete «reject» con entrantes)", "PERMISSION_DENIED (path-traversal)", "INTERNAL_IO_ERROR (carga de config)", "WorkspaceError"]
@@ -422,9 +422,9 @@ tools:
     params:
       - { nombre: changeSetId, tipo: string, requerido: true, semantica: "el «changeset:<hash>» que devolvió change_plan (E12-H08); el plan se recupera de `.lodestar/runtime/plans/` por este id (E12-H09)" }
       - { nombre: expectedWorkspaceRevision, tipo: string, requerido: false, semantica: "control optimista a nivel de workspace («blake3:…»); si se omite se adopta la revisión actual, si no coincide → REVISION_CONFLICT" }
-    retorno: "ApplyResult (lodestar_app): { receiptId, applied, previousWorkspaceRevision, workspaceRevision, changedPaths, semanticDiff, validation: { conformant, errors, warnings } } — json directo, sin envelope"
+    retorno: "ApplyResult (lodestar_app): { receiptId, applied, previousWorkspaceRevision, workspaceRevision, changedPaths, semanticDiff, validation: { valid, errors, warnings } } — json directo, sin envelope"
     output_schema: "sí — schemars::schema_for!(ApplyResult), vía lodestar_app::schemas::change_apply_schema()"
-    errores: ["PLAN_EXPIRED (plan caducado)", "PLAN_STALE (plan ausente/ilegible, o el workspace cambió bajo él ⇒ planHash recomputado difiere)", "REVISION_CONFLICT (expectedWorkspaceRevision no coincide, o la base cambió entre plan y apply)", "PERMISSION_DENIED (un path afectado cae fuera de writableRoots / bajo un referenceRoot)", "NONCONFORMANT_RESULT (gate diferencial de E20-H04: el resultado INTRODUCE errores que el canónico no tenía con rejectNewErrors, o deja errores con allowExistingErrors:false)", "WORKSPACE_RECOVERY_REQUIRED (recuperación pendiente no completada)", "INTERNAL_IO_ERROR (carga de config, IO de la transacción)", "WorkspaceError"]
+    errores: ["PLAN_EXPIRED (plan caducado)", "PLAN_STALE (plan ausente/ilegible, o el workspace cambió bajo él ⇒ planHash recomputado difiere)", "REVISION_CONFLICT (expectedWorkspaceRevision no coincide, o la base cambió entre plan y apply)", "PERMISSION_DENIED (un path afectado cae fuera de writableRoots / bajo un referenceRoot)", "INVALID_RESULT (gate diferencial de E20-H04: el resultado INTRODUCE errores que el canónico no tenía con rejectNewErrors, o deja errores con allowExistingErrors:false)", "WORKSPACE_RECOVERY_REQUIRED (recuperación pendiente no completada)", "INTERNAL_IO_ERROR (carga de config, IO de la transacción)", "WorkspaceError"]
     semantica: >-
       Aplica un plan vigente por el ÚNICO ESCRITOR (invariante #5) con la mecánica de publicación
       recuperable de E13 (invariante «nunca un estado parcial silencioso»). Pasos de plan: carga el
@@ -435,7 +435,7 @@ tools:
       escribe. Luego delega en `Workspace::apply_transaction`, que ejecuta EN ORDEN: lock de
       publicación (E13-H02) → cálculo del conjunto afectado real (creados/modificados/borrados) →
       `assert_writable` de cada afectado ANTES de tocar el canónico (E11-H04 → PERMISSION_DENIED) →
-      staging + gate diferencial de cambios (E13-H01/E20-H04: rechaza con NONCONFORMANT_RESULT solo
+      staging + gate diferencial de cambios (E13-H01/E20-H04: rechaza con INVALID_RESULT solo
       si el resultado introduce errores que el canónico no tenía, según rejectNewErrors/
       allowExistingErrors) → re-verificación de la base (E13-H02) → copias de recuperación
       (E13-H04) → write-ahead journal `prepared` fsynced (E13-H03) → renames atómicos por el único

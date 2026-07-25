@@ -471,14 +471,14 @@ fn workspace_file_ausente_es_warning() {
         report.diagnostics
     );
     assert!(
-        report.conformant,
+        report.valid,
         "conforme = sin errores duros, con o sin warnings"
     );
     assert!(
         !plan::can_apply(
             &report,
             &PlanPolicy {
-                require_conformant_result: true,
+                require_valid_result: true,
                 allow_warnings: false,
             }
         ),
@@ -488,7 +488,7 @@ fn workspace_file_ausente_es_warning() {
         plan::can_apply(
             &report,
             &PlanPolicy {
-                require_conformant_result: true,
+                require_valid_result: true,
                 allow_warnings: true,
             }
         ),

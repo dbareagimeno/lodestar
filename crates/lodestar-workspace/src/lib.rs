@@ -356,12 +356,12 @@ impl Workspace {
         ty: &str,
         title: Option<&str>,
         body: &str,
-        allow_nonconformant: bool,
+        allow_invalid: bool,
     ) -> Result<WriteOutcome, WorkspaceError> {
         self.guard_recovery()?;
         let doc_set = self.document_set()?;
         let now = now_iso8601();
-        let outcome = doc_set.create_document(p, ty, title, body, Some(&now), allow_nonconformant);
+        let outcome = doc_set.create_document(p, ty, title, body, Some(&now), allow_invalid);
         if outcome.written {
             io::write_atomic(&self.root, &outcome.path, &outcome.raw)?;
             self.cache_upsert(&outcome.path, &outcome.raw);
@@ -375,11 +375,11 @@ impl Workspace {
         &self,
         p: &RelPath,
         raw: &str,
-        allow_nonconformant: bool,
+        allow_invalid: bool,
     ) -> Result<WriteOutcome, WorkspaceError> {
         self.guard_recovery()?;
         let doc_set = self.document_set()?;
-        let outcome = doc_set.write_document_raw(p, raw, allow_nonconformant);
+        let outcome = doc_set.write_document_raw(p, raw, allow_invalid);
         if outcome.written {
             io::write_atomic(&self.root, &outcome.path, &outcome.raw)?;
             self.cache_upsert(&outcome.path, &outcome.raw);

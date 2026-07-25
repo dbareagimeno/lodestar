@@ -154,7 +154,7 @@ pub fn error_code(err: &CoreError) -> ErrorCode {
 /// - `PermissionDenied` (E11-H04: escritura bajo un `referenceRoot`, o fuera de `writableRoots`) →
 ///   `ErrorCode::PermissionDenied`, mapeo directo por nombre (mismo caso que `error_code` con
 ///   `CoreError::InvalidRelPath`).
-/// - `NonconformantResult` (E13-H01) / `WriteConflict` (E13-H02) / `WorkspaceRecoveryRequired`
+/// - `InvalidResult` (E13-H01) / `WriteConflict` (E13-H02) / `WorkspaceRecoveryRequired`
 ///   (E13-H06) → sus códigos homónimos del catálogo, mapeo directo por nombre.
 pub fn workspace_error_code(err: &WorkspaceError) -> ErrorCode {
     match err {
@@ -163,7 +163,7 @@ pub fn workspace_error_code(err: &WorkspaceError) -> ErrorCode {
         WorkspaceError::NoCache => ErrorCode::InternalIoError,
         WorkspaceError::Store(_) => ErrorCode::InternalIoError,
         WorkspaceError::PermissionDenied(_) => ErrorCode::PermissionDenied,
-        WorkspaceError::NonconformantResult(_) => ErrorCode::NonconformantResult,
+        WorkspaceError::InvalidResult(_) => ErrorCode::InvalidResult,
         WorkspaceError::WriteConflict(_) => ErrorCode::WriteConflict,
         WorkspaceError::WorkspaceRecoveryRequired(_) => ErrorCode::WorkspaceRecoveryRequired,
     }
@@ -317,7 +317,7 @@ pub struct WorkspaceStatus {
     /// esquemas (`§20.10`); se conserva en el wire para no romper a un cliente que lo lea.
     pub schema_version: String,
     /// `true` si el workspace no tiene ningún check `Err` (`Analysis::hard_fail == 0`).
-    pub conformant: bool,
+    pub valid: bool,
     /// Recuento agregado de documentos/enlaces/diagnósticos.
     pub counts: StatusCounts,
     /// Capacidades habilitadas por el perfil de arranque.
@@ -422,7 +422,7 @@ impl App {
             reference_roots: cfg.workspace.reference_roots.clone(),
             format_version: DEFAULT_FORMAT_VERSION.to_string(),
             schema_version: DEFAULT_SCHEMA_VERSION.to_string(),
-            conformant: analysis.hard_fail() == 0,
+            valid: analysis.hard_fail() == 0,
             counts: StatusCounts {
                 documents: analysis.documents.len(),
                 links,
@@ -747,7 +747,7 @@ impl App {
     /// Como solo depende de los datos del diagnóstico (nunca de timestamps/orden/caché), la misma
     /// revisión produce los mismos `id` incluso entre procesos frescos (criterio `check_ids_estables`).
     ///
-    /// `summary` (errors/warnings/info) y `conformant` (== `errors == 0`) se computan sobre **todo**
+    /// `summary` (errors/warnings/info) y `valid` (== `errors == 0`) se computan sobre **todo**
     /// el conjunto de diagnósticos del scope, antes de aplicar `minimum_severity` o la paginación —
     /// son un agregado del scope, no de la página devuelta. `minimum_severity` (por defecto `Info`,
     /// que ya excluye los `Pass`) eleva el umbral de lo que se **devuelve** en `diagnostics`.
@@ -832,7 +832,7 @@ impl App {
             }
         }
 
-        // Summary/conformant sobre TODO el scope (antes de minimum_severity y paginación).
+        // Summary/valid sobre TODO el scope (antes de minimum_severity y paginación).
         let errors = items
             .iter()
             .filter(|(_, c)| c.level == Severity::Err)
@@ -845,7 +845,7 @@ impl App {
             .iter()
             .filter(|(_, c)| c.level == Severity::Info)
             .count();
-        let conformant = errors == 0;
+        let valid = errors == 0;
 
         // Umbral de severidad para lo que se DEVUELVE (por defecto Info, que ya excluye Pass).
         let floor = minimum_severity.unwrap_or(Severity::Info);
@@ -867,7 +867,7 @@ impl App {
         let next_cursor = (end > start && end < total).then(|| encode_cursor(end));
 
         Ok(CheckReport {
-            conformant,
+            valid,
             summary: CheckSummary {
                 errors,
                 warnings,
@@ -916,7 +916,7 @@ impl App {
     /// Hasta E23-H01 este método era `document_set().analyze()` a secas, y eso hacía que la CLI y el
     /// MCP dieran **veredictos contradictorios sobre el mismo workspace**: con
     /// `validation: {danglingDocumentLinks: ignore}` en `.lodestar/config.yaml`, `lodestar check`
-    /// salía 1 («NO CONFORME») mientras `knowledge_check` respondía `conformant: true`. Dos verdades
+    /// salía 1 («NO CONFORME») mientras `knowledge_check` respondía `valid: true`. Dos verdades
     /// sobre los mismos ficheros. Ahora se componen las **dos** mitades que le faltaban:
     ///
     /// 1. **La política de severidad** de `validation` (`§20.9`): cada diagnóstico pasa por
@@ -1567,7 +1567,7 @@ impl App {
             changed_paths,
             semantic_diff: plan.semantic_diff,
             validation: ApplyValidation {
-                conformant: analysis.hard_fail() == 0,
+                valid: analysis.hard_fail() == 0,
                 errors: analysis.hard_fail(),
                 warnings: analysis.warn_count(),
             },
@@ -1797,7 +1797,7 @@ pub struct ApplyResult {
 #[serde(rename_all = "camelCase")]
 pub struct ApplyValidation {
     /// `true` si el workspace publicado no tiene ningún check `Err` (`hardFail == 0`).
-    pub conformant: bool,
+    pub valid: bool,
     /// Nº de ficheros con al menos un check `Err`.
     pub errors: usize,
     /// Nº de checks `Warn`.
@@ -2481,7 +2481,7 @@ pub struct CheckSummary {
 #[serde(rename_all = "camelCase")]
 pub struct CheckReport {
     /// `true` si el scope no tiene ningún diagnóstico de severidad `Err`.
-    pub conformant: bool,
+    pub valid: bool,
     /// Recuento por severidad sobre TODO el scope (independiente de `minimumSeverity`/paginación).
     pub summary: CheckSummary,
     /// La página de diagnósticos (cada uno con su `id` estable), tras filtrar por severidad y paginar.

@@ -163,7 +163,7 @@ impl Workspace {
     ///   resultado rechaza»).
     ///
     /// Al rechazar, **aborta sin tocar el canónico** y limpia el directorio de staging, devolviendo
-    /// [`WorkspaceError::NonconformantResult`]. Si pasa, devuelve `Ok(())` y el staging queda listo
+    /// [`WorkspaceError::InvalidResult`]. Si pasa, devuelve `Ok(())` y el staging queda listo
     /// para publicarse.
     ///
     /// **Severidad configurable**: qué diagnóstico cuenta como error lo decide
@@ -203,7 +203,7 @@ impl Workspace {
             // Aborta: limpia el staging (best-effort) y no toca el canónico.
             let _ = std::fs::remove_dir_all(staging.path());
             let nuevos = after_errors.difference(&before_errors).count();
-            return Err(WorkspaceError::NonconformantResult(format!(
+            return Err(WorkspaceError::InvalidResult(format!(
                 "el resultado del plan no pasa la política de cambios: {nuevos} error(es) nuevo(s), \
                  {} error(es) en total (rejectNewErrors={}, allowExistingErrors={})",
                 after_errors.len(),

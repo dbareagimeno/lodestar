@@ -5,18 +5,24 @@
 //! `init`/generadores/`export`/`import` se retiraron con esos subcomandos, y lo que queda aquí son
 //! los e2e de la puerta de CI que siguen vivos.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
+
+use tempfile::TempDir;
 
 fn bin() -> Command {
     Command::new(env!("CARGO_BIN_EXE_lodestar"))
 }
 
-fn temp_dir(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("lodestar-e2e-{name}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+/// Directorio temporal aislado **con limpieza automática**, unificado con el resto del repo en
+/// `E23-H08` (ver el helper gemelo de `cli.rs`). El arnés anterior derivaba el nombre del PID y
+/// **nunca** limpiaba; además, como todos los tests de un binario corren en el mismo proceso, el
+/// PID no los distinguía: dos tests que pidieran el mismo `name` compartían directorio.
+fn temp_dir(name: &str) -> TempDir {
+    tempfile::Builder::new()
+        .prefix(&format!("lodestar-e2e-{name}-"))
+        .tempdir()
+        .expect("crear el directorio temporal del test")
 }
 
 fn write(dir: &Path, rel: &str, content: &str) {
@@ -49,22 +55,26 @@ fn run(dir: &Path, args: &[&str]) -> i32 {
 #[test]
 fn config_invalida_es_error_de_runtime() {
     let dir = temp_dir("yaml-roto");
-    write(&dir, "index.md", "---\ntype: Index\ntitle: Bundle\ndescription: Índice del bundle\nokf_version: \"0.1\"\n---\n\n# B\n");
+    write(dir.path(), "index.md", "---\ntype: Index\ntitle: Bundle\ndescription: Índice del bundle\nokf_version: \"0.1\"\n---\n\n# B\n");
     // Secuencia de flujo YAML sin cerrar: parseo inválido garantizado.
     write(
-        &dir,
+        dir.path(),
         ".lodestar/config.yaml",
         "discovery:\n  exclude: [\"notas/**\"\n",
     );
-    assert_eq!(run(&dir, &["check"]), 3);
+    assert_eq!(run(dir.path(), &["check"]), 3);
 }
 
 /// Un `.md` no-UTF8 no aborta el check: se salta con aviso y el resto se juzga.
 #[test]
 fn md_no_utf8_no_aborta_el_check() {
     let dir = temp_dir("no-utf8");
-    write(&dir, "index.md", "---\ntype: Index\ntitle: Bundle\ndescription: Índice del bundle\nokf_version: \"0.1\"\n---\n\n# B\n");
-    write(&dir, "buena.md", CONCEPT_B);
-    std::fs::write(dir.join("latin1.md"), b"---\ntype: Nota\n---\n\n# a\xf1o\n").unwrap();
-    assert_eq!(run(&dir, &["check"]), 0);
+    write(dir.path(), "index.md", "---\ntype: Index\ntitle: Bundle\ndescription: Índice del bundle\nokf_version: \"0.1\"\n---\n\n# B\n");
+    write(dir.path(), "buena.md", CONCEPT_B);
+    std::fs::write(
+        dir.path().join("latin1.md"),
+        b"---\ntype: Nota\n---\n\n# a\xf1o\n",
+    )
+    .unwrap();
+    assert_eq!(run(dir.path(), &["check"]), 0);
 }

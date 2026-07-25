@@ -134,7 +134,7 @@ pub fn list() -> Value {
              } },
              "operation": { "type": "object", "description": "La operación a expandir sobre cada documento que casa la «selection», con el tipo como CLAVE (p. ej. {\"patch_frontmatter\": {\"status\": \"review\"}}). Solo las que tienen sentido en masa: patch_frontmatter/replace_text/delete/apply_fix." },
              "policy": { "type": "object", "description": "Política de aplicación del plan.", "properties": {
-                 "requireConformantResult": { "type": "boolean", "description": "Si true, un resultado no conforme bloquea canApply." },
+                 "requireValidResult": { "type": "boolean", "description": "Si true, un resultado no conforme bloquea canApply." },
                  "allowWarnings": { "type": "boolean", "description": "Si false, cualquier warning bloquea canApply." }
              } }
          }, "additionalProperties": false },
