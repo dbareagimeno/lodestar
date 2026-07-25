@@ -68,6 +68,14 @@ fn sc(resp: &Value) -> &Value {
 /// Monta el proyecto arbitrario del `§Resultado esperado`: documentación a varias profundidades,
 /// **sin** `.lodestar/`/`index.md`/frontmatter obligatorio, con enlaces cruzados raíz↔profundo y
 /// frontmatter YAML arbitrario (tipos reales) para ejercitar la consulta tipada.
+///
+/// **AMPLIADO en E23-H08** con la otra mitad de un repo real: un `.gitignore` con `vendor/` y un
+/// `.lodestarignore` con `borradores/`, cada uno con un `.md` dentro. Los dos documentos ocultos
+/// llevan **el mismo frontmatter que los visibles** (`type: decision`, `status: draft`) a propósito:
+/// así todas las aserciones de inventario del fichero pasan a ser discriminantes. Si el
+/// descubrimiento dejara de aplicar los ficheros de exclusión, `counts.documents` sería 7 en vez de
+/// 5, `where type = "decision"` daría 4 en vez de 2 y la selección masiva expandiría 4 ops en vez de
+/// 2 — y el `change_apply` escribiría dentro de `vendor/`.
 fn proyecto_arbitrario(root: &Path) {
     // Raíz: enlaza a un documento profundo (ida) y a código del proyecto.
     escribe(
@@ -100,6 +108,161 @@ fn proyecto_arbitrario(root: &Path) {
     escribe(root, "knowledge/roadmap/2027.md", "# Roadmap 2027\n");
     // Un fichero de código que EXISTE (destino del enlace WorkspaceFile de README).
     escribe(root, "src/auth/token.rs", "// token service\n");
+
+    // --- E23-H08: lo que un repo real trae y Lodestar NO debe mirar ---------------------------
+    // `.gitignore` del proyecto: el caso del pitch (`node_modules/`, `target/`, `vendor/`). Se
+    // respeta aunque no haya repo git (`discovery.rs` construye el walker con `require_git(false)`).
+    escribe(root, ".gitignore", "vendor/\n");
+    escribe(
+        root,
+        "vendor/basura.md",
+        "---\ntype: decision\nstatus: draft\npriority: 9\n---\n\n\
+         # Dependencia vendorizada\n\nPalabra que no existe en ningún otro documento: sarpullido.\n",
+    );
+    // `.lodestarignore`: exclusiones propias, independientes de git.
+    escribe(root, ".lodestarignore", "borradores/\n");
+    escribe(
+        root,
+        "borradores/wip.md",
+        "---\ntype: decision\nstatus: draft\npriority: 8\n---\n\n\
+         # Borrador\n\nPalabra que no existe en ningún otro documento: ornitorrinco.\n",
+    );
+}
+
+/// Los 5 documentos que la fachada **sí** debe ver, ordenados.
+fn documentos_visibles() -> Vec<String> {
+    let mut v = vec![
+        "README.md".to_string(),
+        "docs/decisions/cache.md".to_string(),
+        "docs/guide.md".to_string(),
+        "knowledge/roadmap/2027.md".to_string(),
+        "packages/api/docs/auth.md".to_string(),
+    ];
+    v.sort();
+    v
+}
+
+/// Los `path` de los resultados de un `knowledge_search`, ordenados.
+fn paths_de_resultados(resp: &Value) -> Vec<String> {
+    let mut v: Vec<String> = sc(resp)["results"]
+        .as_array()
+        .unwrap_or_else(|| panic!("knowledge_search debe devolver `results`: {resp}"))
+        .iter()
+        .map(|x| x["path"].as_str().unwrap().to_string())
+        .collect();
+    v.sort();
+    v
+}
+
+/// Comprueba **por la superficie MCP** —una sola sesión, el binario real— que un documento excluido
+/// por el descubrimiento es invisible para el agente: ni lo cuenta `workspace_status`, ni lo
+/// devuelve `knowledge_search` (ni por su palabra única ni en el inventario completo), ni lo deja
+/// leer `knowledge_get`.
+///
+/// `palabra_unica` es un término que **solo** está en el documento oculto; `Roadmap` hace de
+/// **control anti-vacuo**: si la búsqueda estuviera rota (o devolviera siempre vacío), el «0
+/// resultados» de la palabra oculta no probaría nada, así que se exige en la MISMA sesión que la
+/// búsqueda sí encuentre un documento visible.
+fn asevera_documento_ignorado(root: &Path, ruta_ignorada: &str, palabra_unica: &str) {
+    // Precondición: el `.md` oculto EXISTE en disco y es legible. Sin esto, «no aparece» podría
+    // deberse a que el fixture no lo escribió.
+    let contenido = std::fs::read_to_string(root.join(ruta_ignorada))
+        .unwrap_or_else(|e| panic!("precondición: `{ruta_ignorada}` debe existir en disco ({e})"));
+    assert!(
+        contenido.contains(palabra_unica),
+        "precondición: `{ruta_ignorada}` debe contener la palabra única «{palabra_unica}»"
+    );
+
+    let r = mcp(
+        root,
+        &[
+            init(),
+            call(1, "workspace_status", json!({})),
+            call(2, "knowledge_search", json!({ "text": palabra_unica })),
+            call(3, "knowledge_search", json!({"text": "Roadmap"})),
+            call(4, "knowledge_search", json!({"text": ""})),
+            call(5, "knowledge_get", json!({"ref": {"path": ruta_ignorada}})),
+        ],
+        6,
+    );
+
+    // (1) El inventario: los 5 visibles, ni uno más.
+    assert_eq!(
+        sc(&r[1])["counts"]["documents"],
+        5,
+        "`{ruta_ignorada}` está excluido por el descubrimiento: no puede contar como documento. \
+         counts = {}",
+        sc(&r[1])["counts"]
+    );
+
+    // (2) Su palabra única no encuentra nada…
+    assert_eq!(
+        paths_de_resultados(&r[2]),
+        Vec::<String>::new(),
+        "`knowledge_search` no puede devolver un documento excluido (búsqueda por «{palabra_unica}»)"
+    );
+    // (3) …y el control demuestra que la búsqueda de esa misma sesión SÍ funciona.
+    assert_eq!(
+        paths_de_resultados(&r[3]),
+        vec!["knowledge/roadmap/2027.md".to_string()],
+        "control anti-vacuo: la búsqueda debe encontrar el documento visible «Roadmap»"
+    );
+
+    // (4) El inventario completo que ve el agente son exactamente los 5 visibles.
+    assert_eq!(
+        paths_de_resultados(&r[4]),
+        documentos_visibles(),
+        "el inventario que expone `knowledge_search` son los documentos NO excluidos"
+    );
+
+    // (5) Tampoco se puede leer pidiéndolo por su path exacto.
+    assert_eq!(
+        r[5]["result"]["isError"], true,
+        "`knowledge_get` de un documento excluido debe ser error, no una lectura silenciosa: {}",
+        r[5]
+    );
+    assert!(
+        r[5]["result"].to_string().contains("DOCUMENT_NOT_FOUND"),
+        "el error debe llevar el código estable `DOCUMENT_NOT_FOUND`: {}",
+        r[5]
+    );
+}
+
+/// **E23-H08** · Criterio `gitignore_respetado_por_la_fachada`: **Dado** un proyecto con `vendor/`
+/// en el `.gitignore` y un `.md` dentro, **Cuando** se pregunta a la superficie MCP, **Entonces** ni
+/// `counts` ni `knowledge_search` lo incluyen.
+///
+/// HUECO QUE CIERRA: el descubrimiento tiene 13 tests a nivel de `lodestar-workspace`
+/// (`crates/lodestar-workspace/tests/discovery.rs`) pero **ninguno por una fachada**, siendo la
+/// promesa central del refactor: apuntar Lodestar a un repo real —con `node_modules/`, `target/`,
+/// `vendor/` llenos de `.md`— y que solo vea el conocimiento del proyecto (`ARCHITECTURE.md §20.5`).
+/// Un cableado que perdiera la `DiscoveryPolicy` entre `App` y `Workspace` sería invisible para
+/// aquellos tests y catastrófico para el usuario.
+///
+/// NO es fase roja: el descubrimiento ya funciona y el test sale verde. Su valor es de cobertura y
+/// regresión sobre la frontera.
+#[test]
+fn gitignore_respetado_por_la_fachada() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    proyecto_arbitrario(root);
+    asevera_documento_ignorado(root, "vendor/basura.md", "sarpullido");
+}
+
+/// **E23-H08** (misma garantía, el otro fichero de exclusiones): **Dado** un `.lodestarignore` con
+/// `borradores/` y un `.md` dentro, **Cuando** se pregunta a la superficie MCP, **Entonces** tampoco
+/// aparece.
+///
+/// Va aparte de su gemelo porque son **dos mecanismos independientes** (`git_ignore` del walker vs
+/// `add_custom_ignore_filename`): un cambio en la construcción del walker puede romper uno y dejar
+/// el otro en pie, y `.lodestarignore` es además el único mecanismo de exclusión de un proyecto que
+/// no usa git.
+#[test]
+fn lodestarignore_respetado_por_la_fachada() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    proyecto_arbitrario(root);
+    asevera_documento_ignorado(root, "borradores/wip.md", "ornitorrinco");
 }
 
 /// El flujo completo del documento, paso a paso, cada uno contra su criterio de aceptación.
@@ -118,6 +281,13 @@ fn flujo_completo_migracion() {
     let status = sc(&r[1]);
     let counts = &status["counts"];
     // 5 documentos .md (token.rs NO es documento), a 3 niveles de profundidad.
+    //
+    // E23-H08: este `5` es ahora una aserción MÁS FUERTE que antes. El fixture tiene 7 ficheros
+    // `.md` en disco; dos de ellos están excluidos por el `.gitignore` (`vendor/basura.md`) y por el
+    // `.lodestarignore` (`borradores/wip.md`). Que el inventario siga siendo 5 —y no 7— es
+    // exactamente la prueba de que el descubrimiento aplica los ficheros de exclusión por la
+    // fachada. El detalle (búsqueda, lectura, control anti-vacuo) va en
+    // `gitignore_respetado_por_la_fachada`/`lodestarignore_respetado_por_la_fachada`.
     assert_eq!(counts["documents"], 5, "descubre los 5 .md: {counts}");
 
     // --- 2. knowledge_search con `where` tipado sobre frontmatter arbitrario --------------------

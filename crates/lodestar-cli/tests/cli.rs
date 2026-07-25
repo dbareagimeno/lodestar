@@ -6,11 +6,23 @@ fn bin() -> Command {
     Command::new(env!("CARGO_BIN_EXE_lodestar"))
 }
 
-fn temp_dir(name: &str) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!("lodestar-cli-{name}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+/// Directorio temporal aislado para un test, **con limpieza automática**: el [`tempfile::TempDir`]
+/// borra el árbol al dropearse, al final del test.
+///
+/// UNIFICADO en E23-H08 con el arnés del resto del repo (`lodestar-mcp`, `lodestar-store`,
+/// `lodestar-workspace` ya usaban `tempfile`). Antes el nombre se derivaba del PID
+/// (`std::env::temp_dir().join("lodestar-cli-<name>-<pid>")`) y **nunca** se limpiaba: los
+/// directorios se acumulaban en `/tmp` ejecución tras ejecución, y dos tests del mismo binario que
+/// pidieran el mismo `name` compartían directorio (todos los tests corren en el mismo proceso, así
+/// que el PID no los distingue).
+///
+/// El `name` sobrevive como **prefijo** del directorio —sigue siendo útil para identificar restos si
+/// un test se cuelga—, pero ya no es su identidad: `tempfile` añade el sufijo aleatorio.
+fn temp_dir(name: &str) -> tempfile::TempDir {
+    tempfile::Builder::new()
+        .prefix(&format!("lodestar-cli-{name}-"))
+        .tempdir()
+        .unwrap()
 }
 
 fn write(dir: &std::path::Path, rel: &str, content: &str) {
@@ -23,16 +35,21 @@ fn write(dir: &std::path::Path, rel: &str, content: &str) {
 fn check_conforme_exit_0() {
     let dir = temp_dir("conforme");
     write(
-        &dir,
+        dir.path(),
         "index.md",
         "---\ntype: Index\ntitle: Bundle\ndescription: Índice del bundle\nokf_version: \"0.1\"\n---\n\n# Bundle\n",
     );
     write(
-        &dir,
+        dir.path(),
         "a.md",
         "---\ntype: Nota\ntitle: A\ndescription: d\n---\n\n# H\n\ncuerpo\n",
     );
-    let status = bin().arg("--path").arg(&dir).arg("check").status().unwrap();
+    let status = bin()
+        .arg("--path")
+        .arg(dir.path())
+        .arg("check")
+        .status()
+        .unwrap();
     assert_eq!(status.code(), Some(0));
 }
 
@@ -42,8 +59,13 @@ fn check_hard_fail_exit_1() {
     // MIGRADO en E16-H05: el hard fail era «sin frontmatter» (`OKF-FM01`), que dejó de ser un
     // error. Hoy lo es un bloque que abre y no cierra (`FM-UNCLOSED`): Lodestar no puede
     // interpretar el documento.
-    write(&dir, "malo.md", "---\ntype: Nota\n");
-    let status = bin().arg("--path").arg(&dir).arg("check").status().unwrap();
+    write(dir.path(), "malo.md", "---\ntype: Nota\n");
+    let status = bin()
+        .arg("--path")
+        .arg(dir.path())
+        .arg("check")
+        .status()
+        .unwrap();
     assert_eq!(status.code(), Some(1));
 }
 
@@ -51,13 +73,13 @@ fn check_hard_fail_exit_1() {
 fn check_json_es_valido() {
     let dir = temp_dir("json");
     write(
-        &dir,
+        dir.path(),
         "a.md",
         "---\ntype: Nota\ntitle: A\ndescription: d\n---\n\n# H\n",
     );
     let out = bin()
         .arg("--path")
-        .arg(&dir)
+        .arg(dir.path())
         .args(["check", "--json"])
         .output()
         .unwrap();
@@ -78,10 +100,10 @@ fn check_json_es_valido() {
 #[test]
 fn check_sarif_es_valido() {
     let dir = temp_dir("sarif");
-    write(&dir, "malo.md", "---\ntype: Nota\n");
+    write(dir.path(), "malo.md", "---\ntype: Nota\n");
     let out = bin()
         .arg("--path")
-        .arg(&dir)
+        .arg(dir.path())
         .args(["check", "--sarif"])
         .output()
         .unwrap();
@@ -127,13 +149,13 @@ fn help_sin_subcomandos_git() {
 fn check_rev_es_uso() {
     let dir = temp_dir("check-rev-uso");
     write(
-        &dir,
+        dir.path(),
         "index.md",
         "---\ntype: Index\ntitle: Bundle\ndescription: Índice del bundle\nokf_version: \"0.1\"\n---\n\n# Bundle\n",
     );
     let status = bin()
         .arg("--path")
-        .arg(&dir)
+        .arg(dir.path())
         .args(["check", "--rev", "HEAD"])
         .status()
         .unwrap();
@@ -150,16 +172,21 @@ fn check_rev_es_uso() {
 fn check_working_tree_conforme() {
     let dir = temp_dir("check-wt-conforme");
     write(
-        &dir,
+        dir.path(),
         "index.md",
         "---\ntype: Index\ntitle: Bundle\ndescription: Índice del bundle\nokf_version: \"0.1\"\n---\n\n# Bundle\n",
     );
     write(
-        &dir,
+        dir.path(),
         "a.md",
         "---\ntype: Nota\ntitle: A\ndescription: d\n---\n\n# H\n\ncuerpo\n",
     );
-    let status = bin().arg("--path").arg(&dir).arg("check").status().unwrap();
+    let status = bin()
+        .arg("--path")
+        .arg(dir.path())
+        .arg("check")
+        .status()
+        .unwrap();
     assert_eq!(
         status.code(),
         Some(0),
@@ -200,9 +227,14 @@ fn workspace_con_enlace_roto(dir: &std::path::Path) {
 #[test]
 fn check_falla() {
     let dir = temp_dir("falla-check");
-    workspace_con_enlace_roto(&dir);
+    workspace_con_enlace_roto(dir.path());
 
-    let status = bin().arg("--path").arg(&dir).arg("check").status().unwrap();
+    let status = bin()
+        .arg("--path")
+        .arg(dir.path())
+        .arg("check")
+        .status()
+        .unwrap();
     assert_eq!(
         status.code(),
         Some(1),
@@ -217,20 +249,20 @@ fn check_falla() {
 fn check_conforme_json() {
     let dir = temp_dir("conforme-json");
     write(
-        &dir,
+        dir.path(),
         "index.md",
         "---\ntype: Index\ntitle: Bundle\ndescription: Índice del bundle\nokf_version: \"0.1\"\n---\n\n# Bundle\n",
     );
     // Documento sin enlaces rotos → conforme.
     write(
-        &dir,
+        dir.path(),
         "a.md",
         "---\ntype: Nota\ntitle: A\ndescription: d\n---\n\n# H\n\ncuerpo sin enlaces\n",
     );
 
     let out = bin()
         .arg("--path")
-        .arg(&dir)
+        .arg(dir.path())
         .args(["check", "--json"])
         .output()
         .unwrap();
@@ -252,24 +284,29 @@ fn check_conforme_json() {
 fn check_caza_edicion_directa() {
     let dir = temp_dir("edicion-directa");
     write(
-        &dir,
+        dir.path(),
         "index.md",
         "---\ntype: Index\ntitle: Bundle\ndescription: Índice del bundle\nokf_version: \"0.1\"\n---\n\n# Bundle\n",
     );
     // Estado inicial válido (sin enlaces rotos).
     write(
-        &dir,
+        dir.path(),
         "a.md",
         "---\ntype: Nota\ntitle: A\ndescription: d\n---\n\n# H\n\ncuerpo\n",
     );
     // Edición directa del Markdown a mano → queda inválido (añade un enlace a un `.md` inexistente).
     write(
-        &dir,
+        dir.path(),
         "a.md",
         "---\ntype: Nota\ntitle: A\ndescription: d\n---\n\n# H\n\ncuerpo editado a mano: [roto](no-existe.md)\n",
     );
 
-    let status = bin().arg("--path").arg(&dir).arg("check").status().unwrap();
+    let status = bin()
+        .arg("--path")
+        .arg(dir.path())
+        .arg("check")
+        .status()
+        .unwrap();
     assert_eq!(
         status.code(),
         Some(1),
@@ -284,11 +321,11 @@ fn check_caza_edicion_directa() {
 #[test]
 fn check_sarif_lista_diagnostico() {
     let dir = temp_dir("sarif-diag");
-    workspace_con_enlace_roto(&dir);
+    workspace_con_enlace_roto(dir.path());
 
     let out = bin()
         .arg("--path")
-        .arg(&dir)
+        .arg(dir.path())
         .args(["check", "--sarif"])
         .output()
         .unwrap();
@@ -312,11 +349,11 @@ fn check_sarif_lista_diagnostico() {
 #[test]
 fn check_json_lista_diagnostico() {
     let dir = temp_dir("json-diag");
-    workspace_con_enlace_roto(&dir);
+    workspace_con_enlace_roto(dir.path());
 
     let out = bin()
         .arg("--path")
-        .arg(&dir)
+        .arg(dir.path())
         .args(["check", "--json"])
         .output()
         .unwrap();
@@ -407,18 +444,18 @@ fn help_sin_generadores() {
 fn index_es_uso() {
     let dir = temp_dir("index-es-uso");
     write(
-        &dir,
+        dir.path(),
         "a.md",
         "---\ntype: Nota\ntitle: A\ndescription: d\n---\n\n# H\n",
     );
-    let status = bin().current_dir(&dir).arg("index").status().unwrap();
+    let status = bin().current_dir(dir.path()).arg("index").status().unwrap();
     assert_eq!(
         status.code(),
         Some(2),
         "`index` retirado → error de uso (exit 2), no generar el índice"
     );
     assert!(
-        !dir.join("index.md").exists(),
+        !dir.path().join("index.md").exists(),
         "un subcomando retirado no debe haber escrito nada en disco"
     );
 }
@@ -453,14 +490,14 @@ fn help_solo_check_y_reindex() {
 #[test]
 fn init_es_uso() {
     let dir = temp_dir("init-es-uso");
-    let status = bin().current_dir(&dir).arg("init").status().unwrap();
+    let status = bin().current_dir(dir.path()).arg("init").status().unwrap();
     assert_eq!(
         status.code(),
         Some(2),
         "`init` retirado → error de uso (exit 2), no crear scaffold"
     );
     assert!(
-        !dir.join("index.md").exists(),
+        !dir.path().join("index.md").exists(),
         "un subcomando retirado no debe haber creado el scaffold"
     );
 }
@@ -490,16 +527,16 @@ fn init_es_uso() {
 fn cli_no_asciende() {
     let proyecto = temp_dir("no-asciende");
     write(
-        &proyecto,
+        proyecto.path(),
         "index.md",
         "---\ntype: Index\ntitle: Bundle\ndescription: Índice del bundle\nokf_version: \"0.1\"\n---\n\n# Bundle\n",
     );
     // Hard fail que vive SOLO en el ancestro. MIGRADO en E16-H05: «sin frontmatter» dejó de
     // serlo, así que la premisa del escenario —que el ancestro dé exit 1— se sostiene ahora con
     // un bloque sin cerrar.
-    write(&proyecto, "malo.md", "---\ntype: Nota\n");
+    write(proyecto.path(), "malo.md", "---\ntype: Nota\n");
     // El subdirectorio, juzgado por sí mismo, es conforme.
-    let sub = proyecto.join("sub");
+    let sub = proyecto.path().join("sub");
     write(
         &sub,
         "a.md",
@@ -631,11 +668,11 @@ fn snapshot_arbol(dir: &std::path::Path) -> Vec<(String, Vec<u8>)> {
 #[test]
 fn dry_run_detecta() {
     let dir = temp_dir("mfo-detecta");
-    workspace_okf(&dir);
+    workspace_okf(dir.path());
 
     let out = bin()
         .arg("--path")
-        .arg(&dir)
+        .arg(dir.path())
         .args(["migrate-from-okf", "--dry-run"])
         .output()
         .unwrap();
@@ -690,13 +727,13 @@ fn dry_run_detecta() {
 #[test]
 fn dry_run_no_modifica() {
     let dir = temp_dir("mfo-no-modifica");
-    workspace_okf(&dir);
+    workspace_okf(dir.path());
 
-    let antes = snapshot_arbol(&dir);
+    let antes = snapshot_arbol(dir.path());
 
     let out = bin()
         .arg("--path")
-        .arg(&dir)
+        .arg(dir.path())
         .args(["migrate-from-okf", "--dry-run"])
         .output()
         .unwrap();
@@ -711,7 +748,7 @@ fn dry_run_no_modifica() {
         String::from_utf8_lossy(&out.stderr)
     );
 
-    let despues = snapshot_arbol(&dir);
+    let despues = snapshot_arbol(dir.path());
     assert_eq!(
         antes, despues,
         "`migrate-from-okf --dry-run` no debe modificar, crear ni borrar ningún fichero del árbol"
@@ -731,11 +768,11 @@ fn dry_run_no_modifica() {
 #[test]
 fn dry_run_workspace_limpio() {
     let dir = temp_dir("mfo-limpio");
-    lodestar_fixtures::materialize(&lodestar_fixtures::arbitrary(), &dir).unwrap();
+    lodestar_fixtures::materialize(&lodestar_fixtures::arbitrary(), dir.path()).unwrap();
 
     let out = bin()
         .arg("--path")
-        .arg(&dir)
+        .arg(dir.path())
         .args(["migrate-from-okf", "--dry-run"])
         .output()
         .unwrap();
@@ -770,11 +807,11 @@ fn dry_run_workspace_limpio() {
 #[test]
 fn migrate_sin_dry_run_es_uso() {
     let dir = temp_dir("mfo-sin-flag");
-    workspace_okf(&dir);
+    workspace_okf(dir.path());
 
     let out = bin()
         .arg("--path")
-        .arg(&dir)
+        .arg(dir.path())
         .arg("migrate-from-okf")
         .output()
         .unwrap();
@@ -909,15 +946,15 @@ fn codigos_del_json(v: &serde_json::Value) -> Vec<String> {
 #[test]
 fn check_y_knowledge_check_coinciden_con_ignore() {
     let dir = temp_dir("h01-coinciden-ignore");
-    workspace_dos_defectos(&dir);
+    workspace_dos_defectos(dir.path());
     write(
-        &dir,
+        dir.path(),
         ".lodestar/config.yaml",
         "validation:\n  danglingDocumentLinks: ignore\n  malformedFrontmatter: ignore\n",
     );
 
     // (1) El veredicto del motor de servicios: las dos familias están suprimidas ⇒ conforme.
-    let report = knowledge_check_workspace(&dir);
+    let report = knowledge_check_workspace(dir.path());
     assert_eq!(
         report.summary.errors,
         0,
@@ -933,7 +970,7 @@ fn check_y_knowledge_check_coinciden_con_ignore() {
     );
 
     // (2) El veredicto de la puerta de CI sobre el MISMO workspace debe ser el MISMO.
-    let (code, json) = check_json(&dir);
+    let (code, json) = check_json(dir.path());
     assert_eq!(
         code,
         Some(0),
@@ -972,14 +1009,14 @@ fn check_y_knowledge_check_coinciden_con_ignore() {
 #[test]
 fn check_y_knowledge_check_coinciden_con_error() {
     let dir = temp_dir("h01-coinciden-error");
-    workspace_dos_defectos(&dir);
+    workspace_dos_defectos(dir.path());
     write(
-        &dir,
+        dir.path(),
         ".lodestar/config.yaml",
         "validation:\n  danglingDocumentLinks: error\n",
     );
 
-    let report = knowledge_check_workspace(&dir);
+    let report = knowledge_check_workspace(dir.path());
     assert!(
         report.summary.errors >= 1,
         "con `danglingDocumentLinks: error` el enlace roto debe contar como error en \
@@ -993,7 +1030,7 @@ fn check_y_knowledge_check_coinciden_con_error() {
         resumen_reporte(&report)
     );
 
-    let (code, json) = check_json(&dir);
+    let (code, json) = check_json(dir.path());
     assert_eq!(
         code,
         Some(1),
@@ -1031,13 +1068,17 @@ fn check_y_knowledge_check_coinciden_con_error() {
 #[test]
 fn check_ve_diagnosticos_de_descubrimiento() {
     let dir = temp_dir("h01-descubrimiento");
-    write(&dir, "notas/uno.md", "# Uno\n\nCuerpo sin enlaces.\n");
+    write(dir.path(), "notas/uno.md", "# Uno\n\nCuerpo sin enlaces.\n");
     // `.md` no UTF-8: 0xF0 abre una secuencia de 4 bytes y 0x28 no es continuación válida.
-    std::fs::write(dir.join("notas/binario.md"), [0xF0, 0x28, 0x8C, 0xBC]).unwrap();
+    std::fs::write(
+        dir.path().join("notas/binario.md"),
+        [0xF0, 0x28, 0x8C, 0xBC],
+    )
+    .unwrap();
 
     // Precondición no vacua: `knowledge_check` SÍ ve el diagnóstico de descubrimiento (E20-H04). Si
     // esto fallara, el fixture no estaría produciendo el DOC-NOT-UTF8 y el test sería vacuo.
-    let report = knowledge_check_workspace(&dir);
+    let report = knowledge_check_workspace(dir.path());
     assert!(
         report
             .diagnostics
@@ -1048,7 +1089,7 @@ fn check_ve_diagnosticos_de_descubrimiento() {
         resumen_reporte(&report)
     );
 
-    let (code, json) = check_json(&dir);
+    let (code, json) = check_json(dir.path());
     let codigos = codigos_del_json(&json);
     assert!(
         codigos.iter().any(|c| c == "DOC-NOT-UTF8"),
@@ -1070,5 +1111,262 @@ fn check_ve_diagnosticos_de_descubrimiento() {
          convertir la puerta en roja — knowledge_check declara el mismo workspace conforme \
          (errors == {}). json = {json}",
         report.summary.errors
+    );
+}
+
+// ---------------------------------------------------------------------------
+// E23-H08 — Cobertura de `lodestar reindex`
+// (`requirements/epica-23-cierre-migracion.md`, invariante #1 y #5 de `CLAUDE.md`)
+//
+// HUECO QUE CIERRAN: `reindex` es 1 de los 3 subcomandos del producto y hasta E23-H08 **ningún test
+// lo invocaba** — solo aparecía en la aserción de `--help` (`help_solo_check_y_reindex`), que
+// comprueba que se anuncia, no que funcione. El hueco estaba declarado como «Pendiente» en el ledger
+// desde E15.
+//
+// NO son fase roja: la implementación existe (`commands::reindex`) y los tests salen VERDES. Su
+// valor es de cobertura y regresión, así que la exigencia se traslada a la NO-VACUIDAD: cada uno
+// asevera algo que un `reindex` roto (o degradado a no-op) rompería.
+//
+// CÓMO SE OBSERVA LA CACHE: con `lodestar_store::Store::open`, que aplica el DDL pero **no** indexa.
+// Es deliberado: `Workspace::enable_cache()` —el camino que usa el propio subcomando— llama a
+// `rebuild()`, así que responder por ahí daría el inventario correcto AUNQUE `reindex` no hubiera
+// escrito una sola fila; sería un observable vacuo. Lo que devuelve `documentos_en_cache` es,
+// literalmente, lo que el subcomando dejó persistido en `.lodestar/index.db`.
+//
+// POR QUÉ NO SE USA `check --json` COMO OBSERVABLE (lo que sugería el criterio de la historia):
+// `check` no lee la cache en ningún momento —recorre el disco por `document_set()`—, de modo que su
+// salida es idéntica antes y después de cualquier `reindex`, incluso de uno que no hiciera nada.
+// Comparar dos `check` sería trivialmente cierto.
+// ---------------------------------------------------------------------------
+
+/// Monta el workspace de los tests de `reindex` y devuelve los paths de sus documentos, ordenados.
+///
+/// Incluye un fichero que **no** es documento (`src/main.rs`): así la lista esperada no es «todo lo
+/// que hay en el árbol» y una cache que indexara de más también fallaría.
+fn workspace_para_reindex(dir: &std::path::Path) -> Vec<String> {
+    write(
+        dir,
+        "guia.md",
+        "---\nestado: vigente\n---\n\n# Guía\n\nVer [alfa](notas/alfa.md).\n",
+    );
+    write(dir, "notas/alfa.md", "# Alfa\n\nCuerpo de la nota alfa.\n");
+    write(
+        dir,
+        "notas/beta.md",
+        "---\ntags: [uno, dos]\n---\n\n# Beta\n",
+    );
+    write(dir, "src/main.rs", "fn main() {}\n");
+    vec![
+        "guia.md".to_string(),
+        "notas/alfa.md".to_string(),
+        "notas/beta.md".to_string(),
+    ]
+}
+
+/// La ruta de la cache derivada de un workspace.
+fn ruta_cache(root: &std::path::Path) -> std::path::PathBuf {
+    root.join(".lodestar/index.db")
+}
+
+/// Los documentos indexados en `.lodestar/index.db`, leídos **sin reconstruir la cache**
+/// (`Store::open` aplica el DDL pero no indexa — ver la cabecera del bloque).
+fn documentos_en_cache(root: &std::path::Path) -> Vec<String> {
+    let store = lodestar_store::Store::open(root).expect("la cache debe poder abrirse");
+    let mut docs: Vec<String> = store
+        .documents()
+        .expect("la cache debe poder consultarse")
+        .iter()
+        .map(|p| p.as_str().to_string())
+        .collect();
+    docs.sort();
+    docs
+}
+
+/// Corre `lodestar --path <root> reindex` y devuelve `(exit code, stdout)`.
+fn corre_reindex(root: &std::path::Path) -> (Option<i32>, String) {
+    let out = bin()
+        .arg("--path")
+        .arg(root)
+        .arg("reindex")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert!(
+        out.status.code() != Some(101),
+        "`reindex` no debe panicar; stderr=\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    (out.status.code(), stdout)
+}
+
+/// Snapshot del árbol **canónico** (todo menos lo derivado): los `.md` y demás ficheros del
+/// proyecto, sin `.lodestar/` (cache + runtime, derivados y desechables) ni `.gitignore`.
+///
+/// El `.gitignore` se excluye porque hoy `Workspace::open` lo reescribe al abrir (síntoma
+/// documentado de **E23-H12**, que es quien debe cerrarlo con `check_no_ensucia_el_working_tree`):
+/// incluirlo aquí mezclaría dos historias y haría fallar a esta por un defecto ajeno.
+fn snapshot_canonico(dir: &std::path::Path) -> Vec<(String, Vec<u8>)> {
+    snapshot_arbol(dir)
+        .into_iter()
+        .filter(|(rel, _)| !rel.starts_with(".lodestar/") && rel != ".gitignore")
+        .collect()
+}
+
+/// **E23-H08** · Criterio `reindex_crea_cache`: **Dado** un workspace sin cache, **Cuando** se corre
+/// `lodestar reindex`, **Entonces** existe `.lodestar/index.db` y el exit es `0`.
+///
+/// NO-VACUIDAD: no basta con que el fichero exista —`Store::open` crea un `index.db` vacío con solo
+/// aplicar el DDL—, así que se exige además que quede **poblado** con exactamente los 3 documentos
+/// del workspace (y no con `src/main.rs`, que no es documento). Un `reindex` que abriera la cache y
+/// no indexara pasaría la aserción de existencia y fallaría esta.
+#[test]
+fn reindex_crea_cache() {
+    let dir = temp_dir("reindex-crea");
+    let esperados = workspace_para_reindex(dir.path());
+    let db = ruta_cache(dir.path());
+    assert!(
+        !db.exists(),
+        "precondición: el workspace arranca SIN cache (si ya existiera, el test sería vacuo)"
+    );
+
+    let (code, stdout) = corre_reindex(dir.path());
+    assert_eq!(code, Some(0), "`reindex` sale 0; stdout=\n{stdout}");
+    assert!(
+        db.exists(),
+        "`reindex` debe crear la cache en `.lodestar/index.db`"
+    );
+    assert!(
+        std::fs::metadata(&db).unwrap().len() > 0,
+        "la cache creada no puede ser un fichero de 0 bytes"
+    );
+    assert_eq!(
+        documentos_en_cache(dir.path()),
+        esperados,
+        "la cache debe quedar POBLADA con los documentos del workspace (y solo con ellos: \
+         `src/main.rs` no es documento)"
+    );
+}
+
+/// **E23-H08** · Criterio `reindex_es_idempotente`: **Dado** una cache recién creada, **Cuando** se
+/// corre `reindex` otra vez, **Entonces** exit `0` y el resultado observable es idéntico.
+///
+/// OBSERVABLE ELEGIDO (y por qué no es trivialmente cierto):
+///  1. el **contenido indexado** de la cache leído sin reconstruirla (`documentos_en_cache`) — no
+///     un `check --json`, que jamás toca la cache y por tanto sería idéntico incluso si `reindex`
+///     fuera un no-op;
+///  2. el **árbol canónico byte a byte** antes y después de las dos pasadas: la cache es derivada y
+///     desechable (invariante #1), así que reconstruirla no puede tocar ni un `.md` ni un fichero
+///     del proyecto. Esta es la aserción que caza el fallo caro de verdad;
+///  3. exit `0` y el **mismo stdout** en las dos pasadas (la segunda no puede degradarse a un error
+///     por «la cache ya existe», que es el modo de fallo clásico de un reindex no idempotente).
+///
+/// GUARDA ANTI-VACUA (fase 3): tras comparar las dos pasadas se **añade** un documento y se vuelve a
+/// reindexar, exigiendo que la cache pase a tener 4. Demuestra que el observable comparado es
+/// SENSIBLE al estado del workspace: si `documentos_en_cache` devolviera siempre lo mismo (porque
+/// `reindex` no reconstruye, o porque se estuviera leyendo un rebuild propio del test en vez de lo
+/// persistido), la igualdad de las fases 1-2 no significaría nada y esta fase fallaría.
+#[test]
+fn reindex_es_idempotente() {
+    let dir = temp_dir("reindex-idempotente");
+    let esperados = workspace_para_reindex(dir.path());
+    let canonico_inicial = snapshot_canonico(dir.path());
+
+    let (code1, stdout1) = corre_reindex(dir.path());
+    assert_eq!(code1, Some(0), "primera pasada: exit 0; stdout=\n{stdout1}");
+    let docs1 = documentos_en_cache(dir.path());
+    assert_eq!(docs1, esperados, "primera pasada: cache poblada");
+
+    let (code2, stdout2) = corre_reindex(dir.path());
+    assert_eq!(
+        code2,
+        Some(0),
+        "segunda pasada sobre una cache YA existente: exit 0; stdout=\n{stdout2}"
+    );
+    let docs2 = documentos_en_cache(dir.path());
+
+    assert_eq!(
+        docs2, docs1,
+        "correr `reindex` dos veces debe dejar la cache con el mismo inventario (ni duplicados ni \
+         pérdidas)"
+    );
+    assert_eq!(
+        stdout2, stdout1,
+        "la segunda pasada debe reportar lo mismo que la primera"
+    );
+    assert_eq!(
+        snapshot_canonico(dir.path()),
+        canonico_inicial,
+        "la cache es derivada y desechable: reconstruirla (dos veces) no puede modificar, crear ni \
+         borrar ningún fichero canónico del proyecto"
+    );
+
+    // --- guarda anti-vacua: el observable es sensible al estado del workspace ------------------
+    write(
+        dir.path(),
+        "notas/gamma.md",
+        "# Gamma\n\nDocumento nuevo.\n",
+    );
+    let (code3, _) = corre_reindex(dir.path());
+    assert_eq!(code3, Some(0), "tercera pasada: exit 0");
+    let docs3 = documentos_en_cache(dir.path());
+    assert_eq!(
+        docs3.len(),
+        esperados.len() + 1,
+        "`reindex` reconstruye desde disco: un documento nuevo debe aparecer en la cache. Sin esto, \
+         la igualdad de las dos primeras pasadas sería vacua. Cache = {docs3:?}"
+    );
+    assert!(
+        docs3.contains(&"notas/gamma.md".to_string()),
+        "la cache debe contener el documento añadido: {docs3:?}"
+    );
+}
+
+/// **E23-H08** · Criterio `reindex_sobre_cache_corrupta`: **Dado** un `index.db` con bytes basura,
+/// **Cuando** se corre `reindex`, **Entonces** exit `0` y la cache queda usable.
+///
+/// La cache es DESECHABLE (invariante #1): un fichero corrupto —un `git checkout` a medias, un disco
+/// lleno, un kill durante una escritura— no puede dejar a `lodestar` sin poder abrirla nunca más. El
+/// precedente a nivel de crate es `cache_corrupta_se_recrea_sola`
+/// (`crates/lodestar-store/tests/store.rs`), que prueba `Store::open`; esto lo prueba **por la
+/// fachada**, que es donde el usuario lo sufre.
+///
+/// NO-VACUIDAD: «usable» no se comprueba volviendo a abrir la cache y ya (`Store::open` borra y
+/// recrea el fichero corrupto por su cuenta, así que eso pasaría aunque `reindex` hubiera fallado):
+/// se exige que la cache quede **poblada** con los 3 documentos y que el fichero ya no sea la basura
+/// que se escribió (cabecera SQLite real).
+#[test]
+fn reindex_sobre_cache_corrupta() {
+    let dir = temp_dir("reindex-corrupta");
+    let esperados = workspace_para_reindex(dir.path());
+
+    // Cache corrupta: bytes que no son una base SQLite (incluye NUL y bytes no UTF-8).
+    let db = ruta_cache(dir.path());
+    std::fs::create_dir_all(db.parent().unwrap()).unwrap();
+    let basura: Vec<u8> = (0u8..=255).cycle().take(4096).collect();
+    std::fs::write(&db, &basura).unwrap();
+    assert!(
+        !std::fs::read(&db)
+            .unwrap()
+            .starts_with(b"SQLite format 3\0"),
+        "precondición: el `index.db` de partida NO es una base SQLite"
+    );
+
+    let (code, stdout) = corre_reindex(dir.path());
+    assert_eq!(
+        code,
+        Some(0),
+        "`reindex` sobre una cache corrupta debe recrearla y salir 0, no propagar el error de \
+         SQLite; stdout=\n{stdout}"
+    );
+
+    let bytes = std::fs::read(&db).unwrap();
+    assert!(
+        bytes.starts_with(b"SQLite format 3\0"),
+        "tras el reindex, `index.db` debe ser una base SQLite real (los bytes basura se descartan)"
+    );
+    assert_eq!(
+        documentos_en_cache(dir.path()),
+        esperados,
+        "la cache recreada debe quedar usable Y poblada con los documentos del workspace"
     );
 }

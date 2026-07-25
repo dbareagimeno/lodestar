@@ -499,8 +499,10 @@ dependencies = [
  "lodestar-app",
  "lodestar-core",
  "lodestar-fixtures",
+ "lodestar-store",
  "lodestar-workspace",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]
