@@ -3,29 +3,48 @@
 > Mapea las épicas/historias de [`requirements/`](requirements/) a su estado real en esta rama.
 > Construido en el **orden de fases ratificado** (`ARCHITECTURE.md §14`), validando con tests en cada fase.
 >
-> **Resumen**: **todas las épicas (E0–E8) están implementadas y verificadas.** Backend completo
-> (core + store SQLite/FTS5+watcher con paridad SQL==core + vcs con switch/merge/hooks + workspace con
-> bus en vivo + CLI + MCP con golden cross-fachada) y **escritorio completo** (fachada Tauri v2 con la
-> tabla de comandos congelados + evento `bundle:changed`, y UI Svelte 5 funcional: árbol, editor
-> multi-escritor, isla del grafo, modo Cambios). **~113 tests** en verde; `cargo clippy --workspace
-> --all-targets --all-features --locked -- -D warnings` limpio; `cargo doc -D warnings` limpio;
-> `npm run check`/`build` del frontend en verde. Ya hay **pipeline de release multiplataforma**
-> (`release.yml`: macOS arm64 · Windows · Linux, bundles **sin firmar**) y **CI multiplataforma**.
-> Lo pendiente es **producto/pulido**, no arquitectura (firma/notarización de bundles, rails
-> redimensionables, rmcp, `.d.ts` generado): ver [`DECISIONES.md`](DECISIONES.md).
+> **Resumen** (actualizado en `E23-H13`): el repo es un **motor headless de integridad semántica**
+> sobre workspaces Markdown universales (`ARCHITECTURE.md §20`, v0.3.0). Las épicas **E0–E8**
+> (fundacionales), **E9–E14** (giro headless) y **E15–E22** (migración de OKF a Markdown universal)
+> están **completas**; **E23** (cierre: defectos hallados en la revisión de la PR #17) está en curso.
+> Backend: `core` puro + `store` SQLite/FTS5 con paridad SQL==core + `workspace` (único escritor,
+> transaccional) + `app` (servicios de caso de uso) + las dos fachadas `cli` y `mcp`. **372 tests**
+> en verde (+4 de crash-recovery tras `--features test-failpoints`, que el CI corre desde E23-H06);
+> `clippy -D warnings` y `cargo doc -D warnings` limpios; pureza del core verificada por CI.
+>
+> **Ya no forman parte de este repo**: la app de escritorio (Tauri + Svelte, movida a
+> `experimental/ui-desktop` con el giro headless), el crate `lodestar-vcs` y `git2` (borrados en
+> `E15-H01`), los generadores `init`/`index`/`tags`/`export`/`import` (`E15-H02`/`H03`) y el arnés
+> diferencial JS-vs-Rust (`E15-H04`). Las secciones de E0–E8 de más abajo conservan esa terminología
+> como **historia del proyecto**; la autoridad viva es `ARCHITECTURE.md §20`.
+>
+> Lo pendiente está en [`DECISIONES.md`](DECISIONES.md): fechas en el lenguaje de consulta (§12),
+> `Conformant → Valid` (§13) y el **store sin consumidor** (§14, abierto en E23-H16).
 
 ## Cómo correrlo
 
 ```bash
-cargo test --workspace          # ~113 tests (incl. 6 diferenciales JS-vs-Rust; core, store, cli, vcs, workspace, mcp)
-cargo run -p lodestar-cli -- check --path <bundle>     # la puerta de CI (exit 0/1)
-cargo run -p lodestar-cli -- log | last-conforming | branch | switch | merge | hooks
-cargo run -p lodestar-mcp [-- --root <dir>]            # servidor MCP por stdio (raíz = cwd)
+cargo test --workspace --locked                       # 372 tests
+cargo test -p lodestar-workspace --features test-failpoints --locked   # +4 de crash-recovery
+cargo run -p lodestar-cli -- check [--path <dir>]     # la puerta de CI (exit 0/1/2/3)
+cargo run -p lodestar-cli -- reindex                  # reconstruye .lodestar/index.db
+cargo run -p lodestar-cli -- migrate-from-okf --dry-run
+cargo run -p lodestar-mcp [-- --root <dir>] [--profile readonly|standard]   # MCP por stdio
 ```
 (La app de escritorio —`frontend/` + `src-tauri/`, binario `lodestar-desktop`— se retiró de `main`
-a la rama `experimental/ui-desktop`; ya no se construye ni se ejecuta desde este repo headless.)
+a la rama `experimental/ui-desktop`; ya no se construye ni se ejecuta desde este repo headless. Los
+subcomandos git de la CLI —`log`/`last-conforming`/`branch`/`switch`/`merge`/`hooks`— se retiraron en
+`E9-H02` y su mecánica se borró en `E15-H01`.)
 
-## Estado por épica
+## Estado por épica (E0–E8) — **histórico**
+
+> ⚠️ Esta tabla describe las épicas fundacionales **tal como se construyeron**, y su vocabulario es
+> el de v0.1/v0.2 (OKF, bundle, concept, conformidad, git, UI). Varias de las capacidades que lista
+> **ya no existen**: `lodestar-vcs` y `git2` se borraron en `E15-H01`, los generadores
+> (`index`/`tags`/`export`/`init`) en `E15-H02`/`H03`, el arnés diferencial en `E15-H04`, la UI se
+> movió a `experimental/ui-desktop`, y las 13 tools de E7 convergieron a las **10** de `§20.10`.
+> Se conserva como historia del proyecto. **El estado vigente son las secciones de E9–E14 y E15–E23**
+> de más abajo; la autoridad de diseño es `ARCHITECTURE.md §20`.
 
 | Épica | Estado | Detalle |
 |---|---|---|
@@ -139,24 +158,34 @@ verificación empírica; ~40 defectos corregidos con tests de regresión. Lo má
 
 ## Invariantes verificados
 
-- **Core puro**: `lodestar-core` no declara `tauri`/`rusqlite`/`notify`/`tokio`/`git2`; `#![forbid(unsafe_code)]`.
-- **Una sola verdad computada**: la conformidad por commit (vcs) y el gate (cli) usan el **mismo** `core::analyze`.
-- **Un solo contrato de tipos**: definido una vez en `core::types`; el front lo refleja (a generar con ts-rs).
+- **Core puro**: `lodestar-core` no declara `tauri`/`rusqlite`/`notify`/`tokio`/`git2`/`zip`;
+  `#![forbid(unsafe_code)]`. Verificado por el job `core-purity` del CI.
+- **Una sola verdad computada**: `lodestar check` y `knowledge_check` juzgan con el mismo motor
+  (`E23-H01`; hasta entonces divergían cuando `.lodestar/config.yaml` tenía sección `validation`).
+- **Un solo contrato de tipos**: definido una vez en `core::types`. **Sin espejo TS**: desapareció al
+  retirar la UI a `experimental/ui-desktop`, y con él la nota de ts-rs.
 - **RelPath**: newtype validado; único chokepoint de path-traversal (tests de absolutas/`..`).
-- **git vocabulario directo + transporte híbrido**: libgit2 local, binario `git` solo para red.
 - **Único escritor**: la workspace escribe `.md` atómico (temp+rename); nadie más escribe.
+- **Crash-recovery**: un crash a mitad de la publicación nunca deja un `.md` parcial. Verificado por
+  los 4 tests tras `--features test-failpoints`, que el **CI ejecuta desde `E23-H06`**.
+- ~~**git vocabulario directo**~~ — retirado con `lodestar-vcs` en `E15-H01` (`§20.13`).
 
-## Próximos pasos (todo opcional — producto/pulido, ver [`DECISIONES.md`](DECISIONES.md))
+## Próximos pasos (ver [`DECISIONES.md`](DECISIONES.md))
 
-Las 9 épicas (E0–E8) están implementadas. Lo que queda no es arquitectura:
+Cerrar **E23** (defectos de la revisión de la PR #17) es lo único que bloquea el merge de v0.3.0. Lo
+demás está abierto a criterio del usuario:
 
-1. **Empaquetado** (§1): plataformas objetivo, iconos de marca y pipeline de release **ya hechos**
-   (`release.yml`, tres plataformas, bundles sin firmar); queda la **firma/notarización** + **updater**.
-2. **Pulido de UI** (§2): rails redimensionables por arrastre, overlay de grafo, resaltado con la
-   semántica del core.
-3. **E0-H04/E6-H03** (§4): generar el `.d.ts` desde Rust (ts-rs/specta).
-4. **E7** (§3): adoptar `rmcp` oficial + resources cuando un cliente lo exija.
-5. **E8** (§9): gate de bench (§11), threat model.
+1. **`DECISIONES §14`** — el store (épica E18) no tiene consumidor: ninguna tool lee de SQLite y
+   `document_set()` reparsea la base entera en cada llamada. Decidir si se conecta, se acota o se
+   retira.
+2. **`DECISIONES §12`** — las fechas se comparan lexicográficamente (`serde_yaml` no tipa
+   timestamps). Documentarlo o introducir un tipo fecha.
+3. **`DECISIONES §13`** — `Conformant → Valid`: la mitad que falta de `§20.3`; toca el catálogo de
+   errores congelado.
+4. **`docs/PROPUESTA_CLI.md`** — la CLI como gestor de KB (hoy solo es puerta de CI). Pendiente de
+   `/planificar` en una PR posterior.
+5. **`DECISIONES §3`/`§9`** — `rmcp` oficial + resources cuando un cliente lo exija; gate de bench y
+   threat model.
 
 ## Giro a motor headless de integridad semántica (E9–E14) — COMPLETO
 
@@ -538,7 +567,7 @@ superficie de producto; git queda como crate dormido) y `DECISIONES.md §0`. Des
 
 ---
 
-## Migración a workspaces Markdown universales (E15–E22) — EN CURSO
+## Migración a workspaces Markdown universales (E15–E22) — COMPLETA
 
 > Rama `refactor/markdown-universal`. Diseño ratificado: `ARCHITECTURE.md §20` (2026-07-23; fuente:
 > `docs/REFACTOR_PHASE_2.md`). Lodestar deja de exigir OKF y opera sobre cualquier red de `.md` de un
@@ -546,14 +575,15 @@ superficie de producto; git queda como crate dormido) y `DECISIONES.md §0`. Des
 
 | Épica | Estado | Detalle |
 |---|---|---|
-| **E15** Workspace universal | 🟡 En curso | Retirada de vcs/generadores/init-zip/prototipo · raíz = `cwd` · descubrimiento recursivo · config opcional. |
-| **E16** Modelo documental genérico | 🟡 En curso | ✅ H01 `ParsedFrontmatter` YAML arbitrario · ✅ H02 sin ficheros reservados · ✅ H03 título derivado · ⚪ H04 patch quirúrgico · ⚪ H05 diagnósticos mínimos · ⚪ H06 `Concept`→`Document`. |
-| **E17** Enlaces y grafo universal | ⚪ Pendiente | Parser de enlaces (`pulldown-cmark`) · `LinkTarget` · diagnósticos de enlace · `Analysis` nueva · superficie de grafo. |
-| **E18** Store v2 | ⚪ Pendiente | DDL nuevo, metadata anidada, links genéricos, cold rebuild, paridad core/store. |
-| **E19** Lenguaje de consulta | ⚪ Pendiente | Parser · AST · type checking · namespaces · filtro JSON equivalente. |
-| **E20** Inspección y validación genéricas | ⚪ Pendiente | `metadata_inspect` (retira `core::schema`) · política `rejectNewErrors`/`allowExistingErrors`. |
-| **E21** Contrato MCP y transacciones genéricas | ⚪ Pendiente | Contrato nuevo · 8 operaciones universales · selecciones masivas por consulta. |
-| **E22** Migración y limpieza pública | ⚪ Pendiente | `migrate-from-okf --dry-run` · docs · README · publicación incompatible. |
+| **E15** Workspace universal | ✅ Completa | Retirada de vcs/generadores/init-zip/prototipo · raíz = `cwd` · descubrimiento recursivo · config opcional (H01–H09). |
+| **E16** Modelo documental genérico | ✅ Completa | `ParsedFrontmatter` YAML arbitrario · sin ficheros reservados · título derivado · patch quirúrgico · diagnósticos mínimos · `Concept`→`Document` (H01–H06). |
+| **E17** Enlaces y grafo universal | ✅ Completa | `pulldown-cmark` en el core · `LinkTarget` · diagnósticos de enlace · `Analysis` nueva · grafo universal + cableado de `other_files`. |
+| **E18** Store v2 | ✅ Completa | DDL nuevo, metadata anidada por field path, links genéricos, cold rebuild, paridad core/store. **Sin consumidor en el producto** → `DECISIONES §14`. |
+| **E19** Lenguaje de consulta | ✅ Completa | Parser · AST único · type checking sin coerción · namespaces `document.*`/`graph.*` · filtro JSON equivalente. |
+| **E20** Inspección y validación genéricas | ✅ Completa | `metadata_inspect` (retira `core::schema`) · política `rejectNewErrors`/`allowExistingErrors` · diagnósticos de descubrimiento cableados. |
+| **E21** Contrato MCP y transacciones genéricas | ✅ Completa | 8 operaciones universales · selecciones masivas por consulta · `move` por span · `delete` con política explícita. |
+| **E22** Migración y limpieza pública | ✅ Completa | `migrate-from-okf --dry-run` · README · v0.3.0 incompatible · e2e de la migración. |
+| **E23** Cierre de la migración | 🟡 En curso | Defectos de la revisión de la PR #17 · puerta de CI (failpoints) · e2e de sesión larga · schema de escritura · documentos. Ver [`epica-23`](requirements/epica-23-cierre-migracion.md). |
 
 ### E15 — Workspace universal
 
