@@ -103,7 +103,8 @@ hard-fail · `2` uso · `3` runtime/IO.
 ## Build desde el código
 
 ```bash
-cargo test --workspace --locked        # la suite completa
+cargo test --workspace --locked        # la suite completa (372 tests)
+cargo test -p lodestar-workspace --features test-failpoints --locked   # +4 de crash-recovery
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 ```

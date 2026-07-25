@@ -68,6 +68,19 @@ jobs:
       - name: Tests
         run: cargo test --workspace --locked
 
+      # E23-H06: los 4 tests de crash-recovery de E13-H06 viven tras `#[cfg(feature =
+      # "test-failpoints")]` (`crates/lodestar-workspace/tests/transactions.rs`), así que el paso de
+      # arriba NO los ejecuta: `cargo test --workspace` no activa features opcionales. Se quedaron
+      # fuera de la puerta desde E13 hasta que la revisión de la PR #17 lo destapó.
+      #
+      # Importa porque son la garantía NUCLEAR del producto: `recovery_sin_parciales` es —por
+      # declaración del propio `benchmark.rs`— la prueba autoritativa de que un crash a mitad de la
+      # publicación nunca deja un `.md` a medias, y `recovery_bloquea_escritura` es el único test del
+      # repo que asevera `WORKSPACE_RECOVERY_REQUIRED`. Sin este step, clippy los compila (por
+      # `--all-features`) pero nadie los ejecuta: no se pudren, pero tampoco muerden.
+      - name: Tests de crash-recovery (feature `test-failpoints`)
+        run: cargo test -p lodestar-workspace --features test-failpoints --locked
+
       - name: Doc (los doc-comments deben compilar; intra-doc links rotos = error)
         run: cargo doc --workspace --no-deps --locked
         env:

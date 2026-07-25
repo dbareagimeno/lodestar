@@ -77,12 +77,17 @@ Mapa de documentos — quién manda sobre qué:
 
 ### Build, test y lint (lo que corre el CI — `.github/workflows/ci.yml`)
 ```bash
-cargo test --workspace --locked        # ~113 tests (incl. 6 diferenciales JS-vs-Rust)
+cargo test --workspace --locked        # 372 tests
+cargo test -p lodestar-workspace --features test-failpoints --locked   # +4 de crash-recovery
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 cargo doc --workspace --no-deps --locked   # con RUSTDOCFLAGS="-D warnings"
 ```
 - Sin node: `E15-H04` retiró el arnés diferencial, así que `cargo test` basta.
+- **`--features test-failpoints` no es opcional** (`E23-H06`): los 4 tests de crash-recovery de
+  E13-H06 están gateados tras esa feature, así que `cargo test --workspace` **no los ejecuta**.
+  Son la garantía nuclear (un crash nunca deja un `.md` a medias) y el CI los corre en un step
+  propio.
 - El CI también verifica la **pureza del core** (`cargo tree -p lodestar-core` sin
   tokio/rusqlite/git2/notify/tauri/zip) y que el workspace entero no arrastre
   `git2`/`lodestar-vcs`/`zip` (retirados en `E15-H01`/`E15-H03`).
