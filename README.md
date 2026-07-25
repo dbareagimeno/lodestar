@@ -39,6 +39,10 @@ editor, sin GUI y sin git en la superficie.
   "security"`, `graph.backlinks = 0` — sobre cualquier propiedad YAML, con dot-notation y **sin
   coerción de tipos** (`priority >= "high"` es un error de tipo, no un `false` silencioso). La
   consulta textual (`where`) y el filtro JSON (`filter`) producen el mismo resultado.
+  > **Fechas**: no hay tipo fecha. Un `2026-07-23` del frontmatter es un **string**, y comparar
+  > orden entre strings es **lexicográfico**. Con fechas ISO-8601 bien formadas eso coincide con el
+  > orden cronológico, pero no con formatos mixtos (`2026-7-3`) ni entre zonas horarias distintas.
+  > Tampoco hay `now()`, fechas relativas ni `mtime` del fichero. Ver [`DECISIONES.md §12`](DECISIONES.md).
 - **Inspección de metadata sin schema**: `metadata_inspect` descubre qué campos usa una base
   desconocida, en cuántos documentos aparece cada uno y qué valores toma.
 - **Modelo transaccional recuperable**: `change_plan` (normaliza/simula/valida, `planHash`) →
