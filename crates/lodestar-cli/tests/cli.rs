@@ -790,3 +790,285 @@ fn migrate_sin_dry_run_es_uso() {
         "el error de uso debe guiar hacia `--dry-run`; stderr=\n{stderr}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// E23-H01 — Una sola verdad de validación
+// (`requirements/epica-23-cierre-migracion.md`, `CLAUDE.md` invariante #3, `§20.9`)
+//
+// SÍNTOMA REPRODUCIDO (no deducido): con `.lodestar/config.yaml` →
+// `validation: {danglingDocumentLinks: ignore, malformedFrontmatter: ignore}` sobre un workspace con
+// un enlace roto y un YAML ilegible, `lodestar check` imprime `NO CONFORME` y sale **1** mientras que
+// `knowledge_check` responde `conformant: true` con `summary.errors: 0`. Dos veredictos
+// contradictorios sobre el MISMO workspace, con el mismo motor debajo.
+//
+// CAUSA: `App::full_analysis()` va por `document_set().analyze()` a secas —sin la política de
+// severidad de `ValidationSection::effective_severity` y sin los diagnósticos de descubrimiento—,
+// mientras que `App::knowledge_check` sí pasa por `document_set_with_discovery()` + la política.
+//
+// UBICACIÓN de los tests: aquí, en la fachada CLI, y no solo en `lodestar-app`, porque el criterio de
+// aceptación compara **dos superficies**: el exit code del binario real (`lodestar check`) contra el
+// veredicto de `knowledge_check`. `lodestar-app` es dependencia de `lodestar-cli`, así que el mismo
+// test puede ejecutar el binario y llamar a la capa de servicios en proceso. (En
+// `crates/lodestar-app/tests/validacion.rs` vive el test hermano que fija que la corrección va en
+// `full_analysis`, el punto compartido, y no en `commands.rs`.)
+// ---------------------------------------------------------------------------
+
+use lodestar_app::{App, CheckScope};
+use lodestar_core::types::Severity;
+
+/// Semilla del síntoma de E23-H01: un workspace con **dos** defectos, uno por cada familia de
+/// `§20.9` que el síntoma configura:
+/// - `notas/rota.md` enlaza a un `.md` inexistente → `LINK-TARGET-MISSING` con `related[0]`
+///   markdown ⇒ familia `danglingDocumentLinks` (severidad intrínseca `err`).
+/// - `notas/ilegible.md` abre un bloque de frontmatter con YAML no interpretable →
+///   `FM-YAML-INVALID` ⇒ familia `malformedFrontmatter` (severidad intrínseca `err`).
+///
+/// Los dos defectos viven en documentos **distintos** a propósito: así el veredicto no depende de
+/// que un mismo fichero acumule diagnósticos de dos familias.
+fn workspace_dos_defectos(dir: &std::path::Path) {
+    write(
+        dir,
+        "notas/rota.md",
+        "# Rota\n\nEnlace a un documento inexistente: [falta](inexistente.md).\n",
+    );
+    write(
+        dir,
+        "notas/ilegible.md",
+        "---\ntitulo: [sin cerrar\notra: \"comilla\n---\n\n# Ilegible\n\nCuerpo.\n",
+    );
+}
+
+/// Corre `lodestar check --json` sobre `dir` y devuelve `(exit code, JSON de la salida)`.
+fn check_json(dir: &std::path::Path) -> (Option<i32>, serde_json::Value) {
+    let out = bin()
+        .arg("--path")
+        .arg(dir)
+        .args(["check", "--json"])
+        .output()
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap_or_else(|e| {
+        panic!(
+            "`check --json` debe emitir JSON válido por stdout ({e}); stdout=\n{}\nstderr=\n{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        )
+    });
+    (out.status.code(), v)
+}
+
+/// Llama a `knowledge_check(scope: workspace)` **en proceso** sobre el mismo directorio (umbral
+/// `Info`, sin fixes, límite holgado) y devuelve el reporte.
+fn knowledge_check_workspace(dir: &std::path::Path) -> lodestar_app::CheckReport {
+    let app = App::open(dir).expect("el workspace de prueba debe abrir");
+    app.knowledge_check(
+        &CheckScope::Workspace,
+        Some(Severity::Info),
+        false,
+        Some(1000),
+        None,
+    )
+    .expect("knowledge_check(workspace) debe responder")
+}
+
+/// Resumen legible de los diagnósticos de un `CheckReport`, para los mensajes de fallo.
+fn resumen_reporte(report: &lodestar_app::CheckReport) -> String {
+    report
+        .diagnostics
+        .iter()
+        .map(|c| format!("{}/{:?}", c.code.as_str(), c.level))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Los códigos de todos los diagnósticos que viajan en el `diagnostics` del `check --json`
+/// (`{path: [Check]}`), en orden de aparición.
+fn codigos_del_json(v: &serde_json::Value) -> Vec<String> {
+    v["diagnostics"]
+        .as_object()
+        .map(|m| {
+            m.values()
+                .filter_map(serde_json::Value::as_array)
+                .flatten()
+                .filter_map(|c| c["code"].as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// **E23-H01** · Criterio `check_y_knowledge_check_coinciden_con_ignore`:
+/// **Dado** un workspace con un enlace roto y un YAML ilegible, con
+/// `validation: {danglingDocumentLinks: ignore, malformedFrontmatter: ignore}`, **Cuando** se corre
+/// `lodestar check` y se llama a `knowledge_check(scope: workspace)`, **Entonces** ambos dicen
+/// **conforme** (exit 0 / `conformant: true`).
+///
+/// ROJO hoy (reproducido con los binarios, no deducido): `knowledge_check` ya responde
+/// `conformant: true` con `errors: 0` —aplica `ValidationSection::effective_severity`, que suprime
+/// las dos familias puestas a `ignore`—, pero `lodestar check` sale **1** con `conformant: false`,
+/// porque `App::full_analysis()` va por `document_set().analyze()` a secas y ve las severidades
+/// intrínsecas. La aserción que falla es la del exit code / `conformant` de la CLI.
+#[test]
+fn check_y_knowledge_check_coinciden_con_ignore() {
+    let dir = temp_dir("h01-coinciden-ignore");
+    workspace_dos_defectos(&dir);
+    write(
+        &dir,
+        ".lodestar/config.yaml",
+        "validation:\n  danglingDocumentLinks: ignore\n  malformedFrontmatter: ignore\n",
+    );
+
+    // (1) El veredicto del motor de servicios: las dos familias están suprimidas ⇒ conforme.
+    let report = knowledge_check_workspace(&dir);
+    assert_eq!(
+        report.summary.errors,
+        0,
+        "precondición del síntoma: con las dos familias a `ignore`, knowledge_check no debe contar \
+         errores. Diagnósticos: [{}]",
+        resumen_reporte(&report)
+    );
+    assert!(
+        report.conformant,
+        "precondición del síntoma: knowledge_check debe declarar el workspace conforme con las dos \
+         familias a `ignore`. Diagnósticos: [{}]",
+        resumen_reporte(&report)
+    );
+
+    // (2) El veredicto de la puerta de CI sobre el MISMO workspace debe ser el MISMO.
+    let (code, json) = check_json(&dir);
+    assert_eq!(
+        code,
+        Some(0),
+        "`lodestar check` debe coincidir con knowledge_check (conforme ⇒ exit 0) sobre el mismo \
+         workspace y la misma config: la sección `validation` no se está aplicando en el camino de \
+         la CLI (`full_analysis`). Códigos vistos en el JSON: {:?}",
+        codigos_del_json(&json)
+    );
+    assert_eq!(
+        json.get("conformant").and_then(serde_json::Value::as_bool),
+        Some(true),
+        "el `conformant` del `check --json` debe coincidir con el de knowledge_check (true): {json}"
+    );
+    // Y los diagnósticos suprimidos tampoco deben viajar en la salida: una familia a `ignore` no se
+    // reporta (`§20.9`), ni siquiera como informativa.
+    let codigos = codigos_del_json(&json);
+    assert!(
+        !codigos
+            .iter()
+            .any(|c| c == "LINK-TARGET-MISSING" || c == "FM-YAML-INVALID"),
+        "una familia a `ignore` se SUPRIME: `check --json` no debe listar sus diagnósticos; \
+         códigos = {codigos:?}"
+    );
+}
+
+/// **E23-H01** · Criterio `check_y_knowledge_check_coinciden_con_error` (**control anti-vacuo**):
+/// **Dado** el mismo workspace con `validation: {danglingDocumentLinks: error}`, **Cuando** se corre
+/// lo mismo, **Entonces** ambos dicen **NO conforme** (exit 1 / `conformant: false`).
+///
+/// Su función es impedir que «coinciden» se satisfaga devolviendo siempre `conforme`: una
+/// implementación que hiciera `conformant = true` a secas pasaría el test del `ignore` y **rompería
+/// este**. Es una GUARDA, verde hoy (el gate absoluto actual ya bloquea con cualquier `Err`): en
+/// aislamiento no puede ir roja mientras `full_analysis` ignore la config, porque la severidad
+/// configurada aquí coincide con la intrínseca. Su valor es de regresión sobre la implementación
+/// futura, igual que `rechaza_errores_nuevos` en `lodestar-app/tests/validacion.rs`.
+#[test]
+fn check_y_knowledge_check_coinciden_con_error() {
+    let dir = temp_dir("h01-coinciden-error");
+    workspace_dos_defectos(&dir);
+    write(
+        &dir,
+        ".lodestar/config.yaml",
+        "validation:\n  danglingDocumentLinks: error\n",
+    );
+
+    let report = knowledge_check_workspace(&dir);
+    assert!(
+        report.summary.errors >= 1,
+        "con `danglingDocumentLinks: error` el enlace roto debe contar como error en \
+         knowledge_check. Diagnósticos: [{}]",
+        resumen_reporte(&report)
+    );
+    assert!(
+        !report.conformant,
+        "con `danglingDocumentLinks: error` knowledge_check NO debe declarar conforme el \
+         workspace. Diagnósticos: [{}]",
+        resumen_reporte(&report)
+    );
+
+    let (code, json) = check_json(&dir);
+    assert_eq!(
+        code,
+        Some(1),
+        "`lodestar check` debe coincidir con knowledge_check (no conforme ⇒ exit 1): {json}"
+    );
+    assert_eq!(
+        json.get("conformant").and_then(serde_json::Value::as_bool),
+        Some(false),
+        "el `conformant` del `check --json` debe coincidir con el de knowledge_check (false): {json}"
+    );
+    // Y el diagnóstico que dispara el bloqueo se surfacea (no solo el veredicto).
+    let codigos = codigos_del_json(&json);
+    assert!(
+        codigos.iter().any(|c| c == "LINK-TARGET-MISSING"),
+        "el `check --json` debe surfacear el LINK-TARGET-MISSING que dispara el exit 1; \
+         códigos = {codigos:?}"
+    );
+}
+
+/// **E23-H01** · Criterio `check_ve_diagnosticos_de_descubrimiento`:
+/// **Dado** un workspace con un `.md` no UTF-8, **Cuando** se corre `lodestar check --json`,
+/// **Entonces** el diagnóstico de descubrimiento (`DOC-NOT-UTF8`) aparece en la salida.
+///
+/// `notas/binario.md` **no** entra en el inventario (no se pudo interpretar), así que su diagnóstico
+/// no lo produce el recorrido por `Analysis::documents`: lo produce el descubrimiento
+/// (`Workspace::document_set_with_discovery`), que hoy `full_analysis` no consulta. `knowledge_check`
+/// sí lo ve (E20-H04), y de ahí la contradicción que cierra esta historia.
+///
+/// El exit sigue siendo **0**: `DOC-NOT-UTF8` es `Warn` y su código no pertenece a ninguna de las 5
+/// familias configurables, así que no bloquea la puerta — y ese es justamente el veredicto que da
+/// `knowledge_check` sobre el mismo workspace (`errors == 0`). Surfacear el diagnóstico no puede
+/// convertirse en un bloqueo nuevo de CI.
+///
+/// ROJO hoy: `check --json` emite `diagnostics: {"notas/uno.md": []}` — ni rastro del `DOC-NOT-UTF8`.
+#[test]
+fn check_ve_diagnosticos_de_descubrimiento() {
+    let dir = temp_dir("h01-descubrimiento");
+    write(&dir, "notas/uno.md", "# Uno\n\nCuerpo sin enlaces.\n");
+    // `.md` no UTF-8: 0xF0 abre una secuencia de 4 bytes y 0x28 no es continuación válida.
+    std::fs::write(dir.join("notas/binario.md"), [0xF0, 0x28, 0x8C, 0xBC]).unwrap();
+
+    // Precondición no vacua: `knowledge_check` SÍ ve el diagnóstico de descubrimiento (E20-H04). Si
+    // esto fallara, el fixture no estaría produciendo el DOC-NOT-UTF8 y el test sería vacuo.
+    let report = knowledge_check_workspace(&dir);
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|c| c.code.as_str() == "DOC-NOT-UTF8"),
+        "precondición: knowledge_check debe ver el DOC-NOT-UTF8 del `.md` no UTF-8. \
+         Diagnósticos: [{}]",
+        resumen_reporte(&report)
+    );
+
+    let (code, json) = check_json(&dir);
+    let codigos = codigos_del_json(&json);
+    assert!(
+        codigos.iter().any(|c| c == "DOC-NOT-UTF8"),
+        "`lodestar check --json` debe surfacear el diagnóstico de descubrimiento DOC-NOT-UTF8 (hoy \
+         `full_analysis` descarta los diagnósticos de descubrimiento); códigos = {codigos:?}, \
+         json = {json}"
+    );
+    assert!(
+        serde_json::to_string(&json["diagnostics"])
+            .unwrap()
+            .contains("binario.md"),
+        "el DOC-NOT-UTF8 debe señalar al fichero culpable `notas/binario.md`: {}",
+        json["diagnostics"]
+    );
+    assert_eq!(
+        code,
+        Some(0),
+        "un `.md` no UTF-8 es un AVISO (`DOC-NOT-UTF8`), no un hard-fail: surfacearlo no debe \
+         convertir la puerta en roja — knowledge_check declara el mismo workspace conforme \
+         (errors == {}). json = {json}",
+        report.summary.errors
+    );
+}

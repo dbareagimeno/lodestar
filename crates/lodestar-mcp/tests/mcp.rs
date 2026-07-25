@@ -4431,3 +4431,158 @@ fn metadata_inspect_field() {
         "el valor numérico 5 aparece en 1 documento: {numerico:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// E23-H04 — `pendingTransaction` real
+// (`requirements/epica-23-cierre-migracion.md`, `crates/lodestar-workspace/src/recovery.rs`)
+//
+// SÍNTOMA: `workspace_status.recovery.pendingTransaction` es un `false` LITERAL en
+// `crates/lodestar-app/src/lib.rs` (`StatusRecovery { pending_transaction: false }`), pese a que
+// `Workspace::recovery_pending()` existe y funciona desde E13-H06. Tras un crash, la primera tool
+// que llama un agente le miente: planifica con normalidad y solo descubre el problema cuando
+// `change_apply` explota con `WORKSPACE_RECOVERY_REQUIRED`.
+//
+// UBICACIÓN: por la **frontera MCP JSON-RPC real** (binario `lodestar-mcp` sobre stdio), no por la
+// capa `App`. Es criterio DURO de la historia: éste es el sexto hueco de cableado de la misma
+// familia (E17 `other_files`, E20-H04 diagnósticos, E22-H04 selección masiva) y todos los anteriores
+// se escaparon precisamente porque se probaban en `App`.
+//
+// MONTAJE del estado «transacción a medias»: SIN la feature `test-failpoints` (que vive en
+// `lodestar-workspace` y no está activada aquí). Se compone con las MISMAS primitivas públicas y
+// durables que usa `simular_caida` en `crates/lodestar-workspace/tests/transactions.rs`
+// (`backup_originals` de E13-H04 + `create_journal`/`mark_applied` de E13-H03), deteniéndose en el
+// equivalente a `FailPoint::EntreRenames`: journal `applying`, 1 de 2 renames hechos, copias de
+// recuperación listas y ningún `done`. Es exactamente lo que un crash real deja en disco.
+// ---------------------------------------------------------------------------
+
+use lodestar_core::types::RelPath;
+use lodestar_workspace::Workspace;
+
+/// Id de la transacción interrumpida. Un mismo id nombra el journal (`<id>.json`) y las copias de
+/// recuperación (`recovery/<id>/`), como fija la convención de E13-H06.
+const TXN_A_MEDIAS: &str = "txn-e23-h04-a-medias";
+
+/// Monta un workspace con una **transacción a medias** durable en disco: dos documentos canónicos,
+/// copias de recuperación de ambos, un write-ahead journal en estado `applying` con el primer rename
+/// ya marcado y el segundo `pending`, y el canónico reflejando solo ese primer rename.
+///
+/// El `Workspace` se abre y se **dropea** dentro de esta función: eso es la «caída». Nada sella el
+/// journal a `done`, así que `Workspace::recovery_pending()` queda en `true` para cualquier proceso
+/// que abra después el mismo directorio — incluido el servidor MCP.
+///
+/// Nota sobre las revisiones del journal: se pasa la misma `WorkspaceRevision` como base y como
+/// resultado porque la recuperación (`JournalHeader` en `recovery.rs`) solo lee `txnId` y `state`
+/// del JSON — los campos de revisión no participan en la detección de recuperación pendiente.
+fn workspace_transaccion_a_medias() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write(root, "notas/uno.md", "# Uno\n\ncuerpo original de uno\n");
+    write(root, "notas/dos.md", "# Dos\n\ncuerpo original de dos\n");
+
+    let ws = Workspace::open(root).expect("el workspace de prueba debe abrir");
+    let uno = RelPath::new("notas/uno.md").unwrap();
+    let dos = RelPath::new("notas/dos.md").unwrap();
+    let afectados = [uno.clone(), dos];
+    let base = ws
+        .workspace_revision()
+        .expect("revisión base del workspace");
+
+    // (H04) Copias de recuperación de los originales afectados: preceden a todo rename.
+    ws.backup_originals(TXN_A_MEDIAS, &afectados)
+        .expect("preparar las copias de recuperación");
+    // (H03) Write-ahead journal `prepared`, fsynced antes de tocar el canónico.
+    let mut journal = ws
+        .create_journal(TXN_A_MEDIAS, &afectados, &base, &base)
+        .expect("crear el write-ahead journal");
+    // (H05) Primer rename «hecho»: el canónico ya refleja el cambio de `notas/uno.md`…
+    std::fs::write(
+        root.join("notas/uno.md"),
+        "# Uno\n\ncuerpo NUEVO a medio publicar\n",
+    )
+    .unwrap();
+    journal
+        .mark_applied(&uno)
+        .expect("marcar el primer rename en el journal");
+    // …y aquí «se cae»: el segundo rename nunca ocurre y el journal nunca llega a `done`.
+
+    dir
+}
+
+/// **E23-H04** · Criterio `status_reporta_recovery_pendiente`:
+/// **Dado** un workspace con una transacción a medias (journal presente), **Cuando** se llama a
+/// `workspace_status` **por MCP**, **Entonces** `recovery.pendingTransaction` es `true`.
+///
+/// ROJO hoy: `App::workspace_status` construye `StatusRecovery { pending_transaction: false }` con un
+/// literal, sin consultar `Workspace::recovery_pending()`, así que la tool responde `false` sobre un
+/// workspace que sí necesita recuperación.
+///
+/// La precondición (`recovery_pending()` directo sobre el mismo directorio) NO es decorativa: prueba
+/// que el fixture montó de verdad el estado interrumpido, de modo que un `false` en la respuesta solo
+/// puede ser el hueco de cableado y nunca un fixture mal montado.
+#[test]
+fn status_reporta_recovery_pendiente() {
+    let dir = workspace_transaccion_a_medias();
+
+    // Precondición no vacua: el estado en disco es realmente una recuperación pendiente.
+    let ws = Workspace::open(dir.path()).expect("reabrir el workspace de prueba");
+    assert!(
+        ws.recovery_pending(),
+        "precondición: el fixture debe dejar una recuperación PENDIENTE (journal no-`done` bajo \
+         .lodestar/runtime/journal/)"
+    );
+    drop(ws);
+
+    let resp = roundtrip(
+        dir.path(),
+        &[
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"workspace_status","arguments":{}}}"#,
+        ],
+        1,
+    );
+    let sc = &resp[0]["result"]["structuredContent"];
+    assert_eq!(
+        sc["recovery"]["pendingTransaction"],
+        serde_json::Value::Bool(true),
+        "con una transacción a medias en disco, workspace_status debe reportar \
+         recovery.pendingTransaction == true (hoy es un `false` literal en \
+         `App::workspace_status`, sin consultar `Workspace::recovery_pending()`): {resp:?}"
+    );
+}
+
+/// **E23-H04** · Criterio `status_sin_recovery_pendiente` (**control anti-vacuo**):
+/// **Dado** un workspace limpio, **Cuando** se llama a `workspace_status`, **Entonces**
+/// `recovery.pendingTransaction` es `false`.
+///
+/// Impide que el criterio anterior se satisfaga cableando un `true` literal (el defecto simétrico al
+/// de hoy). GUARDA verde en la fase roja —el literal actual ya devuelve `false`—; su valor es de
+/// regresión sobre la implementación futura.
+#[test]
+fn status_sin_recovery_pendiente() {
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), "notas/uno.md", "# Uno\n\ncuerpo original\n");
+    write(dir.path(), "notas/dos.md", "# Dos\n\ncuerpo original\n");
+
+    // Precondición no vacua: este workspace NO tiene recuperación pendiente (el par exacto del
+    // fixture de `status_reporta_recovery_pendiente`, sin el journal interrumpido).
+    let ws = Workspace::open(dir.path()).expect("el workspace limpio debe abrir");
+    assert!(
+        !ws.recovery_pending(),
+        "precondición: un workspace recién creado no tiene ninguna transacción a medias"
+    );
+    drop(ws);
+
+    let resp = roundtrip(
+        dir.path(),
+        &[
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"workspace_status","arguments":{}}}"#,
+        ],
+        1,
+    );
+    let sc = &resp[0]["result"]["structuredContent"];
+    assert_eq!(
+        sc["recovery"]["pendingTransaction"],
+        serde_json::Value::Bool(false),
+        "sobre un workspace limpio, workspace_status debe reportar \
+         recovery.pendingTransaction == false: {resp:?}"
+    );
+}

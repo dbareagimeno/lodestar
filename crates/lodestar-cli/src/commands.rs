@@ -7,36 +7,39 @@ use lodestar_core::types::{RelPath, Severity};
 
 use crate::sarif;
 
-/// `lodestar check`: la puerta de CI sobre el **working tree**. Juzga la conformidad **completa**
-/// (documento + `SCHEMA-*` + `REL-*` + refs externas) con el **mismo motor** que
+/// `lodestar check`: la puerta de CI sobre el **working tree**. Juzga con el **mismo motor** que
 /// [`lodestar_app::App::knowledge_check`] scope `workspace` (invariante #3 — una sola verdad
-/// computada): ambos comparten la fusión documento+schema-driven de
-/// `App::schema_diagnostics_by_path`. La CLI es una fachada fina y **no** recompone la validación
-/// schema-driven a mano.
+/// computada): desde E23-H01 ambos salen de [`lodestar_app::App::full_analysis`], que compone el
+/// análisis del core **más** la política de severidad de `validation` **más** los diagnósticos de
+/// descubrimiento. La CLI es una fachada fina y **no** recompone nada a mano.
 ///
-/// La salida (`--json`/`--sarif`/humano) se renderiza desde un **único** `Analysis` completo
-/// ([`lodestar_app::App::full_analysis`], un solo `analyze()`): así los diagnósticos `SCHEMA-*`/
-/// `REL-*` que disparan el fallo se **surface an** en el wire, no solo el veredicto. El veredicto
-/// `conformant` (== sin `Err` entre los documentos, misma semántica que `knowledge_check`) decide el
-/// bloqueo; además, `.lodestar/config.yaml` puede endurecer la puerta bloqueando también avisos
+/// (Antes de E23-H01 esto no era cierto: `full_analysis` ignoraba la config y los diagnósticos de
+/// descubrimiento, así que con `validation: {danglingDocumentLinks: ignore}` la CLI salía 1 y el MCP
+/// decía `conformant: true` sobre los mismos ficheros.)
+///
+/// La salida (`--json`/`--sarif`/humano) se renderiza desde ese **único** `Analysis`, así que los
+/// diagnósticos que disparan el fallo se surfacean en el wire, no solo el veredicto. El veredicto
+/// `conformant` (== sin `Err`, misma semántica que `knowledge_check`) decide el bloqueo; además,
+/// `.lodestar/config.yaml` puede endurecer la puerta bloqueando también avisos
 /// (`gate.blockWarnings`). Exit codes congelados: `0` conforme · `1` bloqueado · `3` runtime/IO
 /// (error del servicio o `.lodestar/config.yaml` inválido — lo detecta ya `App::open`).
 pub fn check(root: &Path, json: bool, sarif_out: bool) -> anyhow::Result<ExitCode> {
-    // Motor completo (documento + schema-driven) en `App`, computado UNA sola vez: `full_analysis` corre
-    // `analyze()` y fusiona los `SCHEMA-*`/`REL-*` en `diagnostics` con la misma lógica que
-    // `knowledge_check`. De ese `Analysis` sale tanto el veredicto como la salida.
+    // Motor completo en `App`, computado UNA sola vez. De ese `Analysis` sale tanto el veredicto
+    // como la salida, así que no pueden divergir entre sí.
     let app = lodestar_app::App::open(root).map_err(|e| anyhow::anyhow!(e.to_string()))?;
     let analysis = app
         .full_analysis()
         .map_err(|e| anyhow::anyhow!(e.as_str().to_string()))?;
 
-    // Veredicto == sin `Err` entre los documentos, misma semántica que `knowledge_check` scope
-    // `workspace` (que también itera `analysis.documents`): así la fachada no reimplementa el motor,
-    // solo lee el mismo `Analysis`.
+    // Veredicto == sin `Err` en NINGÚN diagnóstico, misma semántica que `knowledge_check` scope
+    // `workspace` (que también cuenta los de descubrimiento en su `summary.errors`). Se recorre el
+    // mapa entero, no solo las claves de `analysis.documents`: desde E23-H01 los diagnósticos de
+    // descubrimiento entran bajo la clave del fichero que describen, que por definición **no** es un
+    // documento del inventario — filtrar por `documents` los dejaría fuera del veredicto pero
+    // dentro de la salida, que es precisamente la clase de divergencia que la historia cierra.
     let conformant = !analysis
-        .documents
-        .iter()
-        .filter_map(|p| analysis.diagnostics.get(p))
+        .diagnostics
+        .values()
         .flatten()
         .any(|c| c.level == Severity::Err);
 

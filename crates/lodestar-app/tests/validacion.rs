@@ -455,3 +455,82 @@ fn rechaza_errores_nuevos() {
         "un apply rechazado por introducir un error nuevo no debe materializar `nuevo.md`"
     );
 }
+
+// ===========================================================================
+// E23-H01 — Una sola verdad de validación (mitad `lodestar-app`)
+//
+// El criterio de aceptación de la historia se ejercita por las DOS superficies en
+// `crates/lodestar-cli/tests/cli.rs` (`check_y_knowledge_check_coinciden_con_ignore` /
+// `…_con_error` / `check_ve_diagnosticos_de_descubrimiento`): allí se compara el exit code del
+// binario real contra el veredicto de `knowledge_check`.
+//
+// Este test es su complemento en esta capa y fija DÓNDE vive la corrección: en
+// `App::full_analysis()` —el punto que comparten `lodestar check` y cualquier futura fachada—, no en
+// `commands.rs`. El alcance de la historia lo dice explícitamente: «`commands.rs` no cambia de
+// forma: sigue derivando `conformant` de la ausencia de `Err`, pero sobre el análisis correcto».
+// Sin este test, un parche que recompusiera la política dentro de la CLI pasaría los tests de
+// `cli.rs` y dejaría la asimetría intacta para el siguiente consumidor.
+// ===========================================================================
+
+/// **E23-H01** (complemento de `check_y_knowledge_check_coinciden_con_ignore`):
+/// **Dado** un workspace con un enlace roto y un YAML ilegible y una config que pone ambas familias
+/// a `ignore`, **Cuando** se pide `App::full_analysis()`, **Entonces** su `Analysis` ya no contiene
+/// ningún diagnóstico `Err` — el mismo veredicto que da `App::knowledge_check` sobre el mismo
+/// workspace (invariante #3 de `CLAUDE.md`: una sola verdad computada).
+///
+/// ROJO hoy: `full_analysis` hace `document_set().analyze()` a secas, así que devuelve las
+/// severidades **intrínsecas** (`LINK-TARGET-MISSING`/`FM-YAML-INVALID` como `Err`) e ignora la
+/// sección `validation`, mientras que `knowledge_check` los suprime.
+#[test]
+fn full_analysis_aplica_la_politica_de_validacion() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    escribe(
+        root,
+        "notas/rota.md",
+        "# Rota\n\nEnlace a un documento inexistente: [falta](inexistente.md).\n",
+    );
+    escribe(
+        root,
+        "notas/ilegible.md",
+        "---\ntitulo: [sin cerrar\notra: \"comilla\n---\n\n# Ilegible\n\nCuerpo.\n",
+    );
+    escribe(
+        root,
+        ".lodestar/config.yaml",
+        "validation:\n  danglingDocumentLinks: ignore\n  malformedFrontmatter: ignore\n",
+    );
+
+    let app = App::open(root).expect("el workspace temporal debe abrir");
+
+    // Referencia: el veredicto del servicio que SÍ aplica la política (E20-H04).
+    let report = check_workspace(&app);
+    assert_eq!(
+        report.summary.errors,
+        0,
+        "precondición: con las dos familias a `ignore`, knowledge_check no cuenta errores. \
+         Diagnósticos: [{}]",
+        resumen(&report)
+    );
+
+    // El análisis que alimenta a `lodestar check` debe decir LO MISMO.
+    let analysis = app
+        .full_analysis()
+        .expect("full_analysis debe computar el análisis del working tree");
+    let errores: Vec<String> = analysis
+        .diagnostics
+        .iter()
+        .flat_map(|(path, checks)| {
+            checks
+                .iter()
+                .filter(|c| c.level == Severity::Err)
+                .map(move |c| format!("{}:{}", path.as_str(), c.code.as_str()))
+        })
+        .collect();
+    assert!(
+        errores.is_empty(),
+        "`full_analysis` debe aplicar la misma política de severidad que `knowledge_check` \
+         (`ValidationSection::effective_severity`): con las dos familias a `ignore` no puede quedar \
+         ningún diagnóstico de error. Errores encontrados: {errores:?}"
+    );
+}

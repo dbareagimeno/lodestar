@@ -238,7 +238,10 @@ tools:
       `counts.isolated` sustituye a `counts.orphans` (E16-H02, misma redefinición). `formatVersion`
       es CONSTANTE desde E16-H02: el motor ya no lee `okf_version` del `index.md` raíz.
       La primera tool que debe llamar un agente en cada sesión. `recovery.pendingTransaction`
-      siempre `false` hasta E13-H06.
+      es REAL desde E23-H04 (`Workspace::recovery_pending()`: journals no sellados en
+      `.lodestar/runtime/`). Era un `false` literal desde E10-H08 pese a que la detección existía
+      desde E13-H06, así que tras un crash esta tool afirmaba que no había nada que recuperar y el
+      agente solo lo descubría al fallar `change_apply` con `WORKSPACE_RECOVERY_REQUIRED`.
 
   - nombre: knowledge_search
     fuente: crates/lodestar-mcp/src/tools.rs:188

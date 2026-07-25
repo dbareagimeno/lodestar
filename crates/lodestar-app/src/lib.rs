@@ -278,14 +278,19 @@ pub struct StatusCapabilities {
     pub external_references: bool,
 }
 
-/// Estado de una posible transacción interrumpida (`recovery` de `WorkspaceStatus`). E13 lo
-/// puebla de verdad (staging/journal/crash-recovery); hasta entonces siempre `false` — no hay
-/// mecánica transaccional que pueda dejar el workspace a medio escribir.
+/// Estado de una posible transacción interrumpida (`recovery` de `WorkspaceStatus`), computado
+/// desde los write-ahead journals no sellados que haya en `.lodestar/runtime/` (E23-H04).
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct StatusRecovery {
-    /// `true` si hay una transacción sin terminar pendiente de recuperar. Fijo a `false` hasta
-    /// E13-H06.
+    /// `true` si hay una transacción sin terminar pendiente de recuperar
+    /// ([`Workspace::recovery_pending`]).
+    ///
+    /// Fue un `false` **literal** desde E10-H08 hasta E23-H04, pese a que la mecánica de detección
+    /// existía y funcionaba desde E13-H06: un hueco de cableado que hacía que, tras un crash, la
+    /// primera tool que llama un agente en cada sesión le dijera que todo estaba bien. El agente
+    /// planificaba con normalidad y solo descubría el problema cuando `change_apply` reventaba con
+    /// `WORKSPACE_RECOVERY_REQUIRED`.
     pub pending_transaction: bool,
 }
 
@@ -434,7 +439,9 @@ impl App {
                 external_references: true,
             },
             recovery: StatusRecovery {
-                pending_transaction: false,
+                // E23-H04: computado, no literal. `recovery_pending()` mira los journals no sellados
+                // de `.lodestar/runtime/`, la única fuente durable de «hay algo a medias».
+                pending_transaction: self.workspace.recovery_pending(),
             },
         })
     }
@@ -903,17 +910,63 @@ impl App {
     }
 
     /// Computa el `Analysis` del working tree que alimenta la **salida** de `lodestar check`
-    /// (`--json`/`--sarif`/humano). Tras E20-H03 es exactamente el `Analysis` de
-    /// [`DocumentSet::analyze`] (`§20.9`): la validación schema-driven (`SCHEMA-*`/`REL-*`) se retiró
-    /// con `core::schema`, así que ya no hay diagnósticos que fusionar. Se conserva el método (en vez
-    /// de exponer `analyze()` directo) para no acoplar la CLI al `Workspace` y dejar un único punto
-    /// por si futuras historias vuelven a componer más fuentes de diagnóstico.
+    /// (`--json`/`--sarif`/humano), por el **mismo camino** que [`App::knowledge_check`] scope
+    /// `workspace` (E23-H01, invariante #3 de `CLAUDE.md`: *una sola verdad computada*).
+    ///
+    /// Hasta E23-H01 este método era `document_set().analyze()` a secas, y eso hacía que la CLI y el
+    /// MCP dieran **veredictos contradictorios sobre el mismo workspace**: con
+    /// `validation: {danglingDocumentLinks: ignore}` en `.lodestar/config.yaml`, `lodestar check`
+    /// salía 1 («NO CONFORME») mientras `knowledge_check` respondía `conformant: true`. Dos verdades
+    /// sobre los mismos ficheros. Ahora se componen las **dos** mitades que le faltaban:
+    ///
+    /// 1. **La política de severidad** de `validation` (`§20.9`): cada diagnóstico pasa por
+    ///    [`ValidationSection::effective_severity`], que lo reclasifica (`error`/`warning`) o lo
+    ///    **suprime** (`ignore`). Con la config por defecto es la identidad, así que un workspace sin
+    ///    `.lodestar/config.yaml` no cambia de veredicto.
+    /// 2. **Los diagnósticos de descubrimiento** (`DOC-NOT-UTF8`, `DOC-TOO-LARGE`,
+    ///    `SYMLINK-UNSUPPORTED`, `LINK-CASE-MISMATCH`…): describen ficheros que Lodestar **no pudo
+    ///    incorporar al inventario**, así que no están en `analysis.documents` y el análisis puro no
+    ///    los ve. `knowledge_check` ya los añadía; `lodestar check` los descartaba, o sea que la
+    ///    mitad del catálogo de `§20.9` era invisible desde la puerta de CI.
+    ///
+    /// Los de descubrimiento se indexan en `diagnostics` **por su primer `target`** (el fichero que
+    /// describen), que por definición **no** es uno de `analysis.documents`. Un diagnóstico sin
+    /// `target` —`PATH-NOT-UTF8`, cuyo path no es representable como [`RelPath`]— no tiene clave con
+    /// la que entrar en el mapa y **solo** se surface a por `knowledge_check`, que los lleva en una
+    /// lista aparte; queda documentado como límite del wire del `Analysis`, no como olvido.
     pub fn full_analysis(&self) -> Result<Analysis, ErrorCode> {
-        let doc_set = self
+        let (doc_set, discovery_diagnostics) = self
             .workspace
-            .document_set()
+            .document_set_with_discovery()
             .map_err(|e| workspace_error_code(&e))?;
-        Ok(doc_set.analyze().clone())
+        let mut analysis = doc_set.analyze().clone();
+        let validation = &self.workspace.config().validation;
+
+        // 1. Política de severidad sobre los diagnósticos de documento.
+        for checks in analysis.diagnostics.values_mut() {
+            checks.retain_mut(|check| match validation.effective_severity(check) {
+                Some(level) => {
+                    check.level = level;
+                    true
+                }
+                // Familia a `ignore`: el diagnóstico no se reporta (ni cuenta para el veredicto).
+                None => false,
+            });
+        }
+
+        // 2. Diagnósticos de descubrimiento, bajo la clave de su primer `target`.
+        for mut check in discovery_diagnostics {
+            let Some(level) = validation.effective_severity(&check) else {
+                continue;
+            };
+            check.level = level;
+            let Some(anchor) = check.targets.first().cloned() else {
+                continue;
+            };
+            analysis.diagnostics.entry(anchor).or_default().push(check);
+        }
+
+        Ok(analysis)
     }
 
     /// Consulta el grafo, consolidando en una sola tool lo que hoy son 4 tools separadas
