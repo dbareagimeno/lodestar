@@ -71,8 +71,96 @@ Queda:
 - No hay forma de **listar receipts**: si el agente pierde el `receiptId`, el undo es inalcanzable
   pese a estar persistido. Decidir si entra aquí o es historia propia.
 
-**3. E23-H13 (2/2)** — añadir la sección de E23 a `IMPLEMENTATION_STATUS.md` con el detalle por
-historia, y marcar la épica completa cuando lo esté.
+**3. E23-H13 (2/2)** — la sección de E23 en `IMPLEMENTATION_STATUS.md`. Es lo **último** que hay que
+hacer, por definición: escribirla antes de cerrar H12 y H11 obligaría a reescribirla. Detalle de lo
+que ya se hizo y de lo que falta, en «Bloque D» más abajo.
+
+> Los bloques **D** (documentos de estado) y **E** (documentos nuevos) están **cerrados** salvo esa
+> mitad de H13. Su contenido se detalla abajo porque es donde viven las dos decisiones que tomaste
+> —abrir el catálogo de errores y declarar las fechas lexicográficas— y las dos que siguen abiertas.
+
+## Los bloques de la épica
+
+La épica se organizó en bloques por naturaleza del trabajo, no por área de código. **A** (defectos),
+**B** (tests e2e) y **C** (superficie MCP) están cubiertos en la tabla de arriba. **F** no estaba
+planificado: son los dos defectos que destapó el propio bloque B. Los que quedan por explicar:
+
+### Bloque D — Documentos de estado
+
+Barato en código, pero es lo que hace que el repo deje de mentir sobre sí mismo.
+
+**H13 — poner al día el ledger.** Va en **dos mitades**, y solo la primera está hecha
+(commit `eb690b2`).
+
+*Hecho (1/2)*, todo en `IMPLEMENTATION_STATUS.md`:
+- La tabla de la migración decía **«E15–E22 EN CURSO»** con E17–E22 «⚪ Pendiente», **350 líneas por
+  encima del detalle que las da todas por cerradas**. Marcarla completa era criterio de aceptación
+  **literal de E22-H03**, y estaba incumplido.
+- El resumen describía «escritorio completo (fachada Tauri v2… UI Svelte 5 funcional)» y «~113
+  tests»; el «Cómo correrlo» listaba `log | last-conforming | branch | switch | merge | hooks`,
+  subcomandos retirados en E9-H02 cuyo crate se borró en E15-H01.
+- La tabla **E0–E8 se marcó explícitamente como HISTÓRICA**, con aviso de qué capacidades que lista
+  ya no existen (vcs, generadores, arnés diferencial, UI, las 13 tools que hoy son 10). Antes se
+  leía como estado vigente.
+- «Invariantes verificados»: cayó el de git, entró el de crash-recovery, y el de «una sola verdad
+  computada» pasó a **nombrar** la divergencia CLI/MCP que E23-H01 arregla en vez de afirmarla como
+  cierta.
+- También `requirements/README.md`: E20 dejó de figurar como *(pendiente)*, se añadió la fila de E23
+  y la nota del «hueco de cableado con dueño (E20)» pasó a describir un hueco **ya cerrado** y la
+  familia de huecos que se repite.
+
+*Pendiente (2/2)*: añadir la **sección de E23** a `IMPLEMENTATION_STATUS.md` con el detalle por
+historia —el mismo formato que las secciones de E15–E22, al final del fichero— y marcar la épica
+completa. Se dejó para el final a propósito: escribirla antes obligaría a reescribirla.
+
+**H14 — cerrar o documentar las decisiones abiertas. COMPLETA** (commits `a0bec35` y `4cc3c7c`).
+
+- **`DECISIONES §12` (fechas) → cerrada en la opción (a).** Las comparaciones de orden son
+  **lexicográficas** porque `serde_yaml` 0.9 no tipa timestamps. Lo grave no era la limitación sino
+  el silencio: no estaba documentada en **ninguna** superficie de usuario, en un motor cuyo
+  argumento de venta es que *no coerciona tipos*. Ahora está declarada en `contracts/mcp.yml`
+  (semántica de `where`) y en el README. Migrar a un tipo fecha propio sigue siendo posible sin
+  romper el wire, porque el tipo viaja en `value_type`.
+- **`DECISIONES §13` (`Conformant → Valid`) → cerrada en la opción (a), decisión tuya.** Era el
+  **único de los 29 criterios de aceptación** de `REFACTOR_PHASE_2` demostrablemente incumplido («no
+  existe terminología OKF en la API pública»). Se abrió el catálogo de 16 códigos de error **la
+  única vez**, aprovechando que v0.3 ya es incompatible con v0.2: romper el wire costaba cero
+  entonces y dejaba de costarlo en cuanto se publicara.
+  Wire resultante: `conformant` → `valid` · `requireConformantResult` → `requireValidResult` ·
+  `allowNonconformant` → `allowInvalid` · `NONCONFORMANT_RESULT` → `INVALID_RESULT`. **El catálogo
+  sigue teniendo 16 filas**: se sustituyó una, no se añadió ninguna. También la salida humana de
+  `check`: `CONFORME` → `VÁLIDO`.
+  ⚠️ Ver «Trampas»: el renombre automático destrozó las tablas de terminología y hubo que
+  revertirlas a mano.
+
+### Bloque E — Documentos nuevos (se escriben aquí, se planifican después)
+
+Los dos artefactos de este bloque **no implementan nada**: existen para que una decisión no se
+pierda. Ambos completos (commit `e5158bf`).
+
+**H15 — [`docs/PROPUESTA_CLI.md`](PROPUESTA_CLI.md).** Propuesta de diseño para que la CLI sea un
+gestor de KB, redactada para que `/planificar` la consuma en una PR posterior. Contiene:
+- El diagnóstico: la CLI tiene 3 subcomandos y **cero** capacidad de leer o escribir conocimiento,
+  así que la promesa del README de que Lodestar se consume «desde clientes MCP **y desde la CLI**»
+  no se sostiene.
+- El principio: **paridad de capacidades, no de forma**. La lectura es casi gratis porque
+  `lodestar-app` ya existe como capa de casos de uso compartida; la escritura pide **verbos**
+  (`new`/`mv`/`rm`/`set`) en vez del JSON de operaciones del MCP, que sería mala ergonomía humana.
+- Seis preguntas abiertas para la puerta de diseño (perfiles, `--path` vs `--root`, salida por
+  defecto, `writableRoots`, alcance de v1).
+- Una **condición de entrada** que ya se cumple: la escritura por CLI no se implementa hasta que
+  existan los tests de concurrencia entre procesos. **Existen desde E23-H09**
+  (`crates/lodestar-mcp/tests/concurrencia.rs`), así que ese bloqueo está levantado.
+
+**H16 — `DECISIONES.md §14`, el store sin consumidor.** Registrado como decisión **abierta**, sin
+resolver, como manda `CLAUDE.md` («no las tomes por tu cuenta: propón y pregunta»). El hallazgo: la
+épica **E18 entera** —DDL v2, metadata anidada por field path, FTS genérico, tests de paridad— está
+construida y verificada, y **ningún consumidor la usa**. El único `enable_cache()` del producto está
+en `lodestar reindex` y solo la *construye*; ninguna tool MCP lee de SQLite, y `document_set()`
+relee y reparsea la base entera **en cada llamada**. Tres opciones sobre la mesa: conectarlo (con
+invalidación por hash y alineando el walker con la `DiscoveryPolicy`), acotarlo por escrito, o
+retirarlo como se retiró `lodestar-vcs`. **No bloquea el merge**: el producto funciona, solo que sin
+cache.
 
 ## Cómo se ha estado trabajando
 
