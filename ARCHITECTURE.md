@@ -1085,7 +1085,9 @@ normalizado.
 pub enum LinkTarget {
     Document(RelPath),        // otro .md del INVENTARIO → arista del grafo
     WorkspaceFile(RelPath),   // fichero del proyecto que NO es un documento del inventario: existe, pero NO es nodo
-    ExternalUri(String), SelfAnchor(String), Missing(RelPath), EscapesWorkspace,
+    ExternalUri(String), SelfAnchor(String), Missing(RelPath),
+    WorkspaceDirectory(Option<RelPath>),   // E23-H11; None = la raíz
+    EscapesWorkspace,
 }
 ```
 
@@ -1096,15 +1098,20 @@ pub enum LinkTarget {
 >    `.md` de un repo GitHub/GitLab, y el invariante *"ningún path público es absoluto"* de `§20.2`
 >    habla de las **rutas que Lodestar expone**, no de los hrefs que escribe el usuario en su
 >    contenido. La alternativa (`EscapesWorkspace`) rechazaría un patrón real y frecuente.
-> 2b. **Navegación pura** (E17-H03, fase verde): un href que **no nombra ningún segmento propio**
->    —`.`, `./`, `..`, `../`, `../..`— designa un *directorio* (el del propio documento o uno por
->    encima), no un fichero. Como `§20.6` prohíbe convertir un directorio en su `index.md` y
->    `LinkTarget` no tiene variante para directorios, se clasifica **`EscapesWorkspace`**, la única
->    variante sin path — el mismo caso degenerado que el destino que normaliza a la raíz, con el
->    mismo *coste conocido* (un `Err` sobre un enlace que GitHub sí renderiza). Un href que **sí**
->    nombra algo sigue teniendo path aunque también sea un directorio: `[x](guias/)` es
->    `Missing("guias")`, nunca `guias/index.md`. **El arreglo correcto es ampliar `LinkTarget`** con
->    una variante propia para directorio/raíz — candidato a E20/E21.
+> 2b. **Navegación pura** (E17-H03; **resuelto en E23-H11**): un href que **no nombra ningún
+>    segmento propio** —`.`, `./`, `..`, `../`, `../..`— designa un *directorio* (el del propio
+>    documento o uno por encima), no un fichero. Como `§20.6` prohíbe convertir un directorio en su
+>    `index.md`, hasta E23-H11 se clasificaba **`EscapesWorkspace`** por no haber variante mejor, y
+>    eso lo hacía `Err`: un `[volver](../)` —que GitHub renderiza sin problema— **tumbaba la puerta
+>    de CI**. E17-H03 ya dejó escrito que el arreglo correcto era ampliar el enum, no parchear el
+>    diagnóstico, y así se hizo: entra **`WorkspaceDirectory(Option<RelPath>)`** (`None` = la raíz,
+>    que no es nombrable como `RelPath`). No es nodo del grafo, no produce diagnóstico, y
+>    `EscapesWorkspace` queda para lo que de verdad sale **por encima** de la raíz —que sigue siendo
+>    `Err`, porque es el chokepoint semántico de contención—. Un href que **sí** nombra algo sigue
+>    teniendo path aunque también sea un directorio: `[x](guias/)` es `Missing("guias")`, nunca
+>    `guias/index.md` (no se introduce heurística de barra final).
+>    `move_document` recalcula también estos destinos (E23-H11): si el documento cambia de
+>    profundidad, un `../` pasaría a señalar otro directorio en silencio.
 >
 > 2. **Un `.md` que existe en disco pero está EXCLUIDO del descubrimiento** es **`WorkspaceFile`, no
 >    `Missing`**. Por eso la variante se define por «no es un documento del inventario» y no por «no

@@ -133,7 +133,13 @@
 #     `{ href, text, span: {start,end}, kind, target: {kind,value?}, fragment }` — el href CRUDO
 #     byte a byte, el `span` de bytes del destino dentro del CUERPO y el destino ya clasificado
 #     (`LinkTarget`, `§20.6`: document/workspaceFile/externalUri/selfAnchor/missing/
-#     escapesWorkspace). `kind` ∈ inline/reference/collapsed/shortcut/autolink.
+#     workspaceDirectory/escapesWorkspace). `kind` ∈ inline/reference/collapsed/shortcut/autolink.
+#     `workspaceDirectory` (E23-H11) es un DIRECTORIO contenido en el workspace, alcanzado por
+#     navegación pura (`./`, `..`, `../`) o por un path que normaliza a un directorio (`../docs/..`);
+#     su `value` es el path del directorio, o `null` para la RAÍZ (no hay RelPath que la nombre).
+#     No es nodo del grafo y NO produce diagnóstico. Hasta E23-H11 estos destinos caían en
+#     `escapesWorkspace`, que es Err, así que un `[volver](../)` legítimo tumbaba `lodestar check`.
+#     `escapesWorkspace` queda para lo que de verdad sale POR ENCIMA de la raíz, y sigue siendo Err.
 #   - `knowledge_get.backlinks` (`Backlinks`): `inbound` pasa de `[{path, href}]` a
 #     `[LinkReference]` = `{ from, link: ResolvedLink }` — UNA entrada por ENLACE (un origen que
 #     enlaza dos veces aparece dos veces); `out` pasa de `[RelPath]` a `[ResolvedLink]`; DESAPARECE

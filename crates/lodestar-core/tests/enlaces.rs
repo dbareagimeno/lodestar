@@ -31,7 +31,10 @@
 //!
 //! pub enum LinkTarget {
 //!     Document(RelPath), WorkspaceFile(RelPath), ExternalUri(String),
-//!     SelfAnchor(String), Missing(RelPath), EscapesWorkspace,
+//!     SelfAnchor(String), Missing(RelPath),
+//!     /// AMPLIADO en E23-H11: un directorio CONTENIDO en el workspace (`None` = la raíz).
+//!     WorkspaceDirectory(Option<RelPath>),
+//!     EscapesWorkspace,
 //! }
 //!
 //! pub struct ResolvedLink {
@@ -77,11 +80,11 @@
 
 use std::collections::BTreeSet;
 
-use lodestar_core::links;
-use lodestar_core::model;
 use lodestar_core::types::{
-    FileMap, Inventory, LinkKind, LinkTarget, RawLink, RelPath, ResolvedLink,
+    Check, CheckCode, FileMap, Inventory, LinkKind, LinkTarget, RawLink, RelPath, ResolvedLink,
+    Severity,
 };
+use lodestar_core::{links, model, DocumentSet};
 
 // --- Utilidades ---------------------------------------------------------------
 
@@ -872,5 +875,372 @@ fn mismo_basename_inequivoco() {
         LinkTarget::Missing(rp("auth.md")),
         "existen dos `auth.md` en el workspace, pero ninguno está en la raíz: el destino falta, \
          no se desempata por similitud"
+    );
+}
+
+// =============================================================================
+// E23-H11 — Un enlace a un DIRECTORIO no es un escape (fase roja)
+// =============================================================================
+//
+// ## El defecto (deuda registrada al cerrar E17 y aplazada a E20/E21, que cerraron sin hacerlo)
+//
+// `links::clasificar` devuelve `LinkTarget::EscapesWorkspace` en dos casos que **no** salen del
+// workspace: cuando el href es **pura navegación** (no nombra ningún segmento: `../`, `./`, `.`,
+// `..`) y cuando el destino **normaliza a la raíz** (`../docs/..`). Y `links::diagnose` convierte
+// `EscapesWorkspace` en `Severity::Err` → `LINK-ESCAPES-WORKSPACE`. Resultado: un `[volver](../)`
+// —un enlace legítimo que GitHub resuelve perfectamente— hace **fallar `lodestar check` con exit
+// 1**. El propio `links.rs` lo documenta como caso degenerado consciente y anota que «el arreglo
+// correcto es ampliar `LinkTarget`, no parchear el diagnóstico».
+//
+// ## El contrato que fija esta fase roja
+//
+// ```ignore
+// pub enum LinkTarget {
+//     …,
+//     /// El destino es un DIRECTORIO contenido en el workspace, alcanzado por navegación pura
+//     /// (`./`, `.`, `../`, `..`) o por un path que normaliza a la raíz (`../docs/..`).
+//     /// `None` = la RAÍZ del workspace: no hay `RelPath` que la nombre (`RelPath::new("")` es un
+//     /// error por diseño, invariante #6). `Some(p)` = un directorio de dentro.
+//     WorkspaceDirectory(Option<RelPath>),
+//     /// El destino sale POR ENCIMA de la raíz. Sigue sin llevar path y sigue siendo `Err`.
+//     EscapesWorkspace,
+// }
+// ```
+//
+// **Wire** (`knowledge_get.outgoingLinks[].target`, etiquetado adyacente en camelCase como el
+// resto de variantes): `{"kind":"workspaceDirectory","value":"docs"}` y —para la raíz—
+// `{"kind":"workspaceDirectory","value":null}`.
+//
+// ### Por qué UNA variante con `Option` y no dos (`WorkspaceRoot` + `Directory(RelPath)`)
+//
+// Para un cliente MCP es **un solo concepto** —«esto apunta a un directorio, no a un documento»— y
+// un solo `kind` que comprobar; la raíz es solo el directorio sin nombre. Dos `kind` obligarían a
+// todo consumidor a acordarse de los dos, y el día que uno se olvide del segundo tendrá el mismo
+// bug que hoy. Con `Option` el caso raíz es **inevitable de mirar**: no hay `RelPath` que sacar sin
+// pasar por él.
+//
+// ### Las cuatro decisiones de criterio que van clavadas abajo
+//
+// 1. **No es un error de ninguna severidad**: `diagnose` no emite NADA para un directorio, igual
+//    que no emite nada para `Document`/`WorkspaceFile`/`ExternalUri`/`SelfAnchor`. Un directorio del
+//    workspace existe (el documento origen vive dentro de él, o de uno bajo él): no hay nada roto
+//    que reportar, y el diagnóstico sigue siendo **función pura del `LinkTarget`** —el principio de
+//    E17-H03— porque la distinción la hace ahora la CLASIFICACIÓN, no una segunda lectura del href.
+// 2. **No es nodo del grafo ni fantasma**: `internal_path()` devuelve `None` (un directorio no es
+//    un documento, y `§20.6` prohíbe convertirlo en su `index.md`), así que no aparece en
+//    `dangling` ni crea vértices. Es la misma respuesta que ya dan `WorkspaceFile` y `ExternalUri`.
+// 3. **El escape de verdad NO se toca**: subir por encima de la raíz sigue siendo
+//    `EscapesWorkspace`/`Err`/`LINK-ESCAPES-WORKSPACE`. Es el chokepoint de seguridad (invariante
+//    #6) y el control anti-vacuo obligatorio de esta historia: sin él, «no tumbar el check» se
+//    satisface borrando el diagnóstico.
+// 4. **Un href que NOMBRA un directorio (`guias/`) sigue siendo `Missing("guias")`**, no
+//    `WorkspaceDirectory`. El core no tiene inventario de directorios —`Inventory` son documentos y
+//    ficheros—, así que decidir «esto es un directorio» por la barra final sería exactamente la
+//    heurística que `§20.6` prohíbe. Y no hace falta: `Missing` de un destino no-`.md` ya es `Warn`,
+//    o sea que tampoco tumba la puerta de CI. Lo que arregla esta historia es el caso que el core
+//    **sí** puede decidir estructuralmente: el href que no nombra nada.
+
+/// Un [`DocumentSet`] a partir de pares `(ruta, contenido crudo)`. Es el camino que recorre
+/// `lodestar check`: `analyze()` resuelve los enlaces y emite los diagnósticos.
+fn docset(files: &[(&str, &str)]) -> DocumentSet {
+    let mut m: FileMap = FileMap::new();
+    for (p, raw) in files {
+        m.insert(rp(p), (*raw).to_string());
+    }
+    DocumentSet::from_files(m)
+}
+
+/// Todos los diagnósticos del workspace, aplanados.
+fn diagnosticos(ds: &DocumentSet) -> Vec<Check> {
+    ds.analyze()
+        .diagnostics
+        .values()
+        .flatten()
+        .cloned()
+        .collect()
+}
+
+/// Los códigos de una lista de diagnósticos, con su severidad, para mensajes de error legibles.
+fn resumen(cs: &[Check]) -> Vec<(&'static str, Severity)> {
+    cs.iter().map(|c| (c.code.as_str(), c.level)).collect()
+}
+
+/// El JSON de wire de un destino: [`LinkTarget`] viaja en `knowledge_get.outgoingLinks[].target`,
+/// así que su forma serializada **es** contrato (invariante #4).
+fn wire(t: &LinkTarget) -> serde_json::Value {
+    serde_json::to_value(t).expect("`LinkTarget` es un tipo de wire: tiene que serializar")
+}
+
+/// El wire esperado de un destino directorio; `None` es la raíz del workspace.
+fn wire_directorio(dir: Option<&str>) -> serde_json::Value {
+    serde_json::json!({ "kind": "workspaceDirectory", "value": dir })
+}
+
+/// Clava el contrato completo de un destino directorio: wire, no-escape, no-nodo y round-trip.
+fn assert_es_directorio(t: &LinkTarget, dir: Option<&str>, ctx: &str) {
+    assert_ne!(
+        *t,
+        LinkTarget::EscapesWorkspace,
+        "{ctx}: el destino es un directorio DE DENTRO del workspace, no un escape (hoy sale \
+         `EscapesWorkspace` y `diagnose` lo convierte en un `Err` que tumba `lodestar check`)"
+    );
+    assert_eq!(
+        wire(t),
+        wire_directorio(dir),
+        "{ctx}: el wire de un destino directorio es \
+         `{{\"kind\":\"workspaceDirectory\",\"value\":<dir|null>}}`; salió {}",
+        wire(t)
+    );
+    assert!(
+        t.internal_path().is_none(),
+        "{ctx}: un directorio NO es un documento del grafo — ni arista real ni fantasma \
+         (`§20.6` prohíbe resolverlo a su `index.md`): {t:?}"
+    );
+    assert!(
+        !t.is_internal(),
+        "{ctx}: …y por tanto tampoco conecta el grafo: {t:?}"
+    );
+    assert_eq!(
+        serde_json::from_value::<LinkTarget>(wire(t)).expect("el wire debe deserializar"),
+        *t,
+        "{ctx}: el destino directorio debe hacer round-trip por el wire"
+    );
+}
+
+/// Criterio E23-H11: **Dado** un documento con `[volver](../)`, **Cuando** se corre `check`,
+/// **Entonces** **no** es un error bloqueante (`enlace_a_la_raiz_no_tumba_el_check`).
+///
+/// Se juzga por el mismo camino que `lodestar check`: `DocumentSet::analyze()`, que resuelve los
+/// enlaces y emite los diagnósticos de `links::diagnose` (`document_set.rs`).
+///
+/// **El control anti-vacuo vive DENTRO de este mismo test**: sin él, la forma más barata de
+/// verdear sería dejar de emitir `LINK-ESCAPES-WORKSPACE`, que es justo el chokepoint de seguridad
+/// del motor (invariante #6).
+#[test]
+fn enlace_a_la_raiz_no_tumba_el_check() {
+    // La familia entera de hrefs de navegación pura, más el que normaliza a la raíz nombrando algo
+    // por el camino (`../docs/..`). Los cinco apuntan a un directorio DE DENTRO del workspace.
+    //
+    // Se evalúan TODOS y se asevera al final (en vez de un assert por vuelta) para que el rojo
+    // liste de una vez los cinco casos y su diagnóstico real.
+    let mut ofensores: Vec<(&str, Vec<(&'static str, Severity)>)> = Vec::new();
+    for href in ["../", "..", "./", ".", "../docs/.."] {
+        let ws = docset(&[
+            ("README.md", "# Índice\n\nUn workspace de dos documentos.\n"),
+            (
+                "docs/guia.md",
+                &format!("# Guía\n\nY [volver]({href}) al índice.\n"),
+            ),
+        ]);
+        let cs = diagnosticos(&ws);
+        // Ofende lo que bloquea la puerta de CI (`Err`) y, sea cual sea su severidad, cualquier
+        // `LINK-ESCAPES-WORKSPACE`: el destino NO sale de la raíz.
+        let malos: Vec<(&'static str, Severity)> = resumen(&cs)
+            .into_iter()
+            .filter(|(code, level)| {
+                *level == Severity::Err || *code == CheckCode::LinkEscapesWorkspace.as_str()
+            })
+            .collect();
+        if !malos.is_empty() {
+            ofensores.push((href, malos));
+        }
+    }
+    assert!(
+        ofensores.is_empty(),
+        "un `[volver](href)` desde `docs/guia.md` que apunta a un directorio del workspace es un \
+         enlace legítimo —GitHub lo resuelve— y no puede tumbar la puerta de CI (exit 1) ni salir \
+         como `LINK-ESCAPES-WORKSPACE`. Ofensores: {ofensores:?}"
+    );
+
+    // CONTROL ANTI-VACUO (obligatorio): el escape de verdad sigue siendo un error bloqueante. Si
+    // este assert se cae, el arreglo fue borrar el diagnóstico, no ampliar la clasificación.
+    let fuga = docset(&[
+        ("README.md", "# Índice\n\nUn workspace de dos documentos.\n"),
+        (
+            "docs/guia.md",
+            "# Guía\n\nY [fuera](../../../etc/passwd) del workspace.\n",
+        ),
+    ]);
+    let cs = diagnosticos(&fuga);
+    assert_eq!(
+        resumen(&cs),
+        vec![("LINK-ESCAPES-WORKSPACE", Severity::Err)],
+        "un destino que sube POR ENCIMA de la raíz sigue siendo `LINK-ESCAPES-WORKSPACE` con \
+         severidad error: es el chokepoint de path-traversal (invariante #6), no una deuda"
+    );
+}
+
+/// La clasificación nueva, destino a destino: qué directorio designa cada href de navegación pura,
+/// y su forma exacta en el wire (la raíz incluida, que no es nombrable como [`RelPath`]).
+#[test]
+fn destino_directorio_dentro_del_workspace() {
+    let i = inv(&["raiz.md", "docs/guia.md", "docs/deep/nota.md"]);
+
+    // `(href, origen, directorio designado)`. Desde tres niveles: `.` es su propio directorio, cada
+    // `..` sube uno, y dos `..` llegan a la raíz —que no tiene `RelPath`, por eso el `Option`—.
+    // El último caso NOMBRA segmentos pero vuelve a la raíz por el camino: mismo destino.
+    const CASOS: [(&str, &str, Option<&str>); 9] = [
+        ("./", "docs/deep/nota.md", Some("docs/deep")),
+        (".", "docs/deep/nota.md", Some("docs/deep")),
+        ("../", "docs/deep/nota.md", Some("docs")),
+        ("..", "docs/deep/nota.md", Some("docs")),
+        ("../../", "docs/deep/nota.md", None),
+        ("../..", "docs/deep/nota.md", None),
+        ("./", "raiz.md", None),
+        (".", "raiz.md", None),
+        ("../docs/..", "docs/guia.md", None),
+    ];
+
+    // Primero los 9 destinos de una vez: el rojo enseña la tabla entera, no solo el primer caso.
+    let obtenidos: Vec<(&str, &str, serde_json::Value)> = CASOS
+        .iter()
+        .map(|(href, desde, _)| (*href, *desde, wire(&resolver_href(href, desde, &i).target)))
+        .collect();
+    let esperados: Vec<(&str, &str, serde_json::Value)> = CASOS
+        .iter()
+        .map(|(href, desde, dir)| (*href, *desde, wire_directorio(*dir)))
+        .collect();
+    assert_eq!(
+        obtenidos, esperados,
+        "un href de navegación pura designa el DIRECTORIO al que llega, y viaja al wire como \
+         `{{\"kind\":\"workspaceDirectory\",\"value\":<dir|null>}}` (`null` = la raíz)"
+    );
+
+    // Y luego, caso a caso, el resto del contrato: no-escape, no-nodo y round-trip por el wire.
+    for (href, desde, dir) in CASOS {
+        let r = resolver_href(href, desde, &i);
+        assert_es_directorio(&r.target, dir, &format!("`{href}` desde `{desde}`"));
+        assert_eq!(
+            r.href, href,
+            "el href original se conserva byte a byte (paso 10 del algoritmo de §20.6)"
+        );
+    }
+
+    // La raíz y un directorio de dentro son destinos DISTINTOS: el wire los separa por su `value`.
+    assert_ne!(
+        wire(&resolver_href("../", "docs/deep/nota.md", &i).target),
+        wire(&resolver_href("../../", "docs/deep/nota.md", &i).target),
+        "`../` designa `docs` y `../../` la raíz: no pueden colapsar en el mismo destino"
+    );
+}
+
+/// Control anti-vacuo, en su propio test para que su rojo/verde se lea por separado: el escape
+/// **real** sigue clasificándose `EscapesWorkspace` y diagnosticándose como error.
+///
+/// Es la parte del contrato que esta historia **no** puede aflojar: `EscapesWorkspace` es lo que
+/// impide que un enlace nombre `/etc/passwd`, y `RelPath` (invariante #6) el que impide escribirlo.
+#[test]
+fn escape_real_sigue_siendo_error() {
+    let files = lodestar_fixtures::with_edge_cases();
+    let i = inv_de(&files);
+
+    let escapes = [
+        // (href, origen, por qué escapa)
+        ("../", "raiz.md", "un solo `..` desde la raíz ya está fuera"),
+        ("..", "raiz.md", "idem sin barra final"),
+        (
+            "../../..",
+            "docs/deep/nota.md",
+            "tres `..` desde dos niveles de profundidad",
+        ),
+        (
+            "../../../../../../etc/passwd",
+            "raiz.md",
+            "seis `..` y un destino nombrado fuera",
+        ),
+        (
+            "../../docs/auth.md",
+            "docs/auth.md",
+            "sale por encima de la raíz y vuelve a entrar: contener es contar profundidad",
+        ),
+    ];
+    for (href, desde, porque) in escapes {
+        assert_eq!(
+            resolver_href(href, desde, &i).target,
+            LinkTarget::EscapesWorkspace,
+            "`{href}` desde `{desde}` escapa del workspace ({porque}): la variante nueva de \
+             directorio NO puede tragarse este caso"
+        );
+    }
+
+    // …y por el camino del diagnóstico: error bloqueante, con su código.
+    let ws = docset(&[
+        ("docs/deep/nota.md", "# Nota\n\n[fuera](../../../x.md)\n"),
+        ("README.md", "# Índice\n"),
+    ]);
+    assert_eq!(
+        resumen(&diagnosticos(&ws)),
+        vec![("LINK-ESCAPES-WORKSPACE", Severity::Err)],
+        "el escape real sigue siendo el único `LINK-ESCAPES-WORKSPACE` del catálogo, y sigue \
+         siendo `Err`"
+    );
+}
+
+/// Consecuencia sobre el GRAFO: un directorio no es nodo, no es fantasma y no es colgante.
+///
+/// Es lo que separa «ampliar `LinkTarget`» de «parchear el diagnóstico»: si el destino directorio se
+/// hubiera modelado como `Missing`, dejaría de tumbar el check (sería `Warn`) pero metería un
+/// vértice inexistente en el grafo y una fila en `dangling`.
+#[test]
+fn directorio_no_es_nodo_del_grafo() {
+    let ws = docset(&[
+        ("README.md", "# Índice\n\nSin enlaces.\n"),
+        ("docs/guia.md", "# Guía\n\n[volver](../) al índice.\n"),
+    ]);
+    let a = ws.analyze();
+
+    assert_eq!(
+        a.documents,
+        vec![rp("README.md"), rp("docs/guia.md")],
+        "los nodos del grafo son los documentos descubiertos: ningún directorio se cuela"
+    );
+    assert!(
+        a.dangling.is_empty(),
+        "un enlace a un directorio NO es un colgante: no hay ningún destino roto que reparar; \
+         dangling = {:?}",
+        a.dangling.iter().map(|d| &d.target).collect::<Vec<_>>()
+    );
+
+    let salientes = &a.outgoing[&rp("docs/guia.md")];
+    assert_eq!(salientes.len(), 1, "el documento tiene un enlace saliente");
+    assert_es_directorio(
+        &salientes[0].target,
+        None,
+        "el saliente de `docs/guia.md` (`../` desde `docs/`)",
+    );
+
+    // Un enlace a un directorio no conecta con ningún documento: `docs/guia.md` sigue AISLADO. Es
+    // la consecuencia buscada de que `internal_path()` sea `None`.
+    assert_eq!(
+        a.isolated,
+        vec![rp("README.md"), rp("docs/guia.md")],
+        "enlazar a un directorio no saca a un documento del aislamiento: no es una arista del grafo"
+    );
+}
+
+/// Control del alcance (decisión 4): un href que **nombra** un directorio sigue siendo `Missing`,
+/// y `Missing` de un destino que no es `.md` ya era `Warn` — nunca fue lo que tumbaba el check.
+#[test]
+fn directorio_nombrado_sigue_siendo_missing_y_no_bloquea() {
+    let i = inv(&["raiz.md", "guias/index.md"]);
+
+    for href in ["guias/", "guias", "./guias/"] {
+        assert_eq!(
+            resolver_href(href, "raiz.md", &i).target,
+            LinkTarget::Missing(rp("guias")),
+            "`{href}` NOMBRA un segmento, y el core no tiene inventario de directorios: decidir \
+             que es un directorio por la barra final sería la heurística que `§20.6` prohíbe"
+        );
+    }
+
+    let ws = docset(&[
+        ("raiz.md", "# Raíz\n\nVer [las guías](guias/).\n"),
+        ("guias/index.md", "# Guías\n"),
+    ]);
+    assert_eq!(
+        resumen(&diagnosticos(&ws)),
+        vec![("LINK-TARGET-MISSING", Severity::Warn)],
+        "un destino nombrado que no existe y no es `.md` es un aviso (`missingWorkspaceFiles: \
+         warning`, §20.9): informa, pero no tumba la puerta de CI"
     );
 }

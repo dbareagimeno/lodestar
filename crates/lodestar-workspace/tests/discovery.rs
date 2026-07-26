@@ -863,3 +863,332 @@ fn exclude_gana_a_los_ficheros_de_ignore() {
         rutas(&d.files)
     );
 }
+
+// ---------------------------------------------------------------------------
+// E23-H09 · Bordes — **Unicode en rutas**
+//
+// Cero cobertura hasta esta historia, y es el primo hermano de `colision_capitalizacion`: ahí el
+// eje era la capitalización (propiedad del VOLUMEN), aquí es la **forma de normalización** Unicode
+// (propiedad del volumen Y de quien escribe el enlace). El CI corre en macOS (APFS), Linux (bytes
+// crudos) y Windows (UTF-16), así que estos tests **sondean el disco en tiempo de ejecución** en
+// vez de decidir por `cfg!(target_os)` — misma técnica que `fs_case_sensitive`.
+//
+// Son cobertura que faltaba, no fase roja: se espera que pasen.
+// ---------------------------------------------------------------------------
+
+/// `café.md` en **NFC** (una sola code unit `é` = U+00E9). Es lo que teclea un humano en macOS o
+/// Linux con un teclado normal y lo que produce la mayoría de editores.
+const CAFE_NFC: &str = "caf\u{e9}.md";
+
+/// `café.md` en **NFD** (`e` + U+0301, acento combinante). Visualmente idéntico al anterior,
+/// **distinto** byte a byte: 9 bytes contra 8.
+const CAFE_NFD: &str = "cafe\u{301}.md";
+
+/// Escribe un fichero del workspace creando los directorios intermedios.
+fn escribe(dir: &std::path::Path, rel: &str, contenido: &str) {
+    let p = dir.join(rel);
+    std::fs::create_dir_all(p.parent().expect("ruta con padre")).expect("crear directorios");
+    std::fs::write(p, contenido).expect("escribir fichero");
+}
+
+/// Nombre **tal y como el volumen lo devuelve** por `read_dir` para el fichero que se escribió con
+/// el nombre `escrito`. En APFS/ext4/NTFS es el mismo (se preserva la forma dada); en HFS+ vuelve
+/// normalizado a NFD. Es el eje que estos tests no pueden asumir y por eso lo miden.
+fn nombre_en_disco(raiz: &std::path::Path, escrito: &str) -> String {
+    let candidatas: Vec<String> = std::fs::read_dir(raiz)
+        .expect("listar la raíz")
+        .filter_map(Result::ok)
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.ends_with(".md") && n.starts_with("caf"))
+        .collect();
+    assert_eq!(
+        candidatas.len(),
+        1,
+        "se escribió UN «café.md» (como {:?}); el volumen devuelve {candidatas:?}",
+        escrito.as_bytes()
+    );
+    candidatas.into_iter().next().unwrap()
+}
+
+/// Percent-encoding de los bytes no ASCII de un nombre de fichero: es la forma en que muchos
+/// editores (y GitHub) escriben un href con acentos, y la que ejercita el `percent_decode` del
+/// core sobre UTF-8 multibyte.
+fn percent_encode(nombre: &str) -> String {
+    nombre
+        .bytes()
+        .map(|b| {
+            if b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_' | b'/') {
+                (b as char).to_string()
+            } else {
+                format!("%{b:02X}")
+            }
+        })
+        .collect()
+}
+
+/// Los diagnósticos de `origen` en el análisis del workspace, como pares `(código, related)`.
+fn diagnosticos_de(a: &lodestar_core::types::Analysis, origen: &str) -> Vec<(String, Vec<String>)> {
+    a.diagnostics
+        .get(&RelPath::new(origen).expect("ruta válida"))
+        .map(Vec::as_slice)
+        .unwrap_or_default()
+        .iter()
+        .map(|c| {
+            (
+                c.code.as_str().to_string(),
+                c.related.iter().map(|r| r.as_str().to_string()).collect(),
+            )
+        })
+        .collect()
+}
+
+/// **Dado** documentos con nombres no ASCII (acento, ideogramas CJK, emoji) enlazados desde otro
+/// documento, **Cuando** se descubre y se analiza el workspace, **Entonces** los tres entran en el
+/// inventario con su ruta exacta y sus tres enlaces **resuelven** (ningún `LINK-TARGET-MISSING`),
+/// tanto escritos en literal como percent-encodeados.
+///
+/// El nombre acentuado se escribe en NFC y se **relee del disco** antes de componer el href: así el
+/// criterio («el enlace resuelve») se mide en las tres plataformas sin asumir qué forma preserva el
+/// volumen. La divergencia NFC/NFD es el sujeto del test siguiente, no de este.
+///
+/// Anti-vacuo: el mismo documento enlaza además a un `café-que-no-existe.md`, que **sí** debe salir
+/// como `LINK-TARGET-MISSING`. Sin esa mitad, un análisis que no mirara los enlaces pasaría igual.
+#[test]
+fn unicode_en_rutas() {
+    use lodestar_core::types::LinkTarget;
+
+    let dir = tempfile::tempdir().unwrap();
+    escribe(
+        dir.path(),
+        CAFE_NFC,
+        "# Café\n\nnota con acento en el nombre.\n",
+    );
+    escribe(
+        dir.path(),
+        "日本語.md",
+        "# 日本語\n\nnota con ideogramas.\n",
+    );
+    escribe(
+        dir.path(),
+        "notas/🚀-lanzamiento.md",
+        "# Lanzamiento\n\nnota con emoji en el nombre.\n",
+    );
+
+    // La forma que el volumen devuelve de verdad (ver `nombre_en_disco`).
+    let cafe = nombre_en_disco(dir.path(), CAFE_NFC);
+    eprintln!(
+        "[unicode] escrito {:?} → el volumen devuelve {:?} (preserva NFC: {})",
+        CAFE_NFC.as_bytes(),
+        cafe.as_bytes(),
+        cafe == CAFE_NFC
+    );
+    assert!(
+        cafe == CAFE_NFC || cafe == CAFE_NFD,
+        "el nombre en disco debe ser una de las dos formas de «café.md», no {:?}",
+        cafe.as_bytes()
+    );
+
+    let cafe_encoded = percent_encode(&cafe);
+    assert_ne!(
+        cafe_encoded, cafe,
+        "el percent-encoding debe cambiar algo (si no, el enlace codificado no probaría nada)"
+    );
+    escribe(
+        dir.path(),
+        "enlazador.md",
+        &format!(
+            "# Enlazador\n\n\
+             * [Café literal]({cafe})\n\
+             * [Café codificado]({cafe_encoded})\n\
+             * [Japonés](日本語.md)\n\
+             * [Lanzamiento](notas/🚀-lanzamiento.md)\n\
+             * [Café inexistente](caf\u{e9}-que-no-existe.md)\n"
+        ),
+    );
+
+    // --- Descubrimiento: los tres nombres no ASCII entran con su ruta EXACTA ------------------
+    let d = discover(dir.path(), &politica()).unwrap();
+    for esperado in [cafe.as_str(), "日本語.md", "notas/🚀-lanzamiento.md"] {
+        assert!(
+            contiene(&d.files, esperado),
+            "un nombre no ASCII no puede quedarse fuera del inventario (falta {:?}): {:?}",
+            esperado.as_bytes(),
+            rutas(&d.files)
+        );
+    }
+    assert!(
+        d.diagnostics.is_empty(),
+        "un nombre no ASCII no es un problema de descubrimiento (ni PATH-NOT-UTF8 ni nada): {}",
+        resumen(&d.diagnostics)
+    );
+
+    // --- Análisis: los enlaces a esos nombres RESUELVEN --------------------------------------
+    let ws = lodestar_workspace::Workspace::open(dir.path()).expect("abrir el workspace");
+    let a = ws.analyze().expect("analizar el workspace");
+    let salientes = a
+        .outgoing
+        .get(&RelPath::new("enlazador.md").unwrap())
+        .expect("«enlazador.md» debe estar entre los documentos analizados");
+    let destino = |href: &str| -> LinkTarget {
+        salientes
+            .iter()
+            .find(|l| l.href == href)
+            .unwrap_or_else(|| {
+                let vistos: Vec<&str> = salientes.iter().map(|l| l.href.as_str()).collect();
+                panic!("«enlazador.md» debe tener un saliente con href «{href}»; tiene {vistos:?}")
+            })
+            .target
+            .clone()
+    };
+    let doc = |p: &str| LinkTarget::Document(RelPath::new(p).unwrap());
+
+    assert_eq!(
+        destino(&cafe),
+        doc(&cafe),
+        "el enlace literal al documento acentuado debe resolver a ese documento"
+    );
+    assert_eq!(
+        destino(&cafe_encoded),
+        doc(&cafe),
+        "el enlace percent-encodeado ({cafe_encoded}) debe decodificarse a UTF-8 y resolver al \
+         mismo documento"
+    );
+    assert_eq!(
+        destino("日本語.md"),
+        doc("日本語.md"),
+        "el enlace a un documento con ideogramas debe resolver"
+    );
+    assert_eq!(
+        destino("notas/🚀-lanzamiento.md"),
+        doc("notas/🚀-lanzamiento.md"),
+        "el enlace a un documento con emoji, en un subdirectorio, debe resolver"
+    );
+
+    // --- Anti-vacuo: el único enlace roto del documento es el que se rompió a propósito -------
+    let diags = diagnosticos_de(&a, "enlazador.md");
+    let perdidos: Vec<&(String, Vec<String>)> = diags
+        .iter()
+        .filter(|(code, _)| code == "LINK-TARGET-MISSING")
+        .collect();
+    assert_eq!(
+        perdidos.len(),
+        1,
+        "solo el enlace inventado debe faltar; los cuatro no ASCII resuelven. Diagnósticos: \
+         {diags:?}"
+    );
+    assert_eq!(
+        perdidos[0].1,
+        vec!["caf\u{e9}-que-no-existe.md".to_string()],
+        "y el que falta es exactamente el inventado (con su acento intacto en el `related`)"
+    );
+}
+
+/// **Dado** un documento cuyo nombre está en una forma de normalización Unicode y un enlace que lo
+/// apunta en **la otra**, **Cuando** se analiza el workspace, **Entonces** el enlace **NO** resuelve:
+/// sale `LINK-TARGET-MISSING` con severidad `Err`.
+///
+/// ⚠ **HALLAZGO — este test asevera el comportamiento REAL, que en macOS es un falso positivo.**
+///
+/// Lodestar compara rutas **byte a byte** (el inventario es un `BTreeMap<RelPath, _>` y
+/// `RelPath::new` no normaliza), así que `caf\u{e9}.md` (NFC, 8 bytes) y `cafe\u{301}.md` (NFD,
+/// 9 bytes) son dos rutas distintas. Consecuencias por plataforma, medidas por la sonda que este
+/// test imprime:
+///
+/// - **Linux/ext4** (bytes crudos): el fichero NFD no existe, así que el diagnóstico es **correcto**
+///   — un render de Markdown tampoco encontraría el destino.
+/// - **macOS/APFS** (preserva la forma escrita pero compara *normalization-insensitive*): el
+///   fichero **sí se abre** con el nombre en la otra forma, así que el diagnóstico es un **falso
+///   positivo**: `LINK-TARGET-MISSING` sobre un `.md` es severidad `Err` ⇒ **tumba la puerta de
+///   CI** por un enlace que el sistema operativo y GitHub resuelven sin problema.
+/// - **macOS/HFS+** (normaliza a NFD al escribir): el caso simétrico, con el mismo resultado.
+///
+/// El escenario realista no es rebuscado: basta con que el fichero lo cree un `git checkout` en
+/// macOS y el enlace lo teclee alguien en Linux, o al revés. El arreglo correcto sería normalizar
+/// (a NFC) en el chokepoint de `RelPath` —los dos lados a la vez, inventario y href—, no parchear
+/// el diagnóstico. Mientras no se decida, esta es la conducta vigente y queda fijada aquí; si
+/// alguna historia la cambia, este test debe **reescribirse**, nunca relajarse.
+#[test]
+fn unicode_nfc_y_nfd_no_son_la_misma_ruta() {
+    use lodestar_core::types::{LinkTarget, Severity};
+
+    let dir = tempfile::tempdir().unwrap();
+    escribe(
+        dir.path(),
+        CAFE_NFC,
+        "# Café\n\nel documento realmente existe.\n",
+    );
+
+    let en_disco = nombre_en_disco(dir.path(), CAFE_NFC);
+    // La forma CONTRARIA a la que el volumen guarda: es la que escribirá el enlace.
+    let la_otra = if en_disco == CAFE_NFC {
+        CAFE_NFD
+    } else {
+        CAFE_NFC
+    };
+    let abre_con_la_otra = dir.path().join(la_otra).is_file();
+    eprintln!(
+        "[unicode-nfc-nfd] en disco={:?} · enlace={:?} · ¿el SO abre el fichero con la forma del \
+         enlace? {abre_con_la_otra}",
+        en_disco.as_bytes(),
+        la_otra.as_bytes()
+    );
+
+    escribe(
+        dir.path(),
+        "enlazador.md",
+        &format!("# Enlazador\n\n[Café en la otra forma]({la_otra})\n"),
+    );
+
+    let ws = lodestar_workspace::Workspace::open(dir.path()).expect("abrir el workspace");
+    let a = ws.analyze().expect("analizar el workspace");
+
+    // El documento SÍ está en el inventario (el test no va de un fichero que falte).
+    assert!(
+        a.diagnostics.keys().any(|p| p.as_str() == en_disco)
+            || a.outgoing.keys().any(|p| p.as_str() == en_disco),
+        "«café.md» debe estar entre los documentos analizados (inventario: {:?})",
+        a.outgoing.keys().map(RelPath::as_str).collect::<Vec<_>>()
+    );
+
+    let saliente = a
+        .outgoing
+        .get(&RelPath::new("enlazador.md").unwrap())
+        .and_then(|ls| ls.first())
+        .expect("«enlazador.md» debe tener su único enlace resuelto");
+    assert_eq!(
+        saliente.target,
+        LinkTarget::Missing(RelPath::new(la_otra).unwrap()),
+        "las dos formas Unicode se comparan byte a byte: el enlace se clasifica Missing aunque el \
+         fichero exista visualmente con ese nombre (¿el SO lo abre?: {abre_con_la_otra})"
+    );
+
+    let checks = a
+        .diagnostics
+        .get(&RelPath::new("enlazador.md").unwrap())
+        .expect("el enlace no resuelto debe producir diagnóstico");
+    let missing = checks
+        .iter()
+        .find(|c| c.code.as_str() == "LINK-TARGET-MISSING")
+        .unwrap_or_else(|| {
+            panic!(
+                "se esperaba LINK-TARGET-MISSING; diagnósticos: {}",
+                resumen(checks)
+            )
+        });
+    assert_eq!(
+        missing.level,
+        Severity::Err,
+        "un destino `.md` ausente es hard-fail: por eso el falso positivo de macOS tumba la puerta \
+         de CI y no es una molestia menor"
+    );
+    // Y NO se degrada a LINK-CASE-MISMATCH: `find_ignoring_case` pliega mayúsculas, no formas
+    // Unicode, así que el motor ni siquiera sugiere la ruta real.
+    assert!(
+        !checks
+            .iter()
+            .any(|c| c.code.as_str() == "LINK-CASE-MISMATCH"),
+        "hoy el motor no relaciona las dos formas Unicode: no hay pista hacia la ruta real. \
+         Diagnósticos: {}",
+        resumen(checks)
+    );
+}

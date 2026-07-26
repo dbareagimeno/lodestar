@@ -64,9 +64,18 @@ pub fn catalog(docs: &DocumentSet) -> MetadataCatalog {
 /// frontmatter y los con frontmatter pero sin este campo), de modo que
 /// `present_in + missing_in == nº de documentos`.
 ///
-/// `values` cuenta **solo escalares** (`null`/bool/número/string): un valor lista u objeto suma en
-/// `present_in` y su tipo en `inferred_types`, pero no aparece en `values`. Un `null` presente es un
-/// escalar y **sí** aparece —distinto de la ausencia, que no llega a `present_in`—.
+/// `values` es el **vocabulario** del campo. Un valor escalar (`null`/bool/número/string) aporta su
+/// propio valor; un valor **lista aporta cada uno de sus elementos escalares** (E23-H11), que es lo
+/// que hace útil `metadata_inspect` sobre un `tags: [a, b]` — hasta E23-H11 devolvía `values: []` y
+/// era imposible sacar el vocabulario de tags de una base. Un valor mapa no aporta nada (sus hojas
+/// ya son campos propios del catálogo, con su field path). Un `null` presente es un escalar y **sí**
+/// aparece —distinto de la ausencia, que no llega a `present_in`—.
+///
+/// **Consecuencia contraintuitiva y deliberada**: `present_in` cuenta **documentos**, así que un
+/// documento con `tags: [a, b, c]` suma 1 a `present_in` pero 3 al vocabulario. La suma de los
+/// `count` de `values` **puede superar** `present_in` en un campo multivalor. Un elemento repetido
+/// dentro de la misma lista (`tags: [a, a]`) cuenta 2: `values` mide observaciones, no documentos.
+/// La explosión **no es recursiva**: un elemento que a su vez sea lista u objeto se ignora.
 ///
 /// # Orden de `values` (determinista)
 /// Por conteo **descendente** y, a igual conteo, por el **texto** del valor **ascendente** (el
@@ -90,9 +99,27 @@ pub fn inspect_field(docs: &DocumentSet, field: &FieldPath) -> FieldInspection {
         present_in += 1;
         let tipo = ValueType::of(value);
         *inferred_types.entry(tipo).or_insert(0) += 1;
-        // Solo los escalares entran en `values`; lista y objeto quedan fuera (sí en inferred_types).
-        if es_escalar(tipo) {
-            *conteos.entry(value.clone()).or_insert(0) += 1;
+        match value {
+            // E23-H11: una LISTA aporta cada uno de sus elementos escalares al vocabulario. Sin
+            // esto, `metadata_inspect(field: "tags")` devolvía `values: []` sobre cualquier base de
+            // notas —el caso de uso número uno de una KB— y la tool incumplía su propósito
+            // declarado: «descubrir qué campos usa una base desconocida **y qué valores toma**».
+            //
+            // No es recursivo: un elemento que a su vez sea lista u objeto se ignora. Explotar en
+            // profundidad convertiría el vocabulario en una mezcla de niveles distintos, y las hojas
+            // de un objeto ya son campos propios del catálogo por su field path (`tags.x`).
+            serde_yaml::Value::Sequence(items) => {
+                for item in items {
+                    if es_escalar(ValueType::of(item)) {
+                        *conteos.entry(item.clone()).or_insert(0) += 1;
+                    }
+                }
+            }
+            // Un escalar aporta su propio valor; un mapa no aporta nada (sí su tipo, arriba).
+            _ if es_escalar(tipo) => {
+                *conteos.entry(value.clone()).or_insert(0) += 1;
+            }
+            _ => {}
         }
     }
 

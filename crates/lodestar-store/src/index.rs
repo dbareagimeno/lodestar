@@ -81,15 +81,19 @@ fn target_kind(target: &LinkTarget) -> String {
 }
 
 /// El path de destino sin fragmento (la columna `links.target_path`), o `None` para los destinos
-/// sin path (externo, anchor propio, escape).
+/// que no son un **fichero** del workspace (externo, anchor propio, directorio, escape).
 fn target_path(target: &LinkTarget) -> Option<String> {
     match target {
         LinkTarget::Document(p) | LinkTarget::WorkspaceFile(p) | LinkTarget::Missing(p) => {
             Some(p.as_str().to_string())
         }
-        LinkTarget::ExternalUri(_) | LinkTarget::SelfAnchor(_) | LinkTarget::EscapesWorkspace => {
-            None
-        }
+        // Un directorio (E23-H11) sí tiene path a veces, pero `target_path` es la columna del
+        // destino-fichero: indexar ahí un directorio lo haría indistinguible de un `.md` en las
+        // consultas de la cache. El `kind` del wire (`workspaceDirectory`) ya lo identifica.
+        LinkTarget::WorkspaceDirectory(_)
+        | LinkTarget::ExternalUri(_)
+        | LinkTarget::SelfAnchor(_)
+        | LinkTarget::EscapesWorkspace => None,
     }
 }
 

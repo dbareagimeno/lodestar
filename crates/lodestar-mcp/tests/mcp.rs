@@ -4587,3 +4587,295 @@ fn status_sin_recovery_pendiente() {
          recovery.pendingTransaction == false: {resp:?}"
     );
 }
+
+// ===========================================================================
+// E23-H09 · Bordes (`requirements/epica-23-cierre-migracion.md`)
+//
+// Lo que separa «funciona en un tempdir limpio» de «funciona en un repo real». Es cobertura que
+// faltaba, no fase roja: se espera que estos tests pasen.
+//
+// La concurrencia ENTRE PROCESOS (`dos_procesos_un_ganador`, `lock_huerfano`) vive en
+// `crates/lodestar-mcp/tests/concurrencia.rs`, que necesita mantener dos servidores vivos a la vez
+// y no puede usar el `roundtrip` de este fichero. El Unicode en rutas, en
+// `crates/lodestar-workspace/tests/discovery.rs`.
+// ===========================================================================
+
+/// El texto del error de EJECUCIÓN de una tool: `crates/lodestar-mcp/src/tools.rs` pone ahí el
+/// código estable (`ErrorCode::as_str()`), nunca el `Debug` de la variante. Verifica de paso que el
+/// rechazo llegó como `isError` y **no** como error de protocolo JSON-RPC.
+fn texto_de_error(resp: &serde_json::Value) -> String {
+    assert_eq!(
+        resp["result"]["isError"], true,
+        "se esperaba un error de EJECUCIÓN de la tool (isError en el result): {resp:?}"
+    );
+    assert!(
+        resp["error"].is_null(),
+        "un rechazo del motor NO debe viajar como error de protocolo JSON-RPC: {resp:?}"
+    );
+    resp["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap_or_else(|| panic!("el error debe traer su código estable como texto: {resp:?}"))
+        .to_string()
+}
+
+/// Frontmatter **sintácticamente inválido** dentro de un bloque bien delimitado: el mismo
+/// disparador de `FM-YAML-INVALID` que ya usa `workspace_editado_a_mano`, aquí como dato de
+/// entrada del camino de ESCRITURA.
+const FM_ROTO: &str =
+    "---\ntitle: : :\n  - roto\nestado: escrito a pelo\n---\n\n# Nota rota\n\ncuerpo valioso.\n";
+
+/// Bloque de frontmatter que abre y **nunca cierra** (`FM-UNCLOSED`): la otra mitad de «ilegible».
+/// Va en el mismo test porque son dos ramas distintas de `model::patch_frontmatter`
+/// (`SplitFront::SinCerrar` vs. YAML que no parsea) y arreglar una no arregla la otra.
+const FM_SIN_CERRAR: &str =
+    "---\nestado: abierto\n\n# Nota sin cerrar\n\notro cuerpo valioso que no se puede perder.\n";
+
+/// **E23-H09** · Criterio `patch_sobre_frontmatter_ilegible`:
+/// **Dado** un documento cuyo frontmatter no se puede interpretar, **Cuando** se le aplica un
+/// `patch_frontmatter`, **Entonces** la operación falla limpio (`INVALID_SCHEMA`) y el `.md` queda
+/// **byte a byte** como estaba.
+///
+/// Es la vía más directa a pérdida de datos del usuario y hasta esta historia solo estaba probada
+/// en el camino de LECTURA (`check_detecta_edicion_directa` → `FM-YAML-INVALID`). En escritura, la
+/// alternativa peligrosa sería «reconstruir el bloque encima» con las claves que sí se entienden:
+/// eso borraría en silencio lo que el usuario había escrito. El core lo evita a propósito
+/// (`crates/lodestar-core/src/plan.rs`, rama `PatchFrontmatter`: «un frontmatter ilegible hace
+/// fallar la operación en vez de reconstruirse encima»); aquí se fija **por la frontera MCP** y
+/// **verificando el disco**, que es donde se pierde el dato.
+///
+/// El fallo ocurre ya en `change_plan` —que simula el cambio en memoria— así que no llega a existir
+/// un plan que aplicar: mejor todavía, el agente se entera antes de pedir la escritura.
+///
+/// Anti-vacuo: la tercera parte del test aplica el MISMO patch a un documento sano y comprueba que
+/// ese sí planifica y escribe. Sin ella, un `patch_frontmatter` roto de raíz pasaría este test.
+#[test]
+fn patch_sobre_frontmatter_ilegible() {
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), "roto-yaml.md", FM_ROTO);
+    write(dir.path(), "sin-cerrar.md", FM_SIN_CERRAR);
+    write(
+        dir.path(),
+        "sano.md",
+        "---\nestado: borrador\n---\n\n# Sano\n\ncuerpo.\n",
+    );
+
+    // Copia byte a byte del estado previo de los dos documentos ilegibles.
+    let antes: Vec<(String, Vec<u8>)> = ["roto-yaml.md", "sin-cerrar.md"]
+        .iter()
+        .map(|p| {
+            (
+                (*p).to_string(),
+                std::fs::read(dir.path().join(p)).expect("leer el documento ilegible"),
+            )
+        })
+        .collect();
+
+    for (ruta, contenido_previo) in &antes {
+        let ops = serde_json::json!([
+            { "op": "patch_frontmatter", "ref": { "path": ruta },
+              "patch": { "estado": "PATCH-QUE-NO-DEBE-APLICARSE" } }
+        ]);
+        let resp = roundtrip(
+            dir.path(),
+            &[change_plan_line(None, ops, policy_permisiva()).as_str()],
+            1,
+        );
+
+        // (a) Falla limpio, con el código estable del catálogo — no un panic ni un plan silencioso.
+        let codigo = texto_de_error(&resp[0]);
+        assert!(
+            codigo.contains("INVALID_SCHEMA"),
+            "parchear el frontmatter de «{ruta}» (ilegible) debe rechazarse con INVALID_SCHEMA \
+             —precondición de la operación incumplida por el dato de entrada—, no con «{codigo}»: \
+             {resp:?}"
+        );
+
+        // (b) LO ESENCIAL: el fichero del usuario sigue **byte a byte** como estaba.
+        let ahora = std::fs::read(dir.path().join(ruta)).expect("releer el documento ilegible");
+        assert_eq!(
+            &ahora,
+            contenido_previo,
+            "un patch rechazado NO puede tocar el documento: «{ruta}» debe quedar byte a byte \
+             igual. Antes: {:?} · Ahora: {:?}",
+            String::from_utf8_lossy(contenido_previo),
+            String::from_utf8_lossy(&ahora)
+        );
+        // Redundante a propósito y legible en el informe de fallo: el bloque original sobrevive.
+        let texto = String::from_utf8_lossy(&ahora);
+        assert!(
+            !texto.contains("PATCH-QUE-NO-DEBE-APLICARSE"),
+            "la clave del patch no puede haberse colado en «{ruta}»: {texto:?}"
+        );
+    }
+
+    // (c) Anti-vacuo: el mismo patch sobre un documento con frontmatter legible SÍ planifica.
+    let ops_sanas = serde_json::json!([
+        { "op": "patch_frontmatter", "ref": { "path": "sano.md" },
+          "patch": { "estado": "PATCH-QUE-SI-SE-APLICA" } }
+    ]);
+    let plan = roundtrip(
+        dir.path(),
+        &[change_plan_line(None, ops_sanas, policy_permisiva()).as_str()],
+        1,
+    );
+    assert!(
+        plan[0]["result"]["isError"].as_bool() != Some(true),
+        "el MISMO patch sobre un documento sano debe planificar sin error (si no, el rechazo de \
+         arriba no probaría nada sobre el frontmatter ilegible): {plan:?}"
+    );
+    let id = plan_change_set_id(&plan[0]);
+    let aplicado = roundtrip(dir.path(), &[change_apply_line(&id, None).as_str()], 1);
+    assert_eq!(
+        apply_sc(&aplicado[0])["applied"],
+        serde_json::Value::Bool(true),
+        "y debe poder aplicarse: {aplicado:?}"
+    );
+    let sano = std::fs::read_to_string(dir.path().join("sano.md")).unwrap();
+    assert!(
+        sano.contains("PATCH-QUE-SI-SE-APLICA"),
+        "el documento sano sí recibe el patch: {sano:?}"
+    );
+    // Y la transacción no arrastró a los ilegibles, que ni siquiera estaban en su change set.
+    for (ruta, contenido_previo) in &antes {
+        assert_eq!(
+            &std::fs::read(dir.path().join(ruta)).unwrap(),
+            contenido_previo,
+            "publicar un cambio sobre otro documento no puede reescribir «{ruta}»"
+        );
+    }
+}
+
+/// **E23-H09** · Criterio «códigos del catálogo sin emisor», primer caso alcanzable:
+/// **Dado** `lodestar-mcp --root <ruta que no existe>`, **Cuando** se arranca, **Entonces** falla
+/// con un mensaje legible por stderr y exit code 3, sin panic y sin ensuciar stdout.
+///
+/// El arranque es el único punto de la superficie donde «no hay workspace» puede ocurrir: dentro de
+/// una sesión, la raíz ya está canonicalizada y fija (`§20.5`). Se asevera lo que el producto
+/// promete de verdad —stdout es JSON-RPC **puro**, así que un fallo de arranque no puede escribir
+/// nada ahí— y que no hay panic (un `unwrap` en el arranque sería un fallo de robustez visible para
+/// cualquier cliente MCP, que vería el proceso morir sin explicación).
+///
+/// **HALLAZGO registrado por este test**: el catálogo congelado de 16 códigos tiene
+/// `WORKSPACE_NOT_FOUND`, pero **ningún camino del producto lo emite** — el arranque sale por
+/// `std::process::exit(3)` con texto plano, no por el envelope de error. Aquí se fija el
+/// comportamiento REAL (exit 3 + mensaje que nombra la ruta), no el que el catálogo insinúa.
+#[test]
+fn root_inexistente_falla_legible_sin_panic() {
+    let base = tempfile::tempdir().unwrap();
+    let inexistente = base.path().join("no-existe").join("ni-de-lejos");
+    assert!(
+        !inexistente.exists(),
+        "precondición: la ruta del test no debe existir"
+    );
+
+    let salida = Command::new(env!("CARGO_BIN_EXE_lodestar-mcp"))
+        .arg("--root")
+        .arg(&inexistente)
+        .stdin(Stdio::null())
+        .output()
+        .expect("ejecutar lodestar-mcp");
+
+    let stderr = String::from_utf8_lossy(&salida.stderr).into_owned();
+    let stdout = String::from_utf8_lossy(&salida.stdout).into_owned();
+    eprintln!(
+        "[root-inexistente] exit={:?} stderr={stderr:?}",
+        salida.status.code()
+    );
+
+    assert_eq!(
+        salida.status.code(),
+        Some(3),
+        "una raíz que no existe es un fallo de runtime/IO: exit 3 (stderr: {stderr:?})"
+    );
+    assert!(
+        !stderr.contains("panicked"),
+        "el arranque no puede paniquear ante una ruta inexistente: {stderr:?}"
+    );
+    assert!(
+        stderr.contains("lodestar-mcp"),
+        "el mensaje debe identificar al programa: {stderr:?}"
+    );
+    assert!(
+        stderr.contains("ni-de-lejos"),
+        "el mensaje debe nombrar la ruta que no se pudo resolver (si no, el usuario no sabe qué \
+         arreglar): {stderr:?}"
+    );
+    assert!(
+        stdout.is_empty(),
+        "stdout es JSON-RPC PURO: un fallo de arranque no puede escribir nada ahí, ni siquiera un \
+         mensaje de ayuda: {stdout:?}"
+    );
+}
+
+/// **E23-H09** · Criterio «códigos del catálogo sin emisor», caso `INTERNAL_IO_ERROR`:
+/// **Dado** un workspace en el que `.lodestar/runtime/plans/` **no puede existir** como directorio,
+/// **Cuando** se pide un `change_plan`, **Entonces** la tool responde `INTERNAL_IO_ERROR` en vez de
+/// paniquear o de devolver un plan que no se podrá aplicar.
+///
+/// Es el único de los cuatro códigos huérfanos del catálogo (`AMBIGUOUS_REFERENCE`,
+/// `RESULT_TOO_LARGE`, `RECOVERY_FAILED`, `INTERNAL_IO_ERROR`) con un camino alcanzable desde la
+/// superficie: los otros tres no tienen productor en el árbol (ver el informe de la historia).
+///
+/// El escenario se monta plantando un **fichero** donde el motor espera un directorio, que es la
+/// forma portable de provocar un fallo de I/O real (los permisos POSIX no se comportan igual en
+/// Windows ni bajo root). Modela un caso de campo: un `.lodestar/` corrupto o un volumen que
+/// rechaza la escritura.
+///
+/// De paso fija dos propiedades de robustez: abrir el workspace **no** aborta por esto
+/// (`ensure_runtime_scaffold` es best-effort y solo avisa por stderr), y la lectura sigue
+/// funcionando pese al runtime roto.
+#[test]
+fn plan_con_runtime_no_escribible_da_internal_io_error() {
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), "nota.md", "# Nota\n\ncuerpo.\n");
+
+    // Un FICHERO donde `persist_plan` necesita un directorio: `create_dir_all` fallará.
+    std::fs::create_dir_all(dir.path().join(".lodestar/runtime")).unwrap();
+    std::fs::write(
+        dir.path().join(".lodestar/runtime/plans"),
+        b"no soy un directorio\n",
+    )
+    .unwrap();
+
+    let ops = serde_json::json!([
+        { "op": "patch_frontmatter", "ref": { "path": "nota.md" }, "patch": { "estado": "x" } }
+    ]);
+    let resp = roundtrip(
+        dir.path(),
+        &[
+            change_plan_line(None, ops, policy_permisiva()).as_str(),
+            // El servidor sigue vivo y sirviendo lecturas pese al runtime roto.
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"knowledge_get","arguments":{"ref":{"path":"nota.md"}}}}"#,
+        ],
+        2,
+    );
+
+    let codigo = texto_de_error(&resp[0]);
+    assert!(
+        codigo.contains("INTERNAL_IO_ERROR"),
+        "un fallo de I/O al persistir el plan debe reportarse como INTERNAL_IO_ERROR (fallo del \
+         motor/entorno, no del agente), no como «{codigo}»: {resp:?}"
+    );
+
+    // No se corrompió nada ni se abortó el proceso: la lectura posterior responde con normalidad.
+    assert!(
+        resp[1]["result"]["isError"].as_bool() != Some(true),
+        "el servidor debe seguir sirviendo lecturas con el runtime roto: {resp:?}"
+    );
+    assert_eq!(
+        resp[1]["result"]["structuredContent"]["document"]["path"], "nota.md",
+        "y devolver el documento pedido: {resp:?}"
+    );
+
+    // El obstáculo sigue siendo un fichero: el motor no lo ha borrado por su cuenta para hacerse
+    // sitio (eso sería destruir algo del usuario para poder escribir su scratch).
+    assert!(
+        dir.path().join(".lodestar/runtime/plans").is_file(),
+        "el motor no debe borrar lo que encuentra en su ruta de runtime"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("nota.md")).unwrap(),
+        "# Nota\n\ncuerpo.\n",
+        "planificar no escribe el canónico, ni siquiera cuando falla"
+    );
+}

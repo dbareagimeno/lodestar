@@ -705,7 +705,22 @@ pub enum LinkTarget {
     SelfAnchor(String),
     /// Destino contenido en el workspace que no existe, con su path ya normalizado.
     Missing(RelPath),
-    /// El destino sale de la raíz del workspace. No lleva path: no hay `RelPath` que lo represente.
+    /// **Directorio contenido en el workspace** — E23-H11.
+    ///
+    /// Se alcanza por navegación pura (`./`, `.`, `../`, `..`) o por un path que normaliza a un
+    /// directorio (`../docs/..`). `None` es la **raíz** del workspace: no hay `RelPath` que la
+    /// nombre, porque `RelPath::new("")` es un error por diseño (invariante #6).
+    ///
+    /// Existe porque hasta E23-H11 estos destinos caían en [`LinkTarget::EscapesWorkspace`], que es
+    /// `Severity::Err`: un `[volver](../)` —un enlace legítimo que GitHub resuelve— **tumbaba
+    /// `lodestar check` con exit 1**. La deuda estaba registrada al cerrar E17, que ya decía que el
+    /// arreglo correcto era ampliar este enum en vez de parchear el diagnóstico.
+    ///
+    /// No es nodo del grafo ni produce diagnóstico: un directorio no es un documento (`§20.6`
+    /// prohíbe convertirlo en su `index.md`).
+    WorkspaceDirectory(Option<RelPath>),
+    /// El destino sale **por encima** de la raíz del workspace. No lleva path: no hay `RelPath` que
+    /// lo represente. Sigue siendo `Err` — es el chokepoint semántico de contención.
     EscapesWorkspace,
 }
 }

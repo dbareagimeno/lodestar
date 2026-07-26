@@ -1633,9 +1633,13 @@ fn target_path_de(t: &lodestar_core::types::LinkTarget) -> Option<String> {
         LinkTarget::Document(p) | LinkTarget::WorkspaceFile(p) | LinkTarget::Missing(p) => {
             Some(p.as_str().to_string())
         }
-        LinkTarget::ExternalUri(_) | LinkTarget::SelfAnchor(_) | LinkTarget::EscapesWorkspace => {
-            None
-        }
+        // E23-H11: un directorio no es un destino-fichero, así que no entra en `target_path`
+        // (espeja `lodestar_store::index::target_path`, la función de producción que este helper
+        // deriva del enum del core).
+        LinkTarget::WorkspaceDirectory(_)
+        | LinkTarget::ExternalUri(_)
+        | LinkTarget::SelfAnchor(_)
+        | LinkTarget::EscapesWorkspace => None,
     }
 }
 

@@ -679,15 +679,18 @@ fn rebase_body_links(body: &str, from: &RelPath, to: &RelPath, inventory: &Inven
     // uso— no la vería. No es una arista del grafo, pero sí es un path relativo escrito por el
     // usuario: dejarla sin recalcular la haría apuntar a otro sitio en silencio. Los spans de las
     // usadas coinciden con los de su definición, así que el `dedup_by` de abajo los funde.
-    let mut objetivos: Vec<(std::ops::Range<usize>, RelPath)> = links::extract_links(body)
+    let mut objetivos: Vec<(std::ops::Range<usize>, Destino)> = links::extract_links(body)
         .into_iter()
         .chain(links::reference_definitions(body))
         .map(|raw| links::resolve(&raw, from, inventory))
         .filter_map(|link| {
             let destino = match &link.target {
                 LinkTarget::Document(p) | LinkTarget::WorkspaceFile(p) | LinkTarget::Missing(p) => {
-                    p.clone()
+                    Destino::Fichero(p.clone())
                 }
+                // Un directorio (`[volver](../)`) también depende del origen: si el documento
+                // cambia de profundidad, ese href pasa a señalar otro directorio en silencio.
+                LinkTarget::WorkspaceDirectory(d) => Destino::Directorio(d.clone()),
                 LinkTarget::ExternalUri(_)
                 | LinkTarget::SelfAnchor(_)
                 | LinkTarget::EscapesWorkspace => return None,
@@ -701,11 +704,69 @@ fn rebase_body_links(body: &str, from: &RelPath, to: &RelPath, inventory: &Inven
     let mut out = body.to_string();
     for (span, destino) in objetivos {
         // El href se recalcula como si lo escribiera el documento YA en `to`: mismo destino, origen
-        // nuevo. `retarget_href` conserva el sufijo `#fragmento`/`?query` y el estilo absoluto.
-        let nuevo = retarget_href(&out[span.clone()], to.as_str(), &destino);
+        // nuevo. Se conserva el sufijo `#fragmento`/`?query` y el estilo absoluto.
+        let nuevo = match &destino {
+            Destino::Fichero(p) => retarget_href(&out[span.clone()], to.as_str(), p),
+            Destino::Directorio(d) => {
+                redirigir_href_a_directorio(&out[span.clone()], to, d.as_ref())
+            }
+        };
         out.replace_range(span, &nuevo);
     }
     out
+}
+
+/// A dónde apunta un enlace que hay que recalcular al mover su documento — E23-H11.
+enum Destino {
+    /// Un fichero del workspace (documento, código, o un destino ausente).
+    Fichero(RelPath),
+    /// Un directorio; `None` es la raíz del workspace.
+    Directorio(Option<RelPath>),
+}
+
+/// Recalcula un href que apunta a un **directorio** para que siga apuntando al mismo directorio
+/// desde `to` — E23-H11. Conserva el sufijo `#fragmento`/`?query` y el estilo raíz-absoluto.
+///
+/// Es el gemelo de [`retarget_href`] para destinos sin fichero: [`relative_href`] no sirve porque
+/// trata el último segmento como nombre de fichero, y aquí **todos** los segmentos son directorios.
+/// El resultado termina en `/` (o es `./`) para que siga leyéndose como un directorio.
+fn redirigir_href_a_directorio(old_href: &str, to: &RelPath, destino: Option<&RelPath>) -> String {
+    let (base, suffix) = split_href_suffix(old_href);
+    let destino_str = destino.map(RelPath::as_str).unwrap_or("");
+    let new_base = if base.starts_with('/') {
+        format!("/{destino_str}")
+    } else {
+        relative_dir_href(to.as_str(), destino_str)
+    };
+    format!("{new_base}{suffix}")
+}
+
+/// El href relativo desde el directorio de `source_path` hasta el **directorio** `target_dir`
+/// (cadena vacía = la raíz del workspace) — E23-H11.
+///
+/// Termina siempre en `/`, y es `./` cuando origen y destino son el mismo directorio: así el href
+/// sigue siendo inequívocamente una navegación a directorio y no se confunde con un fichero.
+fn relative_dir_href(source_path: &str, target_dir: &str) -> String {
+    let from_dir = model::dir_of(source_path);
+    let from_parts: Vec<&str> = from_dir.split('/').filter(|s| !s.is_empty()).collect();
+    let to_parts: Vec<&str> = target_dir.split('/').filter(|s| !s.is_empty()).collect();
+
+    let mut common = 0;
+    while common < from_parts.len()
+        && common < to_parts.len()
+        && from_parts[common] == to_parts[common]
+    {
+        common += 1;
+    }
+
+    let subidas = from_parts.len() - common;
+    let bajadas = &to_parts[common..];
+    if subidas == 0 && bajadas.is_empty() {
+        return "./".to_string();
+    }
+    let mut segs: Vec<&str> = vec![".."; subidas];
+    segs.extend_from_slice(bajadas);
+    format!("{}/", segs.join("/"))
 }
 
 /// "Desenlaza" a texto plano los enlaces **inline** cuyo href resuelve a `target`, dejando su texto

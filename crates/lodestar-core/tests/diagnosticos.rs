@@ -50,14 +50,14 @@
 //!    destino ausente (`danglingDocumentLinks: error`, `missingWorkspaceFiles: warning`) pero no la
 //!    del escape. Va a `Err`: un destino fuera de la raíz no es un enlace roto recuperable sino algo
 //!    que el motor **no puede** seguir, indexar ni reescribir en un `move_document`.
-//! 2. **El caso degenerado del destino que normaliza a la RAÍZ** (`[x](../)` desde un
-//!    subdirectorio) **también emite `LINK-ESCAPES-WORKSPACE`**. E17-H02 lo clasifica así porque la
-//!    raíz no es nombrable como `RelPath`, y el principio de esta historia es que **el diagnóstico
-//!    es función pura del `LinkTarget`**: si H03 volviera a mirar el href para distinguir «escapa de
-//!    verdad» de «apunta a la raíz» estaría reimplementando la clasificación de H02 con un segundo
-//!    algoritmo divergente (lo que prohíbe el invariante #3). El precio —un `Err` sobre un enlace a
-//!    la raíz del repo, que un render de GitHub sí resuelve— queda fijado por test y **reportado**:
-//!    arreglarlo es ampliar `LinkTarget` (§20.6), no parchear el diagnóstico.
+//! 2. **El destino que normaliza a la RAÍZ o a un directorio** (`[x](../)` desde un subdirectorio)
+//!    **NO diagnostica nada** desde `E23-H11`. Hasta entonces emitía `LINK-ESCAPES-WORKSPACE` —o
+//!    sea `Err`—, así que un `[volver](../)` legítimo, de los que GitHub resuelve sin problema,
+//!    tumbaba `lodestar check` con exit 1. Se arregló como esta misma historia dejó escrito que
+//!    debía arreglarse: **ampliando `LinkTarget`** con `WorkspaceDirectory`, no parcheando el
+//!    diagnóstico. El principio se mantiene intacto —el diagnóstico sigue siendo función pura del
+//!    `LinkTarget` y no vuelve a mirar el href—, que es justo lo que hacía inaceptable el parche.
+//!    El contrato vive ahora en `enlaces.rs::enlace_a_la_raiz_no_tumba_el_check`.
 //! 3. **Un destino `Missing` produce UN solo diagnóstico**, nunca dos: o `LINK-CASE-MISMATCH` (si el
 //!    inventario tiene esa ruta salvo capitalización) o `LINK-TARGET-MISSING`.
 //! 4. **La familia de severidad se decide por el destino, no por el disco**: un destino perdido que
@@ -266,20 +266,11 @@ fn link_escapa() {
         "aunque el path recortado (`docs/vecino.md`) exista, el destino salió de la raíz"
     );
 
-    // El caso DEGENERADO que dejó abierto E17-H02: un destino que normaliza a la RAÍZ del
-    // workspace no es nombrable como `RelPath` y se clasifica `EscapesWorkspace` — el único punto
-    // donde esa variante no significa literalmente «sale del workspace». Decisión fijada aquí: el
-    // diagnóstico es función PURA del `LinkTarget`, así que emite el mismo código. Re-inspeccionar
-    // el href para distinguirlo sería reimplementar la clasificación de H02 (invariante #3).
-    for href in ["../", "..", "./", "../docs/.."] {
-        let raiz = format!("A la raíz: [x]({href}).\n");
-        assert_eq!(
-            codigos(&diagnosticos(&raiz, "docs/a.md", &i)),
-            ["LINK-ESCAPES-WORKSPACE"],
-            "`{href}` desde `docs/a.md` normaliza a la raíz del workspace: E17-H02 lo clasifica \
-             `EscapesWorkspace` y el diagnóstico lo sigue sin re-interpretar el href"
-        );
-    }
+    // El caso degenerado que dejó abierto E17-H02 —un destino que normaliza a la RAÍZ— dejó de ser
+    // un escape en `E23-H11`, que le dio su propia variante (`WorkspaceDirectory`). Su contrato
+    // vive ahora en `enlaces.rs::enlace_a_la_raiz_no_tumba_el_check`, con el control anti-vacuo del
+    // escape real incluido. Aquí solo queda la mitad que sigue siendo de esta historia: que un
+    // escape DE VERDAD sigue diagnosticando.
 
     // No vacuo: subir un nivel SIN pasarse no escapa (y no diagnostica nada).
     assert!(

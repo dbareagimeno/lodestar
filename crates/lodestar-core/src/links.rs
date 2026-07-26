@@ -422,12 +422,15 @@ fn clasificar(ruta: &str, from: &RelPath, inventory: &Inventory) -> LinkTarget {
 
     // Navegación pura (`./`, `..`, `../`, `../..`): el href no nombra nada, así que no designa
     // ningún fichero — apunta al directorio del propio documento o a uno por encima. Un directorio
-    // no es un documento y `§20.6` prohíbe convertirlo en su `index.md`, y `LinkTarget` no tiene
-    // variante para directorios: cae en la única variante sin path, igual que el destino que
-    // normaliza a la raíz. Un href que SÍ nombra algo (`guias/`) sigue siendo un destino con path
-    // —`Missing("guias")`— aunque también sea un directorio.
+    // no es un documento y `§20.6` prohíbe convertirlo en su `index.md`, así que va a su propia
+    // variante (E23-H11): NO es un escape —está dentro del workspace, el bucle de arriba ya rechazó
+    // los que bajan de cero— y por tanto no es un error. Antes caía en `EscapesWorkspace`, que es
+    // `Err`, y un `[volver](../)` tumbaba la puerta de CI.
+    //
+    // Un href que SÍ nombra algo (`guias/`) sigue siendo un destino con path —`Missing("guias")`—
+    // aunque también sea un directorio: no se introduce heurística de barra final.
     if !nombra_algo {
-        return LinkTarget::EscapesWorkspace;
+        return directorio(&partes);
     }
 
     // El percent-decoding se aplica DESPUÉS de interpretar `.`/`..` (RFC 3986): así un `%2e%2e`
@@ -440,11 +443,29 @@ fn clasificar(ruta: &str, from: &RelPath, inventory: &Inventory) -> LinkTarget {
 
     match RelPath::new(&destino) {
         Ok(p) => pertenencia(p, inventory),
-        // Solo queda un destino no nombrable como `RelPath`: la **raíz** del workspace (`../` desde
-        // un subdirectorio, `./` desde la raíz). No es un documento y no hay path que reportar, así
-        // que se clasifica con la única variante sin path. Caso degenerado y consciente.
-        Err(_) => LinkTarget::EscapesWorkspace,
+        // Solo queda un destino no nombrable como `RelPath`: la **raíz** del workspace, a la que se
+        // llega nombrando algo y deshaciéndolo (`../docs/..`). Está DENTRO del workspace, así que
+        // desde E23-H11 es un directorio, no un escape.
+        Err(_) => LinkTarget::WorkspaceDirectory(None),
     }
+}
+
+/// Clasifica un destino que es un **directorio** del workspace a partir de sus segmentos ya
+/// normalizados: `None` (la raíz) si no queda ninguno — E23-H11.
+///
+/// Los segmentos vienen del recorrido de `clasificar`, que ya garantizó la contención (un `..` que
+/// baja de cero devuelve [`LinkTarget::EscapesWorkspace`] antes de llegar aquí), así que aquí no se
+/// vuelve a comprobar: un directorio mal formado como `RelPath` solo puede serlo por ser la raíz.
+fn directorio(partes: &[&str]) -> LinkTarget {
+    if partes.is_empty() {
+        return LinkTarget::WorkspaceDirectory(None);
+    }
+    let ruta = partes
+        .iter()
+        .map(|s| decodificar_segmento(s))
+        .collect::<Vec<_>>()
+        .join("/");
+    LinkTarget::WorkspaceDirectory(RelPath::new(&ruta).ok())
 }
 
 /// Paso 9: clasificar un destino ya contenido y normalizado contra el inventario.
@@ -497,15 +518,15 @@ fn decodificar_segmento(seg: &str) -> String {
 ///   (`danglingDocumentLinks: error`); cualquier otro, un fichero del proyecto
 ///   (`missingWorkspaceFiles: warning`). Es el **mismo** discriminador con el que
 ///   [`LinkTarget::internal_path`] decide si ese destino es además un fantasma del grafo.
-/// - [`LinkTarget::EscapesWorkspace`] es `Err` y va **sin** `related`: el destino no es nombrable
-///   como `RelPath` — Lodestar no puede seguirlo, indexarlo ni reescribirlo en un `move_document`.
-/// - **Coste conocido y aceptado** (E17-H03): un enlace de **navegación pura** (`[x](../)`,
-///   `[x](./)` — hrefs que no nombran ningún segmento) designa un directorio, que [`resolve`]
-///   clasifica `EscapesWorkspace` por no tener variante propia, así que aquí sale un `Err` sobre un
-///   enlace que un render de GitHub sí resuelve. El arreglo correcto es **ampliar [`LinkTarget`]**
-///   (`§20.6`) con una variante para directorio/raíz, no parchear el diagnóstico: si esta función
-///   volviera a mirar el href para distinguir «escapa de verdad» de «apunta a un directorio»
-///   estaría reimplementando la clasificación con un segundo algoritmo divergente.
+/// - [`LinkTarget::EscapesWorkspace`] es `Err` y va **sin** `related`: el destino sale POR ENCIMA de
+///   la raíz — Lodestar no puede seguirlo, indexarlo ni reescribirlo en un `move_document`.
+/// - [`LinkTarget::WorkspaceDirectory`] **no produce diagnóstico** (E23-H11): un `[volver](../)`
+///   apunta dentro del workspace y un render de GitHub lo resuelve. Hasta E23-H11 caía en
+///   `EscapesWorkspace` y por tanto en `Err`, o sea que un enlace legítimo **tumbaba la puerta de
+///   CI**; el coste estaba documentado aquí desde E17-H03 con el arreglo correcto ya identificado
+///   —ampliar [`LinkTarget`], no parchear el diagnóstico—, que es justo lo que se hizo: esta función
+///   sigue siendo función pura del `LinkTarget` y no vuelve a mirar el href, así que no hay un
+///   segundo algoritmo de clasificación que pueda divergir del primero.
 ///
 /// `targets` es siempre el **documento origen** (el fichero que hay que editar, y el que indexa
 /// `Analysis::diagnostics`); el path relacionado —el destino perdido o la ruta real del
@@ -572,7 +593,9 @@ pub fn diagnose(
             LinkTarget::Document(_)
             | LinkTarget::WorkspaceFile(_)
             | LinkTarget::ExternalUri(_)
-            | LinkTarget::SelfAnchor(_) => continue,
+            | LinkTarget::SelfAnchor(_)
+            // Un directorio del workspace es un destino legítimo: nada que diagnosticar (E23-H11).
+            | LinkTarget::WorkspaceDirectory(_) => continue,
         };
         out.push(match rango_de_lineas(raw, body_start, &link.span) {
             Some(range) => check.with_range(range),
