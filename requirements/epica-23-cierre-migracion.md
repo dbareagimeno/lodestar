@@ -20,6 +20,27 @@ de diseño**; la implementación se planifica vía `/planificar` en una PR poste
 
 ---
 
+## ⚠️ ESTADO — leer antes de implementar nada
+
+**14 de 17 historias están CERRADAS.** Esta épica se escribió entera de antemano, así que el texto de
+cada historia describe el **defecto original**, no lo que queda por hacer. Antes de tocar código,
+mira esta tabla y luego
+[`docs/E23_CONTINUACION.md`](../docs/E23_CONTINUACION.md), que lleva el estado real, el punto de
+entrada al código de lo que falta y las trampas ya pisadas.
+
+| Historia | Estado |
+|---|---|
+| H01 · H02 · H03 · H04 · H05 (bloque A) | ✅ cerradas |
+| H06 · H07 · H08 · H09 (bloque B) | ✅ cerradas |
+| H10 (schema de escritura) | ✅ cerrada |
+| **H11** (descubribilidad) | 🟡 **A MEDIAS** — ver el aviso en su sección |
+| **H12** (efectos secundarios) | ⚪ **PENDIENTE, sin empezar** |
+| **H13** (ledger) | 🟡 **A MEDIAS** — la mitad 1/2 está hecha |
+| H14 · H15 · H16 (bloques D y E) | ✅ cerradas |
+| H23 · H24 (bloque F, no planificadas) | ✅ cerradas |
+
+---
+
 ## Bloque A — Defectos
 
 ### E23-H01 — Una sola verdad de validación
@@ -327,6 +348,13 @@ de diseño**; la implementación se planifica vía `/planificar` en una PR poste
 
 ### E23-H11 — Descubribilidad de la KB
 
+> 🟡 **A MEDIAS.** Los dos síntomas **del core** ya están arreglados (commit `2b9cf18`): el
+> vocabulario de tags (`metadata_inspect` explota listas) y el enlace a la raíz (`LinkTarget` ganó
+> `WorkspaceDirectory`, y `move` recalcula también esos destinos). **Lo que falta es la parte de
+> `App`/MCP**: la proyección de frontmatter en `knowledge_search` (hoy N+1), el `sort` que se acepta
+> y se ignora, la retirada de `apply_fix` del enum, y decidir si listar receipts entra aquí.
+> No rehagas la mitad del core.
+
 - **Objetivo**: que un agente pueda entender una base de notas ajena sin pagar N+1 llamadas.
 - **Síntomas verificados**:
   - `metadata_inspect(mode:"field", field:"tags")` devuelve `values: []` con `inferredTypes:
@@ -389,6 +417,12 @@ de diseño**; la implementación se planifica vía `/planificar` en una PR poste
 ## Bloque D — Documentos de estado
 
 ### E23-H13 — Poner al día el ledger
+
+> 🟡 **A MEDIAS.** La mitad 1/2 está hecha (commit `eb690b2`): cabecera, tabla E15–E22 a COMPLETA,
+> tabla E0–E8 marcada como histórica, invariantes, próximos pasos y `requirements/README.md`.
+> **Falta la mitad 2/2**: la sección de E23 con el detalle por historia, al final de
+> `IMPLEMENTATION_STATUS.md` y con el mismo formato que las de E15–E22. Va **la última** de toda la
+> épica por definición: escribirla antes de cerrar H11 y H12 obliga a reescribirla.
 
 - **Objetivo**: que los documentos de estado dejen de contradecirse.
 - **Alcance**:

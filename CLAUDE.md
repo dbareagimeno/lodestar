@@ -7,6 +7,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Estado actual del repo (importante)
 
+> **🚧 TRABAJO EN CURSO — rama `refactor/markdown-universal` (PR #17), épica E23.** La migración
+> E15–E22 está cerrada, pero una revisión de la PR destapó defectos que se están saldando en la
+> **épica de cierre E23**: 14 de 17 historias hechas, quedan **H12**, la mitad de **H11** y la mitad
+> de **H13**. **Antes de tocar nada, lee [`docs/E23_CONTINUACION.md`](docs/E23_CONTINUACION.md)**:
+> lleva el estado real, el punto de entrada al código de lo que falta y las trampas ya pisadas. La
+> spec está en [`requirements/epica-23-cierre-migracion.md`](requirements/epica-23-cierre-migracion.md),
+> cuyo texto describe los defectos **originales** — el estado por historia está en su tabla de
+> cabecera.
+
 > **⚠️ ACTUALIZACIÓN (v0.3.0, `ARCHITECTURE.md §20`, épicas E15–E22): el repo migró de OKF a
 > workspaces Markdown universales.** Lodestar ya **no exige OKF**: opera sobre cualquier red de `.md`
 > de un proyecto (`cd my-project && lodestar-mcp`, sin `init`/`.lodestar/`/`index.md`/frontmatter).
