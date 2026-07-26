@@ -149,11 +149,12 @@ pub fn reindex(root: &Path) -> anyhow::Result<ExitCode> {
 /// `0` (no exit `1` por «detectó OKF»); solo `3` si no puede leerlo. El informe va a **stdout**; los
 /// errores, a stderr.
 ///
-/// **Cero escrituras** (invariante de la historia): abre en modo **hermético** con
-/// [`Workspace::open_ephemeral`](lodestar_workspace::Workspace::open_ephemeral) —que **no** toca
-/// `.gitignore` ni crea el scaffold de `.lodestar/runtime/`, a diferencia de
-/// [`App::open`](lodestar_app::App::open)— y solo lee el inventario descubierto. La detección reusa
-/// el descubrimiento (E15) y el parseo de frontmatter (E16): no reimplementa ni lo uno ni lo otro.
+/// **Cero escrituras** (invariante de la historia): solo lee el inventario descubierto. Desde
+/// E23-H12 no hace falta ningún modo especial para conseguirlo —
+/// [`Workspace::open`](lodestar_workspace::Workspace::open) **es** hermético: no toca el
+/// `.gitignore` ni crea `.lodestar/runtime/`, y por eso el `open_ephemeral` que esta función usaba
+/// se colapsó en `open`. La detección reusa el descubrimiento (E15) y el parseo de frontmatter
+/// (E16): no reimplementa ni lo uno ni lo otro.
 ///
 /// Sin `--dry-run` es **error de uso** (exit `2`): en v0.3 solo existe la forma diagnóstica; exigir
 /// el flag explícito deja la palabra libre para una futura forma «aplicadora» sin invocarla por
@@ -167,11 +168,11 @@ pub fn migrate_from_okf(root: &Path, dry_run: bool) -> anyhow::Result<ExitCode> 
         return Ok(ExitCode::from(2));
     }
 
-    // Modo HERMÉTICO: `open_ephemeral` no escribe nada en el workspace (ni `.gitignore` ni el
-    // scaffold de runtime que `App::open`/`Workspace::open` crearían), así el diagnóstico no puede
-    // dejar rastro en disco. Se envuelve en `App` como capa de servicios (invariante de fachada).
-    let ws = lodestar_workspace::Workspace::open_ephemeral(root)
-        .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+    // Abrir NO escribe nada en el workspace (E23-H12: ni `.gitignore` ni scaffold de runtime), así
+    // que el diagnóstico no puede dejar rastro en disco sin ningún modo aparte. Se envuelve en
+    // `App` como capa de servicios (invariante de fachada).
+    let ws =
+        lodestar_workspace::Workspace::open(root).map_err(|e| anyhow::anyhow!(e.to_string()))?;
     let app = lodestar_app::App::from_workspace(ws);
     let doc_set = app
         .workspace()

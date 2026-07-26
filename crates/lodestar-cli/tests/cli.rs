@@ -630,8 +630,11 @@ fn workspace_okf(dir: &std::path::Path) {
 /// Snapshot determinista del árbol de ficheros bajo `dir`: lista ordenada de `(ruta relativa,
 /// bytes)`. Captura contenido Y existencia, así detecta tanto una modificación de contenido como un
 /// fichero creado o borrado (p. ej. un `.gitignore` o un `.lodestar/` que el comando escribiera sin
-/// querer — `Workspace::open` sí los tocaría, por lo que el diagnóstico debe abrir en modo
-/// hermético).
+/// querer).
+///
+/// Solo recoge FICHEROS: un directorio vacío (el caso de `.lodestar/runtime/{plans,receipts,
+/// staging}`) no deja rastro aquí, así que quien quiera excluir también scaffolds vacíos tiene que
+/// aseverar además su no-existencia (lo hace `check_no_ensucia_el_working_tree`).
 fn snapshot_arbol(dir: &std::path::Path) -> Vec<(String, Vec<u8>)> {
     fn recorrer(
         base: &std::path::Path,
@@ -1139,11 +1142,30 @@ fn check_ve_diagnosticos_de_descubrimiento() {
 // Comparar dos `check` sería trivialmente cierto.
 // ---------------------------------------------------------------------------
 
+/// El bloque que `lodestar` gestiona dentro del `.gitignore` del proyecto
+/// (`crates/lodestar-workspace/src/gitignore.rs`), en su forma canónica.
+///
+/// Los tests de `reindex` parten de un proyecto que **ya lo tiene** (el caso normal de cualquier
+/// repo que haya usado lodestar antes): `reindex` activa la cache y `enable_cache()` es uno de los
+/// cuatro chokepoints de escritura que E23-H12 **conserva** —ahí nace `index.db`, así que ahí toca
+/// ignorarlo—, de modo que sin el bloque ya presente la primera pasada lo añadiría y comparar el
+/// árbol canónico antes/después mediría ese ajuste legítimo en vez de lo que se quiere medir. Con el
+/// bloque presente, `ensure_gitignore` sale por su rama idempotente y la comparación pasa a
+/// aseverar algo más fuerte: reconstruir la cache **no toca ni un byte** del `.gitignore` del
+/// usuario (ni lo reordena, ni le duplica líneas, ni le normaliza los finales de línea).
+const BLOQUE_GITIGNORE_GESTIONADO: &str =
+    "# lodestar: cache y runtime desechables (no versionar)\n.lodestar/index.db\n.lodestar/runtime/\n";
+
 /// Monta el workspace de los tests de `reindex` y devuelve los paths de sus documentos, ordenados.
 ///
 /// Incluye un fichero que **no** es documento (`src/main.rs`): así la lista esperada no es «todo lo
 /// que hay en el árbol» y una cache que indexara de más también fallaría.
 fn workspace_para_reindex(dir: &std::path::Path) -> Vec<String> {
+    write(
+        dir,
+        ".gitignore",
+        &format!("target/\n\n{BLOQUE_GITIGNORE_GESTIONADO}"),
+    );
     write(
         dir,
         "guia.md",
@@ -1200,15 +1222,16 @@ fn corre_reindex(root: &std::path::Path) -> (Option<i32>, String) {
 }
 
 /// Snapshot del árbol **canónico** (todo menos lo derivado): los `.md` y demás ficheros del
-/// proyecto, sin `.lodestar/` (cache + runtime, derivados y desechables) ni `.gitignore`.
+/// proyecto —**el `.gitignore` incluido**—, sin `.lodestar/` (cache + runtime, derivados y
+/// desechables).
 ///
-/// El `.gitignore` se excluye porque hoy `Workspace::open` lo reescribe al abrir (síntoma
-/// documentado de **E23-H12**, que es quien debe cerrarlo con `check_no_ensucia_el_working_tree`):
-/// incluirlo aquí mezclaría dos historias y haría fallar a esta por un defecto ajeno.
+/// El `.gitignore` estuvo excluido a propósito mientras `Workspace::open` lo reescribía al abrir;
+/// **E23-H12** cerró ese defecto (`check_no_ensucia_el_working_tree`), así que vuelve al snapshot:
+/// es un fichero del usuario como cualquier otro y `reindex` no puede churnearlo.
 fn snapshot_canonico(dir: &std::path::Path) -> Vec<(String, Vec<u8>)> {
     snapshot_arbol(dir)
         .into_iter()
-        .filter(|(rel, _)| !rel.starts_with(".lodestar") && rel != ".gitignore")
+        .filter(|(rel, _)| !rel.starts_with(".lodestar"))
         .collect()
 }
 
@@ -1368,5 +1391,95 @@ fn reindex_sobre_cache_corrupta() {
         documentos_en_cache(dir.path()),
         esperados,
         "la cache recreada debe quedar usable Y poblada con los documentos del workspace"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// E23-H12 — Higiene de efectos secundarios: **abrir un workspace no modifica el proyecto**
+// (`requirements/epica-23-cierre-migracion.md §E23-H12`).
+//
+// Fase ROJA: hoy `Workspace::open` (`crates/lodestar-workspace/src/lib.rs:83-84`) llama a
+// `gitignore::ensure_gitignore(root)` y `runtime::ensure_runtime_scaffold(root)` **antes de leer
+// nada**, así que la mera puerta de CI reescribe el `.gitignore` del usuario y le crea
+// `.lodestar/runtime/{plans,receipts,staging}`. Los dos efectos pasan a ser perezosos (ocurren
+// cuando se va a escribir de verdad); el `.gitignore` sobrevive en los cuatro chokepoints de
+// escritura (`enable_cache`, `acquire_lock`, `persist_plan`, `try_append_audit`) y el scaffold
+// desaparece sin sustituto.
+// ---------------------------------------------------------------------------
+
+/// **E23-H12** · Criterio `check_no_ensucia_el_working_tree`: **Dado** un proyecto con un
+/// `.gitignore` propio, **Cuando** se corre `lodestar check`, **Entonces** el `.gitignore` queda
+/// **byte a byte** igual.
+///
+/// POR QUÉ SE COMPARAN BYTES (y no «sigue conteniendo mis reglas»): `ensure_gitignore` es
+/// idempotente byte a byte **a partir de la segunda vez** —sale antes si las dos entradas ya
+/// están—, pero la PRIMERA reescritura reconstruye el fichero línea a línea: normaliza los CRLF a
+/// `\n` y poda las líneas en blanco finales. Un `.gitignore` escrito en Windows conserva todas sus
+/// reglas y aun así vuelve del `check` con otros bytes; para `git` eso es un fichero modificado, y
+/// en CI, un working tree sucio. Un test que solo mirase el contenido lógico NO vería el defecto.
+///
+/// Se asevera además el árbol ENTERO (mismos ficheros, mismos bytes) y la **no existencia** de
+/// `.lodestar/`: `snapshot_arbol` solo recoge ficheros, así que los tres subdirectorios vacíos del
+/// scaffold de runtime solo se cazan preguntando por el directorio.
+///
+/// NO-VACUIDAD: se exige exit `0` y que el `--json` liste los **2 documentos** del proyecto. Sin
+/// eso, un `check` que no llegara a abrir el workspace (o un binario roto) dejaría el árbol intacto
+/// y pasaría el test sin haber hecho nada.
+#[test]
+fn check_no_ensucia_el_working_tree() {
+    let dir = temp_dir("check-higiene");
+
+    // `.gitignore` propio del usuario, con los dos detalles que la reescritura normaliza: finales
+    // de línea CRLF y una línea en blanco al final.
+    let gitignore_original: &[u8] = b"target/\r\n*.log\r\n\r\n";
+    std::fs::write(dir.path().join(".gitignore"), gitignore_original).unwrap();
+    write(
+        dir.path(),
+        "guia.md",
+        "# Guía\n\nVer [alfa](notas/alfa.md).\n",
+    );
+    write(dir.path(), "notas/alfa.md", "# Alfa\n\nCuerpo.\n");
+
+    let antes = snapshot_arbol(dir.path());
+
+    let out = bin()
+        .arg("--path")
+        .arg(dir.path())
+        .args(["check", "--json"])
+        .output()
+        .unwrap();
+
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "el proyecto es válido: la puerta sale 0; stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout).expect("`--json` es JSON");
+    assert_eq!(
+        json["documents"].as_array().map(Vec::len),
+        Some(2),
+        "guarda de no vacuidad: el `check` tiene que haber leído los 2 documentos para que comparar \
+         el árbol signifique algo; json={json}"
+    );
+
+    let gitignore_tras_check = std::fs::read(dir.path().join(".gitignore")).unwrap();
+    assert_eq!(
+        gitignore_tras_check,
+        gitignore_original,
+        "`lodestar check` es una LECTURA: el `.gitignore` del proyecto debe quedar byte a byte igual \
+         (ni CRLF normalizados, ni líneas en blanco podadas, ni bloque añadido). Era {:?} y quedó {:?}",
+        String::from_utf8_lossy(gitignore_original),
+        String::from_utf8_lossy(&gitignore_tras_check)
+    );
+    assert!(
+        !dir.path().join(".lodestar").exists(),
+        "abrir el workspace para leerlo no puede crear `.lodestar/` (ni el scaffold de runtime): en \
+         un proyecto ajeno es una escritura no solicitada, y en CI deja el working tree sucio"
+    );
+    assert_eq!(
+        snapshot_arbol(dir.path()),
+        antes,
+        "`lodestar check` no debe modificar, crear ni borrar NINGÚN fichero del proyecto"
     );
 }

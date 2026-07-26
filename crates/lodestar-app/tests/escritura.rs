@@ -6,7 +6,7 @@
 //!
 //! ## El defecto que fijan estos tests
 //!
-//! `Workspace::assert_writable` (`crates/lodestar-workspace/src/external_refs.rs:130-157`) solo
+//! `Workspace::assert_writable` (`crates/lodestar-workspace/src/external_refs.rs:60`) solo
 //! conoce `referenceRoots`/`writableRoots`. **No consulta la `DiscoveryPolicy`**, así que con la
 //! config por defecto (`writableRoots` vacío = «todo escribible») acepta destinos que el
 //! descubrimiento (`Workspace::discovery_policy`, E15-H07/H08) deja FUERA del inventario: el plano

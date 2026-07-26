@@ -29,7 +29,7 @@ use lodestar_core::types::{
     Severity, ValidationReport, ValidationSummary, WorkspaceRevision,
 };
 use lodestar_core::{CoreError, DocumentSet};
-use lodestar_workspace::{transaction_id, ExternalReference, Workspace, WorkspaceError};
+use lodestar_workspace::{transaction_id, Workspace, WorkspaceError};
 
 /// Envelope común de protocolo (`ARCHITECTURE.md §19.6`, `docs/REFACTOR.md §13`, decisión **D3**).
 ///
@@ -348,15 +348,15 @@ pub struct App {
 
 impl App {
     /// Abre el workspace en `root` y construye la fachada de servicios. Delega en
-    /// [`Workspace::open`] — mismas garantías (descubrimiento de git best-effort, identidad desde
-    /// `lodestar.toml`, cache incremental **no** activada).
+    /// [`Workspace::open`] — mismas garantías: cache incremental **no** activada y, desde E23-H12,
+    /// apertura **hermética** (abrir no escribe nada en el proyecto del usuario).
     pub fn open(root: &Path) -> Result<Self, WorkspaceError> {
         let workspace = Workspace::open(root)?;
         Ok(App { workspace })
     }
 
-    /// Envuelve un [`Workspace`] ya abierto (p. ej. [`Workspace::open_ephemeral`] en tests, o un
-    /// caller que ya gestiona su propio ciclo de vida del workspace).
+    /// Envuelve un [`Workspace`] ya abierto (p. ej. en tests, o un caller que ya gestiona su propio
+    /// ciclo de vida del workspace).
     pub fn from_workspace(workspace: Workspace) -> Self {
         App { workspace }
     }
@@ -587,7 +587,7 @@ impl App {
     /// campo opcional.
     ///
     /// `include` es la lista de campos wire pedidos (`"frontmatter"`, `"body"`, `"outgoingLinks"`,
-    /// `"backlinks"`, `"diagnostics"`, `"externalReferences"`; `"revision"` es aceptado pero no-op,
+    /// `"backlinks"`, `"diagnostics"`; `"revision"` es aceptado pero no-op,
     /// ya que ese campo siempre se puebla). Un campo **no** pedido queda en `None` en el
     /// [`DocumentView`] — nunca en su valor por defecto "vacío" disfrazado de "no pedido", para que
     /// el `include` selectivo sea significativo (criterio `get_incluye_revision`).
@@ -598,11 +598,22 @@ impl App {
     /// el resultado final es la concatenación de todos los `headingPath` pedidos. Sin `sections`,
     /// `body` es el cuerpo completo.
     ///
-    /// `externalReferences` resuelve `implemented_by`/`verified_by` contra disco vía
-    /// [`Workspace::external_refs`] (E11-H04) — `{path, exists}` por cada referencia declarada. Desde
-    /// E20-H03 esa llamada NO produce diagnósticos (el `EXTREF-MISSING` se retiró con `core::schema`);
-    /// el campo `diagnostics` de esta proyección viene solo de `Analysis::diagnostics` (invariante #3);
-    /// un agente que quiera detectar una ref rota la deriva de `exists:false` en `externalReferences`.
+    /// El campo `diagnostics` de esta proyección viene **solo** de `Analysis::diagnostics`
+    /// (invariante #3).
+    ///
+    /// # `externalReferences`, RETIRADO en E23-H12
+    ///
+    /// El valor `"externalReferences"` del `include` —que resolvía contra disco los campos de
+    /// frontmatter `implemented_by`/`verified_by` y devolvía `{path, exists}`— se retiró **sin
+    /// sustituto**: eran las últimas claves con semántica impuesta y no configurable, contra el
+    /// invariante 3 de `ARCHITECTURE.md §20.2`. Hoy es un valor desconocido del `include`, y como
+    /// tal se ignora (ningún campo extra viaja en la respuesta).
+    ///
+    /// **Ruta de migración**: apuntar a código NO desapareció — un enlace Markdown a un fichero de
+    /// código viaja en `outgoingLinks` ya clasificado como
+    /// [`LinkTarget::WorkspaceFile`](lodestar_core::types::LinkTarget::WorkspaceFile) (`§20.6`), con
+    /// su diagnóstico si el destino no existe. Lo que desapareció es que un **nombre de campo** de
+    /// frontmatter activase esa resolución.
     pub fn knowledge_get(
         &self,
         r: &DocumentRef,
@@ -650,16 +661,6 @@ impl App {
                 .cloned()
                 .unwrap_or_default()
         });
-        let external_references = if wants("externalReferences") {
-            let report = self
-                .workspace
-                .external_refs(&path)
-                .map_err(|e| workspace_error_code(&e))?;
-            Some(report.references)
-        } else {
-            None
-        };
-
         Ok(DocumentView {
             path,
             revision,
@@ -667,7 +668,6 @@ impl App {
             body,
             outgoing_links,
             backlinks,
-            external_references,
             diagnostics,
         })
     }
@@ -1315,7 +1315,6 @@ impl App {
             .workspace
             .document_set()
             .map_err(|e| workspace_error_code(&e))?;
-        let root = self.workspace.root();
         let cfg = self.workspace.config();
         let files = doc_set.files();
         let writable = &cfg.workspace.writable_roots;
@@ -1408,7 +1407,7 @@ impl App {
         // `change_apply`, E13) lo recupere por `changeSetId`. Es runtime — gitignored, fuera de
         // `WorkspaceRevision` (E9-H06/E10-H03) — así que NO usa el único-escritor atómico de
         // `lodestar_workspace::io` (ese protocolo protege el conocimiento canónico, no el scratch).
-        persist_plan(root, &result)?;
+        persist_plan(&self.workspace, &result)?;
 
         Ok(result)
     }
@@ -1712,11 +1711,11 @@ impl App {
     /// **Best-effort y silencioso para el llamante**: la auditoría es diagnóstico local, NUNCA debe
     /// tumbar una operación de escritura ni enmascarar su error original (regla de la historia). Un
     /// fallo al escribir (permisos, disco lleno, …) se reporta por stderr y se descarta — mismo
-    /// criterio que `gitignore::ensure_gitignore`/`runtime::ensure_runtime_scaffold` en
-    /// `lodestar-workspace`. Es runtime puro: gitignored, fuera de `WorkspaceRevision`
-    /// (E9-H06/E10-H03), no indexado y no expuesto por ninguna tool MCP (solo diagnóstico local).
+    /// criterio que [`Workspace::ensure_managed_gitignore`] en `lodestar-workspace`. Es runtime
+    /// puro: gitignored, fuera de `WorkspaceRevision` (E9-H06/E10-H03), no indexado y no expuesto
+    /// por ninguna tool MCP (solo diagnóstico local).
     fn audit(&self, entry: AuditEntry) {
-        if let Err(e) = try_append_audit(self.workspace.root(), &entry) {
+        if let Err(e) = try_append_audit(&self.workspace, &entry) {
             eprintln!(
                 "lodestar: aviso: no se pudo anexar la auditoría de `{}`: {e}",
                 entry.tool
@@ -1928,20 +1927,25 @@ fn audit_entry_for_revert(
     }
 }
 
-/// Ruta completa de `.lodestar/runtime/audit.jsonl` bajo `root` (E13-H10). El directorio `runtime`
-/// ya lo garantiza `ensure_runtime_scaffold` al abrir el workspace (E9-H06); `try_append_audit` lo
-/// reafirma con `create_dir_all` por robustez (mismo patrón que `persist_plan`).
+/// Ruta completa de `.lodestar/runtime/audit.jsonl` bajo `root` (E13-H10). Nadie garantiza ya ese
+/// directorio al abrir (E23-H12 retiró el scaffold de runtime): `try_append_audit` lo crea con
+/// `create_dir_all` justo antes de escribir (mismo patrón que `persist_plan`).
 fn audit_file_path(root: &Path) -> PathBuf {
     root.join(".lodestar").join("runtime").join("audit.jsonl")
 }
 
-/// Anexa `entry` como una línea JSON (+ `\n`) a `.lodestar/runtime/audit.jsonl` bajo `root`
+/// Anexa `entry` como una línea JSON (+ `\n`) a `.lodestar/runtime/audit.jsonl` del workspace
 /// (E13-H10): crea `.lodestar/runtime/` si falta y abre en modo `append` — JSONL que solo crece,
 /// nunca reescribe líneas previas. Devuelve el error de I/O sin envolver; `App::audit` es quien
 /// decide que un fallo aquí es best-effort (no debe tumbar la operación auditada).
-fn try_append_audit(root: &Path, entry: &AuditEntry) -> std::io::Result<()> {
+///
+/// Es uno de los cuatro chokepoints de escritura de E23-H12: escribir la auditoría hace nacer
+/// runtime desechable, así que aquí se ajusta el `.gitignore` gestionado. Por eso recibe el
+/// [`Workspace`] y no un `&Path`.
+fn try_append_audit(ws: &Workspace, entry: &AuditEntry) -> std::io::Result<()> {
     use std::io::Write;
-    let path = audit_file_path(root);
+    ws.ensure_managed_gitignore();
+    let path = audit_file_path(ws.root());
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
@@ -2307,8 +2311,8 @@ fn plan_file_name(id: &ChangeSetId) -> String {
 }
 
 /// Ruta completa del fichero de plan persistido para `id`, bajo `.lodestar/runtime/plans/` del
-/// `root` del workspace. El directorio ya lo garantiza `ensure_runtime_scaffold` al abrir el
-/// workspace (E9-H06); [`persist_plan`] lo reafirma con `create_dir_all` por robustez.
+/// `root` del workspace. Nadie garantiza ya ese directorio al abrir (E23-H12 retiró el scaffold de
+/// runtime): [`persist_plan`] lo crea con `create_dir_all` justo antes de escribir.
 fn plan_file_path(root: &Path, id: &ChangeSetId) -> PathBuf {
     root.join(".lodestar")
         .join("runtime")
@@ -2324,8 +2328,14 @@ fn plan_file_path(root: &Path, id: &ChangeSetId) -> PathBuf {
 /// se escribe con `std::fs::write` normal — el protocolo temp+rename del único-escritor
 /// (`lodestar_workspace::io::write_atomic`) protege el conocimiento `.md` canónico, no el scratch
 /// de runtime, que ni el watcher ni el walker observan.
-fn persist_plan(root: &Path, plan: &PlanResult) -> Result<(), ErrorCode> {
-    let dir = root.join(".lodestar").join("runtime").join("plans");
+///
+/// Es uno de los cuatro chokepoints de escritura de E23-H12: `change_plan` persiste **sin** tomar
+/// el lock, así que es aquí (y no en `acquire_lock`) donde le toca ajustar el `.gitignore`
+/// gestionado — abrir el workspace ya no lo hace. Por eso recibe el [`Workspace`] y no un `&Path`:
+/// el ajuste no puede quedar a criterio del llamador.
+fn persist_plan(ws: &Workspace, plan: &PlanResult) -> Result<(), ErrorCode> {
+    ws.ensure_managed_gitignore();
+    let dir = ws.root().join(".lodestar").join("runtime").join("plans");
     std::fs::create_dir_all(&dir).map_err(|_| ErrorCode::InternalIoError)?;
     let path = dir.join(plan_file_name(&plan.change_set_id));
     let json = serde_json::to_vec_pretty(plan).map_err(|_| ErrorCode::InternalIoError)?;
@@ -2644,10 +2654,6 @@ pub struct DocumentView {
     /// Vecindad de enlaces entrantes (`DocumentSet::backlinks`), si se pidió `"backlinks"`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backlinks: Option<Backlinks>,
-    /// Referencias externas (`implemented_by`/`verified_by`, E11-H04) resueltas contra
-    /// `referenceRoots`, si se pidió `"externalReferences"`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub external_references: Option<Vec<ExternalReference>>,
     /// Checks de conformidad del documento (`Analysis::diagnostics`), si se pidió `"diagnostics"`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub diagnostics: Option<Vec<Check>>,

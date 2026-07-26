@@ -20,7 +20,6 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 crossbeam-channel = "0.5"
 serde_yaml = { workspace = true }
-schemars = { workspace = true, optional = true }
 
 # E23-H23: comprobar si el dueño de un lock huérfano sigue vivo (`kill(pid, 0)`). Solo en Unix; en
 # Windows el TTL hace de red. No añade código externo nuevo al árbol: `libc` ya llega
@@ -30,9 +29,9 @@ libc = "0.2"
 
 [features]
 default = []
-# Gatea #[derive(JsonSchema)] en `ExternalReference` (E11-H04), consumido por `lodestar-app` para
-# el `outputSchema` de `knowledge_get` — mismo patrón que la feature homónima de `lodestar-core`.
-schemars = ["dep:schemars"]
+# (E23-H12 retiró la feature `schemars`: gateaba `#[derive(JsonSchema)]` en `ExternalReference`, el
+# único tipo de wire que este crate exportaba, y ese tipo desapareció con las claves de frontmatter
+# privilegiadas. La workspace ya no aporta tipos al `outputSchema` de ninguna tool.)
 # Arnés de crash-recovery (E13-H06): habilita la sonda de fallo (`FailPoint`) y la batería de tests
 # de recuperación determinista de `tests/transactions.rs`. Solo test/plumbing — NO cablea lógica de
 # recovery en producción. La sonda de fallo de PRODUCCIÓN que el implementador thread-eará por el

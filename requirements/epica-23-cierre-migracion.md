@@ -22,7 +22,7 @@ de diseño**; la implementación se planifica vía `/planificar` en una PR poste
 
 ## ⚠️ ESTADO — leer antes de implementar nada
 
-**14 de 17 historias están CERRADAS.** Esta épica se escribió entera de antemano, así que el texto de
+**15 de 17 historias están CERRADAS.** Esta épica se escribió entera de antemano, así que el texto de
 cada historia describe el **defecto original**, no lo que queda por hacer. Antes de tocar código,
 mira esta tabla y luego
 [`docs/E23_CONTINUACION.md`](../docs/E23_CONTINUACION.md), que lleva el estado real, el punto de
@@ -34,7 +34,7 @@ entrada al código de lo que falta y las trampas ya pisadas.
 | H06 · H07 · H08 · H09 (bloque B) | ✅ cerradas |
 | H10 (schema de escritura) | ✅ cerrada |
 | **H11** (descubribilidad) | 🟡 **A MEDIAS** — ver el aviso en su sección |
-| **H12** (efectos secundarios) | ⚪ **PENDIENTE, sin empezar** |
+| **H12** (efectos secundarios) | ✅ cerrada |
 | **H13** (ledger) | 🟡 **A MEDIAS** — la mitad 1/2 está hecha |
 | H14 · H15 · H16 (bloques D y E) | ✅ cerradas |
 | H23 · H24 (bloque F, no planificadas) | ✅ cerradas |
@@ -352,8 +352,20 @@ entrada al código de lo que falta y las trampas ya pisadas.
 > vocabulario de tags (`metadata_inspect` explota listas) y el enlace a la raíz (`LinkTarget` ganó
 > `WorkspaceDirectory`, y `move` recalcula también esos destinos). **Lo que falta es la parte de
 > `App`/MCP**: la proyección de frontmatter en `knowledge_search` (hoy N+1), el `sort` que se acepta
-> y se ignora, la retirada de `apply_fix` del enum, y decidir si listar receipts entra aquí.
+> y se ignora, la retirada de `apply_fix` del enum, y listar receipts.
 > No rehagas la mitad del core.
+>
+> **Decisiones del usuario (2026-07-26)**, que cierran las tres opciones que este texto dejaba
+> abiertas:
+> - `sort` → **se retira del schema**, no se implementa. El orden determinista que ya existe (score
+>   desc, path asc) se queda como el único y se documenta; es además la base del cursor de
+>   paginación. Volver a añadir el parámetro más adelante es aditivo y no rompe el wire.
+> - `apply_fix` → **se retira la op**, y se deja el análisis escrito en `docs/PROPUESTA_FIXES.md`
+>   (formato H15). **`Fix`, `Check.fixes` e `includeSuggestedFixes` NO se tocan**: un array vacío se
+>   lee como «no hay sugerencias» y es verdad, mientras que una op invocable que siempre falla
+>   devuelve además un código que apunta al sitio equivocado (`FixNotFound` → `DOCUMENT_NOT_FOUND`).
+> - Listar receipts → **entra aquí, ampliando `workspace_status`**, no como 11ª tool: la superficie
+>   converge en 10 (`§19.6`) y `workspace_status` ya es donde vive `recovery.pendingTransaction`.
 
 - **Objetivo**: que un agente pueda entender una base de notas ajena sin pagar N+1 llamadas.
 - **Síntomas verificados**:
@@ -372,10 +384,21 @@ entrada al código de lo que falta y las trampas ya pisadas.
   - No hay forma de **listar receipts**: si el agente pierde el `receiptId`, el undo es inalcanzable
     pese a que los receipts están persistidos y hay `audit.jsonl`.
 - **Alcance**: `metadata_inspect` explota listas al contar valores; `knowledge_search` acepta una
-  proyección de campos de frontmatter pedida por el llamador; `sort` se implementa o se retira del
-  schema; `apply_fix` sale del enum hasta que haya productor; `LinkTarget` se amplía para el destino
-  «raíz del workspace» (arreglo correcto según el ledger, no parchear el diagnóstico); se decide si
-  listar receipts entra aquí o es historia propia.
+  proyección de campos de frontmatter pedida por el llamador; `sort` **se retira** del schema;
+  `apply_fix` sale del enum hasta que haya productor; `LinkTarget` se amplía para el destino
+  «raíz del workspace» (arreglo correcto según el ledger, no parchear el diagnóstico); los receipts
+  **se listan desde `workspace_status`**.
+  - La proyección se pide con `include: ["frontmatter.<fieldPath>"]` y el sufijo se parsea con
+    `FieldPath::parse`, así que los campos anidados (`frontmatter.owner.name`) salen gratis. Los
+    valores viajan como YAML crudo, **sin coerción**, y un campo ausente en un documento simplemente
+    no aparece en su mapa — nunca un `null` disfrazado, misma regla que el `include` de
+    `knowledge_get`. Reutiliza `ParsedFrontmatter::get(&FieldPath)`, que ya resuelve dot-paths sobre
+    YAML arbitrario.
+  - El listado de receipts va **acotado** (`receiptId`, `changeSetId`, `resultRevision` y nº de rutas
+    afectadas): lo justo para elegir cuál revertir, no el receipt entero, que se sigue leyendo por
+    `change_revert`. Orden por **mtime desc**, el mismo criterio que ya usa `gc_receipts` porque
+    `ChangeReceipt` no lleva timestamp propio. La lista está acotada de fábrica por
+    `transactions.maximumReceipts` (default 20).
 - **Criterios de aceptación**:
   - **Dado** un workspace con `tags: [a, b]` en 3 documentos, **Cuando** se pide
     `metadata_inspect(field:"tags")`, **Entonces** `values` trae `a` y `b` con sus frecuencias →
@@ -386,8 +409,17 @@ entrada al código de lo que falta y las trampas ya pisadas.
     error bloqueante → `enlace_a_la_raiz_no_tumba_el_check`.
   - **Dado** un `apply_fix`, **Entonces** la op no está en el enum del schema →
     `apply_fix_retirada`.
+  - **Dado** un `knowledge_search` con `sort`, **Entonces** el schema lo rechaza en vez de aceptarlo
+    y descartarlo (`additionalProperties: false` ya está puesto), y ni el contrato ni la firma de
+    `App` lo mencionan → `sort_retirado_del_schema`.
+  - **Dado** un `change_apply` recién ejecutado, **Cuando** se pide `workspace_status`, **Entonces**
+    su `receiptId` aparece en la lista y sirve para un `change_revert` sin haberlo guardado el
+    llamador → `receipts_listables_en_workspace_status`.
 - **Dependencias**: E23-H10 (comparten el schema).
 - **Pruebas**: `crates/lodestar-core/tests/metadata.rs`, `enlaces.rs`, `crates/lodestar-mcp/tests/mcp.rs`.
+  La cobertura de `knowledge_search` vive **por el wire**, no contra la firma de Rust; para la fase
+  roja, fichero propio nuevo bajo `crates/lodestar-mcp/tests/` con el precedente de `grafo.rs`, para
+  no arrastrar los ~90 tests verdes de `mcp.rs`.
 - **Frontera (mcp.yml)**: **sí**.
 
 ### E23-H12 — Higiene de efectos secundarios
@@ -398,18 +430,75 @@ entrada al código de lo que falta y las trampas ya pisadas.
   reescriben el `.gitignore` del proyecto** y crean `.lodestar/runtime/` antes de leer nada. Para el
   pitch «`cd my-project && lodestar-mcp` sobre cualquier proyecto» es una escritura no solicitada;
   en CI, deja el working tree sucio.
-- **Alcance**: no tocar el `.gitignore` en el camino de solo-lectura (o hacerlo opt-in por config);
-  `migrate-from-okf` ya demuestra que existe un modo hermético (`open_ephemeral`) reutilizable.
+- **Alcance**: los dos efectos pasan a ser **perezosos** — ocurren cuando se va a escribir de verdad,
+  no al abrir.
+  - `ensure_runtime_scaffold` **se borra sin sustituto**: los ocho consumidores de
+    `.lodestar/runtime/` ya hacen su propio `create_dir_all` antes de escribir (`lock.rs`,
+    `journal.rs`, `receipts.rs`, `staging.rs`, `recovery.rs`, y `persist_plan`/`try_append_audit` en
+    `lodestar-app`), y los dos lectores toleran el directorio ausente. **Ningún código de producción
+    depende del scaffold** — pero sí lo hacía un test: `receipt_gc`
+    (`crates/lodestar-workspace/tests/transactions.rs`) plantaba ficheros bajo `.lodestar/` sin crear
+    los directorios, y le funcionaba porque se los regalaba la apertura. Se corrige con los
+    `create_dir_all` que le faltaban.
+    Al arreglarlo se destapó un **segundo defecto del test, anterior e independiente** de esta
+    historia: escribía su `config.yaml` *después* de `Workspace::open`, y la config se lee una sola
+    vez al abrir, así que el GC corría con los defaults — y como los defaults (`24h`/`20`) coincidían
+    con lo declarado, un `gc_receipts` que ignorase la config entera habría pasado igual. Corregido
+    escribiendo la config **antes** de abrir, con una precondición que asevera que la sesión la leyó,
+    y añadiendo la fase que ejercita `retainReceiptsFor` (el TTL **no lo cubría ningún test**).
+  - `ensure_gitignore` se invoca desde los cuatro chokepoints que cubren **todo** camino de
+    escritura: `enable_cache()` (nace `index.db`), `acquire_lock()` (`change_apply`/`change_revert`),
+    `persist_plan()` (`change_plan` persiste sin tomar el lock) y `try_append_audit()`. Ya es
+    idempotente byte a byte a partir de la segunda vez.
+  - Con los efectos fuera, **`open_ephemeral` queda byte a byte igual que `open`**: se retira y su
+    único llamador (`migrate_from_okf`) pasa a `Workspace::open`. El «modo hermético reutilizable»
+    deja de ser un modo aparte porque **abrir ya es hermético**.
+  - ⚠️ **Deuda registrada (juez ciego de H12)**: `Workspace::materialize_staging`
+    (`crates/lodestar-workspace/src/staging.rs`) es **API pública** que crea
+    `.lodestar/runtime/staging/` sin pasar por el lock ni por `ensure_managed_gitignore`. Hoy es
+    inofensiva —**no tiene ningún llamador de producción**, solo tests— y el resto de escritores
+    bajo `.lodestar/` queda aguas abajo de `acquire_lock`/`enable_cache`. Pero si algún día se le da
+    un llamador de producción, **tiene que pasar por un chokepoint o convertirse en el quinto**.
   Además: retirar `implemented_by`/`verified_by` como claves de frontmatter privilegiadas y no
   configurables (`crates/lodestar-workspace/src/external_refs.rs`), último residuo OKF con semántica
-  impuesta, contra el invariante 3 de `§20.2`.
+  impuesta, contra el invariante 3 de `§20.2`. **Decisión del usuario (2026-07-26): se retiran sin
+  sustituto**, y con ellas la opción `include:["externalReferences"]` de `knowledge_get`, que se
+  quedaría sin fuente — una opción que siempre devuelve vacío es el mismo patrón que E23 está
+  saldando. El fichero `external_refs.rs` **se conserva**: su segunda responsabilidad (contención
+  bajo `referenceRoots`) sostiene `assert_writable` y la exclusión en `workspace_revision`, y no se
+  toca.
 - **Criterios de aceptación**:
   - **Dado** un proyecto con un `.gitignore` propio, **Cuando** se corre `lodestar check`,
     **Entonces** el `.gitignore` queda **byte a byte** igual → `check_no_ensucia_el_working_tree`.
+    Corolario: `snapshot_canonico` de `crates/lodestar-cli/tests/cli.rs` deja de excluir el
+    `.gitignore`, y sus dos doc-comments, que nombran a esta historia como quien debe cerrarlo,
+    sobran. ⚠️ Ojo: eso **no** convierte `reindex_es_idempotente` en cobertura gratis, porque
+    `reindex` va por `enable_cache()`, que es uno de los cuatro chokepoints que **conservan** la
+    escritura: sobre un fixture sin `.gitignore` la primera pasada lo crea y la comparación
+    antes/después fallaría incluso con la implementación correcta. El fixture debe traer ya el
+    bloque gestionado —el caso normal de cualquier repo que haya usado Lodestar— para que
+    `ensure_gitignore` salga por su rama idempotente; así la comparación asevera algo más fuerte:
+    reindexar no toca ni un byte del `.gitignore` del usuario.
   - **Dado** ese proyecto, **Cuando** se arranca el MCP en perfil `readonly`, **Entonces** tampoco
-    cambia → `readonly_no_escribe_nada`.
+    cambia → `readonly_no_escribe_nada`. Ni el `.gitignore` ni `.lodestar/` aparecen: `git status
+    --porcelain` sale vacío.
+  - **Dado** un documento con `implemented_by: María`, **Cuando** se corre `check`, **Entonces** no
+    se emite ningún diagnóstico: ningún nombre de campo tiene semántica impuesta →
+    `claves_de_frontmatter_sin_semantica_impuesta`.
+  - **Dado** un `knowledge_get`, **Entonces** `externalReferences` no está en el enum de `include`
+    ni en `contracts/mcp.yml` → `external_references_retirada_del_wire`.
 - **Dependencias**: ninguna.
-- **Pruebas**: `crates/lodestar-cli/tests/cli.rs`, `crates/lodestar-mcp/tests/mcp.rs`.
+- **Pruebas**: `crates/lodestar-cli/tests/cli.rs`, `crates/lodestar-mcp/tests/mcp.rs`,
+  `crates/lodestar-workspace/tests/workspace.rs`.
+  - **Se rompen a propósito** (esperado, hay que reescribirlos, no forzarlos):
+    `gitignore_parte_lodestar` (`workspace.rs`) da por hecho el efecto tras un `open` a secas, y los
+    tests de referencias externas de `reference_roots.rs` pierden su sujeto —
+    **`reference_roots_inmutable` se queda**, porque cubre `assert_writable`, no las claves. También
+    hay que reescribir o retirar el escenario de `knowledge_get(externalReferences)` del benchmark
+    §17.
+  - **No romper**: `adopcion_ajusta_gitignore` (va por `open_live` → `enable_cache`, que sigue
+    escribiendo) y el test de `mcp.rs` que planta un fichero donde iría `runtime/plans` para forzar
+    el fallo de `create_dir_all` y verifica que el servidor sigue sirviendo lecturas.
 - **Frontera (mcp.yml)**: parcial (`externalReferences`).
 
 ---
@@ -438,9 +527,34 @@ entrada al código de lo que falta y las trampas ya pisadas.
   - Doc-comments obsoletos en API pública (viajan en `cargo doc`): `App::open` menciona descubrimiento
     de git e identidad desde `lodestar.toml`, ambos borrados; `core::types` sigue documentando el
     `.d.ts` de ts-rs; `contracts/mcp.yml` dice que `externalReferences` está siempre vacío, falso.
+  - **Añadido tras el `/contrato --check` de E23-H12** (todo drift MENOR, ninguno bloqueante, todo
+    texto — pero es exactamente el tipo de mentira que esta historia existe para saldar):
+    - **Los punteros `fuente:` de `contracts/mcp.yml` a `tools.rs` están obsoletos EN BLOQUE**: son
+      **siete**, no uno (`fuente_registro`, `fuente_despacho`, y los de `workspace_status`,
+      `knowledge_search`, `knowledge_get`, `knowledge_check`, `graph_query`). Los que apuntan a
+      `main.rs` sí son exactos. Conviene decidir si se corrigen o si se retira el número de línea,
+      que es lo que envejece.
+    - **`ValueCount::count` se contradice con `metadata.rs`**: `core::types` dice «cuántos
+      **documentos** tienen ese valor» y `metadata.rs` dice «`values` mide **observaciones**, no
+      documentos» (`tags: [a, a]` cuenta 2). Va en el mismo saco que el rustdoc de
+      `FieldInspection::values`, que sigue diciendo «solo escalares», falso desde E23-H11.
+    - **`codigos_sin_emisor` dice cuatro y son cinco**: falta `RELATION_CONSTRAINT_VIOLATION`, que
+      está en la misma situación que `RESULT_TOO_LARGE` (mapeo vivo, variante de `CoreError` que
+      **no se construye en ningún punto del árbol**). La auditoría de E23-H09/H24 se dejó una fuera.
+    - **El texto `instructions` que ve el agente usa vocabulario retirado**, y esto **es superficie
+      de wire** (viaja en `initialize`), no documentación: dice «huérfanos» cuando la operación se
+      llama `isolated` desde E16-H02 —un agente que lea las instrucciones y pruebe `orphans` se come
+      un `INVALID_SCHEMA`— y dice «conforme», vocabulario que E23-H14 retiró del wire en favor de
+      `valid`. Es el mismo defecto que el resto de la épica, en el único sitio donde nadie miró.
+    - **Documentos que E23-H12 deja desactualizados**: `ARCHITECTURE.md §6` sigue declarando
+      `open_ephemeral` en el boceto de API; `IMPLEMENTATION_STATUS.md` lo describe como el modo
+      hermético, lista el escenario de benchmark «ref de código inexistente → `exists:false`» que ya
+      no existe, y describe `knowledge_get.externalReferences` como cableado (aquí toca **nota de
+      retirada, no borrado**: es registro histórico de E11-H04).
 - **Criterios de aceptación**: checklist verificable — ninguna mención viva a la UI Tauri, a git como
   capacidad, ni a subcomandos borrados; la tabla E15–E22 en COMPLETA; el nº de tests real; `grep` de
-  `ts-rs`/`lodestar.toml`/`DocumentSet` sin falsos positivos.
+  `ts-rs`/`lodestar.toml`/`DocumentSet` sin falsos positivos; y el `instructions` del servidor sin
+  vocabulario retirado (`huérfanos`, `conforme`).
 - **Dependencias**: se hace **al final**, con el estado ya real.
 - **Frontera (mcp.yml)**: sí (notas semánticas).
 

@@ -105,7 +105,7 @@ pub fn list() -> Value {
                  "path": { "type": "string", "description": "Ruta relativa del documento (p. ej. «notas/alfa.md»)." }
              }, "required": ["path"], "additionalProperties": false },
              "include": { "type": "array", "description": "Campos a poblar; un campo no pedido queda sin poblar.",
-                 "items": { "type": "string", "enum": ["frontmatter", "body", "revision", "outgoingLinks", "backlinks", "diagnostics", "externalReferences"] } },
+                 "items": { "type": "string", "enum": ["frontmatter", "body", "revision", "outgoingLinks", "backlinks", "diagnostics"] } },
              "sections": { "type": "array", "description": "Acota «body» a estas subsecciones (solo si «body» está en include). Cada elemento es un headingPath, p. ej. [\"Security\",\"Token rotation\"].",
                  "items": { "type": "array", "items": { "type": "string" } } }
          }, "required": ["ref"], "additionalProperties": false },
@@ -487,10 +487,13 @@ mod tests {
     //! Verifica que la fachada MCP es un shell fino sin lógica de dominio propia (`§2`, `§7`).
     use super::*;
 
-    /// Como antes (`Workspace` efímero sobre un fixture en disco), pero envuelto en `App` —
-    /// `call()` despacha sobre `App` desde E10-H08 (necesita `App::workspace_status`). Las
-    /// comparaciones «directas» del golden test siguen yendo contra el mismo `Workspace`, vía
-    /// `App::workspace()`.
+    /// Como antes (`Workspace` sobre un fixture en disco), pero envuelto en `App` — `call()`
+    /// despacha sobre `App` desde E10-H08 (necesita `App::workspace_status`). Las comparaciones
+    /// «directas» del golden test siguen yendo contra el mismo `Workspace`, vía `App::workspace()`.
+    ///
+    /// Se abre con `Workspace::open`: E23-H12 retiró `open_ephemeral` porque, con los efectos
+    /// secundarios fuera de la apertura, `open` **ya es** hermético (no toca el `.gitignore` del
+    /// fixture ni le monta scaffold de runtime).
     fn app_with_fixture() -> (tempfile::TempDir, App) {
         let dir = tempfile::tempdir().unwrap();
         for (p, c) in [
@@ -506,7 +509,7 @@ mod tests {
         ] {
             std::fs::write(dir.path().join(p), c).unwrap();
         }
-        let ws = Workspace::open_ephemeral(dir.path()).unwrap();
+        let ws = Workspace::open(dir.path()).unwrap();
         (dir, App::from_workspace(ws))
     }
 

@@ -358,8 +358,19 @@ fn esta_ignorado(gi: &ignore::gitignore::Gitignore, rel: &str, es_dir: bool) -> 
     gi.matched_path_or_any_parents(rel, es_dir).is_ignore()
 }
 
-/// Criterio: workspace recién abierto → el `.gitignore` ignora `.lodestar/index.db` y
-/// `.lodestar/runtime/` pero **no** `.lodestar/config.yaml`.
+/// Criterio (REESCRITO en **E23-H12**): el `.gitignore` ignora `.lodestar/index.db` y
+/// `.lodestar/runtime/` pero **no** `.lodestar/config.yaml` — y eso ocurre en el **primer camino de
+/// escritura**, no al abrir.
+///
+/// Hasta E23-H12 este test daba por hecho el efecto tras un `Workspace::open` a secas, que es
+/// justamente el defecto: abrir para leer (un `lodestar check`, un `lodestar-mcp` en perfil
+/// `readonly`) reescribía el `.gitignore` del proyecto ajeno. El ajuste sigue siendo necesario
+/// —quien crea la cache tiene que ignorarla— pero es **perezoso**: se dispara en los cuatro
+/// chokepoints que cubren todo camino de escritura (`enable_cache`, `acquire_lock`, `persist_plan`,
+/// `try_append_audit`). Aquí se ejerce `enable_cache()`, el que hace nacer `.lodestar/index.db`.
+///
+/// La primera mitad (abrir NO escribe) es la que fija la historia; la segunda (escribir SÍ ajusta)
+/// impide leerla como «retirar el ajuste» y deja el criterio original intacto donde toca.
 #[test]
 fn gitignore_parte_lodestar() {
     let dir = tempfile::tempdir().unwrap();
@@ -367,7 +378,20 @@ fn gitignore_parte_lodestar() {
     // Abrir un directorio cualquiera es la ruta canónica de "recién abierto" (E15-H03: ya no
     // hay `init` que monte scaffold).
     std::fs::create_dir_all(&root).unwrap();
-    let _ws = Workspace::open(&root).unwrap();
+    let mut ws = Workspace::open(&root).unwrap();
+
+    // 1) Abrir es HERMÉTICO: ni `.gitignore` ni scaffold de runtime.
+    assert!(
+        !root.join(".gitignore").exists(),
+        "abrir un workspace para leerlo no puede crear un `.gitignore` en el proyecto del usuario"
+    );
+    assert!(
+        !root.join(".lodestar").exists(),
+        "abrir un workspace para leerlo no puede crear `.lodestar/` (scaffold de runtime incluido)"
+    );
+
+    // 2) El primer camino de ESCRITURA (aquí `enable_cache`, donde nace `index.db`) sí lo ajusta.
+    ws.enable_cache().unwrap();
 
     let gi = gitignore_de(&root);
 
@@ -383,6 +407,55 @@ fn gitignore_parte_lodestar() {
         !esta_ignorado(&gi, ".lodestar/config.yaml", false),
         "el `.gitignore` NO debe ignorar la config VERSIONADA `.lodestar/config.yaml`"
     );
+}
+
+/// **E23-H12** · El chokepoint `acquire_lock`, **aislado**: tomar el lock de publicación
+/// (`change_apply`/`change_revert`) ajusta el `.gitignore` gestionado.
+///
+/// POR QUÉ VIVE AQUÍ Y NO EN `mcp.rs` (hallazgo de un juez ciego): por la superficie MCP este
+/// chokepoint **no se puede aislar**. `App::change_apply` audita SIEMPRE al terminar —éxito o
+/// fallo—, y `try_append_audit` es otro de los cuatro chokepoints, así que un `.gitignore` correcto
+/// tras un `change_apply` no distingue cuál de los dos lo dejó así: borrar el ajuste de
+/// `acquire_lock` no rompería ese test. En el crate `workspace` no existe la auditoría, y
+/// [`Workspace::acquire_lock`] es API pública: aquí el único candidato posible es él.
+///
+/// El `.gitignore` de partida es el del usuario, SIN bloque gestionado, para que el ajuste tenga que
+/// ocurrir de verdad durante este test (no basta con que estuviera ya puesto).
+#[test]
+fn lock_ajusta_el_gitignore() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::write(root.join(".gitignore"), "target/\n").unwrap();
+
+    let ws = Workspace::open(root).unwrap();
+    // Precondición: abrir no lo ha tocado (lo fija `gitignore_parte_lodestar`; aquí evita que el
+    // test pase por un ajuste anterior en vez de por el que se quiere probar).
+    assert_eq!(
+        std::fs::read_to_string(root.join(".gitignore")).unwrap(),
+        "target/\n",
+        "precondición: abrir no ajusta el `.gitignore` (E23-H12)"
+    );
+
+    // Tomar el lock ES ir a escribir: el runtime que nace de aquí no puede acabar versionado.
+    let lock = ws.acquire_lock().expect("tomar el lock de publicación");
+
+    let gi = gitignore_de(root);
+    assert!(
+        esta_ignorado(&gi, ".lodestar/runtime/lock", false),
+        "tomar el lock debe dejar ignorado el runtime desechable que crea (`.lodestar/runtime/`)"
+    );
+    assert!(
+        esta_ignorado(&gi, ".lodestar/index.db", false),
+        "el bloque gestionado se pone entero: también ignora la cache derivada"
+    );
+    assert!(
+        std::fs::read_to_string(root.join(".gitignore"))
+            .unwrap()
+            .lines()
+            .any(|l| l.trim() == "target/"),
+        "el ajuste debe preservar el `.gitignore` propio del usuario"
+    );
+    drop(lock);
 }
 
 /// Criterio: un fichero en `.lodestar/runtime/plans/x.json` no genera un `IndexEvent` de

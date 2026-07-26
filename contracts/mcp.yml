@@ -173,6 +173,25 @@
 #     (`# SE BORRAN: OKF-…`, `Bundle → DocumentSet`, retiradas de tools) son registro histórico y se
 #     conservan.
 #
+# E23-H12 (`ARCHITECTURE.md §20.2`, invariante 3): se RETIRA del `include` de `knowledge_get` el
+# valor `externalReferences` (y con él el campo homónimo de `DocumentView`). Resolvía contra disco
+# los campos de frontmatter `implemented_by`/`verified_by` y devolvía `[{path, exists}]`; eran las
+# ÚLTIMAS claves de frontmatter con semántica impuesta y no configurable, contra el invariante 3 de
+# `§20.2` (ningún nombre de campo activa reglas especiales — lo mismo que E16-H02 hizo con los
+# nombres de FICHERO). **Sin sustituto y sin alias**, misma razón que `orphans`→`isolated`: hoy es un
+# valor desconocido del `include` y como tal se ignora, sin campo extra en la respuesta.
+#   - Ruta de migración: apuntar a código NO desaparece — un enlace Markdown a un fichero de código
+#     viaja en `outgoingLinks` clasificado como `LinkTarget::workspaceFile` (`§20.6`), con su
+#     `LINK-TARGET-MISSING` si el destino no existe. Lo que desaparece es que un NOMBRE DE CAMPO
+#     active esa resolución.
+#   - `referenceRoots` SIGUE: su otra responsabilidad —raíces visibles pero nunca escribibles, la
+#     write policy de `Workspace::assert_writable` y la exclusión de `workspace_revision`— no se
+#     toca. `workspace_status.capabilities.externalReferences` tampoco cambia: describe que el
+#     servidor entiende `referenceRoots`, que sigue siendo cierto.
+#   - Mismo cambio en la mecánica: `Workspace::external_refs`/`ExternalReference` se borraron; el
+#     escenario 14 de §17 (ref de código inexistente) se retira con la capacidad, como los 8 y 9 en
+#     E20-H03.
+#
 # E10-H13 (decisión D6b, `docs/REFACTOR.md §13`, `DECISIONES.md §3`): las 10 tools activas declaran
 # `outputSchema` (JSON Schema derivado con `schemars::schema_for!` desde el tipo de respuesta real
 # de `lodestar-app`, vía los helpers de `lodestar_app::schemas::*`).
@@ -280,7 +299,7 @@ tools:
     historia: E10-H10
     params:
       - { nombre: ref, tipo: "object (DocumentRef)", requerido: true, semantica: "{ path: RelPath }, identidad del documento" }
-      - { nombre: include, tipo: "array<string>", requerido: false, semantica: "campos a poblar: frontmatter/body/revision/outgoingLinks/backlinks/diagnostics/externalReferences; un campo no pedido queda ausente (None), nunca un valor por defecto disfrazado. Desde E16-H01 «frontmatter» es el YAML ARBITRARIO del documento (objeto libre con las claves del usuario, tipos YAML reales: numero/booleano/null/lista/objeto), NO la proyeccion de 7 campos conocidos del extinto core::types::Frontmatter; un documento sin bloque devuelve {}" }
+      - { nombre: include, tipo: "array<string>", requerido: false, semantica: "campos a poblar: frontmatter/body/revision/outgoingLinks/backlinks/diagnostics; un campo no pedido queda ausente (None), nunca un valor por defecto disfrazado. Desde E16-H01 «frontmatter» es el YAML ARBITRARIO del documento (objeto libre con las claves del usuario, tipos YAML reales: numero/booleano/null/lista/objeto), NO la proyeccion de 7 campos conocidos del extinto core::types::Frontmatter; un documento sin bloque devuelve {}" }
       - { nombre: sections, tipo: "array<array<string>>", requerido: false, semantica: "headingPaths para acotar «body» (solo si «body» ∈ include), p. ej. [[\"Security\",\"Token rotation\"]]" }
     retorno: "json { document: DocumentView } — envoltorio de un solo campo, NO DocumentView a secas (lodestar_app::KnowledgeGetResponse describe esta forma exacta)"
     output_schema: "sí — schemars::schema_for!(KnowledgeGetResponse), vía lodestar_app::schemas::knowledge_get_schema()"
@@ -288,8 +307,8 @@ tools:
     semantica: >-
       Obtiene un documento concreto con `include` selectivo y selección de secciones.
       `revision` (== DocumentRevision, blake3 del contenido en disco) se calcula SIEMPRE,
-      independiente de `include`. `externalReferences` siempre vacío en esta historia
-      (E11-H04 fuera de alcance).
+      independiente de `include`. El séptimo valor del `include` se RETIRÓ en E23-H12 (ver la
+      cabecera de este fichero): ningún nombre de campo de frontmatter activa reglas especiales.
 
   - nombre: metadata_inspect
     fuente: crates/lodestar-mcp/src/tools.rs

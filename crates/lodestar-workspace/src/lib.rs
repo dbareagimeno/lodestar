@@ -32,14 +32,12 @@ mod lock;
 mod publish;
 mod receipts;
 mod recovery;
-mod runtime;
 mod snapshot;
 mod staging;
 mod transaction;
 
 pub use config::WorkspaceConfig;
 pub use error::WorkspaceError;
-pub use external_refs::{ExternalReference, ExternalRefsReport};
 pub use journal::{Journal, JournalState, OpState};
 pub use lock::WorkspaceLock;
 pub use recovery::RecoveryDir;
@@ -52,7 +50,8 @@ pub struct Workspace {
     root: PathBuf,
     /// Configuración de la sesión (`.lodestar/config.yaml`), leída **una sola vez** al abrir.
     config: WorkspaceConfig,
-    /// Cache incremental (SQLite/FTS5). `None` en modo efímero (CLI one-shot).
+    /// Cache incremental (SQLite/FTS5). `None` mientras no se active con
+    /// [`Workspace::enable_cache`] (el caso de la CLI one-shot, que lee del core y no la necesita).
     cache: Option<Arc<Store>>,
     /// Watcher vivo (mantiene la observación de disco mientras exista).
     _watcher: Option<Watcher>,
@@ -66,6 +65,21 @@ impl Workspace {
     /// (`ARCHITECTURE.md §20.1`). Un directorio con `.md` sueltos —y **sin** `.lodestar/`— es un
     /// workspace válido: la config es opcional y su ausencia da los defaults de `§20.5`.
     ///
+    /// # Abrir es HERMÉTICO (E23-H12)
+    ///
+    /// Abrir **no escribe nada** en el proyecto del usuario: ni ajusta el `.gitignore`, ni crea
+    /// `.lodestar/`, ni deja rastro alguno. Hasta E23-H12 sí lo hacía (`ensure_gitignore` +
+    /// scaffold de `.lodestar/runtime/`), de modo que un `lodestar check` o un `lodestar-mcp` en
+    /// perfil `readonly` sobre un proyecto ajeno modificaban el working tree sin que nadie lo
+    /// hubiera pedido. Los dos efectos pasaron a ser **perezosos**:
+    ///
+    /// - el scaffold de runtime se retiró sin sustituto (cada consumidor de `.lodestar/runtime/`
+    ///   crea su directorio con `create_dir_all` justo antes de escribir);
+    /// - el ajuste del `.gitignore` vive ahora en [`Workspace::ensure_managed_gitignore`], que se
+    ///   invoca desde los cuatro chokepoints que cubren todo camino de escritura
+    ///   ([`Workspace::enable_cache`], [`Workspace::acquire_lock`], y `persist_plan` /
+    ///   `try_append_audit` en `lodestar-app`).
+    ///
     /// # Errores
     /// - [`WorkspaceError::Io`] si `.lodestar/config.yaml` existe pero es inválido. Se comprueba
     ///   **antes** de tocar nada del disco: desde que la config gobierna el descubrimiento
@@ -73,15 +87,8 @@ impl Workspace {
     ///   documentos distinto del que el usuario declaró sin decir una palabra.
     pub fn open(root: &Path) -> Result<Self, WorkspaceError> {
         // La config se lee UNA vez por sesión: la raíz y su política son fijas mientras el
-        // workspace vive (`ARCHITECTURE.md §20.5`).
+        // workspace vive (`ARCHITECTURE.md §20.5`). Es lo ÚNICO que hace abrir: una lectura.
         let config = WorkspaceConfig::load(root).map_err(WorkspaceError::Io)?;
-        // Ajusta el `.gitignore` versionado (cache + runtime desechables, config canónica
-        // preservada) y garantiza el scaffold de `.lodestar/runtime/` — ambos best-effort, no
-        // abortan la apertura (`ARCHITECTURE.md §19.4`, `DECISIONES.md §0` D5). Ninguno de los dos
-        // escribe configuración: un workspace sin `.lodestar/config.yaml` sigue sin tenerlo tras
-        // abrirlo.
-        gitignore::ensure_gitignore(root);
-        runtime::ensure_runtime_scaffold(root);
         Ok(Workspace {
             root: root.to_path_buf(),
             config,
@@ -181,24 +188,27 @@ impl Workspace {
         }
     }
 
-    /// Abre en modo hermético (p. ej. CLI efímera): sin tocar `.gitignore` ni el scaffold de
-    /// runtime, y sin cache incremental.
+    /// Ajusta el `.gitignore` versionado del proyecto para que ignore la cache derivada
+    /// (`.lodestar/index.db`) y el runtime desechable (`.lodestar/runtime/`), preservando el
+    /// contenido propio del usuario y dejando versionada la config canónica
+    /// (`.lodestar/config.yaml`, `.lodestar/templates/`).
     ///
-    /// «Hermético» se refiere a **no escribir** en el workspace, no a saltarse la validación: la
-    /// config se carga y se valida igual que en [`Workspace::open`]. Si no lo hiciera, esta vía
-    /// serviría un inventario calculado con una política de defaults que el usuario nunca escribió
-    /// — justo el fallo silencioso que la validación existe para evitar.
+    /// Es el **chokepoint perezoso** de E23-H12: el ajuste ya no ocurre al abrir (leer un proyecto
+    /// ajeno no puede modificarlo), sino en cada camino que va a escribir de verdad —
+    /// [`Workspace::enable_cache`] (hace nacer `index.db`), [`Workspace::acquire_lock`]
+    /// (`change_apply`/`change_revert`) y, en `lodestar-app`, la persistencia del plan y el anexado
+    /// de la auditoría. Quien crea lo derivado es quien tiene que ignorarlo.
     ///
-    /// # Errores
-    /// - [`WorkspaceError::Io`] si `.lodestar/config.yaml` existe pero es inválido.
-    pub fn open_ephemeral(root: &Path) -> Result<Self, WorkspaceError> {
-        let config = WorkspaceConfig::load(root).map_err(WorkspaceError::Io)?;
-        Ok(Workspace {
-            root: root.to_path_buf(),
-            config,
-            cache: None,
-            _watcher: None,
-        })
+    /// **Idempotente byte a byte** a partir de la segunda vez: si las entradas gestionadas ya están
+    /// presentes no se reescribe ni un byte, así que llamarlo en cada escritura no churnea el
+    /// fichero del usuario.
+    ///
+    /// **Best-effort**: un fallo de escritura (checkout de solo lectura, permisos) se reporta por
+    /// stderr y no aborta la operación — el ajuste es una cortesía, no una precondición
+    /// (`ARCHITECTURE.md §19.4`, `DECISIONES.md §0` D5). Nunca escribe configuración: un workspace
+    /// sin `.lodestar/config.yaml` sigue sin tenerlo después.
+    pub fn ensure_managed_gitignore(&self) {
+        gitignore::ensure_gitignore(&self.root);
     }
 
     /// Abre un workspace **en vivo**: cache incremental construida + watcher arrancado.
@@ -211,12 +221,17 @@ impl Workspace {
 
     /// Activa (si no lo está) la cache incremental: abre `.lodestar/index.db`, la reconstruye
     /// desde disco y arranca el watcher (único escritor de la cache).
+    ///
+    /// Es uno de los cuatro chokepoints de escritura de E23-H12: aquí **nace** `index.db`, así que
+    /// aquí toca ignorarla.
     pub fn enable_cache(&mut self) -> Result<(), WorkspaceError> {
         if self.cache.is_some() {
             return Ok(());
         }
-        // El `.gitignore` ya quedó ajustado en `Workspace::open` (cache + runtime ignorados,
-        // ANTES de crear la cache) — ver `gitignore::ensure_gitignore`: texto plano, sin git.
+        // El `.gitignore` se ajusta ANTES de crear la cache (nunca se versiona un `index.db` a
+        // medio nacer) — ver `gitignore::ensure_gitignore`: texto plano, sin git. Desde E23-H12 lo
+        // hace este método, no `Workspace::open`: abrir para leer no puede tocar el proyecto.
+        self.ensure_managed_gitignore();
         let store = Arc::new(Store::open(&self.root)?);
         // Watcher ANTES del rebuild: un guardado externo durante el rebuild inicial genera
         // evento y se reconcilia; al revés quedaba una ventana ciega hasta el siguiente evento.

@@ -26,9 +26,10 @@
 //!   - Escenario 8 (relación inválida): RETIRADO en E20-H03 (relaciones tipadas eliminadas con
 //!     `core::schema`; una relación es un enlace, sin restricción de tipo).
 //!   - Escenario 13 (fuera de writableRoots): **`PERMISSION_DENIED`** en `change_apply`.
-//!   - Escenario 14 (ref de código inexistente): el «diagnóstico» aflora en `knowledge_get` como una
-//!     `externalReference` con **`exists:false`** (el check `EXTREF-MISSING` es de la workspace, no
-//!     lo fusiona `knowledge_check`; su superficie e2e es `knowledge_get(include:[externalReferences])`).
+//!   - Escenario 14 (ref de código inexistente): RETIRADO en E23-H12 (los campos de frontmatter
+//!     `implemented_by`/`verified_by` dejan de tener semántica impuesta y con ellos cae
+//!     `knowledge_get(include:[externalReferences])`, su única superficie e2e; ver la nota del
+//!     escenario).
 //!   - Escenario 15 (Markdown inválido a mano): el check **`OKF-TYPE`** (hard-fail) vía
 //!     `knowledge_check` scope workspace, `valid:false`.
 //!
@@ -784,58 +785,23 @@ fn escenario_13_fuera_writable() {
 }
 
 // ===========================================================================
-// Escenario 14 — Referenciar un archivo de código inexistente → diagnóstico.
-// (La superficie e2e es knowledge_get(externalReferences): exists:false por la ref rota.)
+// Escenario 14 — «Referenciar un archivo de código inexistente → diagnóstico»: RETIRADO en E23-H12,
+// como los escenarios 8 y 9 lo fueron en E20-H03 (una fila de §17 cuya CAPACIDAD desaparece deja de
+// tener superficie que ejercer).
+//
+// Su único vehículo e2e era `knowledge_get(include:[externalReferences])`, que resolvía contra disco
+// los campos de frontmatter `implemented_by`/`verified_by`. E23-H12 los retira **sin sustituto**:
+// eran las últimas claves con semántica impuesta y no configurable, contra el invariante 3 de
+// `ARCHITECTURE.md §20.2` (ningún nombre de campo activa reglas especiales, igual que E16-H02 hizo
+// con los nombres de FICHERO). En el modelo universal, `implemented_by` es metadata del usuario como
+// `autor` o `tags`, y comprobar que una ruta de código existe no es competencia de Lodestar.
+//
+// Lo que SÍ se conserva de aquel escenario: la garantía de que esas claves no pueden convertir
+// `knowledge_get` en un oráculo de existencia de ficheros del host, hoy en
+// `mcp.rs::frontmatter_no_es_oraculo_de_ficheros_del_host`, y la write policy de `referenceRoots`
+// (`escenario_13_fuera_writable`, `reference_roots.rs::reference_roots_inmutable`), que es la
+// segunda responsabilidad —esa sí viva— de `referenceRoots`.
 // ===========================================================================
-fn escenario_14_ref_codigo_inexistente() {
-    let dir = tempfile::tempdir().unwrap();
-    write(dir.path(), "index.md", INDEX);
-    write(dir.path(), "src/existe.rs", "fn main() {}\n");
-    write(
-        dir.path(),
-        ".lodestar/config.yaml",
-        "workspace:\n  writableRoots: [knowledge]\n  referenceRoots: [src]\n",
-    );
-    // Un documento con dos referencias de código: una que existe y una que NO.
-    write(
-        dir.path(),
-        "knowledge/tarea.md",
-        "---\ntype: Concept\ntitle: Tarea\ndescription: con refs de codigo\nimplemented_by:\n  - src/existe.rs\n  - src/inexistente.rs\n---\n\n# Tarea\n\ncuerpo\n",
-    );
-
-    let resp = roundtrip(
-        dir.path(),
-        &[call(
-            1,
-            "knowledge_get",
-            json!({ "ref": { "path": "knowledge/tarea.md" }, "include": ["externalReferences"] }),
-        )],
-        1,
-    );
-    let refs = sc(&resp[0])["document"]["externalReferences"]
-        .as_array()
-        .unwrap_or_else(|| panic!("knowledge_get debe devolver externalReferences: {resp:?}"));
-
-    let inexistente = refs
-        .iter()
-        .find(|r| r["path"] == "src/inexistente.rs")
-        .unwrap_or_else(|| panic!("debe listar la ref rota src/inexistente.rs: {resp:?}"));
-    assert_eq!(
-        inexistente["exists"],
-        Value::Bool(false),
-        "una ref a un archivo de código inexistente debe marcarse exists:false (diagnóstico): {resp:?}"
-    );
-    // No vacuo: la ref que SÍ existe se marca exists:true.
-    let existe = refs
-        .iter()
-        .find(|r| r["path"] == "src/existe.rs")
-        .unwrap_or_else(|| panic!("debe listar la ref existente src/existe.rs: {resp:?}"));
-    assert_eq!(
-        existe["exists"],
-        Value::Bool(true),
-        "una ref a un archivo de código existente debe marcarse exists:true: {resp:?}"
-    );
-}
 
 // ===========================================================================
 // Escenario 15 — Editar directamente un Markdown inválido → detectado por knowledge_check.
@@ -951,10 +917,8 @@ fn bench_12_crash_recuperacion() {
 fn bench_13_fuera_writable() {
     escenario_13_fuera_writable();
 }
-#[test]
-fn bench_14_ref_codigo_inexistente() {
-    escenario_14_ref_codigo_inexistente();
-}
+// bench_14_ref_codigo_inexistente: RETIRADO en E23-H12 (capacidad eliminada; ver la nota del
+// escenario 14).
 #[test]
 fn bench_15_editar_markdown_invalido() {
     escenario_15_editar_markdown_invalido();
@@ -963,8 +927,9 @@ fn bench_15_editar_markdown_invalido() {
 // ---------------------------------------------------------------------------
 // E14-H04 · Criterio `benchmark_escenarios`: las filas de §17 en un solo viaje e2e.
 // Es el test que nombra la spec; ejerce los escenarios en secuencia sobre la superficie real. En
-// E20-H03 quedan 13 (los escenarios 8 y 9 —relación tipada inválida y safe fixes de REL-TARGET— se
-// retiraron con `core::schema`).
+// E20-H03 quedaron 13 (los escenarios 8 y 9 —relación tipada inválida y safe fixes de REL-TARGET—
+// se retiraron con `core::schema`) y en E23-H12 quedan 12 (el 14, ref de código inexistente, se
+// retira con los campos de frontmatter privilegiados).
 // ---------------------------------------------------------------------------
 // ===========================================================================
 // E23-H03 — `move` recalcula sus PROPIOS enlaces salientes, APLICANDO A DISCO
@@ -1452,6 +1417,5 @@ fn benchmark_escenarios() {
     escenario_11_revert();
     escenario_12_crash_recuperacion();
     escenario_13_fuera_writable();
-    escenario_14_ref_codigo_inexistente();
     escenario_15_editar_markdown_invalido();
 }

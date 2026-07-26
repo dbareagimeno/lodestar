@@ -920,23 +920,73 @@ fn receipt_persistido() {
     );
 }
 
+/// Escribe `<root>/.lodestar/config.yaml` con la sección `transactions` dada, creando el directorio
+/// si hace falta.
+///
+/// El `create_dir_all` no es ceremonia: desde **E23-H12** abrir un workspace no monta ningún
+/// scaffold (leer un proyecto ajeno no puede modificarlo), así que el directorio lo crea **quien
+/// escribe** — y quien escribe la config del test es el test.
+fn escribe_config_transacciones(root: &Path, transactions_yaml: &str) {
+    std::fs::create_dir_all(root.join(".lodestar")).unwrap();
+    std::fs::write(
+        root.join(".lodestar/config.yaml"),
+        format!("transactions:\n{transactions_yaml}"),
+    )
+    .unwrap();
+}
+
 /// **E13-H07** · Criterio `receipt_gc`: dados 21 recibos con `maximumReceipts:20`, al hacer GC queda
 /// el más antiguo (`receipt-00`, por mtime) fuera —su receipt y su copia de recuperación borrados—
 /// y persisten exactamente los 20 más recientes con sus copias intactas.
+///
+/// ## Dos arreglos de E23-H12 (el test se apoyaba en un efecto secundario y en una config muerta)
+///
+/// 1. **Los `create_dir_all` que le faltaban.** Plantaba ficheros bajo `.lodestar/` sin crear
+///    `.lodestar/` ni `runtime/receipts/`, y le funcionaba porque `Workspace::open` le montaba el
+///    scaffold de runtime al abrir. E23-H12 retira ese efecto (abrir no modifica el proyecto) y el
+///    directorio pasa a crearlo quien escribe: en producción `write_receipt`, aquí el test —que
+///    planta los recibos a mano justamente para controlar sus mtimes.
+/// 2. **La config se escribe ANTES de abrir.** `WorkspaceConfig` se lee **una sola vez, al abrir**
+///    (`ARCHITECTURE.md §20.5`), así que el `config.yaml` que este test escribía DESPUÉS de
+///    `Workspace::open` no llegaba nunca al GC: se estaba juzgando con los defaults —que casualmente
+///    son los mismos, `24h`/`20`— y el test aseveraba sobre una config que jamás se aplicó. Ahora la
+///    precondición comprueba explícitamente que la sesión la leyó.
+///
+/// ## Fase 2 — retención por EDAD, y la prueba de que manda la config
+///
+/// Con la fase 1 sola, `maximumReceipts:20` es indistinguible del default: el criterio lo cumpliría
+/// igual un `gc_receipts` que ignorase la config entera. La fase 2 cierra dos huecos de un tiro: una
+/// config **no-default** (`retainReceiptsFor: "1h"`) que solo puede purgar si de verdad se lee, y la
+/// retención por edad del alcance de E13-H07, que hasta ahora no ejercitaba ningún test (los mtimes
+/// de la fase 1 están todos dentro de las 24h a propósito, para que solo muerda el límite de
+/// cantidad).
+///
+/// Las edades de la fase 2 son **bimodales** (2 h vs. ahora) contra un TTL de 1 h: el veredicto
+/// queda a una hora de cualquier jitter del reloj, así que no puede volverse flaky. Los mtimes
+/// escalonados por segundos de la fase 1 solo ORDENAN, no deciden caducidad.
 #[test]
 fn receipt_gc() {
     let dir = tempfile::tempdir().unwrap();
-    let ws = Workspace::open(dir.path()).unwrap();
 
-    // Config explícita del criterio: retener como máximo 20 recibos (y 24h por edad, holgado).
-    std::fs::write(
-        dir.path().join(".lodestar/config.yaml"),
-        "transactions:\n  retainReceiptsFor: \"24h\"\n  maximumReceipts: 20\n",
-    )
-    .unwrap();
+    // Config explícita del criterio (retener como máximo 20 recibos, 24h por edad = holgado),
+    // escrita ANTES de abrir: es lo único que la hace efectiva.
+    escribe_config_transacciones(
+        dir.path(),
+        "  retainReceiptsFor: \"24h\"\n  maximumReceipts: 20\n",
+    );
+    let ws = Workspace::open(dir.path()).unwrap();
+    assert_eq!(
+        ws.config().transactions.maximum_receipts,
+        20,
+        "precondición: la sesión tiene que haber LEÍDO la config declarada (se lee una sola vez, al \
+         abrir); si no, el GC estaría juzgando con defaults y el criterio sería vacuo"
+    );
 
     let receipts_dir = dir.path().join(".lodestar/runtime/receipts");
     let recovery_dir = dir.path().join(".lodestar/runtime/recovery");
+    // El runtime lo crea QUIEN ESCRIBE (E23-H12: la apertura ya no monta scaffold). Aquí los recibos
+    // los planta el test, así que los directorios son suyos.
+    std::fs::create_dir_all(&receipts_dir).unwrap();
     std::fs::create_dir_all(&recovery_dir).unwrap();
 
     // 21 recibos con mtimes ESCALONADOS: `receipt-00` el más antiguo … `receipt-20` el más nuevo,
@@ -995,6 +1045,66 @@ fn receipt_gc() {
             "la copia de recuperación del receipt reciente {id} no debía borrarse"
         );
     }
+
+    // === Fase 2 — retención por EDAD (`retainReceiptsFor`), con una config NO-default ===========
+    // Sesión NUEVA: la config se lee al abrir, así que reescribirla exige reabrir para que aplique.
+    escribe_config_transacciones(
+        dir.path(),
+        "  retainReceiptsFor: \"1h\"\n  maximumReceipts: 20\n",
+    );
+    let ws = Workspace::open(dir.path()).unwrap();
+    assert_eq!(
+        ws.config().transactions.retain_receipts_for,
+        "1h",
+        "precondición: la sesión nueva debe haber leído la retención declarada (con el default de \
+         24h no se purgaría nada y la fase 2 sería vacua)"
+    );
+
+    // De los 20 supervivientes, los 5 más antiguos pasan a tener 2 h: CADUCADOS con el TTL de 1 h
+    // declarado, y VIGENTES con el default de 24h — que es justo lo que hace discriminante esta
+    // fase. El resto se re-sella a «ahora». Siguen siendo 20, así que `maximumReceipts:20` no purga
+    // a nadie: lo único que puede mover ficheros aquí es la edad.
+    let supervivientes = &ids[1..];
+    let (caducados, vigentes) = supervivientes.split_at(5);
+    for id in caducados {
+        set_mtime(
+            &receipts_dir.join(format!("{id}.json")),
+            now - Duration::from_secs(2 * 3600),
+        );
+    }
+    for id in vigentes {
+        set_mtime(&receipts_dir.join(format!("{id}.json")), now);
+    }
+
+    ws.gc_receipts()
+        .expect("recolectar los recibos caducados por retainReceiptsFor");
+
+    for id in caducados {
+        assert!(
+            !receipts_dir.join(format!("{id}.json")).exists(),
+            "el receipt {id} (2 h de antigüedad) debía purgarse con retainReceiptsFor:1h; si sigue \
+             ahí, el GC está usando el default de 24h en vez de la config del workspace"
+        );
+        assert!(
+            !recovery_dir.join(id).exists(),
+            "la copia de recuperación del receipt caducado {id} debía borrarse con él"
+        );
+    }
+    for id in vigentes {
+        assert!(
+            receipts_dir.join(format!("{id}.json")).exists(),
+            "el receipt {id} está dentro de la retención: no debía purgarse"
+        );
+        assert!(
+            recovery_dir.join(id).exists(),
+            "la copia de recuperación del receipt vigente {id} no debía borrarse"
+        );
+    }
+    assert_eq!(
+        contar_json(&receipts_dir),
+        vigentes.len(),
+        "tras el GC por edad deben quedar exactamente los recibos dentro de la retención"
+    );
 }
 
 // ===========================================================================

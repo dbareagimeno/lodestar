@@ -275,9 +275,10 @@ fn config_malformada_es_error() {
          cualquier otro fallo de IO). Mensaje: {msg:?}"
     );
 
-    // Puerta de atrás: la apertura hermética (CLI one-shot) tampoco puede servir un inventario
-    // calculado con una política que el usuario no escribió.
-    if let Ok(ws) = Workspace::open_ephemeral(dir.path()) {
+    // Puerta de atrás: ninguna apertura puede servir un inventario calculado con una política que
+    // el usuario no escribió. (E23-H12 retiró `open_ephemeral`: con los efectos secundarios fuera de
+    // `open`, abrir YA es hermético y el «modo hermético reutilizable» dejó de ser un modo aparte.)
+    if let Ok(ws) = Workspace::open(dir.path()) {
         assert!(
             ws.document_set().is_err(),
             "con la config malformada, ninguna vía puede devolver un inventario: se habría \

@@ -4821,9 +4821,9 @@ fn root_inexistente_falla_legible_sin_panic() {
 /// Windows ni bajo root). Modela un caso de campo: un `.lodestar/` corrupto o un volumen que
 /// rechaza la escritura.
 ///
-/// De paso fija dos propiedades de robustez: abrir el workspace **no** aborta por esto
-/// (`ensure_runtime_scaffold` es best-effort y solo avisa por stderr), y la lectura sigue
-/// funcionando pese al runtime roto.
+/// De paso fija dos propiedades de robustez: abrir el workspace **no** aborta por esto (desde
+/// E23-H12 la apertura ni siquiera mira el runtime — el scaffold se retiró y cada consumidor crea su
+/// directorio al escribir), y la lectura sigue funcionando pese al runtime roto.
 #[test]
 fn plan_con_runtime_no_escribible_da_internal_io_error() {
     let dir = tempfile::tempdir().unwrap();
@@ -4878,4 +4878,602 @@ fn plan_con_runtime_no_escribible_da_internal_io_error() {
         "# Nota\n\ncuerpo.\n",
         "planificar no escribe el canónico, ni siquiera cuando falla"
     );
+}
+
+// ===========================================================================
+// E23-H12 — Higiene de efectos secundarios y retirada de las claves privilegiadas
+// (`requirements/epica-23-cierre-migracion.md §E23-H12`). Fase ROJA.
+//
+// DOS DEFECTOS, UNA HISTORIA:
+//
+// 1. `Workspace::open` (`crates/lodestar-workspace/src/lib.rs:83-84`) ejecuta
+//    `gitignore::ensure_gitignore(root)` + `runtime::ensure_runtime_scaffold(root)` ANTES de leer
+//    nada, así que **arrancar el MCP —incluso en perfil `readonly`— reescribe el `.gitignore` del
+//    proyecto** y le crea `.lodestar/runtime/{plans,receipts,staging}`. Para el pitch «cd
+//    my-project && lodestar-mcp sobre cualquier proyecto» es una escritura no solicitada; en CI,
+//    un working tree sucio. Los dos efectos pasan a ser perezosos: el scaffold se borra sin
+//    sustituto (sus ocho consumidores ya hacen su `create_dir_all`) y el `.gitignore` se ajusta en
+//    los cuatro chokepoints de escritura (`enable_cache`, `acquire_lock`, `persist_plan`,
+//    `try_append_audit`).
+//
+// 2. `implemented_by`/`verified_by` son las últimas claves de frontmatter con **semántica impuesta
+//    y no configurable** (`crates/lodestar-workspace/src/external_refs.rs:25`), contra el
+//    invariante 3 de `§20.2`. Se retiran sin sustituto (decisión del usuario, 2026-07-26) y con
+//    ellas la opción `include:["externalReferences"]` de `knowledge_get`, que se quedaría sin
+//    fuente: una opción que siempre devuelve vacío es el patrón que E23 está saldando.
+// ===========================================================================
+
+/// Snapshot determinista del árbol bajo `dir`: `(ruta relativa, bytes)` ordenado. Captura contenido
+/// Y existencia, así que detecta lo mismo un fichero modificado que uno creado o borrado.
+///
+/// Solo recoge FICHEROS: los subdirectorios vacíos del scaffold de runtime no dejan rastro aquí y
+/// hay que aseverarlos aparte (por eso los tests preguntan además por `.lodestar/`).
+fn snapshot_arbol(dir: &std::path::Path) -> Vec<(String, Vec<u8>)> {
+    fn recorrer(
+        base: &std::path::Path,
+        actual: &std::path::Path,
+        acc: &mut Vec<(String, Vec<u8>)>,
+    ) {
+        let mut entradas: Vec<std::path::PathBuf> = std::fs::read_dir(actual)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .collect();
+        entradas.sort();
+        for p in entradas {
+            if p.is_dir() {
+                recorrer(base, &p, acc);
+            } else {
+                let rel = p.strip_prefix(base).unwrap().to_string_lossy().into_owned();
+                acc.push((rel, std::fs::read(&p).unwrap()));
+            }
+        }
+    }
+    let mut acc = Vec::new();
+    recorrer(dir, dir, &mut acc);
+    acc.sort();
+    acc
+}
+
+/// Una línea `tools/call` serializada con `serde_json` (nunca interpolada: los argumentos llevan
+/// rutas y texto libre).
+fn linea_call(id: u32, tool: &str, args: serde_json::Value) -> String {
+    serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "method": "tools/call",
+        "params": { "name": tool, "arguments": args }
+    })
+    .to_string()
+}
+
+/// **E23-H12** · Criterio `readonly_no_escribe_nada`: **Dado** un proyecto con un `.gitignore`
+/// propio, **Cuando** se arranca el MCP en perfil `readonly` y se hace una sesión de solo lectura,
+/// **Entonces** el proyecto queda intacto: ni el `.gitignore` cambia ni aparece `.lodestar/`.
+///
+/// El criterio de la historia lo enuncia como «`git status --porcelain` sale vacío»; aquí se asevera
+/// la propiedad que hay debajo, y de forma más estricta que `git status`: el árbol ENTERO byte a
+/// byte (`git status` no vería un fichero ya ignorado) más la no-existencia de `.lodestar/`, que es
+/// donde caería el scaffold de runtime (directorios vacíos que un snapshot de ficheros no ve).
+///
+/// El `.gitignore` lleva CRLF y línea en blanco final a propósito: son los dos detalles que la
+/// primera reescritura de `ensure_gitignore` normaliza, o sea que el fichero volvería con otros
+/// bytes conservando todas sus reglas. Comparar contenido lógico no vería el defecto.
+///
+/// NO-VACUIDAD: la sesión tiene que haber SERVIDO de verdad (`workspace_status` con su
+/// `workspaceRevision`, `knowledge_search` encontrando el documento y `knowledge_check` con
+/// veredicto), no simplemente arrancar y morir; un servidor que rechazara todo también dejaría el
+/// árbol intacto.
+#[test]
+fn readonly_no_escribe_nada() {
+    let dir = tempfile::tempdir().unwrap();
+    let gitignore_original: &[u8] = b"target/\r\n*.log\r\n\r\n";
+    std::fs::write(dir.path().join(".gitignore"), gitignore_original).unwrap();
+    write(
+        dir.path(),
+        "guia.md",
+        "---\nestado: vigente\n---\n\n# Guía\n\nVer [alfa](notas/alfa.md).\n",
+    );
+    write(dir.path(), "notas/alfa.md", "# Alfa\n\nCuerpo de alfa.\n");
+
+    let antes = snapshot_arbol(dir.path());
+
+    // Sesión de SOLO LECTURA: las 7 tools que el perfil `readonly` sigue exponiendo.
+    let lineas = [
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}"#.to_string(),
+        r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#.to_string(),
+        linea_call(3, "workspace_status", serde_json::json!({})),
+        linea_call(4, "knowledge_search", serde_json::json!({ "text": "alfa" })),
+        linea_call(
+            5,
+            "knowledge_get",
+            serde_json::json!({
+                "ref": { "path": "guia.md" },
+                "include": ["frontmatter", "body", "outgoingLinks", "backlinks", "diagnostics"]
+            }),
+        ),
+        linea_call(6, "metadata_inspect", serde_json::json!({ "mode": "catalog" })),
+        linea_call(
+            7,
+            "knowledge_check",
+            serde_json::json!({ "scope": { "kind": "workspace" } }),
+        ),
+        linea_call(
+            8,
+            "graph_query",
+            serde_json::json!({ "operation": "isolated" }),
+        ),
+    ];
+    let refs: Vec<&str> = lineas.iter().map(String::as_str).collect();
+    let resp = roundtrip_profile(dir.path(), "readonly", &refs, lineas.len());
+
+    // --- guarda anti-vacua: la sesión de lectura funcionó de verdad -----------------------------
+    assert_eq!(
+        resp.len(),
+        lineas.len(),
+        "el servidor debe responder a las {} peticiones de la sesión: {resp:?}",
+        lineas.len()
+    );
+    assert!(
+        resp[2]["result"]["structuredContent"]["workspaceRevision"]
+            .as_str()
+            .unwrap_or("")
+            .starts_with("blake3:"),
+        "workspace_status debe haber servido el estado del workspace: {resp:?}"
+    );
+    assert!(
+        search_paths(&resp[3]).contains(&"notas/alfa.md".to_string()),
+        "knowledge_search debe haber encontrado `notas/alfa.md`: {resp:?}"
+    );
+    assert_eq!(
+        resp[4]["result"]["structuredContent"]["document"]["path"], "guia.md",
+        "knowledge_get debe haber servido el documento: {resp:?}"
+    );
+    assert_eq!(
+        resp[6]["result"]["structuredContent"]["valid"],
+        serde_json::Value::Bool(true),
+        "knowledge_check debe haber emitido veredicto sobre un workspace válido: {resp:?}"
+    );
+
+    // --- el criterio: cero escrituras -----------------------------------------------------------
+    let gitignore_tras_sesion = std::fs::read(dir.path().join(".gitignore")).unwrap();
+    assert_eq!(
+        gitignore_tras_sesion,
+        gitignore_original,
+        "una sesión `readonly` no puede tocar el `.gitignore` del proyecto: era {:?} y quedó {:?}",
+        String::from_utf8_lossy(gitignore_original),
+        String::from_utf8_lossy(&gitignore_tras_sesion)
+    );
+    assert!(
+        !dir.path().join(".lodestar").exists(),
+        "una sesión `readonly` no puede hacer aparecer `.lodestar/` (ni siquiera el scaffold vacío \
+         de runtime): sobre el proyecto de un tercero es una escritura no solicitada"
+    );
+    assert_eq!(
+        snapshot_arbol(dir.path()),
+        antes,
+        "una sesión `readonly` no debe modificar, crear ni borrar NINGÚN fichero del proyecto"
+    );
+}
+
+/// El `document` de una respuesta `knowledge_get`, normalizado para comparar dos documentos gemelos
+/// que solo se diferencian en el NOMBRE de una clave de frontmatter: se quita `revision` (blake3 del
+/// contenido — difiere por fuerza, porque el nombre de la clave forma parte de los bytes) y se
+/// sustituyen la ruta y la clave por marcadores.
+fn documento_normalizado(resp: &serde_json::Value, ruta: &str, clave: &str) -> String {
+    let mut doc = resp["result"]["structuredContent"]["document"].clone();
+    assert!(
+        doc.is_object(),
+        "knowledge_get debe devolver `document` como objeto: {resp:?}"
+    );
+    if let Some(obj) = doc.as_object_mut() {
+        obj.remove("revision");
+    }
+    doc.to_string().replace(ruta, "DOC").replace(clave, "CLAVE")
+}
+
+/// **E23-H12** · Criterio `claves_de_frontmatter_sin_semantica_impuesta`: **Dado** un documento con
+/// `implemented_by: María`, **Cuando** se audita el workspace, **Entonces** no se emite ningún
+/// diagnóstico — ningún nombre de campo tiene semántica impuesta.
+///
+/// SE EJERCE POR `knowledge_check` scope `workspace`, que es el mismo motor que `lodestar check`
+/// (invariante #3: desde E23-H01 ambos salen de `App::full_analysis`), y por la superficie donde el
+/// privilegio es OBSERVABLE, que es `knowledge_get`.
+///
+/// POR QUÉ NO BASTA LA MITAD LITERAL: el diagnóstico `EXTREF-MISSING` ya murió en E20-H03, así que
+/// «`check` no dice nada de `implemented_by`» es hoy trivialmente cierto y un test que solo aseverase
+/// eso sería VACUO. Lo que sigue vivo —y lo que esta historia mata— es que Lodestar interpreta el
+/// valor de esas dos claves como una **ruta de fichero** y la resuelve contra disco: con
+/// `implemented_by: María` (un nombre de persona), `knowledge_get(include:[externalReferences])`
+/// devuelve hoy `[{path:"María", exists:false}]`, o sea que trata a María como un fichero de código
+/// que falta.
+///
+/// FORMA DEL TEST — DIFERENCIAL: dos documentos gemelos, idénticos salvo el NOMBRE de la clave
+/// (`implemented_by` vs `autor_favorito`). «Ningún nombre de campo tiene semántica impuesta»
+/// significa exactamente que sus proyecciones son indistinguibles módulo ese nombre. Hoy difieren
+/// (uno trae `externalReferences` poblado, el otro vacío) ⇒ ROJO. La formulación es robusta frente a
+/// cómo se implemente la retirada: da igual que la opción `externalReferences` pase a rechazarse o a
+/// no existir, mientras los gemelos se traten igual.
+#[test]
+fn claves_de_frontmatter_sin_semantica_impuesta() {
+    let dir = tempfile::tempdir().unwrap();
+    // `referenceRoots` configurado: el escenario en el que la maquinaria de refs externas está más
+    // «viva» posible, para que su retirada no pueda pasar por casualidad.
+    write(
+        dir.path(),
+        ".lodestar/config.yaml",
+        "workspace:\n  referenceRoots: [src]\n",
+    );
+    write(dir.path(), "src/lib.rs", "// código del proyecto\n");
+    write(
+        dir.path(),
+        "docs/con-clave-privilegiada.md",
+        "---\nimplemented_by: María\n---\n\n# Ficha\n\ncuerpo.\n",
+    );
+    write(
+        dir.path(),
+        "docs/con-clave-cualquiera.md",
+        "---\nautor_favorito: María\n---\n\n# Ficha\n\ncuerpo.\n",
+    );
+
+    let include = serde_json::json!([
+        "frontmatter",
+        "body",
+        "outgoingLinks",
+        "backlinks",
+        "diagnostics",
+        "externalReferences"
+    ]);
+    let lineas = [
+        linea_call(
+            1,
+            "knowledge_check",
+            serde_json::json!({ "scope": { "kind": "workspace" } }),
+        ),
+        linea_call(
+            2,
+            "knowledge_get",
+            serde_json::json!({ "ref": { "path": "docs/con-clave-privilegiada.md" }, "include": include }),
+        ),
+        linea_call(
+            3,
+            "knowledge_get",
+            serde_json::json!({ "ref": { "path": "docs/con-clave-cualquiera.md" }, "include": include }),
+        ),
+    ];
+    let refs: Vec<&str> = lineas.iter().map(String::as_str).collect();
+    let resp = roundtrip(dir.path(), &refs, lineas.len());
+
+    // --- mitad literal del criterio: auditar no emite NINGÚN diagnóstico ------------------------
+    let diags = check_diagnostics(&resp[0]);
+    assert!(
+        diags.is_empty(),
+        "un documento con `implemented_by: María` (un nombre de persona, no una ruta) no puede \
+         producir diagnóstico alguno: ningún nombre de campo tiene semántica impuesta. \
+         Diagnósticos: {diags:?}"
+    );
+
+    // --- la mitad que muerde: los gemelos son indistinguibles módulo el nombre de la clave ------
+    let privilegiada =
+        documento_normalizado(&resp[1], "docs/con-clave-privilegiada.md", "implemented_by");
+    let cualquiera =
+        documento_normalizado(&resp[2], "docs/con-clave-cualquiera.md", "autor_favorito");
+    assert_eq!(
+        privilegiada, cualquiera,
+        "`implemented_by` debe ser metadata del usuario como `autor_favorito`: sus proyecciones \
+         tienen que ser idénticas módulo el nombre de la clave. Hoy no lo son porque Lodestar \
+         interpreta el valor de `implemented_by` como una ruta y lo resuelve contra disco"
+    );
+
+    // Guarda anti-vacua: la comparación de arriba solo significa algo si el frontmatter del usuario
+    // viajó de verdad (dos `document` vacíos también serían iguales).
+    assert_eq!(
+        resp[1]["result"]["structuredContent"]["document"]["frontmatter"]["implemented_by"],
+        serde_json::Value::String("María".to_string()),
+        "el frontmatter del usuario debe viajar VERBATIM, con su clave y su valor: {resp:?}"
+    );
+}
+
+/// **E23-H12** · Criterio `external_references_retirada_del_wire`: **Dado** un `knowledge_get`,
+/// **Entonces** `externalReferences` no está en el enum de `include` ni en `contracts/mcp.yml`.
+///
+/// Se aseveran las TRES caras de la retirada, porque cada una se puede incumplir por separado:
+///   1. el **schema declarado** a los clientes (`tools/list` → `inputSchema` de `knowledge_get`),
+///      que es lo que un agente lee para saber qué puede pedir;
+///   2. el **contrato** `contracts/mcp.yml`, la spec de la frontera. Se compara contra el YAML
+///      **parseado** (sección `tools:`), no contra el texto crudo: los comentarios `#` del fichero
+///      son memoria histórica de la migración y documentar ahí la retirada debe seguir siendo
+///      legítimo — lo que no puede sobrevivir es la superficie declarada;
+///   3. el **comportamiento**: pedir el campo retirado no puede resucitarlo en la respuesta. Sin
+///      esto, quitarlo del enum y dejar el código vivo pasaría por «hecho» y el wire seguiría
+///      devolviendo un campo indocumentado.
+#[test]
+fn external_references_retirada_del_wire() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        ".lodestar/config.yaml",
+        "workspace:\n  referenceRoots: [src]\n",
+    );
+    write(dir.path(), "src/existe.rs", "fn main() {}\n");
+    write(
+        dir.path(),
+        "tarea.md",
+        "---\nimplemented_by:\n  - src/existe.rs\n---\n\n# Tarea\n\ncuerpo.\n",
+    );
+
+    let resp = roundtrip(
+        dir.path(),
+        &[
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#,
+            &linea_call(
+                2,
+                "knowledge_get",
+                serde_json::json!({
+                    "ref": { "path": "tarea.md" },
+                    "include": ["frontmatter", "externalReferences"]
+                }),
+            ),
+        ],
+        2,
+    );
+
+    // --- 1. el enum de `include` que se le declara al cliente ------------------------------------
+    let tools = resp[0]["result"]["tools"]
+        .as_array()
+        .expect("tools/list devuelve un array");
+    let get = tools
+        .iter()
+        .find(|t| t["name"] == "knowledge_get")
+        .unwrap_or_else(|| panic!("`knowledge_get` debe seguir en el catálogo: {tools:?}"));
+    let valores: Vec<String> = get["inputSchema"]["properties"]["include"]["items"]["enum"]
+        .as_array()
+        .unwrap_or_else(|| panic!("`include` debe declarar su enum de valores: {get}"))
+        .iter()
+        .filter_map(|v| v.as_str().map(String::from))
+        .collect();
+    assert!(
+        !valores.iter().any(|v| v == "externalReferences"),
+        "`externalReferences` no puede seguir en el enum de `include` de `knowledge_get`: sin \
+         `implemented_by`/`verified_by` no tiene fuente, y una opción que siempre devolvería vacío \
+         es el patrón que E23 salda. Enum: {valores:?}"
+    );
+    // Guarda anti-vacua: el enum sigue existiendo y con sus valores vivos.
+    for vivo in [
+        "frontmatter",
+        "body",
+        "outgoingLinks",
+        "backlinks",
+        "diagnostics",
+    ] {
+        assert!(
+            valores.iter().any(|v| v == vivo),
+            "el enum de `include` debe conservar «{vivo}»: {valores:?}"
+        );
+    }
+
+    // --- 2. el contrato de la frontera -----------------------------------------------------------
+    let contrato = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../contracts/mcp.yml");
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        &std::fs::read_to_string(&contrato)
+            .unwrap_or_else(|e| panic!("no se pudo leer {}: {e}", contrato.display())),
+    )
+    .expect("`contracts/mcp.yml` debe ser YAML válido");
+    let superficie = serde_yaml::to_string(&yaml["tools"]).unwrap();
+    assert!(
+        !superficie.contains("externalReferences"),
+        "la sección `tools:` de `contracts/mcp.yml` no puede seguir declarando `externalReferences` \
+         en `knowledge_get`"
+    );
+    // Guarda anti-vacua: se está mirando la sección correcta y con contenido.
+    assert!(
+        superficie.contains("knowledge_get") && superficie.contains("outgoingLinks"),
+        "el test debe estar leyendo la superficie real de `contracts/mcp.yml`"
+    );
+
+    // --- 3. el comportamiento: pedirlo no lo resucita --------------------------------------------
+    let documento = &resp[1]["result"]["structuredContent"]["document"];
+    assert!(
+        documento.get("externalReferences").is_none(),
+        "pedir el campo retirado no puede hacer que reaparezca en la respuesta: {documento}"
+    );
+    assert!(
+        documento["frontmatter"]["implemented_by"].is_array(),
+        "guarda anti-vacua: el documento se sirvió y su frontmatter viajó tal cual (`implemented_by` \
+         es hoy una lista más de metadata del usuario): {documento}"
+    );
+}
+
+/// **E23-H12** · Regresión de SEGURIDAD migrada desde `ref_externa_traversal`
+/// (`crates/lodestar-workspace/tests/reference_roots.rs`, hallada por un juez ciego): `knowledge_get`
+/// **no puede ser un oráculo de existencia de ficheros arbitrarios del host**.
+///
+/// El vector original era `implemented_by: [/etc/hosts]` / `verified_by: [../secreto.txt]`: si
+/// Lodestar resuelve contra disco una cadena cruda del frontmatter con un `join` ingenuo, un agente
+/// puede preguntar por cualquier ruta del sistema y leer la respuesta `exists:true/false`. E23-H12
+/// retira la resolución entera, así que el contrato se ENDURECE: antes se prohibía `exists:true`,
+/// ahora se prohíbe **cualquier** resolución.
+///
+/// El escenario es determinista con independencia del entorno: el workspace vive en un
+/// subdirectorio y el `secreto.txt` está en su PADRE, fuera de él (con un `root.join` crudo,
+/// `../secreto.txt` alcanza un fichero REAL).
+///
+/// Las claves siguen viajando como metadata —`frontmatter` las ecoa verbatim, que es justo el
+/// punto: son datos del usuario, no instrucciones para el motor—; lo que no puede viajar es su
+/// resolución.
+#[test]
+fn frontmatter_no_es_oraculo_de_ficheros_del_host() {
+    let base = tempfile::tempdir().unwrap();
+    let root = base.path().join("workspace");
+    std::fs::create_dir_all(&root).unwrap();
+    // El "secreto" vive FUERA del workspace, en el directorio padre.
+    std::fs::write(base.path().join("secreto.txt"), "datos sensibles\n").unwrap();
+
+    write(
+        &root,
+        ".lodestar/config.yaml",
+        "workspace:\n  referenceRoots: [src]\n",
+    );
+    write(
+        &root,
+        "ficha.md",
+        "---\nimplemented_by:\n  - /etc/hosts\nverified_by:\n  - ../secreto.txt\n---\n\n# Ficha\n\ncuerpo.\n",
+    );
+
+    let resp = roundtrip(
+        &root,
+        &[&linea_call(
+            1,
+            "knowledge_get",
+            serde_json::json!({
+                "ref": { "path": "ficha.md" },
+                "include": ["frontmatter", "body", "diagnostics", "externalReferences"]
+            }),
+        )],
+        1,
+    );
+
+    let documento = &resp[0]["result"]["structuredContent"]["document"];
+    let texto = documento.to_string();
+    assert!(
+        documento.get("externalReferences").is_none(),
+        "ninguna resolución de rutas del frontmatter puede viajar en la respuesta: {documento}"
+    );
+    assert!(
+        !texto.contains("exists"),
+        "la respuesta no puede llevar veredictos de existencia de ficheros del host (oráculo, \
+         invariante #6): {documento}"
+    );
+    assert!(
+        !texto.contains("datos sensibles"),
+        "jamás puede viajar el CONTENIDO de un fichero de fuera del workspace: {documento}"
+    );
+    // Las claves son metadata del usuario y viajan como tal (guarda anti-vacua: el documento se
+    // sirvió de verdad).
+    assert_eq!(
+        documento["frontmatter"]["verified_by"][0],
+        serde_json::Value::String("../secreto.txt".to_string()),
+        "el frontmatter se ecoa verbatim: son datos del usuario, no instrucciones para el motor: \
+         {documento}"
+    );
+}
+
+/// **E23-H12** · Guarda del OTRO lado del criterio: hacer perezoso el ajuste del `.gitignore` no es
+/// lo mismo que retirarlo. **Dado** un proyecto cuyo `.gitignore` no menciona a lodestar, **Cuando**
+/// se ejerce un camino de ESCRITURA (`change_plan` → `change_apply`), **Entonces** el bloque
+/// gestionado aparece y el contenido propio del usuario se conserva.
+///
+/// Sin esto, «que abrir no escriba» se podría satisfacer borrando `ensure_gitignore`, y el proyecto
+/// acabaría versionando `.lodestar/index.db` (una base SQLite derivada) y `.lodestar/runtime/`
+/// (planes, recibos y staging), que es el problema que aquel ajuste resolvía.
+///
+/// ## Cada chokepoint por separado (corrección de un hallazgo de juez ciego)
+///
+/// La versión anterior de este test comprobaba el `.gitignore` tras `change_plan` y **luego** tras
+/// `change_apply`, sin restaurarlo entre medias: cuando llegaba a la segunda comprobación el bloque
+/// ya estaba puesto por `persist_plan`, así que la segunda no podía distinguir nada (borrar el
+/// ajuste de `acquire_lock` o el de `try_append_audit` dejaba la suite entera en verde). Ahora el
+/// `.gitignore` se **restaura a su estado original entre fase y fase**, de modo que cada fase solo
+/// puede pasar si el chokepoint que ejerce hace el ajuste por sí mismo:
+///
+///   1. `change_plan` → `persist_plan`, que persiste el plan bajo `.lodestar/runtime/plans/` **sin**
+///      tomar el lock.
+///   2. `change_apply` con un `changeSetId` INEXISTENTE → falla en el paso 1 (plan no encontrado),
+///      o sea que no llega ni a `acquire_lock` ni a `persist_plan`… pero **audita igual** (cada
+///      intento, con éxito o sin él, anexa a `.lodestar/runtime/audit.jsonl`). Es el único camino de
+///      la superficie que ejerce `try_append_audit` en solitario.
+///   3. `change_apply` real: el camino completo end-to-end (lock + publicación + auditoría), que es
+///      la propiedad que ve el usuario. Esta fase **no discrimina** entre `acquire_lock` y
+///      `try_append_audit` —el segundo corre siempre al final del primero— y no pretende hacerlo:
+///      `acquire_lock` se aísla donde sí se puede, en `workspace.rs::lock_ajusta_el_gitignore`
+///      (crate sin auditoría). `enable_cache` lo cubren `gitignore_parte_lodestar` y
+///      `adopcion_ajusta_gitignore`.
+///
+/// NO es fase roja: es regresión sobre la implementación de esta historia.
+#[test]
+fn escribir_si_ajusta_el_gitignore() {
+    let dir = tempfile::tempdir().unwrap();
+    /// El `.gitignore` del usuario, sin rastro de lodestar: el estado de partida de cada fase.
+    const GITIGNORE_USUARIO: &str = "target/\n";
+    write(
+        dir.path(),
+        "nota.md",
+        "---\nestado: borrador\n---\n\n# Nota\n",
+    );
+
+    /// Las entradas que el bloque gestionado garantiza (`workspace/src/gitignore.rs`).
+    const ENTRADAS: [&str; 2] = [".lodestar/index.db", ".lodestar/runtime/"];
+    // Devuelve el `.gitignore` al estado del usuario: sin esto, una fase heredaría el ajuste de la
+    // anterior y pasaría sin ejercer su propio chokepoint (el defecto que halló el juez).
+    let restaura = || {
+        write(dir.path(), ".gitignore", GITIGNORE_USUARIO);
+    };
+    let comprueba = |momento: &str| {
+        let gi = std::fs::read_to_string(dir.path().join(".gitignore"))
+            .unwrap_or_else(|e| panic!("{momento}: el `.gitignore` debe existir: {e}"));
+        assert_ne!(
+            gi, GITIGNORE_USUARIO,
+            "{momento}: el `.gitignore` sigue exactamente como lo dejó el usuario, así que este \
+             camino de escritura NO ajustó nada"
+        );
+        for entrada in ENTRADAS {
+            assert!(
+                gi.lines().any(|l| l.trim() == entrada),
+                "{momento}: el `.gitignore` debe ignorar «{entrada}» (la cache y el runtime son \
+                 derivados y desechables: versionarlos es el defecto que este ajuste evita). \
+                 Era:\n{gi}"
+            );
+        }
+        assert!(
+            gi.lines().any(|l| l.trim() == "target/"),
+            "{momento}: el ajuste debe preservar el `.gitignore` propio del usuario. Era:\n{gi}"
+        );
+        assert!(
+            !gi.lines().any(|l| l.trim() == ".lodestar/config.yaml"),
+            "{momento}: la config canónica NO se ignora (va versionada). Era:\n{gi}"
+        );
+    };
+
+    // (1) `persist_plan` aislado: `change_plan` persiste el plan sin tomar el lock ni auditar.
+    restaura();
+    let ops = serde_json::json!([
+        { "op": "patch_frontmatter", "ref": { "path": "nota.md" }, "patch": { "estado": "vigente" } }
+    ]);
+    let plan = roundtrip(
+        dir.path(),
+        &[change_plan_line(None, ops, policy_permisiva()).as_str()],
+        1,
+    );
+    let id = plan_change_set_id(&plan[0]);
+    comprueba("tras change_plan (persist_plan)");
+
+    // (2) `try_append_audit` aislado: un apply de un plan que NO existe aborta antes de tocar el
+    // lock, pero el intento se audita igual — y auditar hace nacer runtime desechable.
+    restaura();
+    let fallido = roundtrip(
+        dir.path(),
+        &[change_apply_line("changeset:no-existe", None).as_str()],
+        1,
+    );
+    assert_eq!(
+        fallido[0]["result"]["isError"],
+        serde_json::Value::Bool(true),
+        "guarda: el apply de un plan inexistente debe FALLAR (si se ejecutara, la fase dejaría de \
+         aislar la auditoría): {fallido:?}"
+    );
+    assert!(
+        dir.path().join(".lodestar/runtime/audit.jsonl").is_file(),
+        "guarda: el intento fallido tiene que haber auditado de verdad; si no hay `audit.jsonl`, \
+         esta fase no está ejerciendo `try_append_audit`"
+    );
+    comprueba("tras un change_apply fallido (try_append_audit)");
+
+    // (3) El camino completo, tal y como lo vive el usuario: lock + publicación + auditoría.
+    restaura();
+    let applied = roundtrip(dir.path(), &[change_apply_line(&id, None).as_str()], 1);
+    assert_eq!(
+        apply_sc(&applied[0])["applied"],
+        serde_json::Value::Bool(true),
+        "guarda de no vacuidad: el apply tiene que haberse ejecutado de verdad: {applied:?}"
+    );
+    comprueba("tras change_apply");
 }

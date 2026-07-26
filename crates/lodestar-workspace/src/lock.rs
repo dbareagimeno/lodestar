@@ -62,6 +62,10 @@ impl Workspace {
     /// Crea `.lodestar/runtime/` si falta. El [`WorkspaceLock`] devuelto libera el lock al
     /// dropearse (RAII), incluso en un `panic`.
     ///
+    /// Es uno de los cuatro chokepoints de escritura de E23-H12: tomar el lock es la puerta de
+    /// `change_apply`/`change_revert`, así que aquí se ajusta el `.gitignore` gestionado
+    /// ([`Workspace::ensure_managed_gitignore`]) — abrir el workspace ya no lo hace.
+    ///
     /// # Errores
     /// - [`WorkspaceError::WriteConflict`] si el lock ya está tomado (el fichero ya existe).
     /// - [`WorkspaceError::Io`] si falla la creación del directorio runtime o la escritura del
@@ -69,8 +73,13 @@ impl Workspace {
     pub fn acquire_lock(&self) -> Result<WorkspaceLock, WorkspaceError> {
         let path = self.lock_path();
 
-        // El scaffold runtime se crea al abrir el workspace, pero garantízalo por si el directorio se
-        // borró en caliente (checkout limpio, `rm -rf .lodestar/runtime`, …).
+        // Se va a escribir de verdad: la cache y el runtime que nacerán de aquí no deben acabar
+        // versionados (E23-H12; idempotente byte a byte si el bloque ya está).
+        self.ensure_managed_gitignore();
+
+        // Nadie garantiza ya el directorio de runtime al abrir (E23-H12 retiró el scaffold): cada
+        // consumidor lo crea justo antes de escribir, y esto cubre además el caso de que lo borren
+        // en caliente (checkout limpio, `rm -rf .lodestar/runtime`, …).
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
