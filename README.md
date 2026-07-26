@@ -82,7 +82,7 @@ Las **10 tools** de la superficie MCP:
 
 | Tool | Qué hace |
 |---|---|
-| `workspace_status` | Config, capacidades del perfil, conformidad y recuento agregado (llámala primero). |
+| `workspace_status` | Config, capacidades del perfil, validez, recuento agregado, recuperación pendiente y recibos revertibles (llámala primero). |
 | `knowledge_search` | Localiza documentos por texto libre + `where`/`filter` (lenguaje tipado); nunca cuerpos. |
 | `knowledge_get` | Un documento con `include` selectivo (frontmatter, body, enlaces, backlinks, diagnósticos). |
 | `metadata_inspect` | Catálogo de propiedades del workspace, o inspección de un campo (tipos, valores frecuentes). |
@@ -101,13 +101,13 @@ cargo run -p lodestar-cli -- reindex            # reconstruye la cache .lodestar
 cargo run -p lodestar-cli -- migrate-from-okf --dry-run   # diagnostica convenciones OKF legadas
 ```
 
-Subcomandos: `check` · `reindex` · `migrate-from-okf`. Exit codes de `check`: `0` conforme · `1`
-hard-fail · `2` uso · `3` runtime/IO.
+Subcomandos: `check` · `reindex` · `migrate-from-okf`. Exit codes de `check` (congelados): `0` sin
+errores · `1` hard-fail · `2` uso · `3` runtime/IO.
 
 ## Build desde el código
 
 ```bash
-cargo test --workspace --locked        # la suite completa (372 tests)
+cargo test --workspace --locked        # la suite completa (437 tests)
 cargo test -p lodestar-workspace --features test-failpoints --locked   # +4 de crash-recovery
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings

@@ -323,7 +323,9 @@ pub struct WorkspaceStatus {
     pub counts: StatusCounts,
     /// Capacidades habilitadas por el perfil de arranque.
     pub capabilities: StatusCapabilities,
-    /// Estado de recuperación de transacciones (siempre `pendingTransaction: false` hasta E13).
+    /// Estado de recuperación de transacciones. **Real desde E23-H04** (`Workspace::recovery_pending`
+    /// sobre los write-ahead journals no sellados); antes era un `false` literal — ver
+    /// [`StatusRecovery::pending_transaction`].
     pub recovery: StatusRecovery,
     /// Los recibos de transacción persistidos, **del más reciente al más antiguo** (E23-H11).
     /// Vacío si no hay ninguno — nunca ausente.

@@ -55,7 +55,8 @@ sin frontmatter obligatorio.
 - **git**: el crate `lodestar-vcs` se **borra** del repo (era una capacidad dormida).
 - **Generadores e intercambio**: `lodestar init`/`index`/`tags`/`export`/`import`.
 - **El prototipo JS** como spec de comportamiento (la spec pasa a ser `docs/REFACTOR_PHASE_2.md`).
-- Terminología OKF de la API pública: `Concept`→`Document`, `Bundle`→`DocumentSet`,
+- Terminología OKF de la API pública: `Concept`→`Document`, `Bundle`→`Workspace` como **concepto**
+  (`ARCHITECTURE §20.3`) y `DocumentSet` como **tipo** del core que lo sustituye (`§20.4`),
   `Conformance`→`Validation`, `CONCEPT_NOT_FOUND`→`DOCUMENT_NOT_FOUND`.
 
 ### Añadido
@@ -63,6 +64,69 @@ sin frontmatter obligatorio.
 - **`lodestar migrate-from-okf --dry-run`**: diagnóstico de cortesía que detecta convenciones OKF
   legadas (`index.md` raíz, índices anidados, `okf_version`, índices de tags) **sin modificar ningún
   fichero**.
+
+### Cierre de la migración (E23)
+
+Épica de cierre, abierta por la revisión de la PR #17 (2026-07-25), que salda los defectos que la
+migración dejó vivos **antes** de publicar. Se recogen aquí porque v0.3.0 no llegó a publicarse sin
+ellos.
+
+**Corregido**
+
+- **Abrir un workspace ya no modifica el proyecto.** `lodestar check` y arrancar `lodestar-mcp`
+  —incluso en perfil `readonly`— reescribían el `.gitignore` y creaban `.lodestar/runtime/` antes de
+  leer nada. Ahora abrir es **hermético**: los dos efectos ocurren en los cuatro puntos que van a
+  escribir de verdad.
+- **`lodestar check` y `knowledge_check` daban veredictos contradictorios** sobre el mismo
+  workspace: la validación ignoraba la sección `validation` de la config y los diagnósticos de
+  descubrimiento.
+- **`recovery.pendingTransaction` era un `false` literal**: tras un crash, la primera tool que
+  llamaba un agente le mentía.
+- **No se podía mover una nota que enlazara a sus vecinas**: los salientes del documento movido no
+  se recalculaban y el gate lo veía como errores nuevos.
+- **`create` escribía `type: ''`** (residuo OKF) y un `title` que nadie pidió.
+- **Un lock huérfano era irrecuperable**: un proceso muerto por SIGKILL cerraba la base a la
+  escritura para siempre. Ahora se reclama por TTL + PID.
+- **NFC/NFD**: un enlace correcto tumbaba el CI en macOS. Resolución tolerante con aviso, sin
+  normalizar la ruta canónica.
+- **Corrupción real**: reescribir el cuerpo de un documento **sin frontmatter** le inyectaba
+  `---\n{}\n---`, así que mover un documento corrompía de una tacada todos sus enlazantes sin
+  frontmatter.
+
+**Añadido**
+
+- **Proyección de frontmatter en `knowledge_search`**: `include: ["frontmatter.status"]` (y
+  anidados, `frontmatter.owner.name`) devuelve esos campos en cada resultado, con sus tipos YAML
+  reales. Antes, ver el `status` de 30 resultados costaba 30 `knowledge_get`.
+- **`workspace_status` lista los recibos** (`receiptId`, `changeSetId`, `resultRevision`,
+  `changedPathCount`): perder el `receiptId` dejaba el undo inalcanzable pese a estar persistido.
+- **`metadata_inspect` explota las listas** al contar valores, así que ya se puede obtener el
+  vocabulario de tags de una base.
+- El `inputSchema` de `change_plan` declara **los 18 parámetros** que el código lee, no 4.
+
+**Retirado**
+
+- **`apply_fix`** (las ops universales quedan en **7**): sin productor de `Fix` desde E20-H03 fallaba
+  siempre, y encima devolvía `DOCUMENT_NOT_FOUND`. El lado de lectura (`fixes`,
+  `includeSuggestedFixes`) se conserva. Ver `docs/PROPUESTA_FIXES.md`.
+- **`sort` en `knowledge_search`**: se aceptaba y se ignoraba en silencio. El orden es siempre
+  determinista (score desc, path asc).
+- **`retarget` y `create_stub`** como políticas de `delete`: se aceptaban **sin ejecutarse**,
+  dejando los enlaces entrantes rotos.
+- **`implemented_by`/`verified_by`** como claves de frontmatter privilegiadas, y con ellas
+  `include:["externalReferences"]` en `knowledge_get`. Ningún nombre de campo tiene ya semántica
+  impuesta. Apuntar a código sigue siendo posible con un enlace Markdown normal.
+- **`Workspace::open_ephemeral`**: quedó idéntico a `open` cuando abrir pasó a ser hermético.
+
+**Cambiado (wire)**
+
+- `conformant` → `valid` · `requireConformantResult` → `requireValidResult` · `allowNonconformant` →
+  `allowInvalid` · `NONCONFORMANT_RESULT` → `INVALID_RESULT`; y la salida humana de `check`,
+  `CONFORME` → `VÁLIDO`. El catálogo de errores sigue teniendo 16 filas: se sustituyó una, no se
+  añadió ninguna.
+- **Las comparaciones de fecha son lexicográficas** y ahora está declarado: `serde_yaml` 0.9 no tipa
+  timestamps, así que un `2026-07-23` sin comillas es un string. Con ISO-8601 bien formado coincide
+  con el orden cronológico; con formatos mixtos, no.
 
 ## [0.2.0] - 2026-07-23
 

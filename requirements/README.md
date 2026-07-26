@@ -77,9 +77,13 @@ planes de **E12**; **E14** cierra. Ninguna historia del giro está **[BLOQUEADA]
 | **E22** — Migración y limpieza pública | 11 | `migrate-from-okf --dry-run` · docs · README · publicación incompatible · **e2e final** | [epica-22-migracion-publicacion.md](epica-22-migracion-publicacion.md) |
 | **E23** — Cierre de la migración | — | Defectos hallados en la revisión de la PR #17 · puerta de CI (failpoints) · e2e de sesión larga · schema de escritura · documentos de estado | [epica-23-cierre-migracion.md](epica-23-cierre-migracion.md) |
 
-**E23 no es una fase de `§20.14`**: es la épica de **cierre**, abierta por la revisión de la PR #17
-(2026-07-25), que salda los defectos que la migración dejó vivos antes de mergear. Su bloque A no se
-dedujo leyendo código: se reprodujo ejecutando los binarios.
+**E23 no fue una fase de `§20.14`**: fue la épica de **cierre**, abierta por la revisión de la PR #17
+(2026-07-25) y **completada el 2026-07-26**, que saldó los defectos que la migración dejó vivos antes
+de mergear. Su bloque A no se dedujo leyendo código: se reprodujo ejecutando los binarios — y esa
+resultó ser su lección, porque **cinco de los defectos que cerró no estaban en la revisión inicial**:
+aparecieron implementando, todos en código ya publicado y verde. Dos de ellos (la cobertura vacua de
+un chokepoint y un GC que llevaba tres épicas juzgando con los valores por defecto) eran **tests que
+pasaban por la razón equivocada**.
 
 **Orden de construcción (E15–E22)**: estrictamente secuencial. **E15 es prerrequisito de todo** (sin
 descubrimiento universal no hay nada que modelar); **E16** cambia el modelo documental y arrastra los

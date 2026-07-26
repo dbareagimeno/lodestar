@@ -20,13 +20,11 @@ de diseño**; la implementación se planifica vía `/planificar` en una PR poste
 
 ---
 
-## ⚠️ ESTADO — leer antes de implementar nada
+## ✅ ESTADO — ÉPICA COMPLETA (2026-07-26)
 
-**16 de 17 historias están CERRADAS.** Esta épica se escribió entera de antemano, así que el texto de
-cada historia describe el **defecto original**, no lo que queda por hacer. Antes de tocar código,
-mira esta tabla y luego
-[`docs/E23_CONTINUACION.md`](../docs/E23_CONTINUACION.md), que lleva el estado real, el punto de
-entrada al código de lo que falta y las trampas ya pisadas.
+**Las 17 historias están CERRADAS.** Esta épica se escribió entera de antemano, así que el texto de
+cada historia describe el **defecto original**, no lo que se hizo: el relato de lo implementado está
+en la sección de E23 de [`IMPLEMENTATION_STATUS.md`](../IMPLEMENTATION_STATUS.md).
 
 | Historia | Estado |
 |---|---|
@@ -35,9 +33,13 @@ entrada al código de lo que falta y las trampas ya pisadas.
 | H10 (schema de escritura) | ✅ cerrada |
 | **H11** (descubribilidad) | ✅ cerrada |
 | **H12** (efectos secundarios) | ✅ cerrada |
-| **H13** (ledger) | 🟡 **A MEDIAS** — la mitad 1/2 está hecha |
+| **H13** (ledger) | ✅ cerrada |
 | H14 · H15 · H16 (bloques D y E) | ✅ cerradas |
 | H23 · H24 (bloque F, no planificadas) | ✅ cerradas |
+
+> El documento de traspaso `docs/E23_CONTINUACION.md` se **retiró** al cerrar la épica: era un
+> apunte de sesión, no producto. Lo que llevaba —estado real y defectos— vive ahora en
+> `IMPLEMENTATION_STATUS.md`; sus «trampas ya pisadas» eran de proceso, no de este repo.
 
 ---
 

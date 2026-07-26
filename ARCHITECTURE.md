@@ -7,6 +7,17 @@
 
 ## 1. Stack
 
+> **⚠️ TABLA DE ÉPOCA (v0.2), no el stack vigente.** Es la primera tabla del documento y describe el
+> producto **antes** del giro headless (`§19`) y de la migración a Markdown universal (`§20`).
+> Siguen siendo ciertas las filas de **Backend/Rust**, **Cache SQLite/FTS5**, **Watcher `notify`**,
+> **Fachada agentes (MCP)** y **Fachada CI (CLI)** — salvo que `rmcp` sigue sin adoptarse
+> (`DECISIONES §3`) y que la semántica ya no es «OKF» sino Markdown universal (`§20`).
+> **Han dejado de ser ciertas**: «Shell de escritorio (Tauri v2)» y «Frontend (Svelte 5 + Vite)»
+> —la UI se retiró de `main` a la rama `experimental/ui-desktop` con el giro headless (`§19.1`)— y
+> **«Versionado: git»**, que salió de la superficie en `E9-H02` y del repo en `E15-H01`: no existe
+> `lodestar-vcs`, ni `git2`, ni conformidad-por-commit (`§20.13`). Lo único que sobrevive de git es
+> `workspace/src/gitignore.rs`, que trata el `.gitignore` como texto plano.
+
 | Capa | Elección | Por qué |
 |---|---|---|
 | Shell de escritorio | **Tauri v2** | Rust es el backend de primera clase; binario ~5–10 MB; webview del SO |
@@ -29,8 +40,11 @@
    refleja esas computaciones por velocidad/FTS y se **verifica idéntica con un test de paridad**.
    Cuando podrían discrepar, gana el core; `lodestar check` reconcilia antes de leer.
 4. **Un solo contrato de tipos.** `Check`, `Severity`, `Analysis`, `GraphModel`, etc. se
-   definen **una vez** en `lodestar-core` y cruzan a Tauri/MCP/CLI **sin capa DTO paralela**.
-   El `.d.ts` de TypeScript se **genera** desde los tipos Rust (ts-rs/specta).
+   definen **una vez** en `lodestar-core` y cruzan a las fachadas **sin capa DTO paralela**.
+   *(La regla sigue vigente; la frase de época decía «cruzan a Tauri/MCP/CLI» y que el `.d.ts` se
+   genera con ts-rs/specta. **Ya no hay espejo TS**: desapareció al retirar la UI a
+   `experimental/ui-desktop`, y con él la nota de `DECISIONES §4`. Lo que sí se deriva de los tipos
+   Rust es el **JSON Schema** de los `outputSchema` del MCP, vía `schemars`.)*
 
 ---
 
@@ -318,7 +332,16 @@ sobre la misma fixture. Si difieren, es bug de la cache.
 
 ## 6. `lodestar-workspace` — el handle unificado
 
-Compone `lodestar-core` (puro) + `lodestar-store` + `lodestar-vcs`. Es lo que ven las fachadas. Reglas:
+> **Las dos REGLAS de abajo siguen vigentes** (único watcher/único escritor —invariante #5— y
+> `WorkspaceError` unificado); el **boceto de API** que las sigue es de v0.2 y se lee como
+> **historia**, no como firma actual: `lodestar-vcs` y todos los métodos git se **borraron** en
+> `E15-H01` (§20.13), `generate_index`/`generate_tag_indexes` en `E15-H02` y `export` en `E15-H03`,
+> `BundleSnapshot` es hoy `WorkspaceSnapshot` y `Bundle` es `DocumentSet` (§20.3/§20.4), y
+> `open_ephemeral` se **retiró en `E23-H12`**: `open` ya no escribe nada en el proyecto ajeno
+> (ni `.gitignore` ni `.lodestar/runtime/`), así que abrir es hermético por defecto y el modo dejó
+> de ser un modo. La superficie real vive en `crates/lodestar-workspace/src/lib.rs`.
+
+Compone `lodestar-core` (puro) + `lodestar-store`. Es lo que ven las fachadas. Reglas:
 
 - **Un solo watcher por proceso** que posee el **único escritor** de SQLite. Los comandos
   **nunca** escriben la cache directamente: escriben el `.md` (atómico temp+rename) y dejan que el
@@ -330,7 +353,8 @@ Compone `lodestar-core` (puro) + `lodestar-store` + `lodestar-vcs`. Es lo que ve
 ```rust
 impl Workspace {
   pub fn open(root: &Path) -> Result<Self, WorkspaceError>;   // abre/crea cache, arranca watcher, Vcs::discover
-  pub fn open_ephemeral(root: &Path) -> Result<Self, _>;      // sin cache (CLI hermético)
+  // `open_ephemeral` (sin cache, «CLI hermético») se RETIRÓ en E23-H12: `open` dejó de tener
+  // efectos secundarios sobre el proyecto, así que quedó byte a byte igual que él.
   pub fn subscribe(&self) -> crossbeam::Receiver<IndexEvent>;
   pub fn snapshot(&self) -> BundleSnapshot;                    // files + analysis + graph, todo junto
   // delega en core para semántica; aplica Mutations por el único camino de escritura
@@ -481,7 +505,7 @@ como cualquier escritor externo. `commit`/`restore`/`switch_branch`/`merge`/`ini
 | 3 | `Check`/`Severity`/`CheckCode` triplicados con nombres y `Ord` distintos | **Una definición** en `lodestar-core::types`. `Check {level, code, msg, targets}`; `Severity` ordenada `Pass<Info<Warn<Err` (`.max()`=peor) en minúsculas; `CheckCode` con `#[serde(rename="OKF-…")]`. Borrar duplicados. |
 | 4 | Bug del gate: `Severity{Err,…}` + `Ord` derivado → `.max()` da `Pass` → CI nunca falla | Orden corregido (Err máximo) **o** `hard_fail = #ficheros con algún Err` (conteo). Test: 1 Err + 1 Pass cuenta como hard_fail. |
 | 5 | `Analysis` con `out:Vec<Link>` vs `Vec<RelPath>`, `inn` vs `backlinks`, `checks` vs `per_file` | Congelado: `out` = strings, `inn`, `per_file`, camelCase en wire. Metadata de link aparte. |
-| 6 | ¿Capa DTO paralela (CheckDto/AnalysisDto)? | **No.** Un solo esquema de wire; el `.d.ts` se genera desde Rust. Se borra la DTO duplicada de Tauri. |
+| 6 | ¿Capa DTO paralela (CheckDto/AnalysisDto)? | **No.** Un solo esquema de wire. *(La regla sigue vigente; lo de época es el `.d.ts` generado desde Rust y la DTO de Tauri: no hay espejo TS desde que la UI se fue a `experimental/ui-desktop`. Lo que se deriva hoy es el JSON Schema de los `outputSchema` vía `schemars`.)* |
 | 7 | Nombres de evento/comando divergentes (`bundle:changed` vs `bundle://changed`, `query` vs `query_bundle`…) | Registro de constantes compartido + `ipc.ts` generado + smoke test que abre bundle, edita y asserta snapshot poblado. |
 | 8 | Doble escritor de SQLite (comando + watcher) | **Un watcher = único escritor.** Comandos solo escriben el `.md`. |
 | 9 | `RelPath` newtype vs `type RelPath = String` | Newtype validado en todas partes (es el chokepoint de path-traversal). |
@@ -511,6 +535,29 @@ Objetivos explícitos (gate de bench con una fixture sintética de 10k concepts)
 ---
 
 ## 12. Concerns transversales (con dueño asignado)
+
+> **⚠️ TABLA MAYORITARIAMENTE DE ÉPOCA (v0.2).** `CLAUDE.md` la cita junto a `§10` como autoridad
+> para resolver contradicciones ya zanjadas, así que conviene saber qué queda en pie. Se escribió
+> para un producto con GUI, git y OKF, y el giro headless (`§19`) más la migración a Markdown
+> universal (`§20`) se llevaron por delante la mayoría de sus filas.
+>
+> **Siguen vigentes**: *Errores* (taxonomía y código estable cruzando `CoreError`→`ErrorCode`→exit
+> code; la supervisión del watcher), *Un bundle por proceso* (el lockfile existe, y `E23-H23` lo hizo
+> reclamable por TTL+PID), y la parte de *Seguridad* sobre escapado de FTS5 y path-traversal
+> (`RelPath`, invariante #6).
+>
+> **De época, NO vigentes**: *Migración del prototipo* (`lodestar import` se borró en `E15-H03`, y no
+> hay `git init` que hacer), *Versionado OKF* (`okf_version` dejó de tener semántica en `§20`),
+> *Packaging* en su parte Tauri, *Testing/paridad* en sus partes de test diferencial (retirado en
+> `E15-H04`), store Svelte y e2e de Tauri, *First-run* (`lodestar init` retirado en `E15-H03`; no se
+> hace scaffold de nada), y **las tres filas de git** —*Sincronización/remoto*, *Paridad con `git`
+> CLI* y el shell-out de *Seguridad*—, porque `lodestar-vcs` y `git2` **se borraron del repo** en
+> `E15-H01` (`§20.13`).
+>
+> **Corregida por historia posterior**: la fila *Config* dice que la configuración por bundle es
+> `lodestar.toml`; es **`.lodestar/config.yaml`** desde `E15-H08`, y es **opcional** — un directorio
+> con `.md` sueltos y sin `.lodestar/` es un workspace válido (`§20.1`). Un lector que siga esta fila
+> buscará un fichero que no existe.
 
 | Tema | Decisión |
 |---|---|
@@ -801,11 +848,15 @@ Se congelan en `lodestar-core::types` (salvo el envelope, que va en `lodestar-ap
 - `NormalizedOperation` — enum de las 11 ops resueltas a escrituras (`create`/`patch_frontmatter`/
   `replace_body`/`edit_section`/`replace_text`/`move`/`delete`/`add_relation`/`remove_relation`/
   `transition_status`/`apply_fix`); reutiliza `FrontmatterPatch` (merge-patch RFC 7386, null-borra).
+  **Hoy son SIETE** (§20.11): `add_relation`/`remove_relation`/`transition_status` cayeron con el
+  modelo universal (`E21-H01`) y `apply_fix` en `E23-H11` (sin productor de `Fix` desde que
+  `E20-H03` retiró `core::schema`, fallaba siempre). Las 11 de esta línea son el diseño de época.
 - `RiskAssessment { level, reasons }` — lógica pura nueva alimentada por backlinks/blast-radius.
 - `SemanticDiff` — **reutiliza `OkfDiff`** (`core::diff`, port de `diffSnap`), ampliado con
   `diagnosticsIntroduced`/`diagnosticsResolved`.
-- `ValidationReport { conformant, summary{errors,warnings,info}, diagnostics: Vec<Check> }` — sobre
-  `Analysis.hard_fail`/`warn_count`.
+- `ValidationReport { valid, summary{errors,warnings,info}, diagnostics: Vec<Check> }` — sobre
+  `Analysis.hard_fail`/`warn_count`. (El campo se llamaba `conformant`; `E23-H14` cerró el adjetivo
+  de la pareja `Conformance / Conformant` de §20.3, igual que `NONCONFORMANT_RESULT` abajo.)
 - `ChangeReceipt { id, change_set_id, previous_revision, result_revision, changed_paths, semantic_diff }`.
 - **Códigos de error** (§13 de REFACTOR): enum estable en `core::types` (patrón `CheckCode`, wire por
   `#[serde(rename)]`): `WORKSPACE_NOT_FOUND`, `WORKSPACE_RECOVERY_REQUIRED`, `CONCEPT_NOT_FOUND`,

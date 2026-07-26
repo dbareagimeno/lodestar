@@ -1,7 +1,12 @@
 //! El **contrato de tipos**, definido UNA sola vez (`ARCHITECTURE.md §4.1` y `§4.4`).
 //!
-//! Todas las fachadas hacen `use` de estos tipos; no hay capa DTO paralela (principio #4).
-//! El `.d.ts` de TypeScript se genera desde aquí (ts-rs/specta) en E0-H04/E6-H03.
+//! Las **dos** fachadas (`lodestar-cli` y `lodestar-mcp`) hacen `use` de estos tipos; no hay capa
+//! DTO paralela (principio #4). **Ya no hay espejo TypeScript que sincronizar**: el `.d.ts`
+//! generado con ts-rs/specta (E0-H04/E6-H03) existía para la UI de escritorio, que se retiró de
+//! `main` a la rama `experimental/ui-desktop` con el giro headless (`§19.1`) llevándose consigo
+//! `frontend/src/lib/ipc/types.ts` — y con ello `DECISIONES.md §4`, hoy obsoleta. Lo que sí se
+//! deriva desde aquí es el **JSON Schema** del `outputSchema` de las tools MCP, vía la feature
+//! `schemars` (ver la macro `schema_derive!` de abajo).
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -1854,15 +1859,21 @@ pub struct FieldInspection {
     /// Tipos observados y su conteo ([`ValueType::of`] de cada valor). Wire: objeto
     /// `{tipo-en-minúscula: conteo}`.
     pub inferred_types: BTreeMap<ValueType, usize>,
-    /// Los valores **escalares** más frecuentes con su conteo, en orden **determinista**: por conteo
-    /// descendente y, a igual conteo, por el texto del valor ascendente. Un valor lista u objeto
-    /// cuenta en `present_in`/`inferred_types` pero **no** aparece aquí (`§Fase 6`: solo escalares).
+    /// El **vocabulario escalar** de la propiedad con su conteo, en orden **determinista**: por
+    /// conteo descendente y, a igual conteo, por el texto del valor ascendente.
+    ///
+    /// Qué aporta cada valor observado (verdad única: [`crate::metadata::inspect_field`]): un
+    /// escalar aporta **su propio valor**; una **lista aporta cada uno de sus elementos escalares**
+    /// (E23-H11) —así un `tags: [a, b]` sí rinde vocabulario—, sin recursión (un elemento que a su
+    /// vez sea lista u objeto se ignora); un **mapa no aporta nada** aquí (cuenta en
+    /// `present_in`/`inferred_types`, y sus hojas ya son campos propios del catálogo con su field
+    /// path). Un `null` presente es un escalar y **sí** aparece.
     pub values: Vec<ValueCount>,
 }
 }
 
 schema_derive! {
-/// Un valor escalar observado y en cuántos documentos aparece (`§Fase 6`, `{value, count}`).
+/// Un valor escalar observado y **cuántas veces se ha observado** (`§Fase 6`, `{value, count}`).
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ValueCount {
@@ -1870,7 +1881,11 @@ pub struct ValueCount {
     /// son valores distintos, con conteos distintos). En el wire conserva su tipo JSON natural.
     #[cfg_attr(feature = "schemars", schemars(with = "serde_json::Value"))]
     pub value: serde_yaml::Value,
-    /// Cuántos documentos tienen exactamente ese valor en la propiedad.
+    /// Cuántas **observaciones** de exactamente ese valor hay en la propiedad — **no** cuántos
+    /// documentos (E23-H11). Un documento con `tags: [a, a]` aporta **2** al conteo de `a`, y la
+    /// suma de los `count` de [`FieldInspection::values`] **puede superar** su `present_in` en un
+    /// campo multivalor. Con un campo de un solo escalar por documento ambas medidas coinciden, que
+    /// es de donde venía la confusión.
     pub count: usize,
 }
 }

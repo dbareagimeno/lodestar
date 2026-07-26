@@ -157,6 +157,102 @@ fn initialize_ecoa_version_soportada() {
     assert_eq!(resp[0]["result"]["serverInfo"]["name"], "lodestar-mcp");
 }
 
+/// E23-H13 · Guarda del texto `instructions` servido en `initialize`.
+///
+/// El `instructions` **no es documentación**: viaja por el wire y es lo primero que lee un agente,
+/// así que un nombre de operación obsoleto ahí se convierte en una llamada fallida del cliente. Y
+/// es justo el sitio donde nadie miró en toda E23: hasta esta historia decía «huérfanos» (la
+/// operación se llama `isolated` desde E16-H02, y un `orphans` hoy es `INVALID_SCHEMA`) y
+/// «conformidad» (el wire dice `valid` desde E23-H14).
+///
+/// Dos aserciones, ambas contra el binario real:
+/// 1. el texto no contiene vocabulario RETIRADO —el de v0.2 (`bundle`/`concepto`/`orphans`/
+///    `huérfanos`/`conforme`) y el que retiró la propia E23 (`sort`, `apply_fix`,
+///    `externalReferences`)—;
+/// 2. nombra EXACTAMENTE las tools que sirve `tools/list`, ni una de menos (un flujo que se salta
+///    una tool la deja invisible) ni una de más (una tool que no existe manda al agente a un
+///    `-32602`). Esto último ata el texto a la superficie viva: si un día entra o sale una tool, el
+///    test cae aquí en vez de envejecer en silencio.
+#[test]
+fn instructions_sin_vocabulario_retirado() {
+    let dir = workspace_min();
+    let resp = roundtrip(
+        dir.path(),
+        &[
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#,
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#,
+        ],
+        2,
+    );
+
+    let instructions = resp[0]["result"]["instructions"]
+        .as_str()
+        .expect("initialize sirve «instructions» (string)")
+        .to_lowercase();
+
+    // Vocabulario retirado. `huerfano` sin tilde cubre una reintroducción sin acentuar.
+    for retirado in [
+        "huérfano",
+        "huerfano",
+        "orphan",
+        "conforme",
+        "conformidad",
+        "apply_fix",
+        "externalreferences",
+        "sort",
+        "bundle",
+        "concepto",
+    ] {
+        assert!(
+            !instructions.contains(retirado),
+            "el `instructions` que ve el agente usa vocabulario RETIRADO: «{retirado}»\n\
+             (es superficie de wire, no documentación: lo que diga aquí es lo que el cliente \
+             intentará llamar)\n---\n{instructions}"
+        );
+    }
+
+    // Las tools nombradas en el texto == las tools servidas por `tools/list`.
+    let servidas: Vec<String> = resp[1]["result"]["tools"]
+        .as_array()
+        .expect("tools/list devuelve un array de tools")
+        .iter()
+        .map(|t| {
+            t["name"]
+                .as_str()
+                .expect("cada tool tiene «name»")
+                .to_string()
+        })
+        .collect();
+    assert_eq!(servidas.len(), 10, "la superficie objetivo es de 10 tools");
+    for tool in &servidas {
+        assert!(
+            instructions.contains(tool.as_str()),
+            "`{tool}` está en `tools/list` pero el `instructions` no la nombra"
+        );
+    }
+    // Ninguna tool RETIRADA sobrevive en el texto: las heredadas de E14-H06, `schema_inspect`
+    // (E20-H03) y las 3 git (E9-H01). Solo se listan los nombres que NO son subcadena de nada
+    // vivo: `query` lo es de `graph_query`, `neighborhood` es hoy una OPERACIÓN legítima de
+    // `graph_query`, y `history`/`commit` aparecen dentro de palabras corrientes.
+    for retirada in [
+        "conformance_check",
+        "find_backlinks",
+        "find_orphans",
+        "find_dangling",
+        "create_concept",
+        "update_frontmatter",
+        "generate_index",
+        "generate_tag_indexes",
+        "schema_inspect",
+        "last_conforming_commit",
+    ] {
+        assert!(
+            !instructions.contains(retirada),
+            "el `instructions` nombra la tool RETIRADA `{retirada}`: invocarla es -32602"
+        );
+    }
+}
+
 /// E9-H01 · Criterio `list_sin_tools_git`:
 /// Dado un servidor MCP arrancado, Cuando un cliente pide `tools/list`, Entonces NO aparece
 /// ninguna de las 3 tools git (`history`/`last_conforming_commit`/`commit`) en el catálogo.

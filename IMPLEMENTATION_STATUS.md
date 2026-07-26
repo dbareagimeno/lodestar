@@ -5,10 +5,10 @@
 >
 > **Resumen** (actualizado en `E23-H13`): el repo es un **motor headless de integridad semántica**
 > sobre workspaces Markdown universales (`ARCHITECTURE.md §20`, v0.3.0). Las épicas **E0–E8**
-> (fundacionales), **E9–E14** (giro headless) y **E15–E22** (migración de OKF a Markdown universal)
-> están **completas**; **E23** (cierre: defectos hallados en la revisión de la PR #17) está en curso.
+> (fundacionales), **E9–E14** (giro headless), **E15–E22** (migración de OKF a Markdown universal) y
+> **E23** (cierre: defectos hallados en la revisión de la PR #17) están **completas**.
 > Backend: `core` puro + `store` SQLite/FTS5 con paridad SQL==core + `workspace` (único escritor,
-> transaccional) + `app` (servicios de caso de uso) + las dos fachadas `cli` y `mcp`. **372 tests**
+> transaccional) + `app` (servicios de caso de uso) + las dos fachadas `cli` y `mcp`. **437 tests**
 > en verde (+4 de crash-recovery tras `--features test-failpoints`, que el CI corre desde E23-H06);
 > `clippy -D warnings` y `cargo doc -D warnings` limpios; pureza del core verificada por CI.
 >
@@ -172,19 +172,30 @@ verificación empírica; ~40 defectos corregidos con tests de regresión. Lo má
 
 ## Próximos pasos (ver [`DECISIONES.md`](DECISIONES.md))
 
-Cerrar **E23** (defectos de la revisión de la PR #17) es lo único que bloquea el merge de v0.3.0. Lo
-demás está abierto a criterio del usuario:
+**E23 está cerrada, así que nada bloquea el merge de v0.3.0.** Lo que sigue está abierto a criterio
+del usuario:
 
 1. **`DECISIONES §14`** — el store (épica E18) no tiene consumidor: ninguna tool lee de SQLite y
    `document_set()` reparsea la base entera en cada llamada. Decidir si se conecta, se acota o se
-   retira.
+   retira. Va con la deuda hermana: el walker del store **no aplica la `DiscoveryPolicy`**, así que
+   la paridad core↔store solo se sostiene bajo política por defecto — inocua mientras nadie lea el
+   store, bug real en cuanto se conecte.
 2. ~~`DECISIONES §12` (fechas) y `§13` (`Conformant → Valid`)~~ — **cerradas en E23-H14**: las
    fechas se declaran lexicográficas por escrito, y el catálogo de errores se abrió la única vez
    para completar la pareja de `§20.3`.
 3. **`docs/PROPUESTA_CLI.md`** — la CLI como gestor de KB (hoy solo es puerta de CI). Pendiente de
-   `/planificar` en una PR posterior.
+   `/planificar` en una PR posterior. Su condición de entrada dura —que existan tests de
+   concurrencia entre procesos— **ya se cumple** desde `E23-H09`.
+4. **`docs/PROPUESTA_FIXES.md`** — reactivar los arreglos sugeridos (`Fix`/`apply_fix`, la op
+   retirada en `E23-H11`). Condición de entrada: que existan productores de `Fix` que justifiquen la
+   maquinaria del `fixId` direccionable entre revisiones.
 5. **`DECISIONES §3`/`§9`** — `rmcp` oficial + resources cuando un cliente lo exija; gate de bench y
    threat model.
+
+Deuda menor registrada, con dueño futuro: `Workspace::materialize_staging` es API pública que
+escribe bajo `.lodestar/` **sin pasar por ninguno de los cuatro chokepoints** de `E23-H12`; hoy es
+inofensiva porque no tiene llamador de producción, pero si se le da uno, tiene que pasar por un
+chokepoint o convertirse en el quinto.
 
 ## Giro a motor headless de integridad semántica (E9–E14) — COMPLETO
 
@@ -582,7 +593,7 @@ superficie de producto; git queda como crate dormido) y `DECISIONES.md §0`. Des
 | **E20** Inspección y validación genéricas | ✅ Completa | `metadata_inspect` (retira `core::schema`) · política `rejectNewErrors`/`allowExistingErrors` · diagnósticos de descubrimiento cableados. |
 | **E21** Contrato MCP y transacciones genéricas | ✅ Completa | 8 operaciones universales · selecciones masivas por consulta · `move` por span · `delete` con política explícita. |
 | **E22** Migración y limpieza pública | ✅ Completa | `migrate-from-okf --dry-run` · README · v0.3.0 incompatible · e2e de la migración. |
-| **E23** Cierre de la migración | 🟡 En curso | Defectos de la revisión de la PR #17 · puerta de CI (failpoints) · e2e de sesión larga · schema de escritura · documentos. Ver [`epica-23`](requirements/epica-23-cierre-migracion.md). |
+| **E23** Cierre de la migración | ✅ Completa | Defectos de la revisión de la PR #17 · puerta de CI (failpoints) · e2e de sesión larga · schema de escritura · apertura hermética · descubribilidad · documentos. Ver [`epica-23`](requirements/epica-23-cierre-migracion.md). |
 
 ### E15 — Workspace universal
 
@@ -938,3 +949,97 @@ superficie de producto; git queda como crate dormido) y `DECISIONES.md §0`. Des
     solo `params["operations"]` (el array) y el `inputSchema` tenía `additionalProperties: false` +
     `required: ["operations"]`, así que descartaba `selection`/`operation`. Corregidos dispatch y
     schema. **Ningún test unitario lo cazó porque probaban `App`, no la frontera.**
+
+### E23 — Cierre de la migración
+
+> Épica de **cierre**, abierta por la revisión de la PR #17 (2026-07-25). No es una fase de `§20.14`:
+> salda los defectos que E15–E22 dejaron vivos antes de mergear. Su bloque A **no se dedujo leyendo
+> código: se reprodujo ejecutando los binarios**, y esa es la lección de la épica — de los defectos
+> que aparecieron, **cinco no estaban en la revisión inicial** y salieron implementando.
+
+- ✅ **E23-H06** — **El CI corre los tests de crash-recovery**. Los 4 de E13-H06 estaban tras
+  `#[cfg(feature = "test-failpoints")]` y `cargo test --workspace` **no activa features opcionales**:
+  llevaban sin ejecutarse desde E13. La garantía nuclear del motor (un crash nunca deja un `.md` a
+  medias) era verde por no correr. Ahora el CI los lanza en un step propio.
+- ✅ **E23-H01/H04** — **Una sola verdad de validación y `pendingTransaction` real**. `lodestar check`
+  y `knowledge_check` daban **veredictos contradictorios sobre el mismo workspace**: `full_analysis`
+  ignoraba la sección `validation` de la config y los diagnósticos de descubrimiento. Y
+  `recovery.pendingTransaction` era un `false` literal desde E10-H08 pese a que la detección existía
+  desde E13-H06: tras un crash, la primera tool que llamaba un agente le mentía.
+- ✅ **E23-H02/H03/H05** — **El camino de escritura deja de mentir** (cierra el bloque A). `create`
+  escribía `type: ''` (residuo OKF) y un `title` que nadie pidió; **no se podía mover una nota que
+  enlazara a sus vecinas** porque los salientes del documento movido no se recalculaban y el gate lo
+  veía como errores nuevos; y `delete` aceptaba `retarget`/`create_stub` **sin ejecutarlas**,
+  dejando los entrantes rotos — retiradas, porque ninguna tiene semántica que inventar sin más datos
+  del llamador.
+- ✅ **E23-H07/H08** — **e2e de ciclo de vida en UNA sola sesión MCP**, y `reindex` deja de no tener
+  tests. Antes cada paso del e2e levantaba un proceso, lo que **enmascaraba justo los bugs de
+  invalidación**; el ignorado (`.gitignore`/`.lodestarignore`) tampoco se probaba por ninguna fachada.
+- ✅ **E23-H09/H11 (core)** — **Bordes del motor y descubribilidad**. Concurrencia entre **procesos**,
+  lock huérfano, unicode en rutas, `patch_frontmatter` sobre YAML ilegible, `--root` inexistente. Y
+  en el core: `metadata_inspect` no daba el **vocabulario de tags** (no explotaba las listas, el caso
+  de uso número uno de una KB de notas), y `[volver](../)` tumbaba la puerta de CI.
+- ✅ **E23-H10** — **El schema de escritura deja de ser opaco**. El `inputSchema` de `change_plan`
+  declaraba 4 campos; ahora declara los **18** que el código lee. Para un producto cuyo público son
+  agentes, ese era el mayor agujero de usabilidad: el schema decía qué ops existen pero no cómo
+  invocarlas.
+- ✅ **E23-H23/H24** (bloque F, no planificado: los destapó el propio bloque B) — **Lock reclamable
+  por TTL+PID** (un proceso muerto por SIGKILL dejaba la base cerrada a la escritura **para siempre**)
+  y **NFC/NFD** (un enlace correcto tumbaba el CI en macOS, con el mismo veredicto que en Linux pero
+  acertado solo en una de las dos plataformas). Resueltos como decidió el usuario: reclamo por
+  TTL+PID, y resolución tolerante con aviso sin normalizar la ruta canónica.
+- ✅ **E23-H12** — **Abrir un workspace deja de escribir en el proyecto ajeno**. `Workspace::open`
+  llamaba a `ensure_gitignore` y `ensure_runtime_scaffold`, así que `lodestar check` y arrancar el
+  MCP —**incluso en perfil `readonly`**— reescribían el `.gitignore` del usuario y creaban
+  `.lodestar/runtime/` antes de leer nada. Los dos efectos pasan a ser **perezosos**: el scaffold se
+  retira sin sustituto (cada consumidor crea su directorio antes de escribir) y el ajuste del
+  `.gitignore` vive en `Workspace::ensure_managed_gitignore`, invocado desde los cuatro chokepoints
+  que cubren todo camino de escritura (`enable_cache`, `acquire_lock`, `persist_plan`,
+  `try_append_audit`). Con los efectos fuera, `open_ephemeral` quedaba idéntico a `open` y **se
+  retira: abrir ya es hermético**. Además se retiran `implemented_by`/`verified_by` como claves de
+  frontmatter privilegiadas —último residuo OKF con semántica impuesta, contra el invariante 3 de
+  `§20.2`— y con ellas la opción `include:["externalReferences"]` de `knowledge_get`. Cierra de paso
+  una grieta del invariante #4: `ExternalReference` era un tipo de wire definido **fuera** de
+  `core::types`.
+  - **Tres defectos que destapó el ciclo, ninguno en la revisión inicial**: `receipt_gc` dependía
+    del scaffold para plantar sus ficheros, y al arreglarlo salió que escribía su `config.yaml`
+    **después** de abrir el workspace —y la config se lee una sola vez al abrir—, así que el GC
+    llevaba **desde E13-H07 corriendo con los defaults**; como los defaults coincidían con lo
+    declarado, era indistinguible de un `gc_receipts` que ignorase la config entera, y el TTL
+    (`retainReceiptsFor`) **no lo cubría ningún test**. La cobertura de dos de los cuatro chokepoints
+    era **vacua** (el juez ciego lo demostró por mutación: borrando ambas llamadas la suite seguía
+    verde) porque el test comprobaba primero tras `change_plan`, que ya ajusta el `.gitignore` — y su
+    rustdoc afirmaba lo contrario. Y `materialize_staging` es API pública que escribe bajo
+    `.lodestar/` sin pasar por ningún chokepoint (hoy sin llamador de producción; registrada).
+  - **La superficie de ataque se cerró, no se trasladó**: el vector del test de path-traversal
+    existía porque `Workspace::external_refs` era el único punto que convertía una cadena cruda de
+    frontmatter en un `is_file()`. Ese código desaparece; la propiedad se migra endurecida a
+    `frontmatter_no_es_oraculo_de_ficheros_del_host`, que pasa de prohibir `exists:true` a prohibir
+    **cualquier** resolución.
+- ✅ **E23-H11 (resto)** — **La KB se vuelve descubrible y la superficie deja de prometer de más**.
+  `knowledge_search` acepta `include: ["frontmatter.<fieldPath>"]`: el sufijo se parsea con
+  `FieldPath::parse` y se resuelve con `ParsedFrontmatter::get`, así que los anidados salen gratis.
+  Antes ver el `status` de 30 resultados costaba **30 `knowledge_get`**. Valores YAML crudos sin
+  coerción; un campo ausente no aparece (distinto de un `null` explícito, con test que fija la
+  distinción); proyecta **solo lo pedido**. `sort` **se retira** en vez de implementarse (se aceptaba
+  y se ignoraba en silencio; volver a añadirlo es aditivo). `apply_fix` **se retira**: sin productor
+  de `Fix` desde E20-H03 fallaba siempre, y devolvía `DOCUMENT_NOT_FOUND`, mandando al agente a
+  buscar el problema donde no estaba — el lado de **lectura** (`Fix`, `Check.fixes`,
+  `includeSuggestedFixes`) se conserva, porque un array vacío no engaña. Y los **receipts se listan
+  desde `workspace_status`**, no como 11ª tool: perder el `receiptId` dejaba el undo inalcanzable
+  pese a estar persistido.
+- ✅ **E23-H13/H14/H15/H16** — **Los documentos dejan de contradecirse**. La tabla de la migración
+  decía «E15–E22 EN CURSO» **350 líneas por encima del detalle que las daba por cerradas** (era
+  criterio de aceptación literal de E22-H03, incumplido); la cabecera describía la UI Tauri y
+  subcomandos git borrados en E9-H02. `DECISIONES §12` (fechas **lexicográficas**, porque
+  `serde_yaml` 0.9 no tipa timestamps) y **§13** (`Conformant → Valid`) cerradas: §13 era el **único
+  de los 29 criterios de `REFACTOR_PHASE_2` demostrablemente incumplido**, y se saldó abriendo el
+  catálogo de 16 códigos **la única vez**, aprovechando que v0.3 ya era incompatible con v0.2. Y se
+  escribieron `docs/PROPUESTA_CLI.md` y `DECISIONES §14` (el store de E18 **entero, sin ningún
+  consumidor**) para que dos decisiones no se perdieran.
+  - **Lo que la barrida final encontró y que nadie había mirado**: el texto `instructions` que el
+    servidor sirve en `initialize` —lo primero que lee un agente, y **superficie de wire**, no
+    documentación— usaba vocabulario retirado (`huérfanos` cuando la operación es `isolated` desde
+    E16-H02, `conforme` cuando E23-H14 lo pasó a `valid`). Un agente que leyera las instrucciones y
+    probase `orphans` se comía un `INVALID_SCHEMA`.
+- **437 tests · E23 COMPLETA.** (+4 de crash-recovery tras `--features test-failpoints`.)

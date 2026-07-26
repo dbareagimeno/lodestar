@@ -7,14 +7,18 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Estado actual del repo (importante)
 
-> **🚧 TRABAJO EN CURSO — rama `refactor/markdown-universal` (PR #17), épica E23.** La migración
-> E15–E22 está cerrada, pero una revisión de la PR destapó defectos que se están saldando en la
-> **épica de cierre E23**: 14 de 17 historias hechas, quedan **H12**, la mitad de **H11** y la mitad
-> de **H13**. **Antes de tocar nada, lee [`docs/E23_CONTINUACION.md`](docs/E23_CONTINUACION.md)**:
-> lleva el estado real, el punto de entrada al código de lo que falta y las trampas ya pisadas. La
-> spec está en [`requirements/epica-23-cierre-migracion.md`](requirements/epica-23-cierre-migracion.md),
-> cuyo texto describe los defectos **originales** — el estado por historia está en su tabla de
-> cabecera.
+> **Rama `refactor/markdown-universal` (PR #17) — E15–E22 y la épica de cierre E23 están
+> COMPLETAS** (E23 cerrada el 2026-07-26; 17 de 17 historias). La revisión de la PR destapó defectos
+> reales en el camino de escritura y E23 los saldó: apertura hermética, una sola verdad de
+> validación, descubribilidad de la KB y documentos de estado que dejan de contradecirse. El detalle
+> por historia está en [`IMPLEMENTATION_STATUS.md`](IMPLEMENTATION_STATUS.md) y la spec en
+> [`requirements/epica-23-cierre-migracion.md`](requirements/epica-23-cierre-migracion.md), cuyo
+> texto describe los defectos **originales**.
+>
+> Lección de E23, por si sirve para la próxima épica: **cinco de los defectos que cerró no estaban en
+> la revisión inicial** — aparecieron implementando, todos en código ya publicado y con la suite en
+> verde. Dos eran tests que pasaban por la razón equivocada. Cuando dudes de si algo funciona,
+> **ejecútalo**: leer el código no bastó ni una sola vez.
 
 > **⚠️ ACTUALIZACIÓN (v0.3.0, `ARCHITECTURE.md §20`, épicas E15–E22): el repo migró de OKF a
 > workspaces Markdown universales.** Lodestar ya **no exige OKF**: opera sobre cualquier red de `.md`
@@ -86,7 +90,7 @@ Mapa de documentos — quién manda sobre qué:
 
 ### Build, test y lint (lo que corre el CI — `.github/workflows/ci.yml`)
 ```bash
-cargo test --workspace --locked        # 372 tests
+cargo test --workspace --locked        # 437 tests
 cargo test -p lodestar-workspace --features test-failpoints --locked   # +4 de crash-recovery
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
@@ -102,7 +106,7 @@ cargo doc --workspace --no-deps --locked   # con RUSTDOCFLAGS="-D warnings"
   `git2`/`lodestar-vcs`/`zip` (retirados en `E15-H01`/`E15-H03`).
 
 ### CLI (`cargo run -p lodestar-cli -- …`)
-- `check [--json|--sarif]` — la **puerta de CI**. Exit codes congelados: `0` conforme · `1`
+- `check [--json|--sarif]` — la **puerta de CI**. Exit codes congelados: `0` válido · `1`
   hard-fail · `2` uso · `3` runtime/IO. Juzga siempre el **working
   tree** (scope workspace); desde `E9-H02` **no** expone `--staged`/`--rev`/`--range`, y desde
   `E15-H01` no hay crate `vcs` que los soporte.

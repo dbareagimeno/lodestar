@@ -18,30 +18,44 @@ use serde_json::{json, Value};
 mod tools;
 
 /// Instrucciones del servidor (`instructions` de la respuesta `initialize`, `ARCHITECTURE.md
-/// §19.6`): orientan al agente con el **flujo recomendado de 10 pasos**, mencionando las 10 tools
-/// en el orden en que se espera usarlas. Los nombres de tool son identificadores (no se traducen);
-/// el resto va en español, el idioma del repo (E14-H03).
+/// §19.6`/`§20.1`): orientan al agente con el **flujo recomendado de 10 pasos**, mencionando las 10
+/// tools en el orden en que se espera usarlas. Los nombres de tool son identificadores (no se
+/// traducen); el resto va en español, el idioma del repo (E14-H03).
+///
+/// **Esto es superficie de WIRE, no documentación**: viaja en la respuesta de `initialize` y es lo
+/// primero que lee un agente, así que un nombre de operación o un parámetro que ya no existe aquí
+/// se convierte en una llamada fallida del cliente. E23-H13 saldó el drift acumulado
+/// (`huérfanos` → la operación se llama `isolated` desde E16-H02; `conformidad` → el wire dice
+/// `valid` desde E23-H14) y lo blindó con `tests/mcp.rs::instructions_sin_vocabulario_retirado`,
+/// que además comprueba que se nombran exactamente las tools que sirve `tools/list`.
 const SERVER_INSTRUCTIONS: &str = "\
-Motor headless de integridad semántica para agentes. Flujo recomendado en cada sesión \
-(10 pasos, en orden):
+Motor headless de integridad semántica para agentes. Opera sobre la red de documentos Markdown de \
+un proyecto cualquiera: no exige estructura previa, ningún nombre de fichero activa reglas \
+especiales, el frontmatter es YAML arbitrario tuyo y todas las rutas son relativas a la raíz.
 
-1. `workspace_status`: oriéntate primero — config activa, capacidades del perfil, conformidad y \
-recuento agregado del workspace.
-2. `knowledge_search`: localiza documentos por texto y filtros (snippets y revisión, nunca cuerpos \
-completos).
-3. `knowledge_get`: lee un documento concreto con `include` selectivo y secciones acotadas.
-4. `metadata_inspect`: descubre las convenciones de metadata de la base (campos, tipos, valores \
-frecuentes) sin necesitar un schema, antes de proponer cambios.
-5. `graph_query`: consulta el grafo (backlinks, huérfanos, vecindario, caminos) para entender el \
-contexto de un documento.
-6. `impact_analyze`: evalúa el impacto de un cambio hipotético (afectados, bloqueos, riesgo) antes \
-de proponerlo.
-7. `change_plan`: planifica el cambio SIN escribir — normaliza, simula en memoria y valida; \
-devuelve un change set con su hash determinista.
+Flujo recomendado en cada sesión (10 pasos, en orden):
+
+1. `workspace_status`: oriéntate primero — config activa, capacidades del perfil, validez y \
+recuento agregado del workspace, recuperación pendiente y los recibos disponibles para revertir.
+2. `knowledge_search`: localiza documentos por texto libre y por consulta tipada (`where`/`filter`); \
+con `include: [\"frontmatter.<campo>\"]` proyectas metadata de cada resultado sin pedir el documento \
+entero. Devuelve snippets y revisión, nunca cuerpos completos.
+3. `knowledge_get`: lee un documento concreto con `include` selectivo y secciones acotadas por \
+`headingPath`.
+4. `metadata_inspect`: descubre las convenciones de metadata de la base (qué campos existen, de qué \
+tipos y qué valores toman) sin necesitar un schema, antes de proponer cambios.
+5. `graph_query`: consulta el grafo de enlaces — operaciones `backlinks`, `outgoing`, \
+`neighborhood`, `isolated`, `dangling`, `path_between`, `cycles`, `components`.
+6. `impact_analyze`: evalúa el impacto de un cambio hipotético (afectados directos y transitivos, \
+riesgo) antes de proponerlo.
+7. `change_plan`: planifica el cambio SIN escribir — normaliza las operaciones, simula en memoria y \
+valida el resultado; devuelve un change set con su hash determinista.
 8. `change_apply`: aplica el plan calculado con todas las salvaguardas transaccionales; devuelve el \
 recibo.
-9. `knowledge_check`: audita el conocimiento tras aplicar para confirmar que sigue conforme.
-10. `change_revert`: si algo salió mal, revierte la última transacción al estado anterior.
+9. `knowledge_check`: audita el conocimiento tras aplicar para confirmar que sigue siendo \
+interpretable y que sus enlaces siguen resolviendo.
+10. `change_revert`: si algo salió mal, revierte al estado anterior la transacción del `receiptId` \
+que te dio `change_apply` (o el que listó `workspace_status`).
 
 Perfil `readonly`: solo los pasos de lectura y verificación (las tools de cambio no están \
 disponibles). Perfil `standard` (por defecto): el flujo completo.";

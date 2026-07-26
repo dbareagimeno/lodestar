@@ -89,7 +89,7 @@ pub fn list() -> Value {
     // Schema de un objeto sin parámetros.
     let empty = json!({ "type": "object", "properties": {}, "additionalProperties": false });
     json!([
-        {"name": "workspace_status", "description": "Config activa, capacidades del perfil, conformidad y recuento agregado del workspace (llámala primero en cada sesión).", "inputSchema": empty,
+        {"name": "workspace_status", "description": "Config activa, capacidades del perfil, validez y recuento agregado del workspace, recuperación pendiente y los recibos disponibles para revertir (llámala primero en cada sesión).", "inputSchema": empty,
          "outputSchema": schemas::workspace_status_schema()},
         {"name": "knowledge_search", "description": "Localiza documentos por texto libre y por el lenguaje de consulta tipado (where/filter), con snippets y paginación por cursor (nunca devuelve cuerpos).",
          "inputSchema": { "type": "object", "properties": {
