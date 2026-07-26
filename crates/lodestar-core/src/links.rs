@@ -550,8 +550,9 @@ pub fn diagnose(
                     Severity::Warn,
                     CheckCode::LinkCaseMismatch,
                     format!(
-                        "El enlace apunta a «{destino}», pero la ruta real es «{real}»: la \
-                         capitalización no es portable entre sistemas de ficheros."
+                        "El enlace apunta a «{destino}», pero la ruta real es «{real}»: coinciden \
+                         salvo capitalización o forma Unicode (NFC/NFD), y eso no es portable \
+                         entre sistemas de ficheros."
                     ),
                     vec![path.clone()],
                 )

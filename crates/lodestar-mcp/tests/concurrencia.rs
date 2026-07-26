@@ -398,57 +398,79 @@ fn lock_huerfano() {
     std::fs::create_dir_all(lock_path(raiz).parent().unwrap()).expect("crear runtime/");
     std::fs::write(lock_path(raiz), &cuerpo_huerfano).expect("plantar el lock huérfano");
 
-    // (3) Aplicar. Fail-fast: debe responder ya, no esperar. El límite es generoso a propósito
-    //     (un cuelgue real no responde NUNCA, así que basta con distinguirlo de «lento»); el
-    //     tiempo real se registra abajo, y en local es de milisegundos.
+    // (3) Aplicar. Debe responder ya, no esperar: el modelo es fail-fast y un lock huérfano no
+    //     puede convertirse en una espera. El límite es generoso a propósito (un cuelgue real no
+    //     responde NUNCA, así que basta con distinguirlo de «lento»).
     let t0 = Instant::now();
     let resp = roundtrip_con_limite(raiz, vec![linea_apply(2, &id)], 1, LIMITE_ROUNDTRIP);
     let transcurrido = t0.elapsed();
     eprintln!("[lock_huerfano] respuesta en {transcurrido:?} (pid huérfano plantado: {pid})");
 
-    let codigo = codigo_de_error(&resp[0]);
+    // (4) E23-H23: el lock de un PID MUERTO se RECLAMA, así que el apply pasa. Antes de E23-H23
+    //     esto daba `WRITE_CONFLICT` y el workspace quedaba cerrado a la escritura para siempre:
+    //     `acquire_lock` solo miraba si el fichero existía y nadie leía de vuelta el `pid` que el
+    //     propio lock guarda. Un `lodestar-mcp` muerto por SIGKILL o por el OOM killer bastaba
+    //     para dejar la base inservible hasta que un humano borrara el fichero a mano.
     assert!(
-        codigo.contains("WRITE_CONFLICT"),
-        "con el lock tomado (aunque sea por un muerto) el apply debe rechazarse con \
-         WRITE_CONFLICT, no con «{codigo}»: {resp:?}"
+        aplicado(&resp[0]),
+        "el lock de un PID inexistente debe reclamarse y el apply completarse: {resp:?}"
     );
-
-    // El documento no se tocó: un rechazo por lock ocurre ANTES de publicar.
     let en_disco = std::fs::read_to_string(raiz.join("nota.md")).expect("leer nota.md");
     assert!(
-        en_disco.contains("estado: inicial"),
-        "un apply rechazado por el lock no debe haber escrito nada: {en_disco:?}"
-    );
-
-    // (4) HALLAZGO: el lock huérfano sigue exactamente igual. Nadie lo reclama, ni siquiera
-    //     mirando el `pid` que él mismo guarda; y el error no dice qué fichero borrar.
-    let tras_el_intento =
-        std::fs::read_to_string(lock_path(raiz)).expect("el lock huérfano debe seguir en disco");
-    assert_eq!(
-        tras_el_intento, cuerpo_huerfano,
-        "el motor NO reclama el lock de un PID muerto: el fichero sobrevive byte a byte al intento \
-         fallido. Documentado como defecto conocido en la cabecera de este bloque; si algún día se \
-         implementa el reclamo (TTL o comprobación de proceso vivo), este test debe REESCRIBIRSE, \
-         no relajarse"
-    );
-
-    // (5) Control anti-vacuo + prueba de que no hay reclamo automático: borrado el lock a mano, el
-    //     MISMO plan (mismo changeSetId, mismo disco) se aplica sin tocar nada más.
-    std::fs::remove_file(lock_path(raiz)).expect("borrar el lock huérfano a mano");
-    let resp2 = roundtrip_con_limite(raiz, vec![linea_apply(3, &id)], 1, LIMITE_ROUNDTRIP);
-    assert!(
-        aplicado(&resp2[0]),
-        "borrado el lock huérfano, el MISMO plan debe aplicarse: el lock era el único \
-         discriminante (si esto fallara, el WRITE_CONFLICT de arriba podría deberse a otra cosa y \
-         el test sería vacuo): {resp2:?}"
-    );
-    let final_ = std::fs::read_to_string(raiz.join("nota.md")).expect("leer nota.md");
-    assert!(
-        final_.contains("tras-el-lock-huerfano"),
-        "el apply que sí pasó debe haber publicado el patch: {final_:?}"
+        en_disco.contains("tras-el-lock-huerfano"),
+        "el apply que reclamó el lock debe haber publicado el patch: {en_disco:?}"
     );
     assert!(
         !lock_path(raiz).exists(),
-        "el apply exitoso debe soltar su propio lock (RAII) al terminar"
+        "y debe soltar su propio lock al terminar (RAII), sin dejar el del muerto"
     );
+
+    // (5) CONTROL ANTI-VACUO, y el más importante del test: un lock de un proceso VIVO **no** se
+    //     reclama. Sin esto, «reclamar locks huérfanos» podría estar implementado como «borrar
+    //     siempre el lock», que rompería el invariante de escritor único — mucho peor que el
+    //     defecto que arregla.
+    let plan2 = roundtrip_con_limite(
+        raiz,
+        vec![linea_plan(
+            4,
+            serde_json::json!([
+                { "op": "patch_frontmatter", "ref": { "path": "nota.md" },
+                  "patch": { "estado": "no-deberia-aplicarse" } }
+            ]),
+        )],
+        1,
+        LIMITE_ROUNDTRIP,
+    );
+    let id2 = change_set_id(&plan2[0]);
+
+    // Lock de ESTE proceso (vivo por definición) y con timestamp de ahora, así que ni el criterio
+    // de PID ni el de TTL pueden reclamarlo.
+    let ahora = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let cuerpo_vivo = format!(
+        "{{\"owner\":\"vivo\",\"pid\":{},\"timestamp\":{ahora}}}\n",
+        std::process::id()
+    );
+    std::fs::write(lock_path(raiz), &cuerpo_vivo).expect("plantar el lock de un proceso vivo");
+
+    let resp2 = roundtrip_con_limite(raiz, vec![linea_apply(5, &id2)], 1, LIMITE_ROUNDTRIP);
+    let codigo = codigo_de_error(&resp2[0]);
+    assert!(
+        codigo.contains("WRITE_CONFLICT"),
+        "un lock cuyo dueño sigue VIVO no puede reclamarse: se esperaba WRITE_CONFLICT, no \
+         «{codigo}»: {resp2:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(lock_path(raiz)).expect("el lock vivo debe seguir en disco"),
+        cuerpo_vivo,
+        "el lock de un proceso vivo sobrevive byte a byte al intento"
+    );
+    let final_ = std::fs::read_to_string(raiz.join("nota.md")).expect("leer nota.md");
+    assert!(
+        !final_.contains("no-deberia-aplicarse"),
+        "y el apply rechazado no puede haber escrito nada: {final_:?}"
+    );
+    std::fs::remove_file(lock_path(raiz)).ok();
 }

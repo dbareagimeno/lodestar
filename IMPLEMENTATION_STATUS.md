@@ -19,7 +19,7 @@
 > como **historia del proyecto**; la autoridad viva es `ARCHITECTURE.md §20`.
 >
 > Lo pendiente está en [`DECISIONES.md`](DECISIONES.md): fechas en el lenguaje de consulta (§12),
-> `Valid → Valid` (§13) y el **store sin consumidor** (§14, abierto en E23-H16).
+> el **store sin consumidor** (§14, abierto en E23-H16). §12 y §13 se cerraron en E23-H14.
 
 ## Cómo correrlo
 
@@ -178,11 +178,10 @@ demás está abierto a criterio del usuario:
 1. **`DECISIONES §14`** — el store (épica E18) no tiene consumidor: ninguna tool lee de SQLite y
    `document_set()` reparsea la base entera en cada llamada. Decidir si se conecta, se acota o se
    retira.
-2. **`DECISIONES §12`** — las fechas se comparan lexicográficamente (`serde_yaml` no tipa
-   timestamps). Documentarlo o introducir un tipo fecha.
-3. **`DECISIONES §13`** — `Valid → Valid`: la mitad que falta de `§20.3`; toca el catálogo de
-   errores congelado.
-4. **`docs/PROPUESTA_CLI.md`** — la CLI como gestor de KB (hoy solo es puerta de CI). Pendiente de
+2. ~~`DECISIONES §12` (fechas) y `§13` (`Conformant → Valid`)~~ — **cerradas en E23-H14**: las
+   fechas se declaran lexicográficas por escrito, y el catálogo de errores se abrió la única vez
+   para completar la pareja de `§20.3`.
+3. **`docs/PROPUESTA_CLI.md`** — la CLI como gestor de KB (hoy solo es puerta de CI). Pendiente de
    `/planificar` en una PR posterior.
 5. **`DECISIONES §3`/`§9`** — `rmcp` oficial + resources cuando un cliente lo exija; gate de bench y
    threat model.
@@ -781,7 +780,8 @@ superficie de producto; git queda como crate dormido) y `DECISIONES.md §0`. Des
 - ⚠️ **Deuda declarada al cerrar E16**: (1) `Severity::Warn` se ha quedado **sin productor** en
   `all_checks`, así que `PlanPolicy::allowWarnings` y `gate.blockWarnings` son inalcanzables desde
   datos reales hasta que E17 traiga `LINK-CASE-MISMATCH` y E20 la política de severidades; (2) la
-  pareja `Valid → Valid` de `§20.3` está a medias — ver `DECISIONES.md §12`… perdón, **§13**;
+  pareja `Conformant → Valid` de `§20.3` está a medias — ver `DECISIONES.md` **§13** (cerrada
+  después en E23-H14);
   (3) `core::types` sigue documentando el `.d.ts` generado por ts-rs, falso desde que se retiró la UI.
 
 ### E17 — Enlaces y grafo universal
@@ -913,7 +913,7 @@ superficie de producto; git queda como crate dormido) y `DECISIONES.md §0`. Des
   `delete_document` **exige política explícita** (`§Fase 12`: no elegir en silencio).
 - ✅ **E21-H04** — **`OkfDiff` → `SnapshotDiff` + limpieza del contrato** (cierra E21). El diff de wire
   ya era `types::SemanticDiff` (E12); el de `diff.rs` pasa a `SnapshotDiff` (neutro). Contrato sin
-  vocabulario OKF en superficie activa; `DECISIONES §13` (`Valid → Valid`) documentada como
+  vocabulario OKF en superficie activa; `DECISIONES §13` (`Conformant → Valid`) documentada como
   aplazada (toca el catálogo de errores congelado).
 
 ### E22 — Migración de repos OKF y publicación

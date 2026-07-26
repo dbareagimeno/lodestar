@@ -22,6 +22,12 @@ crossbeam-channel = "0.5"
 serde_yaml = { workspace = true }
 schemars = { workspace = true, optional = true }
 
+# E23-H23: comprobar si el dueño de un lock huérfano sigue vivo (`kill(pid, 0)`). Solo en Unix; en
+# Windows el TTL hace de red. No añade código externo nuevo al árbol: `libc` ya llega
+# transitivamente por `rusqlite`/`notify`.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [features]
 default = []
 # Gatea #[derive(JsonSchema)] en `ExternalReference` (E11-H04), consumido por `lodestar-app` para

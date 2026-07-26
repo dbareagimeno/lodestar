@@ -567,6 +567,7 @@ version = "0.3.0"
 dependencies = [
  "crossbeam-channel",
  "ignore",
+ "libc",
  "lodestar-core",
  "lodestar-fixtures",
  "lodestar-store",

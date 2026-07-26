@@ -1084,31 +1084,35 @@ fn unicode_en_rutas() {
 }
 
 /// **Dado** un documento cuyo nombre está en una forma de normalización Unicode y un enlace que lo
-/// apunta en **la otra**, **Cuando** se analiza el workspace, **Entonces** el enlace **NO** resuelve:
-/// sale `LINK-TARGET-MISSING` con severidad `Err`.
+/// apunta en **la otra**, **Cuando** se analiza el workspace, **Entonces** el enlace resuelve a la
+/// ruta real y el diagnóstico es un **aviso de portabilidad** (`LINK-CASE-MISMATCH`), nunca un
+/// `LINK-TARGET-MISSING` bloqueante — E23-H23.
 ///
-/// ⚠ **HALLAZGO — este test asevera el comportamiento REAL, que en macOS es un falso positivo.**
+/// # Qué defecto cierra
 ///
-/// Lodestar compara rutas **byte a byte** (el inventario es un `BTreeMap<RelPath, _>` y
-/// `RelPath::new` no normaliza), así que `caf\u{e9}.md` (NFC, 8 bytes) y `cafe\u{301}.md` (NFD,
-/// 9 bytes) son dos rutas distintas. Consecuencias por plataforma, medidas por la sonda que este
-/// test imprime:
+/// Hasta E23-H23 Lodestar comparaba rutas **byte a byte**, así que `caf\u{e9}.md` (NFC, 8 bytes) y
+/// `cafe\u{301}.md` (NFD, 9 bytes) eran dos rutas distintas. Consecuencias por plataforma, medidas
+/// por la sonda que este test imprime:
 ///
-/// - **Linux/ext4** (bytes crudos): el fichero NFD no existe, así que el diagnóstico es **correcto**
-///   — un render de Markdown tampoco encontraría el destino.
+/// - **Linux/ext4** (bytes crudos): el fichero NFD de verdad no existe.
 /// - **macOS/APFS** (preserva la forma escrita pero compara *normalization-insensitive*): el
-///   fichero **sí se abre** con el nombre en la otra forma, así que el diagnóstico es un **falso
-///   positivo**: `LINK-TARGET-MISSING` sobre un `.md` es severidad `Err` ⇒ **tumba la puerta de
-///   CI** por un enlace que el sistema operativo y GitHub resuelven sin problema.
-/// - **macOS/HFS+** (normaliza a NFD al escribir): el caso simétrico, con el mismo resultado.
+///   fichero **sí se abre** con el nombre en la otra forma.
 ///
-/// El escenario realista no es rebuscado: basta con que el fichero lo cree un `git checkout` en
-/// macOS y el enlace lo teclee alguien en Linux, o al revés. El arreglo correcto sería normalizar
-/// (a NFC) en el chokepoint de `RelPath` —los dos lados a la vez, inventario y href—, no parchear
-/// el diagnóstico. Mientras no se decida, esta es la conducta vigente y queda fijada aquí; si
-/// alguna historia la cambia, este test debe **reescribirse**, nunca relajarse.
+/// O sea que el veredicto era idéntico en las dos plataformas pero **acertado solo en una**: en
+/// macOS, un `LINK-TARGET-MISSING` sobre un `.md` es `Err` y **tumbaba la puerta de CI** por un
+/// enlace que el sistema operativo y GitHub resuelven. El disparador no es rebuscado: basta con que
+/// el fichero lo cree un `git checkout` en macOS y el enlace lo teclee alguien en Linux, o al revés.
+///
+/// # Por qué se arregló así
+///
+/// **No** normalizando la ruta canónica: en Linux el fichero está literalmente en NFD, así que un
+/// `RelPath` reescrito a NFC dejaría de poder abrirlo — sería peor que el bug. Lo que normaliza a
+/// NFC es la **clave de búsqueda tolerante** del inventario (`fold_path`), exactamente igual que ya
+/// se hacía con las mayúsculas desde E17-H03. Por eso el diagnóstico resultante es el mismo que el
+/// de capitalización: son el mismo problema —dos textos que designan el mismo fichero para el SO
+/// pero diferen byte a byte— y merecen el mismo aviso de portabilidad.
 #[test]
-fn unicode_nfc_y_nfd_no_son_la_misma_ruta() {
+fn unicode_nfc_y_nfd_resuelven_con_aviso() {
     use lodestar_core::types::{LinkTarget, Severity};
 
     let dir = tempfile::tempdir().unwrap();
@@ -1155,40 +1159,55 @@ fn unicode_nfc_y_nfd_no_son_la_misma_ruta() {
         .get(&RelPath::new("enlazador.md").unwrap())
         .and_then(|ls| ls.first())
         .expect("«enlazador.md» debe tener su único enlace resuelto");
+    // El TARGET sigue siendo `Missing`: la ruta tecleada no está en el inventario byte a byte, y
+    // el modelo no reescribe lo que el usuario escribió. Es exactamente lo que ya ocurría con la
+    // capitalización desde E17-H03 (`Docs/Auth.md` contra `docs/auth.md`), y la coherencia importa:
+    // la tolerancia vive en el DIAGNÓSTICO, no en la clasificación.
     assert_eq!(
         saliente.target,
         LinkTarget::Missing(RelPath::new(la_otra).unwrap()),
-        "las dos formas Unicode se comparan byte a byte: el enlace se clasifica Missing aunque el \
-         fichero exista visualmente con ese nombre (¿el SO lo abre?: {abre_con_la_otra})"
+        "la clasificación es byte a byte y no reescribe el href del usuario \
+         (¿el SO lo abre?: {abre_con_la_otra})"
     );
 
     let checks = a
         .diagnostics
         .get(&RelPath::new("enlazador.md").unwrap())
-        .expect("el enlace no resuelto debe producir diagnóstico");
-    let missing = checks
+        .expect("un enlace que difiere en la forma Unicode debe avisar de portabilidad");
+    let aviso = checks
         .iter()
-        .find(|c| c.code.as_str() == "LINK-TARGET-MISSING")
+        .find(|c| c.code.as_str() == "LINK-CASE-MISMATCH")
         .unwrap_or_else(|| {
             panic!(
-                "se esperaba LINK-TARGET-MISSING; diagnósticos: {}",
+                "se esperaba LINK-CASE-MISMATCH; diagnósticos: {}",
                 resumen(checks)
             )
         });
     assert_eq!(
-        missing.level,
-        Severity::Err,
-        "un destino `.md` ausente es hard-fail: por eso el falso positivo de macOS tumba la puerta \
-         de CI y no es una molestia menor"
+        aviso.level,
+        Severity::Warn,
+        "es un aviso de PORTABILIDAD, no un hard-fail: el enlace funciona aquí, pero puede no \
+         funcionar en otro sistema de ficheros"
     );
-    // Y NO se degrada a LINK-CASE-MISMATCH: `find_ignoring_case` pliega mayúsculas, no formas
-    // Unicode, así que el motor ni siquiera sugiere la ruta real.
+    assert_eq!(
+        aviso.related.first().map(RelPath::as_str),
+        Some(en_disco.as_str()),
+        "el aviso debe señalar la ruta REAL, que es la pista que el motor no daba antes"
+    );
+
+    // LA propiedad que cierra el defecto: ni un solo `Err`. Antes de E23-H23 aquí había un
+    // `LINK-TARGET-MISSING` de severidad `Err` que hacía salir `lodestar check` con 1 en macOS.
+    assert!(
+        !checks.iter().any(|c| c.level == Severity::Err),
+        "un enlace que difiere solo en la forma Unicode NO puede tumbar la puerta de CI. \
+         Diagnósticos: {}",
+        resumen(checks)
+    );
     assert!(
         !checks
             .iter()
-            .any(|c| c.code.as_str() == "LINK-CASE-MISMATCH"),
-        "hoy el motor no relaciona las dos formas Unicode: no hay pista hacia la ruta real. \
-         Diagnósticos: {}",
+            .any(|c| c.code.as_str() == "LINK-TARGET-MISSING"),
+        "y no se emite además un destino ausente: un solo diagnóstico por enlace. Diagnósticos: {}",
         resumen(checks)
     );
 }

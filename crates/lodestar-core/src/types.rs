@@ -821,14 +821,35 @@ pub struct DanglingLink {
 /// Separa **documentos** (los `.md` descubiertos, nodos potenciales del grafo) de los **demás
 /// ficheros** del proyecto (código, imágenes, …), que `resolve` necesita para poder clasificar un
 /// destino como [`LinkTarget::WorkspaceFile`] en vez de como [`LinkTarget::Missing`]. Quien hace
+/// La forma **plegada** de una ruta para el índice tolerante del [`Inventory`] — E23-H23.
+///
+/// Normaliza a **NFC** y baja a minúsculas, en ese orden. Las dos mitades responden al mismo
+/// problema: dos textos que designan *el mismo fichero* para el sistema operativo pero difieren
+/// byte a byte.
+///
+/// - **Capitalización** (E17-H03): APFS y NTFS son case-insensitive; ext4 no.
+/// - **Forma Unicode** (E23-H23): `é` puede escribirse como un solo code point (NFC, `U+00E9`) o
+///   como `e` + acento combinante (NFD, `U+0065 U+0301`). macOS y Linux difieren en cuál acaba en
+///   disco según cómo se creara el fichero, y APFS además resuelve ambas.
+///
+/// **Esto NO normaliza la ruta canónica**, y es deliberado: `RelPath` conserva los bytes tal cual
+/// están en disco. Normalizar la ruta canónica sería *peor* que el bug — en Linux el fichero está
+/// literalmente en NFD, así que un `RelPath` reescrito a NFC dejaría de poder abrirlo. Lo que se
+/// normaliza es solo la **clave de búsqueda tolerante**, igual que ya se hacía con las mayúsculas.
+fn fold_path(path: &str) -> String {
+    use unicode_normalization::UnicodeNormalization;
+    path.nfc().collect::<String>().to_lowercase()
+}
+
 /// I/O —el descubrimiento de `lodestar-workspace`— es quien lo construye.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Inventory {
     documents: BTreeSet<RelPath>,
     other_files: BTreeSet<RelPath>,
-    /// Índice auxiliar `ruta plegada a minúsculas → ruta REAL`, derivado de los dos anteriores.
-    /// Solo lo consume [`Inventory::find_ignoring_case`]; no forma parte de la identidad del
-    /// inventario más allá de lo que ya determinan `documents`/`other_files`.
+    /// Índice auxiliar `ruta plegada → ruta REAL`, derivado de los dos anteriores. El plegado
+    /// normaliza a **NFC** y baja a minúsculas (ver `fold_path`). Solo lo consume
+    /// [`Inventory::find_ignoring_case`]; no forma parte de la identidad del inventario más allá de
+    /// lo que ya determinan `documents`/`other_files`.
     folded: BTreeMap<String, RelPath>,
 }
 
@@ -862,7 +883,7 @@ impl Inventory {
         let mut folded: BTreeMap<String, RelPath> = BTreeMap::new();
         for p in documents.iter().chain(other_files.iter()) {
             folded
-                .entry(p.as_str().to_lowercase())
+                .entry(fold_path(p.as_str()))
                 .or_insert_with(|| p.clone());
         }
         Inventory {
@@ -872,16 +893,22 @@ impl Inventory {
         }
     }
 
-    /// La ruta **real** del inventario que coincide con `path` salvo capitalización, o `None` si
-    /// no hay ninguna. Con una coincidencia exacta devuelve la propia `path`.
+    /// La ruta **real** del inventario que coincide con `path` salvo **capitalización o forma
+    /// Unicode**, o `None` si no hay ninguna. Con una coincidencia exacta devuelve la propia `path`.
     ///
-    /// Es lo que convierte un destino ausente en `LINK-CASE-MISMATCH` (E17-H03): el veredicto sale
-    /// de este inventario **en memoria**, jamás del disco, así que es idéntico en un volumen
-    /// case-insensitive (APFS) y en uno que no lo es (ext4) — que es justo el problema de
-    /// portabilidad que el diagnóstico denuncia. El plegado es Unicode ([`str::to_lowercase`]),
-    /// no ASCII.
+    /// Es lo que convierte un destino ausente en `LINK-CASE-MISMATCH` (E17-H03) en vez de en un
+    /// `LINK-TARGET-MISSING` bloqueante: el veredicto sale de este inventario **en memoria**, jamás
+    /// del disco, así que es idéntico en un volumen case-insensitive (APFS) y en uno que no lo es
+    /// (ext4) — que es justo el problema de portabilidad que el diagnóstico denuncia.
+    ///
+    /// Desde E23-H23 el plegado también **normaliza a NFC** (ver `fold_path`). Sin eso, un
+    /// `[x](café.md)` tecleado en NFD contra un `café.md` guardado en NFC se clasificaba `Missing`
+    /// → `LINK-TARGET-MISSING` con severidad **`Err`**, o sea que tumbaba `lodestar check` por un
+    /// enlace que el sistema de ficheros y GitHub resuelven sin problema. El disparador es
+    /// realista: un fichero creado en un checkout de macOS y un enlace tecleado en Linux, o al
+    /// revés.
     pub fn find_ignoring_case(&self, path: &RelPath) -> Option<&RelPath> {
-        self.folded.get(&path.as_str().to_lowercase())
+        self.folded.get(&fold_path(path.as_str()))
     }
 
     /// ¿Hay un documento Markdown en esa ruta exacta?

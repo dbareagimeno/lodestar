@@ -429,6 +429,63 @@ de diseño**; la implementación se planifica vía `/planificar` en una PR poste
 
 ---
 
+## Bloque F — Defectos que destapó el propio bloque B
+
+> Estas dos historias **no estaban en el plan**: las encontró `E23-H09` al cubrir los bordes, y son
+> exactamente la razón por la que esos bordes había que cubrirlos. Ambas se decidieron con el usuario
+> antes de tocar código, porque las dos tienen riesgo de diseño.
+
+### E23-H23 — El lock huérfano se reclama; NFC/NFD deja de tumbar el CI
+
+**Defecto 1 — un proceso muerto cerraba el workspace a la escritura para siempre.**
+`acquire_lock` solo miraba si `.lodestar/runtime/lock.json` existía. El `pid` que el propio lock
+escribe en `lock_metadata()` **nadie lo leía de vuelta**, y no había TTL. Un `lodestar-mcp` muerto
+por `SIGKILL` o por el OOM killer dejaba el fichero en disco y la base quedaba inservible para
+escribir hasta que un humano lo borrara a mano — y por la frontera MCP el agente solo veía un
+`WRITE_CONFLICT` pelado, sin ninguna pista de qué mirar (el mensaje interno sí nombra la ruta, pero
+`tools.rs` emite únicamente el código estable).
+
+Arreglo: se reclama si **el dueño ya no existe** (`kill(pid, 0)` → `ESRCH`, solo Unix, inmediato y
+exacto) **o** si el lock supera el `LOCK_TTL` (15 min, red portable para Windows). Ante la duda
+—fichero ilegible, `pid` ausente, reloj hacia atrás— **no se reclama**: perder disponibilidad es
+recuperable, romper el escritor único no. El control anti-vacuo del test es el que de verdad
+importa: un lock de un proceso **vivo** no se reclama, porque «reclamar huérfanos» mal implementado
+sería «borrar siempre el lock», mucho peor que el defecto.
+
+**Defecto 2 — un enlace correcto tumbaba el CI en macOS.** Lodestar comparaba rutas byte a byte, así
+que `café.md` en NFC y en NFD eran dos rutas distintas. En Linux el veredicto era correcto (el
+fichero NFD de verdad no existe); en macOS/APFS el fichero **sí se abre** con la otra forma, así que
+`LINK-TARGET-MISSING` con severidad `Err` hacía salir `lodestar check` con 1 por un enlace que el SO
+y GitHub resuelven. Mismo veredicto en las dos plataformas, acertado solo en una. Disparador
+realista: fichero creado por un checkout en macOS, enlace tecleado en Linux.
+
+Arreglo: `fold_path` normaliza a **NFC** además de bajar a minúsculas, o sea que el índice tolerante
+del `Inventory` relaciona las dos formas y el diagnóstico degrada a `LINK-CASE-MISMATCH` (`Warn`,
+aviso de portabilidad) en vez de a un error bloqueante. **No se normaliza la ruta canónica**, y es la
+decisión clave: en Linux el fichero está literalmente en NFD, así que un `RelPath` reescrito a NFC
+dejaría de poder abrirlo — sería peor que el bug. El `target` sigue siendo `Missing`, igual que con
+la capitalización desde E17-H03: la tolerancia vive en el **diagnóstico**, no en la clasificación.
+
+- **Criterios**: `lock_huerfano` (reclamo + no-reclamo de un vivo) ·
+  `unicode_nfc_y_nfd_resuelven_con_aviso` (aviso `Warn`, ni un `Err`, y el `related` señalando la
+  ruta real, que es la pista que antes no existía).
+- **Pruebas**: `crates/lodestar-mcp/tests/concurrencia.rs`,
+  `crates/lodestar-workspace/tests/discovery.rs`.
+
+### E23-H24 — Códigos del catálogo sin emisor (registrar, no inventar)
+
+`E23-H09` verificó que **4 de las 16 filas** del catálogo congelado no tienen productor:
+`WORKSPACE_NOT_FOUND` (un `--root` inexistente sale por `std::process::exit(3)` con texto plano,
+nunca por el envelope), `RESULT_TOO_LARGE` (mapeado desde `CoreError::SizeGuardExceeded`, variante
+que no se construye en ninguna parte), `RECOVERY_FAILED` (cero apariciones fuera de `types.rs`) y
+`AMBIGUOUS_REFERENCE` (declarado RESERVADO hasta que exista resolución por `id`).
+`INTERNAL_IO_ERROR` sí resultó alcanzable y quedó cubierto.
+
+No se inventan emisores: un código sin camino real es información sobre el catálogo, no un hueco que
+haya que rellenar. Se registra en `contracts/mcp.yml` para que la próxima auditoría no lo redescubra.
+
+---
+
 ## Bloque E — Documentos nuevos (se escriben aquí, se planifican después)
 
 ### E23-H15 — `docs/PROPUESTA_CLI.md`

@@ -86,9 +86,12 @@
 #     `affectedDocuments`; `change_apply` sirve `conformance` → `validation` (mismo objeto
 #     `{ valid, errors, warnings }`); `impact_analyze.proposedOperation.kind`
 #     `"replace_concept"` → `"replace_document"`.
-#   - NO cambian (deliberado): `valid`/`requireValidResult`/`allowInvalid` y el
-#     código `INVALID_RESULT` — el catálogo de 16 `ErrorCode` sigue congelado salvo la fila
-#     renombrada aquí, y `Valid → Valid` de `§20.3` queda pendiente de una historia propia.
+#   - NO cambiaron EN E16-H06 (deliberado entonces): `conformant`/`requireConformantResult`/
+#     `allowNonconformant` y el código `NONCONFORMANT_RESULT`, porque tocarlos obligaba a abrir el
+#     catálogo congelado de 16 `ErrorCode`. Esa mitad —el ADJETIVO de la pareja `Conformance /
+#     Conformant` de `§20.3`— quedó pendiente y la cerró **E23-H14**, abriendo el catálogo la única
+#     vez y aprovechando que v0.3 ya es incompatible: hoy el wire dice `valid`, `requireValidResult`,
+#     `allowInvalid` e `INVALID_RESULT`. El catálogo sigue teniendo 16 filas: se sustituyó una.
 #     `okf_version` sigue siendo metadata del usuario (`§20.13`), no terminología del motor.
 #
 # E16-H04 (`ARCHITECTURE.md §20.4`): el patch de frontmatter pasa a ser QUIRÚRGICO
@@ -160,11 +163,13 @@
 #     El nombre neutro no es `SemanticDiff` porque ese identificador ya lo lleva el tipo de wire.
 #   - La superficie ACTIVA de este contrato no lleva vocabulario OKF salvo `valid`/
 #     `requireValidResult`/`INVALID_RESULT` (retorno de `change_apply`.validation, param
-#     `policy` de `change_plan`, código de error). Es EXACTAMENTE `DECISIONES.md §13`
-#     (`Valid → Valid`), APLAZADA: completar la pareja de `§20.3` abriría el catálogo de 16
-#     `ErrorCode` congelados, y eso no es un renombre léxico — queda para una historia que decida
-#     abrir ese catálogo. Hasta entonces esos tres identificadores se conservan tal cual (deuda
-#     documentada, no discrepancia de contrato). Los comentarios de changelog de arriba
+#     `policy` de `change_plan`, código de error). Eran `conformant`/`requireConformantResult`/
+#     `NONCONFORMANT_RESULT` — `DECISIONES.md §13`, el ADJETIVO de la pareja `Conformance /
+#     Conformant` de `§20.3`—, y estuvieron APLAZADOS tres épicas porque completarlos obligaba a
+#     abrir el catálogo de 16 `ErrorCode` congelados, que no es un renombre léxico. **E23-H14** lo
+#     cerró: se abrió el catálogo la única vez, aprovechando que v0.3 ya es incompatible con v0.2,
+#     y con ello se cumplió el último de los 29 criterios de aceptación que quedaba incumplido
+#     («no existe terminología OKF en la API pública»). Sigue habiendo 16 filas. Los comentarios de changelog de arriba
 #     (`# SE BORRAN: OKF-…`, `Bundle → DocumentSet`, retiradas de tools) son registro histórico y se
 #     conservan.
 #
@@ -511,3 +516,19 @@ migracion:
     metadata_inspect, knowledge_check, graph_query, impact_analyze, change_plan, change_apply,
     change_revert (`docs/REFACTOR.md §8`). Ninguna de las 10 tools heredadas sobrevive salvo por su
     reemplazo semántico listado arriba.
+
+# ---------------------------------------------------------------------------
+# Catálogo de errores: filas SIN emisor (auditado en E23-H09/H24)
+# ---------------------------------------------------------------------------
+codigos_sin_emisor:
+  nota: >-
+    De las 16 filas congeladas de `ErrorCode` (§19.3), estas CUATRO no se emiten desde ningún camino
+    del producto. Se registra aquí para que la próxima auditoría no lo redescubra, y sobre todo para
+    NO inventarles un emisor: un código sin camino real es información sobre el catálogo, no un hueco
+    que rellenar. Verificado por grep sobre el árbol y por test donde el camino sí existía
+    (`INTERNAL_IO_ERROR` resultó alcanzable y quedó cubierto en E23-H09).
+  filas:
+    - { codigo: WORKSPACE_NOT_FOUND, motivo: "un `--root` inexistente sale por `std::process::exit(3)` con texto plano desde `main.rs`, nunca por el envelope. Fuera de `types.rs` solo aparece en una aserción de round-trip serde. El comportamiento REAL (exit 3, stderr que nombra la ruta, sin panic, stdout vacío) está fijado por `mcp.rs::root_inexistente_falla_legible_sin_panic`" }
+    - { codigo: RESULT_TOO_LARGE, motivo: "mapeado desde `CoreError::SizeGuardExceeded`, pero esa variante NO se construye en ninguna parte del árbol. El presupuesto de payload se respeta por diseño (knowledge_search nunca devuelve cuerpos, hay límites de página), no por este error" }
+    - { codigo: RECOVERY_FAILED, motivo: "cero apariciones fuera de `types.rs`, ni siquiera un mapeo. La recuperación fallida se surface a hoy como `INTERNAL_IO_ERROR` o `WORKSPACE_RECOVERY_REQUIRED`" }
+    - { codigo: AMBIGUOUS_REFERENCE, motivo: "RESERVADO por diseño (`lodestar-app/src/lib.rs`): hoy un DocumentRef solo admite `path`, que es exacto por construcción. Se activará si alguna vez existe resolución por `id` o por título" }
