@@ -129,7 +129,7 @@ fn bench_search_payload_acotado() {
     // Página completa (tope 100) para tener suficientes resultados sobre los que medir la cota.
     let t_search = Instant::now();
     let res = app
-        .knowledge_search("documento", None, None, None, Some(100), None)
+        .knowledge_search("documento", None, None, &[], Some(100), None)
         .expect("knowledge_search debe responder sobre el workspace grande");
     let search_ms = t_search.elapsed().as_millis();
 

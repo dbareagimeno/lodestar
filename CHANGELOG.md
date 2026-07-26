@@ -40,9 +40,9 @@ sin frontmatter obligatorio.
 - **Validación genérica** (E20): diagnósticos mínimos de `§20.9` (nada de «falta `type`»);
   `metadata_inspect` (catálogo de propiedades e inspección de campo) sustituye a `schema_inspect`;
   política `rejectNewErrors`/`allowExistingErrors` (se puede reparar un repo que ya tiene problemas).
-- **Operaciones transaccionales universales** (E21): las 8 de `§20.11` (`create_document`,
-  `patch_frontmatter`, `replace_body`, `replace_text`, `edit_section`, `move_document`,
-  `delete_document`, `apply_fix`), selecciones masivas por consulta, y `move_document` que reescribe
+- **Operaciones transaccionales universales** (E21): las **7** de `§20.11` (`create`,
+  `patch_frontmatter`, `replace_body`, `replace_text`, `edit_section`, `move`,
+  `delete`), selecciones masivas por consulta, y `move` que reescribe
   los backlinks relativos (incluidas las definiciones de referencia). El motor transaccional
   (staging/journal/locks/recovery/receipt/revert) **no cambia**.
 

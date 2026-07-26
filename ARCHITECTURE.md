@@ -1239,6 +1239,17 @@ agente comprender las convenciones de una base desconocida **sin necesitar un sc
 combina full-text, restricción por paths, filtros de metadata y propiedades calculadas de documento y
 grafo.
 
+> **Actualización E23-H11.** `knowledge_search` gana `include: ["frontmatter.<fieldPath>"]`: la
+> **proyección** de los campos de frontmatter que pida el llamador sobre cada resultado (valores YAML
+> crudos, campo ausente = clave ausente). Sin ella, ver el `status` de 30 resultados costaba 30
+> `knowledge_get` — el N+1 que dejó E19-H05 al retirar los campos privilegiados OKF sin sustituto
+> genérico. Una entrada mal formada es `INVALID_SCHEMA`, no un descarte silencioso.
+> En la misma historia **desaparece `sort`**, que se aceptaba y se ignoraba desde E10-H09: el orden
+> determinista (score desc, path asc) es el único, y es la base del cursor-offset.
+> Y `workspace_status` gana `receipts`, el listado acotado de recibos persistidos (mtime desc), para
+> que perder el `receiptId` de un `change_apply` no deje el undo inalcanzable. La superficie sigue
+> siendo de **diez** tools: listar recibos no justifica una undécima.
+
 ### 20.11 Operaciones transaccionales (supersede §19.5 en el catálogo de ops)
 
 El motor transaccional **no cambia conceptualmente**: `WorkspaceRevision`, `DocumentRevision`, hashes
@@ -1254,6 +1265,16 @@ Ocho operaciones **universales** — `create_document`, `patch_frontmatter`, `re
 `replace_text`, `edit_section`, `move_document`, `delete_document`, `apply_fix` — y se **eliminan** las
 semánticas (`add_relation`, `remove_relation`, `transition_status`, `deprecate`, `replace_concept`):
 una relación es un enlace Markdown y un estado es una propiedad arbitraria del frontmatter.
+
+> **Actualización E23-H11: son SIETE.** `apply_fix` se **retira** de la superficie (del enum de
+> `change_plan`, de las ops admitidas en masa, de `NormalizedOperation` y de `plan.rs`, junto con
+> `CoreError::FixNotFound`). Motivo: E20-H03 retiró `core::schema` y con él el único productor de
+> `Fix`, así que la operación fallaba **siempre** —y con un código que apuntaba al sitio equivocado
+> (`DOCUMENT_NOT_FOUND` sobre un documento que existe)—, mientras se anunciaba en el `inputSchema`
+> como una de las ocho. Hoy es una op desconocida → `INVALID_SCHEMA`. El lado de **lectura** de los
+> arreglos (`Fix`, `Check.fixes`, `knowledge_check.includeSuggestedFixes`) **no se toca**: un array
+> vacío se lee como «no hay sugerencias» y eso es verdad. El análisis de qué haría falta para que la
+> capacidad vuelva está en `docs/PROPUESTA_FIXES.md`.
 
 - **Selecciones masivas por consulta**: `{selection: {where: …}, operation: {…}}` →
   `query → documentos → snapshot de revisiones → semantic diff → impact → validation → plan → apply → receipt`.

@@ -7,7 +7,7 @@
 use lodestar_app::{schemas, App, CheckScope, Profile};
 use lodestar_core::plan::PlanPolicy;
 use lodestar_core::types::{
-    ChangeSetId, DocumentRef, InboundLinksPolicy, ReceiptId, Severity, WorkspaceRevision,
+    ChangeSetId, DocumentRef, ErrorCode, InboundLinksPolicy, ReceiptId, Severity, WorkspaceRevision,
 };
 #[cfg(test)]
 use lodestar_workspace::Workspace;
@@ -46,9 +46,12 @@ fn politica_de_borrado_invalida(raw_ops: &Value) -> Option<String> {
 /// que un cliente MCP lee para saber CÓMO escribir, así que merece estar donde se pueda revisar de
 /// un vistazo contra `normalize_raw_op` (`lodestar-app`), que es quien de verdad lee estos campos.
 ///
+/// E23-H11 retiró del enum la octava operación, `apply_fix` (y con ella su parámetro `fixId`): sin
+/// productor de `Fix` desde E20-H03, siempre fallaba — ver `docs/PROPUESTA_FIXES.md`.
+///
 /// Hasta E23-H10 aquí solo se declaraban `op`/`path`/`ref`/`expectedRevision`: **ni uno** de los
-/// parámetros reales de 7 de las 8 operaciones. Para un producto cuyo público objetivo son agentes,
-/// era el mayor agujero de usabilidad de la superficie — el schema decía qué operaciones existen
+/// parámetros reales de 7 de las 8 operaciones de entonces. Para un producto cuyo público objetivo
+/// son agentes, era el mayor agujero de usabilidad de la superficie — el schema decía qué operaciones existen
 /// pero no cómo invocarlas, así que había que adivinar.
 ///
 /// Se declaran **planas** (todas las propiedades juntas, cada una diciendo a qué op pertenece) en
@@ -57,7 +60,7 @@ fn politica_de_borrado_invalida(raw_ops: &Value) -> Option<String> {
 /// mientras que la forma plana no puede rechazar una entrada válida.
 fn operacion_item_schema() -> Value {
     json!({ "type": "object", "properties": {
-                     "op": { "type": "string", "enum": ["create", "patch_frontmatter", "replace_body", "replace_text", "edit_section", "move", "delete", "apply_fix"],
+                     "op": { "type": "string", "enum": ["create", "patch_frontmatter", "replace_body", "replace_text", "edit_section", "move", "delete"],
                              "description": "Qué operación es. Determina qué otros campos se leen; los que no pertenecen a esta op se IGNORAN." },
                      "path": { "type": "string", "description": "Ruta relativa del documento. Obligatoria en «create»; en «patch_frontmatter»/«replace_body»/«replace_text»/«edit_section»/«delete» es la alternativa corta a «ref.path» (se acepta cualquiera de las dos)." },
                      "ref": { "type": "object", "description": "DocumentRef, alternativa a «path» en las ops que operan sobre un documento existente.",
@@ -76,8 +79,7 @@ fn operacion_item_schema() -> Value {
                      "from": { "type": "string", "description": "[move] Ruta actual del documento." },
                      "to": { "type": "string", "description": "[move] Ruta destino. Los enlaces relativos SALIENTES del propio documento se recalculan solos desde la ubicación nueva (E23-H03)." },
                      "rewriteInboundLinks": { "type": "boolean", "default": false, "description": "[move] Si true, reescribe además los enlaces ENTRANTES de todos los documentos que apuntan al movido (incluidas las definiciones de referencia), en la misma transacción. Con false los backlinks quedan apuntando a la ruta vieja y se rompen: actívalo salvo que sepas lo que haces." },
-                     "inboundLinksPolicy": { "type": "string", "enum": ["reject", "remove_links"], "description": "[delete] Qué hacer con los enlaces entrantes. OBLIGATORIO cuando el documento tiene backlinks (§20.11 prohíbe elegir en silencio); sin backlinks no hay nada que decidir y puede omitirse. «reject» = fallar con INBOUND_LINKS_EXIST; «remove_links» = desenlazar en los emisores dejando su texto plano. («retarget» y «create_stub» se RETIRARON en E23-H05: se aceptaban sin ejecutarse.)" },
-                     "fixId": { "type": "string", "description": "[apply_fix] Identificador del arreglo sugerido por un diagnóstico. AVISO: hoy ningún diagnóstico produce «fixes», así que esta op siempre falla con DOCUMENT_NOT_FOUND." }
+                     "inboundLinksPolicy": { "type": "string", "enum": ["reject", "remove_links"], "description": "[delete] Qué hacer con los enlaces entrantes. OBLIGATORIO cuando el documento tiene backlinks (§20.11 prohíbe elegir en silencio); sin backlinks no hay nada que decidir y puede omitirse. «reject» = fallar con INBOUND_LINKS_EXIST; «remove_links» = desenlazar en los emisores dejando su texto plano. («retarget» y «create_stub» se RETIRARON en E23-H05: se aceptaban sin ejecutarse.)" }
                  }, "required": ["op"] })
 }
 
@@ -94,7 +96,16 @@ pub fn list() -> Value {
              "text": { "type": "string", "description": "Texto libre (subcadena sobre basename + valores de frontmatter + cuerpo). Vacío = todos los documentos." },
              "where": { "type": "string", "description": "Consulta textual del lenguaje tipado (§20.8), p. ej. «status = \"accepted\" and graph.backlinks = 0». Se intersecta con «text» y con «filter»." },
              "filter": { "type": "object", "description": "Filtro JSON estructurado (§20.10) equivalente a «where»: {field, operator, value} o envolturas and/or/not/has/missing. Si llegan «where» y «filter», se combinan con AND." },
-             "sort": { "type": "string", "description": "Reservado: hoy el orden es siempre determinista (score desc, path asc)." },
+             "include": { "type": "array", "description": "Campos de FRONTMATTER a proyectar en cada resultado, como «frontmatter.<fieldPath>» (p. ej. «frontmatter.status» o el anidado «frontmatter.owner.name»). Ahorra un knowledge_get por documento solo para leer un campo. Los valores viajan con su tipo YAML real y un campo que un documento no tiene NO aparece en su mapa (nunca null). Una entrada que no empiece por «frontmatter.», o cuyo sufijo no sea un field path válido, se RECHAZA con INVALID_SCHEMA.",
+                 // El «pattern» declara el prefijo obligatorio y un sufijo NO vacío, sin cerrar los
+                 // valores: el field path es abierto por naturaleza (§20.2), así que solo se puede
+                 // acotar la forma. Es deliberadamente un SUPERCONJUNTO de lo que acepta el
+                 // despachador —«frontmatter.a..b» casa el patrón y aun así falla en
+                 // `FieldPath::parse`—, que es la dirección segura: un cliente que valide contra el
+                 // schema caza el error más común antes de la llamada, y ningún `include` válido se
+                 // rechaza de más. La validación de ejecución (E23-H11) se queda como está: es la
+                 // que da el mensaje bueno y la única que puede ser exacta.
+                 "items": { "type": "string", "pattern": "^frontmatter\\..+" } },
              "limit": { "type": "integer", "minimum": 1, "maximum": 100, "default": 20 },
              "cursor": { "type": "string", "description": "Cursor opaco de paginación devuelto en «nextCursor»." }
          }, "additionalProperties": false },
@@ -163,18 +174,17 @@ pub fn list() -> Value {
         {"name": "change_plan", "description": "Planifica un cambio complejo SIN escribir: normaliza las operaciones propuestas, simula su aplicación en memoria y valida el resultado. Devuelve un único change set (normalizedOperations, semanticDiff, risk, impact, diagnosticsBefore/After) con un planHash determinista. No toca disco (aplicar es change_apply, E13).",
          "inputSchema": { "type": "object", "properties": {
              "expectedWorkspaceRevision": { "type": "string", "description": "Control optimista a nivel de workspace («blake3:…»). Si se omite, se toma la revisión actual; si no coincide → REVISION_CONFLICT." },
-             "operations": { "type": "array", "description": "Operaciones propuestas, discriminadas por «op»; las 8 universales (§20.11). Cada entrada lleva «op» más los parámetros de ESA op (declarados abajo, cada uno indica a cuál pertenece), y opcionalmente «expectedRevision» para control optimista por documento.",
+             "operations": { "type": "array", "description": "Operaciones propuestas, discriminadas por «op»; las 7 universales (§20.11). Cada entrada lleva «op» más los parámetros de ESA op (declarados abajo, cada uno indica a cuál pertenece), y opcionalmente «expectedRevision» para control optimista por documento.",
                  "items": operacion_item_schema() },
              "selection": { "type": "object", "description": "Selección MASIVA por consulta (§20.11, alternativa a «operations»): «where» (lenguaje textual) o «filter» (JSON), como en knowledge_search. Requiere «operation».", "properties": {
                  "where": { "type": "string" },
                  "filter": { "type": "object" }
              } },
-             "operation": { "type": "object", "description": "La operación a expandir sobre cada documento que casa la «selection», con el tipo como CLAVE y sus parámetros como valor (p. ej. {\"patch_frontmatter\": {\"status\": \"review\"}}). Los parámetros son los mismos que en «operations», sin repetir «op» ni el path (lo pone la selección). Solo las que tienen sentido en masa: patch_frontmatter/replace_text/delete/apply_fix.",
+             "operation": { "type": "object", "description": "La operación a expandir sobre cada documento que casa la «selection», con el tipo como CLAVE y sus parámetros como valor (p. ej. {\"patch_frontmatter\": {\"status\": \"review\"}}). Los parámetros son los mismos que en «operations», sin repetir «op» ni el path (lo pone la selección). Solo las que tienen sentido en masa: patch_frontmatter/replace_text/delete.",
                  "properties": {
                      "patch_frontmatter": { "type": "object", "description": "El merge-patch a aplicar a cada documento seleccionado (mismo formato que «patch»)." },
                      "replace_text": { "type": "object", "description": "{find, replace, expectedOccurrences?} como en la op suelta." },
-                     "delete": { "type": "object", "description": "{inboundLinksPolicy} como en la op suelta." },
-                     "apply_fix": { "type": "object", "description": "{fixId} como en la op suelta." }
+                     "delete": { "type": "object", "description": "{inboundLinksPolicy} como en la op suelta." }
                  } },
              "policy": { "type": "object", "description": "Política de aplicación del plan.", "properties": {
                  "requireValidResult": { "type": "boolean", "default": true, "description": "Si true (por defecto), un resultado NO VÁLIDO bloquea canApply." },
@@ -261,14 +271,36 @@ pub fn call(app: &App, profile: Profile, name: &str, params: &Value) -> ToolResu
             // la clave del wire se lee por string, no por campo.
             let where_expr = params.get("where").and_then(Value::as_str);
             let filter = params.get("filter");
-            let sort = params.get("sort").and_then(Value::as_str);
+            // Proyección de frontmatter (E23-H11). Se parsea AQUÍ, en el despachador, porque los
+            // valores son abiertos (`frontmatter.<lo que sea>`) y no caben en un `enum` del schema
+            // —a diferencia del `include` cerrado de `knowledge_get`—: este es el único sitio donde
+            // la superficie puede ser honesta. Una entrada mal formada se RECHAZA con
+            // `INVALID_SCHEMA`; aceptarla y descartarla sería reintroducir por detrás el defecto
+            // que esta misma historia saca por delante con `sort`.
+            let include: Vec<String> = match params.get("include") {
+                Some(v) => serde_json::from_value(v.clone()).map_err(|e| {
+                    format!(
+                        "{}: «include» debe ser un array de cadenas «frontmatter.<fieldPath>»: {e}",
+                        ErrorCode::InvalidSchema.as_str()
+                    )
+                })?,
+                None => Vec::new(),
+            };
+            let proyecciones =
+                lodestar_app::FrontmatterProjection::parse_all(&include).map_err(|code| {
+                    format!(
+                        "{}: cada entrada de «include» debe ser «frontmatter.<fieldPath>» (p. ej. \
+                         «frontmatter.status» o «frontmatter.owner.name»); recibido {include:?}",
+                        code.as_str()
+                    )
+                })?;
             let limit = params
                 .get("limit")
                 .and_then(Value::as_u64)
                 .map(|n| n as usize);
             let cursor = params.get("cursor").and_then(Value::as_str);
             let results = app
-                .knowledge_search(text, where_expr, filter, sort, limit, cursor)
+                .knowledge_search(text, where_expr, filter, &proyecciones, limit, cursor)
                 .map_err(|e| e.to_string())?;
             to_json(&results)
         }

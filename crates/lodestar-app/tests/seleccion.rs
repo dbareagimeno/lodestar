@@ -15,9 +15,13 @@
 //! `NormalizedOperation` por documento seleccionado** (el array suelto `[ {op…}, … ]` sigue
 //! valiendo tal cual). La `operation` codifica el tipo como CLAVE (`{patch_frontmatter: {…}}`),
 //! según el ejemplo de la historia; solo las ops con sentido en masa (`patch_frontmatter`,
-//! `replace_text`, `delete`, `apply_fix`) — `create` no aplica a documentos existentes, así que
-//! estos tests solo ejercen `patch_frontmatter`. El valor de `patch_frontmatter` es el merge-patch
-//! (RFC 7386) que se aplica a cada documento que casa.
+//! `replace_text`, `delete`) — `create` no aplica a documentos existentes, así que estos tests solo
+//! ejercen `patch_frontmatter`. El valor de `patch_frontmatter` es el merge-patch (RFC 7386) que se
+//! aplica a cada documento que casa.
+//!
+//! (E21-H02 admitía una cuarta op en masa, `apply_fix`. **E23-H11 la retiró** de la superficie
+//! entera —enum, contrato y normalizador— porque no hay productor de `fixes` desde E20-H03 y la
+//! op siempre fallaba; hoy pedirla en `operation` es `INVALID_SCHEMA`.)
 //!
 //! ## Por qué son ROJOS hoy
 //!

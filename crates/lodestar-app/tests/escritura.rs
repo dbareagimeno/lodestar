@@ -506,7 +506,7 @@ fn create_sin_frontmatter_titulo_derivado() {
     );
 
     let resultados = app
-        .knowledge_search("", None, None, None, Some(100), None)
+        .knowledge_search("", None, None, &[], Some(100), None)
         .expect("buscar sobre el workspace no debe fallar")
         .results;
     let titulo = |path: &str| -> String {

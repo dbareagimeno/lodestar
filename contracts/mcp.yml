@@ -192,6 +192,34 @@
 #     escenario 14 de §17 (ref de código inexistente) se retira con la capacidad, como los 8 y 9 en
 #     E20-H03.
 #
+# E23-H11 (descubribilidad de la KB): la superficie sigue siendo de 10 tools; cambian tres cosas,
+# todas por el mismo motivo — que un agente entienda una base ajena sin pagar N+1 llamadas ni
+# tropezar con parámetros que no hacen nada.
+#   - `knowledge_search` GANA `include: ["frontmatter.<fieldPath>"]`, la proyección de campos de
+#     frontmatter pedida por el llamador, y cada resultado gana el mapa `frontmatter` cuando se pide
+#     algo. Ver `SearchResult` abajo. E19-H05 había retirado los campos privilegiados OKF
+#     (`type`/`status`/`tags`) SIN poner nada genérico en su lugar, así que ver el `status` de 30
+#     resultados costaba 30 `knowledge_get`.
+#   - `knowledge_search` PIERDE `sort`. Estaba declarado como «reservado» desde E10-H09 y el
+#     servicio lo recibía en un `_sort` que nunca leía: se aceptaba y se ignoraba en silencio.
+#     **Sin sustituto**: el orden determinista (score desc, path asc) es el único y además la base
+#     del cursor-offset, que solo reanuda idéntico en un proceso fresco porque el orden depende solo
+#     del contenido. Volver a añadir el parámetro el día que se implemente es aditivo.
+#   - Se RETIRA la operación `apply_fix` de `change_plan` (del enum de `operations[].op`, de su
+#     parámetro `fixId` y de las ops admitidas en selección masiva), junto con
+#     `NormalizedOperation::ApplyFix`, `plan::normalize_apply_fix` y `CoreError::FixNotFound`. Las
+#     operaciones universales pasan de 8 a 7. Motivo: desde que E20-H03 retiró `core::schema`
+#     desapareció el único productor de `Fix`, así que la op fallaba SIEMPRE — y su error mapeaba a
+#     `DOCUMENT_NOT_FOUND`, mandando al agente a buscar el problema en un documento que existía.
+#     **Sin alias**: un `apply_fix` hoy es una op desconocida → `INVALID_SCHEMA`, mismo trato que
+#     `transition_status` desde E21-H01. El lado de LECTURA de los fixes NO se toca (`Fix`,
+#     `Check.fixes`, `knowledge_check.includeSuggestedFixes`): un array vacío se lee como «no hay
+#     sugerencias» y eso es verdad. Análisis completo en `docs/PROPUESTA_FIXES.md`.
+#   - `workspace_status` GANA `receipts`, el listado acotado de los recibos persistidos. Sin él, un
+#     agente que perdía el `receiptId` de `change_apply` no podía revertir aunque el recibo siguiera
+#     en disco. **No es una 11ª tool**: la superficie converge en 10 (`§19.6`) y este es el sitio
+#     donde ya vive `recovery.pendingTransaction`.
+#
 # E10-H13 (decisión D6b, `docs/REFACTOR.md §13`, `DECISIONES.md §3`): las 10 tools activas declaran
 # `outputSchema` (JSON Schema derivado con `schemars::schema_for!` desde el tipo de respuesta real
 # de `lodestar-app`, vía los helpers de `lodestar_app::schemas::*`).
@@ -231,7 +259,23 @@ meta:
     Éxito → { content:[{type:text,text:json}], structuredContent:<objeto> }. Las 5 tools de
     E10 mapean el error a un texto que lleva el código estable de `ErrorCode::as_str()`
     (p. ej. «DOCUMENT_NOT_FOUND»/«INVALID_SCHEMA»), NUNCA el `Debug` de la variante Rust
-    (`tools.rs`, casos `knowledge_get`/`metadata_inspect`/`knowledge_check`).
+    (`tools.rs`, casos `knowledge_get`/`metadata_inspect`/`knowledge_check` y, desde E23-H11,
+    `knowledge_search` en su rama de `include`).
+  validacion_de_argumentos: >-
+    REGLA DE LA CASA, enunciada aquí una vez porque hasta E23-H11 vivía implícita en tres semánticas
+    distintas: **el servidor valida los VALORES de los parámetros que declara, e IGNORA lo que no
+    declara.** No valida `arguments` contra el `inputSchema` — este es DECLARATIVO por diseño
+    (E23-H10), y quien lo valida es el cliente, para lo cual todos los objetos llevan
+    `additionalProperties: false`. El criterio operativo es: se RECHAZA cuando hay un despachador que
+    de todos modos tiene que interpretar el valor (`operations[].op`, `inboundLinksPolicy`, `mode` de
+    `metadata_inspect`, el `include` de `knowledge_search`), y se IGNORA cuando el valor no llega a
+    ningún intérprete y el schema cerrado ya lo declara imposible (p. ej. mandar el `sort` retirado en
+    E23-H11, o el `externalReferences` retirado del `include` de `knowledge_get` en E23-H12: son
+    propiedades/valores desconocidos y como tales se descartan). La diferencia con el defecto que
+    E23 salda —superficie que anuncia y no cumple— es que aquí no hay nada anunciado: es tolerancia
+    genérica y uniforme, no una promesa falsa.
+    DEUDA DECLARADA: ese `additionalProperties: false` es él mismo una afirmación que el servidor no
+    ejecuta. Preexistente a E23-H11 (política de E23-H10), registrada para que no se descubra dos veces.
   arranque: >-
     `lodestar-mcp [--root <dir>] [--profile readonly|standard]` (main.rs parse_args, E15-H06,
     `ARCHITECTURE.md §20.5`). Sin `--root` la raíz es `std::env::current_dir()`. NO hay argumento
@@ -272,6 +316,21 @@ tools:
       `.lodestar/runtime/`). Era un `false` literal desde E10-H08 pese a que la detección existía
       desde E13-H06, así que tras un crash esta tool afirmaba que no había nada que recuperar y el
       agente solo lo descubría al fallar `change_apply` con `WORKSPACE_RECOVERY_REQUIRED`.
+      E23-H11 AÑADE `receipts`: array (posiblemente vacío, nunca ausente) de los recibos
+      persistidos en `.lodestar/runtime/receipts/`, ORDEN MTIME DESC (el más reciente primero,
+      el mismo criterio de antigüedad que `gc_receipts` porque `ChangeReceipt` no lleva timestamp
+      propio; lo lista `Workspace::list_receipts`). Cada entrada es un `lodestar_app::ReceiptSummary`
+      —proyección ESTRECHANTE de `core::types::ChangeReceipt` (4 de sus 6 campos, reutilizando sus
+      newtypes `ReceiptId`/`ChangeSetId`/`WorkspaceRevision`), no un tipo paralelo— y lleva
+      EXACTAMENTE `receiptId`, `changeSetId`, `resultRevision` y `changedPathCount` (nº de rutas
+      afectadas, agregado derivado de `ChangeReceipt::changed_paths`): lo justo para elegir cuál
+      revertir; el recibo entero se sigue leyendo por `change_revert`, y esta tool se llama en CADA
+      sesión. ⚠️ La cota la impone el **GC que corre tras cada `change_apply`/`change_revert`**
+      (`transactions.maximumReceipts`, default 20), NO `list_receipts`, que devuelve lo que haya en
+      disco sin truncar: bajo perfil `readonly` el GC no corre nunca, y si se baja
+      `maximumReceipts` la lista sigue larga hasta la siguiente escritura. Un `.json` corrupto o
+      ilegible se salta, para que un recibo roto no impida ver los sanos. Antes no había forma de
+      listarlos: perder el `receiptId` dejaba el undo inalcanzable pese a estar persistido.
 
   - nombre: knowledge_search
     fuente: crates/lodestar-mcp/src/tools.rs:188
@@ -280,19 +339,22 @@ tools:
       - { nombre: text, tipo: string, requerido: false, semantica: "texto libre, subcadena sobre basename + valores de frontmatter + cuerpo (core::text::loose_text_match); vacío = todos los documentos" }
       - { nombre: where, tipo: string, requerido: false, semantica: "consulta textual del lenguaje tipado (§20.8): comparaciones =/!=/>/>=/</<=, contains/starts_with/ends_with, contains_any/contains_all, has()/missing(), and/or/not, dot-notation y namespaces frontmatter.*/document.*/graph.*. Se traduce al mismo Expression que `filter` (core::parse::parse) y se intersecta con `text`. LIMITACIÓN DECLARADA (DECISIONES §12, cerrada en E23-H14): NO hay tipo fecha. serde_yaml 0.9 no tipa timestamps, así que un `2026-07-23` sin comillas es un STRING y su comparación de orden es LEXICOGRÁFICA. Con fechas ISO-8601 bien formadas y de igual longitud eso coincide con el orden cronológico —el caso real funciona—, pero deja de coincidir con formatos mixtos (`2026-7-3`), con offsets de zona distintos, o al comparar una fecha con un datetime. Tampoco hay now() ni fechas relativas, ni ningún campo temporal del fichero (mtime/ctime) en document.*" }
       - { nombre: filter, tipo: "object (Expression JSON, §20.10)", requerido: false, semantica: "filtro estructurado equivalente a `where`: {field, operator, value} (operadores en nombres largos: equals/contains/…) o envolturas and/or/not/has/missing. Traduce al mismo Expression (core::filter::from_json). Si llegan `where` y `filter`, se combinan con AND (intersección)" }
-      - { nombre: sort, tipo: string, requerido: false, semantica: "reservado; el orden es siempre determinista (score desc, path asc)" }
+      - { nombre: include, tipo: "array<string>", requerido: false, semantica: "proyección de campos de FRONTMATTER sobre cada resultado (E23-H11), con la forma «frontmatter.<fieldPath>» (p. ej. «frontmatter.status», o el anidado «frontmatter.owner.name»: el sufijo se parsea con core::types::FieldPath::parse y se resuelve con ParsedFrontmatter::get, la única verdad de acceso a metadata). Cada hit gana entonces el mapa `frontmatter`, tecleado por el sufijo TAL CUAL se pidió (sin re-anidar ni repetir el prefijo) y con el valor YAML CRUDO, sin coerción (§20.2). Un campo ausente en un documento NO aparece en su mapa — nunca un null disfrazado, misma regla que el `include` de knowledge_get. Sin `include` el hit conserva su forma anterior. Una entrada que no empiece por «frontmatter.», o cuyo sufijo no sea un field path válido, → INVALID_SCHEMA: aceptar y descartar en silencio es justo el defecto que esta historia retira de `sort`, y aquí no cabe un enum en el schema porque los valores son abiertos. ⚠️ EL PREFIJO ES OBLIGATORIO AQUÍ, a diferencia de `where`/`filter` —parámetros de ESTA MISMA tool— donde es una abreviatura OPCIONAL (`core::parse::build_field_path` acepta la ruta desnuda). O sea que en la misma llamada `where: \"status = 'x'\"` funciona pero `include: [\"status\"]` es INVALID_SCHEMA. Es deliberado (obliga a un namespace explícito para que `include` pueda crecer a graph.*/document.* sin ambigüedad), pero es una trampa fácil de pisar. Nota sobre valores no representables en JSON: un flotante no finito viaja como `null` (serde_json lo mapea, no falla) y una clave no-string de un submapa se estringa (`{1: uno}` → `{\"1\":\"uno\"}`); un `null` EXPLÍCITO del frontmatter sí aparece como `null`, que es distinto de un campo ausente (ese no aparece). Fuente: tools.rs (parseo) + lodestar_app::FrontmatterProjection" }
       - { nombre: limit, tipo: integer, default: 20, minimo: 1, maximo: 100 }
       - { nombre: cursor, tipo: string, requerido: false, semantica: "cursor opaco (offset codificado en hex) devuelto en nextCursor" }
-    retorno: "SearchResults (lodestar_app): { results: [SearchResult], nextCursor, totalApproximate } — json directo, sin envelope. SearchResult NUNCA lleva body; desde E19-H05 tampoco los campos privilegiados OKF type/status/description/tags — solo path, title (derivado), snippet, score, revision (+ id, siempre ausente en v2)"
+    retorno: "SearchResults (lodestar_app): { results: [SearchResult], nextCursor, totalApproximate } — json directo, sin envelope. SearchResult NUNCA lleva body; desde E19-H05 tampoco los campos privilegiados OKF type/status/description/tags — solo path, title (derivado), snippet, score, revision (+ id, siempre ausente en v2), y desde E23-H11 `frontmatter` (solo si se pidió algo en `include`: el mapa de los field paths proyectados)"
     output_schema: "sí — schemars::schema_for!(SearchResults), vía lodestar_app::schemas::knowledge_search_schema()"
-    errores: ["WorkspaceError (un `where`/`filter` malformado → WorkspaceError::Core genérico; el mapeo fino a INVALID_SCHEMA es E20)"]
+    errores: ["WorkspaceError (un `where`/`filter` malformado → WorkspaceError::Core genérico; el mapeo fino a INVALID_SCHEMA es E20)", "INVALID_SCHEMA (E23-H11: una entrada de `include` que no sea «frontmatter.<fieldPath>» válida; se rechaza en el despachador, antes de tocar el workspace, y NO devuelve página de resultados)"]
     semantica: >-
       Localiza documentos por texto libre y por el lenguaje de consulta tipado (where/filter), con
       snippet compacto y `revision` (DocumentRevision), sin devolver cuerpos completos. El filtrado
       por metadata pasa enteramente por el lenguaje (§20.8/§20.10): `where` y `filter` equivalentes
       producen el mismo resultado, y ambos se intersectan con el `text`. Paginación por cursor-offset
       autosuficiente (reanuda idéntico en un proceso fresco). Reemplaza semánticamente a `query`
-      (ver §15).
+      (ver §15). El ORDEN es el único que hay desde E23-H11, que retiró el parámetro `sort`
+      (declarado «reservado» desde E10-H09 y recibido en un `_sort` que nadie leía): además de
+      mentir al agente, un criterio alternativo rompería el cursor-offset, que se apoya en que el
+      orden dependa solo del contenido.
 
   - nombre: knowledge_get
     fuente: crates/lodestar-mcp/src/tools.rs:231
@@ -333,7 +395,7 @@ tools:
     params:
       - { nombre: scope, tipo: "object (CheckScope)", requerido: true, semantica: "discriminado por «kind»: workspace (todos) | document{ref} | paths{paths} | affected{refs,depth} (vecindario/blast-radius, DocumentSet::neighborhood Direction::Both)" }
       - { nombre: minimumSeverity, tipo: string, requerido: false, valores: ["err", "warn", "info"], default: "info (ya excluye Pass)", semantica: "umbral de lo DEVUELTO; summary/valid se computan sobre todo el scope, antes del umbral" }
-      - { nombre: includeSuggestedFixes, tipo: boolean, default: false, semantica: "false vacía «fixes» en cada diagnóstico (hoy siempre vacío: E12-H07 los produce)" }
+      - { nombre: includeSuggestedFixes, tipo: boolean, default: false, semantica: "false vacía «fixes» en cada diagnóstico. HOY `fixes` ESTÁ SIEMPRE VACÍO, así que este parámetro apaga algo ya apagado: el único productor de `Fix` (`validate_relations`/`REL-TARGET`) desapareció con `core::schema` en E20-H03, y NADIE construye un `Fix` en todo el árbol. E23-H11 decidió CONSERVAR este lado de lectura —un array vacío se lee como «no hay sugerencias» y es verdad— y retirar solo la op de escritura `apply_fix`, que sí mentía: era invocable, fallaba siempre y devolvía DOCUMENT_NOT_FOUND, mandando al agente a buscar el problema donde no estaba. El análisis completo y la condición de entrada para reactivarlo, en `docs/PROPUESTA_FIXES.md`" }
       - { nombre: limit, tipo: integer, default: 100, minimo: 1, maximo: 1000 }
       - { nombre: cursor, tipo: string, requerido: false, semantica: "cursor opaco de paginación devuelto en nextCursor" }
     retorno: "CheckReport (lodestar_app): { valid, summary: CheckSummary, diagnostics: [Check], workspaceRevision, nextCursor } — json directo, sin envelope"
@@ -417,12 +479,12 @@ tools:
     params:
       - { nombre: expectedWorkspaceRevision, tipo: string, requerido: false, semantica: "control optimista a nivel de workspace («blake3:…»); si se omite se toma la revisión actual, si no coincide → REVISION_CONFLICT" }
       - { nombre: operations, tipo: "array<object>", requerido: "condicional (una de: operations | selection+operation)", semantica: "FORMA-ARRAY (E12-H08): operaciones propuestas, discriminadas por «op»; cada op puede llevar «expectedRevision» (DocumentRevision, control optimista por documento). Alternativa a la forma-objeto de selección masiva (selection+operation)" }
-      - { nombre: "operations[].op", tipo: string, requerido: true, valores: ["create", "patch_frontmatter", "replace_body", "replace_text", "edit_section", "move", "delete", "apply_fix"], semantica: "las 8 operaciones universales de §20.11 (E21-H01 retiró add_relation/remove_relation/transition_status: una relación es un enlace Markdown, un estado es un patch de frontmatter); cada una se despacha a su normalizador del core. Una op fuera del enum → INVALID_SCHEMA" }
+      - { nombre: "operations[].op", tipo: string, requerido: true, valores: ["create", "patch_frontmatter", "replace_body", "replace_text", "edit_section", "move", "delete"], semantica: "las 7 operaciones universales de §20.11 (E21-H01 retiró add_relation/remove_relation/transition_status: una relación es un enlace Markdown, un estado es un patch de frontmatter; y E23-H11 retiró la octava, `apply_fix`, que sin productor de Fix desde E20-H03 fallaba siempre y encima devolvía DOCUMENT_NOT_FOUND — ver `docs/PROPUESTA_FIXES.md`); cada una se despacha a su normalizador del core. Una op fuera del enum → INVALID_SCHEMA" }
       - { nombre: "operations[].expectedRevision", tipo: string, requerido: false, semantica: "DocumentRevision que el agente cree vigente («blake3:…»); si el documento cambió → REVISION_CONFLICT" }
-      - { nombre: "operations[].<params de cada op>", tipo: varios, requerido: "según la op", semantica: "E23-H10: el inputSchema DECLARA los parámetros de las 8 ops, cosa que no hacía hasta ahora — solo llevaba op/path/ref/expectedRevision, o sea ni uno de los parámetros reales de 7 de las 8. Para un producto cuyo público objetivo son agentes ese era el mayor agujero de usabilidad: el schema decía qué ops existen pero no cómo invocarlas. Los nombres los lee normalize_raw_op (lodestar-app) y son: create → frontmatter?/body? · patch_frontmatter → patch · replace_body → body · replace_text → find/replace/expectedOccurrences? · edit_section → headingPath/mode?/content · move → from/to/rewriteInboundLinks? · delete → inboundLinksPolicy? · apply_fix → fixId. Se declaran PLANOS (no con oneOf por op) porque el servidor no valida contra este schema: es declarativo, y un oneOf mal escrito confundiría al cliente sin que ningún test lo notara. Fuente: tools.rs::operacion_item_schema" }
+      - { nombre: "operations[].<params de cada op>", tipo: varios, requerido: "según la op", semantica: "E23-H10: el inputSchema DECLARA los parámetros de cada op, cosa que no hacía hasta ahora — solo llevaba op/path/ref/expectedRevision, o sea ni uno de los parámetros reales de 7 de las 8 ops de entonces. Para un producto cuyo público objetivo son agentes ese era el mayor agujero de usabilidad: el schema decía qué ops existen pero no cómo invocarlas. Los nombres los lee normalize_raw_op (lodestar-app) y son: create → frontmatter?/body? · patch_frontmatter → patch · replace_body → body · replace_text → find/replace/expectedOccurrences? · edit_section → headingPath/mode?/content · move → from/to/rewriteInboundLinks? · delete → inboundLinksPolicy?. (E23-H11 retiró el octavo juego de parámetros, «fixId», junto con su op — ver la nota de cabecera.) Se declaran PLANOS (no con oneOf por op) porque el servidor no valida contra este schema: es declarativo, y un oneOf mal escrito confundiría al cliente sin que ningún test lo notara. Fuente: tools.rs::operacion_item_schema" }
       - { nombre: "operations[].inboundLinksPolicy", tipo: string, requerido: "obligatorio para «delete» cuando el documento tiene backlinks (E21-H03, §Fase 12)", valores: ["reject", "remove_links"], semantica: "política ante enlaces entrantes de un «delete». §Fase 12 prohíbe elegirla en silencio: un «delete» con backlinks y SIN esta clave → INVALID_SCHEMA (falta un campo requerido), distinto del INBOUND_LINKS_EXIST que da «reject» explícito con backlinks. Sin backlinks no hay nada que decidir y la omisión se permite. Un valor no reconocido → INVALID_SCHEMA, con un mensaje que NOMBRA las válidas (E23-H05). «retarget» y «create_stub» se RETIRARON en E23-H05: estaban declaradas desde E12-H06 pero no implementadas (normalize_delete emitía solo el Delete, dejando los entrantes rotos), así que se aceptaban sin ejecutarse. No se implementan porque ninguna tiene semántica que inventar sin más datos del llamador: «retarget» no tiene campo de destino y «create_stub» no tiene criterio de contenido. Los valores válidos viven UNA vez, en core::types::InboundLinksPolicy::WIRE_VALUES" }
       - { nombre: selection, tipo: object, requerido: "condicional (forma-objeto de selección masiva, E21-H02)", semantica: "{ where: «<consulta E19>» | filter: {…} } — la consulta tipada (§20.8/§20.10, el MISMO Expression que knowledge_search) selecciona documentos del workspace; junto a «operation» sustituye al array «operations». Sin criterio (ni where ni filter), o malformado → INVALID_SCHEMA" }
-      - { nombre: operation, tipo: object, requerido: "condicional (con selection)", semantica: "{ <op universal>: {<parámetros>} } — la op codifica su tipo como CLAVE (p. ej. { patch_frontmatter: { status: \"review\" } }) y se expande a UNA NormalizedOperation por documento seleccionado. Solo ops con sentido en masa: patch_frontmatter | replace_text | delete | apply_fix (create/move no aplican a una selección de documentos existentes). Objeto que no sea de una sola clave admitida → INVALID_SCHEMA" }
+      - { nombre: operation, tipo: object, requerido: "condicional (con selection)", semantica: "{ <op universal>: {<parámetros>} } — la op codifica su tipo como CLAVE (p. ej. { patch_frontmatter: { status: \"review\" } }) y se expande a UNA NormalizedOperation por documento seleccionado. Solo ops con sentido en masa: patch_frontmatter | replace_text | delete (create/move no aplican a una selección de documentos existentes; la cuarta admitida, `apply_fix`, salió con su op en E23-H11). Objeto que no sea de una sola clave admitida → INVALID_SCHEMA" }
       - { nombre: policy, tipo: object, requerido: false, semantica: "{ requireValidResult?, allowWarnings? } (PlanPolicy, E12-H04); por defecto exige conformidad y permite warnings" }
     retorno: "PlanResult (lodestar_app): { changeSetId, baseWorkspaceRevision, planHash, canApply, expiresAt, normalizedOperations: [NormalizedOperation], risk, semanticDiff, impact: { affectedDocuments, affectedCount }, capturedRevisions: { «path»: «blake3:…» }, diagnosticsBefore, diagnosticsAfter } — json directo, sin envelope. `capturedRevisions` (E21-H02) lleva una entrada por documento de una selección masiva (su DocumentRevision, el snapshot de §Fase 12); vacío {} en la forma-array"
     output_schema: "sí — schemars::schema_for!(PlanResult), vía lodestar_app::schemas::change_plan_schema()"

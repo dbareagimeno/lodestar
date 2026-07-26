@@ -929,32 +929,17 @@ pub fn normalize_delete(
 }
 
 // ---------------------------------------------------------------------------
-// Normalización de `apply_fix` (E12-H07): materializa un arreglo sugerido por un diagnóstico.
+// NOTA E23-H11 — `normalize_apply_fix` (E12-H07) se RETIRÓ junto con la operación `apply_fix`.
 //
-// E21-H01 retiró las operaciones SEMÁNTICAS (`add_relation`/`remove_relation`/`transition_status`)
-// y sus helpers de relación: el modelo es universal (`§20.11`), una relación es un enlace Markdown y
-// un estado es una propiedad arbitraria del frontmatter, así que ambas se expresan con las
-// operaciones universales (una transición es un `PatchFrontmatter{status}`). Queda solo `apply_fix`,
-// que resuelve a la operación terminal que su `Fix` describa. PURO: sin I/O, sin reloj.
+// E21-H01 ya había retirado las operaciones SEMÁNTICAS (`add_relation`/`remove_relation`/
+// `transition_status`) y sus helpers de relación: el modelo es universal (`§20.11`), una relación es
+// un enlace Markdown y un estado es una propiedad arbitraria del frontmatter, así que ambas se
+// expresan con las operaciones universales (una transición es un `PatchFrontmatter{status}`).
+// Quedaba `apply_fix`, que desde que E20-H03 retiró `core::schema` —y con él el único productor de
+// `Fix`— devolvía SIEMPRE `CoreError::FixNotFound`: una operación anunciada en el enum del schema
+// que no podía tener éxito nunca. El lado de LECTURA de los fixes (`Fix`, `Check.fixes`,
+// `includeSuggestedFixes`) sigue intacto. Análisis en `docs/PROPUESTA_FIXES.md`.
 // ---------------------------------------------------------------------------
-
-/// Normaliza un `apply_fix`: materializa el `Fix` `safe` cuyo `fix_id` casa con `fix_id`, entre los
-/// diagnósticos recomputados del workspace — E12-H07.
-///
-/// Recompone el MISMO universo de diagnósticos que `lodestar check` (`all_checks`:
-/// `analyze().diagnostics`) y comprueba que exista un [`crate::types::Fix`] con `fix_id == fix_id` y
-/// `safe == true`; si no, falla con [`CoreError::FixNotFound`]. Tras el retiro de `core::schema`
-/// (E20-H03) su único productor de `Fix` (`validate_relations`/`REL-TARGET`) desapareció, así que
-/// hoy ningún diagnóstico adjunta un arreglo aplicable y `apply_fix` responde siempre
-/// [`CoreError::FixNotFound`]. La operación se conserva (Fase 12 la retira); un futuro productor de
-/// `Fix` la reactiva sin cambiar esta lógica. **Puro.**
-pub fn normalize_apply_fix(
-    _doc_set: &DocumentSet,
-    fix_id: &str,
-) -> Result<NormalizedOperation, CoreError> {
-    // Sin productores de `Fix` tras E20-H03 no hay arreglo materializable: `fix_id` no resuelve.
-    Err(CoreError::FixNotFound(fix_id.to_string()))
-}
 
 // ---------------------------------------------------------------------------
 // Aplicación en memoria de un plan (E12-H08): construir el `FileMap` hipotético.
@@ -1086,7 +1071,6 @@ fn op_variant_name(op: &NormalizedOperation) -> String {
         NormalizedOperation::ReplaceText { .. } => "replace_text",
         NormalizedOperation::Move { .. } => "move",
         NormalizedOperation::Delete { .. } => "delete",
-        NormalizedOperation::ApplyFix { .. } => "apply_fix",
     }
     .to_string()
 }

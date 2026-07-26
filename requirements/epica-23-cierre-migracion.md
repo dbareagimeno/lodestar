@@ -22,7 +22,7 @@ de diseño**; la implementación se planifica vía `/planificar` en una PR poste
 
 ## ⚠️ ESTADO — leer antes de implementar nada
 
-**15 de 17 historias están CERRADAS.** Esta épica se escribió entera de antemano, así que el texto de
+**16 de 17 historias están CERRADAS.** Esta épica se escribió entera de antemano, así que el texto de
 cada historia describe el **defecto original**, no lo que queda por hacer. Antes de tocar código,
 mira esta tabla y luego
 [`docs/E23_CONTINUACION.md`](../docs/E23_CONTINUACION.md), que lleva el estado real, el punto de
@@ -33,7 +33,7 @@ entrada al código de lo que falta y las trampas ya pisadas.
 | H01 · H02 · H03 · H04 · H05 (bloque A) | ✅ cerradas |
 | H06 · H07 · H08 · H09 (bloque B) | ✅ cerradas |
 | H10 (schema de escritura) | ✅ cerrada |
-| **H11** (descubribilidad) | 🟡 **A MEDIAS** — ver el aviso en su sección |
+| **H11** (descubribilidad) | ✅ cerrada |
 | **H12** (efectos secundarios) | ✅ cerrada |
 | **H13** (ledger) | 🟡 **A MEDIAS** — la mitad 1/2 está hecha |
 | H14 · H15 · H16 (bloques D y E) | ✅ cerradas |
@@ -394,6 +394,12 @@ entrada al código de lo que falta y las trampas ya pisadas.
     no aparece en su mapa — nunca un `null` disfrazado, misma regla que el `include` de
     `knowledge_get`. Reutiliza `ParsedFrontmatter::get(&FieldPath)`, que ya resuelve dot-paths sobre
     YAML arbitrario.
+  - **Un `include` que no empiece por `frontmatter.`, o cuyo sufijo no sea un `FieldPath` válido, es
+    `INVALID_SCHEMA`** — no se ignora en silencio. (Hueco que destapó la fase roja; se resuelve así
+    por coherencia con la tesis de la épica: *aceptar y descartar* es precisamente el defecto que
+    esta misma historia retira en `sort`. A diferencia del `include` de `knowledge_get`, aquí los
+    valores son abiertos y no caben en un `enum` del schema, así que la validación en ejecución es
+    el único sitio donde la superficie puede ser honesta.)
   - El listado de receipts va **acotado** (`receiptId`, `changeSetId`, `resultRevision` y nº de rutas
     afectadas): lo justo para elegir cuál revertir, no el receipt entero, que se sigue leyendo por
     `change_revert`. Orden por **mtime desc**, el mismo criterio que ya usa `gc_receipts` porque

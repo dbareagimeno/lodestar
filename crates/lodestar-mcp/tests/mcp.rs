@@ -363,6 +363,15 @@ fn status_capabilities_readonly() {
 // La firma de servicio ASUMIDA (el implementador la crea con su propia elección de tipos):
 //   App::knowledge_search(text, filters, sort, limit, cursor)
 //       -> Result<{ results:[…], nextCursor, totalApproximate }, WorkspaceError>
+//
+// ESTADO HOY (este bloque describe el contrato de E10-H09, que ya NO es el vigente):
+//   · `filters` (los filtros OKF privilegiados) se retiró en E19-H05 → `where`/`filter`, el
+//     lenguaje de consulta tipado; con él cayeron `type`/`status`/`description`/`tags` del
+//     `SearchResult`.
+//   · `sort` se retiró en E23-H11: se aceptaba y se IGNORABA en silencio. El orden determinista
+//     (score desc, path asc) es el único, y es la base del cursor-offset.
+//   · E23-H11 añadió `include: ["frontmatter.<fieldPath>"]` y el mapa `frontmatter` del hit.
+//   Firma vigente y forma del wire: `crates/lodestar-mcp/tests/descubribilidad.rs`.
 // ---------------------------------------------------------------------------
 
 /// Extrae los `path` de los `results` de una respuesta `knowledge_search`. Si la tool/servicio no

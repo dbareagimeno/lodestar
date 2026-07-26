@@ -115,7 +115,6 @@ pub struct ResourceLink {
 ///   E20-H03, ver [`CoreError`]).
 /// - `InvalidStatusTransition` → `InvalidSchema` (E12-H07; sin productor desde E20-H03, ver
 ///   [`CoreError`]).
-/// - `FixNotFound` → `DocumentNotFound` (`apply_fix` con un `fixId` inexistente/no aplicable, E12-H07).
 /// - `InvalidFieldPath` → `InvalidSchema` (ruta a propiedad de frontmatter mal formada, E16-H01:
 ///   entrada del agente que no designa ningún campo).
 /// - `UnreadableFrontmatter` → `InvalidSchema` (E16-H04: el bloque de frontmatter del documento
@@ -135,7 +134,9 @@ pub fn error_code(err: &CoreError) -> ErrorCode {
         CoreError::InboundLinksExist(_) => ErrorCode::InboundLinksExist,
         CoreError::RelationConstraintViolation(_) => ErrorCode::RelationConstraintViolation,
         CoreError::InvalidStatusTransition(_) => ErrorCode::InvalidSchema,
-        CoreError::FixNotFound(_) => ErrorCode::DocumentNotFound,
+        // NOTA E23-H11: el mapeo `FixNotFound → DocumentNotFound` desapareció con la variante y con
+        // la operación `apply_fix` que la producía. Era además un código mentiroso: el documento
+        // existía, y `DOCUMENT_NOT_FOUND` mandaba al agente a buscar el problema donde no estaba.
         // Invariante interno (E12-H08): el aplicador recibió una op sin normalizar a forma
         // terminal — fallo de infraestructura, no del agente.
         CoreError::OperationNotApplicable(_) => ErrorCode::InternalIoError,
@@ -324,6 +325,30 @@ pub struct WorkspaceStatus {
     pub capabilities: StatusCapabilities,
     /// Estado de recuperación de transacciones (siempre `pendingTransaction: false` hasta E13).
     pub recovery: StatusRecovery,
+    /// Los recibos de transacción persistidos, **del más reciente al más antiguo** (E23-H11).
+    /// Vacío si no hay ninguno — nunca ausente.
+    pub receipts: Vec<ReceiptSummary>,
+}
+
+/// Entrada del listado de recibos de [`WorkspaceStatus::receipts`] (E23-H11): **lo justo para
+/// elegir cuál revertir**, no el recibo entero.
+///
+/// El recibo completo (con `previousRevision`, `changedPaths` y el `semanticDiff`) se sigue leyendo
+/// por `change_revert`; `workspace_status` se llama en CADA sesión y su payload no puede crecer con
+/// hasta 20 recibos completos. `changedPathCount` es el número de rutas afectadas —eco directo de
+/// `ChangeReceipt::changed_paths`, que es de donde sale—, suficiente para reconocer la transacción
+/// sin arrastrar la lista.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ReceiptSummary {
+    /// El id con el que `change_revert` localiza el recibo y sus copias de recuperación.
+    pub receipt_id: ReceiptId,
+    /// El change set que originó la transacción.
+    pub change_set_id: ChangeSetId,
+    /// La revisión de workspace que dejó el apply: «el estado al que se volvería» al revertir.
+    pub result_revision: WorkspaceRevision,
+    /// Cuántas rutas tocó la transacción.
+    pub changed_path_count: usize,
 }
 
 /// Versión del formato de documento que reporta `workspace_status` (`ARCHITECTURE.md §19.6`).
@@ -443,6 +468,21 @@ impl App {
                 // de `.lodestar/runtime/`, la única fuente durable de «hay algo a medias».
                 pending_transaction: self.workspace.recovery_pending(),
             },
+            // E23-H11: los recibos persistidos, acotados a lo justo para elegir cuál revertir. Sin
+            // este listado, un agente que perdía el `receiptId` de `change_apply` no podía revertir
+            // aunque el recibo siguiera en disco. No es una 11ª tool: la superficie converge en 10
+            // (`§19.6`) y este es el sitio donde ya vive `recovery.pendingTransaction`.
+            receipts: self
+                .workspace
+                .list_receipts()
+                .into_iter()
+                .map(|r| ReceiptSummary {
+                    receipt_id: r.id,
+                    change_set_id: r.change_set_id,
+                    result_revision: r.result_revision,
+                    changed_path_count: r.changed_paths.len(),
+                })
+                .collect(),
         })
     }
 
@@ -474,8 +514,24 @@ impl App {
     /// ningún estado de sesión ni de la caché), un mismo cursor reanuda idénticamente en un servidor
     /// recién arrancado. `limit` por defecto 20, tope 100; `nextCursor` es `None` al agotar.
     ///
-    /// `sort` queda reservado para una futura elección de criterio explícito; hoy el orden es siempre
-    /// el determinista descrito arriba.
+    /// El orden es el **único** que hay: E23-H11 retiró el parámetro `sort`, que se aceptaba y se
+    /// **ignoraba en silencio** desde E10-H09 (`_sort` en esta misma firma). Además de mentirle al
+    /// agente, un criterio alternativo rompería el cursor-offset, que se apoya justo en que el orden
+    /// dependa solo del contenido. Reintroducirlo el día que se implemente es aditivo.
+    ///
+    /// **Proyección de frontmatter** (`include`, E23-H11): cada hit puede traer los campos de
+    /// frontmatter que pida el llamador, para que ver el `status` de 30 resultados no cueste 30
+    /// `knowledge_get` (el N+1 que dejó E19-H05 al retirar los campos privilegiados OKF). Las
+    /// proyecciones llegan ya parseadas ([`FrontmatterProjection`], que es quien valida la forma
+    /// `frontmatter.<fieldPath>` y rechaza lo demás con `INVALID_SCHEMA`) y se resuelven con
+    /// [`ParsedFrontmatter::get`](lodestar_core::types::ParsedFrontmatter::get) — la única verdad de
+    /// acceso a metadata (invariante #3), que además resuelve dot-paths anidados. Reglas:
+    /// - la clave del mapa es el **field path pedido tal cual** (`"status"`, `"owner.name"`), sin el
+    ///   prefijo `frontmatter.` y sin re-anidar;
+    /// - los valores viajan **crudos**, con su tipo YAML (un número es número, una lista es lista);
+    /// - un campo **ausente en ese documento no aparece** en su mapa — nunca un `null` disfrazado,
+    ///   misma regla que el `include` de [`App::knowledge_get`];
+    /// - sin `include`, el hit conserva exactamente su forma anterior (no aparece `frontmatter`).
     ///
     /// Cada resultado lleva `revision` = [`DocumentRevision`] del contenido en disco (blake3, E10-H03)
     /// y un `snippet` compacto NO vacío; la estructura [`SearchResult`] **no tiene** campo `body`, así
@@ -492,7 +548,7 @@ impl App {
         text: &str,
         where_expr: Option<&str>,
         filter: Option<&Value>,
-        _sort: Option<&str>,
+        include: &[FrontmatterProjection],
         limit: Option<usize>,
         cursor: Option<&str>,
     ) -> Result<SearchResults, WorkspaceError> {
@@ -545,6 +601,38 @@ impl App {
             };
             let revision = DocumentRevision::from_hash(*blake3::hash(raw.as_bytes()).as_bytes());
 
+            // Proyección pedida (E23-H11): solo si el llamador pidió algo, y solo lo que pidió —
+            // `knowledge_search` sigue siendo la tool de payload acotado (nada de volcar el
+            // frontmatter entero). Un campo que este documento no tiene, sencillamente no entra.
+            let frontmatter = (!include.is_empty()).then(|| {
+                let mut proyectado = BTreeMap::new();
+                for proyeccion in include {
+                    if let Some(valor) = fm.get(proyeccion.field_path()) {
+                        // YAML → JSON conservando el tipo (no hay coerción: `§20.2`): un número
+                        // sigue siendo número, una lista lista y un mapa mapa. Dos casos los
+                        // NORMALIZA `serde_json` en silencio, y conviene saber cuáles son porque no
+                        // fallan:
+                        // - un flotante **no finito** (`.nan`, `.inf`) no existe en JSON y viaja
+                        //   como `null` (no se omite): `nan: .nan` se proyecta `"nan": null`;
+                        // - una **clave escalar no-string** de un mapa se estringa:
+                        //   `config: {1: uno}` viaja como `{"1": "uno"}`.
+                        // El `Err` que descarta el campo queda para lo que de verdad no es
+                        // representable —una clave que es lista o mapa, legal en YAML—: entonces se
+                        // omite, como si el campo estuviera ausente, antes que tumbar la búsqueda
+                        // entera por un documento exótico.
+                        //
+                        // Lo que NO se colapsa (es el criterio de la historia, «nunca un `null`
+                        // disfrazado»): un campo **ausente** no aporta clave, mientras que un campo
+                        // **presente con `null` explícito** sí aparece, con valor `null` —
+                        // `ParsedFrontmatter::get` ya distingue los dos casos y aquí se respeta.
+                        if let Ok(json) = serde_json::to_value(valor) {
+                            proyectado.insert(proyeccion.key().to_string(), json);
+                        }
+                    }
+                }
+                proyectado
+            });
+
             results.push(SearchResult {
                 path: path.clone(),
                 id: None,
@@ -552,6 +640,7 @@ impl App {
                 snippet,
                 score: score_of(raw, &needle),
                 revision,
+                frontmatter,
             });
         }
 
@@ -2128,15 +2217,10 @@ fn normalize_raw_op(
             };
             plan::normalize_delete(doc_set, &path, policy).map_err(|e| error_code(&e))
         }
-        "apply_fix" => {
-            let fix_id = op
-                .get("fixId")
-                .and_then(Value::as_str)
-                .ok_or(ErrorCode::InvalidSchema)?;
-            plan::normalize_apply_fix(doc_set, fix_id)
-                .map(one)
-                .map_err(|e| error_code(&e))
-        }
+        // NOTA E23-H11: `"apply_fix"` ya NO tiene brazo propio — cae en el de por defecto, o sea
+        // que un `apply_fix` es hoy una op desconocida (`INVALID_SCHEMA`), el mismo trato que
+        // `transition_status` desde E21-H01. Antes llegaba a `normalize_apply_fix`, que devolvía
+        // siempre `FixNotFound` → `DOCUMENT_NOT_FOUND` (código que apuntaba al sitio equivocado).
         _ => Err(ErrorCode::InvalidSchema),
     }
 }
@@ -2152,9 +2236,10 @@ fn normalize_raw_op(
 /// [`Expression`] que `knowledge_search`) se evalúa contra **cada** documento del workspace; los que
 /// casan reciben **una** [`NormalizedOperation`] cada uno, expandiendo la `operation` (que codifica el
 /// tipo como CLAVE, `{patch_frontmatter: {…}}`) con ese `path`. Solo se admiten las ops con sentido en
-/// masa (`patch_frontmatter`/`replace_text`/`delete`/`apply_fix`); `create` no aplica a documentos
-/// existentes. Cada documento seleccionado captura además su [`DocumentRevision`] actual (el mismo
-/// blake3 que reporta `knowledge_get`) — el *snapshot de revisiones* de `§Fase 12`.
+/// masa (`patch_frontmatter`/`replace_text`/`delete` — `apply_fix` salió con la op en E23-H11);
+/// `create` no aplica a documentos existentes. Cada documento seleccionado captura además su
+/// [`DocumentRevision`] actual (el mismo blake3 que reporta `knowledge_get`) — el *snapshot de
+/// revisiones* de `§Fase 12`.
 ///
 /// Una selección que no casa ningún documento devuelve un plan **vacío**, sin error. Un `where`/
 /// `filter` malformado, una `operation` que no es un objeto de una sola clave, o una op no admitida →
@@ -2244,7 +2329,9 @@ fn single_operation(operation: &Value) -> Result<(&str, &Value), ErrorCode> {
     }
     let (kind, params) = obj.iter().next().ok_or(ErrorCode::InvalidSchema)?;
     match kind.as_str() {
-        "patch_frontmatter" | "replace_text" | "delete" | "apply_fix" => Ok((kind, params)),
+        // E23-H11: `apply_fix` salió de la lista blanca con la op. Una selección masiva que la pida
+        // es `INVALID_SCHEMA` (op no admitida en masa), igual que si pidiera `create`.
+        "patch_frontmatter" | "replace_text" | "delete" => Ok((kind, params)),
         _ => Err(ErrorCode::InvalidSchema),
     }
 }
@@ -2252,7 +2339,7 @@ fn single_operation(operation: &Value) -> Result<(&str, &Value), ErrorCode> {
 /// Construye la op cruda `{op, ref:{path}, …}` para un documento seleccionado, de forma que
 /// [`normalize_raw_op`] la despache igual que si la hubiera enviado el agente sueltamente. El valor de
 /// `patch_frontmatter` ES el merge-patch (va bajo la clave `patch`); las demás ops llevan sus
-/// parámetros sueltos (`find`/`replace`, `inboundLinksPolicy`, `fixId`…).
+/// parámetros sueltos (`find`/`replace`, `inboundLinksPolicy`…).
 fn build_selected_op(kind: &str, params: &Value, path: &RelPath) -> Result<Value, ErrorCode> {
     let mut obj = serde_json::Map::new();
     obj.insert("op".to_string(), Value::String(kind.to_string()));
@@ -2695,6 +2782,73 @@ pub struct SearchResult {
     pub score: f64,
     /// Revisión de contenido del documento (`blake3:…`, == [`DocumentRevision`] de E10-H03).
     pub revision: DocumentRevision,
+    /// Los campos de frontmatter **pedidos** en `include` (E23-H11), tecleados por el field path
+    /// tal y como se pidió (`"status"`, `"owner.name"`) y con su **valor YAML crudo**.
+    ///
+    /// `None` —campo ausente del wire— si el llamador no pidió ninguno: sin `include`, el hit
+    /// conserva byte a byte su forma anterior. Un campo pedido que este documento **no tiene** no
+    /// aparece como clave (nunca un `null` disfrazado), así que el mapa puede ser vacío; un campo
+    /// **presente con `null` explícito** sí aparece, con valor `null`. Son dos estados distintos a
+    /// propósito, y [`ParsedFrontmatter::get`](lodestar_core::types::ParsedFrontmatter::get) ya los
+    /// distingue.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frontmatter: Option<BTreeMap<String, Value>>,
+}
+
+/// Una proyección de frontmatter pedida en el `include` de `knowledge_search` (E23-H11):
+/// la entrada de wire `"frontmatter.<fieldPath>"` ya validada y parseada.
+///
+/// Existe como tipo —y no como un `&str` que cada capa reinterprete— para que el parseo ocurra
+/// **una vez**, en la frontera, y para que [`App::knowledge_search`] reciba algo que no puede estar
+/// mal formado. La clave que viajará en la respuesta es el sufijo **tal cual se pidió**, de modo que
+/// quien escribió `frontmatter.owner.name` lee la respuesta con esa misma cadena.
+#[derive(Debug, Clone)]
+pub struct FrontmatterProjection {
+    /// El sufijo pedido, sin el prefijo `frontmatter.` — la clave del mapa de la respuesta.
+    key: String,
+    /// El mismo sufijo ya parseado a [`FieldPath`], que es quien resuelve el dot-path.
+    field_path: FieldPath,
+}
+
+/// Prefijo obligatorio de cada entrada del `include` de `knowledge_search`.
+const SEARCH_INCLUDE_PREFIX: &str = "frontmatter.";
+
+impl FrontmatterProjection {
+    /// Parsea **una** entrada del `include`.
+    ///
+    /// # Errores
+    /// [`ErrorCode::InvalidSchema`] si la entrada no empieza por `frontmatter.` o si su sufijo no es
+    /// un [`FieldPath`] válido (vacío, o con algún segmento vacío como `a..b`).
+    pub fn parse(entrada: &str) -> Result<Self, ErrorCode> {
+        let key = entrada
+            .strip_prefix(SEARCH_INCLUDE_PREFIX)
+            .ok_or(ErrorCode::InvalidSchema)?;
+        let field_path = FieldPath::parse(key).map_err(|_| ErrorCode::InvalidSchema)?;
+        Ok(FrontmatterProjection {
+            key: key.to_string(),
+            field_path,
+        })
+    }
+
+    /// Parsea la lista entera: **todo o nada**. Una entrada válida no redime a la inválida que la
+    /// acompaña — aceptar y descartar en silencio es justamente el defecto que E23-H11 retira del
+    /// parámetro `sort`.
+    ///
+    /// # Errores
+    /// [`ErrorCode::InvalidSchema`] en cuanto una entrada no sea válida (ver [`Self::parse`]).
+    pub fn parse_all(entradas: &[String]) -> Result<Vec<Self>, ErrorCode> {
+        entradas.iter().map(|e| Self::parse(e)).collect()
+    }
+
+    /// La clave con la que este campo viaja en la respuesta (el sufijo pedido).
+    pub fn key(&self) -> &str {
+        &self.key
+    }
+
+    /// El [`FieldPath`] con el que se resuelve el valor sobre el frontmatter del documento.
+    pub fn field_path(&self) -> &FieldPath {
+        &self.field_path
+    }
 }
 
 /// Respuesta de `knowledge_search`: la página de resultados, el cursor a la siguiente página (o

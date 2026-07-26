@@ -58,12 +58,12 @@ pub enum CoreError {
     #[error("transición de estado no permitida: {0}")]
     InvalidStatusTransition(String),
 
-    /// Al normalizar `apply_fix` (E12-H07), el `fix_id` pedido no corresponde a ningún `Fix`
-    /// `safe` de los diagnósticos recomputados del workspace (desconocido, ya resuelto, o no `safe`).
-    /// El payload es el `fix_id` no encontrado. Mapea a `ErrorCode::DocumentNotFound`.
-    #[error("fix no encontrado o no aplicable: {0}")]
-    FixNotFound(String),
-
+    // NOTA E23-H11: `FixNotFound` se RETIRÓ con la operación `apply_fix` que la producía. Era el
+    // único error del catálogo sin más salida que el fracaso —`normalize_apply_fix` la devolvía
+    // SIEMPRE desde que E20-H03 dejó sin productor a los `Fix`— y encima mapeaba a
+    // `ErrorCode::DocumentNotFound`, mandando al agente a buscar el problema en un documento que
+    // existía. El lado de LECTURA de los fixes (`Fix`, `Check.fixes`, `includeSuggestedFixes`) sigue
+    // intacto: un array vacío dice la verdad. Análisis completo en `docs/PROPUESTA_FIXES.md`.
     /// Al materializar un plan en memoria (E12-H08, [`crate::plan::apply_normalized_ops`]) se
     /// recibió una [`crate::types::NormalizedOperation`] en forma NO terminal (una variante
     /// semántica/de contenido que los normalizadores de E12-H05/H06/H07 ya resuelven a

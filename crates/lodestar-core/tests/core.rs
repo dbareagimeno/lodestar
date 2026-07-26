@@ -2022,10 +2022,14 @@ fn delete_remove_links() {
 //   · `transicion_invalida`   (validaba `to` contra `allowedStatuses` → InvalidStatusTransition)
 //   · `apply_fix_safe`        (materializaba el `Fix{safe}` del `REL-TARGET` de una relación rota)
 // Con `core::schema` desaparecen tipos, `RelationDef`, `allowedStatuses` y el productor de `Fix`
-// (`validate_relations`). Las operaciones `add_relation`/`transition_status` sobreviven SIN validar
-// (escriben el campo del frontmatter tal cual, `§20.10`) y `apply_fix` responde siempre
-// `FixNotFound` (ningún diagnóstico adjunta fixes); Fase 12 retira las tres. Su normalización
-// trivial ya no tiene criterio propio que fijar aquí.
+// (`validate_relations`). Su normalización trivial ya no tiene criterio propio que fijar aquí.
+//
+// Las TRES operaciones están hoy RETIRADAS: `add_relation`/`transition_status` en E21-H01 (una
+// relación es un enlace Markdown y un estado es un patch de frontmatter) y `apply_fix` en E23-H11
+// —se anunciaba como una de las 8 ops universales y siempre fallaba con `FixNotFound`, mapeado
+// además a `DOCUMENT_NOT_FOUND`, un código que apunta al sitio equivocado—. La mitad de LECTURA
+// sobrevive intacta (`Fix`, `Check.fixes`, `includeSuggestedFixes`): un array vacío se lee como
+// «no hay sugerencias» y eso es verdad. Análisis en `docs/PROPUESTA_FIXES.md`.
 // ---------------------------------------------------------------------------
 
 // ===========================================================================

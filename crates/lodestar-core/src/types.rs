@@ -1442,12 +1442,19 @@ impl InboundLinksPolicy {
 
 schema_derive! {
 /// Una operación YA normalizada (resuelta a path(s) y contenido/patch concretos) dentro de un
-/// `ChangeSet`. Las **8 operaciones universales** de `§20.11` (contenido: E12-H05 · estructura:
-/// E12-H06 · `apply_fix`: E12-H07); aquí solo su forma — los campos son razonables para lo que cada
-/// operación resuelve, sin cerrar la lógica que los produce. E21-H01 retiró las 3 operaciones
-/// semánticas (`add_relation`/`remove_relation`/`transition_status`): una relación es un enlace
-/// Markdown y un estado es una propiedad arbitraria del frontmatter (`§20.11`), así que ambas se
-/// expresan con las universales (una transición es un `PatchFrontmatter`).
+/// `ChangeSet`. Las **7 operaciones universales** de `§20.11` (contenido: E12-H05 · estructura:
+/// E12-H06); aquí solo su forma — los campos son razonables para lo que cada operación resuelve,
+/// sin cerrar la lógica que los produce. E21-H01 retiró las 3 operaciones semánticas
+/// (`add_relation`/`remove_relation`/`transition_status`): una relación es un enlace Markdown y un
+/// estado es una propiedad arbitraria del frontmatter (`§20.11`), así que ambas se expresan con las
+/// universales (una transición es un `PatchFrontmatter`).
+///
+/// **E23-H11 retiró `ApplyFix { fix_id }`**, con lo que las universales pasan de 8 a 7: desde que
+/// E20-H03 dejó sin productor a los `Fix`, `normalize_apply_fix` devolvía SIEMPRE
+/// `CoreError::FixNotFound`, así que la op se anunciaba en el enum del `inputSchema` y en el
+/// contrato pero no podía tener éxito nunca. El lado de LECTURA (`Fix`, `Check.fixes`,
+/// `includeSuggestedFixes`) NO se toca: un array vacío de sugerencias dice la verdad, una op
+/// invocable que siempre falla no. Ver `docs/PROPUESTA_FIXES.md`.
 ///
 /// El tag de wire (`op`) usa los mismos nombres snake_case que `proposedOperation.kind`
 /// (`contracts/mcp.yml`) — un solo vocabulario de tipos de operación en el contrato.
@@ -1509,8 +1516,8 @@ pub enum NormalizedOperation {
         path: RelPath,
         inbound_links_policy: InboundLinksPolicy,
     },
-    /// Materializa un `Fix` `safe` sugerido por un diagnóstico previo (`Fix.fix_id`).
-    ApplyFix { fix_id: String },
+    // NOTA E23-H11: la variante `ApplyFix { fix_id }` se RETIRÓ. Ver la nota de la cabecera de este
+    // enum y `docs/PROPUESTA_FIXES.md`.
 }
 }
 
