@@ -7,7 +7,7 @@ y el proyecto sigue [Versionado Semántico](https://semver.org/lang/es/).
 
 ## [No publicado]
 
-## [0.3.0] - 2026-07-24
+## [0.3.0] - 2026-07-28
 
 **Migración de OKF a workspaces Markdown universales** (`ARCHITECTURE.md §20`, ratificado el
 2026-07-23; épicas E15–E22; fuente `docs/REFACTOR_PHASE_2.md`). lodestar deja de exigir el formato
@@ -245,6 +245,7 @@ y pipeline de release multiplataforma.
 - **Heading por defecto de los conceptos**: ahora `# {Tipo} - {Nombre}` (antes
   `# Resumen`).
 
-[No publicado]: https://github.com/dbareagimeno/lodestar/compare/v0.2.0...HEAD
+[No publicado]: https://github.com/dbareagimeno/lodestar/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/dbareagimeno/lodestar/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/dbareagimeno/lodestar/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/dbareagimeno/lodestar/releases/tag/v0.1.0
