@@ -62,7 +62,7 @@ La pirámide del flujo, de arriba abajo — cada nivel tiene su puerta:
   evolucionar, se hace en esa rama, no en el flujo de este repo.
 - **Bugfix**: no hace falta historia completa — test de regresión primero (rojo, reproduce el bug),
   fix (verde), `/juzgar` simple con el issue como spec. Si el bug es de paridad con el prototipo,
-  el test va además al arnés diferencial o a la sección «Regresiones de paridad con el
+  (hasta `E15-H04`, el test iba además al arnés diferencial; hoy va a «Regresiones de paridad con el
   prototipo» de `core.rs`.
 - **Refactor**: los tests existentes son la red. `/mutantes` con el mismo alcance **antes y
   después**: si tras el refactor sobreviven mutantes que antes morían, la suite se debilitó.
@@ -82,7 +82,7 @@ mismo), y el orquestador tampoco escribe código en `/tdd` para no contaminar lo
 ## Decisiones de proceso ya tomadas (no relitigar sin motivo)
 
 - **BDD sin Gherkin ejecutable**: los escenarios Dado/Cuando/Entonces viven en los criterios de las
-  historias y mapean a tests Rust nombrados. No se introduce cucumber-rs: el arnés diferencial
+  historias y mapean a tests Rust nombrados. No se introduce cucumber-rs: el arnés diferencial (retirado en `E15-H04`)
   JS-vs-Rust ya es el oráculo de comportamiento vivo, y un runner Gherkin duplicaría maquinaria.
 - **Mutation testing a demanda, sin CI**: `/mutantes` scoped a lo que tocó cada historia. Se
   integrará en CI solo si demuestra valor sostenido.

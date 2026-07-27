@@ -64,7 +64,7 @@ fn patch(pares: &[(&str, &str)]) -> FrontmatterPatch {
 fn create_conforme(path: &str, title: &str) -> NormalizedOperation {
     NormalizedOperation::Create {
         path: RelPath::new(path).unwrap(),
-        frontmatter: patch(&[("type", "Nota"), ("title", title)]),
+        frontmatter: Some(patch(&[("type", "Nota"), ("title", title)])),
         body: Some(format!("# {title}\n\ncuerpo\n")),
     }
 }
@@ -170,7 +170,7 @@ fn detecta_escritura_externa() {
     let root = dir.path();
     escribe_config(root, "knowledge", "src");
 
-    // Un concepto writable canónico previo, conforme, sobre el que se "planifica".
+    // Un documento writable canónico previo, conforme, sobre el que se "planifica".
     std::fs::create_dir_all(root.join("knowledge")).unwrap();
     let nota_disk = root.join("knowledge/nota.md");
     std::fs::write(

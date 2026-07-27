@@ -35,8 +35,8 @@ cargo fmt --all --check
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked
 ```
-El arnés diferencial necesita `npm ci` en `prototype/harness/` para no saltarse — si tu historia
-tiene sondas diferenciales, asegúrate de que corren de verdad.
+El arnés diferencial (y con él la dependencia de node/`npm ci`) se RETIRÓ en `E15-H04`: el
+prototipo dejó de ser spec de comportamiento. No hay sondas diferenciales que hacer correr.
 
 ## Salida
 Qué implementaste y dónde, la evidencia del verde (resumen de `cargo test` + gates), cualquier

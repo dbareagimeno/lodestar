@@ -7,6 +7,127 @@ y el proyecto sigue [Versionado Semántico](https://semver.org/lang/es/).
 
 ## [No publicado]
 
+## [0.3.0] - 2026-07-24
+
+**Migración de OKF a workspaces Markdown universales** (`ARCHITECTURE.md §20`, ratificado el
+2026-07-23; épicas E15–E22; fuente `docs/REFACTOR_PHASE_2.md`). lodestar deja de exigir el formato
+documental propio **OKF** y pasa a operar sobre **cualquier red de ficheros Markdown contenida en un
+proyecto**: `cd my-project && lodestar-mcp` funciona sin `init`, sin `.lodestar/`, sin `index.md`,
+sin frontmatter obligatorio.
+
+> **⚠️ Versión INCOMPATIBLE con v0.2.x.** El modelo documental, la superficie MCP y el DDL del store
+> cambian. La cache `.lodestar/index.db` se reconstruye automáticamente; los `.md` OKF existentes
+> siguen siendo Markdown válido (ver `migrate-from-okf --dry-run`), pero pierden la semántica especial
+> de OKF.
+
+### Cambiado
+
+- **El `cwd` es el workspace** (E15): `lodestar-mcp` arranca desde cualquier directorio (`--root` para
+  fijarlo); descubrimiento recursivo de todos los `**/*.md` respetando `.gitignore`/`.lodestarignore`.
+- **Modelo documental genérico** (E16): el frontmatter es **YAML arbitrario** con sus tipos reales
+  (sin campos conocidos, sin `type` obligatorio); ningún nombre de fichero (`index.md`, `README.md`,
+  `log.md`) activa reglas especiales; título derivado (`frontmatter.title` → primer H1 → nombre del
+  fichero); `patch_frontmatter` **quirúrgico** que no reescribe el bloque salvo que sea necesario y
+  no puede destruir un frontmatter ilegible.
+- **Enlaces Markdown estándar** (E17): resueltos **solo por path** (inline, de referencia, con
+  fragmento, anchors, externos), clasificados en `LinkTarget` (documento / fichero del proyecto /
+  externo / self-anchor / roto / escapa). Grafo universal: todos los `.md` son nodos.
+- **Store v2** (E18): DDL `documents`/`metadata`/`links`/`diagnostics` sin columnas OKF; metadata
+  indexada por field path recursivo con su tipo; FTS sin campos privilegiados.
+- **Lenguaje de consulta tipado** (E19): `where` textual y `filter` JSON producen el mismo AST y el
+  mismo resultado; dot-notation, listas, existencia, namespaces `document.*`/`graph.*`; **sin coerción
+  implícita** (`priority >= "high"` es un error de tipo). Sustituye la DSL de subcadena.
+- **Validación genérica** (E20): diagnósticos mínimos de `§20.9` (nada de «falta `type`»);
+  `metadata_inspect` (catálogo de propiedades e inspección de campo) sustituye a `schema_inspect`;
+  política `rejectNewErrors`/`allowExistingErrors` (se puede reparar un repo que ya tiene problemas).
+- **Operaciones transaccionales universales** (E21): las **7** de `§20.11` (`create`,
+  `patch_frontmatter`, `replace_body`, `replace_text`, `edit_section`, `move`,
+  `delete`), selecciones masivas por consulta, y `move` que reescribe
+  los backlinks relativos (incluidas las definiciones de referencia). El motor transaccional
+  (staging/journal/locks/recovery/receipt/revert) **no cambia**.
+
+### Retirado
+
+- **OKF como formato obligatorio**: fuera `core::schema` (`DocType`, `requiredFields`,
+  `allowedStatuses`, relaciones tipadas, `.lodestar/schema.yaml`), los códigos `OKF-*`/`SCHEMA-*`/
+  `REL-*`, `in_index`/`okf_version` como semántica, y las 5 operaciones semánticas (`add_relation`,
+  `remove_relation`, `transition_status`, `deprecate`, `replace_concept`).
+- **git**: el crate `lodestar-vcs` se **borra** del repo (era una capacidad dormida).
+- **Generadores e intercambio**: `lodestar init`/`index`/`tags`/`export`/`import`.
+- **El prototipo JS** como spec de comportamiento (la spec pasa a ser `docs/REFACTOR_PHASE_2.md`).
+- Terminología OKF de la API pública: `Concept`→`Document`, `Bundle`→`Workspace` como **concepto**
+  (`ARCHITECTURE §20.3`) y `DocumentSet` como **tipo** del core que lo sustituye (`§20.4`),
+  `Conformance`→`Validation`, `CONCEPT_NOT_FOUND`→`DOCUMENT_NOT_FOUND`.
+
+### Añadido
+
+- **`lodestar migrate-from-okf --dry-run`**: diagnóstico de cortesía que detecta convenciones OKF
+  legadas (`index.md` raíz, índices anidados, `okf_version`, índices de tags) **sin modificar ningún
+  fichero**.
+
+### Cierre de la migración (E23)
+
+Épica de cierre, abierta por la revisión de la PR #17 (2026-07-25), que salda los defectos que la
+migración dejó vivos **antes** de publicar. Se recogen aquí porque v0.3.0 no llegó a publicarse sin
+ellos.
+
+**Corregido**
+
+- **Abrir un workspace ya no modifica el proyecto.** `lodestar check` y arrancar `lodestar-mcp`
+  —incluso en perfil `readonly`— reescribían el `.gitignore` y creaban `.lodestar/runtime/` antes de
+  leer nada. Ahora abrir es **hermético**: los dos efectos ocurren en los cuatro puntos que van a
+  escribir de verdad.
+- **`lodestar check` y `knowledge_check` daban veredictos contradictorios** sobre el mismo
+  workspace: la validación ignoraba la sección `validation` de la config y los diagnósticos de
+  descubrimiento.
+- **`recovery.pendingTransaction` era un `false` literal**: tras un crash, la primera tool que
+  llamaba un agente le mentía.
+- **No se podía mover una nota que enlazara a sus vecinas**: los salientes del documento movido no
+  se recalculaban y el gate lo veía como errores nuevos.
+- **`create` escribía `type: ''`** (residuo OKF) y un `title` que nadie pidió.
+- **Un lock huérfano era irrecuperable**: un proceso muerto por SIGKILL cerraba la base a la
+  escritura para siempre. Ahora se reclama por TTL + PID.
+- **NFC/NFD**: un enlace correcto tumbaba el CI en macOS. Resolución tolerante con aviso, sin
+  normalizar la ruta canónica.
+- **Corrupción real**: reescribir el cuerpo de un documento **sin frontmatter** le inyectaba
+  `---\n{}\n---`, así que mover un documento corrompía de una tacada todos sus enlazantes sin
+  frontmatter.
+
+**Añadido**
+
+- **Proyección de frontmatter en `knowledge_search`**: `include: ["frontmatter.status"]` (y
+  anidados, `frontmatter.owner.name`) devuelve esos campos en cada resultado, con sus tipos YAML
+  reales. Antes, ver el `status` de 30 resultados costaba 30 `knowledge_get`.
+- **`workspace_status` lista los recibos** (`receiptId`, `changeSetId`, `resultRevision`,
+  `changedPathCount`): perder el `receiptId` dejaba el undo inalcanzable pese a estar persistido.
+- **`metadata_inspect` explota las listas** al contar valores, así que ya se puede obtener el
+  vocabulario de tags de una base.
+- El `inputSchema` de `change_plan` declara **los 18 parámetros** que el código lee, no 4.
+
+**Retirado**
+
+- **`apply_fix`** (las ops universales quedan en **7**): sin productor de `Fix` desde E20-H03 fallaba
+  siempre, y encima devolvía `DOCUMENT_NOT_FOUND`. El lado de lectura (`fixes`,
+  `includeSuggestedFixes`) se conserva. Ver `docs/PROPUESTA_FIXES.md`.
+- **`sort` en `knowledge_search`**: se aceptaba y se ignoraba en silencio. El orden es siempre
+  determinista (score desc, path asc).
+- **`retarget` y `create_stub`** como políticas de `delete`: se aceptaban **sin ejecutarse**,
+  dejando los enlaces entrantes rotos.
+- **`implemented_by`/`verified_by`** como claves de frontmatter privilegiadas, y con ellas
+  `include:["externalReferences"]` en `knowledge_get`. Ningún nombre de campo tiene ya semántica
+  impuesta. Apuntar a código sigue siendo posible con un enlace Markdown normal.
+- **`Workspace::open_ephemeral`**: quedó idéntico a `open` cuando abrir pasó a ser hermético.
+
+**Cambiado (wire)**
+
+- `conformant` → `valid` · `requireConformantResult` → `requireValidResult` · `allowNonconformant` →
+  `allowInvalid` · `NONCONFORMANT_RESULT` → `INVALID_RESULT`; y la salida humana de `check`,
+  `CONFORME` → `VÁLIDO`. El catálogo de errores sigue teniendo 16 filas: se sustituyó una, no se
+  añadió ninguna.
+- **Las comparaciones de fecha son lexicográficas** y ahora está declarado: `serde_yaml` 0.9 no tipa
+  timestamps, así que un `2026-07-23` sin comillas es un string. Con ISO-8601 bien formado coincide
+  con el orden cronológico; con formatos mixtos, no.
+
 ## [0.2.0] - 2026-07-23
 
 **Giro a motor headless de integridad semántica** (`ARCHITECTURE.md §19`, ratificado el

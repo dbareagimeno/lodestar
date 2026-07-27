@@ -28,7 +28,6 @@ use std::time::{Duration, SystemTime};
 
 use lodestar_core::types::{ChangeReceipt, ReceiptId};
 
-use crate::config::WorkspaceConfig;
 use crate::{Workspace, WorkspaceError};
 
 /// Nombre de fichero saneado para un `ReceiptId` (E13-H07), mismo criterio que staging (E13-H01,
@@ -158,6 +157,51 @@ impl Workspace {
             .map_err(|e| WorkspaceError::Io(format!("receipt corrupto {}: {e}", path.display())))
     }
 
+    /// Lista los recibos persistidos, **del más reciente al más antiguo** (E23-H11).
+    ///
+    /// Sin esto, un agente que pierde el `receiptId` que devolvió `change_apply` no puede revertir
+    /// aunque el recibo siga en disco: el undo era inalcanzable por accidente de memoria del
+    /// llamador. Lo consume `workspace_status`, que ya es donde vive `recovery.pendingTransaction`.
+    ///
+    /// El orden es por **mtime descendente** — el mismo criterio de antigüedad que usa
+    /// [`Workspace::gc_receipts`], por la misma razón: `ChangeReceipt` no lleva timestamp propio (es
+    /// runtime desechable) y el mtime del `.json` es el único reloj disponible. Descendente porque
+    /// el recibo que se quiere revertir es casi siempre el último.
+    ///
+    /// **Tolerante como el resto del runtime**: un directorio de recibos ausente es una lista
+    /// **vacía**, no un error (mismo patrón que `gc_receipts` y `pending_journals`), y un `.json`
+    /// ilegible o corrupto se salta en vez de tumbar la llamada — es una tool de estado, y un
+    /// recibo roto no puede impedir que el agente vea los sanos. La lista está acotada de fábrica
+    /// por `transactions.maximumReceipts` (default 20), que el GC hace cumplir.
+    pub fn list_receipts(&self) -> Vec<ChangeReceipt> {
+        let Ok(read_dir) = std::fs::read_dir(self.receipts_dir()) else {
+            return Vec::new();
+        };
+
+        let mut entries: Vec<(SystemTime, ChangeReceipt)> = Vec::new();
+        for entry in read_dir.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|x| x.to_str()) != Some("json") {
+                continue;
+            }
+            let Ok(mtime) = entry.metadata().and_then(|m| m.modified()) else {
+                continue;
+            };
+            let Ok(raw) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            let Ok(receipt) = serde_json::from_str::<ChangeReceipt>(&raw) else {
+                continue;
+            };
+            entries.push((mtime, receipt));
+        }
+
+        // Más reciente primero; a igualdad de mtime (relojes de baja resolución), el id desempata
+        // para que el orden sea total y reproducible.
+        entries.sort_by(|(ma, ra), (mb, rb)| mb.cmp(ma).then_with(|| ra.id.0.cmp(&rb.id.0)));
+        entries.into_iter().map(|(_, receipt)| receipt).collect()
+    }
+
     /// Recolecta los recibos caducados (`transactions.retainReceiptsFor`) o excedentes
     /// (`transactions.maximumReceipts`) según la config del workspace (E9-H05, default `24h`/`20`),
     /// borrando además las copias de recuperación asociadas
@@ -178,8 +222,7 @@ impl Workspace {
     /// - [`WorkspaceError::Io`] si falla el borrado de un `.json` purgado o de su copia de
     ///   recuperación.
     pub fn gc_receipts(&self) -> Result<(), WorkspaceError> {
-        let cfg = WorkspaceConfig::load(&self.root).unwrap_or_default();
-        let ttl = parse_retention(&cfg.transactions.retain_receipts_for);
+        let ttl = parse_retention(&self.config().transactions.retain_receipts_for);
 
         let dir = self.receipts_dir();
         let Ok(read_dir) = std::fs::read_dir(&dir) else {
@@ -212,7 +255,7 @@ impl Workspace {
         let mut purge: BTreeSet<String> = BTreeSet::new();
 
         // (a) Excedentes: los más antiguos por encima de `maximumReceipts`.
-        let max = cfg.transactions.maximum_receipts;
+        let max = self.config().transactions.maximum_receipts;
         if entries.len() > max {
             let excess = entries.len() - max;
             for (_, _, stem) in entries.iter().take(excess) {

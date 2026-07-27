@@ -6,7 +6,7 @@ use serde_json::{json, Value};
 /// Serializa el `Analysis` como un documento SARIF 2.1.0.
 pub fn to_sarif(a: &Analysis) -> anyhow::Result<String> {
     let mut results: Vec<Value> = Vec::new();
-    for (path, checks) in &a.per_file {
+    for (path, checks) in &a.diagnostics {
         for c in checks {
             // Solo se reportan err/warn/info; los `pass` no son hallazgos.
             let level = match c.level {

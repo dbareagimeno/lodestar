@@ -8,9 +8,9 @@
 ## Qué es (y qué NO es) un contrato aquí
 
 - **Los tipos NO se definen aquí.** El invariante #4 del repo manda: los tipos viven **una sola
-  vez** en `crates/lodestar-core/src/types.rs` (y su espejo generado/manual
-  `frontend/src/lib/ipc/types.ts`). En los YAML, los tipos se **referencian por nombre**
-  (`Analysis`, `BundleSnapshot`, `Check`, `RelPath`…). Si un YAML redefine la forma de un tipo,
+  vez** en `crates/lodestar-core/src/types.rs` (ya no hay espejo TS: se fue con la UI a
+  `experimental/ui-desktop`). En los YAML, los tipos se **referencian por nombre**
+  (`Analysis`, `WorkspaceSnapshot`, `Check`, `RelPath`…). Si un YAML redefine la forma de un tipo,
   es un bug del contrato.
 - **La superficie sí se define aquí**: nombres de comandos/eventos/tools (congelados por
   `ARCHITECTURE.md`), parámetros, retorno, errores y semántica (incluidos los invariantes que la
@@ -20,8 +20,11 @@
 
 | Fichero | Superficie | Lado de código que refleja |
 |---|---|---|
-| `ipc.yml` | Comandos Tauri + eventos | `src-tauri` (`#[tauri::command]`, `generate_handler!`, `app.emit`) |
 | `mcp.yml` | Tools MCP | `crates/lodestar-mcp` (registro de tools JSON-RPC) |
+
+> `ipc.yml` (comandos Tauri + eventos, reflejaba `src-tauri`) se **retiró de `main`** con el giro
+> headless: la UI de escritorio vive en la rama `experimental/ui-desktop`. Hoy `mcp.yml` es el
+> único contrato de frontera de este repo.
 
 ## Reglas de mantenimiento
 
@@ -32,5 +35,4 @@
 3. En discrepancia superficie↔YAML gana el **código real** (salvo `estado: pendiente`); en
    discrepancia de tipos gana **`core::types`**. Los nombres congelados nunca se «arreglan»
    renombrando código.
-4. `/contrato --check` antes de cualquier PR que toque `core::types`, `src-tauri`,
-   `lodestar-mcp` o `frontend/src/lib/ipc/`.
+4. `/contrato --check` antes de cualquier PR que toque `core::types` o `lodestar-mcp`.

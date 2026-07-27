@@ -1,6 +1,7 @@
-//! Diff semántico OKF (`ARCHITECTURE.md §4.4`, `§13.3`). Port de `diffSnap`/`fmDiff`/`lineDiff`/`collapseDiff`.
+//! Diff de snapshot entre dos [`FileMap`] (árbol vs árbol / HEAD vs working, `ARCHITECTURE.md
+//! §4.4`, `§13.3`). Port de `diffSnap`/`fmDiff`/`lineDiff`/`collapseDiff`.
 //!
-//! Es la **única verdad computada** del diff; lo renderizan igual las fachadas y el frontend.
+//! Es la **única verdad computada** del diff; lo renderizan igual las fachadas.
 //! El LCS lleva una **guarda de tamaño** (fallback grueso por umbral) para no reventar la memoria
 //! con ficheros enormes; la versión Hirschberg/dos-filas es una mejora aditiva futura.
 
@@ -9,7 +10,7 @@ use std::collections::BTreeSet;
 use serde::{Deserialize, Serialize};
 
 use crate::model;
-use crate::types::{FileMap, RelPath};
+use crate::types::{FileMap, Inventory, RelPath};
 
 /// Umbral de celdas (n×m) del LCS antes de caer a un diff grueso. ~2M celdas ≈ pocos MB.
 const MAX_LCS_CELLS: usize = 2_000_000;
@@ -106,10 +107,15 @@ pub enum MessageHint {
 }
 
 schema_derive! {
-/// El diff semántico OKF completo.
+/// El diff de snapshot completo entre dos [`FileMap`] (árbol vs árbol / HEAD vs working).
+///
+/// Nombre neutro por `§20.3` (la API pública deja de hablar de OKF; antes llevaba ese prefijo).
+/// No se llama `SemanticDiff` porque ese nombre ya lo lleva el diff de un `ChangeSet` en
+/// [`crate::types::SemanticDiff`] (E12, otra forma de wire): este es el diff de bajo nivel entre
+/// dos snapshots que aquél reusa vía [`crate::plan::semantic_diff`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct OkfDiff {
+pub struct SnapshotDiff {
     pub files: Vec<FileDiff>,
     pub generated: Vec<GeneratedChange>,
     pub stats: DiffStats,
@@ -118,13 +124,19 @@ pub struct OkfDiff {
 }
 }
 
-/// `true` si el path es un artefacto generado (index/log/tags). Port de `isGenerated`.
+/// `true` si el path es un artefacto **generado** (index/log/tags). Port de `isGenerated`.
+///
+/// Es lo único que sigue mirando el basename, y no como clase de documento: describe qué ficheros
+/// **produce** el generador (`lodestar index`/`tags`), para que el diff no los cuente como cambio
+/// del usuario. El modelo documental ya no distingue por nombre (E16-H02); retirar la semántica
+/// especial de los artefactos generados es trabajo posterior
+/// (`REFACTOR_PHASE_2 §Fase 8 (Eliminar)`).
 pub fn is_generated(p: &RelPath) -> bool {
-    p.is_reserved() || p.as_str().starts_with("tags/")
+    matches!(p.basename(), "index.md" | "log.md") || p.as_str().starts_with("tags/")
 }
 
 /// Diff entre dos file-maps (árbol vs árbol, o HEAD vs working). Port de `diffSnap`.
-pub fn diff_snap(a: &FileMap, b: &FileMap) -> OkfDiff {
+pub fn diff_snap(a: &FileMap, b: &FileMap) -> SnapshotDiff {
     // El proto ordena las claves con `sortPaths` (numeric-aware: `doc-2` < `doc-10`), no léxico.
     let keys: Vec<RelPath> = {
         let set: BTreeSet<RelPath> = a.keys().chain(b.keys()).cloned().collect();
@@ -132,6 +144,9 @@ pub fn diff_snap(a: &FileMap, b: &FileMap) -> OkfDiff {
         v.sort_by(|x, y| model::sort_paths_cmp(x.as_str(), y.as_str()));
         v
     };
+    // Inventario de cada lado: un enlace se resuelve contra los documentos de SU workspace.
+    let inv_a = Inventory::from_documents(a);
+    let inv_b = Inventory::from_documents(b);
     let mut files: Vec<FileDiff> = Vec::new();
     let mut generated: Vec<GeneratedChange> = Vec::new();
     let mut stats = DiffStats::default();
@@ -171,14 +186,18 @@ pub fn diff_snap(a: &FileMap, b: &FileMap) -> OkfDiff {
                 to: sc.to.clone(),
             });
         }
-        let a_body = av.map(|r| model::split_front(r).body).unwrap_or_default();
-        let b_body = bv.map(|r| model::split_front(r).body).unwrap_or_default();
+        let a_body = av
+            .map(|r| model::split_front(r).body(r).to_string())
+            .unwrap_or_default();
+        let b_body = bv
+            .map(|r| model::split_front(r).body(r).to_string())
+            .unwrap_or_default();
         let body = collapse_diff(line_diff(&a_body, &b_body));
         let la: BTreeSet<RelPath> = av
-            .map(|r| out_link_paths(p, &model::split_front(r).body))
+            .map(|r| out_link_paths(p, model::split_front(r).body(r), &inv_a))
             .unwrap_or_default();
         let lb: BTreeSet<RelPath> = bv
-            .map(|r| out_link_paths(p, &model::split_front(r).body))
+            .map(|r| out_link_paths(p, model::split_front(r).body(r), &inv_b))
             .unwrap_or_default();
         let links_added = lb.difference(&la).cloned().collect();
         let links_removed = la.difference(&lb).cloned().collect();
@@ -193,7 +212,7 @@ pub fn diff_snap(a: &FileMap, b: &FileMap) -> OkfDiff {
     }
 
     let suggested = suggest_msg(a, b, &files, &stats, &status_changes);
-    OkfDiff {
+    SnapshotDiff {
         files,
         generated,
         stats,
@@ -202,10 +221,14 @@ pub fn diff_snap(a: &FileMap, b: &FileMap) -> OkfDiff {
     }
 }
 
-fn out_link_paths(p: &RelPath, body: &str) -> BTreeSet<RelPath> {
-    model::out_links(p.as_str(), body)
-        .into_iter()
-        .filter_map(|t| RelPath::new(&t).ok())
+/// Destinos **internos** (documentos y fantasmas) de los enlaces del cuerpo, ya normalizados
+/// desde `p`. Es la misma extracción/resolución que usa el análisis (`links`, E17), no un segundo
+/// léxico de enlaces: aquí solo sirve para decir qué enlaces aparecieron o desaparecieron.
+fn out_link_paths(p: &RelPath, body: &str, inventory: &Inventory) -> BTreeSet<RelPath> {
+    crate::links::extract_links(body)
+        .iter()
+        .map(|raw| crate::links::resolve(raw, p, inventory))
+        .filter_map(|l| l.target.internal_path().cloned())
         .collect()
 }
 
@@ -262,15 +285,14 @@ pub fn fm_diff(a_raw: &str, b_raw: &str) -> Vec<FieldChange> {
 }
 
 fn fm_pairs(raw: &str) -> Vec<(String, serde_yaml::Value)> {
-    let sf = model::split_front(raw);
-    let text = match sf.fm_text {
-        Some(t) if !t.is_empty() => t,
-        _ => return Vec::new(),
-    };
-    match model::parse_yaml(&text) {
-        Ok(fm) => fm.as_pairs(),
-        Err(_) => Vec::new(),
-    }
+    model::parse_frontmatter(raw)
+        .map(|fm| {
+            fm.entries()
+                .into_iter()
+                .map(|(k, v)| (k, v.clone()))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Port de `fmFmt`: representación textual de un valor de frontmatter.
@@ -445,5 +467,5 @@ fn page_title(a: &FileMap, b: &FileMap, p: &RelPath) -> String {
             }
         }
     }
-    model::title_from_path(p.as_str())
+    model::derived_title(None, "", p)
 }

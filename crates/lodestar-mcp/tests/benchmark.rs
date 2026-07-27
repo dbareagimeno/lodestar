@@ -6,30 +6,32 @@
 //! `lodestar-mcp`, le habla JSON-RPC y asevera sobre las respuestas y el disco. La mayoría de los
 //! mecanismos ya existen (las tools se cerraron en E10-H09…E13-H09, dependencia E13-H09), así que
 //! esta historia es de **composición/regresión e2e**: verifica que el conjunto de las 10 tools cubre
-//! los escenarios de producto de punta a punta sobre un bundle de benchmark realista.
+//! los escenarios de producto de punta a punta sobre un workspace de benchmark realista.
 //!
 //! ## Códigos de error REALES (los que emite el motor HOY, no los idealizados de §17)
 //! El catálogo `ErrorCode` (`lodestar-core::types`, invariante #4) está congelado en 16 variantes;
 //! cada escenario asevera el código estable que el motor emite de verdad (verificado en
 //! `crates/lodestar-app/src/lib.rs` `error_code`/`workspace_error_code` y `types.rs`):
-//!   - Escenario 3 (crear sin campo obligatorio): §17 dice «Plan rechazado». El motor lo materializa
-//!     en DOS superficies: `change_plan` devuelve `canApply:false` con `diagnosticsAfter.errors>=1`,
-//!     y `change_apply` lo rechaza en el staging con **`NONCONFORMANT_RESULT`** (E13-H01). Se
-//!     aseveran ambas.
+//!   - Escenario 3 (crear un documento NO conforme): §17 dice «Plan rechazado». RECOMPUESTO en
+//!     E20-H03 con un código vivo (`LINK-TARGET-MISSING` por un enlace roto, ya que `SCHEMA-REQFIELD`
+//!     se retiró). El motor lo materializa en DOS superficies: `change_plan` devuelve `canApply:false`
+//!     con `diagnosticsAfter.errors>=1`, y `change_apply` lo rechaza en el staging con
+//!     **`INVALID_RESULT`** (E14-H04). Se aseveran ambas.
 //!   - Escenario 5 (borrar referenciado): §17 dice «Rechazo con blockers». El motor emite
 //!     **`INBOUND_LINKS_EXIST`** al normalizar un `delete` con política `Reject` (los enlaces
 //!     entrantes SON los blockers).
 //!   - Escenario 6 (modificar cambiado externamente): §17 dice `REVISION_CONFLICT` y el motor emite
 //!     exactamente **`REVISION_CONFLICT`** (control optimista por op en `change_plan`). Sin
 //!     divergencia.
-//!   - Escenario 8 (relación inválida): **`RELATION_CONSTRAINT_VIOLATION`**, antes de escribir
-//!     (`change_plan` no toca disco).
+//!   - Escenario 8 (relación inválida): RETIRADO en E20-H03 (relaciones tipadas eliminadas con
+//!     `core::schema`; una relación es un enlace, sin restricción de tipo).
 //!   - Escenario 13 (fuera de writableRoots): **`PERMISSION_DENIED`** en `change_apply`.
-//!   - Escenario 14 (ref de código inexistente): el «diagnóstico» aflora en `knowledge_get` como una
-//!     `externalReference` con **`exists:false`** (el check `EXTREF-MISSING` es de la workspace, no
-//!     lo fusiona `knowledge_check`; su superficie e2e es `knowledge_get(include:[externalReferences])`).
+//!   - Escenario 14 (ref de código inexistente): RETIRADO en E23-H12 (los campos de frontmatter
+//!     `implemented_by`/`verified_by` dejan de tener semántica impuesta y con ellos cae
+//!     `knowledge_get(include:[externalReferences])`, su única superficie e2e; ver la nota del
+//!     escenario).
 //!   - Escenario 15 (Markdown inválido a mano): el check **`OKF-TYPE`** (hard-fail) vía
-//!     `knowledge_check` scope workspace, `conformant:false`.
+//!     `knowledge_check` scope workspace, `valid:false`.
 //!
 //! ## Escenario 12 (crash durante publicación)
 //! La PRUEBA AUTORITATIVA de recuperación determinista es el property test
@@ -44,7 +46,7 @@
 //! (tras) la publicación» con estado determinista; el borde de crash A MITAD lo cubre E13-H06.
 //!
 //! ## Estructura
-//! Cada escenario es una función `escenario_NN_*()` autocontenida (su propio bundle temporal + sus
+//! Cada escenario es una función `escenario_NN_*()` autocontenida (su propio workspace temporal + sus
 //! aserciones e2e). Hay UN `#[test]` por fila (`bench_NN_*`, diagnóstico granular: una fila que
 //! falla se nombra a sí misma) y un `#[test] benchmark_15_escenarios` que ejerce las 15 en secuencia
 //! (el test que nombra la spec, el viaje completo). Ambas formas son reales y no vacuas.
@@ -69,6 +71,7 @@ fn write(dir: &std::path::Path, rel: &str, content: &str) {
 /// `expect` respuestas JSON-RPC. stdout debe ser JSON-RPC puro.
 fn roundtrip(dir: &std::path::Path, lines: &[String], expect: usize) -> Vec<Value> {
     let mut child = Command::new(env!("CARGO_BIN_EXE_lodestar-mcp"))
+        .arg("--root")
         .arg(dir)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -122,12 +125,12 @@ fn es_error_con(resp: &Value, code: &str) -> bool {
 
 /// Política permisiva: no exige resultado conforme, admite warnings.
 fn policy_permisiva() -> Value {
-    json!({ "requireConformantResult": false, "allowWarnings": true })
+    json!({ "requireValidResult": false, "allowWarnings": true })
 }
 
 /// Política estricta: exige resultado conforme (para probar «plan rechazado»).
 fn policy_estricta() -> Value {
-    json!({ "requireConformantResult": true, "allowWarnings": true })
+    json!({ "requireValidResult": true, "allowWarnings": true })
 }
 
 /// Línea `change_plan` con `operations`/`policy`.
@@ -188,96 +191,27 @@ fn snapshot_md(root: &std::path::Path) -> std::collections::BTreeMap<String, Str
 }
 
 // ---------------------------------------------------------------------------
-// Bundles de benchmark.
+// Workspaces de benchmark.
 // ---------------------------------------------------------------------------
 
-const INDEX: &str = "---\nokf_version: \"0.1\"\n---\n\n# Bundle\n";
+const INDEX: &str = "---\ntype: Index\ntitle: Bundle\ndescription: Índice del bundle\nokf_version: \"0.1\"\n---\n\n# Bundle\n";
 
-/// Bundle mínimo (solo `index.md`).
-fn bundle_min() -> tempfile::TempDir {
+/// Workspace mínimo (solo `index.md`).
+fn workspace_min() -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
     write(dir.path(), "index.md", INDEX);
     dir
 }
 
-/// Bundle con `.lodestar/schema.yaml` que declara `decision` con `requiredFields:[title,status,
-/// rationale]` (para el escenario 3) y `note` (segundo tipo).
-fn bundle_schema_decision() -> tempfile::TempDir {
-    let dir = tempfile::tempdir().unwrap();
-    write(dir.path(), "index.md", INDEX);
-    write(
-        dir.path(),
-        ".lodestar/schema.yaml",
-        "\
-version: \"1\"
-types:
-  decision:
-    name: decision
-    description: Una decision registrada
-    requiredFields: [title, status, rationale]
-    allowedStatuses: [proposed, accepted, rejected]
-  note:
-    name: note
-    description: Una nota libre
-    requiredFields: [title]
-",
-    );
-    dir
-}
-
-/// Bundle con schema `task.depends_on -> [component]` y conceptos `component`/`note`/`task`
-/// (escenarios 8 y 9).
-fn bundle_relaciones(task_depends_on: &str) -> tempfile::TempDir {
-    let dir = tempfile::tempdir().unwrap();
-    write(dir.path(), "index.md", INDEX);
-    write(
-        dir.path(),
-        ".lodestar/schema.yaml",
-        "\
-version: \"1\"
-types:
-  component:
-    name: component
-    description: Un componente
-  note:
-    name: note
-    description: Una nota
-  task:
-    name: task
-    description: Una tarea que depende de un componente
-    relations:
-      depends_on:
-        targetTypes: [component]
-        cardinality: many
-",
-    );
-    write(
-        dir.path(),
-        "component.md",
-        "---\ntype: component\ntitle: Componente\ndescription: el nucleo\n---\n\n# Componente\n\ncuerpo\n",
-    );
-    write(
-        dir.path(),
-        "nota.md",
-        "---\ntype: note\ntitle: Nota\ndescription: irrelevante\n---\n\n# Nota\n\ncuerpo\n",
-    );
-    write(
-        dir.path(),
-        "tarea.md",
-        &format!(
-            "---\ntype: task\ntitle: Tarea\ndescription: depende de algo\n{task_depends_on}---\n\n# Tarea\n\ncuerpo\n"
-        ),
-    );
-    dir
-}
-
-/// Bundle con 4 conceptos relacionados en anillo (`a`/`b`/`c`/`d`), conformes (escenario 7).
-fn bundle_cinco_relacionados() -> tempfile::TempDir {
+// (E20-H03: los fixtures `workspace_schema_decision` y `workspace_relaciones`, que escribían un
+// `.lodestar/schema.yaml` con tipos/relaciones tipadas, se retiran con la maquinaria de schema.)
+/// Workspace con 4 documentos relacionados en anillo (`a`/`b`/`c`/`d`), conformes (escenario 7).
+fn workspace_cinco_relacionados() -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
     write(
         dir.path(),
         "index.md",
-        "---\nokf_version: \"0.1\"\n---\n\n# Bundle\n\n* [A](a.md)\n* [B](b.md)\n* [C](c.md)\n* [D](d.md)\n",
+        "---\ntype: Index\ntitle: Bundle\ndescription: Índice del bundle\nokf_version: \"0.1\"\n---\n\n# Bundle\n\n* [A](a.md)\n* [B](b.md)\n* [C](c.md)\n* [D](d.md)\n",
     );
     for (slug, next) in [("a", "b"), ("b", "c"), ("c", "d"), ("d", "a")] {
         let up = slug.to_uppercase();
@@ -295,8 +229,7 @@ fn bundle_cinco_relacionados() -> tempfile::TempDir {
 /// Las 5 operaciones del escenario 7: 1 `create` + 4 `patch_frontmatter`.
 fn cinco_operaciones() -> Value {
     json!([
-        { "op": "create", "path": "nuevo.md", "type": "Concept", "title": "Nuevo",
-          "body": "# Nuevo\n\ncuerpo del quinto concepto\n" },
+        { "op": "create", "path": "nuevo.md", "body": "# Nuevo\n\ncuerpo del quinto documento\n" },
         { "op": "patch_frontmatter", "ref": { "path": "a.md" }, "patch": { "description": "a v2" } },
         { "op": "patch_frontmatter", "ref": { "path": "b.md" }, "patch": { "description": "b v2" } },
         { "op": "patch_frontmatter", "ref": { "path": "c.md" }, "patch": { "description": "c v2" } },
@@ -304,14 +237,14 @@ fn cinco_operaciones() -> Value {
     ])
 }
 
-/// Bundle con `target.md` referenciado por EXACTAMENTE 30 emisores de cuerpo (escenario 4).
-fn bundle_treinta_backlinks() -> tempfile::TempDir {
+/// Workspace con `target.md` referenciado por EXACTAMENTE 30 emisores de cuerpo (escenario 4).
+fn workspace_treinta_backlinks() -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
     write(dir.path(), "index.md", INDEX);
     write(
         dir.path(),
         "target.md",
-        "---\ntype: Concept\ntitle: Target\ndescription: el concepto a mover\n---\n\n# Target\n\ncuerpo\n",
+        "---\ntype: Concept\ntitle: Target\ndescription: el documento a mover\n---\n\n# Target\n\ncuerpo\n",
     );
     for i in 0..30 {
         write(
@@ -333,7 +266,7 @@ fn escenario_01_buscar_por_significado() {
     write(
         dir.path(),
         "index.md",
-        "---\nokf_version: \"0.1\"\n---\n\n# Bundle\n\n* [Auth](auth.md)\n",
+        "---\ntype: Index\ntitle: Bundle\ndescription: Índice del bundle\nokf_version: \"0.1\"\n---\n\n# Bundle\n\n* [Auth](auth.md)\n",
     );
     write(
         dir.path(),
@@ -343,7 +276,7 @@ fn escenario_01_buscar_por_significado() {
     write(
         dir.path(),
         "bici.md",
-        "---\ntype: concept\ntitle: Bicicletas\ndescription: sobre ruedas\n---\n\n# H\n\nnada que ver con el tema.\n",
+        "---\ntype: document\ntitle: Bicicletas\ndescription: sobre ruedas\n---\n\n# H\n\nnada que ver con el tema.\n",
     );
 
     // (1) knowledge_search por significado: encuentra la decisión, no el decoy.
@@ -378,20 +311,20 @@ fn escenario_01_buscar_por_significado() {
         )],
         1,
     );
-    let concept = &sc(&get[0])["concept"];
+    let document = &sc(&get[0])["document"];
     assert!(
-        concept["revision"]
+        document["revision"]
             .as_str()
             .unwrap_or("")
             .starts_with("blake3:"),
         "knowledge_get debe traer revision «blake3:…»: {get:?}"
     );
     assert!(
-        concept["frontmatter"].is_object(),
+        document["frontmatter"].is_object(),
         "knowledge_get debe traer el frontmatter: {get:?}"
     );
     assert!(
-        concept["body"]
+        document["body"]
             .as_str()
             .unwrap_or("")
             .contains("tokens rotatorios"),
@@ -400,13 +333,12 @@ fn escenario_01_buscar_por_significado() {
 }
 
 // ===========================================================================
-// Escenario 2 — Crear un concepto válido → plan aceptado y aplicado.
+// Escenario 2 — Crear un documento válido → plan aceptado y aplicado.
 // ===========================================================================
 fn escenario_02_crear_valido() {
-    let dir = bundle_min();
+    let dir = workspace_min();
     let ops = json!([
-        { "op": "create", "path": "nuevo.md", "type": "Nota", "title": "Nuevo",
-          "body": "# Resumen\n\ncuerpo del concepto nuevo\n" },
+        { "op": "create", "path": "nuevo.md", "body": "# Resumen\n\ncuerpo del documento nuevo\n" },
     ]);
     // (1) Plan aceptado: canApply true bajo política estricta (conforme).
     let plan = roundtrip(
@@ -435,30 +367,21 @@ fn escenario_02_crear_valido() {
 }
 
 // ===========================================================================
-// Escenario 3 — Crear un concepto sin campo obligatorio → plan rechazado.
+// Escenario 3 — Crear un documento NO conforme → plan rechazado (RECOMPUESTO E20-H03).
 //
-// Dos superficies deben rechazarlo para que «sin campo obligatorio» NUNCA acabe publicado:
-//   (1) change_plan: canApply:false + diagnosticsAfter.errors>=1  → VERDE (change_plan usa
-//       `plan::validate_result`, que SÍ incluye la validación schema-driven).
-//   (2) change_apply: NONCONFORMANT_RESULT y no escribe            → ROJO (HUECO REAL).
-//
-// HUECO (fase roja para el implementador de E14-H04): `change_apply` PUBLICA el concepto no
-// conforme y reporta `conformance.conformant:true` pese a los `SCHEMA-REQFIELD` (level err). Causa:
-// `Workspace::validate_staging` (E13-H01, `crates/lodestar-workspace/src/staging.rs`) mide solo
-// `bundle.analyze().hard_fail` (los 15 checks OKF) y NO ejecuta `validate_schema`/`validate_relations`
-// — así un `SCHEMA-REQFIELD` no cuenta como fallo duro y la publicación pasa el gate. Es una
-// divergencia del invariante #3 (una sola verdad computada): `knowledge_check`/`lodestar check` sobre
-// el mismo resultado dirían `conformant:false`, pero el gate del único-escritor dice `true`. Cerrarlo:
-// extender el gate de staging a la conformidad schema-driven (o que `change_apply` rechace un plan
-// persistido con `canApply:false`).
+// El escenario §17 sigue siendo el mismo («un create que deja el workspace no conforme NUNCA acaba
+// publicado»), pero con un código VIVO de `§20.9` en vez del retirado `SCHEMA-REQFIELD`: el nuevo
+// documento lleva un enlace a un `.md` inexistente ⇒ `LINK-TARGET-MISSING` (Err) ⇒ resultado no
+// conforme. Dos superficies deben rechazarlo:
+//   (1) change_plan: canApply:false + diagnosticsAfter.errors>=1 (usa `plan::validate_result`).
+//   (2) change_apply: INVALID_RESULT y no escribe (gate de `validate_staging`, E14-H04).
 // ===========================================================================
-fn escenario_03_crear_sin_campo_obligatorio() {
-    let dir = bundle_schema_decision();
-    // `decision` requiere [title, status, rationale]; el create solo aporta type+title ⇒ faltan
-    // status y rationale ⇒ SCHEMA-REQFIELD ⇒ resultado no conforme.
+fn escenario_03_crear_no_conforme() {
+    let dir = workspace_min();
+    // El create añade un documento con un enlace a un `.md` que no existe ⇒ LINK-TARGET-MISSING (Err)
+    // ⇒ resultado no conforme.
     let ops = json!([
-        { "op": "create", "path": "dec.md", "type": "decision", "title": "Sin campos",
-          "body": "# Sin campos\n\ncuerpo\n" },
+        { "op": "create", "path": "dec.md", "body": "# No conforme\n\n[roto](no-existe.md)\n" },
     ]);
 
     // (1) change_plan bajo política ESTRICTA: el plan se rechaza a sí mismo (canApply:false) y
@@ -471,7 +394,7 @@ fn escenario_03_crear_sin_campo_obligatorio() {
     assert_eq!(
         sc(&plan[0])["canApply"],
         Value::Bool(false),
-        "un create sin campos obligatorios NO debe ser aplicable (canApply:false): {plan:?}"
+        "un create que deja el workspace no conforme NO debe ser aplicable (canApply:false): {plan:?}"
     );
     assert!(
         sc(&plan[0])["diagnosticsAfter"]["errors"]
@@ -482,28 +405,24 @@ fn escenario_03_crear_sin_campo_obligatorio() {
     );
     let id = plan_id(&plan[0]);
 
-    // (2) change_apply DEBE rechazar el plan no conforme: «sin campo obligatorio» no puede acabar
-    //     escrito en el canónico. HOY es ROJO — el gate de staging no valida schema-driven (ver la
-    //     nota de HUECO de la cabecera), así que publica el concepto reportando conformant:true.
+    // (2) change_apply DEBE rechazar el plan no conforme: un resultado no conforme no puede acabar
+    //     escrito en el canónico (gate de `validate_staging`, invariante #3).
     let applied = roundtrip(dir.path(), &[change_apply_line(2, &id)], 1);
     assert!(
-        es_error_con(&applied[0], "NONCONFORMANT_RESULT"),
-        "HUECO: change_apply publica un create con SCHEMA-REQFIELD (err) en vez de rechazarlo con \
-         NONCONFORMANT_RESULT — el gate de validate_staging solo cuenta hard_fail OKF, no valida \
-         schema-driven (invariante #3): {applied:?}"
+        es_error_con(&applied[0], "INVALID_RESULT"),
+        "change_apply debe rechazar un create no conforme con INVALID_RESULT: {applied:?}"
     );
     assert!(
         !dir.path().join("dec.md").exists(),
-        "HUECO: un create no conforme por schema NO debe materializar el .md, pero change_apply lo \
-         escribe: {applied:?}"
+        "un create no conforme NO debe materializar el .md: {applied:?}"
     );
 }
 
 // ===========================================================================
-// Escenario 4 — Mover un concepto con 30 backlinks → enlaces actualizados dentro del mismo plan.
+// Escenario 4 — Mover un documento con 30 backlinks → enlaces actualizados dentro del mismo plan.
 // ===========================================================================
 fn escenario_04_mover_30_backlinks() {
-    let dir = bundle_treinta_backlinks();
+    let dir = workspace_treinta_backlinks();
     let antes = snapshot_md(dir.path());
 
     let ops = json!([
@@ -518,11 +437,33 @@ fn escenario_04_mover_30_backlinks() {
         .as_array()
         .unwrap_or_else(|| panic!("change_plan debe devolver normalizedOperations: {plan:?}"));
 
-    // El plan lleva el Move MÁS las 30 reescrituras de enlaces entrantes, todo en UN change set: 31.
+    // El plan lleva el Move MÁS las 30 reescrituras de enlaces entrantes, todo en UN change set.
+    //
+    // E23-H03 relaja el CONTEO exacto (era `== 31`) sin aflojar lo que este escenario mide: desde
+    // esa historia `normalize_move` reescribe también el CUERPO DEL PROPIO DOCUMENTO MOVIDO, y aquí
+    // `target.md` no tiene salientes, así que emitir esa op (32) o ahorrársela (31) son ambas
+    // implementaciones defendibles. Lo que sí se exige, y con más precisión que un conteo: 1 `Move`
+    // y exactamente 30 reescrituras de emisores, todo bajo un único changeSetId.
+    let moves = normalized.iter().filter(|op| op["op"] == "move").count();
     assert_eq!(
-        normalized.len(),
-        31,
-        "mover con 30 backlinks debe producir 1 Move + 30 reescrituras = 31 ops en un solo plan: {plan:?}"
+        moves, 1,
+        "el plan debe llevar exactamente un `move`: {plan:?}"
+    );
+    let emisores = normalized
+        .iter()
+        .filter(|op| {
+            op["op"] == "replace_body"
+                && op["path"].as_str().is_some_and(|p| p.starts_with("emisor"))
+        })
+        .count();
+    assert_eq!(
+        emisores, 30,
+        "mover con 30 backlinks debe reescribir los 30 emisores en el mismo plan: {plan:?}"
+    );
+    assert!(
+        normalized.len() <= 32,
+        "el plan no debe llevar ops de más (a lo sumo: 1 move + 30 emisores + el documento \
+         movido): {plan:?}"
     );
     assert!(
         !plan_id(&plan[0]).is_empty(),
@@ -538,32 +479,34 @@ fn escenario_04_mover_30_backlinks() {
 }
 
 // ===========================================================================
-// Escenario 5 — Borrar un concepto referenciado → rechazo con blockers (INBOUND_LINKS_EXIST).
+// Escenario 5 — Borrar un documento referenciado → rechazo con blockers (INBOUND_LINKS_EXIST).
 // ===========================================================================
 fn escenario_05_borrar_referenciado() {
     let dir = tempfile::tempdir().unwrap();
     write(
         dir.path(),
         "index.md",
-        "---\nokf_version: \"0.1\"\n---\n\n# Bundle\n\n* [A](a.md)\n* [B](b.md)\n* [C](c.md)\n",
+        "---\ntype: Index\ntitle: Bundle\ndescription: Índice del bundle\nokf_version: \"0.1\"\n---\n\n# Bundle\n\n* [A](a.md)\n* [B](b.md)\n* [C](c.md)\n",
     );
     write(
         dir.path(),
         "objetivo.md",
-        "---\ntype: concept\ntitle: Objetivo\ndescription: referenciado por 3\n---\n\n# Objetivo\n\ncuerpo\n",
+        "---\ntype: document\ntitle: Objetivo\ndescription: referenciado por 3\n---\n\n# Objetivo\n\ncuerpo\n",
     );
     for slug in ["a", "b", "c"] {
         write(
             dir.path(),
             &format!("{slug}.md"),
             &format!(
-                "---\ntype: concept\ntitle: {slug}\ndescription: enlaza al objetivo\n---\n\n# {slug}\n\n[Objetivo](objetivo.md)\n"
+                "---\ntype: document\ntitle: {slug}\ndescription: enlaza al objetivo\n---\n\n# {slug}\n\n[Objetivo](objetivo.md)\n"
             ),
         );
     }
 
-    // delete con la política por defecto (Reject): los 3 entrantes son blockers ⇒ INBOUND_LINKS_EXIST.
-    let ops = json!([ { "op": "delete", "ref": { "path": "objetivo.md" } } ]);
+    // delete con política `reject` EXPLÍCITA (E21-H03, §Fase 12: un delete sin política y con
+    // backlinks es INVALID_SCHEMA, no un `reject` en silencio): los 3 entrantes son blockers ⇒
+    // INBOUND_LINKS_EXIST.
+    let ops = json!([ { "op": "delete", "ref": { "path": "objetivo.md" }, "inboundLinksPolicy": "reject" } ]);
     let resp = roundtrip(
         dir.path(),
         &[change_plan_line(1, ops, policy_permisiva())],
@@ -571,7 +514,7 @@ fn escenario_05_borrar_referenciado() {
     );
     assert!(
         es_error_con(&resp[0], "INBOUND_LINKS_EXIST"),
-        "borrar un concepto referenciado debe rechazarse con INBOUND_LINKS_EXIST: {resp:?}"
+        "borrar un documento referenciado debe rechazarse con INBOUND_LINKS_EXIST: {resp:?}"
     );
     assert!(
         dir.path().join("objetivo.md").is_file(),
@@ -580,10 +523,10 @@ fn escenario_05_borrar_referenciado() {
 }
 
 // ===========================================================================
-// Escenario 6 — Modificar un concepto cambiado externamente → REVISION_CONFLICT.
+// Escenario 6 — Modificar un documento cambiado externamente → REVISION_CONFLICT.
 // ===========================================================================
 fn escenario_06_conflicto_revision() {
-    let dir = bundle_cinco_relacionados();
+    let dir = workspace_cinco_relacionados();
 
     // (1) Revisión actual de a.md.
     let get = roundtrip(
@@ -595,7 +538,7 @@ fn escenario_06_conflicto_revision() {
         )],
         1,
     );
-    let old_rev = sc(&get[0])["concept"]["revision"]
+    let old_rev = sc(&get[0])["document"]["revision"]
         .as_str()
         .unwrap_or_else(|| panic!("knowledge_get debe devolver revision de a.md: {get:?}"))
         .to_string();
@@ -624,10 +567,10 @@ fn escenario_06_conflicto_revision() {
 }
 
 // ===========================================================================
-// Escenario 7 — Cambiar cinco conceptos relacionados → un único change set.
+// Escenario 7 — Cambiar cinco documentos relacionados → un único change set.
 // ===========================================================================
-fn escenario_07_cinco_conceptos() {
-    let dir = bundle_cinco_relacionados();
+fn escenario_07_cinco_documentos() {
+    let dir = workspace_cinco_relacionados();
     let plan = roundtrip(
         dir.path(),
         &[change_plan_line(1, cinco_operaciones(), policy_permisiva())],
@@ -646,102 +589,19 @@ fn escenario_07_cinco_conceptos() {
 }
 
 // ===========================================================================
-// Escenario 8 — Introducir una relación inválida → error antes de escribir (RELATION_CONSTRAINT_VIOLATION).
+// Escenarios 8 y 9 — RETIRADOS en E20-H03.
+//   · 8 (relación inválida → RELATION_CONSTRAINT_VIOLATION): las relaciones tipadas y su validación
+//     desaparecen con `core::schema` (`§20.10`: una relación es un enlace, sin restricción de tipo).
+//   · 9 (safe fixes de REL-TARGET): el diagnóstico `REL-TARGET` y su `Fix{safe}` mueren con
+//     `validate_relations`; ya no hay fixes que aplicar. Ambos ejercitaban capacidades que E20
+//     elimina, no un hueco por cubrir.
 // ===========================================================================
-fn escenario_08_relacion_invalida() {
-    let dir = bundle_relaciones(""); // tarea.md sin depends_on todavía.
-    let antes = snapshot_md(dir.path());
-
-    // add_relation depends_on de la tarea hacia `nota.md` (tipo note), pero depends_on solo admite
-    // `component` ⇒ RELATION_CONSTRAINT_VIOLATION, antes de tocar disco.
-    let ops = json!([
-        { "op": "add_relation", "source": "tarea.md", "relation": "depends_on", "target": "nota.md" },
-    ]);
-    let resp = roundtrip(
-        dir.path(),
-        &[change_plan_line(1, ops, policy_permisiva())],
-        1,
-    );
-    assert!(
-        es_error_con(&resp[0], "RELATION_CONSTRAINT_VIOLATION"),
-        "una relación con target de tipo no admitido debe dar RELATION_CONSTRAINT_VIOLATION: {resp:?}"
-    );
-    assert_eq!(
-        antes,
-        snapshot_md(dir.path()),
-        "el error de relación inválida debe ocurrir ANTES de escribir"
-    );
-}
-
-// ===========================================================================
-// Escenario 9 — Corregir safe fixes → operaciones apply_fix.
-// ===========================================================================
-fn escenario_09_safe_fixes() {
-    // tarea.md declara depends_on hacia un target INEXISTENTE ⇒ REL-TARGET con un `Fix { safe }`.
-    let dir = bundle_relaciones("depends_on:\n  - inexistente.md\n");
-
-    // (1) knowledge_check con fixes sugeridos: localiza el diagnóstico REL-TARGET y su fixId.
-    let check = roundtrip(
-        dir.path(),
-        &[call(
-            1,
-            "knowledge_check",
-            json!({ "scope": { "kind": "workspace" }, "includeSuggestedFixes": true }),
-        )],
-        1,
-    );
-    let diags = sc(&check[0])["diagnostics"]
-        .as_array()
-        .unwrap_or_else(|| panic!("knowledge_check debe devolver diagnostics: {check:?}"));
-    let rel_target = diags
-        .iter()
-        .find(|d| d["code"] == "REL-TARGET")
-        .unwrap_or_else(|| {
-            panic!("debe haber un diagnóstico REL-TARGET por la relación rota: {check:?}")
-        });
-    let fix = rel_target["fixes"]
-        .as_array()
-        .and_then(|f| f.first())
-        .unwrap_or_else(|| panic!("el REL-TARGET debe traer un fix sugerido: {rel_target:?}"));
-    assert_eq!(
-        fix["safe"],
-        Value::Bool(true),
-        "el fix sugerido para REL-TARGET debe ser safe: {fix:?}"
-    );
-    let fix_id = fix["fixId"]
-        .as_str()
-        .unwrap_or_else(|| panic!("el fix debe llevar un fixId: {fix:?}"))
-        .to_string();
-
-    // (2) change_plan con una operación `apply_fix` sobre ese fixId: produce un plan real cuyo
-    //     resultado RESUELVE el REL-TARGET (semanticDiff.diagnosticsResolved lo recoge).
-    let ops = json!([ { "op": "apply_fix", "fixId": fix_id } ]);
-    let plan = roundtrip(
-        dir.path(),
-        &[change_plan_line(2, ops, policy_permisiva())],
-        1,
-    );
-    let s = sc(&plan[0]);
-    assert!(
-        s["normalizedOperations"]
-            .as_array()
-            .is_some_and(|o| !o.is_empty()),
-        "apply_fix debe producir >=1 operación normalizada: {plan:?}"
-    );
-    let resueltos = s["semanticDiff"]["diagnosticsResolved"]
-        .as_array()
-        .unwrap_or_else(|| panic!("el plan debe traer semanticDiff.diagnosticsResolved: {plan:?}"));
-    assert!(
-        resueltos.iter().any(|d| d["code"] == "REL-TARGET"),
-        "el safe fix debe RESOLVER el diagnóstico REL-TARGET: {plan:?}"
-    );
-}
 
 // ===========================================================================
 // Escenario 10 — Revisar un refactor → diff semántico en change_plan.
 // ===========================================================================
 fn escenario_10_diff_refactor() {
-    let dir = bundle_cinco_relacionados();
+    let dir = workspace_cinco_relacionados();
     // Un refactor de a.md: cambia el frontmatter Y el cuerpo.
     let ops = json!([
         { "op": "patch_frontmatter", "ref": { "path": "a.md" }, "patch": { "description": "refactor" } },
@@ -781,10 +641,9 @@ fn escenario_10_diff_refactor() {
 // Escenario 11 — Recuperar un cambio reciente → change_revert.
 // ===========================================================================
 fn escenario_11_revert() {
-    let dir = bundle_min();
+    let dir = workspace_min();
     let ops = json!([
-        { "op": "create", "path": "nuevo.md", "type": "Nota", "title": "Nuevo",
-          "body": "# Resumen\n\ncuerpo del concepto nuevo\n" },
+        { "op": "create", "path": "nuevo.md", "body": "# Resumen\n\ncuerpo del documento nuevo\n" },
     ]);
     // Plan → apply (captura receiptId + revisión previa).
     let plan = roundtrip(
@@ -834,10 +693,9 @@ fn escenario_11_revert() {
 // estado parcial.
 // ===========================================================================
 fn escenario_12_crash_recuperacion() {
-    let dir = bundle_min();
+    let dir = workspace_min();
     let ops = json!([
-        { "op": "create", "path": "nuevo.md", "type": "Nota", "title": "Nuevo",
-          "body": "# Resumen\n\ncuerpo publicado\n" },
+        { "op": "create", "path": "nuevo.md", "body": "# Resumen\n\ncuerpo publicado\n" },
     ]);
     let plan = roundtrip(
         dir.path(),
@@ -879,7 +737,7 @@ fn escenario_12_crash_recuperacion() {
         "el .md publicado debe persistir íntegro tras reabrir: {contenido:?}"
     );
     assert_eq!(
-        sc(&post[1])["conformant"],
+        sc(&post[1])["valid"],
         Value::Bool(true),
         "el workspace recuperado debe quedar conforme (sin parciales): {post:?}"
     );
@@ -893,8 +751,8 @@ fn escenario_13_fuera_writable() {
     write(dir.path(), "index.md", INDEX);
     write(
         dir.path(),
-        "knowledge/concepto.md",
-        "---\ntype: Concept\ntitle: Concepto\ndescription: dentro de knowledge\n---\n\n# H\n\ncuerpo\n",
+        "knowledge/documento.md",
+        "---\ntype: Concept\ntitle: Documento\ndescription: dentro de knowledge\n---\n\n# H\n\ncuerpo\n",
     );
     write(dir.path(), "src/existente.rs", "fn main() {}\n");
     write(
@@ -906,8 +764,7 @@ fn escenario_13_fuera_writable() {
     // Plan de un create bajo src/ (fuera de writableRoots): change_plan no valida writable, así que
     // produce el plan; el rechazo recae en change_apply (único escritor, assert_writable).
     let ops = json!([
-        { "op": "create", "path": "src/malicioso.md", "type": "Nota", "title": "Malo",
-          "body": "# Malo\n\nfuera de writableRoots\n" },
+        { "op": "create", "path": "src/malicioso.md", "body": "# Malo\n\nfuera de writableRoots\n" },
     ]);
     let plan = roundtrip(
         dir.path(),
@@ -928,58 +785,23 @@ fn escenario_13_fuera_writable() {
 }
 
 // ===========================================================================
-// Escenario 14 — Referenciar un archivo de código inexistente → diagnóstico.
-// (La superficie e2e es knowledge_get(externalReferences): exists:false por la ref rota.)
+// Escenario 14 — «Referenciar un archivo de código inexistente → diagnóstico»: RETIRADO en E23-H12,
+// como los escenarios 8 y 9 lo fueron en E20-H03 (una fila de §17 cuya CAPACIDAD desaparece deja de
+// tener superficie que ejercer).
+//
+// Su único vehículo e2e era `knowledge_get(include:[externalReferences])`, que resolvía contra disco
+// los campos de frontmatter `implemented_by`/`verified_by`. E23-H12 los retira **sin sustituto**:
+// eran las últimas claves con semántica impuesta y no configurable, contra el invariante 3 de
+// `ARCHITECTURE.md §20.2` (ningún nombre de campo activa reglas especiales, igual que E16-H02 hizo
+// con los nombres de FICHERO). En el modelo universal, `implemented_by` es metadata del usuario como
+// `autor` o `tags`, y comprobar que una ruta de código existe no es competencia de Lodestar.
+//
+// Lo que SÍ se conserva de aquel escenario: la garantía de que esas claves no pueden convertir
+// `knowledge_get` en un oráculo de existencia de ficheros del host, hoy en
+// `mcp.rs::frontmatter_no_es_oraculo_de_ficheros_del_host`, y la write policy de `referenceRoots`
+// (`escenario_13_fuera_writable`, `reference_roots.rs::reference_roots_inmutable`), que es la
+// segunda responsabilidad —esa sí viva— de `referenceRoots`.
 // ===========================================================================
-fn escenario_14_ref_codigo_inexistente() {
-    let dir = tempfile::tempdir().unwrap();
-    write(dir.path(), "index.md", INDEX);
-    write(dir.path(), "src/existe.rs", "fn main() {}\n");
-    write(
-        dir.path(),
-        ".lodestar/config.yaml",
-        "workspace:\n  writableRoots: [knowledge]\n  referenceRoots: [src]\n",
-    );
-    // Un concepto con dos referencias de código: una que existe y una que NO.
-    write(
-        dir.path(),
-        "knowledge/tarea.md",
-        "---\ntype: Concept\ntitle: Tarea\ndescription: con refs de codigo\nimplemented_by:\n  - src/existe.rs\n  - src/inexistente.rs\n---\n\n# Tarea\n\ncuerpo\n",
-    );
-
-    let resp = roundtrip(
-        dir.path(),
-        &[call(
-            1,
-            "knowledge_get",
-            json!({ "ref": { "path": "knowledge/tarea.md" }, "include": ["externalReferences"] }),
-        )],
-        1,
-    );
-    let refs = sc(&resp[0])["concept"]["externalReferences"]
-        .as_array()
-        .unwrap_or_else(|| panic!("knowledge_get debe devolver externalReferences: {resp:?}"));
-
-    let inexistente = refs
-        .iter()
-        .find(|r| r["path"] == "src/inexistente.rs")
-        .unwrap_or_else(|| panic!("debe listar la ref rota src/inexistente.rs: {resp:?}"));
-    assert_eq!(
-        inexistente["exists"],
-        Value::Bool(false),
-        "una ref a un archivo de código inexistente debe marcarse exists:false (diagnóstico): {resp:?}"
-    );
-    // No vacuo: la ref que SÍ existe se marca exists:true.
-    let existe = refs
-        .iter()
-        .find(|r| r["path"] == "src/existe.rs")
-        .unwrap_or_else(|| panic!("debe listar la ref existente src/existe.rs: {resp:?}"));
-    assert_eq!(
-        existe["exists"],
-        Value::Bool(true),
-        "una ref a un archivo de código existente debe marcarse exists:true: {resp:?}"
-    );
-}
 
 // ===========================================================================
 // Escenario 15 — Editar directamente un Markdown inválido → detectado por knowledge_check.
@@ -990,13 +812,18 @@ fn escenario_15_editar_markdown_invalido() {
     write(
         dir.path(),
         "index.md",
-        "---\nokf_version: \"0.1\"\n---\n\n# Bundle\n\n* [Editado](editado-a-mano.md)\n",
+        "---\ntype: Index\ntitle: Bundle\ndescription: Índice del bundle\nokf_version: \"0.1\"\n---\n\n# Bundle\n\n* [Editado](editado-a-mano.md)\n",
     );
-    // Frontmatter válido como bloque pero SIN `type` (alguien lo editó a mano) ⇒ OKF-TYPE (hard-fail).
+    // RECOMPUESTO en E16-H05: el escenario se apoyaba en `OKF-TYPE` (frontmatter sin `type`), y
+    // ese código se retiró — un `.md` sin `type` es un documento de primera clase. El escenario
+    // §17 sigue siendo el mismo («alguien editó el Markdown a mano y lo dejó inválido; el motor
+    // lo caza»), pero con el catálogo mínimo de `§20.9`: aquí el frontmatter está delimitado y su
+    // YAML es sintácticamente inválido ⇒ `FM-YAML-INVALID` (hard-fail), que es exactamente lo que
+    // impide a Lodestar interpretar y modificar el documento con seguridad.
     write(
         dir.path(),
         "editado-a-mano.md",
-        "---\ntitle: Editado a mano\ndescription: a pelo\n---\n\n# Nota\n\ncuerpo sin tipo.\n",
+        "---\ntitle: : :\n  - a pelo\ndescription: a pelo\n---\n\n# Nota\n\ncuerpo.\n",
     );
 
     let resp = roundtrip(
@@ -1020,11 +847,22 @@ fn escenario_15_editar_markdown_invalido() {
         })
         .collect();
     assert!(
-        del_fichero.iter().any(|d| d["code"] == "OKF-TYPE"),
-        "knowledge_check debe cazar el Markdown editado a mano con OKF-TYPE: {resp:?}"
+        del_fichero.iter().any(|d| d["code"] == "FM-YAML-INVALID"),
+        "knowledge_check debe cazar el Markdown editado a mano con FM-YAML-INVALID: {resp:?}"
+    );
+    // Y el diagnóstico acota el bloque: `§20.9` exige rango para `FM-YAML-INVALID`, y aquí son
+    // las líneas 2..4 (1-based, delimitadores excluidos).
+    let con_rango = del_fichero
+        .iter()
+        .find(|d| d["code"] == "FM-YAML-INVALID")
+        .expect("ya comprobado arriba");
+    assert_eq!(
+        con_rango["range"],
+        json!({ "startLine": 2, "endLine": 4 }),
+        "el diagnóstico de frontmatter ilegible debe acotar las líneas del bloque: {resp:?}"
     );
     assert_eq!(
-        sc(&resp[0])["conformant"],
+        sc(&resp[0])["valid"],
         Value::Bool(false),
         "un frontmatter inválido debe dejar el workspace NO conforme: {resp:?}"
     );
@@ -1043,8 +881,8 @@ fn bench_02_crear_valido() {
     escenario_02_crear_valido();
 }
 #[test]
-fn bench_03_crear_sin_campo_obligatorio() {
-    escenario_03_crear_sin_campo_obligatorio();
+fn bench_03_crear_no_conforme() {
+    escenario_03_crear_no_conforme();
 }
 #[test]
 fn bench_04_mover_30_backlinks() {
@@ -1059,17 +897,10 @@ fn bench_06_conflicto_revision() {
     escenario_06_conflicto_revision();
 }
 #[test]
-fn bench_07_cinco_conceptos() {
-    escenario_07_cinco_conceptos();
+fn bench_07_cinco_documentos() {
+    escenario_07_cinco_documentos();
 }
-#[test]
-fn bench_08_relacion_invalida() {
-    escenario_08_relacion_invalida();
-}
-#[test]
-fn bench_09_safe_fixes() {
-    escenario_09_safe_fixes();
-}
+// bench_08_relacion_invalida / bench_09_safe_fixes: RETIRADOS en E20-H03 (capacidades eliminadas).
 #[test]
 fn bench_10_diff_refactor() {
     escenario_10_diff_refactor();
@@ -1086,34 +917,505 @@ fn bench_12_crash_recuperacion() {
 fn bench_13_fuera_writable() {
     escenario_13_fuera_writable();
 }
-#[test]
-fn bench_14_ref_codigo_inexistente() {
-    escenario_14_ref_codigo_inexistente();
-}
+// bench_14_ref_codigo_inexistente: RETIRADO en E23-H12 (capacidad eliminada; ver la nota del
+// escenario 14).
 #[test]
 fn bench_15_editar_markdown_invalido() {
     escenario_15_editar_markdown_invalido();
 }
 
 // ---------------------------------------------------------------------------
-// E14-H04 · Criterio `benchmark_15_escenarios`: las 15 filas de §17 en un solo viaje e2e.
-// Es el test que nombra la spec; ejerce los 15 escenarios en secuencia sobre la superficie real.
+// E14-H04 · Criterio `benchmark_escenarios`: las filas de §17 en un solo viaje e2e.
+// Es el test que nombra la spec; ejerce los escenarios en secuencia sobre la superficie real. En
+// E20-H03 quedaron 13 (los escenarios 8 y 9 —relación tipada inválida y safe fixes de REL-TARGET—
+// se retiraron con `core::schema`) y en E23-H12 quedan 12 (el 14, ref de código inexistente, se
+// retira con los campos de frontmatter privilegiados).
 // ---------------------------------------------------------------------------
+// ===========================================================================
+// E23-H03 — `move` recalcula sus PROPIOS enlaces salientes, APLICANDO A DISCO
+// (`ARCHITECTURE.md §20.11`, `requirements/epica-23-cierre-migracion.md`). Fase ROJA.
+//
+// El defecto existe precisamente porque `escenario_04_mover_30_backlinks` **solo planifica** y
+// asevera que el disco NO cambió: la mitad saliente del move nunca se ejerció de punta a punta.
+// Estos tres cierran ese hueco por la superficie real (JSON-RPC → binario `lodestar-mcp`):
+// planifican, **aplican**, leen los `.md` publicados y revierten.
+//
+// Síntoma reproducido con los binarios: con `notas/alfa.md` que contiene `[b]: beta.md` y
+// `notas/beta.md` existente, planificar el move a `archivo/alfa.md` da `canApply:false` con
+// `diagnosticsAfter.errors:1` y el apply falla con `INVALID_RESULT` — el documento movido se
+// lleva sus hrefs relativos escritos para la ubicación VIEJA.
+//
+// ROJO esperado HOY: por ASERCIÓN (`canApply` es `false`, así que el test se para en el plan).
+// ===========================================================================
+
+/// `notas/alfa.md`: el documento a mover. Enlaza a su vecina `notas/beta.md` de las DOS formas
+/// (inline + definición de referencia) y lleva además los tres destinos que **no** dependen de
+/// dónde viva el documento: una URI externa, un anchor propio y un href raíz-absoluto.
+const ALFA_CON_SALIENTES: &str = "---\ntitle: Alfa\n---\n\n# Alfa\n\n## seccion\n\n\
+     Inline: [Beta](beta.md).\n\n\
+     Referencia: [beta][b].\n\n\
+     Externo: [Sitio](https://example.com/notas/beta.md).\n\n\
+     Ancla: [Sección](#seccion).\n\n\
+     Raíz: [Raíz](/raiz.md).\n\n\
+     [b]: beta.md\n";
+
+/// Workspace del defecto: el documento con salientes, su vecina y el destino raíz-absoluto.
+fn workspace_move_salientes() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), "notas/alfa.md", ALFA_CON_SALIENTES);
+    write(
+        dir.path(),
+        "notas/beta.md",
+        "---\ntitle: Beta\n---\n\n# Beta\n\ncuerpo\n",
+    );
+    write(dir.path(), "raiz.md", "---\ntitle: Raíz\n---\n\n# Raíz\n");
+    dir
+}
+
+/// Las operaciones del move que fija la historia.
+fn ops_move_alfa() -> Value {
+    json!([
+        { "op": "move", "from": "notas/alfa.md", "to": "archivo/alfa.md",
+          "rewriteInboundLinks": true },
+    ])
+}
+
+/// Planifica `ops` bajo `policy` y devuelve `(changeSetId, respuesta)`, exigiendo `canApply:true`.
+/// Es donde muere hoy el rojo de E23-H03: el mensaje incluye el plan entero (con
+/// `diagnosticsAfter`), que es el diagnóstico útil.
+fn planifica_aplicable(dir: &std::path::Path, ops: Value, policy: Value) -> (String, Value) {
+    let plan = roundtrip(dir, &[change_plan_line(1, ops, policy)], 1);
+    assert_eq!(
+        sc(&plan[0])["canApply"],
+        Value::Bool(true),
+        "el plan debe ser aplicable (canApply:true): {plan:?}"
+    );
+    (plan_id(&plan[0]), plan[0].clone())
+}
+
+/// Aplica `id` exigiendo `applied:true` y devuelve el `receiptId`.
+fn aplica(dir: &std::path::Path, id: &str) -> String {
+    let applied = roundtrip(dir, &[change_apply_line(2, id)], 1);
+    assert_eq!(
+        sc(&applied[0])["applied"],
+        Value::Bool(true),
+        "el plan debe aplicarse (applied:true): {applied:?}"
+    );
+    sc(&applied[0])["receiptId"]
+        .as_str()
+        .unwrap_or_else(|| panic!("change_apply debe devolver receiptId: {applied:?}"))
+        .to_string()
+}
+
+/// `true` si `knowledge_check` (scope workspace) da el workspace por conforme — el equivalente e2e
+/// de «`lodestar check` sale 0» dentro de este binario de test.
+fn workspace_conforme(dir: &std::path::Path) -> (bool, Value) {
+    let resp = roundtrip(
+        dir,
+        &[call(
+            9,
+            "knowledge_check",
+            json!({ "scope": { "kind": "workspace" } }),
+        )],
+        1,
+    );
+    (sc(&resp[0])["valid"] == Value::Bool(true), resp[0].clone())
+}
+
+/// Lee un `.md` publicado (falla con un mensaje claro si no existe).
+fn lee(dir: &std::path::Path, rel: &str) -> String {
+    std::fs::read_to_string(dir.join(rel))
+        .unwrap_or_else(|e| panic!("«{rel}» debe existir en disco tras el apply: {e}"))
+}
+
+/// Criterio `move_recalcula_salientes` — **Dado** `notas/alfa.md` con un enlace inline y una
+/// definición de referencia a `notas/beta.md`, **Cuando** se mueve a `archivo/alfa.md` y se
+/// **aplica**, **Entonces** ambos hrefs quedan `../notas/beta.md` y el workspace queda conforme
+/// (`lodestar check` sale 0).
+///
+/// Y el criterio `move_no_toca_externos_ni_anchors` en su mitad e2e: la URI externa, el anchor
+/// propio y el href raíz-absoluto sobreviven **byte a byte** al viaje completo (su versión pura
+/// vive en `crates/lodestar-core/tests/core.rs`).
 #[test]
-fn benchmark_15_escenarios() {
+fn move_recalcula_salientes() {
+    let dir = workspace_move_salientes();
+
+    // Política ESTRICTA a propósito: el criterio es que mover una nota que enlaza a sus vecinas
+    // deja el workspace consistente, así que el plan tiene que ser conforme por sí mismo.
+    let (id, _plan) = planifica_aplicable(dir.path(), ops_move_alfa(), policy_estricta());
+    aplica(dir.path(), &id);
+
+    let raw = lee(dir.path(), "archivo/alfa.md");
+    assert!(
+        !dir.path().join("notas/alfa.md").exists(),
+        "el documento movido no puede seguir en su ubicación vieja; disco =\n{raw}"
+    );
+
+    // 1) Los dos salientes relativos, recalculados desde `archivo/`.
+    assert!(
+        raw.contains("[Beta](../notas/beta.md)"),
+        "el enlace inline saliente debe quedar `../notas/beta.md` tras el move; \
+         `archivo/alfa.md` =\n{raw}"
+    );
+    assert!(
+        raw.contains("[b]: ../notas/beta.md"),
+        "la definición de referencia saliente debe quedar `[b]: ../notas/beta.md` tras el move; \
+         `archivo/alfa.md` =\n{raw}"
+    );
+    assert!(
+        !raw.contains("](beta.md)") && !raw.contains("[b]: beta.md"),
+        "ningún saliente puede conservar el destino viejo relativo a `notas/`; \
+         `archivo/alfa.md` =\n{raw}"
+    );
+
+    // 2) Y lo que NO depende de la ubicación sobrevive byte a byte.
+    for intacto in [
+        "Externo: [Sitio](https://example.com/notas/beta.md).",
+        "Ancla: [Sección](#seccion).",
+        "Raíz: [Raíz](/raiz.md).",
+    ] {
+        assert!(
+            raw.contains(intacto),
+            "«{intacto}» debe sobrevivir intacto al move; `archivo/alfa.md` =\n{raw}"
+        );
+    }
+
+    // 3) El veredicto del producto: el workspace queda conforme (equivale a `check` → exit 0).
+    let (conforme, resp) = workspace_conforme(dir.path());
+    assert!(
+        conforme,
+        "tras mover una nota que enlaza a sus vecinas el workspace debe quedar conforme \
+         (`lodestar check` sale 0): {resp:?}"
+    );
+}
+
+/// Criterio `move_completo_treinta_backlinks` — **Dado** un documento con 30 backlinks entrantes y
+/// enlaces salientes propios, **Cuando** se mueve y se **aplica**, **Entonces** los 30 emisores
+/// apuntan al destino nuevo y el documento movido conserva sus salientes válidos, **en una sola
+/// transacción**.
+///
+/// Es la unión de las dos mitades del `move` (entrante, ya cubierta por `escenario_04`, y saliente,
+/// el defecto de E23-H03) sobre el mismo change set: un único `changeSetId` y un único `receiptId`.
+#[test]
+fn move_completo_treinta_backlinks() {
+    let dir = workspace_move_salientes();
+    for i in 0..30 {
+        write(
+            dir.path(),
+            &format!("emisor{i:02}.md"),
+            &format!(
+                "---\ntitle: Emisor {i:02}\n---\n\n# Emisor {i:02}\n\nreferencia a [alfa](notas/alfa.md).\n"
+            ),
+        );
+    }
+
+    let (id, plan) = planifica_aplicable(dir.path(), ops_move_alfa(), policy_estricta());
+    assert!(
+        !id.is_empty(),
+        "las 31+ escrituras deben caber en un ÚNICO change set: {plan:?}"
+    );
+
+    // El plan lleva la mitad entrante (30 emisores) Y la saliente (el propio documento movido).
+    let normalized = sc(&plan)["normalizedOperations"]
+        .as_array()
+        .unwrap_or_else(|| panic!("change_plan debe devolver normalizedOperations: {plan:?}"))
+        .clone();
+    let emisores_reescritos = normalized
+        .iter()
+        .filter(|op| {
+            op["op"] == "replace_body"
+                && op["path"].as_str().is_some_and(|p| p.starts_with("emisor"))
+        })
+        .count();
+    assert_eq!(
+        emisores_reescritos, 30,
+        "el plan debe reescribir los 30 emisores entrantes: {plan:?}"
+    );
+    assert!(
+        normalized.iter().any(|op| {
+            op["op"] == "replace_body"
+                && matches!(
+                    op["path"].as_str(),
+                    Some("notas/alfa.md") | Some("archivo/alfa.md")
+                )
+        }),
+        "el plan debe incluir además la reescritura del PROPIO documento movido (sus salientes \
+         recalculados desde la ubicación nueva): {plan:?}"
+    );
+
+    let receipt = aplica(dir.path(), &id);
+    assert!(
+        !receipt.is_empty(),
+        "la transacción única debe devolver un receiptId"
+    );
+
+    // 1) Los 30 emisores apuntan al destino nuevo.
+    for i in 0..30 {
+        let emisor = lee(dir.path(), &format!("emisor{i:02}.md"));
+        assert!(
+            emisor.contains("[alfa](archivo/alfa.md)"),
+            "el emisor {i:02} debe apuntar al destino nuevo `archivo/alfa.md`; cuerpo =\n{emisor}"
+        );
+        assert!(
+            !emisor.contains("notas/alfa.md"),
+            "el emisor {i:02} no debe conservar el destino viejo; cuerpo =\n{emisor}"
+        );
+    }
+
+    // 2) Y el documento movido conserva sus salientes VÁLIDOS desde la ubicación nueva.
+    let movido = lee(dir.path(), "archivo/alfa.md");
+    assert!(
+        movido.contains("[Beta](../notas/beta.md)") && movido.contains("[b]: ../notas/beta.md"),
+        "el documento movido debe conservar sus salientes recalculados; \
+         `archivo/alfa.md` =\n{movido}"
+    );
+
+    let (conforme, resp) = workspace_conforme(dir.path());
+    assert!(
+        conforme,
+        "tras el move completo el workspace debe quedar conforme: {resp:?}"
+    );
+}
+
+/// Criterio `move_revert_completo` — **Dado** ese move aplicado, **Cuando** se hace
+/// `change_revert`, **Entonces** los 32 ficheros vuelven a su contenido previo.
+///
+/// Se compara el árbol `.md` ENTERO (snapshot antes/después), que es más fuerte que contar
+/// ficheros: cualquier byte distinto en cualquier `.md` —incluido el path del documento movido—
+/// hace fallar el test. Con una guarda de no vacuidad: entre medias el árbol tiene que haber
+/// cambiado de verdad.
+#[test]
+fn move_revert_completo() {
+    let dir = workspace_move_salientes();
+    for i in 0..30 {
+        write(
+            dir.path(),
+            &format!("emisor{i:02}.md"),
+            &format!(
+                "---\ntitle: Emisor {i:02}\n---\n\n# Emisor {i:02}\n\nreferencia a [alfa](notas/alfa.md).\n"
+            ),
+        );
+    }
+    let antes = snapshot_md(dir.path());
+    assert_eq!(
+        antes.len(),
+        33,
+        "el fixture son 30 emisores + alfa + beta + raiz"
+    );
+
+    let (id, _) = planifica_aplicable(dir.path(), ops_move_alfa(), policy_estricta());
+    let receipt = aplica(dir.path(), &id);
+
+    let tras_aplicar = snapshot_md(dir.path());
+    assert_ne!(
+        antes, tras_aplicar,
+        "guarda de no vacuidad: el apply del move TIENE que haber cambiado el árbol"
+    );
+
+    let reverted = roundtrip(dir.path(), &[change_revert_line(3, &receipt)], 1);
+    assert_eq!(
+        sc(&reverted[0])["reverted"],
+        Value::Bool(true),
+        "el receipt del move debe poder revertirse: {reverted:?}"
+    );
+
+    let despues = snapshot_md(dir.path());
+    assert_eq!(
+        despues, antes,
+        "revertir el move debe devolver TODOS los `.md` a su contenido previo, byte a byte \
+         (incluido el documento movido en su ubicación original y los 30 emisores)"
+    );
+}
+
+// ===========================================================================
+// E23-H05 — Políticas de borrado honestas, POR LA SUPERFICIE MCP
+// (`ARCHITECTURE.md §20.11`, `requirements/epica-23-cierre-migracion.md`). Fase ROJA.
+//
+// `delete_politica_retirada_nombra_validas` es el rojo: hoy `retarget`/`create_stub` se ACEPTAN y
+// el plan sale (con el borrado a secas), así que la respuesta no es un error y no nombra nada.
+// `delete_remove_links_aplicado` y `delete_revert_byte_a_byte` son los criterios 2 y 3 de la
+// historia: la política que SÍ sobrevive tiene que seguir funcionando de punta a punta (aplicar +
+// revertir). Son controles anti-regresión de la retirada — si están verdes hoy, su valor es que
+// sigan verdes después.
+// ===========================================================================
+
+/// Workspace con `objetivo.md` referenciado desde `a.md` y `b.md` (2 backlinks inline).
+fn workspace_borrado_con_backlinks() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "objetivo.md",
+        "---\ntitle: Objetivo\n---\n\n# Objetivo\n\ncuerpo\n",
+    );
+    for slug in ["a", "b"] {
+        write(
+            dir.path(),
+            &format!("{slug}.md"),
+            &format!(
+                "---\ntitle: {slug}\n---\n\n# {slug}\n\nApunta a [Objetivo](objetivo.md) y sigue.\n"
+            ),
+        );
+    }
+    dir
+}
+
+/// Criterio `delete_retarget_rechazado` (mitad de wire; la del `App` vive en
+/// `crates/lodestar-app/tests/eliminacion.rs`) — **Dado** un `delete` con
+/// `inboundLinksPolicy: "retarget"`, **Cuando** se planifica, **Entonces** se rechaza con
+/// `INVALID_SCHEMA` **y un mensaje que nombra las políticas válidas**.
+///
+/// El mensaje es parte del criterio: el valor de la política es lo que el agente escribió, así que
+/// el rechazo tiene que decirle cuáles quedan. Hoy `ErrorCode` viaja a la superficie como código
+/// pelado (`e.as_str()` en `tools.rs`), de modo que este test obliga a que el rechazo de un valor
+/// retirado lleve además el texto — sin tocar el catálogo congelado de 16 códigos.
+#[test]
+fn delete_politica_retirada_nombra_validas() {
+    let dir = workspace_borrado_con_backlinks();
+
+    for politica in ["retarget", "create_stub"] {
+        let resp = roundtrip(
+            dir.path(),
+            &[change_plan_line(
+                1,
+                json!([
+                    { "op": "delete", "ref": { "path": "objetivo.md" },
+                      "inboundLinksPolicy": politica }
+                ]),
+                policy_permisiva(),
+            )],
+            1,
+        );
+        assert!(
+            es_error_con(&resp[0], "INVALID_SCHEMA"),
+            "`inboundLinksPolicy: {politica}` está RETIRADA (E23-H05) y debe rechazarse con \
+             INVALID_SCHEMA, no aceptarse para producir un plan que no ejecuta la política: {resp:?}"
+        );
+        let texto = resp[0].to_string();
+        for valida in ["reject", "remove_links"] {
+            assert!(
+                texto.contains(valida),
+                "el rechazo de «{politica}» debe nombrar las políticas válidas (falta \
+                 «{valida}»): {resp:?}"
+            );
+        }
+        assert!(
+            dir.path().join("objetivo.md").is_file(),
+            "un delete rechazado no puede borrar nada: {resp:?}"
+        );
+    }
+
+    // Control anti-vacuo: la política viva no se rechaza (el filtro es del VALOR retirado, no del
+    // parámetro).
+    let ok = roundtrip(
+        dir.path(),
+        &[change_plan_line(
+            2,
+            json!([
+                { "op": "delete", "ref": { "path": "objetivo.md" },
+                  "inboundLinksPolicy": "remove_links" }
+            ]),
+            policy_permisiva(),
+        )],
+        1,
+    );
+    assert!(
+        !es_error_con(&ok[0], "INVALID_SCHEMA"),
+        "`remove_links` sigue siendo una política válida y debe planificar: {ok:?}"
+    );
+}
+
+/// Criterio `delete_remove_links_aplicado` — **Dado** un `delete` con
+/// `inboundLinksPolicy: "remove_links"` sobre un documento con 2 backlinks, **Cuando** se
+/// **aplica**, **Entonces** el `.md` desaparece, los 2 emisores conservan el texto sin el enlace, y
+/// `check` sale 0.
+#[test]
+fn delete_remove_links_aplicado() {
+    let dir = workspace_borrado_con_backlinks();
+
+    let (id, _) = planifica_aplicable(
+        dir.path(),
+        json!([
+            { "op": "delete", "ref": { "path": "objetivo.md" },
+              "inboundLinksPolicy": "remove_links" }
+        ]),
+        policy_estricta(),
+    );
+    aplica(dir.path(), &id);
+
+    assert!(
+        !dir.path().join("objetivo.md").exists(),
+        "el documento borrado debe desaparecer del disco"
+    );
+    for slug in ["a", "b"] {
+        let emisor = lee(dir.path(), &format!("{slug}.md"));
+        assert!(
+            !emisor.contains("objetivo.md"),
+            "tras `remove_links` el emisor {slug}.md no puede conservar el enlace; cuerpo =\n{emisor}"
+        );
+        assert!(
+            emisor.contains("Apunta a Objetivo y sigue."),
+            "`remove_links` desenlaza dejando el TEXTO del enlace en su sitio, sin comerse la \
+             frase; cuerpo =\n{emisor}"
+        );
+    }
+
+    let (conforme, resp) = workspace_conforme(dir.path());
+    assert!(
+        conforme,
+        "tras borrar con `remove_links` el workspace debe quedar conforme (`check` sale 0): {resp:?}"
+    );
+}
+
+/// Criterio `delete_revert_byte_a_byte` — **Dado** ese borrado aplicado, **Cuando** se hace
+/// `change_revert`, **Entonces** el documento vuelve **byte a byte** y los emisores recuperan sus
+/// enlaces.
+#[test]
+fn delete_revert_byte_a_byte() {
+    let dir = workspace_borrado_con_backlinks();
+    let antes = snapshot_md(dir.path());
+
+    let (id, _) = planifica_aplicable(
+        dir.path(),
+        json!([
+            { "op": "delete", "ref": { "path": "objetivo.md" },
+              "inboundLinksPolicy": "remove_links" }
+        ]),
+        policy_estricta(),
+    );
+    let receipt = aplica(dir.path(), &id);
+    assert_ne!(
+        antes,
+        snapshot_md(dir.path()),
+        "guarda de no vacuidad: el apply del borrado TIENE que haber cambiado el árbol"
+    );
+
+    let reverted = roundtrip(dir.path(), &[change_revert_line(3, &receipt)], 1);
+    assert_eq!(
+        sc(&reverted[0])["reverted"],
+        Value::Bool(true),
+        "el receipt del borrado debe poder revertirse: {reverted:?}"
+    );
+
+    assert_eq!(
+        snapshot_md(dir.path()),
+        antes,
+        "revertir el borrado debe devolver el documento BYTE A BYTE y restaurar los enlaces de los \
+         dos emisores"
+    );
+}
+
+#[test]
+fn benchmark_escenarios() {
     escenario_01_buscar_por_significado();
     escenario_02_crear_valido();
-    escenario_03_crear_sin_campo_obligatorio();
+    escenario_03_crear_no_conforme();
     escenario_04_mover_30_backlinks();
     escenario_05_borrar_referenciado();
     escenario_06_conflicto_revision();
-    escenario_07_cinco_conceptos();
-    escenario_08_relacion_invalida();
-    escenario_09_safe_fixes();
+    escenario_07_cinco_documentos();
     escenario_10_diff_refactor();
     escenario_11_revert();
     escenario_12_crash_recuperacion();
     escenario_13_fuera_writable();
-    escenario_14_ref_codigo_inexistente();
     escenario_15_editar_markdown_invalido();
 }

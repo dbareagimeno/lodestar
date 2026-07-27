@@ -1,24 +1,24 @@
 //! `lodestar` — fachada CLI (`ARCHITECTURE.md §7.3`). Puerta de CI con exit codes congelados.
 //!
-//! Cada subcomando resuelve el root → construye el `Bundle` (efímero, sobre el core) → serializa.
-//! **Cero lógica OKF aquí**: toda la semántica vive en `lodestar-core`.
+//! Cada subcomando resuelve el root → construye el `DocumentSet` (efímero, sobre el core) → serializa.
+//! **Cero lógica de dominio aquí**: toda la semántica vive en `lodestar-core`.
 //!
-//! Exit codes (congelados): `0` conforme · `1` hard-fail · `2` uso · `3` runtime/IO · `4` drift de generadores.
+//! Exit codes (congelados): `0` conforme · `1` hard-fail · `2` uso · `3` runtime/IO. El `4` (drift
+//! de generadores) se retiró con los generadores en E15-H02: sin `index`/`tags` no hay drift.
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 
-mod bundle_io;
 mod commands;
 mod sarif;
 
-/// Editor local-first de bases de conocimiento OKF — interfaz de línea de comandos.
+/// Motor de integridad semántica para bases de conocimiento Markdown — línea de comandos.
 #[derive(Parser)]
 #[command(name = "lodestar", version, about)]
 struct Cli {
-    /// Raíz del bundle (por defecto: el directorio actual o el ancestro con `index.md`/`.lodestar`).
+    /// Raíz del workspace (por defecto: el directorio actual; nunca se asciende a los ancestros).
     #[arg(long, global = true)]
     path: Option<PathBuf>,
     #[command(subcommand)]
@@ -27,11 +27,9 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Inicializa un bundle nuevo (index raíz + `.gitignore`).
-    Init { dir: Option<PathBuf> },
-    /// La puerta de CI: ¿es conforme el bundle? (exit 0/1). Juzga siempre el **working tree**
-    /// (scope workspace) — el `vcs`/git queda fuera de la superficie de la CLI (E9-H02); `--staged`,
-    /// `--rev` y `--range` quedan diferidos con el crate `vcs` dormido.
+    /// La puerta de CI: ¿es conforme el workspace? (exit 0/1). Juzga siempre el **working tree**
+    /// (scope workspace) — git salió de la superficie en E9-H02 y del repo en E15-H01, así que no
+    /// hay `--staged`/`--rev`/`--range` que valgan.
     Check {
         /// Salida JSON (el `Analysis` serializado).
         #[arg(long, conflicts_with = "sarif")]
@@ -40,44 +38,28 @@ enum Command {
         #[arg(long)]
         sarif: bool,
     },
-    /// Genera el `index.md` de un directorio (o `--check` para detectar drift, exit 4).
-    Index {
-        dir: Option<String>,
-        #[arg(long)]
-        check: bool,
-    },
-    /// Genera/purga los índices de tags (o `--check`, exit 4).
-    Tags {
-        #[arg(long)]
-        check: bool,
-    },
-    /// Exporta el bundle a un `.zip`.
-    Export {
-        #[arg(long)]
-        out: Option<PathBuf>,
-    },
     /// Reconstruye la cache `.lodestar/index.db` desde los `.md`.
     Reindex,
-    /// Importa un bundle (zip exportado del prototipo o directorio).
-    /// Requerido en clap: sin argumento es error de USO (exit 2), no de runtime.
-    Import { source: PathBuf },
+    /// Diagnostica convenciones OKF legadas (índices, `okf_version`, índices de tags) **sin
+    /// modificar ningún fichero**. Requiere `--dry-run`: en v0.3 solo existe la forma diagnóstica.
+    #[command(name = "migrate-from-okf")]
+    MigrateFromOkf {
+        /// Modo diagnóstico (obligatorio): recorre el workspace y reporta, sin tocar nada.
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
-/// Resuelve el root del bundle: `--path`, o sube desde el cwd buscando `index.md`/`.lodestar`.
+/// Resuelve la raíz del workspace: `--path` si se da, si no el **cwd tal cual**
+/// (`ARCHITECTURE.md §20.5`, E15-H06).
+///
+/// **No asciende por los ancestros**: el ascenso buscando `index.md`/`.lodestar` desaparece con la
+/// unidad «workspace» — la raíz es el directorio donde se invoca, y lo que se juzga es ese directorio,
+/// nunca un proyecto que lo contenga.
 fn resolve_root(explicit: Option<&Path>) -> PathBuf {
-    if let Some(p) = explicit {
-        return p.to_path_buf();
-    }
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let mut cur = cwd.as_path();
-    loop {
-        if cur.join("index.md").is_file() || cur.join(".lodestar").is_dir() {
-            return cur.to_path_buf();
-        }
-        match cur.parent() {
-            Some(p) => cur = p,
-            None => return cwd,
-        }
+    match explicit {
+        Some(p) => p.to_path_buf(),
+        None => std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
     }
 }
 
@@ -85,21 +67,9 @@ fn main() -> ExitCode {
     let cli = Cli::parse();
     let root = resolve_root(cli.path.as_deref());
     let result = match cli.command {
-        // `init` sin argumento inicializa el CWD (o `--path`), NUNCA el resultado de
-        // `resolve_root`: subiría hasta un bundle ancestro e inicializaría el padre.
-        Command::Init { dir } => {
-            let target = dir
-                .or_else(|| cli.path.clone())
-                .or_else(|| std::env::current_dir().ok())
-                .unwrap_or_else(|| PathBuf::from("."));
-            commands::init(target)
-        }
         Command::Check { json, sarif } => commands::check(&root, json, sarif),
-        Command::Index { dir, check } => commands::index(&root, dir.unwrap_or_default(), check),
-        Command::Tags { check } => commands::tags(&root, check),
-        Command::Export { out } => commands::export(&root, out),
         Command::Reindex => commands::reindex(&root),
-        Command::Import { source } => commands::import(&root, source),
+        Command::MigrateFromOkf { dry_run } => commands::migrate_from_okf(&root, dry_run),
     };
     match result {
         Ok(code) => code,

@@ -8,9 +8,9 @@
 //!   escribe TODOS los ficheros resultantes del plan (reusando `plan::apply_normalized_ops` sobre
 //!   el `FileMap` canónico) bajo `.lodestar/runtime/staging/<changeSetId>/`. No toca el canónico.
 //! - `Workspace::validate_staging(&self, staging: &StagingDir) -> Result<(), WorkspaceError>`
-//!   construye un `Bundle` desde el árbol de staging (canónico + staging), corre `analyze` y, si el
+//!   construye un `DocumentSet` desde el árbol de staging (canónico + staging), corre `analyze` y, si el
 //!   resultado no cumple la política (gate estricto: `hard_fail > 0`), aborta SIN tocar el canónico
-//!   y limpia el staging. El `Err` mapea al wire `NONCONFORMANT_RESULT` (`WorkspaceError::code()`).
+//!   y limpia el staging. El `Err` mapea al wire `INVALID_RESULT` (`WorkspaceError::code()`).
 //! - `StagingDir::path(&self) -> &Path` expone el directorio de staging materializado.
 //!
 //! Firmas asumidas de E13-H02 (fase ROJA; el implementador debe respetarlas):
@@ -136,11 +136,12 @@ fn change_set(id: &str, operations: Vec<NormalizedOperation>) -> ChangeSet {
     }
 }
 
-/// Un `Create` conforme (con `type` y `title`) que resuelve al `.md` `path`.
+/// Un `Create` válido que resuelve al `.md` `path`, con `type`/`title` como frontmatter
+/// **arbitrario** (E23-H02: el motor no privilegia ninguna clave; aquí son solo dos claves más).
 fn create_conforme(path: &str, ty: &str, title: &str) -> NormalizedOperation {
     NormalizedOperation::Create {
         path: RelPath::new(path).unwrap(),
-        frontmatter: patch(&[("type", ty), ("title", title)]),
+        frontmatter: Some(patch(&[("type", ty), ("title", title)])),
         body: Some(format!("# {title}\n\ncuerpo\n")),
     }
 }
@@ -182,8 +183,8 @@ fn staging_no_toca_canonico() {
     let dir = tempfile::tempdir().unwrap();
     let ws = Workspace::open(dir.path()).unwrap();
 
-    // Concepto canónico previo, para comprobar que la materialización no lo altera.
-    ws.create_concept(
+    // Documento canónico previo, para comprobar que la materialización no lo altera.
+    ws.create_document(
         &RelPath::new("raiz.md").unwrap(),
         "Nota",
         Some("Raiz"),
@@ -236,7 +237,7 @@ fn staging_no_toca_canonico() {
 }
 
 /// **E13-H01** · Criterio: dado un staging que resultaría NO conforme (política estricta), al
-/// validarlo aborta con `NONCONFORMANT_RESULT` y limpia el staging.
+/// validarlo aborta con `INVALID_RESULT` y limpia el staging.
 #[test]
 fn staging_no_conforme_aborta() {
     let dir = tempfile::tempdir().unwrap();
@@ -244,14 +245,16 @@ fn staging_no_conforme_aborta() {
 
     let antes = canonical_md(dir.path());
 
-    // Change set cuyo resultado es NO conforme: un `Create` con `type` vacío (hard-fail de esquema,
-    // mismo motivo que `create_concept("")` rechaza en `create_concept_no_conforme_no_escribe`).
+    // Change set cuyo resultado es NO conforme. MIGRADO en E16-H05: era un `Create` con `type`
+    // vacío (`OKF-TYPE`), retirado del catálogo; hoy es un cuerpo con marcadores de merge sin
+    // resolver (`DOC-CONFLICT-MARKER`), mismo motivo por el que rechaza
+    // `create_document_no_conforme_no_escribe`.
     let cs = change_set(
         "changeset:no-conforme",
         vec![NormalizedOperation::Create {
             path: RelPath::new("malo.md").unwrap(),
-            frontmatter: patch(&[("type", ""), ("title", "Malo")]),
-            body: Some("# Malo\n".to_string()),
+            frontmatter: Some(patch(&[("type", "Nota"), ("title", "Malo")])),
+            body: Some("# Malo\n\n<<<<<<< HEAD\nuno\n=======\ndos\n>>>>>>> rama\n".to_string()),
         }],
     );
 
@@ -264,8 +267,8 @@ fn staging_no_conforme_aborta() {
         .expect_err("un staging no conforme debe abortar la validación");
     assert_eq!(
         err.code(),
-        "NONCONFORMANT_RESULT",
-        "el error de validación no mapea a NONCONFORMANT_RESULT: {err:?}"
+        "INVALID_RESULT",
+        "el error de validación no mapea a INVALID_RESULT: {err:?}"
     );
 
     // El staging quedó limpio (el directorio del changeSetId no persiste).
@@ -325,7 +328,7 @@ fn revision_base_cambiada() {
     let ws = Workspace::open(dir.path()).unwrap();
 
     // Estado inicial sobre el que se "planificó".
-    ws.create_concept(
+    ws.create_document(
         &RelPath::new("base.md").unwrap(),
         "Nota",
         Some("Base"),
@@ -343,8 +346,8 @@ fn revision_base_cambiada() {
     ws.reverify_base_revision(&r1)
         .expect("sin cambios, re-verificar la revisión base debe ser Ok");
 
-    // El workspace cambia ENTRE plan y apply: otro escritor introduce un concepto.
-    ws.create_concept(
+    // El workspace cambia ENTRE plan y apply: otro escritor introduce un documento.
+    ws.create_document(
         &RelPath::new("intruso.md").unwrap(),
         "Nota",
         Some("Intruso"),
@@ -748,15 +751,15 @@ fn publica_lote() {
 /// calculada coincide con la `resultWorkspaceRevision` que el plan previó. El esperado se obtiene
 /// aplicando el plan sobre el canónico (`plan::apply_normalized_ops`) y hasheando el resultado con
 /// la misma lógica del core (`types::workspace_revision`, writableRoots por defecto = vacío en un
-/// bundle recién abierto). Se comprueba tanto el valor devuelto por `publish` como el que
+/// workspace recién abierto). Se comprueba tanto el valor devuelto por `publish` como el que
 /// `Workspace::workspace_revision()` calcula del canónico ya publicado.
 #[test]
 fn revision_resultante_coincide() {
     let dir = tempfile::tempdir().unwrap();
     let ws = Workspace::open(dir.path()).unwrap();
 
-    // Un concepto canónico previo, para que la publicación opere sobre una base no vacía.
-    ws.create_concept(
+    // Un documento canónico previo, para que la publicación opere sobre una base no vacía.
+    ws.create_document(
         &RelPath::new("raiz.md").unwrap(),
         "Nota",
         Some("Raiz"),
@@ -917,23 +920,73 @@ fn receipt_persistido() {
     );
 }
 
+/// Escribe `<root>/.lodestar/config.yaml` con la sección `transactions` dada, creando el directorio
+/// si hace falta.
+///
+/// El `create_dir_all` no es ceremonia: desde **E23-H12** abrir un workspace no monta ningún
+/// scaffold (leer un proyecto ajeno no puede modificarlo), así que el directorio lo crea **quien
+/// escribe** — y quien escribe la config del test es el test.
+fn escribe_config_transacciones(root: &Path, transactions_yaml: &str) {
+    std::fs::create_dir_all(root.join(".lodestar")).unwrap();
+    std::fs::write(
+        root.join(".lodestar/config.yaml"),
+        format!("transactions:\n{transactions_yaml}"),
+    )
+    .unwrap();
+}
+
 /// **E13-H07** · Criterio `receipt_gc`: dados 21 recibos con `maximumReceipts:20`, al hacer GC queda
 /// el más antiguo (`receipt-00`, por mtime) fuera —su receipt y su copia de recuperación borrados—
 /// y persisten exactamente los 20 más recientes con sus copias intactas.
+///
+/// ## Dos arreglos de E23-H12 (el test se apoyaba en un efecto secundario y en una config muerta)
+///
+/// 1. **Los `create_dir_all` que le faltaban.** Plantaba ficheros bajo `.lodestar/` sin crear
+///    `.lodestar/` ni `runtime/receipts/`, y le funcionaba porque `Workspace::open` le montaba el
+///    scaffold de runtime al abrir. E23-H12 retira ese efecto (abrir no modifica el proyecto) y el
+///    directorio pasa a crearlo quien escribe: en producción `write_receipt`, aquí el test —que
+///    planta los recibos a mano justamente para controlar sus mtimes.
+/// 2. **La config se escribe ANTES de abrir.** `WorkspaceConfig` se lee **una sola vez, al abrir**
+///    (`ARCHITECTURE.md §20.5`), así que el `config.yaml` que este test escribía DESPUÉS de
+///    `Workspace::open` no llegaba nunca al GC: se estaba juzgando con los defaults —que casualmente
+///    son los mismos, `24h`/`20`— y el test aseveraba sobre una config que jamás se aplicó. Ahora la
+///    precondición comprueba explícitamente que la sesión la leyó.
+///
+/// ## Fase 2 — retención por EDAD, y la prueba de que manda la config
+///
+/// Con la fase 1 sola, `maximumReceipts:20` es indistinguible del default: el criterio lo cumpliría
+/// igual un `gc_receipts` que ignorase la config entera. La fase 2 cierra dos huecos de un tiro: una
+/// config **no-default** (`retainReceiptsFor: "1h"`) que solo puede purgar si de verdad se lee, y la
+/// retención por edad del alcance de E13-H07, que hasta ahora no ejercitaba ningún test (los mtimes
+/// de la fase 1 están todos dentro de las 24h a propósito, para que solo muerda el límite de
+/// cantidad).
+///
+/// Las edades de la fase 2 son **bimodales** (2 h vs. ahora) contra un TTL de 1 h: el veredicto
+/// queda a una hora de cualquier jitter del reloj, así que no puede volverse flaky. Los mtimes
+/// escalonados por segundos de la fase 1 solo ORDENAN, no deciden caducidad.
 #[test]
 fn receipt_gc() {
     let dir = tempfile::tempdir().unwrap();
-    let ws = Workspace::open(dir.path()).unwrap();
 
-    // Config explícita del criterio: retener como máximo 20 recibos (y 24h por edad, holgado).
-    std::fs::write(
-        dir.path().join(".lodestar/config.yaml"),
-        "transactions:\n  retainReceiptsFor: \"24h\"\n  maximumReceipts: 20\n",
-    )
-    .unwrap();
+    // Config explícita del criterio (retener como máximo 20 recibos, 24h por edad = holgado),
+    // escrita ANTES de abrir: es lo único que la hace efectiva.
+    escribe_config_transacciones(
+        dir.path(),
+        "  retainReceiptsFor: \"24h\"\n  maximumReceipts: 20\n",
+    );
+    let ws = Workspace::open(dir.path()).unwrap();
+    assert_eq!(
+        ws.config().transactions.maximum_receipts,
+        20,
+        "precondición: la sesión tiene que haber LEÍDO la config declarada (se lee una sola vez, al \
+         abrir); si no, el GC estaría juzgando con defaults y el criterio sería vacuo"
+    );
 
     let receipts_dir = dir.path().join(".lodestar/runtime/receipts");
     let recovery_dir = dir.path().join(".lodestar/runtime/recovery");
+    // El runtime lo crea QUIEN ESCRIBE (E23-H12: la apertura ya no monta scaffold). Aquí los recibos
+    // los planta el test, así que los directorios son suyos.
+    std::fs::create_dir_all(&receipts_dir).unwrap();
     std::fs::create_dir_all(&recovery_dir).unwrap();
 
     // 21 recibos con mtimes ESCALONADOS: `receipt-00` el más antiguo … `receipt-20` el más nuevo,
@@ -992,6 +1045,66 @@ fn receipt_gc() {
             "la copia de recuperación del receipt reciente {id} no debía borrarse"
         );
     }
+
+    // === Fase 2 — retención por EDAD (`retainReceiptsFor`), con una config NO-default ===========
+    // Sesión NUEVA: la config se lee al abrir, así que reescribirla exige reabrir para que aplique.
+    escribe_config_transacciones(
+        dir.path(),
+        "  retainReceiptsFor: \"1h\"\n  maximumReceipts: 20\n",
+    );
+    let ws = Workspace::open(dir.path()).unwrap();
+    assert_eq!(
+        ws.config().transactions.retain_receipts_for,
+        "1h",
+        "precondición: la sesión nueva debe haber leído la retención declarada (con el default de \
+         24h no se purgaría nada y la fase 2 sería vacua)"
+    );
+
+    // De los 20 supervivientes, los 5 más antiguos pasan a tener 2 h: CADUCADOS con el TTL de 1 h
+    // declarado, y VIGENTES con el default de 24h — que es justo lo que hace discriminante esta
+    // fase. El resto se re-sella a «ahora». Siguen siendo 20, así que `maximumReceipts:20` no purga
+    // a nadie: lo único que puede mover ficheros aquí es la edad.
+    let supervivientes = &ids[1..];
+    let (caducados, vigentes) = supervivientes.split_at(5);
+    for id in caducados {
+        set_mtime(
+            &receipts_dir.join(format!("{id}.json")),
+            now - Duration::from_secs(2 * 3600),
+        );
+    }
+    for id in vigentes {
+        set_mtime(&receipts_dir.join(format!("{id}.json")), now);
+    }
+
+    ws.gc_receipts()
+        .expect("recolectar los recibos caducados por retainReceiptsFor");
+
+    for id in caducados {
+        assert!(
+            !receipts_dir.join(format!("{id}.json")).exists(),
+            "el receipt {id} (2 h de antigüedad) debía purgarse con retainReceiptsFor:1h; si sigue \
+             ahí, el GC está usando el default de 24h en vez de la config del workspace"
+        );
+        assert!(
+            !recovery_dir.join(id).exists(),
+            "la copia de recuperación del receipt caducado {id} debía borrarse con él"
+        );
+    }
+    for id in vigentes {
+        assert!(
+            receipts_dir.join(format!("{id}.json")).exists(),
+            "el receipt {id} está dentro de la retención: no debía purgarse"
+        );
+        assert!(
+            recovery_dir.join(id).exists(),
+            "la copia de recuperación del receipt vigente {id} no debía borrarse"
+        );
+    }
+    assert_eq!(
+        contar_json(&receipts_dir),
+        vigentes.len(),
+        "tras el GC por edad deben quedar exactamente los recibos dentro de la retención"
+    );
 }
 
 // ===========================================================================
@@ -1103,12 +1216,12 @@ mod recuperacion {
         }
     }
 
-    /// Abre un bundle con 3 conceptos canónicos conocidos (`uno/dos/tres.md`) y devuelve el
+    /// Abre un workspace con 3 documentos canónicos conocidos (`uno/dos/tres.md`) y devuelve el
     /// workspace + el `FileMap` canónico ORIGINAL (el estado "antes de la transacción").
-    fn bundle_con_tres(root: &Path) -> (Workspace, FileMap) {
+    fn workspace_con_tres(root: &Path) -> (Workspace, FileMap) {
         let ws = Workspace::open(root).unwrap();
         for (p, t) in [("uno.md", "Uno"), ("dos.md", "Dos"), ("tres.md", "Tres")] {
-            ws.create_concept(
+            ws.create_document(
                 &RelPath::new(p).unwrap(),
                 "Nota",
                 Some(t),
@@ -1121,7 +1234,7 @@ mod recuperacion {
         (ws, original)
     }
 
-    /// Change set de 3 **modificaciones** (`ReplaceBody`) de los conceptos existentes.
+    /// Change set de 3 **modificaciones** (`ReplaceBody`) de los documentos existentes.
     fn cs_modifica_tres(id: &str) -> ChangeSet {
         change_set(
             id,
@@ -1142,7 +1255,7 @@ mod recuperacion {
         )
     }
 
-    /// Change set de 3 **creaciones** de conceptos nuevos (`a/b/c.md`): ejercita la ruta de
+    /// Change set de 3 **creaciones** de documentos nuevos (`a/b/c.md`): ejercita la ruta de
     /// recuperación por `.absent` (borrar los creados al restaurar).
     fn cs_crea_tres(id: &str) -> ChangeSet {
         change_set(
@@ -1257,7 +1370,7 @@ mod recuperacion {
     #[test]
     fn recovery_restaura_desde_medio() {
         let dir = tempfile::tempdir().unwrap();
-        let (ws, original) = bundle_con_tres(dir.path());
+        let (ws, original) = workspace_con_tres(dir.path());
 
         let cs = cs_modifica_tres("recovery-restaura-desde-medio");
         let result = plan::apply_normalized_ops(&original, &cs.operations).unwrap();
@@ -1293,7 +1406,7 @@ mod recuperacion {
     #[test]
     fn recovery_completa() {
         let dir = tempfile::tempdir().unwrap();
-        let (ws, original) = bundle_con_tres(dir.path());
+        let (ws, original) = workspace_con_tres(dir.path());
 
         let cs = cs_modifica_tres("recovery-completa");
         let result = plan::apply_normalized_ops(&original, &cs.operations).unwrap();
@@ -1333,7 +1446,7 @@ mod recuperacion {
     #[test]
     fn recovery_bloquea_escritura() {
         let dir = tempfile::tempdir().unwrap();
-        let (ws, original) = bundle_con_tres(dir.path());
+        let (ws, original) = workspace_con_tres(dir.path());
 
         let cs = cs_modifica_tres("recovery-bloquea-escritura");
         // Deja una transacción a medias (journal `applying`): la recuperación queda PENDIENTE.
@@ -1350,7 +1463,7 @@ mod recuperacion {
         let ws2 = Workspace::open(dir.path()).unwrap();
 
         // Una escritura con recuperación pendiente debe rechazarse con WORKSPACE_RECOVERY_REQUIRED.
-        match ws2.create_concept(
+        match ws2.create_document(
             &RelPath::new("nuevo.md").unwrap(),
             "Nota",
             Some("Nuevo"),
@@ -1364,7 +1477,7 @@ mod recuperacion {
             ),
             Ok(outcome) => panic!(
                 "una escritura con recuperación pendiente debía fallar con \
-                 WORKSPACE_RECOVERY_REQUIRED, pero create_concept escribió (written={})",
+                 WORKSPACE_RECOVERY_REQUIRED, pero create_document escribió (written={})",
                 outcome.written
             ),
         }
@@ -1374,7 +1487,7 @@ mod recuperacion {
             !dir.path().join("nuevo.md").exists(),
             "la escritura bloqueada no debía tocar el canónico"
         );
-        // El bundle sigue conteniendo los 3 originales (no se perdió nada del canónico previo).
+        // El workspace sigue conteniendo los 3 originales (no se perdió nada del canónico previo).
         let _ = original;
     }
 
@@ -1385,14 +1498,14 @@ mod recuperacion {
     /// (todo el original íntegro, o todo el resultado íntegro), nunca una mezcla.
     #[test]
     fn recovery_sin_parciales() {
-        // Cada forma de change set se fabrica desde el bundle base (3 conceptos existentes).
+        // Cada forma de change set se fabrica desde el workspace base (3 documentos existentes).
         type FormaCs = (&'static str, fn(&str) -> ChangeSet);
         let formas: &[FormaCs] = &[("modifica", cs_modifica_tres), ("crea", cs_crea_tres)];
 
         for (forma, build_cs) in formas {
             for &fp in TODOS_LOS_FAILPOINTS {
                 let dir = tempfile::tempdir().unwrap();
-                let (ws, original) = bundle_con_tres(dir.path());
+                let (ws, original) = workspace_con_tres(dir.path());
 
                 let id = format!("recovery-sin-parciales-{forma}-{fp:?}");
                 let cs = build_cs(&id);

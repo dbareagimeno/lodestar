@@ -8,7 +8,7 @@ pub enum StoreError {
     /// Error de SQLite (apertura, DDL, consulta).
     #[error("sqlite: {0}")]
     Sqlite(#[from] rusqlite::Error),
-    /// Error de I/O al leer el bundle o preparar `.lodestar/`.
+    /// Error de I/O al leer el workspace o preparar `.lodestar/`.
     #[error("io: {0}")]
     Io(String),
     /// Error del watcher (`notify`).

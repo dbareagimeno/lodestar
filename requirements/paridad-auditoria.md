@@ -12,6 +12,11 @@ por ambas implementaciones) antes de aceptarla. Resultado: **8 divergencias conf
 falsos positivos refutados (validación de fechas `isISO`: ambos lados son laxos vía `Date.parse`,
 no divergen).
 
+> **RETIRADO en `E15-H04`.** Este documento es el registro histórico de la auditoría de paridad
+> JS-vs-Rust de v0.2.x. El arnés diferencial y el prototipo como spec de comportamiento se
+> retiraron con la migración a workspaces Markdown universales (`ARCHITECTURE.md §20.13`); las
+> 6 divergencias que documenta siguen siendo historia útil, no contrato vigente.
+
 El **arnés diferencial** (`prototype/harness/` + `crates/lodestar-core/tests/differential.rs`)
 ejecuta las funciones puras del prototipo en Node y compara su salida con el core Rust sobre las
 mismas fixtures: es la red de seguridad permanente que fija esta paridad.
