@@ -1,169 +1,268 @@
-# lodestar
+# Lodestar
 
-**Motor headless de integridad semántica** para bases de conocimiento en formato **OKF** (Open
-Knowledge Format): un directorio de ficheros `.md` con frontmatter YAML. «Solo ficheros»: legible
-por humanos y por agentes, versionable en git, sin SDK ni servidor. No es un editor generalista y
-no gestiona git — es una capa fiable para que agentes (Claude Code, Codex, otros clientes MCP) y
-la CLI busquen, validen y analicen conocimiento sin GUI (`ARCHITECTURE.md §19`, giro ratificado
-2026-07-22).
+**Conocimiento en Markdown que los agentes pueden entender, validar y cambiar con seguridad.**
 
-Una misma lógica de análisis (conformidad, backlinks, huérfanos, query, grafo) se expone hoy por
-**dos fachadas headless**: **CLI** (puerta de CI) y servidor **MCP** (para agentes como Claude
-Code) — ambas invocan la misma lógica de `lodestar-core`/`lodestar-workspace` y, desde `E10`, el
-crate de servicios `lodestar-app` (`ARCHITECTURE.md §19.2`). La app de escritorio (Tauri v2 +
-Svelte 5) sigue en el repo, compilando, pero queda **congelada**: no recibe desarrollo nuevo tras
-el giro.
+[![CI](https://github.com/dbareagimeno/lodestar/actions/workflows/ci.yml/badge.svg)](https://github.com/dbareagimeno/lodestar/actions/workflows/ci.yml)
+[![Rust 1.80+](https://img.shields.io/badge/Rust-1.80%2B-dea584?logo=rust)](rust-toolchain.toml)
+[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#licencia)
 
-**git sale de la superficie de producto**: ninguna fachada expone ya commit/rama/push/pull/merge.
-La mecánica se conserva **dormida** en el crate `lodestar-vcs` (compila, tests verdes, sin
-consumidor) por si vuelve a exponerse — ver `ARCHITECTURE.md §19.1` y `§13` (cabecera de
-supersesión).
+Lodestar convierte un directorio de documentos Markdown en una base de conocimiento que agentes,
+automatizaciones y equipos pueden consultar con semántica, no como una colección de texto suelto.
+Entiende conceptos, tipos, relaciones y estados; detecta incoherencias; calcula el impacto de un
+cambio y permite aplicarlo mediante transacciones recuperables.
 
-Stack: **Rust + SQLite/FTS5 + MCP + CLI (clap)**; `Tauri v2 + Svelte 5/Vite` para la app de
-escritorio congelada; git (libgit2 + binario `git`) como capacidad dormida en `lodestar-vcs`.
+Los ficheros `.md` siguen siendo la única fuente de verdad. No hay un formato binario propietario,
+un servidor que mantener ni una base de datos de la que dependa tu conocimiento. Todo permanece
+legible, portable y versionable.
 
-## Características
+> Lodestar es un motor headless: se integra con agentes mediante MCP y con personas o CI mediante
+> su CLI.
 
-- **Los `.md` en disco son la única fuente de verdad** — todo lo demás (cache SQLite/FTS5, índices,
-  grafo) se deriva y se puede reconstruir.
-- **Conformidad OKF**: 15+ checks con severidad, salida humana, `--json` y `--sarif`;
-  `lodestar check` como puerta de CI con exit codes congelados, sobre el working tree.
-- **Motor headless**: la superficie de producto (MCP · CLI) no expone git ni GUI — buscar, validar
-  y analizar conocimiento desde agentes y automatización. git queda como capacidad **dormida** en
-  `lodestar-vcs` (libgit2 local + binario `git` para red), no en la superficie.
-- **Convergencia multi-escritor**: CLI, MCP y edición externa convergen vía un watcher con gate por
-  hash blake3; un único escritor aplica cambios (escritura atómica).
-- **Escritorio (congelado)**: la app Tauri/Svelte construida antes del giro sigue disponible —
-  árbol filtrable, editor con validación y diagnósticos en español, panel de enlaces, grafo
-  interactivo (SVG + rAF) — pero no recibe desarrollo nuevo (`ARCHITECTURE.md §19.1`).
-- **Paridad garantizada por tests**: la síntesis SQL se verifica idéntica al core, y un arnés
-  diferencial ejecuta el prototipo JS original en node como oráculo del core Rust.
+## Por qué Lodestar
 
-## Instalación
+- **Contexto preciso para agentes.** Busca conceptos, recupera solo las secciones necesarias e
+  inspecciona el esquema sin cargar todo el repositorio en el contexto.
+- **Conocimiento con estructura.** Markdown y frontmatter YAML se convierten en tipos, estados,
+  relaciones y reglas comprobables.
+- **Grafo e impacto.** Encuentra backlinks, huérfanos, enlaces rotos, ciclos, caminos y el radio de
+  impacto de un cambio antes de realizarlo.
+- **Cambios seguros.** Separa planificación y escritura: simula, valida y evalúa el riesgo antes de
+  publicar; después genera un recibo y permite revertir.
+- **Una puerta de calidad para CI.** `lodestar check` produce salida humana, JSON o SARIF y devuelve
+  códigos de salida estables.
+- **Local-first y file-first.** La caché SQLite/FTS5 es derivada y desechable; se puede reconstruir
+  siempre desde los Markdown.
 
-### Descargar la app de escritorio (congelada)
+## Cómo funciona
 
-> La app de escritorio quedó **congelada** tras el giro a motor headless (`ARCHITECTURE.md §19.1`):
-> sigue disponible y funcional, pero no recibe desarrollo nuevo. El foco de producto es la CLI y el
-> servidor MCP.
+Un agente puede seguir un flujo completo sin escribir a ciegas:
 
-Las builds de escritorio se publican en **[GitHub Releases][releases]** (macOS, Windows y Linux).
-Descarga el instalador de tu plataforma desde la última release.
+```text
+orientarse → buscar → leer → inspeccionar relaciones → analizar impacto
+    → planificar en memoria → aplicar → validar → revertir si es necesario
+```
 
-> **Nota — bundles sin firmar.** Los instaladores **no están firmados** todavía, así que el sistema
-> operativo mostrará un aviso la primera vez. Es esperado; solo hace falta desbloquearlos una vez.
+Lodestar expone ese recorrido mediante diez tools MCP:
 
-**macOS** — al abrir `lodestar.app` puede aparecer «no se puede comprobar que no contiene
-malware». Dos opciones:
+| Necesidad | Tools |
+|---|---|
+| Entender el workspace | `workspace_status`, `knowledge_search`, `knowledge_get`, `schema_inspect` |
+| Analizar la base | `graph_query`, `impact_analyze`, `knowledge_check` |
+| Cambiar con seguridad | `change_plan`, `change_apply`, `change_revert` |
 
-- Clic derecho sobre la app → **Abrir** → **Abrir** en el diálogo (solo la primera vez), o
-- quita la cuarentena desde la terminal:
+El perfil `readonly` ofrece únicamente lectura y análisis. El perfil `standard` añade el flujo
+transaccional de cambios.
 
-  ```bash
-  xattr -dr com.apple.quarantine /ruta/a/lodestar.app
-  ```
+## Inicio rápido
 
-**Windows** — SmartScreen puede mostrar «Windows protegió su PC». Pulsa **Más información** →
-**Ejecutar de todas formas**.
+### 1. Instala Lodestar
 
-**Linux** — usa el `.AppImage` (dale permiso de ejecución: `chmod +x lodestar_*.AppImage`) o el
-paquete `.deb`. Necesitas las libs de WebKitGTK del sistema (ver [Requisitos](#requisitos)).
-
-### Instalar la CLI / el servidor MCP con cargo
-
-La CLI (`lodestar`) y el servidor MCP (`lodestar-mcp`) se pueden compilar e instalar desde el
-código con `cargo`:
+Descarga los binarios de `lodestar` y `lodestar-mcp` desde
+[GitHub Releases](https://github.com/dbareagimeno/lodestar/releases), o compílalos desde este
+repositorio:
 
 ```bash
-cargo install --path crates/lodestar-cli    # binario `lodestar`
-cargo install --path crates/lodestar-mcp    # binario `lodestar-mcp`
+cargo install --path crates/lodestar-cli
+cargo install --path crates/lodestar-mcp
 ```
 
-## Requisitos
+Requiere Rust 1.80 o posterior.
 
-- **Rust** estable (≥ 1.80, con `rustfmt` y `clippy`; ver `rust-toolchain.toml`)
-- **Node.js** ≥ 20 + npm (arnés diferencial)
-- **git** en el PATH (operaciones de red)
+### 2. Crea una base de conocimiento
 
-(La UI de escritorio y sus dependencias de sistema Tauri se retiraron de `main`; viven en la rama
-`experimental/ui-desktop`.)
-
-## Build desde el código
-
-### Tests
 ```bash
-npm ci --prefix prototype/harness   # deps del arnés diferencial (una vez)
-cargo test --workspace              # core, store, vcs, workspace, cli, mcp + diferenciales
+lodestar init mi-conocimiento
+cd mi-conocimiento
 ```
 
-### CLI
+Añade conceptos como Markdown con frontmatter YAML:
+
+```markdown
+---
+type: Decision
+title: Usar PostgreSQL
+description: Decisión sobre la base de datos principal
+status: accepted
+tags: [architecture, data]
+---
+
+# Usar PostgreSQL
+
+Elegimos PostgreSQL por su soporte transaccional y su ecosistema.
+
+Esta decisión queda recogida en [el índice del bundle](/index.md).
+```
+
+### 3. Valídala
+
 ```bash
-cargo run -p lodestar-cli -- init mi-bundle          # bundle nuevo (git init + commit inicial)
-cargo run -p lodestar-cli -- check --path mi-bundle  # ¿conforme? exit 0/1 (--json | --sarif)
-cargo run -p lodestar-cli -- reindex                 # reconstruye la cache .lodestar/index.db
+lodestar check
 ```
-Subcomandos: `init` · `check` · `index` · `tags` · `export` · `import` · `reindex`. Desde `E9-H02`
-**no** hay subcomandos git (`log`/`last-conforming`/`branch`/`switch`/`merge`/`pull`/`push`/`hooks`
-retirados de la superficie; la mecánica sigue dormida en `lodestar-vcs`, ver `ARCHITECTURE.md
-§19.1`) ni `--staged`/`--rev`/`--range` en `check` — juzga siempre el working tree.
 
-Exit codes de `check`: `0` conforme · `1` hard-fail · `2` uso · `3` runtime/IO · `4` drift de
-generadores.
+Una base conforme devuelve `0`; una violación que bloquea devuelve `1`.
 
-### App de escritorio (Tauri v2) — retirada de `main`
-
-La UI de escritorio (`frontend/` Svelte + `src-tauri/`, binario `lodestar-desktop`) se **retiró de
-`main`** con el giro headless y vive íntegra en la rama `experimental/ui-desktop`. Quien la quiera
-construir, esa rama; este repo es un motor headless (CLI + MCP).
-
-### Servidor MCP (agentes)
 ```bash
-cargo run -p lodestar-mcp -- <ruta-al-bundle>   # JSON-RPC por stdio, 10 tools (sin git desde E9-H01)
+lodestar check --json                 # integraciones y automatización
+lodestar check --sarif > results.sarif # plataformas de análisis de código
 ```
 
-## Estructura del repo
+### 4. Conecta tu agente
 
-Mapa del giro headless (`ARCHITECTURE.md §19.2`) — `lodestar-app` **llega en E10**, todavía no
-existe; hasta entonces `lodestar-cli`/`lodestar-mcp` llaman a `lodestar-workspace` directamente:
+Configura tu cliente MCP para ejecutar el servidor por `stdio`. La forma exacta del fichero cambia
+según el cliente, pero la definición equivalente es:
 
+```json
+{
+  "mcpServers": {
+    "lodestar": {
+      "command": "lodestar-mcp",
+      "args": ["/ruta/absoluta/mi-conocimiento", "--profile", "readonly"]
+    }
+  }
+}
 ```
+
+Usa `readonly` para exploración y revisión. Cambia el perfil a `standard` cuando quieras habilitar
+`change_plan`, `change_apply` y `change_revert`.
+
+## Qué puede hacer
+
+### Descubrir y recuperar conocimiento
+
+`knowledge_search` combina texto y filtros por tipo, estado, tags o prefijo de ruta. Devuelve
+snippets y revisiones, no documentos completos. Después, `knowledge_get` permite solicitar
+frontmatter, cuerpo, enlaces, diagnósticos o secciones concretas de un concepto.
+
+### Validar reglas propias
+
+Además de las comprobaciones de conformidad OKF, un bundle puede declarar sus tipos y reglas en
+`.lodestar/schema.yaml`: campos obligatorios, estados permitidos y relaciones tipadas con
+cardinalidad. `schema_inspect` permite que el agente descubra esas reglas antes de proponer cambios.
+
+### Razonar sobre relaciones e impacto
+
+`graph_query` consulta backlinks, enlaces salientes, vecindarios, huérfanos, enlaces rotos, caminos,
+ciclos y componentes. `impact_analyze` estima conceptos afectados, referencias bloqueantes y nivel
+de riesgo para operaciones como mover, eliminar, deprecar o sustituir un concepto.
+
+### Publicar sin dejar estados parciales silenciosos
+
+El flujo de escritura tiene tres pasos:
+
+1. `change_plan` normaliza las operaciones, simula el resultado en memoria, calcula el diff
+   semántico y valida la conformidad sin tocar disco.
+2. `change_apply` comprueba que el workspace no haya cambiado y publica mediante staging, lock,
+   copias de recuperación, journal previo a escritura y renames atómicos.
+3. `change_revert` restaura una transacción reciente desde su recibo si el resultado necesita
+   deshacerse.
+
+Las revisiones deterministas de conceptos y workspace proporcionan control optimista de
+concurrencia cuando un agente, una persona y otra herramienta editan los mismos ficheros.
+
+## CLI
+
+La CLI cubre el ciclo de mantenimiento y automatización:
+
+| Comando | Uso |
+|---|---|
+| `lodestar init [dir]` | Inicializa un bundle |
+| `lodestar check` | Valida el working tree |
+| `lodestar index [dir]` | Genera índices de navegación |
+| `lodestar tags` | Genera o purga índices de tags |
+| `lodestar reindex` | Reconstruye la caché local |
+| `lodestar export` | Exporta el bundle a ZIP |
+| `lodestar import <source>` | Importa un ZIP o directorio |
+
+`index` y `tags` aceptan `--check` para detectar artefactos desactualizados sin modificarlos.
+
+Los códigos de salida son estables: `0` correcto, `1` no conforme, `2` uso inválido, `3` error de
+runtime o I/O y `4` drift de generadores.
+
+## El formato OKF
+
+Un bundle **OKF (Open Knowledge Format)** es un directorio de `.md` con un `index.md` raíz. Cada
+concepto combina:
+
+- frontmatter YAML para los datos que deben poder consultarse y validarse;
+- Markdown para el conocimiento que debe seguir siendo cómodo de leer y editar;
+- enlaces Markdown para formar el grafo entre conceptos.
+
+El esquema es opcional: sin `.lodestar/schema.yaml`, Lodestar conserva un modelo permisivo y aplica
+las reglas base de OKF. La configuración del workspace puede limitar las raíces escribibles,
+declarar raíces externas de referencia y endurecer la puerta de calidad.
+
+## Arquitectura
+
+```text
+                 ┌──────────────────────────┐
+Markdown + YAML ─►  motor semántico en Rust ├──► CLI / CI
+  fuente real    │  conformidad · grafo     ├──► MCP / agentes
+                 │  impacto · transacciones │
+                 └────────────┬─────────────┘
+                              ▼
+                     SQLite / FTS5
+                    caché reconstruible
+```
+
+El workspace está dividido por responsabilidades:
+
+```text
 crates/
-  lodestar-core/        # PURO: modelo, conformidad, links, query, grafo, generación, export, diff
-  lodestar-store/       # cache SQLite/FTS5 + watcher notify (derivada, desechable)
-  lodestar-vcs/         # DORMIDO: git (libgit2 local + binario git para red); mecánica conservada,
-                         # sin consumidor de fachada desde E9-H01/H02; nunca escribe el working tree
-  lodestar-workspace/   # glue: compone core+store+vcs; único escritor; bus de eventos
-  lodestar-app/         # (E10, aún no existe) servicios de caso de uso compartidos por cli/mcp
-  lodestar-cli/         # fachada CLI (clap) — sin git en la superficie
-  lodestar-mcp/         # fachada MCP (stdio, 10 tools) — sin git en la superficie
-  lodestar-fixtures/    # bundles de prueba compartidos (no se publica)
-prototype/              # prototipo HTML/JS de referencia + arnés diferencial (oráculo en node)
-requirements/           # épicas e historias
+  lodestar-core/        modelo, conformidad, query, grafo, generación y diff
+  lodestar-store/       índice SQLite/FTS5 y watcher
+  lodestar-workspace/   I/O, configuración y publicación recuperable
+  lodestar-app/         casos de uso compartidos por CLI y MCP
+  lodestar-cli/         fachada para personas y CI
+  lodestar-mcp/         fachada MCP por stdio para agentes
+  lodestar-vcs/         capacidad git conservada, fuera de la superficie actual
+  lodestar-fixtures/    fixtures compartidos de test
 ```
-(La UI de escritorio —`src-tauri/` + `frontend/`— se retiró de `main` a la rama
-`experimental/ui-desktop`.)
 
-Los seis crates de la biblioteca (`lodestar-core`, `-store`, `-vcs`, `-workspace`, `-cli`, `-mcp`)
-son publicables; `lodestar-fixtures` (solo tests) lleva `publish = false`.
+La misma lógica de dominio sirve a la CLI y al servidor MCP. Las fachadas no reimplementan la
+semántica, por lo que una validación produce el mismo veredicto independientemente del consumidor.
+
+## Estado del proyecto
+
+La versión actual es **0.2.0** y el foco del proyecto es el motor headless (CLI + MCP). La antigua
+aplicación Tauri/Svelte no forma parte de `main`; su última versión se conserva en la rama
+`experimental/ui-desktop`.
+
+El servidor implementa MCP sobre JSON-RPC por `stdio`, con schemas de entrada y salida para todas
+sus tools y perfiles de acceso `readonly` y `standard`. La adopción del transporte oficial `rmcp`
+y sus capacidades adicionales permanece en evaluación.
+
+Consulta el [changelog](CHANGELOG.md) para los cambios por versión y el
+[estado de implementación](IMPLEMENTATION_STATUS.md) para el detalle de capacidades verificadas.
+
+## Desarrollo
+
+```bash
+# Dependencias del arnés diferencial JS ↔ Rust
+npm ci --prefix prototype/harness
+
+# Suite completa
+cargo test --workspace
+
+# Gates usados en CI
+cargo fmt --all --check
+cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+```
+
+El arnés diferencial ejecuta el prototipo JavaScript original como oráculo y comprueba la paridad
+del motor Rust. La CI compila y prueba el workspace en Linux, macOS y Windows.
 
 ## Documentación
 
-| Documento | Qué es |
+| Documento | Contenido |
 |---|---|
-| [`ARCHITECTURE.md`](ARCHITECTURE.md) | El diseño ratificado — la autoridad en cuestiones de diseño |
-| [`IMPLEMENTATION_STATUS.md`](IMPLEMENTATION_STATUS.md) | Estado real por épica e invariantes verificados |
-| [`DECISIONES.md`](DECISIONES.md) | Decisiones de producto aún abiertas, con recomendación |
-| [`CHANGELOG.md`](CHANGELOG.md) | Historial de cambios por versión |
-| [`RELEASING.md`](RELEASING.md) | Cómo se corta y publica una release |
-| [`CLAUDE.md`](CLAUDE.md) | Guía para trabajar en el repo con Claude Code |
+| [Arquitectura](ARCHITECTURE.md) | Diseño ratificado e invariantes |
+| [Contrato MCP](contracts/mcp.yml) | Superficie y semántica de las diez tools |
+| [Workflows](docs/WORKFLOWS.md) | Flujo de desarrollo del proyecto |
+| [Estado de implementación](IMPLEMENTATION_STATUS.md) | Trazabilidad de épicas y verificación |
+| [Changelog](CHANGELOG.md) | Historial de versiones |
+| [Releasing](RELEASING.md) | Proceso de publicación |
 
 ## Licencia
 
-Distribuido bajo **MIT OR Apache-2.0**, a tu elección. Ver [`LICENSE-MIT`](LICENSE-MIT) y
-[`LICENSE-APACHE`](LICENSE-APACHE).
-
-Salvo que se indique lo contrario, toda contribución que envíes intencionadamente para su
-inclusión en la obra, según la licencia Apache-2.0, se licenciará como arriba, sin términos ni
-condiciones adicionales.
-
-[releases]: https://github.com/dbareagimeno/lodestar/releases
+Lodestar se distribuye bajo **MIT OR Apache-2.0**, a tu elección. Consulta
+[LICENSE-MIT](LICENSE-MIT) y [LICENSE-APACHE](LICENSE-APACHE).
