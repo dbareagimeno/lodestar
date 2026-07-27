@@ -35,9 +35,8 @@ hace, no lo que la spec pide.
 **BDD sin Gherkin ejecutable.** Los criterios de aceptación de comportamiento se escriben como
 escenarios `Dado / Cuando / Entonces` y **cada escenario mapea a un test Rust nombrado** (p. ej.
 `Entonces el check es OKF-FM01 → test: fm01_falta_frontmatter`). No hay cucumber-rs ni runner
-Gherkin: el arnés diferencial JS-vs-Rust (`prototype/harness/` +
-`crates/lodestar-core/tests/differential.rs`) ya es el oráculo de comportamiento vivo, y un runner
-duplicaría maquinaria.
+Gherkin: los tests de integración por crate (`crates/*/tests/`) ya son el oráculo de comportamiento
+vivo, y un runner duplicaría maquinaria.
 
 **Jueces ciegos.** Antes de commitear, el trabajo lo revisa un agente **fresco** que recibe
 únicamente la spec, el diff y las rutas de los docs de autoridad — jamás resúmenes de la
@@ -150,9 +149,9 @@ las marcadas `[BLOQUEADA por DECISIONES §N]`.
 retiraron a la rama `experimental/ui-desktop` (ver §5); el motor de este repo es headless.
 
 **Bugfix**: no hace falta historia completa. Test de regresión primero (rojo: reproduce el bug) →
-fix (verde) → `/juzgar` simple con el issue como spec. Si el bug es de paridad con el prototipo,
-el test va además al arnés diferencial o a la sección «Regresiones de paridad con el prototipo»
-de `core.rs`.
+fix (verde) → `/juzgar` simple con el issue como spec. Si el bug es de la semántica heredada del
+prototipo, el test va a la sección «Regresiones de paridad con el prototipo» de `core.rs` (el
+arnés diferencial JS-vs-Rust se retiró en `E15-H04`).
 
 **Refactor**: los tests existentes son la red. `/mutantes` con el mismo alcance **antes y
 después**: si tras el refactor sobreviven mutantes que antes morían, la suite se debilitó.
@@ -178,5 +177,6 @@ drift entre las tools reales, el contrato YAML y los tipos de `core::types`.
   contradicciones); [`DECISIONES.md`](../DECISIONES.md) lista lo abierto a criterio del usuario
   (los agentes proponen, nunca deciden); [`IMPLEMENTATION_STATUS.md`](../IMPLEMENTATION_STATUS.md)
   el estado real por épica (se actualiza en el mismo PR que cierra o abre trabajo);
-  [`prototype/index.html`](../prototype/index.html) es la spec de comportamiento que el core porta
-  1:1.
+  [`docs/REFACTOR_PHASE_2.md`](REFACTOR_PHASE_2.md) + `ARCHITECTURE.md §20` son la spec de
+  comportamiento de v0.3, y [`prototype/index.html`](../prototype/index.html) queda como
+  referencia histórica de v0.2.x (desde `E15-H04` ya no arbitra).

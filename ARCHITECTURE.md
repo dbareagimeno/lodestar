@@ -7,6 +7,17 @@
 
 ## 1. Stack
 
+> **⚠️ TABLA DE ÉPOCA (v0.2), no el stack vigente.** Es la primera tabla del documento y describe el
+> producto **antes** del giro headless (`§19`) y de la migración a Markdown universal (`§20`).
+> Siguen siendo ciertas las filas de **Backend/Rust**, **Cache SQLite/FTS5**, **Watcher `notify`**,
+> **Fachada agentes (MCP)** y **Fachada CI (CLI)** — salvo que `rmcp` sigue sin adoptarse
+> (`DECISIONES §3`) y que la semántica ya no es «OKF» sino Markdown universal (`§20`).
+> **Han dejado de ser ciertas**: «Shell de escritorio (Tauri v2)» y «Frontend (Svelte 5 + Vite)»
+> —la UI se retiró de `main` a la rama `experimental/ui-desktop` con el giro headless (`§19.1`)— y
+> **«Versionado: git»**, que salió de la superficie en `E9-H02` y del repo en `E15-H01`: no existe
+> `lodestar-vcs`, ni `git2`, ni conformidad-por-commit (`§20.13`). Lo único que sobrevive de git es
+> `workspace/src/gitignore.rs`, que trata el `.gitignore` como texto plano.
+
 | Capa | Elección | Por qué |
 |---|---|---|
 | Shell de escritorio | **Tauri v2** | Rust es el backend de primera clase; binario ~5–10 MB; webview del SO |
@@ -29,8 +40,11 @@
    refleja esas computaciones por velocidad/FTS y se **verifica idéntica con un test de paridad**.
    Cuando podrían discrepar, gana el core; `lodestar check` reconcilia antes de leer.
 4. **Un solo contrato de tipos.** `Check`, `Severity`, `Analysis`, `GraphModel`, etc. se
-   definen **una vez** en `lodestar-core` y cruzan a Tauri/MCP/CLI **sin capa DTO paralela**.
-   El `.d.ts` de TypeScript se **genera** desde los tipos Rust (ts-rs/specta).
+   definen **una vez** en `lodestar-core` y cruzan a las fachadas **sin capa DTO paralela**.
+   *(La regla sigue vigente; la frase de época decía «cruzan a Tauri/MCP/CLI» y que el `.d.ts` se
+   genera con ts-rs/specta. **Ya no hay espejo TS**: desapareció al retirar la UI a
+   `experimental/ui-desktop`, y con él la nota de `DECISIONES §4`. Lo que sí se deriva de los tipos
+   Rust es el **JSON Schema** de los `outputSchema` del MCP, vía `schemars`.)*
 
 ---
 
@@ -72,6 +86,14 @@ crates/
 ---
 
 ## 4. `lodestar-core` — modelo canónico
+
+> **Superada por §20 en cuanto al MODELO DOCUMENTAL** (migración a workspaces Markdown universales,
+> `docs/REFACTOR_PHASE_2.md`). Lo que sigue describe el modelo **OKF** (frontmatter de 7 campos
+> tipados, `FileKind::Index`/`Log`, códigos `OKF-*`, `in_index`, generadores de índices): se conserva
+> como referencia histórica de v0.2.x, **no** como comportamiento de v0.3+. Lo que §20 **no** toca de
+> esta sección sigue vigente: `RelPath` como newtype validado (§4.1), la disciplina de "una sola
+> definición de tipos", la pureza del core y la forma de `Check`/`Severity` (cambian los *códigos*,
+> no la estructura).
 
 Módulos: `model` · `conform` · `links` · `query` · `graph` · `generate` · `export` · `diff`.
 Primitivas puras como funciones libres (port 1:1 del prototipo: `split_front`, `parse_yaml`,
@@ -310,7 +332,16 @@ sobre la misma fixture. Si difieren, es bug de la cache.
 
 ## 6. `lodestar-workspace` — el handle unificado
 
-Compone `lodestar-core` (puro) + `lodestar-store` + `lodestar-vcs`. Es lo que ven las fachadas. Reglas:
+> **Las dos REGLAS de abajo siguen vigentes** (único watcher/único escritor —invariante #5— y
+> `WorkspaceError` unificado); el **boceto de API** que las sigue es de v0.2 y se lee como
+> **historia**, no como firma actual: `lodestar-vcs` y todos los métodos git se **borraron** en
+> `E15-H01` (§20.13), `generate_index`/`generate_tag_indexes` en `E15-H02` y `export` en `E15-H03`,
+> `BundleSnapshot` es hoy `WorkspaceSnapshot` y `Bundle` es `DocumentSet` (§20.3/§20.4), y
+> `open_ephemeral` se **retiró en `E23-H12`**: `open` ya no escribe nada en el proyecto ajeno
+> (ni `.gitignore` ni `.lodestar/runtime/`), así que abrir es hermético por defecto y el modo dejó
+> de ser un modo. La superficie real vive en `crates/lodestar-workspace/src/lib.rs`.
+
+Compone `lodestar-core` (puro) + `lodestar-store`. Es lo que ven las fachadas. Reglas:
 
 - **Un solo watcher por proceso** que posee el **único escritor** de SQLite. Los comandos
   **nunca** escriben la cache directamente: escriben el `.md` (atómico temp+rename) y dejan que el
@@ -322,7 +353,8 @@ Compone `lodestar-core` (puro) + `lodestar-store` + `lodestar-vcs`. Es lo que ve
 ```rust
 impl Workspace {
   pub fn open(root: &Path) -> Result<Self, WorkspaceError>;   // abre/crea cache, arranca watcher, Vcs::discover
-  pub fn open_ephemeral(root: &Path) -> Result<Self, _>;      // sin cache (CLI hermético)
+  // `open_ephemeral` (sin cache, «CLI hermético») se RETIRÓ en E23-H12: `open` dejó de tener
+  // efectos secundarios sobre el proyecto, así que quedó byte a byte igual que él.
   pub fn subscribe(&self) -> crossbeam::Receiver<IndexEvent>;
   pub fn snapshot(&self) -> BundleSnapshot;                    // files + analysis + graph, todo junto
   // delega en core para semántica; aplica Mutations por el único camino de escritura
@@ -448,6 +480,17 @@ como cualquier escritor externo. `commit`/`restore`/`switch_branch`/`merge`/`ini
 
 ## 10. Decisiones ratificadas (resuelven las contradicciones del workflow)
 
+> **Nota (workspaces Markdown universales §20, 2026-07-23).** Las filas que fijan **disciplina de
+> arquitectura** siguen vigentes sin cambios: **#1** (el core es la autoridad, SQLite acelerador),
+> **#2** (dónde vive `Workspace`), **#3** (una sola definición de `Check`/`Severity`/`CheckCode` —
+> cambia el *catálogo de códigos*, no la regla), **#4** (orden de `Severity` / conteo de `hard_fail`),
+> **#6** (sin capa DTO), **#8** (un watcher = único escritor), **#9** (`RelPath` newtype validado),
+> **#10** (el store es dueño del DDL). Quedan **superadas por §20** las que dependen del modelo OKF:
+> **#5** (forma de `Analysis`: `in_index`/`orphans` desaparecen), **#11** (semántica de query por
+> subcadena → lenguaje de expresiones tipado) y las filas de generadores puros / `merge_frontmatter`
+> en la medida en que describen `gen_index`/`gen_tag_indexes` (retirados). Las filas **#15–#21** (git)
+> quedan **retiradas**, no dormidas: §20 borra el crate `lodestar-vcs`.
+>
 > **Nota (giro headless §19, 2026-07-22).** Las filas **#15–#21** (git de primera clase) siguen
 > siendo **ciertas sobre el crate `lodestar-vcs`**, pero su **exposición en la superficie de producto
 > queda revertida** por §19: el crate se conserva dormido y ninguna fachada lo consume. Las filas
@@ -462,7 +505,7 @@ como cualquier escritor externo. `commit`/`restore`/`switch_branch`/`merge`/`ini
 | 3 | `Check`/`Severity`/`CheckCode` triplicados con nombres y `Ord` distintos | **Una definición** en `lodestar-core::types`. `Check {level, code, msg, targets}`; `Severity` ordenada `Pass<Info<Warn<Err` (`.max()`=peor) en minúsculas; `CheckCode` con `#[serde(rename="OKF-…")]`. Borrar duplicados. |
 | 4 | Bug del gate: `Severity{Err,…}` + `Ord` derivado → `.max()` da `Pass` → CI nunca falla | Orden corregido (Err máximo) **o** `hard_fail = #ficheros con algún Err` (conteo). Test: 1 Err + 1 Pass cuenta como hard_fail. |
 | 5 | `Analysis` con `out:Vec<Link>` vs `Vec<RelPath>`, `inn` vs `backlinks`, `checks` vs `per_file` | Congelado: `out` = strings, `inn`, `per_file`, camelCase en wire. Metadata de link aparte. |
-| 6 | ¿Capa DTO paralela (CheckDto/AnalysisDto)? | **No.** Un solo esquema de wire; el `.d.ts` se genera desde Rust. Se borra la DTO duplicada de Tauri. |
+| 6 | ¿Capa DTO paralela (CheckDto/AnalysisDto)? | **No.** Un solo esquema de wire. *(La regla sigue vigente; lo de época es el `.d.ts` generado desde Rust y la DTO de Tauri: no hay espejo TS desde que la UI se fue a `experimental/ui-desktop`. Lo que se deriva hoy es el JSON Schema de los `outputSchema` vía `schemars`.)* |
 | 7 | Nombres de evento/comando divergentes (`bundle:changed` vs `bundle://changed`, `query` vs `query_bundle`…) | Registro de constantes compartido + `ipc.ts` generado + smoke test que abre bundle, edita y asserta snapshot poblado. |
 | 8 | Doble escritor de SQLite (comando + watcher) | **Un watcher = único escritor.** Comandos solo escriben el `.md`. |
 | 9 | `RelPath` newtype vs `type RelPath = String` | Newtype validado en todas partes (es el chokepoint de path-traversal). |
@@ -492,6 +535,29 @@ Objetivos explícitos (gate de bench con una fixture sintética de 10k concepts)
 ---
 
 ## 12. Concerns transversales (con dueño asignado)
+
+> **⚠️ TABLA MAYORITARIAMENTE DE ÉPOCA (v0.2).** `CLAUDE.md` la cita junto a `§10` como autoridad
+> para resolver contradicciones ya zanjadas, así que conviene saber qué queda en pie. Se escribió
+> para un producto con GUI, git y OKF, y el giro headless (`§19`) más la migración a Markdown
+> universal (`§20`) se llevaron por delante la mayoría de sus filas.
+>
+> **Siguen vigentes**: *Errores* (taxonomía y código estable cruzando `CoreError`→`ErrorCode`→exit
+> code; la supervisión del watcher), *Un bundle por proceso* (el lockfile existe, y `E23-H23` lo hizo
+> reclamable por TTL+PID), y la parte de *Seguridad* sobre escapado de FTS5 y path-traversal
+> (`RelPath`, invariante #6).
+>
+> **De época, NO vigentes**: *Migración del prototipo* (`lodestar import` se borró en `E15-H03`, y no
+> hay `git init` que hacer), *Versionado OKF* (`okf_version` dejó de tener semántica en `§20`),
+> *Packaging* en su parte Tauri, *Testing/paridad* en sus partes de test diferencial (retirado en
+> `E15-H04`), store Svelte y e2e de Tauri, *First-run* (`lodestar init` retirado en `E15-H03`; no se
+> hace scaffold de nada), y **las tres filas de git** —*Sincronización/remoto*, *Paridad con `git`
+> CLI* y el shell-out de *Seguridad*—, porque `lodestar-vcs` y `git2` **se borraron del repo** en
+> `E15-H01` (`§20.13`).
+>
+> **Corregida por historia posterior**: la fila *Config* dice que la configuración por bundle es
+> `lodestar.toml`; es **`.lodestar/config.yaml`** desde `E15-H08`, y es **opcional** — un directorio
+> con `.md` sueltos y sin `.lodestar/` es un workspace válido (`§20.1`). Un lector que siga esta fila
+> buscará un fichero que no existe.
 
 | Tema | Decisión |
 |---|---|
@@ -707,6 +773,13 @@ Cada fase se valida con el arnés de paridad antes de la siguiente.
 
 ## 19. Motor headless de integridad semántica (supersede §13 en superficie)
 
+> **Superada por §20 en cuanto al MODELO DOCUMENTAL Y LA SUPERFICIE DE ESQUEMAS.** El giro headless
+> de esta sección (motor sin GUI ni git, consumido por agentes vía MCP/CLI; `lodestar-app`; modelo
+> transaccional; perfiles) **sigue íntegro y vigente** — §20 lo hereda entero. Lo que §20 supersede
+> es: el modelo OKF de §19.3 (`ConceptRef`/`ConceptRevision`/`core::schema`/`DocType`/relaciones
+> tipadas), la tool `schema_inspect` de §19.6 (→ `metadata_inspect`) y `.lodestar/schema.yaml` de
+> §19.4. El crate `lodestar-vcs`, conservado dormido por §19.1, se **retira** en §20.
+>
 > **Ratificado 2026-07-22** (puerta 1 de `/planificar`; fuente: `docs/REFACTOR.md`; propuesta:
 > `docs/REFACTOR_DISENO_PROPUESTA.md`). Lodestar deja de posicionarse como "editor local-first con git
 > de primera clase" y pasa a ser un **motor headless de integridad semántica para bases de conocimiento
@@ -775,17 +848,23 @@ Se congelan en `lodestar-core::types` (salvo el envelope, que va en `lodestar-ap
 - `NormalizedOperation` — enum de las 11 ops resueltas a escrituras (`create`/`patch_frontmatter`/
   `replace_body`/`edit_section`/`replace_text`/`move`/`delete`/`add_relation`/`remove_relation`/
   `transition_status`/`apply_fix`); reutiliza `FrontmatterPatch` (merge-patch RFC 7386, null-borra).
+  **Hoy son SIETE** (§20.11): `add_relation`/`remove_relation`/`transition_status` cayeron con el
+  modelo universal (`E21-H01`) y `apply_fix` en `E23-H11` (sin productor de `Fix` desde que
+  `E20-H03` retiró `core::schema`, fallaba siempre). Las 11 de esta línea son el diseño de época.
 - `RiskAssessment { level, reasons }` — lógica pura nueva alimentada por backlinks/blast-radius.
 - `SemanticDiff` — **reutiliza `OkfDiff`** (`core::diff`, port de `diffSnap`), ampliado con
   `diagnosticsIntroduced`/`diagnosticsResolved`.
-- `ValidationReport { conformant, summary{errors,warnings,info}, diagnostics: Vec<Check> }` — sobre
-  `Analysis.hard_fail`/`warn_count`.
+- `ValidationReport { valid, summary{errors,warnings,info}, diagnostics: Vec<Check> }` — sobre
+  `Analysis.hard_fail`/`warn_count`. (El campo se llamaba `conformant`; `E23-H14` cerró el adjetivo
+  de la pareja `Conformance / Conformant` de §20.3, igual que `NONCONFORMANT_RESULT` abajo.)
 - `ChangeReceipt { id, change_set_id, previous_revision, result_revision, changed_paths, semantic_diff }`.
 - **Códigos de error** (§13 de REFACTOR): enum estable en `core::types` (patrón `CheckCode`, wire por
   `#[serde(rename)]`): `WORKSPACE_NOT_FOUND`, `WORKSPACE_RECOVERY_REQUIRED`, `CONCEPT_NOT_FOUND`,
   `AMBIGUOUS_REFERENCE`, `REVISION_CONFLICT`, `PLAN_STALE`, `PLAN_EXPIRED`, `PERMISSION_DENIED`,
-  `INVALID_SCHEMA`, `NONCONFORMANT_RESULT`, `INBOUND_LINKS_EXIST`, `RELATION_CONSTRAINT_VIOLATION`,
+  `INVALID_SCHEMA`, `INVALID_RESULT`, `INBOUND_LINKS_EXIST`, `RELATION_CONSTRAINT_VIOLATION`,
   `WRITE_CONFLICT`, `RESULT_TOO_LARGE`, `RECOVERY_FAILED`, `INTERNAL_IO_ERROR`.
+  (`NONCONFORMANT_RESULT` → `INVALID_RESULT` en `E23-H14`, la única vez que se abre este catálogo:
+  ver `§20.3`. `CONCEPT_NOT_FOUND` pasó a `DOCUMENT_NOT_FOUND` en `E16-H06`. Siguen siendo 16.)
 
 **Extensión del tipo `Check`** (aditiva, sin forkear — invariante #4): gana campos **opcionales**
 `id: Option<_>`, `range: Option<Range>` (`startLine`/`endLine`), `related: Vec<_>`,
@@ -813,6 +892,14 @@ transactions:
   maximumReceipts:   20
 # identity: DORMIDA (git fuera de superficie; se conserva por si vcs vuelve)
 ```
+
+> **Actualización E15-H08**: `lodestar.toml` **ya no existe** (borrado; cierra `DECISIONES.md §8`),
+> así que `.lodestar/config.yaml` es el único fichero de configuración del motor. El esquema de
+> arriba se **amplía** con dos secciones que documentan `§20.5` y `§20.9`: `discovery`
+> (`include`/`exclude`/`respectGitignore`/`respectLodestarIgnore`/`followSymlinks`/
+> `maxDocumentBytes`) y `validation` (severidad por familia de diagnóstico), más
+> `transactions.rejectNewErrors`/`allowExistingErrors`. `validation` y la política de cambios **solo
+> se cargan**: aplicarlas es E20. `workspace.root` **no** se implementa (circular, `§20.5`).
 
 `.lodestar/` se parte en **dos naturalezas**:
 
@@ -890,3 +977,417 @@ Auditoría local en `.lodestar/runtime/audit.jsonl` (runtime, no conocimiento).
 
 Cada fase se valida antes de la siguiente; los criterios de aceptación se alimentan del **benchmark
 funcional** (`REFACTOR §17`).
+
+---
+
+## 20. Workspace Markdown universal (supersede §4, §5 y §19.3 en modelo documental)
+
+> **Ratificado 2026-07-23** (puerta de diseño; fuente: `docs/REFACTOR_PHASE_2.md`). Lodestar deja de
+> exigir **OKF** como formato documental y pasa a operar sobre **cualquier red de ficheros Markdown
+> contenida en un proyecto**. El giro headless de §19 (motor sin GUI ni git, `lodestar-app`, modelo
+> transaccional, perfiles) **se hereda íntegro**: esta sección cambia *qué* se modela, no *cómo* se
+> expone ni *cómo* se escribe.
+
+### 20.1 Definición del producto
+
+> Un motor local y transaccional para que agentes de IA puedan descubrir, consultar, comprender y
+> modificar de forma segura una red arbitraria de documentos Markdown contenida dentro de un proyecto.
+
+La unidad fundamental deja de ser el *bundle OKF* y pasa a ser el **workspace**:
+
+```
+Workspace
+├── root  (el cwd, o --root)
+├── discovery policy · write policy
+├── document inventory      (todos los .md descubiertos recursivamente)
+├── metadata index          (cualquier propiedad YAML, anidada, sin lista cerrada)
+├── link graph              (enlaces Markdown estándar resueltos por PATH)
+├── diagnostics · search index · transaction state
+```
+
+El valor diferencial **no depende de un formato propio**: descubrimiento global, consultas
+estructuradas sobre frontmatter, grafo, backlinks, análisis de impacto, planificación de cambios,
+validación previa, escrituras atómicas, auditoría, recovery y rollback.
+
+**Arranque sin ceremonia** (criterio de aceptación central): `cd my-project && lodestar-mcp` funciona.
+No es obligatorio `lodestar init`, ni `.lodestar/config.yaml`, ni frontmatter, ni `type`, ni `status`,
+ni `index.md`. La configuración solo sirve para **limitar** descubrimiento, escrituras o diagnósticos
+— nunca para convertir un workspace en válido.
+
+### 20.2 Invariantes del modelo (los 20 de `REFACTOR_PHASE_2 §Invariantes`)
+
+Se **añaden** a los invariantes #1–#6 de `CLAUDE.md`, que siguen íntegros. Los que fijan diseño:
+
+1. Ningún path público es absoluto; ninguna operación escapa del workspace (sigue siendo `RelPath`,
+   §4.1, el chokepoint sintáctico + la guarda semántica de §19.7).
+2. Todo documento descubierto tiene una ruta canónica única; **todo enlace se resuelve por path**,
+   nunca por título, basename, alias o similitud. Sin resolución heurística ni ambigua.
+3. El frontmatter **nunca** es obligatorio y sus claves **no** tienen semántica impuesta.
+4. Los tipos YAML se respetan **sin coerción implícita** (`priority >= "high"` es un error de tipo).
+5. Los documentos aislados **no** son errores; `index.md` y `README.md` **no** tienen trato especial.
+6. La estructura de carpetas **no** altera el significado de los documentos.
+7. El store se reconstruye por completo desde los ficheros; análisis puro y store son equivalentes.
+8. El proyecto **no** depende de sintaxis de Obsidian (sin wikilinks, embeds, block refs ni aliases).
+
+### 20.3 Terminología retirada de la API pública
+
+`OKF` · `bundle` · `concept` · `conformance` · `okf_version` · `OKF-IDX` · `OKF-LOG` · `in_index` ·
+`concept type` · `concept status`.
+
+| Anterior | Nueva |
+|---|---|
+| Bundle | Workspace |
+| Concept / ConceptRef / ConceptSummary / ConceptRevision | Document / DocumentRef / DocumentSummary / DocumentRevision |
+| OKF diff | Semantic diff |
+| Conformance / Conformant | Validation / Valid |
+| Orphan | Isolated document |
+| Bundle revision | Workspace revision |
+
+> **La pareja `Conformance / Conformant` está completa desde `E23-H14`** (2026-07-25). El sustantivo
+> se sustituyó en E16 (`ApplyConformance` → `ApplyValidation`, `Store::conformance_counts` →
+> `validation_counts`), pero el **adjetivo** sobrevivió tres épicas más en la superficie activa
+> —`conformant`, `requireConformantResult`, `allowNonconformant` y el código de error
+> `NONCONFORMANT_RESULT`—, porque completarlo obligaba a **abrir el catálogo de 16 códigos** de
+> `§19.3`, declarado congelado. Era el **único** de los 29 criterios de aceptación de
+> `REFACTOR_PHASE_2` demostrablemente incumplido («no existe terminología OKF en la API pública»).
+> Se cerró aprovechando que v0.3.0 ya es incompatible con v0.2.x: romper el wire costaba cero
+> entonces y dejaba de costarlo en cuanto se publicara. Ver `DECISIONES.md §13`.
+>
+> Wire resultante: `conformant` → `valid` · `requireConformantResult` → `requireValidResult` ·
+> `allowNonconformant` → `allowInvalid` · `NONCONFORMANT_RESULT` → `INVALID_RESULT`.
+
+### 20.4 Modelo documental (supersede §4.1 en frontmatter y clases de fichero)
+
+```rust
+pub struct Document {
+    pub path: RelPath,                        // §4.1 sin cambios (newtype validado)
+    pub raw: String,
+    pub frontmatter: Option<ParsedFrontmatter>,
+    pub body: String,
+    pub content_hash: ContentHash,
+}
+
+/// El frontmatter es metadata ARBITRARIA del usuario. Sin campos conocidos, sin lista cerrada,
+/// sin conversión automática de tipos, sin borrado de claves desconocidas.
+pub struct ParsedFrontmatter { pub value: serde_yaml::Value, pub raw: String, pub span: Range<usize> }
+
+/// El agregado analizable, independiente del sistema de ficheros (sustituye a `Bundle`).
+pub struct DocumentSet { pub documents: FileMap }
+```
+
+**Desaparecen**: `FileKind` (`Index`/`Log`), `KNOWN_FM`, los 7 campos tipados de `Frontmatter`,
+`RelPath::is_reserved`/`concept_id`, `okf_version`, `in_index`, `index_refs`, `src_is_index` y la
+pertenencia determinada por índices.
+
+**Título derivado** — `frontmatter.title` → primer heading H1 → nombre del fichero. Es **solo una
+heurística de presentación**: `title` no se convierte en propiedad reservada.
+
+**Edición de frontmatter** — la operación genérica es `patch_frontmatter` (`set` + `remove`), que
+modifica solo las claves pedidas, preserva las demás, no reordena innecesariamente, mantiene el
+cuerpo intacto y **distingue explícitamente asignar `null` de eliminar una clave**. El plan debe
+declarar si el bloque se reserializará entero.
+
+### 20.5 Descubrimiento (§3 de REFACTOR_PHASE_2)
+
+La raíz es `--root` si se da, si no `std::env::current_dir()`, canonicalizada al arrancar y **fija
+durante toda la sesión**. Todas las rutas públicas son relativas a ella.
+
+> **`workspace.root` en la config NO se implementa** (E15-H08). `REFACTOR_PHASE_2 §Fase 2` lo
+> sugiere como configuración opcional, pero es **circular**: el fichero vive en
+> `<root>/.lodestar/config.yaml`, luego hay que conocer la raíz para leerlo. La raíz sale
+> exclusivamente de `--root` o del cwd.
+
+Política por defecto:
+
+```yaml
+discovery:
+  include: ["**/*.md"]
+  exclude: [".git/**", ".lodestar/**"]
+  respectGitignore: true
+  respectLodestarIgnore: true
+  followSymlinks: false
+```
+
+> **Corrección (E15-H07)**: `REFACTOR_PHASE_2 §Fase 3` sugiere `.lodestar/runtime/**` en su
+> «política recomendada». Se excluye **`.lodestar/` entero** por una **invariante de consistencia**:
+> *todo documento del inventario debe contar para la `WorkspaceRevision`*. Si no, sería nodo del
+> grafo, analizable y escribible, con cambios que nunca mueven la revisión — el control optimista
+> dejaría de protegerlo en silencio. Y la revisión **no puede** dejar de excluir `.lodestar/`
+> (decisión **D5**): `StagingDir` materializa ahí un árbol `.md` completo —copias de los documentos
+> cuya escritura está guardando—, así que si contara, `reverify_base_revision` fallaría *a causa del
+> apply en curso*: el motor transaccional invalidaría su propia base al preparar la escritura. Lo
+> mismo con las copias de recuperación. `.lodestar/` es el **plano de control** (config, cache,
+> runtime), nunca conocimiento del usuario. Tras E20 —que retira `schema.yaml` y los templates— ahí
+> no queda nada más.
+
+Sin profundidad máxima artificial. Restricciones iniciales: documentos UTF-8, paths representables,
+tamaño máximo configurable, symlinks desactivados. Se detectan **colisiones de capitalización**.
+
+### 20.6 Enlaces (supersede `resolve_link` de §4)
+
+Solo **Markdown estándar**: inline `[t](p.md)`, con fragmento `[t](p.md#s)`, de referencia
+`[t][id]` + `[id]: ../p.md`, anchors del propio documento `[t](#s)` y URIs externas. Algoritmo:
+parsear con el parser Markdown → separar path/query/fragment → detectar URI externa y self-anchor →
+resolver contra el directorio del documento origen → normalizar `.`/`..` → verificar contención en
+el workspace → resolver contra el inventario → clasificar → registrar href original **y** destino
+normalizado.
+
+```rust
+pub enum LinkTarget {
+    Document(RelPath),        // otro .md del INVENTARIO → arista del grafo
+    WorkspaceFile(RelPath),   // fichero del proyecto que NO es un documento del inventario: existe, pero NO es nodo
+    ExternalUri(String), SelfAnchor(String), Missing(RelPath),
+    WorkspaceDirectory(Option<RelPath>),   // E23-H11; None = la raíz
+    EscapesWorkspace,
+}
+```
+
+> **Dos precisiones decididas en E17-H02**, que `REFACTOR_PHASE_2 §Fase 7` no cubre:
+>
+> 1. **Href raíz-absoluto (`/beta.md`)**: se resuelve **relativo a la raíz del workspace**. Es
+>    determinista y sin heurística (que es lo que prohíbe `§20.7`), coincide con cómo renderizan los
+>    `.md` de un repo GitHub/GitLab, y el invariante *"ningún path público es absoluto"* de `§20.2`
+>    habla de las **rutas que Lodestar expone**, no de los hrefs que escribe el usuario en su
+>    contenido. La alternativa (`EscapesWorkspace`) rechazaría un patrón real y frecuente.
+> 2b. **Navegación pura** (E17-H03; **resuelto en E23-H11**): un href que **no nombra ningún
+>    segmento propio** —`.`, `./`, `..`, `../`, `../..`— designa un *directorio* (el del propio
+>    documento o uno por encima), no un fichero. Como `§20.6` prohíbe convertir un directorio en su
+>    `index.md`, hasta E23-H11 se clasificaba **`EscapesWorkspace`** por no haber variante mejor, y
+>    eso lo hacía `Err`: un `[volver](../)` —que GitHub renderiza sin problema— **tumbaba la puerta
+>    de CI**. E17-H03 ya dejó escrito que el arreglo correcto era ampliar el enum, no parchear el
+>    diagnóstico, y así se hizo: entra **`WorkspaceDirectory(Option<RelPath>)`** (`None` = la raíz,
+>    que no es nombrable como `RelPath`). No es nodo del grafo, no produce diagnóstico, y
+>    `EscapesWorkspace` queda para lo que de verdad sale **por encima** de la raíz —que sigue siendo
+>    `Err`, porque es el chokepoint semántico de contención—. Un href que **sí** nombra algo sigue
+>    teniendo path aunque también sea un directorio: `[x](guias/)` es `Missing("guias")`, nunca
+>    `guias/index.md` (no se introduce heurística de barra final).
+>    `move_document` recalcula también estos destinos (E23-H11): si el documento cambia de
+>    profundidad, un `../` pasaría a señalar otro directorio en silencio.
+>
+> 2. **Un `.md` que existe en disco pero está EXCLUIDO del descubrimiento** es **`WorkspaceFile`, no
+>    `Missing`**. Por eso la variante se define por «no es un documento del inventario» y no por «no
+>    es `.md`»: decir `Missing` de un fichero que está ahí sería mentir sobre el disco y produciría
+>    un `LINK-TARGET-MISSING` espurio sobre un enlace que el usuario ve funcionar. Consecuencia para
+>    quien construye el `Inventory`: los `.md` excluidos van en `other_files`, no en `documents`.
+>
+>    **Límite conocido y aceptado** (E17, cableado de `other_files`): esto solo alcanza a los
+>    ficheros que el walker **visita**. Los que quedan **podados** —por `discovery.exclude`
+>    (`.git/**`, `.lodestar/**`) o por un `.gitignore`/`.lodestarignore` del árbol— nunca se
+>    visitan, así que un enlace a ellos sigue siendo `Missing`. Cubrirlo exigiría **dejar de podar
+>    directorios ignorados**, es decir recorrer `.git/` y `node_modules/` enteros en cada análisis:
+>    una regresión directa del descubrimiento de E15 a cambio de un caso marginal. Se acepta el
+>    coste. (El ejemplo que esta precisión usaba antes, `vendor/dep.md` bajo `.gitignore`, cae
+>    justo en el lado podado — por eso se ha retirado del texto.)
+
+**Prohibido**: buscar por basename o título, añadir `.md` automáticamente, resolver un directorio
+como `index.md`, tratar `README.md` como fallback, interpretar aliases o resolver ambigüedades por
+heurística. **Sin soporte de Obsidian** (wikilinks, embeds, block refs).
+
+### 20.7 Grafo y análisis (supersede §4.1 `Analysis`)
+
+Nodos = **todos** los documentos Markdown descubiertos. Aristas = enlaces resueltos entre ellos.
+
+```rust
+pub struct Analysis {
+    pub documents: Vec<RelPath>,
+    pub outgoing: BTreeMap<RelPath, Vec<ResolvedLink>>,
+    pub incoming: BTreeMap<RelPath, Vec<LinkReference>>,
+    pub isolated: Vec<RelPath>,          // sin enlaces internos entrantes NI salientes
+    pub dangling: Vec<DanglingLink>,
+    pub diagnostics: BTreeMap<RelPath, Vec<Check>>,   // `Check` es el tipo de `§4.1` (invariante #4)
+}
+
+impl Analysis {                    // E17-H04: derivados, NO campos
+    pub fn hard_fail(&self) -> usize;   // nº de FICHEROS con algún `Err` (`§10` fila 4)
+    pub fn warn_count(&self) -> usize;  // nº de DIAGNÓSTICOS `Warn`
+}
+```
+
+Un **documento aislado no es inválido**: es una propiedad consultable (`graph.isolated = true`) que
+no genera warning por defecto.
+
+Precisiones de E17-H04 (fase verde):
+
+- **`hard_fail`/`warn_count` son métodos derivados de `diagnostics`, no campos**: la lista de seis
+  campos de arriba es literal, y la puerta de CI (`WorkspaceConfig::gate_blocked`,
+  `workspace_status`, `knowledge_check`) los sigue consumiendo con la misma semántica. Así **no
+  puede existir** un contador desincronizado de la lista de la que sale (invariante #3).
+- **`outgoing` lleva TODOS los enlaces**, no solo las aristas: los externos, los anchors propios y
+  los que apuntan a ficheros del proyecto viajan también, porque los necesitan
+  `knowledge_get.outgoingLinks`, `move_document` y la tabla `links` del store v2 (`§20.12`). El
+  **grafo filtra**: nodo solo lo que es documento, arista solo `Document`/`Missing`
+  (`LinkTarget::is_internal`, la única definición de «enlace interno»).
+- **Precisión (E17, cableado de `other_files`): un `Missing` solo es fantasma si su destino sería un
+  documento Markdown** (`RelPath::is_markdown`). Los nodos son «todos los documentos **Markdown**
+  descubiertos», así que un enlace roto a código (`[x](src/no_existe.rs)`) **no** mete un vértice
+  `.rs` en el grafo: sigue siendo un colgante de `Analysis::dangling` con su `LINK-TARGET-MISSING`
+  (`warn`), pero no es un nodo. El filtro se aplica **solo** a `Missing`: un destino `Document` está
+  en el inventario y es un documento aunque `discovery.include` admita otra extensión — decidirlo
+  por el nombre sería la clasificación por extensión que `§20.6` prohíbe. Es el mismo discriminador
+  que ya decidía la severidad de `LINK-TARGET-MISSING`, y por eso se comparte: si divergieran,
+  habría nodos del grafo que la conformidad no considera documentos.
+- **`incoming` es literalmente la inversa**: una entrada por **enlace** (un origen que enlaza dos
+  veces aparece dos veces) y el `ResolvedLink` que lleva es *el mismo* que su origen tiene en
+  `outgoing`. La deduplicación por vecino vive en el grafo, no en la lista.
+- **Aislado** = sin enlaces internos entrantes ni salientes. `Missing` **cuenta** como enlace
+  interno: enlazar a un fantasma es participar en el grafo.
+
+### 20.8 Lenguaje de consulta (supersede §4.3)
+
+La DSL de tokens con semántica de subcadena se sustituye por un lenguaje de expresiones **tipado**
+sobre cualquier propiedad YAML, con dot-notation para propiedades anidadas.
+
+- **Comparación** `= != > >= < <=` · **texto** `contains starts_with ends_with` · **listas**
+  `contains contains_any contains_all` · **lógica** `and or not (…)` · **existencia** `has(x)`
+  `missing(x)` (incluido `has(frontmatter)`).
+- **Namespaces**: `frontmatter.*` (abreviable — `status = "x"` ≡ `frontmatter.status = "x"`),
+  `document.path|title|has_frontmatter`, `graph.backlinks|outgoing_links|dangling_links|isolated`.
+  Las propiedades calculadas **exigen** namespace explícito.
+- **Sin coerción implícita** entre string/número, string/booleano, escalar/lista, lista/objeto. La
+  heterogeneidad de tipos de una propiedad es inspeccionable y comunicable.
+
+> **Aviso de implementación (E16-H01)**: el evaluador de comparaciones debe ir **siempre** sobre
+> `ParsedFrontmatter::get` (que devuelve el `serde_yaml::Value` con su tipo), **nunca** sobre
+> `get_text`. `get_text` renderiza escalares a `String` para las columnas de cache y los DTO de
+> presentación; construir las comparaciones encima haría que todo se comparase como texto y el
+> invariante 4 de `§20.2` —`priority >= "high"` es un error de tipo— desaparecería **sin que ningún
+> test lo notara**, porque para fechas y números ISO el orden lexicográfico suele coincidir. Es la
+> vía por la que puede volver a colarse la coerción implícita que `js_string` tenía y E16-H01
+> retiró.
+- **Un solo AST** (`Expression`: `Comparison`/`Function`/`And`/`Or`/`Not`): la consulta textual
+  (`where`) y el filtro estructurado (`filter`) se traducen al mismo AST y **producen exactamente el
+  mismo resultado**.
+
+### 20.9 Validación genérica (supersede §4.1 en códigos)
+
+`knowledge_check` responde *"¿puede Lodestar interpretar y modificar este workspace de forma
+consistente y segura?"*, **no** *"¿cumple el workspace una especificación documental?"*.
+
+Deja de ser error: falta de frontmatter, de `type`, de `status`, formato de `tags`, ausencia en un
+índice, falta de `okf_version`, documento aislado, estructura de headings, transiciones de estado y
+relaciones no tipadas. Catálogo mínimo:
+
+| Código | Significado |
+|---|---|
+| `FM-UNCLOSED` / `FM-YAML-INVALID` | Frontmatter sin cierre / YAML inválido |
+| `DOC-CONFLICT-MARKER` / `DOC-NOT-UTF8` / `DOC-TOO-LARGE` | Marcadores de merge / no UTF-8 / sobre el límite |
+| `PATH-NOT-UTF8` / `SYMLINK-UNSUPPORTED` | Ruta no representable / symlink no admitido |
+| `LINK-TARGET-MISSING` / `LINK-ESCAPES-WORKSPACE` / `LINK-CASE-MISMATCH` | Destino inexistente / fuera del root / capitalización no portable |
+
+**Política de cambios** (`validation` + `transactions` en la config): `allowExistingErrors: true` —
+Lodestar trabaja en un repositorio que ya tiene problemas — junto a `rejectNewErrors: true` — un
+cambio no introduce errores nuevos ni empeora los existentes, y una reparación parcial se puede
+aplicar.
+
+### 20.10 Superficie MCP (supersede §19.6 en una tool)
+
+Diez tools, con **un solo cambio** respecto de §19.6: `schema_inspect` → **`metadata_inspect`**
+(catálogo de propiedades con `presentIn`/`inferredTypes`, inspección de una propiedad con sus valores
+y frecuencias, y soporte de propiedades anidadas `service.tier`, `release.target.date`). Permite a un
+agente comprender las convenciones de una base desconocida **sin necesitar un schema**.
+
+`knowledge_search` acepta `where` (textual) y `filter` (estructurado) — equivalentes por §20.8 — y
+combina full-text, restricción por paths, filtros de metadata y propiedades calculadas de documento y
+grafo.
+
+> **Actualización E23-H11.** `knowledge_search` gana `include: ["frontmatter.<fieldPath>"]`: la
+> **proyección** de los campos de frontmatter que pida el llamador sobre cada resultado (valores YAML
+> crudos, campo ausente = clave ausente). Sin ella, ver el `status` de 30 resultados costaba 30
+> `knowledge_get` — el N+1 que dejó E19-H05 al retirar los campos privilegiados OKF sin sustituto
+> genérico. Una entrada mal formada es `INVALID_SCHEMA`, no un descarte silencioso.
+> En la misma historia **desaparece `sort`**, que se aceptaba y se ignoraba desde E10-H09: el orden
+> determinista (score desc, path asc) es el único, y es la base del cursor-offset.
+> Y `workspace_status` gana `receipts`, el listado acotado de recibos persistidos (mtime desc), para
+> que perder el `receiptId` de un `change_apply` no deje el undo inalcanzable. La superficie sigue
+> siendo de **diez** tools: listar recibos no justifica una undécima.
+
+### 20.11 Operaciones transaccionales (supersede §19.5 en el catálogo de ops)
+
+El motor transaccional **no cambia conceptualmente**: `WorkspaceRevision`, `DocumentRevision`, hashes
+de contenido, plan inmutable, snapshot de precondiciones, staging, journal, escritura atómica,
+recovery, receipt y revert se conservan tal cual — aplicados a Markdown genérico en vez de a
+documentos conformes con OKF.
+
+Cambia la **validación previa**: de *"¿el resultado es conforme con OKF?"* a *"¿es parseable? ¿queda
+dentro del workspace? ¿respeta la política de escritura? ¿introduce diagnósticos nuevos? ¿coincide con
+las revisiones del plan? ¿mantiene consistencia entre inventario, store y grafo?"*.
+
+Ocho operaciones **universales** — `create_document`, `patch_frontmatter`, `replace_body`,
+`replace_text`, `edit_section`, `move_document`, `delete_document`, `apply_fix` — y se **eliminan** las
+semánticas (`add_relation`, `remove_relation`, `transition_status`, `deprecate`, `replace_concept`):
+una relación es un enlace Markdown y un estado es una propiedad arbitraria del frontmatter.
+
+> **Actualización E23-H11: son SIETE.** `apply_fix` se **retira** de la superficie (del enum de
+> `change_plan`, de las ops admitidas en masa, de `NormalizedOperation` y de `plan.rs`, junto con
+> `CoreError::FixNotFound`). Motivo: E20-H03 retiró `core::schema` y con él el único productor de
+> `Fix`, así que la operación fallaba **siempre** —y con un código que apuntaba al sitio equivocado
+> (`DOCUMENT_NOT_FOUND` sobre un documento que existe)—, mientras se anunciaba en el `inputSchema`
+> como una de las ocho. Hoy es una op desconocida → `INVALID_SCHEMA`. El lado de **lectura** de los
+> arreglos (`Fix`, `Check.fixes`, `knowledge_check.includeSuggestedFixes`) **no se toca**: un array
+> vacío se lee como «no hay sugerencias» y eso es verdad. El análisis de qué haría falta para que la
+> capacidad vuelva está en `docs/PROPUESTA_FIXES.md`.
+
+- **Selecciones masivas por consulta**: `{selection: {where: …}, operation: {…}}` →
+  `query → documentos → snapshot de revisiones → semantic diff → impact → validation → plan → apply → receipt`.
+- **`move_document`** con `rewriteInboundLinks`: encuentra los backlinks, recalcula el enlace relativo
+  desde cada origen, reescribe **solo el destino** conservando label y fragmento, y aplica todo como
+  una única transacción lógica.
+- **`delete_document`** exige **política explícita** (rechazar si hay backlinks · permitir enlaces
+  rotos · eliminar referencias · sustituir referencias). Nunca se elige una automáticamente.
+
+La **revisión del workspace** depende, como mínimo, de: rutas Markdown incluidas, hash de cada
+documento, configuración de descubrimiento, configuración de escritura, versión del parser y versión
+del esquema del store.
+
+### 20.12 Store v2 (supersede §5 en DDL)
+
+El índice SQLite sigue siendo **derivado y desechable**: se incrementa `USER_VERSION` y se reconstruye
+por completo — sin migración de datos OKF. Modelo conceptual: `documents(path, title, body, raw,
+frontmatter_json, content_hash)` · `metadata(document_path, field_path, value_json, value_type)` ·
+`links(source_path, raw_href, target_kind, target_path, fragment, resolved)` ·
+`diagnostics(document_path, code, severity, message, range_json)`.
+
+La metadata se indexa **recursivamente** por field path (`service.name`, `service.tier`), conservando
+valor JSON original y tipo. FTS indexa path, título derivado, body y valores textuales del
+frontmatter — **sin depender** de campos concretos como `type`, `status` o `tags`.
+
+### 20.13 Migración de repositorios OKF existentes
+
+**No se modifican destructivamente los documentos anteriores.** `type: decision` / `status: accepted`
+se conservan exactamente y pasan a ser metadata normal, consultable. `index.md` y los índices de tags
+sobreviven como documentos Markdown normales (ya no determinan pertenencia, ni versión, ni evitan
+aislamiento, ni son catálogo obligatorio). `okf_version` se conserva como metadata desconocida y se
+ofrece como **recomendación de limpieza, no como error**. El índice SQLite se elimina y se
+reconstruye. Se ofrece un diagnóstico opcional `lodestar migrate-from-okf --dry-run` que **no
+modifica ficheros**.
+
+**Se retiran del repo** (decisión del usuario, 2026-07-23): el crate `lodestar-vcs` (dormido desde
+§19.1), `core::schema` con `DocType`/relaciones tipadas/`.lodestar/schema.yaml`, `core::generate` con
+los subcomandos `init`/`index`/`tags`, `export`/`import` zip, y el prototipo JS como spec de
+comportamiento (con su arnés diferencial: la spec pasa a ser `docs/REFACTOR_PHASE_2.md`).
+
+### 20.14 Plan de fases → épicas
+
+Épicas **15–22** (las 00–14 quedan como están; `requirements/`). Corresponden a los 11 PRs de
+`REFACTOR_PHASE_2 §Orden de implementación`, con dos ajustes justificados:
+
+| Épica | PRs | Foco |
+|---|---|---|
+| **E15** — Workspace universal | 0 (retirada) + 1 | Borrado de OKF sin sustituto · `cwd` como root · `--root` · descubrimiento recursivo · seguridad de paths · fixtures arbitrarios |
+| **E16** — Modelo documental genérico | 2 | `Document`/`DocumentSet` · frontmatter YAML arbitrario · título derivado · diagnósticos mínimos |
+| **E17** — Enlaces y grafo universal | 3 + 4 | Parser de enlaces · `LinkTarget` · escapes · case mismatch · `Analysis` nueva · isolated/dangling |
+| **E18** — Store v2 | 5 | DDL nuevo · metadata anidada · links genéricos · cold rebuild · paridad core/store |
+| **E19** — Lenguaje de consulta | 6 | Parser · AST · type checking · namespaces · filtro JSON equivalente |
+| **E20** — Inspección y validación genéricas | 7 + 8 | `metadata_inspect` (retira `core::schema`) · política `rejectNewErrors`/`allowExistingErrors` |
+| **E21** — Contrato MCP y transacciones genéricas | 9 + 10 | Contrato nuevo · 8 operaciones universales · selecciones masivas por consulta |
+| **E22** — Migración y limpieza pública | 11 | `migrate-from-okf --dry-run` · docs · README · publicación incompatible |
+
+**Ajuste 1 — E17 fusiona los PRs 3 y 4**: el grafo se construye directamente de los enlaces resueltos;
+separarlos obliga a un `Analysis` intermedio que nadie consume.
+
+**Ajuste 2 — la validación genérica se adelanta del PR 8**: al retirar los campos tipados del
+frontmatter (PR 2) y la semántica de `index.md` (PR 3/4), los checks `OKF-TYPE`/`OKF-IDX`/`OKF-LOG`/
+`ORPHAN` se quedan sin nada sobre lo que compilar. `conform` se reduce al catálogo mínimo de §20.9 ya
+en E16/E17; E20 aporta solo la **política** y la semántica nueva de `knowledge_check`.
+
+**Ruptura declarada**: v0.3.0 es **incompatible** con v0.2.x. `v0.2.0` queda como última versión OKF.

@@ -1,5 +1,5 @@
 //! Lock de publicación del workspace (E13-H02, `ARCHITECTURE.md §19.5`, `REFACTOR §5.2`):
-//! garantiza **un solo publicador a la vez** sobre un mismo bundle. Es control de concurrencia
+//! garantiza **un solo publicador a la vez** sobre un mismo workspace. Es control de concurrencia
 //! runtime, no estado canónico: el fichero de lock vive bajo `.lodestar/runtime/` (excluido del
 //! índice de conocimiento y del `WorkspaceRevision`), así que no viola el invariante #1 («los
 //! `.md` en disco son la única fuente de verdad»).
@@ -12,7 +12,7 @@
 //! incluido durante el desenrollado de pila de un `panic`.
 
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::error::WorkspaceError;
 use crate::Workspace;
@@ -62,6 +62,10 @@ impl Workspace {
     /// Crea `.lodestar/runtime/` si falta. El [`WorkspaceLock`] devuelto libera el lock al
     /// dropearse (RAII), incluso en un `panic`.
     ///
+    /// Es uno de los cuatro chokepoints de escritura de E23-H12: tomar el lock es la puerta de
+    /// `change_apply`/`change_revert`, así que aquí se ajusta el `.gitignore` gestionado
+    /// ([`Workspace::ensure_managed_gitignore`]) — abrir el workspace ya no lo hace.
+    ///
     /// # Errores
     /// - [`WorkspaceError::WriteConflict`] si el lock ya está tomado (el fichero ya existe).
     /// - [`WorkspaceError::Io`] si falla la creación del directorio runtime o la escritura del
@@ -69,8 +73,13 @@ impl Workspace {
     pub fn acquire_lock(&self) -> Result<WorkspaceLock, WorkspaceError> {
         let path = self.lock_path();
 
-        // El scaffold runtime se crea al abrir el bundle, pero garantízalo por si el directorio se
-        // borró en caliente (checkout limpio, `rm -rf .lodestar/runtime`, …).
+        // Se va a escribir de verdad: la cache y el runtime que nacerán de aquí no deben acabar
+        // versionados (E23-H12; idempotente byte a byte si el bloque ya está).
+        self.ensure_managed_gitignore();
+
+        // Nadie garantiza ya el directorio de runtime al abrir (E23-H12 retiró el scaffold): cada
+        // consumidor lo crea justo antes de escribir, y esto cubre además el caso de que lo borren
+        // en caliente (checkout limpio, `rm -rf .lodestar/runtime`, …).
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -84,10 +93,28 @@ impl Workspace {
         {
             Ok(f) => f,
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                return Err(WorkspaceError::WriteConflict(format!(
-                    "el lock de publicación ya está tomado ({})",
-                    path.display()
-                )));
+                // El lock existe. Antes de rendirse: ¿lo dejó un proceso que ya no está? (E23-H23)
+                match reclamar_si_huerfano(&path) {
+                    Reclamo::Reclamado => std::fs::OpenOptions::new()
+                        .write(true)
+                        .create_new(true)
+                        .open(&path)
+                        // Si en la ventana entre el borrado y esta reapertura otro proceso ganó la
+                        // carrera, `AlreadyExists` otra vez: se rinde, no se reintenta en bucle.
+                        .map_err(|_| {
+                            WorkspaceError::WriteConflict(format!(
+                                "el lock de publicación lo tomó otro proceso mientras se \
+                                 reclamaba uno huérfano ({})",
+                                path.display()
+                            ))
+                        })?,
+                    Reclamo::Vivo(detalle) => {
+                        return Err(WorkspaceError::WriteConflict(format!(
+                            "el lock de publicación ya está tomado ({}){detalle}",
+                            path.display()
+                        )));
+                    }
+                }
             }
             Err(e) => return Err(WorkspaceError::from(e)),
         };
@@ -100,9 +127,110 @@ impl Workspace {
     }
 }
 
-/// Cuerpo JSON de diagnóstico del fichero de lock: `owner`, `pid` y `timestamp` (epoch en
-/// segundos). Es informativo — la exclusión la garantiza la existencia atómica del fichero, no su
-/// contenido — así que se compone a mano (sin dependencia extra) y no se parsea de vuelta.
+/// Cuánto puede vivir un lock antes de considerarse huérfano — E23-H23.
+///
+/// Es la **red portable** para cuando no se puede preguntar por el proceso (Windows, o un lock sin
+/// `pid` legible). Deliberadamente generoso: la transacción más larga medida en el arnés de escala
+/// (~10.000 documentos, E14-H05) ronda los 8 segundos, así que 15 minutos son tres órdenes de
+/// magnitud de margen. Reclamar el lock de un escritor **vivo pero lento** rompería el invariante de
+/// escritor único, que es mucho peor que esperar.
+const LOCK_TTL: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+
+/// Resultado de examinar un lock ya existente.
+enum Reclamo {
+    /// Era huérfano y se ha borrado: se puede reintentar la creación.
+    Reclamado,
+    /// Su dueño sigue vivo (o no se pudo determinar que no lo esté). Lleva el detalle legible.
+    Vivo(String),
+}
+
+/// Decide si un lock existente es **huérfano** y, si lo es, lo borra — E23-H23.
+///
+/// Hasta E23-H23 esto no existía: `acquire_lock` solo miraba si el fichero existía, y el `pid` que
+/// escribe [`lock_metadata`] **nadie lo leía de vuelta**. Un `lodestar-mcp` muerto por `SIGKILL` o
+/// por el OOM killer dejaba el fichero en disco y el workspace quedaba **cerrado a la escritura
+/// para siempre**, hasta que un humano lo borrara a mano — y por la frontera MCP el agente solo veía
+/// un `WRITE_CONFLICT` pelado, sin pista de qué mirar.
+///
+/// Dos criterios, en orden:
+/// 1. **El dueño ya no existe** (solo Unix): `kill(pid, 0)` responde `ESRCH`. Es inmediato y exacto.
+/// 2. **El lock es más viejo que [`LOCK_TTL`]**: red portable para Windows y para un lock cuyo
+///    cuerpo no se pueda leer.
+///
+/// Ante la duda **no se reclama**: un fichero ilegible, un `pid` ausente o un reloj que va hacia
+/// atrás dejan el lock intacto. Perder disponibilidad es recuperable; romper el escritor único, no.
+fn reclamar_si_huerfano(path: &Path) -> Reclamo {
+    let cuerpo = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        // Ilegible: no hay información con la que decidir, así que se respeta.
+        Err(e) => return Reclamo::Vivo(format!("; no se pudo leer el lock ({e})")),
+    };
+    let meta: serde_json::Value = serde_json::from_str(&cuerpo).unwrap_or(serde_json::Value::Null);
+    let pid = meta.get("pid").and_then(serde_json::Value::as_u64);
+    let owner = meta
+        .get("owner")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("desconocido");
+    let ts = meta.get("timestamp").and_then(serde_json::Value::as_u64);
+
+    let edad = ts.and_then(|t| {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .map(|ahora| ahora.as_secs().saturating_sub(t))
+    });
+
+    let dueño_muerto = pid.is_some_and(proceso_muerto);
+    let caducado = edad.is_some_and(|s| s > LOCK_TTL.as_secs());
+
+    if dueño_muerto || caducado {
+        // Best-effort: si el borrado falla (permisos, carrera con otro reclamador), se trata como
+        // no reclamado y el llamador se rinde con un conflicto normal.
+        if std::fs::remove_file(path).is_ok() {
+            return Reclamo::Reclamado;
+        }
+    }
+
+    let detalle = match (pid, edad) {
+        (Some(p), Some(s)) => format!("; lo tiene el pid {p} de «{owner}» desde hace {s}s"),
+        (Some(p), None) => format!("; lo tiene el pid {p} de «{owner}»"),
+        _ => String::new(),
+    };
+    Reclamo::Vivo(detalle)
+}
+
+/// `true` si se puede afirmar que el proceso `pid` **ya no existe**.
+///
+/// En Unix, `kill(pid, 0)` con `ESRCH`. Un `EPERM` (existe pero es de otro usuario) cuenta como
+/// vivo, que es la respuesta conservadora. Fuera de Unix devuelve siempre `false`: no se afirma
+/// nada, y el criterio de reclamo queda en manos del [`LOCK_TTL`].
+#[cfg(unix)]
+fn proceso_muerto(pid: u64) -> bool {
+    // Un pid que no cabe en `pid_t` no es un proceso de este sistema; no se afirma nada.
+    let Ok(pid) = i32::try_from(pid) else {
+        return false;
+    };
+    if pid <= 0 {
+        return false;
+    }
+    // SAFETY: `kill` con señal 0 no envía nada — solo comprueba permisos y existencia del proceso.
+    // No toca memoria del proceso llamante ni tiene efectos observables.
+    let rc = unsafe { libc::kill(pid, 0) };
+    rc == -1 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+}
+
+#[cfg(not(unix))]
+fn proceso_muerto(_pid: u64) -> bool {
+    false
+}
+
+/// Cuerpo JSON del fichero de lock: `owner`, `pid` y `timestamp` (epoch en segundos).
+///
+/// La exclusión mutua la garantiza la **existencia atómica** del fichero, no su contenido. Pero
+/// desde E23-H23 este cuerpo **sí se lee de vuelta** ([`reclamar_si_huerfano`]): es lo que permite
+/// distinguir un lock vivo de uno que dejó un proceso muerto. Se compone a mano —sin serializador—
+/// porque escribirlo no puede fallar de formas interesantes; leerlo sí usa `serde_json`, que tolera
+/// un cuerpo corrupto sin paniquear.
 fn lock_metadata() -> String {
     let owner = std::env::var("USER")
         .or_else(|_| std::env::var("USERNAME"))

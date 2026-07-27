@@ -36,3 +36,7 @@ Thumbs.db
 
 # cargo-mutants (skill /mutantes)
 mutants.out*/
+
+# lodestar: cache y runtime desechables (no versionar)
+.lodestar/index.db
+.lodestar/runtime/

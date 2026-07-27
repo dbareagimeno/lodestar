@@ -1,11 +1,14 @@
 //! Handlers de las tools del MCP (`ARCHITECTURE.md §7.2`). Cada uno = shell sobre `Workspace`.
 //!
 //! Scope = **semántica, no CRUD**. El valor es lo que los ficheros crudos no dan barato:
-//! backlinks resueltos, huérfanos, dangling, impacto, la puerta OKF, query y escrituras validadas.
+//! backlinks resueltos, aislados, dangling, impacto, la puerta de validación, query y escrituras
+//! validadas.
 
-use lodestar_app::{schemas, App, CheckScope, Profile, SearchFilters};
+use lodestar_app::{schemas, App, CheckScope, Profile};
 use lodestar_core::plan::PlanPolicy;
-use lodestar_core::types::{ChangeSetId, ConceptRef, ReceiptId, Severity, WorkspaceRevision};
+use lodestar_core::types::{
+    ChangeSetId, DocumentRef, ErrorCode, InboundLinksPolicy, ReceiptId, Severity, WorkspaceRevision,
+};
 #[cfg(test)]
 use lodestar_workspace::Workspace;
 use serde_json::{json, Value};
@@ -13,54 +16,126 @@ use serde_json::{json, Value};
 /// Error de tool con un mensaje legible (la fachada lo envuelve en el error JSON-RPC).
 pub type ToolResult = Result<Value, String>;
 
+/// El primer `inboundLinksPolicy` de `raw_ops` que **no** esté en
+/// [`InboundLinksPolicy::WIRE_VALUES`], o `None` si todos son válidos (E23-H05).
+///
+/// Recorre tanto el array `operations` como el `operation` de una selección masiva, que son las dos
+/// formas de wire que acepta `change_plan`.
+fn politica_de_borrado_invalida(raw_ops: &Value) -> Option<String> {
+    fn de_op(op: &Value) -> Option<String> {
+        // Forma suelta (`{"op":"delete", "inboundLinksPolicy":…}`) y forma de selección masiva
+        // (`{"delete": {"inboundLinksPolicy":…}}`), que anida los params bajo el tipo de op.
+        let directo = op.get("inboundLinksPolicy");
+        let anidado = op.get("delete").and_then(|d| d.get("inboundLinksPolicy"));
+        let valor = directo.or(anidado)?.as_str()?;
+        (!InboundLinksPolicy::WIRE_VALUES.contains(&valor)).then(|| valor.to_string())
+    }
+
+    match raw_ops {
+        Value::Array(ops) => ops.iter().find_map(de_op),
+        // Selección masiva: `{selection, operation}`; la op viaja en `operation`.
+        Value::Object(_) => raw_ops.get("operation").and_then(de_op),
+        _ => None,
+    }
+}
+
+/// Schema de UNA operación de `change_plan.operations[]` — E23-H10.
+///
+/// Vive en su propia función por dos razones. La primera es mecánica: metido en el `json!` de
+/// [`list`] hacía saltar el límite de recursión del macro. La segunda importa más: es el documento
+/// que un cliente MCP lee para saber CÓMO escribir, así que merece estar donde se pueda revisar de
+/// un vistazo contra `normalize_raw_op` (`lodestar-app`), que es quien de verdad lee estos campos.
+///
+/// E23-H11 retiró del enum la octava operación, `apply_fix` (y con ella su parámetro `fixId`): sin
+/// productor de `Fix` desde E20-H03, siempre fallaba — ver `docs/PROPUESTA_FIXES.md`.
+///
+/// Hasta E23-H10 aquí solo se declaraban `op`/`path`/`ref`/`expectedRevision`: **ni uno** de los
+/// parámetros reales de 7 de las 8 operaciones de entonces. Para un producto cuyo público objetivo
+/// son agentes, era el mayor agujero de usabilidad de la superficie — el schema decía qué operaciones existen
+/// pero no cómo invocarlas, así que había que adivinar.
+///
+/// Se declaran **planas** (todas las propiedades juntas, cada una diciendo a qué op pertenece) en
+/// vez de con un `oneOf` por op: el servidor no valida contra este schema —es puramente
+/// declarativo— y un `oneOf` mal escrito confundiría al cliente sin que ningún test lo notara,
+/// mientras que la forma plana no puede rechazar una entrada válida.
+fn operacion_item_schema() -> Value {
+    json!({ "type": "object", "properties": {
+                     "op": { "type": "string", "enum": ["create", "patch_frontmatter", "replace_body", "replace_text", "edit_section", "move", "delete"],
+                             "description": "Qué operación es. Determina qué otros campos se leen; los que no pertenecen a esta op se IGNORAN." },
+                     "path": { "type": "string", "description": "Ruta relativa del documento. Obligatoria en «create»; en «patch_frontmatter»/«replace_body»/«replace_text»/«edit_section»/«delete» es la alternativa corta a «ref.path» (se acepta cualquiera de las dos)." },
+                     "ref": { "type": "object", "description": "DocumentRef, alternativa a «path» en las ops que operan sobre un documento existente.",
+                              "properties": { "path": { "type": "string" } } },
+                     "expectedRevision": { "type": "string", "description": "DocumentRevision que el agente cree vigente («blake3:…»); si el documento cambió → REVISION_CONFLICT." },
+
+                     "frontmatter": { "type": "object", "description": "[create] Frontmatter YAML ARBITRARIO del documento nuevo. Opcional: sin él, el documento se crea SIN bloque de frontmatter (no uno vacío). Ninguna clave es obligatoria ni tiene semántica impuesta (§20.2 invariante 3); el título se DERIVA (frontmatter.title → primer H1 → nombre del fichero), no hace falta materializarlo." },
+                     "body": { "type": "string", "description": "[create, replace_body] Cuerpo Markdown (sin el bloque de frontmatter). En «create» es opcional: sin él se genera un heading con el título derivado. En «replace_body» sustituye el cuerpo entero conservando el frontmatter existente —incluida su AUSENCIA: un documento sin bloque no gana uno." },
+                     "patch": { "type": "object", "description": "[patch_frontmatter] Merge-patch RFC 7386 sobre el frontmatter: una clave con valor la fija, una clave con «null» la BORRA, y lo que no se menciona sobrevive byte a byte (patch quirúrgico, E16-H04). Sobre un frontmatter ilegible la operación falla en vez de reescribirlo encima." },
+                     "find": { "type": "string", "description": "[replace_text] Texto literal a buscar (no es una regex). Solo se busca en el CUERPO, nunca en el frontmatter." },
+                     "replace": { "type": "string", "description": "[replace_text] Texto literal de sustitución. Se sustituyen TODAS las ocurrencias." },
+                     "expectedOccurrences": { "type": "integer", "minimum": 0, "description": "[replace_text] Si se indica y el nº real de ocurrencias no coincide, la operación falla en vez de aplicar un cambio distinto del que el agente creía." },
+                     "headingPath": { "type": "array", "items": { "type": "string" }, "description": "[edit_section] Ruta de headings hasta la sección, p. ej. [\"Seguridad\",\"Rotación de tokens\"]. Si no existe → DOCUMENT_NOT_FOUND." },
+                     "mode": { "type": "string", "enum": ["replace", "append", "prepend"], "default": "replace", "description": "[edit_section] Qué hacer con «content» respecto al contenido actual de la sección." },
+                     "content": { "type": "string", "description": "[edit_section] Contenido Markdown de la sección." },
+                     "from": { "type": "string", "description": "[move] Ruta actual del documento." },
+                     "to": { "type": "string", "description": "[move] Ruta destino. Los enlaces relativos SALIENTES del propio documento se recalculan solos desde la ubicación nueva (E23-H03)." },
+                     "rewriteInboundLinks": { "type": "boolean", "default": false, "description": "[move] Si true, reescribe además los enlaces ENTRANTES de todos los documentos que apuntan al movido (incluidas las definiciones de referencia), en la misma transacción. Con false los backlinks quedan apuntando a la ruta vieja y se rompen: actívalo salvo que sepas lo que haces." },
+                     "inboundLinksPolicy": { "type": "string", "enum": ["reject", "remove_links"], "description": "[delete] Qué hacer con los enlaces entrantes. OBLIGATORIO cuando el documento tiene backlinks (§20.11 prohíbe elegir en silencio); sin backlinks no hay nada que decidir y puede omitirse. «reject» = fallar con INBOUND_LINKS_EXIST; «remove_links» = desenlazar en los emisores dejando su texto plano. («retarget» y «create_stub» se RETIRARON en E23-H05: se aceptaban sin ejecutarse.)" }
+                 }, "required": ["op"] })
+}
+
 /// Lista las tools con descripción e `inputSchema` (obligatorio en el spec MCP: sin él,
 /// los clientes conformes rechazan la tool o el modelo no sabe qué argumentos pasar).
 pub fn list() -> Value {
     // Schema de un objeto sin parámetros.
     let empty = json!({ "type": "object", "properties": {}, "additionalProperties": false });
     json!([
-        {"name": "workspace_status", "description": "Config activa, capacidades del perfil, conformidad y recuento agregado del workspace (llámala primero en cada sesión).", "inputSchema": empty,
+        {"name": "workspace_status", "description": "Config activa, capacidades del perfil, validez y recuento agregado del workspace, recuperación pendiente y los recibos disponibles para revertir (llámala primero en cada sesión).", "inputSchema": empty,
          "outputSchema": schemas::workspace_status_schema()},
-        {"name": "knowledge_search", "description": "Localiza conceptos por texto y filtros, con snippets y paginación por cursor (nunca devuelve cuerpos).",
+        {"name": "knowledge_search", "description": "Localiza documentos por texto libre y por el lenguaje de consulta tipado (where/filter), con snippets y paginación por cursor (nunca devuelve cuerpos).",
          "inputSchema": { "type": "object", "properties": {
-             "text": { "type": "string", "description": "Texto libre (subcadena, misma semántica que la DSL del prototipo). Vacío = todos los conceptos." },
-             "filters": { "type": "object", "description": "Filtros: types/statuses/tags (listas) y pathPrefix (string).", "properties": {
-                 "types": { "type": "array", "items": { "type": "string" } },
-                 "statuses": { "type": "array", "items": { "type": "string" } },
-                 "tags": { "type": "array", "items": { "type": "string" } },
-                 "pathPrefix": { "type": "string" }
-             } },
-             "sort": { "type": "string", "description": "Reservado: hoy el orden es siempre determinista (score desc, path asc)." },
+             "text": { "type": "string", "description": "Texto libre (subcadena sobre basename + valores de frontmatter + cuerpo). Vacío = todos los documentos." },
+             "where": { "type": "string", "description": "Consulta textual del lenguaje tipado (§20.8), p. ej. «status = \"accepted\" and graph.backlinks = 0». Se intersecta con «text» y con «filter»." },
+             "filter": { "type": "object", "description": "Filtro JSON estructurado (§20.10) equivalente a «where»: {field, operator, value} o envolturas and/or/not/has/missing. Si llegan «where» y «filter», se combinan con AND." },
+             "include": { "type": "array", "description": "Campos de FRONTMATTER a proyectar en cada resultado, como «frontmatter.<fieldPath>» (p. ej. «frontmatter.status» o el anidado «frontmatter.owner.name»). Ahorra un knowledge_get por documento solo para leer un campo. Los valores viajan con su tipo YAML real y un campo que un documento no tiene NO aparece en su mapa (nunca null). Una entrada que no empiece por «frontmatter.», o cuyo sufijo no sea un field path válido, se RECHAZA con INVALID_SCHEMA.",
+                 // El «pattern» declara el prefijo obligatorio y un sufijo NO vacío, sin cerrar los
+                 // valores: el field path es abierto por naturaleza (§20.2), así que solo se puede
+                 // acotar la forma. Es deliberadamente un SUPERCONJUNTO de lo que acepta el
+                 // despachador —«frontmatter.a..b» casa el patrón y aun así falla en
+                 // `FieldPath::parse`—, que es la dirección segura: un cliente que valide contra el
+                 // schema caza el error más común antes de la llamada, y ningún `include` válido se
+                 // rechaza de más. La validación de ejecución (E23-H11) se queda como está: es la
+                 // que da el mensaje bueno y la única que puede ser exacta.
+                 "items": { "type": "string", "pattern": "^frontmatter\\..+" } },
              "limit": { "type": "integer", "minimum": 1, "maximum": 100, "default": 20 },
              "cursor": { "type": "string", "description": "Cursor opaco de paginación devuelto en «nextCursor»." }
          }, "additionalProperties": false },
          "outputSchema": schemas::knowledge_search_schema()},
-        {"name": "knowledge_get", "description": "Obtiene un concepto concreto con `include` selectivo y selección de secciones por headingPath.",
+        {"name": "knowledge_get", "description": "Obtiene un documento concreto con `include` selectivo y selección de secciones por headingPath.",
          "inputSchema": { "type": "object", "properties": {
-             "ref": { "type": "object", "description": "ConceptRef: identidad del concepto a leer.", "properties": {
-                 "path": { "type": "string", "description": "Ruta relativa del concepto (p. ej. «notas/alfa.md»)." }
+             "ref": { "type": "object", "description": "DocumentRef: identidad del documento a leer.", "properties": {
+                 "path": { "type": "string", "description": "Ruta relativa del documento (p. ej. «notas/alfa.md»)." }
              }, "required": ["path"], "additionalProperties": false },
              "include": { "type": "array", "description": "Campos a poblar; un campo no pedido queda sin poblar.",
-                 "items": { "type": "string", "enum": ["frontmatter", "body", "revision", "outgoingLinks", "backlinks", "diagnostics", "externalReferences"] } },
+                 "items": { "type": "string", "enum": ["frontmatter", "body", "revision", "outgoingLinks", "backlinks", "diagnostics"] } },
              "sections": { "type": "array", "description": "Acota «body» a estas subsecciones (solo si «body» está en include). Cada elemento es un headingPath, p. ej. [\"Security\",\"Token rotation\"].",
                  "items": { "type": "array", "items": { "type": "string" } } }
          }, "required": ["ref"], "additionalProperties": false },
          "outputSchema": schemas::knowledge_get_schema()},
-        {"name": "schema_inspect", "description": "Descubre el catálogo de tipos (`.lodestar/schema.yaml`): un DocType concreto o el catálogo completo.",
+        {"name": "metadata_inspect", "description": "Descubre las convenciones de metadata de una base desconocida SIN necesitar un schema: el catálogo de propiedades (qué campos existen, en cuántos documentos y de qué tipos) o la inspección de una propiedad (presencia/ausencia, tipos y valores frecuentes).",
          "inputSchema": { "type": "object", "properties": {
-             "mode": { "type": "string", "description": "«catalog» (todos los DocType) o «type» (uno concreto, requiere «type»).", "enum": ["catalog", "type"] },
-             "type": { "type": "string", "description": "Nombre del DocType a inspeccionar (solo con mode «type»)." }
+             "mode": { "type": "string", "description": "«catalog» (todos los campos con presencia y tipos) o «field» (inspección de un campo concreto, requiere «field»).", "enum": ["catalog", "field"] },
+             "field": { "type": "string", "description": "Path punteado del campo a inspeccionar (p. ej. «status» o «service.tier»); solo con mode «field»." }
          }, "required": ["mode"], "additionalProperties": false },
-         "outputSchema": schemas::schema_inspect_schema()},
-        {"name": "knowledge_check", "description": "Audita el conocimiento (checks OKF + esquema) con scopes y severidad mínima; diagnósticos con id estable y paginación por cursor.",
+         "outputSchema": schemas::metadata_inspect_schema()},
+        {"name": "knowledge_check", "description": "Audita el conocimiento (diagnósticos de interpretabilidad y enlaces del documento) con scopes y severidad mínima; diagnósticos con id estable y paginación por cursor.",
          "inputSchema": { "type": "object", "properties": {
              "scope": { "type": "object", "description": "Qué auditar. Discriminado por «kind».", "properties": {
-                 "kind": { "type": "string", "enum": ["workspace", "concept", "paths", "affected"] },
-                 "ref": { "type": "object", "description": "ConceptRef (solo con kind «concept»).", "properties": {
+                 "kind": { "type": "string", "enum": ["workspace", "document", "paths", "affected"] },
+                 "ref": { "type": "object", "description": "DocumentRef (solo con kind «document»).", "properties": {
                      "path": { "type": "string" }
                  }, "required": ["path"] },
                  "paths": { "type": "array", "description": "Lista de paths (solo con kind «paths»).", "items": { "type": "string" } },
-                 "refs": { "type": "array", "description": "ConceptRefs centro del vecindario (solo con kind «affected»).",
+                 "refs": { "type": "array", "description": "DocumentRefs centro del vecindario (solo con kind «affected»).",
                      "items": { "type": "object", "properties": { "path": { "type": "string" } }, "required": ["path"] } },
                  "depth": { "type": "integer", "minimum": 1, "default": 1, "description": "Distancia máxima del vecindario (solo con kind «affected»)." }
              }, "required": ["kind"] },
@@ -70,14 +145,14 @@ pub fn list() -> Value {
              "cursor": { "type": "string", "description": "Cursor opaco de paginación devuelto en «nextCursor»." }
          }, "required": ["scope"], "additionalProperties": false },
          "outputSchema": schemas::knowledge_check_schema()},
-        {"name": "graph_query", "description": "Consulta el grafo: backlinks/outgoing/neighborhood/orphans/dangling/path_between/cycles/components en una sola tool (consolida find_backlinks/find_orphans/find_dangling/neighborhood).",
+        {"name": "graph_query", "description": "Consulta el grafo: backlinks/outgoing/neighborhood/isolated/dangling/path_between/cycles/components en una sola tool (consolida find_backlinks/find_orphans/find_dangling/neighborhood).",
          "inputSchema": { "type": "object", "properties": {
-             "operation": { "type": "string", "enum": ["backlinks", "outgoing", "neighborhood", "orphans", "dangling", "path_between", "cycles", "components"], "description": "Qué subgrafo computar. «backlinks»/«outgoing»/«neighborhood» requieren «ref»; «path_between» requiere «ref» (origen) y «to» (destino); «orphans»/«dangling»/«cycles»/«components» no requieren refs." },
-             "ref": { "type": "object", "description": "ConceptRef: el concepto centro (requerido en backlinks/outgoing/neighborhood; origen en path_between).", "properties": {
-                 "path": { "type": "string", "description": "Ruta relativa del concepto (p. ej. «notas/alfa.md»)." }
+             "operation": { "type": "string", "enum": ["backlinks", "outgoing", "neighborhood", "isolated", "dangling", "path_between", "cycles", "components"], "description": "Qué subgrafo computar. «backlinks»/«outgoing»/«neighborhood» requieren «ref»; «path_between» requiere «ref» (origen) y «to» (destino); «isolated»/«dangling»/«cycles»/«components» no requieren refs. «isolated» = documentos sin enlaces internos entrantes NI salientes (antes «orphans»)." },
+             "ref": { "type": "object", "description": "DocumentRef: el documento centro (requerido en backlinks/outgoing/neighborhood; origen en path_between).", "properties": {
+                 "path": { "type": "string", "description": "Ruta relativa del documento (p. ej. «notas/alfa.md»)." }
              }, "required": ["path"], "additionalProperties": false },
-             "to": { "type": "object", "description": "ConceptRef destino, solo «path_between» (extremo final del camino dirigido).", "properties": {
-                 "path": { "type": "string", "description": "Ruta relativa del concepto destino." }
+             "to": { "type": "object", "description": "DocumentRef destino, solo «path_between» (extremo final del camino dirigido).", "properties": {
+                 "path": { "type": "string", "description": "Ruta relativa del documento destino." }
              }, "required": ["path"], "additionalProperties": false },
              "depth": { "type": "integer", "minimum": 1, "default": 1, "description": "Solo «neighborhood»." },
              "direction": { "type": "string", "enum": ["out", "in", "both"], "default": "out", "description": "Solo «neighborhood»." },
@@ -85,13 +160,13 @@ pub fn list() -> Value {
              "cursor": { "type": "string", "description": "Cursor opaco de paginación devuelto en «nextCursor»." }
          }, "required": ["operation"], "additionalProperties": false },
          "outputSchema": schemas::graph_query_schema()},
-        {"name": "impact_analyze", "description": "Analiza el impacto de un cambio hipotético sobre un concepto (sin aplicarlo): afectados directos/transitivos, relaciones tipadas obligatorias que romperían (bloqueos) y nivel de riesgo. Reusa el blast-radius entrante y las relaciones del schema.",
+        {"name": "impact_analyze", "description": "Analiza el impacto de un cambio hipotético sobre un documento (sin aplicarlo): afectados directos/transitivos y nivel de riesgo, sobre el grafo de enlaces. Reusa el blast-radius entrante.",
          "inputSchema": { "type": "object", "properties": {
-             "ref": { "type": "object", "description": "ConceptRef: el concepto sobre el que se propone el cambio.", "properties": {
-                 "path": { "type": "string", "description": "Ruta relativa del concepto (p. ej. «notas/alfa.md»)." }
+             "ref": { "type": "object", "description": "DocumentRef: el documento sobre el que se propone el cambio.", "properties": {
+                 "path": { "type": "string", "description": "Ruta relativa del documento (p. ej. «notas/alfa.md»)." }
              }, "required": ["path"], "additionalProperties": false },
              "proposedOperation": { "type": "object", "description": "El cambio hipotético a evaluar.", "properties": {
-                 "kind": { "type": "string", "enum": ["move", "delete", "deprecate", "transition_status", "change_relation", "replace_concept"], "description": "Tipo de operación propuesta. Solo «delete» computa bloqueos estructurales en v1." }
+                 "kind": { "type": "string", "enum": ["move", "delete"], "description": "Tipo de operación propuesta (modelo universal, §20.10). Solo «delete» computa bloqueos estructurales en v1." }
              }, "required": ["kind"], "additionalProperties": false },
              "depth": { "type": "integer", "minimum": 1, "description": "Profundidad del blast-radius entrante; por defecto cubre todo el alcance transitivo." }
          }, "required": ["ref", "proposedOperation"], "additionalProperties": false },
@@ -99,20 +174,25 @@ pub fn list() -> Value {
         {"name": "change_plan", "description": "Planifica un cambio complejo SIN escribir: normaliza las operaciones propuestas, simula su aplicación en memoria y valida el resultado. Devuelve un único change set (normalizedOperations, semanticDiff, risk, impact, diagnosticsBefore/After) con un planHash determinista. No toca disco (aplicar es change_apply, E13).",
          "inputSchema": { "type": "object", "properties": {
              "expectedWorkspaceRevision": { "type": "string", "description": "Control optimista a nivel de workspace («blake3:…»). Si se omite, se toma la revisión actual; si no coincide → REVISION_CONFLICT." },
-             "operations": { "type": "array", "description": "Operaciones propuestas, discriminadas por «op» (create/patch_frontmatter/replace_body/replace_text/edit_section/move/delete/add_relation/remove_relation/transition_status/apply_fix). Cada op puede llevar «expectedRevision» (ConceptRevision «blake3:…») para control optimista por concepto.",
-                 "items": { "type": "object", "properties": {
-                     "op": { "type": "string", "enum": ["create", "patch_frontmatter", "replace_body", "replace_text", "edit_section", "move", "delete", "add_relation", "remove_relation", "transition_status", "apply_fix"] },
-                     "path": { "type": "string" },
-                     "ref": { "type": "object", "properties": { "path": { "type": "string" } } },
-                     "expectedRevision": { "type": "string", "description": "ConceptRevision que el agente cree vigente («blake3:…»); si el concepto cambió → REVISION_CONFLICT." }
-                 }, "required": ["op"] } },
+             "operations": { "type": "array", "description": "Operaciones propuestas, discriminadas por «op»; las 7 universales (§20.11). Cada entrada lleva «op» más los parámetros de ESA op (declarados abajo, cada uno indica a cuál pertenece), y opcionalmente «expectedRevision» para control optimista por documento.",
+                 "items": operacion_item_schema() },
+             "selection": { "type": "object", "description": "Selección MASIVA por consulta (§20.11, alternativa a «operations»): «where» (lenguaje textual) o «filter» (JSON), como en knowledge_search. Requiere «operation».", "properties": {
+                 "where": { "type": "string" },
+                 "filter": { "type": "object" }
+             } },
+             "operation": { "type": "object", "description": "La operación a expandir sobre cada documento que casa la «selection», con el tipo como CLAVE y sus parámetros como valor (p. ej. {\"patch_frontmatter\": {\"status\": \"review\"}}). Los parámetros son los mismos que en «operations», sin repetir «op» ni el path (lo pone la selección). Solo las que tienen sentido en masa: patch_frontmatter/replace_text/delete.",
+                 "properties": {
+                     "patch_frontmatter": { "type": "object", "description": "El merge-patch a aplicar a cada documento seleccionado (mismo formato que «patch»)." },
+                     "replace_text": { "type": "object", "description": "{find, replace, expectedOccurrences?} como en la op suelta." },
+                     "delete": { "type": "object", "description": "{inboundLinksPolicy} como en la op suelta." }
+                 } },
              "policy": { "type": "object", "description": "Política de aplicación del plan.", "properties": {
-                 "requireConformantResult": { "type": "boolean", "description": "Si true, un resultado no conforme bloquea canApply." },
-                 "allowWarnings": { "type": "boolean", "description": "Si false, cualquier warning bloquea canApply." }
+                 "requireValidResult": { "type": "boolean", "default": true, "description": "Si true (por defecto), un resultado NO VÁLIDO bloquea canApply." },
+                 "allowWarnings": { "type": "boolean", "default": true, "description": "Si false, cualquier warning bloquea canApply." }
              } }
-         }, "required": ["operations"], "additionalProperties": false },
+         }, "additionalProperties": false },
          "outputSchema": schemas::change_plan_schema()},
-        {"name": "change_apply", "description": "Aplica un plan previamente calculado y vigente por el ÚNICO ESCRITOR, con todas las salvaguardas transaccionales (staging → lock → copias de recuperación → write-ahead journal → renames atómicos → receipt). Verifica caducidad (PLAN_EXPIRED) y planHash (PLAN_STALE si el bundle cambió bajo el plan) y rechaza escrituras fuera de writableRoots (PERMISSION_DENIED). Devuelve el recibo con las revisiones antes/después y el semanticDiff.",
+        {"name": "change_apply", "description": "Aplica un plan previamente calculado y vigente por el ÚNICO ESCRITOR, con todas las salvaguardas transaccionales (staging → lock → copias de recuperación → write-ahead journal → renames atómicos → receipt). Verifica caducidad (PLAN_EXPIRED) y planHash (PLAN_STALE si el workspace cambió bajo el plan) y rechaza escrituras fuera de writableRoots (PERMISSION_DENIED). Devuelve el recibo con las revisiones antes/después y el semanticDiff.",
          "inputSchema": { "type": "object", "properties": {
              "changeSetId": { "type": "string", "description": "El «changeset:<hash>» que devolvió change_plan (E12-H08); el plan se recupera de runtime por este id." },
              "expectedWorkspaceRevision": { "type": "string", "description": "Control optimista a nivel de workspace («blake3:…»). Si se omite, se adopta la revisión actual; si no coincide → REVISION_CONFLICT." }
@@ -186,23 +266,46 @@ pub fn call(app: &App, profile: Profile, name: &str, params: &Value) -> ToolResu
         }
         "knowledge_search" => {
             let text = params.get("text").and_then(Value::as_str).unwrap_or("");
-            let filters: SearchFilters = match params.get("filters") {
-                Some(v) => serde_json::from_value(v.clone()).map_err(|e| e.to_string())?,
-                None => SearchFilters::default(),
+            // `where`/`filter` (E19-H05): la consulta textual y el filtro JSON estructurado, ambos
+            // hacia el mismo `Expression` en la `App`. `where` es palabra reservada en Rust, así que
+            // la clave del wire se lee por string, no por campo.
+            let where_expr = params.get("where").and_then(Value::as_str);
+            let filter = params.get("filter");
+            // Proyección de frontmatter (E23-H11). Se parsea AQUÍ, en el despachador, porque los
+            // valores son abiertos (`frontmatter.<lo que sea>`) y no caben en un `enum` del schema
+            // —a diferencia del `include` cerrado de `knowledge_get`—: este es el único sitio donde
+            // la superficie puede ser honesta. Una entrada mal formada se RECHAZA con
+            // `INVALID_SCHEMA`; aceptarla y descartarla sería reintroducir por detrás el defecto
+            // que esta misma historia saca por delante con `sort`.
+            let include: Vec<String> = match params.get("include") {
+                Some(v) => serde_json::from_value(v.clone()).map_err(|e| {
+                    format!(
+                        "{}: «include» debe ser un array de cadenas «frontmatter.<fieldPath>»: {e}",
+                        ErrorCode::InvalidSchema.as_str()
+                    )
+                })?,
+                None => Vec::new(),
             };
-            let sort = params.get("sort").and_then(Value::as_str);
+            let proyecciones =
+                lodestar_app::FrontmatterProjection::parse_all(&include).map_err(|code| {
+                    format!(
+                        "{}: cada entrada de «include» debe ser «frontmatter.<fieldPath>» (p. ej. \
+                         «frontmatter.status» o «frontmatter.owner.name»); recibido {include:?}",
+                        code.as_str()
+                    )
+                })?;
             let limit = params
                 .get("limit")
                 .and_then(Value::as_u64)
                 .map(|n| n as usize);
             let cursor = params.get("cursor").and_then(Value::as_str);
             let results = app
-                .knowledge_search(text, &filters, sort, limit, cursor)
+                .knowledge_search(text, where_expr, filter, &proyecciones, limit, cursor)
                 .map_err(|e| e.to_string())?;
             to_json(&results)
         }
         "knowledge_get" => {
-            let r: ConceptRef = match params.get("ref") {
+            let r: DocumentRef = match params.get("ref") {
                 Some(v) => serde_json::from_value(v.clone()).map_err(|e| e.to_string())?,
                 None => return Err("falta el parámetro «ref»".to_string()),
             };
@@ -215,23 +318,23 @@ pub fn call(app: &App, profile: Profile, name: &str, params: &Value) -> ToolResu
                 None => None,
             };
             // Mapeo de error a wire (E10-H02): el texto que ve el agente lleva el código estable
-            // `ErrorCode::as_str()` (p. ej. «CONCEPT_NOT_FOUND»), NUNCA el `Debug` de la variante
-            // (`ConceptNotFound`) — el catálogo de 16 códigos es el contrato, no el nombre Rust.
-            let concept = app
+            // `ErrorCode::as_str()` (p. ej. «DOCUMENT_NOT_FOUND»), NUNCA el `Debug` de la variante
+            // (`DocumentNotFound`) — el catálogo de 16 códigos es el contrato, no el nombre Rust.
+            let document = app
                 .knowledge_get(&r, &include, sections.as_deref())
                 .map_err(|e| e.as_str().to_string())?;
-            Ok(json!({ "concept": to_json(&concept)? }))
+            Ok(json!({ "document": to_json(&document)? }))
         }
-        "schema_inspect" => {
+        "metadata_inspect" => {
             let mode = params
                 .get("mode")
                 .and_then(Value::as_str)
                 .ok_or("falta el parámetro «mode»")?;
-            let type_name = params.get("type").and_then(Value::as_str);
+            let field = params.get("field").and_then(Value::as_str);
             // Mismo mapeo de error a wire que `knowledge_get` (E10-H02): el código estable
             // `ErrorCode::as_str()`, nunca el `Debug` de la variante.
             let inspection = app
-                .schema_inspect(mode, type_name)
+                .metadata_inspect(mode, field)
                 .map_err(|e| e.as_str().to_string())?;
             to_json(&inspection)
         }
@@ -257,7 +360,7 @@ pub fn call(app: &App, profile: Profile, name: &str, params: &Value) -> ToolResu
                 .and_then(Value::as_u64)
                 .map(|n| n as usize);
             let cursor = params.get("cursor").and_then(Value::as_str);
-            // Mismo mapeo de error a wire que `knowledge_get`/`schema_inspect` (E10-H02): el código
+            // Mismo mapeo de error a wire que `knowledge_get`/`metadata_inspect` (E10-H02): el código
             // estable `ErrorCode::as_str()`, nunca el `Debug` de la variante.
             let report = app
                 .knowledge_check(&scope, min_severity, include_fixes, limit, cursor)
@@ -269,12 +372,12 @@ pub fn call(app: &App, profile: Profile, name: &str, params: &Value) -> ToolResu
                 .get("operation")
                 .and_then(Value::as_str)
                 .ok_or("falta el parámetro «operation»")?;
-            let r: Option<ConceptRef> = match params.get("ref") {
+            let r: Option<DocumentRef> = match params.get("ref") {
                 Some(v) => Some(serde_json::from_value(v.clone()).map_err(|e| e.to_string())?),
                 None => None,
             };
             // Segundo extremo, solo para `path_between` (destino del camino dirigido).
-            let to: Option<ConceptRef> = match params.get("to") {
+            let to: Option<DocumentRef> = match params.get("to") {
                 Some(v) => Some(serde_json::from_value(v.clone()).map_err(|e| e.to_string())?),
                 None => None,
             };
@@ -288,7 +391,7 @@ pub fn call(app: &App, profile: Profile, name: &str, params: &Value) -> ToolResu
                 .and_then(Value::as_u64)
                 .map(|n| n as usize);
             let cursor = params.get("cursor").and_then(Value::as_str);
-            // Mismo mapeo de error a wire que `knowledge_get`/`schema_inspect`/`knowledge_check`
+            // Mismo mapeo de error a wire que `knowledge_get`/`metadata_inspect`/`knowledge_check`
             // (E10-H02): el código estable `ErrorCode::as_str()`, nunca el `Debug` de la variante.
             let result = app
                 .graph_query(
@@ -304,7 +407,7 @@ pub fn call(app: &App, profile: Profile, name: &str, params: &Value) -> ToolResu
             to_json(&result)
         }
         "impact_analyze" => {
-            let r: ConceptRef = match params.get("ref") {
+            let r: DocumentRef = match params.get("ref") {
                 Some(v) => serde_json::from_value(v.clone()).map_err(|e| e.to_string())?,
                 None => return Err("falta el parámetro «ref»".to_string()),
             };
@@ -329,15 +432,38 @@ pub fn call(app: &App, profile: Profile, name: &str, params: &Value) -> ToolResu
                 .get("expectedWorkspaceRevision")
                 .and_then(Value::as_str)
                 .map(|s| WorkspaceRevision(s.to_string()));
-            let operations = params.get("operations").cloned().unwrap_or(Value::Null);
+            // `App::change_plan` acepta dos formas de wire: el array `operations` (ops sueltas) o el
+            // objeto `{selection, operation}` de la selección MASIVA por consulta (§20.11, E21-H02).
+            // El dispatch pasa la que venga: si hay `selection`, el objeto entero de params (que ya
+            // lleva `selection` + `operation`); si no, el array `operations`. (Sin esto, la selección
+            // masiva no llegaría a la superficie MCP aunque `App` la sepa interpretar.)
+            let raw_ops = if params.get("selection").is_some() {
+                params.clone()
+            } else {
+                params.get("operations").cloned().unwrap_or(Value::Null)
+            };
             let policy: PlanPolicy = match params.get("policy") {
                 Some(v) => serde_json::from_value(v.clone()).map_err(|e| e.to_string())?,
                 None => PlanPolicy::default(),
             };
+            // E23-H05: validación de FORMA del enum, igual que las comprobaciones de «falta el
+            // parámetro «ref»» de las otras tools. `App` ya rechaza el valor con `INVALID_SCHEMA`,
+            // pero ese código pelado no le dice al agente cuáles son las válidas — y `retarget`/
+            // `create_stub` estuvieron aceptándose sin ejecutarse desde E12-H06, así que un cliente
+            // que las use viene de una versión donde «funcionaban». La lista sale de
+            // `InboundLinksPolicy::WIRE_VALUES`, la misma que declara el `inputSchema`.
+            if let Some(mala) = politica_de_borrado_invalida(&raw_ops) {
+                return Err(format!(
+                    "INVALID_SCHEMA: «{mala}» no es una política válida ante enlaces entrantes; \
+                     usa una de {:?}. «retarget» y «create_stub» se retiraron en E23-H05: se \
+                     aceptaban sin ejecutarse, dejando enlaces rotos.",
+                    InboundLinksPolicy::WIRE_VALUES
+                ));
+            }
             // Mismo mapeo de error a wire que las demás tools (E10-H02): el código estable
             // `ErrorCode::as_str()` (p. ej. «REVISION_CONFLICT»), nunca el `Debug` de la variante.
             let result = app
-                .change_plan(expected, &operations, policy)
+                .change_plan(expected, &raw_ops, policy)
                 .map_err(|e| e.as_str().to_string())?;
             to_json(&result)
         }
@@ -390,17 +516,20 @@ fn to_json<T: serde::Serialize>(v: &T) -> ToolResult {
 #[cfg(test)]
 mod tests {
     //! Golden cross-fachada (E7-H06): la salida de cada tool == la del `Workspace` directo.
-    //! Verifica que la fachada MCP es un shell fino sin lógica OKF propia (`§2`, `§7`).
+    //! Verifica que la fachada MCP es un shell fino sin lógica de dominio propia (`§2`, `§7`).
     use super::*;
 
-    /// Como antes (`Workspace` efímero sobre un fixture en disco), pero envuelto en `App` —
-    /// `call()` despacha sobre `App` desde E10-H08 (necesita `App::workspace_status`). Las
-    /// comparaciones «directas» del golden test siguen yendo contra el mismo `Workspace`, vía
-    /// `App::workspace()`.
+    /// Como antes (`Workspace` sobre un fixture en disco), pero envuelto en `App` — `call()`
+    /// despacha sobre `App` desde E10-H08 (necesita `App::workspace_status`). Las comparaciones
+    /// «directas» del golden test siguen yendo contra el mismo `Workspace`, vía `App::workspace()`.
+    ///
+    /// Se abre con `Workspace::open`: E23-H12 retiró `open_ephemeral` porque, con los efectos
+    /// secundarios fuera de la apertura, `open` **ya es** hermético (no toca el `.gitignore` del
+    /// fixture ni le monta scaffold de runtime).
     fn app_with_fixture() -> (tempfile::TempDir, App) {
         let dir = tempfile::tempdir().unwrap();
         for (p, c) in [
-            ("index.md", "---\nokf_version: \"0.1\"\n---\n\n# Bundle\n\n* [Alfa](alfa.md)\n"),
+            ("index.md", "---\ntype: Index\ntitle: Bundle\ndescription: Índice del bundle\nokf_version: \"0.1\"\n---\n\n# Bundle\n\n* [Alfa](alfa.md)\n"),
             (
                 "alfa.md",
                 "---\ntype: Concept\ntitle: Alfa\ndescription: d\n---\n\n# H\n\n[huerfano falta](/no-existe.md)\n",
@@ -412,7 +541,7 @@ mod tests {
         ] {
             std::fs::write(dir.path().join(p), c).unwrap();
         }
-        let ws = Workspace::open_ephemeral(dir.path()).unwrap();
+        let ws = Workspace::open(dir.path()).unwrap();
         (dir, App::from_workspace(ws))
     }
 
@@ -420,8 +549,8 @@ mod tests {
     // `golden_orphans_y_dangling_igual_workspace` y `golden_query_igual_workspace` se RETIRARON al
     // retirar las tools heredadas `find_backlinks`/`find_orphans`/`find_dangling`/`query`. Su
     // cobertura vive hoy en la superficie objetivo (e2e en `tests/mcp.rs`): `find_backlinks` →
-    // `graph_query(backlinks)` (`graph_backlinks`); `find_orphans` → `graph_query(orphans)`
-    // (`graph_orphans`); `find_dangling` → `graph_query(dangling)` (`graph_dangling`); `query` →
+    // `graph_query(backlinks)` (`graph_backlinks`); `find_orphans` → `graph_query(isolated)`
+    // (`graph_isolated`); `find_dangling` → `graph_query(dangling)` (`graph_dangling`); `query` →
     // `knowledge_search` (`search_sin_cuerpos`/`search_filtra_tipo`/`search_paginacion`). El golden
     // cross-fachada de que la tool == el `Workspace` directo lo sigue verificando
     // `golden_workspace_status_igual_app` para una tool objetivo.

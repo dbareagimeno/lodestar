@@ -21,12 +21,16 @@ lodestar-workspace = { workspace = true }
 lodestar-app = { workspace = true }
 clap = { workspace = true }
 anyhow = { workspace = true }
-ignore = { workspace = true }
 serde_json = { workspace = true }
-zip = { workspace = true }
 
 [lints]
 workspace = true
 
 [dev-dependencies]
 lodestar-fixtures = { workspace = true }
+# E23-H08: el arnés de los tests pasa a `tempfile` (limpieza automática), como el resto del repo.
+tempfile = "3"
+# E23-H08: los tests de `reindex` leen la cache que el subcomando deja en `.lodestar/index.db` SIN
+# reconstruirla (`Store::open` no hace rebuild, a diferencia de `Workspace::enable_cache`): es la
+# única forma de observar lo que `reindex` persistió de verdad. Solo tests; no entra en el binario.
+lodestar-store = { workspace = true }

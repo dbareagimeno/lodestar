@@ -18,13 +18,13 @@ recibes, pídelo y no hagas nada más.
   `vcs.rs`, `workspace.rs`, `cli.rs`/`e2e.rs`, `mcp.rs`). Añade ahí, no crees ficheros nuevos sin
   motivo.
 - **Unit inline**: módulos `#[cfg(test)]` junto al código, para lógica interna.
-- **Fixtures compartidas**: `crates/lodestar-fixtures` (`file_map`, `conformant()`, `with_issues()`,
-  `synthetic(n)`). Amplíalas antes que duplicar bundles inline.
-- **Arnés diferencial** (si la historia porta comportamiento del prototipo): añade un `#[test]` en
-  `crates/lodestar-core/tests/differential.rs` con `assert_parity(...)` guardado tras
-  `if !node_available() { return; }`, y las sondas de query nuevas al slice `PROBES`.
-- **Regresiones de paridad**: sección «Regresiones de paridad con el prototipo» de
-  `crates/lodestar-core/tests/core.rs`.
+- **Fixtures compartidas**: `crates/lodestar-fixtures`. Para workspaces Markdown universales,
+  `arbitrary()`, `with_edge_cases()`, `materialize()` y `materialize_disk_only()`; los bundles OKF
+  heredados (`conformant()`, `with_issues()`, `synthetic(n)`) siguen ahí mientras duren sus
+  consumidores. Amplíalas antes que duplicar workspaces inline.
+- **Arnés diferencial**: RETIRADO en `E15-H04` junto con la dependencia de node. El prototipo ya no
+  arbitra comportamiento: la spec es `docs/REFACTOR_PHASE_2.md` + `ARCHITECTURE.md §20`. No escribas
+  sondas de paridad ni toques `prototype/`.
 
 ## Reglas duras
 1. **Un test (mínimo) por criterio de aceptación**, con el nombre que la historia propone para cada

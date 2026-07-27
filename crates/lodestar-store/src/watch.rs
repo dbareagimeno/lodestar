@@ -18,7 +18,7 @@ pub struct Watcher {
 }
 
 impl Store {
-    /// Arranca el watcher del bundle. Cada tanda de eventos dispara `reconcile_all()`
+    /// Arranca el watcher del workspace. Cada tanda de eventos dispara `reconcile_all()`
     /// (gate por hash: los no-ops y echoes no generan `IndexEvent`).
     pub fn watch(self: &Arc<Self>) -> Result<Watcher, StoreError> {
         let store = Arc::clone(self);
@@ -30,7 +30,7 @@ impl Store {
             move |res: DebounceEventResult| {
                 // Filtro: los eventos de `.lodestar/` (¡las escrituras de la PROPIA cache!) y de
                 // `.git/` no disparan reconcile — sin él, cada upsert genera un eco que re-lee y
-                // re-hashea el bundle entero, y cada commit/switch dispara decenas de reconciles.
+                // re-hashea el workspace entero, y cada commit/switch dispara decenas de reconciles.
                 let relevant = match &res {
                     Ok(events) => events.iter().any(|ev| {
                         ev.paths

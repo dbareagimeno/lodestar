@@ -1,5 +1,6 @@
 //! Bus de eventos `IndexEvent` (`ARCHITECTURE.md §5`, `§9`) — `crossbeam`, síncrono y
-//! runtime-neutral. El MCP lo puentea a tokio; Tauri a `app.emit`; la CLI lo ignora.
+//! runtime-neutral. El MCP lo puentea a tokio y la CLI lo ignora. (La fachada Tauri lo puenteaba a
+//! `app.emit`; se retiró de `main` a `experimental/ui-desktop` con el giro headless, `§19.1`.)
 
 use std::sync::Mutex;
 
