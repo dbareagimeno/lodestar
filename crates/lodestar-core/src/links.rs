@@ -537,10 +537,9 @@ pub fn diagnose(
     links: &[ResolvedLink],
     inventory: &Inventory,
 ) -> Vec<Check> {
-    let body_start = match crate::model::split_front(raw) {
-        crate::model::SplitFront::Bloque { body_start, .. } => body_start,
-        _ => 0,
-    };
+    // Sin bloque el cuerpo empieza en 0… salvo que el documento lleve BOM, que ocupa 3 bytes que
+    // no son cuerpo (E24-H01): `body_offset` es la misma verdad que usa `SplitFront::body`.
+    let body_start = crate::model::split_front(raw).body_offset(raw);
     let mut out: Vec<Check> = Vec::new();
 
     for link in links {

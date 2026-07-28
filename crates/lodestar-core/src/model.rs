@@ -13,28 +13,72 @@ use serde_yaml::Value as Yaml;
 
 use crate::types::{FmError, ParsedFrontmatter};
 
+/// El **BOM UTF-8** (`U+FEFF`, bytes `EF BB BF`) tal y como puede aparecer al frente de un `.md`
+/// (E24-H01).
+///
+/// No es contenido del documento —ni frontmatter ni cuerpo—: es una marca de codificación que
+/// algunos editores (Notepad, Visual Studio) escriben delante de todo. Lodestar la **conserva byte
+/// a byte** en vez de normalizarla, porque [`crate::types::workspace_revision`] hashea los bytes
+/// crudos del `FileMap`: strippearla al leer y no al reemitir declararía un cambio espurio —y con
+/// él, conflictos de escritura— en cada round-trip.
+pub const BOM: &str = "\u{feff}";
+
+/// `true` si `raw` empieza por el [`BOM`] UTF-8.
+pub fn has_bom(raw: &str) -> bool {
+    raw.starts_with(BOM)
+}
+
+/// Longitud en **bytes** del [`BOM`] al frente de `raw` (`3`), o `0` si no lo tiene. Es el offset
+/// desde el que empieza el documento propiamente dicho.
+pub fn bom_len(raw: &str) -> usize {
+    if has_bom(raw) {
+        BOM.len()
+    } else {
+        0
+    }
+}
+
+/// `raw` sin su [`BOM`] inicial (o `raw` tal cual si no lo tenía).
+pub fn strip_bom(raw: &str) -> &str {
+    raw.strip_prefix(BOM).unwrap_or(raw)
+}
+
 /// Resultado de [`split_front`]: dónde está (si está) el bloque de frontmatter de un documento.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SplitFront {
-    /// El documento no abre bloque de frontmatter: el cuerpo es el documento entero. Es un estado
-    /// **válido** (`§20.4`), no un error.
+    /// El documento no abre bloque de frontmatter: el cuerpo es el documento entero (sin su
+    /// [`BOM`], si lo lleva). Es un estado **válido** (`§20.4`), no un error.
     Sin,
     /// Bloque presente y cerrado. `span` es el rango de bytes de su TEXTO YAML (sin los
-    /// delimitadores `---`); `body_start` es el offset donde empieza el cuerpo.
+    /// delimitadores `---`); `body_start` es el offset donde empieza el cuerpo. Ambos son
+    /// posiciones sobre el `raw` **completo**, [`BOM`] incluido.
     Bloque {
         span: std::ops::Range<usize>,
         body_start: usize,
     },
-    /// El documento abre `---` y nunca lo cierra: el cuerpo es el documento entero.
+    /// El documento abre `---` y nunca lo cierra: el cuerpo es el documento entero (sin su
+    /// [`BOM`], si lo lleva).
     SinCerrar,
 }
 
 impl SplitFront {
     /// El cuerpo del documento `raw` según este corte.
+    ///
+    /// Sin bloque el cuerpo es el documento entero **menos su [`BOM`]**: la marca de codificación
+    /// pertenece a la cabecera del fichero, no al texto (E24-H01).
     pub fn body<'a>(&self, raw: &'a str) -> &'a str {
+        &raw[self.body_offset(raw)..]
+    }
+
+    /// Offset de byte dentro de `raw` donde empieza el cuerpo que devuelve [`SplitFront::body`].
+    ///
+    /// Lo necesita quien traduce un offset **del cuerpo** a una posición **del fichero** (los
+    /// rangos de los diagnósticos de enlaces, `links::diagnose`): sin bloque el cuerpo no empieza
+    /// en `0` si el documento lleva [`BOM`].
+    pub fn body_offset(&self, raw: &str) -> usize {
         match self {
-            SplitFront::Bloque { body_start, .. } => &raw[*body_start..],
-            _ => raw,
+            SplitFront::Bloque { body_start, .. } => *body_start,
+            _ => bom_len(raw),
         }
     }
 
@@ -53,48 +97,55 @@ impl SplitFront {
 /// El bloque abre con `---` en la primera línea y cierra con la primera línea posterior que
 /// empieza por `---`. Un bloque **vacío** (`---\n---\n`) es un bloque presente con texto vacío —
 /// no un bloque sin cerrar, que era el veredicto del port del prototipo.
+///
+/// Un [`BOM`] UTF-8 inicial **no oculta el bloque** (E24-H01): la detección se hace sobre el
+/// documento sin la marca, pero los offsets devueltos siguen siendo posiciones de byte sobre
+/// `raw` —la invariante `raw[span] == fm.raw` de la que depende el patch quirúrgico no se rompe—.
 pub fn split_front(raw: &str) -> SplitFront {
-    if !raw.starts_with("---") {
+    // Base = 0 sin BOM, 3 con él. Todo el escaneo trabaja sobre `s` (el documento sin la marca) y
+    // los offsets se trasladan a `raw` al construir el resultado.
+    let base = bom_len(raw);
+    let s = &raw[base..];
+    if !s.starts_with("---") {
         return SplitFront::Sin;
     }
     // Tras el `---` de apertura debe venir un salto de línea; si no, no hay bloque bien formado.
-    let after_open = if raw[3..].starts_with("\r\n") {
+    let after_open = if s[3..].starts_with("\r\n") {
         5
-    } else if raw[3..].starts_with('\n') {
+    } else if s[3..].starts_with('\n') {
         4
     } else {
         return SplitFront::SinCerrar;
     };
 
     // El cierre puede venir inmediatamente (bloque vacío) o tras una o más líneas de contenido.
-    let (span, close_start) = if raw[after_open..].starts_with("---") {
+    let (span, close_start) = if s[after_open..].starts_with("---") {
         (after_open..after_open, after_open)
     } else {
-        let Some(nl) = raw[after_open..]
+        let Some(nl) = s[after_open..]
             .match_indices('\n')
             .map(|(i, _)| after_open + i)
-            .find(|i| raw[i + 1..].starts_with("---"))
+            .find(|i| s[i + 1..].starts_with("---"))
         else {
             return SplitFront::SinCerrar;
         };
         // El `\r` de un CRLF pertenece al delimitador, no al texto del bloque.
-        let end = if raw[..nl].ends_with('\r') {
-            nl - 1
-        } else {
-            nl
-        };
+        let end = if s[..nl].ends_with('\r') { nl - 1 } else { nl };
         (after_open..end, nl + 1)
     };
 
     // Tras el `---` de cierre se consume el salto de línea (CRLF o LF) si lo hay.
     let mut body_start = close_start + 3;
-    if raw[body_start..].starts_with('\r') {
+    if s[body_start..].starts_with('\r') {
         body_start += 1;
     }
-    if raw[body_start..].starts_with('\n') {
+    if s[body_start..].starts_with('\n') {
         body_start += 1;
     }
-    SplitFront::Bloque { span, body_start }
+    SplitFront::Bloque {
+        span: (span.start + base)..(span.end + base),
+        body_start: body_start + base,
+    }
 }
 
 /// Parsea el texto de un bloque de frontmatter. `Ok` es **siempre** un `Value::Mapping`: un bloque
@@ -294,16 +345,33 @@ pub fn parse_frontmatter(raw: &str) -> Option<ParsedFrontmatter> {
 ///
 /// > La edición **quirúrgica** del bloque (reutilizar `raw`/`span` en vez de reserializar) es
 /// > E16-H04; aquí siempre se reserializa el `value`.
+///
+/// El documento resultante **no lleva [`BOM`]**. Quien reconstruye un documento que sí lo tenía
+/// —el brazo `ReplaceBody` de `plan::apply_normalized_ops`— usa [`build_raw_with_bom`].
 pub fn build_raw(fm: Option<&ParsedFrontmatter>, body: &str) -> String {
+    build_raw_with_bom(fm, body, false)
+}
+
+/// Como [`build_raw`], pero reemitiendo el [`BOM`] UTF-8 al frente cuando `bom` es `true`
+/// (E24-H01).
+///
+/// `build_raw` recibe `(frontmatter, cuerpo)` y **ninguno de los dos lleva la marca** —
+/// [`SplitFront::body`] la deja fuera del cuerpo a propósito—, así que la reemisión tiene que
+/// llegar como dato aparte: es exactamente la misma lección de E23-H03 (conservar «la ausencia de
+/// frontmatter») un nivel más abajo. Sin esto, un `replace_body` sobre un `.md` con BOM lo
+/// perdería, y como `move --rewriteInboundLinks` reescribe el cuerpo de CADA enlazante, bastaría
+/// un `move` para reescribir en silencio la codificación de medio workspace.
+pub fn build_raw_with_bom(fm: Option<&ParsedFrontmatter>, body: &str, bom: bool) -> String {
+    let prefijo = if bom { BOM } else { "" };
     let Some(fm) = fm else {
-        return body.to_string();
+        return format!("{prefijo}{body}");
     };
     let y = serde_yaml::to_string(&fm.value)
         .unwrap_or_default()
         .trim_end()
         .to_string();
     let body_trimmed = body.trim_start_matches('\n');
-    format!("---\n{y}\n---\n\n{body_trimmed}")
+    format!("{prefijo}---\n{y}\n---\n\n{body_trimmed}")
 }
 
 /// El documento resultante de aplicar un [`crate::types::FrontmatterPatch`]
@@ -342,7 +410,8 @@ pub struct PatchedDocument {
 ///    impide localizar líneas con seguridad (claves duplicadas, anchors/alias, líneas de primer
 ///    nivel que no son `clave: valor`).
 /// 3. **Creación** (`reserialized: false`) — el documento no tiene bloque: se antepone uno con las
-///    claves del patch y el documento original queda intacto como cuerpo.
+///    claves del patch y el documento original queda intacto como cuerpo. Si el documento empieza
+///    por [`BOM`], el bloque nuevo va **después** de la marca (E24-H01).
 ///
 /// El **cuerpo queda intacto byte a byte** en los tres casos: la operación solo reemplaza el rango
 /// de bytes del bloque (o antepone uno nuevo).
@@ -375,8 +444,12 @@ pub fn patch_frontmatter(
                 });
             }
             let bloque = dump_mapping(&map);
+            // El bloque nuevo va DESPUÉS del BOM, si lo hay: nada se antepone a la marca de
+            // codificación del usuario (E24-H01).
+            let bom = &raw[..bom_len(raw)];
+            let cuerpo = strip_bom(raw);
             return Ok(PatchedDocument {
-                raw: format!("---\n{bloque}\n---\n\n{raw}"),
+                raw: format!("{bom}---\n{bloque}\n---\n\n{cuerpo}"),
                 reserialized: false,
             });
         }
