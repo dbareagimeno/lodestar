@@ -5582,3 +5582,318 @@ fn escribir_si_ajusta_el_gitignore() {
     );
     comprueba("tras change_apply");
 }
+
+// ---------------------------------------------------------------------------
+// E24-H01 — Un BOM deja de tragarse el frontmatter (por el WIRE).
+// `requirements/epica-24-cierre-defectos-v031.md §E24-H01` · `ARCHITECTURE.md §20.4` ·
+// `CLAUDE.md` invariante #1 («los `.md` en disco son la única fuente de verdad»). Fase ROJA.
+//
+// Estos tres tests son la reproducción EXACTA del síntoma de la historia, ejercida sobre el
+// binario real por JSON-RPC (el arnés `roundtrip`), porque es así como se descubrió: el fichero
+// con BOM se escribe en disco, y lo que se juzga son los BYTES que quedan en disco después.
+// La misma semántica, en el núcleo puro, la fijan los tests homónimos de
+// `crates/lodestar-core/tests/documento.rs`.
+//
+// SÍNTOMA verificado hoy contra `lodestar-mcp` (v0.3.0):
+//   knowledge_get  -> frontmatter {} · body = el fichero ENTERO (BOM y bloque incluidos)
+//   where "document.has_frontmatter = true"  -> []      (y `= false` -> ['bom.md'])
+//   patch_frontmatter {"status":"review"} + apply deja en disco
+//     b'---\nstatus: review\n---\n\n\xef\xbb\xbf---\nstatus: draft\nowner: ana\n---\n\n# Con BOM…'
+//   Dos bloques; `owner: ana` degradado a texto del cuerpo, listo para que el siguiente
+//   `replace_body` lo borre para siempre.
+//
+// ROJO esperado HOY: por ASERCIÓN en los tres (ninguna API nueva, ningún stub).
+// ---------------------------------------------------------------------------
+
+/// El documento del síntoma, byte a byte: BOM UTF-8 (`EF BB BF`) + frontmatter de **dos** claves.
+/// `owner` es la clave testigo: es la que la corrupción de hoy destruye.
+const DOC_CON_BOM: &str =
+    "\u{feff}---\nstatus: draft\nowner: ana\n---\n\n# Con BOM\n\ncuerpo original\n";
+
+/// Workspace con el documento del síntoma **y** un gemelo sin BOM. El gemelo es el control de no
+/// vacuidad de las consultas: `document.has_frontmatter = true` ya lo devuelve hoy, así que si un
+/// arreglo rompiera el caso normal, estos tests lo verían.
+fn workspace_con_bom() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), "bom.md", DOC_CON_BOM);
+    write(
+        dir.path(),
+        "sin_bom.md",
+        "---\nstatus: draft\nowner: ana\n---\n\n# Sin BOM\n\ncuerpo original\n",
+    );
+    dir
+}
+
+/// Los BYTES de un `.md` del workspace. Se leen como bytes —y no como `String`— porque el BOM es
+/// precisamente lo que se juzga y una lectura descuidada lo escondería.
+fn bytes_de(root: &std::path::Path, rel: &str) -> Vec<u8> {
+    std::fs::read(root.join(rel)).unwrap_or_else(|e| panic!("`{rel}` debe existir en disco: {e}"))
+}
+
+/// Rendición legible de unos bytes para los mensajes de aserción (el BOM se ve como `\u{feff}`).
+fn como_texto(bytes: &[u8]) -> String {
+    format!("{:?}", String::from_utf8_lossy(bytes))
+}
+
+/// Número de líneas delimitadoras de frontmatter (`---`) de un `.md`, tolerando el BOM en la
+/// primera. Un documento con **un** bloque tiene exactamente dos; la corrupción produce cuatro.
+fn delimitadores(bytes: &[u8]) -> usize {
+    String::from_utf8_lossy(bytes)
+        .lines()
+        .filter(|l| l.trim_start_matches('\u{feff}') == "---")
+        .count()
+}
+
+/// La `workspaceRevision` que reporta `workspace_status` sobre el workspace de `root`.
+fn revision_de(root: &std::path::Path) -> String {
+    let status = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"workspace_status","arguments":{}}}"#;
+    let resp = roundtrip(root, &[status], 1);
+    resp[0]["result"]["structuredContent"]["workspaceRevision"]
+        .as_str()
+        .unwrap_or_else(|| panic!("workspace_status debe devolver `workspaceRevision`: {resp:?}"))
+        .to_string()
+}
+
+/// Planifica **una** operación y la aplica, exigiendo que el apply tenga éxito (guarda de no
+/// vacuidad: si la operación no llega a ejecutarse, el estado de disco no prueba nada).
+fn planifica_y_aplica(root: &std::path::Path, op: serde_json::Value) -> serde_json::Value {
+    let plan = roundtrip(
+        root,
+        &[change_plan_line(None, serde_json::json!([op]), policy_permisiva()).as_str()],
+        1,
+    );
+    let id = plan_change_set_id(&plan[0]);
+    let apply = roundtrip(root, &[change_apply_line(&id, None).as_str()], 1);
+    assert_eq!(
+        apply_sc(&apply[0])["applied"],
+        serde_json::Value::Bool(true),
+        "guarda: la operación debe aplicarse de verdad para que el criterio no sea vacuo: {apply:?}"
+    );
+    apply_sc(&apply[0]).clone()
+}
+
+/// E24-H01 · Criterio `bom_no_se_traga_el_frontmatter`:
+/// Dado un `.md` con BOM y frontmatter válido, Cuando se lee con `knowledge_get`, Entonces
+/// `frontmatter` trae las claves reales y `document.has_frontmatter` es `true`.
+#[test]
+fn bom_no_se_traga_el_frontmatter() {
+    let dir = workspace_con_bom();
+    // Guarda del fixture: el fichero que se acaba de escribir empieza de verdad por `EF BB BF`.
+    assert_eq!(
+        bytes_de(dir.path(), "bom.md").get(..3),
+        Some([0xEF, 0xBB, 0xBF].as_slice()),
+        "guarda del fixture: `bom.md` debe empezar por el BOM UTF-8"
+    );
+
+    let get = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"knowledge_get","arguments":{"ref":{"path":"bom.md"},"include":["frontmatter","body"]}}}"#;
+    let con_fm = ks_call(serde_json::json!({ "where": "document.has_frontmatter = true" }));
+    let sin_fm = ks_call(serde_json::json!({ "where": "document.has_frontmatter = false" }));
+    let resp = roundtrip(dir.path(), &[get, con_fm.as_str(), sin_fm.as_str()], 3);
+
+    // (a) El frontmatter que viaja son las CLAVES REALES, no el mapa vacío.
+    let doc = &resp[0]["result"]["structuredContent"]["document"];
+    assert_eq!(
+        doc["frontmatter"]["status"],
+        serde_json::json!("draft"),
+        "`knowledge_get` sobre un `.md` con BOM debe devolver su `status` real; hoy devuelve el \
+         frontmatter vacío y la metadata del usuario es invisible: {resp:?}"
+    );
+    assert_eq!(
+        doc["frontmatter"]["owner"],
+        serde_json::json!("ana"),
+        "…y su `owner`, que es la clave que la corrupción de esta historia destruye: {resp:?}"
+    );
+
+    // (b) El `body` es el CUERPO, no el fichero entero con su bloque dentro.
+    let body = doc["body"].as_str().unwrap_or_else(|| {
+        panic!("`knowledge_get` con include=[body] debe traer `body`: {resp:?}")
+    });
+    assert!(
+        !body.contains("status: draft"),
+        "el bloque de frontmatter NO puede viajar dentro del `body`: body = {body:?}"
+    );
+    assert!(
+        !body.starts_with('\u{feff}'),
+        "el BOM pertenece a la cabecera del fichero, no al cuerpo: body = {body:?}"
+    );
+    assert_eq!(
+        body, "\n# Con BOM\n\ncuerpo original\n",
+        "el cuerpo debe ser exactamente el que sigue al bloque, igual que en un `.md` sin BOM"
+    );
+
+    // (c) `document.has_frontmatter` es `true` para el documento con BOM.
+    let con: std::collections::BTreeSet<String> = search_paths(&resp[1]).into_iter().collect();
+    assert!(
+        con.contains("sin_bom.md"),
+        "guarda de no vacuidad: el gemelo SIN BOM ya casa `document.has_frontmatter = true` en \
+         v0.3.0 y debe seguir casando: {resp:?}"
+    );
+    assert!(
+        con.contains("bom.md"),
+        "`document.has_frontmatter` debe ser `true` para el `.md` con BOM: su bloque está \
+         presente y cerrado. Casaron {con:?}: {resp:?}"
+    );
+
+    // (d) …y por tanto NO casa la consulta complementaria (control anti-vacuo de la anterior).
+    let sin: std::collections::BTreeSet<String> = search_paths(&resp[2]).into_iter().collect();
+    assert!(
+        !sin.contains("bom.md"),
+        "`bom.md` no puede aparecer como documento SIN frontmatter: casaron {sin:?}: {resp:?}"
+    );
+}
+
+/// E24-H01 · Criterio `patch_sobre_bom_no_duplica_bloque`:
+/// Dado ese documento, Cuando se le aplica `patch_frontmatter`, Entonces el resultado tiene un
+/// solo bloque, conserva las claves que no se tocaron y empieza por el BOM.
+///
+/// Se juzga sobre los BYTES publicados en disco (invariante #1), no sobre la respuesta de la tool.
+#[test]
+fn patch_sobre_bom_no_duplica_bloque() {
+    let dir = workspace_con_bom();
+
+    planifica_y_aplica(
+        dir.path(),
+        serde_json::json!({
+            "op": "patch_frontmatter", "ref": { "path": "bom.md" },
+            "patch": { "status": "review" }
+        }),
+    );
+
+    let publicado = bytes_de(dir.path(), "bom.md");
+
+    // (a) Empieza por el BOM: no se le antepone un bloque por delante.
+    assert_eq!(
+        publicado.get(..3),
+        Some([0xEF, 0xBB, 0xBF].as_slice()),
+        "el `.md` publicado debe seguir empezando por el BOM UTF-8 (EF BB BF); hoy el patch le \
+         antepone un bloque nuevo. En disco quedó: {}",
+        como_texto(&publicado)
+    );
+
+    // (b) UN SOLO bloque de frontmatter.
+    assert_eq!(
+        delimitadores(&publicado),
+        2,
+        "el `.md` publicado debe tener UN solo bloque (2 líneas «---»); la corrupción deja 4 y \
+         degrada el bloque original a texto del cuerpo. En disco quedó: {}",
+        como_texto(&publicado)
+    );
+
+    // (c) La clave no tocada sobrevive, una sola vez, y la tocada tiene el valor nuevo.
+    let texto = String::from_utf8_lossy(&publicado).to_string();
+    assert_eq!(
+        texto.matches("owner: ana").count(),
+        1,
+        "`owner: ana` debe aparecer EXACTAMENTE una vez: ni borrada ni duplicada en un segundo \
+         bloque muerto. En disco quedó: {}",
+        como_texto(&publicado)
+    );
+    assert!(
+        !texto.contains("status: draft"),
+        "el valor viejo de `status` no puede sobrevivir en un bloque degradado a cuerpo. En disco \
+         quedó: {}",
+        como_texto(&publicado)
+    );
+
+    // (d) Y el motor vuelve a leer el documento entero: nada quedó fuera de su alcance, así que el
+    // siguiente `replace_body` (el segundo paso del síntoma) no tiene nada que destruir.
+    let get = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"knowledge_get","arguments":{"ref":{"path":"bom.md"},"include":["frontmatter"]}}}"#;
+    let resp = roundtrip(dir.path(), &[get], 1);
+    let fm = &resp[0]["result"]["structuredContent"]["document"]["frontmatter"];
+    assert_eq!(
+        fm["status"],
+        serde_json::json!("review"),
+        "tras el patch, `status` debe valer «review»: {resp:?}"
+    );
+    assert_eq!(
+        fm["owner"],
+        serde_json::json!("ana"),
+        "…y `owner: ana` debe seguir siendo metadata VIVA, no texto muerto del cuerpo: {resp:?}"
+    );
+}
+
+/// E24-H01 · Criterio `bom_roundtrip_byte_a_byte` (**control anti-vacuo de la historia**):
+/// Dado ese documento, Cuando se lee y se reescribe sin cambios, Entonces los bytes son idénticos
+/// y la `WorkspaceRevision` no cambia.
+///
+/// Sin este criterio, un arreglo que se limitase a **strippear** el BOM al leer pasaría los otros
+/// dos. Aquí no: `workspace_revision` hashea los bytes crudos del `FileMap`, así que strippear al
+/// leer y no al reemitir declararía un cambio espurio en cada round-trip — justo lo que el alcance
+/// de la historia prohíbe («el BOM NO se normaliza en la lectura de disco»).
+///
+/// Dos rutas, las dos que un agente usa de verdad:
+///   - **A. `replace_body`** con el `body` que acaba de devolver `knowledge_get`: obliga a
+///     **reemitir** el BOM al reconstruir el documento. Lleva una precondición explícita (el
+///     cuerpo leído debe ser el cuerpo) sin la cual sería vacua: si el `body` fuese el fichero
+///     entero —el defecto de hoy—, reescribirlo devolvería los mismos bytes por accidente.
+///   - **B. `patch_frontmatter`** escribiendo en `status` el valor que **ya** tenía: obliga a
+///     **conservarlo**. Es roja hoy por sí sola.
+#[test]
+fn bom_roundtrip_byte_a_byte() {
+    let dir = workspace_con_bom();
+    let antes = bytes_de(dir.path(), "bom.md");
+    let revision_antes = revision_de(dir.path());
+
+    // --- Ruta A: leer el cuerpo por el wire y volver a escribirlo tal cual.
+    let get = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"knowledge_get","arguments":{"ref":{"path":"bom.md"},"include":["body"]}}}"#;
+    let leido = roundtrip(dir.path(), &[get], 1);
+    let body = leido[0]["result"]["structuredContent"]["document"]["body"]
+        .as_str()
+        .unwrap_or_else(|| panic!("`knowledge_get` debe traer el `body` de `bom.md`: {leido:?}"))
+        .to_string();
+    assert!(
+        !body.starts_with('\u{feff}') && !body.contains("status: draft"),
+        "precondición del round-trip: el `body` leído debe ser el cuerpo, no el fichero entero — \
+         si no, reescribirlo devolvería los mismos bytes por accidente y el criterio sería vacuo. \
+         body = {body:?}"
+    );
+
+    planifica_y_aplica(
+        dir.path(),
+        serde_json::json!({
+            "op": "replace_body", "ref": { "path": "bom.md" }, "body": body
+        }),
+    );
+
+    let tras_a = bytes_de(dir.path(), "bom.md");
+    assert_eq!(
+        tras_a.get(..3),
+        Some([0xEF, 0xBB, 0xBF].as_slice()),
+        "reescribir el cuerpo debe REEMITIR el BOM: es del usuario, no ruido a normalizar. En \
+         disco quedó: {}",
+        como_texto(&tras_a)
+    );
+    assert_eq!(
+        como_texto(&tras_a),
+        como_texto(&antes),
+        "leer y reescribir sin cambios debe dejar los MISMOS bytes en disco"
+    );
+    assert_eq!(
+        revision_de(dir.path()),
+        revision_antes,
+        "un round-trip sin cambios no puede mover la `WorkspaceRevision`: declararía un cambio \
+         espurio —y con él conflictos de escritura— en cada lectura-escritura de un `.md` con BOM"
+    );
+
+    // --- Ruta B: escribir en `status` el valor que ya tenía.
+    planifica_y_aplica(
+        dir.path(),
+        serde_json::json!({
+            "op": "patch_frontmatter", "ref": { "path": "bom.md" },
+            "patch": { "status": "draft" }
+        }),
+    );
+
+    let tras_b = bytes_de(dir.path(), "bom.md");
+    assert_eq!(
+        como_texto(&tras_b),
+        como_texto(&antes),
+        "escribir en `status` el valor que ya tenía no cambia el documento: mismos bytes, BOM \
+         incluido"
+    );
+    assert_eq!(
+        revision_de(dir.path()),
+        revision_antes,
+        "un patch que no cambia ningún valor no puede mover la `WorkspaceRevision`"
+    );
+}
