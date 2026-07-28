@@ -97,6 +97,17 @@ validación responde `VÁLIDO` incumple los dos a la vez.
 - **Dependencias**: ninguna.
 - **Pruebas**: `crates/lodestar-core/tests/documento.rs` + `crates/lodestar-mcp/tests/mcp.rs`.
 - **Frontera (mcp.yml)**: no (cambia el parseo, no la forma del wire).
+- **Consecuencia declarada (hallada por el juez ciego, medida)**: al pasar a **interpretar** el
+  documento, `lodestar check` puede cambiar de exit **0** a exit **1** en workspaces que hoy pasan:
+
+  | | v0.3.0 | con el arreglo |
+  |---|---|---|
+  | BOM + bloque sin cerrar | `[]` | `[FM-UNCLOSED, Err]` |
+  | BOM + YAML inválido | `[]` | `[FM-YAML-INVALID, Err]` |
+
+  Es el comportamiento **correcto** y el propio principio rector de la épica (dejar de responder
+  VÁLIDO sobre lo que no se entiende), pero es un cambio de veredicto de la puerta de CI para bases
+  existentes. **Debe ir en la nota de release de v0.3.1** (E24-H18).
 
 ### E24-H02 — Un BOM es visible, no silencioso
 
@@ -660,6 +671,11 @@ validación responde `VÁLIDO` incumple los dos a la vez.
   - `CHANGELOG.md`: sección `## [0.3.1] - AAAA-MM-DD` con `### Corregido`, viñetas que abren en
     negrita con el síntoma (estilo E23), y pie de enlaces actualizado
     (`[No publicado]: …compare/v0.3.1...HEAD` + `[0.3.1]: …compare/v0.3.0...v0.3.1`).
+  - **Avisos de cambio de veredicto** que la 0.3.1 introduce sobre bases existentes, recogidos de
+    las historias que los declararon: `lodestar check` puede pasar de exit 0 a exit 1 en un
+    workspace con un `.md` con BOM y frontmatter ilegible (E24-H01), y una consulta con una
+    propiedad inexistente bajo namespace reservado pasa de devolver `[]` a fallar (E24-H07). Los
+    dos son correcciones, pero cambian resultados observables: van en la nota de release.
   - `./scripts/set-version.sh 0.3.1 && cargo update -w`.
 - **Criterios de aceptación**:
   - `grep -rn "schema_inspect" CLAUDE.md ARCHITECTURE.md` no devuelve ninguna línea que la presente
