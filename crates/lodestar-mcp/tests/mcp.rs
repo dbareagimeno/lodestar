@@ -6221,3 +6221,198 @@ fn titulo_coincide_entre_get_y_search() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// E24-H15 — El `structuredContent` CONFORMA el `outputSchema` declarado
+//
+// Los 10 `outputSchema` se derivan con `schemars` desde el tipo Rust que sirve cada servicio, así
+// que en teoría no pueden divergir. En la práctica nadie lo comprobaba: `tools_declaran_outputschema`
+// mira 5 de las 10 y solo que el schema «tenga alguna clave estructural», y un brazo del despachador
+// que construya el JSON a mano (como hace `knowledge_get` con su envoltorio `{document}`) puede
+// apartarse del tipo sin que nada lo note.
+//
+// Un cliente MCP estricto SÍ valida. Esto es una guardia anti-drift, no la corrección de un defecto:
+// al escribirla, las 10 conformaban.
+// ---------------------------------------------------------------------------
+
+/// Valida `instancia` contra `schema`, devolviendo los errores en texto.
+fn errores_de_schema(schema: &serde_json::Value, instancia: &serde_json::Value) -> Vec<String> {
+    let validador = jsonschema::validator_for(schema)
+        .unwrap_or_else(|e| panic!("el propio outputSchema no es un JSON Schema válido: {e}"));
+    validador
+        .iter_errors(instancia)
+        .map(|e| format!("{} en {}", e, e.instance_path()))
+        .collect()
+}
+
+/// **E24-H15** — la salida real de las 10 tools conforma su `outputSchema`.
+#[test]
+fn structured_content_conforma_output_schema() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "alfa.md",
+        "---\nstatus: draft\npriority: 2\ntags:\n  - uno\n---\n\n# Alfa\n\nVer [beta](notas/beta.md) y [roto](no-existe.md).\n",
+    );
+    write(
+        dir.path(),
+        "notas/beta.md",
+        "---\nstatus: accepted\n---\n\n# Beta\n\n## Sección\n\ncuerpo\n\n[alfa](../alfa.md)\n",
+    );
+
+    // Llamadas que cubren las 10 tools (varias formas de las polimórficas).
+    let llamadas: Vec<(&str, serde_json::Value)> = vec![
+        ("workspace_status", serde_json::json!({})),
+        (
+            "knowledge_search",
+            serde_json::json!({"text": "", "include": ["frontmatter.status"]}),
+        ),
+        (
+            "knowledge_get",
+            serde_json::json!({"ref": {"path": "alfa.md"},
+            "include": ["frontmatter","body","revision","outgoingLinks","backlinks","diagnostics"]}),
+        ),
+        ("metadata_inspect", serde_json::json!({"mode": "catalog"})),
+        (
+            "metadata_inspect",
+            serde_json::json!({"mode": "field", "field": "tags"}),
+        ),
+        (
+            "knowledge_check",
+            serde_json::json!({"scope": {"kind": "workspace"}, "includeSuggestedFixes": true}),
+        ),
+        (
+            "graph_query",
+            serde_json::json!({"operation": "neighborhood", "ref": {"path": "alfa.md"}, "depth": 2, "direction": "both"}),
+        ),
+        (
+            "graph_query",
+            serde_json::json!({"operation": "components"}),
+        ),
+        ("graph_query", serde_json::json!({"operation": "dangling"})),
+        (
+            "impact_analyze",
+            serde_json::json!({"ref": {"path": "alfa.md"}, "proposedOperation": {"kind": "move"}}),
+        ),
+    ];
+
+    let mut lineas =
+        vec![serde_json::json!({"jsonrpc":"2.0","id":0,"method":"tools/list"}).to_string()];
+    for (i, (nombre, args)) in llamadas.iter().enumerate() {
+        lineas.push(
+            serde_json::json!({"jsonrpc":"2.0","id": i + 1,"method":"tools/call",
+                "params":{"name": nombre,"arguments": args}})
+            .to_string(),
+        );
+    }
+    // Las 3 de cambio, encadenadas: plan -> apply -> revert.
+    lineas.push(
+        serde_json::json!({"jsonrpc":"2.0","id":100,"method":"tools/call","params":{
+            "name":"change_plan","arguments":{
+                "operations":[{"op":"patch_frontmatter","path":"alfa.md","patch":{"status":"review"}}],
+                "policy":{"requireValidResult":false,"allowWarnings":true}}}})
+        .to_string(),
+    );
+    let refs: Vec<&str> = lineas.iter().map(String::as_str).collect();
+    let resp = roundtrip(dir.path(), &refs, lineas.len());
+
+    let tools: std::collections::BTreeMap<String, serde_json::Value> = resp[0]["result"]["tools"]
+        .as_array()
+        .expect("tools/list")
+        .iter()
+        .map(|t| {
+            (
+                t["name"].as_str().unwrap_or_default().to_string(),
+                t["outputSchema"].clone(),
+            )
+        })
+        .collect();
+    assert_eq!(tools.len(), 10, "deben ser las 10 tools objetivo");
+
+    let mut validadas: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for (i, (nombre, args)) in llamadas.iter().enumerate() {
+        let r = &resp[i + 1];
+        let sc = &r["result"]["structuredContent"];
+        assert!(
+            !r["result"]["isError"].as_bool().unwrap_or(false),
+            "la llamada a «{nombre}» con {args} debe tener éxito para poder validar su salida: {r}"
+        );
+        let errores = errores_de_schema(&tools[*nombre], sc);
+        assert!(
+            errores.is_empty(),
+            "el `structuredContent` de «{nombre}» NO conforma su `outputSchema` declarado. Un \
+             cliente MCP estricto lo rechazaría.\nViolaciones: {errores:#?}"
+        );
+        validadas.insert((*nombre).to_string());
+    }
+
+    // change_plan (la última respuesta): su salida también conforma.
+    let plan = &resp[lineas.len() - 1]["result"]["structuredContent"];
+    let errores = errores_de_schema(&tools["change_plan"], plan);
+    assert!(
+        errores.is_empty(),
+        "el `structuredContent` de «change_plan» no conforma su `outputSchema`: {errores:#?}"
+    );
+    validadas.insert("change_plan".to_string());
+
+    // change_apply y change_revert, en una sesión aparte (necesitan el changeSetId del plan).
+    let cs = plan["changeSetId"].as_str().expect("changeSetId");
+    let l_apply = serde_json::json!({"jsonrpc":"2.0","id":1,"method":"tools/call",
+        "params":{"name":"change_apply","arguments":{"changeSetId": cs}}})
+    .to_string();
+    let resp2 = roundtrip(dir.path(), &[l_apply.as_str()], 1);
+    let apply = &resp2[0]["result"]["structuredContent"];
+    let errores = errores_de_schema(&tools["change_apply"], apply);
+    assert!(
+        errores.is_empty(),
+        "el `structuredContent` de «change_apply» no conforma su `outputSchema`: {errores:#?}"
+    );
+    validadas.insert("change_apply".to_string());
+
+    let receipt = apply["receiptId"].as_str().expect("receiptId");
+    let l_revert = serde_json::json!({"jsonrpc":"2.0","id":1,"method":"tools/call",
+        "params":{"name":"change_revert","arguments":{"receiptId": receipt}}})
+    .to_string();
+    let resp3 = roundtrip(dir.path(), &[l_revert.as_str()], 1);
+    let revert = &resp3[0]["result"]["structuredContent"];
+    let errores = errores_de_schema(&tools["change_revert"], revert);
+    assert!(
+        errores.is_empty(),
+        "el `structuredContent` de «change_revert» no conforma su `outputSchema`: {errores:#?}"
+    );
+    validadas.insert("change_revert".to_string());
+
+    // Cobertura: las 10, sin excepción. Es lo que impide que este test se degrade con el tiempo a
+    // «las que resultaron fáciles de llamar».
+    let declaradas: std::collections::BTreeSet<String> = tools.keys().cloned().collect();
+    assert_eq!(
+        validadas, declaradas,
+        "se deben validar TODAS las tools declaradas, no un subconjunto"
+    );
+}
+
+/// **E24-H15** — control anti-vacuo del validador: una salida deliberadamente incoherente falla.
+///
+/// Sin esto, un `errores_de_schema` que devolviera siempre la lista vacía —por un schema mal
+/// cargado, por ejemplo— haría pasar el test de arriba sin validar nada.
+#[test]
+fn el_validador_de_schema_muerde() {
+    let schema = serde_json::json!({
+        "type": "object",
+        "properties": { "results": { "type": "array" } },
+        "required": ["results"]
+    });
+    assert!(
+        errores_de_schema(&schema, &serde_json::json!({"results": []})).is_empty(),
+        "una instancia correcta no puede producir errores"
+    );
+    assert!(
+        !errores_de_schema(&schema, &serde_json::json!({"results": "no soy un array"})).is_empty(),
+        "una instancia que viola el schema DEBE producir errores: si no, el test de conformidad no \
+         está validando nada"
+    );
+    assert!(
+        !errores_de_schema(&schema, &serde_json::json!({})).is_empty(),
+        "un campo requerido ausente debe detectarse"
+    );
+}
