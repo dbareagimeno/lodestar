@@ -1946,3 +1946,591 @@ mod seam_real {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// E25-H01 — La publicación no escribe fuera de lo que respaldó
+// (`requirements/epica-25-endurecimiento-escritura.md`, bloque A). Fase ROJA.
+//
+// EL DEFECTO
+//
+// `apply_transaction` computa el canónico, el resultado y el conjunto AFECTADO en **T1**
+// (`src/transaction.rs:127-129`) y sobre ESE conjunto ejerce `assert_writable` (:133), el backup
+// (:156) y el journal (:161). Pero `publish_result` **vuelve a leer el canónico** en **T3**
+// (`src/publish.rs:104`) y **recomputa** `affected` contra el `result` de T1 (`publish.rs:114-124`),
+// escribiendo o borrando todo lo que difiera (`publish.rs:127-134`) — sin `assert_writable`, sin
+// copia de recuperación y sin entrada de journal. Cualquier cosa que aparezca o cambie en la
+// ventana `[T1, T3)` cae dentro de esa diferencia recomputada.
+//
+// EL CONTRATO QUE FIJAN ESTOS TESTS
+//
+// El conjunto que la publicación sustituye es **exactamente** el que pasó por el guard, por el
+// backup y por el journal — o la transacción aborta con `WRITE_CONFLICT` **antes del primer
+// rename**. Un `WRITE_CONFLICT` sigue siendo terminal (modelo fail-fast, `§19.5`): no hay reintento.
+//
+// EL SEAM QUE HACE FALTA (lo añade el implementador; aquí solo se USA)
+//
+// El `failpoint!` de `src/lib.rs:38` solo sabe **abortar**, así que no sirve para inyectar una
+// edición externa: hace falta un punto que ejecute un gancho del test y **continúe**. API mínima
+// esperada, en `crates/lodestar-workspace/src/failpoints.rs`, bajo `#[cfg(feature =
+// "test-failpoints")]` (en compilación normal no genera ni una instrucción):
+//
+// ```rust
+// /// Punto del orquestador donde se ejecuta un gancho del test y la transacción CONTINÚA.
+// #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// pub enum PuntoDeGancho {
+//     /// Dentro de la ventana `[T1, T3)`, en su último instante: tras `create_journal` e
+//     /// INMEDIATAMENTE ANTES de `publish_result` (`transaction.rs:167`). Es donde el defecto vive:
+//     /// copias y journal ya cubren el conjunto de T1, y el bucle de publicación aún no ha
+//     /// sustituido nada.
+//     AntesDePublicar,
+// }
+//
+// /// Arma un gancho para el HILO ACTUAL (`thread_local`, igual que `failpoints::armar`: los tests
+// /// corren en paralelo en el mismo proceso). Se dispara **una sola vez** y se desarma solo.
+// pub fn armar_gancho(punto: PuntoDeGancho, gancho: impl Fn() + 'static);
+//
+// /// Desarma cualquier gancho del hilo actual (higiene: el gancho puede no haberse disparado).
+// pub fn desarmar_ganchos();
+// ```
+//
+// El gancho vive en el orquestador REAL (`apply_transaction`), no en una reconstrucción del flujo
+// (lección de E24-H13).
+//
+// ROJO ESPERADO HOY
+// - Los tres tests del módulo `ventana_de_publicacion`: **no compilan** (`armar_gancho`,
+//   `desarmar_ganchos` y `PuntoDeGancho` no existen). Es rojo válido: el error nombra exactamente
+//   los símbolos del seam que la historia encarga.
+// - `apply_sin_interferencia_publica_igual` y `publicado_igual_a_respaldado` son los **controles
+//   anti-vacuos**: no usan el gancho, están FUERA del gate de la feature y deben pasar **ya en
+//   main** (el arreglo no puede consistir en abortar más a menudo ni en publicar menos).
+// ---------------------------------------------------------------------------
+
+/// Abre un workspace temporal con un documento por nombre (`<n>.md`, cuerpo «cuerpo original»).
+fn siembra_documentos(root: &Path, nombres: &[&str]) -> Workspace {
+    let ws = Workspace::open(root).unwrap();
+    for n in nombres {
+        ws.create_document(
+            &RelPath::new(&format!("{n}.md")).unwrap(),
+            "Nota",
+            Some(n),
+            &format!("# {n}\n\ncuerpo original\n"),
+            false,
+        )
+        .unwrap();
+    }
+    ws
+}
+
+/// Change set que sustituye el cuerpo de cada `<n>.md`, con la `base_revision` ACTUAL del
+/// workspace (si no, la transacción moriría en el control optimista del paso 7 y no llegaría a la
+/// ventana que se está probando).
+fn cs_modifica(ws: &Workspace, id: &str, paths: &[&str]) -> ChangeSet {
+    let mut cs = change_set(
+        id,
+        paths
+            .iter()
+            .map(|p| NormalizedOperation::ReplaceBody {
+                path: RelPath::new(p).unwrap(),
+                body: format!("# {p}\n\ncuerpo NUEVO\n"),
+            })
+            .collect(),
+    );
+    cs.base_revision = ws.workspace_revision().unwrap();
+    cs
+}
+
+/// Un `FileMap` visto como `ruta -> contenido` (mismas claves que [`canonical_md`]).
+fn como_md(files: &FileMap) -> BTreeMap<String, String> {
+    files
+        .iter()
+        .map(|(rel, c)| (rel.as_str().to_string(), c.clone()))
+        .collect()
+}
+
+/// Conjunto de rutas que difieren entre dos estados del canónico: creadas/modificadas + borradas.
+/// Es la definición observable de «lo publicado» (lo que el disco sustituyó de verdad).
+fn diferencia(
+    antes: &BTreeMap<String, String>,
+    despues: &BTreeMap<String, String>,
+) -> std::collections::BTreeSet<String> {
+    let mut out = std::collections::BTreeSet::new();
+    for (rel, contenido) in despues {
+        if antes.get(rel) != Some(contenido) {
+            out.insert(rel.clone());
+        }
+    }
+    for rel in antes.keys() {
+        if !despues.contains_key(rel) {
+            out.insert(rel.clone());
+        }
+    }
+    out
+}
+
+/// Conjunto de rutas **respaldadas** por una transacción: las copias byte-a-byte que hay bajo
+/// `.lodestar/runtime/recovery/<txnId>/` MÁS las que el manifiesto `.absent` marcó «no existía»
+/// (afectadas que se iban a crear, sin original que copiar).
+fn respaldado_en_recovery(root: &Path, txn_id: &str) -> std::collections::BTreeSet<String> {
+    let base = root
+        .join(".lodestar")
+        .join("runtime")
+        .join("recovery")
+        .join(txn_id);
+    let mut out = std::collections::BTreeSet::new();
+    fn walk(dir: &Path, base: &Path, out: &mut std::collections::BTreeSet<String>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, base, out);
+                continue;
+            }
+            let rel = path
+                .strip_prefix(base)
+                .unwrap()
+                .to_string_lossy()
+                .to_string();
+            if rel == ".absent" {
+                for linea in std::fs::read_to_string(&path).unwrap_or_default().lines() {
+                    let l = linea.trim();
+                    if !l.is_empty() {
+                        out.insert(l.to_string());
+                    }
+                }
+            } else {
+                out.insert(rel);
+            }
+        }
+    }
+    walk(&base, &base, &mut out);
+    out
+}
+
+/// **E25-H01** · Criterio `apply_sin_interferencia_publica_igual` (**control anti-vacuo**, pasa ya
+/// en main) — **Dado** un apply SIN interferencia, **Cuando** se aplica, **Entonces** publica
+/// exactamente los mismos paths y contenidos que hoy, con el mismo `resultWorkspaceRevision` y el
+/// mismo `changedPaths`.
+///
+/// El oráculo no es un golden: se computa aparte con la única lógica del core
+/// (`plan::apply_normalized_ops` + `types::workspace_revision`), que es lo que la transacción tiene
+/// que reproducir. El change set mezcla las tres formas de afectación —modificar, crear y borrar—
+/// para que el control cubra las tres ramas del bucle de publicación.
+#[test]
+fn apply_sin_interferencia_publica_igual() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws = siembra_documentos(dir.path(), &["uno", "dos", "tres"]);
+
+    let canonico_antes = canonical_filemap(dir.path());
+    let mut cs = change_set(
+        "e25-h01-sin-interferencia",
+        vec![
+            NormalizedOperation::ReplaceBody {
+                path: RelPath::new("uno.md").unwrap(),
+                body: "# uno\n\ncuerpo NUEVO\n".to_string(),
+            },
+            create_conforme("cuatro.md", "Nota", "cuatro"),
+            NormalizedOperation::Delete {
+                path: RelPath::new("tres.md").unwrap(),
+                inbound_links_policy: lodestar_core::types::InboundLinksPolicy::Reject,
+            },
+        ],
+    );
+    let previous_esperada = ws.workspace_revision().unwrap();
+    cs.base_revision = previous_esperada.clone();
+
+    // Oráculo independiente: el resultado que el core prevé, su revisión y su conjunto afectado.
+    let esperado = plan::apply_normalized_ops(&canonico_antes, &cs.operations)
+        .expect("prever el resultado del plan");
+    let esperado_md = como_md(&esperado);
+    let antes_md = como_md(&canonico_antes);
+    let afectados_esperados = diferencia(&antes_md, &esperado_md);
+    assert_eq!(
+        afectados_esperados.len(),
+        3,
+        "precondición: el change set debe afectar a 3 paths (modificado, creado y borrado)"
+    );
+    let revision_esperada = lodestar_core::types::workspace_revision(&esperado, &[]);
+
+    let (previous, result, changed) = ws
+        .apply_transaction(&cs)
+        .expect("sin interferencia, la transacción debe publicar");
+
+    assert_eq!(
+        previous, previous_esperada,
+        "la `previousRevision` debe ser la revisión sobre la que se publicó"
+    );
+    assert_eq!(
+        result, revision_esperada,
+        "la `resultWorkspaceRevision` publicada debe ser la que el core prevé para el resultado"
+    );
+    let changed_set: std::collections::BTreeSet<String> = changed
+        .iter()
+        .map(|p| p.as_str().to_string())
+        .collect::<std::collections::BTreeSet<String>>();
+    assert_eq!(
+        changed_set, afectados_esperados,
+        "`changedPaths` debe ser exactamente el conjunto afectado por el plan"
+    );
+    assert_eq!(
+        canonical_md(dir.path()),
+        esperado_md,
+        "el canónico publicado debe ser, path a path y byte a byte, el resultado del plan"
+    );
+}
+
+/// **E25-H01** · Criterio `publicado_igual_a_respaldado` (propiedad; **control anti-vacuo** en su
+/// mitad de éxito) — **Dado** el conjunto publicado y el conjunto respaldado, **Cuando** termina
+/// cualquier apply con éxito, **Entonces** son idénticos.
+///
+/// «Publicado» se mide en el disco (diferencia real entre el canónico de antes y el de después), no
+/// en lo que la transacción dice haber cambiado: si el bucle de publicación tocara un path que
+/// nadie respaldó, la igualdad se rompería aunque `changedPaths` siguiera pareciendo correcto. Se
+/// recorren las mismas formas de change set que el arnés de recuperación (modificar, crear, borrar,
+/// mover) más una mixta.
+#[test]
+fn publicado_igual_a_respaldado() {
+    fn cs_mod(ws: &Workspace, id: &str) -> ChangeSet {
+        cs_modifica(ws, id, &["uno.md", "dos.md", "tres.md"])
+    }
+    fn cs_crea(ws: &Workspace, id: &str) -> ChangeSet {
+        let mut cs = change_set(
+            id,
+            vec![
+                create_conforme("a.md", "Nota", "a"),
+                create_conforme("b.md", "Nota", "b"),
+            ],
+        );
+        cs.base_revision = ws.workspace_revision().unwrap();
+        cs
+    }
+    fn cs_borra(ws: &Workspace, id: &str) -> ChangeSet {
+        let mut cs = change_set(
+            id,
+            vec![NormalizedOperation::Delete {
+                path: RelPath::new("tres.md").unwrap(),
+                inbound_links_policy: lodestar_core::types::InboundLinksPolicy::Reject,
+            }],
+        );
+        cs.base_revision = ws.workspace_revision().unwrap();
+        cs
+    }
+    fn cs_mueve(ws: &Workspace, id: &str) -> ChangeSet {
+        let mut cs = change_set(
+            id,
+            vec![NormalizedOperation::Move {
+                from: RelPath::new("uno.md").unwrap(),
+                to: RelPath::new("movido.md").unwrap(),
+                rewrite_inbound_links: false,
+            }],
+        );
+        cs.base_revision = ws.workspace_revision().unwrap();
+        cs
+    }
+    fn cs_mixto(ws: &Workspace, id: &str) -> ChangeSet {
+        let mut cs = change_set(
+            id,
+            vec![
+                NormalizedOperation::ReplaceBody {
+                    path: RelPath::new("dos.md").unwrap(),
+                    body: "# dos\n\ncuerpo NUEVO\n".to_string(),
+                },
+                create_conforme("nuevo.md", "Nota", "nuevo"),
+                NormalizedOperation::Delete {
+                    path: RelPath::new("tres.md").unwrap(),
+                    inbound_links_policy: lodestar_core::types::InboundLinksPolicy::Reject,
+                },
+            ],
+        );
+        cs.base_revision = ws.workspace_revision().unwrap();
+        cs
+    }
+
+    type Forma = (&'static str, fn(&Workspace, &str) -> ChangeSet);
+    let formas: &[Forma] = &[
+        ("modifica", cs_mod),
+        ("crea", cs_crea),
+        ("borra", cs_borra),
+        ("mueve", cs_mueve),
+        ("mixto", cs_mixto),
+    ];
+
+    for (forma, build) in formas {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = siembra_documentos(dir.path(), &["uno", "dos", "tres"]);
+        let antes = canonical_md(dir.path());
+
+        let id = format!("e25-h01-respaldado-{forma}");
+        let cs = build(&ws, &id);
+        let (_, _, changed) = ws
+            .apply_transaction(&cs)
+            .unwrap_or_else(|e| panic!("[{forma}] la transacción debe publicar: {e:?}"));
+
+        let despues = canonical_md(dir.path());
+        let publicado = diferencia(&antes, &despues);
+        assert!(
+            !publicado.is_empty(),
+            "[{forma}] precondición no vacua: el change set debe cambiar algo del canónico"
+        );
+
+        let respaldado = respaldado_en_recovery(dir.path(), &id);
+        assert_eq!(
+            publicado, respaldado,
+            "[{forma}] lo que la publicación sustituyó en disco debe ser EXACTAMENTE lo que se \
+             respaldó en `recovery/{id}/` (copias + manifiesto `.absent`): todo lo publicado tiene \
+             que ser recuperable"
+        );
+
+        let changed_set: std::collections::BTreeSet<String> =
+            changed.iter().map(|p| p.as_str().to_string()).collect();
+        assert_eq!(
+            changed_set, publicado,
+            "[{forma}] y el `changedPaths` del recibo debe declarar ese mismo conjunto"
+        );
+    }
+}
+
+#[cfg(feature = "test-failpoints")]
+mod ventana_de_publicacion {
+    use super::*;
+    use lodestar_workspace::failpoints::{self, PuntoDeGancho};
+
+    /// Ruta del árbol de copias de recuperación de una transacción.
+    fn recovery_de(root: &Path, txn_id: &str) -> PathBuf {
+        root.join(".lodestar")
+            .join("runtime")
+            .join("recovery")
+            .join(txn_id)
+    }
+
+    /// **E25-H01** · Criterio 1 — **Dado** un apply en curso con el gancho armado en la ventana
+    /// `[T1, T3)`, **Cuando** el gancho modifica un `.md` AFECTADO, **Entonces** la transacción
+    /// falla con `WRITE_CONFLICT` y **ni uno** de los `.md` canónicos ha cambiado (incluido el
+    /// editado, que conserva la edición externa).
+    ///
+    /// Hoy `publish_result` relee el canónico en T3 y sustituye `dos.md` por el contenido del plan:
+    /// la edición externa se pierde y el backup guarda una versión de T1 que ya no era el estado
+    /// real, así que un `change_revert` restauraría un estado que nunca existió.
+    #[test]
+    fn edicion_externa_en_la_ventana_aborta_sin_publicar() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = siembra_documentos(dir.path(), &["uno", "dos", "tres"]);
+        let antes = canonical_md(dir.path());
+        let dos_en_t1 = antes.get("dos.md").expect("dos.md sembrado").clone();
+
+        let id = "e25-h01-edicion-externa";
+        let cs = cs_modifica(&ws, id, &["uno.md", "dos.md", "tres.md"]);
+
+        // El gancho hace de «otro proceso»: edita un `.md` que la transacción va a sustituir,
+        // cuando el guard, las copias y el journal ya se ejercieron sobre el estado de T1.
+        let ruta_dos = dir.path().join("dos.md");
+        let edicion_externa = "---\ntype: Nota\ntitle: dos\n---\n\n# dos\n\nEDICIÓN EXTERNA\n";
+        failpoints::armar_gancho(PuntoDeGancho::AntesDePublicar, move || {
+            std::fs::write(&ruta_dos, edicion_externa).expect("el gancho debe poder editar dos.md");
+        });
+        let resultado = ws.apply_transaction(&cs);
+        failpoints::desarmar_ganchos();
+
+        let err = match resultado {
+            Err(e) => e,
+            Ok((_, _, changed)) => panic!(
+                "una edición externa dentro de la ventana `[T1, T3)` debe abortar la transacción \
+                 ANTES del primer rename, pero publicó: changedPaths={changed:?}"
+            ),
+        };
+        assert_eq!(
+            err.code(),
+            "WRITE_CONFLICT",
+            "el aborto debe llevar el código estable WRITE_CONFLICT (terminal: el agente \
+             replanifica, no se reintenta); era: {err:?}"
+        );
+
+        // Precondición del escenario (no el criterio): el gancho se disparó DENTRO de la ventana y
+        // DESPUÉS de las copias, que es donde vive el defecto. Si esto falla, el punto de gancho se
+        // colocó demasiado pronto y el test no ejerce el camino de publicación.
+        let recovery = recovery_de(dir.path(), id);
+        assert!(
+            recovery.is_dir(),
+            "el gancho debe dispararse tras `backup_originals` (último instante de la ventana): \
+             sin árbol de recuperación, el aborto ocurrió antes de que el defecto sea posible"
+        );
+        assert_eq!(
+            std::fs::read_to_string(recovery.join("dos.md")).unwrap_or_default(),
+            dos_en_t1,
+            "y la copia de recuperación guarda la versión de T1: exactamente por eso publicar \
+             sobre un canónico que ya no es el de T1 dejaría un backup que no restaura nada real"
+        );
+
+        // El criterio: ni un `.md` canónico sustituido. El único cambio es el del propio gancho.
+        let mut esperado = antes.clone();
+        esperado.insert("dos.md".to_string(), edicion_externa.to_string());
+        assert_eq!(
+            canonical_md(dir.path()),
+            esperado,
+            "tras el aborto, ningún `.md` canónico puede haber sido sustituido — y la edición \
+             externa de `dos.md` sigue intacta (no la pisó la publicación)"
+        );
+    }
+
+    /// **E25-H01** · Criterio 2 — **Dado** ese mismo apply, **Cuando** el gancho **crea** un `.md`
+    /// que el plan no menciona, **Entonces** ese fichero sigue existiendo con su contenido intacto.
+    ///
+    /// Hoy desaparece: no está en el `result` de T1, así que el bucle de `publish.rs:120-124` lo
+    /// mete en `affected` y `publish.rs:130` lo **borra**, sin backup (nunca estuvo en el conjunto
+    /// de T1) y sin entrada de journal. El borrado es irrecuperable y el recibo ni lo menciona.
+    #[test]
+    fn fichero_nuevo_en_la_ventana_no_se_borra() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = siembra_documentos(dir.path(), &["uno", "dos", "tres"]);
+        let antes = canonical_md(dir.path());
+
+        let cs = cs_modifica(
+            &ws,
+            "e25-h01-fichero-nuevo",
+            &["uno.md", "dos.md", "tres.md"],
+        );
+
+        let ruta_intruso = dir.path().join("intruso.md");
+        let contenido_intruso =
+            "---\ntype: Nota\ntitle: intruso\n---\n\n# intruso\n\ncreado por otro proceso\n";
+        {
+            let ruta = ruta_intruso.clone();
+            failpoints::armar_gancho(PuntoDeGancho::AntesDePublicar, move || {
+                std::fs::write(&ruta, contenido_intruso)
+                    .expect("el gancho debe poder crear el .md");
+            });
+        }
+        let resultado = ws.apply_transaction(&cs);
+        failpoints::desarmar_ganchos();
+
+        // El fichero que nadie respaldó tiene que seguir ahí, byte a byte. Es el criterio.
+        assert!(
+            ruta_intruso.is_file(),
+            "un `.md` creado por otro proceso dentro de la ventana NO puede desaparecer: la \
+             publicación solo puede tocar lo que respaldó y anotó en el journal"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&ruta_intruso).unwrap(),
+            contenido_intruso,
+            "y su contenido debe estar intacto"
+        );
+
+        let err = match resultado {
+            Err(e) => e,
+            Ok((_, _, changed)) => panic!(
+                "un canónico que cambió dentro de la ventana debe abortar la transacción antes del \
+                 primer rename, pero publicó: changedPaths={changed:?}"
+            ),
+        };
+        assert_eq!(
+            err.code(),
+            "WRITE_CONFLICT",
+            "el aborto debe llevar el código estable WRITE_CONFLICT; era: {err:?}"
+        );
+
+        // Y no se publicó nada: el canónico es el de T1 más el intruso.
+        let mut esperado = antes.clone();
+        esperado.insert("intruso.md".to_string(), contenido_intruso.to_string());
+        assert_eq!(
+            canonical_md(dir.path()),
+            esperado,
+            "el aborto ocurre ANTES del primer rename: ningún `.md` del plan puede haberse escrito"
+        );
+    }
+
+    /// **E25-H01** · Criterio 3 — **Dado** un workspace con `referenceRoots`, **Cuando** el gancho
+    /// crea un `.md` bajo un `referenceRoot` dentro de la ventana, **Entonces** ese fichero no se
+    /// toca.
+    ///
+    /// Es el escenario que el control optimista **no puede** ver ni en principio:
+    /// `lodestar_core::types::workspace_revision` excluye lo que queda fuera de `writableRoots`
+    /// (`core/types.rs:1247-1249`, fijado por `core.rs::revision_excluye_reference_roots`), así que
+    /// `reverify_base_revision` es ciego a él. Solo una comparación del canónico completo entre T1 y
+    /// T3 lo detecta — y mientras tanto `publish_result` lo borra sin haberlo respaldado, violando
+    /// de paso la inmutabilidad que `assert_writable` promete para los `referenceRoots`.
+    #[test]
+    fn reference_root_no_se_borra_en_la_ventana() {
+        let dir = tempfile::tempdir().unwrap();
+        let lodestar = dir.path().join(".lodestar");
+        std::fs::create_dir_all(&lodestar).unwrap();
+        std::fs::write(
+            lodestar.join("config.yaml"),
+            "workspace:\n  writableRoots: [conocimiento]\n  referenceRoots: [referencia]\n",
+        )
+        .unwrap();
+
+        let ws = siembra_documentos(
+            dir.path(),
+            &["conocimiento/uno", "conocimiento/dos", "referencia/manual"],
+        );
+        let antes = canonical_md(dir.path());
+        assert!(
+            antes.contains_key("referencia/manual.md"),
+            "precondición: el `referenceRoot` es visible para el descubrimiento (por eso el bucle \
+             de publicación puede llegar a borrarlo)"
+        );
+
+        let cs = cs_modifica(
+            &ws,
+            "e25-h01-reference-root",
+            &["conocimiento/uno.md", "conocimiento/dos.md"],
+        );
+
+        let ruta_intruso = dir.path().join("referencia").join("intruso.md");
+        let contenido_intruso = "# intruso\n\nmaterial de solo lectura aparecido en la ventana\n";
+        {
+            let ruta = ruta_intruso.clone();
+            failpoints::armar_gancho(PuntoDeGancho::AntesDePublicar, move || {
+                std::fs::write(&ruta, contenido_intruso)
+                    .expect("el gancho debe poder crear el .md");
+            });
+        }
+        let resultado = ws.apply_transaction(&cs);
+        failpoints::desarmar_ganchos();
+
+        // El criterio: lo que hay bajo un `referenceRoot` es intocable, aparezca cuando aparezca.
+        assert!(
+            ruta_intruso.is_file(),
+            "un `.md` aparecido bajo un `referenceRoot` (inmutable por `assert_writable`) dentro de \
+             la ventana NO puede borrarlo la publicación: hoy lo borra porque recomputa `affected` \
+             contra el canónico de T3 sin volver a pasar por el guard"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&ruta_intruso).unwrap(),
+            contenido_intruso,
+            "y su contenido debe estar intacto"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("referencia").join("manual.md")).unwrap(),
+            antes["referencia/manual.md"],
+            "tampoco puede tocarse el material de referencia que ya estaba"
+        );
+
+        let err = match resultado {
+            Err(e) => e,
+            Ok((_, _, changed)) => panic!(
+                "el canónico cambió dentro de la ventana (aunque fuera de `writableRoots`, donde la \
+                 revisión no mira): la transacción debe abortar, pero publicó: \
+                 changedPaths={changed:?}"
+            ),
+        };
+        assert_eq!(
+            err.code(),
+            "WRITE_CONFLICT",
+            "el aborto debe llevar el código estable WRITE_CONFLICT; era: {err:?}"
+        );
+        assert_eq!(
+            canonical_md(dir.path())
+                .into_iter()
+                .filter(|(k, _)| k.starts_with("conocimiento/"))
+                .collect::<BTreeMap<String, String>>(),
+            antes
+                .iter()
+                .filter(|(k, _)| k.starts_with("conocimiento/"))
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect::<BTreeMap<String, String>>(),
+            "y nada del conocimiento escribible se publicó: el aborto es antes del primer rename"
+        );
+    }
+}

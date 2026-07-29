@@ -563,3 +563,97 @@ fn create_sin_frontmatter_titulo_derivado() {
          claves = {claves:?}",
     );
 }
+
+// ===========================================================================
+// E25-H01 — El `WRITE_CONFLICT` de la ventana `[T1, T3)` llega a la fachada
+// (`requirements/epica-25-endurecimiento-escritura.md`, bloque A). Fase ROJA.
+//
+// `Workspace::apply_transaction` computa canónico/resultado/afectados en T1 y `publish_result`
+// vuelve a leer el canónico en T3 (`crates/lodestar-workspace/src/publish.rs:104`), publicando la
+// diferencia recomputada: cualquier cambio del canónico dentro de esa ventana se pisa o se borra
+// sin guard, sin copia y sin journal. El arreglo aborta con `WorkspaceError::WriteConflict` antes
+// del primer rename; este test fija que ese aborto **atraviesa la fachada** con su código de wire
+// (`workspace_error_code` ya mapea `WriteConflict -> ErrorCode::WriteConflict`,
+// `crates/lodestar-app/src/lib.rs:168`) — o sea, que el agente recibe `WRITE_CONFLICT`, terminal,
+// y replanifica; no un `INTERNAL_IO_ERROR` ni, peor, un `applied: true` que no es verdad.
+//
+// REQUISITO DE BUILD (lo añade el implementador): `lodestar-app` **no** propaga hoy la feature
+// `test-failpoints`, así que este módulo NO SE COMPILA y el criterio queda sin ejercer. Hace falta
+// el passthrough de Cargo
+//
+//     [features]
+//     test-failpoints = ["lodestar-workspace/test-failpoints"]
+//
+// y ampliar al crate el step de CI que hoy corre
+// `cargo test -p lodestar-workspace --features test-failpoints`. (E25-H04 pide ese mismo
+// passthrough para armar sus failpoints post-publicación desde `App::change_apply`.)
+// ===========================================================================
+
+#[cfg(feature = "test-failpoints")]
+mod ventana_de_publicacion {
+    use super::*;
+    use lodestar_workspace::failpoints::{self, PuntoDeGancho};
+
+    /// **E25-H01** · Criterio de fachada — **Dado** un `change_apply` en curso, **Cuando** otro
+    /// proceso modifica dentro de la ventana `[T1, T3)` un `.md` que la transacción iba a
+    /// sustituir, **Entonces** la fachada devuelve `WRITE_CONFLICT` y no publica nada.
+    #[test]
+    fn write_conflict_de_la_ventana_llega_a_la_fachada() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        semilla(root);
+
+        let app = App::open(root).expect("el workspace temporal debe abrir");
+
+        let ops = json!([
+            { "op": "replace_body", "path": "alfa.md", "body": "# Resumen\n\ncuerpo del plan\n" },
+        ]);
+        let plan = app
+            .change_plan(None, &ops, policy_permisiva())
+            .expect("planificar una modificación normal debe funcionar");
+
+        // El gancho hace de «otro proceso»: edita el `.md` afectado dentro de la ventana, cuando el
+        // guard, las copias y el journal ya se ejercieron sobre el estado de T1.
+        let ruta_alfa = root.join("alfa.md");
+        let edicion_externa =
+            "---\ntype: Nota\ntitle: Alfa\ndescription: Primer documento\n---\n\n# Resumen\n\nEDICIÓN EXTERNA\n";
+        {
+            let ruta = ruta_alfa.clone();
+            failpoints::armar_gancho(PuntoDeGancho::AntesDePublicar, move || {
+                std::fs::write(&ruta, edicion_externa)
+                    .expect("el gancho debe poder editar alfa.md");
+            });
+        }
+        let resultado = app.change_apply(&plan.change_set_id, None);
+        failpoints::desarmar_ganchos();
+
+        let err = match resultado {
+            Err(e) => e,
+            Ok(aplicado) => panic!(
+                "aplicar sobre un canónico que cambió dentro de la ventana `[T1, T3)` debe \
+                 rechazarse con WRITE_CONFLICT, pero la fachada informó de una publicación: \
+                 applied={}, changedPaths={:?}",
+                aplicado.applied, aplicado.changed_paths
+            ),
+        };
+        assert_eq!(
+            err,
+            ErrorCode::WriteConflict,
+            "el conflicto de la ventana debe llegar a la fachada con su código estable \
+             WRITE_CONFLICT (terminal: el agente replanifica); era: {} ({err:?})",
+            err.as_str()
+        );
+        assert_eq!(
+            err.as_str(),
+            "WRITE_CONFLICT",
+            "y con esa cadena exacta en el wire"
+        );
+
+        // Y no publicó: el `.md` conserva la edición externa, no el cuerpo del plan.
+        assert_eq!(
+            std::fs::read_to_string(&ruta_alfa).unwrap(),
+            edicion_externa,
+            "un apply rechazado por WRITE_CONFLICT no puede haber pisado la edición de otro proceso"
+        );
+    }
+}
