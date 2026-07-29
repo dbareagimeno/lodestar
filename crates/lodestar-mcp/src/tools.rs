@@ -265,11 +265,11 @@ pub fn call(app: &App, profile: Profile, name: &str, params: &Value) -> ToolResu
             to_json(&status)
         }
         "knowledge_search" => {
-            let text = params.get("text").and_then(Value::as_str).unwrap_or("");
+            let text = str_validado(params, "text")?.unwrap_or("");
             // `where`/`filter` (E19-H05): la consulta textual y el filtro JSON estructurado, ambos
             // hacia el mismo `Expression` en la `App`. `where` es palabra reservada en Rust, así que
             // la clave del wire se lee por string, no por campo.
-            let where_expr = params.get("where").and_then(Value::as_str);
+            let where_expr = str_validado(params, "where")?;
             let filter = params.get("filter");
             // Proyección de frontmatter (E23-H11). Se parsea AQUÍ, en el despachador, porque los
             // valores son abiertos (`frontmatter.<lo que sea>`) y no caben en un `enum` del schema
@@ -294,20 +294,22 @@ pub fn call(app: &App, profile: Profile, name: &str, params: &Value) -> ToolResu
                         code.as_str()
                     )
                 })?;
-            let limit = params
-                .get("limit")
-                .and_then(Value::as_u64)
-                .map(|n| n as usize);
-            let cursor = params.get("cursor").and_then(Value::as_str);
+            // `inputSchema` declara `minimum: 1, maximum: 100` (E24-H09).
+            let limit = limit_validado(params, 1, 100)?;
+            let cursor = str_validado(params, "cursor")?;
             let results = app
                 .knowledge_search(text, where_expr, filter, &proyecciones, limit, cursor)
-                .map_err(|e| e.to_string())?;
+                // E24-H10: el mensaje ABRE con el código estable. `Display` a secas dejaba
+                // «entrada inválida: …», legible pero sin nada por lo que un agente pueda ramificar.
+                .map_err(|e| format!("{}: {e}", lodestar_app::workspace_error_code(&e).as_str()))?;
             to_json(&results)
         }
         "knowledge_get" => {
             let r: DocumentRef = match params.get("ref") {
-                Some(v) => serde_json::from_value(v.clone()).map_err(|e| e.to_string())?,
-                None => return Err("falta el parámetro «ref»".to_string()),
+                Some(v) => {
+                    serde_json::from_value(v.clone()).map_err(|e| forma_invalida("ref", e))?
+                }
+                None => return Err(falta("ref")),
             };
             let include: Vec<String> = match params.get("include") {
                 Some(v) => serde_json::from_value(v.clone()).map_err(|e| e.to_string())?,
@@ -329,7 +331,7 @@ pub fn call(app: &App, profile: Profile, name: &str, params: &Value) -> ToolResu
             let mode = params
                 .get("mode")
                 .and_then(Value::as_str)
-                .ok_or("falta el parámetro «mode»")?;
+                .ok_or_else(|| falta("mode"))?;
             let field = params.get("field").and_then(Value::as_str);
             // Mismo mapeo de error a wire que `knowledge_get` (E10-H02): el código estable
             // `ErrorCode::as_str()`, nunca el `Debug` de la variante.
@@ -340,26 +342,28 @@ pub fn call(app: &App, profile: Profile, name: &str, params: &Value) -> ToolResu
         }
         "knowledge_check" => {
             let scope: CheckScope = match params.get("scope") {
-                Some(v) => serde_json::from_value(v.clone()).map_err(|e| e.to_string())?,
-                None => return Err("falta el parámetro «scope»".to_string()),
+                Some(v) => {
+                    serde_json::from_value(v.clone()).map_err(|e| forma_invalida("scope", e))?
+                }
+                None => return Err(falta("scope")),
             };
             // Wire de severidad mínima → `Severity` (err|warn|info); ausente = sin umbral extra.
-            let min_severity = match params.get("minimumSeverity").and_then(Value::as_str) {
+            let min_severity = match str_validado(params, "minimumSeverity")? {
                 Some("err") => Some(Severity::Err),
                 Some("warn") => Some(Severity::Warn),
                 Some("info") => Some(Severity::Info),
-                Some(other) => return Err(format!("minimumSeverity inválido: «{other}»")),
+                Some(other) => {
+                    return Err(format!(
+                        "{}: «minimumSeverity» debe ser «err», «warn» o «info»; recibido «{other}»",
+                        ErrorCode::InvalidSchema.as_str()
+                    ))
+                }
                 None => None,
             };
-            let include_fixes = params
-                .get("includeSuggestedFixes")
-                .and_then(Value::as_bool)
-                .unwrap_or(false);
-            let limit = params
-                .get("limit")
-                .and_then(Value::as_u64)
-                .map(|n| n as usize);
-            let cursor = params.get("cursor").and_then(Value::as_str);
+            let include_fixes = bool_validado(params, "includeSuggestedFixes", false)?;
+            // `inputSchema` declara `minimum: 1, maximum: 1000` (E24-H09).
+            let limit = limit_validado(params, 1, 1000)?;
+            let cursor = str_validado(params, "cursor")?;
             // Mismo mapeo de error a wire que `knowledge_get`/`metadata_inspect` (E10-H02): el código
             // estable `ErrorCode::as_str()`, nunca el `Debug` de la variante.
             let report = app
@@ -371,7 +375,7 @@ pub fn call(app: &App, profile: Profile, name: &str, params: &Value) -> ToolResu
             let operation = params
                 .get("operation")
                 .and_then(Value::as_str)
-                .ok_or("falta el parámetro «operation»")?;
+                .ok_or_else(|| falta("operation"))?;
             let r: Option<DocumentRef> = match params.get("ref") {
                 Some(v) => Some(serde_json::from_value(v.clone()).map_err(|e| e.to_string())?),
                 None => None,
@@ -381,16 +385,12 @@ pub fn call(app: &App, profile: Profile, name: &str, params: &Value) -> ToolResu
                 Some(v) => Some(serde_json::from_value(v.clone()).map_err(|e| e.to_string())?),
                 None => None,
             };
-            let depth = params
-                .get("depth")
-                .and_then(Value::as_u64)
-                .map(|n| n as u32);
-            let direction = params.get("direction").and_then(Value::as_str);
-            let limit = params
-                .get("limit")
-                .and_then(Value::as_u64)
-                .map(|n| n as usize);
-            let cursor = params.get("cursor").and_then(Value::as_str);
+            // `inputSchema` declara `minimum: 1` (E24-H09).
+            let depth = entero_validado(params, "depth", 1)?.map(|n| n as u32);
+            let direction = str_validado(params, "direction")?;
+            // `inputSchema` declara `minimum: 1` sin máximo para graph_query (E24-H09).
+            let limit = limit_validado(params, 1, u64::MAX)?;
+            let cursor = str_validado(params, "cursor")?;
             // Mismo mapeo de error a wire que `knowledge_get`/`metadata_inspect`/`knowledge_check`
             // (E10-H02): el código estable `ErrorCode::as_str()`, nunca el `Debug` de la variante.
             let result = app
@@ -408,18 +408,18 @@ pub fn call(app: &App, profile: Profile, name: &str, params: &Value) -> ToolResu
         }
         "impact_analyze" => {
             let r: DocumentRef = match params.get("ref") {
-                Some(v) => serde_json::from_value(v.clone()).map_err(|e| e.to_string())?,
-                None => return Err("falta el parámetro «ref»".to_string()),
+                Some(v) => {
+                    serde_json::from_value(v.clone()).map_err(|e| forma_invalida("ref", e))?
+                }
+                None => return Err(falta("ref")),
             };
             let kind = params
                 .get("proposedOperation")
                 .and_then(|op| op.get("kind"))
                 .and_then(Value::as_str)
-                .ok_or("falta el parámetro «proposedOperation.kind»")?;
-            let depth = params
-                .get("depth")
-                .and_then(Value::as_u64)
-                .map(|n| n as u32);
+                .ok_or_else(|| falta("proposedOperation.kind"))?;
+            // `inputSchema` declara `minimum: 1` (E24-H09).
+            let depth = entero_validado(params, "depth", 1)?.map(|n| n as u32);
             // Mismo mapeo de error a wire que las demás tools (E10-H02): el código estable
             // `ErrorCode::as_str()`, nunca el `Debug` de la variante.
             let report = app
@@ -472,7 +472,7 @@ pub fn call(app: &App, profile: Profile, name: &str, params: &Value) -> ToolResu
                 params
                     .get("changeSetId")
                     .and_then(Value::as_str)
-                    .ok_or("falta el parámetro «changeSetId»")?
+                    .ok_or_else(|| falta("changeSetId"))?
                     .to_string(),
             );
             let expected = params
@@ -491,7 +491,7 @@ pub fn call(app: &App, profile: Profile, name: &str, params: &Value) -> ToolResu
                 params
                     .get("receiptId")
                     .and_then(Value::as_str)
-                    .ok_or("falta el parámetro «receiptId»")?
+                    .ok_or_else(|| falta("receiptId"))?
                     .to_string(),
             );
             let expected = params
@@ -511,6 +511,106 @@ pub fn call(app: &App, profile: Profile, name: &str, params: &Value) -> ToolResu
 
 fn to_json<T: serde::Serialize>(v: &T) -> ToolResult {
     serde_json::to_value(v).map_err(|e| e.to_string())
+}
+
+// ---------------------------------------------------------------------------
+// Extracción VALIDANTE de parámetros (E24-H09)
+//
+// `contracts/mcp.yml` («regla de la casa») dice que el servidor **valida los VALORES de los
+// parámetros que declara**. No lo hacía: cada brazo leía con
+// `params.get("x").and_then(Value::as_u64).unwrap_or(default)`, así que un `limit: "10"` (tipo
+// equivocado), un `limit: 0` o un `limit: 9999` (fuera del `minimum`/`maximum` declarados) caían al
+// default **en silencio**. El peor caso es `limit: 0`: devolvía 0 resultados, indistinguible de
+// «no hay nada».
+//
+// Esto NO cambia la política sobre parámetros **no declarados**, que se siguen ignorando: eso está
+// escrito en tres sitios y es una decisión, no un descuido.
+// ---------------------------------------------------------------------------
+
+/// `limit` validado contra el rango que declara el `inputSchema` de la tool.
+///
+/// `None` si el parámetro no viene (el llamante aplica su default). `Err(INVALID_SCHEMA)` si viene
+/// con un tipo que no es entero o con un valor fuera de `[min, max]`.
+fn limit_validado(params: &Value, min: u64, max: u64) -> Result<Option<usize>, String> {
+    let Some(v) = params.get("limit") else {
+        return Ok(None);
+    };
+    let n = v
+        .as_u64()
+        .filter(|n| (min..=max).contains(n))
+        .ok_or_else(|| {
+            format!(
+                "{}: «limit» debe ser un entero entre {min} y {max}; recibido {v}",
+                ErrorCode::InvalidSchema.as_str()
+            )
+        })?;
+    Ok(Some(n as usize))
+}
+
+/// Entero positivo validado (`depth`), con mínimo declarado y sin máximo.
+fn entero_validado(params: &Value, nombre: &str, min: u64) -> Result<Option<u64>, String> {
+    let Some(v) = params.get(nombre) else {
+        return Ok(None);
+    };
+    let n = v.as_u64().filter(|n| *n >= min).ok_or_else(|| {
+        format!(
+            "{}: «{nombre}» debe ser un entero mayor o igual que {min}; recibido {v}",
+            ErrorCode::InvalidSchema.as_str()
+        )
+    })?;
+    Ok(Some(n))
+}
+
+/// Booleano validado: un `"true"` (string) deja de tratarse como `false`.
+fn bool_validado(params: &Value, nombre: &str, default: bool) -> Result<bool, String> {
+    match params.get(nombre) {
+        None => Ok(default),
+        Some(v) => v.as_bool().ok_or_else(|| {
+            format!(
+                "{}: «{nombre}» debe ser un booleano; recibido {v}",
+                ErrorCode::InvalidSchema.as_str()
+            )
+        }),
+    }
+}
+
+/// Error de un parámetro cuya FORMA no encaja, con código del catálogo (E24-H10).
+///
+/// Los `serde_json::from_value` de los brazos producen mensajes internos
+/// (`"unknown variant `nope`, expected one of …"`): útiles, pero sin código estable por el que un
+/// agente pueda ramificar. Se conserva el texto de serde —dice qué valores se esperaban— y se le
+/// antepone el código.
+fn forma_invalida(nombre: &str, e: impl std::fmt::Display) -> String {
+    format!(
+        "{}: «{nombre}» no tiene la forma esperada: {e}",
+        ErrorCode::InvalidSchema.as_str()
+    )
+}
+
+/// Error de parámetro obligatorio ausente, **con código del catálogo** (E24-H10).
+///
+/// Hasta v0.3.0 estos errores viajaban como texto suelto (`"falta el parámetro «ref»"`): 10 de los
+/// 21 errores de superficie no llevaban ningún código, así que un agente no podía ramificar por
+/// ellos sin parsear prosa.
+fn falta(nombre: &str) -> String {
+    format!(
+        "{}: falta el parámetro obligatorio «{nombre}»",
+        ErrorCode::InvalidSchema.as_str()
+    )
+}
+
+/// Cadena validada: un `text: 42` deja de tratarse como cadena vacía (o sea, «todos los
+/// documentos»), que es una respuesta silenciosamente equivocada.
+fn str_validado<'a>(params: &'a Value, nombre: &str) -> Result<Option<&'a str>, String> {
+    match params.get(nombre) {
+        None | Some(Value::Null) => Ok(None),
+        Some(v) => v.as_str().map(Some).ok_or_else(|| {
+            format!(
+                "{}: «{nombre}» debe ser una cadena; recibido {v}",
+                ErrorCode::InvalidSchema.as_str()
+            )
+        }),
+    }
 }
 
 #[cfg(test)]

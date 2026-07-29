@@ -44,6 +44,17 @@ pub enum WorkspaceError {
     /// `WORKSPACE_RECOVERY_REQUIRED`.
     #[error("recuperación pendiente: {0}")]
     WorkspaceRecoveryRequired(String),
+    /// La **entrada** del agente no es interpretable: una consulta `where`/`filter` malformada,
+    /// un valor fuera del rango que declara el `inputSchema`… (E24-H10). Mapea al wire
+    /// `INVALID_SCHEMA`.
+    ///
+    /// Existe porque hasta v0.3.0 estos errores se envolvían en [`WorkspaceError::Core`], que
+    /// `workspace_error_code` mapea a `INTERNAL_IO_ERROR`: un typo del agente en su consulta se le
+    /// reportaba como un error interno de I/O del motor, y la misma consulta malformada daba **dos
+    /// códigos distintos** según entrara por `knowledge_search` o por la selección masiva de
+    /// `change_plan`.
+    #[error("entrada inválida: {0}")]
+    InvalidSchema(String),
 }
 
 impl WorkspaceError {
@@ -58,6 +69,7 @@ impl WorkspaceError {
             WorkspaceError::InvalidResult(_) => "INVALID_RESULT",
             WorkspaceError::WriteConflict(_) => "WRITE_CONFLICT",
             WorkspaceError::WorkspaceRecoveryRequired(_) => "WORKSPACE_RECOVERY_REQUIRED",
+            WorkspaceError::InvalidSchema(_) => "INVALID_SCHEMA",
         }
     }
 }

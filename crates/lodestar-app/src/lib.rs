@@ -167,6 +167,7 @@ pub fn workspace_error_code(err: &WorkspaceError) -> ErrorCode {
         WorkspaceError::InvalidResult(_) => ErrorCode::InvalidResult,
         WorkspaceError::WriteConflict(_) => ErrorCode::WriteConflict,
         WorkspaceError::WorkspaceRecoveryRequired(_) => ErrorCode::WorkspaceRecoveryRequired,
+        WorkspaceError::InvalidSchema(_) => ErrorCode::InvalidSchema,
     }
 }
 
@@ -2927,26 +2928,46 @@ pub struct SearchResults {
 ///   ningún test lo fija, pero es la elección menos sorprendente (un filtro extra solo puede
 ///   restringir, nunca abrir la selección).
 ///
-/// Un `where`/`filter` **malformado** se surface como [`WorkspaceError::Core`] genérico: el mapeo
-/// fino a `INVALID_SCHEMA` (con `location`/`suggestion`) es E20 y queda fuera de esta historia; aquí
-/// basta con no tragarse el error ni entrar en pánico.
+/// Un `where`/`filter` **malformado** se surface con el código estable **`INVALID_SCHEMA`**
+/// (E24-H10). Hasta v0.3.0 se envolvía en [`WorkspaceError::Core`], que `workspace_error_code`
+/// mapea a `INTERNAL_IO_ERROR`: un typo del agente en su consulta se le reportaba como error
+/// interno de I/O. Y la MISMA consulta malformada daba **dos códigos distintos según la tool**,
+/// porque `build_selection_expression` (la selección masiva de `change_plan`) ya devolvía
+/// `INVALID_SCHEMA`.
+///
+/// El mensaje se queda con el texto del `ParseError`/`FilterError` del core y NO propaga el
+/// `Display` de serde: `"data did not match any variant of untagged enum WireNode"` es un interno
+/// de implementación que no ayuda a nadie a arreglar su consulta.
+/// Mensaje de un `FilterError` apto para el wire: se queda con la parte útil y **descarta** el
+/// `Display` de serde cuando aparece (E24-H10).
+///
+/// `filter::from_json` usa `#[serde(untagged)]`, y un JSON que no casa ninguna variante produce
+/// literalmente `"data did not match any variant of untagged enum WireNode"` — un interno de
+/// implementación que no le dice a nadie qué arreglar en su filtro.
+fn mensaje_de_filtro(e: &lodestar_core::filter::FilterError) -> String {
+    if e.message.contains("did not match any variant") {
+        return "no es un nodo de filtro válido: se esperaba {field, operator, value} o una \
+                envoltura and/or/not/has/missing"
+            .to_string();
+    }
+    e.message.clone()
+}
+
 fn build_search_expression(
     where_expr: Option<&str>,
     filter: Option<&Value>,
 ) -> Result<Option<Expression>, WorkspaceError> {
     // Un `where` en blanco (solo espacios) se trata como ausente: no es una consulta malformada.
     let del_where = match where_expr.map(str::trim).filter(|s| !s.is_empty()) {
-        Some(w) => Some(
-            lodestar_core::parse::parse(w)
-                .map_err(|e| WorkspaceError::Core(format!("«where» inválido: {}", e.message)))?,
-        ),
+        Some(w) => Some(lodestar_core::parse::parse(w).map_err(|e| {
+            WorkspaceError::InvalidSchema(format!("«where» inválido: {}", e.message))
+        })?),
         None => None,
     };
     let del_filter = match filter {
-        Some(f) => Some(
-            lodestar_core::filter::from_json(f)
-                .map_err(|e| WorkspaceError::Core(format!("«filter» inválido: {}", e.message)))?,
-        ),
+        Some(f) => Some(lodestar_core::filter::from_json(f).map_err(|e| {
+            WorkspaceError::InvalidSchema(format!("«filter» inválido: {}", mensaje_de_filtro(&e)))
+        })?),
         None => None,
     };
     Ok(match (del_where, del_filter) {

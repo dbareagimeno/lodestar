@@ -3068,7 +3068,7 @@ fn bom_emite_aviso_sin_bloquear() {
     let ds = DocumentSet::from_files(mapa(&[("bom.md", &con_bom)]));
     let a = ds.analyze();
 
-    let cs = codigos(&a, &rp("bom.md"));
+    let cs = codigos(a, &rp("bom.md"));
     assert!(
         cs.iter().any(|c| c == "DOC-BOM"),
         "un `.md` que empieza por BOM UTF-8 debe emitir el aviso de portabilidad `DOC-BOM`; \
@@ -3119,7 +3119,7 @@ fn sin_bom_no_hay_aviso() {
     let ds = DocumentSet::from_files(mapa(&[("limpio.md", sin_bom)]));
     let a = ds.analyze();
 
-    let cs = codigos(&a, &rp("limpio.md"));
+    let cs = codigos(a, &rp("limpio.md"));
     assert!(
         !cs.iter().any(|c| c == "DOC-BOM"),
         "un `.md` SIN BOM no puede emitir `DOC-BOM`: {cs:?}"
@@ -3140,7 +3140,7 @@ fn bom_sin_frontmatter_tambien_avisa() {
     let ds = DocumentSet::from_files(mapa(&[("desnudo.md", &con_bom)]));
     let a = ds.analyze();
 
-    let cs = codigos(&a, &rp("desnudo.md"));
+    let cs = codigos(a, &rp("desnudo.md"));
     assert!(
         cs.iter().any(|c| c == "DOC-BOM"),
         "el aviso es del FICHERO (su codificación), no del bloque de frontmatter: un `.md` con \

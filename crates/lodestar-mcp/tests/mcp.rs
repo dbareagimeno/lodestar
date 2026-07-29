@@ -5897,3 +5897,219 @@ fn bom_roundtrip_byte_a_byte() {
         "un patch que no cambia ningún valor no puede mover la `WorkspaceRevision`"
     );
 }
+
+// ---------------------------------------------------------------------------
+// E24-H09/H10 — La superficie de error deja de mentir
+//
+// H09: `contracts/mcp.yml` («regla de la casa») dice que el servidor **valida los VALORES de los
+// parámetros que declara**. No lo hacía: `limit: "10"`, `limit: 0` (el schema declara `minimum: 1`)
+// o `includeSuggestedFixes: "true"` caían al default EN SILENCIO. El peor caso es `limit: 0`, que
+// devolvía 0 resultados — indistinguible de «no hay nada».
+//
+// H10: 10 de los 21 errores de superficie viajaban como texto suelto, sin código del catálogo, y la
+// MISMA consulta malformada daba dos códigos distintos según la tool (`INTERNAL_IO_ERROR` por
+// `knowledge_search`, `INVALID_SCHEMA` por la selección de `change_plan`).
+//
+// Lo que NO cambia: los parámetros **no declarados** se siguen ignorando. Es la regla de la casa,
+// escrita en tres sitios, y revisarla es un cambio de política, no un bugfix.
+// ---------------------------------------------------------------------------
+
+/// Workspace mínimo con dos documentos, para que un `limit` mal puesto sea observable.
+fn ws_dos_docs() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), "a.md", "---\ns: 1\n---\n\n# A\n");
+    write(dir.path(), "b.md", "---\ns: 2\n---\n\n# B\n");
+    dir
+}
+
+/// Texto del error de ejecución de una tool, o `None` si la llamada tuvo éxito.
+fn error_de(resp: &serde_json::Value) -> Option<String> {
+    let res = resp.get("result")?;
+    res.get("isError")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+        .then(|| res["content"][0]["text"].as_str().unwrap_or("").to_string())
+}
+
+/// **E24-H09** — un `limit` fuera del rango declarado o de otro tipo se RECHAZA.
+#[test]
+fn limit_fuera_de_rango_es_invalid_schema() {
+    let dir = ws_dos_docs();
+    let casos = [
+        serde_json::json!({"text": "", "limit": 0}),
+        serde_json::json!({"text": "", "limit": 9999}),
+        serde_json::json!({"text": "", "limit": -5}),
+        serde_json::json!({"text": "", "limit": "10"}),
+    ];
+    let lineas: Vec<String> = casos
+        .iter()
+        .enumerate()
+        .map(|(i, args)| {
+            serde_json::json!({"jsonrpc":"2.0","id": i + 1,"method":"tools/call",
+                "params":{"name":"knowledge_search","arguments": args}})
+            .to_string()
+        })
+        .collect();
+    let refs: Vec<&str> = lineas.iter().map(String::as_str).collect();
+    let resp = roundtrip(dir.path(), &refs, casos.len());
+
+    for (i, r) in resp.iter().enumerate() {
+        let err = error_de(r).unwrap_or_else(|| {
+            panic!(
+                "el caso {i} ({}) debe RECHAZARSE: el `inputSchema` declara `minimum: 1, \
+                 maximum: 100`, y hasta E24-H09 estos valores caían al default en silencio. \
+                 `limit: 0` devolvía 0 resultados, indistinguible de «no hay nada». Respuesta: {r}",
+                casos[i]
+            )
+        });
+        assert!(
+            err.starts_with("INVALID_SCHEMA"),
+            "el rechazo debe llevar el código estable del catálogo: {err}"
+        );
+    }
+}
+
+/// **E24-H09** — control anti-vacuo: un `limit` válido sigue funcionando exactamente igual.
+#[test]
+fn limit_valido_sigue_funcionando() {
+    let dir = ws_dos_docs();
+    let linea = serde_json::json!({"jsonrpc":"2.0","id":1,"method":"tools/call",
+        "params":{"name":"knowledge_search","arguments":{"text":"","limit":1}}})
+    .to_string();
+    let resp = roundtrip(dir.path(), &[linea.as_str()], 1);
+    assert!(
+        error_de(&resp[0]).is_none(),
+        "un `limit` dentro del rango no puede rechazarse: {}",
+        resp[0]
+    );
+    assert_eq!(
+        resp[0]["result"]["structuredContent"]["results"]
+            .as_array()
+            .map(Vec::len),
+        Some(1),
+        "y debe seguir acotando la página: {}",
+        resp[0]
+    );
+}
+
+/// **E24-H09** — un booleano y un entero con el tipo equivocado se rechazan.
+#[test]
+fn tipo_incorrecto_es_invalid_schema() {
+    let dir = ws_dos_docs();
+    let l1 = serde_json::json!({"jsonrpc":"2.0","id":1,"method":"tools/call",
+        "params":{"name":"knowledge_check","arguments":{"scope":{"kind":"workspace"},
+                  "includeSuggestedFixes":"true"}}})
+    .to_string();
+    let l2 = serde_json::json!({"jsonrpc":"2.0","id":2,"method":"tools/call",
+        "params":{"name":"graph_query","arguments":{"operation":"backlinks",
+                  "ref":{"path":"a.md"},"depth":"3"}}})
+    .to_string();
+    let resp = roundtrip(dir.path(), &[l1.as_str(), l2.as_str()], 2);
+
+    for (i, r) in resp.iter().enumerate() {
+        let err = error_de(r).unwrap_or_else(|| {
+            panic!("el caso {i} debe rechazarse en vez de caer al default en silencio: {r}")
+        });
+        assert!(
+            err.starts_with("INVALID_SCHEMA"),
+            "con código estable: {err}"
+        );
+    }
+}
+
+/// **E24-H10** — un `where` malformado sale con `INVALID_SCHEMA`, no con `INTERNAL_IO_ERROR`.
+#[test]
+fn where_malformado_es_invalid_schema() {
+    let dir = ws_dos_docs();
+    let linea = serde_json::json!({"jsonrpc":"2.0","id":1,"method":"tools/call",
+        "params":{"name":"knowledge_search","arguments":{"text":"","where":"status ="}}})
+    .to_string();
+    let resp = roundtrip(dir.path(), &[linea.as_str()], 1);
+    let err = error_de(&resp[0]).expect("una consulta malformada debe fallar");
+    assert!(
+        err.starts_with("INVALID_SCHEMA"),
+        "un typo del agente en su consulta es entrada inválida, no un error interno de I/O del \
+         motor (hasta v0.3.0 salía INTERNAL_IO_ERROR): {err}"
+    );
+}
+
+/// **E24-H10** — la MISMA consulta malformada da el MISMO código por las dos tools que la aceptan.
+///
+/// Es la asimetría concreta que cierra la historia: por `knowledge_search` salía
+/// `INTERNAL_IO_ERROR` y por la selección masiva de `change_plan`, `INVALID_SCHEMA`.
+#[test]
+fn misma_consulta_mismo_codigo_en_las_dos_tools() {
+    let dir = ws_dos_docs();
+    let l1 = serde_json::json!({"jsonrpc":"2.0","id":1,"method":"tools/call",
+        "params":{"name":"knowledge_search","arguments":{"text":"","where":"))) and and"}}})
+    .to_string();
+    let l2 = serde_json::json!({"jsonrpc":"2.0","id":2,"method":"tools/call",
+        "params":{"name":"change_plan","arguments":{
+            "selection":{"where":"))) and and"},
+            "operation":{"patch_frontmatter":{"patch":{"x":1}}}}}})
+    .to_string();
+    let resp = roundtrip(dir.path(), &[l1.as_str(), l2.as_str()], 2);
+
+    let e1 = error_de(&resp[0]).expect("knowledge_search debe fallar");
+    let e2 = error_de(&resp[1]).expect("change_plan debe fallar");
+    assert!(
+        e1.starts_with("INVALID_SCHEMA") && e2.starts_with("INVALID_SCHEMA"),
+        "la misma consulta malformada debe dar el mismo código por las dos tools.\n\
+         knowledge_search: {e1}\nchange_plan:       {e2}"
+    );
+}
+
+/// **E24-H10** — un parámetro obligatorio ausente lleva código estable.
+#[test]
+fn parametro_obligatorio_ausente_es_invalid_schema() {
+    let dir = ws_dos_docs();
+    let casos: [(&str, serde_json::Value); 5] = [
+        ("knowledge_get", serde_json::json!({})),
+        ("metadata_inspect", serde_json::json!({})),
+        ("knowledge_check", serde_json::json!({})),
+        ("graph_query", serde_json::json!({})),
+        ("change_apply", serde_json::json!({})),
+    ];
+    let lineas: Vec<String> = casos
+        .iter()
+        .enumerate()
+        .map(|(i, (n, args))| {
+            serde_json::json!({"jsonrpc":"2.0","id": i + 1,"method":"tools/call",
+                "params":{"name": n,"arguments": args}})
+            .to_string()
+        })
+        .collect();
+    let refs: Vec<&str> = lineas.iter().map(String::as_str).collect();
+    let resp = roundtrip(dir.path(), &refs, casos.len());
+
+    for (i, r) in resp.iter().enumerate() {
+        let err = error_de(r)
+            .unwrap_or_else(|| panic!("{} sin su parámetro obligatorio debe fallar", casos[i].0));
+        assert!(
+            err.starts_with("INVALID_SCHEMA"),
+            "«falta el parámetro X» viajaba como texto suelto, sin nada por lo que un agente \
+             pueda ramificar. Tool {}: {err}",
+            casos[i].0
+        );
+    }
+}
+
+/// **E24-H10** — los mensajes de error no filtran internos de serde.
+#[test]
+fn errores_no_filtran_internos_de_serde() {
+    let dir = ws_dos_docs();
+    let linea = serde_json::json!({"jsonrpc":"2.0","id":1,"method":"tools/call",
+        "params":{"name":"knowledge_search","arguments":{"text":"","filter":{"nope":1}}}})
+    .to_string();
+    let resp = roundtrip(dir.path(), &[linea.as_str()], 1);
+    let err = error_de(&resp[0]).expect("un filtro malformado debe fallar");
+    assert!(
+        !err.contains("untagged enum"),
+        "«data did not match any variant of untagged enum WireNode» es un interno de \
+         implementación que no le dice a nadie qué arreglar en su filtro: {err}"
+    );
+    assert!(
+        err.contains("field") && err.contains("operator"),
+        "el mensaje debe decir qué forma se esperaba: {err}"
+    );
+}

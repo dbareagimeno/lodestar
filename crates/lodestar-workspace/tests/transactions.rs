@@ -1739,7 +1739,7 @@ fn gc_no_toca_transacciones_vivas() {
     // Transacción EN CURSO: journal `prepared` + su staging y sus copias.
     let a = RelPath::new("a.md").unwrap();
     let base = ws.workspace_revision().unwrap();
-    ws.backup_originals("txn-viva", &[a.clone()])
+    ws.backup_originals("txn-viva", std::slice::from_ref(&a))
         .expect("copias de recuperación");
     let _journal = ws
         .create_journal("txn-viva", &[a], &base, &base)
