@@ -28,3 +28,8 @@ workspace = true
 
 [dev-dependencies]
 tempfile = "3"
+
+# E24-H14: `SIGKILL` al binario para probar el crash REAL (ni un `Drop` se ejecuta). Solo tests, y
+# solo Unix: Windows no tiene equivalente con la misma garantía.
+[target.'cfg(unix)'.dev-dependencies]
+libc = "0.2"
