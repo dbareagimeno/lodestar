@@ -5582,3 +5582,837 @@ fn escribir_si_ajusta_el_gitignore() {
     );
     comprueba("tras change_apply");
 }
+
+// ---------------------------------------------------------------------------
+// E24-H01 — Un BOM deja de tragarse el frontmatter (por el WIRE).
+// `requirements/epica-24-cierre-defectos-v031.md §E24-H01` · `ARCHITECTURE.md §20.4` ·
+// `CLAUDE.md` invariante #1 («los `.md` en disco son la única fuente de verdad»). Fase ROJA.
+//
+// Estos tres tests son la reproducción EXACTA del síntoma de la historia, ejercida sobre el
+// binario real por JSON-RPC (el arnés `roundtrip`), porque es así como se descubrió: el fichero
+// con BOM se escribe en disco, y lo que se juzga son los BYTES que quedan en disco después.
+// La misma semántica, en el núcleo puro, la fijan los tests homónimos de
+// `crates/lodestar-core/tests/documento.rs`.
+//
+// SÍNTOMA verificado hoy contra `lodestar-mcp` (v0.3.0):
+//   knowledge_get  -> frontmatter {} · body = el fichero ENTERO (BOM y bloque incluidos)
+//   where "document.has_frontmatter = true"  -> []      (y `= false` -> ['bom.md'])
+//   patch_frontmatter {"status":"review"} + apply deja en disco
+//     b'---\nstatus: review\n---\n\n\xef\xbb\xbf---\nstatus: draft\nowner: ana\n---\n\n# Con BOM…'
+//   Dos bloques; `owner: ana` degradado a texto del cuerpo, listo para que el siguiente
+//   `replace_body` lo borre para siempre.
+//
+// ROJO esperado HOY: por ASERCIÓN en los tres (ninguna API nueva, ningún stub).
+// ---------------------------------------------------------------------------
+
+/// El documento del síntoma, byte a byte: BOM UTF-8 (`EF BB BF`) + frontmatter de **dos** claves.
+/// `owner` es la clave testigo: es la que la corrupción de hoy destruye.
+const DOC_CON_BOM: &str =
+    "\u{feff}---\nstatus: draft\nowner: ana\n---\n\n# Con BOM\n\ncuerpo original\n";
+
+/// Workspace con el documento del síntoma **y** un gemelo sin BOM. El gemelo es el control de no
+/// vacuidad de las consultas: `document.has_frontmatter = true` ya lo devuelve hoy, así que si un
+/// arreglo rompiera el caso normal, estos tests lo verían.
+fn workspace_con_bom() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), "bom.md", DOC_CON_BOM);
+    write(
+        dir.path(),
+        "sin_bom.md",
+        "---\nstatus: draft\nowner: ana\n---\n\n# Sin BOM\n\ncuerpo original\n",
+    );
+    dir
+}
+
+/// Los BYTES de un `.md` del workspace. Se leen como bytes —y no como `String`— porque el BOM es
+/// precisamente lo que se juzga y una lectura descuidada lo escondería.
+fn bytes_de(root: &std::path::Path, rel: &str) -> Vec<u8> {
+    std::fs::read(root.join(rel)).unwrap_or_else(|e| panic!("`{rel}` debe existir en disco: {e}"))
+}
+
+/// Rendición legible de unos bytes para los mensajes de aserción (el BOM se ve como `\u{feff}`).
+fn como_texto(bytes: &[u8]) -> String {
+    format!("{:?}", String::from_utf8_lossy(bytes))
+}
+
+/// Número de líneas delimitadoras de frontmatter (`---`) de un `.md`, tolerando el BOM en la
+/// primera. Un documento con **un** bloque tiene exactamente dos; la corrupción produce cuatro.
+fn delimitadores(bytes: &[u8]) -> usize {
+    String::from_utf8_lossy(bytes)
+        .lines()
+        .filter(|l| l.trim_start_matches('\u{feff}') == "---")
+        .count()
+}
+
+/// La `workspaceRevision` que reporta `workspace_status` sobre el workspace de `root`.
+fn revision_de(root: &std::path::Path) -> String {
+    let status = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"workspace_status","arguments":{}}}"#;
+    let resp = roundtrip(root, &[status], 1);
+    resp[0]["result"]["structuredContent"]["workspaceRevision"]
+        .as_str()
+        .unwrap_or_else(|| panic!("workspace_status debe devolver `workspaceRevision`: {resp:?}"))
+        .to_string()
+}
+
+/// Planifica **una** operación y la aplica, exigiendo que el apply tenga éxito (guarda de no
+/// vacuidad: si la operación no llega a ejecutarse, el estado de disco no prueba nada).
+fn planifica_y_aplica(root: &std::path::Path, op: serde_json::Value) -> serde_json::Value {
+    let plan = roundtrip(
+        root,
+        &[change_plan_line(None, serde_json::json!([op]), policy_permisiva()).as_str()],
+        1,
+    );
+    let id = plan_change_set_id(&plan[0]);
+    let apply = roundtrip(root, &[change_apply_line(&id, None).as_str()], 1);
+    assert_eq!(
+        apply_sc(&apply[0])["applied"],
+        serde_json::Value::Bool(true),
+        "guarda: la operación debe aplicarse de verdad para que el criterio no sea vacuo: {apply:?}"
+    );
+    apply_sc(&apply[0]).clone()
+}
+
+/// E24-H01 · Criterio `bom_no_se_traga_el_frontmatter`:
+/// Dado un `.md` con BOM y frontmatter válido, Cuando se lee con `knowledge_get`, Entonces
+/// `frontmatter` trae las claves reales y `document.has_frontmatter` es `true`.
+#[test]
+fn bom_no_se_traga_el_frontmatter() {
+    let dir = workspace_con_bom();
+    // Guarda del fixture: el fichero que se acaba de escribir empieza de verdad por `EF BB BF`.
+    assert_eq!(
+        bytes_de(dir.path(), "bom.md").get(..3),
+        Some([0xEF, 0xBB, 0xBF].as_slice()),
+        "guarda del fixture: `bom.md` debe empezar por el BOM UTF-8"
+    );
+
+    let get = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"knowledge_get","arguments":{"ref":{"path":"bom.md"},"include":["frontmatter","body"]}}}"#;
+    let con_fm = ks_call(serde_json::json!({ "where": "document.has_frontmatter = true" }));
+    let sin_fm = ks_call(serde_json::json!({ "where": "document.has_frontmatter = false" }));
+    let resp = roundtrip(dir.path(), &[get, con_fm.as_str(), sin_fm.as_str()], 3);
+
+    // (a) El frontmatter que viaja son las CLAVES REALES, no el mapa vacío.
+    let doc = &resp[0]["result"]["structuredContent"]["document"];
+    assert_eq!(
+        doc["frontmatter"]["status"],
+        serde_json::json!("draft"),
+        "`knowledge_get` sobre un `.md` con BOM debe devolver su `status` real; hoy devuelve el \
+         frontmatter vacío y la metadata del usuario es invisible: {resp:?}"
+    );
+    assert_eq!(
+        doc["frontmatter"]["owner"],
+        serde_json::json!("ana"),
+        "…y su `owner`, que es la clave que la corrupción de esta historia destruye: {resp:?}"
+    );
+
+    // (b) El `body` es el CUERPO, no el fichero entero con su bloque dentro.
+    let body = doc["body"].as_str().unwrap_or_else(|| {
+        panic!("`knowledge_get` con include=[body] debe traer `body`: {resp:?}")
+    });
+    assert!(
+        !body.contains("status: draft"),
+        "el bloque de frontmatter NO puede viajar dentro del `body`: body = {body:?}"
+    );
+    assert!(
+        !body.starts_with('\u{feff}'),
+        "el BOM pertenece a la cabecera del fichero, no al cuerpo: body = {body:?}"
+    );
+    assert_eq!(
+        body, "\n# Con BOM\n\ncuerpo original\n",
+        "el cuerpo debe ser exactamente el que sigue al bloque, igual que en un `.md` sin BOM"
+    );
+
+    // (c) `document.has_frontmatter` es `true` para el documento con BOM.
+    let con: std::collections::BTreeSet<String> = search_paths(&resp[1]).into_iter().collect();
+    assert!(
+        con.contains("sin_bom.md"),
+        "guarda de no vacuidad: el gemelo SIN BOM ya casa `document.has_frontmatter = true` en \
+         v0.3.0 y debe seguir casando: {resp:?}"
+    );
+    assert!(
+        con.contains("bom.md"),
+        "`document.has_frontmatter` debe ser `true` para el `.md` con BOM: su bloque está \
+         presente y cerrado. Casaron {con:?}: {resp:?}"
+    );
+
+    // (d) …y por tanto NO casa la consulta complementaria (control anti-vacuo de la anterior).
+    let sin: std::collections::BTreeSet<String> = search_paths(&resp[2]).into_iter().collect();
+    assert!(
+        !sin.contains("bom.md"),
+        "`bom.md` no puede aparecer como documento SIN frontmatter: casaron {sin:?}: {resp:?}"
+    );
+}
+
+/// E24-H01 · Criterio `patch_sobre_bom_no_duplica_bloque`:
+/// Dado ese documento, Cuando se le aplica `patch_frontmatter`, Entonces el resultado tiene un
+/// solo bloque, conserva las claves que no se tocaron y empieza por el BOM.
+///
+/// Se juzga sobre los BYTES publicados en disco (invariante #1), no sobre la respuesta de la tool.
+#[test]
+fn patch_sobre_bom_no_duplica_bloque() {
+    let dir = workspace_con_bom();
+
+    planifica_y_aplica(
+        dir.path(),
+        serde_json::json!({
+            "op": "patch_frontmatter", "ref": { "path": "bom.md" },
+            "patch": { "status": "review" }
+        }),
+    );
+
+    let publicado = bytes_de(dir.path(), "bom.md");
+
+    // (a) Empieza por el BOM: no se le antepone un bloque por delante.
+    assert_eq!(
+        publicado.get(..3),
+        Some([0xEF, 0xBB, 0xBF].as_slice()),
+        "el `.md` publicado debe seguir empezando por el BOM UTF-8 (EF BB BF); hoy el patch le \
+         antepone un bloque nuevo. En disco quedó: {}",
+        como_texto(&publicado)
+    );
+
+    // (b) UN SOLO bloque de frontmatter.
+    assert_eq!(
+        delimitadores(&publicado),
+        2,
+        "el `.md` publicado debe tener UN solo bloque (2 líneas «---»); la corrupción deja 4 y \
+         degrada el bloque original a texto del cuerpo. En disco quedó: {}",
+        como_texto(&publicado)
+    );
+
+    // (c) La clave no tocada sobrevive, una sola vez, y la tocada tiene el valor nuevo.
+    let texto = String::from_utf8_lossy(&publicado).to_string();
+    assert_eq!(
+        texto.matches("owner: ana").count(),
+        1,
+        "`owner: ana` debe aparecer EXACTAMENTE una vez: ni borrada ni duplicada en un segundo \
+         bloque muerto. En disco quedó: {}",
+        como_texto(&publicado)
+    );
+    assert!(
+        !texto.contains("status: draft"),
+        "el valor viejo de `status` no puede sobrevivir en un bloque degradado a cuerpo. En disco \
+         quedó: {}",
+        como_texto(&publicado)
+    );
+
+    // (d) Y el motor vuelve a leer el documento entero: nada quedó fuera de su alcance, así que el
+    // siguiente `replace_body` (el segundo paso del síntoma) no tiene nada que destruir.
+    let get = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"knowledge_get","arguments":{"ref":{"path":"bom.md"},"include":["frontmatter"]}}}"#;
+    let resp = roundtrip(dir.path(), &[get], 1);
+    let fm = &resp[0]["result"]["structuredContent"]["document"]["frontmatter"];
+    assert_eq!(
+        fm["status"],
+        serde_json::json!("review"),
+        "tras el patch, `status` debe valer «review»: {resp:?}"
+    );
+    assert_eq!(
+        fm["owner"],
+        serde_json::json!("ana"),
+        "…y `owner: ana` debe seguir siendo metadata VIVA, no texto muerto del cuerpo: {resp:?}"
+    );
+}
+
+/// E24-H01 · Criterio `bom_roundtrip_byte_a_byte` (**control anti-vacuo de la historia**):
+/// Dado ese documento, Cuando se lee y se reescribe sin cambios, Entonces los bytes son idénticos
+/// y la `WorkspaceRevision` no cambia.
+///
+/// Sin este criterio, un arreglo que se limitase a **strippear** el BOM al leer pasaría los otros
+/// dos. Aquí no: `workspace_revision` hashea los bytes crudos del `FileMap`, así que strippear al
+/// leer y no al reemitir declararía un cambio espurio en cada round-trip — justo lo que el alcance
+/// de la historia prohíbe («el BOM NO se normaliza en la lectura de disco»).
+///
+/// Dos rutas, las dos que un agente usa de verdad:
+///   - **A. `replace_body`** con el `body` que acaba de devolver `knowledge_get`: obliga a
+///     **reemitir** el BOM al reconstruir el documento. Lleva una precondición explícita (el
+///     cuerpo leído debe ser el cuerpo) sin la cual sería vacua: si el `body` fuese el fichero
+///     entero —el defecto de hoy—, reescribirlo devolvería los mismos bytes por accidente.
+///   - **B. `patch_frontmatter`** escribiendo en `status` el valor que **ya** tenía: obliga a
+///     **conservarlo**. Es roja hoy por sí sola.
+#[test]
+fn bom_roundtrip_byte_a_byte() {
+    let dir = workspace_con_bom();
+    let antes = bytes_de(dir.path(), "bom.md");
+    let revision_antes = revision_de(dir.path());
+
+    // --- Ruta A: leer el cuerpo por el wire y volver a escribirlo tal cual.
+    let get = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"knowledge_get","arguments":{"ref":{"path":"bom.md"},"include":["body"]}}}"#;
+    let leido = roundtrip(dir.path(), &[get], 1);
+    let body = leido[0]["result"]["structuredContent"]["document"]["body"]
+        .as_str()
+        .unwrap_or_else(|| panic!("`knowledge_get` debe traer el `body` de `bom.md`: {leido:?}"))
+        .to_string();
+    assert!(
+        !body.starts_with('\u{feff}') && !body.contains("status: draft"),
+        "precondición del round-trip: el `body` leído debe ser el cuerpo, no el fichero entero — \
+         si no, reescribirlo devolvería los mismos bytes por accidente y el criterio sería vacuo. \
+         body = {body:?}"
+    );
+
+    planifica_y_aplica(
+        dir.path(),
+        serde_json::json!({
+            "op": "replace_body", "ref": { "path": "bom.md" }, "body": body
+        }),
+    );
+
+    let tras_a = bytes_de(dir.path(), "bom.md");
+    assert_eq!(
+        tras_a.get(..3),
+        Some([0xEF, 0xBB, 0xBF].as_slice()),
+        "reescribir el cuerpo debe REEMITIR el BOM: es del usuario, no ruido a normalizar. En \
+         disco quedó: {}",
+        como_texto(&tras_a)
+    );
+    assert_eq!(
+        como_texto(&tras_a),
+        como_texto(&antes),
+        "leer y reescribir sin cambios debe dejar los MISMOS bytes en disco"
+    );
+    assert_eq!(
+        revision_de(dir.path()),
+        revision_antes,
+        "un round-trip sin cambios no puede mover la `WorkspaceRevision`: declararía un cambio \
+         espurio —y con él conflictos de escritura— en cada lectura-escritura de un `.md` con BOM"
+    );
+
+    // --- Ruta B: escribir en `status` el valor que ya tenía.
+    planifica_y_aplica(
+        dir.path(),
+        serde_json::json!({
+            "op": "patch_frontmatter", "ref": { "path": "bom.md" },
+            "patch": { "status": "draft" }
+        }),
+    );
+
+    let tras_b = bytes_de(dir.path(), "bom.md");
+    assert_eq!(
+        como_texto(&tras_b),
+        como_texto(&antes),
+        "escribir en `status` el valor que ya tenía no cambia el documento: mismos bytes, BOM \
+         incluido"
+    );
+    assert_eq!(
+        revision_de(dir.path()),
+        revision_antes,
+        "un patch que no cambia ningún valor no puede mover la `WorkspaceRevision`"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// E24-H09/H10 — La superficie de error deja de mentir
+//
+// H09: `contracts/mcp.yml` («regla de la casa») dice que el servidor **valida los VALORES de los
+// parámetros que declara**. No lo hacía: `limit: "10"`, `limit: 0` (el schema declara `minimum: 1`)
+// o `includeSuggestedFixes: "true"` caían al default EN SILENCIO. El peor caso es `limit: 0`, que
+// devolvía 0 resultados — indistinguible de «no hay nada».
+//
+// H10: 10 de los 21 errores de superficie viajaban como texto suelto, sin código del catálogo, y la
+// MISMA consulta malformada daba dos códigos distintos según la tool (`INTERNAL_IO_ERROR` por
+// `knowledge_search`, `INVALID_SCHEMA` por la selección de `change_plan`).
+//
+// Lo que NO cambia: los parámetros **no declarados** se siguen ignorando. Es la regla de la casa,
+// escrita en tres sitios, y revisarla es un cambio de política, no un bugfix.
+// ---------------------------------------------------------------------------
+
+/// Workspace mínimo con dos documentos, para que un `limit` mal puesto sea observable.
+fn ws_dos_docs() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), "a.md", "---\ns: 1\n---\n\n# A\n");
+    write(dir.path(), "b.md", "---\ns: 2\n---\n\n# B\n");
+    dir
+}
+
+/// Texto del error de ejecución de una tool, o `None` si la llamada tuvo éxito.
+fn error_de(resp: &serde_json::Value) -> Option<String> {
+    let res = resp.get("result")?;
+    res.get("isError")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+        .then(|| res["content"][0]["text"].as_str().unwrap_or("").to_string())
+}
+
+/// **E24-H09** — un `limit` fuera del rango declarado o de otro tipo se RECHAZA.
+#[test]
+fn limit_fuera_de_rango_es_invalid_schema() {
+    let dir = ws_dos_docs();
+    let casos = [
+        serde_json::json!({"text": "", "limit": 0}),
+        serde_json::json!({"text": "", "limit": 9999}),
+        serde_json::json!({"text": "", "limit": -5}),
+        serde_json::json!({"text": "", "limit": "10"}),
+    ];
+    let lineas: Vec<String> = casos
+        .iter()
+        .enumerate()
+        .map(|(i, args)| {
+            serde_json::json!({"jsonrpc":"2.0","id": i + 1,"method":"tools/call",
+                "params":{"name":"knowledge_search","arguments": args}})
+            .to_string()
+        })
+        .collect();
+    let refs: Vec<&str> = lineas.iter().map(String::as_str).collect();
+    let resp = roundtrip(dir.path(), &refs, casos.len());
+
+    for (i, r) in resp.iter().enumerate() {
+        let err = error_de(r).unwrap_or_else(|| {
+            panic!(
+                "el caso {i} ({}) debe RECHAZARSE: el `inputSchema` declara `minimum: 1, \
+                 maximum: 100`, y hasta E24-H09 estos valores caían al default en silencio. \
+                 `limit: 0` devolvía 0 resultados, indistinguible de «no hay nada». Respuesta: {r}",
+                casos[i]
+            )
+        });
+        assert!(
+            err.starts_with("INVALID_SCHEMA"),
+            "el rechazo debe llevar el código estable del catálogo: {err}"
+        );
+    }
+}
+
+/// **E24-H09** — control anti-vacuo: un `limit` válido sigue funcionando exactamente igual.
+#[test]
+fn limit_valido_sigue_funcionando() {
+    let dir = ws_dos_docs();
+    let linea = serde_json::json!({"jsonrpc":"2.0","id":1,"method":"tools/call",
+        "params":{"name":"knowledge_search","arguments":{"text":"","limit":1}}})
+    .to_string();
+    let resp = roundtrip(dir.path(), &[linea.as_str()], 1);
+    assert!(
+        error_de(&resp[0]).is_none(),
+        "un `limit` dentro del rango no puede rechazarse: {}",
+        resp[0]
+    );
+    assert_eq!(
+        resp[0]["result"]["structuredContent"]["results"]
+            .as_array()
+            .map(Vec::len),
+        Some(1),
+        "y debe seguir acotando la página: {}",
+        resp[0]
+    );
+}
+
+/// **E24-H09** — un booleano y un entero con el tipo equivocado se rechazan.
+#[test]
+fn tipo_incorrecto_es_invalid_schema() {
+    let dir = ws_dos_docs();
+    let l1 = serde_json::json!({"jsonrpc":"2.0","id":1,"method":"tools/call",
+        "params":{"name":"knowledge_check","arguments":{"scope":{"kind":"workspace"},
+                  "includeSuggestedFixes":"true"}}})
+    .to_string();
+    let l2 = serde_json::json!({"jsonrpc":"2.0","id":2,"method":"tools/call",
+        "params":{"name":"graph_query","arguments":{"operation":"backlinks",
+                  "ref":{"path":"a.md"},"depth":"3"}}})
+    .to_string();
+    let resp = roundtrip(dir.path(), &[l1.as_str(), l2.as_str()], 2);
+
+    for (i, r) in resp.iter().enumerate() {
+        let err = error_de(r).unwrap_or_else(|| {
+            panic!("el caso {i} debe rechazarse en vez de caer al default en silencio: {r}")
+        });
+        assert!(
+            err.starts_with("INVALID_SCHEMA"),
+            "con código estable: {err}"
+        );
+    }
+}
+
+/// **E24-H10** — un `where` malformado sale con `INVALID_SCHEMA`, no con `INTERNAL_IO_ERROR`.
+#[test]
+fn where_malformado_es_invalid_schema() {
+    let dir = ws_dos_docs();
+    let linea = serde_json::json!({"jsonrpc":"2.0","id":1,"method":"tools/call",
+        "params":{"name":"knowledge_search","arguments":{"text":"","where":"status ="}}})
+    .to_string();
+    let resp = roundtrip(dir.path(), &[linea.as_str()], 1);
+    let err = error_de(&resp[0]).expect("una consulta malformada debe fallar");
+    assert!(
+        err.starts_with("INVALID_SCHEMA"),
+        "un typo del agente en su consulta es entrada inválida, no un error interno de I/O del \
+         motor (hasta v0.3.0 salía INTERNAL_IO_ERROR): {err}"
+    );
+}
+
+/// **E24-H10** — la MISMA consulta malformada da el MISMO código por las dos tools que la aceptan.
+///
+/// Es la asimetría concreta que cierra la historia: por `knowledge_search` salía
+/// `INTERNAL_IO_ERROR` y por la selección masiva de `change_plan`, `INVALID_SCHEMA`.
+#[test]
+fn misma_consulta_mismo_codigo_en_las_dos_tools() {
+    let dir = ws_dos_docs();
+    let l1 = serde_json::json!({"jsonrpc":"2.0","id":1,"method":"tools/call",
+        "params":{"name":"knowledge_search","arguments":{"text":"","where":"))) and and"}}})
+    .to_string();
+    let l2 = serde_json::json!({"jsonrpc":"2.0","id":2,"method":"tools/call",
+        "params":{"name":"change_plan","arguments":{
+            "selection":{"where":"))) and and"},
+            "operation":{"patch_frontmatter":{"patch":{"x":1}}}}}})
+    .to_string();
+    let resp = roundtrip(dir.path(), &[l1.as_str(), l2.as_str()], 2);
+
+    let e1 = error_de(&resp[0]).expect("knowledge_search debe fallar");
+    let e2 = error_de(&resp[1]).expect("change_plan debe fallar");
+    assert!(
+        e1.starts_with("INVALID_SCHEMA") && e2.starts_with("INVALID_SCHEMA"),
+        "la misma consulta malformada debe dar el mismo código por las dos tools.\n\
+         knowledge_search: {e1}\nchange_plan:       {e2}"
+    );
+}
+
+/// **E24-H10** — un parámetro obligatorio ausente lleva código estable.
+#[test]
+fn parametro_obligatorio_ausente_es_invalid_schema() {
+    let dir = ws_dos_docs();
+    let casos: [(&str, serde_json::Value); 5] = [
+        ("knowledge_get", serde_json::json!({})),
+        ("metadata_inspect", serde_json::json!({})),
+        ("knowledge_check", serde_json::json!({})),
+        ("graph_query", serde_json::json!({})),
+        ("change_apply", serde_json::json!({})),
+    ];
+    let lineas: Vec<String> = casos
+        .iter()
+        .enumerate()
+        .map(|(i, (n, args))| {
+            serde_json::json!({"jsonrpc":"2.0","id": i + 1,"method":"tools/call",
+                "params":{"name": n,"arguments": args}})
+            .to_string()
+        })
+        .collect();
+    let refs: Vec<&str> = lineas.iter().map(String::as_str).collect();
+    let resp = roundtrip(dir.path(), &refs, casos.len());
+
+    for (i, r) in resp.iter().enumerate() {
+        let err = error_de(r)
+            .unwrap_or_else(|| panic!("{} sin su parámetro obligatorio debe fallar", casos[i].0));
+        assert!(
+            err.starts_with("INVALID_SCHEMA"),
+            "«falta el parámetro X» viajaba como texto suelto, sin nada por lo que un agente \
+             pueda ramificar. Tool {}: {err}",
+            casos[i].0
+        );
+    }
+}
+
+/// **E24-H10** — los mensajes de error no filtran internos de serde.
+#[test]
+fn errores_no_filtran_internos_de_serde() {
+    let dir = ws_dos_docs();
+    let linea = serde_json::json!({"jsonrpc":"2.0","id":1,"method":"tools/call",
+        "params":{"name":"knowledge_search","arguments":{"text":"","filter":{"nope":1}}}})
+    .to_string();
+    let resp = roundtrip(dir.path(), &[linea.as_str()], 1);
+    let err = error_de(&resp[0]).expect("un filtro malformado debe fallar");
+    assert!(
+        !err.contains("untagged enum"),
+        "«data did not match any variant of untagged enum WireNode» es un interno de \
+         implementación que no le dice a nadie qué arreglar en su filtro: {err}"
+    );
+    assert!(
+        err.contains("field") && err.contains("operator"),
+        "el mensaje debe decir qué forma se esperaba: {err}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// E24-H11 — `knowledge_get` devuelve el título derivado
+//
+// La derivación (`frontmatter.title` → primer H1 → nombre del fichero, §20.2) funcionaba y viajaba
+// en `knowledge_search` y en `graph_query`, pero NO en la tool que lee un documento: su
+// `DocumentView` traía `path`/`revision`/`frontmatter`/`body`/`outgoingLinks`/`backlinks`/
+// `diagnostics` y nada más. Un agente que siguiera el flujo recomendado (buscar → leer) perdía el
+// título al leer, y el `include` cerrado tampoco le dejaba pedirlo.
+// ---------------------------------------------------------------------------
+
+/// **E24-H11** — las tres fuentes de la cascada de `§20.2` llegan por `knowledge_get`.
+#[test]
+fn get_devuelve_titulo_derivado() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "con_fm.md",
+        "---\ntitle: Desde Frontmatter\n---\n\n# Otro H1\n",
+    );
+    write(dir.path(), "con_h1.md", "# Desde H1\n\ncuerpo\n");
+    write(dir.path(), "pelado.md", "solo texto, sin heading\n");
+
+    let esperado = [
+        ("con_fm.md", "Desde Frontmatter"),
+        ("con_h1.md", "Desde H1"),
+        ("pelado.md", "pelado"),
+    ];
+    let lineas: Vec<String> = esperado
+        .iter()
+        .enumerate()
+        .map(|(i, (p, _))| {
+            serde_json::json!({"jsonrpc":"2.0","id": i + 1,"method":"tools/call",
+                "params":{"name":"knowledge_get","arguments":{"ref":{"path": p}}}})
+            .to_string()
+        })
+        .collect();
+    let refs: Vec<&str> = lineas.iter().map(String::as_str).collect();
+    let resp = roundtrip(dir.path(), &refs, esperado.len());
+
+    for (i, (path, titulo)) in esperado.iter().enumerate() {
+        let doc = &resp[i]["result"]["structuredContent"]["document"];
+        assert_eq!(
+            doc["title"].as_str(),
+            Some(*titulo),
+            "`knowledge_get` debe traer el título derivado por la cascada de §20.2 \
+             (frontmatter.title → primer H1 → nombre del fichero) para {path}: {}",
+            resp[i]
+        );
+    }
+}
+
+/// **E24-H11** — control anti-vacuo: el título de `knowledge_get` coincide con el de
+/// `knowledge_search`.
+///
+/// Es lo que impide que sea una SEGUNDA implementación del título (invariante #3): si alguien
+/// derivara el título aquí con otro criterio, este test lo caza.
+#[test]
+fn titulo_coincide_entre_get_y_search() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "con_fm.md",
+        "---\ntitle: Desde Frontmatter\n---\n\n# Otro H1\n",
+    );
+    write(dir.path(), "con_h1.md", "# Desde H1\n\ncuerpo\n");
+    write(dir.path(), "pelado.md", "solo texto\n");
+
+    let l_search = serde_json::json!({"jsonrpc":"2.0","id":1,"method":"tools/call",
+        "params":{"name":"knowledge_search","arguments":{"text":""}}})
+    .to_string();
+    let l_get: Vec<String> = ["con_fm.md", "con_h1.md", "pelado.md"]
+        .iter()
+        .enumerate()
+        .map(|(i, p)| {
+            serde_json::json!({"jsonrpc":"2.0","id": i + 2,"method":"tools/call",
+                "params":{"name":"knowledge_get","arguments":{"ref":{"path": p}}}})
+            .to_string()
+        })
+        .collect();
+    let mut refs: Vec<&str> = vec![l_search.as_str()];
+    refs.extend(l_get.iter().map(String::as_str));
+    let resp = roundtrip(dir.path(), &refs, 4);
+
+    let de_search: std::collections::BTreeMap<String, String> = resp[0]["result"]
+        ["structuredContent"]["results"]
+        .as_array()
+        .expect("results")
+        .iter()
+        .map(|r| {
+            (
+                r["path"].as_str().unwrap_or_default().to_string(),
+                r["title"].as_str().unwrap_or_default().to_string(),
+            )
+        })
+        .collect();
+
+    for r in resp.iter().skip(1) {
+        let doc = &r["result"]["structuredContent"]["document"];
+        let path = doc["path"].as_str().expect("path").to_string();
+        assert_eq!(
+            doc["title"].as_str().map(str::to_string),
+            de_search.get(&path).cloned(),
+            "el título de `knowledge_get` y el de `knowledge_search` deben salir de la MISMA \
+             función del core, no de dos implementaciones (invariante #3). Path: {path}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// E24-H15 — El `structuredContent` CONFORMA el `outputSchema` declarado
+//
+// Los 10 `outputSchema` se derivan con `schemars` desde el tipo Rust que sirve cada servicio, así
+// que en teoría no pueden divergir. En la práctica nadie lo comprobaba: `tools_declaran_outputschema`
+// mira 5 de las 10 y solo que el schema «tenga alguna clave estructural», y un brazo del despachador
+// que construya el JSON a mano (como hace `knowledge_get` con su envoltorio `{document}`) puede
+// apartarse del tipo sin que nada lo note.
+//
+// Un cliente MCP estricto SÍ valida. Esto es una guardia anti-drift, no la corrección de un defecto:
+// al escribirla, las 10 conformaban.
+// ---------------------------------------------------------------------------
+
+/// Valida `instancia` contra `schema`, devolviendo los errores en texto.
+fn errores_de_schema(schema: &serde_json::Value, instancia: &serde_json::Value) -> Vec<String> {
+    let validador = jsonschema::validator_for(schema)
+        .unwrap_or_else(|e| panic!("el propio outputSchema no es un JSON Schema válido: {e}"));
+    validador
+        .iter_errors(instancia)
+        .map(|e| format!("{} en {}", e, e.instance_path()))
+        .collect()
+}
+
+/// **E24-H15** — la salida real de las 10 tools conforma su `outputSchema`.
+#[test]
+fn structured_content_conforma_output_schema() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "alfa.md",
+        "---\nstatus: draft\npriority: 2\ntags:\n  - uno\n---\n\n# Alfa\n\nVer [beta](notas/beta.md) y [roto](no-existe.md).\n",
+    );
+    write(
+        dir.path(),
+        "notas/beta.md",
+        "---\nstatus: accepted\n---\n\n# Beta\n\n## Sección\n\ncuerpo\n\n[alfa](../alfa.md)\n",
+    );
+
+    // Llamadas que cubren las 10 tools (varias formas de las polimórficas).
+    let llamadas: Vec<(&str, serde_json::Value)> = vec![
+        ("workspace_status", serde_json::json!({})),
+        (
+            "knowledge_search",
+            serde_json::json!({"text": "", "include": ["frontmatter.status"]}),
+        ),
+        (
+            "knowledge_get",
+            serde_json::json!({"ref": {"path": "alfa.md"},
+            "include": ["frontmatter","body","revision","outgoingLinks","backlinks","diagnostics"]}),
+        ),
+        ("metadata_inspect", serde_json::json!({"mode": "catalog"})),
+        (
+            "metadata_inspect",
+            serde_json::json!({"mode": "field", "field": "tags"}),
+        ),
+        (
+            "knowledge_check",
+            serde_json::json!({"scope": {"kind": "workspace"}, "includeSuggestedFixes": true}),
+        ),
+        (
+            "graph_query",
+            serde_json::json!({"operation": "neighborhood", "ref": {"path": "alfa.md"}, "depth": 2, "direction": "both"}),
+        ),
+        (
+            "graph_query",
+            serde_json::json!({"operation": "components"}),
+        ),
+        ("graph_query", serde_json::json!({"operation": "dangling"})),
+        (
+            "impact_analyze",
+            serde_json::json!({"ref": {"path": "alfa.md"}, "proposedOperation": {"kind": "move"}}),
+        ),
+    ];
+
+    let mut lineas =
+        vec![serde_json::json!({"jsonrpc":"2.0","id":0,"method":"tools/list"}).to_string()];
+    for (i, (nombre, args)) in llamadas.iter().enumerate() {
+        lineas.push(
+            serde_json::json!({"jsonrpc":"2.0","id": i + 1,"method":"tools/call",
+                "params":{"name": nombre,"arguments": args}})
+            .to_string(),
+        );
+    }
+    // Las 3 de cambio, encadenadas: plan -> apply -> revert.
+    lineas.push(
+        serde_json::json!({"jsonrpc":"2.0","id":100,"method":"tools/call","params":{
+            "name":"change_plan","arguments":{
+                "operations":[{"op":"patch_frontmatter","path":"alfa.md","patch":{"status":"review"}}],
+                "policy":{"requireValidResult":false,"allowWarnings":true}}}})
+        .to_string(),
+    );
+    let refs: Vec<&str> = lineas.iter().map(String::as_str).collect();
+    let resp = roundtrip(dir.path(), &refs, lineas.len());
+
+    let tools: std::collections::BTreeMap<String, serde_json::Value> = resp[0]["result"]["tools"]
+        .as_array()
+        .expect("tools/list")
+        .iter()
+        .map(|t| {
+            (
+                t["name"].as_str().unwrap_or_default().to_string(),
+                t["outputSchema"].clone(),
+            )
+        })
+        .collect();
+    assert_eq!(tools.len(), 10, "deben ser las 10 tools objetivo");
+
+    let mut validadas: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for (i, (nombre, args)) in llamadas.iter().enumerate() {
+        let r = &resp[i + 1];
+        let sc = &r["result"]["structuredContent"];
+        assert!(
+            !r["result"]["isError"].as_bool().unwrap_or(false),
+            "la llamada a «{nombre}» con {args} debe tener éxito para poder validar su salida: {r}"
+        );
+        let errores = errores_de_schema(&tools[*nombre], sc);
+        assert!(
+            errores.is_empty(),
+            "el `structuredContent` de «{nombre}» NO conforma su `outputSchema` declarado. Un \
+             cliente MCP estricto lo rechazaría.\nViolaciones: {errores:#?}"
+        );
+        validadas.insert((*nombre).to_string());
+    }
+
+    // change_plan (la última respuesta): su salida también conforma.
+    let plan = &resp[lineas.len() - 1]["result"]["structuredContent"];
+    let errores = errores_de_schema(&tools["change_plan"], plan);
+    assert!(
+        errores.is_empty(),
+        "el `structuredContent` de «change_plan» no conforma su `outputSchema`: {errores:#?}"
+    );
+    validadas.insert("change_plan".to_string());
+
+    // change_apply y change_revert, en una sesión aparte (necesitan el changeSetId del plan).
+    let cs = plan["changeSetId"].as_str().expect("changeSetId");
+    let l_apply = serde_json::json!({"jsonrpc":"2.0","id":1,"method":"tools/call",
+        "params":{"name":"change_apply","arguments":{"changeSetId": cs}}})
+    .to_string();
+    let resp2 = roundtrip(dir.path(), &[l_apply.as_str()], 1);
+    let apply = &resp2[0]["result"]["structuredContent"];
+    let errores = errores_de_schema(&tools["change_apply"], apply);
+    assert!(
+        errores.is_empty(),
+        "el `structuredContent` de «change_apply» no conforma su `outputSchema`: {errores:#?}"
+    );
+    validadas.insert("change_apply".to_string());
+
+    let receipt = apply["receiptId"].as_str().expect("receiptId");
+    let l_revert = serde_json::json!({"jsonrpc":"2.0","id":1,"method":"tools/call",
+        "params":{"name":"change_revert","arguments":{"receiptId": receipt}}})
+    .to_string();
+    let resp3 = roundtrip(dir.path(), &[l_revert.as_str()], 1);
+    let revert = &resp3[0]["result"]["structuredContent"];
+    let errores = errores_de_schema(&tools["change_revert"], revert);
+    assert!(
+        errores.is_empty(),
+        "el `structuredContent` de «change_revert» no conforma su `outputSchema`: {errores:#?}"
+    );
+    validadas.insert("change_revert".to_string());
+
+    // Cobertura: las 10, sin excepción. Es lo que impide que este test se degrade con el tiempo a
+    // «las que resultaron fáciles de llamar».
+    let declaradas: std::collections::BTreeSet<String> = tools.keys().cloned().collect();
+    assert_eq!(
+        validadas, declaradas,
+        "se deben validar TODAS las tools declaradas, no un subconjunto"
+    );
+}
+
+/// **E24-H15** — control anti-vacuo del validador: una salida deliberadamente incoherente falla.
+///
+/// Sin esto, un `errores_de_schema` que devolviera siempre la lista vacía —por un schema mal
+/// cargado, por ejemplo— haría pasar el test de arriba sin validar nada.
+#[test]
+fn el_validador_de_schema_muerde() {
+    let schema = serde_json::json!({
+        "type": "object",
+        "properties": { "results": { "type": "array" } },
+        "required": ["results"]
+    });
+    assert!(
+        errores_de_schema(&schema, &serde_json::json!({"results": []})).is_empty(),
+        "una instancia correcta no puede producir errores"
+    );
+    assert!(
+        !errores_de_schema(&schema, &serde_json::json!({"results": "no soy un array"})).is_empty(),
+        "una instancia que viola el schema DEBE producir errores: si no, el test de conformidad no \
+         está validando nada"
+    );
+    assert!(
+        !errores_de_schema(&schema, &serde_json::json!({})).is_empty(),
+        "un campo requerido ausente debe detectarse"
+    );
+}

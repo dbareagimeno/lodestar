@@ -249,6 +249,17 @@ pub enum CheckCode {
     /// inventario tiene *salvo capitalización*.
     #[serde(rename = "LINK-CASE-MISMATCH")]
     LinkCaseMismatch,
+    /// El documento empieza por un **BOM UTF-8** (`U+FEFF`), que no es portable: muchas
+    /// herramientas de línea de comandos, parsers de YAML y diffs lo tratan como contenido
+    /// (E24-H02).
+    ///
+    /// Lodestar **sí** lo interpreta y lo **conserva byte a byte** (E24-H01), así que esto no
+    /// impide leer ni modificar el documento: es un **aviso** de portabilidad, de la misma
+    /// naturaleza que [`CheckCode::LinkCaseMismatch`]. Hasta E24-H01 el BOM se tragaba el
+    /// frontmatter entero **en silencio**, y este código es la mitad que hace visible lo que
+    /// aquello escondía.
+    #[serde(rename = "DOC-BOM")]
+    DocBom,
 }
 }
 
@@ -266,6 +277,7 @@ impl CheckCode {
             CheckCode::PathNotUtf8 => "PATH-NOT-UTF8",
             CheckCode::SymlinkUnsupported => "SYMLINK-UNSUPPORTED",
             CheckCode::LinkCaseMismatch => "LINK-CASE-MISMATCH",
+            CheckCode::DocBom => "DOC-BOM",
         }
     }
 }
@@ -393,6 +405,21 @@ impl Check {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct FieldPath(Vec<String>);
 
+/// Las propiedades válidas del namespace `document.*` del lenguaje de consulta (`§20.8`).
+///
+/// **Fuente única de verdad** (E24-H07). Hasta v0.3.1 esta lista vivía SOLO en los brazos de un
+/// `match` de `eval.rs`, así que el validador de consultas y el evaluador podían divergir sin que
+/// nada lo detectara.
+pub const DOCUMENT_PROPS: &[&str] = &["path", "title", "has_frontmatter"];
+
+/// Las propiedades válidas del namespace `graph.*` del lenguaje de consulta (`§20.8`). Ver
+/// [`DOCUMENT_PROPS`].
+pub const GRAPH_PROPS: &[&str] = &["backlinks", "outgoing_links", "dangling_links", "isolated"];
+
+/// El prefijo con el que un `FieldPath` se ancla EXPLÍCITAMENTE al frontmatter del usuario,
+/// saltándose los namespaces reservados (E24-H08).
+pub const FRONTMATTER_ANCHOR: &str = "frontmatter";
+
 impl FieldPath {
     /// Construye un `FieldPath` desde dot-notation (`"service.tier"`,
     /// `"release.target.date"`). **Siempre** parte por puntos: nunca resuelve a una clave literal
@@ -426,6 +453,24 @@ impl FieldPath {
     /// Los segmentos del path, en orden de descenso.
     pub fn segments(&self) -> &[String] {
         &self.0
+    }
+
+    /// `true` si el primer segmento es un **namespace reservado** (`document`/`graph`), es decir,
+    /// si este path se resuelve contra propiedades calculadas y no contra el frontmatter.
+    pub fn es_namespace_reservado(&self) -> bool {
+        matches!(
+            self.0.first().map(String::as_str),
+            Some("document") | Some("graph")
+        )
+    }
+
+    /// Las propiedades válidas del namespace reservado de este path, o `None` si no lo es.
+    pub fn props_del_namespace(&self) -> Option<&'static [&'static str]> {
+        match self.0.first().map(String::as_str) {
+            Some("document") => Some(DOCUMENT_PROPS),
+            Some("graph") => Some(GRAPH_PROPS),
+            _ => None,
+        }
     }
 }
 

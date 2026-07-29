@@ -49,7 +49,14 @@ pub fn check(root: &Path, json: bool, sarif_out: bool) -> anyhow::Result<ExitCod
     // motor cubre los `Err` (incluidos los schema-driven) vía `valid`; la config solo puede
     // endurecer la puerta para que los avisos también bloqueen.
     let blocked = !valid || app.workspace().config().gate_blocked(&analysis);
-    render_analysis(&analysis, valid, json, sarif_out, blocked)
+
+    // E24-H04: si una transacción de publicación quedó a medias, el disco tiene renames parciales
+    // y los diagnósticos que se ven son ARTEFACTOS de ese estado intermedio, no daño real: sobre un
+    // `move` de 120 enlazantes interrumpido, `check` informaba de 120 enlaces rotos sin decir que
+    // eran recuperables. Se AVISA, no se repara: abrir un workspace es hermético desde E23-H12 y
+    // `check` no escribe. La reparación la hace el siguiente `change_plan` (E24-H03).
+    let recovery_pending = app.workspace().recovery_pending();
+    render_analysis(&analysis, valid, json, sarif_out, blocked, recovery_pending)
 }
 
 /// Imprime un `Analysis` en el formato pedido y devuelve el exit code (0 conforme / 1 bloqueado).
@@ -58,12 +65,18 @@ pub fn check(root: &Path, json: bool, sarif_out: bool) -> anyhow::Result<ExitCod
 /// `REL-*` viajan dentro de `diagnostics` (y por tanto en `--sarif`/humano) al haberse fusionado en
 /// [`lodestar_app::App::full_analysis`]. `blocked` decide el exit code: lo endurece la strictness de
 /// `.lodestar/config.yaml` (`gate.blockWarnings`) sobre el veredicto del motor.
+/// `recovery_pending` declara si hay una **transacción de publicación interrumpida** (E24-H04).
+/// Cuando la hay, los diagnósticos del análisis describen un estado **intermedio y recuperable**:
+/// el aviso lo dice explícitamente para que ni una persona ni un CI lean como daño real lo que es
+/// una publicación a medias. El exit code **no cambia** (sigue siendo `1` si algo bloquea): el
+/// workspace efectivamente no está en un estado publicable, y los códigos están congelados.
 pub fn render_analysis(
     analysis: &lodestar_core::types::Analysis,
     valid: bool,
     json: bool,
     sarif_out: bool,
     blocked: bool,
+    recovery_pending: bool,
 ) -> anyhow::Result<ExitCode> {
     if json {
         // Aditivo: serializar el `Analysis` (conserva `documents`/`hardFail`/… en el wire) y añadir
@@ -71,11 +84,22 @@ pub fn render_analysis(
         let mut value = serde_json::to_value(analysis)?;
         if let serde_json::Value::Object(map) = &mut value {
             map.insert("valid".to_string(), serde_json::Value::Bool(valid));
+            map.insert(
+                "recoveryPending".to_string(),
+                serde_json::Value::Bool(recovery_pending),
+            );
         }
         println!("{}", serde_json::to_string_pretty(&value)?);
     } else if sarif_out {
         println!("{}", sarif::to_sarif(analysis)?);
     } else {
+        if recovery_pending {
+            println!(
+                "  ⚠ Hay una transacción de publicación sin terminar: lo que sigue describe un \
+                 estado INTERMEDIO y recuperable, no daño real.\n    El próximo cambio \
+                 (`change_plan`) la completa o la deshace automáticamente antes de planificar."
+            );
+        }
         print_human(analysis, blocked);
     }
     if blocked {

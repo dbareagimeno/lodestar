@@ -25,17 +25,47 @@ use crate::Workspace;
 /// Directorio de staging materializado: contiene el árbol `.md` resultante de aplicar un
 /// [`ChangeSet`] sobre el canónico, bajo `.lodestar/runtime/staging/<changeSetId saneado>/`.
 ///
-/// La limpieza NO es automática: [`Workspace::validate_staging`] borra el directorio cuando el
-/// resultado no es conforme; el flujo de publicación (E13-H05) lo consumirá y limpiará al
-/// terminar. Mientras tanto persiste en disco (es el propósito del staging).
+/// La limpieza es **RAII** desde E24-H05: al dropearse, el directorio se borra salvo que la
+/// transacción lo haya consumido explícitamente con [`StagingDir::keep`].
+///
+/// Antes no lo era, y los pasos (7)–(10) de `Workspace::apply_transaction` salen por `?`
+/// saltándose el `remove_dir_all` del paso (11): cualquier transacción que fallara el control
+/// optimista, el guard de escritura, el journal o la publicación dejaba en disco el árbol `.md`
+/// **completo** de su resultado, sin que nada volviera a recogerlo. El caso que lo destapó —el
+/// `WRITE_CONFLICT` sistemático tras un crash, E24-H03— dejaba 121 ficheros por intento.
+///
+/// El mismo patrón que [`crate::WorkspaceLock`], que ya libera el lock en el `Drop` incluso ante
+/// un panic.
 pub struct StagingDir {
     path: PathBuf,
+    /// `true` si el `Drop` NO debe borrar el directorio: la publicación lo consumió y se encarga
+    /// ella (paso (11) de `apply_transaction`, que además sella el journal).
+    keep: bool,
 }
 
 impl StagingDir {
     /// El directorio raíz del árbol de staging materializado (bajo `.lodestar/runtime/staging/`).
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// Renuncia a la limpieza automática: a partir de aquí el directorio es responsabilidad del
+    /// llamante (E24-H05).
+    ///
+    /// Lo usa el camino feliz de `apply_transaction`, que borra el staging **después** de publicar
+    /// y de sellar el journal, en un orden que el `Drop` no puede conocer.
+    pub fn keep(&mut self) {
+        self.keep = true;
+    }
+}
+
+impl Drop for StagingDir {
+    fn drop(&mut self) {
+        if self.keep {
+            return;
+        }
+        // Best-effort: un fallo al limpiar no puede enmascarar el error que provocó el `Drop`.
+        let _ = std::fs::remove_dir_all(&self.path);
     }
 }
 
@@ -147,7 +177,10 @@ impl Workspace {
             std::fs::write(&target, content)?;
         }
 
-        Ok(StagingDir { path: dir })
+        Ok(StagingDir {
+            path: dir,
+            keep: false,
+        })
     }
 
     /// Valida un staging materializado contra la **política de cambios** antes de publicar (E13-H01,

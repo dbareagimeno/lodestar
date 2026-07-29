@@ -167,6 +167,7 @@ pub fn workspace_error_code(err: &WorkspaceError) -> ErrorCode {
         WorkspaceError::InvalidResult(_) => ErrorCode::InvalidResult,
         WorkspaceError::WriteConflict(_) => ErrorCode::WriteConflict,
         WorkspaceError::WorkspaceRecoveryRequired(_) => ErrorCode::WorkspaceRecoveryRequired,
+        WorkspaceError::InvalidSchema(_) => ErrorCode::InvalidSchema,
     }
 }
 
@@ -423,6 +424,43 @@ impl App {
     /// Compone `DocumentSet::analyze` (una sola verdad computada, invariante #3) +
     /// `core::types::workspace_revision` (E10-H03) + `WorkspaceConfig::load` (I/O de `workspace`,
     /// nunca del core) — sin lógica de dominio propia.
+    /// Completa o deshace una transacción interrumpida **antes** de leer el canónico, si la hay
+    /// (E24-H03).
+    ///
+    /// No-op —y sin coste, sin lock y sin escribir— cuando no hay recuperación pendiente, que es
+    /// el caso normal. Cuando la hay, toma el **mismo lock exclusivo de publicación** que
+    /// `Workspace::apply_transaction` y delega en `Workspace::recover`, cuya decisión es
+    /// determinista por el estado durable del journal.
+    ///
+    /// Se comprueba dos veces —antes y después de tomar el lock— porque entre ambas puede haber
+    /// recuperado otro proceso: sin la segunda comprobación se recuperaría dos veces la misma
+    /// transacción.
+    ///
+    /// **Esto es reparar, no publicar**: el canónico vuelve a uno de los dos bordes de la
+    /// transacción interrumpida. Ninguna operación del plan que lo invoca se materializa aquí.
+    fn recover_if_pending(&self) -> Result<(), ErrorCode> {
+        if !self.workspace.recovery_pending() {
+            return Ok(());
+        }
+        let _lock = self
+            .workspace
+            .acquire_lock()
+            .map_err(|e| workspace_error_code(&e))?;
+        if self.workspace.recovery_pending() {
+            self.workspace
+                .recover()
+                .map_err(|e| workspace_error_code(&e))?;
+            // E24-H06: recoger aquí, no solo en el camino de éxito. Justo después de un crash es
+            // cuando hay basura en el plano de control —el staging de la transacción interrumpida
+            // y los temporales a medio escribir—, y el GC solo se disparaba desde `change_apply` y
+            // `change_revert` cuando terminaban bien: el flujo que produce la basura era
+            // exactamente el que no la recogía. Best-effort: un fallo recogiendo no puede impedir
+            // planificar.
+            let _ = self.workspace.gc_receipts();
+        }
+        Ok(())
+    }
+
     pub fn workspace_status(&self, profile: Profile) -> Result<WorkspaceStatus, WorkspaceError> {
         let doc_set = self.workspace.document_set()?;
         let files = doc_set.files();
@@ -752,8 +790,12 @@ impl App {
                 .cloned()
                 .unwrap_or_default()
         });
+        // Mismo cómputo que `knowledge_search` y `graph_query` (invariante #3: una sola verdad
+        // computada, nunca una segunda implementación del título).
+        let title = model::derived_title(parsed.frontmatter.as_ref(), &parsed.body, &path);
         Ok(DocumentView {
             path,
+            title,
             revision,
             frontmatter,
             body,
@@ -1402,6 +1444,19 @@ impl App {
         raw_ops: &Value,
         policy: PlanPolicy,
     ) -> Result<PlanResult, ErrorCode> {
+        // (0) Recuperación pendiente ANTES de leer nada (E24-H03). Si una transacción anterior
+        //     quedó a medias, el disco tiene renames parciales: planificar sobre él captura una
+        //     `base_revision` de un estado que `apply_transaction` va a deshacer en su paso (2),
+        //     y el control optimista del paso (7) lo ve como un conflicto ajeno →
+        //     `WRITE_CONFLICT` en la PRIMERA escritura del agente, siempre, con un código que
+        //     además miente (lo alteró la propia recuperación de Lodestar, no otro escritor).
+        //
+        //     Recuperar aquí es reparar, no publicar: el plan sigue sin materializar su resultado
+        //     en el canónico. Se hace bajo el MISMO lock de publicación que toma el apply, para
+        //     que dos planificadores no recuperen a la vez, y solo cuando hay algo que recuperar
+        //     —el camino normal no toma el lock ni escribe nada—.
+        self.recover_if_pending()?;
+
         let doc_set = self
             .workspace
             .document_set()
@@ -2723,6 +2778,16 @@ pub struct BlockingReference {
 pub struct DocumentView {
     /// Ruta relativa del documento (su identidad en v2).
     pub path: RelPath,
+    /// Título **derivado** (`frontmatter.title` → primer H1 → nombre del fichero, `§20.2`).
+    /// Siempre presente (E24-H11).
+    ///
+    /// Es heurística de presentación, no una propiedad reservada del frontmatter. Viaja aquí por la
+    /// misma razón que en `SearchResult` y en `GraphNode`, y lo computa **la misma** función del
+    /// core ([`model::derived_title`]): hasta v0.3.0 la tool que lee UN documento era la única de
+    /// las tres que no lo traía, así que un agente que seguía el flujo recomendado
+    /// (`knowledge_search` → `knowledge_get`) perdía el título al leer, y el `include` cerrado
+    /// tampoco le dejaba pedirlo.
+    pub title: String,
     /// Identidad de contenido (`blake3:…`, == [`DocumentRevision`] de E10-H03). Siempre presente.
     pub revision: DocumentRevision,
     /// Frontmatter del documento —metadata **arbitraria** del usuario, siempre un objeto YAML—,
@@ -2877,26 +2942,46 @@ pub struct SearchResults {
 ///   ningún test lo fija, pero es la elección menos sorprendente (un filtro extra solo puede
 ///   restringir, nunca abrir la selección).
 ///
-/// Un `where`/`filter` **malformado** se surface como [`WorkspaceError::Core`] genérico: el mapeo
-/// fino a `INVALID_SCHEMA` (con `location`/`suggestion`) es E20 y queda fuera de esta historia; aquí
-/// basta con no tragarse el error ni entrar en pánico.
+/// Un `where`/`filter` **malformado** se surface con el código estable **`INVALID_SCHEMA`**
+/// (E24-H10). Hasta v0.3.0 se envolvía en [`WorkspaceError::Core`], que `workspace_error_code`
+/// mapea a `INTERNAL_IO_ERROR`: un typo del agente en su consulta se le reportaba como error
+/// interno de I/O. Y la MISMA consulta malformada daba **dos códigos distintos según la tool**,
+/// porque `build_selection_expression` (la selección masiva de `change_plan`) ya devolvía
+/// `INVALID_SCHEMA`.
+///
+/// El mensaje se queda con el texto del `ParseError`/`FilterError` del core y NO propaga el
+/// `Display` de serde: `"data did not match any variant of untagged enum WireNode"` es un interno
+/// de implementación que no ayuda a nadie a arreglar su consulta.
+/// Mensaje de un `FilterError` apto para el wire: se queda con la parte útil y **descarta** el
+/// `Display` de serde cuando aparece (E24-H10).
+///
+/// `filter::from_json` usa `#[serde(untagged)]`, y un JSON que no casa ninguna variante produce
+/// literalmente `"data did not match any variant of untagged enum WireNode"` — un interno de
+/// implementación que no le dice a nadie qué arreglar en su filtro.
+fn mensaje_de_filtro(e: &lodestar_core::filter::FilterError) -> String {
+    if e.message.contains("did not match any variant") {
+        return "no es un nodo de filtro válido: se esperaba {field, operator, value} o una \
+                envoltura and/or/not/has/missing"
+            .to_string();
+    }
+    e.message.clone()
+}
+
 fn build_search_expression(
     where_expr: Option<&str>,
     filter: Option<&Value>,
 ) -> Result<Option<Expression>, WorkspaceError> {
     // Un `where` en blanco (solo espacios) se trata como ausente: no es una consulta malformada.
     let del_where = match where_expr.map(str::trim).filter(|s| !s.is_empty()) {
-        Some(w) => Some(
-            lodestar_core::parse::parse(w)
-                .map_err(|e| WorkspaceError::Core(format!("«where» inválido: {}", e.message)))?,
-        ),
+        Some(w) => Some(lodestar_core::parse::parse(w).map_err(|e| {
+            WorkspaceError::InvalidSchema(format!("«where» inválido: {}", e.message))
+        })?),
         None => None,
     };
     let del_filter = match filter {
-        Some(f) => Some(
-            lodestar_core::filter::from_json(f)
-                .map_err(|e| WorkspaceError::Core(format!("«filter» inválido: {}", e.message)))?,
-        ),
+        Some(f) => Some(lodestar_core::filter::from_json(f).map_err(|e| {
+            WorkspaceError::InvalidSchema(format!("«filter» inválido: {}", mensaje_de_filtro(&e)))
+        })?),
         None => None,
     };
     Ok(match (del_where, del_filter) {

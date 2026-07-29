@@ -12,6 +12,7 @@
 //! gramática de este tamaño no justifica una dependencia). El flujo es tokenizar → parsear con dos
 //! niveles de precedencia (`or` < `and` < `not`) sobre el flujo de tokens.
 
+use crate::types::FRONTMATTER_ANCHOR;
 use crate::types::{ComparisonOperator, Expression, FieldPath, FunctionName, QueryValue};
 
 /// El error de una consulta textual `where` malformada (`status =` sin valor, paréntesis sin
@@ -442,11 +443,54 @@ fn word_to_value(w: &str) -> QueryValue {
 /// abriría la puerta a que las dos superficies divergieran.
 pub(crate) fn build_field_path(word: &str) -> Result<FieldPath, ParseError> {
     let partes: Vec<&str> = word.split('.').collect();
-    let partes: &[&str] = if partes.len() > 1 && partes[0] == "frontmatter" {
+
+    // E24-H08: `frontmatter.` es un ANCLAJE, no una abreviatura que se descarta. Hasta v0.3.1 se
+    // recortaba sin más, así que `frontmatter.graph.backlinks` se convertía en `graph.backlinks` y
+    // lo capturaba el namespace reservado: el frontmatter propio del usuario con una clave llamada
+    // `graph` o `document` era **inalcanzable**, pese a que `metadata_inspect` lo anunciaba en su
+    // catálogo. Ahora, si lo que queda tras el prefijo empieza por un namespace reservado, se
+    // conserva un marcador para que el evaluador vaya al frontmatter y no al grafo.
+    let anclado_al_frontmatter = partes.len() > 1 && partes[0] == FRONTMATTER_ANCHOR;
+    let resto: &[&str] = if anclado_al_frontmatter {
         &partes[1..]
     } else {
         partes.as_slice()
     };
-    FieldPath::from_segments(partes.iter().copied())
-        .map_err(|e| ParseError::new(format!("campo inválido `{word}`: {e:?}")))
+
+    let path = FieldPath::from_segments(resto.iter().copied())
+        .map_err(|e| ParseError::new(format!("campo inválido `{word}`: {e:?}")))?;
+
+    // Un anclaje explícito sobre lo que SERÍA un namespace reservado conserva el prefijo, que es
+    // lo que `eval::resolver_campo` usa para saltarse los namespaces.
+    if anclado_al_frontmatter && path.es_namespace_reservado() {
+        return FieldPath::from_segments(
+            std::iter::once(FRONTMATTER_ANCHOR).chain(resto.iter().copied()),
+        )
+        .map_err(|e| ParseError::new(format!("campo inválido `{word}`: {e:?}")));
+    }
+
+    // E24-H07: bajo un namespace RESERVADO, una propiedad desconocida es un ERROR de consulta, no
+    // una ausencia. Hasta v0.3.1 `graph.backlink` (con typo) devolvía `[]` —indistinguible de un
+    // resultado legítimamente vacío—, que es peor que un error: una respuesta silenciosamente
+    // equivocada. Se valida AQUÍ porque es el único punto compartido por `where`, `filter` y
+    // `has`/`missing`, así que la equivalencia entre las tres se preserva por construcción.
+    if let Some(validas) = path.props_del_namespace() {
+        let segs = path.segments();
+        let ns = &segs[0];
+        let clave = segs.get(1).map(String::as_str);
+        let bien = segs.len() == 2 && clave.is_some_and(|c| validas.contains(&c));
+        if !bien {
+            return Err(ParseError::new(format!(
+                "`{word}` no existe: el namespace `{ns}` solo tiene {}. Para consultar una clave \
+                 de TU frontmatter con ese nombre, ánclala con `frontmatter.{word}`",
+                validas
+                    .iter()
+                    .map(|p| format!("`{ns}.{p}`"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )));
+        }
+    }
+
+    Ok(path)
 }

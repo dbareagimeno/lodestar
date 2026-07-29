@@ -1483,3 +1483,112 @@ fn check_no_ensucia_el_working_tree() {
         "`lodestar check` no debe modificar, crear ni borrar NINGÚN fichero del proyecto"
     );
 }
+
+// ---------------------------------------------------------------------------
+// E24-H04 — Un workspace con recuperación pendiente no se presenta como daño real
+//
+// Reproducido matando el servidor con SIGKILL a mitad de un `move` de 120 enlazantes: al reabrir,
+// `lodestar check` decía «121 documentos · 120 con errores · NO VÁLIDO» sin una sola mención de que
+// había una transacción a medias. Un CI lo leería como una KB rota; en realidad son ARTEFACTOS de
+// una publicación interrumpida que el siguiente `change_plan` deshace (E24-H03).
+//
+// `check` AVISA, no repara: abrir un workspace es hermético desde E23-H12. El exit code no cambia
+// (los códigos están congelados y el workspace efectivamente no está publicable).
+// ---------------------------------------------------------------------------
+
+/// Monta una transacción interrumpida durable con las mismas primitivas públicas que un crash real
+/// deja en disco (`backup_originals` de E13-H04 + `create_journal`/`mark_applied` de E13-H03),
+/// deteniéndose en el equivalente a `FailPoint::EntreRenames`.
+fn monta_transaccion_a_medias(root: &std::path::Path) {
+    use lodestar_core::types::RelPath;
+    use lodestar_workspace::Workspace;
+
+    write(root, "notas/uno.md", "# Uno\n\ncuerpo original\n");
+    write(root, "notas/dos.md", "# Dos\n\ncuerpo original\n");
+
+    let ws = Workspace::open(root).expect("el workspace debe abrir");
+    let uno = RelPath::new("notas/uno.md").unwrap();
+    let dos = RelPath::new("notas/dos.md").unwrap();
+    let afectados = [uno.clone(), dos];
+    let base = ws.workspace_revision().expect("revisión base");
+
+    ws.backup_originals("txn-e24-h04", &afectados)
+        .expect("copias de recuperación");
+    let mut journal = ws
+        .create_journal("txn-e24-h04", &afectados, &base, &base)
+        .expect("write-ahead journal");
+    std::fs::write(root.join("notas/uno.md"), "# Uno\n\ncuerpo a MEDIAS\n").unwrap();
+    journal.mark_applied(&uno).expect("marcar el rename");
+    // Se «cae»: nada sella el journal a `done`.
+}
+
+/// **E24-H04** — `check` nombra la recuperación pendiente en la salida humana.
+#[test]
+fn check_avisa_de_recuperacion_pendiente() {
+    let dir = temp_dir("recuperacion-pendiente");
+    monta_transaccion_a_medias(dir.path());
+
+    let out = bin()
+        .args(["--path", dir.path().to_str().unwrap(), "check"])
+        .output()
+        .unwrap();
+    let texto = String::from_utf8_lossy(&out.stdout);
+
+    assert!(
+        texto.contains("transacción de publicación sin terminar"),
+        "`check` sobre un workspace con una transacción a medias debe DECIRLO: hasta E24-H04 \
+         informaba de los enlaces rotos como daño real, sin mencionar que eran recuperables.\n\
+         Salida:\n{texto}"
+    );
+}
+
+/// **E24-H04** — el aviso viaja también en `--json`, que es lo que consume un CI.
+#[test]
+fn check_json_declara_recovery_pending() {
+    let dir = temp_dir("recuperacion-json");
+    monta_transaccion_a_medias(dir.path());
+
+    let out = bin()
+        .args(["--path", dir.path().to_str().unwrap(), "check", "--json"])
+        .output()
+        .unwrap();
+    let v: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("`check --json` debe emitir JSON válido");
+
+    assert_eq!(
+        v["recoveryPending"],
+        serde_json::Value::Bool(true),
+        "`--json` debe declarar `recoveryPending: true`: es lo que un CI puede leer para no \
+         confundir un estado intermedio con una KB rota. JSON: {v}"
+    );
+}
+
+/// **E24-H04** — control anti-vacuo: sin transacción a medias no hay aviso, ni en humano ni en JSON.
+///
+/// Sin esto, una implementación que avisara siempre pasaría los dos tests de arriba.
+#[test]
+fn check_sin_recuperacion_no_avisa() {
+    let dir = temp_dir("sin-recuperacion");
+    write(dir.path(), "a.md", "# A\n\ncuerpo\n");
+
+    let out = bin()
+        .args(["--path", dir.path().to_str().unwrap(), "check"])
+        .output()
+        .unwrap();
+    let texto = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !texto.contains("transacción de publicación sin terminar"),
+        "un workspace limpio no puede avisar de recuperación pendiente:\n{texto}"
+    );
+
+    let out = bin()
+        .args(["--path", dir.path().to_str().unwrap(), "check", "--json"])
+        .output()
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(
+        v["recoveryPending"],
+        serde_json::Value::Bool(false),
+        "sin transacción a medias, `recoveryPending` es false: {v}"
+    );
+}

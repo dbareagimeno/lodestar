@@ -929,7 +929,7 @@ escrituras externas (REFACTOR §5.3).
 ### 19.6 Superficie MCP 13 → 10 y perfiles
 
 Diez tools (`REFACTOR §8`): **READ** `workspace_status` · `knowledge_search` · `knowledge_get` ·
-`schema_inspect` · `graph_query` · `impact_analyze`; **VERIFY** `knowledge_check`; **CHANGE**
+`schema_inspect` (→ `metadata_inspect` en §20.10) · `graph_query` · `impact_analyze`; **VERIFY** `knowledge_check`; **CHANGE**
 `change_plan` · `change_apply` · `change_revert`. Migración desde las 13 actuales:
 
 | Tool actual | Destino |
@@ -969,7 +969,7 @@ Auditoría local en `.lodestar/runtime/audit.jsonl` (runtime, no conocimiento).
 | Épica | Fase REFACTOR | Foco |
 |---|---|---|
 | **E9** — Reducción de alcance | 0 (§16) | Retirar git de superficie; congelar UI en `.claude/`/docs; `.lodestar/config.yaml` + separación canónico/runtime; escribir §19; reposicionar README/CLAUDE |
-| **E10** — Esquemas + lectura headless | 1 | `core::schema` puro; `ConceptRevision`/`WorkspaceRevision`/`ConceptRef`; extensión de `Check`; envelope + códigos de error; crate `lodestar-app`; `workspace_status`/`knowledge_search`/`knowledge_get`/`schema_inspect`/`knowledge_check` |
+| **E10** — Esquemas + lectura headless | 1 | `core::schema` puro; `ConceptRevision`/`WorkspaceRevision`/`ConceptRef`; extensión de `Check`; envelope + códigos de error; crate `lodestar-app`; `workspace_status`/`knowledge_search`/`knowledge_get`/`schema_inspect` (→ `metadata_inspect` en E20-H03)/`knowledge_check` |
 | **E11** — Grafo e impacto | 2 | `graph_query` (consolida grafo); `impact_analyze` (blast-radius); typed relations + validación de `referenceRoots` |
 | **E12** — Planificación | 3 | `ChangeSet`/`NormalizedOperation`/`RiskAssessment`/`SemanticDiff`/`ValidationReport`; `change_plan` (sin escribir); 11 ops; optimistic concurrency |
 | **E13** — Publicación recuperable | 4 | Staging · journal · locks · copias de recuperación · crash-recovery · `change_apply` · `change_revert` · `ChangeReceipt` · `audit.jsonl` |
@@ -1078,6 +1078,13 @@ pub struct DocumentSet { pub documents: FileMap }
 **Desaparecen**: `FileKind` (`Index`/`Log`), `KNOWN_FM`, los 7 campos tipados de `Frontmatter`,
 `RelPath::is_reserved`/`concept_id`, `okf_version`, `in_index`, `index_refs`, `src_is_index` y la
 pertenencia determinada por índices.
+
+**BOM UTF-8** (E24-H01): un `U+FEFF` al frente del fichero **no oculta el bloque** de frontmatter, y
+se **conserva byte a byte** en toda reescritura — nunca se normaliza al leer de disco, porque
+`workspace_revision` hashea los bytes crudos y strippearlo al leer sin reemitirlo declararía un
+cambio espurio en cada round-trip. No pertenece ni al frontmatter ni al cuerpo: `SplitFront::body`
+lo deja fuera, y quien traduzca un offset del cuerpo a una posición del fichero debe usar
+`SplitFront::body_offset`. Su falta de portabilidad se avisa con `DOC-BOM` (§20.9).
 
 **Título derivado** — `frontmatter.title` → primer heading H1 → nombre del fichero. Es **solo una
 heurística de presentación**: `title` no se convierte en propiedad reservada.
@@ -1273,6 +1280,7 @@ relaciones no tipadas. Catálogo mínimo:
 | `DOC-CONFLICT-MARKER` / `DOC-NOT-UTF8` / `DOC-TOO-LARGE` | Marcadores de merge / no UTF-8 / sobre el límite |
 | `PATH-NOT-UTF8` / `SYMLINK-UNSUPPORTED` | Ruta no representable / symlink no admitido |
 | `LINK-TARGET-MISSING` / `LINK-ESCAPES-WORKSPACE` / `LINK-CASE-MISMATCH` | Destino inexistente / fuera del root / capitalización no portable |
+| `DOC-BOM` | BOM UTF-8 al frente del documento: se interpreta y se conserva byte a byte, pero no es portable (aviso, E24-H02) |
 
 **Política de cambios** (`validation` + `transactions` en la config): `allowExistingErrors: true` —
 Lodestar trabaja en un repositorio que ya tiene problemas — junto a `rejectNewErrors: true` — un

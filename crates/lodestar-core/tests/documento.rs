@@ -2468,3 +2468,682 @@ fn create_frontmatter_arbitrario() {
         "el cuerpo pedido debe cerrar el documento; documento =\n{raw}",
     );
 }
+
+// ===========================================================================
+// E24-H01 — Un BOM deja de tragarse el frontmatter
+// (`requirements/epica-24-cierre-defectos-v031.md §E24-H01`, `ARCHITECTURE.md §20.4`,
+// `CLAUDE.md` invariante #1). Fase ROJA.
+//
+// ## Síntoma (reproducido EJECUTANDO el binario `lodestar-mcp` por JSON-RPC, no leyendo código)
+//
+// Fichero en disco:
+//     b'\xef\xbb\xbf---\nstatus: draft\nowner: ana\n---\n\n# Con BOM\n\ncuerpo original\n'
+//
+//   - `knowledge_get` → `frontmatter: {}` y `body` = el fichero ENTERO (bloque incluido).
+//   - `document.has_frontmatter` = `false`.
+//   - Y al escribir encima, `patch_frontmatter {"status":"review"}` publica en disco:
+//         b'---\nstatus: review\n---\n\n\xef\xbb\xbf---\nstatus: draft\nowner: ana\n---\n\n# Con
+//           BOM\n\ncuerpo original\n'
+//     Dos bloques; el original degradado a texto del cuerpo. Un `replace_body` posterior
+//     **destruye `owner: ana` y `status: draft` para siempre** — pérdida silenciosa de datos
+//     mientras la validación responde VÁLIDO.
+//
+// ## Causa
+//
+// `model::split_front` (línea 57) hace `if !raw.starts_with("---") { return SplitFront::Sin }`;
+// con BOM, `raw` empieza por `\u{feff}---` y cae en `Sin`. De ahí, la rama `SplitFront::Sin` de
+// `patch_frontmatter` (líneas 367-382) antepone un bloque nuevo POR DELANTE del BOM.
+//
+// ## Qué NO se fija aquí (deliberado: no inventar API)
+//
+// Estos tests **no** tocan la firma de `model::build_raw`: la reemisión del BOM se ejerce por el
+// camino real de escritura (`plan::apply_normalized_ops`, que es lo que materializa el `.md` que
+// publica el único escritor), para que el implementador elija cómo propaga la marca —un campo en
+// `ParsedFrontmatter`, un parámetro de `build_raw`, lo que sea— sin que la fase roja se lo dicte.
+// Tampoco se exige que el patch sea quirúrgico (`reserialized == false`): sobre este fixture
+// ambos caminos dan los mismos bytes, y el criterio es la conservación, no el camino.
+//
+// ## Rojo esperado HOY (por ASERCIÓN, no por compilación: no hace falta ningún stub)
+//
+//   - `bom_no_se_traga_el_frontmatter`  → `parse_file` devuelve `frontmatter: None`.
+//   - `patch_sobre_bom_no_duplica_bloque` → el resultado empieza por `---`, no por el BOM.
+//   - `bom_roundtrip_byte_a_byte` → el cuerpo leído ES el fichero entero (precondición) y el
+//     patch duplica el bloque, así que ni los bytes ni la `WorkspaceRevision` se conservan.
+// ===========================================================================
+
+use lodestar_core::types::workspace_revision;
+
+/// El BOM UTF-8 (`EF BB BF`) como `&str`.
+const BOM: &str = "\u{feff}";
+
+/// El documento del síntoma, byte a byte: BOM + un frontmatter válido de **dos** claves. La
+/// segunda clave (`owner`) es la que la corrupción destruye, así que es el testigo del daño real.
+const DOC_CON_BOM: &str = concat!(
+    "\u{feff}",
+    "---\n",
+    "status: draft\n",
+    "owner: ana\n",
+    "---\n",
+    "\n",
+    "# Con BOM\n",
+    "\n",
+    "cuerpo original\n",
+);
+
+/// El **mismo** documento sin el BOM. Es el oráculo del último criterio de la historia («un `.md`
+/// sin BOM se parsea igual que en v0.3.0»): comparar contra él, y no contra literales copiados,
+/// hace imposible que el arreglo del BOM se pague cambiando el parseo del caso normal.
+const DOC_SIN_BOM: &str = concat!(
+    "---\n",
+    "status: draft\n",
+    "owner: ana\n",
+    "---\n",
+    "\n",
+    "# Con BOM\n",
+    "\n",
+    "cuerpo original\n",
+);
+
+/// Guarda de fixture y aserción de criterio a la vez: los tres primeros bytes son `EF BB BF`.
+fn assert_empieza_por_bom(raw: &str, contexto: &str) {
+    assert_eq!(
+        raw.as_bytes().get(..3),
+        Some([0xEF, 0xBB, 0xBF].as_slice()),
+        "{contexto}: debe empezar por el BOM UTF-8 (EF BB BF) — el BOM es del usuario y se \
+         conserva byte a byte, ni se strippea ni se desplaza. Primeros bytes: {:02X?}; \
+         documento = {raw:?}",
+        raw.as_bytes().get(..8),
+    );
+}
+
+/// Número de líneas delimitadoras de frontmatter (`---`) del documento, tolerando el BOM en la
+/// primera. Un documento con **un** bloque tiene exactamente dos; la corrupción de esta historia
+/// produce cuatro.
+fn delimitadores(raw: &str) -> usize {
+    raw.lines()
+        .filter(|l| l.trim_start_matches(BOM) == "---")
+        .count()
+}
+
+/// Criterio `bom_no_se_traga_el_frontmatter` — **Dado** un `.md` con BOM y frontmatter válido,
+/// **Cuando** se lee, **Entonces** `frontmatter` trae las claves reales y `has_frontmatter` es
+/// `true`.
+///
+/// `document.has_frontmatter` se computa (`eval.rs:160`) como `doc.frontmatter.is_some()` sobre lo
+/// que devuelve `model::parse_file`, así que aquí se juzga en su origen; por el wire lo fija el
+/// test homónimo de `crates/lodestar-mcp/tests/mcp.rs`.
+#[test]
+fn bom_no_se_traga_el_frontmatter() {
+    assert_empieza_por_bom(DOC_CON_BOM, "el fixture de la historia");
+
+    let con = model::parse_file("bom.md", DOC_CON_BOM);
+    let sin = model::parse_file("bom.md", DOC_SIN_BOM);
+
+    // (a) El bloque está PRESENTE: `has_frontmatter` es `true`.
+    assert!(
+        con.fm_err.is_none(),
+        "un BOM delante de un frontmatter perfectamente cerrado no es un error de parseo: \
+         fm_err = {:?}",
+        con.fm_err
+    );
+    let pf = con.frontmatter.as_ref().unwrap_or_else(|| {
+        panic!(
+            "un `.md` que empieza por BOM SÍ tiene frontmatter: `document.has_frontmatter` debe \
+             ser `true`. Hoy `split_front` compara `raw.starts_with(\"---\")` sobre un raw que \
+             empieza por `\\u{{feff}}---` y cae en `SplitFront::Sin`, así que la metadata del \
+             usuario se vuelve invisible para el motor. Cuerpo interpretado = {:?}",
+            con.body
+        )
+    });
+
+    // (b) Las claves REALES, con su tipo YAML (`§20.4`: metadata arbitraria, sin coerción).
+    assert_eq!(
+        claves(pf),
+        BTreeSet::from(["status".to_string(), "owner".to_string()]),
+        "el frontmatter tras el BOM debe traer sus DOS claves reales, no el mapa vacío"
+    );
+    assert_eq!(
+        pf.get(&fp("status")),
+        Some(&Yaml::String("draft".to_string())),
+        "`status` debe leerse como el string «draft»"
+    );
+    assert_eq!(
+        pf.get(&fp("owner")),
+        Some(&Yaml::String("ana".to_string())),
+        "`owner` debe leerse como el string «ana»: es la clave que la corrupción destruye"
+    );
+
+    // (c) El cuerpo es el CUERPO, no el fichero entero: el bloque no se degrada a texto.
+    assert_eq!(
+        con.body, sin.body,
+        "el BOM no cambia dónde empieza el cuerpo: debe ser exactamente el mismo que el del \
+         documento sin BOM. Hoy el cuerpo se traga el bloque `---…---` entero"
+    );
+    assert!(
+        !con.body.contains("status: draft"),
+        "el frontmatter no puede aparecer dentro del cuerpo: cuerpo = {:?}",
+        con.body
+    );
+    assert!(
+        !con.body.starts_with(BOM),
+        "el BOM pertenece a la cabecera del fichero, no al cuerpo: cuerpo = {:?}",
+        con.body
+    );
+
+    // (d) Mismo veredicto que sin BOM: el BOM no cambia la INTERPRETACIÓN, solo los bytes.
+    let pf_sin = sin
+        .frontmatter
+        .as_ref()
+        .expect("guarda: el documento SIN BOM tiene frontmatter ya en v0.3.0");
+    assert_eq!(
+        pf.value, pf_sin.value,
+        "el frontmatter interpretado debe ser idéntico con y sin BOM"
+    );
+
+    // (e) Los offsets siguen siendo posiciones de BYTE válidas sobre el raw CON BOM: la invariante
+    // `raw[span] == fm.raw` no se rompe (alcance de la historia), que es lo que necesitan el patch
+    // quirúrgico y los rangos de diagnóstico.
+    assert_span_coherente(DOC_CON_BOM, pf);
+    assert!(
+        matches!(
+            model::split_front(DOC_CON_BOM),
+            model::SplitFront::Bloque { .. }
+        ),
+        "`split_front` debe reconocer el bloque tras el BOM: {:?}",
+        model::split_front(DOC_CON_BOM)
+    );
+}
+
+/// Criterio `patch_sobre_bom_no_duplica_bloque` — **Dado** ese documento, **Cuando** se le aplica
+/// `patch_frontmatter`, **Entonces** el resultado tiene **un solo** bloque, conserva las claves que
+/// no se tocaron y **empieza por el BOM**.
+#[test]
+fn patch_sobre_bom_no_duplica_bloque() {
+    let res = parchear(DOC_CON_BOM, &parche(&[("status", s("review"))]));
+
+    // (a) El resultado EMPIEZA POR EL BOM: nada se antepone al BOM del usuario.
+    assert_empieza_por_bom(
+        &res.raw,
+        "el documento parcheado (hoy se le antepone un bloque nuevo POR DELANTE del BOM)",
+    );
+
+    // (b) UN SOLO bloque: dos delimitadores, no cuatro.
+    assert_eq!(
+        delimitadores(&res.raw),
+        2,
+        "el documento parcheado debe tener UN solo bloque de frontmatter (2 líneas «---»); la \
+         corrupción de esta historia produce 4 y deja el bloque original como texto del cuerpo. \
+         Documento resultante:\n{:?}",
+        res.raw
+    );
+
+    // (c) Las claves NO tocadas se conservan, y la tocada toma el valor nuevo.
+    let pf = model::parse_frontmatter(&res.raw).unwrap_or_else(|| {
+        panic!(
+            "el documento parcheado debe tener un bloque de frontmatter legible:\n{:?}",
+            res.raw
+        )
+    });
+    assert_eq!(
+        claves(&pf),
+        BTreeSet::from(["status".to_string(), "owner".to_string()]),
+        "el patch toca `status` y NADA más: `owner` debe seguir en el bloque. Documento \
+         resultante:\n{:?}",
+        res.raw
+    );
+    assert_eq!(
+        pf.get(&fp("status")),
+        Some(&Yaml::String("review".to_string())),
+        "`status` debe tomar el valor nuevo. Documento resultante:\n{:?}",
+        res.raw
+    );
+    assert_eq!(
+        pf.get(&fp("owner")),
+        Some(&Yaml::String("ana".to_string())),
+        "`owner: ana` es la clave que hoy se pierde: parchear `status` no puede degradarla a \
+         texto del cuerpo. Documento resultante:\n{:?}",
+        res.raw
+    );
+
+    // (d) El cuerpo queda intacto byte a byte (el mismo que el del documento sin BOM: el BOM no
+    // desplaza dónde empieza el cuerpo).
+    let re = model::parse_file("bom.md", &res.raw);
+    assert_eq!(
+        re.body,
+        model::parse_file("bom.md", DOC_SIN_BOM).body,
+        "el cuerpo debe llegar intacto al resultado del patch. Documento resultante:\n{:?}",
+        res.raw
+    );
+
+    // (e) Y el documento resultante se vuelve a leer entero, sin pérdidas: un `replace_body`
+    // posterior (el segundo paso del síntoma) ya no tendría nada que destruir.
+    let refm = re
+        .frontmatter
+        .as_ref()
+        .expect("el documento parcheado debe volver a leerse CON frontmatter");
+    assert_eq!(
+        claves(refm),
+        BTreeSet::from(["status".to_string(), "owner".to_string()]),
+        "releer el resultado debe dar las dos claves: si el patch dejó dos bloques, el segundo \
+         (con `owner`) es texto muerto que la siguiente escritura borra para siempre. Documento \
+         resultante:\n{:?}",
+        res.raw
+    );
+}
+
+/// Criterio `bom_roundtrip_byte_a_byte` (**control anti-vacuo de la historia**) — **Dado** ese
+/// documento, **Cuando** se lee y se reescribe sin cambios, **Entonces** los bytes son idénticos y
+/// la `WorkspaceRevision` no cambia.
+///
+/// Sin este criterio, un arreglo que se limitase a **strippear** el BOM al leer pasaría los otros
+/// dos: aquí no, porque `types::workspace_revision` hashea los bytes CRUDOS del `FileMap`
+/// (`types.rs:1196`), así que strippear al leer y no al reemitir declararía un cambio espurio en
+/// cada round-trip — exactamente lo que el alcance de la historia prohíbe.
+///
+/// Se ejercen las **dos** rutas de escritura que el motor usa de verdad, ambas por
+/// `plan::apply_normalized_ops` (lo que materializa el `.md` que publica el único escritor):
+///
+///   - **A. `replace_body`** con el cuerpo tal y como se acaba de leer. Es la ruta que obliga a
+///     **reemitir** el BOM: reconstruye el documento desde `(frontmatter, cuerpo)`.
+///   - **B. `patch_frontmatter`** escribiendo en una clave el valor que **ya** tenía. Es la ruta
+///     que obliga a **conservarlo**: hoy antepone un bloque y cambia los bytes.
+///
+/// La ruta A necesita una **precondición explícita** para no ser vacua: si el cuerpo leído fuese
+/// el fichero entero (el defecto de hoy), reescribirlo daría los mismos bytes de casualidad. Por
+/// eso se asevera primero que lo leído es el cuerpo de verdad.
+#[test]
+fn bom_roundtrip_byte_a_byte() {
+    let path = rp("bom.md");
+    let files: FileMap = [(path.clone(), DOC_CON_BOM.to_string())]
+        .into_iter()
+        .collect();
+    let rev_antes = workspace_revision(&files, &[]);
+    let doc_set = DocumentSet::from_files(files.clone());
+
+    // --- Ruta A: leer el cuerpo y volver a escribirlo TAL CUAL.
+    let leido = model::parse_file(path.as_str(), DOC_CON_BOM);
+    // Precondición anti-vacua de la ruta A (ver el rustdoc): lo leído debe ser el CUERPO.
+    assert!(
+        !leido.body.starts_with(BOM) && !leido.body.contains("status: draft"),
+        "precondición del round-trip: el cuerpo leído debe ser el cuerpo, no el fichero entero — \
+         si no, reescribirlo devolvería los mismos bytes por accidente y el criterio sería vacuo. \
+         Cuerpo leído = {:?}",
+        leido.body
+    );
+    let op_a = plan::normalize_replace_body(&doc_set, &path, leido.body.clone())
+        .expect("reescribir el cuerpo de un documento existente no debe fallar la normalización");
+    let despues_a = plan::apply_normalized_ops(&files, &[op_a])
+        .expect("aplicar en memoria un `replace_body` no debe fallar");
+    let raw_a = despues_a
+        .get(&path)
+        .expect("el documento debe seguir existiendo tras el `replace_body`");
+    assert_empieza_por_bom(raw_a, "el documento reescrito por `replace_body`");
+    assert_eq!(
+        raw_a.as_str(),
+        DOC_CON_BOM,
+        "leer y reescribir el cuerpo sin cambios debe devolver los MISMOS bytes: el BOM se reemite \
+         y ni el bloque ni el cuerpo se reordenan"
+    );
+    assert_eq!(
+        workspace_revision(&despues_a, &[]),
+        rev_antes,
+        "un round-trip sin cambios no puede mover la `WorkspaceRevision`: declararía un cambio \
+         espurio (y con él, conflictos de escritura) en cada lectura-escritura de un `.md` con BOM"
+    );
+
+    // --- Ruta B: reescribir una clave con el valor que YA tenía.
+    let op_b =
+        plan::normalize_patch_frontmatter(&doc_set, &path, parche(&[("status", s("draft"))]))
+            .expect("parchear un documento existente no debe fallar la normalización");
+    let despues_b = plan::apply_normalized_ops(&files, &[op_b])
+        .expect("aplicar en memoria un `patch_frontmatter` no debe fallar");
+    let raw_b = despues_b
+        .get(&path)
+        .expect("el documento debe seguir existiendo tras el `patch_frontmatter`");
+    assert_empieza_por_bom(raw_b, "el documento reescrito por `patch_frontmatter`");
+    assert_eq!(
+        raw_b.as_str(),
+        DOC_CON_BOM,
+        "escribir en `status` el valor que ya tenía no cambia el documento: mismos bytes, BOM \
+         incluido"
+    );
+    assert_eq!(
+        workspace_revision(&despues_b, &[]),
+        rev_antes,
+        "un patch que no cambia ningún valor no puede mover la `WorkspaceRevision`"
+    );
+}
+
+// ===========================================================================
+// E24-H01 (cobertura) — El BOM de un documento SIN frontmatter
+// (`requirements/epica-24-cierre-defectos-v031.md §E24-H01`, `ARCHITECTURE.md §20.4`,
+// `CLAUDE.md` invariante #1).
+//
+// Los tres tests de arriba usan un fixture CON bloque, así que entran por el brazo
+// `SplitFront::Bloque` y dejan sin red las dos ramas que sirven al documento **sin** bloque —
+// justo la familia del defecto de E23-H03 (el `README.md` sin frontmatter que se corrompe al
+// reescribirle el cuerpo), ahora con el BOM como dato a conservar. Un juez ciego lo confirmó
+// mutando la implementación: las dos ramas de abajo sobrevivían con la suite ENTERA en verde.
+//
+// Hueco 1 — `model::build_raw_with_bom` con `fm = None`: sustituir
+// `return format!("{prefijo}{body}")` por `return body.to_string()` (es decir, que un
+// `replace_body` sobre un `.md` con BOM y sin bloque se coma la marca) no rompía ningún test.
+// Lo cubre `move_no_se_come_el_bom_del_enlazante_sin_frontmatter`.
+//
+// Hueco 2 — brazo `SplitFront::Sin` de `model::patch_frontmatter`: revertirlo a
+// `format!("---\n{bloque}\n---\n\n{raw}")` (bloque nuevo POR DELANTE del BOM, marca de
+// codificación en mitad del fichero) tampoco rompía ningún test. Lo cubre
+// `patch_sobre_bom_sin_bloque_no_precede_a_la_marca`.
+//
+// Ambos llevan un **gemelo sin BOM** como oráculo: el resultado con BOM debe ser exactamente el
+// resultado sin BOM más la marca delante. Así ninguna de las dos mutaciones opuestas pasa — ni
+// tragarse el BOM, ni emitirlo donde no lo había.
+// ===========================================================================
+
+/// El enlazante del escenario real: un `README.md` con BOM, **sin frontmatter**, que enlaza a otro
+/// documento. Es el fichero que `move --rewriteInboundLinks` reescribe en cadena.
+const ENLAZANTE_CON_BOM: &str = concat!("\u{feff}", "# Notas\n", "\n", "[a](x.md)\n");
+
+/// Su gemelo exacto sin la marca: el oráculo diferencial (mismo resultado, un BOM menos).
+const ENLAZANTE_SIN_BOM: &str = concat!("# Notas\n", "\n", "[a](x.md)\n");
+
+/// Documento con BOM y **sin** bloque de frontmatter, para el patch que tiene que crear uno.
+const DOC_CON_BOM_SIN_FRONTMATTER: &str = concat!("\u{feff}", "# Notas\n", "\n", "cuerpo\n");
+
+/// Su gemelo sin la marca.
+const DOC_SIN_BOM_SIN_FRONTMATTER: &str = concat!("# Notas\n", "\n", "cuerpo\n");
+
+/// Cobertura del hueco 1 — **Dado** un `.md` con BOM y **sin** frontmatter que enlaza a otro
+/// documento, **Cuando** se mueve el documento enlazado con `rewriteInboundLinks`, **Entonces** el
+/// enlazante conserva su BOM byte a byte (y sigue sin frontmatter).
+///
+/// Es el camino por el que el daño se **propaga**: `normalize_move` emite un `ReplaceBody` por
+/// **cada** documento entrante, así que un solo `move` reescribe el cuerpo de medio workspace. Si
+/// `build_raw_with_bom` no reemitiera la marca cuando el documento no tiene bloque, ese `move`
+/// cambiaría en silencio la codificación de todos los enlazantes sin frontmatter y movería la
+/// `WorkspaceRevision` sin que nadie lo pidiera.
+///
+/// El gemelo `LEEME.md` (sin BOM, mismo cuerpo) es el control anti-vacuo en la otra dirección: el
+/// arreglo no puede consistir en emitir el BOM siempre.
+#[test]
+fn move_no_se_come_el_bom_del_enlazante_sin_frontmatter() {
+    assert_empieza_por_bom(ENLAZANTE_CON_BOM, "el fixture del enlazante");
+    let files = mapa(&[
+        ("README.md", ENLAZANTE_CON_BOM),
+        ("LEEME.md", ENLAZANTE_SIN_BOM),
+        ("x.md", "---\ntitle: X\n---\n\n# X\n"),
+    ]);
+    // Guarda del fixture: el enlazante NO tiene bloque de frontmatter (si lo tuviera, el test
+    // entraría por el brazo `Bloque`, que ya está cubierto, y no probaría nada nuevo).
+    assert!(
+        model::parse_file("README.md", ENLAZANTE_CON_BOM)
+            .frontmatter
+            .is_none(),
+        "guarda del fixture: el enlazante debe ser un `.md` SIN bloque de frontmatter"
+    );
+
+    let doc_set = DocumentSet::from_files(files.clone());
+    let ops = plan::normalize_move(&doc_set, &rp("x.md"), &rp("docs/x.md"), true)
+        .expect("mover un documento existente no debe fallar la normalización");
+    let despues = plan::apply_normalized_ops(&files, &ops)
+        .expect("aplicar en memoria un `move` con reescritura de entrantes no debe fallar");
+
+    let readme = despues
+        .get(&rp("README.md"))
+        .expect("el enlazante debe seguir existiendo tras el `move`");
+    let leeme = despues
+        .get(&rp("LEEME.md"))
+        .expect("el enlazante gemelo debe seguir existiendo tras el `move`");
+
+    // (a) Guarda de no vacuidad: el `move` REESCRIBIÓ de verdad los dos enlazantes. Sin esto, un
+    // `move` que no tocara nada dejaría el BOM intacto por accidente.
+    assert!(
+        readme.contains("docs/x.md") && leeme.contains("docs/x.md"),
+        "guarda: `rewriteInboundLinks` debe haber reapuntado el enlace de AMBOS enlazantes a \
+         `docs/x.md` — si no, el criterio sería vacuo.\nREADME = {readme:?}\nLEEME  = {leeme:?}"
+    );
+
+    // (b) El BOM sobrevive a la reescritura del cuerpo.
+    assert_empieza_por_bom(
+        readme,
+        "el enlazante reescrito por el `move` (reescribir su cuerpo no puede comerse su BOM)",
+    );
+
+    // (c) …y el documento sigue SIN bloque de frontmatter: no se le inventa uno (E23-H03) ni se le
+    // cuela nada entre la marca y el cuerpo.
+    assert_eq!(
+        delimitadores(readme),
+        0,
+        "un documento sin frontmatter sigue sin frontmatter tras el `move`: no se le inyecta un \
+         bloque.\nREADME = {readme:?}"
+    );
+    assert!(
+        model::parse_file("README.md", readme).frontmatter.is_none(),
+        "releer el enlazante reescrito no puede dar un bloque de frontmatter: {readme:?}"
+    );
+
+    // (d) Oráculo diferencial: el resultado con BOM es EXACTAMENTE el resultado sin BOM más la
+    // marca delante. Cierra las dos mutaciones opuestas de una vez (comerse el BOM y emitirlo
+    // donde no lo había).
+    assert!(
+        !leeme.starts_with(BOM),
+        "el enlazante que NO tenía BOM no puede ganar uno: {leeme:?}"
+    );
+    assert_eq!(
+        readme.as_str(),
+        format!("{BOM}{leeme}"),
+        "el enlazante con BOM debe quedar igual que su gemelo sin BOM, más la marca delante"
+    );
+
+    // (e) La misma exigencia por la ruta desnuda (`replace_body` directo), que es en lo que
+    // `move`, `replace_text`, `edit_section` y `delete remove_links` se normalizan todos.
+    let cuerpo = model::parse_file("README.md", ENLAZANTE_CON_BOM).body;
+    let op = plan::normalize_replace_body(&doc_set, &rp("README.md"), cuerpo)
+        .expect("reescribir el cuerpo de un documento existente no debe fallar la normalización");
+    let tras_replace = plan::apply_normalized_ops(&files, &[op])
+        .expect("aplicar en memoria un `replace_body` no debe fallar");
+    let readme_replace = tras_replace
+        .get(&rp("README.md"))
+        .expect("el documento debe seguir existiendo tras el `replace_body`");
+    assert_eq!(
+        readme_replace.as_str(),
+        ENLAZANTE_CON_BOM,
+        "leer y reescribir el cuerpo de un `.md` con BOM y SIN frontmatter debe devolver los \
+         MISMOS bytes"
+    );
+    assert_eq!(
+        workspace_revision(&tras_replace, &[]),
+        workspace_revision(&files, &[]),
+        "un round-trip sin cambios sobre un documento sin frontmatter no puede mover la \
+         `WorkspaceRevision`"
+    );
+}
+
+/// Cobertura del hueco 2 — **Dado** un `.md` con BOM y **sin** bloque de frontmatter, **Cuando** se
+/// le aplica `patch_frontmatter`, **Entonces** el bloque nuevo se inserta **después** de la marca,
+/// no por delante.
+///
+/// El brazo `SplitFront::Sin` es el que crea el bloque donde no había ninguno. Anteponerlo al BOM
+/// deja la marca de codificación en mitad del fichero: deja de ser un BOM (que por definición es el
+/// primer byte) y se convierte en un carácter invisible dentro del cuerpo, que además vuelve
+/// ilegible el propio bloque que se acaba de escribir para cualquier lector que sí respete la
+/// marca.
+#[test]
+fn patch_sobre_bom_sin_bloque_no_precede_a_la_marca() {
+    assert_empieza_por_bom(DOC_CON_BOM_SIN_FRONTMATTER, "el fixture sin frontmatter");
+    // Guarda del fixture: hoy no hay bloque, así que el patch entra por el brazo `Sin`.
+    assert!(
+        matches!(
+            model::split_front(DOC_CON_BOM_SIN_FRONTMATTER),
+            model::SplitFront::Sin
+        ),
+        "guarda del fixture: el documento no debe tener bloque de frontmatter, para que el patch \
+         entre por el brazo que lo CREA"
+    );
+
+    let res = parchear(
+        DOC_CON_BOM_SIN_FRONTMATTER,
+        &parche(&[("status", s("draft"))]),
+    );
+    // El mismo patch sobre el gemelo sin la marca: el oráculo de todo lo que sigue.
+    let gemelo = parchear(
+        DOC_SIN_BOM_SIN_FRONTMATTER,
+        &parche(&[("status", s("draft"))]),
+    );
+
+    // (a) El resultado empieza por la marca: nada se antepone al BOM del usuario.
+    assert_empieza_por_bom(
+        &res.raw,
+        "el documento parcheado (el bloque nuevo va DESPUÉS de la marca, nunca por delante)",
+    );
+
+    // (b) …y la marca aparece UNA sola vez: no queda un BOM huérfano en mitad del fichero.
+    assert_eq!(
+        res.raw.matches(BOM).count(),
+        1,
+        "el BOM debe aparecer exactamente una vez, y en el primer byte: si el bloque se antepone, \
+         la marca queda enterrada dentro del documento.\nDocumento resultante = {:?}",
+        res.raw
+    );
+
+    // (c) El bloque creado es legible y trae la clave del patch; el cuerpo llega intacto y SIN la
+    // marca (que pertenece a la cabecera del fichero).
+    let re = model::parse_file("bom.md", &res.raw);
+    let pf = re.frontmatter.as_ref().unwrap_or_else(|| {
+        panic!(
+            "el documento parcheado debe tener un bloque de frontmatter legible:\n{:?}",
+            res.raw
+        )
+    });
+    assert_eq!(
+        pf.get(&fp("status")),
+        Some(&Yaml::String("draft".to_string())),
+        "el bloque creado debe traer la clave del patch.\nDocumento resultante = {:?}",
+        res.raw
+    );
+    assert_eq!(
+        re.body,
+        model::parse_file("bom.md", &gemelo.raw).body,
+        "el cuerpo debe llegar intacto y sin la marca: si el bloque se antepusiera al BOM, el \
+         cuerpo empezaría por él.\nDocumento resultante = {:?}",
+        res.raw
+    );
+    assert_span_coherente(&res.raw, pf);
+
+    // (d) Oráculo diferencial: mismo patch sobre el gemelo sin BOM ⇒ mismos bytes, una marca menos.
+    assert!(
+        !gemelo.raw.starts_with(BOM),
+        "el documento que NO tenía BOM no puede ganar uno: {:?}",
+        gemelo.raw
+    );
+    assert_eq!(
+        res.raw,
+        format!("{BOM}{}", gemelo.raw),
+        "el documento con BOM debe quedar igual que su gemelo sin BOM, más la marca delante"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// E24-H02 — Un BOM es VISIBLE, no silencioso
+//
+// H01 hizo que el BOM dejara de tragarse el frontmatter, pero un `.md` con BOM sigue sin producir
+// ni un diagnóstico: `knowledge_check` responde VÁLIDO con 0 avisos sobre un fichero cuya marca de
+// codificación no es portable. Es el mismo problema de portabilidad que `LINK-CASE-MISMATCH`
+// (capitalización que solo funciona en un tipo de volumen), y se trata igual: **aviso**, no error.
+//
+// Criterio de severidad (decisión propia de la historia): `Warn` y NO configurable. `§20.9` fija
+// cinco familias reclasificables desde `validation:` y esta no es una de ellas; añadir una sexta
+// sería ampliar el contrato de config, no arreglar un defecto. Queda como `LINK-ESCAPES-WORKSPACE`
+// o `SYMLINK-UNSUPPORTED`: severidad intrínseca (`family_of` devuelve `None`).
+// ---------------------------------------------------------------------------
+
+/// **E24-H02** — un `.md` con BOM emite el aviso de portabilidad y NO bloquea.
+///
+/// La pareja de aserciones importa: si fuera `Err`, un `lodestar check` sobre cualquier repo con un
+/// fichero guardado por Notepad saldría con exit 1, que es exactamente el tipo de falso positivo
+/// que `§20.9` quiere evitar («solo lo que impide interpretar o modificar con seguridad»).
+#[test]
+fn bom_emite_aviso_sin_bloquear() {
+    let con_bom = format!("{BOM}---\nstatus: draft\n---\n\n# Con BOM\n");
+    let ds = DocumentSet::from_files(mapa(&[("bom.md", &con_bom)]));
+    let a = ds.analyze();
+
+    let cs = codigos(a, &rp("bom.md"));
+    assert!(
+        cs.iter().any(|c| c == "DOC-BOM"),
+        "un `.md` que empieza por BOM UTF-8 debe emitir el aviso de portabilidad `DOC-BOM`; \
+         hoy no emite nada y `knowledge_check` responde VÁLIDO sobre él. Códigos: {cs:?}"
+    );
+
+    let bom = a
+        .diagnostics
+        .get(&rp("bom.md"))
+        .into_iter()
+        .flatten()
+        .find(|c| c.code.as_str() == "DOC-BOM")
+        .expect("el diagnóstico DOC-BOM debe estar presente");
+
+    assert_eq!(
+        bom.level,
+        lodestar_core::types::Severity::Warn,
+        "el BOM es un problema de PORTABILIDAD, no de interpretabilidad: es aviso, no error. \
+         Con `Err`, `lodestar check` tumbaría cualquier repo con un fichero guardado por Notepad"
+    );
+    assert_eq!(
+        bom.targets,
+        vec![rp("bom.md")],
+        "`targets` es el documento que lleva la marca (el que hay que editar si molesta)"
+    );
+    assert_eq!(
+        a.hard_fail(),
+        0,
+        "un BOM no puede tumbar la puerta de CI: el workspace sigue siendo válido"
+    );
+
+    // El frontmatter se sigue leyendo (no se ha roto lo que arregló H01).
+    assert!(
+        !cs.iter()
+            .any(|c| c == "FM-UNCLOSED" || c == "FM-YAML-INVALID"),
+        "el aviso de BOM no puede venir acompañado de un diagnóstico de frontmatter ilegible: \
+         H01 hizo que el bloque se interprete bien. Códigos: {cs:?}"
+    );
+}
+
+/// **E24-H02** — control anti-vacuo: sin BOM no hay aviso.
+///
+/// Sin esto, una implementación que emitiera `DOC-BOM` para todo documento pasaría el test de
+/// arriba.
+#[test]
+fn sin_bom_no_hay_aviso() {
+    let sin_bom = "---\nstatus: draft\n---\n\n# Sin BOM\n";
+    let ds = DocumentSet::from_files(mapa(&[("limpio.md", sin_bom)]));
+    let a = ds.analyze();
+
+    let cs = codigos(a, &rp("limpio.md"));
+    assert!(
+        !cs.iter().any(|c| c == "DOC-BOM"),
+        "un `.md` SIN BOM no puede emitir `DOC-BOM`: {cs:?}"
+    );
+    assert!(
+        cs.is_empty(),
+        "un documento limpio no diagnostica nada: {cs:?}"
+    );
+}
+
+/// **E24-H02** — el aviso también aparece en un documento con BOM y SIN frontmatter.
+///
+/// La marca es del fichero, no del bloque: no puede depender de que haya frontmatter. Cierra por
+/// delante el hueco de cobertura que el juez de H01 encontró por mutación en la familia gemela.
+#[test]
+fn bom_sin_frontmatter_tambien_avisa() {
+    let con_bom = format!("{BOM}# Solo cuerpo\n\ntexto\n");
+    let ds = DocumentSet::from_files(mapa(&[("desnudo.md", &con_bom)]));
+    let a = ds.analyze();
+
+    let cs = codigos(a, &rp("desnudo.md"));
+    assert!(
+        cs.iter().any(|c| c == "DOC-BOM"),
+        "el aviso es del FICHERO (su codificación), no del bloque de frontmatter: un `.md` con \
+         BOM y sin frontmatter también debe avisarlo. Códigos: {cs:?}"
+    );
+}

@@ -124,3 +124,24 @@ jobs:
             exit 1
           fi
           echo "OK: sin git2/lodestar-vcs/zip en el workspace."
+
+      # E24-H17: el doc-comment de `core::types::ErrorCode` afirma desde E10-H02 que «está
+      # prohibido redefinir estos códigos fuera de `core::types` (grep de CI)». Ese grep NO
+      # existía: el job solo tenía los dos `cargo tree` de arriba. Aquí está.
+      #
+      # Qué caza: que otro crate declare su propia tabla de códigos de wire en vez de consumir
+      # `ErrorCode::as_str()` — que es como se cuela una segunda verdad del catálogo (invariante #4:
+      # un solo contrato de tipos). Se buscan literales SCREAMING_SNAKE del catálogo fuera de
+      # `lodestar-core`, excluyendo los tests (que los asertan a propósito) y los comentarios.
+      - name: Los códigos de error solo se definen en core::types
+        run: |
+          set -euo pipefail
+          patron='"(WORKSPACE_NOT_FOUND|WORKSPACE_RECOVERY_REQUIRED|DOCUMENT_NOT_FOUND|AMBIGUOUS_REFERENCE|REVISION_CONFLICT|PLAN_STALE|PLAN_EXPIRED|PERMISSION_DENIED|INVALID_SCHEMA|INVALID_RESULT|INBOUND_LINKS_EXIST|RELATION_CONSTRAINT_VIOLATION|WRITE_CONFLICT|RESULT_TOO_LARGE|RECOVERY_FAILED|INTERNAL_IO_ERROR)"'
+          # `crates/*/src/` de todos los crates MENOS lodestar-core (que es donde deben vivir).
+          fuentes=$(find crates -path 'crates/lodestar-core' -prune -o -path '*/src/*' -name '*.rs' -print)
+          if [ -n "$fuentes" ] && echo "$fuentes" | xargs grep -nE "$patron" 2>/dev/null | grep -vE '^\s*//|///'; then
+            echo "::error::un crate fuera de lodestar-core declara literales del catálogo de ErrorCode."
+            echo "Los códigos de wire se definen UNA vez en core::types y se consumen con ErrorCode::as_str()."
+            exit 1
+          fi
+          echo "OK: los códigos de error solo se definen en core::types."

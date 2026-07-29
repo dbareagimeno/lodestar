@@ -7,6 +7,126 @@ y el proyecto sigue [Versionado Semántico](https://semver.org/lang/es/).
 
 ## [No publicado]
 
+## [0.4.0] - 2026-07-29
+
+**El lenguaje de consulta deja de responder a lo que no entiende** (`E24-H07`/`H08`, la mitad de la
+épica de cierre que se difirió de v0.3.1 por cambiar resultados observables).
+
+> **⚠️ Cambio incompatible de comportamiento**: consultas que hoy se aceptan pasan a fallar. Es la
+> corrección —lo que devolvían era una respuesta silenciosamente equivocada— pero conviene saberlo
+> antes de actualizar.
+
+### Cambiado
+
+- **Una propiedad desconocida bajo un namespace reservado es un ERROR**, no una ausencia.
+  `graph.backlink = 0` (con typo, sin la `s`) devolvía `[]` —indistinguible de un resultado
+  legítimamente vacío— y ahora falla con `INVALID_SCHEMA`, nombrando las propiedades válidas y la
+  forma de anclar al frontmatter propio. Afecta igual a `where`, a `filter` y a `has`/`missing`: los
+  tres comparten el mismo constructor de `FieldPath`, así que la equivalencia entre ellos se
+  preserva por construcción.
+  Revisa el criterio de **E19-H04** («una sub-clave de namespace desconocida es propiedad
+  ausente»), que era deliberado y ahora se considera equivocado: un typo del agente no debe
+  parecerse a un resultado.
+- **`frontmatter.` vuelve a ser un anclaje real.** Se descartaba como mera abreviatura, así que
+  `frontmatter.graph.backlinks` se convertía en `graph.backlinks` y lo capturaba el namespace: el
+  frontmatter propio del usuario con una clave llamada `graph` o `document` era **inalcanzable por
+  cualquier consulta**, pese a que `metadata_inspect` lo anunciaba en su catálogo — justo el flujo
+  que las `instructions` del servidor recomiendan (inspeccionar la metadata y luego consultarla).
+  Sin anclaje, el namespace sigue ganando: es una vía nueva, no un cambio de la que había.
+- **`has()`/`missing()` respetan los namespaces.** Hacían `FieldPath::parse` y consultaban el
+  frontmatter directamente, así que `has(graph.backlinks)` miraba una clave literalmente llamada
+  `graph.backlinks`. Era, por accidente, la única vía por la que un frontmatter `graph:` resultaba
+  alcanzable.
+- **Fuente única de verdad** para las propiedades de `document.*`/`graph.*` (`core::types`). Vivían
+  solo en los brazos de un `match` de `eval.rs`, así que el validador y el evaluador podían
+  divergir sin que nada lo detectara.
+
+## [0.3.1] - 2026-07-29
+
+Cierre de los defectos que la revisión de la v0.3.0 destapó **después** de publicarla
+(épica `E24`, [`requirements/epica-24`](requirements/epica-24-cierre-defectos-v031.md)). Igual que
+en E23, ninguno se dedujo leyendo código: los cinco se reprodujeron **ejecutando** `lodestar-mcp`
+por JSON-RPC sobre stdio y la CLI contra workspaces de prueba.
+
+> La v0.3.0 pasa todas sus puertas —437 tests, `clippy -D warnings`, los 4 de crash-recovery,
+> pureza del core— y el invariante nuclear aguantó **30 `SIGKILL` reales** durante `change_apply`
+> sin dejar ni un `.md` a medias. Lo que sigue son defectos que **la suite no miraba**.
+
+### ⚠️ Cambios observables sobre bases existentes
+
+Son correcciones, pero cambian resultados que hoy se dan por buenos:
+
+- **`lodestar check` puede pasar de exit 0 a exit 1.** Un `.md` con BOM UTF-8 y frontmatter
+  ilegible pasaba la puerta de CI porque el BOM ocultaba el bloque **entero**. Ahora se interpreta
+  y sus problemas reales (`FM-UNCLOSED`, `FM-YAML-INVALID`) se diagnostican.
+- **Los `.md` con la extensión en mayúsculas (`README.MD`) ahora se descubren.** Aparecerán en
+  búsquedas y en el grafo, y los enlaces hacia ellos dejarán de estar rotos.
+- **Nuevo diagnóstico `DOC-BOM`** (aviso, no bloquea).
+- **Se rechazan valores de parámetros que antes se ignoraban en silencio**: `limit: 0`,
+  `limit: "10"`, `depth: "3"`, `includeSuggestedFixes: "true"` → `INVALID_SCHEMA`.
+
+### Corregido
+
+- **Un BOM UTF-8 se tragaba el frontmatter entero, y escribir encima destruía la metadata.**
+  `split_front` comparaba `starts_with("---")` sobre un raw que empieza por `\u{feff}---`, así que
+  un `.md` con BOM caía en «sin frontmatter»: su metadata era invisible para el motor y
+  `knowledge_check` respondía VÁLIDO con 0 diagnósticos. Al escribir, `patch_frontmatter` anteponía
+  un bloque nuevo **por delante** del BOM (dos bloques, el original degradado a cuerpo) y un
+  `replace_body` posterior lo borraba para siempre. El BOM se **conserva byte a byte**. Cubre los
+  cinco caminos de reescritura de cuerpo de una vez, incluido `move --rewriteInboundLinks`, que es
+  el que propagaba el daño a cada enlazante. (`E24-H01`/`H02`)
+- **Tras un crash, la primera escritura fallaba siempre con `WRITE_CONFLICT`** (10 de 11
+  reproducciones). `change_plan` leía el disco sin recuperar y fijaba ahí su base; luego
+  `apply_transaction` recuperaba por debajo y el control optimista lo veía como un conflicto ajeno.
+  El código además mentía: lo había alterado la recuperación del propio Lodestar. Ahora
+  `change_plan` recupera —bajo el mismo lock de publicación— antes de leer. (`E24-H03`)
+- **Un workspace con una transacción a medias se presentaba como daño real**: `lodestar check`
+  informaba de 120 enlaces rotos sin decir que eran artefactos recuperables. Ahora lo avisa, y lo
+  declara en `--json` (`recoveryPending`). Avisa, no repara: abrir sigue siendo hermético.
+  (`E24-H04`)
+- **Fugas sin cota en `.lodestar/runtime/`.** `StagingDir` no era RAII, así que toda transacción
+  que fallara dejaba el árbol `.md` completo de su resultado; y el GC solo miraba `receipts/` y
+  solo corría en el camino de éxito — el flujo que producía la basura era el que no la recogía.
+  (`E24-H05`/`H06`)
+- **10 de 21 errores de superficie viajaban sin código del catálogo**, y la misma consulta
+  malformada daba **dos códigos distintos** según entrara por `knowledge_search`
+  (`INTERNAL_IO_ERROR`) o por la selección masiva de `change_plan` (`INVALID_SCHEMA`). Ahora 0 de
+  21. Los mensajes dejan de filtrar internos de serde. El catálogo sigue teniendo 16 códigos.
+  (`E24-H10`)
+- **Huecos de descubrimiento silenciosos**: `README.MD` invisible, symlink de directorio sin
+  diagnóstico, y un fichero llamado literalmente `a\b.md` que en Unix podía **enmascarar** al
+  documento `a/b.md`. (`E24-H12`)
+- **`WorkspaceError::code()` mantenía su propia tabla de códigos de wire**, una segunda verdad del
+  catálogo. La cazó el grep de CI que `core::types` afirmaba tener desde E10-H02 y que no existía.
+  (`E24-H17`)
+
+### Añadido
+
+- **`knowledge_get` devuelve `title`** (derivado por la cascada de `§20.2`). Ya viajaba en
+  `knowledge_search` y en `graph_query`; faltaba justo en la tool que lee un documento, así que un
+  agente que seguía el flujo recomendado perdía el título al leer. (`E24-H11`)
+- **Seam real de failpoints** en `apply_transaction`. La feature `test-failpoints` existía desde
+  E13-H06 pero **ningún fichero de `src/` la referenciaba**: los tests componían el estado
+  post-crash a mano y **en orden distinto al del orquestador**, así que uno de sus puntos de caída
+  describía un estado que el código real no puede producir. Sin coste sin la feature. (`E24-H13`)
+- **El crash por señal, como test permanente**: `SIGKILL` al binario a mitad de `change_apply`, la
+  única prueba que no depende de ningún `Drop`. (`E24-H14`)
+- **El `structuredContent` se valida contra el `outputSchema`** en las **10** tools (antes: 5, y
+  solo que el schema «tuviera alguna clave estructural»). (`E24-H15`)
+- **Escala medida por el wire**: `knowledge_search` con filtro tipado y proyección sobre 10.000
+  documentos → ~73 KB por JSON-RPC. (`E24-H16`)
+- **Los tests que E23-H10 declaró y nunca se escribieron**
+  (`schema_declara_todos_los_parametros`, `move_default_explicito`) y el grep de CI de los
+  `ErrorCode`. (`E24-H17`)
+
+### Diferido a v0.4.0
+
+El **lenguaje de consulta** (`E24-H07`/`H08`): hoy una propiedad inexistente bajo un namespace
+reservado (`graph.backlink`, con typo) devuelve `[]` en vez de fallar —una respuesta silenciosamente
+equivocada— y el frontmatter propio del usuario llamado `graph:`/`document:` es **inalcanzable** pese
+a que `metadata_inspect` lo anuncia. Se difiere porque cambia resultados de consultas que hoy se
+aceptan y porque revisa un criterio ratificado en E19-H04.
+
 ## [0.3.0] - 2026-07-28
 
 **Migración de OKF a workspaces Markdown universales** (`ARCHITECTURE.md §20`, ratificado el
@@ -245,7 +365,9 @@ y pipeline de release multiplataforma.
 - **Heading por defecto de los conceptos**: ahora `# {Tipo} - {Nombre}` (antes
   `# Resumen`).
 
-[No publicado]: https://github.com/dbareagimeno/lodestar/compare/v0.3.0...HEAD
+[No publicado]: https://github.com/dbareagimeno/lodestar/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/dbareagimeno/lodestar/compare/v0.3.1...v0.4.0
+[0.3.1]: https://github.com/dbareagimeno/lodestar/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/dbareagimeno/lodestar/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/dbareagimeno/lodestar/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/dbareagimeno/lodestar/releases/tag/v0.1.0

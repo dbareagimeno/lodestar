@@ -1551,3 +1551,398 @@ mod recuperacion {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// E24-H05 — Una transacción FALLIDA no deja staging
+//
+// `StagingDir` no tenía `Drop`, y los pasos (7)–(10) de `apply_transaction` salen por `?`
+// saltándose el `remove_dir_all` del paso (11). Cualquier transacción que fallara el control
+// optimista, el guard de escritura, el journal o la publicación dejaba en disco el árbol `.md`
+// COMPLETO de su resultado, sin que nada volviera a recogerlo. El caso que lo destapó —el
+// WRITE_CONFLICT sistemático tras un crash (E24-H03)— dejaba 121 ficheros por intento, y el GC
+// nunca los veía porque solo itera `receipts/` y solo corre en el camino de éxito.
+// ---------------------------------------------------------------------------
+
+/// Ficheros bajo `.lodestar/runtime/staging/`, o vacío si el directorio no existe.
+fn stagings_en_disco(root: &Path) -> Vec<String> {
+    let base = root.join(".lodestar").join("runtime").join("staging");
+    let Ok(entries) = std::fs::read_dir(&base) else {
+        return Vec::new();
+    };
+    let mut out: Vec<String> = entries
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .collect();
+    out.sort();
+    out
+}
+
+/// **E24-H05** — una transacción que falla el control optimista no deja su staging en disco.
+#[test]
+fn staging_no_sobrevive_a_una_transaccion_fallida() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws = Workspace::open(dir.path()).unwrap();
+    ws.create_document(
+        &RelPath::new("base.md").unwrap(),
+        "Nota",
+        Some("Base"),
+        "# H\n\ncuerpo\n",
+        false,
+    )
+    .unwrap();
+
+    // Un change set cuya `base_revision` es de un estado que ya no existe: el paso (7)
+    // `reverify_base_revision` lo rechazará DESPUÉS de materializar el staging (paso 6).
+    let mut cs = change_set(
+        "e24-h05-fallida",
+        vec![create_conforme("nuevo.md", "Nota", "Nuevo")],
+    );
+    cs.base_revision = WorkspaceRevision("blake3:0000000000000000".to_string());
+
+    let err = ws
+        .apply_transaction(&cs)
+        .expect_err("la base del change set no es la actual: la transacción debe abortar");
+    assert_eq!(
+        err.code(),
+        "WRITE_CONFLICT",
+        "precondición del test: el fallo debe ser el del control optimista (paso 7), que ocurre \
+         DESPUÉS de materializar el staging (paso 6). Si fallara antes, el test sería vacuo: {err:?}"
+    );
+
+    assert!(
+        stagings_en_disco(dir.path()).is_empty(),
+        "una transacción fallida no puede dejar su árbol de staging en disco: {:?}",
+        stagings_en_disco(dir.path())
+    );
+    assert!(
+        !dir.path().join("nuevo.md").exists(),
+        "y desde luego no puede haber publicado nada en el canónico"
+    );
+}
+
+/// **E24-H05** — control anti-vacuo: el camino feliz también limpia, y publica lo que debe.
+///
+/// Sin esto, un `Drop` que borrase el staging demasiado pronto (antes de publicar) pasaría el test
+/// de arriba y rompería la publicación entera.
+#[test]
+fn staging_se_limpia_tambien_en_el_camino_feliz() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws = Workspace::open(dir.path()).unwrap();
+    ws.create_document(
+        &RelPath::new("base.md").unwrap(),
+        "Nota",
+        Some("Base"),
+        "# H\n\ncuerpo\n",
+        false,
+    )
+    .unwrap();
+
+    let base = ws.workspace_revision().unwrap();
+    let mut cs = change_set(
+        "e24-h05-feliz",
+        vec![create_conforme("nuevo.md", "Nota", "Nuevo")],
+    );
+    cs.base_revision = base;
+
+    ws.apply_transaction(&cs)
+        .expect("la transacción debe publicarse");
+
+    assert!(
+        dir.path().join("nuevo.md").exists(),
+        "el camino feliz debe publicar de verdad: si el `Drop` limpiase el staging antes de \
+         publicar, esto fallaría"
+    );
+    assert!(
+        stagings_en_disco(dir.path()).is_empty(),
+        "tras publicar tampoco puede quedar staging: {:?}",
+        stagings_en_disco(dir.path())
+    );
+}
+
+// ---------------------------------------------------------------------------
+// E24-H06 — El GC recoge huérfanos del plano de control
+//
+// `gc_receipts` iteraba SOLO `receipts/`, así que un `staging/<txn>/` cuya transacción nunca llegó
+// a producir recibo le era invisible: no hay entrada con ese stem. Y solo se disparaba desde el
+// camino de éxito de `change_apply`/`change_revert`, o sea que el flujo que produce la basura era
+// justo el que no la recogía.
+//
+// El barrido va al revés: recorre `staging/` y `recovery/` y purga lo que no tiene ni journal vivo
+// (transacción en curso o pendiente de recuperar) ni recibo vigente (revertible).
+// ---------------------------------------------------------------------------
+
+/// Crea un directorio con un fichero dentro, bajo `.lodestar/runtime/<sub>/<nombre>/`.
+fn siembra_runtime_dir(root: &Path, sub: &str, nombre: &str) {
+    let d = root
+        .join(".lodestar")
+        .join("runtime")
+        .join(sub)
+        .join(nombre);
+    std::fs::create_dir_all(&d).unwrap();
+    std::fs::write(d.join("resto.md"), "# resto\n").unwrap();
+}
+
+fn existe_runtime_dir(root: &Path, sub: &str, nombre: &str) -> bool {
+    root.join(".lodestar")
+        .join("runtime")
+        .join(sub)
+        .join(nombre)
+        .exists()
+}
+
+/// **E24-H06** — un staging y un recovery sin journal ni recibo se purgan.
+#[test]
+fn gc_purga_huerfanos_sin_recibo() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws = Workspace::open(dir.path()).unwrap();
+    ws.create_document(
+        &RelPath::new("a.md").unwrap(),
+        "Nota",
+        Some("A"),
+        "# A\n\ncuerpo\n",
+        false,
+    )
+    .unwrap();
+
+    siembra_runtime_dir(dir.path(), "staging", "txn-huerfano");
+    siembra_runtime_dir(dir.path(), "recovery", "txn-huerfano");
+
+    ws.gc_receipts().expect("el GC debe correr");
+
+    assert!(
+        !existe_runtime_dir(dir.path(), "staging", "txn-huerfano"),
+        "un `staging/<txn>/` sin journal ni recibo es basura y el GC debe recogerlo"
+    );
+    assert!(
+        !existe_runtime_dir(dir.path(), "recovery", "txn-huerfano"),
+        "lo mismo para su `recovery/<txn>/`"
+    );
+}
+
+/// **E24-H06** — control anti-vacuo: una transacción VIVA (con journal) no se toca.
+///
+/// Sin esto, un barrido que borrase todo pasaría el test de arriba y destruiría exactamente los
+/// datos que la recuperación necesita.
+#[test]
+fn gc_no_toca_transacciones_vivas() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws = Workspace::open(dir.path()).unwrap();
+    ws.create_document(
+        &RelPath::new("a.md").unwrap(),
+        "Nota",
+        Some("A"),
+        "# A\n\ncuerpo\n",
+        false,
+    )
+    .unwrap();
+
+    // Transacción EN CURSO: journal `prepared` + su staging y sus copias.
+    let a = RelPath::new("a.md").unwrap();
+    let base = ws.workspace_revision().unwrap();
+    ws.backup_originals("txn-viva", std::slice::from_ref(&a))
+        .expect("copias de recuperación");
+    let _journal = ws
+        .create_journal("txn-viva", &[a], &base, &base)
+        .expect("journal");
+    siembra_runtime_dir(dir.path(), "staging", "txn-viva");
+
+    ws.gc_receipts().expect("el GC debe correr");
+
+    assert!(
+        existe_runtime_dir(dir.path(), "staging", "txn-viva"),
+        "una transacción con journal vivo está a medio publicar o a medio recuperar: su staging es \
+         justo lo que la recuperación necesita, el GC NO puede tocarlo"
+    );
+    assert!(
+        existe_runtime_dir(dir.path(), "recovery", "txn-viva"),
+        "ni sus copias de recuperación"
+    );
+}
+
+/// **E24-H06** — los temporales `*.lodestar-tmp` abandonados por un crash se recogen.
+#[test]
+fn gc_purga_temporales_huerfanos() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws = Workspace::open(dir.path()).unwrap();
+    let journal_dir = dir.path().join(".lodestar").join("runtime").join("journal");
+    std::fs::create_dir_all(&journal_dir).unwrap();
+    let tmp = journal_dir.join("txn.json.12345-0.lodestar-tmp");
+    std::fs::write(&tmp, "{}").unwrap();
+
+    ws.gc_receipts().expect("el GC debe correr");
+
+    assert!(
+        !tmp.exists(),
+        "un temporal de la escritura atómica abandonado por un crash entre el `create` y el \
+         `rename` no rompe nada, pero se acumula sin límite: el GC debe recogerlo"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// E24-H13 — Seam REAL de failpoints: la caída se inyecta DENTRO de `apply_transaction`
+//
+// Los cuatro tests de E13-H06 componen el estado post-crash a mano con `simular_caida`, y en un
+// orden que NO es el del orquestador (journal antes que backup, cuando producción hace backup antes
+// que journal). Consecuencia medida: `FailPoint::TrasJournalPrepared` de aquella taxonomía describe
+// un estado que el código real no puede producir, y pasa vacuamente porque sin directorio de
+// recuperación `restore_from_recovery` devuelve Ok() de inmediato.
+//
+// Estos tests recorren el orquestador de verdad, así que la taxonomía ya no puede divergir del
+// orden de producción: si alguien reordena los pasos, cambia el comportamiento observado aquí.
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "test-failpoints")]
+mod seam_real {
+    use super::*;
+    use lodestar_workspace::failpoints::{self, FailPoint};
+
+    /// Workspace con tres documentos y un change set que los toca todos.
+    fn tres_documentos() -> (tempfile::TempDir, Workspace, BTreeMap<String, String>) {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = Workspace::open(dir.path()).unwrap();
+        for n in ["uno", "dos", "tres"] {
+            ws.create_document(
+                &RelPath::new(&format!("{n}.md")).unwrap(),
+                "Nota",
+                Some(n),
+                &format!("# {n}\n\ncuerpo original\n"),
+                false,
+            )
+            .unwrap();
+        }
+        let original = canonical_md(dir.path());
+        (dir, ws, original)
+    }
+
+    /// Un change set que modifica los tres documentos.
+    fn cs_modifica_los_tres(ws: &Workspace, id: &str) -> ChangeSet {
+        let mut cs = change_set(
+            id,
+            ["uno", "dos", "tres"]
+                .iter()
+                .map(|n| NormalizedOperation::ReplaceBody {
+                    path: RelPath::new(&format!("{n}.md")).unwrap(),
+                    body: format!("# {n}\n\ncuerpo NUEVO\n"),
+                })
+                .collect(),
+        );
+        cs.base_revision = ws.workspace_revision().unwrap();
+        cs
+    }
+
+    /// **E24-H13** — property test sobre el orquestador REAL: desde cualquier punto de caída, tras
+    /// recuperar el canónico converge a uno de los dos bordes. Nunca a un estado parcial.
+    #[test]
+    fn recovery_sin_parciales_por_el_orquestador_real() {
+        let puntos = [
+            FailPoint::AlEntrar,
+            FailPoint::TrasBackupSinJournal,
+            FailPoint::TrasJournalPrepared,
+            FailPoint::EntreRenames,
+            FailPoint::TrasPublicarSinSellar,
+            FailPoint::AntesDeSellar,
+        ];
+
+        for (i, fp) in puntos.iter().enumerate() {
+            let (dir, ws, original) = tres_documentos();
+            let cs = cs_modifica_los_tres(&ws, &format!("e24-h13-{i}"));
+            // `ReplaceBody` CONSERVA el frontmatter (E23-H03), así que el borde «resultado» es el
+            // original con el cuerpo sustituido — no solo el cuerpo.
+            let resultado_esperado: BTreeMap<String, String> = original
+                .iter()
+                .map(|(k, v)| (k.clone(), v.replace("cuerpo original", "cuerpo NUEVO")))
+                .collect();
+
+            failpoints::armar(*fp);
+            let r = ws.apply_transaction(&cs);
+            failpoints::desarmar();
+            assert!(
+                r.is_err(),
+                "el failpoint {fp:?} debe abortar la transacción (si no, el test es vacuo)"
+            );
+
+            // Se «reabre» el workspace, como haría el proceso siguiente, y se recupera.
+            drop(ws);
+            let ws2 = Workspace::open(dir.path()).unwrap();
+            if ws2.recovery_pending() {
+                ws2.recover().expect("la recuperación debe completarse");
+            }
+
+            let final_ = canonical_md(dir.path());
+            let es_original = final_ == original;
+            let es_resultado = final_ == resultado_esperado;
+            assert!(
+                es_original || es_resultado,
+                "desde {fp:?}, el canónico debe converger a UNO de los dos bordes de la \
+                 transacción, jamás a un estado parcial.\nfinal:     {final_:?}\noriginal:  \
+                 {original:?}\nresultado: {resultado_esperado:?}"
+            );
+            assert!(
+                !ws2.recovery_pending(),
+                "tras recuperar desde {fp:?} no puede quedar recuperación pendiente"
+            );
+        }
+    }
+
+    /// **E24-H13** — el estado que la simulación de E13-H06 NO modelaba: copias escritas, journal
+    /// aún ausente.
+    ///
+    /// Producción hace backup ANTES que journal; la simulación lo hacía al revés, así que este
+    /// estado —el único que el código real produce entre esos dos pasos— no lo cubría nadie. Al
+    /// reabrir, `recovery_pending()` es `false` (solo mira journals): hay que comprobar que el
+    /// canónico está intacto, porque ningún rename ha ocurrido todavía.
+    #[test]
+    fn caida_entre_backup_y_journal() {
+        let (dir, ws, original) = tres_documentos();
+        let cs = cs_modifica_los_tres(&ws, "e24-h13-backup-sin-journal");
+
+        failpoints::armar(FailPoint::TrasBackupSinJournal);
+        let r = ws.apply_transaction(&cs);
+        failpoints::desarmar();
+        assert!(r.is_err(), "el failpoint debe abortar");
+
+        drop(ws);
+        let ws2 = Workspace::open(dir.path()).unwrap();
+        assert!(
+            !ws2.recovery_pending(),
+            "sin journal no hay recuperación pendiente que detectar: `pending_journals` solo mira \
+             journals. Es justamente por eso que el canónico tiene que estar ya intacto"
+        );
+        assert_eq!(
+            canonical_md(dir.path()),
+            original,
+            "la caída ocurrió ANTES del primer rename, así que el canónico no puede haberse \
+             movido ni un byte"
+        );
+
+        // El árbol de recuperación queda huérfano (no hay journal ni recibo): lo recoge el GC.
+        ws2.gc_receipts().expect("el GC debe correr");
+        let recovery = dir
+            .path()
+            .join(".lodestar")
+            .join("runtime")
+            .join("recovery");
+        let huerfanos = std::fs::read_dir(&recovery)
+            .map(|rd| rd.flatten().count())
+            .unwrap_or(0);
+        assert_eq!(
+            huerfanos, 0,
+            "las copias de una transacción que nunca llegó a tener journal ni recibo son basura: \
+             el GC de E24-H06 debe recogerlas"
+        );
+    }
+
+    /// **E24-H13** — control anti-vacuo del seam: sin armar nada, la transacción publica.
+    #[test]
+    fn sin_failpoint_armado_la_transaccion_publica() {
+        let (dir, ws, _original) = tres_documentos();
+        let cs = cs_modifica_los_tres(&ws, "e24-h13-sin-armar");
+        ws.apply_transaction(&cs)
+            .expect("sin failpoint armado la transacción debe publicar");
+        let final_ = canonical_md(dir.path());
+        assert!(
+            final_.values().all(|c| c.contains("cuerpo NUEVO")),
+            "el seam no puede alterar el camino normal: {final_:?}"
+        );
+    }
+}

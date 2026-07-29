@@ -1233,3 +1233,121 @@ fn receipt_corrupto_no_oculta_los_sanos() {
          del nombre del fichero): {ids:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// E24-H17 — Los tests que E23-H10 declaró como criterio y nunca se escribieron
+//
+// `requirements/epica-23-cierre-migracion.md:342` fija como criterio de aceptación de E23-H10 un
+// test llamado `schema_declara_todos_los_parametros`. La cadena aparece UNA sola vez en todo el
+// repo —en esa línea de la spec— y en ningún `.rs`. El commit que cerró la historia (`c6a9990`)
+// tocó solo `contracts/mcp.yml` y `tools.rs`, y su cuerpo sustituye el test por «verificado
+// manualmente». La historia consta como cerrada en el ledger. Ídem `move_default_explicito`.
+//
+// Aquí están. Es la misma clase de defecto que toda E24 cierra: una afirmación que nadie ejecuta.
+// ---------------------------------------------------------------------------
+
+/// **E24-H17** — el `inputSchema` de `change_plan.operations[]` declara TODOS los parámetros que el
+/// normalizador lee.
+///
+/// El sentido de la comprobación es «declarado ⊇ leído»: un parámetro que el código lee y el schema
+/// no anuncia es invisible para el cliente, que es justo el agujero de usabilidad que E23-H10 abrió
+/// para cerrar (hasta entonces el schema declaraba 4 de los 18 campos reales).
+///
+/// La lista de «leídos» se mantiene a mano porque los nombres viven dispersos en `params.get("…")`
+/// y en los brazos de `normalize_raw_op`, y no son introspectables. Eso hace el test **frágil a
+/// propósito**: si alguien añade un parámetro al normalizador sin declararlo, este test no lo caza
+/// solo — pero sí caza el caso inverso (declarar y no leer) y, sobre todo, deja la lista escrita en
+/// un sitio donde el siguiente que toque la superficie la vea.
+#[test]
+fn schema_declara_todos_los_parametros() {
+    let dir = workspace_frontmatter();
+    let mut s = Sesion::abrir(dir.path());
+    let cp = s.descriptor("change_plan");
+
+    let declarados: BTreeSet<String> = cp["inputSchema"]["properties"]["operations"]["items"]
+        ["properties"]
+        .as_object()
+        .expect("el schema de `operations[]` debe declarar `properties`")
+        .keys()
+        .cloned()
+        .collect();
+
+    // Los que `lodestar_app::normalize_raw_op` lee de verdad, op por op.
+    let leidos: BTreeSet<String> = [
+        // comunes
+        "op",
+        "path",
+        "ref",
+        "expectedRevision",
+        // create
+        "frontmatter",
+        "body",
+        // patch_frontmatter
+        "patch",
+        // replace_text
+        "find",
+        "replace",
+        "expectedOccurrences",
+        // edit_section
+        "headingPath",
+        "mode",
+        "content",
+        // move
+        "from",
+        "to",
+        "rewriteInboundLinks",
+        // delete
+        "inboundLinksPolicy",
+    ]
+    .iter()
+    .map(|s| (*s).to_string())
+    .collect();
+
+    let sin_declarar: Vec<&String> = leidos.difference(&declarados).collect();
+    assert!(
+        sin_declarar.is_empty(),
+        "el `inputSchema` de `change_plan.operations[]` debe declarar TODOS los parámetros que el \
+         normalizador lee: un parámetro leído y no anunciado es invisible para el cliente, que es \
+         el agujero que E23-H10 vino a cerrar. Sin declarar: {sin_declarar:?}"
+    );
+
+    // Guarda anti-vacua: si la lista de «leídos» se vaciara por accidente, la aserción de arriba
+    // pasaría siempre.
+    assert!(
+        leidos.len() >= 17,
+        "la lista de parámetros leídos no puede quedarse vacía o corta: son 17 como mínimo"
+    );
+
+    drop(s);
+}
+
+/// **E24-H17** — `move.rewriteInboundLinks` declara su default explícitamente.
+///
+/// Es el otro criterio de E23-H10 que nunca se escribió. Importa porque el default es `false` y las
+/// consecuencias de no saberlo son caras: sin él, un `move` deja **todos** los backlinks apuntando
+/// a la ruta vieja, rotos y en silencio. Un cliente que lee el schema tiene que poder verlo sin
+/// ejecutar nada.
+#[test]
+fn move_default_explicito() {
+    let dir = workspace_frontmatter();
+    let mut s = Sesion::abrir(dir.path());
+    let cp = s.descriptor("change_plan");
+    let prop = &cp["inputSchema"]["properties"]["operations"]["items"]["properties"]
+        ["rewriteInboundLinks"];
+
+    assert_eq!(
+        prop["default"],
+        serde_json::json!(false),
+        "`rewriteInboundLinks` debe declarar su default (`false`) en el schema: sin él, un `move` \
+         rompe todos los backlinks en silencio y el cliente no tiene forma de saberlo sin \
+         ejecutarlo. Propiedad declarada: {prop}"
+    );
+    assert!(
+        prop["description"]
+            .as_str()
+            .is_some_and(|d| d.contains("rompe") || d.contains("rotos")),
+        "y la descripción debe advertir de la consecuencia, no solo enunciar el campo: {prop}"
+    );
+
+    drop(s);
+}

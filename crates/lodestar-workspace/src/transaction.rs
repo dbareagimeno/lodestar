@@ -35,6 +35,8 @@ use std::collections::BTreeSet;
 use lodestar_core::plan;
 use lodestar_core::types::{ChangeSet, ChangeSetId, FileMap, RelPath, WorkspaceRevision};
 
+#[cfg(feature = "test-failpoints")]
+use crate::failpoints::FailPoint;
 use crate::{Workspace, WorkspaceError};
 
 /// Deriva el identificador de transacción de un [`ChangeSetId`]: el hash **desnudo** (sin el prefijo
@@ -104,6 +106,8 @@ impl Workspace {
         // (1) Lock exclusivo de publicación (RAII: liberado al final por `Drop`, incluso en panic).
         let _lock = self.acquire_lock()?;
 
+        failpoint!(FailPoint::AlEntrar);
+
         // (2) Recuperación pendiente primero: si una transacción anterior quedó a medias, complétala
         //     o restáurala antes de publicar sobre un estado a medio recuperar (E13-H06). Bajo el
         //     lock, así dos publicadores no recuperan a la vez.
@@ -132,7 +136,10 @@ impl Workspace {
 
         // (6) Staging: materializa y valida el resultado hipotético sin tocar el canónico (E13-H01),
         //     de modo que el lote publicado coincida exactamente con lo materializado y validado.
-        let staging = self.materialize_staging_result(&change_set.id, &result_files)?;
+        // E24-H05: `StagingDir` es RAII. Si cualquiera de los pasos (7)–(10) sale por `?`, su
+        // `Drop` limpia el árbol — antes se quedaba en disco para siempre, porque el
+        // `remove_dir_all` del paso (11) quedaba por debajo del `?`.
+        let mut staging = self.materialize_staging_result(&change_set.id, &result_files)?;
         let staging_path = staging.path().to_path_buf();
         self.validate_staging(&staging)?;
 
@@ -148,18 +155,28 @@ impl Workspace {
         //     conservan al sellar (para el receipt y el revert de H09).
         self.backup_originals(&txn_id, &affected)?;
 
+        failpoint!(FailPoint::TrasBackupSinJournal);
+
         // (9) Write-ahead journal `prepared`, fsynced antes del primer rename (E13-H03).
         let mut journal = self.create_journal(&txn_id, &affected, &previous, &result_rev)?;
+
+        failpoint!(FailPoint::TrasJournalPrepared);
 
         // (10) Publica el resultado por el único escritor (renames atómicos + journal `applied`,
         //      E13-H05): el mismo `result_files` que se materializó y validó en staging.
         let result = self.publish_result(&result_files, &mut journal)?;
 
+        failpoint!(FailPoint::TrasPublicarSinSellar);
+
         // (11) Sella la transacción: limpia el staging y el journal (levanta el gate de recuperación)
         //      pero CONSERVA las copias de recuperación (el receipt y `change_revert` las usan). El
         //      journal ya está `applied` en disco; borrarlo es el sellado `done` efectivo (tras esto
         //      `recovery_pending()` vuelve a `false`).
+        // A partir de aquí la limpieza del staging es de este camino, no del `Drop` (E24-H05): se
+        // borra DESPUÉS de publicar y en el mismo orden que el sellado del journal.
+        staging.keep();
         let journal_path = journal.path().to_path_buf();
+        failpoint!(FailPoint::AntesDeSellar);
         if staging_path.exists() {
             std::fs::remove_dir_all(&staging_path)?;
         }

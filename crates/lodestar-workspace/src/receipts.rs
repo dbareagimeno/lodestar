@@ -226,7 +226,11 @@ impl Workspace {
 
         let dir = self.receipts_dir();
         let Ok(read_dir) = std::fs::read_dir(&dir) else {
-            return Ok(());
+            // Sin recibos no hay nada que purgar por retención, pero SÍ puede haber huérfanos:
+            // una transacción abortada deja staging sin llegar nunca a producir recibo, que es
+            // justo el caso que E24-H06 recoge. Salir aquí sin barrer dejaría el arreglo sin
+            // efecto en el escenario que lo motivó.
+            return self.gc_runtime_huerfanos();
         };
 
         let mut entries: Vec<(PathBuf, SystemTime, String)> = Vec::new();
@@ -282,6 +286,82 @@ impl Workspace {
             let recovery = self.receipt_recovery_dir(stem);
             if recovery.exists() {
                 std::fs::remove_dir_all(&recovery)?;
+            }
+        }
+
+        self.gc_runtime_huerfanos()?;
+
+        Ok(())
+    }
+
+    /// Barre el plano de control: directorios de `staging/` y `recovery/` que ya no pertenecen a
+    /// ninguna transacción **viva ni recordada**, y temporales `*.lodestar-tmp` abandonados
+    /// (E24-H06).
+    ///
+    /// El GC de recibos itera **solo** `receipts/`, así que un `staging/<txn>/` cuya transacción
+    /// nunca llegó a producir recibo le es invisible: no hay entrada con ese stem. Este barrido va
+    /// al revés —recorre `staging/` y `recovery/` y purga lo que no tiene respaldo— que es la única
+    /// forma de recoger lo que dejaban las transacciones abortadas.
+    ///
+    /// **Qué se considera vivo, y por qué no se toca**:
+    /// - una transacción con **journal** presente está a medio publicar o a medio recuperar: su
+    ///   staging y sus copias son justamente lo que la recuperación necesita;
+    /// - una transacción con **recibo** vigente puede revertirse, y `change_revert` restaura desde
+    ///   `recovery/<txn>/`.
+    ///
+    /// Todo lo demás es basura: la convención de nombre única de este módulo (mismo `txnId` saneado
+    /// para `staging/`, `recovery/`, `journal/` y `receipts/`) es lo que permite decidirlo.
+    fn gc_runtime_huerfanos(&self) -> Result<(), WorkspaceError> {
+        let runtime = self.root.join(".lodestar").join("runtime");
+
+        // Stems con respaldo: journal vivo (transacción en curso o pendiente de recuperar) o
+        // recibo persistido (revertible).
+        let mut vivos: BTreeSet<String> = BTreeSet::new();
+        for (sub, ext) in [("journal", "json"), ("receipts", "json")] {
+            if let Ok(rd) = std::fs::read_dir(runtime.join(sub)) {
+                for e in rd.flatten() {
+                    let p = e.path();
+                    if p.extension().and_then(|x| x.to_str()) == Some(ext) {
+                        if let Some(stem) = p.file_stem().and_then(|s| s.to_str()) {
+                            vivos.insert(stem.to_string());
+                        }
+                    }
+                }
+            }
+        }
+
+        for sub in ["staging", "recovery"] {
+            let Ok(rd) = std::fs::read_dir(runtime.join(sub)) else {
+                continue;
+            };
+            for e in rd.flatten() {
+                let p = e.path();
+                if !p.is_dir() {
+                    continue;
+                }
+                let Some(nombre) = p.file_name().and_then(|s| s.to_str()) else {
+                    continue;
+                };
+                if !vivos.contains(nombre) {
+                    // Best-effort: que un huérfano no se pueda borrar no puede tumbar la
+                    // transacción que acaba de publicarse con éxito.
+                    let _ = std::fs::remove_dir_all(&p);
+                }
+            }
+        }
+
+        // Temporales de la escritura atómica abandonados por un crash entre el `File::create` y el
+        // `rename` (`io::write_atomic`, `journal::write_journal`, `receipts::write_runtime_atomic`).
+        // No rompen nada —`pending_journals` filtra por extensión `.json` y el descubrimiento por
+        // `.md`—, pero se acumulan sin límite.
+        for sub in ["journal", "receipts", "plans"] {
+            if let Ok(rd) = std::fs::read_dir(runtime.join(sub)) {
+                for e in rd.flatten() {
+                    let p = e.path();
+                    if p.to_string_lossy().ends_with(".lodestar-tmp") {
+                        let _ = std::fs::remove_file(&p);
+                    }
+                }
             }
         }
 

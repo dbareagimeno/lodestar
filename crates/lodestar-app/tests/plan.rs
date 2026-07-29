@@ -241,3 +241,201 @@ fn plan_fuera_de_revision() {
          excluido de la identidad del workspace)",
     );
 }
+
+// ---------------------------------------------------------------------------
+// E24-H03 — `change_plan` planifica sobre el estado YA RECUPERADO
+//
+// Defecto reproducido matando el servidor con SIGKILL a mitad de `change_apply`: la primera pareja
+// `change_plan` + `change_apply` posterior fallaba SIEMPRE con `WRITE_CONFLICT` (10 de 11
+// reproducciones), y el segundo intento funcionaba. La cadena era:
+//
+//   1. `change_plan` leía el disco SIN recuperar (renames parciales visibles) y fijaba ahí
+//      `base_revision`.
+//   2. `change_apply` recomputaba el `planHash` sobre ese mismo estado → coincidía, no saltaba
+//      `PLAN_STALE`.
+//   3. `apply_transaction` paso (2) llamaba a `recover()`, que restauraba los originales.
+//   4. Paso (7) `reverify_base_revision` comparaba la base pre-recuperación contra el estado
+//      post-recuperación → `WriteConflict`.
+//
+// El código además MENTÍA: `WRITE_CONFLICT` significa «otro escritor lo modificó entre el plan y el
+// apply», y aquí quien lo modificó fue la recuperación del propio Lodestar.
+//
+// El montaje del estado «transacción a medias» usa las mismas primitivas públicas y durables que
+// `simular_caida` (`backup_originals` de E13-H04 + `create_journal`/`mark_applied` de E13-H03),
+// deteniéndose en el equivalente a `FailPoint::EntreRenames`. Es lo que un crash real deja en disco.
+// ---------------------------------------------------------------------------
+
+use lodestar_core::types::RelPath;
+use lodestar_workspace::Workspace;
+
+/// Monta un workspace con una transacción interrumpida durable: copias de recuperación de los dos
+/// documentos afectados, journal `applying` con el primer rename marcado, y el canónico reflejando
+/// solo ese primer rename. Nada sella `done`, así que `recovery_pending()` queda en `true`.
+///
+/// Devuelve el tempdir y el contenido ORIGINAL de los dos documentos, para poder aseverar que la
+/// recuperación restaura (la transacción quedó en `applying`, que restaura, no completa).
+fn workspace_con_transaccion_a_medias() -> (tempfile::TempDir, String, String) {
+    const TXN: &str = "txn-e24-h03-a-medias";
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let uno_original = "# Uno\n\ncuerpo original de uno\n".to_string();
+    let dos_original = "# Dos\n\ncuerpo original de dos\n".to_string();
+    escribe(root, "notas/uno.md", &uno_original);
+    escribe(root, "notas/dos.md", &dos_original);
+
+    let ws = Workspace::open(root).expect("el workspace de prueba debe abrir");
+    let uno = RelPath::new("notas/uno.md").unwrap();
+    let dos = RelPath::new("notas/dos.md").unwrap();
+    let afectados = [uno.clone(), dos];
+    let base = ws.workspace_revision().expect("revisión base");
+
+    ws.backup_originals(TXN, &afectados)
+        .expect("copias de recuperación");
+    let mut journal = ws
+        .create_journal(TXN, &afectados, &base, &base)
+        .expect("write-ahead journal");
+    // Primer rename «hecho»: el canónico ya refleja el cambio de uno.md; dos.md sigue original.
+    std::fs::write(
+        root.join("notas/uno.md"),
+        "# Uno\n\ncuerpo a MEDIO publicar\n",
+    )
+    .unwrap();
+    journal.mark_applied(&uno).expect("marcar el primer rename");
+    // Se «cae» aquí: el journal nunca llega a `done`.
+    drop(journal);
+    drop(ws);
+
+    (dir, uno_original, dos_original)
+}
+
+/// **E24-H03** — tras un crash, `change_plan` + `change_apply` funciona **al primer intento**.
+#[test]
+fn apply_tras_crash_no_da_write_conflict() {
+    let (dir, uno_original, _dos_original) = workspace_con_transaccion_a_medias();
+    let app = App::open(dir.path()).expect("el workspace debe abrir");
+
+    // Guarda de no vacuidad: el montaje tiene que dejar recuperación pendiente de verdad. Sin
+    // esto, un montaje roto haría pasar el test por la razón equivocada.
+    assert!(
+        app.workspace().recovery_pending(),
+        "precondición: el montaje debe dejar una transacción a medias (journal no-`done`)"
+    );
+
+    let plan = app
+        .change_plan(
+            None,
+            &serde_json::json!([{ "op": "create", "path": "testigo.md", "body": "# Testigo\n" }]),
+            PlanPolicy {
+                require_valid_result: false,
+                allow_warnings: true,
+            },
+        )
+        .expect("el plan debe producirse sobre el estado recuperado");
+
+    let receipt = app.change_apply(&plan.change_set_id, None);
+    assert!(
+        receipt.is_ok(),
+        "tras un crash, el PRIMER `change_apply` debe funcionar: hasta E24-H03 fallaba siempre \
+         con WRITE_CONFLICT porque el plan capturaba la base de un estado que `apply_transaction` \
+         deshacía después. Error: {:?}",
+        receipt.err()
+    );
+
+    assert!(
+        dir.path().join("testigo.md").exists(),
+        "la transacción del agente debe haberse publicado de verdad"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("notas/uno.md")).unwrap(),
+        uno_original,
+        "la transacción interrumpida quedó en `applying`, así que la recuperación RESTAURA: \
+         `notas/uno.md` vuelve a su contenido original"
+    );
+    assert!(
+        !app.workspace().recovery_pending(),
+        "tras recuperar y publicar, no puede quedar recuperación pendiente"
+    );
+}
+
+/// **E24-H03** — el plan parte del estado recuperado, no del estado parcial.
+///
+/// Es la mitad que explica POR QUÉ desaparece el `WRITE_CONFLICT`: si la `baseWorkspaceRevision`
+/// del plan fuera la del estado a medias, seguiría sin casar con la del canónico recuperado.
+#[test]
+fn plan_tras_crash_parte_del_estado_recuperado() {
+    let (dir, _uno, _dos) = workspace_con_transaccion_a_medias();
+    let app = App::open(dir.path()).expect("el workspace debe abrir");
+    assert!(
+        app.workspace().recovery_pending(),
+        "precondición: debe haber recuperación pendiente"
+    );
+
+    // La revisión del estado PARCIAL, leída antes de planificar.
+    let parcial = app
+        .workspace()
+        .workspace_revision()
+        .expect("revisión del estado parcial");
+
+    let plan = app
+        .change_plan(
+            None,
+            &serde_json::json!([{ "op": "create", "path": "t.md", "body": "# T\n" }]),
+            PlanPolicy {
+                require_valid_result: false,
+                allow_warnings: true,
+            },
+        )
+        .expect("el plan debe producirse");
+
+    assert_ne!(
+        plan.base_workspace_revision, parcial,
+        "la base del plan NO puede ser la del estado a medias: `change_plan` recupera antes de \
+         leer, así que parte del canónico ya restaurado"
+    );
+    assert_eq!(
+        plan.base_workspace_revision,
+        app.workspace()
+            .workspace_revision()
+            .expect("revisión tras recuperar"),
+        "la base del plan es la revisión del canónico YA recuperado"
+    );
+}
+
+/// **E24-H03** — control anti-vacuo: sin recuperación pendiente, `change_plan` no toca el canónico.
+///
+/// El arreglo no puede convertir el plan en un escritor habitual: recuperar es reparar, y solo
+/// ocurre cuando hay algo que reparar.
+#[test]
+fn plan_sin_recuperacion_pendiente_no_escribe() {
+    let dir = tempfile::tempdir().unwrap();
+    escribe(dir.path(), "a.md", "# A\n\ncuerpo\n");
+    let app = App::open(dir.path()).expect("el workspace debe abrir");
+    assert!(
+        !app.workspace().recovery_pending(),
+        "precondición: un workspace limpio no tiene recuperación pendiente"
+    );
+
+    let antes = std::fs::read_to_string(dir.path().join("a.md")).unwrap();
+    let rev_antes = app.workspace().workspace_revision().unwrap();
+
+    app.change_plan(
+        None,
+        &serde_json::json!([{ "op": "replace_body", "path": "a.md", "body": "# A\n\notro\n" }]),
+        PlanPolicy {
+            require_valid_result: false,
+            allow_warnings: true,
+        },
+    )
+    .expect("el plan debe producirse");
+
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("a.md")).unwrap(),
+        antes,
+        "`change_plan` no publica: el canónico queda idéntico"
+    );
+    assert_eq!(
+        app.workspace().workspace_revision().unwrap(),
+        rev_antes,
+        "la revisión del workspace no se mueve al planificar"
+    );
+}

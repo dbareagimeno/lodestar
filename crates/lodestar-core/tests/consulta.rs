@@ -947,6 +947,12 @@ fn eval_en(ds: &DocumentSet, path: &str, expr: &Expression) -> Result<bool, Type
     evaluate(expr, &doc, ds.analyze())
 }
 
+/// Parsea una expresión del lenguaje textual, o explota con su mensaje (E24-H07/H08).
+fn parsea(expr: &str) -> Expression {
+    lodestar_core::parse::parse(expr)
+        .unwrap_or_else(|e| panic!("`{expr}` debe parsear: {}", e.message))
+}
+
 /// Criterio: `document.path starts_with "docs/"` (`namespace_document_path`).
 #[test]
 fn namespace_document_path() {
@@ -1418,5 +1424,167 @@ fn filtro_malformado_es_error() {
     assert!(
         from_json(&json!("status = accepted")).is_err(),
         "un filtro que no es objeto es `Err`"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// E24-H07/H08 (v0.4.0) — Los namespaces reservados dejan de responder a lo que no entienden
+//
+// Hasta v0.3.1, `graph.backlink` (con typo) devolvía `[]`: indistinguible de un resultado
+// legítimamente vacío. Es peor que un error — una respuesta silenciosamente equivocada. Y el
+// frontmatter propio del usuario llamado `graph:`/`document:` era INALCANZABLE, porque
+// `build_field_path` descartaba el prefijo `frontmatter.` y el namespace lo capturaba, pese a que
+// `metadata_inspect` lo anuncia en su catálogo.
+//
+// Esto REVISA el criterio de E19-H04 («una sub-clave de namespace desconocida es propiedad
+// ausente»), y por eso va en v0.4.0 y no en el parche.
+// ---------------------------------------------------------------------------
+
+/// **E24-H07** — una propiedad desconocida bajo namespace reservado es un ERROR de consulta.
+#[test]
+fn namespace_reservado_rechaza_propiedad_desconocida() {
+    for expr in [
+        "graph.backlink = 0", // typo: falta la `s`
+        "graph.foo = 1",
+        "document.pathh = \"a.md\"",
+        "document.foo = 1",
+        "graph.backlinks.extra = 1", // demasiados segmentos
+    ] {
+        let e = lodestar_core::parse::parse(expr)
+            .expect_err(&format!("`{expr}` debe RECHAZARSE, no devolver []"));
+        assert!(
+            e.message.contains("no existe"),
+            "el error debe decir que la propiedad no existe: {}",
+            e.message
+        );
+        assert!(
+            e.message.contains("frontmatter."),
+            "y debe indicar la salida (anclar con `frontmatter.`) para quien SÍ tenga una clave \
+             con ese nombre en su metadata: {}",
+            e.message
+        );
+    }
+}
+
+/// **E24-H07** — control anti-vacuo: las 7 propiedades válidas siguen funcionando.
+#[test]
+fn namespaces_validos_siguen_parseando() {
+    for expr in [
+        "document.path = \"a.md\"",
+        "document.title = \"A\"",
+        "document.has_frontmatter = true",
+        "graph.backlinks = 0",
+        "graph.outgoing_links > 1",
+        "graph.dangling_links = 0",
+        "graph.isolated = true",
+    ] {
+        lodestar_core::parse::parse(expr)
+            .unwrap_or_else(|e| panic!("`{expr}` es válida y debe parsear: {}", e.message));
+    }
+}
+
+/// **E24-H07** — un campo de frontmatter inexistente SIN namespace reservado sigue siendo ausencia.
+///
+/// El rechazo es solo bajo `document.`/`graph.`: el frontmatter es metadata arbitraria del usuario
+/// y preguntar por una clave que no tiene es legítimo, no un error.
+#[test]
+fn campo_de_frontmatter_inexistente_sigue_siendo_ausencia() {
+    lodestar_core::parse::parse("status_inventado = x")
+        .expect("un campo de frontmatter que no existe NO es un error de consulta");
+    lodestar_core::parse::parse("service.tier.profundo = 1").expect("ni uno anidado que no existe");
+}
+
+/// **E24-H07** — el `filter` JSON rechaza igual (comparten `build_field_path`).
+#[test]
+fn filtro_con_namespace_desconocido_es_error() {
+    let f = serde_json::json!({"field": "graph.backlink", "operator": "equals", "value": 0});
+    let e = lodestar_core::filter::from_json(&f)
+        .expect_err("el filtro JSON debe rechazar lo mismo que el `where`: comparten constructor");
+    assert!(
+        e.message.contains("no existe"),
+        "mismo mensaje por los dos caminos: {}",
+        e.message
+    );
+}
+
+/// **E24-H08** — `frontmatter.` es un ANCLAJE: alcanza una clave llamada como un namespace.
+#[test]
+fn anclaje_frontmatter_alcanza_clave_reservada() {
+    let ds = DocumentSet::from_files(lodestar_fixtures::file_map(&[(
+        "b.md",
+        "---\ngraph:\n  backlinks: 7\ndocument:\n  path: falso.md\n---\n\n# B\n",
+    )]));
+
+    assert_eq!(
+        eval_en(&ds, "b.md", &parsea("frontmatter.graph.backlinks = 7")),
+        Ok(true),
+        "`frontmatter.graph.backlinks` debe alcanzar la clave del USUARIO. Hasta v0.3.1 el prefijo \
+         se descartaba y lo capturaba el namespace del grafo, así que este dato —que \
+         `metadata_inspect` SÍ anuncia en su catálogo— era inalcanzable por cualquier consulta"
+    );
+    assert_eq!(
+        eval_en(
+            &ds,
+            "b.md",
+            &parsea("frontmatter.document.path = \"falso.md\"")
+        ),
+        Ok(true),
+        "ídem para `document`"
+    );
+}
+
+/// **E24-H08** — control anti-vacuo: SIN anclaje, el namespace sigue ganando.
+///
+/// El anclaje añade una vía, no cambia la que ya había: `graph.backlinks` sigue siendo el grafo.
+#[test]
+fn namespace_sigue_ganando_sin_anclaje() {
+    let ds = DocumentSet::from_files(lodestar_fixtures::file_map(&[(
+        "b.md",
+        "---\ngraph:\n  backlinks: 7\n---\n\n# B\n",
+    )]));
+
+    assert_eq!(
+        eval_en(&ds, "b.md", &parsea("graph.backlinks = 0")),
+        Ok(true),
+        "sin anclaje, `graph.backlinks` es el GRAFO (0 backlinks reales), no el 7 del frontmatter"
+    );
+    assert_eq!(
+        eval_en(&ds, "b.md", &parsea("graph.backlinks = 7")),
+        Ok(false),
+        "y por tanto NO casa el valor del frontmatter"
+    );
+}
+
+/// **E24-H08** — `has()`/`missing()` respetan los namespaces.
+///
+/// Antes hacían `FieldPath::parse` y consultaban el frontmatter directamente, así que
+/// `has(graph.backlinks)` miraba una clave literalmente llamada `graph.backlinks`.
+#[test]
+fn has_respeta_los_namespaces() {
+    let ds = DocumentSet::from_files(lodestar_fixtures::file_map(&[(
+        "a.md",
+        "---\nstatus: draft\n---\n\n# A\n",
+    )]));
+
+    assert_eq!(
+        eval_en(&ds, "a.md", &parsea("has(graph.backlinks)")),
+        Ok(true),
+        "las propiedades calculadas existen SIEMPRE para todo documento: `has(graph.backlinks)` \
+         es trivialmente cierto, no depende de que el frontmatter tenga esa clave"
+    );
+    assert_eq!(
+        eval_en(&ds, "a.md", &parsea("has(document.path)")),
+        Ok(true),
+        "ídem para `document.path`"
+    );
+    assert_eq!(
+        eval_en(&ds, "a.md", &parsea("has(status)")),
+        Ok(true),
+        "control anti-vacuo: una clave real del frontmatter sigue detectándose"
+    );
+    assert_eq!(
+        eval_en(&ds, "a.md", &parsea("missing(inventada)")),
+        Ok(true),
+        "y una que no existe sigue estando ausente"
     );
 }

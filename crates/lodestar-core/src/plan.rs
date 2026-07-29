@@ -982,21 +982,24 @@ pub fn apply_normalized_ops(
     Ok(out)
 }
 
-/// Frontmatter y cuerpo actuales del `.md` en `path` dentro de `files`.
+/// Frontmatter, cuerpo y **marca de BOM** actuales del `.md` en `path` dentro de `files`.
 ///
 /// El frontmatter es `None` cuando el documento **no tiene bloque** —no un mapping vacío—, porque
 /// esa distinción es la que separa «conservar el documento tal cual» de «inventarle un bloque». Ver
 /// el brazo `ReplaceBody` de [`apply_one`]: hasta E23-H03 aquí se devolvía
 /// `unwrap_or_default()`, y reescribir el cuerpo de un documento sin frontmatter le **inyectaba un
 /// `---\n{}\n---`**.
-fn parsed_of(files: &FileMap, path: &RelPath) -> (Option<serde_yaml::Mapping>, String) {
+///
+/// El tercer elemento es la misma lección un nivel más abajo (E24-H01): ni el frontmatter ni el
+/// cuerpo llevan el BOM UTF-8, así que reconstruir el documento sin esta marca lo **perdería**.
+fn parsed_of(files: &FileMap, path: &RelPath) -> (Option<serde_yaml::Mapping>, String, bool) {
     match files.get(path) {
         Some(raw) => {
             let parsed = model::parse_file(path.as_str(), raw);
             let map = parsed.frontmatter.as_ref().map(|fm| fm.mapping().clone());
-            (map, parsed.body)
+            (map, parsed.body, model::has_bom(raw))
         }
-        None => (None, String::new()),
+        None => (None, String::new(), false),
     }
 }
 
@@ -1040,9 +1043,16 @@ fn apply_one(files: &mut FileMap, op: &NormalizedOperation) -> Result<(), CoreEr
             // reescribir el cuerpo de un `README.md` sin frontmatter le colaba un `---\n{}\n---`.
             // Y como `move` con `rewriteInboundLinks` reescribe el cuerpo de CADA emisor, mover un
             // documento corrompía de una tacada todos sus enlazantes sin frontmatter.
-            let (map, _) = parsed_of(files, path);
+            //
+            // E24-H01: por el mismo motivo se conserva el BOM UTF-8. Ni el frontmatter ni el
+            // cuerpo lo llevan (`SplitFront::body` lo deja fuera), así que hay que reemitirlo
+            // explícitamente o un `replace_body` se lo comería.
+            let (map, _, bom) = parsed_of(files, path);
             let fm = map.map(ParsedFrontmatter::from_mapping);
-            files.insert(path.clone(), model::build_raw(fm.as_ref(), body));
+            files.insert(
+                path.clone(),
+                model::build_raw_with_bom(fm.as_ref(), body, bom),
+            );
         }
         NormalizedOperation::Move { from, to, .. } => {
             if let Some(raw) = files.remove(from) {

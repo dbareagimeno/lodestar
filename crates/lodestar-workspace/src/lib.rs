@@ -23,6 +23,31 @@ use crate::discovery::DiscoveryPolicy;
 
 pub mod config;
 pub mod discovery;
+/// Puntos de caída inyectables en el orquestador transaccional (E24-H13). Solo con
+/// `--features test-failpoints`.
+#[cfg(feature = "test-failpoints")]
+pub mod failpoints;
+
+/// Aborta la transacción si el punto de caída está armado (E24-H13).
+///
+/// **Se define siempre, pero sin `--features test-failpoints` expande a nada**: no genera ni una
+/// instrucción en una compilación normal. Así los puntos de inyección viven en el código de
+/// producción —que es justo lo que faltaba: la feature existía desde E13-H06 y ningún fichero de
+/// `src/` la referenciaba— sin coste alguno para quien no los usa.
+#[macro_export]
+macro_rules! failpoint {
+    ($fp:expr) => {
+        #[cfg(feature = "test-failpoints")]
+        {
+            if $crate::failpoints::disparado($fp) {
+                return Err($crate::WorkspaceError::Io(format!(
+                    "failpoint inyectado: {:?}",
+                    $fp
+                )));
+            }
+        }
+    };
+}
 mod error;
 mod external_refs;
 mod gitignore;
