@@ -146,8 +146,16 @@ impl Workspace {
 
         // Persiste el conjunto "no existía" en el manifiesto (una línea por path), para poder
         // reconstruirlo al reabrir tras un fallo (E13-H06/H09) sin depender solo de la memoria.
-        let manifest: String = absent.iter().map(|p| format!("{}\n", p.as_str())).collect();
-        std::fs::write(dir.join(ABSENT_MANIFEST), manifest)?;
+        //
+        // E24-H06: solo si hay algo que anotar. Escribirlo siempre dejaba, en toda transacción que
+        // únicamente CREA ficheros, un `recovery/<txn>/` con un `.absent` vacío como único
+        // contenido — un directorio que sobrevive al sellado (el paso (11) conserva las copias a
+        // propósito) y que solo desaparecía si el GC llegaba a purgar su recibo homónimo.
+        // `read_absent_manifest` ya trata la ausencia del fichero como conjunto vacío.
+        if !absent.is_empty() {
+            let manifest: String = absent.iter().map(|p| format!("{}\n", p.as_str())).collect();
+            std::fs::write(dir.join(ABSENT_MANIFEST), manifest)?;
+        }
 
         Ok(RecoveryDir { path: dir, absent })
     }

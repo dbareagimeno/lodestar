@@ -1658,3 +1658,122 @@ fn staging_se_limpia_tambien_en_el_camino_feliz() {
         stagings_en_disco(dir.path())
     );
 }
+
+// ---------------------------------------------------------------------------
+// E24-H06 — El GC recoge huérfanos del plano de control
+//
+// `gc_receipts` iteraba SOLO `receipts/`, así que un `staging/<txn>/` cuya transacción nunca llegó
+// a producir recibo le era invisible: no hay entrada con ese stem. Y solo se disparaba desde el
+// camino de éxito de `change_apply`/`change_revert`, o sea que el flujo que produce la basura era
+// justo el que no la recogía.
+//
+// El barrido va al revés: recorre `staging/` y `recovery/` y purga lo que no tiene ni journal vivo
+// (transacción en curso o pendiente de recuperar) ni recibo vigente (revertible).
+// ---------------------------------------------------------------------------
+
+/// Crea un directorio con un fichero dentro, bajo `.lodestar/runtime/<sub>/<nombre>/`.
+fn siembra_runtime_dir(root: &Path, sub: &str, nombre: &str) {
+    let d = root
+        .join(".lodestar")
+        .join("runtime")
+        .join(sub)
+        .join(nombre);
+    std::fs::create_dir_all(&d).unwrap();
+    std::fs::write(d.join("resto.md"), "# resto\n").unwrap();
+}
+
+fn existe_runtime_dir(root: &Path, sub: &str, nombre: &str) -> bool {
+    root.join(".lodestar")
+        .join("runtime")
+        .join(sub)
+        .join(nombre)
+        .exists()
+}
+
+/// **E24-H06** — un staging y un recovery sin journal ni recibo se purgan.
+#[test]
+fn gc_purga_huerfanos_sin_recibo() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws = Workspace::open(dir.path()).unwrap();
+    ws.create_document(
+        &RelPath::new("a.md").unwrap(),
+        "Nota",
+        Some("A"),
+        "# A\n\ncuerpo\n",
+        false,
+    )
+    .unwrap();
+
+    siembra_runtime_dir(dir.path(), "staging", "txn-huerfano");
+    siembra_runtime_dir(dir.path(), "recovery", "txn-huerfano");
+
+    ws.gc_receipts().expect("el GC debe correr");
+
+    assert!(
+        !existe_runtime_dir(dir.path(), "staging", "txn-huerfano"),
+        "un `staging/<txn>/` sin journal ni recibo es basura y el GC debe recogerlo"
+    );
+    assert!(
+        !existe_runtime_dir(dir.path(), "recovery", "txn-huerfano"),
+        "lo mismo para su `recovery/<txn>/`"
+    );
+}
+
+/// **E24-H06** — control anti-vacuo: una transacción VIVA (con journal) no se toca.
+///
+/// Sin esto, un barrido que borrase todo pasaría el test de arriba y destruiría exactamente los
+/// datos que la recuperación necesita.
+#[test]
+fn gc_no_toca_transacciones_vivas() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws = Workspace::open(dir.path()).unwrap();
+    ws.create_document(
+        &RelPath::new("a.md").unwrap(),
+        "Nota",
+        Some("A"),
+        "# A\n\ncuerpo\n",
+        false,
+    )
+    .unwrap();
+
+    // Transacción EN CURSO: journal `prepared` + su staging y sus copias.
+    let a = RelPath::new("a.md").unwrap();
+    let base = ws.workspace_revision().unwrap();
+    ws.backup_originals("txn-viva", &[a.clone()])
+        .expect("copias de recuperación");
+    let _journal = ws
+        .create_journal("txn-viva", &[a], &base, &base)
+        .expect("journal");
+    siembra_runtime_dir(dir.path(), "staging", "txn-viva");
+
+    ws.gc_receipts().expect("el GC debe correr");
+
+    assert!(
+        existe_runtime_dir(dir.path(), "staging", "txn-viva"),
+        "una transacción con journal vivo está a medio publicar o a medio recuperar: su staging es \
+         justo lo que la recuperación necesita, el GC NO puede tocarlo"
+    );
+    assert!(
+        existe_runtime_dir(dir.path(), "recovery", "txn-viva"),
+        "ni sus copias de recuperación"
+    );
+}
+
+/// **E24-H06** — los temporales `*.lodestar-tmp` abandonados por un crash se recogen.
+#[test]
+fn gc_purga_temporales_huerfanos() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws = Workspace::open(dir.path()).unwrap();
+    let journal_dir = dir.path().join(".lodestar").join("runtime").join("journal");
+    std::fs::create_dir_all(&journal_dir).unwrap();
+    let tmp = journal_dir.join("txn.json.12345-0.lodestar-tmp");
+    std::fs::write(&tmp, "{}").unwrap();
+
+    ws.gc_receipts().expect("el GC debe correr");
+
+    assert!(
+        !tmp.exists(),
+        "un temporal de la escritura atómica abandonado por un crash entre el `create` y el \
+         `rename` no rompe nada, pero se acumula sin límite: el GC debe recogerlo"
+    );
+}

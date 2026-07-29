@@ -449,6 +449,13 @@ impl App {
             self.workspace
                 .recover()
                 .map_err(|e| workspace_error_code(&e))?;
+            // E24-H06: recoger aquí, no solo en el camino de éxito. Justo después de un crash es
+            // cuando hay basura en el plano de control —el staging de la transacción interrumpida
+            // y los temporales a medio escribir—, y el GC solo se disparaba desde `change_apply` y
+            // `change_revert` cuando terminaban bien: el flujo que produce la basura era
+            // exactamente el que no la recogía. Best-effort: un fallo recogiendo no puede impedir
+            // planificar.
+            let _ = self.workspace.gc_receipts();
         }
         Ok(())
     }
