@@ -1211,3 +1211,121 @@ fn unicode_nfc_y_nfd_resuelven_con_aviso() {
         resumen(checks)
     );
 }
+
+// ---------------------------------------------------------------------------
+// E24-H12 — Los huecos de descubrimiento dejan de ser silenciosos
+//
+// Tres agujeros declarados como «no regresiones» desde el juez de E15-H07, pero vivos y observables
+// sobre un árbol real. Los tres compartían la misma forma: Lodestar NO veía algo y no lo decía.
+// ---------------------------------------------------------------------------
+
+/// **E24-H12** — un `.md` con la extensión en mayúsculas se descubre.
+///
+/// `**/*.md` es un glob sensible a la capitalización, así que `README.MD` —lo que escribe media
+/// cadena de herramientas de Windows— quedaba invisible: ni en el inventario, ni consultable, y un
+/// enlace a él resolvía como `Missing`. En un volumen case-insensitive es además literalmente el
+/// mismo fichero que `README.md`.
+#[test]
+fn extension_en_mayusculas_se_descubre() {
+    let dir = tempfile::tempdir().unwrap();
+    escribe(dir.path(), "README.MD", "# Léeme\n");
+    escribe(dir.path(), "normal.md", "# Normal\n");
+
+    let d = discover(dir.path(), &politica()).unwrap();
+    let paths: Vec<String> = d.files.keys().map(|p| p.as_str().to_string()).collect();
+
+    assert!(
+        paths.iter().any(|p| p == "README.MD"),
+        "un `.md` con la extensión en mayúsculas es Markdown y debe entrar en el inventario: {paths:?}"
+    );
+    assert!(
+        paths.iter().any(|p| p == "normal.md"),
+        "control anti-vacuo: el descubrimiento normal sigue funcionando: {paths:?}"
+    );
+}
+
+/// **E24-H12** — un `include` personalizado del usuario se sigue respetando.
+///
+/// Control anti-vacuo del anterior: la tolerancia solo afecta a la capitalización de la EXTENSIÓN,
+/// no convierte el filtro en «todo vale».
+#[test]
+fn tolerancia_de_extension_no_rompe_el_include() {
+    let dir = tempfile::tempdir().unwrap();
+    escribe(dir.path(), "docs/dentro.md", "# Dentro\n");
+    escribe(dir.path(), "fuera.md", "# Fuera\n");
+    let politica_docs = lodestar_workspace::discovery::DiscoveryPolicy {
+        include: vec!["docs/**/*.md".to_string()],
+        ..politica()
+    };
+
+    let d = discover(dir.path(), &politica_docs).unwrap();
+    let paths: Vec<String> = d.files.keys().map(|p| p.as_str().to_string()).collect();
+    assert!(
+        paths.iter().any(|p| p == "docs/dentro.md"),
+        "lo que casa el include entra: {paths:?}"
+    );
+    assert!(
+        !paths.iter().any(|p| p == "fuera.md"),
+        "lo que NO casa el include del usuario sigue fuera: {paths:?}"
+    );
+}
+
+/// **E24-H12** — un symlink de DIRECTORIO se diagnostica.
+///
+/// No se sigue (política), pero antes tampoco se decía: como no acaba en `.md`, no pasaba el filtro
+/// `include` y se iba a `other_files` en silencio, ocultando todos los documentos que hubiera
+/// detrás. Un symlink a un fichero suelto ya se diagnosticaba desde E15-H07.
+#[cfg(unix)]
+#[test]
+fn symlink_de_directorio_diagnostica() {
+    let dir = tempfile::tempdir().unwrap();
+    escribe(dir.path(), "real/hoja.md", "# Hoja\n");
+    escribe(dir.path(), "raiz.md", "# Raíz\n");
+    std::os::unix::fs::symlink(dir.path().join("real"), dir.path().join("atajo")).unwrap();
+
+    let d = discover(dir.path(), &politica()).unwrap();
+    let codigos: Vec<&str> = d.diagnostics.iter().map(|c| c.code.as_str()).collect();
+
+    assert!(
+        codigos.contains(&"SYMLINK-UNSUPPORTED"),
+        "un symlink a un directorio oculta TODOS los documentos que haya detrás: el usuario tiene \
+         que enterarse. Diagnósticos: {codigos:?}"
+    );
+    let paths: Vec<String> = d.files.keys().map(|p| p.as_str().to_string()).collect();
+    assert!(
+        !paths.iter().any(|p| p.starts_with("atajo/")),
+        "y sigue sin seguirse (la política no cambia): {paths:?}"
+    );
+    assert!(
+        paths.iter().any(|p| p == "real/hoja.md"),
+        "control anti-vacuo: el documento real, alcanzado por su ruta de verdad, sí está: {paths:?}"
+    );
+}
+
+/// **E24-H12** — en Unix, `\` es un carácter legítimo del nombre y no se traduce a separador.
+///
+/// Traducirlo convertía un fichero llamado literalmente `a\b.md` en la ruta `a/b.md`, que puede
+/// **enmascarar un documento real** de ese path.
+#[cfg(unix)]
+#[test]
+fn barra_invertida_en_unix_no_enmascara() {
+    let dir = tempfile::tempdir().unwrap();
+    escribe(dir.path(), "a/b.md", "# El documento REAL\n");
+    // Un único fichero en la raíz cuyo NOMBRE contiene una barra invertida.
+    std::fs::write(dir.path().join("a\\b.md"), "# El impostor\n").unwrap();
+
+    let d = discover(dir.path(), &politica()).unwrap();
+    let real = d
+        .files
+        .iter()
+        .find(|(p, _)| p.as_str() == "a/b.md")
+        .map(|(_, c)| c.clone());
+
+    assert_eq!(
+        real.as_deref(),
+        Some("# El documento REAL\n"),
+        "`a/b.md` debe seguir siendo el documento real: si la barra invertida se tradujera a \
+         separador, el fichero `a\\b.md` de la raíz lo enmascararía. Inventario: {:?}",
+        d.files.keys().map(|p| p.as_str()).collect::<Vec<_>>()
+    );
+}

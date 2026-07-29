@@ -216,6 +216,31 @@ pub fn discover(root: &Path, policy: &DiscoveryPolicy) -> Result<Discovered, Wor
             continue;
         }
 
+        // Symlink de DIRECTORIO (E24-H12): se comprueba ANTES del filtro `include` porque un
+        // symlink a un directorio no acaba en `.md` y por tanto nunca lo pasaría — se iba a
+        // `other_files` en silencio, ocultando TODOS los documentos que hubiera detrás. Un
+        // symlink a un fichero suelto sigue tratándose más abajo (y uno que no sea `.md` sigue sin
+        // merecer diagnóstico: no es un documento que Lodestar «no esté viendo»).
+        if file_type.is_some_and(|t| t.is_symlink()) && path.metadata().is_ok_and(|m| m.is_dir()) {
+            diagnostics.push(match rel_path_from(rel) {
+                Ok(rp) => {
+                    let diag = Check::new(
+                        Severity::Warn,
+                        CheckCode::SymlinkUnsupported,
+                        format!(
+                            "«{}» es un enlace simbólico a un directorio: Lodestar no sigue                              symlinks, así que NINGÚN documento que haya detrás entra en el                              inventario",
+                            rp.as_str()
+                        ),
+                        vec![rp.clone()],
+                    );
+                    other_files.insert(rp);
+                    diag
+                }
+                Err(diag) => diag,
+            });
+            continue;
+        }
+
         // Filtro `include`, el ÚLTIMO de la cadena de precedencia (ver la doc de esta función).
         // Se aplica a todo no-directorio, symlinks incluidos: un `enlace.txt` no es un documento
         // que Lodestar «no esté viendo», así que no merece diagnóstico. Lo que no pasa el filtro no
@@ -570,8 +595,25 @@ pub fn case_collisions(files: &FileMap) -> Vec<Check> {
 // boxearlo solo añadiría una indirección y un `*` en cada uso, en un camino que además es frío
 // (una ruta no representable por workspace, no por documento).
 #[allow(clippy::result_large_err)]
+/// Normaliza el separador de directorios de una ruta relativa **del sistema**.
+///
+/// En Windows `Path` usa `\\` como separador y hay que traducirlo al `/` canónico de [`RelPath`].
+/// En Unix, en cambio, `\\` es un carácter **legítimo dentro de un nombre de fichero**: traducirlo
+/// allí convertía un fichero llamado literalmente `a\\b.md` en la ruta `a/b.md`, que puede
+/// **enmascarar un documento real** de ese path (E24-H12).
+fn normaliza_separadores(s: &str) -> String {
+    #[cfg(windows)]
+    {
+        s.replace('\\', "/")
+    }
+    #[cfg(not(windows))]
+    {
+        s.to_string()
+    }
+}
+
 pub fn rel_path_from(rel: &Path) -> Result<RelPath, Check> {
-    let lossy = rel.to_string_lossy().replace('\\', "/");
+    let lossy = normaliza_separadores(&rel.to_string_lossy());
     let no_representable = |motivo: String| {
         Check::new(
             Severity::Warn,
@@ -585,7 +627,7 @@ pub fn rel_path_from(rel: &Path) -> Result<RelPath, Check> {
             "tiene una ruta no representable como UTF-8".to_string(),
         ));
     };
-    RelPath::new(&texto.replace('\\', "/")).map_err(|e| {
+    RelPath::new(&normaliza_separadores(texto)).map_err(|e| {
         no_representable(format!(
             "no es una ruta relativa válida del workspace ({e})"
         ))
@@ -678,5 +720,23 @@ fn build_include(root: &Path, policy: &DiscoveryPolicy) -> Result<Override, Work
 /// `include` vacío da un matcher vacío, que no casa con nada — coherente con «la config limita,
 /// nunca habilita»: una lista blanca sin entradas no incluye nada.
 fn incluido(include: &Override, path: &Path) -> bool {
-    include.matched(path, false).is_whitelist()
+    if include.matched(path, false).is_whitelist() {
+        return true;
+    }
+    // E24-H12: `**/*.md` es un glob sensible a la capitalización, así que un `README.MD` guardado
+    // por una herramienta de Windows quedaba **invisible en silencio**: ni entraba en el
+    // inventario, ni se podía consultar, ni un enlace a él resolvía — y nada lo decía. En un
+    // volumen case-insensitive (macOS, Windows) es además literalmente el mismo fichero que
+    // `README.md`.
+    //
+    // Se reintenta el match con la extensión en minúsculas, de modo que solo cambia la
+    // capitalización de la EXTENSIÓN: el resto del glob (directorios, nombre) sigue exacto, y un
+    // `include` personalizado del usuario se sigue respetando tal cual.
+    match path.extension().and_then(|e| e.to_str()) {
+        Some(ext) if ext != ext.to_ascii_lowercase() => {
+            let bajado = path.with_extension(ext.to_ascii_lowercase());
+            include.matched(&bajado, false).is_whitelist()
+        }
+        _ => false,
+    }
 }
