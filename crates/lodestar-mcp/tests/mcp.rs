@@ -6113,3 +6113,111 @@ fn errores_no_filtran_internos_de_serde() {
         "el mensaje debe decir qué forma se esperaba: {err}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// E24-H11 — `knowledge_get` devuelve el título derivado
+//
+// La derivación (`frontmatter.title` → primer H1 → nombre del fichero, §20.2) funcionaba y viajaba
+// en `knowledge_search` y en `graph_query`, pero NO en la tool que lee un documento: su
+// `DocumentView` traía `path`/`revision`/`frontmatter`/`body`/`outgoingLinks`/`backlinks`/
+// `diagnostics` y nada más. Un agente que siguiera el flujo recomendado (buscar → leer) perdía el
+// título al leer, y el `include` cerrado tampoco le dejaba pedirlo.
+// ---------------------------------------------------------------------------
+
+/// **E24-H11** — las tres fuentes de la cascada de `§20.2` llegan por `knowledge_get`.
+#[test]
+fn get_devuelve_titulo_derivado() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "con_fm.md",
+        "---\ntitle: Desde Frontmatter\n---\n\n# Otro H1\n",
+    );
+    write(dir.path(), "con_h1.md", "# Desde H1\n\ncuerpo\n");
+    write(dir.path(), "pelado.md", "solo texto, sin heading\n");
+
+    let esperado = [
+        ("con_fm.md", "Desde Frontmatter"),
+        ("con_h1.md", "Desde H1"),
+        ("pelado.md", "pelado"),
+    ];
+    let lineas: Vec<String> = esperado
+        .iter()
+        .enumerate()
+        .map(|(i, (p, _))| {
+            serde_json::json!({"jsonrpc":"2.0","id": i + 1,"method":"tools/call",
+                "params":{"name":"knowledge_get","arguments":{"ref":{"path": p}}}})
+            .to_string()
+        })
+        .collect();
+    let refs: Vec<&str> = lineas.iter().map(String::as_str).collect();
+    let resp = roundtrip(dir.path(), &refs, esperado.len());
+
+    for (i, (path, titulo)) in esperado.iter().enumerate() {
+        let doc = &resp[i]["result"]["structuredContent"]["document"];
+        assert_eq!(
+            doc["title"].as_str(),
+            Some(*titulo),
+            "`knowledge_get` debe traer el título derivado por la cascada de §20.2 \
+             (frontmatter.title → primer H1 → nombre del fichero) para {path}: {}",
+            resp[i]
+        );
+    }
+}
+
+/// **E24-H11** — control anti-vacuo: el título de `knowledge_get` coincide con el de
+/// `knowledge_search`.
+///
+/// Es lo que impide que sea una SEGUNDA implementación del título (invariante #3): si alguien
+/// derivara el título aquí con otro criterio, este test lo caza.
+#[test]
+fn titulo_coincide_entre_get_y_search() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "con_fm.md",
+        "---\ntitle: Desde Frontmatter\n---\n\n# Otro H1\n",
+    );
+    write(dir.path(), "con_h1.md", "# Desde H1\n\ncuerpo\n");
+    write(dir.path(), "pelado.md", "solo texto\n");
+
+    let l_search = serde_json::json!({"jsonrpc":"2.0","id":1,"method":"tools/call",
+        "params":{"name":"knowledge_search","arguments":{"text":""}}})
+    .to_string();
+    let l_get: Vec<String> = ["con_fm.md", "con_h1.md", "pelado.md"]
+        .iter()
+        .enumerate()
+        .map(|(i, p)| {
+            serde_json::json!({"jsonrpc":"2.0","id": i + 2,"method":"tools/call",
+                "params":{"name":"knowledge_get","arguments":{"ref":{"path": p}}}})
+            .to_string()
+        })
+        .collect();
+    let mut refs: Vec<&str> = vec![l_search.as_str()];
+    refs.extend(l_get.iter().map(String::as_str));
+    let resp = roundtrip(dir.path(), &refs, 4);
+
+    let de_search: std::collections::BTreeMap<String, String> = resp[0]["result"]
+        ["structuredContent"]["results"]
+        .as_array()
+        .expect("results")
+        .iter()
+        .map(|r| {
+            (
+                r["path"].as_str().unwrap_or_default().to_string(),
+                r["title"].as_str().unwrap_or_default().to_string(),
+            )
+        })
+        .collect();
+
+    for r in resp.iter().skip(1) {
+        let doc = &r["result"]["structuredContent"]["document"];
+        let path = doc["path"].as_str().expect("path").to_string();
+        assert_eq!(
+            doc["title"].as_str().map(str::to_string),
+            de_search.get(&path).cloned(),
+            "el título de `knowledge_get` y el de `knowledge_search` deben salir de la MISMA \
+             función del core, no de dos implementaciones (invariante #3). Path: {path}"
+        );
+    }
+}

@@ -790,8 +790,12 @@ impl App {
                 .cloned()
                 .unwrap_or_default()
         });
+        // Mismo cómputo que `knowledge_search` y `graph_query` (invariante #3: una sola verdad
+        // computada, nunca una segunda implementación del título).
+        let title = model::derived_title(parsed.frontmatter.as_ref(), &parsed.body, &path);
         Ok(DocumentView {
             path,
+            title,
             revision,
             frontmatter,
             body,
@@ -2774,6 +2778,16 @@ pub struct BlockingReference {
 pub struct DocumentView {
     /// Ruta relativa del documento (su identidad en v2).
     pub path: RelPath,
+    /// Título **derivado** (`frontmatter.title` → primer H1 → nombre del fichero, `§20.2`).
+    /// Siempre presente (E24-H11).
+    ///
+    /// Es heurística de presentación, no una propiedad reservada del frontmatter. Viaja aquí por la
+    /// misma razón que en `SearchResult` y en `GraphNode`, y lo computa **la misma** función del
+    /// core ([`model::derived_title`]): hasta v0.3.0 la tool que lee UN documento era la única de
+    /// las tres que no lo traía, así que un agente que seguía el flujo recomendado
+    /// (`knowledge_search` → `knowledge_get`) perdía el título al leer, y el `include` cerrado
+    /// tampoco le dejaba pedirlo.
+    pub title: String,
     /// Identidad de contenido (`blake3:…`, == [`DocumentRevision`] de E10-H03). Siempre presente.
     pub revision: DocumentRevision,
     /// Frontmatter del documento —metadata **arbitraria** del usuario, siempre un objeto YAML—,
