@@ -594,7 +594,6 @@ pub fn case_collisions(files: &FileMap) -> Vec<Check> {
 // diagnóstico del catálogo `§20.9` que el llamador empuja tal cual a `Discovered::diagnostics`:
 // boxearlo solo añadiría una indirección y un `*` en cada uso, en un camino que además es frío
 // (una ruta no representable por workspace, no por documento).
-#[allow(clippy::result_large_err)]
 /// Normaliza el separador de directorios de una ruta relativa **del sistema**.
 ///
 /// En Windows `Path` usa `\\` como separador y hay que traducirlo al `/` canónico de [`RelPath`].
@@ -612,6 +611,7 @@ fn normaliza_separadores(s: &str) -> String {
     }
 }
 
+#[allow(clippy::result_large_err)]
 pub fn rel_path_from(rel: &Path) -> Result<RelPath, Check> {
     let lossy = normaliza_separadores(&rel.to_string_lossy());
     let no_representable = |motivo: String| {

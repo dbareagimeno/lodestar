@@ -36,8 +36,6 @@ use lodestar_core::plan;
 use lodestar_core::types::{ChangeSet, ChangeSetId, FileMap, RelPath, WorkspaceRevision};
 
 #[cfg(feature = "test-failpoints")]
-use crate::failpoint;
-#[cfg(feature = "test-failpoints")]
 use crate::failpoints::FailPoint;
 use crate::{Workspace, WorkspaceError};
 
