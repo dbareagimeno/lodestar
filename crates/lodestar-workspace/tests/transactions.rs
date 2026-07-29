@@ -1551,3 +1551,110 @@ mod recuperacion {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// E24-H05 — Una transacción FALLIDA no deja staging
+//
+// `StagingDir` no tenía `Drop`, y los pasos (7)–(10) de `apply_transaction` salen por `?`
+// saltándose el `remove_dir_all` del paso (11). Cualquier transacción que fallara el control
+// optimista, el guard de escritura, el journal o la publicación dejaba en disco el árbol `.md`
+// COMPLETO de su resultado, sin que nada volviera a recogerlo. El caso que lo destapó —el
+// WRITE_CONFLICT sistemático tras un crash (E24-H03)— dejaba 121 ficheros por intento, y el GC
+// nunca los veía porque solo itera `receipts/` y solo corre en el camino de éxito.
+// ---------------------------------------------------------------------------
+
+/// Ficheros bajo `.lodestar/runtime/staging/`, o vacío si el directorio no existe.
+fn stagings_en_disco(root: &Path) -> Vec<String> {
+    let base = root.join(".lodestar").join("runtime").join("staging");
+    let Ok(entries) = std::fs::read_dir(&base) else {
+        return Vec::new();
+    };
+    let mut out: Vec<String> = entries
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .collect();
+    out.sort();
+    out
+}
+
+/// **E24-H05** — una transacción que falla el control optimista no deja su staging en disco.
+#[test]
+fn staging_no_sobrevive_a_una_transaccion_fallida() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws = Workspace::open(dir.path()).unwrap();
+    ws.create_document(
+        &RelPath::new("base.md").unwrap(),
+        "Nota",
+        Some("Base"),
+        "# H\n\ncuerpo\n",
+        false,
+    )
+    .unwrap();
+
+    // Un change set cuya `base_revision` es de un estado que ya no existe: el paso (7)
+    // `reverify_base_revision` lo rechazará DESPUÉS de materializar el staging (paso 6).
+    let mut cs = change_set(
+        "e24-h05-fallida",
+        vec![create_conforme("nuevo.md", "Nota", "Nuevo")],
+    );
+    cs.base_revision = WorkspaceRevision("blake3:0000000000000000".to_string());
+
+    let err = ws
+        .apply_transaction(&cs)
+        .expect_err("la base del change set no es la actual: la transacción debe abortar");
+    assert_eq!(
+        err.code(),
+        "WRITE_CONFLICT",
+        "precondición del test: el fallo debe ser el del control optimista (paso 7), que ocurre \
+         DESPUÉS de materializar el staging (paso 6). Si fallara antes, el test sería vacuo: {err:?}"
+    );
+
+    assert!(
+        stagings_en_disco(dir.path()).is_empty(),
+        "una transacción fallida no puede dejar su árbol de staging en disco: {:?}",
+        stagings_en_disco(dir.path())
+    );
+    assert!(
+        !dir.path().join("nuevo.md").exists(),
+        "y desde luego no puede haber publicado nada en el canónico"
+    );
+}
+
+/// **E24-H05** — control anti-vacuo: el camino feliz también limpia, y publica lo que debe.
+///
+/// Sin esto, un `Drop` que borrase el staging demasiado pronto (antes de publicar) pasaría el test
+/// de arriba y rompería la publicación entera.
+#[test]
+fn staging_se_limpia_tambien_en_el_camino_feliz() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws = Workspace::open(dir.path()).unwrap();
+    ws.create_document(
+        &RelPath::new("base.md").unwrap(),
+        "Nota",
+        Some("Base"),
+        "# H\n\ncuerpo\n",
+        false,
+    )
+    .unwrap();
+
+    let base = ws.workspace_revision().unwrap();
+    let mut cs = change_set(
+        "e24-h05-feliz",
+        vec![create_conforme("nuevo.md", "Nota", "Nuevo")],
+    );
+    cs.base_revision = base;
+
+    ws.apply_transaction(&cs)
+        .expect("la transacción debe publicarse");
+
+    assert!(
+        dir.path().join("nuevo.md").exists(),
+        "el camino feliz debe publicar de verdad: si el `Drop` limpiase el staging antes de \
+         publicar, esto fallaría"
+    );
+    assert!(
+        stagings_en_disco(dir.path()).is_empty(),
+        "tras publicar tampoco puede quedar staging: {:?}",
+        stagings_en_disco(dir.path())
+    );
+}

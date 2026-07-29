@@ -132,7 +132,10 @@ impl Workspace {
 
         // (6) Staging: materializa y valida el resultado hipotético sin tocar el canónico (E13-H01),
         //     de modo que el lote publicado coincida exactamente con lo materializado y validado.
-        let staging = self.materialize_staging_result(&change_set.id, &result_files)?;
+        // E24-H05: `StagingDir` es RAII. Si cualquiera de los pasos (7)–(10) sale por `?`, su
+        // `Drop` limpia el árbol — antes se quedaba en disco para siempre, porque el
+        // `remove_dir_all` del paso (11) quedaba por debajo del `?`.
+        let mut staging = self.materialize_staging_result(&change_set.id, &result_files)?;
         let staging_path = staging.path().to_path_buf();
         self.validate_staging(&staging)?;
 
@@ -159,6 +162,9 @@ impl Workspace {
         //      pero CONSERVA las copias de recuperación (el receipt y `change_revert` las usan). El
         //      journal ya está `applied` en disco; borrarlo es el sellado `done` efectivo (tras esto
         //      `recovery_pending()` vuelve a `false`).
+        // A partir de aquí la limpieza del staging es de este camino, no del `Drop` (E24-H05): se
+        // borra DESPUÉS de publicar y en el mismo orden que el sellado del journal.
+        staging.keep();
         let journal_path = journal.path().to_path_buf();
         if staging_path.exists() {
             std::fs::remove_dir_all(&staging_path)?;
