@@ -20,6 +20,7 @@
 use std::borrow::Cow;
 use std::cmp::Ordering;
 
+use crate::types::FRONTMATTER_ANCHOR;
 use crate::types::{
     Analysis, ComparisonOperator, Expression, FieldPath, FunctionName, ParsedFrontmatter,
     QueryValue, RelPath, TypeError, ValueType,
@@ -63,7 +64,9 @@ pub fn evaluate(
             operator,
             value,
         } => eval_comparison(field, *operator, value, doc, analysis),
-        Expression::Function { name, arguments } => Ok(eval_function(*name, arguments, doc)),
+        Expression::Function { name, arguments } => {
+            Ok(eval_function(*name, arguments, doc, analysis))
+        }
         // Los conectores lógicos evalúan con cortocircuito: `And` se detiene en la primera rama
         // falsa y `Or` en la primera verdadera, de modo que un error de tipo de una rama posterior
         // no se propaga si una anterior ya decidió el veredicto. Ningún test de H01 los ejercita
@@ -134,6 +137,20 @@ fn resolver_campo<'a>(
     doc: &EvalDocument<'a>,
     analysis: &'a Analysis,
 ) -> Option<Cow<'a, serde_yaml::Value>> {
+    // E24-H08: un path ANCLADO (`frontmatter.<lo que sea>`) va siempre al frontmatter del usuario,
+    // aunque su primer segmento coincida con un namespace reservado. El anclaje solo se conserva
+    // cuando hace falta desambiguar (lo decide `parse::build_field_path`), así que aquí basta con
+    // recortarlo.
+    if field.segments().first().map(String::as_str) == Some(FRONTMATTER_ANCHOR) {
+        let Ok(real) = FieldPath::from_segments(field.segments()[1..].iter().cloned()) else {
+            return None;
+        };
+        return doc
+            .frontmatter
+            .and_then(|fm| fm.get(&real))
+            .cloned()
+            .map(Cow::Owned);
+    }
     match field.segments().first().map(String::as_str) {
         Some("document") => resolver_document(field, doc).map(Cow::Owned),
         Some("graph") => resolver_graph(field, doc, analysis).map(Cow::Owned),
@@ -203,24 +220,41 @@ fn valor_conteo(n: usize) -> serde_yaml::Value {
 /// la propiedad como [`QueryValue::String`] (la forma del AST de `§20.8`); se reinterpreta como
 /// [`FieldPath`] (parsea la dot-notation). La existencia se juzga con [`ParsedFrontmatter::get`],
 /// así que una clave a `null`/`""`/`[]` cuenta como **presente**.
-fn eval_function(name: FunctionName, arguments: &[QueryValue], doc: &EvalDocument<'_>) -> bool {
-    let presente = propiedad_presente(arguments, doc);
+fn eval_function(
+    name: FunctionName,
+    arguments: &[QueryValue],
+    doc: &EvalDocument<'_>,
+    analysis: &Analysis,
+) -> bool {
+    let presente = propiedad_presente(arguments, doc, analysis);
     match name {
         FunctionName::Has => presente,
         FunctionName::Missing => !presente,
     }
 }
 
-/// `true` si el primer argumento nombra una propiedad presente en el frontmatter. Un argumento
-/// ausente, no-string o con dot-notation inválida no direcciona ninguna propiedad → ausente.
-fn propiedad_presente(arguments: &[QueryValue], doc: &EvalDocument<'_>) -> bool {
+/// `true` si el primer argumento nombra una propiedad presente. Un argumento ausente, no-string o
+/// con dot-notation inválida no direcciona ninguna propiedad → ausente.
+///
+/// **E24-H08**: respeta los namespaces igual que una comparación. Antes hacía `FieldPath::parse` y
+/// consultaba el frontmatter directamente, así que `has(graph.backlinks)` miraba una clave de
+/// frontmatter literalmente llamada `graph.backlinks` en vez del grafo — y era, por accidente, la
+/// única vía por la que un frontmatter de usuario llamado `graph:` resultaba alcanzable.
+fn propiedad_presente(
+    arguments: &[QueryValue],
+    doc: &EvalDocument<'_>,
+    analysis: &Analysis,
+) -> bool {
     let Some(QueryValue::String(nombre)) = arguments.first() else {
         return false;
     };
     let Ok(path) = FieldPath::parse(nombre) else {
         return false;
     };
-    doc.frontmatter.and_then(|fm| fm.get(&path)).is_some()
+    // Las propiedades calculadas SIEMPRE existen para todo documento: `has(graph.backlinks)` es
+    // trivialmente cierto, igual que `has(document.path)`. Lo que puede faltar es una clave del
+    // frontmatter.
+    resolver_campo(&path, doc, analysis).is_some()
 }
 
 /// Igualdad por **valor e igualdad de tipo** (`=`/`!=`). El cruce de tipos es `false`, **nunca**

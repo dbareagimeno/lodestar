@@ -7,6 +7,40 @@ y el proyecto sigue [Versionado Semántico](https://semver.org/lang/es/).
 
 ## [No publicado]
 
+## [0.4.0] - 2026-07-29
+
+**El lenguaje de consulta deja de responder a lo que no entiende** (`E24-H07`/`H08`, la mitad de la
+épica de cierre que se difirió de v0.3.1 por cambiar resultados observables).
+
+> **⚠️ Cambio incompatible de comportamiento**: consultas que hoy se aceptan pasan a fallar. Es la
+> corrección —lo que devolvían era una respuesta silenciosamente equivocada— pero conviene saberlo
+> antes de actualizar.
+
+### Cambiado
+
+- **Una propiedad desconocida bajo un namespace reservado es un ERROR**, no una ausencia.
+  `graph.backlink = 0` (con typo, sin la `s`) devolvía `[]` —indistinguible de un resultado
+  legítimamente vacío— y ahora falla con `INVALID_SCHEMA`, nombrando las propiedades válidas y la
+  forma de anclar al frontmatter propio. Afecta igual a `where`, a `filter` y a `has`/`missing`: los
+  tres comparten el mismo constructor de `FieldPath`, así que la equivalencia entre ellos se
+  preserva por construcción.
+  Revisa el criterio de **E19-H04** («una sub-clave de namespace desconocida es propiedad
+  ausente»), que era deliberado y ahora se considera equivocado: un typo del agente no debe
+  parecerse a un resultado.
+- **`frontmatter.` vuelve a ser un anclaje real.** Se descartaba como mera abreviatura, así que
+  `frontmatter.graph.backlinks` se convertía en `graph.backlinks` y lo capturaba el namespace: el
+  frontmatter propio del usuario con una clave llamada `graph` o `document` era **inalcanzable por
+  cualquier consulta**, pese a que `metadata_inspect` lo anunciaba en su catálogo — justo el flujo
+  que las `instructions` del servidor recomiendan (inspeccionar la metadata y luego consultarla).
+  Sin anclaje, el namespace sigue ganando: es una vía nueva, no un cambio de la que había.
+- **`has()`/`missing()` respetan los namespaces.** Hacían `FieldPath::parse` y consultaban el
+  frontmatter directamente, así que `has(graph.backlinks)` miraba una clave literalmente llamada
+  `graph.backlinks`. Era, por accidente, la única vía por la que un frontmatter `graph:` resultaba
+  alcanzable.
+- **Fuente única de verdad** para las propiedades de `document.*`/`graph.*` (`core::types`). Vivían
+  solo en los brazos de un `match` de `eval.rs`, así que el validador y el evaluador podían
+  divergir sin que nada lo detectara.
+
 ## [0.3.1] - 2026-07-29
 
 Cierre de los defectos que la revisión de la v0.3.0 destapó **después** de publicarla
@@ -331,7 +365,8 @@ y pipeline de release multiplataforma.
 - **Heading por defecto de los conceptos**: ahora `# {Tipo} - {Nombre}` (antes
   `# Resumen`).
 
-[No publicado]: https://github.com/dbareagimeno/lodestar/compare/v0.3.1...HEAD
+[No publicado]: https://github.com/dbareagimeno/lodestar/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/dbareagimeno/lodestar/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/dbareagimeno/lodestar/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/dbareagimeno/lodestar/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/dbareagimeno/lodestar/compare/v0.1.0...v0.2.0

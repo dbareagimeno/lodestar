@@ -9,7 +9,7 @@
 > **E23** (cierre: defectos hallados en la revisión de la PR #17) y **E24** (cierre de los defectos
 > que la revisión de la v0.3.0 destapó tras publicarla) están **completas**.
 > Backend: `core` puro + `store` SQLite/FTS5 con paridad SQL==core + `workspace` (único escritor,
-> transaccional) + `app` (servicios de caso de uso) + las dos fachadas `cli` y `mcp`. **479 tests**
+> transaccional) + `app` (servicios de caso de uso) + las dos fachadas `cli` y `mcp`. **486 tests**
 > en verde (+ los de crash-recovery tras `--features test-failpoints`, que el CI corre desde E23-H06);
 > `clippy -D warnings` y `cargo doc -D warnings` limpios; pureza del core verificada por CI.
 >
@@ -25,7 +25,7 @@
 ## Cómo correrlo
 
 ```bash
-cargo test --workspace --locked                       # 479 tests
+cargo test --workspace --locked                       # 486 tests
 cargo test -p lodestar-workspace --features test-failpoints --locked   # +4 de crash-recovery
 cargo run -p lodestar-cli -- check [--path <dir>]     # la puerta de CI (exit 0/1/2/3)
 cargo run -p lodestar-cli -- reindex                  # reconstruye .lodestar/index.db
@@ -1045,7 +1045,7 @@ superficie de producto; git queda como crate dormido) y `DECISIONES.md §0`. Des
     probase `orphans` se comía un `INVALID_SCHEMA`.
 - **437 tests · E23 COMPLETA.** (+4 de crash-recovery tras `--features test-failpoints`.)
 
-## Cierre de defectos de la v0.3.0 (E24) — v0.3.1 · COMPLETA
+## Cierre de defectos de la v0.3.0 (E24) — v0.3.1 + v0.4.0 · COMPLETA
 
 > Rama `release/v0.3.1`. Épica: [`epica-24`](requirements/epica-24-cierre-defectos-v031.md).
 > **Origen**: revisión de la v0.3.0 publicada (2026-07-28). Igual que en E23, ningún defecto se
@@ -1071,7 +1071,7 @@ criterio ratificado en E19-H04. Ninguna historia de v0.3.1 depende de ellas.
 | **E24-H13/H14** El crash se prueba de verdad | ✅ | Seam real en el orquestador + `SIGKILL` al binario. |
 | **E24-H15/H16/H17** La suite muerde donde no mordía | ✅ | `outputSchema` en las 10; escala por el wire; los tests que E23-H10 prometió. |
 | **E24-H18** Documentos y publicación | ✅ | v0.3.1. |
-| **E24-H07/H08** Lenguaje de consulta | ⏭️ | **Diferidas a v0.4.0** (cambian resultados observables y revisan un criterio de E19-H04). |
+| **E24-H07/H08** Lenguaje de consulta | ✅ | **v0.4.0**, tras publicar v0.3.1: el typo bajo namespace reservado falla, y `frontmatter.` vuelve a ser un anclaje. |
 
 - ✅ **E24-H01** — **Pérdida silenciosa de datos por BOM UTF-8**. `split_front` comparaba
   `raw.starts_with("---")` sobre un raw que empieza por `\u{feff}---`, así que un `.md` con BOM caía
@@ -1136,4 +1136,17 @@ criterio ratificado en E19-H04. Ninguna historia de v0.3.1 depende de ellas.
   afirmaciones que el repo daba por ciertas: los dos tests que E23-H10 declaró como criterio y
   nunca existieron, y el grep de CI de los `ErrorCode` — que **al ejecutarlo cazó una violación
   real**: `WorkspaceError::code()` mantenía su propia tabla de códigos de wire.
-- **479 tests · E24 COMPLETA** (+ los de crash-recovery tras `--features test-failpoints`).
+- **486 tests · E24 COMPLETA** (+ los de crash-recovery tras `--features test-failpoints`).
+- ✅ **E24-H07/H08 (v0.4.0)** — **El lenguaje de consulta deja de responder a lo que no entiende**.
+  `graph.backlink = 0` (con typo) devolvía `[]`: indistinguible de un resultado legítimamente vacío,
+  o sea una respuesta **silenciosamente equivocada**, que es peor que un error. Ahora falla con
+  `INVALID_SCHEMA` nombrando las propiedades válidas. Y `frontmatter.` vuelve a ser un **anclaje**:
+  se descartaba como abreviatura, así que un frontmatter de usuario con una clave llamada `graph` o
+  `document` era **inalcanzable por cualquier consulta** pese a que `metadata_inspect` lo anuncia —
+  justo el flujo que las `instructions` del servidor recomiendan.
+  - Se valida en `parse::build_field_path`, el **único** punto compartido por `where`, `filter` y
+    `has`/`missing`, así que la equivalencia entre los tres se preserva por construcción.
+  - Las propiedades válidas pasan a `core::types` (`DOCUMENT_PROPS`/`GRAPH_PROPS`): vivían solo en
+    los brazos de un `match` de `eval.rs`, donde validador y evaluador podían divergir.
+  - **Revisa el criterio de E19-H04** («una sub-clave de namespace desconocida es propiedad
+    ausente»), que era deliberado. Por eso fue a v0.4.0 y no al parche.

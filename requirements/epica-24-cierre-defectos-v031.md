@@ -294,12 +294,14 @@ validación responde `VÁLIDO` incumple los dos a la vez.
 
 ---
 
-## Bloque C — Lenguaje de consulta · **DIFERIDO A v0.4.0**
+## Bloque C — Lenguaje de consulta · **v0.4.0 · CERRADO**
 
 > **Corte de release (2026-07-29).** H07 y H08 **no entran en v0.3.1**. Las dos cambian resultados
 > observables de consultas que hoy se aceptan (`graph.foo = 1` pasa de devolver `[]` a fallar), y una
 > revisa un criterio ratificado en E19-H04. Se implementan **después** de publicar v0.3.1, como
 > núcleo de v0.4.0.
+>
+> **Cerrado el 2026-07-29, después de publicar v0.3.1**, como estaba previsto.
 >
 > **Verificado que no bloquean a nadie de v0.3.1**: ninguna historia del resto de la épica depende de
 > H07 ni de H08. La única que las nombraba era H18 (aviso de release), que pierde esa mitad del
