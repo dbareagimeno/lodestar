@@ -3102,7 +3102,8 @@ fn bom_emite_aviso_sin_bloquear() {
 
     // El frontmatter se sigue leyendo (no se ha roto lo que arregló H01).
     assert!(
-        !cs.iter().any(|c| c == "FM-UNCLOSED" || c == "FM-YAML-INVALID"),
+        !cs.iter()
+            .any(|c| c == "FM-UNCLOSED" || c == "FM-YAML-INVALID"),
         "el aviso de BOM no puede venir acompañado de un diagnóstico de frontmatter ilegible: \
          H01 hizo que el bloque se interprete bien. Códigos: {cs:?}"
     );
