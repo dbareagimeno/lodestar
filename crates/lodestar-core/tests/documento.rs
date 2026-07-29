@@ -3042,3 +3042,107 @@ fn patch_sobre_bom_sin_bloque_no_precede_a_la_marca() {
         "el documento con BOM debe quedar igual que su gemelo sin BOM, más la marca delante"
     );
 }
+
+// ---------------------------------------------------------------------------
+// E24-H02 — Un BOM es VISIBLE, no silencioso
+//
+// H01 hizo que el BOM dejara de tragarse el frontmatter, pero un `.md` con BOM sigue sin producir
+// ni un diagnóstico: `knowledge_check` responde VÁLIDO con 0 avisos sobre un fichero cuya marca de
+// codificación no es portable. Es el mismo problema de portabilidad que `LINK-CASE-MISMATCH`
+// (capitalización que solo funciona en un tipo de volumen), y se trata igual: **aviso**, no error.
+//
+// Criterio de severidad (decisión propia de la historia): `Warn` y NO configurable. `§20.9` fija
+// cinco familias reclasificables desde `validation:` y esta no es una de ellas; añadir una sexta
+// sería ampliar el contrato de config, no arreglar un defecto. Queda como `LINK-ESCAPES-WORKSPACE`
+// o `SYMLINK-UNSUPPORTED`: severidad intrínseca (`family_of` devuelve `None`).
+// ---------------------------------------------------------------------------
+
+/// **E24-H02** — un `.md` con BOM emite el aviso de portabilidad y NO bloquea.
+///
+/// La pareja de aserciones importa: si fuera `Err`, un `lodestar check` sobre cualquier repo con un
+/// fichero guardado por Notepad saldría con exit 1, que es exactamente el tipo de falso positivo
+/// que `§20.9` quiere evitar («solo lo que impide interpretar o modificar con seguridad»).
+#[test]
+fn bom_emite_aviso_sin_bloquear() {
+    let con_bom = format!("{BOM}---\nstatus: draft\n---\n\n# Con BOM\n");
+    let ds = DocumentSet::from_files(mapa(&[("bom.md", &con_bom)]));
+    let a = ds.analyze();
+
+    let cs = codigos(&a, &rp("bom.md"));
+    assert!(
+        cs.iter().any(|c| c == "DOC-BOM"),
+        "un `.md` que empieza por BOM UTF-8 debe emitir el aviso de portabilidad `DOC-BOM`; \
+         hoy no emite nada y `knowledge_check` responde VÁLIDO sobre él. Códigos: {cs:?}"
+    );
+
+    let bom = a
+        .diagnostics
+        .get(&rp("bom.md"))
+        .into_iter()
+        .flatten()
+        .find(|c| c.code.as_str() == "DOC-BOM")
+        .expect("el diagnóstico DOC-BOM debe estar presente");
+
+    assert_eq!(
+        bom.level,
+        lodestar_core::types::Severity::Warn,
+        "el BOM es un problema de PORTABILIDAD, no de interpretabilidad: es aviso, no error. \
+         Con `Err`, `lodestar check` tumbaría cualquier repo con un fichero guardado por Notepad"
+    );
+    assert_eq!(
+        bom.targets,
+        vec![rp("bom.md")],
+        "`targets` es el documento que lleva la marca (el que hay que editar si molesta)"
+    );
+    assert_eq!(
+        a.hard_fail(),
+        0,
+        "un BOM no puede tumbar la puerta de CI: el workspace sigue siendo válido"
+    );
+
+    // El frontmatter se sigue leyendo (no se ha roto lo que arregló H01).
+    assert!(
+        !cs.iter().any(|c| c == "FM-UNCLOSED" || c == "FM-YAML-INVALID"),
+        "el aviso de BOM no puede venir acompañado de un diagnóstico de frontmatter ilegible: \
+         H01 hizo que el bloque se interprete bien. Códigos: {cs:?}"
+    );
+}
+
+/// **E24-H02** — control anti-vacuo: sin BOM no hay aviso.
+///
+/// Sin esto, una implementación que emitiera `DOC-BOM` para todo documento pasaría el test de
+/// arriba.
+#[test]
+fn sin_bom_no_hay_aviso() {
+    let sin_bom = "---\nstatus: draft\n---\n\n# Sin BOM\n";
+    let ds = DocumentSet::from_files(mapa(&[("limpio.md", sin_bom)]));
+    let a = ds.analyze();
+
+    let cs = codigos(&a, &rp("limpio.md"));
+    assert!(
+        !cs.iter().any(|c| c == "DOC-BOM"),
+        "un `.md` SIN BOM no puede emitir `DOC-BOM`: {cs:?}"
+    );
+    assert!(
+        cs.is_empty(),
+        "un documento limpio no diagnostica nada: {cs:?}"
+    );
+}
+
+/// **E24-H02** — el aviso también aparece en un documento con BOM y SIN frontmatter.
+///
+/// La marca es del fichero, no del bloque: no puede depender de que haya frontmatter. Cierra por
+/// delante el hueco de cobertura que el juez de H01 encontró por mutación en la familia gemela.
+#[test]
+fn bom_sin_frontmatter_tambien_avisa() {
+    let con_bom = format!("{BOM}# Solo cuerpo\n\ntexto\n");
+    let ds = DocumentSet::from_files(mapa(&[("desnudo.md", &con_bom)]));
+    let a = ds.analyze();
+
+    let cs = codigos(&a, &rp("desnudo.md"));
+    assert!(
+        cs.iter().any(|c| c == "DOC-BOM"),
+        "el aviso es del FICHERO (su codificación), no del bloque de frontmatter: un `.md` con \
+         BOM y sin frontmatter también debe avisarlo. Códigos: {cs:?}"
+    );
+}

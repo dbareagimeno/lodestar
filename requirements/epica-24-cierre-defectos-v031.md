@@ -294,7 +294,18 @@ validación responde `VÁLIDO` incumple los dos a la vez.
 
 ---
 
-## Bloque C — Lenguaje de consulta
+## Bloque C — Lenguaje de consulta · **DIFERIDO A v0.4.0**
+
+> **Corte de release (2026-07-29).** H07 y H08 **no entran en v0.3.1**. Las dos cambian resultados
+> observables de consultas que hoy se aceptan (`graph.foo = 1` pasa de devolver `[]` a fallar), y una
+> revisa un criterio ratificado en E19-H04. Se implementan **después** de publicar v0.3.1, como
+> núcleo de v0.4.0.
+>
+> **Verificado que no bloquean a nadie de v0.3.1**: ninguna historia del resto de la épica depende de
+> H07 ni de H08. La única que las nombraba era H18 (aviso de release), que pierde esa mitad del
+> aviso. H07/H08 sí comparten fichero con nadie más de la épica: tocan `core/src/parse.rs`,
+> `core/src/eval.rs`, `core/src/filter.rs` y `core/src/types.rs`, que ninguna otra historia de
+> v0.3.1 modifica.
 
 ### E24-H07 — Los namespaces reservados rechazan lo que no conocen
 
@@ -692,18 +703,35 @@ validación responde `VÁLIDO` incumple los dos a la vez.
 
 ## Orden de construcción
 
+**v0.3.1** (16 historias):
+
 ```
 A: H01 ─→ H02                          ┐
-B: H03 ─→ H04     ·     H05 ─→ H06     │
-C: H07 ─→ H08                          ├─→ F: H13 · H14 · H15 · H16 · H17 ─→ G: H18
+B: H03 ─→ H04     ·     H05 ─→ H06     ├─→ F: H13 · H14 · H15 · H16 · H17 ─→ G: H18
 D: H09 ─→ H10     ·     H11            │
 E: H12                                 ┘
 ```
 
-Los bloques A–E son independientes entre sí y paralelizables. Dentro de cada uno el orden es
+**v0.4.0** (después de publicar v0.3.1): `C: H07 ─→ H08`.
+
+Los bloques A, B, D y E son independientes entre sí y paralelizables. Dentro de cada uno el orden es
 estricto. El bloque F va después porque sus tests describen el comportamiento ya corregido: **H13**
 depende del bloque B entero, **H14** de H03/H05/H06, **H15** de H11, **H17** de H09/H10. **H18**
 cierra.
+
+## Proceso por historia
+
+Dos velocidades, según lo que arriesga cada historia (`docs/WORKFLOWS.md §6` contempla la receta
+corta para defectos acotados):
+
+| Ciclo | Historias | Por qué |
+|---|---|---|
+| **Completo** (spec → roja → verde → juez ciego con *mutation testing*) | H01 ✅ · H02 · H03 · H04 · H06 · H09 · H10 · H11 · H13 | Tocan corrupción de datos, el motor transaccional o la forma del wire |
+| **Corto** (regresión en rojo → fix → verificación) | H05 · H12 · H14 · H15 · H16 · H17 | Defectos acotados, o puramente aditivas de tests |
+
+**Lección de H01, aplicable a todos los jueces que queden**: los seis tests de su fase roja pasaban
+con dos mutaciones distintas del arreglo puestas. El juez lo destapó haciendo *mutation testing* por
+su cuenta. A partir de aquí se le pide explícitamente en el encargo.
 
 ## Criterio de salida
 

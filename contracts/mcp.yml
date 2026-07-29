@@ -229,6 +229,23 @@
 # E10-H13 (decisión D6b, `docs/REFACTOR.md §13`, `DECISIONES.md §3`): las 10 tools activas declaran
 # `outputSchema` (JSON Schema derivado con `schemars::schema_for!` desde el tipo de respuesta real
 # de `lodestar-app`, vía los helpers de `lodestar_app::schemas::*`).
+#
+# E24-H02 (v0.3.1, `ARCHITECTURE.md §20.9`): el catálogo de `CheckCode` gana `DOC-BOM` (`warning`),
+# que viaja en `knowledge_check.diagnostics` y en `lodestar check --json/--sarif`. La superficie de
+# 10 tools NO cambia y ningún código sale.
+#   - Qué avisa: el documento empieza por un BOM UTF-8 (`U+FEFF`). Lodestar lo interpreta y lo
+#     conserva byte a byte (E24-H01), así que NO impide leer ni modificar: es un aviso de
+#     PORTABILIDAD, de la misma naturaleza que `LINK-CASE-MISMATCH`.
+#   - Severidad **intrínseca y no configurable**: `family_of` devuelve `None`, igual que
+#     `LINK-ESCAPES-WORKSPACE` o `SYMLINK-UNSUPPORTED`. Las cinco familias reclasificables desde
+#     `validation:` son las de `§20.9` y esta no es una de ellas; añadir una sexta sería ampliar el
+#     contrato de configuración, no arreglar un defecto.
+#   - `targets` = [el documento que lleva la marca]; sin `related` ni `range` (la marca es del
+#     fichero entero, no de una línea).
+#   - Aviso de release: hasta v0.3.0 un BOM se tragaba el frontmatter ENTERO en silencio, así que un
+#     workspace con un `.md` con BOM y frontmatter ilegible pasaba `lodestar check` con exit 0. A
+#     partir de v0.3.1 ese documento se interpreta y sus problemas reales (`FM-UNCLOSED`,
+#     `FM-YAML-INVALID`) se diagnostican: el veredicto de la puerta de CI puede cambiar a exit 1.
 
 meta:
   fachada: lodestar-mcp (JSON-RPC por stdio; stdout puro, logs a stderr)

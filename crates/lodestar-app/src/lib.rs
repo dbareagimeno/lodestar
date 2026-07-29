@@ -423,6 +423,36 @@ impl App {
     /// Compone `DocumentSet::analyze` (una sola verdad computada, invariante #3) +
     /// `core::types::workspace_revision` (E10-H03) + `WorkspaceConfig::load` (I/O de `workspace`,
     /// nunca del core) — sin lógica de dominio propia.
+    /// Completa o deshace una transacción interrumpida **antes** de leer el canónico, si la hay
+    /// (E24-H03).
+    ///
+    /// No-op —y sin coste, sin lock y sin escribir— cuando no hay recuperación pendiente, que es
+    /// el caso normal. Cuando la hay, toma el **mismo lock exclusivo de publicación** que
+    /// `Workspace::apply_transaction` y delega en `Workspace::recover`, cuya decisión es
+    /// determinista por el estado durable del journal.
+    ///
+    /// Se comprueba dos veces —antes y después de tomar el lock— porque entre ambas puede haber
+    /// recuperado otro proceso: sin la segunda comprobación se recuperaría dos veces la misma
+    /// transacción.
+    ///
+    /// **Esto es reparar, no publicar**: el canónico vuelve a uno de los dos bordes de la
+    /// transacción interrumpida. Ninguna operación del plan que lo invoca se materializa aquí.
+    fn recover_if_pending(&self) -> Result<(), ErrorCode> {
+        if !self.workspace.recovery_pending() {
+            return Ok(());
+        }
+        let _lock = self
+            .workspace
+            .acquire_lock()
+            .map_err(|e| workspace_error_code(&e))?;
+        if self.workspace.recovery_pending() {
+            self.workspace
+                .recover()
+                .map_err(|e| workspace_error_code(&e))?;
+        }
+        Ok(())
+    }
+
     pub fn workspace_status(&self, profile: Profile) -> Result<WorkspaceStatus, WorkspaceError> {
         let doc_set = self.workspace.document_set()?;
         let files = doc_set.files();
@@ -1402,6 +1432,19 @@ impl App {
         raw_ops: &Value,
         policy: PlanPolicy,
     ) -> Result<PlanResult, ErrorCode> {
+        // (0) Recuperación pendiente ANTES de leer nada (E24-H03). Si una transacción anterior
+        //     quedó a medias, el disco tiene renames parciales: planificar sobre él captura una
+        //     `base_revision` de un estado que `apply_transaction` va a deshacer en su paso (2),
+        //     y el control optimista del paso (7) lo ve como un conflicto ajeno →
+        //     `WRITE_CONFLICT` en la PRIMERA escritura del agente, siempre, con un código que
+        //     además miente (lo alteró la propia recuperación de Lodestar, no otro escritor).
+        //
+        //     Recuperar aquí es reparar, no publicar: el plan sigue sin materializar su resultado
+        //     en el canónico. Se hace bajo el MISMO lock de publicación que toma el apply, para
+        //     que dos planificadores no recuperen a la vez, y solo cuando hay algo que recuperar
+        //     —el camino normal no toma el lock ni escribe nada—.
+        self.recover_if_pending()?;
+
         let doc_set = self
             .workspace
             .document_set()

@@ -1079,6 +1079,13 @@ pub struct DocumentSet { pub documents: FileMap }
 `RelPath::is_reserved`/`concept_id`, `okf_version`, `in_index`, `index_refs`, `src_is_index` y la
 pertenencia determinada por índices.
 
+**BOM UTF-8** (E24-H01): un `U+FEFF` al frente del fichero **no oculta el bloque** de frontmatter, y
+se **conserva byte a byte** en toda reescritura — nunca se normaliza al leer de disco, porque
+`workspace_revision` hashea los bytes crudos y strippearlo al leer sin reemitirlo declararía un
+cambio espurio en cada round-trip. No pertenece ni al frontmatter ni al cuerpo: `SplitFront::body`
+lo deja fuera, y quien traduzca un offset del cuerpo a una posición del fichero debe usar
+`SplitFront::body_offset`. Su falta de portabilidad se avisa con `DOC-BOM` (§20.9).
+
 **Título derivado** — `frontmatter.title` → primer heading H1 → nombre del fichero. Es **solo una
 heurística de presentación**: `title` no se convierte en propiedad reservada.
 
@@ -1273,6 +1280,7 @@ relaciones no tipadas. Catálogo mínimo:
 | `DOC-CONFLICT-MARKER` / `DOC-NOT-UTF8` / `DOC-TOO-LARGE` | Marcadores de merge / no UTF-8 / sobre el límite |
 | `PATH-NOT-UTF8` / `SYMLINK-UNSUPPORTED` | Ruta no representable / symlink no admitido |
 | `LINK-TARGET-MISSING` / `LINK-ESCAPES-WORKSPACE` / `LINK-CASE-MISMATCH` | Destino inexistente / fuera del root / capitalización no portable |
+| `DOC-BOM` | BOM UTF-8 al frente del documento: se interpreta y se conserva byte a byte, pero no es portable (aviso, E24-H02) |
 
 **Política de cambios** (`validation` + `transactions` en la config): `allowExistingErrors: true` —
 Lodestar trabaja en un repositorio que ya tiene problemas — junto a `rejectNewErrors: true` — un

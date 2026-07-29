@@ -40,6 +40,20 @@ pub(crate) fn validate_file(path: &RelPath, parsed: &Parsed, raw: &str) -> Vec<C
         ));
     }
 
+    // DOC-BOM (aviso): la marca de codificación no es portable. Se emite ANTES del corte por
+    // frontmatter ilegible: es una propiedad del FICHERO, no del bloque, así que un documento con
+    // BOM y un YAML inválido debe avisar de las dos cosas (E24-H02).
+    if model::has_bom(raw) {
+        out.push(Check::new(
+            Severity::Warn,
+            CheckCode::DocBom,
+            "El documento empieza por un BOM UTF-8 (EF BB BF). Lodestar lo interpreta y lo \
+             conserva byte a byte, pero muchas herramientas lo tratan como contenido: no es \
+             portable.",
+            vec![path.clone()],
+        ));
+    }
+
     // Frontmatter no interpretable: es lo único que impide leer la metadata del documento, así que
     // corta el resto de la validación (como hacía el port del prototipo).
     match &parsed.fm_err {

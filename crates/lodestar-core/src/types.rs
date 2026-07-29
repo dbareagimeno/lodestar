@@ -249,6 +249,17 @@ pub enum CheckCode {
     /// inventario tiene *salvo capitalización*.
     #[serde(rename = "LINK-CASE-MISMATCH")]
     LinkCaseMismatch,
+    /// El documento empieza por un **BOM UTF-8** (`U+FEFF`), que no es portable: muchas
+    /// herramientas de línea de comandos, parsers de YAML y diffs lo tratan como contenido
+    /// (E24-H02).
+    ///
+    /// Lodestar **sí** lo interpreta y lo **conserva byte a byte** (E24-H01), así que esto no
+    /// impide leer ni modificar el documento: es un **aviso** de portabilidad, de la misma
+    /// naturaleza que [`CheckCode::LinkCaseMismatch`]. Hasta E24-H01 el BOM se tragaba el
+    /// frontmatter entero **en silencio**, y este código es la mitad que hace visible lo que
+    /// aquello escondía.
+    #[serde(rename = "DOC-BOM")]
+    DocBom,
 }
 }
 
@@ -266,6 +277,7 @@ impl CheckCode {
             CheckCode::PathNotUtf8 => "PATH-NOT-UTF8",
             CheckCode::SymlinkUnsupported => "SYMLINK-UNSUPPORTED",
             CheckCode::LinkCaseMismatch => "LINK-CASE-MISMATCH",
+            CheckCode::DocBom => "DOC-BOM",
         }
     }
 }

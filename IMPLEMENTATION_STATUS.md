@@ -1043,3 +1043,51 @@ superficie de producto; git queda como crate dormido) y `DECISIONES.md §0`. Des
     E16-H02, `conforme` cuando E23-H14 lo pasó a `valid`). Un agente que leyera las instrucciones y
     probase `orphans` se comía un `INVALID_SCHEMA`.
 - **437 tests · E23 COMPLETA.** (+4 de crash-recovery tras `--features test-failpoints`.)
+
+## Cierre de defectos de la v0.3.0 (E24) — v0.3.1 · EN CURSO
+
+> Rama `release/v0.3.1`. Épica: [`epica-24`](requirements/epica-24-cierre-defectos-v031.md).
+> **Origen**: revisión de la v0.3.0 publicada (2026-07-28). Igual que en E23, ningún defecto se
+> dedujo leyendo código: los cinco se reprodujeron **ejecutando** `lodestar-mcp` por JSON-RPC sobre
+> stdio y la CLI contra workspaces de prueba, con un arnés de sesión viva.
+>
+> La v0.3.0 **pasa todas sus puertas** —437 tests, `clippy -D warnings`, los 4 de crash-recovery,
+> pureza del core— y el invariante nuclear aguantó **30 `SIGKILL` reales** durante `change_apply`
+> sin dejar ni un `.md` a medias. Estos son defectos que la suite **no mira**.
+
+**Corte de release**: `H07`/`H08` (lenguaje de consulta) quedan **fuera de v0.3.1** y son el núcleo
+de **v0.4.0**: cambian resultados observables de consultas que hoy se aceptan y una revisa un
+criterio ratificado en E19-H04. Ninguna historia de v0.3.1 depende de ellas.
+
+| Historia | Estado | Detalle |
+|---|---|---|
+| **E24-H01** El BOM deja de tragarse el frontmatter | ✅ Cerrada | Ver abajo. |
+| **E24-H02** Un BOM es visible, no silencioso | ✅ Cerrada | `DOC-BOM` (aviso, no configurable). |
+| H03–H06 (recuperación), H09–H12 (superficie y descubrimiento), H13–H17 (suite), H18 (release) | ⏳ | |
+
+- ✅ **E24-H01** — **Pérdida silenciosa de datos por BOM UTF-8**. `split_front` comparaba
+  `raw.starts_with("---")` sobre un raw que empieza por `\u{feff}---`, así que un `.md` con BOM caía
+  en `SplitFront::Sin`: su metadata era **invisible** para el motor y `knowledge_check` respondía
+  VÁLIDO con 0 diagnósticos. Al escribir encima, la rama `Sin` de `patch_frontmatter` anteponía un
+  bloque nuevo **por delante** del BOM (dos bloques, el original degradado a cuerpo) y un
+  `replace_body` posterior destruía la metadata original para siempre.
+  El arreglo cubre **los cinco caminos de reescritura de cuerpo de una vez**: `replace_text` y
+  `edit_section` normalizan a `ReplaceBody`, igual que `move --rewriteInboundLinks` y
+  `delete remove_links`. El BOM se **conserva byte a byte** y NO se normaliza al leer de disco:
+  `workspace_revision` hashea los bytes crudos.
+  - **Colateral encontrado implementando**: `links::diagnose` asumía `body_start == 0` sin bloque,
+    así que los rangos de los diagnósticos de enlace de un `.md` con BOM y sin frontmatter iban
+    desplazados 3 bytes. Ahora consume `SplitFront::body_offset`.
+  - **Lo que el juez ciego encontró y la fase roja no**: tres ramas del arreglo **sobrevivían a la
+    mutación con la suite entera en verde**. Dos eran mayores y se cerraron con tests verificados
+    poniendo cada mutación (`move_no_se_come_el_bom_del_enlazante_sin_frontmatter`,
+    `patch_sobre_bom_sin_bloque_no_precede_a_la_marca`). Es la lección de E23 repitiéndose: los seis
+    tests de la fase roja pasaban con el defecto reintroducido.
+- ✅ **E24-H02** — **El BOM deja de ser invisible**. Nuevo `CheckCode` `DOC-BOM` (`warning`,
+  severidad **intrínseca**: `family_of` devuelve `None`, como `LINK-ESCAPES-WORKSPACE`). Se emite
+  antes del corte por frontmatter ilegible, porque la marca es del **fichero**, no del bloque.
+  - **Aviso de release**: hasta v0.3.0, un BOM ocultaba el frontmatter entero, así que un workspace
+    con un `.md` con BOM y frontmatter ilegible pasaba `lodestar check` con **exit 0**. Desde v0.3.1
+    ese documento se interpreta y sus problemas reales se diagnostican: **el veredicto de la puerta
+    de CI puede cambiar a exit 1** sobre bases existentes. Es el comportamiento correcto, pero es un
+    cambio observable y va en la nota de release.
