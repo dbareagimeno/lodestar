@@ -1777,3 +1777,172 @@ fn gc_purga_temporales_huerfanos() {
          `rename` no rompe nada, pero se acumula sin límite: el GC debe recogerlo"
     );
 }
+
+// ---------------------------------------------------------------------------
+// E24-H13 — Seam REAL de failpoints: la caída se inyecta DENTRO de `apply_transaction`
+//
+// Los cuatro tests de E13-H06 componen el estado post-crash a mano con `simular_caida`, y en un
+// orden que NO es el del orquestador (journal antes que backup, cuando producción hace backup antes
+// que journal). Consecuencia medida: `FailPoint::TrasJournalPrepared` de aquella taxonomía describe
+// un estado que el código real no puede producir, y pasa vacuamente porque sin directorio de
+// recuperación `restore_from_recovery` devuelve Ok() de inmediato.
+//
+// Estos tests recorren el orquestador de verdad, así que la taxonomía ya no puede divergir del
+// orden de producción: si alguien reordena los pasos, cambia el comportamiento observado aquí.
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "test-failpoints")]
+mod seam_real {
+    use super::*;
+    use lodestar_workspace::failpoints::{self, FailPoint};
+
+    /// Workspace con tres documentos y un change set que los toca todos.
+    fn tres_documentos() -> (tempfile::TempDir, Workspace, BTreeMap<String, String>) {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = Workspace::open(dir.path()).unwrap();
+        for n in ["uno", "dos", "tres"] {
+            ws.create_document(
+                &RelPath::new(&format!("{n}.md")).unwrap(),
+                "Nota",
+                Some(n),
+                &format!("# {n}\n\ncuerpo original\n"),
+                false,
+            )
+            .unwrap();
+        }
+        let original = canonical_md(dir.path());
+        (dir, ws, original)
+    }
+
+    /// Un change set que modifica los tres documentos.
+    fn cs_modifica_los_tres(ws: &Workspace, id: &str) -> ChangeSet {
+        let mut cs = change_set(
+            id,
+            ["uno", "dos", "tres"]
+                .iter()
+                .map(|n| NormalizedOperation::ReplaceBody {
+                    path: RelPath::new(&format!("{n}.md")).unwrap(),
+                    body: format!("# {n}\n\ncuerpo NUEVO\n"),
+                })
+                .collect(),
+        );
+        cs.base_revision = ws.workspace_revision().unwrap();
+        cs
+    }
+
+    /// **E24-H13** — property test sobre el orquestador REAL: desde cualquier punto de caída, tras
+    /// recuperar el canónico converge a uno de los dos bordes. Nunca a un estado parcial.
+    #[test]
+    fn recovery_sin_parciales_por_el_orquestador_real() {
+        let puntos = [
+            FailPoint::AlEntrar,
+            FailPoint::TrasBackupSinJournal,
+            FailPoint::TrasJournalPrepared,
+            FailPoint::EntreRenames,
+            FailPoint::TrasPublicarSinSellar,
+            FailPoint::AntesDeSellar,
+        ];
+
+        for (i, fp) in puntos.iter().enumerate() {
+            let (dir, ws, original) = tres_documentos();
+            let cs = cs_modifica_los_tres(&ws, &format!("e24-h13-{i}"));
+            // `ReplaceBody` CONSERVA el frontmatter (E23-H03), así que el borde «resultado» es el
+            // original con el cuerpo sustituido — no solo el cuerpo.
+            let resultado_esperado: BTreeMap<String, String> = original
+                .iter()
+                .map(|(k, v)| (k.clone(), v.replace("cuerpo original", "cuerpo NUEVO")))
+                .collect();
+
+            failpoints::armar(*fp);
+            let r = ws.apply_transaction(&cs);
+            failpoints::desarmar();
+            assert!(
+                r.is_err(),
+                "el failpoint {fp:?} debe abortar la transacción (si no, el test es vacuo)"
+            );
+
+            // Se «reabre» el workspace, como haría el proceso siguiente, y se recupera.
+            drop(ws);
+            let ws2 = Workspace::open(dir.path()).unwrap();
+            if ws2.recovery_pending() {
+                ws2.recover().expect("la recuperación debe completarse");
+            }
+
+            let final_ = canonical_md(dir.path());
+            let es_original = final_ == original;
+            let es_resultado = final_ == resultado_esperado;
+            assert!(
+                es_original || es_resultado,
+                "desde {fp:?}, el canónico debe converger a UNO de los dos bordes de la \
+                 transacción, jamás a un estado parcial.\nfinal:     {final_:?}\noriginal:  \
+                 {original:?}\nresultado: {resultado_esperado:?}"
+            );
+            assert!(
+                !ws2.recovery_pending(),
+                "tras recuperar desde {fp:?} no puede quedar recuperación pendiente"
+            );
+        }
+    }
+
+    /// **E24-H13** — el estado que la simulación de E13-H06 NO modelaba: copias escritas, journal
+    /// aún ausente.
+    ///
+    /// Producción hace backup ANTES que journal; la simulación lo hacía al revés, así que este
+    /// estado —el único que el código real produce entre esos dos pasos— no lo cubría nadie. Al
+    /// reabrir, `recovery_pending()` es `false` (solo mira journals): hay que comprobar que el
+    /// canónico está intacto, porque ningún rename ha ocurrido todavía.
+    #[test]
+    fn caida_entre_backup_y_journal() {
+        let (dir, ws, original) = tres_documentos();
+        let cs = cs_modifica_los_tres(&ws, "e24-h13-backup-sin-journal");
+
+        failpoints::armar(FailPoint::TrasBackupSinJournal);
+        let r = ws.apply_transaction(&cs);
+        failpoints::desarmar();
+        assert!(r.is_err(), "el failpoint debe abortar");
+
+        drop(ws);
+        let ws2 = Workspace::open(dir.path()).unwrap();
+        assert!(
+            !ws2.recovery_pending(),
+            "sin journal no hay recuperación pendiente que detectar: `pending_journals` solo mira \
+             journals. Es justamente por eso que el canónico tiene que estar ya intacto"
+        );
+        assert_eq!(
+            canonical_md(dir.path()),
+            original,
+            "la caída ocurrió ANTES del primer rename, así que el canónico no puede haberse \
+             movido ni un byte"
+        );
+
+        // El árbol de recuperación queda huérfano (no hay journal ni recibo): lo recoge el GC.
+        ws2.gc_receipts().expect("el GC debe correr");
+        let recovery = dir
+            .path()
+            .join(".lodestar")
+            .join("runtime")
+            .join("recovery");
+        let huerfanos = std::fs::read_dir(&recovery)
+            .map(|rd| rd.flatten().count())
+            .unwrap_or(0);
+        assert_eq!(
+            huerfanos, 0,
+            "las copias de una transacción que nunca llegó a tener journal ni recibo son basura: \
+             el GC de E24-H06 debe recogerlas"
+        );
+    }
+
+    /// **E24-H13** — control anti-vacuo del seam: sin armar nada, la transacción publica.
+    #[test]
+    fn sin_failpoint_armado_la_transaccion_publica() {
+        let (dir, ws, _original) = tres_documentos();
+        let cs = cs_modifica_los_tres(&ws, "e24-h13-sin-armar");
+        ws.apply_transaction(&cs)
+            .expect("sin failpoint armado la transacción debe publicar");
+        let final_ = canonical_md(dir.path());
+        assert!(
+            final_.values().all(|c| c.contains("cuerpo NUEVO")),
+            "el seam no puede alterar el camino normal: {final_:?}"
+        );
+    }
+}

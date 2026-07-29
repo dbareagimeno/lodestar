@@ -18,6 +18,10 @@ use lodestar_core::plan;
 use lodestar_core::types::{ChangeSet, FileMap, RelPath, WorkspaceRevision};
 
 use crate::error::WorkspaceError;
+#[cfg(feature = "test-failpoints")]
+use crate::failpoint;
+#[cfg(feature = "test-failpoints")]
+use crate::failpoints::FailPoint;
 use crate::journal::Journal;
 use crate::{io, Workspace};
 
@@ -128,6 +132,7 @@ impl Workspace {
                 None => io::delete(&self.root, rel)?,
             }
             journal.mark_applied(rel)?;
+            failpoint!(FailPoint::EntreRenames);
         }
 
         // Todas las operaciones aplicadas: el journal pasa a `applied` (E13-H05).
