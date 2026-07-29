@@ -2324,11 +2324,36 @@ mod ventana_de_publicacion {
 
         // El gancho hace de «otro proceso»: edita un `.md` que la transacción va a sustituir,
         // cuando el guard, las copias y el journal ya se ejercieron sobre el estado de T1.
+        //
+        // La **precondición del escenario** —que el gancho se dispara DENTRO de la ventana y
+        // DESPUÉS de las copias, que es donde vive el defecto— se asevera desde DENTRO del gancho:
+        // es el único instante en que ese estado existe. Antes se comprobaba tras el fallo, pero
+        // E25-H02 sella el journal y el árbol del aborto de ventana (ajuste declarado en su spec),
+        // así que a la vuelta ya no queda ninguno de los dos que mirar.
         let ruta_dos = dir.path().join("dos.md");
         let edicion_externa = "---\ntype: Nota\ntitle: dos\n---\n\n# dos\n\nEDICIÓN EXTERNA\n";
-        failpoints::armar_gancho(PuntoDeGancho::AntesDePublicar, move || {
-            std::fs::write(&ruta_dos, edicion_externa).expect("el gancho debe poder editar dos.md");
-        });
+        {
+            let root = dir.path().to_path_buf();
+            let dos_t1 = dos_en_t1.clone();
+            failpoints::armar_gancho(PuntoDeGancho::AntesDePublicar, move || {
+                let recovery = recovery_de(&root, id);
+                assert!(
+                    recovery.is_dir(),
+                    "el gancho debe dispararse tras `backup_originals` (último instante de la \
+                     ventana): sin árbol de recuperación, el aborto ocurriría antes de que el \
+                     defecto sea posible"
+                );
+                assert_eq!(
+                    std::fs::read_to_string(recovery.join("dos.md")).unwrap_or_default(),
+                    dos_t1,
+                    "y la copia de recuperación guarda la versión de T1: exactamente por eso \
+                     publicar sobre un canónico que ya no es el de T1 dejaría un backup que no \
+                     restaura nada real"
+                );
+                std::fs::write(&ruta_dos, edicion_externa)
+                    .expect("el gancho debe poder editar dos.md");
+            });
+        }
         let resultado = ws.apply_transaction(&cs);
         failpoints::desarmar_ganchos();
 
@@ -2346,20 +2371,28 @@ mod ventana_de_publicacion {
              replanifica, no se reintenta); era: {err:?}"
         );
 
-        // Precondición del escenario (no el criterio): el gancho se disparó DENTRO de la ventana y
-        // DESPUÉS de las copias, que es donde vive el defecto. Si esto falla, el punto de gancho se
-        // colocó demasiado pronto y el test no ejerce el camino de publicación.
-        let recovery = recovery_de(dir.path(), id);
+        // E25-H02 (**ajuste declarado en su spec**, aserción INVERTIDA): el aborto de ventana sella
+        // su propia transacción bajo el mismo lock —sabe por control de flujo que no ha entrado en
+        // el bucle de renames, así que cero renames significa que no hay NADA que restaurar—, de
+        // modo que tras el `WRITE_CONFLICT` no puede quedar ni journal ni árbol de recuperación.
+        // Hasta E25-H01 esta misma aserción exigía justo lo contrario (que el árbol siguiera ahí,
+        // como precondición del escenario); la precondición se garantiza ahora desde dentro del
+        // gancho, que es donde ese estado existe de verdad. Si el material sobreviviera, la
+        // siguiente operación restauraría las copias de T1 encima de la edición externa que este
+        // aborto existe para no pisar.
         assert!(
-            recovery.is_dir(),
-            "el gancho debe dispararse tras `backup_originals` (último instante de la ventana): \
-             sin árbol de recuperación, el aborto ocurrió antes de que el defecto sea posible"
+            !recovery_de(dir.path(), id).exists(),
+            "el aborto de ventana no puede dejar su árbol de recuperación en disco: {}",
+            recovery_de(dir.path(), id).display()
         );
-        assert_eq!(
-            std::fs::read_to_string(recovery.join("dos.md")).unwrap_or_default(),
-            dos_en_t1,
-            "y la copia de recuperación guarda la versión de T1: exactamente por eso publicar \
-             sobre un canónico que ya no es el de T1 dejaría un backup que no restaura nada real"
+        assert!(
+            !journal_de(dir.path(), id).exists(),
+            "ni su fichero de journal: {}",
+            journal_de(dir.path(), id).display()
+        );
+        assert!(
+            !ws.recovery_pending(),
+            "y por tanto no queda recuperación pendiente que la siguiente operación vaya a ejecutar"
         );
 
         // El criterio: ni un `.md` canónico sustituido. El único cambio es el del propio gancho.
@@ -2531,6 +2564,934 @@ mod ventana_de_publicacion {
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect::<BTreeMap<String, String>>(),
             "y nada del conocimiento escribible se publicó: el aborto es antes del primer rename"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// E25-H02 — Las copias de recuperación son durables, verificadas y nunca encallan el workspace
+// (`requirements/epica-25-endurecimiento-escritura.md`, bloque B). Fase ROJA.
+//
+// LOS DEFECTOS
+//
+// 1. **Copias no durables**: `backup_originals` copia con `std::fs::copy`
+//    (`src/recovery.rs:140`) y escribe el manifiesto `.absent` con `std::fs::write` (`:155-158`),
+//    ninguno con volcado; el journal, en cambio, SÍ se fsynca antes del primer rename. Tras un
+//    corte de energía puede quedar un journal durable apuntando a una copia truncada o ausente.
+// 2. **Restauración verbatim**: `restore_backups` (`:358-364`) lee la copia y la escribe tal cual
+//    sobre el canónico, sin verificar nada. Una copia truncada se PUBLICA como si fuera el original.
+// 3. **Workspace encallado para siempre**: si la copia es ilegible, `restore_backups` devuelve `Err`
+//    y `recover()` lo propaga con `?` en sus tres brazos (`:271`, `:275-276`, `:297-298`). No hay
+//    cuarentena ni descarte: `pending_journals` sigue viendo el journal, `recovery_pending()` sigue
+//    en `true` y TODA escritura futura muere en el paso (2) de `apply_transaction`.
+// 4. **`.absent` perdido → estado híbrido**: `read_absent_manifest` (`:179-188`) trata cualquier
+//    fallo de lectura como conjunto vacío, así que la restauración no borra los ficheros que la
+//    transacción creó: el canónico queda con los originales MÁS los creados. Ni un borde ni el otro.
+// 5. **La recuperación deshace lo que el aborto de ventana acababa de proteger** (estado nuevo, lo
+//    destapó E25-H01): tras el `WRITE_CONFLICT` de ventana quedan en disco el journal `prepared`
+//    (creado en `transaction.rs:164`, ANTES de la comprobación) y su árbol de recuperación con las
+//    copias de T1, con CERO renames aplicados. La siguiente operación clasifica ese journal como
+//    `prepared` → RESTAURAR y escribe las copias de T1 encima de la edición externa que el aborto
+//    existía para no pisar; y lo que el usuario CREÓ en la ventana está marcado `.absent`, así que
+//    la restauración lo borra. Sin esta enmienda, las tres garantías de E25-H01 duran exactamente
+//    hasta la siguiente operación.
+//
+// EL CONTRATO QUE FIJAN ESTOS TESTS
+//
+// - Nada se escribe sobre el canónico a partir de una copia que no verifica.
+// - Un journal que no se puede restaurar manda su material a
+//   `.lodestar/runtime/journal/quarantine/<txnId>/` —donde NADA se borra: es material forense—,
+//   `recover()` sigue con los demás, la operación que lo disparó falla UNA vez con
+//   `RECOVERY_FAILED` nombrando esa ruta, y la siguiente procede.
+// - El aborto de ventana sella su propia transacción bajo el mismo lock (journal primero, árbol
+//   después), así que no deja recuperación pendiente que pise nada.
+//
+// EL SEAM QUE HACE FALTA (lo añade el implementador; aquí solo se USA)
+//
+// Para el criterio `el_sellado_del_aborto_es_seguro_a_mitad` hace falta poder interrumpir el sellado
+// del aborto ENTRE el borrado del journal y el del árbol. La taxonomía de `FailPoint`
+// (`src/failpoints.rs:45-64`) gana un punto —solo bajo `--features test-failpoints`, sin generar ni
+// una instrucción en compilación normal—:
+//
+// ```rust
+// pub enum FailPoint {
+//     …
+//     /// En medio del sellado del **aborto de ventana** (E25-H02): el fichero de journal ya se ha
+//     /// borrado y el árbol de recuperación TODAVÍA no. Modela el proceso que muere entre los dos
+//     /// borrados; al reabrir no debe haber recuperación pendiente y el árbol huérfano lo recoge
+//     /// el GC (E24-H06).
+//     EnMedioDelSelladoDelAborto,
+// }
+// ```
+//
+// Se ejerce con el `failpoint!` que ya existe (aborta con `Err`), colocado en el camino de aborto
+// por divergencia de ventana, entre `remove_file(journal)` y la limpieza del árbol. Cuando está
+// armado, el error que sale de `apply_transaction` es el del failpoint y NO `WRITE_CONFLICT`: el
+// test solo exige `is_err()`.
+//
+// Además, `RECOVERY_FAILED` gana su primer emisor real: `WorkspaceError` necesita una variante cuyo
+// `.code()` sea `ErrorCode::RecoveryFailed.as_str()` («RECOVERY_FAILED») y cuyo `Display` nombre la
+// ruta de cuarentena. Los tests NO nombran la variante —solo `code()` y el mensaje—, así que la
+// forma exacta la elige el implementador.
+//
+// ROJO ESPERADO HOY
+// - `copia_truncada_no_se_restaura_verbatim`: la copia truncada se escribe encima del canónico.
+// - `journal_irrecuperable_no_encalla_el_workspace`: la primera operación falla con `IO`
+//   (no `RECOVERY_FAILED`), no hay cuarentena, y la segunda falla igual — para siempre.
+// - `un_journal_roto_no_arrastra_a_los_demas`: `recover()` sale por `?` en el primer journal roto.
+// - `absent_perdido_no_deja_estado_hibrido`: `recover()` devuelve `Ok` y los ficheros creados
+//   sobreviven junto a los originales.
+// - `la_cuarentena_no_borra_nada`: no existe cuarentena alguna.
+// - Los cuatro del aborto de ventana: la recuperación de la siguiente operación pisa la edición
+//   externa, borra el fichero nuevo y deja journal + árbol en disco.
+// - `cero_applied_no_significa_cero_renames` es el **control anti-vacuo declarado**: pasa ya hoy y
+//   tiene que seguir pasando. Protege contra la generalización prohibida por la spec
+//   («un journal `prepared` con cero `applied` no hay que restaurarlo»), que sellaría publicaciones
+//   parciales: «cero `applied` durables» describe también la caída ENTRE el primer rename y su
+//   anotación.
+// ---------------------------------------------------------------------------
+
+/// Ruta del árbol de copias de recuperación de una transacción (`recovery/<txnId>/`), exista o no.
+fn recovery_de(root: &Path, txn_id: &str) -> PathBuf {
+    root.join(".lodestar")
+        .join("runtime")
+        .join("recovery")
+        .join(txn_id)
+}
+
+/// Ruta del write-ahead journal de una transacción (`journal/<txnId>.json`), exista o no.
+fn journal_de(root: &Path, txn_id: &str) -> PathBuf {
+    root.join(".lodestar")
+        .join("runtime")
+        .join("journal")
+        .join(format!("{txn_id}.json"))
+}
+
+/// Ruta del directorio de **cuarentena** de una transacción cuya recuperación falló (E25-H02):
+/// `.lodestar/runtime/journal/quarantine/<txnId>/`. Nada se borra ahí dentro: es material forense.
+fn cuarentena_de(root: &Path, txn_id: &str) -> PathBuf {
+    root.join(".lodestar")
+        .join("runtime")
+        .join("journal")
+        .join("quarantine")
+        .join(txn_id)
+}
+
+/// Todos los ficheros bajo `dir` (recursivo) como `ruta relativa POSIX -> bytes`. Compara **bytes**,
+/// no texto: una copia de recuperación corrupta no es UTF-8 y el criterio «la cuarentena no borra
+/// nada» es byte-a-byte.
+fn ficheros_bajo(dir: &Path) -> BTreeMap<String, Vec<u8>> {
+    fn walk(d: &Path, base: &Path, out: &mut BTreeMap<String, Vec<u8>>) {
+        let Ok(entries) = std::fs::read_dir(d) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, base, out);
+                continue;
+            }
+            let rel = path
+                .strip_prefix(base)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            out.insert(rel, std::fs::read(&path).unwrap_or_default());
+        }
+    }
+    let mut out = BTreeMap::new();
+    walk(dir, dir, &mut out);
+    out
+}
+
+/// Conjunto de paths afectados por llevar `canonico` a `resultado`, con el MISMO criterio y el mismo
+/// orden determinista que el orquestador (`transaction.rs::affected_paths`): así el arnés respalda y
+/// registra exactamente el lote que producción respaldaría y registraría.
+fn afectados_por(canonico: &FileMap, resultado: &FileMap) -> Vec<RelPath> {
+    let mut set: std::collections::BTreeSet<RelPath> = std::collections::BTreeSet::new();
+    for (rel, contenido) in resultado {
+        if canonico.get(rel) != Some(contenido) {
+            set.insert(rel.clone());
+        }
+    }
+    for rel in canonico.keys() {
+        if !resultado.contains_key(rel) {
+            set.insert(rel.clone());
+        }
+    }
+    set.into_iter().collect()
+}
+
+/// Deja en disco el estado durable EXACTO de una transacción **interrumpida**, en el orden real del
+/// orquestador (copias → journal → renames, `transaction.rs:159-180`): `backup_originals` (E13-H04)
+/// → `create_journal` (E13-H03) → los `renames` primeros renames del lote.
+///
+/// - `renames`: cuántas sustituciones del canónico llegaron a completarse, en el orden determinista
+///   del lote (el mismo que publica `publish_result`).
+/// - `anotar`: si cada rename se marcó en el journal (`mark_applied`, que lo lleva a `applying`) o
+///   no. `anotar = false` con `renames = 1` es la caída ENTRE el primer rename y su anotación:
+///   journal `prepared`, cero entradas `applied` **y un rename ya hecho en disco**.
+///
+/// Devuelve `(afectados, resultado)`: el lote respaldado/registrado y el `FileMap` que la
+/// transacción habría dejado si hubiera terminado.
+fn transaccion_interrumpida(
+    ws: &Workspace,
+    root: &Path,
+    txn_id: &str,
+    cs: &ChangeSet,
+    renames: usize,
+    anotar: bool,
+) -> (Vec<RelPath>, FileMap) {
+    let canonico = canonical_filemap(root);
+    let resultado = plan::apply_normalized_ops(&canonico, &cs.operations)
+        .expect("prever el resultado del plan");
+    let afectados = afectados_por(&canonico, &resultado);
+    assert!(
+        !afectados.is_empty(),
+        "precondición del arnés: la transacción debe afectar a algún path"
+    );
+    assert!(
+        renames <= afectados.len(),
+        "precondición del arnés: no se pueden simular más renames ({renames}) que paths afectados \
+         ({})",
+        afectados.len()
+    );
+
+    let base = ws.workspace_revision().unwrap();
+    let writable = &[] as &[RelPath];
+    let result_rev = lodestar_core::types::workspace_revision(&resultado, writable);
+
+    // (8) Copias de recuperación de los originales afectados — ANTES del journal, como producción.
+    ws.backup_originals(txn_id, &afectados)
+        .expect("preparar las copias de recuperación");
+
+    // (9) Write-ahead journal `prepared`, fsynced antes del primer rename.
+    let mut journal = ws
+        .create_journal(txn_id, &afectados, &base, &result_rev)
+        .expect("crear el write-ahead journal");
+
+    // (10) Los `renames` primeros renames del lote, en el orden determinista de la publicación.
+    for rel in afectados.iter().take(renames) {
+        match resultado.get(rel) {
+            Some(contenido) => std::fs::write(root.join(rel.as_str()), contenido).unwrap(),
+            None => {
+                let _ = std::fs::remove_file(root.join(rel.as_str()));
+            }
+        }
+        if anotar {
+            journal
+                .mark_applied(rel)
+                .expect("anotar el rename en el journal");
+        }
+    }
+
+    // Se «cae»: el journal no llega a `applied` ni se sella.
+    (afectados, resultado)
+}
+
+/// `true` si `mensaje` nombra la cuarentena de `txn_id` (la ruta que la spec exige citar para que
+/// quien lea el error sepa dónde quedó el material forense).
+fn menciona_la_cuarentena(mensaje: &str, txn_id: &str) -> bool {
+    mensaje.contains("quarantine") && mensaje.contains(txn_id)
+}
+
+mod durabilidad_de_la_recuperacion {
+    use super::*;
+
+    /// **E25-H02** · Criterio 1 — **Dado** un journal `prepared` cuya copia de recuperación está
+    /// **truncada**, **Cuando** se reabre el workspace y se recupera, **Entonces** el canónico NO se
+    /// sobrescribe con la copia rota.
+    ///
+    /// Hoy `restore_backups` (`recovery.rs:358-364`) lee la copia y la escribe tal cual: el `.md`
+    /// canónico queda con los bytes truncados —frontmatter partido incluido— y la recuperación lo
+    /// declara un éxito. Una copia que no verifica no es un original: no se restaura.
+    #[test]
+    fn copia_truncada_no_se_restaura_verbatim() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = siembra_documentos(dir.path(), &["uno", "dos", "tres"]);
+        let original = canonical_md(dir.path());
+
+        let id = "e25-h02-copia-truncada";
+        let cs = cs_modifica(&ws, id, &["uno.md", "dos.md", "tres.md"]);
+        // Un rename ya hecho y anotado (journal `applying`): la restauración es NECESARIA, así que
+        // ninguna implementación puede saltarse la copia sin más y pasar el test vacuamente.
+        let (afectados, resultado) = transaccion_interrumpida(&ws, dir.path(), id, &cs, 1, true);
+        let publicado = afectados[0].as_str().to_string();
+        let esperado = como_md(&resultado);
+        assert_ne!(
+            original[&publicado], esperado[&publicado],
+            "precondición: el path renombrado debe cambiar de contenido (si no, no hay nada que \
+             restaurar y el test sería vacuo)"
+        );
+
+        // La copia de recuperación de ESE path queda truncada a la mitad, como la dejaría un corte
+        // de energía sobre un `std::fs::copy` sin volcado.
+        let copia = recovery_de(dir.path(), id).join(&publicado);
+        let completa = std::fs::read(&copia).expect("la copia de recuperación debe existir");
+        let truncada = completa[..completa.len() / 2].to_vec();
+        assert!(
+            !truncada.is_empty() && truncada != completa,
+            "precondición: la copia truncada debe diferir de la íntegra"
+        );
+        std::fs::write(&copia, &truncada).unwrap();
+        drop(ws);
+
+        let ws2 = Workspace::open(dir.path()).unwrap();
+        // La recuperación puede fallar (copia que no verifica → cuarentena) o no, pero si falla lo
+        // hace con su código propio, no con un IO genérico.
+        if let Err(e) = ws2.recover() {
+            assert_eq!(
+                e.code(),
+                "RECOVERY_FAILED",
+                "una copia que no verifica es un fallo de recuperación, con su código propio del \
+                 catálogo; era: {e:?}"
+            );
+        }
+
+        let despues = canonical_md(dir.path());
+        let contenido = despues
+            .get(&publicado)
+            .unwrap_or_else(|| panic!("`{publicado}` debe seguir existiendo en el canónico"));
+        assert_ne!(
+            contenido.as_bytes(),
+            truncada.as_slice(),
+            "el canónico NO puede quedar con los bytes de la copia truncada: restaurar sin \
+             verificar publica basura firmada como «el original»"
+        );
+        assert!(
+            contenido == &original[&publicado] || contenido == &esperado[&publicado],
+            "y tiene que ser uno de los dos bordes íntegros de la transacción (original o \
+             resultado), nunca una copia a medias.\nen disco: {contenido:?}\noriginal: {:?}\n\
+             resultado: {:?}",
+            original[&publicado],
+            esperado[&publicado]
+        );
+        assert!(
+            !ws2.recovery_pending(),
+            "y el workspace vuelve a ser escribible: tras recuperar (aunque sea a cuarentena) no \
+             puede quedar recuperación pendiente"
+        );
+    }
+
+    /// **E25-H02** · Criterio 2 — **Dado** un journal `prepared` cuya copia es **ilegible**,
+    /// **Cuando** se recupera y luego se intenta una transacción nueva, **Entonces** la primera
+    /// falla con `RECOVERY_FAILED` nombrando la cuarentena y **la segunda tiene éxito**.
+    ///
+    /// Hoy no tiene éxito ninguna de las dos, nunca: `restore_backups` devuelve `Err`, `recover()`
+    /// lo propaga con `?`, el journal sigue pendiente y toda escritura futura muere en el paso (2)
+    /// de `apply_transaction`. Un solo fichero ilegible cierra el workspace para siempre.
+    ///
+    /// La copia se hace ilegible escribiéndole bytes que **no son UTF-8**: `read_to_string` falla
+    /// exactamente igual que con un permiso denegado, y sin depender de `chmod` ni del usuario que
+    /// corre los tests (en CI podría ser root, para quien no hay fichero ilegible).
+    #[test]
+    fn journal_irrecuperable_no_encalla_el_workspace() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = siembra_documentos(dir.path(), &["uno", "dos", "tres"]);
+
+        let id = "e25-h02-journal-irrecuperable";
+        let cs = cs_modifica(&ws, id, &["uno.md", "dos.md", "tres.md"]);
+        let (afectados, _) = transaccion_interrumpida(&ws, dir.path(), id, &cs, 1, true);
+        let publicado = afectados[0].as_str().to_string();
+        std::fs::write(
+            recovery_de(dir.path(), id).join(&publicado),
+            [0xff, 0xfe, 0x00, 0x01],
+        )
+        .unwrap();
+        drop(ws);
+
+        let ws2 = Workspace::open(dir.path()).unwrap();
+        assert!(
+            ws2.recovery_pending(),
+            "precondición: al reabrir hay una recuperación pendiente que la primera operación \
+             tendrá que atender"
+        );
+
+        // La PRIMERA operación real dispara la recuperación en su paso (2) y hereda su fallo.
+        let cs2 = cs_modifica(&ws2, "e25-h02-siguiente", &["tres.md"]);
+        let err = match ws2.apply_transaction(&cs2) {
+            Err(e) => e,
+            Ok((_, _, changed)) => panic!(
+                "la operación que arrastra una recuperación irrecuperable no puede reportar éxito: \
+                 changedPaths={changed:?}"
+            ),
+        };
+        assert_eq!(
+            err.code(),
+            "RECOVERY_FAILED",
+            "el fallo de recuperación tiene su propio código del catálogo (E25-H02 le da su primer \
+             emisor real): no es un IO genérico ni un WORKSPACE_RECOVERY_REQUIRED; era: {err:?}"
+        );
+        let mensaje = err.to_string();
+        assert!(
+            menciona_la_cuarentena(&mensaje, id),
+            "y el mensaje debe NOMBRAR la ruta de cuarentena \
+             (.lodestar/runtime/journal/quarantine/{id}/): es el único sitio donde el operador se \
+             entera de que hay material forense esperando. Mensaje: {mensaje}"
+        );
+        assert!(
+            cuarentena_de(dir.path(), id).is_dir(),
+            "y la cuarentena debe existir de verdad en {}",
+            cuarentena_de(dir.path(), id).display()
+        );
+        assert!(
+            !ws2.recovery_pending(),
+            "tras la cuarentena ya no queda recuperación pendiente: es lo que desencalla el \
+             workspace"
+        );
+
+        // La SEGUNDA operación tiene éxito: el workspace volvió a ser escribible.
+        ws2.apply_transaction(&cs2).unwrap_or_else(|e| {
+            panic!(
+                "la segunda operación debe publicar con normalidad (el journal irrecuperable ya \
+                 está en cuarentena): {e:?}"
+            )
+        });
+        assert!(
+            canonical_md(dir.path())["tres.md"].contains("cuerpo NUEVO"),
+            "y su resultado tiene que estar en el canónico"
+        );
+    }
+
+    /// **E25-H02** · Criterio 3 — **Dado** dos journals pendientes, uno sano y uno irrecuperable,
+    /// **Cuando** se recupera, **Entonces** el sano se recupera igualmente.
+    ///
+    /// Hoy `recover()` itera `pending_journals` y sale por `?` en el primero que falla, así que el
+    /// destino del journal sano depende del orden de `read_dir`. El test muerde en los dos órdenes:
+    /// si el roto va primero, el sano no se recupera; si va segundo, el sano se recupera pero el
+    /// error que sale es un `IO` genérico y sin cuarentena.
+    #[test]
+    fn un_journal_roto_no_arrastra_a_los_demas() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = siembra_documentos(dir.path(), &["uno", "dos", "tres", "cuatro"]);
+        let original = canonical_md(dir.path());
+
+        // Transacción SANA interrumpida sobre `uno.md` (copia íntegra, 1 rename hecho).
+        let sano = "e25-h02-sano";
+        let cs_sano = cs_modifica(&ws, sano, &["uno.md"]);
+        let (af_sano, _) = transaccion_interrumpida(&ws, dir.path(), sano, &cs_sano, 1, true);
+        assert_eq!(af_sano.len(), 1, "precondición: la sana afecta a un path");
+
+        // Transacción ROTA interrumpida sobre `tres.md` (copia ilegible, 1 rename hecho).
+        let roto = "e25-h02-roto";
+        let cs_roto = cs_modifica(&ws, roto, &["tres.md"]);
+        let (af_roto, _) = transaccion_interrumpida(&ws, dir.path(), roto, &cs_roto, 1, true);
+        assert_eq!(af_roto.len(), 1, "precondición: la rota afecta a un path");
+        std::fs::write(
+            recovery_de(dir.path(), roto).join(af_roto[0].as_str()),
+            [0xff, 0xfe, 0x00, 0x01],
+        )
+        .unwrap();
+        drop(ws);
+
+        let ws2 = Workspace::open(dir.path()).unwrap();
+        let err = match ws2.recover() {
+            Err(e) => e,
+            Ok(()) => panic!(
+                "una recuperación con un journal irrecuperable debe reportarlo una vez, no callarlo"
+            ),
+        };
+        assert_eq!(
+            err.code(),
+            "RECOVERY_FAILED",
+            "el fallo del journal roto se reporta con su código propio; era: {err:?}"
+        );
+
+        // El journal SANO se recuperó igualmente: su path volvió al original y su plano de control
+        // quedó sellado.
+        let despues = canonical_md(dir.path());
+        assert_eq!(
+            despues["uno.md"], original["uno.md"],
+            "el journal sano se restaura igual: que otro journal esté roto no puede dejar a medias \
+             una transacción que sí se podía deshacer"
+        );
+        assert!(
+            !journal_de(dir.path(), sano).exists(),
+            "y su journal queda sellado (borrado), no pendiente"
+        );
+        assert!(
+            !recovery_de(dir.path(), sano).exists(),
+            "ni su árbol de recuperación"
+        );
+
+        // El roto quedó en cuarentena y el workspace desencallado.
+        assert!(
+            cuarentena_de(dir.path(), roto).is_dir(),
+            "el journal roto va a cuarentena: {}",
+            cuarentena_de(dir.path(), roto).display()
+        );
+        assert!(
+            !ws2.recovery_pending(),
+            "y tras recuperar no queda NINGÚN journal pendiente (ni el sano, ni el roto)"
+        );
+    }
+
+    /// **E25-H02** · Criterio 4 — **Dado** una transacción que **crea** ficheros y cuyo manifiesto
+    /// `.absent` se pierde antes de la caída, **Cuando** se recupera, **Entonces** el canónico
+    /// converge al borde «original» —los creados no sobreviven— o la recuperación va a cuarentena;
+    /// **nunca** al híbrido.
+    ///
+    /// Hoy `read_absent_manifest` (`recovery.rs:179-188`) trata la ausencia del manifiesto como
+    /// conjunto vacío, así que `recover()` devuelve `Ok(())` y deja los ficheros creados en su
+    /// sitio: el canónico queda con los originales MÁS los creados, que es exactamente lo que el
+    /// rustdoc de `recover` promete que no puede pasar. Lo prohibido es el híbrido **silencioso**:
+    /// un `Ok(())` con los creados vivos.
+    #[test]
+    fn absent_perdido_no_deja_estado_hibrido() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = siembra_documentos(dir.path(), &["uno", "dos"]);
+        let original = canonical_md(dir.path());
+
+        let id = "e25-h02-absent-perdido";
+        let mut cs = change_set(
+            id,
+            vec![
+                create_conforme("a.md", "Nota", "a"),
+                create_conforme("b.md", "Nota", "b"),
+            ],
+        );
+        cs.base_revision = ws.workspace_revision().unwrap();
+        // Un fichero creado ya en disco (el primer rename, anotado): hay algo que deshacer.
+        let (afectados, _) = transaccion_interrumpida(&ws, dir.path(), id, &cs, 1, true);
+        let creado = afectados[0].as_str().to_string();
+        assert!(
+            dir.path().join(&creado).is_file(),
+            "precondición: la transacción llegó a crear `{creado}` en el canónico"
+        );
+
+        // El manifiesto `.absent` no llegó a disco (se escribía con `std::fs::write`, sin volcado).
+        let manifiesto = recovery_de(dir.path(), id).join(".absent");
+        assert!(
+            manifiesto.is_file(),
+            "precondición: una transacción que solo CREA escribe el manifiesto `.absent` con los \
+             paths que no existían"
+        );
+        std::fs::remove_file(&manifiesto).unwrap();
+        drop(ws);
+
+        let ws2 = Workspace::open(dir.path()).unwrap();
+        match ws2.recover() {
+            Ok(()) => assert_eq!(
+                canonical_md(dir.path()),
+                original,
+                "si la recuperación se declara exitosa, el canónico tiene que estar en el borde \
+                 «original»: los ficheros que la transacción creó NO pueden sobrevivir. Un `Ok` con \
+                 los creados vivos es el estado híbrido que la recuperación existe para impedir"
+            ),
+            Err(e) => {
+                assert_eq!(
+                    e.code(),
+                    "RECOVERY_FAILED",
+                    "si el manifiesto perdido hace la restauración indecidible, se reporta como \
+                     fallo de recuperación (y el material va a cuarentena); era: {e:?}"
+                );
+                assert!(
+                    cuarentena_de(dir.path(), id).is_dir(),
+                    "y con su material en cuarentena: {}",
+                    cuarentena_de(dir.path(), id).display()
+                );
+            }
+        }
+        assert!(
+            !ws2.recovery_pending(),
+            "en los dos bordes admisibles, el workspace vuelve a ser escribible"
+        );
+    }
+
+    /// **E25-H02** · Criterio 5 — **Dado** el material en cuarentena, **Cuando** se inspecciona,
+    /// **Entonces** el journal y el árbol de recuperación siguen ahí **completos**.
+    ///
+    /// La cuarentena es material forense: se **mueve**, no se depura. Lo que había en
+    /// `journal/<txnId>.json` y en `recovery/<txnId>/` —incluida la copia corrupta que causó el
+    /// fallo y las copias sanas de los demás paths— tiene que seguir byte a byte dentro de
+    /// `journal/quarantine/<txnId>/`.
+    #[test]
+    fn la_cuarentena_no_borra_nada() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = siembra_documentos(dir.path(), &["uno", "dos", "tres"]);
+
+        let id = "e25-h02-cuarentena-completa";
+        let cs = cs_modifica(&ws, id, &["uno.md", "dos.md", "tres.md"]);
+        let (afectados, _) = transaccion_interrumpida(&ws, dir.path(), id, &cs, 1, true);
+        std::fs::write(
+            recovery_de(dir.path(), id).join(afectados[0].as_str()),
+            [0xff, 0xfe, 0x00, 0x01],
+        )
+        .unwrap();
+
+        // Foto exacta del material ANTES de recuperar: el árbol entero y el JSON del journal.
+        let arbol_antes = ficheros_bajo(&recovery_de(dir.path(), id));
+        assert!(
+            arbol_antes.len() >= 3,
+            "precondición: el árbol debe tener una copia por path afectado; tiene {:?}",
+            arbol_antes.keys().collect::<Vec<_>>()
+        );
+        let journal_antes = std::fs::read(journal_de(dir.path(), id)).expect("el journal en disco");
+        drop(ws);
+
+        let ws2 = Workspace::open(dir.path()).unwrap();
+        ws2.recover()
+            .expect_err("la copia ilegible debe hacer fallar la recuperación de esa transacción");
+
+        // Se movió: en su sitio original ya no queda nada (por eso la siguiente operación procede).
+        assert!(
+            !journal_de(dir.path(), id).exists(),
+            "el journal en cuarentena sale de `journal/<txnId>.json`: si se quedara, el gate de \
+             `recovery_pending` seguiría cerrado"
+        );
+        assert!(
+            !recovery_de(dir.path(), id).exists(),
+            "y su árbol sale de `recovery/<txnId>/`"
+        );
+
+        // Y está completo dentro de la cuarentena, byte a byte.
+        let cuarentena = cuarentena_de(dir.path(), id);
+        assert!(
+            cuarentena.is_dir(),
+            "la cuarentena debe existir en {}",
+            cuarentena.display()
+        );
+        let en_cuarentena = ficheros_bajo(&cuarentena);
+        for (rel, bytes) in &arbol_antes {
+            assert!(
+                en_cuarentena
+                    .iter()
+                    .any(|(k, v)| k.ends_with(rel) && v == bytes),
+                "la copia `{rel}` ({} bytes) debe seguir íntegra dentro de la cuarentena: nada se \
+                 borra ahí, es material forense. Contenido de la cuarentena: {:?}",
+                bytes.len(),
+                en_cuarentena.keys().collect::<Vec<_>>()
+            );
+        }
+        assert!(
+            en_cuarentena.values().any(|v| v == &journal_antes),
+            "y el JSON del journal, tal cual estaba, también: sin él no se puede saber qué \
+             pretendía la transacción. Contenido de la cuarentena: {:?}",
+            en_cuarentena.keys().collect::<Vec<_>>()
+        );
+    }
+
+    /// **E25-H02** · Criterio 10 (**control anti-vacuo declarado; pasa YA HOY y debe seguir
+    /// pasando**) — **Dado** una caída **entre el primer rename y su anotación en el journal**
+    /// (journal `prepared`, cero entradas `applied`, **un rename ya hecho en disco**), **Cuando** se
+    /// recupera, **Entonces** SÍ se restaura.
+    ///
+    /// Es el guardia de la generalización que la spec prohíbe explícitamente: *«`recover()` no
+    /// restaura un journal `prepared` con cero entradas `applied`»*. `mark_applied` re-persiste el
+    /// journal **después** de cada rename (`publish.rs:206`), así que «cero `applied` durables»
+    /// describe también este estado — sellar por esa inferencia daría por buena una publicación
+    /// parcial, que es justo lo que la recuperación existe para impedir. El sellado del aborto de
+    /// ventana tiene que decidirlo el camino que **sabe** que no publicó, no una lectura del journal
+    /// a posteriori.
+    #[test]
+    fn cero_applied_no_significa_cero_renames() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = siembra_documentos(dir.path(), &["uno", "dos", "tres"]);
+        let original = canonical_md(dir.path());
+
+        let id = "e25-h02-cero-applied";
+        let cs = cs_modifica(&ws, id, &["uno.md", "dos.md", "tres.md"]);
+        // 1 rename hecho y NO anotado: el journal se queda en `prepared` con todo `pending`.
+        let (afectados, resultado) = transaccion_interrumpida(&ws, dir.path(), id, &cs, 1, false);
+        let publicado = afectados[0].as_str().to_string();
+
+        let journal = leer_journal(&journal_de(dir.path(), id));
+        assert_eq!(
+            journal["state"].as_str(),
+            Some("prepared"),
+            "precondición: el journal quedó `prepared` (la anotación del rename no llegó a disco)"
+        );
+        assert_eq!(
+            estado_op(&journal, &publicado),
+            "pending",
+            "precondición: cero entradas `applied` en el journal…"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join(&publicado)).unwrap(),
+            como_md(&resultado)[&publicado],
+            "…y sin embargo el rename YA está hecho en disco: es la caída entre el rename y su \
+             anotación"
+        );
+        drop(ws);
+
+        let ws2 = Workspace::open(dir.path()).unwrap();
+        ws2.recover().expect("la recuperación debe restaurar");
+
+        assert_eq!(
+            canonical_md(dir.path()),
+            original,
+            "un journal `prepared` con cero `applied` PUEDE tener renames hechos: hay que \
+             restaurarlo. Sellarlo por «no publicó nada» daría por buena una publicación parcial"
+        );
+        assert!(!ws2.recovery_pending(), "y tras restaurar queda sellado");
+    }
+}
+
+#[cfg(feature = "test-failpoints")]
+mod aborto_de_ventana {
+    use super::*;
+    use lodestar_workspace::failpoints::{self, FailPoint, PuntoDeGancho};
+
+    /// El escenario común de los cuatro: un apply que va a modificar los tres documentos y un
+    /// gancho que, en el último instante de la ventana `[T1, T3)`, hace de «otro proceso». Devuelve
+    /// `(tempdir, workspace, canónico de T1, contenido de la edición externa)`.
+    fn aborto_por_edicion_externa(
+        id: &'static str,
+    ) -> (
+        tempfile::TempDir,
+        Workspace,
+        BTreeMap<String, String>,
+        &'static str,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = siembra_documentos(dir.path(), &["uno", "dos", "tres"]);
+        let antes = canonical_md(dir.path());
+        let cs = cs_modifica(&ws, id, &["uno.md", "dos.md", "tres.md"]);
+
+        let edicion_externa = "---\ntype: Nota\ntitle: dos\n---\n\n# dos\n\nEDICIÓN EXTERNA\n";
+        {
+            let ruta = dir.path().join("dos.md");
+            failpoints::armar_gancho(PuntoDeGancho::AntesDePublicar, move || {
+                std::fs::write(&ruta, edicion_externa).expect("el gancho debe poder editar dos.md");
+            });
+        }
+        let resultado = ws.apply_transaction(&cs);
+        failpoints::desarmar_ganchos();
+        let err = match resultado {
+            Err(e) => e,
+            Ok((_, _, changed)) => panic!(
+                "una edición externa en la ventana `[T1, T3)` debe abortar la transacción: \
+                 changedPaths={changed:?}"
+            ),
+        };
+        assert_eq!(
+            err.code(),
+            "WRITE_CONFLICT",
+            "el aborto de ventana es un WRITE_CONFLICT (E25-H01); era: {err:?}"
+        );
+        (dir, ws, antes, edicion_externa)
+    }
+
+    /// **E25-H02** · Criterio 6 — **Dado** un `WRITE_CONFLICT` de ventana (con la edición externa ya
+    /// en disco), **Cuando** la siguiente operación abre el workspace y recupera, **Entonces** la
+    /// edición externa sigue **intacta** byte a byte.
+    ///
+    /// Hoy la recuperación la sobrescribe con la copia de T1: el journal `prepared` y su árbol
+    /// sobreviven al aborto, `recover()` los clasifica como «renames parciales» y restaura. Es el
+    /// defecto de E25-H01 con un rodeo — en vez de pisar la edición al publicar, la pisa al
+    /// recuperar, una operación más tarde y sin que nadie lo pida.
+    #[test]
+    fn el_aborto_de_ventana_no_deja_recuperacion_que_pise_la_edicion() {
+        let id = "e25-h02-aborto-no-pisa";
+        let (dir, ws, antes, edicion_externa) = aborto_por_edicion_externa(id);
+        drop(ws);
+
+        // La siguiente operación: reabre y recupera (el paso (2) de toda transacción).
+        let ws2 = Workspace::open(dir.path()).unwrap();
+        ws2.recover()
+            .expect("la recuperación de la siguiente operación no puede fallar");
+
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("dos.md")).unwrap(),
+            edicion_externa,
+            "la edición externa que el aborto protegió tiene que seguir intacta byte a byte: si la \
+             recuperación escribe la copia de T1 encima, el aborto no protegió nada — solo retrasó \
+             la pérdida una operación"
+        );
+        let mut esperado = antes.clone();
+        esperado.insert("dos.md".to_string(), edicion_externa.to_string());
+        assert_eq!(
+            canonical_md(dir.path()),
+            esperado,
+            "y ningún otro `.md` puede haberse movido: no hubo un solo rename que deshacer"
+        );
+    }
+
+    /// **E25-H02** · Criterio 7 — **Dado** ese mismo `WRITE_CONFLICT` de ventana con un `.md`
+    /// **creado por el usuario** dentro de la ventana, **Cuando** la siguiente operación recupera,
+    /// **Entonces** ese fichero **sigue existiendo**.
+    ///
+    /// El plan iba a crear `x.md`, así que el manifiesto `.absent` lo marca «no existía»; el usuario
+    /// crea ese mismo path en la ventana y el aborto lo respeta (E25-H01), pero la restauración de
+    /// la siguiente operación lo **borra** (`recovery.rs:331-333`): la garantía de
+    /// `fichero_nuevo_en_la_ventana_no_se_borra`, deshecha una operación más tarde.
+    #[test]
+    fn el_aborto_de_ventana_no_borra_el_fichero_nuevo_al_recuperar() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = siembra_documentos(dir.path(), &["uno", "dos"]);
+        let antes = canonical_md(dir.path());
+
+        let id = "e25-h02-aborto-fichero-nuevo";
+        let mut cs = change_set(id, vec![create_conforme("x.md", "Nota", "x")]);
+        cs.base_revision = ws.workspace_revision().unwrap();
+
+        let del_usuario = "---\ntype: Nota\ntitle: x\n---\n\n# x\n\nESTO LO ESCRIBIÓ EL USUARIO\n";
+        {
+            let root = dir.path().to_path_buf();
+            let ruta = dir.path().join("x.md");
+            failpoints::armar_gancho(PuntoDeGancho::AntesDePublicar, move || {
+                // Precondición del escenario, aseverada en el único instante en que ese estado
+                // existe: el plan marcó `x.md` como «no existía» en el manifiesto `.absent`, que es
+                // lo que hace peligrosa la restauración posterior (la marca dice «bórralo»).
+                let manifiesto = recovery_de(&root, id).join(".absent");
+                assert!(
+                    std::fs::read_to_string(&manifiesto)
+                        .unwrap_or_default()
+                        .lines()
+                        .any(|l| l.trim() == "x.md"),
+                    "el manifiesto `.absent` de la transacción debe marcar `x.md` como «no \
+                     existía»: {}",
+                    manifiesto.display()
+                );
+                assert!(
+                    !ruta.exists(),
+                    "y el path no puede existir aún: lo crea el usuario DENTRO de la ventana"
+                );
+                std::fs::write(&ruta, del_usuario).expect("el gancho debe poder crear x.md");
+            });
+        }
+        let resultado = ws.apply_transaction(&cs);
+        failpoints::desarmar_ganchos();
+        let err = resultado.expect_err("el canónico cambió en la ventana: debe abortar");
+        assert_eq!(
+            err.code(),
+            "WRITE_CONFLICT",
+            "el aborto de ventana es un WRITE_CONFLICT (E25-H01); era: {err:?}"
+        );
+        drop(ws);
+
+        let ws2 = Workspace::open(dir.path()).unwrap();
+        ws2.recover()
+            .expect("la recuperación de la siguiente operación no puede fallar");
+
+        assert!(
+            dir.path().join("x.md").is_file(),
+            "el `.md` que creó el usuario dentro de la ventana NO puede desaparecer al recuperar: \
+             el manifiesto `.absent` dice «no existía en T1», pero la transacción que lo escribió \
+             fue abortada y nunca creó nada — borrarlo es destruir un fichero ajeno sin copia"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("x.md")).unwrap(),
+            del_usuario,
+            "y con su contenido intacto"
+        );
+        let mut esperado = antes.clone();
+        esperado.insert("x.md".to_string(), del_usuario.to_string());
+        assert_eq!(
+            canonical_md(dir.path()),
+            esperado,
+            "y sin tocar nada más del canónico"
+        );
+    }
+
+    /// **E25-H02** · Criterio 8 — **Dado** ese mismo aborto, **Cuando** termina, **Entonces**
+    /// `recovery_pending()` es `false` y no queda ni journal ni árbol de recuperación de esa
+    /// transacción.
+    ///
+    /// El aborto sabe por control de flujo que **no ha entrado en el bucle de renames**, así que
+    /// sellar es exacto, no una amnistía: cero renames significa que el canónico nunca se movió. El
+    /// journal se borra **primero** (es lo que levanta el gate de `recovery_pending`) y el árbol
+    /// después.
+    #[test]
+    fn el_aborto_de_ventana_no_deja_recuperacion_pendiente() {
+        let id = "e25-h02-aborto-sin-pendiente";
+        let (dir, ws, _antes, _edicion) = aborto_por_edicion_externa(id);
+
+        assert!(
+            !ws.recovery_pending(),
+            "el aborto sella su propia transacción bajo el mismo lock: al devolver el \
+             WRITE_CONFLICT no puede quedar recuperación pendiente (si queda, la siguiente \
+             operación restaurará copias de un estado que nunca se publicó)"
+        );
+        assert!(
+            !journal_de(dir.path(), id).exists(),
+            "no puede quedar el fichero de journal en {}",
+            journal_de(dir.path(), id).display()
+        );
+        assert!(
+            !recovery_de(dir.path(), id).exists(),
+            "ni el árbol de recuperación en {}",
+            recovery_de(dir.path(), id).display()
+        );
+
+        drop(ws);
+        let ws2 = Workspace::open(dir.path()).unwrap();
+        assert!(
+            !ws2.recovery_pending(),
+            "y al reabrir tampoco (el sellado es durable, no un estado en memoria)"
+        );
+    }
+
+    /// **E25-H02** · Criterio 9 — **Dado** un aborto de ventana interrumpido **entre** el borrado
+    /// del journal y el del árbol, **Cuando** se reabre y corre el GC, **Entonces** no hay
+    /// recuperación pendiente y el huérfano se purga.
+    ///
+    /// Es la razón por la que el journal va **primero**: si el proceso muere entre los dos borrados
+    /// queda un árbol de recuperación **sin journal**, que es un huérfano legítimo y lo recoge el GC
+    /// (E24-H06). Al revés —árbol primero— quedaría un journal apuntando a copias que ya no están, y
+    /// la recuperación sellaría un estado parcial en silencio.
+    ///
+    /// Usa el punto de caída **nuevo** que esta historia añade a la taxonomía
+    /// (`FailPoint::EnMedioDelSelladoDelAborto`, ver la cabecera de la sección). Con él armado, el
+    /// error que sale de `apply_transaction` es el del failpoint y no el `WRITE_CONFLICT`: el test
+    /// solo exige `is_err()`.
+    #[test]
+    fn el_sellado_del_aborto_es_seguro_a_mitad() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = siembra_documentos(dir.path(), &["uno", "dos", "tres"]);
+        let antes = canonical_md(dir.path());
+
+        let id = "e25-h02-sellado-a-mitad";
+        let cs = cs_modifica(&ws, id, &["uno.md", "dos.md", "tres.md"]);
+
+        let edicion_externa = "---\ntype: Nota\ntitle: dos\n---\n\n# dos\n\nEDICIÓN EXTERNA\n";
+        {
+            let ruta = dir.path().join("dos.md");
+            failpoints::armar_gancho(PuntoDeGancho::AntesDePublicar, move || {
+                std::fs::write(&ruta, edicion_externa).expect("el gancho debe poder editar dos.md");
+            });
+        }
+        failpoints::armar(FailPoint::EnMedioDelSelladoDelAborto);
+        let resultado = ws.apply_transaction(&cs);
+        failpoints::desarmar();
+        failpoints::desarmar_ganchos();
+        assert!(
+            resultado.is_err(),
+            "la transacción abortada por la ventana no puede reportar éxito"
+        );
+
+        // El punto de caída está ENTRE los dos borrados: journal ya fuera, árbol todavía dentro.
+        assert!(
+            !journal_de(dir.path(), id).exists(),
+            "el sellado del aborto borra el journal PRIMERO (es lo que levanta el gate de \
+             `recovery_pending`): en {} no puede quedar nada",
+            journal_de(dir.path(), id).display()
+        );
+        assert!(
+            recovery_de(dir.path(), id).is_dir(),
+            "y el failpoint interrumpe justo después, con el árbol aún en disco: si ya no está, el \
+             punto se colocó en el sitio equivocado y el test no ejerce el borde que le importa"
+        );
+
+        drop(ws);
+        let ws2 = Workspace::open(dir.path()).unwrap();
+        assert!(
+            !ws2.recovery_pending(),
+            "un árbol de recuperación sin journal NO es una recuperación pendiente: por eso el \
+             journal se borra primero"
+        );
+        ws2.gc_receipts().expect("el GC debe correr");
+        assert!(
+            !recovery_de(dir.path(), id).exists(),
+            "y el árbol huérfano (sin journal ni recibo) lo purga el GC de E24-H06"
+        );
+
+        let mut esperado = antes.clone();
+        esperado.insert("dos.md".to_string(), edicion_externa.to_string());
+        assert_eq!(
+            canonical_md(dir.path()),
+            esperado,
+            "y el canónico sigue con la edición externa y sin un solo rename publicado"
         );
     }
 }

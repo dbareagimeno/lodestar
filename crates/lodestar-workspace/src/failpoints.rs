@@ -61,6 +61,20 @@ pub enum FailPoint {
     TrasPublicarSinSellar,
     /// Tras marcar el staging como consumido, justo antes de borrar staging y journal.
     AntesDeSellar,
+    /// **En medio del sellado del aborto de ventana** (E25-H02): el `WRITE_CONFLICT` de la ventana
+    /// `[T1, T3)` (E25-H01) ya se detectó, el fichero de journal de la transacción abortada ya se ha
+    /// **borrado** y su árbol de recuperación **todavía no**.
+    ///
+    /// Modela el proceso que muere entre los dos borrados. El orden importa y es lo que este punto
+    /// fija: el journal va primero porque es lo que levanta el gate de `recovery_pending`, así que
+    /// lo que sobrevive a la interrupción es un árbol de recuperación **sin journal** — un huérfano
+    /// legítimo que recoge el GC (E24-H06). Al revés quedaría un journal apuntando a copias que ya
+    /// no están, y la recuperación sellaría un estado parcial en silencio.
+    ///
+    /// STUB de la fase roja de E25-H02: la variante existe para que el test compile; **nadie la
+    /// dispara todavía** (el camino de aborto no la ejerce porque el sellado del aborto aún no
+    /// existe). El implementador coloca el `failpoint!` correspondiente entre los dos borrados.
+    EnMedioDelSelladoDelAborto,
 }
 
 thread_local! {
