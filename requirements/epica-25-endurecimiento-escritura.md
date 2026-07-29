@@ -154,6 +154,21 @@ mirar en medio. Cuando la duda sea «¿esto sigue siendo cierto aquí?», la res
      restauración **no borra** los ficheros que la transacción creó: el canónico queda con los
      originales restaurados **más** los ficheros nuevos. Ni un borde ni el otro — justo lo que el
      rustdoc de `recover` promete que no puede pasar (`recovery.rs:253-258`).
+  5. **La recuperación deshace lo que el aborto de ventana acababa de proteger** *(estado nuevo,
+     señalado por la implementación de **E25-H01**)*: cuando la publicación aborta con
+     `WRITE_CONFLICT` por divergencia de la ventana `[T1, T3)`, quedan en disco el journal
+     `prepared` (creado en `transaction.rs:161`, antes de la comprobación) y su árbol de recuperación
+     con las copias de **T1** — y **cero renames aplicados**. La siguiente operación ve
+     `recovery_pending()` en `true` (`recovery.rs:237`), `recover()` clasifica ese journal como
+     `prepared` → **RESTAURAR** (`recovery.rs:274-277`) y `restore_from_recovery` escribe las copias
+     de T1 **encima de la edición externa** que el aborto existía para no pisar. El defecto es
+     literalmente el de H01 con un rodeo: en vez de sobrescribir la edición al publicar, la
+     sobrescribe al recuperar, una operación más tarde y sin que nadie lo pida.
+     Y con el manifiesto `.absent` es peor: un path que no existía en T1 y que el **usuario** creó
+     dentro de la ventana está marcado «no existía», así que la restauración lo **borra**
+     (`recovery.rs:331-333`) — deshaciendo también la garantía de
+     `fichero_nuevo_en_la_ventana_no_se_borra`. **Sin esta enmienda, las tres garantías de E25-H01
+     duran exactamente hasta la siguiente operación.**
 - **Referencias**: `ARCHITECTURE.md §19.5` (copias de recuperación y recuperación determinista) ·
   `docs/REFACTOR_PHASE_2.md §5.2` · `crates/lodestar-workspace/src/recovery.rs`
   (`backup_originals:113`, `read_absent_manifest:179`, `recover:262`, `restore_from_recovery:316`,
@@ -178,6 +193,28 @@ mirar en medio. Cuando la duda sea «¿esto sigue siendo cierto aquí?», la res
     operación ya no ve un journal pendiente y procede.
   - `RECOVERY_FAILED` gana así su **primer emisor real** y sale de `codigos_sin_emisor`
     (`contracts/mcp.yml:665`). **No** se añade ningún `ErrorCode`: el catálogo sigue teniendo 16 filas.
+  - **El aborto de ventana sella su propio journal** (defecto 5): cuando la comprobación de E25-H01
+    detecta divergencia, el camino de aborto —que sabe por control de flujo que **no ha entrado en el
+    bucle de renames**— sella su transacción **bajo el mismo lock, antes de devolver el
+    `WRITE_CONFLICT`**: borra el fichero de journal **primero** (es lo que levanta el gate de
+    `recovery_pending`) y luego su árbol de recuperación, reusando la limpieza de
+    `finish_recovery` (`recovery.rs:376`) en vez de escribir una segunda copia del sellado. No hay
+    nada que restaurar: cero renames significa que el canónico nunca se movió, así que sellar es
+    exacto, no una amnistía. Si el proceso muere entre los dos borrados queda un árbol de
+    recuperación **sin journal**, que es un huérfano legítimo y lo recoge el GC (E24-H06, con el
+    criterio de propiedad de E25-H03) — por eso el journal va primero.
+    - **Alternativa admisible con el mismo efecto observable**: cualquier variante en la que, tras un
+      `WRITE_CONFLICT` de ventana, la siguiente operación no encuentre recuperación pendiente de esa
+      transacción y la edición externa siga intacta. Lo que **no** es admisible es la generalización
+      tentadora —*«`recover()` no restaura un journal `prepared` con cero entradas `applied`»*—:
+      `mark_applied` re-persiste el journal **después** de cada rename (`publish.rs:129-132`), así
+      que «cero `applied` durables» también describe el estado de una caída **entre** el primer
+      rename y su anotación. Sellar por esa inferencia daría por buena una publicación parcial, que
+      es justo lo que la recuperación existe para impedir. La decisión tiene que tomarla el camino
+      que **sabe** que no publicó, no una lectura del journal a posteriori.
+    - Tampoco vale mover la comprobación de ventana **antes** del journal: su valor está en ser lo
+      más tardía posible, inmediatamente antes del primer rename. Adelantarla reabre la ventana entre
+      la comprobación y el rename, que es el defecto de E25-H01 otra vez.
 - **Consecuencia declarada (material de nota de release)**: la promesa «el canónico converge a uno de
   los dos bordes» pasa a ser **incondicional solo mientras las copias verifiquen**. Con copias
   corruptas, lo que se garantiza es: (a) nada se escribe a partir de una copia que no verifica; (b)
@@ -188,6 +225,14 @@ mirar en medio. Cuando la duda sea «¿esto sigue siendo cierto aquí?», la res
   wire (`workspace_status` no gana un campo), así que quien no lea el mensaje de error o el stderr no
   sabrá que hay material forense esperando. Cerrarlo pide un `lodestar recover`, que sigue fuera de
   alcance por la decisión de E24.
+- **Ajuste declarado sobre un test de E25-H01**: `edicion_externa_en_la_ventana_aborta_sin_publicar`
+  comprueba hoy, como precondición del escenario, que **tras el fallo existe** el árbol de
+  recuperación de la transacción abortada. Con el sellado del aborto esa aserción queda
+  **incompatible**: después del `WRITE_CONFLICT` de ventana no hay ni journal ni árbol. El ciclo de
+  H02 debe **invertirla** —el test pasa a exigir que no queden ninguno de los dos— y no relajarla ni
+  borrarla: es exactamente el estado que esta historia hace imposible, así que su aserción tiene que
+  seguir mordiendo, con el signo contrario. Se declara aquí para que el ajuste se haga **con
+  conocimiento de causa** y no como un test que se toca hasta que pasa.
 - **Criterios de aceptación**:
   - **Dado** un journal `prepared` cuya copia de recuperación está **truncada**, **Cuando** se
     reabre el workspace y se recupera, **Entonces** el canónico **no** se sobrescribe con la copia
@@ -204,6 +249,27 @@ mirar en medio. Cuando la duda sea «¿esto sigue siendo cierto aquí?», la res
     `absent_perdido_no_deja_estado_hibrido`.
   - **Dado** el material en cuarentena, **Cuando** se inspecciona, **Entonces** el journal y el árbol
     de recuperación siguen ahí completos → `la_cuarentena_no_borra_nada`.
+  - **Dado** un `WRITE_CONFLICT` de ventana (el escenario de E25-H01, con la edición externa ya en
+    disco), **Cuando** la siguiente operación abre el workspace y recupera, **Entonces** la edición
+    externa sigue **intacta** byte a byte →
+    `el_aborto_de_ventana_no_deja_recuperacion_que_pise_la_edicion` (hoy la recuperación la
+    sobrescribe con la copia de T1).
+  - **Dado** ese mismo `WRITE_CONFLICT` de ventana con un `.md` **creado por el usuario** dentro de
+    la ventana, **Cuando** la siguiente operación recupera, **Entonces** ese fichero **sigue
+    existiendo** → `el_aborto_de_ventana_no_borra_el_fichero_nuevo_al_recuperar` (el manifiesto
+    `.absent` lo marca «no existía», así que hoy la restauración lo borra: es la garantía de
+    `fichero_nuevo_en_la_ventana_no_se_borra` deshecha una operación más tarde).
+  - **Dado** ese mismo aborto, **Cuando** termina, **Entonces** `recovery_pending()` es `false` y no
+    queda ni journal ni árbol de recuperación de esa transacción →
+    `el_aborto_de_ventana_no_deja_recuperacion_pendiente`.
+  - **Dado** un aborto de ventana interrumpido **entre** el borrado del journal y el del árbol,
+    **Cuando** se reabre y corre el GC, **Entonces** no hay recuperación pendiente y el huérfano se
+    purga → `el_sellado_del_aborto_es_seguro_a_mitad`.
+  - **Dado** una caída **entre el primer rename y su anotación en el journal** (journal `prepared`
+    con cero entradas `applied` pero con un rename ya hecho), **Cuando** se recupera, **Entonces**
+    **sí** se restaura → `cero_applied_no_significa_cero_renames` (control anti-vacuo: el sellado del
+    aborto no puede degenerar en «un journal `prepared` sin `applied` no hay que restaurarlo», que
+    sellaría publicaciones parciales).
   - **Dado** una recuperación normal (copias sanas), **Cuando** se recupera, **Entonces** el
     comportamiento es idéntico a v0.3.1 → `recovery_sin_parciales_por_el_orquestador_real` y
     `caida_entre_backup_y_journal` siguen verdes sin tocarse (control anti-vacuo).
@@ -212,9 +278,11 @@ mirar en medio. Cuando la duda sea «¿esto sigue siendo cierto aquí?», la res
     pasan por el helper durable.
 - **Dependencias**: **E25-H01** (comparten el contrato «lo respaldado es lo publicable» y el mismo
   fichero de tests de recuperación).
-- **Pruebas**: `crates/lodestar-workspace/tests/transactions.rs` (los escenarios se construyen
-  corrompiendo el árbol de `recovery/` antes de reabrir, como ya hace `mod recuperacion`) ·
-  `crates/lodestar-app/tests/error.rs` (el código `RECOVERY_FAILED` en la fachada).
+- **Pruebas**: `crates/lodestar-workspace/tests/transactions.rs` (los escenarios de durabilidad se
+  construyen corrompiendo el árbol de `recovery/` antes de reabrir, como ya hace `mod recuperacion`;
+  los cuatro del aborto de ventana reusan el **gancho de E25-H01** y siguen con una reapertura +
+  `recover()`, que es donde se manifiesta el defecto) · `crates/lodestar-app/tests/error.rs` (el
+  código `RECOVERY_FAILED` en la fachada).
 - **Frontera (mcp.yml)**: **sí** — `RECOVERY_FAILED` gana emisor y `codigos_sin_emisor` pierde una
   fila.
 - **Delta de contrato**:
