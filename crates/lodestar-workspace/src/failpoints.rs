@@ -37,7 +37,7 @@
 //! garantía de que un crash **de verdad** —`SIGKILL`, sin `Drop` ninguno— también converge la da
 //! el test de señal de E24-H14, que mata el binario.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 
 /// Punto de la transacción en el que se puede inyectar una caída, **en el orden real de
 /// `apply_transaction`**.
@@ -91,4 +91,61 @@ pub fn disparado(fp: FailPoint) -> bool {
             false
         }
     })
+}
+
+/// Punto del orquestador donde se ejecuta un **gancho** del test y la transacción **continúa**
+/// (E25-H01).
+///
+/// Es el complemento de [`FailPoint`]: aquel solo sabe **abortar** —devuelve `Err` y la transacción
+/// muere ahí—, y hay defectos que solo se manifiestan si algo pasa *y el flujo sigue*. El caso que
+/// lo motivó es la ventana `[T1, T3)` de la publicación: para reproducir una edición externa
+/// concurrente hace falta modificar el disco **entre** el conjunto respaldado y el bucle de
+/// renames, sin interrumpir la transacción.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PuntoDeGancho {
+    /// Dentro de la ventana `[T1, T3)`, en su último instante: tras `create_journal` e
+    /// **inmediatamente antes** de `publish_result`. Copias de recuperación y journal ya cubren el
+    /// conjunto afectado calculado en T1, y el bucle de publicación aún no ha sustituido nada.
+    AntesDePublicar,
+}
+
+/// Gancho armado (el punto que lo dispara y el cierre a ejecutar), o nada.
+type GanchoArmado = Option<(PuntoDeGancho, Box<dyn Fn()>)>;
+
+thread_local! {
+    /// Gancho armado para el hilo actual, o `None`. `thread_local` por el mismo motivo que
+    /// [`ARMADO`]: los tests del repo corren en paralelo dentro del mismo proceso y un estado
+    /// global haría que el gancho de un test interfiriese con la transacción de otro.
+    static GANCHO: RefCell<GanchoArmado> = const { RefCell::new(None) };
+}
+
+/// Arma un gancho para el **hilo actual**. Se dispara **una sola vez** y se desarma solo, de modo
+/// que una transacción posterior del mismo test no vuelva a ejecutarlo. Armar un gancho nuevo
+/// sustituye al anterior.
+pub fn armar_gancho(punto: PuntoDeGancho, gancho: impl Fn() + 'static) {
+    GANCHO.with(|g| *g.borrow_mut() = Some((punto, Box::new(gancho))));
+}
+
+/// Desarma cualquier gancho del hilo actual (higiene: el gancho puede no haberse disparado).
+pub fn desarmar_ganchos() {
+    GANCHO.with(|g| *g.borrow_mut() = None);
+}
+
+/// Ejecuta el gancho armado para `punto`, si lo hay, y **continúa**: a diferencia de
+/// [`disparado`], no aborta nada.
+///
+/// El gancho se extrae del `thread_local` **antes** de invocarlo (y con ello se desarma), así que
+/// un gancho que a su vez entrara en el orquestador no volvería a dispararse ni haría panicar el
+/// `RefCell` por doble préstamo.
+pub(crate) fn ejecutar_gancho(punto: PuntoDeGancho) {
+    let armado = GANCHO.with(|g| {
+        let mut slot = g.borrow_mut();
+        match slot.as_ref() {
+            Some((p, _)) if *p == punto => slot.take().map(|(_, gancho)| gancho),
+            _ => None,
+        }
+    });
+    if let Some(gancho) = armado {
+        gancho();
+    }
 }

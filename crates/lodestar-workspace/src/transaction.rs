@@ -25,7 +25,9 @@
 //! 7. `reverify_base_revision` — control optimista bajo el lock (la base no cambió, E13-H02).
 //! 8. `backup_originals` — copias de recuperación **antes** de publicar (E13-H04).
 //! 9. `create_journal` — write-ahead journal `prepared`, fsynced antes del primer rename (E13-H03).
-//! 10. `publish` — renames atómicos por el único escritor + journal `applied` (E13-H05).
+//! 10. `publish` — renames atómicos por el único escritor + journal `applied` (E13-H05), sobre el
+//!     MISMO canónico del paso (4): si cambió por debajo mientras la transacción se preparaba,
+//!     `WriteConflict` antes del primer rename (E25-H01) — lo publicado es siempre lo respaldado.
 //! 11. **Sellar**: limpiar staging + journal; **conservar** las copias de recuperación (el receipt y
 //!     el `change_revert` de E13-H09 las necesitan).
 //! 12. `result = workspace_revision()` — la revisión resultante (`resultRevision`).
@@ -91,8 +93,9 @@ impl Workspace {
     /// `recover`): el receipt (E13-H07) y `change_revert` (E13-H09) las necesitan.
     ///
     /// # Errores
-    /// - [`WorkspaceError::WriteConflict`] si el lock ya está tomado (otro publicador) o si la base
-    ///   del plan cambió entre plan y apply (E13-H02).
+    /// - [`WorkspaceError::WriteConflict`] si el lock ya está tomado (otro publicador), si la base
+    ///   del plan cambió entre plan y apply (E13-H02) o si el canónico cambió entre el cálculo del
+    ///   lote y su publicación (E25-H01) — en los tres casos **antes** del primer rename.
     /// - [`WorkspaceError::PermissionDenied`] si algún path afectado cae fuera de `writableRoots` o
     ///   bajo un `referenceRoot` (E11-H04) — comprobado **antes** de tocar el canónico.
     /// - [`WorkspaceError::InvalidResult`] si el resultado hipotético no es conforme (E13-H01).
@@ -162,9 +165,19 @@ impl Workspace {
 
         failpoint!(FailPoint::TrasJournalPrepared);
 
+        // Seam de test (E25-H01), último instante de la ventana `[T1, T3)`: con las copias y el
+        // journal ya en disco y sin un solo rename hecho, un gancho del test puede simular aquí la
+        // edición externa de otro proceso y dejar que la transacción CONTINÚE — que es lo que
+        // `failpoint!` no sabe hacer. Sin `--features test-failpoints` no genera ni una instrucción.
+        #[cfg(feature = "test-failpoints")]
+        crate::failpoints::ejecutar_gancho(crate::failpoints::PuntoDeGancho::AntesDePublicar);
+
         // (10) Publica el resultado por el único escritor (renames atómicos + journal `applied`,
-        //      E13-H05): el mismo `result_files` que se materializó y validó en staging.
-        let result = self.publish_result(&result_files, &mut journal)?;
+        //      E13-H05): el mismo `result_files` que se materializó y validó en staging, sobre el
+        //      MISMO canónico de T1 con el que se computaron el conjunto afectado, las copias y el
+        //      journal. Si el canónico cambió por debajo, `publish_result` aborta con
+        //      `WriteConflict` antes del primer rename (E25-H01).
+        let result = self.publish_result(&canonical, &result_files, &mut journal)?;
 
         failpoint!(FailPoint::TrasPublicarSinSellar);
 

@@ -23,6 +23,14 @@ serde_yaml = { workspace = true }
 blake3 = { workspace = true }
 schemars = { workspace = true }
 
+[features]
+default = []
+# Passthrough del arnés de fallo/gancho de `lodestar-workspace` (E25-H01). No cablea nada en
+# producción: solo permite que los tests de esta fachada armen los seams del orquestador
+# transaccional (p. ej. inyectar una edición externa en la ventana `[T1, T3)` de la publicación) y
+# comprueben que el error resultante llega al wire con su `ErrorCode`.
+test-failpoints = ["lodestar-workspace/test-failpoints"]
+
 [lints]
 workspace = true
 
