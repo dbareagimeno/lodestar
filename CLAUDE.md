@@ -42,7 +42,7 @@ borra, nada de lo ya construido deja de compilar.
 
 Estado del giro — **E9–E14 COMPLETAS** (`IMPLEMENTATION_STATUS.md` tiene el detalle por historia):
 - **Superficie MCP convergida a las 10 tools objetivo** (`§19.6`): `workspace_status`,
-  `knowledge_search`, `knowledge_get`, `schema_inspect`, `graph_query`, `impact_analyze`,
+  `knowledge_search`, `knowledge_get`, `metadata_inspect`, `graph_query`, `impact_analyze`,
   `knowledge_check`, `change_plan`, `change_apply`, `change_revert` (E14-H06 retiró las 10
   heredadas — `query`/`conformance_check`/`find_*`/`neighborhood`/`create_concept`/
   `update_frontmatter`/`generate_*` — a `contracts/mcp.yml §15`; ver `crates/lodestar-mcp/src/tools.rs`).

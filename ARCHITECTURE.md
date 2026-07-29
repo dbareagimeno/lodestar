@@ -929,7 +929,7 @@ escrituras externas (REFACTOR §5.3).
 ### 19.6 Superficie MCP 13 → 10 y perfiles
 
 Diez tools (`REFACTOR §8`): **READ** `workspace_status` · `knowledge_search` · `knowledge_get` ·
-`schema_inspect` · `graph_query` · `impact_analyze`; **VERIFY** `knowledge_check`; **CHANGE**
+`schema_inspect` (→ `metadata_inspect` en §20.10) · `graph_query` · `impact_analyze`; **VERIFY** `knowledge_check`; **CHANGE**
 `change_plan` · `change_apply` · `change_revert`. Migración desde las 13 actuales:
 
 | Tool actual | Destino |
@@ -969,7 +969,7 @@ Auditoría local en `.lodestar/runtime/audit.jsonl` (runtime, no conocimiento).
 | Épica | Fase REFACTOR | Foco |
 |---|---|---|
 | **E9** — Reducción de alcance | 0 (§16) | Retirar git de superficie; congelar UI en `.claude/`/docs; `.lodestar/config.yaml` + separación canónico/runtime; escribir §19; reposicionar README/CLAUDE |
-| **E10** — Esquemas + lectura headless | 1 | `core::schema` puro; `ConceptRevision`/`WorkspaceRevision`/`ConceptRef`; extensión de `Check`; envelope + códigos de error; crate `lodestar-app`; `workspace_status`/`knowledge_search`/`knowledge_get`/`schema_inspect`/`knowledge_check` |
+| **E10** — Esquemas + lectura headless | 1 | `core::schema` puro; `ConceptRevision`/`WorkspaceRevision`/`ConceptRef`; extensión de `Check`; envelope + códigos de error; crate `lodestar-app`; `workspace_status`/`knowledge_search`/`knowledge_get`/`schema_inspect` (→ `metadata_inspect` en E20-H03)/`knowledge_check` |
 | **E11** — Grafo e impacto | 2 | `graph_query` (consolida grafo); `impact_analyze` (blast-radius); typed relations + validación de `referenceRoots` |
 | **E12** — Planificación | 3 | `ChangeSet`/`NormalizedOperation`/`RiskAssessment`/`SemanticDiff`/`ValidationReport`; `change_plan` (sin escribir); 11 ops; optimistic concurrency |
 | **E13** — Publicación recuperable | 4 | Staging · journal · locks · copias de recuperación · crash-recovery · `change_apply` · `change_revert` · `ChangeReceipt` · `audit.jsonl` |

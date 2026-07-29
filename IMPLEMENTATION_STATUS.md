@@ -6,10 +6,11 @@
 > **Resumen** (actualizado en `E23-H13`): el repo es un **motor headless de integridad semántica**
 > sobre workspaces Markdown universales (`ARCHITECTURE.md §20`, v0.3.0). Las épicas **E0–E8**
 > (fundacionales), **E9–E14** (giro headless), **E15–E22** (migración de OKF a Markdown universal) y
-> **E23** (cierre: defectos hallados en la revisión de la PR #17) están **completas**.
+> **E23** (cierre: defectos hallados en la revisión de la PR #17) y **E24** (cierre de los defectos
+> que la revisión de la v0.3.0 destapó tras publicarla) están **completas**.
 > Backend: `core` puro + `store` SQLite/FTS5 con paridad SQL==core + `workspace` (único escritor,
-> transaccional) + `app` (servicios de caso de uso) + las dos fachadas `cli` y `mcp`. **437 tests**
-> en verde (+4 de crash-recovery tras `--features test-failpoints`, que el CI corre desde E23-H06);
+> transaccional) + `app` (servicios de caso de uso) + las dos fachadas `cli` y `mcp`. **479 tests**
+> en verde (+ los de crash-recovery tras `--features test-failpoints`, que el CI corre desde E23-H06);
 > `clippy -D warnings` y `cargo doc -D warnings` limpios; pureza del core verificada por CI.
 >
 > **Ya no forman parte de este repo**: la app de escritorio (Tauri + Svelte, movida a
@@ -24,7 +25,7 @@
 ## Cómo correrlo
 
 ```bash
-cargo test --workspace --locked                       # 372 tests
+cargo test --workspace --locked                       # 479 tests
 cargo test -p lodestar-workspace --features test-failpoints --locked   # +4 de crash-recovery
 cargo run -p lodestar-cli -- check [--path <dir>]     # la puerta de CI (exit 0/1/2/3)
 cargo run -p lodestar-cli -- reindex                  # reconstruye .lodestar/index.db
@@ -1044,7 +1045,7 @@ superficie de producto; git queda como crate dormido) y `DECISIONES.md §0`. Des
     probase `orphans` se comía un `INVALID_SCHEMA`.
 - **437 tests · E23 COMPLETA.** (+4 de crash-recovery tras `--features test-failpoints`.)
 
-## Cierre de defectos de la v0.3.0 (E24) — v0.3.1 · EN CURSO
+## Cierre de defectos de la v0.3.0 (E24) — v0.3.1 · COMPLETA
 
 > Rama `release/v0.3.1`. Épica: [`epica-24`](requirements/epica-24-cierre-defectos-v031.md).
 > **Origen**: revisión de la v0.3.0 publicada (2026-07-28). Igual que en E23, ningún defecto se
@@ -1061,9 +1062,16 @@ criterio ratificado en E19-H04. Ninguna historia de v0.3.1 depende de ellas.
 
 | Historia | Estado | Detalle |
 |---|---|---|
-| **E24-H01** El BOM deja de tragarse el frontmatter | ✅ Cerrada | Ver abajo. |
-| **E24-H02** Un BOM es visible, no silencioso | ✅ Cerrada | `DOC-BOM` (aviso, no configurable). |
-| H03–H06 (recuperación), H09–H12 (superficie y descubrimiento), H13–H17 (suite), H18 (release) | ⏳ | |
+| **E24-H01/H02** El BOM deja de tragarse el frontmatter, y se hace visible | ✅ | Pérdida silenciosa de datos. `DOC-BOM` (aviso, no configurable). |
+| **E24-H03/H04** La recuperación tras un crash deja de estorbar | ✅ | Se acabó el `WRITE_CONFLICT` sistemático; `check` avisa en vez de mentir. |
+| **E24-H05/H06** El plano de control deja de crecer sin cota | ✅ | `StagingDir` RAII; el GC barre huérfanos y corre también al fallar. |
+| **E24-H09/H10** La superficie de error deja de mentir | ✅ | Valores validados; 0 de 21 errores sin código (antes 10). |
+| **E24-H11** `knowledge_get` devuelve `title` | ✅ | Faltaba justo en la tool que lee un documento. |
+| **E24-H12** Huecos de descubrimiento | ✅ | `README.MD`, symlink de directorio, `a\b.md`. |
+| **E24-H13/H14** El crash se prueba de verdad | ✅ | Seam real en el orquestador + `SIGKILL` al binario. |
+| **E24-H15/H16/H17** La suite muerde donde no mordía | ✅ | `outputSchema` en las 10; escala por el wire; los tests que E23-H10 prometió. |
+| **E24-H18** Documentos y publicación | ✅ | v0.3.1. |
+| **E24-H07/H08** Lenguaje de consulta | ⏭️ | **Diferidas a v0.4.0** (cambian resultados observables y revisan un criterio de E19-H04). |
 
 - ✅ **E24-H01** — **Pérdida silenciosa de datos por BOM UTF-8**. `split_front` comparaba
   `raw.starts_with("---")` sobre un raw que empieza por `\u{feff}---`, así que un `.md` con BOM caía
@@ -1091,3 +1099,41 @@ criterio ratificado en E19-H04. Ninguna historia de v0.3.1 depende de ellas.
     ese documento se interpreta y sus problemas reales se diagnostican: **el veredicto de la puerta
     de CI puede cambiar a exit 1** sobre bases existentes. Es el comportamiento correcto, pero es un
     cambio observable y va en la nota de release.
+
+- ✅ **E24-H03/H04** — **La recuperación tras un crash deja de estorbar**. `change_plan` leía el
+  disco **sin recuperar** y fijaba ahí su base; después `apply_transaction` recuperaba por debajo y
+  el control optimista lo veía como conflicto ajeno → **`WRITE_CONFLICT` en la primera escritura,
+  siempre** (10 de 11 reproducciones matando el servidor con `SIGKILL`). El código además mentía: lo
+  había alterado la recuperación del propio Lodestar. Ahora el plan recupera —bajo el mismo lock de
+  publicación, y solo si hay algo que recuperar— antes de leer. Y `check` **avisa** de la
+  transacción pendiente en vez de informar de 120 enlaces rotos como si fueran daño real; avisa, no
+  repara (abrir sigue siendo hermético, E23-H12).
+  - **Decisión, en contra de lo que pedía la spec**: NO se le fabrica un emisor a
+    `WORKSPACE_RECOVERY_REQUIRED`. Con la recuperación transparente, ese código pasa a ser
+    inalcanzable **por diseño**, no por defecto: el agente ya no puede encontrarse un workspace que
+    exija recuperación manual. Inventarle un emisor sería forzar la superficie para cumplir una
+    spec escrita antes de decidir H03.
+- ✅ **E24-H05/H06** — **El plano de control deja de crecer sin cota**. `StagingDir` no era RAII y
+  los pasos (7)–(10) de `apply_transaction` salen por `?`: toda transacción fallida dejaba el árbol
+  `.md` **completo** de su resultado. Y `gc_receipts` iteraba solo `receipts/` y solo corría en el
+  camino de éxito — el flujo que producía la basura era el que no la recogía.
+- ✅ **E24-H09/H10** — **La superficie de error deja de mentir**. Los valores de los parámetros
+  declarados se validan de verdad (era la política que el contrato ya prometía: `limit: 0` devolvía
+  0 resultados en silencio pese al `minimum: 1` declarado), y **0 de 21** errores viajan sin código
+  del catálogo (antes 10). La misma consulta malformada daba **dos códigos distintos** según la
+  tool. Nueva variante `WorkspaceError::InvalidSchema` para no seguir aplanando entrada inválida
+  contra fallo de I/O. Lo que **no** cambia: los parámetros no declarados se siguen ignorando — eso
+  es revisar un criterio ratificado, y queda como `DECISIONES §15`.
+- ✅ **E24-H13/H14** — **El crash se prueba de verdad**. La feature `test-failpoints` existía desde
+  E13-H06 pero **ningún fichero de `src/` la referenciaba**: los tests componían el estado
+  post-crash a mano y **en orden distinto al del orquestador** (journal antes que backup, cuando
+  producción hace backup antes que journal), así que `TrasJournalPrepared` describía un estado que
+  el código real no puede producir y pasaba vacuamente. Ahora el punto de caída se inyecta dentro de
+  `apply_transaction`, y un test aparte mata el **binario** con `SIGKILL`.
+- ✅ **E24-H15/H16/H17** — **La suite muerde donde no mordía**. El `structuredContent` se valida
+  contra el `outputSchema` en las **10** tools (antes 5, y solo que el schema «tuviera alguna clave
+  estructural»); la escala se mide **por el wire** (10.000 documentos → ~73 KB); y se escriben las
+  afirmaciones que el repo daba por ciertas: los dos tests que E23-H10 declaró como criterio y
+  nunca existieron, y el grep de CI de los `ErrorCode` — que **al ejecutarlo cazó una violación
+  real**: `WorkspaceError::code()` mantenía su propia tabla de códigos de wire.
+- **479 tests · E24 COMPLETA** (+ los de crash-recovery tras `--features test-failpoints`).

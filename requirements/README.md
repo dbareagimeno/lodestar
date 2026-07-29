@@ -75,6 +75,7 @@ planes de **E12**; **E14** cierra. Ninguna historia del giro está **[BLOQUEADA]
 | **E20** — Inspección y validación genéricas | 7 + 8 | `metadata_inspect` (retira `core::schema`) · política `rejectNewErrors`/`allowExistingErrors` · diagnósticos de descubrimiento cableados | [epica-20-inspeccion-validacion.md](epica-20-inspeccion-validacion.md) |
 | **E21** — Contrato MCP y transacciones genéricas | 9 + 10 | Contrato nuevo · 8 operaciones universales · selecciones masivas por consulta | [epica-21-transacciones-genericas.md](epica-21-transacciones-genericas.md) |
 | **E22** — Migración y limpieza pública | 11 | `migrate-from-okf --dry-run` · docs · README · publicación incompatible · **e2e final** | [epica-22-migracion-publicacion.md](epica-22-migracion-publicacion.md) |
+| **E24** — Cierre de defectos de la v0.3.0 | — | BOM que se tragaba el frontmatter · recuperación tras crash (WRITE_CONFLICT, workspace que parecía roto, fugas) · superficie de error honesta · seam real de failpoints · crash por señal | [epica-24-cierre-defectos-v031.md](epica-24-cierre-defectos-v031.md) |
 | **E23** — Cierre de la migración | — | Defectos hallados en la revisión de la PR #17 · puerta de CI (failpoints) · e2e de sesión larga · schema de escritura · documentos de estado | [epica-23-cierre-migracion.md](epica-23-cierre-migracion.md) |
 
 **E23 no fue una fase de `§20.14`**: fue la épica de **cierre**, abierta por la revisión de la PR #17
