@@ -1,6 +1,7 @@
 //! `WorkspaceError`: envuelve `CoreError` + errores de la cache/IO con códigos estables
 //! (`§6`, `§12`).
 
+use lodestar_core::types::ErrorCode;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -65,11 +66,17 @@ impl WorkspaceError {
             WorkspaceError::Io(_) => "IO",
             WorkspaceError::NoCache => "NO_CACHE",
             WorkspaceError::Store(_) => "STORE",
-            WorkspaceError::PermissionDenied(_) => "PERMISSION_DENIED",
-            WorkspaceError::InvalidResult(_) => "INVALID_RESULT",
-            WorkspaceError::WriteConflict(_) => "WRITE_CONFLICT",
-            WorkspaceError::WorkspaceRecoveryRequired(_) => "WORKSPACE_RECOVERY_REQUIRED",
-            WorkspaceError::InvalidSchema(_) => "INVALID_SCHEMA",
+            // E24-H17: los que SON códigos del catálogo se toman de `ErrorCode::as_str()`, nunca
+            // se reescriben aquí. Antes esta tabla era una segunda verdad del catálogo de wire
+            // —justo lo que el doc-comment de `core::types::ErrorCode` prohíbe— y el grep de CI que
+            // debía impedirlo no existía.
+            WorkspaceError::PermissionDenied(_) => ErrorCode::PermissionDenied.as_str(),
+            WorkspaceError::InvalidResult(_) => ErrorCode::InvalidResult.as_str(),
+            WorkspaceError::WriteConflict(_) => ErrorCode::WriteConflict.as_str(),
+            WorkspaceError::WorkspaceRecoveryRequired(_) => {
+                ErrorCode::WorkspaceRecoveryRequired.as_str()
+            }
+            WorkspaceError::InvalidSchema(_) => ErrorCode::InvalidSchema.as_str(),
         }
     }
 }

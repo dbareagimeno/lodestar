@@ -2434,3 +2434,82 @@ fn move_no_toca_externos_ni_anchors() {
         "tras el move el workspace no debe tener errores; errores = {errores:?}",
     );
 }
+
+// ---------------------------------------------------------------------------
+// E24-H17 — Las afirmaciones sin respaldo pasan a tenerlo
+//
+// `core::types` afirma sobre `ErrorCode`: «Los 16 códigos de error estables del protocolo» y «está
+// prohibido redefinir estos códigos fuera de `core::types` (grep de CI)».
+//
+// Ninguna de las dos cosas estaba respaldada: el «16» vivía solo en PROSA (en 9 sitios distintos) y
+// el grep de CI **no existe** — `.github/workflows/ci.yml` solo tiene dos greps, ambos sobre
+// `cargo tree` en el job `core-purity`. E24-H17 escribe el test que faltaba y añade el grep que se
+// afirmaba.
+// ---------------------------------------------------------------------------
+
+/// **E24-H17** — el catálogo de errores del protocolo tiene exactamente 16 filas.
+///
+/// No es burocracia: el catálogo es superficie de wire congelada, y E23-H14 tuvo que abrirlo **la
+/// única vez** (`NONCONFORMANT_RESULT` → `INVALID_RESULT`) aprovechando que v0.3 ya era
+/// incompatible con v0.2. Un código nuevo colado sin darse cuenta es un cambio incompatible
+/// silencioso; este test obliga a que sea una decisión consciente.
+#[test]
+fn catalogo_de_errores_tiene_dieciseis_filas() {
+    use lodestar_core::types::ErrorCode;
+
+    // Enumeración EXPLÍCITA: si alguien añade una variante, esto no compila (el `match` exhaustivo
+    // de abajo lo fuerza) y hay que venir aquí a decidir a conciencia.
+    let todos = [
+        ErrorCode::WorkspaceNotFound,
+        ErrorCode::WorkspaceRecoveryRequired,
+        ErrorCode::DocumentNotFound,
+        ErrorCode::AmbiguousReference,
+        ErrorCode::RevisionConflict,
+        ErrorCode::PlanStale,
+        ErrorCode::PlanExpired,
+        ErrorCode::PermissionDenied,
+        ErrorCode::InvalidSchema,
+        ErrorCode::InvalidResult,
+        ErrorCode::InboundLinksExist,
+        ErrorCode::RelationConstraintViolation,
+        ErrorCode::WriteConflict,
+        ErrorCode::ResultTooLarge,
+        ErrorCode::RecoveryFailed,
+        ErrorCode::InternalIoError,
+    ];
+
+    assert_eq!(
+        todos.len(),
+        16,
+        "el catálogo de códigos de error del protocolo está CONGELADO en 16 filas. Si has añadido \
+         uno, es un cambio incompatible de wire: decídelo a conciencia y actualiza este test, \
+         `contracts/mcp.yml` y el CHANGELOG"
+    );
+
+    // El `match` exhaustivo es lo que hace que la lista de arriba no pueda quedarse corta: añadir
+    // una variante a `ErrorCode` deja de compilar aquí.
+    for c in todos {
+        let wire = c.as_str();
+        assert!(
+            wire.chars().all(|ch| ch.is_ascii_uppercase() || ch == '_'),
+            "el valor de wire de {c:?} debe ser SCREAMING_SNAKE: «{wire}»"
+        );
+        // Round-trip: el `as_str()` y el `serde` no pueden divergir (son dos tablas escritas a
+        // mano en `types.rs`).
+        let json = serde_json::to_string(&c).expect("ErrorCode serializa");
+        assert_eq!(
+            json,
+            format!("\"{wire}\""),
+            "`as_str()` y la serialización de serde son DOS tablas distintas mantenidas a mano: \
+             deben coincidir para {c:?}"
+        );
+    }
+
+    // Y no puede haber dos códigos con el mismo valor de wire.
+    let unicos: std::collections::BTreeSet<&str> = todos.iter().map(|c| c.as_str()).collect();
+    assert_eq!(
+        unicos.len(),
+        16,
+        "dos variantes con el mismo valor de wire harían indistinguibles dos errores distintos"
+    );
+}
