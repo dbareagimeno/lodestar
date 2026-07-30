@@ -657,3 +657,573 @@ mod ventana_de_publicacion {
         );
     }
 }
+
+// ===========================================================================
+// E25-H04 — Publicar implica recibo: nada se pierde después del punto de no retorno
+// (`requirements/epica-25-endurecimiento-escritura.md`, bloque B). Fase ROJA.
+//
+// EL DEFECTO (S5)
+//
+// Tras `publish_result` (`crates/lodestar-workspace/src/transaction.rs:198`) el disco YA está
+// cambiado, pero quedan pasos que salen por `?`: el sellado (`transaction.rs:224-238`) y, en ESTA
+// fachada, `write_receipt` (`crates/lodestar-app/src/lib.rs:1704-1706`), `gc_receipts` (`:1707-1709`)
+// y `analyze` (`:1712-1715`). Cualquiera de ellos convierte una transacción **publicada** en un `Err`
+// **sin recibo**: el agente concluye que no se aplicó nada y el workspace dice lo contrario. Y no hay
+// salida — `change_revert` carga el recibo primero y, al no encontrarlo, responde `PLAN_EXPIRED`
+// (`:1787-1790`) **para siempre**; un segundo `change_apply` del mismo plan muere con `PLAN_STALE`
+// (`:1676-1681`) porque la base cambió.
+//
+// Los failpoints `TrasPublicarSinSellar` y `AntesDeSellar` dejan exactamente ese estado —canónico
+// publicado, recibo inexistente— desde E24-H13, pero **nadie los ejerce a través de
+// `App::change_apply`**: los dos se arman desde `lodestar-workspace`, por debajo de la capa que
+// escribe los recibos, así que ningún test ha mirado nunca qué le pasa a `change_revert` después.
+// Estos tests los ejercen por la fachada, y añaden el punto que faltaba (ver más abajo).
+//
+// QUÉ FIJAN ESTOS TESTS — la superficie observable, no el mecanismo
+//
+// La spec deja el mecanismo abierto («el recibo —o su registro durable equivalente— se escribe con el
+// journal, y la recuperación por la vía COMPLETAR lo da por bueno»), así que aquí NO se asevera nada
+// del layout de `.lodestar/runtime/receipts/`. Se asevera lo que un agente puede observar:
+//
+//   1. que el canónico está publicado (los bytes del `.md`);
+//   2. que **existe un recibo** para ese `changeSetId` —visible en `workspace_status.receipts`
+//      (E23-H11), que es como un agente lo encuentra si perdió el `receiptId`— y que ese recibo es
+//      **coherente**: su `resultRevision` es la revisión actual del workspace, que es justo lo que
+//      `change_revert` re-verifica antes de restaurar;
+//   3. que `change_revert` con ese `receiptId` **funciona** y devuelve los bytes originales — la
+//      única prueba de que el recibo es utilizable y no un registro decorativo;
+//   4. que ningún fallo POSTERIOR a la publicación (sellado, limpieza de staging, GC) convierte el
+//      apply en `Err`;
+//   5. y el control anti-vacuo: un apply que falla ANTES del primer rename no deja recibo.
+//
+// EL SEAM NUEVO (declarado en la salida de la fase roja; aquí solo se USA)
+//
+// Los seis failpoints existentes viven dentro de `apply_transaction`. Falta el punto de la FACHADA
+// —entre el retorno de `apply_transaction` y el recibo—, que es donde `write_receipt`/`gc_receipts`/
+// `analyze` pueden perder una publicación. Se añade a la taxonomía:
+//
+// ```rust
+// pub enum FailPoint {
+//     …,
+//     /// En `App::change_apply`, entre el retorno de `apply_transaction` y el recibo.
+//     TrasLaTransaccionAntesDelRecibo,   // E25-H04
+// }
+// ```
+//
+// El macro `failpoint!` es interno de `lodestar-workspace`, así que la fachada lo consulta con la API
+// pública del módulo (`failpoints::disparado(..)`, que **autodesarma** el punto al dispararse) — la
+// forma exacta está documentada en el rustdoc de la variante. Los tests se apoyan en ese autodesarme
+// para comprobar que el punto **se ejerció de verdad**: si tras el `change_apply` sigue armado, nadie
+// lo consultó y el escenario habría pasado vacuamente.
+//
+// ROJO ESPERADO HOY
+// - `publicar_implica_recibo`: ROJO en los tres puntos. Con los dos de `apply_transaction` la
+//   transacción publica y sale por `Err` sin que el recibo se escriba nunca; con el de la fachada,
+//   además, hoy NADIE lo consulta (el `assert` de «se ejerció» lo destapa).
+// - `tras_fallo_post_publicacion_el_revert_funciona`: ROJO, `PLAN_EXPIRED`.
+// - `el_cierre_no_convierte_un_apply_publicado_en_error`: ROJO, el apply publicado devuelve `Err`.
+// - `el_gc_de_otro_proceso_no_impide_revertir_tras_el_fallo_post_publicacion`: ROJO (el hueco que
+//   dejó anotado el juez de E25-H03: la ventana `[sellado, recibo)` no está cubierta por el lock).
+// - `un_apply_no_publicado_no_deja_recibo`: **control anti-vacuo**, PASA YA HOY y tiene que seguir
+//   pasando. No es vacuo: prohíbe que el arreglo consista en escribir recibos siempre. Con el recibo
+//   persistido junto al journal, los dos escenarios que ejerce —caída con journal `prepared` y cero
+//   renames, y aborto de ventana de E25-H01/H02— pasan por el punto donde el recibo YA existiría, así
+//   que el arreglo tiene que retirarlo (o no darlo por bueno) cuando la publicación no llega a
+//   ocurrir: si no, `change_revert` restauraría las copias de T1 sobre una edición externa.
+// ===========================================================================
+
+#[cfg(feature = "test-failpoints")]
+mod recibo_tras_el_punto_de_no_retorno {
+    use super::*;
+    use lodestar_app::{Profile, ReceiptSummary};
+    use lodestar_core::types::{ChangeSetId, ReceiptId};
+    use lodestar_workspace::failpoints::{self, FailPoint, PuntoDeGancho};
+    use lodestar_workspace::{transaction_id, Workspace};
+
+    /// El cuerpo que publica el plan de estos tests (una sola ruta afectada: `alfa.md`).
+    const CUERPO_NUEVO: &str = "# Resumen\n\ncuerpo del plan\n";
+
+    /// Los tres puntos de caída **posteriores a la publicación** que hay que ejercer por la fachada.
+    /// Los dos primeros existen desde E24-H13 y nadie los había armado desde `App::change_apply`; el
+    /// tercero es el que faltaba (ver la cabecera del módulo).
+    const PUNTOS_POST_PUBLICACION: &[FailPoint] = &[
+        FailPoint::TrasPublicarSinSellar,
+        FailPoint::AntesDeSellar,
+        FailPoint::TrasLaTransaccionAntesDelRecibo,
+    ];
+
+    /// Semilla + plan listo para aplicar. Devuelve la fachada, el `changeSetId` del plan y el
+    /// contenido ORIGINAL de `alfa.md` — el estado exacto al que tiene que volver un `change_revert`.
+    ///
+    /// `config_yaml`, si viene, se escribe **antes** de abrir: `WorkspaceConfig` se lee una sola vez,
+    /// al abrir, así que es lo único que la hace efectiva.
+    fn app_con_plan(root: &Path, config_yaml: Option<&str>) -> (App, ChangeSetId, String) {
+        semilla(root);
+        if let Some(yaml) = config_yaml {
+            escribe(root, ".lodestar/config.yaml", yaml);
+        }
+        let original = std::fs::read_to_string(root.join("alfa.md"))
+            .expect("la semilla debe haber escrito alfa.md");
+
+        let app = App::open(root).expect("el workspace temporal debe abrir");
+        let ops = json!([
+            { "op": "replace_body", "path": "alfa.md", "body": CUERPO_NUEVO },
+        ]);
+        let plan = app
+            .change_plan(None, &ops, policy_permisiva())
+            .expect("planificar una modificación normal debe funcionar");
+        (app, plan.change_set_id, original)
+    }
+
+    /// El recibo de `cs` tal y como lo ve un agente: `workspace_status.receipts` (E23-H11), la vía
+    /// por la que se recupera un `receiptId` que no se apuntó. Deliberadamente NO se mira el disco:
+    /// lo que la historia exige es un recibo **utilizable**, no un fichero en un sitio concreto.
+    fn recibo_del_plan(app: &App, cs: &ChangeSetId) -> Option<ReceiptSummary> {
+        app.workspace_status(Profile::Standard)
+            .expect("workspace_status debe responder")
+            .receipts
+            .into_iter()
+            .find(|r| r.change_set_id == *cs)
+    }
+
+    /// La revisión actual del workspace, por la misma fachada.
+    fn revision_actual(app: &App) -> String {
+        app.workspace_status(Profile::Standard)
+            .expect("workspace_status debe responder")
+            .workspace_revision
+            .0
+    }
+
+    /// Aplica el plan con `fp` armado y devuelve el resultado de la fachada, comprobando que el punto
+    /// **se ejerció**: `failpoints::disparado` autodesarma el punto al dispararse, así que si sigue
+    /// armado después del `change_apply` es que nadie lo consultó — y el escenario no ha reproducido
+    /// nada.
+    fn aplica_cayendo_en(app: &App, cs: &ChangeSetId, fp: FailPoint) -> Result<(), ErrorCode> {
+        failpoints::armar(fp);
+        let resultado = app.change_apply(cs, None).map(|_| ());
+        let seguia_armado = failpoints::disparado(fp);
+        failpoints::desarmar();
+        assert!(
+            !seguia_armado,
+            "el punto de caída {fp:?} no se ejerció: nadie lo consulta en el camino de \
+             `App::change_apply`. Sin eso el escenario de esta historia no se reproduce y el test \
+             pasaría vacuamente — ver la cabecera del módulo para la API esperada del punto de la \
+             fachada"
+        );
+        resultado
+    }
+
+    /// Asevera lo que la historia llama «el canónico está publicado»: `alfa.md` tiene el cuerpo del
+    /// plan (y por tanto los renames ocurrieron: se cruzó el punto de no retorno). `contexto` nombra
+    /// el fallo que se inyectó, que es lo que tiene que ser POSTERIOR a la publicación.
+    fn asevera_publicado(root: &Path, contexto: &str) {
+        let alfa = std::fs::read_to_string(root.join("alfa.md")).expect("alfa.md debe existir");
+        assert!(
+            alfa.contains("cuerpo del plan"),
+            "precondición del escenario: con {contexto} —posterior a la publicación— el canónico \
+             tiene que estar ya publicado; si no, el test no está mirando la ventana de esta \
+             historia. alfa.md = {alfa:?}"
+        );
+    }
+
+    /// **Criterio 1** (`publicar_implica_recibo`) — **Dado** un failpoint armado **después** de la
+    /// publicación y **antes** del recibo, **Cuando** se llama a `App::change_apply`, **Entonces** el
+    /// canónico está publicado **y** existe un recibo válido.
+    ///
+    /// Los tres puntos de `PUNTOS_POST_PUBLICACION` describen la misma ventana con distinta
+    /// profundidad, y ninguno de los tres puede satisfacerse escribiendo el recibo *después*: con
+    /// `TrasPublicarSinSellar`/`AntesDeSellar` la transacción sale por `Err` **desde dentro** de
+    /// `apply_transaction`, así que la fachada no llega nunca a su paso (5). La única forma de que
+    /// exista recibo es persistirlo **antes del punto de no retorno**, que es lo que pide el alcance
+    /// de la historia (las revisiones que lo componen ya se conocen: `previous` en el paso (3) y
+    /// `result_rev` en `transaction.rs:161`, la que estampa el journal).
+    #[test]
+    fn publicar_implica_recibo() {
+        for fp in PUNTOS_POST_PUBLICACION {
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path();
+            let (app, cs, _original) = app_con_plan(root, None);
+
+            let resultado = aplica_cayendo_en(&app, &cs, *fp);
+
+            // (1) El disco ya cambió: se cruzó el punto de no retorno.
+            asevera_publicado(root, &format!("el punto de caída {fp:?}"));
+
+            // (2) …luego el recibo tiene que existir, sea cual sea el veredicto que la fachada
+            //     devuelva (la historia no fija que este punto artificial deba devolver `Ok`: eso lo
+            //     fija `el_cierre_no_convierte_un_apply_publicado_en_error` para los fallos REALES de
+            //     cierre. Lo que no puede pasar es que la publicación quede sin registro).
+            let recibo = recibo_del_plan(&app, &cs).unwrap_or_else(|| {
+                panic!(
+                    "con {fp:?} el canónico quedó PUBLICADO y sin recibo: la transacción es \
+                     irreversible para siempre (`change_revert` → PLAN_EXPIRED) y un segundo \
+                     `change_apply` moriría con PLAN_STALE. change_apply devolvió: {resultado:?}"
+                )
+            });
+
+            // (3) Y tiene que ser un recibo COHERENTE, no un registro decorativo: `change_revert`
+            //     exige que `resultRevision` sea la revisión actual del workspace, así que un recibo
+            //     con revisiones inventadas sería inservible aunque exista.
+            assert_eq!(
+                recibo.result_revision.0,
+                revision_actual(&app),
+                "el recibo de una transacción publicada tiene que declarar como `resultRevision` la \
+                 revisión que dejó el apply (es la que `change_revert` re-verifica antes de \
+                 restaurar); {fp:?}"
+            );
+            assert_eq!(
+                recibo.changed_path_count, 1,
+                "y las rutas que tocó: el plan afecta exactamente a `alfa.md`; {fp:?}"
+            );
+        }
+    }
+
+    /// **Criterio 2** (`tras_fallo_post_publicacion_el_revert_funciona`) — **Dado** ese mismo
+    /// workspace, **Cuando** se llama a `change_revert` con ese `receiptId`, **Entonces** revierte
+    /// correctamente. Hoy: `PLAN_EXPIRED` para siempre.
+    ///
+    /// Esta es la prueba de que el recibo es **utilizable**, y con los dos puntos de
+    /// `apply_transaction` exige algo más que persistirlo temprano: al no haberse sellado la
+    /// transacción, el journal queda `applied` en disco, así que `revert_transaction` recupera primero
+    /// (su paso 2) y la vía **COMPLETAR** de `recovery.rs` pasa hoy por `finish_recovery`, que
+    /// **borra las copias de recuperación** (`discard_recovery_copies`) — y sin copias no hay
+    /// reversión posible. «La recuperación por la vía COMPLETAR lo da por bueno» (alcance de la
+    /// historia) incluye, por tanto, conservar el plano de reversión de una transacción que sí
+    /// publicó y sí tiene recibo. Es el mismo requisito que el criterio del `SIGKILL`
+    /// (`crash_tras_publicar_deja_transaccion_reversible`, en
+    /// `crates/lodestar-mcp/tests/crash_senal.rs`), aquí en forma determinista.
+    #[test]
+    fn tras_fallo_post_publicacion_el_revert_funciona() {
+        for fp in PUNTOS_POST_PUBLICACION {
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path();
+            let (app, cs, original) = app_con_plan(root, None);
+
+            let resultado = aplica_cayendo_en(&app, &cs, *fp);
+            asevera_publicado(root, &format!("el punto de caída {fp:?}"));
+
+            let recibo = recibo_del_plan(&app, &cs).unwrap_or_else(|| {
+                panic!(
+                    "con {fp:?} no hay recibo que revertir (criterio 1); change_apply devolvió: \
+                     {resultado:?}"
+                )
+            });
+
+            let revert = app.change_revert(&recibo.receipt_id, None);
+            let salida = match revert {
+                Ok(salida) => salida,
+                Err(e) => panic!(
+                    "tras un fallo posterior a la publicación ({fp:?}) la transacción TIENE que ser \
+                     reversible: `change_revert` con el receiptId {:?} devolvió {} ({e:?}). \
+                     PLAN_EXPIRED es el síntoma del defecto (recibo ausente); un fallo de IO es el \
+                     del plano de reversión purgado por la recuperación",
+                    recibo.receipt_id.0,
+                    e.as_str()
+                ),
+            };
+            assert!(
+                salida.reverted,
+                "la reversión debe declararse hecha; {fp:?}: {salida:?}"
+            );
+            assert_eq!(
+                std::fs::read_to_string(root.join("alfa.md")).unwrap(),
+                original,
+                "revertir tiene que devolver `alfa.md` a sus bytes ORIGINALES (frontmatter incluido); \
+                 {fp:?}"
+            );
+        }
+    }
+
+    /// Deja `dir` en solo-lectura (`r-x`): con el bit de escritura del **directorio** apagado no se
+    /// pueden crear ni **borrar** entradas dentro de él, que es exactamente el fallo de IO que hay que
+    /// inyectar (la limpieza de staging y el purgado del GC son borrados).
+    #[cfg(unix)]
+    fn solo_lectura(dir: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o500))
+            .expect("dejar el directorio en solo-lectura");
+    }
+
+    /// Devuelve `dir` a escritura (si no, ni el `TempDir` puede limpiarse al final).
+    #[cfg(unix)]
+    fn con_escritura(dir: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
+    }
+
+    /// `true` si en este entorno un directorio `r-x` de verdad impide borrar dentro. Corriendo como
+    /// **root** los bits de permiso no deniegan nada, y el escenario no se podría inyectar: el test
+    /// lo dice y se salta en vez de dar un verde falso.
+    #[cfg(unix)]
+    fn los_permisos_deniegan() -> bool {
+        let sonda = tempfile::tempdir().unwrap();
+        let dentro = sonda.path().join("sub");
+        std::fs::create_dir(&dentro).unwrap();
+        std::fs::write(dentro.join("x"), b"x").unwrap();
+        solo_lectura(&dentro);
+        let denegado = std::fs::remove_file(dentro.join("x")).is_err();
+        con_escritura(&dentro);
+        denegado
+    }
+
+    /// **Criterio 3** (`el_cierre_no_convierte_un_apply_publicado_en_error`) — **Dado** un fallo de
+    /// sellado, de limpieza de staging o del GC, **Cuando** ocurre después de publicar, **Entonces**
+    /// `change_apply` devuelve **éxito**.
+    ///
+    /// Aquí el fallo es **real**, no un failpoint, y eso es deliberado: `failpoint!` hace `return
+    /// Err(...)` desde el orquestador para modelar un proceso que MUERE, y
+    /// `seam_real::recovery_sin_parciales_por_el_orquestador_real` (E24-H13) exige que siga abortando.
+    /// Lo que esta historia degrada a *best-effort con aviso por stderr* son los pasos de cierre
+    /// cuando fallan **de verdad** (`transaction.rs:233-238`, `lib.rs:1707-1709`), y eso solo se
+    /// prueba haciendo que fallen de verdad:
+    ///
+    /// - **(a) limpieza de staging** —parte del sellado, paso (11)—: se deja
+    ///   `.lodestar/runtime/staging/` en solo-lectura dentro de la ventana `[T1, T3)`, cuando el
+    ///   staging ya está materializado y validado y lo único que queda por hacer con él es borrarlo.
+    ///   El `remove_dir_all` del sellado falla con `EACCES`.
+    /// - **(b) GC de retención**: con `maximumReceipts: 1` y un recibo viejo plantado, el barrido
+    ///   posterior al apply tiene que purgar y su `remove_dir_all(recovery/<viejo>)` falla porque
+    ///   `.lodestar/runtime/recovery/` queda en solo-lectura.
+    ///
+    /// El borrado del **fichero de journal** —el otro paso del sellado— no se inyecta por separado a
+    /// propósito: dejar `journal/` en solo-lectura rompería `mark_applied`, que re-persiste el journal
+    /// **durante** los renames, y el fallo dejaría de ser posterior a la publicación. Su camino de
+    /// error es el mismo `?` que el de (a), en la línea siguiente.
+    #[test]
+    #[cfg(unix)]
+    fn el_cierre_no_convierte_un_apply_publicado_en_error() {
+        if !los_permisos_deniegan() {
+            eprintln!(
+                "AVISO (E25-H04): este entorno no deniega escritura por permisos (¿root?); \
+                 `el_cierre_no_convierte_un_apply_publicado_en_error` no puede inyectar el fallo de \
+                 IO y se salta"
+            );
+            return;
+        }
+
+        // (a) Fallo de la limpieza de staging (sellado, paso 11).
+        {
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path();
+            let (app, cs, _original) = app_con_plan(root, None);
+
+            let staging = root.join(".lodestar").join("runtime").join("staging");
+            {
+                let staging = staging.clone();
+                failpoints::armar_gancho(PuntoDeGancho::AntesDePublicar, move || {
+                    assert!(
+                        staging.is_dir(),
+                        "precondición: en la ventana `[T1, T3)` el staging ya está materializado"
+                    );
+                    solo_lectura(&staging);
+                });
+            }
+            let resultado = app.change_apply(&cs, None);
+            failpoints::desarmar_ganchos();
+            con_escritura(&staging);
+
+            let aplicado = resultado.unwrap_or_else(|e| {
+                panic!(
+                    "un fallo al limpiar el staging ocurre DESPUÉS de publicar: el canónico ya \
+                     cambió, así que el apply no puede devolver {} ({e:?}) — sería un agente \
+                     convencido de que no se aplicó nada y sin recibo con el que deshacerlo. El \
+                     cierre es best-effort con aviso por stderr",
+                    e.as_str()
+                )
+            });
+            assert!(
+                aplicado.applied,
+                "y se declara aplicado: {:?}",
+                aplicado.changed_paths
+            );
+            asevera_publicado(root, "el fallo al limpiar el staging");
+            assert!(
+                recibo_del_plan(&app, &cs).is_some(),
+                "un apply que devuelve éxito tiene que dejar su recibo (si no, `change_revert` \
+                 responde PLAN_EXPIRED sobre algo que sí se aplicó)"
+            );
+        }
+
+        // (b) Fallo del GC de retención.
+        {
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path();
+            // `maximumReceipts: 1` obliga al barrido posterior al apply a purgar el recibo más
+            // antiguo (el plantado) y, con él, su copia de recuperación.
+            let (app, cs, _original) = app_con_plan(
+                root,
+                Some("transactions:\n  retainReceiptsFor: \"24h\"\n  maximumReceipts: 1\n"),
+            );
+            escribe(root, ".lodestar/runtime/receipts/viejo.json", "{}");
+            escribe(root, ".lodestar/runtime/recovery/viejo/uno.md", "respaldo");
+
+            let recovery = root.join(".lodestar").join("runtime").join("recovery");
+            {
+                let recovery = recovery.clone();
+                failpoints::armar_gancho(PuntoDeGancho::AntesDePublicar, move || {
+                    // Las copias de esta transacción ya están escritas (paso 8) y nada vuelve a
+                    // escribir aquí: el sellado las CONSERVA. Lo único que este candado rompe es el
+                    // purgado del GC, que corre ya publicado el canónico.
+                    solo_lectura(&recovery);
+                });
+            }
+            let resultado = app.change_apply(&cs, None);
+            failpoints::desarmar_ganchos();
+            con_escritura(&recovery);
+
+            let aplicado = resultado.unwrap_or_else(|e| {
+                panic!(
+                    "el GC de retención es best-effort por definición (`receipts.rs:238-248` ya lo \
+                     dice para el lock) y corre DESPUÉS de publicar: un fallo suyo no puede \
+                     convertir el apply en {} ({e:?})",
+                    e.as_str()
+                )
+            });
+            assert!(aplicado.applied, "y se declara aplicado");
+            asevera_publicado(root, "el fallo del GC de retención");
+        }
+    }
+
+    /// **Extra** (hueco declarado por el juez de E25-H03) — la ventana `[sellado, recibo)`:
+    /// `apply_transaction` suelta el lock al sellar, y hasta que el recibo existe la transacción no
+    /// aparece en ninguno de los dos conjuntos de «vivos» del GC (`journal/` ∪ `receipts/`), así que
+    /// el GC de **otro proceso** puede purgar en ese hueco las copias que el recibo va a referenciar.
+    ///
+    /// El escenario cabe en este arnés sin retorcerlo porque el punto de la fachada deja el proceso
+    /// **exactamente** en ese estado —publicado, sellado, lock soltado— y desde ahí basta con lanzar
+    /// el GC de un segundo `Workspace` sobre la misma raíz (el «otro proceso» de E25-H03) antes de
+    /// revertir. Persistir el recibo con el journal cierra el hueco por diseño: cuando el lock se
+    /// suelta, la transacción ya está en `receipts/`.
+    #[test]
+    fn el_gc_de_otro_proceso_no_impide_revertir_tras_el_fallo_post_publicacion() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let (app, cs, original) = app_con_plan(root, None);
+
+        let resultado = aplica_cayendo_en(&app, &cs, FailPoint::TrasLaTransaccionAntesDelRecibo);
+        asevera_publicado(root, "el punto de caída de la fachada");
+
+        // El «otro proceso»: un segundo handle sobre la misma raíz que barre el plano de control en
+        // el hueco entre el sellado y el recibo.
+        Workspace::open(root)
+            .expect("el segundo handle debe abrir")
+            .gc_receipts()
+            .expect("el GC es best-effort: nunca devuelve Err por no poder barrer");
+
+        let recibo = recibo_del_plan(&app, &cs).unwrap_or_else(|| {
+            panic!(
+                "el recibo tiene que sobrevivir al GC de otro proceso (y existir: criterio 1); \
+                 change_apply devolvió: {resultado:?}"
+            )
+        });
+        app.change_revert(&recibo.receipt_id, None)
+            .unwrap_or_else(|e| {
+                panic!(
+                    "el GC de otro proceso no puede dejar irreversible una transacción publicada: \
+                     `change_revert` devolvió {} ({e:?}). Si el recibo ya existe cuando se suelta el \
+                     lock, el GC ve la transacción como viva y no toca sus copias",
+                    e.as_str()
+                )
+            });
+        assert_eq!(
+            std::fs::read_to_string(root.join("alfa.md")).unwrap(),
+            original,
+            "y la reversión devuelve `alfa.md` a sus bytes originales"
+        );
+    }
+
+    /// **Criterio 5** (`un_apply_no_publicado_no_deja_recibo`) — **Dado** un apply que falla **antes**
+    /// del primer rename, **Cuando** termina, **Entonces** **no** hay recibo y `change_revert` sigue
+    /// respondiendo `PLAN_EXPIRED`.
+    ///
+    /// Control anti-vacuo: el arreglo no puede consistir en escribir recibos siempre. Y no es un
+    /// control barato, porque los dos escenarios que ejerce pasan por el instante en el que el recibo
+    /// **ya existiría** si se persiste junto al journal:
+    ///
+    /// - **(a)** `FailPoint::TrasJournalPrepared`: journal `prepared` y copias listas, **cero**
+    ///   renames.
+    /// - **(b)** el **aborto de ventana** de E25-H01/H02: la transacción llega con journal y copias
+    ///   hasta el último instante de `[T1, T3)`, detecta que el canónico cambió y aborta con
+    ///   `WRITE_CONFLICT` sellando su propio journal. Si el recibo sobreviviera a ese sellado,
+    ///   `change_revert` escribiría las copias de T1 **encima** de la edición externa que el aborto
+    ///   existe para no pisar.
+    ///
+    /// En los dos casos el `receiptId` se deriva del `changeSetId` con la misma convención que usa la
+    /// fachada (`transaction_id`), porque el escenario es justamente que ningún recibo se ha publicado
+    /// y no hay de dónde leerlo.
+    #[test]
+    fn un_apply_no_publicado_no_deja_recibo() {
+        // (a) Caída con journal `prepared` y cero renames.
+        {
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path();
+            let (app, cs, original) = app_con_plan(root, None);
+
+            let err = aplica_cayendo_en(&app, &cs, FailPoint::TrasJournalPrepared)
+                .expect_err("el failpoint aborta la transacción antes del primer rename");
+            assert_eq!(
+                std::fs::read_to_string(root.join("alfa.md")).unwrap(),
+                original,
+                "precondición: la caída fue ANTES del primer rename, así que el canónico no se movió \
+                 ni un byte (el apply devolvió {})",
+                err.as_str()
+            );
+
+            assert!(
+                recibo_del_plan(&app, &cs).is_none(),
+                "una transacción que NO publicó no puede dejar recibo: `change_revert` restauraría \
+                 las copias de un estado que nunca se sustituyó"
+            );
+            let derivado = ReceiptId(transaction_id(&cs));
+            let revert = app.change_revert(&derivado, None);
+            assert_eq!(
+                revert.err(),
+                Some(ErrorCode::PlanExpired),
+                "y revertir lo que no se aplicó sigue siendo PLAN_EXPIRED (transacción no \
+                 disponible), no un éxito"
+            );
+        }
+
+        // (b) Aborto de la ventana `[T1, T3)` (E25-H01/H02): WRITE_CONFLICT antes del primer rename.
+        {
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path();
+            let (app, cs, _original) = app_con_plan(root, None);
+
+            let edicion_externa = "---\ntype: Nota\ntitle: Alfa\ndescription: Primer documento\n---\n\n# Resumen\n\nEDICIÓN EXTERNA\n";
+            {
+                let ruta = root.join("alfa.md");
+                failpoints::armar_gancho(PuntoDeGancho::AntesDePublicar, move || {
+                    std::fs::write(&ruta, edicion_externa)
+                        .expect("el gancho debe poder editar alfa.md");
+                });
+            }
+            let err = app.change_apply(&cs, None).map(|_| ());
+            failpoints::desarmar_ganchos();
+            assert_eq!(
+                err.err(),
+                Some(ErrorCode::WriteConflict),
+                "precondición (E25-H01): el canónico cambió en la ventana, así que el apply aborta \
+                 con WRITE_CONFLICT antes del primer rename"
+            );
+            assert_eq!(
+                std::fs::read_to_string(root.join("alfa.md")).unwrap(),
+                edicion_externa,
+                "y no publicó nada"
+            );
+
+            assert!(
+                recibo_del_plan(&app, &cs).is_none(),
+                "el aborto de ventana sella su transacción (E25-H02): un recibo suyo sobreviviente \
+                 haría que `change_revert` pisara la edición externa con las copias de T1"
+            );
+            let derivado = ReceiptId(transaction_id(&cs));
+            let revert = app.change_revert(&derivado, None);
+            assert_eq!(
+                revert.err(),
+                Some(ErrorCode::PlanExpired),
+                "y revertir un aborto de ventana sigue siendo PLAN_EXPIRED"
+            );
+        }
+    }
+}

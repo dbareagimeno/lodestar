@@ -75,6 +75,35 @@ pub enum FailPoint {
     /// dispara todavía** (el camino de aborto no la ejerce porque el sellado del aborto aún no
     /// existe). El implementador coloca el `failpoint!` correspondiente entre los dos borrados.
     EnMedioDelSelladoDelAborto,
+    /// **En la FACHADA** (E25-H04): entre el retorno de `Workspace::apply_transaction` y el recibo,
+    /// dentro de `App::change_apply`. El disco canónico ya está publicado y la transacción ya está
+    /// sellada (su lock, soltado); lo único que falta es el registro que permite deshacerla.
+    ///
+    /// Es el único punto de la taxonomía que **no** vive en `lodestar-workspace`: los seis anteriores
+    /// modelan caídas dentro del orquestador y ninguno llega a la capa que escribe los recibos, que es
+    /// justamente donde `write_receipt`/`gc_receipts`/`analyze` pueden convertir una transacción
+    /// PUBLICADA en un `Err` **sin recibo** — el agente concluye que no se aplicó nada, `change_revert`
+    /// responde `PLAN_EXPIRED` para siempre y un segundo `change_apply` muere con `PLAN_STALE`.
+    ///
+    /// STUB de la fase roja de E25-H04: la variante existe para que el test compile; **nadie la
+    /// consulta todavía**. El implementador la ejerce en `lodestar-app`, que ya propaga la feature
+    /// (`test-failpoints = ["lodestar-workspace/test-failpoints"]`, E25-H01), consultando el estado
+    /// armado con la API pública de este módulo — el macro `failpoint!` es interno de este crate:
+    ///
+    /// ```ignore
+    /// // crates/lodestar-app/src/lib.rs, en `change_apply_uncounted`, entre (4) y (5):
+    /// #[cfg(feature = "test-failpoints")]
+    /// if lodestar_workspace::failpoints::disparado(
+    ///     lodestar_workspace::failpoints::FailPoint::TrasLaTransaccionAntesDelRecibo,
+    /// ) {
+    ///     return Err(ErrorCode::InternalIoError);
+    /// }
+    /// ```
+    ///
+    /// El punto se **autodesarma al dispararse** ([`disparado`]), y de eso se sirven los tests para
+    /// comprobar que de verdad se ejerció: si tras el `change_apply` el punto sigue armado, nadie lo
+    /// consultó y el escenario habría pasado vacuamente.
+    TrasLaTransaccionAntesDelRecibo,
 }
 
 thread_local! {
