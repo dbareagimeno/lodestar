@@ -20,6 +20,23 @@
 //! caducados (más viejos que la retención por edad) —, decidiendo "más antiguo" por el **mtime**
 //! del fichero `<receiptId>.json`: `ChangeReceipt` no lleva timestamp propio (es runtime
 //! desechable) y el mtime es el mismo reloj que gobierna la retención por edad.
+//!
+//! **El barrido corre bajo el lock de publicación** (E25-H03). El criterio de «transacción viva» del
+//! plano de control (`gc_runtime_huerfanos`) es *presencia en `journal/` ∪ `receipts/`*,
+//! y hay una ventana en la que una transacción **en curso** no está en ninguno de los dos: entre
+//! `backup_originals` y `create_journal` (`crate::transaction`, pasos 8–9) tiene copias de
+//! recuperación y todavía no tiene ni journal ni recibo. Con un solo proceso eso es inocuo —quien
+//! barre es quien acaba de publicar—, pero con dos el GC del proceso B borraba el plano de
+//! recuperación del proceso A: A publicaba **sin copias** y, si caía, `restore_from_recovery` no
+//! encontraba directorio, devolvía `Ok(())` y la recuperación sellaba un estado parcial en silencio.
+//! Tomar el mismo lock que la publicación cierra la ventana sin inventar una segunda señal de vida:
+//! el criterio de propiedad (¿el dueño está vivo?, ¿la marca está rancia?) sigue viviendo en **un
+//! solo sitio**, `crate::lock::reclamar_si_huerfano` (invariante #3).
+//!
+//! Ese «bajo el lock» es una exigencia **de tipos**, no de documentación: el barrido vive en
+//! [`Workspace::gc_receipts_con_el_lock_tomado`], que pide un `&`[`WorkspaceLock`] como testigo, y
+//! [`Workspace::gc_receipts`] es la única puerta que lo adquiere por su cuenta. Barrer sin el lock no
+//! compila.
 
 use std::collections::BTreeSet;
 use std::io::Write as _;
@@ -28,7 +45,7 @@ use std::time::{Duration, SystemTime};
 
 use lodestar_core::types::{ChangeReceipt, ReceiptId};
 
-use crate::{Workspace, WorkspaceError};
+use crate::{Workspace, WorkspaceError, WorkspaceLock};
 
 /// Nombre de fichero saneado para un `ReceiptId` (E13-H07), mismo criterio que staging (E13-H01,
 /// [`crate::staging`]) y recovery (E13-H04, [`crate::recovery`]): neutraliza `:`/`/`/`\`
@@ -218,10 +235,70 @@ impl Workspace {
     /// recibo: si falta la copia de recuperación de uno purgado, no es un error (pudo no haber
     /// ficheros afectados, o ya haberse limpiado).
     ///
+    /// **Corre bajo el lock de publicación** (E25-H03) y es **fail-fast y silencioso**: si el lock
+    /// está tomado —o su fichero es ilegible, o no se puede crear el runtime— **no barre** y devuelve
+    /// `Ok(())`. Las dos mitades de esa frase son requisitos:
+    /// - *bajo el lock*, porque el criterio de «vivo» del plano de control no ve a una transacción de
+    ///   **otro proceso** detenida en la ventana `[backup, journal)` y barrerla le quitaría las copias
+    ///   con las que se recupera (ver la documentación de módulo);
+    /// - *fail-fast y silencioso*, porque el GC se invoca **después** de que la transacción llamante
+    ///   haya publicado: un `Err` suyo convertiría un apply ya publicado en un fallo sin recibo. No
+    ///   espera al lock (el modelo de `ARCHITECTURE.md §19.5` es no bloqueante) y no propaga el
+    ///   `WriteConflict` de [`Workspace::acquire_lock`]; como mucho pospone la retención al siguiente
+    ///   barrido, que es una degradación aceptable de algo que es best-effort por definición.
+    ///
+    /// Quien ya posee el lock —la recuperación de `App::recover_if_pending`— no puede pasar por aquí
+    /// (se auto-bloquearía y el GC quedaría en un no-op permanente): usa
+    /// [`Workspace::gc_receipts_con_el_lock_tomado`], que **exige el guard como argumento**.
+    ///
     /// # Errores
     /// - [`WorkspaceError::Io`] si falla el borrado de un `.json` purgado o de su copia de
-    ///   recuperación.
+    ///   recuperación. **Nunca** falla por no haber conseguido el lock.
     pub fn gc_receipts(&self) -> Result<(), WorkspaceError> {
+        // Fail-fast: sin lock no se barre, y no barrer no es un error (ver doc de la función).
+        let Ok(lock) = self.acquire_lock() else {
+            return Ok(());
+        };
+        self.gc_receipts_con_el_lock_tomado(&lock)
+    }
+
+    /// [`Workspace::gc_receipts`] para quien **ya posee** el lock de publicación (E25-H03).
+    ///
+    /// Mismo barrido y mismos errores; lo único que no hace es adquirir el lock, porque el lock de
+    /// este workspace es **no reentrante** (`O_CREAT | O_EXCL` sobre un fichero: el propio poseedor se
+    /// bloquea a sí mismo). El único llamante es la recuperación de la fachada
+    /// (`App::recover_if_pending`), que recupera y barre bajo un mismo lock — justo después de un
+    /// crash es cuando hay basura en el plano de control, así que ese camino no puede quedarse sin GC.
+    ///
+    /// # El lock se pide por TIPOS, no por documentación
+    ///
+    /// `lock` es un **testigo**: no se lee para barrer, se exige para poder llamar. Barrer el plano de
+    /// control sin el lock reabre el defecto que E25-H03 cerró —el barrido se llevaría las copias de
+    /// recuperación de una transacción en curso en **otro** proceso—, y un contrato así no puede
+    /// quedarse en un párrafo de rustdoc que el siguiente call-site no leerá. Como [`WorkspaceLock`]
+    /// solo se obtiene de [`Workspace::acquire_lock`] y libera el lock en su `Drop`, tener una
+    /// referencia viva a uno **es** la prueba de posesión: llamar a esta función sin poseer el lock no
+    /// compila, y la referencia mantiene el guard vivo durante todo el barrido (no puede dropearse a
+    /// mitad). Mismo patrón de chokepoint que [`lodestar_core::types::RelPath`] para el
+    /// path-traversal (invariante #6): lo que no debe poder expresarse, que no compile.
+    ///
+    /// # Errores
+    /// Los mismos que [`Workspace::gc_receipts`].
+    ///
+    /// # Pánicos
+    /// En compilaciones de debug, si `lock` no es el lock de **este** workspace (un `debug_assert`:
+    /// el testigo prueba posesión, y esto comprueba además identidad — un mismatch solo puede venir
+    /// de un llamante que barre un workspace mientras sostiene el lock de otro).
+    pub fn gc_receipts_con_el_lock_tomado(
+        &self,
+        lock: &WorkspaceLock,
+    ) -> Result<(), WorkspaceError> {
+        debug_assert_eq!(
+            lock.path(),
+            self.lock_path(),
+            "el testigo tiene que ser el lock de ESTE workspace: barrer el plano de control de uno \
+             sosteniendo el lock de otro no protege nada"
+        );
         let ttl = parse_retention(&self.config().transactions.retain_receipts_for);
 
         let dir = self.receipts_dir();
@@ -311,6 +388,14 @@ impl Workspace {
     ///
     /// Todo lo demás es basura: la convención de nombre única de este módulo (mismo `txnId` saneado
     /// para `staging/`, `recovery/`, `journal/` y `receipts/`) es lo que permite decidirlo.
+    ///
+    /// **Ese criterio solo es correcto con el lock de publicación en la mano** (E25-H03). Entre
+    /// `backup_originals` y `create_journal` una transacción en curso no aparece ni en `journal/` ni en
+    /// `receipts/`, así que «no tiene respaldo» y «no existe» son indistinguibles desde aquí: es el
+    /// llamante quien garantiza que nadie está publicando, sosteniendo el lock. No hay una tercera
+    /// lista de «vivos» a propósito — la vida de una transacción se pregunta donde ya se preguntaba,
+    /// al lock (`crate::lock::reclamar_si_huerfano`), y no en un formato durable paralelo que habría
+    /// que caducar por separado.
     fn gc_runtime_huerfanos(&self) -> Result<(), WorkspaceError> {
         let runtime = self.root.join(".lodestar").join("runtime");
 

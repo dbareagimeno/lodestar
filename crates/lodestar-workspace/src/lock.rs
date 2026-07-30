@@ -32,6 +32,17 @@ pub struct WorkspaceLock {
     path: PathBuf,
 }
 
+impl WorkspaceLock {
+    /// Ruta del fichero de lock que este guard posee.
+    ///
+    /// Interno: existe para que quien **exige** un testigo del lock (`Workspace::gc_receipts_con_el_lock_tomado`,
+    /// E25-H03) pueda comprobar que el testigo es el de *ese* workspace y no el de otro. No se expone
+    /// en la API pública — el guard es una prueba de posesión, no un accessor de rutas.
+    pub(crate) fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
 impl Drop for WorkspaceLock {
     fn drop(&mut self) {
         // Best-effort: la liberación no debe paniquear (podría hacerlo durante el desenrollado de

@@ -1891,6 +1891,18 @@ mod seam_real {
     /// estado —el único que el código real produce entre esos dos pasos— no lo cubría nadie. Al
     /// reabrir, `recovery_pending()` es `false` (solo mira journals): hay que comprobar que el
     /// canónico está intacto, porque ningún rename ha ocurrido todavía.
+    ///
+    /// **E25-H03 — por qué el GC puede barrer aquí**: la razón es de **PROPIEDAD**, no de ausencia de
+    /// journal. La transacción de este escenario **terminó** (el failpoint la abortó y su lock se
+    /// soltó por RAII), así que su material ya no tiene dueño y es basura. La ausencia de journal por
+    /// sí sola NO autoriza a barrer: entre `backup_originals` y `create_journal` una transacción
+    /// **viva** —de este proceso o de otro— está exactamente en este mismo estado durable, y
+    /// destruirle las copias la deja publicando sin plano de recuperación. Esa dimensión, la de
+    /// vida, la fijan `gc_y_transacciones_vivas::gc_no_destruye_una_transaccion_en_curso_de_otro_proceso`
+    /// (el material de una transacción EN CURSO sobrevive al GC de otro handle) y
+    /// `gc_y_transacciones_vivas::la_marca_no_sobrevive_a_la_transaccion` (la señal de propiedad muere
+    /// con la transacción, también cuando esta acaba en `Err` — que es lo que mantiene verde el
+    /// barrido de aquí abajo sin tocar ni una aserción de este test).
     #[test]
     fn caida_entre_backup_y_journal() {
         let (dir, ws, original) = tres_documentos();
@@ -1915,7 +1927,11 @@ mod seam_real {
              movido ni un byte"
         );
 
-        // El árbol de recuperación queda huérfano (no hay journal ni recibo): lo recoge el GC.
+        // El árbol de recuperación queda SIN DUEÑO —la transacción abortó y soltó su lock, así que
+        // nadie va a publicar con esas copias— y por eso lo recoge el GC (E25-H03: el criterio es de
+        // propiedad; que no haya journal ni recibo describe el estado, no lo autoriza a barrer — una
+        // transacción viva en la ventana `[backup, journal)` presenta ese mismo estado y su material
+        // es intocable).
         ws2.gc_receipts().expect("el GC debe correr");
         let recovery = dir
             .path()

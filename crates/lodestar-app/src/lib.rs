@@ -445,7 +445,7 @@ impl App {
         if !self.workspace.recovery_pending() {
             return Ok(());
         }
-        let _lock = self
+        let lock = self
             .workspace
             .acquire_lock()
             .map_err(|e| workspace_error_code(&e))?;
@@ -459,7 +459,14 @@ impl App {
             // `change_revert` cuando terminaban bien: el flujo que produce la basura era
             // exactamente el que no la recogía. Best-effort: un fallo recogiendo no puede impedir
             // planificar.
-            let _ = self.workspace.gc_receipts();
+            //
+            // E25-H03: la variante que exige el lock como TESTIGO, porque aquí ya lo tenemos
+            // (`lock`). `gc_receipts` lo adquiere él mismo y es fail-fast, así que llamarlo desde
+            // dentro de este bloque lo convertiría en un no-op silencioso **para siempre**: el único
+            // camino que barre justo después de un crash dejaría de barrer. Pasar el guard es lo que
+            // hace que el compilador —y no un comentario— garantice que este barrido corre bajo el
+            // lock; el `&lock` mantiene además el guard vivo hasta que el GC termina.
+            let _ = self.workspace.gc_receipts_con_el_lock_tomado(&lock);
         }
         Ok(())
     }

@@ -9,6 +9,9 @@
 //! Orden EXACTO de la transacción (cada paso antes del siguiente; los renames del canónico llegan
 //! solo al final, tras dejar todo lo necesario para recuperar/revertir):
 //! 1. `acquire_lock()` — un solo publicador a la vez (RAII, liberado al final por `Drop`, E13-H02).
+//!    Desde E25-H03 ese mismo lock es lo que protege el material de la transacción del GC del plano
+//!    de control mientras dura la ventana `[backup, journal)`, en la que la transacción está viva y
+//!    todavía no aparece ni en `journal/` ni en `receipts/` (ver [`crate::Workspace::gc_receipts`]).
 //! 2. `recover()` si hay una recuperación pendiente — nunca se publica sobre un estado a medio
 //!    recuperar (E13-H06).
 //! 3. `previous = workspace_revision()` — la revisión sobre la que se publica (`previousRevision`).
@@ -159,6 +162,10 @@ impl Workspace {
 
         // (8) Copias de recuperación de los originales afectados, ANTES de publicar (E13-H04). Se
         //     conservan al sellar (para el receipt y el revert de H09).
+        //     Desde aquí y hasta (9) esta transacción tiene copias y NO tiene ni journal ni recibo,
+        //     así que el criterio de «vivos» del GC del plano de control (`journal/` ∪ `receipts/`)
+        //     no la ve. Lo que la protege es el lock que sostiene este `_lock`: `gc_receipts` lo
+        //     adquiere también (E25-H03) y, al no conseguirlo, no barre.
         self.backup_originals(&txn_id, &affected)?;
 
         // Seam de test (E25-H03), dentro de la ventana `[backup, journal)`: la transacción tiene
