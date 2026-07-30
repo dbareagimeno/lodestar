@@ -121,6 +121,21 @@ pub enum PuntoDeGancho {
     /// **inmediatamente antes** de `publish_result`. Copias de recuperación y journal ya cubren el
     /// conjunto afectado calculado en T1, y el bucle de publicación aún no ha sustituido nada.
     AntesDePublicar,
+    /// Dentro de la ventana **`[backup, journal)`**: tras `backup_originals` y **antes** de
+    /// `create_journal` (E25-H03). Es el instante en que la transacción **tiene copias de
+    /// recuperación y no tiene todavía ni journal ni recibo**, o sea el único estado en el que el
+    /// criterio de «vivos» del GC del plano de control (`journal/` ∪ `receipts/`) no la ve.
+    ///
+    /// Es el complemento *ejecuta-y-espera* de [`FailPoint::TrasBackupSinJournal`], que modela ese
+    /// mismo punto pero **abortando**: para reproducir el defecto de E25-H03 hace falta que la
+    /// transacción se quede **congelada ahí, viva**, mientras otro proceso barre. El gancho del test
+    /// bloquea en un canal y la transacción continúa cuando el test la libera.
+    ///
+    /// STUB de la fase roja de E25-H03: la variante existe para que el test compile y el orquestador
+    /// la ejerce con un `ejecutar_gancho` cfg-gateado en `transaction.rs` (dos líneas, sin lógica de
+    /// producción). El mecanismo que protege el material de la transacción viva —GC bajo el lock o
+    /// marca durable de «en curso»— lo elige el implementador.
+    TrasElBackup,
 }
 
 /// Gancho armado (el punto que lo dispara y el cierre a ejecutar), o nada.

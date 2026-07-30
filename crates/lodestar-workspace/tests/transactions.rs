@@ -3671,3 +3671,582 @@ mod aborto_de_ventana {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// E25-H03 — El GC no destruye el plano de recuperación de una transacción viva
+// (`requirements/epica-25-endurecimiento-escritura.md`, bloque E25-H03). Fase ROJA.
+//
+// EL DEFECTO (S3)
+//
+// `gc_receipts` se invoca DESPUÉS de que la transacción suelte el lock (`lodestar-app/src/lib.rs`,
+// tras `apply_transaction`/`revert_transaction`), y `gc_runtime_huerfanos`
+// (`src/receipts.rs:314-360`) purga TODO directorio de `staging/`/`recovery/` —y todo sidecar
+// `recovery/<txn>.digests.json`— cuyo stem no aparezca ni en `journal/` ni en `receipts/`. Ese
+// criterio es correcto con un solo proceso y FALSO con dos: entre `backup_originals`
+// (`transaction.rs:162`) y `create_journal` (`:167`) hay una ventana —la que modela
+// `FailPoint::TrasBackupSinJournal`— en la que la transacción tiene copias y NO tiene ni journal ni
+// recibo. Un `change_apply` de otro proceso que termine en ese instante lanza su GC y **borra el
+// árbol de recuperación de la transacción viva**: esa publica sin copias y, si cae,
+// `restore_from_recovery` no encuentra directorio, devuelve `Ok(())` de inmediato
+// (`recovery.rs:323-325`) y la recuperación **sella un estado parcial en silencio**.
+//
+// EL CONTRATO QUE FIJAN ESTOS TESTS (sin fijar el mecanismo)
+//
+// La spec deja al implementador elegir entre (1) GC bajo el lock de publicación —fail-fast: si no lo
+// consigue, no barre y devuelve `Ok(())`— y (2) marca durable de «transacción en curso» creada antes
+// del backup y respetada por el GC como tercer conjunto de vivos, con dueño (pid/host) y criterio de
+// rancidez. Por eso estos tests aseveran **solo efectos en disco**:
+//
+// - con una transacción VIVA en la ventana, su árbol de recuperación y su sidecar sobreviven a un GC
+//   lanzado desde otro handle sobre la misma raíz (criterio 1);
+// - con el dueño MUERTO, el mismo material se purga (criterio 2, control anti-vacuo: el arreglo no
+//   puede consistir en dejar de barrer, ni en dejar basura inmortal);
+// - una transacción terminada —con éxito o con `Err`— no deja NINGÚN rastro de «en curso» bajo
+//   `.lodestar/runtime/` (criterio 3): la marca muere con la transacción, así que el huérfano que
+//   deja un aborto en la ventana sigue siendo basura recogible (es lo que mantiene verde
+//   `seam_real::caida_entre_backup_y_journal` sin tocarlo);
+// - un GC que no puede barrer (lock tomado, señal de propiedad ilegible) devuelve `Ok(())` y no
+//   altera lo publicado (criterio 4).
+//
+// EL SEAM QUE HACE FALTA (declarado en la salida de la fase roja; aquí solo se USA)
+//
+// `FailPoint::TrasBackupSinJournal` modela ese punto **abortando**, y para reproducir el defecto hace
+// falta lo contrario: que la transacción se quede ahí CONGELADA Y VIVA mientras otro handle barre.
+// Se reusa por tanto el gancho *ejecuta-y-espera* de E25-H01 con un punto nuevo:
+//
+// ```rust
+// pub enum PuntoDeGancho {
+//     AntesDePublicar,   // E25-H01
+//     /// Dentro de la ventana `[backup, journal)`: tras `backup_originals` y ANTES de
+//     /// `create_journal`. El gancho del test bloquea en un canal y la transacción CONTINÚA al
+//     /// liberarlo.
+//     TrasElBackup,      // E25-H03
+// }
+// ```
+//
+// El gancho es `thread_local` (a propósito: los tests corren en paralelo en el mismo proceso), así
+// que la transacción congelada corre en un **hilo propio** con el gancho armado EN ESE HILO — es lo
+// que hace `congelar_en_la_ventana`.
+//
+// ROJO ESPERADO HOY
+// - `gc_no_destruye_una_transaccion_en_curso_de_otro_proceso`: ROJO. El GC del segundo handle borra
+//   el árbol de recuperación y el sidecar de la transacción viva.
+// - `gc_sigue_purgando_huerfanos_de_dueno_muerto`, `la_marca_no_sobrevive_a_la_transaccion` y
+//   `el_gc_nunca_tumba_a_quien_lo_llama`: **controles anti-vacuos**, pasan ya hoy y tienen que
+//   seguir pasando. Hoy pasan trivialmente (el GC barre siempre y no mira ningún lock, y no existe
+//   marca alguna que pueda sobrevivir); lo que prohíben es que el arreglo del criterio 1 se pague
+//   con basura inmortal, con un GC que devuelva `Err` cuando el lock está tomado, o con una marca
+//   que sobreviva a su transacción.
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "test-failpoints")]
+mod gc_y_transacciones_vivas {
+    use super::*;
+    use lodestar_workspace::failpoints::{self, FailPoint, PuntoDeGancho};
+    use std::sync::mpsc;
+
+    /// Límite de cualquier rendez-vous con el hilo de la transacción congelada, y del propio GC.
+    /// Solo tiene que distinguir «colgado» (infinito) de «lento», así que se elige **muy** holgado:
+    /// un runner de CI cargado puede tardar segundos en lo que en local tarda milisegundos, y un
+    /// valor ajustado convertiría una aserción de robustez en un test frágil.
+    const LIMITE: Duration = Duration::from_secs(120);
+
+    /// El plano de control de la sesión (`.lodestar/runtime/`), exista o no.
+    fn runtime_de(root: &Path) -> PathBuf {
+        root.join(".lodestar").join("runtime")
+    }
+
+    /// El sidecar de huellas de las copias de una transacción (E25-H02),
+    /// `recovery/<txnId>.digests.json`: **hermano** del árbol, nunca dentro de él. Vive y muere con
+    /// él, así que el GC lo juzga con el mismo criterio de propiedad.
+    fn sidecar_de(root: &Path, txn_id: &str) -> PathBuf {
+        runtime_de(root)
+            .join("recovery")
+            .join(format!("{txn_id}.digests.json"))
+    }
+
+    /// El árbol de staging de una transacción (`staging/<txnId>/`), exista o no.
+    fn staging_de(root: &Path, txn_id: &str) -> PathBuf {
+        runtime_de(root).join("staging").join(txn_id)
+    }
+
+    /// Todo lo que queda bajo `.lodestar/runtime/` que **no** es el material de recuperación de
+    /// `txn_id` (su árbol `recovery/<txn>/…` y su sidecar `recovery/<txn>.digests.json`, que el
+    /// sellado conserva a propósito porque `change_revert` los necesita).
+    ///
+    /// Cualquier otra cosa que sobreviva a la transacción —un fichero de lock, una marca de «en
+    /// curso», un staging sin limpiar— es un rastro que no puede quedar: el GC de otro proceso lo
+    /// leería como «hay alguien publicando» y el material quedaría **inmortal**, que es cambiar un
+    /// defecto por otro.
+    fn resto_del_plano_de_control(root: &Path, txn_id: &str) -> BTreeMap<String, Vec<u8>> {
+        let arbol = format!("recovery/{txn_id}/");
+        let sidecar = format!("recovery/{txn_id}.digests.json");
+        ficheros_bajo(&runtime_de(root))
+            .into_iter()
+            .filter(|(rel, _)| !rel.starts_with(&arbol) && *rel != sidecar)
+            .collect()
+    }
+
+    /// Un pid que con certeza **no** corresponde a ningún proceso vivo: se arranca el propio binario
+    /// de test con `--list` (enumera los tests y sale 0 sin ejecutar ninguno) y se espera a que
+    /// muera. Portable —no depende de rangos de pid del sistema— y realista: es exactamente el hueco
+    /// que deja un proceso que se fue. Mismo truco que `pid_muerto()` en
+    /// `crates/lodestar-mcp/tests/concurrencia.rs`.
+    fn pid_inexistente() -> u32 {
+        let exe = std::env::current_exe().expect("ruta del binario de test");
+        let mut hijo = std::process::Command::new(exe)
+            .arg("--list")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("arrancar el proceso sonda");
+        let pid = hijo.id();
+        hijo.wait().expect("esperar al proceso sonda");
+        pid
+    }
+
+    /// Ejecuta `gc_receipts()` de `ws` con **límite de tiempo**: el modelo es fail-fast (`§19.5`),
+    /// así que un GC que se quedara esperando un lock es un defecto, y el test tiene que decirlo en
+    /// vez de dejar el CI colgado. Devuelve el resultado tal cual (el GC es best-effort: se espera
+    /// `Ok(())` incluso cuando no puede barrer).
+    fn gc_con_limite(ws: Workspace) -> Result<(), String> {
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let r = ws.gc_receipts().map_err(|e| format!("{}: {e:?}", e.code()));
+            let _ = tx.send(r);
+        });
+        match rx.recv_timeout(LIMITE) {
+            Ok(r) => r,
+            Err(_) => panic!(
+                "el GC del plano de control no puede BLOQUEAR esperando el lock de publicación: el \
+                 modelo es fail-fast; si no consigue barrer, no barre y devuelve Ok(())"
+            ),
+        }
+    }
+
+    /// Un `apply_transaction` **congelado y vivo** dentro de la ventana `[backup, journal)`.
+    ///
+    /// Corre en un **hilo propio** porque el gancho es `thread_local`: armarlo en el hilo del test no
+    /// afectaría a la transacción. Mientras este valor existe, la transacción está detenida en el
+    /// punto donde tiene copias de recuperación y todavía no tiene journal — el estado exacto que el
+    /// GC de otro proceso confunde hoy con basura.
+    struct VentanaCongelada {
+        hilo: Option<std::thread::JoinHandle<Result<Vec<RelPath>, String>>>,
+        liberar: Option<mpsc::Sender<()>>,
+    }
+
+    impl VentanaCongelada {
+        /// Deja que la transacción continúe y espera su resultado (`changedPaths` si publicó).
+        fn liberar(mut self) -> Result<Vec<RelPath>, String> {
+            self.liberar
+                .take()
+                .expect("la ventana solo se libera una vez")
+                .send(())
+                .expect("el hilo de la transacción debe seguir esperando en la ventana");
+            self.hilo
+                .take()
+                .expect("el hilo de la transacción solo se espera una vez")
+                .join()
+                .expect("el hilo de la transacción no puede paniquear")
+        }
+    }
+
+    impl Drop for VentanaCongelada {
+        /// Si una aserción del test falla **antes** de liberar la ventana, el hilo de la transacción
+        /// se queda esperando en el canal: al dropear el emisor recibiría `Disconnected` y paniquearía,
+        /// sepultando el fallo real bajo un segundo panic en un hilo secundario. Aquí se libera y se
+        /// espera, siempre en modo best-effort (un `Drop` que paniquea durante un desenrollado aborta
+        /// el proceso).
+        fn drop(&mut self) {
+            if let Some(tx) = self.liberar.take() {
+                let _ = tx.send(());
+            }
+            if let Some(hilo) = self.hilo.take() {
+                let _ = hilo.join();
+            }
+        }
+    }
+
+    /// Arranca `ws.apply_transaction(&cs)` en un hilo propio y **espera a que quede congelado**
+    /// dentro de la ventana `[backup, journal)`. Al volver, la transacción está viva y detenida ahí.
+    fn congelar_en_la_ventana(ws: Workspace, cs: ChangeSet) -> VentanaCongelada {
+        let (tx_dentro, rx_dentro) = mpsc::channel::<()>();
+        let (tx_liberar, rx_liberar) = mpsc::channel::<()>();
+
+        let hilo = std::thread::spawn(move || {
+            failpoints::armar_gancho(PuntoDeGancho::TrasElBackup, move || {
+                tx_dentro
+                    .send(())
+                    .expect("avisar al test de que la ventana está abierta");
+                rx_liberar
+                    .recv_timeout(LIMITE)
+                    .expect("el test debe liberar la ventana");
+            });
+            let r = ws.apply_transaction(&cs);
+            failpoints::desarmar_ganchos();
+            r.map(|(_, _, changed)| changed)
+                .map_err(|e| format!("{}: {e:?}", e.code()))
+        });
+
+        if let Err(e) = rx_dentro.recv_timeout(LIMITE) {
+            panic!(
+                "la transacción debe alcanzar la ventana `[backup, journal)` y quedarse ahí: el \
+                 gancho `PuntoDeGancho::TrasElBackup` —tras `backup_originals` y ANTES de \
+                 `create_journal`— no se disparó ({e})"
+            );
+        }
+        VentanaCongelada {
+            hilo: Some(hilo),
+            liberar: Some(tx_liberar),
+        }
+    }
+
+    /// **E25-H03** · Criterio 1 — **Dado** un proceso A detenido en la ventana `[backup, journal)`,
+    /// **Cuando** otro handle sobre la MISMA raíz ejecuta el GC, **Entonces** el árbol de
+    /// recuperación de A (y su sidecar) **sigue intacto**.
+    ///
+    /// Hoy lo borra: `gc_runtime_huerfanos` decide «vivo» por presencia en `journal/` ∪ `receipts/`,
+    /// y en esa ventana la transacción no está en ninguno de los dos aunque esté publicando. A
+    /// publica entonces sin copias, y si cae, la recuperación no encuentra directorio, devuelve
+    /// `Ok(())` y sella un estado parcial en silencio.
+    ///
+    /// El GC se lanza desde un **segundo `Workspace` sobre la misma raíz**, que es el «otro
+    /// proceso» del escenario: por eso la señal que protege a A tiene que ser **durable** (un
+    /// fichero de lock o una marca en disco), no un estado en memoria del handle que publica.
+    #[test]
+    fn gc_no_destruye_una_transaccion_en_curso_de_otro_proceso() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws_a = siembra_documentos(dir.path(), &["uno", "dos", "tres"]);
+        let antes = canonical_md(dir.path());
+
+        let id = "e25-h03-en-curso";
+        let cs = cs_modifica(&ws_a, id, &["uno.md", "dos.md", "tres.md"]);
+        let ventana = congelar_en_la_ventana(ws_a, cs);
+
+        // Precondición del escenario: A está DENTRO de la ventana — copias listas, journal ausente.
+        // Si el gancho se disparara en otro punto, el defecto no sería ni posible (con journal en
+        // disco el GC ya considera viva la transacción) y el test sería vacuo.
+        assert!(
+            recovery_de(dir.path(), id).is_dir(),
+            "el gancho debe dispararse DESPUÉS de `backup_originals`: falta el árbol {}",
+            recovery_de(dir.path(), id).display()
+        );
+        assert!(
+            sidecar_de(dir.path(), id).is_file(),
+            "y con él el sidecar de huellas de E25-H02: falta {}",
+            sidecar_de(dir.path(), id).display()
+        );
+        assert!(
+            !journal_de(dir.path(), id).exists(),
+            "y ANTES de `create_journal`: con journal en disco el GC ya vería la transacción como \
+             viva y el escenario no reproduciría nada ({})",
+            journal_de(dir.path(), id).display()
+        );
+
+        let respaldo_antes = ficheros_bajo(&recovery_de(dir.path(), id));
+        assert!(
+            !respaldo_antes.is_empty(),
+            "precondición: las copias de recuperación de A no pueden estar vacías"
+        );
+        let sidecar_antes = std::fs::read(sidecar_de(dir.path(), id)).expect("leer el sidecar");
+
+        // El «otro proceso»: un segundo handle sobre la misma raíz que barre el plano de control
+        // mientras A publica (es lo que hace `App::change_apply` al terminar su propia transacción).
+        let ws_b = Workspace::open(dir.path()).unwrap();
+        gc_con_limite(ws_b).expect(
+            "el GC es best-effort: nunca falla, ni cuando no puede barrer (criterio 4 de la \
+             historia)",
+        );
+
+        // EL CRITERIO.
+        assert_eq!(
+            ficheros_bajo(&recovery_de(dir.path(), id)),
+            respaldo_antes,
+            "el GC de otro proceso NO puede tocar el árbol de recuperación de una transacción EN \
+             CURSO: sin esas copias, A publica sin plano de recuperación y una caída posterior \
+             sella un estado parcial en silencio (`restore_from_recovery` sin directorio devuelve \
+             Ok de inmediato)"
+        );
+        assert_eq!(
+            std::fs::read(sidecar_de(dir.path(), id)).unwrap_or_default(),
+            sidecar_antes,
+            "ni su sidecar de huellas: sin él, las copias que sí sobrevivan se restauran sin \
+             verificar (E25-H02)"
+        );
+        assert!(
+            staging_de(dir.path(), id).is_dir(),
+            "ni el staging de la transacción viva, que es material del mismo lote en vuelo: {}",
+            staging_de(dir.path(), id).display()
+        );
+
+        // A continúa y publica: el GC de otro proceso no puede alterar su resultado.
+        let changed = ventana
+            .liberar()
+            .expect("la transacción congelada debe poder publicar al liberarla");
+        assert_eq!(
+            changed.len(),
+            3,
+            "A publica su lote completo: changedPaths={changed:?}"
+        );
+
+        let despues = canonical_md(dir.path());
+        assert_ne!(
+            despues, antes,
+            "A publicó: el canónico tiene que haber cambiado"
+        );
+        assert!(
+            despues.values().all(|c| c.contains("cuerpo NUEVO")),
+            "y con el resultado del plan: {despues:?}"
+        );
+        // Corolario del criterio, medido al final: las copias que `change_revert` necesita siguen
+        // completas. Son las mismas que el GC intruso se llevó a mitad de vuelo.
+        assert_eq!(
+            ficheros_bajo(&recovery_de(dir.path(), id)),
+            respaldo_antes,
+            "tras publicar, las copias de recuperación de la transacción siguen completas: son las \
+             que hacen reversible lo que acaba de publicarse"
+        );
+    }
+
+    /// **E25-H03** · Criterio 2 (**control anti-vacuo**) — **Dado** el mismo estado de la ventana
+    /// pero con el dueño **muerto**, **Cuando** corre el GC, **Entonces** el material se purga.
+    ///
+    /// El arreglo del criterio 1 no puede consistir en dejar de barrer: si la señal de propiedad
+    /// sobrevive a un crash y nadie la caduca, el material de esa ventana queda **inmortal** y se
+    /// cambia un defecto por otro (la spec lo dice explícitamente: la marca se considera rancia con
+    /// el mismo criterio de propiedad que el lock, `reclamar_si_huerfano`).
+    ///
+    /// Dos estados, los dos con dueño que ya no está:
+    /// - **(a)** el que deja un aborto en la ventana: la transacción TERMINÓ (con `Err`), así que su
+    ///   material es basura y no hay dueño que lo reclame;
+    /// - **(b)** el que deja un **crash real** en la ventana: el mismo material MÁS la señal durable
+    ///   de propiedad que el mecanismo escriba, con el pid de este proceso sustituido por uno
+    ///   **inexistente**. La señal se **captura de una ventana de verdad** (no se fabrica a mano),
+    ///   precisamente para no fijar el mecanismo: sea un fichero de lock o una marca de «en curso»,
+    ///   se repone tal cual con el dueño cambiado.
+    #[test]
+    fn gc_sigue_purgando_huerfanos_de_dueno_muerto() {
+        // ---- (a) la transacción terminó: su material es un huérfano sin dueño ----
+        {
+            let dir = tempfile::tempdir().unwrap();
+            let ws = siembra_documentos(dir.path(), &["uno", "dos"]);
+            let id = "e25-h03-huerfano-sin-dueno";
+            let cs = cs_modifica(&ws, id, &["uno.md", "dos.md"]);
+
+            failpoints::armar(FailPoint::TrasBackupSinJournal);
+            let r = ws.apply_transaction(&cs);
+            failpoints::desarmar();
+            assert!(
+                r.is_err(),
+                "el failpoint de la ventana debe abortar la transacción (si no, el test es vacuo)"
+            );
+            assert!(
+                recovery_de(dir.path(), id).is_dir(),
+                "precondición: el aborto deja el árbol de recuperación en disco"
+            );
+
+            let ws_b = Workspace::open(dir.path()).unwrap();
+            gc_con_limite(ws_b).expect("el GC nunca falla");
+
+            assert!(
+                !recovery_de(dir.path(), id).exists(),
+                "la transacción TERMINÓ: nadie va a publicar con esas copias, no hay journal ni \
+                 recibo, y su dueño no existe. Es basura y el GC tiene que recogerla — si el \
+                 mecanismo de protección la hace inmortal, se cambia un defecto por otro"
+            );
+            assert!(
+                !sidecar_de(dir.path(), id).exists(),
+                "y con ella su sidecar de huellas"
+            );
+        }
+
+        // ---- (b) crash REAL en la ventana: mismo material + señal de propiedad de un pid muerto --
+        let dir = tempfile::tempdir().unwrap();
+        let ws_a = siembra_documentos(dir.path(), &["uno", "dos"]);
+        let id = "e25-h03-dueno-muerto";
+        let cs = cs_modifica(&ws_a, id, &["uno.md", "dos.md"]);
+
+        let ventana = congelar_en_la_ventana(ws_a, cs);
+        // Foto del plano de control con la transacción VIVA dentro de la ventana: contiene el árbol,
+        // el sidecar, el staging y —sea cual sea el mecanismo— la señal durable de propiedad.
+        let foto = ficheros_bajo(&runtime_de(dir.path()));
+        assert!(
+            foto.keys()
+                .any(|r| r.starts_with(&format!("recovery/{id}"))),
+            "precondición: la foto debe incluir el material de recuperación de la ventana: {:?}",
+            foto.keys().collect::<Vec<_>>()
+        );
+        let señales: Vec<&String> = foto
+            .keys()
+            .filter(|r| !r.starts_with("recovery/") && !r.starts_with("staging/"))
+            .collect();
+        assert!(
+            !señales.is_empty(),
+            "precondición del escenario: mientras la transacción está viva en la ventana tiene que \
+             existir en disco ALGUNA señal durable de propiedad (el fichero de lock, o la marca de \
+             «en curso» que el mecanismo elija) — es lo que este caso convierte en «dueño muerto». \
+             Sin ninguna, este caso no se distinguiría del (a): {:?}",
+            foto.keys().collect::<Vec<_>>()
+        );
+        ventana
+            .liberar()
+            .expect("la transacción congelada publica al liberarla");
+
+        // Se repone el estado que dejaría un crash en esa ventana: todo lo que la foto tenía y el
+        // sellado se llevó, con el pid de ESTE proceso (vivo) sustituido por uno inexistente. El
+        // journal NO se repone: el crash ocurrió antes de crearlo, que es lo que hace del material
+        // un huérfano invisible para el criterio `journal/` ∪ `receipts/`.
+        let vivo = std::process::id().to_string();
+        let muerto = pid_inexistente().to_string();
+        for (rel, bytes) in &foto {
+            let destino = runtime_de(dir.path()).join(rel);
+            if destino.exists() {
+                continue;
+            }
+            if let Some(padre) = destino.parent() {
+                std::fs::create_dir_all(padre).unwrap();
+            }
+            let contenido = match std::str::from_utf8(bytes) {
+                Ok(texto) => texto.replace(&vivo, &muerto).into_bytes(),
+                Err(_) => bytes.clone(),
+            };
+            std::fs::write(&destino, contenido).unwrap();
+        }
+        assert!(
+            !journal_de(dir.path(), id).exists(),
+            "precondición: el crash es ANTERIOR al journal, así que no puede haber ninguno"
+        );
+
+        let ws_b = Workspace::open(dir.path()).unwrap();
+        gc_con_limite(ws_b).expect("el GC nunca falla");
+
+        assert!(
+            !recovery_de(dir.path(), id).exists(),
+            "el dueño de esta ventana está MUERTO (pid inexistente): su material es basura y el GC \
+             tiene que recogerlo. Una señal de propiedad sin criterio de rancidez deja basura \
+             inmortal en cada crash — es el defecto que E23-H23 ya cerró para el lock"
+        );
+        assert!(
+            !sidecar_de(dir.path(), id).exists(),
+            "y su sidecar de huellas con él"
+        );
+        assert!(
+            !staging_de(dir.path(), id).exists(),
+            "y su staging, que es el huérfano que motivó el barrido de E24-H06"
+        );
+    }
+
+    /// **E25-H03** · Criterio 3 — **Dado** una transacción que termina, **Cuando** ha terminado,
+    /// **Entonces** no queda **ninguna** marca de «en curso» bajo `.lodestar/runtime/`.
+    ///
+    /// La spec lo pide para el camino de éxito; el test cubre también el camino de `Err`, porque la
+    /// invariante es la misma —**la marca muere con la transacción**— y de ella depende que un
+    /// aborto en la ventana siga dejando un huérfano *recogible*: es exactamente lo que mantiene
+    /// verde `seam_real::caida_entre_backup_y_journal` (que aborta en la ventana **en este mismo
+    /// proceso**, con este pid VIVO) sin tener que tocarlo. Si la marca sobreviviera al `Err`, el GC
+    /// vería un dueño vivo para siempre.
+    ///
+    /// Lo único que el sellado conserva a propósito es el material de recuperación de la transacción
+    /// (árbol + sidecar), que `change_revert` necesita. Cualquier otro rastro —lock sin liberar,
+    /// marca de «en curso», staging sin limpiar— es lo que este test prohíbe.
+    #[test]
+    fn la_marca_no_sobrevive_a_la_transaccion() {
+        // ---- (a) camino feliz ----
+        let dir = tempfile::tempdir().unwrap();
+        let ws = siembra_documentos(dir.path(), &["uno", "dos"]);
+        let id = "e25-h03-marca-exito";
+        let cs = cs_modifica(&ws, id, &["uno.md", "dos.md"]);
+        ws.apply_transaction(&cs)
+            .expect("la transacción debe publicar");
+
+        let resto = resto_del_plano_de_control(dir.path(), id);
+        assert!(
+            resto.is_empty(),
+            "tras publicar con éxito no puede quedar ninguna marca de «en curso» bajo \
+             .lodestar/runtime/ (solo el material de recuperación de la transacción, que \
+             `change_revert` necesita); quedó: {:?}",
+            resto.keys().collect::<Vec<_>>()
+        );
+
+        // ---- (b) camino de `Err` dentro de la ventana: la transacción también TERMINÓ ----
+        let dir2 = tempfile::tempdir().unwrap();
+        let ws2 = siembra_documentos(dir2.path(), &["uno", "dos"]);
+        let id2 = "e25-h03-marca-abortada";
+        let cs2 = cs_modifica(&ws2, id2, &["uno.md", "dos.md"]);
+
+        failpoints::armar(FailPoint::TrasBackupSinJournal);
+        let r = ws2.apply_transaction(&cs2);
+        failpoints::desarmar();
+        assert!(r.is_err(), "el failpoint de la ventana debe abortar");
+
+        let resto2 = resto_del_plano_de_control(dir2.path(), id2);
+        assert!(
+            resto2.is_empty(),
+            "una transacción que muere en la ventana también ha TERMINADO: su marca no puede \
+             sobrevivirla. Si sobreviviera, el GC vería un dueño vivo con este pid y el huérfano \
+             sería inmortal — y `caida_entre_backup_y_journal` pasaría a fallar por la razón \
+             equivocada; quedó: {:?}",
+            resto2.keys().collect::<Vec<_>>()
+        );
+    }
+
+    /// **E25-H03** · Criterio 4 (**control anti-vacuo**) — **Dado** un GC que no consigue barrer
+    /// (lock tomado, señal de propiedad ilegible), **Cuando** se invoca, **Entonces** devuelve
+    /// `Ok(())` y la operación que lo llamó no se ve afectada.
+    ///
+    /// El GC es best-effort por definición y corre **después** de que la transacción haya publicado:
+    /// un `Err` suyo convertiría un apply publicado en un fallo sin recibo (el defecto que cierra
+    /// E25-H04). Por eso «GC bajo el lock» tiene que ser fail-fast y **silencioso**: si no consigue
+    /// el lock, no barre y devuelve `Ok(())`; jamás propaga el `WRITE_CONFLICT` de `acquire_lock`.
+    #[test]
+    fn el_gc_nunca_tumba_a_quien_lo_llama() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = siembra_documentos(dir.path(), &["uno", "dos"]);
+        let id = "e25-h03-gc-no-tumba";
+        let cs = cs_modifica(&ws, id, &["uno.md", "dos.md"]);
+        ws.apply_transaction(&cs)
+            .expect("la transacción debe publicar");
+        let publicado = canonical_md(dir.path());
+        assert!(
+            publicado.values().all(|c| c.contains("cuerpo NUEVO")),
+            "precondición: la transacción publicó su lote: {publicado:?}"
+        );
+
+        // (a) El lock de publicación está TOMADO por otro: el GC no puede barrer, y no pasa nada.
+        let guardia = ws
+            .acquire_lock()
+            .expect("tomar el lock de publicación en el test");
+        let ws_b = Workspace::open(dir.path()).unwrap();
+        assert_eq!(
+            gc_con_limite(ws_b),
+            Ok(()),
+            "un GC que no consigue barrer devuelve Ok(()): es best-effort y corre DESPUÉS de \
+             publicar, así que un Err suyo convertiría un apply publicado en un fallo sin recibo"
+        );
+        drop(guardia);
+
+        // (b) La señal de propiedad del plano de control es ILEGIBLE (bytes que no son UTF-8 ni
+        //     JSON). Tampoco puede tumbar el GC: ante la duda no se barre, pero se devuelve Ok.
+        std::fs::write(ws.lock_path(), [0xff, 0xfe, 0x00, 0x01]).expect("plantar un lock ilegible");
+        std::fs::write(
+            runtime_de(dir.path()).join("marca.ilegible"),
+            [0x00, 0xff, 0x00],
+        )
+        .expect("plantar una marca ilegible en el plano de control");
+        let ws_c = Workspace::open(dir.path()).unwrap();
+        assert_eq!(
+            gc_con_limite(ws_c),
+            Ok(()),
+            "una señal de propiedad ilegible deja al GC sin criterio para barrer, no con un error \
+             que propagar a quien acaba de publicar"
+        );
+
+        // Y lo que la operación llamante publicó sigue publicado, byte a byte.
+        assert_eq!(
+            canonical_md(dir.path()),
+            publicado,
+            "el GC no toca el conocimiento canónico: solo barre `.lodestar/runtime/`"
+        );
+    }
+}

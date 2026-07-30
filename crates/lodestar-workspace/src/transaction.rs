@@ -161,6 +161,14 @@ impl Workspace {
         //     conservan al sellar (para el receipt y el revert de H09).
         self.backup_originals(&txn_id, &affected)?;
 
+        // Seam de test (E25-H03), dentro de la ventana `[backup, journal)`: la transacción tiene
+        // copias y todavía no tiene ni journal ni recibo, así que el criterio de «vivos» del GC del
+        // plano de control no la ve. Un gancho del test puede congelarla aquí —viva— mientras otro
+        // handle barre, que es lo que `failpoint!` (que solo aborta) no sabe hacer. Sin
+        // `--features test-failpoints` no genera ni una instrucción.
+        #[cfg(feature = "test-failpoints")]
+        crate::failpoints::ejecutar_gancho(crate::failpoints::PuntoDeGancho::TrasElBackup);
+
         failpoint!(FailPoint::TrasBackupSinJournal);
 
         // (9) Write-ahead journal `prepared`, fsynced antes del primer rename (E13-H03).
