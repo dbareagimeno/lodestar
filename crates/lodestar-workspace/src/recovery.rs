@@ -11,7 +11,8 @@
 //! **H06** — al reabrir el workspace, [`Workspace::recover`] escanea los write-ahead journals
 //! no-`done` (E13-H03/H05) y, **por el estado global durable del journal**, decide de forma
 //! determinista: `applied` (todos los renames hechos, solo falta sellar) → **COMPLETAR** (el
-//! canónico ya es el resultado final; solo se limpia staging/recovery y se sella la transacción);
+//! canónico ya es el resultado final; se limpia el staging, se promueve el registro durable del recibo
+//! —E25-H04— y se sella la transacción **conservando** sus copias, que es lo que la deja reversible);
 //! `prepared`/`applying` (renames parciales) → **RESTAURAR** el estado anterior desde las copias de
 //! H04 (deshacer los renames hechos + borrar los creados que marca `.absent`). Toda escritura del
 //! canónico durante la restauración va por el **único escritor** (`io::write_atomic`/`io::delete`,
@@ -171,14 +172,12 @@ impl RecoveryDir {
 /// criterio que el staging (E13-H01) y los planes (E12-H09): se neutraliza cualquier `:`/`/`/`\`
 /// (hostil a nombres de fichero en Windows y a la estructura de directorios) por `_`. El resultado
 /// es determinista y basta para la trazabilidad del directorio.
+///
+/// Delega en `crate::receipts::sanear_nombre` (E25-H04): el saneado tiene **una** implementación en el
+/// crate, porque de que los cuatro nombres derivados del `txnId` coincidan depende que se localicen
+/// entre sí.
 fn recovery_dir_name(txn_id: &str) -> String {
-    txn_id
-        .chars()
-        .map(|c| match c {
-            ':' | '/' | '\\' => '_',
-            other => other,
-        })
-        .collect()
+    crate::receipts::sanear_nombre(txn_id)
 }
 
 impl Workspace {
@@ -396,6 +395,30 @@ impl Workspace {
         out
     }
 
+    /// Estado global **durable** del write-ahead journal de `txn_id`, leído del disco, o `None` si no
+    /// hay journal para esa transacción (o su JSON es ilegible/torn).
+    ///
+    /// Es la misma lectura con la que [`Workspace::recover`] decide COMPLETAR frente a RESTAURAR, y por
+    /// tanto la **única** fuente de verdad sobre «esta transacción llegó a publicar» (invariante #3).
+    /// La consulta el registro durable del recibo (E25-H04, `crate::receipts`) para decidir si es
+    /// efectivo: sin ella habría que inventar un segundo juicio sobre lo mismo.
+    ///
+    /// Localiza el fichero por la convención de [`Workspace::create_journal`]
+    /// (`journal/<txnId saneado>.json`), con el **mismo** saneado que nombra el registro durable del
+    /// recibo: si los dos no coincidieran, un `txnId` exótico dejaría al pendiente sin poder encontrar
+    /// su journal —y por tanto nunca efectivo— sin que nada lo dijera. Como el saneado es idempotente,
+    /// da igual que `txn_id` llegue crudo (del cuerpo del journal) o ya saneado (del nombre de un
+    /// fichero).
+    pub(crate) fn journal_state_of(&self, txn_id: &str) -> Option<JournalState> {
+        let path = self
+            .journal_dir()
+            .join(format!("{}.json", recovery_dir_name(txn_id)));
+        let raw = std::fs::read_to_string(path).ok()?;
+        serde_json::from_str::<JournalHeader>(&raw)
+            .ok()
+            .map(|h| h.state)
+    }
+
     /// `true` si hay una recuperación de publicación **pendiente** (E13-H06): existe algún
     /// write-ahead journal no-`done` (o torn) bajo `.lodestar/runtime/journal/`. Mientras lo haya,
     /// las escrituras del canónico se rechazan con `WORKSPACE_RECOVERY_REQUIRED` (gate interno)
@@ -411,7 +434,10 @@ impl Workspace {
     /// Por cada journal pendiente, decide **por su estado global durable** (la única fuente de
     /// verdad recuperable):
     /// - `applied` → **COMPLETAR**: todos los renames se hicieron antes de caer; el canónico ya es
-    ///   el resultado final, así que solo se limpia el staging/recovery y se sella la transacción.
+    ///   el resultado final, así que solo se limpia el staging, se **da por bueno el recibo** (E25-H04:
+    ///   el registro durable escrito con el journal se promueve a recibo definitivo) y se sella la
+    ///   transacción. Las copias de recuperación **se conservan**: la transacción publicó y tiene
+    ///   recibo, así que sigue siendo reversible como cualquier otra que hubiera sellado sin morirse.
     /// - `prepared`/`applying` → **RESTAURAR**: se deshace la transacción devolviendo el canónico a
     ///   su estado anterior desde las copias de H04 (restaurar cada original respaldado y borrar los
     ///   paths que `.absent` marcó "no existía"), y luego se limpia y sella.
@@ -470,11 +496,15 @@ impl Workspace {
             };
 
             // Una transacción a la vez: su fallo no puede abortar el bucle (defecto 3 de E25-H02).
+            // La vía COMPLETAR no puede fallar —y por eso no devuelve `Result`, E25-H04—: la
+            // cuarentena se lleva el árbol de copias, y una transacción que SÍ publicó y ya tiene
+            // recibo no puede acabar como material forense por un fallo al limpiar detrás de ella.
             let resultado = if restaurar {
                 self.restore_from_recovery(&txn_id)
                     .and_then(|()| self.finish_recovery(&txn_id, &journal_path))
             } else {
-                self.finish_recovery(&txn_id, &journal_path)
+                self.finish_recovery_completada(&txn_id, &journal_path);
+                Ok(())
             };
 
             if let Err(causa) = resultado {
@@ -700,14 +730,17 @@ impl Workspace {
         Ok(())
     }
 
-    /// Sella una transacción recuperada (E13-H06): limpia el staging (`.lodestar/runtime/staging/
-    /// <txnId>/`) y las copias de recuperación (`.lodestar/runtime/recovery/<txnId>/` + su sidecar de
-    /// huellas), y **borra el fichero de journal** para levantar el gate (tras esto ya no queda ningún
-    /// journal no-`done`, de modo que [`Workspace::recovery_pending`] vuelve a `false` y las
-    /// escrituras se permiten).
+    /// Sella una transacción **deshecha** por la vía RESTAURAR (E13-H06): limpia el staging
+    /// (`.lodestar/runtime/staging/<txnId>/`) y las copias de recuperación
+    /// (`.lodestar/runtime/recovery/<txnId>/` + su sidecar de huellas), **retira el registro durable
+    /// del recibo** (E25-H04: la transacción no publicó, así que su recibo no puede sobrevivirla) y
+    /// **borra el fichero de journal** para levantar el gate (tras esto ya no queda ningún journal
+    /// no-`done`, de modo que [`Workspace::recovery_pending`] vuelve a `false` y las escrituras se
+    /// permiten).
     ///
-    /// El `txnId` (sin prefijo `changeset:`) nombra por igual el staging, la recuperación y el
-    /// journal (convención de E13-H06), así que un mismo nombre saneado localiza los tres.
+    /// El `txnId` (sin prefijo `changeset:`) nombra por igual el staging, la recuperación, el registro
+    /// del recibo y el journal (convención de E13-H06), así que un mismo nombre saneado los localiza
+    /// todos.
     fn finish_recovery(&self, txn_id: &str, journal_path: &Path) -> Result<(), WorkspaceError> {
         let name = recovery_dir_name(txn_id);
         let runtime = self.root.join(".lodestar").join("runtime");
@@ -716,11 +749,80 @@ impl Workspace {
         if staging.exists() {
             std::fs::remove_dir_all(&staging)?;
         }
+        self.discard_pending_receipt(txn_id)?;
         self.discard_recovery_copies(txn_id)?;
         if journal_path.exists() {
             std::fs::remove_file(journal_path)?;
         }
         Ok(())
+    }
+
+    /// Sella una transacción **completada** por la vía COMPLETAR (E13-H06, endurecida por E25-H04): el
+    /// journal declaraba `applied`, así que el canónico ya es el resultado final y lo único que faltaba
+    /// era el cierre que el proceso muerto no llegó a hacer.
+    ///
+    /// Se diferencia de [`Workspace::finish_recovery`] en las dos cosas que distinguen «publicó» de «no
+    /// publicó»:
+    /// 1. **Da por bueno el recibo**: promueve el registro durable escrito con el journal a recibo
+    ///    definitivo (`receipts/<txnId>.json`). Es lo que convierte una publicación huérfana en una
+    ///    transacción reversible, en vez de un cambio del canónico que nadie puede deshacer.
+    /// 2. **Conserva las copias de recuperación**: exactamente como el sellado del camino feliz
+    ///    (`crate::transaction`, paso 11), porque `change_revert` las necesita. Borrarlas —lo que hacía
+    ///    hasta E25-H04— dejaba el recibo apuntando a un plano de reversión que ya no existía: había
+    ///    recibo y no había *undo*, que es la mitad inútil de la promesa.
+    ///
+    /// # Por qué NO devuelve `Result`
+    ///
+    /// Una transacción que se completa **no puede fallar al cerrarse**, y aquí eso es una exigencia de
+    /// tipos y no un comentario. El camino de esta función es el mismo que el paso (11) del apply
+    /// (`crate::transaction`) visto desde el otro lado de un crash, así que hereda su regla: pasado el
+    /// punto de no retorno, nada convierte lo publicado en un fallo. Con `Result`, un `?` en la limpieza
+    /// caía en el `quarantine_transaction` del bucle de [`Workspace::recover`] — que **mueve el árbol de
+    /// copias** a `journal/quarantine/`— justo después de haber promovido el recibo: el recibo anunciaba
+    /// una reversión cuyo material acababa de irse a material forense. Y una transacción COMPLETADA con
+    /// éxito no es material forense por definición: la cuarentena existe para las que **no** se pudieron
+    /// recuperar.
+    ///
+    /// Los tres pasos son por tanto best-effort con aviso por stderr:
+    /// - **la promoción**: si falla, el conocimiento sigue en el borde correcto pero la transacción no
+    ///   será reversible; se avisa y se sigue.
+    /// - **el staging**: sobra desde el instante en que la transacción publicó; el GC lo recoge.
+    /// - **el fichero de journal**: si no se puede borrar, el gate de [`Workspace::recovery_pending`]
+    ///   sigue en pie y el siguiente `recover` vuelve a pasar por aquí. Es un reintento seguro porque la
+    ///   promoción es **idempotente**: con el pendiente ya retirado no hace nada y el recibo definitivo
+    ///   ya está escrito.
+    fn finish_recovery_completada(&self, txn_id: &str, journal_path: &Path) {
+        let name = recovery_dir_name(txn_id);
+        let runtime = self.root.join(".lodestar").join("runtime");
+
+        if let Err(e) = self.promote_pending_receipt(txn_id) {
+            eprintln!(
+                "lodestar: aviso: la transacción {txn_id} se completó pero su recibo no se pudo \
+                 persistir ({e}): el conocimiento está en el estado correcto, pero la transacción no \
+                 será reversible"
+            );
+        }
+
+        let staging = runtime.join("staging").join(&name);
+        if staging.exists() {
+            if let Err(e) = std::fs::remove_dir_all(&staging) {
+                eprintln!(
+                    "lodestar: aviso: no se pudo limpiar el staging {} de la transacción completada \
+                     {txn_id} ({e}): el GC del plano de control lo recogerá",
+                    staging.display()
+                );
+            }
+        }
+        if journal_path.exists() {
+            if let Err(e) = std::fs::remove_file(journal_path) {
+                eprintln!(
+                    "lodestar: aviso: no se pudo borrar el journal {} de la transacción completada \
+                     {txn_id} ({e}): el conocimiento ya está en su borde final y su recibo persistido; \
+                     la siguiente recuperación reintentará el sellado",
+                    journal_path.display()
+                );
+            }
+        }
     }
 
     /// Borra el árbol de copias de recuperación de una transacción **y su sidecar de huellas** (los
@@ -754,11 +856,18 @@ impl Workspace {
     /// queda un árbol de recuperación **sin** journal: un huérfano legítimo que recoge el GC
     /// (E24-H06). Al revés quedaría un journal apuntando a copias que ya no están, y la recuperación
     /// sellaría un estado parcial en silencio.
+    ///
+    /// El **registro durable del recibo** (E25-H04) va antes que los dos, y por el mismo tipo de razón:
+    /// es efectivo mientras su journal declare `applied` y aquí el journal declara `prepared`, así que
+    /// ya no lo es —pero retirarlo primero cierra el orden por completo. Un recibo de esta transacción
+    /// que sobreviviera al aborto haría que `change_revert` escribiera las copias de T1 **encima** de la
+    /// edición externa que este aborto existe para no pisar.
     pub(crate) fn seal_window_abort(
         &self,
         txn_id: &str,
         journal_path: &Path,
     ) -> Result<(), WorkspaceError> {
+        self.discard_pending_receipt(txn_id)?;
         if journal_path.exists() {
             std::fs::remove_file(journal_path)?;
         }

@@ -600,11 +600,28 @@ tools:
       staging + gate diferencial de cambios (E13-H01/E20-H04: rechaza con INVALID_RESULT solo
       si el resultado introduce errores que el canónico no tenía, según rejectNewErrors/
       allowExistingErrors) → re-verificación de la base (E13-H02) → copias de recuperación
-      (E13-H04) → write-ahead journal `prepared` fsynced (E13-H03) → renames atómicos por el único
-      escritor (E13-H05) → sellado (limpia staging/journal, CONSERVA las copias de recuperación).
-      Tras publicar, persiste el ChangeReceipt (E13-H07, `receiptId` = id de transacción derivado del
-      changeSetId) y ejecuta la retención (`gc_receipts`). El `workspaceRevision` devuelto es la
-      revisión resultante: el workspace «queda en» ella. revert = change_revert (E13-H09).
+      (E13-H04) → write-ahead journal `prepared` fsynced (E13-H03) → REGISTRO DURABLE DEL RECIBO, con
+      el journal y ANTES del primer rename (E25-H04) → renames atómicos por el único escritor
+      (E13-H05) → sellado (promueve ese registro a ChangeReceipt definitivo ANTES de borrar el journal,
+      limpia staging/journal y CONSERVA las copias de recuperación).
+      El `receiptId` es el id de transacción derivado del changeSetId (E13-H07); tras el sellado la
+      fachada re-escribe el recibo y ejecuta la retención (`gc_receipts`). El `workspaceRevision`
+      devuelto es la revisión resultante: el workspace «queda en» ella. revert = change_revert (E13-H09).
+      E25-H04 — PUBLICAR IMPLICA RECIBO: el orden importa y es contrato. El recibo se persiste ANTES
+      del punto de no retorno porque sus dos revisiones ya se conocen ahí, de modo que ni un fallo
+      posterior ni un SIGKILL pueden dejar un cambio publicado sin forma de deshacerlo (antes eso
+      hacía a la transacción irreversible PARA SIEMPRE: change_revert → PLAN_EXPIRED por recibo
+      ausente, y un segundo change_apply del mismo plan → PLAN_STALE porque la base ya había
+      cambiado). Corolarios observables: (a) NINGÚN paso posterior a la publicación puede devolver
+      error — sellado, limpieza de staging, retención y el propio cálculo de `validation` son
+      best-effort con aviso por stderr—, así que un apply que publicó responde SIEMPRE éxito; (b) si
+      el proceso muere entre el último rename y el sellado, al reabrir la recuperación toma la vía
+      COMPLETAR, da por bueno ese registro y CONSERVA las copias, así que la transacción sigue siendo
+      reversible; (c) una transacción que NO llega a publicar no deja recibo (el aborto de ventana y
+      la vía RESTAURAR retiran el registro), así que change_revert sobre ella sigue siendo
+      PLAN_EXPIRED; (d) `validation.valid` es `false` también cuando la conformidad post-apply no se
+      pudo computar —caso distinguible por `errors == 0 && warnings == 0 && valid == false`, imposible
+      en un veredicto realmente computado—, sin que eso convierta el apply en un fallo.
       La auto-regen de index/tags dentro de la transacción (E13-H11) se RETIRÓ en E15-H02: el
       apply publica EXACTAMENTE el resultado del change set, sin añadir índices ni tags.
       E25-H02: las copias de recuperación se escriben con el protocolo DURABLE del único escritor

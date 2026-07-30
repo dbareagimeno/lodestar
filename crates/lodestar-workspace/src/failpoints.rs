@@ -85,10 +85,9 @@ pub enum FailPoint {
     /// PUBLICADA en un `Err` **sin recibo** — el agente concluye que no se aplicó nada, `change_revert`
     /// responde `PLAN_EXPIRED` para siempre y un segundo `change_apply` muere con `PLAN_STALE`.
     ///
-    /// STUB de la fase roja de E25-H04: la variante existe para que el test compile; **nadie la
-    /// consulta todavía**. El implementador la ejerce en `lodestar-app`, que ya propaga la feature
-    /// (`test-failpoints = ["lodestar-workspace/test-failpoints"]`, E25-H01), consultando el estado
-    /// armado con la API pública de este módulo — el macro `failpoint!` es interno de este crate:
+    /// Lo consulta `lodestar-app` —que propaga la feature (`test-failpoints =
+    /// ["lodestar-workspace/test-failpoints"]`, E25-H01)— con la API pública de este módulo, porque el
+    /// macro `failpoint!` es interno de este crate:
     ///
     /// ```ignore
     /// // crates/lodestar-app/src/lib.rs, en `change_apply_uncounted`, entre (4) y (5):

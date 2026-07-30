@@ -201,7 +201,13 @@ impl Workspace {
                 .collect(),
         };
 
-        let path = dir.join(format!("{txn_id}.json"));
+        // Nombre saneado, el MISMO que derivan `staging/`, `recovery/` y `receipts/` del `txnId`
+        // (E25-H04): que los cuatro coincidan es lo que permite a la recuperación y al GC localizarlos
+        // entre sí. Para un `txnId` hexadecimal —el caso real, ver `transaction::transaction_id`— el
+        // saneado es la identidad, así que esto no cambia ningún nombre existente; lo que cierra es la
+        // divergencia silenciosa con un id exótico, que dejaría al registro del recibo sin encontrar su
+        // journal.
+        let path = dir.join(format!("{}.json", crate::receipts::sanear_nombre(txn_id)));
         write_journal(&path, &data)?;
 
         Ok(Journal { path, data })

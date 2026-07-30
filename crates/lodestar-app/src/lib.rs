@@ -1614,14 +1614,24 @@ impl App {
     ///    `change_plan`) y lo compara con el `planHash` persistido; si difiere, el workspace cambió bajo
     ///    el plan → `Err(PlanStale)` y **no escribe**. (El `planHash` mezcla la base y las
     ///    operaciones, así que un cambio del canónico bajo el plan lo invalida.)
-    /// 4. **Transacción**: [`Workspace::apply_transaction`] publica por el único escritor (staging →
-    ///    lock → backup → journal → renames atómicos), devolviendo `(previous, result, changedPaths)`.
-    ///    Su `assert_writable` rechaza cualquier path fuera de `writableRoots` → `PERMISSION_DENIED`
-    ///    ANTES de tocar el canónico.
+    /// 4. **Transacción**: [`Workspace::apply_transaction_con_recibo`] publica por el único escritor
+    ///    (staging → lock → backup → journal + registro durable del recibo → renames atómicos),
+    ///    devolviendo `(previous, result, changedPaths)`. Su `assert_writable` rechaza cualquier path
+    ///    fuera de `writableRoots` → `PERMISSION_DENIED` ANTES de tocar el canónico.
     /// 5. **Receipt + GC**: persiste el [`ChangeReceipt`] de la aplicación completada (E13-H07) y
     ///    ejecuta la retención (`gc_receipts`).
     /// 6. Devuelve un [`ApplyResult`] (proyección de servicio) con `applied:true`, las revisiones
     ///    antes/después, los paths cambiados, el `semanticDiff` del plan y la conformidad post-apply.
+    ///
+    /// # Publicar implica recibo (E25-H04)
+    /// El **punto de no retorno** es el primer rename del paso (4). A partir de ahí el conocimiento ya
+    /// cambió, así que este método no puede devolver `Err` por nada de lo que venga después: los pasos
+    /// (5) y (6) —recibo, retención, conformidad— son **best-effort con aviso por stderr**. Un error ahí
+    /// diría al agente que no se aplicó nada sobre algo que sí se aplicó, y no habría salida:
+    /// `change_revert` responde `PLAN_EXPIRED` sin recibo y un segundo `change_apply` del mismo plan,
+    /// `PLAN_STALE`, porque la base cambió. Degradarlos no basta por sí solo (no cubre el `SIGKILL`): lo
+    /// que cierra el agujero es que el recibo se persista **con el journal**, dentro del paso (4), y que
+    /// la recuperación por la vía COMPLETAR lo dé por bueno.
     ///
     /// # Mapeo de error y la reserva `WorkspaceError::Core` (E10-H02)
     /// Los errores de la transacción se mapean con [`workspace_error_code`]. El rechazo por permisos
@@ -1680,18 +1690,38 @@ impl App {
             return Err(ErrorCode::PlanStale);
         }
 
-        // (4) Publicar por el único escritor (staging → lock → backup → journal → renames). El guard
-        //     `assert_writable` de la transacción rechaza fuera de `writableRoots` → PERMISSION_DENIED
-        //     antes de tocar el canónico.
+        // (4) Publicar por el único escritor (staging → lock → backup → journal + REGISTRO DURABLE DEL
+        //     RECIBO → renames). El guard `assert_writable` de la transacción rechaza fuera de
+        //     `writableRoots` → PERMISSION_DENIED antes de tocar el canónico. Se presta el
+        //     `semanticDiff` del plan porque es la única pieza del recibo que la mecánica de disco no
+        //     puede conocer (E25-H04): con ella, el recibo queda persistido ANTES del primer rename y
+        //     una publicación no puede volverse irreversible por morirse el proceso después.
         let change_set = plan_to_change_set(&plan);
         let (previous, result, changed_paths) = self
             .workspace
-            .apply_transaction(&change_set)
+            .apply_transaction_con_recibo(&change_set, Some(&plan.semantic_diff))
             .map_err(|e| workspace_error_code(&e))?;
+
+        // Punto de caída de la FACHADA (E25-H04): entre el retorno de la transacción y el recibo. Es la
+        // ventana en la que el canónico ya está publicado, el lock ya está soltado y —hasta esta
+        // historia— no existía todavía ningún registro con el que deshacer el cambio. Sin
+        // `--features test-failpoints` no genera ni una instrucción.
+        #[cfg(feature = "test-failpoints")]
+        if lodestar_workspace::failpoints::disparado(
+            lodestar_workspace::failpoints::FailPoint::TrasLaTransaccionAntesDelRecibo,
+        ) {
+            return Err(ErrorCode::InternalIoError);
+        }
 
         // (5) Receipt de la aplicación completada + retención (E13-H07). El `receiptId` es el mismo
         //     id de transacción derivado del `changeSetId`, así el receipt localiza sus copias de
         //     recuperación por convención de nombre.
+        //
+        //     DESDE AQUÍ TODO ES BEST-EFFORT (E25-H04): estos pasos corren con el canónico ya publicado,
+        //     así que un `Err` suyo diría al agente que no se aplicó nada sobre algo que sí se aplicó —y
+        //     sin salida, porque `change_revert` respondería `PLAN_EXPIRED` y un segundo `change_apply`
+        //     del mismo plan, `PLAN_STALE`—. La transacción ya dejó el recibo persistido y promovido; esta
+        //     escritura es la red de seguridad de que existe también si su promoción no pudo completarse.
         let receipt_id = ReceiptId(transaction_id(&plan.change_set_id));
         let receipt = ChangeReceipt {
             id: receipt_id.clone(),
@@ -1701,18 +1731,39 @@ impl App {
             changed_paths: changed_paths.clone(),
             semantic_diff: plan.semantic_diff.clone(),
         };
-        self.workspace
-            .write_receipt(&receipt)
-            .map_err(|e| workspace_error_code(&e))?;
-        self.workspace
-            .gc_receipts()
-            .map_err(|e| workspace_error_code(&e))?;
+        if let Err(e) = self.workspace.write_receipt(&receipt) {
+            eprintln!(
+                "lodestar: aviso: no se pudo re-escribir el recibo de `{}` tras publicar: {e}",
+                plan.change_set_id.0
+            );
+        }
+        if let Err(e) = self.workspace.gc_receipts() {
+            eprintln!("lodestar: aviso: la retención de recibos falló tras publicar: {e}");
+        }
 
         // (6) Conformidad del workspace ya publicado (una sola verdad computada, invariante #3).
-        let analysis = self
-            .workspace
-            .analyze()
-            .map_err(|e| workspace_error_code(&e))?;
+        //     También best-effort: si el canónico no se puede releer, la publicación sigue siendo un
+        //     hecho. Lo único que se degrada es lo que se puede AFIRMAR de ella, y se degrada al lado
+        //     conservador (`valid: false`): no se declara válido lo que no se ha podido comprobar.
+        let validation = match self.workspace.analyze() {
+            Ok(analysis) => ApplyValidation {
+                valid: analysis.hard_fail() == 0,
+                errors: analysis.hard_fail(),
+                warnings: analysis.warn_count(),
+            },
+            Err(e) => {
+                eprintln!(
+                    "lodestar: aviso: el cambio se publicó pero su conformidad no se pudo computar: \
+                     {e}. Se reporta como no verificado (`valid: false`); `knowledge_check` la \
+                     recomputa"
+                );
+                ApplyValidation {
+                    valid: false,
+                    errors: 0,
+                    warnings: 0,
+                }
+            }
+        };
 
         Ok(ApplyResult {
             receipt_id,
@@ -1721,11 +1772,7 @@ impl App {
             workspace_revision: result,
             changed_paths,
             semantic_diff: plan.semantic_diff,
-            validation: ApplyValidation {
-                valid: analysis.hard_fail() == 0,
-                errors: analysis.hard_fail(),
-                warnings: analysis.warn_count(),
-            },
+            validation,
         })
     }
 
@@ -1833,9 +1880,11 @@ impl App {
         self.workspace
             .write_receipt(&revert_receipt)
             .map_err(|e| workspace_error_code(&e))?;
-        self.workspace
-            .gc_receipts()
-            .map_err(|e| workspace_error_code(&e))?;
+        // Best-effort, por el mismo motivo que en `change_apply` (E25-H04): la retención corre con la
+        // reversión ya publicada, así que un fallo suyo no puede convertirla en un error.
+        if let Err(e) = self.workspace.gc_receipts() {
+            eprintln!("lodestar: aviso: la retención de recibos falló tras revertir: {e}");
+        }
 
         Ok(RevertResult {
             reverted: true,
@@ -1948,10 +1997,22 @@ pub struct ApplyResult {
 
 /// Veredicto de conformidad del workspace tras aplicar la transacción (`validation` de
 /// [`ApplyResult`]). Mismo desglose que `hardFail`/`warnCount` de [`Analysis`]. Wire en camelCase.
+///
+/// El veredicto es **posterior a la publicación**, así que no puede negarla: si el análisis no se puede
+/// computar, el apply sigue siendo un éxito y lo que se degrada es lo que se afirma de él (E25-H04, ver
+/// [`ApplyValidation::valid`]).
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ApplyValidation {
     /// `true` si el workspace publicado no tiene ningún check `Err` (`hardFail == 0`).
+    ///
+    /// **También `false` cuando la conformidad post-apply no se pudo ejecutar** (E25-H04): el análisis
+    /// corre con el canónico ya publicado, así que un fallo suyo no puede convertir el apply en un error
+    /// —el cambio está hecho—, y lo único honesto que queda es no declarar válido lo que no se ha podido
+    /// comprobar. Ese caso se distingue por `errors == 0 && warnings == 0 && valid == false`, que es
+    /// imposible en un veredicto realmente computado (`valid` es exactamente `errors == 0`), y va
+    /// acompañado de un aviso por stderr. Para obtener el veredicto de verdad, `knowledge_check` lo
+    /// recomputa.
     pub valid: bool,
     /// Nº de ficheros con al menos un check `Err`.
     pub errors: usize,
