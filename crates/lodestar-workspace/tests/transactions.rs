@@ -3225,6 +3225,182 @@ mod durabilidad_de_la_recuperacion {
         );
         assert!(!ws2.recovery_pending(), "y tras restaurar queda sellado");
     }
+
+    /// Ruta del **sidecar de huellas** de una transacción (E25-H02):
+    /// `.lodestar/runtime/recovery/<txnId>.digests.json`, hermano del árbol de copias.
+    fn sidecar_de(root: &Path, txn_id: &str) -> PathBuf {
+        root.join(".lodestar")
+            .join("runtime")
+            .join("recovery")
+            .join(format!("{txn_id}.digests.json"))
+    }
+
+    /// **E25-H02** · Criterio 1, segunda mitad (**cobertura pedida por el juez ciego**) — **Dado** un
+    /// journal `prepared` cuya copia de recuperación está **corrupta pero del mismo tamaño**,
+    /// **Cuando** se recupera, **Entonces** el canónico no se sobrescribe con ella y el fallo se
+    /// reporta con `RECOVERY_FAILED`.
+    ///
+    /// `copia_truncada_no_se_restaura_verbatim` se contenta con una verificación de **tamaño**: una
+    /// implementación que solo compare bytes-en-disco contra bytes-respaldados lo pasa. Este
+    /// escenario cierra ese hueco — la copia tiene EXACTAMENTE los mismos bytes de longitud y sigue
+    /// siendo UTF-8 válido, así que solo la **revisión blake3** del contenido la distingue del
+    /// original. Es el caso realista de una corrupción en el medio físico (un bit/byte cambiado sin
+    /// cambiar el tamaño del fichero), que es justo lo que un `std::fs::copy` sin volcado no
+    /// protege.
+    ///
+    /// Mata la mutación «verificar solo el tamaño»: neutralizando la comparación de `revision` en
+    /// `restore_backups`, la copia corrupta pasa la verificación, se restaura, `recover()` devuelve
+    /// `Ok` y este test se pone rojo.
+    #[test]
+    fn copia_corrupta_del_mismo_tamano_no_se_restaura() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = siembra_documentos(dir.path(), &["uno", "dos", "tres"]);
+        let original = canonical_md(dir.path());
+
+        let id = "e25-h02-copia-corrupta-mismo-tamano";
+        let cs = cs_modifica(&ws, id, &["uno.md", "dos.md", "tres.md"]);
+        // Un rename hecho y anotado (journal `applying`): la restauración es NECESARIA.
+        let (afectados, resultado) = transaccion_interrumpida(&ws, dir.path(), id, &cs, 1, true);
+        let publicado = afectados[0].as_str().to_string();
+        let esperado = como_md(&resultado);
+
+        // La copia se corrompe SIN cambiar su tamaño y siguiendo siendo texto válido: un byte del
+        // cuerpo cambia («original» → «0riginal»). Ni el tamaño ni la legibilidad delatan nada.
+        let copia = recovery_de(dir.path(), id).join(&publicado);
+        let intacta = std::fs::read_to_string(&copia).expect("la copia debe existir y ser texto");
+        let corrupta = intacta.replacen("cuerpo original", "cuerpo 0riginal", 1);
+        assert_eq!(
+            corrupta.len(),
+            intacta.len(),
+            "precondición del escenario: la corrupción NO cambia el tamaño (si lo cambiara, una \
+             verificación de solo tamaño ya la vería y el test no probaría nada nuevo)"
+        );
+        assert_ne!(
+            corrupta, intacta,
+            "precondición: y sí cambia el contenido (si no, no hay corrupción que detectar)"
+        );
+        std::fs::write(&copia, &corrupta).unwrap();
+        drop(ws);
+
+        let ws2 = Workspace::open(dir.path()).unwrap();
+        let err = match ws2.recover() {
+            Err(e) => e,
+            Ok(()) => panic!(
+                "una copia corrupta del mismo tamaño NO puede pasar por original: comparar solo el \
+                 tamaño (o no comparar nada) publica contenido alterado firmándolo como «el estado \
+                 anterior». El canónico de `{publicado}` quedó: {:?}",
+                canonical_md(dir.path()).get(&publicado)
+            ),
+        };
+        assert_eq!(
+            err.code(),
+            "RECOVERY_FAILED",
+            "y el fallo lleva su código propio del catálogo; era: {err:?}"
+        );
+
+        let despues = canonical_md(dir.path());
+        let contenido = despues
+            .get(&publicado)
+            .unwrap_or_else(|| panic!("`{publicado}` debe seguir existiendo en el canónico"));
+        assert_ne!(
+            contenido, &corrupta,
+            "el canónico no puede quedar con el contenido corrupto de la copia"
+        );
+        assert!(
+            contenido == &original[&publicado] || contenido == &esperado[&publicado],
+            "y tiene que ser uno de los dos bordes íntegros de la transacción.\nen disco: \
+             {contenido:?}\noriginal: {:?}\nresultado: {:?}",
+            original[&publicado],
+            esperado[&publicado]
+        );
+        assert!(
+            cuarentena_de(dir.path(), id).is_dir(),
+            "el material de la transacción irrecuperable va a cuarentena: {}",
+            cuarentena_de(dir.path(), id).display()
+        );
+        assert!(
+            !ws2.recovery_pending(),
+            "y el workspace vuelve a ser escribible"
+        );
+    }
+
+    /// **E25-H02** · Camino de migración (**cobertura pedida por el juez ciego**) — **Dado** un árbol
+    /// de recuperación válido **sin sidecar de huellas** (una transacción respaldada por ≤ v0.3.1),
+    /// **Cuando** se recupera, **Entonces** se **restaura** como en v0.3.1: el canónico converge al
+    /// borde «original», sin cuarentena, y el workspace queda escribible.
+    ///
+    /// Es el estado que un journal escrito por una versión anterior deja en disco tras actualizar el
+    /// binario, y hoy no lo ejercía nadie: si la restauración sin huellas fuera un no-op —o si el
+    /// camino sin sidecar mandara a cuarentena por no poder verificar—, una actualización de
+    /// Lodestar convertiría una transacción interrumpida perfectamente recuperable en un estado
+    /// parcial sellado (o en material forense inútil), justo al reabrir.
+    ///
+    /// Mata la mutación «`restore_backups_legacy` como no-op»: sin restaurar nada, el canónico se
+    /// queda con el rename publicado y la comparación contra el borde original falla.
+    #[test]
+    fn arbol_sin_sidecar_restaura_como_v031() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = siembra_documentos(dir.path(), &["uno", "dos", "tres"]);
+        let original = canonical_md(dir.path());
+
+        let id = "e25-h02-sin-sidecar";
+        let cs = cs_modifica(&ws, id, &["uno.md", "dos.md", "tres.md"]);
+        // Copias íntegras y un rename ya hecho y anotado: hay algo que deshacer y se puede deshacer.
+        let (afectados, resultado) = transaccion_interrumpida(&ws, dir.path(), id, &cs, 1, true);
+        let publicado = afectados[0].as_str().to_string();
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join(&publicado)).unwrap(),
+            como_md(&resultado)[&publicado],
+            "precondición: el rename se publicó, así que la restauración tiene trabajo que hacer"
+        );
+
+        // Se simula el árbol de una versión anterior a E25-H02: existe el árbol de copias, pero no
+        // hay sidecar de huellas con el que verificar.
+        let sidecar = sidecar_de(dir.path(), id);
+        assert!(
+            sidecar.is_file(),
+            "precondición: la transacción actual sí escribe su sidecar de huellas en {}",
+            sidecar.display()
+        );
+        std::fs::remove_file(&sidecar).unwrap();
+        assert!(
+            recovery_de(dir.path(), id).is_dir(),
+            "y el árbol de copias sigue en su sitio: es lo único que dejaba v0.3.1"
+        );
+        drop(ws);
+
+        let ws2 = Workspace::open(dir.path()).unwrap();
+        ws2.recover().unwrap_or_else(|e| {
+            panic!(
+                "un árbol legítimo sin huellas NO es un fallo de recuperación: se restaura como en \
+                 v0.3.1 (nunca peor que el comportamiento que E25-H02 endurece). Era: {e:?}"
+            )
+        });
+
+        assert_eq!(
+            canonical_md(dir.path()),
+            original,
+            "el canónico tiene que converger al borde «original»: las copias estaban íntegras y el \
+             único motivo para no restaurarlas sería no poder verificarlas, que es exactamente lo \
+             que v0.3.1 nunca hizo"
+        );
+        assert!(
+            !cuarentena_de(dir.path(), id).exists(),
+            "y no hay nada que poner en cuarentena: la transacción se recuperó, no falló"
+        );
+        assert!(
+            !journal_de(dir.path(), id).exists(),
+            "el journal queda sellado (borrado)"
+        );
+        assert!(
+            !recovery_de(dir.path(), id).exists(),
+            "y su árbol de copias limpio"
+        );
+        assert!(
+            !ws2.recovery_pending(),
+            "así que el workspace vuelve a ser escribible sin intervención"
+        );
+    }
 }
 
 #[cfg(feature = "test-failpoints")]

@@ -336,25 +336,35 @@ impl Workspace {
             };
             for e in rd.flatten() {
                 let p = e.path();
-                if !p.is_dir() {
-                    continue;
-                }
                 let Some(nombre) = p.file_name().and_then(|s| s.to_str()) else {
                     continue;
                 };
-                if !vivos.contains(nombre) {
-                    // Best-effort: que un huérfano no se pueda borrar no puede tumbar la
-                    // transacción que acaba de publicarse con éxito.
-                    let _ = std::fs::remove_dir_all(&p);
+                if p.is_dir() {
+                    if !vivos.contains(nombre) {
+                        // Best-effort: que un huérfano no se pueda borrar no puede tumbar la
+                        // transacción que acaba de publicarse con éxito.
+                        let _ = std::fs::remove_dir_all(&p);
+                    }
+                    continue;
+                }
+                // El sidecar de huellas de las copias (`recovery/<txnId>.digests.json`, E25-H02) es un
+                // FICHERO hermano del árbol de su transacción: vive y muere con él, así que se juzga
+                // con el mismo criterio de propiedad. Sin esto, el barrido —que solo miraba
+                // directorios— dejaría un sidecar huérfano por cada transacción abortada.
+                if let Some(stem) = nombre.strip_suffix(".digests.json") {
+                    if !vivos.contains(stem) {
+                        let _ = std::fs::remove_file(&p);
+                    }
                 }
             }
         }
 
         // Temporales de la escritura atómica abandonados por un crash entre el `File::create` y el
-        // `rename` (`io::write_atomic`, `journal::write_journal`, `receipts::write_runtime_atomic`).
-        // No rompen nada —`pending_journals` filtra por extensión `.json` y el descubrimiento por
-        // `.md`—, pero se acumulan sin límite.
-        for sub in ["journal", "receipts", "plans"] {
+        // `rename` (`io::write_bytes_atomic`, `journal::write_journal`,
+        // `receipts::write_runtime_atomic`). No rompen nada —`pending_journals` filtra por extensión
+        // `.json` y el descubrimiento por `.md`—, pero se acumulan sin límite. `recovery/` entró en la
+        // lista con E25-H02: su sidecar de huellas se escribe con el mismo protocolo durable.
+        for sub in ["journal", "receipts", "plans", "recovery"] {
             if let Ok(rd) = std::fs::read_dir(runtime.join(sub)) {
                 for e in rd.flatten() {
                     let p = e.path();

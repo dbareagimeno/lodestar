@@ -156,7 +156,9 @@ pub fn error_code(err: &CoreError) -> ErrorCode {
 ///   `ErrorCode::PermissionDenied`, mapeo directo por nombre (mismo caso que `error_code` con
 ///   `CoreError::InvalidRelPath`).
 /// - `InvalidResult` (E13-H01) / `WriteConflict` (E13-H02) / `WorkspaceRecoveryRequired`
-///   (E13-H06) → sus códigos homónimos del catálogo, mapeo directo por nombre.
+///   (E13-H06) / `RecoveryFailed` (E25-H02: una transacción interrumpida cuyas copias no verifican;
+///   su material queda en `.lodestar/runtime/journal/quarantine/<txnId>/`) → sus códigos homónimos
+///   del catálogo, mapeo directo por nombre.
 pub fn workspace_error_code(err: &WorkspaceError) -> ErrorCode {
     match err {
         WorkspaceError::Core(_) => ErrorCode::InternalIoError,
@@ -167,6 +169,7 @@ pub fn workspace_error_code(err: &WorkspaceError) -> ErrorCode {
         WorkspaceError::InvalidResult(_) => ErrorCode::InvalidResult,
         WorkspaceError::WriteConflict(_) => ErrorCode::WriteConflict,
         WorkspaceError::WorkspaceRecoveryRequired(_) => ErrorCode::WorkspaceRecoveryRequired,
+        WorkspaceError::RecoveryFailed(_) => ErrorCode::RecoveryFailed,
         WorkspaceError::InvalidSchema(_) => ErrorCode::InvalidSchema,
     }
 }

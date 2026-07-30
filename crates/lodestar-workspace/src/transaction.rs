@@ -27,7 +27,10 @@
 //! 9. `create_journal` — write-ahead journal `prepared`, fsynced antes del primer rename (E13-H03).
 //! 10. `publish` — renames atómicos por el único escritor + journal `applied` (E13-H05), sobre el
 //!     MISMO canónico del paso (4): si cambió por debajo mientras la transacción se preparaba,
-//!     `WriteConflict` antes del primer rename (E25-H01) — lo publicado es siempre lo respaldado.
+//!     `WriteConflict` antes del primer rename (E25-H01) — lo publicado es siempre lo respaldado. Ese
+//!     aborto **sella su propia transacción** bajo el mismo lock (journal primero, copias después,
+//!     E25-H02): con cero renames no hay nada que restaurar, así que dejar el journal en disco solo
+//!     serviría para que la siguiente operación pisara la edición externa al «recuperar».
 //! 11. **Sellar**: limpiar staging + journal; **conservar** las copias de recuperación (el receipt y
 //!     el `change_revert` de E13-H09 las necesitan).
 //! 12. `result = workspace_revision()` — la revisión resultante (`resultRevision`).
@@ -177,7 +180,29 @@ impl Workspace {
         //      MISMO canónico de T1 con el que se computaron el conjunto afectado, las copias y el
         //      journal. Si el canónico cambió por debajo, `publish_result` aborta con
         //      `WriteConflict` antes del primer rename (E25-H01).
-        let result = self.publish_result(&canonical, &result_files, &mut journal)?;
+        let result = match self.publish_result(&canonical, &result_files, &mut journal) {
+            Ok(result) => result,
+            // (10b) Sellado del aborto de ventana (E25-H02, enmienda del defecto 5). El ÚNICO
+            //       `WriteConflict` que `publish_result` puede devolver es el de la divergencia de la
+            //       ventana `[T1, T3)`, y lo devuelve **antes** de entrar en el bucle de renames: por
+            //       control de flujo sabemos que el canónico no se ha movido ni un byte, así que no
+            //       hay nada que restaurar y sellar aquí es exacto. Se sella bajo el MISMO lock, antes
+            //       de devolver el error, porque si el journal `prepared` y sus copias de T1
+            //       sobrevivieran, la recuperación de la siguiente operación las escribiría encima de
+            //       la edición externa que este aborto existe para no pisar.
+            //
+            //       Deliberadamente NO se generaliza a «`recover()` no restaura un journal `prepared`
+            //       con cero `applied`»: `mark_applied` re-persiste el journal DESPUÉS de cada rename,
+            //       así que ese estado describe también la caída entre el primer rename y su
+            //       anotación, y sellarlo daría por buena una publicación parcial. La decisión la toma
+            //       el camino que SABE que no publicó.
+            Err(WorkspaceError::WriteConflict(motivo)) => {
+                let journal_path = journal.path().to_path_buf();
+                self.seal_window_abort(&txn_id, &journal_path)?;
+                return Err(WorkspaceError::WriteConflict(motivo));
+            }
+            Err(e) => return Err(e),
+        };
 
         failpoint!(FailPoint::TrasPublicarSinSellar);
 

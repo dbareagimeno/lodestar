@@ -19,19 +19,37 @@
 //! [`Workspace::recovery_pending`] devuelve `true` y las escrituras del canónico se rechazan con
 //! `WORKSPACE_RECOVERY_REQUIRED`.
 //!
+//! **E25-H02** — las copias dejan de ser el eslabón débil de esa promesa. Se escriben con el mismo
+//! protocolo durable que el único escritor (contenido volcado con `sync_all`, fsync del árbol una vez
+//! al terminar, **antes** de que la transacción avance al journal), se registra la **huella** de cada
+//! original (tamaño + revisión blake3) en el sidecar `recovery/<txnId>.digests.json`, y
+//! [`Workspace::recover`] **verifica antes de escribir**: una copia que no casa no se restaura. Un
+//! journal que no se puede recuperar ya no cierra el workspace para siempre — su material se mueve
+//! íntegro a `journal/quarantine/<txnId>/`, la recuperación sigue con los demás y el fallo se reporta
+//! una vez con `RECOVERY_FAILED`. Y el aborto de la ventana de publicación (E25-H01) **sella su
+//! propia transacción** ([`Workspace::seal_window_abort`]), para que la recuperación de la siguiente
+//! operación no deshaga lo que ese aborto acababa de proteger.
+//!
+//! Promesa declarada tras E25-H02: «el canónico converge a uno de los dos bordes» es incondicional
+//! **mientras las copias verifiquen**. Con copias corruptas lo garantizado es (a) nada se escribe a
+//! partir de una copia que no verifica, (b) el material se preserva en cuarentena, (c) el fallo lleva
+//! código propio y (d) el workspace vuelve a ser escribible.
+//!
 //! Runtime, no canónico: el árbol de recuperación vive bajo `.lodestar/runtime/`, que el walker de
 //! conocimiento (`discovery::discover`) y el watcher excluyen (E9-H06) y `WorkspaceRevision` ignora
 //! (E10-H03), por lo que no viola «los `.md` son la única fuente de verdad» (invariante #1).
 //! Copiar el original solo **lee** el canónico: nunca lo modifica.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
-use lodestar_core::types::{workspace_revision, RelPath, WorkspaceRevision};
+use lodestar_core::types::{workspace_revision, FileMap, RelPath, WorkspaceRevision};
 
 use crate::error::WorkspaceError;
+#[cfg(feature = "test-failpoints")]
+use crate::failpoints::FailPoint;
 use crate::journal::JournalState;
 use crate::{io, Workspace};
 
@@ -41,10 +59,82 @@ use crate::{io, Workspace};
 /// reabrir (E13-H06/H09) sin depender solo de la memoria.
 const ABSENT_MANIFEST: &str = ".absent";
 
+/// Sufijo del **sidecar de huellas** de una transacción (E25-H02):
+/// `.lodestar/runtime/recovery/<txnId>.digests.json`, HERMANO del árbol de copias y nunca dentro de
+/// él.
+///
+/// Vive fuera del árbol a propósito: el contrato «lo publicado es lo respaldado» (E25-H01) se mide
+/// tratando **cada** fichero de `recovery/<txnId>/` como la copia de un path respaldado, y
+/// `restore_backups_legacy`/`collect_backups` restauran con ese mismo criterio. Un fichero de
+/// metadatos dentro del árbol se restauraría como si fuera un documento del usuario.
+const DIGESTS_SUFFIX: &str = ".digests.json";
+
+/// Subdirectorio de **cuarentena** del plano de control (E25-H02):
+/// `.lodestar/runtime/journal/quarantine/<txnId>/`, donde acaba el material de una transacción cuya
+/// recuperación falló. Cuelga de `journal/` y no interfiere con el gate de recuperación:
+/// [`Workspace::pending_journals`] solo mira ficheros con extensión `.json` y el GC del plano de
+/// control (E24-H06) solo barre `staging/` y `recovery/`.
+const QUARANTINE_DIR: &str = "quarantine";
+
+/// Huella durable de una copia de recuperación: el tamaño en bytes del original y su revisión de
+/// contenido blake3 (`revision`), tal y como estaban al respaldarlo.
+///
+/// La revisión se calcula con la **única** función de identidad de contenido del core
+/// ([`workspace_revision`] sobre un solo par path→contenido, invariante #3): no hay una segunda
+/// forma de hashear un documento en el árbol. Es `None` solo si el original no era UTF-8 válido y
+/// por tanto no se pudo interpretar como documento — un caso en el que la restauración fallaría de
+/// todos modos, porque el único escritor escribe texto.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BackupDigest {
+    /// Tamaño en bytes de la copia tal y como se escribió.
+    size: u64,
+    /// Revisión de contenido (`"blake3:<hex>"`) del original respaldado, si era texto.
+    revision: Option<String>,
+}
+
+/// Manifiesto durable de las copias de recuperación de una transacción (E25-H02), persistido en el
+/// sidecar `recovery/<txnId>.digests.json` **antes** de que la transacción avance al journal.
+///
+/// Es lo que convierte la restauración en verificable: describe, para el lote afectado completo, qué
+/// paths tenían original (con la huella de su copia) y qué paths **no existían**. Al restaurar se
+/// compara copia a copia contra estas huellas y se decide con este `absent` —no con el manifiesto
+/// `.absent` del árbol—, de modo que perder ese manifiesto ya no deja el canónico a medio camino
+/// entre los dos bordes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BackupManifest {
+    /// Identificador de la transacción a la que pertenecen las copias.
+    txn_id: String,
+    /// Paths afectados que tenían original → huella de su copia byte-a-byte.
+    copies: BTreeMap<String, BackupDigest>,
+    /// Paths afectados que **no existían** en el canónico (se iban a crear).
+    absent: Vec<String>,
+}
+
+/// Huella de contenido de un documento respaldado: `(tamaño en bytes, revisión blake3)`, con la
+/// revisión a `None` si el contenido no es UTF-8 válido (no es un documento que el único escritor
+/// pueda republicar).
+fn huella(rel: &RelPath, bytes: &[u8]) -> BackupDigest {
+    let revision = std::str::from_utf8(bytes).ok().map(|texto| {
+        let mut uno = FileMap::new();
+        uno.insert(rel.clone(), texto.to_string());
+        workspace_revision(&uno, &[]).0
+    });
+    BackupDigest {
+        size: bytes.len() as u64,
+        revision,
+    }
+}
+
 /// Directorio de recuperación de una transacción: contiene una copia **byte-a-byte** del original
 /// de cada path afectado que existía en el canónico, bajo `.lodestar/runtime/recovery/<txnId>/`,
 /// espejando su ruta relativa; y conoce el conjunto de paths que **no existían** (marcados en el
 /// manifiesto `.absent`) para poder borrarlos al revertir.
+///
+/// Desde E25-H02 le acompaña, **fuera** del árbol, el sidecar de huellas
+/// `recovery/<txnId>.digests.json`: los dos van siempre juntos (el sidecar sin árbol no describe nada;
+/// el árbol sin sidecar no es verificable) y se descartan a la vez al sellar la recuperación.
 ///
 /// La limpieza NO es automática: el flujo de publicación (E13-H05) y la recuperación tras fallo
 /// (E13-H06) consumirán estas copias y las retirarán al terminar. Mientras tanto persisten en
@@ -100,44 +190,62 @@ impl Workspace {
     /// [`RecoveryDir`] que referenciará el journal (E13-H03).
     ///
     /// Solo **lee** el canónico: copiar el original nunca modifica los `.md` (invariante #1). La
-    /// copia se hace con [`std::fs::copy`] (preserva los bytes exactos, incluido UTF-8 multibyte);
-    /// el árbol de recuperación es scratch runtime, así que no necesita el protocolo atómico del
-    /// único-escritor que protege los `.md` canónicos.
+    /// copia preserva los bytes exactos (incluido UTF-8 multibyte) y se escribe con el **mismo
+    /// protocolo durable que el único escritor** (`io::write_bytes_atomic`: temporal + `sync_all` +
+    /// rename), con un fsync del árbol de recuperación **una sola vez** al terminar (E25-H02).
+    ///
+    /// Ese orden —copias durables → journal durable → renames— es lo que hace verdad la premisa de
+    /// la recuperación. Hasta v0.3.1 las copias se hacían con [`std::fs::copy`] y el manifiesto con
+    /// [`std::fs::write`], sin volcado alguno, mientras el journal SÍ se fsyncaba antes del primer
+    /// rename: un corte de energía podía dejar un journal **durable** apuntando a una copia
+    /// **truncada o ausente**, justo la combinación que la recuperación daba por buena.
+    ///
+    /// Además de las copias, registra su **huella** (tamaño + revisión blake3) en el sidecar
+    /// `recovery/<txnId>.digests.json` —hermano del árbol, nunca dentro— para que
+    /// [`Workspace::recover`] pueda verificar cada copia **antes** de escribirla sobre el canónico y
+    /// para que el conjunto "no existía" sobreviva a la pérdida del manifiesto `.absent`.
     ///
     /// Si ya existía una recuperación con el mismo `txnId` (reintento), se limpia antes de
     /// reescribir para que el árbol refleje exactamente el estado actual de los afectados.
     ///
     /// # Errores
     /// - [`WorkspaceError::Io`] si falla la creación del directorio runtime, la copia de un
-    ///   original o la escritura del manifiesto.
+    ///   original o la escritura del manifiesto o del sidecar de huellas.
     pub fn backup_originals(
         &self,
         txn_id: &str,
         affected: &[RelPath],
     ) -> Result<RecoveryDir, WorkspaceError> {
-        let dir = self
-            .root
-            .join(".lodestar")
-            .join("runtime")
-            .join("recovery")
-            .join(recovery_dir_name(txn_id));
+        let dir = self.recovery_root(txn_id);
 
-        // Reintento idempotente: parte de un directorio limpio.
+        // Reintento idempotente: parte de un directorio limpio (y de un sidecar limpio).
         if dir.exists() {
             std::fs::remove_dir_all(&dir)?;
         }
         std::fs::create_dir_all(&dir)?;
+        let digests = self.digests_path(txn_id);
+        if digests.exists() {
+            std::fs::remove_file(&digests)?;
+        }
 
         let mut absent = BTreeSet::new();
+        let mut copies: BTreeMap<String, BackupDigest> = BTreeMap::new();
+        // Directorios cuyos renames hay que persistir al final (una sola pasada de fsync).
+        let mut a_sincronizar: BTreeSet<PathBuf> = BTreeSet::new();
+        a_sincronizar.insert(dir.clone());
+
         for path in affected {
             let original = self.root.join(path.as_str());
             if original.is_file() {
-                // Existe original: copia byte-a-byte, espejando la ruta relativa.
+                // Existe original: copia byte-a-byte DURABLE, espejando la ruta relativa.
                 let target = dir.join(path.as_str());
                 if let Some(parent) = target.parent() {
                     std::fs::create_dir_all(parent)?;
+                    a_sincronizar.insert(parent.to_path_buf());
                 }
-                std::fs::copy(&original, &target)?;
+                let bytes = std::fs::read(&original)?;
+                io::write_bytes_atomic(&target, &bytes)?;
+                copies.insert(path.as_str().to_string(), huella(path, &bytes));
             } else {
                 // No existía: se marca "no existía" (se creará y habrá que borrarlo al revertir).
                 absent.insert(path.clone());
@@ -154,10 +262,68 @@ impl Workspace {
         // `read_absent_manifest` ya trata la ausencia del fichero como conjunto vacío.
         if !absent.is_empty() {
             let manifest: String = absent.iter().map(|p| format!("{}\n", p.as_str())).collect();
-            std::fs::write(dir.join(ABSENT_MANIFEST), manifest)?;
+            io::write_bytes_atomic(&dir.join(ABSENT_MANIFEST), manifest.as_bytes())?;
+        }
+
+        // Sidecar de huellas del lote completo (copias + "no existía"), hermano del árbol.
+        let manifiesto = BackupManifest {
+            txn_id: txn_id.to_string(),
+            copies,
+            absent: absent.iter().map(|p| p.as_str().to_string()).collect(),
+        };
+        let json = serde_json::to_vec_pretty(&manifiesto).map_err(|e| {
+            WorkspaceError::Io(format!(
+                "no se pudo serializar las huellas de las copias: {e}"
+            ))
+        })?;
+        io::write_bytes_atomic(&digests, &json)?;
+
+        // Fsync del árbol de recuperación UNA vez, al terminar: hasta aquí las copias tienen su
+        // contenido volcado (`sync_all`), pero sus NOMBRES podían perderse en una caída. Se sincroniza
+        // también el directorio padre, que es donde vive el sidecar. Después de este punto la
+        // transacción puede avanzar al journal.
+        for d in &a_sincronizar {
+            io::sync_dir(d);
+        }
+        if let Some(padre) = digests.parent() {
+            io::sync_dir(padre);
         }
 
         Ok(RecoveryDir { path: dir, absent })
+    }
+
+    /// Ruta del **sidecar de huellas** de una transacción
+    /// (`.lodestar/runtime/recovery/<txnId>.digests.json`), exista o no.
+    fn digests_path(&self, txn_id: &str) -> PathBuf {
+        self.root
+            .join(".lodestar")
+            .join("runtime")
+            .join("recovery")
+            .join(format!("{}{DIGESTS_SUFFIX}", recovery_dir_name(txn_id)))
+    }
+
+    /// Lee el manifiesto de huellas de `txn_id`: `Ok(None)` si el sidecar no existe (transacción
+    /// respaldada por una versión anterior a E25-H02, o caída antes del backup), `Err` si existe pero
+    /// no se puede leer o interpretar — en ese caso las copias eran verificables por contrato y ya no
+    /// lo son, así que la restauración no puede darse por buena.
+    fn read_backup_manifest(&self, txn_id: &str) -> Result<Option<BackupManifest>, WorkspaceError> {
+        let path = self.digests_path(txn_id);
+        if !path.is_file() {
+            return Ok(None);
+        }
+        let raw = std::fs::read(&path).map_err(|e| {
+            WorkspaceError::RecoveryFailed(format!(
+                "las huellas de las copias de recuperación son ilegibles ({}): {e}",
+                path.display()
+            ))
+        })?;
+        let manifiesto = serde_json::from_slice::<BackupManifest>(&raw).map_err(|e| {
+            WorkspaceError::RecoveryFailed(format!(
+                "las huellas de las copias de recuperación no se pueden interpretar ({}): {e}",
+                path.display()
+            ))
+        })?;
+        Ok(Some(manifiesto))
     }
 }
 
@@ -257,24 +423,29 @@ impl Workspace {
     /// transacción —todo el original íntegro o todo el resultado íntegro—, para cualquier punto de
     /// caída.
     ///
+    /// Un journal cuya recuperación **falla** (copia ausente, ilegible o que no verifica) no encalla
+    /// el workspace (E25-H02): su material se **mueve** a `journal/quarantine/<txnId>/` sin borrar
+    /// nada, la recuperación **sigue** con los demás journals pendientes y el fallo se reporta una
+    /// sola vez con [`WorkspaceError::RecoveryFailed`], nombrando la cuarentena. Al levantarse el
+    /// gate, la siguiente operación ya no encuentra recuperación pendiente y procede.
+    ///
     /// # Errores
-    /// - [`WorkspaceError::Io`] si falla la restauración/limpieza sobre el runtime o el canónico.
+    /// - [`WorkspaceError::RecoveryFailed`] si la recuperación de al menos un journal no se pudo
+    ///   llevar a término (su material queda en cuarentena).
+    /// - [`WorkspaceError::Io`] si falla la propia puesta en cuarentena.
     pub fn recover(&self) -> Result<(), WorkspaceError> {
+        let mut fallos: Vec<String> = Vec::new();
+
         for journal_path in self.pending_journals(None) {
             let header = std::fs::read_to_string(&journal_path)
                 .ok()
                 .and_then(|raw| serde_json::from_str::<JournalHeader>(&raw).ok());
 
-            match header {
+            let (txn_id, restaurar) = match header {
                 // COMPLETAR: el canónico ya es el resultado (todos los renames hechos).
-                Some(h) if h.state == JournalState::Applied => {
-                    self.finish_recovery(&h.txn_id, &journal_path)?;
-                }
+                Some(h) if h.state == JournalState::Applied => (h.txn_id, false),
                 // RESTAURAR el estado anterior (renames parciales).
-                Some(h) => {
-                    self.restore_from_recovery(&h.txn_id)?;
-                    self.finish_recovery(&h.txn_id, &journal_path)?;
-                }
+                Some(h) => (h.txn_id, true),
                 // Journal torn (JSON ilegible/truncado): política defensiva. `write_journal`
                 // persiste atómico (temp+rename), así que un torn es rarísimo; aun así NO se
                 // paniquea. Como los renames del canónico solo ocurren TRAS crear las copias de
@@ -294,54 +465,217 @@ impl Workspace {
                          conservadoramente al estado anterior desde las copias de recuperación",
                         journal_path.display()
                     );
-                    self.restore_from_recovery(&txn_id)?;
-                    self.finish_recovery(&txn_id, &journal_path)?;
+                    (txn_id, true)
                 }
+            };
+
+            // Una transacción a la vez: su fallo no puede abortar el bucle (defecto 3 de E25-H02).
+            let resultado = if restaurar {
+                self.restore_from_recovery(&txn_id)
+                    .and_then(|()| self.finish_recovery(&txn_id, &journal_path))
+            } else {
+                self.finish_recovery(&txn_id, &journal_path)
+            };
+
+            if let Err(causa) = resultado {
+                let cuarentena = self.quarantine_transaction(&txn_id, &journal_path)?;
+                let aviso = format!(
+                    "la transacción {txn_id} no se pudo recuperar ({causa}): su journal y sus copias \
+                     se han MOVIDO íntegros a {} (nada se ha borrado) y el workspace vuelve a ser \
+                     escribible",
+                    cuarentena.display()
+                );
+                eprintln!("lodestar: aviso: {aviso}");
+                fallos.push(aviso);
             }
+        }
+
+        if !fallos.is_empty() {
+            return Err(WorkspaceError::RecoveryFailed(fallos.join(" · ")));
         }
         Ok(())
     }
 
-    /// **RESTAURAR** (E13-H06): devuelve el conocimiento canónico a su estado anterior a la
-    /// transacción `txn_id` usando exclusivamente las copias de recuperación de H04
-    /// (`.lodestar/runtime/recovery/<txnId>/`). Deriva el conjunto afectado del propio árbol de
-    /// recuperación (robusto ante un journal torn):
-    /// 1. cada fichero del árbol (salvo el manifiesto `.absent`) es la copia byte-a-byte de un
-    ///    original que se sobrescribió → se devuelve a su sitio con `io::write_atomic`;
-    /// 2. cada path del manifiesto `.absent` no existía antes → si la transacción lo creó, se borra
-    ///    con `io::delete` (idempotente si no llegó a crearse).
+    /// Mueve a **cuarentena** (`.lodestar/runtime/journal/quarantine/<txnId>/`) el material de una
+    /// transacción cuya recuperación falló (E25-H02) y devuelve la ruta del destino.
     ///
-    /// Si el directorio de recuperación no existe, la caída fue antes del backup de H04 (que precede
-    /// a todo rename), así que el canónico está intacto y no hay nada que restaurar.
+    /// Se **mueve**, no se depura: el journal (con su intención completa), el árbol de copias —
+    /// incluida la que no verificó— y el sidecar de huellas quedan ahí byte a byte, como material
+    /// forense. El journal va **primero**: es el fichero que sostiene el gate de
+    /// [`Workspace::recovery_pending`], así que en cuanto sale, el workspace deja de estar cerrado a
+    /// la escritura.
+    ///
+    /// Nunca sobrescribe una cuarentena previa: si el destino ya existe (misma transacción
+    /// cuarentenada dos veces) se usa el primer nombre libre `<txnId>.2`, `<txnId>.3`…
+    ///
+    /// # Errores
+    /// - [`WorkspaceError::Io`] si falla la creación del destino o alguno de los movimientos.
+    fn quarantine_transaction(
+        &self,
+        txn_id: &str,
+        journal_path: &Path,
+    ) -> Result<PathBuf, WorkspaceError> {
+        let name = recovery_dir_name(txn_id);
+        let base = self.journal_dir().join(QUARANTINE_DIR);
+        std::fs::create_dir_all(&base)?;
+
+        let mut destino = base.join(&name);
+        let mut n = 2;
+        while destino.exists() {
+            destino = base.join(format!("{name}.{n}"));
+            n += 1;
+        }
+        std::fs::create_dir_all(&destino)?;
+
+        // (1) El journal primero: es lo que levanta el gate de recuperación. Y se sincroniza el
+        //     directorio de ORIGEN, no solo el destino: lo que abre el workspace a la escritura es la
+        //     desaparición de `journal/<txnId>.json`, así que esa entrada de directorio tiene que
+        //     estar durable. Sin este fsync, una caída inmediatamente después podía resucitar el
+        //     journal y repetir la cuarentena en `<txnId>.2` (mismo criterio que `seal_window_abort`).
+        if journal_path.exists() {
+            let nombre = journal_path
+                .file_name()
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from(format!("{name}.json")));
+            std::fs::rename(journal_path, destino.join(nombre))?;
+            if let Some(origen) = journal_path.parent() {
+                io::sync_dir(origen);
+            }
+        }
+        // (2) El árbol de copias, íntegro.
+        let recovery = self.recovery_root(txn_id);
+        if recovery.exists() {
+            std::fs::rename(&recovery, destino.join("recovery"))?;
+        }
+        // (3) Y las huellas con las que se iba a verificar.
+        let digests = self.digests_path(txn_id);
+        if digests.exists() {
+            std::fs::rename(&digests, destino.join(format!("{name}{DIGESTS_SUFFIX}")))?;
+        }
+        io::sync_dir(&destino);
+
+        Ok(destino)
+    }
+
+    /// **RESTAURAR** (E13-H06 + E25-H02): devuelve el conocimiento canónico a su estado anterior a la
+    /// transacción `txn_id` usando exclusivamente las copias de recuperación de H04
+    /// (`.lodestar/runtime/recovery/<txnId>/`), **verificándolas antes de escribir**.
+    ///
+    /// El lote se lee del **sidecar de huellas** (`recovery/<txnId>.digests.json`), no del journal —que
+    /// puede estar torn— ni del recorrido del árbol:
+    /// 1. cada `copies[path]` es la copia byte-a-byte de un original que se sobrescribió: se compara su
+    ///    tamaño y su revisión blake3 con lo registrado y, solo si **todas** casan, se devuelven a su
+    ///    sitio con `io::write_atomic` (restauración todo-o-nada: una copia rota no puede dejar el
+    ///    canónico a medio restaurar);
+    /// 2. cada `absent[i]` no existía antes: si la transacción lo creó, se borra con `io::delete`
+    ///    (idempotente si no llegó a crearse).
+    ///
+    /// Una copia ausente, ilegible o que no verifica es un fallo de recuperación
+    /// ([`WorkspaceError::RecoveryFailed`]) y **no** un `.md` que publicar: quien llama la manda a
+    /// cuarentena. Que el conjunto "no existía" venga del sidecar y no del manifiesto `.absent` es lo
+    /// que impide el híbrido «originales restaurados **más** ficheros creados» cuando ese manifiesto no
+    /// llegó a disco. Los ficheros del árbol que el sidecar no declara se ignoran: el lote respaldado
+    /// es el que el sidecar describe, no lo que alguien haya dejado caer dentro del directorio.
+    ///
+    /// Si no hay sidecar (transacción respaldada por una versión anterior a E25-H02), se restaura como
+    /// en v0.3.1, sin verificar. Si además el directorio de recuperación no existe, la caída fue antes
+    /// del backup de H04 (que precede a todo rename), así que el canónico está intacto y no hay nada
+    /// que restaurar.
     fn restore_from_recovery(&self, txn_id: &str) -> Result<(), WorkspaceError> {
-        let recovery_root = self
-            .root
-            .join(".lodestar")
-            .join("runtime")
-            .join("recovery")
-            .join(recovery_dir_name(txn_id));
-        if !recovery_root.exists() {
+        let recovery_root = self.recovery_root(txn_id);
+        let manifiesto = self.read_backup_manifest(txn_id)?;
+
+        let Some(manifiesto) = manifiesto else {
+            // Sin sidecar de huellas: transacción respaldada antes de E25-H02 (o caída antes del
+            // backup). No hay con qué verificar, así que se restaura como en v0.3.1 — nunca peor que
+            // el comportamiento que esta historia endurece.
+            if !recovery_root.exists() {
+                return Ok(());
+            }
+            eprintln!(
+                "lodestar: aviso: las copias de {} no llevan huellas de verificación (transacción \
+                 anterior a v0.4.0): se restauran sin verificar",
+                recovery_root.display()
+            );
+            self.restore_backups_legacy(&recovery_root, &recovery_root)?;
+            for rel in read_absent_manifest(&recovery_root) {
+                io::delete(&self.root, &rel)?;
+            }
             return Ok(());
+        };
+
+        // (1) Verificar TODAS las copias antes de escribir una sola: la restauración es
+        //     todo-o-nada, así que una copia rota no deja el canónico a medio restaurar.
+        let mut a_restaurar: Vec<(RelPath, String)> = Vec::new();
+        for (path, esperada) in &manifiesto.copies {
+            let rel = RelPath::new(path).map_err(|e| {
+                WorkspaceError::RecoveryFailed(format!(
+                    "las huellas registran un path inválido ({path}): {e}"
+                ))
+            })?;
+            let copia = recovery_root.join(path);
+            let bytes = std::fs::read(&copia).map_err(|e| {
+                WorkspaceError::RecoveryFailed(format!(
+                    "la copia de recuperación de {path} no se puede leer ({}): {e}",
+                    copia.display()
+                ))
+            })?;
+            let real = huella(&rel, &bytes);
+            if real.size != esperada.size {
+                return Err(WorkspaceError::RecoveryFailed(format!(
+                    "la copia de recuperación de {path} no verifica: {} bytes en disco frente a los \
+                     {} que se respaldaron ({})",
+                    real.size,
+                    esperada.size,
+                    copia.display()
+                )));
+            }
+            if real.revision != esperada.revision {
+                return Err(WorkspaceError::RecoveryFailed(format!(
+                    "la copia de recuperación de {path} no verifica: su contenido no casa con la \
+                     revisión respaldada ({})",
+                    copia.display()
+                )));
+            }
+            let contenido = String::from_utf8(bytes).map_err(|_| {
+                WorkspaceError::RecoveryFailed(format!(
+                    "la copia de recuperación de {path} no es texto válido ({})",
+                    copia.display()
+                ))
+            })?;
+            a_restaurar.push((rel, contenido));
         }
 
-        // (1) Restaurar cada original respaldado (deshace los renames que sí ocurrieron).
-        self.restore_backups(&recovery_root, &recovery_root)?;
+        // (2) Restaurar cada original respaldado por el único escritor (deshace los renames hechos).
+        for (rel, contenido) in &a_restaurar {
+            io::write_atomic(&self.root, rel, contenido)?;
+        }
 
-        // (2) Borrar los paths marcados "no existía" que la transacción pudo crear.
-        for rel in read_absent_manifest(&recovery_root) {
+        // (3) Borrar los paths que el sidecar marca "no existía" y que la transacción pudo crear.
+        for path in &manifiesto.absent {
+            let rel = RelPath::new(path).map_err(|e| {
+                WorkspaceError::RecoveryFailed(format!(
+                    "las huellas registran un path inválido ({path}): {e}"
+                ))
+            })?;
             io::delete(&self.root, &rel)?;
         }
         Ok(())
     }
 
-    /// Recorre el árbol de recuperación restaurando por el único escritor cada copia de un original
-    /// a su ruta canónica (espejando la ruta relativa bajo `recovery_root`). Salta el manifiesto
-    /// `.absent` (no es una copia). Auxiliar recursivo de [`Workspace::restore_from_recovery`].
-    fn restore_backups(&self, dir: &Path, recovery_root: &Path) -> Result<(), WorkspaceError> {
+    /// Restauración **sin verificación** desde el árbol de recuperación, para transacciones cuyas
+    /// copias se prepararon antes de E25-H02 (sin sidecar de huellas): recorre el árbol y devuelve
+    /// cada copia a su ruta canónica por el único escritor, saltando el manifiesto `.absent`. Es el
+    /// comportamiento exacto de v0.3.1, conservado como camino de migración.
+    fn restore_backups_legacy(
+        &self,
+        dir: &Path,
+        recovery_root: &Path,
+    ) -> Result<(), WorkspaceError> {
         for entry in std::fs::read_dir(dir)? {
             let path = entry?.path();
             if path.is_dir() {
-                self.restore_backups(&path, recovery_root)?;
+                self.restore_backups_legacy(&path, recovery_root)?;
                 continue;
             }
             if path.file_name().and_then(|n| n.to_str()) == Some(ABSENT_MANIFEST) {
@@ -356,7 +690,7 @@ impl Workspace {
                 continue;
             };
             let content = std::fs::read_to_string(&path).map_err(|e| {
-                WorkspaceError::Io(format!(
+                WorkspaceError::RecoveryFailed(format!(
                     "copia de recuperación ilegible {}: {e}",
                     path.display()
                 ))
@@ -367,9 +701,10 @@ impl Workspace {
     }
 
     /// Sella una transacción recuperada (E13-H06): limpia el staging (`.lodestar/runtime/staging/
-    /// <txnId>/`) y las copias de recuperación (`.lodestar/runtime/recovery/<txnId>/`), y **borra el
-    /// fichero de journal** para levantar el gate (tras esto ya no queda ningún journal no-`done`,
-    /// de modo que [`Workspace::recovery_pending`] vuelve a `false` y las escrituras se permiten).
+    /// <txnId>/`) y las copias de recuperación (`.lodestar/runtime/recovery/<txnId>/` + su sidecar de
+    /// huellas), y **borra el fichero de journal** para levantar el gate (tras esto ya no queda ningún
+    /// journal no-`done`, de modo que [`Workspace::recovery_pending`] vuelve a `false` y las
+    /// escrituras se permiten).
     ///
     /// El `txnId` (sin prefijo `changeset:`) nombra por igual el staging, la recuperación y el
     /// journal (convención de E13-H06), así que un mismo nombre saneado localiza los tres.
@@ -381,14 +716,59 @@ impl Workspace {
         if staging.exists() {
             std::fs::remove_dir_all(&staging)?;
         }
-        let recovery = runtime.join("recovery").join(&name);
-        if recovery.exists() {
-            std::fs::remove_dir_all(&recovery)?;
-        }
+        self.discard_recovery_copies(txn_id)?;
         if journal_path.exists() {
             std::fs::remove_file(journal_path)?;
         }
         Ok(())
+    }
+
+    /// Borra el árbol de copias de recuperación de una transacción **y su sidecar de huellas** (los
+    /// dos van siempre juntos: el sidecar sin árbol no describe nada y el árbol sin sidecar no es
+    /// verificable).
+    fn discard_recovery_copies(&self, txn_id: &str) -> Result<(), WorkspaceError> {
+        let recovery = self.recovery_root(txn_id);
+        if recovery.exists() {
+            std::fs::remove_dir_all(&recovery)?;
+        }
+        let digests = self.digests_path(txn_id);
+        if digests.exists() {
+            std::fs::remove_file(&digests)?;
+        }
+        Ok(())
+    }
+
+    /// **Sella el aborto de la ventana de publicación** (E25-H02, enmienda del defecto 5): cierra la
+    /// transacción que acaba de abortar con `WRITE_CONFLICT` por divergencia del canónico en la
+    /// ventana `[T1, T3)` (E25-H01), **bajo el mismo lock** y antes de devolver el error.
+    ///
+    /// Sellar es exacto, no una amnistía: quien llama lo sabe por control de flujo —el aborto ocurre
+    /// **antes** del bucle de renames, así que el canónico no se movió ni un byte— y por tanto no hay
+    /// nada que restaurar. Si el journal y sus copias sobrevivieran, la siguiente operación los
+    /// clasificaría como «renames parciales» y escribiría las copias de T1 **encima** de la edición
+    /// externa que este aborto existe para no pisar (y borraría, por el manifiesto `.absent`, el `.md`
+    /// que el usuario creó dentro de la ventana).
+    ///
+    /// Orden **deliberado**: el fichero de journal primero —es lo que sostiene el gate de
+    /// [`Workspace::recovery_pending`]— y las copias después. Si el proceso muere entre los dos,
+    /// queda un árbol de recuperación **sin** journal: un huérfano legítimo que recoge el GC
+    /// (E24-H06). Al revés quedaría un journal apuntando a copias que ya no están, y la recuperación
+    /// sellaría un estado parcial en silencio.
+    pub(crate) fn seal_window_abort(
+        &self,
+        txn_id: &str,
+        journal_path: &Path,
+    ) -> Result<(), WorkspaceError> {
+        if journal_path.exists() {
+            std::fs::remove_file(journal_path)?;
+        }
+        if let Some(padre) = journal_path.parent() {
+            io::sync_dir(padre);
+        }
+
+        failpoint!(FailPoint::EnMedioDelSelladoDelAborto);
+
+        self.discard_recovery_copies(txn_id)
     }
 
     /// El directorio raíz de las copias de recuperación de una transacción

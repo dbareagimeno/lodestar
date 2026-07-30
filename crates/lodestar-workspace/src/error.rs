@@ -45,6 +45,19 @@ pub enum WorkspaceError {
     /// `WORKSPACE_RECOVERY_REQUIRED`.
     #[error("recuperación pendiente: {0}")]
     WorkspaceRecoveryRequired(String),
+    /// La recuperación de una transacción interrumpida **no se pudo llevar a término** (E25-H02,
+    /// [`crate::Workspace::recover`]): la copia de recuperación de algún path afectado no está, no se
+    /// puede leer o **no verifica** contra el tamaño y el hash blake3 que se registraron al
+    /// respaldarla. Una copia que no verifica no es un original, así que no se escribe **nada** a
+    /// partir de ella.
+    ///
+    /// El material de esa transacción —su write-ahead journal y su árbol de copias— se **mueve** a
+    /// `.lodestar/runtime/journal/quarantine/<txnId>/` (nada se borra: es material forense) y el
+    /// mensaje nombra esa ruta. La recuperación **sigue** con los demás journals pendientes y el
+    /// gate de escritura se levanta: la operación que disparó la recuperación falla una vez con este
+    /// error y la siguiente ya no encuentra recuperación pendiente. Mapea al wire `RECOVERY_FAILED`.
+    #[error("la recuperación no se pudo completar: {0}")]
+    RecoveryFailed(String),
     /// La **entrada** del agente no es interpretable: una consulta `where`/`filter` malformada,
     /// un valor fuera del rango que declara el `inputSchema`… (E24-H10). Mapea al wire
     /// `INVALID_SCHEMA`.
@@ -76,6 +89,7 @@ impl WorkspaceError {
             WorkspaceError::WorkspaceRecoveryRequired(_) => {
                 ErrorCode::WorkspaceRecoveryRequired.as_str()
             }
+            WorkspaceError::RecoveryFailed(_) => ErrorCode::RecoveryFailed.as_str(),
             WorkspaceError::InvalidSchema(_) => ErrorCode::InvalidSchema.as_str(),
         }
     }

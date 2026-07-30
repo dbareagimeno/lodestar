@@ -265,6 +265,28 @@
 #     recuperación transparente de E24-H03 un agente ya no puede encontrarse un workspace que exija
 #     recuperación manual, porque `change_plan` la completa o la deshace antes de planificar.
 
+# E25-H02 (v0.4.0, bloque B de la épica de endurecimiento de escritura): `RECOVERY_FAILED` gana su
+# PRIMER EMISOR real y sale de `codigos_sin_emisor` (eran CINCO filas, ahora CUATRO). El catálogo
+# sigue teniendo 16 códigos: no se añadió ninguno.
+#   - Cuándo se emite: una transacción interrumpida no se puede restaurar porque su copia de
+#     recuperación no está, no se puede leer o **no verifica** contra el tamaño y el hash blake3 que
+#     se registraron al respaldarla (las copias son ahora durables —`sync_all` + fsync del árbol antes
+#     del journal— y verificadas antes de escribir; nada se escribe sobre el canónico a partir de una
+#     copia que no casa).
+#   - Qué pasa entonces: el journal de esa transacción y su árbol de copias se **MUEVEN** íntegros a
+#     `.lodestar/runtime/journal/quarantine/<txnId>/` (nada se borra: es material forense), la
+#     recuperación **sigue** con los demás journals pendientes y el `message` **nombra la ruta** de
+#     cuarentena. Como el journal deja de estar en `journal/<txnId>.json`, el gate de recuperación se
+#     levanta: la SIGUIENTE llamada ya no encuentra recuperación pendiente y procede con normalidad.
+#     Un solo fichero ilegible ya no cierra el workspace a la escritura para siempre.
+#   - Consecuencia declarada (nota de release): «el canónico converge a uno de los dos bordes» es
+#     incondicional **mientras las copias verifiquen**. Con copias corruptas lo garantizado es (a) nada
+#     se escribe desde una copia que no verifica, (b) el material se preserva, (c) el fallo lleva
+#     código propio y (d) el workspace vuelve a ser escribible.
+#   - Riesgo residual declarado: el contenido en cuarentena NO se surface por el wire
+#     (`workspace_status` no gana campo); quien no lea el `message` ni el stderr no sabrá que hay
+#     material forense esperando. Cerrarlo pide un `lodestar recover`, fuera de alcance (decisión E24).
+
 meta:
   fachada: lodestar-mcp (JSON-RPC por stdio; stdout puro, logs a stderr)
   fuente_registro: crates/lodestar-mcp/src/tools.rs        # tools::list()
@@ -535,7 +557,7 @@ tools:
       - { nombre: policy, tipo: object, requerido: false, semantica: "{ requireValidResult?, allowWarnings? } (PlanPolicy, E12-H04); por defecto exige conformidad y permite warnings" }
     retorno: "PlanResult (lodestar_app): { changeSetId, baseWorkspaceRevision, planHash, canApply, expiresAt, normalizedOperations: [NormalizedOperation], risk, semanticDiff, impact: { affectedDocuments, affectedCount }, capturedRevisions: { «path»: «blake3:…» }, diagnosticsBefore, diagnosticsAfter } — json directo, sin envelope. `capturedRevisions` (E21-H02) lleva una entrada por documento de una selección masiva (su DocumentRevision, el snapshot de §Fase 12); vacío {} en la forma-array"
     output_schema: "sí — schemars::schema_for!(PlanResult), vía lodestar_app::schemas::change_plan_schema()"
-    errores: ["REVISION_CONFLICT (workspace o documento cambiado)", "INVALID_SCHEMA (op desconocida o parámetro inválido)", "DOCUMENT_NOT_FOUND (objetivo de normalización inexistente)", "INBOUND_LINKS_EXIST (delete «reject» con entrantes)", "PERMISSION_DENIED (path-traversal)", "INTERNAL_IO_ERROR (carga de config)", "WorkspaceError"]
+    errores: ["REVISION_CONFLICT (workspace o documento cambiado)", "INVALID_SCHEMA (op desconocida o parámetro inválido)", "DOCUMENT_NOT_FOUND (objetivo de normalización inexistente)", "INBOUND_LINKS_EXIST (delete «reject» con entrantes)", "PERMISSION_DENIED (path-traversal)", "RECOVERY_FAILED (E25-H02: la recuperación transparente del paso (0) —E24-H03— no pudo restaurar una transacción interrumpida porque sus copias no verifican; su journal y sus copias quedan en .lodestar/runtime/journal/quarantine/<txnId>/ y el mensaje nombra la ruta; la SIGUIENTE llamada ya no encuentra recuperación pendiente)", "INTERNAL_IO_ERROR (carga de config)", "WorkspaceError"]
     semantica: >-
       Orquesta un plan de cambios SIN escribir (invariante #1; aplicar es change_apply, E13): toda
       la simulación es sobre un DocumentSet en memoria. Acepta DOS formas de wire: la forma-ARRAY
@@ -564,7 +586,7 @@ tools:
       - { nombre: expectedWorkspaceRevision, tipo: string, requerido: false, semantica: "control optimista a nivel de workspace («blake3:…»); si se omite se adopta la revisión actual, si no coincide → REVISION_CONFLICT" }
     retorno: "ApplyResult (lodestar_app): { receiptId, applied, previousWorkspaceRevision, workspaceRevision, changedPaths, semanticDiff, validation: { valid, errors, warnings } } — json directo, sin envelope"
     output_schema: "sí — schemars::schema_for!(ApplyResult), vía lodestar_app::schemas::change_apply_schema()"
-    errores: ["PLAN_EXPIRED (plan caducado)", "PLAN_STALE (plan ausente/ilegible, o el workspace cambió bajo él ⇒ planHash recomputado difiere)", "REVISION_CONFLICT (expectedWorkspaceRevision no coincide, o la base cambió entre plan y apply)", "PERMISSION_DENIED (un path afectado cae fuera de writableRoots / bajo un referenceRoot)", "INVALID_RESULT (gate diferencial de E20-H04: el resultado INTRODUCE errores que el canónico no tenía con rejectNewErrors, o deja errores con allowExistingErrors:false)", "WORKSPACE_RECOVERY_REQUIRED (recuperación pendiente no completada)", "INTERNAL_IO_ERROR (carga de config, IO de la transacción)", "WorkspaceError"]
+    errores: ["PLAN_EXPIRED (plan caducado)", "PLAN_STALE (plan ausente/ilegible, o el workspace cambió bajo él ⇒ planHash recomputado difiere)", "REVISION_CONFLICT (expectedWorkspaceRevision no coincide, o la base cambió entre plan y apply)", "PERMISSION_DENIED (un path afectado cae fuera de writableRoots / bajo un referenceRoot)", "INVALID_RESULT (gate diferencial de E20-H04: el resultado INTRODUCE errores que el canónico no tenía con rejectNewErrors, o deja errores con allowExistingErrors:false)", "WORKSPACE_RECOVERY_REQUIRED (recuperación pendiente no completada)", "RECOVERY_FAILED (E25-H02: una transacción interrumpida no se pudo restaurar porque sus copias no verifican; su journal y sus copias quedan en .lodestar/runtime/journal/quarantine/<txnId>/ y el mensaje nombra la ruta; la SIGUIENTE llamada ya no encuentra recuperación pendiente)", "INTERNAL_IO_ERROR (carga de config, IO de la transacción)", "WorkspaceError"]
     semantica: >-
       Aplica un plan vigente por el ÚNICO ESCRITOR (invariante #5) con la mecánica de publicación
       recuperable de E13 (invariante «nunca un estado parcial silencioso»). Pasos de plan: carga el
@@ -585,6 +607,13 @@ tools:
       revisión resultante: el workspace «queda en» ella. revert = change_revert (E13-H09).
       La auto-regen de index/tags dentro de la transacción (E13-H11) se RETIRÓ en E15-H02: el
       apply publica EXACTAMENTE el resultado del change set, sin añadir índices ni tags.
+      E25-H02: las copias de recuperación se escriben con el protocolo DURABLE del único escritor
+      (contenido volcado + fsync del árbol antes del journal) y llevan la huella (tamaño + blake3) con
+      la que la recuperación las verifica antes de restaurar. Y si la publicación aborta con
+      WRITE_CONFLICT por divergencia de la ventana `[T1, T3)` (E25-H01), ese aborto **sella su propia
+      transacción** bajo el mismo lock —journal primero, copias después—: con cero renames no hay nada
+      que restaurar, así que no deja recuperación pendiente que la siguiente llamada pudiera aplicar
+      encima de la edición externa.
 
   - nombre: change_revert
     fuente: crates/lodestar-mcp/src/tools.rs
@@ -595,7 +624,7 @@ tools:
       - { nombre: expectedWorkspaceRevision, tipo: string, requerido: false, semantica: "control optimista a nivel de workspace («blake3:…»); si se omite se adopta la revisión actual, si no coincide → REVISION_CONFLICT" }
     retorno: "RevertResult (lodestar_app): { reverted, receiptId, previousWorkspaceRevision, workspaceRevision, changedPaths, semanticDiff } — json directo, sin envelope. Es INVERSO al apply: previousWorkspaceRevision == resultRevision del apply revertido; workspaceRevision == previousRevision del apply (estado restaurado)"
     output_schema: "sí — schemars::schema_for!(RevertResult), vía lodestar_app::schemas::change_revert_schema()"
-    errores: ["PLAN_EXPIRED (receipt no disponible: caducado/purgado por retención — reuso documentado del catálogo congelado de ErrorCode, no hay variante «receipt no encontrado»)", "REVISION_CONFLICT (expectedWorkspaceRevision no coincide con la revisión actual)", "WRITE_CONFLICT (un fichero afectado —o cualquier otro— cambió tras el apply: la revisión actual ya no es la resultRevision del receipt)", "PERMISSION_DENIED (un path afectado ya no es escribible)", "INTERNAL_IO_ERROR (carga de config, IO de la transacción, copias de recuperación ausentes)", "WorkspaceError"]
+    errores: ["PLAN_EXPIRED (receipt no disponible: caducado/purgado por retención — reuso documentado del catálogo congelado de ErrorCode, no hay variante «receipt no encontrado»)", "REVISION_CONFLICT (expectedWorkspaceRevision no coincide con la revisión actual)", "WRITE_CONFLICT (un fichero afectado —o cualquier otro— cambió tras el apply: la revisión actual ya no es la resultRevision del receipt)", "PERMISSION_DENIED (un path afectado ya no es escribible)", "RECOVERY_FAILED (E25-H02, mismo caso: la reversión también recupera antes de revertir, así que hereda el fallo y la cuarentena)", "INTERNAL_IO_ERROR (carga de config, IO de la transacción, copias de recuperación ausentes)", "WorkspaceError"]
     semantica: >-
       Revierte una transacción RECIENTE y no alterada por el ÚNICO ESCRITOR (invariante #5),
       devolviendo el conocimiento canónico al estado ANTERIOR al apply desde sus copias de
@@ -650,7 +679,7 @@ migracion:
 # ---------------------------------------------------------------------------
 codigos_sin_emisor:
   nota: >-
-    De las 16 filas congeladas de `ErrorCode` (§19.3), estas CINCO no se emiten desde ningún camino
+    De las 16 filas congeladas de `ErrorCode` (§19.3), estas CUATRO no se emiten desde ningún camino
     del producto. Se registra aquí para que la próxima auditoría no lo redescubra, y sobre todo para
     NO inventarles un emisor: un código sin camino real es información sobre el catálogo, no un hueco
     que rellenar. Verificado por grep sobre el árbol y por test donde el camino sí existía
@@ -658,9 +687,12 @@ codigos_sin_emisor:
     E23-H13: eran CUATRO en la auditoría de E23-H09/H24, que se dejó `RELATION_CONSTRAINT_VIOLATION`
     fuera pese a estar en la misma situación exacta que `RESULT_TOO_LARGE` (mapeo vivo en
     `lodestar-app`, variante de `CoreError` que nadie construye).
+    E25-H02: eran CINCO y `RECOVERY_FAILED` SALIÓ de la lista — ganó su primer emisor real (una
+    recuperación cuyas copias no verifican, con el material en cuarentena), cubierto por
+    `lodestar-app/tests/error.rs::recovery_failed_llega_a_la_fachada` y por
+    `lodestar-workspace/tests/transactions.rs::durabilidad_de_la_recuperacion`.
   filas:
     - { codigo: WORKSPACE_NOT_FOUND, motivo: "un `--root` inexistente sale por `std::process::exit(3)` con texto plano desde `main.rs`, nunca por el envelope. Fuera de `types.rs` solo aparece en una aserción de round-trip serde. El comportamiento REAL (exit 3, stderr que nombra la ruta, sin panic, stdout vacío) está fijado por `mcp.rs::root_inexistente_falla_legible_sin_panic`" }
     - { codigo: RESULT_TOO_LARGE, motivo: "mapeado desde `CoreError::SizeGuardExceeded`, pero esa variante NO se construye en ninguna parte del árbol. El presupuesto de payload se respeta por diseño (knowledge_search nunca devuelve cuerpos, hay límites de página), no por este error" }
     - { codigo: RELATION_CONSTRAINT_VIOLATION, motivo: "mapeado desde `CoreError::RelationConstraintViolation` (`lodestar-app::error_code`), pero esa variante NO se construye en ninguna parte del árbol: su único productor validaba el target contra un `RelationDef`, y `core::schema` se retiró en E20-H03 (modelo universal §20.10 — una relación es un enlace Markdown y nada más). Un enlace roto lo reporta hoy `LINK-TARGET-MISSING`, no este código" }
-    - { codigo: RECOVERY_FAILED, motivo: "cero apariciones fuera de `types.rs`, ni siquiera un mapeo. La recuperación fallida se surface a hoy como `INTERNAL_IO_ERROR` o `WORKSPACE_RECOVERY_REQUIRED`" }
     - { codigo: AMBIGUOUS_REFERENCE, motivo: "RESERVADO por diseño (`lodestar-app/src/lib.rs`): hoy un DocumentRef solo admite `path`, que es exacto por construcción. Se activará si alguna vez existe resolución por `id` o por título" }
