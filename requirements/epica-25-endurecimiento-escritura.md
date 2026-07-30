@@ -435,40 +435,86 @@ mirar en medio. Cuando la duda sea «¿esto sigue siendo cierto aquí?», la res
 - **Frontera (mcp.yml)**: no (cambia cuándo se emiten `PLAN_EXPIRED`/`PLAN_STALE`, no el catálogo ni
   la forma).
 
-### E25-H05 — Borrar es durable, y revertir re-verifica bajo el lock
+### E25-H05 — Borrar es durable, y revertir re-verifica bajo el lock y deja recibo
 
-- **Objetivo**: cerrar los dos huecos que quedan por donde un cambio publicado puede deshacerse solo
-  (un borrado que reaparece) o pisar a otro (un revert que sobrescribe una edición ajena).
-- **Defectos (S6 + S7) y escenarios que los reproducen hoy**:
-  - **(a) Borrado no durable**: `io::delete` (`crates/lodestar-workspace/src/io.rs:46-52`) hace
+- **Objetivo**: cerrar los tres huecos que quedan por donde un cambio publicado puede deshacerse solo
+  (un borrado que reaparece), pisar a otro (un revert que sobrescribe una edición ajena) o
+  desaparecer del registro (una reversión publicada sin recibo).
+- **Defectos (S6 + S7 + el espejo de S5) y escenarios que los reproducen hoy**:
+  - **(a) Borrado no durable**: `io::delete` (`crates/lodestar-workspace/src/io.rs:72-78`) hace
     `remove_file` y nada más — sin fsync del directorio padre. Un corte de energía después de que el
     journal quede `applied` puede dejar el unlink sin persistir: al reabrir, el documento **reaparece**
-    y el recibo afirma que se borró. Además, el fsync de directorio de `write_atomic` es
-    **best-effort silencioso** (`io.rs:35-41`, `let _ = dir.sync_all()`): un fallo de durabilidad del
-    rename no se entera nadie. Es la mitad que falta de la durabilidad que `write_atomic` sí cuida
-    para el contenido (`io.rs:29`, `sync_all` antes del rename).
+    y el recibo afirma que se borró. Además, el fsync de directorio es **best-effort silencioso**:
+    E25-H02 lo centralizó en `io::sync_dir` (`io.rs:62-69`, `let _ = handle.sync_all()`), lo cual es
+    una mejora —hay **un** sitio que arreglar en vez de varios— pero el `let _` sigue ahí, y ahora lo
+    comparten `write_atomic` (`io.rs:25-27`) y las cinco llamadas de `recovery.rs` (`:287`, `:290`,
+    `:563`, `:576`, `:842`). Es la mitad que falta de la durabilidad que el contenido sí tiene
+    (`write_bytes_atomic`, `io.rs:50`, `sync_all` antes del rename).
   - **(b) Revert sin re-verificación bajo el lock**: `change_revert_uncounted` compara la revisión
-    actual con `receipt.result_revision` en `crates/lodestar-app/src/lib.rs:1788-1801`, **antes** de
-    tomar el lock — el lock lo toma `revert_transaction` en `recovery.rs:442`. En la ventana entre
+    actual con `receipt.result_revision` en `crates/lodestar-app/src/lib.rs:1845-1857`, **antes** de
+    tomar el lock — el lock lo toma `revert_transaction` en `recovery.rs:898`. En la ventana entre
     las dos, otro escritor puede tocar un `.md` afectado: la reversión lo sobrescribe con la copia
     respaldada, en silencio. La simetría con el apply está rota: `apply_transaction` **sí** vuelve a
-    comprobar la base bajo el lock (`reverify_base_revision`, `transaction.rs:147`) y `revert_transaction`
+    comprobar la base bajo el lock (`reverify_base_revision`, `transaction.rs:195`) y `revert_transaction`
     **no tiene equivalente**.
+  - **(c) La reversión conserva la forma exacta de S5** *(hallazgo **MAYOR-2** del veredicto del juez
+    ciego de **E25-H04**)*: E25-H04 cerró «publicar implica recibo» **solo en el camino del apply**.
+    En el espejo, `write_receipt(&revert_receipt)` sale por `?`
+    (`crates/lodestar-app/src/lib.rs:1880-1882`) **después** de que `revert_transaction` haya
+    publicado la inversa (`:1863-1866`), y `revert_transaction` (`recovery.rs:892`) **no persiste
+    ningún registro durable antes de su punto de no retorno**: no llama a `write_pending_receipt`
+    (`receipts.rs:225`), que es lo que `apply_transaction` sí hace justo después del journal
+    (`transaction.rs:231`), así que no hay recibo pendiente que `finish_recovery_completada`
+    (`recovery.rs:769`) pueda promover por la vía COMPLETAR. Un `SIGKILL` o un `ENOSPC` entre el
+    último rename de la inversa (`recovery.rs:960`) y su recibo devuelve **`Err` sobre algo
+    publicado** y deja la inversa **sin recibo**: el agente cree que no se revirtió, el canónico dice
+    lo contrario, y como el recibo es el criterio de «vivo» del GC (`journal/ ∪ receipts/`), el árbol
+    `recovery/<txnId>-revert/` queda huérfano y se purga — con lo que **deshacer el undo** se vuelve
+    imposible para siempre. E25-H04 arregló ya la mitad barata de este camino (el `gc_receipts` del
+    revert es best-effort, `app/lib.rs:1885-1887`); esta historia arregla la que importa.
 - **Referencias**: `ARCHITECTURE.md §19.5` (único escritor, `§11.3` reversión) ·
-  `crates/lodestar-workspace/src/io.rs` (`write_atomic:18`, `delete:46`) ·
-  `crates/lodestar-workspace/src/recovery.rs` (`revert_transaction:436`, pasos (2)-(9)) ·
+  `crates/lodestar-workspace/src/io.rs` (`write_atomic:18`, `write_bytes_atomic:43`, `sync_dir:62`,
+  `delete:72`) · `crates/lodestar-workspace/src/recovery.rs` (`revert_transaction:892`, pasos
+  (2)-(11); `finish_recovery:735`, `finish_recovery_completada:769`, `journal_state_of:409`) ·
+  `crates/lodestar-workspace/src/receipts.rs` (`write_pending_receipt:225`,
+  `pending_receipt_efectivo:259`, `promote_pending_receipt:282`, `discard_pending_receipt:308`) ·
+  `crates/lodestar-workspace/src/transaction.rs:231` (el llamador que ya existe, en el apply) ·
   `crates/lodestar-workspace/src/lib.rs` (`reverify_base_revision:203`) ·
-  `crates/lodestar-app/src/lib.rs` (`change_revert_uncounted:1771`).
+  `crates/lodestar-app/src/lib.rs` (`change_revert_uncounted:1828`) · **E25-H04** (la mecánica que
+  esta historia extiende) y su veredicto de juez ciego (MAYOR-2).
 - **Alcance**:
-  - `io::delete` fsynca el directorio padre tras el unlink, con el mismo `#[cfg(unix)]` que ya usa
-    `write_atomic`.
-  - El fsync de directorio deja de ser silencioso en los dos sitios: un fallo se propaga como
-    `WorkspaceError::Io`. En plataformas donde abrir un directorio no es posible el comportamiento no
-    cambia (el bloque sigue siendo `#[cfg(unix)]`).
+  - `io::delete` fsynca el directorio padre tras el unlink, reusando `io::sync_dir` (`io.rs:62`).
+  - El fsync de directorio deja de ser silencioso: `sync_dir` pasa a poder fallar y un fallo se
+    propaga como `WorkspaceError::Io`. Al ser hoy un **único chokepoint** (E25-H02), el cambio se hace
+    una vez y ripplea a sus llamadores —`write_atomic` y las cinco llamadas de `recovery.rs`—, que
+    deben propagar en vez de ignorar. En plataformas donde abrir un directorio no es posible el
+    comportamiento no cambia (sigue siendo no-op fuera de Unix).
   - `revert_transaction` recibe la revisión que la fachada observó y la **re-verifica bajo el lock**,
     después de la recuperación del paso (2) y antes de la primera escritura; si difiere →
     `WriteConflict`. Se reusa `reverify_base_revision` (`lib.rs:203`), no se escribe una segunda
     comprobación (invariante #3).
+  - **La reversión persiste su recibo pendiente con su journal** (defecto (c)), con la **misma
+    mecánica y las mismas garantías** que E25-H04 dio al apply, **reusando la infraestructura que ya
+    existe** —`write_pending_receipt`/`promote_pending_receipt`/`discard_pending_receipt`
+    (`receipts.rs:225`/`:282`/`:308`) y la efectividad decidida por el estado `applied` del journal
+    vía `journal_state_of` (`recovery.rs:409`, `pending_receipt_efectivo:259`)—, **no una segunda
+    copia** de la mecánica (invariante #3, «una sola verdad computada»). Concretamente:
+    - `revert_transaction` escribe el recibo pendiente de la inversa **justo después de crear su
+      journal** y **antes** del primer rename: sus dos revisiones ya se conocen ahí (`previous` del
+      paso (6) y la `result_rev` que estampa el journal), y el `semanticDiff` lo presta el recibo
+      original, igual que hoy lo copia `app/lib.rs:1878`. Va **después** del journal por la misma
+      razón que en el apply: el registro es efectivo solo mientras su journal declare `applied`, así
+      que su vida queda contenida en la del journal y no hace falta una tercera señal que caducar.
+    - El **sellado** de la reversión lo promueve a recibo definitivo, y la vía **COMPLETAR** de la
+      recuperación (`finish_recovery_completada:769`) lo promueve igual — sin código nuevo: basta que
+      el journal de la inversa siga la misma convención de nombre, que ya sigue.
+    - **Ningún paso posterior a la publicación de la inversa convierte el resultado en `Err`**: el
+      `write_receipt` de la fachada (`app/lib.rs:1880-1882`) deja de ser el punto de no retorno y
+      pasa a ser una promoción best-effort con aviso por stderr, como ya es el `gc_receipts` de al
+      lado (`:1885-1887`).
+    - Con ello, la propiedad de E25-H04 —«si el canónico cambió, existe el recibo que lo deshace»—
+      deja de tener una mitad sin cubrir: vale para el apply **y** para el revert, que es la
+      operación cuya razón de existir es precisamente ser deshacible.
 - **Fuera de alcance, con motivo**: pasar la reversión por `validate_staging`. El estado al que
   revierte es un estado que **ya estuvo publicado y validado**; someterlo al gate diferencial de
   E20-H04 podría bloquear un *undo* legítimo, que es justo la operación que nunca debe estar
@@ -484,13 +530,25 @@ mirar en medio. Cuando la duda sea «¿esto sigue siendo cierto aquí?», la res
   - **Dado** un directorio cuyo fsync falla, **Cuando** se escribe o se borra un `.md`, **Entonces**
     la operación devuelve `WorkspaceError::Io` en vez de seguir como si nada →
     `fallo_de_fsync_de_directorio_es_visible`.
-  - **Estructural (checklist binario)**: ni `io::delete` ni `io::write_atomic` contienen ya un
-    `let _ =` sobre una operación de durabilidad — revisión de diff sobre `io.rs`.
-  - **No regresión**: `reference_roots_inmutable`, los tests de reversión de
+  - **Dado** un failpoint armado **entre la publicación de la inversa y su recibo**, **Cuando** se
+    llama a `change_revert`, **Entonces** la inversa está publicada **y** existe su recibo →
+    `revertir_implica_recibo` (hoy devuelve `Err` sobre algo ya publicado y sin recibo).
+  - **Dado** un `change_revert` que falla **antes** del primer rename de la inversa (base
+    re-verificada que no casa, permiso denegado, copias ausentes), **Cuando** termina, **Entonces**
+    **no** queda recibo de la inversa → `un_revert_no_publicado_no_deja_recibo` (control anti-vacuo:
+    el arreglo no puede consistir en escribir recibos siempre, que es justo lo que
+    `pending_receipt_efectivo` existe para impedir).
+  - **Estructural (checklist binario)**: ni `io::delete` ni `io::sync_dir` contienen ya un `let _ =`
+    sobre una operación de durabilidad — revisión de diff sobre `io.rs`.
+  - **No regresión**: `reference_roots_inmutable`, `publicar_implica_recibo` y
+    `un_apply_no_publicado_no_deja_recibo` (E25-H04), los tests de reversión de
     `crates/lodestar-app/tests/escritura.rs` y el benchmark `§17` siguen verdes.
-- **Dependencias**: **E25-H04**.
+- **Dependencias**: **E25-H04** (y de forma dura para el defecto (c): esta historia **extiende** su
+  mecánica de recibo pendiente al camino espejo; sin ella no hay infraestructura que reusar).
 - **Pruebas**: `crates/lodestar-workspace/tests/transactions.rs` ·
-  `crates/lodestar-app/tests/escritura.rs`.
+  `crates/lodestar-app/tests/escritura.rs` (los dos criterios de recibo usan el seam de failpoints
+  que E25-H04 propagó a `lodestar-app`, así que corren en el step de CI con
+  `--features test-failpoints` — el mismo que aquella historia amplió).
 - **Frontera (mcp.yml)**: no.
 
 ---
