@@ -164,6 +164,27 @@ pub enum PuntoDeGancho {
     /// producción). El mecanismo que protege el material de la transacción viva —GC bajo el lock o
     /// marca durable de «en curso»— lo elige el implementador.
     TrasElBackup,
+    /// Dentro de la ventana de la **reversión** (E25-H05): entre la comprobación de
+    /// `receipt.result_revision` que hace la fachada (`App::change_revert`, `lib.rs:1845-1857`) y la
+    /// **primera escritura** de `Workspace::revert_transaction` (el `backup_originals` de su paso 7).
+    ///
+    /// Es el espejo de [`PuntoDeGancho::AntesDePublicar`] para el camino que deshace: la fachada mira
+    /// la revisión **sin el lock** —lo toma `revert_transaction` después (`recovery.rs:898`)—, así que
+    /// en ese hueco otro escritor puede tocar un `.md` afectado y la reversión lo sobrescribe con la
+    /// copia respaldada, en silencio. El gancho del test hace de ese «otro escritor» y deja que la
+    /// reversión **continúe**, que es lo que [`FailPoint`] no sabe hacer.
+    ///
+    /// **Dónde debe dispararlo el implementador**: dentro de `revert_transaction`, en cualquier punto
+    /// entre su entrada y su primera escritura, y **antes** de la re-verificación de la base bajo el
+    /// lock (`reverify_base_revision`, `lib.rs:203`) — que es justamente lo que tiene que cazar la
+    /// edición. Colocarlo *después* de la re-verificación, o después del primer rename, es
+    /// observablemente distinto y los tests de E25-H05 lo distinguen (esperan `WriteConflict` y el
+    /// canónico intacto con la edición ajena encima).
+    ///
+    /// STUB de la fase roja de E25-H05: la variante existe para que el test compile; **nadie la
+    /// dispara todavía**. El implementador añade el `ejecutar_gancho` cfg-gateado (dos líneas, sin
+    /// lógica de producción), igual que E25-H01/H03 hicieron en `transaction.rs`.
+    AntesDeRestaurar,
 }
 
 /// Gancho armado (el punto que lo dispara y el cierre a ejecutar), o nada.

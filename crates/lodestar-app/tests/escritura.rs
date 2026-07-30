@@ -1227,3 +1227,508 @@ mod recibo_tras_el_punto_de_no_retorno {
         }
     }
 }
+
+// ===========================================================================
+// E25-H05 — Revertir re-verifica bajo el lock y deja recibo
+// (`requirements/epica-25-endurecimiento-escritura.md`, bloque B). Fase ROJA.
+//
+// LOS DOS DEFECTOS QUE SE PRUEBAN AQUÍ (el tercero, el fsync del directorio, es un límite
+// estructural del nivel de integración y vive como test unitario en
+// `crates/lodestar-workspace/src/io.rs`, módulo `durabilidad_del_directorio`)
+//
+// **(b) Revert sin re-verificación bajo el lock.** `change_revert_uncounted` compara la revisión
+// actual con `receipt.result_revision` en `crates/lodestar-app/src/lib.rs:1845-1857` — **antes** de
+// tomar el lock, que lo toma `revert_transaction` (`recovery.rs:898`). En esa ventana otro escritor
+// puede tocar un `.md` afectado y la reversión lo sobrescribe con la copia respaldada, en silencio.
+// La simetría con el apply está rota: `apply_transaction` sí vuelve a comprobar la base bajo el lock
+// (`reverify_base_revision`, `transaction.rs:195`) y `revert_transaction` no tiene equivalente.
+//
+// **(c) La reversión conserva la forma exacta de S5** (hallazgo MAYOR-2 del juez ciego de E25-H04).
+// E25-H04 cerró «publicar implica recibo» solo en el camino del apply. En el espejo,
+// `write_receipt(&revert_receipt)` sale por `?` (`lib.rs:1880-1882`) **después** de que
+// `revert_transaction` haya publicado la inversa (`:1863-1866`), y `revert_transaction`
+// (`recovery.rs:892`) no llama a `write_pending_receipt` (`receipts.rs:225`) — así que no hay
+// registro durable que la vía COMPLETAR (`finish_recovery_completada:769`) pueda promover. Un
+// `SIGKILL` o un `ENOSPC` entre el último rename de la inversa y su recibo devuelve `Err` sobre algo
+// PUBLICADO y sin recibo: el agente cree que no se revirtió, el canónico dice lo contrario, y como el
+// recibo es el criterio de «vivo» del GC (`journal/ ∪ receipts/`), el árbol `recovery/<txnId>-revert/`
+// queda huérfano y se purga — deshacer el *undo* se vuelve imposible para siempre.
+//
+// LOS SEAMS (declarados en la salida de la fase roja; aquí solo se USAN)
+//
+// 1. `PuntoDeGancho::AntesDeRestaurar` — **variante nueva** (stub añadido a
+//    `crates/lodestar-workspace/src/failpoints.rs`, sin lógica). El implementador la dispara con un
+//    `ejecutar_gancho` cfg-gateado dentro de `revert_transaction`, entre su entrada y su primera
+//    escritura y **antes** de la re-verificación bajo el lock — es el espejo de
+//    `AntesDePublicar` (E25-H01) para el camino que deshace. Como el gancho **continúa**, reproduce
+//    lo que un `FailPoint` no sabe: la edición ajena ocurre *y el flujo sigue*.
+// 2. `FailPoint::TrasLaTransaccionAntesDelRecibo` — **la que ya existe** (E25-H04), consultada
+//    también desde `App::change_revert`, entre el retorno de `revert_transaction` y el
+//    `write_receipt` de la inversa. Mismo `failpoints::disparado(..)` y mismo autodesarme, que es lo
+//    que permite comprobar que el punto **se ejerció** y que el escenario no pasó vacuamente.
+// 3. `FailPoint::TrasJournalPrepared` — **la que ya existe** (E24-H13), ejercida también en
+//    `revert_transaction` justo después de su journal (y del registro durable del recibo que la
+//    historia le añade) y **antes** del primer rename de la inversa. Es lo que hace fuerte al control
+//    anti-vacuo: sin ella, «no dejar recibo» se cumpliría trivialmente en escenarios que ni siquiera
+//    llegan a escribir el registro.
+//
+// ROJO ESPERADO HOY
+// - `revert_con_edicion_externa_en_la_ventana_da_write_conflict`: ROJO. Nadie dispara el gancho, así
+//   que el testigo del test no se enciende y el escenario ni siquiera se reproduce (y si se
+//   reprodujera, hoy la reversión pisa la edición ajena en silencio y devuelve `Ok`).
+// - `revert_sin_interferencia_sigue_funcionando`: **control anti-vacuo, PASA YA HOY** y tiene que
+//   seguir pasando. Es la mitad que impide que el arreglo consista en rechazar reversiones.
+// - `revertir_implica_recibo`: ROJO. Nadie consulta el punto de la fachada en el camino del revert.
+// - `un_revert_no_publicado_no_deja_recibo`: ROJO en (a) y (c) por falta de los seams; (b) —copias
+//   ausentes— pasa ya hoy y es el control de que el arreglo no puede consistir en escribir recibos
+//   siempre.
+// ===========================================================================
+
+mod reversion_re_verificada {
+    use super::*;
+    use lodestar_app::{Profile, ReceiptSummary};
+    use lodestar_core::types::{ChangeSetId, ReceiptId};
+    use lodestar_workspace::transaction_id;
+
+    /// El cuerpo que publica el plan de estos tests (una sola ruta afectada: `alfa.md`).
+    const CUERPO_NUEVO: &str = "# Resumen\n\ncuerpo del plan\n";
+
+    /// Lo que escribe «el otro escritor» sobre `alfa.md` dentro de la ventana de la reversión.
+    const EDICION_EXTERNA: &str = "---\ntype: Nota\ntitle: Alfa\ndescription: Primer documento\n---\n\n# Resumen\n\nEDICIÓN EXTERNA\n";
+
+    /// Un workspace con una transacción **ya publicada**: el punto de partida de todo `change_revert`.
+    struct Aplicada {
+        app: App,
+        cs: ChangeSetId,
+        /// El recibo del apply, el que se le pasa a `change_revert`.
+        receipt_id: ReceiptId,
+        /// Bytes de `alfa.md` ANTES del apply: el estado exacto al que tiene que volver la reversión.
+        original: String,
+        /// Bytes de `alfa.md` DESPUÉS del apply: lo que la reversión deshace.
+        publicado: String,
+        /// Revisión del workspace antes del apply (== `resultRevision` de la inversa).
+        revision_original: String,
+        /// Revisión del workspace tras el apply (== `previousRevision` de la inversa).
+        revision_publicada: String,
+    }
+
+    /// Semilla + plan + apply, con las precondiciones aseveradas: sin una publicación real no hay
+    /// nada que revertir y los escenarios de esta historia no significan nada.
+    fn app_aplicada(root: &Path) -> Aplicada {
+        semilla(root);
+        let original = std::fs::read_to_string(root.join("alfa.md"))
+            .expect("la semilla debe haber escrito alfa.md");
+
+        let app = App::open(root).expect("el workspace temporal debe abrir");
+        let ops = json!([
+            { "op": "replace_body", "path": "alfa.md", "body": CUERPO_NUEVO },
+        ]);
+        let plan = app
+            .change_plan(None, &ops, policy_permisiva())
+            .expect("planificar una modificación normal debe funcionar");
+        let aplicado = app
+            .change_apply(&plan.change_set_id, None)
+            .expect("aplicar el plan debe funcionar: es la precondición de todo revert");
+
+        let publicado =
+            std::fs::read_to_string(root.join("alfa.md")).expect("alfa.md debe existir");
+        assert!(
+            publicado.contains("cuerpo del plan") && publicado != original,
+            "precondición: el apply tiene que haber publicado de verdad; alfa.md = {publicado:?}"
+        );
+        Aplicada {
+            app,
+            cs: plan.change_set_id,
+            receipt_id: aplicado.receipt_id,
+            original,
+            publicado,
+            revision_original: aplicado.previous_workspace_revision.0,
+            revision_publicada: aplicado.workspace_revision.0,
+        }
+    }
+
+    /// El id con el que la fachada nombra el recibo y el material de la transacción **inversa**
+    /// (`<txnId>-revert`, `lib.rs:1861`). Se deriva del `changeSetId` porque los escenarios de fallo
+    /// son justamente aquellos en los que no hay `RevertResult` del que leerlo.
+    ///
+    /// La convención de nombre no es cosmética: es lo que hace que el journal, las copias, el
+    /// registro durable y el recibo de la inversa se localicen todos con el mismo `txnId` (y lo que
+    /// permite que la vía COMPLETAR de la recuperación promueva su recibo sin código nuevo).
+    fn id_de_la_inversa(cs: &ChangeSetId) -> ReceiptId {
+        ReceiptId(format!("{}-revert", transaction_id(cs)))
+    }
+
+    /// El recibo `id` tal y como lo ve un agente: `workspace_status.receipts` (E23-H11). No se mira
+    /// el disco a propósito: lo que la historia exige es un recibo **utilizable**, no un fichero en
+    /// un sitio concreto.
+    fn recibo_por_id(app: &App, id: &ReceiptId) -> Option<ReceiptSummary> {
+        app.workspace_status(Profile::Standard)
+            .expect("workspace_status debe responder")
+            .receipts
+            .into_iter()
+            .find(|r| r.receipt_id == *id)
+    }
+
+    /// La revisión actual del workspace, por la misma fachada.
+    fn revision_actual(app: &App) -> String {
+        app.workspace_status(Profile::Standard)
+            .expect("workspace_status debe responder")
+            .workspace_revision
+            .0
+    }
+
+    /// Los bytes de `alfa.md` en disco.
+    fn alfa(root: &Path) -> String {
+        std::fs::read_to_string(root.join("alfa.md")).expect("alfa.md debe existir")
+    }
+
+    /// **Criterio 2** (`revert_sin_interferencia_sigue_funcionando`) — **Dado** un `change_revert`
+    /// sin interferencia, **Cuando** se ejecuta, **Entonces** restaura exactamente igual que en
+    /// v0.3.1.
+    ///
+    /// Control anti-vacuo del criterio 1: el arreglo es *re-verificar*, no *rechazar*. Una
+    /// implementación que devolviera `WRITE_CONFLICT` de más —por ejemplo comparando contra una
+    /// revisión mal calculada, o computándola después de tocar el canónico— rompería este test, que
+    /// fija el camino feliz completo: bytes restaurados, revisiones intercambiadas, rutas y recibo de
+    /// la inversa.
+    #[test]
+    fn revert_sin_interferencia_sigue_funcionando() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let a = app_aplicada(root);
+
+        let salida = a
+            .app
+            .change_revert(&a.receipt_id, None)
+            .unwrap_or_else(|e| {
+                panic!(
+                "un `change_revert` sin interferencia tiene que seguir revirtiendo: devolvió {} \
+                 ({e:?})",
+                e.as_str()
+            )
+            });
+
+        assert!(salida.reverted, "se declara revertida: {salida:?}");
+        assert_eq!(
+            alfa(root),
+            a.original,
+            "revertir devuelve `alfa.md` a sus bytes ORIGINALES (frontmatter incluido)"
+        );
+        assert_eq!(
+            salida.previous_workspace_revision.0, a.revision_publicada,
+            "la `previousWorkspaceRevision` de la inversa es la `resultRevision` del apply"
+        );
+        assert_eq!(
+            salida.workspace_revision.0, a.revision_original,
+            "y su `workspaceRevision` es la `previousRevision` del apply: el estado restaurado"
+        );
+        assert_eq!(
+            revision_actual(&a.app),
+            a.revision_original,
+            "que además es la revisión REAL del workspace tras revertir"
+        );
+        assert_eq!(
+            salida
+                .changed_paths
+                .iter()
+                .map(|p| p.as_str())
+                .collect::<Vec<_>>(),
+            vec!["alfa.md"],
+            "y las rutas restauradas son exactamente las que tocó el apply"
+        );
+        assert_eq!(
+            salida.receipt_id,
+            id_de_la_inversa(&a.cs),
+            "el recibo de la inversa conserva la convención de nombre `<txnId>-revert`, que es lo \
+             que localiza su journal, sus copias y su registro durable con el mismo id"
+        );
+        assert!(
+            recibo_por_id(&a.app, &id_de_la_inversa(&a.cs)).is_some(),
+            "y queda persistido y visible para un agente (`workspace_status.receipts`)"
+        );
+    }
+
+    #[cfg(feature = "test-failpoints")]
+    mod con_seams {
+        use super::*;
+        use lodestar_workspace::failpoints::{self, FailPoint, PuntoDeGancho};
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+
+        /// Arma el gancho de la ventana de la reversión: escribe [`EDICION_EXTERNA`] sobre `alfa.md`
+        /// —haciendo de «otro escritor»— y enciende un testigo, de modo que el test pueda distinguir
+        /// «el escenario se reprodujo y el motor lo dejó pasar» de «nadie ejerció el gancho».
+        fn armar_edicion_externa(root: &Path) -> Arc<AtomicBool> {
+            let testigo = Arc::new(AtomicBool::new(false));
+            let ruta = root.join("alfa.md");
+            let marca = Arc::clone(&testigo);
+            failpoints::armar_gancho(PuntoDeGancho::AntesDeRestaurar, move || {
+                std::fs::write(&ruta, EDICION_EXTERNA)
+                    .expect("el gancho debe poder editar alfa.md");
+                marca.store(true, Ordering::SeqCst);
+            });
+            testigo
+        }
+
+        /// Asevera que el gancho se ejerció de verdad. Sin esto el escenario no se reproduce y el
+        /// test pasaría vacuamente (o fallaría por una razón que no es la del criterio).
+        fn asevera_gancho_ejercido(testigo: &Arc<AtomicBool>) {
+            assert!(
+                testigo.load(Ordering::SeqCst),
+                "el gancho `PuntoDeGancho::AntesDeRestaurar` no se ejerció: nadie lo dispara en el \
+                 camino de `Workspace::revert_transaction`. Sin él, la edición externa de la ventana \
+                 `[comprobación de la fachada, primera escritura de la inversa)` no ocurre y este \
+                 escenario no prueba nada — ver el rustdoc de la variante para dónde debe vivir el \
+                 `ejecutar_gancho`"
+            );
+        }
+
+        /// **Criterio 1** (`revert_con_edicion_externa_en_la_ventana_da_write_conflict`) — **Dado**
+        /// un `change_revert` en curso, **Cuando** otro escritor modifica un `.md` afectado entre la
+        /// comprobación de la fachada y la toma del lock, **Entonces** la reversión falla con
+        /// `WRITE_CONFLICT` y **no** escribe nada.
+        ///
+        /// Hoy la pisa en silencio: la fachada mira `receipt.result_revision` sin el lock y nadie
+        /// vuelve a mirar después de tomarlo, así que la copia respaldada se escribe encima de la
+        /// edición ajena y `change_revert` devuelve `Ok`. El arreglo re-verifica bajo el lock
+        /// **reusando** `reverify_base_revision` (invariante #3: una sola verdad, no una segunda
+        /// comprobación escrita a mano).
+        #[test]
+        fn revert_con_edicion_externa_en_la_ventana_da_write_conflict() {
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path();
+            let a = app_aplicada(root);
+
+            let testigo = armar_edicion_externa(root);
+            let resultado = a.app.change_revert(&a.receipt_id, None);
+            failpoints::desarmar_ganchos();
+
+            asevera_gancho_ejercido(&testigo);
+
+            let err = match resultado {
+                Err(e) => e,
+                Ok(salida) => panic!(
+                    "revertir sobre un canónico que cambió dentro de la ventana tiene que \
+                     rechazarse con WRITE_CONFLICT, pero la fachada informó de una reversión: \
+                     reverted={}, changedPaths={:?}. El `.md` afectado quedó: {:?}",
+                    salida.reverted,
+                    salida.changed_paths,
+                    alfa(root)
+                ),
+            };
+            assert_eq!(
+                err,
+                ErrorCode::WriteConflict,
+                "el conflicto de la ventana del revert debe llegar a la fachada con su código \
+                 estable WRITE_CONFLICT (terminal: el agente vuelve a mirar y decide); era: {} \
+                 ({err:?})",
+                err.as_str()
+            );
+            assert_eq!(
+                err.as_str(),
+                "WRITE_CONFLICT",
+                "y con esa cadena exacta en el wire"
+            );
+
+            // Y NO escribió nada: la edición ajena sigue intacta y la revisión no se movió.
+            assert_eq!(
+                alfa(root),
+                EDICION_EXTERNA,
+                "una reversión rechazada por WRITE_CONFLICT no puede haber pisado la edición de otro \
+                 escritor con la copia respaldada: ese cambio no está respaldado en ningún sitio y se \
+                 pierde para siempre"
+            );
+            assert!(
+                recibo_por_id(&a.app, &id_de_la_inversa(&a.cs)).is_none(),
+                "ni puede haber dejado recibo de una inversa que no se publicó"
+            );
+        }
+
+        /// Arma `fp`, ejecuta el `change_revert` y comprueba que el punto **se ejerció**:
+        /// `failpoints::disparado` autodesarma al dispararse, así que si sigue armado después es que
+        /// nadie lo consultó en ese camino.
+        fn revierte_cayendo_en(
+            app: &App,
+            receipt_id: &ReceiptId,
+            fp: FailPoint,
+            donde: &str,
+        ) -> Result<(), ErrorCode> {
+            failpoints::armar(fp);
+            let resultado = app.change_revert(receipt_id, None).map(|_| ());
+            let seguia_armado = failpoints::disparado(fp);
+            failpoints::desarmar();
+            assert!(
+                !seguia_armado,
+                "el punto de caída {fp:?} no se ejerció: nadie lo consulta {donde}. Sin eso el \
+                 escenario de esta historia no se reproduce y el test pasaría vacuamente"
+            );
+            resultado
+        }
+
+        /// **Criterio 4** (`revertir_implica_recibo`) — **Dado** un failpoint armado **entre la
+        /// publicación de la inversa y su recibo**, **Cuando** se llama a `change_revert`,
+        /// **Entonces** la inversa está publicada **y** existe su recibo.
+        ///
+        /// Hoy devuelve `Err` sobre algo ya publicado y sin recibo: `write_receipt` sale por `?`
+        /// (`lib.rs:1880-1882`) después de que `revert_transaction` haya restaurado el canónico, y
+        /// `revert_transaction` no persiste ningún registro durable antes de su punto de no retorno.
+        /// El arreglo no puede consistir en escribir el recibo *después* —el proceso puede no llegar
+        /// ahí—, sino en persistirlo con el journal de la inversa y promoverlo al sellar, con la
+        /// misma mecánica que E25-H04 dio al apply (`write_pending_receipt`/`promote_pending_receipt`,
+        /// efectividad decidida por el estado `applied` del journal).
+        #[test]
+        fn revertir_implica_recibo() {
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path();
+            let a = app_aplicada(root);
+
+            let resultado = revierte_cayendo_en(
+                &a.app,
+                &a.receipt_id,
+                FailPoint::TrasLaTransaccionAntesDelRecibo,
+                "en el camino de `App::change_revert`, entre el retorno de `revert_transaction` y el \
+                 `write_receipt` de la inversa",
+            );
+
+            // (1) La inversa está PUBLICADA: el canónico ya volvió al estado anterior al apply.
+            assert_eq!(
+                alfa(root),
+                a.original,
+                "precondición del escenario: el punto de caída es POSTERIOR a la publicación de la \
+                 inversa, así que el canónico tiene que estar ya restaurado; si no, el test no está \
+                 mirando la ventana de esta historia"
+            );
+
+            // (2) …luego su recibo tiene que existir, sea cual sea el veredicto que la fachada
+            //     devuelva por este punto artificial.
+            let inversa = id_de_la_inversa(&a.cs);
+            let recibo = recibo_por_id(&a.app, &inversa).unwrap_or_else(|| {
+                panic!(
+                    "la inversa quedó PUBLICADA y sin recibo: el agente cree que no se revirtió, el \
+                     canónico dice lo contrario, y como el recibo es el criterio de «vivo» del GC \
+                     (`journal/ ∪ receipts/`) el árbol `recovery/{}/` queda huérfano y se purga — \
+                     deshacer el *undo* se vuelve imposible para siempre. change_revert devolvió: \
+                     {resultado:?}",
+                    inversa.0
+                )
+            });
+
+            // (3) Y tiene que ser COHERENTE, no un registro decorativo.
+            assert_eq!(
+                recibo.result_revision.0,
+                revision_actual(&a.app),
+                "el recibo de la inversa declara como `resultRevision` la revisión que dejó la \
+                 reversión (la que se re-verifica antes de volver a tocar nada)"
+            );
+            assert_eq!(
+                recibo.changed_path_count, 1,
+                "y las rutas que tocó: la reversión afecta exactamente a `alfa.md`"
+            );
+        }
+
+        /// **Criterio 5** (`un_revert_no_publicado_no_deja_recibo`) — **Dado** un `change_revert` que
+        /// falla **antes** del primer rename de la inversa, **Cuando** termina, **Entonces** **no**
+        /// queda recibo de la inversa.
+        ///
+        /// Control anti-vacuo: el arreglo no puede consistir en escribir recibos siempre, que es
+        /// justo lo que `pending_receipt_efectivo` (`receipts.rs:259`) existe para impedir. Los tres
+        /// escenarios cubren las tres formas de no publicar:
+        ///
+        /// - **(a)** la base re-verificada que no casa (el `WRITE_CONFLICT` del criterio 1). Un
+        ///   recibo suyo haría que un revert posterior escribiera las copias respaldadas **encima**
+        ///   de la edición externa que este rechazo existe para no pisar.
+        /// - **(b)** copias de recuperación ausentes: falla antes de tocar nada (pasa ya hoy).
+        /// - **(c)** caída con el journal de la inversa `prepared` y **cero** renames — el instante
+        ///   en el que el registro durable del recibo YA existe. Es el escenario que da fuerza al
+        ///   control: obliga a que la efectividad del registro la decida el estado del journal, no su
+        ///   mera presencia.
+        #[test]
+        fn un_revert_no_publicado_no_deja_recibo() {
+            // (a) WRITE_CONFLICT de la ventana.
+            {
+                let dir = tempfile::tempdir().unwrap();
+                let root = dir.path();
+                let a = app_aplicada(root);
+
+                let testigo = armar_edicion_externa(root);
+                let resultado = a.app.change_revert(&a.receipt_id, None).map(|_| ());
+                failpoints::desarmar_ganchos();
+                asevera_gancho_ejercido(&testigo);
+
+                assert_eq!(
+                    resultado.err(),
+                    Some(ErrorCode::WriteConflict),
+                    "precondición (criterio 1): la base re-verificada bajo el lock ya no casa, así \
+                     que la reversión aborta antes del primer rename"
+                );
+                assert_eq!(
+                    alfa(root),
+                    EDICION_EXTERNA,
+                    "y no publicó nada: la edición ajena sigue en pie"
+                );
+                assert!(
+                    recibo_por_id(&a.app, &id_de_la_inversa(&a.cs)).is_none(),
+                    "una reversión que NO publicó no puede dejar recibo: un revert posterior con él \
+                     escribiría las copias respaldadas encima de la edición externa"
+                );
+            }
+
+            // (b) Copias de recuperación ausentes (transacción ya no reversible).
+            {
+                let dir = tempfile::tempdir().unwrap();
+                let root = dir.path();
+                let a = app_aplicada(root);
+
+                let recovery = root.join(".lodestar").join("runtime").join("recovery");
+                std::fs::remove_dir_all(&recovery)
+                    .expect("el apply tiene que haber dejado su árbol de recuperación");
+
+                let err = a
+                    .app
+                    .change_revert(&a.receipt_id, None)
+                    .map(|_| ())
+                    .expect_err("sin copias de recuperación no se puede revertir");
+                assert_eq!(
+                    alfa(root),
+                    a.publicado,
+                    "precondición: el rechazo ocurre antes de tocar el canónico (devolvió {})",
+                    err.as_str()
+                );
+                assert!(
+                    recibo_por_id(&a.app, &id_de_la_inversa(&a.cs)).is_none(),
+                    "ni deja recibo de una inversa que no llegó a existir"
+                );
+            }
+
+            // (c) Caída con el journal de la inversa `prepared` y cero renames.
+            {
+                let dir = tempfile::tempdir().unwrap();
+                let root = dir.path();
+                let a = app_aplicada(root);
+
+                let err = revierte_cayendo_en(
+                    &a.app,
+                    &a.receipt_id,
+                    FailPoint::TrasJournalPrepared,
+                    "en `Workspace::revert_transaction`, tras crear el journal de la inversa (y su \
+                     registro durable de recibo) y ANTES del primer rename",
+                )
+                .expect_err("el failpoint aborta la reversión antes del primer rename");
+                assert_eq!(
+                    alfa(root),
+                    a.publicado,
+                    "precondición: la caída fue ANTES del primer rename, así que el canónico no se \
+                     movió ni un byte (el revert devolvió {})",
+                    err.as_str()
+                );
+                assert!(
+                    recibo_por_id(&a.app, &id_de_la_inversa(&a.cs)).is_none(),
+                    "el registro durable del recibo de la inversa ya está escrito en este punto, \
+                     pero su journal declara `prepared`: no es efectivo, así que ni se lista ni se \
+                     carga. Si lo fuera, un revert posterior restauraría copias de un estado que \
+                     nunca se sustituyó"
+                );
+            }
+        }
+    }
+}

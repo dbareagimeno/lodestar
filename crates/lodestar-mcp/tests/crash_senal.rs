@@ -540,3 +540,175 @@ fn crash_tras_publicar_deja_transaccion_reversible() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// E25-H05 — Revertir también implica recibo, también cuando el proceso muere
+// (`requirements/epica-25-endurecimiento-escritura.md`, bloque B, defecto (c)). Fase ROJA.
+//
+// El test de arriba cubre el camino del apply. Este cubre **el espejo**, que es el hallazgo MAYOR-2
+// del juez ciego de E25-H04: `revert_transaction` (`recovery.rs:892`) no escribe ningún registro
+// durable antes de su punto de no retorno, y el `write_receipt` de la inversa sale por `?` en la
+// fachada (`crates/lodestar-app/src/lib.rs:1880-1882`) **después** de que el canónico ya haya vuelto
+// atrás. Un `SIGKILL` entre el último rename de la inversa y su recibo deja el conocimiento
+// restaurado y **sin registro** de que eso ocurrió: como el recibo es el criterio de «vivo» del GC
+// (`journal/ ∪ receipts/`), el árbol `recovery/<txnId>-revert/` queda huérfano y se purga.
+//
+// LA PROPIEDAD QUE FIJA EL TEST (mecanismo-agnóstica, y por eso vale para un crash real)
+//
+//   si tras el `SIGKILL` y la recuperación el canónico volvió al borde ORIGINAL (la inversa se
+//   completó), entonces existe el recibo de la inversa — el registro de que el *undo* ocurrió.
+//
+// EL DISPARADOR es el mismo que el del test de arriba y por la misma razón: el **estado durable del
+// journal**, sondeado desde fuera. Durante la reversión el único journal en `journal/` es el de la
+// inversa (el del apply se selló al terminar), así que `applied` significa aquí «último rename de la
+// inversa hecho y anotado, sellado pendiente»: exactamente la ventana del defecto. Es observación de
+// disco desde otro proceso, no un seam — el binario que muere es el del repo, sin features de test.
+//
+// ROJO ESPERADO HOY: la reversión se completa (por la vía COMPLETAR de la recuperación) y no hay
+// recibo de la inversa por ninguna parte, así que `workspace_status.receipts` no la lista y la
+// primera aserción del criterio falla.
+// ---------------------------------------------------------------------------
+
+/// Repeticiones del escenario de reversión. El disparador es determinista (estado del journal), así
+/// que solo cubren el jitter del sondeo; cada una arranca dos servidores y publica 61 `.md`, de modo
+/// que subirlas cuesta CI sin comprar garantía.
+const REPETICIONES_REVERT: usize = 3;
+
+/// **E25-H05** · criterio del crash — **Dado** un `SIGKILL` real entre la publicación de la inversa
+/// y su recibo, **Cuando** se reabre y se recupera, **Entonces** la reversión completada tiene su
+/// recibo.
+#[test]
+fn crash_durante_revert_deja_inversa_reversible() {
+    let mut en_la_ventana = 0usize;
+    let mut restaurados = 0usize;
+    let mut sin_recibo = 0usize;
+
+    for i in 0..REPETICIONES_REVERT {
+        let dir = tempfile::tempdir().unwrap();
+        construye(dir.path());
+        let original = instantanea(dir.path());
+
+        let mut s = Sesion::abrir(dir.path());
+        let plan = s.tool("change_plan", ops_del_escenario());
+        let cs = plan["changeSetId"]
+            .as_str()
+            .expect("changeSetId")
+            .to_string();
+        let txn = txn_id_de(&cs).to_string();
+        let id_inversa = format!("{txn}-revert");
+
+        // Precondición: el apply publica de verdad (61 `.md` tocados) y devuelve su recibo.
+        let aplicado = s.tool(
+            "change_apply",
+            serde_json::json!({"changeSetId": cs.clone()}),
+        );
+        let receipt_id = aplicado["receiptId"]
+            .as_str()
+            .unwrap_or_else(|| panic!("change_apply debe devolver receiptId: {aplicado}"))
+            .to_string();
+        let publicado = instantanea(dir.path());
+        assert!(
+            publicado.contains_key("notas/hub.md") && !publicado.contains_key("hub.md"),
+            "repetición {i}: precondición, el apply tiene que haber publicado el movimiento"
+        );
+
+        // Se lanza el revert SIN leer la respuesta y se sondea el journal de la INVERSA desde fuera:
+        // en cuanto declara `applied` —último rename hecho y anotado, sellado aún no— llega el
+        // `SIGKILL`.
+        s.envia(
+            "tools/call",
+            serde_json::json!({"name": "change_revert", "arguments": {"receiptId": receipt_id}}),
+        );
+        let t0 = std::time::Instant::now();
+        while t0.elapsed() < LIMITE_SONDEO
+            && estado_del_journal(dir.path()).as_deref() != Some("applied")
+        {
+            std::thread::sleep(std::time::Duration::from_micros(100));
+        }
+        s.matar();
+
+        // Instrumentación: ¿se acertó la ventana? (no es la aserción; esa se hace por MCP).
+        let journal_al_morir = estado_del_journal(dir.path());
+        let recibo_al_morir = hay_recibo_en_disco(dir.path(), &id_inversa);
+        if journal_al_morir.as_deref() == Some("applied") {
+            en_la_ventana += 1;
+            if !recibo_al_morir {
+                sin_recibo += 1;
+            }
+        }
+        eprintln!(
+            "E25-H05 (repetición {i}): al morir revirtiendo → journal={journal_al_morir:?}, \
+             recibo de la inversa={recibo_al_morir}"
+        );
+
+        // Se reabre y se deja que el motor recupere, SIN tocar el canónico (`change_plan` dispara la
+        // recuperación y no publica nada).
+        let mut s2 = Sesion::abrir(dir.path());
+        s2.envia(
+            "initialize",
+            serde_json::json!({"protocolVersion": "2025-06-18", "capabilities": {}}),
+        );
+        let _ = s2.lee();
+        let _ = s2.tool(
+            "change_plan",
+            serde_json::json!({
+                "operations": [{"op": "create", "path": "testigo.md", "body": "# Testigo\n"}],
+                "policy": {"requireValidResult": false, "allowWarnings": true}
+            }),
+        );
+
+        // ¿A qué borde convergió la INVERSA?
+        let tras_recuperar = instantanea(dir.path());
+        if tras_recuperar != original {
+            assert_eq!(
+                tras_recuperar.keys().collect::<Vec<_>>(),
+                publicado.keys().collect::<Vec<_>>(),
+                "repetición {i}: si la reversión no se completó, la recuperación tiene que haber \
+                 devuelto el canónico al borde POST-APPLY; jamás a un estado parcial"
+            );
+            s2.cerrar();
+            continue;
+        }
+        restaurados += 1;
+
+        // (1) EXISTE EL RECIBO DE LA INVERSA, y se encuentra por donde lo busca un agente que perdió
+        //     el `receiptId` (`workspace_status.receipts`, E23-H11).
+        let estado = s2.tool("workspace_status", serde_json::json!({}));
+        let recibos = estado["receipts"].as_array().cloned().unwrap_or_default();
+        let ids: Vec<&str> = recibos
+            .iter()
+            .filter_map(|r| r["receiptId"].as_str())
+            .collect();
+        assert!(
+            ids.contains(&id_inversa.as_str()),
+            "repetición {i}: el canónico volvió al borde ORIGINAL tras el SIGKILL —la reversión se \
+             completó— y no hay recibo «{id_inversa}» ({} recibo(s): {ids:?}). Sin él, el GC ve el \
+             árbol `recovery/{id_inversa}/` como basura y lo purga: deshacer el *undo* deja de ser \
+             posible, y el agente que preguntó por el estado no tiene forma de saber que su reversión \
+             ocurrió. Al morir: journal={journal_al_morir:?}, recibo={recibo_al_morir}",
+            recibos.len()
+        );
+
+        s2.cerrar();
+    }
+
+    // Controles anti-vacuos del ARNÉS (no del criterio).
+    assert!(
+        en_la_ventana > 0,
+        "el arnés perdió su punto de mira: en {REPETICIONES_REVERT} repeticiones ningún `SIGKILL` \
+         cayó con el journal de la inversa en `applied` (último rename hecho, sellado pendiente), que \
+         es la ventana del criterio. Si la reversión ya no pasa de forma observable por ese estado, \
+         re-apunta el disparador"
+    );
+    assert!(
+        restaurados > 0,
+        "ninguna repetición dejó el canónico en el borde ORIGINAL: la propiedad del test («si la \
+         inversa se completó, existe su recibo») no se ha ejercido ni una vez"
+    );
+    if sin_recibo == 0 {
+        eprintln!(
+            "AVISO (E25-H05): en las {en_la_ventana} muertes dentro de la ventana el recibo de la \
+             inversa ya estaba en disco. Si esto ocurre ANTES del arreglo, el disparador llega tarde"
+        );
+    }
+}

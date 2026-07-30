@@ -4266,3 +4266,23 @@ mod gc_y_transacciones_vivas {
         );
     }
 }
+
+// ===========================================================================
+// E25-H05 — dónde viven sus tests (nota para la próxima auditoría)
+//
+// La historia lista este fichero entre sus «Pruebas», pero ninguno de sus criterios se puede fijar
+// aquí sin atarlo a una firma que la propia historia va a cambiar o a un módulo que no es visible:
+//
+// - **Ventana del revert y recibo de la inversa** (criterios 1, 2, 4 y 5) →
+//   `crates/lodestar-app/tests/escritura.rs`, módulo `reversion_re_verificada`. La ventana que
+//   describen empieza en la FACHADA (`App::change_revert` mira `receipt.result_revision` **antes**
+//   de que `revert_transaction` tome el lock), así que solo se reproduce entera desde ahí; y
+//   `revert_transaction` gana en esta historia un parámetro (la revisión observada), de modo que un
+//   test que lo llamara directamente obligaría al implementador a tocar los tests del autor.
+// - **Crash real durante la reversión** → `crates/lodestar-mcp/tests/crash_senal.rs`
+//   (`crash_durante_revert_deja_inversa_reversible`), donde ya vive el arnés de `SIGKILL`.
+// - **Fsync de directorio visible** (criterio 3) → `crates/lodestar-workspace/src/io.rs`, módulo
+//   unitario `durabilidad_del_directorio`: `mod io` es privado y la única inyección portable del
+//   fallo (un directorio que no se puede abrir) es incompatible con el descubrimiento, que necesita
+//   el mismo bit de lectura. Está declarado como límite estructural en la fase roja.
+// ===========================================================================
