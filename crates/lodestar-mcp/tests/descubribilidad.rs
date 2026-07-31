@@ -1351,3 +1351,209 @@ fn move_default_explicito() {
 
     drop(s);
 }
+
+// ===========================================================================
+// E26-H09 — El catálogo es DIRECCIONABLE (propiedad de round-trip)
+// ===========================================================================
+//
+// `metadata_inspect{mode:"catalog"}` es LA tool de descubribilidad: la que un agente llama sobre una
+// base que no conoce para saber qué campos existen. Su utilidad depende por completo de que los
+// `name` que emite se puedan **usar** — pasarlos a `mode:"field"` para ver el detalle, y a
+// `knowledge_search{where}` para encontrar los documentos. Hoy los emite `ParsedFrontmatter::walk`
+// tal cual, así que sobre un frontmatter con una clave `graph:` anuncia `graph.backlinks`, un texto
+// que:
+//   · en `where`/`has` significa el GRAFO (E24-H07/H08), no la clave del usuario;
+//   · en `where` ni siquiera parsea si la subclave no es una propiedad válida del namespace
+//     (`graph.nota` → error);
+//   · y, tras E26-H09, tampoco es inspeccionable.
+// O sea: la tool que existe para hacer descubrible una base devuelve nombres no direccionables.
+//
+// Este test es la PROPIEDAD, no un caso: recorre TODOS los `name` del catálogo y exige que los tres
+// caminos coincidan en el campo. Un arreglo que solo contemplara `graph.backlinks` no pasaría.
+//
+// Fuera de la propiedad, declarado: una clave con **punto literal** (`"sonar.projectKey"` como
+// clave única) no es direccionable y no puede serlo dentro del alcance de esta historia — `walk` la
+// emite como un `FieldPath` de un solo segmento cuyo `Display` es indistinguible del anidado
+// `sonar → projectKey`, y desambiguarla exigiría una sintaxis de escape en el lenguaje de consulta,
+// que la historia no abre. Por eso el fixture no la incluye: la propiedad sería infalsable.
+
+/// Workspace cuya metadata colisiona con los dos namespaces reservados (`graph:`, `document:`) y
+/// contiene además, a propósito, campos de todas las formas que el catálogo sabe emitir: mapa
+/// intermedio, hoja anidada, lista, `null` explícito y un `graph` que **no** es primer segmento
+/// (`meta.graph.x`, ya direccionable tal cual).
+///
+/// `graph.backlinks: 7` es discriminante: los tres documentos están aislados, así que el grafo real
+/// tiene 0 backlinks y ninguna respuesta que venga del grafo puede pasar por una del frontmatter.
+fn workspace_colisiones() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    escribe(
+        dir.path(),
+        "alfa.md",
+        concat!(
+            "---\n",
+            "status: draft\n",
+            "tags:\n  - rust\n  - mcp\n",
+            "owner:\n  name: Ana\n",
+            "graph:\n  backlinks: 7\n  nota: manual\n",
+            "document:\n  path: falso.md\n",
+            "meta:\n  graph:\n    x: 1\n",
+            "nula: null\n",
+            "---\n\n# Alfa\n\ncuerpo.\n"
+        ),
+    );
+    escribe(
+        dir.path(),
+        "bravo.md",
+        "---\nstatus: accepted\n---\n\n# Bravo\n\ncuerpo.\n",
+    );
+    escribe(dir.path(), "charlie.md", "# Charlie\n\nsin frontmatter.\n");
+    dir
+}
+
+/// **E26-H09** · Criterio `el_catalogo_es_direccionable`:
+/// **Dado** cualquier `name` que devuelva `mode:"catalog"`, **Cuando** se le pasa a `mode:"field"` y
+/// a `knowledge_search{where}`, **Entonces** los tres coinciden en el campo.
+///
+/// Las tres patas se cotejan por su medida común, la **presencia**: el `presentIn` del catálogo, el
+/// `presentIn` de la inspección y el nº de documentos que devuelve `where: "has(<name>)"` tienen que
+/// ser el mismo número para cada `name`. Se usa `has(...)` —y no `= <valor>`— porque es la única
+/// forma que aplica a TODOS los campos (un mapa o una lista no se comparan por igualdad con un
+/// escalar); la pata de igualdad con valor se verifica aparte, sobre la clave en colisión, que es
+/// donde el defecto muerde.
+///
+/// Hoy falla en los nombres del namespace: `has(graph.backlinks)` es trivialmente cierto para TODO
+/// documento (es una propiedad calculada, `has_respeta_los_namespaces` en `consulta.rs`) → 3 ≠ 1, y
+/// `has(graph.nota)`/`has(graph)` ni siquiera parsean → la búsqueda falla.
+#[test]
+fn el_catalogo_es_direccionable() {
+    let dir = workspace_colisiones();
+    let mut s = Sesion::abrir(dir.path());
+
+    let catalogo = s.tool("metadata_inspect", json!({"mode": "catalog"}));
+    let fields = catalogo["fields"]
+        .as_array()
+        .unwrap_or_else(|| panic!("el catálogo devuelve `fields` (array): {catalogo}"))
+        .clone();
+    assert!(
+        fields.len() >= 12,
+        "el fixture debe producir un catálogo rico (≥ 12 campos) o la propiedad sería vacua: \
+         {catalogo}"
+    );
+
+    for entrada in &fields {
+        let name = entrada["name"]
+            .as_str()
+            .unwrap_or_else(|| panic!("cada entrada del catálogo lleva `name` (string): {entrada}"))
+            .to_string();
+        let present_in = entrada["presentIn"].as_u64().unwrap_or_else(|| {
+            panic!("cada entrada del catálogo lleva `presentIn` (entero): {entrada}")
+        });
+
+        // (1) El nombre anunciado se INSPECCIONA tal cual, y describe el mismo campo.
+        let insp = s.tool_cruda(
+            "metadata_inspect",
+            json!({"mode": "field", "field": name.clone()}),
+        );
+        assert!(
+            insp["isError"] != json!(true),
+            "el catálogo anuncia «{name}», así que `mode:\"field\"` con ese mismo texto tiene que \
+             funcionar: un nombre que la propia tool no acepta no es descubrible.\nError: {}",
+            insp["content"][0]["text"]
+        );
+        let insp = &insp["structuredContent"];
+        assert_eq!(
+            insp["field"].as_str(),
+            Some(name.as_str()),
+            "…y la inspección debe ecoar el MISMO texto (round-trip estable): {insp}"
+        );
+        assert_eq!(
+            insp["presentIn"].as_u64(),
+            Some(present_in),
+            "…y describir el mismo campo que el catálogo (mismo `presentIn`) para «{name}»: {insp}"
+        );
+
+        // (2) El nombre anunciado se CONSULTA tal cual, y encuentra esos mismos documentos.
+        let busq = s.tool_cruda(
+            "knowledge_search",
+            json!({"text": "", "where": format!("has({name})")}),
+        );
+        assert!(
+            busq["isError"] != json!(true),
+            "…y `where: \"has({name})\"` tiene que ser una consulta legal: el catálogo no puede \
+             anunciar un nombre que el lenguaje rechaza.\nError: {}",
+            busq["content"][0]["text"]
+        );
+        let hits = busq["structuredContent"]["results"]
+            .as_array()
+            .unwrap_or_else(|| panic!("knowledge_search devuelve `results`: {busq}"))
+            .len() as u64;
+        assert_eq!(
+            hits, present_in,
+            "…y encontrar exactamente los `presentIn` documentos que el catálogo anuncia para \
+             «{name}»: si el texto se resolviera contra otro campo (el GRAFO, p. ej.), los números \
+             divergirían. Resultados: {}",
+            busq["structuredContent"]["results"]
+        );
+    }
+
+    let nombres: BTreeSet<String> = fields
+        .iter()
+        .filter_map(|f| f["name"].as_str().map(str::to_string))
+        .collect();
+
+    // La colisión tiene que estar EJERCITADA: sin esta guarda, un catálogo que dejara de anunciar
+    // las claves problemáticas pasaría el bucle de arriba con las manos limpias.
+    for anclado in [
+        "frontmatter.graph",
+        "frontmatter.graph.backlinks",
+        "frontmatter.graph.nota",
+        "frontmatter.document.path",
+    ] {
+        assert!(
+            nombres.contains(anclado),
+            "la clave del usuario que colisiona con un namespace reservado se anuncia ANCLADA \
+             («{anclado}»), que es su única forma direccionable: {nombres:?}"
+        );
+    }
+    for desnudo in ["graph", "graph.backlinks", "graph.nota", "document.path"] {
+        assert!(
+            !nombres.contains(desnudo),
+            "…y no en su forma desnuda («{desnudo}»), que en el resto de la superficie significa \
+             otra cosa: {nombres:?}"
+        );
+    }
+    // Control anti-vacuo: solo cambian de texto las claves en colisión. Anclarlo todo también
+    // superaría el round-trip, pero rompería el contrato de wire de cualquier cliente de v0.4.0.
+    for intacto in ["status", "tags", "owner.name", "meta.graph.x", "nula"] {
+        assert!(
+            nombres.contains(intacto),
+            "«{intacto}» ya era direccionable tal cual: su nombre no cambia (la consecuencia \
+             declarada de la historia es que cambian los nombres EN COLISIÓN, no todos): \
+             {nombres:?}"
+        );
+    }
+
+    // (3) La tercera pata con VALOR, sobre la clave en colisión: el `where` de igualdad con el
+    //     nombre que anuncia el catálogo encuentra el documento, y encuentra el valor del
+    //     FRONTMATTER (7), no el del grafo (0 backlinks reales).
+    let en_colision = s.buscar(json!({"text": "", "where": "frontmatter.graph.backlinks = 7"}));
+    assert_eq!(
+        en_colision.len(),
+        1,
+        "`frontmatter.graph.backlinks = 7` debe encontrar el documento que lo declara: {en_colision:?}"
+    );
+    assert_eq!(
+        en_colision[0]["path"],
+        json!("alfa.md"),
+        "…y ser `alfa.md`: {en_colision:?}"
+    );
+    let por_el_grafo = s.buscar(json!({"text": "", "where": "graph.backlinks = 7"}));
+    assert!(
+        por_el_grafo.is_empty(),
+        "…mientras el texto DESNUDO sigue significando el grafo, donde no hay ningún documento con \
+         7 backlinks reales (los tres están aislados): la ambigüedad que el anclaje deshace no \
+         desaparece, se hace explícita: {por_el_grafo:?}"
+    );
+
+    drop(s);
+}

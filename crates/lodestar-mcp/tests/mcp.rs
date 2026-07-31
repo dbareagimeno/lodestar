@@ -7348,3 +7348,278 @@ fn type_error_de_lista_tambien_es_error_de_consulta() {
          subcadena) ni la ausencia de `tags` en `c-numero.md` lo estropeen"
     );
 }
+
+// ---------------------------------------------------------------------------
+// E26-H09 — `metadata_inspect` habla el mismo dialecto de dot-paths que la consulta
+//
+// `App::metadata_inspect` normaliza su `field` con `FieldPath::parse`, mientras `where`, `filter` y
+// `has`/`missing` pasan todos por `core::parse::build_field_path` (E24-H07/H08). Dos dialectos para
+// el mismo texto, con tres consecuencias que estos tests reproducen por el wire:
+//   · `field: "frontmatter.graph.backlinks"` —la sintaxis que el propio mensaje de error del parser
+//     recomienda— busca una clave de primer nivel llamada `frontmatter` y devuelve `presentIn: 0`:
+//     silenciosamente equivocado sobre un dato que SÍ existe;
+//   · `field: "graph.backlinks"` inspecciona la clave del frontmatter, mientras el mismo texto en un
+//     `where` consulta el GRAFO: el mismo dot-path significa dos cosas según la tool;
+//   · `field: "frontmatter.status"` (la abreviatura legal del lenguaje) devuelve `presentIn: 0`
+//     sobre una base llena de `status`.
+//
+// Lo que la historia decide, y estos tests clavan: `metadata_inspect` hereda las TRES reglas del
+// lenguaje (abreviatura, anclaje y rechazo bajo namespace reservado) y, además, un namespace
+// reservado VÁLIDO no es inspeccionable —`metadata_inspect` describe metadata, y una propiedad
+// calculada no vive en ningún frontmatter—, con un mensaje que dice por dónde sí (`graph_query` o
+// el anclaje `frontmatter.`).
+// ---------------------------------------------------------------------------
+
+/// Workspace con una clave de frontmatter que **colisiona** con un namespace reservado
+/// (`graph.backlinks`, con el valor 7) más un `status` normal en 2 de los 3 documentos.
+///
+/// Discriminante por diseño: el 7 del frontmatter no coincide con ningún backlink real del grafo
+/// (los tres documentos están aislados, 0 backlinks), así que una respuesta que venga del grafo no
+/// puede confundirse con una que venga del frontmatter.
+fn ws_reservado_en_frontmatter() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "alfa.md",
+        "---\nstatus: draft\ngraph:\n  backlinks: 7\ndocument:\n  path: falso.md\n---\n\n# Alfa\n",
+    );
+    write(
+        dir.path(),
+        "bravo.md",
+        "---\nstatus: draft\n---\n\n# Bravo\n",
+    );
+    write(dir.path(), "charlie.md", "# Charlie\n\nsin frontmatter.\n");
+    dir
+}
+
+/// La llamada JSON-RPC a `metadata_inspect` en modo `field`.
+fn linea_inspect(id: u32, field: &str) -> String {
+    linea_call(
+        id,
+        "metadata_inspect",
+        serde_json::json!({"mode": "field", "field": field}),
+    )
+}
+
+/// **E26-H09** · Criterio `anclaje_frontmatter_alcanza_la_clave_reservada`:
+/// **Dado** un documento con frontmatter `graph: {backlinks: 7}`, **Cuando** se llama a
+/// `metadata_inspect{mode:"field", field:"frontmatter.graph.backlinks"}`, **Entonces** devuelve
+/// `presentIn: 1` con el valor `7`.
+///
+/// Hoy devuelve `presentIn: 0`: `FieldPath::parse` no conoce el anclaje de E24-H08, así que el path
+/// se resuelve como la clave literal `frontmatter` → `graph` → `backlinks`, que no existe. Es la
+/// misma clase de defecto —una respuesta silenciosamente equivocada— que E24-H08 retiró del
+/// lenguaje de consulta, sobreviviendo en la tool que existe para descubrir la base.
+#[test]
+fn anclaje_frontmatter_alcanza_la_clave_reservada() {
+    let dir = ws_reservado_en_frontmatter();
+    let resp = roundtrip(
+        dir.path(),
+        &[linea_inspect(1, "frontmatter.graph.backlinks").as_str()],
+        1,
+    );
+    assert_eq!(
+        error_de(&resp[0]),
+        None,
+        "`frontmatter.` es la sintaxis que el propio parser recomienda para alcanzar una clave \
+         homónima de un namespace: no puede fallar"
+    );
+    let sc = &resp[0]["result"]["structuredContent"];
+
+    assert_eq!(
+        sc["presentIn"].as_u64(),
+        Some(1),
+        "`frontmatter.graph.backlinks` debe alcanzar la clave del USUARIO —el `backlinks: 7` de \
+         `alfa.md`—, no una clave de primer nivel llamada literalmente `frontmatter`. Hasta v0.4.0 \
+         esto devolvía `presentIn: 0` sobre un dato que existe: {resp:?}"
+    );
+    assert_eq!(
+        sc["missingIn"].as_u64(),
+        Some(2),
+        "…y los otros 2 documentos siguen contando como ausencia (presentIn + missingIn == 3): \
+         {resp:?}"
+    );
+
+    let values = sc["values"].as_array().unwrap_or_else(|| {
+        panic!("la inspección debe traer `values` (array de {{value, count}}): {resp:?}")
+    });
+    assert_eq!(
+        values,
+        &vec![serde_json::json!({"value": 7, "count": 1})],
+        "…con el valor 7 en su tipo JSON natural (número, sin coerción) y conteo 1: es el dato que \
+         hoy es inalcanzable por esta tool: {resp:?}"
+    );
+    assert_eq!(
+        sc["inferredTypes"]["number"].as_u64(),
+        Some(1),
+        "…y su tipo observado es `number`: {resp:?}"
+    );
+}
+
+/// **E26-H09** · Criterio `namespace_reservado_no_es_inspeccionable`:
+/// **Dado** ese mismo documento, **Cuando** se llama con `field:"graph.backlinks"`, **Entonces**
+/// falla con `INVALID_SCHEMA` y el mensaje apunta al anclaje y a `graph_query`.
+///
+/// Hoy devuelve una inspección: la de la clave del frontmatter. O sea que el MISMO texto significa
+/// «el grafo» en `where` y «mi clave `graph`» en `metadata_inspect`. Se rechaza (y no se reinterpreta
+/// como el grafo) porque `metadata_inspect` describe **metadata**: una propiedad calculada no vive
+/// en ningún frontmatter y no tiene `presentIn`/`missingIn` que describir.
+///
+/// Tres casos, uno por regla: el namespace reservado VÁLIDO (`graph.backlinks`, `document.path`) y
+/// la propiedad DESCONOCIDA bajo namespace reservado (`graph.backlink`, con typo), que E24-H07 ya
+/// declaró error en el lenguaje y que hoy esta tool contesta con `presentIn: 0`.
+#[test]
+fn namespace_reservado_no_es_inspeccionable() {
+    let dir = ws_reservado_en_frontmatter();
+    let campos = ["graph.backlinks", "document.path", "graph.backlink"];
+    let lineas: Vec<String> = campos
+        .iter()
+        .enumerate()
+        .map(|(i, f)| linea_inspect(i as u32 + 1, f))
+        .collect();
+    let refs: Vec<&str> = lineas.iter().map(String::as_str).collect();
+    let resp = roundtrip(dir.path(), &refs, campos.len());
+
+    for (i, campo) in campos.iter().enumerate() {
+        let err = error_de(&resp[i]).unwrap_or_else(|| {
+            panic!(
+                "`field: \"{campo}\"` no es inspeccionable: `{campo}` nombra una propiedad \
+                 CALCULADA (o una que no existe bajo un namespace reservado), y `metadata_inspect` \
+                 describe metadata de frontmatter. Hasta v0.4.0 esta llamada devolvía una \
+                 inspección —la de la clave homónima del usuario, o `presentIn: 0`—, así que el \
+                 mismo dot-path significaba una cosa aquí y otra en `where`.\nRespuesta recibida: {}",
+                resp[i]
+            )
+        });
+        assert_eq!(
+            codigo_de(&err),
+            "INVALID_SCHEMA",
+            "el `field` pedido no es un campo de metadata: es un error de entrada de la tool \
+             («{campo}»): «{err}»"
+        );
+        let (_, mensaje) = codigo_y_mensaje(&err).unwrap_or_else(|| {
+            panic!("debe emitir «CÓDIGO: mensaje» (E26-H07) para «{campo}»: «{err}»")
+        });
+        assert!(
+            menciona(&mensaje.to_lowercase(), "frontmatter"),
+            "…y el mensaje debe decir CÓMO alcanzar la clave homónima del usuario —el anclaje \
+             `frontmatter.{campo}`—, que es la mitad del diagnóstico que convierte el rechazo en \
+             una instrucción: «{err}»"
+        );
+    }
+
+    // El caso del GRAFO tiene además una segunda salida que el mensaje debe nombrar: la tool que sí
+    // responde por las propiedades calculadas.
+    let err_grafo = error_de(&resp[0]).expect("caso `graph.backlinks`");
+    assert!(
+        menciona(&err_grafo.to_lowercase(), "graph_query"),
+        "…y para un namespace `graph.*` válido, el mensaje debe remitir a `graph_query`: el agente \
+         que preguntó por los backlinks reales tiene que salir de aquí sabiendo dónde \
+         preguntarlos: «{err_grafo}»"
+    );
+
+    // Control anti-vacuo: el rechazo es del NAMESPACE, no de todo lo que lleve puntos. Un path
+    // anidado normal se sigue inspeccionando.
+    let ok = roundtrip(
+        dir.path(),
+        &[linea_inspect(1, "frontmatter.graph.backlinks").as_str()],
+        1,
+    );
+    assert_eq!(
+        error_de(&ok[0]),
+        None,
+        "el anclaje explícito sigue siendo la vía legal a esa misma clave: {:?}",
+        ok[0]
+    );
+}
+
+/// **E26-H09** · Criterio `la_abreviatura_vale_tambien_en_metadata_inspect`:
+/// **Dado** un documento con `status: draft`, **Cuando** se llama con `field:"frontmatter.status"` y
+/// con `field:"status"`, **Entonces** las dos respuestas son **idénticas**.
+///
+/// Hoy la primera devuelve `presentIn: 0` (busca la clave literal `frontmatter`). La abreviatura es
+/// legal en `where`/`filter`/`has` desde E19-H02, y el `include` de `knowledge_search` incluso la
+/// EXIGE (`frontmatter.status`), así que un agente que use ese mismo texto contra
+/// `metadata_inspect` obtiene hoy una respuesta vacía sin un solo aviso.
+///
+/// La igualdad se asevera sobre el `structuredContent` **entero**, lo que fija también que el
+/// `field` que ecoa la respuesta sea el path NORMALIZADO (el mismo para las dos entradas) y no el
+/// texto tal cual se tecleó: si el eco variase, dos respuestas «equivalentes» no serían idénticas y
+/// el agente no podría cotejarlas.
+#[test]
+fn la_abreviatura_vale_tambien_en_metadata_inspect() {
+    let dir = ws_reservado_en_frontmatter();
+    let resp = roundtrip(
+        dir.path(),
+        &[
+            linea_inspect(1, "frontmatter.status").as_str(),
+            linea_inspect(2, "status").as_str(),
+        ],
+        2,
+    );
+    assert_eq!(
+        error_de(&resp[0]),
+        None,
+        "`frontmatter.status` es la abreviatura legal del lenguaje desde E19-H02: {:?}",
+        resp[0]
+    );
+    let anclado = &resp[0]["result"]["structuredContent"];
+    let desnudo = &resp[1]["result"]["structuredContent"];
+
+    assert_eq!(
+        anclado, desnudo,
+        "`frontmatter.status` y `status` son el MISMO campo en el lenguaje de consulta, así que \
+         `metadata_inspect` debe responder exactamente lo mismo. Hasta v0.4.0 la primera forma \
+         devolvía `presentIn: 0`"
+    );
+
+    // No vacuo: dos respuestas vacías o dos errores también serían «idénticas».
+    assert_eq!(
+        desnudo["presentIn"].as_u64(),
+        Some(2),
+        "`status` está en 2 de los 3 documentos (el tercero no tiene frontmatter): {resp:?}"
+    );
+    assert_eq!(
+        desnudo["values"],
+        serde_json::json!([{"value": "draft", "count": 2}]),
+        "…con `draft` como único valor del vocabulario: {resp:?}"
+    );
+}
+
+/// **E26-H09** · Criterio `dot_path_invalido_sigue_rechazandose` (control anti-vacuo):
+/// **Dado** un `field` con un dot-path inválido (`"a..b"`, `"service."`), **Cuando** se llama,
+/// **Entonces** sigue siendo `INVALID_SCHEMA`.
+///
+/// Cambiar de normalizador no puede abrir la puerta a paths que hoy se rechazan: un segmento vacío
+/// no construye un `FieldPath` en NINGUNO de los dos dialectos. Este test pasa ya hoy, y está para
+/// que el arreglo no consista en dejar de validar.
+#[test]
+fn dot_path_invalido_sigue_rechazandose() {
+    let dir = ws_reservado_en_frontmatter();
+    let campos = ["a..b", "service.", ".status", ""];
+    let lineas: Vec<String> = campos
+        .iter()
+        .enumerate()
+        .map(|(i, f)| linea_inspect(i as u32 + 1, f))
+        .collect();
+    let refs: Vec<&str> = lineas.iter().map(String::as_str).collect();
+    let resp = roundtrip(dir.path(), &refs, campos.len());
+
+    for (i, campo) in campos.iter().enumerate() {
+        let err = error_de(&resp[i]).unwrap_or_else(|| {
+            panic!(
+                "`field: \"{campo}\"` tiene un segmento vacío y no es un dot-path válido: {}",
+                resp[i]
+            )
+        });
+        assert_eq!(
+            codigo_de(&err),
+            "INVALID_SCHEMA",
+            "un dot-path malformado es un error de entrada de la tool («{campo}»): «{err}»"
+        );
+        assert!(
+            codigo_y_mensaje(&err).is_some(),
+            "…y sigue viniendo con mensaje (E26-H07), no como código pelado: «{err}»"
+        );
+    }
+}

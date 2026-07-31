@@ -712,3 +712,224 @@ fn metadata_inspect_vocabulario_ordenado_por_frecuencia() {
         "77 observaciones de tag en 47 documentos: el multivalor rompe la igualdad con present_in"
     );
 }
+
+// =============================================================================
+// E26-H09 — El catálogo es DIRECCIONABLE y el anclaje `frontmatter.` llega al core
+// =============================================================================
+//
+// La mitad de la historia que se ve por el wire (`metadata_inspect` normalizando su `field` con
+// `parse::build_field_path` y el rechazo del namespace reservado) vive en
+// `crates/lodestar-mcp/tests/mcp.rs` y en `descubribilidad.rs`. Lo que se fija AQUÍ es la mitad que
+// vive en el core, y que es la premisa de aquella:
+//
+//   1. **Cómo se RINDE el nombre en el catálogo** (`catalog`). Un `name` del catálogo tiene que ser
+//      un texto que el lenguaje de consulta acepte y resuelva al MISMO campo. Cuando la clave del
+//      usuario colisiona con un namespace reservado (`graph:`, `document:`), el nombre desnudo que
+//      hoy emite `walk` (`graph.backlinks`) NO cumple: `where`/`has` lo resuelven contra el GRAFO
+//      (E24-H07/H08) y `graph.nota` ni siquiera parsea. La forma direccionable de esa clave es la
+//      **anclada** (`frontmatter.graph.backlinks`).
+//   2. **Que `inspect_field` entienda ese mismo path anclado**, porque si no el catálogo anunciaría
+//      un nombre que su propia tool no sabe inspeccionar — el defecto que la historia cierra, del
+//      revés.
+//
+// Se prueba en el core, y no solo por el wire, por el invariante #3 (*una sola verdad computada*):
+// el catálogo lo computa `core::metadata`, y si la fachada reescribiera los nombres al servirlos,
+// el catálogo del core y el del wire dirían cosas distintas sobre el mismo workspace. La ALCANCE de
+// la historia lo dice explícitamente: no se toca `FieldPath::from_segments` ni `walk` —la
+// restricción de E24-H07 sigue vigente—; lo que cambia es **cómo se rinde** el nombre.
+//
+// NO se prueba aquí la clave con **punto literal** (`"sonar.projectKey"` como clave única del
+// mapa): `walk` la emite como un `FieldPath` de UN segmento con punto, y su `Display` es
+// indistinguible del path anidado `sonar → projectKey`. Hacerla direccionable exigiría una sintaxis
+// de escape en el lenguaje de consulta, que está fuera del alcance declarado de esta historia.
+
+/// Frontmatter que colisiona con los DOS namespaces reservados y, a la vez, tiene claves que **no**
+/// deben cambiar de nombre:
+///   · `graph:`/`document:` de primer nivel → colisión real (los nombres que hoy no son
+///     direccionables);
+///   · `meta.graph.x` → un `graph` que NO es primer segmento, así que ya es direccionable tal cual
+///     (control: quien «ancle todo» lo rompe);
+///   · `status` → una clave normal (mismo control).
+const FM_COLISION: &str = concat!(
+    "status: draft\n",
+    "graph:\n",
+    "  backlinks: 7\n",
+    "  nota: manual\n",
+    "document:\n",
+    "  path: falso.md\n",
+    "meta:\n",
+    "  graph:\n",
+    "    x: 1"
+);
+
+/// Un workspace con el frontmatter en colisión + un documento sin frontmatter (para que
+/// `present_in`/`missing_in` discriminen).
+fn docs_colision() -> Vec<(String, String)> {
+    vec![
+        ("alfa.md".to_string(), fm_doc(FM_COLISION)),
+        (
+            "bravo.md".to_string(),
+            "# Bravo\n\nsin frontmatter.\n".to_string(),
+        ),
+    ]
+}
+
+/// **E26-H09** — el catálogo rinde ANCLADA la clave que colisiona con un namespace reservado, y
+/// **solo** esa.
+///
+/// Hoy emite `graph.backlinks`/`graph.nota`/`document.path` (los nombres crudos de `walk`), que son
+/// justo los tres textos que el lenguaje de consulta interpreta como propiedades calculadas —o
+/// rechaza—: la tool que existe para hacer descubrible una base desconocida anuncia nombres que
+/// ninguna otra superficie acepta.
+#[test]
+fn catalogo_rinde_anclado_el_nombre_en_colision() {
+    let cat = catalog(&ds(docs_colision()));
+    let nombres = field_names(&cat);
+
+    for anclado in [
+        "frontmatter.graph",
+        "frontmatter.graph.backlinks",
+        "frontmatter.graph.nota",
+        "frontmatter.document",
+        "frontmatter.document.path",
+    ] {
+        assert!(
+            nombres.iter().any(|n| n == anclado),
+            "el catálogo debe anunciar «{anclado}»: es la ÚNICA forma con la que un agente puede \
+             después inspeccionar o consultar esa clave (`where`/`has` resuelven el texto desnudo \
+             contra el grafo, E24-H07/H08). Nombres emitidos: {nombres:?}"
+        );
+    }
+
+    for desnudo in [
+        "graph",
+        "graph.backlinks",
+        "graph.nota",
+        "document",
+        "document.path",
+    ] {
+        assert!(
+            !nombres.iter().any(|n| n == desnudo),
+            "…y NO debe anunciar «{desnudo}» a secas: es un nombre no direccionable (o significa \
+             otra cosa —el grafo— en el resto de la superficie). Nombres emitidos: {nombres:?}"
+        );
+    }
+
+    // Control anti-vacuo 1: lo que YA era direccionable no cambia de texto. La consecuencia que la
+    // historia declara es que cambian los nombres «para las claves que colisionan con un
+    // namespace», no todos.
+    for intacto in ["status", "meta", "meta.graph", "meta.graph.x"] {
+        assert!(
+            nombres.iter().any(|n| n == intacto),
+            "«{intacto}» ya es direccionable tal cual (su primer segmento no es un namespace \
+             reservado): anclarlo también sería cambiar el contrato sin motivo. Nombres emitidos: \
+             {nombres:?}"
+        );
+    }
+
+    // Control anti-vacuo 2: la ESTADÍSTICA no se toca; lo que cambia es cómo se rinde el nombre.
+    let backlinks = stats_por_nombre(&cat, "frontmatter.graph.backlinks");
+    assert_eq!(
+        backlinks.present_in, 1,
+        "la clave del usuario sigue estando en 1 de los 2 documentos: {backlinks:?}"
+    );
+    assert_eq!(
+        backlinks.inferred_types.get(&ValueType::Number),
+        Some(&1),
+        "…y su tipo observado sigue siendo `number` (el 7 del frontmatter): {backlinks:?}"
+    );
+}
+
+/// **E26-H09** — el catálogo es direccionable **desde el propio core**: cada `FieldPath` que emite
+/// `catalog` se puede pasar a `inspect_field` y devuelve la misma presencia.
+///
+/// Es la mitad de la propiedad de round-trip que `descubribilidad.rs` verifica por el wire (allí se
+/// añade la tercera pata: `knowledge_search{where}`). Hoy pasa —los nombres desnudos los resuelve
+/// `ParsedFrontmatter::get` sin más—; el día que el catálogo rinda anclados los nombres en colisión
+/// **exige** que `inspect_field` entienda ese anclaje, que es la premisa del criterio
+/// `anclaje_frontmatter_alcanza_la_clave_reservada`.
+#[test]
+fn cada_nombre_del_catalogo_se_inspecciona() {
+    let docs = ds(docs_colision());
+    let cat = catalog(&docs);
+    assert!(
+        cat.fields.len() >= 8,
+        "el fixture debe producir un catálogo rico (≥ 8 campos) o el bucle sería vacuo: {:?}",
+        field_names(&cat)
+    );
+
+    for entrada in &cat.fields {
+        let insp = inspect_field(&docs, &entrada.field);
+        assert_eq!(
+            insp.present_in, entrada.present_in,
+            "el nombre «{}» que anuncia el catálogo debe inspeccionarse tal cual y describir el \
+             MISMO campo (present_in del catálogo vs. de la inspección)",
+            entrada.field
+        );
+        assert_eq!(
+            insp.inferred_types, entrada.inferred_types,
+            "…con los mismos tipos observados, para «{}»",
+            entrada.field
+        );
+    }
+}
+
+/// **E26-H09** — `inspect_field` resuelve un [`FieldPath`] **anclado** contra el frontmatter del
+/// usuario, igual que hace el evaluador de consultas desde E24-H08.
+///
+/// Hoy busca una clave de primer nivel literalmente llamada `frontmatter` y devuelve `present_in:
+/// 0`: silenciosamente equivocado. El path se construye con `FieldPath::from_segments` (público) y
+/// no con el normalizador del parser, para no acoplar este test a un símbolo que la historia aún
+/// tiene que promover a `pub`.
+#[test]
+fn inspect_field_alcanza_la_clave_reservada_por_el_anclaje() {
+    let docs = ds(docs_colision());
+    let anclado = FieldPath::from_segments(["frontmatter", "graph", "backlinks"])
+        .expect("un path anclado de 3 segmentos es válido");
+
+    let insp = inspect_field(&docs, &anclado);
+
+    assert_eq!(
+        insp.present_in, 1,
+        "`frontmatter.graph.backlinks` debe alcanzar la clave del USUARIO (el 7 de `alfa.md`), no \
+         una clave de primer nivel llamada literalmente `frontmatter`: {insp:?}"
+    );
+    assert_eq!(
+        insp.missing_in, 1,
+        "…y el documento sin frontmatter sigue contando como ausencia: {insp:?}"
+    );
+    assert_eq!(
+        insp.values,
+        vec![ValueCount {
+            value: serde_yaml::from_str::<Yaml>("7").unwrap(),
+            count: 1
+        }],
+        "…con el valor 7 en su tipo YAML real (número), que es el dato que hoy es inalcanzable: \
+         {insp:?}"
+    );
+
+    // Control anti-vacuo: el anclaje no es un comodín que haga aparecer cualquier cosa. Una clave
+    // inexistente bajo el mismo anclaje sigue ausente.
+    let fantasma = FieldPath::from_segments(["frontmatter", "graph", "inventada"]).unwrap();
+    assert_eq!(
+        inspect_field(&docs, &fantasma).present_in,
+        0,
+        "una subclave que no existe sigue sin estar presente"
+    );
+}
+
+/// La entrada del catálogo cuyo `name` (el `Display` del `FieldPath`) es `nombre`, o panic con la
+/// lista. Complementa a [`stats`], que busca por `FieldPath::parse` y por tanto no puede pedir un
+/// nombre anclado (`parse` no aplica la abreviatura: construiría `["frontmatter","graph",…]` sí,
+/// pero por una vía distinta de la del lenguaje).
+fn stats_por_nombre<'a>(cat: &'a MetadataCatalog, nombre: &str) -> &'a FieldStats {
+    cat.fields
+        .iter()
+        .find(|e| e.field.to_string() == nombre)
+        .unwrap_or_else(|| {
+            panic!(
+                "el catálogo debe listar «{nombre}»; lista {:?}",
+                field_names(cat)
+            )
+        })
+}
