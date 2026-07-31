@@ -1015,3 +1015,76 @@ fn la_fusion_no_infla_present_in() {
         );
     }
 }
+
+// =============================================================================
+// E26-H10 — La cota vive en la FACHADA; el core sigue devolviendo la verdad completa
+// =============================================================================
+//
+// E26-H10 pone `limit`/`cursor` (default 100, máximo 1000) a `metadata_inspect`, porque el catálogo
+// emite una fila por cada field path y `values` una entrada por cada valor escalar distinto: N
+// entradas para N documentos en un campo de alta cardinalidad. La historia decide **dónde** se
+// aplica esa cota: en `lodestar-app`, la fachada que sirve el wire — **no** aquí.
+//
+// Este test es la guardia de esa decisión, y por eso está en VERDE desde antes de implementar nada:
+// su papel no es reproducir un defecto, sino impedir que el arreglo se cuele en el sitio
+// equivocado. Un `catalog`/`inspect_field` que truncara a 100 rompería los invariantes #2 y #3
+// (el core es puro y es la única verdad computada), dejaría a `lodestar-cli` y a cualquier
+// consumidor futuro del core sin acceso a la cola, y haría irrecuperable —desde el core— lo que la
+// paginación promete recuperar página a página.
+
+/// `n` documentos con un campo de **alta cardinalidad** (`uid`, un valor distinto por documento),
+/// un campo común (`status`) y un field path propio por documento (`campoNNN`), de modo que tanto
+/// el catálogo (`n + 2` campos) como el vocabulario de `uid` (`n` valores) superen holgadamente los
+/// 100 de la cota de la fachada. Mismo workspace, campo a campo, que `ws_cota()` en
+/// `crates/lodestar-mcp/tests/mcp.rs`.
+fn docs_alta_cardinalidad(n: usize) -> Vec<(String, String)> {
+    (0..n)
+        .map(|i| {
+            (
+                format!("n{i:03}.md"),
+                fm_doc(&format!("campo{i:03}: {i}\nstatus: draft\nuid: u{i:03}")),
+            )
+        })
+        .collect()
+}
+
+/// **E26-H10** — `catalog` e `inspect_field` devuelven la verdad **completa**: la cota de 100 es de
+/// la fachada, no del core.
+#[test]
+fn el_core_no_pagina_la_verdad_completa() {
+    const N: usize = 150;
+    let docs = ds(docs_alta_cardinalidad(N));
+
+    let cat = catalog(&docs);
+    assert_eq!(
+        cat.fields.len(),
+        N + 2,
+        "el catálogo debe listar los {N} `campoNNN` más `status` y `uid`, sin recortar en 100: la \
+         cota de `metadata_inspect` es de la FACHADA (invariantes #2 y #3)"
+    );
+
+    let insp = inspect_field(&docs, &fp("uid"));
+    assert_eq!(
+        insp.values.len(),
+        N,
+        "…y el vocabulario de un campo de alta cardinalidad sale entero ({N} valores distintos): \
+         quien pagine aquí deja al core sin la cola que la paginación del wire promete recuperar"
+    );
+    assert_eq!(
+        insp.present_in, N,
+        "`uid` está en los {N} documentos: el agregado también es del workspace entero"
+    );
+    assert_eq!(insp.missing_in, 0, "…y no falta en ninguno");
+    assert_eq!(
+        insp.values.iter().map(|v| v.count).sum::<usize>(),
+        N,
+        "…con una observación por documento (campo escalar): la lista no pierde ni duplica nada"
+    );
+
+    // No vacuo: los dos números están por ENCIMA de la cota que se le pone a la fachada, así que un
+    // truncado a 100 en el core rompería este test de verdad.
+    assert!(
+        cat.fields.len() > 100 && insp.values.len() > 100,
+        "el workspace de este test tiene que superar la cota de 100 para que el test muerda"
+    );
+}

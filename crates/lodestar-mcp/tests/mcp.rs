@@ -7774,3 +7774,728 @@ fn clave_frontmatter_literal_colisiona_con_ruido() {
         "…con su vocabulario real, no el de la clave literal (`raro`): {resp2:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// E26-H10 — Ninguna respuesta viaja sin cota
+//
+// Dos tools pueden devolver hoy una respuesta de tamaño proporcional al workspace:
+//   · `graph_query` no tiene ni default ni máximo (`None => total`), así que un
+//     `operation:"components"` sirve el grafo COMPLETO en una sola respuesta, y su `inputSchema`
+//     declara `minimum: 1` sin `maximum` — el cliente tampoco puede protegerse;
+//   · `metadata_inspect` no tiene paginación en NINGÚN modo: el catálogo emite una fila por cada
+//     field path (incluidos los mapas intermedios) y `values` una entrada por cada valor escalar
+//     distinto — N entradas para N documentos en un campo de alta cardinalidad.
+// Es el contraste interno con `knowledge_search` (20/100) y `knowledge_check` (100/1000), que
+// llevan cota y cursor desde E10 y que E24-H09 hizo cumplir de verdad.
+//
+// CONTRATO DE WIRE que fija esta historia (lo que el implementador debe respetar):
+//   `graph_query.arguments.limit`  → integer, `minimum: 1`, `maximum: 1000`, `default: 100`,
+//                                    DECLARADOS en el `inputSchema` y verificados por la fachada.
+//   `metadata_inspect.arguments`   → gana `limit` (integer, min 1, máx 1000, default 100) y
+//                                    `cursor` (string), en LOS DOS modos, declarados en el
+//                                    `inputSchema` (que es `additionalProperties: false`: sin
+//                                    declararlos, un cliente estricto ni siquiera podría enviarlos).
+//   `metadata_inspect` structuredContent:
+//        mode "catalog" → { fields: [ … ], nextCursor: string|null }
+//        mode "field"   → { field, presentIn, missingIn, inferredTypes, values: [ … ],
+//                           nextCursor: string|null }
+//     `nextCursor` es el MISMO cursor-offset hex autosuficiente del resto de la superficie: se
+//     obtiene en un proceso y se reanuda en otro fresco (mismo criterio que `search_paginacion`).
+//     Los agregados (`presentIn`/`missingIn`/`inferredTypes`) se computan sobre TODO el workspace:
+//     se pagina la LISTA, no la estadística.
+//
+// DÓNDE va la cota: en la FACHADA (`lodestar-app`), no en `core::metadata` — el core sigue puro y
+// devolviendo la verdad completa (invariantes #2 y #3). Lo clava, desde el otro lado,
+// `crates/lodestar-core/tests/metadata.rs::el_core_no_pagina_la_verdad_completa`.
+//
+// FASE ROJA (por qué falla hoy cada test):
+//   · `graph_query_respeta_su_maximo`: `limit_validado` se invoca con `u64::MAX`, así que `limit:
+//     5000` se ACEPTA; y el `inputSchema` no declara ni `maximum` ni `default`.
+//   · `metadata_inspect_field_pagina`/`metadata_inspect_catalog_pagina`: el despachador ni lee
+//     `limit`/`cursor`, así que la respuesta trae las 150/152 entradas y no hay `nextCursor`.
+//   · `paginar_no_pierde_ni_duplica`/`el_cursor_es_autosuficiente`: sin default no hay más que una
+//     página que recorrer ni cursor con el que reanudar.
+//   · `la_estadistica_no_se_pagina`: el `limit` se ignora, así que `values` viene entero.
+// El caso GRANDE (~1.000 documentos) vive en `escala_wire.rs::graph_query_tiene_default`, que es
+// donde está el arnés de proceso real de E24-H16.
+// ---------------------------------------------------------------------------
+
+/// Documentos del workspace de cotas. Por encima de 100 (el default que fija la historia) y muy por
+/// debajo de 1000 (el máximo), para que una página por defecto trunque y una página al máximo
+/// contenga el resultado ENTERO — que es la referencia contra la que se compara el recorrido
+/// completo.
+const DOCS_COTA: usize = 150;
+
+/// Campos del catálogo del workspace de cotas: un `campoNNN` por documento más `status` y `uid`.
+const CAMPOS_COTA: usize = DOCS_COTA + 2;
+
+/// **E26-H10** — Workspace de 150 documentos que fuerza las tres cotas a la vez:
+///   · **grafo**: 150 nodos (cada nota enlaza a la siguiente, en ciclo → ninguna arista colgante y
+///     ningún nodo fantasma, así que `components` sirve exactamente 150 nodos);
+///   · **catálogo**: 152 field paths (`campo000`…`campo149` + `status` + `uid`);
+///   · **vocabulario**: `uid` es de **alta cardinalidad** — un valor distinto por documento, que es
+///     el caso que la historia nombra (un `id`, una fecha, un `owner`).
+///
+/// Deterministas por índice, así que los tres órdenes totales (nodos por `id`, campos por field
+/// path, valores por conteo→texto) son reproducibles entre procesos.
+fn ws_cota() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    for i in 0..DOCS_COTA {
+        let siguiente = format!("n{:03}.md", (i + 1) % DOCS_COTA);
+        write(
+            dir.path(),
+            &format!("n{i:03}.md"),
+            &format!(
+                "---\ncampo{i:03}: {i}\nstatus: draft\nuid: u{i:03}\n---\n\n# Nota {i}\n\n[siguiente]({siguiente})\n"
+            ),
+        );
+    }
+    dir
+}
+
+/// El `structuredContent` de una respuesta que **debe** haber tenido éxito (si falló, el mensaje
+/// del panic lleva el error de la tool, no un `null` mudo).
+fn sc_ok<'a>(resp: &'a serde_json::Value, que: &str) -> &'a serde_json::Value {
+    if let Some(err) = error_de(resp) {
+        panic!("«{que}» no puede fallar en este test: «{err}»");
+    }
+    &resp["result"]["structuredContent"]
+}
+
+/// Los elementos de la lista `clave` del `structuredContent` (nodes/fields/values), tal cual.
+fn lista(sc: &serde_json::Value, clave: &str) -> Vec<serde_json::Value> {
+    sc[clave]
+        .as_array()
+        .unwrap_or_else(|| panic!("el structuredContent debe traer «{clave}» (array): {sc}"))
+        .clone()
+}
+
+/// El `nextCursor` de una respuesta paginada: `Some` si es un string no vacío, `None` si es nulo o
+/// ausente (agotado).
+fn cursor_de(sc: &serde_json::Value) -> Option<String> {
+    match sc["nextCursor"].as_str() {
+        Some(c) if !c.is_empty() => Some(c.to_string()),
+        Some(_) => panic!("un `nextCursor` presente no puede ser la cadena vacía: {sc}"),
+        None => None,
+    }
+}
+
+/// Recorre **todas** las páginas de una tool paginada siguiendo su `nextCursor`, y devuelve la
+/// concatenación de la lista `clave` más el número de páginas.
+///
+/// Cada página se pide en un **proceso fresco** (`roundtrip` arranca y termina el servidor), así que
+/// el recorrido solo funciona si el cursor es autosuficiente — es la misma propiedad que
+/// `search_paginacion` fija para `knowledge_search`.
+fn recorre_paginas(
+    dir: &std::path::Path,
+    tool: &str,
+    args: &serde_json::Value,
+    clave: &str,
+) -> (Vec<serde_json::Value>, usize) {
+    let mut acumulado: Vec<serde_json::Value> = Vec::new();
+    let mut cursor: Option<String> = None;
+    let mut paginas = 0usize;
+    loop {
+        let mut a = args.clone();
+        if let Some(c) = &cursor {
+            a["cursor"] = serde_json::Value::String(c.clone());
+        }
+        let resp = roundtrip(dir, &[linea_call(1, tool, a).as_str()], 1);
+        let sc = sc_ok(&resp[0], tool).clone();
+        acumulado.extend(lista(&sc, clave));
+        paginas += 1;
+        assert!(
+            paginas <= 20,
+            "el recorrido de «{tool}» no termina: con {DOCS_COTA} documentos y el default de 100 \
+             bastan 2 páginas. O el cursor no avanza, o la cota no acota."
+        );
+        match cursor_de(&sc) {
+            Some(c) => cursor = Some(c),
+            None => break,
+        }
+    }
+    (acumulado, paginas)
+}
+
+/// La tool `nombre` tal como la declara `tools/list` en `resp` (que debe ser la respuesta a un
+/// `tools/list`).
+fn tool_declarada(resp: &serde_json::Value, nombre: &str) -> serde_json::Value {
+    resp["result"]["tools"]
+        .as_array()
+        .unwrap_or_else(|| panic!("tools/list debe devolver `tools`: {resp}"))
+        .iter()
+        .find(|t| t["name"] == nombre)
+        .unwrap_or_else(|| panic!("`tools/list` debe declarar «{nombre}»: {resp}"))
+        .clone()
+}
+
+/// **E26-H10** · Criterio `graph_query_respeta_su_maximo`:
+/// **Dado** `graph_query` con `limit: 5000`, **Cuando** se llama, **Entonces** falla con
+/// `INVALID_SCHEMA` por exceder el máximo declarado.
+///
+/// Dos mitades inseparables: el `inputSchema` **declara** `default: 100` y `maximum: 1000` (sin la
+/// declaración el cliente no puede protegerse, que es la mitad del defecto U5), y la fachada lo
+/// **verifica** (`limit_validado`, hoy invocado con `u64::MAX`). El control anti-vacuo es el propio
+/// máximo: `limit: 1000` tiene que seguir aceptándose, o «acotar» habría degenerado en «rechazar».
+#[test]
+fn graph_query_respeta_su_maximo() {
+    let dir = ws_dos_docs();
+    let resp = roundtrip(
+        dir.path(),
+        &[
+            r#"{"jsonrpc":"2.0","id":0,"method":"tools/list"}"#,
+            linea_call(
+                1,
+                "graph_query",
+                serde_json::json!({"operation": "components", "limit": 5000}),
+            )
+            .as_str(),
+            linea_call(
+                2,
+                "graph_query",
+                serde_json::json!({"operation": "components", "limit": 1000}),
+            )
+            .as_str(),
+        ],
+        3,
+    );
+
+    // (1) La VERIFICACIÓN: el máximo se hace cumplir (el criterio propiamente dicho).
+    let err = error_de(&resp[1]).unwrap_or_else(|| {
+        panic!(
+            "`limit: 5000` excede el máximo declarado (1000) y debe RECHAZARSE. Hasta v0.4.0 \
+             `limit_validado` se invocaba con `u64::MAX` para esta tool, así que cualquier valor \
+             pasaba.\nRespuesta recibida: {}",
+            resp[1]
+        )
+    });
+    assert_eq!(
+        codigo_de(&err),
+        "INVALID_SCHEMA",
+        "un `limit` fuera del rango declarado es entrada inválida, con el mismo código que en \
+         `knowledge_search`/`knowledge_check` (E24-H09): «{err}»"
+    );
+    let (_, mensaje) = codigo_y_mensaje(&err)
+        .unwrap_or_else(|| panic!("debe emitir «CÓDIGO: mensaje» (E26-H07): «{err}»"));
+    assert!(
+        mensaje.contains("1000"),
+        "…y el mensaje debe deletrear el máximo excedido (1000), que es lo que el agente necesita \
+         para corregir su llamada: «{err}»"
+    );
+
+    // (2) Control anti-vacuo: el máximo declarado SÍ se acepta (la cota no puede ser un «no» a todo).
+    assert_eq!(
+        error_de(&resp[2]),
+        None,
+        "`limit: 1000` es exactamente el máximo declarado y debe aceptarse: {}",
+        resp[2]
+    );
+
+    // (3) La DECLARACIÓN: un agente descubre la cota leyendo el schema, no chocando con ella.
+    let gq = tool_declarada(&resp[0], "graph_query");
+    let limit = &gq["inputSchema"]["properties"]["limit"];
+    assert_eq!(
+        limit["maximum"].as_u64(),
+        Some(1000),
+        "el `inputSchema` de `graph_query.limit` debe declarar `maximum: 1000`. Hasta v0.4.0 \
+         declaraba `minimum: 1` y NINGÚN máximo, así que ni el cliente podía protegerse de una \
+         respuesta del tamaño del workspace: {gq}"
+    );
+    assert_eq!(
+        limit["default"].as_u64(),
+        Some(100),
+        "…y `default: 100`, que es la cota que se aplica cuando el parámetro no viene: {gq}"
+    );
+    assert_eq!(
+        limit["minimum"].as_u64(),
+        Some(1),
+        "…conservando el `minimum: 1` que ya declaraba (E24-H09): {gq}"
+    );
+}
+
+/// **E26-H10** · Criterio `metadata_inspect_field_pagina`:
+/// **Dado** un campo de alta cardinalidad (un valor distinto por documento), **Cuando** se llama a
+/// `metadata_inspect{mode:"field"}` **sin** `limit`, **Entonces** `values` trae como mucho 100
+/// entradas y un `nextCursor`.
+///
+/// Hoy trae las 150: `metadata_inspect` es la única de las 10 tools sin `limit` ni `cursor`, y un
+/// `uid`/`owner`/fecha rinde una entrada por documento.
+///
+/// El control anti-vacuo es la segunda llamada: con el máximo declarado (`limit: 1000`) el
+/// vocabulario ENTERO sigue estando disponible en una sola respuesta y `nextCursor` es nulo. Acotar
+/// no puede consistir en dejar de calcular la cola.
+#[test]
+fn metadata_inspect_field_pagina() {
+    let dir = ws_cota();
+    let args = serde_json::json!({"mode": "field", "field": "uid"});
+    let mut args_max = args.clone();
+    args_max["limit"] = serde_json::json!(1000);
+
+    let resp = roundtrip(
+        dir.path(),
+        &[
+            r#"{"jsonrpc":"2.0","id":0,"method":"tools/list"}"#,
+            linea_call(1, "metadata_inspect", args).as_str(),
+            linea_call(2, "metadata_inspect", args_max).as_str(),
+        ],
+        3,
+    );
+
+    // (1) La página por DEFECTO: como mucho 100 valores y un cursor con el que seguir.
+    let sc = sc_ok(&resp[1], "metadata_inspect(field:uid)");
+    let values = lista(sc, "values");
+    assert_eq!(
+        values.len(),
+        100,
+        "sin `limit`, `values` debe traer la página por defecto (100 entradas) sobre un campo de \
+         {DOCS_COTA} valores distintos. Hasta v0.4.0 traía los {DOCS_COTA}: una respuesta de \
+         tamaño proporcional al workspace, que es el defecto U5: {}",
+        resp[1]
+    );
+    let cursor = cursor_de(sc).unwrap_or_else(|| {
+        panic!(
+            "…y con {DOCS_COTA} valores y una página de 100 debe venir un `nextCursor` no vacío \
+             con el que recorrer el resto: {}",
+            resp[1]
+        )
+    });
+    assert!(!cursor.is_empty());
+
+    // (2) Control anti-vacuo: con el máximo, el vocabulario ENTERO sigue disponible.
+    let sc_max = sc_ok(&resp[2], "metadata_inspect(field:uid, limit:1000)");
+    let todos = lista(sc_max, "values");
+    assert_eq!(
+        todos.len(),
+        DOCS_COTA,
+        "con `limit: 1000` (el máximo) el vocabulario completo cabe en una respuesta: acotar no \
+         puede consistir en dejar de calcular la cola: {}",
+        resp[2]
+    );
+    assert_eq!(
+        cursor_de(sc_max),
+        None,
+        "…y ahí `nextCursor` debe ser nulo (no queda nada por recorrer): {}",
+        resp[2]
+    );
+    assert_eq!(
+        values,
+        todos[..100].to_vec(),
+        "…y la página por defecto debe ser el PREFIJO de ese orden total, no una muestra: {}",
+        resp[1]
+    );
+
+    // (3) La DECLARACIÓN. El `inputSchema` de esta tool es `additionalProperties: false`: sin
+    //     declarar `limit`/`cursor`, un cliente estricto ni siquiera podría enviarlos.
+    let mi = tool_declarada(&resp[0], "metadata_inspect");
+    let props = &mi["inputSchema"]["properties"];
+    assert_eq!(
+        props["limit"]["maximum"].as_u64(),
+        Some(1000),
+        "el `inputSchema` de `metadata_inspect` debe declarar `limit` con `maximum: 1000` \
+         (por analogía con `knowledge_check`, la otra tool que enumera un catálogo): {mi}"
+    );
+    assert_eq!(
+        props["limit"]["default"].as_u64(),
+        Some(100),
+        "…con `default: 100`: {mi}"
+    );
+    assert_eq!(
+        props["limit"]["minimum"].as_u64(),
+        Some(1),
+        "…y `minimum: 1`, como el resto de la superficie: {mi}"
+    );
+    assert_eq!(
+        props["cursor"]["type"].as_str(),
+        Some("string"),
+        "…y debe declarar `cursor` (string): es el parámetro con el que se recorre lo que la cota \
+         dejó fuera, y sin declararlo la paginación es inalcanzable para un cliente estricto: {mi}"
+    );
+    assert!(
+        mi["outputSchema"].to_string().contains("nextCursor"),
+        "…y el `outputSchema` declarado debe describir el `nextCursor` que ahora viaja en la \
+         respuesta (`schemars::schema_for!(MetadataInspection)`, ACTUALIZADO por esta historia): un \
+         cursor que el schema no menciona es un cursor que el agente no sabe que existe: {mi}"
+    );
+}
+
+/// **E26-H10** · Criterio `metadata_inspect_catalog_pagina`:
+/// **Dado** un workspace con muchos field paths, **Cuando** se llama a `mode:"catalog"` sin
+/// `limit`, **Entonces** `fields` trae como mucho 100 entradas y un `nextCursor`.
+///
+/// El catálogo emite una fila por **cada** field path que aparece en algún documento —incluidos los
+/// mapas intermedios—, así que su tamaño crece con las convenciones de la base. Aquí son 152
+/// (`campo000`…`campo149` + `status` + `uid`).
+///
+/// Control anti-vacuo: con `limit: 1000` el catálogo entero sigue cabiendo en una respuesta, y la
+/// página por defecto es su prefijo.
+#[test]
+fn metadata_inspect_catalog_pagina() {
+    let dir = ws_cota();
+    let resp = roundtrip(
+        dir.path(),
+        &[
+            linea_call(
+                1,
+                "metadata_inspect",
+                serde_json::json!({"mode": "catalog"}),
+            )
+            .as_str(),
+            linea_call(
+                2,
+                "metadata_inspect",
+                serde_json::json!({"mode": "catalog", "limit": 1000}),
+            )
+            .as_str(),
+        ],
+        2,
+    );
+
+    let sc = sc_ok(&resp[0], "metadata_inspect(catalog)");
+    let fields = lista(sc, "fields");
+    assert_eq!(
+        fields.len(),
+        100,
+        "sin `limit`, el catálogo debe traer la página por defecto (100 campos) de los \
+         {CAMPOS_COTA} del workspace. Hasta v0.4.0 los traía todos: {}",
+        resp[0]
+    );
+    let cursor = cursor_de(sc).unwrap_or_else(|| {
+        panic!(
+            "…y con {CAMPOS_COTA} campos y una página de 100 debe venir un `nextCursor`: {}",
+            resp[0]
+        )
+    });
+    assert!(!cursor.is_empty());
+
+    let sc_max = sc_ok(&resp[1], "metadata_inspect(catalog, limit:1000)");
+    let todos = lista(sc_max, "fields");
+    assert_eq!(
+        todos.len(),
+        CAMPOS_COTA,
+        "con `limit: 1000` el catálogo ENTERO sigue cabiendo en una respuesta: la cota acota la \
+         página, no el cómputo: {}",
+        resp[1]
+    );
+    assert_eq!(
+        cursor_de(sc_max),
+        None,
+        "…y ahí `nextCursor` es nulo: {}",
+        resp[1]
+    );
+    assert_eq!(
+        fields,
+        todos[..100].to_vec(),
+        "…y la página por defecto es el PREFIJO del orden total del catálogo (por field path), no \
+         una selección arbitraria: {}",
+        resp[0]
+    );
+}
+
+/// **E26-H10** · Criterio `paginar_no_pierde_ni_duplica` (control anti-vacuo CLAVE):
+/// **Dado** un recorrido completo por cursor en cualquiera de los tres casos, **Cuando** se
+/// concatenan las páginas, **Entonces** el resultado es **exactamente** el que devolvía v0.4.0 sin
+/// paginar, sin repeticiones ni huecos.
+///
+/// La cota no puede consistir en tirar datos. Se comprueba en los **tres** casos que la historia
+/// acota —`graph_query{components}`, `metadata_inspect{catalog}` y `metadata_inspect{field}`—
+/// contra la respuesta completa, que aquí se obtiene con el `limit` **máximo** (1000 > 152 > 150):
+/// esa llamada devuelve hoy y mañana exactamente lo mismo, así que es una referencia válida a
+/// ambos lados del cambio.
+///
+/// El recorrido exige **más de una página** en los tres: si una sola página lo cubriera todo, la
+/// concatenación coincidiría trivialmente y el criterio sería vacuo — que es justo lo que pasa hoy
+/// (sin default no hay segunda página que recorrer).
+///
+/// De paso se asevera el **orden total estable por id** de `graph_query`, del que depende que un
+/// cursor-offset no pierda ni duplique nada.
+///
+/// **Límite deliberado del criterio en el caso del grafo**: lo que se compara es el conjunto
+/// ordenado de **nodos**. Las `edges` se acotan a los nodos de cada página (comportamiento vigente
+/// y documentado: `App::graph_query` nunca sirve una arista colgando de un nodo que la página dejó
+/// fuera), así que su concatenación NO reconstruye el conjunto completo de aristas y no se
+/// asevera.
+#[test]
+fn paginar_no_pierde_ni_duplica() {
+    let dir = ws_cota();
+
+    let casos: [(&str, serde_json::Value, &str, usize); 3] = [
+        (
+            "graph_query",
+            serde_json::json!({"operation": "components"}),
+            "nodes",
+            DOCS_COTA,
+        ),
+        (
+            "metadata_inspect",
+            serde_json::json!({"mode": "catalog"}),
+            "fields",
+            CAMPOS_COTA,
+        ),
+        (
+            "metadata_inspect",
+            serde_json::json!({"mode": "field", "field": "uid"}),
+            "values",
+            DOCS_COTA,
+        ),
+    ];
+
+    for (tool, args, clave, total) in casos {
+        // La verdad completa: una sola página con el `limit` máximo.
+        let mut args_max = args.clone();
+        args_max["limit"] = serde_json::json!(1000);
+        let full_resp = roundtrip(dir.path(), &[linea_call(1, tool, args_max).as_str()], 1);
+        let sc_full = sc_ok(&full_resp[0], tool);
+        let completo = lista(sc_full, clave);
+        assert_eq!(
+            completo.len(),
+            total,
+            "precondición del caso «{tool}/{clave}»: con el `limit` máximo debe verse el resultado \
+             entero ({total} entradas): {}",
+            full_resp[0]
+        );
+        assert_eq!(
+            cursor_de(sc_full),
+            None,
+            "…y sin nada pendiente, `nextCursor` nulo: {}",
+            full_resp[0]
+        );
+
+        // El recorrido completo por cursor, página a página y proceso a proceso.
+        let (recorrido, paginas) = recorre_paginas(dir.path(), tool, &args, clave);
+        assert!(
+            paginas >= 2,
+            "el recorrido de «{tool}/{clave}» se agotó en {paginas} página(s) sobre {total} \
+             entradas: sin la cota por defecto (100) no hay nada que recorrer y este criterio sería \
+             vacuo. Es exactamente lo que pasa hasta v0.4.0."
+        );
+        assert_eq!(
+            recorrido, completo,
+            "la concatenación de las {paginas} páginas de «{tool}/{clave}» debe ser EXACTAMENTE el \
+             resultado sin paginar —mismo contenido y mismo orden—: la cota acota el payload, no el \
+             resultado"
+        );
+
+        // Sin repeticiones: la concatenación tiene tantos elementos distintos como longitud.
+        let distintos: std::collections::BTreeSet<String> =
+            recorrido.iter().map(ToString::to_string).collect();
+        assert_eq!(
+            distintos.len(),
+            recorrido.len(),
+            "…y ninguna entrada puede aparecer en dos páginas de «{tool}/{clave}»"
+        );
+    }
+
+    // Orden total estable por `id` en el grafo: es la premisa del cursor-offset.
+    let full = roundtrip(
+        dir.path(),
+        &[linea_call(
+            1,
+            "graph_query",
+            serde_json::json!({"operation": "components", "limit": 1000}),
+        )
+        .as_str()],
+        1,
+    );
+    let servidos: Vec<String> = graph_nodes(&full[0])
+        .iter()
+        .map(|n| {
+            n["id"]
+                .as_str()
+                .unwrap_or_else(|| panic!("cada nodo lleva un `id` string: {n}"))
+                .to_string()
+        })
+        .collect();
+    let mut ordenados = servidos.clone();
+    ordenados.sort();
+    assert_eq!(
+        servidos, ordenados,
+        "`graph_query` debe servir sus nodos en orden total estable por `id`: un cursor-offset \
+         sobre un orden inestable perdería y duplicaría entradas entre páginas"
+    );
+    assert_eq!(
+        servidos.len(),
+        DOCS_COTA,
+        "…sobre los {DOCS_COTA} nodos del grafo"
+    );
+}
+
+/// **E26-H10** · Criterio `el_cursor_es_autosuficiente`:
+/// **Dado** un cursor obtenido en un proceso y usado en otro **fresco**, **Cuando** se reanuda,
+/// **Entonces** continúa idéntico.
+///
+/// Mismo criterio que `search_paginacion` fija para `knowledge_search`: el cursor es un offset hex
+/// opaco, no un handle atado al estado de una sesión. `roundtrip` arranca y termina un servidor por
+/// llamada, así que las tres páginas de este test salen de tres procesos distintos.
+#[test]
+fn el_cursor_es_autosuficiente() {
+    let dir = ws_cota();
+
+    let casos: [(&str, serde_json::Value, &str, usize); 3] = [
+        (
+            "graph_query",
+            serde_json::json!({"operation": "components"}),
+            "nodes",
+            DOCS_COTA,
+        ),
+        (
+            "metadata_inspect",
+            serde_json::json!({"mode": "catalog"}),
+            "fields",
+            CAMPOS_COTA,
+        ),
+        (
+            "metadata_inspect",
+            serde_json::json!({"mode": "field", "field": "uid"}),
+            "values",
+            DOCS_COTA,
+        ),
+    ];
+
+    for (tool, args, clave, total) in casos {
+        // Proceso 1: la primera página y su cursor.
+        let p1 = roundtrip(dir.path(), &[linea_call(1, tool, args.clone()).as_str()], 1);
+        let sc1 = sc_ok(&p1[0], tool);
+        let pagina1 = lista(sc1, clave);
+        let cursor = cursor_de(sc1).unwrap_or_else(|| {
+            panic!(
+                "«{tool}/{clave}» debe entregar un `nextCursor` en su primera página ({total} \
+                 entradas, cota por defecto 100): {}",
+                p1[0]
+            )
+        });
+
+        // Proceso 2 (FRESCO): se reanuda con ese cursor.
+        let mut args2 = args.clone();
+        args2["cursor"] = serde_json::Value::String(cursor.clone());
+        let p2 = roundtrip(dir.path(), &[linea_call(1, tool, args2).as_str()], 1);
+        let sc2 = sc_ok(&p2[0], tool);
+        let pagina2 = lista(sc2, clave);
+
+        // Proceso 3 (FRESCO): la referencia completa, con el `limit` máximo.
+        let mut args_max = args.clone();
+        args_max["limit"] = serde_json::json!(1000);
+        let full = roundtrip(dir.path(), &[linea_call(1, tool, args_max).as_str()], 1);
+        let completo = lista(sc_ok(&full[0], tool), clave);
+
+        assert_eq!(
+            pagina2,
+            completo[pagina1.len()..].to_vec(),
+            "el cursor de «{tool}/{clave}» se emitió en un proceso y se consumió en otro FRESCO: \
+             debe reanudar exactamente donde acabó la página anterior (offset autosuficiente, no un \
+             handle de sesión)"
+        );
+        assert_eq!(
+            pagina1.len() + pagina2.len(),
+            total,
+            "…y entre las dos páginas debe estar el resultado entero de «{tool}/{clave}»"
+        );
+        assert_eq!(
+            cursor_de(sc2),
+            None,
+            "…y la segunda página agota el recorrido, así que su `nextCursor` es nulo: {}",
+            p2[0]
+        );
+    }
+}
+
+/// **E26-H10** · Criterio `la_estadistica_no_se_pagina`:
+/// **Dado** los conteos agregados de `metadata_inspect`, **Cuando** se pide una página, **Entonces**
+/// `presentIn`/`missingIn` siguen refiriéndose a **todo** el workspace.
+///
+/// Lo que se pagina es la **lista**, no la estadística: un agente que pide 5 valores para orientarse
+/// no puede recibir a cambio un `presentIn: 5` sobre un campo que está en 150 documentos —sería una
+/// respuesta silenciosamente equivocada, la familia de defecto que esta épica cierra—.
+///
+/// Se comprueba en los dos modos: en `field` sobre `presentIn`/`missingIn`/`inferredTypes`, y en
+/// `catalog` sobre el `presentIn` de las filas servidas (que se computa sobre el workspace entero,
+/// no sobre la página).
+#[test]
+fn la_estadistica_no_se_pagina() {
+    let dir = ws_cota();
+    let resp = roundtrip(
+        dir.path(),
+        &[
+            linea_call(
+                1,
+                "metadata_inspect",
+                serde_json::json!({"mode": "field", "field": "uid", "limit": 5}),
+            )
+            .as_str(),
+            linea_call(
+                2,
+                "metadata_inspect",
+                serde_json::json!({"mode": "field", "field": "uid", "limit": 1000}),
+            )
+            .as_str(),
+            linea_call(
+                3,
+                "metadata_inspect",
+                serde_json::json!({"mode": "catalog", "limit": 5}),
+            )
+            .as_str(),
+        ],
+        3,
+    );
+
+    let pagina = sc_ok(&resp[0], "metadata_inspect(field:uid, limit:5)");
+    let completa = sc_ok(&resp[1], "metadata_inspect(field:uid, limit:1000)");
+
+    // La lista SÍ se acota (si no, el criterio no tendría de qué hablar).
+    assert_eq!(
+        lista(pagina, "values").len(),
+        5,
+        "con `limit: 5` deben viajar 5 valores: {}",
+        resp[0]
+    );
+
+    // …y la estadística NO.
+    assert_eq!(
+        pagina["presentIn"].as_u64(),
+        Some(DOCS_COTA as u64),
+        "`presentIn` describe TODO el workspace ({DOCS_COTA} documentos con `uid`), no la página \
+         de 5 valores: se pagina la lista, no la estadística: {}",
+        resp[0]
+    );
+    assert_eq!(
+        pagina["missingIn"].as_u64(),
+        Some(0),
+        "…y `missingIn` sigue siendo el resto del workspace (0): {}",
+        resp[0]
+    );
+    assert_eq!(
+        pagina["inferredTypes"], completa["inferredTypes"],
+        "…y los tipos observados son los de todo el workspace, idénticos a los de la respuesta sin \
+         paginar: {}",
+        resp[0]
+    );
+    assert_eq!(
+        pagina["presentIn"], completa["presentIn"],
+        "…dicho de otro modo: los agregados de una página y los de la respuesta completa coinciden"
+    );
+
+    // Modo catálogo: cada fila servida trae su presencia sobre el workspace entero.
+    let cat = sc_ok(&resp[2], "metadata_inspect(catalog, limit:5)");
+    let filas = lista(cat, "fields");
+    assert_eq!(
+        filas.len(),
+        5,
+        "con `limit: 5` viajan 5 campos: {}",
+        resp[2]
+    );
+    let status = filas.iter().find(|f| f["name"] == "status");
+    // `status` no cae en la primera página (el orden es por field path: `campo000`…), así que la
+    // presencia se comprueba sobre las filas que sí vienen: cada `campoNNN` está en 1 documento.
+    assert!(
+        status.is_none(),
+        "precondición del caso: la primera página del catálogo son campos `campoNNN`: {}",
+        resp[2]
+    );
+    for f in &filas {
+        assert_eq!(
+            f["presentIn"].as_u64(),
+            Some(1),
+            "cada `campoNNN` está en exactamente 1 de los {DOCS_COTA} documentos, y ese conteo se \
+             computa sobre el workspace entero aunque la página traiga 5 filas: {f}"
+        );
+    }
+}
