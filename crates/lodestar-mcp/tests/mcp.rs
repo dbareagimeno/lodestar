@@ -6768,3 +6768,382 @@ fn change_plan_conserva_el_error_del_parser() {
          change_plan:          «{e_plan}»"
     );
 }
+
+// ---------------------------------------------------------------------------
+// E26-H08 — Un `TypeError` de consulta se REPORTA, no excluye documentos en silencio
+//
+// Los dos consumidores del lenguaje descartan la evaluación con
+// `if !matches!(evaluate(...), Ok(true)) { continue; }` —`knowledge_search` y la selección masiva de
+// `change_plan` (`expand_selection`)—, así que un `Err(TypeError)` cae en el MISMO `continue` que un
+// `Ok(false)`: el documento se excluye. Efectos que estos tests reproducen:
+//   · una consulta con un error de tipo real devuelve `[]` sin un solo aviso, indistinguible de «no
+//     hay resultados»;
+//   · sobre una base heterogénea la exclusión se decide documento a documento, así que la respuesta
+//     es una lista RECORTADA que nadie puede distinguir de la correcta;
+//   · en `change_plan` es peor: una selección masiva salta documentos en silencio y el plan afecta a
+//     menos ficheros de los que el agente cree haber seleccionado.
+//
+// Es el principio de E24-H07 («una respuesta silenciosamente equivocada es peor que un error»)
+// aplicado a la EVALUACIÓN, después de que E24-H07/H08 lo aplicaran al parseo. Los rustdoc de
+// `lib.rs` consagran hoy lo contrario («sin propagarse a la búsqueda entera» / «sin abortar el
+// plan»): E26-H08 revisa ese criterio, igual que E24-H07 revisó el de E19-H04.
+//
+// Lo que NO cambia (y por eso hay dos controles anti-vacuos): `Ok(false)` sigue siendo AUSENCIA —no
+// casar no es un error—, y un campo ausente sigue excluyendo su documento sin ruido.
+// ---------------------------------------------------------------------------
+
+/// La consulta del defecto: orden (`>=`) entre un campo numérico y un literal string. Es
+/// `TypeError::OrderNotDefined` en el core desde E19-H01 (`error_de_tipo_orden_cruzado`), y hasta
+/// v0.4.0 se traducía a «este documento no casa».
+const ORDEN_CRUZADO: &str = "priority >= \"high\"";
+
+/// Grafías admisibles del tipo `number` en el mensaje: la del wire (`ValueType` serializa en
+/// minúscula, y es la que ve el agente en `metadata_inspect.inferredTypes`) o su nombre en español
+/// —los mensajes van en español (E26-H07)—. Lo que el criterio exige es que el mensaje NOMBRE el
+/// tipo, no una tipografía concreta.
+const GRAFIAS_NUMBER: &[&str] = &["number", "numero", "número", "numerico", "numérico"];
+
+/// Ídem para `string`.
+const GRAFIAS_STRING: &[&str] = &["string", "cadena", "texto"];
+
+/// ¿El mensaje nombra ese tipo en alguna de sus grafías admisibles?
+fn nombra_tipo(mensaje: &str, grafias: &[&str]) -> bool {
+    let bajo = mensaje.to_lowercase();
+    grafias.iter().any(|g| menciona(&bajo, g))
+}
+
+/// Juzga el error de un `TypeError` de orden cruzado: código estable + un mensaje que permita
+/// CORREGIR la consulta (campo, operador y los dos tipos que chocan). `contexto` identifica la tool
+/// en el fallo.
+fn juzga_error_de_tipo(err: &str, contexto: &str) {
+    assert_eq!(
+        codigo_de(err),
+        "INVALID_SCHEMA",
+        "un error de TIPO al evaluar es una consulta que el motor no puede responder sobre estos \
+         datos, y el catálogo ya tiene el código para eso ({contexto}): «{err}»"
+    );
+    let (_, mensaje) = codigo_y_mensaje(err)
+        .unwrap_or_else(|| panic!("{contexto} debe emitir «CÓDIGO: mensaje» (E26-H07): «{err}»"));
+    assert!(
+        menciona(&mensaje.to_lowercase(), "priority"),
+        "el mensaje debe NOMBRAR el campo que choca ({contexto}): «{err}»"
+    );
+    assert!(
+        nombra_tipo(mensaje, GRAFIAS_NUMBER),
+        "…el tipo que tiene el campo en el documento (number) ({contexto}): «{err}»"
+    );
+    assert!(
+        nombra_tipo(mensaje, GRAFIAS_STRING),
+        "…y el tipo del literal con el que se le comparó (string), que es la mitad del diagnóstico \
+         sin la cual el agente no sabe qué lado corregir ({contexto}): «{err}»"
+    );
+    assert!(
+        mensaje.contains(">=") || menciona(&mensaje.to_lowercase(), "greater_than_or_equal"),
+        "…y el operador, porque `=` sobre los MISMOS operandos es legal (es `false`, no error): \
+         solo el ORDEN yerra ({contexto}): «{err}»"
+    );
+}
+
+/// Workspace **homogéneo**: los dos documentos tienen `priority` numérico, así que
+/// `priority >= "high"` es un error de tipo en todos. Hoy la consulta devuelve `[]` —«no hay
+/// resultados»— sin un solo aviso.
+fn ws_priority_numerico() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "alfa.md",
+        "---\npriority: 2\nstatus: draft\n---\n\n# Alfa\n",
+    );
+    write(
+        dir.path(),
+        "beta.md",
+        "---\npriority: 5\nstatus: draft\n---\n\n# Beta\n",
+    );
+    dir
+}
+
+/// Workspace **heterogéneo** —el escenario real del defecto—: `priority` es string en unos
+/// documentos y número en otros, de modo que `priority >= "high"` casa unos, yerra en otros y hoy
+/// devuelve una lista recortada.
+///
+/// El reparto es DISCRIMINANTE para el criterio de determinismo:
+///   · `alfa.md` es el primero del orden total y **no** yerra (string vs string): quien reporte «el
+///     primer documento» sin más, o el primero que casa, nombrará el documento equivocado;
+///   · `bravo.md` es el primero del orden total que **sí** yerra → es el que debe salir nombrado;
+///   · `zulu.md` yerra también, pero el ÚLTIMO: quien acumule los errores y reporte el último (o
+///     todos) hará que el mensaje dependa de dónde paró el motor, no del workspace.
+fn ws_priority_heterogeneo() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "alfa.md",
+        "---\npriority: high\nstatus: draft\n---\n\n# Alfa\n",
+    );
+    write(
+        dir.path(),
+        "bravo.md",
+        "---\npriority: 2\nstatus: draft\n---\n\n# Bravo\n",
+    );
+    write(
+        dir.path(),
+        "charlie.md",
+        "---\npriority: urgent\nstatus: draft\n---\n\n# Charlie\n",
+    );
+    write(
+        dir.path(),
+        "zulu.md",
+        "---\npriority: 9\nstatus: draft\n---\n\n# Zulu\n",
+    );
+    dir
+}
+
+/// La llamada JSON-RPC a `knowledge_search` con un `where` (y opcionalmente un `limit`).
+fn linea_search(id: u32, donde: &str, limit: Option<u32>) -> String {
+    let mut args = serde_json::json!({"text": "", "where": donde});
+    if let Some(l) = limit {
+        args["limit"] = serde_json::json!(l);
+    }
+    serde_json::json!({"jsonrpc":"2.0","id": id,"method":"tools/call",
+        "params":{"name":"knowledge_search","arguments": args}})
+    .to_string()
+}
+
+/// La llamada JSON-RPC a `change_plan` con la MISMA consulta como `selection.where`. La política es
+/// permisiva a propósito: lo que se juzga es la EXPANSIÓN de la selección, no el veredicto de
+/// conformidad del resultado.
+fn linea_plan(id: u32, donde: &str) -> String {
+    serde_json::json!({"jsonrpc":"2.0","id": id,"method":"tools/call",
+        "params":{"name":"change_plan","arguments":{
+            "selection": {"where": donde},
+            "operation": {"patch_frontmatter": {"status": "review"}},
+            "policy": {"requireValidResult": false, "allowWarnings": true}}}})
+    .to_string()
+}
+
+/// **E26-H08** — un error de TIPO aborta la consulta con `INVALID_SCHEMA`, en vez de devolver `[]`.
+///
+/// Hoy `knowledge_search` responde `{"results": []}`: una lista vacía que el agente lee como «no hay
+/// documentos con esa prioridad», cuando lo que ocurrió es que su consulta no es respondible sobre
+/// estos datos. Es la respuesta silenciosamente equivocada que E24-H07 declaró peor que un error.
+#[test]
+fn type_error_de_orden_es_error_de_consulta() {
+    let dir = ws_priority_numerico();
+    let linea = linea_search(1, ORDEN_CRUZADO, None);
+    let resp = roundtrip(dir.path(), &[linea.as_str()], 1);
+
+    let err = error_de(&resp[0]).unwrap_or_else(|| {
+        panic!(
+            "`{ORDEN_CRUZADO}` sobre documentos con `priority` NUMÉRICO no es una consulta que el \
+             motor pueda responder: comparar el orden de un número con un string es \
+             `TypeError::OrderNotDefined` en el core desde E19-H01. Hasta v0.4.0 cada documento que \
+             erraba se EXCLUÍA, así que la respuesta era `[]` —indistinguible de «no hay \
+             resultados»— y el agente no tenía forma de enterarse.\nRespuesta recibida: {}",
+            resp[0]
+        )
+    });
+    juzga_error_de_tipo(&err, "knowledge_search");
+}
+
+/// **E26-H08** — la misma consulta da el mismo error por las dos superficies que la aceptan.
+///
+/// `knowledge_search` y `change_plan.selection` comparten el lenguaje (`§20.10`: `where`/`filter`
+/// significan lo mismo en las dos), así que también deben compartir el veredicto y su redacción. En
+/// `change_plan` el defecto es además el más caro: la selección masiva salta documentos en silencio
+/// y el plan toca menos ficheros de los que el agente cree haber seleccionado.
+#[test]
+fn misma_consulta_mismo_error_en_search_y_en_plan() {
+    let dir = ws_priority_numerico();
+    let l_search = linea_search(1, ORDEN_CRUZADO, None);
+    let l_plan = linea_plan(2, ORDEN_CRUZADO);
+    let resp = roundtrip(dir.path(), &[l_search.as_str(), l_plan.as_str()], 2);
+
+    let e_search = error_de(&resp[0]).unwrap_or_else(|| {
+        panic!(
+            "`knowledge_search` con `{ORDEN_CRUZADO}` debe fallar (ver \
+             `type_error_de_orden_es_error_de_consulta`): {}",
+            resp[0]
+        )
+    });
+    let e_plan = error_de(&resp[1]).unwrap_or_else(|| {
+        panic!(
+            "`change_plan` con `selection.where: {ORDEN_CRUZADO}` debe fallar: hoy `expand_selection` \
+             se salta en silencio TODO documento cuya evaluación yerra, así que planifica sobre un \
+             subconjunto que nadie pidió (aquí, el conjunto vacío) y lo presenta como un plan \
+             legítimo.\nRespuesta recibida: {}",
+            resp[1]
+        )
+    });
+
+    juzga_error_de_tipo(&e_plan, "change_plan");
+    assert_eq!(
+        e_search, e_plan,
+        "el MISMO `where` sobre el MISMO workspace debe dar el MISMO código y el MISMO mensaje por \
+         las dos tools que aceptan el lenguaje: si divergen, el agente aprende a corregir con una \
+         superficie y se queda a ciegas con la otra (§20.10, invariante #3)"
+    );
+}
+
+/// **E26-H08** — el error reportado es determinista: mismo workspace y misma consulta, mismo error
+/// palabra por palabra, y siempre sobre el mismo documento.
+///
+/// Sobre una base heterogénea hay VARIOS documentos que yerran, así que «cuál se reporta» tiene que
+/// estar decidido por el workspace y no por el camino que tomó el motor. El criterio de la historia
+/// es el **primer documento del orden total ya existente** (`Analysis::documents`, ordenado por
+/// `RelPath`) — la premisa está clavada en el core por `primer_type_error_en_el_orden_total`
+/// (`lodestar-core/tests/consulta.rs`).
+///
+/// Cuatro observaciones distintas del mismo workspace, que es lo que hace al test discriminante:
+/// dos procesos frescos, una página más pequeña y la otra tool. Ninguna puede cambiar el veredicto.
+#[test]
+fn el_type_error_reportado_es_determinista() {
+    let dir = ws_priority_heterogeneo();
+    let linea = linea_search(1, ORDEN_CRUZADO, None);
+
+    // (1) y (2): dos servidores recién arrancados, sin estado compartido.
+    let r1 = roundtrip(dir.path(), &[linea.as_str()], 1);
+    let r2 = roundtrip(dir.path(), &[linea.as_str()], 1);
+    let e1 = error_de(&r1[0]).unwrap_or_else(|| {
+        panic!(
+            "sobre una base heterogénea la consulta `{ORDEN_CRUZADO}` devuelve hoy los documentos \
+             de `priority` textual y CALLA sobre los numéricos: una lista recortada, decidida \
+             documento a documento, que nadie puede distinguir de la correcta.\nRespuesta: {}",
+            r1[0]
+        )
+    });
+    let e2 = error_de(&r2[0]).expect("la segunda ejecución debe fallar igual que la primera");
+    assert_eq!(
+        e1, e2,
+        "dos ejecuciones de la misma consulta sobre el mismo workspace deben dar el MISMO error, \
+         palabra por palabra"
+    );
+    juzga_error_de_tipo(&e1, "knowledge_search (base heterogénea)");
+
+    // El documento nombrado es el PRIMERO del orden total que yerra, no el primero del orden
+    // (`alfa.md`, que no yerra) ni el último que yerra (`zulu.md`).
+    assert!(
+        e1.contains("bravo.md"),
+        "el error debe nombrar el documento sobre el que se produjo, y ser el PRIMERO del orden \
+         total de `Analysis::documents` que yerra: `alfa.md` va antes pero su `priority` es string \
+         (no yerra), así que el nombrado es `bravo.md`. Error: «{e1}»"
+    );
+    assert!(
+        !e1.contains("zulu.md"),
+        "…y SOLO ese: reportar el último documento que yerra (o todos) hace que el mensaje dependa \
+         de dónde paró el motor en vez de del workspace, que es justo el no-determinismo que la \
+         historia cierra. Error: «{e1}»"
+    );
+
+    // (3) El tamaño de página no puede cambiar el veredicto: si el motor evaluara perezosamente
+    //     hasta llenar la página, con `limit: 1` le bastaría `alfa.md` (que casa) para responder
+    //     antes de llegar a `bravo.md`, y la MISMA consulta tendría éxito o fracaso según el
+    //     `limit` — un resultado que depende de un parámetro invisible para el problema.
+    let l_limit = linea_search(1, ORDEN_CRUZADO, Some(1));
+    let r3 = roundtrip(dir.path(), &[l_limit.as_str()], 1);
+    let e3 = error_de(&r3[0]).unwrap_or_else(|| {
+        panic!(
+            "la misma consulta con `limit: 1` debe fallar igual: el veredicto de una consulta no \
+             puede depender del tamaño de la página.\nRespuesta: {}",
+            r3[0]
+        )
+    });
+    assert_eq!(e3, e1, "…y con el mismo texto exacto");
+
+    // (4) Y por `change_plan`, cuyo bucle es OTRO: el documento reportado lo fija el orden total,
+    //     no el orden en que el planificador toque los documentos.
+    let l_plan = linea_plan(1, ORDEN_CRUZADO);
+    let r4 = roundtrip(dir.path(), &[l_plan.as_str()], 1);
+    let e4 = error_de(&r4[0]).unwrap_or_else(|| {
+        panic!(
+            "la selección masiva sobre la base heterogénea debe fallar en vez de planificar sobre \
+             los documentos que «sí casaron».\nRespuesta: {}",
+            r4[0]
+        )
+    });
+    assert_eq!(
+        e4, e1,
+        "las dos tools deben nombrar el MISMO documento con el MISMO texto: el criterio es el orden \
+         total de `Analysis::documents`, no el orden de evaluación de cada consumidor"
+    );
+}
+
+/// **E26-H08** — control anti-vacuo: no casar sigue siendo AUSENCIA, no error.
+///
+/// El arreglo no puede consistir en convertir cualquier resultado vacío en un fallo: `Ok(false)` es
+/// exclusión y solo `Err` cambia de tratamiento. El control lleva su propio control: la misma
+/// consulta con el valor que SÍ está en los documentos devuelve los dos, de modo que el `[]` de
+/// arriba significa «no casa» y no «la búsqueda está rota».
+#[test]
+fn no_casar_sigue_siendo_ausencia() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "alfa.md",
+        "---\nstatus: draft\ntitle: Alfa\n---\n\n# Alfa\n",
+    );
+    write(
+        dir.path(),
+        "beta.md",
+        "---\nstatus: draft\ntitle: Beta\n---\n\n# Beta\n",
+    );
+
+    let l_vacia = linea_search(1, "status = borrador", None);
+    let l_control = linea_search(2, "status = draft", None);
+    let resp = roundtrip(dir.path(), &[l_vacia.as_str(), l_control.as_str()], 2);
+
+    assert_eq!(
+        error_de(&resp[0]),
+        None,
+        "`status = borrador` sobre documentos con `status: draft` es una comparación PERFECTAMENTE \
+         tipada (string vs string) que simplemente no casa: eso es ausencia, no error"
+    );
+    assert!(
+        search_paths(&resp[0]).is_empty(),
+        "…y su respuesta es la lista vacía: {:?}",
+        search_paths(&resp[0])
+    );
+
+    let mut casan = search_paths(&resp[1]);
+    casan.sort();
+    assert_eq!(
+        casan,
+        vec!["alfa.md".to_string(), "beta.md".to_string()],
+        "control del control: la MISMA maquinaria con el valor que sí está devuelve los dos \
+         documentos, así que el `[]` de arriba es un veredicto y no una búsqueda rota"
+    );
+}
+
+/// **E26-H08** — control anti-vacuo: un campo AUSENTE excluye su documento sin error, como hasta
+/// ahora.
+///
+/// La ausencia cortocircuita antes de comprobar tipos (`campo_inexistente`, E19-H01): no se puede
+/// errar sobre un tipo que no se tiene. El documento sin `priority` va PRIMERO en el orden total a
+/// propósito: una implementación que abortara ante todo lo que no sea `Ok(true)` moriría en él.
+#[test]
+fn campo_ausente_no_es_type_error() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "a-sin-priority.md",
+        "---\nstatus: draft\ntitle: Sin prioridad\n---\n\n# Sin prioridad\n",
+    );
+    write(
+        dir.path(),
+        "b-con-priority.md",
+        "---\nstatus: draft\npriority: 5\n---\n\n# Con prioridad\n",
+    );
+
+    let linea = linea_search(1, "priority >= 3", None);
+    let resp = roundtrip(dir.path(), &[linea.as_str()], 1);
+
+    assert_eq!(
+        error_de(&resp[0]),
+        None,
+        "preguntar por una clave que un documento no tiene es legítimo (el frontmatter es metadata \
+         arbitraria): la ausencia excluye el documento, no rompe la consulta"
+    );
+    assert_eq!(
+        search_paths(&resp[0]),
+        vec!["b-con-priority.md".to_string()],
+        "…y el documento que SÍ tiene la clave, con el tipo correcto, sigue casando"
+    );
+}

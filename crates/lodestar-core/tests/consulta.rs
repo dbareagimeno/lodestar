@@ -1177,6 +1177,13 @@ fn equivalen(donde: &str, filtro: serde_json::Value, esperado: Expression) {
 /// Selecciona, en orden de `RelPath`, los documentos de `ds` que casan `expr`. Evalúa cada documento
 /// con su frontmatter real y el `Analysis` de verdad del grafo (mismo patrón que `eval_en`), de modo
 /// que el conjunto seleccionado no puede mentir sobre lo que el evaluador computa.
+///
+/// Su `_ => None` (que trata `Err(TypeError)` como «no casa») es una comodidad de ESTE helper, no el
+/// contrato de la superficie: E19-H04/E21-H02 decidieron que un `TypeError` excluyera el documento
+/// en silencio y **E26-H08 lo revisa** —en las fachadas, que ahora abortan la consulta con
+/// `INVALID_SCHEMA`—. El core no cambia: sigue devolviendo `Result<bool, TypeError>` por documento,
+/// que es lo que permite a la fachada elegir. Los fixtures de `equivalencia_resultado` están
+/// tipados de forma homogénea, así que aquí no llega ningún `Err`.
 fn seleccion(ds: &DocumentSet, expr: &Expression) -> Vec<RelPath> {
     ds.files()
         .iter()
@@ -1587,4 +1594,103 @@ fn has_respeta_los_namespaces() {
         Ok(true),
         "y una que no existe sigue estando ausente"
     );
+}
+
+// =============================================================================
+// E26-H08 — La PREMISA del determinismo: el orden total y el primer `Err`
+// =============================================================================
+//
+// E26-H08 hace que un `TypeError` de evaluación ABORTE la consulta (`INVALID_SCHEMA`) en vez de
+// excluir el documento en silencio, y exige que el documento reportado sea el **primero del orden
+// total ya existente** (`Analysis::documents`, ordenado por `RelPath`), no el primero que toque el
+// consumidor. Ese cambio vive en la fachada (`lodestar-app`): el core NO cambia — sigue devolviendo
+// `Result<bool, TypeError>` por documento, que es justo lo que permite a la fachada elegir.
+//
+// Este test es la premisa de la que dependen `el_type_error_reportado_es_determinista`
+// (`lodestar-mcp/tests/mcp.rs`) y su gemelo de `seleccion.rs`: fija QUÉ documento es «el primero que
+// yerra» en el fixture que ambos usan. **Verde por diseño** (el core ya se comporta así); su valor
+// es que, si alguien cambiara el orden de `Analysis::documents` o la clasificación de tipos, el
+// esperado de aquellos tests dejaría de ser arbitrario y este assert diría por qué.
+
+/// **E26-H08** (premisa) — sobre una base heterogénea, el primer `Err` en el orden total de
+/// `Analysis::documents` es `bravo.md`: ni `alfa.md` (primero del orden, pero no yerra) ni `zulu.md`
+/// (yerra, pero el último).
+#[test]
+fn primer_type_error_en_el_orden_total() {
+    // Se insertan DESORDENADOS a propósito: el orden lo pone el modelo (`RelPath`), no el fixture.
+    let ds = DocumentSet::from_files(lodestar_fixtures::file_map(&[
+        ("zulu.md", "---\npriority: 9\n---\n\n# Zulu\n"),
+        ("bravo.md", "---\npriority: 2\n---\n\n# Bravo\n"),
+        ("alfa.md", "---\npriority: high\n---\n\n# Alfa\n"),
+        ("charlie.md", "---\npriority: urgent\n---\n\n# Charlie\n"),
+    ]));
+    let expr = parsea("priority >= \"high\"");
+    let analysis = ds.analyze();
+
+    assert_eq!(
+        analysis
+            .documents
+            .iter()
+            .map(RelPath::as_str)
+            .collect::<Vec<_>>(),
+        vec!["alfa.md", "bravo.md", "charlie.md", "zulu.md"],
+        "`Analysis::documents` es el orden TOTAL por `RelPath` (§20.7): es el que hereda el \
+         determinismo de E26-H08"
+    );
+
+    // Qué hace cada documento con la MISMA consulta (la heterogeneidad es el escenario real).
+    assert_eq!(
+        eval_en(&ds, "alfa.md", &expr),
+        Ok(true),
+        "`alfa.md` compara string con string: casa, y no yerra"
+    );
+    assert!(
+        matches!(
+            eval_en(&ds, "bravo.md", &expr),
+            Err(TypeError::OrderNotDefined {
+                field_type: ValueType::Number,
+                value_type: ValueType::String,
+                ..
+            })
+        ),
+        "`bravo.md` tiene `priority` numérico: el orden cruzado es ERROR, con los dos tipos"
+    );
+    assert_eq!(
+        eval_en(&ds, "charlie.md", &expr),
+        Ok(true),
+        "`charlie.md` también es string (`urgent` >= `high` lexicográfico)"
+    );
+    assert!(
+        matches!(eval_en(&ds, "zulu.md", &expr), Err(TypeError::OrderNotDefined { .. })),
+        "`zulu.md` yerra igual que `bravo.md`: hay MÁS de un candidato, y por eso «cuál se reporta» \
+         tiene que estar decidido"
+    );
+
+    // La premisa: recorrido en el orden total, el primer `Err` es `bravo.md`.
+    let primero = analysis
+        .documents
+        .iter()
+        .find(|p| eval_en(&ds, p.as_str(), &expr).is_err());
+    assert_eq!(
+        primero.map(RelPath::as_str),
+        Some("bravo.md"),
+        "el primer documento del orden total que yerra es `bravo.md` — el esperado de \
+         `el_type_error_reportado_es_determinista`"
+    );
+
+    // Y el `TypeError` YA lleva la información que el mensaje de la fachada necesita (campo,
+    // operador y los dos tipos): E26-H08 sube un dato existente, no inventa un diagnóstico.
+    let Err(TypeError::OrderNotDefined {
+        field,
+        operator,
+        field_type,
+        value_type,
+    }) = eval_en(&ds, "bravo.md", &expr)
+    else {
+        panic!("`bravo.md` debe dar `OrderNotDefined`");
+    };
+    assert_eq!(field, fp("priority"), "el campo viaja en el error");
+    assert_eq!(operator, Op::Ge, "el operador también");
+    assert_eq!(field_type, ValueType::Number, "y el tipo del campo");
+    assert_eq!(value_type, ValueType::String, "y el del literal");
 }
