@@ -933,3 +933,85 @@ fn stats_por_nombre<'a>(cat: &'a MetadataCatalog, nombre: &str) -> &'a FieldStat
             )
         })
 }
+
+/// **E26-H09** — cuando dos campos de un MISMO documento rinden al mismo nombre, la estadística no
+/// se infla: `present_in` cuenta **documentos**.
+///
+/// El caso límite lo destapó la revisión de la historia: un documento con una clave `graph:` (que se
+/// rinde anclada, `frontmatter.graph`) **y** una clave de primer nivel llamada literalmente
+/// `frontmatter` con una subclave `graph` (que se rinde tal cual, y da el mismo texto). Los dos
+/// caen en la misma entrada del catálogo. Sumar sus observaciones daría `presentIn: 2` sobre **un**
+/// documento —un conteo que excede el total y que ninguna otra tool podría reproducir—: la
+/// ambigüedad del lenguaje es tolerable, una estadística imposible no.
+///
+/// La segunda mitad es la coherencia con la inspección: en la fusión gana la forma **anclada**,
+/// porque es la que `inspect_field` resuelve, así que catálogo e inspección describen el mismo
+/// valor. Aquí es observable sin fragilidad porque los dos campos tienen **tipos distintos**: el
+/// `graph:` del usuario es un mapa y la subclave de la clave literal es un string.
+#[test]
+fn la_fusion_no_infla_present_in() {
+    let docs = ds(vec![(
+        "alfa.md".to_string(),
+        fm_doc(concat!(
+            "graph:\n",
+            "  backlinks: 7\n",
+            "frontmatter:\n",
+            "  graph: solo-un-string"
+        )),
+    )]);
+
+    let cat = catalog(&docs);
+    let fusionada = stats_por_nombre(&cat, "frontmatter.graph");
+
+    assert_eq!(
+        fusionada.present_in, 1,
+        "los dos campos que rinden a «frontmatter.graph» viven en el MISMO documento: la entrada \
+         cuenta 1, nunca 2. `present_in` cuenta documentos, y el workspace tiene uno solo: {cat:?}"
+    );
+    assert_eq!(
+        fusionada.inferred_types.values().sum::<usize>(),
+        1,
+        "…y una sola observación de tipo, por el mismo motivo (el invariante \
+         `sum(inferred_types) == present_in` sigue en pie): {fusionada:?}"
+    );
+    assert_eq!(
+        fusionada.inferred_types.get(&ValueType::Mapping),
+        Some(&1),
+        "…y esa observación es la de la forma ANCLADA —el `graph:` del usuario, que es un mapa—, \
+         porque es la que `inspect_field` resuelve; registrar el string de la clave literal haría \
+         que el catálogo describiera un valor distinto del que devuelve la inspección: {fusionada:?}"
+    );
+
+    // La coherencia, aseverada de verdad y no por lectura del código: el mismo nombre, inspeccionado.
+    let insp = inspect_field(
+        &docs,
+        &FieldPath::from_segments(["frontmatter", "graph"]).unwrap(),
+    );
+    assert_eq!(
+        insp.present_in, fusionada.present_in,
+        "catálogo e inspección deben decir lo mismo sobre «frontmatter.graph»: {insp:?}"
+    );
+    assert_eq!(
+        insp.inferred_types, fusionada.inferred_types,
+        "…también en el tipo observado: {insp:?}"
+    );
+    assert_eq!(
+        insp.missing_in, 0,
+        "…y `present_in + missing_in` sigue siendo el total de documentos (1): {insp:?}"
+    );
+
+    // Control anti-vacuo: la fusión no se come nada. Las dos hojas siguen anunciadas, cada una con
+    // su nombre, y el catálogo no se queda en una sola entrada.
+    let nombres = field_names(&cat);
+    for esperado in [
+        "frontmatter",
+        "frontmatter.graph",
+        "frontmatter.graph.backlinks",
+    ] {
+        assert!(
+            nombres.iter().any(|n| n == esperado),
+            "«{esperado}» debe seguir en el catálogo: fusionar dos nombres iguales no puede \
+             hacer desaparecer campos distintos: {nombres:?}"
+        );
+    }
+}

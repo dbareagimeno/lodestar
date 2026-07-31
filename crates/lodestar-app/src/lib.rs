@@ -27,6 +27,7 @@ use lodestar_core::types::{
     FieldInspection, FieldPath, FrontmatterPatch, GraphNode, InboundLinksPolicy, MetadataCatalog,
     NormalizedOperation, PlanHash, ReceiptId, RelPath, ResolvedLink, RiskAssessment, SemanticDiff,
     Severity, TypeError, ValidationReport, ValidationSummary, WorkspaceRevision,
+    FRONTMATTER_ANCHOR,
 };
 use lodestar_core::{CoreError, DocumentSet};
 use lodestar_workspace::{transaction_id, Workspace, WorkspaceError};
@@ -924,6 +925,30 @@ impl App {
     /// Un `mode` sin reconocer → `Err(ErrorCode::InvalidSchema)` (nunca entra en pánico). Un
     /// workspace sin frontmatter en ningún documento NO es un error: el catálogo sale vacío.
     ///
+    /// # Un solo dialecto de dot-paths (E26-H09)
+    ///
+    /// El `field` se normaliza con [`lodestar_core::parse::build_field_path`] —el **mismo** punto
+    /// por el que pasan `where`, `filter` y `has`/`missing`— y no con `FieldPath::parse`, que hasta
+    /// v0.4.0 hacía de esta tool un segundo dialecto: `frontmatter.status` buscaba una clave literal
+    /// `frontmatter` y devolvía `presentIn: 0` sobre una base llena de `status`, y `graph.backlinks`
+    /// inspeccionaba la clave del frontmatter mientras el mismo texto en un `where` consultaba el
+    /// grafo. De ahí hereda `field` las tres reglas del lenguaje: la **abreviatura**
+    /// (`frontmatter.status` ≡ `status`), el **anclaje** (`frontmatter.graph.backlinks` alcanza la
+    /// clave del usuario) y el **rechazo** de una propiedad desconocida bajo namespace reservado
+    /// (`graph.backlink`, con typo), con el mismo mensaje que da la consulta.
+    ///
+    /// Y dos reglas propias. La primera: un namespace reservado **válido** (`graph.backlinks`,
+    /// `document.path`) tampoco es inspeccionable → `Err(ErrorCode::InvalidSchema)`.
+    /// `metadata_inspect` describe **metadata**, y una propiedad calculada no vive en ningún
+    /// frontmatter: no tiene presencia ni vocabulario que describir. El mensaje dice por dónde sí:
+    /// `graph_query` para el grafo, y el anclaje `frontmatter.` para la clave homónima del usuario.
+    ///
+    /// La segunda: un `field` que empieza por el anclaje, **no encuentra nada** y sin embargo es un
+    /// nombre que el **catálogo anuncia** es la colisión con una clave de primer nivel llamada
+    /// literalmente `frontmatter` → `Err(ErrorCode::InvalidSchema)` explicando la ambigüedad, en vez
+    /// de un `presentIn: 0` indistinguible de una ausencia legítima. El caso normal no cambia: si la
+    /// resolución anclada encuentra algo, se responde con ella.
+    ///
     /// `Result<_, AppError>` (no `WorkspaceError`) — mismo patrón que [`App::knowledge_get`]: es un
     /// servicio de cara a la fachada MCP/CLI, y el código estable **con su mensaje** es lo que el
     /// llamante necesita para el wire de error.
@@ -944,16 +969,45 @@ impl App {
                          campos disponibles",
                     )
                 })?;
-                let field_path = FieldPath::parse(field).map_err(|e| {
+                // E26-H09: el MISMO normalizador que `where`/`filter`/`has` (un solo dialecto por
+                // construcción). Su `ParseError` ya distingue el dot-path malformado de la
+                // propiedad desconocida bajo namespace reservado, y ese mensaje viaja entero.
+                let field_path = lodestar_core::parse::build_field_path(field).map_err(|e| {
+                    // El diagnóstico del core viaja ENTERO (invariante #3): distingue el dot-path
+                    // malformado (`a..b`) de la propiedad desconocida bajo namespace reservado
+                    // (`graph.backlink`), y en este segundo caso ya dice cómo alcanzar la clave
+                    // homónima del usuario. La fachada solo añade qué parámetro falló.
                     AppError::invalid_schema(format!(
-                        "«field» no es un dot-path válido: {e}; se esperaba algo como «status» u \
-                         «owner.name», recibido «{field}»"
+                        "«field» no es un dot-path inspeccionable: {}; se esperaba algo como \
+                         «status» u «owner.name», recibido «{field}»",
+                        e.message
                     ))
                 })?;
-                Ok(MetadataInspection::Field(metadata::inspect_field(
-                    &doc_set,
-                    &field_path,
-                )))
+                if let Some(props) = field_path.props_del_namespace() {
+                    return Err(AppError::invalid_schema(
+                        mensaje_namespace_no_inspeccionable(&field_path, props),
+                    ));
+                }
+                let inspection = metadata::inspect_field(&doc_set, &field_path);
+                // E26-H09: un `field` que empieza por el ANCLAJE y no encuentra nada puede ser la
+                // colisión con una clave de primer nivel llamada literalmente `frontmatter`, que el
+                // catálogo SÍ anuncia con ese texto (es su nombre literal, no un anclaje). Devolver
+                // `presentIn: 0` sería el defecto que esta épica retira: una respuesta
+                // silenciosamente equivocada sobre un dato que existe. Se comprueba contra el
+                // catálogo —la misma verdad que el agente leyó— y solo en el caso vacío, que es el
+                // único ambiguo: si la resolución anclada encuentra algo, manda ella.
+                if inspection.present_in == 0 && empieza_por_el_anclaje(field) {
+                    let anunciado = metadata::catalog(&doc_set)
+                        .fields
+                        .iter()
+                        .any(|e| e.field.to_string() == field);
+                    if anunciado {
+                        return Err(AppError::invalid_schema(mensaje_colision_con_el_anclaje(
+                            field,
+                        )));
+                    }
+                }
+                Ok(MetadataInspection::Field(inspection))
             }
             _ => Err(AppError::invalid_schema(format!(
                 "«mode» debe ser «catalog» (los campos que existen en la base) o «field» (el \
@@ -3305,6 +3359,24 @@ const SEARCH_INCLUDE_PREFIX: &str = "frontmatter.";
 impl FrontmatterProjection {
     /// Parsea **una** entrada del `include`.
     ///
+    /// # Por qué NO pasa por `parse::build_field_path` (E26-H09)
+    ///
+    /// Esta no es una tercera normalización del dot-path del lenguaje de consulta, sino la
+    /// **semántica del anclaje con el prefijo obligatorio**: `frontmatter.` no es aquí un anclaje
+    /// opcional que compita con namespaces reservados, sino el namespace **exigido** de cada
+    /// entrada, y el sufijo direcciona siempre el frontmatter del usuario. No hay abreviatura que
+    /// aplicar (el prefijo nunca puede faltar) ni namespace calculado que desambiguar
+    /// (`frontmatter.graph.backlinks` proyecta la clave `graph.backlinks` del usuario, que es lo
+    /// que `build_field_path` también produce, por el anclaje).
+    ///
+    /// Delegar tendría además un **coste observable** en el único caso donde las dos vías difieren:
+    /// `frontmatter.frontmatter.x` proyecta hoy —correctamente— la clave del usuario
+    /// `frontmatter.x`, mientras que `build_field_path` consumiría el primer `frontmatter.` como
+    /// abreviatura y la resolución acabaría en `x`: una respuesta silenciosamente equivocada, justo
+    /// la clase de defecto que E24-H08/E26-H09 retiran. Esta superficie es, de hecho, la **única**
+    /// que sabe leer una clave que vive bajo un `frontmatter` literal (ver
+    /// `App::metadata_inspect`, que por eso remite aquí cuando detecta esa colisión).
+    ///
     /// # Errores
     /// [`ErrorCode::InvalidSchema`] si la entrada no empieza por `frontmatter.` o si su sufijo no es
     /// un [`FieldPath`] válido (vacío, o con algún segmento vacío como `a..b`).
@@ -3392,6 +3464,71 @@ fn mensaje_de_filtro(e: &lodestar_core::filter::FilterError) -> String {
             .to_string();
     }
     e.message.clone()
+}
+
+/// El mensaje de por qué un namespace reservado **válido** (`graph.backlinks`, `document.path`) no
+/// es inspeccionable por `metadata_inspect` (E26-H09), y por dónde sí se pregunta lo que el agente
+/// quería saber.
+///
+/// Dos salidas, siempre las dos que existen: la **tool** que responde por esa propiedad calculada
+/// (`graph_query` para el grafo; el `where` de `knowledge_search` para las de documento, que no
+/// tienen tool propia) y el **anclaje** `frontmatter.` para la clave homónima del usuario, que es lo
+/// que el agente pedía si su frontmatter tiene una clave `graph:`/`document:`. Sin la segunda mitad
+/// el rechazo sería un callejón sin salida: la clave del catálogo existe, y hay una forma de
+/// alcanzarla.
+fn mensaje_namespace_no_inspeccionable(field: &FieldPath, props: &[&str]) -> String {
+    let ns = field
+        .segments()
+        .first()
+        .map_or_else(String::new, String::clone);
+    let validas = props
+        .iter()
+        .map(|p| format!("`{ns}.{p}`"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let por_donde = if ns == "graph" {
+        "Para preguntar por el grafo real usa `graph_query` (o un `where` sobre esas propiedades \
+         en knowledge_search)"
+    } else {
+        "Para filtrar por esas propiedades usa un `where` en knowledge_search"
+    };
+    format!(
+        "«{field}» no es un campo de metadata: el namespace `{ns}` son propiedades CALCULADAS \
+         ({validas}) y no viven en el frontmatter de ningún documento, así que no tienen presencia \
+         ni vocabulario que inspeccionar. {por_donde}; para inspeccionar la clave de TU \
+         frontmatter con ese nombre, ánclala: «{}»",
+        field.anclado()
+    )
+}
+
+/// `true` si el texto de un `field` empieza por el **anclaje** (`frontmatter.`), es decir, si el
+/// normalizador lo va a reinterpretar en vez de tomarlo al pie de la letra.
+fn empieza_por_el_anclaje(field: &str) -> bool {
+    field
+        .strip_prefix(FRONTMATTER_ANCHOR)
+        .is_some_and(|resto| resto.starts_with('.'))
+}
+
+/// El mensaje de la **colisión con el anclaje** (E26-H09): el catálogo anuncia este nombre, pero
+/// viene de una clave de primer nivel llamada literalmente `frontmatter`, y el lenguaje lee ese
+/// mismo texto como el anclaje al frontmatter del usuario. No hay sintaxis para distinguirlas —el
+/// mismo límite que una clave con **punto literal**—, así que la tool lo dice en voz alta en vez de
+/// contestar `presentIn: 0` sobre un dato que existe.
+///
+/// El escape que se ofrece es real: el `include` de `knowledge_search` exige el prefijo
+/// `frontmatter.` y parsea el **sufijo literalmente**, así que `frontmatter.{texto}` sí lee el
+/// valor de esa clave (lo que no existe es forma de *inspeccionarla* como campo).
+fn mensaje_colision_con_el_anclaje(texto: &str) -> String {
+    format!(
+        "«{texto}» no es inspeccionable: el prefijo «frontmatter.» es el ANCLAJE del lenguaje de \
+         consulta (E24-H08), así que este texto se lee como una clave del frontmatter que no \
+         aparece en ningún documento; el nombre que anuncia el catálogo viene de una clave de \
+         primer nivel llamada literalmente «frontmatter», y el lenguaje no tiene comillas para \
+         distinguir las dos cosas. Su VALOR sí se puede leer, con \
+         knowledge_search{{include: [\"{FRONTMATTER_ANCHOR}.{texto}\"]}}, cuyo prefijo es \
+         obligatorio y cuyo sufijo es literal; para inspeccionarla como campo habría que renombrar \
+         esa clave"
+    )
 }
 
 fn build_search_expression(

@@ -124,7 +124,7 @@ pub fn list() -> Value {
         {"name": "metadata_inspect", "description": "Descubre las convenciones de metadata de una base desconocida SIN necesitar un schema: el catálogo de propiedades (qué campos existen, en cuántos documentos y de qué tipos) o la inspección de una propiedad (presencia/ausencia, tipos y valores frecuentes).",
          "inputSchema": { "type": "object", "properties": {
              "mode": { "type": "string", "description": "«catalog» (todos los campos con presencia y tipos) o «field» (inspección de un campo concreto, requiere «field»).", "enum": ["catalog", "field"] },
-             "field": { "type": "string", "description": "Path punteado del campo a inspeccionar (p. ej. «status» o «service.tier»); solo con mode «field»." }
+             "field": { "type": "string", "description": "Dot-path del campo a inspeccionar (p. ej. «status» o «service.tier»); solo con mode «field». Mismo dialecto que «where»/«filter»: «frontmatter.status» ≡ «status», y una clave de TU frontmatter que colisione con un namespace reservado se alcanza anclada («frontmatter.graph.backlinks»). Un namespace reservado a secas («graph.backlinks», «document.path») NO es metadata: es INVALID_SCHEMA (para el grafo, graph_query)." }
          }, "required": ["mode"], "additionalProperties": false },
          "outputSchema": schemas::metadata_inspect_schema()},
         {"name": "knowledge_check", "description": "Audita el conocimiento (diagnósticos de interpretabilidad y enlaces del documento) con scopes y severidad mínima; diagnósticos con id estable y paginación por cursor.",

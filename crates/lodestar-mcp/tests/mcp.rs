@@ -7500,11 +7500,18 @@ fn namespace_reservado_no_es_inspeccionable() {
         let (_, mensaje) = codigo_y_mensaje(&err).unwrap_or_else(|| {
             panic!("debe emitir «CÓDIGO: mensaje» (E26-H07) para «{campo}»: «{err}»")
         });
+        // La forma ANCLADA COMPLETA, no la palabra «frontmatter» suelta: el mensaje habla de
+        // frontmatter varias veces (explicando que las propiedades calculadas no viven en él), así
+        // que una aserción por token la satisface de rebote y sobreviviría a borrar la salida. Lo
+        // que el criterio exige es que el mensaje deletree el texto que el agente tiene que
+        // TECLEAR. Se comprueba por subcadena y no con `menciona` porque el anclaje lleva puntos, y
+        // el punto es separador de tokens.
+        let anclado = format!("frontmatter.{campo}");
         assert!(
-            menciona(&mensaje.to_lowercase(), "frontmatter"),
-            "…y el mensaje debe decir CÓMO alcanzar la clave homónima del usuario —el anclaje \
-             `frontmatter.{campo}`—, que es la mitad del diagnóstico que convierte el rechazo en \
-             una instrucción: «{err}»"
+            mensaje.contains(&anclado),
+            "…y el mensaje debe deletrear la salida —el anclaje «{anclado}»—, no limitarse a \
+             mencionar el frontmatter: es la mitad del diagnóstico que convierte el rechazo en una \
+             instrucción ejecutable: «{err}»"
         );
     }
 
@@ -7622,4 +7629,148 @@ fn dot_path_invalido_sigue_rechazandose() {
             "…y sigue viniendo con mensaje (E26-H07), no como código pelado: «{err}»"
         );
     }
+}
+
+/// **E26-H09** — el borde que destapó la revisión: una clave de PRIMER NIVEL llamada literalmente
+/// `frontmatter`.
+///
+/// El catálogo la anuncia con su nombre literal (`frontmatter.status`), porque eso es lo que `walk`
+/// emite y anclarla no la arreglaría; pero el lenguaje lee ese mismo texto como el **anclaje**
+/// (E24-H08), así que `mode:"field"` resolvería la clave `status` del usuario —que aquí no existe—
+/// y contestaría `presentIn: 0`: otra vez una respuesta silenciosamente equivocada sobre un dato
+/// que sí está en el disco. La tool lo dice en voz alta.
+///
+/// Y el rechazo no es un callejón sin salida: el `include` de `knowledge_search` exige el prefijo
+/// `frontmatter.` y parsea el sufijo **literalmente**, así que `frontmatter.frontmatter.status` sí
+/// lee el valor. Este test comprueba que la salida que el mensaje promete **funciona de verdad**
+/// (una instrucción que no se ejecuta es peor que ninguna).
+///
+/// Segunda mitad, para que el ruido no se coma la señal: cuando el anclaje **sí** resuelve —hay un
+/// `status` de verdad en la base—, manda la resolución anclada y la inspección es normal. La
+/// ambigüedad solo se reporta en el caso vacío, que es el único en el que la respuesta sería
+/// engañosa.
+#[test]
+fn clave_frontmatter_literal_colisiona_con_ruido() {
+    // --- (A) La clave literal a solas: el anclaje no resuelve nada, así que la tool lo reporta ---
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "raro.md",
+        "---\nfrontmatter:\n  status: raro\n---\n\n# Raro\n",
+    );
+    write(dir.path(), "otro.md", "# Otro\n\nsin frontmatter.\n");
+
+    let resp = roundtrip(
+        dir.path(),
+        &[
+            linea_call(
+                1,
+                "metadata_inspect",
+                serde_json::json!({"mode": "catalog"}),
+            )
+            .as_str(),
+            linea_inspect(2, "frontmatter.status").as_str(),
+            linea_call(
+                3,
+                "knowledge_search",
+                serde_json::json!({"text": "", "include": ["frontmatter.frontmatter.status"]}),
+            )
+            .as_str(),
+        ],
+        3,
+    );
+
+    // 1) El catálogo la anuncia con su nombre literal: el dato existe y es descubrible.
+    let nombres: Vec<String> = resp[0]["result"]["structuredContent"]["fields"]
+        .as_array()
+        .unwrap_or_else(|| panic!("el catálogo devuelve `fields`: {:?}", resp[0]))
+        .iter()
+        .filter_map(|f| f["name"].as_str().map(str::to_string))
+        .collect();
+    assert!(
+        nombres.iter().any(|n| n == "frontmatter.status"),
+        "el catálogo anuncia la clave literal tal cual (`walk` la emite así, y anclarla no la haría \
+         direccionable): {nombres:?}"
+    );
+
+    // 2) Inspeccionarla por ese nombre NO puede contestar `presentIn: 0`: es el defecto que la
+    //    épica retira. Se reporta la ambigüedad, con la salida real.
+    let err = error_de(&resp[1]).unwrap_or_else(|| {
+        panic!(
+            "«frontmatter.status» es AMBIGUO en esta base: el catálogo lo anuncia (viene de una \
+             clave de primer nivel llamada literalmente `frontmatter`) y el lenguaje lo lee como el \
+             anclaje a una clave `status` que aquí no existe. Contestar `presentIn: 0` sería \
+             silenciosamente equivocado sobre un dato que está en el disco.\nRespuesta recibida: {}",
+            resp[1]
+        )
+    });
+    assert_eq!(
+        codigo_de(&err),
+        "INVALID_SCHEMA",
+        "la ambigüedad es del `field` que se pidió: «{err}»"
+    );
+    let (_, mensaje) = codigo_y_mensaje(&err)
+        .unwrap_or_else(|| panic!("debe emitir «CÓDIGO: mensaje» (E26-H07): «{err}»"));
+    assert!(
+        menciona(&mensaje.to_lowercase(), "knowledge_search"),
+        "…y el mensaje debe nombrar la tool por la que ese valor SÍ se lee (`knowledge_search`, con \
+         su `include`): un rechazo sin salida deja al agente sin nada que hacer: «{err}»"
+    );
+    assert!(
+        mensaje.contains("frontmatter.frontmatter.status"),
+        "…deletreando el texto exacto que hay que teclear (el prefijo obligatorio del `include` más \
+         la clave literal), no solo el nombre de la tool: «{err}»"
+    );
+
+    // 3) …y la salida que promete FUNCIONA: el `include` proyecta el valor de la clave literal.
+    let hits = search_paths_values(&resp[2]);
+    let raro = hits
+        .iter()
+        .find(|r| r["path"] == "raro.md")
+        .unwrap_or_else(|| panic!("`raro.md` debe estar entre los resultados: {hits:?}"));
+    assert_eq!(
+        raro["frontmatter"],
+        serde_json::json!({"frontmatter.status": "raro"}),
+        "el `include` exige el prefijo `frontmatter.` y parsea el sufijo LITERALMENTE, así que \
+         «frontmatter.frontmatter.status» lee la clave anidada bajo la clave literal `frontmatter` \
+         y la proyecta con la clave pedida: {raro:?}"
+    );
+
+    // --- (B) Con un `status` de verdad en la base, manda el anclaje y no hay ambigüedad ---
+    let dir2 = tempfile::tempdir().unwrap();
+    write(
+        dir2.path(),
+        "raro.md",
+        "---\nfrontmatter:\n  status: raro\n---\n\n# Raro\n",
+    );
+    write(
+        dir2.path(),
+        "normal.md",
+        "---\nstatus: draft\n---\n\n# Normal\n",
+    );
+    let resp2 = roundtrip(
+        dir2.path(),
+        &[linea_inspect(1, "frontmatter.status").as_str()],
+        1,
+    );
+
+    assert_eq!(
+        error_de(&resp2[0]),
+        None,
+        "cuando el anclaje SÍ resuelve, manda él: `frontmatter.status` es la abreviatura legal de \
+         `status` y no puede volverse un error por que otro documento tenga una clave literal \
+         `frontmatter`. La ambigüedad solo se reporta cuando la respuesta sería engañosa: {:?}",
+        resp2[0]
+    );
+    let sc = &resp2[0]["result"]["structuredContent"];
+    assert_eq!(
+        sc["presentIn"].as_u64(),
+        Some(1),
+        "…y la inspección es la del `status` del usuario: {resp2:?}"
+    );
+    assert_eq!(
+        sc["values"],
+        serde_json::json!([{"value": "draft", "count": 1}]),
+        "…con su vocabulario real, no el de la clave literal (`raro`): {resp2:?}"
+    );
 }
