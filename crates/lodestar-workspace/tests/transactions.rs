@@ -4286,3 +4286,363 @@ mod gc_y_transacciones_vivas {
 //   fallo (un directorio que no se puede abrir) es incompatible con el descubrimiento, que necesita
 //   el mismo bit de lectura. Está declarado como límite estructural en la fase roja.
 // ===========================================================================
+
+// ===========================================================================
+// E25-H06 — El lock tiene dueño demostrable
+// (`requirements/epica-25-endurecimiento-escritura.md`, defecto (a)). Fase ROJA.
+//
+// Los tres criterios de lock de la historia miran el MISMO objeto: el cuerpo del fichero
+// `.lodestar/runtime/lock.json` y quién tiene derecho a borrarlo o a reclamarlo. Hoy:
+//
+//   1. `Drop for WorkspaceLock` borra **por ruta** (`lock.rs:51`), sin comprobar que el fichero
+//      siga siendo el suyo → si otro proceso lo reclamó por huérfano y lo recreó, el `Drop` del
+//      dueño original libera el lock del NUEVO dueño, y a partir de ahí encadena.
+//   2. `reclamar_si_huerfano` reclama con `dueño_muerto || caducado` (`lock.rs:197`): el TTL
+//      **manda sobre** la prueba de vida, así que un dueño vivo pero suspendido (portátil dormido,
+//      breakpoint, reloj movido) pierde su lock.
+//   3. El metadata no declara host (`lock.rs:255`), y `proceso_muerto` pregunta por el pid en la
+//      máquina **local**: sobre un workspace en red, el pid de otra máquina se juzga como propio.
+//
+// CONTRATO OBSERVABLE QUE ASUMEN ESTOS TESTS (mínimo, para el implementador)
+//
+// - El cuerpo del lock sigue siendo un **objeto JSON** legible desde fuera (ya lo es, y
+//   `concurrencia.rs::lock_huerfano` depende de ello desde E23-H23).
+// - Ese objeto declara la **identidad de máquina** en un campo `host` de tipo string no vacío. Es
+//   el único nombre que los tests fijan, porque fabricar «un lock de OTRO host» exige poder
+//   escribirlo; el resto del layout —en particular el **token de propiedad**— queda a elección del
+//   implementador y NINGÚN test lo nombra: los criterios se aseveran por su EFECTO (el fichero del
+//   segundo dueño sobrevive al `Drop` del primero).
+// - Los cuerpos que estos tests plantan se derivan del cuerpo REAL que escribe una adquisición
+//   (`acquire_lock` → leer el fichero → mutar solo `pid`/`timestamp`/`host`), de modo que un
+//   campo nuevo (token, boot-id, versión…) viaja en ellos sin que haya que tocar los tests.
+// - Un lock con `timestamp: 0` es reclamable en cualquier plataforma (TTL vencido por tres órdenes
+//   de magnitud): es la palanca portable que usan los tests para provocar un reclamo legítimo.
+//
+// PLATAFORMA: los criterios 2 y 3 hablan de la **prueba de vida por pid**, que solo existe en Unix
+// (`proceso_muerto` devuelve `false` fuera de Unix por diseño, `lock.rs:234`, y ahí el TTL es la
+// única red). Van gateados con `#[cfg(unix)]`: en Windows no habría nada que afirmar y el test
+// pasaría por la razón equivocada. El criterio 1 (Drop ajeno) es portable y no se gatea.
+// ===========================================================================
+
+mod propiedad_del_lock {
+    use super::*;
+
+    /// Segundos desde la época. Los tests fabrican `timestamp`s relativos a este reloj, que es el
+    /// mismo que lee `reclamar_si_huerfano` (`lock.rs:187-192`).
+    fn ahora_epoch() -> u64 {
+        SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("el reloj del sistema debe ir por delante de la época")
+            .as_secs()
+    }
+
+    /// Un `timestamp` con el TTL del lock (15 min, `lock.rs:148`) **vencido de sobra**.
+    fn hace_una_hora() -> u64 {
+        ahora_epoch().saturating_sub(3600)
+    }
+
+    /// Un PID que con certeza **no** corresponde a ningún proceso vivo: se relanza el propio
+    /// binario de test con `--list` (libtest lista los tests y sale de inmediato, sin ejecutar
+    /// ninguno) y se espera a que muera. Portable —no depende de rangos de PID del sistema— y
+    /// realista: es exactamente el hueco que deja un escritor que se fue. Mismo truco que
+    /// `crates/lodestar-mcp/tests/concurrencia.rs::pid_muerto`, que allí puede usar el binario del
+    /// servidor y aquí no existe.
+    fn pid_muerto() -> u64 {
+        let exe = std::env::current_exe().expect("ruta del propio binario de test");
+        let mut hijo = std::process::Command::new(exe)
+            .arg("--list")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("arrancar el proceso sonda");
+        let pid = u64::from(hijo.id());
+        hijo.wait().expect("esperar al proceso sonda");
+        pid
+    }
+
+    /// Cuerpo REAL del lock, tal y como lo escribe una adquisición de verdad: se toma el lock, se
+    /// lee el fichero y se suelta. Es la base sobre la que los tests fabrican sus escenarios, de
+    /// modo que **todos** los campos que el implementador añada (token, host, boot-id…) viajen en
+    /// los cuerpos plantados sin que los tests tengan que conocerlos.
+    fn metadata_real(ws: &Workspace) -> serde_json::Value {
+        let guard = ws
+            .acquire_lock()
+            .expect("tomar el lock para leer el metadata que escribe la implementación");
+        let raw = std::fs::read_to_string(ws.lock_path()).expect("leer el fichero de lock");
+        drop(guard);
+        serde_json::from_str(&raw).unwrap_or_else(|e| {
+            panic!("el cuerpo del lock debe ser JSON legible desde fuera (E23-H23 ya lo lee de vuelta): {e}; cuerpo: {raw:?}")
+        })
+    }
+
+    /// Planta `cuerpo` como fichero de lock del workspace (creando `runtime/` si falta) y devuelve
+    /// el texto exacto escrito, para poder aseverar supervivencia **byte a byte**.
+    fn plantar_lock(ws: &Workspace, cuerpo: &serde_json::Value) -> String {
+        let path = ws.lock_path();
+        let runtime = path
+            .parent()
+            .expect("el lock cuelga de `.lodestar/runtime/`");
+        std::fs::create_dir_all(runtime).expect("crear `.lodestar/runtime/`");
+        let texto = format!("{cuerpo}\n");
+        std::fs::write(&path, &texto).expect("plantar el fichero de lock del escenario");
+        texto
+    }
+
+    /// **E25-H06 · Criterio 1** (`drop_no_borra_un_lock_ajeno`) — **Dado** un lock reclamado por
+    /// huérfano y recreado por un segundo dueño, **Cuando** el guard del **primer** dueño se
+    /// dropea, **Entonces** el fichero de lock del segundo **sigue existiendo**.
+    ///
+    /// ROJO HOY: `Drop for WorkspaceLock` (`lock.rs:46-53`) hace `remove_file(&self.path)` a secas.
+    /// El guard de A no sabe que el fichero que hay en esa ruta ya no es el que él creó, así que
+    /// borra el de B — y B sigue publicando creyéndose el único escritor, con el lock libre para
+    /// cualquiera. Peor: la cascada. Cada `Drop` posterior libera el lock del siguiente dueño.
+    ///
+    /// El escenario es el que la historia describe, montado con la API pública y sin tocar reloj ni
+    /// procesos: A toma el lock; el cuerpo del lock pasa a **parecer** el de un muerto rancio
+    /// (`timestamp: 0`, pid inexistente) —que es justo lo que ve un tercero cuando A quedó
+    /// suspendido o su marca envejeció—; B lo reclama y lo recrea legítimamente
+    /// (`reclamar_si_huerfano` → `Reclamo::Reclamado`); y solo entonces A termina y suelta su guard.
+    ///
+    /// ANTI-VACUO (última aserción): cuando el dueño **de verdad** se va, el lock SÍ se libera. El
+    /// arreglo no puede consistir en que `Drop` deje de borrar: eso convertiría cada transacción en
+    /// un lock huérfano y devolvería el defecto que cerró E23-H23.
+    #[test]
+    fn drop_no_borra_un_lock_ajeno() {
+        let dir = tempfile::tempdir().unwrap();
+        // Dos handles sobre el mismo root: los dos «procesos» del escenario.
+        let ws_a = Workspace::open(dir.path()).unwrap();
+        let ws_b = Workspace::open(dir.path()).unwrap();
+        let lock_path = ws_a.lock_path();
+
+        // (1) A es el dueño inicial.
+        let guard_a = ws_a
+            .acquire_lock()
+            .expect("el primer publicador debe adquirir el lock");
+        assert!(
+            lock_path.exists(),
+            "precondición: mientras el guard de A vive, su fichero de lock existe"
+        );
+
+        // (2) El lock de A pasa a parecer huérfano y rancio: dueño inexistente y `timestamp: 0`
+        //     (TTL vencido en cualquier plataforma). Es exactamente lo que ve un tercero cuando el
+        //     dueño quedó suspendido, murió por SIGKILL o el reloj se movió.
+        let cuerpo_rancio = serde_json::json!({
+            "owner": "a-fantasma",
+            "pid": pid_muerto(),
+            "timestamp": 0,
+        });
+        plantar_lock(&ws_a, &cuerpo_rancio);
+
+        // (3) B lo reclama por huérfano y lo recrea: a partir de aquí el lock es SUYO.
+        let guard_b = ws_b
+            .acquire_lock()
+            .expect("un lock rancio de dueño inexistente debe reclamarse (E23-H23)");
+        let cuerpo_de_b =
+            std::fs::read_to_string(&lock_path).expect("B debe haber recreado el fichero de lock");
+
+        // (4) A termina su trabajo y suelta su guard. El fichero que hay en la ruta YA NO ES SUYO.
+        drop(guard_a);
+
+        assert!(
+            lock_path.exists(),
+            "el `Drop` del primer dueño NO puede borrar el lock que otro proceso reclamó y recreó: \
+             hoy `Drop for WorkspaceLock` borra por RUTA (`lock.rs:51`), sin comprobar que el \
+             fichero siga siendo el suyo, y a partir de ahí encadena (cada Drop libera el lock del \
+             siguiente). Un token de propiedad en el cuerpo lo resuelve: si el del fichero no es el \
+             mío, no es mi lock"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&lock_path).expect("el lock del segundo dueño debe seguir ahí"),
+            cuerpo_de_b,
+            "y sigue siendo el lock de B **byte a byte**: el Drop ajeno no lo toca de ninguna forma"
+        );
+
+        // (5) Y B conserva la exclusión: un tercero no lo obtiene mientras B vive (el fichero de B
+        //     es reciente y su dueño está vivo, así que no hay reclamo posible).
+        let ws_c = Workspace::open(dir.path()).unwrap();
+        assert!(
+            ws_c.acquire_lock().is_err(),
+            "tras el `Drop` ajeno el lock debe seguir CERRADO a terceros: si no, el escritor único \
+             se rompió aunque el fichero siguiera en disco"
+        );
+
+        // (6) ANTI-VACUO: el dueño legítimo sí libera al irse.
+        drop(guard_b);
+        assert!(
+            !lock_path.exists(),
+            "el `Drop` del dueño REAL debe seguir borrando su lock (RAII, E13-H02): el arreglo no \
+             puede consistir en dejar de borrar nunca, o cada transacción dejaría un huérfano"
+        );
+    }
+
+    /// **E25-H06 · Criterio 2** (`no_se_reclama_el_lock_de_un_pid_vivo`) — **Dado** un lock cuyo
+    /// `timestamp` es más viejo que el TTL pero cuyo pid está **vivo** en esta máquina, **Cuando**
+    /// otro proceso intenta adquirirlo, **Entonces** falla con `WRITE_CONFLICT` y el lock no se
+    /// reclama.
+    ///
+    /// ROJO HOY: `reclamar_si_huerfano` reclama con `dueño_muerto || caducado` (`lock.rs:197`), así
+    /// que el TTL **manda sobre** la prueba de vida: un dueño vivo pero suspendido —portátil
+    /// dormido, proceso parado en un breakpoint, máquina con el reloj movido— pierde su lock y el
+    /// invariante de escritor único se rompe en silencio. El arreglo lo invierte: un pid vivo
+    /// **local** impide el reclamo aunque el TTL haya vencido; el TTL sigue siendo la red portable
+    /// para cuando no se puede afirmar nada.
+    ///
+    /// POR QUÉ NO LO CUBRE YA `concurrencia.rs::lock_huerfano` (comprobado): su parte (5) planta un
+    /// lock de proceso vivo con `timestamp` **de ahora**, de modo que ni el pid ni el TTL permiten
+    /// reclamarlo — pasa hoy y seguirá pasando. La combinación que reproduce el defecto es la otra:
+    /// **TTL vencido + pid vivo**, que allí no se ejerce.
+    ///
+    /// El cuerpo se deriva del que escribe una adquisición REAL, así que declara este host (y el
+    /// token, y lo que el implementador añada); solo se mutan `pid` y `timestamp`.
+    ///
+    /// ANTI-VACUO (parte (b)): el mismo cuerpo rancio con el dueño **muerto** sí se reclama. El
+    /// arreglo no puede consistir en dejar de reclamar.
+    ///
+    /// UNIX-ONLY: la prueba de vida por pid solo existe en Unix (`lock.rs:233-236`); en Windows el
+    /// TTL es el único criterio admisible y no habría nada que afirmar.
+    #[cfg(unix)]
+    #[test]
+    fn no_se_reclama_el_lock_de_un_pid_vivo() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = Workspace::open(dir.path()).unwrap();
+        let otro = Workspace::open(dir.path()).unwrap();
+        let lock_path = ws.lock_path();
+
+        // (a) Lock RANCIO (TTL vencido de sobra) cuyo dueño es un proceso VIVO de esta máquina:
+        //     este mismo proceso de test, que por definición existe.
+        let mut meta = metadata_real(&ws);
+        meta["pid"] = serde_json::json!(std::process::id());
+        meta["timestamp"] = serde_json::json!(hace_una_hora());
+        let cuerpo_vivo = plantar_lock(&ws, &meta);
+
+        let err = otro.acquire_lock().err().unwrap_or_else(|| {
+            panic!(
+                "un lock cuyo dueño sigue VIVO en esta máquina NO puede reclamarse aunque su \
+                 `timestamp` haya vencido el TTL: hoy `reclamar_si_huerfano` reclama con \
+                 `dueño_muerto || caducado` (`lock.rs:197`), así que un escritor suspendido \
+                 (portátil dormido, breakpoint, reloj movido) pierde su lock y dos procesos \
+                 publican a la vez. La prueba de vida debe MANDAR sobre el TTL"
+            )
+        });
+        assert_eq!(
+            err.code(),
+            "WRITE_CONFLICT",
+            "el intento contra un lock vivo mapea al wire `WRITE_CONFLICT`: {err:?}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&lock_path).expect("el lock vivo debe seguir en disco"),
+            cuerpo_vivo,
+            "y el lock del proceso vivo sobrevive **byte a byte** al intento: no se reclama, no se \
+             reescribe, no se toca"
+        );
+
+        // (b) ANTI-VACUO: el MISMO cuerpo rancio, pero con el dueño realmente muerto, sí se
+        //     reclama. La única diferencia entre (a) y (b) es la vida del pid, que es justo el
+        //     discriminante que la historia introduce.
+        meta["pid"] = serde_json::json!(pid_muerto());
+        plantar_lock(&ws, &meta);
+        let guard = otro.acquire_lock().expect(
+            "un lock rancio de dueño MUERTO se sigue reclamando (E23-H23): el arreglo no puede \
+             consistir en dejar de reclamar nunca, o un SIGKILL volvería a cerrar el workspace a la \
+             escritura para siempre",
+        );
+        drop(guard);
+    }
+
+    /// **E25-H06 · Criterio 3** (`pid_de_otro_host_no_decide`) — **Dado** un lock cuyo metadata
+    /// declara **otro host**, **Cuando** se examina, **Entonces** el pid no se usa como criterio y
+    /// solo decide el TTL.
+    ///
+    /// ROJO HOY, por dos razones encadenadas: (i) `lock_metadata` (`lock.rs:245-256`) no escribe
+    /// ninguna identidad de máquina, así que la primera aserción —el contrato observable— falla ya;
+    /// y (ii) aunque se plantara el campo, `reclamar_si_huerfano` consulta `proceso_muerto` sin
+    /// mirarlo (`lock.rs:194`), de modo que un pid de OTRA máquina se juzga contra la tabla de
+    /// procesos de ÉSTA: sobre un workspace en red (o entre namespaces de PID) el lock de un
+    /// escritor vivo se reclama porque «su» pid no existe aquí.
+    ///
+    /// CONTRATO OBSERVABLE MÍNIMO que fija este test (lo demás queda abierto): el cuerpo del lock
+    /// declara un campo `host` de tipo string no vacío. Es el único nombre necesario para poder
+    /// **fabricar** un lock de otra máquina; el token de propiedad del criterio 1 no se nombra en
+    /// ninguna parte porque allí basta con aseverar su efecto.
+    ///
+    /// Las dos mitades son el criterio entero: con host ajeno, un pid muerto **no** reclama (i) y
+    /// el TTL vencido **sí** (ii). La segunda es además el control anti-vacuo: «otro host» no puede
+    /// significar «intocable», o un workspace compartido se quedaría bloqueado para siempre tras el
+    /// primer crash remoto.
+    ///
+    /// UNIX-ONLY: fuera de Unix `proceso_muerto` ya devuelve `false` siempre, así que la mitad (i)
+    /// pasaría por la razón equivocada.
+    #[cfg(unix)]
+    #[test]
+    fn pid_de_otro_host_no_decide() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = Workspace::open(dir.path()).unwrap();
+        let otro = Workspace::open(dir.path()).unwrap();
+        let lock_path = ws.lock_path();
+
+        // (0) CONTRATO: una adquisición real declara la máquina que tomó el lock.
+        let mut meta = metadata_real(&ws);
+        let host_local = meta
+            .get("host")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+            .unwrap_or_else(|| {
+                panic!(
+                    "el cuerpo del lock debe declarar la identidad de máquina en un campo `host` \
+                     (string no vacío). Sin él, `proceso_muerto` pregunta por un pid ajeno en la \
+                     tabla de procesos LOCAL y un lock de otra máquina se juzga como propio — el \
+                     defecto (a) de E25-H06. Cuerpo actual: {meta}"
+                )
+            });
+        assert!(
+            !host_local.trim().is_empty(),
+            "el `host` del lock no puede ser la cadena vacía: sería una identidad que no \
+             identifica, y `host ajeno` dejaría de poder distinguirse de `mismo host`"
+        );
+
+        // (i) Lock de OTRO host, con un pid que aquí está muerto y un `timestamp` reciente.
+        //     El pid no dice nada: ese número es de la tabla de procesos de otra máquina.
+        let host_ajeno = format!("{host_local}-otra-maquina");
+        assert_ne!(
+            host_ajeno, host_local,
+            "precondición: el host fabricado tiene que ser distinto del local"
+        );
+        meta["host"] = serde_json::json!(host_ajeno);
+        meta["pid"] = serde_json::json!(pid_muerto());
+        meta["timestamp"] = serde_json::json!(ahora_epoch());
+        let cuerpo_remoto = plantar_lock(&ws, &meta);
+
+        let err = otro.acquire_lock().err().unwrap_or_else(|| {
+            panic!(
+                "con un lock que declara OTRO host, el pid NO puede decidir: `proceso_muerto` \
+                 responde por la tabla de procesos local, y ahí ese número o no existe o es de un \
+                 proceso distinto. Con el TTL sin vencer, el único veredicto admisible es \
+                 `WRITE_CONFLICT` — hoy se reclama el lock de un escritor remoto vivo y dos \
+                 máquinas publican a la vez sobre el mismo workspace"
+            )
+        });
+        assert_eq!(
+            err.code(),
+            "WRITE_CONFLICT",
+            "el intento contra un lock remoto no caducado mapea al wire `WRITE_CONFLICT`: {err:?}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&lock_path).expect("el lock remoto debe seguir en disco"),
+            cuerpo_remoto,
+            "y el lock remoto sobrevive byte a byte: no se reclama ni se reescribe"
+        );
+
+        // (ii) El MISMO lock remoto, ya caducado: el TTL es la red portable y sí decide. Control
+        //      anti-vacuo — «otro host» no puede significar «intocable», o un crash remoto dejaría
+        //      el workspace bloqueado para siempre.
+        meta["timestamp"] = serde_json::json!(hace_una_hora());
+        plantar_lock(&ws, &meta);
+        let guard = otro.acquire_lock().expect(
+            "con el host ajeno el TTL es el ÚNICO criterio, y aquí ha vencido: el lock se reclama. \
+             Si no, un lock remoto se volvería inmortal y el workspace quedaría cerrado a la \
+             escritura",
+        );
+        drop(guard);
+    }
+}

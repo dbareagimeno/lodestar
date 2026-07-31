@@ -616,3 +616,176 @@ fn abre_sin_repo_git() {
         snap.analysis.documents
     );
 }
+
+// ---------------------------------------------------------------------------
+// E25-H06 — El `.gitignore` del usuario se respeta
+// (`requirements/epica-25-endurecimiento-escritura.md`, defecto (b)). Fase ROJA.
+//
+// POR QUÉ ESTOS TESTS VIVEN AQUÍ Y NO EN `src/gitignore.rs` (declarado)
+//
+// La historia apunta a los tests unitarios inline de `crates/lodestar-workspace/src/gitignore.rs`,
+// pero `src/` es territorio del implementador en la fase roja: añadir tests ahí sería tocar
+// producción. Este fichero ya es la casa de los criterios de `.gitignore` a nivel de integración
+// (`gitignore_parte_lodestar`, `lock_ajusta_el_gitignore`, E23-H12) y `Workspace::acquire_lock` es
+// API pública que dispara `ensure_managed_gitignore` de forma **aislada** (en el crate `workspace`
+// no existe la auditoría de `lodestar-app`, que es el otro chokepoint). Es el sitio con menos
+// fricción y el que mantiene los criterios de `.gitignore` juntos.
+//
+// Los tests unitarios inline existentes (`crea_bloque_en_gitignore_vacio`,
+// `preserva_contenido_propio_y_es_idempotente`, `sustituye_estilo_viejo`) NO se tocan: la
+// idempotencia byte-a-byte del bloque gestionado sigue siendo suya y debe seguir verde.
+// ---------------------------------------------------------------------------
+
+/// `true` si `bytes` usa CRLF en **todas** sus líneas: cada `\n` va precedido de `\r`.
+fn todo_crlf(bytes: &[u8]) -> bool {
+    bytes
+        .iter()
+        .enumerate()
+        .filter(|(_, b)| **b == b'\n')
+        .all(|(i, _)| i > 0 && bytes[i - 1] == b'\r')
+}
+
+/// **E25-H06 · Criterio 5** (`gitignore_conserva_crlf`) — **Dado** un `.gitignore` con CRLF,
+/// **Cuando** se ajusta el bloque gestionado, **Entonces** el fichero conserva CRLF en todas sus
+/// líneas.
+///
+/// ROJO HOY: `ensure_gitignore` reconstruye el fichero con `str::lines` (`gitignore.rs:53`), que
+/// **descarta el `\r`** de cada línea, y vuelve a unirlas con `\n` (`:58-67`). Un `.gitignore` con
+/// CRLF —lo normal en un repo trabajado desde Windows— se convierte entero a LF sin avisar: el
+/// usuario ve un diff espurio de TODAS las líneas de un fichero **versionado**, provocado por un
+/// motor que solo tenía que añadir dos entradas. Es el único fichero versionado del usuario que
+/// lodestar modifica, y se toca en CADA escritura (E23-H12).
+///
+/// ANTI-VACUO (segunda mitad): un `.gitignore` en LF sigue en LF. El arreglo es **preservar el
+/// estilo dominante**, no emitir CRLF siempre — si no, el defecto se cambia de bando y quien
+/// trabaja en Unix se lleva el diff espurio.
+#[test]
+fn gitignore_conserva_crlf() {
+    // --- (a) CRLF de entrada → CRLF de salida, incluidas las líneas nuevas. ---
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::write(root.join(".gitignore"), "node_modules/\r\ntarget/\r\n").unwrap();
+
+    let ws = Workspace::open(root).unwrap();
+    // Tomar el lock es ir a escribir: dispara el ajuste del bloque gestionado (E23-H12).
+    let lock = ws.acquire_lock().expect("tomar el lock de publicación");
+    drop(lock);
+
+    let bytes = std::fs::read(root.join(".gitignore")).expect("leer el `.gitignore` ajustado");
+    let texto = String::from_utf8_lossy(&bytes).into_owned();
+
+    // Precondición: el ajuste ocurrió de verdad (si no, «conserva CRLF» sería trivial).
+    assert!(
+        texto.contains(".lodestar/index.db") && texto.contains(".lodestar/runtime/"),
+        "precondición: el bloque gestionado debe haberse añadido; si no, el test no mira lo que \
+         dice mirar: {texto:?}"
+    );
+    assert!(
+        todo_crlf(&bytes),
+        "un `.gitignore` que venía en CRLF debe reemitirse en CRLF **en todas sus líneas** (las del \
+         usuario y las nuevas del bloque gestionado). Hoy `ensure_gitignore` lo reconstruye con \
+         `str::lines`, que se traga el `\\r`, y lo reescribe en LF: un diff espurio de fichero \
+         entero en el repo VERSIONADO del usuario. Contenido: {texto:?}"
+    );
+    assert!(
+        texto.contains("node_modules/\r\n") && texto.contains("target/\r\n"),
+        "y las líneas propias del usuario siguen ahí, con su fin de línea intacto: {texto:?}"
+    );
+
+    // --- (b) ANTI-VACUO: LF de entrada → LF de salida (no se convierte a CRLF). ---
+    let dir_lf = tempfile::tempdir().unwrap();
+    let root_lf = dir_lf.path();
+    std::fs::write(root_lf.join(".gitignore"), "node_modules/\ntarget/\n").unwrap();
+    let ws_lf = Workspace::open(root_lf).unwrap();
+    let lock_lf = ws_lf.acquire_lock().expect("tomar el lock de publicación");
+    drop(lock_lf);
+
+    let texto_lf =
+        std::fs::read_to_string(root_lf.join(".gitignore")).expect("leer el `.gitignore` ajustado");
+    assert!(
+        texto_lf.contains(".lodestar/index.db"),
+        "precondición: el bloque gestionado también se añade aquí: {texto_lf:?}"
+    );
+    assert!(
+        !texto_lf.contains('\r'),
+        "y un `.gitignore` que venía en LF sigue en LF: el arreglo es PRESERVAR el estilo \
+         dominante, no emitir CRLF siempre — o el diff espurio solo cambia de víctima: {texto_lf:?}"
+    );
+}
+
+/// **E25-H06 · Criterio 6** (`gitignore_no_deja_temporales`) — **Dado** un ajuste del bloque
+/// gestionado, **Cuando** termina, **Entonces** no queda ningún `*.lodestar-tmp` en la raíz.
+///
+/// El `.gitignore` es el único fichero **versionado** del usuario que el motor modifica, y hoy se
+/// reescribe con `std::fs::write` (`gitignore.rs:69`): truncar-y-escribir sobre el fichero vivo. Un
+/// proceso que muere a mitad —o un lector concurrente, que en un repo es `git status`— ve un
+/// `.gitignore` a medias. El alcance de la historia lo pasa al protocolo temp+fsync+rename que ya
+/// existe para los `.md` (`io::write_atomic`).
+///
+/// POR QUÉ NO ES VACUO: «no quedan temporales» lo cumple hoy trivialmente `fs::write`, que no crea
+/// ninguno. Lo que hace de éste un test del mecanismo nuevo es la aserción de **atomicidad
+/// observable**: tras el ajuste, el `.gitignore` es un **inodo distinto** del que había. Eso solo
+/// puede pasar por `rename(2)` — una escritura in-place conserva el inodo—, así que la aserción
+/// distingue exactamente los dos mecanismos, y ningún lector puede haber visto un fichero a medias.
+/// El recuento de temporales queda como guarda de que el protocolo **limpia detrás de sí**
+/// (`write_bytes_atomic` deja el temporal hermano `<nombre>.<pid>-<seq>.lodestar-tmp` en el MISMO
+/// directorio — aquí, la raíz del proyecto del usuario).
+///
+/// La mitad del inodo es Unix-only (no hay noción portable de inodo); el recuento de temporales
+/// corre en todas las plataformas.
+#[test]
+fn gitignore_no_deja_temporales() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::write(root.join(".gitignore"), "node_modules/\n").unwrap();
+
+    #[cfg(unix)]
+    let inodo_antes = {
+        use std::os::unix::fs::MetadataExt as _;
+        std::fs::metadata(root.join(".gitignore"))
+            .expect("leer el metadata del `.gitignore` de partida")
+            .ino()
+    };
+
+    let ws = Workspace::open(root).unwrap();
+    let lock = ws.acquire_lock().expect("tomar el lock de publicación");
+    drop(lock);
+
+    let texto = std::fs::read_to_string(root.join(".gitignore")).expect("leer el `.gitignore`");
+    assert!(
+        texto.contains(".lodestar/index.db"),
+        "precondición: el ajuste debe haber ocurrido (si no se reescribe nada, no hay atomicidad \
+         que comprobar): {texto:?}"
+    );
+
+    // (a) El protocolo atómico limpia detrás de sí: ni un temporal huérfano en la raíz del
+    //     proyecto del usuario (que es un directorio VERSIONADO, no un scratch).
+    let residuos: Vec<String> = std::fs::read_dir(root)
+        .expect("listar la raíz del workspace")
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.ends_with(".lodestar-tmp"))
+        .collect();
+    assert!(
+        residuos.is_empty(),
+        "el ajuste del `.gitignore` no puede dejar temporales en la raíz del proyecto: {residuos:?}"
+    );
+
+    // (b) Y la reescritura fue ATÓMICA: el fichero se sustituyó por rename (inodo nuevo), no se
+    //     truncó in-place. Es la mitad que hace de este test un test del mecanismo nuevo.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        let inodo_despues = std::fs::metadata(root.join(".gitignore"))
+            .expect("leer el metadata del `.gitignore` ajustado")
+            .ino();
+        assert_ne!(
+            inodo_antes, inodo_despues,
+            "el `.gitignore` debe sustituirse por RENAME (protocolo temp+fsync+rename, como los \
+             `.md`), no reescribirse in-place con `std::fs::write` (`gitignore.rs:69`): conservar \
+             el inodo demuestra que hubo un truncado sobre el fichero vivo, y ahí es donde un \
+             lector concurrente —o un crash— ve un `.gitignore` a medias. Es el ÚNICO fichero \
+             versionado del usuario que el motor toca"
+        );
+    }
+}
