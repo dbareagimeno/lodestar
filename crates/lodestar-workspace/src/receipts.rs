@@ -132,10 +132,20 @@ fn parse_retention(spec: &str) -> Option<Duration> {
     Some(Duration::from_secs(secs))
 }
 
-/// Serializa `bytes` en `path` de forma **atómica y durable** (temp+fsync+rename), mismo patrón
-/// que el write-ahead journal (E13-H03, `write_journal` en [`crate::journal`]). Los recibos son
-/// runtime desechable, pero fsyncarlos evita que una caída justo tras `done` deje un `.json` a
-/// medias que confundiría un `load_receipt`/GC posterior.
+/// Serializa `bytes` en `path` de forma **atómica y durable** (temp+fsync+rename **+ fsync del
+/// directorio**), mismo patrón que el write-ahead journal (E13-H03, `write_journal` en
+/// [`crate::journal`]). Los recibos son runtime desechable, pero fsyncarlos evita que una caída justo
+/// tras `done` deje un `.json` a medias que confundiría un `load_receipt`/GC posterior.
+///
+/// **E25-H05**: el fsync del directorio va por `io::sync_dir` —el único chokepoint, que ya no se traga
+/// su fallo— y aquí se **propaga siempre**, sin la dualidad que sí necesita el journal. Es seguro
+/// porque de los dos usos, uno va antes del primer rename (`write_pending_receipt`: propagar es
+/// exactamente lo que se quiere, y es además el registro cuya pérdida deja irreversible una
+/// publicación) y el otro, `write_receipt`, **ya lo tratan como best-effort todos sus llamadores**:
+/// `promote_pending_receipt` (cuyo `Err` hace que el sellado conserve el journal para que la
+/// recuperación reintente la promoción) y las dos fachadas de `lodestar-app`, que avisan por stderr y
+/// siguen. Ningún `Err` de aquí puede convertir una publicación consumada en un fallo aparente: lo
+/// único que cambia respecto a v0.4.0 es que un fsync de directorio que falla deja de pasar por bueno.
 fn write_runtime_atomic(path: &Path, bytes: &[u8]) -> Result<(), WorkspaceError> {
     let io_err = |e: std::io::Error| WorkspaceError::Io(e.to_string());
 
@@ -161,12 +171,11 @@ fn write_runtime_atomic(path: &Path, bytes: &[u8]) -> Result<(), WorkspaceError>
         let _ = std::fs::remove_file(&tmp);
         return Err(io_err(e));
     }
-    // Persiste la entrada del directorio (best-effort en Unix), como en `io::write_atomic`.
-    #[cfg(unix)]
+    // Persiste la entrada del directorio por el único chokepoint (`io::sync_dir`), y propaga su fallo
+    // como hace `io::write_atomic` desde E25-H05: sin esa entrada durable, el `.json` puede tener el
+    // contenido volcado y no tener nombre.
     if let Some(parent) = path.parent() {
-        if let Ok(dir) = std::fs::File::open(parent) {
-            let _ = dir.sync_all();
-        }
+        crate::io::sync_dir(parent)?;
     }
     Ok(())
 }

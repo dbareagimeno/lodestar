@@ -15,15 +15,23 @@ use crate::error::WorkspaceError;
 ///   los datos sin volcar → `.md` truncado (y los `.md` son LA fuente de verdad, sin copia).
 /// - Temporal ÚNICO por proceso+secuencia: con nombre fijo, dos procesos escritores (app +
 ///   agente MCP) sobre el mismo documento se pisaban el temp y publicaban contenido a medias.
+/// - fsync del directorio tras el rename ([`sync_dir`]), y desde E25-H05 su fallo se **propaga**:
+///   devolver `Ok` sin haber podido persistir la entrada de directorio era afirmar una durabilidad
+///   que no se había comprobado.
+///
+/// # Errores
+/// - [`WorkspaceError::Io`] si falla la creación del directorio padre, la escritura del temporal, el
+///   rename o el fsync del directorio.
 pub fn write_atomic(root: &Path, rel: &RelPath, content: &str) -> Result<(), WorkspaceError> {
     let target = root.join(rel.as_str());
     if let Some(parent) = target.parent() {
         std::fs::create_dir_all(parent).map_err(|e| WorkspaceError::Io(e.to_string()))?;
     }
     write_bytes_atomic(&target, content.as_bytes())?;
-    // Persiste el rename (la entrada del directorio); best-effort en Unix.
+    // Persiste el rename (la entrada del directorio). Desde E25-H05 su fallo se PROPAGA: devolver
+    // `Ok` aquí era afirmar una durabilidad que no se pudo comprobar (ver [`sync_dir`]).
     if let Some(parent) = target.parent() {
-        sync_dir(parent);
+        sync_dir(parent)?;
     }
     Ok(())
 }
@@ -56,23 +64,69 @@ pub(crate) fn write_bytes_atomic(path: &Path, bytes: &[u8]) -> Result<(), Worksp
     Ok(())
 }
 
-/// Persiste las entradas de directorio de `dir` (los renames ya hechos dentro de él); best-effort en
-/// Unix y no-op en el resto de plataformas. Sin esto, una caída puede perder el propio **nombre** de
-/// un fichero cuyo contenido sí está volcado.
-pub(crate) fn sync_dir(dir: &Path) {
+/// Persiste las entradas de directorio de `dir` (los renames y los unlinks ya hechos dentro de él).
+/// Sin esto, una caída puede perder el propio **nombre** de un fichero cuyo contenido sí está
+/// volcado —o resucitar uno que se borró—.
+///
+/// **E25-H05: deja de ser silencioso.** Hasta v0.3.1 esto era `if let Ok(f) = File::open(dir) { let _
+/// = f.sync_all(); }`: un fsync que fallaba no se distinguía de uno que había funcionado, así que
+/// [`write_atomic`] y [`delete`] devolvían `Ok` afirmando una durabilidad que no podían sostener. Al
+/// ser el **único chokepoint** del fsync de directorio (E25-H02), arreglarlo aquí lo arregla en sus
+/// seis llamadores.
+///
+/// El fallo al **abrir** el directorio cuenta como fallo de durabilidad, y por la razón más simple
+/// que hay: si no se pudo abrir, no se pudo fsyncar. Tragárselo sería exactamente el mismo silencio,
+/// solo que una línea más arriba.
+///
+/// Fuera de Unix sigue siendo un **no-op** que devuelve `Ok(())`: no hay forma portable de fsyncar un
+/// directorio, así que el comportamiento no cambia (`std::fs::File::open` sobre un directorio ni
+/// siquiera está soportado en Windows) y afirmar un fallo ahí sería tan falso como afirmar el éxito.
+///
+/// # Errores
+/// - [`WorkspaceError::Io`] si el directorio no se puede abrir o su `sync_all` falla (solo en Unix).
+#[cfg_attr(not(unix), allow(unused_variables))]
+pub(crate) fn sync_dir(dir: &Path) -> Result<(), WorkspaceError> {
     #[cfg(unix)]
-    if let Ok(handle) = std::fs::File::open(dir) {
-        let _ = handle.sync_all();
+    {
+        let handle = std::fs::File::open(dir).map_err(|e| {
+            WorkspaceError::Io(format!(
+                "no se pudo abrir el directorio {} para persistir sus entradas: {e}",
+                dir.display()
+            ))
+        })?;
+        handle.sync_all().map_err(|e| {
+            WorkspaceError::Io(format!(
+                "no se pudieron persistir las entradas del directorio {}: {e}",
+                dir.display()
+            ))
+        })?;
     }
-    #[cfg(not(unix))]
-    let _ = dir;
+    Ok(())
 }
 
-/// Borra un fichero (purga de tags obsoletos).
+/// Borra un `.md` del conocimiento canónico de forma **durable**: `remove_file` + fsync del
+/// directorio padre ([`sync_dir`]).
+///
+/// El fsync es la mitad que le faltaba a la durabilidad que el contenido sí tenía (E25-H05,
+/// defecto (a)): sin él, un corte de energía posterior a un journal `applied` podía dejar el unlink
+/// sin persistir, de modo que al reabrir el documento **reaparecía** mientras su recibo afirmaba que
+/// se había borrado. Un borrado que no se puede afirmar durable ya no se afirma: el fallo del fsync
+/// se propaga.
+///
+/// Borrar lo que no existe es un no-op (`Ok(())`) y no fsynca nada: no hay entrada de directorio
+/// nueva que persistir. Eso mantiene idempotente la restauración de los paths marcados "no existía"
+/// (`recovery.rs`), que se ejecuta también cuando la transacción no llegó a crearlos.
+///
+/// # Errores
+/// - [`WorkspaceError::Io`] si el `remove_file` falla, o si el directorio padre no se puede
+///   persistir tras el unlink.
 pub fn delete(root: &Path, rel: &RelPath) -> Result<(), WorkspaceError> {
     let target = root.join(rel.as_str());
     if target.exists() {
         std::fs::remove_file(&target).map_err(|e| WorkspaceError::Io(e.to_string()))?;
+        if let Some(parent) = target.parent() {
+            sync_dir(parent)?;
+        }
     }
     Ok(())
 }

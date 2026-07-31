@@ -1796,10 +1796,13 @@ impl App {
     ///    cambió tras el apply → [`ErrorCode::WriteConflict`] y **no** revierte (comprobación
     ///    conservadora y suficiente para el criterio: un cambio en el conocimiento escribible mueve la
     ///    `WorkspaceRevision`).
-    /// 4. **Restauración recuperable**: delega en [`Workspace::revert_transaction`], que verifica que
-    ///    las copias de recuperación (E13-H04) existen y restaura por el único escritor bajo su propio
-    ///    journal; luego persiste el [`ChangeReceipt`] de la reversión (transacción inversa) y ejecuta
-    ///    la retención (`gc_receipts`).
+    /// 4. **Restauración recuperable**: delega en `Workspace::revert_transaction_con_recibo`, que
+    ///    **re-verifica bajo el lock** la revisión observada en el paso 3 (E25-H05: entre esa
+    ///    comprobación y el lock cabe otro escritor → [`ErrorCode::WriteConflict`]), verifica que las
+    ///    copias de recuperación (E13-H04) existen, registra el [`ChangeReceipt`] de la inversa con su
+    ///    journal y restaura por el único escritor, promoviendo el recibo al sellar. Lo que queda aquí
+    ///    —re-escribir ese recibo y la retención (`gc_receipts`)— es **best-effort**: corre con la
+    ///    reversión ya publicada, así que no puede convertirla en un `Err`.
     ///
     /// Devuelve un [`RevertResult`] con `reverted:true`, las revisiones antes/después de la
     /// transacción INVERSA (`previousWorkspaceRevision` == `resultRevision` del apply;
@@ -1858,12 +1861,33 @@ impl App {
         }
 
         // (5) Restaurar por el único escritor (transacción inversa recuperable con journal propio).
+        //     `current` viaja con la llamada para que se **re-verifique BAJO EL LOCK** (E25-H05): el
+        //     paso (4) mira sin lock —lo toma `revert_transaction`—, así que en esa ventana otro
+        //     escritor puede tocar un `.md` afectado y la reversión le escribiría la copia respaldada
+        //     encima. Y el `semanticDiff` del recibo original se presta para que la inversa registre su
+        //     propio recibo con su journal, ANTES de su punto de no retorno.
         let orig_txn_id = transaction_id(&receipt.change_set_id);
         let revert_txn_id = format!("{orig_txn_id}-revert");
         let (previous, result, changed_paths) = self
             .workspace
-            .revert_transaction(&orig_txn_id, &revert_txn_id)
+            .revert_transaction_con_recibo(
+                &orig_txn_id,
+                &revert_txn_id,
+                &current,
+                Some((&receipt.change_set_id, &receipt.semantic_diff)),
+            )
             .map_err(|e| workspace_error_code(&e))?;
+
+        // Punto de caída de la FACHADA (E25-H05, espejo del de `change_apply`): entre el retorno de la
+        // transacción inversa y su recibo. Es la ventana en la que el canónico ya volvió atrás, el lock
+        // ya está soltado y —hasta esta historia— no existía todavía ningún registro de que la
+        // reversión hubiera ocurrido. Sin `--features test-failpoints` no genera ni una instrucción.
+        #[cfg(feature = "test-failpoints")]
+        if lodestar_workspace::failpoints::disparado(
+            lodestar_workspace::failpoints::FailPoint::TrasLaTransaccionAntesDelRecibo,
+        ) {
+            return Err(ErrorCode::InternalIoError);
+        }
 
         // (6) Receipt de la reversión (inversa: previous/result intercambiados respecto al apply) +
         //     retención. Su id nombra por convención las copias de recuperación de la inversa
@@ -1877,9 +1901,18 @@ impl App {
             changed_paths: changed_paths.clone(),
             semantic_diff: receipt.semantic_diff.clone(),
         };
-        self.workspace
-            .write_receipt(&revert_receipt)
-            .map_err(|e| workspace_error_code(&e))?;
+        // DESDE AQUÍ TODO ES BEST-EFFORT (E25-H05, regla heredada de E25-H04): estos pasos corren con
+        // la reversión ya publicada, así que un `Err` suyo diría al agente que no se revirtió nada
+        // sobre algo que sí se revirtió. La transacción inversa ya dejó su recibo persistido y
+        // promovido (`revert_transaction_con_recibo`); esta escritura es la red de seguridad de que
+        // existe también si su promoción no pudo completarse.
+        if let Err(e) = self.workspace.write_receipt(&revert_receipt) {
+            eprintln!(
+                "lodestar: aviso: no se pudo re-escribir el recibo de la reversión `{}` tras \
+                 revertir: {e}",
+                revert_receipt.id.0
+            );
+        }
         // Best-effort, por el mismo motivo que en `change_apply` (E25-H04): la retención corre con la
         // reversión ya publicada, así que un fallo suyo no puede convertirla en un error.
         if let Err(e) = self.workspace.gc_receipts() {

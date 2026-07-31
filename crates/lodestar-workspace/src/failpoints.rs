@@ -181,9 +181,10 @@ pub enum PuntoDeGancho {
     /// observablemente distinto y los tests de E25-H05 lo distinguen (esperan `WriteConflict` y el
     /// canónico intacto con la edición ajena encima).
     ///
-    /// STUB de la fase roja de E25-H05: la variante existe para que el test compile; **nadie la
-    /// dispara todavía**. El implementador añade el `ejecutar_gancho` cfg-gateado (dos líneas, sin
-    /// lógica de producción), igual que E25-H01/H03 hicieron en `transaction.rs`.
+    /// La variante nació como STUB de la fase roja de E25-H05 y **ya la ejerce el orquestador**: el
+    /// `ejecutar_gancho` cfg-gateado vive en `recovery.rs`, entre la recuperación del paso (2) de
+    /// `revert_transaction` y su re-verificación (2b), igual que E25-H01/H03 hicieron en
+    /// `transaction.rs`.
     AntesDeRestaurar,
 }
 

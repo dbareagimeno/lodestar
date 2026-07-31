@@ -15,6 +15,12 @@
 //! ya está en disco antes de que se toque el canónico; sin él, una caída de energía podría dejar el
 //! canónico modificado sin rastro de la transacción que lo modificó, y la recuperación no tendría
 //! qué releer.
+//!
+//! A eso E25-H05 le añadió la mitad que faltaba, la **entrada de directorio**: el fsync del
+//! directorio va por `io::sync_dir` (el único chokepoint, que desde esa historia ya no se traga su
+//! propio fallo) y su tratamiento depende de dónde caiga la escritura respecto del primer rename —
+//! **exigido** al crear el journal, **best-effort con aviso** en los `mark_*`, que corren durante y
+//! después de la publicación. El porqué de cada mitad está en `DurabilidadDelNombre`.
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -115,6 +121,12 @@ impl Journal {
     /// disco con fsync (E13-H03). La primera marca transiciona el estado global de `prepared` a
     /// `applying`; las siguientes lo dejan en `applying` (el salto a `applied` es de E13-H05).
     ///
+    /// Corre **entre renames**, así que el fsync de la entrada de directorio es best-effort con aviso
+    /// (E25-H05, `DurabilidadDelNombre::BestEffort`): a partir del primer rename el canónico ya
+    /// cambió y un fallo de durabilidad del *nombre* —que ya existe y es durable desde
+    /// `create_journal`— solo puede dejar a la vista un estado más atrasado, que la recuperación
+    /// restaura. El fsync del **contenido** sigue siendo incondicional y sí se propaga.
+    ///
     /// # Errores
     /// - [`WorkspaceError::Io`] si `path` no figura entre las operaciones registradas (registrar un
     ///   rename que el journal no previó es una incoherencia del plan), o si falla la re-escritura.
@@ -138,7 +150,7 @@ impl Journal {
             self.data.state = JournalState::Applying;
         }
 
-        write_journal(&self.path, &self.data)
+        write_journal(&self.path, &self.data, DurabilidadDelNombre::BestEffort)
     }
 
     /// Transiciona el journal a estado global `applied` (E13-H05): todas las operaciones de la
@@ -151,6 +163,11 @@ impl Journal {
     /// publicación interrumpida (todo renombrado, solo falta sellar), frente a `applying`/`prepared`
     /// (renames parciales que hay que **restaurar**).
     ///
+    /// Corre **después del último rename**, de modo que el fsync de la entrada de directorio es
+    /// best-effort con aviso (E25-H05, `DurabilidadDelNombre::BestEffort`) por la razón más dura de
+    /// todas: un `Err` aquí devolvería un fallo sobre una publicación ya consumada, que es la forma
+    /// exacta del defecto que E25-H04 cerró.
+    ///
     /// # Errores
     /// - [`WorkspaceError::Io`] si falla la re-escritura fsynced del journal.
     pub fn mark_all_applied(&mut self) -> Result<(), WorkspaceError> {
@@ -158,7 +175,7 @@ impl Journal {
             op.state = OpState::Applied;
         }
         self.data.state = JournalState::Applied;
-        write_journal(&self.path, &self.data)
+        write_journal(&self.path, &self.data, DurabilidadDelNombre::BestEffort)
     }
 }
 
@@ -172,11 +189,15 @@ impl Workspace {
     ///
     /// El fsync es lo que hace el journal *write-ahead*: garantiza que la intención completa está
     /// durable en disco antes de tocar el conocimiento canónico, de modo que una publicación
-    /// interrumpida siempre deja rastro recuperable (E13-H06).
+    /// interrumpida siempre deja rastro recuperable (E13-H06). Desde E25-H05 eso incluye la **entrada
+    /// de directorio** de `journal/<txnId>.json` —de la que cuelga `pending_journals`, y con ella toda
+    /// la recuperación—, cuyo fsync se **exige** aquí (`DurabilidadDelNombre::Exigida`): esta
+    /// escritura ocurre antes del primer rename, así que abortar no publica nada, mientras que seguir
+    /// sería tocar el canónico sin saber si queda rastro de ello.
     ///
     /// # Errores
-    /// - [`WorkspaceError::Io`] si falla la creación del directorio runtime o la escritura fsynced
-    ///   del journal.
+    /// - [`WorkspaceError::Io`] si falla la creación del directorio runtime, la escritura fsynced del
+    ///   journal o la persistencia de su entrada de directorio.
     pub fn create_journal(
         &self,
         txn_id: &str,
@@ -208,14 +229,45 @@ impl Workspace {
         // divergencia silenciosa con un id exótico, que dejaría al registro del recibo sin encontrar su
         // journal.
         let path = dir.join(format!("{}.json", crate::receipts::sanear_nombre(txn_id)));
-        write_journal(&path, &data)?;
+        write_journal(&path, &data, DurabilidadDelNombre::Exigida)?;
 
         Ok(Journal { path, data })
     }
 }
 
+/// Qué hacer con el **fsync del directorio** del journal tras el rename (E25-H05).
+///
+/// El fsync del fichero (`sync_all` del temporal) es incondicional y su fallo se propaga siempre: es
+/// lo que hace *write-ahead* al journal. Lo que este enum decide es el otro fsync, el de la **entrada
+/// de directorio**, cuyo tratamiento depende de dónde esté la escritura respecto del primer rename
+/// del canónico — la misma regla que gobierna el resto del orquestador desde E25-H04.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DurabilidadDelNombre {
+    /// **Antes** del primer rename ([`Workspace::create_journal`]): el fallo se **propaga**.
+    ///
+    /// De la entrada de directorio de `journal/<txnId>.json` cuelga toda la recuperación: es el
+    /// fichero que `pending_journals` enumera y el único rastro de que la transacción existió. Si esa
+    /// entrada no se puede persistir, avanzar al primer rename sería tocar el canónico sabiendo que
+    /// quizá no queda registro de ello — exactamente lo que el journal existe para impedir. Abortar
+    /// aquí es gratis: no se ha publicado nada.
+    Exigida,
+    /// **Durante o después** de los renames (`mark_applied`, `mark_all_applied`): el fallo se
+    /// **degrada** a aviso por stderr.
+    ///
+    /// Dos razones, y ninguna es comodidad. (1) A partir del primer rename el canónico ya cambió, así
+    /// que un `Err` aquí devolvería un error por algo que sí se aplicó —el agente concluiría que no se
+    /// aplicó nada— y en `mark_all_applied`, que corre tras el ÚLTIMO rename, sería literalmente la
+    /// forma de S5 que E25-H04 cerró. (2) Perder este fsync es **conservador por construcción**: el
+    /// nombre ya existe y es durable desde `create_journal`, y lo único que podría no persistir es la
+    /// re-vinculación del nombre a la versión nueva del JSON, de modo que una caída dejaría a la vista
+    /// un estado **más atrasado** (`prepared`/`applying` en vez de `applied`) y la recuperación
+    /// RESTAURARÍA en vez de COMPLETAR: uno de los dos bordes de la transacción, que es justo lo que la
+    /// promesa de convergencia garantiza. El silencio anterior no era eso: era no saberlo.
+    BestEffort,
+}
+
 /// Serializa `data` a JSON y lo persiste en `path` de forma **atómica y durable**
-/// (temp+fsync+rename).
+/// (temp+fsync+rename), con el fsync del directorio que pida `durabilidad`.
 ///
 /// El journal es el registro que E13-H06 releerá para recuperar una publicación interrumpida, así
 /// que una re-escritura no debe poder dejarlo *torn* (JSON a medias) ni siquiera si el proceso cae
@@ -225,7 +277,11 @@ impl Workspace {
 /// medias). Endurecido en E13-H05 (cierra la reserva de E13-H03): antes se escribía in situ, lo que
 /// bastaba para la durabilidad pero no descartaba un fichero torn si la caída ocurría a mitad de la
 /// escritura.
-fn write_journal(path: &Path, data: &JournalData) -> Result<(), WorkspaceError> {
+fn write_journal(
+    path: &Path,
+    data: &JournalData,
+    durabilidad: DurabilidadDelNombre,
+) -> Result<(), WorkspaceError> {
     let json = serde_json::to_vec_pretty(data)
         .map_err(|e| WorkspaceError::Io(format!("no se pudo serializar el journal: {e}")))?;
     let io_err = |e: std::io::Error| WorkspaceError::Io(e.to_string());
@@ -252,11 +308,20 @@ fn write_journal(path: &Path, data: &JournalData) -> Result<(), WorkspaceError> 
         let _ = std::fs::remove_file(&tmp);
         return Err(io_err(e));
     }
-    // Persiste la entrada del directorio (best-effort en Unix), como en `io::write_atomic`.
-    #[cfg(unix)]
+    // Persiste la entrada del directorio por el ÚNICO chokepoint del fsync de directorio
+    // (`io::sync_dir`, E25-H02/E25-H05), que ya no se traga su propio fallo. Qué se hace con ese
+    // fallo lo decide `durabilidad` — ver `DurabilidadDelNombre`.
     if let Some(parent) = path.parent() {
-        if let Ok(dir) = std::fs::File::open(parent) {
-            let _ = dir.sync_all();
+        match (crate::io::sync_dir(parent), durabilidad) {
+            (Ok(()), _) => {}
+            (Err(e), DurabilidadDelNombre::Exigida) => return Err(e),
+            (Err(e), DurabilidadDelNombre::BestEffort) => eprintln!(
+                "lodestar: aviso: no se pudo persistir la entrada de directorio del journal {} \
+                 ({e}): el JSON sí está volcado, así que una caída inmediata mostraría a lo sumo un \
+                 estado anterior del journal y la recuperación restauraría en vez de completar — \
+                 nunca un estado parcial",
+                path.display()
+            ),
         }
     }
     Ok(())

@@ -46,7 +46,10 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use lodestar_core::types::{workspace_revision, FileMap, RelPath, WorkspaceRevision};
+use lodestar_core::types::{
+    workspace_revision, ChangeReceipt, ChangeSetId, FileMap, ReceiptId, RelPath, SemanticDiff,
+    WorkspaceRevision,
+};
 
 use crate::error::WorkspaceError;
 #[cfg(feature = "test-failpoints")]
@@ -281,11 +284,16 @@ impl Workspace {
         // contenido volcado (`sync_all`), pero sus NOMBRES podían perderse en una caída. Se sincroniza
         // también el directorio padre, que es donde vive el sidecar. Después de este punto la
         // transacción puede avanzar al journal.
+        //
+        // E25-H05: su fallo se PROPAGA (antes se ignoraba). Estamos **antes** del primer rename, así
+        // que abortar aquí no deja nada publicado; y seguir sería avanzar al journal declarando
+        // durables unas copias que quizá no lo son — justo la premisa que la recuperación da por
+        // buena para escribirlas encima del canónico.
         for d in &a_sincronizar {
-            io::sync_dir(d);
+            io::sync_dir(d)?;
         }
         if let Some(padre) = digests.parent() {
-            io::sync_dir(padre);
+            io::sync_dir(padre)?;
         }
 
         Ok(RecoveryDir { path: dir, absent })
@@ -569,7 +577,7 @@ impl Workspace {
                 .unwrap_or_else(|| PathBuf::from(format!("{name}.json")));
             std::fs::rename(journal_path, destino.join(nombre))?;
             if let Some(origen) = journal_path.parent() {
-                io::sync_dir(origen);
+                io::sync_dir(origen)?;
             }
         }
         // (2) El árbol de copias, íntegro.
@@ -582,7 +590,7 @@ impl Workspace {
         if digests.exists() {
             std::fs::rename(&digests, destino.join(format!("{name}{DIGESTS_SUFFIX}")))?;
         }
-        io::sync_dir(&destino);
+        io::sync_dir(&destino)?;
 
         Ok(destino)
     }
@@ -872,7 +880,7 @@ impl Workspace {
             std::fs::remove_file(journal_path)?;
         }
         if let Some(padre) = journal_path.parent() {
-            io::sync_dir(padre);
+            io::sync_dir(padre)?;
         }
 
         failpoint!(FailPoint::EnMedioDelSelladoDelAborto);
@@ -917,15 +925,62 @@ impl Workspace {
     /// [`WorkspaceRevision`] antes (== `resultRevision` del apply original) y después (==
     /// `previousRevision` del apply original) de la reversión, y los paths que restauró.
     ///
+    /// `observed` es la [`WorkspaceRevision`] que la fachada vio al decidir que la transacción era
+    /// reversible, y se **re-verifica bajo el lock** antes de la primera escritura (E25-H05): la
+    /// fachada mira sin el lock, y en esa ventana otro escritor puede tocar un `.md` afectado. Si ya
+    /// no casa → [`WorkspaceError::WriteConflict`] y no se escribe nada, en vez de sobrescribir esa
+    /// edición con la copia respaldada. Es la simetría que le faltaba al camino que deshace: el apply
+    /// re-verifica su base bajo el lock desde E13-H02.
+    ///
     /// # Errores
     /// - [`WorkspaceError::Io`] si faltan las copias de recuperación de `orig_txn_id` (no se puede
     ///   revertir: transacción no disponible), o ante un fallo de IO de la restauración.
-    /// - [`WorkspaceError::WriteConflict`] si el lock ya está tomado (otro publicador).
+    /// - [`WorkspaceError::WriteConflict`] si el lock ya está tomado (otro publicador) o si el
+    ///   canónico cambió entre la comprobación de la fachada y la toma del lock (E25-H05).
     /// - [`WorkspaceError::PermissionDenied`] si algún path afectado ya no es escribible.
     pub fn revert_transaction(
         &self,
         orig_txn_id: &str,
         new_txn_id: &str,
+        observed: &WorkspaceRevision,
+    ) -> Result<(WorkspaceRevision, WorkspaceRevision, Vec<RelPath>), WorkspaceError> {
+        self.revert_transaction_con_recibo(orig_txn_id, new_txn_id, observed, None)
+    }
+
+    /// [`Workspace::revert_transaction`] que además **registra durablemente el recibo de la inversa
+    /// antes de su punto de no retorno** (E25-H05, defecto (c)).
+    ///
+    /// Es la variante que usa la fachada (`App::change_revert`), y el espejo exacto de
+    /// [`Workspace::apply_transaction_con_recibo`]: `recibo` presta las dos piezas del
+    /// [`ChangeReceipt`] que esta mecánica no puede conocer —el `changeSetId` de la transacción que se
+    /// deshace y su `semanticDiff`, que nacieron en `change_plan` y no en el disco—. Con `Some(..)` la
+    /// reversión compone su recibo completo (`previousRevision` = la revisión del paso (6),
+    /// `resultRevision` = la que estampa su journal, las dos conocidas **antes** del primer rename) y
+    /// lo persiste con el journal (`crate::receipts`, `write_pending_receipt`), promoviéndolo a recibo
+    /// definitivo al sellar. Con `None` no hay recibo: es el contrato de quien solo ejercita la
+    /// mecánica de disco.
+    ///
+    /// Por qué eso importa: hasta E25-H05 el recibo de la inversa lo escribía la fachada **después**
+    /// de que el canónico ya hubiera vuelto atrás. Un `SIGKILL` o un `ENOSPC` en ese hueco devolvía
+    /// `Err` sobre algo ya publicado y dejaba la reversión **sin recibo**; y como el recibo es el
+    /// criterio de «vivo» del GC (`journal/` ∪ `receipts/`), el árbol `recovery/<txnId>-revert/` quedaba
+    /// huérfano y se purgaba: deshacer el *undo* se volvía imposible para siempre. Persistido con el
+    /// journal, la vía COMPLETAR de [`Workspace::recover`] lo promueve sin código nuevo — la
+    /// convención de nombre `<txnId>-revert` ya localiza journal, copias, registro pendiente y recibo
+    /// con el mismo id.
+    ///
+    /// # Errores
+    /// Los mismos que [`Workspace::revert_transaction`], más un [`WorkspaceError::Io`] si el registro
+    /// del recibo no se puede escribir — que ocurre **antes** del primer rename, así que no publica
+    /// nada. A partir de la publicación de la inversa el cierre (promoción del recibo, borrado del
+    /// journal) es best-effort con aviso por stderr: un `Err` ahí convertiría una reversión consumada
+    /// en un fallo aparente.
+    pub fn revert_transaction_con_recibo(
+        &self,
+        orig_txn_id: &str,
+        new_txn_id: &str,
+        observed: &WorkspaceRevision,
+        recibo: Option<(&ChangeSetId, &SemanticDiff)>,
     ) -> Result<(WorkspaceRevision, WorkspaceRevision, Vec<RelPath>), WorkspaceError> {
         // (1) Lock exclusivo de publicación (RAII: liberado al final por `Drop`, incluso en panic).
         let _lock = self.acquire_lock()?;
@@ -934,6 +989,27 @@ impl Workspace {
         if self.recovery_pending() {
             self.recover()?;
         }
+
+        // Seam de test (E25-H05), dentro de la ventana `[comprobación de la fachada, primera
+        // escritura)`: el gancho hace de «otro escritor» y la reversión CONTINÚA —lo que `failpoint!`,
+        // que solo aborta, no sabe hacer—. Va **antes** de la re-verificación del paso (2b), que es
+        // justamente lo que tiene que cazar esa edición. Sin `--features test-failpoints` no genera ni
+        // una instrucción.
+        #[cfg(feature = "test-failpoints")]
+        crate::failpoints::ejecutar_gancho(crate::failpoints::PuntoDeGancho::AntesDeRestaurar);
+
+        // (2b) Control optimista BAJO EL LOCK (E25-H05, defecto (b)): la revisión que la fachada
+        //      observó al decidir que esta transacción era reversible sigue siendo la actual. La
+        //      fachada mira **sin** el lock —lo toma este método—, así que en esa ventana otro escritor
+        //      puede tocar un `.md` afectado; sin esta comprobación la reversión le escribía la copia
+        //      respaldada encima, en silencio y sin respaldo posible de lo pisado.
+        //
+        //      Es el mismo `reverify_base_revision` que usa el apply (invariante #3: una sola verdad,
+        //      no una segunda comprobación escrita a mano), y va **antes** de la primera escritura: al
+        //      abortar aquí no hay journal, ni copias de la inversa, ni registro de recibo que sellar
+        //      —a diferencia del aborto de ventana del apply (E25-H02), que sí tiene que sellarse
+        //      porque ocurre con el journal ya en disco—. El canónico no se ha movido ni un byte.
+        self.reverify_base_revision(observed)?;
 
         // (3) Localizar el árbol de recuperación de la transacción a revertir. Si no está, la
         //     transacción ya no es reversible (copias purgadas por el GC, E13-H07).
@@ -962,7 +1038,7 @@ impl Workspace {
             self.assert_writable(path)?;
         }
 
-        // (6) Revisión actual (== `resultRevision` del apply, ya re-verificado por la fachada) y
+        // (6) Revisión actual (== `resultRevision` del apply, re-verificada en (2b) bajo el lock) y
         //     resultado hipotético de la reversión (canónico con backups restaurados / creados
         //     borrados) para estampar la `resultRevision` en el journal ANTES de tocar el canónico.
         let previous = self.workspace_revision()?;
@@ -984,6 +1060,26 @@ impl Workspace {
         // (8) Write-ahead journal `prepared` de la inversa, fsynced antes del primer rename (H03).
         let mut journal = self.create_journal(new_txn_id, &affected, &previous, &result_rev)?;
 
+        // (8b) Registro durable del RECIBO de la inversa, con su journal y antes del primer rename
+        //      (E25-H05, misma mecánica y mismas garantías que E25-H04 dio al apply). Va DESPUÉS del
+        //      journal a propósito: el registro es efectivo solo mientras su journal declare `applied`
+        //      (`pending_receipt_efectivo` → `journal_state_of`), así que su vida queda contenida en la
+        //      del journal y no hace falta una tercera señal que caducar. A partir del primer rename el
+        //      canónico ya volvió atrás, así que este es el último instante en el que escribirlo aún
+        //      sirve de algo.
+        if let Some((change_set_id, diff)) = recibo {
+            self.write_pending_receipt(&ChangeReceipt {
+                id: ReceiptId(new_txn_id.to_string()),
+                change_set_id: change_set_id.clone(),
+                previous_revision: previous.clone(),
+                result_revision: result_rev.clone(),
+                changed_paths: affected.clone(),
+                semantic_diff: diff.clone(),
+            })?;
+        }
+
+        failpoint!(FailPoint::TrasJournalPrepared);
+
         // (9) Restaura por el único escritor: escribe cada original respaldado; borra los creados.
         for (rel, content) in &backups {
             io::write_atomic(&self.root, rel, content)?;
@@ -995,12 +1091,43 @@ impl Workspace {
         }
         journal.mark_all_applied()?;
 
-        // (10) Sella: borra el fichero de journal (levanta el gate de recuperación). Conserva las
-        //      copias de recuperación de la inversa (el receipt de la reversión las referencia; el
-        //      GC de E13-H07 las purgará con su recibo).
+        // (10) Sella la inversa: promueve su recibo y borra el fichero de journal (levanta el gate de
+        //      recuperación). Conserva las copias de recuperación de la inversa (el receipt de la
+        //      reversión las referencia; el GC de E13-H07 las purgará con su recibo).
+        //
+        // EL BLOQUE ENTERO ES BEST-EFFORT (E25-H05, regla heredada de E25-H04). Está al otro lado del
+        // punto de no retorno: el canónico ya volvió atrás, así que un `?` aquí devolvería un error por
+        // algo que SÍ se deshizo, y el agente actuaría sobre la premisa falsa de que su reversión no
+        // ocurrió. Se avisa por stderr y se sigue.
         let journal_path = journal.path().to_path_buf();
-        if journal_path.exists() {
-            std::fs::remove_file(&journal_path)?;
+
+        // (10a) El recibo, ANTES de borrar el journal: así la inversa pasa de estar respaldada por
+        //       `journal/` a estarlo por `receipts/` sin un solo instante en el que el GC del plano de
+        //       control (cuyo criterio de vivos es `journal/ ∪ receipts/`) la vea como basura y le
+        //       purgue las copias con las que se deshace el propio *undo*.
+        let recibo_a_salvo = match self.promote_pending_receipt(new_txn_id) {
+            Ok(()) => true,
+            Err(e) => {
+                eprintln!(
+                    "lodestar: aviso: no se pudo promover el recibo de la reversión {new_txn_id} \
+                     ({e}): se conserva su journal para que la recuperación lo reintente"
+                );
+                false
+            }
+        };
+
+        // (10b) El journal, y solo si el recibo quedó a salvo: si no, dejarlo en disco es lo que hace
+        //       que la vía COMPLETAR de la recuperación vuelva a intentar la promoción en la siguiente
+        //       operación en vez de perder el recibo de algo ya revertido.
+        if recibo_a_salvo && journal_path.exists() {
+            if let Err(e) = std::fs::remove_file(&journal_path) {
+                eprintln!(
+                    "lodestar: aviso: no se pudo borrar el journal {} de la reversión {new_txn_id} \
+                     ({e}): el conocimiento ya está restaurado y la recuperación completará el sellado \
+                     al reabrir",
+                    journal_path.display()
+                );
+            }
         }
 
         // (11) Revisión resultante (== `previousRevision` del apply original) + paths restaurados.
