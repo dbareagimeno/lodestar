@@ -312,8 +312,13 @@ fn flujo_completo_migracion() {
         .collect();
     assert_eq!(paths, vec!["docs/guide.md"], "where status=accepted");
 
-    // La regla de tipos viva: priority >= "high" (string vs número) NO devuelve todo, EXCLUYE los
-    // numéricos → resultado vacío (no una comparación lexicográfica).
+    // La regla de tipos viva: priority >= "high" (string vs número) NO compara texto. Hasta v0.4.0
+    // el documento que erraba se EXCLUÍA (criterio de E19-H04) y esta llamada devolvía `results: []`
+    // —una lista vacía indistinguible de «no hay resultados»—; **E26-H08 revisa ese criterio**: un
+    // `TypeError` de evaluación aborta la consulta con INVALID_SCHEMA y un mensaje que nombra campo,
+    // operador, los dos tipos y el documento. La aserción se AMPLÍA (no se borra): lo que ya
+    // demostraba —que el lenguaje respeta los tipos y no cae en el orden lexicográfico— sigue
+    // demostrándolo, ahora por el veredicto explícito.
     let r = mcp(
         root,
         &[
@@ -326,9 +331,29 @@ fn flujo_completo_migracion() {
         ],
         2,
     );
+    assert_eq!(
+        r[1]["result"]["isError"],
+        json!(true),
+        "priority >= \"high\" sobre `priority` numérico no es respondible: debe FALLAR, no \
+         devolver una lista recortada (E26-H08): {}",
+        r[1]
+    );
+    let e = r[1]["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
     assert!(
-        sc(&r[1])["results"].as_array().unwrap().is_empty(),
-        "priority >= \"high\" respeta el tipo (excluye numéricos), no compara texto"
+        e.starts_with("INVALID_SCHEMA: "),
+        "…con el código del catálogo y su mensaje (E26-H07): «{e}»"
+    );
+    assert!(
+        e.contains("priority") && e.contains("number") && e.contains("string"),
+        "…nombrando el campo y los dos tipos que chocaron: «{e}»"
+    );
+    assert!(
+        e.contains("docs/decisions/cache.md"),
+        "…y el PRIMER documento del orden total que yerra (`README.md` va antes pero no tiene \
+         `priority`, así que se excluye sin error): «{e}»"
     );
 
     // where y filter equivalentes dan el MISMO conjunto.

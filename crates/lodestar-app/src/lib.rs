@@ -26,7 +26,7 @@ use lodestar_core::types::{
     Direction, DocumentRef, DocumentRevision, Edge, EditSectionMode, ErrorCode, Expression,
     FieldInspection, FieldPath, FrontmatterPatch, GraphNode, InboundLinksPolicy, MetadataCatalog,
     NormalizedOperation, PlanHash, ReceiptId, RelPath, ResolvedLink, RiskAssessment, SemanticDiff,
-    Severity, ValidationReport, ValidationSummary, WorkspaceRevision,
+    Severity, TypeError, ValidationReport, ValidationSummary, WorkspaceRevision,
 };
 use lodestar_core::{CoreError, DocumentSet};
 use lodestar_workspace::{transaction_id, Workspace, WorkspaceError};
@@ -658,12 +658,31 @@ impl App {
     /// y un `snippet` compacto NO vacío; la estructura [`SearchResult`] **no tiene** campo `body`, así
     /// que es imposible filtrar el cuerpo completo por esta vía.
     ///
-    /// Un `where_expr`/`filter` **malformado** (no parseable) se surface como un
-    /// [`WorkspaceError::Core`] genérico —el mapeo fino a `INVALID_SCHEMA` es E20—; un
-    /// [`lodestar_core::types::TypeError`] al **evaluar** una expresión bien formada contra un
-    /// documento concreto (p. ej. `priority >= "high"` sobre un `priority` numérico) **excluye ese
-    /// documento** del resultado, sin abortar la búsqueda: el corpus es heterogéneo y un tipo
-    /// incompatible en un documento no debe tumbar la consulta sobre los demás.
+    /// Un `where_expr`/`filter` **malformado** (no parseable) se surface con `INVALID_SCHEMA` y el
+    /// diagnóstico del parser del core (E24-H10, E26-H07).
+    ///
+    /// **Un [`TypeError`] al evaluar ABORTA la consulta** (E26-H08): una expresión bien formada
+    /// sobre datos de otro tipo (p. ej. `priority >= "high"` sobre un `priority` numérico) devuelve
+    /// `Err(AppError)` con `INVALID_SCHEMA` y un mensaje que nombra campo, operador, los dos tipos y
+    /// el documento (`error_de_tipo`). Hasta v0.4.0 ese documento se **excluía en silencio** —el
+    /// criterio de E19-H04: «el corpus es heterogéneo y un tipo incompatible no debe tumbar la
+    /// consulta sobre los demás»—, y el precio era una lista recortada, decidida documento a
+    /// documento, indistinguible de la correcta; sobre un corpus homogéneo, un `[]` indistinguible
+    /// de «no hay resultados». E26-H08 revisa ese criterio con el mismo principio con que E24-H07
+    /// revisó el del parseo: una respuesta silenciosamente equivocada es peor que un error.
+    ///
+    /// **Determinismo y ámbito del error** (la decisión, porque el orden de los criterios la fija):
+    /// el `where`/`filter` se evalúa **antes** que el `text`, sobre el orden total de
+    /// [`Analysis::documents`], y se reporta el **primer** `Err` de ese orden. Consecuencias
+    /// deliberadas:
+    /// - un documento que el `text` habría descartado **sí** dispara su `TypeError`: el error es de
+    ///   la CONSULTA («este `where` no es respondible sobre este workspace»), no del subconjunto que
+    ///   el `text` deja pasar. Lo contrario —dejar que un `text` más estrecho tape el error— haría
+    ///   que la misma consulta fuera legal o ilegal según un parámetro que no habla de tipos, y que
+    ///   añadir resultados a una búsqueda la rompiera;
+    /// - `limit`/`cursor` **tampoco** cambian el veredicto: la página se recorta después de recorrer
+    ///   el orden entero. Cortocircuitar al llenar la página sería más barato, pero haría que
+    ///   `limit: 1` tuviera éxito donde `limit: 100` falla — la corrección manda (E26-H08).
     pub fn knowledge_search(
         &self,
         text: &str,
@@ -688,22 +707,27 @@ impl App {
             let parsed = model::parse_file(path.as_str(), raw);
             let fm = parsed.frontmatter.clone().unwrap_or_default();
 
-            // (1) Intersección con el FTS de `text` (subcadena, verdad del core).
-            if !text_trim.is_empty() && !loose_text_match(path, &fm, &parsed.body, &needle) {
-                continue;
-            }
-
-            // (2) Intersección con el lenguaje de consulta. Un `TypeError` sobre ESTE documento lo
-            //     excluye (no casa), sin propagarse a la búsqueda entera.
+            // (1) Intersección con el lenguaje de consulta. Va ANTES del `text` a propósito
+            //     (E26-H08): un `TypeError` es un error de la CONSULTA, no del subconjunto, así que
+            //     se decide sobre el orden total y no sobre lo que el `text` haya dejado pasar. El
+            //     `?` propaga el PRIMER `Err` del orden total —este bucle recorre
+            //     `analysis.documents` de principio a fin y la paginación es posterior—, así que ni
+            //     el `text` ni el `limit` pueden cambiar el veredicto. `Ok(false)` sigue siendo
+            //     exclusión.
             if let Some(expr) = &expr {
                 let doc = EvalDocument {
                     path,
                     frontmatter: parsed.frontmatter.as_ref(),
                     body: &parsed.body,
                 };
-                if !matches!(evaluate(expr, &doc, analysis), Ok(true)) {
+                if !evalua_documento(expr, &doc, analysis)? {
                     continue;
                 }
+            }
+
+            // (2) Intersección con el FTS de `text` (subcadena, verdad del core).
+            if !text_trim.is_empty() && !loose_text_match(path, &fm, &parsed.body, &needle) {
+                continue;
             }
 
             let title = model::derived_title(Some(&fm), &parsed.body, path);
@@ -2620,8 +2644,19 @@ fn normalize_raw_op(
 /// Una selección que no casa ningún documento devuelve un plan **vacío**, sin error. Un `where`/
 /// `filter` malformado, una `operation` que no es un objeto de una sola clave, o una op no admitida →
 /// `Err` con [`ErrorCode::InvalidSchema`] y el mensaje que dice cuál de los tres casos fue (E26-H07;
-/// para el `where`/`filter`, el diagnóstico del parser del core tal cual). Un `TypeError` al evaluar la consulta sobre un documento concreto
-/// lo **excluye** de la selección (no casa), sin abortar el plan — coherente con `knowledge_search`.
+/// para el `where`/`filter`, el diagnóstico del parser del core tal cual).
+///
+/// **Un [`TypeError`] al evaluar ABORTA el plan** (E26-H08), con el mismo `INVALID_SCHEMA` y el
+/// mismo texto que daría `knowledge_search` para esa consulta ([`evalua_documento`], `§20.10`).
+/// Hasta v0.4.0 el documento que erraba se **excluía en silencio** de la selección, así que una
+/// selección masiva saltaba documentos sin decirlo y el plan afectaba a menos ficheros de los que el
+/// agente creía haber seleccionado — la superficie donde el defecto era más caro, porque el
+/// resultado se escribe.
+///
+/// **Determinismo**: la consulta se evalúa sobre el orden total de [`Analysis::documents`] **antes**
+/// de expandir ninguna operación, y se reporta el primer `Err` de ese orden; ni el orden en que el
+/// planificador toque los documentos ni un fallo de normalización de una op posterior pueden
+/// cambiarlo. `Ok(false)` sigue siendo exclusión: no casar no es un error.
 fn expand_selection(
     doc_set: &DocumentSet,
     raw: &Value,
@@ -2654,8 +2689,12 @@ fn expand_selection(
     let analysis = doc_set.analyze();
     let files = doc_set.files();
 
-    let mut normalized: Vec<NormalizedOperation> = Vec::new();
-    let mut captured: BTreeMap<RelPath, DocumentRevision> = BTreeMap::new();
+    // (1) La CONSULTA decide el conjunto, recorriendo el orden total de `Analysis::documents`
+    //     entero y antes de expandir nada. Un `TypeError` aborta el plan con el error del PRIMER
+    //     documento de ese orden que yerra (E26-H08): el criterio no puede ser «el primero que
+    //     tocó el planificador», y expandir por el camino dejaría que el fallo de una op sobre un
+    //     documento que casa se adelantara al error de tipo de otro anterior.
+    let mut seleccionados: Vec<&RelPath> = Vec::new();
     for path in &analysis.documents {
         let Some(raw_md) = files.get(path) else {
             continue;
@@ -2666,10 +2705,18 @@ fn expand_selection(
             frontmatter: parsed.frontmatter.as_ref(),
             body: &parsed.body,
         };
-        // Un `TypeError` sobre ESTE documento lo excluye (no casa), sin propagarse al plan entero.
-        if !matches!(evaluate(&expr, &doc, analysis), Ok(true)) {
-            continue;
+        if evalua_documento(&expr, &doc, analysis)? {
+            seleccionados.push(path);
         }
+    }
+
+    // (2) …y solo entonces se expande la operación sobre los documentos elegidos.
+    let mut normalized: Vec<NormalizedOperation> = Vec::new();
+    let mut captured: BTreeMap<RelPath, DocumentRevision> = BTreeMap::new();
+    for path in seleccionados {
+        let Some(raw_md) = files.get(path) else {
+            continue;
+        };
         let raw_op = build_selected_op(op_kind, op_params, path)?;
         normalized.extend(normalize_raw_op(doc_set, &raw_op)?);
         captured.insert(
@@ -3370,6 +3417,96 @@ fn build_search_expression(
         (Some(e), None) | (None, Some(e)) => Some(e),
         (Some(w), Some(f)) => Some(Expression::And(vec![w, f])),
     })
+}
+
+/// Evalúa `expr` contra **un** documento y traduce el [`TypeError`] del evaluador al [`AppError`] de
+/// la superficie (E26-H08): un error de tipo **aborta la consulta** en vez de excluir el documento.
+///
+/// Es el **único** puente entre [`evaluate`] y las dos superficies que aceptan el lenguaje
+/// (`knowledge_search` y la selección masiva de `change_plan`), de modo que la misma consulta mal
+/// tipada dé el mismo código **y** el mismo texto por las dos (`§20.10`, invariante #3). El core no
+/// cambia: sigue devolviendo `Result<bool, TypeError>` por documento —el dato que permite a la
+/// fachada decidir—; lo que cambia es qué hace la fachada con el `Err`.
+///
+/// `Ok(false)` **sigue siendo exclusión**: no casar no es un error, y un campo ausente no llega
+/// nunca aquí como `Err` (la ausencia cortocircuita antes de comprobar tipos, E19-H01).
+fn evalua_documento(
+    expr: &Expression,
+    doc: &EvalDocument<'_>,
+    analysis: &Analysis,
+) -> Result<bool, AppError> {
+    evaluate(expr, doc, analysis).map_err(|e| error_de_tipo(&e, doc.path))
+}
+
+/// Traduce un [`TypeError`] del evaluador —el que produce una consulta bien formada sobre datos de
+/// otro tipo— al [`AppError`] de superficie: `INVALID_SCHEMA` con un mensaje que nombra **el campo,
+/// el operador, los dos tipos y el documento** donde chocaron, más cómo salir del error.
+///
+/// Hasta v0.4.0 este `Err` se descartaba en los dos consumidores con el mismo `continue` que un
+/// `Ok(false)`, así que `priority >= "high"` sobre un `priority` numérico devolvía `[]` —o una lista
+/// recortada, decidida documento a documento— sin un solo aviso: la respuesta silenciosamente
+/// equivocada que E24-H07 declaró peor que un error, aquí en la evaluación (E26-H08).
+///
+/// El **documento** viaja en el mensaje porque el mismo `where` puede ser perfectamente respondible
+/// sobre casi todo el corpus: sin él, el agente no sabe dónde mirar. **Quién** es ese documento lo
+/// fija el llamador, recorriendo el orden total de [`Analysis::documents`] y quedándose con el
+/// primer `Err` (determinismo, E26-H08): los dos consumidores iteran ese mismo orden de principio a
+/// fin, así que el error no depende de dónde paró el motor.
+fn error_de_tipo(err: &TypeError, path: &RelPath) -> AppError {
+    let detalle = match err {
+        TypeError::OrderNotDefined {
+            field,
+            operator,
+            field_type,
+            value_type,
+        } => format!(
+            "en «{}» el campo «{field}» es de tipo {} y la consulta lo compara con un literal de \
+             tipo {} mediante el operador de orden «{}». El orden solo está definido entre dos \
+             number o entre dos string (lexicográfico), y el lenguaje no coerce tipos (§20.8)",
+            path.as_str(),
+            nombre_de_wire(field_type),
+            nombre_de_wire(value_type),
+            nombre_de_wire(operator),
+        ),
+        TypeError::NotAList {
+            field,
+            operator,
+            found,
+        } => format!(
+            "en «{}» el campo «{field}» es de tipo {} y el operador «{}» exige una list (o un \
+             string, en el caso de contains, donde significa subcadena)",
+            path.as_str(),
+            nombre_de_wire(found),
+            nombre_de_wire(operator),
+        ),
+        // El enum del core es cerrado (dos variantes): una tercera rompería la compilación aquí,
+        // que es justo lo que se quiere — un `TypeError` nuevo sin mensaje sería el defecto de vuelta.
+    };
+    // La salida sugerida tiene que RESOLVER el error que se reporta. `has(campo)` no vale: la
+    // ausencia nunca produce un `TypeError` (cortocircuita antes de mirar el tipo), así que el
+    // documento que yerra TIENE el campo y `has()` no lo excluye — sugerirlo mandaría al agente a
+    // reescribir la consulta para volver a chocar con lo mismo.
+    AppError::invalid_schema(format!(
+        "la consulta no es respondible sobre estos datos: {detalle}. Ajusta la consulta al tipo \
+         real del campo: compara con un literal de ese tipo, o usa un operador definido para él \
+         («=»/«!=» nunca son error — el cruce de tipos es false); \
+         metadata_inspect{{\"mode\":\"field\"}} enumera los tipos que ese campo toma en el workspace"
+    ))
+}
+
+/// Rinde un tipo o un operador del lenguaje con su **grafía de wire** —la de `filter.operator`
+/// (`greater_than_or_equal`, `contains_any`) y la de `metadata_inspect.inferredTypes` (`number`,
+/// `string`)—, que es la que el agente ya ve en el contrato.
+///
+/// Se deriva de `Serialize` en vez de tabularse aquí a propósito: una tabla propia en la fachada
+/// sería un vocabulario paralelo al del wire (invariante #4) y podría desincronizarse del core en
+/// silencio. El `unwrap_or` no es alcanzable con los enums de unidad de `core::types` (serializan
+/// siempre a string), pero evita un `expect` en un camino de error.
+fn nombre_de_wire<T: Serialize>(valor: &T) -> String {
+    serde_json::to_value(valor)
+        .ok()
+        .and_then(|v| v.as_str().map(str::to_string))
+        .unwrap_or_else(|| "desconocido".to_string())
 }
 
 /// Puntuación simple: nº de apariciones del texto (minúsculas) en el contenido crudo; `1.0` para un

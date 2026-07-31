@@ -417,7 +417,7 @@ tools:
       - { nombre: cursor, tipo: string, requerido: false, semantica: "cursor opaco (offset codificado en hex) devuelto en nextCursor" }
     retorno: "SearchResults (lodestar_app): { results: [SearchResult], nextCursor, totalApproximate } — json directo, sin envelope. SearchResult NUNCA lleva body; desde E19-H05 tampoco los campos privilegiados OKF type/status/description/tags — solo path, title (derivado), snippet, score, revision (+ id, siempre ausente en v2), y desde E23-H11 `frontmatter` (solo si se pidió algo en `include`: el mapa de los field paths proyectados)"
     output_schema: "sí — schemars::schema_for!(SearchResults), vía lodestar_app::schemas::knowledge_search_schema()"
-    errores: ["WorkspaceError (un `where`/`filter` malformado → WorkspaceError::Core genérico; el mapeo fino a INVALID_SCHEMA es E20)", "INVALID_SCHEMA (E23-H11: una entrada de `include` que no sea «frontmatter.<fieldPath>» válida; se rechaza en el despachador, antes de tocar el workspace, y NO devuelve página de resultados)"]
+    errores: ["INVALID_SCHEMA (un `where`/`filter` malformado, con el diagnóstico del parser del core en el mensaje — E24-H10/E26-H07; una entrada de `include` que no sea «frontmatter.<fieldPath>» válida — E23-H11, se rechaza en el despachador, antes de tocar el workspace, y NO devuelve página de resultados; y desde E26-H08 un TYPE ERROR de evaluación: comparar un campo con un literal de tipo incompatible, p. ej. `priority >= \"high\"` sobre `priority: 2`)", "WorkspaceError"]
     semantica: >-
       Localiza documentos por texto libre y por el lenguaje de consulta tipado (where/filter), con
       snippet compacto y `revision` (DocumentRevision), sin devolver cuerpos completos. El filtrado
@@ -428,6 +428,15 @@ tools:
       (declarado «reservado» desde E10-H09 y recibido en un `_sort` que nadie leía): además de
       mentir al agente, un criterio alternativo rompería el cursor-offset, que se apoya en que el
       orden dependa solo del contenido.
+      Un error de TIPO durante la evaluación aborta la consulta con INVALID_SCHEMA nombrando
+      campo, operador, los dos tipos y el DOCUMENTO donde chocaron (E26-H08). Hasta v0.4.0 EXCLUÍA
+      el documento en silencio, así que la respuesta era una lista recortada indistinguible de la
+      correcta, decidida documento a documento. No casar (Ok(false)) sigue siendo ausencia, no
+      error, y un campo ausente tampoco es error. El error se decide sobre el ORDEN TOTAL de
+      Analysis::documents (se reporta el PRIMER documento que yerra) y ANTES de aplicar `text` y
+      `limit`/`cursor`: es un error de la CONSULTA, no del subconjunto, así que ni un `text` más
+      estrecho ni una página más pequeña lo tapan — la misma consulta sobre el mismo workspace da
+      siempre el mismo error, palabra por palabra.
 
   - nombre: knowledge_get
     fuente: crates/lodestar-mcp/src/tools.rs
@@ -561,14 +570,19 @@ tools:
       - { nombre: policy, tipo: object, requerido: false, semantica: "{ requireValidResult?, allowWarnings? } (PlanPolicy, E12-H04); por defecto exige conformidad y permite warnings" }
     retorno: "PlanResult (lodestar_app): { changeSetId, baseWorkspaceRevision, planHash, canApply, expiresAt, normalizedOperations: [NormalizedOperation], risk, semanticDiff, impact: { affectedDocuments, affectedCount }, capturedRevisions: { «path»: «blake3:…» }, diagnosticsBefore, diagnosticsAfter } — json directo, sin envelope. `capturedRevisions` (E21-H02) lleva una entrada por documento de una selección masiva (su DocumentRevision, el snapshot de §Fase 12); vacío {} en la forma-array"
     output_schema: "sí — schemars::schema_for!(PlanResult), vía lodestar_app::schemas::change_plan_schema()"
-    errores: ["REVISION_CONFLICT (workspace o documento cambiado)", "INVALID_SCHEMA (op desconocida o parámetro inválido; un `where`/`filter` de `selection` malformado, CON el diagnóstico del parser del core en el mensaje — E26-H07; hasta v0.4.0 `build_selection_expression` lo descartaba con `map_err(|_| …)` y la misma consulta se diagnosticaba por knowledge_search y se callaba por change_plan)", "DOCUMENT_NOT_FOUND (objetivo de normalización inexistente)", "INBOUND_LINKS_EXIST (delete «reject» con entrantes)", "PERMISSION_DENIED (path-traversal)", "RECOVERY_FAILED (E25-H02: la recuperación transparente del paso (0) —E24-H03— no pudo restaurar una transacción interrumpida porque sus copias no verifican; su journal y sus copias quedan en .lodestar/runtime/journal/quarantine/<txnId>/ y el mensaje nombra la ruta; la SIGUIENTE llamada ya no encuentra recuperación pendiente)", "INTERNAL_IO_ERROR (carga de config)", "WorkspaceError"]
+    errores: ["REVISION_CONFLICT (workspace o documento cambiado)", "INVALID_SCHEMA (op desconocida o parámetro inválido; un `where`/`filter` de `selection` malformado, CON el diagnóstico del parser del core en el mensaje — E26-H07; hasta v0.4.0 `build_selection_expression` lo descartaba con `map_err(|_| …)` y la misma consulta se diagnosticaba por knowledge_search y se callaba por change_plan; y un TYPE ERROR al evaluar `selection.where`/`selection.filter` — E26-H08: una selección masiva ya no salta documentos en silencio, y el error es el MISMO código y el MISMO texto que daría knowledge_search con esa consulta)", "DOCUMENT_NOT_FOUND (objetivo de normalización inexistente)", "INBOUND_LINKS_EXIST (delete «reject» con entrantes)", "PERMISSION_DENIED (path-traversal)", "RECOVERY_FAILED (E25-H02: la recuperación transparente del paso (0) —E24-H03— no pudo restaurar una transacción interrumpida porque sus copias no verifican; su journal y sus copias quedan en .lodestar/runtime/journal/quarantine/<txnId>/ y el mensaje nombra la ruta; la SIGUIENTE llamada ya no encuentra recuperación pendiente)", "INTERNAL_IO_ERROR (carga de config)", "WorkspaceError"]
     semantica: >-
       Orquesta un plan de cambios SIN escribir (invariante #1; aplicar es change_apply, E13): toda
       la simulación es sobre un DocumentSet en memoria. Acepta DOS formas de wire: la forma-ARRAY
       («operations»: ops sueltas, E12-H08) y la forma-OBJETO de SELECCIÓN MASIVA («selection» +
       «operation», E21-H02) — la consulta E19 elige documentos y la operación se expande a una op por
       documento seleccionado, capturando su DocumentRevision en «capturedRevisions» (snapshot de
-      §Fase 12); una selección que no casa nada da un plan vacío sin error. Verifica
+      §Fase 12); una selección que no casa nada da un plan vacío sin error, pero un TYPE ERROR al
+      evaluar la consulta ABORTA el plan (INVALID_SCHEMA, E26-H08: hasta v0.4.0 el documento que
+      erraba se saltaba en silencio y el plan afectaba a menos ficheros de los seleccionados). La
+      consulta decide el conjunto recorriendo el ORDEN TOTAL de Analysis::documents ANTES de
+      expandir ninguna operación, así que el documento nombrado en el error no depende del orden en
+      que el planificador toque los documentos. Verifica
       `expectedWorkspaceRevision` (o toma la
       actual como `baseWorkspaceRevision` = workspace_revision sobre las raíces escribibles) y, por
       cada op con `expectedRevision`, la DocumentRevision (blake3 del .md) del documento objetivo →

@@ -7147,3 +7147,204 @@ fn campo_ausente_no_es_type_error() {
         "…y el documento que SÍ tiene la clave, con el tipo correcto, sigue casando"
     );
 }
+
+/// La llamada JSON-RPC a `knowledge_search` combinando un `text` NO vacío con un `where`.
+fn linea_search_con_texto(id: u32, texto: &str, donde: &str) -> String {
+    serde_json::json!({"jsonrpc":"2.0","id": id,"method":"tools/call",
+        "params":{"name":"knowledge_search","arguments":{"text": texto, "where": donde}}})
+    .to_string()
+}
+
+/// **E26-H08** — un `text` más estrecho NO puede tapar el error de tipo.
+///
+/// El resto de tests de la familia usan `text: ""`, así que ninguno fija el ORDEN entre los dos
+/// criterios de `knowledge_search`, y el orden es justo lo que decide el alcance del error: si el
+/// `text` se aplicase primero, un documento descartado por texto nunca llegaría a evaluarse y su
+/// `TypeError` desaparecería. La misma consulta sería entonces legal o ilegal según un parámetro que
+/// no habla de tipos, y **añadir palabras a la búsqueda arreglaría la consulta** — el mismo
+/// resultado-que-depende-de-lo-invisible que la historia cierra.
+///
+/// El criterio es que el error es de la CONSULTA («este `where` no es respondible sobre este
+/// workspace»), no del subconjunto que el `text` deja pasar: el `where` se evalúa sobre el orden
+/// total de `Analysis::documents`, y por eso el veredicto es idéntico —byte a byte— al de `text: ""`.
+///
+/// Discriminante por construcción: `text: "alfa"` casa **solo** `alfa.md` (que NO yerra: su
+/// `priority` es string) y descarta `bravo.md` (que sí yerra, y es el que debe seguir saliendo
+/// nombrado).
+#[test]
+fn el_text_no_tapa_el_type_error() {
+    let dir = ws_priority_heterogeneo();
+
+    // Control de la premisa: con ese `text` y SIN `where`, la búsqueda devuelve solo `alfa.md` —de
+    // modo que el `text` de verdad descarta a `bravo.md`, y el test no es vacuo.
+    let l_solo_texto = serde_json::json!({"jsonrpc":"2.0","id":1,"method":"tools/call",
+        "params":{"name":"knowledge_search","arguments":{"text":"alfa"}}})
+    .to_string();
+    let l_texto_y_where = linea_search_con_texto(2, "alfa", ORDEN_CRUZADO);
+    let l_solo_where = linea_search(3, ORDEN_CRUZADO, None);
+    let resp = roundtrip(
+        dir.path(),
+        &[
+            l_solo_texto.as_str(),
+            l_texto_y_where.as_str(),
+            l_solo_where.as_str(),
+        ],
+        3,
+    );
+
+    assert_eq!(
+        search_paths(&resp[0]),
+        vec!["alfa.md".to_string()],
+        "premisa del test: `text: \"alfa\"` acota la búsqueda a `alfa.md` y deja fuera a `bravo.md` \
+         (el documento que yerra). Si esto cambiara, el caso de abajo dejaría de discriminar"
+    );
+
+    let con_texto = error_de(&resp[1]).unwrap_or_else(|| {
+        panic!(
+            "un `text` que descarta al documento mal tipado NO puede convertir una consulta \
+             imposible en una respuesta: el `where` se evalúa sobre el orden total, no sobre lo que \
+             el `text` deje pasar.\nRespuesta: {}",
+            resp[1]
+        )
+    });
+    juzga_error_de_tipo(
+        &con_texto,
+        "knowledge_search (con `text` que excluye el documento)",
+    );
+    assert!(
+        con_texto.contains("bravo.md"),
+        "…y sigue nombrando `bravo.md`, aunque el `text` lo hubiera descartado: «{con_texto}»"
+    );
+
+    let sin_texto = error_de(&resp[2]).expect("y con `text: \"\"` también falla");
+    assert_eq!(
+        con_texto, sin_texto,
+        "el veredicto y su texto deben ser IDÉNTICOS con y sin `text`: si un `text` más estrecho \
+         cambiara el error (o lo hiciera desaparecer), el agente podría «arreglar» una consulta mal \
+         tipada añadiendo palabras a la búsqueda"
+    );
+}
+
+/// **E26-H08** — la otra variante de `TypeError` también aborta: `NotAList`.
+///
+/// `OrderNotDefined` (el `>=` cruzado) es el generador más probable en una base real, pero el enum
+/// del core tiene DOS variantes y las dos llegan por el mismo camino. Sin este caso, la rama
+/// `NotAList` del traductor de la fachada no la ejercita nadie: podría no emitir mensaje —o emitir
+/// el del orden— y la suite no se enteraría.
+///
+/// **Ojo con la semántica real de `contains`** (verificada contra el evaluador del core antes de
+/// escribir el test, `eval_contains`): sobre un **string** `contains` es SUBCADENA, no error, así
+/// que `tags contains "x"` sobre `tags: solo` es `Ok(false)` y **no** dispara nada. `NotAList` sale
+/// de los dos casos que este test usa:
+///   · `contains` sobre un escalar **no string** (aquí un número);
+///   · `contains_any`/`contains_all` sobre cualquier no-lista (aquí un string) — son exclusivos de
+///     listas, y es el caso realista de quien escribió un tag suelto sin lista.
+#[test]
+fn type_error_de_lista_tambien_es_error_de_consulta() {
+    let dir = tempfile::tempdir().unwrap();
+    // Orden total: `a-lista.md` < `b-escalar.md` < `c-numero.md`. El primero del orden NO yerra en
+    // ninguno de los dos casos, así que el documento nombrado no puede salir por accidente.
+    write(
+        dir.path(),
+        "a-lista.md",
+        "---\ntags:\n  - uno\n  - dos\n---\n\n# Con lista\n",
+    );
+    write(
+        dir.path(),
+        "b-escalar.md",
+        "---\ntags: solo\n---\n\n# Tag suelto\n",
+    );
+    write(
+        dir.path(),
+        "c-numero.md",
+        "---\npriority: 2\n---\n\n# Número\n",
+    );
+
+    let l_contains_num = linea_search(1, "priority contains \"2\"", None);
+    let l_contains_any = linea_search(2, "tags contains_any [\"uno\"]", None);
+    let l_subcadena = linea_search(3, "tags contains \"sol\"", None);
+    let resp = roundtrip(
+        dir.path(),
+        &[
+            l_contains_num.as_str(),
+            l_contains_any.as_str(),
+            l_subcadena.as_str(),
+        ],
+        3,
+    );
+
+    // (1) `contains` sobre un número: el operador de lista sobre un escalar no-string.
+    let e_num = error_de(&resp[0]).unwrap_or_else(|| {
+        panic!(
+            "`priority contains \"2\"` sobre `priority: 2` es `TypeError::NotAList` en el core: un \
+             operador de lista sobre un número. Debe abortar la consulta igual que el orden \
+             cruzado, no devolver una lista recortada.\nRespuesta: {}",
+            resp[0]
+        )
+    });
+    let (codigo, mensaje) = codigo_y_mensaje(&e_num)
+        .unwrap_or_else(|| panic!("debe emitir «CÓDIGO: mensaje»: «{e_num}»"));
+    assert_eq!(
+        codigo, "INVALID_SCHEMA",
+        "mismo código que el otro TypeError"
+    );
+    assert!(
+        menciona(&mensaje.to_lowercase(), "priority"),
+        "el mensaje debe nombrar el campo: «{e_num}»"
+    );
+    assert!(
+        nombra_tipo(mensaje, GRAFIAS_NUMBER),
+        "…y el tipo REAL del campo (number), que es lo que le dice al agente por qué su `contains` \
+         no aplica: «{e_num}»"
+    );
+    assert!(
+        menciona(&mensaje.to_lowercase(), "contains"),
+        "…y el operador que lo exigía: «{e_num}»"
+    );
+    assert!(
+        e_num.contains("c-numero.md"),
+        "…y el documento donde chocó: «{e_num}»"
+    );
+
+    // (2) `contains_any` sobre un string: exclusivo de listas. El primero del orden (`a-lista.md`)
+    //     casa sin errar, así que el nombrado es el segundo.
+    let e_any = error_de(&resp[1]).unwrap_or_else(|| {
+        panic!(
+            "`tags contains_any [\"uno\"]` sobre `tags: solo` (string) es `NotAList`: \
+             `contains_any` es exclusivo de listas. Hasta v0.4.0 ese documento se excluía en \
+             silencio, así que la respuesta era la lista de los que SÍ tenían lista.\nRespuesta: {}",
+            resp[1]
+        )
+    });
+    let (codigo, mensaje) = codigo_y_mensaje(&e_any)
+        .unwrap_or_else(|| panic!("debe emitir «CÓDIGO: mensaje»: «{e_any}»"));
+    assert_eq!(codigo, "INVALID_SCHEMA", "mismo código");
+    assert!(
+        menciona(&mensaje.to_lowercase(), "tags") && nombra_tipo(mensaje, GRAFIAS_STRING),
+        "el mensaje debe nombrar el campo y su tipo real (string): «{e_any}»"
+    );
+    assert!(
+        menciona(&mensaje.to_lowercase(), "contains_any"),
+        "…y el operador exacto, que es distinto del `contains` a secas: «{e_any}»"
+    );
+    assert!(
+        e_any.contains("b-escalar.md") && !e_any.contains("c-numero.md"),
+        "…y el documento donde chocó, que es el primero del orden total que yerra (`a-lista.md` va \
+         antes y casa sin errar): «{e_any}»"
+    );
+
+    // (3) Control anti-vacuo: `contains` sobre un STRING es subcadena, no error. El arreglo no
+    //     puede consistir en hacer ilegal todo `contains` sobre lo que no sea una lista.
+    assert_eq!(
+        error_de(&resp[2]),
+        None,
+        "`tags contains \"sol\"` sobre `tags: solo` es SUBCADENA (el tipo del campo decide el \
+         significado del operador, `eval_contains`): eso no es un error de tipo"
+    );
+    assert_eq!(
+        search_paths(&resp[2]),
+        vec!["b-escalar.md".to_string()],
+        "…y casa el documento del tag suelto, sin que la lista de `a-lista.md` (que no contiene la \
+         subcadena) ni la ausencia de `tags` en `c-numero.md` lo estropeen"
+    );
+}
