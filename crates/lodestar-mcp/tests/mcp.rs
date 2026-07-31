@@ -6095,23 +6095,52 @@ fn parametro_obligatorio_ausente_es_invalid_schema() {
 }
 
 /// **E24-H10** — los mensajes de error no filtran internos de serde.
+///
+/// **Ampliado en E26-H07** a `change_plan`: la misma `mensaje_de_filtro` que sanea el `FilterError`
+/// para `knowledge_search` debe servir a la selección masiva, que hasta v0.4.0 devolvía
+/// «INVALID_SCHEMA» pelado (no filtraba el interno de serde… porque no decía nada). La exigencia
+/// es la misma para las dos tools, y por eso el caso se añade a la tabla en vez de a un test aparte:
+/// una segunda copia del saneado sería justo lo que prohíbe el invariante #3.
 #[test]
 fn errores_no_filtran_internos_de_serde() {
     let dir = ws_dos_docs();
-    let linea = serde_json::json!({"jsonrpc":"2.0","id":1,"method":"tools/call",
-        "params":{"name":"knowledge_search","arguments":{"text":"","filter":{"nope":1}}}})
-    .to_string();
-    let resp = roundtrip(dir.path(), &[linea.as_str()], 1);
-    let err = error_de(&resp[0]).expect("un filtro malformado debe fallar");
-    assert!(
-        !err.contains("untagged enum"),
-        "«data did not match any variant of untagged enum WireNode» es un interno de \
-         implementación que no le dice a nadie qué arreglar en su filtro: {err}"
-    );
-    assert!(
-        err.contains("field") && err.contains("operator"),
-        "el mensaje debe decir qué forma se esperaba: {err}"
-    );
+    let casos: [(&str, serde_json::Value); 2] = [
+        (
+            "knowledge_search",
+            serde_json::json!({"text": "", "filter": {"nope": 1}}),
+        ),
+        (
+            "change_plan",
+            serde_json::json!({"selection": {"filter": {"nope": 1}},
+                               "operation": {"patch_frontmatter": {"patch": {"x": 1}}}}),
+        ),
+    ];
+    let lineas: Vec<String> = casos
+        .iter()
+        .enumerate()
+        .map(|(i, (n, args))| {
+            serde_json::json!({"jsonrpc":"2.0","id": i + 1,"method":"tools/call",
+                "params":{"name": n,"arguments": args}})
+            .to_string()
+        })
+        .collect();
+    let refs: Vec<&str> = lineas.iter().map(String::as_str).collect();
+    let resp = roundtrip(dir.path(), &refs, casos.len());
+
+    for (i, (tool, _)) in casos.iter().enumerate() {
+        let err = error_de(&resp[i]).unwrap_or_else(|| {
+            panic!("un filtro malformado debe fallar por «{tool}»: {}", resp[i])
+        });
+        assert!(
+            !err.contains("untagged enum"),
+            "«data did not match any variant of untagged enum WireNode» es un interno de \
+             implementación que no le dice a nadie qué arreglar en su filtro. Tool «{tool}»: {err}"
+        );
+        assert!(
+            err.contains("field") && err.contains("operator"),
+            "el mensaje debe decir qué forma se esperaba. Tool «{tool}»: {err}"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -6414,5 +6443,328 @@ fn el_validador_de_schema_muerde() {
     assert!(
         !errores_de_schema(&schema, &serde_json::json!({})).is_empty(),
         "un campo requerido ausente debe detectarse"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// E26-H07 — Todo error de superficie lleva código Y mensaje
+//
+// E24-H10 puso el código estable al frente del mensaje… en `knowledge_search` y en las
+// comprobaciones locales del despachador. Las otras OCHO tools siguen haciendo
+// `.map_err(|e| e.as_str().to_string())`: el agente recibe literalmente «INVALID_SCHEMA», sin una
+// palabra sobre QUÉ parámetro, QUÉ valor o QUÉ se esperaba. No es un descuido del despachador —los
+// productores de `lodestar-app` son `Result<_, ErrorCode>` y no tienen dónde poner el mensaje—, y
+// por eso el arreglo es de la fachada entera, no de ocho `format!`.
+//
+// Dos consecuencias concretas de no tener sitio para el mensaje:
+//  - `graph_query` sin `ref` responde `DOCUMENT_NOT_FOUND` (el rustdoc lo admite: «no hay un código
+//    de falta-parámetro en el catálogo»), así que quien OLVIDA el `ref` recibe el mismo error que
+//    quien apunta a un documento que no existe, y toma el camino de recuperación equivocado;
+//  - `build_selection_expression` tira el `ParseError` del core con `map_err(|_| …)`, así que la
+//    MISMA consulta malformada se diagnostica por `knowledge_search` y se calla por `change_plan`.
+//
+// El catálogo NO se toca: sigue teniendo 16 filas (`catalogo_de_errores_tiene_dieciseis_filas`, en
+// `lodestar-core`) y esta historia añade mensaje, no reclasifica códigos — salvo el único caso que
+// declara, `graph_query` sin `ref`/`to`.
+// ---------------------------------------------------------------------------
+
+/// Parte el texto de error en `(código, mensaje)` **solo** si tiene la forma «CÓDIGO: mensaje» con
+/// el código estable de `ErrorCode::as_str()` (SCREAMING_SNAKE) al frente. `None` si el texto es el
+/// código pelado, o si lo que abre no es un código del catálogo.
+fn codigo_y_mensaje(err: &str) -> Option<(&str, &str)> {
+    let (codigo, mensaje) = err.split_once(": ")?;
+    (!codigo.is_empty()
+        && codigo
+            .chars()
+            .all(|c| c.is_ascii_uppercase() || c == '_' || c.is_ascii_digit()))
+    .then(|| (codigo, mensaje.trim()))
+}
+
+/// El código que abre el texto de error, o el texto entero si viene pelado (que es justo lo que
+/// esta historia arregla): sirve para juzgar el CÓDIGO con independencia de si ya trae mensaje.
+fn codigo_de(err: &str) -> &str {
+    codigo_y_mensaje(err).map_or(err, |(codigo, _)| codigo)
+}
+
+/// ¿El mensaje **nombra** ese identificador (parámetro, operación) como token, y no como trozo de
+/// otra palabra? Acepta cualquier delimitador —«ref», "ref", `ref` o ref suelto— porque lo que el
+/// criterio exige es que el mensaje lo nombre, no una tipografía concreta; pero rechaza
+/// «referencia» o «documento» como forma de «nombrar» `ref` o `to`.
+fn menciona(texto: &str, token: &str) -> bool {
+    texto
+        .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+        .any(|t| t == token)
+}
+
+/// **E26-H07** — las 8 tools que hoy devuelven el código pelado emiten «CÓDIGO: mensaje».
+///
+/// Cada caso provoca el error **más común** de su tool por el camino que hoy no tiene mensaje: el
+/// del productor de `lodestar-app` (no las comprobaciones locales del despachador, que desde
+/// E24-H10 ya lo llevan). El código esperado se asevera además tal cual sale hoy: esta historia
+/// AÑADE mensaje y no reclasifica el catálogo, así que envolver el arreglo en un «todo es
+/// INVALID_SCHEMA» sería otro defecto, no el arreglo.
+#[test]
+fn todas_las_tools_dan_codigo_y_mensaje() {
+    let dir = ws_dos_docs();
+    let casos: [(&str, serde_json::Value, &str); 8] = [
+        (
+            "knowledge_get",
+            serde_json::json!({"ref": {"path": "no-existe.md"}}),
+            "DOCUMENT_NOT_FOUND",
+        ),
+        (
+            "metadata_inspect",
+            serde_json::json!({"mode": "field"}),
+            "INVALID_SCHEMA",
+        ),
+        (
+            "knowledge_check",
+            serde_json::json!({"scope": {"kind": "document", "ref": {"path": "no-existe.md"}}}),
+            "DOCUMENT_NOT_FOUND",
+        ),
+        (
+            "graph_query",
+            serde_json::json!({"operation": "chorizo"}),
+            "INVALID_SCHEMA",
+        ),
+        (
+            "impact_analyze",
+            serde_json::json!({"ref": {"path": "no-existe.md"},
+                               "proposedOperation": {"kind": "move"}}),
+            "DOCUMENT_NOT_FOUND",
+        ),
+        (
+            "change_plan",
+            serde_json::json!({"operations": [
+                {"op": "patch_frontmatter", "path": "no-existe.md", "patch": {"x": 1}}]}),
+            "DOCUMENT_NOT_FOUND",
+        ),
+        (
+            "change_apply",
+            serde_json::json!({"changeSetId": "cs:no-existe"}),
+            "PLAN_STALE",
+        ),
+        (
+            "change_revert",
+            serde_json::json!({"receiptId": "rc:no-existe"}),
+            "PLAN_EXPIRED",
+        ),
+    ];
+
+    let lineas: Vec<String> = casos
+        .iter()
+        .enumerate()
+        .map(|(i, (n, args, _))| {
+            serde_json::json!({"jsonrpc":"2.0","id": i + 1,"method":"tools/call",
+                "params":{"name": n,"arguments": args}})
+            .to_string()
+        })
+        .collect();
+    let refs: Vec<&str> = lineas.iter().map(String::as_str).collect();
+    let resp = roundtrip(dir.path(), &refs, casos.len());
+
+    // Se acumulan TODAS las tools que incumplen antes de fallar: el defecto es de las ocho a la
+    // vez, y un panic en la primera obligaría a descubrirlas de una en una.
+    let mut incumplen: Vec<String> = Vec::new();
+    for (i, (tool, args, codigo_esperado)) in casos.iter().enumerate() {
+        let err = error_de(&resp[i]).unwrap_or_else(|| {
+            panic!(
+                "«{tool}» con {args} debe fallar para poder juzgar su error: {}",
+                resp[i]
+            )
+        });
+        match codigo_y_mensaje(&err) {
+            None => incumplen.push(format!(
+                "{tool}: CÓDIGO PELADO «{err}» (se esperaba «{codigo_esperado}: <mensaje>»)"
+            )),
+            Some((codigo, mensaje)) => {
+                if codigo != *codigo_esperado {
+                    incumplen.push(format!(
+                        "{tool}: código «{codigo}», se esperaba «{codigo_esperado}» — E26-H07 \
+                         AÑADE mensaje, no reclasifica el catálogo (su único cambio de código es \
+                         `graph_query` sin «ref»)"
+                    ));
+                } else if mensaje.len() < 10 || mensaje == codigo {
+                    incumplen.push(format!(
+                        "{tool}: el mensaje debe ser accionable, no un relleno ni el código \
+                         repetido: «{err}»"
+                    ));
+                }
+            }
+        }
+    }
+    assert!(
+        incumplen.is_empty(),
+        "estas tools no emiten «CÓDIGO: mensaje». El agente puede ramificar por el código, pero \
+         no tiene una palabra sobre qué parámetro, qué valor o qué se esperaba — que es lo que \
+         necesita para CORREGIR. La forma es la que `knowledge_search` emite desde E24-H10:\n  {}",
+        incumplen.join("\n  ")
+    );
+}
+
+/// **E26-H07** — olvidar el parámetro NO es «el documento no existe».
+///
+/// Las cuatro operaciones que exigen un extremo (`backlinks`/`outgoing`/`neighborhood` piden `ref`;
+/// `path_between` pide además `to`) devuelven hoy `DOCUMENT_NOT_FOUND` cuando el parámetro ni
+/// siquiera viene. El agente que olvidó el `ref` recibe el mismo error que el que apuntó a un
+/// documento inexistente, y toma el camino de recuperación equivocado (buscar el documento, en vez
+/// de mirar su llamada).
+#[test]
+fn graph_query_sin_ref_es_invalid_schema() {
+    let dir = ws_dos_docs();
+    // (argumentos, operación, parámetro ausente)
+    let casos: [(serde_json::Value, &str, &str); 4] = [
+        (
+            serde_json::json!({"operation": "backlinks"}),
+            "backlinks",
+            "ref",
+        ),
+        (
+            serde_json::json!({"operation": "outgoing"}),
+            "outgoing",
+            "ref",
+        ),
+        (
+            serde_json::json!({"operation": "neighborhood"}),
+            "neighborhood",
+            "ref",
+        ),
+        (
+            serde_json::json!({"operation": "path_between", "ref": {"path": "a.md"}}),
+            "path_between",
+            "to",
+        ),
+    ];
+
+    let lineas: Vec<String> = casos
+        .iter()
+        .enumerate()
+        .map(|(i, (args, _, _))| {
+            serde_json::json!({"jsonrpc":"2.0","id": i + 1,"method":"tools/call",
+                "params":{"name":"graph_query","arguments": args}})
+            .to_string()
+        })
+        .collect();
+    let refs: Vec<&str> = lineas.iter().map(String::as_str).collect();
+    let resp = roundtrip(dir.path(), &refs, casos.len());
+
+    for (i, (args, operacion, parametro)) in casos.iter().enumerate() {
+        let err = error_de(&resp[i])
+            .unwrap_or_else(|| panic!("{args} debe fallar: falta «{parametro}»: {}", resp[i]));
+        // El CÓDIGO se juzga primero y con independencia del mensaje: el defecto U2 es que
+        // «falta el parámetro» y «el documento no existe» son hoy el mismo error.
+        assert_eq!(
+            codigo_de(&err),
+            "INVALID_SCHEMA",
+            "que FALTE «{parametro}» es un esquema de entrada inválido, no un documento que no \
+             existe: hasta v0.4.0 salía DOCUMENT_NOT_FOUND, indistinguible de un «{parametro}» \
+             presente que no resuelve. Error completo: «{err}»"
+        );
+        let (_, mensaje) = codigo_y_mensaje(&err)
+            .unwrap_or_else(|| panic!("el error de {args} debe llevar código Y mensaje: «{err}»"));
+        assert!(
+            menciona(mensaje, parametro),
+            "el mensaje debe NOMBRAR el parámetro que falta («{parametro}»): «{err}»"
+        );
+        assert!(
+            menciona(mensaje, operacion),
+            "…y la operación que lo exige («{operacion}»), porque no todas lo exigen: «{err}»"
+        );
+    }
+}
+
+/// **E26-H07** — control anti-vacuo: el arreglo no puede consistir en mapear todo a
+/// `INVALID_SCHEMA`.
+///
+/// Un `ref` (o un `to`) PRESENTE que no resuelve es exactamente lo que dice
+/// `DOCUMENT_NOT_FOUND`, y debe seguir siéndolo: es la distinción que la historia existe para
+/// crear. Lo que sí cambia es que ahora también trae mensaje.
+#[test]
+fn ref_que_no_resuelve_sigue_siendo_not_found() {
+    let dir = ws_dos_docs();
+    let casos: [serde_json::Value; 2] = [
+        serde_json::json!({"operation": "backlinks", "ref": {"path": "no-existe.md"}}),
+        serde_json::json!({"operation": "path_between", "ref": {"path": "a.md"},
+                           "to": {"path": "no-existe.md"}}),
+    ];
+
+    let lineas: Vec<String> = casos
+        .iter()
+        .enumerate()
+        .map(|(i, args)| {
+            serde_json::json!({"jsonrpc":"2.0","id": i + 1,"method":"tools/call",
+                "params":{"name":"graph_query","arguments": args}})
+            .to_string()
+        })
+        .collect();
+    let refs: Vec<&str> = lineas.iter().map(String::as_str).collect();
+    let resp = roundtrip(dir.path(), &refs, casos.len());
+
+    for (i, args) in casos.iter().enumerate() {
+        let err = error_de(&resp[i])
+            .unwrap_or_else(|| panic!("{args} apunta a un documento inexistente: {}", resp[i]));
+        // Primero el control (el CÓDIGO no puede cambiar), después la exigencia nueva (mensaje).
+        assert_eq!(
+            codigo_de(&err),
+            "DOCUMENT_NOT_FOUND",
+            "un extremo PRESENTE que no resuelve es lo que su nombre dice. Si esto pasara a \
+             INVALID_SCHEMA, la distinción que introduce E26-H07 se habría perdido por el otro \
+             lado. Error completo: «{err}»"
+        );
+        assert!(
+            codigo_y_mensaje(&err).is_some_and(|(_, m)| !m.is_empty()),
+            "…y también él lleva ahora mensaje, en la forma «CÓDIGO: mensaje»: «{err}»"
+        );
+    }
+}
+
+/// **E26-H07** — la misma consulta malformada se diagnostica igual por las dos tools que la aceptan.
+///
+/// `build_search_expression` (`knowledge_search`) entrega el texto del `ParseError` del core;
+/// `build_selection_expression` (la selección masiva de `change_plan`) lo tira con
+/// `map_err(|_| ErrorCode::InvalidSchema)`. E24-H10 cerró esa asimetría para el CÓDIGO y la dejó
+/// abierta para el MENSAJE.
+///
+/// El diagnóstico esperado se toma del **core**, no de un literal: así el test no fija la redacción
+/// del parser, solo exige que llegue entera a las dos superficies (invariante #3, una sola verdad).
+#[test]
+fn change_plan_conserva_el_error_del_parser() {
+    let dir = ws_dos_docs();
+    const CONSULTA: &str = "status =";
+    let diagnostico = lodestar_core::parse::parse(CONSULTA)
+        .expect_err("«status =» es una consulta malformada: al parser le falta el valor")
+        .message;
+
+    let l_search = serde_json::json!({"jsonrpc":"2.0","id":1,"method":"tools/call",
+        "params":{"name":"knowledge_search","arguments":{"text":"","where": CONSULTA}}})
+    .to_string();
+    let l_plan = serde_json::json!({"jsonrpc":"2.0","id":2,"method":"tools/call",
+        "params":{"name":"change_plan","arguments":{
+            "selection":{"where": CONSULTA},
+            "operation":{"patch_frontmatter":{"patch":{"x":1}}}}}})
+    .to_string();
+    let resp = roundtrip(dir.path(), &[l_search.as_str(), l_plan.as_str()], 2);
+
+    let e_search = error_de(&resp[0]).expect("knowledge_search debe fallar");
+    let e_plan = error_de(&resp[1]).expect("change_plan debe fallar");
+
+    // Control: por `knowledge_search` el diagnóstico ya viaja (E24-H10). Si esto fallara, el
+    // esperado se habría desalineado del core y el test de abajo no probaría nada.
+    assert!(
+        e_search.contains(&diagnostico),
+        "el diagnóstico del parser («{diagnostico}») debe seguir llegando por knowledge_search: \
+         «{e_search}»"
+    );
+    let (codigo, mensaje) = codigo_y_mensaje(&e_plan)
+        .unwrap_or_else(|| panic!("change_plan debe emitir «CÓDIGO: mensaje»: «{e_plan}»"));
+    assert_eq!(codigo, "INVALID_SCHEMA", "mismo código por las dos tools");
+    assert!(
+        mensaje.contains(&diagnostico),
+        "el MISMO `where` malformado debe dar el MISMO diagnóstico por las dos tools que lo \
+         aceptan: `build_selection_expression` lo descarta con `map_err(|_| …)`, así que \
+         change_plan devolvía «INVALID_SCHEMA» a secas.\n\
+         diagnóstico del core: «{diagnostico}»\n\
+         knowledge_search:     «{e_search}»\n\
+         change_plan:          «{e_plan}»"
     );
 }
