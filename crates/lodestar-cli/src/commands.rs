@@ -29,7 +29,9 @@ pub fn check(root: &Path, json: bool, sarif_out: bool) -> anyhow::Result<ExitCod
     let app = lodestar_app::App::open(root).map_err(|e| anyhow::anyhow!(e.to_string()))?;
     let analysis = app
         .full_analysis()
-        .map_err(|e| anyhow::anyhow!(e.as_str().to_string()))?;
+        // E26-H07: el `Display` de `AppError` ya es «CÓDIGO: mensaje», así que el exit 3 de la CLI
+        // dice también QUÉ falló, no solo el código pelado.
+        .map_err(|e| anyhow::anyhow!(e.to_string()))?;
 
     // Veredicto == sin `Err` en NINGÚN diagnóstico, misma semántica que `knowledge_check` scope
     // `workspace` (que también cuenta los de descubrimiento en su `summary.errors`). Se recorre el

@@ -174,6 +174,76 @@ pub fn workspace_error_code(err: &WorkspaceError) -> ErrorCode {
     }
 }
 
+/// El error que devuelven los servicios de [`App`]: el [`ErrorCode`] estable del catálogo
+/// **emparejado con un mensaje accionable** (E26-H07).
+///
+/// # Por qué existe
+/// Hasta v0.4.0 los servicios devolvían `Result<_, ErrorCode>` — el código **pelado**, sin un sitio
+/// donde poner el mensaje—, así que ocho de las diez tools MCP le entregaban al agente literalmente
+/// `INVALID_SCHEMA`, sin una palabra sobre qué parámetro, qué valor o qué se esperaba. Un agente
+/// puede **ramificar** por el código, pero necesita el mensaje para **corregir**. `knowledge_search`
+/// ya lo hacía desde E24-H10 usando `WorkspaceError::InvalidSchema` + [`workspace_error_code`];
+/// este tipo generaliza ese patrón a **todos** los servicios, en un solo sitio.
+///
+/// # Lo que NO es
+/// **No** es una jerarquía paralela de códigos (invariante #4 de `CLAUDE.md`): el catálogo sigue
+/// teniendo 16 filas y viviendo **solo** en [`lodestar_core::types::ErrorCode`]. `AppError` es un
+/// envoltorio de fachada —un `ErrorCode` del core + un `String`—, no un catálogo nuevo, y su
+/// `Display` compone el texto de wire `«CÓDIGO: mensaje»` con `ErrorCode::as_str()`, nunca con un
+/// literal propio.
+///
+/// Los mensajes van en **español** (regla de idioma del repo), salvo los identificadores congelados:
+/// nombres de código, de tool, de parámetro y de operación.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppError {
+    /// Código estable del catálogo de 16 (`core::types::ErrorCode`) — por él ramifica el agente.
+    pub code: ErrorCode,
+    /// Mensaje accionable en español: qué parámetro, qué valor y qué se esperaba.
+    pub message: String,
+}
+
+impl AppError {
+    /// Empareja un código del catálogo con su mensaje.
+    pub fn new(code: ErrorCode, message: impl Into<String>) -> Self {
+        AppError {
+            code,
+            message: message.into(),
+        }
+    }
+
+    /// Atajo para el código más frecuente en la frontera: la **entrada** del agente no es
+    /// interpretable ([`ErrorCode::InvalidSchema`]).
+    pub fn invalid_schema(message: impl Into<String>) -> Self {
+        AppError::new(ErrorCode::InvalidSchema, message)
+    }
+}
+
+impl std::fmt::Display for AppError {
+    /// El texto de wire de las fachadas: `«CÓDIGO: mensaje»`, con el código estable de
+    /// [`ErrorCode::as_str`] (nunca el `Debug` de la variante Rust).
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {}", self.code.as_str(), self.message)
+    }
+}
+
+impl std::error::Error for AppError {}
+
+impl From<WorkspaceError> for AppError {
+    /// Código por [`workspace_error_code`] y mensaje por el `Display` del error real: la misma
+    /// pareja que `knowledge_search` componía a mano en la fachada MCP desde E24-H10.
+    fn from(err: WorkspaceError) -> Self {
+        AppError::new(workspace_error_code(&err), err.to_string())
+    }
+}
+
+impl From<&CoreError> for AppError {
+    /// Código por [`error_code`] y mensaje por el `Display` del [`CoreError`] — el diagnóstico del
+    /// core viaja **entero** hasta la superficie (invariante #3: una sola verdad computada).
+    fn from(err: &CoreError) -> Self {
+        AppError::new(error_code(err), err.to_string())
+    }
+}
+
 /// Forma de error de protocolo (`REFACTOR.md §13`): lo que se sirve en vez de un [`Envelope`]
 /// cuando una operación se rechaza. Wire en camelCase; `expected_revision`/`actual_revision`
 /// solo se rellenan para `REVISION_CONFLICT` (control optimista, E12) y `recovery` es un mensaje
@@ -403,20 +473,26 @@ impl App {
     /// documentos que computa el core (`Analysis::documents`, invariante #3 — "una sola verdad
     /// computada"), no contra la mera presencia de un fichero en el `FileMap` — así la resolución
     /// pasa por el mismo inventario que analiza el core, sin criterios paralelos. Si el `path` no
-    /// está en esa lista, `Err(ErrorCode::DocumentNotFound)`.
+    /// está en esa lista, `Err` con [`ErrorCode::DocumentNotFound`] **y el path que no resolvió**
+    /// (E26-H07): es la diferencia entre «te equivocaste de ruta» y «olvidaste el parámetro», que
+    /// desde esa historia son dos errores distintos.
     ///
     /// `ErrorCode::AmbiguousReference` queda RESERVADO para cuando exista resolución por `id`
     /// (`REFACTOR §6.1`) — no-goal de esta historia (IDs estables/federación). En v2 `DocumentRef.id`
     /// es siempre `None`, así que esta función nunca lo produce todavía.
-    pub fn resolve_ref(&self, r: &DocumentRef) -> Result<RelPath, ErrorCode> {
-        let analysis = self
-            .workspace
-            .analyze()
-            .map_err(|e| workspace_error_code(&e))?;
+    pub fn resolve_ref(&self, r: &DocumentRef) -> Result<RelPath, AppError> {
+        let analysis = self.workspace.analyze()?;
         if analysis.documents.contains(&r.path) {
             Ok(r.path.clone())
         } else {
-            Err(ErrorCode::DocumentNotFound)
+            Err(AppError::new(
+                ErrorCode::DocumentNotFound,
+                format!(
+                    "«{}» no es un documento del workspace: la identidad de un documento es su \
+                     ruta relativa, tal y como la devuelven knowledge_search o graph_query",
+                    r.path.as_str()
+                ),
+            ))
         }
     }
 
@@ -441,18 +517,13 @@ impl App {
     ///
     /// **Esto es reparar, no publicar**: el canónico vuelve a uno de los dos bordes de la
     /// transacción interrumpida. Ninguna operación del plan que lo invoca se materializa aquí.
-    fn recover_if_pending(&self) -> Result<(), ErrorCode> {
+    fn recover_if_pending(&self) -> Result<(), AppError> {
         if !self.workspace.recovery_pending() {
             return Ok(());
         }
-        let lock = self
-            .workspace
-            .acquire_lock()
-            .map_err(|e| workspace_error_code(&e))?;
+        let lock = self.workspace.acquire_lock()?;
         if self.workspace.recovery_pending() {
-            self.workspace
-                .recover()
-                .map_err(|e| workspace_error_code(&e))?;
+            self.workspace.recover()?;
             // E24-H06: recoger aquí, no solo en el camino de éxito. Justo después de un crash es
             // cuando hay basura en el plano de control —el staging de la transacción interrumpida
             // y los temporales a medio escribir—, y el GC solo se disparaba desde `change_apply` y
@@ -471,7 +542,7 @@ impl App {
         Ok(())
     }
 
-    pub fn workspace_status(&self, profile: Profile) -> Result<WorkspaceStatus, WorkspaceError> {
+    pub fn workspace_status(&self, profile: Profile) -> Result<WorkspaceStatus, AppError> {
         let doc_set = self.workspace.document_set()?;
         let files = doc_set.files();
         let analysis = doc_set.analyze();
@@ -601,7 +672,7 @@ impl App {
         include: &[FrontmatterProjection],
         limit: Option<usize>,
         cursor: Option<&str>,
-    ) -> Result<SearchResults, WorkspaceError> {
+    ) -> Result<SearchResults, AppError> {
         let doc_set = self.workspace.document_set()?;
         let analysis = doc_set.analyze();
         let files = doc_set.files();
@@ -758,12 +829,9 @@ impl App {
         r: &DocumentRef,
         include: &[String],
         sections: Option<&[Vec<String>]>,
-    ) -> Result<DocumentView, ErrorCode> {
+    ) -> Result<DocumentView, AppError> {
         let path = self.resolve_ref(r)?;
-        let doc_set = self
-            .workspace
-            .document_set()
-            .map_err(|e| workspace_error_code(&e))?;
+        let doc_set = self.workspace.document_set()?;
         let files = doc_set.files();
         // `resolve_ref` ya comprobó que `path` está en `Analysis::documents`, que se computa a
         // partir de este mismo `FileMap` (invariante #3) — así que el fichero existe.
@@ -826,35 +894,47 @@ impl App {
     /// - `"field"` → [`metadata::inspect_field`]: para un `field` dado (dot-path, p. ej.
     ///   `"service.tier"`), presencia/ausencia, tipos y valores escalares frecuentes
     ///   (`FieldInspection`). Requiere el parámetro `field`; su ausencia o un dot-path inválido →
-    ///   `Err(ErrorCode::InvalidSchema)`.
+    ///   `Err(ErrorCode::InvalidSchema)`, **con un mensaje que dice cuál de las dos cosas pasó**
+    ///   (E26-H07).
     ///
     /// Un `mode` sin reconocer → `Err(ErrorCode::InvalidSchema)` (nunca entra en pánico). Un
     /// workspace sin frontmatter en ningún documento NO es un error: el catálogo sale vacío.
     ///
-    /// `Result<_, ErrorCode>` (no `WorkspaceError`) — mismo patrón que [`App::knowledge_get`]: es un
-    /// servicio de cara a la fachada MCP/CLI, y el catálogo de códigos estables es lo que el llamante
-    /// necesita para el wire de error.
+    /// `Result<_, AppError>` (no `WorkspaceError`) — mismo patrón que [`App::knowledge_get`]: es un
+    /// servicio de cara a la fachada MCP/CLI, y el código estable **con su mensaje** es lo que el
+    /// llamante necesita para el wire de error.
     pub fn metadata_inspect(
         &self,
         mode: &str,
         field: Option<&str>,
-    ) -> Result<MetadataInspection, ErrorCode> {
-        let doc_set = self
-            .workspace
-            .document_set()
-            .map_err(|e| workspace_error_code(&e))?;
+    ) -> Result<MetadataInspection, AppError> {
+        let doc_set = self.workspace.document_set()?;
 
         match mode {
             "catalog" => Ok(MetadataInspection::Catalog(metadata::catalog(&doc_set))),
             "field" => {
-                let field = field.ok_or(ErrorCode::InvalidSchema)?;
-                let field_path = FieldPath::parse(field).map_err(|_| ErrorCode::InvalidSchema)?;
+                let field = field.ok_or_else(|| {
+                    AppError::invalid_schema(
+                        "el modo «field» exige el parámetro «field» con el dot-path del campo a \
+                         inspeccionar (p. ej. «status» u «owner.name»); el modo «catalog» lista los \
+                         campos disponibles",
+                    )
+                })?;
+                let field_path = FieldPath::parse(field).map_err(|e| {
+                    AppError::invalid_schema(format!(
+                        "«field» no es un dot-path válido: {e}; se esperaba algo como «status» u \
+                         «owner.name», recibido «{field}»"
+                    ))
+                })?;
                 Ok(MetadataInspection::Field(metadata::inspect_field(
                     &doc_set,
                     &field_path,
                 )))
             }
-            _ => Err(ErrorCode::InvalidSchema),
+            _ => Err(AppError::invalid_schema(format!(
+                "«mode» debe ser «catalog» (los campos que existen en la base) o «field» (el \
+                 detalle de uno); recibido «{mode}»"
+            ))),
         }
     }
 
@@ -906,11 +986,8 @@ impl App {
         include_suggested_fixes: bool,
         limit: Option<usize>,
         cursor: Option<&str>,
-    ) -> Result<CheckReport, ErrorCode> {
-        let (doc_set, discovery_diagnostics) = self
-            .workspace
-            .document_set_with_discovery()
-            .map_err(|e| workspace_error_code(&e))?;
+    ) -> Result<CheckReport, AppError> {
+        let (doc_set, discovery_diagnostics) = self.workspace.document_set_with_discovery()?;
         let analysis = doc_set.analyze();
         let cfg = self.workspace.config();
         // Política de severidad por familia (`§20.9`, E20-H04): reclasifica o suprime cada
@@ -1029,7 +1106,7 @@ impl App {
         doc_set: &DocumentSet,
         analysis: &Analysis,
         scope: &CheckScope,
-    ) -> Result<BTreeSet<RelPath>, ErrorCode> {
+    ) -> Result<BTreeSet<RelPath>, AppError> {
         match scope {
             CheckScope::Workspace => Ok(analysis.documents.iter().cloned().collect()),
             CheckScope::Document { r#ref } => {
@@ -1078,11 +1155,8 @@ impl App {
     /// `target` —`PATH-NOT-UTF8`, cuyo path no es representable como [`RelPath`]— no tiene clave con
     /// la que entrar en el mapa y **solo** se surface a por `knowledge_check`, que los lleva en una
     /// lista aparte; queda documentado como límite del wire del `Analysis`, no como olvido.
-    pub fn full_analysis(&self) -> Result<Analysis, ErrorCode> {
-        let (doc_set, discovery_diagnostics) = self
-            .workspace
-            .document_set_with_discovery()
-            .map_err(|e| workspace_error_code(&e))?;
+    pub fn full_analysis(&self) -> Result<Analysis, AppError> {
+        let (doc_set, discovery_diagnostics) = self.workspace.document_set_with_discovery()?;
         let mut analysis = doc_set.analyze().clone();
         let validation = &self.workspace.config().validation;
 
@@ -1119,9 +1193,13 @@ impl App {
     ///
     /// `operation` ∈ `"backlinks"`/`"outgoing"`/`"neighborhood"`/`"isolated"`/`"dangling"`:
     /// - `backlinks`/`outgoing`/`neighborhood` requieren `r` (resuelto con [`App::resolve_ref`]);
-    ///   su ausencia es `Err(ErrorCode::DocumentNotFound)` — no hay un código de "falta parámetro"
-    ///   dedicado en el catálogo de 16 códigos estables, y es el mismo error que produciría un
-    ///   `ref` que no resuelve, así que reusarlo aquí no inventa semántica nueva.
+    ///   su **ausencia** es `Err(ErrorCode::InvalidSchema)`, con un mensaje que nombra el parámetro
+    ///   que falta y la operación que lo exige (E26-H07). Hasta v0.4.0 era `DOCUMENT_NOT_FOUND`
+    ///   —«no hay un código de falta-parámetro en el catálogo, y es el mismo error que produciría un
+    ///   `ref` que no resuelve»—, y esa equivalencia era justo el defecto: quien **olvida** el `ref`
+    ///   recibía el mismo error que quien apunta a un documento inexistente, y tomaba el camino de
+    ///   recuperación equivocado (buscar el documento, en vez de mirar su llamada). Un `ref`
+    ///   **presente** que no resuelve sigue siendo `DOCUMENT_NOT_FOUND`, que es lo que su nombre dice.
     /// - `backlinks` reusa [`DocumentSet::backlinks`] (invariante #3, "una sola verdad computada"):
     ///   `nodes` = el propio documento + sus fuentes entrantes (`inbound`); `edges` = fuente→ref.
     /// - `outgoing` reusa [`DocumentSet::neighborhood`] con `Direction::Out` a profundidad 1: mismo
@@ -1142,7 +1220,8 @@ impl App {
     /// forma `{nodes,edges}` (invariante #3):
     /// - `path_between` requiere `r` (origen) y `to` (destino); reusa [`DocumentSet::path_between`]
     ///   (camino más corto dirigido). `nodes` = los nodos del camino, `edges` = los enlaces
-    ///   consecutivos `[a→..→b]`. Si algún ref no resuelve → `Err(ErrorCode::DocumentNotFound)`; si
+    ///   consecutivos `[a→..→b]`. La ausencia de cualquiera de los dos extremos es `INVALID_SCHEMA`
+    ///   (E26-H07, mismo criterio que arriba). Si algún ref no resuelve → `Err(ErrorCode::DocumentNotFound)`; si
     ///   no hay camino, `nodes`/`edges` vacíos (nunca error). **Nota**: la paginación genérica
     ///   ordena `nodes` por `id`, así que el orden del camino se recupera de `edges`, no de `nodes`.
     /// - `cycles` no requiere `r`: reusa [`DocumentSet::cycles`]. `nodes` = la unión de los nodos que
@@ -1174,15 +1253,26 @@ impl App {
         direction: Option<&str>,
         limit: Option<usize>,
         cursor: Option<&str>,
-    ) -> Result<GraphQueryResult, ErrorCode> {
-        let doc_set = self
-            .workspace
-            .document_set()
-            .map_err(|e| workspace_error_code(&e))?;
+    ) -> Result<GraphQueryResult, AppError> {
+        let doc_set = self.workspace.document_set()?;
+
+        // Extremo (`ref` u `to`) de las operaciones que lo exigen (E26-H07). Que FALTE es
+        // `INVALID_SCHEMA` —el agente tiene que mirar su llamada— y que no RESUELVA es
+        // `DOCUMENT_NOT_FOUND` (lo dice `resolve_ref`) —el agente tiene que buscar el documento—:
+        // dos caminos de recuperación distintos, que hasta v0.4.0 compartían código.
+        let extremo = |valor: Option<&DocumentRef>, parametro: &str, papel: &str| {
+            let r = valor.ok_or_else(|| {
+                AppError::invalid_schema(format!(
+                    "la operación «{operation}» exige el parámetro «{parametro}» ({papel}); las \
+                     operaciones isolated/dangling/cycles/components no lo llevan"
+                ))
+            })?;
+            self.resolve_ref(r)
+        };
 
         let (mut nodes, mut edges): (Vec<GraphNode>, Vec<Edge>) = match operation {
             "backlinks" => {
-                let path = self.resolve_ref(r.ok_or(ErrorCode::DocumentNotFound)?)?;
+                let path = extremo(r, "ref", "el documento consultado")?;
                 let bl = doc_set.backlinks(&path);
                 let mut ids: BTreeSet<RelPath> = BTreeSet::new();
                 ids.insert(path.clone());
@@ -1206,12 +1296,12 @@ impl App {
                 (nodes, edges)
             }
             "outgoing" => {
-                let path = self.resolve_ref(r.ok_or(ErrorCode::DocumentNotFound)?)?;
+                let path = extremo(r, "ref", "el documento consultado")?;
                 let nb = doc_set.neighborhood(&path, 1, Direction::Out);
                 (nb.nodes, nb.edges)
             }
             "neighborhood" => {
-                let path = self.resolve_ref(r.ok_or(ErrorCode::DocumentNotFound)?)?;
+                let path = extremo(r, "ref", "el centro del vecindario")?;
                 let dir = match direction {
                     Some("in") => Direction::In,
                     Some("both") => Direction::Both,
@@ -1245,8 +1335,8 @@ impl App {
                 (nodes, edges)
             }
             "path_between" => {
-                let from = self.resolve_ref(r.ok_or(ErrorCode::DocumentNotFound)?)?;
-                let dest = self.resolve_ref(to.ok_or(ErrorCode::DocumentNotFound)?)?;
+                let from = extremo(r, "ref", "el origen del camino")?;
+                let dest = extremo(to, "to", "el destino del camino")?;
                 let path = doc_set.path_between(&from, &dest);
                 let nodes = path.iter().map(|id| doc_set.node(id)).collect();
                 // Aristas consecutivas del camino; `dangling` si el destino no es un fichero real.
@@ -1279,10 +1369,15 @@ impl App {
                 let model = doc_set.graph_model();
                 (model.nodes, model.edges)
             }
-            // Ninguna historia ejerce todavía una `operation` fuera de las anteriores; mismo
-            // criterio que `metadata_inspect` para un `mode` no reconocido — no hay un código de
-            // "argumento inválido" dedicado en el catálogo de 16.
-            _ => return Err(ErrorCode::InvalidSchema),
+            // Una `operation` fuera de las anteriores es entrada inválida; mismo criterio que
+            // `metadata_inspect` para un `mode` no reconocido. El mensaje enumera las válidas
+            // (E26-H07): el código dice que el agente se equivocó, la lista le dice en qué.
+            _ => {
+                return Err(AppError::invalid_schema(format!(
+                    "«operation» debe ser una de backlinks, outgoing, neighborhood, isolated, \
+                     dangling, path_between, cycles o components; recibido «{operation}»"
+                )))
+            }
         };
 
         // Orden total y estable por `id` — paginación reproducible entre procesos frescos.
@@ -1347,17 +1442,18 @@ impl App {
         r: &DocumentRef,
         kind: &str,
         depth: Option<u32>,
-    ) -> Result<ImpactReport, ErrorCode> {
+    ) -> Result<ImpactReport, AppError> {
         // E21-H01: `kind` restringido a las operaciones de impacto del modelo universal (`§20.10`).
         // Los `kind` semánticos retirados caen aquí como esquema de entrada inválido.
         if kind != "move" && kind != "delete" {
-            return Err(ErrorCode::InvalidSchema);
+            return Err(AppError::invalid_schema(format!(
+                "«proposedOperation.kind» debe ser «move» o «delete»; recibido «{kind}». Los kind \
+                 semánticos (deprecate, transition_status, change_relation, replace_document) se \
+                 retiraron en E21-H01 con el modelo que los definía"
+            )));
         }
         let path = self.resolve_ref(r)?;
-        let doc_set = self
-            .workspace
-            .document_set()
-            .map_err(|e| workspace_error_code(&e))?;
+        let doc_set = self.workspace.document_set()?;
 
         // `directlyAffected`: backlinks DIRECTOS entrantes (verdad del core).
         let directly_affected = doc_set.backlinks(&path).inbound.len();
@@ -1446,14 +1542,17 @@ impl App {
     ///    distinto ⇒ hash distinto. **No** depende del reloj (`expiresAt` sí es wall-clock, pero
     ///    queda FUERA del hash). `changeSetId` se deriva del `planHash`.
     ///
-    /// Devuelve un [`PlanResult`] (proyección de servicio) con el plan completo. `Err(ErrorCode)`
-    /// para el wire de error (mismo patrón que el resto de servicios de `App`).
+    /// Devuelve un [`PlanResult`] (proyección de servicio) con el plan completo. `Err(AppError)`
+    /// —código estable **y** mensaje— para el wire de error (mismo patrón que el resto de servicios
+    /// de `App` desde E26-H07). El diagnóstico de un `selection.where`/`filter` malformado llega
+    /// entero en ese mensaje, por la misma compilación de consulta que usa `knowledge_search`
+    /// (`build_search_expression`, invariante #3).
     pub fn change_plan(
         &self,
         expected_workspace_revision: Option<WorkspaceRevision>,
         raw_ops: &Value,
         policy: PlanPolicy,
-    ) -> Result<PlanResult, ErrorCode> {
+    ) -> Result<PlanResult, AppError> {
         // (0) Recuperación pendiente ANTES de leer nada (E24-H03). Si una transacción anterior
         //     quedó a medias, el disco tiene renames parciales: planificar sobre él captura una
         //     `base_revision` de un estado que `apply_transaction` va a deshacer en su paso (2),
@@ -1467,10 +1566,7 @@ impl App {
         //     —el camino normal no toma el lock ni escribe nada—.
         self.recover_if_pending()?;
 
-        let doc_set = self
-            .workspace
-            .document_set()
-            .map_err(|e| workspace_error_code(&e))?;
+        let doc_set = self.workspace.document_set()?;
         let cfg = self.workspace.config();
         let files = doc_set.files();
         let writable = &cfg.workspace.writable_roots;
@@ -1479,7 +1575,15 @@ impl App {
         let base_revision = workspace_revision(files, writable);
         if let Some(expected) = &expected_workspace_revision {
             if expected != &base_revision {
-                return Err(ErrorCode::RevisionConflict);
+                return Err(AppError::new(
+                    ErrorCode::RevisionConflict,
+                    format!(
+                        "el workspace ya no está en la revisión esperada: «expectedWorkspaceRevision» \
+                         es {} y la actual es {}. Vuelve a leer el estado (workspace_status) y \
+                         replanifica",
+                        expected.0, base_revision.0
+                    ),
+                ));
             }
         }
 
@@ -1494,7 +1598,12 @@ impl App {
         ) = if raw_ops.get("selection").is_some() {
             expand_selection(&doc_set, raw_ops)?
         } else {
-            let ops_arr = raw_ops.as_array().ok_or(ErrorCode::InvalidSchema)?;
+            let ops_arr = raw_ops.as_array().ok_or_else(|| {
+                AppError::invalid_schema(
+                    "se esperaba «operations» (un array de operaciones) o la forma de selección \
+                     masiva «{selection, operation}»",
+                )
+            })?;
             let mut normalized: Vec<NormalizedOperation> = Vec::new();
             for raw in ops_arr {
                 if let Some(expected) = raw.get("expectedRevision").and_then(Value::as_str) {
@@ -1503,7 +1612,18 @@ impl App {
                         DocumentRevision::from_hash(*blake3::hash(raw_md.as_bytes()).as_bytes())
                     });
                     if actual.as_ref().map(|r| r.0.as_str()) != Some(expected) {
-                        return Err(ErrorCode::RevisionConflict);
+                        return Err(AppError::new(
+                            ErrorCode::RevisionConflict,
+                            format!(
+                                "«{}» ya no está en la revisión «{expected}» que declara la \
+                                 operación (ahora es {}). Vuelve a leerlo (knowledge_get) y \
+                                 replanifica",
+                                target.as_str(),
+                                actual
+                                    .map(|r| format!("«{}»", r.0))
+                                    .unwrap_or_else(|| "inexistente".to_string())
+                            ),
+                        ));
                     }
                 }
                 normalized.extend(normalize_raw_op(&doc_set, raw)?);
@@ -1513,7 +1633,7 @@ impl App {
 
         // (4) DocumentSet hipotético + análisis del plan (todo en memoria, sin escribir).
         let after_files =
-            plan::apply_normalized_ops(files, &normalized).map_err(|e| error_code(&e))?;
+            plan::apply_normalized_ops(files, &normalized).map_err(|e| AppError::from(&e))?;
         let after = DocumentSet::from_files(after_files);
 
         // (4-bis) Guard de descubrimiento (E15-H09): ningún path que el plan escribiría puede
@@ -1523,9 +1643,7 @@ impl App {
         //     `assert_writable`: las raíces de la config se siguen juzgando en el apply.
         for (path, contenido) in after.files() {
             if files.get(path) != Some(contenido) {
-                self.workspace
-                    .assert_discoverable(path)
-                    .map_err(|e| workspace_error_code(&e))?;
+                self.workspace.assert_discoverable(path)?;
             }
         }
 
@@ -1583,18 +1701,38 @@ impl App {
     ///
     /// Si el plan existe y está vigente, `Ok(PlanResult)` con el contenido persistido tal cual
     /// (mismo `planHash` que devolvió `change_plan`).
-    pub fn load_plan(&self, id: &ChangeSetId) -> Result<PlanResult, ErrorCode> {
+    pub fn load_plan(&self, id: &ChangeSetId) -> Result<PlanResult, AppError> {
+        // Los tres motivos de PLAN_STALE comparten mensaje porque comparten remedio: el plan ya no
+        // es utilizable y hay que volver a pedirlo (E26-H07 les da voz; el código no cambia).
+        let no_utilizable = || {
+            AppError::new(
+                ErrorCode::PlanStale,
+                format!(
+                    "el plan «{}» ya no está disponible (no existe, se purgó el runtime o su \
+                     fichero no es legible): vuelve a llamar a change_plan para obtener un \
+                     changeSetId vigente",
+                    id.0
+                ),
+            )
+        };
         let path = plan_file_path(self.workspace.root(), id);
-        let raw = std::fs::read(&path).map_err(|_| ErrorCode::PlanStale)?;
-        let plan: PlanResult = serde_json::from_slice(&raw).map_err(|_| ErrorCode::PlanStale)?;
+        let raw = std::fs::read(&path).map_err(|_| no_utilizable())?;
+        let plan: PlanResult = serde_json::from_slice(&raw).map_err(|_| no_utilizable())?;
 
-        let expires_at: u64 = plan.expires_at.parse().map_err(|_| ErrorCode::PlanStale)?;
+        let expires_at: u64 = plan.expires_at.parse().map_err(|_| no_utilizable())?;
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
         if expires_at < now {
-            return Err(ErrorCode::PlanExpired);
+            return Err(AppError::new(
+                ErrorCode::PlanExpired,
+                format!(
+                    "el plan «{}» caducó (expiresAt {expires_at}, ahora {now}): vuelve a llamar a \
+                     change_plan para replanificar sobre el estado actual",
+                    id.0
+                ),
+            ));
         }
 
         Ok(plan)
@@ -1653,7 +1791,7 @@ impl App {
         &self,
         change_set_id: &ChangeSetId,
         expected_workspace_revision: Option<WorkspaceRevision>,
-    ) -> Result<ApplyResult, ErrorCode> {
+    ) -> Result<ApplyResult, AppError> {
         let outcome = self.change_apply_uncounted(change_set_id, expected_workspace_revision);
         self.audit(audit_entry_for_apply(change_set_id, &outcome));
         outcome
@@ -1665,21 +1803,26 @@ impl App {
         &self,
         change_set_id: &ChangeSetId,
         expected_workspace_revision: Option<WorkspaceRevision>,
-    ) -> Result<ApplyResult, ErrorCode> {
+    ) -> Result<ApplyResult, AppError> {
         // (1) Cargar el plan persistido (caducidad → PLAN_EXPIRED; ausente/ilegible → PLAN_STALE).
         let plan = self.load_plan(change_set_id)?;
 
         let cfg = self.workspace.config();
-        let doc_set = self
-            .workspace
-            .document_set()
-            .map_err(|e| workspace_error_code(&e))?;
+        let doc_set = self.workspace.document_set()?;
         let current_base = workspace_revision(doc_set.files(), &cfg.workspace.writable_roots);
 
         // (2) Control optimista a nivel de workspace (si el llamante fijó una expectativa).
         if let Some(expected) = &expected_workspace_revision {
             if expected != &current_base {
-                return Err(ErrorCode::RevisionConflict);
+                return Err(AppError::new(
+                    ErrorCode::RevisionConflict,
+                    format!(
+                        "el workspace ya no está en la revisión esperada: \
+                         «expectedWorkspaceRevision» es {} y la actual es {}. Vuelve a leer el \
+                         estado (workspace_status) y replanifica",
+                        expected.0, current_base.0
+                    ),
+                ));
             }
         }
 
@@ -1687,7 +1830,15 @@ impl App {
         //     recomputado difiere del persistido → PLAN_STALE (no se escribe).
         let recomputed = compute_plan_hash(&current_base, &plan.normalized_operations);
         if recomputed != plan.plan_hash {
-            return Err(ErrorCode::PlanStale);
+            return Err(AppError::new(
+                ErrorCode::PlanStale,
+                format!(
+                    "el conocimiento cambió bajo el plan «{}»: se planificó sobre la revisión {} y \
+                     el workspace está en {}, así que no se ha escrito nada. Vuelve a llamar a \
+                     change_plan sobre el estado actual",
+                    plan.change_set_id.0, plan.base_workspace_revision.0, current_base.0
+                ),
+            ));
         }
 
         // (4) Publicar por el único escritor (staging → lock → backup → journal + REGISTRO DURABLE DEL
@@ -1699,8 +1850,7 @@ impl App {
         let change_set = plan_to_change_set(&plan);
         let (previous, result, changed_paths) = self
             .workspace
-            .apply_transaction_con_recibo(&change_set, Some(&plan.semantic_diff))
-            .map_err(|e| workspace_error_code(&e))?;
+            .apply_transaction_con_recibo(&change_set, Some(&plan.semantic_diff))?;
 
         // Punto de caída de la FACHADA (E25-H04): entre el retorno de la transacción y el recibo. Es la
         // ventana en la que el canónico ya está publicado, el lock ya está soltado y —hasta esta
@@ -1710,7 +1860,10 @@ impl App {
         if lodestar_workspace::failpoints::disparado(
             lodestar_workspace::failpoints::FailPoint::TrasLaTransaccionAntesDelRecibo,
         ) {
-            return Err(ErrorCode::InternalIoError);
+            return Err(AppError::new(
+                ErrorCode::InternalIoError,
+                "failpoint de prueba: caída simulada tras publicar la transacción y antes del recibo",
+            ));
         }
 
         // (5) Receipt de la aplicación completada + retención (E13-H07). El `receiptId` es el mismo
@@ -1819,7 +1972,7 @@ impl App {
         &self,
         receipt_id: &ReceiptId,
         expected_workspace_revision: Option<WorkspaceRevision>,
-    ) -> Result<RevertResult, ErrorCode> {
+    ) -> Result<RevertResult, AppError> {
         let outcome = self.change_revert_uncounted(receipt_id, expected_workspace_revision);
         let change_set_id_hint = self.revert_change_set_hint(receipt_id);
         self.audit(audit_entry_for_revert(&change_set_id_hint, &outcome));
@@ -1832,32 +1985,49 @@ impl App {
         &self,
         receipt_id: &ReceiptId,
         expected_workspace_revision: Option<WorkspaceRevision>,
-    ) -> Result<RevertResult, ErrorCode> {
+    ) -> Result<RevertResult, AppError> {
         // (1) Cargar el receipt persistido. Ausente/purgado ⇒ transacción no disponible → PLAN_EXPIRED.
-        let receipt = self
-            .workspace
-            .load_receipt(receipt_id)
-            .map_err(|_| ErrorCode::PlanExpired)?;
+        let receipt = self.workspace.load_receipt(receipt_id).map_err(|_| {
+            AppError::new(
+                ErrorCode::PlanExpired,
+                format!(
+                    "no hay recibo «{}»: esa transacción ya no es reversible (el recibo nunca \
+                     existió o la retención lo purgó)",
+                    receipt_id.0
+                ),
+            )
+        })?;
 
         // (2) Revisión actual del conocimiento escribible.
         let cfg = self.workspace.config();
-        let doc_set = self
-            .workspace
-            .document_set()
-            .map_err(|e| workspace_error_code(&e))?;
+        let doc_set = self.workspace.document_set()?;
         let current = workspace_revision(doc_set.files(), &cfg.workspace.writable_roots);
 
         // (3) Control optimista a nivel de workspace (si el llamante fijó una expectativa).
         if let Some(expected) = &expected_workspace_revision {
             if expected != &current {
-                return Err(ErrorCode::RevisionConflict);
+                return Err(AppError::new(
+                    ErrorCode::RevisionConflict,
+                    format!(
+                        "el workspace ya no está en la revisión esperada: \
+                         «expectedWorkspaceRevision» es {} y la actual es {}",
+                        expected.0, current.0
+                    ),
+                ));
             }
         }
 
         // (4) Ficheros afectados no alterados: el workspace sigue en la `resultRevision` del apply.
         //     Si difiere, algo cambió tras el apply → WRITE_CONFLICT y NO se revierte.
         if current != receipt.result_revision {
-            return Err(ErrorCode::WriteConflict);
+            return Err(AppError::new(
+                ErrorCode::WriteConflict,
+                format!(
+                    "el conocimiento cambió después del apply «{}» (quedó en {} y ahora está en \
+                     {}), así que revertir pisaría ese cambio: no se ha restaurado nada",
+                    receipt.change_set_id.0, receipt.result_revision.0, current.0
+                ),
+            ));
         }
 
         // (5) Restaurar por el único escritor (transacción inversa recuperable con journal propio).
@@ -1868,15 +2038,12 @@ impl App {
         //     propio recibo con su journal, ANTES de su punto de no retorno.
         let orig_txn_id = transaction_id(&receipt.change_set_id);
         let revert_txn_id = format!("{orig_txn_id}-revert");
-        let (previous, result, changed_paths) = self
-            .workspace
-            .revert_transaction_con_recibo(
-                &orig_txn_id,
-                &revert_txn_id,
-                &current,
-                Some((&receipt.change_set_id, &receipt.semantic_diff)),
-            )
-            .map_err(|e| workspace_error_code(&e))?;
+        let (previous, result, changed_paths) = self.workspace.revert_transaction_con_recibo(
+            &orig_txn_id,
+            &revert_txn_id,
+            &current,
+            Some((&receipt.change_set_id, &receipt.semantic_diff)),
+        )?;
 
         // Punto de caída de la FACHADA (E25-H05, espejo del de `change_apply`): entre el retorno de la
         // transacción inversa y su recibo. Es la ventana en la que el canónico ya volvió atrás, el lock
@@ -1886,7 +2053,10 @@ impl App {
         if lodestar_workspace::failpoints::disparado(
             lodestar_workspace::failpoints::FailPoint::TrasLaTransaccionAntesDelRecibo,
         ) {
-            return Err(ErrorCode::InternalIoError);
+            return Err(AppError::new(
+                ErrorCode::InternalIoError,
+                "failpoint de prueba: caída simulada tras revertir la transacción y antes del recibo",
+            ));
         }
 
         // (6) Receipt de la reversión (inversa: previous/result intercambiados respecto al apply) +
@@ -2117,7 +2287,7 @@ fn audit_timestamp_now() -> String {
 /// del [`ErrorCode`] rechazado.
 fn audit_entry_for_apply(
     change_set_id: &ChangeSetId,
-    outcome: &Result<ApplyResult, ErrorCode>,
+    outcome: &Result<ApplyResult, AppError>,
 ) -> AuditEntry {
     let (base_revision, result_revision, paths, result) = match outcome {
         Ok(apply) => (
@@ -2130,7 +2300,7 @@ fn audit_entry_for_apply(
                 .collect(),
             "success".to_string(),
         ),
-        Err(err) => (None, None, Vec::new(), err.as_str().to_string()),
+        Err(err) => (None, None, Vec::new(), err.code.as_str().to_string()),
     };
     AuditEntry {
         timestamp: audit_timestamp_now(),
@@ -2150,7 +2320,7 @@ fn audit_entry_for_apply(
 /// `ChangeSetId` directo.
 fn audit_entry_for_revert(
     change_set_id_hint: &str,
-    outcome: &Result<RevertResult, ErrorCode>,
+    outcome: &Result<RevertResult, AppError>,
 ) -> AuditEntry {
     let (base_revision, result_revision, paths, result) = match outcome {
         Ok(revert) => (
@@ -2163,7 +2333,7 @@ fn audit_entry_for_revert(
                 .collect(),
             "success".to_string(),
         ),
-        Err(err) => (None, None, Vec::new(), err.as_str().to_string()),
+        Err(err) => (None, None, Vec::new(), err.code.as_str().to_string()),
     };
     AuditEntry {
         timestamp: audit_timestamp_now(),
@@ -2225,7 +2395,7 @@ const PLAN_TTL_SECS: u64 = 3600;
 /// El documento cuya [`DocumentRevision`] guarda el control optimista de una op cruda: `ref.path`,
 /// `path`, `from` (move) o `source` (relaciones), en ese orden. `Err(InvalidSchema)` si la op trae
 /// `expectedRevision` pero no un objetivo identificable.
-fn op_target_path(op: &Value) -> Result<RelPath, ErrorCode> {
+fn op_target_path(op: &Value) -> Result<RelPath, AppError> {
     let candidate = op
         .get("ref")
         .and_then(|r| r.get("path"))
@@ -2233,29 +2403,48 @@ fn op_target_path(op: &Value) -> Result<RelPath, ErrorCode> {
         .or_else(|| op.get("path").and_then(Value::as_str))
         .or_else(|| op.get("from").and_then(Value::as_str))
         .or_else(|| op.get("source").and_then(Value::as_str))
-        .ok_or(ErrorCode::InvalidSchema)?;
-    RelPath::new(candidate).map_err(|e| error_code(&e))
+        .ok_or_else(|| {
+            AppError::invalid_schema(
+                "una operación con «expectedRevision» necesita identificar su documento objetivo \
+                 en «ref.path», «path» o «from»",
+            )
+        })?;
+    RelPath::new(candidate).map_err(|e| AppError::from(&e))
 }
 
 /// `ref.path` o `path` de una op cruda como [`RelPath`]. `Err(InvalidSchema)` si falta, o el error
 /// mapeado de [`RelPath::new`] (path-traversal → `PermissionDenied`) si es inválido.
-fn op_ref_path(op: &Value) -> Result<RelPath, ErrorCode> {
+fn op_ref_path(op: &Value) -> Result<RelPath, AppError> {
     let s = op
         .get("ref")
         .and_then(|r| r.get("path"))
         .and_then(Value::as_str)
         .or_else(|| op.get("path").and_then(Value::as_str))
-        .ok_or(ErrorCode::InvalidSchema)?;
-    RelPath::new(s).map_err(|e| error_code(&e))
+        .ok_or_else(|| {
+            AppError::invalid_schema(format!(
+                "la operación «{}» necesita el documento objetivo en «ref.path» o en «path» \
+                 (una ruta relativa al workspace)",
+                op_kind_de(op)
+            ))
+        })?;
+    RelPath::new(s).map_err(|e| AppError::from(&e))
 }
 
 /// Un campo string obligatorio de una op cruda como [`RelPath`].
-fn op_rel_field(op: &Value, key: &str) -> Result<RelPath, ErrorCode> {
-    let s = op
-        .get(key)
-        .and_then(Value::as_str)
-        .ok_or(ErrorCode::InvalidSchema)?;
-    RelPath::new(s).map_err(|e| error_code(&e))
+fn op_rel_field(op: &Value, key: &str) -> Result<RelPath, AppError> {
+    let s = op.get(key).and_then(Value::as_str).ok_or_else(|| {
+        AppError::invalid_schema(format!(
+            "la operación «{}» exige el campo «{key}» con una ruta relativa al workspace",
+            op_kind_de(op)
+        ))
+    })?;
+    RelPath::new(s).map_err(|e| AppError::from(&e))
+}
+
+/// El discriminador `op` de una op cruda, para citarlo en los mensajes de error (E26-H07);
+/// `«sin op»` si ni siquiera viene.
+fn op_kind_de(op: &Value) -> &str {
+    op.get("op").and_then(Value::as_str).unwrap_or("sin op")
 }
 
 /// Despacha UNA op cruda (`{op, …}`) a su normalizador del core, devolviendo las
@@ -2266,11 +2455,13 @@ fn op_rel_field(op: &Value, key: &str) -> Result<RelPath, ErrorCode> {
 fn normalize_raw_op(
     doc_set: &DocumentSet,
     op: &Value,
-) -> Result<Vec<NormalizedOperation>, ErrorCode> {
-    let kind = op
-        .get("op")
-        .and_then(Value::as_str)
-        .ok_or(ErrorCode::InvalidSchema)?;
+) -> Result<Vec<NormalizedOperation>, AppError> {
+    let kind = op.get("op").and_then(Value::as_str).ok_or_else(|| {
+        AppError::invalid_schema(
+            "cada operación necesita su discriminador «op»: create, patch_frontmatter, \
+             replace_body, replace_text, edit_section, move o delete",
+        )
+    })?;
     let one = |n: NormalizedOperation| vec![n];
     match kind {
         "create" => {
@@ -2282,21 +2473,30 @@ fn normalize_raw_op(
             let frontmatter = match op.get("frontmatter") {
                 None | Some(Value::Null) => None,
                 Some(v) if v.is_object() => {
-                    Some(serde_json::from_value(v.clone()).map_err(|_| ErrorCode::InvalidSchema)?)
+                    Some(serde_json::from_value(v.clone()).map_err(|e| {
+                        AppError::invalid_schema(format!(
+                        "el «frontmatter» de «create» no es un mapa de claves interpretable: {e}"
+                    ))
+                    })?)
                 }
-                Some(_) => return Err(ErrorCode::InvalidSchema),
+                Some(v) => {
+                    return Err(AppError::invalid_schema(format!(
+                        "el «frontmatter» de «create» debe ser un objeto de claves YAML \
+                         arbitrarias; recibido {v}"
+                    )))
+                }
             };
             let body = op.get("body").and_then(Value::as_str).map(str::to_string);
             plan::normalize_create(doc_set, &path, frontmatter, body)
                 .map(one)
-                .map_err(|e| error_code(&e))
+                .map_err(|e| AppError::from(&e))
         }
         "patch_frontmatter" => {
             let path = op_ref_path(op)?;
             let patch = op_patch(op)?;
             plan::normalize_patch_frontmatter(doc_set, &path, patch)
                 .map(one)
-                .map_err(|e| error_code(&e))
+                .map_err(|e| AppError::from(&e))
         }
         "replace_body" => {
             let path = op_ref_path(op)?;
@@ -2307,7 +2507,7 @@ fn normalize_raw_op(
                 .to_string();
             plan::normalize_replace_body(doc_set, &path, body)
                 .map(one)
-                .map_err(|e| error_code(&e))
+                .map_err(|e| AppError::from(&e))
         }
         "replace_text" => {
             let path = op_ref_path(op)?;
@@ -2319,7 +2519,7 @@ fn normalize_raw_op(
                 .map(|n| n as usize);
             plan::normalize_replace_text(doc_set, &path, find, replace, expected)
                 .map(one)
-                .map_err(|e| error_code(&e))
+                .map_err(|e| AppError::from(&e))
         }
         "edit_section" => {
             let path = op_ref_path(op)?;
@@ -2341,7 +2541,7 @@ fn normalize_raw_op(
             let content = op.get("content").and_then(Value::as_str).unwrap_or("");
             plan::normalize_edit_section(doc_set, &path, &heading_path, mode, content)
                 .map(one)
-                .map_err(|e| error_code(&e))
+                .map_err(|e| AppError::from(&e))
         }
         "move" => {
             let from = op_rel_field(op, "from")?;
@@ -2350,7 +2550,7 @@ fn normalize_raw_op(
                 .get("rewriteInboundLinks")
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
-            plan::normalize_move(doc_set, &from, &to, rewrite).map_err(|e| error_code(&e))
+            plan::normalize_move(doc_set, &from, &to, rewrite).map_err(|e| AppError::from(&e))
         }
         "delete" => {
             let path = op_ref_path(op)?;
@@ -2364,25 +2564,40 @@ fn normalize_raw_op(
                 // `INBOUND_LINKS_EXIST` que produce un `reject` explícito con backlinks. Sin
                 // backlinks no hay nada que decidir, así que se permite (borrado limpio).
                 None => {
-                    if doc_set.backlinks(&path).inbound.is_empty() {
+                    let entrantes = doc_set.backlinks(&path).inbound.len();
+                    if entrantes == 0 {
                         InboundLinksPolicy::Reject
                     } else {
-                        return Err(ErrorCode::InvalidSchema);
+                        return Err(AppError::invalid_schema(format!(
+                            "«{}» tiene {entrantes} enlaces entrantes, así que «delete» exige \
+                             elegir explícitamente «inboundLinksPolicy»: {:?}",
+                            path.as_str(),
+                            InboundLinksPolicy::WIRE_VALUES
+                        )));
                     }
                 }
                 // Un valor de política no reconocido es una op mal formada. Desde E23-H05 esto
                 // incluye `retarget` y `create_stub`, que se aceptaban sin ejecutarse: ahora se
                 // rechazan aquí, y la fachada MCP añade al mensaje cuáles son las válidas
                 // (`InboundLinksPolicy::WIRE_VALUES`).
-                Some(_) => return Err(ErrorCode::InvalidSchema),
+                Some(otra) => {
+                    return Err(AppError::invalid_schema(format!(
+                        "«{otra}» no es una política válida ante enlaces entrantes; usa una de \
+                         {:?}",
+                        InboundLinksPolicy::WIRE_VALUES
+                    )))
+                }
             };
-            plan::normalize_delete(doc_set, &path, policy).map_err(|e| error_code(&e))
+            plan::normalize_delete(doc_set, &path, policy).map_err(|e| AppError::from(&e))
         }
         // NOTA E23-H11: `"apply_fix"` ya NO tiene brazo propio — cae en el de por defecto, o sea
         // que un `apply_fix` es hoy una op desconocida (`INVALID_SCHEMA`), el mismo trato que
         // `transition_status` desde E21-H01. Antes llegaba a `normalize_apply_fix`, que devolvía
         // siempre `FixNotFound` → `DOCUMENT_NOT_FOUND` (código que apuntaba al sitio equivocado).
-        _ => Err(ErrorCode::InvalidSchema),
+        _ => Err(AppError::invalid_schema(format!(
+            "«{kind}» no es una operación conocida; usa create, patch_frontmatter, replace_body, \
+             replace_text, edit_section, move o delete"
+        ))),
     }
 }
 
@@ -2404,7 +2619,8 @@ fn normalize_raw_op(
 ///
 /// Una selección que no casa ningún documento devuelve un plan **vacío**, sin error. Un `where`/
 /// `filter` malformado, una `operation` que no es un objeto de una sola clave, o una op no admitida →
-/// `Err(ErrorCode::InvalidSchema)`. Un `TypeError` al evaluar la consulta sobre un documento concreto
+/// `Err` con [`ErrorCode::InvalidSchema`] y el mensaje que dice cuál de los tres casos fue (E26-H07;
+/// para el `where`/`filter`, el diagnóstico del parser del core tal cual). Un `TypeError` al evaluar la consulta sobre un documento concreto
 /// lo **excluye** de la selección (no casa), sin abortar el plan — coherente con `knowledge_search`.
 fn expand_selection(
     doc_set: &DocumentSet,
@@ -2414,10 +2630,20 @@ fn expand_selection(
         Vec<NormalizedOperation>,
         BTreeMap<RelPath, DocumentRevision>,
     ),
-    ErrorCode,
+    AppError,
 > {
-    let selection = raw.get("selection").ok_or(ErrorCode::InvalidSchema)?;
-    let operation = raw.get("operation").ok_or(ErrorCode::InvalidSchema)?;
+    let selection = raw.get("selection").ok_or_else(|| {
+        AppError::invalid_schema(
+            "una selección masiva necesita «selection» con «where» (consulta textual) o «filter» \
+             (filtro JSON)",
+        )
+    })?;
+    let operation = raw.get("operation").ok_or_else(|| {
+        AppError::invalid_schema(
+            "una selección masiva necesita «operation»: el objeto de UNA clave con la operación a \
+             expandir (p. ej. {\"patch_frontmatter\": {…}})",
+        )
+    })?;
 
     let where_expr = selection.get("where").and_then(Value::as_str);
     let filter = selection.get("filter");
@@ -2456,26 +2682,25 @@ fn expand_selection(
 }
 
 /// Traduce la consulta de una [`expand_selection`] (`where` textual o `filter` JSON) al [`Expression`]
-/// del core (E19), igual que `knowledge_search`. Exige **al menos** una de las dos (una selección sin
-/// criterio es una op mal formada) y, si vienen ambas, las combina con `and` (intersección).
-/// `Err(ErrorCode::InvalidSchema)` si falta el criterio o alguno es malformado.
+/// del core (E19) **por la misma función** que `knowledge_search` ([`build_search_expression`]), de
+/// modo que la misma consulta malformada dé el mismo código Y el mismo mensaje por las dos tools que
+/// la aceptan (E26-H07, invariante #3: una sola verdad computada). Lo único propio de la selección es
+/// que exige **al menos** un criterio: una selección sin `where` ni `filter` seleccionaría el
+/// workspace entero por descuido.
+///
+/// Hasta v0.4.0 esta función parseaba por su cuenta y tiraba el diagnóstico del parser con
+/// `map_err(|_| ErrorCode::InvalidSchema)`, así que el mismo `where: "status ="` se diagnosticaba
+/// por `knowledge_search` y se callaba por `change_plan`.
 fn build_selection_expression(
     where_expr: Option<&str>,
     filter: Option<&Value>,
-) -> Result<Expression, ErrorCode> {
-    let del_where = match where_expr.map(str::trim).filter(|s| !s.is_empty()) {
-        Some(w) => Some(lodestar_core::parse::parse(w).map_err(|_| ErrorCode::InvalidSchema)?),
-        None => None,
-    };
-    let del_filter = match filter {
-        Some(f) => Some(lodestar_core::filter::from_json(f).map_err(|_| ErrorCode::InvalidSchema)?),
-        None => None,
-    };
-    match (del_where, del_filter) {
-        (None, None) => Err(ErrorCode::InvalidSchema),
-        (Some(e), None) | (None, Some(e)) => Ok(e),
-        (Some(w), Some(f)) => Ok(Expression::And(vec![w, f])),
-    }
+) -> Result<Expression, AppError> {
+    build_search_expression(where_expr, filter)?.ok_or_else(|| {
+        AppError::invalid_schema(
+            "«selection» necesita «where» (consulta textual) o «filter» (filtro JSON): sin \
+             criterio, la selección masiva alcanzaría a todos los documentos",
+        )
+    })
 }
 
 /// Extrae de la `operation` de una selección masiva su `(tipo, parámetros)`: la op codifica el tipo
@@ -2483,17 +2708,30 @@ fn build_selection_expression(
 /// esa clave una op con sentido en masa. `create` no aplica a una selección de documentos existentes;
 /// `move` tampoco (un solo `to` no puede servir para N documentos). `Err(ErrorCode::InvalidSchema)`
 /// en cualquier otro caso.
-fn single_operation(operation: &Value) -> Result<(&str, &Value), ErrorCode> {
-    let obj = operation.as_object().ok_or(ErrorCode::InvalidSchema)?;
-    if obj.len() != 1 {
-        return Err(ErrorCode::InvalidSchema);
-    }
-    let (kind, params) = obj.iter().next().ok_or(ErrorCode::InvalidSchema)?;
+fn single_operation(operation: &Value) -> Result<(&str, &Value), AppError> {
+    const EN_MASA: &str = "patch_frontmatter, replace_text o delete";
+    let obj = operation.as_object().ok_or_else(|| {
+        AppError::invalid_schema(format!(
+            "«operation» debe ser un objeto que codifique la operación como CLAVE \
+             ({{\"patch_frontmatter\": {{…}}}}); en masa solo tienen sentido {EN_MASA}"
+        ))
+    })?;
+    let mut claves = obj.keys();
+    let (Some(kind), None) = (claves.next(), claves.next()) else {
+        return Err(AppError::invalid_schema(format!(
+            "«operation» debe tener EXACTAMENTE una clave (la operación a expandir); recibidas {:?}",
+            obj.keys().collect::<Vec<_>>()
+        )));
+    };
+    let params = &obj[kind];
     match kind.as_str() {
         // E23-H11: `apply_fix` salió de la lista blanca con la op. Una selección masiva que la pida
         // es `INVALID_SCHEMA` (op no admitida en masa), igual que si pidiera `create`.
         "patch_frontmatter" | "replace_text" | "delete" => Ok((kind, params)),
-        _ => Err(ErrorCode::InvalidSchema),
+        otra => Err(AppError::invalid_schema(format!(
+            "«{otra}» no es una operación admitida en una selección masiva; usa {EN_MASA} \
+             («create» no aplica a documentos existentes y «move» necesita un destino por documento)"
+        ))),
     }
 }
 
@@ -2501,7 +2739,7 @@ fn single_operation(operation: &Value) -> Result<(&str, &Value), ErrorCode> {
 /// [`normalize_raw_op`] la despache igual que si la hubiera enviado el agente sueltamente. El valor de
 /// `patch_frontmatter` ES el merge-patch (va bajo la clave `patch`); las demás ops llevan sus
 /// parámetros sueltos (`find`/`replace`, `inboundLinksPolicy`…).
-fn build_selected_op(kind: &str, params: &Value, path: &RelPath) -> Result<Value, ErrorCode> {
+fn build_selected_op(kind: &str, params: &Value, path: &RelPath) -> Result<Value, AppError> {
     let mut obj = serde_json::Map::new();
     obj.insert("op".to_string(), Value::String(kind.to_string()));
     obj.insert(
@@ -2510,11 +2748,18 @@ fn build_selected_op(kind: &str, params: &Value, path: &RelPath) -> Result<Value
     );
     if kind == "patch_frontmatter" {
         if !params.is_object() {
-            return Err(ErrorCode::InvalidSchema);
+            return Err(AppError::invalid_schema(format!(
+                "el valor de «patch_frontmatter» ES el merge-patch de frontmatter, así que debe ser \
+                 un objeto; recibido {params}"
+            )));
         }
         obj.insert("patch".to_string(), params.clone());
     } else {
-        let extra = params.as_object().ok_or(ErrorCode::InvalidSchema)?;
+        let extra = params.as_object().ok_or_else(|| {
+            AppError::invalid_schema(format!(
+                "los parámetros de «{kind}» deben venir en un objeto; recibido {params}"
+            ))
+        })?;
         for (k, v) in extra {
             obj.insert(k.clone(), v.clone());
         }
@@ -2525,12 +2770,21 @@ fn build_selected_op(kind: &str, params: &Value, path: &RelPath) -> Result<Value
 /// Convierte el campo `patch` de una op cruda en un [`FrontmatterPatch`] (merge-patch RFC 7386:
 /// `null` borra la clave, cualquier otro valor la escribe). `Err(InvalidSchema)` si `patch` falta o
 /// no es un objeto.
-fn op_patch(op: &Value) -> Result<FrontmatterPatch, ErrorCode> {
-    let patch = op.get("patch").ok_or(ErrorCode::InvalidSchema)?;
+fn op_patch(op: &Value) -> Result<FrontmatterPatch, AppError> {
+    let patch = op.get("patch").ok_or_else(|| {
+        AppError::invalid_schema(
+            "«patch_frontmatter» exige el campo «patch» con el merge-patch (RFC 7386: un valor \
+             escribe la clave, «null» la borra)",
+        )
+    })?;
     if !patch.is_object() {
-        return Err(ErrorCode::InvalidSchema);
+        return Err(AppError::invalid_schema(format!(
+            "«patch» debe ser un objeto de claves de frontmatter; recibido {patch}"
+        )));
     }
-    serde_json::from_value(patch.clone()).map_err(|_| ErrorCode::InvalidSchema)
+    serde_json::from_value(patch.clone()).map_err(|e| {
+        AppError::invalid_schema(format!("«patch» no es un merge-patch interpretable: {e}"))
+    })
 }
 
 /// `planHash` determinista: `blake3(baseWorkspaceRevision ‖ 0x00 ‖ serialización JSON de las
@@ -2581,13 +2835,30 @@ fn plan_file_path(root: &Path, id: &ChangeSetId) -> PathBuf {
 /// el lock, así que es aquí (y no en `acquire_lock`) donde le toca ajustar el `.gitignore`
 /// gestionado — abrir el workspace ya no lo hace. Por eso recibe el [`Workspace`] y no un `&Path`:
 /// el ajuste no puede quedar a criterio del llamador.
-fn persist_plan(ws: &Workspace, plan: &PlanResult) -> Result<(), ErrorCode> {
+fn persist_plan(ws: &Workspace, plan: &PlanResult) -> Result<(), AppError> {
+    let io = |e: std::io::Error| {
+        AppError::new(
+            ErrorCode::InternalIoError,
+            format!(
+                "no se pudo persistir el plan «{}» en .lodestar/runtime/plans/: {e}",
+                plan.change_set_id.0
+            ),
+        )
+    };
     ws.ensure_managed_gitignore();
     let dir = ws.root().join(".lodestar").join("runtime").join("plans");
-    std::fs::create_dir_all(&dir).map_err(|_| ErrorCode::InternalIoError)?;
+    std::fs::create_dir_all(&dir).map_err(io)?;
     let path = dir.join(plan_file_name(&plan.change_set_id));
-    let json = serde_json::to_vec_pretty(plan).map_err(|_| ErrorCode::InternalIoError)?;
-    std::fs::write(&path, json).map_err(|_| ErrorCode::InternalIoError)
+    let json = serde_json::to_vec_pretty(plan).map_err(|e| {
+        AppError::new(
+            ErrorCode::InternalIoError,
+            format!(
+                "el plan «{}» no serializa a JSON: {e}",
+                plan.change_set_id.0
+            ),
+        )
+    })?;
+    std::fs::write(&path, json).map_err(io)
 }
 
 /// Instante de caducidad del plan (`expiresAt`): ahora + [`PLAN_TTL_SECS`], en segundos epoch como
@@ -3046,6 +3317,11 @@ pub struct SearchResults {
 ///   ningún test lo fija, pero es la elección menos sorprendente (un filtro extra solo puede
 ///   restringir, nunca abrir la selección).
 ///
+/// Es la **única** compilación de consulta del motor: la selección masiva de `change_plan` la
+/// consume vía [`build_selection_expression`] (E26-H07), así que el mismo `where`/`filter`
+/// malformado produce el mismo código y el mismo texto por las dos tools que lo aceptan
+/// (invariante #3).
+///
 /// Un `where`/`filter` **malformado** se surface con el código estable **`INVALID_SCHEMA`**
 /// (E24-H10). Hasta v0.3.0 se envolvía en [`WorkspaceError::Core`], que `workspace_error_code`
 /// mapea a `INTERNAL_IO_ERROR`: un typo del agente en su consulta se le reportaba como error
@@ -3074,17 +3350,18 @@ fn mensaje_de_filtro(e: &lodestar_core::filter::FilterError) -> String {
 fn build_search_expression(
     where_expr: Option<&str>,
     filter: Option<&Value>,
-) -> Result<Option<Expression>, WorkspaceError> {
+) -> Result<Option<Expression>, AppError> {
     // Un `where` en blanco (solo espacios) se trata como ausente: no es una consulta malformada.
-    let del_where = match where_expr.map(str::trim).filter(|s| !s.is_empty()) {
-        Some(w) => Some(lodestar_core::parse::parse(w).map_err(|e| {
-            WorkspaceError::InvalidSchema(format!("«where» inválido: {}", e.message))
-        })?),
-        None => None,
-    };
+    let del_where =
+        match where_expr.map(str::trim).filter(|s| !s.is_empty()) {
+            Some(w) => Some(lodestar_core::parse::parse(w).map_err(|e| {
+                AppError::invalid_schema(format!("«where» inválido: {}", e.message))
+            })?),
+            None => None,
+        };
     let del_filter = match filter {
         Some(f) => Some(lodestar_core::filter::from_json(f).map_err(|e| {
-            WorkspaceError::InvalidSchema(format!("«filter» inválido: {}", mensaje_de_filtro(&e)))
+            AppError::invalid_schema(format!("«filter» inválido: {}", mensaje_de_filtro(&e)))
         })?),
         None => None,
     };

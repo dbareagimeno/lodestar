@@ -120,11 +120,11 @@ fn asevera_rechazo_al_planificar(app: &App, root: &Path, ops: &Value, destino: &
         ),
     };
     assert_eq!(
-        err,
+        err.code,
         ErrorCode::PermissionDenied,
         "el rechazo de una escritura sobre «{destino}» debe llevar el código estable \
          PERMISSION_DENIED (`REFACTOR_PHASE_2 §Principio 8`); era: {err:?} ({})",
-        err.as_str()
+        err.code.as_str()
     );
 
     let planes = planes_persistidos(root);
@@ -316,11 +316,11 @@ fn plan_valido_no_escribe_en_lo_ignorado_sobrevenido() {
         ),
     };
     assert_eq!(
-        err,
+        err.code,
         ErrorCode::PermissionDenied,
         "el guard del único escritor debe rechazar un destino excluido con PERMISSION_DENIED; \
          era: {} ({err:?})",
-        err.as_str()
+        err.code.as_str()
     );
 
     // (4) Y no escribió nada: ni el `.md` colado, ni el directorio que lo contendría.
@@ -637,14 +637,14 @@ mod ventana_de_publicacion {
             ),
         };
         assert_eq!(
-            err,
+            err.code,
             ErrorCode::WriteConflict,
             "el conflicto de la ventana debe llegar a la fachada con su código estable \
              WRITE_CONFLICT (terminal: el agente replanifica); era: {} ({err:?})",
-            err.as_str()
+            err.code.as_str()
         );
         assert_eq!(
-            err.as_str(),
+            err.code.as_str(),
             "WRITE_CONFLICT",
             "y con esa cadena exacta en el wire"
         );
@@ -798,7 +798,11 @@ mod recibo_tras_el_punto_de_no_retorno {
     /// **se ejerció**: `failpoints::disparado` autodesarma el punto al dispararse, así que si sigue
     /// armado después del `change_apply` es que nadie lo consultó — y el escenario no ha reproducido
     /// nada.
-    fn aplica_cayendo_en(app: &App, cs: &ChangeSetId, fp: FailPoint) -> Result<(), ErrorCode> {
+    fn aplica_cayendo_en(
+        app: &App,
+        cs: &ChangeSetId,
+        fp: FailPoint,
+    ) -> Result<(), lodestar_app::AppError> {
         failpoints::armar(fp);
         let resultado = app.change_apply(cs, None).map(|_| ());
         let seguia_armado = failpoints::disparado(fp);
@@ -918,7 +922,7 @@ mod recibo_tras_el_punto_de_no_retorno {
                      PLAN_EXPIRED es el síntoma del defecto (recibo ausente); un fallo de IO es el \
                      del plano de reversión purgado por la recuperación",
                     recibo.receipt_id.0,
-                    e.as_str()
+                    e.code.as_str()
                 ),
             };
             assert!(
@@ -1028,7 +1032,7 @@ mod recibo_tras_el_punto_de_no_retorno {
                      cambió, así que el apply no puede devolver {} ({e:?}) — sería un agente \
                      convencido de que no se aplicó nada y sin recibo con el que deshacerlo. El \
                      cierre es best-effort con aviso por stderr",
-                    e.as_str()
+                    e.code.as_str()
                 )
             });
             assert!(
@@ -1076,7 +1080,7 @@ mod recibo_tras_el_punto_de_no_retorno {
                     "el GC de retención es best-effort por definición (`receipts.rs:238-248` ya lo \
                      dice para el lock) y corre DESPUÉS de publicar: un fallo suyo no puede \
                      convertir el apply en {} ({e:?})",
-                    e.as_str()
+                    e.code.as_str()
                 )
             });
             assert!(aplicado.applied, "y se declara aplicado");
@@ -1122,7 +1126,7 @@ mod recibo_tras_el_punto_de_no_retorno {
                     "el GC de otro proceso no puede dejar irreversible una transacción publicada: \
                      `change_revert` devolvió {} ({e:?}). Si el recibo ya existe cuando se suelta el \
                      lock, el GC ve la transacción como viva y no toca sus copias",
-                    e.as_str()
+                    e.code.as_str()
                 )
             });
         assert_eq!(
@@ -1166,7 +1170,7 @@ mod recibo_tras_el_punto_de_no_retorno {
                 original,
                 "precondición: la caída fue ANTES del primer rename, así que el canónico no se movió \
                  ni un byte (el apply devolvió {})",
-                err.as_str()
+                err.code.as_str()
             );
 
             assert!(
@@ -1177,7 +1181,7 @@ mod recibo_tras_el_punto_de_no_retorno {
             let derivado = ReceiptId(transaction_id(&cs));
             let revert = app.change_revert(&derivado, None);
             assert_eq!(
-                revert.err(),
+                revert.err().map(|e| e.code),
                 Some(ErrorCode::PlanExpired),
                 "y revertir lo que no se aplicó sigue siendo PLAN_EXPIRED (transacción no \
                  disponible), no un éxito"
@@ -1201,7 +1205,7 @@ mod recibo_tras_el_punto_de_no_retorno {
             let err = app.change_apply(&cs, None).map(|_| ());
             failpoints::desarmar_ganchos();
             assert_eq!(
-                err.err(),
+                err.err().map(|e| e.code),
                 Some(ErrorCode::WriteConflict),
                 "precondición (E25-H01): el canónico cambió en la ventana, así que el apply aborta \
                  con WRITE_CONFLICT antes del primer rename"
@@ -1220,7 +1224,7 @@ mod recibo_tras_el_punto_de_no_retorno {
             let derivado = ReceiptId(transaction_id(&cs));
             let revert = app.change_revert(&derivado, None);
             assert_eq!(
-                revert.err(),
+                revert.err().map(|e| e.code),
                 Some(ErrorCode::PlanExpired),
                 "y revertir un aborto de ventana sigue siendo PLAN_EXPIRED"
             );
@@ -1404,7 +1408,7 @@ mod reversion_re_verificada {
                 panic!(
                 "un `change_revert` sin interferencia tiene que seguir revirtiendo: devolvió {} \
                  ({e:?})",
-                e.as_str()
+                e.code.as_str()
             )
             });
 
@@ -1517,15 +1521,15 @@ mod reversion_re_verificada {
                 ),
             };
             assert_eq!(
-                err,
+                err.code,
                 ErrorCode::WriteConflict,
                 "el conflicto de la ventana del revert debe llegar a la fachada con su código \
                  estable WRITE_CONFLICT (terminal: el agente vuelve a mirar y decide); era: {} \
                  ({err:?})",
-                err.as_str()
+                err.code.as_str()
             );
             assert_eq!(
-                err.as_str(),
+                err.code.as_str(),
                 "WRITE_CONFLICT",
                 "y con esa cadena exacta en el wire"
             );
@@ -1552,7 +1556,7 @@ mod reversion_re_verificada {
             receipt_id: &ReceiptId,
             fp: FailPoint,
             donde: &str,
-        ) -> Result<(), ErrorCode> {
+        ) -> Result<(), lodestar_app::AppError> {
             failpoints::armar(fp);
             let resultado = app.change_revert(receipt_id, None).map(|_| ());
             let seguia_armado = failpoints::disparado(fp);
@@ -1656,7 +1660,7 @@ mod reversion_re_verificada {
                 asevera_gancho_ejercido(&testigo);
 
                 assert_eq!(
-                    resultado.err(),
+                    resultado.err().map(|e| e.code),
                     Some(ErrorCode::WriteConflict),
                     "precondición (criterio 1): la base re-verificada bajo el lock ya no casa, así \
                      que la reversión aborta antes del primer rename"
@@ -1692,7 +1696,7 @@ mod reversion_re_verificada {
                     alfa(root),
                     a.publicado,
                     "precondición: el rechazo ocurre antes de tocar el canónico (devolvió {})",
-                    err.as_str()
+                    err.code.as_str()
                 );
                 assert!(
                     recibo_por_id(&a.app, &id_de_la_inversa(&a.cs)).is_none(),
@@ -1719,7 +1723,7 @@ mod reversion_re_verificada {
                     a.publicado,
                     "precondición: la caída fue ANTES del primer rename, así que el canónico no se \
                      movió ni un byte (el revert devolvió {})",
-                    err.as_str()
+                    err.code.as_str()
                 );
                 assert!(
                     recibo_por_id(&a.app, &id_de_la_inversa(&a.cs)).is_none(),

@@ -77,7 +77,7 @@ fn delete_rechaza_con_backlinks() {
     );
 
     assert!(
-        matches!(resultado, Err(ErrorCode::InboundLinksExist)),
+        matches!(&resultado, Err(e) if e.code == ErrorCode::InboundLinksExist),
         "borrar un documento referenciado con política `reject` debe dar Err(InboundLinksExist) \
          (wire INBOUND_LINKS_EXIST); dio {resultado:?}",
     );
@@ -113,7 +113,7 @@ fn delete_exige_politica_explicita() {
         policy_permisiva(),
     );
     assert!(
-        matches!(sin_politica, Err(ErrorCode::InvalidSchema)),
+        matches!(&sin_politica, Err(e) if e.code == ErrorCode::InvalidSchema),
         "un `delete` SIN `inboundLinksPolicy` debe rechazarse pidiendo una política explícita \
          (INVALID_SCHEMA: campo requerido ausente), NO elegir `reject` en silencio —que daría \
          INBOUND_LINKS_EXIST por la razón equivocada, el mismo camino que \
@@ -249,7 +249,7 @@ fn delete_retarget_rechazado() {
             policy_permisiva(),
         );
         assert!(
-            matches!(resultado, Err(ErrorCode::InvalidSchema)),
+            matches!(&resultado, Err(e) if e.code == ErrorCode::InvalidSchema),
             "`inboundLinksPolicy: {politica}` está RETIRADA (E23-H05): planificar debe rechazarse \
              con INVALID_SCHEMA en vez de aceptar una política que el motor no ejecuta; dio \
              {resultado:?}",
@@ -268,7 +268,7 @@ fn delete_retarget_rechazado() {
             policy_permisiva(),
         );
         assert!(
-            matches!(resultado, Err(ErrorCode::InvalidSchema)),
+            matches!(&resultado, Err(e) if e.code == ErrorCode::InvalidSchema),
             "un valor retirado de `inboundLinksPolicy` ({politica}) debe rechazarse SIEMPRE, tenga \
              o no backlinks el documento; dio {resultado:?}",
         );
@@ -296,7 +296,7 @@ fn delete_retarget_rechazado() {
         policy_permisiva(),
     );
     assert!(
-        matches!(con_reject, Err(ErrorCode::InboundLinksExist)),
+        matches!(&con_reject, Err(e) if e.code == ErrorCode::InboundLinksExist),
         "`reject` con backlinks debe seguir dando INBOUND_LINKS_EXIST (código DISTINTO de \
          INVALID_SCHEMA: el rechazo de arriba señala el VALOR retirado, no «todo delete falla»); \
          dio {con_reject:?}",

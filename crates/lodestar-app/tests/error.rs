@@ -151,14 +151,14 @@ fn recovery_failed_llega_a_la_fachada() {
         ),
     };
     assert_eq!(
-        err,
+        err.code,
         ErrorCode::RecoveryFailed,
         "el fallo de recuperación tiene código propio en el catálogo de 16 y E25-H02 le da su primer \
          emisor real: el agente no puede recibir un INTERNAL_IO_ERROR genérico. Era: {} ({err:?})",
-        err.as_str()
+        err.code.as_str()
     );
     assert_eq!(
-        err.as_str(),
+        err.code.as_str(),
         "RECOVERY_FAILED",
         "y con esa cadena exacta en el wire"
     );
@@ -178,12 +178,15 @@ fn recovery_failed_llega_a_la_fachada() {
 
     // SEGUNDA operación: ya no hay journal pendiente, así que el workspace vuelve a ser usable de
     // punta a punta (planificar + aplicar).
-    let plan = app
-        .change_plan(None, &ops, policy)
-        .unwrap_or_else(|e| panic!("la segunda operación debe proceder: {} ({e:?})", e.as_str()));
+    let plan = app.change_plan(None, &ops, policy).unwrap_or_else(|e| {
+        panic!(
+            "la segunda operación debe proceder: {} ({e:?})",
+            e.code.as_str()
+        )
+    });
     let aplicado = app
         .change_apply(&plan.change_set_id, None)
-        .unwrap_or_else(|e| panic!("y el apply también: {} ({e:?})", e.as_str()));
+        .unwrap_or_else(|e| panic!("y el apply también: {} ({e:?})", e.code.as_str()));
     assert!(
         aplicado.applied,
         "un journal irrecuperable no puede cerrar el workspace a la escritura para siempre"

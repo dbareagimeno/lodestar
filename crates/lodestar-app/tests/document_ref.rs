@@ -66,7 +66,7 @@ fn ref_inexistente() {
         .expect("un path válido pero inexistente debe deserializar");
     let resultado = app.resolve_ref(&referencia);
     assert!(
-        matches!(resultado, Err(ErrorCode::DocumentNotFound)),
+        matches!(&resultado, Err(e) if e.code == ErrorCode::DocumentNotFound),
         "un DocumentRef a un path inexistente debe dar Err(DocumentNotFound), dio {resultado:?}",
     );
 }
@@ -87,9 +87,12 @@ fn error_code_documento() {
     let referencia: DocumentRef = serde_json::from_str(r#"{"path":"no-existe.md"}"#)
         .expect("un path válido pero inexistente debe deserializar");
 
+    // E26-H07: el error de los servicios es un `AppError` (código + mensaje); el CÓDIGO, que es lo
+    // que este criterio fija, se lee en `.code` y sigue siendo el del catálogo.
     let code = app
         .knowledge_get(&referencia, &[], None)
-        .expect_err("`knowledge_get` sobre un documento inexistente debe fallar");
+        .expect_err("`knowledge_get` sobre un documento inexistente debe fallar")
+        .code;
 
     // El wire: `ErrorCode` serializa a la cadena SCREAMING_SNAKE del catálogo.
     let wire = serde_json::to_value(code).expect("`ErrorCode` debe serializar");

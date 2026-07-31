@@ -279,13 +279,15 @@ fn bench_concurrencia_segura() {
     );
 
     // --- Propiedad 2: el perdedor se rechaza LIMPIAMENTE con un código de la familia «conflicto». ---
-    let perdedor: &ErrorCode = match (&res_a, &res_b) {
+    // E26-H07: los servicios de `App` devuelven `AppError` (código + mensaje); el código, que es lo
+    // que este test juzga, sigue siendo el mismo y se lee en `.code`.
+    let perdedor: &lodestar_app::AppError = match (&res_a, &res_b) {
         (Ok(_), Err(e)) | (Err(e), Ok(_)) => e,
         _ => unreachable!("la propiedad 1 garantiza un único perdedor"),
     };
     eprintln!("[bench_concurrencia] código del perdedor = {perdedor:?}");
     assert!(
-        matches!(perdedor, ErrorCode::WriteConflict | ErrorCode::PlanStale),
+        matches!(perdedor.code, ErrorCode::WriteConflict | ErrorCode::PlanStale),
         "el perdedor debe rechazarse con WRITE_CONFLICT o PLAN_STALE (familia conflicto), no {perdedor:?}"
     );
 

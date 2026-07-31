@@ -325,11 +325,15 @@ meta:
   errores_ejecucion: >-
     Un error de ejecución de tool NO viaja como error JSON-RPC: va en el result como
     { content:[{type:text,text:msg}], isError:true } para que el modelo lo vea y corrija.
-    Éxito → { content:[{type:text,text:json}], structuredContent:<objeto> }. Las 5 tools de
-    E10 mapean el error a un texto que lleva el código estable de `ErrorCode::as_str()`
-    (p. ej. «DOCUMENT_NOT_FOUND»/«INVALID_SCHEMA»), NUNCA el `Debug` de la variante Rust
-    (`tools.rs`, casos `knowledge_get`/`metadata_inspect`/`knowledge_check` y, desde E23-H11,
-    `knowledge_search` en su rama de `include`).
+    Éxito → { content:[{type:text,text:json}], structuredContent:<objeto> }. Desde E26-H07 el texto
+    de TODA tool tiene la forma «CODIGO: mensaje»: el código estable de `ErrorCode::as_str()`
+    (nunca el `Debug` de la variante Rust) seguido de un mensaje accionable en español, que nombra
+    el parámetro, el valor recibido y lo que se esperaba. Hasta v0.4.0 ocho de las diez tools
+    devolvían el código PELADO (`.map_err(|e| e.as_str().to_string())` en `tools.rs`), porque los
+    productores de `lodestar-app` eran `Result<_, ErrorCode>` y no tenían dónde poner el mensaje;
+    hoy devuelven `lodestar_app::AppError` (el ErrorCode del catálogo + un String), cuyo `Display`
+    compone ese texto en un solo sitio. El catálogo sigue teniendo 16 filas y viviendo solo en
+    `core::types` (invariante #4): esto añade mensaje, no códigos.
   validacion_de_argumentos: >-
     REGLA DE LA CASA, enunciada aquí una vez porque hasta E23-H11 vivía implícita en tres semánticas
     distintas: **el servidor valida los VALORES de los parámetros que declara, e IGNORA lo que no
@@ -434,7 +438,7 @@ tools:
       - { nombre: sections, tipo: "array<array<string>>", requerido: false, semantica: "headingPaths para acotar «body» (solo si «body» ∈ include), p. ej. [[\"Security\",\"Token rotation\"]]" }
     retorno: "json { document: DocumentView } — envoltorio de un solo campo, NO DocumentView a secas (lodestar_app::KnowledgeGetResponse describe esta forma exacta)"
     output_schema: "sí — schemars::schema_for!(KnowledgeGetResponse), vía lodestar_app::schemas::knowledge_get_schema()"
-    errores: ["«falta el parámetro «ref»»", "DOCUMENT_NOT_FOUND", "WorkspaceError"]
+    errores: ["INVALID_SCHEMA (falta «ref» o su forma es inválida)", "DOCUMENT_NOT_FOUND (el «ref» no es un documento del workspace)", "WorkspaceError"]
     semantica: >-
       Obtiene un documento concreto con `include` selectivo y selección de secciones.
       `revision` (== DocumentRevision, blake3 del contenido en disco) se calcula SIEMPRE,
@@ -449,7 +453,7 @@ tools:
       - { nombre: field, tipo: string, requerido: false, semantica: "path punteado del campo a inspeccionar (p. ej. «status» o «service.tier»); requerido cuando mode==«field». Path inválido o ausente → INVALID_SCHEMA" }
     retorno: "MetadataInspection (lodestar_app, enum untagged sobre core::types): mode «catalog» → MetadataCatalog { fields: [{ name (dot-path), presentIn, inferredTypes: {tipo-minúscula: conteo} }] }; mode «field» → FieldInspection { field (dot-path), presentIn, missingIn, inferredTypes: {…}, values: [{ value (tipo JSON natural), count }] }. Json directo sin envelope. ⚠️ `values[].count` cuenta OBSERVACIONES, no documentos (E23-H11): una LISTA aporta cada uno de sus elementos escalares al vocabulario, así que un `tags: [a, b]` suma 1 a `presentIn` y 2 a `values`, un `tags: [a, a]` cuenta 2 veces `a`, y la suma de los `count` puede SUPERAR `presentIn` en un campo multivalor. `presentIn`/`missingIn` sí cuentan documentos (`presentIn + missingIn == nº de documentos`). La explosión NO es recursiva (un elemento que a su vez sea lista u objeto se ignora) y un mapa no aporta valores (sí su tipo, y sus hojas ya son campos propios del catálogo)"
     output_schema: "sí — schemars::schema_for!(MetadataInspection), vía lodestar_app::schemas::metadata_inspect_schema()"
-    errores: ["«falta el parámetro «mode»»", "INVALID_SCHEMA (mode desconocido, o mode «field» sin «field» / con un dot-path inválido)", "WorkspaceError"]
+    errores: ["INVALID_SCHEMA (falta «mode»; mode desconocido; mode «field» sin «field» o con un dot-path inválido)", "WorkspaceError"]
     semantica: >-
       Descubre las convenciones de metadata de una base desconocida SIN necesitar un schema
       (`§20.10`, `REFACTOR_PHASE_2 §Fase 6`; sustituye a `schema_inspect`, retirada con
@@ -494,15 +498,15 @@ tools:
     historia: E11-H01, E11-H02 (amplía el enum operation con path_between/cycles/components)
     params:
       - { nombre: operation, tipo: string, requerido: true, valores: ["backlinks", "outgoing", "neighborhood", "isolated", "dangling", "path_between", "cycles", "components"], semantica: "backlinks/outgoing/neighborhood requieren «ref»; path_between requiere «ref» (origen) y «to» (destino); isolated/dangling/cycles/components no requieren refs. «isolated» sustituye a «orphans» (E16-H02): documentos SIN enlaces internos entrantes NI salientes — es una propiedad del grafo, no un diagnóstico. SIN alias: v0.3 es incompatible con v0.2, un «orphans» hoy es INVALID_SCHEMA" }
-      - { nombre: ref, tipo: "object (DocumentRef)", requerido: false, semantica: "{ path: RelPath }, documento centro — requerido en backlinks/outgoing/neighborhood y como origen en path_between; su ausencia en esas operaciones es DOCUMENT_NOT_FOUND" }
-      - { nombre: to, tipo: "object (DocumentRef)", requerido: false, semantica: "{ path: RelPath }, destino del camino — SOLO path_between; su ausencia (o la de ref) en path_between es DOCUMENT_NOT_FOUND" }
+      - { nombre: ref, tipo: "object (DocumentRef)", requerido: false, semantica: "{ path: RelPath }, documento centro — requerido en backlinks/outgoing/neighborhood y como origen en path_between; su AUSENCIA en esas operaciones es INVALID_SCHEMA, con un mensaje que nombra el parámetro y la operación que lo exige (E26-H07; hasta v0.4.0 era DOCUMENT_NOT_FOUND, indistinguible de un ref que no resuelve, y mandaba al agente a buscar el documento en vez de a mirar su llamada). Un ref PRESENTE que no resuelve sigue siendo DOCUMENT_NOT_FOUND" }
+      - { nombre: to, tipo: "object (DocumentRef)", requerido: false, semantica: "{ path: RelPath }, destino del camino — SOLO path_between; su ausencia (o la de ref) en path_between es INVALID_SCHEMA (idem ref, E26-H07); un «to» presente que no resuelve sigue siendo DOCUMENT_NOT_FOUND" }
       - { nombre: depth, tipo: integer, default: 1, minimo: 1, semantica: "solo neighborhood" }
       - { nombre: direction, tipo: "string (Direction)", valores: ["out", "in", "both"], default: "out  # cualquier otro → Out", semantica: "solo neighborhood" }
       - { nombre: limit, tipo: integer, requerido: false, semantica: "trunca el nº de nodos de la página (orden total estable por id); sin limit o limit>=total → sin truncar" }
       - { nombre: cursor, tipo: string, requerido: false, semantica: "cursor opaco de paginación (offset hex, mismo esquema que knowledge_search/knowledge_check) devuelto en nextCursor" }
     retorno: "GraphQueryResult (lodestar_app): { nodes: [GraphNode], edges: [Edge], summary: { nodeCount, edgeCount, truncated }, nextCursor } — json directo, sin envelope. nodes/edges == core::types::GraphNode/Edge, reexpuestos sin capa DTO paralela"
     output_schema: "sí — schemars::schema_for!(GraphQueryResult), vía lodestar_app::schemas::graph_query_schema()"
-    errores: ["«falta el parámetro «operation»»", "DOCUMENT_NOT_FOUND (ref/to ausente o no resuelve en backlinks/outgoing/neighborhood/path_between)", "INVALID_SCHEMA (operation desconocida)", "WorkspaceError"]
+    errores: ["INVALID_SCHEMA (falta «operation»; falta «ref»/«to» en la operación que lo exige; operation desconocida — E26-H07)", "DOCUMENT_NOT_FOUND (ref/to PRESENTES que no resuelven)", "WorkspaceError"]
     semantica: >-
       Consulta el grafo: `backlinks` reusa DocumentSet::backlinks (nodes = ref + fuentes entrantes,
       edges = fuente→ref); `outgoing` reusa DocumentSet::neighborhood(ref,1,Out); `neighborhood`
@@ -528,7 +532,7 @@ tools:
       - { nombre: depth, tipo: integer, requerido: false, minimo: 1, semantica: "profundidad del blast-radius entrante; por defecto cubre todo el alcance transitivo (neighborhood(In) a profundidad máxima)" }
     retorno: "ImpactReport (lodestar_app): { summary: { directlyAffected, transitivelyAffected, blockingReferences, risk }, affectedDocuments: [RelPath], blockingReferences: [{ path, reason }], recommendations: [string] } — json directo, sin envelope"
     output_schema: "sí — schemars::schema_for!(ImpactReport), vía lodestar_app::schemas::impact_analyze_schema()"
-    errores: ["«falta el parámetro «ref»»", "«falta el parámetro «proposedOperation.kind»»", "DOCUMENT_NOT_FOUND (ref no resuelve)", "INVALID_SCHEMA (kind fuera de {move, delete})", "INTERNAL_IO_ERROR", "WorkspaceError"]
+    errores: ["INVALID_SCHEMA (falta «ref» o «proposedOperation.kind»; kind fuera de {move, delete})", "DOCUMENT_NOT_FOUND (ref no resuelve)", "INTERNAL_IO_ERROR", "WorkspaceError"]
     semantica: >-
       Analiza el impacto de un cambio hipotético sobre `ref` SIN materializarlo (aplicar es
       E12/E13). `directlyAffected` = nº de backlinks directos entrantes (DocumentSet::backlinks.inbound).
@@ -557,7 +561,7 @@ tools:
       - { nombre: policy, tipo: object, requerido: false, semantica: "{ requireValidResult?, allowWarnings? } (PlanPolicy, E12-H04); por defecto exige conformidad y permite warnings" }
     retorno: "PlanResult (lodestar_app): { changeSetId, baseWorkspaceRevision, planHash, canApply, expiresAt, normalizedOperations: [NormalizedOperation], risk, semanticDiff, impact: { affectedDocuments, affectedCount }, capturedRevisions: { «path»: «blake3:…» }, diagnosticsBefore, diagnosticsAfter } — json directo, sin envelope. `capturedRevisions` (E21-H02) lleva una entrada por documento de una selección masiva (su DocumentRevision, el snapshot de §Fase 12); vacío {} en la forma-array"
     output_schema: "sí — schemars::schema_for!(PlanResult), vía lodestar_app::schemas::change_plan_schema()"
-    errores: ["REVISION_CONFLICT (workspace o documento cambiado)", "INVALID_SCHEMA (op desconocida o parámetro inválido)", "DOCUMENT_NOT_FOUND (objetivo de normalización inexistente)", "INBOUND_LINKS_EXIST (delete «reject» con entrantes)", "PERMISSION_DENIED (path-traversal)", "RECOVERY_FAILED (E25-H02: la recuperación transparente del paso (0) —E24-H03— no pudo restaurar una transacción interrumpida porque sus copias no verifican; su journal y sus copias quedan en .lodestar/runtime/journal/quarantine/<txnId>/ y el mensaje nombra la ruta; la SIGUIENTE llamada ya no encuentra recuperación pendiente)", "INTERNAL_IO_ERROR (carga de config)", "WorkspaceError"]
+    errores: ["REVISION_CONFLICT (workspace o documento cambiado)", "INVALID_SCHEMA (op desconocida o parámetro inválido; un `where`/`filter` de `selection` malformado, CON el diagnóstico del parser del core en el mensaje — E26-H07; hasta v0.4.0 `build_selection_expression` lo descartaba con `map_err(|_| …)` y la misma consulta se diagnosticaba por knowledge_search y se callaba por change_plan)", "DOCUMENT_NOT_FOUND (objetivo de normalización inexistente)", "INBOUND_LINKS_EXIST (delete «reject» con entrantes)", "PERMISSION_DENIED (path-traversal)", "RECOVERY_FAILED (E25-H02: la recuperación transparente del paso (0) —E24-H03— no pudo restaurar una transacción interrumpida porque sus copias no verifican; su journal y sus copias quedan en .lodestar/runtime/journal/quarantine/<txnId>/ y el mensaje nombra la ruta; la SIGUIENTE llamada ya no encuentra recuperación pendiente)", "INTERNAL_IO_ERROR (carga de config)", "WorkspaceError"]
     semantica: >-
       Orquesta un plan de cambios SIN escribir (invariante #1; aplicar es change_apply, E13): toda
       la simulación es sobre un DocumentSet en memoria. Acepta DOS formas de wire: la forma-ARRAY

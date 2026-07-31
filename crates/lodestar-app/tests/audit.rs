@@ -210,7 +210,7 @@ fn audit_registra_fallo() {
         .change_apply(&plan.change_set_id, Some(revision_falsa))
         .expect_err("el `change_apply` con revisión esperada falsa debe fallar por conflicto");
     assert!(
-        matches!(err, ErrorCode::RevisionConflict),
+        matches!(err.code, ErrorCode::RevisionConflict),
         "el fallo debe ser un conflicto de revisión, fue {err:?}",
     );
 
