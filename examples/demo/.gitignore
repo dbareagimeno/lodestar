@@ -1,0 +1,3 @@
+# lodestar: cache y runtime desechables (no versionar)
+.lodestar/index.db
+.lodestar/runtime/
