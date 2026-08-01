@@ -294,6 +294,7 @@ produces the same result regardless of the consumer.
 ```bash
 cargo test --workspace --locked
 cargo test -p lodestar-workspace --features test-failpoints --locked
+cargo test -p lodestar-app --features test-failpoints --locked
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 ```
