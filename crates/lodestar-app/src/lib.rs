@@ -26,7 +26,8 @@ use lodestar_core::types::{
     Direction, DocumentRef, DocumentRevision, Edge, EditSectionMode, ErrorCode, Expression,
     FieldInspection, FieldPath, FrontmatterPatch, GraphNode, InboundLinksPolicy, MetadataCatalog,
     NormalizedOperation, PlanHash, ReceiptId, RelPath, ResolvedLink, RiskAssessment, SemanticDiff,
-    Severity, ValidationReport, ValidationSummary, WorkspaceRevision,
+    Severity, TypeError, ValidationReport, ValidationSummary, WorkspaceRevision,
+    FRONTMATTER_ANCHOR,
 };
 use lodestar_core::{CoreError, DocumentSet};
 use lodestar_workspace::{transaction_id, Workspace, WorkspaceError};
@@ -156,7 +157,9 @@ pub fn error_code(err: &CoreError) -> ErrorCode {
 ///   `ErrorCode::PermissionDenied`, mapeo directo por nombre (mismo caso que `error_code` con
 ///   `CoreError::InvalidRelPath`).
 /// - `InvalidResult` (E13-H01) / `WriteConflict` (E13-H02) / `WorkspaceRecoveryRequired`
-///   (E13-H06) → sus códigos homónimos del catálogo, mapeo directo por nombre.
+///   (E13-H06) / `RecoveryFailed` (E25-H02: una transacción interrumpida cuyas copias no verifican;
+///   su material queda en `.lodestar/runtime/journal/quarantine/<txnId>/`) → sus códigos homónimos
+///   del catálogo, mapeo directo por nombre.
 pub fn workspace_error_code(err: &WorkspaceError) -> ErrorCode {
     match err {
         WorkspaceError::Core(_) => ErrorCode::InternalIoError,
@@ -167,7 +170,78 @@ pub fn workspace_error_code(err: &WorkspaceError) -> ErrorCode {
         WorkspaceError::InvalidResult(_) => ErrorCode::InvalidResult,
         WorkspaceError::WriteConflict(_) => ErrorCode::WriteConflict,
         WorkspaceError::WorkspaceRecoveryRequired(_) => ErrorCode::WorkspaceRecoveryRequired,
+        WorkspaceError::RecoveryFailed(_) => ErrorCode::RecoveryFailed,
         WorkspaceError::InvalidSchema(_) => ErrorCode::InvalidSchema,
+    }
+}
+
+/// El error que devuelven los servicios de [`App`]: el [`ErrorCode`] estable del catálogo
+/// **emparejado con un mensaje accionable** (E26-H07).
+///
+/// # Por qué existe
+/// Hasta v0.4.0 los servicios devolvían `Result<_, ErrorCode>` — el código **pelado**, sin un sitio
+/// donde poner el mensaje—, así que ocho de las diez tools MCP le entregaban al agente literalmente
+/// `INVALID_SCHEMA`, sin una palabra sobre qué parámetro, qué valor o qué se esperaba. Un agente
+/// puede **ramificar** por el código, pero necesita el mensaje para **corregir**. `knowledge_search`
+/// ya lo hacía desde E24-H10 usando `WorkspaceError::InvalidSchema` + [`workspace_error_code`];
+/// este tipo generaliza ese patrón a **todos** los servicios, en un solo sitio.
+///
+/// # Lo que NO es
+/// **No** es una jerarquía paralela de códigos (invariante #4 de `CLAUDE.md`): el catálogo sigue
+/// teniendo 16 filas y viviendo **solo** en [`lodestar_core::types::ErrorCode`]. `AppError` es un
+/// envoltorio de fachada —un `ErrorCode` del core + un `String`—, no un catálogo nuevo, y su
+/// `Display` compone el texto de wire `«CÓDIGO: mensaje»` con `ErrorCode::as_str()`, nunca con un
+/// literal propio.
+///
+/// Los mensajes van en **español** (regla de idioma del repo), salvo los identificadores congelados:
+/// nombres de código, de tool, de parámetro y de operación.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppError {
+    /// Código estable del catálogo de 16 (`core::types::ErrorCode`) — por él ramifica el agente.
+    pub code: ErrorCode,
+    /// Mensaje accionable en español: qué parámetro, qué valor y qué se esperaba.
+    pub message: String,
+}
+
+impl AppError {
+    /// Empareja un código del catálogo con su mensaje.
+    pub fn new(code: ErrorCode, message: impl Into<String>) -> Self {
+        AppError {
+            code,
+            message: message.into(),
+        }
+    }
+
+    /// Atajo para el código más frecuente en la frontera: la **entrada** del agente no es
+    /// interpretable ([`ErrorCode::InvalidSchema`]).
+    pub fn invalid_schema(message: impl Into<String>) -> Self {
+        AppError::new(ErrorCode::InvalidSchema, message)
+    }
+}
+
+impl std::fmt::Display for AppError {
+    /// El texto de wire de las fachadas: `«CÓDIGO: mensaje»`, con el código estable de
+    /// [`ErrorCode::as_str`] (nunca el `Debug` de la variante Rust).
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {}", self.code.as_str(), self.message)
+    }
+}
+
+impl std::error::Error for AppError {}
+
+impl From<WorkspaceError> for AppError {
+    /// Código por [`workspace_error_code`] y mensaje por el `Display` del error real: la misma
+    /// pareja que `knowledge_search` componía a mano en la fachada MCP desde E24-H10.
+    fn from(err: WorkspaceError) -> Self {
+        AppError::new(workspace_error_code(&err), err.to_string())
+    }
+}
+
+impl From<&CoreError> for AppError {
+    /// Código por [`error_code`] y mensaje por el `Display` del [`CoreError`] — el diagnóstico del
+    /// core viaja **entero** hasta la superficie (invariante #3: una sola verdad computada).
+    fn from(err: &CoreError) -> Self {
+        AppError::new(error_code(err), err.to_string())
     }
 }
 
@@ -400,20 +474,26 @@ impl App {
     /// documentos que computa el core (`Analysis::documents`, invariante #3 — "una sola verdad
     /// computada"), no contra la mera presencia de un fichero en el `FileMap` — así la resolución
     /// pasa por el mismo inventario que analiza el core, sin criterios paralelos. Si el `path` no
-    /// está en esa lista, `Err(ErrorCode::DocumentNotFound)`.
+    /// está en esa lista, `Err` con [`ErrorCode::DocumentNotFound`] **y el path que no resolvió**
+    /// (E26-H07): es la diferencia entre «te equivocaste de ruta» y «olvidaste el parámetro», que
+    /// desde esa historia son dos errores distintos.
     ///
     /// `ErrorCode::AmbiguousReference` queda RESERVADO para cuando exista resolución por `id`
     /// (`REFACTOR §6.1`) — no-goal de esta historia (IDs estables/federación). En v2 `DocumentRef.id`
     /// es siempre `None`, así que esta función nunca lo produce todavía.
-    pub fn resolve_ref(&self, r: &DocumentRef) -> Result<RelPath, ErrorCode> {
-        let analysis = self
-            .workspace
-            .analyze()
-            .map_err(|e| workspace_error_code(&e))?;
+    pub fn resolve_ref(&self, r: &DocumentRef) -> Result<RelPath, AppError> {
+        let analysis = self.workspace.analyze()?;
         if analysis.documents.contains(&r.path) {
             Ok(r.path.clone())
         } else {
-            Err(ErrorCode::DocumentNotFound)
+            Err(AppError::new(
+                ErrorCode::DocumentNotFound,
+                format!(
+                    "«{}» no es un documento del workspace: la identidad de un documento es su \
+                     ruta relativa, tal y como la devuelven knowledge_search o graph_query",
+                    r.path.as_str()
+                ),
+            ))
         }
     }
 
@@ -438,30 +518,32 @@ impl App {
     ///
     /// **Esto es reparar, no publicar**: el canónico vuelve a uno de los dos bordes de la
     /// transacción interrumpida. Ninguna operación del plan que lo invoca se materializa aquí.
-    fn recover_if_pending(&self) -> Result<(), ErrorCode> {
+    fn recover_if_pending(&self) -> Result<(), AppError> {
         if !self.workspace.recovery_pending() {
             return Ok(());
         }
-        let _lock = self
-            .workspace
-            .acquire_lock()
-            .map_err(|e| workspace_error_code(&e))?;
+        let lock = self.workspace.acquire_lock()?;
         if self.workspace.recovery_pending() {
-            self.workspace
-                .recover()
-                .map_err(|e| workspace_error_code(&e))?;
+            self.workspace.recover()?;
             // E24-H06: recoger aquí, no solo en el camino de éxito. Justo después de un crash es
             // cuando hay basura en el plano de control —el staging de la transacción interrumpida
             // y los temporales a medio escribir—, y el GC solo se disparaba desde `change_apply` y
             // `change_revert` cuando terminaban bien: el flujo que produce la basura era
             // exactamente el que no la recogía. Best-effort: un fallo recogiendo no puede impedir
             // planificar.
-            let _ = self.workspace.gc_receipts();
+            //
+            // E25-H03: la variante que exige el lock como TESTIGO, porque aquí ya lo tenemos
+            // (`lock`). `gc_receipts` lo adquiere él mismo y es fail-fast, así que llamarlo desde
+            // dentro de este bloque lo convertiría en un no-op silencioso **para siempre**: el único
+            // camino que barre justo después de un crash dejaría de barrer. Pasar el guard es lo que
+            // hace que el compilador —y no un comentario— garantice que este barrido corre bajo el
+            // lock; el `&lock` mantiene además el guard vivo hasta que el GC termina.
+            let _ = self.workspace.gc_receipts_con_el_lock_tomado(&lock);
         }
         Ok(())
     }
 
-    pub fn workspace_status(&self, profile: Profile) -> Result<WorkspaceStatus, WorkspaceError> {
+    pub fn workspace_status(&self, profile: Profile) -> Result<WorkspaceStatus, AppError> {
         let doc_set = self.workspace.document_set()?;
         let files = doc_set.files();
         let analysis = doc_set.analyze();
@@ -577,12 +659,31 @@ impl App {
     /// y un `snippet` compacto NO vacío; la estructura [`SearchResult`] **no tiene** campo `body`, así
     /// que es imposible filtrar el cuerpo completo por esta vía.
     ///
-    /// Un `where_expr`/`filter` **malformado** (no parseable) se surface como un
-    /// [`WorkspaceError::Core`] genérico —el mapeo fino a `INVALID_SCHEMA` es E20—; un
-    /// [`lodestar_core::types::TypeError`] al **evaluar** una expresión bien formada contra un
-    /// documento concreto (p. ej. `priority >= "high"` sobre un `priority` numérico) **excluye ese
-    /// documento** del resultado, sin abortar la búsqueda: el corpus es heterogéneo y un tipo
-    /// incompatible en un documento no debe tumbar la consulta sobre los demás.
+    /// Un `where_expr`/`filter` **malformado** (no parseable) se surface con `INVALID_SCHEMA` y el
+    /// diagnóstico del parser del core (E24-H10, E26-H07).
+    ///
+    /// **Un [`TypeError`] al evaluar ABORTA la consulta** (E26-H08): una expresión bien formada
+    /// sobre datos de otro tipo (p. ej. `priority >= "high"` sobre un `priority` numérico) devuelve
+    /// `Err(AppError)` con `INVALID_SCHEMA` y un mensaje que nombra campo, operador, los dos tipos y
+    /// el documento (`error_de_tipo`). Hasta v0.4.0 ese documento se **excluía en silencio** —el
+    /// criterio de E19-H04: «el corpus es heterogéneo y un tipo incompatible no debe tumbar la
+    /// consulta sobre los demás»—, y el precio era una lista recortada, decidida documento a
+    /// documento, indistinguible de la correcta; sobre un corpus homogéneo, un `[]` indistinguible
+    /// de «no hay resultados». E26-H08 revisa ese criterio con el mismo principio con que E24-H07
+    /// revisó el del parseo: una respuesta silenciosamente equivocada es peor que un error.
+    ///
+    /// **Determinismo y ámbito del error** (la decisión, porque el orden de los criterios la fija):
+    /// el `where`/`filter` se evalúa **antes** que el `text`, sobre el orden total de
+    /// [`Analysis::documents`], y se reporta el **primer** `Err` de ese orden. Consecuencias
+    /// deliberadas:
+    /// - un documento que el `text` habría descartado **sí** dispara su `TypeError`: el error es de
+    ///   la CONSULTA («este `where` no es respondible sobre este workspace»), no del subconjunto que
+    ///   el `text` deja pasar. Lo contrario —dejar que un `text` más estrecho tape el error— haría
+    ///   que la misma consulta fuera legal o ilegal según un parámetro que no habla de tipos, y que
+    ///   añadir resultados a una búsqueda la rompiera;
+    /// - `limit`/`cursor` **tampoco** cambian el veredicto: la página se recorta después de recorrer
+    ///   el orden entero. Cortocircuitar al llenar la página sería más barato, pero haría que
+    ///   `limit: 1` tuviera éxito donde `limit: 100` falla — la corrección manda (E26-H08).
     pub fn knowledge_search(
         &self,
         text: &str,
@@ -591,7 +692,7 @@ impl App {
         include: &[FrontmatterProjection],
         limit: Option<usize>,
         cursor: Option<&str>,
-    ) -> Result<SearchResults, WorkspaceError> {
+    ) -> Result<SearchResults, AppError> {
         let doc_set = self.workspace.document_set()?;
         let analysis = doc_set.analyze();
         let files = doc_set.files();
@@ -607,22 +708,27 @@ impl App {
             let parsed = model::parse_file(path.as_str(), raw);
             let fm = parsed.frontmatter.clone().unwrap_or_default();
 
-            // (1) Intersección con el FTS de `text` (subcadena, verdad del core).
-            if !text_trim.is_empty() && !loose_text_match(path, &fm, &parsed.body, &needle) {
-                continue;
-            }
-
-            // (2) Intersección con el lenguaje de consulta. Un `TypeError` sobre ESTE documento lo
-            //     excluye (no casa), sin propagarse a la búsqueda entera.
+            // (1) Intersección con el lenguaje de consulta. Va ANTES del `text` a propósito
+            //     (E26-H08): un `TypeError` es un error de la CONSULTA, no del subconjunto, así que
+            //     se decide sobre el orden total y no sobre lo que el `text` haya dejado pasar. El
+            //     `?` propaga el PRIMER `Err` del orden total —este bucle recorre
+            //     `analysis.documents` de principio a fin y la paginación es posterior—, así que ni
+            //     el `text` ni el `limit` pueden cambiar el veredicto. `Ok(false)` sigue siendo
+            //     exclusión.
             if let Some(expr) = &expr {
                 let doc = EvalDocument {
                     path,
                     frontmatter: parsed.frontmatter.as_ref(),
                     body: &parsed.body,
                 };
-                if !matches!(evaluate(expr, &doc, analysis), Ok(true)) {
+                if !evalua_documento(expr, &doc, analysis)? {
                     continue;
                 }
+            }
+
+            // (2) Intersección con el FTS de `text` (subcadena, verdad del core).
+            if !text_trim.is_empty() && !loose_text_match(path, &fm, &parsed.body, &needle) {
+                continue;
             }
 
             let title = model::derived_title(Some(&fm), &parsed.body, path);
@@ -748,12 +854,9 @@ impl App {
         r: &DocumentRef,
         include: &[String],
         sections: Option<&[Vec<String>]>,
-    ) -> Result<DocumentView, ErrorCode> {
+    ) -> Result<DocumentView, AppError> {
         let path = self.resolve_ref(r)?;
-        let doc_set = self
-            .workspace
-            .document_set()
-            .map_err(|e| workspace_error_code(&e))?;
+        let doc_set = self.workspace.document_set()?;
         let files = doc_set.files();
         // `resolve_ref` ya comprobó que `path` está en `Analysis::documents`, que se computa a
         // partir de este mismo `FileMap` (invariante #3) — así que el fichero existe.
@@ -816,35 +919,146 @@ impl App {
     /// - `"field"` → [`metadata::inspect_field`]: para un `field` dado (dot-path, p. ej.
     ///   `"service.tier"`), presencia/ausencia, tipos y valores escalares frecuentes
     ///   (`FieldInspection`). Requiere el parámetro `field`; su ausencia o un dot-path inválido →
-    ///   `Err(ErrorCode::InvalidSchema)`.
+    ///   `Err(ErrorCode::InvalidSchema)`, **con un mensaje que dice cuál de las dos cosas pasó**
+    ///   (E26-H07).
     ///
     /// Un `mode` sin reconocer → `Err(ErrorCode::InvalidSchema)` (nunca entra en pánico). Un
     /// workspace sin frontmatter en ningún documento NO es un error: el catálogo sale vacío.
     ///
-    /// `Result<_, ErrorCode>` (no `WorkspaceError`) — mismo patrón que [`App::knowledge_get`]: es un
-    /// servicio de cara a la fachada MCP/CLI, y el catálogo de códigos estables es lo que el llamante
-    /// necesita para el wire de error.
+    /// # Un solo dialecto de dot-paths (E26-H09)
+    ///
+    /// El `field` se normaliza con [`lodestar_core::parse::build_field_path`] —el **mismo** punto
+    /// por el que pasan `where`, `filter` y `has`/`missing`— y no con `FieldPath::parse`, que hasta
+    /// v0.4.0 hacía de esta tool un segundo dialecto: `frontmatter.status` buscaba una clave literal
+    /// `frontmatter` y devolvía `presentIn: 0` sobre una base llena de `status`, y `graph.backlinks`
+    /// inspeccionaba la clave del frontmatter mientras el mismo texto en un `where` consultaba el
+    /// grafo. De ahí hereda `field` las tres reglas del lenguaje: la **abreviatura**
+    /// (`frontmatter.status` ≡ `status`), el **anclaje** (`frontmatter.graph.backlinks` alcanza la
+    /// clave del usuario) y el **rechazo** de una propiedad desconocida bajo namespace reservado
+    /// (`graph.backlink`, con typo), con el mismo mensaje que da la consulta.
+    ///
+    /// Y dos reglas propias. La primera: un namespace reservado **válido** (`graph.backlinks`,
+    /// `document.path`) tampoco es inspeccionable → `Err(ErrorCode::InvalidSchema)`.
+    /// `metadata_inspect` describe **metadata**, y una propiedad calculada no vive en ningún
+    /// frontmatter: no tiene presencia ni vocabulario que describir. El mensaje dice por dónde sí:
+    /// `graph_query` para el grafo, y el anclaje `frontmatter.` para la clave homónima del usuario.
+    ///
+    /// La segunda: un `field` que empieza por el anclaje, **no encuentra nada** y sin embargo es un
+    /// nombre que el **catálogo anuncia** es la colisión con una clave de primer nivel llamada
+    /// literalmente `frontmatter` → `Err(ErrorCode::InvalidSchema)` explicando la ambigüedad, en vez
+    /// de un `presentIn: 0` indistinguible de una ausencia legítima. El caso normal no cambia: si la
+    /// resolución anclada encuentra algo, se responde con ella.
+    ///
+    /// # Paginación (E26-H10)
+    ///
+    /// `limit`/`cursor` acotan la **lista** de los dos modos —`fields` en `catalog`, `values` en
+    /// `field`— con el mismo cursor-offset hex opaco y autosuficiente del resto de la superficie
+    /// (`knowledge_search`/`knowledge_check`/`graph_query`): `limit` por defecto **100**, tope
+    /// **1000** (`DEFAULT_METADATA_LIMIT`/`MAX_METADATA_LIMIT`), `next_cursor` `None` al agotar. Hasta
+    /// v0.4.0 esta era la única de las diez tools sin cota, y sus dos modos devuelven respuestas de
+    /// tamaño proporcional al workspace: el catálogo emite una fila por cada field path (mapas
+    /// intermedios incluidos) y `values` una entrada por cada valor escalar distinto —N entradas para
+    /// N documentos en un campo de alta cardinalidad (un `id`, una fecha, un `owner`)—.
+    ///
+    /// La cota la aplica **esta fachada**, no [`metadata::catalog`]/[`metadata::inspect_field`]: el
+    /// core sigue puro y devolviendo la verdad completa (invariantes #2 y #3), y quien la trunca es
+    /// quien sirve el wire. Y se pagina la **lista, no la estadística**: `present_in`/`missing_in`/
+    /// `inferred_types` —y el `present_in` de cada fila del catálogo— se computan sobre **todo** el
+    /// workspace, así que una página de 5 valores nunca implica un `presentIn: 5`.
+    ///
+    /// `Result<_, AppError>` (no `WorkspaceError`) — mismo patrón que [`App::knowledge_get`]: es un
+    /// servicio de cara a la fachada MCP/CLI, y el código estable **con su mensaje** es lo que el
+    /// llamante necesita para el wire de error.
     pub fn metadata_inspect(
         &self,
         mode: &str,
         field: Option<&str>,
-    ) -> Result<MetadataInspection, ErrorCode> {
-        let doc_set = self
-            .workspace
-            .document_set()
-            .map_err(|e| workspace_error_code(&e))?;
+        limit: Option<usize>,
+        cursor: Option<&str>,
+    ) -> Result<MetadataInspection, AppError> {
+        let doc_set = self.workspace.document_set()?;
 
         match mode {
-            "catalog" => Ok(MetadataInspection::Catalog(metadata::catalog(&doc_set))),
-            "field" => {
-                let field = field.ok_or(ErrorCode::InvalidSchema)?;
-                let field_path = FieldPath::parse(field).map_err(|_| ErrorCode::InvalidSchema)?;
-                Ok(MetadataInspection::Field(metadata::inspect_field(
-                    &doc_set,
-                    &field_path,
-                )))
+            "catalog" => {
+                let catalog = metadata::catalog(&doc_set);
+                let (fields, next_cursor) = pagina(
+                    catalog.fields,
+                    limit,
+                    cursor,
+                    DEFAULT_METADATA_LIMIT,
+                    MAX_METADATA_LIMIT,
+                );
+                Ok(MetadataInspection::Catalog(MetadataCatalogPage {
+                    catalog: MetadataCatalog { fields },
+                    next_cursor,
+                }))
             }
-            _ => Err(ErrorCode::InvalidSchema),
+            "field" => {
+                let field = field.ok_or_else(|| {
+                    AppError::invalid_schema(
+                        "el modo «field» exige el parámetro «field» con el dot-path del campo a \
+                         inspeccionar (p. ej. «status» u «owner.name»); el modo «catalog» lista los \
+                         campos disponibles",
+                    )
+                })?;
+                // E26-H09: el MISMO normalizador que `where`/`filter`/`has` (un solo dialecto por
+                // construcción). Su `ParseError` ya distingue el dot-path malformado de la
+                // propiedad desconocida bajo namespace reservado, y ese mensaje viaja entero.
+                let field_path = lodestar_core::parse::build_field_path(field).map_err(|e| {
+                    // El diagnóstico del core viaja ENTERO (invariante #3): distingue el dot-path
+                    // malformado (`a..b`) de la propiedad desconocida bajo namespace reservado
+                    // (`graph.backlink`), y en este segundo caso ya dice cómo alcanzar la clave
+                    // homónima del usuario. La fachada solo añade qué parámetro falló.
+                    AppError::invalid_schema(format!(
+                        "«field» no es un dot-path inspeccionable: {}; se esperaba algo como \
+                         «status» u «owner.name», recibido «{field}»",
+                        e.message
+                    ))
+                })?;
+                if let Some(props) = field_path.props_del_namespace() {
+                    return Err(AppError::invalid_schema(
+                        mensaje_namespace_no_inspeccionable(&field_path, props),
+                    ));
+                }
+                let mut inspection = metadata::inspect_field(&doc_set, &field_path);
+                // E26-H09: un `field` que empieza por el ANCLAJE y no encuentra nada puede ser la
+                // colisión con una clave de primer nivel llamada literalmente `frontmatter`, que el
+                // catálogo SÍ anuncia con ese texto (es su nombre literal, no un anclaje). Devolver
+                // `presentIn: 0` sería el defecto que esta épica retira: una respuesta
+                // silenciosamente equivocada sobre un dato que existe. Se comprueba contra el
+                // catálogo —la misma verdad que el agente leyó— y solo en el caso vacío, que es el
+                // único ambiguo: si la resolución anclada encuentra algo, manda ella.
+                if inspection.present_in == 0 && empieza_por_el_anclaje(field) {
+                    let anunciado = metadata::catalog(&doc_set)
+                        .fields
+                        .iter()
+                        .any(|e| e.field.to_string() == field);
+                    if anunciado {
+                        return Err(AppError::invalid_schema(mensaje_colision_con_el_anclaje(
+                            field,
+                        )));
+                    }
+                }
+                // La página se recorta AQUÍ, después de que los agregados
+                // (`present_in`/`missing_in`/`inferred_types`) queden fijados sobre el workspace
+                // entero: se pagina la lista, no la estadística (E26-H10).
+                let (values, next_cursor) = pagina(
+                    std::mem::take(&mut inspection.values),
+                    limit,
+                    cursor,
+                    DEFAULT_METADATA_LIMIT,
+                    MAX_METADATA_LIMIT,
+                );
+                inspection.values = values;
+                Ok(MetadataInspection::Field(FieldInspectionPage {
+                    inspection,
+                    next_cursor,
+                }))
+            }
+            _ => Err(AppError::invalid_schema(format!(
+                "«mode» debe ser «catalog» (los campos que existen en la base) o «field» (el \
+                 detalle de uno); recibido «{mode}»"
+            ))),
         }
     }
 
@@ -896,11 +1110,8 @@ impl App {
         include_suggested_fixes: bool,
         limit: Option<usize>,
         cursor: Option<&str>,
-    ) -> Result<CheckReport, ErrorCode> {
-        let (doc_set, discovery_diagnostics) = self
-            .workspace
-            .document_set_with_discovery()
-            .map_err(|e| workspace_error_code(&e))?;
+    ) -> Result<CheckReport, AppError> {
+        let (doc_set, discovery_diagnostics) = self.workspace.document_set_with_discovery()?;
         let analysis = doc_set.analyze();
         let cfg = self.workspace.config();
         // Política de severidad por familia (`§20.9`, E20-H04): reclasifica o suprime cada
@@ -1019,7 +1230,7 @@ impl App {
         doc_set: &DocumentSet,
         analysis: &Analysis,
         scope: &CheckScope,
-    ) -> Result<BTreeSet<RelPath>, ErrorCode> {
+    ) -> Result<BTreeSet<RelPath>, AppError> {
         match scope {
             CheckScope::Workspace => Ok(analysis.documents.iter().cloned().collect()),
             CheckScope::Document { r#ref } => {
@@ -1068,11 +1279,8 @@ impl App {
     /// `target` —`PATH-NOT-UTF8`, cuyo path no es representable como [`RelPath`]— no tiene clave con
     /// la que entrar en el mapa y **solo** se surface a por `knowledge_check`, que los lleva en una
     /// lista aparte; queda documentado como límite del wire del `Analysis`, no como olvido.
-    pub fn full_analysis(&self) -> Result<Analysis, ErrorCode> {
-        let (doc_set, discovery_diagnostics) = self
-            .workspace
-            .document_set_with_discovery()
-            .map_err(|e| workspace_error_code(&e))?;
+    pub fn full_analysis(&self) -> Result<Analysis, AppError> {
+        let (doc_set, discovery_diagnostics) = self.workspace.document_set_with_discovery()?;
         let mut analysis = doc_set.analyze().clone();
         let validation = &self.workspace.config().validation;
 
@@ -1109,9 +1317,13 @@ impl App {
     ///
     /// `operation` ∈ `"backlinks"`/`"outgoing"`/`"neighborhood"`/`"isolated"`/`"dangling"`:
     /// - `backlinks`/`outgoing`/`neighborhood` requieren `r` (resuelto con [`App::resolve_ref`]);
-    ///   su ausencia es `Err(ErrorCode::DocumentNotFound)` — no hay un código de "falta parámetro"
-    ///   dedicado en el catálogo de 16 códigos estables, y es el mismo error que produciría un
-    ///   `ref` que no resuelve, así que reusarlo aquí no inventa semántica nueva.
+    ///   su **ausencia** es `Err(ErrorCode::InvalidSchema)`, con un mensaje que nombra el parámetro
+    ///   que falta y la operación que lo exige (E26-H07). Hasta v0.4.0 era `DOCUMENT_NOT_FOUND`
+    ///   —«no hay un código de falta-parámetro en el catálogo, y es el mismo error que produciría un
+    ///   `ref` que no resuelve»—, y esa equivalencia era justo el defecto: quien **olvida** el `ref`
+    ///   recibía el mismo error que quien apunta a un documento inexistente, y tomaba el camino de
+    ///   recuperación equivocado (buscar el documento, en vez de mirar su llamada). Un `ref`
+    ///   **presente** que no resuelve sigue siendo `DOCUMENT_NOT_FOUND`, que es lo que su nombre dice.
     /// - `backlinks` reusa [`DocumentSet::backlinks`] (invariante #3, "una sola verdad computada"):
     ///   `nodes` = el propio documento + sus fuentes entrantes (`inbound`); `edges` = fuente→ref.
     /// - `outgoing` reusa [`DocumentSet::neighborhood`] con `Direction::Out` a profundidad 1: mismo
@@ -1132,7 +1344,8 @@ impl App {
     /// forma `{nodes,edges}` (invariante #3):
     /// - `path_between` requiere `r` (origen) y `to` (destino); reusa [`DocumentSet::path_between`]
     ///   (camino más corto dirigido). `nodes` = los nodos del camino, `edges` = los enlaces
-    ///   consecutivos `[a→..→b]`. Si algún ref no resuelve → `Err(ErrorCode::DocumentNotFound)`; si
+    ///   consecutivos `[a→..→b]`. La ausencia de cualquiera de los dos extremos es `INVALID_SCHEMA`
+    ///   (E26-H07, mismo criterio que arriba). Si algún ref no resuelve → `Err(ErrorCode::DocumentNotFound)`; si
     ///   no hay camino, `nodes`/`edges` vacíos (nunca error). **Nota**: la paginación genérica
     ///   ordena `nodes` por `id`, así que el orden del camino se recupera de `edges`, no de `nodes`.
     /// - `cycles` no requiere `r`: reusa [`DocumentSet::cycles`]. `nodes` = la unión de los nodos que
@@ -1140,17 +1353,20 @@ impl App {
     ///   conjunto. La partición en ciclos concretos la da el core; aquí se sirve el subgrafo cíclico
     ///   agregado (coherente con la forma `{nodes,edges}` de esta tool).
     /// - `components` no requiere `r`: reusa [`DocumentSet::components`]. Como las componentes conexas
-    ///   particionan **todo** el grafo, se sirve el grafo completo (`nodes`/`edges` de
-    ///   [`DocumentSet::graph_model`]); el cliente reconstruye la partición con [`DocumentSet::components`] o
-    ///   recorriendo las aristas.
+    ///   particionan **todo** el grafo, se parte del grafo completo (`nodes`/`edges` de
+    ///   [`DocumentSet::graph_model`]) **antes de paginar** (E26-H10: lo que viaja es una página de
+    ///   ese grafo, no el grafo entero); el cliente reconstruye la partición con
+    ///   [`DocumentSet::components`] o recorriendo las aristas.
     ///
     /// **Paginación**: orden total y estable de `nodes` por `id` (mismo criterio que
     /// `knowledge_search`/`knowledge_check`); `limit` trunca esa página con un cursor-offset opaco
-    /// (mismo esquema hex, autosuficiente entre procesos). Sin `limit`, o con `limit` mayor o igual
-    /// al total, no hay truncamiento y `nextCursor` es `None`. Las `edges` devueltas se acotan a
-    /// los `nodes` que sobreviven a la página (origen y destino ambos presentes), así el subgrafo
-    /// que se sirve es siempre coherente consigo mismo — nunca una arista "colgando" de un nodo que
-    /// la paginación dejó fuera.
+    /// (mismo esquema hex, autosuficiente entre procesos). **E26-H10**: `limit` ausente vale **100**
+    /// y se acota a **1000** (`DEFAULT_GRAPH_LIMIT`/`MAX_GRAPH_LIMIT`) —hasta v0.4.0 `None` significaba «el
+    /// grafo entero», así que `components` sobre una base grande servía una respuesta del tamaño del
+    /// workspace—; con `limit` mayor o igual al total no hay truncamiento y `nextCursor` es `None`.
+    /// Las `edges` devueltas se acotan a los `nodes` que sobreviven a la página (origen y destino
+    /// ambos presentes), así el subgrafo que se sirve es siempre coherente consigo mismo — nunca una
+    /// arista "colgando" de un nodo que la paginación dejó fuera.
     // Dispatcher de wire: cada argumento mapea 1:1 a un campo del `inputSchema` de la tool MCP
     // `graph_query` (operation/ref/to/depth/direction/limit/cursor). Agruparlos en un struct sería
     // una capa de framing paralela sin valor; el listado plano es el contrato.
@@ -1164,15 +1380,26 @@ impl App {
         direction: Option<&str>,
         limit: Option<usize>,
         cursor: Option<&str>,
-    ) -> Result<GraphQueryResult, ErrorCode> {
-        let doc_set = self
-            .workspace
-            .document_set()
-            .map_err(|e| workspace_error_code(&e))?;
+    ) -> Result<GraphQueryResult, AppError> {
+        let doc_set = self.workspace.document_set()?;
+
+        // Extremo (`ref` u `to`) de las operaciones que lo exigen (E26-H07). Que FALTE es
+        // `INVALID_SCHEMA` —el agente tiene que mirar su llamada— y que no RESUELVA es
+        // `DOCUMENT_NOT_FOUND` (lo dice `resolve_ref`) —el agente tiene que buscar el documento—:
+        // dos caminos de recuperación distintos, que hasta v0.4.0 compartían código.
+        let extremo = |valor: Option<&DocumentRef>, parametro: &str, papel: &str| {
+            let r = valor.ok_or_else(|| {
+                AppError::invalid_schema(format!(
+                    "la operación «{operation}» exige el parámetro «{parametro}» ({papel}); las \
+                     operaciones isolated/dangling/cycles/components no lo llevan"
+                ))
+            })?;
+            self.resolve_ref(r)
+        };
 
         let (mut nodes, mut edges): (Vec<GraphNode>, Vec<Edge>) = match operation {
             "backlinks" => {
-                let path = self.resolve_ref(r.ok_or(ErrorCode::DocumentNotFound)?)?;
+                let path = extremo(r, "ref", "el documento consultado")?;
                 let bl = doc_set.backlinks(&path);
                 let mut ids: BTreeSet<RelPath> = BTreeSet::new();
                 ids.insert(path.clone());
@@ -1196,12 +1423,12 @@ impl App {
                 (nodes, edges)
             }
             "outgoing" => {
-                let path = self.resolve_ref(r.ok_or(ErrorCode::DocumentNotFound)?)?;
+                let path = extremo(r, "ref", "el documento consultado")?;
                 let nb = doc_set.neighborhood(&path, 1, Direction::Out);
                 (nb.nodes, nb.edges)
             }
             "neighborhood" => {
-                let path = self.resolve_ref(r.ok_or(ErrorCode::DocumentNotFound)?)?;
+                let path = extremo(r, "ref", "el centro del vecindario")?;
                 let dir = match direction {
                     Some("in") => Direction::In,
                     Some("both") => Direction::Both,
@@ -1235,8 +1462,8 @@ impl App {
                 (nodes, edges)
             }
             "path_between" => {
-                let from = self.resolve_ref(r.ok_or(ErrorCode::DocumentNotFound)?)?;
-                let dest = self.resolve_ref(to.ok_or(ErrorCode::DocumentNotFound)?)?;
+                let from = extremo(r, "ref", "el origen del camino")?;
+                let dest = extremo(to, "to", "el destino del camino")?;
                 let path = doc_set.path_between(&from, &dest);
                 let nodes = path.iter().map(|id| doc_set.node(id)).collect();
                 // Aristas consecutivas del camino; `dangling` si el destino no es un fichero real.
@@ -1269,21 +1496,28 @@ impl App {
                 let model = doc_set.graph_model();
                 (model.nodes, model.edges)
             }
-            // Ninguna historia ejerce todavía una `operation` fuera de las anteriores; mismo
-            // criterio que `metadata_inspect` para un `mode` no reconocido — no hay un código de
-            // "argumento inválido" dedicado en el catálogo de 16.
-            _ => return Err(ErrorCode::InvalidSchema),
+            // Una `operation` fuera de las anteriores es entrada inválida; mismo criterio que
+            // `metadata_inspect` para un `mode` no reconocido. El mensaje enumera las válidas
+            // (E26-H07): el código dice que el agente se equivocó, la lista le dice en qué.
+            _ => {
+                return Err(AppError::invalid_schema(format!(
+                    "«operation» debe ser una de backlinks, outgoing, neighborhood, isolated, \
+                     dangling, path_between, cycles o components; recibido «{operation}»"
+                )))
+            }
         };
 
         // Orden total y estable por `id` — paginación reproducible entre procesos frescos.
         nodes.sort_by(|a, b| a.id.cmp(&b.id));
 
         let total = nodes.len();
+        // E26-H10: `limit` ausente ya NO significa «el grafo entero». Hasta v0.4.0 `None => total`,
+        // así que un `components` —que sirve el `graph_model` completo— volcaba una respuesta del
+        // tamaño del workspace. Ahora la página por defecto es `DEFAULT_GRAPH_LIMIT` y el resto se
+        // recorre por `nextCursor` (consecuencia declarada de la historia).
+        let limit = limit.unwrap_or(DEFAULT_GRAPH_LIMIT).min(MAX_GRAPH_LIMIT);
         let start = cursor.map(decode_cursor).unwrap_or(0).min(total);
-        let end = match limit {
-            Some(l) => start.saturating_add(l).min(total),
-            None => total,
-        };
+        let end = start.saturating_add(limit).min(total);
         let truncated = end < total;
         let next_cursor = truncated.then(|| encode_cursor(end));
         let page_nodes: Vec<GraphNode> = nodes.get(start..end).unwrap_or(&[]).to_vec();
@@ -1337,17 +1571,18 @@ impl App {
         r: &DocumentRef,
         kind: &str,
         depth: Option<u32>,
-    ) -> Result<ImpactReport, ErrorCode> {
+    ) -> Result<ImpactReport, AppError> {
         // E21-H01: `kind` restringido a las operaciones de impacto del modelo universal (`§20.10`).
         // Los `kind` semánticos retirados caen aquí como esquema de entrada inválido.
         if kind != "move" && kind != "delete" {
-            return Err(ErrorCode::InvalidSchema);
+            return Err(AppError::invalid_schema(format!(
+                "«proposedOperation.kind» debe ser «move» o «delete»; recibido «{kind}». Los kind \
+                 semánticos (deprecate, transition_status, change_relation, replace_document) se \
+                 retiraron en E21-H01 con el modelo que los definía"
+            )));
         }
         let path = self.resolve_ref(r)?;
-        let doc_set = self
-            .workspace
-            .document_set()
-            .map_err(|e| workspace_error_code(&e))?;
+        let doc_set = self.workspace.document_set()?;
 
         // `directlyAffected`: backlinks DIRECTOS entrantes (verdad del core).
         let directly_affected = doc_set.backlinks(&path).inbound.len();
@@ -1436,14 +1671,17 @@ impl App {
     ///    distinto ⇒ hash distinto. **No** depende del reloj (`expiresAt` sí es wall-clock, pero
     ///    queda FUERA del hash). `changeSetId` se deriva del `planHash`.
     ///
-    /// Devuelve un [`PlanResult`] (proyección de servicio) con el plan completo. `Err(ErrorCode)`
-    /// para el wire de error (mismo patrón que el resto de servicios de `App`).
+    /// Devuelve un [`PlanResult`] (proyección de servicio) con el plan completo. `Err(AppError)`
+    /// —código estable **y** mensaje— para el wire de error (mismo patrón que el resto de servicios
+    /// de `App` desde E26-H07). El diagnóstico de un `selection.where`/`filter` malformado llega
+    /// entero en ese mensaje, por la misma compilación de consulta que usa `knowledge_search`
+    /// (`build_search_expression`, invariante #3).
     pub fn change_plan(
         &self,
         expected_workspace_revision: Option<WorkspaceRevision>,
         raw_ops: &Value,
         policy: PlanPolicy,
-    ) -> Result<PlanResult, ErrorCode> {
+    ) -> Result<PlanResult, AppError> {
         // (0) Recuperación pendiente ANTES de leer nada (E24-H03). Si una transacción anterior
         //     quedó a medias, el disco tiene renames parciales: planificar sobre él captura una
         //     `base_revision` de un estado que `apply_transaction` va a deshacer en su paso (2),
@@ -1457,10 +1695,7 @@ impl App {
         //     —el camino normal no toma el lock ni escribe nada—.
         self.recover_if_pending()?;
 
-        let doc_set = self
-            .workspace
-            .document_set()
-            .map_err(|e| workspace_error_code(&e))?;
+        let doc_set = self.workspace.document_set()?;
         let cfg = self.workspace.config();
         let files = doc_set.files();
         let writable = &cfg.workspace.writable_roots;
@@ -1469,7 +1704,15 @@ impl App {
         let base_revision = workspace_revision(files, writable);
         if let Some(expected) = &expected_workspace_revision {
             if expected != &base_revision {
-                return Err(ErrorCode::RevisionConflict);
+                return Err(AppError::new(
+                    ErrorCode::RevisionConflict,
+                    format!(
+                        "el workspace ya no está en la revisión esperada: «expectedWorkspaceRevision» \
+                         es {} y la actual es {}. Vuelve a leer el estado (workspace_status) y \
+                         replanifica",
+                        expected.0, base_revision.0
+                    ),
+                ));
             }
         }
 
@@ -1484,7 +1727,12 @@ impl App {
         ) = if raw_ops.get("selection").is_some() {
             expand_selection(&doc_set, raw_ops)?
         } else {
-            let ops_arr = raw_ops.as_array().ok_or(ErrorCode::InvalidSchema)?;
+            let ops_arr = raw_ops.as_array().ok_or_else(|| {
+                AppError::invalid_schema(
+                    "se esperaba «operations» (un array de operaciones) o la forma de selección \
+                     masiva «{selection, operation}»",
+                )
+            })?;
             let mut normalized: Vec<NormalizedOperation> = Vec::new();
             for raw in ops_arr {
                 if let Some(expected) = raw.get("expectedRevision").and_then(Value::as_str) {
@@ -1493,7 +1741,18 @@ impl App {
                         DocumentRevision::from_hash(*blake3::hash(raw_md.as_bytes()).as_bytes())
                     });
                     if actual.as_ref().map(|r| r.0.as_str()) != Some(expected) {
-                        return Err(ErrorCode::RevisionConflict);
+                        return Err(AppError::new(
+                            ErrorCode::RevisionConflict,
+                            format!(
+                                "«{}» ya no está en la revisión «{expected}» que declara la \
+                                 operación (ahora es {}). Vuelve a leerlo (knowledge_get) y \
+                                 replanifica",
+                                target.as_str(),
+                                actual
+                                    .map(|r| format!("«{}»", r.0))
+                                    .unwrap_or_else(|| "inexistente".to_string())
+                            ),
+                        ));
                     }
                 }
                 normalized.extend(normalize_raw_op(&doc_set, raw)?);
@@ -1503,7 +1762,7 @@ impl App {
 
         // (4) DocumentSet hipotético + análisis del plan (todo en memoria, sin escribir).
         let after_files =
-            plan::apply_normalized_ops(files, &normalized).map_err(|e| error_code(&e))?;
+            plan::apply_normalized_ops(files, &normalized).map_err(|e| AppError::from(&e))?;
         let after = DocumentSet::from_files(after_files);
 
         // (4-bis) Guard de descubrimiento (E15-H09): ningún path que el plan escribiría puede
@@ -1513,9 +1772,7 @@ impl App {
         //     `assert_writable`: las raíces de la config se siguen juzgando en el apply.
         for (path, contenido) in after.files() {
             if files.get(path) != Some(contenido) {
-                self.workspace
-                    .assert_discoverable(path)
-                    .map_err(|e| workspace_error_code(&e))?;
+                self.workspace.assert_discoverable(path)?;
             }
         }
 
@@ -1573,18 +1830,38 @@ impl App {
     ///
     /// Si el plan existe y está vigente, `Ok(PlanResult)` con el contenido persistido tal cual
     /// (mismo `planHash` que devolvió `change_plan`).
-    pub fn load_plan(&self, id: &ChangeSetId) -> Result<PlanResult, ErrorCode> {
+    pub fn load_plan(&self, id: &ChangeSetId) -> Result<PlanResult, AppError> {
+        // Los tres motivos de PLAN_STALE comparten mensaje porque comparten remedio: el plan ya no
+        // es utilizable y hay que volver a pedirlo (E26-H07 les da voz; el código no cambia).
+        let no_utilizable = || {
+            AppError::new(
+                ErrorCode::PlanStale,
+                format!(
+                    "el plan «{}» ya no está disponible (no existe, se purgó el runtime o su \
+                     fichero no es legible): vuelve a llamar a change_plan para obtener un \
+                     changeSetId vigente",
+                    id.0
+                ),
+            )
+        };
         let path = plan_file_path(self.workspace.root(), id);
-        let raw = std::fs::read(&path).map_err(|_| ErrorCode::PlanStale)?;
-        let plan: PlanResult = serde_json::from_slice(&raw).map_err(|_| ErrorCode::PlanStale)?;
+        let raw = std::fs::read(&path).map_err(|_| no_utilizable())?;
+        let plan: PlanResult = serde_json::from_slice(&raw).map_err(|_| no_utilizable())?;
 
-        let expires_at: u64 = plan.expires_at.parse().map_err(|_| ErrorCode::PlanStale)?;
+        let expires_at: u64 = plan.expires_at.parse().map_err(|_| no_utilizable())?;
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
         if expires_at < now {
-            return Err(ErrorCode::PlanExpired);
+            return Err(AppError::new(
+                ErrorCode::PlanExpired,
+                format!(
+                    "el plan «{}» caducó (expiresAt {expires_at}, ahora {now}): vuelve a llamar a \
+                     change_plan para replanificar sobre el estado actual",
+                    id.0
+                ),
+            ));
         }
 
         Ok(plan)
@@ -1604,14 +1881,24 @@ impl App {
     ///    `change_plan`) y lo compara con el `planHash` persistido; si difiere, el workspace cambió bajo
     ///    el plan → `Err(PlanStale)` y **no escribe**. (El `planHash` mezcla la base y las
     ///    operaciones, así que un cambio del canónico bajo el plan lo invalida.)
-    /// 4. **Transacción**: [`Workspace::apply_transaction`] publica por el único escritor (staging →
-    ///    lock → backup → journal → renames atómicos), devolviendo `(previous, result, changedPaths)`.
-    ///    Su `assert_writable` rechaza cualquier path fuera de `writableRoots` → `PERMISSION_DENIED`
-    ///    ANTES de tocar el canónico.
+    /// 4. **Transacción**: [`Workspace::apply_transaction_con_recibo`] publica por el único escritor
+    ///    (staging → lock → backup → journal + registro durable del recibo → renames atómicos),
+    ///    devolviendo `(previous, result, changedPaths)`. Su `assert_writable` rechaza cualquier path
+    ///    fuera de `writableRoots` → `PERMISSION_DENIED` ANTES de tocar el canónico.
     /// 5. **Receipt + GC**: persiste el [`ChangeReceipt`] de la aplicación completada (E13-H07) y
     ///    ejecuta la retención (`gc_receipts`).
     /// 6. Devuelve un [`ApplyResult`] (proyección de servicio) con `applied:true`, las revisiones
     ///    antes/después, los paths cambiados, el `semanticDiff` del plan y la conformidad post-apply.
+    ///
+    /// # Publicar implica recibo (E25-H04)
+    /// El **punto de no retorno** es el primer rename del paso (4). A partir de ahí el conocimiento ya
+    /// cambió, así que este método no puede devolver `Err` por nada de lo que venga después: los pasos
+    /// (5) y (6) —recibo, retención, conformidad— son **best-effort con aviso por stderr**. Un error ahí
+    /// diría al agente que no se aplicó nada sobre algo que sí se aplicó, y no habría salida:
+    /// `change_revert` responde `PLAN_EXPIRED` sin recibo y un segundo `change_apply` del mismo plan,
+    /// `PLAN_STALE`, porque la base cambió. Degradarlos no basta por sí solo (no cubre el `SIGKILL`): lo
+    /// que cierra el agujero es que el recibo se persista **con el journal**, dentro del paso (4), y que
+    /// la recuperación por la vía COMPLETAR lo dé por bueno.
     ///
     /// # Mapeo de error y la reserva `WorkspaceError::Core` (E10-H02)
     /// Los errores de la transacción se mapean con [`workspace_error_code`]. El rechazo por permisos
@@ -1633,7 +1920,7 @@ impl App {
         &self,
         change_set_id: &ChangeSetId,
         expected_workspace_revision: Option<WorkspaceRevision>,
-    ) -> Result<ApplyResult, ErrorCode> {
+    ) -> Result<ApplyResult, AppError> {
         let outcome = self.change_apply_uncounted(change_set_id, expected_workspace_revision);
         self.audit(audit_entry_for_apply(change_set_id, &outcome));
         outcome
@@ -1645,21 +1932,26 @@ impl App {
         &self,
         change_set_id: &ChangeSetId,
         expected_workspace_revision: Option<WorkspaceRevision>,
-    ) -> Result<ApplyResult, ErrorCode> {
+    ) -> Result<ApplyResult, AppError> {
         // (1) Cargar el plan persistido (caducidad → PLAN_EXPIRED; ausente/ilegible → PLAN_STALE).
         let plan = self.load_plan(change_set_id)?;
 
         let cfg = self.workspace.config();
-        let doc_set = self
-            .workspace
-            .document_set()
-            .map_err(|e| workspace_error_code(&e))?;
+        let doc_set = self.workspace.document_set()?;
         let current_base = workspace_revision(doc_set.files(), &cfg.workspace.writable_roots);
 
         // (2) Control optimista a nivel de workspace (si el llamante fijó una expectativa).
         if let Some(expected) = &expected_workspace_revision {
             if expected != &current_base {
-                return Err(ErrorCode::RevisionConflict);
+                return Err(AppError::new(
+                    ErrorCode::RevisionConflict,
+                    format!(
+                        "el workspace ya no está en la revisión esperada: \
+                         «expectedWorkspaceRevision» es {} y la actual es {}. Vuelve a leer el \
+                         estado (workspace_status) y replanifica",
+                        expected.0, current_base.0
+                    ),
+                ));
             }
         }
 
@@ -1667,21 +1959,51 @@ impl App {
         //     recomputado difiere del persistido → PLAN_STALE (no se escribe).
         let recomputed = compute_plan_hash(&current_base, &plan.normalized_operations);
         if recomputed != plan.plan_hash {
-            return Err(ErrorCode::PlanStale);
+            return Err(AppError::new(
+                ErrorCode::PlanStale,
+                format!(
+                    "el conocimiento cambió bajo el plan «{}»: se planificó sobre la revisión {} y \
+                     el workspace está en {}, así que no se ha escrito nada. Vuelve a llamar a \
+                     change_plan sobre el estado actual",
+                    plan.change_set_id.0, plan.base_workspace_revision.0, current_base.0
+                ),
+            ));
         }
 
-        // (4) Publicar por el único escritor (staging → lock → backup → journal → renames). El guard
-        //     `assert_writable` de la transacción rechaza fuera de `writableRoots` → PERMISSION_DENIED
-        //     antes de tocar el canónico.
+        // (4) Publicar por el único escritor (staging → lock → backup → journal + REGISTRO DURABLE DEL
+        //     RECIBO → renames). El guard `assert_writable` de la transacción rechaza fuera de
+        //     `writableRoots` → PERMISSION_DENIED antes de tocar el canónico. Se presta el
+        //     `semanticDiff` del plan porque es la única pieza del recibo que la mecánica de disco no
+        //     puede conocer (E25-H04): con ella, el recibo queda persistido ANTES del primer rename y
+        //     una publicación no puede volverse irreversible por morirse el proceso después.
         let change_set = plan_to_change_set(&plan);
         let (previous, result, changed_paths) = self
             .workspace
-            .apply_transaction(&change_set)
-            .map_err(|e| workspace_error_code(&e))?;
+            .apply_transaction_con_recibo(&change_set, Some(&plan.semantic_diff))?;
+
+        // Punto de caída de la FACHADA (E25-H04): entre el retorno de la transacción y el recibo. Es la
+        // ventana en la que el canónico ya está publicado, el lock ya está soltado y —hasta esta
+        // historia— no existía todavía ningún registro con el que deshacer el cambio. Sin
+        // `--features test-failpoints` no genera ni una instrucción.
+        #[cfg(feature = "test-failpoints")]
+        if lodestar_workspace::failpoints::disparado(
+            lodestar_workspace::failpoints::FailPoint::TrasLaTransaccionAntesDelRecibo,
+        ) {
+            return Err(AppError::new(
+                ErrorCode::InternalIoError,
+                "failpoint de prueba: caída simulada tras publicar la transacción y antes del recibo",
+            ));
+        }
 
         // (5) Receipt de la aplicación completada + retención (E13-H07). El `receiptId` es el mismo
         //     id de transacción derivado del `changeSetId`, así el receipt localiza sus copias de
         //     recuperación por convención de nombre.
+        //
+        //     DESDE AQUÍ TODO ES BEST-EFFORT (E25-H04): estos pasos corren con el canónico ya publicado,
+        //     así que un `Err` suyo diría al agente que no se aplicó nada sobre algo que sí se aplicó —y
+        //     sin salida, porque `change_revert` respondería `PLAN_EXPIRED` y un segundo `change_apply`
+        //     del mismo plan, `PLAN_STALE`—. La transacción ya dejó el recibo persistido y promovido; esta
+        //     escritura es la red de seguridad de que existe también si su promoción no pudo completarse.
         let receipt_id = ReceiptId(transaction_id(&plan.change_set_id));
         let receipt = ChangeReceipt {
             id: receipt_id.clone(),
@@ -1691,18 +2013,39 @@ impl App {
             changed_paths: changed_paths.clone(),
             semantic_diff: plan.semantic_diff.clone(),
         };
-        self.workspace
-            .write_receipt(&receipt)
-            .map_err(|e| workspace_error_code(&e))?;
-        self.workspace
-            .gc_receipts()
-            .map_err(|e| workspace_error_code(&e))?;
+        if let Err(e) = self.workspace.write_receipt(&receipt) {
+            eprintln!(
+                "lodestar: aviso: no se pudo re-escribir el recibo de `{}` tras publicar: {e}",
+                plan.change_set_id.0
+            );
+        }
+        if let Err(e) = self.workspace.gc_receipts() {
+            eprintln!("lodestar: aviso: la retención de recibos falló tras publicar: {e}");
+        }
 
         // (6) Conformidad del workspace ya publicado (una sola verdad computada, invariante #3).
-        let analysis = self
-            .workspace
-            .analyze()
-            .map_err(|e| workspace_error_code(&e))?;
+        //     También best-effort: si el canónico no se puede releer, la publicación sigue siendo un
+        //     hecho. Lo único que se degrada es lo que se puede AFIRMAR de ella, y se degrada al lado
+        //     conservador (`valid: false`): no se declara válido lo que no se ha podido comprobar.
+        let validation = match self.workspace.analyze() {
+            Ok(analysis) => ApplyValidation {
+                valid: analysis.hard_fail() == 0,
+                errors: analysis.hard_fail(),
+                warnings: analysis.warn_count(),
+            },
+            Err(e) => {
+                eprintln!(
+                    "lodestar: aviso: el cambio se publicó pero su conformidad no se pudo computar: \
+                     {e}. Se reporta como no verificado (`valid: false`); `knowledge_check` la \
+                     recomputa"
+                );
+                ApplyValidation {
+                    valid: false,
+                    errors: 0,
+                    warnings: 0,
+                }
+            }
+        };
 
         Ok(ApplyResult {
             receipt_id,
@@ -1711,11 +2054,7 @@ impl App {
             workspace_revision: result,
             changed_paths,
             semantic_diff: plan.semantic_diff,
-            validation: ApplyValidation {
-                valid: analysis.hard_fail() == 0,
-                errors: analysis.hard_fail(),
-                warnings: analysis.warn_count(),
-            },
+            validation,
         })
     }
 
@@ -1739,10 +2078,13 @@ impl App {
     ///    cambió tras el apply → [`ErrorCode::WriteConflict`] y **no** revierte (comprobación
     ///    conservadora y suficiente para el criterio: un cambio en el conocimiento escribible mueve la
     ///    `WorkspaceRevision`).
-    /// 4. **Restauración recuperable**: delega en [`Workspace::revert_transaction`], que verifica que
-    ///    las copias de recuperación (E13-H04) existen y restaura por el único escritor bajo su propio
-    ///    journal; luego persiste el [`ChangeReceipt`] de la reversión (transacción inversa) y ejecuta
-    ///    la retención (`gc_receipts`).
+    /// 4. **Restauración recuperable**: delega en `Workspace::revert_transaction_con_recibo`, que
+    ///    **re-verifica bajo el lock** la revisión observada en el paso 3 (E25-H05: entre esa
+    ///    comprobación y el lock cabe otro escritor → [`ErrorCode::WriteConflict`]), verifica que las
+    ///    copias de recuperación (E13-H04) existen, registra el [`ChangeReceipt`] de la inversa con su
+    ///    journal y restaura por el único escritor, promoviendo el recibo al sellar. Lo que queda aquí
+    ///    —re-escribir ese recibo y la retención (`gc_receipts`)— es **best-effort**: corre con la
+    ///    reversión ya publicada, así que no puede convertirla en un `Err`.
     ///
     /// Devuelve un [`RevertResult`] con `reverted:true`, las revisiones antes/después de la
     /// transacción INVERSA (`previousWorkspaceRevision` == `resultRevision` del apply;
@@ -1759,7 +2101,7 @@ impl App {
         &self,
         receipt_id: &ReceiptId,
         expected_workspace_revision: Option<WorkspaceRevision>,
-    ) -> Result<RevertResult, ErrorCode> {
+    ) -> Result<RevertResult, AppError> {
         let outcome = self.change_revert_uncounted(receipt_id, expected_workspace_revision);
         let change_set_id_hint = self.revert_change_set_hint(receipt_id);
         self.audit(audit_entry_for_revert(&change_set_id_hint, &outcome));
@@ -1772,41 +2114,79 @@ impl App {
         &self,
         receipt_id: &ReceiptId,
         expected_workspace_revision: Option<WorkspaceRevision>,
-    ) -> Result<RevertResult, ErrorCode> {
+    ) -> Result<RevertResult, AppError> {
         // (1) Cargar el receipt persistido. Ausente/purgado ⇒ transacción no disponible → PLAN_EXPIRED.
-        let receipt = self
-            .workspace
-            .load_receipt(receipt_id)
-            .map_err(|_| ErrorCode::PlanExpired)?;
+        let receipt = self.workspace.load_receipt(receipt_id).map_err(|_| {
+            AppError::new(
+                ErrorCode::PlanExpired,
+                format!(
+                    "no hay recibo «{}»: esa transacción ya no es reversible (el recibo nunca \
+                     existió o la retención lo purgó)",
+                    receipt_id.0
+                ),
+            )
+        })?;
 
         // (2) Revisión actual del conocimiento escribible.
         let cfg = self.workspace.config();
-        let doc_set = self
-            .workspace
-            .document_set()
-            .map_err(|e| workspace_error_code(&e))?;
+        let doc_set = self.workspace.document_set()?;
         let current = workspace_revision(doc_set.files(), &cfg.workspace.writable_roots);
 
         // (3) Control optimista a nivel de workspace (si el llamante fijó una expectativa).
         if let Some(expected) = &expected_workspace_revision {
             if expected != &current {
-                return Err(ErrorCode::RevisionConflict);
+                return Err(AppError::new(
+                    ErrorCode::RevisionConflict,
+                    format!(
+                        "el workspace ya no está en la revisión esperada: \
+                         «expectedWorkspaceRevision» es {} y la actual es {}",
+                        expected.0, current.0
+                    ),
+                ));
             }
         }
 
         // (4) Ficheros afectados no alterados: el workspace sigue en la `resultRevision` del apply.
         //     Si difiere, algo cambió tras el apply → WRITE_CONFLICT y NO se revierte.
         if current != receipt.result_revision {
-            return Err(ErrorCode::WriteConflict);
+            return Err(AppError::new(
+                ErrorCode::WriteConflict,
+                format!(
+                    "el conocimiento cambió después del apply «{}» (quedó en {} y ahora está en \
+                     {}), así que revertir pisaría ese cambio: no se ha restaurado nada",
+                    receipt.change_set_id.0, receipt.result_revision.0, current.0
+                ),
+            ));
         }
 
         // (5) Restaurar por el único escritor (transacción inversa recuperable con journal propio).
+        //     `current` viaja con la llamada para que se **re-verifique BAJO EL LOCK** (E25-H05): el
+        //     paso (4) mira sin lock —lo toma `revert_transaction`—, así que en esa ventana otro
+        //     escritor puede tocar un `.md` afectado y la reversión le escribiría la copia respaldada
+        //     encima. Y el `semanticDiff` del recibo original se presta para que la inversa registre su
+        //     propio recibo con su journal, ANTES de su punto de no retorno.
         let orig_txn_id = transaction_id(&receipt.change_set_id);
         let revert_txn_id = format!("{orig_txn_id}-revert");
-        let (previous, result, changed_paths) = self
-            .workspace
-            .revert_transaction(&orig_txn_id, &revert_txn_id)
-            .map_err(|e| workspace_error_code(&e))?;
+        let (previous, result, changed_paths) = self.workspace.revert_transaction_con_recibo(
+            &orig_txn_id,
+            &revert_txn_id,
+            &current,
+            Some((&receipt.change_set_id, &receipt.semantic_diff)),
+        )?;
+
+        // Punto de caída de la FACHADA (E25-H05, espejo del de `change_apply`): entre el retorno de la
+        // transacción inversa y su recibo. Es la ventana en la que el canónico ya volvió atrás, el lock
+        // ya está soltado y —hasta esta historia— no existía todavía ningún registro de que la
+        // reversión hubiera ocurrido. Sin `--features test-failpoints` no genera ni una instrucción.
+        #[cfg(feature = "test-failpoints")]
+        if lodestar_workspace::failpoints::disparado(
+            lodestar_workspace::failpoints::FailPoint::TrasLaTransaccionAntesDelRecibo,
+        ) {
+            return Err(AppError::new(
+                ErrorCode::InternalIoError,
+                "failpoint de prueba: caída simulada tras revertir la transacción y antes del recibo",
+            ));
+        }
 
         // (6) Receipt de la reversión (inversa: previous/result intercambiados respecto al apply) +
         //     retención. Su id nombra por convención las copias de recuperación de la inversa
@@ -1820,12 +2200,23 @@ impl App {
             changed_paths: changed_paths.clone(),
             semantic_diff: receipt.semantic_diff.clone(),
         };
-        self.workspace
-            .write_receipt(&revert_receipt)
-            .map_err(|e| workspace_error_code(&e))?;
-        self.workspace
-            .gc_receipts()
-            .map_err(|e| workspace_error_code(&e))?;
+        // DESDE AQUÍ TODO ES BEST-EFFORT (E25-H05, regla heredada de E25-H04): estos pasos corren con
+        // la reversión ya publicada, así que un `Err` suyo diría al agente que no se revirtió nada
+        // sobre algo que sí se revirtió. La transacción inversa ya dejó su recibo persistido y
+        // promovido (`revert_transaction_con_recibo`); esta escritura es la red de seguridad de que
+        // existe también si su promoción no pudo completarse.
+        if let Err(e) = self.workspace.write_receipt(&revert_receipt) {
+            eprintln!(
+                "lodestar: aviso: no se pudo re-escribir el recibo de la reversión `{}` tras \
+                 revertir: {e}",
+                revert_receipt.id.0
+            );
+        }
+        // Best-effort, por el mismo motivo que en `change_apply` (E25-H04): la retención corre con la
+        // reversión ya publicada, así que un fallo suyo no puede convertirla en un error.
+        if let Err(e) = self.workspace.gc_receipts() {
+            eprintln!("lodestar: aviso: la retención de recibos falló tras revertir: {e}");
+        }
 
         Ok(RevertResult {
             reverted: true,
@@ -1938,10 +2329,22 @@ pub struct ApplyResult {
 
 /// Veredicto de conformidad del workspace tras aplicar la transacción (`validation` de
 /// [`ApplyResult`]). Mismo desglose que `hardFail`/`warnCount` de [`Analysis`]. Wire en camelCase.
+///
+/// El veredicto es **posterior a la publicación**, así que no puede negarla: si el análisis no se puede
+/// computar, el apply sigue siendo un éxito y lo que se degrada es lo que se afirma de él (E25-H04, ver
+/// [`ApplyValidation::valid`]).
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ApplyValidation {
     /// `true` si el workspace publicado no tiene ningún check `Err` (`hardFail == 0`).
+    ///
+    /// **También `false` cuando la conformidad post-apply no se pudo ejecutar** (E25-H04): el análisis
+    /// corre con el canónico ya publicado, así que un fallo suyo no puede convertir el apply en un error
+    /// —el cambio está hecho—, y lo único honesto que queda es no declarar válido lo que no se ha podido
+    /// comprobar. Ese caso se distingue por `errors == 0 && warnings == 0 && valid == false`, que es
+    /// imposible en un veredicto realmente computado (`valid` es exactamente `errors == 0`), y va
+    /// acompañado de un aviso por stderr. Para obtener el veredicto de verdad, `knowledge_check` lo
+    /// recomputa.
     pub valid: bool,
     /// Nº de ficheros con al menos un check `Err`.
     pub errors: usize,
@@ -2013,7 +2416,7 @@ fn audit_timestamp_now() -> String {
 /// del [`ErrorCode`] rechazado.
 fn audit_entry_for_apply(
     change_set_id: &ChangeSetId,
-    outcome: &Result<ApplyResult, ErrorCode>,
+    outcome: &Result<ApplyResult, AppError>,
 ) -> AuditEntry {
     let (base_revision, result_revision, paths, result) = match outcome {
         Ok(apply) => (
@@ -2026,7 +2429,7 @@ fn audit_entry_for_apply(
                 .collect(),
             "success".to_string(),
         ),
-        Err(err) => (None, None, Vec::new(), err.as_str().to_string()),
+        Err(err) => (None, None, Vec::new(), err.code.as_str().to_string()),
     };
     AuditEntry {
         timestamp: audit_timestamp_now(),
@@ -2046,7 +2449,7 @@ fn audit_entry_for_apply(
 /// `ChangeSetId` directo.
 fn audit_entry_for_revert(
     change_set_id_hint: &str,
-    outcome: &Result<RevertResult, ErrorCode>,
+    outcome: &Result<RevertResult, AppError>,
 ) -> AuditEntry {
     let (base_revision, result_revision, paths, result) = match outcome {
         Ok(revert) => (
@@ -2059,7 +2462,7 @@ fn audit_entry_for_revert(
                 .collect(),
             "success".to_string(),
         ),
-        Err(err) => (None, None, Vec::new(), err.as_str().to_string()),
+        Err(err) => (None, None, Vec::new(), err.code.as_str().to_string()),
     };
     AuditEntry {
         timestamp: audit_timestamp_now(),
@@ -2121,7 +2524,7 @@ const PLAN_TTL_SECS: u64 = 3600;
 /// El documento cuya [`DocumentRevision`] guarda el control optimista de una op cruda: `ref.path`,
 /// `path`, `from` (move) o `source` (relaciones), en ese orden. `Err(InvalidSchema)` si la op trae
 /// `expectedRevision` pero no un objetivo identificable.
-fn op_target_path(op: &Value) -> Result<RelPath, ErrorCode> {
+fn op_target_path(op: &Value) -> Result<RelPath, AppError> {
     let candidate = op
         .get("ref")
         .and_then(|r| r.get("path"))
@@ -2129,29 +2532,48 @@ fn op_target_path(op: &Value) -> Result<RelPath, ErrorCode> {
         .or_else(|| op.get("path").and_then(Value::as_str))
         .or_else(|| op.get("from").and_then(Value::as_str))
         .or_else(|| op.get("source").and_then(Value::as_str))
-        .ok_or(ErrorCode::InvalidSchema)?;
-    RelPath::new(candidate).map_err(|e| error_code(&e))
+        .ok_or_else(|| {
+            AppError::invalid_schema(
+                "una operación con «expectedRevision» necesita identificar su documento objetivo \
+                 en «ref.path», «path» o «from»",
+            )
+        })?;
+    RelPath::new(candidate).map_err(|e| AppError::from(&e))
 }
 
 /// `ref.path` o `path` de una op cruda como [`RelPath`]. `Err(InvalidSchema)` si falta, o el error
 /// mapeado de [`RelPath::new`] (path-traversal → `PermissionDenied`) si es inválido.
-fn op_ref_path(op: &Value) -> Result<RelPath, ErrorCode> {
+fn op_ref_path(op: &Value) -> Result<RelPath, AppError> {
     let s = op
         .get("ref")
         .and_then(|r| r.get("path"))
         .and_then(Value::as_str)
         .or_else(|| op.get("path").and_then(Value::as_str))
-        .ok_or(ErrorCode::InvalidSchema)?;
-    RelPath::new(s).map_err(|e| error_code(&e))
+        .ok_or_else(|| {
+            AppError::invalid_schema(format!(
+                "la operación «{}» necesita el documento objetivo en «ref.path» o en «path» \
+                 (una ruta relativa al workspace)",
+                op_kind_de(op)
+            ))
+        })?;
+    RelPath::new(s).map_err(|e| AppError::from(&e))
 }
 
 /// Un campo string obligatorio de una op cruda como [`RelPath`].
-fn op_rel_field(op: &Value, key: &str) -> Result<RelPath, ErrorCode> {
-    let s = op
-        .get(key)
-        .and_then(Value::as_str)
-        .ok_or(ErrorCode::InvalidSchema)?;
-    RelPath::new(s).map_err(|e| error_code(&e))
+fn op_rel_field(op: &Value, key: &str) -> Result<RelPath, AppError> {
+    let s = op.get(key).and_then(Value::as_str).ok_or_else(|| {
+        AppError::invalid_schema(format!(
+            "la operación «{}» exige el campo «{key}» con una ruta relativa al workspace",
+            op_kind_de(op)
+        ))
+    })?;
+    RelPath::new(s).map_err(|e| AppError::from(&e))
+}
+
+/// El discriminador `op` de una op cruda, para citarlo en los mensajes de error (E26-H07);
+/// `«sin op»` si ni siquiera viene.
+fn op_kind_de(op: &Value) -> &str {
+    op.get("op").and_then(Value::as_str).unwrap_or("sin op")
 }
 
 /// Despacha UNA op cruda (`{op, …}`) a su normalizador del core, devolviendo las
@@ -2162,11 +2584,13 @@ fn op_rel_field(op: &Value, key: &str) -> Result<RelPath, ErrorCode> {
 fn normalize_raw_op(
     doc_set: &DocumentSet,
     op: &Value,
-) -> Result<Vec<NormalizedOperation>, ErrorCode> {
-    let kind = op
-        .get("op")
-        .and_then(Value::as_str)
-        .ok_or(ErrorCode::InvalidSchema)?;
+) -> Result<Vec<NormalizedOperation>, AppError> {
+    let kind = op.get("op").and_then(Value::as_str).ok_or_else(|| {
+        AppError::invalid_schema(
+            "cada operación necesita su discriminador «op»: create, patch_frontmatter, \
+             replace_body, replace_text, edit_section, move o delete",
+        )
+    })?;
     let one = |n: NormalizedOperation| vec![n];
     match kind {
         "create" => {
@@ -2178,21 +2602,30 @@ fn normalize_raw_op(
             let frontmatter = match op.get("frontmatter") {
                 None | Some(Value::Null) => None,
                 Some(v) if v.is_object() => {
-                    Some(serde_json::from_value(v.clone()).map_err(|_| ErrorCode::InvalidSchema)?)
+                    Some(serde_json::from_value(v.clone()).map_err(|e| {
+                        AppError::invalid_schema(format!(
+                        "el «frontmatter» de «create» no es un mapa de claves interpretable: {e}"
+                    ))
+                    })?)
                 }
-                Some(_) => return Err(ErrorCode::InvalidSchema),
+                Some(v) => {
+                    return Err(AppError::invalid_schema(format!(
+                        "el «frontmatter» de «create» debe ser un objeto de claves YAML \
+                         arbitrarias; recibido {v}"
+                    )))
+                }
             };
             let body = op.get("body").and_then(Value::as_str).map(str::to_string);
             plan::normalize_create(doc_set, &path, frontmatter, body)
                 .map(one)
-                .map_err(|e| error_code(&e))
+                .map_err(|e| AppError::from(&e))
         }
         "patch_frontmatter" => {
             let path = op_ref_path(op)?;
             let patch = op_patch(op)?;
             plan::normalize_patch_frontmatter(doc_set, &path, patch)
                 .map(one)
-                .map_err(|e| error_code(&e))
+                .map_err(|e| AppError::from(&e))
         }
         "replace_body" => {
             let path = op_ref_path(op)?;
@@ -2203,7 +2636,7 @@ fn normalize_raw_op(
                 .to_string();
             plan::normalize_replace_body(doc_set, &path, body)
                 .map(one)
-                .map_err(|e| error_code(&e))
+                .map_err(|e| AppError::from(&e))
         }
         "replace_text" => {
             let path = op_ref_path(op)?;
@@ -2215,7 +2648,7 @@ fn normalize_raw_op(
                 .map(|n| n as usize);
             plan::normalize_replace_text(doc_set, &path, find, replace, expected)
                 .map(one)
-                .map_err(|e| error_code(&e))
+                .map_err(|e| AppError::from(&e))
         }
         "edit_section" => {
             let path = op_ref_path(op)?;
@@ -2237,7 +2670,7 @@ fn normalize_raw_op(
             let content = op.get("content").and_then(Value::as_str).unwrap_or("");
             plan::normalize_edit_section(doc_set, &path, &heading_path, mode, content)
                 .map(one)
-                .map_err(|e| error_code(&e))
+                .map_err(|e| AppError::from(&e))
         }
         "move" => {
             let from = op_rel_field(op, "from")?;
@@ -2246,7 +2679,7 @@ fn normalize_raw_op(
                 .get("rewriteInboundLinks")
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
-            plan::normalize_move(doc_set, &from, &to, rewrite).map_err(|e| error_code(&e))
+            plan::normalize_move(doc_set, &from, &to, rewrite).map_err(|e| AppError::from(&e))
         }
         "delete" => {
             let path = op_ref_path(op)?;
@@ -2260,25 +2693,40 @@ fn normalize_raw_op(
                 // `INBOUND_LINKS_EXIST` que produce un `reject` explícito con backlinks. Sin
                 // backlinks no hay nada que decidir, así que se permite (borrado limpio).
                 None => {
-                    if doc_set.backlinks(&path).inbound.is_empty() {
+                    let entrantes = doc_set.backlinks(&path).inbound.len();
+                    if entrantes == 0 {
                         InboundLinksPolicy::Reject
                     } else {
-                        return Err(ErrorCode::InvalidSchema);
+                        return Err(AppError::invalid_schema(format!(
+                            "«{}» tiene {entrantes} enlaces entrantes, así que «delete» exige \
+                             elegir explícitamente «inboundLinksPolicy»: {:?}",
+                            path.as_str(),
+                            InboundLinksPolicy::WIRE_VALUES
+                        )));
                     }
                 }
                 // Un valor de política no reconocido es una op mal formada. Desde E23-H05 esto
                 // incluye `retarget` y `create_stub`, que se aceptaban sin ejecutarse: ahora se
                 // rechazan aquí, y la fachada MCP añade al mensaje cuáles son las válidas
                 // (`InboundLinksPolicy::WIRE_VALUES`).
-                Some(_) => return Err(ErrorCode::InvalidSchema),
+                Some(otra) => {
+                    return Err(AppError::invalid_schema(format!(
+                        "«{otra}» no es una política válida ante enlaces entrantes; usa una de \
+                         {:?}",
+                        InboundLinksPolicy::WIRE_VALUES
+                    )))
+                }
             };
-            plan::normalize_delete(doc_set, &path, policy).map_err(|e| error_code(&e))
+            plan::normalize_delete(doc_set, &path, policy).map_err(|e| AppError::from(&e))
         }
         // NOTA E23-H11: `"apply_fix"` ya NO tiene brazo propio — cae en el de por defecto, o sea
         // que un `apply_fix` es hoy una op desconocida (`INVALID_SCHEMA`), el mismo trato que
         // `transition_status` desde E21-H01. Antes llegaba a `normalize_apply_fix`, que devolvía
         // siempre `FixNotFound` → `DOCUMENT_NOT_FOUND` (código que apuntaba al sitio equivocado).
-        _ => Err(ErrorCode::InvalidSchema),
+        _ => Err(AppError::invalid_schema(format!(
+            "«{kind}» no es una operación conocida; usa create, patch_frontmatter, replace_body, \
+             replace_text, edit_section, move o delete"
+        ))),
     }
 }
 
@@ -2300,8 +2748,20 @@ fn normalize_raw_op(
 ///
 /// Una selección que no casa ningún documento devuelve un plan **vacío**, sin error. Un `where`/
 /// `filter` malformado, una `operation` que no es un objeto de una sola clave, o una op no admitida →
-/// `Err(ErrorCode::InvalidSchema)`. Un `TypeError` al evaluar la consulta sobre un documento concreto
-/// lo **excluye** de la selección (no casa), sin abortar el plan — coherente con `knowledge_search`.
+/// `Err` con [`ErrorCode::InvalidSchema`] y el mensaje que dice cuál de los tres casos fue (E26-H07;
+/// para el `where`/`filter`, el diagnóstico del parser del core tal cual).
+///
+/// **Un [`TypeError`] al evaluar ABORTA el plan** (E26-H08), con el mismo `INVALID_SCHEMA` y el
+/// mismo texto que daría `knowledge_search` para esa consulta ([`evalua_documento`], `§20.10`).
+/// Hasta v0.4.0 el documento que erraba se **excluía en silencio** de la selección, así que una
+/// selección masiva saltaba documentos sin decirlo y el plan afectaba a menos ficheros de los que el
+/// agente creía haber seleccionado — la superficie donde el defecto era más caro, porque el
+/// resultado se escribe.
+///
+/// **Determinismo**: la consulta se evalúa sobre el orden total de [`Analysis::documents`] **antes**
+/// de expandir ninguna operación, y se reporta el primer `Err` de ese orden; ni el orden en que el
+/// planificador toque los documentos ni un fallo de normalización de una op posterior pueden
+/// cambiarlo. `Ok(false)` sigue siendo exclusión: no casar no es un error.
 fn expand_selection(
     doc_set: &DocumentSet,
     raw: &Value,
@@ -2310,10 +2770,20 @@ fn expand_selection(
         Vec<NormalizedOperation>,
         BTreeMap<RelPath, DocumentRevision>,
     ),
-    ErrorCode,
+    AppError,
 > {
-    let selection = raw.get("selection").ok_or(ErrorCode::InvalidSchema)?;
-    let operation = raw.get("operation").ok_or(ErrorCode::InvalidSchema)?;
+    let selection = raw.get("selection").ok_or_else(|| {
+        AppError::invalid_schema(
+            "una selección masiva necesita «selection» con «where» (consulta textual) o «filter» \
+             (filtro JSON)",
+        )
+    })?;
+    let operation = raw.get("operation").ok_or_else(|| {
+        AppError::invalid_schema(
+            "una selección masiva necesita «operation»: el objeto de UNA clave con la operación a \
+             expandir (p. ej. {\"patch_frontmatter\": {…}})",
+        )
+    })?;
 
     let where_expr = selection.get("where").and_then(Value::as_str);
     let filter = selection.get("filter");
@@ -2324,8 +2794,12 @@ fn expand_selection(
     let analysis = doc_set.analyze();
     let files = doc_set.files();
 
-    let mut normalized: Vec<NormalizedOperation> = Vec::new();
-    let mut captured: BTreeMap<RelPath, DocumentRevision> = BTreeMap::new();
+    // (1) La CONSULTA decide el conjunto, recorriendo el orden total de `Analysis::documents`
+    //     entero y antes de expandir nada. Un `TypeError` aborta el plan con el error del PRIMER
+    //     documento de ese orden que yerra (E26-H08): el criterio no puede ser «el primero que
+    //     tocó el planificador», y expandir por el camino dejaría que el fallo de una op sobre un
+    //     documento que casa se adelantara al error de tipo de otro anterior.
+    let mut seleccionados: Vec<&RelPath> = Vec::new();
     for path in &analysis.documents {
         let Some(raw_md) = files.get(path) else {
             continue;
@@ -2336,10 +2810,18 @@ fn expand_selection(
             frontmatter: parsed.frontmatter.as_ref(),
             body: &parsed.body,
         };
-        // Un `TypeError` sobre ESTE documento lo excluye (no casa), sin propagarse al plan entero.
-        if !matches!(evaluate(&expr, &doc, analysis), Ok(true)) {
-            continue;
+        if evalua_documento(&expr, &doc, analysis)? {
+            seleccionados.push(path);
         }
+    }
+
+    // (2) …y solo entonces se expande la operación sobre los documentos elegidos.
+    let mut normalized: Vec<NormalizedOperation> = Vec::new();
+    let mut captured: BTreeMap<RelPath, DocumentRevision> = BTreeMap::new();
+    for path in seleccionados {
+        let Some(raw_md) = files.get(path) else {
+            continue;
+        };
         let raw_op = build_selected_op(op_kind, op_params, path)?;
         normalized.extend(normalize_raw_op(doc_set, &raw_op)?);
         captured.insert(
@@ -2352,26 +2834,25 @@ fn expand_selection(
 }
 
 /// Traduce la consulta de una [`expand_selection`] (`where` textual o `filter` JSON) al [`Expression`]
-/// del core (E19), igual que `knowledge_search`. Exige **al menos** una de las dos (una selección sin
-/// criterio es una op mal formada) y, si vienen ambas, las combina con `and` (intersección).
-/// `Err(ErrorCode::InvalidSchema)` si falta el criterio o alguno es malformado.
+/// del core (E19) **por la misma función** que `knowledge_search` ([`build_search_expression`]), de
+/// modo que la misma consulta malformada dé el mismo código Y el mismo mensaje por las dos tools que
+/// la aceptan (E26-H07, invariante #3: una sola verdad computada). Lo único propio de la selección es
+/// que exige **al menos** un criterio: una selección sin `where` ni `filter` seleccionaría el
+/// workspace entero por descuido.
+///
+/// Hasta v0.4.0 esta función parseaba por su cuenta y tiraba el diagnóstico del parser con
+/// `map_err(|_| ErrorCode::InvalidSchema)`, así que el mismo `where: "status ="` se diagnosticaba
+/// por `knowledge_search` y se callaba por `change_plan`.
 fn build_selection_expression(
     where_expr: Option<&str>,
     filter: Option<&Value>,
-) -> Result<Expression, ErrorCode> {
-    let del_where = match where_expr.map(str::trim).filter(|s| !s.is_empty()) {
-        Some(w) => Some(lodestar_core::parse::parse(w).map_err(|_| ErrorCode::InvalidSchema)?),
-        None => None,
-    };
-    let del_filter = match filter {
-        Some(f) => Some(lodestar_core::filter::from_json(f).map_err(|_| ErrorCode::InvalidSchema)?),
-        None => None,
-    };
-    match (del_where, del_filter) {
-        (None, None) => Err(ErrorCode::InvalidSchema),
-        (Some(e), None) | (None, Some(e)) => Ok(e),
-        (Some(w), Some(f)) => Ok(Expression::And(vec![w, f])),
-    }
+) -> Result<Expression, AppError> {
+    build_search_expression(where_expr, filter)?.ok_or_else(|| {
+        AppError::invalid_schema(
+            "«selection» necesita «where» (consulta textual) o «filter» (filtro JSON): sin \
+             criterio, la selección masiva alcanzaría a todos los documentos",
+        )
+    })
 }
 
 /// Extrae de la `operation` de una selección masiva su `(tipo, parámetros)`: la op codifica el tipo
@@ -2379,17 +2860,30 @@ fn build_selection_expression(
 /// esa clave una op con sentido en masa. `create` no aplica a una selección de documentos existentes;
 /// `move` tampoco (un solo `to` no puede servir para N documentos). `Err(ErrorCode::InvalidSchema)`
 /// en cualquier otro caso.
-fn single_operation(operation: &Value) -> Result<(&str, &Value), ErrorCode> {
-    let obj = operation.as_object().ok_or(ErrorCode::InvalidSchema)?;
-    if obj.len() != 1 {
-        return Err(ErrorCode::InvalidSchema);
-    }
-    let (kind, params) = obj.iter().next().ok_or(ErrorCode::InvalidSchema)?;
+fn single_operation(operation: &Value) -> Result<(&str, &Value), AppError> {
+    const EN_MASA: &str = "patch_frontmatter, replace_text o delete";
+    let obj = operation.as_object().ok_or_else(|| {
+        AppError::invalid_schema(format!(
+            "«operation» debe ser un objeto que codifique la operación como CLAVE \
+             ({{\"patch_frontmatter\": {{…}}}}); en masa solo tienen sentido {EN_MASA}"
+        ))
+    })?;
+    let mut claves = obj.keys();
+    let (Some(kind), None) = (claves.next(), claves.next()) else {
+        return Err(AppError::invalid_schema(format!(
+            "«operation» debe tener EXACTAMENTE una clave (la operación a expandir); recibidas {:?}",
+            obj.keys().collect::<Vec<_>>()
+        )));
+    };
+    let params = &obj[kind];
     match kind.as_str() {
         // E23-H11: `apply_fix` salió de la lista blanca con la op. Una selección masiva que la pida
         // es `INVALID_SCHEMA` (op no admitida en masa), igual que si pidiera `create`.
         "patch_frontmatter" | "replace_text" | "delete" => Ok((kind, params)),
-        _ => Err(ErrorCode::InvalidSchema),
+        otra => Err(AppError::invalid_schema(format!(
+            "«{otra}» no es una operación admitida en una selección masiva; usa {EN_MASA} \
+             («create» no aplica a documentos existentes y «move» necesita un destino por documento)"
+        ))),
     }
 }
 
@@ -2397,7 +2891,7 @@ fn single_operation(operation: &Value) -> Result<(&str, &Value), ErrorCode> {
 /// [`normalize_raw_op`] la despache igual que si la hubiera enviado el agente sueltamente. El valor de
 /// `patch_frontmatter` ES el merge-patch (va bajo la clave `patch`); las demás ops llevan sus
 /// parámetros sueltos (`find`/`replace`, `inboundLinksPolicy`…).
-fn build_selected_op(kind: &str, params: &Value, path: &RelPath) -> Result<Value, ErrorCode> {
+fn build_selected_op(kind: &str, params: &Value, path: &RelPath) -> Result<Value, AppError> {
     let mut obj = serde_json::Map::new();
     obj.insert("op".to_string(), Value::String(kind.to_string()));
     obj.insert(
@@ -2406,11 +2900,18 @@ fn build_selected_op(kind: &str, params: &Value, path: &RelPath) -> Result<Value
     );
     if kind == "patch_frontmatter" {
         if !params.is_object() {
-            return Err(ErrorCode::InvalidSchema);
+            return Err(AppError::invalid_schema(format!(
+                "el valor de «patch_frontmatter» ES el merge-patch de frontmatter, así que debe ser \
+                 un objeto; recibido {params}"
+            )));
         }
         obj.insert("patch".to_string(), params.clone());
     } else {
-        let extra = params.as_object().ok_or(ErrorCode::InvalidSchema)?;
+        let extra = params.as_object().ok_or_else(|| {
+            AppError::invalid_schema(format!(
+                "los parámetros de «{kind}» deben venir en un objeto; recibido {params}"
+            ))
+        })?;
         for (k, v) in extra {
             obj.insert(k.clone(), v.clone());
         }
@@ -2421,12 +2922,21 @@ fn build_selected_op(kind: &str, params: &Value, path: &RelPath) -> Result<Value
 /// Convierte el campo `patch` de una op cruda en un [`FrontmatterPatch`] (merge-patch RFC 7386:
 /// `null` borra la clave, cualquier otro valor la escribe). `Err(InvalidSchema)` si `patch` falta o
 /// no es un objeto.
-fn op_patch(op: &Value) -> Result<FrontmatterPatch, ErrorCode> {
-    let patch = op.get("patch").ok_or(ErrorCode::InvalidSchema)?;
+fn op_patch(op: &Value) -> Result<FrontmatterPatch, AppError> {
+    let patch = op.get("patch").ok_or_else(|| {
+        AppError::invalid_schema(
+            "«patch_frontmatter» exige el campo «patch» con el merge-patch (RFC 7386: un valor \
+             escribe la clave, «null» la borra)",
+        )
+    })?;
     if !patch.is_object() {
-        return Err(ErrorCode::InvalidSchema);
+        return Err(AppError::invalid_schema(format!(
+            "«patch» debe ser un objeto de claves de frontmatter; recibido {patch}"
+        )));
     }
-    serde_json::from_value(patch.clone()).map_err(|_| ErrorCode::InvalidSchema)
+    serde_json::from_value(patch.clone()).map_err(|e| {
+        AppError::invalid_schema(format!("«patch» no es un merge-patch interpretable: {e}"))
+    })
 }
 
 /// `planHash` determinista: `blake3(baseWorkspaceRevision ‖ 0x00 ‖ serialización JSON de las
@@ -2477,13 +2987,30 @@ fn plan_file_path(root: &Path, id: &ChangeSetId) -> PathBuf {
 /// el lock, así que es aquí (y no en `acquire_lock`) donde le toca ajustar el `.gitignore`
 /// gestionado — abrir el workspace ya no lo hace. Por eso recibe el [`Workspace`] y no un `&Path`:
 /// el ajuste no puede quedar a criterio del llamador.
-fn persist_plan(ws: &Workspace, plan: &PlanResult) -> Result<(), ErrorCode> {
+fn persist_plan(ws: &Workspace, plan: &PlanResult) -> Result<(), AppError> {
+    let io = |e: std::io::Error| {
+        AppError::new(
+            ErrorCode::InternalIoError,
+            format!(
+                "no se pudo persistir el plan «{}» en .lodestar/runtime/plans/: {e}",
+                plan.change_set_id.0
+            ),
+        )
+    };
     ws.ensure_managed_gitignore();
     let dir = ws.root().join(".lodestar").join("runtime").join("plans");
-    std::fs::create_dir_all(&dir).map_err(|_| ErrorCode::InternalIoError)?;
+    std::fs::create_dir_all(&dir).map_err(io)?;
     let path = dir.join(plan_file_name(&plan.change_set_id));
-    let json = serde_json::to_vec_pretty(plan).map_err(|_| ErrorCode::InternalIoError)?;
-    std::fs::write(&path, json).map_err(|_| ErrorCode::InternalIoError)
+    let json = serde_json::to_vec_pretty(plan).map_err(|e| {
+        AppError::new(
+            ErrorCode::InternalIoError,
+            format!(
+                "el plan «{}» no serializa a JSON: {e}",
+                plan.change_set_id.0
+            ),
+        )
+    })?;
+    std::fs::write(&path, json).map_err(io)
 }
 
 /// Instante de caducidad del plan (`expiresAt`): ahora + [`PLAN_TTL_SECS`], en segundos epoch como
@@ -2674,6 +3201,13 @@ fn diagnostic_id(path: &str, check: &Check) -> String {
 // `nodes`/`edges` que porta SÍ son dominio puro (`GraphNode`/`Edge` de `core::types`), reexpuestos
 // tal cual — esta capa nunca redefine su forma. Wire en camelCase.
 // ---------------------------------------------------------------------------
+
+/// Límite por defecto de nodos por página de `graph_query` (E26-H10). Hasta v0.4.0 no había
+/// default: `limit` ausente servía el grafo **entero**.
+const DEFAULT_GRAPH_LIMIT: usize = 100;
+/// Tope duro de nodos por página de `graph_query` (E26-H10; el `inputSchema` lo declara como
+/// `maximum` y la fachada MCP rechaza lo que lo exceda).
+const MAX_GRAPH_LIMIT: usize = 1000;
 
 /// Respuesta de `graph_query` (`ARCHITECTURE.md §19.6`, `REFACTOR §9.5`). Wire en camelCase
 /// (`nextCursor`).
@@ -2883,6 +3417,24 @@ const SEARCH_INCLUDE_PREFIX: &str = "frontmatter.";
 impl FrontmatterProjection {
     /// Parsea **una** entrada del `include`.
     ///
+    /// # Por qué NO pasa por `parse::build_field_path` (E26-H09)
+    ///
+    /// Esta no es una tercera normalización del dot-path del lenguaje de consulta, sino la
+    /// **semántica del anclaje con el prefijo obligatorio**: `frontmatter.` no es aquí un anclaje
+    /// opcional que compita con namespaces reservados, sino el namespace **exigido** de cada
+    /// entrada, y el sufijo direcciona siempre el frontmatter del usuario. No hay abreviatura que
+    /// aplicar (el prefijo nunca puede faltar) ni namespace calculado que desambiguar
+    /// (`frontmatter.graph.backlinks` proyecta la clave `graph.backlinks` del usuario, que es lo
+    /// que `build_field_path` también produce, por el anclaje).
+    ///
+    /// Delegar tendría además un **coste observable** en el único caso donde las dos vías difieren:
+    /// `frontmatter.frontmatter.x` proyecta hoy —correctamente— la clave del usuario
+    /// `frontmatter.x`, mientras que `build_field_path` consumiría el primer `frontmatter.` como
+    /// abreviatura y la resolución acabaría en `x`: una respuesta silenciosamente equivocada, justo
+    /// la clase de defecto que E24-H08/E26-H09 retiran. Esta superficie es, de hecho, la **única**
+    /// que sabe leer una clave que vive bajo un `frontmatter` literal (ver
+    /// `App::metadata_inspect`, que por eso remite aquí cuando detecta esa colisión).
+    ///
     /// # Errores
     /// [`ErrorCode::InvalidSchema`] si la entrada no empieza por `frontmatter.` o si su sufijo no es
     /// un [`FieldPath`] válido (vacío, o con algún segmento vacío como `a..b`).
@@ -2942,6 +3494,11 @@ pub struct SearchResults {
 ///   ningún test lo fija, pero es la elección menos sorprendente (un filtro extra solo puede
 ///   restringir, nunca abrir la selección).
 ///
+/// Es la **única** compilación de consulta del motor: la selección masiva de `change_plan` la
+/// consume vía [`build_selection_expression`] (E26-H07), así que el mismo `where`/`filter`
+/// malformado produce el mismo código y el mismo texto por las dos tools que lo aceptan
+/// (invariante #3).
+///
 /// Un `where`/`filter` **malformado** se surface con el código estable **`INVALID_SCHEMA`**
 /// (E24-H10). Hasta v0.3.0 se envolvía en [`WorkspaceError::Core`], que `workspace_error_code`
 /// mapea a `INTERNAL_IO_ERROR`: un typo del agente en su consulta se le reportaba como error
@@ -2967,20 +3524,86 @@ fn mensaje_de_filtro(e: &lodestar_core::filter::FilterError) -> String {
     e.message.clone()
 }
 
+/// El mensaje de por qué un namespace reservado **válido** (`graph.backlinks`, `document.path`) no
+/// es inspeccionable por `metadata_inspect` (E26-H09), y por dónde sí se pregunta lo que el agente
+/// quería saber.
+///
+/// Dos salidas, siempre las dos que existen: la **tool** que responde por esa propiedad calculada
+/// (`graph_query` para el grafo; el `where` de `knowledge_search` para las de documento, que no
+/// tienen tool propia) y el **anclaje** `frontmatter.` para la clave homónima del usuario, que es lo
+/// que el agente pedía si su frontmatter tiene una clave `graph:`/`document:`. Sin la segunda mitad
+/// el rechazo sería un callejón sin salida: la clave del catálogo existe, y hay una forma de
+/// alcanzarla.
+fn mensaje_namespace_no_inspeccionable(field: &FieldPath, props: &[&str]) -> String {
+    let ns = field
+        .segments()
+        .first()
+        .map_or_else(String::new, String::clone);
+    let validas = props
+        .iter()
+        .map(|p| format!("`{ns}.{p}`"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let por_donde = if ns == "graph" {
+        "Para preguntar por el grafo real usa `graph_query` (o un `where` sobre esas propiedades \
+         en knowledge_search)"
+    } else {
+        "Para filtrar por esas propiedades usa un `where` en knowledge_search"
+    };
+    format!(
+        "«{field}» no es un campo de metadata: el namespace `{ns}` son propiedades CALCULADAS \
+         ({validas}) y no viven en el frontmatter de ningún documento, así que no tienen presencia \
+         ni vocabulario que inspeccionar. {por_donde}; para inspeccionar la clave de TU \
+         frontmatter con ese nombre, ánclala: «{}»",
+        field.anclado()
+    )
+}
+
+/// `true` si el texto de un `field` empieza por el **anclaje** (`frontmatter.`), es decir, si el
+/// normalizador lo va a reinterpretar en vez de tomarlo al pie de la letra.
+fn empieza_por_el_anclaje(field: &str) -> bool {
+    field
+        .strip_prefix(FRONTMATTER_ANCHOR)
+        .is_some_and(|resto| resto.starts_with('.'))
+}
+
+/// El mensaje de la **colisión con el anclaje** (E26-H09): el catálogo anuncia este nombre, pero
+/// viene de una clave de primer nivel llamada literalmente `frontmatter`, y el lenguaje lee ese
+/// mismo texto como el anclaje al frontmatter del usuario. No hay sintaxis para distinguirlas —el
+/// mismo límite que una clave con **punto literal**—, así que la tool lo dice en voz alta en vez de
+/// contestar `presentIn: 0` sobre un dato que existe.
+///
+/// El escape que se ofrece es real: el `include` de `knowledge_search` exige el prefijo
+/// `frontmatter.` y parsea el **sufijo literalmente**, así que `frontmatter.{texto}` sí lee el
+/// valor de esa clave (lo que no existe es forma de *inspeccionarla* como campo).
+fn mensaje_colision_con_el_anclaje(texto: &str) -> String {
+    format!(
+        "«{texto}» no es inspeccionable: el prefijo «frontmatter.» es el ANCLAJE del lenguaje de \
+         consulta (E24-H08), así que este texto se lee como una clave del frontmatter que no \
+         aparece en ningún documento; el nombre que anuncia el catálogo viene de una clave de \
+         primer nivel llamada literalmente «frontmatter», y el lenguaje no tiene comillas para \
+         distinguir las dos cosas. Su VALOR sí se puede leer, con \
+         knowledge_search{{include: [\"{FRONTMATTER_ANCHOR}.{texto}\"]}}, cuyo prefijo es \
+         obligatorio y cuyo sufijo es literal; para inspeccionarla como campo habría que renombrar \
+         esa clave"
+    )
+}
+
 fn build_search_expression(
     where_expr: Option<&str>,
     filter: Option<&Value>,
-) -> Result<Option<Expression>, WorkspaceError> {
+) -> Result<Option<Expression>, AppError> {
     // Un `where` en blanco (solo espacios) se trata como ausente: no es una consulta malformada.
-    let del_where = match where_expr.map(str::trim).filter(|s| !s.is_empty()) {
-        Some(w) => Some(lodestar_core::parse::parse(w).map_err(|e| {
-            WorkspaceError::InvalidSchema(format!("«where» inválido: {}", e.message))
-        })?),
-        None => None,
-    };
+    let del_where =
+        match where_expr.map(str::trim).filter(|s| !s.is_empty()) {
+            Some(w) => Some(lodestar_core::parse::parse(w).map_err(|e| {
+                AppError::invalid_schema(format!("«where» inválido: {}", e.message))
+            })?),
+            None => None,
+        };
     let del_filter = match filter {
         Some(f) => Some(lodestar_core::filter::from_json(f).map_err(|e| {
-            WorkspaceError::InvalidSchema(format!("«filter» inválido: {}", mensaje_de_filtro(&e)))
+            AppError::invalid_schema(format!("«filter» inválido: {}", mensaje_de_filtro(&e)))
         })?),
         None => None,
     };
@@ -2989,6 +3612,96 @@ fn build_search_expression(
         (Some(e), None) | (None, Some(e)) => Some(e),
         (Some(w), Some(f)) => Some(Expression::And(vec![w, f])),
     })
+}
+
+/// Evalúa `expr` contra **un** documento y traduce el [`TypeError`] del evaluador al [`AppError`] de
+/// la superficie (E26-H08): un error de tipo **aborta la consulta** en vez de excluir el documento.
+///
+/// Es el **único** puente entre [`evaluate`] y las dos superficies que aceptan el lenguaje
+/// (`knowledge_search` y la selección masiva de `change_plan`), de modo que la misma consulta mal
+/// tipada dé el mismo código **y** el mismo texto por las dos (`§20.10`, invariante #3). El core no
+/// cambia: sigue devolviendo `Result<bool, TypeError>` por documento —el dato que permite a la
+/// fachada decidir—; lo que cambia es qué hace la fachada con el `Err`.
+///
+/// `Ok(false)` **sigue siendo exclusión**: no casar no es un error, y un campo ausente no llega
+/// nunca aquí como `Err` (la ausencia cortocircuita antes de comprobar tipos, E19-H01).
+fn evalua_documento(
+    expr: &Expression,
+    doc: &EvalDocument<'_>,
+    analysis: &Analysis,
+) -> Result<bool, AppError> {
+    evaluate(expr, doc, analysis).map_err(|e| error_de_tipo(&e, doc.path))
+}
+
+/// Traduce un [`TypeError`] del evaluador —el que produce una consulta bien formada sobre datos de
+/// otro tipo— al [`AppError`] de superficie: `INVALID_SCHEMA` con un mensaje que nombra **el campo,
+/// el operador, los dos tipos y el documento** donde chocaron, más cómo salir del error.
+///
+/// Hasta v0.4.0 este `Err` se descartaba en los dos consumidores con el mismo `continue` que un
+/// `Ok(false)`, así que `priority >= "high"` sobre un `priority` numérico devolvía `[]` —o una lista
+/// recortada, decidida documento a documento— sin un solo aviso: la respuesta silenciosamente
+/// equivocada que E24-H07 declaró peor que un error, aquí en la evaluación (E26-H08).
+///
+/// El **documento** viaja en el mensaje porque el mismo `where` puede ser perfectamente respondible
+/// sobre casi todo el corpus: sin él, el agente no sabe dónde mirar. **Quién** es ese documento lo
+/// fija el llamador, recorriendo el orden total de [`Analysis::documents`] y quedándose con el
+/// primer `Err` (determinismo, E26-H08): los dos consumidores iteran ese mismo orden de principio a
+/// fin, así que el error no depende de dónde paró el motor.
+fn error_de_tipo(err: &TypeError, path: &RelPath) -> AppError {
+    let detalle = match err {
+        TypeError::OrderNotDefined {
+            field,
+            operator,
+            field_type,
+            value_type,
+        } => format!(
+            "en «{}» el campo «{field}» es de tipo {} y la consulta lo compara con un literal de \
+             tipo {} mediante el operador de orden «{}». El orden solo está definido entre dos \
+             number o entre dos string (lexicográfico), y el lenguaje no coerce tipos (§20.8)",
+            path.as_str(),
+            nombre_de_wire(field_type),
+            nombre_de_wire(value_type),
+            nombre_de_wire(operator),
+        ),
+        TypeError::NotAList {
+            field,
+            operator,
+            found,
+        } => format!(
+            "en «{}» el campo «{field}» es de tipo {} y el operador «{}» exige una list (o un \
+             string, en el caso de contains, donde significa subcadena)",
+            path.as_str(),
+            nombre_de_wire(found),
+            nombre_de_wire(operator),
+        ),
+        // El enum del core es cerrado (dos variantes): una tercera rompería la compilación aquí,
+        // que es justo lo que se quiere — un `TypeError` nuevo sin mensaje sería el defecto de vuelta.
+    };
+    // La salida sugerida tiene que RESOLVER el error que se reporta. `has(campo)` no vale: la
+    // ausencia nunca produce un `TypeError` (cortocircuita antes de mirar el tipo), así que el
+    // documento que yerra TIENE el campo y `has()` no lo excluye — sugerirlo mandaría al agente a
+    // reescribir la consulta para volver a chocar con lo mismo.
+    AppError::invalid_schema(format!(
+        "la consulta no es respondible sobre estos datos: {detalle}. Ajusta la consulta al tipo \
+         real del campo: compara con un literal de ese tipo, o usa un operador definido para él \
+         («=»/«!=» nunca son error — el cruce de tipos es false); \
+         metadata_inspect{{\"mode\":\"field\"}} enumera los tipos que ese campo toma en el workspace"
+    ))
+}
+
+/// Rinde un tipo o un operador del lenguaje con su **grafía de wire** —la de `filter.operator`
+/// (`greater_than_or_equal`, `contains_any`) y la de `metadata_inspect.inferredTypes` (`number`,
+/// `string`)—, que es la que el agente ya ve en el contrato.
+///
+/// Se deriva de `Serialize` en vez de tabularse aquí a propósito: una tabla propia en la fachada
+/// sería un vocabulario paralelo al del wire (invariante #4) y podría desincronizarse del core en
+/// silencio. El `unwrap_or` no es alcanzable con los enums de unidad de `core::types` (serializan
+/// siempre a string), pero evita un `expect` en un camino de error.
+fn nombre_de_wire<T: Serialize>(valor: &T) -> String {
+    serde_json::to_value(valor)
+        .ok()
+        .and_then(|v| v.as_str().map(str::to_string))
+        .unwrap_or_else(|| "desconocido".to_string())
 }
 
 /// Puntuación simple: nº de apariciones del texto (minúsculas) en el contenido crudo; `1.0` para un
@@ -3061,28 +3774,102 @@ fn decode_cursor(cursor: &str) -> usize {
     usize::from_str_radix(cursor, 16).unwrap_or(0)
 }
 
+/// Aplica la **cota de página** sobre una lista ya ordenada por su orden total: recorta a
+/// `[start, start + limit)` —con `start` leído del cursor-offset— y devuelve el trozo más el
+/// `next_cursor` al siguiente (o `None` al agotar).
+///
+/// Es la mecánica que `knowledge_search`/`knowledge_check`/`graph_query` traían escrita a mano; la
+/// comparte `metadata_inspect` desde E26-H10, para que el cursor sea **el mismo** offset hex
+/// autosuficiente en toda la superficie. `limit` ausente → `default_limit`; por encima de
+/// `max_limit` se acota (la fachada MCP ya rechaza antes lo que exceda el máximo declarado en el
+/// `inputSchema`, así que esto es la red de seguridad de cualquier otro llamante).
+fn pagina<T>(
+    items: Vec<T>,
+    limit: Option<usize>,
+    cursor: Option<&str>,
+    default_limit: usize,
+    max_limit: usize,
+) -> (Vec<T>, Option<String>) {
+    let total = items.len();
+    let limit = limit.unwrap_or(default_limit).min(max_limit);
+    let start = cursor.map(decode_cursor).unwrap_or(0).min(total);
+    let end = start.saturating_add(limit).min(total);
+    let next_cursor = (end > start && end < total).then(|| encode_cursor(end));
+    let page = items
+        .into_iter()
+        .skip(start)
+        .take(end.saturating_sub(start))
+        .collect();
+    (page, next_cursor)
+}
+
 // ---------------------------------------------------------------------------
 // `metadata_inspect` — envoltorio de respuesta de la tool (E20-H03, sustituye a `schema_inspect`).
 //
-// Es solo el discriminador de modo: un enum `untagged` que envuelve los tipos de wire del CORE
-// (`MetadataCatalog`/`FieldInspection`, `core::types`, con su serde ya fijado en E20-H03). No es una
-// capa DTO paralela (invariante #4): el contrato de tipos vive en `core::types`; esto es framing de
-// tool (qué proyección devuelve cada `mode`), igual que `KnowledgeGetResponse`.
+// Es el discriminador de modo más el `nextCursor` de la página (E26-H10): un enum `untagged` que
+// **aplana** los tipos de wire del CORE (`MetadataCatalog`/`FieldInspection`, `core::types`, con su
+// serde ya fijado en E20-H03) y les añade el cursor. No es una capa DTO paralela (invariante #4): la
+// forma de los datos sigue viviendo una sola vez en `core::types` —aquí se reexpone con `flatten`,
+// sin redeclarar un solo campo—; esto es framing de tool (qué proyección devuelve cada `mode` y
+// dónde se quedó la página), igual que `GraphQueryResult` o `KnowledgeGetResponse`.
+//
+// El cursor vive AQUÍ y no en el core por la misma razón que la cota (E26-H10): paginar es servir el
+// wire, y el core sigue devolviendo la verdad completa (invariantes #2 y #3).
 // ---------------------------------------------------------------------------
+
+/// Límite por defecto de entradas por página de `metadata_inspect` (E26-H10): campos en modo
+/// `catalog`, valores en modo `field`. Mismo par que `knowledge_check`, la otra tool que enumera un
+/// catálogo.
+const DEFAULT_METADATA_LIMIT: usize = 100;
+/// Tope duro de entradas por página de `metadata_inspect` (E26-H10; evita respuestas de tamaño
+/// proporcional al workspace: el catálogo emite una fila por field path y `values` una por valor
+/// escalar distinto).
+const MAX_METADATA_LIMIT: usize = 1000;
 
 /// Respuesta de la tool `metadata_inspect` (`ARCHITECTURE.md §20.10`, `REFACTOR_PHASE_2 §Fase 6`).
 ///
-/// `untagged`: serializa como el valor interno directo, así que `Catalog` da `{ "fields": [ … ] }`
-/// (la forma de [`MetadataCatalog`]) y `Field` da `{ "field": …, "presentIn": …, … }` (la de
-/// [`FieldInspection`]) — sin envoltorio ni discriminador extra. Solo `Serialize` (+ `JsonSchema`
-/// para el `outputSchema`): la tool PRODUCE esta respuesta, nunca la consume del wire.
+/// `untagged`: serializa como el valor interno directo, así que `Catalog` da
+/// `{ "fields": [ … ], "nextCursor": … }` (la forma de [`MetadataCatalog`] más el cursor) y `Field`
+/// da `{ "field": …, "presentIn": …, …, "nextCursor": … }` (la de [`FieldInspection`] más el
+/// cursor) — sin envoltorio ni discriminador extra. Solo `Serialize` (+ `JsonSchema` para el
+/// `outputSchema`): la tool PRODUCE esta respuesta, nunca la consume del wire.
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 #[serde(untagged)]
 pub enum MetadataInspection {
-    /// Modo `"catalog"`: el catálogo de propiedades del workspace.
-    Catalog(MetadataCatalog),
-    /// Modo `"field"`: la inspección de una propiedad concreta.
-    Field(FieldInspection),
+    /// Modo `"catalog"`: la página del catálogo de propiedades del workspace.
+    Catalog(MetadataCatalogPage),
+    /// Modo `"field"`: la página de la inspección de una propiedad concreta.
+    Field(FieldInspectionPage),
+}
+
+/// Una página del catálogo de propiedades (E26-H10): el [`MetadataCatalog`] del core —**aplanado**,
+/// con sus `fields` ya recortados a la página— y el cursor a la siguiente.
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct MetadataCatalogPage {
+    /// El catálogo con la página de `fields` (el orden total es el determinista del core, por field
+    /// path). Se aplana: en el wire sus claves son las de [`MetadataCatalog`], sin anidar.
+    #[serde(flatten)]
+    pub catalog: MetadataCatalog,
+    /// Cursor opaco a la siguiente página de `fields`, o `None` si no quedan más campos.
+    pub next_cursor: Option<String>,
+}
+
+/// Una página de la inspección de una propiedad (E26-H10): la [`FieldInspection`] del core
+/// —**aplanada**, con sus `values` ya recortados a la página— y el cursor a la siguiente.
+///
+/// Los agregados (`presentIn`/`missingIn`/`inferredTypes`) describen **todo** el workspace, no la
+/// página: lo que se pagina es la lista, no la estadística.
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct FieldInspectionPage {
+    /// La inspección con la página de `values` (el orden total es el determinista del core: por
+    /// conteo descendente y, a igual conteo, por el texto del valor). Se aplana: en el wire sus
+    /// claves son las de [`FieldInspection`], sin anidar.
+    #[serde(flatten)]
+    pub inspection: FieldInspection,
+    /// Cursor opaco a la siguiente página de `values`, o `None` si no queda más vocabulario.
+    pub next_cursor: Option<String>,
 }
 
 // ---------------------------------------------------------------------------

@@ -437,11 +437,16 @@ fn word_to_value(w: &str) -> QueryValue {
 /// con `ParsedFrontmatter::get`—; `document.*`/`graph.*` conservan su primer segmento (son
 /// namespaces calculados, E19-H04). Un segmento vacío (`service.`, `a..b`) es `Err`.
 ///
-/// `pub(crate)` porque el filtro JSON de E19-H03 ([`crate::filter::from_json`]) la **reutiliza** para
-/// normalizar su campo `field` de forma idéntica al textual — esa identidad es lo que garantiza que
-/// `where` y `filter` produzcan exactamente el mismo [`Expression`] (`§20.10`); reimplementarla
-/// abriría la puerta a que las dos superficies divergieran.
-pub(crate) fn build_field_path(word: &str) -> Result<FieldPath, ParseError> {
+/// Es **público** porque es el ÚNICO normalizador de dot-paths de toda la superficie: el filtro
+/// JSON de E19-H03 ([`crate::filter::from_json`]) la reutiliza para normalizar su campo `field` de
+/// forma idéntica al textual —esa identidad es lo que garantiza que `where` y `filter` produzcan
+/// exactamente el mismo [`Expression`] (`§20.10`)— y, desde **E26-H09**, también el parámetro
+/// `field` de `metadata_inspect`, que hasta v0.4.0 normalizaba con [`FieldPath::parse`]: un
+/// **segundo dialecto** en el que `frontmatter.status` buscaba una clave literal `frontmatter`
+/// (`presentIn: 0` sobre un dato que existe) y `graph.backlinks` significaba una cosa distinta que
+/// en `where`. Reimplementarla —o volver a usar `FieldPath::parse` en una fachada— abre la puerta a
+/// que un mismo texto signifique dos campos según la tool.
+pub fn build_field_path(word: &str) -> Result<FieldPath, ParseError> {
     let partes: Vec<&str> = word.split('.').collect();
 
     // E24-H08: `frontmatter.` es un ANCLAJE, no una abreviatura que se descarta. Hasta v0.3.1 se
@@ -463,10 +468,7 @@ pub(crate) fn build_field_path(word: &str) -> Result<FieldPath, ParseError> {
     // Un anclaje explícito sobre lo que SERÍA un namespace reservado conserva el prefijo, que es
     // lo que `eval::resolver_campo` usa para saltarse los namespaces.
     if anclado_al_frontmatter && path.es_namespace_reservado() {
-        return FieldPath::from_segments(
-            std::iter::once(FRONTMATTER_ANCHOR).chain(resto.iter().copied()),
-        )
-        .map_err(|e| ParseError::new(format!("campo inválido `{word}`: {e:?}")));
+        return Ok(path.anclado());
     }
 
     // E24-H07: bajo un namespace RESERVADO, una propiedad desconocida es un ERROR de consulta, no

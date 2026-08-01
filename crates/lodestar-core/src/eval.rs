@@ -142,9 +142,7 @@ fn resolver_campo<'a>(
     // cuando hace falta desambiguar (lo decide `parse::build_field_path`), así que aquí basta con
     // recortarlo.
     if field.segments().first().map(String::as_str) == Some(FRONTMATTER_ANCHOR) {
-        let Ok(real) = FieldPath::from_segments(field.segments()[1..].iter().cloned()) else {
-            return None;
-        };
+        let real = field.sin_anclaje()?;
         return doc
             .frontmatter
             .and_then(|fm| fm.get(&real))

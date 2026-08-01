@@ -78,8 +78,15 @@ jobs:
       # publicación nunca deja un `.md` a medias, y `recovery_bloquea_escritura` es el único test del
       # repo que asevera `WORKSPACE_RECOVERY_REQUIRED`. Sin este step, clippy los compila (por
       # `--all-features`) pero nadie los ejecuta: no se pudren, pero tampoco muerden.
+      #
+      # E25-H01 añadió el mismo gate a `lodestar-app`: la fachada propaga la feature
+      # (`test-failpoints = ["lodestar-workspace/test-failpoints"]`) para poder armar los seams del
+      # orquestador desde `App::change_apply` y comprobar que el error llega al wire con su
+      # `ErrorCode` (`crates/lodestar-app/tests/escritura.rs`, módulo `ventana_de_publicacion`).
       - name: Tests de crash-recovery (feature `test-failpoints`)
-        run: cargo test -p lodestar-workspace --features test-failpoints --locked
+        run: |
+          cargo test -p lodestar-workspace --features test-failpoints --locked
+          cargo test -p lodestar-app --features test-failpoints --locked
 
       - name: Doc (los doc-comments deben compilar; intra-doc links rotos = error)
         run: cargo doc --workspace --no-deps --locked

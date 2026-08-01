@@ -136,3 +136,83 @@ Todos producidos por **E1-H06** (conformidad) y agregados por **E1-H07** (analyz
 | Intentar escribir fuera de `writableRoots` → rechazo | E13-H08 |
 | Referenciar un archivo de código inexistente → diagnóstico | E11-H04 |
 | Editar directamente un Markdown inválido → detectado | E10-H12, E14-H01 |
+
+---
+
+## E25 — Endurecimiento del camino de escritura → historias
+
+> Auditoría del camino de escritura (2026-07-29), posterior a v0.3.1. Estas filas **no** salen de
+> `§10`/`§12`: cada una es un **defecto** con su invariante incumplido y la historia que lo cierra.
+> La columna «Defecto» conserva el identificador de la auditoría (S1–S9) para poder rastrear el
+> hallazgo original.
+>
+> ✅ **Las 6 historias están CERRADAS** (rama `epic/e25-e26-endurecimiento`, 2026-08-01).
+
+| Invariante / sección incumplida | Defecto | Historias |
+|---|---|---|
+| Invariantes #1 y #5 (`.md` única fuente de verdad; único escritor) · `§19.5` pasos 5–10 | **S1** — `publish_result` recomputa el conjunto afectado en T3 y escribe/borra fuera de lo que pasó por `assert_writable`, backup y journal (edición externa pisada, fichero nuevo borrado, `referenceRoot` sobrescribible) | ✅ E25-H01 |
+| Invariante #1 · `§19.5` (copias de recuperación) · `REFACTOR §5.2` | **S2** — copias y `.absent` sin volcado, restauración verbatim de una copia rota, y un journal irrecuperable que cierra el workspace a la escritura para siempre | ✅ E25-H02 |
+| Invariante #5 · `§19.5` (lock de publicación y retención) | **S3** — el GC corre fuera del lock y purga el plano de recuperación de una transacción viva de **otro** proceso, que publica entonces sin copias | ✅ E25-H03 |
+| `§19.5` paso 11 · `REFACTOR §11.2` (recibo y reversibilidad) | **S5** — un fallo posterior a la publicación devuelve `Err` con el disco ya cambiado y **sin recibo**: `change_revert` responde `PLAN_EXPIRED` para siempre | ✅ E25-H04 |
+| Invariante #5 (escritura atómica y durable) · `REFACTOR §11.3` (reversión) | **S6 + S7** — `io::delete` sin fsync de directorio y dir-fsync best-effort silencioso; `change_revert` compara la revisión **antes** del lock y no re-verifica dentro | ✅ E25-H05 |
+| `§19.5` paso 11 · `REFACTOR §11.3` — **espejo de S5**, hallado por el juez de H04 (MAYOR-2) | La reversión no persiste registro durable antes de su punto de no retorno: `Err` sobre la inversa ya publicada, sin recibo, y el GC le purga las copias | ✅ E25-H05 |
+| `§19.5` (un solo publicador) · `§20.13` (`.gitignore` como texto plano) | **S4 + S9** — lock sin prueba de propiedad (TTL wall-clock, `Drop` por ruta, pid sin host) y `.gitignore` versionado reescrito sin atomicidad y con CRLF normalizado a LF | ✅ E25-H06 |
+
+## E26 — UX de errores de la superficie MCP → historias
+
+> Auditoría de la superficie de errores (2026-07-29). Continúa `E24-H07`/`E24-H10`: el código estable
+> ya viaja en todo error; lo que faltaba es el **mensaje**, la **honestidad** de la respuesta y la
+> **cota**. Identificadores U1–U6 de la auditoría.
+>
+> ✅ **Las 5 historias están CERRADAS** (rama `epic/e25-e26-endurecimiento`, 2026-08-01).
+
+| Invariante / sección incumplida | Defecto | Historias |
+|---|---|---|
+| `§19.3` (códigos estables) · `contracts/mcp.yml` `errores_ejecucion` | **U1 + U2** — 8 de 10 tools devuelven el código **pelado** (los productores de `lodestar-app` son `Result<_, ErrorCode>`); `graph_query` sin `ref` responde `DOCUMENT_NOT_FOUND`; `change_plan` descarta el `ParseError` que `knowledge_search` sí entrega | ✅ E26-H07 |
+| `§20.8` (lenguaje tipado) · principio de `E24-H07` | **U3** — un `TypeError` de evaluación **excluye el documento en silencio** en `knowledge_search` y en la selección masiva de `change_plan`: respuesta recortada, decidida documento a documento | ✅ E26-H08 |
+| `§20.8`/`§20.10` (un solo dialecto de dot-paths) · invariante #3 | **U4** — `metadata_inspect` normaliza con `FieldPath::parse` en vez de `build_field_path`: `graph.backlinks` significa dos cosas según la tool, el anclaje `frontmatter.` no funciona y el catálogo anuncia nombres no direccionables | ✅ E26-H09 |
+| `§19.6` (presupuesto de payload) · `E24-H09` (validación de valores) | **U5** — `graph_query` sin default ni máximo (`None => total`, sirve el grafo completo) y `metadata_inspect` sin paginación ni tope en ninguno de sus dos modos | ✅ E26-H10 |
+| `contracts/README.md` (el contrato describe el servidor real) | **U6** — `contracts/mcp.yml` describe el comportamiento pre-`E24-H10`, `E24-H07` declaró frontera sin tocar el contrato, y cuatro tools declaran sus errores como prosa suelta | ✅ E26-H11 |
+
+## Deuda declarada por la auditoría de E25/E26 → `DECISIONES §16`
+
+> Lo que quedó **explícitamente fuera** de esta tanda, con su origen. No son filas de cobertura
+> pendiente: son decisiones de no-hacer, registradas para que la próxima auditoría no las
+> redescubra. El detalle, con opciones y recomendación, está en [`DECISIONES.md §16`](../DECISIONES.md).
+
+| Punto (§16) | Origen |
+|---|---|
+| (a) *Quoting* en el lenguaje: clave con punto literal, clave `frontmatter` literal, fusión de nombres | E26-H09 |
+| (b) `Envelope`/`ErrorEnvelope` sin llamantes | auditoría UX |
+| (c) Cache SQLite y watcher sin uso en producción | auditoría UX (va con `§14`) |
+| (d) Servidor MCP monohilo, sin timeout ni cancelación | auditoría UX (va con `§3`) |
+| (e) Config sin `deny_unknown_fields`; config ilegible → defaults silenciosos | auditoría de escritura (va con `§15`) |
+| (f) Workspace vacío indistinguible de directorio equivocado | auditoría UX |
+| (g) API pública no transaccional de `Workspace` (**S8**) | auditoría de escritura |
+| (h) Escritores de runtime sin lock (`persist_plan`/`write_receipt`) | juez ciego de E25-H03 |
+| (i) Secuencia de sellado duplicada `apply`/`revert` | juez ciego de E25-H05 |
+| (j) Cursor basura reinicia la paginación en silencio | juez ciego de E26-H10 |
+| (k) Trazabilidad sin filas de E15–E24 | cierre de E24-H18, verificado aquí |
+
+## Consecuencias observables declaradas (E25–E26) → historia que las declara
+
+> Cambios de resultado sobre bases existentes que la rama introduce. Se recogen aquí para que la nota
+> de release no dependa de releer las épicas; `E26-H11` es quien las consolida.
+
+| Consecuencia | Historia |
+|---|---|
+| La convergencia «a uno de los dos bordes» pasa a estar **condicionada** a que las copias de recuperación verifiquen; lo que no verifica va a cuarentena y se reporta con `RECOVERY_FAILED` | E25-H02 |
+| `graph_query` sin `ref` cambia de `DOCUMENT_NOT_FOUND` a `INVALID_SCHEMA` | E26-H07 |
+| Una consulta con un error de **tipo** pasa de devolver una lista recortada a **fallar** | E26-H08 |
+| `metadata_inspect{field:"graph.backlinks"}` pasa a fallar; `field:"frontmatter.status"` pasa a funcionar; el `name` del catálogo cambia para las claves que colisionan con un namespace | E26-H09 |
+| `graph_query` sin `limit` deja de devolver el grafo completo (100 nodos + `nextCursor`) | E26-H10 |
+
+## Catálogo de `ErrorCode` (16 filas) — movimientos de esta rama
+
+| Código | Movimiento | Historia |
+|---|---|---|
+| `RECOVERY_FAILED` | gana su **primer emisor real** (cuarentena de un journal irrecuperable) y sale de `codigos_sin_emisor`, que baja de 5 a 4 filas | E25-H02 |
+
+> **El catálogo sigue teniendo 16 filas**: ninguna historia de E25/E26 añade, borra ni renombra un
+> código (invariante #4; el grep de CI de `E24-H17` lo hace cumplir). Lo único que cambia es qué
+> caminos emiten qué.

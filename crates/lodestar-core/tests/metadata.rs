@@ -712,3 +712,379 @@ fn metadata_inspect_vocabulario_ordenado_por_frecuencia() {
         "77 observaciones de tag en 47 documentos: el multivalor rompe la igualdad con present_in"
     );
 }
+
+// =============================================================================
+// E26-H09 — El catálogo es DIRECCIONABLE y el anclaje `frontmatter.` llega al core
+// =============================================================================
+//
+// La mitad de la historia que se ve por el wire (`metadata_inspect` normalizando su `field` con
+// `parse::build_field_path` y el rechazo del namespace reservado) vive en
+// `crates/lodestar-mcp/tests/mcp.rs` y en `descubribilidad.rs`. Lo que se fija AQUÍ es la mitad que
+// vive en el core, y que es la premisa de aquella:
+//
+//   1. **Cómo se RINDE el nombre en el catálogo** (`catalog`). Un `name` del catálogo tiene que ser
+//      un texto que el lenguaje de consulta acepte y resuelva al MISMO campo. Cuando la clave del
+//      usuario colisiona con un namespace reservado (`graph:`, `document:`), el nombre desnudo que
+//      hoy emite `walk` (`graph.backlinks`) NO cumple: `where`/`has` lo resuelven contra el GRAFO
+//      (E24-H07/H08) y `graph.nota` ni siquiera parsea. La forma direccionable de esa clave es la
+//      **anclada** (`frontmatter.graph.backlinks`).
+//   2. **Que `inspect_field` entienda ese mismo path anclado**, porque si no el catálogo anunciaría
+//      un nombre que su propia tool no sabe inspeccionar — el defecto que la historia cierra, del
+//      revés.
+//
+// Se prueba en el core, y no solo por el wire, por el invariante #3 (*una sola verdad computada*):
+// el catálogo lo computa `core::metadata`, y si la fachada reescribiera los nombres al servirlos,
+// el catálogo del core y el del wire dirían cosas distintas sobre el mismo workspace. La ALCANCE de
+// la historia lo dice explícitamente: no se toca `FieldPath::from_segments` ni `walk` —la
+// restricción de E24-H07 sigue vigente—; lo que cambia es **cómo se rinde** el nombre.
+//
+// NO se prueba aquí la clave con **punto literal** (`"sonar.projectKey"` como clave única del
+// mapa): `walk` la emite como un `FieldPath` de UN segmento con punto, y su `Display` es
+// indistinguible del path anidado `sonar → projectKey`. Hacerla direccionable exigiría una sintaxis
+// de escape en el lenguaje de consulta, que está fuera del alcance declarado de esta historia.
+
+/// Frontmatter que colisiona con los DOS namespaces reservados y, a la vez, tiene claves que **no**
+/// deben cambiar de nombre:
+///   · `graph:`/`document:` de primer nivel → colisión real (los nombres que hoy no son
+///     direccionables);
+///   · `meta.graph.x` → un `graph` que NO es primer segmento, así que ya es direccionable tal cual
+///     (control: quien «ancle todo» lo rompe);
+///   · `status` → una clave normal (mismo control).
+const FM_COLISION: &str = concat!(
+    "status: draft\n",
+    "graph:\n",
+    "  backlinks: 7\n",
+    "  nota: manual\n",
+    "document:\n",
+    "  path: falso.md\n",
+    "meta:\n",
+    "  graph:\n",
+    "    x: 1"
+);
+
+/// Un workspace con el frontmatter en colisión + un documento sin frontmatter (para que
+/// `present_in`/`missing_in` discriminen).
+fn docs_colision() -> Vec<(String, String)> {
+    vec![
+        ("alfa.md".to_string(), fm_doc(FM_COLISION)),
+        (
+            "bravo.md".to_string(),
+            "# Bravo\n\nsin frontmatter.\n".to_string(),
+        ),
+    ]
+}
+
+/// **E26-H09** — el catálogo rinde ANCLADA la clave que colisiona con un namespace reservado, y
+/// **solo** esa.
+///
+/// Hoy emite `graph.backlinks`/`graph.nota`/`document.path` (los nombres crudos de `walk`), que son
+/// justo los tres textos que el lenguaje de consulta interpreta como propiedades calculadas —o
+/// rechaza—: la tool que existe para hacer descubrible una base desconocida anuncia nombres que
+/// ninguna otra superficie acepta.
+#[test]
+fn catalogo_rinde_anclado_el_nombre_en_colision() {
+    let cat = catalog(&ds(docs_colision()));
+    let nombres = field_names(&cat);
+
+    for anclado in [
+        "frontmatter.graph",
+        "frontmatter.graph.backlinks",
+        "frontmatter.graph.nota",
+        "frontmatter.document",
+        "frontmatter.document.path",
+    ] {
+        assert!(
+            nombres.iter().any(|n| n == anclado),
+            "el catálogo debe anunciar «{anclado}»: es la ÚNICA forma con la que un agente puede \
+             después inspeccionar o consultar esa clave (`where`/`has` resuelven el texto desnudo \
+             contra el grafo, E24-H07/H08). Nombres emitidos: {nombres:?}"
+        );
+    }
+
+    for desnudo in [
+        "graph",
+        "graph.backlinks",
+        "graph.nota",
+        "document",
+        "document.path",
+    ] {
+        assert!(
+            !nombres.iter().any(|n| n == desnudo),
+            "…y NO debe anunciar «{desnudo}» a secas: es un nombre no direccionable (o significa \
+             otra cosa —el grafo— en el resto de la superficie). Nombres emitidos: {nombres:?}"
+        );
+    }
+
+    // Control anti-vacuo 1: lo que YA era direccionable no cambia de texto. La consecuencia que la
+    // historia declara es que cambian los nombres «para las claves que colisionan con un
+    // namespace», no todos.
+    for intacto in ["status", "meta", "meta.graph", "meta.graph.x"] {
+        assert!(
+            nombres.iter().any(|n| n == intacto),
+            "«{intacto}» ya es direccionable tal cual (su primer segmento no es un namespace \
+             reservado): anclarlo también sería cambiar el contrato sin motivo. Nombres emitidos: \
+             {nombres:?}"
+        );
+    }
+
+    // Control anti-vacuo 2: la ESTADÍSTICA no se toca; lo que cambia es cómo se rinde el nombre.
+    let backlinks = stats_por_nombre(&cat, "frontmatter.graph.backlinks");
+    assert_eq!(
+        backlinks.present_in, 1,
+        "la clave del usuario sigue estando en 1 de los 2 documentos: {backlinks:?}"
+    );
+    assert_eq!(
+        backlinks.inferred_types.get(&ValueType::Number),
+        Some(&1),
+        "…y su tipo observado sigue siendo `number` (el 7 del frontmatter): {backlinks:?}"
+    );
+}
+
+/// **E26-H09** — el catálogo es direccionable **desde el propio core**: cada `FieldPath` que emite
+/// `catalog` se puede pasar a `inspect_field` y devuelve la misma presencia.
+///
+/// Es la mitad de la propiedad de round-trip que `descubribilidad.rs` verifica por el wire (allí se
+/// añade la tercera pata: `knowledge_search{where}`). Hoy pasa —los nombres desnudos los resuelve
+/// `ParsedFrontmatter::get` sin más—; el día que el catálogo rinda anclados los nombres en colisión
+/// **exige** que `inspect_field` entienda ese anclaje, que es la premisa del criterio
+/// `anclaje_frontmatter_alcanza_la_clave_reservada`.
+#[test]
+fn cada_nombre_del_catalogo_se_inspecciona() {
+    let docs = ds(docs_colision());
+    let cat = catalog(&docs);
+    assert!(
+        cat.fields.len() >= 8,
+        "el fixture debe producir un catálogo rico (≥ 8 campos) o el bucle sería vacuo: {:?}",
+        field_names(&cat)
+    );
+
+    for entrada in &cat.fields {
+        let insp = inspect_field(&docs, &entrada.field);
+        assert_eq!(
+            insp.present_in, entrada.present_in,
+            "el nombre «{}» que anuncia el catálogo debe inspeccionarse tal cual y describir el \
+             MISMO campo (present_in del catálogo vs. de la inspección)",
+            entrada.field
+        );
+        assert_eq!(
+            insp.inferred_types, entrada.inferred_types,
+            "…con los mismos tipos observados, para «{}»",
+            entrada.field
+        );
+    }
+}
+
+/// **E26-H09** — `inspect_field` resuelve un [`FieldPath`] **anclado** contra el frontmatter del
+/// usuario, igual que hace el evaluador de consultas desde E24-H08.
+///
+/// Hoy busca una clave de primer nivel literalmente llamada `frontmatter` y devuelve `present_in:
+/// 0`: silenciosamente equivocado. El path se construye con `FieldPath::from_segments` (público) y
+/// no con el normalizador del parser, para no acoplar este test a un símbolo que la historia aún
+/// tiene que promover a `pub`.
+#[test]
+fn inspect_field_alcanza_la_clave_reservada_por_el_anclaje() {
+    let docs = ds(docs_colision());
+    let anclado = FieldPath::from_segments(["frontmatter", "graph", "backlinks"])
+        .expect("un path anclado de 3 segmentos es válido");
+
+    let insp = inspect_field(&docs, &anclado);
+
+    assert_eq!(
+        insp.present_in, 1,
+        "`frontmatter.graph.backlinks` debe alcanzar la clave del USUARIO (el 7 de `alfa.md`), no \
+         una clave de primer nivel llamada literalmente `frontmatter`: {insp:?}"
+    );
+    assert_eq!(
+        insp.missing_in, 1,
+        "…y el documento sin frontmatter sigue contando como ausencia: {insp:?}"
+    );
+    assert_eq!(
+        insp.values,
+        vec![ValueCount {
+            value: serde_yaml::from_str::<Yaml>("7").unwrap(),
+            count: 1
+        }],
+        "…con el valor 7 en su tipo YAML real (número), que es el dato que hoy es inalcanzable: \
+         {insp:?}"
+    );
+
+    // Control anti-vacuo: el anclaje no es un comodín que haga aparecer cualquier cosa. Una clave
+    // inexistente bajo el mismo anclaje sigue ausente.
+    let fantasma = FieldPath::from_segments(["frontmatter", "graph", "inventada"]).unwrap();
+    assert_eq!(
+        inspect_field(&docs, &fantasma).present_in,
+        0,
+        "una subclave que no existe sigue sin estar presente"
+    );
+}
+
+/// La entrada del catálogo cuyo `name` (el `Display` del `FieldPath`) es `nombre`, o panic con la
+/// lista. Complementa a [`stats`], que busca por `FieldPath::parse` y por tanto no puede pedir un
+/// nombre anclado (`parse` no aplica la abreviatura: construiría `["frontmatter","graph",…]` sí,
+/// pero por una vía distinta de la del lenguaje).
+fn stats_por_nombre<'a>(cat: &'a MetadataCatalog, nombre: &str) -> &'a FieldStats {
+    cat.fields
+        .iter()
+        .find(|e| e.field.to_string() == nombre)
+        .unwrap_or_else(|| {
+            panic!(
+                "el catálogo debe listar «{nombre}»; lista {:?}",
+                field_names(cat)
+            )
+        })
+}
+
+/// **E26-H09** — cuando dos campos de un MISMO documento rinden al mismo nombre, la estadística no
+/// se infla: `present_in` cuenta **documentos**.
+///
+/// El caso límite lo destapó la revisión de la historia: un documento con una clave `graph:` (que se
+/// rinde anclada, `frontmatter.graph`) **y** una clave de primer nivel llamada literalmente
+/// `frontmatter` con una subclave `graph` (que se rinde tal cual, y da el mismo texto). Los dos
+/// caen en la misma entrada del catálogo. Sumar sus observaciones daría `presentIn: 2` sobre **un**
+/// documento —un conteo que excede el total y que ninguna otra tool podría reproducir—: la
+/// ambigüedad del lenguaje es tolerable, una estadística imposible no.
+///
+/// La segunda mitad es la coherencia con la inspección: en la fusión gana la forma **anclada**,
+/// porque es la que `inspect_field` resuelve, así que catálogo e inspección describen el mismo
+/// valor. Aquí es observable sin fragilidad porque los dos campos tienen **tipos distintos**: el
+/// `graph:` del usuario es un mapa y la subclave de la clave literal es un string.
+#[test]
+fn la_fusion_no_infla_present_in() {
+    let docs = ds(vec![(
+        "alfa.md".to_string(),
+        fm_doc(concat!(
+            "graph:\n",
+            "  backlinks: 7\n",
+            "frontmatter:\n",
+            "  graph: solo-un-string"
+        )),
+    )]);
+
+    let cat = catalog(&docs);
+    let fusionada = stats_por_nombre(&cat, "frontmatter.graph");
+
+    assert_eq!(
+        fusionada.present_in, 1,
+        "los dos campos que rinden a «frontmatter.graph» viven en el MISMO documento: la entrada \
+         cuenta 1, nunca 2. `present_in` cuenta documentos, y el workspace tiene uno solo: {cat:?}"
+    );
+    assert_eq!(
+        fusionada.inferred_types.values().sum::<usize>(),
+        1,
+        "…y una sola observación de tipo, por el mismo motivo (el invariante \
+         `sum(inferred_types) == present_in` sigue en pie): {fusionada:?}"
+    );
+    assert_eq!(
+        fusionada.inferred_types.get(&ValueType::Mapping),
+        Some(&1),
+        "…y esa observación es la de la forma ANCLADA —el `graph:` del usuario, que es un mapa—, \
+         porque es la que `inspect_field` resuelve; registrar el string de la clave literal haría \
+         que el catálogo describiera un valor distinto del que devuelve la inspección: {fusionada:?}"
+    );
+
+    // La coherencia, aseverada de verdad y no por lectura del código: el mismo nombre, inspeccionado.
+    let insp = inspect_field(
+        &docs,
+        &FieldPath::from_segments(["frontmatter", "graph"]).unwrap(),
+    );
+    assert_eq!(
+        insp.present_in, fusionada.present_in,
+        "catálogo e inspección deben decir lo mismo sobre «frontmatter.graph»: {insp:?}"
+    );
+    assert_eq!(
+        insp.inferred_types, fusionada.inferred_types,
+        "…también en el tipo observado: {insp:?}"
+    );
+    assert_eq!(
+        insp.missing_in, 0,
+        "…y `present_in + missing_in` sigue siendo el total de documentos (1): {insp:?}"
+    );
+
+    // Control anti-vacuo: la fusión no se come nada. Las dos hojas siguen anunciadas, cada una con
+    // su nombre, y el catálogo no se queda en una sola entrada.
+    let nombres = field_names(&cat);
+    for esperado in [
+        "frontmatter",
+        "frontmatter.graph",
+        "frontmatter.graph.backlinks",
+    ] {
+        assert!(
+            nombres.iter().any(|n| n == esperado),
+            "«{esperado}» debe seguir en el catálogo: fusionar dos nombres iguales no puede \
+             hacer desaparecer campos distintos: {nombres:?}"
+        );
+    }
+}
+
+// =============================================================================
+// E26-H10 — La cota vive en la FACHADA; el core sigue devolviendo la verdad completa
+// =============================================================================
+//
+// E26-H10 pone `limit`/`cursor` (default 100, máximo 1000) a `metadata_inspect`, porque el catálogo
+// emite una fila por cada field path y `values` una entrada por cada valor escalar distinto: N
+// entradas para N documentos en un campo de alta cardinalidad. La historia decide **dónde** se
+// aplica esa cota: en `lodestar-app`, la fachada que sirve el wire — **no** aquí.
+//
+// Este test es la guardia de esa decisión, y por eso está en VERDE desde antes de implementar nada:
+// su papel no es reproducir un defecto, sino impedir que el arreglo se cuele en el sitio
+// equivocado. Un `catalog`/`inspect_field` que truncara a 100 rompería los invariantes #2 y #3
+// (el core es puro y es la única verdad computada), dejaría a `lodestar-cli` y a cualquier
+// consumidor futuro del core sin acceso a la cola, y haría irrecuperable —desde el core— lo que la
+// paginación promete recuperar página a página.
+
+/// `n` documentos con un campo de **alta cardinalidad** (`uid`, un valor distinto por documento),
+/// un campo común (`status`) y un field path propio por documento (`campoNNN`), de modo que tanto
+/// el catálogo (`n + 2` campos) como el vocabulario de `uid` (`n` valores) superen holgadamente los
+/// 100 de la cota de la fachada. Mismo workspace, campo a campo, que `ws_cota()` en
+/// `crates/lodestar-mcp/tests/mcp.rs`.
+fn docs_alta_cardinalidad(n: usize) -> Vec<(String, String)> {
+    (0..n)
+        .map(|i| {
+            (
+                format!("n{i:03}.md"),
+                fm_doc(&format!("campo{i:03}: {i}\nstatus: draft\nuid: u{i:03}")),
+            )
+        })
+        .collect()
+}
+
+/// **E26-H10** — `catalog` e `inspect_field` devuelven la verdad **completa**: la cota de 100 es de
+/// la fachada, no del core.
+#[test]
+fn el_core_no_pagina_la_verdad_completa() {
+    const N: usize = 150;
+    let docs = ds(docs_alta_cardinalidad(N));
+
+    let cat = catalog(&docs);
+    assert_eq!(
+        cat.fields.len(),
+        N + 2,
+        "el catálogo debe listar los {N} `campoNNN` más `status` y `uid`, sin recortar en 100: la \
+         cota de `metadata_inspect` es de la FACHADA (invariantes #2 y #3)"
+    );
+
+    let insp = inspect_field(&docs, &fp("uid"));
+    assert_eq!(
+        insp.values.len(),
+        N,
+        "…y el vocabulario de un campo de alta cardinalidad sale entero ({N} valores distintos): \
+         quien pagine aquí deja al core sin la cola que la paginación del wire promete recuperar"
+    );
+    assert_eq!(
+        insp.present_in, N,
+        "`uid` está en los {N} documentos: el agregado también es del workspace entero"
+    );
+    assert_eq!(insp.missing_in, 0, "…y no falta en ninguno");
+    assert_eq!(
+        insp.values.iter().map(|v| v.count).sum::<usize>(),
+        N,
+        "…con una observación por documento (campo escalar): la lista no pierde ni duplica nada"
+    );
+
+    // No vacuo: los dos números están por ENCIMA de la cota que se le pone a la fachada, así que un
+    // truncado a 100 en el core rompería este test de verdad.
+    assert!(
+        cat.fields.len() > 100 && insp.values.len() > 100,
+        "el workspace de este test tiene que superar la cota de 100 para que el test muerda"
+    );
+}

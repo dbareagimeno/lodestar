@@ -41,6 +41,7 @@ use std::path::Path;
 use lodestar_app::App;
 use lodestar_core::plan::PlanPolicy;
 use lodestar_core::types::DocumentRef;
+use lodestar_core::types::ErrorCode;
 use lodestar_core::types::RelPath;
 use serde_json::{json, Value};
 
@@ -242,5 +243,164 @@ fn seleccion_captura_revisiones() {
         2,
         "`capturedRevisions` debe tener exactamente una entrada por documento seleccionado (d1, d2): \
          {plan_json}",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// E26-H08 — Una selección masiva no salta documentos en silencio
+//
+// Los tres tests de E21-H02 de arriba siguen VERDES tal cual: `Ok(false)` sigue siendo exclusión
+// (`seleccion_vacia` lo prueba con una consulta perfectamente tipada que no casa nada), y lo único
+// que cambia de tratamiento es `Err(TypeError)`.
+//
+// Lo que E19-H04/E21-H02 decidieron —y esta historia REVISA— está en el rustdoc de
+// `expand_selection`: *«Un `TypeError` sobre ESTE documento lo excluye (no casa), sin propagarse al
+// plan entero»*. El criterio era el de E19: el corpus es heterogéneo y un tipo incompatible no debe
+// tumbar la consulta sobre los demás. E24-H07 ya revisó ese mismo criterio para el PARSEO («una
+// respuesta silenciosamente equivocada es peor que un error») y E26-H08 lo lleva a la EVALUACIÓN:
+// una selección masiva que se salta documentos produce un plan que afecta a menos ficheros de los
+// que el agente cree haber seleccionado, y nada en la respuesta lo delata.
+// ---------------------------------------------------------------------------
+
+/// La consulta del defecto: orden entre un campo numérico y un literal string
+/// (`TypeError::OrderNotDefined`, E19-H01).
+const ORDEN_CRUZADO: &str = "priority >= \"high\"";
+
+/// Workspace con `priority` de tipos MEZCLADOS. El reparto es discriminante para el criterio de
+/// determinismo: `alfa.md` va primero en el orden total pero NO yerra (string vs string), `bravo.md`
+/// es el primero que yerra —el que debe salir nombrado— y `zulu.md` yerra el último.
+/// (`primer_type_error_en_el_orden_total`, en `lodestar-core/tests/consulta.rs`, clava esa premisa
+/// sobre el mismo fixture.)
+fn app_con_prioridades_mixtas() -> (tempfile::TempDir, App) {
+    let dir = tempfile::tempdir().unwrap();
+    escribe(
+        dir.path(),
+        "alfa.md",
+        "---\npriority: high\nstatus: draft\n---\n\n# Alfa\n",
+    );
+    escribe(
+        dir.path(),
+        "bravo.md",
+        "---\npriority: 2\nstatus: draft\n---\n\n# Bravo\n",
+    );
+    escribe(
+        dir.path(),
+        "charlie.md",
+        "---\npriority: urgent\nstatus: draft\n---\n\n# Charlie\n",
+    );
+    escribe(
+        dir.path(),
+        "zulu.md",
+        "---\npriority: 9\nstatus: draft\n---\n\n# Zulu\n",
+    );
+    let app = App::open(dir.path()).expect("el workspace temporal debe abrir");
+    (dir, app)
+}
+
+/// `seleccion_con_type_error_aborta_el_plan` — **Dado** una selección masiva cuya consulta choca de
+/// tipo con algunos documentos, **Cuando** se planifica, **Entonces** falla con `INVALID_SCHEMA` y
+/// un mensaje que nombra el campo, los dos tipos y el primer documento del orden total que yerra,
+/// **y** ese error es el MISMO que da `knowledge_search` con la misma consulta.
+///
+/// Gemelo por la API de `misma_consulta_mismo_error_en_search_y_en_plan` y
+/// `el_type_error_reportado_es_determinista` (por el wire, en `lodestar-mcp/tests/mcp.rs`). Se prueba
+/// aquí además porque el `AppError` es observable entero —código y mensaje como campos, no como
+/// texto concatenado— y porque esta es la superficie donde el defecto es más caro: el plan.
+#[test]
+fn seleccion_con_type_error_aborta_el_plan() {
+    let (_dir, app) = app_con_prioridades_mixtas();
+
+    let err = app
+        .change_plan(None, &seleccion_patch(ORDEN_CRUZADO), policy_permisiva())
+        .expect_err(
+            "una selección masiva cuya consulta yerra de tipo sobre parte del corpus debe FALLAR: \
+             hasta v0.4.0 `expand_selection` se saltaba en silencio los documentos que erraban \
+             (`alfa.md`/`charlie.md` entraban, `bravo.md`/`zulu.md` desaparecían) y devolvía un plan \
+             de aspecto legítimo que afectaba a menos ficheros de los seleccionados",
+        );
+
+    assert_eq!(
+        err.code,
+        ErrorCode::InvalidSchema,
+        "el código es el del catálogo para «tu entrada no es respondible sobre estos datos»: {err}"
+    );
+    let bajo = err.message.to_lowercase();
+    assert!(
+        bajo.contains("priority"),
+        "el mensaje debe nombrar el campo que choca: {err}"
+    );
+    assert!(
+        ["number", "numero", "número", "numérico"]
+            .iter()
+            .any(|t| bajo.contains(t)),
+        "…el tipo que tiene el campo en el documento: {err}"
+    );
+    assert!(
+        ["string", "cadena", "texto"]
+            .iter()
+            .any(|t| bajo.contains(t)),
+        "…y el tipo del literal con el que se comparó: {err}"
+    );
+    assert!(
+        err.message.contains("bravo.md"),
+        "…y el documento sobre el que se produjo, que debe ser el PRIMERO del orden total de \
+         `Analysis::documents` que yerra (no `alfa.md`, que va antes y no yerra): {err}"
+    );
+    assert!(
+        !err.message.contains("zulu.md"),
+        "…y solo ese: nombrar el último que yerra haría depender el mensaje de dónde paró el motor: \
+         {err}"
+    );
+
+    // Equivalencia de superficies (`§20.10`): la misma consulta, el mismo veredicto y la misma
+    // redacción por `knowledge_search`. Si divergieran, el agente aprendería a corregir con una y
+    // se quedaría a ciegas con la otra.
+    let e_search = app
+        .knowledge_search("", Some(ORDEN_CRUZADO), None, &[], None, None)
+        .expect_err("`knowledge_search` con la misma consulta también debe fallar");
+    assert_eq!(
+        e_search, err,
+        "`knowledge_search` y `change_plan.selection` comparten el lenguaje, así que comparten el \
+         error: mismo código y mismo mensaje"
+    );
+}
+
+/// `seleccion_con_campo_ausente_sigue_expandiendo` — control anti-vacuo del criterio anterior: un
+/// campo AUSENTE excluye su documento sin error, como hasta ahora.
+///
+/// El arreglo no puede consistir en abortar ante todo lo que no sea `Ok(true)`: la ausencia
+/// cortocircuita antes de comprobar tipos (`campo_inexistente`, E19-H01) y sigue siendo exclusión.
+/// El documento sin `priority` va primero en el orden total a propósito.
+#[test]
+fn seleccion_con_campo_ausente_sigue_expandiendo() {
+    let dir = tempfile::tempdir().unwrap();
+    escribe(
+        dir.path(),
+        "a-sin-priority.md",
+        "---\nstatus: draft\n---\n\n# Sin prioridad\n",
+    );
+    escribe(
+        dir.path(),
+        "b-con-priority.md",
+        "---\nstatus: draft\npriority: 5\n---\n\n# Con prioridad\n",
+    );
+    let app = App::open(dir.path()).expect("el workspace temporal debe abrir");
+
+    let plan = app
+        .change_plan(None, &seleccion_patch("priority >= 3"), policy_permisiva())
+        .expect("preguntar por una clave que un documento no tiene es legítimo, no un error");
+
+    let paths: Vec<String> = serde_json::to_value(&plan.normalized_operations)
+        .unwrap()
+        .as_array()
+        .expect("normalizedOperations debe ser un array")
+        .iter()
+        .map(|op| op["path"].as_str().unwrap_or_default().to_string())
+        .collect();
+    assert_eq!(
+        paths,
+        vec!["b-con-priority.md".to_string()],
+        "la selección se expande sobre el documento que tiene la clave con el tipo correcto, y el \
+         que no la tiene queda fuera SIN ruido"
     );
 }

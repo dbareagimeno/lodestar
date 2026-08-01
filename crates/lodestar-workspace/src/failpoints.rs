@@ -37,7 +37,7 @@
 //! garantía de que un crash **de verdad** —`SIGKILL`, sin `Drop` ninguno— también converge la da
 //! el test de señal de E24-H14, que mata el binario.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 
 /// Punto de la transacción en el que se puede inyectar una caída, **en el orden real de
 /// `apply_transaction`**.
@@ -61,6 +61,48 @@ pub enum FailPoint {
     TrasPublicarSinSellar,
     /// Tras marcar el staging como consumido, justo antes de borrar staging y journal.
     AntesDeSellar,
+    /// **En medio del sellado del aborto de ventana** (E25-H02): el `WRITE_CONFLICT` de la ventana
+    /// `[T1, T3)` (E25-H01) ya se detectó, el fichero de journal de la transacción abortada ya se ha
+    /// **borrado** y su árbol de recuperación **todavía no**.
+    ///
+    /// Modela el proceso que muere entre los dos borrados. El orden importa y es lo que este punto
+    /// fija: el journal va primero porque es lo que levanta el gate de `recovery_pending`, así que
+    /// lo que sobrevive a la interrupción es un árbol de recuperación **sin journal** — un huérfano
+    /// legítimo que recoge el GC (E24-H06). Al revés quedaría un journal apuntando a copias que ya
+    /// no están, y la recuperación sellaría un estado parcial en silencio.
+    ///
+    /// STUB de la fase roja de E25-H02: la variante existe para que el test compile; **nadie la
+    /// dispara todavía** (el camino de aborto no la ejerce porque el sellado del aborto aún no
+    /// existe). El implementador coloca el `failpoint!` correspondiente entre los dos borrados.
+    EnMedioDelSelladoDelAborto,
+    /// **En la FACHADA** (E25-H04): entre el retorno de `Workspace::apply_transaction` y el recibo,
+    /// dentro de `App::change_apply`. El disco canónico ya está publicado y la transacción ya está
+    /// sellada (su lock, soltado); lo único que falta es el registro que permite deshacerla.
+    ///
+    /// Es el único punto de la taxonomía que **no** vive en `lodestar-workspace`: los seis anteriores
+    /// modelan caídas dentro del orquestador y ninguno llega a la capa que escribe los recibos, que es
+    /// justamente donde `write_receipt`/`gc_receipts`/`analyze` pueden convertir una transacción
+    /// PUBLICADA en un `Err` **sin recibo** — el agente concluye que no se aplicó nada, `change_revert`
+    /// responde `PLAN_EXPIRED` para siempre y un segundo `change_apply` muere con `PLAN_STALE`.
+    ///
+    /// Lo consulta `lodestar-app` —que propaga la feature (`test-failpoints =
+    /// ["lodestar-workspace/test-failpoints"]`, E25-H01)— con la API pública de este módulo, porque el
+    /// macro `failpoint!` es interno de este crate:
+    ///
+    /// ```ignore
+    /// // crates/lodestar-app/src/lib.rs, en `change_apply_uncounted`, entre (4) y (5):
+    /// #[cfg(feature = "test-failpoints")]
+    /// if lodestar_workspace::failpoints::disparado(
+    ///     lodestar_workspace::failpoints::FailPoint::TrasLaTransaccionAntesDelRecibo,
+    /// ) {
+    ///     return Err(ErrorCode::InternalIoError);
+    /// }
+    /// ```
+    ///
+    /// El punto se **autodesarma al dispararse** ([`disparado`]), y de eso se sirven los tests para
+    /// comprobar que de verdad se ejerció: si tras el `change_apply` el punto sigue armado, nadie lo
+    /// consultó y el escenario habría pasado vacuamente.
+    TrasLaTransaccionAntesDelRecibo,
 }
 
 thread_local! {
@@ -91,4 +133,98 @@ pub fn disparado(fp: FailPoint) -> bool {
             false
         }
     })
+}
+
+/// Punto del orquestador donde se ejecuta un **gancho** del test y la transacción **continúa**
+/// (E25-H01).
+///
+/// Es el complemento de [`FailPoint`]: aquel solo sabe **abortar** —devuelve `Err` y la transacción
+/// muere ahí—, y hay defectos que solo se manifiestan si algo pasa *y el flujo sigue*. El caso que
+/// lo motivó es la ventana `[T1, T3)` de la publicación: para reproducir una edición externa
+/// concurrente hace falta modificar el disco **entre** el conjunto respaldado y el bucle de
+/// renames, sin interrumpir la transacción.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PuntoDeGancho {
+    /// Dentro de la ventana `[T1, T3)`, en su último instante: tras `create_journal` e
+    /// **inmediatamente antes** de `publish_result`. Copias de recuperación y journal ya cubren el
+    /// conjunto afectado calculado en T1, y el bucle de publicación aún no ha sustituido nada.
+    AntesDePublicar,
+    /// Dentro de la ventana **`[backup, journal)`**: tras `backup_originals` y **antes** de
+    /// `create_journal` (E25-H03). Es el instante en que la transacción **tiene copias de
+    /// recuperación y no tiene todavía ni journal ni recibo**, o sea el único estado en el que el
+    /// criterio de «vivos» del GC del plano de control (`journal/` ∪ `receipts/`) no la ve.
+    ///
+    /// Es el complemento *ejecuta-y-espera* de [`FailPoint::TrasBackupSinJournal`], que modela ese
+    /// mismo punto pero **abortando**: para reproducir el defecto de E25-H03 hace falta que la
+    /// transacción se quede **congelada ahí, viva**, mientras otro proceso barre. El gancho del test
+    /// bloquea en un canal y la transacción continúa cuando el test la libera.
+    ///
+    /// STUB de la fase roja de E25-H03: la variante existe para que el test compile y el orquestador
+    /// la ejerce con un `ejecutar_gancho` cfg-gateado en `transaction.rs` (dos líneas, sin lógica de
+    /// producción). El mecanismo que protege el material de la transacción viva —GC bajo el lock o
+    /// marca durable de «en curso»— lo elige el implementador.
+    TrasElBackup,
+    /// Dentro de la ventana de la **reversión** (E25-H05): entre la comprobación de
+    /// `receipt.result_revision` que hace la fachada (`App::change_revert`, `lib.rs:1845-1857`) y la
+    /// **primera escritura** de `Workspace::revert_transaction` (el `backup_originals` de su paso 7).
+    ///
+    /// Es el espejo de [`PuntoDeGancho::AntesDePublicar`] para el camino que deshace: la fachada mira
+    /// la revisión **sin el lock** —lo toma `revert_transaction` después (`recovery.rs:898`)—, así que
+    /// en ese hueco otro escritor puede tocar un `.md` afectado y la reversión lo sobrescribe con la
+    /// copia respaldada, en silencio. El gancho del test hace de ese «otro escritor» y deja que la
+    /// reversión **continúe**, que es lo que [`FailPoint`] no sabe hacer.
+    ///
+    /// **Dónde debe dispararlo el implementador**: dentro de `revert_transaction`, en cualquier punto
+    /// entre su entrada y su primera escritura, y **antes** de la re-verificación de la base bajo el
+    /// lock (`reverify_base_revision`, `lib.rs:203`) — que es justamente lo que tiene que cazar la
+    /// edición. Colocarlo *después* de la re-verificación, o después del primer rename, es
+    /// observablemente distinto y los tests de E25-H05 lo distinguen (esperan `WriteConflict` y el
+    /// canónico intacto con la edición ajena encima).
+    ///
+    /// La variante nació como STUB de la fase roja de E25-H05 y **ya la ejerce el orquestador**: el
+    /// `ejecutar_gancho` cfg-gateado vive en `recovery.rs`, entre la recuperación del paso (2) de
+    /// `revert_transaction` y su re-verificación (2b), igual que E25-H01/H03 hicieron en
+    /// `transaction.rs`.
+    AntesDeRestaurar,
+}
+
+/// Gancho armado (el punto que lo dispara y el cierre a ejecutar), o nada.
+type GanchoArmado = Option<(PuntoDeGancho, Box<dyn Fn()>)>;
+
+thread_local! {
+    /// Gancho armado para el hilo actual, o `None`. `thread_local` por el mismo motivo que
+    /// [`ARMADO`]: los tests del repo corren en paralelo dentro del mismo proceso y un estado
+    /// global haría que el gancho de un test interfiriese con la transacción de otro.
+    static GANCHO: RefCell<GanchoArmado> = const { RefCell::new(None) };
+}
+
+/// Arma un gancho para el **hilo actual**. Se dispara **una sola vez** y se desarma solo, de modo
+/// que una transacción posterior del mismo test no vuelva a ejecutarlo. Armar un gancho nuevo
+/// sustituye al anterior.
+pub fn armar_gancho(punto: PuntoDeGancho, gancho: impl Fn() + 'static) {
+    GANCHO.with(|g| *g.borrow_mut() = Some((punto, Box::new(gancho))));
+}
+
+/// Desarma cualquier gancho del hilo actual (higiene: el gancho puede no haberse disparado).
+pub fn desarmar_ganchos() {
+    GANCHO.with(|g| *g.borrow_mut() = None);
+}
+
+/// Ejecuta el gancho armado para `punto`, si lo hay, y **continúa**: a diferencia de
+/// [`disparado`], no aborta nada.
+///
+/// El gancho se extrae del `thread_local` **antes** de invocarlo (y con ello se desarma), así que
+/// un gancho que a su vez entrara en el orquestador no volvería a dispararse ni haría panicar el
+/// `RefCell` por doble préstamo.
+pub(crate) fn ejecutar_gancho(punto: PuntoDeGancho) {
+    let armado = GANCHO.with(|g| {
+        let mut slot = g.borrow_mut();
+        match slot.as_ref() {
+            Some((p, _)) if *p == punto => slot.take().map(|(_, gancho)| gancho),
+            _ => None,
+        }
+    });
+    if let Some(gancho) = armado {
+        gancho();
+    }
 }

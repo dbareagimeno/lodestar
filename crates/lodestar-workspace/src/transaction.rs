@@ -9,6 +9,9 @@
 //! Orden EXACTO de la transacción (cada paso antes del siguiente; los renames del canónico llegan
 //! solo al final, tras dejar todo lo necesario para recuperar/revertir):
 //! 1. `acquire_lock()` — un solo publicador a la vez (RAII, liberado al final por `Drop`, E13-H02).
+//!    Desde E25-H03 ese mismo lock es lo que protege el material de la transacción del GC del plano
+//!    de control mientras dura la ventana `[backup, journal)`, en la que la transacción está viva y
+//!    todavía no aparece ni en `journal/` ni en `receipts/` (ver [`crate::Workspace::gc_receipts`]).
 //! 2. `recover()` si hay una recuperación pendiente — nunca se publica sobre un estado a medio
 //!    recuperar (E13-H06).
 //! 3. `previous = workspace_revision()` — la revisión sobre la que se publica (`previousRevision`).
@@ -24,16 +27,29 @@
 //!    rechaza solo si el resultado **introduce** errores que el canónico no tenía.
 //! 7. `reverify_base_revision` — control optimista bajo el lock (la base no cambió, E13-H02).
 //! 8. `backup_originals` — copias de recuperación **antes** de publicar (E13-H04).
-//! 9. `create_journal` — write-ahead journal `prepared`, fsynced antes del primer rename (E13-H03).
-//! 10. `publish` — renames atómicos por el único escritor + journal `applied` (E13-H05).
-//! 11. **Sellar**: limpiar staging + journal; **conservar** las copias de recuperación (el receipt y
-//!     el `change_revert` de E13-H09 las necesitan).
+//! 9. `create_journal` — write-ahead journal `prepared`, fsynced antes del primer rename (E13-H03), y
+//!    con él el **registro durable del recibo** (E25-H04): las dos revisiones que lo componen ya se
+//!    conocen aquí, y este es el último instante en que escribirlo aún sirve para poder deshacer.
+//! 10. `publish` — renames atómicos por el único escritor + journal `applied` (E13-H05), sobre el
+//!     MISMO canónico del paso (4): si cambió por debajo mientras la transacción se preparaba,
+//!     `WriteConflict` antes del primer rename (E25-H01) — lo publicado es siempre lo respaldado. Ese
+//!     aborto **sella su propia transacción** bajo el mismo lock (journal primero, copias después,
+//!     E25-H02): con cero renames no hay nada que restaurar, así que dejar el journal en disco solo
+//!     serviría para que la siguiente operación pisara la edición externa al «recuperar».
+//! 11. **Sellar**: promover el registro del recibo a recibo definitivo (antes de borrar el journal, para
+//!     que el GC del plano de control nunca vea la transacción sin respaldo), limpiar staging + journal
+//!     y **conservar** las copias de recuperación (el receipt y el `change_revert` de E13-H09 las
+//!     necesitan). Todo el paso es **best-effort** (E25-H04): está al otro lado del punto de no retorno,
+//!     así que un fallo suyo avisa por stderr y no convierte la publicación en un error.
 //! 12. `result = workspace_revision()` — la revisión resultante (`resultRevision`).
 
 use std::collections::BTreeSet;
 
 use lodestar_core::plan;
-use lodestar_core::types::{ChangeSet, ChangeSetId, FileMap, RelPath, WorkspaceRevision};
+use lodestar_core::types::{
+    ChangeReceipt, ChangeSet, ChangeSetId, FileMap, ReceiptId, RelPath, SemanticDiff,
+    WorkspaceRevision,
+};
 
 #[cfg(feature = "test-failpoints")]
 use crate::failpoints::FailPoint;
@@ -91,8 +107,9 @@ impl Workspace {
     /// `recover`): el receipt (E13-H07) y `change_revert` (E13-H09) las necesitan.
     ///
     /// # Errores
-    /// - [`WorkspaceError::WriteConflict`] si el lock ya está tomado (otro publicador) o si la base
-    ///   del plan cambió entre plan y apply (E13-H02).
+    /// - [`WorkspaceError::WriteConflict`] si el lock ya está tomado (otro publicador), si la base
+    ///   del plan cambió entre plan y apply (E13-H02) o si el canónico cambió entre el cálculo del
+    ///   lote y su publicación (E25-H01) — en los tres casos **antes** del primer rename.
     /// - [`WorkspaceError::PermissionDenied`] si algún path afectado cae fuera de `writableRoots` o
     ///   bajo un `referenceRoot` (E11-H04) — comprobado **antes** de tocar el canónico.
     /// - [`WorkspaceError::InvalidResult`] si el resultado hipotético no es conforme (E13-H01).
@@ -102,6 +119,37 @@ impl Workspace {
     pub fn apply_transaction(
         &self,
         change_set: &ChangeSet,
+    ) -> Result<(WorkspaceRevision, WorkspaceRevision, Vec<RelPath>), WorkspaceError> {
+        self.apply_transaction_con_recibo(change_set, None)
+    }
+
+    /// [`Workspace::apply_transaction`] que además **registra durablemente el recibo antes del punto de
+    /// no retorno** (E25-H04).
+    ///
+    /// Es la variante que usa la fachada (`App::change_apply`), y la única diferencia con la de arriba
+    /// es `semantic_diff`: el diff del plan es la única pieza del [`ChangeReceipt`] que esta mecánica no
+    /// puede conocer (nace en `change_plan`, no en el disco), así que quien lo tenga lo presta. Con
+    /// `Some(..)` la transacción compone el recibo completo —`previousRevision` es la revisión del paso
+    /// (3) y `resultRevision` la que estampa el journal, las dos conocidas **antes** del primer
+    /// rename— y lo persiste con el journal (`crate::receipts`, `write_pending_receipt`), promoviéndolo a
+    /// recibo definitivo al sellar. Con `None` no hay recibo: es el contrato de los llamantes que solo
+    /// ejercitan la mecánica de disco.
+    ///
+    /// Por qué eso importa: sin el registro previo, **cualquier** fallo posterior al primer rename
+    /// —incluido un `SIGKILL`— dejaba el canónico cambiado y sin recibo, y una transacción publicada sin
+    /// recibo es irreversible **para siempre** (`change_revert` → `PLAN_EXPIRED`, y un segundo apply del
+    /// mismo plan → `PLAN_STALE` porque la base ya cambió).
+    ///
+    /// # Errores
+    /// Los mismos que [`Workspace::apply_transaction`], más un [`WorkspaceError::Io`] si el registro del
+    /// recibo no se puede escribir — que ocurre **antes** del primer rename, así que no publica nada.
+    /// A partir de la publicación ningún fallo se propaga: el cierre (promoción del recibo, limpieza del
+    /// staging, borrado del journal) es best-effort con aviso por stderr, porque un `Err` ahí convertiría
+    /// una publicación consumada en un fallo aparente.
+    pub fn apply_transaction_con_recibo(
+        &self,
+        change_set: &ChangeSet,
+        semantic_diff: Option<&SemanticDiff>,
     ) -> Result<(WorkspaceRevision, WorkspaceRevision, Vec<RelPath>), WorkspaceError> {
         // (1) Lock exclusivo de publicación (RAII: liberado al final por `Drop`, incluso en panic).
         let _lock = self.acquire_lock()?;
@@ -153,35 +201,138 @@ impl Workspace {
 
         // (8) Copias de recuperación de los originales afectados, ANTES de publicar (E13-H04). Se
         //     conservan al sellar (para el receipt y el revert de H09).
+        //     Desde aquí y hasta (9) esta transacción tiene copias y NO tiene ni journal ni recibo,
+        //     así que el criterio de «vivos» del GC del plano de control (`journal/` ∪ `receipts/`)
+        //     no la ve. Lo que la protege es el lock que sostiene este `_lock`: `gc_receipts` lo
+        //     adquiere también (E25-H03) y, al no conseguirlo, no barre.
         self.backup_originals(&txn_id, &affected)?;
+
+        // Seam de test (E25-H03), dentro de la ventana `[backup, journal)`: la transacción tiene
+        // copias y todavía no tiene ni journal ni recibo, así que el criterio de «vivos» del GC del
+        // plano de control no la ve. Un gancho del test puede congelarla aquí —viva— mientras otro
+        // handle barre, que es lo que `failpoint!` (que solo aborta) no sabe hacer. Sin
+        // `--features test-failpoints` no genera ni una instrucción.
+        #[cfg(feature = "test-failpoints")]
+        crate::failpoints::ejecutar_gancho(crate::failpoints::PuntoDeGancho::TrasElBackup);
 
         failpoint!(FailPoint::TrasBackupSinJournal);
 
         // (9) Write-ahead journal `prepared`, fsynced antes del primer rename (E13-H03).
         let mut journal = self.create_journal(&txn_id, &affected, &previous, &result_rev)?;
 
+        // (9b) Registro durable del RECIBO, con el journal y antes del primer rename (E25-H04). A
+        //      partir del rename siguiente el disco canónico ya está cambiado, así que este es el
+        //      último instante en el que escribir el recibo aún sirve de algo: un `SIGKILL` a mitad de
+        //      la publicación dejaba, hasta aquí, un cambio consumado que NADIE podía deshacer.
+        //      Va DESPUÉS del journal a propósito: el registro es efectivo solo mientras su journal
+        //      declare `applied`, así que su vida está contenida en la del journal y ni el GC del plano
+        //      de control ni la recuperación necesitan una tercera señal que caducar.
+        if let Some(diff) = semantic_diff {
+            self.write_pending_receipt(&ChangeReceipt {
+                id: ReceiptId(txn_id.clone()),
+                change_set_id: change_set.id.clone(),
+                previous_revision: previous.clone(),
+                result_revision: result_rev.clone(),
+                changed_paths: affected.clone(),
+                semantic_diff: diff.clone(),
+            })?;
+        }
+
         failpoint!(FailPoint::TrasJournalPrepared);
 
+        // Seam de test (E25-H01), último instante de la ventana `[T1, T3)`: con las copias y el
+        // journal ya en disco y sin un solo rename hecho, un gancho del test puede simular aquí la
+        // edición externa de otro proceso y dejar que la transacción CONTINÚE — que es lo que
+        // `failpoint!` no sabe hacer. Sin `--features test-failpoints` no genera ni una instrucción.
+        #[cfg(feature = "test-failpoints")]
+        crate::failpoints::ejecutar_gancho(crate::failpoints::PuntoDeGancho::AntesDePublicar);
+
         // (10) Publica el resultado por el único escritor (renames atómicos + journal `applied`,
-        //      E13-H05): el mismo `result_files` que se materializó y validó en staging.
-        let result = self.publish_result(&result_files, &mut journal)?;
+        //      E13-H05): el mismo `result_files` que se materializó y validó en staging, sobre el
+        //      MISMO canónico de T1 con el que se computaron el conjunto afectado, las copias y el
+        //      journal. Si el canónico cambió por debajo, `publish_result` aborta con
+        //      `WriteConflict` antes del primer rename (E25-H01).
+        let result = match self.publish_result(&canonical, &result_files, &mut journal) {
+            Ok(result) => result,
+            // (10b) Sellado del aborto de ventana (E25-H02, enmienda del defecto 5). El ÚNICO
+            //       `WriteConflict` que `publish_result` puede devolver es el de la divergencia de la
+            //       ventana `[T1, T3)`, y lo devuelve **antes** de entrar en el bucle de renames: por
+            //       control de flujo sabemos que el canónico no se ha movido ni un byte, así que no
+            //       hay nada que restaurar y sellar aquí es exacto. Se sella bajo el MISMO lock, antes
+            //       de devolver el error, porque si el journal `prepared` y sus copias de T1
+            //       sobrevivieran, la recuperación de la siguiente operación las escribiría encima de
+            //       la edición externa que este aborto existe para no pisar.
+            //
+            //       Deliberadamente NO se generaliza a «`recover()` no restaura un journal `prepared`
+            //       con cero `applied`»: `mark_applied` re-persiste el journal DESPUÉS de cada rename,
+            //       así que ese estado describe también la caída entre el primer rename y su
+            //       anotación, y sellarlo daría por buena una publicación parcial. La decisión la toma
+            //       el camino que SABE que no publicó.
+            Err(WorkspaceError::WriteConflict(motivo)) => {
+                let journal_path = journal.path().to_path_buf();
+                self.seal_window_abort(&txn_id, &journal_path)?;
+                return Err(WorkspaceError::WriteConflict(motivo));
+            }
+            Err(e) => return Err(e),
+        };
 
         failpoint!(FailPoint::TrasPublicarSinSellar);
 
-        // (11) Sella la transacción: limpia el staging y el journal (levanta el gate de recuperación)
-        //      pero CONSERVA las copias de recuperación (el receipt y `change_revert` las usan). El
-        //      journal ya está `applied` en disco; borrarlo es el sellado `done` efectivo (tras esto
-        //      `recovery_pending()` vuelve a `false`).
+        // (11) Sella la transacción: promueve el recibo, limpia el staging y el journal (levanta el gate
+        //      de recuperación) pero CONSERVA las copias de recuperación (el receipt y `change_revert`
+        //      las usan). El journal ya está `applied` en disco; borrarlo es el sellado `done` efectivo
+        //      (tras esto `recovery_pending()` vuelve a `false`).
         // A partir de aquí la limpieza del staging es de este camino, no del `Drop` (E24-H05): se
         // borra DESPUÉS de publicar y en el mismo orden que el sellado del journal.
+        //
+        // EL BLOQUE ENTERO ES BEST-EFFORT (E25-H04). Está al otro lado del punto de no retorno: el
+        // canónico ya cambió, así que un `?` aquí devolvería un error por algo que SÍ se aplicó —el
+        // agente concluiría que no se aplicó nada y actuaría sobre una premisa falsa—. Se avisa por
+        // stderr y se sigue, con el mismo criterio que ya usaban el GC (`receipts.rs`) y el `.gitignore`
+        // gestionado (`gitignore.rs`). Lo que NO se degrada son los `failpoint!`: modelan un proceso que
+        // muere, y morirse sí aborta.
         staging.keep();
         let journal_path = journal.path().to_path_buf();
         failpoint!(FailPoint::AntesDeSellar);
+
+        // (11a) El recibo, ANTES de borrar el journal: así la transacción pasa de estar respaldada por
+        //       `journal/` a estarlo por `receipts/` sin un solo instante en el que el GC del plano de
+        //       control (cuyo criterio de vivos es `journal/ ∪ receipts/`) la vea como basura y le
+        //       purgue las copias con las que se revierte. Ese hueco `[sellado, recibo)` existía
+        //       mientras el recibo lo escribía la fachada, ya soltado el lock.
+        let recibo_a_salvo = match self.promote_pending_receipt(&txn_id) {
+            Ok(()) => true,
+            Err(e) => {
+                eprintln!(
+                    "lodestar: aviso: no se pudo promover el recibo de la transacción {txn_id} ({e}): \
+                     se conserva su journal para que la recuperación lo reintente"
+                );
+                false
+            }
+        };
+
+        // (11b) Staging.
         if staging_path.exists() {
-            std::fs::remove_dir_all(&staging_path)?;
+            if let Err(e) = std::fs::remove_dir_all(&staging_path) {
+                eprintln!(
+                    "lodestar: aviso: no se pudo limpiar el staging {} de la transacción {txn_id} \
+                     ({e}): el cambio está publicado; el GC del plano de control lo recogerá",
+                    staging_path.display()
+                );
+            }
         }
-        if journal_path.exists() {
-            std::fs::remove_file(&journal_path)?;
+
+        // (11c) El journal, y solo si el recibo quedó a salvo: si no, dejarlo en disco es lo que hace
+        //       que la vía COMPLETAR de la recuperación vuelva a intentar la promoción en la siguiente
+        //       operación en vez de perder el recibo de algo ya publicado.
+        if recibo_a_salvo && journal_path.exists() {
+            if let Err(e) = std::fs::remove_file(&journal_path) {
+                eprintln!(
+                    "lodestar: aviso: no se pudo borrar el journal {} de la transacción {txn_id} \
+                     ({e}): el cambio está publicado y la recuperación lo completará al reabrir",
+                    journal_path.display()
+                );
+            }
         }
 
         // (12) Revisión resultante + conjunto de paths cambiados.

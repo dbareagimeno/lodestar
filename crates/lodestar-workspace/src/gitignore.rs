@@ -29,6 +29,14 @@ const MANAGED_ENTRIES: [&str; 2] = [".lodestar/index.db", ".lodestar/runtime/"];
 /// - **Adopción**: si el fichero ignoraba `.lodestar/` entero (estilo viejo, el que escribía
 ///   `Vcs::init`), esa línea se sustituye por las entradas nuevas, de forma que
 ///   `.lodestar/config.yaml`/`templates/` pasan a quedar versionados.
+/// - **Respetuoso con el fin de línea** (E25-H06): se reemite con el estilo **dominante** del
+///   fichero — un `.gitignore` en CRLF sigue en CRLF, incluidas las líneas nuevas del bloque
+///   gestionado. Hasta v0.3.1 se reconstruía con `str::lines`, que se traga el `\r`, y el usuario se
+///   encontraba un diff espurio de fichero entero en un fichero **versionado**.
+/// - **Atómico** (E25-H06): se publica por el mismo protocolo temp+fsync+rename que los `.md`
+///   ([`crate::io::write_bytes_atomic`]) en vez de truncar el fichero vivo con `std::fs::write`. Es
+///   el único fichero versionado del usuario que el motor toca, y se toca en CADA escritura: un
+///   lector concurrente (`git status`) o un crash no pueden verlo a medias.
 ///
 /// Best-effort: un fallo de escritura (p. ej. checkout de solo lectura) se reporta por stderr y
 /// no aborta la operación que lo invocó — mismo criterio que el `ensure_cache_ignored` al que
@@ -44,30 +52,58 @@ pub(crate) fn ensure_gitignore(root: &Path) {
         return; // ya gestionado: nada que hacer (garantiza idempotencia byte-a-byte).
     }
 
+    let eol = fin_de_linea_dominante(&current);
+
     let is_old_style = |l: &str| {
         matches!(
             l.trim(),
             ".lodestar/" | "/.lodestar/" | ".lodestar" | "/.lodestar"
         )
     };
+    // `str::lines` ya descarta el `\r` final de cada línea, así que reconstruir con `eol` reemite
+    // el estilo del fichero en TODAS las líneas (las del usuario y las nuevas).
     let mut lines: Vec<&str> = current.lines().filter(|l| !is_old_style(l)).collect();
     while matches!(lines.last(), Some(l) if l.trim().is_empty()) {
         lines.pop();
     }
 
-    let mut out = lines.join("\n");
+    let mut out = lines.join(eol);
     if !out.is_empty() {
-        out.push_str("\n\n");
+        out.push_str(eol);
+        out.push_str(eol);
     }
     out.push_str(MANAGED_COMMENT);
-    out.push('\n');
+    out.push_str(eol);
     for entry in MANAGED_ENTRIES {
         out.push_str(entry);
-        out.push('\n');
+        out.push_str(eol);
     }
 
-    if let Err(e) = std::fs::write(&path, out) {
+    if let Err(e) = crate::io::write_bytes_atomic(&path, out.as_bytes()) {
         eprintln!("lodestar: aviso: no se pudo ajustar .gitignore: {e}");
+        return;
+    }
+    // Persiste el rename. Best-effort como el resto de la función: el `.gitignore` es una comodidad
+    // para el repo del usuario, no conocimiento canónico, y su fallo no puede tumbar la escritura
+    // que lo invocó.
+    if let Err(e) = crate::io::sync_dir(root) {
+        eprintln!("lodestar: aviso: no se pudo persistir el ajuste de .gitignore: {e}");
+    }
+}
+
+/// Estilo de fin de línea **dominante** del fichero: `"\r\n"` si la mayoría de sus saltos son CRLF,
+/// `"\n"` en cualquier otro caso (incluido el fichero vacío o sin saltos) — E25-H06.
+///
+/// Se decide por mayoría y no por «hay algún CRLF» para que un fichero mixto no cambie de estilo por
+/// una línea suelta, y para que preservar CRLF no se convierta en imponerlo: quien trabaja en Unix
+/// no puede llevarse el diff espurio que este arreglo le quita a quien trabaja en Windows.
+fn fin_de_linea_dominante(contenido: &str) -> &'static str {
+    let saltos = contenido.matches('\n').count();
+    let crlf = contenido.matches("\r\n").count();
+    if crlf * 2 > saltos {
+        "\r\n"
+    } else {
+        "\n"
     }
 }
 
@@ -94,6 +130,25 @@ mod tests {
         ensure_gitignore(dir.path());
         let segunda = std::fs::read_to_string(dir.path().join(".gitignore")).unwrap();
         assert_eq!(primera, segunda);
+    }
+
+    /// E25-H06: el estilo de fin de línea se decide por **mayoría**, no por «hay algún CRLF». Un
+    /// fichero mixto con un CRLF suelto sigue siendo un fichero LF, y viceversa.
+    #[test]
+    fn el_fin_de_linea_lo_decide_la_mayoria() {
+        assert_eq!(fin_de_linea_dominante(""), "\n", "fichero vacío → LF");
+        assert_eq!(fin_de_linea_dominante("a\nb\n"), "\n");
+        assert_eq!(fin_de_linea_dominante("a\r\nb\r\n"), "\r\n");
+        assert_eq!(
+            fin_de_linea_dominante("a\r\nb\nc\nd\n"),
+            "\n",
+            "un CRLF suelto en un fichero LF no cambia el estilo"
+        );
+        assert_eq!(
+            fin_de_linea_dominante("a\nb\r\nc\r\nd\r\n"),
+            "\r\n",
+            "un LF suelto en un fichero CRLF tampoco"
+        );
     }
 
     #[test]

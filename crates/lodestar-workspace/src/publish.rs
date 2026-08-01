@@ -7,6 +7,12 @@
 //! (E13-H05) se sustituye el canónico y se marca el journal a medida que cada rename se completa.
 //! La recuperación tras una caída a mitad es E13-H06; el receipt de cierre, E13-H07.
 //!
+//! Lo publicado es lo respaldado (E25-H01): el lote que se sustituye es **exactamente** el que pasó
+//! por `assert_writable`, por las copias de recuperación y por el journal. Si el canónico cambió
+//! entre el cálculo del lote y el primer rename —otro proceso, el usuario, un `.md` aparecido bajo
+//! un `referenceRoot`—, la publicación aborta con `WriteConflict` sin escribir nada, en lugar de
+//! recomputar la diferencia contra un estado que nadie respaldó.
+//!
 //! Único escritor (invariante #5): la publicación **solo** escribe el canónico a través de
 //! `io::write_atomic` (creados/modificados) e `io::delete` (borrados); no hay ningún otro
 //! camino de escritura del `.md` en este flujo. Si el watcher está activo, absorbe el lote
@@ -22,6 +28,40 @@ use crate::error::WorkspaceError;
 use crate::failpoints::FailPoint;
 use crate::journal::Journal;
 use crate::{io, Workspace};
+
+/// Describe, para el mensaje de error de un conflicto de ventana (E25-H01), los paths en los que
+/// dos estados del canónico difieren: creados, modificados o desaparecidos. Se citan como mucho
+/// [`MAX_PATHS_EN_CONFLICTO`] (el resto se resume como «y N más»), para que el mensaje siga siendo
+/// legible en un workspace grande.
+fn paths_divergentes(antes: &FileMap, ahora: &FileMap) -> String {
+    let mut divergentes: BTreeSet<&RelPath> = BTreeSet::new();
+    for (rel, content) in ahora {
+        if antes.get(rel) != Some(content) {
+            divergentes.insert(rel);
+        }
+    }
+    for rel in antes.keys() {
+        if !ahora.contains_key(rel) {
+            divergentes.insert(rel);
+        }
+    }
+
+    let total = divergentes.len();
+    let citados: Vec<&str> = divergentes
+        .into_iter()
+        .take(MAX_PATHS_EN_CONFLICTO)
+        .map(RelPath::as_str)
+        .collect();
+    let lista = citados.join(", ");
+    if total > citados.len() {
+        format!("{lista} (y {} más)", total - citados.len())
+    } else {
+        lista
+    }
+}
+
+/// Cuántos paths en conflicto se citan como mucho en el mensaje de [`WorkspaceError::WriteConflict`].
+const MAX_PATHS_EN_CONFLICTO: usize = 5;
 
 impl Workspace {
     /// Publica el resultado de `change_set` sobre el conocimiento canónico por el **único escritor**
@@ -47,6 +87,8 @@ impl Workspace {
     /// # Errores
     /// - [`WorkspaceError::Core`] si `change_set` trae una operación no terminal (violación del
     ///   pipeline de normalización).
+    /// - [`WorkspaceError::WriteConflict`] si el canónico cambió entre la lectura de partida y el
+    ///   primer rename (E25-H01).
     /// - [`WorkspaceError::Io`] si falla la lectura del canónico, alguna escritura/borrado atómico o
     ///   la re-persistencia del journal.
     pub fn publish(
@@ -54,10 +96,12 @@ impl Workspace {
         change_set: &ChangeSet,
         journal: &mut Journal,
     ) -> Result<WorkspaceRevision, WorkspaceError> {
-        // Estado de partida y resultado previsto por el plan (misma lógica que el staging).
+        // Estado de partida y resultado previsto por el plan (misma lógica que el staging). El
+        // canónico se lee **una sola vez** y se le pasa a `publish_result`, que lo usa como el
+        // estado de partida sobre el que se computó el resultado (E25-H01).
         let canonical = self.discover_files()?;
         let result = plan::apply_normalized_ops(&canonical, &change_set.operations)?;
-        self.publish_result(&result, journal)
+        self.publish_result(&canonical, &result, journal)
     }
 
     /// Publica un `FileMap` resultado **ya computado** sobre el canónico por el **único escritor**.
@@ -70,20 +114,35 @@ impl Workspace {
     /// (`ARCHITECTURE.md §20.13`), pero la escisión se conserva porque la propiedad de arriba
     /// —validar y publicar el mismo mapa— vale por sí sola.
     ///
-    /// Determina el conjunto de cambios contra el canónico: paths **creados/modificados** (el
-    /// resultado deja un contenido que difiere del canónico) y **borrados** (el canónico los tenía y
-    /// el resultado ya no). En **orden determinista por [`RelPath`]** aplica cada cambio con
-    /// `io::write_atomic` (temp+fsync+rename) o `io::delete`, marcando el journal tras cada
-    /// sustitución; al terminar transiciona el journal a `applied`. Devuelve la
-    /// `resultWorkspaceRevision` recalculada del canónico ya publicado.
+    /// `canonical` es el estado de partida **con el que se computó `result`** (el `FileMap` leído en
+    /// T1 por el orquestador, el mismo sobre el que se ejerció `assert_writable`, el backup y el
+    /// journal). Antes del primer rename se relee el canónico y se **comparan ambos**: si difieren
+    /// en cualquier path —una edición externa, un `.md` nuevo, incluso bajo un `referenceRoot`—, la
+    /// publicación aborta con [`WorkspaceError::WriteConflict`] sin haber tocado nada (E25-H01). El
+    /// conjunto respaldado y anotado en el journal es la **única** escritura legítima: antes, el
+    /// conjunto afectado se recomputaba contra el canónico de T3, de modo que cualquier fichero
+    /// aparecido en la ventana se borraba sin guard, sin copia de recuperación y sin entrada de
+    /// journal.
+    ///
+    /// El conjunto de cambios se deriva de `canonical` (el de T1), no del relectura: paths
+    /// **creados/modificados** (el resultado deja un contenido que difiere del canónico) y
+    /// **borrados** (el canónico los tenía y el resultado ya no) — exactamente el conjunto que el
+    /// journal declara, porque el orquestador lo computó del mismo par. En **orden determinista por
+    /// [`RelPath`]** aplica cada cambio con `io::write_atomic` (temp+fsync+rename) o `io::delete`,
+    /// marcando el journal tras cada sustitución; al terminar transiciona el journal a `applied`.
+    /// Devuelve la `resultWorkspaceRevision` recalculada del canónico ya publicado.
     ///
     /// # Errores
     /// - [`WorkspaceError::WorkspaceRecoveryRequired`] si existe un journal no-`done` de OTRA
     ///   transacción sin recuperar (no se publica sobre un estado a medio recuperar).
+    /// - [`WorkspaceError::WriteConflict`] si el canónico cambió entre T1 y el primer rename
+    ///   (E25-H01). Es **terminal** para esa transacción: el modelo es fail-fast (`§19.5`), no hay
+    ///   reintento; el agente replanifica.
     /// - [`WorkspaceError::Io`] si falla la lectura del canónico, alguna escritura/borrado atómico o
     ///   la re-persistencia del journal.
     pub(crate) fn publish_result(
         &self,
+        canonical: &FileMap,
         result: &FileMap,
         journal: &mut Journal,
     ) -> Result<WorkspaceRevision, WorkspaceError> {
@@ -101,7 +160,22 @@ impl Workspace {
             ));
         }
 
-        let canonical = self.discover_files()?;
+        // Control de la ventana `[T1, T3)` (E25-H01): el canónico que se sustituye tiene que ser el
+        // mismo con el que se computaron el resultado, el conjunto afectado, las copias de
+        // recuperación y el journal. Si algo cambió en esa ventana —otro proceso, el usuario, un
+        // `.md` nuevo bajo un `referenceRoot` que el control optimista no puede ver porque
+        // `workspace_revision` excluye lo que queda fuera de `writableRoots`—, se aborta ANTES del
+        // primer rename: publicar sobre un canónico distinto escribiría fuera de lo respaldado.
+        let ahora = self.discover_files()?;
+        if ahora != *canonical {
+            let divergentes = paths_divergentes(canonical, &ahora);
+            return Err(WorkspaceError::WriteConflict(format!(
+                "el conocimiento canónico cambió mientras la transacción se preparaba \
+                 (entre el cálculo del lote y su publicación): {divergentes}. No se publica nada: \
+                 el conjunto respaldado y anotado en el journal ya no describe el estado real; \
+                 vuelve a planificar sobre el conocimiento actual"
+            )));
+        }
 
         // Conjunto de paths afectados, en orden determinista por `RelPath` (BTreeSet).
         //

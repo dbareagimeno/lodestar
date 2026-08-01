@@ -181,7 +181,7 @@ fn plan_caducado() {
 
     let resultado = app.load_plan(&plan.change_set_id);
     assert!(
-        matches!(resultado, Err(ErrorCode::PlanExpired)),
+        matches!(&resultado, Err(e) if e.code == ErrorCode::PlanExpired),
         "cargar un plan con `expiresAt` en el pasado debe dar Err(PlanExpired), dio {resultado:?}",
     );
 }

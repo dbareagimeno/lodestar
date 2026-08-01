@@ -1891,6 +1891,18 @@ mod seam_real {
     /// estado —el único que el código real produce entre esos dos pasos— no lo cubría nadie. Al
     /// reabrir, `recovery_pending()` es `false` (solo mira journals): hay que comprobar que el
     /// canónico está intacto, porque ningún rename ha ocurrido todavía.
+    ///
+    /// **E25-H03 — por qué el GC puede barrer aquí**: la razón es de **PROPIEDAD**, no de ausencia de
+    /// journal. La transacción de este escenario **terminó** (el failpoint la abortó y su lock se
+    /// soltó por RAII), así que su material ya no tiene dueño y es basura. La ausencia de journal por
+    /// sí sola NO autoriza a barrer: entre `backup_originals` y `create_journal` una transacción
+    /// **viva** —de este proceso o de otro— está exactamente en este mismo estado durable, y
+    /// destruirle las copias la deja publicando sin plano de recuperación. Esa dimensión, la de
+    /// vida, la fijan `gc_y_transacciones_vivas::gc_no_destruye_una_transaccion_en_curso_de_otro_proceso`
+    /// (el material de una transacción EN CURSO sobrevive al GC de otro handle) y
+    /// `gc_y_transacciones_vivas::la_marca_no_sobrevive_a_la_transaccion` (la señal de propiedad muere
+    /// con la transacción, también cuando esta acaba en `Err` — que es lo que mantiene verde el
+    /// barrido de aquí abajo sin tocar ni una aserción de este test).
     #[test]
     fn caida_entre_backup_y_journal() {
         let (dir, ws, original) = tres_documentos();
@@ -1915,7 +1927,11 @@ mod seam_real {
              movido ni un byte"
         );
 
-        // El árbol de recuperación queda huérfano (no hay journal ni recibo): lo recoge el GC.
+        // El árbol de recuperación queda SIN DUEÑO —la transacción abortó y soltó su lock, así que
+        // nadie va a publicar con esas copias— y por eso lo recoge el GC (E25-H03: el criterio es de
+        // propiedad; que no haya journal ni recibo describe el estado, no lo autoriza a barrer — una
+        // transacción viva en la ventana `[backup, journal)` presenta ese mismo estado y su material
+        // es intocable).
         ws2.gc_receipts().expect("el GC debe correr");
         let recovery = dir
             .path()
@@ -1944,5 +1960,2705 @@ mod seam_real {
             final_.values().all(|c| c.contains("cuerpo NUEVO")),
             "el seam no puede alterar el camino normal: {final_:?}"
         );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// E25-H01 — La publicación no escribe fuera de lo que respaldó
+// (`requirements/epica-25-endurecimiento-escritura.md`, bloque A). Fase ROJA.
+//
+// EL DEFECTO
+//
+// `apply_transaction` computa el canónico, el resultado y el conjunto AFECTADO en **T1**
+// (`src/transaction.rs:127-129`) y sobre ESE conjunto ejerce `assert_writable` (:133), el backup
+// (:156) y el journal (:161). Pero `publish_result` **vuelve a leer el canónico** en **T3**
+// (`src/publish.rs:104`) y **recomputa** `affected` contra el `result` de T1 (`publish.rs:114-124`),
+// escribiendo o borrando todo lo que difiera (`publish.rs:127-134`) — sin `assert_writable`, sin
+// copia de recuperación y sin entrada de journal. Cualquier cosa que aparezca o cambie en la
+// ventana `[T1, T3)` cae dentro de esa diferencia recomputada.
+//
+// EL CONTRATO QUE FIJAN ESTOS TESTS
+//
+// El conjunto que la publicación sustituye es **exactamente** el que pasó por el guard, por el
+// backup y por el journal — o la transacción aborta con `WRITE_CONFLICT` **antes del primer
+// rename**. Un `WRITE_CONFLICT` sigue siendo terminal (modelo fail-fast, `§19.5`): no hay reintento.
+//
+// EL SEAM QUE HACE FALTA (lo añade el implementador; aquí solo se USA)
+//
+// El `failpoint!` de `src/lib.rs:38` solo sabe **abortar**, así que no sirve para inyectar una
+// edición externa: hace falta un punto que ejecute un gancho del test y **continúe**. API mínima
+// esperada, en `crates/lodestar-workspace/src/failpoints.rs`, bajo `#[cfg(feature =
+// "test-failpoints")]` (en compilación normal no genera ni una instrucción):
+//
+// ```rust
+// /// Punto del orquestador donde se ejecuta un gancho del test y la transacción CONTINÚA.
+// #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// pub enum PuntoDeGancho {
+//     /// Dentro de la ventana `[T1, T3)`, en su último instante: tras `create_journal` e
+//     /// INMEDIATAMENTE ANTES de `publish_result` (`transaction.rs:167`). Es donde el defecto vive:
+//     /// copias y journal ya cubren el conjunto de T1, y el bucle de publicación aún no ha
+//     /// sustituido nada.
+//     AntesDePublicar,
+// }
+//
+// /// Arma un gancho para el HILO ACTUAL (`thread_local`, igual que `failpoints::armar`: los tests
+// /// corren en paralelo en el mismo proceso). Se dispara **una sola vez** y se desarma solo.
+// pub fn armar_gancho(punto: PuntoDeGancho, gancho: impl Fn() + 'static);
+//
+// /// Desarma cualquier gancho del hilo actual (higiene: el gancho puede no haberse disparado).
+// pub fn desarmar_ganchos();
+// ```
+//
+// El gancho vive en el orquestador REAL (`apply_transaction`), no en una reconstrucción del flujo
+// (lección de E24-H13).
+//
+// ROJO ESPERADO HOY
+// - Los tres tests del módulo `ventana_de_publicacion`: **no compilan** (`armar_gancho`,
+//   `desarmar_ganchos` y `PuntoDeGancho` no existen). Es rojo válido: el error nombra exactamente
+//   los símbolos del seam que la historia encarga.
+// - `apply_sin_interferencia_publica_igual` y `publicado_igual_a_respaldado` son los **controles
+//   anti-vacuos**: no usan el gancho, están FUERA del gate de la feature y deben pasar **ya en
+//   main** (el arreglo no puede consistir en abortar más a menudo ni en publicar menos).
+// ---------------------------------------------------------------------------
+
+/// Abre un workspace temporal con un documento por nombre (`<n>.md`, cuerpo «cuerpo original»).
+fn siembra_documentos(root: &Path, nombres: &[&str]) -> Workspace {
+    let ws = Workspace::open(root).unwrap();
+    for n in nombres {
+        ws.create_document(
+            &RelPath::new(&format!("{n}.md")).unwrap(),
+            "Nota",
+            Some(n),
+            &format!("# {n}\n\ncuerpo original\n"),
+            false,
+        )
+        .unwrap();
+    }
+    ws
+}
+
+/// Change set que sustituye el cuerpo de cada `<n>.md`, con la `base_revision` ACTUAL del
+/// workspace (si no, la transacción moriría en el control optimista del paso 7 y no llegaría a la
+/// ventana que se está probando).
+fn cs_modifica(ws: &Workspace, id: &str, paths: &[&str]) -> ChangeSet {
+    let mut cs = change_set(
+        id,
+        paths
+            .iter()
+            .map(|p| NormalizedOperation::ReplaceBody {
+                path: RelPath::new(p).unwrap(),
+                body: format!("# {p}\n\ncuerpo NUEVO\n"),
+            })
+            .collect(),
+    );
+    cs.base_revision = ws.workspace_revision().unwrap();
+    cs
+}
+
+/// Un `FileMap` visto como `ruta -> contenido` (mismas claves que [`canonical_md`]).
+fn como_md(files: &FileMap) -> BTreeMap<String, String> {
+    files
+        .iter()
+        .map(|(rel, c)| (rel.as_str().to_string(), c.clone()))
+        .collect()
+}
+
+/// Conjunto de rutas que difieren entre dos estados del canónico: creadas/modificadas + borradas.
+/// Es la definición observable de «lo publicado» (lo que el disco sustituyó de verdad).
+fn diferencia(
+    antes: &BTreeMap<String, String>,
+    despues: &BTreeMap<String, String>,
+) -> std::collections::BTreeSet<String> {
+    let mut out = std::collections::BTreeSet::new();
+    for (rel, contenido) in despues {
+        if antes.get(rel) != Some(contenido) {
+            out.insert(rel.clone());
+        }
+    }
+    for rel in antes.keys() {
+        if !despues.contains_key(rel) {
+            out.insert(rel.clone());
+        }
+    }
+    out
+}
+
+/// Conjunto de rutas **respaldadas** por una transacción: las copias byte-a-byte que hay bajo
+/// `.lodestar/runtime/recovery/<txnId>/` MÁS las que el manifiesto `.absent` marcó «no existía»
+/// (afectadas que se iban a crear, sin original que copiar).
+fn respaldado_en_recovery(root: &Path, txn_id: &str) -> std::collections::BTreeSet<String> {
+    let base = root
+        .join(".lodestar")
+        .join("runtime")
+        .join("recovery")
+        .join(txn_id);
+    let mut out = std::collections::BTreeSet::new();
+    fn walk(dir: &Path, base: &Path, out: &mut std::collections::BTreeSet<String>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, base, out);
+                continue;
+            }
+            let rel = path
+                .strip_prefix(base)
+                .unwrap()
+                .to_string_lossy()
+                .to_string();
+            if rel == ".absent" {
+                for linea in std::fs::read_to_string(&path).unwrap_or_default().lines() {
+                    let l = linea.trim();
+                    if !l.is_empty() {
+                        out.insert(l.to_string());
+                    }
+                }
+            } else {
+                out.insert(rel);
+            }
+        }
+    }
+    walk(&base, &base, &mut out);
+    out
+}
+
+/// **E25-H01** · Criterio `apply_sin_interferencia_publica_igual` (**control anti-vacuo**, pasa ya
+/// en main) — **Dado** un apply SIN interferencia, **Cuando** se aplica, **Entonces** publica
+/// exactamente los mismos paths y contenidos que hoy, con el mismo `resultWorkspaceRevision` y el
+/// mismo `changedPaths`.
+///
+/// El oráculo no es un golden: se computa aparte con la única lógica del core
+/// (`plan::apply_normalized_ops` + `types::workspace_revision`), que es lo que la transacción tiene
+/// que reproducir. El change set mezcla las tres formas de afectación —modificar, crear y borrar—
+/// para que el control cubra las tres ramas del bucle de publicación.
+#[test]
+fn apply_sin_interferencia_publica_igual() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws = siembra_documentos(dir.path(), &["uno", "dos", "tres"]);
+
+    let canonico_antes = canonical_filemap(dir.path());
+    let mut cs = change_set(
+        "e25-h01-sin-interferencia",
+        vec![
+            NormalizedOperation::ReplaceBody {
+                path: RelPath::new("uno.md").unwrap(),
+                body: "# uno\n\ncuerpo NUEVO\n".to_string(),
+            },
+            create_conforme("cuatro.md", "Nota", "cuatro"),
+            NormalizedOperation::Delete {
+                path: RelPath::new("tres.md").unwrap(),
+                inbound_links_policy: lodestar_core::types::InboundLinksPolicy::Reject,
+            },
+        ],
+    );
+    let previous_esperada = ws.workspace_revision().unwrap();
+    cs.base_revision = previous_esperada.clone();
+
+    // Oráculo independiente: el resultado que el core prevé, su revisión y su conjunto afectado.
+    let esperado = plan::apply_normalized_ops(&canonico_antes, &cs.operations)
+        .expect("prever el resultado del plan");
+    let esperado_md = como_md(&esperado);
+    let antes_md = como_md(&canonico_antes);
+    let afectados_esperados = diferencia(&antes_md, &esperado_md);
+    assert_eq!(
+        afectados_esperados.len(),
+        3,
+        "precondición: el change set debe afectar a 3 paths (modificado, creado y borrado)"
+    );
+    let revision_esperada = lodestar_core::types::workspace_revision(&esperado, &[]);
+
+    let (previous, result, changed) = ws
+        .apply_transaction(&cs)
+        .expect("sin interferencia, la transacción debe publicar");
+
+    assert_eq!(
+        previous, previous_esperada,
+        "la `previousRevision` debe ser la revisión sobre la que se publicó"
+    );
+    assert_eq!(
+        result, revision_esperada,
+        "la `resultWorkspaceRevision` publicada debe ser la que el core prevé para el resultado"
+    );
+    let changed_set: std::collections::BTreeSet<String> = changed
+        .iter()
+        .map(|p| p.as_str().to_string())
+        .collect::<std::collections::BTreeSet<String>>();
+    assert_eq!(
+        changed_set, afectados_esperados,
+        "`changedPaths` debe ser exactamente el conjunto afectado por el plan"
+    );
+    assert_eq!(
+        canonical_md(dir.path()),
+        esperado_md,
+        "el canónico publicado debe ser, path a path y byte a byte, el resultado del plan"
+    );
+}
+
+/// **E25-H01** · Criterio `publicado_igual_a_respaldado` (propiedad; **control anti-vacuo** en su
+/// mitad de éxito) — **Dado** el conjunto publicado y el conjunto respaldado, **Cuando** termina
+/// cualquier apply con éxito, **Entonces** son idénticos.
+///
+/// «Publicado» se mide en el disco (diferencia real entre el canónico de antes y el de después), no
+/// en lo que la transacción dice haber cambiado: si el bucle de publicación tocara un path que
+/// nadie respaldó, la igualdad se rompería aunque `changedPaths` siguiera pareciendo correcto. Se
+/// recorren las mismas formas de change set que el arnés de recuperación (modificar, crear, borrar,
+/// mover) más una mixta.
+#[test]
+fn publicado_igual_a_respaldado() {
+    fn cs_mod(ws: &Workspace, id: &str) -> ChangeSet {
+        cs_modifica(ws, id, &["uno.md", "dos.md", "tres.md"])
+    }
+    fn cs_crea(ws: &Workspace, id: &str) -> ChangeSet {
+        let mut cs = change_set(
+            id,
+            vec![
+                create_conforme("a.md", "Nota", "a"),
+                create_conforme("b.md", "Nota", "b"),
+            ],
+        );
+        cs.base_revision = ws.workspace_revision().unwrap();
+        cs
+    }
+    fn cs_borra(ws: &Workspace, id: &str) -> ChangeSet {
+        let mut cs = change_set(
+            id,
+            vec![NormalizedOperation::Delete {
+                path: RelPath::new("tres.md").unwrap(),
+                inbound_links_policy: lodestar_core::types::InboundLinksPolicy::Reject,
+            }],
+        );
+        cs.base_revision = ws.workspace_revision().unwrap();
+        cs
+    }
+    fn cs_mueve(ws: &Workspace, id: &str) -> ChangeSet {
+        let mut cs = change_set(
+            id,
+            vec![NormalizedOperation::Move {
+                from: RelPath::new("uno.md").unwrap(),
+                to: RelPath::new("movido.md").unwrap(),
+                rewrite_inbound_links: false,
+            }],
+        );
+        cs.base_revision = ws.workspace_revision().unwrap();
+        cs
+    }
+    fn cs_mixto(ws: &Workspace, id: &str) -> ChangeSet {
+        let mut cs = change_set(
+            id,
+            vec![
+                NormalizedOperation::ReplaceBody {
+                    path: RelPath::new("dos.md").unwrap(),
+                    body: "# dos\n\ncuerpo NUEVO\n".to_string(),
+                },
+                create_conforme("nuevo.md", "Nota", "nuevo"),
+                NormalizedOperation::Delete {
+                    path: RelPath::new("tres.md").unwrap(),
+                    inbound_links_policy: lodestar_core::types::InboundLinksPolicy::Reject,
+                },
+            ],
+        );
+        cs.base_revision = ws.workspace_revision().unwrap();
+        cs
+    }
+
+    type Forma = (&'static str, fn(&Workspace, &str) -> ChangeSet);
+    let formas: &[Forma] = &[
+        ("modifica", cs_mod),
+        ("crea", cs_crea),
+        ("borra", cs_borra),
+        ("mueve", cs_mueve),
+        ("mixto", cs_mixto),
+    ];
+
+    for (forma, build) in formas {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = siembra_documentos(dir.path(), &["uno", "dos", "tres"]);
+        let antes = canonical_md(dir.path());
+
+        let id = format!("e25-h01-respaldado-{forma}");
+        let cs = build(&ws, &id);
+        let (_, _, changed) = ws
+            .apply_transaction(&cs)
+            .unwrap_or_else(|e| panic!("[{forma}] la transacción debe publicar: {e:?}"));
+
+        let despues = canonical_md(dir.path());
+        let publicado = diferencia(&antes, &despues);
+        assert!(
+            !publicado.is_empty(),
+            "[{forma}] precondición no vacua: el change set debe cambiar algo del canónico"
+        );
+
+        let respaldado = respaldado_en_recovery(dir.path(), &id);
+        assert_eq!(
+            publicado, respaldado,
+            "[{forma}] lo que la publicación sustituyó en disco debe ser EXACTAMENTE lo que se \
+             respaldó en `recovery/{id}/` (copias + manifiesto `.absent`): todo lo publicado tiene \
+             que ser recuperable"
+        );
+
+        let changed_set: std::collections::BTreeSet<String> =
+            changed.iter().map(|p| p.as_str().to_string()).collect();
+        assert_eq!(
+            changed_set, publicado,
+            "[{forma}] y el `changedPaths` del recibo debe declarar ese mismo conjunto"
+        );
+    }
+}
+
+#[cfg(feature = "test-failpoints")]
+mod ventana_de_publicacion {
+    use super::*;
+    use lodestar_workspace::failpoints::{self, PuntoDeGancho};
+
+    /// Ruta del árbol de copias de recuperación de una transacción.
+    fn recovery_de(root: &Path, txn_id: &str) -> PathBuf {
+        root.join(".lodestar")
+            .join("runtime")
+            .join("recovery")
+            .join(txn_id)
+    }
+
+    /// **E25-H01** · Criterio 1 — **Dado** un apply en curso con el gancho armado en la ventana
+    /// `[T1, T3)`, **Cuando** el gancho modifica un `.md` AFECTADO, **Entonces** la transacción
+    /// falla con `WRITE_CONFLICT` y **ni uno** de los `.md` canónicos ha cambiado (incluido el
+    /// editado, que conserva la edición externa).
+    ///
+    /// Hoy `publish_result` relee el canónico en T3 y sustituye `dos.md` por el contenido del plan:
+    /// la edición externa se pierde y el backup guarda una versión de T1 que ya no era el estado
+    /// real, así que un `change_revert` restauraría un estado que nunca existió.
+    #[test]
+    fn edicion_externa_en_la_ventana_aborta_sin_publicar() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = siembra_documentos(dir.path(), &["uno", "dos", "tres"]);
+        let antes = canonical_md(dir.path());
+        let dos_en_t1 = antes.get("dos.md").expect("dos.md sembrado").clone();
+
+        let id = "e25-h01-edicion-externa";
+        let cs = cs_modifica(&ws, id, &["uno.md", "dos.md", "tres.md"]);
+
+        // El gancho hace de «otro proceso»: edita un `.md` que la transacción va a sustituir,
+        // cuando el guard, las copias y el journal ya se ejercieron sobre el estado de T1.
+        //
+        // La **precondición del escenario** —que el gancho se dispara DENTRO de la ventana y
+        // DESPUÉS de las copias, que es donde vive el defecto— se asevera desde DENTRO del gancho:
+        // es el único instante en que ese estado existe. Antes se comprobaba tras el fallo, pero
+        // E25-H02 sella el journal y el árbol del aborto de ventana (ajuste declarado en su spec),
+        // así que a la vuelta ya no queda ninguno de los dos que mirar.
+        let ruta_dos = dir.path().join("dos.md");
+        let edicion_externa = "---\ntype: Nota\ntitle: dos\n---\n\n# dos\n\nEDICIÓN EXTERNA\n";
+        {
+            let root = dir.path().to_path_buf();
+            let dos_t1 = dos_en_t1.clone();
+            failpoints::armar_gancho(PuntoDeGancho::AntesDePublicar, move || {
+                let recovery = recovery_de(&root, id);
+                assert!(
+                    recovery.is_dir(),
+                    "el gancho debe dispararse tras `backup_originals` (último instante de la \
+                     ventana): sin árbol de recuperación, el aborto ocurriría antes de que el \
+                     defecto sea posible"
+                );
+                assert_eq!(
+                    std::fs::read_to_string(recovery.join("dos.md")).unwrap_or_default(),
+                    dos_t1,
+                    "y la copia de recuperación guarda la versión de T1: exactamente por eso \
+                     publicar sobre un canónico que ya no es el de T1 dejaría un backup que no \
+                     restaura nada real"
+                );
+                std::fs::write(&ruta_dos, edicion_externa)
+                    .expect("el gancho debe poder editar dos.md");
+            });
+        }
+        let resultado = ws.apply_transaction(&cs);
+        failpoints::desarmar_ganchos();
+
+        let err = match resultado {
+            Err(e) => e,
+            Ok((_, _, changed)) => panic!(
+                "una edición externa dentro de la ventana `[T1, T3)` debe abortar la transacción \
+                 ANTES del primer rename, pero publicó: changedPaths={changed:?}"
+            ),
+        };
+        assert_eq!(
+            err.code(),
+            "WRITE_CONFLICT",
+            "el aborto debe llevar el código estable WRITE_CONFLICT (terminal: el agente \
+             replanifica, no se reintenta); era: {err:?}"
+        );
+
+        // E25-H02 (**ajuste declarado en su spec**, aserción INVERTIDA): el aborto de ventana sella
+        // su propia transacción bajo el mismo lock —sabe por control de flujo que no ha entrado en
+        // el bucle de renames, así que cero renames significa que no hay NADA que restaurar—, de
+        // modo que tras el `WRITE_CONFLICT` no puede quedar ni journal ni árbol de recuperación.
+        // Hasta E25-H01 esta misma aserción exigía justo lo contrario (que el árbol siguiera ahí,
+        // como precondición del escenario); la precondición se garantiza ahora desde dentro del
+        // gancho, que es donde ese estado existe de verdad. Si el material sobreviviera, la
+        // siguiente operación restauraría las copias de T1 encima de la edición externa que este
+        // aborto existe para no pisar.
+        assert!(
+            !recovery_de(dir.path(), id).exists(),
+            "el aborto de ventana no puede dejar su árbol de recuperación en disco: {}",
+            recovery_de(dir.path(), id).display()
+        );
+        assert!(
+            !journal_de(dir.path(), id).exists(),
+            "ni su fichero de journal: {}",
+            journal_de(dir.path(), id).display()
+        );
+        assert!(
+            !ws.recovery_pending(),
+            "y por tanto no queda recuperación pendiente que la siguiente operación vaya a ejecutar"
+        );
+
+        // El criterio: ni un `.md` canónico sustituido. El único cambio es el del propio gancho.
+        let mut esperado = antes.clone();
+        esperado.insert("dos.md".to_string(), edicion_externa.to_string());
+        assert_eq!(
+            canonical_md(dir.path()),
+            esperado,
+            "tras el aborto, ningún `.md` canónico puede haber sido sustituido — y la edición \
+             externa de `dos.md` sigue intacta (no la pisó la publicación)"
+        );
+    }
+
+    /// **E25-H01** · Criterio 2 — **Dado** ese mismo apply, **Cuando** el gancho **crea** un `.md`
+    /// que el plan no menciona, **Entonces** ese fichero sigue existiendo con su contenido intacto.
+    ///
+    /// Hoy desaparece: no está en el `result` de T1, así que el bucle de `publish.rs:120-124` lo
+    /// mete en `affected` y `publish.rs:130` lo **borra**, sin backup (nunca estuvo en el conjunto
+    /// de T1) y sin entrada de journal. El borrado es irrecuperable y el recibo ni lo menciona.
+    #[test]
+    fn fichero_nuevo_en_la_ventana_no_se_borra() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = siembra_documentos(dir.path(), &["uno", "dos", "tres"]);
+        let antes = canonical_md(dir.path());
+
+        let cs = cs_modifica(
+            &ws,
+            "e25-h01-fichero-nuevo",
+            &["uno.md", "dos.md", "tres.md"],
+        );
+
+        let ruta_intruso = dir.path().join("intruso.md");
+        let contenido_intruso =
+            "---\ntype: Nota\ntitle: intruso\n---\n\n# intruso\n\ncreado por otro proceso\n";
+        {
+            let ruta = ruta_intruso.clone();
+            failpoints::armar_gancho(PuntoDeGancho::AntesDePublicar, move || {
+                std::fs::write(&ruta, contenido_intruso)
+                    .expect("el gancho debe poder crear el .md");
+            });
+        }
+        let resultado = ws.apply_transaction(&cs);
+        failpoints::desarmar_ganchos();
+
+        // El fichero que nadie respaldó tiene que seguir ahí, byte a byte. Es el criterio.
+        assert!(
+            ruta_intruso.is_file(),
+            "un `.md` creado por otro proceso dentro de la ventana NO puede desaparecer: la \
+             publicación solo puede tocar lo que respaldó y anotó en el journal"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&ruta_intruso).unwrap(),
+            contenido_intruso,
+            "y su contenido debe estar intacto"
+        );
+
+        let err = match resultado {
+            Err(e) => e,
+            Ok((_, _, changed)) => panic!(
+                "un canónico que cambió dentro de la ventana debe abortar la transacción antes del \
+                 primer rename, pero publicó: changedPaths={changed:?}"
+            ),
+        };
+        assert_eq!(
+            err.code(),
+            "WRITE_CONFLICT",
+            "el aborto debe llevar el código estable WRITE_CONFLICT; era: {err:?}"
+        );
+
+        // Y no se publicó nada: el canónico es el de T1 más el intruso.
+        let mut esperado = antes.clone();
+        esperado.insert("intruso.md".to_string(), contenido_intruso.to_string());
+        assert_eq!(
+            canonical_md(dir.path()),
+            esperado,
+            "el aborto ocurre ANTES del primer rename: ningún `.md` del plan puede haberse escrito"
+        );
+    }
+
+    /// **E25-H01** · Criterio 3 — **Dado** un workspace con `referenceRoots`, **Cuando** el gancho
+    /// crea un `.md` bajo un `referenceRoot` dentro de la ventana, **Entonces** ese fichero no se
+    /// toca.
+    ///
+    /// Es el escenario que el control optimista **no puede** ver ni en principio:
+    /// `lodestar_core::types::workspace_revision` excluye lo que queda fuera de `writableRoots`
+    /// (`core/types.rs:1247-1249`, fijado por `core.rs::revision_excluye_reference_roots`), así que
+    /// `reverify_base_revision` es ciego a él. Solo una comparación del canónico completo entre T1 y
+    /// T3 lo detecta — y mientras tanto `publish_result` lo borra sin haberlo respaldado, violando
+    /// de paso la inmutabilidad que `assert_writable` promete para los `referenceRoots`.
+    #[test]
+    fn reference_root_no_se_borra_en_la_ventana() {
+        let dir = tempfile::tempdir().unwrap();
+        let lodestar = dir.path().join(".lodestar");
+        std::fs::create_dir_all(&lodestar).unwrap();
+        std::fs::write(
+            lodestar.join("config.yaml"),
+            "workspace:\n  writableRoots: [conocimiento]\n  referenceRoots: [referencia]\n",
+        )
+        .unwrap();
+
+        let ws = siembra_documentos(
+            dir.path(),
+            &["conocimiento/uno", "conocimiento/dos", "referencia/manual"],
+        );
+        let antes = canonical_md(dir.path());
+        assert!(
+            antes.contains_key("referencia/manual.md"),
+            "precondición: el `referenceRoot` es visible para el descubrimiento (por eso el bucle \
+             de publicación puede llegar a borrarlo)"
+        );
+
+        let cs = cs_modifica(
+            &ws,
+            "e25-h01-reference-root",
+            &["conocimiento/uno.md", "conocimiento/dos.md"],
+        );
+
+        let ruta_intruso = dir.path().join("referencia").join("intruso.md");
+        let contenido_intruso = "# intruso\n\nmaterial de solo lectura aparecido en la ventana\n";
+        {
+            let ruta = ruta_intruso.clone();
+            failpoints::armar_gancho(PuntoDeGancho::AntesDePublicar, move || {
+                std::fs::write(&ruta, contenido_intruso)
+                    .expect("el gancho debe poder crear el .md");
+            });
+        }
+        let resultado = ws.apply_transaction(&cs);
+        failpoints::desarmar_ganchos();
+
+        // El criterio: lo que hay bajo un `referenceRoot` es intocable, aparezca cuando aparezca.
+        assert!(
+            ruta_intruso.is_file(),
+            "un `.md` aparecido bajo un `referenceRoot` (inmutable por `assert_writable`) dentro de \
+             la ventana NO puede borrarlo la publicación: hoy lo borra porque recomputa `affected` \
+             contra el canónico de T3 sin volver a pasar por el guard"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&ruta_intruso).unwrap(),
+            contenido_intruso,
+            "y su contenido debe estar intacto"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("referencia").join("manual.md")).unwrap(),
+            antes["referencia/manual.md"],
+            "tampoco puede tocarse el material de referencia que ya estaba"
+        );
+
+        let err = match resultado {
+            Err(e) => e,
+            Ok((_, _, changed)) => panic!(
+                "el canónico cambió dentro de la ventana (aunque fuera de `writableRoots`, donde la \
+                 revisión no mira): la transacción debe abortar, pero publicó: \
+                 changedPaths={changed:?}"
+            ),
+        };
+        assert_eq!(
+            err.code(),
+            "WRITE_CONFLICT",
+            "el aborto debe llevar el código estable WRITE_CONFLICT; era: {err:?}"
+        );
+        assert_eq!(
+            canonical_md(dir.path())
+                .into_iter()
+                .filter(|(k, _)| k.starts_with("conocimiento/"))
+                .collect::<BTreeMap<String, String>>(),
+            antes
+                .iter()
+                .filter(|(k, _)| k.starts_with("conocimiento/"))
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect::<BTreeMap<String, String>>(),
+            "y nada del conocimiento escribible se publicó: el aborto es antes del primer rename"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// E25-H02 — Las copias de recuperación son durables, verificadas y nunca encallan el workspace
+// (`requirements/epica-25-endurecimiento-escritura.md`, bloque B). Fase ROJA.
+//
+// LOS DEFECTOS
+//
+// 1. **Copias no durables**: `backup_originals` copia con `std::fs::copy`
+//    (`src/recovery.rs:140`) y escribe el manifiesto `.absent` con `std::fs::write` (`:155-158`),
+//    ninguno con volcado; el journal, en cambio, SÍ se fsynca antes del primer rename. Tras un
+//    corte de energía puede quedar un journal durable apuntando a una copia truncada o ausente.
+// 2. **Restauración verbatim**: `restore_backups` (`:358-364`) lee la copia y la escribe tal cual
+//    sobre el canónico, sin verificar nada. Una copia truncada se PUBLICA como si fuera el original.
+// 3. **Workspace encallado para siempre**: si la copia es ilegible, `restore_backups` devuelve `Err`
+//    y `recover()` lo propaga con `?` en sus tres brazos (`:271`, `:275-276`, `:297-298`). No hay
+//    cuarentena ni descarte: `pending_journals` sigue viendo el journal, `recovery_pending()` sigue
+//    en `true` y TODA escritura futura muere en el paso (2) de `apply_transaction`.
+// 4. **`.absent` perdido → estado híbrido**: `read_absent_manifest` (`:179-188`) trata cualquier
+//    fallo de lectura como conjunto vacío, así que la restauración no borra los ficheros que la
+//    transacción creó: el canónico queda con los originales MÁS los creados. Ni un borde ni el otro.
+// 5. **La recuperación deshace lo que el aborto de ventana acababa de proteger** (estado nuevo, lo
+//    destapó E25-H01): tras el `WRITE_CONFLICT` de ventana quedan en disco el journal `prepared`
+//    (creado en `transaction.rs:164`, ANTES de la comprobación) y su árbol de recuperación con las
+//    copias de T1, con CERO renames aplicados. La siguiente operación clasifica ese journal como
+//    `prepared` → RESTAURAR y escribe las copias de T1 encima de la edición externa que el aborto
+//    existía para no pisar; y lo que el usuario CREÓ en la ventana está marcado `.absent`, así que
+//    la restauración lo borra. Sin esta enmienda, las tres garantías de E25-H01 duran exactamente
+//    hasta la siguiente operación.
+//
+// EL CONTRATO QUE FIJAN ESTOS TESTS
+//
+// - Nada se escribe sobre el canónico a partir de una copia que no verifica.
+// - Un journal que no se puede restaurar manda su material a
+//   `.lodestar/runtime/journal/quarantine/<txnId>/` —donde NADA se borra: es material forense—,
+//   `recover()` sigue con los demás, la operación que lo disparó falla UNA vez con
+//   `RECOVERY_FAILED` nombrando esa ruta, y la siguiente procede.
+// - El aborto de ventana sella su propia transacción bajo el mismo lock (journal primero, árbol
+//   después), así que no deja recuperación pendiente que pise nada.
+//
+// EL SEAM QUE HACE FALTA (lo añade el implementador; aquí solo se USA)
+//
+// Para el criterio `el_sellado_del_aborto_es_seguro_a_mitad` hace falta poder interrumpir el sellado
+// del aborto ENTRE el borrado del journal y el del árbol. La taxonomía de `FailPoint`
+// (`src/failpoints.rs:45-64`) gana un punto —solo bajo `--features test-failpoints`, sin generar ni
+// una instrucción en compilación normal—:
+//
+// ```rust
+// pub enum FailPoint {
+//     …
+//     /// En medio del sellado del **aborto de ventana** (E25-H02): el fichero de journal ya se ha
+//     /// borrado y el árbol de recuperación TODAVÍA no. Modela el proceso que muere entre los dos
+//     /// borrados; al reabrir no debe haber recuperación pendiente y el árbol huérfano lo recoge
+//     /// el GC (E24-H06).
+//     EnMedioDelSelladoDelAborto,
+// }
+// ```
+//
+// Se ejerce con el `failpoint!` que ya existe (aborta con `Err`), colocado en el camino de aborto
+// por divergencia de ventana, entre `remove_file(journal)` y la limpieza del árbol. Cuando está
+// armado, el error que sale de `apply_transaction` es el del failpoint y NO `WRITE_CONFLICT`: el
+// test solo exige `is_err()`.
+//
+// Además, `RECOVERY_FAILED` gana su primer emisor real: `WorkspaceError` necesita una variante cuyo
+// `.code()` sea `ErrorCode::RecoveryFailed.as_str()` («RECOVERY_FAILED») y cuyo `Display` nombre la
+// ruta de cuarentena. Los tests NO nombran la variante —solo `code()` y el mensaje—, así que la
+// forma exacta la elige el implementador.
+//
+// ROJO ESPERADO HOY
+// - `copia_truncada_no_se_restaura_verbatim`: la copia truncada se escribe encima del canónico.
+// - `journal_irrecuperable_no_encalla_el_workspace`: la primera operación falla con `IO`
+//   (no `RECOVERY_FAILED`), no hay cuarentena, y la segunda falla igual — para siempre.
+// - `un_journal_roto_no_arrastra_a_los_demas`: `recover()` sale por `?` en el primer journal roto.
+// - `absent_perdido_no_deja_estado_hibrido`: `recover()` devuelve `Ok` y los ficheros creados
+//   sobreviven junto a los originales.
+// - `la_cuarentena_no_borra_nada`: no existe cuarentena alguna.
+// - Los cuatro del aborto de ventana: la recuperación de la siguiente operación pisa la edición
+//   externa, borra el fichero nuevo y deja journal + árbol en disco.
+// - `cero_applied_no_significa_cero_renames` es el **control anti-vacuo declarado**: pasa ya hoy y
+//   tiene que seguir pasando. Protege contra la generalización prohibida por la spec
+//   («un journal `prepared` con cero `applied` no hay que restaurarlo»), que sellaría publicaciones
+//   parciales: «cero `applied` durables» describe también la caída ENTRE el primer rename y su
+//   anotación.
+// ---------------------------------------------------------------------------
+
+/// Ruta del árbol de copias de recuperación de una transacción (`recovery/<txnId>/`), exista o no.
+fn recovery_de(root: &Path, txn_id: &str) -> PathBuf {
+    root.join(".lodestar")
+        .join("runtime")
+        .join("recovery")
+        .join(txn_id)
+}
+
+/// Ruta del write-ahead journal de una transacción (`journal/<txnId>.json`), exista o no.
+fn journal_de(root: &Path, txn_id: &str) -> PathBuf {
+    root.join(".lodestar")
+        .join("runtime")
+        .join("journal")
+        .join(format!("{txn_id}.json"))
+}
+
+/// Ruta del directorio de **cuarentena** de una transacción cuya recuperación falló (E25-H02):
+/// `.lodestar/runtime/journal/quarantine/<txnId>/`. Nada se borra ahí dentro: es material forense.
+fn cuarentena_de(root: &Path, txn_id: &str) -> PathBuf {
+    root.join(".lodestar")
+        .join("runtime")
+        .join("journal")
+        .join("quarantine")
+        .join(txn_id)
+}
+
+/// Todos los ficheros bajo `dir` (recursivo) como `ruta relativa POSIX -> bytes`. Compara **bytes**,
+/// no texto: una copia de recuperación corrupta no es UTF-8 y el criterio «la cuarentena no borra
+/// nada» es byte-a-byte.
+fn ficheros_bajo(dir: &Path) -> BTreeMap<String, Vec<u8>> {
+    fn walk(d: &Path, base: &Path, out: &mut BTreeMap<String, Vec<u8>>) {
+        let Ok(entries) = std::fs::read_dir(d) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, base, out);
+                continue;
+            }
+            let rel = path
+                .strip_prefix(base)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            out.insert(rel, std::fs::read(&path).unwrap_or_default());
+        }
+    }
+    let mut out = BTreeMap::new();
+    walk(dir, dir, &mut out);
+    out
+}
+
+/// Conjunto de paths afectados por llevar `canonico` a `resultado`, con el MISMO criterio y el mismo
+/// orden determinista que el orquestador (`transaction.rs::affected_paths`): así el arnés respalda y
+/// registra exactamente el lote que producción respaldaría y registraría.
+fn afectados_por(canonico: &FileMap, resultado: &FileMap) -> Vec<RelPath> {
+    let mut set: std::collections::BTreeSet<RelPath> = std::collections::BTreeSet::new();
+    for (rel, contenido) in resultado {
+        if canonico.get(rel) != Some(contenido) {
+            set.insert(rel.clone());
+        }
+    }
+    for rel in canonico.keys() {
+        if !resultado.contains_key(rel) {
+            set.insert(rel.clone());
+        }
+    }
+    set.into_iter().collect()
+}
+
+/// Deja en disco el estado durable EXACTO de una transacción **interrumpida**, en el orden real del
+/// orquestador (copias → journal → renames, `transaction.rs:159-180`): `backup_originals` (E13-H04)
+/// → `create_journal` (E13-H03) → los `renames` primeros renames del lote.
+///
+/// - `renames`: cuántas sustituciones del canónico llegaron a completarse, en el orden determinista
+///   del lote (el mismo que publica `publish_result`).
+/// - `anotar`: si cada rename se marcó en el journal (`mark_applied`, que lo lleva a `applying`) o
+///   no. `anotar = false` con `renames = 1` es la caída ENTRE el primer rename y su anotación:
+///   journal `prepared`, cero entradas `applied` **y un rename ya hecho en disco**.
+///
+/// Devuelve `(afectados, resultado)`: el lote respaldado/registrado y el `FileMap` que la
+/// transacción habría dejado si hubiera terminado.
+fn transaccion_interrumpida(
+    ws: &Workspace,
+    root: &Path,
+    txn_id: &str,
+    cs: &ChangeSet,
+    renames: usize,
+    anotar: bool,
+) -> (Vec<RelPath>, FileMap) {
+    let canonico = canonical_filemap(root);
+    let resultado = plan::apply_normalized_ops(&canonico, &cs.operations)
+        .expect("prever el resultado del plan");
+    let afectados = afectados_por(&canonico, &resultado);
+    assert!(
+        !afectados.is_empty(),
+        "precondición del arnés: la transacción debe afectar a algún path"
+    );
+    assert!(
+        renames <= afectados.len(),
+        "precondición del arnés: no se pueden simular más renames ({renames}) que paths afectados \
+         ({})",
+        afectados.len()
+    );
+
+    let base = ws.workspace_revision().unwrap();
+    let writable = &[] as &[RelPath];
+    let result_rev = lodestar_core::types::workspace_revision(&resultado, writable);
+
+    // (8) Copias de recuperación de los originales afectados — ANTES del journal, como producción.
+    ws.backup_originals(txn_id, &afectados)
+        .expect("preparar las copias de recuperación");
+
+    // (9) Write-ahead journal `prepared`, fsynced antes del primer rename.
+    let mut journal = ws
+        .create_journal(txn_id, &afectados, &base, &result_rev)
+        .expect("crear el write-ahead journal");
+
+    // (10) Los `renames` primeros renames del lote, en el orden determinista de la publicación.
+    for rel in afectados.iter().take(renames) {
+        match resultado.get(rel) {
+            Some(contenido) => std::fs::write(root.join(rel.as_str()), contenido).unwrap(),
+            None => {
+                let _ = std::fs::remove_file(root.join(rel.as_str()));
+            }
+        }
+        if anotar {
+            journal
+                .mark_applied(rel)
+                .expect("anotar el rename en el journal");
+        }
+    }
+
+    // Se «cae»: el journal no llega a `applied` ni se sella.
+    (afectados, resultado)
+}
+
+/// `true` si `mensaje` nombra la cuarentena de `txn_id` (la ruta que la spec exige citar para que
+/// quien lea el error sepa dónde quedó el material forense).
+fn menciona_la_cuarentena(mensaje: &str, txn_id: &str) -> bool {
+    mensaje.contains("quarantine") && mensaje.contains(txn_id)
+}
+
+mod durabilidad_de_la_recuperacion {
+    use super::*;
+
+    /// **E25-H02** · Criterio 1 — **Dado** un journal `prepared` cuya copia de recuperación está
+    /// **truncada**, **Cuando** se reabre el workspace y se recupera, **Entonces** el canónico NO se
+    /// sobrescribe con la copia rota.
+    ///
+    /// Hoy `restore_backups` (`recovery.rs:358-364`) lee la copia y la escribe tal cual: el `.md`
+    /// canónico queda con los bytes truncados —frontmatter partido incluido— y la recuperación lo
+    /// declara un éxito. Una copia que no verifica no es un original: no se restaura.
+    #[test]
+    fn copia_truncada_no_se_restaura_verbatim() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = siembra_documentos(dir.path(), &["uno", "dos", "tres"]);
+        let original = canonical_md(dir.path());
+
+        let id = "e25-h02-copia-truncada";
+        let cs = cs_modifica(&ws, id, &["uno.md", "dos.md", "tres.md"]);
+        // Un rename ya hecho y anotado (journal `applying`): la restauración es NECESARIA, así que
+        // ninguna implementación puede saltarse la copia sin más y pasar el test vacuamente.
+        let (afectados, resultado) = transaccion_interrumpida(&ws, dir.path(), id, &cs, 1, true);
+        let publicado = afectados[0].as_str().to_string();
+        let esperado = como_md(&resultado);
+        assert_ne!(
+            original[&publicado], esperado[&publicado],
+            "precondición: el path renombrado debe cambiar de contenido (si no, no hay nada que \
+             restaurar y el test sería vacuo)"
+        );
+
+        // La copia de recuperación de ESE path queda truncada a la mitad, como la dejaría un corte
+        // de energía sobre un `std::fs::copy` sin volcado.
+        let copia = recovery_de(dir.path(), id).join(&publicado);
+        let completa = std::fs::read(&copia).expect("la copia de recuperación debe existir");
+        let truncada = completa[..completa.len() / 2].to_vec();
+        assert!(
+            !truncada.is_empty() && truncada != completa,
+            "precondición: la copia truncada debe diferir de la íntegra"
+        );
+        std::fs::write(&copia, &truncada).unwrap();
+        drop(ws);
+
+        let ws2 = Workspace::open(dir.path()).unwrap();
+        // La recuperación puede fallar (copia que no verifica → cuarentena) o no, pero si falla lo
+        // hace con su código propio, no con un IO genérico.
+        if let Err(e) = ws2.recover() {
+            assert_eq!(
+                e.code(),
+                "RECOVERY_FAILED",
+                "una copia que no verifica es un fallo de recuperación, con su código propio del \
+                 catálogo; era: {e:?}"
+            );
+        }
+
+        let despues = canonical_md(dir.path());
+        let contenido = despues
+            .get(&publicado)
+            .unwrap_or_else(|| panic!("`{publicado}` debe seguir existiendo en el canónico"));
+        assert_ne!(
+            contenido.as_bytes(),
+            truncada.as_slice(),
+            "el canónico NO puede quedar con los bytes de la copia truncada: restaurar sin \
+             verificar publica basura firmada como «el original»"
+        );
+        assert!(
+            contenido == &original[&publicado] || contenido == &esperado[&publicado],
+            "y tiene que ser uno de los dos bordes íntegros de la transacción (original o \
+             resultado), nunca una copia a medias.\nen disco: {contenido:?}\noriginal: {:?}\n\
+             resultado: {:?}",
+            original[&publicado],
+            esperado[&publicado]
+        );
+        assert!(
+            !ws2.recovery_pending(),
+            "y el workspace vuelve a ser escribible: tras recuperar (aunque sea a cuarentena) no \
+             puede quedar recuperación pendiente"
+        );
+    }
+
+    /// **E25-H02** · Criterio 2 — **Dado** un journal `prepared` cuya copia es **ilegible**,
+    /// **Cuando** se recupera y luego se intenta una transacción nueva, **Entonces** la primera
+    /// falla con `RECOVERY_FAILED` nombrando la cuarentena y **la segunda tiene éxito**.
+    ///
+    /// Hoy no tiene éxito ninguna de las dos, nunca: `restore_backups` devuelve `Err`, `recover()`
+    /// lo propaga con `?`, el journal sigue pendiente y toda escritura futura muere en el paso (2)
+    /// de `apply_transaction`. Un solo fichero ilegible cierra el workspace para siempre.
+    ///
+    /// La copia se hace ilegible escribiéndole bytes que **no son UTF-8**: `read_to_string` falla
+    /// exactamente igual que con un permiso denegado, y sin depender de `chmod` ni del usuario que
+    /// corre los tests (en CI podría ser root, para quien no hay fichero ilegible).
+    #[test]
+    fn journal_irrecuperable_no_encalla_el_workspace() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = siembra_documentos(dir.path(), &["uno", "dos", "tres"]);
+
+        let id = "e25-h02-journal-irrecuperable";
+        let cs = cs_modifica(&ws, id, &["uno.md", "dos.md", "tres.md"]);
+        let (afectados, _) = transaccion_interrumpida(&ws, dir.path(), id, &cs, 1, true);
+        let publicado = afectados[0].as_str().to_string();
+        std::fs::write(
+            recovery_de(dir.path(), id).join(&publicado),
+            [0xff, 0xfe, 0x00, 0x01],
+        )
+        .unwrap();
+        drop(ws);
+
+        let ws2 = Workspace::open(dir.path()).unwrap();
+        assert!(
+            ws2.recovery_pending(),
+            "precondición: al reabrir hay una recuperación pendiente que la primera operación \
+             tendrá que atender"
+        );
+
+        // La PRIMERA operación real dispara la recuperación en su paso (2) y hereda su fallo.
+        let cs2 = cs_modifica(&ws2, "e25-h02-siguiente", &["tres.md"]);
+        let err = match ws2.apply_transaction(&cs2) {
+            Err(e) => e,
+            Ok((_, _, changed)) => panic!(
+                "la operación que arrastra una recuperación irrecuperable no puede reportar éxito: \
+                 changedPaths={changed:?}"
+            ),
+        };
+        assert_eq!(
+            err.code(),
+            "RECOVERY_FAILED",
+            "el fallo de recuperación tiene su propio código del catálogo (E25-H02 le da su primer \
+             emisor real): no es un IO genérico ni un WORKSPACE_RECOVERY_REQUIRED; era: {err:?}"
+        );
+        let mensaje = err.to_string();
+        assert!(
+            menciona_la_cuarentena(&mensaje, id),
+            "y el mensaje debe NOMBRAR la ruta de cuarentena \
+             (.lodestar/runtime/journal/quarantine/{id}/): es el único sitio donde el operador se \
+             entera de que hay material forense esperando. Mensaje: {mensaje}"
+        );
+        assert!(
+            cuarentena_de(dir.path(), id).is_dir(),
+            "y la cuarentena debe existir de verdad en {}",
+            cuarentena_de(dir.path(), id).display()
+        );
+        assert!(
+            !ws2.recovery_pending(),
+            "tras la cuarentena ya no queda recuperación pendiente: es lo que desencalla el \
+             workspace"
+        );
+
+        // La SEGUNDA operación tiene éxito: el workspace volvió a ser escribible.
+        ws2.apply_transaction(&cs2).unwrap_or_else(|e| {
+            panic!(
+                "la segunda operación debe publicar con normalidad (el journal irrecuperable ya \
+                 está en cuarentena): {e:?}"
+            )
+        });
+        assert!(
+            canonical_md(dir.path())["tres.md"].contains("cuerpo NUEVO"),
+            "y su resultado tiene que estar en el canónico"
+        );
+    }
+
+    /// **E25-H02** · Criterio 3 — **Dado** dos journals pendientes, uno sano y uno irrecuperable,
+    /// **Cuando** se recupera, **Entonces** el sano se recupera igualmente.
+    ///
+    /// Hoy `recover()` itera `pending_journals` y sale por `?` en el primero que falla, así que el
+    /// destino del journal sano depende del orden de `read_dir`. El test muerde en los dos órdenes:
+    /// si el roto va primero, el sano no se recupera; si va segundo, el sano se recupera pero el
+    /// error que sale es un `IO` genérico y sin cuarentena.
+    #[test]
+    fn un_journal_roto_no_arrastra_a_los_demas() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = siembra_documentos(dir.path(), &["uno", "dos", "tres", "cuatro"]);
+        let original = canonical_md(dir.path());
+
+        // Transacción SANA interrumpida sobre `uno.md` (copia íntegra, 1 rename hecho).
+        let sano = "e25-h02-sano";
+        let cs_sano = cs_modifica(&ws, sano, &["uno.md"]);
+        let (af_sano, _) = transaccion_interrumpida(&ws, dir.path(), sano, &cs_sano, 1, true);
+        assert_eq!(af_sano.len(), 1, "precondición: la sana afecta a un path");
+
+        // Transacción ROTA interrumpida sobre `tres.md` (copia ilegible, 1 rename hecho).
+        let roto = "e25-h02-roto";
+        let cs_roto = cs_modifica(&ws, roto, &["tres.md"]);
+        let (af_roto, _) = transaccion_interrumpida(&ws, dir.path(), roto, &cs_roto, 1, true);
+        assert_eq!(af_roto.len(), 1, "precondición: la rota afecta a un path");
+        std::fs::write(
+            recovery_de(dir.path(), roto).join(af_roto[0].as_str()),
+            [0xff, 0xfe, 0x00, 0x01],
+        )
+        .unwrap();
+        drop(ws);
+
+        let ws2 = Workspace::open(dir.path()).unwrap();
+        let err = match ws2.recover() {
+            Err(e) => e,
+            Ok(()) => panic!(
+                "una recuperación con un journal irrecuperable debe reportarlo una vez, no callarlo"
+            ),
+        };
+        assert_eq!(
+            err.code(),
+            "RECOVERY_FAILED",
+            "el fallo del journal roto se reporta con su código propio; era: {err:?}"
+        );
+
+        // El journal SANO se recuperó igualmente: su path volvió al original y su plano de control
+        // quedó sellado.
+        let despues = canonical_md(dir.path());
+        assert_eq!(
+            despues["uno.md"], original["uno.md"],
+            "el journal sano se restaura igual: que otro journal esté roto no puede dejar a medias \
+             una transacción que sí se podía deshacer"
+        );
+        assert!(
+            !journal_de(dir.path(), sano).exists(),
+            "y su journal queda sellado (borrado), no pendiente"
+        );
+        assert!(
+            !recovery_de(dir.path(), sano).exists(),
+            "ni su árbol de recuperación"
+        );
+
+        // El roto quedó en cuarentena y el workspace desencallado.
+        assert!(
+            cuarentena_de(dir.path(), roto).is_dir(),
+            "el journal roto va a cuarentena: {}",
+            cuarentena_de(dir.path(), roto).display()
+        );
+        assert!(
+            !ws2.recovery_pending(),
+            "y tras recuperar no queda NINGÚN journal pendiente (ni el sano, ni el roto)"
+        );
+    }
+
+    /// **E25-H02** · Criterio 4 — **Dado** una transacción que **crea** ficheros y cuyo manifiesto
+    /// `.absent` se pierde antes de la caída, **Cuando** se recupera, **Entonces** el canónico
+    /// converge al borde «original» —los creados no sobreviven— o la recuperación va a cuarentena;
+    /// **nunca** al híbrido.
+    ///
+    /// Hoy `read_absent_manifest` (`recovery.rs:179-188`) trata la ausencia del manifiesto como
+    /// conjunto vacío, así que `recover()` devuelve `Ok(())` y deja los ficheros creados en su
+    /// sitio: el canónico queda con los originales MÁS los creados, que es exactamente lo que el
+    /// rustdoc de `recover` promete que no puede pasar. Lo prohibido es el híbrido **silencioso**:
+    /// un `Ok(())` con los creados vivos.
+    #[test]
+    fn absent_perdido_no_deja_estado_hibrido() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = siembra_documentos(dir.path(), &["uno", "dos"]);
+        let original = canonical_md(dir.path());
+
+        let id = "e25-h02-absent-perdido";
+        let mut cs = change_set(
+            id,
+            vec![
+                create_conforme("a.md", "Nota", "a"),
+                create_conforme("b.md", "Nota", "b"),
+            ],
+        );
+        cs.base_revision = ws.workspace_revision().unwrap();
+        // Un fichero creado ya en disco (el primer rename, anotado): hay algo que deshacer.
+        let (afectados, _) = transaccion_interrumpida(&ws, dir.path(), id, &cs, 1, true);
+        let creado = afectados[0].as_str().to_string();
+        assert!(
+            dir.path().join(&creado).is_file(),
+            "precondición: la transacción llegó a crear `{creado}` en el canónico"
+        );
+
+        // El manifiesto `.absent` no llegó a disco (se escribía con `std::fs::write`, sin volcado).
+        let manifiesto = recovery_de(dir.path(), id).join(".absent");
+        assert!(
+            manifiesto.is_file(),
+            "precondición: una transacción que solo CREA escribe el manifiesto `.absent` con los \
+             paths que no existían"
+        );
+        std::fs::remove_file(&manifiesto).unwrap();
+        drop(ws);
+
+        let ws2 = Workspace::open(dir.path()).unwrap();
+        match ws2.recover() {
+            Ok(()) => assert_eq!(
+                canonical_md(dir.path()),
+                original,
+                "si la recuperación se declara exitosa, el canónico tiene que estar en el borde \
+                 «original»: los ficheros que la transacción creó NO pueden sobrevivir. Un `Ok` con \
+                 los creados vivos es el estado híbrido que la recuperación existe para impedir"
+            ),
+            Err(e) => {
+                assert_eq!(
+                    e.code(),
+                    "RECOVERY_FAILED",
+                    "si el manifiesto perdido hace la restauración indecidible, se reporta como \
+                     fallo de recuperación (y el material va a cuarentena); era: {e:?}"
+                );
+                assert!(
+                    cuarentena_de(dir.path(), id).is_dir(),
+                    "y con su material en cuarentena: {}",
+                    cuarentena_de(dir.path(), id).display()
+                );
+            }
+        }
+        assert!(
+            !ws2.recovery_pending(),
+            "en los dos bordes admisibles, el workspace vuelve a ser escribible"
+        );
+    }
+
+    /// **E25-H02** · Criterio 5 — **Dado** el material en cuarentena, **Cuando** se inspecciona,
+    /// **Entonces** el journal y el árbol de recuperación siguen ahí **completos**.
+    ///
+    /// La cuarentena es material forense: se **mueve**, no se depura. Lo que había en
+    /// `journal/<txnId>.json` y en `recovery/<txnId>/` —incluida la copia corrupta que causó el
+    /// fallo y las copias sanas de los demás paths— tiene que seguir byte a byte dentro de
+    /// `journal/quarantine/<txnId>/`.
+    #[test]
+    fn la_cuarentena_no_borra_nada() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = siembra_documentos(dir.path(), &["uno", "dos", "tres"]);
+
+        let id = "e25-h02-cuarentena-completa";
+        let cs = cs_modifica(&ws, id, &["uno.md", "dos.md", "tres.md"]);
+        let (afectados, _) = transaccion_interrumpida(&ws, dir.path(), id, &cs, 1, true);
+        std::fs::write(
+            recovery_de(dir.path(), id).join(afectados[0].as_str()),
+            [0xff, 0xfe, 0x00, 0x01],
+        )
+        .unwrap();
+
+        // Foto exacta del material ANTES de recuperar: el árbol entero y el JSON del journal.
+        let arbol_antes = ficheros_bajo(&recovery_de(dir.path(), id));
+        assert!(
+            arbol_antes.len() >= 3,
+            "precondición: el árbol debe tener una copia por path afectado; tiene {:?}",
+            arbol_antes.keys().collect::<Vec<_>>()
+        );
+        let journal_antes = std::fs::read(journal_de(dir.path(), id)).expect("el journal en disco");
+        drop(ws);
+
+        let ws2 = Workspace::open(dir.path()).unwrap();
+        ws2.recover()
+            .expect_err("la copia ilegible debe hacer fallar la recuperación de esa transacción");
+
+        // Se movió: en su sitio original ya no queda nada (por eso la siguiente operación procede).
+        assert!(
+            !journal_de(dir.path(), id).exists(),
+            "el journal en cuarentena sale de `journal/<txnId>.json`: si se quedara, el gate de \
+             `recovery_pending` seguiría cerrado"
+        );
+        assert!(
+            !recovery_de(dir.path(), id).exists(),
+            "y su árbol sale de `recovery/<txnId>/`"
+        );
+
+        // Y está completo dentro de la cuarentena, byte a byte.
+        let cuarentena = cuarentena_de(dir.path(), id);
+        assert!(
+            cuarentena.is_dir(),
+            "la cuarentena debe existir en {}",
+            cuarentena.display()
+        );
+        let en_cuarentena = ficheros_bajo(&cuarentena);
+        for (rel, bytes) in &arbol_antes {
+            assert!(
+                en_cuarentena
+                    .iter()
+                    .any(|(k, v)| k.ends_with(rel) && v == bytes),
+                "la copia `{rel}` ({} bytes) debe seguir íntegra dentro de la cuarentena: nada se \
+                 borra ahí, es material forense. Contenido de la cuarentena: {:?}",
+                bytes.len(),
+                en_cuarentena.keys().collect::<Vec<_>>()
+            );
+        }
+        assert!(
+            en_cuarentena.values().any(|v| v == &journal_antes),
+            "y el JSON del journal, tal cual estaba, también: sin él no se puede saber qué \
+             pretendía la transacción. Contenido de la cuarentena: {:?}",
+            en_cuarentena.keys().collect::<Vec<_>>()
+        );
+    }
+
+    /// **E25-H02** · Criterio 10 (**control anti-vacuo declarado; pasa YA HOY y debe seguir
+    /// pasando**) — **Dado** una caída **entre el primer rename y su anotación en el journal**
+    /// (journal `prepared`, cero entradas `applied`, **un rename ya hecho en disco**), **Cuando** se
+    /// recupera, **Entonces** SÍ se restaura.
+    ///
+    /// Es el guardia de la generalización que la spec prohíbe explícitamente: *«`recover()` no
+    /// restaura un journal `prepared` con cero entradas `applied`»*. `mark_applied` re-persiste el
+    /// journal **después** de cada rename (`publish.rs:206`), así que «cero `applied` durables»
+    /// describe también este estado — sellar por esa inferencia daría por buena una publicación
+    /// parcial, que es justo lo que la recuperación existe para impedir. El sellado del aborto de
+    /// ventana tiene que decidirlo el camino que **sabe** que no publicó, no una lectura del journal
+    /// a posteriori.
+    #[test]
+    fn cero_applied_no_significa_cero_renames() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = siembra_documentos(dir.path(), &["uno", "dos", "tres"]);
+        let original = canonical_md(dir.path());
+
+        let id = "e25-h02-cero-applied";
+        let cs = cs_modifica(&ws, id, &["uno.md", "dos.md", "tres.md"]);
+        // 1 rename hecho y NO anotado: el journal se queda en `prepared` con todo `pending`.
+        let (afectados, resultado) = transaccion_interrumpida(&ws, dir.path(), id, &cs, 1, false);
+        let publicado = afectados[0].as_str().to_string();
+
+        let journal = leer_journal(&journal_de(dir.path(), id));
+        assert_eq!(
+            journal["state"].as_str(),
+            Some("prepared"),
+            "precondición: el journal quedó `prepared` (la anotación del rename no llegó a disco)"
+        );
+        assert_eq!(
+            estado_op(&journal, &publicado),
+            "pending",
+            "precondición: cero entradas `applied` en el journal…"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join(&publicado)).unwrap(),
+            como_md(&resultado)[&publicado],
+            "…y sin embargo el rename YA está hecho en disco: es la caída entre el rename y su \
+             anotación"
+        );
+        drop(ws);
+
+        let ws2 = Workspace::open(dir.path()).unwrap();
+        ws2.recover().expect("la recuperación debe restaurar");
+
+        assert_eq!(
+            canonical_md(dir.path()),
+            original,
+            "un journal `prepared` con cero `applied` PUEDE tener renames hechos: hay que \
+             restaurarlo. Sellarlo por «no publicó nada» daría por buena una publicación parcial"
+        );
+        assert!(!ws2.recovery_pending(), "y tras restaurar queda sellado");
+    }
+
+    /// Ruta del **sidecar de huellas** de una transacción (E25-H02):
+    /// `.lodestar/runtime/recovery/<txnId>.digests.json`, hermano del árbol de copias.
+    fn sidecar_de(root: &Path, txn_id: &str) -> PathBuf {
+        root.join(".lodestar")
+            .join("runtime")
+            .join("recovery")
+            .join(format!("{txn_id}.digests.json"))
+    }
+
+    /// **E25-H02** · Criterio 1, segunda mitad (**cobertura pedida por el juez ciego**) — **Dado** un
+    /// journal `prepared` cuya copia de recuperación está **corrupta pero del mismo tamaño**,
+    /// **Cuando** se recupera, **Entonces** el canónico no se sobrescribe con ella y el fallo se
+    /// reporta con `RECOVERY_FAILED`.
+    ///
+    /// `copia_truncada_no_se_restaura_verbatim` se contenta con una verificación de **tamaño**: una
+    /// implementación que solo compare bytes-en-disco contra bytes-respaldados lo pasa. Este
+    /// escenario cierra ese hueco — la copia tiene EXACTAMENTE los mismos bytes de longitud y sigue
+    /// siendo UTF-8 válido, así que solo la **revisión blake3** del contenido la distingue del
+    /// original. Es el caso realista de una corrupción en el medio físico (un bit/byte cambiado sin
+    /// cambiar el tamaño del fichero), que es justo lo que un `std::fs::copy` sin volcado no
+    /// protege.
+    ///
+    /// Mata la mutación «verificar solo el tamaño»: neutralizando la comparación de `revision` en
+    /// `restore_backups`, la copia corrupta pasa la verificación, se restaura, `recover()` devuelve
+    /// `Ok` y este test se pone rojo.
+    #[test]
+    fn copia_corrupta_del_mismo_tamano_no_se_restaura() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = siembra_documentos(dir.path(), &["uno", "dos", "tres"]);
+        let original = canonical_md(dir.path());
+
+        let id = "e25-h02-copia-corrupta-mismo-tamano";
+        let cs = cs_modifica(&ws, id, &["uno.md", "dos.md", "tres.md"]);
+        // Un rename hecho y anotado (journal `applying`): la restauración es NECESARIA.
+        let (afectados, resultado) = transaccion_interrumpida(&ws, dir.path(), id, &cs, 1, true);
+        let publicado = afectados[0].as_str().to_string();
+        let esperado = como_md(&resultado);
+
+        // La copia se corrompe SIN cambiar su tamaño y siguiendo siendo texto válido: un byte del
+        // cuerpo cambia («original» → «0riginal»). Ni el tamaño ni la legibilidad delatan nada.
+        let copia = recovery_de(dir.path(), id).join(&publicado);
+        let intacta = std::fs::read_to_string(&copia).expect("la copia debe existir y ser texto");
+        let corrupta = intacta.replacen("cuerpo original", "cuerpo 0riginal", 1);
+        assert_eq!(
+            corrupta.len(),
+            intacta.len(),
+            "precondición del escenario: la corrupción NO cambia el tamaño (si lo cambiara, una \
+             verificación de solo tamaño ya la vería y el test no probaría nada nuevo)"
+        );
+        assert_ne!(
+            corrupta, intacta,
+            "precondición: y sí cambia el contenido (si no, no hay corrupción que detectar)"
+        );
+        std::fs::write(&copia, &corrupta).unwrap();
+        drop(ws);
+
+        let ws2 = Workspace::open(dir.path()).unwrap();
+        let err = match ws2.recover() {
+            Err(e) => e,
+            Ok(()) => panic!(
+                "una copia corrupta del mismo tamaño NO puede pasar por original: comparar solo el \
+                 tamaño (o no comparar nada) publica contenido alterado firmándolo como «el estado \
+                 anterior». El canónico de `{publicado}` quedó: {:?}",
+                canonical_md(dir.path()).get(&publicado)
+            ),
+        };
+        assert_eq!(
+            err.code(),
+            "RECOVERY_FAILED",
+            "y el fallo lleva su código propio del catálogo; era: {err:?}"
+        );
+
+        let despues = canonical_md(dir.path());
+        let contenido = despues
+            .get(&publicado)
+            .unwrap_or_else(|| panic!("`{publicado}` debe seguir existiendo en el canónico"));
+        assert_ne!(
+            contenido, &corrupta,
+            "el canónico no puede quedar con el contenido corrupto de la copia"
+        );
+        assert!(
+            contenido == &original[&publicado] || contenido == &esperado[&publicado],
+            "y tiene que ser uno de los dos bordes íntegros de la transacción.\nen disco: \
+             {contenido:?}\noriginal: {:?}\nresultado: {:?}",
+            original[&publicado],
+            esperado[&publicado]
+        );
+        assert!(
+            cuarentena_de(dir.path(), id).is_dir(),
+            "el material de la transacción irrecuperable va a cuarentena: {}",
+            cuarentena_de(dir.path(), id).display()
+        );
+        assert!(
+            !ws2.recovery_pending(),
+            "y el workspace vuelve a ser escribible"
+        );
+    }
+
+    /// **E25-H02** · Camino de migración (**cobertura pedida por el juez ciego**) — **Dado** un árbol
+    /// de recuperación válido **sin sidecar de huellas** (una transacción respaldada por ≤ v0.3.1),
+    /// **Cuando** se recupera, **Entonces** se **restaura** como en v0.3.1: el canónico converge al
+    /// borde «original», sin cuarentena, y el workspace queda escribible.
+    ///
+    /// Es el estado que un journal escrito por una versión anterior deja en disco tras actualizar el
+    /// binario, y hoy no lo ejercía nadie: si la restauración sin huellas fuera un no-op —o si el
+    /// camino sin sidecar mandara a cuarentena por no poder verificar—, una actualización de
+    /// Lodestar convertiría una transacción interrumpida perfectamente recuperable en un estado
+    /// parcial sellado (o en material forense inútil), justo al reabrir.
+    ///
+    /// Mata la mutación «`restore_backups_legacy` como no-op»: sin restaurar nada, el canónico se
+    /// queda con el rename publicado y la comparación contra el borde original falla.
+    #[test]
+    fn arbol_sin_sidecar_restaura_como_v031() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = siembra_documentos(dir.path(), &["uno", "dos", "tres"]);
+        let original = canonical_md(dir.path());
+
+        let id = "e25-h02-sin-sidecar";
+        let cs = cs_modifica(&ws, id, &["uno.md", "dos.md", "tres.md"]);
+        // Copias íntegras y un rename ya hecho y anotado: hay algo que deshacer y se puede deshacer.
+        let (afectados, resultado) = transaccion_interrumpida(&ws, dir.path(), id, &cs, 1, true);
+        let publicado = afectados[0].as_str().to_string();
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join(&publicado)).unwrap(),
+            como_md(&resultado)[&publicado],
+            "precondición: el rename se publicó, así que la restauración tiene trabajo que hacer"
+        );
+
+        // Se simula el árbol de una versión anterior a E25-H02: existe el árbol de copias, pero no
+        // hay sidecar de huellas con el que verificar.
+        let sidecar = sidecar_de(dir.path(), id);
+        assert!(
+            sidecar.is_file(),
+            "precondición: la transacción actual sí escribe su sidecar de huellas en {}",
+            sidecar.display()
+        );
+        std::fs::remove_file(&sidecar).unwrap();
+        assert!(
+            recovery_de(dir.path(), id).is_dir(),
+            "y el árbol de copias sigue en su sitio: es lo único que dejaba v0.3.1"
+        );
+        drop(ws);
+
+        let ws2 = Workspace::open(dir.path()).unwrap();
+        ws2.recover().unwrap_or_else(|e| {
+            panic!(
+                "un árbol legítimo sin huellas NO es un fallo de recuperación: se restaura como en \
+                 v0.3.1 (nunca peor que el comportamiento que E25-H02 endurece). Era: {e:?}"
+            )
+        });
+
+        assert_eq!(
+            canonical_md(dir.path()),
+            original,
+            "el canónico tiene que converger al borde «original»: las copias estaban íntegras y el \
+             único motivo para no restaurarlas sería no poder verificarlas, que es exactamente lo \
+             que v0.3.1 nunca hizo"
+        );
+        assert!(
+            !cuarentena_de(dir.path(), id).exists(),
+            "y no hay nada que poner en cuarentena: la transacción se recuperó, no falló"
+        );
+        assert!(
+            !journal_de(dir.path(), id).exists(),
+            "el journal queda sellado (borrado)"
+        );
+        assert!(
+            !recovery_de(dir.path(), id).exists(),
+            "y su árbol de copias limpio"
+        );
+        assert!(
+            !ws2.recovery_pending(),
+            "así que el workspace vuelve a ser escribible sin intervención"
+        );
+    }
+}
+
+#[cfg(feature = "test-failpoints")]
+mod aborto_de_ventana {
+    use super::*;
+    use lodestar_workspace::failpoints::{self, FailPoint, PuntoDeGancho};
+
+    /// El escenario común de los cuatro: un apply que va a modificar los tres documentos y un
+    /// gancho que, en el último instante de la ventana `[T1, T3)`, hace de «otro proceso». Devuelve
+    /// `(tempdir, workspace, canónico de T1, contenido de la edición externa)`.
+    fn aborto_por_edicion_externa(
+        id: &'static str,
+    ) -> (
+        tempfile::TempDir,
+        Workspace,
+        BTreeMap<String, String>,
+        &'static str,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = siembra_documentos(dir.path(), &["uno", "dos", "tres"]);
+        let antes = canonical_md(dir.path());
+        let cs = cs_modifica(&ws, id, &["uno.md", "dos.md", "tres.md"]);
+
+        let edicion_externa = "---\ntype: Nota\ntitle: dos\n---\n\n# dos\n\nEDICIÓN EXTERNA\n";
+        {
+            let ruta = dir.path().join("dos.md");
+            failpoints::armar_gancho(PuntoDeGancho::AntesDePublicar, move || {
+                std::fs::write(&ruta, edicion_externa).expect("el gancho debe poder editar dos.md");
+            });
+        }
+        let resultado = ws.apply_transaction(&cs);
+        failpoints::desarmar_ganchos();
+        let err = match resultado {
+            Err(e) => e,
+            Ok((_, _, changed)) => panic!(
+                "una edición externa en la ventana `[T1, T3)` debe abortar la transacción: \
+                 changedPaths={changed:?}"
+            ),
+        };
+        assert_eq!(
+            err.code(),
+            "WRITE_CONFLICT",
+            "el aborto de ventana es un WRITE_CONFLICT (E25-H01); era: {err:?}"
+        );
+        (dir, ws, antes, edicion_externa)
+    }
+
+    /// **E25-H02** · Criterio 6 — **Dado** un `WRITE_CONFLICT` de ventana (con la edición externa ya
+    /// en disco), **Cuando** la siguiente operación abre el workspace y recupera, **Entonces** la
+    /// edición externa sigue **intacta** byte a byte.
+    ///
+    /// Hoy la recuperación la sobrescribe con la copia de T1: el journal `prepared` y su árbol
+    /// sobreviven al aborto, `recover()` los clasifica como «renames parciales» y restaura. Es el
+    /// defecto de E25-H01 con un rodeo — en vez de pisar la edición al publicar, la pisa al
+    /// recuperar, una operación más tarde y sin que nadie lo pida.
+    #[test]
+    fn el_aborto_de_ventana_no_deja_recuperacion_que_pise_la_edicion() {
+        let id = "e25-h02-aborto-no-pisa";
+        let (dir, ws, antes, edicion_externa) = aborto_por_edicion_externa(id);
+        drop(ws);
+
+        // La siguiente operación: reabre y recupera (el paso (2) de toda transacción).
+        let ws2 = Workspace::open(dir.path()).unwrap();
+        ws2.recover()
+            .expect("la recuperación de la siguiente operación no puede fallar");
+
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("dos.md")).unwrap(),
+            edicion_externa,
+            "la edición externa que el aborto protegió tiene que seguir intacta byte a byte: si la \
+             recuperación escribe la copia de T1 encima, el aborto no protegió nada — solo retrasó \
+             la pérdida una operación"
+        );
+        let mut esperado = antes.clone();
+        esperado.insert("dos.md".to_string(), edicion_externa.to_string());
+        assert_eq!(
+            canonical_md(dir.path()),
+            esperado,
+            "y ningún otro `.md` puede haberse movido: no hubo un solo rename que deshacer"
+        );
+    }
+
+    /// **E25-H02** · Criterio 7 — **Dado** ese mismo `WRITE_CONFLICT` de ventana con un `.md`
+    /// **creado por el usuario** dentro de la ventana, **Cuando** la siguiente operación recupera,
+    /// **Entonces** ese fichero **sigue existiendo**.
+    ///
+    /// El plan iba a crear `x.md`, así que el manifiesto `.absent` lo marca «no existía»; el usuario
+    /// crea ese mismo path en la ventana y el aborto lo respeta (E25-H01), pero la restauración de
+    /// la siguiente operación lo **borra** (`recovery.rs:331-333`): la garantía de
+    /// `fichero_nuevo_en_la_ventana_no_se_borra`, deshecha una operación más tarde.
+    #[test]
+    fn el_aborto_de_ventana_no_borra_el_fichero_nuevo_al_recuperar() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = siembra_documentos(dir.path(), &["uno", "dos"]);
+        let antes = canonical_md(dir.path());
+
+        let id = "e25-h02-aborto-fichero-nuevo";
+        let mut cs = change_set(id, vec![create_conforme("x.md", "Nota", "x")]);
+        cs.base_revision = ws.workspace_revision().unwrap();
+
+        let del_usuario = "---\ntype: Nota\ntitle: x\n---\n\n# x\n\nESTO LO ESCRIBIÓ EL USUARIO\n";
+        {
+            let root = dir.path().to_path_buf();
+            let ruta = dir.path().join("x.md");
+            failpoints::armar_gancho(PuntoDeGancho::AntesDePublicar, move || {
+                // Precondición del escenario, aseverada en el único instante en que ese estado
+                // existe: el plan marcó `x.md` como «no existía» en el manifiesto `.absent`, que es
+                // lo que hace peligrosa la restauración posterior (la marca dice «bórralo»).
+                let manifiesto = recovery_de(&root, id).join(".absent");
+                assert!(
+                    std::fs::read_to_string(&manifiesto)
+                        .unwrap_or_default()
+                        .lines()
+                        .any(|l| l.trim() == "x.md"),
+                    "el manifiesto `.absent` de la transacción debe marcar `x.md` como «no \
+                     existía»: {}",
+                    manifiesto.display()
+                );
+                assert!(
+                    !ruta.exists(),
+                    "y el path no puede existir aún: lo crea el usuario DENTRO de la ventana"
+                );
+                std::fs::write(&ruta, del_usuario).expect("el gancho debe poder crear x.md");
+            });
+        }
+        let resultado = ws.apply_transaction(&cs);
+        failpoints::desarmar_ganchos();
+        let err = resultado.expect_err("el canónico cambió en la ventana: debe abortar");
+        assert_eq!(
+            err.code(),
+            "WRITE_CONFLICT",
+            "el aborto de ventana es un WRITE_CONFLICT (E25-H01); era: {err:?}"
+        );
+        drop(ws);
+
+        let ws2 = Workspace::open(dir.path()).unwrap();
+        ws2.recover()
+            .expect("la recuperación de la siguiente operación no puede fallar");
+
+        assert!(
+            dir.path().join("x.md").is_file(),
+            "el `.md` que creó el usuario dentro de la ventana NO puede desaparecer al recuperar: \
+             el manifiesto `.absent` dice «no existía en T1», pero la transacción que lo escribió \
+             fue abortada y nunca creó nada — borrarlo es destruir un fichero ajeno sin copia"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("x.md")).unwrap(),
+            del_usuario,
+            "y con su contenido intacto"
+        );
+        let mut esperado = antes.clone();
+        esperado.insert("x.md".to_string(), del_usuario.to_string());
+        assert_eq!(
+            canonical_md(dir.path()),
+            esperado,
+            "y sin tocar nada más del canónico"
+        );
+    }
+
+    /// **E25-H02** · Criterio 8 — **Dado** ese mismo aborto, **Cuando** termina, **Entonces**
+    /// `recovery_pending()` es `false` y no queda ni journal ni árbol de recuperación de esa
+    /// transacción.
+    ///
+    /// El aborto sabe por control de flujo que **no ha entrado en el bucle de renames**, así que
+    /// sellar es exacto, no una amnistía: cero renames significa que el canónico nunca se movió. El
+    /// journal se borra **primero** (es lo que levanta el gate de `recovery_pending`) y el árbol
+    /// después.
+    #[test]
+    fn el_aborto_de_ventana_no_deja_recuperacion_pendiente() {
+        let id = "e25-h02-aborto-sin-pendiente";
+        let (dir, ws, _antes, _edicion) = aborto_por_edicion_externa(id);
+
+        assert!(
+            !ws.recovery_pending(),
+            "el aborto sella su propia transacción bajo el mismo lock: al devolver el \
+             WRITE_CONFLICT no puede quedar recuperación pendiente (si queda, la siguiente \
+             operación restaurará copias de un estado que nunca se publicó)"
+        );
+        assert!(
+            !journal_de(dir.path(), id).exists(),
+            "no puede quedar el fichero de journal en {}",
+            journal_de(dir.path(), id).display()
+        );
+        assert!(
+            !recovery_de(dir.path(), id).exists(),
+            "ni el árbol de recuperación en {}",
+            recovery_de(dir.path(), id).display()
+        );
+
+        drop(ws);
+        let ws2 = Workspace::open(dir.path()).unwrap();
+        assert!(
+            !ws2.recovery_pending(),
+            "y al reabrir tampoco (el sellado es durable, no un estado en memoria)"
+        );
+    }
+
+    /// **E25-H02** · Criterio 9 — **Dado** un aborto de ventana interrumpido **entre** el borrado
+    /// del journal y el del árbol, **Cuando** se reabre y corre el GC, **Entonces** no hay
+    /// recuperación pendiente y el huérfano se purga.
+    ///
+    /// Es la razón por la que el journal va **primero**: si el proceso muere entre los dos borrados
+    /// queda un árbol de recuperación **sin journal**, que es un huérfano legítimo y lo recoge el GC
+    /// (E24-H06). Al revés —árbol primero— quedaría un journal apuntando a copias que ya no están, y
+    /// la recuperación sellaría un estado parcial en silencio.
+    ///
+    /// Usa el punto de caída **nuevo** que esta historia añade a la taxonomía
+    /// (`FailPoint::EnMedioDelSelladoDelAborto`, ver la cabecera de la sección). Con él armado, el
+    /// error que sale de `apply_transaction` es el del failpoint y no el `WRITE_CONFLICT`: el test
+    /// solo exige `is_err()`.
+    #[test]
+    fn el_sellado_del_aborto_es_seguro_a_mitad() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = siembra_documentos(dir.path(), &["uno", "dos", "tres"]);
+        let antes = canonical_md(dir.path());
+
+        let id = "e25-h02-sellado-a-mitad";
+        let cs = cs_modifica(&ws, id, &["uno.md", "dos.md", "tres.md"]);
+
+        let edicion_externa = "---\ntype: Nota\ntitle: dos\n---\n\n# dos\n\nEDICIÓN EXTERNA\n";
+        {
+            let ruta = dir.path().join("dos.md");
+            failpoints::armar_gancho(PuntoDeGancho::AntesDePublicar, move || {
+                std::fs::write(&ruta, edicion_externa).expect("el gancho debe poder editar dos.md");
+            });
+        }
+        failpoints::armar(FailPoint::EnMedioDelSelladoDelAborto);
+        let resultado = ws.apply_transaction(&cs);
+        failpoints::desarmar();
+        failpoints::desarmar_ganchos();
+        assert!(
+            resultado.is_err(),
+            "la transacción abortada por la ventana no puede reportar éxito"
+        );
+
+        // El punto de caída está ENTRE los dos borrados: journal ya fuera, árbol todavía dentro.
+        assert!(
+            !journal_de(dir.path(), id).exists(),
+            "el sellado del aborto borra el journal PRIMERO (es lo que levanta el gate de \
+             `recovery_pending`): en {} no puede quedar nada",
+            journal_de(dir.path(), id).display()
+        );
+        assert!(
+            recovery_de(dir.path(), id).is_dir(),
+            "y el failpoint interrumpe justo después, con el árbol aún en disco: si ya no está, el \
+             punto se colocó en el sitio equivocado y el test no ejerce el borde que le importa"
+        );
+
+        drop(ws);
+        let ws2 = Workspace::open(dir.path()).unwrap();
+        assert!(
+            !ws2.recovery_pending(),
+            "un árbol de recuperación sin journal NO es una recuperación pendiente: por eso el \
+             journal se borra primero"
+        );
+        ws2.gc_receipts().expect("el GC debe correr");
+        assert!(
+            !recovery_de(dir.path(), id).exists(),
+            "y el árbol huérfano (sin journal ni recibo) lo purga el GC de E24-H06"
+        );
+
+        let mut esperado = antes.clone();
+        esperado.insert("dos.md".to_string(), edicion_externa.to_string());
+        assert_eq!(
+            canonical_md(dir.path()),
+            esperado,
+            "y el canónico sigue con la edición externa y sin un solo rename publicado"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// E25-H03 — El GC no destruye el plano de recuperación de una transacción viva
+// (`requirements/epica-25-endurecimiento-escritura.md`, bloque E25-H03). Fase ROJA.
+//
+// EL DEFECTO (S3)
+//
+// `gc_receipts` se invoca DESPUÉS de que la transacción suelte el lock (`lodestar-app/src/lib.rs`,
+// tras `apply_transaction`/`revert_transaction`), y `gc_runtime_huerfanos`
+// (`src/receipts.rs:314-360`) purga TODO directorio de `staging/`/`recovery/` —y todo sidecar
+// `recovery/<txn>.digests.json`— cuyo stem no aparezca ni en `journal/` ni en `receipts/`. Ese
+// criterio es correcto con un solo proceso y FALSO con dos: entre `backup_originals`
+// (`transaction.rs:162`) y `create_journal` (`:167`) hay una ventana —la que modela
+// `FailPoint::TrasBackupSinJournal`— en la que la transacción tiene copias y NO tiene ni journal ni
+// recibo. Un `change_apply` de otro proceso que termine en ese instante lanza su GC y **borra el
+// árbol de recuperación de la transacción viva**: esa publica sin copias y, si cae,
+// `restore_from_recovery` no encuentra directorio, devuelve `Ok(())` de inmediato
+// (`recovery.rs:323-325`) y la recuperación **sella un estado parcial en silencio**.
+//
+// EL CONTRATO QUE FIJAN ESTOS TESTS (sin fijar el mecanismo)
+//
+// La spec deja al implementador elegir entre (1) GC bajo el lock de publicación —fail-fast: si no lo
+// consigue, no barre y devuelve `Ok(())`— y (2) marca durable de «transacción en curso» creada antes
+// del backup y respetada por el GC como tercer conjunto de vivos, con dueño (pid/host) y criterio de
+// rancidez. Por eso estos tests aseveran **solo efectos en disco**:
+//
+// - con una transacción VIVA en la ventana, su árbol de recuperación y su sidecar sobreviven a un GC
+//   lanzado desde otro handle sobre la misma raíz (criterio 1);
+// - con el dueño MUERTO, el mismo material se purga (criterio 2, control anti-vacuo: el arreglo no
+//   puede consistir en dejar de barrer, ni en dejar basura inmortal);
+// - una transacción terminada —con éxito o con `Err`— no deja NINGÚN rastro de «en curso» bajo
+//   `.lodestar/runtime/` (criterio 3): la marca muere con la transacción, así que el huérfano que
+//   deja un aborto en la ventana sigue siendo basura recogible (es lo que mantiene verde
+//   `seam_real::caida_entre_backup_y_journal` sin tocarlo);
+// - un GC que no puede barrer (lock tomado, señal de propiedad ilegible) devuelve `Ok(())` y no
+//   altera lo publicado (criterio 4).
+//
+// EL SEAM QUE HACE FALTA (declarado en la salida de la fase roja; aquí solo se USA)
+//
+// `FailPoint::TrasBackupSinJournal` modela ese punto **abortando**, y para reproducir el defecto hace
+// falta lo contrario: que la transacción se quede ahí CONGELADA Y VIVA mientras otro handle barre.
+// Se reusa por tanto el gancho *ejecuta-y-espera* de E25-H01 con un punto nuevo:
+//
+// ```rust
+// pub enum PuntoDeGancho {
+//     AntesDePublicar,   // E25-H01
+//     /// Dentro de la ventana `[backup, journal)`: tras `backup_originals` y ANTES de
+//     /// `create_journal`. El gancho del test bloquea en un canal y la transacción CONTINÚA al
+//     /// liberarlo.
+//     TrasElBackup,      // E25-H03
+// }
+// ```
+//
+// El gancho es `thread_local` (a propósito: los tests corren en paralelo en el mismo proceso), así
+// que la transacción congelada corre en un **hilo propio** con el gancho armado EN ESE HILO — es lo
+// que hace `congelar_en_la_ventana`.
+//
+// ROJO ESPERADO HOY
+// - `gc_no_destruye_una_transaccion_en_curso_de_otro_proceso`: ROJO. El GC del segundo handle borra
+//   el árbol de recuperación y el sidecar de la transacción viva.
+// - `gc_sigue_purgando_huerfanos_de_dueno_muerto`, `la_marca_no_sobrevive_a_la_transaccion` y
+//   `el_gc_nunca_tumba_a_quien_lo_llama`: **controles anti-vacuos**, pasan ya hoy y tienen que
+//   seguir pasando. Hoy pasan trivialmente (el GC barre siempre y no mira ningún lock, y no existe
+//   marca alguna que pueda sobrevivir); lo que prohíben es que el arreglo del criterio 1 se pague
+//   con basura inmortal, con un GC que devuelva `Err` cuando el lock está tomado, o con una marca
+//   que sobreviva a su transacción.
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "test-failpoints")]
+mod gc_y_transacciones_vivas {
+    use super::*;
+    use lodestar_workspace::failpoints::{self, FailPoint, PuntoDeGancho};
+    use std::sync::mpsc;
+
+    /// Límite de cualquier rendez-vous con el hilo de la transacción congelada, y del propio GC.
+    /// Solo tiene que distinguir «colgado» (infinito) de «lento», así que se elige **muy** holgado:
+    /// un runner de CI cargado puede tardar segundos en lo que en local tarda milisegundos, y un
+    /// valor ajustado convertiría una aserción de robustez en un test frágil.
+    const LIMITE: Duration = Duration::from_secs(120);
+
+    /// El plano de control de la sesión (`.lodestar/runtime/`), exista o no.
+    fn runtime_de(root: &Path) -> PathBuf {
+        root.join(".lodestar").join("runtime")
+    }
+
+    /// El sidecar de huellas de las copias de una transacción (E25-H02),
+    /// `recovery/<txnId>.digests.json`: **hermano** del árbol, nunca dentro de él. Vive y muere con
+    /// él, así que el GC lo juzga con el mismo criterio de propiedad.
+    fn sidecar_de(root: &Path, txn_id: &str) -> PathBuf {
+        runtime_de(root)
+            .join("recovery")
+            .join(format!("{txn_id}.digests.json"))
+    }
+
+    /// El árbol de staging de una transacción (`staging/<txnId>/`), exista o no.
+    fn staging_de(root: &Path, txn_id: &str) -> PathBuf {
+        runtime_de(root).join("staging").join(txn_id)
+    }
+
+    /// Todo lo que queda bajo `.lodestar/runtime/` que **no** es el material de recuperación de
+    /// `txn_id` (su árbol `recovery/<txn>/…` y su sidecar `recovery/<txn>.digests.json`, que el
+    /// sellado conserva a propósito porque `change_revert` los necesita).
+    ///
+    /// Cualquier otra cosa que sobreviva a la transacción —un fichero de lock, una marca de «en
+    /// curso», un staging sin limpiar— es un rastro que no puede quedar: el GC de otro proceso lo
+    /// leería como «hay alguien publicando» y el material quedaría **inmortal**, que es cambiar un
+    /// defecto por otro.
+    fn resto_del_plano_de_control(root: &Path, txn_id: &str) -> BTreeMap<String, Vec<u8>> {
+        let arbol = format!("recovery/{txn_id}/");
+        let sidecar = format!("recovery/{txn_id}.digests.json");
+        ficheros_bajo(&runtime_de(root))
+            .into_iter()
+            .filter(|(rel, _)| !rel.starts_with(&arbol) && *rel != sidecar)
+            .collect()
+    }
+
+    /// Un pid que con certeza **no** corresponde a ningún proceso vivo: se arranca el propio binario
+    /// de test con `--list` (enumera los tests y sale 0 sin ejecutar ninguno) y se espera a que
+    /// muera. Portable —no depende de rangos de pid del sistema— y realista: es exactamente el hueco
+    /// que deja un proceso que se fue. Mismo truco que `pid_muerto()` en
+    /// `crates/lodestar-mcp/tests/concurrencia.rs`.
+    fn pid_inexistente() -> u32 {
+        let exe = std::env::current_exe().expect("ruta del binario de test");
+        let mut hijo = std::process::Command::new(exe)
+            .arg("--list")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("arrancar el proceso sonda");
+        let pid = hijo.id();
+        hijo.wait().expect("esperar al proceso sonda");
+        pid
+    }
+
+    /// Ejecuta `gc_receipts()` de `ws` con **límite de tiempo**: el modelo es fail-fast (`§19.5`),
+    /// así que un GC que se quedara esperando un lock es un defecto, y el test tiene que decirlo en
+    /// vez de dejar el CI colgado. Devuelve el resultado tal cual (el GC es best-effort: se espera
+    /// `Ok(())` incluso cuando no puede barrer).
+    fn gc_con_limite(ws: Workspace) -> Result<(), String> {
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let r = ws.gc_receipts().map_err(|e| format!("{}: {e:?}", e.code()));
+            let _ = tx.send(r);
+        });
+        match rx.recv_timeout(LIMITE) {
+            Ok(r) => r,
+            Err(_) => panic!(
+                "el GC del plano de control no puede BLOQUEAR esperando el lock de publicación: el \
+                 modelo es fail-fast; si no consigue barrer, no barre y devuelve Ok(())"
+            ),
+        }
+    }
+
+    /// Un `apply_transaction` **congelado y vivo** dentro de la ventana `[backup, journal)`.
+    ///
+    /// Corre en un **hilo propio** porque el gancho es `thread_local`: armarlo en el hilo del test no
+    /// afectaría a la transacción. Mientras este valor existe, la transacción está detenida en el
+    /// punto donde tiene copias de recuperación y todavía no tiene journal — el estado exacto que el
+    /// GC de otro proceso confunde hoy con basura.
+    struct VentanaCongelada {
+        hilo: Option<std::thread::JoinHandle<Result<Vec<RelPath>, String>>>,
+        liberar: Option<mpsc::Sender<()>>,
+    }
+
+    impl VentanaCongelada {
+        /// Deja que la transacción continúe y espera su resultado (`changedPaths` si publicó).
+        fn liberar(mut self) -> Result<Vec<RelPath>, String> {
+            self.liberar
+                .take()
+                .expect("la ventana solo se libera una vez")
+                .send(())
+                .expect("el hilo de la transacción debe seguir esperando en la ventana");
+            self.hilo
+                .take()
+                .expect("el hilo de la transacción solo se espera una vez")
+                .join()
+                .expect("el hilo de la transacción no puede paniquear")
+        }
+    }
+
+    impl Drop for VentanaCongelada {
+        /// Si una aserción del test falla **antes** de liberar la ventana, el hilo de la transacción
+        /// se queda esperando en el canal: al dropear el emisor recibiría `Disconnected` y paniquearía,
+        /// sepultando el fallo real bajo un segundo panic en un hilo secundario. Aquí se libera y se
+        /// espera, siempre en modo best-effort (un `Drop` que paniquea durante un desenrollado aborta
+        /// el proceso).
+        fn drop(&mut self) {
+            if let Some(tx) = self.liberar.take() {
+                let _ = tx.send(());
+            }
+            if let Some(hilo) = self.hilo.take() {
+                let _ = hilo.join();
+            }
+        }
+    }
+
+    /// Arranca `ws.apply_transaction(&cs)` en un hilo propio y **espera a que quede congelado**
+    /// dentro de la ventana `[backup, journal)`. Al volver, la transacción está viva y detenida ahí.
+    fn congelar_en_la_ventana(ws: Workspace, cs: ChangeSet) -> VentanaCongelada {
+        let (tx_dentro, rx_dentro) = mpsc::channel::<()>();
+        let (tx_liberar, rx_liberar) = mpsc::channel::<()>();
+
+        let hilo = std::thread::spawn(move || {
+            failpoints::armar_gancho(PuntoDeGancho::TrasElBackup, move || {
+                tx_dentro
+                    .send(())
+                    .expect("avisar al test de que la ventana está abierta");
+                rx_liberar
+                    .recv_timeout(LIMITE)
+                    .expect("el test debe liberar la ventana");
+            });
+            let r = ws.apply_transaction(&cs);
+            failpoints::desarmar_ganchos();
+            r.map(|(_, _, changed)| changed)
+                .map_err(|e| format!("{}: {e:?}", e.code()))
+        });
+
+        if let Err(e) = rx_dentro.recv_timeout(LIMITE) {
+            panic!(
+                "la transacción debe alcanzar la ventana `[backup, journal)` y quedarse ahí: el \
+                 gancho `PuntoDeGancho::TrasElBackup` —tras `backup_originals` y ANTES de \
+                 `create_journal`— no se disparó ({e})"
+            );
+        }
+        VentanaCongelada {
+            hilo: Some(hilo),
+            liberar: Some(tx_liberar),
+        }
+    }
+
+    /// **E25-H03** · Criterio 1 — **Dado** un proceso A detenido en la ventana `[backup, journal)`,
+    /// **Cuando** otro handle sobre la MISMA raíz ejecuta el GC, **Entonces** el árbol de
+    /// recuperación de A (y su sidecar) **sigue intacto**.
+    ///
+    /// Hoy lo borra: `gc_runtime_huerfanos` decide «vivo» por presencia en `journal/` ∪ `receipts/`,
+    /// y en esa ventana la transacción no está en ninguno de los dos aunque esté publicando. A
+    /// publica entonces sin copias, y si cae, la recuperación no encuentra directorio, devuelve
+    /// `Ok(())` y sella un estado parcial en silencio.
+    ///
+    /// El GC se lanza desde un **segundo `Workspace` sobre la misma raíz**, que es el «otro
+    /// proceso» del escenario: por eso la señal que protege a A tiene que ser **durable** (un
+    /// fichero de lock o una marca en disco), no un estado en memoria del handle que publica.
+    #[test]
+    fn gc_no_destruye_una_transaccion_en_curso_de_otro_proceso() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws_a = siembra_documentos(dir.path(), &["uno", "dos", "tres"]);
+        let antes = canonical_md(dir.path());
+
+        let id = "e25-h03-en-curso";
+        let cs = cs_modifica(&ws_a, id, &["uno.md", "dos.md", "tres.md"]);
+        let ventana = congelar_en_la_ventana(ws_a, cs);
+
+        // Precondición del escenario: A está DENTRO de la ventana — copias listas, journal ausente.
+        // Si el gancho se disparara en otro punto, el defecto no sería ni posible (con journal en
+        // disco el GC ya considera viva la transacción) y el test sería vacuo.
+        assert!(
+            recovery_de(dir.path(), id).is_dir(),
+            "el gancho debe dispararse DESPUÉS de `backup_originals`: falta el árbol {}",
+            recovery_de(dir.path(), id).display()
+        );
+        assert!(
+            sidecar_de(dir.path(), id).is_file(),
+            "y con él el sidecar de huellas de E25-H02: falta {}",
+            sidecar_de(dir.path(), id).display()
+        );
+        assert!(
+            !journal_de(dir.path(), id).exists(),
+            "y ANTES de `create_journal`: con journal en disco el GC ya vería la transacción como \
+             viva y el escenario no reproduciría nada ({})",
+            journal_de(dir.path(), id).display()
+        );
+
+        let respaldo_antes = ficheros_bajo(&recovery_de(dir.path(), id));
+        assert!(
+            !respaldo_antes.is_empty(),
+            "precondición: las copias de recuperación de A no pueden estar vacías"
+        );
+        let sidecar_antes = std::fs::read(sidecar_de(dir.path(), id)).expect("leer el sidecar");
+
+        // El «otro proceso»: un segundo handle sobre la misma raíz que barre el plano de control
+        // mientras A publica (es lo que hace `App::change_apply` al terminar su propia transacción).
+        let ws_b = Workspace::open(dir.path()).unwrap();
+        gc_con_limite(ws_b).expect(
+            "el GC es best-effort: nunca falla, ni cuando no puede barrer (criterio 4 de la \
+             historia)",
+        );
+
+        // EL CRITERIO.
+        assert_eq!(
+            ficheros_bajo(&recovery_de(dir.path(), id)),
+            respaldo_antes,
+            "el GC de otro proceso NO puede tocar el árbol de recuperación de una transacción EN \
+             CURSO: sin esas copias, A publica sin plano de recuperación y una caída posterior \
+             sella un estado parcial en silencio (`restore_from_recovery` sin directorio devuelve \
+             Ok de inmediato)"
+        );
+        assert_eq!(
+            std::fs::read(sidecar_de(dir.path(), id)).unwrap_or_default(),
+            sidecar_antes,
+            "ni su sidecar de huellas: sin él, las copias que sí sobrevivan se restauran sin \
+             verificar (E25-H02)"
+        );
+        assert!(
+            staging_de(dir.path(), id).is_dir(),
+            "ni el staging de la transacción viva, que es material del mismo lote en vuelo: {}",
+            staging_de(dir.path(), id).display()
+        );
+
+        // A continúa y publica: el GC de otro proceso no puede alterar su resultado.
+        let changed = ventana
+            .liberar()
+            .expect("la transacción congelada debe poder publicar al liberarla");
+        assert_eq!(
+            changed.len(),
+            3,
+            "A publica su lote completo: changedPaths={changed:?}"
+        );
+
+        let despues = canonical_md(dir.path());
+        assert_ne!(
+            despues, antes,
+            "A publicó: el canónico tiene que haber cambiado"
+        );
+        assert!(
+            despues.values().all(|c| c.contains("cuerpo NUEVO")),
+            "y con el resultado del plan: {despues:?}"
+        );
+        // Corolario del criterio, medido al final: las copias que `change_revert` necesita siguen
+        // completas. Son las mismas que el GC intruso se llevó a mitad de vuelo.
+        assert_eq!(
+            ficheros_bajo(&recovery_de(dir.path(), id)),
+            respaldo_antes,
+            "tras publicar, las copias de recuperación de la transacción siguen completas: son las \
+             que hacen reversible lo que acaba de publicarse"
+        );
+    }
+
+    /// **E25-H03** · Criterio 2 (**control anti-vacuo**) — **Dado** el mismo estado de la ventana
+    /// pero con el dueño **muerto**, **Cuando** corre el GC, **Entonces** el material se purga.
+    ///
+    /// El arreglo del criterio 1 no puede consistir en dejar de barrer: si la señal de propiedad
+    /// sobrevive a un crash y nadie la caduca, el material de esa ventana queda **inmortal** y se
+    /// cambia un defecto por otro (la spec lo dice explícitamente: la marca se considera rancia con
+    /// el mismo criterio de propiedad que el lock, `reclamar_si_huerfano`).
+    ///
+    /// Dos estados, los dos con dueño que ya no está:
+    /// - **(a)** el que deja un aborto en la ventana: la transacción TERMINÓ (con `Err`), así que su
+    ///   material es basura y no hay dueño que lo reclame;
+    /// - **(b)** el que deja un **crash real** en la ventana: el mismo material MÁS la señal durable
+    ///   de propiedad que el mecanismo escriba, con el pid de este proceso sustituido por uno
+    ///   **inexistente**. La señal se **captura de una ventana de verdad** (no se fabrica a mano),
+    ///   precisamente para no fijar el mecanismo: sea un fichero de lock o una marca de «en curso»,
+    ///   se repone tal cual con el dueño cambiado.
+    #[test]
+    fn gc_sigue_purgando_huerfanos_de_dueno_muerto() {
+        // ---- (a) la transacción terminó: su material es un huérfano sin dueño ----
+        {
+            let dir = tempfile::tempdir().unwrap();
+            let ws = siembra_documentos(dir.path(), &["uno", "dos"]);
+            let id = "e25-h03-huerfano-sin-dueno";
+            let cs = cs_modifica(&ws, id, &["uno.md", "dos.md"]);
+
+            failpoints::armar(FailPoint::TrasBackupSinJournal);
+            let r = ws.apply_transaction(&cs);
+            failpoints::desarmar();
+            assert!(
+                r.is_err(),
+                "el failpoint de la ventana debe abortar la transacción (si no, el test es vacuo)"
+            );
+            assert!(
+                recovery_de(dir.path(), id).is_dir(),
+                "precondición: el aborto deja el árbol de recuperación en disco"
+            );
+
+            let ws_b = Workspace::open(dir.path()).unwrap();
+            gc_con_limite(ws_b).expect("el GC nunca falla");
+
+            assert!(
+                !recovery_de(dir.path(), id).exists(),
+                "la transacción TERMINÓ: nadie va a publicar con esas copias, no hay journal ni \
+                 recibo, y su dueño no existe. Es basura y el GC tiene que recogerla — si el \
+                 mecanismo de protección la hace inmortal, se cambia un defecto por otro"
+            );
+            assert!(
+                !sidecar_de(dir.path(), id).exists(),
+                "y con ella su sidecar de huellas"
+            );
+        }
+
+        // ---- (b) crash REAL en la ventana: mismo material + señal de propiedad de un pid muerto --
+        let dir = tempfile::tempdir().unwrap();
+        let ws_a = siembra_documentos(dir.path(), &["uno", "dos"]);
+        let id = "e25-h03-dueno-muerto";
+        let cs = cs_modifica(&ws_a, id, &["uno.md", "dos.md"]);
+
+        let ventana = congelar_en_la_ventana(ws_a, cs);
+        // Foto del plano de control con la transacción VIVA dentro de la ventana: contiene el árbol,
+        // el sidecar, el staging y —sea cual sea el mecanismo— la señal durable de propiedad.
+        let foto = ficheros_bajo(&runtime_de(dir.path()));
+        assert!(
+            foto.keys()
+                .any(|r| r.starts_with(&format!("recovery/{id}"))),
+            "precondición: la foto debe incluir el material de recuperación de la ventana: {:?}",
+            foto.keys().collect::<Vec<_>>()
+        );
+        let señales: Vec<&String> = foto
+            .keys()
+            .filter(|r| !r.starts_with("recovery/") && !r.starts_with("staging/"))
+            .collect();
+        assert!(
+            !señales.is_empty(),
+            "precondición del escenario: mientras la transacción está viva en la ventana tiene que \
+             existir en disco ALGUNA señal durable de propiedad (el fichero de lock, o la marca de \
+             «en curso» que el mecanismo elija) — es lo que este caso convierte en «dueño muerto». \
+             Sin ninguna, este caso no se distinguiría del (a): {:?}",
+            foto.keys().collect::<Vec<_>>()
+        );
+        ventana
+            .liberar()
+            .expect("la transacción congelada publica al liberarla");
+
+        // Se repone el estado que dejaría un crash en esa ventana: todo lo que la foto tenía y el
+        // sellado se llevó, con el pid de ESTE proceso (vivo) sustituido por uno inexistente. El
+        // journal NO se repone: el crash ocurrió antes de crearlo, que es lo que hace del material
+        // un huérfano invisible para el criterio `journal/` ∪ `receipts/`.
+        let vivo = std::process::id().to_string();
+        let muerto = pid_inexistente().to_string();
+        for (rel, bytes) in &foto {
+            let destino = runtime_de(dir.path()).join(rel);
+            if destino.exists() {
+                continue;
+            }
+            if let Some(padre) = destino.parent() {
+                std::fs::create_dir_all(padre).unwrap();
+            }
+            let contenido = match std::str::from_utf8(bytes) {
+                Ok(texto) => texto.replace(&vivo, &muerto).into_bytes(),
+                Err(_) => bytes.clone(),
+            };
+            std::fs::write(&destino, contenido).unwrap();
+        }
+        assert!(
+            !journal_de(dir.path(), id).exists(),
+            "precondición: el crash es ANTERIOR al journal, así que no puede haber ninguno"
+        );
+
+        let ws_b = Workspace::open(dir.path()).unwrap();
+        gc_con_limite(ws_b).expect("el GC nunca falla");
+
+        assert!(
+            !recovery_de(dir.path(), id).exists(),
+            "el dueño de esta ventana está MUERTO (pid inexistente): su material es basura y el GC \
+             tiene que recogerlo. Una señal de propiedad sin criterio de rancidez deja basura \
+             inmortal en cada crash — es el defecto que E23-H23 ya cerró para el lock"
+        );
+        assert!(
+            !sidecar_de(dir.path(), id).exists(),
+            "y su sidecar de huellas con él"
+        );
+        assert!(
+            !staging_de(dir.path(), id).exists(),
+            "y su staging, que es el huérfano que motivó el barrido de E24-H06"
+        );
+    }
+
+    /// **E25-H03** · Criterio 3 — **Dado** una transacción que termina, **Cuando** ha terminado,
+    /// **Entonces** no queda **ninguna** marca de «en curso» bajo `.lodestar/runtime/`.
+    ///
+    /// La spec lo pide para el camino de éxito; el test cubre también el camino de `Err`, porque la
+    /// invariante es la misma —**la marca muere con la transacción**— y de ella depende que un
+    /// aborto en la ventana siga dejando un huérfano *recogible*: es exactamente lo que mantiene
+    /// verde `seam_real::caida_entre_backup_y_journal` (que aborta en la ventana **en este mismo
+    /// proceso**, con este pid VIVO) sin tener que tocarlo. Si la marca sobreviviera al `Err`, el GC
+    /// vería un dueño vivo para siempre.
+    ///
+    /// Lo único que el sellado conserva a propósito es el material de recuperación de la transacción
+    /// (árbol + sidecar), que `change_revert` necesita. Cualquier otro rastro —lock sin liberar,
+    /// marca de «en curso», staging sin limpiar— es lo que este test prohíbe.
+    #[test]
+    fn la_marca_no_sobrevive_a_la_transaccion() {
+        // ---- (a) camino feliz ----
+        let dir = tempfile::tempdir().unwrap();
+        let ws = siembra_documentos(dir.path(), &["uno", "dos"]);
+        let id = "e25-h03-marca-exito";
+        let cs = cs_modifica(&ws, id, &["uno.md", "dos.md"]);
+        ws.apply_transaction(&cs)
+            .expect("la transacción debe publicar");
+
+        let resto = resto_del_plano_de_control(dir.path(), id);
+        assert!(
+            resto.is_empty(),
+            "tras publicar con éxito no puede quedar ninguna marca de «en curso» bajo \
+             .lodestar/runtime/ (solo el material de recuperación de la transacción, que \
+             `change_revert` necesita); quedó: {:?}",
+            resto.keys().collect::<Vec<_>>()
+        );
+
+        // ---- (b) camino de `Err` dentro de la ventana: la transacción también TERMINÓ ----
+        let dir2 = tempfile::tempdir().unwrap();
+        let ws2 = siembra_documentos(dir2.path(), &["uno", "dos"]);
+        let id2 = "e25-h03-marca-abortada";
+        let cs2 = cs_modifica(&ws2, id2, &["uno.md", "dos.md"]);
+
+        failpoints::armar(FailPoint::TrasBackupSinJournal);
+        let r = ws2.apply_transaction(&cs2);
+        failpoints::desarmar();
+        assert!(r.is_err(), "el failpoint de la ventana debe abortar");
+
+        let resto2 = resto_del_plano_de_control(dir2.path(), id2);
+        assert!(
+            resto2.is_empty(),
+            "una transacción que muere en la ventana también ha TERMINADO: su marca no puede \
+             sobrevivirla. Si sobreviviera, el GC vería un dueño vivo con este pid y el huérfano \
+             sería inmortal — y `caida_entre_backup_y_journal` pasaría a fallar por la razón \
+             equivocada; quedó: {:?}",
+            resto2.keys().collect::<Vec<_>>()
+        );
+    }
+
+    /// **E25-H03** · Criterio 4 (**control anti-vacuo**) — **Dado** un GC que no consigue barrer
+    /// (lock tomado, señal de propiedad ilegible), **Cuando** se invoca, **Entonces** devuelve
+    /// `Ok(())` y la operación que lo llamó no se ve afectada.
+    ///
+    /// El GC es best-effort por definición y corre **después** de que la transacción haya publicado:
+    /// un `Err` suyo convertiría un apply publicado en un fallo sin recibo (el defecto que cierra
+    /// E25-H04). Por eso «GC bajo el lock» tiene que ser fail-fast y **silencioso**: si no consigue
+    /// el lock, no barre y devuelve `Ok(())`; jamás propaga el `WRITE_CONFLICT` de `acquire_lock`.
+    #[test]
+    fn el_gc_nunca_tumba_a_quien_lo_llama() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = siembra_documentos(dir.path(), &["uno", "dos"]);
+        let id = "e25-h03-gc-no-tumba";
+        let cs = cs_modifica(&ws, id, &["uno.md", "dos.md"]);
+        ws.apply_transaction(&cs)
+            .expect("la transacción debe publicar");
+        let publicado = canonical_md(dir.path());
+        assert!(
+            publicado.values().all(|c| c.contains("cuerpo NUEVO")),
+            "precondición: la transacción publicó su lote: {publicado:?}"
+        );
+
+        // (a) El lock de publicación está TOMADO por otro: el GC no puede barrer, y no pasa nada.
+        let guardia = ws
+            .acquire_lock()
+            .expect("tomar el lock de publicación en el test");
+        let ws_b = Workspace::open(dir.path()).unwrap();
+        assert_eq!(
+            gc_con_limite(ws_b),
+            Ok(()),
+            "un GC que no consigue barrer devuelve Ok(()): es best-effort y corre DESPUÉS de \
+             publicar, así que un Err suyo convertiría un apply publicado en un fallo sin recibo"
+        );
+        drop(guardia);
+
+        // (b) La señal de propiedad del plano de control es ILEGIBLE (bytes que no son UTF-8 ni
+        //     JSON). Tampoco puede tumbar el GC: ante la duda no se barre, pero se devuelve Ok.
+        std::fs::write(ws.lock_path(), [0xff, 0xfe, 0x00, 0x01]).expect("plantar un lock ilegible");
+        std::fs::write(
+            runtime_de(dir.path()).join("marca.ilegible"),
+            [0x00, 0xff, 0x00],
+        )
+        .expect("plantar una marca ilegible en el plano de control");
+        let ws_c = Workspace::open(dir.path()).unwrap();
+        assert_eq!(
+            gc_con_limite(ws_c),
+            Ok(()),
+            "una señal de propiedad ilegible deja al GC sin criterio para barrer, no con un error \
+             que propagar a quien acaba de publicar"
+        );
+
+        // Y lo que la operación llamante publicó sigue publicado, byte a byte.
+        assert_eq!(
+            canonical_md(dir.path()),
+            publicado,
+            "el GC no toca el conocimiento canónico: solo barre `.lodestar/runtime/`"
+        );
+    }
+}
+
+// ===========================================================================
+// E25-H05 — dónde viven sus tests (nota para la próxima auditoría)
+//
+// La historia lista este fichero entre sus «Pruebas», pero ninguno de sus criterios se puede fijar
+// aquí sin atarlo a una firma que la propia historia va a cambiar o a un módulo que no es visible:
+//
+// - **Ventana del revert y recibo de la inversa** (criterios 1, 2, 4 y 5) →
+//   `crates/lodestar-app/tests/escritura.rs`, módulo `reversion_re_verificada`. La ventana que
+//   describen empieza en la FACHADA (`App::change_revert` mira `receipt.result_revision` **antes**
+//   de que `revert_transaction` tome el lock), así que solo se reproduce entera desde ahí; y
+//   `revert_transaction` gana en esta historia un parámetro (la revisión observada), de modo que un
+//   test que lo llamara directamente obligaría al implementador a tocar los tests del autor.
+// - **Crash real durante la reversión** → `crates/lodestar-mcp/tests/crash_senal.rs`
+//   (`crash_durante_revert_deja_inversa_reversible`), donde ya vive el arnés de `SIGKILL`.
+// - **Fsync de directorio visible** (criterio 3) → `crates/lodestar-workspace/src/io.rs`, módulo
+//   unitario `durabilidad_del_directorio`: `mod io` es privado y la única inyección portable del
+//   fallo (un directorio que no se puede abrir) es incompatible con el descubrimiento, que necesita
+//   el mismo bit de lectura. Está declarado como límite estructural en la fase roja.
+// ===========================================================================
+
+// ===========================================================================
+// E25-H06 — El lock tiene dueño demostrable
+// (`requirements/epica-25-endurecimiento-escritura.md`, defecto (a)). Fase ROJA.
+//
+// Los tres criterios de lock de la historia miran el MISMO objeto: el cuerpo del fichero
+// `.lodestar/runtime/lock.json` y quién tiene derecho a borrarlo o a reclamarlo. Hoy:
+//
+//   1. `Drop for WorkspaceLock` borra **por ruta** (`lock.rs:51`), sin comprobar que el fichero
+//      siga siendo el suyo → si otro proceso lo reclamó por huérfano y lo recreó, el `Drop` del
+//      dueño original libera el lock del NUEVO dueño, y a partir de ahí encadena.
+//   2. `reclamar_si_huerfano` reclama con `dueño_muerto || caducado` (`lock.rs:197`): el TTL
+//      **manda sobre** la prueba de vida, así que un dueño vivo pero suspendido (portátil dormido,
+//      breakpoint, reloj movido) pierde su lock.
+//   3. El metadata no declara host (`lock.rs:255`), y `proceso_muerto` pregunta por el pid en la
+//      máquina **local**: sobre un workspace en red, el pid de otra máquina se juzga como propio.
+//
+// CONTRATO OBSERVABLE QUE ASUMEN ESTOS TESTS (mínimo, para el implementador)
+//
+// - El cuerpo del lock sigue siendo un **objeto JSON** legible desde fuera (ya lo es, y
+//   `concurrencia.rs::lock_huerfano` depende de ello desde E23-H23).
+// - Ese objeto declara la **identidad de máquina** en un campo `host` de tipo string no vacío. Es
+//   el único nombre que los tests fijan, porque fabricar «un lock de OTRO host» exige poder
+//   escribirlo; el resto del layout —en particular el **token de propiedad**— queda a elección del
+//   implementador y NINGÚN test lo nombra: los criterios se aseveran por su EFECTO (el fichero del
+//   segundo dueño sobrevive al `Drop` del primero).
+// - Los cuerpos que estos tests plantan se derivan del cuerpo REAL que escribe una adquisición
+//   (`acquire_lock` → leer el fichero → mutar solo `pid`/`timestamp`/`host`), de modo que un
+//   campo nuevo (token, boot-id, versión…) viaja en ellos sin que haya que tocar los tests.
+// - Un lock con `timestamp: 0` es reclamable en cualquier plataforma (TTL vencido por tres órdenes
+//   de magnitud): es la palanca portable que usan los tests para provocar un reclamo legítimo.
+//
+// PLATAFORMA: los criterios 2 y 3 hablan de la **prueba de vida por pid**, que solo existe en Unix
+// (`proceso_muerto` devuelve `false` fuera de Unix por diseño, `lock.rs:234`, y ahí el TTL es la
+// única red). Van gateados con `#[cfg(unix)]`: en Windows no habría nada que afirmar y el test
+// pasaría por la razón equivocada. El criterio 1 (Drop ajeno) es portable y no se gatea.
+// ===========================================================================
+
+mod propiedad_del_lock {
+    use super::*;
+
+    /// Segundos desde la época. Los tests fabrican `timestamp`s relativos a este reloj, que es el
+    /// mismo que lee `reclamar_si_huerfano` (`lock.rs:187-192`).
+    ///
+    /// `#[cfg(unix)]` porque sus únicos consumidores son los dos tests unix-only de este módulo (la
+    /// prueba de vida por pid no existe fuera de Unix): en Windows quedaría huérfano y el
+    /// `-D warnings` del CI lo rechaza como `dead_code`. El `cfg` es la verdad —es un helper de
+    /// escenarios unix-only—, no un `allow` que tape el aviso.
+    #[cfg(unix)]
+    fn ahora_epoch() -> u64 {
+        SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("el reloj del sistema debe ir por delante de la época")
+            .as_secs()
+    }
+
+    /// Un `timestamp` con el TTL del lock (15 min, `lock.rs:148`) **vencido de sobra**.
+    ///
+    /// `#[cfg(unix)]` por el mismo motivo que [`ahora_epoch`]: solo lo consumen los dos tests
+    /// unix-only del módulo.
+    #[cfg(unix)]
+    fn hace_una_hora() -> u64 {
+        ahora_epoch().saturating_sub(3600)
+    }
+
+    /// Un PID que con certeza **no** corresponde a ningún proceso vivo: se relanza el propio
+    /// binario de test con `--list` (libtest lista los tests y sale de inmediato, sin ejecutar
+    /// ninguno) y se espera a que muera. Portable —no depende de rangos de PID del sistema— y
+    /// realista: es exactamente el hueco que deja un escritor que se fue. Mismo truco que
+    /// `crates/lodestar-mcp/tests/concurrencia.rs::pid_muerto`, que allí puede usar el binario del
+    /// servidor y aquí no existe.
+    fn pid_muerto() -> u64 {
+        let exe = std::env::current_exe().expect("ruta del propio binario de test");
+        let mut hijo = std::process::Command::new(exe)
+            .arg("--list")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("arrancar el proceso sonda");
+        let pid = u64::from(hijo.id());
+        hijo.wait().expect("esperar al proceso sonda");
+        pid
+    }
+
+    /// Cuerpo REAL del lock, tal y como lo escribe una adquisición de verdad: se toma el lock, se
+    /// lee el fichero y se suelta. Es la base sobre la que los tests fabrican sus escenarios, de
+    /// modo que **todos** los campos que el implementador añada (token, host, boot-id…) viajen en
+    /// los cuerpos plantados sin que los tests tengan que conocerlos.
+    ///
+    /// `#[cfg(unix)]`: los dos escenarios que derivan su cuerpo del real —lock rancio de pid vivo y
+    /// lock de otro host— son unix-only, porque los dos hablan de la prueba de vida por pid. El
+    /// escenario portable (`drop_no_borra_un_lock_ajeno`) planta su cuerpo a mano con `timestamp: 0`
+    /// y no necesita este helper.
+    #[cfg(unix)]
+    fn metadata_real(ws: &Workspace) -> serde_json::Value {
+        let guard = ws
+            .acquire_lock()
+            .expect("tomar el lock para leer el metadata que escribe la implementación");
+        let raw = std::fs::read_to_string(ws.lock_path()).expect("leer el fichero de lock");
+        drop(guard);
+        serde_json::from_str(&raw).unwrap_or_else(|e| {
+            panic!("el cuerpo del lock debe ser JSON legible desde fuera (E23-H23 ya lo lee de vuelta): {e}; cuerpo: {raw:?}")
+        })
+    }
+
+    /// Planta `cuerpo` como fichero de lock del workspace (creando `runtime/` si falta) y devuelve
+    /// el texto exacto escrito, para poder aseverar supervivencia **byte a byte**.
+    fn plantar_lock(ws: &Workspace, cuerpo: &serde_json::Value) -> String {
+        let path = ws.lock_path();
+        let runtime = path
+            .parent()
+            .expect("el lock cuelga de `.lodestar/runtime/`");
+        std::fs::create_dir_all(runtime).expect("crear `.lodestar/runtime/`");
+        let texto = format!("{cuerpo}\n");
+        std::fs::write(&path, &texto).expect("plantar el fichero de lock del escenario");
+        texto
+    }
+
+    /// **E25-H06 · Criterio 1** (`drop_no_borra_un_lock_ajeno`) — **Dado** un lock reclamado por
+    /// huérfano y recreado por un segundo dueño, **Cuando** el guard del **primer** dueño se
+    /// dropea, **Entonces** el fichero de lock del segundo **sigue existiendo**.
+    ///
+    /// ROJO HOY: `Drop for WorkspaceLock` (`lock.rs:46-53`) hace `remove_file(&self.path)` a secas.
+    /// El guard de A no sabe que el fichero que hay en esa ruta ya no es el que él creó, así que
+    /// borra el de B — y B sigue publicando creyéndose el único escritor, con el lock libre para
+    /// cualquiera. Peor: la cascada. Cada `Drop` posterior libera el lock del siguiente dueño.
+    ///
+    /// El escenario es el que la historia describe, montado con la API pública y sin tocar reloj ni
+    /// procesos: A toma el lock; el cuerpo del lock pasa a **parecer** el de un muerto rancio
+    /// (`timestamp: 0`, pid inexistente) —que es justo lo que ve un tercero cuando A quedó
+    /// suspendido o su marca envejeció—; B lo reclama y lo recrea legítimamente
+    /// (`reclamar_si_huerfano` → `Reclamo::Reclamado`); y solo entonces A termina y suelta su guard.
+    ///
+    /// ANTI-VACUO (última aserción): cuando el dueño **de verdad** se va, el lock SÍ se libera. El
+    /// arreglo no puede consistir en que `Drop` deje de borrar: eso convertiría cada transacción en
+    /// un lock huérfano y devolvería el defecto que cerró E23-H23.
+    #[test]
+    fn drop_no_borra_un_lock_ajeno() {
+        let dir = tempfile::tempdir().unwrap();
+        // Dos handles sobre el mismo root: los dos «procesos» del escenario.
+        let ws_a = Workspace::open(dir.path()).unwrap();
+        let ws_b = Workspace::open(dir.path()).unwrap();
+        let lock_path = ws_a.lock_path();
+
+        // (1) A es el dueño inicial.
+        let guard_a = ws_a
+            .acquire_lock()
+            .expect("el primer publicador debe adquirir el lock");
+        assert!(
+            lock_path.exists(),
+            "precondición: mientras el guard de A vive, su fichero de lock existe"
+        );
+
+        // (2) El lock de A pasa a parecer huérfano y rancio: dueño inexistente y `timestamp: 0`
+        //     (TTL vencido en cualquier plataforma). Es exactamente lo que ve un tercero cuando el
+        //     dueño quedó suspendido, murió por SIGKILL o el reloj se movió.
+        let cuerpo_rancio = serde_json::json!({
+            "owner": "a-fantasma",
+            "pid": pid_muerto(),
+            "timestamp": 0,
+        });
+        plantar_lock(&ws_a, &cuerpo_rancio);
+
+        // (3) B lo reclama por huérfano y lo recrea: a partir de aquí el lock es SUYO.
+        let guard_b = ws_b
+            .acquire_lock()
+            .expect("un lock rancio de dueño inexistente debe reclamarse (E23-H23)");
+        let cuerpo_de_b =
+            std::fs::read_to_string(&lock_path).expect("B debe haber recreado el fichero de lock");
+
+        // (4) A termina su trabajo y suelta su guard. El fichero que hay en la ruta YA NO ES SUYO.
+        drop(guard_a);
+
+        assert!(
+            lock_path.exists(),
+            "el `Drop` del primer dueño NO puede borrar el lock que otro proceso reclamó y recreó: \
+             hoy `Drop for WorkspaceLock` borra por RUTA (`lock.rs:51`), sin comprobar que el \
+             fichero siga siendo el suyo, y a partir de ahí encadena (cada Drop libera el lock del \
+             siguiente). Un token de propiedad en el cuerpo lo resuelve: si el del fichero no es el \
+             mío, no es mi lock"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&lock_path).expect("el lock del segundo dueño debe seguir ahí"),
+            cuerpo_de_b,
+            "y sigue siendo el lock de B **byte a byte**: el Drop ajeno no lo toca de ninguna forma"
+        );
+
+        // (5) Y B conserva la exclusión: un tercero no lo obtiene mientras B vive (el fichero de B
+        //     es reciente y su dueño está vivo, así que no hay reclamo posible).
+        let ws_c = Workspace::open(dir.path()).unwrap();
+        assert!(
+            ws_c.acquire_lock().is_err(),
+            "tras el `Drop` ajeno el lock debe seguir CERRADO a terceros: si no, el escritor único \
+             se rompió aunque el fichero siguiera en disco"
+        );
+
+        // (6) ANTI-VACUO: el dueño legítimo sí libera al irse.
+        drop(guard_b);
+        assert!(
+            !lock_path.exists(),
+            "el `Drop` del dueño REAL debe seguir borrando su lock (RAII, E13-H02): el arreglo no \
+             puede consistir en dejar de borrar nunca, o cada transacción dejaría un huérfano"
+        );
+    }
+
+    /// **E25-H06 · Criterio 2** (`no_se_reclama_el_lock_de_un_pid_vivo`) — **Dado** un lock cuyo
+    /// `timestamp` es más viejo que el TTL pero cuyo pid está **vivo** en esta máquina, **Cuando**
+    /// otro proceso intenta adquirirlo, **Entonces** falla con `WRITE_CONFLICT` y el lock no se
+    /// reclama.
+    ///
+    /// ROJO HOY: `reclamar_si_huerfano` reclama con `dueño_muerto || caducado` (`lock.rs:197`), así
+    /// que el TTL **manda sobre** la prueba de vida: un dueño vivo pero suspendido —portátil
+    /// dormido, proceso parado en un breakpoint, máquina con el reloj movido— pierde su lock y el
+    /// invariante de escritor único se rompe en silencio. El arreglo lo invierte: un pid vivo
+    /// **local** impide el reclamo aunque el TTL haya vencido; el TTL sigue siendo la red portable
+    /// para cuando no se puede afirmar nada.
+    ///
+    /// POR QUÉ NO LO CUBRE YA `concurrencia.rs::lock_huerfano` (comprobado): su parte (5) planta un
+    /// lock de proceso vivo con `timestamp` **de ahora**, de modo que ni el pid ni el TTL permiten
+    /// reclamarlo — pasa hoy y seguirá pasando. La combinación que reproduce el defecto es la otra:
+    /// **TTL vencido + pid vivo**, que allí no se ejerce.
+    ///
+    /// El cuerpo se deriva del que escribe una adquisición REAL, así que declara este host (y el
+    /// token, y lo que el implementador añada); solo se mutan `pid` y `timestamp`.
+    ///
+    /// ANTI-VACUO (parte (b)): el mismo cuerpo rancio con el dueño **muerto** sí se reclama. El
+    /// arreglo no puede consistir en dejar de reclamar.
+    ///
+    /// UNIX-ONLY: la prueba de vida por pid solo existe en Unix (`lock.rs:233-236`); en Windows el
+    /// TTL es el único criterio admisible y no habría nada que afirmar.
+    #[cfg(unix)]
+    #[test]
+    fn no_se_reclama_el_lock_de_un_pid_vivo() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = Workspace::open(dir.path()).unwrap();
+        let otro = Workspace::open(dir.path()).unwrap();
+        let lock_path = ws.lock_path();
+
+        // (a) Lock RANCIO (TTL vencido de sobra) cuyo dueño es un proceso VIVO de esta máquina:
+        //     este mismo proceso de test, que por definición existe.
+        let mut meta = metadata_real(&ws);
+        meta["pid"] = serde_json::json!(std::process::id());
+        meta["timestamp"] = serde_json::json!(hace_una_hora());
+        let cuerpo_vivo = plantar_lock(&ws, &meta);
+
+        let err = otro.acquire_lock().err().unwrap_or_else(|| {
+            panic!(
+                "un lock cuyo dueño sigue VIVO en esta máquina NO puede reclamarse aunque su \
+                 `timestamp` haya vencido el TTL: hoy `reclamar_si_huerfano` reclama con \
+                 `dueño_muerto || caducado` (`lock.rs:197`), así que un escritor suspendido \
+                 (portátil dormido, breakpoint, reloj movido) pierde su lock y dos procesos \
+                 publican a la vez. La prueba de vida debe MANDAR sobre el TTL"
+            )
+        });
+        assert_eq!(
+            err.code(),
+            "WRITE_CONFLICT",
+            "el intento contra un lock vivo mapea al wire `WRITE_CONFLICT`: {err:?}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&lock_path).expect("el lock vivo debe seguir en disco"),
+            cuerpo_vivo,
+            "y el lock del proceso vivo sobrevive **byte a byte** al intento: no se reclama, no se \
+             reescribe, no se toca"
+        );
+
+        // (b) ANTI-VACUO: el MISMO cuerpo rancio, pero con el dueño realmente muerto, sí se
+        //     reclama. La única diferencia entre (a) y (b) es la vida del pid, que es justo el
+        //     discriminante que la historia introduce.
+        meta["pid"] = serde_json::json!(pid_muerto());
+        plantar_lock(&ws, &meta);
+        let guard = otro.acquire_lock().expect(
+            "un lock rancio de dueño MUERTO se sigue reclamando (E23-H23): el arreglo no puede \
+             consistir en dejar de reclamar nunca, o un SIGKILL volvería a cerrar el workspace a la \
+             escritura para siempre",
+        );
+        drop(guard);
+    }
+
+    /// **E25-H06 · Criterio 3** (`pid_de_otro_host_no_decide`) — **Dado** un lock cuyo metadata
+    /// declara **otro host**, **Cuando** se examina, **Entonces** el pid no se usa como criterio y
+    /// solo decide el TTL.
+    ///
+    /// ROJO HOY, por dos razones encadenadas: (i) `lock_metadata` (`lock.rs:245-256`) no escribe
+    /// ninguna identidad de máquina, así que la primera aserción —el contrato observable— falla ya;
+    /// y (ii) aunque se plantara el campo, `reclamar_si_huerfano` consulta `proceso_muerto` sin
+    /// mirarlo (`lock.rs:194`), de modo que un pid de OTRA máquina se juzga contra la tabla de
+    /// procesos de ÉSTA: sobre un workspace en red (o entre namespaces de PID) el lock de un
+    /// escritor vivo se reclama porque «su» pid no existe aquí.
+    ///
+    /// CONTRATO OBSERVABLE MÍNIMO que fija este test (lo demás queda abierto): el cuerpo del lock
+    /// declara un campo `host` de tipo string no vacío. Es el único nombre necesario para poder
+    /// **fabricar** un lock de otra máquina; el token de propiedad del criterio 1 no se nombra en
+    /// ninguna parte porque allí basta con aseverar su efecto.
+    ///
+    /// Las dos mitades son el criterio entero: con host ajeno, un pid muerto **no** reclama (i) y
+    /// el TTL vencido **sí** (ii). La segunda es además el control anti-vacuo: «otro host» no puede
+    /// significar «intocable», o un workspace compartido se quedaría bloqueado para siempre tras el
+    /// primer crash remoto.
+    ///
+    /// UNIX-ONLY: fuera de Unix `proceso_muerto` ya devuelve `false` siempre, así que la mitad (i)
+    /// pasaría por la razón equivocada.
+    #[cfg(unix)]
+    #[test]
+    fn pid_de_otro_host_no_decide() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = Workspace::open(dir.path()).unwrap();
+        let otro = Workspace::open(dir.path()).unwrap();
+        let lock_path = ws.lock_path();
+
+        // (0) CONTRATO: una adquisición real declara la máquina que tomó el lock.
+        let mut meta = metadata_real(&ws);
+        let host_local = meta
+            .get("host")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+            .unwrap_or_else(|| {
+                panic!(
+                    "el cuerpo del lock debe declarar la identidad de máquina en un campo `host` \
+                     (string no vacío). Sin él, `proceso_muerto` pregunta por un pid ajeno en la \
+                     tabla de procesos LOCAL y un lock de otra máquina se juzga como propio — el \
+                     defecto (a) de E25-H06. Cuerpo actual: {meta}"
+                )
+            });
+        assert!(
+            !host_local.trim().is_empty(),
+            "el `host` del lock no puede ser la cadena vacía: sería una identidad que no \
+             identifica, y `host ajeno` dejaría de poder distinguirse de `mismo host`"
+        );
+
+        // (i) Lock de OTRO host, con un pid que aquí está muerto y un `timestamp` reciente.
+        //     El pid no dice nada: ese número es de la tabla de procesos de otra máquina.
+        let host_ajeno = format!("{host_local}-otra-maquina");
+        assert_ne!(
+            host_ajeno, host_local,
+            "precondición: el host fabricado tiene que ser distinto del local"
+        );
+        meta["host"] = serde_json::json!(host_ajeno);
+        meta["pid"] = serde_json::json!(pid_muerto());
+        meta["timestamp"] = serde_json::json!(ahora_epoch());
+        let cuerpo_remoto = plantar_lock(&ws, &meta);
+
+        let err = otro.acquire_lock().err().unwrap_or_else(|| {
+            panic!(
+                "con un lock que declara OTRO host, el pid NO puede decidir: `proceso_muerto` \
+                 responde por la tabla de procesos local, y ahí ese número o no existe o es de un \
+                 proceso distinto. Con el TTL sin vencer, el único veredicto admisible es \
+                 `WRITE_CONFLICT` — hoy se reclama el lock de un escritor remoto vivo y dos \
+                 máquinas publican a la vez sobre el mismo workspace"
+            )
+        });
+        assert_eq!(
+            err.code(),
+            "WRITE_CONFLICT",
+            "el intento contra un lock remoto no caducado mapea al wire `WRITE_CONFLICT`: {err:?}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&lock_path).expect("el lock remoto debe seguir en disco"),
+            cuerpo_remoto,
+            "y el lock remoto sobrevive byte a byte: no se reclama ni se reescribe"
+        );
+
+        // (ii) El MISMO lock remoto, ya caducado: el TTL es la red portable y sí decide. Control
+        //      anti-vacuo — «otro host» no puede significar «intocable», o un crash remoto dejaría
+        //      el workspace bloqueado para siempre.
+        meta["timestamp"] = serde_json::json!(hace_una_hora());
+        plantar_lock(&ws, &meta);
+        let guard = otro.acquire_lock().expect(
+            "con el host ajeno el TTL es el ÚNICO criterio, y aquí ha vencido: el lock se reclama. \
+             Si no, un lock remoto se volvería inmortal y el workspace quedaría cerrado a la \
+             escritura",
+        );
+        drop(guard);
     }
 }

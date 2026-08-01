@@ -124,7 +124,9 @@ pub fn list() -> Value {
         {"name": "metadata_inspect", "description": "Descubre las convenciones de metadata de una base desconocida SIN necesitar un schema: el catálogo de propiedades (qué campos existen, en cuántos documentos y de qué tipos) o la inspección de una propiedad (presencia/ausencia, tipos y valores frecuentes).",
          "inputSchema": { "type": "object", "properties": {
              "mode": { "type": "string", "description": "«catalog» (todos los campos con presencia y tipos) o «field» (inspección de un campo concreto, requiere «field»).", "enum": ["catalog", "field"] },
-             "field": { "type": "string", "description": "Path punteado del campo a inspeccionar (p. ej. «status» o «service.tier»); solo con mode «field»." }
+             "field": { "type": "string", "description": "Dot-path del campo a inspeccionar (p. ej. «status» o «service.tier»); solo con mode «field». Mismo dialecto que «where»/«filter»: «frontmatter.status» ≡ «status», y una clave de TU frontmatter que colisione con un namespace reservado se alcanza anclada («frontmatter.graph.backlinks»). Un namespace reservado a secas («graph.backlinks», «document.path») NO es metadata: es INVALID_SCHEMA (para el grafo, graph_query)." },
+             "limit": { "type": "integer", "minimum": 1, "maximum": 1000, "default": 100, "description": "Trunca la lista de la página: «fields» con mode «catalog», «values» con mode «field». Los agregados (presentIn/missingIn/inferredTypes) siguen describiendo TODO el workspace: se pagina la lista, no la estadística." },
+             "cursor": { "type": "string", "description": "Cursor opaco de paginación devuelto en «nextCursor»." }
          }, "required": ["mode"], "additionalProperties": false },
          "outputSchema": schemas::metadata_inspect_schema()},
         {"name": "knowledge_check", "description": "Audita el conocimiento (diagnósticos de interpretabilidad y enlaces del documento) con scopes y severidad mínima; diagnósticos con id estable y paginación por cursor.",
@@ -156,7 +158,7 @@ pub fn list() -> Value {
              }, "required": ["path"], "additionalProperties": false },
              "depth": { "type": "integer", "minimum": 1, "default": 1, "description": "Solo «neighborhood»." },
              "direction": { "type": "string", "enum": ["out", "in", "both"], "default": "out", "description": "Solo «neighborhood»." },
-             "limit": { "type": "integer", "minimum": 1, "description": "Trunca el nº de nodos devueltos (paginación por cursor)." },
+             "limit": { "type": "integer", "minimum": 1, "maximum": 1000, "default": 100, "description": "Trunca el nº de nodos devueltos (paginación por cursor). Sin él se sirven 100 nodos: hasta v0.4.0 no había default ni máximo, así que «components» sobre una base grande devolvía el grafo COMPLETO en una respuesta (E26-H10)." },
              "cursor": { "type": "string", "description": "Cursor opaco de paginación devuelto en «nextCursor»." }
          }, "required": ["operation"], "additionalProperties": false },
          "outputSchema": schemas::graph_query_schema()},
@@ -301,7 +303,9 @@ pub fn call(app: &App, profile: Profile, name: &str, params: &Value) -> ToolResu
                 .knowledge_search(text, where_expr, filter, &proyecciones, limit, cursor)
                 // E24-H10: el mensaje ABRE con el código estable. `Display` a secas dejaba
                 // «entrada inválida: …», legible pero sin nada por lo que un agente pueda ramificar.
-                .map_err(|e| format!("{}: {e}", lodestar_app::workspace_error_code(&e).as_str()))?;
+                // E26-H07: ese emparejado lo hace ahora `AppError` —en `lodestar-app`, para las diez
+                // tools— y su `Display` YA es «CÓDIGO: mensaje», así que aquí no se antepone nada.
+                .map_err(|e| e.to_string())?;
             to_json(&results)
         }
         "knowledge_get" => {
@@ -311,20 +315,28 @@ pub fn call(app: &App, profile: Profile, name: &str, params: &Value) -> ToolResu
                 }
                 None => return Err(falta("ref")),
             };
+            // E26-H07: también estos errores de FORMA llevan código; el `Display` de serde a secas
+            // dejaba un texto sin nada por lo que ramificar (mismo criterio que `forma_invalida`).
             let include: Vec<String> = match params.get("include") {
-                Some(v) => serde_json::from_value(v.clone()).map_err(|e| e.to_string())?,
+                Some(v) => {
+                    serde_json::from_value(v.clone()).map_err(|e| forma_invalida("include", e))?
+                }
                 None => Vec::new(),
             };
             let sections: Option<Vec<Vec<String>>> = match params.get("sections") {
-                Some(v) => Some(serde_json::from_value(v.clone()).map_err(|e| e.to_string())?),
+                Some(v) => Some(
+                    serde_json::from_value(v.clone()).map_err(|e| forma_invalida("sections", e))?,
+                ),
                 None => None,
             };
-            // Mapeo de error a wire (E10-H02): el texto que ve el agente lleva el código estable
-            // `ErrorCode::as_str()` (p. ej. «DOCUMENT_NOT_FOUND»), NUNCA el `Debug` de la variante
-            // (`DocumentNotFound`) — el catálogo de 16 códigos es el contrato, no el nombre Rust.
+            // Mapeo de error a wire (E10-H02 + E26-H07): el `Display` de `AppError` compone
+            // «CÓDIGO: mensaje» con el código estable `ErrorCode::as_str()` (p. ej.
+            // «DOCUMENT_NOT_FOUND»), NUNCA el `Debug` de la variante (`DocumentNotFound`) — el
+            // catálogo de 16 códigos es el contrato, no el nombre Rust. Hasta v0.4.0 esta línea era
+            // `e.as_str().to_string()`: el código PELADO, sin una palabra sobre qué corregir.
             let document = app
                 .knowledge_get(&r, &include, sections.as_deref())
-                .map_err(|e| e.as_str().to_string())?;
+                .map_err(|e| e.to_string())?;
             Ok(json!({ "document": to_json(&document)? }))
         }
         "metadata_inspect" => {
@@ -333,11 +345,16 @@ pub fn call(app: &App, profile: Profile, name: &str, params: &Value) -> ToolResu
                 .and_then(Value::as_str)
                 .ok_or_else(|| falta("mode"))?;
             let field = params.get("field").and_then(Value::as_str);
-            // Mismo mapeo de error a wire que `knowledge_get` (E10-H02): el código estable
-            // `ErrorCode::as_str()`, nunca el `Debug` de la variante.
+            // `inputSchema` declara `minimum: 1, maximum: 1000, default: 100` (E26-H10): esta era la
+            // única de las 10 tools sin cota, y sus dos modos devuelven una lista de tamaño
+            // proporcional al workspace.
+            let limit = limit_validado(params, 1, 1000)?;
+            let cursor = str_validado(params, "cursor")?;
+            // Mismo mapeo de error a wire que `knowledge_get` (E10-H02, E26-H07): «CÓDIGO:
+            // mensaje» con el código estable `ErrorCode::as_str()`, nunca el `Debug` de la variante.
             let inspection = app
-                .metadata_inspect(mode, field)
-                .map_err(|e| e.as_str().to_string())?;
+                .metadata_inspect(mode, field, limit, cursor)
+                .map_err(|e| e.to_string())?;
             to_json(&inspection)
         }
         "knowledge_check" => {
@@ -364,11 +381,11 @@ pub fn call(app: &App, profile: Profile, name: &str, params: &Value) -> ToolResu
             // `inputSchema` declara `minimum: 1, maximum: 1000` (E24-H09).
             let limit = limit_validado(params, 1, 1000)?;
             let cursor = str_validado(params, "cursor")?;
-            // Mismo mapeo de error a wire que `knowledge_get`/`metadata_inspect` (E10-H02): el código
-            // estable `ErrorCode::as_str()`, nunca el `Debug` de la variante.
+            // Mismo mapeo de error a wire que `knowledge_get`/`metadata_inspect` (E10-H02,
+            // E26-H07): «CÓDIGO: mensaje», nunca el `Debug` de la variante.
             let report = app
                 .knowledge_check(&scope, min_severity, include_fixes, limit, cursor)
-                .map_err(|e| e.as_str().to_string())?;
+                .map_err(|e| e.to_string())?;
             to_json(&report)
         }
         "graph_query" => {
@@ -376,23 +393,34 @@ pub fn call(app: &App, profile: Profile, name: &str, params: &Value) -> ToolResu
                 .get("operation")
                 .and_then(Value::as_str)
                 .ok_or_else(|| falta("operation"))?;
+            // Presente pero mal formado se juzga AQUÍ (forma); AUSENTE lo juzga `App::graph_query`,
+            // que es quien sabe qué operación exige qué extremo (E26-H07).
             let r: Option<DocumentRef> = match params.get("ref") {
-                Some(v) => Some(serde_json::from_value(v.clone()).map_err(|e| e.to_string())?),
+                Some(v) => {
+                    Some(serde_json::from_value(v.clone()).map_err(|e| forma_invalida("ref", e))?)
+                }
                 None => None,
             };
             // Segundo extremo, solo para `path_between` (destino del camino dirigido).
             let to: Option<DocumentRef> = match params.get("to") {
-                Some(v) => Some(serde_json::from_value(v.clone()).map_err(|e| e.to_string())?),
+                Some(v) => {
+                    Some(serde_json::from_value(v.clone()).map_err(|e| forma_invalida("to", e))?)
+                }
                 None => None,
             };
             // `inputSchema` declara `minimum: 1` (E24-H09).
             let depth = entero_validado(params, "depth", 1)?.map(|n| n as u32);
             let direction = str_validado(params, "direction")?;
-            // `inputSchema` declara `minimum: 1` sin máximo para graph_query (E24-H09).
-            let limit = limit_validado(params, 1, u64::MAX)?;
+            // `inputSchema` declara `minimum: 1, maximum: 1000, default: 100` (E24-H09 + E26-H10:
+            // hasta v0.4.0 esta llamada era `limit_validado(params, 1, u64::MAX)` sobre un schema sin
+            // máximo, así que un `limit` arbitrario se aceptaba y `limit` ausente servía el grafo
+            // entero).
+            let limit = limit_validado(params, 1, 1000)?;
             let cursor = str_validado(params, "cursor")?;
             // Mismo mapeo de error a wire que `knowledge_get`/`metadata_inspect`/`knowledge_check`
-            // (E10-H02): el código estable `ErrorCode::as_str()`, nunca el `Debug` de la variante.
+            // (E10-H02, E26-H07): «CÓDIGO: mensaje», nunca el `Debug` de la variante. Que FALTE
+            // «ref»/«to» lo juzga `App::graph_query` como INVALID_SCHEMA (E26-H07): aquí no se
+            // pre-valida, para que el mensaje pueda nombrar la operación que lo exige.
             let result = app
                 .graph_query(
                     operation,
@@ -403,7 +431,7 @@ pub fn call(app: &App, profile: Profile, name: &str, params: &Value) -> ToolResu
                     limit,
                     cursor,
                 )
-                .map_err(|e| e.as_str().to_string())?;
+                .map_err(|e| e.to_string())?;
             to_json(&result)
         }
         "impact_analyze" => {
@@ -420,11 +448,11 @@ pub fn call(app: &App, profile: Profile, name: &str, params: &Value) -> ToolResu
                 .ok_or_else(|| falta("proposedOperation.kind"))?;
             // `inputSchema` declara `minimum: 1` (E24-H09).
             let depth = entero_validado(params, "depth", 1)?.map(|n| n as u32);
-            // Mismo mapeo de error a wire que las demás tools (E10-H02): el código estable
-            // `ErrorCode::as_str()`, nunca el `Debug` de la variante.
+            // Mismo mapeo de error a wire que las demás tools (E10-H02, E26-H07): «CÓDIGO:
+            // mensaje», nunca el `Debug` de la variante.
             let report = app
                 .impact_analyze(&r, kind, depth)
-                .map_err(|e| e.as_str().to_string())?;
+                .map_err(|e| e.to_string())?;
             to_json(&report)
         }
         "change_plan" => {
@@ -443,7 +471,9 @@ pub fn call(app: &App, profile: Profile, name: &str, params: &Value) -> ToolResu
                 params.get("operations").cloned().unwrap_or(Value::Null)
             };
             let policy: PlanPolicy = match params.get("policy") {
-                Some(v) => serde_json::from_value(v.clone()).map_err(|e| e.to_string())?,
+                Some(v) => {
+                    serde_json::from_value(v.clone()).map_err(|e| forma_invalida("policy", e))?
+                }
                 None => PlanPolicy::default(),
             };
             // E23-H05: validación de FORMA del enum, igual que las comprobaciones de «falta el
@@ -460,11 +490,12 @@ pub fn call(app: &App, profile: Profile, name: &str, params: &Value) -> ToolResu
                     InboundLinksPolicy::WIRE_VALUES
                 ));
             }
-            // Mismo mapeo de error a wire que las demás tools (E10-H02): el código estable
-            // `ErrorCode::as_str()` (p. ej. «REVISION_CONFLICT»), nunca el `Debug` de la variante.
+            // Mismo mapeo de error a wire que las demás tools (E10-H02, E26-H07): «CÓDIGO:
+            // mensaje» (p. ej. «REVISION_CONFLICT: …»), nunca el `Debug` de la variante. El
+            // diagnóstico del parser de un `selection.where` malformado viaja ENTERO en ese mensaje.
             let result = app
                 .change_plan(expected, &raw_ops, policy)
-                .map_err(|e| e.as_str().to_string())?;
+                .map_err(|e| e.to_string())?;
             to_json(&result)
         }
         "change_apply" => {
@@ -479,11 +510,11 @@ pub fn call(app: &App, profile: Profile, name: &str, params: &Value) -> ToolResu
                 .get("expectedWorkspaceRevision")
                 .and_then(Value::as_str)
                 .map(|s| WorkspaceRevision(s.to_string()));
-            // Mismo mapeo de error a wire que las demás tools (E10-H02): el código estable
-            // `ErrorCode::as_str()` (p. ej. «PLAN_STALE»/«PERMISSION_DENIED»), nunca el `Debug`.
+            // Mismo mapeo de error a wire que las demás tools (E10-H02, E26-H07): «CÓDIGO:
+            // mensaje» (p. ej. «PLAN_STALE: …»/«PERMISSION_DENIED: …»), nunca el `Debug`.
             let result = app
                 .change_apply(&change_set_id, expected)
-                .map_err(|e| e.as_str().to_string())?;
+                .map_err(|e| e.to_string())?;
             to_json(&result)
         }
         "change_revert" => {
@@ -498,11 +529,11 @@ pub fn call(app: &App, profile: Profile, name: &str, params: &Value) -> ToolResu
                 .get("expectedWorkspaceRevision")
                 .and_then(Value::as_str)
                 .map(|s| WorkspaceRevision(s.to_string()));
-            // Mismo mapeo de error a wire que las demás tools (E10-H02): el código estable
-            // `ErrorCode::as_str()` (p. ej. «WRITE_CONFLICT»/«PLAN_EXPIRED»), nunca el `Debug`.
+            // Mismo mapeo de error a wire que las demás tools (E10-H02, E26-H07): «CÓDIGO:
+            // mensaje» (p. ej. «WRITE_CONFLICT: …»/«PLAN_EXPIRED: …»), nunca el `Debug`.
             let result = app
                 .change_revert(&receipt_id, expected)
-                .map_err(|e| e.as_str().to_string())?;
+                .map_err(|e| e.to_string())?;
             to_json(&result)
         }
         other => Err(format!("tool desconocida: {other}")),
@@ -510,7 +541,14 @@ pub fn call(app: &App, profile: Profile, name: &str, params: &Value) -> ToolResu
 }
 
 fn to_json<T: serde::Serialize>(v: &T) -> ToolResult {
-    serde_json::to_value(v).map_err(|e| e.to_string())
+    // E26-H07: hasta el fallo improbable (una respuesta del motor que no serializa) abre con un
+    // código del catálogo, para que «CÓDIGO: mensaje» sea invariante de TODA salida de error.
+    serde_json::to_value(v).map_err(|e| {
+        format!(
+            "{}: la respuesta no se pudo serializar a JSON: {e}",
+            ErrorCode::InternalIoError.as_str()
+        )
+    })
 }
 
 // ---------------------------------------------------------------------------

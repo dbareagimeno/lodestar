@@ -107,6 +107,44 @@ que la CLI y el MCP dieran veredictos distintos sobre el mismo workspace.
 spec de comportamiento** y el arnés diferencial se retira. La spec de la migración es
 `docs/REFACTOR_PHASE_2.md`; `prototype/` queda como referencia histórica de v0.2.x.
 
+## Mapa de épicas de endurecimiento posterior a v0.3.1
+
+> Auditoría del **camino de escritura** y de la **superficie de errores** (2026-07-29), posterior a la
+> publicación de v0.3.1 y al cierre del bloque C de E24. Ninguna de las dos es una fase de `§20.14`
+> ni de `§19.8`: son épicas de **endurecimiento** que cierran defectos que la suite no mira, todos de
+> concurrencia, durabilidad o superficie. **Ratificadas el 2026-07-29** y **COMPLETAS el 2026-08-01**
+> (rama `epic/e25-e26-endurecimiento`, hasta `7ebe764`). Detalle por historia, veredictos de los
+> jueces ciegos e invariantes verificados en
+> [`IMPLEMENTATION_STATUS.md`](../IMPLEMENTATION_STATUS.md); la deuda que quedó **fuera** por decisión
+> está en [`DECISIONES.md §16`](../DECISIONES.md).
+
+| Épica | Estado | Área | Doc |
+|---|---|---|---|
+| **E25** — Endurecimiento del camino de escritura | ✅ **completa · 6/6 historias** | TOCTOU entre planificar y publicar · durabilidad y verificación de las copias de recuperación · GC vs transacción viva de otro proceso · recibo antes del punto de no retorno · fsync de borrado y revert bajo el lock · propiedad del lock y `.gitignore` del usuario | [epica-25-endurecimiento-escritura.md](epica-25-endurecimiento-escritura.md) |
+| **E26** — UX de errores de la superficie MCP | ✅ **completa · 5/5 historias** | código **y** mensaje en las 10 tools · `TypeError` de consulta visible · un solo dialecto de dot-paths · cotas y paginación en toda la superficie · contrato sincronizado | [epica-26-ux-errores.md](epica-26-ux-errores.md) |
+
+> **Las dos épicas se enmendaron durante la implementación**, las dos por un hallazgo del ciclo
+> anterior y con commit de spec propio antes de la fase roja: `E25-H02` ganó el sellado del aborto de
+> ventana (lo destapó implementar `E25-H01`) y `E25-H05` ganó «revertir también deja recibo»
+> (**MAYOR-2** del juez ciego de `E25-H04`). El texto de las épicas incluye ambas enmiendas, así que
+> describe lo que se construyó, no solo lo que se planificó.
+
+**Orden de construcción (E25–E26)**: **E25 → E26** (misma rama). Dentro de E25 el orden es
+estrictamente `H01 → H02 → H03 → H04 → H05 → H06`: las cuatro primeras tocan el mismo camino y los
+mismos ficheros (`transaction.rs`/`recovery.rs`/`receipts.rs`), y cada una apoya el contrato de la
+siguiente. Dentro de E26, `H07 → H08 → H09 → H10 → H11`: **H07** abre el canal de código+mensaje del
+que dependen las tres siguientes, y **H11** es la pasada final de coherencia del contrato — depende
+de H07–H10 **y** de **E25-H02**, cuyo delta entra en la misma pasada. E26 no depende
+funcionalmente de E25 salvo en esa fila: si se paralelizaran, su único punto de encuentro es
+`contracts/mcp.yml`. Ninguna historia está **[BLOQUEADA]**: la única decisión abierta que las roza
+—rechazar parámetros **no** declarados, registrada por `E24-H18` en `DECISIONES.md`— está
+explícitamente fuera de alcance en las dos épicas.
+
+**Principio rector de cada una** (la regla que desempata dudas durante toda la épica): en **E25**,
+*una salvaguarda vale por el estado sobre el que se ejerce, no por el estado sobre el que se
+computó* — ante la duda, re-mirar bajo el lock y abortar si cambió. En **E26**, el de `E24-H07`:
+*una respuesta silenciosamente equivocada es peor que un error*.
+
 ## Formato de una historia
 
 Cada historia tiene un identificador estable `E<épica>-H<nn>` y esta plantilla:

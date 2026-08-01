@@ -472,6 +472,44 @@ impl FieldPath {
             _ => None,
         }
     }
+
+    /// El mismo path **anclado** explícitamente al frontmatter del usuario
+    /// ([`FRONTMATTER_ANCHOR`]): `graph.backlinks` → `frontmatter.graph.backlinks` (E24-H08).
+    ///
+    /// Es la forma con la que una clave del usuario cuyo primer segmento colisiona con un namespace
+    /// reservado se **direcciona** —la única que el lenguaje de consulta resuelve contra el
+    /// frontmatter y no contra el grafo— y, desde E26-H09, la que rinde el catálogo de
+    /// [`crate::metadata::catalog`] para esas claves. Infalible: `self` es no vacío y sin segmentos
+    /// vacíos por construcción, así que anteponerle un segmento sigue siendo un path válido.
+    ///
+    /// Vive aquí, y no en cada consumidor, porque el anclaje se **escribe** en tres sitios
+    /// (`parse::build_field_path`, el catálogo y los mensajes de error) y se **deshace** en dos
+    /// (`sin_anclaje`, interno del crate): una sola verdad de cómo se deletrea (invariante #3).
+    pub fn anclado(&self) -> FieldPath {
+        FieldPath(
+            std::iter::once(FRONTMATTER_ANCHOR.to_string())
+                .chain(self.0.iter().cloned())
+                .collect(),
+        )
+    }
+
+    /// La clave de frontmatter que este path direcciona **si está anclado** (`frontmatter.graph`
+    /// → `graph`), o `None` si no lo está —o si el anclaje viene solo (`frontmatter` a secas, que
+    /// no direcciona ninguna clave y por tanto no se puede desanclar)—.
+    ///
+    /// Inversa de [`Self::anclado`]. La usan el evaluador de consultas
+    /// (`eval::resolver_campo`) y la inspección de metadata (`metadata::inspect_field`) para
+    /// saltarse los namespaces reservados y resolver contra el frontmatter del usuario.
+    ///
+    /// `pub(crate)`: **no** es superficie de fachada. Quien resuelve un path anclado es el core
+    /// —una fachada que lo desanclase por su cuenta estaría reimplementando la resolución de
+    /// campos fuera de la única verdad computada (invariante #3)—.
+    pub(crate) fn sin_anclaje(&self) -> Option<FieldPath> {
+        if self.0.first().map(String::as_str) != Some(FRONTMATTER_ANCHOR) {
+            return None;
+        }
+        FieldPath::from_segments(self.0[1..].iter().cloned()).ok()
+    }
 }
 
 impl std::fmt::Display for FieldPath {

@@ -79,6 +79,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 
+use lodestar_core::types::ErrorCode;
 use serde_json::{json, Value};
 
 // ===========================================================================
@@ -1350,4 +1351,632 @@ fn move_default_explicito() {
     );
 
     drop(s);
+}
+
+// ===========================================================================
+// E26-H09 — El catálogo es DIRECCIONABLE (propiedad de round-trip)
+// ===========================================================================
+//
+// `metadata_inspect{mode:"catalog"}` es LA tool de descubribilidad: la que un agente llama sobre una
+// base que no conoce para saber qué campos existen. Su utilidad depende por completo de que los
+// `name` que emite se puedan **usar** — pasarlos a `mode:"field"` para ver el detalle, y a
+// `knowledge_search{where}` para encontrar los documentos. Hoy los emite `ParsedFrontmatter::walk`
+// tal cual, así que sobre un frontmatter con una clave `graph:` anuncia `graph.backlinks`, un texto
+// que:
+//   · en `where`/`has` significa el GRAFO (E24-H07/H08), no la clave del usuario;
+//   · en `where` ni siquiera parsea si la subclave no es una propiedad válida del namespace
+//     (`graph.nota` → error);
+//   · y, tras E26-H09, tampoco es inspeccionable.
+// O sea: la tool que existe para hacer descubrible una base devuelve nombres no direccionables.
+//
+// Este test es la PROPIEDAD, no un caso: recorre TODOS los `name` del catálogo y exige que los tres
+// caminos coincidan en el campo. Un arreglo que solo contemplara `graph.backlinks` no pasaría.
+//
+// Fuera de la propiedad, declarado: una clave con **punto literal** (`"sonar.projectKey"` como
+// clave única) no es direccionable y no puede serlo dentro del alcance de esta historia — `walk` la
+// emite como un `FieldPath` de un solo segmento cuyo `Display` es indistinguible del anidado
+// `sonar → projectKey`, y desambiguarla exigiría una sintaxis de escape en el lenguaje de consulta,
+// que la historia no abre. Por eso el fixture no la incluye: la propiedad sería infalsable.
+
+/// Workspace cuya metadata colisiona con los dos namespaces reservados (`graph:`, `document:`) y
+/// contiene además, a propósito, campos de todas las formas que el catálogo sabe emitir: mapa
+/// intermedio, hoja anidada, lista, `null` explícito y un `graph` que **no** es primer segmento
+/// (`meta.graph.x`, ya direccionable tal cual).
+///
+/// `graph.backlinks: 7` es discriminante: los tres documentos están aislados, así que el grafo real
+/// tiene 0 backlinks y ninguna respuesta que venga del grafo puede pasar por una del frontmatter.
+fn workspace_colisiones() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    escribe(
+        dir.path(),
+        "alfa.md",
+        concat!(
+            "---\n",
+            "status: draft\n",
+            "tags:\n  - rust\n  - mcp\n",
+            "owner:\n  name: Ana\n",
+            "graph:\n  backlinks: 7\n  nota: manual\n",
+            "document:\n  path: falso.md\n",
+            "meta:\n  graph:\n    x: 1\n",
+            "nula: null\n",
+            "---\n\n# Alfa\n\ncuerpo.\n"
+        ),
+    );
+    escribe(
+        dir.path(),
+        "bravo.md",
+        "---\nstatus: accepted\n---\n\n# Bravo\n\ncuerpo.\n",
+    );
+    escribe(dir.path(), "charlie.md", "# Charlie\n\nsin frontmatter.\n");
+    dir
+}
+
+/// **E26-H09** · Criterio `el_catalogo_es_direccionable`:
+/// **Dado** cualquier `name` que devuelva `mode:"catalog"`, **Cuando** se le pasa a `mode:"field"` y
+/// a `knowledge_search{where}`, **Entonces** los tres coinciden en el campo.
+///
+/// Las tres patas se cotejan por su medida común, la **presencia**: el `presentIn` del catálogo, el
+/// `presentIn` de la inspección y el nº de documentos que devuelve `where: "has(<name>)"` tienen que
+/// ser el mismo número para cada `name`. Se usa `has(...)` —y no `= <valor>`— porque es la única
+/// forma que aplica a TODOS los campos (un mapa o una lista no se comparan por igualdad con un
+/// escalar); la pata de igualdad con valor se verifica aparte, sobre la clave en colisión, que es
+/// donde el defecto muerde.
+///
+/// Hoy falla en los nombres del namespace: `has(graph.backlinks)` es trivialmente cierto para TODO
+/// documento (es una propiedad calculada, `has_respeta_los_namespaces` en `consulta.rs`) → 3 ≠ 1, y
+/// `has(graph.nota)`/`has(graph)` ni siquiera parsean → la búsqueda falla.
+#[test]
+fn el_catalogo_es_direccionable() {
+    let dir = workspace_colisiones();
+    let mut s = Sesion::abrir(dir.path());
+
+    let catalogo = s.tool("metadata_inspect", json!({"mode": "catalog"}));
+    let fields = catalogo["fields"]
+        .as_array()
+        .unwrap_or_else(|| panic!("el catálogo devuelve `fields` (array): {catalogo}"))
+        .clone();
+    assert!(
+        fields.len() >= 12,
+        "el fixture debe producir un catálogo rico (≥ 12 campos) o la propiedad sería vacua: \
+         {catalogo}"
+    );
+
+    for entrada in &fields {
+        let name = entrada["name"]
+            .as_str()
+            .unwrap_or_else(|| panic!("cada entrada del catálogo lleva `name` (string): {entrada}"))
+            .to_string();
+        let present_in = entrada["presentIn"].as_u64().unwrap_or_else(|| {
+            panic!("cada entrada del catálogo lleva `presentIn` (entero): {entrada}")
+        });
+
+        // (1) El nombre anunciado se INSPECCIONA tal cual, y describe el mismo campo.
+        let insp = s.tool_cruda(
+            "metadata_inspect",
+            json!({"mode": "field", "field": name.clone()}),
+        );
+        assert!(
+            insp["isError"] != json!(true),
+            "el catálogo anuncia «{name}», así que `mode:\"field\"` con ese mismo texto tiene que \
+             funcionar: un nombre que la propia tool no acepta no es descubrible.\nError: {}",
+            insp["content"][0]["text"]
+        );
+        let insp = &insp["structuredContent"];
+        assert_eq!(
+            insp["field"].as_str(),
+            Some(name.as_str()),
+            "…y la inspección debe ecoar el MISMO texto (round-trip estable): {insp}"
+        );
+        assert_eq!(
+            insp["presentIn"].as_u64(),
+            Some(present_in),
+            "…y describir el mismo campo que el catálogo (mismo `presentIn`) para «{name}»: {insp}"
+        );
+
+        // (2) El nombre anunciado se CONSULTA tal cual, y encuentra esos mismos documentos.
+        let busq = s.tool_cruda(
+            "knowledge_search",
+            json!({"text": "", "where": format!("has({name})")}),
+        );
+        assert!(
+            busq["isError"] != json!(true),
+            "…y `where: \"has({name})\"` tiene que ser una consulta legal: el catálogo no puede \
+             anunciar un nombre que el lenguaje rechaza.\nError: {}",
+            busq["content"][0]["text"]
+        );
+        let hits = busq["structuredContent"]["results"]
+            .as_array()
+            .unwrap_or_else(|| panic!("knowledge_search devuelve `results`: {busq}"))
+            .len() as u64;
+        assert_eq!(
+            hits, present_in,
+            "…y encontrar exactamente los `presentIn` documentos que el catálogo anuncia para \
+             «{name}»: si el texto se resolviera contra otro campo (el GRAFO, p. ej.), los números \
+             divergirían. Resultados: {}",
+            busq["structuredContent"]["results"]
+        );
+    }
+
+    let nombres: BTreeSet<String> = fields
+        .iter()
+        .filter_map(|f| f["name"].as_str().map(str::to_string))
+        .collect();
+
+    // La colisión tiene que estar EJERCITADA: sin esta guarda, un catálogo que dejara de anunciar
+    // las claves problemáticas pasaría el bucle de arriba con las manos limpias.
+    for anclado in [
+        "frontmatter.graph",
+        "frontmatter.graph.backlinks",
+        "frontmatter.graph.nota",
+        "frontmatter.document.path",
+    ] {
+        assert!(
+            nombres.contains(anclado),
+            "la clave del usuario que colisiona con un namespace reservado se anuncia ANCLADA \
+             («{anclado}»), que es su única forma direccionable: {nombres:?}"
+        );
+    }
+    for desnudo in ["graph", "graph.backlinks", "graph.nota", "document.path"] {
+        assert!(
+            !nombres.contains(desnudo),
+            "…y no en su forma desnuda («{desnudo}»), que en el resto de la superficie significa \
+             otra cosa: {nombres:?}"
+        );
+    }
+    // Control anti-vacuo: solo cambian de texto las claves en colisión. Anclarlo todo también
+    // superaría el round-trip, pero rompería el contrato de wire de cualquier cliente de v0.4.0.
+    for intacto in ["status", "tags", "owner.name", "meta.graph.x", "nula"] {
+        assert!(
+            nombres.contains(intacto),
+            "«{intacto}» ya era direccionable tal cual: su nombre no cambia (la consecuencia \
+             declarada de la historia es que cambian los nombres EN COLISIÓN, no todos): \
+             {nombres:?}"
+        );
+    }
+
+    // (3) La tercera pata con VALOR, sobre la clave en colisión: el `where` de igualdad con el
+    //     nombre que anuncia el catálogo encuentra el documento, y encuentra el valor del
+    //     FRONTMATTER (7), no el del grafo (0 backlinks reales).
+    let en_colision = s.buscar(json!({"text": "", "where": "frontmatter.graph.backlinks = 7"}));
+    assert_eq!(
+        en_colision.len(),
+        1,
+        "`frontmatter.graph.backlinks = 7` debe encontrar el documento que lo declara: {en_colision:?}"
+    );
+    assert_eq!(
+        en_colision[0]["path"],
+        json!("alfa.md"),
+        "…y ser `alfa.md`: {en_colision:?}"
+    );
+    let por_el_grafo = s.buscar(json!({"text": "", "where": "graph.backlinks = 7"}));
+    assert!(
+        por_el_grafo.is_empty(),
+        "…mientras el texto DESNUDO sigue significando el grafo, donde no hay ningún documento con \
+         7 backlinks reales (los tres están aislados): la ambigüedad que el anclaje deshace no \
+         desaparece, se hace explícita: {por_el_grafo:?}"
+    );
+
+    drop(s);
+}
+
+// ===========================================================================
+// E26-H11 — El contrato describe el servidor que hay
+// ===========================================================================
+//
+// Criterio `los_codigos_del_contrato_estan_en_el_catalogo`: **ningún código citado en
+// `contracts/mcp.yml` está fuera de las 16 filas de `core::types::ErrorCode`.**
+//
+// Por qué existe: la lista de errores de cada tool está escrita a mano, en prosa, dentro de un YAML
+// que nadie ejecuta. Es exactamente lo que envejece en silencio — el mismo defecto que E23-H13 saldó
+// un nivel más arriba (los números de línea del contrato) y el que esta historia salda aquí: el
+// contrato llegó a v0.4.0 describiendo el mapeo de errores **pre-E24-H10** mientras su propia
+// cabecera documentaba E24-H10. Un agente que ramifica por código lee este fichero; si cita un
+// código que el motor no puede emitir, o deja de citar uno que sí emite, el agente ramifica sobre
+// una ficción.
+//
+// # Criterio de extracción (declarado, porque es la mitad difícil del test)
+//
+// El YAML contiene SCREAMING_SNAKE que **no** son códigos del catálogo (nombres de fichero como
+// `PROPUESTA_FIXES`, constantes Rust como `SERVER_INSTRUCTIONS` o `WIRE_VALUES`, códigos ya
+// RETIRADOS que la cabecera cita para explicar su retirada). El barrido es por eso de dos
+// intensidades:
+//
+// 1. **Estructural, sin excepciones** — lo que el contrato *declara* como error de una tool
+//    (`tools[].errores`, tomando la CABEZA de cada entrada: el texto hasta el primer espacio o
+//    paréntesis, porque el resto es prosa explicativa) y las filas de `codigos_sin_emisor`. Ahí una
+//    entrada solo puede ser un código del catálogo o el centinela textual `WorkspaceError` —que no
+//    es un código sino el nombre del tipo Rust cuyo mapeo (`lodestar_app::error_code`) decide el
+//    código en ejecución—. Cualquier otra cosa (un código inventado, un código retirado o la **prosa
+//    suelta** del estilo «falta el parámetro «ref»» que E26-H07 sustituye) es un fallo.
+//
+// 2. **En prosa, acotado por forma y por parentesco** — sobre TODOS los textos del YAML (los
+//    `semantica`, los `motivo`, las explicaciones entre paréntesis de los propios `errores`…) se
+//    recogen los tokens con forma exacta de código —`^[A-Z][A-Z0-9]*(_[A-Z0-9]+)+$`— y se consideran
+//    **cita de código** solo los que comparten al menos un segmento (el trozo entre guiones bajos)
+//    con alguna fila del catálogo. Ese parentesco es lo que separa, **sin lista blanca que
+//    mantener**, un código mal escrito o retirado (`CONCEPT_NOT_FOUND`, `INVALID_SCHEME`,
+//    `NONCONFORMANT_RESULT` comparten `NOT`/`FOUND`/`INVALID`/`RESULT` con el catálogo) de un
+//    identificador ajeno (`PROPUESTA_FIXES`, `REFACTOR_PHASE_2`, `SERVER_INSTRUCTIONS`,
+//    `WIRE_VALUES` no comparten ninguno). El hueco declarado: un código falso que no compartiera
+//    NINGÚN segmento con el catálogo pasaría el barrido de prosa — pero no el estructural, que es
+//    donde se declaran los errores de verdad.
+//
+// **Los comentarios `#` del YAML quedan FUERA** del barrido (serde_yaml los descarta al parsear, y
+// es deliberado): la cabecera es el changelog del contrato y cita por diseño los códigos que se
+// renombraron o retiraron (`CONCEPT_NOT_FOUND` → `DOCUMENT_NOT_FOUND`, `NONCONFORMANT_RESULT` →
+// `INVALID_RESULT`). Prohibirlos obligaría a circunloquios y dejaría el documento peor de lo que
+// estaba — el mismo criterio con que `apply_fix_retirada` mira el enum y no la prosa.
+//
+// # El catálogo se lee del catálogo
+//
+// Las 16 filas salen de `ErrorCode::as_str()`, nunca de una lista de cadenas copiada a mano: copiar
+// el catálogo en el test sería reintroducir en `tests/` justo el defecto que el test combate. Lo
+// único escrito aquí son las **variantes**, y `_exhaustividad_del_catalogo` es una guarda de
+// COMPILACIÓN: añadir o quitar una variante de `ErrorCode` rompe ese `match` y obliga a pasar por
+// aquí.
+
+/// Las variantes de [`ErrorCode`]; sus **cadenas** se derivan siempre con `as_str()`.
+const CATALOGO: [ErrorCode; 16] = [
+    ErrorCode::WorkspaceNotFound,
+    ErrorCode::WorkspaceRecoveryRequired,
+    ErrorCode::DocumentNotFound,
+    ErrorCode::AmbiguousReference,
+    ErrorCode::RevisionConflict,
+    ErrorCode::PlanStale,
+    ErrorCode::PlanExpired,
+    ErrorCode::PermissionDenied,
+    ErrorCode::InvalidSchema,
+    ErrorCode::InvalidResult,
+    ErrorCode::InboundLinksExist,
+    ErrorCode::RelationConstraintViolation,
+    ErrorCode::WriteConflict,
+    ErrorCode::ResultTooLarge,
+    ErrorCode::RecoveryFailed,
+    ErrorCode::InternalIoError,
+];
+
+/// Guarda de **compilación** de que [`CATALOGO`] sigue completo: si alguien añade (o quita) una
+/// variante de [`ErrorCode`], este `match` deja de ser exhaustivo y el fichero no compila.
+fn _exhaustividad_del_catalogo(c: ErrorCode) {
+    match c {
+        ErrorCode::WorkspaceNotFound
+        | ErrorCode::WorkspaceRecoveryRequired
+        | ErrorCode::DocumentNotFound
+        | ErrorCode::AmbiguousReference
+        | ErrorCode::RevisionConflict
+        | ErrorCode::PlanStale
+        | ErrorCode::PlanExpired
+        | ErrorCode::PermissionDenied
+        | ErrorCode::InvalidSchema
+        | ErrorCode::InvalidResult
+        | ErrorCode::InboundLinksExist
+        | ErrorCode::RelationConstraintViolation
+        | ErrorCode::WriteConflict
+        | ErrorCode::ResultTooLarge
+        | ErrorCode::RecoveryFailed
+        | ErrorCode::InternalIoError => {}
+    }
+}
+
+/// Las 16 cadenas de wire del catálogo, tomadas del propio `ErrorCode::as_str()`.
+fn codigos_del_catalogo() -> BTreeSet<&'static str> {
+    CATALOGO.iter().map(|c| c.as_str()).collect()
+}
+
+/// Los segmentos (trozos entre `_`) que aparecen en alguna fila del catálogo.
+fn segmentos_del_catalogo() -> BTreeSet<&'static str> {
+    CATALOGO
+        .iter()
+        .flat_map(|c| c.as_str().split('_'))
+        .collect()
+}
+
+/// `contracts/mcp.yml` parseado (sin sus comentarios `#`, que serde_yaml descarta).
+fn contrato() -> serde_yaml::Value {
+    let ruta = del_repo("contracts/mcp.yml");
+    serde_yaml::from_str(
+        &std::fs::read_to_string(&ruta)
+            .unwrap_or_else(|e| panic!("no se pudo leer {}: {e}", ruta.display())),
+    )
+    .expect("`contracts/mcp.yml` debe ser YAML válido")
+}
+
+/// `contracts/mcp.yml` **crudo**, comentarios incluidos.
+fn contrato_crudo() -> String {
+    let ruta = del_repo("contracts/mcp.yml");
+    std::fs::read_to_string(&ruta)
+        .unwrap_or_else(|e| panic!("no se pudo leer {}: {e}", ruta.display()))
+}
+
+/// Acumula en `out` todos los textos del árbol YAML (claves y escalares de cadena).
+fn textos(v: &serde_yaml::Value, out: &mut Vec<String>) {
+    match v {
+        serde_yaml::Value::String(s) => out.push(s.clone()),
+        serde_yaml::Value::Sequence(xs) => xs.iter().for_each(|x| textos(x, out)),
+        serde_yaml::Value::Mapping(m) => {
+            for (k, val) in m {
+                textos(k, out);
+                textos(val, out);
+            }
+        }
+        serde_yaml::Value::Tagged(t) => textos(&t.value, out),
+        _ => {}
+    }
+}
+
+/// ¿`t` tiene la forma EXACTA de un código de wire? (`^[A-Z][A-Z0-9]*(_[A-Z0-9]+)+$`)
+fn forma_de_codigo(t: &str) -> bool {
+    t.contains('_')
+        && t.starts_with(|c: char| c.is_ascii_uppercase())
+        && t.split('_').all(|s| {
+            !s.is_empty()
+                && s.chars()
+                    .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
+        })
+}
+
+/// Los tokens de `texto` con forma de código que además **emparentan** con el catálogo (comparten
+/// al menos un segmento con alguna de sus 16 filas): las «citas de código» del barrido de prosa.
+fn citas_de_codigo(texto: &str) -> Vec<String> {
+    let segmentos = segmentos_del_catalogo();
+    texto
+        .split(|c: char| !(c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_'))
+        .filter(|t| forma_de_codigo(t))
+        .filter(|t| t.split('_').any(|s| segmentos.contains(s)))
+        .map(str::to_string)
+        .collect()
+}
+
+/// La **cabeza** de una entrada de `errores:`: el texto hasta el primer espacio o paréntesis (el
+/// resto es la prosa que explica cuándo se emite).
+fn cabeza_del_error(entrada: &str) -> String {
+    entrada
+        .split(['(', ' '])
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_string()
+}
+
+/// Los códigos que el contrato declara EMITIDOS: la cabeza de cada entrada de `errores:` de cada
+/// tool, descartando el centinela `WorkspaceError` (que no es un código, sino el tipo cuyo mapeo
+/// elige el código en ejecución).
+fn codigos_emitidos(yaml: &serde_yaml::Value) -> BTreeSet<String> {
+    entradas_de_errores(yaml)
+        .into_iter()
+        .map(|(_, e)| cabeza_del_error(&e))
+        .filter(|c| c != CENTINELA_WORKSPACE_ERROR)
+        .collect()
+}
+
+/// `(tool, entrada)` para cada entrada de cada lista `errores:` de la sección `tools:`.
+fn entradas_de_errores(yaml: &serde_yaml::Value) -> Vec<(String, String)> {
+    let tools = yaml["tools"]
+        .as_sequence()
+        .expect("`contracts/mcp.yml` declara `tools:` como secuencia");
+    let mut out = Vec::new();
+    for t in tools {
+        let nombre = t["nombre"].as_str().unwrap_or("«sin nombre»").to_string();
+        let errores = t["errores"].as_sequence().unwrap_or_else(|| {
+            panic!("la tool «{nombre}» debe declarar `errores:` como secuencia: {t:?}")
+        });
+        for e in errores {
+            let texto = e
+                .as_str()
+                .unwrap_or_else(|| panic!("cada entrada de `errores` de «{nombre}» es un string"));
+            out.push((nombre.clone(), texto.to_string()));
+        }
+    }
+    out
+}
+
+/// Los códigos de `codigos_sin_emisor.filas[].codigo`.
+fn codigos_sin_emisor(yaml: &serde_yaml::Value) -> BTreeSet<String> {
+    yaml["codigos_sin_emisor"]["filas"]
+        .as_sequence()
+        .expect("`codigos_sin_emisor` declara `filas:` como secuencia")
+        .iter()
+        .map(|f| {
+            f["codigo"]
+                .as_str()
+                .unwrap_or_else(|| {
+                    panic!("cada fila de `codigos_sin_emisor` lleva `codigo`: {f:?}")
+                })
+                .to_string()
+        })
+        .collect()
+}
+
+/// El centinela que el contrato usa en `errores:` para «el `WorkspaceError` que sea, mapeado a su
+/// código por `lodestar_app::error_code`». No es un código y por eso no se coteja.
+const CENTINELA_WORKSPACE_ERROR: &str = "WorkspaceError";
+
+/// **E26-H11** · Criterio `los_codigos_del_contrato_estan_en_el_catalogo`:
+/// **Dado** `contracts/mcp.yml`, **Cuando** se extraen los códigos que cita, **Entonces** todos
+/// están entre las 16 filas de `core::types::ErrorCode`.
+///
+/// Tres barridos (el criterio de extracción de cada uno está declarado en la cabecera de esta
+/// sección):
+/// 1. la **cabeza** de cada entrada de `tools[].errores` — un código del catálogo o el centinela
+///    `WorkspaceError`, nunca prosa suelta ni un código inventado;
+/// 2. cada fila de `codigos_sin_emisor`;
+/// 3. la **prosa** de todos los textos del YAML, acotada por forma de código y parentesco de
+///    segmentos con el catálogo.
+#[test]
+fn los_codigos_del_contrato_estan_en_el_catalogo() {
+    let yaml = contrato();
+    let catalogo = codigos_del_catalogo();
+    assert_eq!(
+        catalogo.len(),
+        16,
+        "el catálogo tiene 16 filas (§19.3) y `as_str()` no puede colapsar dos: {catalogo:?}"
+    );
+
+    // --- 1. lo que cada tool declara emitir ----------------------------------------------------
+    let entradas = entradas_de_errores(&yaml);
+    let mut desconocidos: Vec<String> = Vec::new();
+    for (tool, entrada) in &entradas {
+        let cabeza = cabeza_del_error(entrada);
+        if cabeza == CENTINELA_WORKSPACE_ERROR || catalogo.contains(cabeza.as_str()) {
+            continue;
+        }
+        desconocidos.push(format!("{tool}: «{entrada}» (cabeza: «{cabeza}»)"));
+    }
+    assert!(
+        desconocidos.is_empty(),
+        "cada entrada de `errores:` debe EMPEZAR por un código de las 16 filas de `ErrorCode` (o \
+         por el centinela «{CENTINELA_WORKSPACE_ERROR}»): un agente ramifica por ese código, y una \
+         entrada que es prosa —«falta el parámetro «ref»»— o un código que el motor no puede \
+         emitir le hace ramificar sobre una ficción. Entradas fuera del catálogo:\n  - {}",
+        desconocidos.join("\n  - ")
+    );
+
+    // --- 2. las filas sin emisor ---------------------------------------------------------------
+    let sin_emisor = codigos_sin_emisor(&yaml);
+    let filas_fuera: Vec<&String> = sin_emisor
+        .iter()
+        .filter(|c| !catalogo.contains(c.as_str()))
+        .collect();
+    assert!(
+        filas_fuera.is_empty(),
+        "`codigos_sin_emisor` audita filas DEL catálogo: un código que ya no existe ahí es una \
+         auditoría de un fichero que ya no se escribe. Fuera del catálogo: {filas_fuera:?}"
+    );
+
+    // --- 3. la prosa ---------------------------------------------------------------------------
+    let mut corpus = Vec::new();
+    textos(&yaml, &mut corpus);
+    let mut citas_totales = 0usize;
+    let mut citas_fuera: BTreeSet<String> = BTreeSet::new();
+    for texto in &corpus {
+        for cita in citas_de_codigo(texto) {
+            citas_totales += 1;
+            if !catalogo.contains(cita.as_str()) {
+                citas_fuera.insert(format!("«{cita}» en: {}", recorte(texto, &cita)));
+            }
+        }
+    }
+    assert!(
+        citas_fuera.is_empty(),
+        "la prosa del contrato cita códigos que NO están en las 16 filas de `ErrorCode`: o el \
+         código se renombró/retiró y la explicación quedó fósil, o está mal escrito — en ambos \
+         casos el lector ramifica por un código que nunca llegará.\n  - {}",
+        citas_fuera.into_iter().collect::<Vec<_>>().join("\n  - ")
+    );
+
+    // --- guardas anti-vacuas: los tres barridos han barrido de verdad ---------------------------
+    assert_eq!(
+        yaml["tools"].as_sequence().map(Vec::len),
+        Some(10),
+        "el contrato describe las 10 tools de la superficie objetivo (§19.6); si esta cifra baja, \
+         el barrido de arriba estaría mirando menos de lo que cree"
+    );
+    assert!(
+        entradas.len() >= 25,
+        "las listas `errores:` de las 10 tools suman ≥ 25 entradas: {}",
+        entradas.len()
+    );
+    assert!(
+        codigos_emitidos(&yaml).len() >= 10,
+        "el contrato declara ≥ 10 códigos DISTINTOS entre las tools (si no, el barrido estructural \
+         sería vacuo): {:?}",
+        codigos_emitidos(&yaml)
+    );
+    assert!(
+        !sin_emisor.is_empty(),
+        "`codigos_sin_emisor` no puede quedarse vacío sin que alguien lo justifique: es la otra \
+         mitad del cotejo"
+    );
+    assert!(
+        citas_totales >= 20,
+        "el barrido de prosa debe encontrar ≥ 20 citas de código en los textos del YAML; menos \
+         significa que el extractor dejó de reconocerlas (y entonces «no hay códigos fuera del \
+         catálogo» sería verdad por no mirar). Citas encontradas: {citas_totales}"
+    );
+}
+
+/// Devuelve un recorte del texto alrededor de `aguja`, para que el mensaje de fallo diga DÓNDE.
+fn recorte(texto: &str, aguja: &str) -> String {
+    let Some(i) = texto.find(aguja) else {
+        return texto.chars().take(120).collect();
+    };
+    let desde = texto[..i]
+        .char_indices()
+        .rev()
+        .nth(60)
+        .map_or(0, |(j, _)| j);
+    let hasta = texto[i..]
+        .char_indices()
+        .nth(80)
+        .map_or(texto.len(), |(j, _)| i + j);
+    format!("…{}…", &texto[desde..hasta])
+}
+
+/// **E26-H11** · La otra dirección del mismo criterio: la **coherencia interna** del contrato.
+///
+/// `codigos_sin_emisor` es una auditoría con fecha de caducidad («de las 16 filas, estas CUATRO no
+/// se emiten desde ningún camino del producto»). Si una tool declara emitir uno de ellos, una de
+/// las dos afirmaciones es falsa y el fichero se contradice a sí mismo — que es literalmente el
+/// defecto U6 que esta historia salda. E25-H02 ya recorrió ese camino en la dirección correcta:
+/// `RECOVERY_FAILED` ganó emisor, entró en los `errores` de `change_apply`/`change_revert` y SALIÓ
+/// de la lista, en el mismo PR.
+///
+/// Y su corolario: entre los códigos que alguna tool emite y los que se declaran sin emisor deben
+/// quedar cubiertas las 16 filas, sin solapes. Un código del catálogo que no esté ni en un lado ni
+/// en el otro es exactamente el hueco por donde el contrato envejece: nadie sabe si es que no se
+/// emite o es que se olvidó de contarlo.
+#[test]
+fn los_codigos_sin_emisor_no_los_emite_ninguna_tool() {
+    let yaml = contrato();
+    let catalogo: BTreeSet<String> = codigos_del_catalogo()
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    let emitidos = codigos_emitidos(&yaml);
+    let sin_emisor = codigos_sin_emisor(&yaml);
+
+    // (1) Sin solape: emitir y «no tener emisor» no pueden ser verdad a la vez.
+    let solape: Vec<&String> = emitidos.intersection(&sin_emisor).collect();
+    assert!(
+        solape.is_empty(),
+        "estos códigos aparecen a la vez en los `errores:` de alguna tool y en \
+         `codigos_sin_emisor`: el contrato se contradice a sí mismo y el lector no sabe cuál de \
+         las dos afirmaciones creerse. Cuando un código gana emisor, sale de la lista en el MISMO \
+         cambio (precedente: `RECOVERY_FAILED`, E25-H02). Solape: {solape:?}"
+    );
+
+    // (2) Cobertura: cada fila del catálogo está contada de un lado o del otro.
+    let cubiertos: BTreeSet<String> = emitidos.union(&sin_emisor).cloned().collect();
+    let huerfanos: Vec<&String> = catalogo.difference(&cubiertos).collect();
+    assert!(
+        huerfanos.is_empty(),
+        "estas filas de `ErrorCode` no las declara emitidas ninguna tool NI figuran en \
+         `codigos_sin_emisor`: el contrato no dice nada de ellas, que es la forma silenciosa de \
+         mentir. Si el código no tiene camino real, su sitio es `codigos_sin_emisor` con su motivo; \
+         si lo tiene, la tool que lo emite debe listarlo. Sin contar: {huerfanos:?}"
+    );
+
+    // (3) Y las afirmaciones en PRESENTE sobre la lista tienen que ser verdad HOY. La cabecera del
+    //     contrato es un changelog y puede (debe) contar que un código SALIÓ de la lista; lo que no
+    //     puede es afirmar que un código «sigue en `codigos_sin_emisor`» cuando no está en ella.
+    let mut falsas: Vec<String> = Vec::new();
+    for linea in contrato_crudo().lines() {
+        let plana = linea.replace('`', "");
+        if !plana.contains("sigue en codigos_sin_emisor") {
+            continue;
+        }
+        for cita in citas_de_codigo(&plana) {
+            if !sin_emisor.contains(&cita) {
+                falsas.push(format!("«{cita}» — línea: {}", linea.trim()));
+            }
+        }
+    }
+    assert!(
+        falsas.is_empty(),
+        "el contrato AFIRMA en presente que estos códigos siguen en `codigos_sin_emisor`, y las \
+         `filas:` de esa sección no los incluyen: es una afirmación falsa sobre el propio fichero \
+         que la contiene (y la más cara de todas, porque quien la lee no vuelve a mirar la \
+         lista).\n  - {}",
+        falsas.join("\n  - ")
+    );
 }

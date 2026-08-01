@@ -6095,23 +6095,52 @@ fn parametro_obligatorio_ausente_es_invalid_schema() {
 }
 
 /// **E24-H10** — los mensajes de error no filtran internos de serde.
+///
+/// **Ampliado en E26-H07** a `change_plan`: la misma `mensaje_de_filtro` que sanea el `FilterError`
+/// para `knowledge_search` debe servir a la selección masiva, que hasta v0.4.0 devolvía
+/// «INVALID_SCHEMA» pelado (no filtraba el interno de serde… porque no decía nada). La exigencia
+/// es la misma para las dos tools, y por eso el caso se añade a la tabla en vez de a un test aparte:
+/// una segunda copia del saneado sería justo lo que prohíbe el invariante #3.
 #[test]
 fn errores_no_filtran_internos_de_serde() {
     let dir = ws_dos_docs();
-    let linea = serde_json::json!({"jsonrpc":"2.0","id":1,"method":"tools/call",
-        "params":{"name":"knowledge_search","arguments":{"text":"","filter":{"nope":1}}}})
-    .to_string();
-    let resp = roundtrip(dir.path(), &[linea.as_str()], 1);
-    let err = error_de(&resp[0]).expect("un filtro malformado debe fallar");
-    assert!(
-        !err.contains("untagged enum"),
-        "«data did not match any variant of untagged enum WireNode» es un interno de \
-         implementación que no le dice a nadie qué arreglar en su filtro: {err}"
-    );
-    assert!(
-        err.contains("field") && err.contains("operator"),
-        "el mensaje debe decir qué forma se esperaba: {err}"
-    );
+    let casos: [(&str, serde_json::Value); 2] = [
+        (
+            "knowledge_search",
+            serde_json::json!({"text": "", "filter": {"nope": 1}}),
+        ),
+        (
+            "change_plan",
+            serde_json::json!({"selection": {"filter": {"nope": 1}},
+                               "operation": {"patch_frontmatter": {"patch": {"x": 1}}}}),
+        ),
+    ];
+    let lineas: Vec<String> = casos
+        .iter()
+        .enumerate()
+        .map(|(i, (n, args))| {
+            serde_json::json!({"jsonrpc":"2.0","id": i + 1,"method":"tools/call",
+                "params":{"name": n,"arguments": args}})
+            .to_string()
+        })
+        .collect();
+    let refs: Vec<&str> = lineas.iter().map(String::as_str).collect();
+    let resp = roundtrip(dir.path(), &refs, casos.len());
+
+    for (i, (tool, _)) in casos.iter().enumerate() {
+        let err = error_de(&resp[i]).unwrap_or_else(|| {
+            panic!("un filtro malformado debe fallar por «{tool}»: {}", resp[i])
+        });
+        assert!(
+            !err.contains("untagged enum"),
+            "«data did not match any variant of untagged enum WireNode» es un interno de \
+             implementación que no le dice a nadie qué arreglar en su filtro. Tool «{tool}»: {err}"
+        );
+        assert!(
+            err.contains("field") && err.contains("operator"),
+            "el mensaje debe decir qué forma se esperaba. Tool «{tool}»: {err}"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -6415,4 +6444,2115 @@ fn el_validador_de_schema_muerde() {
         !errores_de_schema(&schema, &serde_json::json!({})).is_empty(),
         "un campo requerido ausente debe detectarse"
     );
+}
+
+// ---------------------------------------------------------------------------
+// E26-H07 — Todo error de superficie lleva código Y mensaje
+//
+// E24-H10 puso el código estable al frente del mensaje… en `knowledge_search` y en las
+// comprobaciones locales del despachador. Las otras OCHO tools siguen haciendo
+// `.map_err(|e| e.as_str().to_string())`: el agente recibe literalmente «INVALID_SCHEMA», sin una
+// palabra sobre QUÉ parámetro, QUÉ valor o QUÉ se esperaba. No es un descuido del despachador —los
+// productores de `lodestar-app` son `Result<_, ErrorCode>` y no tienen dónde poner el mensaje—, y
+// por eso el arreglo es de la fachada entera, no de ocho `format!`.
+//
+// Dos consecuencias concretas de no tener sitio para el mensaje:
+//  - `graph_query` sin `ref` responde `DOCUMENT_NOT_FOUND` (el rustdoc lo admite: «no hay un código
+//    de falta-parámetro en el catálogo»), así que quien OLVIDA el `ref` recibe el mismo error que
+//    quien apunta a un documento que no existe, y toma el camino de recuperación equivocado;
+//  - `build_selection_expression` tira el `ParseError` del core con `map_err(|_| …)`, así que la
+//    MISMA consulta malformada se diagnostica por `knowledge_search` y se calla por `change_plan`.
+//
+// El catálogo NO se toca: sigue teniendo 16 filas (`catalogo_de_errores_tiene_dieciseis_filas`, en
+// `lodestar-core`) y esta historia añade mensaje, no reclasifica códigos — salvo el único caso que
+// declara, `graph_query` sin `ref`/`to`.
+// ---------------------------------------------------------------------------
+
+/// Parte el texto de error en `(código, mensaje)` **solo** si tiene la forma «CÓDIGO: mensaje» con
+/// el código estable de `ErrorCode::as_str()` (SCREAMING_SNAKE) al frente. `None` si el texto es el
+/// código pelado, o si lo que abre no es un código del catálogo.
+fn codigo_y_mensaje(err: &str) -> Option<(&str, &str)> {
+    let (codigo, mensaje) = err.split_once(": ")?;
+    (!codigo.is_empty()
+        && codigo
+            .chars()
+            .all(|c| c.is_ascii_uppercase() || c == '_' || c.is_ascii_digit()))
+    .then(|| (codigo, mensaje.trim()))
+}
+
+/// El código que abre el texto de error, o el texto entero si viene pelado (que es justo lo que
+/// esta historia arregla): sirve para juzgar el CÓDIGO con independencia de si ya trae mensaje.
+fn codigo_de(err: &str) -> &str {
+    codigo_y_mensaje(err).map_or(err, |(codigo, _)| codigo)
+}
+
+/// ¿El mensaje **nombra** ese identificador (parámetro, operación) como token, y no como trozo de
+/// otra palabra? Acepta cualquier delimitador —«ref», "ref", `ref` o ref suelto— porque lo que el
+/// criterio exige es que el mensaje lo nombre, no una tipografía concreta; pero rechaza
+/// «referencia» o «documento» como forma de «nombrar» `ref` o `to`.
+fn menciona(texto: &str, token: &str) -> bool {
+    texto
+        .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+        .any(|t| t == token)
+}
+
+/// **E26-H07** — las 8 tools que hoy devuelven el código pelado emiten «CÓDIGO: mensaje».
+///
+/// Cada caso provoca el error **más común** de su tool por el camino que hoy no tiene mensaje: el
+/// del productor de `lodestar-app` (no las comprobaciones locales del despachador, que desde
+/// E24-H10 ya lo llevan). El código esperado se asevera además tal cual sale hoy: esta historia
+/// AÑADE mensaje y no reclasifica el catálogo, así que envolver el arreglo en un «todo es
+/// INVALID_SCHEMA» sería otro defecto, no el arreglo.
+#[test]
+fn todas_las_tools_dan_codigo_y_mensaje() {
+    let dir = ws_dos_docs();
+    let casos: [(&str, serde_json::Value, &str); 8] = [
+        (
+            "knowledge_get",
+            serde_json::json!({"ref": {"path": "no-existe.md"}}),
+            "DOCUMENT_NOT_FOUND",
+        ),
+        (
+            "metadata_inspect",
+            serde_json::json!({"mode": "field"}),
+            "INVALID_SCHEMA",
+        ),
+        (
+            "knowledge_check",
+            serde_json::json!({"scope": {"kind": "document", "ref": {"path": "no-existe.md"}}}),
+            "DOCUMENT_NOT_FOUND",
+        ),
+        (
+            "graph_query",
+            serde_json::json!({"operation": "chorizo"}),
+            "INVALID_SCHEMA",
+        ),
+        (
+            "impact_analyze",
+            serde_json::json!({"ref": {"path": "no-existe.md"},
+                               "proposedOperation": {"kind": "move"}}),
+            "DOCUMENT_NOT_FOUND",
+        ),
+        (
+            "change_plan",
+            serde_json::json!({"operations": [
+                {"op": "patch_frontmatter", "path": "no-existe.md", "patch": {"x": 1}}]}),
+            "DOCUMENT_NOT_FOUND",
+        ),
+        (
+            "change_apply",
+            serde_json::json!({"changeSetId": "cs:no-existe"}),
+            "PLAN_STALE",
+        ),
+        (
+            "change_revert",
+            serde_json::json!({"receiptId": "rc:no-existe"}),
+            "PLAN_EXPIRED",
+        ),
+    ];
+
+    let lineas: Vec<String> = casos
+        .iter()
+        .enumerate()
+        .map(|(i, (n, args, _))| {
+            serde_json::json!({"jsonrpc":"2.0","id": i + 1,"method":"tools/call",
+                "params":{"name": n,"arguments": args}})
+            .to_string()
+        })
+        .collect();
+    let refs: Vec<&str> = lineas.iter().map(String::as_str).collect();
+    let resp = roundtrip(dir.path(), &refs, casos.len());
+
+    // Se acumulan TODAS las tools que incumplen antes de fallar: el defecto es de las ocho a la
+    // vez, y un panic en la primera obligaría a descubrirlas de una en una.
+    let mut incumplen: Vec<String> = Vec::new();
+    for (i, (tool, args, codigo_esperado)) in casos.iter().enumerate() {
+        let err = error_de(&resp[i]).unwrap_or_else(|| {
+            panic!(
+                "«{tool}» con {args} debe fallar para poder juzgar su error: {}",
+                resp[i]
+            )
+        });
+        match codigo_y_mensaje(&err) {
+            None => incumplen.push(format!(
+                "{tool}: CÓDIGO PELADO «{err}» (se esperaba «{codigo_esperado}: <mensaje>»)"
+            )),
+            Some((codigo, mensaje)) => {
+                if codigo != *codigo_esperado {
+                    incumplen.push(format!(
+                        "{tool}: código «{codigo}», se esperaba «{codigo_esperado}» — E26-H07 \
+                         AÑADE mensaje, no reclasifica el catálogo (su único cambio de código es \
+                         `graph_query` sin «ref»)"
+                    ));
+                } else if mensaje.len() < 10 || mensaje == codigo {
+                    incumplen.push(format!(
+                        "{tool}: el mensaje debe ser accionable, no un relleno ni el código \
+                         repetido: «{err}»"
+                    ));
+                }
+            }
+        }
+    }
+    assert!(
+        incumplen.is_empty(),
+        "estas tools no emiten «CÓDIGO: mensaje». El agente puede ramificar por el código, pero \
+         no tiene una palabra sobre qué parámetro, qué valor o qué se esperaba — que es lo que \
+         necesita para CORREGIR. La forma es la que `knowledge_search` emite desde E24-H10:\n  {}",
+        incumplen.join("\n  ")
+    );
+}
+
+/// **E26-H07** — olvidar el parámetro NO es «el documento no existe».
+///
+/// Las cuatro operaciones que exigen un extremo (`backlinks`/`outgoing`/`neighborhood` piden `ref`;
+/// `path_between` pide además `to`) devuelven hoy `DOCUMENT_NOT_FOUND` cuando el parámetro ni
+/// siquiera viene. El agente que olvidó el `ref` recibe el mismo error que el que apuntó a un
+/// documento inexistente, y toma el camino de recuperación equivocado (buscar el documento, en vez
+/// de mirar su llamada).
+#[test]
+fn graph_query_sin_ref_es_invalid_schema() {
+    let dir = ws_dos_docs();
+    // (argumentos, operación, parámetro ausente)
+    let casos: [(serde_json::Value, &str, &str); 4] = [
+        (
+            serde_json::json!({"operation": "backlinks"}),
+            "backlinks",
+            "ref",
+        ),
+        (
+            serde_json::json!({"operation": "outgoing"}),
+            "outgoing",
+            "ref",
+        ),
+        (
+            serde_json::json!({"operation": "neighborhood"}),
+            "neighborhood",
+            "ref",
+        ),
+        (
+            serde_json::json!({"operation": "path_between", "ref": {"path": "a.md"}}),
+            "path_between",
+            "to",
+        ),
+    ];
+
+    let lineas: Vec<String> = casos
+        .iter()
+        .enumerate()
+        .map(|(i, (args, _, _))| {
+            serde_json::json!({"jsonrpc":"2.0","id": i + 1,"method":"tools/call",
+                "params":{"name":"graph_query","arguments": args}})
+            .to_string()
+        })
+        .collect();
+    let refs: Vec<&str> = lineas.iter().map(String::as_str).collect();
+    let resp = roundtrip(dir.path(), &refs, casos.len());
+
+    for (i, (args, operacion, parametro)) in casos.iter().enumerate() {
+        let err = error_de(&resp[i])
+            .unwrap_or_else(|| panic!("{args} debe fallar: falta «{parametro}»: {}", resp[i]));
+        // El CÓDIGO se juzga primero y con independencia del mensaje: el defecto U2 es que
+        // «falta el parámetro» y «el documento no existe» son hoy el mismo error.
+        assert_eq!(
+            codigo_de(&err),
+            "INVALID_SCHEMA",
+            "que FALTE «{parametro}» es un esquema de entrada inválido, no un documento que no \
+             existe: hasta v0.4.0 salía DOCUMENT_NOT_FOUND, indistinguible de un «{parametro}» \
+             presente que no resuelve. Error completo: «{err}»"
+        );
+        let (_, mensaje) = codigo_y_mensaje(&err)
+            .unwrap_or_else(|| panic!("el error de {args} debe llevar código Y mensaje: «{err}»"));
+        assert!(
+            menciona(mensaje, parametro),
+            "el mensaje debe NOMBRAR el parámetro que falta («{parametro}»): «{err}»"
+        );
+        assert!(
+            menciona(mensaje, operacion),
+            "…y la operación que lo exige («{operacion}»), porque no todas lo exigen: «{err}»"
+        );
+    }
+}
+
+/// **E26-H07** — control anti-vacuo: el arreglo no puede consistir en mapear todo a
+/// `INVALID_SCHEMA`.
+///
+/// Un `ref` (o un `to`) PRESENTE que no resuelve es exactamente lo que dice
+/// `DOCUMENT_NOT_FOUND`, y debe seguir siéndolo: es la distinción que la historia existe para
+/// crear. Lo que sí cambia es que ahora también trae mensaje.
+#[test]
+fn ref_que_no_resuelve_sigue_siendo_not_found() {
+    let dir = ws_dos_docs();
+    let casos: [serde_json::Value; 2] = [
+        serde_json::json!({"operation": "backlinks", "ref": {"path": "no-existe.md"}}),
+        serde_json::json!({"operation": "path_between", "ref": {"path": "a.md"},
+                           "to": {"path": "no-existe.md"}}),
+    ];
+
+    let lineas: Vec<String> = casos
+        .iter()
+        .enumerate()
+        .map(|(i, args)| {
+            serde_json::json!({"jsonrpc":"2.0","id": i + 1,"method":"tools/call",
+                "params":{"name":"graph_query","arguments": args}})
+            .to_string()
+        })
+        .collect();
+    let refs: Vec<&str> = lineas.iter().map(String::as_str).collect();
+    let resp = roundtrip(dir.path(), &refs, casos.len());
+
+    for (i, args) in casos.iter().enumerate() {
+        let err = error_de(&resp[i])
+            .unwrap_or_else(|| panic!("{args} apunta a un documento inexistente: {}", resp[i]));
+        // Primero el control (el CÓDIGO no puede cambiar), después la exigencia nueva (mensaje).
+        assert_eq!(
+            codigo_de(&err),
+            "DOCUMENT_NOT_FOUND",
+            "un extremo PRESENTE que no resuelve es lo que su nombre dice. Si esto pasara a \
+             INVALID_SCHEMA, la distinción que introduce E26-H07 se habría perdido por el otro \
+             lado. Error completo: «{err}»"
+        );
+        assert!(
+            codigo_y_mensaje(&err).is_some_and(|(_, m)| !m.is_empty()),
+            "…y también él lleva ahora mensaje, en la forma «CÓDIGO: mensaje»: «{err}»"
+        );
+    }
+}
+
+/// **E26-H07** — la misma consulta malformada se diagnostica igual por las dos tools que la aceptan.
+///
+/// `build_search_expression` (`knowledge_search`) entrega el texto del `ParseError` del core;
+/// `build_selection_expression` (la selección masiva de `change_plan`) lo tira con
+/// `map_err(|_| ErrorCode::InvalidSchema)`. E24-H10 cerró esa asimetría para el CÓDIGO y la dejó
+/// abierta para el MENSAJE.
+///
+/// El diagnóstico esperado se toma del **core**, no de un literal: así el test no fija la redacción
+/// del parser, solo exige que llegue entera a las dos superficies (invariante #3, una sola verdad).
+#[test]
+fn change_plan_conserva_el_error_del_parser() {
+    let dir = ws_dos_docs();
+    const CONSULTA: &str = "status =";
+    let diagnostico = lodestar_core::parse::parse(CONSULTA)
+        .expect_err("«status =» es una consulta malformada: al parser le falta el valor")
+        .message;
+
+    let l_search = serde_json::json!({"jsonrpc":"2.0","id":1,"method":"tools/call",
+        "params":{"name":"knowledge_search","arguments":{"text":"","where": CONSULTA}}})
+    .to_string();
+    let l_plan = serde_json::json!({"jsonrpc":"2.0","id":2,"method":"tools/call",
+        "params":{"name":"change_plan","arguments":{
+            "selection":{"where": CONSULTA},
+            "operation":{"patch_frontmatter":{"patch":{"x":1}}}}}})
+    .to_string();
+    let resp = roundtrip(dir.path(), &[l_search.as_str(), l_plan.as_str()], 2);
+
+    let e_search = error_de(&resp[0]).expect("knowledge_search debe fallar");
+    let e_plan = error_de(&resp[1]).expect("change_plan debe fallar");
+
+    // Control: por `knowledge_search` el diagnóstico ya viaja (E24-H10). Si esto fallara, el
+    // esperado se habría desalineado del core y el test de abajo no probaría nada.
+    assert!(
+        e_search.contains(&diagnostico),
+        "el diagnóstico del parser («{diagnostico}») debe seguir llegando por knowledge_search: \
+         «{e_search}»"
+    );
+    let (codigo, mensaje) = codigo_y_mensaje(&e_plan)
+        .unwrap_or_else(|| panic!("change_plan debe emitir «CÓDIGO: mensaje»: «{e_plan}»"));
+    assert_eq!(codigo, "INVALID_SCHEMA", "mismo código por las dos tools");
+    assert!(
+        mensaje.contains(&diagnostico),
+        "el MISMO `where` malformado debe dar el MISMO diagnóstico por las dos tools que lo \
+         aceptan: `build_selection_expression` lo descarta con `map_err(|_| …)`, así que \
+         change_plan devolvía «INVALID_SCHEMA» a secas.\n\
+         diagnóstico del core: «{diagnostico}»\n\
+         knowledge_search:     «{e_search}»\n\
+         change_plan:          «{e_plan}»"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// E26-H08 — Un `TypeError` de consulta se REPORTA, no excluye documentos en silencio
+//
+// Los dos consumidores del lenguaje descartan la evaluación con
+// `if !matches!(evaluate(...), Ok(true)) { continue; }` —`knowledge_search` y la selección masiva de
+// `change_plan` (`expand_selection`)—, así que un `Err(TypeError)` cae en el MISMO `continue` que un
+// `Ok(false)`: el documento se excluye. Efectos que estos tests reproducen:
+//   · una consulta con un error de tipo real devuelve `[]` sin un solo aviso, indistinguible de «no
+//     hay resultados»;
+//   · sobre una base heterogénea la exclusión se decide documento a documento, así que la respuesta
+//     es una lista RECORTADA que nadie puede distinguir de la correcta;
+//   · en `change_plan` es peor: una selección masiva salta documentos en silencio y el plan afecta a
+//     menos ficheros de los que el agente cree haber seleccionado.
+//
+// Es el principio de E24-H07 («una respuesta silenciosamente equivocada es peor que un error»)
+// aplicado a la EVALUACIÓN, después de que E24-H07/H08 lo aplicaran al parseo. Los rustdoc de
+// `lib.rs` consagran hoy lo contrario («sin propagarse a la búsqueda entera» / «sin abortar el
+// plan»): E26-H08 revisa ese criterio, igual que E24-H07 revisó el de E19-H04.
+//
+// Lo que NO cambia (y por eso hay dos controles anti-vacuos): `Ok(false)` sigue siendo AUSENCIA —no
+// casar no es un error—, y un campo ausente sigue excluyendo su documento sin ruido.
+// ---------------------------------------------------------------------------
+
+/// La consulta del defecto: orden (`>=`) entre un campo numérico y un literal string. Es
+/// `TypeError::OrderNotDefined` en el core desde E19-H01 (`error_de_tipo_orden_cruzado`), y hasta
+/// v0.4.0 se traducía a «este documento no casa».
+const ORDEN_CRUZADO: &str = "priority >= \"high\"";
+
+/// Grafías admisibles del tipo `number` en el mensaje: la del wire (`ValueType` serializa en
+/// minúscula, y es la que ve el agente en `metadata_inspect.inferredTypes`) o su nombre en español
+/// —los mensajes van en español (E26-H07)—. Lo que el criterio exige es que el mensaje NOMBRE el
+/// tipo, no una tipografía concreta.
+const GRAFIAS_NUMBER: &[&str] = &["number", "numero", "número", "numerico", "numérico"];
+
+/// Ídem para `string`.
+const GRAFIAS_STRING: &[&str] = &["string", "cadena", "texto"];
+
+/// ¿El mensaje nombra ese tipo en alguna de sus grafías admisibles?
+fn nombra_tipo(mensaje: &str, grafias: &[&str]) -> bool {
+    let bajo = mensaje.to_lowercase();
+    grafias.iter().any(|g| menciona(&bajo, g))
+}
+
+/// Juzga el error de un `TypeError` de orden cruzado: código estable + un mensaje que permita
+/// CORREGIR la consulta (campo, operador y los dos tipos que chocan). `contexto` identifica la tool
+/// en el fallo.
+fn juzga_error_de_tipo(err: &str, contexto: &str) {
+    assert_eq!(
+        codigo_de(err),
+        "INVALID_SCHEMA",
+        "un error de TIPO al evaluar es una consulta que el motor no puede responder sobre estos \
+         datos, y el catálogo ya tiene el código para eso ({contexto}): «{err}»"
+    );
+    let (_, mensaje) = codigo_y_mensaje(err)
+        .unwrap_or_else(|| panic!("{contexto} debe emitir «CÓDIGO: mensaje» (E26-H07): «{err}»"));
+    assert!(
+        menciona(&mensaje.to_lowercase(), "priority"),
+        "el mensaje debe NOMBRAR el campo que choca ({contexto}): «{err}»"
+    );
+    assert!(
+        nombra_tipo(mensaje, GRAFIAS_NUMBER),
+        "…el tipo que tiene el campo en el documento (number) ({contexto}): «{err}»"
+    );
+    assert!(
+        nombra_tipo(mensaje, GRAFIAS_STRING),
+        "…y el tipo del literal con el que se le comparó (string), que es la mitad del diagnóstico \
+         sin la cual el agente no sabe qué lado corregir ({contexto}): «{err}»"
+    );
+    assert!(
+        mensaje.contains(">=") || menciona(&mensaje.to_lowercase(), "greater_than_or_equal"),
+        "…y el operador, porque `=` sobre los MISMOS operandos es legal (es `false`, no error): \
+         solo el ORDEN yerra ({contexto}): «{err}»"
+    );
+}
+
+/// Workspace **homogéneo**: los dos documentos tienen `priority` numérico, así que
+/// `priority >= "high"` es un error de tipo en todos. Hoy la consulta devuelve `[]` —«no hay
+/// resultados»— sin un solo aviso.
+fn ws_priority_numerico() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "alfa.md",
+        "---\npriority: 2\nstatus: draft\n---\n\n# Alfa\n",
+    );
+    write(
+        dir.path(),
+        "beta.md",
+        "---\npriority: 5\nstatus: draft\n---\n\n# Beta\n",
+    );
+    dir
+}
+
+/// Workspace **heterogéneo** —el escenario real del defecto—: `priority` es string en unos
+/// documentos y número en otros, de modo que `priority >= "high"` casa unos, yerra en otros y hoy
+/// devuelve una lista recortada.
+///
+/// El reparto es DISCRIMINANTE para el criterio de determinismo:
+///   · `alfa.md` es el primero del orden total y **no** yerra (string vs string): quien reporte «el
+///     primer documento» sin más, o el primero que casa, nombrará el documento equivocado;
+///   · `bravo.md` es el primero del orden total que **sí** yerra → es el que debe salir nombrado;
+///   · `zulu.md` yerra también, pero el ÚLTIMO: quien acumule los errores y reporte el último (o
+///     todos) hará que el mensaje dependa de dónde paró el motor, no del workspace.
+fn ws_priority_heterogeneo() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "alfa.md",
+        "---\npriority: high\nstatus: draft\n---\n\n# Alfa\n",
+    );
+    write(
+        dir.path(),
+        "bravo.md",
+        "---\npriority: 2\nstatus: draft\n---\n\n# Bravo\n",
+    );
+    write(
+        dir.path(),
+        "charlie.md",
+        "---\npriority: urgent\nstatus: draft\n---\n\n# Charlie\n",
+    );
+    write(
+        dir.path(),
+        "zulu.md",
+        "---\npriority: 9\nstatus: draft\n---\n\n# Zulu\n",
+    );
+    dir
+}
+
+/// La llamada JSON-RPC a `knowledge_search` con un `where` (y opcionalmente un `limit`).
+fn linea_search(id: u32, donde: &str, limit: Option<u32>) -> String {
+    let mut args = serde_json::json!({"text": "", "where": donde});
+    if let Some(l) = limit {
+        args["limit"] = serde_json::json!(l);
+    }
+    serde_json::json!({"jsonrpc":"2.0","id": id,"method":"tools/call",
+        "params":{"name":"knowledge_search","arguments": args}})
+    .to_string()
+}
+
+/// La llamada JSON-RPC a `change_plan` con la MISMA consulta como `selection.where`. La política es
+/// permisiva a propósito: lo que se juzga es la EXPANSIÓN de la selección, no el veredicto de
+/// conformidad del resultado.
+fn linea_plan(id: u32, donde: &str) -> String {
+    serde_json::json!({"jsonrpc":"2.0","id": id,"method":"tools/call",
+        "params":{"name":"change_plan","arguments":{
+            "selection": {"where": donde},
+            "operation": {"patch_frontmatter": {"status": "review"}},
+            "policy": {"requireValidResult": false, "allowWarnings": true}}}})
+    .to_string()
+}
+
+/// **E26-H08** — un error de TIPO aborta la consulta con `INVALID_SCHEMA`, en vez de devolver `[]`.
+///
+/// Hoy `knowledge_search` responde `{"results": []}`: una lista vacía que el agente lee como «no hay
+/// documentos con esa prioridad», cuando lo que ocurrió es que su consulta no es respondible sobre
+/// estos datos. Es la respuesta silenciosamente equivocada que E24-H07 declaró peor que un error.
+#[test]
+fn type_error_de_orden_es_error_de_consulta() {
+    let dir = ws_priority_numerico();
+    let linea = linea_search(1, ORDEN_CRUZADO, None);
+    let resp = roundtrip(dir.path(), &[linea.as_str()], 1);
+
+    let err = error_de(&resp[0]).unwrap_or_else(|| {
+        panic!(
+            "`{ORDEN_CRUZADO}` sobre documentos con `priority` NUMÉRICO no es una consulta que el \
+             motor pueda responder: comparar el orden de un número con un string es \
+             `TypeError::OrderNotDefined` en el core desde E19-H01. Hasta v0.4.0 cada documento que \
+             erraba se EXCLUÍA, así que la respuesta era `[]` —indistinguible de «no hay \
+             resultados»— y el agente no tenía forma de enterarse.\nRespuesta recibida: {}",
+            resp[0]
+        )
+    });
+    juzga_error_de_tipo(&err, "knowledge_search");
+}
+
+/// **E26-H08** — la misma consulta da el mismo error por las dos superficies que la aceptan.
+///
+/// `knowledge_search` y `change_plan.selection` comparten el lenguaje (`§20.10`: `where`/`filter`
+/// significan lo mismo en las dos), así que también deben compartir el veredicto y su redacción. En
+/// `change_plan` el defecto es además el más caro: la selección masiva salta documentos en silencio
+/// y el plan toca menos ficheros de los que el agente cree haber seleccionado.
+#[test]
+fn misma_consulta_mismo_error_en_search_y_en_plan() {
+    let dir = ws_priority_numerico();
+    let l_search = linea_search(1, ORDEN_CRUZADO, None);
+    let l_plan = linea_plan(2, ORDEN_CRUZADO);
+    let resp = roundtrip(dir.path(), &[l_search.as_str(), l_plan.as_str()], 2);
+
+    let e_search = error_de(&resp[0]).unwrap_or_else(|| {
+        panic!(
+            "`knowledge_search` con `{ORDEN_CRUZADO}` debe fallar (ver \
+             `type_error_de_orden_es_error_de_consulta`): {}",
+            resp[0]
+        )
+    });
+    let e_plan = error_de(&resp[1]).unwrap_or_else(|| {
+        panic!(
+            "`change_plan` con `selection.where: {ORDEN_CRUZADO}` debe fallar: hoy `expand_selection` \
+             se salta en silencio TODO documento cuya evaluación yerra, así que planifica sobre un \
+             subconjunto que nadie pidió (aquí, el conjunto vacío) y lo presenta como un plan \
+             legítimo.\nRespuesta recibida: {}",
+            resp[1]
+        )
+    });
+
+    juzga_error_de_tipo(&e_plan, "change_plan");
+    assert_eq!(
+        e_search, e_plan,
+        "el MISMO `where` sobre el MISMO workspace debe dar el MISMO código y el MISMO mensaje por \
+         las dos tools que aceptan el lenguaje: si divergen, el agente aprende a corregir con una \
+         superficie y se queda a ciegas con la otra (§20.10, invariante #3)"
+    );
+}
+
+/// **E26-H08** — el error reportado es determinista: mismo workspace y misma consulta, mismo error
+/// palabra por palabra, y siempre sobre el mismo documento.
+///
+/// Sobre una base heterogénea hay VARIOS documentos que yerran, así que «cuál se reporta» tiene que
+/// estar decidido por el workspace y no por el camino que tomó el motor. El criterio de la historia
+/// es el **primer documento del orden total ya existente** (`Analysis::documents`, ordenado por
+/// `RelPath`) — la premisa está clavada en el core por `primer_type_error_en_el_orden_total`
+/// (`lodestar-core/tests/consulta.rs`).
+///
+/// Cuatro observaciones distintas del mismo workspace, que es lo que hace al test discriminante:
+/// dos procesos frescos, una página más pequeña y la otra tool. Ninguna puede cambiar el veredicto.
+#[test]
+fn el_type_error_reportado_es_determinista() {
+    let dir = ws_priority_heterogeneo();
+    let linea = linea_search(1, ORDEN_CRUZADO, None);
+
+    // (1) y (2): dos servidores recién arrancados, sin estado compartido.
+    let r1 = roundtrip(dir.path(), &[linea.as_str()], 1);
+    let r2 = roundtrip(dir.path(), &[linea.as_str()], 1);
+    let e1 = error_de(&r1[0]).unwrap_or_else(|| {
+        panic!(
+            "sobre una base heterogénea la consulta `{ORDEN_CRUZADO}` devuelve hoy los documentos \
+             de `priority` textual y CALLA sobre los numéricos: una lista recortada, decidida \
+             documento a documento, que nadie puede distinguir de la correcta.\nRespuesta: {}",
+            r1[0]
+        )
+    });
+    let e2 = error_de(&r2[0]).expect("la segunda ejecución debe fallar igual que la primera");
+    assert_eq!(
+        e1, e2,
+        "dos ejecuciones de la misma consulta sobre el mismo workspace deben dar el MISMO error, \
+         palabra por palabra"
+    );
+    juzga_error_de_tipo(&e1, "knowledge_search (base heterogénea)");
+
+    // El documento nombrado es el PRIMERO del orden total que yerra, no el primero del orden
+    // (`alfa.md`, que no yerra) ni el último que yerra (`zulu.md`).
+    assert!(
+        e1.contains("bravo.md"),
+        "el error debe nombrar el documento sobre el que se produjo, y ser el PRIMERO del orden \
+         total de `Analysis::documents` que yerra: `alfa.md` va antes pero su `priority` es string \
+         (no yerra), así que el nombrado es `bravo.md`. Error: «{e1}»"
+    );
+    assert!(
+        !e1.contains("zulu.md"),
+        "…y SOLO ese: reportar el último documento que yerra (o todos) hace que el mensaje dependa \
+         de dónde paró el motor en vez de del workspace, que es justo el no-determinismo que la \
+         historia cierra. Error: «{e1}»"
+    );
+
+    // (3) El tamaño de página no puede cambiar el veredicto: si el motor evaluara perezosamente
+    //     hasta llenar la página, con `limit: 1` le bastaría `alfa.md` (que casa) para responder
+    //     antes de llegar a `bravo.md`, y la MISMA consulta tendría éxito o fracaso según el
+    //     `limit` — un resultado que depende de un parámetro invisible para el problema.
+    let l_limit = linea_search(1, ORDEN_CRUZADO, Some(1));
+    let r3 = roundtrip(dir.path(), &[l_limit.as_str()], 1);
+    let e3 = error_de(&r3[0]).unwrap_or_else(|| {
+        panic!(
+            "la misma consulta con `limit: 1` debe fallar igual: el veredicto de una consulta no \
+             puede depender del tamaño de la página.\nRespuesta: {}",
+            r3[0]
+        )
+    });
+    assert_eq!(e3, e1, "…y con el mismo texto exacto");
+
+    // (4) Y por `change_plan`, cuyo bucle es OTRO: el documento reportado lo fija el orden total,
+    //     no el orden en que el planificador toque los documentos.
+    let l_plan = linea_plan(1, ORDEN_CRUZADO);
+    let r4 = roundtrip(dir.path(), &[l_plan.as_str()], 1);
+    let e4 = error_de(&r4[0]).unwrap_or_else(|| {
+        panic!(
+            "la selección masiva sobre la base heterogénea debe fallar en vez de planificar sobre \
+             los documentos que «sí casaron».\nRespuesta: {}",
+            r4[0]
+        )
+    });
+    assert_eq!(
+        e4, e1,
+        "las dos tools deben nombrar el MISMO documento con el MISMO texto: el criterio es el orden \
+         total de `Analysis::documents`, no el orden de evaluación de cada consumidor"
+    );
+}
+
+/// **E26-H08** — control anti-vacuo: no casar sigue siendo AUSENCIA, no error.
+///
+/// El arreglo no puede consistir en convertir cualquier resultado vacío en un fallo: `Ok(false)` es
+/// exclusión y solo `Err` cambia de tratamiento. El control lleva su propio control: la misma
+/// consulta con el valor que SÍ está en los documentos devuelve los dos, de modo que el `[]` de
+/// arriba significa «no casa» y no «la búsqueda está rota».
+#[test]
+fn no_casar_sigue_siendo_ausencia() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "alfa.md",
+        "---\nstatus: draft\ntitle: Alfa\n---\n\n# Alfa\n",
+    );
+    write(
+        dir.path(),
+        "beta.md",
+        "---\nstatus: draft\ntitle: Beta\n---\n\n# Beta\n",
+    );
+
+    let l_vacia = linea_search(1, "status = borrador", None);
+    let l_control = linea_search(2, "status = draft", None);
+    let resp = roundtrip(dir.path(), &[l_vacia.as_str(), l_control.as_str()], 2);
+
+    assert_eq!(
+        error_de(&resp[0]),
+        None,
+        "`status = borrador` sobre documentos con `status: draft` es una comparación PERFECTAMENTE \
+         tipada (string vs string) que simplemente no casa: eso es ausencia, no error"
+    );
+    assert!(
+        search_paths(&resp[0]).is_empty(),
+        "…y su respuesta es la lista vacía: {:?}",
+        search_paths(&resp[0])
+    );
+
+    let mut casan = search_paths(&resp[1]);
+    casan.sort();
+    assert_eq!(
+        casan,
+        vec!["alfa.md".to_string(), "beta.md".to_string()],
+        "control del control: la MISMA maquinaria con el valor que sí está devuelve los dos \
+         documentos, así que el `[]` de arriba es un veredicto y no una búsqueda rota"
+    );
+}
+
+/// **E26-H08** — control anti-vacuo: un campo AUSENTE excluye su documento sin error, como hasta
+/// ahora.
+///
+/// La ausencia cortocircuita antes de comprobar tipos (`campo_inexistente`, E19-H01): no se puede
+/// errar sobre un tipo que no se tiene. El documento sin `priority` va PRIMERO en el orden total a
+/// propósito: una implementación que abortara ante todo lo que no sea `Ok(true)` moriría en él.
+#[test]
+fn campo_ausente_no_es_type_error() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "a-sin-priority.md",
+        "---\nstatus: draft\ntitle: Sin prioridad\n---\n\n# Sin prioridad\n",
+    );
+    write(
+        dir.path(),
+        "b-con-priority.md",
+        "---\nstatus: draft\npriority: 5\n---\n\n# Con prioridad\n",
+    );
+
+    let linea = linea_search(1, "priority >= 3", None);
+    let resp = roundtrip(dir.path(), &[linea.as_str()], 1);
+
+    assert_eq!(
+        error_de(&resp[0]),
+        None,
+        "preguntar por una clave que un documento no tiene es legítimo (el frontmatter es metadata \
+         arbitraria): la ausencia excluye el documento, no rompe la consulta"
+    );
+    assert_eq!(
+        search_paths(&resp[0]),
+        vec!["b-con-priority.md".to_string()],
+        "…y el documento que SÍ tiene la clave, con el tipo correcto, sigue casando"
+    );
+}
+
+/// La llamada JSON-RPC a `knowledge_search` combinando un `text` NO vacío con un `where`.
+fn linea_search_con_texto(id: u32, texto: &str, donde: &str) -> String {
+    serde_json::json!({"jsonrpc":"2.0","id": id,"method":"tools/call",
+        "params":{"name":"knowledge_search","arguments":{"text": texto, "where": donde}}})
+    .to_string()
+}
+
+/// **E26-H08** — un `text` más estrecho NO puede tapar el error de tipo.
+///
+/// El resto de tests de la familia usan `text: ""`, así que ninguno fija el ORDEN entre los dos
+/// criterios de `knowledge_search`, y el orden es justo lo que decide el alcance del error: si el
+/// `text` se aplicase primero, un documento descartado por texto nunca llegaría a evaluarse y su
+/// `TypeError` desaparecería. La misma consulta sería entonces legal o ilegal según un parámetro que
+/// no habla de tipos, y **añadir palabras a la búsqueda arreglaría la consulta** — el mismo
+/// resultado-que-depende-de-lo-invisible que la historia cierra.
+///
+/// El criterio es que el error es de la CONSULTA («este `where` no es respondible sobre este
+/// workspace»), no del subconjunto que el `text` deja pasar: el `where` se evalúa sobre el orden
+/// total de `Analysis::documents`, y por eso el veredicto es idéntico —byte a byte— al de `text: ""`.
+///
+/// Discriminante por construcción: `text: "alfa"` casa **solo** `alfa.md` (que NO yerra: su
+/// `priority` es string) y descarta `bravo.md` (que sí yerra, y es el que debe seguir saliendo
+/// nombrado).
+#[test]
+fn el_text_no_tapa_el_type_error() {
+    let dir = ws_priority_heterogeneo();
+
+    // Control de la premisa: con ese `text` y SIN `where`, la búsqueda devuelve solo `alfa.md` —de
+    // modo que el `text` de verdad descarta a `bravo.md`, y el test no es vacuo.
+    let l_solo_texto = serde_json::json!({"jsonrpc":"2.0","id":1,"method":"tools/call",
+        "params":{"name":"knowledge_search","arguments":{"text":"alfa"}}})
+    .to_string();
+    let l_texto_y_where = linea_search_con_texto(2, "alfa", ORDEN_CRUZADO);
+    let l_solo_where = linea_search(3, ORDEN_CRUZADO, None);
+    let resp = roundtrip(
+        dir.path(),
+        &[
+            l_solo_texto.as_str(),
+            l_texto_y_where.as_str(),
+            l_solo_where.as_str(),
+        ],
+        3,
+    );
+
+    assert_eq!(
+        search_paths(&resp[0]),
+        vec!["alfa.md".to_string()],
+        "premisa del test: `text: \"alfa\"` acota la búsqueda a `alfa.md` y deja fuera a `bravo.md` \
+         (el documento que yerra). Si esto cambiara, el caso de abajo dejaría de discriminar"
+    );
+
+    let con_texto = error_de(&resp[1]).unwrap_or_else(|| {
+        panic!(
+            "un `text` que descarta al documento mal tipado NO puede convertir una consulta \
+             imposible en una respuesta: el `where` se evalúa sobre el orden total, no sobre lo que \
+             el `text` deje pasar.\nRespuesta: {}",
+            resp[1]
+        )
+    });
+    juzga_error_de_tipo(
+        &con_texto,
+        "knowledge_search (con `text` que excluye el documento)",
+    );
+    assert!(
+        con_texto.contains("bravo.md"),
+        "…y sigue nombrando `bravo.md`, aunque el `text` lo hubiera descartado: «{con_texto}»"
+    );
+
+    let sin_texto = error_de(&resp[2]).expect("y con `text: \"\"` también falla");
+    assert_eq!(
+        con_texto, sin_texto,
+        "el veredicto y su texto deben ser IDÉNTICOS con y sin `text`: si un `text` más estrecho \
+         cambiara el error (o lo hiciera desaparecer), el agente podría «arreglar» una consulta mal \
+         tipada añadiendo palabras a la búsqueda"
+    );
+}
+
+/// **E26-H08** — la otra variante de `TypeError` también aborta: `NotAList`.
+///
+/// `OrderNotDefined` (el `>=` cruzado) es el generador más probable en una base real, pero el enum
+/// del core tiene DOS variantes y las dos llegan por el mismo camino. Sin este caso, la rama
+/// `NotAList` del traductor de la fachada no la ejercita nadie: podría no emitir mensaje —o emitir
+/// el del orden— y la suite no se enteraría.
+///
+/// **Ojo con la semántica real de `contains`** (verificada contra el evaluador del core antes de
+/// escribir el test, `eval_contains`): sobre un **string** `contains` es SUBCADENA, no error, así
+/// que `tags contains "x"` sobre `tags: solo` es `Ok(false)` y **no** dispara nada. `NotAList` sale
+/// de los dos casos que este test usa:
+///   · `contains` sobre un escalar **no string** (aquí un número);
+///   · `contains_any`/`contains_all` sobre cualquier no-lista (aquí un string) — son exclusivos de
+///     listas, y es el caso realista de quien escribió un tag suelto sin lista.
+#[test]
+fn type_error_de_lista_tambien_es_error_de_consulta() {
+    let dir = tempfile::tempdir().unwrap();
+    // Orden total: `a-lista.md` < `b-escalar.md` < `c-numero.md`. El primero del orden NO yerra en
+    // ninguno de los dos casos, así que el documento nombrado no puede salir por accidente.
+    write(
+        dir.path(),
+        "a-lista.md",
+        "---\ntags:\n  - uno\n  - dos\n---\n\n# Con lista\n",
+    );
+    write(
+        dir.path(),
+        "b-escalar.md",
+        "---\ntags: solo\n---\n\n# Tag suelto\n",
+    );
+    write(
+        dir.path(),
+        "c-numero.md",
+        "---\npriority: 2\n---\n\n# Número\n",
+    );
+
+    let l_contains_num = linea_search(1, "priority contains \"2\"", None);
+    let l_contains_any = linea_search(2, "tags contains_any [\"uno\"]", None);
+    let l_subcadena = linea_search(3, "tags contains \"sol\"", None);
+    let resp = roundtrip(
+        dir.path(),
+        &[
+            l_contains_num.as_str(),
+            l_contains_any.as_str(),
+            l_subcadena.as_str(),
+        ],
+        3,
+    );
+
+    // (1) `contains` sobre un número: el operador de lista sobre un escalar no-string.
+    let e_num = error_de(&resp[0]).unwrap_or_else(|| {
+        panic!(
+            "`priority contains \"2\"` sobre `priority: 2` es `TypeError::NotAList` en el core: un \
+             operador de lista sobre un número. Debe abortar la consulta igual que el orden \
+             cruzado, no devolver una lista recortada.\nRespuesta: {}",
+            resp[0]
+        )
+    });
+    let (codigo, mensaje) = codigo_y_mensaje(&e_num)
+        .unwrap_or_else(|| panic!("debe emitir «CÓDIGO: mensaje»: «{e_num}»"));
+    assert_eq!(
+        codigo, "INVALID_SCHEMA",
+        "mismo código que el otro TypeError"
+    );
+    assert!(
+        menciona(&mensaje.to_lowercase(), "priority"),
+        "el mensaje debe nombrar el campo: «{e_num}»"
+    );
+    assert!(
+        nombra_tipo(mensaje, GRAFIAS_NUMBER),
+        "…y el tipo REAL del campo (number), que es lo que le dice al agente por qué su `contains` \
+         no aplica: «{e_num}»"
+    );
+    assert!(
+        menciona(&mensaje.to_lowercase(), "contains"),
+        "…y el operador que lo exigía: «{e_num}»"
+    );
+    assert!(
+        e_num.contains("c-numero.md"),
+        "…y el documento donde chocó: «{e_num}»"
+    );
+
+    // (2) `contains_any` sobre un string: exclusivo de listas. El primero del orden (`a-lista.md`)
+    //     casa sin errar, así que el nombrado es el segundo.
+    let e_any = error_de(&resp[1]).unwrap_or_else(|| {
+        panic!(
+            "`tags contains_any [\"uno\"]` sobre `tags: solo` (string) es `NotAList`: \
+             `contains_any` es exclusivo de listas. Hasta v0.4.0 ese documento se excluía en \
+             silencio, así que la respuesta era la lista de los que SÍ tenían lista.\nRespuesta: {}",
+            resp[1]
+        )
+    });
+    let (codigo, mensaje) = codigo_y_mensaje(&e_any)
+        .unwrap_or_else(|| panic!("debe emitir «CÓDIGO: mensaje»: «{e_any}»"));
+    assert_eq!(codigo, "INVALID_SCHEMA", "mismo código");
+    assert!(
+        menciona(&mensaje.to_lowercase(), "tags") && nombra_tipo(mensaje, GRAFIAS_STRING),
+        "el mensaje debe nombrar el campo y su tipo real (string): «{e_any}»"
+    );
+    assert!(
+        menciona(&mensaje.to_lowercase(), "contains_any"),
+        "…y el operador exacto, que es distinto del `contains` a secas: «{e_any}»"
+    );
+    assert!(
+        e_any.contains("b-escalar.md") && !e_any.contains("c-numero.md"),
+        "…y el documento donde chocó, que es el primero del orden total que yerra (`a-lista.md` va \
+         antes y casa sin errar): «{e_any}»"
+    );
+
+    // (3) Control anti-vacuo: `contains` sobre un STRING es subcadena, no error. El arreglo no
+    //     puede consistir en hacer ilegal todo `contains` sobre lo que no sea una lista.
+    assert_eq!(
+        error_de(&resp[2]),
+        None,
+        "`tags contains \"sol\"` sobre `tags: solo` es SUBCADENA (el tipo del campo decide el \
+         significado del operador, `eval_contains`): eso no es un error de tipo"
+    );
+    assert_eq!(
+        search_paths(&resp[2]),
+        vec!["b-escalar.md".to_string()],
+        "…y casa el documento del tag suelto, sin que la lista de `a-lista.md` (que no contiene la \
+         subcadena) ni la ausencia de `tags` en `c-numero.md` lo estropeen"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// E26-H09 — `metadata_inspect` habla el mismo dialecto de dot-paths que la consulta
+//
+// `App::metadata_inspect` normaliza su `field` con `FieldPath::parse`, mientras `where`, `filter` y
+// `has`/`missing` pasan todos por `core::parse::build_field_path` (E24-H07/H08). Dos dialectos para
+// el mismo texto, con tres consecuencias que estos tests reproducen por el wire:
+//   · `field: "frontmatter.graph.backlinks"` —la sintaxis que el propio mensaje de error del parser
+//     recomienda— busca una clave de primer nivel llamada `frontmatter` y devuelve `presentIn: 0`:
+//     silenciosamente equivocado sobre un dato que SÍ existe;
+//   · `field: "graph.backlinks"` inspecciona la clave del frontmatter, mientras el mismo texto en un
+//     `where` consulta el GRAFO: el mismo dot-path significa dos cosas según la tool;
+//   · `field: "frontmatter.status"` (la abreviatura legal del lenguaje) devuelve `presentIn: 0`
+//     sobre una base llena de `status`.
+//
+// Lo que la historia decide, y estos tests clavan: `metadata_inspect` hereda las TRES reglas del
+// lenguaje (abreviatura, anclaje y rechazo bajo namespace reservado) y, además, un namespace
+// reservado VÁLIDO no es inspeccionable —`metadata_inspect` describe metadata, y una propiedad
+// calculada no vive en ningún frontmatter—, con un mensaje que dice por dónde sí (`graph_query` o
+// el anclaje `frontmatter.`).
+// ---------------------------------------------------------------------------
+
+/// Workspace con una clave de frontmatter que **colisiona** con un namespace reservado
+/// (`graph.backlinks`, con el valor 7) más un `status` normal en 2 de los 3 documentos.
+///
+/// Discriminante por diseño: el 7 del frontmatter no coincide con ningún backlink real del grafo
+/// (los tres documentos están aislados, 0 backlinks), así que una respuesta que venga del grafo no
+/// puede confundirse con una que venga del frontmatter.
+fn ws_reservado_en_frontmatter() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "alfa.md",
+        "---\nstatus: draft\ngraph:\n  backlinks: 7\ndocument:\n  path: falso.md\n---\n\n# Alfa\n",
+    );
+    write(
+        dir.path(),
+        "bravo.md",
+        "---\nstatus: draft\n---\n\n# Bravo\n",
+    );
+    write(dir.path(), "charlie.md", "# Charlie\n\nsin frontmatter.\n");
+    dir
+}
+
+/// La llamada JSON-RPC a `metadata_inspect` en modo `field`.
+fn linea_inspect(id: u32, field: &str) -> String {
+    linea_call(
+        id,
+        "metadata_inspect",
+        serde_json::json!({"mode": "field", "field": field}),
+    )
+}
+
+/// **E26-H09** · Criterio `anclaje_frontmatter_alcanza_la_clave_reservada`:
+/// **Dado** un documento con frontmatter `graph: {backlinks: 7}`, **Cuando** se llama a
+/// `metadata_inspect{mode:"field", field:"frontmatter.graph.backlinks"}`, **Entonces** devuelve
+/// `presentIn: 1` con el valor `7`.
+///
+/// Hoy devuelve `presentIn: 0`: `FieldPath::parse` no conoce el anclaje de E24-H08, así que el path
+/// se resuelve como la clave literal `frontmatter` → `graph` → `backlinks`, que no existe. Es la
+/// misma clase de defecto —una respuesta silenciosamente equivocada— que E24-H08 retiró del
+/// lenguaje de consulta, sobreviviendo en la tool que existe para descubrir la base.
+#[test]
+fn anclaje_frontmatter_alcanza_la_clave_reservada() {
+    let dir = ws_reservado_en_frontmatter();
+    let resp = roundtrip(
+        dir.path(),
+        &[linea_inspect(1, "frontmatter.graph.backlinks").as_str()],
+        1,
+    );
+    assert_eq!(
+        error_de(&resp[0]),
+        None,
+        "`frontmatter.` es la sintaxis que el propio parser recomienda para alcanzar una clave \
+         homónima de un namespace: no puede fallar"
+    );
+    let sc = &resp[0]["result"]["structuredContent"];
+
+    assert_eq!(
+        sc["presentIn"].as_u64(),
+        Some(1),
+        "`frontmatter.graph.backlinks` debe alcanzar la clave del USUARIO —el `backlinks: 7` de \
+         `alfa.md`—, no una clave de primer nivel llamada literalmente `frontmatter`. Hasta v0.4.0 \
+         esto devolvía `presentIn: 0` sobre un dato que existe: {resp:?}"
+    );
+    assert_eq!(
+        sc["missingIn"].as_u64(),
+        Some(2),
+        "…y los otros 2 documentos siguen contando como ausencia (presentIn + missingIn == 3): \
+         {resp:?}"
+    );
+
+    let values = sc["values"].as_array().unwrap_or_else(|| {
+        panic!("la inspección debe traer `values` (array de {{value, count}}): {resp:?}")
+    });
+    assert_eq!(
+        values,
+        &vec![serde_json::json!({"value": 7, "count": 1})],
+        "…con el valor 7 en su tipo JSON natural (número, sin coerción) y conteo 1: es el dato que \
+         hoy es inalcanzable por esta tool: {resp:?}"
+    );
+    assert_eq!(
+        sc["inferredTypes"]["number"].as_u64(),
+        Some(1),
+        "…y su tipo observado es `number`: {resp:?}"
+    );
+}
+
+/// **E26-H09** · Criterio `namespace_reservado_no_es_inspeccionable`:
+/// **Dado** ese mismo documento, **Cuando** se llama con `field:"graph.backlinks"`, **Entonces**
+/// falla con `INVALID_SCHEMA` y el mensaje apunta al anclaje y a `graph_query`.
+///
+/// Hoy devuelve una inspección: la de la clave del frontmatter. O sea que el MISMO texto significa
+/// «el grafo» en `where` y «mi clave `graph`» en `metadata_inspect`. Se rechaza (y no se reinterpreta
+/// como el grafo) porque `metadata_inspect` describe **metadata**: una propiedad calculada no vive
+/// en ningún frontmatter y no tiene `presentIn`/`missingIn` que describir.
+///
+/// Tres casos, uno por regla: el namespace reservado VÁLIDO (`graph.backlinks`, `document.path`) y
+/// la propiedad DESCONOCIDA bajo namespace reservado (`graph.backlink`, con typo), que E24-H07 ya
+/// declaró error en el lenguaje y que hoy esta tool contesta con `presentIn: 0`.
+#[test]
+fn namespace_reservado_no_es_inspeccionable() {
+    let dir = ws_reservado_en_frontmatter();
+    let campos = ["graph.backlinks", "document.path", "graph.backlink"];
+    let lineas: Vec<String> = campos
+        .iter()
+        .enumerate()
+        .map(|(i, f)| linea_inspect(i as u32 + 1, f))
+        .collect();
+    let refs: Vec<&str> = lineas.iter().map(String::as_str).collect();
+    let resp = roundtrip(dir.path(), &refs, campos.len());
+
+    for (i, campo) in campos.iter().enumerate() {
+        let err = error_de(&resp[i]).unwrap_or_else(|| {
+            panic!(
+                "`field: \"{campo}\"` no es inspeccionable: `{campo}` nombra una propiedad \
+                 CALCULADA (o una que no existe bajo un namespace reservado), y `metadata_inspect` \
+                 describe metadata de frontmatter. Hasta v0.4.0 esta llamada devolvía una \
+                 inspección —la de la clave homónima del usuario, o `presentIn: 0`—, así que el \
+                 mismo dot-path significaba una cosa aquí y otra en `where`.\nRespuesta recibida: {}",
+                resp[i]
+            )
+        });
+        assert_eq!(
+            codigo_de(&err),
+            "INVALID_SCHEMA",
+            "el `field` pedido no es un campo de metadata: es un error de entrada de la tool \
+             («{campo}»): «{err}»"
+        );
+        let (_, mensaje) = codigo_y_mensaje(&err).unwrap_or_else(|| {
+            panic!("debe emitir «CÓDIGO: mensaje» (E26-H07) para «{campo}»: «{err}»")
+        });
+        // La forma ANCLADA COMPLETA, no la palabra «frontmatter» suelta: el mensaje habla de
+        // frontmatter varias veces (explicando que las propiedades calculadas no viven en él), así
+        // que una aserción por token la satisface de rebote y sobreviviría a borrar la salida. Lo
+        // que el criterio exige es que el mensaje deletree el texto que el agente tiene que
+        // TECLEAR. Se comprueba por subcadena y no con `menciona` porque el anclaje lleva puntos, y
+        // el punto es separador de tokens.
+        let anclado = format!("frontmatter.{campo}");
+        assert!(
+            mensaje.contains(&anclado),
+            "…y el mensaje debe deletrear la salida —el anclaje «{anclado}»—, no limitarse a \
+             mencionar el frontmatter: es la mitad del diagnóstico que convierte el rechazo en una \
+             instrucción ejecutable: «{err}»"
+        );
+    }
+
+    // El caso del GRAFO tiene además una segunda salida que el mensaje debe nombrar: la tool que sí
+    // responde por las propiedades calculadas.
+    let err_grafo = error_de(&resp[0]).expect("caso `graph.backlinks`");
+    assert!(
+        menciona(&err_grafo.to_lowercase(), "graph_query"),
+        "…y para un namespace `graph.*` válido, el mensaje debe remitir a `graph_query`: el agente \
+         que preguntó por los backlinks reales tiene que salir de aquí sabiendo dónde \
+         preguntarlos: «{err_grafo}»"
+    );
+
+    // Control anti-vacuo: el rechazo es del NAMESPACE, no de todo lo que lleve puntos. Un path
+    // anidado normal se sigue inspeccionando.
+    let ok = roundtrip(
+        dir.path(),
+        &[linea_inspect(1, "frontmatter.graph.backlinks").as_str()],
+        1,
+    );
+    assert_eq!(
+        error_de(&ok[0]),
+        None,
+        "el anclaje explícito sigue siendo la vía legal a esa misma clave: {:?}",
+        ok[0]
+    );
+}
+
+/// **E26-H09** · Criterio `la_abreviatura_vale_tambien_en_metadata_inspect`:
+/// **Dado** un documento con `status: draft`, **Cuando** se llama con `field:"frontmatter.status"` y
+/// con `field:"status"`, **Entonces** las dos respuestas son **idénticas**.
+///
+/// Hoy la primera devuelve `presentIn: 0` (busca la clave literal `frontmatter`). La abreviatura es
+/// legal en `where`/`filter`/`has` desde E19-H02, y el `include` de `knowledge_search` incluso la
+/// EXIGE (`frontmatter.status`), así que un agente que use ese mismo texto contra
+/// `metadata_inspect` obtiene hoy una respuesta vacía sin un solo aviso.
+///
+/// La igualdad se asevera sobre el `structuredContent` **entero**, lo que fija también que el
+/// `field` que ecoa la respuesta sea el path NORMALIZADO (el mismo para las dos entradas) y no el
+/// texto tal cual se tecleó: si el eco variase, dos respuestas «equivalentes» no serían idénticas y
+/// el agente no podría cotejarlas.
+#[test]
+fn la_abreviatura_vale_tambien_en_metadata_inspect() {
+    let dir = ws_reservado_en_frontmatter();
+    let resp = roundtrip(
+        dir.path(),
+        &[
+            linea_inspect(1, "frontmatter.status").as_str(),
+            linea_inspect(2, "status").as_str(),
+        ],
+        2,
+    );
+    assert_eq!(
+        error_de(&resp[0]),
+        None,
+        "`frontmatter.status` es la abreviatura legal del lenguaje desde E19-H02: {:?}",
+        resp[0]
+    );
+    let anclado = &resp[0]["result"]["structuredContent"];
+    let desnudo = &resp[1]["result"]["structuredContent"];
+
+    assert_eq!(
+        anclado, desnudo,
+        "`frontmatter.status` y `status` son el MISMO campo en el lenguaje de consulta, así que \
+         `metadata_inspect` debe responder exactamente lo mismo. Hasta v0.4.0 la primera forma \
+         devolvía `presentIn: 0`"
+    );
+
+    // No vacuo: dos respuestas vacías o dos errores también serían «idénticas».
+    assert_eq!(
+        desnudo["presentIn"].as_u64(),
+        Some(2),
+        "`status` está en 2 de los 3 documentos (el tercero no tiene frontmatter): {resp:?}"
+    );
+    assert_eq!(
+        desnudo["values"],
+        serde_json::json!([{"value": "draft", "count": 2}]),
+        "…con `draft` como único valor del vocabulario: {resp:?}"
+    );
+}
+
+/// **E26-H09** · Criterio `dot_path_invalido_sigue_rechazandose` (control anti-vacuo):
+/// **Dado** un `field` con un dot-path inválido (`"a..b"`, `"service."`), **Cuando** se llama,
+/// **Entonces** sigue siendo `INVALID_SCHEMA`.
+///
+/// Cambiar de normalizador no puede abrir la puerta a paths que hoy se rechazan: un segmento vacío
+/// no construye un `FieldPath` en NINGUNO de los dos dialectos. Este test pasa ya hoy, y está para
+/// que el arreglo no consista en dejar de validar.
+#[test]
+fn dot_path_invalido_sigue_rechazandose() {
+    let dir = ws_reservado_en_frontmatter();
+    let campos = ["a..b", "service.", ".status", ""];
+    let lineas: Vec<String> = campos
+        .iter()
+        .enumerate()
+        .map(|(i, f)| linea_inspect(i as u32 + 1, f))
+        .collect();
+    let refs: Vec<&str> = lineas.iter().map(String::as_str).collect();
+    let resp = roundtrip(dir.path(), &refs, campos.len());
+
+    for (i, campo) in campos.iter().enumerate() {
+        let err = error_de(&resp[i]).unwrap_or_else(|| {
+            panic!(
+                "`field: \"{campo}\"` tiene un segmento vacío y no es un dot-path válido: {}",
+                resp[i]
+            )
+        });
+        assert_eq!(
+            codigo_de(&err),
+            "INVALID_SCHEMA",
+            "un dot-path malformado es un error de entrada de la tool («{campo}»): «{err}»"
+        );
+        assert!(
+            codigo_y_mensaje(&err).is_some(),
+            "…y sigue viniendo con mensaje (E26-H07), no como código pelado: «{err}»"
+        );
+    }
+}
+
+/// **E26-H09** — el borde que destapó la revisión: una clave de PRIMER NIVEL llamada literalmente
+/// `frontmatter`.
+///
+/// El catálogo la anuncia con su nombre literal (`frontmatter.status`), porque eso es lo que `walk`
+/// emite y anclarla no la arreglaría; pero el lenguaje lee ese mismo texto como el **anclaje**
+/// (E24-H08), así que `mode:"field"` resolvería la clave `status` del usuario —que aquí no existe—
+/// y contestaría `presentIn: 0`: otra vez una respuesta silenciosamente equivocada sobre un dato
+/// que sí está en el disco. La tool lo dice en voz alta.
+///
+/// Y el rechazo no es un callejón sin salida: el `include` de `knowledge_search` exige el prefijo
+/// `frontmatter.` y parsea el sufijo **literalmente**, así que `frontmatter.frontmatter.status` sí
+/// lee el valor. Este test comprueba que la salida que el mensaje promete **funciona de verdad**
+/// (una instrucción que no se ejecuta es peor que ninguna).
+///
+/// Segunda mitad, para que el ruido no se coma la señal: cuando el anclaje **sí** resuelve —hay un
+/// `status` de verdad en la base—, manda la resolución anclada y la inspección es normal. La
+/// ambigüedad solo se reporta en el caso vacío, que es el único en el que la respuesta sería
+/// engañosa.
+#[test]
+fn clave_frontmatter_literal_colisiona_con_ruido() {
+    // --- (A) La clave literal a solas: el anclaje no resuelve nada, así que la tool lo reporta ---
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "raro.md",
+        "---\nfrontmatter:\n  status: raro\n---\n\n# Raro\n",
+    );
+    write(dir.path(), "otro.md", "# Otro\n\nsin frontmatter.\n");
+
+    let resp = roundtrip(
+        dir.path(),
+        &[
+            linea_call(
+                1,
+                "metadata_inspect",
+                serde_json::json!({"mode": "catalog"}),
+            )
+            .as_str(),
+            linea_inspect(2, "frontmatter.status").as_str(),
+            linea_call(
+                3,
+                "knowledge_search",
+                serde_json::json!({"text": "", "include": ["frontmatter.frontmatter.status"]}),
+            )
+            .as_str(),
+        ],
+        3,
+    );
+
+    // 1) El catálogo la anuncia con su nombre literal: el dato existe y es descubrible.
+    let nombres: Vec<String> = resp[0]["result"]["structuredContent"]["fields"]
+        .as_array()
+        .unwrap_or_else(|| panic!("el catálogo devuelve `fields`: {:?}", resp[0]))
+        .iter()
+        .filter_map(|f| f["name"].as_str().map(str::to_string))
+        .collect();
+    assert!(
+        nombres.iter().any(|n| n == "frontmatter.status"),
+        "el catálogo anuncia la clave literal tal cual (`walk` la emite así, y anclarla no la haría \
+         direccionable): {nombres:?}"
+    );
+
+    // 2) Inspeccionarla por ese nombre NO puede contestar `presentIn: 0`: es el defecto que la
+    //    épica retira. Se reporta la ambigüedad, con la salida real.
+    let err = error_de(&resp[1]).unwrap_or_else(|| {
+        panic!(
+            "«frontmatter.status» es AMBIGUO en esta base: el catálogo lo anuncia (viene de una \
+             clave de primer nivel llamada literalmente `frontmatter`) y el lenguaje lo lee como el \
+             anclaje a una clave `status` que aquí no existe. Contestar `presentIn: 0` sería \
+             silenciosamente equivocado sobre un dato que está en el disco.\nRespuesta recibida: {}",
+            resp[1]
+        )
+    });
+    assert_eq!(
+        codigo_de(&err),
+        "INVALID_SCHEMA",
+        "la ambigüedad es del `field` que se pidió: «{err}»"
+    );
+    let (_, mensaje) = codigo_y_mensaje(&err)
+        .unwrap_or_else(|| panic!("debe emitir «CÓDIGO: mensaje» (E26-H07): «{err}»"));
+    assert!(
+        menciona(&mensaje.to_lowercase(), "knowledge_search"),
+        "…y el mensaje debe nombrar la tool por la que ese valor SÍ se lee (`knowledge_search`, con \
+         su `include`): un rechazo sin salida deja al agente sin nada que hacer: «{err}»"
+    );
+    assert!(
+        mensaje.contains("frontmatter.frontmatter.status"),
+        "…deletreando el texto exacto que hay que teclear (el prefijo obligatorio del `include` más \
+         la clave literal), no solo el nombre de la tool: «{err}»"
+    );
+
+    // 3) …y la salida que promete FUNCIONA: el `include` proyecta el valor de la clave literal.
+    let hits = search_paths_values(&resp[2]);
+    let raro = hits
+        .iter()
+        .find(|r| r["path"] == "raro.md")
+        .unwrap_or_else(|| panic!("`raro.md` debe estar entre los resultados: {hits:?}"));
+    assert_eq!(
+        raro["frontmatter"],
+        serde_json::json!({"frontmatter.status": "raro"}),
+        "el `include` exige el prefijo `frontmatter.` y parsea el sufijo LITERALMENTE, así que \
+         «frontmatter.frontmatter.status» lee la clave anidada bajo la clave literal `frontmatter` \
+         y la proyecta con la clave pedida: {raro:?}"
+    );
+
+    // --- (B) Con un `status` de verdad en la base, manda el anclaje y no hay ambigüedad ---
+    let dir2 = tempfile::tempdir().unwrap();
+    write(
+        dir2.path(),
+        "raro.md",
+        "---\nfrontmatter:\n  status: raro\n---\n\n# Raro\n",
+    );
+    write(
+        dir2.path(),
+        "normal.md",
+        "---\nstatus: draft\n---\n\n# Normal\n",
+    );
+    let resp2 = roundtrip(
+        dir2.path(),
+        &[linea_inspect(1, "frontmatter.status").as_str()],
+        1,
+    );
+
+    assert_eq!(
+        error_de(&resp2[0]),
+        None,
+        "cuando el anclaje SÍ resuelve, manda él: `frontmatter.status` es la abreviatura legal de \
+         `status` y no puede volverse un error por que otro documento tenga una clave literal \
+         `frontmatter`. La ambigüedad solo se reporta cuando la respuesta sería engañosa: {:?}",
+        resp2[0]
+    );
+    let sc = &resp2[0]["result"]["structuredContent"];
+    assert_eq!(
+        sc["presentIn"].as_u64(),
+        Some(1),
+        "…y la inspección es la del `status` del usuario: {resp2:?}"
+    );
+    assert_eq!(
+        sc["values"],
+        serde_json::json!([{"value": "draft", "count": 1}]),
+        "…con su vocabulario real, no el de la clave literal (`raro`): {resp2:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// E26-H10 — Ninguna respuesta viaja sin cota
+//
+// Dos tools pueden devolver hoy una respuesta de tamaño proporcional al workspace:
+//   · `graph_query` no tiene ni default ni máximo (`None => total`), así que un
+//     `operation:"components"` sirve el grafo COMPLETO en una sola respuesta, y su `inputSchema`
+//     declara `minimum: 1` sin `maximum` — el cliente tampoco puede protegerse;
+//   · `metadata_inspect` no tiene paginación en NINGÚN modo: el catálogo emite una fila por cada
+//     field path (incluidos los mapas intermedios) y `values` una entrada por cada valor escalar
+//     distinto — N entradas para N documentos en un campo de alta cardinalidad.
+// Es el contraste interno con `knowledge_search` (20/100) y `knowledge_check` (100/1000), que
+// llevan cota y cursor desde E10 y que E24-H09 hizo cumplir de verdad.
+//
+// CONTRATO DE WIRE que fija esta historia (lo que el implementador debe respetar):
+//   `graph_query.arguments.limit`  → integer, `minimum: 1`, `maximum: 1000`, `default: 100`,
+//                                    DECLARADOS en el `inputSchema` y verificados por la fachada.
+//   `metadata_inspect.arguments`   → gana `limit` (integer, min 1, máx 1000, default 100) y
+//                                    `cursor` (string), en LOS DOS modos, declarados en el
+//                                    `inputSchema` (que es `additionalProperties: false`: sin
+//                                    declararlos, un cliente estricto ni siquiera podría enviarlos).
+//   `metadata_inspect` structuredContent:
+//        mode "catalog" → { fields: [ … ], nextCursor: string|null }
+//        mode "field"   → { field, presentIn, missingIn, inferredTypes, values: [ … ],
+//                           nextCursor: string|null }
+//     `nextCursor` es el MISMO cursor-offset hex autosuficiente del resto de la superficie: se
+//     obtiene en un proceso y se reanuda en otro fresco (mismo criterio que `search_paginacion`).
+//     Los agregados (`presentIn`/`missingIn`/`inferredTypes`) se computan sobre TODO el workspace:
+//     se pagina la LISTA, no la estadística.
+//
+// DÓNDE va la cota: en la FACHADA (`lodestar-app`), no en `core::metadata` — el core sigue puro y
+// devolviendo la verdad completa (invariantes #2 y #3). Lo clava, desde el otro lado,
+// `crates/lodestar-core/tests/metadata.rs::el_core_no_pagina_la_verdad_completa`.
+//
+// FASE ROJA (por qué falla hoy cada test):
+//   · `graph_query_respeta_su_maximo`: `limit_validado` se invoca con `u64::MAX`, así que `limit:
+//     5000` se ACEPTA; y el `inputSchema` no declara ni `maximum` ni `default`.
+//   · `metadata_inspect_field_pagina`/`metadata_inspect_catalog_pagina`: el despachador ni lee
+//     `limit`/`cursor`, así que la respuesta trae las 150/152 entradas y no hay `nextCursor`.
+//   · `paginar_no_pierde_ni_duplica`/`el_cursor_es_autosuficiente`: sin default no hay más que una
+//     página que recorrer ni cursor con el que reanudar.
+//   · `la_estadistica_no_se_pagina`: el `limit` se ignora, así que `values` viene entero.
+// El caso GRANDE (~1.000 documentos) vive en `escala_wire.rs::graph_query_tiene_default`, que es
+// donde está el arnés de proceso real de E24-H16.
+// ---------------------------------------------------------------------------
+
+/// Documentos del workspace de cotas. Por encima de 100 (el default que fija la historia) y muy por
+/// debajo de 1000 (el máximo), para que una página por defecto trunque y una página al máximo
+/// contenga el resultado ENTERO — que es la referencia contra la que se compara el recorrido
+/// completo.
+const DOCS_COTA: usize = 150;
+
+/// Campos del catálogo del workspace de cotas: un `campoNNN` por documento más `status` y `uid`.
+const CAMPOS_COTA: usize = DOCS_COTA + 2;
+
+/// **E26-H10** — Workspace de 150 documentos que fuerza las tres cotas a la vez:
+///   · **grafo**: 150 nodos (cada nota enlaza a la siguiente, en ciclo → ninguna arista colgante y
+///     ningún nodo fantasma, así que `components` sirve exactamente 150 nodos);
+///   · **catálogo**: 152 field paths (`campo000`…`campo149` + `status` + `uid`);
+///   · **vocabulario**: `uid` es de **alta cardinalidad** — un valor distinto por documento, que es
+///     el caso que la historia nombra (un `id`, una fecha, un `owner`).
+///
+/// Deterministas por índice, así que los tres órdenes totales (nodos por `id`, campos por field
+/// path, valores por conteo→texto) son reproducibles entre procesos.
+fn ws_cota() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    for i in 0..DOCS_COTA {
+        let siguiente = format!("n{:03}.md", (i + 1) % DOCS_COTA);
+        write(
+            dir.path(),
+            &format!("n{i:03}.md"),
+            &format!(
+                "---\ncampo{i:03}: {i}\nstatus: draft\nuid: u{i:03}\n---\n\n# Nota {i}\n\n[siguiente]({siguiente})\n"
+            ),
+        );
+    }
+    dir
+}
+
+/// El `structuredContent` de una respuesta que **debe** haber tenido éxito (si falló, el mensaje
+/// del panic lleva el error de la tool, no un `null` mudo).
+fn sc_ok<'a>(resp: &'a serde_json::Value, que: &str) -> &'a serde_json::Value {
+    if let Some(err) = error_de(resp) {
+        panic!("«{que}» no puede fallar en este test: «{err}»");
+    }
+    &resp["result"]["structuredContent"]
+}
+
+/// Los elementos de la lista `clave` del `structuredContent` (nodes/fields/values), tal cual.
+fn lista(sc: &serde_json::Value, clave: &str) -> Vec<serde_json::Value> {
+    sc[clave]
+        .as_array()
+        .unwrap_or_else(|| panic!("el structuredContent debe traer «{clave}» (array): {sc}"))
+        .clone()
+}
+
+/// El `nextCursor` de una respuesta paginada: `Some` si es un string no vacío, `None` si es nulo o
+/// ausente (agotado).
+fn cursor_de(sc: &serde_json::Value) -> Option<String> {
+    match sc["nextCursor"].as_str() {
+        Some(c) if !c.is_empty() => Some(c.to_string()),
+        Some(_) => panic!("un `nextCursor` presente no puede ser la cadena vacía: {sc}"),
+        None => None,
+    }
+}
+
+/// Recorre **todas** las páginas de una tool paginada siguiendo su `nextCursor`, y devuelve la
+/// concatenación de la lista `clave` más el número de páginas.
+///
+/// Cada página se pide en un **proceso fresco** (`roundtrip` arranca y termina el servidor), así que
+/// el recorrido solo funciona si el cursor es autosuficiente — es la misma propiedad que
+/// `search_paginacion` fija para `knowledge_search`.
+fn recorre_paginas(
+    dir: &std::path::Path,
+    tool: &str,
+    args: &serde_json::Value,
+    clave: &str,
+) -> (Vec<serde_json::Value>, usize) {
+    let mut acumulado: Vec<serde_json::Value> = Vec::new();
+    let mut cursor: Option<String> = None;
+    let mut paginas = 0usize;
+    loop {
+        let mut a = args.clone();
+        if let Some(c) = &cursor {
+            a["cursor"] = serde_json::Value::String(c.clone());
+        }
+        let resp = roundtrip(dir, &[linea_call(1, tool, a).as_str()], 1);
+        let sc = sc_ok(&resp[0], tool).clone();
+        acumulado.extend(lista(&sc, clave));
+        paginas += 1;
+        assert!(
+            paginas <= 20,
+            "el recorrido de «{tool}» no termina: con {DOCS_COTA} documentos y el default de 100 \
+             bastan 2 páginas. O el cursor no avanza, o la cota no acota."
+        );
+        match cursor_de(&sc) {
+            Some(c) => cursor = Some(c),
+            None => break,
+        }
+    }
+    (acumulado, paginas)
+}
+
+/// La tool `nombre` tal como la declara `tools/list` en `resp` (que debe ser la respuesta a un
+/// `tools/list`).
+fn tool_declarada(resp: &serde_json::Value, nombre: &str) -> serde_json::Value {
+    resp["result"]["tools"]
+        .as_array()
+        .unwrap_or_else(|| panic!("tools/list debe devolver `tools`: {resp}"))
+        .iter()
+        .find(|t| t["name"] == nombre)
+        .unwrap_or_else(|| panic!("`tools/list` debe declarar «{nombre}»: {resp}"))
+        .clone()
+}
+
+/// **E26-H10** · Criterio `graph_query_respeta_su_maximo`:
+/// **Dado** `graph_query` con `limit: 5000`, **Cuando** se llama, **Entonces** falla con
+/// `INVALID_SCHEMA` por exceder el máximo declarado.
+///
+/// Dos mitades inseparables: el `inputSchema` **declara** `default: 100` y `maximum: 1000` (sin la
+/// declaración el cliente no puede protegerse, que es la mitad del defecto U5), y la fachada lo
+/// **verifica** (`limit_validado`, hoy invocado con `u64::MAX`). El control anti-vacuo es el propio
+/// máximo: `limit: 1000` tiene que seguir aceptándose, o «acotar» habría degenerado en «rechazar».
+#[test]
+fn graph_query_respeta_su_maximo() {
+    let dir = ws_dos_docs();
+    let resp = roundtrip(
+        dir.path(),
+        &[
+            r#"{"jsonrpc":"2.0","id":0,"method":"tools/list"}"#,
+            linea_call(
+                1,
+                "graph_query",
+                serde_json::json!({"operation": "components", "limit": 5000}),
+            )
+            .as_str(),
+            linea_call(
+                2,
+                "graph_query",
+                serde_json::json!({"operation": "components", "limit": 1000}),
+            )
+            .as_str(),
+        ],
+        3,
+    );
+
+    // (1) La VERIFICACIÓN: el máximo se hace cumplir (el criterio propiamente dicho).
+    let err = error_de(&resp[1]).unwrap_or_else(|| {
+        panic!(
+            "`limit: 5000` excede el máximo declarado (1000) y debe RECHAZARSE. Hasta v0.4.0 \
+             `limit_validado` se invocaba con `u64::MAX` para esta tool, así que cualquier valor \
+             pasaba.\nRespuesta recibida: {}",
+            resp[1]
+        )
+    });
+    assert_eq!(
+        codigo_de(&err),
+        "INVALID_SCHEMA",
+        "un `limit` fuera del rango declarado es entrada inválida, con el mismo código que en \
+         `knowledge_search`/`knowledge_check` (E24-H09): «{err}»"
+    );
+    let (_, mensaje) = codigo_y_mensaje(&err)
+        .unwrap_or_else(|| panic!("debe emitir «CÓDIGO: mensaje» (E26-H07): «{err}»"));
+    assert!(
+        mensaje.contains("1000"),
+        "…y el mensaje debe deletrear el máximo excedido (1000), que es lo que el agente necesita \
+         para corregir su llamada: «{err}»"
+    );
+
+    // (2) Control anti-vacuo: el máximo declarado SÍ se acepta (la cota no puede ser un «no» a todo).
+    assert_eq!(
+        error_de(&resp[2]),
+        None,
+        "`limit: 1000` es exactamente el máximo declarado y debe aceptarse: {}",
+        resp[2]
+    );
+
+    // (3) La DECLARACIÓN: un agente descubre la cota leyendo el schema, no chocando con ella.
+    let gq = tool_declarada(&resp[0], "graph_query");
+    let limit = &gq["inputSchema"]["properties"]["limit"];
+    assert_eq!(
+        limit["maximum"].as_u64(),
+        Some(1000),
+        "el `inputSchema` de `graph_query.limit` debe declarar `maximum: 1000`. Hasta v0.4.0 \
+         declaraba `minimum: 1` y NINGÚN máximo, así que ni el cliente podía protegerse de una \
+         respuesta del tamaño del workspace: {gq}"
+    );
+    assert_eq!(
+        limit["default"].as_u64(),
+        Some(100),
+        "…y `default: 100`, que es la cota que se aplica cuando el parámetro no viene: {gq}"
+    );
+    assert_eq!(
+        limit["minimum"].as_u64(),
+        Some(1),
+        "…conservando el `minimum: 1` que ya declaraba (E24-H09): {gq}"
+    );
+}
+
+/// **E26-H10** · Criterio `metadata_inspect_field_pagina`:
+/// **Dado** un campo de alta cardinalidad (un valor distinto por documento), **Cuando** se llama a
+/// `metadata_inspect{mode:"field"}` **sin** `limit`, **Entonces** `values` trae como mucho 100
+/// entradas y un `nextCursor`.
+///
+/// Hoy trae las 150: `metadata_inspect` es la única de las 10 tools sin `limit` ni `cursor`, y un
+/// `uid`/`owner`/fecha rinde una entrada por documento.
+///
+/// El control anti-vacuo es la segunda llamada: con el máximo declarado (`limit: 1000`) el
+/// vocabulario ENTERO sigue estando disponible en una sola respuesta y `nextCursor` es nulo. Acotar
+/// no puede consistir en dejar de calcular la cola.
+#[test]
+fn metadata_inspect_field_pagina() {
+    let dir = ws_cota();
+    let args = serde_json::json!({"mode": "field", "field": "uid"});
+    let mut args_max = args.clone();
+    args_max["limit"] = serde_json::json!(1000);
+
+    let resp = roundtrip(
+        dir.path(),
+        &[
+            r#"{"jsonrpc":"2.0","id":0,"method":"tools/list"}"#,
+            linea_call(1, "metadata_inspect", args).as_str(),
+            linea_call(2, "metadata_inspect", args_max).as_str(),
+        ],
+        3,
+    );
+
+    // (1) La página por DEFECTO: como mucho 100 valores y un cursor con el que seguir.
+    let sc = sc_ok(&resp[1], "metadata_inspect(field:uid)");
+    let values = lista(sc, "values");
+    assert_eq!(
+        values.len(),
+        100,
+        "sin `limit`, `values` debe traer la página por defecto (100 entradas) sobre un campo de \
+         {DOCS_COTA} valores distintos. Hasta v0.4.0 traía los {DOCS_COTA}: una respuesta de \
+         tamaño proporcional al workspace, que es el defecto U5: {}",
+        resp[1]
+    );
+    let cursor = cursor_de(sc).unwrap_or_else(|| {
+        panic!(
+            "…y con {DOCS_COTA} valores y una página de 100 debe venir un `nextCursor` no vacío \
+             con el que recorrer el resto: {}",
+            resp[1]
+        )
+    });
+    assert!(!cursor.is_empty());
+
+    // (2) Control anti-vacuo: con el máximo, el vocabulario ENTERO sigue disponible.
+    let sc_max = sc_ok(&resp[2], "metadata_inspect(field:uid, limit:1000)");
+    let todos = lista(sc_max, "values");
+    assert_eq!(
+        todos.len(),
+        DOCS_COTA,
+        "con `limit: 1000` (el máximo) el vocabulario completo cabe en una respuesta: acotar no \
+         puede consistir en dejar de calcular la cola: {}",
+        resp[2]
+    );
+    assert_eq!(
+        cursor_de(sc_max),
+        None,
+        "…y ahí `nextCursor` debe ser nulo (no queda nada por recorrer): {}",
+        resp[2]
+    );
+    assert_eq!(
+        values,
+        todos[..100].to_vec(),
+        "…y la página por defecto debe ser el PREFIJO de ese orden total, no una muestra: {}",
+        resp[1]
+    );
+
+    // (3) La DECLARACIÓN. El `inputSchema` de esta tool es `additionalProperties: false`: sin
+    //     declarar `limit`/`cursor`, un cliente estricto ni siquiera podría enviarlos.
+    let mi = tool_declarada(&resp[0], "metadata_inspect");
+    let props = &mi["inputSchema"]["properties"];
+    assert_eq!(
+        props["limit"]["maximum"].as_u64(),
+        Some(1000),
+        "el `inputSchema` de `metadata_inspect` debe declarar `limit` con `maximum: 1000` \
+         (por analogía con `knowledge_check`, la otra tool que enumera un catálogo): {mi}"
+    );
+    assert_eq!(
+        props["limit"]["default"].as_u64(),
+        Some(100),
+        "…con `default: 100`: {mi}"
+    );
+    assert_eq!(
+        props["limit"]["minimum"].as_u64(),
+        Some(1),
+        "…y `minimum: 1`, como el resto de la superficie: {mi}"
+    );
+    assert_eq!(
+        props["cursor"]["type"].as_str(),
+        Some("string"),
+        "…y debe declarar `cursor` (string): es el parámetro con el que se recorre lo que la cota \
+         dejó fuera, y sin declararlo la paginación es inalcanzable para un cliente estricto: {mi}"
+    );
+    assert!(
+        mi["outputSchema"].to_string().contains("nextCursor"),
+        "…y el `outputSchema` declarado debe describir el `nextCursor` que ahora viaja en la \
+         respuesta (`schemars::schema_for!(MetadataInspection)`, ACTUALIZADO por esta historia): un \
+         cursor que el schema no menciona es un cursor que el agente no sabe que existe: {mi}"
+    );
+}
+
+/// **E26-H10** · Criterio `metadata_inspect_catalog_pagina`:
+/// **Dado** un workspace con muchos field paths, **Cuando** se llama a `mode:"catalog"` sin
+/// `limit`, **Entonces** `fields` trae como mucho 100 entradas y un `nextCursor`.
+///
+/// El catálogo emite una fila por **cada** field path que aparece en algún documento —incluidos los
+/// mapas intermedios—, así que su tamaño crece con las convenciones de la base. Aquí son 152
+/// (`campo000`…`campo149` + `status` + `uid`).
+///
+/// Control anti-vacuo: con `limit: 1000` el catálogo entero sigue cabiendo en una respuesta, y la
+/// página por defecto es su prefijo.
+#[test]
+fn metadata_inspect_catalog_pagina() {
+    let dir = ws_cota();
+    let resp = roundtrip(
+        dir.path(),
+        &[
+            linea_call(
+                1,
+                "metadata_inspect",
+                serde_json::json!({"mode": "catalog"}),
+            )
+            .as_str(),
+            linea_call(
+                2,
+                "metadata_inspect",
+                serde_json::json!({"mode": "catalog", "limit": 1000}),
+            )
+            .as_str(),
+        ],
+        2,
+    );
+
+    let sc = sc_ok(&resp[0], "metadata_inspect(catalog)");
+    let fields = lista(sc, "fields");
+    assert_eq!(
+        fields.len(),
+        100,
+        "sin `limit`, el catálogo debe traer la página por defecto (100 campos) de los \
+         {CAMPOS_COTA} del workspace. Hasta v0.4.0 los traía todos: {}",
+        resp[0]
+    );
+    let cursor = cursor_de(sc).unwrap_or_else(|| {
+        panic!(
+            "…y con {CAMPOS_COTA} campos y una página de 100 debe venir un `nextCursor`: {}",
+            resp[0]
+        )
+    });
+    assert!(!cursor.is_empty());
+
+    let sc_max = sc_ok(&resp[1], "metadata_inspect(catalog, limit:1000)");
+    let todos = lista(sc_max, "fields");
+    assert_eq!(
+        todos.len(),
+        CAMPOS_COTA,
+        "con `limit: 1000` el catálogo ENTERO sigue cabiendo en una respuesta: la cota acota la \
+         página, no el cómputo: {}",
+        resp[1]
+    );
+    assert_eq!(
+        cursor_de(sc_max),
+        None,
+        "…y ahí `nextCursor` es nulo: {}",
+        resp[1]
+    );
+    assert_eq!(
+        fields,
+        todos[..100].to_vec(),
+        "…y la página por defecto es el PREFIJO del orden total del catálogo (por field path), no \
+         una selección arbitraria: {}",
+        resp[0]
+    );
+}
+
+/// **E26-H10** · Criterio `paginar_no_pierde_ni_duplica` (control anti-vacuo CLAVE):
+/// **Dado** un recorrido completo por cursor en cualquiera de los tres casos, **Cuando** se
+/// concatenan las páginas, **Entonces** el resultado es **exactamente** el que devolvía v0.4.0 sin
+/// paginar, sin repeticiones ni huecos.
+///
+/// La cota no puede consistir en tirar datos. Se comprueba en los **tres** casos que la historia
+/// acota —`graph_query{components}`, `metadata_inspect{catalog}` y `metadata_inspect{field}`—
+/// contra la respuesta completa, que aquí se obtiene con el `limit` **máximo** (1000 > 152 > 150):
+/// esa llamada devuelve hoy y mañana exactamente lo mismo, así que es una referencia válida a
+/// ambos lados del cambio.
+///
+/// El recorrido exige **más de una página** en los tres: si una sola página lo cubriera todo, la
+/// concatenación coincidiría trivialmente y el criterio sería vacuo — que es justo lo que pasa hoy
+/// (sin default no hay segunda página que recorrer).
+///
+/// De paso se asevera el **orden total estable por id** de `graph_query`, del que depende que un
+/// cursor-offset no pierda ni duplique nada.
+///
+/// **Límite deliberado del criterio en el caso del grafo**: lo que se compara es el conjunto
+/// ordenado de **nodos**. Las `edges` se acotan a los nodos de cada página (comportamiento vigente
+/// y documentado: `App::graph_query` nunca sirve una arista colgando de un nodo que la página dejó
+/// fuera), así que su concatenación NO reconstruye el conjunto completo de aristas y no se
+/// asevera.
+#[test]
+fn paginar_no_pierde_ni_duplica() {
+    let dir = ws_cota();
+
+    let casos: [(&str, serde_json::Value, &str, usize); 3] = [
+        (
+            "graph_query",
+            serde_json::json!({"operation": "components"}),
+            "nodes",
+            DOCS_COTA,
+        ),
+        (
+            "metadata_inspect",
+            serde_json::json!({"mode": "catalog"}),
+            "fields",
+            CAMPOS_COTA,
+        ),
+        (
+            "metadata_inspect",
+            serde_json::json!({"mode": "field", "field": "uid"}),
+            "values",
+            DOCS_COTA,
+        ),
+    ];
+
+    for (tool, args, clave, total) in casos {
+        // La verdad completa: una sola página con el `limit` máximo.
+        let mut args_max = args.clone();
+        args_max["limit"] = serde_json::json!(1000);
+        let full_resp = roundtrip(dir.path(), &[linea_call(1, tool, args_max).as_str()], 1);
+        let sc_full = sc_ok(&full_resp[0], tool);
+        let completo = lista(sc_full, clave);
+        assert_eq!(
+            completo.len(),
+            total,
+            "precondición del caso «{tool}/{clave}»: con el `limit` máximo debe verse el resultado \
+             entero ({total} entradas): {}",
+            full_resp[0]
+        );
+        assert_eq!(
+            cursor_de(sc_full),
+            None,
+            "…y sin nada pendiente, `nextCursor` nulo: {}",
+            full_resp[0]
+        );
+
+        // El recorrido completo por cursor, página a página y proceso a proceso.
+        let (recorrido, paginas) = recorre_paginas(dir.path(), tool, &args, clave);
+        assert!(
+            paginas >= 2,
+            "el recorrido de «{tool}/{clave}» se agotó en {paginas} página(s) sobre {total} \
+             entradas: sin la cota por defecto (100) no hay nada que recorrer y este criterio sería \
+             vacuo. Es exactamente lo que pasa hasta v0.4.0."
+        );
+        assert_eq!(
+            recorrido, completo,
+            "la concatenación de las {paginas} páginas de «{tool}/{clave}» debe ser EXACTAMENTE el \
+             resultado sin paginar —mismo contenido y mismo orden—: la cota acota el payload, no el \
+             resultado"
+        );
+
+        // Sin repeticiones: la concatenación tiene tantos elementos distintos como longitud.
+        let distintos: std::collections::BTreeSet<String> =
+            recorrido.iter().map(ToString::to_string).collect();
+        assert_eq!(
+            distintos.len(),
+            recorrido.len(),
+            "…y ninguna entrada puede aparecer en dos páginas de «{tool}/{clave}»"
+        );
+    }
+
+    // Orden total estable por `id` en el grafo: es la premisa del cursor-offset.
+    let full = roundtrip(
+        dir.path(),
+        &[linea_call(
+            1,
+            "graph_query",
+            serde_json::json!({"operation": "components", "limit": 1000}),
+        )
+        .as_str()],
+        1,
+    );
+    let servidos: Vec<String> = graph_nodes(&full[0])
+        .iter()
+        .map(|n| {
+            n["id"]
+                .as_str()
+                .unwrap_or_else(|| panic!("cada nodo lleva un `id` string: {n}"))
+                .to_string()
+        })
+        .collect();
+    let mut ordenados = servidos.clone();
+    ordenados.sort();
+    assert_eq!(
+        servidos, ordenados,
+        "`graph_query` debe servir sus nodos en orden total estable por `id`: un cursor-offset \
+         sobre un orden inestable perdería y duplicaría entradas entre páginas"
+    );
+    assert_eq!(
+        servidos.len(),
+        DOCS_COTA,
+        "…sobre los {DOCS_COTA} nodos del grafo"
+    );
+}
+
+/// **E26-H10** · Criterio `el_cursor_es_autosuficiente`:
+/// **Dado** un cursor obtenido en un proceso y usado en otro **fresco**, **Cuando** se reanuda,
+/// **Entonces** continúa idéntico.
+///
+/// Mismo criterio que `search_paginacion` fija para `knowledge_search`: el cursor es un offset hex
+/// opaco, no un handle atado al estado de una sesión. `roundtrip` arranca y termina un servidor por
+/// llamada, así que las tres páginas de este test salen de tres procesos distintos.
+#[test]
+fn el_cursor_es_autosuficiente() {
+    let dir = ws_cota();
+
+    let casos: [(&str, serde_json::Value, &str, usize); 3] = [
+        (
+            "graph_query",
+            serde_json::json!({"operation": "components"}),
+            "nodes",
+            DOCS_COTA,
+        ),
+        (
+            "metadata_inspect",
+            serde_json::json!({"mode": "catalog"}),
+            "fields",
+            CAMPOS_COTA,
+        ),
+        (
+            "metadata_inspect",
+            serde_json::json!({"mode": "field", "field": "uid"}),
+            "values",
+            DOCS_COTA,
+        ),
+    ];
+
+    for (tool, args, clave, total) in casos {
+        // Proceso 1: la primera página y su cursor.
+        let p1 = roundtrip(dir.path(), &[linea_call(1, tool, args.clone()).as_str()], 1);
+        let sc1 = sc_ok(&p1[0], tool);
+        let pagina1 = lista(sc1, clave);
+        let cursor = cursor_de(sc1).unwrap_or_else(|| {
+            panic!(
+                "«{tool}/{clave}» debe entregar un `nextCursor` en su primera página ({total} \
+                 entradas, cota por defecto 100): {}",
+                p1[0]
+            )
+        });
+
+        // Proceso 2 (FRESCO): se reanuda con ese cursor.
+        let mut args2 = args.clone();
+        args2["cursor"] = serde_json::Value::String(cursor.clone());
+        let p2 = roundtrip(dir.path(), &[linea_call(1, tool, args2).as_str()], 1);
+        let sc2 = sc_ok(&p2[0], tool);
+        let pagina2 = lista(sc2, clave);
+
+        // Proceso 3 (FRESCO): la referencia completa, con el `limit` máximo.
+        let mut args_max = args.clone();
+        args_max["limit"] = serde_json::json!(1000);
+        let full = roundtrip(dir.path(), &[linea_call(1, tool, args_max).as_str()], 1);
+        let completo = lista(sc_ok(&full[0], tool), clave);
+
+        assert_eq!(
+            pagina2,
+            completo[pagina1.len()..].to_vec(),
+            "el cursor de «{tool}/{clave}» se emitió en un proceso y se consumió en otro FRESCO: \
+             debe reanudar exactamente donde acabó la página anterior (offset autosuficiente, no un \
+             handle de sesión)"
+        );
+        assert_eq!(
+            pagina1.len() + pagina2.len(),
+            total,
+            "…y entre las dos páginas debe estar el resultado entero de «{tool}/{clave}»"
+        );
+        assert_eq!(
+            cursor_de(sc2),
+            None,
+            "…y la segunda página agota el recorrido, así que su `nextCursor` es nulo: {}",
+            p2[0]
+        );
+    }
+}
+
+/// **E26-H10** · Criterio `la_estadistica_no_se_pagina`:
+/// **Dado** los conteos agregados de `metadata_inspect`, **Cuando** se pide una página, **Entonces**
+/// `presentIn`/`missingIn` siguen refiriéndose a **todo** el workspace.
+///
+/// Lo que se pagina es la **lista**, no la estadística: un agente que pide 5 valores para orientarse
+/// no puede recibir a cambio un `presentIn: 5` sobre un campo que está en 150 documentos —sería una
+/// respuesta silenciosamente equivocada, la familia de defecto que esta épica cierra—.
+///
+/// Se comprueba en los dos modos: en `field` sobre `presentIn`/`missingIn`/`inferredTypes`, y en
+/// `catalog` sobre el `presentIn` de las filas servidas (que se computa sobre el workspace entero,
+/// no sobre la página).
+///
+/// **El caso del catálogo se mide donde discrimina**. Las filas de la primera página son todas
+/// `campoNNN` con `presentIn: 1`, y un `1` vale lo mismo contado sobre el workspace que sobre la
+/// página: aseverarlo ahí no distingue una implementación correcta de una que recortara la
+/// estadística al subconjunto servido. Por eso la presencia se asevera en la página que contiene
+/// `status` y `uid`, presentes en los **150** documentos: un número mayor que el tamaño de su
+/// propia página (52 filas), así que cualquier `min(presentIn, filas_de_la_página)` se delata.
+#[test]
+fn la_estadistica_no_se_pagina() {
+    let dir = ws_cota();
+    let resp = roundtrip(
+        dir.path(),
+        &[
+            linea_call(
+                1,
+                "metadata_inspect",
+                serde_json::json!({"mode": "field", "field": "uid", "limit": 5}),
+            )
+            .as_str(),
+            linea_call(
+                2,
+                "metadata_inspect",
+                serde_json::json!({"mode": "field", "field": "uid", "limit": 1000}),
+            )
+            .as_str(),
+            linea_call(
+                3,
+                "metadata_inspect",
+                serde_json::json!({"mode": "catalog", "limit": 5}),
+            )
+            .as_str(),
+            linea_call(
+                4,
+                "metadata_inspect",
+                serde_json::json!({"mode": "catalog"}),
+            )
+            .as_str(),
+        ],
+        4,
+    );
+
+    let pagina = sc_ok(&resp[0], "metadata_inspect(field:uid, limit:5)");
+    let completa = sc_ok(&resp[1], "metadata_inspect(field:uid, limit:1000)");
+
+    // La lista SÍ se acota (si no, el criterio no tendría de qué hablar).
+    assert_eq!(
+        lista(pagina, "values").len(),
+        5,
+        "con `limit: 5` deben viajar 5 valores: {}",
+        resp[0]
+    );
+
+    // …y la estadística NO.
+    assert_eq!(
+        pagina["presentIn"].as_u64(),
+        Some(DOCS_COTA as u64),
+        "`presentIn` describe TODO el workspace ({DOCS_COTA} documentos con `uid`), no la página \
+         de 5 valores: se pagina la lista, no la estadística: {}",
+        resp[0]
+    );
+    assert_eq!(
+        pagina["missingIn"].as_u64(),
+        Some(0),
+        "…y `missingIn` sigue siendo el resto del workspace (0): {}",
+        resp[0]
+    );
+    assert_eq!(
+        pagina["inferredTypes"], completa["inferredTypes"],
+        "…y los tipos observados son los de todo el workspace, idénticos a los de la respuesta sin \
+         paginar: {}",
+        resp[0]
+    );
+    assert_eq!(
+        pagina["presentIn"], completa["presentIn"],
+        "…dicho de otro modo: los agregados de una página y los de la respuesta completa coinciden"
+    );
+
+    // --- Modo catálogo -------------------------------------------------------------------------
+    // (a) La lista SÍ se acota también aquí, y las filas de esta primera página son las de
+    //     presencia BAJA (`campoNNN`, 1 documento cada uno): sirve de control de que la estadística
+    //     no es una constante, pero NO discrimina un recorte a la página (min(1, 5) == 1).
+    let cat = sc_ok(&resp[2], "metadata_inspect(catalog, limit:5)");
+    let filas = lista(cat, "fields");
+    assert_eq!(
+        filas.len(),
+        5,
+        "con `limit: 5` viajan 5 campos: {}",
+        resp[2]
+    );
+    for f in &filas {
+        assert_eq!(
+            f["presentIn"].as_u64(),
+            Some(1),
+            "cada `campoNNN` está en exactamente 1 de los {DOCS_COTA} documentos: {f}"
+        );
+    }
+
+    // (b) Donde el criterio muerde: la página que contiene las filas de presencia ALTA. El orden
+    //     del catálogo es por field path (`campo000`…`campo149` < `status` < `uid`), así que
+    //     `status`/`uid` caen en la SEGUNDA página del recorrido por defecto.
+    let cat1 = sc_ok(&resp[3], "metadata_inspect(catalog)");
+    let cursor = cursor_de(cat1).unwrap_or_else(|| {
+        panic!(
+            "el catálogo de {CAMPOS_COTA} campos debe entregar un `nextCursor` en su primera \
+             página: {}",
+            resp[3]
+        )
+    });
+    let p2 = roundtrip(
+        dir.path(),
+        &[linea_call(
+            5,
+            "metadata_inspect",
+            serde_json::json!({"mode": "catalog", "cursor": cursor}),
+        )
+        .as_str()],
+        1,
+    );
+    let filas2 = lista(sc_ok(&p2[0], "metadata_inspect(catalog, cursor)"), "fields");
+    assert_eq!(
+        filas2.len(),
+        CAMPOS_COTA - 100,
+        "la segunda página del catálogo trae los {} campos restantes: {}",
+        CAMPOS_COTA - 100,
+        p2[0]
+    );
+    for nombre in ["status", "uid"] {
+        let fila = filas2
+            .iter()
+            .find(|f| f["name"] == nombre)
+            .unwrap_or_else(|| {
+                panic!(
+                    "precondición: «{nombre}» (presente en los {DOCS_COTA} documentos) tiene que \
+                     caer en esta página, o el criterio no discriminaría: {}",
+                    p2[0]
+                )
+            });
+        assert_eq!(
+            fila["presentIn"].as_u64(),
+            Some(DOCS_COTA as u64),
+            "«{nombre}» está en los {DOCS_COTA} documentos del workspace, y ese conteo NO puede \
+             encogerse a las {} filas de la página que lo trae: se pagina la lista, no la \
+             estadística: {fila}",
+            filas2.len()
+        );
+    }
 }

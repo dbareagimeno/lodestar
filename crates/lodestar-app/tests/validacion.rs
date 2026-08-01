@@ -331,7 +331,10 @@ fn semilla_con_error_preexistente(root: &Path) {
 
 /// Aplica `ops` como un ciclo `change_plan` → `change_apply` completo (política de plan permisiva
 /// para no confundir el veredicto del plan con el gate del apply). Devuelve el resultado del apply.
-fn planifica_y_aplica(app: &App, ops: &Value) -> Result<lodestar_app::ApplyResult, ErrorCode> {
+fn planifica_y_aplica(
+    app: &App,
+    ops: &Value,
+) -> Result<lodestar_app::ApplyResult, lodestar_app::AppError> {
     let plan = app
         .change_plan(None, ops, policy_permisiva())
         .expect("el change_plan debe producir un plan");
@@ -380,7 +383,7 @@ fn apply_sobre_errores_previos() {
             "una reparación parcial que NO introduce errores debe permitirse sobre un workspace que \
              ya los tiene (`allowExistingErrors`); el gate la rechazó con {e:?} ({}). El gate está \
              comparando el resultado contra «cero errores» en vez de contra el estado previo.",
-            e.as_str()
+            e.code.as_str()
         ),
     };
     assert!(
@@ -443,10 +446,10 @@ fn rechaza_errores_nuevos() {
         ),
     };
     assert_eq!(
-        err,
+        err.code,
         ErrorCode::InvalidResult,
         "introducir un error nuevo debe rechazarse con INVALID_RESULT; era: {} ({err:?})",
-        err.as_str()
+        err.code.as_str()
     );
 
     // El documento nuevo no se publicó (el apply rechazado no toca el canónico).
