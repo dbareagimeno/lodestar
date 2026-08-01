@@ -91,12 +91,13 @@ impact_analyze
 
 ```json
 {
-  "summary": {"directlyAffected": 4, "transitivelyAffected": 7, "risk": "medium", "blockingReferences": 0},
-  "recommendations": ["Revisa los 4 enlaces entrantes que apuntan a este documento tras aplicar «move»."]
+  "summary": {"directlyAffected": 5, "transitivelyAffected": 8, "risk": "medium", "blockingReferences": 0},
+  "recommendations": ["Revisa los 5 enlaces entrantes que apuntan a este documento tras aplicar «move»."]
 }
 ```
 
-Four documents link here directly; seven are in the transitive blast radius.
+Five documents link here directly (this README is one of them); eight are
+in the transitive blast radius.
 The agent knows the cost of the change before proposing it.
 
 ### Plan, apply, revert
