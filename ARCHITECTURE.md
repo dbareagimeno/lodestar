@@ -1399,3 +1399,69 @@ frontmatter (PR 2) y la semántica de `index.md` (PR 3/4), los checks `OKF-TYPE`
 en E16/E17; E20 aporta solo la **política** y la semántica nueva de `knowledge_check`.
 
 **Ruptura declarada**: v0.3.0 es **incompatible** con v0.2.x. `v0.2.0` queda como última versión OKF.
+
+---
+
+## 21. Superficie externa y distribución (E27)
+
+> **Ratificada el 2026-08-01** (puerta 1 de la épica E27, `DECISIONES.md §17`). **Aditiva: no
+> supersede nada.** Regula lo que el proyecto muestra hacia fuera —README, documentación de usuario,
+> demo, pipeline de release y embudo de contribución—, no el motor. Contexto: una review OSS externa
+> (evaluada y verificada punto a punto, 2026-08-01) concluyó que el proyecto está **por delante de su
+> adopción**: la deuda dominante de v0.5.0 no es de motor, es de producto/distribución/comunidad.
+
+### 21.1 Regla de idioma (amplía el invariante de `requirements/README.md`)
+
+- **Superficie pública, en inglés**: `README.md`, `docs/user/`, `examples/demo/`, `CONTRIBUTING.md`,
+  `SECURITY.md`, `CODE_OF_CONDUCT.md` y los templates de `.github/`.
+- **Interno, sigue en español**: `ARCHITECTURE.md`, `DECISIONES.md`, `requirements/`, `docs/` (specs
+  y workflows), `contracts/`, código, comentarios, mensajes de error del wire y commits.
+- La frontera es de **audiencia**, no de directorio: lo que un adoptante lee antes de decidir se
+  escribe en inglés; lo que gobierna el desarrollo del repo se queda en español.
+
+### 21.2 Distribución
+
+- **Vías soportadas**: binarios precompilados de GitHub Releases (3 plataformas) y
+  `cargo install --git`. **crates.io queda diferido** (`DECISIONES.md §17`, reabrible): publicar es
+  permanente y los crates de dominio no están pensados como API de librería estable.
+- **Guardarraíles del pipeline** (`.github/workflows/release.yml`, E27-H01):
+  1. un step temprano **falla si `github.ref_name != "v" + workspace.package.version`** — convierte
+     en error de CI la clase de fallo del tag `0.5.0` sin prefijo (y el caso inverso: tag empujado
+     sin subir la versión);
+  2. cada plataforma publica un **`SHA256SUMS-<target>.txt`** como asset del release.
+- **Firma/notarización: diferida**, no descartada (`RELEASING.md`); los checksums cubren la parte
+  barata de la integridad.
+
+### 21.3 Taxonomía documental y demo ejecutable
+
+- `docs/user/` — documentación de **usuario**, en inglés.
+- `docs/` raíz — **specs vigentes e internas**, en español: `REFACTOR_PHASE_2.md` (spec de
+  comportamiento viva, citada por ~51 ficheros del repo: **no se mueve** — el criterio taxonómico es
+  *vigente/superseded*, no *viejo/nuevo*) y `WORKFLOWS.md`.
+- `docs/history/` — propuestas y specs **superseded** (`REFACTOR.md`, `REFACTOR_DISENO_PROPUESTA.md`,
+  `PROPUESTA_CLI.md`, `PROPUESTA_FIXES.md`), conservadas como historia del proyecto.
+- `examples/demo/` — un workspace Markdown pequeño con defectos **deliberados** (un enlace roto, un
+  huérfano) que sirve de **documentación ejecutable**: el quickstart del README y `docs/user/` se
+  escriben contra él, y un **job de smoke en CI** ejecuta su guion y aserta las salidas clave, para
+  que README y demo no puedan pudrirse en silencio.
+
+### 21.4 Contribución y seguridad
+
+- **Issues-first**: bugs y docs se aceptan por PR directo (con checklist); las features requieren
+  issue previa donde el mantenedor decide si pasan por el proceso de diseño del repo. El proceso SDD
+  interno (historias ratificadas, jueces ciegos) no se les exige a contribuidores externos: lo aplica
+  el mantenedor al integrar. **Discussions: OFF** por ahora (revisar cuando haya tráfico).
+- **Código de conducta**: Contributor Covenant 2.1, en inglés; contacto `dbareagimeno@icloud.com`.
+- **Seguridad**: GitHub **Private Vulnerability Reporting** como canal primario + el email como
+  fallback. El alcance declarado es honesto con el producto: motor local por stdio, sin red — la
+  superficie de ataque relevante es parsing y path-traversal (chokepoint `RelPath`, invariante #6).
+
+### 21.5 Regla transversal de honestidad (ligada a `DECISIONES.md §14`)
+
+**Mientras `DECISIONES.md §14` siga abierta** (el store SQLite no tiene consumidor y el watcher no
+corre en el motor), la superficie externa **no presenta `reindex`/la cache como camino de lectura del
+producto ni promete rendimiento a escala**. La cache se describe como lo que es: derivada y
+reconstruible. Es el principio de E23 («la documentación no afirma nada falso») aplicado donde el
+coste de una afirmación falsa es mayor.
+
+**Principio rector de E27**: *la superficie externa solo promete lo que el motor ejecuta hoy.*

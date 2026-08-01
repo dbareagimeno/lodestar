@@ -145,6 +145,26 @@ explícitamente fuera de alcance en las dos épicas.
 computó* — ante la duda, re-mirar bajo el lock y abortar si cambió. En **E26**, el de `E24-H07`:
 *una respuesta silenciosamente equivocada es peor que un error*.
 
+## Mapa de épicas de producto y apertura OSS
+
+> Primera épica de **superficie externa** (`ARCHITECTURE.md §21`, ratificada 2026-08-01;
+> `DECISIONES.md §17`). Origen: review OSS externa que concluyó que el repo está técnicamente por
+> delante de su adopción. No toca el motor ni la frontera MCP: release con guardarraíles, README en
+> inglés, demo ejecutable con smoke en CI, `docs/user/`, reorganización de `docs/` y embudo de
+> contribución.
+
+| Épica | Estado | Área | Doc |
+|---|---|---|---|
+| **E27** — Producto, distribución y apertura OSS | 🔵 ratificada, no iniciada | guardarraíles de release · README EN · `examples/demo/` + smoke CI · `docs/user/` · `docs/history/` · CONTRIBUTING/SECURITY/CoC · templates | [epica-27-producto-distribucion-oss.md](epica-27-producto-distribucion-oss.md) |
+
+**Orden de construcción (E27)**: `H01 → H03 → H02 → H04 → H06 → H05 → H11 → H07 → H08 → H09 →
+[H10]`. **H10 (crates.io) está `[BLOQUEADA por DECISIONES §17]`** hasta que esa decisión se reabra.
+**Principio rector**: *la superficie externa solo promete lo que el motor ejecuta hoy* — mientras
+`DECISIONES.md §14` siga abierta, ningún documento público presenta `reindex`/la cache SQLite como
+camino de lectura ni promete rendimiento a escala (`§21.5`). **Regla de idioma** (`§21.1`): la
+superficie pública que esta épica produce va en **inglés**; los documentos internos siguen en
+español.
+
 ## Formato de una historia
 
 Cada historia tiene un identificador estable `E<épica>-H<nn>` y esta plantilla:
