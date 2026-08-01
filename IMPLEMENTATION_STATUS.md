@@ -14,8 +14,8 @@
 > `cli` y `mcp`. Suite en verde (+ los de crash-recovery tras `--features test-failpoints`, que el CI
 > corre desde E23-H06); `clippy -D warnings` y `cargo doc -D warnings` limpios; pureza del core
 > verificada por CI. **El recuento exacto de tests lo fija la nota de release** (E24-H18:
-> `cargo test --workspace -- --list | grep -c ": test$"`); el último fijado aquí fueron los 486 de
-> E24, antes de las 11 historias de E25/E26.
+> `cargo test --workspace -- --list | grep -c ": test$"`); fijado en la **v0.5.0**: **541 tests**
+> (eran 486 al cerrar E24, antes de las 11 historias de E25/E26).
 >
 > **Ya no forman parte de este repo**: la app de escritorio (Tauri + Svelte, movida a
 > `experimental/ui-desktop` con el giro headless), el crate `lodestar-vcs` y `git2` (borrados en
@@ -29,8 +29,9 @@
 ## Cómo correrlo
 
 ```bash
-cargo test --workspace --locked                       # 486 tests
-cargo test -p lodestar-workspace --features test-failpoints --locked   # +4 de crash-recovery
+cargo test --workspace --locked                       # 541 tests (v0.5.0)
+cargo test -p lodestar-workspace --features test-failpoints --locked   # crash-recovery (E13-H06)
+cargo test -p lodestar-app --features test-failpoints --locked         # ventana de publicación (E25-H01)
 cargo run -p lodestar-cli -- check [--path <dir>]     # la puerta de CI (exit 0/1/2/3)
 cargo run -p lodestar-cli -- reindex                  # reconstruye .lodestar/index.db
 cargo run -p lodestar-cli -- migrate-from-okf --dry-run
@@ -1369,7 +1370,8 @@ Lo que merece quedar registrado, porque cambió el plan:
   `RECOVERY_FAILED` ganó emisor, así que `codigos_sin_emisor` baja de 5 a 4.
 - **Core puro (#2)**: intacto — las cotas de H10 viven en la fachada, no en `core::metadata`.
 
-> **Recuento de tests**: esta rama añade la fase roja de las 11 historias al total de 486 de E24. El
-> número exacto **no se ha vuelto a fijar aquí a propósito**: lo fija la nota de release, con
+> **Recuento de tests**: esta rama añade la fase roja de las 11 historias al total de 486 de E24. La
+> nota de release de la **v0.5.0** lo fijó en **541**, medido con
 > `cargo test --workspace -- --list | grep -c ": test$"`, que es el criterio que E24-H18 dejó escrito
-> para que este documento no vuelva a mentir con una cifra copiada.
+> para que este documento no vuelva a mentir con una cifra copiada. (No incluye los tests gateados
+> tras `--features test-failpoints`, que ese comando no lista.)

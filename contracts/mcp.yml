@@ -311,7 +311,7 @@
 #     `descubribilidad.rs::los_codigos_sin_emisor_no_los_emite_ninguna_tool`, que coteja las
 #     afirmaciones en presente del fichero contra sus propias filas.)
 
-# E25-H02 (v0.4.0, bloque B de la épica de endurecimiento de escritura): `RECOVERY_FAILED` gana su
+# E25-H02 (v0.5.0, bloque B de la épica de endurecimiento de escritura): `RECOVERY_FAILED` gana su
 # PRIMER EMISOR real y sale de `codigos_sin_emisor` (eran CINCO filas, ahora CUATRO). El catálogo
 # sigue teniendo 16 códigos: no se añadió ninguno.
 #   - Cuándo se emite: una transacción interrumpida no se puede restaurar porque su copia de
@@ -333,7 +333,7 @@
 #     (`workspace_status` no gana campo); quien no lea el `message` ni el stderr no sabrá que hay
 #     material forense esperando. Cerrarlo pide un `lodestar recover`, fuera de alcance (decisión E24).
 
-# E25-H01/H03/H04/H05/H06 (v0.4.0, épica de endurecimiento del camino de escritura): el resto de la
+# E25-H01/H03/H04/H05/H06 (v0.5.0, épica de endurecimiento del camino de escritura): el resto de la
 # épica, que E25-H02 dejó a medias en este fichero. **Nada de esto cambia la superficie**: siguen las
 # 10 tools, ningún tipo del wire cambia de forma y el catálogo sigue en 16 filas. Lo que cambia es
 # CUÁNDO se emiten códigos que ya existían y qué garantiza `change_apply`/`change_revert` — o sea,
@@ -398,7 +398,7 @@
 #     `.md` y PRESERVA el fin de línea dominante: un fichero en CRLF ya no vuelve en LF con un diff
 #     espurio, ni queda a medias si el proceso muere. Sigue siendo idempotente byte a byte.
 
-# E26-H07/H08/H09/H10/H11 (v0.4.0, épica de UX de errores de la superficie MCP): el error dice qué
+# E26-H07/H08/H09/H10/H11 (v0.5.0, épica de UX de errores de la superficie MCP): el error dice qué
 # pasó, hay un solo dialecto de dot-paths, ninguna respuesta viaja sin cota y este contrato vuelve a
 # describir el servidor que hay. La superficie sigue siendo de 10 tools y el catálogo, de 16 filas
 # (la épica se prohibió explícitamente añadir códigos): cambian mensajes, veredictos y cotas.
@@ -450,9 +450,11 @@
 #     centinela `WorkspaceError` en `meta.errores_ejecucion` —aparecía en las diez tools sin estar
 #     definido en ninguna parte— y corrige la afirmación falsa sobre `WORKSPACE_RECOVERY_REQUIRED`
 #     (arriba). No cambia comportamiento: solo este fichero.
-#   - **CONSECUENCIAS OBSERVABLES de la rama, recopiladas para la nota de release** (v0.3.1 → v0.4.0;
-#     escribir el CHANGELOG y publicar es trabajo aparte). Todas son cambios de VEREDICTO o de
-#     TAMAÑO de respuesta, ninguna es un cambio de forma del wire:
+#   - **CONSECUENCIAS OBSERVABLES de la rama, recopiladas para la nota de release** (delta completo
+#     v0.3.1 → v0.5.0; escribir el CHANGELOG y publicar es trabajo aparte). Los puntos 1 y 2 son de
+#     E24-H07/H08 y viajaron ya en la **v0.4.0** —la única release que los llevó—; del 3 al 8 salen
+#     en la **v0.5.0**. Todas son cambios de VEREDICTO o de TAMAÑO de respuesta, ninguna es un
+#     cambio de forma del wire:
 #     1. (E24-H07) Una consulta con una propiedad desconocida bajo `graph.`/`document.` pasa de
 #        devolver `[]` a fallar con `INVALID_SCHEMA`. Salida: corregir el nombre de la propiedad, o
 #        anclar con `frontmatter.` si lo que se quería era una clave del usuario.
