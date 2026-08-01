@@ -1,116 +1,135 @@
 # Lodestar
 
-**Haz que cualquier repositorio Markdown sea navegable, consultable y seguro para agentes de IA.**
+**Make any Markdown repository navigable, queryable and safe for AI agents.**
 
 [![CI](https://github.com/dbareagimeno/lodestar/actions/workflows/ci.yml/badge.svg)](https://github.com/dbareagimeno/lodestar/actions/workflows/ci.yml)
 [![Rust 1.80+](https://img.shields.io/badge/Rust-1.80%2B-dea584?logo=rust)](rust-toolchain.toml)
-[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#licencia)
+[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 
-Lodestar es un motor local y transaccional que permite a los agentes descubrir, consultar,
-comprender y modificar una red de documentos Markdown sin convertirla a un formato propietario.
-Lee la estructura que ya existe, interpreta el frontmatter que ya utilizas, resuelve sus enlaces y
-protege los cambios con validación, control de concurrencia y rollback.
+Lodestar is a local, transactional engine that lets agents discover, query, understand and modify a
+network of Markdown documents without converting it to a proprietary format. It reads the structure
+that already exists, interprets the frontmatter you already use, resolves its links, and protects
+changes with validation, concurrency control and rollback.
 
 ```bash
-cd mi-proyecto
+cd my-project
 lodestar-mcp
 ```
 
-Eso es todo. No necesitas inicializar el repositorio, crear un índice especial ni adaptar tus
-documentos. Lodestar descubre recursivamente los `.md`, respeta `.gitignore` y
-`.lodestarignore`, y usa el directorio actual como workspace.
+That is all. You do not need to initialize the repository, create a special index or adapt your
+documents. Lodestar discovers `.md` files recursively, honours `.gitignore` and `.lodestarignore`,
+and uses the current directory as the workspace.
 
-> Tus Markdown siguen siendo la única fuente de verdad: legibles por personas, versionables con las
-> herramientas que prefieras y utilizables sin Lodestar.
+> Your Markdown remains the single source of truth: human-readable, versionable with whatever tools
+> you prefer, and usable without Lodestar.
 
-## Qué aporta
+## What it gives you
 
-- **Contexto preciso para agentes.** Busca primero y recupera después solo el documento, la sección
-  o los campos necesarios; no vuelca todo el repositorio en el contexto.
-- **Consultas sobre tu propia metadata.** Filtra cualquier propiedad YAML con operadores tipados,
-  dot notation y condiciones sobre el grafo, sin imponer un schema.
-- **Una visión real de las relaciones.** Resuelve enlaces Markdown, backlinks, documentos aislados,
-  enlaces rotos, caminos, ciclos y componentes a cualquier profundidad.
-- **Análisis antes de cambiar.** Calcula el radio de impacto y las referencias afectadas antes de
-  mover o eliminar un documento.
-- **Cambios recuperables.** Planifica y valida en memoria, aplica mediante una transacción atómica y
-  conserva un recibo con el que poder revertir.
-- **Una puerta de calidad para CI.** Audita el working tree y produce salida humana, JSON o SARIF
-  con códigos de salida estables.
-- **Local-first y file-first.** El servidor se comunica por `stdio`; la caché SQLite/FTS5 es
-  derivada y puede reconstruirse desde los Markdown.
+- **Precise context for agents.** Search first and then retrieve only the document, section or
+  fields you need; it does not dump the whole repository into the context window.
+- **Queries over your own metadata.** Filter any YAML property with typed operators, dot notation
+  and conditions over the graph, without imposing a schema.
+- **A real view of the relationships.** It resolves Markdown links, backlinks, isolated documents,
+  broken links, paths, cycles and components at any depth.
+- **Analysis before changing anything.** It computes the blast radius and the affected references
+  before you move or delete a document.
+- **Recoverable changes.** Plan and validate in memory, apply through an atomic transaction, and
+  keep a receipt you can revert from.
+- **A quality gate for CI.** It audits the working tree and produces human, JSON or SARIF output
+  with stable exit codes.
+- **Local-first and file-first.** The server speaks over `stdio`; the SQLite/FTS5 cache is derived
+  and can be rebuilt from the Markdown.
 
-## Cómo trabaja un agente con Lodestar
+## How an agent works with Lodestar
 
 ```text
-orientarse → buscar → leer → inspeccionar metadata y relaciones
-    → analizar impacto → planificar → aplicar → validar → revertir si hace falta
+orient → search → read → inspect metadata and relationships
+    → analyze impact → plan → apply → validate → revert if needed
 ```
 
-Lodestar expone ese recorrido mediante MCP:
+Lodestar exposes that journey over MCP:
 
-| Necesidad | Tools |
+| Need | Tools |
 |---|---|
-| Entender el workspace | `workspace_status`, `knowledge_search`, `knowledge_get`, `metadata_inspect` |
-| Analizar el conocimiento | `graph_query`, `impact_analyze`, `knowledge_check` |
-| Cambiar con seguridad | `change_plan`, `change_apply`, `change_revert` |
+| Understand the workspace | `workspace_status`, `knowledge_search`, `knowledge_get`, `metadata_inspect` |
+| Analyze the knowledge | `graph_query`, `impact_analyze`, `knowledge_check` |
+| Change it safely | `change_plan`, `change_apply`, `change_revert` |
 
-El perfil `readonly` ofrece las siete tools de lectura y verificación. El perfil `standard`, usado
-por defecto, añade planificación, aplicación y reversión de cambios.
+The `readonly` profile offers the seven read and verification tools. The `standard` profile, used by
+default, adds planning, applying and reverting changes.
 
-## Inicio rápido
+## Quickstart
 
-### 1. Instala los binarios
+### 1. Install the binaries
 
-Cada [release de GitHub](https://github.com/dbareagimeno/lodestar/releases/latest) incluye los
-binarios precompilados para macOS (Apple Silicon), Linux (x86_64) y Windows (x86_64). Descarga el
-archivo de tu plataforma, descomprímelo y coloca los dos ejecutables en tu `PATH`:
+Every [GitHub release](https://github.com/dbareagimeno/lodestar/releases/latest) ships prebuilt
+binaries for macOS (Apple Silicon), Linux (x86_64) and Windows (x86_64). Download the archive for
+your platform, unpack it and put both executables on your `PATH`:
 
 ```bash
-tar -xzf lodestar-cli-v*-aarch64-apple-darwin.tar.gz   # .zip en Windows
-mv lodestar lodestar-mcp ~/.local/bin/                 # o cualquier directorio del PATH
+tar -xzf lodestar-cli-v*-aarch64-apple-darwin.tar.gz   # .zip on Windows
+mv lodestar lodestar-mcp ~/.local/bin/                 # or any directory on your PATH
 ```
 
-Los binarios salen sin firmar, así que macOS y Windows pueden pedir confirmación la primera vez.
+Releases published after `v0.5.0` also ship a `SHA256SUMS-<target>.txt` next to each archive: verify
+it with `shasum -a 256 -c SHA256SUMS-<target>.txt` (or `sha256sum -c`) before unpacking.
 
-También puedes compilar desde una copia del repositorio (requiere Rust 1.80 o posterior):
+The binaries are unsigned, so macOS and Windows may ask for confirmation the first time.
+
+You can also build from source (Rust 1.80 or later):
 
 ```bash
-cargo install --path crates/lodestar-cli
-cargo install --path crates/lodestar-mcp
+cargo install --git https://github.com/dbareagimeno/lodestar lodestar-cli
+cargo install --git https://github.com/dbareagimeno/lodestar lodestar-mcp
 ```
 
-En ambos casos obtienes:
+Either way you get:
 
-- `lodestar`, la CLI para validación y mantenimiento;
-- `lodestar-mcp`, el servidor local que conecta el workspace con un agente.
+- `lodestar`, the CLI for validation and maintenance;
+- `lodestar-mcp`, the local server that connects the workspace to an agent.
 
-No hacen falta Node.js, git ni librerías de interfaz gráfica.
+No Node.js, no git and no GUI libraries required.
 
-### 2. Comprueba un proyecto
+### 2. Try it on the demo workspace
+
+The repository ships [`examples/demo/`](examples/demo/README.md): ten Markdown documents about a
+fictional service, with two deliberate defects — one broken link and one orphan document.
+
+```console
+$ git clone https://github.com/dbareagimeno/lodestar
+$ cd lodestar/examples/demo
+$ lodestar check
+  ✗ [LINK-TARGET-MISSING] runbooks/incident-response.md: El enlace apunta a un documento que no existe: «runbooks/escalation.md».
+
+10 documentos · 1 con errores · 0 avisos · NO VÁLIDO
+$ echo $?
+1
+```
+
+Ten documents were walked, the broken link was found, and the non-zero exit code is what makes
+`lodestar check` usable as a CI gate. Nothing on disk was modified. (Diagnostic messages are
+currently emitted in Spanish; the diagnostic codes such as `LINK-TARGET-MISSING` and the exit codes
+are the stable part of the contract.)
+
+The same command works on any project of yours:
 
 ```bash
-cd /ruta/a/mi-proyecto
+cd /path/to/my-project
 lodestar check
-```
-
-Lodestar recorrerá todos los Markdown visibles del proyecto sin modificar ningún fichero.
-
-```bash
 lodestar check --json
 lodestar check --sarif > lodestar.sarif
 ```
 
-### 3. Conecta tu cliente MCP
+### 3. Connect your MCP client
 
-Configura el cliente para lanzar `lodestar-mcp` por `stdio`. Estos son los valores esenciales:
+Configure the client to launch `lodestar-mcp` over `stdio`. In [Claude
+Code](https://claude.com/claude-code) that is one line:
 
-```text
-command: lodestar-mcp
-args:    --root /ruta/absoluta/mi-proyecto --profile readonly
+```bash
+claude mcp add lodestar -- lodestar-mcp --root /absolute/path/to/project
 ```
 
-En clientes con configuración MCP en JSON, la definición equivalente es:
+In clients configured with JSON, the equivalent definition is:
 
 ```json
 {
@@ -119,7 +138,7 @@ En clientes con configuración MCP en JSON, la definición equivalente es:
       "command": "lodestar-mcp",
       "args": [
         "--root",
-        "/ruta/absoluta/mi-proyecto",
+        "/absolute/path/to/project",
         "--profile",
         "readonly"
       ]
@@ -128,20 +147,24 @@ En clientes con configuración MCP en JSON, la definición equivalente es:
 }
 ```
 
-Puedes omitir `--root` si el cliente arranca el proceso dentro del proyecto. Usa `readonly` para
-explorar o revisar; cambia a `standard` cuando quieras permitir cambios transaccionales.
+You can omit `--root` if the client starts the process inside the project. Use `readonly` to explore
+or review; switch to `standard` when you want to allow transactional changes.
 
-## Funciona con el Markdown que ya tienes
+A full session against the demo — typed query, orphan detection, impact analysis, and a
+plan/apply/revert round trip, with the real request and response of every tool call — is written out
+in [`examples/demo/README.md`](examples/demo/README.md).
 
-No hay campos obligatorios ni nombres de fichero reservados. Un documento puede ser Markdown plano:
+## Works with the Markdown you already have
+
+There are no mandatory fields and no reserved file names. A document can be plain Markdown:
 
 ```markdown
-# Rotación de credenciales
+# Credential rotation
 
-Consulta también el [runbook de despliegue](../runbooks/deploy.md).
+See also the [deployment runbook](../runbooks/deploy.md).
 ```
 
-O puede utilizar cualquier frontmatter YAML que tenga sentido para tu equipo:
+Or it can use whatever YAML frontmatter makes sense for your team:
 
 ```markdown
 ---
@@ -153,12 +176,12 @@ service:
   tier: critical
 ---
 
-# Rotación de credenciales
+# Credential rotation
 
-Consulta también el [runbook de despliegue](../runbooks/deploy.md).
+See also the [deployment runbook](../runbooks/deploy.md).
 ```
 
-Lodestar conserva los tipos YAML reales y permite consultas como:
+Lodestar preserves the real YAML types and allows queries such as:
 
 ```text
 status = "accepted" and priority >= 2
@@ -167,109 +190,106 @@ service.tier = "critical"
 graph.backlinks = 0
 ```
 
-`metadata_inspect` permite que un agente descubra primero qué campos existen, sus tipos, su
-cobertura y sus valores frecuentes. Así puede entender las convenciones de un proyecto desconocido
-sin que tengas que mantener un schema paralelo.
+`metadata_inspect` lets an agent first discover which fields exist, their types, their coverage and
+their frequent values. That way it can understand the conventions of an unfamiliar project without
+you having to maintain a parallel schema.
 
-## Grafo e impacto
+## Graph and impact
 
-Cada enlace Markdown interno forma una arista del grafo. Lodestar reconoce enlaces inline, enlaces
-de referencia, anchors, destinos externos y rutas relativas entre documentos situados a cualquier
-profundidad.
+Every internal Markdown link forms an edge of the graph. Lodestar recognizes inline links, reference
+links, anchors, external targets and relative paths between documents sitting at any depth.
 
-`graph_query` permite consultar:
+`graph_query` lets you ask for:
 
-- backlinks y enlaces salientes;
-- vecindarios entrantes, salientes o bidireccionales;
-- documentos aislados y enlaces sin destino;
-- el camino entre dos documentos;
-- ciclos y componentes del grafo.
+- backlinks and outgoing links;
+- incoming, outgoing or bidirectional neighborhoods;
+- isolated documents and links without a target;
+- the path between two documents;
+- cycles and components of the graph.
 
-Antes de un `move` o `delete`, `impact_analyze` identifica afectados directos y transitivos y
-calcula el nivel de riesgo sin tocar disco.
+Before a `move` or a `delete`, `impact_analyze` identifies directly and transitively affected
+documents and computes the risk level without touching disk.
 
-## Cambios seguros y recuperables
+## Safe, recoverable changes
 
-El perfil `standard` separa deliberadamente pensar de escribir:
+The `standard` profile deliberately separates thinking from writing:
 
-1. `change_plan` normaliza las operaciones, simula el resultado en memoria, calcula el diff
-   semántico, evalúa el impacto y valida si el cambio se puede aplicar.
-2. `change_apply` comprueba que el workspace no haya cambiado desde el plan y publica mediante
-   staging, lock, copias de recuperación, write-ahead journal y renames atómicos.
-3. `knowledge_check` confirma el estado resultante.
-4. `change_revert` restaura una transacción reciente desde su recibo si necesitas deshacerla.
+1. `change_plan` normalizes the operations, simulates the result in memory, computes the semantic
+   diff, evaluates the impact and validates whether the change can be applied.
+2. `change_apply` checks that the workspace has not changed since the plan, and publishes through
+   staging, a lock, recovery copies, a write-ahead journal and atomic renames.
+3. `knowledge_check` confirms the resulting state.
+4. `change_revert` restores a recent transaction from its receipt if you need to undo it.
 
-Las operaciones disponibles cubren creación, modificación quirúrgica del frontmatter, sustitución
-de cuerpo o texto, edición de secciones, movimientos y borrados. También pueden aplicarse
-operaciones compatibles sobre selecciones obtenidas mediante consulta.
+The available operations cover creation, surgical frontmatter edits, body or text replacement,
+section editing, moves and deletions. Compatible operations can also be applied over selections
+obtained through a query.
 
-Las revisiones deterministas de documento y workspace proporcionan control optimista de
-concurrencia: si una persona u otra herramienta cambia un fichero entre el plan y la aplicación,
-Lodestar rechaza la escritura obsoleta.
+Deterministic document and workspace revisions provide optimistic concurrency control: if a person
+or another tool changes a file between the plan and the apply, Lodestar rejects the stale write.
 
 ## CLI
 
-La CLI es una fachada pequeña para personas, scripts y CI:
+The CLI is a small facade for people, scripts and CI:
 
-| Comando | Uso |
+| Command | Use |
 |---|---|
-| `lodestar check` | Audita el working tree |
-| `lodestar reindex` | Reconstruye `.lodestar/index.db` desde los Markdown |
-| `lodestar migrate-from-okf --dry-run` | Diagnostica convenciones OKF heredadas sin modificar ficheros |
+| `lodestar check` | Audits the working tree |
+| `lodestar reindex` | Rebuilds the derived `.lodestar/index.db` cache from the Markdown |
+| `lodestar migrate-from-okf --dry-run` | Diagnoses legacy OKF conventions without modifying files |
 
-Para operar sobre otro directorio sin cambiar el `cwd`:
-
-```bash
-lodestar --path /ruta/al/proyecto check
-```
-
-Los códigos de salida de `check` son estables: `0` sin errores, `1` validación bloqueada, `2` uso
-inválido y `3` error de runtime o I/O.
-
-## Migración desde OKF
-
-Los repositorios creados con el antiguo formato OKF siguen siendo Markdown válido y pueden abrirse
-directamente. El comando de migración es únicamente diagnóstico:
+To operate on another directory without changing the `cwd`:
 
 ```bash
-lodestar --path /ruta/al/proyecto migrate-from-okf --dry-run
+lodestar --path /path/to/project check
 ```
 
-Informa sobre índices, `okf_version` e índices de tags heredados, pero nunca modifica el proyecto.
-Consulta el [changelog](CHANGELOG.md) para conocer la evolución del formato y las incompatibilidades
-entre releases.
+The exit codes of `check` are stable: `0` no errors, `1` validation blocked, `2` invalid usage and
+`3` runtime or I/O error.
 
-## Arquitectura
+## Migrating from OKF
+
+Repositories created with the old OKF format are still valid Markdown and can be opened directly.
+The migration command is diagnostic only:
+
+```bash
+lodestar --path /path/to/project migrate-from-okf --dry-run
+```
+
+It reports on legacy indexes, `okf_version` and tag indexes, but it never modifies the project. See
+the [changelog](CHANGELOG.md) for how the format evolved and what is incompatible between releases.
+
+## Architecture
 
 ```text
-                         ┌──────────────────────────┐
-Repositorio Markdown ───► descubrimiento + parser  │
- fuente de verdad        │ metadata · links · query├──► MCP / agentes
-                         │ grafo · impacto · diff   ├──► CLI / CI
-                         │ transacciones · recovery │
-                         └────────────┬─────────────┘
-                                      ▼
+                        ┌──────────────────────────┐
+Markdown repository ───►│ discovery + parser       │
+ source of truth        │ metadata · links · query ├──► MCP / agents
+                        │ graph · impact · diff    ├──► CLI / CI
+                        │ transactions · recovery  │
+                        └────────────┬─────────────┘
+                                     ▼
                               SQLite / FTS5
-                             caché reconstruible
+                             rebuildable cache
 ```
 
-La lógica de dominio es compartida por las dos fachadas:
+The domain logic is shared by both facades:
 
 ```text
 crates/
-  lodestar-core/        modelo documental, metadata, enlaces, query, grafo y diff
-  lodestar-store/       caché SQLite/FTS5 y watcher
-  lodestar-workspace/   descubrimiento, I/O y publicación recuperable
-  lodestar-app/         casos de uso compartidos por CLI y MCP
-  lodestar-cli/         fachada para personas y CI
-  lodestar-mcp/         fachada MCP por stdio para agentes
-  lodestar-fixtures/    workspaces compartidos de test
+  lodestar-core/        document model, metadata, links, query, graph and diff
+  lodestar-store/       SQLite/FTS5 cache and watcher
+  lodestar-workspace/   discovery, I/O and recoverable publication
+  lodestar-app/         use cases shared by the CLI and MCP
+  lodestar-cli/         facade for people and CI
+  lodestar-mcp/         MCP facade over stdio for agents
+  lodestar-fixtures/    shared test workspaces
 ```
 
-El core no realiza I/O y las fachadas no reimplementan la semántica. Una consulta o validación
-produce el mismo resultado independientemente del consumidor.
+The core performs no I/O and the facades do not reimplement the semantics. A query or a validation
+produces the same result regardless of the consumer.
 
-## Desarrollo
+## Development
 
 ```bash
 cargo test --workspace --locked
@@ -278,21 +298,35 @@ cargo fmt --all --check
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 ```
 
-La CI ejecuta formato, lint estricto, build, documentación y tests —incluidos los escenarios de
-crash-recovery— en Linux, macOS y Windows.
+CI runs formatting, strict linting, build, documentation and tests — including the crash-recovery
+scenarios — on Linux, macOS and Windows.
 
-## Documentación
+## Documentation
 
-| Documento | Contenido |
+Start with the [guided demo](examples/demo/README.md): every command and every MCP call in it comes
+from a real run.
+
+The documents below govern the development of the repository. They are **written in Spanish by
+design** (`ARCHITECTURE.md §21.1`: the public surface is in English, the internal material that
+governs development stays in Spanish):
+
+| Document | Contents |
 |---|---|
-| [Arquitectura](ARCHITECTURE.md) | Diseño vigente e invariantes del motor |
-| [Contrato MCP](contracts/mcp.yml) | Superficie y semántica de las tools |
-| [Estado de implementación](IMPLEMENTATION_STATUS.md) | Capacidades verificadas y trazabilidad |
-| [Decisiones](DECISIONES.md) | Decisiones de producto abiertas o ratificadas |
-| [Changelog](CHANGELOG.md) | Historial de cambios por release |
-| [Releasing](RELEASING.md) | Proceso de publicación |
+| [Architecture](ARCHITECTURE.md) | Current design and engine invariants |
+| [MCP contract](contracts/mcp.yml) | Surface and semantics of the tools |
+| [Implementation status](IMPLEMENTATION_STATUS.md) | Verified capabilities and traceability |
+| [Decisions](DECISIONES.md) | Open and ratified product decisions |
+| [Changelog](CHANGELOG.md) | Per-release history of changes |
+| [Releasing](RELEASING.md) | Publication process |
 
-## Licencia
+## Roadmap
 
-Lodestar se distribuye bajo **MIT OR Apache-2.0**, a tu elección. Consulta
-[LICENSE-MIT](LICENSE-MIT) y [LICENSE-APACHE](LICENSE-APACHE).
+There is no separate roadmap document to keep in sync: the living record of what is decided, what is
+still open and why is [`DECISIONES.md`](DECISIONES.md) (in Spanish, like the rest of the internal
+material). Each entry states the question, the options considered and the ratified answer, so what
+comes next is readable from the open ones. Anything not implemented today is not promised here.
+
+## License
+
+Lodestar is distributed under **MIT OR Apache-2.0**, at your option. See [LICENSE-MIT](LICENSE-MIT)
+and [LICENSE-APACHE](LICENSE-APACHE).
