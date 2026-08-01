@@ -7,6 +7,195 @@ y el proyecto sigue [Versionado Semántico](https://semver.org/lang/es/).
 
 ## [No publicado]
 
+## [0.5.0] - 2026-08-01
+
+**Endurecimiento del camino de escritura y de la superficie de errores** (épicas `E25`/`E26`, 11
+historias: [`epica-25`](requirements/epica-25-endurecimiento-escritura.md) ·
+[`epica-26`](requirements/epica-26-ux-errores.md)). Origen: la auditoría del orquestador
+transaccional y de la frontera MCP (2026-07-29), posterior a v0.3.1 y al bloque C de E24.
+
+> **Qué distingue a estas dos épicas de E23/E24**: aquellos defectos se reprodujeron **ejecutando**
+> los binarios; estos once se localizaron **leyendo** el orquestador y la frontera, y todos comparten
+> la razón por la que la suite no los veía: necesitan **dos actores** —dos procesos, o un proceso y
+> una caída— y la suite ejercía uno. Cada historia abrió con una fase roja que monta el segundo actor.
+>
+> **La superficie no cambia de forma**: siguen las **10 tools**, ningún tipo del wire cambia de forma
+> y el catálogo de errores sigue en **16 códigos** (E26 se prohibió explícitamente añadir ninguno).
+> Lo que cambia son veredictos, mensajes y cotas.
+>
+> **Recuento de tests de esta versión: 541** —el criterio de E24-H18,
+> `cargo test --workspace -- --list | grep -c ": test$"`— más los gateados tras
+> `--features test-failpoints` en `lodestar-workspace` y `lodestar-app`, que ese comando no lista.
+
+### ⚠️ Cambios observables para clientes
+
+Recopilados en la cabecera de [`contracts/mcp.yml`](contracts/mcp.yml) (E26-H11). Ninguno cambia la
+forma del wire: todos son cambios de **veredicto** o de **tamaño** de respuesta. Los dos primeros
+viajaron ya en la v0.4.0 y se repiten aquí porque ese bloque recoge el delta completo desde v0.3.1.
+
+1. **(`E24-H07`, ya en v0.4.0)** Una consulta con una propiedad desconocida bajo `graph.`/`document.`
+   pasa de devolver `[]` a fallar con `INVALID_SCHEMA`. **Migrar**: corregir el nombre de la
+   propiedad, o anclar con `frontmatter.` si lo que se quería era una clave del usuario.
+2. **(`E24-H08`, ya en v0.4.0)** `frontmatter.graph.backlinks` pasa de no casar nunca a alcanzar la
+   clave del usuario; `has(graph.backlinks)` pasa de mirar el frontmatter a mirar el grafo.
+   **Migrar**: revisar las consultas que dependían de cualquiera de las dos formas.
+3. **(`E26-H07`)** `graph_query` sin `ref` (o sin `to` en `path_between`) cambia de código:
+   `DOCUMENT_NOT_FOUND` → `INVALID_SCHEMA`. **Migrar**: un cliente que ramificaba por
+   `DOCUMENT_NOT_FOUND` para «el documento no existe» deja de recibir ahí los errores de su propia
+   llamada, que es el objetivo; un `ref` **presente** que no resuelve sigue siendo
+   `DOCUMENT_NOT_FOUND`.
+4. **(`E26-H08`)** Una consulta con un error de **tipo** pasa de devolver una lista recortada en
+   silencio a fallar con `INVALID_SCHEMA`. Afecta sobre todo a bases heterogéneas y a las
+   comparaciones de orden con fechas sin comillas (que son strings, `§20.8`). **Migrar**: acotar con
+   `has(campo)` o comparar con el tipo real; `=`/`!=` nunca son error de tipo.
+5. **(`E26-H09`)** `metadata_inspect{field: "graph.backlinks"}` pasa de devolver una inspección
+   (equivocada) a fallar; `field: "frontmatter.status"` pasa de `presentIn: 0` a inspeccionar
+   `status` de verdad; y el `name` del catálogo cambia de texto para las claves que colisionan con un
+   namespace reservado (se rinde anclado). **Migrar**: pasar el `name` del catálogo tal cual —desde
+   esta versión es **direccionable**: resuelve al mismo campo en `mode:"field"` y en `where`— y usar
+   `graph_query` para las propiedades calculadas.
+6. **(`E26-H10`)** `graph_query` sin `limit` deja de devolver el grafo entero: devuelve 100 nodos,
+   `truncated: true` y un `nextCursor`. `metadata_inspect` recorta igual sus `fields`/`values`
+   (default 100, máximo 1000). **Migrar**: quien asumiera la respuesta completa debe recorrer el
+   cursor — concatenar las páginas reconstruye **exactamente** la lista que devolvía v0.4.0.
+7. **(`E25-H02`)** La promesa «el canónico converge a uno de los dos bordes» queda **condicionada** a
+   que las copias de recuperación verifiquen. Con copias corruptas, lo garantizado es: nada se
+   escribe a partir de una copia que no verifica, el material se preserva, el fallo lleva
+   `RECOVERY_FAILED` como código propio y el workspace vuelve a ser escribible. **Migrar**: tratar
+   `RECOVERY_FAILED` como fallo con material forense en cuarentena
+   (`.lodestar/runtime/journal/quarantine/<txnId>/`, la ruta va en el mensaje).
+8. **(`E25-H01`/`H04`/`H05`)** `change_apply`/`change_revert` **abortan con `WRITE_CONFLICT`** ante
+   una edición externa en la ventana de publicación (antes la pisaban), y un cambio publicado
+   **siempre** deja recibo: un apply que publicó responde éxito aunque falle su cierre. **Migrar**:
+   un `WRITE_CONFLICT` sigue siendo terminal para esa transacción — el agente replanifica.
+
+### Corregido — el camino de escritura (`E25`)
+
+- **La publicación escribía fuera de lo que respaldó** (`E25-H01`). `apply_transaction` computa
+  canónico, resultado y afectados en **T1** y sobre ese conjunto ejerce `assert_writable`, el backup
+  y el journal; pero `publish_result` **releía** el canónico en **T3** y **recomputaba** el conjunto,
+  escribiendo o borrando lo divergente sin ninguna de las tres salvaguardas. Consecuencias
+  reproducidas: una edición externa en la ventana `[T1, T3)` se pisaba con un backup que ya no
+  correspondía (y `change_revert` restauraba un estado que nunca existió); un `.md` **creado** en esa
+  ventana se **borraba** sin copia ni journal; y bajo un `referenceRoot` pasaba lo mismo sin que el
+  control optimista pudiera verlo. Hoy la publicación compara el canónico de T1 con el de T3 y aborta
+  con `WRITE_CONFLICT` **antes del primer rename**; el bucle publica exactamente el conjunto que el
+  journal declara.
+- **Las copias de recuperación no eran durables, ni se verificaban, y una rota cerraba el workspace
+  para siempre** (`E25-H02`). Se copiaban con `std::fs::copy` y el manifiesto `.absent` con
+  `std::fs::write`, sin volcado, mientras el journal **sí** se fsyncaba: tras un corte podía quedar un
+  journal durable apuntando a una copia truncada, que la restauración escribía **verbatim** sobre el
+  canónico. Y si la copia era ilegible, `recover()` propagaba `Err` con el journal aún en disco, así
+  que `recovery_pending()` seguía en `true` y **toda** escritura futura moría. Hoy las copias van por
+  el protocolo durable, se verifican por huella `blake3` contra un sidecar de manifiesto antes de
+  restaurar, y un journal irrecuperable va a `journal/quarantine/<txnId>/` —nada se borra: es material
+  forense— con `RECOVERY_FAILED`, que gana así su **primer emisor real**.
+  - **Enmienda de la propia épica, nacida de implementar H01**: el aborto de ventana dejaba en disco
+    su journal `prepared` y las copias de T1 con **cero renames**, así que la siguiente operación
+    recuperaba restaurando T1 encima de la edición externa que el aborto acababa de proteger. El
+    camino de aborto **sella su propio journal** bajo el mismo lock.
+- **El GC desarmaba a una transacción viva de otro proceso** (`E25-H03`). El recolector que corre tras
+  cada `change_apply`/`change_revert` purgaba todo árbol de `staging/`/`recovery/` sin journal ni
+  recibo. Correcto con un proceso, falso con dos: entre el respaldo y la creación del journal una
+  transacción tiene copias y todavía no tiene journal ni recibo, así que el GC de **otro** proceso le
+  borraba el plano de recuperación y, si aquélla caía, la recuperación sellaba un estado parcial en
+  silencio. Hoy el GC barre **solo con el lock de publicación en la mano** (sin lock no barre, y no
+  barrer no es un error: el GC es best-effort), y la variante interna exige el testigo del lock por
+  firma, de modo que barrer sin él **no compila**.
+- **Publicar podía no dejar recibo** (`E25-H04`). Tras el primer rename el disco ya está cambiado,
+  pero el sellado, la escritura del recibo y el GC salían por `?`: cualquiera convertía una
+  transacción **publicada** en un `Err` **sin recibo**, y a partir de ahí no había salida
+  (`change_revert` → `PLAN_EXPIRED` para siempre; reaplicar el plan → `PLAN_STALE`). Un `SIGKILL` en
+  esa ventana dejaba el mismo estado. Hoy el **recibo pendiente** se persiste junto al journal y
+  **antes** del punto de no retorno, y el sellado lo promueve a `ChangeReceipt` definitivo; la vía
+  COMPLETAR de la recuperación hace lo mismo tras un crash y **conserva** las copias, así que la
+  transacción sigue siendo reversible.
+  - **Corolario de wire**: ningún paso posterior a la publicación puede devolver error —sellado,
+    limpieza de staging, retención y el propio cálculo de `validation` son best-effort con aviso por
+    stderr—, y por eso `validation.valid == false` con `errors == 0 && warnings == 0` significa «el
+    veredicto no se pudo computar», no «el resultado es inválido».
+- **Borrar no era durable, revertir no re-verificaba y la reversión no dejaba recibo** (`E25-H05`).
+  `io::delete` hacía `remove_file` sin fsync del directorio padre (un corte de energía podía
+  resucitar un documento que el recibo daba por borrado) y el fsync de directorio era best-effort
+  **silencioso**; `change_revert` comparaba la revisión **antes** de tomar el lock, y en esa ventana
+  otro escritor podía tocar un `.md` afectado, que la reversión pisaba en silencio; y la reversión
+  escribía su recibo por `?` tras publicar la inversa, con la forma exacta del defecto de H04 —lo
+  que hacía imposible **deshacer el undo**—. Hoy el borrado fsynca y propaga el fallo, el revert
+  **re-verifica bajo el lock** antes de la primera escritura (→ `WRITE_CONFLICT` sin escribir nada)
+  y persiste su recibo pendiente con su journal, **reusando** la mecánica de H04.
+- **El lock no tenía dueño demostrable** (`E25-H06`). El `Drop` del guard borraba el fichero de lock
+  **por ruta**: si otro proceso lo había reclamado por huérfano, el `Drop` del dueño original liberaba
+  el lock del **nuevo**, y de ahí en cascada. Hoy cada adquisición lleva un **token de propiedad** (el
+  `Drop` solo borra si coincide), el metadata lleva `host` (el pid solo decide si el host coincide) y
+  un pid **vivo** local impide el reclamo aunque haya vencido el TTL de 15 min, que queda como red
+  portable.
+  - Y el **`.gitignore`** —el único fichero versionado del usuario que el motor toca
+    (`ARCHITECTURE.md §20.13`)— se reescribe por el mismo protocolo temp+fsync+rename que un `.md` y
+    **preserva el fin de línea dominante**: un fichero en CRLF ya no vuelve en LF con un diff espurio,
+    ni queda a medias si el proceso muere. Sigue siendo idempotente byte a byte.
+
+### Corregido — la superficie de errores (`E26`)
+
+- **8 de las 10 tools devolvían el código de error pelado** (`E26-H07`). No era descuido del
+  despachador: los productores de `lodestar-app` eran `Result<_, ErrorCode>` y **no tenían dónde poner
+  el mensaje**, así que el agente recibía literalmente `INVALID_SCHEMA`, sin qué parámetro ni qué se
+  esperaba. Hoy devuelven `lodestar_app::AppError` (código del catálogo + `String`) y las diez emiten
+  **«CÓDIGO: mensaje»** en español, nombrando el parámetro, el valor recibido y lo esperado. Además
+  `graph_query` sin `ref` deja de responder `DOCUMENT_NOT_FOUND`, y `change_plan` conserva entero el
+  diagnóstico del parser de un `selection.where`/`filter` malformado, que antes tiraba con
+  `map_err(|_| …)`. **Sin tocar el catálogo**: sigue en 16 filas.
+- **Un `TypeError` de consulta excluía documentos en silencio** (`E26-H08`). Los dos consumidores del
+  lenguaje descartaban la evaluación con `if !matches!(evaluate(…), Ok(true)) { continue; }`, así que
+  un error de **tipo** —comparar `priority >= "high"` sobre un `priority: 2`— caía en el mismo
+  `continue` que un «no casa»: la respuesta era una lista recortada indistinguible de la correcta,
+  decidida documento a documento, y en la selección masiva de `change_plan`, un plan que afectaba a
+  menos ficheros de los seleccionados. Hoy aborta la consulta con `INVALID_SCHEMA` nombrando campo,
+  operador, los dos tipos y el documento donde chocaron, igual en las dos tools y de forma
+  **determinista** (sobre el orden total de `Analysis::documents` y antes de aplicar `text`/`limit`).
+  `Ok(false)` sigue siendo ausencia: no casar no es un error.
+- **Había dos dialectos de dot-paths** (`E26-H09`). `metadata_inspect` normalizaba con
+  `FieldPath::parse` en vez de con `core::parse::build_field_path`, el punto único de
+  `where`/`filter`/`has`: `graph.backlinks` significaba **dos cosas** según la tool,
+  `frontmatter.graph.backlinks` —la sintaxis que el propio mensaje de error recomienda— devolvía
+  `presentIn: 0`, y el catálogo **anunciaba** nombres que ninguna consulta podía alcanzar. Hoy usa el
+  mismo normalizador y hereda sus tres reglas; un namespace reservado **válido** no es inspeccionable
+  —`metadata_inspect` describe metadata, y una propiedad calculada no vive en ningún frontmatter— y se
+  rechaza con un mensaje que remite a `graph_query` o al anclaje.
+- **Había respuestas sin cota** (`E26-H10`). `graph_query` no tenía default **ni máximo** (`limit`
+  ausente ⇒ el total), así que un `operation: "components"` servía el **grafo completo** en una
+  respuesta; y `metadata_inspect` era la única de las 10 tools sin `limit` ni `cursor` en ninguno de
+  sus dos modos, con un `ValueCount` por valor distinto (N entradas para N documentos en un campo de
+  alta cardinalidad). Hoy las dos tienen default 100 / máximo 1000 y paginan con el mismo
+  cursor-offset hex autosuficiente del resto de la superficie. La cota vive en la **fachada**: el
+  core sigue puro y sirviendo la verdad completa (invariantes #2 y #3), y la **estadística no se
+  pagina** (`presentIn`/`missingIn`/`inferredTypes` describen todo el workspace) — se pagina la
+  lista.
+
+### Cambiado
+
+- **El contrato vuelve a describir el servidor que hay** (`E26-H11`). `contracts/mcp.yml` seguía
+  diciendo que un `where`/`filter` malformado daba un «`WorkspaceError::Core` genérico»
+  (comportamiento pre-E24-H10, mientras su propia cabecera ya documentaba lo contrario), E24-H07
+  declaró frontera sin tocar el contrato, y cuatro tools declaraban sus errores como prosa suelta.
+  Sincronizado con los cinco deltas de la rama, con `/contrato --check` limpio, con el centinela
+  `WorkspaceError` **definido** en `meta.errores_ejecucion` (aparecía en las diez tools sin estar
+  definido en ninguna parte) y con un test que **coteja** los códigos citados en el YAML contra
+  `ErrorCode`, porque una lista de errores escrita a mano es justo lo que envejece en silencio.
+
+### Deuda declarada
+
+Las 11 historias pasaron por **juez ciego** con *mutation testing* pedido en el encargo; las 11
+volvieron `APROBADA CON RESERVAS` y **todas las reservas mayores se cerraron en el mismo ciclo**. Lo
+que se decidió **no** arreglar aquí queda registrado, con su origen y su motivo, en
+[`DECISIONES §16`](DECISIONES.md) — doce puntos, de `(a)` a `(l)`: los tres límites de *quoting* del
+lenguaje de consulta, el `Envelope` sin llamantes, la cache SQLite y el watcher sin uso en
+producción, el servidor MCP monohilo sin *timeout* ni cancelación, la config que no rechaza claves
+desconocidas, el workspace vacío indistinguible de un directorio equivocado, la API pública no
+transaccional de `Workspace`, los escritores de runtime que no toman el lock, la secuencia de sellado
+duplicada entre `apply` y `revert`, el cursor basura que reinicia la paginación en silencio, la
+matriz de trazabilidad sin filas de E15–E24, y los flecos de fuerza de suite de siete historias
+(`§16(l)`). **Ninguno bloquea esta publicación.**
+
 ## [0.4.0] - 2026-07-29
 
 **El lenguaje de consulta deja de responder a lo que no entiende** (`E24-H07`/`H08`, la mitad de la
@@ -365,7 +554,8 @@ y pipeline de release multiplataforma.
 - **Heading por defecto de los conceptos**: ahora `# {Tipo} - {Nombre}` (antes
   `# Resumen`).
 
-[No publicado]: https://github.com/dbareagimeno/lodestar/compare/v0.4.0...HEAD
+[No publicado]: https://github.com/dbareagimeno/lodestar/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/dbareagimeno/lodestar/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/dbareagimeno/lodestar/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/dbareagimeno/lodestar/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/dbareagimeno/lodestar/compare/v0.2.0...v0.3.0
