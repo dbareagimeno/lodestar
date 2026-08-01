@@ -5,10 +5,18 @@ El criterio de este directorio es **vigente / superseded**, no viejo/nuevo
 
 ## Para usuarios (inglés)
 
-- [`user/`](user/) — documentación de uso: quickstart, clientes MCP, lenguaje
-  de consulta, cambios seguros y `check` como puerta de CI. Empieza por
-  [`user/quickstart.md`](user/quickstart.md). La demo guiada vive en
+- [`user/`](user/) — documentación de uso, en inglés. Empieza por el
+  quickstart; la demo guiada vive en
   [`../examples/demo/`](../examples/demo/README.md).
+  - [`user/quickstart.md`](user/quickstart.md) — instalar, primer `check`,
+    cómo leer la salida (severidades y exit codes) y qué leer después.
+  - [`user/mcp-clients.md`](user/mcp-clients.md) — configurar un cliente MCP
+    (Claude Code y JSON genérico), `--root`, perfiles `readonly`/`standard` y
+    recorrido de las 10 tools.
+  - [`user/ci.md`](user/ci.md) — `check` como puerta de CI: exit codes
+    congelados, `--json`/`--sarif` y un workflow completo de GitHub Actions.
+  - Pendientes (E27-H11): la referencia del lenguaje de consulta y la de
+    cambios seguros.
 
 ## Para el desarrollo del repo (español)
 

@@ -307,6 +307,14 @@ scenarios — on Linux, macOS and Windows.
 Start with the [guided demo](examples/demo/README.md): every command and every MCP call in it comes
 from a real run.
 
+The **user guide** lives in [`docs/user/`](docs/user/) and is written in English:
+
+| Document | Contents |
+|---|---|
+| [Quickstart](docs/user/quickstart.md) | Install, run the first `check`, read the output, exit codes |
+| [MCP clients](docs/user/mcp-clients.md) | Per-client configuration, `--root`, profiles, a tour of the ten tools |
+| [CI](docs/user/ci.md) | `check` as a gate: exit codes, `--json`, `--sarif`, a complete GitHub Actions workflow |
+
 The documents below govern the development of the repository. They are **written in Spanish by
 design** (`ARCHITECTURE.md §21.1`: the public surface is in English, the internal material that
 governs development stays in Spanish):
