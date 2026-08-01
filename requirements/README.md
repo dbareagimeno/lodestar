@@ -14,9 +14,12 @@
   de E0–E14 citan además funciones del prototipo (`prototype/index.html`): desde `E15-H04` esas
   citas son **referencia histórica de v0.2.x** —explican el comportamiento portado, no lo
   arbitran— y el arnés diferencial JS-vs-Rust ya no existe.
-- **Idioma**: español en código, comentarios, UI, mensajes y commits (el usuario es hispanohablante),
+- **Idioma**: español en código, comentarios, mensajes y commits (el usuario es hispanohablante),
   salvo identificadores técnicos congelados por el contrato (nombres de tipos, comandos, eventos,
-  códigos `OKF-*`).
+  códigos de diagnóstico). **Ampliado por `ARCHITECTURE.md §21.1` (E27)**: la superficie
+  **pública** del repo —README raíz, `docs/user/`, `examples/demo/`, CONTRIBUTING, SECURITY, CoC y
+  templates de GitHub— se escribe en **inglés**; todo lo interno (este directorio incluido) sigue
+  en español.
 
 ## Mapa de épicas (alineadas con `ARCHITECTURE.md §14`)
 
@@ -185,13 +188,15 @@ Cada historia tiene un identificador estable `E<épica>-H<nn>` y esta plantilla:
 
 Una historia está `Done` cuando:
 
-1. **Compila** en el workspace sin warnings nuevos (`cargo build`/`cargo clippy -- -D warnings`
-   para Rust; `svelte-check`/`tsc --noEmit` para el frontend).
+1. **Compila** en el workspace sin warnings nuevos (`cargo build`/`cargo clippy -- -D warnings`).
+   Los gates del frontend (`svelte-check`/`tsc`) se retiraron de `main` con la UI
+   (`experimental/ui-desktop`).
 2. **Tiene tests** que cubren su comportamiento (unit + el arnés de paridad/golden que aplique) y
-   **pasan** (`cargo test`, `vitest`, etc.).
+   **pasan** (`cargo test --workspace`, más `--features test-failpoints` en los crates que lo
+   gatean).
 3. **Respeta los invariantes no negociables** de `CLAUDE.md` / `ARCHITECTURE.md §2,§10`:
    core puro, único escritor, una sola verdad computada, un solo contrato de tipos, `RelPath`
-   newtype, vocabulario git directo.
+   newtype.
 4. **No reintroduce duplicación de tipos** ni capa DTO paralela (principio #4).
 5. **Documenta** la superficie pública nueva (`///` en Rust) en español.
 6. El **arnés de paridad** de su fase sigue verde (cuando exista).
@@ -201,10 +206,14 @@ Una historia está `Done` cuando:
 1. Los `.md` en disco son la **única fuente de verdad**; lo demás se deriva.
 2. `lodestar-core` es **puro** (`#![forbid(unsafe_code)]`, sin `tauri`/`rusqlite`/`notify`/`tokio`/`git2`).
 3. **Una sola verdad computada**: cuando SQL y core podrían discrepar, gana el core.
-4. **Un solo contrato de tipos** en `lodestar-core::types`; el `.d.ts` se genera desde Rust.
+4. **Un solo contrato de tipos** en `lodestar-core::types`, sin capa DTO paralela. Lo derivado es
+   el JSON Schema de `outputSchema` (vía `schemars`); el espejo `.d.ts` **ya no existe** — se fue
+   con la UI a `experimental/ui-desktop` (E27-H07 corrigió esta fila, que aún lo afirmaba).
 5. **Un watcher = único escritor**: los comandos escriben el `.md` (atómico temp+rename); el watcher reconcilia.
 6. `RelPath` newtype validado (rechaza absolutas/`..`): único chokepoint de path-traversal.
-7. git con **vocabulario directo**; transporte híbrido (libgit2 local + binario `git` solo para red).
+7. ~~git con **vocabulario directo**; transporte híbrido~~ — **RETIRADO** (`E15-H01`,
+   `ARCHITECTURE.md §20.13`): git salió de la superficie y del repo; no queda crate `vcs` ni
+   `git2`. Se conserva tachado porque las épicas históricas E0–E8 lo citan.
 
 ## Trazabilidad
 

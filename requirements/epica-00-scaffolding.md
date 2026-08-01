@@ -1,3 +1,8 @@
+> **⚠️ ÉPICA HISTÓRICA (v0.2.x, pre-giro) — no implementar nada de aquí.** Describe trabajo
+> completado antes del giro headless (`ARCHITECTURE.md §19`, 2026-07-22) y de la migración a
+> workspaces Markdown universales (`§20`). El workspace de crates que montó sigue siendo la base, pero el modelo documental OKF y las fachadas que asume (Tauri, `vcs`) ya no existen en `main`.
+> Se conserva sin editar como registro del origen del proyecto.
+
 # E0 — Scaffolding del workspace
 
 > **Fase**: previa a `§14.1`. **Objetivo de la épica**: levantar el Cargo workspace, el proyecto

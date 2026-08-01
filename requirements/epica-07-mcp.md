@@ -1,3 +1,8 @@
+> **⚠️ ÉPICA HISTÓRICA (v0.2.x, pre-giro) — no implementar nada de aquí.** Describe trabajo
+> completado antes del giro headless (`ARCHITECTURE.md §19`, 2026-07-22) y de la migración a
+> workspaces Markdown universales (`§20`). Las tools MCP que especifica se retiraron en E14-H06; la superficie vigente son las 10 tools de `§19.6` (`contracts/mcp.yml`).
+> Se conserva sin editar como registro del origen del proyecto.
+
 # E7 — `lodestar-mcp` (fachada de agentes)
 
 > **Fase**: `§14.7`. **Objetivo de la épica**: la 4ª fachada (rmcp, stdio) sobre la **misma**

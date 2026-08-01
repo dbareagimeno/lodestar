@@ -1,3 +1,8 @@
+> **⚠️ ÉPICA HISTÓRICA (v0.2.x, pre-giro) — no implementar nada de aquí.** Describe trabajo
+> completado antes del giro headless (`ARCHITECTURE.md §19`, 2026-07-22) y de la migración a
+> workspaces Markdown universales (`§20`). El crate `lodestar-vcs` que construyó se **borró** entero en E15-H01 (con `git2` y los tipos `Sha`/`CommitRow`/…): git está fuera de la superficie y del repo (`§20.13`).
+> Se conserva sin editar como registro del origen del proyecto.
+
 # E4 — `lodestar-vcs` (libgit2 local + binario `git` para red)
 
 > **Fase**: `§14.4`. **Objetivo de la épica**: la crate dueña **única** de git, hermana de `store`.
