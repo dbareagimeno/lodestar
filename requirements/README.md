@@ -112,12 +112,22 @@ spec de comportamiento** y el arnés diferencial se retira. La spec de la migrac
 > Auditoría del **camino de escritura** y de la **superficie de errores** (2026-07-29), posterior a la
 > publicación de v0.3.1 y al cierre del bloque C de E24. Ninguna de las dos es una fase de `§20.14`
 > ni de `§19.8`: son épicas de **endurecimiento** que cierran defectos que la suite no mira, todos de
-> concurrencia, durabilidad o superficie. **Ratificadas el 2026-07-29**; ninguna historia empezada.
+> concurrencia, durabilidad o superficie. **Ratificadas el 2026-07-29** y **COMPLETAS el 2026-08-01**
+> (rama `epic/e25-e26-endurecimiento`, hasta `7ebe764`). Detalle por historia, veredictos de los
+> jueces ciegos e invariantes verificados en
+> [`IMPLEMENTATION_STATUS.md`](../IMPLEMENTATION_STATUS.md); la deuda que quedó **fuera** por decisión
+> está en [`DECISIONES.md §16`](../DECISIONES.md).
 
 | Épica | Estado | Área | Doc |
 |---|---|---|---|
-| **E25** — Endurecimiento del camino de escritura | **ratificada · 0/6 historias** | TOCTOU entre planificar y publicar · durabilidad y verificación de las copias de recuperación · GC vs transacción viva de otro proceso · recibo antes del punto de no retorno · fsync de borrado y revert bajo el lock · propiedad del lock y `.gitignore` del usuario | [epica-25-endurecimiento-escritura.md](epica-25-endurecimiento-escritura.md) |
-| **E26** — UX de errores de la superficie MCP | **ratificada · 0/5 historias** | código **y** mensaje en las 10 tools · `TypeError` de consulta visible · un solo dialecto de dot-paths · cotas y paginación en toda la superficie · contrato sincronizado | [epica-26-ux-errores.md](epica-26-ux-errores.md) |
+| **E25** — Endurecimiento del camino de escritura | ✅ **completa · 6/6 historias** | TOCTOU entre planificar y publicar · durabilidad y verificación de las copias de recuperación · GC vs transacción viva de otro proceso · recibo antes del punto de no retorno · fsync de borrado y revert bajo el lock · propiedad del lock y `.gitignore` del usuario | [epica-25-endurecimiento-escritura.md](epica-25-endurecimiento-escritura.md) |
+| **E26** — UX de errores de la superficie MCP | ✅ **completa · 5/5 historias** | código **y** mensaje en las 10 tools · `TypeError` de consulta visible · un solo dialecto de dot-paths · cotas y paginación en toda la superficie · contrato sincronizado | [epica-26-ux-errores.md](epica-26-ux-errores.md) |
+
+> **Las dos épicas se enmendaron durante la implementación**, las dos por un hallazgo del ciclo
+> anterior y con commit de spec propio antes de la fase roja: `E25-H02` ganó el sellado del aborto de
+> ventana (lo destapó implementar `E25-H01`) y `E25-H05` ganó «revertir también deja recibo»
+> (**MAYOR-2** del juez ciego de `E25-H04`). El texto de las épicas incluye ambas enmiendas, así que
+> describe lo que se construyó, no solo lo que se planificó.
 
 **Orden de construcción (E25–E26)**: **E25 → E26** (misma rama). Dentro de E25 el orden es
 estrictamente `H01 → H02 → H03 → H04 → H05 → H06`: las cuatro primeras tocan el mismo camino y los

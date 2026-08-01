@@ -3,15 +3,19 @@
 > Mapea las épicas/historias de [`requirements/`](requirements/) a su estado real en esta rama.
 > Construido en el **orden de fases ratificado** (`ARCHITECTURE.md §14`), validando con tests en cada fase.
 >
-> **Resumen** (actualizado en `E23-H13`): el repo es un **motor headless de integridad semántica**
-> sobre workspaces Markdown universales (`ARCHITECTURE.md §20`, v0.3.0). Las épicas **E0–E8**
-> (fundacionales), **E9–E14** (giro headless), **E15–E22** (migración de OKF a Markdown universal) y
-> **E23** (cierre: defectos hallados en la revisión de la PR #17) y **E24** (cierre de los defectos
-> que la revisión de la v0.3.0 destapó tras publicarla) están **completas**.
+> **Resumen** (actualizado al cierre de `E25`/`E26`): el repo es un **motor headless de integridad
+> semántica** sobre workspaces Markdown universales (`ARCHITECTURE.md §20`). Las épicas **E0–E8**
+> (fundacionales), **E9–E14** (giro headless), **E15–E22** (migración de OKF a Markdown universal),
+> **E23** (cierre: defectos hallados en la revisión de la PR #17), **E24** (cierre de los defectos
+> que la revisión de la v0.3.0 destapó tras publicarla) y **E25/E26** (endurecimiento del camino de
+> escritura y de la superficie de errores) están **completas**.
 > Backend: `core` puro + `store` SQLite/FTS5 con paridad SQL==core + `workspace` (único escritor,
-> transaccional) + `app` (servicios de caso de uso) + las dos fachadas `cli` y `mcp`. **486 tests**
-> en verde (+ los de crash-recovery tras `--features test-failpoints`, que el CI corre desde E23-H06);
-> `clippy -D warnings` y `cargo doc -D warnings` limpios; pureza del core verificada por CI.
+> transaccional y **recuperable con recibo**) + `app` (servicios de caso de uso) + las dos fachadas
+> `cli` y `mcp`. Suite en verde (+ los de crash-recovery tras `--features test-failpoints`, que el CI
+> corre desde E23-H06); `clippy -D warnings` y `cargo doc -D warnings` limpios; pureza del core
+> verificada por CI. **El recuento exacto de tests lo fija la nota de release** (E24-H18:
+> `cargo test --workspace -- --list | grep -c ": test$"`); el último fijado aquí fueron los 486 de
+> E24, antes de las 11 historias de E25/E26.
 >
 > **Ya no forman parte de este repo**: la app de escritorio (Tauri + Svelte, movida a
 > `experimental/ui-desktop` con el giro headless), el crate `lodestar-vcs` y `git2` (borrados en
@@ -166,9 +170,18 @@ verificación empírica; ~40 defectos corregidos con tests de regresión. Lo má
 - **Un solo contrato de tipos**: definido una vez en `core::types`. **Sin espejo TS**: desapareció al
   retirar la UI a `experimental/ui-desktop`, y con él la nota de ts-rs.
 - **RelPath**: newtype validado; único chokepoint de path-traversal (tests de absolutas/`..`).
-- **Único escritor**: la workspace escribe `.md` atómico (temp+rename); nadie más escribe.
+- **Único escritor**: la workspace escribe `.md` atómico (temp+rename); nadie más escribe. Desde
+  `E25-H01`, además, **lo publicado es exactamente lo respaldado**: ninguna escritura del canónico
+  esquiva `assert_writable`, la copia de recuperación y el journal, y desde `E25-H05` el **borrado**
+  es tan durable como la escritura.
 - **Crash-recovery**: un crash a mitad de la publicación nunca deja un `.md` parcial. Verificado por
-  los 4 tests tras `--features test-failpoints`, que el **CI ejecuta desde `E23-H06`**.
+  los tests tras `--features test-failpoints`, que el **CI ejecuta desde `E23-H06`**. Desde
+  `E25-H04`/`E25-H05` la garantía es más fuerte: **si el canónico cambió, existe el recibo que lo
+  deshace** — en el apply y en el revert, también tras `SIGKILL`. Y desde `E25-H02` las copias de
+  recuperación se **verifican por huella** antes de restaurarse: una copia corrupta no se publica
+  como si fuera el original, va a cuarentena con `RECOVERY_FAILED`.
+- **Propiedad del lock** (`E25-H06`): el lockfile lleva token de propiedad e identidad de máquina, de
+  modo que un `Drop` no puede liberar el lock de otro dueño ni se reclama el de un pid vivo.
 - ~~**git vocabulario directo**~~ — retirado con `lodestar-vcs` en `E15-H01` (`§20.13`).
 
 ## Próximos pasos (ver [`DECISIONES.md`](DECISIONES.md))
@@ -197,6 +210,13 @@ Deuda menor registrada, con dueño futuro: `Workspace::materialize_staging` es A
 escribe bajo `.lodestar/` **sin pasar por ninguno de los cuatro chokepoints** de `E23-H12`; hoy es
 inofensiva porque no tiene llamador de producción, pero si se le da uno, tiene que pasar por un
 chokepoint o convertirse en el quinto.
+
+**Añadido al cerrar E25/E26**: la auditoría del camino de escritura y las reservas de sus jueces
+ciegos dejaron **once puntos de deuda declarada** —lo que quedó explícitamente fuera de esa tanda,
+cada uno con su origen— en la sección nueva [`DECISIONES §16`](DECISIONES.md). Ninguno bloquea el
+merge: van de sintaxis de *quoting* que hoy es ruidosa pero correcta, a capacidad construida sin
+consumidor (`Envelope`, la cache SQLite), pasando por API pública no transaccional sin llamadores y
+por la matriz de trazabilidad, que sigue **sin filas de E15–E24**.
 
 ## Giro a motor headless de integridad semántica (E9–E14) — COMPLETO
 
@@ -1150,3 +1170,201 @@ criterio ratificado en E19-H04. Ninguna historia de v0.3.1 depende de ellas.
     los brazos de un `match` de `eval.rs`, donde validador y evaluador podían divergir.
   - **Revisa el criterio de E19-H04** («una sub-clave de namespace desconocida es propiedad
     ausente»), que era deliberado. Por eso fue a v0.4.0 y no al parche.
+
+## Endurecimiento de la escritura y de la superficie de errores (E25–E26) — COMPLETAS
+
+> Rama `epic/e25-e26-endurecimiento` (de `e183d00` a `7ebe764`). Épicas:
+> [`epica-25`](requirements/epica-25-endurecimiento-escritura.md) ·
+> [`epica-26`](requirements/epica-26-ux-errores.md). **Origen**: auditoría del camino de escritura y
+> de la superficie de errores (2026-07-29), posterior a v0.3.1 y al bloque C de E24.
+>
+> **Qué las distingue de E23/E24**: aquellas reprodujeron sus defectos **ejecutando** los binarios;
+> estos once se localizaron **leyendo** el orquestador y la frontera, y todos comparten la razón por
+> la que la suite no los veía: necesitan **dos actores** —dos procesos, o un proceso y una caída— y
+> la suite ejercía uno. Cada historia abrió con una fase roja que monta el segundo actor.
+>
+> **Principios rectores**: en E25, *una salvaguarda vale por el estado sobre el que se ejerce, no por
+> el estado sobre el que se computó*; en E26, el de E24-H07: *una respuesta silenciosamente
+> equivocada es peor que un error*.
+
+| Historia | Estado | Detalle |
+|---|---|---|
+| **E25-H01** La publicación no escribe fuera de lo que respaldó | ✅ | TOCTOU `[T1,T3)`: se acabó el borrado sin copia ni journal. |
+| **E25-H02** Copias durables y verificadas; cuarentena en vez de encalle | ✅ | + el sellado del aborto de ventana (enmienda de la propia épica). |
+| **E25-H03** El GC no desarma a una transacción viva | ✅ | El criterio de «vivo» deja de ser «tiene journal o recibo». |
+| **E25-H04** Publicar implica recibo | ✅ | Recibo pendiente escrito con el journal, promovido al sellar. |
+| **E25-H05** Borrar es durable, y revertir re-verifica y deja recibo | ✅ | Cierra el espejo de S5 que el juez de H04 destapó. |
+| **E25-H06** El lock tiene dueño demostrable | ✅ | + el `.gitignore` del usuario deja de perder sus CRLF. |
+| **E26-H07** Todo error lleva código **y** mensaje | ✅ | 8 de 10 tools devolvían el código pelado. |
+| **E26-H08** Un `TypeError` se reporta, no excluye en silencio | ✅ | La respuesta recortada era indistinguible de la correcta. |
+| **E26-H09** Un solo dialecto de dot-paths | ✅ | `metadata_inspect` anunciaba campos que nadie podía consultar. |
+| **E26-H10** Ninguna respuesta viaja sin cota | ✅ | `graph_query` servía el grafo entero; `metadata_inspect`, N valores. |
+| **E26-H11** El contrato describe el servidor que hay | ✅ | `/contrato --check` limpio; cinco deltas aplicados. |
+
+- ✅ **E25-H01** — **La publicación escribía fuera de lo que respaldó**. `apply_transaction` computa
+  canónico, resultado y afectados en **T1**, y sobre ese conjunto ejerce `assert_writable`, el backup
+  y el journal; pero `publish_result` **releía** el canónico en **T3** y **recomputaba** el conjunto
+  contra el resultado de T1, escribiendo o borrando lo divergente sin ninguna de las tres
+  salvaguardas. Tres consecuencias reproducidas: una edición externa en la ventana se pisaba con un
+  backup que ya no correspondía; un `.md` **nuevo** creado en la ventana se **borraba** sin copia ni
+  entrada de journal (irrecuperable, y el recibo ni lo mencionaba); y un fichero aparecido bajo un
+  `referenceRoot` sufría lo mismo, sin que el control optimista pudiera verlo siquiera —
+  `workspace_revision` excluye lo que queda fuera de `writableRoots`. Ahora `publish_result` recibe
+  el canónico de T1, compara, y aborta con `WRITE_CONFLICT` **antes del primer rename**.
+  - **Seam nuevo**: el `failpoint!` de E24-H13 solo sabía **abortar**; hizo falta un punto que
+    **ejecute un gancho del test y continúe**, para poder inyectar el segundo actor dentro de la
+    ventana. Es el que reusan después H02, H05 y H06.
+- ✅ **E25-H02** — **Las copias de recuperación no eran durables, ni se verificaban, y una rota
+  cerraba el workspace para siempre**. Se copiaban con `std::fs::copy` y el manifiesto `.absent` con
+  `std::fs::write`, ninguno con volcado, mientras el journal **sí** se fsyncaba: tras un corte podía
+  quedar un journal durable apuntando a una copia truncada, que la restauración escribía **verbatim**
+  sobre el canónico. Y si la copia era ilegible, `recover()` propagaba `Err` en sus tres brazos con
+  el journal aún en disco: `recovery_pending()` seguía en `true` y **toda** escritura futura moría en
+  el paso (2). Ahora las copias van por el protocolo durable (extraído a `io::write_bytes_atomic` +
+  `io::sync_dir`), se verifican por huella `blake3` contra un sidecar de manifiesto antes de
+  restaurar, y un journal irrecuperable va a `journal/quarantine/<txnId>/` —nada se borra: es
+  material forense— con `RECOVERY_FAILED`, que gana así su **primer emisor real** y sale de
+  `codigos_sin_emisor`.
+  - **Enmienda de la épica, nacida de implementar H01** (commit `2e0d6ea`, spec): el aborto de
+    ventana dejaba en disco su journal `prepared` y las copias de T1 con **cero renames**, así que la
+    siguiente operación recuperaba… **restaurando T1 encima de la edición externa que el aborto
+    acababa de proteger** —y borrando, vía `.absent`, el fichero nuevo del usuario—. Sin esto, las
+    tres garantías de H01 duraban hasta la siguiente operación. El camino de aborto **sella su propio
+    journal** bajo el mismo lock (journal primero, árbol después, para que una caída a mitad deje un
+    huérfano legítimo). Se rechazó por escrito la generalización tentadora —*«no restaurar un
+    `prepared` con cero `applied`»*—: `mark_applied` persiste **después** de cada rename, así que ese
+    estado también describe una caída entre el primer rename y su anotación.
+  - **Promesa recalibrada, declarada**: «converge a uno de los dos bordes» pasa a estar condicionada
+    a que las copias verifiquen. Con copias corruptas lo garantizado es: nada se escribe a partir de
+    una copia que no verifica, el material se preserva, el fallo tiene código propio y el workspace
+    vuelve a ser escribible.
+- ✅ **E25-H03** — **El GC desarmaba a una transacción viva de otro proceso**. `gc_receipts` corría
+  **fuera del lock** (lo dispara la fachada, ya soltado) y purgaba todo `staging/`/`recovery/` sin
+  journal ni recibo. Entre `backup_originals` y `create_journal` —la ventana que el propio
+  `FailPoint::TrasBackupSinJournal` modela— una transacción tiene copias y **no** tiene journal ni
+  recibo: el GC del proceso B le borraba el árbol al proceso A, que publicaba sin copias; y si caía,
+  `restore_from_recovery` devolvía `Ok(())` de inmediato al no encontrar directorio, **sellando un
+  estado parcial en silencio**.
+  - **Test que pasaba por la razón equivocada**: `caida_entre_backup_y_journal` (E24-H13) afirmaba
+    que el GC **debe** purgar ese árbol. Sigue siendo cierto —pero ahora porque el dueño está
+    **muerto**, no porque falte el journal. Es la tercera vez en cuatro épicas (E23, E24, E25) que
+    aparece un test verde apoyado en la premisa equivocada.
+- ✅ **E25-H04** — **Publicar podía no dejar recibo**. Después de `publish_result` el disco ya está
+  cambiado, pero quedaban pasos que salían por `?`: el sellado, y en la fachada `write_receipt` y
+  `gc_receipts`. Cualquiera convertía una transacción **publicada** en `Err` **sin recibo**, y no
+  había salida: `change_revert` respondía `PLAN_EXPIRED` para siempre (el recibo no existe) y
+  reaplicar el plan moría con `PLAN_STALE` (la base cambió). Con un `SIGKILL` pasaba igual, y eso
+  descartaba el arreglo barato: degradar los fallos post-publicación a *warning* no cubre un crash.
+  Ahora el **recibo pendiente** se escribe con el journal —sus dos revisiones ya se conocen antes del
+  primer rename— en `receipts/pending/<txnId>.json`, y su **efectividad la decide el estado `applied`
+  del journal** (`pending_receipt_efectivo`), de modo que su vida queda contenida en la del journal y
+  no hace falta una tercera señal que caducar: el sellado lo promueve, la vía COMPLETAR de la
+  recuperación también, y la vía RESTAURAR lo descarta.
+  - **Colateral cerrado**: la promoción ocurre **bajo el lock**, lo que elimina de paso el hueco
+    `[sellado, recibo)` en el que el GC —cuyo criterio de vivos es `journal/ ∪ receipts/`— podía ver
+    la transacción como basura y purgarle las copias con las que se revierte.
+- ✅ **E25-H05** — **Borrar no era durable, revertir no re-verificaba, y la reversión no dejaba
+  recibo**. Tres cosas: `io::delete` hacía `remove_file` sin fsync del directorio (un corte tras el
+  journal `applied` resucitaba el documento y el recibo mentía); el fsync de directorio era
+  best-effort silencioso; y `change_revert` comparaba la revisión **antes** del lock, que lo toma
+  `revert_transaction`, así que una edición externa en esa ventana se sobrescribía en silencio — el
+  apply sí re-verifica bajo el lock desde E13-H02, el revert no tenía equivalente.
+  - **MAYOR-2 del juez de H04, y por qué la spec se enmendó** (commit `cde2856`): la reversión
+    conservaba **la forma exacta** del defecto que H04 acababa de cerrar. `write_receipt` de la
+    inversa salía por `?` tras publicarla, y `revert_transaction` no persistía ningún registro
+    durable antes de su punto de no retorno. Un `SIGKILL`/`ENOSPC` entre el último rename de la
+    inversa y su recibo devolvía `Err` sobre algo publicado y sin recibo — y como el recibo es el
+    criterio de «vivo» del GC, el árbol de la inversa quedaba huérfano y se purgaba: **deshacer el
+    undo** se volvía imposible para siempre. Arreglado **reusando** la mecánica de H04
+    (`write_pending_receipt`/`promote`/`discard`), no duplicándola.
+- ✅ **E25-H06** — **El lock no tenía dueño demostrable**. `Drop` borraba el fichero **por ruta**:
+  si otro proceso lo había reclamado por huérfano y recreado, el `Drop` del dueño original borraba el
+  lock del **nuevo** dueño, y de ahí en cascada. El TTL de 15 minutos era wall-clock y reclamaba
+  locks de dueños **vivos pero suspendidos** (un pid vivo se comprobaba, pero no mandaba), y la
+  identidad no llevaba host, así que un pid de otra máquina se juzgaba como si fuera de esta. Ahora
+  el lockfile lleva **token de propiedad** (el `Drop` solo borra si coincide) e identidad de máquina,
+  y un pid vivo local impide el reclamo aunque el TTL haya vencido.
+  - Y el `.gitignore` —el **único** fichero versionado del usuario que el motor toca, en cada
+    `acquire_lock`— se reescribía con `std::fs::write` (no atómico) y reconstruido con `str::lines`,
+    que **descarta los `\r`**: un `.gitignore` con CRLF se convertía a LF sin avisar. Ahora es
+    atómico y preserva el estilo de fin de línea.
+- ✅ **E26-H07** — **8 de 10 tools devolvían el código de error pelado**. No era descuido del
+  despachador: los productores de `lodestar-app` eran `Result<_, ErrorCode>` y **no tenían dónde
+  poner el mensaje**. El agente recibía literalmente `INVALID_SCHEMA`, sin qué parámetro ni qué se
+  esperaba. Además `graph_query` sin `ref` respondía `DOCUMENT_NOT_FOUND` —el mismo error que si el
+  documento no existe, con lo que el agente tomaba el camino de recuperación equivocado— y
+  `change_plan` **descartaba** el `ParseError` que `knowledge_search` sí entregaba. Ahora las diez
+  emiten `"CÓDIGO: mensaje"`, `graph_query` sin `ref` es `INVALID_SCHEMA` nombrando el parámetro, y
+  el diagnóstico del parser sobrevive en las dos tools. **Sin tocar el catálogo**: sigue en 16 filas.
+- ✅ **E26-H08** — **Un `TypeError` excluía documentos en silencio**. `if !matches!(evaluate(...),
+  Ok(true)) { continue; }` metía el `Err` en el mismo cajón que el `Ok(false)`, en
+  `knowledge_search` **y** en la selección masiva de `change_plan`. Consecuencia: una consulta con un
+  error de tipo real devolvía una lista **recortada** e indistinguible de la correcta, decidida
+  documento a documento; y en `change_plan` el plan afectaba a menos ficheros de los que el agente
+  creía haber seleccionado. Ahora aborta con `INVALID_SCHEMA` nombrando campo, operador y los dos
+  tipos, de forma **determinista** (el primer documento en el orden total ya existente). `Ok(false)`
+  sigue siendo ausencia: no casar no es un error.
+  - **Revisa dos rustdoc que consagraban lo contrario** («sin propagarse a la búsqueda entera», «sin
+    abortar el plan»), igual que E24-H07 revisó el criterio de E19-H04.
+- ✅ **E26-H09** — **Dos dialectos de dot-paths**. `metadata_inspect` normalizaba con
+  `FieldPath::parse` en vez de `parse::build_field_path`, el punto único por el que pasan `where`,
+  `filter` y `has`/`missing` desde E24-H07. Resultado: `graph.backlinks` significaba **dos cosas**
+  según la tool; `frontmatter.graph.backlinks` —la sintaxis que el propio mensaje de error del parser
+  recomienda— buscaba una clave literal `frontmatter` y devolvía `presentIn: 0`, silenciosamente
+  equivocado; y el catálogo **anunciaba** nombres que ninguna consulta podía alcanzar, que es
+  exactamente lo contrario de para lo que existe la tool. Ahora hay un solo normalizador
+  (`build_field_path` pasa a público) y el `name` del catálogo es **direccionable**: se puede pasar
+  tal cual a `mode:"field"` y a `where` y resuelve al mismo campo.
+- ✅ **E26-H10** — **Respuestas sin cota**. `graph_query` no tenía default **ni máximo**
+  (`None => total`): un `operation:"components"` servía el grafo completo. Y `metadata_inspect` era
+  la única de las 10 tools sin `limit` ni `cursor`, con un `FieldStats` por field path —mapas
+  intermedios incluidos— y un `ValueCount` por valor distinto, o sea **N entradas para N documentos**
+  en un campo de alta cardinalidad. Ahora las dos tienen default y máximo y paginan con el mismo
+  cursor-offset hex del resto de la superficie. La cota vive en la **fachada**: el core sigue puro y
+  devolviendo la verdad completa, y los agregados (`presentIn`/`missingIn`) se computan sobre todo el
+  workspace — se pagina la lista, no la estadística.
+- ✅ **E26-H11** — **El contrato describía un servidor anterior**. `mcp.yml` seguía diciendo que un
+  `where`/`filter` malformado daba «`WorkspaceError::Core` genérico» (comportamiento pre-E24-H10, y
+  la propia cabecera del fichero ya documentaba lo contrario: se contradecía a sí mismo), **E24-H07
+  declaró frontera sin tocar el contrato**, y cuatro tools declaraban sus errores como prosa suelta.
+  Sincronizado con los cinco deltas de esta rama (E25-H02 y E26-H07…H10), con `/contrato --check`
+  limpio y un test que **coteja** los códigos citados en el YAML contra `ErrorCode` — porque una
+  lista de errores escrita a mano es justo lo que envejece en silencio (lección de E23-H13).
+
+### Veredictos de los jueces ciegos (E25–E26)
+
+Las **11 historias** pasaron por juez ciego (agente fresco, solo spec + diff) con *mutation testing*
+pedido explícitamente en el encargo. **Las 11 volvieron `APROBADA CON RESERVAS`**, y **todas las
+reservas se cerraron en el mismo ciclo**: ninguna historia se dio por cerrada con una reserva viva.
+
+Lo que merece quedar registrado, porque cambió el plan:
+
+- **Dos veces la épica ratificada tuvo que enmendarse durante la implementación**, las dos por un
+  hallazgo del ciclo anterior, y las dos con commit de spec propio **antes** de la fase roja
+  correspondiente: `2e0d6ea` (E25-H02: el aborto de ventana sella su journal, hallado implementando
+  H01) y `cde2856` (E25-H05: revertir también deja recibo, **MAYOR-2** del juez de H04). Es la
+  lección de E23 en su forma útil: la spec se corrige cuando implementar demuestra que estaba
+  incompleta, no se implementa alrededor de ella.
+- **Cuatro reservas no eran defectos de la historia sino deuda real del repo**, así que no se
+  cerraron en código: se **declararon** en [`DECISIONES §16`](DECISIONES.md) con su origen — los
+  escritores de runtime sin lock (juez de H03), la duplicación de la secuencia de sellado
+  `apply`/`revert` (juez de H05), los tres límites latentes de *quoting* del lenguaje (H09) y el
+  cursor basura que reinicia en silencio (juez de H10).
+
+### Invariantes que estas dos épicas dejan verificados
+
+- **Único escritor (#5)**, reforzado: lo publicado **es** lo respaldado (H01), y el borrado es tan
+  durable como la escritura (H05). Ninguna escritura del canónico esquiva ya `assert_writable`,
+  backup y journal.
+- **Crash-recovery**, ampliado de «nunca un `.md` a medias» a **«si el canónico cambió, existe el
+  recibo que lo deshace»** — en el apply (H04) y en el revert (H05), y también tras `SIGKILL`.
+- **Una sola verdad computada (#3)**: un solo dialecto de dot-paths en toda la superficie (H09), y la
+  mecánica de recibo pendiente **reusada** en el revert en vez de duplicada (H05).
+- **Un solo contrato de tipos (#4)**: el catálogo sigue en **16 filas**; lo único que se movió es que
+  `RECOVERY_FAILED` ganó emisor, así que `codigos_sin_emisor` baja de 5 a 4.
+- **Core puro (#2)**: intacto — las cotas de H10 viven en la fachada, no en `core::metadata`.
+
+> **Recuento de tests**: esta rama añade la fase roja de las 11 historias al total de 486 de E24. El
+> número exacto **no se ha vuelto a fijar aquí a propósito**: lo fija la nota de release, con
+> `cargo test --workspace -- --list | grep -c ": test$"`, que es el criterio que E24-H18 dejó escrito
+> para que este documento no vuelva a mentir con una cifra copiada.
