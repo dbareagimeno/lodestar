@@ -4329,6 +4329,12 @@ mod propiedad_del_lock {
 
     /// Segundos desde la época. Los tests fabrican `timestamp`s relativos a este reloj, que es el
     /// mismo que lee `reclamar_si_huerfano` (`lock.rs:187-192`).
+    ///
+    /// `#[cfg(unix)]` porque sus únicos consumidores son los dos tests unix-only de este módulo (la
+    /// prueba de vida por pid no existe fuera de Unix): en Windows quedaría huérfano y el
+    /// `-D warnings` del CI lo rechaza como `dead_code`. El `cfg` es la verdad —es un helper de
+    /// escenarios unix-only—, no un `allow` que tape el aviso.
+    #[cfg(unix)]
     fn ahora_epoch() -> u64 {
         SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -4337,6 +4343,10 @@ mod propiedad_del_lock {
     }
 
     /// Un `timestamp` con el TTL del lock (15 min, `lock.rs:148`) **vencido de sobra**.
+    ///
+    /// `#[cfg(unix)]` por el mismo motivo que [`ahora_epoch`]: solo lo consumen los dos tests
+    /// unix-only del módulo.
+    #[cfg(unix)]
     fn hace_una_hora() -> u64 {
         ahora_epoch().saturating_sub(3600)
     }
@@ -4365,6 +4375,12 @@ mod propiedad_del_lock {
     /// lee el fichero y se suelta. Es la base sobre la que los tests fabrican sus escenarios, de
     /// modo que **todos** los campos que el implementador añada (token, host, boot-id…) viajen en
     /// los cuerpos plantados sin que los tests tengan que conocerlos.
+    ///
+    /// `#[cfg(unix)]`: los dos escenarios que derivan su cuerpo del real —lock rancio de pid vivo y
+    /// lock de otro host— son unix-only, porque los dos hablan de la prueba de vida por pid. El
+    /// escenario portable (`drop_no_borra_un_lock_ajeno`) planta su cuerpo a mano con `timestamp: 0`
+    /// y no necesita este helper.
+    #[cfg(unix)]
     fn metadata_real(ws: &Workspace) -> serde_json::Value {
         let guard = ws
             .acquire_lock()
