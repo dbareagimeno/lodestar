@@ -42,13 +42,25 @@ revises antes de publicarlo.
    > `X.Y.Z` a secas no construye nada y deja la release sin binarios (pasó con `0.5.0`,
    > que hubo que re-tagear como `v0.5.0`).
 
+   > **El tag debe coincidir con la versión del workspace.** El primer step del workflow
+   > ejecuta `scripts/verifica-tag-release.sh`: si el tag no es exactamente `v` + la
+   > `version` de `[workspace.package]` en `Cargo.toml`, el CI falla **antes** de crear el
+   > release o compilar nada. Un `v0.6.0` empujado con `Cargo.toml` aún en `0.5.0` no
+   > publica artefactos con una versión que el binario no declara.
+
 5. **El workflow `release.yml` compila las tres plataformas** (macOS Apple Silicon,
    Windows y Linux) y crea un **GitHub Release en borrador** con los tarballs/zip de
-   los binarios de CLI y MCP.
+   los binarios de CLI y MCP más un `SHA256SUMS-<target>.txt` por plataforma. Cada
+   checksum se verifica dentro del propio job antes de subirse.
 
 6. **Revisa el borrador y publícalo**: en GitHub → *Releases*, comprueba que están
-   todos los artefactos de las tres plataformas y las notas, ajusta el texto si hace
-   falta y pulsa **Publish**. El release solo es visible tras publicarlo.
+   los **6 artefactos** (3 tarballs/zip + 3 ficheros de checksums) y las notas,
+   ajusta el texto si hace falta y pulsa **Publish**. El release solo es visible
+   tras publicarlo. Quien descargue un binario puede verificarlo con:
+
+   ```bash
+   shasum -a 256 -c SHA256SUMS-<target>.txt   # sha256sum -c en Linux
+   ```
 
 ## Firma de código (diferida)
 

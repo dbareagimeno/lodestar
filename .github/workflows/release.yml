@@ -1,9 +1,10 @@
 name: Release
 
 # Publica los artefactos (CLI + MCP) cuando se empuja un tag `vX.Y.Z`.
-# - Job `create-release`: crea el release en borrador una sola vez.
+# - Job `create-release`: verifica que el tag coincide con la versión del
+#   workspace (guardarraíl E27-H01) y crea el release en borrador una sola vez.
 # - Job `binaries`: compila la CLI y el MCP por plataforma y sube los tarballs/zip
-#   a ese release.
+#   con su fichero de checksums SHA-256 a ese release.
 # La UI de escritorio (Tauri) se movió a la rama `experimental/ui-desktop`; este
 # pipeline ya no construye ni publica el bundle de escritorio.
 
@@ -31,6 +32,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # Guardarraíl E27-H01: si el tag no es exactamente `v` + la versión de
+      # [workspace.package], aquí se acaba: ni release en borrador ni compilación.
+      # Cubre también el disparo por workflow_dispatch, que no pasa por el
+      # filtro `tags: ["v*"]`.
+      - name: Verifica que el tag coincide con la versión del workspace
+        run: ./scripts/verifica-tag-release.sh "${{ github.ref_name }}"
       - name: Crea (o reutiliza) el release en borrador
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -91,10 +98,27 @@ jobs:
           -Path target/release/lodestar.exe, target/release/lodestar-mcp.exe
           -DestinationPath lodestar-cli-${{ github.ref_name }}-${{ matrix.target }}.zip
 
+      # Checksums E27-H01: se generan y se VERIFICAN en el propio job, para que
+      # un checksum mal generado falle aquí y no en la máquina del usuario.
+      # `shasum` cubre macOS; `sha256sum` cubre linux y el bash de windows.
+      - name: Genera y verifica SHA256SUMS
+        shell: bash
+        run: |
+          archivo="lodestar-cli-${{ github.ref_name }}-${{ matrix.target }}.${{ matrix.archive }}"
+          sumas="SHA256SUMS-${{ matrix.target }}.txt"
+          if command -v shasum >/dev/null 2>&1; then
+            shasum -a 256 "$archivo" > "$sumas"
+            shasum -a 256 -c "$sumas"
+          else
+            sha256sum "$archivo" > "$sumas"
+            sha256sum -c "$sumas"
+          fi
+
       - name: Sube al release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: >-
           gh release upload ${{ github.ref_name }}
           lodestar-cli-${{ github.ref_name }}-${{ matrix.target }}.${{ matrix.archive }}
+          SHA256SUMS-${{ matrix.target }}.txt
           --clobber
