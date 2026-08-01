@@ -553,6 +553,50 @@ Pendientes de priorización (no bloquean el núcleo):
 - **Recomendación**: una historia propia, con el criterio de que **cada fila se verifique contra la
   épica**, no contra el recuerdo.
 
+### (l) Deuda de fuerza de suite y flecos menores registrados por los jueces ciegos
+
+- **Origen**: las **reservas MENORES** de los veredictos de E25/E26. A diferencia de las mayores
+  —que se cerraron en el mismo ciclo— y de (h), (i), (j), que son deuda de diseño, estas son de otra
+  clase: **la suite no muerde ahí**. Casi todas salieron de *mutation testing*, no de un fallo
+  observado, y se registran juntas porque comparten remedio.
+- **Qué es**, por historia y con el mutante que lo destapó:
+  - **E25-H01** — mutación **(g)**: el cálculo de `paths_divergentes` y el mensaje del conflicto de
+    ventana pueden **vaciarse** sin que ningún test muerda. El aborto sigue ocurriendo (eso sí está
+    cubierto), pero el diagnóstico que dice **qué** divergió no lo fija nadie.
+  - **E25-H02** — mutación **S**: el sidecar de huellas movido a cuarentena se puede **borrar** sin
+    que falle un test, pese a que la cuarentena existe precisamente para no perder material forense.
+    Mutación **N**: la **numeración** de cuarentenas repetidas (`.2`, `.3`) tampoco está fijada, así
+    que dos irrecuperables del mismo `txnId` podrían pisarse sin que se note.
+  - **E25-H03** — mutación **c**: el **no-op silencioso** del GC dentro de `recover_if_pending` no
+    tiene arnés. Está **mitigado** por el testigo tipado (`&WorkspaceLock` como prueba de que el lock
+    se posee), que hace el error difícil de cometer de nuevo, pero mitigado no es cubierto.
+  - **E25-H04** — mutante **k**: el guard `recibo_a_salvo` no tiene test que **inyecte un fallo de
+    promoción**, así que la rama que decide qué hacer cuando el recibo no se pudo promover no se
+    ejerce. Tiene **espejo** en el sellado del revert de H05.
+  - **E25-H05** — dos: el wrapper `Workspace::revert_transaction` quedó **sin llamador ni test**
+    propio; y la **re-verificación es única** en el revert mientras el apply comprueba **dos veces**,
+    lo que deja declarada una ventana `[paso 2b, primer rename]` más ancha en el revert que en el
+    apply. Es estrechamiento posible, no un agujero: la comprobación que importa —bajo el lock— sí
+    está, y es la que E25-H05 introdujo.
+  - **E26-H09** — **divergencia latente core↔store**: el catálogo publica ahora nombres **anclados**
+    (`frontmatter.graph.backlinks`), mientras el store sigue indexando `metadata.field_path` con los
+    nombres crudos de `walk`. **Hoy esa columna no la lee nadie**, así que no hay discrepancia
+    observable — es la misma situación exacta de (c)/`§14`, y se resolverá con ella.
+  - **E26-H10** — la **aritmética de paginación está en 4 copias** y los límites se aplican en **3
+    sitios por tool**. Es el vector del mutante **M10**, que se cerró clavando el default con un
+    test; la duplicación sigue ahí, y es donde un arreglo futuro se aplicará a unas copias y no a
+    otras — la misma forma que (i).
+- **Por qué no se cerró**: ninguno es un defecto observable hoy. Cerrarlos uno a uno al vuelo, al
+  final de once historias, habría añadido tests escritos para matar un mutante concreto en vez de
+  para describir comportamiento — que es como se acumulan suites grandes y flojas. Y dos de ellos
+  (H09, H10) no se arreglan con un test sino con el refactor que ya recomiendan (c) e (i).
+- **Recomendación**: **una pasada de `/mutantes` acotada** a los ficheros que E25/E26 tocaron, con
+  presupuesto cerrado, que convierta en test los supervivientes que describan comportamiento real
+  —(g), S, N, k son los candidatos claros—; y, cuando se toque ese código por otro motivo, los dos
+  refactores compartidos que ya están recomendados: **`sellar_publicado`** (i) y un **helper único de
+  paginación** para la aritmética y los límites. La divergencia core↔store de H09 **no se toca aquí**:
+  va con la decisión de `§14`.
+
 ---
 
 ### Resumen de la recomendación

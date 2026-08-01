@@ -1335,7 +1335,11 @@ criterio ratificado en E19-H04. Ninguna historia de v0.3.1 depende de ellas.
 
 Las **11 historias** pasaron por juez ciego (agente fresco, solo spec + diff) con *mutation testing*
 pedido explícitamente en el encargo. **Las 11 volvieron `APROBADA CON RESERVAS`**, y **todas las
-reservas se cerraron en el mismo ciclo**: ninguna historia se dio por cerrada con una reserva viva.
+reservas MAYORES se cerraron en el mismo ciclo**: ninguna historia se dio por cerrada con una reserva
+mayor viva. Las **menores** —flecos de **fuerza de suite**, casi todos mutantes supervivientes en
+ramas de diagnóstico— quedan **declaradas** en [`DECISIONES §16(l)`](DECISIONES.md), no cerradas:
+ninguna describe un defecto observable hoy, y dos de ellas se arreglan con un refactor, no con un
+test.
 
 Lo que merece quedar registrado, porque cambió el plan:
 
@@ -1349,7 +1353,8 @@ Lo que merece quedar registrado, porque cambió el plan:
   cerraron en código: se **declararon** en [`DECISIONES §16`](DECISIONES.md) con su origen — los
   escritores de runtime sin lock (juez de H03), la duplicación de la secuencia de sellado
   `apply`/`revert` (juez de H05), los tres límites latentes de *quoting* del lenguaje (H09) y el
-  cursor basura que reinicia en silencio (juez de H10).
+  cursor basura que reinicia en silencio (juez de H10). Los **flecos menores** de siete historias van
+  aparte, en `§16(l)`, con el mutante que destapó cada uno.
 
 ### Invariantes que estas dos épicas dejan verificados
 
