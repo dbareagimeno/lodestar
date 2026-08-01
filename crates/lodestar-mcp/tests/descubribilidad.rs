@@ -802,7 +802,7 @@ fn orden_determinista_score_desc_path_asc() {
 // La op se anuncia como una de las 8 universales y **siempre falla**: no hay productor de `fixes`
 // desde E20-H03, `normalize_apply_fix` es una línea que devuelve `Err(FixNotFound)` y ese error se
 // mapea a `DOCUMENT_NOT_FOUND` — un código que apunta al sitio equivocado (el documento SÍ existe).
-// Decisión del usuario: se retira la op; el análisis queda escrito en `docs/PROPUESTA_FIXES.md`.
+// Decisión del usuario: se retira la op; el análisis queda escrito en `docs/history/PROPUESTA_FIXES.md`.
 // ===========================================================================
 
 /// Workspace mínimo de escritura: un documento sano al que apuntar las ops.

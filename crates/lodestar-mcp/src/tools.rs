@@ -47,7 +47,7 @@ fn politica_de_borrado_invalida(raw_ops: &Value) -> Option<String> {
 /// un vistazo contra `normalize_raw_op` (`lodestar-app`), que es quien de verdad lee estos campos.
 ///
 /// E23-H11 retiró del enum la octava operación, `apply_fix` (y con ella su parámetro `fixId`): sin
-/// productor de `Fix` desde E20-H03, siempre fallaba — ver `docs/PROPUESTA_FIXES.md`.
+/// productor de `Fix` desde E20-H03, siempre fallaba — ver `docs/history/PROPUESTA_FIXES.md`.
 ///
 /// Hasta E23-H10 aquí solo se declaraban `op`/`path`/`ref`/`expectedRevision`: **ni uno** de los
 /// parámetros reales de 7 de las 8 operaciones de entonces. Para un producto cuyo público objetivo

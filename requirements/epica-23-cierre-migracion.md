@@ -362,7 +362,7 @@ en la sección de E23 de [`IMPLEMENTATION_STATUS.md`](../IMPLEMENTATION_STATUS.m
 > - `sort` → **se retira del schema**, no se implementa. El orden determinista que ya existe (score
 >   desc, path asc) se queda como el único y se documenta; es además la base del cursor de
 >   paginación. Volver a añadir el parámetro más adelante es aditivo y no rompe el wire.
-> - `apply_fix` → **se retira la op**, y se deja el análisis escrito en `docs/PROPUESTA_FIXES.md`
+> - `apply_fix` → **se retira la op**, y se deja el análisis escrito en `docs/history/PROPUESTA_FIXES.md`
 >   (formato H15). **`Fix`, `Check.fixes` e `includeSuggestedFixes` NO se tocan**: un array vacío se
 >   lee como «no hay sugerencias» y es verdad, mientras que una op invocable que siempre falla
 >   devuelve además un código que apunta al sitio equivocado (`FixNotFound` → `DOCUMENT_NOT_FOUND`).
@@ -644,7 +644,7 @@ haya que rellenar. Se registra en `contracts/mcp.yml` para que la próxima audit
 
 ## Bloque E — Documentos nuevos (se escriben aquí, se planifican después)
 
-### E23-H15 — `docs/PROPUESTA_CLI.md`
+### E23-H15 — `docs/history/PROPUESTA_CLI.md`
 
 - **Objetivo**: dejar por escrito la propuesta de diseño para que la CLI sea un gestor de KB, **sin
   implementar nada**, redactada para que `/planificar` la consuma en una PR posterior.

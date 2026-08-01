@@ -938,7 +938,7 @@ pub fn normalize_delete(
 // Quedaba `apply_fix`, que desde que E20-H03 retiró `core::schema` —y con él el único productor de
 // `Fix`— devolvía SIEMPRE `CoreError::FixNotFound`: una operación anunciada en el enum del schema
 // que no podía tener éxito nunca. El lado de LECTURA de los fixes (`Fix`, `Check.fixes`,
-// `includeSuggestedFixes`) sigue intacto. Análisis en `docs/PROPUESTA_FIXES.md`.
+// `includeSuggestedFixes`) sigue intacto. Análisis en `docs/history/PROPUESTA_FIXES.md`.
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------

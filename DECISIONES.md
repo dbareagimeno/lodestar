@@ -10,9 +10,9 @@
 
 ## 0. Giro a motor headless de integridad semántica — ✅ RATIFICADO (2026-07-22)
 
-- **Contexto**: `docs/REFACTOR.md` redefine Lodestar como **motor headless de integridad semántica**
+- **Contexto**: `docs/history/REFACTOR.md` redefine Lodestar como **motor headless de integridad semántica**
   (busca/comprende/valida/modifica conocimiento vía cambios planificados y recuperables, sin editor,
-  sin GUI y sin git). Propuesta de diseño en `docs/REFACTOR_DISENO_PROPUESTA.md`; diseño ratificado en
+  sin GUI y sin git). Propuesta de diseño en `docs/history/REFACTOR_DISENO_PROPUESTA.md`; diseño ratificado en
   **`ARCHITECTURE.md §19`** (supersede §13 en superficie de producto). Descomposición en
   `requirements/epica-09-*.md` … `epica-14-*.md`.
 - **Sub-decisiones cerradas** (puerta 1 de `/planificar`):
@@ -319,8 +319,8 @@ Pendientes de priorización (no bloquean el núcleo):
   También la salida humana de `lodestar check`: `CONFORME`/`NO CONFORME` → `VÁLIDO`/`NO VÁLIDO`. No
   lo exigía la tabla de `§20.3` —que habla de la API—, pero es la aparición más visible del término
   retirado: la línea que un humano lee en cada ejecución de CI.
-  **No se tocaron** los documentos históricos (`docs/REFACTOR.md`,
-  `docs/REFACTOR_DISENO_PROPUESTA.md`) ni las tablas de terminología que **documentan el propio
+  **No se tocaron** los documentos históricos (`docs/history/REFACTOR.md`,
+  `docs/history/REFACTOR_DISENO_PROPUESTA.md`) ni las tablas de terminología que **documentan el propio
   renombre** (`§20.3`, `REFACTOR_PHASE_2 §Terminología`): ahí `Conformant` es el término de partida
   y sustituirlo las dejaría diciendo «Valid → Valid».
 

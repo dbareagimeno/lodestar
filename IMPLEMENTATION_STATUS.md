@@ -198,10 +198,10 @@ del usuario:
 2. ~~`DECISIONES §12` (fechas) y `§13` (`Conformant → Valid`)~~ — **cerradas en E23-H14**: las
    fechas se declaran lexicográficas por escrito, y el catálogo de errores se abrió la única vez
    para completar la pareja de `§20.3`.
-3. **`docs/PROPUESTA_CLI.md`** — la CLI como gestor de KB (hoy solo es puerta de CI). Pendiente de
+3. **`docs/history/PROPUESTA_CLI.md`** — la CLI como gestor de KB (hoy solo es puerta de CI). Pendiente de
    `/planificar` en una PR posterior. Su condición de entrada dura —que existan tests de
    concurrencia entre procesos— **ya se cumple** desde `E23-H09`.
-4. **`docs/PROPUESTA_FIXES.md`** — reactivar los arreglos sugeridos (`Fix`/`apply_fix`, la op
+4. **`docs/history/PROPUESTA_FIXES.md`** — reactivar los arreglos sugeridos (`Fix`/`apply_fix`, la op
    retirada en `E23-H11`). Condición de entrada: que existan productores de `Fix` que justifiquen la
    maquinaria del `fixId` direccionable entre revisiones.
 5. **`DECISIONES §3`/`§9`** — `rmcp` oficial + resources cuando un cliente lo exija; gate de bench y
@@ -221,7 +221,7 @@ por la matriz de trazabilidad, que sigue **sin filas de E15–E24**.
 
 ## Giro a motor headless de integridad semántica (E9–E14) — COMPLETO
 
-Refactor de `docs/REFACTOR.md`, diseño ratificado en `ARCHITECTURE.md §19` (supersede §13 en
+Refactor de `docs/history/REFACTOR.md`, diseño ratificado en `ARCHITECTURE.md §19` (supersede §13 en
 superficie de producto; git queda como crate dormido) y `DECISIONES.md §0`. Descomposición en
 `requirements/epica-09..14` (47 historias, orden E9→E14).
 
@@ -1057,7 +1057,7 @@ superficie de producto; git queda como crate dormido) y `DECISIONES.md §0`. Des
   `serde_yaml` 0.9 no tipa timestamps) y **§13** (`Conformant → Valid`) cerradas: §13 era el **único
   de los 29 criterios de `REFACTOR_PHASE_2` demostrablemente incumplido**, y se saldó abriendo el
   catálogo de 16 códigos **la única vez**, aprovechando que v0.3 ya era incompatible con v0.2. Y se
-  escribieron `docs/PROPUESTA_CLI.md` y `DECISIONES §14` (el store de E18 **entero, sin ningún
+  escribieron `docs/history/PROPUESTA_CLI.md` y `DECISIONES §14` (el store de E18 **entero, sin ningún
   consumidor**) para que dos decisiones no se perdieran.
   - **Lo que la barrida final encontró y que nadie había mirado**: el texto `instructions` que el
     servidor sirve en `initialize` —lo primero que lee un agente, y **superficie de wire**, no

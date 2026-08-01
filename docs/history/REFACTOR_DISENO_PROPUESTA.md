@@ -1,11 +1,11 @@
 # Propuesta de diseño — Lodestar como motor headless de integridad semántica
 
-> **Fase A de `/planificar`** para el giro de `docs/REFACTOR.md`. Esto es una **propuesta**: no
+> **Fase A de `/planificar`** para el giro de `docs/history/REFACTOR.md`. Esto es una **propuesta**: no
 > está ratificada. No modifica `ARCHITECTURE.md` ni `DECISIONES.md`. Tras la ratificación del
 > usuario se escribirá la **adenda** en `ARCHITECTURE.md` (que supersede §13 parcialmente) y se
 > pasará a la Fase B (descomposición en épica de historias).
 >
-> Fuente de la spec: `docs/REFACTOR.md` (secciones §1–§18). Autoridad de diseño actual:
+> Fuente de la spec: `docs/history/REFACTOR.md` (secciones §1–§18). Autoridad de diseño actual:
 > `ARCHITECTURE.md` (§10 decisiones ratificadas, §12 concerns, §13 git). Invariantes: `CLAUDE.md` #1–#6.
 
 ## 0. Resumen de posicionamiento

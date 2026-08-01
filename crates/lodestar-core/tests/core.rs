@@ -2029,7 +2029,7 @@ fn delete_remove_links() {
 // —se anunciaba como una de las 8 ops universales y siempre fallaba con `FixNotFound`, mapeado
 // además a `DOCUMENT_NOT_FOUND`, un código que apunta al sitio equivocado—. La mitad de LECTURA
 // sobrevive intacta (`Fix`, `Check.fixes`, `includeSuggestedFixes`): un array vacío se lee como
-// «no hay sugerencias» y eso es verdad. Análisis en `docs/PROPUESTA_FIXES.md`.
+// «no hay sugerencias» y eso es verdad. Análisis en `docs/history/PROPUESTA_FIXES.md`.
 // ---------------------------------------------------------------------------
 
 // ===========================================================================

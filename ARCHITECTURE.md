@@ -780,8 +780,8 @@ Cada fase se valida con el arnés de paridad antes de la siguiente.
 > tipadas), la tool `schema_inspect` de §19.6 (→ `metadata_inspect`) y `.lodestar/schema.yaml` de
 > §19.4. El crate `lodestar-vcs`, conservado dormido por §19.1, se **retira** en §20.
 >
-> **Ratificado 2026-07-22** (puerta 1 de `/planificar`; fuente: `docs/REFACTOR.md`; propuesta:
-> `docs/REFACTOR_DISENO_PROPUESTA.md`). Lodestar deja de posicionarse como "editor local-first con git
+> **Ratificado 2026-07-22** (puerta 1 de `/planificar`; fuente: `docs/history/REFACTOR.md`; propuesta:
+> `docs/history/REFACTOR_DISENO_PROPUESTA.md`). Lodestar deja de posicionarse como "editor local-first con git
 > de primera clase" y pasa a ser un **motor headless de integridad semántica para bases de conocimiento
 > Markdown gestionadas por humanos y agentes**. Los **invariantes #1–#6 de `CLAUDE.md` siguen íntegros**
 > y son el cimiento del giro; **no se relitiga** ninguna decisión ratificada #1–#14 de §10.
@@ -1333,7 +1333,7 @@ una relación es un enlace Markdown y un estado es una propiedad arbitraria del 
 > como una de las ocho. Hoy es una op desconocida → `INVALID_SCHEMA`. El lado de **lectura** de los
 > arreglos (`Fix`, `Check.fixes`, `knowledge_check.includeSuggestedFixes`) **no se toca**: un array
 > vacío se lee como «no hay sugerencias» y eso es verdad. El análisis de qué haría falta para que la
-> capacidad vuelva está en `docs/PROPUESTA_FIXES.md`.
+> capacidad vuelva está en `docs/history/PROPUESTA_FIXES.md`.
 
 - **Selecciones masivas por consulta**: `{selection: {where: …}, operation: {…}}` →
   `query → documentos → snapshot de revisiones → semantic diff → impact → validation → plan → apply → receipt`.

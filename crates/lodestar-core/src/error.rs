@@ -63,7 +63,7 @@ pub enum CoreError {
     // SIEMPRE desde que E20-H03 dejó sin productor a los `Fix`— y encima mapeaba a
     // `ErrorCode::DocumentNotFound`, mandando al agente a buscar el problema en un documento que
     // existía. El lado de LECTURA de los fixes (`Fix`, `Check.fixes`, `includeSuggestedFixes`) sigue
-    // intacto: un array vacío dice la verdad. Análisis completo en `docs/PROPUESTA_FIXES.md`.
+    // intacto: un array vacío dice la verdad. Análisis completo en `docs/history/PROPUESTA_FIXES.md`.
     /// Al materializar un plan en memoria (E12-H08, [`crate::plan::apply_normalized_ops`]) se
     /// recibió una [`crate::types::NormalizedOperation`] en forma NO terminal (una variante
     /// semántica/de contenido que los normalizadores de E12-H05/H06/H07 ya resuelven a
