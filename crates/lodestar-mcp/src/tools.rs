@@ -124,7 +124,9 @@ pub fn list() -> Value {
         {"name": "metadata_inspect", "description": "Descubre las convenciones de metadata de una base desconocida SIN necesitar un schema: el catálogo de propiedades (qué campos existen, en cuántos documentos y de qué tipos) o la inspección de una propiedad (presencia/ausencia, tipos y valores frecuentes).",
          "inputSchema": { "type": "object", "properties": {
              "mode": { "type": "string", "description": "«catalog» (todos los campos con presencia y tipos) o «field» (inspección de un campo concreto, requiere «field»).", "enum": ["catalog", "field"] },
-             "field": { "type": "string", "description": "Dot-path del campo a inspeccionar (p. ej. «status» o «service.tier»); solo con mode «field». Mismo dialecto que «where»/«filter»: «frontmatter.status» ≡ «status», y una clave de TU frontmatter que colisione con un namespace reservado se alcanza anclada («frontmatter.graph.backlinks»). Un namespace reservado a secas («graph.backlinks», «document.path») NO es metadata: es INVALID_SCHEMA (para el grafo, graph_query)." }
+             "field": { "type": "string", "description": "Dot-path del campo a inspeccionar (p. ej. «status» o «service.tier»); solo con mode «field». Mismo dialecto que «where»/«filter»: «frontmatter.status» ≡ «status», y una clave de TU frontmatter que colisione con un namespace reservado se alcanza anclada («frontmatter.graph.backlinks»). Un namespace reservado a secas («graph.backlinks», «document.path») NO es metadata: es INVALID_SCHEMA (para el grafo, graph_query)." },
+             "limit": { "type": "integer", "minimum": 1, "maximum": 1000, "default": 100, "description": "Trunca la lista de la página: «fields» con mode «catalog», «values» con mode «field». Los agregados (presentIn/missingIn/inferredTypes) siguen describiendo TODO el workspace: se pagina la lista, no la estadística." },
+             "cursor": { "type": "string", "description": "Cursor opaco de paginación devuelto en «nextCursor»." }
          }, "required": ["mode"], "additionalProperties": false },
          "outputSchema": schemas::metadata_inspect_schema()},
         {"name": "knowledge_check", "description": "Audita el conocimiento (diagnósticos de interpretabilidad y enlaces del documento) con scopes y severidad mínima; diagnósticos con id estable y paginación por cursor.",
@@ -156,7 +158,7 @@ pub fn list() -> Value {
              }, "required": ["path"], "additionalProperties": false },
              "depth": { "type": "integer", "minimum": 1, "default": 1, "description": "Solo «neighborhood»." },
              "direction": { "type": "string", "enum": ["out", "in", "both"], "default": "out", "description": "Solo «neighborhood»." },
-             "limit": { "type": "integer", "minimum": 1, "description": "Trunca el nº de nodos devueltos (paginación por cursor)." },
+             "limit": { "type": "integer", "minimum": 1, "maximum": 1000, "default": 100, "description": "Trunca el nº de nodos devueltos (paginación por cursor). Sin él se sirven 100 nodos: hasta v0.4.0 no había default ni máximo, así que «components» sobre una base grande devolvía el grafo COMPLETO en una respuesta (E26-H10)." },
              "cursor": { "type": "string", "description": "Cursor opaco de paginación devuelto en «nextCursor»." }
          }, "required": ["operation"], "additionalProperties": false },
          "outputSchema": schemas::graph_query_schema()},
@@ -343,10 +345,15 @@ pub fn call(app: &App, profile: Profile, name: &str, params: &Value) -> ToolResu
                 .and_then(Value::as_str)
                 .ok_or_else(|| falta("mode"))?;
             let field = params.get("field").and_then(Value::as_str);
+            // `inputSchema` declara `minimum: 1, maximum: 1000, default: 100` (E26-H10): esta era la
+            // única de las 10 tools sin cota, y sus dos modos devuelven una lista de tamaño
+            // proporcional al workspace.
+            let limit = limit_validado(params, 1, 1000)?;
+            let cursor = str_validado(params, "cursor")?;
             // Mismo mapeo de error a wire que `knowledge_get` (E10-H02, E26-H07): «CÓDIGO:
             // mensaje» con el código estable `ErrorCode::as_str()`, nunca el `Debug` de la variante.
             let inspection = app
-                .metadata_inspect(mode, field)
+                .metadata_inspect(mode, field, limit, cursor)
                 .map_err(|e| e.to_string())?;
             to_json(&inspection)
         }
@@ -404,8 +411,11 @@ pub fn call(app: &App, profile: Profile, name: &str, params: &Value) -> ToolResu
             // `inputSchema` declara `minimum: 1` (E24-H09).
             let depth = entero_validado(params, "depth", 1)?.map(|n| n as u32);
             let direction = str_validado(params, "direction")?;
-            // `inputSchema` declara `minimum: 1` sin máximo para graph_query (E24-H09).
-            let limit = limit_validado(params, 1, u64::MAX)?;
+            // `inputSchema` declara `minimum: 1, maximum: 1000, default: 100` (E24-H09 + E26-H10:
+            // hasta v0.4.0 esta llamada era `limit_validado(params, 1, u64::MAX)` sobre un schema sin
+            // máximo, así que un `limit` arbitrario se aceptaba y `limit` ausente servía el grafo
+            // entero).
+            let limit = limit_validado(params, 1, 1000)?;
             let cursor = str_validado(params, "cursor")?;
             // Mismo mapeo de error a wire que `knowledge_get`/`metadata_inspect`/`knowledge_check`
             // (E10-H02, E26-H07): «CÓDIGO: mensaje», nunca el `Debug` de la variante. Que FALTE

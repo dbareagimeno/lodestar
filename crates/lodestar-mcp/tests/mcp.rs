@@ -8409,6 +8409,13 @@ fn el_cursor_es_autosuficiente() {
 /// Se comprueba en los dos modos: en `field` sobre `presentIn`/`missingIn`/`inferredTypes`, y en
 /// `catalog` sobre el `presentIn` de las filas servidas (que se computa sobre el workspace entero,
 /// no sobre la página).
+///
+/// **El caso del catálogo se mide donde discrimina**. Las filas de la primera página son todas
+/// `campoNNN` con `presentIn: 1`, y un `1` vale lo mismo contado sobre el workspace que sobre la
+/// página: aseverarlo ahí no distingue una implementación correcta de una que recortara la
+/// estadística al subconjunto servido. Por eso la presencia se asevera en la página que contiene
+/// `status` y `uid`, presentes en los **150** documentos: un número mayor que el tamaño de su
+/// propia página (52 filas), así que cualquier `min(presentIn, filas_de_la_página)` se delata.
 #[test]
 fn la_estadistica_no_se_pagina() {
     let dir = ws_cota();
@@ -8433,8 +8440,14 @@ fn la_estadistica_no_se_pagina() {
                 serde_json::json!({"mode": "catalog", "limit": 5}),
             )
             .as_str(),
+            linea_call(
+                4,
+                "metadata_inspect",
+                serde_json::json!({"mode": "catalog"}),
+            )
+            .as_str(),
         ],
-        3,
+        4,
     );
 
     let pagina = sc_ok(&resp[0], "metadata_inspect(field:uid, limit:5)");
@@ -8473,7 +8486,10 @@ fn la_estadistica_no_se_pagina() {
         "…dicho de otro modo: los agregados de una página y los de la respuesta completa coinciden"
     );
 
-    // Modo catálogo: cada fila servida trae su presencia sobre el workspace entero.
+    // --- Modo catálogo -------------------------------------------------------------------------
+    // (a) La lista SÍ se acota también aquí, y las filas de esta primera página son las de
+    //     presencia BAJA (`campoNNN`, 1 documento cada uno): sirve de control de que la estadística
+    //     no es una constante, pero NO discrimina un recorte a la página (min(1, 5) == 1).
     let cat = sc_ok(&resp[2], "metadata_inspect(catalog, limit:5)");
     let filas = lista(cat, "fields");
     assert_eq!(
@@ -8482,20 +8498,61 @@ fn la_estadistica_no_se_pagina() {
         "con `limit: 5` viajan 5 campos: {}",
         resp[2]
     );
-    let status = filas.iter().find(|f| f["name"] == "status");
-    // `status` no cae en la primera página (el orden es por field path: `campo000`…), así que la
-    // presencia se comprueba sobre las filas que sí vienen: cada `campoNNN` está en 1 documento.
-    assert!(
-        status.is_none(),
-        "precondición del caso: la primera página del catálogo son campos `campoNNN`: {}",
-        resp[2]
-    );
     for f in &filas {
         assert_eq!(
             f["presentIn"].as_u64(),
             Some(1),
-            "cada `campoNNN` está en exactamente 1 de los {DOCS_COTA} documentos, y ese conteo se \
-             computa sobre el workspace entero aunque la página traiga 5 filas: {f}"
+            "cada `campoNNN` está en exactamente 1 de los {DOCS_COTA} documentos: {f}"
+        );
+    }
+
+    // (b) Donde el criterio muerde: la página que contiene las filas de presencia ALTA. El orden
+    //     del catálogo es por field path (`campo000`…`campo149` < `status` < `uid`), así que
+    //     `status`/`uid` caen en la SEGUNDA página del recorrido por defecto.
+    let cat1 = sc_ok(&resp[3], "metadata_inspect(catalog)");
+    let cursor = cursor_de(cat1).unwrap_or_else(|| {
+        panic!(
+            "el catálogo de {CAMPOS_COTA} campos debe entregar un `nextCursor` en su primera \
+             página: {}",
+            resp[3]
+        )
+    });
+    let p2 = roundtrip(
+        dir.path(),
+        &[linea_call(
+            5,
+            "metadata_inspect",
+            serde_json::json!({"mode": "catalog", "cursor": cursor}),
+        )
+        .as_str()],
+        1,
+    );
+    let filas2 = lista(sc_ok(&p2[0], "metadata_inspect(catalog, cursor)"), "fields");
+    assert_eq!(
+        filas2.len(),
+        CAMPOS_COTA - 100,
+        "la segunda página del catálogo trae los {} campos restantes: {}",
+        CAMPOS_COTA - 100,
+        p2[0]
+    );
+    for nombre in ["status", "uid"] {
+        let fila = filas2
+            .iter()
+            .find(|f| f["name"] == nombre)
+            .unwrap_or_else(|| {
+                panic!(
+                    "precondición: «{nombre}» (presente en los {DOCS_COTA} documentos) tiene que \
+                     caer en esta página, o el criterio no discriminaría: {}",
+                    p2[0]
+                )
+            });
+        assert_eq!(
+            fila["presentIn"].as_u64(),
+            Some(DOCS_COTA as u64),
+            "«{nombre}» está en los {DOCS_COTA} documentos del workspace, y ese conteo NO puede \
+             encogerse a las {} filas de la página que lo trae: se pagina la lista, no la \
+             estadística: {fila}",
+            filas2.len()
         );
     }
 }

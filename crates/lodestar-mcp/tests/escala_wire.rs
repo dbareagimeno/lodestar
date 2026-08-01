@@ -222,12 +222,18 @@ fn graph_query_tiene_default() {
     let nodos = sc["nodes"]
         .as_array()
         .unwrap_or_else(|| panic!("graph_query devuelve `nodes`: {resp}"));
-    assert!(
-        nodos.len() <= 100,
-        "`graph_query{{operation:\"components\"}}` SIN `limit` debe devolver como mucho 100 nodos \
-         de los {N_GRAFO} del grafo. Hasta v0.4.0 `limit` era opcional con `None => total`, así que \
-         esta llamada volcaba el grafo COMPLETO ({} nodos, {bytes} bytes) en una sola respuesta: es \
-         el defecto U5",
+    // El default se clava EXACTO, no como cota superior: con {N_GRAFO} nodos disponibles la página
+    // por defecto se llena entera, así que `== 100` es el valor observable del default. Un `<= 100`
+    // dejaría vivo cualquier otro default menor (75, 10, 1), que también acota el payload pero
+    // **no** es el número que fijan la historia y el `inputSchema` — y un cliente que lea
+    // `default: 100` recibiría otra cosa.
+    assert_eq!(
+        nodos.len(),
+        100,
+        "`graph_query{{operation:\"components\"}}` SIN `limit` debe devolver exactamente los 100 \
+         nodos del default declarado, de los {N_GRAFO} del grafo. Hasta v0.4.0 `limit` era opcional \
+         con `None => total`, así que esta llamada volcaba el grafo COMPLETO ({} nodos, {bytes} \
+         bytes) en una sola respuesta: es el defecto U5",
         nodos.len()
     );
     assert_eq!(

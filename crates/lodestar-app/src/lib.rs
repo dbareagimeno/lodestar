@@ -949,6 +949,23 @@ impl App {
     /// de un `presentIn: 0` indistinguible de una ausencia legítima. El caso normal no cambia: si la
     /// resolución anclada encuentra algo, se responde con ella.
     ///
+    /// # Paginación (E26-H10)
+    ///
+    /// `limit`/`cursor` acotan la **lista** de los dos modos —`fields` en `catalog`, `values` en
+    /// `field`— con el mismo cursor-offset hex opaco y autosuficiente del resto de la superficie
+    /// (`knowledge_search`/`knowledge_check`/`graph_query`): `limit` por defecto **100**, tope
+    /// **1000** (`DEFAULT_METADATA_LIMIT`/`MAX_METADATA_LIMIT`), `next_cursor` `None` al agotar. Hasta
+    /// v0.4.0 esta era la única de las diez tools sin cota, y sus dos modos devuelven respuestas de
+    /// tamaño proporcional al workspace: el catálogo emite una fila por cada field path (mapas
+    /// intermedios incluidos) y `values` una entrada por cada valor escalar distinto —N entradas para
+    /// N documentos en un campo de alta cardinalidad (un `id`, una fecha, un `owner`)—.
+    ///
+    /// La cota la aplica **esta fachada**, no [`metadata::catalog`]/[`metadata::inspect_field`]: el
+    /// core sigue puro y devolviendo la verdad completa (invariantes #2 y #3), y quien la trunca es
+    /// quien sirve el wire. Y se pagina la **lista, no la estadística**: `present_in`/`missing_in`/
+    /// `inferred_types` —y el `present_in` de cada fila del catálogo— se computan sobre **todo** el
+    /// workspace, así que una página de 5 valores nunca implica un `presentIn: 5`.
+    ///
     /// `Result<_, AppError>` (no `WorkspaceError`) — mismo patrón que [`App::knowledge_get`]: es un
     /// servicio de cara a la fachada MCP/CLI, y el código estable **con su mensaje** es lo que el
     /// llamante necesita para el wire de error.
@@ -956,11 +973,26 @@ impl App {
         &self,
         mode: &str,
         field: Option<&str>,
+        limit: Option<usize>,
+        cursor: Option<&str>,
     ) -> Result<MetadataInspection, AppError> {
         let doc_set = self.workspace.document_set()?;
 
         match mode {
-            "catalog" => Ok(MetadataInspection::Catalog(metadata::catalog(&doc_set))),
+            "catalog" => {
+                let catalog = metadata::catalog(&doc_set);
+                let (fields, next_cursor) = pagina(
+                    catalog.fields,
+                    limit,
+                    cursor,
+                    DEFAULT_METADATA_LIMIT,
+                    MAX_METADATA_LIMIT,
+                );
+                Ok(MetadataInspection::Catalog(MetadataCatalogPage {
+                    catalog: MetadataCatalog { fields },
+                    next_cursor,
+                }))
+            }
             "field" => {
                 let field = field.ok_or_else(|| {
                     AppError::invalid_schema(
@@ -988,7 +1020,7 @@ impl App {
                         mensaje_namespace_no_inspeccionable(&field_path, props),
                     ));
                 }
-                let inspection = metadata::inspect_field(&doc_set, &field_path);
+                let mut inspection = metadata::inspect_field(&doc_set, &field_path);
                 // E26-H09: un `field` que empieza por el ANCLAJE y no encuentra nada puede ser la
                 // colisión con una clave de primer nivel llamada literalmente `frontmatter`, que el
                 // catálogo SÍ anuncia con ese texto (es su nombre literal, no un anclaje). Devolver
@@ -1007,7 +1039,21 @@ impl App {
                         )));
                     }
                 }
-                Ok(MetadataInspection::Field(inspection))
+                // La página se recorta AQUÍ, después de que los agregados
+                // (`present_in`/`missing_in`/`inferred_types`) queden fijados sobre el workspace
+                // entero: se pagina la lista, no la estadística (E26-H10).
+                let (values, next_cursor) = pagina(
+                    std::mem::take(&mut inspection.values),
+                    limit,
+                    cursor,
+                    DEFAULT_METADATA_LIMIT,
+                    MAX_METADATA_LIMIT,
+                );
+                inspection.values = values;
+                Ok(MetadataInspection::Field(FieldInspectionPage {
+                    inspection,
+                    next_cursor,
+                }))
             }
             _ => Err(AppError::invalid_schema(format!(
                 "«mode» debe ser «catalog» (los campos que existen en la base) o «field» (el \
@@ -1307,17 +1353,20 @@ impl App {
     ///   conjunto. La partición en ciclos concretos la da el core; aquí se sirve el subgrafo cíclico
     ///   agregado (coherente con la forma `{nodes,edges}` de esta tool).
     /// - `components` no requiere `r`: reusa [`DocumentSet::components`]. Como las componentes conexas
-    ///   particionan **todo** el grafo, se sirve el grafo completo (`nodes`/`edges` de
-    ///   [`DocumentSet::graph_model`]); el cliente reconstruye la partición con [`DocumentSet::components`] o
-    ///   recorriendo las aristas.
+    ///   particionan **todo** el grafo, se parte del grafo completo (`nodes`/`edges` de
+    ///   [`DocumentSet::graph_model`]) **antes de paginar** (E26-H10: lo que viaja es una página de
+    ///   ese grafo, no el grafo entero); el cliente reconstruye la partición con
+    ///   [`DocumentSet::components`] o recorriendo las aristas.
     ///
     /// **Paginación**: orden total y estable de `nodes` por `id` (mismo criterio que
     /// `knowledge_search`/`knowledge_check`); `limit` trunca esa página con un cursor-offset opaco
-    /// (mismo esquema hex, autosuficiente entre procesos). Sin `limit`, o con `limit` mayor o igual
-    /// al total, no hay truncamiento y `nextCursor` es `None`. Las `edges` devueltas se acotan a
-    /// los `nodes` que sobreviven a la página (origen y destino ambos presentes), así el subgrafo
-    /// que se sirve es siempre coherente consigo mismo — nunca una arista "colgando" de un nodo que
-    /// la paginación dejó fuera.
+    /// (mismo esquema hex, autosuficiente entre procesos). **E26-H10**: `limit` ausente vale **100**
+    /// y se acota a **1000** (`DEFAULT_GRAPH_LIMIT`/`MAX_GRAPH_LIMIT`) —hasta v0.4.0 `None` significaba «el
+    /// grafo entero», así que `components` sobre una base grande servía una respuesta del tamaño del
+    /// workspace—; con `limit` mayor o igual al total no hay truncamiento y `nextCursor` es `None`.
+    /// Las `edges` devueltas se acotan a los `nodes` que sobreviven a la página (origen y destino
+    /// ambos presentes), así el subgrafo que se sirve es siempre coherente consigo mismo — nunca una
+    /// arista "colgando" de un nodo que la paginación dejó fuera.
     // Dispatcher de wire: cada argumento mapea 1:1 a un campo del `inputSchema` de la tool MCP
     // `graph_query` (operation/ref/to/depth/direction/limit/cursor). Agruparlos en un struct sería
     // una capa de framing paralela sin valor; el listado plano es el contrato.
@@ -1462,11 +1511,13 @@ impl App {
         nodes.sort_by(|a, b| a.id.cmp(&b.id));
 
         let total = nodes.len();
+        // E26-H10: `limit` ausente ya NO significa «el grafo entero». Hasta v0.4.0 `None => total`,
+        // así que un `components` —que sirve el `graph_model` completo— volcaba una respuesta del
+        // tamaño del workspace. Ahora la página por defecto es `DEFAULT_GRAPH_LIMIT` y el resto se
+        // recorre por `nextCursor` (consecuencia declarada de la historia).
+        let limit = limit.unwrap_or(DEFAULT_GRAPH_LIMIT).min(MAX_GRAPH_LIMIT);
         let start = cursor.map(decode_cursor).unwrap_or(0).min(total);
-        let end = match limit {
-            Some(l) => start.saturating_add(l).min(total),
-            None => total,
-        };
+        let end = start.saturating_add(limit).min(total);
         let truncated = end < total;
         let next_cursor = truncated.then(|| encode_cursor(end));
         let page_nodes: Vec<GraphNode> = nodes.get(start..end).unwrap_or(&[]).to_vec();
@@ -3151,6 +3202,13 @@ fn diagnostic_id(path: &str, check: &Check) -> String {
 // tal cual — esta capa nunca redefine su forma. Wire en camelCase.
 // ---------------------------------------------------------------------------
 
+/// Límite por defecto de nodos por página de `graph_query` (E26-H10). Hasta v0.4.0 no había
+/// default: `limit` ausente servía el grafo **entero**.
+const DEFAULT_GRAPH_LIMIT: usize = 100;
+/// Tope duro de nodos por página de `graph_query` (E26-H10; el `inputSchema` lo declara como
+/// `maximum` y la fachada MCP rechaza lo que lo exceda).
+const MAX_GRAPH_LIMIT: usize = 1000;
+
 /// Respuesta de `graph_query` (`ARCHITECTURE.md §19.6`, `REFACTOR §9.5`). Wire en camelCase
 /// (`nextCursor`).
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
@@ -3716,28 +3774,102 @@ fn decode_cursor(cursor: &str) -> usize {
     usize::from_str_radix(cursor, 16).unwrap_or(0)
 }
 
+/// Aplica la **cota de página** sobre una lista ya ordenada por su orden total: recorta a
+/// `[start, start + limit)` —con `start` leído del cursor-offset— y devuelve el trozo más el
+/// `next_cursor` al siguiente (o `None` al agotar).
+///
+/// Es la mecánica que `knowledge_search`/`knowledge_check`/`graph_query` traían escrita a mano; la
+/// comparte `metadata_inspect` desde E26-H10, para que el cursor sea **el mismo** offset hex
+/// autosuficiente en toda la superficie. `limit` ausente → `default_limit`; por encima de
+/// `max_limit` se acota (la fachada MCP ya rechaza antes lo que exceda el máximo declarado en el
+/// `inputSchema`, así que esto es la red de seguridad de cualquier otro llamante).
+fn pagina<T>(
+    items: Vec<T>,
+    limit: Option<usize>,
+    cursor: Option<&str>,
+    default_limit: usize,
+    max_limit: usize,
+) -> (Vec<T>, Option<String>) {
+    let total = items.len();
+    let limit = limit.unwrap_or(default_limit).min(max_limit);
+    let start = cursor.map(decode_cursor).unwrap_or(0).min(total);
+    let end = start.saturating_add(limit).min(total);
+    let next_cursor = (end > start && end < total).then(|| encode_cursor(end));
+    let page = items
+        .into_iter()
+        .skip(start)
+        .take(end.saturating_sub(start))
+        .collect();
+    (page, next_cursor)
+}
+
 // ---------------------------------------------------------------------------
 // `metadata_inspect` — envoltorio de respuesta de la tool (E20-H03, sustituye a `schema_inspect`).
 //
-// Es solo el discriminador de modo: un enum `untagged` que envuelve los tipos de wire del CORE
-// (`MetadataCatalog`/`FieldInspection`, `core::types`, con su serde ya fijado en E20-H03). No es una
-// capa DTO paralela (invariante #4): el contrato de tipos vive en `core::types`; esto es framing de
-// tool (qué proyección devuelve cada `mode`), igual que `KnowledgeGetResponse`.
+// Es el discriminador de modo más el `nextCursor` de la página (E26-H10): un enum `untagged` que
+// **aplana** los tipos de wire del CORE (`MetadataCatalog`/`FieldInspection`, `core::types`, con su
+// serde ya fijado en E20-H03) y les añade el cursor. No es una capa DTO paralela (invariante #4): la
+// forma de los datos sigue viviendo una sola vez en `core::types` —aquí se reexpone con `flatten`,
+// sin redeclarar un solo campo—; esto es framing de tool (qué proyección devuelve cada `mode` y
+// dónde se quedó la página), igual que `GraphQueryResult` o `KnowledgeGetResponse`.
+//
+// El cursor vive AQUÍ y no en el core por la misma razón que la cota (E26-H10): paginar es servir el
+// wire, y el core sigue devolviendo la verdad completa (invariantes #2 y #3).
 // ---------------------------------------------------------------------------
+
+/// Límite por defecto de entradas por página de `metadata_inspect` (E26-H10): campos en modo
+/// `catalog`, valores en modo `field`. Mismo par que `knowledge_check`, la otra tool que enumera un
+/// catálogo.
+const DEFAULT_METADATA_LIMIT: usize = 100;
+/// Tope duro de entradas por página de `metadata_inspect` (E26-H10; evita respuestas de tamaño
+/// proporcional al workspace: el catálogo emite una fila por field path y `values` una por valor
+/// escalar distinto).
+const MAX_METADATA_LIMIT: usize = 1000;
 
 /// Respuesta de la tool `metadata_inspect` (`ARCHITECTURE.md §20.10`, `REFACTOR_PHASE_2 §Fase 6`).
 ///
-/// `untagged`: serializa como el valor interno directo, así que `Catalog` da `{ "fields": [ … ] }`
-/// (la forma de [`MetadataCatalog`]) y `Field` da `{ "field": …, "presentIn": …, … }` (la de
-/// [`FieldInspection`]) — sin envoltorio ni discriminador extra. Solo `Serialize` (+ `JsonSchema`
-/// para el `outputSchema`): la tool PRODUCE esta respuesta, nunca la consume del wire.
+/// `untagged`: serializa como el valor interno directo, así que `Catalog` da
+/// `{ "fields": [ … ], "nextCursor": … }` (la forma de [`MetadataCatalog`] más el cursor) y `Field`
+/// da `{ "field": …, "presentIn": …, …, "nextCursor": … }` (la de [`FieldInspection`] más el
+/// cursor) — sin envoltorio ni discriminador extra. Solo `Serialize` (+ `JsonSchema` para el
+/// `outputSchema`): la tool PRODUCE esta respuesta, nunca la consume del wire.
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 #[serde(untagged)]
 pub enum MetadataInspection {
-    /// Modo `"catalog"`: el catálogo de propiedades del workspace.
-    Catalog(MetadataCatalog),
-    /// Modo `"field"`: la inspección de una propiedad concreta.
-    Field(FieldInspection),
+    /// Modo `"catalog"`: la página del catálogo de propiedades del workspace.
+    Catalog(MetadataCatalogPage),
+    /// Modo `"field"`: la página de la inspección de una propiedad concreta.
+    Field(FieldInspectionPage),
+}
+
+/// Una página del catálogo de propiedades (E26-H10): el [`MetadataCatalog`] del core —**aplanado**,
+/// con sus `fields` ya recortados a la página— y el cursor a la siguiente.
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct MetadataCatalogPage {
+    /// El catálogo con la página de `fields` (el orden total es el determinista del core, por field
+    /// path). Se aplana: en el wire sus claves son las de [`MetadataCatalog`], sin anidar.
+    #[serde(flatten)]
+    pub catalog: MetadataCatalog,
+    /// Cursor opaco a la siguiente página de `fields`, o `None` si no quedan más campos.
+    pub next_cursor: Option<String>,
+}
+
+/// Una página de la inspección de una propiedad (E26-H10): la [`FieldInspection`] del core
+/// —**aplanada**, con sus `values` ya recortados a la página— y el cursor a la siguiente.
+///
+/// Los agregados (`presentIn`/`missingIn`/`inferredTypes`) describen **todo** el workspace, no la
+/// página: lo que se pagina es la lista, no la estadística.
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct FieldInspectionPage {
+    /// La inspección con la página de `values` (el orden total es el determinista del core: por
+    /// conteo descendente y, a igual conteo, por el texto del valor). Se aplana: en el wire sus
+    /// claves son las de [`FieldInspection`], sin anidar.
+    #[serde(flatten)]
+    pub inspection: FieldInspection,
+    /// Cursor opaco a la siguiente página de `values`, o `None` si no queda más vocabulario.
+    pub next_cursor: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
