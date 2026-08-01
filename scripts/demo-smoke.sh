@@ -27,10 +27,10 @@ command -v python3 >/dev/null || fallo "falta python3"
 CLI_ABS="$(pwd)/$CLI"
 
 # ---------------------------------------------------------------------------
-# Paso 1 — `lodestar check --json`: el enlace roto deliberado, y SOLO él.
-# (El huérfano deliberado no es un diagnóstico de check: la orfandad es una
-# propiedad consultable desde E16-H02 y se aserta en el paso 2 vía
-# graph_query isolated.)
+# Paso 1 — `lodestar check --json`: los DOS defectos deliberados. El enlace
+# roto es el único diagnóstico (la orfandad no es diagnóstico desde E16-H02),
+# pero el JSON expone `isolated`, así que el huérfano también se aserta aquí
+# (y de nuevo en el paso 2 vía graph_query, por el wire MCP).
 # ---------------------------------------------------------------------------
 set +e
 salida_check="$(cd "$DEMO" && "$CLI_ABS" check --json 2>/dev/null)"
@@ -43,8 +43,9 @@ echo "$salida_check" | jq -e '
     and (.diagnostics["runbooks/incident-response.md"][0].code == "LINK-TARGET-MISSING")
     and ([.diagnostics[][] | select(.level == "warn")] | length == 0)
     and (.diagnostics | length == 10)
-' >/dev/null || fallo "check_reporta_el_defecto_deliberado: se esperaba exactamente 1 err (LINK-TARGET-MISSING en runbooks/incident-response.md), 0 warns y 10 documentos"
-echo "ok: check_reporta_el_defecto_deliberado (exit 1, 1 err, 0 warn, 10 docs)"
+    and (.isolated == ["notes/scratchpad.md"])
+' >/dev/null || fallo "check_reporta_los_defectos_deliberados: se esperaba exactamente 1 err (LINK-TARGET-MISSING en runbooks/incident-response.md), 0 warns, 10 documentos y el huérfano deliberado en .isolated"
+echo "ok: check_reporta_los_defectos_deliberados (exit 1, 1 err, 0 warn, 10 docs, isolated=[notes/scratchpad.md])"
 
 # ---------------------------------------------------------------------------
 # Paso 2 — la sesión MCP del guion: search → isolated → impact → plan →
