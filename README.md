@@ -62,14 +62,25 @@ por defecto, añade planificación, aplicación y reversión de cambios.
 
 ### 1. Instala los binarios
 
-Lodestar requiere Rust 1.80 o posterior. Desde una copia del repositorio:
+Cada [release de GitHub](https://github.com/dbareagimeno/lodestar/releases/latest) incluye los
+binarios precompilados para macOS (Apple Silicon), Linux (x86_64) y Windows (x86_64). Descarga el
+archivo de tu plataforma, descomprímelo y coloca los dos ejecutables en tu `PATH`:
+
+```bash
+tar -xzf lodestar-cli-v*-aarch64-apple-darwin.tar.gz   # .zip en Windows
+mv lodestar lodestar-mcp ~/.local/bin/                 # o cualquier directorio del PATH
+```
+
+Los binarios salen sin firmar, así que macOS y Windows pueden pedir confirmación la primera vez.
+
+También puedes compilar desde una copia del repositorio (requiere Rust 1.80 o posterior):
 
 ```bash
 cargo install --path crates/lodestar-cli
 cargo install --path crates/lodestar-mcp
 ```
 
-Esto instala:
+En ambos casos obtienes:
 
 - `lodestar`, la CLI para validación y mantenimiento;
 - `lodestar-mcp`, el servidor local que conecta el workspace con un agente.

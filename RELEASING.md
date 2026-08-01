@@ -38,6 +38,10 @@ revises antes de publicarlo.
    git push origin vX.Y.Z
    ```
 
+   > **El prefijo `v` es obligatorio.** El workflow solo se dispara con tags `v*`: un tag
+   > `X.Y.Z` a secas no construye nada y deja la release sin binarios (pasó con `0.5.0`,
+   > que hubo que re-tagear como `v0.5.0`).
+
 5. **El workflow `release.yml` compila las tres plataformas** (macOS Apple Silicon,
    Windows y Linux) y crea un **GitHub Release en borrador** con los tarballs/zip de
    los binarios de CLI y MCP.
@@ -56,9 +60,9 @@ en `DECISIONES.md` (packaging/firma).
 
 ## Publicar en crates.io (opcional)
 
-> **AVISO**: el repositorio es **privado**. Publicar en crates.io hace el código
-> **público y permanente** (crates.io no permite despublicar de verdad, solo *yank*).
-> Hazlo solo si esa exposición es intencional.
+> **AVISO**: publicar en crates.io es **permanente** (crates.io no permite despublicar
+> de verdad, solo *yank*). Hazlo solo si esa permanencia es intencional; la decisión
+> sigue abierta en `DECISIONES.md`.
 
 Requiere autenticarse una vez con un token de crates.io:
 
