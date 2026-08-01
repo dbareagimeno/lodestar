@@ -158,7 +158,7 @@ computó* — ante la duda, re-mirar bajo el lock y abortar si cambió. En **E26
 
 | Épica | Estado | Área | Doc |
 |---|---|---|---|
-| **E27** — Producto, distribución y apertura OSS | 🔵 ratificada, no iniciada | guardarraíles de release · README EN · `examples/demo/` + smoke CI · `docs/user/` · `docs/history/` · CONTRIBUTING/SECURITY/CoC · templates | [epica-27-producto-distribucion-oss.md](epica-27-producto-distribucion-oss.md) |
+| **E27** — Producto, distribución y apertura OSS | ✅ completa (2026-08-02; H10 bloqueada por `DECISIONES §17`-DA) | guardarraíles de release · README EN · `examples/demo/` + smoke CI · `docs/user/` · `docs/history/` · CONTRIBUTING/SECURITY/CoC · templates | [epica-27-producto-distribucion-oss.md](epica-27-producto-distribucion-oss.md) |
 
 **Orden de construcción (E27)**: `H01 → H03 → H02 → H04 → H06 → H05 → H11 → H07 → H08 → H09 →
 [H10]`. **H10 (crates.io) está `[BLOQUEADA por DECISIONES §17]`** hasta que esa decisión se reabra.
