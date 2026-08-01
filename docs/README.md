@@ -15,8 +15,14 @@ El criterio de este directorio es **vigente / superseded**, no viejo/nuevo
     recorrido de las 10 tools.
   - [`user/ci.md`](user/ci.md) — `check` como puerta de CI: exit codes
     congelados, `--json`/`--sarif` y un workflow completo de GitHub Actions.
-  - Pendientes (E27-H11): la referencia del lenguaje de consulta y la de
-    cambios seguros.
+  - [`user/query-language.md`](user/query-language.md) — referencia del
+    lenguaje de consulta: `where`/`filter`, tipos y operadores, dot-paths y
+    anclaje `frontmatter.`, namespaces `graph.*`/`document.*` y los límites
+    declarados (fechas como strings, los tres casos de *quoting*).
+  - [`user/safe-changes.md`](user/safe-changes.md) — referencia del ciclo
+    `change_plan` → `change_apply` → `change_revert`: qué valida el plan,
+    control optimista, las 7 operaciones y la selección masiva, recibos y
+    retención, y qué garantiza (y qué no) la recuperación ante crash.
 
 ## Para el desarrollo del repo (español)
 

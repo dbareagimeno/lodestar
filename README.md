@@ -314,6 +314,8 @@ The **user guide** lives in [`docs/user/`](docs/user/) and is written in English
 | [Quickstart](docs/user/quickstart.md) | Install, run the first `check`, read the output, exit codes |
 | [MCP clients](docs/user/mcp-clients.md) | Per-client configuration, `--root`, profiles, a tour of the ten tools |
 | [CI](docs/user/ci.md) | `check` as a gate: exit codes, `--json`, `--sarif`, a complete GitHub Actions workflow |
+| [Query language](docs/user/query-language.md) | `where` and `filter`: types, operators, namespaces, and the declared limits |
+| [Safe changes](docs/user/safe-changes.md) | `change_plan` → `change_apply` → `change_revert`: concurrency, receipts, crash recovery |
 
 The documents below govern the development of the repository. They are **written in Spanish by
 design** (`ARCHITECTURE.md §21.1`: the public surface is in English, the internal material that
