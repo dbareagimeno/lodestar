@@ -297,6 +297,11 @@ fn reclamar_si_huerfano(path: &Path) -> Reclamo {
 ///
 /// Tres estados y no dos: «no consta que esté muerto» y «consta que está vivo» llevan a decisiones
 /// distintas. Con `Viva` el TTL deja de mandar; con `Desconocida` el TTL es lo único que hay.
+// Fuera de Unix solo se produce `Desconocida` (no hay prueba de vida portable), así que `Muerta` y
+// `Viva` son «nunca construidas» ahí; existen para el criterio completo y `reclamar_si_huerfano` las
+// sigue consumiendo en TODAS las plataformas. El `allow` es condicional a propósito: en Unix el
+// dead_code real tiene que seguir vigilado.
+#[cfg_attr(not(unix), allow(dead_code))]
 #[derive(Clone, Copy)]
 enum Vida {
     /// Consta que el proceso ya no existe.
