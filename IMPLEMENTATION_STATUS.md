@@ -1399,6 +1399,14 @@ Lo que merece quedar registrado, porque cambió el plan:
 | E27-H09 templates | ✅ | 3 formularios YAML válidos + PR template con los gates exactos del CI. Render de GitHub se comprueba tras el merge. |
 | E27-H10 crates.io | ⛔ | **[BLOQUEADA por `DECISIONES §17`-DA]** (diferida, reabrible). |
 
+**Veredicto del juez ciego** (agente fresco, solo spec + diff, criterios re-ejecutados por él,
+incluido el control anti-vacuo y ~30 llamadas MCP): **APROBADA CON RESERVAS (solo menores)** —
+41/43 criterios ✓, 2 ± con enmienda declarada y justificada; ninguna reserva invalida una
+historia. Las 2 reservas accionables se levantaron en el mismo ciclo (assert de `isolated` en el
+paso 1 del smoke; constancia del `.gitignore` gestionado por el motor); las 2 restantes son
+verificaciones post-merge declaradas (community profile / render de templates) y la end-to-end de
+H01 (la cierra la próxima release).
+
 **Hallazgos registrados al implementar** (regla de la épica: documentar ejecutando destapa, no
 arregla): `DECISIONES §18` (`canApply: false` no vincula a `change_apply`) y `§19` (a: `has(frontmatter)`
 nunca casa, contradice `§20.8`; b: `policy` parcial rechazada pese a campos opcionales del contrato;
