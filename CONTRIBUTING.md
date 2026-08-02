@@ -25,6 +25,17 @@ the discussion belongs upstream of the code, where changing your mind is still c
 GitHub Discussions is intentionally disabled for now. Issues are the channel; if the traffic ever
 justifies a second one, it will be enabled then.
 
+## Branches
+
+**Send every pull request to `develop`.** It is the integration branch and the repository's default
+branch, so a pull request opened from the GitHub UI already targets it — if you branched from `main`
+by hand, change the base before asking for a review.
+
+`main` is the released branch: it only ever receives a release pull request from `develop`, and
+every `vX.Y.Z` tag points at a commit on it. That is what makes `main` a reliable answer to "what is
+actually published right now". The full release runbook is [`RELEASING.md`](RELEASING.md) (in
+Spanish).
+
 ## Running the gates locally
 
 These are the same commands CI runs. Run them before opening a pull request:

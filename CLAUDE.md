@@ -203,6 +203,11 @@ parte del motor headless ni del flujo de desarrollo de v2; su diseño se documen
 
 ## Cómo trabajar aquí
 
+- **Ramas: todo el desarrollo entra por `develop`, nunca por `main`.** `develop` es la rama de
+  integración y la rama por defecto del repo: las ramas de trabajo salen de `develop` y vuelven a
+  `develop` por PR. **`main` solo recibe releases** (un PR de release `develop` → `main`, y de ahí
+  el tag `vX.Y.Z`); no abras PRs de trabajo contra `main` ni commitees en él. El runbook completo
+  está en [`RELEASING.md`](RELEASING.md).
 - **La spec de comportamiento es `docs/REFACTOR_PHASE_2.md` + `ARCHITECTURE.md §20`**, no el
   prototipo. Desde `E15-H04` `prototype/index.html` es **referencia histórica de v0.2.x**: sirve
   para entender por qué el core hace lo que hace (los quirks portados 1:1 de `splitFront`,
