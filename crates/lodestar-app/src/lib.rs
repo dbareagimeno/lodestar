@@ -1,7 +1,7 @@
 //! `lodestar-app` — servicios de caso de uso finos sobre `lodestar-workspace`.
 //!
 //! Capa compartida por las dos fachadas de superficie (`lodestar-mcp`, `lodestar-cli`): compone
-//! el `Envelope<T>` de protocolo (framing, no dominio — decisión **D3**, `docs/REFACTOR_DISENO_PROPUESTA.md`)
+//! el `Envelope<T>` de protocolo (framing, no dominio — decisión **D3**, `docs/history/REFACTOR_DISENO_PROPUESTA.md`)
 //! y la fachada `App`, que envuelve un [`lodestar_workspace::Workspace`] y expone los métodos de
 //! caso de uso (`workspace_status` desde E10-H08; `knowledge_search`, … se irán poblando en
 //! E10-H09+).
@@ -32,7 +32,7 @@ use lodestar_core::types::{
 use lodestar_core::{CoreError, DocumentSet};
 use lodestar_workspace::{transaction_id, Workspace, WorkspaceError};
 
-/// Envelope común de protocolo (`ARCHITECTURE.md §19.6`, `docs/REFACTOR.md §13`, decisión **D3**).
+/// Envelope común de protocolo (`ARCHITECTURE.md §19.6`, `docs/history/REFACTOR.md §13`, decisión **D3**).
 ///
 /// Todas las respuestas de las tools MCP y de los comandos de la CLI se enmarcan en esta forma:
 /// un veredicto (`ok`), la revisión del workspace en el momento de la respuesta, un resumen
@@ -78,7 +78,7 @@ impl<T> Envelope<T> {
 }
 
 /// Enlace a un recurso adicional referenciado desde una respuesta (`resourceLinks` del envelope,
-/// `docs/REFACTOR.md §13`), p. ej. un documento relacionado que el agente puede pedir con
+/// `docs/history/REFACTOR.md §13`), p. ej. un documento relacionado que el agente puede pedir con
 /// `knowledge_get` a continuación. Forma mínima: URI del recurso (dirección estable, no
 /// necesariamente un `RelPath` — puede referirse a recursos fuera del workspace) y un título
 /// legible opcional.
@@ -284,7 +284,7 @@ impl ErrorEnvelope {
 }
 
 // ---------------------------------------------------------------------------
-// `workspace_status` (E10-H08, `ARCHITECTURE.md §19.6`, `docs/REFACTOR.md §9.1/§7`).
+// `workspace_status` (E10-H08, `ARCHITECTURE.md §19.6`, `docs/history/REFACTOR.md §9.1/§7`).
 // ---------------------------------------------------------------------------
 
 /// Perfil con el que arranca el servidor (`lodestar-mcp --profile readonly|standard`,
@@ -313,7 +313,7 @@ impl Profile {
 }
 
 /// Recuento agregado de documentos/enlaces/diagnósticos de un workspace (`counts` de
-/// `WorkspaceStatus`, `docs/REFACTOR.md §9.1`).
+/// `WorkspaceStatus`, `docs/history/REFACTOR.md §9.1`).
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct StatusCounts {
@@ -333,7 +333,7 @@ pub struct StatusCounts {
 }
 
 /// Capacidades habilitadas por el perfil de arranque (`capabilities` de `WorkspaceStatus`,
-/// `docs/REFACTOR.md §9.1`).
+/// `docs/history/REFACTOR.md §9.1`).
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct StatusCapabilities {
@@ -371,7 +371,7 @@ pub struct StatusRecovery {
 }
 
 /// Proyección de estado del workspace — la primera tool que se espera que llame un agente en
-/// cada sesión (`docs/REFACTOR.md §7`, §9.1). Compone `core::types::workspace_revision` +
+/// cada sesión (`docs/history/REFACTOR.md §7`, §9.1). Compone `core::types::workspace_revision` +
 /// `Analysis` + `WorkspaceConfig` + `Schema`, sin lógica de dominio nueva propia: es un servicio
 /// que reusa lo que el core y la workspace ya calculan.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
@@ -499,7 +499,7 @@ impl App {
 
     /// Proyección de estado del workspace (E10-H08): config activa, capacidades del perfil,
     /// conformidad y recuento agregado — la primera tool que debe llamar un agente en cada
-    /// sesión (`docs/REFACTOR.md §7`).
+    /// sesión (`docs/history/REFACTOR.md §7`).
     ///
     /// Compone `DocumentSet::analyze` (una sola verdad computada, invariante #3) +
     /// `core::types::workspace_revision` (E10-H03) + `WorkspaceConfig::load` (I/O de `workspace`,
@@ -3873,7 +3873,7 @@ pub struct FieldInspectionPage {
 }
 
 // ---------------------------------------------------------------------------
-// `outputSchema` (E10-H13, `ARCHITECTURE.md §19.6`, decisión **D6b**, `docs/REFACTOR.md §13`).
+// `outputSchema` (E10-H13, `ARCHITECTURE.md §19.6`, decisión **D6b**, `docs/history/REFACTOR.md §13`).
 //
 // La tool MCP `knowledge_get` no sirve `DocumentView` a secas: la envuelve en `{ "document": … }`
 // (`lodestar-mcp/src/tools.rs`, caso `"knowledge_get"`). El `outputSchema` declarado en

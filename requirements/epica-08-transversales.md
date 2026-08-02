@@ -1,3 +1,8 @@
+> **⚠️ ÉPICA HISTÓRICA (v0.2.x, pre-giro) — no implementar nada de aquí.** Describe trabajo
+> completado antes del giro headless (`ARCHITECTURE.md §19`, 2026-07-22) y de la migración a
+> workspaces Markdown universales (`§20`). Sus gates transversales de frontend y el arnés diferencial JS-vs-Rust se retiraron con la UI y con E15-H04.
+> Se conserva sin editar como registro del origen del proyecto.
+
 # E8 — Transversales de producto
 
 > **Fase**: `§14.8` (entrelazada con las demás). **Objetivo de la épica**: los concerns transversales con

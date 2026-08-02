@@ -417,7 +417,7 @@ ellos.
 
 - **`apply_fix`** (las ops universales quedan en **7**): sin productor de `Fix` desde E20-H03 fallaba
   siempre, y encima devolvía `DOCUMENT_NOT_FOUND`. El lado de lectura (`fixes`,
-  `includeSuggestedFixes`) se conserva. Ver `docs/PROPUESTA_FIXES.md`.
+  `includeSuggestedFixes`) se conserva. Ver `docs/history/PROPUESTA_FIXES.md`.
 - **`sort` en `knowledge_search`**: se aceptaba y se ignoraba en silencio. El orden es siempre
   determinista (score desc, path asc).
 - **`retarget` y `create_stub`** como políticas de `delete`: se aceptaban **sin ejecutarse**,

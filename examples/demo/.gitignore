@@ -1,0 +1,7 @@
+# This is the exact block the engine itself maintains (E25-H06: lodestar
+# rewrites its managed .gitignore entries idempotently, byte for byte). We keep
+# it verbatim instead of a broader `.lodestar/` so the demo shows the real
+# behaviour of the product — and so the engine never needs to touch this file.
+# lodestar: cache y runtime desechables (no versionar)
+.lodestar/index.db
+.lodestar/runtime/

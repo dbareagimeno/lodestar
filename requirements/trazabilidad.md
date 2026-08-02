@@ -216,3 +216,27 @@ Todos producidos por **E1-H06** (conformidad) y agregados por **E1-H07** (analyz
 > **El catálogo sigue teniendo 16 filas**: ninguna historia de E25/E26 añade, borra ni renombra un
 > código (invariante #4; el grep de CI de `E24-H17` lo hace cumplir). Lo único que cambia es qué
 > caminos emiten qué.
+
+---
+
+## E27 — Producto, distribución y apertura OSS → historias
+
+> Diseño ratificado el 2026-08-01: `ARCHITECTURE.md §21` (adenda aditiva) y `DECISIONES.md §17`
+> (cierre de la puerta 1). Estas filas no salen de `§10`/`§12`: mapean cada sub-decisión de
+> `§21`/`§17` y cada hallazgo confirmado de la review OSS externa a la historia que lo cubre.
+> Ninguna historia toca la frontera MCP.
+
+| Decisión / hallazgo | Fuente | Historias |
+|---|---|---|
+| Guardarraíles del pipeline: tag ≡ `v`+`workspace.package.version` (step que falla) + `SHA256SUMS-<target>.txt` como asset | `§21.2` · hallazgo del tag `0.5.0` sin prefijo | E27-H01 |
+| Demo ejecutable: workspace con defectos deliberados como terreno del quickstart y las docs | `§21.3` · hallazgo «sin demo end-to-end» | E27-H03 |
+| README público en inglés, instalación por binarios, snippet MCP, quickstart contra la demo | `§21.1`/`§21.5` · hallazgo «instalación solo `cargo install --path`» | E27-H02 |
+| README y demo protegidos por CI (smoke que ejecuta el guion y aserta salidas clave) | `§21.3` · lección de E23 («ejecútalo») | E27-H04 |
+| Taxonomía documental vigente/superseded: `docs/history/` para los 4 superseded; `REFACTOR_PHASE_2.md` NO se mueve (~51 citas) | `§21.3` · `§17`-DC | E27-H06 |
+| Docs de usuario operativas en inglés: quickstart, mcp-clients, ci | `§21.1` · hallazgo «docs = arqueología, cero docs de usuario» | E27-H05 |
+| Docs de usuario de referencia en inglés: query-language (con límites de `§12`/`§16.a` declarados), safe-changes | `§21.1`/`§21.5` | E27-H11 |
+| Épicas E0–E8 marcadas históricas en fichero; invariantes #4 (`.d.ts`) y #7 (git) corregidos en `requirements/README.md`; regla de idioma registrada | `§21.1` · hallazgo «2 invariantes retirados listados como vigentes» | E27-H07 |
+| Embudo de contribución: CONTRIBUTING issues-first + SECURITY (Private Vulnerability Reporting + email) + Contributor Covenant 2.1 | `§21.4` · `§17`-DB/DD · hallazgo «embudo OSS cerrado» | E27-H08 |
+| Templates de issue/PR + roadmap que apunta a `DECISIONES.md` (sin documento paralelo) | `§21.4` | E27-H09 |
+| Publicación en crates.io — **diferida** | `§17`-DA (reabrible) | E27-H10 **[BLOQUEADA por DECISIONES §17]** |
+| Regla transversal: la superficie externa no presenta la cache como camino de lectura ni promete escala mientras `§14` siga abierta | `§21.5` · `DECISIONES §14` | E27-H02, E27-H03, E27-H05, E27-H11 (criterio de aceptación en las cuatro) |

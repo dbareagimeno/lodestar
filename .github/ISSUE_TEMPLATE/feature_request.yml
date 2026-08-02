@@ -1,0 +1,29 @@
+name: Feature request
+description: Propose a capability lodestar should have.
+title: "[feature] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This project is **issues-first** (see [CONTRIBUTING](../../CONTRIBUTING.md)):
+        features are discussed here *before* any pull request. If the idea is accepted,
+        it goes through the project's spec-first design process — please don't open a
+        feature PR without an accepted issue.
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem, before any solution
+      description: What are you trying to do with your Markdown workspace or your agent that lodestar doesn't let you do today? Concrete scenarios beat abstractions.
+    validations:
+      required: true
+  - type: textarea
+    id: solution
+    attributes:
+      label: Sketch of a solution (optional)
+      description: If you have a shape in mind (a new tool parameter, a CLI flag, a query operator), sketch it. It's fine to leave this empty.
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What you do today instead
+      description: Workarounds you're using, if any — they help size the real need.

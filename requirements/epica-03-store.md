@@ -1,3 +1,8 @@
+> **⚠️ ÉPICA HISTÓRICA (v0.2.x, pre-giro) — no implementar nada de aquí.** Describe trabajo
+> completado antes del giro headless (`ARCHITECTURE.md §19`, 2026-07-22) y de la migración a
+> workspaces Markdown universales (`§20`). El store existe pero el producto no lo consume (`DECISIONES.md §14`, abierta): las tools leen del core en RAM.
+> Se conserva sin editar como registro del origen del proyecto.
+
 # E3 — `lodestar-store` (SQLite/FTS5 + watcher)
 
 > **Fase**: `§14.3`. **Objetivo de la épica**: la cache **derivada y desechable** en

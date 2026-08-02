@@ -6,8 +6,9 @@
 //!   [`materialize_disk_only`]) — los que exige `ARCHITECTURE.md §20.5` y
 //!   `REFACTOR_PHASE_2 §Tests imprescindibles`: estructuras de carpetas arbitrarias, sin `index.md`
 //!   ni frontmatter obligatorio, con los casos límite del descubrimiento.
-//! - **Bundles OKF heredados** ([`valid`], [`with_issues`], [`synthetic`]) — de v0.2.x, vivos
-//!   solo mientras existan sus consumidores (los retiran E16/E17 al cambiar el modelo documental).
+//! - **Bundles OKF heredados** ([`valid`], [`with_issues`], [`synthetic`]) — de v0.2.x. Su único
+//!   consumidor vivo son los tests de `lodestar-store`; se retirarán con ellos cuando se resuelva
+//!   el destino del store (`DECISIONES.md §14`).
 //!
 //! Todos son deterministas: misma llamada ⇒ mismos bytes.
 

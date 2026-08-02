@@ -1,3 +1,8 @@
+> **⚠️ ÉPICA HISTÓRICA (v0.2.x, pre-giro) — no implementar nada de aquí.** Describe trabajo
+> completado antes del giro headless (`ARCHITECTURE.md §19`, 2026-07-22) y de la migración a
+> workspaces Markdown universales (`§20`). De su CLI sobreviven `check` y `reindex`: los subcomandos git se retiraron en E9-H02 y `init`/`index`/`tags`/`export`/`import` en E15-H02/H03.
+> Se conserva sin editar como registro del origen del proyecto.
+
 # E2 — `lodestar-cli` mínima
 
 > **Fase**: `§14.2`. **Objetivo de la épica**: una CLI `clap` sobre el **core efímero** (sin store,

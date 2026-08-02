@@ -1,3 +1,8 @@
+> **⚠️ ÉPICA HISTÓRICA (v0.2.x, pre-giro) — no implementar nada de aquí.** Describe trabajo
+> completado antes del giro headless (`ARCHITECTURE.md §19`, 2026-07-22) y de la migración a
+> workspaces Markdown universales (`§20`). El workspace sigue siendo el glue y único escritor, pero sin `vcs` (E15-H01) y sobre el modelo universal de `§20`, no sobre OKF.
+> Se conserva sin editar como registro del origen del proyecto.
+
 # E5 — `lodestar-workspace` (el handle unificado)
 
 > **Fase**: `§14.5`. **Objetivo de la épica**: la crate **glue** que compone `core` (puro) + `store` +

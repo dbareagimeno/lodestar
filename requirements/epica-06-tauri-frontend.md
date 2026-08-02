@@ -1,3 +1,8 @@
+> **⚠️ ÉPICA HISTÓRICA (v0.2.x, pre-giro) — no implementar nada de aquí.** Describe trabajo
+> completado antes del giro headless (`ARCHITECTURE.md §19`, 2026-07-22) y de la migración a
+> workspaces Markdown universales (`§20`). La UI de escritorio (Tauri v2 + Svelte 5) se retiró íntegra de `main` a la rama `experimental/ui-desktop` con el giro headless (`§19.1`, E9-H04).
+> Se conserva sin editar como registro del origen del proyecto.
+
 # E6 — `src-tauri` + frontend Svelte 5
 
 > **Fase**: `§14.6`. **Objetivo de la épica**: la fachada de escritorio (Tauri v2) sobre `Workspace`,

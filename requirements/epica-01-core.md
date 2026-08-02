@@ -1,3 +1,8 @@
+> **⚠️ ÉPICA HISTÓRICA (v0.2.x, pre-giro) — no implementar nada de aquí.** Describe trabajo
+> completado antes del giro headless (`ARCHITECTURE.md §19`, 2026-07-22) y de la migración a
+> workspaces Markdown universales (`§20`). El core OKF que especifica (schema, conformidad OKF) se sustituyó por el modelo Markdown universal de `§20` (épicas E15–E22); `core::schema` se retiró en E20-H03.
+> Se conserva sin editar como registro del origen del proyecto.
+
 # E1 — `lodestar-core` puro
 
 > **Fase**: `§14.1`. **Objetivo de la épica**: portar TODA la lógica OKF del prototipo a un crate

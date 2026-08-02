@@ -198,10 +198,10 @@ del usuario:
 2. ~~`DECISIONES §12` (fechas) y `§13` (`Conformant → Valid`)~~ — **cerradas en E23-H14**: las
    fechas se declaran lexicográficas por escrito, y el catálogo de errores se abrió la única vez
    para completar la pareja de `§20.3`.
-3. **`docs/PROPUESTA_CLI.md`** — la CLI como gestor de KB (hoy solo es puerta de CI). Pendiente de
+3. **`docs/history/PROPUESTA_CLI.md`** — la CLI como gestor de KB (hoy solo es puerta de CI). Pendiente de
    `/planificar` en una PR posterior. Su condición de entrada dura —que existan tests de
    concurrencia entre procesos— **ya se cumple** desde `E23-H09`.
-4. **`docs/PROPUESTA_FIXES.md`** — reactivar los arreglos sugeridos (`Fix`/`apply_fix`, la op
+4. **`docs/history/PROPUESTA_FIXES.md`** — reactivar los arreglos sugeridos (`Fix`/`apply_fix`, la op
    retirada en `E23-H11`). Condición de entrada: que existan productores de `Fix` que justifiquen la
    maquinaria del `fixId` direccionable entre revisiones.
 5. **`DECISIONES §3`/`§9`** — `rmcp` oficial + resources cuando un cliente lo exija; gate de bench y
@@ -221,7 +221,7 @@ por la matriz de trazabilidad, que sigue **sin filas de E15–E24**.
 
 ## Giro a motor headless de integridad semántica (E9–E14) — COMPLETO
 
-Refactor de `docs/REFACTOR.md`, diseño ratificado en `ARCHITECTURE.md §19` (supersede §13 en
+Refactor de `docs/history/REFACTOR.md`, diseño ratificado en `ARCHITECTURE.md §19` (supersede §13 en
 superficie de producto; git queda como crate dormido) y `DECISIONES.md §0`. Descomposición en
 `requirements/epica-09..14` (47 historias, orden E9→E14).
 
@@ -1057,7 +1057,7 @@ superficie de producto; git queda como crate dormido) y `DECISIONES.md §0`. Des
   `serde_yaml` 0.9 no tipa timestamps) y **§13** (`Conformant → Valid`) cerradas: §13 era el **único
   de los 29 criterios de `REFACTOR_PHASE_2` demostrablemente incumplido**, y se saldó abriendo el
   catálogo de 16 códigos **la única vez**, aprovechando que v0.3 ya era incompatible con v0.2. Y se
-  escribieron `docs/PROPUESTA_CLI.md` y `DECISIONES §14` (el store de E18 **entero, sin ningún
+  escribieron `docs/history/PROPUESTA_CLI.md` y `DECISIONES §14` (el store de E18 **entero, sin ningún
   consumidor**) para que dos decisiones no se perdieran.
   - **Lo que la barrida final encontró y que nadie había mirado**: el texto `instructions` que el
     servidor sirve en `initialize` —lo primero que lee un agente, y **superficie de wire**, no
@@ -1375,3 +1375,39 @@ Lo que merece quedar registrado, porque cambió el plan:
 > `cargo test --workspace -- --list | grep -c ": test$"`, que es el criterio que E24-H18 dejó escrito
 > para que este documento no vuelva a mentir con una cifra copiada. (No incluye los tests gateados
 > tras `--features test-failpoints`, que ese comando no lista.)
+
+## Producto, distribución y apertura OSS (E27) — COMPLETA (2026-08-02; H10 bloqueada)
+
+> Primera épica de **superficie externa** (`ARCHITECTURE.md §21`, `DECISIONES.md §17`): el motor no
+> cambia — cero deltas de contrato, cero cambios de comportamiento en `crates/*/src` (solo
+> comentarios/doc-comments al mover docs). Origen: la review OSS externa del 2026-08-01, verificada
+> punto a punto. Antes de la épica: retro-tag `v0.5.0` (el tag `0.5.0` sin prefijo nunca disparó
+> `release.yml`; la release huérfana sin assets se borró tras verificar la nueva) y los quick fixes
+> de README/RELEASING/fixtures (rama `chore/higiene-docs-release`, incluida en esta).
+
+| Historia | Estado | Nota |
+|---|---|---|
+| E27-H01 guardarraíles de release | ✅ | `scripts/verifica-tag-release.sh` (3 casos ejecutados: v0.5.0→0, v0.6.0→1, 0.5.0→1) + `SHA256SUMS-<target>.txt` generado y verificado en el propio job. **Verificación diferida declarada**: la próxima release real (3 archivos + 3 checksums) la cierra. |
+| E27-H03 `examples/demo/` | ✅ | 10 docs EN, enlace roto + huérfano deliberados y comentados; guion de 2 min con salidas reales. **Enmienda**: el huérfano se enseña vía `graph_query isolated` (el código `ORPHAN` murió en E16-H02), no vía `check`. |
+| E27-H02 README en inglés | ✅ | Binarios de Releases + `cargo install --git` (probado de verdad), quickstart contra la demo, `claude mcp add` + JSON genérico, roadmap → `DECISIONES.md`. Cero promesas de rendimiento (grep del criterio). |
+| E27-H04 smoke de la demo | ✅ | `scripts/demo-smoke.sh` + job `demo-smoke` en `ci.yml`. Control anti-vacuo ejecutado (romper un enlace → falla). El smoke ya cazó una deriva real: añadir el README-guion cambió el blast radius 4/7→5/8. |
+| E27-H06 `docs/` vigente vs superseded | ✅ | `docs/history/` con los 4 superseded (git mv, historia conservada), índice por audiencias, cero citas a rutas viejas (grep del criterio). `REFACTOR_PHASE_2.md` no se mueve (`§17`-DC). |
+| E27-H05 `docs/user/` operativos | ✅ | quickstart/mcp-clients/ci en EN, todo ejecutado (parte con el binario de la release v0.5.0). El workflow de ejemplo de `ci.md` **se ejecutó en Actions** (run 30721903304, rama efímera): install → check → SARIF subido a code scanning → gate bloquea con exit 1, cada step como documenta. |
+| E27-H11 `docs/user/` de referencia | ✅ | query-language/safe-changes en EN, ~45 tool calls, citas del binario verificadas verbatim (9/9), revisión cruzada contra `contracts/mcp.yml` declarada. Destapó los 3 hallazgos de `DECISIONES §19`. |
+| E27-H07 `requirements/` veraz | ✅ | Banner HISTÓRICA en E0–E8, invariantes zombis #4/#7 corregidos, regla de idioma `§21.1` registrada, Done sin gates del frontend retirado. |
+| E27-H08 comunidad | ✅ | CONTRIBUTING (issues-first `§17`-DB) + SECURITY (PVR **habilitado y verificado** + email) + Covenant 2.1 verbatim (diff: 1 línea, el contacto). Community profile se verifica tras el merge (lee `main`). |
+| E27-H09 templates | ✅ | 3 formularios YAML válidos + PR template con los gates exactos del CI. Render de GitHub se comprueba tras el merge. |
+| E27-H10 crates.io | ⛔ | **[BLOQUEADA por `DECISIONES §17`-DA]** (diferida, reabrible). |
+
+**Veredicto del juez ciego** (agente fresco, solo spec + diff, criterios re-ejecutados por él,
+incluido el control anti-vacuo y ~30 llamadas MCP): **APROBADA CON RESERVAS (solo menores)** —
+41/43 criterios ✓, 2 ± con enmienda declarada y justificada; ninguna reserva invalida una
+historia. Las 2 reservas accionables se levantaron en el mismo ciclo (assert de `isolated` en el
+paso 1 del smoke; constancia del `.gitignore` gestionado por el motor); las 2 restantes son
+verificaciones post-merge declaradas (community profile / render de templates) y la end-to-end de
+H01 (la cierra la próxima release).
+
+**Hallazgos registrados al implementar** (regla de la épica: documentar ejecutando destapa, no
+arregla): `DECISIONES §18` (`canApply: false` no vincula a `change_apply`) y `§19` (a: `has(frontmatter)`
+nunca casa, contradice `§20.8`; b: `policy` parcial rechazada pese a campos opcionales del contrato;
+c: imprecisión de `§16.a` caso 3). Todos tocan la frontera o el core → historias propias fuera de E27.

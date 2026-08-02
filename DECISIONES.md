@@ -10,9 +10,9 @@
 
 ## 0. Giro a motor headless de integridad semántica — ✅ RATIFICADO (2026-07-22)
 
-- **Contexto**: `docs/REFACTOR.md` redefine Lodestar como **motor headless de integridad semántica**
+- **Contexto**: `docs/history/REFACTOR.md` redefine Lodestar como **motor headless de integridad semántica**
   (busca/comprende/valida/modifica conocimiento vía cambios planificados y recuperables, sin editor,
-  sin GUI y sin git). Propuesta de diseño en `docs/REFACTOR_DISENO_PROPUESTA.md`; diseño ratificado en
+  sin GUI y sin git). Propuesta de diseño en `docs/history/REFACTOR_DISENO_PROPUESTA.md`; diseño ratificado en
   **`ARCHITECTURE.md §19`** (supersede §13 en superficie de producto). Descomposición en
   `requirements/epica-09-*.md` … `epica-14-*.md`.
 - **Sub-decisiones cerradas** (puerta 1 de `/planificar`):
@@ -319,8 +319,8 @@ Pendientes de priorización (no bloquean el núcleo):
   También la salida humana de `lodestar check`: `CONFORME`/`NO CONFORME` → `VÁLIDO`/`NO VÁLIDO`. No
   lo exigía la tabla de `§20.3` —que habla de la API—, pero es la aparición más visible del término
   retirado: la línea que un humano lee en cada ejecución de CI.
-  **No se tocaron** los documentos históricos (`docs/REFACTOR.md`,
-  `docs/REFACTOR_DISENO_PROPUESTA.md`) ni las tablas de terminología que **documentan el propio
+  **No se tocaron** los documentos históricos (`docs/history/REFACTOR.md`,
+  `docs/history/REFACTOR_DISENO_PROPUESTA.md`) ni las tablas de terminología que **documentan el propio
   renombre** (`§20.3`, `REFACTOR_PHASE_2 §Terminología`): ahí `Conformant` es el término de partida
   y sustituirlo las dejaría diciendo «Valid → Valid».
 
@@ -596,6 +596,89 @@ Pendientes de priorización (no bloquean el núcleo):
   refactores compartidos que ya están recomendados: **`sellar_publicado`** (i) y un **helper único de
   paginación** para la aritmética y los límites. La divergencia core↔store de H09 **no se toca aquí**:
   va con la decisión de `§14`.
+
+---
+
+## 17. Superficie externa y apertura OSS (E27) — ✅ CERRADA (2026-08-01; crates.io reabrible)
+
+- **Contexto**: una review OSS externa (2026-08-01), evaluada y verificada punto a punto contra
+  `main` (v0.5.0), concluyó que el proyecto está **por delante de su adopción**: instalación sin
+  binarios documentados, sin demo end-to-end, sin docs de usuario, embudo de contribución cerrado.
+  La puerta 1 de la épica **E27** (`requirements/epica-27-producto-distribucion-oss.md`) cerró las
+  cuatro decisiones abiertas; el diseño ratificado vive en `ARCHITECTURE.md §21`.
+- **DA — crates.io: DIFERIDO** (esta es la mitad **reabrible** de la entrada). Vías de instalación
+  soportadas: binarios de GitHub Releases + `cargo install --git`. Publicar en crates.io es
+  permanente (solo *yank*) y los crates de dominio (`core`/`store`/`workspace`/`app`) no están
+  pensados como API de librería estable. **E27-H10 queda `[BLOQUEADA por DECISIONES §17]`** hasta
+  que esta mitad se reabra y se cierre en (a). Datos registrados para entonces:
+  - la **disponibilidad de los nombres no está verificada** (`cargo search lodestar` pendiente);
+  - existe una **colisión de marca**: *Lodestar* es un cliente de consenso de Ethereum muy conocido
+    (ChainSafe, TypeScript). No afecta a crates.io en lo técnico pero sí a la **descubribilidad**
+    del proyecto en buscadores, se publique donde se publique. No se renombra: solo queda anotado.
+- **DB — Política de contribución: issues-first + Discussions OFF.** Bugs y docs se aceptan por PR
+  directo con checklist; las features requieren issue previa donde el mantenedor decide si pasan
+  por el proceso de diseño. Discussions queda desactivado hasta que haya tráfico que lo justifique
+  (activarlo es un toggle de settings, no requiere historia).
+- **DC — `docs/REFACTOR_PHASE_2.md` NO se mueve.** Es la spec de comportamiento **vigente**, citada
+  por ~51 ficheros (CLAUDE.md, ARCHITECTURE, 10 épicas, tests y código): moverla rompería o
+  obligaría a tocar todos. A `docs/history/` van solo los 4 documentos genuinamente superseded
+  (`REFACTOR.md`, `REFACTOR_DISENO_PROPUESTA.md`, `PROPUESTA_CLI.md`, `PROPUESTA_FIXES.md`). El
+  criterio taxonómico es *vigente/superseded*, no *viejo/nuevo* (`§21.3`).
+- **DD — CoC y seguridad**: **Contributor Covenant 2.1** en inglés, contacto público
+  `dbareagimeno@icloud.com`; **GitHub Private Vulnerability Reporting** como canal primario de
+  reporte de vulnerabilidades, con ese email como fallback en `SECURITY.md` y el CoC.
+- **Regla transversal ratificada** (`§21.5`): mientras **`§14`** siga abierta, la superficie
+  externa no presenta `reindex`/la cache SQLite como camino de lectura del producto ni promete
+  rendimiento a escala. Principio rector de E27: *la superficie externa solo promete lo que el
+  motor ejecuta hoy*.
+- **Ya ejecutado antes de la épica** (2026-08-01, no forma parte de E27): retro-tag `v0.5.0`
+  empujado (el tag `0.5.0` sin prefijo nunca disparó `release.yml`; la release huérfana sin assets
+  se borra al verificar la nueva) y la rama `chore/higiene-docs-release` con los quick fixes de
+  README/RELEASING/fixtures.
+
+## 18. `canApply: false` no vincula a `change_apply` — 🟠 ABIERTA (hallazgo E27-H03)
+
+**Hallazgo** (2026-08-02, al ejecutar el guion de la demo contra un workspace con un error
+preexistente deliberado): `change_plan` bajo la policy por defecto (`requireValidResult: true`)
+devuelve `canApply: false` cuando el resultado simulado no es válido — pero `change_apply` **no
+consulta ese veredicto**: `can_apply` se computa en `App::change_plan`
+(`crates/lodestar-app/src/lib.rs:1783`, con `core::plan::can_apply`) y viaja al cliente, mientras
+que el camino de apply ejerce solo su propio gate de staging, que **sí aplicó** el plan
+(`applied: true` con `validation.valid: false`, sin diagnósticos nuevos). Resultado: la superficie
+dice «este plan no es aplicable bajo tu policy» y el motor lo aplica igual si el cliente insiste.
+
+**Opciones**: (a) `change_apply` rechaza planes con `canApply: false` (código nuevo o
+`INVALID_SCHEMA`? — tocaría el catálogo de 16 y la frontera); (b) documentar `canApply` como
+**advisory** (el contrato ya no promete que apply lo ejerza; el gate real es el de staging); (c)
+que el gate de staging adopte la policy del plan. Cada una toca la frontera MCP → historia propia
+con delta de contrato, fuera de E27 (que tiene prohibido cambiar comportamiento del motor).
+
+**Mitigación en E27**: el guion de la demo usa `policy: {requireValidResult: false}` — coherente
+con el error deliberado del workspace — y no muestra la incoherencia; `docs/user/safe-changes.md`
+describe `canApply` como veredicto del **plan**, sin prometer que apply lo re-ejerza.
+
+## 19. Hallazgos de documentar la referencia de usuario — 🟠 ABIERTA (E27-H11, 2026-08-02)
+
+Escribir `docs/user/query-language.md`/`safe-changes.md` ejecutando cada afirmación (regla de la
+épica: si documentar destapa un defecto, se registra, no se arregla) dejó tres:
+
+- **(a) `has(frontmatter)` nunca casa; `missing(frontmatter)` casa siempre.** `§20.8` lo lista
+  («incluido `has(frontmatter)`»), pero sobre la demo devuelve 0 de 10 y su negación 10 de 10,
+  mientras `document.has_frontmatter = true` responde bien (7). Causa: `has(x)` resuelve vía
+  `core::eval::resolver_campo` → `FieldPath::sin_anclaje()`, que devuelve `None` para el anclaje
+  pelado (`crates/lodestar-core/src/types.rs:507`). Contradice `§20.8` (el contrato no lo
+  promete). `query-language.md` lo documenta como límite observado y remite a
+  `document.has_frontmatter`. Arreglarlo toca `core::eval` → historia propia.
+- **(b) Una `policy` parcial se rechaza aunque el contrato declara ambos campos opcionales.**
+  `{"policy": {"requireValidResult": false}}` → `INVALID_SCHEMA: … missing field allowWarnings`.
+  `PlanPolicy` tiene `Default` pero sus campos no llevan `#[serde(default)]`
+  (`crates/lodestar-core/src/plan.rs:271`), mientras `contracts/mcp.yml` y el `inputSchema` los
+  declaran opcionales con default. Omitir `policy` entera sí funciona. Emparenta con `§15`
+  (validación de argumentos). `safe-changes.md` instruye enviar ambas claves.
+- **(c) Imprecisión en `§16.a` caso (3)**: una clave literal `a.b` y una anidada `a:{b:…}` en
+  **documentos distintos** producen **dos filas** del catálogo con el mismo `name` (no una), y
+  `mode:"field"` resuelve solo la anidada. La frase del contrato («si ambas formas coinciden en un
+  mismo documento comparten una entrada») es consistente con lo observado; la del §16.a no.
 
 ---
 

@@ -1,0 +1,59 @@
+name: Bug report
+description: Something lodestar does is wrong, crashes, or contradicts its documentation.
+title: "[bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report. The more precisely we can reproduce it,
+        the faster it gets fixed. Security issues do NOT go here — use
+        [private vulnerability reporting](https://github.com/dbareagimeno/lodestar/security/advisories/new).
+  - type: input
+    id: version
+    attributes:
+      label: Lodestar version
+      description: Output of `lodestar --version` (or the release tag / commit you built from).
+      placeholder: v0.5.0
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options:
+        - macOS (Apple Silicon)
+        - Linux (x86_64)
+        - Windows (x86_64)
+        - Other (say which in the description)
+    validations:
+      required: true
+  - type: input
+    id: workspace-shape
+    attributes:
+      label: Workspace shape
+      description: Rough size and structure of the Markdown workspace (number of documents, with/without frontmatter, nesting). A minimal reproducing workspace is gold.
+      placeholder: "~200 docs, YAML frontmatter on most, 3 levels of directories"
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Exact command or tool call
+      description: The CLI command (`lodestar check …`) or the MCP tool call (name + arguments JSON) that triggers the problem.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: check-json
+    attributes:
+      label: Output of `lodestar check --json` (if relevant)
+      description: Run it at the workspace root and paste the output (trim paths you don't want to share).
+      render: json
+  - type: textarea
+    id: expected-observed
+    attributes:
+      label: Expected vs. observed
+      description: What you expected to happen, and what happened instead (paste real output).
+    validations:
+      required: true

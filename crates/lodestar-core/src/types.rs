@@ -1542,7 +1542,7 @@ schema_derive! {
 /// `CoreError::FixNotFound`, así que la op se anunciaba en el enum del `inputSchema` y en el
 /// contrato pero no podía tener éxito nunca. El lado de LECTURA (`Fix`, `Check.fixes`,
 /// `includeSuggestedFixes`) NO se toca: un array vacío de sugerencias dice la verdad, una op
-/// invocable que siempre falla no. Ver `docs/PROPUESTA_FIXES.md`.
+/// invocable que siempre falla no. Ver `docs/history/PROPUESTA_FIXES.md`.
 ///
 /// El tag de wire (`op`) usa los mismos nombres snake_case que `proposedOperation.kind`
 /// (`contracts/mcp.yml`) — un solo vocabulario de tipos de operación en el contrato.
@@ -1605,7 +1605,7 @@ pub enum NormalizedOperation {
         inbound_links_policy: InboundLinksPolicy,
     },
     // NOTA E23-H11: la variante `ApplyFix { fix_id }` se RETIRÓ. Ver la nota de la cabecera de este
-    // enum y `docs/PROPUESTA_FIXES.md`.
+    // enum y `docs/history/PROPUESTA_FIXES.md`.
 }
 }
 
