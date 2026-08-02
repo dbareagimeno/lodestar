@@ -52,7 +52,7 @@ La pirámide del flujo, de arriba abajo — cada nivel tiene su puerta:
         └─ /historia · /tdd · /contrato · /juzgar   (etapas del ciclo)
 ```
 
-- **Feature grande** (p. ej. ghosts+templates, `DECISIONES.md §10`): `/planificar` primero —
+- **Feature grande** (p. ej. ghosts+templates, `decisiones §10`): `/planificar` primero —
   cierra el diseño y produce la épica — y después `/ciclo` historia a historia. Las puertas
   (ratificación de diseño, de épica, gates, sin drift, veredicto) no se negocian: si una falla,
   se vuelve atrás.
@@ -88,5 +88,5 @@ mismo), y el orquestador tampoco escribe código en `/tdd` para no contaminar lo
   integrará en CI solo si demuestra valor sostenido.
 - **Contrato YAML = superficie y semántica; los tipos viven en `core::types`** (invariante #4).
   Los tipos los consumen directamente `lodestar-cli`/`lodestar-mcp`; **ya no hay espejo `.ts`** (se
-  retiró con la UI a `experimental/ui-desktop`), así que la generación con ts-rs de `DECISIONES.md §4`
+  retiró con la UI a `experimental/ui-desktop`), así que la generación con ts-rs de `decisiones §4`
   queda obsoleta para el espejo TS.

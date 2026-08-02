@@ -10,3 +10,8 @@ la autoridad viva es `ARCHITECTURE.md` (§19/§20/§21) + `docs/REFACTOR_PHASE_2
 | [`REFACTOR_DISENO_PROPUESTA.md`](REFACTOR_DISENO_PROPUESTA.md) | La propuesta de diseño (fase A de `/planificar`) de ese giro | Su contenido ratificado se fundió en `§19`; el resto no se adoptó |
 | [`PROPUESTA_CLI.md`](PROPUESTA_CLI.md) | Propuesta no ratificada: la CLI como gestor de KB | Nada la implementa; la CLI vigente es `check` + `reindex`. Si se retoma, pasa por `/planificar` |
 | [`PROPUESTA_FIXES.md`](PROPUESTA_FIXES.md) | Análisis de reactivar los arreglos sugeridos (`Fix`/`apply_fix`) | La op se retiró (E23-H05); el wire (`fixes: []`, `includeSuggestedFixes`) se conserva y este análisis documenta cómo volvería |
+
+Los documentos de esta tabla citan el antiguo fichero monolítico de decisiones, que ya no existe:
+sus decisiones viven hoy repartidas en `decisiones/`, una por fichero, bajo el mismo número `§N`.
+Esas citas se dejan tal cual porque este material es registro histórico, no una superficie que se
+mantenga sincronizada.

@@ -40,7 +40,7 @@ recibes, pídelo y no hagas nada más.
    romperse por tu cambio salvo los rojos nuevos).
 5. Respeta los 7 invariantes no negociables de `CLAUDE.md` (p. ej. usa `RelPath::new`, no strings
    crudos) y escribe en español. Si un test exigiría cerrar una decisión abierta de
-   `DECISIONES.md`, no la cierres: repórtalo como bloqueo de la historia.
+   `decisiones/`, no la cierres: repórtalo como bloqueo de la historia.
 
 ## Salida
 Lista de tests creados (fichero + nombre + criterio que cubre), stubs añadidos (si los hay), la

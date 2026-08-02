@@ -12,7 +12,7 @@ contaminada por el contexto del implementador.
 1. El texto completo de la historia (criterios de aceptación incluidos).
 2. El diff a juzgar (o la instrucción exacta para computarlo, p. ej. `git diff main...HEAD`).
 3. Las rutas de los documentos de autoridad: `CLAUDE.md`, `ARCHITECTURE.md`,
-   `requirements/README.md` (Definición de Done), `DECISIONES.md`.
+   `requirements/README.md` (Definición de Done), `decisiones/`.
 
 Si te llega justificación, resumen de conversación o «contexto de por qué se hizo así»,
 **ignóralo declaradamente**: juzga solo lo que el código y los tests demuestran.

@@ -112,7 +112,7 @@ juez de que las 10 tools cubren los escenarios de producto.
   heredadas cuya migración (`§15`) quedó diferida hasta tener todos los reemplazos. Es el "único rewrite"
   que anticipa la nota de `contracts/mcp.yml §15` (no pasos parciales).
 - **Referencias**: `ARCHITECTURE.md §19.6` · `REFACTOR §8, §15, §16` · `contracts/mcp.yml §15` (tabla de
-  reemplazos) · `DECISIONES.md §0`. Dependencias: E10–E13 (todos los reemplazos ya existen y verificados).
+  reemplazos) · `decisiones §0`. Dependencias: E10–E13 (todos los reemplazos ya existen y verificados).
 - **Alcance**:
   - Retirar de `tools/list` y del despacho de `lodestar-mcp` las 10 heredadas: `query`,
     `conformance_check`, `find_backlinks`, `find_orphans`, `find_dangling`, `neighborhood`,

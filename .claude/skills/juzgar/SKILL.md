@@ -19,7 +19,7 @@ la spec y el diff. La garantía de no-contaminación es tu responsabilidad como 
      Si el diff es enorme, pasa la lista de ficheros + instrucción de computarlo, no un resumen tuyo.
 2. **Lanza el juez** (tipo `juez-historia`, agente NUEVO — nunca un fork, nunca `SendMessage` a un
    agente previo) con exactamente: spec, diff (o cómo computarlo) y las rutas de los docs de
-   autoridad (`CLAUDE.md`, `ARCHITECTURE.md`, `requirements/README.md`, `DECISIONES.md`).
+   autoridad (`CLAUDE.md`, `ARCHITECTURE.md`, `requirements/README.md`, `decisiones/`).
 
    **PROHIBIDO** incluir en el prompt: por qué se implementó así, resúmenes de la conversación,
    dificultades encontradas, o tu propia opinión del diff. Si el juez conoce la intención, deja de

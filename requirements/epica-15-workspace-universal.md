@@ -279,7 +279,7 @@ y la suite en verde.
     escribibles y ciegos al control optimista (ver `ARCHITECTURE.md §20.5`, corrección E15-H07).
     → `exclude_vacio_no_reabre_lodestar`.
   - **Borrar** `Config`/`lodestar.toml` (legado, `config.rs:14-63`): dos ficheros de configuración
-    para lo mismo es deuda, y `identity` ya murió en E15-H01. Cierra `DECISIONES.md §8`.
+    para lo mismo es deuda, y `identity` ya murió en E15-H01. Cierra `decisiones §8`.
   - Renombrar `writableRoots` conservando semántica (es la *write policy* de `§20.1`);
     `referenceRoots` se retira en E20 con las refs externas por frontmatter.
 - **Fuera de alcance**: aplicar la política de validación (E20); `metadata_inspect` (E20).

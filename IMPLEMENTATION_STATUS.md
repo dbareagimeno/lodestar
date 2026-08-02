@@ -23,7 +23,7 @@
 > diferencial JS-vs-Rust (`E15-H04`). Las secciones de E0–E8 de más abajo conservan esa terminología
 > como **historia del proyecto**; la autoridad viva es `ARCHITECTURE.md §20`.
 >
-> Lo pendiente está en [`DECISIONES.md`](DECISIONES.md): fechas en el lenguaje de consulta (§12),
+> Lo pendiente está en [`decisiones/`](decisiones/README.md): fechas en el lenguaje de consulta (§12),
 > el **store sin consumidor** (§14, abierto en E23-H16). §12 y §13 se cerraron en E23-H14.
 
 ## Cómo correrlo
@@ -60,8 +60,8 @@ subcomandos git de la CLI —`log`/`last-conforming`/`branch`/`switch`/`merge`/`
 | **E3** `lodestar-store` | ✅ Hecho | DDL dueño único (`files`/`links`/`tags`/`diagnostics` + FTS5 + `commit_conformance`), cold rebuild, watcher `notify-debouncer-full` con **gate por hash blake3**, síntesis SQL (backlinks/orphans/dangling/blast-radius CTE), FTS5 con escapado, bus `IndexEvent` (crossbeam), trait `ConceptStore`. **13 tests**: paridad SQL==core, property incremental==core (120 ediciones), watcher en vivo, FTS. |
 | **E4** `lodestar-vcs` | ✅ Hecho | libgit2 local + red por binario `git` + **resolve_rev**, **staged_files**, **switch** (sin tocar working tree), **merge** (3-vías a nivel de árbol con marcadores + `MERGE_HEAD`), **install_hooks**, **tree_oid**. Cache de conformidad por tree-oid en el store, cableada en la workspace. **12 tests**. |
 | **E5** `lodestar-workspace` | ✅ Hecho | Handle unificado, único escritor, snapshot, commit/restore con checkpoint, switch/merge, conformidad cacheada por tree-oid, config (`lodestar.toml`), y **bus de eventos en vivo** (`open_live`/`enable_cache`/`subscribe`) con **update optimista** de la cache tras cada escritura. **12 tests**. |
-| **E6** Tauri + frontend | ✅ Hecho | **Fachada Tauri v2** real: comandos congelados sobre `Workspace` + estado del bundle + forwarder del bus `IndexEvent` → evento `bundle:changed` (UI en vivo). Binario `lodestar-desktop` compila; CI de Rust instala webkit y construye el frontend antes. **Frontend Svelte 5 funcional**: layout de 3 columnas colapsables, árbol filtrable, editor multi-escritor con validación y diagnósticos localizados, panel de enlaces, **isla imperativa del grafo** (`createStarMap`, SVG+rAF, sin `{#each}`), modo **Cambios** (diff + commit). `npm run check`/`build` verdes. Pulido en [`DECISIONES.md §2`](DECISIONES.md). |
-| **E7** `lodestar-mcp` | 🟢 Parcial | 13 tools sobre la workspace + bucle JSON-RPC por stdio (stdout puro). **Golden cross-fachada** (tool==workspace) + e2e. **5 tests**. Pendiente: transporte `rmcp` oficial + resources (ver [`DECISIONES.md §3`](DECISIONES.md)). |
+| **E6** Tauri + frontend | ✅ Hecho | **Fachada Tauri v2** real: comandos congelados sobre `Workspace` + estado del bundle + forwarder del bus `IndexEvent` → evento `bundle:changed` (UI en vivo). Binario `lodestar-desktop` compila; CI de Rust instala webkit y construye el frontend antes. **Frontend Svelte 5 funcional**: layout de 3 columnas colapsables, árbol filtrable, editor multi-escritor con validación y diagnósticos localizados, panel de enlaces, **isla imperativa del grafo** (`createStarMap`, SVG+rAF, sin `{#each}`), modo **Cambios** (diff + commit). `npm run check`/`build` verdes. Pulido en [`decisiones §2`](decisiones/02-port-ui-prototipo.md). |
+| **E7** `lodestar-mcp` | 🟢 Parcial | 13 tools sobre la workspace + bucle JSON-RPC por stdio (stdout puro). **Golden cross-fachada** (tool==workspace) + e2e. **5 tests**. Pendiente: transporte `rmcp` oficial + resources (ver [`decisiones §3`](decisiones/03-transporte-mcp-rmcp.md)). |
 | **E8** Transversales | 🟢 Parcial | Hechos: exit codes/SARIF, escritura atómica, **zip-slip cerrado por RelPath en `import`**, identidad de commits + override por `lodestar.toml`, trailer Co-Authored-By del agente, gitignore de `.lodestar/`, **config por-bundle (`lodestar.toml`: strictness + identidad)**, **`lodestar import`** (zip del prototipo o dir), **`init` con git init + commit inicial real**, **i18n keyed por código** (catálogo español), **arnés diferencial JS-vs-Rust (§12)**, y **pipeline de release multiplataforma** (`release.yml`: macOS arm64/Windows/Linux → bundles sin firmar + binarios CLI/MCP; Release en borrador) con **CI multiplataforma** (job de Rust en las 3 plataformas). Pendiente: **firma/notarización** de bundles + updater, gate de bench (§11), threat model. |
 
 ## Infraestructura de proceso (2026-07-10)
@@ -81,7 +81,7 @@ El repo tiene ahora una **estructura de agentes y skills** para el desarrollo po
   (invariante #4). Verificación con `/contrato --check`.
 - **Mutation testing a demanda**: `cargo-mutants` configurado (`.cargo/mutants.toml`), sin CI.
 - Primera historia acordada para el nuevo flujo: **ts-rs** (E0-H04/E6-H03,
-  [`DECISIONES.md §4`](DECISIONES.md)).
+  [`decisiones §4`](decisiones/04-generacion-dts-ts-rs.md)).
 
 ## Cobertura de historias (destacadas)
 
@@ -151,7 +151,7 @@ verificación empírica; ~40 defectos corregidos con tests de regresión. Lo má
 - **Pipeline de release** (`.github/workflows/release.yml`): se dispara con el tag `vX.Y.Z`, compila
   **macOS Apple Silicon (arm64)**, **Windows** y **Linux**, y crea un GitHub Release en **borrador**
   con los bundles (dmg/deb/appimage/nsis) + los binarios de CLI/MCP. Bundles **sin firmar** (firma/
-  notarización diferida — ver [`DECISIONES.md`](DECISIONES.md)). `bundle.active = true` y los iconos
+  notarización diferida — ver [`decisiones §1`](decisiones/01-build-fachada-escritorio.md)). `bundle.active = true` y los iconos
   de marca (estrella dorada) integrados. Runbook en [`RELEASING.md`](RELEASING.md).
 - **CI multiplataforma**: el job `rust` (fmt/clippy/build/test/doc) corre en `ubuntu-latest`,
   `macos-14` y `windows-latest` (`fail-fast: false`); el paso de `apt` (webkitgtk/soup) queda
@@ -185,17 +185,17 @@ verificación empírica; ~40 defectos corregidos con tests de regresión. Lo má
   modo que un `Drop` no puede liberar el lock de otro dueño ni se reclama el de un pid vivo.
 - ~~**git vocabulario directo**~~ — retirado con `lodestar-vcs` en `E15-H01` (`§20.13`).
 
-## Próximos pasos (ver [`DECISIONES.md`](DECISIONES.md))
+## Próximos pasos (ver [`decisiones/`](decisiones/README.md))
 
 **E23 está cerrada, así que nada bloquea el merge de v0.3.0.** Lo que sigue está abierto a criterio
 del usuario:
 
-1. **`DECISIONES §14`** — el store (épica E18) no tiene consumidor: ninguna tool lee de SQLite y
+1. **`decisiones §14`** — el store (épica E18) no tiene consumidor: ninguna tool lee de SQLite y
    `document_set()` reparsea la base entera en cada llamada. Decidir si se conecta, se acota o se
    retira. Va con la deuda hermana: el walker del store **no aplica la `DiscoveryPolicy`**, así que
    la paridad core↔store solo se sostiene bajo política por defecto — inocua mientras nadie lea el
    store, bug real en cuanto se conecte.
-2. ~~`DECISIONES §12` (fechas) y `§13` (`Conformant → Valid`)~~ — **cerradas en E23-H14**: las
+2. ~~`decisiones §12` (fechas) y `§13` (`Conformant → Valid`)~~ — **cerradas en E23-H14**: las
    fechas se declaran lexicográficas por escrito, y el catálogo de errores se abrió la única vez
    para completar la pareja de `§20.3`.
 3. **`docs/history/PROPUESTA_CLI.md`** — la CLI como gestor de KB (hoy solo es puerta de CI). Pendiente de
@@ -204,7 +204,7 @@ del usuario:
 4. **`docs/history/PROPUESTA_FIXES.md`** — reactivar los arreglos sugeridos (`Fix`/`apply_fix`, la op
    retirada en `E23-H11`). Condición de entrada: que existan productores de `Fix` que justifiquen la
    maquinaria del `fixId` direccionable entre revisiones.
-5. **`DECISIONES §3`/`§9`** — `rmcp` oficial + resources cuando un cliente lo exija; gate de bench y
+5. **`decisiones §3`/`§9`** — `rmcp` oficial + resources cuando un cliente lo exija; gate de bench y
    threat model.
 
 Deuda menor registrada, con dueño futuro: `Workspace::materialize_staging` es API pública que
@@ -214,7 +214,7 @@ chokepoint o convertirse en el quinto.
 
 **Añadido al cerrar E25/E26**: la auditoría del camino de escritura y las reservas de sus jueces
 ciegos dejaron **once puntos de deuda declarada** —lo que quedó explícitamente fuera de esa tanda,
-cada uno con su origen— en la sección nueva [`DECISIONES §16`](DECISIONES.md). Ninguno bloquea el
+cada uno con su origen— en la sección nueva [`decisiones §16`](decisiones/16-deuda-auditoria-e25-e26.md). Ninguno bloquea el
 merge: van de sintaxis de *quoting* que hoy es ruidosa pero correcta, a capacidad construida sin
 consumidor (`Envelope`, la cache SQLite), pasando por API pública no transaccional sin llamadores y
 por la matriz de trazabilidad, que sigue **sin filas de E15–E24**.
@@ -222,7 +222,7 @@ por la matriz de trazabilidad, que sigue **sin filas de E15–E24**.
 ## Giro a motor headless de integridad semántica (E9–E14) — COMPLETO
 
 Refactor de `docs/history/REFACTOR.md`, diseño ratificado en `ARCHITECTURE.md §19` (supersede §13 en
-superficie de producto; git queda como crate dormido) y `DECISIONES.md §0`. Descomposición en
+superficie de producto; git queda como crate dormido) y `decisiones §0`. Descomposición en
 `requirements/epica-09..14` (47 historias, orden E9→E14).
 
 - **E9 — Reducción de alcance** (Fase 0):
@@ -610,7 +610,7 @@ superficie de producto; git queda como crate dormido) y `DECISIONES.md §0`. Des
 | **E15** Workspace universal | ✅ Completa | Retirada de vcs/generadores/init-zip/prototipo · raíz = `cwd` · descubrimiento recursivo · config opcional (H01–H09). |
 | **E16** Modelo documental genérico | ✅ Completa | `ParsedFrontmatter` YAML arbitrario · sin ficheros reservados · título derivado · patch quirúrgico · diagnósticos mínimos · `Concept`→`Document` (H01–H06). |
 | **E17** Enlaces y grafo universal | ✅ Completa | `pulldown-cmark` en el core · `LinkTarget` · diagnósticos de enlace · `Analysis` nueva · grafo universal + cableado de `other_files`. |
-| **E18** Store v2 | ✅ Completa | DDL nuevo, metadata anidada por field path, links genéricos, cold rebuild, paridad core/store. **Sin consumidor en el producto** → `DECISIONES §14`. |
+| **E18** Store v2 | ✅ Completa | DDL nuevo, metadata anidada por field path, links genéricos, cold rebuild, paridad core/store. **Sin consumidor en el producto** → `decisiones §14`. |
 | **E19** Lenguaje de consulta | ✅ Completa | Parser · AST único · type checking sin coerción · namespaces `document.*`/`graph.*` · filtro JSON equivalente. |
 | **E20** Inspección y validación genéricas | ✅ Completa | `metadata_inspect` (retira `core::schema`) · política `rejectNewErrors`/`allowExistingErrors` · diagnósticos de descubrimiento cableados. |
 | **E21** Contrato MCP y transacciones genéricas | ✅ Completa | 8 operaciones universales · selecciones masivas por consulta · `move` por span · `delete` con política explícita. |
@@ -663,7 +663,7 @@ superficie de producto; git queda como crate dormido) y `DECISIONES.md §0`. Des
   observarla (`locale_cmp` sobrevive en `core::model`, hoy sin consumidor — candidato a borrarse en
   E16 si sigue huérfano).
 - 📌 **Punteros de proceso actualizados**: `.claude/agents/*` (autor-tests, implementador,
-  historiador, planificador), `.claude/README.md`, `DECISIONES.md §9` y
+  historiador, planificador), `.claude/README.md`, `decisiones §9` y
   `requirements/paridad-auditoria.md` daban por vivo el arnés diferencial y el `npm ci` de
   `prototype/harness/`; ahora lo declaran retirado en `E15-H04`.
 - ⚖️ **Juez ciego (H01–H04)**: **APROBADA CON RESERVAS**, 11/11 criterios cumplen. Hallazgos
@@ -813,7 +813,7 @@ superficie de producto; git queda como crate dormido) y `DECISIONES.md §0`. Des
 - ⚠️ **Deuda declarada al cerrar E16**: (1) `Severity::Warn` se ha quedado **sin productor** en
   `all_checks`, así que `PlanPolicy::allowWarnings` y `gate.blockWarnings` son inalcanzables desde
   datos reales hasta que E17 traiga `LINK-CASE-MISMATCH` y E20 la política de severidades; (2) la
-  pareja `Conformant → Valid` de `§20.3` está a medias — ver `DECISIONES.md` **§13** (cerrada
+  pareja `Conformant → Valid` de `§20.3` está a medias — ver `decisiones §13` (cerrada
   después en E23-H14);
   (3) `core::types` sigue documentando el `.d.ts` generado por ts-rs, falso desde que se retiró la UI.
 
@@ -946,7 +946,7 @@ superficie de producto; git queda como crate dormido) y `DECISIONES.md §0`. Des
   `delete_document` **exige política explícita** (`§Fase 12`: no elegir en silencio).
 - ✅ **E21-H04** — **`OkfDiff` → `SnapshotDiff` + limpieza del contrato** (cierra E21). El diff de wire
   ya era `types::SemanticDiff` (E12); el de `diff.rs` pasa a `SnapshotDiff` (neutro). Contrato sin
-  vocabulario OKF en superficie activa; `DECISIONES §13` (`Conformant → Valid`) documentada como
+  vocabulario OKF en superficie activa; `decisiones §13` (`Conformant → Valid`) documentada como
   aplazada (toca el catálogo de errores congelado).
 
 ### E22 — Migración de repos OKF y publicación
@@ -1053,11 +1053,11 @@ superficie de producto; git queda como crate dormido) y `DECISIONES.md §0`. Des
 - ✅ **E23-H13/H14/H15/H16** — **Los documentos dejan de contradecirse**. La tabla de la migración
   decía «E15–E22 EN CURSO» **350 líneas por encima del detalle que las daba por cerradas** (era
   criterio de aceptación literal de E22-H03, incumplido); la cabecera describía la UI Tauri y
-  subcomandos git borrados en E9-H02. `DECISIONES §12` (fechas **lexicográficas**, porque
+  subcomandos git borrados en E9-H02. `decisiones §12` (fechas **lexicográficas**, porque
   `serde_yaml` 0.9 no tipa timestamps) y **§13** (`Conformant → Valid`) cerradas: §13 era el **único
   de los 29 criterios de `REFACTOR_PHASE_2` demostrablemente incumplido**, y se saldó abriendo el
   catálogo de 16 códigos **la única vez**, aprovechando que v0.3 ya era incompatible con v0.2. Y se
-  escribieron `docs/history/PROPUESTA_CLI.md` y `DECISIONES §14` (el store de E18 **entero, sin ningún
+  escribieron `docs/history/PROPUESTA_CLI.md` y `decisiones §14` (el store de E18 **entero, sin ningún
   consumidor**) para que dos decisiones no se perdieran.
   - **Lo que la barrida final encontró y que nadie había mirado**: el texto `instructions` que el
     servidor sirve en `initialize` —lo primero que lee un agente, y **superficie de wire**, no
@@ -1144,7 +1144,7 @@ criterio ratificado en E19-H04. Ninguna historia de v0.3.1 depende de ellas.
   del catálogo (antes 10). La misma consulta malformada daba **dos códigos distintos** según la
   tool. Nueva variante `WorkspaceError::InvalidSchema` para no seguir aplanando entrada inválida
   contra fallo de I/O. Lo que **no** cambia: los parámetros no declarados se siguen ignorando — eso
-  es revisar un criterio ratificado, y queda como `DECISIONES §15`.
+  es revisar un criterio ratificado, y queda como `decisiones §15`.
 - ✅ **E24-H13/H14** — **El crash se prueba de verdad**. La feature `test-failpoints` existía desde
   E13-H06 pero **ningún fichero de `src/` la referenciaba**: los tests componían el estado
   post-crash a mano y **en orden distinto al del orquestador** (journal antes que backup, cuando
@@ -1338,7 +1338,7 @@ Las **11 historias** pasaron por juez ciego (agente fresco, solo spec + diff) co
 pedido explícitamente en el encargo. **Las 11 volvieron `APROBADA CON RESERVAS`**, y **todas las
 reservas MAYORES se cerraron en el mismo ciclo**: ninguna historia se dio por cerrada con una reserva
 mayor viva. Las **menores** —flecos de **fuerza de suite**, casi todos mutantes supervivientes en
-ramas de diagnóstico— quedan **declaradas** en [`DECISIONES §16(l)`](DECISIONES.md), no cerradas:
+ramas de diagnóstico— quedan **declaradas** en [`decisiones §16(l)`](decisiones/16-deuda-auditoria-e25-e26.md#l-deuda-de-fuerza-de-suite-y-flecos-menores-registrados-por-los-jueces-ciegos), no cerradas:
 ninguna describe un defecto observable hoy, y dos de ellas se arreglan con un refactor, no con un
 test.
 
@@ -1351,7 +1351,7 @@ Lo que merece quedar registrado, porque cambió el plan:
   lección de E23 en su forma útil: la spec se corrige cuando implementar demuestra que estaba
   incompleta, no se implementa alrededor de ella.
 - **Cuatro reservas no eran defectos de la historia sino deuda real del repo**, así que no se
-  cerraron en código: se **declararon** en [`DECISIONES §16`](DECISIONES.md) con su origen — los
+  cerraron en código: se **declararon** en [`decisiones §16`](decisiones/16-deuda-auditoria-e25-e26.md) con su origen — los
   escritores de runtime sin lock (juez de H03), la duplicación de la secuencia de sellado
   `apply`/`revert` (juez de H05), los tres límites latentes de *quoting* del lenguaje (H09) y el
   cursor basura que reinicia en silencio (juez de H10). Los **flecos menores** de siete historias van
@@ -1378,7 +1378,7 @@ Lo que merece quedar registrado, porque cambió el plan:
 
 ## Producto, distribución y apertura OSS (E27) — COMPLETA (2026-08-02; H10 bloqueada)
 
-> Primera épica de **superficie externa** (`ARCHITECTURE.md §21`, `DECISIONES.md §17`): el motor no
+> Primera épica de **superficie externa** (`ARCHITECTURE.md §21`, `decisiones §17`): el motor no
 > cambia — cero deltas de contrato, cero cambios de comportamiento en `crates/*/src` (solo
 > comentarios/doc-comments al mover docs). Origen: la review OSS externa del 2026-08-01, verificada
 > punto a punto. Antes de la épica: retro-tag `v0.5.0` (el tag `0.5.0` sin prefijo nunca disparó
@@ -1389,15 +1389,15 @@ Lo que merece quedar registrado, porque cambió el plan:
 |---|---|---|
 | E27-H01 guardarraíles de release | ✅ | `scripts/verifica-tag-release.sh` (3 casos ejecutados: v0.5.0→0, v0.6.0→1, 0.5.0→1) + `SHA256SUMS-<target>.txt` generado y verificado en el propio job. **Verificación diferida declarada**: la próxima release real (3 archivos + 3 checksums) la cierra. |
 | E27-H03 `examples/demo/` | ✅ | 10 docs EN, enlace roto + huérfano deliberados y comentados; guion de 2 min con salidas reales. **Enmienda**: el huérfano se enseña vía `graph_query isolated` (el código `ORPHAN` murió en E16-H02), no vía `check`. |
-| E27-H02 README en inglés | ✅ | Binarios de Releases + `cargo install --git` (probado de verdad), quickstart contra la demo, `claude mcp add` + JSON genérico, roadmap → `DECISIONES.md`. Cero promesas de rendimiento (grep del criterio). |
+| E27-H02 README en inglés | ✅ | Binarios de Releases + `cargo install --git` (probado de verdad), quickstart contra la demo, `claude mcp add` + JSON genérico, roadmap → `decisiones/`. Cero promesas de rendimiento (grep del criterio). |
 | E27-H04 smoke de la demo | ✅ | `scripts/demo-smoke.sh` + job `demo-smoke` en `ci.yml`. Control anti-vacuo ejecutado (romper un enlace → falla). El smoke ya cazó una deriva real: añadir el README-guion cambió el blast radius 4/7→5/8. |
 | E27-H06 `docs/` vigente vs superseded | ✅ | `docs/history/` con los 4 superseded (git mv, historia conservada), índice por audiencias, cero citas a rutas viejas (grep del criterio). `REFACTOR_PHASE_2.md` no se mueve (`§17`-DC). |
 | E27-H05 `docs/user/` operativos | ✅ | quickstart/mcp-clients/ci en EN, todo ejecutado (parte con el binario de la release v0.5.0). El workflow de ejemplo de `ci.md` **se ejecutó en Actions** (run 30721903304, rama efímera): install → check → SARIF subido a code scanning → gate bloquea con exit 1, cada step como documenta. |
-| E27-H11 `docs/user/` de referencia | ✅ | query-language/safe-changes en EN, ~45 tool calls, citas del binario verificadas verbatim (9/9), revisión cruzada contra `contracts/mcp.yml` declarada. Destapó los 3 hallazgos de `DECISIONES §19`. |
+| E27-H11 `docs/user/` de referencia | ✅ | query-language/safe-changes en EN, ~45 tool calls, citas del binario verificadas verbatim (9/9), revisión cruzada contra `contracts/mcp.yml` declarada. Destapó los 3 hallazgos de `decisiones §19`. |
 | E27-H07 `requirements/` veraz | ✅ | Banner HISTÓRICA en E0–E8, invariantes zombis #4/#7 corregidos, regla de idioma `§21.1` registrada, Done sin gates del frontend retirado. |
 | E27-H08 comunidad | ✅ | CONTRIBUTING (issues-first `§17`-DB) + SECURITY (PVR **habilitado y verificado** + email) + Covenant 2.1 verbatim (diff: 1 línea, el contacto). Community profile se verifica tras el merge (lee `main`). |
 | E27-H09 templates | ✅ | 3 formularios YAML válidos + PR template con los gates exactos del CI. Render de GitHub se comprueba tras el merge. |
-| E27-H10 crates.io | ⛔ | **[BLOQUEADA por `DECISIONES §17`-DA]** (diferida, reabrible). |
+| E27-H10 crates.io | ⛔ | **[BLOQUEADA por decisiones §17]** (diferida, reabrible). |
 
 **Veredicto del juez ciego** (agente fresco, solo spec + diff, criterios re-ejecutados por él,
 incluido el control anti-vacuo y ~30 llamadas MCP): **APROBADA CON RESERVAS (solo menores)** —
@@ -1408,6 +1408,6 @@ verificaciones post-merge declaradas (community profile / render de templates) y
 H01 (la cierra la próxima release).
 
 **Hallazgos registrados al implementar** (regla de la épica: documentar ejecutando destapa, no
-arregla): `DECISIONES §18` (`canApply: false` no vincula a `change_apply`) y `§19` (a: `has(frontmatter)`
+arregla): `decisiones §18` (`canApply: false` no vincula a `change_apply`) y `§19` (a: `has(frontmatter)`
 nunca casa, contradice `§20.8`; b: `policy` parcial rechazada pese a campos opcionales del contrato;
 c: imprecisión de `§16.a` caso 3). Todos tocan la frontera o el core → historias propias fuera de E27.

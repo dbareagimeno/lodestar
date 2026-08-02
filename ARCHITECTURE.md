@@ -11,7 +11,7 @@
 > producto **antes** del giro headless (`§19`) y de la migración a Markdown universal (`§20`).
 > Siguen siendo ciertas las filas de **Backend/Rust**, **Cache SQLite/FTS5**, **Watcher `notify`**,
 > **Fachada agentes (MCP)** y **Fachada CI (CLI)** — salvo que `rmcp` sigue sin adoptarse
-> (`DECISIONES §3`) y que la semántica ya no es «OKF» sino Markdown universal (`§20`).
+> (`decisiones §3`) y que la semántica ya no es «OKF» sino Markdown universal (`§20`).
 > **Han dejado de ser ciertas**: «Shell de escritorio (Tauri v2)» y «Frontend (Svelte 5 + Vite)»
 > —la UI se retiró de `main` a la rama `experimental/ui-desktop` con el giro headless (`§19.1`)— y
 > **«Versionado: git»**, que salió de la superficie en `E9-H02` y del repo en `E15-H01`: no existe
@@ -43,7 +43,7 @@
    definen **una vez** en `lodestar-core` y cruzan a las fachadas **sin capa DTO paralela**.
    *(La regla sigue vigente; la frase de época decía «cruzan a Tauri/MCP/CLI» y que el `.d.ts` se
    genera con ts-rs/specta. **Ya no hay espejo TS**: desapareció al retirar la UI a
-   `experimental/ui-desktop`, y con él la nota de `DECISIONES §4`. Lo que sí se deriva de los tipos
+   `experimental/ui-desktop`, y con él la nota de `decisiones §4`. Lo que sí se deriva de los tipos
    Rust es el **JSON Schema** de los `outputSchema` del MCP, vía `schemars`.)*
 
 ---
@@ -893,7 +893,7 @@ transactions:
 # identity: DORMIDA (git fuera de superficie; se conserva por si vcs vuelve)
 ```
 
-> **Actualización E15-H08**: `lodestar.toml` **ya no existe** (borrado; cierra `DECISIONES.md §8`),
+> **Actualización E15-H08**: `lodestar.toml` **ya no existe** (borrado; cierra `decisiones §8`),
 > así que `.lodestar/config.yaml` es el único fichero de configuración del motor. El esquema de
 > arriba se **amplía** con dos secciones que documentan `§20.5` y `§20.9`: `discovery`
 > (`include`/`exclude`/`respectGitignore`/`respectLodestarIgnore`/`followSymlinks`/
@@ -945,7 +945,7 @@ Diez tools (`REFACTOR §8`): **READ** `workspace_status` · `knowledge_search` �
 **Perfiles** (§12 de REFACTOR): `readonly` = las 7 de lectura/verificación; `standard` = añade las 3 de
 cambio. Se eligen **al arrancar** (`lodestar-mcp --profile readonly|standard`). **Política** de
 conformidad al arrancar (`--policy strict`, `strict` por defecto): no hay `allow_nonconformant` por
-llamada (seguridad §19.7). **Transporte** (decisión D6b): se mantiene **stdio** (DECISIONES §3) y se
+llamada (seguridad §19.7). **Transporte** (decisión D6b): se mantiene **stdio** (decisiones §3) y se
 activa **`outputSchema`** derivado con la feature `schemars` (ya preparada, §10 fila 14); `rmcp`
 **diferido**. `contracts/mcp.yml` se **reescribe** 13→10 y el guardián de contrato lo vigila.
 
@@ -1051,7 +1051,7 @@ Se **añaden** a los invariantes #1–#6 de `CLAUDE.md`, que siguen íntegros. L
 > `§19.3`, declarado congelado. Era el **único** de los 29 criterios de aceptación de
 > `REFACTOR_PHASE_2` demostrablemente incumplido («no existe terminología OKF en la API pública»).
 > Se cerró aprovechando que v0.3.0 ya es incompatible con v0.2.x: romper el wire costaba cero
-> entonces y dejaba de costarlo en cuanto se publicara. Ver `DECISIONES.md §13`.
+> entonces y dejaba de costarlo en cuanto se publicara. Ver `decisiones §13`.
 >
 > Wire resultante: `conformant` → `valid` · `requireConformantResult` → `requireValidResult` ·
 > `allowNonconformant` → `allowInvalid` · `NONCONFORMANT_RESULT` → `INVALID_RESULT`.
@@ -1404,7 +1404,7 @@ en E16/E17; E20 aporta solo la **política** y la semántica nueva de `knowledge
 
 ## 21. Superficie externa y distribución (E27)
 
-> **Ratificada el 2026-08-01** (puerta 1 de la épica E27, `DECISIONES.md §17`). **Aditiva: no
+> **Ratificada el 2026-08-01** (puerta 1 de la épica E27, `decisiones §17`). **Aditiva: no
 > supersede nada.** Regula lo que el proyecto muestra hacia fuera —README, documentación de usuario,
 > demo, pipeline de release y embudo de contribución—, no el motor. Contexto: una review OSS externa
 > (evaluada y verificada punto a punto, 2026-08-01) concluyó que el proyecto está **por delante de su
@@ -1414,7 +1414,7 @@ en E16/E17; E20 aporta solo la **política** y la semántica nueva de `knowledge
 
 - **Superficie pública, en inglés**: `README.md`, `docs/user/`, `examples/demo/`, `CONTRIBUTING.md`,
   `SECURITY.md`, `CODE_OF_CONDUCT.md` y los templates de `.github/`.
-- **Interno, sigue en español**: `ARCHITECTURE.md`, `DECISIONES.md`, `requirements/`, `docs/` (specs
+- **Interno, sigue en español**: `ARCHITECTURE.md`, `decisiones/`, `requirements/`, `docs/` (specs
   y workflows), `contracts/`, código, comentarios, mensajes de error del wire y commits.
 - La frontera es de **audiencia**, no de directorio: lo que un adoptante lee antes de decidir se
   escribe en inglés; lo que gobierna el desarrollo del repo se queda en español.
@@ -1422,7 +1422,7 @@ en E16/E17; E20 aporta solo la **política** y la semántica nueva de `knowledge
 ### 21.2 Distribución
 
 - **Vías soportadas**: binarios precompilados de GitHub Releases (3 plataformas) y
-  `cargo install --git`. **crates.io queda diferido** (`DECISIONES.md §17`, reabrible): publicar es
+  `cargo install --git`. **crates.io queda diferido** (`decisiones §17`, reabrible): publicar es
   permanente y los crates de dominio no están pensados como API de librería estable.
 - **Guardarraíles del pipeline** (`.github/workflows/release.yml`, E27-H01):
   1. un step temprano **falla si `github.ref_name != "v" + workspace.package.version`** — convierte
@@ -1456,9 +1456,9 @@ en E16/E17; E20 aporta solo la **política** y la semántica nueva de `knowledge
   fallback. El alcance declarado es honesto con el producto: motor local por stdio, sin red — la
   superficie de ataque relevante es parsing y path-traversal (chokepoint `RelPath`, invariante #6).
 
-### 21.5 Regla transversal de honestidad (ligada a `DECISIONES.md §14`)
+### 21.5 Regla transversal de honestidad (ligada a `decisiones §14`)
 
-**Mientras `DECISIONES.md §14` siga abierta** (el store SQLite no tiene consumidor y el watcher no
+**Mientras `decisiones §14` siga abierta** (el store SQLite no tiene consumidor y el watcher no
 corre en el motor), la superficie externa **no presenta `reindex`/la cache como camino de lectura del
 producto ni promete rendimiento a escala**. La cache se describe como lo que es: derivada y
 reconstruible. Es el principio de E23 («la documentación no afirma nada falso») aplicado donde el

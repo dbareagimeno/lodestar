@@ -21,14 +21,14 @@ código ni tests**: su entregable es la spec.
      (fichero de test, fixtures, sondas diferenciales), sección «Delta de contrato» si toca la
      frontera MCP (`contracts/mcp.yml`), trazabilidad §10/§12.
 3. Revisa su salida: comprueba que cada criterio es binario y verificable, que no cierra decisiones
-   de `DECISIONES.md`, y que el delta de contrato (si existe) referencia tipos de `core::types` por
+   de `decisiones/`, y que el delta de contrato (si existe) referencia tipos de `core::types` por
    nombre sin redefinirlos.
 4. Presenta al usuario: ID, resumen, criterios, decisiones abiertas que bloquean, y pide
    **ratificación explícita**. No continúes a `/tdd` sin ella.
 
 ## Reglas
 
-- Si la necesidad depende de una decisión abierta de `DECISIONES.md`, la historia se queda en
+- Si la necesidad depende de una decisión abierta de `decisiones/`, la historia se queda en
   borrador y la decisión se le plantea al usuario con opciones — nunca se resuelve por inercia.
 - Una historia ratificada es inmutable durante su implementación: si `/tdd` o el juez revelan un
   defecto de spec, se vuelve aquí a refinarla (nueva ratificación), no se reinterpreta en caliente.

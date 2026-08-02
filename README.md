@@ -326,14 +326,14 @@ governs development stays in Spanish):
 | [Architecture](ARCHITECTURE.md) | Current design and engine invariants |
 | [MCP contract](contracts/mcp.yml) | Surface and semantics of the tools |
 | [Implementation status](IMPLEMENTATION_STATUS.md) | Verified capabilities and traceability |
-| [Decisions](DECISIONES.md) | Open and ratified product decisions |
+| [Decisions](decisiones/README.md) | Open and ratified product decisions |
 | [Changelog](CHANGELOG.md) | Per-release history of changes |
 | [Releasing](RELEASING.md) | Publication process |
 
 ## Roadmap
 
 There is no separate roadmap document to keep in sync: the living record of what is decided, what is
-still open and why is [`DECISIONES.md`](DECISIONES.md) (in Spanish, like the rest of the internal
+still open and why is [`decisiones/`](decisiones/README.md) (in Spanish, like the rest of the internal
 material). Each entry states the question, the options considered and the ratified answer, so what
 comes next is readable from the open ones. Anything not implemented today is not promised here.
 

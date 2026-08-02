@@ -77,8 +77,13 @@ Mapa de documentos — quién manda sobre qué:
   dueño) resuelven contradicciones ya zanjadas; consúltalas antes de proponer un cambio.
 - **`IMPLEMENTATION_STATUS.md`** — estado real por épica/historia y qué invariantes están
   verificados. Actualízalo cuando cierres o abras trabajo.
-- **`DECISIONES.md`** — decisiones abiertas que requieren criterio del usuario (rmcp, ts-rs,
-  packaging, semántica de `--range`…). **No las tomes por tu cuenta**: propón y pregunta.
+- **`decisiones/`** — una decisión por fichero (`NN-slug.md`, `§N` como identificador estable).
+  Cada fichero lleva **frontmatter YAML consultable por el propio motor**: `estado`
+  (`abierta`/`tomada`/`ratificada`/`cerrada`/`diferida`/`obsoleta`) y `prioridad` de **1 a 5, donde 5
+  es lo más importante**. Lo que exige criterio del usuario hoy se obtiene con
+  `prioridad >= 4 and estado = "abierta"` (p. ej. el store sin consumidor, `decisiones §14`; el
+  rechazo de parámetros no declarados, `decisiones §15`; la deuda de auditoría de E25/E26,
+  `decisiones §16`). **No las tomes por tu cuenta**: propón y pregunta.
 - **`docs/REFACTOR_PHASE_2.md`** (+ `ARCHITECTURE.md §20`) — la **spec de comportamiento** vigente
   para la migración a workspace universal de Markdown.
 - **`prototype/index.html`** (~2900 líneas, HTML/JS vanilla + localStorage) — **referencia
@@ -176,7 +181,7 @@ Las **dos únicas fachadas** son ahora `lodestar-cli` y `lodestar-mcp`; la facha
    **una vez** en `lodestar-core::types`. **Sin capa DTO paralela**. (§4.1 fija los nombres/orden
    exactos — respétalos.) Los tipos los consumen directamente `lodestar-cli`/`lodestar-mcp`; **ya no
    hay espejo TS que sincronizar** — el `frontend/src/lib/ipc/types.ts` desapareció al retirar la UI
-   a `experimental/ui-desktop`, y con él la nota de ts-rs/specta de `DECISIONES.md §4` (obsoleta para
+   a `experimental/ui-desktop`, y con él la nota de ts-rs/specta de `decisiones §4` (obsoleta para
    el espejo TS).
 5. **Un watcher = único escritor.** Los comandos **nunca** escriben la cache: escriben el `.md`
    (atómico temp+rename) y el watcher reconcilia (gate por hash blake3 que descarta echoes/no-ops).
@@ -218,11 +223,13 @@ parte del motor headless ni del flujo de desarrollo de v2; su diseño se documen
   semántica son ahora los tests de `crates/lodestar-core/tests/core.rs`.
 - **Antes de mergear**: el CI exige fmt + clippy `-D warnings` + build `--all-targets` + tests +
   doc + pureza del core. Ejecuta el subconjunto relevante en local.
-- **`ARCHITECTURE.md` es la autoridad** en diseño; `DECISIONES.md` lista lo que está abierto a
+- **`ARCHITECTURE.md` es la autoridad** en diseño; `decisiones/` lista lo que está abierto a
   criterio del usuario — si una decisión ratificada te parece equivocada, plantéalo explícitamente,
   no la deshagas por inercia.
-- **Mantén los documentos de estado**: si cierras algo de `DECISIONES.md` o cambias el estado de una
-  épica, refleja el cambio en `IMPLEMENTATION_STATUS.md`/`DECISIONES.md` en el mismo PR.
+- **Mantén los documentos de estado**: si cierras algo de `decisiones/` o cambias el estado de una
+  épica, refleja el cambio en `IMPLEMENTATION_STATUS.md`/`decisiones/` en el mismo PR — cerrar una
+  decisión significa además actualizar su frontmatter (`estado`, `cerrada_en`, `revisada_en`) y la
+  fila correspondiente en `decisiones/README.md`.
 
 ## Flujo de trabajo con agentes (SDD · TDD · BDD · jueces ciegos)
 

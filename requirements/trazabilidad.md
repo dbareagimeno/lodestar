@@ -82,7 +82,7 @@ Todos producidos por **E1-H06** (conformidad) y agregados por **E1-H07** (analyz
 
 ## §19 — Giro headless (decisiones D0–D6/D-CheckCode/D-check) → historias
 
-> Ratificado 2026-07-22 (`ARCHITECTURE.md §19`, `DECISIONES.md §0`). Supersede §13 en superficie de
+> Ratificado 2026-07-22 (`ARCHITECTURE.md §19`, `decisiones §0`). Supersede §13 en superficie de
 > producto. Cada sub-decisión mapea a las historias que la implementan (épicas E9–E14).
 
 | Sub-decisión (§0/§19) | Historias |
@@ -174,11 +174,11 @@ Todos producidos por **E1-H06** (conformidad) y agregados por **E1-H07** (analyz
 | `§19.6` (presupuesto de payload) · `E24-H09` (validación de valores) | **U5** — `graph_query` sin default ni máximo (`None => total`, sirve el grafo completo) y `metadata_inspect` sin paginación ni tope en ninguno de sus dos modos | ✅ E26-H10 |
 | `contracts/README.md` (el contrato describe el servidor real) | **U6** — `contracts/mcp.yml` describe el comportamiento pre-`E24-H10`, `E24-H07` declaró frontera sin tocar el contrato, y cuatro tools declaran sus errores como prosa suelta | ✅ E26-H11 |
 
-## Deuda declarada por la auditoría de E25/E26 → `DECISIONES §16`
+## Deuda declarada por la auditoría de E25/E26 → `decisiones §16`
 
 > Lo que quedó **explícitamente fuera** de esta tanda, con su origen. No son filas de cobertura
 > pendiente: son decisiones de no-hacer, registradas para que la próxima auditoría no las
-> redescubra. El detalle, con opciones y recomendación, está en [`DECISIONES.md §16`](../DECISIONES.md).
+> redescubra. El detalle, con opciones y recomendación, está en [`decisiones §16`](../decisiones/16-deuda-auditoria-e25-e26.md).
 
 | Punto (§16) | Origen |
 |---|---|
@@ -221,7 +221,7 @@ Todos producidos por **E1-H06** (conformidad) y agregados por **E1-H07** (analyz
 
 ## E27 — Producto, distribución y apertura OSS → historias
 
-> Diseño ratificado el 2026-08-01: `ARCHITECTURE.md §21` (adenda aditiva) y `DECISIONES.md §17`
+> Diseño ratificado el 2026-08-01: `ARCHITECTURE.md §21` (adenda aditiva) y `decisiones §17`
 > (cierre de la puerta 1). Estas filas no salen de `§10`/`§12`: mapean cada sub-decisión de
 > `§21`/`§17` y cada hallazgo confirmado de la review OSS externa a la historia que lo cubre.
 > Ninguna historia toca la frontera MCP.
@@ -237,6 +237,6 @@ Todos producidos por **E1-H06** (conformidad) y agregados por **E1-H07** (analyz
 | Docs de usuario de referencia en inglés: query-language (con límites de `§12`/`§16.a` declarados), safe-changes | `§21.1`/`§21.5` | E27-H11 |
 | Épicas E0–E8 marcadas históricas en fichero; invariantes #4 (`.d.ts`) y #7 (git) corregidos en `requirements/README.md`; regla de idioma registrada | `§21.1` · hallazgo «2 invariantes retirados listados como vigentes» | E27-H07 |
 | Embudo de contribución: CONTRIBUTING issues-first + SECURITY (Private Vulnerability Reporting + email) + Contributor Covenant 2.1 | `§21.4` · `§17`-DB/DD · hallazgo «embudo OSS cerrado» | E27-H08 |
-| Templates de issue/PR + roadmap que apunta a `DECISIONES.md` (sin documento paralelo) | `§21.4` | E27-H09 |
-| Publicación en crates.io — **diferida** | `§17`-DA (reabrible) | E27-H10 **[BLOQUEADA por DECISIONES §17]** |
-| Regla transversal: la superficie externa no presenta la cache como camino de lectura ni promete escala mientras `§14` siga abierta | `§21.5` · `DECISIONES §14` | E27-H02, E27-H03, E27-H05, E27-H11 (criterio de aceptación en las cuatro) |
+| Templates de issue/PR + roadmap que apunta a `decisiones/` (sin documento paralelo) | `§21.4` | E27-H09 |
+| Publicación en crates.io — **diferida** | `§17`-DA (reabrible) | E27-H10 **[BLOQUEADA por decisiones §17]** |
+| Regla transversal: la superficie externa no presenta la cache como camino de lectura ni promete escala mientras `§14` siga abierta | `§21.5` · `decisiones §14` | E27-H02, E27-H03, E27-H05, E27-H11 (criterio de aceptación en las cuatro) |

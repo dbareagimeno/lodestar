@@ -29,11 +29,11 @@ validación responde `VÁLIDO` incumple los dos a la vez.
   en `contracts/mcp.yml:276-290` («el servidor valida los VALORES de los parámetros que declara, e
   IGNORA lo que no declara»), en la cabecera de `descubribilidad.rs:59-67` y en `tools.rs:57-60`. No
   es una extensión de la política: es revisarla. **E24-H18** la registra como decisión abierta en
-  `DECISIONES.md`; no se implementa aquí.
+  `decisiones/`; no se implementa aquí.
 - **`lodestar recover` como subcomando.** La recuperación se resuelve de forma transparente
   (E24-H03); el hueco residual para una persona o un CI en perfil `readonly` queda declarado en
   E24-H04, no cerrado.
-- **Conectar el store** (`DECISIONES §14`, abierta desde E23-H16). Sigue sin consumidor.
+- **Conectar el store** (`decisiones §14`, abierta desde E23-H16). Sigue sin consumidor.
 
 ---
 
@@ -679,7 +679,7 @@ validación responde `VÁLIDO` incumple los dos a la vez.
   - Corregir el drift anterior.
   - `IMPLEMENTATION_STATUS.md` gana la sección de E24; `requirements/README.md` y
     `requirements/trazabilidad.md` incorporan la épica.
-  - `DECISIONES.md` gana una sección nueva: **rechazar parámetros no declarados** en la superficie
+  - `decisiones/` gana un fichero nuevo: **rechazar parámetros no declarados** en la superficie
     MCP — contexto, la política vigente citada, opciones y recomendación, **sin tomar la decisión**.
   - `CHANGELOG.md`: sección `## [0.3.1] - AAAA-MM-DD` con `### Corregido`, viñetas que abren en
     negrita con el síntoma (estilo E23), y pie de enlaces actualizado
