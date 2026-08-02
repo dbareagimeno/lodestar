@@ -9,8 +9,8 @@
 > repo público tenga el embudo mínimo de contribución — sin cambiar ni una línea de comportamiento
 > del motor.
 > Referencias maestras: `ARCHITECTURE.md §21` (superficie externa y distribución, ratificada
-> 2026-08-01) · `DECISIONES.md §17` (cierre de la puerta 1: crates.io diferido, issues-first,
-> REFACTOR_PHASE_2 se queda, Covenant 2.1) · `DECISIONES.md §14` (la restricción transversal) ·
+> 2026-08-01) · `decisiones §17` (cierre de la puerta 1: crates.io diferido, issues-first,
+> REFACTOR_PHASE_2 se queda, Covenant 2.1) · `decisiones §14` (la restricción transversal) ·
 > `CLAUDE.md` (invariantes #1 y #6, que la superficie pública debe describir con honestidad).
 
 **Origen**: review OSS externa (2026-08-01), evaluada y verificada punto a punto contra `main`
@@ -22,7 +22,7 @@ advertencia del prefijo `v`; docstring de fixtures) **ya están hechos y no form
 épica**.
 
 **Principio rector**: *la superficie externa solo promete lo que el motor ejecuta hoy* (`§21.5`).
-Corolario operativo, vigente mientras `DECISIONES.md §14` siga abierta: **ningún documento público
+Corolario operativo, vigente mientras `decisiones §14` siga abierta: **ningún documento público
 presenta `reindex`/la cache SQLite como camino de lectura del producto ni promete rendimiento a
 escala** — la cache se describe como derivada y reconstruible, que es lo que es. Ante cualquier duda
 de redacción, se ejecuta el comando y se pega la salida real.
@@ -33,7 +33,7 @@ como todo `requirements/`, se escribe en español.
 
 **Fuera de alcance (explícito)**:
 
-- **Conectar el store + watcher.** `DECISIONES.md §14` sigue abierta; irá a una épica posterior con
+- **Conectar el store + watcher.** `decisiones §14` sigue abierta; irá a una épica posterior con
   puerta de diseño propia (cambia el camino de lectura de las 10 tools y toca el invariante #3).
   Esta épica solo la **respeta**: es la fuente de la regla transversal.
 - **Firma/notarización de binarios.** Diferida en `RELEASING.md`; los checksums de H01 cubren la
@@ -42,7 +42,7 @@ como todo `requirements/`, se escribe en español.
   benchmarks son el criterio de salida natural de la épica del store.
 - **Cualquier cambio de comportamiento del motor o de la frontera MCP.** Ninguna historia toca
   `crates/*/src` ni `contracts/mcp.yml`: **cero deltas de contrato en toda la épica**.
-- **La matriz de trazabilidad retroactiva de E15–E24** (`DECISIONES.md §16.k`): es una historia
+- **La matriz de trazabilidad retroactiva de E15–E24** (`decisiones §16(k)`): es una historia
   propia con su propio criterio de verificación, no un apéndice de esta épica.
 
 ---
@@ -58,7 +58,7 @@ como todo `requirements/`, se escribe en español.
   externa. Además, nada impide hoy empujar `v0.6.0` sobre un árbol cuyo `workspace.package.version`
   sigue en `0.5.0`: los assets se nombrarían con una versión que el binario no declara.
 - **Referencias**: `ARCHITECTURE.md §21.2` · `.github/workflows/release.yml` · `RELEASING.md`
-  (pasos 4–6) · `DECISIONES.md §17` (la firma sigue diferida; esto no la sustituye).
+  (pasos 4–6) · `decisiones §17` (la firma sigue diferida; esto no la sustituye).
 - **Alcance**:
   - Un script `scripts/verifica-tag-release.sh` (interno, en español) que recibe el nombre del tag,
     extrae `version` de `[workspace.package]` en `Cargo.toml` y **sale con error** si el tag no es
@@ -220,7 +220,7 @@ como todo `requirements/`, se escribe en español.
 ### E27-H06 — Reorganizar `docs/`: vigente vs. superseded
 
 - **Objetivo**: que `docs/` distinga lo que gobierna de lo que es historia, sin romper ni una cita.
-- **Referencias**: `ARCHITECTURE.md §21.3` · `DECISIONES.md §17` (decisión DC: el criterio es
+- **Referencias**: `ARCHITECTURE.md §21.3` · `decisiones §17` (decisión DC: el criterio es
   *vigente/superseded*, y `REFACTOR_PHASE_2.md` —citado por ~51 ficheros— **no se mueve**).
 - **Alcance**:
   - Crear `docs/history/` y mover ahí los 4 documentos superseded: `REFACTOR.md`,
@@ -280,7 +280,7 @@ como todo `requirements/`, se escribe en español.
   diferenciales del producto— tengan referencia de usuario, honesta con sus límites declarados.
 - **Referencias**: `ARCHITECTURE.md §20.8` (lenguaje) · `§19.5` (transacciones) ·
   `contracts/mcp.yml` (la semántica que estas páginas narran y **no pueden contradecir**) ·
-  `DECISIONES.md §12` (fechas como strings), `§16.a` (límites de quoting declarados) ·
+  `decisiones §12` (fechas como strings), `§16(a)` (límites de quoting declarados) ·
   `README.md §Cambios seguros` (el resumen que aquí se desarrolla).
 - **Alcance**:
   - `docs/user/query-language.md`: sintaxis de `where` y su equivalente `filter` JSON, operadores y
@@ -295,7 +295,7 @@ como todo `requirements/`, se escribe en español.
     en vez de duplicarlo.
   - Ambos con ejemplos por el wire (peticiones y respuestas MCP reales, saneadas de rutas locales).
 - **Fuera de alcance**: cambiar o «mejorar» semántica alguna al documentarla (si documentar destapa
-  un defecto, se registra en `DECISIONES.md`, no se arregla aquí); documentar el envelope de
+  un defecto, se registra en `decisiones/`, no se arregla aquí); documentar el envelope de
   `lodestar-app` (sin llamantes, `§16.b`).
 - **Criterios de aceptación** (checklist binario):
   - Los dos ficheros existen, en inglés, enlazados desde `docs/README.md` y el README raíz.
@@ -350,7 +350,7 @@ como todo `requirements/`, se escribe en español.
 
 - **Objetivo**: que un externo sepa cómo contribuir, cómo reportar una vulnerabilidad y bajo qué
   normas de convivencia — sin que ninguno de los tres documentos contradiga el proceso real del repo.
-- **Referencias**: `ARCHITECTURE.md §21.4` · `DECISIONES.md §17` (DB: issues-first + Discussions
+- **Referencias**: `ARCHITECTURE.md §21.4` · `decisiones §17` (DB: issues-first + Discussions
   OFF; DD: Covenant 2.1 + Private Vulnerability Reporting + email) · `CLAUDE.md` y
   `docs/WORKFLOWS.md` (el proceso que CONTRIBUTING destila **sin duplicar**: enlaza la autoridad, no
   la copia).
@@ -388,7 +388,7 @@ como todo `requirements/`, se escribe en español.
 - **Objetivo**: que abrir un buen issue o una buena PR sea el camino de menor esfuerzo, y que
   «¿qué viene después?» tenga respuesta pública sin inventar un documento nuevo que mantener.
 - **Referencias**: `ARCHITECTURE.md §21.4` · `CONTRIBUTING.md` (E27-H08, cuya política los
-  templates operacionalizan) · `DECISIONES.md` (el roadmap real del proyecto: sus decisiones
+  templates operacionalizan) · `decisiones/` (el roadmap real del proyecto: sus decisiones
   abiertas).
 - **Alcance**:
   - `.github/ISSUE_TEMPLATE/bug_report.yml` (inglés): versión de lodestar, plataforma, forma del
@@ -401,7 +401,7 @@ como todo `requirements/`, se escribe en español.
   - `.github/PULL_REQUEST_TEMPLATE.md` (inglés): checklist alineada con los gates del CI (fmt,
     clippy `-D warnings`, tests incluidos los de `test-failpoints`, docs actualizadas si cambia la
     superficie) y la casilla «para features: enlaza la issue previa».
-  - Roadmap: sección breve en el README (E27-H02) que apunta a `DECISIONES.md` como registro vivo de
+  - Roadmap: sección breve en el README (E27-H02) que apunta a `decisiones/` como registro vivo de
     decisiones abiertas (con la nota de que está en español), en vez de un `ROADMAP.md` paralelo que
     envejecería — mismo criterio anti-duplicación del invariante #4, aplicado a documentos.
 - **Fuera de alcance**: bots, labels automáticos, CODEOWNERS, GitHub Projects.
@@ -410,7 +410,7 @@ como todo `requirements/`, se escribe en español.
   - `config.yml` desactiva los issues en blanco y enlaza el reporte privado de vulnerabilidades.
   - La checklist de la PR template no exige nada que el CI no exija (ni menos: los cuatro gates
     están).
-  - El README contiene la sección de roadmap apuntando a `DECISIONES.md`.
+  - El README contiene la sección de roadmap apuntando a `decisiones/`.
 - **Dependencias**: E27-H02, E27-H08.
 - **Pruebas**: el render de los formularios en GitHub (capturas en la PR).
 
@@ -418,10 +418,10 @@ como todo `requirements/`, se escribe en español.
 
 ## Bloque E — Diferido
 
-### E27-H10 — Publicación en crates.io — **[BLOQUEADA por DECISIONES §17]**
+### E27-H10 — Publicación en crates.io — **[BLOQUEADA por decisiones §17]**
 
 - **Objetivo**: que `cargo install lodestar-cli` funcione desde el registry público.
-- **Estado**: **bloqueada.** `DECISIONES.md §17` (mitad DA, reabrible) difirió la publicación:
+- **Estado**: **bloqueada.** `decisiones §17` (mitad DA, reabrible) difirió la publicación:
   permanente por naturaleza, sin demanda demostrada, con la disponibilidad del nombre sin verificar
   y una colisión de marca registrada (el Lodestar de ChainSafe). Esta historia **no se detalla ni se
   arranca** hasta que esa mitad se reabra y se cierre en publicar.
@@ -430,7 +430,7 @@ como todo `requirements/`, se escribe en español.
   publicación en el orden topológico ya documentado en `RELEASING.md`; README e
   instrucciones de instalación actualizados; decidir si el pipeline de release automatiza el
   `cargo publish`.
-- **Dependencias**: reapertura y cierre de `DECISIONES.md §17`-DA · E27-H01 (el pipeline guardado
+- **Dependencias**: reapertura y cierre de `decisiones §17-DA` · E27-H01 (el pipeline guardado
   es prerrequisito de automatizar nada más).
 
 ---
@@ -477,4 +477,4 @@ contra `examples/demo/`; el guion de la demo corre en CI y muerde si algo deja d
 nada que el motor no ejecute; `docs/` distingue vigente de superseded sin una cita rota;
 `requirements/` marca su propia historia y no lista invariantes retirados; y el repo público tiene
 CONTRIBUTING, SECURITY, código de conducta y templates coherentes con la política issues-first de
-`DECISIONES.md §17`. crates.io queda diferido y registrado, no olvidado.
+`decisiones §17`. crates.io queda diferido y registrado, no olvidado.

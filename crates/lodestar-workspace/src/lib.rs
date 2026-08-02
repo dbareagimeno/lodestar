@@ -230,7 +230,7 @@ impl Workspace {
     ///
     /// **Best-effort**: un fallo de escritura (checkout de solo lectura, permisos) se reporta por
     /// stderr y no aborta la operación — el ajuste es una cortesía, no una precondición
-    /// (`ARCHITECTURE.md §19.4`, `DECISIONES.md §0` D5). Nunca escribe configuración: un workspace
+    /// (`ARCHITECTURE.md §19.4`, `decisiones §0` D5). Nunca escribe configuración: un workspace
     /// sin `.lodestar/config.yaml` sigue sin tenerlo después.
     pub fn ensure_managed_gitignore(&self) {
         gitignore::ensure_gitignore(&self.root);

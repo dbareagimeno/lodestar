@@ -60,7 +60,7 @@ construcción» al final del documento fija el orden de sus historias. **E9 es p
 git, define config/runtime); **E10** habilita 11–13 (schemas y revisiones son la base de impacto y
 planificación); **E12** depende de **E11** (el impacto alimenta el riesgo del plan); **E13** aplica los
 planes de **E12**; **E14** cierra. Ninguna historia del giro está **[BLOQUEADA]**: las decisiones de diseño
-(D0–D6/D-CheckCode/D-check) se ratificaron en la puerta 1 (`DECISIONES.md §0`, `ARCHITECTURE.md §19`).
+(D0–D6/D-CheckCode/D-check) se ratificaron en la puerta 1 (`decisiones §0`, `ARCHITECTURE.md §19`).
 
 ## Mapa de épicas de la migración a Markdown universal (alineadas con `ARCHITECTURE.md §20.14`)
 
@@ -119,7 +119,7 @@ spec de comportamiento** y el arnés diferencial se retira. La spec de la migrac
 > (rama `epic/e25-e26-endurecimiento`, hasta `7ebe764`). Detalle por historia, veredictos de los
 > jueces ciegos e invariantes verificados en
 > [`IMPLEMENTATION_STATUS.md`](../IMPLEMENTATION_STATUS.md); la deuda que quedó **fuera** por decisión
-> está en [`DECISIONES.md §16`](../DECISIONES.md).
+> está en [`decisiones §16`](../decisiones/16-deuda-auditoria-e25-e26.md).
 
 | Épica | Estado | Área | Doc |
 |---|---|---|---|
@@ -140,7 +140,7 @@ que dependen las tres siguientes, y **H11** es la pasada final de coherencia del
 de H07–H10 **y** de **E25-H02**, cuyo delta entra en la misma pasada. E26 no depende
 funcionalmente de E25 salvo en esa fila: si se paralelizaran, su único punto de encuentro es
 `contracts/mcp.yml`. Ninguna historia está **[BLOQUEADA]**: la única decisión abierta que las roza
-—rechazar parámetros **no** declarados, registrada por `E24-H18` en `DECISIONES.md`— está
+—rechazar parámetros **no** declarados, registrada por `E24-H18` en `decisiones/`— está
 explícitamente fuera de alcance en las dos épicas.
 
 **Principio rector de cada una** (la regla que desempata dudas durante toda la épica): en **E25**,
@@ -151,19 +151,19 @@ computó* — ante la duda, re-mirar bajo el lock y abortar si cambió. En **E26
 ## Mapa de épicas de producto y apertura OSS
 
 > Primera épica de **superficie externa** (`ARCHITECTURE.md §21`, ratificada 2026-08-01;
-> `DECISIONES.md §17`). Origen: review OSS externa que concluyó que el repo está técnicamente por
+> `decisiones §17`). Origen: review OSS externa que concluyó que el repo está técnicamente por
 > delante de su adopción. No toca el motor ni la frontera MCP: release con guardarraíles, README en
 > inglés, demo ejecutable con smoke en CI, `docs/user/`, reorganización de `docs/` y embudo de
 > contribución.
 
 | Épica | Estado | Área | Doc |
 |---|---|---|---|
-| **E27** — Producto, distribución y apertura OSS | ✅ completa (2026-08-02; H10 bloqueada por `DECISIONES §17`-DA) | guardarraíles de release · README EN · `examples/demo/` + smoke CI · `docs/user/` · `docs/history/` · CONTRIBUTING/SECURITY/CoC · templates | [epica-27-producto-distribucion-oss.md](epica-27-producto-distribucion-oss.md) |
+| **E27** — Producto, distribución y apertura OSS | ✅ completa (2026-08-02; H10 bloqueada por `decisiones §17-DA`) | guardarraíles de release · README EN · `examples/demo/` + smoke CI · `docs/user/` · `docs/history/` · CONTRIBUTING/SECURITY/CoC · templates | [epica-27-producto-distribucion-oss.md](epica-27-producto-distribucion-oss.md) |
 
 **Orden de construcción (E27)**: `H01 → H03 → H02 → H04 → H06 → H05 → H11 → H07 → H08 → H09 →
-[H10]`. **H10 (crates.io) está `[BLOQUEADA por DECISIONES §17]`** hasta que esa decisión se reabra.
+[H10]`. **H10 (crates.io) está `[BLOQUEADA por decisiones §17]`** hasta que esa decisión se reabra.
 **Principio rector**: *la superficie externa solo promete lo que el motor ejecuta hoy* — mientras
-`DECISIONES.md §14` siga abierta, ningún documento público presenta `reindex`/la cache SQLite como
+`decisiones §14` siga abierta, ningún documento público presenta `reindex`/la cache SQLite como
 camino de lectura ni promete rendimiento a escala (`§21.5`). **Regla de idioma** (`§21.1`): la
 superficie pública que esta épica produce va en **inglés**; los documentos internos siguen en
 español.

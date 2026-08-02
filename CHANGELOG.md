@@ -187,7 +187,7 @@ viajaron ya en la v0.4.0 y se repiten aquí porque ese bloque recoge el delta co
 Las 11 historias pasaron por **juez ciego** con *mutation testing* pedido en el encargo; las 11
 volvieron `APROBADA CON RESERVAS` y **todas las reservas mayores se cerraron en el mismo ciclo**. Lo
 que se decidió **no** arreglar aquí queda registrado, con su origen y su motivo, en
-[`DECISIONES §16`](DECISIONES.md) — doce puntos, de `(a)` a `(l)`: los tres límites de *quoting* del
+[`decisiones §16`](decisiones/16-deuda-auditoria-e25-e26.md) — doce puntos, de `(a)` a `(l)`: los tres límites de *quoting* del
 lenguaje de consulta, el `Envelope` sin llamantes, la cache SQLite y el watcher sin uso en
 producción, el servidor MCP monohilo sin *timeout* ni cancelación, la config que no rechaza claves
 desconocidas, el workspace vacío indistinguible de un directorio equivocado, la API pública no
@@ -545,7 +545,7 @@ y pipeline de release multiplataforma.
 - **Pipeline de release multiplataforma** (`release.yml`): compila macOS Apple
   Silicon (arm64), Windows y Linux, y publica un GitHub Release en borrador con los
   bundles (dmg/deb/appimage/nsis) y los binarios de CLI/MCP. Bundles **sin firmar**
-  (la firma/notarización queda diferida — ver `DECISIONES.md`).
+  (la firma/notarización queda diferida — ver `decisiones §1`).
 - **CI multiplataforma**: el job de Rust (fmt/clippy/build/test/doc) corre en Linux,
   macOS y Windows; se mantienen los jobs `core-purity` y `frontend`.
 

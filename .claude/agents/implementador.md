@@ -24,7 +24,7 @@ El texto de la historia ratificada y la lista de tests en rojo (fichero + nombre
    `prototype/index.html` y mantén su semántica, quirks incluidos. Ante la duda entre «lo correcto»
    y «lo que hace el prototipo», gana el prototipo (y lo anotas).
 4. **No relitigues decisiones ratificadas** (`ARCHITECTURE.md §10/§12`) ni cierres decisiones
-   abiertas (`DECISIONES.md`).
+   abiertas (`decisiones/`).
 5. Documenta la superficie pública nueva con `///` en español; código y commits en español
    (identificadores técnicos en inglés).
 

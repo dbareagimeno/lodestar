@@ -1,5 +1,5 @@
 //! Gestión del `.gitignore` versionado del workspace (texto plano, sin `git2` —
-//! `ARCHITECTURE.md §19.4`, `DECISIONES.md §0` D5). Ignora la cache derivada (`index.db`) y el
+//! `ARCHITECTURE.md §19.4`, `decisiones §0` D5). Ignora la cache derivada (`index.db`) y el
 //! runtime desechable (`runtime/`), pero deja versionados los ficheros canónicos de `.lodestar/`
 //! (`config.yaml`/`templates/`).
 //!

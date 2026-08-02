@@ -22,7 +22,7 @@ Encadena el flujo completo del repo. Cada etapa tiene su skill; tú orquestas y 
    superficies de seguridad). **Puerta: veredicto APROBADA (o CON RESERVAS aceptadas explícitamente
    por el usuario).** Si RECHAZADA: vuelve a la etapa que el veredicto señale (3 si es de
    implementación, 1 si es de spec) y re-juzga con un juez fresco — nunca negocies con el mismo juez.
-6. **Estado** — actualiza `IMPLEMENTATION_STATUS.md` (y `DECISIONES.md` si la historia cerró o abrió
+6. **Estado** — actualiza `IMPLEMENTATION_STATUS.md` (y `decisiones/` si la historia cerró o abrió
    algo) en el mismo cambio.
 7. **Commit** — mensaje en español que nombra la historia (`E<n>-H<nn>: <qué entrega>`). El push/PR
    queda a criterio del usuario: propónlo, no lo hagas por defecto.

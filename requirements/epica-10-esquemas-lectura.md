@@ -267,7 +267,7 @@ Invariante #4: cada tipo nuevo se define **una vez** en `core::types` (salvo el 
 
 ### E10-H13 — `outputSchema` (schemars) + reescritura de `contracts/mcp.yml` (lectura)
 - **Objetivo**: activar `outputSchema` en las tools de lectura y reflejar la superficie nueva en el contrato.
-- **Referencias**: `ARCHITECTURE.md §19.6` · decisión **D6b** · `REFACTOR §13` · `DECISIONES §3`.
+- **Referencias**: `ARCHITECTURE.md §19.6` · decisión **D6b** · `REFACTOR §13` · `decisiones §3`.
 - **Alcance**:
   - Derivar `outputSchema` con la feature `schemars` (ya preparada) en las respuestas de las 5 tools de esta épica.
   - Reescribir la parte de lectura de `contracts/mcp.yml` (10 tools objetivo; las de cambio llegan en E12/E13).

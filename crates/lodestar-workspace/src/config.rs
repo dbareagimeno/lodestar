@@ -1,10 +1,10 @@
 //! Configuración **por-workspace**: `<root>/.lodestar/config.yaml` (`ARCHITECTURE.md §20.5`, `§20.9`;
-//! `DECISIONES.md §0` D4/D5).
+//! `decisiones §0` D4/D5).
 //!
 //! Desde E15-H08 es el **único** fichero de configuración del motor: el `lodestar.toml` legado
 //! (`Config`/`GateConfig`) se borró —dos ficheros de config para lo mismo era deuda, y su otro
 //! habitante (`identity`) murió en E15-H01—, de modo que un `lodestar.toml` en la raíz es hoy un
-//! fichero más del proyecto: ni se lee, ni su sintaxis importa (cierra `DECISIONES.md §8`).
+//! fichero más del proyecto: ni se lee, ni su sintaxis importa (cierra `decisiones §8`).
 //!
 //! La regla que gobierna todo lo que hay aquí es **la config LIMITA, nunca habilita**
 //! (`ARCHITECTURE.md §20.1`): su ausencia no impide usar Lodestar (defaults seguros = los de

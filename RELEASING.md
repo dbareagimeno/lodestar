@@ -101,13 +101,13 @@ Los binarios de CLI/MCP salen **sin firmar** para macOS (arm64), Windows y Linux
 puede implicar avisos del SO al ejecutarlos (Gatekeeper en macOS, SmartScreen en
 Windows). La firma y notarización están **diferidas, no descartadas**: cuando se
 aborde, el pipeline añadirá los certificados/secretos correspondientes. Ver el estado
-en `DECISIONES.md` (packaging/firma).
+en `decisiones §1` (packaging/firma).
 
 ## Publicar en crates.io (opcional)
 
 > **AVISO**: publicar en crates.io es **permanente** (crates.io no permite despublicar
 > de verdad, solo *yank*). Hazlo solo si esa permanencia es intencional; la decisión
-> sigue abierta en `DECISIONES.md`.
+> sigue abierta en `decisiones §17-DA`.
 
 Requiere autenticarse una vez con un token de crates.io:
 

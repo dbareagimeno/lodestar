@@ -295,7 +295,7 @@ fn config_malformada_es_error() {
 /// **Dado** un `lodestar.toml` en la raíz, **Cuando** se abre, **Entonces** se ignora por completo
 /// (es un fichero más del proyecto).
 ///
-/// La historia **borra** `Config`/`lodestar.toml` (`config.rs:14-63`) y cierra `DECISIONES.md §8`:
+/// La historia **borra** `Config`/`lodestar.toml` (`config.rs:14-63`) y cierra `decisiones §8`:
 /// dos ficheros de configuración para lo mismo es deuda, y el otro habitante del TOML (`identity`)
 /// murió en E15-H01. Lo que este test fija no es la desaparición del símbolo —eso no se puede
 /// aseverar desde un test— sino sus **dos consecuencias observables**, que son las que un futuro

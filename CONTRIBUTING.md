@@ -91,7 +91,7 @@ Lodestar splits languages by **audience**, not by directory
 - **English** for everything an adopter reads before deciding: `README.md`, `docs/user/`,
   `examples/demo/`, this file, `SECURITY.md`, `CODE_OF_CONDUCT.md` and the `.github/` templates.
 - **Spanish** for everything that governs the development of the repository: `ARCHITECTURE.md`,
-  `DECISIONES.md`, `requirements/`, `docs/`, `contracts/`, source comments, error messages on the
+  `decisiones/`, `requirements/`, `docs/`, `contracts/`, source comments, error messages on the
   wire and commit messages.
 
 So yes — once you go past the README you will find the internal documentation in Spanish, and that

@@ -4,7 +4,7 @@
 //! DTO paralela (principio #4). **Ya no hay espejo TypeScript que sincronizar**: el `.d.ts`
 //! generado con ts-rs/specta (E0-H04/E6-H03) existía para la UI de escritorio, que se retiró de
 //! `main` a la rama `experimental/ui-desktop` con el giro headless (`§19.1`) llevándose consigo
-//! `frontend/src/lib/ipc/types.ts` — y con ello `DECISIONES.md §4`, hoy obsoleta. Lo que sí se
+//! `frontend/src/lib/ipc/types.ts` — y con ello `decisiones §4`, hoy obsoleta. Lo que sí se
 //! deriva desde aquí es el **JSON Schema** del `outputSchema` de las tools MCP, vía la feature
 //! `schemars` (ver la macro `schema_derive!` de abajo).
 

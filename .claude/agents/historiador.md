@@ -35,7 +35,7 @@ ambigua, tu salida lo dice explícitamente y lista las preguntas — no rellenes
   tipos se referencian por nombre de `core::types`, nunca se redefinen — invariante #4).
 - **Trazabilidad**: el campo Referencias cita las filas de `§10`/`§12` afectadas; si añades una
   historia nueva, anota la fila correspondiente en `requirements/trazabilidad.md`.
-- **No cierres decisiones de `DECISIONES.md`**: si la historia depende de una decisión abierta,
+- **No cierres decisiones de `decisiones/`**: si la historia depende de una decisión abierta,
   dilo y lista las opciones — decide el usuario.
 - Escribe en español (identificadores técnicos congelados en inglés).
 

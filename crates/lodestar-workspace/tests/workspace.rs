@@ -210,7 +210,7 @@ fn escritorio_crear_workspace_con_cache_vieja_funciona() {
 // E9-H05 — Config nueva `.lodestar/config.yaml` (`WorkspaceConfig::load`).
 //
 // Fase ROJA: `WorkspaceConfig` y su loader YAML todavía NO existen en producción.
-// Estos tests fijan el contrato objetivo (ARCHITECTURE.md §19.4, DECISIONES D4/D5):
+// Estos tests fijan el contrato objetivo (ARCHITECTURE.md §19.4, decisiones §0 (D4/D5)):
 //   WorkspaceConfig { workspace: { writable_roots: Vec<RelPath>, reference_roots: Vec<RelPath>,
 //                                  ignored: Vec<String> }, gate, transactions }
 // cargado con `WorkspaceConfig::load(root)` desde `.lodestar/config.yaml` (YAML, claves camelCase).
@@ -335,7 +335,7 @@ fn ignored_conserva_obligatorios() {
 // ---------------------------------------------------------------------------
 // E9-H06 — Separación canónico vs runtime (`.lodestar/runtime/` + gitignore ajustado).
 //
-// Fase ROJA (ARCHITECTURE.md §19.4, REFACTOR §4.1/§14, DECISIONES D5):
+// Fase ROJA (ARCHITECTURE.md §19.4, REFACTOR §4.1/§14, decisiones §0 (D5)):
 //   - El `.gitignore` deja de ignorar `.lodestar/` ENTERO: ignora solo `index.db` + `runtime/`,
 //     dejando `config.yaml`/`schema.yaml`/`templates/` VERSIONADOS.
 //   - El watcher/carga NO indexan `.lodestar/runtime/` (desechable), sí los canónicos.

@@ -87,7 +87,7 @@ flowchart TD
 ```
 
 - **`/planificar`** es la puerta de entrada de las features grandes (p. ej. una sección de
-  `DECISIONES.md`). Trabaja en dos fases con puertas separadas — **diseñar y trocear son
+  `decisiones/`). Trabaja en dos fases con puertas separadas — **diseñar y trocear son
   ratificaciones distintas**: un buen diseño puede estar mal descompuesto, y viceversa. Fase A:
   propuesta de diseño anclada en `ARCHITECTURE.md` (ratificada → adenda al doc). Fase B:
   descomposición en `requirements/epica-NN-<slug>.md` con orden de construcción y trazabilidad.
@@ -108,7 +108,7 @@ flowchart TD
     CONTRATO["4 · /contrato --check<br/>puerta: sin drift BLOQUEANTE"]
     JUEZ["5 · Juicio — /juzgar<br/>(--panel si es grande, frontera o seguridad)"]
     VER{"veredicto"}
-    DOCS["6 · Docs de estado<br/>IMPLEMENTATION_STATUS.md · DECISIONES.md"]
+    DOCS["6 · Docs de estado<br/>IMPLEMENTATION_STATUS.md · decisiones/"]
     COMMIT["7 · Commit en la rama<br/>(push/PR: decide el usuario)"]
     SPEC --> RAMA --> TDD --> FRONTERA
     FRONTERA -- "sí" --> CONTRATO --> JUEZ
@@ -141,7 +141,7 @@ muerde, y `/simplify` si el verde dejó complejidad evidente.
 
 **Feature grande** (no cabe en una historia): `/planificar` primero — cierra el diseño y produce
 la épica — y después `/ciclo E<n>-H01`, `/ciclo E<n>-H02`… en el orden de construcción, saltando
-las marcadas `[BLOQUEADA por DECISIONES §N]`.
+las marcadas `[BLOQUEADA por decisiones §N]`.
 
 **Feature que cabe en una historia**: `/ciclo <descripción>` directo.
 
@@ -174,7 +174,7 @@ drift entre las tools reales, el contrato YAML y los tipos de `core::types`.
   [`CLAUDE.md`](../CLAUDE.md)).
 - **Mapa de autoridad documental** — quién manda sobre qué:
   [`ARCHITECTURE.md`](../ARCHITECTURE.md) sobre el diseño (sus tablas §10/§12 zanjan
-  contradicciones); [`DECISIONES.md`](../DECISIONES.md) lista lo abierto a criterio del usuario
+  contradicciones); [`decisiones/`](../decisiones/README.md) lista lo abierto a criterio del usuario
   (los agentes proponen, nunca deciden); [`IMPLEMENTATION_STATUS.md`](../IMPLEMENTATION_STATUS.md)
   el estado real por épica (se actualiza en el mismo PR que cierra o abre trabajo);
   [`docs/REFACTOR_PHASE_2.md`](REFACTOR_PHASE_2.md) + `ARCHITECTURE.md §20` son la spec de

@@ -132,7 +132,7 @@ masivas; E17 (`resolve`/`Inventory`, la reescritura de enlaces relativos) es la 
   - `core::diff::OkfDiff` → `SemanticDiff` (el nombre que `§20.3` manda y que E16-H06 difirió aquí).
     Ajustar sus consumidores.
   - Repaso final de `contracts/mcp.yml`: ningún ejemplo, descripción ni tipo con vocabulario OKF
-    (`concept`, `conformance`, `bundle`). Cierra `DECISIONES.md §13` si se decide completar
+    (`concept`, `conformance`, `bundle`). Cierra `decisiones §13` si se decide completar
     `Conformant → Valid` (o se documenta el aplazamiento).
   - `/contrato --check` limpio: `contracts/mcp.yml` ↔ `tools::list()`/`call()` ↔ `core::types`.
 - **Criterios de aceptación**:

@@ -1,7 +1,7 @@
 # docs/ — mapa por audiencias
 
 El criterio de este directorio es **vigente / superseded**, no viejo/nuevo
-(`ARCHITECTURE.md §21.3`, `DECISIONES.md §17`-DC).
+(`ARCHITECTURE.md §21.3`, `decisiones §17-DC`).
 
 ## Para usuarios (inglés)
 
