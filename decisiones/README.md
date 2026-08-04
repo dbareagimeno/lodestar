@@ -60,6 +60,7 @@ prioridad **filtra**, no ordena. El vocabulario de `estado` es cerrado: `abierta
 | 19 | Hallazgos de documentar la referencia de usuario | tomada | 5 | [`19-hallazgos-referencia-usuario.md`](19-hallazgos-referencia-usuario.md) |
 | 20 | Renombrado del proyecto | abierta | **5** | [`20-renombrado-del-proyecto.md`](20-renombrado-del-proyecto.md) |
 | 21 | Comillas en el lenguaje de consulta | tomada | 3 | [`21-comillas-lenguaje-consulta.md`](21-comillas-lenguaje-consulta.md) |
+| 22 | Integridad referencial de los valores del frontmatter | abierta | 3 | [`22-integridad-referencial-frontmatter.md`](22-integridad-referencial-frontmatter.md) |
 
 ## Dónde está el criterio hoy
 
@@ -84,8 +85,10 @@ prioridad **filtra**, no ordena. El vocabulario de `estado` es cerrado: `abierta
 §19 y §21. Las tres primeras, más los puntos (b), (e), (f) y (g) de §16, forman la **épica de
 honestidad de superficie**, que es lo siguiente que entra.
 
-**§3, §10** son decisiones vivas de baja urgencia: tienen recomendación estable y esperan un caso
-real que las fuerce (§3 absorbió además el problema de *timeout*/cancelación de §16(d)).
+**§3, §10, §22** son decisiones vivas de baja urgencia: tienen recomendación estable y esperan un
+caso real que las fuerce (§3 absorbió además el problema de *timeout*/cancelación de §16(d)). §22 es
+el primer hallazgo salido del dogfooding, así que su sitio natural es dentro de la épica de
+evidencia (§9).
 
 **§2, §4, §6, §7, §8** son archivo: la pregunta ya no tiene sujeto porque el código que la motivaba
 se borró (la UI de escritorio, el espejo TS, el merge local, `--range`, `lodestar.toml`). Se
