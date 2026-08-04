@@ -6,9 +6,10 @@ prioridad: 5
 etiquetas: ["store", "rendimiento", "watcher", "descubrimiento"]
 origen: "revision-de-pr"
 abierta_en: "2026-07-25"
-revisada_en: "2026-08-01"
+revisada_en: "2026-08-02"
 epica: "E23"
 historias: ["E23-H16"]
+bloqueada_por: "evidencia"
 relacionadas: [3, 9, 16]
 ---
 
@@ -47,3 +48,30 @@ relacionadas: [3, 9, 16]
   porque nada lee—, pero sí es la mayor cantidad de capacidad construida sin consumidor del repo, y
   la razón por la que cada llamada MCP reparsea la base completa.
 - **No bloquea** el merge de la PR #17: el producto funciona, solo que sin cache.
+
+## Repriorización 2026-08-02 — decidir con datos, no con opinión
+
+- **La ficha estaba mal planteada, no mal priorizada**: pide elegir entre conectar / acotar / retirar
+  **sin un solo número**. Sin medir, (a) es un salto de fe que toca el invariante #3 y (c) un borrado
+  por miedo.
+- **CONDICIÓN DE ENTRADA (decidida 2026-08-02)**: el **gate de rendimiento** de
+  [`§9`](09-transversales-diferidas.md) punto 1 (cold-open de ~10k documentos, coste por llamada MCP
+  con el reparseo actual, y el mismo con cache). §9-bench sube de prioridad y deja de ser un
+  transversal aparcado: es el paso previo obligatorio de esta decisión. El banco de pruebas es útil
+  se decida lo que se decida.
+- **Orden**: va en la **épica de evidencia** (banco de pruebas + dogfooding), **después** de la épica
+  de honestidad de superficie. El dogfooding —usar el motor de verdad sobre `decisiones/` y
+  `requirements/`— es la otra mitad del dato: dice si el reparseo por llamada molesta en el uso real
+  o solo en un arnés sintético.
+- **Absorbe de [`§16`](16-deuda-auditoria-e25-e26.md)**, disuelta el mismo día:
+  - **(c)** el **watcher** tampoco corre en el motor headless: sin `enable_cache` no hay nada que
+    reconciliar, así que hoy el invariante #5 se sostiene por el **protocolo de escritura**
+    (temp+fsync+rename por el único camino), no por el watcher. Cualquier opción que se elija tiene
+    que decir qué pasa con él.
+  - **(l/E26-H09)** **divergencia latente core↔store**: el catálogo publica nombres **anclados**
+    (`frontmatter.graph.backlinks`) mientras el store indexa `metadata.field_path` con los nombres
+    crudos de `walk`. Hoy no hay discrepancia observable porque esa columna no la lee nadie; es la
+    segunda cosa que se rompe el día que se conecte, junto con la `DiscoveryPolicy` del walker.
+- **Sigue siendo prioridad 5** y sigue gobernando a las demás: mientras esté abierta,
+  `ARCHITECTURE.md §21.5` prohíbe que la superficie externa prometa la cache o el rendimiento a
+  escala.

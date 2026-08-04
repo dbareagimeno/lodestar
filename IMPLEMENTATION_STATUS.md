@@ -187,6 +187,15 @@ verificación empírica; ~40 defectos corregidos con tests de regresión. Lo má
 
 ## Próximos pasos (ver [`decisiones/`](decisiones/README.md))
 
+> **Repriorización conjunta del 2026-08-02** — el orden de trabajo vigente vive al final de
+> [`decisiones/README.md`](decisiones/README.md) y es: **(1)** épica de honestidad de superficie
+> (§19a/b, §18 vinculante, §16f, §16e, §15, §16g, §16b) · **(2)** ciclo de higiene (§16 i/j/l) ·
+> **(3)** épica de evidencia = banco de pruebas §9 + dogfooding, que **cierra §14 con datos** ·
+> **(4)** renombrado del proyecto (`§20`, nuevo, alcance total incluido `.lodestar/`; congela la
+> firma de binarios y crates.io) · **(5)** comillas en el lenguaje (`§21`) · **(6)** ghosts (`§10`).
+> En esa pasada **`§16` se disolvió** en sus dueños reales y **`§5` se cerró**. La lista de abajo es
+> anterior y se conserva como registro de lo que estaba pendiente al cerrar E23/E24.
+
 **E23 está cerrada, así que nada bloquea el merge de v0.3.0.** Lo que sigue está abierto a criterio
 del usuario:
 
