@@ -1,15 +1,16 @@
 ---
 id: 1
-titulo: "Build de la fachada de escritorio Tauri"
+titulo: "Firma/notarización de binarios (ex-build de la fachada de escritorio Tauri)"
 estado: "diferida"
-prioridad: 2
+prioridad: 3
 etiquetas: ["distribucion", "ui", "seguridad"]
 origen: "puerta-de-diseno"
 abierta_en: "2026-07-01"
 revisada_en: "2026-08-02"
 epica: "E6"
 historias: ["E8-H06"]
-relacionadas: [2, 17]
+congelada_por: 20
+relacionadas: [2, 17, 20]
 ---
 
 # §1 — Build de la fachada de escritorio Tauri (E6)
@@ -38,3 +39,20 @@ relacionadas: [2, 17]
 - **Recomendación**: v0.1.0 ya se distribuye por Release multiplataforma sin firmar; abordar la
   firma/notarización (y opcionalmente el updater) en una iteración posterior, según necesidad real de
   distribución amplia.
+
+## Repriorización 2026-08-02
+
+- **La única mitad viva de esta ficha es la firma/notarización**, y **sube a prioridad 3**: lo que
+  la mantenía baja era que la distribución fuese hipotética, y E27 convirtió los binarios de
+  GitHub Releases en el **camino de instalación recomendado** del proyecto. El aviso de Gatekeeper /
+  SmartScreen es hoy la primera experiencia de cualquier desconocido.
+- **CONGELADA por [`§20`](20-renombrado-del-proyecto.md)** (renombrado del proyecto, alcance total
+  incluidos los nombres de los binarios): los certificados son del desarrollador, no del binario,
+  pero publicar releases firmadas y notarizadas con un nombre a punto de cambiar es gastar el ciclo
+  de release dos veces. **Mientras tanto**, lo barato y sin coste hundido: documentar el aviso y
+  cómo saltarlo en `docs/user/`.
+- **La mitad de crates.io** de esta ficha está superada por [`§17-DA`](17-superficie-externa-oss.md),
+  y también congelada por §20 — no se reservan nombres que se van a abandonar. Nota histórica: el
+  párrafo dice «el repo es privado»; **ya no lo es** desde la apertura OSS de E27.
+- La mitad de la **fachada de escritorio** es archivo: `src-tauri`/`frontend` viven en
+  `experimental/ui-desktop` desde el giro headless.

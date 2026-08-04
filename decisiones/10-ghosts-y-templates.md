@@ -6,8 +6,8 @@ prioridad: 3
 etiquetas: ["grafo", "mcp", "ui"]
 origen: "puerta-de-diseno"
 abierta_en: "2026-07-01"
-revisada_en: "2026-07-23"
-relacionadas: [2]
+revisada_en: "2026-08-02"
+relacionadas: [2, 14, 21]
 ---
 
 # §10 — Ghosts como primitiva de planificación + templates
@@ -42,3 +42,13 @@ relacionadas: [2]
   tool MCP.
 - **Recomendación**: mantener el principio «ghost = derivado de enlaces»; cualquier variante que
   requiera una lista de ghosts persistida aparte contradice el invariante #1.
+
+## Orden fijado el 2026-08-02
+
+Es **la más grande de las dos piezas de capacidad nueva** sobre la mesa y va **la última**:
+detrás de [`§21`](21-comillas-lenguaje-consulta.md) (comillas en el lenguaje, pequeña y cerrada) y
+detrás de la **épica de evidencia** (banco de pruebas + dogfooding). El motivo no es de coste sino
+de diseño: §10 propone una primitiva de **planificación**, y su puerta de diseño se decide mucho
+mejor con el dogfooding hecho —usar el motor de verdad sobre `decisiones/` y `requirements/`
+enseña qué backlog se quiere consumir realmente— que en abstracto. Sigue siendo **prioridad 3** y
+sigue siendo la dirección de producto acordada.

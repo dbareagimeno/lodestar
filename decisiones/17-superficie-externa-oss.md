@@ -13,7 +13,7 @@ epica: "E27"
 historias: ["E27-H10"]
 bloquea: ["E27-H10"]
 subpuntos: ["DA", "DB", "DC", "DD"]
-relacionadas: [1, 14]
+relacionadas: [1, 14, 20]
 ---
 
 # §17 — Superficie externa y apertura OSS (E27)
@@ -32,6 +32,13 @@ relacionadas: [1, 14]
   - existe una **colisión de marca**: *Lodestar* es un cliente de consenso de Ethereum muy conocido
     (ChainSafe, TypeScript). No afecta a crates.io en lo técnico pero sí a la **descubribilidad**
     del proyecto en buscadores, se publique donde se publique. No se renombra: solo queda anotado.
+
+  > **Actualización 2026-08-02**: la colisión de marca **dejó de estar «solo anotada»** — el usuario
+  > tiene intención firme de **renombrar el proyecto**, con alcance total, y eso abrió
+  > [`§20`](20-renombrado-del-proyecto.md). Consecuencias para DA: sigue **diferida, y ahora por un
+  > motivo mejor** —no se reservan nombres que se van a abandonar—; la verificación de
+  > disponibilidad se hace **dentro de §20**, con el nombre nuevo y ampliada a GitHub, dominio y
+  > buscadores; y **E27-H10 pasa a estar bloqueada por §20**, no solo por esta ficha.
 - **DB — Política de contribución: issues-first + Discussions OFF.** Bugs y docs se aceptan por PR
   directo con checklist; las features requieren issue previa donde el mantenedor decide si pasan
   por el proceso de diseño. Discussions queda desactivado hasta que haya tráfico que lo justifique

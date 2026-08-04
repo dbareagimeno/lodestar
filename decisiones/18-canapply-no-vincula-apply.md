@@ -1,11 +1,12 @@
 ---
 id: 18
 titulo: "canApply false no vincula a change_apply"
-estado: "abierta"
+estado: "tomada"
 prioridad: 4
 etiquetas: ["contrato", "mcp", "escritura"]
 origen: "hallazgo-de-implementacion"
 abierta_en: "2026-08-02"
+cerrada_en: "2026-08-02"
 revisada_en: "2026-08-02"
 epica: "E27"
 historias: ["E27-H03"]
@@ -29,6 +30,14 @@ dice «este plan no es aplicable bajo tu policy» y el motor lo aplica igual si 
 que el gate de staging adopte la policy del plan. Cada una toca la frontera MCP → historia propia
 con delta de contrato, fuera de E27 (que tiene prohibido cambiar comportamiento del motor).
 
-**Mitigación en E27**: el guion de la demo usa `policy: {requireValidResult: false}` — coherente
-con el error deliberado del workspace — y no muestra la incoherencia; `docs/user/safe-changes.md`
-describe `canApply` como veredicto del **plan**, sin prometer que apply lo re-ejerza.
+**DECIDIDO (2026-08-02): (a) vinculante** — `change_apply` rechaza los planes con
+`canApply: false`. Es lo que cualquiera asume al leer el campo, y dejarlo como consejo que nadie
+ejerce es exactamente la clase de superficie que E23/E26 vinieron a cerrar. Entra en la **épica de
+honestidad de superficie**, con **delta de contrato**: hay que elegir si el rechazo usa un código
+existente del catálogo de 16 o justifica el decimoséptimo — el catálogo solo se ha abierto una vez
+(E23-H14), así que la carga de la prueba está en el código nuevo.
+
+**Mitigación en E27** (vigente hasta que la épica cierre): el guion de la demo usa
+`policy: {requireValidResult: false}` — coherente con el error deliberado del workspace — y no
+muestra la incoherencia; `docs/user/safe-changes.md` describe `canApply` como veredicto del **plan**,
+sin prometer que apply lo re-ejerza. Esa redacción hay que revisarla al implementar.

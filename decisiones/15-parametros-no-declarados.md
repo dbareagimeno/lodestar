@@ -1,12 +1,13 @@
 ---
 id: 15
 titulo: "¿Debe el servidor rechazar los parámetros que no declara?"
-estado: "abierta"
+estado: "tomada"
 prioridad: 4
 etiquetas: ["contrato", "mcp", "configuracion"]
 origen: "auditoria"
 abierta_en: "2026-07-25"
-revisada_en: "2026-07-25"
+cerrada_en: "2026-08-02"
+revisada_en: "2026-08-02"
 epica: "E24"
 historias: ["E24-H09"]
 relacionadas: [16, 19]
@@ -28,16 +29,40 @@ relacionadas: [16, 19]
 - **Por qué NO se cerró en E24**: no es un bugfix, es **revisar un criterio ratificado**. La
   política vigente está escrita en tres sitios (`contracts/mcp.yml` `validacion_de_argumentos`, la
   cabecera de `tests/descubribilidad.rs`, y la justificación del schema plano en `tools.rs`), y su
-  razonamiento no es trivial: `operacion_item_schema()` declara **18 propiedades planas a
+  razonamiento no es trivial: `operacion_item_schema()` declara **17 propiedades planas a
   propósito** —sin `oneOf` por operación— porque un `oneOf` mal escrito rechazaría entradas
   válidas. Activar `additionalProperties` en ejecución sin resolver eso primero rompería `create`
-  con campos de otra op.
+  con campos de otra op. (La ficha decía **18**: era el recuento previo a `E23-H11`, que retiró
+  `fixId` junto con su op. Verificado contra `tools.rs:61-84` el 2026-08-02.)
 - **Qué decidir**: (a) **ejecutar** lo que el schema declara, resolviendo antes el `oneOf` por
   operación; (b) **dejar de declararlo** — quitar `additionalProperties: false` de los schemas, de
   modo que la superficie deje de afirmar lo que no cumple, a costa de que el cliente ya no valide;
   (c) **declararlo como tolerancia deliberada** y documentarlo en las `instructions` del servidor,
   para que un agente sepa que un parámetro inventado se descarta.
-- **Recomendación**: **(a)**, en la misma épica que E24-H07/H08 (v0.4.0), porque las tres tocan la
-  misma superficie de entrada y comparten el criterio de fondo: *lo que el motor no entiende, lo
-  dice*. Hoy no es un bug de datos —nada se corrompe—, pero sí una respuesta silenciosamente
-  equivocada, que es la clase de defecto que esta épica ha estado cerrando.
+- **DECIDIDO (2026-08-02): (a) ejecutar**, con el mismo criterio estricto que
+  [`§16(e)`](16-deuda-auditoria-e25-e26.md) aplica al fichero de config — el repo no se queda con
+  dos criterios opuestos según si lo desconocido llega por el wire o por disco. Entra en la **épica
+  de honestidad de superficie**, pero en **historia separada** de §16(e): esa es barata y cierra
+  una salvaguarda silenciosa, esta es la mayor de la épica y no debe arrastrarla si se complica.
+- **Primer criterio de aceptación, y condición de entrada**: fijar por tests la **tabla de campos
+  legales por operación**, antes de activar ningún rechazo. Las 7 ops y sus campos (fuente:
+  `normalize_raw_op` en `lodestar-app`, que es de donde salen los nombres):
+
+  | Campo | Ops | |
+  |---|---|---|
+  | `op` | todas | discriminador, obligatorio |
+  | `path` | todas | ruta relativa; obligatoria en `create`, alternativa corta a `ref.path` en el resto |
+  | `ref` | todas menos `create` | forma larga de `path` |
+  | `expectedRevision` | todas | control de concurrencia optimista |
+  | `frontmatter` | `create` | |
+  | `body` | `create`, `replace_body` | **compartido entre dos ops** |
+  | `patch` | `patch_frontmatter` | |
+  | `find`, `replace`, `expectedOccurrences` | `replace_text` | |
+  | `headingPath`, `mode`, `content` | `edit_section` | |
+  | `from`, `to`, `rewriteInboundLinks` | `move` | |
+  | `inboundLinksPolicy` | `delete` | |
+
+  El riesgo no es teórico y está en esa tabla: `path`/`ref` son intercambiables salvo en `create`, y
+  `body` pertenece a dos ops. Un agente que hoy reutiliza la misma plantilla de objeto para varias
+  operaciones de un lote —perfectamente válido— empezaría a recibir rechazos si la partición se
+  escribe como si fuera limpia.

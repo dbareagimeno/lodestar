@@ -81,9 +81,13 @@ Mapa de documentos — quién manda sobre qué:
   Cada fichero lleva **frontmatter YAML consultable por el propio motor**: `estado`
   (`abierta`/`tomada`/`ratificada`/`cerrada`/`diferida`/`obsoleta`) y `prioridad` de **1 a 5, donde 5
   es lo más importante**. Lo que exige criterio del usuario hoy se obtiene con
-  `prioridad >= 4 and estado = "abierta"` (p. ej. el store sin consumidor, `decisiones §14`; el
-  rechazo de parámetros no declarados, `decisiones §15`; la deuda de auditoría de E25/E26,
-  `decisiones §16`). **No las tomes por tu cuenta**: propón y pregunta.
+  `prioridad >= 4 and estado = "abierta"`; tras la **repriorización conjunta del 2026-08-02** son
+  tres: el **renombrado del proyecto** (`§20`, que congela la firma de binarios y crates.io), el
+  **store sin consumidor** (`§14`) y el **banco de pruebas** (`§9`, condición de entrada de `§14` —
+  no se decide el destino del store sin medir antes). Lo que está en `estado: tomada` ya es trabajo,
+  no criterio: `§15`, `§18`, `§19`, `§21`. **No tomes las abiertas por tu cuenta**: propón y
+  pregunta. El orden de trabajo acordado está al final de
+  [`decisiones/README.md`](decisiones/README.md).
 - **`docs/REFACTOR_PHASE_2.md`** (+ `ARCHITECTURE.md §20`) — la **spec de comportamiento** vigente
   para la migración a workspace universal de Markdown.
 - **`prototype/index.html`** (~2900 líneas, HTML/JS vanilla + localStorage) — **referencia
