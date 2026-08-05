@@ -61,6 +61,7 @@ prioridad **filtra**, no ordena. El vocabulario de `estado` es cerrado: `abierta
 | 20 | Renombrado del proyecto | abierta | **5** | [`20-renombrado-del-proyecto.md`](20-renombrado-del-proyecto.md) |
 | 21 | Comillas en el lenguaje de consulta | tomada | 3 | [`21-comillas-lenguaje-consulta.md`](21-comillas-lenguaje-consulta.md) |
 | 22 | Integridad referencial de los valores del frontmatter | abierta | 3 | [`22-integridad-referencial-frontmatter.md`](22-integridad-referencial-frontmatter.md) |
+| 23 | Hallazgos del testbench MCP sobre el homelab | abierta | **5** | [`23-hallazgos-testbench-homelab.md`](23-hallazgos-testbench-homelab.md) |
 
 ## Dónde está el criterio hoy
 
@@ -72,14 +73,25 @@ prioridad **filtra**, no ordena. El vocabulario de `estado` es cerrado: `abierta
 > congelada · **§16 se disuelve** en sus dueños reales · **§5 se cierra** (resuelta por la decisión
 > de idioma partido) · **§20 y §21 son nuevas**.
 
-**Lo único que sigue exigiendo criterio tuyo** son tres fichas abiertas:
+> **Pasada del testbench (2026-08-06).** El banco de pruebas que §9 pedía existe y corrió: 189
+> casos contra el homelab real ([informe](../docs/qa/informe-homelab-2026-08-06.md)). **§23 es
+> nueva** y nace ya disuelta en dueños: un bug de motor con pérdida de datos (M-01, entra por
+> delante de todo), un guard de colisión que falta (A-05), evidencia nueva para la épica de
+> honestidad (D-01, A-04, A-07) y el ciclo de higiene (A-02/A-03), y material de §19 (el resto).
+
+**Lo único que sigue exigiendo criterio tuyo** son estas fichas abiertas:
 
 - **§20 — renombrado del proyecto** (prio 5). Falta elegir nombre y verificar disponibilidad.
   **Congela** la firma de binarios (§1/§9) y crates.io (§17-DA): no se firma ni se reserva nada bajo
   un nombre que va a cambiar.
 - **§14 — el store sin consumidor** (prio 5). Sigue gobernando a las demás, pero ya **no se decide a
   ciegas**: su condición de entrada es el banco de pruebas de §9. Absorbe §16(c) y §16(l/E26-H09).
-- **§9 — banco de pruebas** (prio 4). El dato que falta para poder cerrar §14.
+- **§9 — banco de pruebas** (prio 4). Ya tiene primera entrega (el testbench de §23,
+  re-ejecutable en `docs/qa/testbench/`); falta convertirlo en banco permanente por release.
+- **§23 — hallazgos del testbench** (prio 5 por M-01). Tres subpuntos piden criterio —
+  A-04 (¿type error ruidoso?), D-02 (¿corregir §20.4 o ampliar el wire?), A-07
+  (¿`DOCUMENT_NOT_FOUND` en scope `paths`?) — con recomendación escrita en la ficha; el resto
+  ya tiene dueño.
 
 **Ya decididas, pendientes de ejecutar** (`estado: tomada` — son trabajo, no criterio): §15, §18,
 §19 y §21. Las tres primeras, más los puntos (b), (e), (f) y (g) de §16, forman la **épica de
@@ -95,15 +107,22 @@ se borró (la UI de escritorio, el espejo TS, el merge local, `--range`, `lodest
 conservan por trazabilidad, no por vigencia. **§5** se les une por otra vía: la contestó la decisión
 de idioma partido, no la ficha.
 
-## Orden de trabajo acordado (2026-08-02)
+## Orden de trabajo acordado (2026-08-02, revisado 2026-08-06 tras el testbench)
 
+0. **§23/M-01 — revert del recibo `-revert`** (bug de motor con pérdida de datos): historia
+   inmediata y acotada, junta con §16(i) porque es la misma coreografía de sellado. Le sigue
+   **§23/A-05** (guard de colisión de `create`/`move`), el único hueco destructivo restante.
 1. **Épica de honestidad de superficie** — todo lo que la superficie documentada afirma y el motor
    no ejecuta: §19(a), §19(b), §18 vinculante, §16(f) aviso de workspace vacío, §16(e) config
-   estricta, §15 wire estricto (con la tabla de campos por operación como primer criterio de
-   aceptación), §16(g) cerrar la API no transaccional y §16(b) retirar el `Envelope`.
-2. **Ciclo de higiene** — §16(i) coreografía única de sellado, §16(j) cursor inválido, §16(l) pasada
-   acotada de `/mutantes`. Sin cambio de comportamiento, con la suite actual como red.
-3. **Épica de evidencia** — banco de pruebas (§9) + dogfooding. **Cierra §14 con datos.**
+   estricta (absorbe §23/A-08-rechazo), §15 wire estricto (con la tabla de campos por operación
+   como primer criterio de aceptación), §16(g) cerrar la API no transaccional, §16(b) retirar el
+   `Envelope`, y del testbench: §23/D-01 (`instructions` por perfil + `protocolVersion`),
+   §23/A-04 y §23/A-07 (si se decide ruido).
+2. **Ciclo de higiene** — §16(i) coreografía única de sellado (ver punto 0), §16(j) cursor
+   inválido **ampliado con §23/A-02/A-03** (cursor ajeno), §16(l) pasada acotada de `/mutantes`.
+3. **Épica de evidencia** — banco de pruebas (§9) + dogfooding; §23 aporta la primera corrida
+   completa y el arnés re-ejecutable. **Cierra §14 con datos.** Los nits documentales de §23
+   (D-02, A-01, A-06, A-09, A-10) van con §19 según toque cada fichero.
 4. **§20 renombrado del proyecto** (alcance total, incluido `.lodestar/`, con migración). Descongela
    §1/§9-firma y §17-DA.
 5. **§21 comillas en el lenguaje de consulta** (puerta de diseño propia).
