@@ -3929,9 +3929,27 @@ pub mod schemas {
         schema_of::<KnowledgeGetResponse>()
     }
 
-    /// `outputSchema` de `metadata_inspect` (== [`MetadataInspection`]).
+    /// `outputSchema` de `metadata_inspect` (== [`MetadataInspection`]), con el `type: "object"` de
+    /// la raíz FIJADO a mano.
+    ///
+    /// Es el único tipo de salida de la superficie que es un `enum` (`untagged`): schemars lo
+    /// deriva como un `anyOf` de las dos variantes y **no** emite `type` en la raíz —en el caso
+    /// general las ramas de un `untagged` podrían ser de tipos JSON distintos, así que no lo
+    /// infiere—. Pero el spec MCP exige que todo `outputSchema` sea un JSON Schema **de tipo
+    /// `object`**, y un cliente estricto que rechaza una tool inválida deja de registrar **las
+    /// diez**: el `anyOf` pelado inutilizaba el servidor entero.
+    ///
+    /// Fijarlo aquí no excluye ninguna respuesta hoy válida, porque las dos variantes
+    /// ([`super::MetadataCatalogPage`] y [`super::FieldInspectionPage`]) ya son `type: "object"`:
+    /// solo declara en la raíz lo que el `anyOf` no sabe expresar. El wire no cambia — envuelve el
+    /// schema DERIVADO, no rediseña el tipo, que sigue sirviendo `{ fields, nextCursor }` o
+    /// `{ field, values, … }` sin discriminador.
     pub fn metadata_inspect_schema() -> Value {
-        schema_of::<MetadataInspection>()
+        let mut schema = schema_of::<MetadataInspection>();
+        if let Some(raiz) = schema.as_object_mut() {
+            raiz.insert("type".to_string(), Value::String("object".to_string()));
+        }
+        schema
     }
 
     /// `outputSchema` de `knowledge_check` (== [`CheckReport`]).

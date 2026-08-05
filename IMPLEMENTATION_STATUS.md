@@ -15,7 +15,9 @@
 > corre desde E23-H06); `clippy -D warnings` y `cargo doc -D warnings` limpios; pureza del core
 > verificada por CI. **El recuento exacto de tests lo fija la nota de release** (E24-H18:
 > `cargo test --workspace -- --list | grep -c ": test$"`); fijado en la **v0.5.0**: **541 tests**
-> (eran 486 al cerrar E24, antes de las 11 historias de E25/E26).
+> (eran 486 al cerrar E24, antes de las 11 historias de E25/E26). En `develop` van **542**: +1 por la
+> guardia del `outputSchema` (ver «Defectos posteriores a E27» al final); la cifra de la v0.5.0 no se
+> reescribe — la fija su release.
 >
 > **Ya no forman parte de este repo**: la app de escritorio (Tauri + Svelte, movida a
 > `experimental/ui-desktop` con el giro headless), el crate `lodestar-vcs` y `git2` (borrados en
@@ -1420,3 +1422,37 @@ H01 (la cierra la próxima release).
 arregla): `decisiones §18` (`canApply: false` no vincula a `change_apply`) y `§19` (a: `has(frontmatter)`
 nunca casa, contradice `§20.8`; b: `policy` parcial rechazada pese a campos opcionales del contrato;
 c: imprecisión de `§16.a` caso 3). Todos tocan la frontera o el core → historias propias fuera de E27.
+
+## Defectos posteriores a E27
+
+| Defecto | Estado | Nota |
+|---|---|---|
+| `outputSchema` de `metadata_inspect` sin `type: "object"` | ✅ | Claude Code **rechazaba la lista completa de tools**. |
+
+- ✅ **`outputSchema` no conforme al spec MCP** — el spec exige que todo `outputSchema` sea un JSON
+  Schema **de tipo `object`**; el de `metadata_inspect` salía con `anyOf` en la raíz y **sin
+  `type`**. Un cliente estricto no degrada la tool inválida: **rechaza la lista entera**, así que
+  Claude Code no registraba ninguna de las 10 y el motor era inusable desde ese cliente — el defecto
+  tenía radio de servidor, no de tool.
+
+  **Causa raíz**: los `outputSchema` se derivan con `schemars` del tipo Rust real de cada servicio
+  (D6b, `ARCHITECTURE.md §10` fila 6). Nueve salidas son `struct` y schemars les emite
+  `type: "object"` gratis; `MetadataInspection` es el **único `enum`** de la superficie y lleva
+  `#[serde(untagged)]`, que schemars traduce a un `anyOf` de las variantes sin inferir `type` en la
+  raíz (en el caso general las ramas podrían ser de tipos JSON distintos). El arreglo lo fija en
+  `schemas::metadata_inspect_schema()`, **sin tocar el wire**: las dos variantes ya eran objetos, así
+  que declararlo en la raíz no excluye ninguna respuesta válida.
+
+  **Por qué la suite no mordía** (el patrón de E23, otra vez): la invariante «la raíz es un objeto»
+  estaba escrita para el input —`tools_list_lleva_input_schema`, y sobre las 10— y **nunca para el
+  output**. El `tools_declaran_outputschema` de E10-H13 miraba **5** de las 10 y daba por bueno que
+  apareciera cualquier clave estructural, con **`anyOf` explícitamente en su allowlist**: pasaba en
+  verde sobre el schema roto, no por accidente sino porque su criterio solo pedía «parece un JSON
+  Schema». El `structured_content_conforma_output_schema` de E24-H15 tampoco podía verlo: mide que la
+  salida **conforma** su schema declarado, y un `anyOf` sin `type` conforma perfectamente.
+
+  **Verificado**: el defecto se reprodujo por stdio (`tools/list` contra el binario) antes de tocar
+  nada, y las dos guardias nuevas se vieron **en rojo** revirtiendo el arreglo. Hoy vigilan la
+  invariante en las 10 tools `tools.rs::tools_list_lleva_output_schema_de_tipo_object` (en proceso) y
+  el `tools_declaran_outputschema` endurecido (e2e). La regla queda escrita en `contracts/mcp.yml`,
+  que hasta ahora no la exigía en ninguna parte.

@@ -1316,13 +1316,26 @@ fn check_ids_estables() {
 //
 // El criterio estructural restante («`/contrato --check` pasa contra el `mcp.yml` reescrito») lo
 // verifica el guardián de contrato, no un `#[test]` (por eso no se codifica aquí).
+//
+// ENDURECIDO tras el defecto del `outputSchema` de `metadata_inspect`: tal como nació, este test
+// miraba 5 de las 10 tools y aceptaba como válida CUALQUIERA de
+// `["type","$ref","properties","allOf","oneOf","anyOf","$defs","definitions"]` en la raíz. Con
+// `anyOf` en esa allowlist, pasaba en verde sobre un schema que un cliente MCP estricto (Claude
+// Code) rechazaba —y al rechazar una tool inválida deja de registrar las diez, así que el servidor
+// entero quedaba inutilizable—. La laxitud no era descuido: el criterio original solo pedía
+// «parece un JSON Schema». Hoy exige lo que el spec exige de verdad, en las 10: la raíz declara
+// `type: "object"`. La guardia gemela en proceso vive en
+// `tools.rs::tools_list_lleva_output_schema_de_tipo_object`, junto a la de `inputSchema` que sí
+// llevaba esta comprobación desde el principio.
 // ---------------------------------------------------------------------------
 
-/// E10-H13 · Criterio `tools_declaran_outputschema`:
-/// Dado `tools/list`, Cuando se inspecciona cada una de las 5 tools de lectura/verificación de E10,
-/// Entonces cada una incluye `outputSchema` y es un objeto de JSON Schema (con al menos una clave
-/// estructural de esquema). Se exigen las 5 (no basta con `workspace_status`): un stub que solo
-/// añadiera `outputSchema` a una tool no pasaría.
+/// E10-H13 · Criterio `tools_declaran_outputschema` (ENDURECIDO, ver la nota de arriba):
+/// Dado `tools/list`, Cuando se inspecciona **cada una de las 10** tools activas, Entonces cada una
+/// incluye `outputSchema` y su raíz declara `type: "object"`, como exige el spec MCP.
+///
+/// Se exigen las 10 (no basta con `workspace_status`): un stub que solo añadiera `outputSchema` a
+/// una tool no pasaría. Y se exige `type: "object"` en la raíz, no «alguna clave estructural»: un
+/// `anyOf` pelado es lo que un cliente estricto rechaza.
 #[test]
 fn tools_declaran_outputschema() {
     let dir = workspace_min();
@@ -1335,26 +1348,25 @@ fn tools_declaran_outputschema() {
         .as_array()
         .expect("tools/list devuelve un array de tools");
 
-    // Las 5 tools de lectura/verificación de E10 (D6b): todas deben declarar `outputSchema`.
+    // Las 10 tools objetivo (`§19.6`): TODAS deben declarar `outputSchema` (D6b), no solo las 5 de
+    // lectura/verificación de E10 con las que nació este criterio.
     let con_output = [
         "workspace_status",
         "knowledge_search",
         "knowledge_get",
         "metadata_inspect",
         "knowledge_check",
+        "graph_query",
+        "impact_analyze",
+        "change_plan",
+        "change_apply",
+        "change_revert",
     ];
-    // Claves estructurales que identifican un JSON Schema derivado por schemars (raíz objeto,
-    // referencia, o combinador). Basta con que aparezca una.
-    let claves_schema = [
-        "type",
-        "$ref",
-        "properties",
-        "allOf",
-        "oneOf",
-        "anyOf",
-        "$defs",
-        "definitions",
-    ];
+    assert_eq!(
+        tools.len(),
+        con_output.len(),
+        "la superficie debe ser exactamente las 10 tools objetivo: {tools:?}"
+    );
     for name in con_output {
         let tool = tools
             .iter()
@@ -1365,9 +1377,11 @@ fn tools_declaran_outputschema() {
             output.is_object(),
             "la tool «{name}» debe declarar `outputSchema` como objeto (D6b): {tool:?}"
         );
-        assert!(
-            claves_schema.iter().any(|k| output.get(k).is_some()),
-            "el `outputSchema` de «{name}» debe ser un JSON Schema (alguna clave estructural): {output:?}"
+        assert_eq!(
+            output["type"], "object",
+            "el `outputSchema` de «{name}» debe declarar `type: \"object\"` en la raíz: el spec \
+             MCP lo exige y un cliente estricto que rechaza una tool inválida deja de registrar \
+             LAS DIEZ: {output:?}"
         );
     }
 }
