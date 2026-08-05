@@ -168,6 +168,24 @@ camino de lectura ni promete rendimiento a escala (`§21.5`). **Regla de idioma*
 superficie pública que esta épica produce va en **inglés**; los documentos internos siguen en
 español.
 
+## Mapa de épicas de la campaña de bugfixes del testbench homelab
+
+> Origen: `decisiones/23-hallazgos-testbench-homelab.md` (dogfooding sistemático, 189 casos sobre
+> el workspace real del homelab, 2026-08-06). Trece hallazgos de naturalezas incompatibles se
+> repartieron por prioridad y dueño (la misma lección de `decisiones §16`); **E28 es su Fase 0**:
+> las dos filas con **riesgo real de pérdida de conocimiento** (prioridades 5 y 4), ejecutadas antes
+> que cualquier otro hallazgo de la tabla.
+
+| Épica | Estado | Área | Doc |
+|---|---|---|---|
+| **E28** — Fase 0: defectos destructivos del testbench homelab | propuesta (pendiente de ratificación) | `change_revert` de un recibo `-revert` restaura de verdad (+ unifica la coreografía de sellado de `decisiones §16(i)`) · guard de colisión en `create`/`move` | [epica-28-defectos-destructivos-testbench.md](epica-28-defectos-destructivos-testbench.md) |
+
+**Orden de construcción (E28)**: `H01` y `H02` son independientes y paralelizables (ficheros y
+garantías distintas); `H01` va primero en la secuencia por gravedad (pérdida de datos activa) y por
+ser la prioridad más alta de `decisiones §23`. Los demás hallazgos de esa ficha (D-01/D-02,
+A-01…A-10) quedan **fuera de E28** — tienen su propio dueño (épica de honestidad de superficie,
+ciclo de higiene de `decisiones §16(j)`, o `§19`) y no implican escritura destructiva.
+
 ## Formato de una historia
 
 Cada historia tiene un identificador estable `E<épica>-H<nn>` y esta plantilla:

@@ -240,3 +240,17 @@ Todos producidos por **E1-H06** (conformidad) y agregados por **E1-H07** (analyz
 | Templates de issue/PR + roadmap que apunta a `decisiones/` (sin documento paralelo) | `§21.4` | E27-H09 |
 | Publicación en crates.io — **diferida** | `§17`-DA (reabrible) | E27-H10 **[BLOQUEADA por decisiones §17]** |
 | Regla transversal: la superficie externa no presenta la cache como camino de lectura ni promete escala mientras `§14` siga abierta | `§21.5` · `decisiones §14` | E27-H02, E27-H03, E27-H05, E27-H11 (criterio de aceptación en las cuatro) |
+
+---
+
+## E28 — Fase 0 de la campaña de bugfixes del testbench homelab → historias
+
+> Origen: `decisiones §23` (hallazgos del testbench MCP sobre el homelab, 2026-08-06), filas M-01 y
+> A-05 — las dos marcadas «historia propia, inmediata»/«historia propia» por gravedad y prioridad.
+> Ninguna historia toca una decisión de `§10`/`§12`; mapean hallazgos verificados del testbench
+> (`docs/qa/informe-homelab-2026-08-06.md`) a la historia que los cierra.
+
+| Hallazgo | Fuente | Historia |
+|---|---|---|
+| **M-01** — `change_revert` de un recibo `-revert` es un no-op silencioso que sobrescribe `recovery/`/`receipts/` del redo | `decisiones §23` fila 1 · informe §1, caso G1-18 | E28-H01 (además salda `decisiones §16(i)`, secuencia de sellado duplicada `apply`/`revert`) |
+| **A-05** — `create`/`move` sobre un `path`/`to` ya ocupado producen `canApply: true` sin fricción | `decisiones §23` fila 2 · informe §3, caso G1-11 | E28-H02 |
