@@ -7,6 +7,33 @@ y el proyecto sigue [Versionado Semántico](https://semver.org/lang/es/).
 
 ## [No publicado]
 
+### Corregido
+
+- **`metadata_inspect` declaraba un `outputSchema` que el spec MCP no admite, y eso tumbaba las diez
+  tools.** El spec exige que todo `outputSchema` sea un JSON Schema **de tipo `object`**; el de
+  `metadata_inspect` salía con `anyOf` en la raíz y **sin `type`**. Un cliente estricto no degrada la
+  tool inválida: **rechaza la lista completa**, así que Claude Code no registraba ninguna de las 10 y
+  el servidor era inusable desde ese cliente.
+
+  **Causa raíz**: los `outputSchema` se derivan con `schemars` del tipo Rust que sirve cada servicio
+  (decisión D6b). Nueve son `struct` → `type: "object"`. `MetadataInspection` es el **único `enum`**
+  de la superficie y lleva `#[serde(untagged)]`: schemars lo deriva como `anyOf` de las variantes y
+  no infiere `type` en la raíz. Ahora `schemas::metadata_inspect_schema()` se lo fija.
+
+  **El wire NO cambia**: las dos variantes ya eran objetos, así que declarar `type: "object"` en la
+  raíz no excluye ninguna respuesta válida —solo declara lo que el `anyOf` no sabe expresar—. La
+  respuesta sigue siendo `{ fields, nextCursor }` o `{ field, values, … }`, sin discriminador.
+
+  **Por qué la suite no lo veía**: la invariante «la raíz es un objeto» estaba escrita para el input
+  (`tools_list_lleva_input_schema`, en las 10) y nunca para el output. El
+  `tools_declaran_outputschema` de E10-H13 miraba **5** de las 10 y aceptaba cualquier clave
+  estructural —con **`anyOf` explícitamente en su allowlist**—, así que pasaba en verde sobre el
+  schema defectuoso. El `structured_content_conforma_output_schema` de E24-H15 tampoco podía verlo:
+  mide que la salida **conforma** su schema, y un `anyOf` sin `type` conforma perfectamente.
+  Se endurece ese criterio (las 10, raíz `type: "object"`) y se añade la guardia gemela en proceso,
+  `tools.rs::tools_list_lleva_output_schema_de_tipo_object`. Ambas verificadas en rojo antes del
+  arreglo.
+
 ## [0.5.0] - 2026-08-01
 
 **Endurecimiento del camino de escritura y de la superficie de errores** (épicas `E25`/`E26`, 11

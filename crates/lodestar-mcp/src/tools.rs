@@ -707,6 +707,23 @@ mod tests {
     }
 
     #[test]
+    fn tools_list_lleva_output_schema_de_tipo_object() {
+        // El spec MCP exige que todo `outputSchema` sea un JSON Schema de tipo `object`. Una sola
+        // tool inválida hace que un cliente estricto (Claude Code) rechace la lista ENTERA: no
+        // degrada esa tool, tumba las diez. `metadata_inspect` lo incumplía por ser el único tipo
+        // de salida de la superficie que es un `enum` `untagged` — schemars deriva `anyOf` en la
+        // raíz y NO infiere `type`, así que hay que fijarlo (`schemas::metadata_inspect_schema`).
+        let tools = list();
+        for t in tools.as_array().unwrap() {
+            assert_eq!(
+                t["outputSchema"]["type"], "object",
+                "el `outputSchema` de «{}» debe declarar `type: \"object\"` en la raíz",
+                t["name"]
+            );
+        }
+    }
+
+    #[test]
     fn tool_desconocida_es_error() {
         let (_d, app) = app_with_fixture();
         assert!(call(&app, Profile::Standard, "no_existe", &json!({})).is_err());
