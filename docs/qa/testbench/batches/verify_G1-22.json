@@ -1,0 +1,38 @@
+{
+  "batch": "verify_G1-22",
+  "root": "worktree",
+  "profile": "standard",
+  "fixtures": "gaps",
+  "cases": [
+    {
+      "id": "G1-22-v",
+      "steps": [
+        {
+          "kind": "call",
+          "tool": "knowledge_search",
+          "arguments": {
+            "where": "document.path = \"fixtures/raros.md\"",
+            "include": [
+              "frontmatter.flotante",
+              "frontmatter.submapa",
+              "frontmatter.submapa.1"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "G1-22-v2-solo-dotted",
+      "steps": [
+        {
+          "kind": "call",
+          "tool": "knowledge_search",
+          "arguments": {
+            "where": "document.path = \"fixtures/raros.md\"",
+            "include": ["frontmatter.submapa.1"]
+          }
+        }
+      ]
+    }
+  ]
+}

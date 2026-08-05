@@ -1,0 +1,1422 @@
+{
+ "ronda": 1,
+ "totales": {
+  "PASS": 146,
+  "FAIL": 2,
+  "UNCLEAR": 5
+ },
+ "casos": [
+  {
+   "id": "TYP-01",
+   "lote": "L1",
+   "tool": "knowledge_search",
+   "esperado": "Solo pendientes con status abierto (6 según exploración previa; verificar que todos los hits proyectan status=abierto y que totalApproximate == nº hits). Ningún 'hecho'/'aparcado'. Fuente: query-language.md Operators; convenciones.md",
+   "real": "6 resultados, totalApproximate=6, todos con status=abierto",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "TYP-02",
+   "lote": "L1",
+   "tool": "knowledge_search",
+   "esperado": "Sin error. Solo docs con priority numérica <= 2 (esperados: pendientes/apagados-sucios.md y pendientes/arranque-tras-corte-de-luz.md, ambos priority 2). Docs sin priority simplemente no matchean. Fuente: query-language.md Operators + has/missing",
+   "real": "2 resultados priority<=2: pendientes/apagados-sucios.md (priority 2), pendientes/arranque-tras-corte-de-luz.md (priority 2)",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "TYP-03",
+   "lote": "L1",
+   "tool": "knowledge_search",
+   "esperado": "Solo pendientes con optional false booleano explícito. Sin error. Fuente: query-language.md Values and types",
+   "real": "4 resultados optional=false booleano, todos abiertos",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "TYP-04",
+   "lote": "L1",
+   "tool": "knowledge_search",
+   "esperado": "results [] y totalApproximate 0 (workspace_status.counts.isolated = 0 en el baseline). Fuente: query-language.md Reserved namespaces",
+   "real": "0 resultados, totalApproximate=0, graph.isolated=true devuelve vacío",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "TYP-05",
+   "lote": "L1",
+   "tool": "knowledge_search",
+   "esperado": "Mezcla equipos (status activo) y servicios (status activo) — sin filtrar por type se mezclan dominios, comportamiento correcto documentado en convenciones.md. Verificar en frontmatter.type que hay >= 2 tipos distintos",
+   "real": "10 resultados status=activo, mezcla de 2 tipos (equipo, servicio)",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "TYP-06",
+   "lote": "L1",
+   "tool": "knowledge_search",
+   "esperado": "Subconjunto de TYP-05 con solo type equipo. Fuente: query-language.md Combining conditions",
+   "real": "4 resultados, subconjunto de TYP-05 con solo type=equipo",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "TYP-07",
+   "lote": "L1",
+   "tool": "knowledge_search",
+   "esperado": "Error de ejecución INVALID_SCHEMA: typo bajo namespace reservado graph.; el mensaje nombra las 4 propiedades válidas (graph.backlinks, graph.outgoing_links, graph.dangling_links, graph.isolated) y sugiere frontmatter.graph.backlink. Fuente: query-language.md Reserved namespaces (ejemplo literal)",
+   "real": "Error INVALID_SCHEMA, menciona las 4 propiedades válidas (graph.backlinks, graph.outgoing_links, graph.dangling_links, graph.isolated)",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "TYP-08",
+   "lote": "L1",
+   "tool": "knowledge_search",
+   "esperado": "Error INVALID_SCHEMA: propiedad desconocida bajo document. — error en compilación, no [] silencioso. Fuente: query-language.md When a query fails, fila 2; mcp.yml E24-H07",
+   "real": "Error INVALID_SCHEMA, menciona las 3 propiedades válidas de document (document.path, document.title, document.has_frontmatter)",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "TYP-09",
+   "lote": "L1",
+   "tool": "knowledge_search",
+   "esperado": "results [] totalApproximate 0, SIN error — campo de frontmatter que nadie tiene es ausencia, no error. Fuente: query-language.md Fields and dot-paths (ejemplo literal nonexistent_field = 3)",
+   "real": "0 resultados, totalApproximate=0, sin error por campo inexistente",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "TYP-10",
+   "lote": "L1",
+   "tool": "knowledge_search",
+   "esperado": "results [] totalApproximate 0, SIN error — priority es number en todo homelab; = con cruce de tipos es false, nunca error. Fuente: query-language.md Values and types (service.tier = \"1\" → [])",
+   "real": "0 resultados, totalApproximate=0, sin error por cruce de tipos (priority number = string)",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "TYP-11",
+   "lote": "L1",
+   "tool": "knowledge_search,knowledge_search",
+   "esperado": "CASO CRÍTICO. Ambos pasos: error INVALID_SCHEMA 'la consulta no es respondible sobre estos datos' nombrando: el documento donde chocó (pendientes/*.md), el campo priority, tipo real number, literal string, operador greater_than_or_equal, referencia §20.8, y remite a metadata_inspect{mode:field}. Determinista: AMBOS pasos nombran el MISMO documento. Fuente: query-language.md When a query fails (texto casi literal); mcp.yml E26-H08",
+   "real": "Ambos pasos error INVALID_SCHEMA idéntico: nombra pendientes/apagados-sucios.md, priority type mismatch (number vs string), cita §20.8, propone metadata_inspect",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "TYP-12",
+   "lote": "L1",
+   "tool": "knowledge_search",
+   "esperado": "Sin error; todos los updated de homelab son strings ISO 2026 entrecomillados → probablemente los 36 docs. Orden lexicográfico == cronológico con formato homogéneo. Fuente: query-language.md Declared limits/Dates",
+   "real": "36 resultados, totalApproximate=36, updated >= 2026-01-01 (ISO strings, orden lexicográfico válido)",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "TYP-13",
+   "lote": "L1",
+   "tool": "knowledge_search",
+   "esperado": "SIN error (string vs string es orden válido) pero 0 resultados: todos los updated reales son \"2026-0X-XX\" y '0' < '1' en el 6º carácter, así que ninguno supera \"2026-1-1\". Demuestra la trampa lexicográfica documentada. Fuente: query-language.md Declared limits (ejemplo 2025-11-04 vs 2025-9-1)",
+   "real": "0 resultados, totalApproximate=0, sin error pero sin coincidencias por trampa lexicográfica (2026-01-01 no existe en formato real 2026-0X-XX)",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "TYP-14",
+   "lote": "L1",
+   "tool": "knowledge_search",
+   "esperado": "Servicios cuyo runs_on (lista) contiene bastion — contains sobre lista es membership, decidido por el tipo del CAMPO. Fuente: query-language.md Operators",
+   "real": "4 servicios con runs_on contains bastion: actualizaciones-automaticas, ssh, terminfo-ghostty, wireguard",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "TYP-15",
+   "lote": "L1",
+   "tool": "knowledge_search",
+   "esperado": "Solo servicios con AMBOS en runs_on (según exploración: servicios/ssh.md y servicios/terminfo-ghostty.md; verificar contra proyección). Fuente: query-language.md Operators contains_all",
+   "real": "2 servicios con runs_on contains_all [bastion, mac-mini]: ssh.md, terminfo-ghostty.md",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "TYP-16",
+   "lote": "L1",
+   "tool": "knowledge_search,knowledge_search",
+   "esperado": "Paso 0: unión de docs con al menos uno de esos tags. Paso 1: docs con tag homelab (los 4 equipos al menos). Sin errores; verificar coherencia con las proyecciones. Fuente: query-language.md Operators",
+   "real": "Paso 0: 6 docs (tags contains_any seguridad/respaldo), Paso 1: 5 docs (tags contains homelab)",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "TYP-17",
+   "lote": "L1",
+   "tool": "knowledge_search",
+   "esperado": "results [] — los 6 servicios llevan verified según exploración. Si aparece alguno, es hallazgo de datos (no de lodestar): anotarlo. Fuente: query-language.md has/missing",
+   "real": "0 resultados, todos los servicios tienen verified",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "TYP-18",
+   "lote": "L1",
+   "tool": "knowledge_search",
+   "esperado": "Exactamente los 4 equipos (único tipo con mapa net). has() juzga presencia de clave. Fuente: query-language.md has/missing",
+   "real": "4 equipos con has(net): bastion, deco, mac-mini, neo",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "TYP-19",
+   "lote": "L1",
+   "tool": "knowledge_search",
+   "esperado": "Los 36 documentos (todos llevan tags). Nota: limit 100 es el máximo de knowledge_search. Fuente: mcp.yml knowledge_search limit [1,100]",
+   "real": "36 documentos, todos llevan tags, limit 100 es máximo válido de knowledge_search",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "TYP-20",
+   "lote": "L1",
+   "tool": "knowledge_search",
+   "esperado": "Docs con status distinto de vigente: 33 docs tienen status, 13 decisiones son vigente → esperados ~20. Precedencia not > and > or. Fuente: query-language.md Combining conditions",
+   "real": "20 documentos con not(status=vigente) and has(status), operadores respetan precedencia",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "TYP-21",
+   "lote": "L1",
+   "tool": "knowledge_search",
+   "esperado": "Error INVALID_SCHEMA «where» inválido: carácter inesperado ' — comillas simples no son delimitador. Fuente: query-language.md Values and types (ejemplo literal)",
+   "real": "Error INVALID_SCHEMA carácter inesperado: comillas simples no son delimitador válido",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "TYP-22",
+   "lote": "L1",
+   "tool": "knowledge_search,knowledge_search",
+   "esperado": "AMBOS pasos devuelven EXACTAMENTE los mismos paths y totalApproximate — where y filter compilan a la misma expresión. Fuente: query-language.md (equivalencia por construcción)",
+   "real": "where y filter compilan idénticamente: 6 resultados, mismos paths (clave-privada-en-fichero-aparte, nombre-del-tunel, split-tunnel, coexistencia-vpns, on-demand-macos, wireguard)",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "TYP-23",
+   "lote": "L1",
+   "tool": "knowledge_search",
+   "esperado": "where y filter juntos se combinan con AND: solo equipos con tag homelab (subconjunto del paso 1 de TYP-16). Fuente: query-language.md Where the language is accepted",
+   "real": "where + filter se combinan con AND: 4 equipos con tag homelab (subconjunto de TYP-16 paso 1)",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "PRJ-01",
+   "lote": "L2",
+   "tool": "knowledge_search",
+   "esperado": "Cada hit con net trae frontmatter {\"net.ip\": \"<ip>\"} — la clave es el SUFIJO literal pedido, sin re-anidar. deco/neo también tienen net.ip según exploración; un doc sin el campo no lleva la clave (nunca null). Fuente: query-language.md Projecting fields",
+   "real": "4 resultados (bastion, deco, mac-mini, neo) con frontmatter={\"net.ip\": \"<ip>\"} — proyección correcta del sufijo literal sin re-anidar",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "PRJ-02",
+   "lote": "L2",
+   "tool": "knowledge_search",
+   "esperado": "Error INVALID_SCHEMA: cada entrada de «include» debe ser «frontmatter.<fieldPath>»; el prefijo es OBLIGATORIO en include aunque sea opcional en where. Fuente: query-language.md Projecting fields (texto literal del error)",
+   "real": "Error INVALID_SCHEMA: 'cada entrada de «include» debe ser «frontmatter.<fieldPath>»' — requiere prefijo obligatorio",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "PRJ-03",
+   "lote": "L2",
+   "tool": "knowledge_search",
+   "esperado": "Sin error; cada hit con mapa frontmatter SIN esa clave (ausente, no null). Fuente: query-language.md Projecting fields",
+   "real": "4 resultados con frontmatter={} (vacío) — campo inexistente ausente, no null",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "PRJ-04",
+   "lote": "L2",
+   "tool": "knowledge_get",
+   "esperado": "document.frontmatter = YAML completo con tipos reales: net como MAPA anidado {ip, mac, iface} (no aplanado), tags lista, updated string. Fuente: mcp.yml knowledge_get include (E16-H01)",
+   "real": "frontmatter con estructura anidada correcta: net{ip, mac, iface}, tags array, updated string '2026-08-05'",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "PRJ-05",
+   "lote": "L2",
+   "tool": "knowledge_get",
+   "esperado": "document.title presente SIEMPRE (E24-H11) y revision blake3; frontmatter/body/outgoingLinks/backlinks ausentes por no pedirse (nunca defaults disfrazados). Fuente: mcp.yml E24-H09/H11",
+   "real": "Solo path, revision(blake3:61ffda60e...), title presentes — body/frontmatter/links ausentes por no pedirse",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "PRJ-06",
+   "lote": "L2",
+   "tool": "knowledge_get,knowledge_get",
+   "esperado": "Paso 0: body completo. Paso 1: body acotado a la sección Diagnóstico (bastion.md tiene un heading Diagnóstico según exploración) — subconjunto estricto del paso 0 que contiene los comandos de diagnóstico. Fuente: mcp.yml knowledge_get sections",
+   "real": "Paso 0: body completo; Paso 1: body acotado a sección Diagnóstico — subconjunto estricto confirmado",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "PRJ-07",
+   "lote": "L2",
+   "tool": "knowledge_get",
+   "esperado": "UNCLEAR esperado: el contrato no fija el comportamiento con heading inexistente (¿body vacío? ¿error?). Registrar el comportamiento real literal para el informe. Fuente: mcp.yml knowledge_get (silencio contractual)",
+   "real": "Sección inexistente retorna body vacío (no error, resultado PASS técnico pero contrato silencioso); comportamiento: vacío sin fallo",
+   "veredicto": "UNCLEAR",
+   "motivo": "",
+   "verificacion": {
+    "clasificacion": "CONTRATO-AMBIGUO",
+    "es_bug_de": "documentacion",
+    "evidencia": "Contrato (contracts/mcp.yml:664, knowledge_get.sections): \"headingPaths para acotar «body» (solo si «body» ∈ include), p. ej. [[\\\"Security\\\",\\\"Token rotation\\\"]]\" — no fija qué pasa con un heading inexistente, y la lista de errores (mcp.yml:667) solo cubre forma inválida, no headings sin match. docs/user/mcp-clients.md:206 tampoco: \"`sections` narrows the body to specific headings\". El comportamiento real, reproducido 2 veces con el harness (root real, readonly): (1) sections=[[\"Sección Que No Existe\"]] → is_error:false, {\"document\":{\"body\":\"\",\"path\":\"equipos/bastion.md\",\"revision\":\"blake3:61ffda60...\",\"title\":\"bastion\"}}; (2) control mixto sections=[[\"Diagnóstico\"],[\"Sección Que No Existe\"]] → devuelve solo el contenido de Diagnóstico, omitiendo el path sin match sin error ni aviso. El comportamiento es DELIBERADO pero solo está documentado en un doc-comment interno del core (crates/lodestar-core/src/model.rs, sobre extract_sections): \"Un `heading_path` que no casa con ningún heading se omite silenciosamente\". Propuesta de issue: declarar en mcp.yml (semántica de knowledge_get.sections) y en mcp-clients.md que un headingPath sin match se omite silenciosamente y que un sections cuyo único path no casa produce body:\"\" — hoy un body vacío o acotado es indistinguible de \"todas las secciones existían\", la misma clase de resultado recortado indistinguible del correcto que E26-H08 eliminó para errores de tipo en knowledge_search (mcp.yml:648-652)."
+   }
+  },
+  {
+   "id": "PRJ-08",
+   "lote": "L2",
+   "tool": "knowledge_get",
+   "esperado": "outgoingLinks como [ResolvedLink]: cada uno {href, text, span, kind, target{kind,...}}; los enlaces internos resueltos con target.kind document. Fuente: mcp.yml E17 (knowledge_get.outgoingLinks [ResolvedLink])",
+   "real": "11 outgoingLinks con {href, text, span, kind, target{kind,value}}; WireGuard aparece 2 veces confirmando UNA ENTRADA POR ENLACE",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "PRJ-09",
+   "lote": "L2",
+   "tool": "knowledge_get",
+   "esperado": "backlinks.inbound = [LinkReference {from, link}] con UNA entrada POR ENLACE (un origen que enlaza dos veces aparece dos veces); out = [ResolvedLink]; sin campo dangling. Fuente: mcp.yml E17 (Backlinks)",
+   "real": "inbound: 20 LinkReference{from, link}; out: 11 ResolvedLink; sin campo dangling; guias/tmux.md presente 2 veces (una por enlace)",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "PRJ-10",
+   "lote": "L2",
+   "tool": "knowledge_get",
+   "esperado": "Error DOCUMENT_NOT_FOUND. Fuente: mcp.yml knowledge_get errores",
+   "real": "Error DOCUMENT_NOT_FOUND — documento no existe en workspace",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "PRJ-11",
+   "lote": "L2",
+   "tool": "knowledge_get",
+   "esperado": "Error INVALID_SCHEMA: falta ref. Fuente: mcp.yml knowledge_get errores",
+   "real": "Error INVALID_SCHEMA: 'falta el parámetro obligatorio «ref»'",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "PRJ-12",
+   "lote": "L2",
+   "tool": "knowledge_search,knowledge_search",
+   "esperado": "Paso 0 funciona; paso 1 con la MISMA consulta falla INVALID_SCHEMA solo por el include sin prefijo — la asimetría documentada como trampa. El error llega ANTES de tocar el workspace (no devuelve página parcial). Fuente: query-language.md Projecting fields; mcp.yml E23-H11",
+   "real": "Paso 0 ejecuta sin error; Paso 1 falla INVALID_SCHEMA antes de acceso (no página parcial) — asimetría documentada",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "PTH-03",
+   "lote": "L2",
+   "tool": "knowledge_get",
+   "esperado": "Rechazado sin tocar disco: RelPath rechaza absolutas y '..' (chokepoint de traversal). Código esperado en la familia INVALID_SCHEMA/DOCUMENT_NOT_FOUND — registrar el literal. Fuente: mcp.yml (RelPath, tests rechaza_absoluta/rechaza_escape)",
+   "real": "Error INVALID_SCHEMA: 'ruta relativa inválida: ../../../etc/passwd' — rechazo sin tocar disco",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "PTH-04",
+   "lote": "L2",
+   "tool": "knowledge_get",
+   "esperado": "Rechazado igual que PTH-03 (path absoluto). Fuente: mcp.yml RelPath",
+   "real": "Error INVALID_SCHEMA: 'ruta relativa inválida: /etc/passwd' — rechazo de path absoluto",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "ROB-04",
+   "lote": "L2",
+   "tool": "knowledge_get",
+   "esperado": "UNCLEAR a resolver: ¿RelPath normaliza '..' internos que no escapan, o rechaza cualquier '..' literal? Registrar comportamiento real (¿devuelve README.md o error?). Fuente: mcp.yml RelPath (ambigüedad)",
+   "real": "Error INVALID_SCHEMA: 'ruta relativa inválida: equipos/../README.md' — rechaza cualquier '..' literal (ambigüedad resuelta: no normaliza internos)",
+   "veredicto": "UNCLEAR",
+   "motivo": "",
+   "verificacion": {
+    "clasificacion": "RECLASIFICADO-PASS",
+    "es_bug_de": "ninguno",
+    "evidencia": "contracts/mcp.yml (bloque previo a `tools:`, líneas 569-574): \"Todo `path` de argumentos de tool es RELATIVO a la raíz y pasa por `RelPath::new` (...): las rutas ABSOLUTAS y las que contienen `..` se rechazan como error de EJECUCIÓN de la tool (`isError: true` en el result, mensaje legible; nunca error de protocolo) y no tocan disco\". Dice \"las que CONTIENEN `..`\", no \"las que escapan\": no hay ambigüedad. Refuerzos: mcp.yml línea 23 \"`ref.path` se valida a `RelPath` (rechaza absolutas/`..`, chokepoint de traversal)\" y crates/lodestar-core/src/types.rs `RelPath::new` (\"rechaza absolutas y `..`, y normaliza (separadores a `/`, colapsa `.` y `//`)\" — el segmento `..` es Err incondicional; solo `.` y `//` se colapsan). La normalización de `../docs/..` (E23-H11, `workspaceDirectory`) aplica a destinos de enlaces Markdown en cuerpos de documento, no a argumentos de tool. Re-ejecución aislada reproduce exacto: knowledge_get {\"ref\":{\"path\":\"equipos/../README.md\"}} → is_error: true, \"INVALID_SCHEMA: «ref» no tiene la forma esperada: ruta relativa inválida: equipos/../README.md\" — error de ejecución con mensaje legible que nombra el parámetro, conforme al contrato y a los tests de frontera del motor (mcp.rs::rechaza_escape, E15-H06). El UNCLEAR venía de que nuestro esperado atribuyó al contrato una ambigüedad que su texto no tiene."
+   }
+  },
+  {
+   "id": "MDI-01",
+   "lote": "L3_mdi_real",
+   "tool": "metadata_inspect",
+   "esperado": "Catálogo con al menos: affects, date, net, net.iface, net.ip, net.mac, optional, os, priority, role, runs_on, status, tags, title, type, updated, verified. presentIn cuenta DOCUMENTOS. net como mapping y sus hojas como campos propios. Fuente: mcp.yml metadata_inspect retorno",
+   "real": "Catálogo devuelve 17 fields: affects, date, net, net.iface, net.ip, net.mac, optional, os, priority, role, runs_on, status, tags, title, type, updated, verified. nextCursor=null.",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "MDI-02",
+   "lote": "L3_mdi_real",
+   "tool": "metadata_inspect",
+   "esperado": "presentIn 4 (4 equipos), missingIn 32, inferredTypes {string:4}, values con las 4 IPs (incluida 192.168.68.60) count 1 cada una. presentIn+missingIn == 36. Fuente: mcp.yml metadata_inspect (dot-path anidado)",
+   "real": "net.ip: presentIn=4, missingIn=32, 4 valores (192.168.68.1, 192.168.68.56, 192.168.68.60, 192.168.68.64), count=1 cada uno. Total=36.",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "MDI-03",
+   "lote": "L3_mdi_real",
+   "tool": "metadata_inspect",
+   "esperado": "inferredTypes SOLO {number:9} — cero strings (integridad del contrato de convenciones.md). presentIn 9. Fuente: convenciones.md (priority es número, nunca string)",
+   "real": "priority: inferredTypes={number:9} solo (sin strings), presentIn=9. values: [7 de value 3, 2 de value 2].",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "MDI-04",
+   "lote": "L3_mdi_real",
+   "tool": "metadata_inspect",
+   "esperado": "Error INVALID_SCHEMA: un namespace reservado a secas NO es metadata (propiedad calculada); el mensaje remite a graph_query o al anclaje frontmatter.graph.backlinks. Fuente: mcp.yml metadata_inspect field (E26-H09) y descripción de la tool",
+   "real": "Error INVALID_SCHEMA. Mensaje aclara que graph.backlinks no es campo metadata sino namespace calculado (graph_query).",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "MDI-05",
+   "lote": "L3_mdi_real",
+   "tool": "metadata_inspect,metadata_inspect",
+   "esperado": "Ambos pasos EQUIVALENTES (frontmatter. es anclaje opcional aquí): mismo presentIn (33), mismos values; el field ecoado es el path NORMALIZADO (igual en ambos). Values mezclan activo/parcial/vigente/abierto/aparcado/hecho — todos string. Fuente: mcp.yml E26-H09 (el field que ecoa es el normalizado)",
+   "real": "Ambos pasos equivalentes: field=status (normalizado en ambos), presentIn=33, values idénticos en ambos (vigente, activo, abierto, hecho, aparcado, verificado).",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "MDI-06",
+   "lote": "L3_mdi_real",
+   "tool": "metadata_inspect",
+   "esperado": "Error INVALID_SCHEMA: field requerido con mode field. Fuente: mcp.yml metadata_inspect",
+   "real": "Error INVALID_SCHEMA. Mensaje: mode field exige parámetro field.",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "MDI-07",
+   "lote": "L3_mdi_real",
+   "tool": "metadata_inspect",
+   "esperado": "Error INVALID_SCHEMA: mode fuera de {catalog, field}. Fuente: mcp.yml metadata_inspect",
+   "real": "Error INVALID_SCHEMA. Mensaje: mode debe ser 'catalog' o 'field', recibido 'invalido'.",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "MDI-08",
+   "lote": "L3_mdi_real",
+   "tool": "metadata_inspect",
+   "esperado": "Error INVALID_SCHEMA: falta mode. Fuente: mcp.yml metadata_inspect",
+   "real": "Error INVALID_SCHEMA. Mensaje: falta parámetro obligatorio 'mode'.",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "MDI-09",
+   "lote": "L3_mdi_real",
+   "tool": "metadata_inspect",
+   "esperado": "values[].count cuenta OBSERVACIONES no documentos: tags es multivalor, la suma de counts puede SUPERAR presentIn (36). presentIn+missingIn == 36 exacto. Fuente: mcp.yml metadata_inspect retorno (explosión de listas)",
+   "real": "tags: presentIn=36, missingIn=0, 33 valores distintos. Suma de counts=46 (46>36 confirma multivalor). 36+0=36.",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "MDI-13",
+   "lote": "L3_mdi_real",
+   "tool": "metadata_inspect",
+   "esperado": "fields con 1 sola entrada + nextCursor no-null. Los agregados siguen describiendo TODO el workspace. Fuente: mcp.yml E26-H10",
+   "real": "limit=1 devuelve 1 field (affects), nextCursor='1' (no-null). Agregados describen todo workspace.",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "MDI-14",
+   "lote": "L3_mdi_real",
+   "tool": "metadata_inspect",
+   "esperado": "Catálogo completo en una página, nextCursor null. Fuente: mcp.yml metadata_inspect limit [1,1000]",
+   "real": "limit=1000 devuelve catálogo completo (17 fields), nextCursor=null.",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "MDI-15",
+   "lote": "L3_mdi_real",
+   "tool": "metadata_inspect",
+   "esperado": "Error INVALID_SCHEMA: limit fuera de [1,1000] (E24-H09: ya no cae al default en silencio). Fuente: mcp.yml",
+   "real": "Error INVALID_SCHEMA. Mensaje: limit debe ser [1,1000], recibido 0.",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "MDI-16",
+   "lote": "L3_mdi_real",
+   "tool": "metadata_inspect",
+   "esperado": "Error INVALID_SCHEMA: limit > 1000. Fuente: mcp.yml",
+   "real": "Error INVALID_SCHEMA. Mensaje: limit debe ser [1,1000], recibido 1001.",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "MDI-17",
+   "lote": "L3_mdi_real",
+   "tool": "metadata_inspect,metadata_inspect,metadata_inspect,metadata_inspect",
+   "esperado": "Los pasos 1-3 recorren el catálogo de 1 en 1: las 3 primeras entradas concatenadas == las 3 primeras del paso 0, sin repeticiones ni huecos (verificación parcial de la reconstrucción exacta). Fuente: mcp.yml E26-H10 (paginación reconstruye exactamente)",
+   "real": "Paginación: step0(limit=1000)=17 fields, step1(limit=1)=affects+cur1, step2(cur1,limit=1)=date+cur2, step3(cur2,limit=1)=net+cur3. Primeras 3 entradas reconstruidas exactamente.",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "ROB-05",
+   "lote": "L3_mdi_real",
+   "tool": "knowledge_search",
+   "esperado": "Comportamiento ante cursor malformado (es 'offset hex'): registrar si es INVALID_SCHEMA o silencioso. Si silencioso, candidato a hallazgo de contrato. Fuente: mcp.yml cursor (opaco, hex)",
+   "real": "cursor='zzz-no-hex' (malformado) ejecuta SILENCIOSO: devuelve resultados (20 items, nextCursor='14') sin error. Candidato a hallazgo de contrato (validación cursor débil o cursor ignorado).",
+   "veredicto": "UNCLEAR",
+   "motivo": "",
+   "verificacion": {
+    "clasificacion": "CONTRATO-AMBIGUO",
+    "es_bug_de": "documentacion",
+    "evidencia": "REPRODUCIDO (3 ejecuciones, harness readonly sobre /Users/dbarea/repos/homelab): knowledge_search con cursor=\"zzz-no-hex\" y where=\"has(tags)\" devuelve SIN error la primera página (20 items, primero CLAUDE.md, nextCursor=\"14\"), byte-idéntica a la llamada sin cursor; el cursor válido \"14\" sí reanuda en el offset 20 (primero guias/tmux.md, nextCursor=null). CAUSA: /Users/dbarea/repos/lodestar/crates/lodestar-app/src/lib.rs:3773-3775 — \"/// Decodifica un cursor a su offset. Un cursor malformado se interpreta como el inicio (offset 0). fn decode_cursor(cursor: &str) -> usize { usize::from_str_radix(cursor, 16).unwrap_or(0) }\" — comportamiento deliberado, no bug de motor. CONTRATO: mcp.yml línea 634 solo declara \"cursor opaco (offset codificado en hex) devuelto en nextCursor\", y la línea 637 restringe INVALID_SCHEMA del cursor al TIPO: \"los VALORES declarados fuera de rango o de tipo — `text`/`where`/`cursor` que no sean cadena\" (E24-H09). Un string no-hex no está prometido como error, así que lo observado no contradice la letra del contrato — pero el fallback a offset 0 no está fijado en NINGUNA fuente visible (ni mcp.yml ni docs/user/* ni ARCHITECTURE.md; solo el comentario del código). Hallazgo documental listo para issue: el fallback silencioso choca con dos principios declarados del propio proyecto — mcp.yml sección `validacion_de_argumentos` (~línea 547): \"se RECHAZA cuando hay un despachador que de todos modos tiene que interpretar el valor\" (decode_cursor ES ese intérprete), y ARCHITECTURE.md:1305: \"Una entrada mal formada es `INVALID_SCHEMA`, no un descarte silencioso\". Riesgo práctico: un agente que pagina con un cursor corrompido recibe la página 1 otra vez, indistinguible de datos correctos (páginas duplicadas), la misma clase de fallo silencioso que E26-H08 eliminó para los type errors. Propuesta: o declarar el fallback en mcp.yml (línea 634/637) o alinear con la regla de la casa y devolver INVALID_SCHEMA ante cursor no decodificable."
+   }
+  },
+  {
+   "id": "ROB-01",
+   "lote": "L3_mdi_real",
+   "tool": "metadata_inspect",
+   "esperado": "Vocabulario completo de affects con counts (observaciones). AUDITORÍA de datos: buscar valores huérfanos count 1 sospechosos de errata (p. ej. bastión con tilde vs bastion). Anotar hallazgos de DATOS aparte de veredicto lodestar. Fuente: convenciones.md Comprobaciones periódicas",
+   "real": "affects: 10 valores con counts (bastion:11, wireguard:9, neo:6, ssh:5, convenciones:3, mac-mini:3, actualizaciones-automaticas:2, deco:2, despertar-por-red:1, termius:1). Valores count=1 legítimos.",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "ROB-02",
+   "lote": "L3_mdi_real",
+   "tool": "knowledge_search,knowledge_search",
+   "esperado": "Paso 0: docs con bastion en affects. Paso 1: probablemente [] (sin normalización Unicode, la tilde no matchea). Ambos sin error. Fuente: query-language.md (membership exacto); convenciones.md (errata devuelve vacío sin avisar)",
+   "real": "Paso 0: 'affects contains \"bastion\"' → totalApproximate=11. Paso 1: 'affects contains \"bastión\"' → totalApproximate=0 (sin normalización Unicode).",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "MDI-10",
+   "lote": "L4",
+   "tool": "metadata_inspect,metadata_inspect,knowledge_search",
+   "esperado": "Paso 0: el catálogo ANUNCIA sonar.projectKey (del fixture dot-key.md). Paso 1: presentIn 0 o equivalente — la clave con punto literal NO es direccionable (el path desciende a un mapa sonar inexistente). Paso 2: results [] sin error. Clase límite 1 documentada. Fuente: query-language.md Three things the dot-path dialect cannot say (1); mcp.yml metadata_inspect clases límite",
+   "real": "Paso 0: catálogo anuncia sonar.projectKey (presentIn=1). Paso 1: presentIn=0 (no alcanzable). Paso 2: results=[] sin error.",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "MDI-10b",
+   "lote": "L4",
+   "tool": "metadata_inspect,knowledge_search",
+   "esperado": "Fixtures nested-env.md (env:{region:us-east}) y flat-env.md (clave literal env.region:eu-west). Catálogo anuncia ambas como env.region (indistinguibles); solo la ANIDADA es alcanzable: paso 1 debe devolver únicamente nested-env.md con us-east. Fuente: query-language.md clase límite 3 (ejemplo literal)",
+   "real": "Paso 0: metadata_inspect presentIn=1, valores=[us-east] (solo nested-env.md alcanzable). Paso 1: knowledge_search devuelve 1 resultado (fixtures/nested-env.md) con frontmatter.env.region=us-east, sin flat-env.md.",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "MDI-11",
+   "lote": "L4",
+   "tool": "metadata_inspect",
+   "esperado": "Error INVALID_SCHEMA RUIDOSO (no presentIn:0 silencioso): el prefijo frontmatter. es el anclaje y colisiona con la clave literal frontmatter del fixture; el mensaje explica la colisión y sugiere knowledge_search{include:[frontmatter.frontmatter.x]}. Fuente: query-language.md clase límite 2 (texto casi literal); mcp.yml E26-H09",
+   "real": "metadata_inspect(frontmatter.x) devuelve error_code=INVALID_SCHEMA (ruidoso), mensaje explica colisión y sugiere include:[frontmatter.frontmatter.x].",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "MDI-12",
+   "lote": "L4",
+   "tool": "knowledge_search,knowledge_search",
+   "esperado": "Paso 0: SOLO fixtures/frontmatter-key.md proyecta {\"frontmatter.x\": 1}; el resto, mapa vacío. Única superficie que lee la clave bajo un frontmatter literal. Paso 1: [] sin error — frontmatter.x en where se lee como anclaje + clave x de primer nivel, que nadie tiene. Fuente: query-language.md clase límite 2",
+   "real": "Paso 0: knowledge_search(include:[frontmatter.frontmatter.x]) devuelve 40 docs; fixtures/frontmatter-key.md con frontmatter.x=1, resto con frontmatter={}. Paso 1: knowledge_search(where:frontmatter.x=1) devuelve results=[].",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "GRF-01",
+   "lote": "L5",
+   "tool": "graph_query",
+   "esperado": "nodes = bastion + orígenes entrantes (NO vacío: bastion es el más citado); edges = origen→bastion; GraphNode {id, title, ghost} SIN type/status. Fuente: mcp.yml graph_query semantica",
+   "real": "nodeCount=20, edgeCount=19, bastion present, no type/status fields",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "GRF-02",
+   "lote": "L5",
+   "tool": "graph_query,graph_query",
+   "esperado": "outgoing ≡ neighborhood(ref,1,Out) por contrato: AMBOS pasos con los mismos nodes/edges. Fuente: mcp.yml graph_query semantica (outgoing reusa neighborhood)",
+   "real": "outgoing step: 16 nodes, 15 edges; neighborhood(depth=1,out) step: 16 nodes, 15 edges (identical)",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "GRF-03",
+   "lote": "L5",
+   "tool": "graph_query",
+   "esperado": "Vecindario a 2 saltos ambas direcciones: superconjunto de GRF-01; summary.nodeCount coherente con nodes. Fuente: mcp.yml graph_query",
+   "real": "neighborhood depth=2 both: nodeCount=34, edgeCount=129, superconjunto de GRF-01",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "GRF-04",
+   "lote": "L5",
+   "tool": "graph_query",
+   "esperado": "{isolated: []} o nodes vacíos — baseline counts.isolated = 0. Fuente: mcp.yml (isolated = sin enlaces internos IN ni OUT)",
+   "real": "isolated: nodeCount=0, edgeCount=0 (empty as expected)",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "GRF-05",
+   "lote": "L5",
+   "tool": "graph_query",
+   "esperado": "Vacío — baseline counts.dangling = 0. Fuente: mcp.yml",
+   "real": "dangling: nodeCount=0, edgeCount=0 (empty as expected)",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "GRF-06",
+   "lote": "L5",
+   "tool": "graph_query",
+   "esperado": "Camino dirigido más corto: nodes = el camino en orden, edges = enlaces consecutivos (README probablemente enlaza wireguard directa o indirectamente). Si no hay camino: vacío, nunca error. Fuente: mcp.yml graph_query semantica",
+   "real": "path_between README→wireguard: nodeCount=2, edgeCount=1, direct path found",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "GRF-07",
+   "lote": "L5",
+   "tool": "graph_query",
+   "esperado": "Probablemente vacío (nodes/edges []) y NUNCA error — sin camino dirigido es respuesta legítima. Fuente: mcp.yml (sin camino → vacío, nunca error)",
+   "real": "path_between tmux→tplink-ddns: nodeCount=4, edgeCount=3, path found (tmux→bastion→deco→tplink), no error",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "GRF-08",
+   "lote": "L5",
+   "tool": "graph_query",
+   "esperado": "SCC no triviales. Homelab enlaza bidireccionalmente (equipo↔servicio) así que puede haber ciclos legítimos: registrar el real. Si vacío también es válido. El veredicto es sobre FORMA (nodes = unión de nodos en ciclos, edges internos al conjunto), no sobre cardinalidad. Fuente: mcp.yml graph_query semantica",
+   "real": "cycles: nodeCount=30, edgeCount=135, SCC detected",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "GRF-09",
+   "lote": "L5",
+   "tool": "graph_query",
+   "esperado": "Sirve el grafo COMPLETO (particiona todo): nodeCount ~36 (+ posibles ghosts), edges de todo el grafo. Con 0 aislados, probablemente 1 componente conexa. Fuente: mcp.yml (components sirve el grafo completo)",
+   "real": "components full graph: nodeCount=36, edgeCount=144, complete workspace",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "GRF-10",
+   "lote": "L5",
+   "tool": "graph_query",
+   "esperado": "Error INVALID_SCHEMA (NO DOCUMENT_NOT_FOUND — cambio E26-H07): mensaje nombra el parámetro ref y la operación backlinks. Fuente: mcp.yml graph_query ref (E26-H07)",
+   "real": "backlinks no ref: error_code=INVALID_SCHEMA (not DOCUMENT_NOT_FOUND)",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "GRF-11",
+   "lote": "L5",
+   "tool": "graph_query",
+   "esperado": "Error INVALID_SCHEMA: falta to en path_between. Fuente: mcp.yml graph_query to",
+   "real": "path_between no to: error_code=INVALID_SCHEMA (missing required param)",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "GRF-12",
+   "lote": "L5",
+   "tool": "graph_query",
+   "esperado": "Error DOCUMENT_NOT_FOUND: ref PRESENTE que no resuelve (distinto de GRF-10). Fuente: mcp.yml graph_query ref",
+   "real": "backlinks non-existent: error_code=DOCUMENT_NOT_FOUND (distinct from missing param)",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "GRF-13",
+   "lote": "L5",
+   "tool": "graph_query",
+   "esperado": "Error INVALID_SCHEMA: orphans retirado sin alias desde E16-H02. Fuente: mcp.yml cabecera (orphans → isolated sin alias)",
+   "real": "orphans retired: error_code=INVALID_SCHEMA (operation not recognized)",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "GRF-14",
+   "lote": "L5",
+   "tool": "graph_query",
+   "esperado": "Error INVALID_SCHEMA con mensaje enumerando las OCHO operaciones válidas (E26-H07). Fuente: mcp.yml graph_query errores",
+   "real": "invalid operation: error_code=INVALID_SCHEMA (unknown operation rejected)",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "GRF-15",
+   "lote": "L5",
+   "tool": "graph_query",
+   "esperado": "1 nodo, summary.truncated true, nextCursor no-null; edges acotadas a los nodos supervivientes de la página. Fuente: mcp.yml E26-H10",
+   "real": "components limit=1: nodeCount=1, truncated=True, nextCursor present",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "GRF-16",
+   "lote": "L5",
+   "tool": "graph_query",
+   "esperado": "Error INVALID_SCHEMA: limit fuera de [1,1000] (E26-H10). Fuente: mcp.yml graph_query limit",
+   "real": "components limit=1001: error_code=INVALID_SCHEMA (out of [1,1000])",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "GRF-17",
+   "lote": "L5",
+   "tool": "graph_query",
+   "esperado": "Error INVALID_SCHEMA: depth < 1 (E24-H09). Fuente: mcp.yml graph_query depth y errores",
+   "real": "neighborhood depth=0: error_code=INVALID_SCHEMA (depth must be >=1)",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "GRF-18",
+   "lote": "L5",
+   "tool": "graph_query,graph_query",
+   "esperado": "direction no reconocida → default Out SIN error (documentado: cualquier otro → Out). Paso 0 == paso 1 exactamente. Si en cambio da INVALID_SCHEMA, es discrepancia contrato-vs-motor a reportar. Fuente: mcp.yml graph_query direction (default anotado)",
+   "real": "direction='sideways' step: 16n/15e; direction='out' step: 16n/15e (identical, no error)",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "IMP-01",
+   "lote": "L5",
+   "tool": "impact_analyze",
+   "esperado": "summary.directlyAffected = nº backlinks directos (== inbound de GRF-01); transitivelyAffected >= directlyAffected; blockingReferences [] SIEMPRE (E20-H03); risk high si muchos afectados; recommendations texto español si risk > low. Fuente: mcp.yml impact_analyze semantica",
+   "real": "delete bastion: directly=20, transitively=33, risk=high, blocking=0",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "IMP-02",
+   "lote": "L5",
+   "tool": "impact_analyze",
+   "esperado": "Sin error; solo delete computa bloqueos en v1; blockingReferences []. Fuente: mcp.yml impact_analyze kind",
+   "real": "move tmux: directly=4, transitively=33, risk=medium, blocking=0",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "IMP-03",
+   "lote": "L5",
+   "tool": "impact_analyze",
+   "esperado": "Error DOCUMENT_NOT_FOUND. Fuente: mcp.yml impact_analyze errores",
+   "real": "delete non-existent: error_code=DOCUMENT_NOT_FOUND",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "IMP-04",
+   "lote": "L5",
+   "tool": "impact_analyze",
+   "esperado": "Error INVALID_SCHEMA: kind fuera de {move, delete}. Fuente: mcp.yml impact_analyze kind",
+   "real": "archive kind: error_code=INVALID_SCHEMA (kind must be move|delete)",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "IMP-05",
+   "lote": "L5",
+   "tool": "impact_analyze",
+   "esperado": "Con depth 1 el blast-radius se acota: transitivelyAffected == directlyAffected (solo entrantes directos). Fuente: mcp.yml impact_analyze depth",
+   "real": "delete bastion depth=1: directly=20, transitively=19",
+   "veredicto": "FAIL",
+   "motivo": "With depth=1 should constrain transitively to directly (20), got 19",
+   "verificacion": {
+    "clasificacion": "RECLASIFICADO-PASS",
+    "es_bug_de": "ninguno",
+    "evidencia": "El esperado del test asumió que con depth=1 `transitivelyAffected == directlyAffected`, pero el contrato define esos dos contadores en UNIDADES DISTINTAS. Fuente (contracts/mcp.yml, tool impact_analyze, campo `semantica`, líneas 768-770): \"`directlyAffected` = nº de backlinks directos entrantes (DocumentSet::backlinks.inbound). `transitivelyAffected` = tamaño del blast-radius entrante (DocumentSet::neighborhood(ref, ∞, Direction::In) excluido el propio ref)\". Y `Backlinks.inbound` cuenta ENLACES, no documentos (crates/lodestar-core/src/types.rs:1174-1176): \"Quién enlaza aquí, con el enlace completo (una entrada por **enlace**). pub inbound: Vec<LinkReference>\". En homelab, guias/tmux.md enlaza a equipos/bastion.md DOS veces (líneas 117 y 145), luego hay 20 referencias entrantes desde 19 documentos únicos. Output reproducido en aislado (harness readonly, root real): depth=1 → {\"directlyAffected\":20,\"transitivelyAffected\":19}, affectedDocuments = 19 paths, recommendations = \"Revisa los 20 enlaces entrantes…\"; sin depth → {\"directlyAffected\":20,\"transitivelyAffected\":33}. Todo coherente: depth=1 sí acota el blast-radius a los entrantes directos (19 documentos, mismo conjunto que los 19 nodos origen de GRF-01 backlinks), y directlyAffected=20 es depth-independiente por definición. La igualdad solo se daría si cada documento entrante enlazara exactamente una vez, cosa que el contrato no promete. No hay bug de motor ni de doc: el comportamiento coincide con la fuente; el esperado leyó mal las unidades."
+   }
+  },
+  {
+   "id": "PLN-01",
+   "lote": "L6",
+   "tool": "change_plan",
+   "esperado": "Paso 0: PlanResult con changeSetId (changeset:...), planHash (blake3:...), baseWorkspaceRevision, expiresAt, normalizedOperations=[el patch], semanticDiff.modified=[pendientes/wol-bastion.md], frontmatterChanges, capturedRevisions {} (forma-array), diagnosticsBefore/After errors 0. canApply true (workspace limpio, policy default). Paso 1: git status VACÍO fuera de .lodestar — nada escrito en los .md. Fuente: safe-changes.md A round trip; mcp.yml change_plan retorno",
+   "real": "change_plan returned PlanResult with changeSetId changeset:915ec0bc, planHash blake3:915ec0bc, canApply true, normalizedOperations=[1 patch], capturedRevisions={}, diagnosticsBefore/After errors 0; git status clean outside .lodestar",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "PLN-02",
+   "lote": "L6",
+   "tool": "change_plan,change_plan,change_plan",
+   "esperado": "CRÍTICO hash determinista: pasos 0 y 1 → MISMO planHash y MISMO changeSetId (mismo input + misma base). Paso 2 (patch distinto) → planHash DIFERENTE. Fuente: mcp.yml change_plan (planHash = blake3(base ‖ ops canónicas), no depende del reloj); safe-changes.md What the plan checks (6)",
+   "real": "Steps 0-1 (priority: 1) identical: planHash blake3:915ec0bc, changeSetId changeset:915ec0bc; Step 2 (priority: 2) different: planHash blake3:8a4f0137, changeSetId changeset:8a4f0137 — deterministic hashing working",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "PLN-04",
+   "lote": "L6",
+   "tool": "change_plan",
+   "esperado": "Forma-objeto masiva: normalizedOperations con UNA entrada por pendiente abierto (6 esperados); capturedRevisions con una entrada blake3 por doc seleccionado; impact.affectedCount coherente. Fuente: safe-changes.md Bulk selections; mcp.yml change_plan selection/operation",
+   "real": "Bulk selection matched 6 pendientes abiertos: normalizedOperations=[6 patches], capturedRevisions={6 blake3 entries}, affectedCount=6, affectedDocuments=[all 6], semanticDiff.modified=[all 6]",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "PLN-05",
+   "lote": "L6",
+   "tool": "change_plan",
+   "esperado": "Plan VACÍO sin error: normalizedOperations [], capturedRevisions {}. Fuente: safe-changes.md (una selección que no casa nada produce plan vacío, no error)",
+   "real": "Selection matched 0 documents: normalizedOperations=[], capturedRevisions={}, affectedCount=0",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "PLN-06",
+   "lote": "L6",
+   "tool": "change_plan",
+   "esperado": "Error INVALID_SCHEMA con el MISMO código y MISMO texto que daría knowledge_search con esa consulta (type error de orden number vs string, nombrando documento/campo/tipos/operador). Comparar literalmente con el mensaje de TYP-11. Fuente: mcp.yml change_plan errores (E26-H08); safe-changes.md Bulk selections",
+   "real": "INVALID_SCHEMA: type mismatch (priority: number vs string 'x' with >= operator), mentions §20.8, directs to metadata_inspect",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "PLN-07",
+   "lote": "L6",
+   "tool": "change_plan",
+   "esperado": "Error INVALID_SCHEMA: bastion tiene backlinks y falta inboundLinksPolicy (obligatoria con entrantes); mensaje nombra las válidas [reject, remove_links]. DISTINTO de INBOUND_LINKS_EXIST. Fuente: safe-changes.md The seven operations; mcp.yml inboundLinksPolicy",
+   "real": "INVALID_SCHEMA (not INBOUND_LINKS_EXIST): bastion.md has 20 inbound links, delete requires inboundLinksPolicy, lists options [reject, remove_links]",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "PLN-09",
+   "lote": "L6",
+   "tool": "change_plan",
+   "esperado": "Error INVALID_SCHEMA: policy parcial rechazada hoy — missing field allowWarnings. Fuente: safe-changes.md canApply (texto literal del error)",
+   "real": "INVALID_SCHEMA: policy missing field allowWarnings",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "PLN-10",
+   "lote": "L6",
+   "tool": "change_plan",
+   "esperado": "Error INVALID_SCHEMA: op fuera del enum de 7. Fuente: mcp.yml operations[].op",
+   "real": "INVALID_SCHEMA: operacion_desconocida not recognized, lists valid ops (create, patch_frontmatter, replace_body, replace_text, edit_section, move, delete)",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "PLN-11",
+   "lote": "L6",
+   "tool": "change_plan",
+   "esperado": "Error INVALID_SCHEMA: apply_fix retirado en E23-H11, hoy es op desconocida (no DOCUMENT_NOT_FOUND). Fuente: mcp.yml cabecera E23-H11",
+   "real": "INVALID_SCHEMA: apply_fix not a known operation (retired E23-H11), lists valid ops excluding apply_fix",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "PLN-12",
+   "lote": "L6",
+   "tool": "change_plan",
+   "esperado": "Error INVALID_SCHEMA: move no es op admitida en selección masiva (solo patch_frontmatter | replace_text | delete). Fuente: mcp.yml change_plan operation",
+   "real": "INVALID_SCHEMA: move not admitted in bulk selection, valid bulk ops are patch_frontmatter, replace_text, delete",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "PLN-13",
+   "lote": "L6",
+   "tool": "change_plan",
+   "esperado": "Error DOCUMENT_NOT_FOUND: objetivo de normalización inexistente. Fuente: mcp.yml change_plan errores",
+   "real": "DOCUMENT_NOT_FOUND: objetivo no encontrado: no-existe.md",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "APL-05",
+   "lote": "L6",
+   "tool": "change_plan",
+   "esperado": "Error REVISION_CONFLICT: la revisión pinneada del documento no es la vigente; mensaje da la actual y remite a knowledge_get. Fuente: safe-changes.md Optimistic concurrency",
+   "real": "REVISION_CONFLICT: expectedRevision pinned to all-zeros, actual is blake3:36c41319, remits to knowledge_get",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "APL-06",
+   "lote": "L6",
+   "tool": "change_plan",
+   "esperado": "Error REVISION_CONFLICT a nivel workspace; mensaje da la revisión actual y remite a workspace_status. Fuente: safe-changes.md Optimistic concurrency",
+   "real": "REVISION_CONFLICT: expectedWorkspaceRevision all-ones, actual is blake3:4a7bba14, remits to workspace_status",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "PTH-01",
+   "lote": "L6",
+   "tool": "change_plan",
+   "esperado": "Rechazado como error de EJECUCIÓN sin tocar disco (RelPath chokepoint; mcp.yml lista PERMISSION_DENIED para path-traversal en change_plan — registrar el código literal). Fuente: mcp.yml change_plan errores + RelPath",
+   "real": "PERMISSION_DENIED: ruta relativa inválida: ../../../etc/passwd",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "PTH-02",
+   "lote": "L6",
+   "tool": "change_plan",
+   "esperado": "Mismo rechazo que PTH-01 con path absoluto. Fuente: mcp.yml RelPath",
+   "real": "PERMISSION_DENIED: ruta relativa inválida: /etc/passwd",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "APL-03",
+   "lote": "L6",
+   "tool": "change_apply",
+   "esperado": "Error PLAN_STALE: plan ausente/ilegible. Fuente: mcp.yml change_apply errores",
+   "real": "PLAN_STALE: changeSetId deadbeef not available, directs to change_plan for fresh plan",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "REV-02",
+   "lote": "L6",
+   "tool": "change_revert",
+   "esperado": "Error PLAN_EXPIRED: no hay recibo — nunca existió o la retención lo purgó. Fuente: safe-changes.md Receipts and retention (texto literal)",
+   "real": "PLAN_EXPIRED: receiptId deadbeef not found (transaction never existed or retention purged)",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "APL-01",
+   "lote": "L7",
+   "tool": "change_plan,change_apply,change_revert",
+   "esperado": "Round trip completo. Paso 2: applied true, receiptId, changedPaths=[pendientes/wol-bastion.md], previousWorkspaceRevision == baseWorkspaceRevision del plan, validation.valid true (workspace limpio). Paso 3: el diff toca SOLO la línea priority (edición quirúrgica, resto byte a byte). Paso 4: reverted true, receiptId con sufijo -revert, workspaceRevision == la previa al apply. Paso 5: sha256 IDÉNTICO al del paso 0 y git status limpio — restauración byte a byte. Fuente: safe-changes.md A round trip",
+   "real": "Round trip completo y limpio. change_plan: baseWorkspaceRevision=blake3:4a7bba14...622082. change_apply: applied=true, changedPaths=[pendientes/wol-bastion.md], previousWorkspaceRevision==baseWorkspaceRevision del plan (4a7bba14...), validation.valid=true/errors=0. git diff muestra únicamente la línea 'priority: 3'→'priority: 1' (edición quirúrgica). change_revert: reverted=true, receiptId con sufijo '-revert' (915ec0bc...f9bf-revert), workspaceRevision post-revert vuelve a blake3:4a7bba14...622082 (== previa al apply). sha256 final ab3658d1... idéntico al sha256 inicial (ab3658d1...) y git status limpio.",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "APL-07",
+   "lote": "L7",
+   "tool": "change_plan,change_apply",
+   "esperado": "Paso 2: Error PLAN_STALE — el workspace cambió bajo el plan (planHash recomputado difiere); el mensaje da ambas revisiones y manda replanificar. Nada escrito. Fuente: safe-changes.md Optimistic concurrency (PLAN_STALE)",
+   "real": "change_apply falla con error_code=PLAN_STALE. Mensaje incluye ambas revisiones: 'se planificó sobre la revisión blake3:4a7bba1484362565f3cb73adf6b15509e92ecea8895c315535da7aeb16622082 y el workspace está en blake3:63930fff44017a413b2edea19b89b067f22dcd7e3bcea31c38cb345697c7ccf5' y termina con 'Vuelve a llamar a change_plan sobre el estado actual'. structured=null, nada escrito por lodestar (la edición externa a streaming-de-musica.md persiste, pero eso es lo esperado, no una escritura de lodestar).",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "APL-08",
+   "lote": "L7",
+   "tool": "change_plan,change_apply,change_revert",
+   "esperado": "Paso 3: Error WRITE_CONFLICT — el conocimiento cambió después del apply, revertir pisaría ese cambio; no se restaura nada (terminal para la transacción). Fuente: safe-changes.md Optimistic concurrency (WRITE_CONFLICT en revert)",
+   "real": "change_revert falla con error_code=WRITE_CONFLICT tras editar wol-bastion.md externamente post-apply. Mensaje: 'el conocimiento cambió después del apply... (quedó en blake3:14ab001e...0af4d y ahora está en blake3:2341a843...a3ae04), así que revertir pisaría ese cambio: no se ha restaurado nada'. structured=null, terminal para la transacción, tal como predice el esperado.",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "APL-09",
+   "lote": "L7",
+   "tool": "change_plan,change_apply",
+   "esperado": "Semántica exacta a REGISTRAR: safe-changes.md muestra INBOUND_LINKS_EXIST con reject explícito y backlinks; si salta ya en el plan (paso 0) o en el apply (paso 1) es el detalle a documentar. Esperado: uno de los dos pasos falla con INBOUND_LINKS_EXIST y bastion NO se borra. Fuente: safe-changes.md The seven operations; mcp.yml change_plan errores (INBOUND_LINKS_EXIST)",
+   "real": "El fallo salta ya en el paso 0 (change_plan), no en el apply: error_code=INBOUND_LINKS_EXIST, mensaje 'el documento «equipos/bastion.md» tiene enlaces entrantes; no se puede borrar con la política «reject»'. Al fallar el plan (structured=null), el paso 1 (change_apply referenciando @step0.structured.changeSetId) no pudo ejecutarse y el arnés registró harness_exception 'TypeError: NoneType object is not subscriptable' — comportamiento correcto del arnés ante una referencia inválida, no un fallo de lodestar. bastion.md NO se borra (el plan nunca llegó a generar un changeSetId aplicable). Detalle a registrar: INBOUND_LINKS_EXIST se detecta en el PLAN, no en el apply.",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "APL-10",
+   "lote": "L7",
+   "tool": "knowledge_check,change_plan,change_apply,knowledge_check,change_revert",
+   "esperado": "Paso 1: el plan expande delete + reescrituras de los docs que enlazan a tmux.md (normalizedOperations > 1 si tiene entrantes). Paso 3: BORRADO. Paso 4: MISMOS errores que paso 0 (0 en workspace limpio) — remove_links no deja LINK-TARGET-MISSING nuevos. Paso 6: RESTAURADO (revert deshace delete + reescrituras). Fuente: safe-changes.md remove_links; mcp.yml normalize (una op puede producir varias)",
+   "real": "Paso 1 (plan delete+remove_links): normalizedOperations tiene 3 entradas (delete + 2 replace_body: README.md y servicios/termius.md), impact.affectedCount=3. Paso 3: BORRADO. Paso 4 (knowledge_check post-apply): errors=0/warnings=0/valid=true, igual que el paso 0 (baseline también 0/0/true) — remove_links no deja LINK-TARGET-MISSING. Paso 6: RESTAURADO tras change_revert (reverted=true, workspaceRevision vuelve a blake3:4a7bba14...622082, la baseline).",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "APL-11",
+   "lote": "L7",
+   "tool": "change_plan,workspace_status,change_apply,workspace_status",
+   "esperado": "Paso 0: canApply TRUE con policy default (homelab está limpio, a diferencia del demo con error deliberado). Paso 3 vs paso 1: workspaceRevision cambia tras el apply; receipts gana una entrada con receiptId/changeSetId/resultRevision/changedPathCount=1 (recibos listados newest first). Fuente: safe-changes.md canApply + Receipts and retention",
+   "real": "Paso 0: canApply=true con policy default (homelab limpio). workspace_status paso 1 (pre-apply): workspaceRevision=blake3:4a7bba14...622082, receipts=[] (vacío). workspace_status paso 3 (post-apply): workspaceRevision cambia a blake3:14ab001e...0af4d, receipts gana 1 entrada con receiptId=915ec0bc79...f9bf, changeSetId=changeset:915ec0bc79...f9bf, resultRevision=blake3:14ab001e...0af4d, changedPathCount=1.",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "APL-12",
+   "lote": "L7",
+   "tool": "change_plan,change_plan,change_apply,graph_query",
+   "esperado": "Paso 0: replace_text con expectedOccurrences que no casa → error (registrar código: familia INVALID_SCHEMA/INVALID_RESULT). Paso 1: move normaliza a move + N reescrituras de entrantes. Paso 3: fichero movido y los que enlazaban actualizados. Paso 4: dangling sigue VACÍO (rewriteInboundLinks true no deja enlaces rotos). Fuente: safe-changes.md What the plan checks (1); mcp.yml move from/to/rewriteInboundLinks",
+   "real": "Paso 0: change_plan con expectedOccurrences=99999 falla con error_code=INVALID_SCHEMA, mensaje 'se esperaban 99999 coincidencias pero se encontraron 32'. Paso 1: move normaliza a 1 op move + 2 replace_body (README.md, servicios/termius.md) = normalizedOperations con 3 entradas, impact.affectedCount=4 (incluye el propio doc creado/eliminado). Paso 3: MOVIDO, y grep confirma que servicios/termius.md y README.md referencian 'tmux-renombrada.md'. Paso 4: graph_query dangling devuelve nodeCount=0/edgeCount=0 (vacío) — sin enlaces rotos.",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "APL-13",
+   "lote": "L7",
+   "tool": "change_plan,change_apply,knowledge_get,knowledge_search",
+   "esperado": "create + apply funciona; paso 2 devuelve el frontmatter con tipos correctos (priority number, optional bool). Paso 3: el doc nuevo SIN enlaces aparece como isolated (nadie lo enlaza y no enlaza a nadie con enlaces internos... OJO: su body no tiene enlaces → isolated true esperado). semanticDiff.created=[el doc]. Fuente: mcp.yml create; §20.7 isolated",
+   "real": "create+apply exitoso (applied=true, changedPaths=[pendientes/caso-de-prueba.md]). knowledge_get devuelve frontmatter con tipos correctos: priority=3 (number, no string), optional=true (bool, no string). knowledge_search con graph.isolated=true devuelve totalApproximate=1 con el doc pendientes/caso-de-prueba.md como único resultado — confirma isolated=true para el doc nuevo sin enlaces. semanticDiff.created del apply=[pendientes/caso-de-prueba.md].",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "APL-14",
+   "lote": "L7",
+   "tool": "change_plan,change_apply",
+   "esperado": "edit_section con headingPath del H1 real del doc: si el heading no existe el plan falla (registrar); si existe, apply y grep = 1. Los modos válidos de mode los declara el inputSchema — si append no es válido, registrar el error como dato del contrato. Fuente: mcp.yml edit_section headingPath/mode/content",
+   "real": "headingPath ['Mantener sesiones vivas con tmux'] (el H1 real) es válido: plan canApply=true, mode='append' aceptado sin error. apply exitoso (applied=true). grep -c 'Línea añadida por el arnés' guias/tmux.md = 1.",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "REV-03",
+   "lote": "L7",
+   "tool": "change_plan,change_apply,change_revert,change_revert",
+   "esperado": "Doble revert del mismo recibo: el paso 2 revierte; el paso 3 debe FALLAR (el workspace ya no está en la revisión post-apply → WRITE_CONFLICT, o el recibo ya consumido → PLAN_EXPIRED; registrar el código real — detalle no explícito en el contrato, candidato CONTRATO-AMBIGUO). Fuente: safe-changes.md change_revert (revert = transacción inversa nueva)",
+   "real": "Doble revert del mismo receiptId: paso 2 revierte OK (reverted=true, workspaceRevision vuelve a blake3:4a7bba14...622082). Paso 3 FALLA con error_code=WRITE_CONFLICT, mensaje 'el conocimiento cambió después del apply... (quedó en blake3:14ab001e...0af4d y ahora está en blake3:4a7bba14...622082), así que revertir pisaría ese cambio: no se ha restaurado nada'. Código real: WRITE_CONFLICT, no PLAN_EXPIRED. Registrado como candidato CONTRATO-AMBIGUO según pedía el esperado: el sistema trata el segundo revert como si el workspace hubiera 'cambiado' (volvió a la revisión pre-apply) en vez de usar un código específico de 'recibo ya consumido'.",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "CHK-01",
+   "lote": "L9",
+   "tool": "knowledge_check",
+   "esperado": "Diagnóstico FM-UNCLOSED nivel err (frontmatter abierto sin cerrar). id con forma diag:blake3:<hex>. Fuente: mcp.yml catálogo CheckCode (FM-UNCLOSED, ex OKF-FM02); conform.rs",
+   "real": "FM-UNCLOSED err, id=diag:blake3:a21af0f7d690235be86411ff98ee05eefbae57826bc04c067475e6676ae79df0, targets=[fixtures/roto-unclosed.md]",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "CHK-02",
+   "lote": "L9",
+   "tool": "knowledge_check",
+   "esperado": "FM-YAML-INVALID nivel err; range = líneas de CONTENIDO del bloque (1-based ambas inclusive, delimitadores --- excluidos): el bloque del fixture tiene contenido en líneas 2-3 del fichero. Fuente: mcp.yml E16-H05 (FM-YAML-INVALID rellena range)",
+   "real": "FM-YAML-INVALID err, range 2-3 (líneas contenido YAML), msg contiene 'mapping values', targets=[fixtures/roto-yaml.md]",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "CHK-03",
+   "lote": "L9",
+   "tool": "knowledge_check",
+   "esperado": "DOC-CONFLICT-MARKER nivel err (marcadores de conflicto git en el cuerpo). Fuente: mcp.yml catálogo (ex OKF-CONFLICT)",
+   "real": "DOC-CONFLICT-MARKER err, msg='Hay marcadores de conflicto de merge sin resolver', targets=[fixtures/conflicto.md]",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "CHK-04",
+   "lote": "L9",
+   "tool": "knowledge_check",
+   "esperado": "LINK-TARGET-MISSING nivel ERR: el destino ../equipos/no-existe.md sería un documento .md del workspace. targets/related según contrato E17 (targets = [origen], related = destino). Fuente: mcp.yml E17-H03 (err si .md)",
+   "real": "LINK-TARGET-MISSING err, related=[equipos/no-existe.md] (documento .md missing), targets=[fixtures/enlace-roto.md]",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "CHK-05",
+   "lote": "L9",
+   "tool": "knowledge_check",
+   "esperado": "LINK-TARGET-MISSING nivel WARN: el destino ../scripts/no-existe.sh NO es .md (sería fichero de proyecto). El MISMO código con severidad distinta según extensión. Fuente: mcp.yml E17-H03 (warning si otro fichero)",
+   "real": "LINK-TARGET-MISSING warn, related=[scripts/no-existe.sh] (fichero no-.md missing), level=warn, valid=true",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "CHK-06",
+   "lote": "L9",
+   "tool": "knowledge_check",
+   "esperado": "LINK-ESCAPES-WORKSPACE nivel err: ../../../fuera-del-workspace.md sale por encima de la raíz; el motor no puede seguirlo ni reescribirlo. Fuente: mcp.yml E17-H03",
+   "real": "LINK-ESCAPES-WORKSPACE err, msg contiene '../../../fuera-del-workspace.md', targets=[fixtures/escapa.md]",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "CHK-07",
+   "lote": "L9",
+   "tool": "knowledge_check",
+   "esperado": "LINK-CASE-MISMATCH nivel warn: ../equipos/Bastion.md difiere solo en capitalización del real bastion.md; related nombra la ruta real del inventario. OJO APFS case-insensitive: si el enlace RESUELVE en disco puede no emitirse LINK-TARGET-MISSING pero SÍ debe emitirse el case-mismatch — registrar el comportamiento exacto. Fuente: mcp.yml E17 (segundo productor de LINK-CASE-MISMATCH)",
+   "real": "LINK-CASE-MISMATCH warn, related=[equipos/bastion.md] (ruta real), enlace tenía Bastion.md (mayúscula)",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "CHK-08",
+   "lote": "L9",
+   "tool": "knowledge_check",
+   "esperado": "SIN diagnóstico de enlace: [volver](../) es navegación pura (WorkspaceDirectory desde E23-H11), no EscapesWorkspace. diagnostics [] o solo ajenos al enlace. Fuente: mcp.yml E23-H11 (un [volver](../) legítimo ya no tumba el check)",
+   "real": "Sin diagnósticos (diagnostics=[]), navegación pura [volver](../) no emite LINK-ESCAPES-WORKSPACE, valid=true",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "CHK-09",
+   "lote": "L9",
+   "tool": "knowledge_check,knowledge_search,knowledge_get",
+   "esperado": "Wikilinks ignorados por diseño (§20.6): paso 0 sin diagnóstico de enlaces; paso 1 devuelve el doc (isolated TRUE pese al [[bastion]]); paso 2 outgoingLinks VACÍO. Es el comportamiento que justifica la decisión enlaces-markdown del homelab. Fuente: convenciones.md Enlaces; decisiones/enlaces-markdown.md; links.rs §20.6",
+   "real": "Paso 0: sin diagnósticos; Paso 1: isolated=true pese a [[bastion]], totalApproximate=1; Paso 2: outgoingLinks=[] (wikilinks ignorados)",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "CHK-10",
+   "lote": "L9",
+   "tool": "knowledge_check,knowledge_check",
+   "esperado": "AMBOS sin diagnóstico: clave con punto y clave frontmatter de primer nivel son YAML válido — el problema es de alcanzabilidad por consulta (L4), no de integridad. knowledge_check no vigila el contrato de convenciones.md, solo interpretabilidad. Fuente: mcp.yml (catálogo mínimo de CheckCode)",
+   "real": "Ambos pasos sin diagnósticos (dot-key y frontmatter-key son YAML válido, problema es alcanzabilidad L4, no integridad FM)",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "CHK-12",
+   "lote": "L10_chk_b",
+   "tool": "knowledge_check,metadata_inspect",
+   "esperado": "Paso 0: SIN diagnóstico — updated: 2026-8-5 sin comillas es YAML válido; el daño es semántico, no estructural. Paso 1: registrar el TIPO inferido para ese valor (¿string? ¿otro?) — la lib YAML no tipa timestamps según query-language.md, así que se espera string entre los inferredTypes junto a los demás. Si aparece un tipo no-string, se ha roto la homogeneidad de updated en el espacio: documentarlo. Fuente: query-language.md Dates are strings",
+   "real": "Paso0: knowledge_check scope document sin diagnósticos, valid:true. Paso1: metadata_inspect field=updated → inferredTypes {\"string\":37}, presentIn:37, missingIn:3, values incluye {\"2026-8-5\":1} tipado como string junto a los demás — sin tipo no-string, coincide con lo esperado.",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "CHK-13",
+   "lote": "L10_chk_b",
+   "tool": "knowledge_check,metadata_inspect,knowledge_search",
+   "esperado": "Paso 0: sin diagnóstico (YAML válido). Paso 1: inferredTypes AHORA {number:9, string:1} — el fixture rompe la homogeneidad. Paso 2: la consulta de orden que ANTES funcionaba ahora ABORTA con INVALID_SCHEMA nombrando fixtures/priority-string.md (campo priority, number vs string invertido: campo string vs literal number). Demuestra que UN solo doc rompe las comparaciones de orden en TODO el espacio, como avisa convenciones.md. Fuente: query-language.md When a query fails; convenciones.md regla 4",
+   "real": "Paso0: sin diagnóstico, valid:true. Paso1: inferredTypes {\"number\":9,\"string\":1}, presentIn:10 (rompe homogeneidad, como se esperaba). Paso2: knowledge_search where=\"priority >= 1\" → is_error true, error_code INVALID_SCHEMA, mensaje nombra fixtures/priority-string.md, campo priority tipo string vs literal number, operador greater_than_or_equal.",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "CHK-14",
+   "lote": "L10_chk_b",
+   "tool": "knowledge_check",
+   "esperado": "Entre los diagnósticos de workspace (los de descubrimiento solo salen en scope workspace): DOC-NOT-UTF8 nivel warn para fixtures/binario.md. Fuente: mcp.yml knowledge_check semantica (E20-H04); discovery.rs",
+   "real": "knowledge_check workspace minimumSeverity=info: diagnóstico DOC-NOT-UTF8 level=warn, targets fixtures/binario.md, msg \"primer byte inválido en el offset 18: el documento no entra en el inventario\". summary errors:1 warnings:5.",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "CHK-15",
+   "lote": "L10_chk_b",
+   "tool": "knowledge_check",
+   "esperado": "SYMLINK-UNSUPPORTED nivel warn para fixtures/enlace-simbolico.md (followSymlinks false por defecto). Fuente: discovery.rs; ARCHITECTURE §20.5",
+   "real": "Mismo listado workspace warn: diagnóstico SYMLINK-UNSUPPORTED level=warn, targets fixtures/enlace-simbolico.md, msg \"Lodestar no sigue symlinks, así que el documento no entra en el inventario\".",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "CHK-16",
+   "lote": "L10_chk_b",
+   "tool": "knowledge_check",
+   "esperado": "DOC-TOO-LARGE nivel warn para fixtures/gigante.md (>10 MiB, DEFAULT_MAX_DOCUMENT_BYTES); mensaje con el tamaño observado. Fuente: discovery.rs L49",
+   "real": "Mismo listado: diagnóstico DOC-TOO-LARGE level=warn, targets fixtures/gigante.md, msg \"supera el tamaño máximo por documento (12150024 bytes > 10485760): el documento no entra en el inventario\" — incluye tamaño observado como se pedía.",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "CHK-17",
+   "lote": "L10_chk_b",
+   "tool": "knowledge_check",
+   "esperado": "DOC-BOM nivel warn; el documento se interpreta igualmente (E24-H02) y el BOM se conserva. Registrar si DOC-BOM sale en scope document o solo workspace. Fuente: mcp.yml E24-H02; conform.rs",
+   "real": "knowledge_check scope document fixtures/con-bom.md → diagnostics=[DOC-BOM level warn], summary errors:0 warnings:1, valid:true (documento sigue siendo interpretado). Responde a la duda abierta: DOC-BOM SÍ aparece en scope document, no solo workspace.",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "CHK-18",
+   "lote": "L10_chk_b",
+   "tool": "knowledge_check",
+   "esperado": "AMBOS diagnósticos: DOC-BOM (warn) Y FM-YAML-INVALID (err) — el BOM se emite antes del corte por frontmatter ilegible porque es propiedad del fichero. Fuente: conform.rs (orden de emisión)",
+   "real": "knowledge_check scope document fixtures/bom-mas-roto.md → diagnostics=[DOC-BOM warn (primero), FM-YAML-INVALID err (segundo, \"mapping values are not allowed in this context at line 2 column 6\")], summary errors:1 warnings:1, valid:false. Orden de emisión BOM antes que el fallo de frontmatter, como exige conform.rs.",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "CHK-27",
+   "lote": "L10_chk_b",
+   "tool": "workspace_status,knowledge_check",
+   "esperado": "Coherencia agregada: workspace_status.counts.errors/warnings del paso 0 == recuento por severidad de los diagnósticos del paso 1 (mismo workspace, misma revisión). El summary del check cuenta TODO antes del umbral. Fuente: mcp.yml workspace_status counts + knowledge_check",
+   "real": "workspace_status.counts = {errors:1, warnings:2, documents:40}. knowledge_check(scope workspace, minimumSeverity info).summary = {errors:1, warnings:5}. errors coincide (1=1) pero warnings NO coincide (2 vs 5): la coherencia agregada exigida por el caso se rompe.",
+   "veredicto": "FAIL",
+   "motivo": "workspace_status reporta 2 warnings pero el listado detallado de knowledge_check con minimumSeverity=info (que según el enunciado 'cuenta TODO antes del umbral') trae 5 diagnósticos warn: DOC-BOM(bom-mas-roto.md), DOC-BOM(con-bom.md), DOC-NOT-UTF8(binario.md), SYMLINK-UNSUPPORTED(enlace-simbolico.md), DOC-TOO-LARGE(gigante.md). El campo counts.warnings de workspace_status no incluye estos 5 diagnósticos de descubrimiento (o los cuenta con otro criterio), mientras que knowledge_check sí los expone todos con minimumSeverity=info. La consistencia prometida entre ambas tools no se cumple para warnings.",
+   "verificacion": {
+    "clasificacion": "RECLASIFICADO-PASS",
+    "es_bug_de": "ninguno",
+    "evidencia": "El esperado del caso inventó una coherencia entre tools que el contrato no promete; el comportamiento real es exactamente el contratado. (1) contracts/mcp.yml, cabecera (bloque sobre `Analysis`, ~L131-138): \"`Analysis` (viaja en `lodestar check --json`; los agregados de `workspace_status` salen de ella) ... `hardFail` = nº de FICHEROS con algún `err`, `warnCount` = nº de diagnósticos `warn`. `workspace_status.counts` no cambia de forma\" — los counts de workspace_status derivan SOLO de Analysis, cuyo `diagnostics` es \"Diagnósticos por documento... Una entrada por documento\" (lodestar-core/src/types.rs, doc de `Analysis`); los ficheros de descubrimiento \"no entra[n] en el inventario\" y no pueden estar ahí. (2) contracts/mcp.yml, knowledge_check `semantica` (~L707): \"Audita conocimiento (diagnósticos de DocumentSet::analyze)... En scope workspace AÑADE los diagnósticos de DESCUBRIMIENTO (§20.9, E20-H04: DOC-NOT-UTF8/DOC-TOO-LARGE/SYMLINK-UNSUPPORTED/PATH-NOT-UTF8...)\" — \"añade\" declara explícitamente que la vista workspace del check es un SUPERCONJUNTO de lo que alimenta workspace_status. (3) La cláusula que citó el ejecutor (\"summary/valid se computan sobre todo el scope, antes del umbral\", mcp.yml ~L700) habla del parámetro minimumSeverity DENTRO de knowledge_check, no de igualdad entre tools: reproducido que summary es idéntico ({errors:1, warnings:5}) con minimumSeverity info y warn. Reproducción (batches/verify_CHK-27.json, worktree+fixtures chk_b): workspace_status.counts={errors:1, warnings:2}; knowledge_check(workspace).summary={errors:1, warnings:5}. Las 2 warnings de status son los 2 DOC-BOM (diagnósticos de documento, conform.rs: con-bom.md y bom-mas-roto.md están entre los 40 del inventario); las 3 extra del check son exactamente los 3 de descubrimiento (DOC-NOT-UTF8 binario.md, SYMLINK-UNSUPPORTED enlace-simbolico.md, DOC-TOO-LARGE gigante.md). Implementación conforme: lodestar-app/src/lib.rs:546-580 (status usa document_set()+analyze()) vs lib.rs:1114-1160 (check usa document_set_with_discovery() y añade descubrimiento solo en scope workspace). Nota: incluso la \"coincidencia\" en errors (1=1) es casual, no coherencia — counts.errors cuenta FICHEROS con err y summary.errors cuenta DIAGNÓSTICOS err (aquí 1 fichero con 1 diagnóstico)."
+   }
+  },
+  {
+   "id": "CHK-20",
+   "lote": "L11",
+   "tool": "knowledge_check",
+   "esperado": "SOLO los diagnósticos de ese documento (FM-UNCLOSED), no los del resto de fixtures rotos. Fuente: mcp.yml knowledge_check scope",
+   "real": "1 diag FM-UNCLOSED (id:a21af0f7d690235be86411ff98ee05eefbae57826bc04c067475e6676ae79df0) en fixtures/roto-unclosed.md, scope document restringido correctamente",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "CHK-21",
+   "lote": "L11",
+   "tool": "knowledge_check",
+   "esperado": "Diagnósticos de exactamente esos 2 documentos (FM-UNCLOSED + FM-YAML-INVALID), nada de enlace-roto.md ni del resto. Fuente: mcp.yml knowledge_check scope kinds",
+   "real": "2 diags exactamente: FM-UNCLOSED + FM-YAML-INVALID en rutas solicitadas, scope paths restringido correctamente",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "CHK-22",
+   "lote": "L11",
+   "tool": "knowledge_check",
+   "esperado": "Diagnósticos del vecindario a profundidad 1 de bastion (blast-radius). Los fixtures NO conectados a bastion por enlaces quedan fuera... salvo case-mismatch.md que enlaza a Bastion.md: registrar si entra en el vecindario. Fuente: mcp.yml knowledge_check scope affected",
+   "real": "0 diags, vecindario a depth=1 de bastion.md vacío (sin conexiones en fixtures), scope affected funcionando",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "CHK-23",
+   "lote": "L11",
+   "tool": "knowledge_check,knowledge_check",
+   "esperado": "Paso 0 devuelve SOLO los err del set chk_a (FM-UNCLOSED, FM-YAML-INVALID, DOC-CONFLICT-MARKER, LINK-TARGET-MISSING .md, LINK-ESCAPES-WORKSPACE); excluye los warn (LINK-TARGET-MISSING no-.md, LINK-CASE-MISMATCH). Paso 1 los incluye todos. El summary de ambos cuenta TODO (se computa antes del umbral). Fuente: mcp.yml knowledge_check minimumSeverity",
+   "real": "Paso 0 (minimumSeverity=err): 5 diags solo level=err, paso 1 (info): 7 diags (err+warn), summary cuenta TODO (err:5, warn:2) antes del filtro en ambos",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "CHK-24",
+   "lote": "L11",
+   "tool": "knowledge_check",
+   "esperado": "Error DOCUMENT_NOT_FOUND (ref inexistente en scope document). Fuente: mcp.yml knowledge_check errores",
+   "real": "error_code=DOCUMENT_NOT_FOUND, mensaje contiene ruta inexistente",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "CHK-25",
+   "lote": "L11",
+   "tool": "knowledge_check",
+   "esperado": "Todos los diagnósticos con fixes [] — SIEMPRE vacío (sin productor de Fix desde E20-H03). Fuente: mcp.yml includeSuggestedFixes",
+   "real": "7 diags con fixes=[] (vacío siempre), includeSuggestedFixes devuelve todos sin sugerencias",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "CHK-26",
+   "lote": "L11",
+   "tool": "knowledge_check,knowledge_check",
+   "esperado": "Mismo id diag:blake3:<hex> en ambos pasos — determinista dentro de una revisión (sin timestamps ni orden). Fuente: mcp.yml knowledge_check (id estable)",
+   "real": "Paso 0 y 1 mismo id=diag:blake3:a21af0f7d690235be86411ff98ee05eefbae57826bc04c067475e6676ae79df0, determinista",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "CHK-28",
+   "lote": "L11",
+   "tool": "knowledge_check",
+   "esperado": "Error INVALID_SCHEMA: minimumSeverity fuera de {err, warn, info}. Fuente: mcp.yml knowledge_check errores",
+   "real": "error_code=INVALID_SCHEMA, minimumSeverity=grave fuera de {err,warn,info}, validación de esquema",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "ROB-12",
+   "lote": "L11",
+   "tool": "knowledge_check",
+   "esperado": "Error INVALID_SCHEMA: includeSuggestedFixes string en vez de booleano (E24-H09: los valores declarados fuera de tipo ya no caen al default en silencio). Fuente: mcp.yml E24-H09",
+   "real": "error_code=INVALID_SCHEMA, includeSuggestedFixes string vs bool rechazado (E24-H09: sin fallback silencioso)",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "CHK-29",
+   "lote": "L11",
+   "tool": "knowledge_check",
+   "esperado": "1 diagnóstico + nextCursor no-null (paginación por cursor). Fuente: mcp.yml knowledge_check limit/cursor",
+   "real": "limit=1 retorna 1 diag + nextCursor=\"1\" (no-null), paginación funciona, summary cuenta TODO (err:5, warn:2)",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "ROB-07",
+   "lote": "L12",
+   "tool": "knowledge_search",
+   "esperado": "Exactamente 1 resultado + nextCursor no-null; orden determinista (score desc, path asc). totalApproximate sigue reflejando el total. Fuente: mcp.yml knowledge_search (orden determinista, base del cursor)",
+   "real": "1 resultado (CLAUDE.md), nextCursor=\"1\" (no-null), totalApproximate=36. Orden coincide con el primer elemento del listado completo (ROB-08), consistente con orden determinista score desc/path asc.",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "ROB-08",
+   "lote": "L12",
+   "tool": "knowledge_search",
+   "esperado": "36 resultados (cabe entero), nextCursor null. Fuente: mcp.yml knowledge_search limit [1,100]",
+   "real": "36 resultados devueltos, nextCursor=null, totalApproximate=36. Cabe entero en un solo page.",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "ROB-09",
+   "lote": "L12",
+   "tool": "knowledge_search",
+   "esperado": "Error INVALID_SCHEMA: el máximo de knowledge_search es 100 (NO 1000 como graph_query/metadata_inspect/knowledge_check — asimetría documentada). Fuente: mcp.yml knowledge_search errores (limit fuera de [1,100])",
+   "real": "error_code=INVALID_SCHEMA, mensaje: «limit» debe ser un entero entre 1 y 100; recibido 101. Confirma el máximo 100 (no 1000) para knowledge_search.",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "ROB-10",
+   "lote": "L12",
+   "tool": "knowledge_search",
+   "esperado": "Error INVALID_SCHEMA: limit < 1 (E24-H09, ya no devuelve 0 resultados en silencio). Fuente: mcp.yml E24-H09",
+   "real": "error_code=INVALID_SCHEMA, mensaje: «limit» debe ser un entero entre 1 y 100; recibido 0. No cae en silencio a 0 resultados, es error explícito como exige E24-H09.",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "ROB-11",
+   "lote": "L12",
+   "tool": "knowledge_search",
+   "esperado": "Error INVALID_SCHEMA: limit string, tipo incorrecto ya no cae al default (E24-H09). Fuente: mcp.yml E24-H09",
+   "real": "error_code=INVALID_SCHEMA, mensaje: «limit» debe ser un entero entre 1 y 100; recibido \"10\". El tipo string no cae al default, error explícito.",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "ROB-13",
+   "lote": "L12",
+   "tool": "knowledge_search",
+   "esperado": "sort (parámetro RETIRADO en E23-H11) se IGNORA en silencio: responde normal, sin error — additionalProperties:false es declarativo, el servidor no valida el schema en runtime; solo los valores DECLARADOS se validan. Fuente: mcp.yml regla de la casa (E24-H09) + retirada de sort (E23-H11)",
+   "real": "is_error=false, respuesta normal con 4 resultados (equipos: bastion, deco, mac-mini, neo), totalApproximate=4. El parámetro sort retirado se ignoró en silencio, sin error INVALID_SCHEMA ni de tipo alguno.",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "ROB-14",
+   "lote": "L12",
+   "tool": "workspace_status",
+   "esperado": "Parámetro desconocido ignorado; respuesta normal de workspace_status. Fuente: mcp.yml regla de la casa",
+   "real": "is_error=false, respuesta normal de workspace_status (documents=36, valid=true, etc.). El parámetro desconocido foo=bar fue ignorado sin error.",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "ROB-15",
+   "lote": "L12",
+   "tool": "workspace_status",
+   "esperado": "Paso 0: respuesta -32700 Parse error con id null (JSON inválido). Paso 1: el servidor SIGUE VIVO y responde normal (el parse error no lo tumba). Fuente: mcp.yml bucle JSON-RPC (-32700)",
+   "real": "Paso 0: error de protocolo -32700 \"Parse error: EOF while parsing a value at line 1 column 47\", id=null. Paso 1: workspace_status responde normal (documents=36, valid=true) — el servidor sigue vivo tras el parse error.",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "ROB-16",
+   "lote": "L12",
+   "tool": "",
+   "esperado": "Ambos: error de PROTOCOLO -32602 tool desconocida (las 10 heredadas retiradas en E14-H06 caen en el brazo por defecto SIN ejecutarse). Fuente: mcp.yml E14-H06",
+   "real": "Ambos pasos: error de protocolo -32602, mensajes \"tool desconocida: query\" y \"tool desconocida: find_orphans\" respectivamente, con id correspondiente (100, 101). Ninguna se ejecutó.",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "ROB-19",
+   "lote": "L12",
+   "tool": "",
+   "esperado": "Exit code 3, stderr nombra la ruta, stdout vacío, sin panic. Fuente: mcp.yml (arranque, exit 3)",
+   "real": "rc=3, stdout vacío, stderr=\"lodestar-mcp: no se pudo resolver la raíz /ruta/que/no/existe: No such file or directory (os error 2)\" — nombra la ruta, sin panic visible.",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "ROB-21",
+   "lote": "L12",
+   "tool": "",
+   "esperado": "Registrar: perfil desconocido debería rechazarse en el arranque (exit != 0 con mensaje) — el contrato solo declara readonly|standard; candidato CONTRATO-AMBIGUO si arranca igual. Fuente: ayuda del binario",
+   "real": "El propio caso pide 'registrar' como candidato CONTRATO-AMBIGUO. Comportamiento real: rc=2 (!=0), stdout vacío, stderr=\"lodestar-mcp: --profile inválido «perfil-invalido» (usa «readonly» o «standard»)\". El perfil inválido SÍ se rechaza en el arranque con mensaje claro — no arranca igual, así que el escenario de ambigüedad temido no se materializó, pero el caso está marcado a-registrar por diseño.",
+   "veredicto": "UNCLEAR",
+   "motivo": "El esperado explícitamente pide 'Registrar' y marca 'candidato CONTRATO-AMBIGUO' condicionado a si arranca o no; no es un PASS/FAIL binario sino una observación a documentar. El dato literal es que rechaza correctamente (rc=2, mensaje claro nombrando los valores válidos).",
+   "verificacion": {
+    "clasificacion": "RECLASIFICADO-PASS",
+    "es_bug_de": "ninguno",
+    "evidencia": "El contrato fija explícitamente este comportamiento — no hay ambigüedad que registrar. Fuente: /Users/dbarea/repos/lodestar/contracts/mcp.yml, sección `mcp.arranque` (línea 566): \"Exit codes de arranque: 2 uso (`--root` sin valor, `--profile` inválido, argumento no reconocido) · 3 raíz irresoluble o workspace no abrible\"; y línea 561: \"`lodestar-mcp [--root <dir>] [--profile readonly|standard]`\". Ayuda del binario (fuente citada por el spec): \"--profile <perfil> «standard» (por defecto) o «readonly» (sin las tools de cambio)\". Reproducción aislada: `lodestar-mcp --profile perfil-invalido` → rc=2, stdout vacío, stderr=\"lodestar-mcp: --profile inválido «perfil-invalido» (usa «readonly» o «standard»)\" — idéntico al resultado del lote. El esperado del caso (\"exit != 0 con mensaje\") se cumple con precisión superior a la pedida: rc=2 es el código exacto que el contrato declara para exactamente este disparador, y el mensaje nombra el valor recibido y los dos válidos. El fallback \"candidato CONTRATO-AMBIGUO si arranca igual\" era condicional y su condición no se materializó: el servidor NO arranca. El veredicto UNCLEAR del ejecutor nace de leer \"Registrar:\" como si el caso no fuera evaluable, pero el contrato sí fija el detalle, luego es un PASS binario."
+   }
+  },
+  {
+   "id": "ROB-06",
+   "lote": "L12",
+   "tool": "graph_query,knowledge_search",
+   "esperado": "Cursor de graph_query reutilizado en knowledge_search: el esquema es el mismo (offset hex) así que puede ACEPTARLO aunque semánticamente sea otro espacio — registrar el comportamiento (¿acepta? ¿INVALID_SCHEMA?). Candidato CONTRATO-AMBIGUO. Fuente: mcp.yml cursor (mismo esquema entre tools)",
+   "real": "Candidato CONTRATO-AMBIGUO por diseño del caso. graph_query(components, limit=1) devolvió nextCursor=\"1\". knowledge_search(has(tags), limit=1, cursor=\"1\") lo ACEPTÓ sin error (is_error=false) y devolvió README.md (el segundo doc en el orden global de ROB-08, es decir offset=1 interpretado correctamente como posición en knowledge_search), nextCursor=\"2\", totalApproximate=36. El servidor acepta cursores cross-tool sin validar su origen semántico.",
+   "veredicto": "UNCLEAR",
+   "motivo": "El esperado pide registrar el comportamiento (¿acepta? ¿INVALID_SCHEMA?) como candidato CONTRATO-AMBIGUO, no exige un veredicto PASS/FAIL. El dato literal es que SÍ lo acepta y produce un resultado coherente con el offset numérico compartido.",
+   "verificacion": {
+    "clasificacion": "CONTRATO-AMBIGUO",
+    "es_bug_de": "documentacion",
+    "evidencia": "contracts/mcp.yml documenta el cursor como compartido y sin marca de origen, pero no fija qué ocurre al cruzarlo entre tools. Línea 634 (knowledge_search): \"cursor opaco (offset codificado en hex) devuelto en nextCursor\". Línea 736 (graph_query): \"cursor opaco de paginación (offset hex, mismo esquema que knowledge_search/knowledge_check/metadata_inspect) ... autosuficiente (reanuda idéntico en un proceso fresco, porque el orden depende solo del contenido)\". Línea 637 (errores de knowledge_search): la única validación de cursor es \"`cursor` que no sean cadena\" (INVALID_SCHEMA, E24-H09) — no existe error de procedencia. Comportamiento real reproducido en aislado (root /Users/dbarea/repos/homelab, perfil readonly): graph_query(operation=components, limit=1) devuelve nextCursor=\"1\"; knowledge_search(where=\"has(tags)\", limit=1, cursor=\"1\") lo ACEPTA con is_error=false y devuelve README.md (posición 1 del orden global de knowledge_search, verificado contra el listado completo de ROB-08), nextCursor=\"2\", totalApproximate=36. Es decir: el servidor reinterpreta silenciosamente un cursor ajeno como offset propio y sirve una página válida pero semánticamente equivocada, sin señal de error. No contradice el contrato (el diseño offset-hex autosuficiente hace el origen indistinguible por construcción), pero el contrato tampoco lo fija: llama al cursor \"opaco\" mientras publica su codificación, y no declara que la procedencia no se valida. Propuesta de issue: añadir una línea al contrato (junto a \"mismo esquema que...\") aclarando que los cursores no llevan marca de tool de origen y que un cursor reutilizado entre tools se reinterpreta como offset en el orden de la tool destino — foot-gun silencioso para agentes que encadenan resultados."
+   }
+  },
+  {
+   "id": "ROB-22",
+   "lote": "L12",
+   "tool": "knowledge_search",
+   "esperado": "Búsqueda libre sobre nombre/frontmatter/cuerpo: al menos servicios/wireguard.md entre los hits, con snippet y score. Fuente: query-language.md (text); mcp.yml knowledge_search",
+   "real": "servicios/wireguard.md aparece entre los hits (score=7.0, tercer resultado), con snippet y score en todos los 20 resultados devueltos (totalApproximate=20).",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "ROB-23",
+   "lote": "L12",
+   "tool": "knowledge_search",
+   "esperado": "text ∩ where: solo decisiones que mencionan wireguard (p. ej. solo-51820-expuesto, split-tunnel). Subconjunto estricto de ROB-22. Fuente: query-language.md Combining conditions (text intersecta)",
+   "real": "6 resultados, todos con path bajo decisiones/ (clave-privada-en-fichero-aparte, nombre-del-tunel, split-tunnel, solo-51820-expuesto, runs-on-vs-affects, tplink-ddns), totalApproximate=6. Es subconjunto estricto de los 20 de ROB-22 (todos los 6 paths están presentes en la lista de ROB-22).",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "ROB-24",
+   "lote": "L12",
+   "tool": "knowledge_search",
+   "esperado": "Los 36 (todo homelab lleva frontmatter). has(frontmatter) NO respondería esto (anclaje); la propiedad correcta es document.has_frontmatter. Fuente: query-language.md has(frontmatter) does not test",
+   "real": "36 resultados, totalApproximate=36, nextCursor=null — coincide con el total de documentos del workspace (documents=36 en workspace_status), confirmando que document.has_frontmatter=true selecciona todos los docs con frontmatter real.",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "ROB-25",
+   "lote": "L12",
+   "tool": "knowledge_search,knowledge_search",
+   "esperado": "Trampa documentada: frontmatter a secas nombra el anclaje, no una clave → has(frontmatter) matchea 0 docs y missing(frontmatter) matchea los 36 (incluidos los que SÍ tienen frontmatter). Fuente: query-language.md has(frontmatter) does not test for a frontmatter block",
+   "real": "Trampa confirmada: missing(frontmatter) con limit=100 → 36 resultados, totalApproximate=36 (todos los docs, incluidos los que sí tienen frontmatter). has(frontmatter) con limit=100 → 0 resultados, totalApproximate=0. Exactamente como predice la trampa documentada del anclaje 'frontmatter'.",
+   "veredicto": "PASS",
+   "motivo": ""
+  }
+ ]
+}

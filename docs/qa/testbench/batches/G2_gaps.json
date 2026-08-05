@@ -1,0 +1,72 @@
+{
+  "batch": "G2",
+  "root": "worktree",
+  "profile": "standard",
+  "fixtures": "gaps",
+  "cases": [
+    {"id": "G1-06", "steps": [
+       {"kind": "call", "tool": "knowledge_search", "arguments": {"where": "campo_nulo = null", "include": ["frontmatter.campo_nulo", "frontmatter.vacio"]}},
+       {"kind": "call", "tool": "knowledge_search", "arguments": {"where": "vacio = null"}},
+       {"kind": "call", "tool": "knowledge_search", "arguments": {"where": "has(campo_nulo)"}},
+       {"kind": "call", "tool": "knowledge_search", "arguments": {"where": "campo_inexistente_total = null"}}],
+     "esperado": "Paso 0: SOLO fixtures/nulo.md, proyectando {campo_nulo: null, vacio: null} — el null EXPLÍCITO viaja, el ausente no aparece. Paso 1: también matchea (key: sin valor es null YAML). Paso 2: has() matchea pese a valer null (presencia de clave). Paso 3: [] — null NUNCA matchea clave ausente. Fuente: query-language.md Values and types (fila null) + has/missing; mcp.yml include (null explícito sí aparece)"},
+    {"id": "G1-07", "steps": [
+       {"kind": "call", "tool": "knowledge_get", "arguments": {"ref": {"path": "fixtures/sin-title-fm.md"}}},
+       {"kind": "call", "tool": "knowledge_get", "arguments": {"ref": {"path": "fixtures/pelado.md"}}},
+       {"kind": "call", "tool": "knowledge_search", "arguments": {"where": "document.title = \"Titulo Desde El H1\""}}],
+     "esperado": "Paso 0: title == 'Titulo Desde El H1' (cae al primer H1). Paso 1: title derivado del NOMBRE de fichero sin Title Case — registrar literal exacto (¿pelado?). Paso 2: encuentra fixtures/sin-title-fm.md vía document.title. Fuente: mcp.yml E16-H02 (derived_title: frontmatter.title → primer H1 → nombre)"},
+    {"id": "G1-08", "steps": [
+       {"kind": "call", "tool": "knowledge_search", "arguments": {"where": "document.has_frontmatter = false"}},
+       {"kind": "call", "tool": "knowledge_get", "arguments": {"ref": {"path": "fixtures/pelado.md"}, "include": ["frontmatter", "body"]}},
+       {"kind": "call", "tool": "knowledge_check", "arguments": {"scope": {"kind": "document", "ref": {"path": "fixtures/pelado.md"}}}}],
+     "esperado": "Paso 0: exactamente los docs sin bloque (pelado.md). Paso 1: frontmatter == {} (literal del contrato) y body completo. Paso 2: CERO diagnósticos — la falta de frontmatter dejó de ser error (OKF-FM01 borrado E16-H05). Fuente: mcp.yml knowledge_get include + E16-H05"},
+    {"id": "G1-09", "steps": [
+       {"kind": "call", "tool": "knowledge_get", "arguments": {"ref": {"path": "fixtures/enlaces-variados.md"}, "include": ["outgoingLinks"]}},
+       {"kind": "call", "tool": "graph_query", "arguments": {"operation": "outgoing", "ref": {"path": "fixtures/enlaces-variados.md"}}},
+       {"kind": "call", "tool": "knowledge_check", "arguments": {"scope": {"kind": "document", "ref": {"path": "fixtures/enlaces-variados.md"}}}},
+       {"kind": "call", "tool": "graph_query", "arguments": {"operation": "backlinks", "ref": {"path": "guias/tmux.md"}}}],
+     "esperado": "Paso 0: 5 ResolvedLink — inline+fragment 'diagnostico' target document(equipos/bastion.md) con href crudo; reference → document(guias/tmux.md); selfAnchor; externalUri; workspaceFile(fixtures/script.sh). Paso 1: SOLO 2 aristas (bastion, tmux) — el grafo filtra selfAnchor/externalUri/workspaceFile. Paso 2: 0 diagnósticos (script.sh existe). Paso 3: los backlinks de tmux incluyen la entrada del enlace de REFERENCIA. Fuente: mcp.yml E17 (ResolvedLink, kinds); ARCHITECTURE §20.6-20.7"},
+    {"id": "G1-10", "steps": [
+       {"kind": "call", "tool": "knowledge_get", "arguments": {"ref": {"path": "fixtures/raiz-absoluta.md"}, "include": ["outgoingLinks"]}},
+       {"kind": "call", "tool": "knowledge_check", "arguments": {"scope": {"kind": "document", "ref": {"path": "fixtures/raiz-absoluta.md"}}}}],
+     "esperado": "El href /equipos/bastion.md resuelve RELATIVO A LA RAÍZ (como GitHub): target document(equipos/bastion.md), SIN LINK-ESCAPES-WORKSPACE ni diagnóstico alguno. Fuente: ARCHITECTURE §20.6 precisión 1 de E17-H02 (texto literal)"},
+    {"id": "G1-11", "steps": [
+       {"kind": "call", "tool": "change_plan", "arguments": {"operations": [{"op": "create", "path": "pendientes/wol-bastion.md", "frontmatter": {"title": "Pisado"}, "body": "x\n"}]}},
+       {"kind": "call", "tool": "change_plan", "arguments": {"operations": [{"op": "move", "from": "guias/tmux.md", "to": "README.md", "rewriteInboundLinks": true}]}},
+       {"kind": "shell", "cmd": "git status --porcelain -- pendientes/wol-bastion.md README.md guias/tmux.md"}],
+     "esperado": "SILENCIO CONTRACTUAL a documentar: create sobre path EXISTENTE y move a destino OCUPADO. Esperable rechazo en normalización (familia INVALID_SCHEMA) SIN escribir; si alguno produce plan canApply true, hallazgo GRAVE (pisaría conocimiento). Paso 2: git limpio. Registrar códigos y mensajes literales. Fuente: mcp.yml change_plan (sin semántica de colisión declarada) — candidato CONTRATO-AMBIGUO"},
+    {"id": "G1-12", "steps": [
+       {"kind": "call", "tool": "graph_query", "arguments": {"operation": "backlinks", "ref": {"path": "fixtures/sin-entrantes.md"}}},
+       {"kind": "call", "tool": "change_plan", "arguments": {"operations": [{"op": "delete", "path": "fixtures/sin-entrantes.md"}], "policy": {"requireValidResult": false, "allowWarnings": true}}},
+       {"kind": "call", "tool": "change_apply", "arguments": {"changeSetId": "@step1.structured.changeSetId"}},
+       {"kind": "shell", "cmd": "test -f fixtures/sin-entrantes.md && echo EXISTE || echo BORRADO"}],
+     "esperado": "Paso 0: 0 entrantes. Paso 1: plan SE EMITE sin inboundLinksPolicy (sin backlinks no hay nada que decidir, la omisión se permite — contraste con PLN-07). Pasos 2-3: BORRADO. Fuente: mcp.yml inboundLinksPolicy (texto de la excepción)"},
+    {"id": "G1-13", "steps": [
+       {"kind": "call", "tool": "change_plan", "arguments": {"operations": [{"op": "replace_text", "path": "fixtures/contador.md", "find": "foo", "replace": "bar", "expectedOccurrences": 3}]}},
+       {"kind": "call", "tool": "change_apply", "arguments": {"changeSetId": "@step0.structured.changeSetId"}},
+       {"kind": "shell", "cmd": "grep -o bar fixtures/contador.md | wc -l"},
+       {"kind": "call", "tool": "change_plan", "arguments": {"operations": [{"op": "replace_text", "path": "fixtures/contador.md", "find": "zzz-no-esta", "replace": "w"}]}}],
+     "esperado": "Pasos 0-2: aserción correcta (3) pasa, aplica, quedan 3 bar. Paso 3: find SIN ocurrencias y sin aserción — REGISTRAR (¿plan vacío/no-op? ¿error?), candidato CONTRATO-AMBIGUO. Fuente: mcp.yml replace_text; safe-changes.md (optionally asserting how many)"},
+    {"id": "G1-14", "steps": [
+       {"kind": "call", "tool": "change_plan", "arguments": {"operations": [{"op": "patch_frontmatter", "path": "pendientes/wol-bastion.md", "patch": {"optional": null}}]}},
+       {"kind": "call", "tool": "change_apply", "arguments": {"changeSetId": "@step0.structured.changeSetId"}},
+       {"kind": "call", "tool": "knowledge_get", "arguments": {"ref": {"path": "pendientes/wol-bastion.md"}, "include": ["frontmatter"]}},
+       {"kind": "shell", "cmd": "grep -n 'optional' pendientes/wol-bastion.md; true"}],
+     "esperado": "ARCHITECTURE §20.4 exige distinguir asignar-null de eliminar-clave, pero el wire solo declara `patch`. REGISTRAR: ¿{optional: null} deja 'optional: null' (asignación) o borra la línea? Cualquier semántica sin la otra expresable = discrepancia arquitectura-vs-wire. Fuente: ARCHITECTURE §20.4; mcp.yml E16-H04 y L787"},
+    {"id": "G1-17", "fresh_root": true, "steps": [
+       {"kind": "call", "tool": "change_plan", "arguments": {"operations": [{"op": "patch_frontmatter", "path": "pendientes/wol-bastion.md", "patch": {"priority": 1}}]}},
+       {"kind": "shell", "cmd": "ls .lodestar/runtime/plans/ && python3 -c \"import json,glob; p=glob.glob('.lodestar/runtime/plans/*')[0]; d=json.load(open(p)); print('claves:',list(d.keys())[:20]); d['expiresAt']='1'; json.dump(d,open(p,'w'))\""},
+       {"kind": "call", "tool": "change_apply", "arguments": {"changeSetId": "@step0.structured.changeSetId"}}],
+     "esperado": "Paso 1: registrar forma real del plan persistido (nombre de fichero, clave de expiración; si la clave difiere de expiresAt, adaptar la lectura del resultado). Paso 2: PLAN_EXPIRED (plan caducado) — distinto de PLAN_STALE. Si el motor responde PLAN_STALE (p.ej. porque el plan editado ya no verifica su hash), registrarlo: significaría que la expiración es indistinguible por wire sin esperar 1h. Fuente: safe-changes.md (1 hora, PLAN_EXPIRED); mcp.yml change_apply (EXPIRED vs STALE)"},
+    {"id": "G1-18", "fresh_root": true, "steps": [
+       {"kind": "call", "tool": "change_plan", "arguments": {"operations": [{"op": "patch_frontmatter", "path": "pendientes/wol-bastion.md", "patch": {"priority": 1}}]}},
+       {"kind": "call", "tool": "change_apply", "arguments": {"changeSetId": "@step0.structured.changeSetId"}},
+       {"kind": "call", "tool": "change_revert", "arguments": {"receiptId": "@step1.structured.receiptId"}},
+       {"kind": "call", "tool": "change_revert", "arguments": {"receiptId": "@step2.structured.receiptId"}},
+       {"kind": "shell", "cmd": "grep -n '^priority' pendientes/wol-bastion.md"}],
+     "esperado": "Revert del recibo -revert (redo): paso 3 restaura el estado POST-apply → paso 4 muestra priority: 1. workspaceRevision del paso 3 == workspaceRevision del paso 1. Registrar la forma del receiptId resultante (¿-revert-revert?). Si el motor rechaza revertir un -revert, asimetría no declarada a reportar. Fuente: safe-changes.md (undoing is itself a transaction)"},
+    {"id": "G1-22", "steps": [
+       {"kind": "call", "tool": "knowledge_search", "arguments": {"where": "document.path = \"fixtures/raros.md\"", "include": ["frontmatter.flotante", "frontmatter.submapa", "frontmatter.submapa.1"]}}],
+     "esperado": "Proyecta {flotante: null, submapa: {\"1\": \"uno\"}} — flotante no finito viaja como null; clave no-string se estringa. Registrar qué hace frontmatter.submapa.1 (¿alcanza la clave estringada?). Sin error. Fuente: mcp.yml include (nota valores no representables, texto literal)"}
+  ]
+}

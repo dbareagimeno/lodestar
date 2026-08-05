@@ -1,0 +1,290 @@
+{
+ "ronda": 2,
+ "totales": {
+  "PASS": 14,
+  "FAIL": 1,
+  "UNCLEAR": 10
+ },
+ "casos": [
+  {
+   "id": "G1-19",
+   "lote": "G0",
+   "tool": "knowledge_search,knowledge_search",
+   "esperado": "AMBOS pasos: INVALID_SCHEMA con el MISMO mensaje (las 4 propiedades válidas de graph.* + sugerencia de anclaje) — el rechazo vive en core::parse::build_field_path, punto único de where y filter; la equivalencia se preserva también en los ERRORES. Comparar los textos literalmente. Fuente: mcp.yml E24-H07; query-language.md Reserved namespaces",
+   "real": "Ambos pasos (where y filter) devuelven is_error=true, error_code=INVALID_SCHEMA, mismo cuerpo salvo el prefijo: paso0 texto='«where» inválido: `graph.backlink` no existe: el namespace `graph` solo tiene `graph.backlinks`, `graph.outgoing_links`, `graph.dangling_links`, `graph.isolated`. Para consultar una clave de TU frontmatter con ese nombre, ánclala con `frontmatter.graph.backlink`'; paso1 idéntico con '«filter» inválido:'. Coincide con lo esperado: mismo código, 4 propiedades válidas listadas, sugerencia de anclaje presente, equivalencia where/filter preservada en el error.",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "G1-20",
+   "lote": "G0",
+   "tool": "knowledge_search,knowledge_search,knowledge_search,knowledge_search",
+   "esperado": "Paso 0: los 4 equipos. Paso 1: SIN limit → exactamente 20 resultados (default declarado limit=20) + nextCursor no-null + totalApproximate 36. Paso 2: contains sobre campo STRING es subcadena: los status activo. Paso 3: starts_with sobre campo NUMBER — la tabla lo declara solo para string pero no fija el veredicto: REGISTRAR si es false silencioso o INVALID_SCHEMA (candidato discrepancia doc-vs-motor). Fuente: query-language.md Operators; mcp.yml knowledge_search limit default 20",
+   "real": "Paso0 (document.path starts_with 'equipos/'): 4 resultados (bastion, deco, mac-mini, neo) — coincide. Paso1 (ends_with '.md' sin limit): exactamente 20 resultados, nextCursor='14' (no-null), totalApproximate=36 — coincide exactamente con lo esperado. Paso2 (status contains 'acti', include frontmatter.status, limit 50): 10 resultados, todos con frontmatter.status='activo' — coincide. Paso3 (priority starts_with '1', campo NUMBER): NO da INVALID_SCHEMA — devuelve éxito silencioso {\"nextCursor\":null,\"results\":[],\"totalApproximate\":0}, is_error=false. LITERAL: starts_with sobre campo numérico se acepta sin error y simplemente no matchea nada (false silencioso), no lanza error de esquema. Éste es exactamente el punto que el enunciado marca como candidato a discrepancia doc-vs-motor (contrato solo documenta starts_with para string) — registro correcto, no falla contra un contrato fijado.",
+   "veredicto": "UNCLEAR",
+   "motivo": "",
+   "verificacion": {
+    "clasificacion": "CONTRATO-AMBIGUO",
+    "es_bug_de": "documentacion",
+    "evidencia": "HUECO DOCUMENTAL: starts_with/ends_with sobre un campo no-string es false silencioso y ninguna fuente lo fija — reproduce para estos operadores el modo de fallo silencioso que E26-H08 declara cerrado para el orden.\n\nFUENTES (ninguna fija el veredicto):\n1. /Users/dbarea/repos/lodestar/docs/user/query-language.md, tabla \"Operators\" (L195): «| `starts_with` | `starts_with` | string | Prefix |» — declara el operador solo para string, sin decir qué pasa sobre un campo de otro tipo.\n2. Ibid., L96: «`=` and `!=` are **never** type errors: a type mismatch is simply `false`. Ordering comparisons are stricter — see [When a query fails]» — fija el cruce de tipos para =/!= y para orden; starts_with no está en ninguna de las dos categorías.\n3. Ibid., tabla \"When a query fails\" (L374): solo «An ordering comparison against an incompatible type → INVALID_SCHEMA»; no hay fila para los operadores de texto.\n4. /Users/dbarea/repos/lodestar/contracts/mcp.yml, knowledge_search errores (L637): «desde E26-H08 un TYPE ERROR de evaluación: comparar un campo con un literal de tipo incompatible, p. ej. `priority >= \"high\"` sobre `priority: 2`» — el único ejemplo es de orden; y la nota E26-H08 (L416-427): «solo `Err` cambia de tratamiento» — delega en el evaluador del core qué constituye type error, sin enumerar starts_with.\n5. Diagnóstico en código (no fuente del veredicto): /Users/dbarea/repos/lodestar/crates/lodestar-core/src/eval.rs L340-342, comentario de eval_afijo: «operadores de texto exclusivos de strings. Con un campo no-string o un literal no-string no hay prefijo/sufijo que comprobar → false (no hay una variante de TypeError \"no es string\", y H01 no la introduce; ningún test lo ejercita)» — el propio código reconoce el hueco y que ningún test lo cubre.\n\nREPRODUCCIÓN (homelab, perfil readonly, 2026-08-05):\n- {\"where\": \"priority starts_with \\\"1\\\"\"} → {\"nextCursor\":null,\"results\":[],\"totalApproximate\":0}, is_error=false (idéntico al lote original).\n- AGRAVANTE que da valor al issue: metadata_inspect{\"mode\":\"field\",\"field\":\"priority\"} → 9 documentos con priority NUMBER (valor 3 en 7 docs, 2 en 2 docs), y {\"where\": \"priority starts_with \\\"3\\\"\"} TAMBIÉN devuelve 0 resultados sin error: los 7 documentos con priority: 3 desaparecen en silencio — exactamente la «lista recortada indistinguible de la correcta» que E26-H08 (mcp.yml L419-421) declara haber eliminado, pero solo para Err del evaluador.\n- CONTROL: {\"where\": \"priority >= \\\"1\\\"\"} → INVALID_SCHEMA «en \"pendientes/apagados-sucios.md\" el campo \"priority\" es de tipo number… operador de orden \"greater_than_or_equal\"», conforme a la fuente.\n\nPROPUESTA DE ISSUE (documentacion): añadir a \"When a query fails\" (query-language.md) y a la semántica de `where` en mcp.yml una fila que fije que starts_with/ends_with sobre campo o literal de tipo incompatible evalúa a false silencioso (Ok(false), no Err) — o alternativamente decidir alinearlo con E26-H08 introduciendo la variante TypeError que el comentario de eval.rs:342 reconoce ausente. Hoy el detalle solo está fijado en un comentario del código sin test.\n\nRESTO DEL CASO (pasa contra fuente): Paso 0: 4 equipos. Paso 1: sin limit → 20 resultados (mcp.yml L633: «limit, tipo: integer, default: 20»), nextCursor no-null, totalApproximate 36; verificado además que cursor \"14\" reanuda con los 16 restantes sin solape (20+16=36). Paso 2: contains subcadena sobre string (query-language.md L194) → 10 docs con status \"activo\". El veredicto UNCLEAR del ejecutor se resuelve: el comportamiento observado encaja con todo lo que las fuentes fijan; lo no fijado es el hallazgo documental de arriba."
+   }
+  },
+  {
+   "id": "G1-21",
+   "lote": "G0",
+   "tool": "knowledge_search,knowledge_search,knowledge_search",
+   "esperado": "Los tres: INVALID_SCHEMA con diagnóstico útil, sin internos de serde crudos ni INTERNAL_IO_ERROR (E24-H10). Registrar los 3 mensajes literales. Fuente: mcp.yml E24-H09/H10; query-language.md The JSON filter form",
+   "real": "Los tres pasos devuelven is_error=true, error_code=INVALID_SCHEMA, sin internos de serde crudos ni INTERNAL_IO_ERROR. Paso0 (operator 'equalz' inválido) y paso1 ({banana:[1]}) y paso2 (falta 'value'): los tres literales de texto son IDÉNTICOS: '«filter» inválido: no es un nodo de filtro válido: se esperaba {field, operator, value} o una envoltura and/or/not/has/missing'. El motor no distingue diagnósticos específicos por sub-causa (operador desconocido vs forma inválida vs campo faltante), colapsa los tres en el mismo mensaje genérico, pero sigue siendo un diagnóstico útil sin fugas internas — cumple el criterio duro exigido (E24-H09/H10).",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "G1-24",
+   "lote": "G0",
+   "tool": "shell,shell,shell,shell",
+   "esperado": "Paso 0: initialize acepta 2025-06-18; el result lleva instructions que nombra EXACTAMENTE las tools activas del perfil (7 en readonly), sin vocabulario retirado (huérfanos, conformidad). Paso 1: versión no aceptada — REGISTRAR el comportamiento (contrato lista aceptadas, no el rechazo; candidato CONTRATO-AMBIGUO). Paso 2: ping responde (registrar forma del result); metodo_inventado → -32601. Paso 3: batch array → -32600 Invalid Request. Fuente: mcp.yml protocolo (metodos, protocol_versions_aceptadas, instructions) y errores_protocolo",
+   "real": "Paso0 (protocolVersion 2025-06-18): rc=0, aceptado, result.protocolVersion='2025-06-18', serverInfo.version='0.5.0', instructions describe el flujo de 10 pasos nombrando 8 tools (workspace_status, knowledge_search, knowledge_get, metadata_inspect, graph_query, impact_analyze, change_plan, change_apply, knowledge_check, change_revert) sin vocabulario retirado ('huérfanos'/'conformidad' ausentes) — PERO no enumera explícitamente '7 tools activas de readonly' como lista aislada, sino que describe el flujo completo standard con nota final 'Perfil readonly: solo los pasos de lectura y verificación (las tools de cambio no están disponibles)'. No hay una lista explícita y literal de 7 nombres filtrados por perfil. Paso1 (protocolVersion '1990-01-01', no listada como aceptada): rc=0, el servidor la ACEPTA igualmente sin rechazo — mismo result con protocolVersion echo='1990-01-01', mismas instructions, sin error. LITERAL: no hay validación de protocolVersion, cualquier string se acepta y se refleja tal cual. Paso2: ping devuelve result={} (vacío); metodo_inventado devuelve error code=-32601, message='método no soportado: metodo_inventado'. Paso3: batch array de un elemento devuelve error code=-32600, message='Invalid Request: se esperaba un objeto JSON-RPC (batch no soportado)', id=null. Piezas fijas (ping/-32601, batch/-32600) coinciden con el contrato; las piezas a REGISTRAR (forma exacta de instructions vs '7 tools nombradas EXACTAMENTE', y aceptación sin validar de protocolVersion arbitraria) son silencios contractuales tal como el propio caso anticipa — UNCLEAR con literal es el veredicto correcto.",
+   "veredicto": "UNCLEAR",
+   "motivo": "",
+   "verificacion": {
+    "clasificacion": "CONFIRMADO-DISCREPANCIA",
+    "es_bug_de": "documentacion",
+    "evidencia": "DISCREPANCIA PRINCIPAL (lista para issue) — contracts/mcp.yml, meta.protocolo.instructions (líneas 493-502) afirma sin acotar por perfil: \"lo blindó con `mcp.rs::instructions_sin_vocabulario_retirado`, que prohíbe el vocabulario retirado y exige que el texto nombre EXACTAMENTE las tools que sirve `tools/list`\". El propio test lo endurece (crates/lodestar-mcp/tests/mcp.rs:172-175): \"ni una de menos [...] ni una de más (una tool que no existe manda al agente a un `-32602`)\". Y meta.perfiles.readonly (líneas 508-510): \"Oculta las 3 tools de cambio [...] de `tools/list` [...] y RECHAZA su invocación con -32602\". REPRODUCIDO bajo --profile readonly: tools/list sirve 7 tools ['workspace_status','knowledge_search','knowledge_get','metadata_inspect','knowledge_check','graph_query','impact_analyze'], pero el `instructions` de initialize nombra las 10 (incluye change_plan, change_apply, change_revert) — exactamente el modo de fallo (\"una de más\" → -32602) que el contrato dice que la guarda impide. La guarda (tests/mcp.rs:177 `instructions_sin_vocabulario_retirado`) solo inicializa con perfil por defecto (standard), donde la igualdad 10==10 sí se cumple; bajo readonly nadie la comprueba. El motor mitiga con nota textual final: \"Perfil `readonly`: solo los pasos de lectura y verificación (las tools de cambio no están disponibles)\" — comportamiento deliberado del código (SERVER_INSTRUCTIONS estático en main.rs). Código y motor coinciden; el contrato sobrepromete → bug de documentación: acotar la cláusula EXACTAMENTE al perfil standard o documentar que bajo readonly el texto sigue nombrando las 3 tools ocultas con caveat textual. (Sí el vocabulario retirado está ausente: 'huérfano'/'orphan'/'conformidad'/'sort'/etc. no aparecen — esa mitad de la cláusula se cumple.) HALLAZGO SECUNDARIO — el literal del ejecutor para Paso 1 es FALSO: afirmó \"protocolVersion echo='1990-01-01' [...] cualquier string se acepta y se refleja tal cual\". Re-ejecutado aislado: initialize con protocolVersion \"1990-01-01\" responde `\"protocolVersion\":\"2024-11-05\"` (fallback, no echo), conforme a crates/lodestar-mcp/src/main.rs:201-204: `.get(\"protocolVersion\") [...] .filter(|v| matches!(*v, \"2024-11-05\" | \"2025-03-26\" | \"2025-06-18\")).unwrap_or(\"2024-11-05\")` — el servidor SÍ valida contra protocol_versions_aceptadas (mcp.yml línea 492) y negocia a la baja al estilo MCP. El contrato solo lista las aceptadas sin fijar la rama no-aceptada: ese detalle concreto sigue siendo silencio contractual, pero el literal correcto a registrar es \"fallback a 2024-11-05\", no \"echo sin validación\". Piezas fijas confirmadas contra mcp.yml meta.errores_protocolo (517-518) y metodos (491): ping → result {} vacío; metodo_inventado → -32601 \"método no soportado: metodo_inventado\"; batch array → -32600 \"Invalid Request: se esperaba un objeto JSON-RPC (batch no soportado)\", id=null."
+   }
+  },
+  {
+   "id": "G1-06",
+   "lote": "G2",
+   "tool": "knowledge_search,knowledge_search,knowledge_search,knowledge_search",
+   "esperado": "Paso 0: SOLO fixtures/nulo.md, proyectando {campo_nulo: null, vacio: null} — el null EXPLÍCITO viaja, el ausente no aparece. Paso 1: también matchea (key: sin valor es null YAML). Paso 2: has() matchea pese a valer null (presencia de clave). Paso 3: [] — null NUNCA matchea clave ausente. Fuente: query-language.md Values and types (fila null) + has/missing; mcp.yml include (null explícito sí aparece)",
+   "real": "Paso0: knowledge_search where=campo_nulo=null con include frontmatter.campo_nulo/vacio devuelve SOLO fixtures/nulo.md proyectando {\"campo_nulo\":null,\"vacio\":null} (1 resultado). Paso1: where=vacio=null matchea el mismo doc (1 resultado). Paso2: has(campo_nulo) matchea el mismo doc (1 resultado). Paso3: campo_inexistente_total=null devuelve resultados:[] totalApproximate:0. Los cuatro pasos coinciden exactamente con lo esperado.",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "G1-07",
+   "lote": "G2",
+   "tool": "knowledge_get,knowledge_get,knowledge_search",
+   "esperado": "Paso 0: title == 'Titulo Desde El H1' (cae al primer H1). Paso 1: title derivado del NOMBRE de fichero sin Title Case — registrar literal exacto (¿pelado?). Paso 2: encuentra fixtures/sin-title-fm.md vía document.title. Fuente: mcp.yml E16-H02 (derived_title: frontmatter.title → primer H1 → nombre)",
+   "real": "Paso0: knowledge_get de fixtures/sin-title-fm.md -> title=\"Titulo Desde El H1\" (cae al primer H1), como predecía el contrato. Paso1: knowledge_get de fixtures/pelado.md -> title literal \"pelado\" (nombre de fichero SIN Title Case, en minúsculas tal cual el basename sin extensión). Paso2: knowledge_search where document.title=\"Titulo Desde El H1\" encuentra fixtures/sin-title-fm.md (1 resultado). El único elemento a REGISTRAR era el literal del paso1: title derivado del filename es \"pelado\" (minúsculas, sin capitalizar), no \"Pelado\" ni ninguna variante Title Case.",
+   "veredicto": "UNCLEAR",
+   "motivo": "",
+   "verificacion": {
+    "clasificacion": "RECLASIFICADO-PASS",
+    "es_bug_de": "ninguno",
+    "evidencia": "Fuente: contracts/mcp.yml líneas 59-60 — «`title` lo deriva ahora `model::derived_title` (frontmatter.title → primer H1 → nombre del fichero, sin Title Case)»; docs/user/query-language.md:143 — «`document.title` | string | Derived title: `frontmatter.title` → first H1 → file name»; ARCHITECTURE.md:1089 — «Título derivado — frontmatter.title → primer heading H1 → nombre del fichero». Output real (re-ejecución aislada, results/verify_G1-07_out.json, worktree+fixtures gaps): paso0 knowledge_get fixtures/sin-title-fm.md → title=\"Titulo Desde El H1\" (cae al primer H1, como promete la cadena); paso1 knowledge_get fixtures/pelado.md (sin frontmatter ni H1) → title=\"pelado\" (stem del fichero, minúsculas tal cual — exactamente el «sin Title Case» que mcp.yml declara; el motor implementa path.stem() en crates/lodestar-core/src/model.rs:213); paso2 knowledge_search where document.title=\"Titulo Desde El H1\" → 1 resultado (fixtures/sin-title-fm.md). Sondas adicionales: document.title=\"pelado\" → 1 resultado; \"Pelado\" → 0; \"pelado.md\" → 0. Las tres aserciones del esperado se cumplen y el literal registrado coincide con la promesa documental explícita; el UNCLEAR del ejecutor no se sostiene. Matiz menor sin entidad de issue: la prosa dice «nombre del fichero» sin precisar que se recorta la extensión (.md), pero ningún documento afirma lo contrario y el propio repo lo documenta en tests (core.rs:481 «el nombre del fichero tal cual, sin `.md`»)."
+   }
+  },
+  {
+   "id": "G1-08",
+   "lote": "G2",
+   "tool": "knowledge_search,knowledge_get,knowledge_check",
+   "esperado": "Paso 0: exactamente los docs sin bloque (pelado.md). Paso 1: frontmatter == {} (literal del contrato) y body completo. Paso 2: CERO diagnósticos — la falta de frontmatter dejó de ser error (OKF-FM01 borrado E16-H05). Fuente: mcp.yml knowledge_get include + E16-H05",
+   "real": "Paso0: where document.has_frontmatter=false devuelve exactamente [fixtures/pelado.md] (1 resultado). Paso1: knowledge_get con include frontmatter+body de pelado.md -> frontmatter:{} (objeto vacío literal) y body:\"Solo un parrafo sin heading.\\n\" completo. Paso2: knowledge_check en pelado.md -> diagnostics:[], summary{errors:0,warnings:0,info:0}, valid:true. Coincide exactamente con lo esperado: la falta de frontmatter no genera ningún diagnóstico.",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "G1-09",
+   "lote": "G2",
+   "tool": "knowledge_get,graph_query,knowledge_check,graph_query",
+   "esperado": "Paso 0: 5 ResolvedLink — inline+fragment 'diagnostico' target document(equipos/bastion.md) con href crudo; reference → document(guias/tmux.md); selfAnchor; externalUri; workspaceFile(fixtures/script.sh). Paso 1: SOLO 2 aristas (bastion, tmux) — el grafo filtra selfAnchor/externalUri/workspaceFile. Paso 2: 0 diagnósticos (script.sh existe). Paso 3: los backlinks de tmux incluyen la entrada del enlace de REFERENCIA. Fuente: mcp.yml E17 (ResolvedLink, kinds); ARCHITECTURE §20.6-20.7",
+   "real": "Paso0: outgoingLinks de fixtures/enlaces-variados.md devuelve exactamente 5 ResolvedLink: inline+fragment 'diagnostico' -> target document(equipos/bastion.md) href '../equipos/bastion.md#diagnostico'; reference -> target document(guias/tmux.md); selfAnchor '#enlaces-variados'; externalUri 'https://example.com/x'; workspaceFile 'fixtures/script.sh'. Paso1: graph_query outgoing -> SOLO 2 edges (equipos/bastion.md, guias/tmux.md), 3 nodos, edgeCount:2 -- confirma que selfAnchor/externalUri/workspaceFile se filtran del grafo. Paso2: knowledge_check -> 0 diagnósticos (script.sh existe como fixture). Paso3: backlinks de guias/tmux.md incluye 3 entradas (README.md, fixtures/enlaces-variados.md, servicios/termius.md), incluyendo la entrada vía enlace de referencia. Todo coincide exactamente.",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "G1-10",
+   "lote": "G2",
+   "tool": "knowledge_get,knowledge_check",
+   "esperado": "El href /equipos/bastion.md resuelve RELATIVO A LA RAÍZ (como GitHub): target document(equipos/bastion.md), SIN LINK-ESCAPES-WORKSPACE ni diagnóstico alguno. Fuente: ARCHITECTURE §20.6 precisión 1 de E17-H02 (texto literal)",
+   "real": "outgoingLinks de fixtures/raiz-absoluta.md para href '/equipos/bastion.md' resuelve a target {kind:\"document\", value:\"equipos/bastion.md\"} (relativo a la raíz del workspace, como GitHub). knowledge_check -> 0 diagnósticos, valid:true. Ningún LINK-ESCAPES-WORKSPACE ni otro código. Coincide exactamente con el texto literal citado de ARCHITECTURE §20.6.",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "G1-11",
+   "lote": "G2",
+   "tool": "change_plan,change_plan,shell",
+   "esperado": "SILENCIO CONTRACTUAL a documentar: create sobre path EXISTENTE y move a destino OCUPADO. Esperable rechazo en normalización (familia INVALID_SCHEMA) SIN escribir; si alguno produce plan canApply true, hallazgo GRAVE (pisaría conocimiento). Paso 2: git limpio. Registrar códigos y mensajes literales. Fuente: mcp.yml change_plan (sin semántica de colisión declarada) — candidato CONTRATO-AMBIGUO",
+   "real": "AMBOS planes se emiten con canApply:true SIN NINGÚN rechazo ni diagnóstico de colisión -- exactamente el escenario que el caso marcaba como 'hallazgo GRAVE'. Paso0 (create sobre pendientes/wol-bastion.md, que YA EXISTE en el repo real como documento real 'Wake on LAN del propio bastion' con priority:3/status:abierto/affects:[bastion], confirmado por knowledge_get en G1-14/18): planHash blake3:413f469c..., canApply:true, risk.level:\"low\", semanticDiff.modified:[\"pendientes/wol-bastion.md\"] con frontmatterChanges y bodyChanges -- pisaría el documento real con {title:\"Pisado\", body:\"x\\n\"} sin ningún warning de colisión (el único warning presente es LINK-TARGET-MISSING no relacionado). Paso1 (move guias/tmux.md -> README.md, README.md YA EXISTE): también canApply:true, risk.level:\"high\" pero el motivo dado es solo \"Mover guias/tmux.md afecta a 5 documentos que lo referencian\" -- NINGUNA mención de que el destino README.md esté ocupado; semanticDiff.deleted incluye guias/tmux.md pero no hay señal de que README.md original se pierda salvo por replace_body implícito. Paso2 (git status) confirma que ningún plan escribió en disco (working tree limpio, correcto para change_plan). No hay código INVALID_SCHEMA ni ningún error: el motor deja que create/move pisen documentos existentes sin fricción -- confirma el 'hallazgo GRAVE' anticipado por el caso. Candidato CONTRATO-AMBIGUO confirmado con literal.",
+   "veredicto": "UNCLEAR",
+   "motivo": "",
+   "verificacion": {
+    "clasificacion": "CONTRATO-AMBIGUO",
+    "es_bug_de": "documentacion",
+    "evidencia": "SILENCIO CONTRACTUAL confirmado y reproducido en aislamiento (batches/verify_G1-11.json, worktree+standard+fixtures gaps): change_plan acepta sin fricción tanto `create` sobre un path EXISTENTE como `move` a destino OCUPADO. Ninguna fuente fija el comportamiento. — FUENTES: (1) contracts/mcp.yml, entrada `change_plan`, campo `errores`: declara \"DOCUMENT_NOT_FOUND (objetivo de normalización inexistente)\" —el caso inverso— y NINGÚN código de colisión de path; la semántica de `create` es solo \"create → frontmatter?/body?\". (2) docs/user/safe-changes.md, tabla de ops: \"`create` | Creates a document with optional frontmatter and body\" y \"`move` | Moves or renames a document, optionally rewriting inbound links\" — cero mención a paths ya existentes. (3) ARCHITECTURE.md §20.11: describe `move_document` con rewriteInboundLinks sin cláusula de destino ocupado. (4) El propio código lo admite: crates/lodestar-core/src/plan.rs:333-334, doc de `normalize_create`: \"No falla (un `path` ya presente en el workspace no se rechaza aquí; esa política es de la workspace)\" — pero en lodestar-workspace NO existe tal política: la remisión apunta a una política que nadie implementó ni documentó. — OUTPUT REAL (reproducido, results/verify_G1-11_results.json): paso 0, create sobre pendientes/wol-bastion.md (documento real \"Wake on LAN del propio bastion\"): canApply:true, risk:{level:\"low\",reasons:[]}, planHash blake3:413f469c…, y el doc aparece en semanticDiff.modified con frontmatterChanges y bodyChanges — el motor SABE que existe (diffea contra el contenido actual) y aun así no emite ningún diagnóstico; aplicarlo pisaría el documento con {title:\"Pisado\", body:\"x\"}. Paso 1, move guias/tmux.md → README.md (ocupado): canApply:true, risk high SOLO por \"Mover «guias/tmux.md» afecta a 5 documentos que lo referencian\", sin mención al destino ocupado; semanticDiff.moved=[] y deleted=[guias/tmux.md] (el diff detecta implícitamente la colisión y no la aflora). AGRAVANTE: normalizedOperations lleva DOS replace_body sobre README.md (primero el cuerpo de tmux movido, después el cuerpo ORIGINAL de README con el enlace reescrito), de modo que aplicado en orden el contenido final de README sería el original y el contenido de tmux se PERDERÍA por completo (guias/tmux.md borrado + su cuerpo sobrescrito). Paso 2: git status limpio (invariante \"plan no escribe\" se cumple). — PROPUESTA DE ISSUE: \"change_plan no declara ni señaliza colisiones de path (create sobre existente, move a destino ocupado)\". Mínimo documental: fijar en contracts/mcp.yml y docs/user/safe-changes.md si create/move sobrescriben (y entonces exigir un diagnóstico/risk reason de colisión en el plan) o si deben rechazar (nuevo código de error). La remisión de plan.rs a una \"política de la workspace\" inexistente debe resolverse en la misma decisión. El doble replace_body sobre el destino del move merece ticket aparte como candidato a bug de motor (pérdida del contenido movido si se aplicara)."
+   }
+  },
+  {
+   "id": "G1-12",
+   "lote": "G2",
+   "tool": "graph_query,change_plan,change_apply,shell",
+   "esperado": "Paso 0: 0 entrantes. Paso 1: plan SE EMITE sin inboundLinksPolicy (sin backlinks no hay nada que decidir, la omisión se permite — contraste con PLN-07). Pasos 2-3: BORRADO. Fuente: mcp.yml inboundLinksPolicy (texto de la excepción)",
+   "real": "Paso0: backlinks de fixtures/sin-entrantes.md -> edges:[], 0 entrantes, confirmado. Paso1: el plan SÍ se emite (canApply:true) pero normalizedOperations muestra explícitamente \"inbound_links_policy\":\"reject\" -- NO está ausente/omitido como predecía el esperado ('sin inboundLinksPolicy'), sino normalizado a un valor default explícito 'reject' aunque el caller nunca lo pasó. Pasos 2-3: change_apply aplica correctamente y el shell confirma BORRADO. El borrado en sí no se bloquea (coincide con la intención del esperado), pero la forma exacta del campo normalizado difiere: no es 'ausente', es 'reject' explícito por defecto -- matiz a registrar sobre el candidato CONTRATO-AMBIGUO.",
+   "veredicto": "UNCLEAR",
+   "motivo": "",
+   "verificacion": {
+    "clasificacion": "RECLASIFICADO-PASS",
+    "es_bug_de": "test",
+    "evidencia": "Fuente (contracts/mcp.yml, tool change_plan, campo operations[].inboundLinksPolicy, línea 788): \"obligatorio para «delete» cuando el documento tiene backlinks (E21-H03, §Fase 12) ... Sin backlinks no hay nada que decidir y la omisión se permite.\" Es un contrato de ENTRADA: fija qué puede omitir el llamador, no la forma del plan emitido. El retorno (línea 792) solo declara \"normalizedOperations: [NormalizedOperation]\" sin fijar presencia de campos. Reproducido aislado (batch verify_G1-12, worktree, fixtures gaps): paso 0 backlinks -> edgeCount:0; paso 1 change_plan sin inboundLinksPolicy -> canApply:true, normalizedOperations:[{\"inbound_links_policy\":\"reject\",\"op\":\"delete\",\"path\":\"fixtures/sin-entrantes.md\"}]; paso 2 applied:true; paso 3 shell BORRADO. Todo lo que la fuente promete se cumple: la omisión con 0 backlinks no falla y el borrado procede. El esperado del test añadió un detalle que la fuente no promete (\"plan SE EMITE sin inboundLinksPolicy\"): sobre-lectura de \"la omisión se permite\". El motor materializa deliberadamente el default inerte: lodestar-app/src/lib.rs:2695-2698 (policy ausente + 0 entrantes -> InboundLinksPolicy::Reject) y lodestar-core/src/types.rs:1602-1605 (campo inbound_links_policy no opcional en NormalizedOperation::Delete, siempre serializa). Con 0 entrantes \"reject\" no puede disparar INBOUND_LINKS_EXIST, así que el eco explícito no altera ninguna promesa. Bug del test (esperado sobre-especificado), no del motor ni de la documentación. Observación menor sin entidad de issue: el eco usa snake_case (inbound_links_policy) frente al camelCase de entrada (inboundLinksPolicy), detalle que mcp.yml delega en el tipo NormalizedOperation."
+   }
+  },
+  {
+   "id": "G1-13",
+   "lote": "G2",
+   "tool": "change_plan,change_apply,shell,change_plan",
+   "esperado": "Pasos 0-2: aserción correcta (3) pasa, aplica, quedan 3 bar. Paso 3: find SIN ocurrencias y sin aserción — REGISTRAR (¿plan vacío/no-op? ¿error?), candidato CONTRATO-AMBIGUO. Fuente: mcp.yml replace_text; safe-changes.md (optionally asserting how many)",
+   "real": "Pasos 0-2: replace_text foo->bar con expectedOccurrences:3 sobre fixtures/contador.md ('foo uno. foo dos. foo tres.') pasa, aplica (receiptId 6208561737...), y grep confirma 3 'bar' en el fichero resultante ('bar uno. bar dos. bar tres.'). Paso3 (find='zzz-no-esta' SIN aserción, SIN ocurrencias en el texto): change_plan devuelve canApply:true, planHash blake3:85e9e149..., impact.affectedCount:0, impact.affectedDocuments:[], semanticDiff con bodyChanges:[], created:[], deleted:[], modified:[], relationChanges:[] -- es decir, un plan NO-OP válido y aplicable (canApply:true) que si se aplicara no cambiaría nada, en vez de un error. Este es exactamente el literal REGISTRAR pedido: find sin ocurrencias y sin aserción produce un plan vacío pero 'exitoso', no un error.",
+   "veredicto": "UNCLEAR",
+   "motivo": "",
+   "verificacion": {
+    "clasificacion": "CONTRATO-AMBIGUO",
+    "es_bug_de": "documentacion",
+    "evidencia": "FUENTES: contracts/mcp.yml:787 declara los parámetros de replace_text como «find/replace/expectedOccurrences?» (aserción opcional) y ni el retorno (:792) ni la lista de errores (:794) mencionan el caso 0-ocurrencias; el inputSchema (crates/lodestar-mcp/src/tools.rs:75) dice «[replace_text] Si se indica y el nº real de ocurrencias no coincide, la operación falla…» — condiciona el fallo a indicar la aserción; docs/user/safe-changes.md:193: «Replaces occurrences of a literal string, optionally asserting how many»; y safe-changes.md:255-257 documenta el cero-coincidencias SOLO para selecciones masivas («A selection that matches nothing produces an empty plan, not an error»), no para la forma-array. OBSERVADO (reproducido en batches/verify_G1-13.json, worktree+fixtures): change_plan {op:replace_text, path:fixtures/contador.md, find:\"zzz-no-esta\", replace:\"w\"} sin expectedOccurrences → is_error:false, canApply:true, semanticDiff.bodyChanges:[], normalizedOperations=[replace_body con el cuerpo idéntico]; change_apply lo aplica sin error y el cuerpo queda intacto. Run original: affectedCount:0/affectedDocuments:[]; re-run sobre fixture prístino: affectedCount:1 porque el apply canonicaliza el frontmatter YAML (tags: [prueba] → bloque; updated pierde comillas) aunque find no case nada — el conteo de impacto del no-op depende de si el fichero ya está en forma canónica. PROPUESTA DE ISSUE DOCUMENTAL: safe-changes.md (§The seven operations) y mcp.yml (change_plan/replace_text) deberían fijar explícitamente que un replace_text cuyo find no casa ninguna ocurrencia y sin expectedOccurrences produce un plan no-op válido (canApply:true, bodyChanges vacío), no un error — en paralelo a la frase ya existente para selecciones masivas — y recomendar expectedOccurrences como guarda, porque el modo de fallo silencioso (find con typo → plan «exitoso» que no cambia nada) es exactamente la «edición ciega» contra la que el propio inputSchema dice proteger. Anotar además que aplicar ese no-op puede reescribir el fichero solo por canonicalización del frontmatter."
+   }
+  },
+  {
+   "id": "G1-14",
+   "lote": "G2",
+   "tool": "change_plan,change_apply,knowledge_get,shell",
+   "esperado": "ARCHITECTURE §20.4 exige distinguir asignar-null de eliminar-clave, pero el wire solo declara `patch`. REGISTRAR: ¿{optional: null} deja 'optional: null' (asignación) o borra la línea? Cualquier semántica sin la otra expresable = discrepancia arquitectura-vs-wire. Fuente: ARCHITECTURE §20.4; mcp.yml E16-H04 y L787",
+   "real": "patch_frontmatter con patch:{optional:null} sobre pendientes/wol-bastion.md se aplica (receiptId 49e8ae07...). El knowledge_get posterior con include:[frontmatter] devuelve frontmatter EXACTO: {affects:[bastion], priority:3, status:\"abierto\", tags:[energia,hardware], title:\"Wake on LAN del propio bastion\", type:\"pendiente\", updated:\"2026-08-04\"} -- la clave 'optional' NO APARECE en absoluto. El grep -n 'optional' sobre el fichero en disco no devuelve ninguna línea (salida vacía). Literal registrado: {campo: null} en patch_frontmatter BORRA la clave del frontmatter, no la deja como 'campo: null' explícito -- resuelve la discrepancia arquitectura-vs-wire señalada por el caso a favor de 'eliminar-clave', no 'asignar-null'.",
+   "veredicto": "UNCLEAR",
+   "motivo": "",
+   "verificacion": {
+    "clasificacion": "CONFIRMADO-DISCREPANCIA",
+    "es_bug_de": "documentacion",
+    "evidencia": "ARCHITECTURE.md §20.4 (L1092-1095) promete que patch_frontmatter «(set + remove) … distingue explícitamente asignar null de eliminar una clave», pero esa distinción es inexpresable por el wire: contracts/mcp.yml L787 declara un único parámetro `patch` sin sintaxis de remove, y el normalizador op_patch (lodestar-app L2922-2940) aplica RFC 7386 («un valor escribe la clave, “null” la borra»): serde mapea JSON null a None(=remove) en FrontmatterPatch(BTreeMap<String,Option<Value>>). El brazo Some(Value::Null) del core (sí asigna null) es inalcanzable desde MCP. ARCHITECTURE se contradice a sí misma: L850/L227/L400/L515 dicen «null-borra». Reproducido aislado (verify_G1-14b): optional: true desaparece tras patch {optional: null}. Issue: corregir §20.4 (declarar RFC 7386 y que asignar null no es expresable) o añadir sintaxis de remove al wire."
+   }
+  },
+  {
+   "id": "G1-17",
+   "lote": "G2",
+   "tool": "change_plan,shell,change_apply",
+   "esperado": "Paso 1: registrar forma real del plan persistido (nombre de fichero, clave de expiración; si la clave difiere de expiresAt, adaptar la lectura del resultado). Paso 2: PLAN_EXPIRED (plan caducado) — distinto de PLAN_STALE. Si el motor responde PLAN_STALE (p.ej. porque el plan editado ya no verifica su hash), registrarlo: significaría que la expiración es indistinguible por wire sin esperar 1h. Fuente: safe-changes.md (1 hora, PLAN_EXPIRED); mcp.yml change_apply (EXPIRED vs STALE)",
+   "real": "Paso1 (shell): el plan persiste en '.lodestar/runtime/plans/f6c14c1e...json' con claves ['changeSetId','baseWorkspaceRevision','planHash','canApply','expiresAt','normalizedOperations','risk','semanticDiff','impact','capturedRevisions','diagnosticsBefore','diagnosticsAfter'] -- la clave de expiración SÍ es literalmente 'expiresAt', coincide con el wire, editada a '1'. Paso2 (change_apply tras forzar expiresAt=1): is_error:true, error_code:\"PLAN_EXPIRED\" literal, mensaje 'PLAN_EXPIRED: el plan «changeset:f6c14c1e...» caducó (expiresAt 1, ahora 1785962205): vuelve a llamar a change_plan para replanificar'. NO devolvió PLAN_STALE -- el motor distingue correctamente expiración (PLAN_EXPIRED) de invalidación por hash, confirmando la rama 'buena' contemplada explícitamente en el esperado.",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "G1-18",
+   "lote": "G2",
+   "tool": "change_plan,change_apply,change_revert,change_revert,shell",
+   "esperado": "Revert del recibo -revert (redo): paso 3 restaura el estado POST-apply → paso 4 muestra priority: 1. workspaceRevision del paso 3 == workspaceRevision del paso 1. Registrar la forma del receiptId resultante (¿-revert-revert?). Si el motor rechaza revertir un -revert, asimetría no declarada a reportar. Fuente: safe-changes.md (undoing is itself a transaction)",
+   "real": "Paso1 (apply patch_frontmatter priority:1): workspaceRevision post-apply = blake3:2f396a78... (priority pasa a 1). Paso2 (revert del receiptId original 'f6c14c1e...'): produce receiptId 'f6c14c1e...-revert' y restaura correctamente el estado PRE-apply, workspaceRevision vuelve a blake3:a3d6a61a... (el mismo baseWorkspaceRevision inicial). Paso3 (revert del receiptId 'f6c14c1e...-revert', intentando 'deshacer el deshacer' / redo): devuelve EXACTAMENTE el mismo receiptId 'f6c14c1e...-revert' (no genera un '-revert-revert' nuevo) y el MISMO workspaceRevision blake3:a3d6a61a... -- es decir, no restauró el estado POST-apply como predecía el esperado, sino que fue un no-op que repitió el resultado del paso anterior sin error y sin cambio real. El grep final confirma 'priority: 3' (valor original), NO 'priority: 1'. Contradice la expectativa primaria del caso ('paso 3 restaura el estado POST-apply -> paso 4 muestra priority: 1') y tampoco cae en la alternativa contemplada de rechazo explícito: el motor acepta la llamada silenciosamente sin hacer redo -- asimetría no declarada confirmada.",
+   "veredicto": "FAIL",
+   "motivo": "",
+   "verificacion": {
+    "clasificacion": "CONFIRMADO-DISCREPANCIA",
+    "es_bug_de": "motor",
+    "evidencia": "Contrato: mcp.yml change_revert retorno — 'Es INVERSO al apply: previousWorkspaceRevision == resultRevision del apply revertido; workspaceRevision == previousRevision del apply (estado restaurado)' y semantica — 'como una NUEVA transacción inversa recuperable'; safe-changes.md L117-119 — 'undoing is itself a transaction, with its own journal and its own recovery copies'; recovery.rs L963-969 (intención E25-H05) — sin recibo 'deshacer el undo se volvía imposible para siempre'. Observado (repro aislada verify_G1-18b, worktree limpio, profile standard): workspace_status lista el recibo 'X-revert' como revertible; change_revert(receiptId='X-revert') devuelve reverted:true, receiptId IDÉNTICO 'X-revert' (el sufijo no apila), previousWorkspaceRevision == workspaceRevision (debía ser el redo), changedPaths no vacío, y el fichero queda en el valor pre-apply — no-op silencioso sin error. Causa raíz en lodestar-app/src/lib.rs ~L2168: orig_txn_id = transaction_id(&receipt.change_set_id) — el recibo '-revert' guarda el changeSetId ORIGINAL, así que revertirlo re-restaura recovery/X/ (ya vigente) en vez de recovery/X-revert/, y revert_txn_id colisiona con el recibo revertido. Efecto destructivo verificado: backup_originals SOBRESCRIBE recovery/X-revert/ (el estado redo, priority:1→3) y reescribe el recibo como degenerado a3d6→a3d6: el redo prometido por E25-H05 queda destruido de forma permanente y silenciosa."
+   }
+  },
+  {
+   "id": "G1-22",
+   "lote": "G2",
+   "tool": "knowledge_search",
+   "esperado": "Proyecta {flotante: null, submapa: {\"1\": \"uno\"}} — flotante no finito viaja como null; clave no-string se estringa. Registrar qué hace frontmatter.submapa.1 (¿alcanza la clave estringada?). Sin error. Fuente: mcp.yml include (nota valores no representables, texto literal)",
+   "real": "knowledge_search sobre fixtures/raros.md con include [frontmatter.flotante, frontmatter.submapa, frontmatter.submapa.1] proyecta frontmatter EXACTO: {\"flotante\":null,\"submapa\":{\"1\":\"uno\"},\"submapa.1\":\"uno\"} -- confirma flotante (.inf, no finito) viaja como null, y submapa con clave YAML no-string (1) se estringa a {\"1\":\"uno\"}. El literal a registrar: frontmatter.submapa.1 NO se fusiona dentro de la proyección anidada de 'submapa', sino que produce una clave adicional de nivel superior literal 'submapa.1' (con el punto en el nombre) con valor 'uno' -- el include con dotted-path que coincide con una clave ya estringada genera una clave paralela duplicada en vez de resolverse dentro del objeto anidado. Sin error en ningún caso.",
+   "veredicto": "UNCLEAR",
+   "motivo": "",
+   "verificacion": {
+    "clasificacion": "RECLASIFICADO-PASS",
+    "es_bug_de": "ninguno",
+    "evidencia": "Fuente (contracts/mcp.yml, tool knowledge_search, parámetro `include`, línea 632): «Cada hit gana entonces el mapa `frontmatter`, tecleado por el sufijo TAL CUAL se pidió (sin re-anidar ni repetir el prefijo) y con el valor YAML CRUDO» y «Nota sobre valores no representables en JSON: un flotante no finito viaja como `null` (serde_json lo mapea, no falla) y una clave no-string de un submapa se estringa (`{1: uno}` → `{\"1\":\"uno\"}`)». Output real reproducido (aislado, worktree+fixtures gaps): {\"frontmatter\":{\"flotante\":null,\"submapa\":{\"1\":\"uno\"},\"submapa.1\":\"uno\"},...}, is_error:false; y con include solo [\"frontmatter.submapa.1\"]: {\"frontmatter\":{\"submapa.1\":\"uno\"}}. Todo encaja con la fuente: .inf→null y la clave 1 estringada son literales del contrato; la clave plana \"submapa.1\" (con punto) es exactamente el «sufijo TAL CUAL se pidió, sin re-anidar» que el contrato manda — no una clave paralela anómala. Además el dotted-path SÍ resuelve dentro del objeto anidado (así obtiene \"uno\"): ParsedFrontmatter::get desciende y lookup (crates/lodestar-core/src/types.rs:701-707) casa la clave YAML entera 1 con el segmento \"1\" vía scalar_text; la respuesta a la pregunta abierta del esperado («¿alcanza la clave estringada?») es sí. El motivo UNCLEAR del ejecutor era una mala lectura de la proyección plana documentada; nada contradice mcp.yml y el caso cumple el esperado (proyecciones fijadas idénticas, comportamiento abierto registrado, sin error)."
+   }
+  },
+  {
+   "id": "G1-01",
+   "lote": "G3_dirty",
+   "tool": "workspace_status,change_plan,change_apply,shell",
+   "esperado": "GATE DIFERENCIAL, hueco mayor. Paso 1: el plan SE EMITE con diagnosticsAfter.errors > diagnosticsBefore.errors, semanticDiff.diagnosticsIntroduced incluye el LINK-TARGET-MISSING nuevo, canApply false con policy default. Paso 2: change_apply lo intenta igualmente (canApply es consejo, no cerrojo) y el gate de staging rechaza: INVALID_RESULT (el resultado INTRODUCE un error que el canónico no tenía — rejectNewErrors default; los errores PREEXISTENTES de los fixtures se toleran por allowExistingErrors). Paso 3: git limpio en guias/. Fuente: safe-changes.md canApply is not a lock + paso 7 del apply; mcp.yml change_apply INVALID_RESULT",
+   "real": "Paso1 change_plan: diagnosticsBefore.errors=6, diagnosticsAfter.errors=7, semanticDiff.diagnosticsIntroduced=[{code:LINK-TARGET-MISSING, targets:[guias/tmux.md], related:[guias/no-existe-nunca.md]}], canApply=false. Paso2 change_apply: is_error=true, error_code implícito en texto 'INVALID_RESULT: el resultado del plan no pasa la política de cambios: 1 error(es) nuevo(s), 7 error(es) en total (rejectNewErrors=true, allowExistingErrors=true)'. Paso3 git status --porcelain -- guias/ → stdout vacío (rc=0). Encaja exactamente con GATE DIFERENCIAL esperado.",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "G1-15",
+   "lote": "G3_dirty",
+   "tool": "shell,change_plan,shell",
+   "esperado": "Patch sobre frontmatter ILEGIBLE → INVALID_SCHEMA (CoreError::UnreadableFrontmatter), sin reconstruir el bloque: sha256 idéntico antes/después. Registrar si el rechazo salta en el plan o exigiría apply. Si el plan se emite y aplicara un bloque reconstruido: hallazgo MAYOR (pérdida de metadata que E16-H04 declara imposible). Fuente: mcp.yml E16-H04 (texto literal)",
+   "real": "change_plan sobre fixtures/roto-yaml.md: is_error=true, error_code='INVALID_SCHEMA', text='INVALID_SCHEMA: el frontmatter del documento no es interpretable: mapping values are not allowed in this context at line 2 column 6'. sha256 antes y después idéntico: 494ba405568483017f9b8138c541f8b7e7ff4405037cca559526d9b884030bcd. El rechazo salta ya en el plan (no llega a apply), sin reconstrucción de bloque.",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "G1-16",
+   "lote": "G3_dirty",
+   "tool": "change_plan,change_apply,shell",
+   "esperado": "El apply funciona (BOM no impide leer ni modificar) y tras la reescritura los 3 primeros bytes siguen siendo ef bb bf — el BOM se conserva byte a byte, nunca se normaliza (si se strippeara, workspace_revision cambiaría espuriamente en cada round-trip). OJO: el apply puede requerir superar el gate (los fixtures tienen errores preexistentes tolerados; este patch no introduce errores nuevos → debe pasar). Fuente: mcp.yml E24-H02; ARCHITECTURE §20.4 E24-H01",
+   "real": "change_plan: canApply=true, diagnosticsBefore=diagnosticsAfter={errors:6,warnings:4} (sin errores nuevos). change_apply: is_error=false, applied=true, changedPaths=[fixtures/con-bom.md], validation={errors:6,warnings:4,valid:false}. Shell posterior: xxd -l3 → 'efbb bf' (BOM intacto), grep -c tocado → 1 (patch aplicado). BOM conservado byte a byte tras el round-trip, tal como exige la fuente.",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "G1-23",
+   "lote": "G3_dirty",
+   "tool": "knowledge_check",
+   "esperado": "SILENCIO CONTRACTUAL: los errores declaran DOCUMENT_NOT_FOUND solo en scope document/affected — paths no está en la lista. REGISTRAR: ¿DOCUMENT_NOT_FOUND igualmente (contrato enumera de menos) o ignora el path fantasma en silencio (typo tragado, contra el espíritu E24/E26)? Cualquiera es dato de contrato. Fuente: mcp.yml knowledge_check errores (enumeración literal)",
+   "real": "REGISTRAR (silencio contractual confirmado empíricamente): knowledge_check con scope.paths=['fixtures/roto-unclosed.md','no-existe.md'] NO emite DOCUMENT_NOT_FOUND para el path fantasma 'no-existe.md'. Respuesta completa: diagnostics=[{code:'FM-UNCLOSED', level:'err', msg:'El bloque de metadatos no está cerrado.', targets:['fixtures/roto-unclosed.md']}], summary={errors:1,warnings:0,info:0}, valid:false. El path inexistente se ignora en silencio (typo tragado) — no aparece mencionado en diagnostics ni en summary ni en ningún otro campo de la respuesta.",
+   "veredicto": "UNCLEAR",
+   "motivo": "",
+   "verificacion": {
+    "clasificacion": "CONTRATO-AMBIGUO",
+    "es_bug_de": "documentacion",
+    "evidencia": "ISSUE DOCUMENTAL — knowledge_check scope paths traga en silencio los paths inexistentes y el contrato no lo declara. FUENTE: contracts/mcp.yml, tool knowledge_check, campo errores (línea 706): «DOCUMENT_NOT_FOUND (ref inexistente en scope document/affected)» — la enumeración excluye el scope paths; la semántica del param scope (línea 700) solo dice «paths{paths}» sin fijar qué pasa con una entrada inexistente. Ningún otro doc lo fija (docs/user/mcp-clients.md §«Paths are not found» solo cubre formato de rutas). COMPORTAMIENTO REAL (reproducido en worktree, profile standard, fixtures chk_a+chk_b): (1) scope.paths=['fixtures/roto-unclosed.md','no-existe.md'] → responde solo con el diagnóstico FM-UNCLOSED del fixture real; 'no-existe.md' no aparece en diagnostics, summary ni ningún campo; (2) CONTROL AGRAVANTE — scope.paths=['no-existe.md'] a solas → {\"diagnostics\":[],\"summary\":{\"errors\":0,\"info\":0,\"warnings\":0},\"valid\":true}: un scope compuesto al 100% por un typo devuelve valid:true; (3) CONTROL DE CONTRASTE — scope document con ref 'no-existe.md' → error «DOCUMENT_NOT_FOUND: \"no-existe.md\" no es un documento del workspace…», confirmando que la enumeración del contrato es exacta. CAUSA (informativa): crates/lodestar-app/src/lib.rs:1240 — «CheckScope::Paths { paths } => Ok(paths.iter().cloned().collect())» toma los paths tal cual sin resolve_ref, a diferencia de Document/Affected. PROPUESTA: declarar en mcp.yml (param scope y/o errores de knowledge_check) el comportamiento del scope paths ante entradas inexistentes — hoy: se ignoran en silencio y un scope íntegramente fantasma es valid:true — o reconsiderarlo como DOCUMENT_NOT_FOUND por coherencia con document/affected y con el espíritu de E24-H09/E26-H07 («la superficie de error deja de mentir»): un agente que teclea mal un path recibe un veredicto verde indistinguible de «ese documento está sano»."
+   }
+  },
+  {
+   "id": "G1-25",
+   "lote": "G3_dirty",
+   "tool": "knowledge_get,knowledge_get,knowledge_get",
+   "esperado": "Paso 0: diagnostics con el LINK-TARGET-MISSING del fixture (misma verdad que knowledge_check). Paso 1: diagnostics [] presente (pedido, doc limpio). Paso 2: externalReferences (retirado E23-H12) es valor DESCONOCIDO del include y se IGNORA sin error ni campo extra — asimetría contractual con knowledge_search donde include malformado es INVALID_SCHEMA. Fuente: mcp.yml knowledge_get include + E23-H12 + validacion_de_argumentos",
+   "real": "Paso0 knowledge_get fixtures/enlace-roto.md include=[diagnostics]: document.diagnostics=[{code:LINK-TARGET-MISSING, targets:[fixtures/enlace-roto.md], related:[equipos/no-existe.md]}]. Paso1 knowledge_get equipos/bastion.md include=[diagnostics]: document.diagnostics=[] (doc limpio). Paso2 knowledge_get equipos/bastion.md include=[externalReferences,frontmatter]: is_error=false, structured.document solo contiene {frontmatter, path, revision, title} — sin clave 'externalReferences' y sin error; el valor desconocido del include se ignora en silencio, tal como predice la asimetría contractual con knowledge_search.",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "G1-02",
+   "lote": "G4a_cfg_writable",
+   "tool": "workspace_status,change_plan,change_apply,change_plan,shell",
+   "esperado": "Config: writableRoots=[pendientes]. Pasos 1-2: equipos/ fuera de las raíces escribibles → PERMISSION_DENIED; el contrato lo sitúa en el APPLY (assert_writable antes de tocar canónico); registrar si el PLAN ya lo anticipa (candidato CONTRATO-AMBIGUO). bastion.md intacto (paso 4 git limpio en equipos/). Paso 3: pendientes/ sigue escribible — el plan se emite normal. NOTA: workspace_revision se computa sobre writableRoots, así que baseWorkspaceRevision difiere del baseline global — registrarlo, no es fallo. Si @step1 no produce changeSetId (plan ya rechazado), el paso 2 tendrá harness_exception por placeholder: eso REGISTRA que el rechazo fue en plan. Fuente: mcp.yml change_apply PERMISSION_DENIED + semantica paso 6; ARCHITECTURE §19.4",
+   "real": "Step 0: workspace_status ok, knowledgeRoots=[pendientes], workspaceRevision=blake3:eb3f1cf02019c45acf306a2a801c591005d32f2f48c68cb62c2ac98bbf1d86a1. Step 1: change_plan equipos/bastion.md: canApply=true, changeSetId=changeset:4df055da24871cb826a383440a7a6e8fef85aa59bbd6de54e1508d93ffbb146c (no PLAN rejection). Step 2: change_apply: PERMISSION_DENIED: «equipos/bastion.md» no cae bajo ningún writableRoot configurado. Step 3: change_plan pendientes/wol-bastion.md: canApply=true, succeeds. Step 4: git status equipos/: rc=0, stdout empty (file untouched). All assertions match: rejection at APPLY, not PLAN; writable root enforced correctly; baseWorkspaceRevision scoped to writableRoots=[pendientes].",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "G1-03",
+   "lote": "G4b",
+   "tool": "change_plan,change_apply,change_plan,change_apply,workspace_status,change_revert",
+   "esperado": "Config: maximumReceipts=1. Paso 4: receipts lista SOLO el recibo del SEGUNDO apply (el GC corre tras cada apply y purga el primero). Paso 5: revert del recibo purgado → PLAN_EXPIRED con 'esa transacción ya no es reversible (el recibo nunca existió o la retención lo purgó)' — la purga borra también las copias de recuperación. Fuente: safe-changes.md Receipts and retention (texto literal); mcp.yml workspace_status receipts",
+   "real": "Step 4 workspace_status: receipts contiene SOLO el recibo del SEGUNDO apply (9d271014ea0ff9a118c21008ef1e2d0e672e099f3b48dc6fcd232ad25c09b27b); el primer recibo (28bb731d26bb70aeddc8e51fabf7077106071b872754c9b13a4c3a7c0fbe4d26) fue purgado. Step 5 change_revert del primer recibo retorna PLAN_EXPIRED con mensaje literal: 'no hay recibo «28bb731d26bb70aeddc8e51fabf7077106071b872754c9b13a4c3a7c0fbe4d26»: esa transacción ya no es reversible (el recibo nunca existió o la retención lo purgó)' — coincide exactamente con lo esperado.",
+   "veredicto": "PASS",
+   "motivo": ""
+  },
+  {
+   "id": "G1-04",
+   "lote": "G4c",
+   "tool": "workspace_status,knowledge_check,knowledge_check",
+   "esperado": "Config: validation con LINK-TARGET-MISSING: ignore (sintaxis EXACTA desconocida — §19.4 solo dice 'validation (severidad por familia)'). Si el servidor NO arranca (config inválida): el arnés registrará el fallo de sesión — ese literal ES el hallazgo (sintaxis de validation no documentada en ninguna fuente de usuario). Si arranca: paso 1 SIN LINK-TARGET-MISSING (ignore suprime la familia entera, también el warn del paso 2) y counts del paso 0 bajan en consecuencia. Cualquiera de los dos resultados es dato documental valioso. Fuente: mcp.yml knowledge_check semantica (validation por familia, E20-H04); ARCHITECTURE §19.4",
+   "real": "Servidor arranca (workspace_status OK). Paso 1: knowledge_check en enlace-roto.md devuelve diagnóstico LINK-TARGET-MISSING con level=err. Paso 2: knowledge_check en enlace-roto-warn.md devuelve diagnóstico LINK-TARGET-MISSING con level=warn. AMBOS diagnósticos aparecen cuando la configuración validation LINK-TARGET-MISSING: ignore debería suprimirlos. No hay validación de configuración rechazada — la sesión inició correctamente pero la regla de ignore no fue aplicada.",
+   "veredicto": "UNCLEAR",
+   "motivo": "El comportamiento esperado requería o (a) rechazo de la configuración por sintaxis desconocida, o (b) supresión de LINK-TARGET-MISSING en la salida con counts ajustados. Lo observado es que la configuración fue aceptada pero no tuvo efecto: los diagnósticos aparecen íntegros. Esto es un dato contractual valioso pero sin fuente normativa que lo fije.",
+   "verificacion": {
+    "clasificacion": "CONTRATO-AMBIGUO",
+    "es_bug_de": "documentacion",
+    "evidencia": "MERECE ISSUE DOCUMENTAL. Titulo propuesto: \"La sintaxis de `validation` (claves = FAMILIAS, no codigos de diagnostico) no esta documentada en ninguna fuente de usuario, y una clave desconocida es silenciosamente inerte\".\n\nPROMESA (contracts/mcp.yml, knowledge_check.semantica, ~l.712): \"La severidad de cada diagnostico la fija la seccion `validation` de la config por familia (E20-H04): un override reclasifica cada diagnostico de la familia, `ignore` lo suprime; con los defaults de §20.9 es la identidad\". ARCHITECTURE.md §19.4 (~l.900): \"`validation` (severidad por familia de diagnostico)\". PERO ARCHITECTURE §20.9 (l.1268-1289) solo lista CODIGOS (`LINK-TARGET-MISSING`...), nunca las familias ni sus defaults; los nombres reales (`malformedFrontmatter`, `danglingDocumentLinks`, `missingWorkspaceFiles`, `caseMismatch`, `isolatedDocuments`) solo existen en crates/lodestar-workspace/src/config.rs (que los atribuye a \"§20.9\" — cita rota) y en el doc interno docs/REFACTOR_PHASE_2.md:1092-1096. En docs/user/*.md la seccion `validation` no aparece.\n\nREPRODUCIDO (scratchpad/results/verify_G1-04_repro_results.json): con `.lodestar/config.yaml` = \"validation:\\n  LINK-TARGET-MISSING: ignore\" el servidor arranca, la config carga sin error y los diagnosticos salen integros: enlace-roto.md -> LINK-TARGET-MISSING level=err (summary errors:1); enlace-roto-warn.md -> LINK-TARGET-MISSING level=warn (summary warnings:1).\n\nCONTRAPRUEBA (scratchpad/results/verify_G1-04_familias_results.json): con \"validation:\\n  danglingDocumentLinks: ignore\\n  missingWorkspaceFiles: ignore\" AMBOS knowledge_check devuelven diagnostics:[] y valid:true — la promesa \"ignore lo suprime\" del contrato ES real, con clave de familia. El motor no contradice mcp.yml; ningun bug de motor ni de test.\n\nCAUSA DE DISENO (config.rs l.176-190): ValidationSection es \"un mapa abierto a proposito ... se carga sin perder datos\"; una clave que `family_of` no reconoce nunca matchea y queda inerte SIN aviso, mientras que una severidad desconocida SI es error duro (test `severidad_desconocida_es_error`). Asimetria no documentada: el usuario que, leyendo la tabla de codigos de §20.9, escriba `LINK-TARGET-MISSING: ignore` obtiene una config aceptada y sin efecto.\n\nOBSERVACION ADYACENTE: incluso con la sintaxis correcta, workspace_status.counts NO baja (errors:5/warnings:2 identicos con y sin ignore): la politica solo afecta a knowledge_check; mcp.yml (workspace_status.semantica) tampoco fija este detalle.\n\nPEDIDO DEL ISSUE: (1) documentar en ARCHITECTURE §20.9 (o en docs/user/) las cinco familias, sus defaults y el mapeo codigo->familia (LINK-TARGET-MISSING se reparte en dos familias segun destino .md o no); (2) decidir y documentar el comportamiento ante clave de familia desconocida (aviso por stderr o error, como ya ocurre con la severidad); (3) aclarar si counts de workspace_status deben reflejar la politica."
+   }
+  },
+  {
+   "id": "G1-05",
+   "lote": "G4d",
+   "tool": "spawn,spawn",
+   "esperado": "Config rota (gate.blockWarnings: \"yes please\", el typo literal de quickstart). AMBOS perfiles: exit code 3, stderr nombra config.yaml y el campo (invalid type: string, expected a boolean), stdout vacío, sin panic — JAMÁS arranca con defaults (un typo no puede aflojar un gate en silencio). Fuente: ci.md (malformed config es exit 3, never a silent fallback); quickstart.md (mensaje literal); mcp.yml arranque exit 3",
+   "real": "rc=3, stderr=\"lodestar-mcp: no se pudo abrir el workspace: error de IO: .lodestar/config.yaml inválido: gate.blockWarnings: invalid type: string \\\"yes please\\\", expected a boolean at line 2 column 18\", stdout=\"\", ambos perfiles",
+   "veredicto": "PASS",
+   "motivo": ""
+  }
+ ]
+}

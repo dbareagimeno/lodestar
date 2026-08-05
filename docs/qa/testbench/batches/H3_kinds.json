@@ -1,0 +1,12 @@
+{
+  "batch": "H3",
+  "root": "worktree",
+  "profile": "standard",
+  "fixtures": "kinds",
+  "cases": [
+    {"id": "G2-03", "steps": [
+       {"kind": "call", "tool": "knowledge_get", "arguments": {"ref": {"path": "fixtures/kinds.md"}, "include": ["outgoingLinks"]}},
+       {"kind": "call", "tool": "graph_query", "arguments": {"operation": "backlinks", "ref": {"path": "fixtures/destino.md"}}}],
+     "esperado": "Paso 0: 4 enlaces — [full][ref1] kind reference; [ref2][] kind collapsed; [ref3] kind shortcut; <https://example.com/auto> kind autolink con target externalUri. Los tres de referencia con target document(fixtures/destino.md). Con esto el enum kind (inline ya visto en G1-09) queda agotado. Paso 1: destino.md con 3 backlinks (una entrada por enlace de referencia). Fuente: mcp.yml L148 (kind ∈ inline/reference/collapsed/shortcut/autolink); ARCHITECTURE §20.6 L1137-1139"}
+  ]
+}

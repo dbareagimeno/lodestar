@@ -1,0 +1,41 @@
+{
+  "batch": "L9",
+  "root": "worktree",
+  "profile": "standard",
+  "fixtures": "chk_a+mdi",
+  "cases": [
+    {"id": "CHK-01", "tool": "knowledge_check",
+     "arguments": {"scope": {"kind": "document", "ref": {"path": "fixtures/roto-unclosed.md"}}},
+     "esperado": "Diagnóstico FM-UNCLOSED nivel err (frontmatter abierto sin cerrar). id con forma diag:blake3:<hex>. Fuente: mcp.yml catálogo CheckCode (FM-UNCLOSED, ex OKF-FM02); conform.rs"},
+    {"id": "CHK-02", "tool": "knowledge_check",
+     "arguments": {"scope": {"kind": "document", "ref": {"path": "fixtures/roto-yaml.md"}}},
+     "esperado": "FM-YAML-INVALID nivel err; range = líneas de CONTENIDO del bloque (1-based ambas inclusive, delimitadores --- excluidos): el bloque del fixture tiene contenido en líneas 2-3 del fichero. Fuente: mcp.yml E16-H05 (FM-YAML-INVALID rellena range)"},
+    {"id": "CHK-03", "tool": "knowledge_check",
+     "arguments": {"scope": {"kind": "document", "ref": {"path": "fixtures/conflicto.md"}}},
+     "esperado": "DOC-CONFLICT-MARKER nivel err (marcadores de conflicto git en el cuerpo). Fuente: mcp.yml catálogo (ex OKF-CONFLICT)"},
+    {"id": "CHK-04", "tool": "knowledge_check",
+     "arguments": {"scope": {"kind": "document", "ref": {"path": "fixtures/enlace-roto.md"}}},
+     "esperado": "LINK-TARGET-MISSING nivel ERR: el destino ../equipos/no-existe.md sería un documento .md del workspace. targets/related según contrato E17 (targets = [origen], related = destino). Fuente: mcp.yml E17-H03 (err si .md)"},
+    {"id": "CHK-05", "tool": "knowledge_check",
+     "arguments": {"scope": {"kind": "document", "ref": {"path": "fixtures/enlace-roto-warn.md"}}},
+     "esperado": "LINK-TARGET-MISSING nivel WARN: el destino ../scripts/no-existe.sh NO es .md (sería fichero de proyecto). El MISMO código con severidad distinta según extensión. Fuente: mcp.yml E17-H03 (warning si otro fichero)"},
+    {"id": "CHK-06", "tool": "knowledge_check",
+     "arguments": {"scope": {"kind": "document", "ref": {"path": "fixtures/escapa.md"}}},
+     "esperado": "LINK-ESCAPES-WORKSPACE nivel err: ../../../fuera-del-workspace.md sale por encima de la raíz; el motor no puede seguirlo ni reescribirlo. Fuente: mcp.yml E17-H03"},
+    {"id": "CHK-07", "tool": "knowledge_check",
+     "arguments": {"scope": {"kind": "document", "ref": {"path": "fixtures/case-mismatch.md"}}},
+     "esperado": "LINK-CASE-MISMATCH nivel warn: ../equipos/Bastion.md difiere solo en capitalización del real bastion.md; related nombra la ruta real del inventario. OJO APFS case-insensitive: si el enlace RESUELVE en disco puede no emitirse LINK-TARGET-MISSING pero SÍ debe emitirse el case-mismatch — registrar el comportamiento exacto. Fuente: mcp.yml E17 (segundo productor de LINK-CASE-MISMATCH)"},
+    {"id": "CHK-08", "tool": "knowledge_check",
+     "arguments": {"scope": {"kind": "document", "ref": {"path": "fixtures/navegacion-pura.md"}}},
+     "esperado": "SIN diagnóstico de enlace: [volver](../) es navegación pura (WorkspaceDirectory desde E23-H11), no EscapesWorkspace. diagnostics [] o solo ajenos al enlace. Fuente: mcp.yml E23-H11 (un [volver](../) legítimo ya no tumba el check)"},
+    {"id": "CHK-09", "steps": [
+       {"kind": "call", "tool": "knowledge_check", "arguments": {"scope": {"kind": "document", "ref": {"path": "fixtures/wikilink.md"}}}},
+       {"kind": "call", "tool": "knowledge_search", "arguments": {"where": "graph.isolated = true and document.path = \"fixtures/wikilink.md\""}},
+       {"kind": "call", "tool": "knowledge_get", "arguments": {"ref": {"path": "fixtures/wikilink.md"}, "include": ["outgoingLinks"]}}],
+     "esperado": "Wikilinks ignorados por diseño (§20.6): paso 0 sin diagnóstico de enlaces; paso 1 devuelve el doc (isolated TRUE pese al [[bastion]]); paso 2 outgoingLinks VACÍO. Es el comportamiento que justifica la decisión enlaces-markdown del homelab. Fuente: convenciones.md Enlaces; decisiones/enlaces-markdown.md; links.rs §20.6"},
+    {"id": "CHK-10", "steps": [
+       {"kind": "call", "tool": "knowledge_check", "arguments": {"scope": {"kind": "document", "ref": {"path": "fixtures/dot-key.md"}}}},
+       {"kind": "call", "tool": "knowledge_check", "arguments": {"scope": {"kind": "document", "ref": {"path": "fixtures/frontmatter-key.md"}}}}],
+     "esperado": "AMBOS sin diagnóstico: clave con punto y clave frontmatter de primer nivel son YAML válido — el problema es de alcanzabilidad por consulta (L4), no de integridad. knowledge_check no vigila el contrato de convenciones.md, solo interpretabilidad. Fuente: mcp.yml (catálogo mínimo de CheckCode)"}
+  ]
+}

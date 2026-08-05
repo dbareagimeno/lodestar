@@ -1,0 +1,15 @@
+{
+  "batch": "H1",
+  "root": "worktree",
+  "profile": "standard",
+  "fixtures": "ignore",
+  "cases": [
+    {"id": "G2-01", "steps": [
+       {"kind": "call", "tool": "workspace_status", "arguments": {}},
+       {"kind": "call", "tool": "knowledge_get", "arguments": {"ref": {"path": "borrador.md"}}},
+       {"kind": "call", "tool": "knowledge_get", "arguments": {"ref": {"path": "enlazador.md"}, "include": ["outgoingLinks"]}},
+       {"kind": "call", "tool": "knowledge_check", "arguments": {"scope": {"kind": "workspace"}, "minimumSeverity": "info", "limit": 1000}},
+       {"kind": "call", "tool": "graph_query", "arguments": {"operation": "outgoing", "ref": {"path": "enlazador.md"}}}],
+     "esperado": "Fixtures: .lodestarignore con 'borrador.md' e 'ignorados/'. Paso 0: counts.documents == 37 (36 de homelab + enlazador.md; borrador.md y oculto.md fuera del inventario). Paso 1: DOCUMENT_NOT_FOUND (excluido). Paso 2: el enlace a borrador.md con target.kind workspaceFile (excluido-pero-visible en disco NO es missing — decir missing sería mentir sobre el disco) y el de ignorados/oculto.md con target.kind missing (lo PODADO nunca se visita, límite aceptado). Paso 3: LINK-TARGET-MISSING err SOLO para ignorados/oculto.md; CERO diagnósticos por borrador.md... OJO: si borrador.md es workspaceFile no-.md-inventariado, registrar si emite el warn de fichero de proyecto — la distinción exacta es el entregable. Paso 4: oculto.md como ghost; borrador.md NO nodo. Fuente: quickstart.md L219-220; ARCHITECTURE §20.5 (respectLodestarIgnore) y L1175-1188 (excluido=WorkspaceFile vs podado=Missing); mcp.yml L141-143 (ghost solo si sería .md)"}
+  ]
+}

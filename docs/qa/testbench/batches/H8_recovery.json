@@ -1,0 +1,18 @@
+{
+  "batch": "H8",
+  "root": "worktree",
+  "profile": "standard",
+  "fixtures": null,
+  "cases": [
+    {"id": "G2-09", "fresh_root": true, "steps": [
+       {"kind": "call", "tool": "change_plan", "arguments": {"operations": [{"op": "patch_frontmatter", "path": "pendientes/wol-bastion.md", "patch": {"g2j": 1}}]}},
+       {"kind": "shell", "cmd": "mkdir -p .lodestar/runtime/journal && printf '{\"txnId\":\"txn-fantasma\",\"state\":\"prepared\"}' > .lodestar/runtime/journal/txn-fantasma.json && ls .lodestar/runtime/journal/"},
+       {"kind": "call", "tool": "workspace_status", "arguments": {}},
+       {"kind": "call", "tool": "change_apply", "arguments": {"changeSetId": "@step0.structured.changeSetId"}},
+       {"kind": "call", "tool": "workspace_status", "arguments": {}},
+       {"kind": "call", "tool": "change_plan", "arguments": {"operations": [{"op": "patch_frontmatter", "path": "pendientes/wol-bastion.md", "patch": {"g2j": 2}}]}},
+       {"kind": "call", "tool": "workspace_status", "arguments": {}},
+       {"kind": "shell", "cmd": "ls .lodestar/runtime/journal/ .lodestar/runtime/journal/quarantine/ 2>&1; git status --porcelain -- . ':!.lodestar'"}],
+     "esperado": "Journal fantasma no sellado fabricado a mano (vía sin failpoints al plano de recuperación). Paso 2: recovery.pendingTransaction — REGISTRAR (definido como 'journals no sellados en .lodestar/runtime'). Paso 3 (apply con recuperación pendiente): REGISTRAR código — ¿WORKSPACE_RECOVERY_REQUIRED, o la recuperación corre y falla con RECOVERY_FAILED nombrando .lodestar/runtime/journal/quarantine/txn-fantasma/ (las copias no verifican porque no existen)? Paso 5 (change_plan resuelve recuperación ANTES de planificar): registrar si tras él pendingTransaction vuelve a false y el journal está en cuarentena. Paso 7: ningún .md tocado por el proceso de recuperación. Caso deliberadamente de tipo REGISTRAR: fija la semántica real del flag y la cuarentena. Fuente: mcp.yml L604-608 (pendingTransaction); safe-changes.md Crash recovery L407-417; ARCHITECTURE L925"}
+  ]
+}

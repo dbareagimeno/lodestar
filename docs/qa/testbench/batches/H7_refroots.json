@@ -1,0 +1,18 @@
+{
+  "batch": "H7",
+  "root": "worktree",
+  "profile": "standard",
+  "fixtures": "refroots",
+  "cases": [
+    {"id": "G2-08", "steps": [
+       {"kind": "call", "tool": "workspace_status", "arguments": {}},
+       {"kind": "call", "tool": "knowledge_search", "arguments": {"where": "type = \"equipo\"", "limit": 50}},
+       {"kind": "shell", "cmd": "printf '\\n<!-- ref edit -->\\n' >> equipos/bastion.md"},
+       {"kind": "call", "tool": "workspace_status", "arguments": {}},
+       {"kind": "shell", "cmd": "printf '\\n<!-- writable edit -->\\n' >> pendientes/wol-bastion.md"},
+       {"kind": "call", "tool": "workspace_status", "arguments": {}},
+       {"kind": "call", "tool": "change_plan", "arguments": {"operations": [{"op": "patch_frontmatter", "path": "equipos/deco.md", "patch": {"x": 1}}], "policy": {"requireValidResult": false, "allowWarnings": true}}},
+       {"kind": "call", "tool": "change_apply", "arguments": {"changeSetId": "@step6.structured.changeSetId"}}],
+     "esperado": "Config: writableRoots [pendientes], referenceRoots [equipos]. Paso 0: referenceRoots == ['equipos'] (hasta ahora siempre []), knowledgeRoots/root coherentes, capabilities.externalReferences true; anotar workspaceRevision R0. Paso 1: los equipos siguen VISIBLES en consultas (visibles para validación, nunca modificables). Paso 3 (tras editar un referenceRoot): workspaceRevision == R0 SIN CAMBIO (la revisión se computa solo sobre writableRoots). Paso 5 (tras editar un writableRoot): revisión CAMBIA (control positivo). Pasos 6-7: patch sobre equipos/deco.md → PERMISSION_DENIED (registrar si en plan o en apply; si @step6 no da changeSetId, el harness_exception del paso 7 registra que fue en plan). Fuente: ARCHITECTURE §19.4 L884-887 y L840-842; mcp.yml L828; safe-changes.md L435"}
+  ]
+}

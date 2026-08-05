@@ -1,0 +1,17 @@
+{
+  "batch": "L8",
+  "root": "real",
+  "profile": "readonly",
+  "fixtures": null,
+  "cases": [
+    {"id": "ROB-17", "steps": [
+       {"kind": "list_tools"},
+       {"kind": "call", "tool": "change_plan", "arguments": {"operations": [{"op": "patch_frontmatter", "path": "README.md", "patch": {"x": 1}}]}},
+       {"kind": "call", "tool": "change_apply", "arguments": {"changeSetId": "changeset:00"}},
+       {"kind": "call", "tool": "change_revert", "arguments": {"receiptId": "00"}}],
+     "esperado": "Paso 0: EXACTAMENTE 7 tools (sin change_*). Pasos 1-3: error de PROTOCOLO -32602 (tool desconocida) — readonly OCULTA y RECHAZA, no ejecuta nada. Fuente: safe-changes.md (readonly hides and refuses); mcp-clients.md Profiles"},
+    {"id": "ROB-18", "tool": "workspace_status",
+     "arguments": {},
+     "esperado": "capabilities: writes false, transactions false, revert false (readonly) — contraste con standard (true/true/true, ya verificado en smoke). counts idénticos al baseline (36/166/0/0/0/0) y workspaceRevision blake3:4a7bba14... intacta. Fuente: mcp-clients.md Profiles; baseline de Fase 0"}
+  ]
+}

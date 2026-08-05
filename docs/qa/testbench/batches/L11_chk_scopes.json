@@ -1,0 +1,40 @@
+{
+  "batch": "L11",
+  "root": "worktree",
+  "profile": "standard",
+  "fixtures": "chk_a",
+  "cases": [
+    {"id": "CHK-20", "tool": "knowledge_check",
+     "arguments": {"scope": {"kind": "document", "ref": {"path": "fixtures/roto-unclosed.md"}}},
+     "esperado": "SOLO los diagnósticos de ese documento (FM-UNCLOSED), no los del resto de fixtures rotos. Fuente: mcp.yml knowledge_check scope"},
+    {"id": "CHK-21", "tool": "knowledge_check",
+     "arguments": {"scope": {"kind": "paths", "paths": ["fixtures/roto-unclosed.md", "fixtures/roto-yaml.md"]}},
+     "esperado": "Diagnósticos de exactamente esos 2 documentos (FM-UNCLOSED + FM-YAML-INVALID), nada de enlace-roto.md ni del resto. Fuente: mcp.yml knowledge_check scope kinds"},
+    {"id": "CHK-22", "tool": "knowledge_check",
+     "arguments": {"scope": {"kind": "affected", "refs": [{"path": "equipos/bastion.md"}], "depth": 1}},
+     "esperado": "Diagnósticos del vecindario a profundidad 1 de bastion (blast-radius). Los fixtures NO conectados a bastion por enlaces quedan fuera... salvo case-mismatch.md que enlaza a Bastion.md: registrar si entra en el vecindario. Fuente: mcp.yml knowledge_check scope affected"},
+    {"id": "CHK-23", "steps": [
+       {"kind": "call", "tool": "knowledge_check", "arguments": {"scope": {"kind": "workspace"}, "minimumSeverity": "err", "limit": 1000}},
+       {"kind": "call", "tool": "knowledge_check", "arguments": {"scope": {"kind": "workspace"}, "minimumSeverity": "info", "limit": 1000}}],
+     "esperado": "Paso 0 devuelve SOLO los err del set chk_a (FM-UNCLOSED, FM-YAML-INVALID, DOC-CONFLICT-MARKER, LINK-TARGET-MISSING .md, LINK-ESCAPES-WORKSPACE); excluye los warn (LINK-TARGET-MISSING no-.md, LINK-CASE-MISMATCH). Paso 1 los incluye todos. El summary de ambos cuenta TODO (se computa antes del umbral). Fuente: mcp.yml knowledge_check minimumSeverity"},
+    {"id": "CHK-24", "tool": "knowledge_check",
+     "arguments": {"scope": {"kind": "document", "ref": {"path": "no-existe.md"}}},
+     "esperado": "Error DOCUMENT_NOT_FOUND (ref inexistente en scope document). Fuente: mcp.yml knowledge_check errores"},
+    {"id": "CHK-25", "tool": "knowledge_check",
+     "arguments": {"scope": {"kind": "workspace"}, "includeSuggestedFixes": true, "limit": 1000},
+     "esperado": "Todos los diagnósticos con fixes [] — SIEMPRE vacío (sin productor de Fix desde E20-H03). Fuente: mcp.yml includeSuggestedFixes"},
+    {"id": "CHK-26", "steps": [
+       {"kind": "call", "tool": "knowledge_check", "arguments": {"scope": {"kind": "document", "ref": {"path": "fixtures/roto-unclosed.md"}}}},
+       {"kind": "call", "tool": "knowledge_check", "arguments": {"scope": {"kind": "document", "ref": {"path": "fixtures/roto-unclosed.md"}}}}],
+     "esperado": "Mismo id diag:blake3:<hex> en ambos pasos — determinista dentro de una revisión (sin timestamps ni orden). Fuente: mcp.yml knowledge_check (id estable)"},
+    {"id": "CHK-28", "tool": "knowledge_check",
+     "arguments": {"scope": {"kind": "workspace"}, "minimumSeverity": "grave"},
+     "esperado": "Error INVALID_SCHEMA: minimumSeverity fuera de {err, warn, info}. Fuente: mcp.yml knowledge_check errores"},
+    {"id": "ROB-12", "tool": "knowledge_check",
+     "arguments": {"scope": {"kind": "workspace"}, "includeSuggestedFixes": "true"},
+     "esperado": "Error INVALID_SCHEMA: includeSuggestedFixes string en vez de booleano (E24-H09: los valores declarados fuera de tipo ya no caen al default en silencio). Fuente: mcp.yml E24-H09"},
+    {"id": "CHK-29", "tool": "knowledge_check",
+     "arguments": {"scope": {"kind": "workspace"}, "minimumSeverity": "info", "limit": 1},
+     "esperado": "1 diagnóstico + nextCursor no-null (paginación por cursor). Fuente: mcp.yml knowledge_check limit/cursor"}
+  ]
+}

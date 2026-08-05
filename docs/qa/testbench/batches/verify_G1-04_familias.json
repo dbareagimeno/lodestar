@@ -1,0 +1,14 @@
+{
+  "batch": "verify_G1-04_familias",
+  "root": "worktree",
+  "profile": "standard",
+  "fixtures": "cfg_validation_familias+chk_a",
+  "cases": [
+    {"id": "G1-04-familias", "steps": [
+       {"kind": "shell", "cmd": "cat .lodestar/config.yaml"},
+       {"kind": "call", "tool": "workspace_status", "arguments": {}},
+       {"kind": "call", "tool": "knowledge_check", "arguments": {"scope": {"kind": "document", "ref": {"path": "fixtures/enlace-roto.md"}}}},
+       {"kind": "call", "tool": "knowledge_check", "arguments": {"scope": {"kind": "document", "ref": {"path": "fixtures/enlace-roto-warn.md"}}}}]
+    }
+  ]
+}

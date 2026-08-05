@@ -1,0 +1,29 @@
+{
+  "batch": "G0",
+  "root": "real",
+  "profile": "readonly",
+  "fixtures": null,
+  "cases": [
+    {"id": "G1-19", "steps": [
+       {"kind": "call", "tool": "knowledge_search", "arguments": {"where": "graph.backlink > 0"}},
+       {"kind": "call", "tool": "knowledge_search", "arguments": {"filter": {"field": "graph.backlink", "operator": "greater_than", "value": 0}}}],
+     "esperado": "AMBOS pasos: INVALID_SCHEMA con el MISMO mensaje (las 4 propiedades válidas de graph.* + sugerencia de anclaje) — el rechazo vive en core::parse::build_field_path, punto único de where y filter; la equivalencia se preserva también en los ERRORES. Comparar los textos literalmente. Fuente: mcp.yml E24-H07; query-language.md Reserved namespaces"},
+    {"id": "G1-20", "steps": [
+       {"kind": "call", "tool": "knowledge_search", "arguments": {"where": "document.path starts_with \"equipos/\""}},
+       {"kind": "call", "tool": "knowledge_search", "arguments": {"where": "document.path ends_with \".md\""}},
+       {"kind": "call", "tool": "knowledge_search", "arguments": {"where": "status contains \"acti\"", "include": ["frontmatter.status"], "limit": 50}},
+       {"kind": "call", "tool": "knowledge_search", "arguments": {"where": "priority starts_with \"1\""}}],
+     "esperado": "Paso 0: los 4 equipos. Paso 1: SIN limit → exactamente 20 resultados (default declarado limit=20) + nextCursor no-null + totalApproximate 36. Paso 2: contains sobre campo STRING es subcadena: los status activo. Paso 3: starts_with sobre campo NUMBER — la tabla lo declara solo para string pero no fija el veredicto: REGISTRAR si es false silencioso o INVALID_SCHEMA (candidato discrepancia doc-vs-motor). Fuente: query-language.md Operators; mcp.yml knowledge_search limit default 20"},
+    {"id": "G1-21", "steps": [
+       {"kind": "call", "tool": "knowledge_search", "arguments": {"filter": {"field": "status", "operator": "equalz", "value": "activo"}}},
+       {"kind": "call", "tool": "knowledge_search", "arguments": {"filter": {"banana": [1]}}},
+       {"kind": "call", "tool": "knowledge_search", "arguments": {"filter": {"field": "status", "operator": "equals"}}}],
+     "esperado": "Los tres: INVALID_SCHEMA con diagnóstico útil, sin internos de serde crudos ni INTERNAL_IO_ERROR (E24-H10). Registrar los 3 mensajes literales. Fuente: mcp.yml E24-H09/H10; query-language.md The JSON filter form"},
+    {"id": "G1-24", "steps": [
+       {"kind": "shell", "cmd": "printf '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{},\"clientInfo\":{\"name\":\"t\",\"version\":\"0\"}}}\\n' | /Users/dbarea/repos/lodestar/target/release/lodestar-mcp --root /Users/dbarea/repos/homelab --profile readonly"},
+       {"kind": "shell", "cmd": "printf '{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"1990-01-01\",\"capabilities\":{},\"clientInfo\":{\"name\":\"t\",\"version\":\"0\"}}}\\n' | /Users/dbarea/repos/lodestar/target/release/lodestar-mcp --root /Users/dbarea/repos/homelab --profile readonly"},
+       {"kind": "shell", "cmd": "printf '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"clientInfo\":{\"name\":\"t\",\"version\":\"0\"}}}\\n{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\\n{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"ping\"}\\n{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"metodo_inventado\"}\\n' | /Users/dbarea/repos/lodestar/target/release/lodestar-mcp --root /Users/dbarea/repos/homelab --profile readonly"},
+       {"kind": "shell", "cmd": "printf '[{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"ping\"}]\\n' | /Users/dbarea/repos/lodestar/target/release/lodestar-mcp --root /Users/dbarea/repos/homelab --profile readonly"}],
+     "esperado": "Paso 0: initialize acepta 2025-06-18; el result lleva instructions que nombra EXACTAMENTE las tools activas del perfil (7 en readonly), sin vocabulario retirado (huérfanos, conformidad). Paso 1: versión no aceptada — REGISTRAR el comportamiento (contrato lista aceptadas, no el rechazo; candidato CONTRATO-AMBIGUO). Paso 2: ping responde (registrar forma del result); metodo_inventado → -32601. Paso 3: batch array → -32600 Invalid Request. Fuente: mcp.yml protocolo (metodos, protocol_versions_aceptadas, instructions) y errores_protocolo"}
+  ]
+}

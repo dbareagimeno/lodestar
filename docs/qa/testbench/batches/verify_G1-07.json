@@ -1,0 +1,43 @@
+{
+  "batch": "verify_G1-07",
+  "root": "worktree",
+  "profile": "standard",
+  "fixtures": "gaps",
+  "cases": [
+    {
+      "id": "G1-07v",
+      "steps": [
+        {
+          "kind": "call",
+          "tool": "knowledge_get",
+          "arguments": { "ref": { "path": "fixtures/sin-title-fm.md" } }
+        },
+        {
+          "kind": "call",
+          "tool": "knowledge_get",
+          "arguments": { "ref": { "path": "fixtures/pelado.md" } }
+        },
+        {
+          "kind": "call",
+          "tool": "knowledge_search",
+          "arguments": { "where": "document.title = \"Titulo Desde El H1\"" }
+        },
+        {
+          "kind": "call",
+          "tool": "knowledge_search",
+          "arguments": { "where": "document.title = \"pelado\"" }
+        },
+        {
+          "kind": "call",
+          "tool": "knowledge_search",
+          "arguments": { "where": "document.title = \"Pelado\"" }
+        },
+        {
+          "kind": "call",
+          "tool": "knowledge_search",
+          "arguments": { "where": "document.title = \"pelado.md\"" }
+        }
+      ]
+    }
+  ]
+}
