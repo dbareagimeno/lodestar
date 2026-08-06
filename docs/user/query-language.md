@@ -248,9 +248,24 @@ knowledge_search
 
 Both functions respect namespaces exactly as a comparison does, so `has(graph.backlinks)` asks about
 a computed property — which every document has, making it trivially true — while
-`has(frontmatter.graph)` asks whether your frontmatter has a `graph:` key. To ask whether a document
-has a frontmatter block at all, use `document.has_frontmatter` (see
-[Declared limits](#declared-limits)).
+`has(frontmatter.graph)` asks whether your frontmatter has a `graph:` key.
+
+`frontmatter` on its own is the one argument that does not name a key: it names the **block**.
+`has(frontmatter)` matches the documents that carry a frontmatter block and `missing(frontmatter)`
+those that do not — the same answer as `document.has_frontmatter`, which remains available and is
+the form to use inside a larger comparison. A block that opens and closes with no keys (`---\n---`)
+counts as present, by both routes.
+
+```json
+knowledge_search
+{"where": "has(frontmatter)", "limit": 20}
+```
+
+```json
+{"totalApproximate": 7}
+```
+
+(Seven of the demo's ten documents carry frontmatter.)
 
 ## Combining conditions
 
@@ -576,23 +591,6 @@ knowledge_search
 
 All three are avoided the same way: **do not put dots in frontmatter keys**, and do not name a
 top-level key `frontmatter`. Nested maps are the intended way to group.
-
-### `has(frontmatter)` does not test for a frontmatter block
-
-`frontmatter` on its own names the anchor prefix, not a key, so `has(frontmatter)` matches no
-document and `missing(frontmatter)` matches all of them — including the documents that do have
-frontmatter. The property that answers the question is `document.has_frontmatter`:
-
-```json
-knowledge_search
-{"where": "document.has_frontmatter = true", "limit": 20}
-```
-
-```json
-{"totalApproximate": 7}
-```
-
-(Seven of the demo's ten documents carry frontmatter.)
 
 ## Reference
 

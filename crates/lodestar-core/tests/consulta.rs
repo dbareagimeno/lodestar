@@ -1694,3 +1694,316 @@ fn primer_type_error_en_el_orden_total() {
     assert_eq!(field_type, ValueType::Number, "y el tipo del campo");
     assert_eq!(value_type, ValueType::String, "y el del literal");
 }
+
+// =============================================================================
+// E29-H03 — `has(frontmatter)` / `missing(frontmatter)` responden la VERDAD
+// =============================================================================
+//
+// `requirements/epica-29-honestidad-superficie.md §E29-H03` · `decisiones §19(a)` ·
+// `ARCHITECTURE.md §20.8` (L1247-1249, la promesa literal: «existencia `has(x)` `missing(x)`
+// (incluido `has(frontmatter)`)») · `CLAUDE.md` invariante #3.
+//
+// SÍNTOMA verificado hoy (v0.5.0) sobre un `DocumentSet` de 3 documentos —2 con bloque de
+// frontmatter, 1 sin él—:
+//
+//   has(frontmatter)      -> Ok(false) para LOS TRES   (debería casar los 2 con bloque)
+//   missing(frontmatter)  -> Ok(true)  para LOS TRES   (debería casar solo el 1 sin bloque)
+//
+// Es decir: la función devuelve el valor CONTRARIO al correcto para todo documento, sin error.
+//
+// CAUSA (verificada en código): `eval::resolver_campo` (`eval.rs:144`) detecta el anclaje por el
+// primer segmento y llama a `field.sin_anclaje()?`; `FieldPath::sin_anclaje` (`types.rs:507`)
+// devuelve `None` para el anclaje PELADO —`frontmatter` a secas—, porque `FieldPath::from_segments`
+// sobre cero segmentos es inválido por construcción. El `?` propaga ese `None` y
+// `propiedad_presente` lo lee como «propiedad ausente».
+//
+// DÓNDE se arregla (lo fija la historia, y estos tests NO lo relajan): en el camino de existencia,
+// reconociendo el anclaje pelado ANTES de intentar desanclarlo. **No** ampliando `sin_anclaje` para
+// que rinda un path vacío: un `FieldPath` sin segmentos es inválido por construcción y ese
+// invariante sostiene el dialecto de dot-paths de E26-H09.
+//
+// LA VERDAD A LA QUE SE ATAN estos tests es `document.has_frontmatter` (invariante #3: no se computa
+// dos veces). Por eso el criterio central no compara contra una lista escrita a mano, sino contra el
+// conjunto que ya devuelve el camino largo — así la aserción sobrevive a un cambio futuro en la
+// definición de «tiene frontmatter».
+//
+// ROJO esperado HOY: por ASERCIÓN en los cuatro primeros (ninguna API nueva, ningún stub); los dos
+// últimos son controles anti-vacuo y están VERDES desde ya, y deben seguir verdes después.
+// ---------------------------------------------------------------------------
+
+/// El workspace de los criterios: 2 documentos **con** bloque de frontmatter y 1 **sin** él.
+///
+/// `con-claves.md` y `con-otra-clave.md` no comparten ninguna clave (`status` vs `owner`): así el
+/// veredicto de `has(frontmatter)` no puede confundirse con el de `has(<una clave concreta>)`, que
+/// es la única vía por la que hoy `has` responde algo cierto.
+fn ds_con_y_sin_frontmatter() -> DocumentSet {
+    DocumentSet::from_files(lodestar_fixtures::file_map(&[
+        ("con-claves.md", "---\nstatus: accepted\n---\n\n# Con\n"),
+        ("con-otra-clave.md", "---\nowner: ana\n---\n\n# Otra\n"),
+        ("sin-bloque.md", "# Sin\n\nNi rastro de frontmatter.\n"),
+    ]))
+}
+
+/// Los documentos de `ds` que casan `expr`, en el orden total de `Analysis::documents` (`§20.7`).
+/// Un `Err` de tipo explota: ninguno de estos criterios comparara tipos, así que un `TypeError` aquí
+/// sería una regresión y no puede pasar como «no casó».
+fn casan(ds: &DocumentSet, expr: &Expression) -> Vec<String> {
+    ds.analyze()
+        .documents
+        .iter()
+        .filter(|p| {
+            eval_en(ds, p.as_str(), expr).unwrap_or_else(|e| {
+                panic!("`{p}` no debe dar TypeError en un `has`/`missing`: {e:?}")
+            })
+        })
+        .map(|p| p.as_str().to_string())
+        .collect()
+}
+
+/// E29-H03 · Criterio `has_frontmatter_pelado_casa_los_documentos_con_frontmatter`:
+/// Dado un workspace con 3 documentos, 2 con bloque de frontmatter y 1 sin él, Cuando se consulta
+/// `has(frontmatter)`, Entonces devuelve exactamente los 2 con frontmatter.
+#[test]
+fn has_frontmatter_pelado_casa_los_documentos_con_frontmatter() {
+    let ds = ds_con_y_sin_frontmatter();
+
+    assert_eq!(
+        casan(&ds, &parsea("has(frontmatter)")),
+        vec!["con-claves.md", "con-otra-clave.md"],
+        "`has(frontmatter)` debe casar los documentos que TIENEN bloque de frontmatter. Hoy no casa \
+         ninguno (0 de 3): `resolver_campo` desancla el path y `sin_anclaje` devuelve `None` para el \
+         anclaje pelado, así que `propiedad_presente` lo lee como ausencia para TODO documento — la \
+         respuesta contraria a la correcta, sin ningún error que lo delate"
+    );
+}
+
+/// E29-H03 · Criterio `missing_frontmatter_pelado_casa_los_que_no_tienen`:
+/// Dado ese mismo workspace, Cuando se consulta `missing(frontmatter)`, Entonces devuelve
+/// exactamente el 1 sin frontmatter.
+#[test]
+fn missing_frontmatter_pelado_casa_los_que_no_tienen() {
+    let ds = ds_con_y_sin_frontmatter();
+
+    assert_eq!(
+        casan(&ds, &parsea("missing(frontmatter)")),
+        vec!["sin-bloque.md"],
+        "`missing(frontmatter)` debe casar solo el documento SIN bloque. Hoy casa los 3, incluidos \
+         los que tienen frontmatter con claves: es la negación de un `has` que siempre es `false`"
+    );
+}
+
+/// E29-H03 · Criterio `has_frontmatter_coincide_con_document_has_frontmatter`:
+/// Dado ese mismo workspace, Cuando se comparan los resultados de `has(frontmatter)` y de
+/// `document.has_frontmatter = true`, Entonces son **el mismo conjunto**.
+///
+/// Es el criterio de invariante #3 —una sola verdad computada— y el que hace la aserción robusta a
+/// cambios futuros en la definición de «tiene frontmatter»: no fija una lista, fija una IGUALDAD
+/// entre el camino corto y el largo. `missing(frontmatter)` se ata simétricamente a `= false`, para
+/// que el arreglo no pueda dejar los dos operadores desacoplados.
+#[test]
+fn has_frontmatter_coincide_con_document_has_frontmatter() {
+    let ds = ds_con_y_sin_frontmatter();
+
+    let camino_largo = casan(&ds, &parsea("document.has_frontmatter = true"));
+    // Guarda de no vacuidad: el camino largo YA responde bien hoy, y responde algo distinto de
+    // «todos» y de «ninguno». Sin esta guarda, un `has` roto podría igualar a un largo también roto.
+    assert_eq!(
+        camino_largo,
+        vec!["con-claves.md", "con-otra-clave.md"],
+        "premisa: `document.has_frontmatter = true` ya distingue hoy los 2 con bloque de los 3 \
+         documentos — es la verdad a la que este criterio ata el camino corto"
+    );
+
+    assert_eq!(
+        casan(&ds, &parsea("has(frontmatter)")),
+        camino_largo,
+        "`has(frontmatter)` y `document.has_frontmatter = true` deben ser EL MISMO conjunto \
+         (invariante #3: la presencia del bloque no se computa dos veces con dos respuestas)"
+    );
+    assert_eq!(
+        casan(&ds, &parsea("missing(frontmatter)")),
+        casan(&ds, &parsea("document.has_frontmatter = false")),
+        "…y `missing(frontmatter)` debe coincidir con `document.has_frontmatter = false`: los dos \
+         operadores se atan a la MISMA verdad, no cada uno a la suya"
+    );
+}
+
+/// E29-H03 · Criterio `has_frontmatter_vacio_coincide_con_el_camino_largo`:
+/// Dado un documento con un frontmatter **vacío** (`---\n---`), Cuando se consulta
+/// `has(frontmatter)`, Entonces el veredicto coincide con el de `document.has_frontmatter` sobre ese
+/// mismo documento, sea cual sea.
+///
+/// Caso límite: el bloque existe pero no tiene claves. La historia **no** inventa una respuesta
+/// propia — se ata a la única verdad existente. Hoy el modelo dice que un bloque vacío SÍ es
+/// frontmatter (`parse_file` rinde `Some(ParsedFrontmatter)` vacío), y el test lo comprueba en vez
+/// de asumirlo, para que si esa definición cambiase el criterio siga diciendo lo correcto.
+#[test]
+fn has_frontmatter_vacio_coincide_con_el_camino_largo() {
+    let ds = DocumentSet::from_files(lodestar_fixtures::file_map(&[
+        ("vacio.md", "---\n---\n\n# Bloque vacío\n"),
+        ("con-claves.md", "---\nstatus: accepted\n---\n\n# Con\n"),
+        ("sin-bloque.md", "# Sin\n\nNi rastro de frontmatter.\n"),
+    ]));
+
+    let largo = eval_en(&ds, "vacio.md", &parsea("document.has_frontmatter = true"));
+    let corto = eval_en(&ds, "vacio.md", &parsea("has(frontmatter)"));
+    assert_eq!(
+        corto, largo,
+        "sobre un bloque VACÍO (`---\\n---`), `has(frontmatter)` debe dar exactamente lo que da \
+         `document.has_frontmatter`: la historia no inventa una tercera respuesta para el borde. \
+         Camino largo = {largo:?}, camino corto = {corto:?}"
+    );
+    assert_eq!(
+        eval_en(&ds, "vacio.md", &parsea("missing(frontmatter)")),
+        largo.map(|v| !v),
+        "y `missing(frontmatter)` es su negación exacta sobre el mismo documento"
+    );
+
+    // Guarda de no vacuidad: los otros dos documentos siguen dando respuestas OPUESTAS entre sí, así
+    // que la igualdad de arriba no se cumple por un `has` degenerado que responda lo mismo a todo.
+    assert_eq!(
+        casan(&ds, &parsea("has(frontmatter)")),
+        casan(&ds, &parsea("document.has_frontmatter = true")),
+        "…y sobre el conjunto entero, corto y largo siguen coincidiendo con el bloque vacío dentro"
+    );
+}
+
+/// E29-H03 · Criterio `has_con_anclaje_y_sufijo_no_cambia` (control anti-vacuo):
+/// Dado una consulta `has(frontmatter.status)` (anclaje **con** sufijo), Cuando se evalúa, Entonces
+/// responde igual que antes del arreglo.
+///
+/// El arreglo toca el camino del anclaje, que es exactamente el que resuelve `frontmatter.<clave>`:
+/// si reconocer el anclaje pelado se llevara por delante el anclaje con sufijo, este test lo vería.
+/// Incluye el caso reservado (`frontmatter.graph.backlinks`, E24-H08), que es el que justifica que
+/// el anclaje exista.
+#[test]
+fn has_con_anclaje_y_sufijo_no_cambia() {
+    let ds = DocumentSet::from_files(lodestar_fixtures::file_map(&[
+        (
+            "a.md",
+            "---\nstatus: draft\ngraph:\n  backlinks: 7\n---\n\n# A\n",
+        ),
+        ("b.md", "# B\n\nSin frontmatter.\n"),
+    ]));
+
+    assert_eq!(
+        eval_en(&ds, "a.md", &parsea("has(frontmatter.status)")),
+        Ok(true),
+        "`has(frontmatter.status)` con la clave presente sigue siendo `true`"
+    );
+    assert_eq!(
+        eval_en(&ds, "a.md", &parsea("has(frontmatter.inventada)")),
+        Ok(false),
+        "…y con una clave que no existe sigue siendo `false`: el anclaje CON sufijo direcciona la \
+         clave, no el bloque"
+    );
+    assert_eq!(
+        eval_en(&ds, "b.md", &parsea("has(frontmatter.status)")),
+        Ok(false),
+        "…y sobre un documento sin bloque tampoco casa"
+    );
+    assert_eq!(
+        eval_en(&ds, "a.md", &parsea("missing(frontmatter.inventada)")),
+        Ok(true),
+        "`missing` con anclaje y sufijo sigue siendo la negación de `has`"
+    );
+    // E24-H08: la clave del usuario llamada como un namespace reservado sigue alcanzándose anclada.
+    assert_eq!(
+        eval_en(&ds, "a.md", &parsea("has(frontmatter.graph.backlinks)")),
+        Ok(true),
+        "el anclaje sobre un namespace reservado (E24-H08) sigue alcanzando la clave del USUARIO: \
+         reconocer el anclaje pelado no puede cortocircuitar el camino que lo justifica"
+    );
+}
+
+/// E29-H03 · Criterio `has_de_clave_y_de_namespace_no_cambia` (control anti-vacuo):
+/// Dado `has(status)` y `has(graph.backlinks)`, Cuando se evalúan, Entonces responden igual que
+/// antes del arreglo.
+///
+/// El resto del operador no se toca: una clave de frontmatter sigue juzgándose por presencia
+/// (`ParsedFrontmatter::get`, con `null`/`""`/`[]` como PRESENTES) y un namespace calculado sigue
+/// existiendo trivialmente para todo documento —incluido uno **sin** frontmatter—, que es lo que la
+/// historia declara fuera de alcance.
+#[test]
+fn has_de_clave_y_de_namespace_no_cambia() {
+    let ds = DocumentSet::from_files(lodestar_fixtures::file_map(&[
+        (
+            "a.md",
+            "---\nstatus: draft\nvacia: \"\"\nnula: null\n---\n\n# A\n",
+        ),
+        ("b.md", "# B\n\nSin frontmatter.\n"),
+    ]));
+
+    assert_eq!(
+        eval_en(&ds, "a.md", &parsea("has(status)")),
+        Ok(true),
+        "una clave real del frontmatter sigue detectándose"
+    );
+    assert_eq!(
+        eval_en(&ds, "a.md", &parsea("has(inventada)")),
+        Ok(false),
+        "…y una que no existe sigue ausente"
+    );
+    assert_eq!(
+        eval_en(&ds, "a.md", &parsea("has(vacia)")),
+        Ok(true),
+        "la cadena vacía sigue contando como valor PRESENTE"
+    );
+    assert_eq!(
+        eval_en(&ds, "a.md", &parsea("has(nula)")),
+        Ok(true),
+        "…y una clave a `null` también"
+    );
+    assert_eq!(
+        eval_en(&ds, "b.md", &parsea("has(status)")),
+        Ok(false),
+        "sobre un documento sin bloque, preguntar por una clave sigue siendo ausencia"
+    );
+    assert_eq!(
+        eval_en(&ds, "a.md", &parsea("has(graph.backlinks)")),
+        Ok(true),
+        "los namespaces calculados siguen existiendo SIEMPRE (fuera de alcance de esta historia)"
+    );
+    assert_eq!(
+        eval_en(&ds, "b.md", &parsea("has(graph.backlinks)")),
+        Ok(true),
+        "…incluido sobre un documento SIN frontmatter: `has(graph.*)` no habla del bloque"
+    );
+    assert_eq!(
+        eval_en(&ds, "b.md", &parsea("has(document.path)")),
+        Ok(true),
+        "…y `document.path` igual"
+    );
+    assert_eq!(
+        eval_en(&ds, "a.md", &parsea("missing(inventada)")),
+        Ok(true),
+        "`missing` de una clave inexistente sigue siendo `true`"
+    );
+}
+
+/// E29-H03 · El `filter` JSON responde lo MISMO que el `where` textual (`§20.10`).
+///
+/// Los dos caminos comparten `parse::build_field_path`, así que el anclaje pelado llega igual por
+/// los dos; esta equivalencia es la que garantiza que arreglar `where` no deje `filter` mintiendo
+/// (el defecto de `§19(a)` es del evaluador, pero la superficie tiene dos puertas).
+#[test]
+fn has_frontmatter_pelado_es_igual_por_where_y_por_filter() {
+    let ds = ds_con_y_sin_frontmatter();
+
+    let por_filter = lodestar_core::filter::from_json(&serde_json::json!({
+        "has": { "field": "frontmatter" }
+    }))
+    .expect("`{\"has\":{\"field\":\"frontmatter\"}}` es un filtro JSON válido (§20.10)");
+
+    assert_eq!(
+        casan(&ds, &por_filter),
+        vec!["con-claves.md", "con-otra-clave.md"],
+        "el `filter` JSON debe casar los mismos 2 documentos con bloque que el `where` textual"
+    );
+    assert_eq!(
+        casan(&ds, &por_filter),
+        casan(&ds, &parsea("has(frontmatter)")),
+        "`where` y `filter` producen el mismo `Expression` y por tanto el mismo conjunto (§20.10): \
+         una sola verdad por las dos puertas del wire"
+    );
+}

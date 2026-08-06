@@ -125,6 +125,7 @@ fn eval_comparison(
 ///
 /// - `document.*` → desde el propio [`EvalDocument`] (ruta/título/existencia de bloque).
 /// - `graph.*` → desde el [`Analysis`] (backlinks/salientes/colgantes/aislamiento).
+/// - `frontmatter` **a secas** → el propio bloque de frontmatter (E29-H03, ver abajo).
 /// - cualquier otro primer segmento → frontmatter (la abreviatura de `frontmatter.` ya se normalizó
 ///   en el parser, `E19-H02`).
 ///
@@ -137,6 +138,24 @@ fn resolver_campo<'a>(
     doc: &EvalDocument<'a>,
     analysis: &'a Analysis,
 ) -> Option<Cow<'a, serde_yaml::Value>> {
+    // E29-H03: el anclaje **pelado** (`frontmatter` a secas) no direcciona ninguna clave: nombra el
+    // BLOQUE. Se reconoce ANTES de desanclar porque `FieldPath::sin_anclaje` devuelve `None` para él
+    // —un `FieldPath` de cero segmentos es inválido por construcción, invariante que sostiene el
+    // dialecto de dot-paths de E26-H09—, y ese `None` lo leía `propiedad_presente` como «propiedad
+    // ausente»: `has(frontmatter)` era `false` para TODO documento y `missing(frontmatter)` `true`,
+    // la respuesta contraria a la correcta y sin error que lo delatase (`decisiones §19(a)`).
+    //
+    // Presente ⇔ el documento tiene bloque, que es **la misma verdad** que sintetiza
+    // `document.has_frontmatter` (`doc.frontmatter.is_some()`, invariante #3: no se computa dos
+    // veces). Se resuelve a `Some(true)` cuando lo hay y a `None` —ausencia— cuando no, de modo que
+    // `has`/`missing` respondan por la vía de existencia que ya existe, sin caso especial propio: un
+    // bloque VACÍO (`---\n---`) rinde `Some(ParsedFrontmatter)` vacío y por tanto cuenta como
+    // presente, exactamente igual que por el camino largo.
+    if field.segments() == [FRONTMATTER_ANCHOR] {
+        return doc
+            .frontmatter
+            .map(|_| Cow::Owned(serde_yaml::Value::Bool(true)));
+    }
     // E24-H08: un path ANCLADO (`frontmatter.<lo que sea>`) va siempre al frontmatter del usuario,
     // aunque su primer segmento coincida con un namespace reservado. El anclaje solo se conserva
     // cuando hace falta desambiguar (lo decide `parse::build_field_path`), así que aquí basta con
@@ -218,6 +237,9 @@ fn valor_conteo(n: usize) -> serde_yaml::Value {
 /// la propiedad como [`QueryValue::String`] (la forma del AST de `§20.8`); se reinterpreta como
 /// [`FieldPath`] (parsea la dot-notation). La existencia se juzga con [`ParsedFrontmatter::get`],
 /// así que una clave a `null`/`""`/`[]` cuenta como **presente**.
+///
+/// `has(frontmatter)` —el anclaje **pelado**— juzga la presencia del **bloque** de frontmatter,
+/// con la misma verdad que `document.has_frontmatter` (E29-H03; la resuelve `resolver_campo`).
 fn eval_function(
     name: FunctionName,
     arguments: &[QueryValue],

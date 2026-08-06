@@ -9304,3 +9304,214 @@ fn mcp_no_arranca_con_config_de_clave_desconocida() {
         String::from_utf8_lossy(&out.stdout)
     );
 }
+
+// ---------------------------------------------------------------------------
+// E29-H03 — `has(frontmatter)` responde la verdad POR EL WIRE.
+// `requirements/epica-29-honestidad-superficie.md §E29-H03` · `decisiones §19(a)` ·
+// `ARCHITECTURE.md §20.8` (la promesa literal: «existencia `has(x)` `missing(x)` (incluido
+// `has(frontmatter)`)») · `CLAUDE.md` invariante #3.
+//
+// La semántica pura la fijan los tests homónimos de `crates/lodestar-core/tests/consulta.rs`. Este
+// es el caso e2e que la historia pide para que la evidencia rojo→verde sea observable **por el
+// wire**, que es como se observó el hallazgo (escribiendo `docs/user/query-language.md` contra
+// `examples/demo/`: `has(frontmatter)` → 0 de 10, `missing(frontmatter)` → 10 de 10, mientras
+// `document.has_frontmatter = true` → 7).
+//
+// SÍNTOMA verificado hoy (v0.5.0) contra el binario real:
+//   knowledge_search {where: "has(frontmatter)"}      -> []            (deberían ser los 2 con bloque)
+//   knowledge_search {where: "missing(frontmatter)"}  -> los 3         (debería ser el 1 sin bloque)
+//
+// ROJO esperado HOY: por ASERCIÓN (ninguna tool nueva, ningún parámetro nuevo, ningún stub).
+// ---------------------------------------------------------------------------
+
+/// Workspace del criterio e2e: 2 documentos **con** bloque de frontmatter y 1 **sin** él, con
+/// cuerpos deliberadamente parecidos para que solo la presencia del bloque los separe. Los dos con
+/// bloque no comparten ninguna clave (`status` vs `owner`): así el veredicto de `has(frontmatter)`
+/// no puede confundirse con el de `has(<una clave concreta>)`.
+fn workspace_con_y_sin_frontmatter() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "con-claves.md",
+        "---\nstatus: accepted\n---\n\n# Con claves\n\ntexto corriente.\n",
+    );
+    write(
+        dir.path(),
+        "con-otra-clave.md",
+        "---\nowner: ana\n---\n\n# Con otra clave\n\ntexto corriente.\n",
+    );
+    write(
+        dir.path(),
+        "sin-bloque.md",
+        "# Sin bloque\n\ntexto corriente.\n",
+    );
+    dir
+}
+
+/// E29-H03 · Criterio `has_frontmatter_pelado_casa_los_documentos_con_frontmatter` (por el wire):
+/// Dado un workspace con 3 documentos, 2 con bloque de frontmatter y 1 sin él, Cuando se llama a
+/// `knowledge_search` con `where: "has(frontmatter)"`, Entonces devuelve exactamente los 2 con
+/// bloque; con `missing(frontmatter)`, exactamente el 1 sin bloque; y los dos conjuntos coinciden
+/// con los de `document.has_frontmatter` (invariante #3: una sola verdad computada, también por el
+/// wire).
+#[test]
+fn has_frontmatter_por_el_wire_casa_los_documentos_con_frontmatter() {
+    let dir = workspace_con_y_sin_frontmatter();
+    let resp = roundtrip(
+        dir.path(),
+        &[
+            ks_call(serde_json::json!({ "where": "has(frontmatter)" })).as_str(),
+            ks_call(serde_json::json!({ "where": "missing(frontmatter)" })).as_str(),
+            ks_call(serde_json::json!({ "where": "document.has_frontmatter = true" })).as_str(),
+            ks_call(serde_json::json!({ "where": "document.has_frontmatter = false" })).as_str(),
+            ks_call(serde_json::json!({ "filter": { "has": { "field": "frontmatter" } } }))
+                .as_str(),
+        ],
+        5,
+    );
+    let conjunto = |i: usize| -> std::collections::BTreeSet<String> {
+        search_paths(&resp[i]).into_iter().collect()
+    };
+    let con_bloque: std::collections::BTreeSet<String> = ["con-claves.md", "con-otra-clave.md"]
+        .into_iter()
+        .map(String::from)
+        .collect();
+    let sin_bloque: std::collections::BTreeSet<String> =
+        ["sin-bloque.md"].into_iter().map(String::from).collect();
+    // Resumen legible de las 5 consultas para los mensajes de fallo: el `resp` crudo son 5
+    // respuestas JSON-RPC completas (con snippets y revisiones) y esconde el dato que importa.
+    let resumen = format!(
+        "has(frontmatter)={:?} · missing(frontmatter)={:?} · document.has_frontmatter=true{:?} \
+         · =false{:?} · filter{{has:frontmatter}}={:?}",
+        conjunto(0),
+        conjunto(1),
+        conjunto(2),
+        conjunto(3),
+        conjunto(4)
+    );
+
+    // Guarda de no vacuidad: el camino LARGO ya responde bien hoy por el wire, y responde algo
+    // distinto de «todos» y de «ninguno». Es la verdad a la que se atan los asserts de abajo.
+    assert_eq!(
+        conjunto(2),
+        con_bloque,
+        "premisa: `document.has_frontmatter = true` ya distingue hoy los 2 documentos con bloque \
+         por el wire. {resumen}"
+    );
+    assert_eq!(
+        conjunto(3),
+        sin_bloque,
+        "premisa simétrica: `document.has_frontmatter = false` devuelve solo el que no lo tiene. \
+         {resumen}"
+    );
+
+    // (a) `has(frontmatter)` casa los que TIENEN bloque.
+    assert_eq!(
+        conjunto(0),
+        con_bloque,
+        "`has(frontmatter)` debe casar los documentos con bloque de frontmatter. Hoy devuelve [] \
+         para todo workspace —el hallazgo de `§19(a)`: 0 de 10 sobre `examples/demo/`—, que es la \
+         respuesta CONTRARIA a la correcta y sin ningún error que lo delate. {resumen}"
+    );
+
+    // (b) `missing(frontmatter)` casa el que NO lo tiene.
+    assert_eq!(
+        conjunto(1),
+        sin_bloque,
+        "`missing(frontmatter)` debe casar solo el documento sin bloque. Hoy casa los 3 (10 de 10 \
+         sobre `examples/demo/`): es la negación de un `has` que siempre es `false`. {resumen}"
+    );
+
+    // (c) Camino corto y camino largo son el MISMO conjunto por el wire (invariante #3).
+    assert_eq!(
+        conjunto(0),
+        conjunto(2),
+        "`has(frontmatter)` y `document.has_frontmatter = true` deben devolver el mismo conjunto \
+         por el wire: la presencia del bloque no se computa dos veces con dos respuestas. {resumen}"
+    );
+    assert_eq!(
+        conjunto(1),
+        conjunto(3),
+        "…y `missing(frontmatter)` con `document.has_frontmatter = false`. {resumen}"
+    );
+
+    // (d) La otra puerta del wire (`filter` JSON, §20.10) responde lo mismo que `where`.
+    assert_eq!(
+        conjunto(4),
+        conjunto(0),
+        "`{{\"has\":{{\"field\":\"frontmatter\"}}}}` por `filter` debe devolver lo mismo que \
+         `has(frontmatter)` por `where`: comparten `build_field_path` y el mismo `Expression`, y la \
+         superficie no puede tener dos verdades según la puerta. {resumen}"
+    );
+}
+
+/// E29-H03 · Control anti-vacuo por el wire: `has()` con anclaje y sufijo, con clave a secas y con
+/// namespace calculado sigue respondiendo lo mismo que antes del arreglo.
+///
+/// El arreglo toca el camino del anclaje —el mismo que resuelve `frontmatter.<clave>`—, así que si
+/// reconocer el anclaje pelado se llevara por delante el resto del operador, este test lo vería por
+/// la misma puerta por la que se observó el defecto. **Verde hoy**, y debe seguirlo estando.
+#[test]
+fn has_con_sufijo_y_de_namespace_no_cambia_por_el_wire() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "con-claves.md",
+        "---\nstatus: accepted\n---\n\n# Con claves\n\ntexto corriente.\n",
+    );
+    write(
+        dir.path(),
+        "sin-bloque.md",
+        "# Sin bloque\n\ntexto corriente.\n",
+    );
+    let resp = roundtrip(
+        dir.path(),
+        &[
+            ks_call(serde_json::json!({ "where": "has(frontmatter.status)" })).as_str(),
+            ks_call(serde_json::json!({ "where": "has(status)" })).as_str(),
+            ks_call(serde_json::json!({ "where": "has(inventada)" })).as_str(),
+            ks_call(serde_json::json!({ "where": "has(graph.backlinks)" })).as_str(),
+        ],
+        4,
+    );
+    let conjunto = |i: usize| -> std::collections::BTreeSet<String> {
+        search_paths(&resp[i]).into_iter().collect()
+    };
+    let solo_con_claves: std::collections::BTreeSet<String> =
+        ["con-claves.md"].into_iter().map(String::from).collect();
+    let ambos: std::collections::BTreeSet<String> = ["con-claves.md", "sin-bloque.md"]
+        .into_iter()
+        .map(String::from)
+        .collect();
+    let resumen = format!(
+        "has(frontmatter.status)={:?} · has(status)={:?} · has(inventada)={:?} \
+         · has(graph.backlinks)={:?}",
+        conjunto(0),
+        conjunto(1),
+        conjunto(2),
+        conjunto(3)
+    );
+
+    assert_eq!(
+        conjunto(0),
+        solo_con_claves,
+        "`has(frontmatter.status)` (anclaje CON sufijo) sigue direccionando la CLAVE, no el bloque. \
+         {resumen}"
+    );
+    assert_eq!(
+        conjunto(1),
+        solo_con_claves,
+        "`has(status)` sin anclaje responde lo mismo que con él (§20.8). {resumen}"
+    );
+    assert!(
+        conjunto(2).is_empty(),
+        "`has(inventada)` sigue sin casar a nadie: una clave ausente es ausencia, no presencia. \
+         {resumen}"
+    );
+    assert_eq!(
+        conjunto(3),
+        ambos,
+        "`has(graph.backlinks)` sigue siendo trivialmente cierto para TODO documento, incluido el \
+         que no tiene frontmatter (fuera de alcance de E29-H03). {resumen}"
+    );
+}
