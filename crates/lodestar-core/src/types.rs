@@ -260,6 +260,16 @@ pub enum CheckCode {
     /// aquello escondía.
     #[serde(rename = "DOC-BOM")]
     DocBom,
+    /// El inventario del workspace quedó **vacío**: ni un solo documento sobrevivió al
+    /// descubrimiento bajo la raíz auditada, ya sea porque no hay ningún `.md` o porque
+    /// `discovery.include`/`discovery.exclude` los excluye a todos. Aviso, no error: un repo
+    /// legítimamente vacío sigue siendo un workspace válido (`§20.1`); el diagnóstico solo hace
+    /// **observable** lo que hoy es indistinguible de un directorio equivocado
+    /// (`decisiones §16(f)`, E29-H06). Severidad `Warn`, intrínseca (`family_of` devuelve `None`,
+    /// como `DOC-NOT-UTF8` y compañía). **Stub del autor de tests de E29-H06**: firma únicamente,
+    /// SIN productor — lo añade la fase verde.
+    #[serde(rename = "WORKSPACE-EMPTY")]
+    WorkspaceEmpty,
 }
 }
 
@@ -278,6 +288,7 @@ impl CheckCode {
             CheckCode::SymlinkUnsupported => "SYMLINK-UNSUPPORTED",
             CheckCode::LinkCaseMismatch => "LINK-CASE-MISMATCH",
             CheckCode::DocBom => "DOC-BOM",
+            CheckCode::WorkspaceEmpty => "WORKSPACE-EMPTY",
         }
     }
 }

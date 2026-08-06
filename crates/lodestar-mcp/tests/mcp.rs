@@ -10102,3 +10102,363 @@ fn has_con_sufijo_y_de_namespace_no_cambia_por_el_wire() {
          que no tiene frontmatter (fuera de alcance de E29-H03). {resumen}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// E29-H05 — `knowledge_check` scope `paths` con un path inexistente responde `DOCUMENT_NOT_FOUND`.
+// `requirements/epica-29-honestidad-superficie.md §E29-H05` · `decisiones §23/A-07` (criterio
+// ratificado: `DOCUMENT_NOT_FOUND`) · `decisiones §22` (principio anti-typo) · `CLAUDE.md`
+// invariante #1.
+//
+// SÍNTOMA (caso G1-23 del testbench homelab): `knowledge_check(scope: {kind: "paths",
+// paths: ["no-existe.md"]})` devuelve 0 diagnósticos SIN error — indistinguible de «ese documento
+// está impecable». Con una lista mixta (`["real.md", "typo.md"]`) el resultado es el de `real.md` a
+// secas: el agente cree haber auditado dos documentos y auditó uno.
+//
+// CAUSA RAÍZ (`crates/lodestar-app/src/lib.rs`, `App::scope_paths`, brazo `CheckScope::Paths`):
+// `Ok(paths.iter().cloned().collect())` — mete los `RelPath` en el conjunto sin comprobar que
+// existan en el inventario. Los brazos `Document`/`Affected` sí resuelven con `self.resolve_ref(…)?`
+// y por eso ya dan `DOCUMENT_NOT_FOUND`.
+//
+// ROJO esperado HOY: por ASERCIÓN (ninguna tool nueva, ningún parámetro nuevo, ningún stub — el
+// brazo `Paths` ya existe, solo le falta la comprobación).
+// ---------------------------------------------------------------------------
+
+/// Workspace mínimo del criterio: un único documento real (`notas/alfa.md`), sin enlaces ni
+/// frontmatter que puedan aportar diagnósticos que confundan la lectura del resultado.
+fn workspace_check_paths() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "notas/alfa.md",
+        "# Alfa\n\nDocumento real, sin enlaces ni frontmatter.\n",
+    );
+    dir
+}
+
+/// Construye la línea JSON-RPC de `knowledge_check` con `scope: {kind: "paths", paths: […]}`.
+fn check_paths_call(paths: &[&str]) -> String {
+    let arguments = serde_json::json!({
+        "scope": { "kind": "paths", "paths": paths }
+    });
+    format!(
+        r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"knowledge_check","arguments":{}}}}}"#,
+        arguments
+    )
+}
+
+/// E29-H05 · Criterio `check_scope_paths_con_path_inexistente_falla`:
+/// Dado un workspace con `notas/alfa.md`, Cuando se llama a `knowledge_check` con
+/// `scope: {kind: "paths", paths: ["notas/no-existe.md"]}`, Entonces la respuesta es un error de
+/// EJECUCIÓN de la tool (`isError`, no un error de protocolo JSON-RPC) con el código estable
+/// `DOCUMENT_NOT_FOUND` que nombra el path — el mismo contrato que ya cumplen los scopes `document`
+/// y `affected`.
+#[test]
+fn check_scope_paths_con_path_inexistente_falla() {
+    let dir = workspace_check_paths();
+    let resp = roundtrip(
+        dir.path(),
+        &[check_paths_call(&["notas/no-existe.md"]).as_str()],
+        1,
+    );
+
+    assert_eq!(
+        resp[0]["result"]["isError"], true,
+        "un scope `paths` con un path inexistente debe dar isError en knowledge_check: {resp:?}"
+    );
+    assert!(
+        resp[0]["error"].is_null(),
+        "un path inexistente en scope.paths NO debe ser un error de protocolo JSON-RPC: {resp:?}"
+    );
+    let texto = resp[0].to_string();
+    assert!(
+        texto.contains("DOCUMENT_NOT_FOUND"),
+        "el error debe exponer el código estable «DOCUMENT_NOT_FOUND»: {resp:?}"
+    );
+    assert!(
+        texto.contains("notas/no-existe.md"),
+        "el mensaje debe NOMBRAR el path que no resolvió (mismo estilo que resolve_ref): {resp:?}"
+    );
+}
+
+/// E29-H05 · Criterio `check_scope_paths_falla_aunque_haya_paths_validos`:
+/// Dado ese mismo workspace, Cuando el scope mezcla un path real (`notas/alfa.md`) y uno inexistente
+/// (`notas/typo.md`), Entonces también falla con `DOCUMENT_NOT_FOUND` — no devuelve el informe
+/// parcial del path real. El síntoma exacto del testbench: con una lista mixta, el agente cree haber
+/// auditado dos documentos y auditó uno.
+#[test]
+fn check_scope_paths_falla_aunque_haya_paths_validos() {
+    let dir = workspace_check_paths();
+    let resp = roundtrip(
+        dir.path(),
+        &[check_paths_call(&["notas/alfa.md", "notas/typo.md"]).as_str()],
+        1,
+    );
+
+    assert_eq!(
+        resp[0]["result"]["isError"], true,
+        "una lista mixta (un path real + uno inexistente) debe fallar entera, no devolver el \
+         informe parcial del real: {resp:?}"
+    );
+    let texto = resp[0].to_string();
+    assert!(
+        texto.contains("DOCUMENT_NOT_FOUND"),
+        "el error debe exponer el código estable «DOCUMENT_NOT_FOUND»: {resp:?}"
+    );
+    assert!(
+        texto.contains("notas/typo.md"),
+        "el mensaje debe nombrar el path inexistente, no el real: {resp:?}"
+    );
+}
+
+/// E29-H05 · Criterio `check_scope_paths_reporta_el_primer_path_inexistente`:
+/// Dado un scope con DOS paths inexistentes, Cuando se llama, Entonces el mensaje nombra el
+/// PRIMERO de la lista recibida (orden determinista de la lista tal cual la envió el cliente, no el
+/// orden de un `BTreeSet`), para que el mensaje sea reproducible y apunte a lo que el agente escribió
+/// primero. `zzz-no-existe.md` ordena DESPUÉS de `aaa-no-existe.md` en orden lexicográfico, así que
+/// si el implementador reportara por orden de `BTreeSet` en vez de por orden de la lista recibida,
+/// este test lo distinguiría.
+#[test]
+fn check_scope_paths_reporta_el_primer_path_inexistente() {
+    let dir = workspace_check_paths();
+    let resp = roundtrip(
+        dir.path(),
+        &[check_paths_call(&["zzz-no-existe.md", "aaa-no-existe.md"]).as_str()],
+        1,
+    );
+
+    assert_eq!(
+        resp[0]["result"]["isError"], true,
+        "dos paths inexistentes deben fallar: {resp:?}"
+    );
+    let texto = resp[0].to_string();
+    assert!(
+        texto.contains("zzz-no-existe.md"),
+        "el mensaje debe nombrar el PRIMERO de la lista recibida («zzz-no-existe.md», pese a \
+         ordenar después de «aaa-no-existe.md» en un BTreeSet): {resp:?}"
+    );
+    assert!(
+        !texto.contains("aaa-no-existe.md"),
+        "el mensaje NO debe nombrar el segundo path inexistente: solo el primero de la lista \
+         recibida se reporta: {resp:?}"
+    );
+}
+
+/// E29-H05 · Criterio `check_scope_paths_trata_lo_excluido_como_inexistente`:
+/// Dado un documento excluido por `.lodestarignore`, Cuando se pide en `scope.paths`, Entonces es
+/// `DOCUMENT_NOT_FOUND` (no está en el inventario) — el mismo criterio que ya aplica `resolve_ref`
+/// para los scopes `document`/`affected`: el inventario es la única verdad de qué documentos hay.
+#[test]
+fn check_scope_paths_trata_lo_excluido_como_inexistente() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "notas/alfa.md",
+        "# Alfa\n\nDocumento real, sin enlaces ni frontmatter.\n",
+    );
+    write(
+        dir.path(),
+        "borradores/wip.md",
+        "# WIP\n\nExcluido por .lodestarignore.\n",
+    );
+    write(dir.path(), ".lodestarignore", "borradores/\n");
+
+    let resp = roundtrip(
+        dir.path(),
+        &[check_paths_call(&["borradores/wip.md"]).as_str()],
+        1,
+    );
+
+    assert_eq!(
+        resp[0]["result"]["isError"], true,
+        "un path excluido por .lodestarignore (fuera del inventario) debe dar DOCUMENT_NOT_FOUND, \
+         no un informe vacío: {resp:?}"
+    );
+    let texto = resp[0].to_string();
+    assert!(
+        texto.contains("DOCUMENT_NOT_FOUND"),
+        "el error debe exponer el código estable «DOCUMENT_NOT_FOUND»: {resp:?}"
+    );
+    assert!(
+        texto.contains("borradores/wip.md"),
+        "el mensaje debe nombrar el path excluido: {resp:?}"
+    );
+}
+
+/// E29-H05 · Criterio `check_scope_paths_valido_sigue_funcionando` (control anti-vacuo):
+/// Dado un scope con paths que TODOS existen, Cuando se llama, Entonces devuelve el informe (sin
+/// error) exactamente como hoy — el rechazo del path inexistente no puede haberse llevado por delante
+/// el caso feliz.
+#[test]
+fn check_scope_paths_valido_sigue_funcionando() {
+    let dir = workspace_check_paths();
+    let resp = roundtrip(
+        dir.path(),
+        &[check_paths_call(&["notas/alfa.md"]).as_str()],
+        1,
+    );
+
+    assert!(
+        resp[0]["result"]["isError"].as_bool() != Some(true),
+        "un scope `paths` con paths que TODOS existen no debe fallar: {resp:?}"
+    );
+    assert!(
+        resp[0]["result"]["structuredContent"]["diagnostics"].is_array(),
+        "el informe debe traer `diagnostics` (array), aunque esté vacío: {resp:?}"
+    );
+    assert_eq!(
+        resp[0]["result"]["structuredContent"]["valid"], true,
+        "el único documento del scope no tiene diagnósticos: el informe debe ser válido: {resp:?}"
+    );
+}
+
+/// E29-H05 · Criterio `check_scope_paths_vacio_no_es_error` (control anti-vacuo del borde):
+/// Dado `scope: {kind: "paths", paths: []}`, Cuando se llama, Entonces devuelve un informe vacío SIN
+/// error — un scope `paths` legítimamente vacío no es lo mismo que un path que no resuelve, y el
+/// rechazo de esta historia no puede confundir los dos casos.
+#[test]
+fn check_scope_paths_vacio_no_es_error() {
+    let dir = workspace_check_paths();
+    let resp = roundtrip(dir.path(), &[check_paths_call(&[]).as_str()], 1);
+
+    assert!(
+        resp[0]["result"]["isError"].as_bool() != Some(true),
+        "un scope `paths` VACÍO no debe ser un error: {resp:?}"
+    );
+    let diagnosticos = resp[0]["result"]["structuredContent"]["diagnostics"]
+        .as_array()
+        .unwrap_or_else(|| panic!("el informe debe traer `diagnostics` (array): {resp:?}"));
+    assert!(
+        diagnosticos.is_empty(),
+        "un scope `paths` vacío no puede aportar ningún diagnóstico: {resp:?}"
+    );
+    assert_eq!(
+        resp[0]["result"]["structuredContent"]["valid"], true,
+        "un scope vacío es trivialmente válido: {resp:?}"
+    );
+}
+
+/// E29-H05 · Control anti-vacuo de la historia hermana: los scopes `document`/`affected` con una
+/// referencia inexistente siguen dando `DOCUMENT_NOT_FOUND` exactamente igual que hoy — la corrección
+/// del scope `paths` no puede haber tocado (ni roto) el camino que ya funcionaba.
+#[test]
+fn check_scope_document_y_affected_siguen_dando_document_not_found() {
+    let dir = workspace_check_paths();
+    let doc_call = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"knowledge_check","arguments":{"scope":{"kind":"document","ref":{"path":"notas/no-existe.md"}}}}}"#;
+    let affected_call = r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"knowledge_check","arguments":{"scope":{"kind":"affected","refs":[{"path":"notas/no-existe.md"}],"depth":1}}}}"#;
+    let resp = roundtrip(dir.path(), &[doc_call, affected_call], 2);
+
+    for (i, nombre) in [(0, "document"), (1, "affected")] {
+        assert_eq!(
+            resp[i]["result"]["isError"], true,
+            "scope `{nombre}` con una ref inexistente debe seguir dando isError: {:?}",
+            resp[i]
+        );
+        let texto = resp[i].to_string();
+        assert!(
+            texto.contains("DOCUMENT_NOT_FOUND"),
+            "scope `{nombre}` debe seguir exponiendo DOCUMENT_NOT_FOUND: {:?}",
+            resp[i]
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// E29-H06 — Un workspace vacío se distingue de un directorio equivocado, POR EL WIRE.
+// `requirements/epica-29-honestidad-superficie.md §E29-H06` · `decisiones §16(f)`.
+//
+// SÍNTOMA: un directorio sin `.md` (o cuya `discovery.include` excluye todo) da
+// `workspace_status`/`knowledge_check` sin ningún aviso — indistinguible de un repo legítimamente
+// vacío en vez de un `cd` al directorio equivocado. Esta sección fija el diagnóstico
+// `WORKSPACE-EMPTY` (severidad `warn`) visible en `knowledge_check(scope: workspace)` por el wire,
+// SIN tumbar `valid`.
+//
+// PUERTA DE DECISIÓN DE ANCLAJE (declarada en la spec, resuelta en la fase roja — ver la nota
+// completa en `crates/lodestar-app/tests/validacion.rs`, sección gemela E29-H06, y en
+// `crates/lodestar-cli/tests/e2e.rs`): `RelPath::new("")` es inválido por diseño (invariante #6 de
+// `CLAUDE.md`, único chokepoint de `RelPath`), así que anclar `WORKSPACE-EMPTY` a la raíz como
+// `target` es INVIABLE. Se elige extender el indexado de `App::full_analysis` para que los
+// diagnósticos sin `target` no se descarten. `knowledge_check` en cambio ya soporta un anchor sin
+// target (usa `check.targets.first()...unwrap_or_default()` sobre un `Vec<(String, Check)>`, no un
+// `BTreeMap<RelPath, _>`), así que estos tests SOLO exigen el efecto observable por el wire: el
+// código `WORKSPACE-EMPTY` presente en `structuredContent.diagnostics`, con severidad `warn` y sin
+// tumbar `valid`.
+//
+// ROJO esperado HOY: por ASERCIÓN (no hay productor de `WORKSPACE-EMPTY` en ninguna parte; el stub
+// de `CheckCode::WorkspaceEmpty` en `lodestar-core::types` es solo la firma, sin lógica).
+// ---------------------------------------------------------------------------
+
+/// Construye la línea JSON-RPC de `knowledge_check(scope: workspace)`.
+fn check_workspace_call() -> String {
+    r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"knowledge_check","arguments":{"scope":{"kind":"workspace"}}}}"#.to_string()
+}
+
+/// E29-H06 · Criterio `knowledge_check_en_workspace_vacio_avisa`:
+/// Dado un directorio temporal SIN ningún `.md`, Cuando se llama a `knowledge_check` scope
+/// `workspace`, Entonces el informe incluye el diagnóstico `WORKSPACE-EMPTY` con severidad `warn` y
+/// `valid` sigue siendo `true`.
+#[test]
+fn knowledge_check_en_workspace_vacio_avisa() {
+    let dir = tempfile::tempdir().unwrap();
+    // Un fichero no-Markdown NO debe cambiar nada: el inventario de documentos sigue vacío.
+    write(dir.path(), "LEEME.txt", "esto no es un documento OKF\n");
+
+    let resp = roundtrip(dir.path(), &[check_workspace_call().as_str()], 1);
+    let diags = check_diagnostics(&resp[0]);
+
+    let workspace_empty: Vec<&serde_json::Value> = diags
+        .iter()
+        .filter(|d| d["code"] == "WORKSPACE-EMPTY")
+        .collect();
+    assert!(
+        !workspace_empty.is_empty(),
+        "knowledge_check(scope: workspace) sobre un directorio sin `.md` debe incluir el \
+         diagnóstico WORKSPACE-EMPTY: {resp:?}"
+    );
+    assert!(
+        workspace_empty.iter().all(|d| d["level"] == "warn"),
+        "WORKSPACE-EMPTY debe ser severidad «warn»: {resp:?}"
+    );
+    assert_eq!(
+        resp[0]["result"]["structuredContent"]["valid"],
+        serde_json::Value::Bool(true),
+        "un workspace vacío SIN otros diagnósticos sigue siendo `valid: true` (el aviso no bloquea \
+         el veredicto): {resp:?}"
+    );
+}
+
+/// E29-H06 · Criterio `workspace_con_todo_excluido_tambien_avisa` (mitad MCP): un directorio CON
+/// `.md` pero cuya `discovery.include` los excluye todos también avisa — «no hay inventario», no
+/// solo «no hay ficheros».
+#[test]
+fn mcp_workspace_con_todo_excluido_tambien_avisa() {
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), "notas/alfa.md", "# Alfa\n\ncontenido real.\n");
+    write(
+        dir.path(),
+        ".lodestar/config.yaml",
+        "discovery:\n  include: [\"solo-esto/**/*.md\"]\n",
+    );
+
+    let resp = roundtrip(dir.path(), &[check_workspace_call().as_str()], 1);
+    let diags = check_diagnostics(&resp[0]);
+
+    assert!(
+        diags.iter().any(|d| d["code"] == "WORKSPACE-EMPTY"),
+        "un `discovery.include` que excluye TODO también debe avisar con WORKSPACE-EMPTY por el \
+         wire: {resp:?}"
+    );
+}
+
+/// E29-H06 · Criterio `workspace_con_documentos_no_avisa` (control anti-vacuo, mitad MCP): un
+/// workspace con AL MENOS un documento no lleva `WORKSPACE-EMPTY` en `knowledge_check`.
+#[test]
+fn mcp_workspace_con_documentos_no_avisa() {
+    let dir = workspace_min();
+    let resp = roundtrip(dir.path(), &[check_workspace_call().as_str()], 1);
+    let diags = check_diagnostics(&resp[0]);
+
+    assert!(
+        !diags.iter().any(|d| d["code"] == "WORKSPACE-EMPTY"),
+        "un workspace con documentos (index.md) NO debe llevar WORKSPACE-EMPTY: {resp:?}"
+    );
+}

@@ -1244,7 +1244,23 @@ impl App {
                 let path = self.resolve_ref(r#ref)?;
                 Ok(std::iter::once(path).collect())
             }
-            CheckScope::Paths { paths } => Ok(paths.iter().cloned().collect()),
+            CheckScope::Paths { paths } => {
+                // E29-H05: cada path debe existir en el inventario, exactamente el mismo criterio
+                // que ya aplican los brazos `Document`/`Affected` vía `resolve_ref` (invariante #3
+                // — una sola verdad de existencia; se reusa en vez de duplicar el predicado). El
+                // primero que no resuelva, en el orden RECIBIDO (no el del `BTreeSet` de salida),
+                // decide el `DOCUMENT_NOT_FOUND`.
+                let mut set: BTreeSet<RelPath> = BTreeSet::new();
+                for path in paths {
+                    let r#ref = DocumentRef {
+                        path: path.clone(),
+                        id: None,
+                    };
+                    let resolved = self.resolve_ref(&r#ref)?;
+                    set.insert(resolved);
+                }
+                Ok(set)
+            }
             CheckScope::Affected { refs, depth } => {
                 let mut set: BTreeSet<RelPath> = BTreeSet::new();
                 for r in refs {

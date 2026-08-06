@@ -230,3 +230,185 @@ fn config_ausente_sigue_cayendo_a_defaults() {
          stderr=\n{stderr}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// E29-H06 — Un workspace vacío se distingue de un directorio equivocado
+// (`requirements/epica-29-honestidad-superficie.md §E29-H06`, `decisiones §16(f)`).
+//
+// Un directorio sin `.md` (o cuya `discovery.include` los excluye todos) daba `lodestar check`
+// exit 0 · VÁLIDO, indistinguible de un repo legítimamente vacío. Esta sección fija el diagnóstico
+// `WORKSPACE-EMPTY` (severidad `warn`) por la fachada CLI, SIN cambiar ningún exit code salvo el
+// que ya dependa de `gate.blockWarnings`.
+//
+// PUERTA DE DECISIÓN DE ANCLAJE: ver la nota completa en
+// `crates/lodestar-app/tests/validacion.rs` (sección gemela E29-H06). Resumen: `RelPath::new("")`
+// es inválido por diseño (invariante #6), así que anclar el diagnóstico a la raíz como `target` es
+// inviable; se elige extender el indexado de `full_analysis` para los diagnósticos sin `target`. La
+// forma concreta de la clave la decide el implementador — estos tests solo exigen el efecto
+// observable: el código aparece en la salida de `lodestar check --json`.
+//
+// ROJO esperado HOY: por ASERCIÓN (no hay productor de `WORKSPACE-EMPTY` en ninguna parte).
+// ---------------------------------------------------------------------------
+
+/// Corre `lodestar check --json` sobre `dir` y devuelve `(exit code, JSON de stdout)`.
+fn check_json(dir: &Path) -> (i32, serde_json::Value) {
+    let out = bin()
+        .arg("--path")
+        .arg(dir)
+        .args(["check", "--json"])
+        .output()
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap_or_else(|e| {
+        panic!(
+            "`check --json` debe emitir JSON válido por stdout ({e}); stdout=\n{}\nstderr=\n{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        )
+    });
+    (out.status.code().unwrap(), v)
+}
+
+/// Los códigos de todos los diagnósticos que viajan en `diagnostics` del `check --json`
+/// (`{path: [Check]}`), aplanados.
+fn codigos_del_json(v: &serde_json::Value) -> Vec<String> {
+    v["diagnostics"]
+        .as_object()
+        .map(|m| {
+            m.values()
+                .filter_map(serde_json::Value::as_array)
+                .flatten()
+                .filter_map(|c| c["code"].as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// **Criterio `check_en_workspace_vacio_avisa_con_exit_0`**: **Dado** un directorio temporal sin
+/// ningún `.md`, **Cuando** se ejecuta `lodestar check`, **Entonces** el exit code sigue siendo `0`
+/// y la salida (`--json`) incluye un aviso `WORKSPACE-EMPTY`.
+///
+/// Un fichero no-Markdown en el directorio (`LEEME.txt`) prueba que el aviso depende del inventario
+/// de DOCUMENTOS, no de si el directorio está vacío a secas.
+#[test]
+fn check_en_workspace_vacio_avisa_con_exit_0() {
+    let dir = temp_dir("vacio");
+    write(dir.path(), "LEEME.txt", "esto no es un documento OKF\n");
+
+    let (code, json) = check_json(dir.path());
+    let codigos = codigos_del_json(&json);
+    assert_eq!(
+        code, 0,
+        "un workspace vacío SIN otros diagnósticos debe seguir pasando la puerta de CI (exit 0): \
+         json={json}"
+    );
+    assert!(
+        codigos.iter().any(|c| c == "WORKSPACE-EMPTY"),
+        "`lodestar check --json` sobre un directorio sin `.md` debe incluir el aviso \
+         WORKSPACE-EMPTY: códigos vistos = {codigos:?}, json={json}"
+    );
+}
+
+/// **Criterio `workspace_con_todo_excluido_tambien_avisa`** (mitad CLI): un directorio **con** `.md`
+/// pero cuya `discovery.include` los excluye todos también avisa — el caso engañoso no es solo «no
+/// hay ficheros», es «no hay inventario».
+#[test]
+fn cli_workspace_con_todo_excluido_tambien_avisa() {
+    let dir = temp_dir("todo-excluido");
+    write(dir.path(), "notas/alfa.md", "# Alfa\n\ncontenido real.\n");
+    write(
+        dir.path(),
+        ".lodestar/config.yaml",
+        "discovery:\n  include: [\"solo-esto/**/*.md\"]\n",
+    );
+
+    let (code, json) = check_json(dir.path());
+    let codigos = codigos_del_json(&json);
+    assert_eq!(
+        code, 0,
+        "el aviso no debe cambiar el exit code por sí solo: json={json}"
+    );
+    assert!(
+        codigos.iter().any(|c| c == "WORKSPACE-EMPTY"),
+        "un `discovery.include` que excluye TODO también debe avisar con WORKSPACE-EMPTY: \
+         códigos vistos = {codigos:?}, json={json}"
+    );
+}
+
+/// **Criterio `workspace_con_documentos_no_avisa`** (control anti-vacuo, mitad CLI): un workspace
+/// con al menos un documento no lleva `WORKSPACE-EMPTY` en la salida de `lodestar check --json`.
+#[test]
+fn cli_workspace_con_documentos_no_avisa() {
+    let dir = temp_dir("con-documentos");
+    write(dir.path(), "beta.md", CONCEPT_B);
+
+    let (code, json) = check_json(dir.path());
+    let codigos = codigos_del_json(&json);
+    assert_eq!(code, 0, "el workspace es conforme: json={json}");
+    assert!(
+        !codigos.iter().any(|c| c == "WORKSPACE-EMPTY"),
+        "un workspace con documentos NO debe llevar WORKSPACE-EMPTY: códigos vistos = {codigos:?}, \
+         json={json}"
+    );
+}
+
+/// **Criterio `el_aviso_de_vacio_lo_ven_las_dos_fachadas`**: la salida de `lodestar check --json`
+/// sobre un workspace vacío y la de `knowledge_check(scope: workspace)` (llamado en proceso, vía
+/// `lodestar-app`, sobre el MISMO directorio) contienen las DOS el diagnóstico `WORKSPACE-EMPTY`
+/// (invariante #3: una sola verdad computada).
+#[test]
+fn el_aviso_de_vacio_lo_ven_las_dos_fachadas() {
+    let dir = temp_dir("dos-fachadas");
+
+    let (code, json) = check_json(dir.path());
+    assert_eq!(code, 0, "workspace vacío: sigue siendo exit 0: json={json}");
+    let codigos_cli = codigos_del_json(&json);
+    assert!(
+        codigos_cli.iter().any(|c| c == "WORKSPACE-EMPTY"),
+        "`lodestar check --json` debe llevar WORKSPACE-EMPTY: códigos vistos = {codigos_cli:?}"
+    );
+
+    let app = lodestar_app::App::open(dir.path()).expect("el workspace temporal debe abrir");
+    let report = app
+        .knowledge_check(
+            &lodestar_app::CheckScope::Workspace,
+            Some(lodestar_core::types::Severity::Info),
+            false,
+            Some(1000),
+            None,
+        )
+        .expect("knowledge_check(workspace) debe responder");
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|c| c.code == lodestar_core::types::CheckCode::WorkspaceEmpty),
+        "`knowledge_check(scope: workspace)` sobre el MISMO directorio también debe llevar \
+         WORKSPACE-EMPTY: diagnósticos = {:?}",
+        report
+            .diagnostics
+            .iter()
+            .map(|c| c.code.as_str())
+            .collect::<Vec<_>>()
+    );
+}
+
+/// **Criterio `el_aviso_de_vacio_respeta_block_warnings`** (mitad CLI): con
+/// `gate.blockWarnings: true`, `lodestar check` sobre un workspace vacío sale `1` — por la
+/// POLÍTICA del usuario, no porque el aviso en sí bloquee.
+#[test]
+fn el_aviso_de_vacio_respeta_block_warnings() {
+    let dir = temp_dir("vacio-block-warnings");
+    write(
+        dir.path(),
+        ".lodestar/config.yaml",
+        "gate:\n  blockWarnings: true\n",
+    );
+
+    assert_eq!(
+        run(dir.path(), &["check"]),
+        1,
+        "con `gate.blockWarnings: true`, un workspace vacío (que SOLO tiene el aviso \
+         WORKSPACE-EMPTY) debe bloquear la puerta de CI: si WORKSPACE-EMPTY no cuenta como `warn` \
+         en el `Analysis`, `gate_blocked` no lo ve y este exit sigue siendo 0"
+    );
+}

@@ -56,7 +56,7 @@ use std::path::Path;
 
 use lodestar_app::{App, CheckReport, CheckScope};
 use lodestar_core::plan::PlanPolicy;
-use lodestar_core::types::{CheckCode, ErrorCode, Severity};
+use lodestar_core::types::{CheckCode, ErrorCode, RelPath, Severity};
 use serde_json::{json, Value};
 
 // ---------------------------------------------------------------------------
@@ -535,5 +535,419 @@ fn full_analysis_aplica_la_politica_de_validacion() {
         "`full_analysis` debe aplicar la misma política de severidad que `knowledge_check` \
          (`ValidationSection::effective_severity`): con las dos familias a `ignore` no puede quedar \
          ningún diagnóstico de error. Errores encontrados: {errores:?}"
+    );
+}
+
+// ===========================================================================
+// E29-H05 — `knowledge_check` scope `paths` con un path inexistente responde `DOCUMENT_NOT_FOUND`
+// (`requirements/epica-29-honestidad-superficie.md §E29-H05`, `decisiones §23/A-07`).
+//
+// Mitad de servicio (sin levantar proceso MCP) del criterio que `crates/lodestar-mcp/tests/mcp.rs`
+// ejerce por el wire. Causa raíz: `App::scope_paths` (`crates/lodestar-app/src/lib.rs`, brazo
+// `CheckScope::Paths`) es `Ok(paths.iter().cloned().collect())` — no comprueba que cada path exista
+// en `analysis.documents`, a diferencia de los brazos `Document`/`Affected`, que resuelven con
+// `self.resolve_ref(…)?`.
+//
+// ROJO esperado HOY: por ASERCIÓN (ningún stub — el brazo `Paths` ya existe y compila).
+// ===========================================================================
+
+/// `RelPath` de conveniencia para construir el argumento `paths` de `CheckScope::Paths`.
+fn rp(p: &str) -> RelPath {
+    RelPath::new(p).unwrap()
+}
+
+/// Workspace mínimo: un único documento real, sin enlaces ni frontmatter.
+fn app_con_un_documento() -> (tempfile::TempDir, App) {
+    let dir = tempfile::tempdir().unwrap();
+    escribe(
+        dir.path(),
+        "notas/alfa.md",
+        "# Alfa\n\nDocumento real, sin enlaces ni frontmatter.\n",
+    );
+    let app = App::open(dir.path()).expect("el workspace temporal debe abrir");
+    (dir, app)
+}
+
+/// `check_scope_paths_con_path_inexistente_falla` (mitad de servicio): **Dado** un workspace con
+/// `notas/alfa.md`, **Cuando** se llama a `knowledge_check` con `scope: paths{["notas/no-existe.md"]}`,
+/// **Entonces** `Err(ErrorCode::DocumentNotFound)` que nombra el path.
+#[test]
+fn check_scope_paths_con_path_inexistente_falla() {
+    let (_dir, app) = app_con_un_documento();
+    let scope = CheckScope::Paths {
+        paths: vec![rp("notas/no-existe.md")],
+    };
+    let resultado = app.knowledge_check(&scope, Some(Severity::Info), false, None, None);
+    let err = resultado.expect_err(
+        "un scope `paths` con un path inexistente debe fallar, no devolver un informe vacío",
+    );
+    assert_eq!(
+        err.code,
+        ErrorCode::DocumentNotFound,
+        "el código debe ser DOCUMENT_NOT_FOUND, era {} ({err:?})",
+        err.code.as_str()
+    );
+    assert!(
+        err.message.contains("notas/no-existe.md"),
+        "el mensaje debe nombrar el path que no resolvió: {err:?}"
+    );
+}
+
+/// `check_scope_paths_falla_aunque_haya_paths_validos` (mitad de servicio): una lista mixta (un path
+/// real + uno inexistente) falla entera — no devuelve el informe parcial del real.
+#[test]
+fn check_scope_paths_falla_aunque_haya_paths_validos() {
+    let (_dir, app) = app_con_un_documento();
+    let scope = CheckScope::Paths {
+        paths: vec![rp("notas/alfa.md"), rp("notas/typo.md")],
+    };
+    let err = app
+        .knowledge_check(&scope, Some(Severity::Info), false, None, None)
+        .expect_err(
+            "una lista mixta con al menos un path inexistente debe fallar entera, no devolver el \
+             informe parcial del path real",
+        );
+    assert_eq!(err.code, ErrorCode::DocumentNotFound, "era {err:?}");
+    assert!(
+        err.message.contains("notas/typo.md"),
+        "el mensaje debe nombrar el path inexistente, no el real: {err:?}"
+    );
+}
+
+/// `check_scope_paths_reporta_el_primer_path_inexistente` (mitad de servicio): con dos paths
+/// inexistentes, el mensaje nombra el PRIMERO de la lista recibida, no el que ordenaría antes en un
+/// `BTreeSet`.
+#[test]
+fn check_scope_paths_reporta_el_primer_path_inexistente() {
+    let (_dir, app) = app_con_un_documento();
+    let scope = CheckScope::Paths {
+        paths: vec![rp("zzz-no-existe.md"), rp("aaa-no-existe.md")],
+    };
+    let err = app
+        .knowledge_check(&scope, Some(Severity::Info), false, None, None)
+        .expect_err("dos paths inexistentes deben fallar");
+    assert_eq!(err.code, ErrorCode::DocumentNotFound, "era {err:?}");
+    assert!(
+        err.message.contains("zzz-no-existe.md"),
+        "el mensaje debe nombrar el PRIMERO de la lista recibida: {err:?}"
+    );
+    assert!(
+        !err.message.contains("aaa-no-existe.md"),
+        "el mensaje NO debe nombrar el segundo path inexistente: {err:?}"
+    );
+}
+
+/// `check_scope_paths_trata_lo_excluido_como_inexistente` (mitad de servicio): un path excluido por
+/// `.lodestarignore` no está en el inventario y por tanto cuenta como inexistente — mismo criterio
+/// que ya aplica `resolve_ref`.
+#[test]
+fn check_scope_paths_trata_lo_excluido_como_inexistente() {
+    let dir = tempfile::tempdir().unwrap();
+    escribe(
+        dir.path(),
+        "notas/alfa.md",
+        "# Alfa\n\nDocumento real, sin enlaces ni frontmatter.\n",
+    );
+    escribe(
+        dir.path(),
+        "borradores/wip.md",
+        "# WIP\n\nExcluido por .lodestarignore.\n",
+    );
+    escribe(dir.path(), ".lodestarignore", "borradores/\n");
+    let app = App::open(dir.path()).expect("el workspace temporal debe abrir");
+
+    let scope = CheckScope::Paths {
+        paths: vec![rp("borradores/wip.md")],
+    };
+    let err = app
+        .knowledge_check(&scope, Some(Severity::Info), false, None, None)
+        .expect_err(
+            "un path excluido por .lodestarignore (fuera del inventario) debe dar \
+             DOCUMENT_NOT_FOUND, no un informe vacío",
+        );
+    assert_eq!(err.code, ErrorCode::DocumentNotFound, "era {err:?}");
+    assert!(
+        err.message.contains("borradores/wip.md"),
+        "el mensaje debe nombrar el path excluido: {err:?}"
+    );
+}
+
+/// `check_scope_paths_valido_sigue_funcionando` (control anti-vacuo, mitad de servicio): un scope
+/// con paths que TODOS existen sigue funcionando exactamente como hoy.
+#[test]
+fn check_scope_paths_valido_sigue_funcionando() {
+    let (_dir, app) = app_con_un_documento();
+    let scope = CheckScope::Paths {
+        paths: vec![rp("notas/alfa.md")],
+    };
+    let report = app
+        .knowledge_check(&scope, Some(Severity::Info), false, None, None)
+        .expect("un scope `paths` con paths que TODOS existen no debe fallar");
+    assert!(
+        report.valid,
+        "el único documento del scope no tiene diagnósticos: el informe debe ser válido: {}",
+        resumen(&report)
+    );
+}
+
+/// `check_scope_paths_vacio_no_es_error` (control anti-vacuo del borde, mitad de servicio): un
+/// scope `paths` vacío sigue devolviendo un informe vacío sin error.
+#[test]
+fn check_scope_paths_vacio_no_es_error() {
+    let (_dir, app) = app_con_un_documento();
+    let scope = CheckScope::Paths { paths: vec![] };
+    let report = app
+        .knowledge_check(&scope, Some(Severity::Info), false, None, None)
+        .expect("un scope `paths` VACÍO no debe ser un error");
+    assert!(
+        report.diagnostics.is_empty(),
+        "un scope `paths` vacío no puede aportar ningún diagnóstico: {}",
+        resumen(&report)
+    );
+    assert!(report.valid, "un scope vacío es trivialmente válido");
+}
+
+// ===========================================================================
+// E29-H06 — Workspace vacío: aviso `WORKSPACE-EMPTY` en vez de silencio
+// (`requirements/epica-29-honestidad-superficie.md §E29-H06`, `decisiones §16(f)`).
+//
+// Mitad de análisis (sin binario ni proceso MCP): fija que `App::full_analysis()` —el punto que
+// alimenta `lodestar check`— y `App::knowledge_check(scope: workspace)` publican el MISMO
+// diagnóstico `WORKSPACE-EMPTY` cuando el inventario queda vacío, con severidad `Warn` y sin tocar
+// el veredicto `valid`/`hard_fail` (invariante #3: una sola verdad computada).
+//
+// PUERTA DE DECISIÓN DE ANCLAJE (declarada en la spec, resuelta aquí): un `WORKSPACE-EMPTY` no
+// describe un fichero, así que no tiene `target`. La spec propone dos resoluciones y deja que la
+// fase roja elija:
+//   (a) anclarlo a la RAÍZ como target, si existe un `RelPath` válido para ella;
+//   (b) extender el indexado de `full_analysis` (`lib.rs` ~L1306-1316) para los diagnósticos SIN
+//       target, que hoy se descartan con `let Some(anchor) = check.targets.first().cloned() else
+//       { continue; }`.
+//
+// Verificado en código: `RelPath::new("")` es un `Err` explícito (types.rs, «rechaza… la cadena
+// vacía»), y la raíz del workspace no tiene ningún segmento relativo a sí misma que sobreviva a
+// `from_segments` (todo `""`/"."` se descarta antes de comprobar `parts.is_empty()`). La opción (a)
+// es por tanto INVIABLE sin relajar el invariante #6 (chokepoint de `RelPath`), que la propia
+// historia prohíbe tocar. **Se elige la opción (b)**: `full_analysis` deja de descartar los
+// diagnósticos de descubrimiento sin `target`. La forma concreta de la clave con la que entran en
+// `Analysis::diagnostics: BTreeMap<RelPath, Vec<Check>>` la decide el implementador (p. ej. una
+// clave sentinela estable); estos tests NO la asumen — solo exigen el efecto observable: que el
+// código `WORKSPACE-EMPTY` esté presente en `analysis.diagnostics.values().flatten()` y en
+// `report.diagnostics`, por las DOS fachadas.
+//
+// ROJO esperado HOY: por ASERCIÓN. No hay productor de `WORKSPACE-EMPTY` en ninguna parte (el
+// stub de `CheckCode::WorkspaceEmpty` es solo la firma, sin lógica), así que la búsqueda del
+// código en los diagnósticos falla siempre.
+// ===========================================================================
+
+/// Workspace temporal sin ni un solo `.md`: el caso más simple del síntoma.
+fn app_vacio() -> (tempfile::TempDir, App) {
+    let dir = tempfile::tempdir().unwrap();
+    // Un fichero que NO es Markdown no debe cambiar nada: el inventario de documentos sigue vacío.
+    escribe(dir.path(), "LEEME.txt", "esto no es un documento OKF\n");
+    let app = App::open(dir.path())
+        .expect("un directorio sin `.md` sigue siendo workspace válido (§20.1)");
+    (dir, app)
+}
+
+/// Busca `WORKSPACE-EMPTY` en `analysis.diagnostics` (indexados por lo que decida el implementador
+/// para la clave sin target — ver la nota de anclaje arriba): recorre TODOS los valores del mapa,
+/// no una clave concreta.
+fn tiene_workspace_empty(analysis: &lodestar_core::types::Analysis) -> bool {
+    analysis
+        .diagnostics
+        .values()
+        .flatten()
+        .any(|c| c.code == CheckCode::WorkspaceEmpty)
+}
+
+/// `full_analysis_de_workspace_vacio_avisa` (mitad de servicio del criterio
+/// `check_en_workspace_vacio_avisa_con_exit_0`): **Dado** un workspace sin ningún `.md`, **Cuando**
+/// se pide `App::full_analysis()`, **Entonces** el `Analysis` contiene un diagnóstico
+/// `WORKSPACE-EMPTY` de severidad `Warn`, y el veredicto (`hard_fail() == 0`) no cambia.
+#[test]
+fn full_analysis_de_workspace_vacio_avisa() {
+    let (_dir, app) = app_vacio();
+
+    let analysis = app
+        .full_analysis()
+        .expect("full_analysis debe computar el análisis de un workspace vacío sin error");
+
+    assert!(
+        analysis.documents.is_empty(),
+        "precondición: el inventario debe estar vacío de verdad (0 documentos), o el test no \
+         prueba el síntoma de la historia"
+    );
+    assert!(
+        tiene_workspace_empty(&analysis),
+        "un workspace con 0 documentos debe llevar el diagnóstico WORKSPACE-EMPTY en \
+         `full_analysis` (el punto que alimenta `lodestar check`): diagnósticos vistos = {:?}",
+        analysis
+            .diagnostics
+            .values()
+            .flatten()
+            .map(|c| c.code.as_str())
+            .collect::<Vec<_>>()
+    );
+    let severidad = analysis
+        .diagnostics
+        .values()
+        .flatten()
+        .find(|c| c.code == CheckCode::WorkspaceEmpty)
+        .map(|c| c.level);
+    assert_eq!(
+        severidad,
+        Some(Severity::Warn),
+        "WORKSPACE-EMPTY debe ser un AVISO, no un error: un repo vacío sigue siendo válido (§20.1)"
+    );
+    assert_eq!(
+        analysis.hard_fail(),
+        0,
+        "el aviso NO puede convertirse en hard-fail: el exit code de `lodestar check` sobre un \
+         workspace vacío debe seguir siendo 0"
+    );
+}
+
+/// `knowledge_check_de_workspace_vacio_avisa` (mitad de servicio del criterio
+/// `knowledge_check_en_workspace_vacio_avisa`): el mismo diagnóstico, visible por
+/// `App::knowledge_check(scope: workspace)`, sin tumbar `report.valid`.
+#[test]
+fn knowledge_check_de_workspace_vacio_avisa() {
+    let (_dir, app) = app_vacio();
+
+    let report = check_workspace(&app);
+
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|c| c.code == CheckCode::WorkspaceEmpty),
+        "knowledge_check(scope: workspace) sobre un inventario vacío debe reportar \
+         WORKSPACE-EMPTY: {}",
+        resumen(&report)
+    );
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .find(|c| c.code == CheckCode::WorkspaceEmpty)
+            .is_some_and(|c| c.level == Severity::Warn),
+        "el diagnóstico debe ser Warn: {}",
+        resumen(&report)
+    );
+    assert!(
+        report.valid,
+        "un workspace vacío SIN otros diagnósticos sigue siendo `valid: true`: el aviso no puede \
+         tumbar el veredicto: {}",
+        resumen(&report)
+    );
+}
+
+/// `workspace_con_todo_excluido_tambien_avisa` (mitad de servicio): un workspace CON `.md` pero
+/// cuya `discovery.include` los excluye a todos es el mismo caso engañoso — «no hay inventario», no
+/// solo «no hay ficheros» — y también debe avisar.
+#[test]
+fn workspace_con_todo_excluido_tambien_avisa() {
+    let dir = tempfile::tempdir().unwrap();
+    escribe(dir.path(), "notas/alfa.md", "# Alfa\n\ncontenido real.\n");
+    // `include` restrictivo: solo casaría con una carpeta que no existe. `alfa.md` sobrevive al
+    // descubrimiento (existe, es `.md`) pero el filtro `include` lo descarta del inventario.
+    escribe(
+        dir.path(),
+        ".lodestar/config.yaml",
+        "discovery:\n  include: [\"solo-esto/**/*.md\"]\n",
+    );
+    let app = App::open(dir.path()).expect("el workspace temporal debe abrir");
+
+    let analysis = app
+        .full_analysis()
+        .expect("full_analysis debe computar el análisis de un workspace con todo excluido");
+    assert!(
+        analysis.documents.is_empty(),
+        "precondición: con `include` restrictivo el inventario de DOCUMENTOS debe quedar vacío, \
+         aunque el `.md` exista en disco"
+    );
+    assert!(
+        tiene_workspace_empty(&analysis),
+        "un `discovery.include` que excluye TODO también es un inventario vacío y debe avisar \
+         (el caso engañoso no es solo «no hay ficheros»): diagnósticos vistos = {:?}",
+        analysis
+            .diagnostics
+            .values()
+            .flatten()
+            .map(|c| c.code.as_str())
+            .collect::<Vec<_>>()
+    );
+}
+
+/// `workspace_con_documentos_no_avisa` (control anti-vacuo, mitad de servicio): un workspace con AL
+/// MENOS un documento no lleva `WORKSPACE-EMPTY`, ni en `full_analysis` ni en `knowledge_check`.
+#[test]
+fn workspace_con_documentos_no_avisa() {
+    let (_dir, app) = app_con_un_documento();
+
+    let analysis = app
+        .full_analysis()
+        .expect("full_analysis debe computar el análisis de un workspace con documentos");
+    assert!(
+        !analysis.documents.is_empty(),
+        "precondición: el workspace debe tener al menos un documento"
+    );
+    assert!(
+        !tiene_workspace_empty(&analysis),
+        "un workspace con documentos NO debe llevar WORKSPACE-EMPTY (full_analysis): {:?}",
+        analysis
+            .diagnostics
+            .values()
+            .flatten()
+            .map(|c| c.code.as_str())
+            .collect::<Vec<_>>()
+    );
+
+    let report = check_workspace(&app);
+    assert!(
+        !report
+            .diagnostics
+            .iter()
+            .any(|c| c.code == CheckCode::WorkspaceEmpty),
+        "un workspace con documentos NO debe llevar WORKSPACE-EMPTY (knowledge_check): {}",
+        resumen(&report)
+    );
+}
+
+/// `el_aviso_de_vacio_respeta_block_warnings` (mitad de servicio): con `gate.blockWarnings: true`,
+/// el `Analysis` de un workspace vacío debe contar como aviso a efectos de la puerta configurable
+/// (`WorkspaceConfig::gate_blocked`) — la interacción que la historia declara explícitamente para
+/// que no quede a interpretación de quien la descubra.
+#[test]
+fn el_aviso_de_vacio_respeta_block_warnings() {
+    let dir = tempfile::tempdir().unwrap();
+    escribe(
+        dir.path(),
+        ".lodestar/config.yaml",
+        "gate:\n  blockWarnings: true\n",
+    );
+    let app = App::open(dir.path()).expect("el workspace temporal debe abrir");
+
+    let analysis = app
+        .full_analysis()
+        .expect("full_analysis debe computar el análisis de un workspace vacío con blockWarnings");
+    assert!(
+        analysis.documents.is_empty(),
+        "precondición: el inventario debe estar vacío"
+    );
+    assert_eq!(
+        analysis.hard_fail(),
+        0,
+        "el aviso en sí NO es un hard-fail: si esto no fuera 0, el bloqueo vendría del aviso \
+         mismo, no de la política del usuario"
+    );
+    assert!(
+        app.workspace().config().gate_blocked(&analysis),
+        "con `gate.blockWarnings: true` un workspace vacío (que SOLO tiene el aviso \
+         WORKSPACE-EMPTY) debe bloquear la puerta por la POLÍTICA del usuario, no por el aviso en \
+         sí — que es justo el criterio `el_aviso_de_vacio_respeta_block_warnings` de la historia. \
+         Si WORKSPACE-EMPTY no cuenta como Warn en `analysis.diagnostics`, `gate_blocked` no lo ve \
+         y este assert falla."
     );
 }
