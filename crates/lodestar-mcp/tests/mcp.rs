@@ -7365,6 +7365,306 @@ fn type_error_de_lista_tambien_es_error_de_consulta() {
 }
 
 // ---------------------------------------------------------------------------
+// E29-H04 — `starts_with`/`ends_with` sobre un campo no-string es TYPE ERROR (por el wire)
+//
+// `requirements/epica-29-honestidad-superficie.md §E29-H04` · `decisiones §23/A-04` (criterio
+// **ratificado por el usuario el 2026-08-06**) · caso **G1-20** del testbench homelab
+// (`docs/qa/informe-homelab-2026-08-06.md §3`), que es como se observó el hallazgo: por el wire.
+//
+// SÍNTOMA medido hoy (v0.5.0) sobre un workspace con `priority: 3` (número):
+//   · `knowledge_search {where: "priority starts_with \"3\""}` → `{"results": [], …}` **sin error**;
+//   · `change_plan {selection: {where: <lo mismo>}}` → un plan con `normalizedOperations: []`,
+//     `impact.affectedCount: 0` y **`canApply: true`**, presentado como un plan legítimo.
+// En el homelab eran 7 documentos con `priority: 3` desapareciendo de la respuesta sin un aviso.
+//
+// CAUSA: `core::eval::eval_afijo` devuelve `bool` (no `Result`), así que un campo no-string es
+// `false` y cae en el mismo `continue` que «no casa» — el defecto que E26-H08 cerró para el ORDEN,
+// abierto todavía para los dos operadores de afijo.
+//
+// LO QUE ESTOS TESTS FIJAN, y por qué aquí y no solo en el core: el criterio de la historia es que el
+// error llegue al agente por las DOS superficies que evalúan consultas, con el `INVALID_SCHEMA` del
+// catálogo (no hay código nuevo) y con un mensaje que nombre campo, operador y tipo hallado —el
+// mismo contrato de redacción que `juzga_error_de_tipo` ya exige para `OrderNotDefined`—, y que en
+// `change_plan` **aborte el plan** en vez de reducir la selección en silencio (coherencia con
+// E26-H08). El core solo puede probar que el evaluador yerra; que ese `Err` no se pierda entre el
+// evaluador y el wire solo se ve desde aquí.
+//
+// ROJO esperado HOY: por ASERCIÓN (`error_de` devuelve `None` porque la respuesta es un éxito).
+// ---------------------------------------------------------------------------
+
+/// La consulta del caso **G1-20**: operador de afijo sobre un campo numérico.
+const AFIJO_SOBRE_NUMERO: &str = "priority starts_with \"3\"";
+
+/// Grafías admisibles del tipo `list` en el mensaje (las de `GRAFIAS_NUMBER`/`GRAFIAS_STRING`, para
+/// el criterio de la lista).
+const GRAFIAS_LIST: &[&str] = &["list", "lista", "array", "secuencia", "sequence"];
+
+/// Juzga el error de un type error de **afijo**: código estable + mensaje que permita CORREGIR la
+/// consulta (campo, operador y el tipo real del campo). Es el gemelo de `juzga_error_de_tipo`, con
+/// el tipo esperado parametrizado porque el defecto se manifiesta sobre varias familias.
+fn juzga_error_de_afijo(err: &str, campo: &str, operador: &str, grafias: &[&str], contexto: &str) {
+    assert_eq!(
+        codigo_de(err),
+        "INVALID_SCHEMA",
+        "un type error de afijo es el MISMO tipo de fallo que el del orden y usa el MISMO código del \
+         catálogo —la historia no abre `ErrorCode` ({contexto})—: «{err}»"
+    );
+    let (_, mensaje) = codigo_y_mensaje(err)
+        .unwrap_or_else(|| panic!("{contexto} debe emitir «CÓDIGO: mensaje» (E26-H07): «{err}»"));
+    let bajo = mensaje.to_lowercase();
+    assert!(
+        menciona(&bajo, campo),
+        "el mensaje debe NOMBRAR el campo que choca ({contexto}): «{err}»"
+    );
+    assert!(
+        nombra_tipo(mensaje, grafias),
+        "…y el tipo REAL que el campo tiene en el documento, que es lo que le dice al agente por qué \
+         su operador de texto no aplica ({contexto}): «{err}»"
+    );
+    assert!(
+        menciona(&bajo, operador),
+        "…y el operador exacto: `starts_with` y `ends_with` fallan por la misma razón pero el agente \
+         corrige uno u otro ({contexto}): «{err}»"
+    );
+}
+
+/// Workspace del caso **G1-20**: `priority` numérico en dos documentos y **textual** en un tercero,
+/// más un `tags` lista.
+///
+/// La heterogeneidad es la que hace grave el defecto y discriminante el test: hoy
+/// `priority starts_with "3"` NO devuelve la lista vacía, devuelve `["z-textual.md"]` — una respuesta
+/// recortada y perfectamente creíble. `a-numerico.md` va primero en el orden total (`§20.7`), así que
+/// es el documento que el criterio de determinismo de E26-H08 obliga a nombrar.
+fn ws_afijo_heterogeneo() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "a-numerico.md",
+        "---\npriority: 3\nstatus: active\ntags:\n  - uno\n---\n\n# Numérico\n",
+    );
+    write(
+        dir.path(),
+        "b-numerico.md",
+        "---\npriority: 5\nstatus: draft\n---\n\n# Otro numérico\n",
+    );
+    write(
+        dir.path(),
+        "z-textual.md",
+        "---\npriority: \"3-alta\"\nstatus: activo\n---\n\n# Textual\n",
+    );
+    dir
+}
+
+/// **E29-H04** · Criterio `starts_with_sobre_numero_es_type_error` (por el wire):
+/// **Dado** un workspace con documentos cuyo `priority` es un **número**, **Cuando** se busca con
+/// `where: "priority starts_with \"3\""`, **Entonces** la respuesta es un error `INVALID_SCHEMA` cuyo
+/// mensaje nombra el campo, el operador y el tipo encontrado.
+///
+/// Es el caso G1-20 tal como se observó: por `knowledge_search`, con la respuesta recortada como
+/// única señal (y ninguna señal, por tanto).
+#[test]
+fn starts_with_sobre_numero_es_type_error() {
+    let dir = ws_afijo_heterogeneo();
+    let linea = linea_search(1, AFIJO_SOBRE_NUMERO, None);
+    let resp = roundtrip(dir.path(), &[linea.as_str()], 1);
+
+    let err = error_de(&resp[0]).unwrap_or_else(|| {
+        panic!(
+            "`{AFIJO_SOBRE_NUMERO}` sobre documentos con `priority` NUMÉRICO no es una consulta \
+             respondible: `starts_with` es un operador de TEXTO y el lenguaje no coerce (§20.8). Hoy \
+             `eval_afijo` devuelve `false` para todo campo no-string, así que los documentos \
+             numéricos se excluyen en silencio y la respuesta es la lista de los que casualmente \
+             tenían `priority` textual — el caso G1-20, donde 7 documentos con `priority: 3` \
+             desaparecieron sin un aviso.\nRespuesta recibida: {}",
+            resp[0]
+        )
+    });
+    juzga_error_de_afijo(
+        &err,
+        "priority",
+        "starts_with",
+        GRAFIAS_NUMBER,
+        "knowledge_search",
+    );
+    assert!(
+        err.contains("a-numerico.md"),
+        "…y debe nombrar el PRIMER documento del orden total que yerra (`a-numerico.md`), como todo \
+         type error desde E26-H08: «{err}»"
+    );
+}
+
+/// **E29-H04** · Criterio `ends_with_sobre_numero_es_type_error` (por el wire):
+/// **Dado** ese mismo workspace, **Cuando** se busca con `ends_with` sobre el mismo campo,
+/// **Entonces** el mismo error.
+#[test]
+fn ends_with_sobre_numero_es_type_error() {
+    let dir = ws_afijo_heterogeneo();
+    let linea = linea_search(1, "priority ends_with \"3\"", None);
+    let resp = roundtrip(dir.path(), &[linea.as_str()], 1);
+
+    let err = error_de(&resp[0]).unwrap_or_else(|| {
+        panic!(
+            "`priority ends_with \"3\"` debe fallar igual que su gemelo `starts_with`: comparten \
+             `eval_afijo`, y arreglar uno solo dejaría el hueco abierto por la mitad.\nRespuesta: {}",
+            resp[0]
+        )
+    });
+    juzga_error_de_afijo(
+        &err,
+        "priority",
+        "ends_with",
+        GRAFIAS_NUMBER,
+        "knowledge_search (ends_with)",
+    );
+}
+
+/// **E29-H04** · Criterio `starts_with_sobre_lista_es_type_error` (por el wire):
+/// **Dado** un documento cuyo campo `tags` es una **lista**, **Cuando** se evalúa
+/// `tags starts_with "x"`, **Entonces** es type error (no `false`).
+///
+/// La lista es la familia no-string más frecuente en un frontmatter real después del número, y la
+/// más tentadora para una coerción («¿y si comparo el primer elemento?»): el mensaje debe decir
+/// `list`, no `string`, o el agente corregirá lo que no es.
+#[test]
+fn starts_with_sobre_lista_es_type_error() {
+    let dir = ws_afijo_heterogeneo();
+    let linea = linea_search(1, "tags starts_with \"uno\"", None);
+    let resp = roundtrip(dir.path(), &[linea.as_str()], 1);
+
+    let err = error_de(&resp[0]).unwrap_or_else(|| {
+        panic!(
+            "`tags starts_with \"uno\"` sobre `tags: [uno, dos]` debe ser type error: una lista no \
+             tiene prefijo de texto, y que su primer elemento sí lo tenga es justo la coerción que \
+             §20.8 prohíbe.\nRespuesta: {}",
+            resp[0]
+        )
+    });
+    juzga_error_de_afijo(
+        &err,
+        "tags",
+        "starts_with",
+        GRAFIAS_LIST,
+        "knowledge_search (lista)",
+    );
+}
+
+/// **E29-H04** · Criterio `selection_con_type_error_de_afijo_aborta_el_plan`:
+/// **Dado** un `change_plan` con `selection.where` que produce el type error, **Cuando** se
+/// planifica, **Entonces** el plan **aborta** con `INVALID_SCHEMA` y **no se expande a ninguna
+/// operación** (coherencia con E26-H08).
+///
+/// Es la mitad cara del defecto: hoy `change_plan` con esta selección devuelve un plan con
+/// `normalizedOperations: []`, `impact.affectedCount: 0` y **`canApply: true`** — un plan vacío
+/// presentado como legítimo, que el agente puede aplicar creyendo que tocó los 7 documentos que
+/// buscaba. Y en el fixture heterogéneo es peor que vacío: planifica sobre `z-textual.md`, el único
+/// que casualmente casó.
+///
+/// El test aserta además la **igualdad exacta** con el error de `knowledge_search`: las dos tools
+/// comparten el lenguaje (`§20.10`), así que deben compartir veredicto **y** redacción, como ya
+/// exige `misma_consulta_mismo_error_en_search_y_en_plan` para el orden.
+#[test]
+fn selection_con_type_error_de_afijo_aborta_el_plan() {
+    let dir = ws_afijo_heterogeneo();
+    let l_search = linea_search(1, AFIJO_SOBRE_NUMERO, None);
+    let l_plan = linea_plan(2, AFIJO_SOBRE_NUMERO);
+    let resp = roundtrip(dir.path(), &[l_search.as_str(), l_plan.as_str()], 2);
+
+    let e_plan = error_de(&resp[1]).unwrap_or_else(|| {
+        let sc = &resp[1]["result"]["structuredContent"];
+        panic!(
+            "`change_plan` con `selection.where: {AFIJO_SOBRE_NUMERO}` debe ABORTAR: hoy \
+             `expand_selection` se salta en silencio todo documento cuya evaluación no sea \
+             `Ok(true)`, así que planifica sobre el subconjunto que casualmente casó y lo presenta \
+             como un plan legítimo (`canApply: {}`, `affectedCount: {}`). Un plan que afecta a menos \
+             ficheros de los que el agente seleccionó es la versión cara de la respuesta \
+             silenciosamente equivocada.\nRespuesta: {}",
+            sc["canApply"], sc["impact"]["affectedCount"], resp[1]
+        )
+    });
+    juzga_error_de_afijo(
+        &e_plan,
+        "priority",
+        "starts_with",
+        GRAFIAS_NUMBER,
+        "change_plan",
+    );
+
+    let e_search = error_de(&resp[0]).unwrap_or_else(|| {
+        panic!(
+            "`knowledge_search` con la misma consulta debe fallar también (ver \
+             `starts_with_sobre_numero_es_type_error`): {}",
+            resp[0]
+        )
+    });
+    assert_eq!(
+        e_search, e_plan,
+        "el MISMO `where` sobre el MISMO workspace debe dar el MISMO código y el MISMO mensaje por \
+         las dos tools que aceptan el lenguaje (§20.10, invariante #3)"
+    );
+}
+
+/// **E29-H04** · Control anti-vacuo: `starts_with` sobre un campo **string** sigue casando, y un
+/// campo **ausente** sigue excluyendo sin error.
+///
+/// Los dos criterios anti-vacuo de la historia juntos, por el wire, que es donde importa que el
+/// operador siga siendo usable: el arreglo no puede consistir en hacer ilegal `starts_with`, ni en
+/// convertir en error toda consulta sobre un frontmatter heterogéneo (que es la norma: la mitad de
+/// los documentos de cualquier base real no tienen la clave por la que se pregunta).
+///
+/// **Verde hoy**, y debe seguir verde.
+#[test]
+fn starts_with_sobre_string_y_campo_ausente_siguen_funcionando() {
+    let dir = ws_afijo_heterogeneo();
+    let l_string = linea_search(1, "status starts_with \"act\"", None);
+    let l_ausente = linea_search(2, "inexistente starts_with \"x\"", None);
+    let l_no_casa = linea_search(3, "status starts_with \"zzz\"", None);
+    let resp = roundtrip(
+        dir.path(),
+        &[l_string.as_str(), l_ausente.as_str(), l_no_casa.as_str()],
+        3,
+    );
+
+    assert_eq!(
+        error_de(&resp[0]),
+        None,
+        "`status starts_with \"act\"` es una comparación perfectamente tipada (string vs string): no \
+         puede convertirse en error"
+    );
+    let mut casan = search_paths(&resp[0]);
+    casan.sort();
+    assert_eq!(
+        casan,
+        vec!["a-numerico.md".to_string(), "z-textual.md".to_string()],
+        "…y sigue casando los documentos cuyo `status` empieza por «act» (`active` y `activo`), que \
+         es la prueba de que el operador conserva su trabajo"
+    );
+
+    assert_eq!(
+        error_de(&resp[1]),
+        None,
+        "un campo que NINGÚN documento tiene no es un type error: la ausencia cortocircuita antes de \
+         mirar tipos (E19-H01) y ese contrato no cambia"
+    );
+    assert!(
+        search_paths(&resp[1]).is_empty(),
+        "…y su respuesta es la lista vacía: {:?}",
+        search_paths(&resp[1])
+    );
+
+    assert_eq!(
+        error_de(&resp[2]),
+        None,
+        "y un `false` legítimo —string que no empieza por ese prefijo— sigue siendo ausencia de \
+         resultados, no un fallo"
+    );
+    assert!(
+        search_paths(&resp[2]).is_empty(),
+        "…con su lista vacía: {:?}",
+        search_paths(&resp[2])
+    );
+}
+
+// ---------------------------------------------------------------------------
 // E26-H09 — `metadata_inspect` habla el mismo dialecto de dot-paths que la consulta
 //
 // `App::metadata_inspect` normaliza su `field` con `FieldPath::parse`, mientras `where`, `filter` y

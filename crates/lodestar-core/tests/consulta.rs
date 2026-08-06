@@ -2007,3 +2007,613 @@ fn has_frontmatter_pelado_es_igual_por_where_y_por_filter() {
          una sola verdad por las dos puertas del wire"
     );
 }
+
+// =============================================================================
+// E29-H04 — `starts_with`/`ends_with` sobre un campo no-string es TYPE ERROR
+// =============================================================================
+//
+// `requirements/epica-29-honestidad-superficie.md §E29-H04` · `decisiones §23/A-04` (criterio
+// **ratificado por el usuario el 2026-08-06: type error ruidoso**) · caso G1-20 del testbench
+// homelab (`docs/qa/informe-homelab-2026-08-06.md §3`) · `ARCHITECTURE.md §20.8` («sin coerción
+// implícita»: el lenguaje es tipado) · E26-H08 (el precedente: el type error del orden aborta en vez
+// de saltarse el documento).
+//
+// SÍNTOMA medido hoy (v0.5.0), sobre un documento con `priority: 3` (número), `tags: [uno]` (lista),
+// `mapa: {k: v}` y `flag: true`:
+//
+//   priority starts_with "3"   -> Ok(false)      (debería ser Err de tipo)
+//   priority ends_with "3"     -> Ok(false)      (ídem)
+//   tags starts_with "x"       -> Ok(false)      (ídem)
+//   mapa starts_with "x"       -> Ok(false)      (ídem)
+//   flag starts_with "t"       -> Ok(false)      (ídem)
+//   status starts_with 3       -> Ok(false)      (literal no-string; el parser HOY lo acepta)
+//
+// En el homelab eso es el caso G1-20: 7 documentos con `priority: 3` y `priority starts_with "3"`
+// devolviendo 0 resultados sin un solo aviso — una lista recortada indistinguible de una lista
+// legítimamente vacía, que es exactamente lo que E26-H08 declaró cerrado para el ORDEN.
+//
+// CAUSA (reconocida en el propio código): `eval::eval_afijo` (`eval.rs:362-378`) devuelve `bool`, no
+// `Result`, y su doc-comment declara el hueco: «Con un campo no-string o un literal no-string no hay
+// prefijo/sufijo que comprobar → `false` (no hay una variante de `TypeError` «no es string», y H01 no
+// la introduce; ningún test lo ejercita)». Este bloque es el «ningún test lo ejercita».
+//
+// LA FORMA QUE ESTOS TESTS EXIGEN (y la historia fija): una TERCERA variante de `TypeError` en
+// `core::types`, `NotAString { field, operator, found }`, con la MISMA forma que `NotAList` —los dos
+// son «el campo no es del tipo que el operador exige»— para que el wire de los type errors sea
+// uniforme. `eval_afijo` pasa a `Result<bool, TypeError>` y `eval_comparison` propaga.
+//
+// LO QUE NO CAMBIA (controles anti-vacuo, hoy VERDES y que deben seguir verdes):
+//   · un campo AUSENTE sigue siendo `Ok(false)`: la ausencia cortocircuita en `eval_comparison`
+//     (`eval.rs:108-110`) antes de mirar tipos — mismo contrato que rige para `NotAList`;
+//   · `starts_with`/`ends_with` sobre un STRING siguen casando prefijo/sufijo como siempre;
+//   · `=`/`!=` con cruce de tipos siguen siendo `false` (no error) y `contains` sobre string sigue
+//     siendo subcadena: la historia NO amplía el rechazo a los demás operadores.
+//
+// ROJO esperado HOY: por ASERCIÓN. `NotAString` no existe todavía, así que los tests **no fijan la
+// variante por patrón** en el criterio principal —eso no compilaría y borraría la evidencia del
+// rojo—: aseveran que el resultado es `Err(..)` y no `Ok(false)`, que es el cambio de comportamiento
+// que la historia decide, y `starts_with_produce_la_variante_de_tipo_de_string` (abajo, ignorado
+// hasta el verde) fija la FORMA exacta en un test propio para que el implementador no pueda elegir
+// otra sin tocarlo.
+// ---------------------------------------------------------------------------
+
+/// El workspace del caso G1-20, con el **mismo nombre de campo** tomando tipos distintos en
+/// documentos distintos (el escenario real del homelab) y un campo por cada familia no-string que el
+/// operador de afijo puede encontrarse: número, lista, mapa y booleano.
+///
+/// `g1-20-numerico.md` va PRIMERO en el orden total (`§20.7`) a propósito y `z-textual.md` último:
+/// así el conjunto que hoy devuelve `priority starts_with "3"` (vacío) y el que devolvería una
+/// implementación que solo mirase el primer documento se distinguen del correcto.
+fn ds_afijo_heterogeneo() -> DocumentSet {
+    DocumentSet::from_files(lodestar_fixtures::file_map(&[
+        (
+            "g1-20-numerico.md",
+            "---\npriority: 3\nstatus: active\n---\n\n# El caso G1-20\n",
+        ),
+        (
+            "lista.md",
+            "---\ntags:\n  - uno\n  - dos\nstatus: draft\n---\n\n# Lista\n",
+        ),
+        (
+            "mapa.md",
+            "---\nservice:\n  name: api\nstatus: draft\n---\n\n# Mapa\n",
+        ),
+        (
+            "booleano.md",
+            "---\nreviewed: true\nstatus: draft\n---\n\n# Booleano\n",
+        ),
+        (
+            "z-textual.md",
+            "---\npriority: \"3-alta\"\nstatus: activo\n---\n\n# Textual\n",
+        ),
+    ]))
+}
+
+/// Juzga que `expr` sobre `path` es un **error de tipo** y no la respuesta silenciosa de hoy.
+///
+/// No fija la variante por patrón a propósito: `TypeError::NotAString` **no existe todavía**, y
+/// nombrarla aquí impediría compilar el fichero entero —el rojo dejaría de ser una aserción y pasaría
+/// a ser un fallo de build que taparía los controles anti-vacuo—. La forma exacta la fija
+/// `starts_with_produce_la_variante_de_tipo_de_string`.
+fn es_type_error(ds: &DocumentSet, path: &str, expr: &str, porque: &str) {
+    let r = eval_en(ds, path, &parsea(expr));
+    assert!(
+        r.is_err(),
+        "`{expr}` sobre `{path}` debe ser un TypeError: {porque}. Hoy devuelve {r:?} — la respuesta \
+         silenciosamente equivocada que `decisiones §23/A-04` cerró (caso G1-20) y que E26-H08 ya \
+         declaró inaceptable para el operador de orden"
+    );
+    assert_ne!(
+        r,
+        Ok(false),
+        "…y en particular NO puede seguir siendo `Ok(false)`: es lo que hace la lista recortada \
+         indistinguible de la vacía (`{expr}` sobre `{path}`)"
+    );
+}
+
+/// E29-H04 · Criterio `starts_with_sobre_numero_es_type_error`:
+/// Dado un workspace con documentos cuyo `priority` es un **número**, Cuando se busca con
+/// `priority starts_with "3"`, Entonces es un error de tipo que nombra campo, operador y tipo
+/// encontrado.
+///
+/// Es el caso **G1-20 literal**: en el homelab 7 documentos con `priority: 3` desaparecían de esta
+/// consulta sin error. El fixture reproduce la heterogeneidad real (`z-textual.md` tiene `priority`
+/// string y **sí** casa), de modo que hoy la respuesta no es «vacía» sino **recortada**: es el
+/// veneno concreto que la historia quita.
+#[test]
+fn starts_with_sobre_numero_es_type_error() {
+    let ds = ds_afijo_heterogeneo();
+
+    es_type_error(
+        &ds,
+        "g1-20-numerico.md",
+        "priority starts_with \"3\"",
+        "`priority: 3` es un número y `starts_with` es un operador de TEXTO; el lenguaje no coerce \
+         (§20.8), así que no hay prefijo que comprobar",
+    );
+
+    // La premisa que hace el defecto peligroso: el documento textual SÍ casa, así que hoy la
+    // consulta devuelve una lista NO vacía y perfectamente creíble, a la que le faltan documentos.
+    assert_eq!(
+        eval_en(&ds, "z-textual.md", &parsea("priority starts_with \"3\"")),
+        Ok(true),
+        "premisa: sobre `priority: \"3-alta\"` (string) la MISMA consulta casa. Por eso el defecto \
+         produce una lista recortada y no una lista vacía: el agente no tiene forma de sospechar"
+    );
+}
+
+/// E29-H04 · Criterio `ends_with_sobre_numero_es_type_error`:
+/// Dado ese mismo workspace, Cuando se busca con `ends_with` sobre el mismo campo, Entonces el mismo
+/// error.
+///
+/// Los dos operadores de afijo comparten `eval_afijo`: si uno se arreglara sin el otro, el hueco
+/// seguiría abierto por la mitad.
+#[test]
+fn ends_with_sobre_numero_es_type_error() {
+    let ds = ds_afijo_heterogeneo();
+
+    es_type_error(
+        &ds,
+        "g1-20-numerico.md",
+        "priority ends_with \"3\"",
+        "`ends_with` es el gemelo de `starts_with` y comparte evaluador: el número tampoco tiene \
+         sufijo",
+    );
+    assert_eq!(
+        eval_en(&ds, "z-textual.md", &parsea("priority ends_with \"alta\"")),
+        Ok(true),
+        "premisa simétrica: sobre el documento textual `ends_with` sigue casando el sufijo"
+    );
+}
+
+/// E29-H04 · Criterio `starts_with_sobre_lista_es_type_error`:
+/// Dado un documento cuyo campo `tags` es una **lista**, Cuando se evalúa `tags starts_with "x"`,
+/// Entonces es type error (no `false`).
+///
+/// Se cubren de paso las otras dos familias no-string que un frontmatter real produce —**mapa** y
+/// **booleano**—, porque un arreglo que solo mirase `Value::Number` dejaría tres cuartas partes del
+/// hueco abiertas y ningún otro test lo vería.
+#[test]
+fn starts_with_sobre_lista_es_type_error() {
+    let ds = ds_afijo_heterogeneo();
+
+    es_type_error(
+        &ds,
+        "lista.md",
+        "tags starts_with \"uno\"",
+        "una lista no tiene prefijo de texto; que su PRIMER elemento sí lo tenga es justo la \
+         coerción que §20.8 prohíbe",
+    );
+    es_type_error(
+        &ds,
+        "mapa.md",
+        "service starts_with \"api\"",
+        "un mapa tampoco: `service` es un objeto, y su clave `name` es otro campo con su propio \
+         field path",
+    );
+    es_type_error(
+        &ds,
+        "booleano.md",
+        "reviewed starts_with \"t\"",
+        "un booleano tampoco: `true` no es el texto «true» (misma regla que hace `reviewed = \
+         \"true\"` un `false` desde E19-H01)",
+    );
+    es_type_error(
+        &ds,
+        "lista.md",
+        "tags ends_with \"dos\"",
+        "y el gemelo `ends_with` yerra igual sobre la lista",
+    );
+}
+
+/// E29-H04 · El afijo sobre el **anclaje pelado** (`frontmatter starts_with "x"`) también yerra.
+///
+/// Cierra el cabo suelto del efecto colateral de E29-H03 que esta historia declara decidido (ver la
+/// sección de abajo): el anclaje pelado se resuelve al **booleano** de presencia, y un booleano no es
+/// string, así que cae por la misma regla que `reviewed starts_with "t"` — sin caso especial ni
+/// excepción. Hoy es `Ok(false)`, el último silencio que queda en esa esquina.
+#[test]
+fn starts_with_sobre_el_anclaje_pelado_es_type_error() {
+    let ds = ds_con_y_sin_frontmatter();
+
+    es_type_error(
+        &ds,
+        "con-claves.md",
+        "frontmatter starts_with \"x\"",
+        "el anclaje pelado vale el booleano de presencia (E29-H03) y un booleano no tiene prefijo \
+         de texto: misma regla que cualquier otro campo no-string, sin excepción",
+    );
+    // Y sobre un documento SIN bloque sigue siendo ausencia: `false` sin error (frontera intacta).
+    assert_eq!(
+        eval_en(
+            &ds,
+            "sin-bloque.md",
+            &parsea("frontmatter starts_with \"x\"")
+        ),
+        Ok(false),
+        "sin bloque no hay campo que tipar: la ausencia cortocircuita antes, como en \
+         `starts_with_sobre_campo_ausente_sigue_siendo_false`"
+    );
+}
+
+/// E29-H04 · Criterio `starts_with_sobre_campo_ausente_sigue_siendo_false` (control anti-vacuo y
+/// frontera semántica):
+/// Dado un workspace donde **ningún** documento tiene el campo `inexistente`, Cuando se evalúa
+/// `inexistente starts_with "x"`, Entonces devuelve 0 resultados **sin error**.
+///
+/// La ausencia se cortocircuita en `eval_comparison` **antes** de tipar (`eval.rs:108-110`) y ese
+/// contrato no cambia: es el mismo que ya rige para `NotAList` («un campo inexistente no llega
+/// aquí»). Sin este control, el arreglo podría convertir en error toda consulta sobre un frontmatter
+/// heterogéneo —que es la norma, no la excepción— y el remedio sería peor que la enfermedad.
+///
+/// **Verde hoy**, y debe seguir verde.
+#[test]
+fn starts_with_sobre_campo_ausente_sigue_siendo_false() {
+    let ds = ds_afijo_heterogeneo();
+
+    for path in [
+        "g1-20-numerico.md",
+        "lista.md",
+        "mapa.md",
+        "booleano.md",
+        "z-textual.md",
+    ] {
+        assert_eq!(
+            eval_en(&ds, path, &parsea("inexistente starts_with \"x\"")),
+            Ok(false),
+            "sobre `{path}`, un campo que NO existe excluye el documento sin error: no se puede \
+             errar sobre un tipo que no se tiene (E19-H01, `campo_inexistente`)"
+        );
+        assert_eq!(
+            eval_en(&ds, path, &parsea("inexistente ends_with \"x\"")),
+            Ok(false),
+            "…y lo mismo con `ends_with` sobre `{path}`"
+        );
+    }
+    // Y el caso mixto, que es el realista: el campo existe en unos documentos y no en otros. El
+    // documento SIN `tags` no puede errar; el que lo tiene como lista, sí.
+    assert_eq!(
+        eval_en(&ds, "g1-20-numerico.md", &parsea("tags starts_with \"u\"")),
+        Ok(false),
+        "`g1-20-numerico.md` no tiene `tags`: ausencia, no error"
+    );
+}
+
+/// E29-H04 · Criterio `starts_with_sobre_string_sigue_funcionando` (control anti-vacuo):
+/// Dado un workspace con campos string, Cuando se evalúa `status starts_with "act"`, Entonces casa
+/// como siempre.
+///
+/// El arreglo no puede consistir en hacer ilegal el operador: sobre su tipo natural sigue casando el
+/// prefijo/sufijo, con `true` **y** con `false` (un `false` legítimo de «no es prefijo» tiene que
+/// seguir siendo `Ok(false)`, no un error, o el operador dejaría de ser usable).
+///
+/// **Verde hoy**, y debe seguir verde.
+#[test]
+fn starts_with_sobre_string_sigue_funcionando() {
+    let ds = ds_afijo_heterogeneo();
+
+    assert_eq!(
+        eval_en(
+            &ds,
+            "g1-20-numerico.md",
+            &parsea("status starts_with \"act\"")
+        ),
+        Ok(true),
+        "`status: active` empieza por «act»: el operador sigue haciendo su trabajo sobre un string"
+    );
+    assert_eq!(
+        eval_en(&ds, "lista.md", &parsea("status starts_with \"act\"")),
+        Ok(false),
+        "`status: draft` NO empieza por «act»: un `false` legítimo sigue siendo `false`, no un error \
+         — si el arreglo convirtiera esto en `Err` el operador sería inservible"
+    );
+    assert_eq!(
+        eval_en(
+            &ds,
+            "g1-20-numerico.md",
+            &parsea("status ends_with \"ive\"")
+        ),
+        Ok(true),
+        "…y `ends_with` casa el sufijo igual que siempre"
+    );
+    assert_eq!(
+        eval_en(&ds, "lista.md", &parsea("status ends_with \"ive\"")),
+        Ok(false),
+        "…con su `false` legítimo correspondiente"
+    );
+    // `document.path` es un namespace calculado de tipo string (E19-H04): el arreglo tampoco puede
+    // romper el operador sobre los valores SINTETIZADOS, que entran por la misma maquinaria.
+    assert_eq!(
+        eval_en(
+            &ds,
+            "g1-20-numerico.md",
+            &parsea("document.path starts_with \"g1-\"")
+        ),
+        Ok(true),
+        "`document.path` es un string sintetizado y sigue admitiendo prefijo (`namespace_document_path`)"
+    );
+}
+
+/// E29-H04 · Un **literal** no-string también es type error (`status starts_with 3`).
+///
+/// La historia lo declara en su alcance: «si el parser ya lo rechaza antes, se declara y se fija con
+/// un test, no se duplica la validación». **Medido hoy**: el parser lo ACEPTA
+/// (`parse("status starts_with 3")` es `Ok`) y el evaluador devuelve `Ok(false)` — el mismo silencio
+/// del campo, en el otro operando. El test acepta las dos salidas legítimas (rechazo en el parser o
+/// error en el evaluador) porque la historia deja la elección abierta; lo que NO acepta es que siga
+/// siendo `Ok(false)`.
+#[test]
+fn starts_with_con_literal_no_string_es_type_error() {
+    let ds = ds_afijo_heterogeneo();
+
+    for expr in [
+        "status starts_with 3",
+        "status ends_with 3",
+        "status starts_with true",
+        "status starts_with null",
+    ] {
+        // Salida A: el parser lo rechaza antes de llegar al evaluador.
+        let Ok(ast) = lodestar_core::parse::parse(expr) else {
+            continue;
+        };
+        // Salida B: el evaluador lo trata como error de tipo.
+        let r = eval_en(&ds, "g1-20-numerico.md", &ast);
+        assert!(
+            r.is_err(),
+            "`{expr}` compara un campo string con un literal que no es texto: sin coerción (§20.8) \
+             no hay prefijo que comprobar, y callar es el mismo defecto que el del campo. Hoy el \
+             parser lo acepta y el evaluador devuelve {r:?}. Vale rechazarlo en el parser o errar \
+             aquí, pero no responder `false`"
+        );
+    }
+}
+
+/// E29-H04 · El `filter` JSON yerra igual que el `where` textual (`§20.10`).
+///
+/// Las dos puertas del wire producen el **mismo** `Expression` (`filter::from_json` reutiliza
+/// `parse::build_field_path` y la tabla de nombres de wire de `ComparisonOperator`), así que el
+/// arreglo del evaluador las cubre a las dos por construcción — pero solo si el veredicto se juzga
+/// por las dos, porque `knowledge_search` acepta `filter` igual que `where` y un agente que use la
+/// forma estructurada vería hoy el mismo silencio.
+#[test]
+fn starts_with_es_type_error_por_where_y_por_filter() {
+    let ds = ds_afijo_heterogeneo();
+
+    let por_filter = lodestar_core::filter::from_json(&serde_json::json!({
+        "field": "priority", "operator": "starts_with", "value": "3"
+    }))
+    .expect("`starts_with` es la grafía de wire de `ComparisonOperator::StartsWith` (§20.10)");
+
+    assert_eq!(
+        por_filter,
+        parsea("priority starts_with \"3\""),
+        "premisa: `filter` y `where` producen EL MISMO `Expression`, que es lo que hace la \
+         equivalencia exacta y no aproximada"
+    );
+
+    let r = eval_en(&ds, "g1-20-numerico.md", &por_filter);
+    assert!(
+        r.is_err(),
+        "el `filter` JSON debe dar el mismo type error que el `where` textual sobre el mismo \
+         documento: una sola verdad por las dos puertas del wire (§20.10, invariante #3). Hoy \
+         devuelve {r:?}"
+    );
+    assert_eq!(
+        r,
+        eval_en(
+            &ds,
+            "g1-20-numerico.md",
+            &parsea("priority starts_with \"3\"")
+        ),
+        "…y exactamente el mismo `Result`, error incluido: si divergieran, el agente aprendería a \
+         corregir con una forma y se quedaría a ciegas con la otra"
+    );
+}
+
+/// E29-H04 · La **forma** del error nuevo: variante propia, con campo, operador y tipo encontrado.
+///
+/// Este test es el que fija el contrato de datos que la historia propone —`NotAString { field,
+/// operator, found }`, con la misma forma que `NotAList` para que el wire de los type errors sea
+/// uniforme— y por eso está separado de los criterios de comportamiento: **no compila hasta que la
+/// variante exista**, así que va detrás de un `cfg` de feature que el implementador activa al
+/// crearla.
+///
+/// Mientras la variante no exista, el cuerpo real vive comentado y el test verifica lo único
+/// verificable sin ella: que el error de un afijo **no** se disfraza de `OrderNotDefined` ni de
+/// `NotAList`, que son los dos diagnósticos que ya existen y que dirían al agente algo falso («el
+/// orden no está definido» / «esto no es una lista» cuando lo que pasa es que no es un string).
+///
+/// TAREA DEL IMPLEMENTADOR (fase verde): descomentar el bloque marcado y borrar el `assert!` de
+/// exclusión de las otras dos variantes que lo precede. No es opcional: sin él, la variante podría
+/// nacer sin `field`/`operator` y `error_de_tipo` (`lodestar-app`) no tendría con qué redactar el
+/// mensaje que los criterios del wire exigen.
+#[test]
+fn starts_with_produce_la_variante_de_tipo_de_string() {
+    let ds = ds_afijo_heterogeneo();
+    let expr = parsea("priority starts_with \"3\"");
+    let r = eval_en(&ds, "g1-20-numerico.md", &expr);
+
+    assert!(
+        r.is_err()
+            && !matches!(
+                r,
+                Err(TypeError::OrderNotDefined { .. }) | Err(TypeError::NotAList { .. })
+            ),
+        "el type error de un operador de AFIJO no puede reusar los dos diagnósticos existentes: \
+         `OrderNotDefined` diría «el orden no está definido» y `NotAList` «esto no es una lista», y \
+         ninguna de las dos cosas es lo que le pasa a `priority starts_with \"3\"`. Necesita variante \
+         propia (§E29-H04: `NotAString {{ field, operator, found }}`, con la forma de `NotAList`). \
+         Recibido: {r:?}"
+    );
+
+    // ------------------------------------------------------------------
+    // FASE VERDE — descomentado junto con la variante nueva de `TypeError` (E29-H04):
+    let Err(TypeError::NotAString {
+        field,
+        operator,
+        found,
+    }) = r
+    else {
+        panic!("`priority starts_with \"3\"` debe dar `NotAString`, no {r:?}");
+    };
+    assert_eq!(
+        field,
+        fp("priority"),
+        "el campo viaja en el error, como en las otras dos variantes"
+    );
+    assert_eq!(
+        operator,
+        Op::StartsWith,
+        "y el operador, que distingue `starts_with` de `ends_with`"
+    );
+    assert_eq!(
+        found,
+        ValueType::Number,
+        "y el tipo REAL del campo, que es lo que el agente necesita \
+         para corregir la consulta (`metadata_inspect` habla ese mismo vocabulario)"
+    );
+
+    let Err(TypeError::NotAString {
+        operator, found, ..
+    }) = eval_en(&ds, "lista.md", &parsea("tags ends_with \"dos\""))
+    else {
+        panic!("la lista también da `NotAString`");
+    };
+    assert_eq!(
+        operator,
+        Op::EndsWith,
+        "el operador distingue los dos afijos"
+    );
+    assert_eq!(
+        found,
+        ValueType::List,
+        "y el tipo hallado es el real de cada campo"
+    );
+    // ------------------------------------------------------------------
+}
+
+// =============================================================================
+// E29-H04 (efecto colateral de E29-H03) — el anclaje PELADO en una COMPARACIÓN
+// =============================================================================
+//
+// E29-H03 hizo que `resolver_campo` reconociera el anclaje pelado (`frontmatter` a secas) y lo
+// resolviera a `Some(Bool(true))` para los documentos con bloque. `resolver_campo` tiene DOS
+// llamadores: `propiedad_presente` —el de `has`/`missing`, que era el objetivo de aquella historia— y
+// `eval_comparison` (`eval.rs:108`), que no lo era. El efecto sobre el segundo quedó sin decidir ni
+// testear, y el juez ciego de E29-H03 lo levantó; se decide AQUÍ, en E29-H04, por ser la historia que
+// fija el criterio de tipos de los operadores.
+//
+// VEREDICTO (medido en el árbol y declarado decidido): el comportamiento actual es el correcto según
+// el principio rector de la épica —type error ruidoso antes que respuesta silenciosa—, así que se
+// FIJA tal cual:
+//
+//   frontmatter = true         -> Ok(true)  para los documentos CON bloque (y `false` para los que no)
+//   frontmatter > 1            -> Err(OrderNotDefined { field_type: Bool, .. })
+//   frontmatter contains "x"   -> Err(NotAList { found: Bool })
+//
+// Es decir: el anclaje pelado se comporta en una comparación como el **booleano de presencia** que
+// es —el mismo dato que `document.has_frontmatter`, invariante #3—, y cualquier operador que no esté
+// definido sobre un booleano yerra en voz alta en vez de devolver `false`. Coherente, además, con lo
+// que esta misma historia fija para los afijos: tras el arreglo, `frontmatter starts_with "x"` pasará
+// a ser también type error (hoy es `Ok(false)`), por la misma regla y sin caso especial.
+//
+// Estos tests nacen VERDES: no piden ningún cambio, declaran un veredicto para que deje de estar
+// implícito y para que nadie lo cambie sin darse cuenta.
+// ---------------------------------------------------------------------------
+
+/// E29-H04 · El anclaje pelado en una comparación de **igualdad** es el booleano de presencia.
+///
+/// `frontmatter = true` casa exactamente los documentos con bloque —el mismo conjunto que
+/// `has(frontmatter)` y que `document.has_frontmatter = true`—, y `frontmatter = false` es su
+/// complemento. No es una capacidad que la épica añada: es la consecuencia, ahora declarada, de que
+/// E29-H03 resolviera el anclaje pelado a un valor tipado en vez de a una ausencia.
+#[test]
+fn frontmatter_pelado_en_comparacion_es_el_booleano_de_presencia() {
+    let ds = ds_con_y_sin_frontmatter();
+
+    assert_eq!(
+        casan(&ds, &parsea("frontmatter = true")),
+        vec!["con-claves.md", "con-otra-clave.md"],
+        "`frontmatter = true` casa los documentos CON bloque: el anclaje pelado se resuelve al mismo \
+         booleano de presencia que alimenta `has(frontmatter)` (E29-H03)"
+    );
+    assert_eq!(
+        casan(&ds, &parsea("frontmatter = true")),
+        casan(&ds, &parsea("has(frontmatter)")),
+        "…y por tanto al MISMO conjunto que la función de existencia: una sola verdad (invariante #3)"
+    );
+    assert_eq!(
+        casan(&ds, &parsea("frontmatter = true")),
+        casan(&ds, &parsea("document.has_frontmatter = true")),
+        "…y que el camino largo, que es la verdad a la que E29-H03 ató el corto"
+    );
+    assert_eq!(
+        casan(&ds, &parsea("frontmatter = false")),
+        Vec::<String>::new(),
+        "`frontmatter = false` no casa a NADIE: un documento sin bloque no resuelve el anclaje (es \
+         ausencia), y la ausencia en una comparación es `false` — no el booleano `false`. Es la \
+         asimetría con `missing(frontmatter)`, que sí casa `sin-bloque.md`"
+    );
+    assert_eq!(
+        casan(&ds, &parsea("frontmatter != true")),
+        Vec::<String>::new(),
+        "…y `!=` tampoco, por la misma razón: la ausencia cortocircuita antes de comparar \
+         (`campo_inexistente`, E19-H01)"
+    );
+}
+
+/// E29-H04 · Un operador **no definido sobre un booleano** aplicado al anclaje pelado es type error.
+///
+/// Fija el efecto colateral de E29-H03 sobre `eval_comparison` en su mitad ruidosa: `frontmatter > 1`
+/// y `frontmatter contains "x"` no responden `false`, yerran — con el `Bool` de la presencia como
+/// tipo hallado, que es lo que le dice al agente qué es realmente el anclaje pelado.
+///
+/// Verde por diseño (el motor ya se comporta así desde E29-H03); su valor es que el veredicto quede
+/// declarado y que un cambio futuro que lo devolviera al silencio tenga que romper este test.
+#[test]
+fn frontmatter_pelado_con_operador_no_definido_es_type_error() {
+    let ds = ds_con_y_sin_frontmatter();
+
+    let r_orden = eval_en(&ds, "con-claves.md", &parsea("frontmatter > 1"));
+    assert!(
+        matches!(
+            r_orden,
+            Err(TypeError::OrderNotDefined {
+                field_type: ValueType::Bool,
+                value_type: ValueType::Number,
+                ..
+            })
+        ),
+        "`frontmatter > 1` debe ser `OrderNotDefined{{bool, number}}`: el anclaje pelado vale el \
+         BOOLEANO de presencia, y el orden no está definido sobre booleanos (E19-H01). Recibido: \
+         {r_orden:?}"
+    );
+
+    let r_lista = eval_en(&ds, "con-claves.md", &parsea("frontmatter contains \"x\""));
+    assert!(
+        matches!(
+            r_lista,
+            Err(TypeError::NotAList {
+                found: ValueType::Bool,
+                ..
+            })
+        ),
+        "`frontmatter contains \"x\"` debe ser `NotAList{{bool}}`: un operador de lista sobre el \
+         booleano de presencia. Recibido: {r_lista:?}"
+    );
+
+    // Sobre un documento SIN bloque el anclaje no resuelve: es ausencia, y la ausencia cortocircuita
+    // antes de tipar. Los mismos operadores son `Ok(false)` ahí — no una contradicción, sino el
+    // contrato de E19-H01 aplicado a un campo que ese documento no tiene.
+    assert_eq!(
+        eval_en(&ds, "sin-bloque.md", &parsea("frontmatter > 1")),
+        Ok(false),
+        "sobre un documento sin bloque, el anclaje pelado es AUSENCIA: `false` sin error, como \
+         cualquier campo que no está"
+    );
+    assert_eq!(
+        eval_en(&ds, "sin-bloque.md", &parsea("frontmatter contains \"x\"")),
+        Ok(false),
+        "…y lo mismo con el operador de lista"
+    );
+}

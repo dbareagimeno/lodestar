@@ -489,6 +489,18 @@
 # fallar con `INVALID_SCHEMA: missing field …`. Redacción, sin cambio de forma: los dos campos ya se
 # declaraban opcionales.
 
+# E29-H04 (2026-08-06, `decisiones §23/A-04`): los operadores de AFIJO (`starts_with`/`ends_with`)
+# sobre un campo —o un literal— que no es string dejan de responder `false` en silencio y pasan a ser
+# un TYPE ERROR más, con el mismo trato que E26-H08 dio al orden: `INVALID_SCHEMA` con el
+# diagnóstico del core en `knowledge_search`, y ABORTO del plan en la selección masiva de
+# `change_plan`. El catálogo de type errors del lenguaje pasa de dos casos a TRES (orden cruzado ·
+# operador de lista sobre un no-lista · operador de texto sobre un no-string) y el de `ErrorCode`
+# NO se abre: sigue en 17 filas. Cambio de comportamiento observable para cualquier cliente
+# existente: `priority starts_with "3"` sobre un `priority: 3` numérico devolvía una lista
+# RECORTADA —los documentos con ese campo textual— y hoy es un error (caso G1-20 del testbench).
+# Sin cambio: la ausencia del campo sigue siendo `false`, y `starts_with`/`ends_with` sobre strings
+# siguen casando prefijo/sufijo con su `false` legítimo.
+
 meta:
   fachada: lodestar-mcp (JSON-RPC por stdio; stdout puro, logs a stderr)
   fuente_registro: crates/lodestar-mcp/src/tools.rs        # tools::list()
@@ -641,7 +653,7 @@ tools:
       - { nombre: cursor, tipo: string, requerido: false, semantica: "cursor opaco (offset codificado en hex) devuelto en nextCursor" }
     retorno: "SearchResults (lodestar_app): { results: [SearchResult], nextCursor, totalApproximate } — json directo, sin envelope. SearchResult NUNCA lleva body; desde E19-H05 tampoco los campos privilegiados OKF type/status/description/tags — solo path, title (derivado), snippet, score, revision (+ id, siempre ausente en v2), y desde E23-H11 `frontmatter` (solo si se pidió algo en `include`: el mapa de los field paths proyectados)"
     output_schema: "sí — schemars::schema_for!(SearchResults), vía lodestar_app::schemas::knowledge_search_schema()"
-    errores: ["INVALID_SCHEMA (un `where`/`filter` malformado, con el diagnóstico del parser del core en el mensaje — E24-H10/E26-H07; una entrada de `include` que no sea «frontmatter.<fieldPath>» válida — E23-H11, se rechaza en el despachador, antes de tocar el workspace, y NO devuelve página de resultados; desde E26-H08 un TYPE ERROR de evaluación: comparar un campo con un literal de tipo incompatible, p. ej. `priority >= \"high\"` sobre `priority: 2`; y los VALORES declarados fuera de rango o de tipo — `text`/`where`/`cursor` que no sean cadena, `limit` fuera de [1, 100] — E24-H09)", "WorkspaceError"]
+    errores: ["INVALID_SCHEMA (un `where`/`filter` malformado, con el diagnóstico del parser del core en el mensaje — E24-H10/E26-H07; una entrada de `include` que no sea «frontmatter.<fieldPath>» válida — E23-H11, se rechaza en el despachador, antes de tocar el workspace, y NO devuelve página de resultados; desde E26-H08 un TYPE ERROR de evaluación: comparar un campo con un literal de tipo incompatible, p. ej. `priority >= \"high\"` sobre `priority: 2`, y desde E29-H04 también un operador de TEXTO sobre un valor que no es string, p. ej. `priority starts_with \"3\"` sobre `priority: 3`; y los VALORES declarados fuera de rango o de tipo — `text`/`where`/`cursor` que no sean cadena, `limit` fuera de [1, 100] — E24-H09)", "WorkspaceError"]
     semantica: >-
       Localiza documentos por texto libre y por el lenguaje de consulta tipado (where/filter), con
       snippet compacto y `revision` (DocumentRevision), sin devolver cuerpos completos. El filtrado
@@ -653,10 +665,17 @@ tools:
       mentir al agente, un criterio alternativo rompería el cursor-offset, que se apoya en que el
       orden dependa solo del contenido.
       Un error de TIPO durante la evaluación aborta la consulta con INVALID_SCHEMA nombrando
-      campo, operador, los dos tipos y el DOCUMENTO donde chocaron (E26-H08). Hasta v0.4.0 EXCLUÍA
-      el documento en silencio, así que la respuesta era una lista recortada indistinguible de la
-      correcta, decidida documento a documento. No casar (Ok(false)) sigue siendo ausencia, no
-      error, y un campo ausente tampoco es error. El error se decide sobre el ORDEN TOTAL de
+      campo, operador, el/los tipo(s) implicados y el DOCUMENTO donde chocaron (E26-H08). Hasta
+      v0.4.0 EXCLUÍA el documento en silencio, así que la respuesta era una lista recortada
+      indistinguible de la correcta, decidida documento a documento. Son TRES los casos (E29-H04):
+      (1) ORDEN CRUZADO — `>`/`>=`/`<`/`<=` fuera de number-vs-number o string-vs-string; (2)
+      OPERADOR DE LISTA sobre un no-lista — `contains` sobre un escalar no string,
+      `contains_any`/`contains_all` sobre cualquier no-lista; (3) OPERADOR DE TEXTO sobre un
+      no-string — `starts_with`/`ends_with` con el CAMPO o el LITERAL de otro tipo (hasta v0.5.0
+      devolvía `false`, así que `priority starts_with "3"` sobre un `priority: 3` numérico servía la
+      lista recortada de los documentos con ese campo textual: caso G1-20 del testbench,
+      `decisiones §23/A-04`). No casar (Ok(false)) sigue siendo ausencia, no error, y un campo
+      ausente tampoco es error. El error se decide sobre el ORDEN TOTAL de
       Analysis::documents (se reporta el PRIMER documento que yerra) y ANTES de aplicar `text` y
       `limit`/`cursor`: es un error de la CONSULTA, no del subconjunto, así que ni un `text` más
       estrecho ni una página más pequeña lo tapan — la misma consulta sobre el mismo workspace da
@@ -798,7 +817,7 @@ tools:
       - { nombre: policy, tipo: object, requerido: false, semantica: "{ requireValidResult?, allowWarnings? } (PlanPolicy, E12-H04); por defecto exige conformidad y permite warnings. Cada campo es independientemente opcional (E29-H02, `decisiones §19(b)`): un objeto PARCIAL —una sola clave, o incluso «policy: {}»— completa el campo omitido con su default, igual que omitir «policy» entera; hasta v0.5.0 el `Deserialize` de PlanPolicy exigía las DOS claves si el objeto estaba presente y una policy parcial daba INVALID_SCHEMA «missing field …» pese a que este contrato ya declaraba los dos campos opcionales" }
     retorno: "PlanResult (lodestar_app): { changeSetId, baseWorkspaceRevision, planHash, canApply, expiresAt, normalizedOperations: [NormalizedOperation], risk, semanticDiff, impact: { affectedDocuments, affectedCount }, capturedRevisions: { «path»: «blake3:…» }, diagnosticsBefore, diagnosticsAfter } — json directo, sin envelope. `capturedRevisions` (E21-H02) lleva una entrada por documento de una selección masiva (su DocumentRevision, el snapshot de §Fase 12); vacío {} en la forma-array"
     output_schema: "sí — schemars::schema_for!(PlanResult), vía lodestar_app::schemas::change_plan_schema()"
-    errores: ["REVISION_CONFLICT (workspace o documento cambiado)", "INVALID_SCHEMA (op desconocida o parámetro inválido; un `where`/`filter` de `selection` malformado, CON el diagnóstico del parser del core en el mensaje — E26-H07; hasta v0.4.0 `build_selection_expression` lo descartaba con `map_err(|_| …)` y la misma consulta se diagnosticaba por knowledge_search y se callaba por change_plan; y un TYPE ERROR al evaluar `selection.where`/`selection.filter` — E26-H08: una selección masiva ya no salta documentos en silencio, y el error es el MISMO código y el MISMO texto que daría knowledge_search con esa consulta)", "DOCUMENT_NOT_FOUND (objetivo de normalización inexistente)", "DOCUMENT_ALREADY_EXISTS (E28-H02: create sobre un path ya ocupado por un documento existente; move cuyo «to» ya está ocupado. Simétrico de DOCUMENT_NOT_FOUND —la dirección contraria— y el mensaje NOMBRA el path colisionado. Hasta v0.5.0 no había guard: el plan salía con canApply:true y el apply PISABA el documento existente sin un solo diagnóstico. Un move con from == to no es colisión: sigue siendo el no-op válido de siempre. E28-H04: el mismo código cubre las colisiones INTRA-PLAN —dos ops del mismo change set que reclaman el path— porque el guard consulta la ocupación acumulada; liberar y reocupar en el mismo plan NO es colisión)", "INBOUND_LINKS_EXIST (delete «reject» con entrantes)", "PERMISSION_DENIED (path-traversal)", "RECOVERY_FAILED (E25-H02: la recuperación transparente del paso (0) —E24-H03— no pudo restaurar una transacción interrumpida porque sus copias no verifican; su journal y sus copias quedan en .lodestar/runtime/journal/quarantine/<txnId>/ y el mensaje nombra la ruta; la SIGUIENTE llamada ya no encuentra recuperación pendiente)", "INTERNAL_IO_ERROR (carga de config)", "WorkspaceError"]
+    errores: ["REVISION_CONFLICT (workspace o documento cambiado)", "INVALID_SCHEMA (op desconocida o parámetro inválido; un `where`/`filter` de `selection` malformado, CON el diagnóstico del parser del core en el mensaje — E26-H07; hasta v0.4.0 `build_selection_expression` lo descartaba con `map_err(|_| …)` y la misma consulta se diagnosticaba por knowledge_search y se callaba por change_plan; y un TYPE ERROR al evaluar `selection.where`/`selection.filter` — E26-H08: una selección masiva ya no salta documentos en silencio, y el error es el MISMO código y el MISMO texto que daría knowledge_search con esa consulta; desde E29-H04 los TRES casos de type error del lenguaje —orden cruzado, operador de lista sobre un no-lista y operador de TEXTO (`starts_with`/`ends_with`) sobre un no-string— abortan igual)", "DOCUMENT_NOT_FOUND (objetivo de normalización inexistente)", "DOCUMENT_ALREADY_EXISTS (E28-H02: create sobre un path ya ocupado por un documento existente; move cuyo «to» ya está ocupado. Simétrico de DOCUMENT_NOT_FOUND —la dirección contraria— y el mensaje NOMBRA el path colisionado. Hasta v0.5.0 no había guard: el plan salía con canApply:true y el apply PISABA el documento existente sin un solo diagnóstico. Un move con from == to no es colisión: sigue siendo el no-op válido de siempre. E28-H04: el mismo código cubre las colisiones INTRA-PLAN —dos ops del mismo change set que reclaman el path— porque el guard consulta la ocupación acumulada; liberar y reocupar en el mismo plan NO es colisión)", "INBOUND_LINKS_EXIST (delete «reject» con entrantes)", "PERMISSION_DENIED (path-traversal)", "RECOVERY_FAILED (E25-H02: la recuperación transparente del paso (0) —E24-H03— no pudo restaurar una transacción interrumpida porque sus copias no verifican; su journal y sus copias quedan en .lodestar/runtime/journal/quarantine/<txnId>/ y el mensaje nombra la ruta; la SIGUIENTE llamada ya no encuentra recuperación pendiente)", "INTERNAL_IO_ERROR (carga de config)", "WorkspaceError"]
     semantica: >-
       Orquesta un plan de cambios SIN escribir (invariante #1; aplicar es change_apply, E13): toda
       la simulación es sobre un DocumentSet en memoria. Acepta DOS formas de wire: la forma-ARRAY
@@ -807,7 +826,10 @@ tools:
       documento seleccionado, capturando su DocumentRevision en «capturedRevisions» (snapshot de
       §Fase 12); una selección que no casa nada da un plan vacío sin error, pero un TYPE ERROR al
       evaluar la consulta ABORTA el plan (INVALID_SCHEMA, E26-H08: hasta v0.4.0 el documento que
-      erraba se saltaba en silencio y el plan afectaba a menos ficheros de los seleccionados). La
+      erraba se saltaba en silencio y el plan afectaba a menos ficheros de los seleccionados). Eso
+      vale para los TRES casos de type error del lenguaje, no solo para el orden: desde E29-H04 un
+      `starts_with`/`ends_with` sobre un valor que no es string también aborta, donde hasta v0.5.0
+      recortaba la selección en silencio y presentaba el plan resultante con canApply:true. La
       consulta decide el conjunto recorriendo el ORDEN TOTAL de Analysis::documents ANTES de
       expandir ninguna operación, así que el documento nombrado en el error no depende del orden en
       que el planificador toque los documentos. Verifica

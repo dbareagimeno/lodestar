@@ -50,6 +50,8 @@ pub struct EvalDocument<'a> {
 ///   error.
 /// - `contains`/`contains_any`/`contains_all` exigen que el campo sea lista (excepción: `contains`
 ///   sobre un string es subcadena); sobre un escalar no string es `Err(TypeError::NotAList)`.
+/// - `starts_with`/`ends_with` son exclusivos de strings: un campo (o un literal) de otro tipo es
+///   `Err(TypeError::NotAString)`, **no** `Ok(false)` (E29-H04).
 /// - Un campo **inexistente** en una comparación es `Ok(false)`, nunca error.
 /// - El primer segmento del campo despacha el namespace: `document.*`/`graph.*` se resuelven de
 ///   [`EvalDocument`]/`analysis`; cualquier otro va al frontmatter (E19-H04).
@@ -116,7 +118,7 @@ fn eval_comparison(
         C::Ne => Ok(!valores_iguales(valor, literal)),
         C::Gt | C::Ge | C::Lt | C::Le => eval_orden(field, operator, valor, literal),
         C::Contains => eval_contains(field, operator, valor, literal),
-        C::StartsWith | C::EndsWith => Ok(eval_afijo(operator, valor, literal)),
+        C::StartsWith | C::EndsWith => eval_afijo(field, operator, valor, literal),
         C::ContainsAny | C::ContainsAll => eval_contains_lista(field, operator, valor, literal),
     }
 }
@@ -359,22 +361,41 @@ fn eval_contains(
     }
 }
 
-/// `starts_with`/`ends_with`: operadores de texto exclusivos de strings. Con un campo no-string o un
-/// literal no-string no hay prefijo/sufijo que comprobar → `false` (no hay una variante de
-/// [`TypeError`] «no es string», y H01 no la introduce; ningún test lo ejercita).
+/// `starts_with`/`ends_with`: operadores de texto **exclusivos de strings**. Con un campo no-string
+/// —o con un literal no-string— no hay prefijo/sufijo que comprobar y es
+/// [`TypeError::NotAString`], **no** `false` (E29-H04, `decisiones §23/A-04`).
+///
+/// Hasta v0.5.0 esta función devolvía `bool` y su hueco estaba declarado en este mismo doc-comment:
+/// un campo no-string caía en el mismo `false` que «no casa», así que `priority starts_with "3"`
+/// sobre `priority: 3` devolvía una lista **recortada** —indistinguible de la correcta— en vez de
+/// decir que la comparación no está definida (caso G1-20 del testbench). Es el mismo defecto que
+/// E26-H08 cerró para el operador de ORDEN, aquí para los dos afijos.
+///
+/// Se juzga primero el **campo** y después el literal: cuando los dos son no-string se reporta el
+/// del campo, que es el dato del workspace que el agente no controla desde la consulta. Un campo
+/// **inexistente** no llega aquí (la ausencia cortocircuita en [`eval_comparison`]).
 fn eval_afijo(
+    field: &FieldPath,
     operator: ComparisonOperator,
     valor: &serde_yaml::Value,
     literal: &QueryValue,
-) -> bool {
-    let (serde_yaml::Value::String(texto), QueryValue::String(aguja)) = (valor, literal) else {
-        return false;
+) -> Result<bool, TypeError> {
+    let no_es_string = |found: ValueType| TypeError::NotAString {
+        field: field.clone(),
+        operator,
+        found,
     };
-    match operator {
+    let serde_yaml::Value::String(texto) = valor else {
+        return Err(no_es_string(ValueType::of(valor)));
+    };
+    let QueryValue::String(aguja) = literal else {
+        return Err(no_es_string(tipo_de_literal(literal)));
+    };
+    Ok(match operator {
         ComparisonOperator::StartsWith => texto.starts_with(aguja),
         ComparisonOperator::EndsWith => texto.ends_with(aguja),
         _ => unreachable!("eval_afijo solo se invoca con starts_with/ends_with"),
-    }
+    })
 }
 
 /// `contains_any`/`contains_all`: **exclusivos de listas**. Sobre cualquier no-lista —incluido un
@@ -408,7 +429,8 @@ fn eval_contains_lista(
 }
 
 /// El [`ValueType`] de un literal de consulta (el reflejo de [`ValueType::of`] para el operando
-/// derecho), para poblar el `value_type` de un [`TypeError::OrderNotDefined`].
+/// derecho), para poblar el `value_type` de un [`TypeError::OrderNotDefined`] y el `found` de un
+/// [`TypeError::NotAString`] cuyo operando culpable es el literal (E29-H04).
 fn tipo_de_literal(literal: &QueryValue) -> ValueType {
     match literal {
         QueryValue::Null => ValueType::Null,

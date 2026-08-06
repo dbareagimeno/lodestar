@@ -1885,6 +1885,26 @@ pub enum TypeError {
         /// El tipo que tenía el campo (nunca `List`).
         found: ValueType,
     },
+    /// Un operador de **texto de afijo** (`starts_with`/`ends_with`) cuyo operando no es un string
+    /// (E29-H04, `decisiones §23/A-04`). Son operadores **exclusivos de strings**: un número, un
+    /// booleano, `null`, una lista o un mapa no tienen prefijo ni sufijo que comprobar, y el
+    /// lenguaje no coerce (`§20.8`), así que devolver `false` era una respuesta silenciosamente
+    /// equivocada —el caso G1-20 del testbench: 7 documentos con `priority: 3` desaparecían de
+    /// `priority starts_with "3"` sin un aviso— y no un veredicto.
+    ///
+    /// Cubre los **dos** operandos: el campo no-string (`priority starts_with "3"` sobre
+    /// `priority: 3`) y el literal no-string (`status starts_with 3`). Cuando fallan los dos, el que
+    /// se reporta es el **campo**, por ser el que el agente no controla desde la consulta.
+    ///
+    /// Un campo **inexistente** no llega aquí: la ausencia es `false` (mismo contrato que
+    /// [`TypeError::NotAList`]).
+    NotAString {
+        field: FieldPath,
+        operator: ComparisonOperator,
+        /// El tipo del operando que **no** es string (nunca `String`): el del campo, o —si el campo
+        /// sí lo era— el del literal.
+        found: ValueType,
+    },
 }
 
 // ---------------------------------------------------------------------------

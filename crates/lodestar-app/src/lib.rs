@@ -668,9 +668,11 @@ impl App {
     /// diagnóstico del parser del core (E24-H10, E26-H07).
     ///
     /// **Un [`TypeError`] al evaluar ABORTA la consulta** (E26-H08): una expresión bien formada
-    /// sobre datos de otro tipo (p. ej. `priority >= "high"` sobre un `priority` numérico) devuelve
-    /// `Err(AppError)` con `INVALID_SCHEMA` y un mensaje que nombra campo, operador, los dos tipos y
-    /// el documento (`error_de_tipo`). Hasta v0.4.0 ese documento se **excluía en silencio** —el
+    /// sobre datos de otro tipo (p. ej. `priority >= "high"` sobre un `priority` numérico, o
+    /// `priority starts_with "3"` sobre ese mismo campo numérico desde E29-H04) devuelve
+    /// `Err(AppError)` con `INVALID_SCHEMA` y un mensaje que nombra campo, operador, los tipos
+    /// implicados y el documento (`error_de_tipo`). Hasta v0.4.0 ese documento se **excluía en
+    /// silencio** —el
     /// criterio de E19-H04: «el corpus es heterogéneo y un tipo incompatible no debe tumbar la
     /// consulta sobre los demás»—, y el precio era una lista recortada, decidida documento a
     /// documento, indistinguible de la correcta; sobre un corpus homogéneo, un `[]` indistinguible
@@ -3764,7 +3766,12 @@ fn evalua_documento(
 
 /// Traduce un [`TypeError`] del evaluador —el que produce una consulta bien formada sobre datos de
 /// otro tipo— al [`AppError`] de superficie: `INVALID_SCHEMA` con un mensaje que nombra **el campo,
-/// el operador, los dos tipos y el documento** donde chocaron, más cómo salir del error.
+/// el operador, el/los tipo(s) implicados y el documento** donde chocaron, más cómo salir del error.
+///
+/// Son **tres** las variantes desde E29-H04 —orden cruzado, operador de lista sobre un no-lista y
+/// operador de texto (`starts_with`/`ends_with`) sobre un no-string—, y el `match` de abajo es
+/// **exhaustivo a propósito**: es el mecanismo que garantiza que ningún `TypeError` nuevo del core
+/// llegue al wire sin mensaje propio.
 ///
 /// Hasta v0.4.0 este `Err` se descartaba en los dos consumidores con el mismo `continue` que un
 /// `Ok(false)`, así que `priority >= "high"` sobre un `priority` numérico devolvía `[]` —o una lista
@@ -3803,8 +3810,22 @@ fn error_de_tipo(err: &TypeError, path: &RelPath) -> AppError {
             nombre_de_wire(found),
             nombre_de_wire(operator),
         ),
-        // El enum del core es cerrado (dos variantes): una tercera rompería la compilación aquí,
-        // que es justo lo que se quiere — un `TypeError` nuevo sin mensaje sería el defecto de vuelta.
+        TypeError::NotAString {
+            field,
+            operator,
+            found,
+        } => format!(
+            "en «{}» la comparación sobre el campo «{field}» tiene un operando de tipo {} y el \
+             operador de texto «{}» exige un string a los DOS lados (el campo y el literal): lo que \
+             no es texto no tiene prefijo ni sufijo que comprobar, y el lenguaje no coerce tipos \
+             (§20.8)",
+            path.as_str(),
+            nombre_de_wire(found),
+            nombre_de_wire(operator),
+        ),
+        // El match es EXHAUSTIVO a propósito (E26-H08): una variante nueva del enum del core rompe
+        // la compilación aquí, que es justo lo que se quiere — un `TypeError` sin mensaje propio
+        // sería el defecto de vuelta. Son tres desde E29-H04.
     };
     // La salida sugerida tiene que RESOLVER el error que se reporta. `has(campo)` no vale: la
     // ausencia nunca produce un `TypeError` (cortocircuita antes de mirar el tipo), así que el
