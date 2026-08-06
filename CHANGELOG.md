@@ -7,7 +7,54 @@ y el proyecto sigue [Versionado Semántico](https://semver.org/lang/es/).
 
 ## [No publicado]
 
+### Añadido
+
+- **`DOCUMENT_ALREADY_EXISTS`: el catálogo de errores pasa de 16 a 17 códigos** (`E28-H02`, ampliado
+  en `E28-H04`; épica [`epica-28`](requirements/epica-28-defectos-destructivos-testbench.md)). Es el
+  simétrico exacto de `DOCUMENT_NOT_FOUND` —los dos describen un desajuste entre lo que la operación
+  asume sobre la existencia de un `path` y lo que hay en el workspace— y lo emite `change_plan`
+  cuando una operación que **crea** un path (un `create`, o el `to` de un `move`) lo encuentra ya
+  ocupado. El mensaje **nombra** el path colisionado.
+
+  **Por qué hacía falta un código nuevo** (defecto A-05 del testbench homelab,
+  [`decisiones §23`](decisiones/23-hallazgos-testbench-homelab.md)): hasta v0.5.0 no había guard
+  ninguno. `create` sobre un documento existente y `move` hacia un destino ocupado salían con
+  `canApply: true` y el apply **pisaba el documento sin un solo diagnóstico** — la vía directa a
+  perder la única fuente de verdad (invariante #1). Reusar `DOCUMENT_NOT_FOUND` habría mandado al
+  agente a buscar un documento que justamente **sí** está.
+
+  Cubre las dos familias de colisión con el mismo criterio (`core::plan::EstadoOcupacion`, una sola
+  verdad computada):
+  - **contra disco** (`E28-H02`): el path ya tiene documento en el workspace;
+  - **intra-plan** (`E28-H04`): el path lo ocupó una operación **anterior del mismo change set**
+    (`[move a→final, move b→final]`, `[create X, move b→X]`, `[create X, create X]`).
+
+  `move` con `from == to` **no** es colisión: sigue siendo el no-op válido de siempre.
+
 ### Corregido
+
+- **Un plan con varias operaciones se normalizaba contra el workspace de partida, no contra lo que
+  el propio plan iba dejando** (`E28-H04`). El bucle de `change_plan` pasaba el **mismo**
+  `DocumentSet` inicial a cada operación, así que ninguna veía el efecto de las anteriores. De ahí
+  salían dos defectos opuestos, los dos reproducidos por JSON-RPC contra el binario:
+  - **Falsos negativos destructivos**: `[move a→final, move b→final]` salía con `risk: low` y, al
+    aplicarse, dejaba en disco un único `final.md` con el cuerpo de `b` — el documento `a`
+    desaparecía sin diagnóstico. Igual `[create X, move b→X]` (el `move` pisaba el `create`) y
+    `[create X, create X]` (ganaba el segundo en silencio).
+  - **Falsos positivos**: `[delete X, create X]` y `[move A→B, create A]` —liberar un path y
+    reocuparlo dentro del mismo plan, idiomas legítimos que funcionaban antes de `E28-H02`— pasaron
+    a rechazarse con `DOCUMENT_ALREADY_EXISTS` porque el guard veía el path todavía ocupado en el
+    estado inicial.
+
+  Ahora la normalización lleva un **estado de ocupación acumulado**: arranca del disco y cada
+  operación aceptada lo actualiza en orden (un `create`/`move.to` **ocupa**, un `delete`/`move.from`
+  **libera**). Los cinco escenarios quedan fijados por tests de wire en
+  `crates/lodestar-mcp/tests/mcp.rs` y por su mitad pura en `crates/lodestar-core/tests/core.rs`. La
+  selección masiva (`selection`+`operation`) queda fuera del acumulado a propósito: `create`/`move`
+  no son operaciones admitidas por esa vía, así que no hay secuencia que acumular.
+
+  **Fuera de alcance**: la comparación de paths sigue siendo **byte a byte**, sin normalizar caja ni
+  forma Unicode — ver [`decisiones §24`](decisiones/24-equivalencia-caja-unicode.md).
 
 - **`metadata_inspect` declaraba un `outputSchema` que el spec MCP no admite, y eso tumbaba las diez
   tools.** El spec exige que todo `outputSchema` sea un JSON Schema **de tipo `object`**; el de

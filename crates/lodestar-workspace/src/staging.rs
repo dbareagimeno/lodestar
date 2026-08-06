@@ -156,12 +156,38 @@ impl Workspace {
         id: &ChangeSetId,
         result: &FileMap,
     ) -> Result<StagingDir, WorkspaceError> {
+        self.materialize_staging_en(&staging_dir_name(id), result)
+    }
+
+    /// [`Workspace::materialize_staging_result`] bajo un **`txnId` ya resuelto** en vez del
+    /// `changeSetId` (E28-H03).
+    ///
+    /// Es lo que usa la transacción desde que la identidad se decide en tiempo de publicación
+    /// (`Workspace::resolve_free_txn_id`): el nombre del staging tiene que ser el `txnId` EFECTIVO,
+    /// porque la convención de `crate::receipts` ata `staging/`, `recovery/`, `journal/` y
+    /// `receipts/` bajo un mismo id, y tanto el sellado como la vía COMPLETAR de la recuperación
+    /// limpian `staging/<txnId>/` por ese nombre. Con el `changeSetId` un apply que resolviera una
+    /// variante libre dejaría el árbol de staging huérfano bajo el candidato.
+    ///
+    /// El nombre del directorio pasa por el **mismo saneado** que el resto del plano de control
+    /// (`crate::receipts::sanear_nombre`, el que aplican `recovery/`, `journal/` y `receipts/`): un
+    /// `changeSetId` con `:`/`/`/`\` no puede convertir el árbol de staging en una jerarquía anidada
+    /// que ni el sellado ni la recuperación sabrían encontrar. Con ids normales (el hash hexadecimal
+    /// más sufijos de `-` y dígitos) el saneado es la identidad.
+    ///
+    /// # Errores
+    /// - [`WorkspaceError::Io`] si falla la creación de directorios o la escritura del staging.
+    pub(crate) fn materialize_staging_en(
+        &self,
+        txn_id: &str,
+        result: &FileMap,
+    ) -> Result<StagingDir, WorkspaceError> {
         let dir = self
             .root
             .join(".lodestar")
             .join("runtime")
             .join("staging")
-            .join(staging_dir_name(id));
+            .join(crate::receipts::sanear_nombre(txn_id));
 
         // Reintento idempotente: parte de un directorio limpio.
         if dir.exists() {

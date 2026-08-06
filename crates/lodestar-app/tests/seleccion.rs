@@ -404,3 +404,70 @@ fn seleccion_con_campo_ausente_sigue_expandiendo() {
          que no la tiene queda fuera SIN ruido"
     );
 }
+
+// ---------------------------------------------------------------------------
+// E28-H04 — criterio de selección masiva que E28-H02 dejó pendiente (control ANTI-VACUO).
+//
+// H02 declaró en su «Alcance» que el guard de colisión de `create`/`move` no tiene superficie que
+// tocar en la selección masiva, porque `create`/`move` NO son ops admitidas en esa vía (el contrato
+// ya lo dice: *«create/move no aplican a una selección de documentos existentes»*, y
+// `single_operation` lo hace cumplir). Ese criterio se declaró «se confirma con un criterio
+// anti-vacuo, no con lógica nueva» y se quedó sin test; la adenda de H04 lo cierra aquí.
+//
+// H04 refuerza la razón de ser de este test: su acumulado de ocupación queda deliberadamente FUERA
+// de la vía de selección (cada documento seleccionado genera como mucho una operación, y no hay
+// secuencia intra-selección que acumular). Esa afirmación solo se sostiene mientras `create`/`move`
+// sigan sin poder entrar por aquí — que es exactamente lo que este test vigila.
+//
+// **NACE VERDE, a propósito**: es un control del comportamiento YA implementado
+// (`crates/lodestar-app/src/lib.rs`, `single_operation`), no una fase roja. Su valor es que si
+// alguien admitiera `create` o `move` en masa —o cambiara el mensaje que le dice al agente por qué
+// no—, el hueco quedaría visible en lugar de abrirse en silencio.
+// ---------------------------------------------------------------------------
+
+/// `seleccion_masiva_rechaza_create_y_move` — **Dado** una selección masiva cuya `operation` pide
+/// `{"create": {…}}` o `{"move": {…}}`, **Cuando** se planifica, **Entonces** se rechaza con
+/// `INVALID_SCHEMA` y el mensaje de `single_operation`, que explica el porqué de cada una: «create»
+/// no aplica a documentos existentes y «move» necesita un destino por documento.
+#[test]
+fn seleccion_masiva_rechaza_create_y_move() {
+    let (_dir, app) = app_con_decisiones();
+
+    for (kind, params) in [
+        ("create", json!({ "path": "nuevo.md", "body": "# Nuevo\n" })),
+        ("move", json!({ "to": "archivo/destino.md" })),
+    ] {
+        let err = app
+            .change_plan(
+                None,
+                &json!({
+                    "selection": { "where": "type = \"decision\" and status = \"draft\"" },
+                    "operation": { kind: params }
+                }),
+                policy_permisiva(),
+            )
+            .expect_err(
+                "«create»/«move» no son ops admitidas en una selección masiva: pedirlas debe \
+                 rechazarse, no expandirse sobre los documentos que casan la consulta",
+            );
+
+        assert_eq!(
+            err.code,
+            ErrorCode::InvalidSchema,
+            "una op no admitida en masa es un error de FORMA de la operación, no de estado del \
+             workspace: {err}"
+        );
+        assert!(
+            err.message.contains(kind),
+            "el mensaje debe NOMBRAR la op que el agente pidió («{kind}»), para que sepa cuál de \
+             las dos claves retirar: {err}"
+        );
+        assert!(
+            err.message.contains("patch_frontmatter")
+                && err.message.contains("replace_text")
+                && err.message.contains("delete"),
+            "…y debe enumerar las que SÍ tienen sentido en masa (patch_frontmatter, replace_text, \
+             delete), que es lo que convierte el rechazo en accionable: {err}"
+        );
+    }
+}

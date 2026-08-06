@@ -30,7 +30,7 @@ use lodestar_core::types::{
     FRONTMATTER_ANCHOR,
 };
 use lodestar_core::{CoreError, DocumentSet};
-use lodestar_workspace::{transaction_id, Workspace, WorkspaceError};
+use lodestar_workspace::{revert_transaction_id, Workspace, WorkspaceError};
 
 /// Envelope común de protocolo (`ARCHITECTURE.md §19.6`, `docs/history/REFACTOR.md §13`, decisión **D3**).
 ///
@@ -111,6 +111,9 @@ pub struct ResourceLink {
 /// - `SizeGuardExceeded` → `ResultTooLarge` (guarda de tamaño excedida en una operación).
 /// - `ReplaceTextMismatch` → `InvalidSchema` (precondición de `replace_text` incumplida, E12-H05).
 /// - `NormalizeTargetNotFound` → `DocumentNotFound` (path/sección objetivo inexistente, E12-H05).
+/// - `DocumentAlreadyExists` → `DocumentAlreadyExists` (E28-H02: el destino de un `create`, o el
+///   `to` de un `move`, ya está ocupado). Es el simétrico del anterior y por eso tiene código
+///   propio: reusar `DocumentNotFound` mandaría al agente a buscar un documento que **sí** existe.
 /// - `InboundLinksExist` → `InboundLinksExist` (borrar `reject` con entrantes, E12-H06).
 /// - `RelationConstraintViolation` → `RelationConstraintViolation` (E12-H07; sin productor desde
 ///   E20-H03, ver [`CoreError`]).
@@ -132,6 +135,7 @@ pub fn error_code(err: &CoreError) -> ErrorCode {
         CoreError::SizeGuardExceeded(_) => ErrorCode::ResultTooLarge,
         CoreError::ReplaceTextMismatch(_, _) => ErrorCode::InvalidSchema,
         CoreError::NormalizeTargetNotFound(_) => ErrorCode::DocumentNotFound,
+        CoreError::DocumentAlreadyExists(_) => ErrorCode::DocumentAlreadyExists,
         CoreError::InboundLinksExist(_) => ErrorCode::InboundLinksExist,
         CoreError::RelationConstraintViolation(_) => ErrorCode::RelationConstraintViolation,
         CoreError::InvalidStatusTransition(_) => ErrorCode::InvalidSchema,
@@ -152,7 +156,7 @@ pub fn error_code(err: &CoreError) -> ErrorCode {
 /// para reusar [`error_code`] — se documenta como limitación conocida, a resolver si una historia
 /// futura decide preservar la variante en vez de aplanarla a texto. Mapeos:
 /// - `Core`/`Store`/`Io`/`NoCache` → `InternalIoError`: fallos de infraestructura/IO o
-///   precondiciones internas sin un código más específico todavía en el catálogo de 16.
+///   precondiciones internas sin un código más específico todavía en el catálogo de 17 (E28-H02).
 /// - `PermissionDenied` (E11-H04: escritura bajo un `referenceRoot`, o fuera de `writableRoots`) →
 ///   `ErrorCode::PermissionDenied`, mapeo directo por nombre (mismo caso que `error_code` con
 ///   `CoreError::InvalidRelPath`).
@@ -187,8 +191,8 @@ pub fn workspace_error_code(err: &WorkspaceError) -> ErrorCode {
 /// este tipo generaliza ese patrón a **todos** los servicios, en un solo sitio.
 ///
 /// # Lo que NO es
-/// **No** es una jerarquía paralela de códigos (invariante #4 de `CLAUDE.md`): el catálogo sigue
-/// teniendo 16 filas y viviendo **solo** en [`lodestar_core::types::ErrorCode`]. `AppError` es un
+/// **No** es una jerarquía paralela de códigos (invariante #4 de `CLAUDE.md`): el catálogo tiene
+/// 17 filas (E28-H02) y vive **solo** en [`lodestar_core::types::ErrorCode`]. `AppError` es un
 /// envoltorio de fachada —un `ErrorCode` del core + un `String`—, no un catálogo nuevo, y su
 /// `Display` compone el texto de wire `«CÓDIGO: mensaje»` con `ErrorCode::as_str()`, nunca con un
 /// literal propio.
@@ -197,7 +201,8 @@ pub fn workspace_error_code(err: &WorkspaceError) -> ErrorCode {
 /// nombres de código, de tool, de parámetro y de operación.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppError {
-    /// Código estable del catálogo de 16 (`core::types::ErrorCode`) — por él ramifica el agente.
+    /// Código estable del catálogo de 17 (`core::types::ErrorCode`, E28-H02) — por él ramifica el
+    /// agente.
     pub code: ErrorCode,
     /// Mensaje accionable en español: qué parámetro, qué valor y qué se esperaba.
     pub message: String,
@@ -255,7 +260,7 @@ impl From<&CoreError> for AppError {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ErrorEnvelope {
-    /// Código estable del catálogo de 16 (`core::types::ErrorCode`).
+    /// Código estable del catálogo de 17 (`core::types::ErrorCode`, E28-H02).
     pub code: ErrorCode,
     /// Mensaje legible, en español, para un humano o un agente.
     pub message: String,
@@ -1734,6 +1739,15 @@ impl App {
                 )
             })?;
             let mut normalized: Vec<NormalizedOperation> = Vec::new();
+            // E28-H04: la ocupación de paths con la que se juzgan las colisiones de existencia es
+            // ACUMULADA — arranca del disco y cada op ya normalizada la actualiza (un `create`/
+            // `move.to` ocupa, un `delete`/`move.from` libera). Hasta H04 todas las ops se
+            // normalizaban contra el `doc_set` de partida, que deja de ser cierto a la segunda:
+            // `[move a→final, move b→final]` aplicaba destruyendo `a` en silencio y
+            // `[delete X, create X]` se rechazaba pese a ser legítimo. El criterio de colisión es el
+            // mismo que el de una sola operación (`plan::EstadoOcupacion`, invariante #3): lo que
+            // cambia es contra qué estado se pregunta.
+            let mut ocupacion = plan::EstadoOcupacion::nueva(files);
             for raw in ops_arr {
                 if let Some(expected) = raw.get("expectedRevision").and_then(Value::as_str) {
                     let target = op_target_path(raw)?;
@@ -1755,10 +1769,24 @@ impl App {
                         ));
                     }
                 }
-                normalized.extend(normalize_raw_op(&doc_set, raw)?);
+                let ops = normalize_raw_op(&doc_set, &ocupacion, raw)?;
+                for op in &ops {
+                    ocupacion.aplicar(op);
+                }
+                normalized.extend(ops);
             }
             (normalized, BTreeMap::new())
         };
+
+        // (3-bis) Red de seguridad de E28-H04 sobre la secuencia YA normalizada, venga del array de
+        //     ops o de la selección masiva: ninguna operación puede ocupar un path que otra del
+        //     mismo plan tenga ocupado. Con el acumulado del bucle de arriba esto no dispara nunca
+        //     —cada op ya se juzgó contra el estado que veía—, pero deja el veredicto verificado
+        //     sobre el plan COMPLETO, que es lo que se persiste y se aplica: si alguna vía futura
+        //     construyera `normalized` sin acumular, la colisión se ve aquí y no en disco. Comparte
+        //     criterio con los guards (`plan::EstadoOcupacion`), así que no puede divergir de ellos.
+        plan::assert_sin_colisiones_intra_plan(files, &normalized)
+            .map_err(|e| AppError::from(&e))?;
 
         // (4) DocumentSet hipotético + análisis del plan (todo en memoria, sin escribir).
         let after_files =
@@ -1890,6 +1918,14 @@ impl App {
     /// 6. Devuelve un [`ApplyResult`] (proyección de servicio) con `applied:true`, las revisiones
     ///    antes/después, los paths cambiados, el `semanticDiff` del plan y la conformidad post-apply.
     ///
+    /// # El `receiptId` lo decide la transacción (E28-H03)
+    /// El `receiptId` devuelto es el `txnId` **efectivo** con el que la publicación ocurrió, y viene
+    /// del paso (4): como el `changeSetId` es determinista, replanificar el mismo cambio sobre la
+    /// misma base repite el `txnId` candidato, y publicar bajo él borraba el `recovery/`/`receipts/`
+    /// de la transacción anterior. La mecánica resuelve ahora la primera variante libre bajo el lock,
+    /// así que **dos applies del mismo `changeSetId` devuelven `receiptId` distintos** y ninguno pisa
+    /// al otro. Recalcularlo desde el `changeSetId` fuera de aquí ya no es fiable.
+    ///
     /// # Publicar implica recibo (E25-H04)
     /// El **punto de no retorno** es el primer rename del paso (4). A partir de ahí el conocimiento ya
     /// cambió, así que este método no puede devolver `Err` por nada de lo que venga después: los pasos
@@ -1970,16 +2006,43 @@ impl App {
             ));
         }
 
+        // (3-bis) Red de colisión intra-plan EN EL LADO QUE ESCRIBE (E28-H04, reserva). El plan es un
+        //     artefacto DURABLE con TTL propio, no un valor en memoria: que `change_plan` haya
+        //     juzgado las operaciones entre sí no protege a este camino, porque el fichero pudo
+        //     escribirlo un binario anterior al guard —o cualquier vía futura que construyera
+        //     `normalizedOperations` sin acumular ocupación—. Sin esto, un plan persistido con
+        //     `[move a→final, move b→final]` publica y `a.md` desaparece en silencio: los pasos (1)
+        //     a (3) juzgan caducidad, revisión y `planHash`, y ninguno de los tres mira una
+        //     operación contra otra. Es el MISMO juicio del core que usa `change_plan`
+        //     (`plan::EstadoOcupacion`, invariante #3), no un criterio nuevo, y se hace ANTES de la
+        //     primera escritura: el disco queda intacto.
+        plan::assert_sin_colisiones_intra_plan(doc_set.files(), &plan.normalized_operations)
+            .map_err(|e| AppError::from(&e))?;
+
         // (4) Publicar por el único escritor (staging → lock → backup → journal + REGISTRO DURABLE DEL
         //     RECIBO → renames). El guard `assert_writable` de la transacción rechaza fuera de
         //     `writableRoots` → PERMISSION_DENIED antes de tocar el canónico. Se presta el
         //     `semanticDiff` del plan porque es la única pieza del recibo que la mecánica de disco no
         //     puede conocer (E25-H04): con ella, el recibo queda persistido ANTES del primer rename y
         //     una publicación no puede volverse irreversible por morirse el proceso después.
+        //
+        //     E28-H03 — LA IDENTIDAD LA DECIDE LA TRANSACCIÓN, NO ESTA FACHADA. El `txnId` (y con él
+        //     el `receiptId`) ya no se deriva aquí del `changeSetId`: la transacción lo resuelve bajo
+        //     el lock contra el material vigente en disco y lo devuelve. Derivarlo fuera era correcto
+        //     mientras un `changeSetId` identificara a lo sumo una transacción publicada, y deja de
+        //     serlo en cuanto se replanifica el mismo cambio sobre la misma base: el hash es
+        //     determinista, así que el segundo apply reutilizaba el id del primero y sobrescribía su
+        //     `recovery/`/`receipts/` — las únicas copias con las que aquél se deshacía.
         let change_set = plan_to_change_set(&plan);
-        let (previous, result, changed_paths) = self
+        let publicada = self
             .workspace
             .apply_transaction_con_recibo(&change_set, Some(&plan.semantic_diff))?;
+        let receipt_id = ReceiptId(publicada.txn_id);
+        let (previous, result, changed_paths) = (
+            publicada.previous,
+            publicada.result,
+            publicada.changed_paths,
+        );
 
         // Punto de caída de la FACHADA (E25-H04): entre el retorno de la transacción y el recibo. Es la
         // ventana en la que el canónico ya está publicado, el lock ya está soltado y —hasta esta
@@ -1995,16 +2058,17 @@ impl App {
             ));
         }
 
-        // (5) Receipt de la aplicación completada + retención (E13-H07). El `receiptId` es el mismo
-        //     id de transacción derivado del `changeSetId`, así el receipt localiza sus copias de
-        //     recuperación por convención de nombre.
+        // (5) Receipt de la aplicación completada + retención (E13-H07). El `receiptId` es el `txnId`
+        //     EFECTIVO con el que la transacción publicó (E28-H03), así el receipt localiza sus copias
+        //     de recuperación por convención de nombre. Hasta E28-H03 se recalculaba aquí desde el
+        //     `changeSetId`; hoy eso nombraría el candidato y no la transacción, porque la identidad
+        //     se resuelve bajo el lock contra el material vigente.
         //
         //     DESDE AQUÍ TODO ES BEST-EFFORT (E25-H04): estos pasos corren con el canónico ya publicado,
         //     así que un `Err` suyo diría al agente que no se aplicó nada sobre algo que sí se aplicó —y
         //     sin salida, porque `change_revert` respondería `PLAN_EXPIRED` y un segundo `change_apply`
         //     del mismo plan, `PLAN_STALE`—. La transacción ya dejó el recibo persistido y promovido; esta
         //     escritura es la red de seguridad de que existe también si su promoción no pudo completarse.
-        let receipt_id = ReceiptId(transaction_id(&plan.change_set_id));
         let receipt = ChangeReceipt {
             id: receipt_id.clone(),
             change_set_id: plan.change_set_id.clone(),
@@ -2091,6 +2155,24 @@ impl App {
     /// `workspaceRevision` == `previousRevision` del apply, el estado restaurado) y los paths
     /// restaurados.
     ///
+    /// # Revertir una reversión (E28-H01, E28-H03)
+    ///
+    /// Es una operación como cualquier otra, y **componible**: el recibo que se revierte puede ser el
+    /// de una reversión previa. La identidad de la inversa se deriva del `receiptId` que se deshace
+    /// —no del `changeSetId` que ese recibo lleva dentro, que las reversiones **heredan** de la
+    /// transacción original— por [`lodestar_workspace::revert_transaction_id`], de modo que cada
+    /// eslabón de la cadena (`X` → `X-revert` → `X-revert-2` → …) tiene su propio journal, sus propias
+    /// copias y su propio recibo. Hasta E28-H01, derivar del `changeSetId` heredado hacía que revertir
+    /// un `-revert` restaurase desde el árbol pre-apply —ya vigente: un no-op declarado exitoso— y
+    /// sobrescribiese su propio material de recuperación, destruyendo el estado *redo* de forma
+    /// permanente y silenciosa (defecto M-01 del testbench homelab).
+    ///
+    /// Ese id derivado es un **candidato** (E28-H03): la mecánica lo resuelve bajo el lock contra el
+    /// material vigente y publica bajo la primera variante libre, así que un `X-revert` ya ocupado
+    /// —por ejemplo por la reversión de un apply anterior con el mismo `changeSetId`— ya no deja la
+    /// transacción sin salida. El `receiptId` que devuelve [`RevertResult`] es el **efectivo**: es el
+    /// que localiza el recibo, y puede no coincidir con lo que el llamante derivaría por su cuenta.
+    ///
     /// # Auditoría (E13-H10, `ARCHITECTURE.md §19.7`)
     /// Mismo wrapper que [`App::change_apply`]: audita éxito y fallo (incluidos los rechazos de los
     /// pasos 1-3) antes de devolver, sin alterar la semántica. El `changeSetId` auditado es el del
@@ -2165,14 +2247,40 @@ impl App {
         //     escritor puede tocar un `.md` afectado y la reversión le escribiría la copia respaldada
         //     encima. Y el `semanticDiff` del recibo original se presta para que la inversa registre su
         //     propio recibo con su journal, ANTES de su punto de no retorno.
-        let orig_txn_id = transaction_id(&receipt.change_set_id);
-        let revert_txn_id = format!("{orig_txn_id}-revert");
-        let (previous, result, changed_paths) = self.workspace.revert_transaction_con_recibo(
+        //
+        //     E28-H01 — LA IDENTIDAD SE DERIVA DEL RECIBO, NO DEL `changeSetId` QUE LLEVA DENTRO.
+        //     El `txnId` de la transacción que se deshace **es** el `receiptId` de su recibo: así lo
+        //     nombran tanto `change_apply` (paso 5) como esta misma función, y de ahí que un mismo id
+        //     localice su journal, su staging, sus copias y su recibo. Derivarlo del `changeSetId`
+        //     —lo que se hacía hasta aquí— era correcto solo para el primer escalón de la cadena: un
+        //     recibo `X-revert` **hereda** el `changeSetId` original, así que revertirlo recalculaba
+        //     `orig_txn_id = X` y restauraba desde `recovery/X/` (el árbol pre-apply, ya vigente: un
+        //     no-op) mientras `revert_txn_id` volvía a dar `X-revert` y la inversa se sobrescribía a
+        //     sí misma, destruyendo el estado *redo*. Ese era el defecto M-01 del testbench homelab.
+        //
+        //     Se usa `receipt.id`, no el `receiptId` que llegó por parámetro: son el mismo id, pero el
+        //     del recibo es el que el propio recibo declara (y el que `load_receipt` acaba de
+        //     verificar), así que no depende de cómo lo escribiera el llamante.
+        //
+        //     E28-H03 — EL ID DERIVADO ES UN CANDIDATO, Y LA TRANSACCIÓN DEVUELVE EL EFECTIVO. Con
+        //     `apply` resolviendo ya su propia identidad (arriba), un `X-revert` puede estar ocupado
+        //     por la reversión de OTRA transacción de la misma cadena; la mecánica busca entonces la
+        //     primera variante libre en vez de rechazar, y el `txnId` con el que publicó —el que
+        //     nombra su journal, sus copias y su recibo— es el que viaja de vuelta.
+        let orig_txn_id = receipt.id.0.clone();
+        let revert_txn_id = revert_transaction_id(&orig_txn_id);
+        let revertida = self.workspace.revert_transaction_con_recibo(
             &orig_txn_id,
             &revert_txn_id,
             &current,
             Some((&receipt.change_set_id, &receipt.semantic_diff)),
         )?;
+        let revert_txn_id = revertida.txn_id;
+        let (previous, result, changed_paths) = (
+            revertida.previous,
+            revertida.result,
+            revertida.changed_paths,
+        );
 
         // Punto de caída de la FACHADA (E25-H05, espejo del de `change_apply`): entre el retorno de la
         // transacción inversa y su recibo. Es la ventana en la que el canónico ya volvió atrás, el lock
@@ -2191,6 +2299,14 @@ impl App {
         // (6) Receipt de la reversión (inversa: previous/result intercambiados respecto al apply) +
         //     retención. Su id nombra por convención las copias de recuperación de la inversa
         //     (`recovery/<revert_txn_id>/`), que el GC purgará junto al recibo.
+        //
+        //     El `changeSetId` se HEREDA de la transacción deshecha —una reversión no nace de un
+        //     `change_plan`, así que no tiene uno propio— y es trazabilidad, no identidad: desde
+        //     E28-H01 el `txnId` (y con él el `receiptId` y todo el material) se deriva del `receiptId`
+        //     que se revierte, precisamente porque este campo NO distingue los eslabones de la cadena;
+        //     y desde E28-H03 ese id derivado lo resuelve la mecánica contra el material vigente, así
+        //     que el `revert_txn_id` de aquí es el EFECTIVO que devolvió la transacción, no el
+        //     candidato con el que se la llamó.
         let revert_receipt_id = ReceiptId(revert_txn_id);
         let revert_receipt = ChangeReceipt {
             id: revert_receipt_id.clone(),
@@ -2581,8 +2697,14 @@ fn op_kind_de(op: &Value) -> &str {
 /// El discriminador `op` usa el mismo vocabulario snake_case que [`NormalizedOperation`]. Un `op`
 /// desconocido o un parámetro inválido → `Err(ErrorCode::InvalidSchema)`; los errores del core se
 /// mapean con [`error_code`].
+///
+/// `estado` es la ocupación de paths **acumulada** por las operaciones anteriores del mismo change
+/// set (E28-H04): contra ella juzgan su colisión de existencia `create` y el destino de `move`, para
+/// que una op vea lo que las de delante ocuparon o liberaron. El `doc_set` sigue siendo el del
+/// workspace de partida y es de donde sale todo el **contenido** (cuerpos, entrantes, frontmatter).
 fn normalize_raw_op(
     doc_set: &DocumentSet,
+    estado: &plan::EstadoOcupacion<'_>,
     op: &Value,
 ) -> Result<Vec<NormalizedOperation>, AppError> {
     let kind = op.get("op").and_then(Value::as_str).ok_or_else(|| {
@@ -2616,7 +2738,7 @@ fn normalize_raw_op(
                 }
             };
             let body = op.get("body").and_then(Value::as_str).map(str::to_string);
-            plan::normalize_create(doc_set, &path, frontmatter, body)
+            plan::normalize_create_en(estado, &path, frontmatter, body)
                 .map(one)
                 .map_err(|e| AppError::from(&e))
         }
@@ -2679,7 +2801,8 @@ fn normalize_raw_op(
                 .get("rewriteInboundLinks")
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
-            plan::normalize_move(doc_set, &from, &to, rewrite).map_err(|e| AppError::from(&e))
+            plan::normalize_move_en(estado, doc_set, &from, &to, rewrite)
+                .map_err(|e| AppError::from(&e))
         }
         "delete" => {
             let path = op_ref_path(op)?;
@@ -2816,6 +2939,12 @@ fn expand_selection(
     }
 
     // (2) …y solo entonces se expande la operación sobre los documentos elegidos.
+    //
+    // E28-H04: la selección masiva queda FUERA del estado de ocupación acumulado, a propósito. Cada
+    // documento seleccionado genera como mucho una operación, y `single_operation` ya excluye de
+    // esta vía las dos únicas que ocupan un path (`create` y `move`), así que no hay secuencia
+    // intra-selección que acumular: la ocupación de partida es la del workspace y no se mueve.
+    let ocupacion = plan::EstadoOcupacion::nueva(files);
     let mut normalized: Vec<NormalizedOperation> = Vec::new();
     let mut captured: BTreeMap<RelPath, DocumentRevision> = BTreeMap::new();
     for path in seleccionados {
@@ -2823,7 +2952,7 @@ fn expand_selection(
             continue;
         };
         let raw_op = build_selected_op(op_kind, op_params, path)?;
-        normalized.extend(normalize_raw_op(doc_set, &raw_op)?);
+        normalized.extend(normalize_raw_op(doc_set, &ocupacion, &raw_op)?);
         captured.insert(
             path.clone(),
             DocumentRevision::from_hash(*blake3::hash(raw_md.as_bytes()).as_bytes()),

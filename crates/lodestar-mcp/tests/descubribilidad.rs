@@ -1564,7 +1564,7 @@ fn el_catalogo_es_direccionable() {
 // ===========================================================================
 //
 // Criterio `los_codigos_del_contrato_estan_en_el_catalogo`: **ningún código citado en
-// `contracts/mcp.yml` está fuera de las 16 filas de `core::types::ErrorCode`.**
+// `contracts/mcp.yml` está fuera de las 17 filas de `core::types::ErrorCode`.**
 //
 // Por qué existe: la lista de errores de cada tool está escrita a mano, en prosa, dentro de un YAML
 // que nadie ejecuta. Es exactamente lo que envejece en silencio — el mismo defecto que E23-H13 saldó
@@ -1609,17 +1609,19 @@ fn el_catalogo_es_direccionable() {
 //
 // # El catálogo se lee del catálogo
 //
-// Las 16 filas salen de `ErrorCode::as_str()`, nunca de una lista de cadenas copiada a mano: copiar
+// Las 17 filas salen de `ErrorCode::as_str()`, nunca de una lista de cadenas copiada a mano: copiar
 // el catálogo en el test sería reintroducir en `tests/` justo el defecto que el test combate. Lo
 // único escrito aquí son las **variantes**, y `_exhaustividad_del_catalogo` es una guarda de
 // COMPILACIÓN: añadir o quitar una variante de `ErrorCode` rompe ese `match` y obliga a pasar por
 // aquí.
 
 /// Las variantes de [`ErrorCode`]; sus **cadenas** se derivan siempre con `as_str()`.
-const CATALOGO: [ErrorCode; 16] = [
+const CATALOGO: [ErrorCode; 17] = [
     ErrorCode::WorkspaceNotFound,
     ErrorCode::WorkspaceRecoveryRequired,
     ErrorCode::DocumentNotFound,
+    // Fila 17 (E28-H02): el guard de colisión de `create`/`move`, simétrico de `DocumentNotFound`.
+    ErrorCode::DocumentAlreadyExists,
     ErrorCode::AmbiguousReference,
     ErrorCode::RevisionConflict,
     ErrorCode::PlanStale,
@@ -1642,6 +1644,7 @@ fn _exhaustividad_del_catalogo(c: ErrorCode) {
         ErrorCode::WorkspaceNotFound
         | ErrorCode::WorkspaceRecoveryRequired
         | ErrorCode::DocumentNotFound
+        | ErrorCode::DocumentAlreadyExists
         | ErrorCode::AmbiguousReference
         | ErrorCode::RevisionConflict
         | ErrorCode::PlanStale
@@ -1658,7 +1661,7 @@ fn _exhaustividad_del_catalogo(c: ErrorCode) {
     }
 }
 
-/// Las 16 cadenas de wire del catálogo, tomadas del propio `ErrorCode::as_str()`.
+/// Las 17 cadenas de wire del catálogo, tomadas del propio `ErrorCode::as_str()`.
 fn codigos_del_catalogo() -> BTreeSet<&'static str> {
     CATALOGO.iter().map(|c| c.as_str()).collect()
 }
@@ -1716,7 +1719,7 @@ fn forma_de_codigo(t: &str) -> bool {
 }
 
 /// Los tokens de `texto` con forma de código que además **emparentan** con el catálogo (comparten
-/// al menos un segmento con alguna de sus 16 filas): las «citas de código» del barrido de prosa.
+/// al menos un segmento con alguna de sus 17 filas): las «citas de código» del barrido de prosa.
 fn citas_de_codigo(texto: &str) -> Vec<String> {
     let segmentos = segmentos_del_catalogo();
     texto
@@ -1793,7 +1796,7 @@ const CENTINELA_WORKSPACE_ERROR: &str = "WorkspaceError";
 
 /// **E26-H11** · Criterio `los_codigos_del_contrato_estan_en_el_catalogo`:
 /// **Dado** `contracts/mcp.yml`, **Cuando** se extraen los códigos que cita, **Entonces** todos
-/// están entre las 16 filas de `core::types::ErrorCode`.
+/// están entre las 17 filas de `core::types::ErrorCode`.
 ///
 /// Tres barridos (el criterio de extracción de cada uno está declarado en la cabecera de esta
 /// sección):
@@ -1808,8 +1811,9 @@ fn los_codigos_del_contrato_estan_en_el_catalogo() {
     let catalogo = codigos_del_catalogo();
     assert_eq!(
         catalogo.len(),
-        16,
-        "el catálogo tiene 16 filas (§19.3) y `as_str()` no puede colapsar dos: {catalogo:?}"
+        17,
+        "el catálogo tiene 17 filas (§19.3, ampliado a conciencia en E28-H02 con \
+         `DOCUMENT_ALREADY_EXISTS`) y `as_str()` no puede colapsar dos: {catalogo:?}"
     );
 
     // --- 1. lo que cada tool declara emitir ----------------------------------------------------
@@ -1824,7 +1828,7 @@ fn los_codigos_del_contrato_estan_en_el_catalogo() {
     }
     assert!(
         desconocidos.is_empty(),
-        "cada entrada de `errores:` debe EMPEZAR por un código de las 16 filas de `ErrorCode` (o \
+        "cada entrada de `errores:` debe EMPEZAR por un código de las 17 filas de `ErrorCode` (o \
          por el centinela «{CENTINELA_WORKSPACE_ERROR}»): un agente ramifica por ese código, y una \
          entrada que es prosa —«falta el parámetro «ref»»— o un código que el motor no puede \
          emitir le hace ramificar sobre una ficción. Entradas fuera del catálogo:\n  - {}",
@@ -1858,7 +1862,7 @@ fn los_codigos_del_contrato_estan_en_el_catalogo() {
     }
     assert!(
         citas_fuera.is_empty(),
-        "la prosa del contrato cita códigos que NO están en las 16 filas de `ErrorCode`: o el \
+        "la prosa del contrato cita códigos que NO están en las 17 filas de `ErrorCode`: o el \
          código se renombró/retiró y la explicación quedó fósil, o está mal escrito — en ambos \
          casos el lector ramifica por un código que nunca llegará.\n  - {}",
         citas_fuera.into_iter().collect::<Vec<_>>().join("\n  - ")
@@ -1914,15 +1918,16 @@ fn recorte(texto: &str, aguja: &str) -> String {
 
 /// **E26-H11** · La otra dirección del mismo criterio: la **coherencia interna** del contrato.
 ///
-/// `codigos_sin_emisor` es una auditoría con fecha de caducidad («de las 16 filas, estas CUATRO no
-/// se emiten desde ningún camino del producto»). Si una tool declara emitir uno de ellos, una de
+/// `codigos_sin_emisor` es una auditoría con fecha de caducidad («de las 17 filas, estas CUATRO no
+/// se emiten desde ningún camino del producto»; eran 16 hasta que E28-H02 abrió el catálogo con
+/// `DOCUMENT_ALREADY_EXISTS`). Si una tool declara emitir uno de ellos, una de
 /// las dos afirmaciones es falsa y el fichero se contradice a sí mismo — que es literalmente el
 /// defecto U6 que esta historia salda. E25-H02 ya recorrió ese camino en la dirección correcta:
 /// `RECOVERY_FAILED` ganó emisor, entró en los `errores` de `change_apply`/`change_revert` y SALIÓ
 /// de la lista, en el mismo PR.
 ///
 /// Y su corolario: entre los códigos que alguna tool emite y los que se declaran sin emisor deben
-/// quedar cubiertas las 16 filas, sin solapes. Un código del catálogo que no esté ni en un lado ni
+/// quedar cubiertas las 17 filas, sin solapes. Un código del catálogo que no esté ni en un lado ni
 /// en el otro es exactamente el hueco por donde el contrato envejece: nadie sabe si es que no se
 /// emite o es que se olvidó de contarlo.
 #[test]

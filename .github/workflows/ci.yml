@@ -152,7 +152,7 @@ jobs:
       - name: Los códigos de error solo se definen en core::types
         run: |
           set -euo pipefail
-          patron='"(WORKSPACE_NOT_FOUND|WORKSPACE_RECOVERY_REQUIRED|DOCUMENT_NOT_FOUND|AMBIGUOUS_REFERENCE|REVISION_CONFLICT|PLAN_STALE|PLAN_EXPIRED|PERMISSION_DENIED|INVALID_SCHEMA|INVALID_RESULT|INBOUND_LINKS_EXIST|RELATION_CONSTRAINT_VIOLATION|WRITE_CONFLICT|RESULT_TOO_LARGE|RECOVERY_FAILED|INTERNAL_IO_ERROR)"'
+          patron='"(WORKSPACE_NOT_FOUND|WORKSPACE_RECOVERY_REQUIRED|DOCUMENT_NOT_FOUND|DOCUMENT_ALREADY_EXISTS|AMBIGUOUS_REFERENCE|REVISION_CONFLICT|PLAN_STALE|PLAN_EXPIRED|PERMISSION_DENIED|INVALID_SCHEMA|INVALID_RESULT|INBOUND_LINKS_EXIST|RELATION_CONSTRAINT_VIOLATION|WRITE_CONFLICT|RESULT_TOO_LARGE|RECOVERY_FAILED|INTERNAL_IO_ERROR)"'
           # `crates/*/src/` de todos los crates MENOS lodestar-core (que es donde deben vivir).
           fuentes=$(find crates -path 'crates/lodestar-core' -prune -o -path '*/src/*' -name '*.rs' -print)
           if [ -n "$fuentes" ] && echo "$fuentes" | xargs grep -nE "$patron" 2>/dev/null | grep -vE '^\s*//|///'; then

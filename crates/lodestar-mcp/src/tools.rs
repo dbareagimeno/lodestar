@@ -332,7 +332,7 @@ pub fn call(app: &App, profile: Profile, name: &str, params: &Value) -> ToolResu
             // Mapeo de error a wire (E10-H02 + E26-H07): el `Display` de `AppError` compone
             // «CÓDIGO: mensaje» con el código estable `ErrorCode::as_str()` (p. ej.
             // «DOCUMENT_NOT_FOUND»), NUNCA el `Debug` de la variante (`DocumentNotFound`) — el
-            // catálogo de 16 códigos es el contrato, no el nombre Rust. Hasta v0.4.0 esta línea era
+            // catálogo de códigos es el contrato, no el nombre Rust. Hasta v0.4.0 esta línea era
             // `e.as_str().to_string()`: el código PELADO, sin una palabra sobre qué corregir.
             let document = app
                 .knowledge_get(&r, &include, sections.as_deref())

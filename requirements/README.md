@@ -168,6 +168,44 @@ camino de lectura ni promete rendimiento a escala (`§21.5`). **Regla de idioma*
 superficie pública que esta épica produce va en **inglés**; los documentos internos siguen en
 español.
 
+## Mapa de épicas de la campaña de bugfixes del testbench homelab
+
+> Origen: `decisiones/23-hallazgos-testbench-homelab.md` (dogfooding sistemático, 189 casos sobre
+> el workspace real del homelab, 2026-08-06). Trece hallazgos de naturalezas incompatibles se
+> repartieron por prioridad y dueño (la misma lección de `decisiones §16`); **E28 es su Fase 0**:
+> las dos filas con **riesgo real de pérdida de conocimiento** (prioridades 5 y 4), ejecutadas antes
+> que cualquier otro hallazgo de la tabla. **E29 es la Fase 1**: la épica de honestidad de superficie
+> que el orden de trabajo de `decisiones/README.md` (L110-132) fija como lo siguiente que entra. El
+> tablero de la campaña está en [`docs/qa/campana-bugfixes-2026-08.md`](../docs/qa/campana-bugfixes-2026-08.md).
+
+| Épica | Estado | Área | Doc |
+|---|---|---|---|
+| **E28** — Fase 0: defectos destructivos del testbench homelab | completa (H01-H04), pendiente de merge | `change_revert` de un recibo `-revert` restaura de verdad (+ unifica la coreografía de sellado de `decisiones §16(i)`) · guard de colisión en `create`/`move` (`DOCUMENT_ALREADY_EXISTS`, catálogo 16→17) · **adenda**: identidad de `txnId` libre en `change_apply`/`change_revert` (H03) · normalización contra estado acumulado del change set (H04) | [epica-28-defectos-destructivos-testbench.md](epica-28-defectos-destructivos-testbench.md) |
+| **E29** — Fase 1: honestidad de superficie | propuesta (pendiente de ratificación) | config estricta (`§16e`+A-08) · `policy` parcial (`§19b`) · `has(frontmatter)` (`§19a`) · type error de afijo (A-04) · scope `paths` (A-07) · aviso de workspace vacío (`§16f`) · `canApply` vinculante (`§18`) · wire estricto (`§15`) · `instructions` por perfil + `protocolVersion` (D-01) · repliegue de la API no transaccional (`§16g`) · retirada del `Envelope` (`§16b`) | [epica-29-honestidad-superficie.md](epica-29-honestidad-superficie.md) |
+
+**Orden de construcción (E28)**: `H01` y `H02` son independientes y paralelizables (ficheros y
+garantías distintas); `H01` va primero en la secuencia por gravedad (pérdida de datos activa) y por
+ser la prioridad más alta de `decisiones §23`. Los demás hallazgos de esa ficha (D-01/D-02,
+A-01…A-10) quedan **fuera de E28** — tienen su propio dueño (épica de honestidad de superficie,
+ciclo de higiene de `decisiones §16(j)`, o `§19`) y no implican escritura destructiva.
+
+**Adenda correctiva (2026-08-06)**: los jueces ciegos que verificaron `H01`/`H02` (ya integradas en
+`develop`) encontraron un bloqueante en cada una, ejecutando el binario real. `H03` cierra la
+identidad de `txnId` que `H01` dejó libre en el camino de `change_apply` (el guard anti-sobrescritura
+solo vivía en `change_revert`); `H04` cierra la normalización de `change_plan`, que seguía
+comparando contra el `DocumentSet` inicial en vez del estado que el propio plan acumula. `H03`/`H04`
+son independientes entre sí y no dependen de nada nuevo; preceden a cualquier trabajo posterior que
+ejercite el camino transaccional (en particular, el arranque de `E29`). `H04` abre además
+`decisiones §24` (equivalencia de paths por caja/Unicode), explícitamente fuera de su alcance.
+
+**Orden de construcción (E29)**: `H01 → H02 → H03 → H04 → H05 → H06 → H09 → H07 → H08 → H11 → H10`.
+`H01` primero por decisión explícita de `decisiones §16(e)` (fija el criterio «lo desconocido se
+rechaza» que `H08` aplica al wire); `H08` la última de las de comportamiento porque `§15` la declara
+la mayor de la épica y pide que su complicación no arrastre a las demás; `H10` **después de que
+E28-H01 esté integrada**, por compartir `crates/lodestar-workspace/tests/transactions.rs`. **Principio
+rector**: *la superficie solo promete lo que el motor ejecuta hoy* (`§21.5` generalizado del exterior
+al wire), con el corolario de E26: *una respuesta silenciosamente equivocada es peor que un error*.
+
 ## Formato de una historia
 
 Cada historia tiene un identificador estable `E<épica>-H<nn>` y esta plantilla:

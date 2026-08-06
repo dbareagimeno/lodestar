@@ -36,7 +36,7 @@ relacionadas: [3, 14, 15, 21]
 | (f) | Workspace vacío indistinguible de directorio equivocado | **Decidido: aviso `warn`, sin tocar exit codes.** |
 | (g) | API pública de `Workspace` no transaccional | **Decidido: cerrarlas al exterior** (`pub(crate)` / solo test). |
 | (h) | Escritores de runtime sin lock | **Registrado sin acción**; se cierra si aparece un caso real o al tocar el GC. Único punto que sigue vivo aquí. |
-| (i) | Secuencia de sellado duplicada `apply`/`revert` | **Decidido: ciclo de higiene propio**, junto a (j) y (l). |
+| (i) | Secuencia de sellado duplicada `apply`/`revert` | **Saldado por `E28-H01`** (commit `296147b`): extraída a `seal_published_transaction`, único camino compartido. |
 | (j) | Un cursor basura reinicia la paginación en silencio | **Decidido: `INVALID_SCHEMA`**, en el ciclo de higiene. |
 | (k) | Matriz de trazabilidad sin filas de E15–E24 | **Decidido: historia propia**, con cada fila verificada contra su épica. |
 | (l) | Deuda de fuerza de suite (mutantes) | **Decidido: pasada de `/mutantes` acotada** en el ciclo de higiene. La divergencia core↔store de E26-H09 va con [`§14`](14-store-sin-consumidor.md). |
@@ -145,6 +145,12 @@ relacionadas: [3, 14, 15, 21]
   se aplicará a una mitad y no a la otra.
 - **Decidido (2026-08-02)**: extraer `sellar_publicado(txn_id, journal_path)` compartido, **en un
   ciclo de higiene propio** con la suite actual como red y sin cambio de comportamiento.
+- **Saldado (2026-08-06) por `E28-H01`** (commit `296147b`, épica
+  [`epica-28-defectos-destructivos-testbench.md`](../requirements/epica-28-defectos-destructivos-testbench.md)):
+  la coreografía se extrajo a `seal_published_transaction`, consumida por
+  `apply_transaction_con_recibo` y `revert_transaction_con_recibo` por igual. No se ejecutó como
+  ciclo de higiene aparte, sino junto al arreglo de M-01 (`decisiones §23`), por compartir la misma
+  zona de código — la agrupación que el punto 0 del orden de trabajo ya anticipaba.
 
 ### (j) Un cursor basura reinicia la paginación en silencio
 

@@ -968,3 +968,786 @@ fn delete_y_revert_byte_a_byte_en_sesion_viva() {
         "los 2 backlinks vuelven a existir tras el revert: {doc}"
     );
 }
+
+// ===========================================================================
+// E28-H01 — Revertir un recibo `-revert` restaura de verdad (M-01 del testbench homelab)
+//
+// EL DEFECTO (`docs/qa/testbench/batches/verify_G1-18b.json`, caso G1-18)
+//
+// `App::change_revert_uncounted` (`crates/lodestar-app/src/lib.rs` ~L2168) deriva la identidad de la
+// transacción inversa del `changeSetId` del recibo que revierte:
+//
+//     let orig_txn_id = transaction_id(&receipt.change_set_id);
+//     let revert_txn_id = format!("{orig_txn_id}-revert");
+//
+// El recibo `X-revert` **hereda** el `changeSetId` de la transacción original, así que revertirlo
+// recalcula `orig_txn_id = X` (no `X-revert`) y `revert_txn_id = "X-revert"` (su propio id). Doble
+// consecuencia: se restaura desde `recovery/X/` —el árbol pre-apply, que YA es el estado vigente:
+// no-op silencioso— y la transacción inversa colisiona consigo misma, sobrescribiendo
+// `recovery/X-revert/` (que guardaba el estado **redo**) y `receipts/X-revert.json`. El redo queda
+// destruido para siempre y `change_revert` responde `reverted: true`.
+//
+// EL COMPORTAMIENTO OBJETIVO QUE FIJAN ESTOS TESTS
+//
+// Revertir un `-revert` es una transacción real y componible: devuelve el fichero al estado que ese
+// recibo dejó atrás, gana un `receiptId` propio (distinto del que revierte), no toca ni un byte del
+// material de recuperación ni de los recibos previos, y encadena sin límite.
+//
+// Los cuatro viven en la sesión VIVA a propósito: es la única forma de observar la secuencia
+// `plan → apply → revert → revert` como la vio el testbench (mismo proceso, mismo estado).
+// ===========================================================================
+
+/// Ruta del plano de control runtime de un workspace.
+fn runtime(root: &Path) -> std::path::PathBuf {
+    root.join(".lodestar").join("runtime")
+}
+
+/// Instantánea `ruta relativa POSIX → bytes` de todos los ficheros bajo `dir` (recursivo). Compara
+/// **bytes**, no texto: las copias de recuperación son ficheros opacos para este test y el criterio
+/// es «intactos byte a byte».
+fn ficheros_bajo(dir: &Path) -> BTreeMap<String, Vec<u8>> {
+    fn recorre(d: &Path, base: &Path, out: &mut BTreeMap<String, Vec<u8>>) {
+        let Ok(entradas) = std::fs::read_dir(d) else {
+            return;
+        };
+        for e in entradas.flatten() {
+            let ruta = e.path();
+            if ruta.is_dir() {
+                recorre(&ruta, base, out);
+                continue;
+            }
+            let rel = ruta
+                .strip_prefix(base)
+                .unwrap_or(&ruta)
+                .to_string_lossy()
+                .replace('\\', "/");
+            out.insert(rel, std::fs::read(&ruta).unwrap_or_default());
+        }
+    }
+    let mut out = BTreeMap::new();
+    recorre(dir, dir, &mut out);
+    out
+}
+
+/// Los bytes de un artefacto del plano de control como texto (son JSON o `.md`), para que un fallo
+/// de comparación se lea como lo que es y no como una lista de enteros.
+fn legible(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes).to_string()
+}
+
+/// Un workspace de un solo documento mutable: la forma mínima en la que el defecto se manifiesta
+/// (una única ruta afectada, sin enlaces que enturbien el diff).
+fn proyecto_de_un_documento(root: &Path) {
+    escribe(
+        root,
+        "pendientes/wol-bastion.md",
+        "---\nprioridad: 5\n---\n\n# WOL bastión\n\nDespertar el bastión por red.\n",
+    );
+}
+
+/// El estado `A` (pre-apply) del documento mutable.
+const ESTADO_A: &str = "---\nprioridad: 5\n---\n\n# WOL bastión\n\nDespertar el bastión por red.\n";
+
+/// El estado `B` (post-apply): el mismo documento con la prioridad parcheada.
+const ESTADO_B: &str = "---\nprioridad: 1\n---\n\n# WOL bastión\n\nDespertar el bastión por red.\n";
+
+/// El documento mutable, tal y como está en disco.
+fn wol(root: &Path) -> String {
+    lee(root, "pendientes/wol-bastion.md")
+}
+
+/// `plan → apply` del patch que lleva el documento de `A` a `B`, con las precondiciones aseveradas:
+/// sin una publicación real no hay nada que revertir y el escenario no significa nada. Devuelve el
+/// `receiptId` del apply.
+fn aplica_el_patch(s: &mut Sesion, root: &Path, prioridad: i64) -> String {
+    let plan = s.planifica(json!([{
+        "op": "patch_frontmatter",
+        "path": "pendientes/wol-bastion.md",
+        "patch": {"prioridad": prioridad}
+    }]));
+    assert_eq!(
+        plan["canApply"], true,
+        "precondición: parchear el frontmatter del documento debe ser aplicable: {plan}"
+    );
+    let cs = plan["changeSetId"]
+        .as_str()
+        .expect("changeSetId")
+        .to_string();
+    let apply = s.aplica(&cs);
+    assert_eq!(apply["applied"], true, "precondición: el apply: {apply}");
+    assert_eq!(
+        paths_cambiados(&apply),
+        vec!["pendientes/wol-bastion.md"],
+        "precondición: el patch toca exactamente una ruta: {apply}"
+    );
+    assert_eq!(
+        wol(root),
+        ESTADO_B,
+        "precondición: el apply tiene que haber publicado de verdad el estado B"
+    );
+    apply["receiptId"]
+        .as_str()
+        .expect("receiptId del apply")
+        .to_string()
+}
+
+/// **Criterio 1** — **Dado** un documento en `A`, **Cuando** se hace
+/// `plan → apply` (queda en `B`) → `revert` (vuelve a `A`) → `revert` de ese recibo `-revert`,
+/// **Entonces** el fichero queda exactamente en el estado post-apply `B`.
+///
+/// Hoy el segundo `revert` restaura desde `recovery/X/` —el árbol pre-apply, que ya es el estado
+/// vigente—, así que el fichero se queda en `A` y la reversión es un no-op que se declara exitoso.
+#[test]
+fn revertir_el_revert_restaura_el_estado_post_apply() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    proyecto_de_un_documento(root);
+
+    let mut s = Sesion::abrir(root);
+    let recibo_apply = aplica_el_patch(&mut s, root, 1);
+
+    let revert1 = s.revierte(&recibo_apply);
+    assert_eq!(
+        revert1["reverted"], true,
+        "precondición: el primer revert debe revertir: {revert1}"
+    );
+    assert_eq!(
+        wol(root),
+        ESTADO_A,
+        "precondición: el primer revert devuelve el documento al estado A"
+    );
+    let recibo_revert = revert1["receiptId"]
+        .as_str()
+        .expect("receiptId del primer revert")
+        .to_string();
+
+    // Deshacer el *undo*: el estado al que hay que volver es el que ese recibo dejó atrás (B).
+    let revert2 = s.revierte(&recibo_revert);
+    assert_eq!(
+        revert2["reverted"], true,
+        "revertir un recibo `-revert` es una transacción como cualquier otra: {revert2}"
+    );
+    assert_eq!(
+        wol(root),
+        ESTADO_B,
+        "revertir el `-revert` tiene que devolver el documento al estado POST-APPLY (B): el recibo \
+         que se revierte llevó el workspace de B a A, así que deshacerlo lo devuelve a B. Si queda \
+         en A, la reversión fue un no-op silencioso y el redo se perdió"
+    );
+    assert_eq!(
+        paths_cambiados(&revert2),
+        vec!["pendientes/wol-bastion.md"],
+        "y declara la ruta que restauró: {revert2}"
+    );
+
+    // La sesión viva sirve el estado restaurado, sin reiniciar el proceso.
+    let doc = s.tool(
+        "knowledge_get",
+        json!({"ref":{"path":"pendientes/wol-bastion.md"},"include":["frontmatter"]}),
+    )["document"]
+        .clone();
+    assert_eq!(
+        doc["frontmatter"]["prioridad"],
+        json!(1),
+        "la lectura posterior ve el valor restaurado por la reversión de la reversión: {doc}"
+    );
+}
+
+/// **Criterio 2** — **Dado** ese mismo encadenamiento, **Cuando** se compara el `receiptId` del
+/// segundo `revert` con el del primero, **Entonces** son **distintos**, y `previousWorkspaceRevision`
+/// y `workspaceRevision` del segundo también difieren entre sí (hubo cambio efectivo, no un no-op).
+///
+/// Hoy el sufijo no apila: `revert_txn_id = "{orig_txn_id}-revert"` recalculado sobre el
+/// `changeSetId` heredado vuelve a producir literalmente `X-revert`, el id de la transacción que se
+/// está revirtiendo — la nueva transacción colisiona consigo misma.
+#[test]
+fn revertir_un_revert_produce_receipt_id_distinto() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    proyecto_de_un_documento(root);
+
+    let mut s = Sesion::abrir(root);
+    let recibo_apply = aplica_el_patch(&mut s, root, 1);
+
+    let revert1 = s.revierte(&recibo_apply);
+    let recibo_revert = revert1["receiptId"]
+        .as_str()
+        .expect("receiptId del primer revert")
+        .to_string();
+    assert_ne!(
+        recibo_revert, recibo_apply,
+        "precondición: el recibo de la inversa ya tiene hoy identidad propia frente al del apply"
+    );
+    let rev_a = revert1["workspaceRevision"]
+        .as_str()
+        .expect("workspaceRevision")
+        .to_string();
+
+    let revert2 = s.revierte(&recibo_revert);
+    let recibo_revert2 = revert2["receiptId"]
+        .as_str()
+        .expect("receiptId del segundo revert")
+        .to_string();
+
+    assert_ne!(
+        recibo_revert2, recibo_revert,
+        "revertir un recibo `-revert` produce una transacción NUEVA, con identidad propia: si \
+         devuelve el mismo `receiptId` que revierte, está sobrescribiendo su propio material de \
+         recuperación en vez de crear el suyo"
+    );
+    assert_eq!(
+        revert2["previousWorkspaceRevision"],
+        json!(rev_a),
+        "la inversa parte de la revisión que dejó el recibo revertido: {revert2}"
+    );
+    assert_ne!(
+        revert2["previousWorkspaceRevision"], revert2["workspaceRevision"],
+        "y la deja en OTRA revisión: `previousWorkspaceRevision == workspaceRevision` es la firma \
+         exacta del no-op silencioso que reportó el testbench (caso G1-18): {revert2}"
+    );
+
+    // El recibo nuevo es utilizable por un agente: aparece en el inventario de la sesión viva.
+    let estado = s.estado();
+    let recibos: Vec<String> = estado["receipts"]
+        .as_array()
+        .expect("workspace_status expone `receipts`")
+        .iter()
+        .map(|r| r["receiptId"].as_str().unwrap_or_default().to_string())
+        .collect();
+    assert!(
+        recibos.contains(&recibo_revert2),
+        "el recibo de la segunda reversión tiene que quedar listado para poder encadenar: \
+         {recibos:?}"
+    );
+    assert!(
+        recibos.contains(&recibo_revert),
+        "y sin desplazar al del primer revert, que sigue describiendo su propia transacción: \
+         {recibos:?}"
+    );
+}
+
+/// **Criterio 3** — **Dado** `recovery/X/` + `receipts/X.json` de la transacción original y
+/// `recovery/X-revert/` + `receipts/X-revert.json` del primer `revert`, **Cuando** se revierte
+/// `X-revert`, **Entonces** los cuatro quedan **intactos byte a byte**.
+///
+/// Es el criterio de la pérdida de datos: `recovery/X-revert/` guarda el estado **redo** (el
+/// resultado del apply). Hoy la colisión de identidad lo sobrescribe con el estado actual y reescribe
+/// su recibo como un registro degenerado (`A→A`), de modo que el redo desaparece de forma permanente
+/// y silenciosa.
+#[test]
+fn revertir_un_revert_no_toca_recovery_ni_receipts_previos() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    proyecto_de_un_documento(root);
+
+    let mut s = Sesion::abrir(root);
+    let recibo_apply = aplica_el_patch(&mut s, root, 1);
+
+    let revert1 = s.revierte(&recibo_apply);
+    let recibo_revert = revert1["receiptId"]
+        .as_str()
+        .expect("receiptId del primer revert")
+        .to_string();
+
+    let recovery = runtime(root).join("recovery");
+    let receipts = runtime(root).join("receipts");
+    let recovery_antes = ficheros_bajo(&recovery);
+    let receipts_antes = ficheros_bajo(&receipts);
+
+    // Precondiciones: los cuatro artefactos existen y el de la inversa guarda el estado REDO.
+    assert!(
+        recovery_antes
+            .keys()
+            .any(|k| k.starts_with(&format!("{recibo_apply}/"))),
+        "precondición: el apply deja copias de recuperación en `recovery/{recibo_apply}/`: {:?}",
+        recovery_antes.keys().collect::<Vec<_>>()
+    );
+    let redo = recovery_antes
+        .get(&format!("{recibo_revert}/pendientes/wol-bastion.md"))
+        .map(|b| String::from_utf8_lossy(b).to_string())
+        .unwrap_or_else(|| {
+            panic!(
+                "precondición: el primer revert respalda el estado que deshace en \
+                 `recovery/{recibo_revert}/`: {:?}",
+                recovery_antes.keys().collect::<Vec<_>>()
+            )
+        });
+    assert_eq!(
+        redo, ESTADO_B,
+        "precondición: esa copia ES el redo — el estado post-apply que el revert dejó atrás"
+    );
+    assert!(
+        receipts_antes.contains_key(&format!("{recibo_apply}.json"))
+            && receipts_antes.contains_key(&format!("{recibo_revert}.json")),
+        "precondición: los dos recibos están persistidos: {:?}",
+        receipts_antes.keys().collect::<Vec<_>>()
+    );
+
+    let revert2 = s.revierte(&recibo_revert);
+    assert_eq!(
+        revert2["reverted"], true,
+        "precondición del criterio: la segunda reversión se ejecuta: {revert2}"
+    );
+
+    let recovery_despues = ficheros_bajo(&recovery);
+    let receipts_despues = ficheros_bajo(&receipts);
+
+    for clave in recovery_antes.keys() {
+        assert_eq!(
+            recovery_despues.get(clave).map(|b| legible(b)),
+            recovery_antes.get(clave).map(|b| legible(b)),
+            "revertir el `-revert` no puede tocar ni un byte del material de recuperación previo, y \
+             pisó «{clave}». Si lo que pisa es `recovery/{recibo_revert}/`, el estado REDO queda \
+             destruido para siempre y ninguna operación posterior puede recuperarlo"
+        );
+    }
+    for clave in receipts_antes.keys() {
+        assert_eq!(
+            receipts_despues.get(clave).map(|b| legible(b)),
+            receipts_antes.get(clave).map(|b| legible(b)),
+            "ni reescribir el recibo «{clave}» de una transacción previa: cada reversión registra \
+             el suyo, con su propia identidad"
+        );
+    }
+    // Control anti-vacuo: la segunda reversión SÍ deja material propio (si no, «nada cambió»
+    // pasaría el criterio de intactos por la razón equivocada).
+    assert!(
+        recovery_despues.len() > recovery_antes.len(),
+        "y además deja SUS copias de recuperación, bajo una identidad nueva: antes {:?}, después \
+         {:?}",
+        recovery_antes.keys().collect::<Vec<_>>(),
+        recovery_despues.keys().collect::<Vec<_>>()
+    );
+    assert!(
+        receipts_despues.len() > receipts_antes.len(),
+        "y su recibo propio: antes {:?}, después {:?}",
+        receipts_antes.keys().collect::<Vec<_>>(),
+        receipts_despues.keys().collect::<Vec<_>>()
+    );
+}
+
+/// **Criterio 4** — **Dado** el encadenamiento de tres reversiones
+/// (`apply` → `revert(X)` → `revert(X-revert)` → `revert` del resultado anterior), **Cuando** se
+/// ejecuta la tercera, **Entonces** el fichero vuelve al estado que dejó el **primer** `revert`
+/// (composición sin límite: cada reversión es una operación real).
+///
+/// Es el criterio que descarta un arreglo que solo funcione «una vez»: la identidad de la inversa
+/// tiene que poder derivarse indefinidamente sin colisionar con ninguna transacción previa.
+#[test]
+fn revertir_tres_veces_compone_sin_perder_estado() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    proyecto_de_un_documento(root);
+
+    let mut s = Sesion::abrir(root);
+    let recibo_apply = aplica_el_patch(&mut s, root, 1);
+
+    let revert1 = s.revierte(&recibo_apply);
+    let recibo1 = revert1["receiptId"]
+        .as_str()
+        .expect("receiptId")
+        .to_string();
+    assert_eq!(wol(root), ESTADO_A, "revert 1: el documento vuelve a A");
+
+    let revert2 = s.revierte(&recibo1);
+    let recibo2 = revert2["receiptId"]
+        .as_str()
+        .expect("receiptId")
+        .to_string();
+    assert_eq!(
+        wol(root),
+        ESTADO_B,
+        "revert 2: deshacer el *undo* devuelve el documento a B: {revert2}"
+    );
+
+    let revert3 = s.revierte(&recibo2);
+    let recibo3 = revert3["receiptId"]
+        .as_str()
+        .expect("receiptId")
+        .to_string();
+    assert_eq!(
+        revert3["reverted"], true,
+        "la tercera reversión es tan válida como las dos anteriores: {revert3}"
+    );
+    assert_eq!(
+        wol(root),
+        ESTADO_A,
+        "revert 3: deshacer la reversión anterior devuelve el documento al estado que dejó el \
+         PRIMER revert (A). La composición no tiene límite: {revert3}"
+    );
+
+    let ids = [&recibo_apply, &recibo1, &recibo2, &recibo3];
+    for (i, a) in ids.iter().enumerate() {
+        for b in ids.iter().skip(i + 1) {
+            assert_ne!(
+                a, b,
+                "cada transacción de la cadena tiene identidad PROPIA: dos ids iguales significan \
+                 dos transacciones compartiendo `recovery/`, `journal/` y `receipts/`: {ids:?}"
+            );
+        }
+    }
+
+    // El estado final es coherente para la sesión viva y para el disco, sin reiniciar el proceso.
+    let doc = s.tool(
+        "knowledge_get",
+        json!({"ref":{"path":"pendientes/wol-bastion.md"},"include":["frontmatter"]}),
+    )["document"]
+        .clone();
+    assert_eq!(
+        doc["frontmatter"]["prioridad"],
+        json!(5),
+        "y la lectura de la sesión coincide con el disco tras las tres reversiones: {doc}"
+    );
+    assert_eq!(
+        s.revision(),
+        revert3["workspaceRevision"].as_str().unwrap(),
+        "la revisión que reporta el servidor es la que declaró la última reversión"
+    );
+}
+
+// ===========================================================================
+// E28-H03 — Identidad de transacción LIBRE en la publicación (corrige el bloqueante de H01)
+//
+// EL DEFECTO (verificado por dos jueces ciegos ejecutando el binario por JSON-RPC)
+//
+// El `changeSetId` es determinista —`blake3(baseRevision, normalizedOperations)`,
+// `crates/lodestar-app/src/lib.rs` ~L1792—, así que replanificar EXACTAMENTE el mismo cambio sobre
+// la misma base produce el mismo `changeSetId` y, con él, el mismo `txnId`
+// (`transaction_id(&change_set.id)`, `transaction.rs:68`). La secuencia
+// `plan → apply(X) → revert(X) → re-plan idéntico → apply` reutiliza literalmente el `txnId` `X`:
+//
+//   - el segundo `apply` **sobrescribe** `recovery/X/` y `receipts/X.json` de la primera transacción,
+//     porque `apply_transaction_con_recibo` (`transaction.rs:280`) llama a `backup_originals` /
+//     `create_journal` / `write_pending_receipt` sin pasar por el guard `assert_txn_id_libre` que
+//     H01 escribió (`recovery.rs:912`) — ese guard solo lo llama el camino del `revert`;
+//   - el `revert` posterior a ese segundo `apply` falla `WRITE_CONFLICT` **sin salida**: el
+//     `revert_transaction_id` deriva `X-revert`, que ya tiene recibo persistido (el de la PRIMERA
+//     reversión), `assert_txn_id_libre` lo rechaza correctamente y no hay id alternativo que probar.
+//     El re-apply queda permanentemente no revertible.
+//
+// EL COMPORTAMIENTO OBJETIVO QUE FIJAN ESTOS TESTS
+//
+// La identidad efectiva de TODA transacción de publicación —`apply` y `revert` por igual— se resuelve
+// buscando de forma determinista la primera variante LIBRE del `txnId`, con el mismo criterio de
+// «libre» del guard de H01 (`journal/ ∪ receipts/`). Ni se sobrescribe en silencio (lo que hace hoy
+// el apply) ni se falla sin salida (lo que hace hoy el revert).
+//
+// Viven en la sesión VIVA a propósito: es como el testbench reprodujo la secuencia (mismo proceso,
+// mismo estado entre llamadas).
+// ===========================================================================
+
+/// **Testigo de identidad de fichero** de todo lo que cuelga de `ruta` (un fichero suelto o un
+/// árbol): `ruta relativa POSIX → identidad de fichero`, en orden determinista.
+///
+/// Por qué hace falta además de la comparación por bytes: cuando dos transacciones comparten `txnId`,
+/// el material que la segunda escribe encima de la primera puede ser **byte a byte idéntico** (mismo
+/// estado respaldado, mismas revisiones en el recibo), así que «intactos byte a byte» pasaría sin
+/// que nada esté intacto. La identidad distingue las dos cosas: `io::write_atomic` publica por
+/// `temp+rename` y `backup_originals` empieza por `remove_dir_all`, de modo que una reescritura
+/// estrena identidad aunque el contenido no cambie.
+///
+/// Multiplataforma con garantías distintas por SO:
+/// - **Unix**: `(dev, ino)`. El inodo es estable frente a cualquier operación que no sea
+///   crear/borrar el fichero, así que distingue con precisión «no lo tocó» de «lo reescribió».
+/// - **Windows**: no hay noción de inodo portable, así que se usa
+///   `(creation_time, last_write_time, file_size)`. Un `rename` atómico crea un fichero nuevo con
+///   `creation_time` distinto del original, que es justo el mecanismo que el motor usa para
+///   publicar (`temp+rename`), así que la garantía observable —distinguir «intacto» de
+///   «reescrito»— se conserva aunque el campo no sea el mismo concepto de bajo nivel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct IdentidadFichero(u64, u64, u64);
+
+fn testigo(ruta: &Path) -> BTreeMap<String, IdentidadFichero> {
+    #[cfg(unix)]
+    fn identidad(m: &std::fs::Metadata) -> IdentidadFichero {
+        use std::os::unix::fs::MetadataExt;
+        IdentidadFichero(m.dev(), m.ino(), 0)
+    }
+    #[cfg(windows)]
+    fn identidad(m: &std::fs::Metadata) -> IdentidadFichero {
+        use std::os::windows::fs::MetadataExt;
+        IdentidadFichero(m.creation_time(), m.last_write_time(), m.file_size())
+    }
+    fn recorre(d: &Path, base: &Path, out: &mut BTreeMap<String, IdentidadFichero>) {
+        let Ok(entradas) = std::fs::read_dir(d) else {
+            return;
+        };
+        for e in entradas.flatten() {
+            let ruta = e.path();
+            if ruta.is_dir() {
+                recorre(&ruta, base, out);
+                continue;
+            }
+            let rel = ruta
+                .strip_prefix(base)
+                .unwrap_or(&ruta)
+                .to_string_lossy()
+                .replace('\\', "/");
+            if let Ok(m) = std::fs::metadata(&ruta) {
+                out.insert(rel, identidad(&m));
+            }
+        }
+    }
+    let mut out = BTreeMap::new();
+    if ruta.is_dir() {
+        recorre(ruta, ruta, &mut out);
+    } else if let Ok(m) = std::fs::metadata(ruta) {
+        out.insert(String::new(), identidad(&m));
+    }
+    assert!(
+        !out.is_empty(),
+        "precondición del testigo: «{}» tiene que existir para poder vigilarlo",
+        ruta.display()
+    );
+    out
+}
+
+/// Los `receiptId` que `workspace_status` lista, en el orden en que los sirve.
+fn recibos_listados(s: &mut Sesion) -> Vec<String> {
+    s.estado()["receipts"]
+        .as_array()
+        .expect("workspace_status expone `receipts`")
+        .iter()
+        .map(|r| r["receiptId"].as_str().unwrap_or_default().to_string())
+        .collect()
+}
+
+/// **Criterio 1** — **Dado** un documento en estado `A`, **Cuando** se ejecuta `plan → apply →
+/// revert → re-plan idéntico (misma base, mismas ops) → apply → revert`, **Entonces** las cuatro
+/// operaciones completan con éxito, cada una con un `receiptId` **distinto** de los tres anteriores,
+/// y el fichero queda en el estado correcto tras cada paso.
+///
+/// El re-plan es **idéntico a propósito**: tras el primer `revert` el workspace vuelve a la misma
+/// `baseRevision` que tenía al planificar, así que `compute_plan_hash` devuelve el mismo
+/// `changeSetId` y el `txnId` colisiona. Es exactamente la secuencia que un agente ejecuta al
+/// deshacer un cambio y rehacerlo, y hoy muere en el último paso con `WRITE_CONFLICT`.
+#[test]
+fn apply_revert_reapply_revert_de_plan_identico_completa_con_cuatro_receipts_unicos() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    proyecto_de_un_documento(root);
+
+    let mut s = Sesion::abrir(root);
+
+    // (1) apply → el documento queda en B.
+    let recibo_apply1 = aplica_el_patch(&mut s, root, 1);
+
+    // (2) revert → vuelve a A.
+    let revert1 = s.revierte(&recibo_apply1);
+    assert_eq!(
+        revert1["reverted"], true,
+        "paso 2: el primer revert debe revertir: {revert1}"
+    );
+    assert_eq!(wol(root), ESTADO_A, "paso 2: el documento vuelve a A");
+    let recibo_revert1 = revert1["receiptId"]
+        .as_str()
+        .expect("receiptId del primer revert")
+        .to_string();
+
+    // (3) re-plan IDÉNTICO + apply → vuelve a B. Como el workspace está de nuevo en la revisión de
+    //     partida y las ops son las mismas, el `changeSetId` es el mismo de (1) por determinismo del
+    //     planHash — y el `txnId` «natural» de esta transacción colisiona con el de aquella.
+    let recibo_apply2 = aplica_el_patch(&mut s, root, 1);
+    assert_ne!(
+        recibo_apply2, recibo_apply1,
+        "el segundo apply publica una transacción NUEVA, con identidad propia: reutilizar el \
+         `txnId` del primer apply sobrescribe su `recovery/` y su recibo, y las copias con las que \
+         se deshacía aquella transacción se pierden. El `changeSetId` puede repetirse (es \
+         determinista y eso es deseado); el `txnId` efectivo, no"
+    );
+    assert_eq!(wol(root), ESTADO_B, "paso 3: el re-apply vuelve a dejar B");
+
+    // (4) revert del re-apply → vuelve a A. Es el paso que hoy muere: el `txnId` derivado para la
+    //     inversa ya tiene recibo persistido (el de la reversión del paso 2) y el guard de H01 lo
+    //     rechaza sin ofrecer alternativa.
+    let revert2 = s.revierte(&recibo_apply2);
+    assert_eq!(
+        revert2["reverted"], true,
+        "paso 4: revertir el re-apply tiene que funcionar. Un `WRITE_CONFLICT` aquí deja el \
+         re-apply permanentemente NO revertible, que es peor que el defecto que H01 cerró: la \
+         secuencia legítima «deshacer y rehacer» se queda sin salida: {revert2}"
+    );
+    assert_eq!(
+        wol(root),
+        ESTADO_A,
+        "paso 4: y devuelve el documento al estado A: {revert2}"
+    );
+    let recibo_revert2 = revert2["receiptId"]
+        .as_str()
+        .expect("receiptId del segundo revert")
+        .to_string();
+
+    // Los CUATRO ids son distintos entre sí: cada uno nombra su propio `recovery/`, `journal/` y
+    // `receipts/`, y dos iguales significan dos transacciones compartiendo material.
+    let ids = [
+        &recibo_apply1,
+        &recibo_revert1,
+        &recibo_apply2,
+        &recibo_revert2,
+    ];
+    for (i, a) in ids.iter().enumerate() {
+        for b in ids.iter().skip(i + 1) {
+            assert_ne!(
+                a, b,
+                "las cuatro transacciones de la secuencia tienen identidad PROPIA: {ids:?}"
+            );
+        }
+    }
+
+    // Y los cuatro recibos siguen listados: la cadena entera es auditable y encadenable.
+    let recibos = recibos_listados(&mut s);
+    for id in ids {
+        assert!(
+            recibos.contains(id),
+            "el recibo «{id}» tiene que quedar listado en `workspace_status`: si desapareció es \
+             que otra transacción lo pisó. Listados: {recibos:?}"
+        );
+    }
+
+    // La sesión viva ve el estado final, sin reiniciar el proceso.
+    let doc = s.tool(
+        "knowledge_get",
+        json!({"ref":{"path":"pendientes/wol-bastion.md"},"include":["frontmatter"]}),
+    )["document"]
+        .clone();
+    assert_eq!(
+        doc["frontmatter"]["prioridad"],
+        json!(5),
+        "la lectura posterior coincide con el disco tras las cuatro operaciones: {doc}"
+    );
+}
+
+/// **Criterio 2** — **Dado** ese mismo encadenamiento, **Cuando** se inspecciona
+/// `recovery/`/`receipts/` tras el segundo `apply`, **Entonces** las copias y el recibo de la
+/// **primera** transacción (`recovery/X/`, `receipts/X.json`) siguen **intactos byte a byte** — el
+/// segundo `apply` publicó bajo un `txnId` distinto.
+///
+/// Es el criterio de la pérdida de datos por la vía del `apply`: hoy `backup_originals` empieza por
+/// `remove_dir_all` del árbol previo y `write_pending_receipt` reescribe su recibo, así que el
+/// material de la primera transacción desaparece en silencio y `change_apply` responde
+/// `applied: true`.
+#[test]
+fn reapply_de_changeset_identico_no_pisa_recovery_ni_receipts_previos() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    proyecto_de_un_documento(root);
+
+    let mut s = Sesion::abrir(root);
+    let recibo_apply1 = aplica_el_patch(&mut s, root, 1);
+
+    let revert1 = s.revierte(&recibo_apply1);
+    assert_eq!(
+        revert1["reverted"], true,
+        "precondición: el primer revert debe revertir: {revert1}"
+    );
+    let recibo_revert1 = revert1["receiptId"]
+        .as_str()
+        .expect("receiptId del primer revert")
+        .to_string();
+
+    let recovery = runtime(root).join("recovery");
+    let receipts = runtime(root).join("receipts");
+    let recovery_antes = ficheros_bajo(&recovery);
+    let receipts_antes = ficheros_bajo(&receipts);
+
+    // Precondiciones: el material de las dos transacciones ya publicadas está en disco, y el del
+    // primer apply guarda el estado A (con el que se deshacía aquel apply).
+    let pre_apply = recovery_antes
+        .get(&format!("{recibo_apply1}/pendientes/wol-bastion.md"))
+        .map(|b| legible(b))
+        .unwrap_or_else(|| {
+            panic!(
+                "precondición: el primer apply respalda el estado que pisó en \
+                 `recovery/{recibo_apply1}/`: {:?}",
+                recovery_antes.keys().collect::<Vec<_>>()
+            )
+        });
+    assert_eq!(
+        pre_apply, ESTADO_A,
+        "precondición: esa copia es el estado A, el que hace reversible al primer apply"
+    );
+    assert!(
+        receipts_antes.contains_key(&format!("{recibo_apply1}.json"))
+            && receipts_antes.contains_key(&format!("{recibo_revert1}.json")),
+        "precondición: los dos recibos están persistidos: {:?}",
+        receipts_antes.keys().collect::<Vec<_>>()
+    );
+
+    // Testigos de identidad de fichero (device+inode) del material de la PRIMERA transacción. La
+    // comparación por bytes no basta aquí y hay que decirlo: el re-apply respalda el MISMO estado A
+    // y compone un recibo con las MISMAS revisiones, así que si sobrescribe deja unos bytes
+    // idénticos y el criterio «intactos byte a byte» pasaría por la razón equivocada. El inodo sí
+    // distingue «no lo tocó» de «lo reescribió con lo mismo»: `write_atomic` publica por
+    // `temp+rename`, que estrena inodo.
+    let testigo_recovery_antes = testigo(&recovery.join(&recibo_apply1));
+    let testigo_recibo_antes = testigo(&receipts.join(format!("{recibo_apply1}.json")));
+
+    // Re-plan idéntico + apply: el `changeSetId` vuelve a ser el mismo, así que el `txnId` «natural»
+    // de esta transacción es el que ya ocupa la primera.
+    let recibo_apply2 = aplica_el_patch(&mut s, root, 1);
+
+    let recovery_despues = ficheros_bajo(&recovery);
+    let receipts_despues = ficheros_bajo(&receipts);
+
+    for clave in recovery_antes.keys() {
+        assert_eq!(
+            recovery_despues.get(clave).map(|b| legible(b)),
+            recovery_antes.get(clave).map(|b| legible(b)),
+            "un re-apply del mismo change set no puede tocar ni un byte del material de \
+             recuperación previo, y pisó «{clave}». Ese árbol es la única copia con la que se \
+             deshace la transacción que lo dejó: sobrescribirlo la vuelve irreversible"
+        );
+    }
+    for clave in receipts_antes.keys() {
+        assert_eq!(
+            receipts_despues.get(clave).map(|b| legible(b)),
+            receipts_antes.get(clave).map(|b| legible(b)),
+            "ni reescribir el recibo «{clave}» de una transacción previa: cada publicación registra \
+             el suyo, bajo su propia identidad"
+        );
+    }
+
+    // Control anti-vacuo: el re-apply SÍ publicó (si no hubiera hecho nada, «intactos» pasaría por
+    // la razón equivocada).
+    assert_eq!(
+        wol(root),
+        ESTADO_B,
+        "control anti-vacuo: el re-apply publica de verdad el estado B"
+    );
+
+    // El material de la primera transacción sigue siendo EL MISMO fichero, no una copia recién
+    // escrita encima con el mismo contenido.
+    assert_eq!(
+        testigo(&recovery.join(&recibo_apply1)),
+        testigo_recovery_antes,
+        "`recovery/{recibo_apply1}/` tiene que seguir siendo el árbol que dejó el PRIMER apply, no \
+         uno reescrito por el segundo: el re-apply respalda el mismo estado A, así que la \
+         sobrescritura deja los mismos bytes y solo la identidad del fichero la delata"
+    );
+    assert_eq!(
+        testigo(&receipts.join(format!("{recibo_apply1}.json"))),
+        testigo_recibo_antes,
+        "y `receipts/{recibo_apply1}.json` tiene que seguir siendo el recibo del PRIMER apply"
+    );
+
+    // Y el re-apply dejó material PROPIO, bajo una identidad que ninguna transacción previa usaba:
+    // dos transacciones publicadas = dos árboles de recuperación y dos recibos.
+    assert_ne!(
+        recibo_apply2, recibo_apply1,
+        "el re-apply publica bajo un `txnId` distinto: si reutiliza el de la primera transacción, \
+         el material que acaba de aseverarse intacto es en realidad el suyo, escrito encima"
+    );
+    assert!(
+        recovery_despues.contains_key(&format!("{recibo_apply2}/pendientes/wol-bastion.md")),
+        "y deja SUS copias de recuperación bajo esa identidad nueva «{recibo_apply2}»: antes {:?}, \
+         después {:?}",
+        recovery_antes.keys().collect::<Vec<_>>(),
+        recovery_despues.keys().collect::<Vec<_>>()
+    );
+    assert!(
+        receipts_despues.contains_key(&format!("{recibo_apply2}.json")),
+        "y su recibo propio: antes {:?}, después {:?}",
+        receipts_antes.keys().collect::<Vec<_>>(),
+        receipts_despues.keys().collect::<Vec<_>>()
+    );
+}
