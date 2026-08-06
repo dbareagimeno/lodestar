@@ -1299,7 +1299,7 @@ pub fn workspace_revision(files: &FileMap, writable: &[RelPath]) -> WorkspaceRev
 // ---------------------------------------------------------------------------
 
 schema_derive! {
-/// Los 16 códigos de error estables del protocolo (`REFACTOR §13`). UNA sola enum, igual que
+/// Los 17 códigos de error estables del protocolo (`REFACTOR §13`). UNA sola enum, igual que
 /// `CheckCode`: el valor de wire ES la cadena SCREAMING_SNAKE (rename por variante, NO el
 /// `PascalCase` por defecto de serde ni el guion de `CheckCode`). Cualquier fachada que traduzca
 /// un error a protocolo usa una de estas variantes — está prohibido redefinir estos códigos fuera
@@ -1307,6 +1307,12 @@ schema_derive! {
 ///
 /// Esta historia (E10-H02) solo fija el contrato de wire y el punto de mapeo; los flujos reales
 /// que producen cada código llegan en E12/E13 (fuera de alcance aquí).
+///
+/// # Cambios conscientes del catálogo
+///
+/// El catálogo es superficie de wire **congelada** y solo se ha abierto a conciencia dos veces:
+/// E23-H14 (`NONCONFORMANT_RESULT` → `INVALID_RESULT`) y **E28-H02**, que añade la fila 17,
+/// [`ErrorCode::DocumentAlreadyExists`], para el guard de colisión de `create`/`move`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum ErrorCode {
     #[serde(rename = "WORKSPACE_NOT_FOUND")]
@@ -1315,6 +1321,12 @@ pub enum ErrorCode {
     WorkspaceRecoveryRequired,
     #[serde(rename = "DOCUMENT_NOT_FOUND")]
     DocumentNotFound,
+    /// El destino de una operación que CREA un documento (`create`, o el `to` de un `move`) ya está
+    /// ocupado por un documento existente (E28-H02). Simétrico de
+    /// [`ErrorCode::DocumentNotFound`]: los dos describen un desajuste entre lo que la operación
+    /// asume sobre la **existencia** de un `path` y lo que hay realmente en el workspace.
+    #[serde(rename = "DOCUMENT_ALREADY_EXISTS")]
+    DocumentAlreadyExists,
     #[serde(rename = "AMBIGUOUS_REFERENCE")]
     AmbiguousReference,
     #[serde(rename = "REVISION_CONFLICT")]
@@ -1352,6 +1364,7 @@ impl ErrorCode {
             ErrorCode::WorkspaceNotFound => "WORKSPACE_NOT_FOUND",
             ErrorCode::WorkspaceRecoveryRequired => "WORKSPACE_RECOVERY_REQUIRED",
             ErrorCode::DocumentNotFound => "DOCUMENT_NOT_FOUND",
+            ErrorCode::DocumentAlreadyExists => "DOCUMENT_ALREADY_EXISTS",
             ErrorCode::AmbiguousReference => "AMBIGUOUS_REFERENCE",
             ErrorCode::RevisionConflict => "REVISION_CONFLICT",
             ErrorCode::PlanStale => "PLAN_STALE",

@@ -330,14 +330,22 @@ pub fn can_apply(report: &ValidationReport, policy: &PlanPolicy) -> bool {
 /// no se materializa como metadata. Quien quiera un `title:` explícito lo pasa en `frontmatter`.
 ///
 /// # Errores
-/// No falla (un `path` ya presente en el workspace no se rechaza aquí; esa política es de la
-/// workspace). La firma devuelve `Result` por coherencia con las otras normalizaciones.
+/// [`CoreError::DocumentAlreadyExists`] si `path` **ya tiene fichero** en el workspace (E28-H02).
+///
+/// Hasta E28-H02 esta función descartaba el `DocumentSet` (lo recibía como `_workspace`) y emitía
+/// el `Create` sin condición alguna, así que un `create` sobre un documento existente producía un
+/// plan aplicable que lo **pisaba sin un solo diagnóstico** (defecto A-05 del testbench homelab,
+/// `decisiones/23-hallazgos-testbench-homelab.md`). El guard vive aquí, en la normalización pura:
+/// es donde está la fuente de verdad (el `DocumentSet`) y donde el plan aún no existe.
 pub fn normalize_create(
-    _workspace: &DocumentSet,
+    workspace: &DocumentSet,
     path: &RelPath,
     frontmatter: Option<FrontmatterPatch>,
     body: Option<String>,
 ) -> Result<NormalizedOperation, CoreError> {
+    if workspace.files().contains_key(path) {
+        return Err(CoreError::DocumentAlreadyExists(path.clone()));
+    }
     Ok(NormalizedOperation::Create {
         path: path.clone(),
         frontmatter,
@@ -821,14 +829,24 @@ fn remove_inline_links(
 /// un path afectado de más) en los planes donde el documento no tiene salientes relativos.
 ///
 /// # Errores
-/// [`CoreError::NormalizeTargetNotFound`] si algún documento entrante no tiene fichero en el workspace
-/// (no debería ocurrir: los entrantes salen del propio workspace).
+/// - [`CoreError::DocumentAlreadyExists`] si el destino `to` **ya tiene fichero** en el workspace
+///   (E28-H02): el rename publicaría encima del documento existente. `from == to` **no** es una
+///   colisión —el destino coincide consigo mismo, no con un documento distinto— y sigue siendo el
+///   no-op válido de siempre.
+/// - [`CoreError::NormalizeTargetNotFound`] si `from` (o algún documento entrante) no tiene fichero
+///   en el workspace. La dirección contraria conserva su código: un origen inexistente es
+///   `DOCUMENT_NOT_FOUND`, no una colisión de destino.
 pub fn normalize_move(
     doc_set: &DocumentSet,
     from: &RelPath,
     to: &RelPath,
     rewrite_inbound_links: bool,
 ) -> Result<Vec<NormalizedOperation>, CoreError> {
+    // E28-H02: el destino no puede estar ocupado por OTRO documento. Mover un documento sobre sí
+    // mismo (`from == to`) es un no-op, no una colisión.
+    if from != to && doc_set.files().contains_key(to) {
+        return Err(CoreError::DocumentAlreadyExists(to.clone()));
+    }
     let mut ops = vec![NormalizedOperation::Move {
         from: from.clone(),
         to: to.clone(),

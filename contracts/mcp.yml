@@ -527,8 +527,8 @@ meta:
     devolvían el código PELADO (`.map_err(|e| e.as_str().to_string())` en `tools.rs`), porque los
     productores de `lodestar-app` eran `Result<_, ErrorCode>` y no tenían dónde poner el mensaje;
     hoy devuelven `lodestar_app::AppError` (el ErrorCode del catálogo + un String), cuyo `Display`
-    compone ese texto en un solo sitio. El catálogo sigue teniendo 16 filas y viviendo solo en
-    `core::types` (invariante #4): esto añade mensaje, no códigos.
+    compone ese texto en un solo sitio. El catálogo vive solo en `core::types` (invariante #4) y
+    tiene 17 filas desde E28-H02: esto añade mensaje, no códigos.
     QUÉ ES «WorkspaceError» en las listas `errores:` de las tools (definido AQUÍ una vez, porque
     aparece en las diez y no es un código): es el CENTINELA del resto de fallos de workspace/IO que
     puede levantar cualquier tool al abrir el `DocumentSet`, recorrer el árbol o leer la config —el
@@ -541,7 +541,7 @@ meta:
     enumerando códigos por tool, porque el conjunto alcanzable depende del estado del disco y
     enumerarlo a mano sería justo la clase de lista que envejece en silencio (E26-H11). El test
     `descubribilidad.rs::los_codigos_del_contrato_estan_en_el_catalogo` lo trata como el único valor
-    admisible de una entrada de `errores:` que no sea una de las 16 filas.
+    admisible de una entrada de `errores:` que no sea una de las 17 filas.
   validacion_de_argumentos: >-
     REGLA DE LA CASA, enunciada aquí una vez porque hasta E23-H11 vivía implícita en tres semánticas
     distintas: **el servidor valida los VALORES de los parámetros que declara, e IGNORA lo que no
@@ -782,7 +782,7 @@ tools:
     params:
       - { nombre: expectedWorkspaceRevision, tipo: string, requerido: false, semantica: "control optimista a nivel de workspace («blake3:…»); si se omite se toma la revisión actual, si no coincide → REVISION_CONFLICT" }
       - { nombre: operations, tipo: "array<object>", requerido: "condicional (una de: operations | selection+operation)", semantica: "FORMA-ARRAY (E12-H08): operaciones propuestas, discriminadas por «op»; cada op puede llevar «expectedRevision» (DocumentRevision, control optimista por documento). Alternativa a la forma-objeto de selección masiva (selection+operation)" }
-      - { nombre: "operations[].op", tipo: string, requerido: true, valores: ["create", "patch_frontmatter", "replace_body", "replace_text", "edit_section", "move", "delete"], semantica: "las 7 operaciones universales de §20.11 (E21-H01 retiró add_relation/remove_relation/transition_status: una relación es un enlace Markdown, un estado es un patch de frontmatter; y E23-H11 retiró la octava, `apply_fix`, que sin productor de Fix desde E20-H03 fallaba siempre y encima devolvía DOCUMENT_NOT_FOUND — ver `docs/history/PROPUESTA_FIXES.md`); cada una se despacha a su normalizador del core. Una op fuera del enum → INVALID_SCHEMA" }
+      - { nombre: "operations[].op", tipo: string, requerido: true, valores: ["create", "patch_frontmatter", "replace_body", "replace_text", "edit_section", "move", "delete"], semantica: "las 7 operaciones universales de §20.11 (E21-H01 retiró add_relation/remove_relation/transition_status: una relación es un enlace Markdown, un estado es un patch de frontmatter; y E23-H11 retiró la octava, `apply_fix`, que sin productor de Fix desde E20-H03 fallaba siempre y encima devolvía DOCUMENT_NOT_FOUND — ver `docs/history/PROPUESTA_FIXES.md`); cada una se despacha a su normalizador del core. Una op fuera del enum → INVALID_SCHEMA. E28-H02: las dos operaciones que CREAN un path —`create`, y el `to` de un `move`— exigen que el destino esté LIBRE; si ya lo ocupa un documento existente, la normalización falla con DOCUMENT_ALREADY_EXISTS nombrando el path y no hay plan que aplicar (antes se emitía la op sin condición y el apply sobrescribía el documento). `move` con from == to sigue siendo un no-op válido, no una colisión" }
       - { nombre: "operations[].expectedRevision", tipo: string, requerido: false, semantica: "DocumentRevision que el agente cree vigente («blake3:…»); si el documento cambió → REVISION_CONFLICT" }
       - { nombre: "operations[].<params de cada op>", tipo: varios, requerido: "según la op", semantica: "E23-H10: el inputSchema DECLARA los parámetros de cada op, cosa que no hacía hasta ahora — solo llevaba op/path/ref/expectedRevision, o sea ni uno de los parámetros reales de 7 de las 8 ops de entonces. Para un producto cuyo público objetivo son agentes ese era el mayor agujero de usabilidad: el schema decía qué ops existen pero no cómo invocarlas. Los nombres los lee normalize_raw_op (lodestar-app) y son: create → frontmatter?/body? · patch_frontmatter → patch · replace_body → body · replace_text → find/replace/expectedOccurrences? · edit_section → headingPath/mode?/content · move → from/to/rewriteInboundLinks? · delete → inboundLinksPolicy?. (E23-H11 retiró el octavo juego de parámetros, «fixId», junto con su op — ver la nota de cabecera.) Se declaran PLANOS (no con oneOf por op) porque el servidor no valida contra este schema: es declarativo, y un oneOf mal escrito confundiría al cliente sin que ningún test lo notara. Fuente: tools.rs::operacion_item_schema" }
       - { nombre: "operations[].inboundLinksPolicy", tipo: string, requerido: "obligatorio para «delete» cuando el documento tiene backlinks (E21-H03, §Fase 12)", valores: ["reject", "remove_links"], semantica: "política ante enlaces entrantes de un «delete». §Fase 12 prohíbe elegirla en silencio: un «delete» con backlinks y SIN esta clave → INVALID_SCHEMA (falta un campo requerido), distinto del INBOUND_LINKS_EXIST que da «reject» explícito con backlinks. Sin backlinks no hay nada que decidir y la omisión se permite. Un valor no reconocido → INVALID_SCHEMA, con un mensaje que NOMBRA las válidas (E23-H05). «retarget» y «create_stub» se RETIRARON en E23-H05: estaban declaradas desde E12-H06 pero no implementadas (normalize_delete emitía solo el Delete, dejando los entrantes rotos), así que se aceptaban sin ejecutarse. No se implementan porque ninguna tiene semántica que inventar sin más datos del llamador: «retarget» no tiene campo de destino y «create_stub» no tiene criterio de contenido. Los valores válidos viven UNA vez, en core::types::InboundLinksPolicy::WIRE_VALUES" }
@@ -791,7 +791,7 @@ tools:
       - { nombre: policy, tipo: object, requerido: false, semantica: "{ requireValidResult?, allowWarnings? } (PlanPolicy, E12-H04); por defecto exige conformidad y permite warnings" }
     retorno: "PlanResult (lodestar_app): { changeSetId, baseWorkspaceRevision, planHash, canApply, expiresAt, normalizedOperations: [NormalizedOperation], risk, semanticDiff, impact: { affectedDocuments, affectedCount }, capturedRevisions: { «path»: «blake3:…» }, diagnosticsBefore, diagnosticsAfter } — json directo, sin envelope. `capturedRevisions` (E21-H02) lleva una entrada por documento de una selección masiva (su DocumentRevision, el snapshot de §Fase 12); vacío {} en la forma-array"
     output_schema: "sí — schemars::schema_for!(PlanResult), vía lodestar_app::schemas::change_plan_schema()"
-    errores: ["REVISION_CONFLICT (workspace o documento cambiado)", "INVALID_SCHEMA (op desconocida o parámetro inválido; un `where`/`filter` de `selection` malformado, CON el diagnóstico del parser del core en el mensaje — E26-H07; hasta v0.4.0 `build_selection_expression` lo descartaba con `map_err(|_| …)` y la misma consulta se diagnosticaba por knowledge_search y se callaba por change_plan; y un TYPE ERROR al evaluar `selection.where`/`selection.filter` — E26-H08: una selección masiva ya no salta documentos en silencio, y el error es el MISMO código y el MISMO texto que daría knowledge_search con esa consulta)", "DOCUMENT_NOT_FOUND (objetivo de normalización inexistente)", "INBOUND_LINKS_EXIST (delete «reject» con entrantes)", "PERMISSION_DENIED (path-traversal)", "RECOVERY_FAILED (E25-H02: la recuperación transparente del paso (0) —E24-H03— no pudo restaurar una transacción interrumpida porque sus copias no verifican; su journal y sus copias quedan en .lodestar/runtime/journal/quarantine/<txnId>/ y el mensaje nombra la ruta; la SIGUIENTE llamada ya no encuentra recuperación pendiente)", "INTERNAL_IO_ERROR (carga de config)", "WorkspaceError"]
+    errores: ["REVISION_CONFLICT (workspace o documento cambiado)", "INVALID_SCHEMA (op desconocida o parámetro inválido; un `where`/`filter` de `selection` malformado, CON el diagnóstico del parser del core en el mensaje — E26-H07; hasta v0.4.0 `build_selection_expression` lo descartaba con `map_err(|_| …)` y la misma consulta se diagnosticaba por knowledge_search y se callaba por change_plan; y un TYPE ERROR al evaluar `selection.where`/`selection.filter` — E26-H08: una selección masiva ya no salta documentos en silencio, y el error es el MISMO código y el MISMO texto que daría knowledge_search con esa consulta)", "DOCUMENT_NOT_FOUND (objetivo de normalización inexistente)", "DOCUMENT_ALREADY_EXISTS (E28-H02: create sobre un path ya ocupado por un documento existente; move cuyo «to» ya está ocupado. Simétrico de DOCUMENT_NOT_FOUND —la dirección contraria— y el mensaje NOMBRA el path colisionado. Hasta v0.5.0 no había guard: el plan salía con canApply:true y el apply PISABA el documento existente sin un solo diagnóstico. Un move con from == to no es colisión: sigue siendo el no-op válido de siempre)", "INBOUND_LINKS_EXIST (delete «reject» con entrantes)", "PERMISSION_DENIED (path-traversal)", "RECOVERY_FAILED (E25-H02: la recuperación transparente del paso (0) —E24-H03— no pudo restaurar una transacción interrumpida porque sus copias no verifican; su journal y sus copias quedan en .lodestar/runtime/journal/quarantine/<txnId>/ y el mensaje nombra la ruta; la SIGUIENTE llamada ya no encuentra recuperación pendiente)", "INTERNAL_IO_ERROR (carga de config)", "WorkspaceError"]
     semantica: >-
       Orquesta un plan de cambios SIN escribir (invariante #1; aplicar es change_apply, E13): toda
       la simulación es sobre un DocumentSet en memoria. Acepta DOS formas de wire: la forma-ARRAY
@@ -941,7 +941,7 @@ migracion:
 # ---------------------------------------------------------------------------
 codigos_sin_emisor:
   nota: >-
-    De las 16 filas congeladas de `ErrorCode` (§19.3), estas CUATRO no se emiten desde ningún camino
+    De las 17 filas congeladas de `ErrorCode` (§19.3), estas CUATRO no se emiten desde ningún camino
     del producto. Se registra aquí para que la próxima auditoría no lo redescubra, y sobre todo para
     NO inventarles un emisor: un código sin camino real es información sobre el catálogo, no un hueco
     que rellenar. Verificado por grep sobre el árbol y por test donde el camino sí existía
@@ -956,11 +956,14 @@ codigos_sin_emisor:
     correcto y es contrato de mantenimiento: cuando un código gana emisor, sale de estas `filas:` y
     entra en los `errores:` de la tool que lo emite, EN EL MISMO cambio.
     E26-H11: la lista deja de ser una afirmación que solo el lector podía comprobar. Los cuatro
-    códigos de abajo, los que declaran las tools y las 16 filas del catálogo se cotejan por test
+    códigos de abajo, los que declaran las tools y las 17 filas del catálogo se cotejan por test
     (`lodestar-mcp/tests/descubribilidad.rs`, criterio `los_codigos_del_contrato_estan_en_el_catalogo`
     y su hermano de coherencia interna): ningún código puede estar a la vez emitido y sin emisor, y
     ninguna fila del catálogo puede quedar sin contar por ningún lado — un código del que el
-    contrato no dice nada es la forma silenciosa de mentir. Hoy son 12 emitidos + estos 4 = 16.
+    contrato no dice nada es la forma silenciosa de mentir.
+    E28-H02: el catálogo pasa de 16 a 17 filas — `DOCUMENT_ALREADY_EXISTS` nace CON emisor (el guard
+    de colisión de `create`/`move` en `core::plan`), así que entra directamente en los `errores:` de
+    `change_plan` y NO en esta lista. Hoy son 13 emitidos + estos 4 = 17.
   filas:
     - { codigo: WORKSPACE_NOT_FOUND, motivo: "un `--root` inexistente sale por `std::process::exit(3)` con texto plano desde `main.rs`, nunca por el envelope. Fuera de `types.rs` solo aparece en una aserción de round-trip serde. El comportamiento REAL (exit 3, stderr que nombra la ruta, sin panic, stdout vacío) está fijado por `mcp.rs::root_inexistente_falla_legible_sin_panic`" }
     - { codigo: RESULT_TOO_LARGE, motivo: "mapeado desde `CoreError::SizeGuardExceeded`, pero esa variante NO se construye en ninguna parte del árbol. El presupuesto de payload se respeta por diseño (knowledge_search nunca devuelve cuerpos, hay límites de página), no por este error" }

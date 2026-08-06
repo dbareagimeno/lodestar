@@ -439,3 +439,160 @@ fn plan_sin_recuperacion_pendiente_no_escribe() {
         "la revisión del workspace no se mueve al planificar"
     );
 }
+
+// ---------------------------------------------------------------------------
+// E28-H02 — el error de colisión de `create`/`move` llega al envelope como
+// `DOCUMENT_ALREADY_EXISTS` (defecto A-05 del testbench homelab,
+// `docs/qa/testbench/batches/verify_G1-11.json`).
+//
+// El guard vive en la normalización pura (`core::plan::normalize_create`/`normalize_move`, cubierto
+// por `crates/lodestar-core/tests/core.rs`); lo que estos dos tests fijan es el MAPEO de esa
+// condición al código estable del protocolo en la capa de servicios, igual que
+// `NormalizeTargetNotFound → DOCUMENT_NOT_FOUND` para la dirección contraria.
+//
+// EXPRESADO POR WIRE, NO POR VARIANTE: `ErrorCode::DocumentAlreadyExists` todavía no existe (la
+// historia lo añade como fila 17 del catálogo), así que la aserción compara `err.code.as_str()`
+// contra la cadena `"DOCUMENT_ALREADY_EXISTS"` —que es exactamente lo que ve el agente— en vez de
+// nombrar la variante Rust. Así el test compila hoy y falla por ASERCIÓN.
+//
+// ROJO esperado HOY: `change_plan` devuelve `Ok(PlanResult)` (plan aplicable que pisaría el
+// documento), no `Err`.
+// ---------------------------------------------------------------------------
+
+/// El código de wire (`ErrorCode::as_str`) que corresponde a una colisión de destino en E28-H02.
+const COLISION: &str = "DOCUMENT_ALREADY_EXISTS";
+
+/// Monta un `App` sobre un workspace temporal con DOS documentos existentes: `notas/existente.md`
+/// (el destino ocupado) y `notas/origen.md` (el documento a mover).
+fn app_con_dos_notas() -> (tempfile::TempDir, App) {
+    let dir = tempfile::tempdir().unwrap();
+    escribe(
+        dir.path(),
+        "notas/existente.md",
+        "---\ntitle: Existente\n---\n\n# Existente\n\ncontenido que no se debe pisar\n",
+    );
+    escribe(
+        dir.path(),
+        "notas/origen.md",
+        "---\ntitle: Origen\n---\n\n# Origen\n\ncuerpo del origen\n",
+    );
+    let app = App::open(dir.path()).expect("el workspace temporal debe abrir");
+    (dir, app)
+}
+
+/// **E28-H02** — Dado un `create` sobre `notas/existente.md` (ya ocupado), Cuando se planifica,
+/// Entonces el servicio devuelve `Err` con el código estable `DOCUMENT_ALREADY_EXISTS` y un mensaje
+/// que nombra el path colisionado (mismo estilo que `DOCUMENT_NOT_FOUND`).
+#[test]
+fn create_sobre_path_ocupado_mapea_a_document_already_exists() {
+    let (_dir, app) = app_con_dos_notas();
+
+    let resultado = app.change_plan(
+        None,
+        &serde_json::json!([
+            { "op": "create", "path": "notas/existente.md",
+              "frontmatter": { "title": "Pisado" }, "body": "x\n" },
+        ]),
+        policy_permisiva(),
+    );
+
+    let err = match resultado {
+        Ok(plan) => panic!(
+            "planificar un `create` sobre un path YA OCUPADO debe fallar con {COLISION}; devolvió un \
+             plan aplicable (canApply={}) que pisaría el documento existente: {:?}",
+            plan.can_apply, plan.normalized_operations,
+        ),
+        Err(e) => e,
+    };
+    assert_eq!(
+        err.code.as_str(),
+        COLISION,
+        "la colisión de un `create` debe mapear al código estable {COLISION} (fila 17 del catálogo, \
+         simétrica de DOCUMENT_NOT_FOUND); el error fue {err}",
+    );
+    assert!(
+        err.message.contains("notas/existente.md"),
+        "el mensaje debe nombrar el path colisionado para que el agente sepa qué reparar; fue {:?}",
+        err.message,
+    );
+}
+
+/// **E28-H02** — Dado un `move` cuyo `to` ya está ocupado, Cuando se planifica, Entonces el mismo
+/// código `DOCUMENT_ALREADY_EXISTS`, nombrando el destino (no el origen, que sí puede moverse).
+#[test]
+fn move_a_destino_ocupado_mapea_a_document_already_exists() {
+    let (_dir, app) = app_con_dos_notas();
+
+    let resultado = app.change_plan(
+        None,
+        &serde_json::json!([
+            { "op": "move", "from": "notas/origen.md", "to": "notas/existente.md",
+              "rewriteInboundLinks": true },
+        ]),
+        policy_permisiva(),
+    );
+
+    let err = match resultado {
+        Ok(plan) => panic!(
+            "planificar un `move` hacia un destino YA OCUPADO debe fallar con {COLISION}; devolvió un \
+             plan aplicable (canApply={}) que publicaría encima del documento existente: {:?}",
+            plan.can_apply, plan.normalized_operations,
+        ),
+        Err(e) => e,
+    };
+    assert_eq!(
+        err.code.as_str(),
+        COLISION,
+        "la colisión del destino de un `move` debe mapear al mismo código {COLISION}; el error fue {err}",
+    );
+    assert!(
+        err.message.contains("notas/existente.md"),
+        "el mensaje debe nombrar el DESTINO ocupado (`notas/existente.md`), no el origen; fue {:?}",
+        err.message,
+    );
+}
+
+/// **E28-H02** · control anti-vacuo del mapeo: la dirección CONTRARIA no cambia de código. Un `move`
+/// cuyo `from` no existe sigue siendo `DOCUMENT_NOT_FOUND`, y un `create`/`move` hacia un destino
+/// libre sigue produciendo plan. Así el guard nuevo no puede degenerar en «todo es colisión».
+#[test]
+fn destino_libre_y_origen_inexistente_conservan_su_codigo() {
+    let (_dir, app) = app_con_dos_notas();
+
+    // (a) `create` sobre un path LIBRE: sigue habiendo plan.
+    app.change_plan(
+        None,
+        &serde_json::json!([
+            { "op": "create", "path": "notas/nueva.md", "body": "# Nueva\n" },
+        ]),
+        policy_permisiva(),
+    )
+    .expect("un `create` sobre un path libre debe seguir produciendo plan");
+
+    // (b) `move` hacia un destino LIBRE: sigue habiendo plan.
+    app.change_plan(
+        None,
+        &serde_json::json!([
+            { "op": "move", "from": "notas/origen.md", "to": "notas/destino.md",
+              "rewriteInboundLinks": true },
+        ]),
+        policy_permisiva(),
+    )
+    .expect("un `move` hacia un destino libre debe seguir produciendo plan");
+
+    // (c) `move` cuyo ORIGEN no existe: `DOCUMENT_NOT_FOUND`, no el código de colisión.
+    let err = app
+        .change_plan(
+            None,
+            &serde_json::json!([
+                { "op": "move", "from": "notas/fantasma.md", "to": "notas/destino.md" },
+            ]),
+            policy_permisiva(),
+        )
+        .expect_err("un `move` desde un path inexistente debe seguir fallando");
+    assert_eq!(
+        err.code,
+        ErrorCode::DocumentNotFound,
+        "un origen inexistente es `DOCUMENT_NOT_FOUND`, no una colisión de destino; el error fue {err}",
+    );
+}

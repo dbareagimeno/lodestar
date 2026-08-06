@@ -8570,3 +8570,363 @@ fn la_estadistica_no_se_pagina() {
         );
     }
 }
+
+// ===========================================================================
+// E28-H02 — `create`/`move` sobre un destino ocupado quedan bloqueados por un guard de colisión.
+//
+// Defecto A-05 del testbench homelab (caso G1-11, repro literal en
+// `docs/qa/testbench/batches/verify_G1-11.json`; ficha en
+// `decisiones/23-hallazgos-testbench-homelab.md`): sobre un workspace con `notas/existente.md`, un
+// `change_plan` con `{"op":"create","path":"notas/existente.md"}` devuelve `canApply:true` sin un
+// solo diagnóstico de colisión — aplicado, sobrescribe el documento. Simétricamente, un `move` cuyo
+// `to` ya está ocupado publica encima de él. La dirección contraria (tocar algo que NO existe) sí
+// tiene guard desde siempre: `DOCUMENT_NOT_FOUND`.
+//
+// Causa raíz (verificada en el código): `crates/lodestar-core/src/plan.rs`, `normalize_create`
+// descarta el `DocumentSet` como `_workspace`; `normalize_move` nunca consulta `doc_set.files()`
+// para el destino.
+//
+// LO QUE FIJAN ESTOS TESTS es la superficie de WIRE: una colisión deja el plan NO APLICABLE y expone
+// el código estable nuevo `DOCUMENT_ALREADY_EXISTS` (fila 17 del catálogo `ErrorCode`, «Delta de
+// contrato propuesto» de la historia) nombrando el path colisionado. Son deliberadamente agnósticos
+// a CÓMO se materialice esa no-aplicabilidad —error de ejecución de la tool (`isError:true`, la ruta
+// que toma hoy `DOCUMENT_NOT_FOUND` y la que sugiere el «Alcance»: `Err(CoreError)` en la
+// normalización) o plan con `canApply:false` y el código en el diagnóstico—, porque la historia
+// admite ambas lecturas; lo que NO admiten es un plan aplicable.
+//
+// Como `ErrorCode::DocumentAlreadyExists` todavía no existe, el código se asevera por su
+// representación de WIRE (la cadena que ve el agente), no por la variante Rust: así estos tests
+// compilan hoy y fallan por ASERCIÓN.
+//
+// ROJO esperado HOY: por ASERCIÓN. `change_plan` devuelve `canApply:true` sin `isError`.
+// ===========================================================================
+
+/// Workspace del criterio: dos documentos existentes bajo `notas/` —`existente.md` (el destino
+/// ocupado, con un contenido reconocible que ninguna operación debe pisar) y `origen.md` (el
+/// documento a mover)—. Sin `index.md`: el modelo es universal (`§20`), ningún fichero es especial.
+fn workspace_dos_notas() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "notas/existente.md",
+        "---\ntitle: Existente\n---\n\n# Existente\n\ncontenido que no se debe pisar\n",
+    );
+    write(
+        dir.path(),
+        "notas/origen.md",
+        "---\ntitle: Origen\n---\n\n# Origen\n\ncuerpo del origen\n",
+    );
+    dir
+}
+
+/// El código de wire (fila 17 del catálogo `ErrorCode`, E28-H02) de una colisión de destino.
+const COLISION: &str = "DOCUMENT_ALREADY_EXISTS";
+
+/// Asevera que la respuesta de `change_plan` deja el cambio **no aplicable por colisión**: el plan
+/// no puede aplicarse (o no llega a existir) y la respuesta expone el código `DOCUMENT_ALREADY_EXISTS`
+/// nombrando `path`. Acepta las dos formas admisibles (error de ejecución de la tool, o plan con
+/// `canApply:false`) y rechaza la única inadmisible: un plan aplicable.
+fn asevera_colision(resp: &serde_json::Value, path: &str) {
+    let texto = resp.to_string();
+
+    // Nunca un error de PROTOCOLO: una colisión es un resultado de la operación, no un fallo de
+    // transporte (mismo patrón que `DOCUMENT_NOT_FOUND`/`REVISION_CONFLICT`).
+    assert!(
+        resp["error"].is_null(),
+        "una colisión de destino NO debe ser un error JSON-RPC de transporte: {resp}"
+    );
+
+    // El cambio no puede quedar aplicable: o la tool falla, o el plan sale con `canApply:false`.
+    let es_error = resp["result"]["isError"].as_bool() == Some(true);
+    let can_apply = resp["result"]["structuredContent"]["canApply"].as_bool();
+    assert!(
+        es_error || can_apply == Some(false),
+        "planificar sobre el destino ocupado «{path}» NO puede dar un plan aplicable: o la tool \
+         falla con {COLISION}, o el plan sale con `canApply:false`. Respuesta: {resp}"
+    );
+
+    // Y el agente debe poder ramificar por el código estable, con el path nombrado.
+    assert!(
+        texto.contains(COLISION),
+        "la respuesta debe exponer el código estable «{COLISION}» (fila 17 del catálogo, simétrica \
+         de DOCUMENT_NOT_FOUND): {resp}"
+    );
+    assert!(
+        texto.contains(path),
+        "el diagnóstico de colisión debe NOMBRAR el path ocupado «{path}», igual que \
+         DOCUMENT_NOT_FOUND nombra el ref que no resolvió: {resp}"
+    );
+}
+
+/// **E28-H02** · Criterio `create_sobre_path_existente_es_document_already_exists`:
+/// **Dado** un workspace con `notas/existente.md`, **Cuando** se llama a `change_plan` con
+/// `{"op":"create","path":"notas/existente.md"}`, **Entonces** el cambio no queda aplicable y el
+/// diagnóstico lleva `DOCUMENT_ALREADY_EXISTS` nombrando el path.
+///
+/// Es el paso 1 literal del repro `verify_G1-11.json`.
+#[test]
+fn create_sobre_path_existente_es_document_already_exists() {
+    let dir = workspace_dos_notas();
+    let antes = snapshot_md(dir.path());
+
+    let ops = serde_json::json!([
+        { "op": "create", "path": "notas/existente.md",
+          "frontmatter": { "title": "Pisado" }, "body": "x\n" },
+    ]);
+    let resp = roundtrip(
+        dir.path(),
+        &[change_plan_line(None, ops, policy_permisiva()).as_str()],
+        1,
+    );
+
+    asevera_colision(&resp[0], "notas/existente.md");
+
+    // Planificar nunca escribe (invariante #1): el documento existente sigue intacto byte a byte.
+    assert_eq!(
+        snapshot_md(dir.path()),
+        antes,
+        "`change_plan` no escribe: el conocimiento en disco debe quedar idéntico: {resp:?}"
+    );
+}
+
+/// **E28-H02** · Criterio `move_a_destino_ocupado_es_document_already_exists`:
+/// **Dado** un workspace con `notas/existente.md` y `notas/origen.md`, **Cuando** se llama a
+/// `change_plan` con `{"op":"move","from":"notas/origen.md","to":"notas/existente.md"}`, **Entonces**
+/// el mismo veredicto y el mismo código, nombrando el DESTINO.
+///
+/// Es el paso 2 del repro `verify_G1-11.json` (allí, `guias/tmux.md → README.md`).
+#[test]
+fn move_a_destino_ocupado_es_document_already_exists() {
+    let dir = workspace_dos_notas();
+    let antes = snapshot_md(dir.path());
+
+    let ops = serde_json::json!([
+        { "op": "move", "from": "notas/origen.md", "to": "notas/existente.md",
+          "rewriteInboundLinks": true },
+    ]);
+    let resp = roundtrip(
+        dir.path(),
+        &[change_plan_line(None, ops, policy_permisiva()).as_str()],
+        1,
+    );
+
+    asevera_colision(&resp[0], "notas/existente.md");
+
+    assert_eq!(
+        snapshot_md(dir.path()),
+        antes,
+        "`change_plan` no escribe: el conocimiento en disco debe quedar idéntico: {resp:?}"
+    );
+}
+
+/// **E28-H02** · Criterio `create_sobre_path_libre_sigue_funcionando` (control anti-vacuo):
+/// **Dado** un workspace **sin** `notas/nueva.md`, **Cuando** se planifica su `create`, **Entonces**
+/// el plan sigue siendo aplicable (`canApply:true`) y sin rastro del código de colisión.
+///
+/// Sin este control, el guard podría implementarse rechazándolo todo.
+#[test]
+fn create_sobre_path_libre_sigue_funcionando() {
+    let dir = workspace_dos_notas();
+    assert!(
+        !dir.path().join("notas/nueva.md").exists(),
+        "precondición: `notas/nueva.md` debe estar LIBRE"
+    );
+
+    let ops = serde_json::json!([
+        { "op": "create", "path": "notas/nueva.md", "body": "# Nueva\n\ncuerpo nuevo\n" },
+    ]);
+    let resp = roundtrip(
+        dir.path(),
+        &[change_plan_line(None, ops, policy_permisiva()).as_str()],
+        1,
+    );
+
+    let sc = plan_sc(&resp[0]);
+    assert_eq!(
+        sc["canApply"],
+        serde_json::Value::Bool(true),
+        "un `create` sobre un path libre debe seguir dando un plan aplicable: {resp:?}"
+    );
+    assert!(
+        resp[0]["result"]["isError"].as_bool() != Some(true),
+        "un `create` sobre un path libre no debe dar isError: {resp:?}"
+    );
+    assert!(
+        !resp[0].to_string().contains(COLISION),
+        "un destino libre no es una colisión: {COLISION} no debe aparecer: {resp:?}"
+    );
+}
+
+/// **E28-H02** · Criterio `move_a_destino_libre_sigue_funcionando` (control anti-vacuo):
+/// **Dado** `notas/origen.md` y **sin** `notas/destino.md`, **Cuando** se planifica el `move`,
+/// **Entonces** el plan sigue siendo aplicable y emite su `Move`.
+#[test]
+fn move_a_destino_libre_sigue_funcionando() {
+    let dir = workspace_dos_notas();
+    assert!(
+        !dir.path().join("notas/destino.md").exists(),
+        "precondición: `notas/destino.md` debe estar LIBRE"
+    );
+
+    let ops = serde_json::json!([
+        { "op": "move", "from": "notas/origen.md", "to": "notas/destino.md",
+          "rewriteInboundLinks": true },
+    ]);
+    let resp = roundtrip(
+        dir.path(),
+        &[change_plan_line(None, ops, policy_permisiva()).as_str()],
+        1,
+    );
+
+    let sc = plan_sc(&resp[0]);
+    assert_eq!(
+        sc["canApply"],
+        serde_json::Value::Bool(true),
+        "un `move` hacia un destino libre debe seguir dando un plan aplicable: {resp:?}"
+    );
+    assert!(
+        !resp[0].to_string().contains(COLISION),
+        "un destino libre no es una colisión: {COLISION} no debe aparecer: {resp:?}"
+    );
+    let normalized = sc["normalizedOperations"]
+        .as_array()
+        .unwrap_or_else(|| panic!("el plan debe traer `normalizedOperations`: {resp:?}"));
+    assert!(
+        normalized
+            .iter()
+            .any(|op| op["op"] == "move" && op["to"] == "notas/destino.md"),
+        "el plan debe incluir el `move` hacia el destino libre: {resp:?}"
+    );
+}
+
+/// **E28-H02** · Criterio `apply_de_plan_con_colision_rechaza_sin_tocar_disco`:
+/// **Dado** un plan con una colisión de `create`, **Cuando** se intenta aplicar, **Entonces** la
+/// llamada se rechaza y el documento existente sigue **exactamente** como estaba en disco.
+///
+/// El test cubre las dos formas que la historia admite para la no-aplicabilidad:
+///   - si `change_plan` NO llega a producir un `changeSetId` (la colisión aborta la normalización),
+///     no hay nada que aplicar y se exige que tampoco quedara un plan persistido en runtime;
+///   - si sí lo produce (plan con `canApply:false`), se llama a `change_apply` con él y se exige que
+///     el apply lo rechace (`isError:true`).
+///
+/// En ambos casos la aserción que de verdad importa es la misma: **el `.md` en disco no cambió**.
+#[test]
+fn apply_de_plan_con_colision_rechaza_sin_tocar_disco() {
+    let dir = workspace_dos_notas();
+    let antes = snapshot_md(dir.path());
+    let contenido_original =
+        std::fs::read_to_string(dir.path().join("notas/existente.md")).unwrap();
+
+    let ops = serde_json::json!([
+        { "op": "create", "path": "notas/existente.md",
+          "frontmatter": { "title": "Pisado" }, "body": "contenido intruso\n" },
+    ]);
+    let plan = roundtrip(
+        dir.path(),
+        &[change_plan_line(None, ops, policy_permisiva()).as_str()],
+        1,
+    );
+
+    // El plan no puede quedar aplicable (mismo veredicto que el criterio 1).
+    asevera_colision(&plan[0], "notas/existente.md");
+
+    match plan[0]["result"]["structuredContent"]["changeSetId"].as_str() {
+        // (a) Hay plan (con `canApply:false`): el apply debe rechazarlo.
+        Some(id) => {
+            let apply = roundtrip(dir.path(), &[change_apply_line(id, None).as_str()], 1);
+            assert_eq!(
+                apply[0]["result"]["isError"],
+                serde_json::Value::Bool(true),
+                "aplicar un plan con una colisión de destino debe ser RECHAZADO: {apply:?}"
+            );
+            assert!(
+                apply[0]["result"]["structuredContent"]["applied"].as_bool() != Some(true),
+                "un plan con colisión nunca puede reportar `applied:true`: {apply:?}"
+            );
+        }
+        // (b) No hay plan: la colisión abortó la normalización. Tampoco debe quedar plan persistido
+        //     en runtime que alguien pudiera aplicar después.
+        None => {
+            let plans = dir.path().join(".lodestar").join("runtime").join("plans");
+            let persistidos: Vec<_> = std::fs::read_dir(&plans)
+                .map(|it| {
+                    it.filter_map(|e| e.ok().map(|e| e.path()))
+                        .filter(|p| p.extension().and_then(|x| x.to_str()) == Some("json"))
+                        .collect()
+                })
+                .unwrap_or_default();
+            assert!(
+                persistidos.is_empty(),
+                "una colisión no debe dejar un plan persistido y aplicable en runtime: {persistidos:?}"
+            );
+        }
+    }
+
+    // Lo nuclear: el conocimiento en disco quedó intacto (invariante #1).
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("notas/existente.md")).unwrap(),
+        contenido_original,
+        "el documento existente NO puede haber sido pisado por la operación colisionada"
+    );
+    assert_eq!(
+        snapshot_md(dir.path()),
+        antes,
+        "ningún `.md` del workspace puede haber cambiado por un plan colisionado"
+    );
+}
+
+/// **E28-H02** · Criterio `move_a_si_mismo_no_es_colision`:
+/// **Dado** un `move` con `from == to` sobre un documento existente, **Cuando** se planifica,
+/// **Entonces** NO es una colisión — el destino coincide consigo mismo, no con otro documento.
+///
+/// Comportamiento que fija esta fase roja (el que el motor tiene HOY, verificado ejecutando los
+/// binarios antes de escribir el test, y que el guard no debe romper): **no-op válido**. El plan sale
+/// aplicable, `change_apply` responde `applied:true` con `changedPaths` vacío y el `.md` queda
+/// intacto byte a byte.
+#[test]
+fn move_a_si_mismo_no_es_colision() {
+    let dir = workspace_dos_notas();
+    let original = std::fs::read_to_string(dir.path().join("notas/origen.md")).unwrap();
+
+    let ops = serde_json::json!([
+        { "op": "move", "from": "notas/origen.md", "to": "notas/origen.md",
+          "rewriteInboundLinks": true },
+    ]);
+    let plan = roundtrip(
+        dir.path(),
+        &[change_plan_line(None, ops, policy_permisiva()).as_str()],
+        1,
+    );
+
+    // (1) No se confunde con una colisión de destino.
+    assert!(
+        !plan[0].to_string().contains(COLISION),
+        "un `move` a sí mismo NO es una colisión de destino ({COLISION} no debe aparecer): {plan:?}"
+    );
+    let sc = plan_sc(&plan[0]);
+    assert_eq!(
+        sc["canApply"],
+        serde_json::Value::Bool(true),
+        "un `move` con `from == to` es un no-op válido, no un plan rechazado: {plan:?}"
+    );
+
+    // (2) Y aplicarlo es inocuo: el documento sigue en su sitio, byte a byte.
+    let id = plan_change_set_id(&plan[0]);
+    let apply = roundtrip(dir.path(), &[change_apply_line(&id, None).as_str()], 1);
+    let asc = apply_sc(&apply[0]);
+    assert_eq!(
+        asc["applied"],
+        serde_json::Value::Bool(true),
+        "aplicar el no-op debe tener éxito: {apply:?}"
+    );
+    assert_eq!(
+        asc["changedPaths"],
+        serde_json::json!([]),
+        "un `move` a sí mismo no cambia ningún path: {apply:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("notas/origen.md")).unwrap(),
+        original,
+        "el documento del `move` a sí mismo debe sobrevivir intacto byte a byte"
+    );
+}

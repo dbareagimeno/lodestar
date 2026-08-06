@@ -111,6 +111,9 @@ pub struct ResourceLink {
 /// - `SizeGuardExceeded` → `ResultTooLarge` (guarda de tamaño excedida en una operación).
 /// - `ReplaceTextMismatch` → `InvalidSchema` (precondición de `replace_text` incumplida, E12-H05).
 /// - `NormalizeTargetNotFound` → `DocumentNotFound` (path/sección objetivo inexistente, E12-H05).
+/// - `DocumentAlreadyExists` → `DocumentAlreadyExists` (E28-H02: el destino de un `create`, o el
+///   `to` de un `move`, ya está ocupado). Es el simétrico del anterior y por eso tiene código
+///   propio: reusar `DocumentNotFound` mandaría al agente a buscar un documento que **sí** existe.
 /// - `InboundLinksExist` → `InboundLinksExist` (borrar `reject` con entrantes, E12-H06).
 /// - `RelationConstraintViolation` → `RelationConstraintViolation` (E12-H07; sin productor desde
 ///   E20-H03, ver [`CoreError`]).
@@ -132,6 +135,7 @@ pub fn error_code(err: &CoreError) -> ErrorCode {
         CoreError::SizeGuardExceeded(_) => ErrorCode::ResultTooLarge,
         CoreError::ReplaceTextMismatch(_, _) => ErrorCode::InvalidSchema,
         CoreError::NormalizeTargetNotFound(_) => ErrorCode::DocumentNotFound,
+        CoreError::DocumentAlreadyExists(_) => ErrorCode::DocumentAlreadyExists,
         CoreError::InboundLinksExist(_) => ErrorCode::InboundLinksExist,
         CoreError::RelationConstraintViolation(_) => ErrorCode::RelationConstraintViolation,
         CoreError::InvalidStatusTransition(_) => ErrorCode::InvalidSchema,
@@ -152,7 +156,7 @@ pub fn error_code(err: &CoreError) -> ErrorCode {
 /// para reusar [`error_code`] — se documenta como limitación conocida, a resolver si una historia
 /// futura decide preservar la variante en vez de aplanarla a texto. Mapeos:
 /// - `Core`/`Store`/`Io`/`NoCache` → `InternalIoError`: fallos de infraestructura/IO o
-///   precondiciones internas sin un código más específico todavía en el catálogo de 16.
+///   precondiciones internas sin un código más específico todavía en el catálogo de 17 (E28-H02).
 /// - `PermissionDenied` (E11-H04: escritura bajo un `referenceRoot`, o fuera de `writableRoots`) →
 ///   `ErrorCode::PermissionDenied`, mapeo directo por nombre (mismo caso que `error_code` con
 ///   `CoreError::InvalidRelPath`).
@@ -187,8 +191,8 @@ pub fn workspace_error_code(err: &WorkspaceError) -> ErrorCode {
 /// este tipo generaliza ese patrón a **todos** los servicios, en un solo sitio.
 ///
 /// # Lo que NO es
-/// **No** es una jerarquía paralela de códigos (invariante #4 de `CLAUDE.md`): el catálogo sigue
-/// teniendo 16 filas y viviendo **solo** en [`lodestar_core::types::ErrorCode`]. `AppError` es un
+/// **No** es una jerarquía paralela de códigos (invariante #4 de `CLAUDE.md`): el catálogo tiene
+/// 17 filas (E28-H02) y vive **solo** en [`lodestar_core::types::ErrorCode`]. `AppError` es un
 /// envoltorio de fachada —un `ErrorCode` del core + un `String`—, no un catálogo nuevo, y su
 /// `Display` compone el texto de wire `«CÓDIGO: mensaje»` con `ErrorCode::as_str()`, nunca con un
 /// literal propio.
@@ -197,7 +201,8 @@ pub fn workspace_error_code(err: &WorkspaceError) -> ErrorCode {
 /// nombres de código, de tool, de parámetro y de operación.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppError {
-    /// Código estable del catálogo de 16 (`core::types::ErrorCode`) — por él ramifica el agente.
+    /// Código estable del catálogo de 17 (`core::types::ErrorCode`, E28-H02) — por él ramifica el
+    /// agente.
     pub code: ErrorCode,
     /// Mensaje accionable en español: qué parámetro, qué valor y qué se esperaba.
     pub message: String,
@@ -255,7 +260,7 @@ impl From<&CoreError> for AppError {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ErrorEnvelope {
-    /// Código estable del catálogo de 16 (`core::types::ErrorCode`).
+    /// Código estable del catálogo de 17 (`core::types::ErrorCode`, E28-H02).
     pub code: ErrorCode,
     /// Mensaje legible, en español, para un humano o un agente.
     pub message: String,
