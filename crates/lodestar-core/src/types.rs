@@ -266,8 +266,13 @@ pub enum CheckCode {
     /// legítimamente vacío sigue siendo un workspace válido (`§20.1`); el diagnóstico solo hace
     /// **observable** lo que hoy es indistinguible de un directorio equivocado
     /// (`decisiones §16(f)`, E29-H06). Severidad `Warn`, intrínseca (`family_of` devuelve `None`,
-    /// como `DOC-NOT-UTF8` y compañía). **Stub del autor de tests de E29-H06**: firma únicamente,
-    /// SIN productor — lo añade la fase verde.
+    /// como `DOC-NOT-UTF8` y compañía).
+    ///
+    /// Lo produce el **descubrimiento** (`lodestar_workspace::discovery::discover`), como los demás
+    /// diagnósticos de esta familia, para que las dos fachadas lo vean por el mismo canal
+    /// (invariante #3). Viaja **sin `targets`** —igual que `PATH-NOT-UTF8`— porque no describe un
+    /// fichero sino la ausencia de todos, y la raíz no tiene [`RelPath`] que la represente
+    /// (`RelPath::new("")` es `Err` por diseño, invariante #6).
     #[serde(rename = "WORKSPACE-EMPTY")]
     WorkspaceEmpty,
 }

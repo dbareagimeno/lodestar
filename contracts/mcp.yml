@@ -501,6 +501,33 @@
 # Sin cambio: la ausencia del campo sigue siendo `false`, y `starts_with`/`ends_with` sobre strings
 # siguen casando prefijo/sufijo con su `false` legítimo.
 
+# E29-H06 (2026-08-06, `decisiones §16(f)`, `ARCHITECTURE.md §20.9`): el catálogo de `CheckCode`
+# —el enum de wire de `Check.code`— gana la fila `WORKSPACE-EMPTY` (severidad `warn`, productor:
+# DESCUBRIMIENTO). La superficie de 10 tools NO cambia, ningún `outputSchema` cambia de forma (el
+# `Check` ya viaja con su `code`), el catálogo de `ErrorCode` NO se abre (esto no es un error de
+# operación) y ningún código sale.
+#   - Qué avisa: bajo la raíz auditada el inventario quedó VACÍO — ni un solo documento. El mensaje
+#     nombra la raíz y distingue las dos causas probables: no hay ningún `.md`, o los hay y la
+#     política de descubrimiento (`discovery.include`/`exclude`, `.gitignore`, `.lodestarignore`)
+#     los deja a todos fuera.
+#   - Por qué: un `cd` al directorio equivocado respondía «todo en orden» (exit 0 · VÁLIDO,
+#     `counts.documents: 0`), literalmente correcto e indistinguible de un repo legítimamente
+#     vacío. Es el «respondió que sí a algo que no entendió» en la puerta de entrada del producto.
+#   - Severidad **intrínseca y no configurable**: `family_of` devuelve `None`, igual que
+#     `DOC-NOT-UTF8`/`SYMLINK-UNSUPPORTED`/`DOC-BOM`. No se añade una sexta familia a `validation:`.
+#   - **Sin `targets`**, como `PATH-NOT-UTF8`: no describe un fichero sino la ausencia de todos, y
+#     la raíz no tiene `RelPath` que la represente (`RelPath::new("")` es `Err` por diseño). En
+#     `knowledge_check` viaja igual que cualquier otro diagnóstico (su `anchor` de orden/paginación
+#     es la cadena vacía); en el `Analysis` de `lodestar check --json`/`--sarif` —que indexa por
+#     `RelPath`— entra bajo la clave sintética `.lodestar` (el plano de control, suelo duro del
+#     descubrimiento: nunca es un documento, así que no puede pisar los diagnósticos de un fichero
+#     real). Hasta v0.5.0 los diagnósticos sin `target` se DESCARTABAN al componer ese `Analysis`,
+#     así que la CLI no los veía; desde E29-H06 los ve por esa clave.
+#   - **Exit codes intactos**: un workspace vacío sin otros diagnósticos sigue saliendo `0` y
+#     `valid: true` (`§20.1`: cualquier directorio es un workspace válido y no se reintroduce
+#     ningún gate al abrir). Solo con `gate.blockWarnings: true` sale `1` — por la política del
+#     usuario, no por el aviso.
+
 meta:
   fachada: lodestar-mcp (JSON-RPC por stdio; stdout puro, logs a stderr)
   fuente_registro: crates/lodestar-mcp/src/tools.rs        # tools::list()
@@ -734,7 +761,9 @@ tools:
       Audita conocimiento (diagnósticos de DocumentSet::analyze) con scope y severidad mínima. En
       scope workspace añade los diagnósticos de DESCUBRIMIENTO (§20.9, E20-H04:
       DOC-NOT-UTF8/DOC-TOO-LARGE/SYMLINK-UNSUPPORTED/PATH-NOT-UTF8 + colisiones de capitalización
-      del inventario), cuyo objetivo no es un documento (o no lo tienen). La severidad de cada
+      del inventario; y desde E29-H06 WORKSPACE-EMPTY, `warn` sin `targets`, cuando el inventario
+      queda VACÍO bajo la raíz — 0 documentos, por no haber `.md` o porque discovery los excluye a
+      todos; no tumba `valid`), cuyo objetivo no es un documento (o no lo tienen). La severidad de cada
       diagnóstico la fija la sección `validation` de la config por familia (E20-H04): un override
       reclasifica cada diagnóstico de la familia, `ignore` lo suprime; con los defaults de §20.9 es
       la identidad. Cada diagnóstico lleva un `id` estable dentro de una revisión

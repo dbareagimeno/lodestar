@@ -349,6 +349,10 @@ pub fn discover(root: &Path, policy: &DiscoveryPolicy) -> Result<Discovered, Wor
 
     // Colisiones de capitalización: propiedad del inventario COMPLETO, no de un fichero suelto.
     diagnostics.extend(case_collisions(&files));
+    // Inventario vacío: propiedad del descubrimiento ENTERO (E29-H06).
+    if files.is_empty() {
+        diagnostics.push(inventario_vacio(root, &other_files));
+    }
     diagnostics.sort_by(|a, b| clave_orden(a).cmp(&clave_orden(b)));
 
     Ok(Discovered {
@@ -576,6 +580,61 @@ pub fn case_collisions(files: &FileMap) -> Vec<Check> {
             )
         })
         .collect()
+}
+
+/// Diagnóstico de **inventario vacío** (`WORKSPACE-EMPTY`, E29-H06, `decisiones §16(f)`).
+///
+/// Ni un solo documento sobrevivió al descubrimiento bajo `root`. Es un **aviso**, no un error: un
+/// repo legítimamente vacío sigue siendo un workspace válido (`§20.1` — cualquier directorio lo es,
+/// y esta historia **no** reintroduce ningún gate al abrir). Lo que arregla es la ambigüedad: hasta
+/// v0.5.0 un `cd` al directorio equivocado respondía «todo en orden», indistinguible de un
+/// workspace vacío de verdad.
+///
+/// Va **sin `targets`**, como `PATH-NOT-UTF8`: no describe un fichero sino la ausencia de todos, y
+/// la raíz no tiene [`RelPath`] que la represente (invariante #6: `RelPath::new("")` es `Err` por
+/// diseño). Quien lo indexa por documento decide su clave — ver `App::full_analysis`.
+///
+/// El mensaje nombra la **raíz** sobre la que se descubrió y distingue las dos causas probables:
+/// no hay ningún `.md` bajo esa raíz, o los hay pero el descubrimiento los descarta a todos. La
+/// segunda se detecta por los `.md` que el walker **visitó** y acabaron en `other_files` (los que
+/// no pasan `include`); los podados antes de visitarse (`exclude`/`.gitignore`/`.lodestarignore`)
+/// no dejan rastro, así que el mensaje genérico menciona igualmente la política de descubrimiento
+/// como sospechosa.
+fn inventario_vacio(root: &Path, other_files: &BTreeSet<RelPath>) -> Check {
+    let markdown_descartado: Vec<&RelPath> =
+        other_files.iter().filter(|p| p.is_markdown()).collect();
+    let causa = if markdown_descartado.is_empty() {
+        "no hay ningún fichero «.md» bajo esa raíz, o la política de descubrimiento \
+         (`discovery.include`/`exclude`, `.gitignore`, `.lodestarignore`) los descarta antes de \
+         visitarlos: comprueba que es el directorio que creías"
+            .to_string()
+    } else {
+        let listado: Vec<&str> = markdown_descartado
+            .iter()
+            .take(3)
+            .map(|p| p.as_str())
+            .collect();
+        format!(
+            "hay {} fichero(s) «.md» bajo esa raíz ({}{}) pero la política de descubrimiento \
+             (`discovery.include`/`exclude`) los deja a TODOS fuera del inventario",
+            markdown_descartado.len(),
+            listado.join(", "),
+            if markdown_descartado.len() > listado.len() {
+                ", …"
+            } else {
+                ""
+            }
+        )
+    };
+    Check::new(
+        Severity::Warn,
+        CheckCode::WorkspaceEmpty,
+        format!(
+            "el workspace «{}» no tiene NINGÚN documento en el inventario: {causa}",
+            root.display()
+        ),
+        Vec::new(),
+    )
 }
 
 /// Convierte una ruta **relativa a la raíz** del sistema de ficheros en un [`RelPath`].

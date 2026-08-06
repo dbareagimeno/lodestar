@@ -1298,10 +1298,15 @@ impl App {
     ///    mitad del catálogo de `§20.9` era invisible desde la puerta de CI.
     ///
     /// Los de descubrimiento se indexan en `diagnostics` **por su primer `target`** (el fichero que
-    /// describen), que por definición **no** es uno de `analysis.documents`. Un diagnóstico sin
-    /// `target` —`PATH-NOT-UTF8`, cuyo path no es representable como [`RelPath`]— no tiene clave con
-    /// la que entrar en el mapa y **solo** se surface a por `knowledge_check`, que los lleva en una
-    /// lista aparte; queda documentado como límite del wire del `Analysis`, no como olvido.
+    /// describen), que por definición **no** es uno de `analysis.documents`. Un diagnóstico **sin**
+    /// `target` —`PATH-NOT-UTF8`, cuyo path no es representable como [`RelPath`], o el
+    /// `WORKSPACE-EMPTY` de E29-H06, que describe la ausencia de todos— no tiene un fichero con el
+    /// que entrar en el mapa. Hasta v0.5.0 se **descartaba** ahí mismo, así que solo lo veía
+    /// `knowledge_check` (que los lleva en una lista aparte) y la puerta de CI se quedaba sin la
+    /// mitad del catálogo. Desde E29-H06 entran bajo [`ANCHOR_WORKSPACE`], una clave **sintética**
+    /// que no puede colisionar con ningún documento (el plano de control `.lodestar/` es el suelo
+    /// duro del descubrimiento, `discovery::CONTROL_PLANE_EXCLUDE`), y por tanto tampoco puede
+    /// pisar los diagnósticos de un fichero real.
     pub fn full_analysis(&self) -> Result<Analysis, AppError> {
         let (doc_set, discovery_diagnostics) = self.workspace.document_set_with_discovery()?;
         let mut analysis = doc_set.analyze().clone();
@@ -1319,14 +1324,16 @@ impl App {
             });
         }
 
-        // 2. Diagnósticos de descubrimiento, bajo la clave de su primer `target`.
+        // 2. Diagnósticos de descubrimiento, bajo la clave de su primer `target` — y los que no
+        //    tienen ninguno, bajo el ancla sintética del workspace (E29-H06).
         for mut check in discovery_diagnostics {
             let Some(level) = validation.effective_severity(&check) else {
                 continue;
             };
             check.level = level;
-            let Some(anchor) = check.targets.first().cloned() else {
-                continue;
+            let anchor = match check.targets.first().cloned() {
+                Some(target) => target,
+                None => anchor_workspace(),
             };
             analysis.diagnostics.entry(anchor).or_default().push(check);
         }
@@ -3320,6 +3327,29 @@ pub struct CheckReport {
     pub next_cursor: Option<String>,
 }
 
+/// Clave **sintética** con la que los diagnósticos de descubrimiento **sin `target`** entran en
+/// [`Analysis::diagnostics`], que es un `BTreeMap<RelPath, Vec<Check>>` y por tanto exige una clave
+/// (E29-H06).
+///
+/// Es `.lodestar`, el **plano de control** del workspace: el suelo duro del descubrimiento
+/// (`lodestar_workspace::discovery::CONTROL_PLANE_EXCLUDE` excluye `.lodestar/**` sin que ninguna
+/// config pueda re-incluirlo), así que **jamás** puede ser un documento del inventario ni pisar los
+/// diagnósticos de un fichero real. No es un `RelPath` de la raíz —no existe: `RelPath::new("")` es
+/// `Err` por diseño, invariante #6— sino una etiqueta estable que dice «esto es del workspace, no
+/// de un fichero tuyo»: los diagnósticos que la usan (`PATH-NOT-UTF8`, `WORKSPACE-EMPTY`) siguen
+/// viajando con `targets` **vacío**, que es la verdad, y su severidad cuenta igual para
+/// `Analysis::hard_fail`/`warn_count` y para el gate de `lodestar check`.
+pub const ANCHOR_WORKSPACE: &str = ".lodestar";
+
+/// El [`RelPath`] de [`ANCHOR_WORKSPACE`].
+///
+/// # Pánico
+/// Nunca: `.lodestar` es un literal válido para [`RelPath::new`] (relativo, un solo segmento, sin
+/// `..` ni backslashes), y el test `ancla_de_workspace_es_relpath_valido` lo clava.
+fn anchor_workspace() -> RelPath {
+    RelPath::new(ANCHOR_WORKSPACE).expect("«.lodestar» es un RelPath válido por construcción")
+}
+
 /// Id estable de un diagnóstico dentro de una revisión (E10-H12): `diag:blake3:<hex>` donde
 /// `hex = blake3(path ‖ 0x00 ‖ code ‖ 0x00 ‖ range ‖ 0x00 ‖ msg)`. Determinista y derivado **solo**
 /// de los datos del diagnóstico (nunca de timestamps, orden ni caché), así que la misma revisión
@@ -4146,5 +4176,25 @@ pub mod schemas {
     /// `outputSchema` de `change_revert` (== [`RevertResult`]).
     pub fn change_revert_schema() -> Value {
         schema_of::<RevertResult>()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// El ancla sintética de los diagnósticos sin `target` (E29-H06) debe ser un [`RelPath`]
+    /// válido: `anchor_workspace()` hace `expect` sobre ella y un cambio del literal que la
+    /// invalidara (una barra inicial, un `..`) tumbaría `full_analysis` en caliente.
+    #[test]
+    fn ancla_de_workspace_es_relpath_valido() {
+        let anchor = RelPath::new(ANCHOR_WORKSPACE)
+            .expect("ANCHOR_WORKSPACE debe ser construible como RelPath");
+        assert_eq!(anchor.as_str(), ANCHOR_WORKSPACE);
+        assert_eq!(anchor_workspace(), anchor);
+        assert!(
+            !anchor.is_markdown(),
+            "el ancla no puede parecer un documento: es el plano de control, no un `.md`"
+        );
     }
 }
