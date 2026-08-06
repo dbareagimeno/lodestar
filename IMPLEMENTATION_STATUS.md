@@ -1423,6 +1423,104 @@ arregla): `decisiones §18` (`canApply: false` no vincula a `change_apply`) y `�
 nunca casa, contradice `§20.8`; b: `policy` parcial rechazada pese a campos opcionales del contrato;
 c: imprecisión de `§16.a` caso 3). Todos tocan la frontera o el core → historias propias fuera de E27.
 
+## Fase 0 de la campaña de bugfixes del testbench homelab (E28) — COMPLETA (pendiente de merge)
+
+> **Origen**: `decisiones/23-hallazgos-testbench-homelab.md` (M-01 y A-05, prioridades 5 y 4 — las
+> dos filas con **riesgo real de pérdida de conocimiento**, ejecutadas antes que cualquier otro
+> hallazgo de la tabla) y `docs/qa/informe-homelab-2026-08-06.md` (caso G1-18 para M-01, caso G1-11
+> para A-05). Épica: [`epica-28-defectos-destructivos-testbench.md`](requirements/epica-28-defectos-destructivos-testbench.md).
+> Tablero de campaña: [`docs/qa/campana-bugfixes-2026-08.md`](docs/qa/campana-bugfixes-2026-08.md).
+> Commits: `043f233` (H02), `296147b` (H01), `8c86b6b` (adenda H03+H04), `c532929` (cierre de
+> reservas de los re-jueces) — los cuatro en `develop`, **pendiente de merge a `main`**.
+
+| Historia | Estado | Detalle |
+|---|---|---|
+| **E28-H01** `change_revert` de un `-revert` restaura de verdad | ✅ | Identidad propia del `txnId` de cada reversión + coreografía de sellado unificada (`decisiones §16(i)`). |
+| **E28-H02** guard de colisión en `create`/`move` | ✅ | `DOCUMENT_ALREADY_EXISTS`, catálogo `ErrorCode` 16→17. |
+| **E28-H03** identidad de transacción libre en la publicación (adenda) | ✅ | Corrige el bloqueante que el juez de H01 dejó en `change_apply`. |
+| **E28-H04** normalización contra el estado acumulado del change set (adenda) | ✅ | Corrige el bloqueante que el juez de H02 dejó en las colisiones intra-plan. |
+
+- ✅ **E28-H01** (`296147b`) — **Revertir un recibo `-revert` era un no-op silencioso que destruía el
+  redo**. La identidad de una reversión se derivaba del `changeSetId` heredado, que colisionaba
+  consigo misma: `revert(revert(X))` recalculaba el mismo `txnId` `X-revert` que el primer revert,
+  así que restauraba un árbol que ya estaba vigente (no-op) y sobrescribía en silencio
+  `recovery/X-revert/` —la única copia del estado que el primer revert había dejado— sin que ningún
+  error lo señalara. Ahora `revert_transaction_id` deriva la identidad del **`receiptId`** que se
+  revierte, no del `changeSetId`, apilando un contador (`-revert`, `-revert-2`, …) que compone sin
+  límite. Guard anti-sobrescritura en `revert_transaction_con_recibo` con el mismo criterio de
+  «vivo» que usa el GC (`journal ∪ receipts`). De paso satura `decisiones §16(i)`: la coreografía
+  de sellado duplicada entre `apply_transaction_con_recibo` y `revert_transaction_con_recibo` se
+  extrae a `seal_published_transaction`, un único camino compartido.
+- ✅ **E28-H02** (`043f233`) — **`create`/`move` sobre un destino ocupado aplicaban sin fricción y
+  pisaban conocimiento existente**. `normalize_create` descartaba el `DocumentSet` (literalmente
+  `_workspace`) y `normalize_move` nunca consultaba `doc_set.files()` para el destino `to`. Ahora
+  los dos comprueban la ocupación del path y fallan con el código nuevo `DOCUMENT_ALREADY_EXISTS`
+  (catálogo `ErrorCode` 16→17, simétrico de `DOCUMENT_NOT_FOUND`), nombrando el path colisionado;
+  `move` con `from == to` sigue siendo no-op válido, no una colisión. Delta de contrato declarado en
+  `contracts/mcp.yml`.
+- ✅ **E28-H03** (`8c86b6b`) — **Bloqueante que el juez ciego de H01 dejó vivo**: el guard
+  anti-sobrescritura de H01 solo protegía `change_revert`; `change_apply` seguía calculando
+  `txn_id = transaction_id(&change_set.id)` sin pasar por él, así que replanificar el mismo cambio
+  (mismo `changeSetId` determinista) y volver a aplicarlo **sobrescribía** `recovery/`/`receipts/`
+  de la primera transacción, y el `revert` posterior quedaba **sin salida** (`WRITE_CONFLICT`
+  permanente, el `txnId` de su propia reversión ya estaba tomado). Ahora `resolve_free_txn_id`
+  resuelve la identidad efectiva de **ambos** caminos buscando de forma determinista la primera
+  variante libre (mismo criterio `journal ∪ receipts`) antes de la primera escritura:
+  `apply → revert → re-apply idéntico → revert` completa con **cuatro `receiptId` únicos**, sin
+  pisar nunca material previo. `revert_transaction_id` endurece el sufijo al formato canónico y su
+  rustdoc declara explícitamente el borde `u64::MAX`.
+- ✅ **E28-H04** (`8c86b6b`) — **Bloqueante que el juez ciego de H02 dejó vivo**: los guards de H02
+  normalizaban cada operación del plan contra el `DocumentSet` **inicial**, así que colisiones
+  reales **dentro** de un mismo plan (`[move a→final, move b→final]`, `[create X, move b→X]`,
+  `[create X, create X]`) no se veían — falsos negativos destructivos — mientras que idiomas
+  legítimos que dependían de la secuencia (`[delete X, create X]`, `[move A→B, create A]`) se
+  rechazaban por error — regresión respecto al commit padre de H02. Ahora la normalización lleva un
+  estado de ocupación acumulado (`EstadoOcupacion`: `create`/`move.to` ocupan, `delete`/`move.from`
+  liberan) que cada operación del plan actualiza en orden, con el mismo juicio de colisión que el
+  guard contra disco (invariante #3, una sola verdad computada). Abre `decisiones §24`
+  (equivalencia de paths por caja/Unicode), explícitamente fuera de su alcance.
+- **Cierre de reservas de los re-jueces** (`c532929`) — la red de colisiones intra-plan pasa a ser
+  **vinculante en `change_apply`** (el plan persistido es un artefacto durable que pudo escribirse
+  con un binario sin el guard; la de `change_plan` queda como diagnóstico temprano, ambas llaman al
+  mismo juicio del core); el motivo del `WRITE_CONFLICT` residual deja de filtrar rutas del plano de
+  control (regla fijada en rustdoc: el motivo lo lee un agente); contrato sincronizado
+  (`DOCUMENT_ALREADY_EXISTS` declarado en `change_apply`, los cuatro emisores de `WRITE_CONFLICT` en
+  `change_revert` incluidos los dos bordes `u64::MAX`, el no-op `move` `from == to` deja su path
+  ocupado en el acumulado); y dos familias de defecto preexistentes (resurrección de paths por
+  operaciones de contenido, move-chains por ocupación del origen) quedan registradas como
+  seguimiento, fuera de esta épica, en la sección «Hallazgos preexistentes registrados» de la spec.
+
+### Veredictos de los jueces ciegos (E28)
+
+**H01 y H02** pasaron cada una por **panel de 3 jueces ciegos** (agentes frescos, solo spec + diff,
+tres lentes distintas). Cada panel localizó un bloqueante real **ejecutando el binario por
+JSON-RPC** —la misma disciplina que produjo el hallazgo original—: el de H01 en el camino de
+`change_apply` (cerrado por H03); el de H02 en la normalización intra-plan (cerrado por H04). Tras
+la adenda, **re-jueces ciegos de robustez** verificaron H03/H04 con el mismo método y devolvieron
+**APROBADA CON RESERVAS**; las reservas se saldaron en el mismo ciclo (`c532929`), sin ninguna
+viva. `/contrato --check` quedó **COHERENTE en dos pasadas** (tras la adenda y tras el cierre de
+reservas).
+
+### Invariantes que esta épica deja verificados
+
+- **Suite completa en verde**, incluidos ambos crates con `--features test-failpoints`
+  (`lodestar-workspace` y `lodestar-app`) — 583+ tests tras las cuatro historias.
+- **Única fuente de verdad (#1) y único escritor (#5)**: ninguna transacción de publicación
+  (`apply` o `revert`) puede ya pisar `recovery/`/`receipts/` de una transacción con material
+  vigente; la identidad se resuelve buscando, no sobrescribiendo ni fallando sin salida.
+- **Una sola verdad computada (#3)**: el guard de colisión de `create`/`move` juzga con el mismo
+  criterio contra disco y contra el estado acumulado del propio plan; la coreografía de sellado de
+  `apply`/`revert` vive en un único camino compartido (`seal_published_transaction`).
+- **Un solo contrato de tipos (#4)**: catálogo `ErrorCode` en 17 filas (16→17,
+  `DOCUMENT_ALREADY_EXISTS`), delta declarado en `contracts/mcp.yml` y verificado por
+  `/contrato --check` en dos pasadas.
+- **clippy `-D warnings`, `cargo fmt --check` y `cargo doc` limpios** en los cuatro commits.
+
+**Estado real**: las cuatro historias están implementadas, verificadas por jueces ciegos y con la
+suite en verde en `develop` — la épica está **completa a falta del merge**: los cuatro commits ya
+viven en `develop`, pero aún no cruzaron a `main` por el ciclo de release descrito en
+`RELEASING.md`.
+
 ## Defectos posteriores a E27
 
 | Defecto | Estado | Nota |

@@ -36,8 +36,8 @@ evidencia y criterio de aceptación.
 
 | # | Punto | Qué es | Dueño | Prio |
 |---|---|---|---|---|
-| 1 | **M-01** revert de un recibo `-revert` | **Bug de motor con pérdida de datos**: no-op silencioso que responde `reverted: true` y sobrescribe las copias del redo | **Historia propia, inmediata** — misma zona que §16(i) (coreografía de sellado): arreglarlos juntos | **5** |
-| 2 | **A-05** `create`/`move` sobre path ocupado | `canApply: true` sin fricción; aplicado, pisa conocimiento. Único hueco con riesgo destructivo para un agente | **Historia propia** — guard de colisión en la normalización (`INVALID_SCHEMA` o código nuevo) + declararlo en el contrato | **4** |
+| 1 | ✅ **M-01** revert de un recibo `-revert` | **Bug de motor con pérdida de datos**: no-op silencioso que responde `reverted: true` y sobrescribe las copias del redo | **Ejecutado**: `E28-H01` (`296147b`) + adenda `E28-H03` (`8c86b6b`, `c532929`) | **5** |
+| 2 | ✅ **A-05** `create`/`move` sobre path ocupado | `canApply: true` sin fricción; aplicado, pisa conocimiento. Único hueco con riesgo destructivo para un agente | **Ejecutado**: `E28-H02` (`043f233`) + adenda `E28-H04` (`8c86b6b`, `c532929`) | **4** |
 | 3 | **D-01** `instructions` nombra 10 tools bajo `readonly` (+ `protocolVersion` sin validar) | La superficie afirma lo que el perfil no sirve — la definición literal de la **épica de honestidad de superficie** | Épica de honestidad (junto a §19(a/b), §18, §15, §16(e/f/g/b)) | **4** |
 | 4 | **A-02/A-03** cursor malformado → offset 0 · cursor ajeno aceptado | Ya **decidido** en §16(j) (`INVALID_SCHEMA`); el testbench aporta la repro y descubre la variante cross-tool | **Ciclo de higiene** §16(j), ampliando su alcance: un cursor válido-en-forma pero de otro espacio también reinicia en silencio | **3** |
 | 5 | **A-04** `starts_with`/`ends_with` sobre campo no-string → `false` silencioso | El mismo modo de fallo que E26-H08 cerró para el orden; `eval.rs` reconoce el hueco sin test | **Decisión de producto aquí**: alinear con E26-H08 (type error ruidoso, recomendado por coherencia) o fijar el `false` en `query-language.md`. Ejecuta: épica de honestidad | **3** |

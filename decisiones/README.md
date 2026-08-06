@@ -111,13 +111,18 @@ de idioma partido, no la ficha.
 
 ## Orden de trabajo acordado (2026-08-02, revisado 2026-08-06 tras el testbench)
 
-0. **§23/M-01 — revert del recibo `-revert`** (bug de motor con pérdida de datos): historia
+0. ✅ **§23/M-01 — revert del recibo `-revert`** (bug de motor con pérdida de datos): historia
    inmediata y acotada, junta con §16(i) porque es la misma coreografía de sellado. Le sigue
    **§23/A-05** (guard de colisión de `create`/`move`), el único hueco destructivo restante.
    **Adenda (2026-08-06)**: los jueces ciegos que verificaron esas dos historias (`E28-H01`/`H02`)
    encontraron un bloqueante en cada una — `E28-H03` cierra la identidad de `txnId` que H01 dejó
    abierta en el `apply`; `E28-H04` cierra la normalización contra estado acumulado que H02 dejó
    pendiente. `E28-H04` abre además `§24` (equivalencia de caja/Unicode), fuera de su alcance.
+   **Ejecutado (2026-08-06)**: `E28` completa — H01+H02 (`043f233`/`296147b`), adenda H03+H04
+   (`8c86b6b`), cierre de reservas de los re-jueces (`c532929`); detalle en
+   [`docs/qa/campana-bugfixes-2026-08.md`](../docs/qa/campana-bugfixes-2026-08.md) e
+   [`IMPLEMENTATION_STATUS.md`](../IMPLEMENTATION_STATUS.md). **Siguiente**: la épica de honestidad
+   `E29` (ya ratificada).
 1. **Épica de honestidad de superficie** — todo lo que la superficie documentada afirma y el motor
    no ejecuta: §19(a), §19(b), §18 vinculante, §16(f) aviso de workspace vacío, §16(e) config
    estricta (absorbe §23/A-08-rechazo), §15 wire estricto (con la tabla de campos por operación
