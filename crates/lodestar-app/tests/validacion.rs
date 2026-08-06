@@ -54,7 +54,7 @@
 
 use std::path::Path;
 
-use lodestar_app::{App, CheckReport, CheckScope};
+use lodestar_app::{App, CheckReport, CheckScope, ANCHOR_WORKSPACE};
 use lodestar_core::plan::PlanPolicy;
 use lodestar_core::types::{CheckCode, ErrorCode, RelPath, Severity};
 use serde_json::{json, Value};
@@ -975,5 +975,190 @@ fn el_aviso_de_vacio_respeta_block_warnings() {
          sí — que es justo el criterio `el_aviso_de_vacio_respeta_block_warnings` de la historia. \
          Si WORKSPACE-EMPTY no cuenta como Warn en `analysis.diagnostics`, `gate_blocked` no lo ve \
          y este assert falla."
+    );
+}
+
+// ===========================================================================
+// E29-H06 (remate del juez ciego, MAYOR-1/MAYOR-2) — contenido del mensaje y ancla incolisionable.
+//
+// El panel verificó por MUTACIÓN que ningún test anterior de esta sección lee `check.msg`: un
+// mensaje fijo tipo `"vacío"` sobrevive a toda la suite pese a que el criterio 1 de la historia
+// exige que nombre la raíz, y el commit `88e99b2` distingue explícitamente «no hay .md» de «los
+// excluye todos». Igualmente, el ancla sintética `ANCHOR_WORKSPACE` (`.lodestar`) no tenía ningún
+// test que la atara a la zona incolisionable del plano de control — un mutante que la cambiara a un
+// literal cualquiera del árbol de usuario (`"workspace"`) pasaba la suite entera.
+// ===========================================================================
+
+/// El diagnóstico `WORKSPACE-EMPTY` de `analysis`, si lo hay (para leer su `.msg`, no solo su
+/// presencia).
+fn workspace_empty_check(
+    analysis: &lodestar_core::types::Analysis,
+) -> Option<&lodestar_core::types::Check> {
+    analysis
+        .diagnostics
+        .values()
+        .flatten()
+        .find(|c| c.code == CheckCode::WorkspaceEmpty)
+}
+
+/// MAYOR-1(a): **Dado** un workspace sin ningún `.md`, **Cuando** se computa `full_analysis`,
+/// **Entonces** el mensaje de `WORKSPACE-EMPTY` nombra la RAÍZ auditada — mata el mutante «mensaje
+/// fijo tipo "vacío"», que no depende del directorio.
+#[test]
+fn mensaje_de_workspace_vacio_nombra_la_raiz() {
+    let (dir, app) = app_vacio();
+
+    let analysis = app
+        .full_analysis()
+        .expect("full_analysis debe computar el análisis de un workspace vacío sin error");
+    let check = workspace_empty_check(&analysis)
+        .expect("precondición: debe existir el diagnóstico WORKSPACE-EMPTY");
+
+    // La raíz del tempdir puede llevar componentes de nombre largo (macOS resuelve `/tmp` a través
+    // de `/private`); se busca el ÚLTIMO componente, que es el que identifica de forma inequívoca
+    // a ESTE tempdir y no a otro cualquiera.
+    let ultimo_componente = dir
+        .path()
+        .file_name()
+        .and_then(|n| n.to_str())
+        .expect("el tempdir debe tener un nombre de componente final legible");
+    assert!(
+        check.msg.contains(ultimo_componente),
+        "el mensaje de WORKSPACE-EMPTY debe nombrar la RAÍZ auditada (se buscó el componente \
+         «{ultimo_componente}» del path «{}»), no un texto fijo desligado del directorio: {:?}",
+        dir.path().display(),
+        check
+    );
+}
+
+/// MAYOR-1(b): **Dado** un workspace CON un `.md` real pero excluido por `discovery.include`,
+/// **Cuando** se computa `full_analysis`, **Entonces** el mensaje de `WORKSPACE-EMPTY` (i) NOMBRA
+/// el fichero descartado y (ii) es DISTINTO del mensaje del caso «no hay ningún .md» —mata tanto el
+/// mutante `markdown_descartado = Vec::new()` (que vaciaría el listado sin que ningún assert lo
+/// notara) como un mensaje único que no distinguiera las dos causas.
+#[test]
+fn mensaje_de_workspace_vacio_distingue_incluido_vs_excluido() {
+    let dir = tempfile::tempdir().unwrap();
+    escribe(dir.path(), "notas/alfa.md", "# Alfa\n\ncontenido real.\n");
+    escribe(
+        dir.path(),
+        ".lodestar/config.yaml",
+        "discovery:\n  include: [\"solo-esto/**/*.md\"]\n",
+    );
+    let app_excluido = App::open(dir.path()).expect("el workspace temporal debe abrir");
+    let analysis_excluido = app_excluido
+        .full_analysis()
+        .expect("full_analysis debe computar el análisis con todo excluido");
+    let check_excluido = workspace_empty_check(&analysis_excluido)
+        .expect("precondición: debe existir WORKSPACE-EMPTY con `include` restrictivo");
+
+    assert!(
+        check_excluido.msg.contains("alfa.md") || check_excluido.msg.contains("notas/alfa.md"),
+        "el mensaje del caso «hay .md pero la política los excluye TODOS» debe NOMBRAR el fichero \
+         descartado (`notas/alfa.md`): {:?}",
+        check_excluido
+    );
+
+    // El caso gemelo SIN ningún `.md`, para comparar: el mismo tempdir vacío de `app_vacio()`.
+    let (_dir_vacio, app_vacio) = app_vacio();
+    let analysis_vacio = app_vacio
+        .full_analysis()
+        .expect("full_analysis debe computar el análisis de un workspace sin `.md`");
+    let check_vacio = workspace_empty_check(&analysis_vacio)
+        .expect("precondición: debe existir WORKSPACE-EMPTY sin ningún `.md`");
+
+    assert!(
+        !check_vacio.msg.contains("alfa.md"),
+        "el caso SIN ningún `.md` no puede nombrar un fichero que no existe en ese workspace: {:?}",
+        check_vacio
+    );
+
+    // Las dos causas deben distinguirse: el mensaje del caso «excluido» no puede ser una copia
+    // literal del mensaje del caso «no hay ningún .md» salvo por la raíz (que ya difiere por sí
+    // sola entre los dos tempdirs) — se compara la parte que sigue a la raíz para neutralizar esa
+    // diferencia espuria.
+    let cola = |msg: &str| -> String {
+        msg.rsplit_once("»:")
+            .map(|(_, resto)| resto.to_string())
+            .unwrap_or_else(|| msg.to_string())
+    };
+    assert_ne!(
+        cola(&check_excluido.msg),
+        cola(&check_vacio.msg),
+        "el mensaje de «hay .md pero la política los excluye TODOS» debe distinguirse del de «no \
+         hay ningún .md» (dos causas distintas para el mismo síntoma exit-0): excluido={:?} \
+         vacio={:?}",
+        check_excluido,
+        check_vacio
+    );
+}
+
+/// MAYOR-2: el ancla sintética `ANCHOR_WORKSPACE` (con la que `full_analysis` indexa los
+/// diagnósticos sin `target`, `WORKSPACE-EMPTY` incluido) vive DENTRO del plano de control
+/// `.lodestar/**`, el suelo duro del descubrimiento que NINGÚN documento del inventario puede
+/// pisar (`decisiones §16(f)` + `lodestar_workspace::discovery::CONTROL_PLANE_EXCLUDE`).
+///
+/// Se verifica CONSTRUCTIVAMENTE, no con un `==` contra un literal duplicado en el test (eso solo
+/// movería el acoplamiento, no lo probaría): un `.md` sintético bajo `ANCHOR_WORKSPACE/` debe ser
+/// rechazado por `Workspace::assert_discoverable` — la misma guarda que protege la escritura real
+/// (E15-H09). Si el literal de producción cambiara a algo colisionable como `"workspace"` (fuera
+/// del suelo duro), ese `.md` sintético SÍ sería discoverable y este assert lo detectaría.
+#[test]
+fn ancla_del_workspace_vive_en_el_suelo_duro_incolisionable() {
+    let (_dir, app) = app_con_un_documento();
+
+    let candidato = RelPath::new(&format!("{ANCHOR_WORKSPACE}/sintetico.md"))
+        .expect("el candidato debe ser un RelPath sintácticamente válido");
+    let resultado = app.workspace().assert_discoverable(&candidato);
+
+    assert!(
+        resultado.is_err(),
+        "«{ANCHOR_WORKSPACE}/sintetico.md» debe quedar FUERA del inventario (rechazado por el \
+         suelo duro del plano de control): si esto fuera `Ok`, el ancla sintética de \
+         `full_analysis` podría colisionar con un documento real que un usuario escribiera bajo \
+         ese mismo prefijo. resultado={resultado:?}"
+    );
+}
+
+/// MAYOR-2 (complemento, comportamiento end-to-end): un documento REAL del inventario y el
+/// diagnóstico `WORKSPACE-EMPTY` (indexado bajo `ANCHOR_WORKSPACE`) coexisten en
+/// `analysis.diagnostics` sin que los diagnósticos de uno se mezclen con los del otro — prueba que
+/// la clave sintética no pisa la clave de un documento real aunque ambas convivan en el mismo mapa.
+///
+/// (El caso motivador es `workspace_con_todo_excluido_tambien_avisa`: un `.md` real EXISTE en el
+/// árbol —aunque quede fuera del inventario de documentos— a la vez que `WORKSPACE-EMPTY` está
+/// activo, así que es el escenario natural donde una colisión de clave sería observable.)
+#[test]
+fn ancla_no_mezcla_diagnosticos_con_documento_real() {
+    let dir = tempfile::tempdir().unwrap();
+    // Documento real QUE SÍ ENTRA en el inventario (para que su clave exista de verdad en el mapa
+    // `analysis.diagnostics`, junto a la clave sintética del ancla).
+    escribe(dir.path(), "notas/alfa.md", "# Alfa\n\ncontenido real.\n");
+    let app = App::open(dir.path()).expect("el workspace temporal debe abrir");
+    let analysis = app
+        .full_analysis()
+        .expect("full_analysis debe computar el análisis de un workspace con un documento real");
+
+    let clave_ancla =
+        RelPath::new(ANCHOR_WORKSPACE).expect("ANCHOR_WORKSPACE es un RelPath válido");
+    let clave_documento = RelPath::new("notas/alfa.md").expect("RelPath del documento real");
+    assert_ne!(
+        clave_ancla, clave_documento,
+        "la clave sintética del ancla y la clave de un documento real del inventario deben ser \
+         SIEMPRE distintas: si coincidieran, `analysis.diagnostics.entry(anchor)` mezclaría los \
+         diagnósticos de descubrimiento con los del documento"
+    );
+    // El documento real no lleva NINGÚN diagnóstico (está limpio): si el ancla colisionara con su
+    // clave, un futurible WORKSPACE-EMPTY aparecería mezclado bajo `notas/alfa.md`.
+    let diags_documento = analysis
+        .diagnostics
+        .get(&clave_documento)
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        !diags_documento
+            .iter()
+            .any(|c| c.code == CheckCode::WorkspaceEmpty),
+        "WORKSPACE-EMPTY no puede aparecer bajo la clave de un documento real: {diags_documento:?}"
     );
 }

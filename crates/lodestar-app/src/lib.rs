@@ -3331,10 +3331,22 @@ pub struct CheckReport {
 /// [`Analysis::diagnostics`], que es un `BTreeMap<RelPath, Vec<Check>>` y por tanto exige una clave
 /// (E29-H06).
 ///
-/// Es `.lodestar`, el **plano de control** del workspace: el suelo duro del descubrimiento
-/// (`lodestar_workspace::discovery::CONTROL_PLANE_EXCLUDE` excluye `.lodestar/**` sin que ninguna
-/// config pueda re-incluirlo), así que **jamás** puede ser un documento del inventario ni pisar los
-/// diagnósticos de un fichero real. No es un `RelPath` de la raíz —no existe: `RelPath::new("")` es
+/// Es `.lodestar`, el **plano de control** del workspace, y **jamás** puede ser un documento del
+/// inventario ni pisar los diagnósticos de un fichero real. La garantía la sostienen **dos** piezas
+/// distintas, porque el suelo duro por sí solo no cubre el literal:
+///
+/// 1. **Lo que hay bajo `.lodestar/`**: el suelo duro del descubrimiento
+///    (`lodestar_workspace::discovery::CONTROL_PLANE_EXCLUDE`) excluye `.lodestar/**` sin que
+///    ninguna config pueda re-incluirlo, así que ningún `.lodestar/loquesea.md` entra al inventario.
+/// 2. **La entrada literal `.lodestar`** (un **fichero** llamado así, sin barra): ese glob **no** la
+///    cubre —`.lodestar/**` casa con lo de dentro de un directorio, no con una entrada suelta—, y la
+///    cierra el arranque: `.lodestar` como fichero hace que leer `<root>/.lodestar/config.yaml` dé
+///    `ENOTDIR`, y desde **E29-H01** un `config.yaml` que existe pero no se puede leer es error de
+///    apertura (`App::open` falla, `exit 3`) en vez de degradar a los valores por defecto. Es decir:
+///    en un workspace que **abre**, esa entrada no existe, y donde existiera no hay `Analysis` que
+///    indexar.
+///
+/// No es un `RelPath` de la raíz —no existe: `RelPath::new("")` es
 /// `Err` por diseño, invariante #6— sino una etiqueta estable que dice «esto es del workspace, no
 /// de un fichero tuyo»: los diagnósticos que la usan (`PATH-NOT-UTF8`, `WORKSPACE-EMPTY`) siguen
 /// viajando con `targets` **vacío**, que es la verdad, y su severidad cuenta igual para
