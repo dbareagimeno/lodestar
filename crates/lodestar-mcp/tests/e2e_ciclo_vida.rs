@@ -167,6 +167,15 @@ impl Sesion {
         self.tool("change_plan", json!({ "operations": ops }))
     }
 
+    /// `change_plan` con una `policy` EXPLÍCITA (E29-H07): el veredicto `canApply` depende de ella,
+    /// así que los tests de esta historia necesitan fijarla y no heredar la de la tool.
+    fn planifica_con_policy(&mut self, ops: Value, policy: Value) -> Value {
+        self.tool(
+            "change_plan",
+            json!({ "operations": ops, "policy": policy }),
+        )
+    }
+
     /// `change_apply` del plan `id`.
     fn aplica(&mut self, id: &str) -> Value {
         self.tool("change_apply", json!({ "changeSetId": id }))
@@ -1749,5 +1758,320 @@ fn reapply_de_changeset_identico_no_pisa_recovery_ni_receipts_previos() {
         "y su recibo propio: antes {:?}, después {:?}",
         receipts_antes.keys().collect::<Vec<_>>(),
         receipts_despues.keys().collect::<Vec<_>>()
+    );
+}
+
+// ===========================================================================
+// E29-H07 — `canApply: false` VINCULA a `change_apply` (`decisiones §18`), por el WIRE.
+//
+// La mitad de servicio de esta historia vive en `crates/lodestar-app/tests/plan.rs`
+// (módulo `can_apply_vincula_al_apply`). Lo que se ejerce aquí es lo que `§18` describe literalmente:
+// un agente que planifica y, viendo `canApply:false`, **insiste** con `change_apply` en la MISMA
+// sesión y con el `changeSetId` que acaba de recibir. Ese encadenamiento plan→apply sobre un proceso
+// vivo es exactamente lo que el arnés `Sesion` existe para reproducir, y es donde la incoherencia se
+// observa como la observó el guion de la demo: la respuesta de la tool dice «no aplicable» y la
+// siguiente responde `applied:true`.
+//
+// QUÉ NO SE DUPLICA AQUÍ. `mcp.rs::apply_de_plan_con_colision_rechaza_sin_tocar_disco` (E28-H02) y
+// los tests de E28-H04 ya cubren el rechazo del apply por **colisión de paths** —dos operaciones
+// que reclaman el mismo destino, o un destino ocupado—, que se juzga sobre las OPERACIONES y sale
+// con `DOCUMENT_ALREADY_EXISTS`. Esta historia cubre el rechazo por el **VEREDICTO** del plan
+// (`canApply:false` bajo su propia `PlanPolicy`, por resultado no conforme o por warnings), que hoy
+// no bloquea absolutamente nada: son gates distintos, con códigos distintos y escenarios disjuntos.
+// ===========================================================================
+
+/// Workspace con un **error preexistente** deliberado —`roto.md` enlaza a un `.md` que no existe,
+/// que `§20.9` clasifica `danglingDocumentLinks: error`— y un documento limpio sobre el que operar.
+/// Es el montaje con el que `§18` se descubrió (el guion de la demo contra un workspace con un
+/// error a propósito).
+fn proyecto_con_error_preexistente(root: &Path) {
+    escribe(
+        root,
+        "roto.md",
+        "# Roto\n\nEnlace a un documento que no existe: [falta](inexistente-previo.md).\n",
+    );
+    escribe(
+        root,
+        "limpio.md",
+        "---\ntitle: Limpio\n---\n\n# Limpio\n\nDocumento sin problemas.\n",
+    );
+}
+
+/// Un patch inocuo sobre `limpio.md`: no crea ni borra nada y no introduce enlaces, así que **no
+/// puede** disparar el gate de staging (`rejectNewErrors`) — si el apply se rechaza, es por el
+/// veredicto del plan.
+fn patch_inocuo() -> Value {
+    json!([
+        { "op": "patch_frontmatter", "ref": { "path": "limpio.md" },
+          "patch": { "status": "revisado" } },
+    ])
+}
+
+/// **Criterio `apply_de_plan_no_aplicable_se_rechaza_sin_escribir`** (mitad e2e) — **Dado** un
+/// workspace con un error preexistente y un `change_plan` con la policy por defecto que devuelve
+/// `canApply:false`, **Cuando** el agente insiste con `change_apply` en la misma sesión, **Entonces**
+/// la tool falla con `INVALID_RESULT`, el mensaje nombra la cláusula `requireValidResult` que
+/// bloqueó —no un genérico— y todos los `.md` quedan byte-idénticos.
+///
+/// ROJO HOY: el apply responde `applied:true` con `validation.valid:false` y `limpio.md` cambia en
+/// disco (medido antes de escribir el test).
+#[test]
+fn apply_de_plan_no_aplicable_se_rechaza_sin_escribir_en_sesion_viva() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    proyecto_con_error_preexistente(root);
+
+    let mut s = Sesion::abrir(root);
+
+    // La policy va explícita aunque coincida con el default: el criterio es sobre `requireValidResult`
+    // y dejarlo implícito haría el test ilegible.
+    let plan = s.planifica_con_policy(
+        patch_inocuo(),
+        json!({"requireValidResult": true, "allowWarnings": true}),
+    );
+    assert_eq!(
+        plan["canApply"], false,
+        "precondición: con `requireValidResult:true` y un error preexistente el plan NO es \
+         aplicable: {plan}"
+    );
+    assert_eq!(
+        plan["diagnosticsAfter"]["errors"], 1,
+        "precondición: el resultado simulado conserva el error preexistente de `roto.md`: {plan}"
+    );
+    let cs = plan["changeSetId"]
+        .as_str()
+        .expect("changeSetId")
+        .to_string();
+
+    let antes = instantanea_md(root);
+    let rev_antes = s.revision();
+
+    // El agente INSISTE, que es el escenario de `§18`.
+    let error = {
+        let r = s.tool_cruda("change_apply", json!({ "changeSetId": cs }));
+        assert_eq!(
+            r["isError"],
+            json!(true),
+            "aplicar un plan cuyo `canApply` era FALSE debe RECHAZARSE: la superficie prometió «este \
+             plan no es aplicable bajo tu policy» y el motor lo publicó igual. Respuesta: {r}. \
+             Disco resultante: {:?}",
+            instantanea_md(root)
+        );
+        r["content"][0]["text"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string()
+    };
+    assert!(
+        error.contains("INVALID_RESULT"),
+        "el rechazo reusa la fila existente `INVALID_RESULT` («el resultado del plan no es \
+         aceptable»), sin abrir el catálogo (`decisiones §18`); fue: {error}"
+    );
+    assert!(
+        error.contains("requireValidResult"),
+        "y el mensaje debe NOMBRAR la cláusula de la policy que bloqueó, que es lo único que le dice \
+         al agente si replanificar o relajar la política; fue: {error}"
+    );
+
+    assert_eq!(
+        instantanea_md(root),
+        antes,
+        "un plan rechazado no escribe un solo byte del conocimiento (invariante #1)"
+    );
+    assert_eq!(
+        s.revision(),
+        rev_antes,
+        "y la revisión del workspace no se mueve: no hubo publicación"
+    );
+}
+
+/// **Criterio `apply_rechaza_tambien_por_allow_warnings`** (mitad e2e) — **Dado** un plan con
+/// `allowWarnings:false` sobre un resultado **válido pero con warnings**, **Cuando** se aplica,
+/// **Entonces** también se rechaza y el mensaje nombra `allowWarnings`.
+///
+/// Este escenario es el que aísla el gate nuevo de cualquier otro: el resultado simulado tiene cero
+/// errores, así que ninguna política de staging tiene nada que objetar. Hoy el apply publica.
+#[test]
+fn apply_rechaza_tambien_por_allow_warnings_en_sesion_viva() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    // `assets/logo.png` no existe: enlace a un fichero de proyecto ausente ⇒ `missingWorkspaceFiles`,
+    // que `§20.9` clasifica como WARNING (no error).
+    escribe(
+        root,
+        "nota.md",
+        "---\ntitle: Nota\n---\n\n# Nota\n\nDiagrama: [logo](assets/logo.png)\n",
+    );
+
+    let mut s = Sesion::abrir(root);
+
+    let plan = s.planifica_con_policy(
+        json!([
+            { "op": "patch_frontmatter", "ref": { "path": "nota.md" },
+              "patch": { "status": "revisado" } },
+        ]),
+        json!({"requireValidResult": true, "allowWarnings": false}),
+    );
+    assert_eq!(
+        plan["canApply"], false,
+        "precondición: `allowWarnings:false` sobre un resultado con warnings da `canApply:false`: {plan}"
+    );
+    assert_eq!(
+        plan["diagnosticsAfter"]["errors"], 0,
+        "precondición: el resultado es VÁLIDO — lo único que bloquea es el warning, de modo que \
+         ningún gate de staging puede reclamar el mérito del rechazo: {plan}"
+    );
+    assert!(
+        plan["diagnosticsAfter"]["warnings"].as_i64().unwrap_or(0) >= 1,
+        "precondición: el enlace a `assets/logo.png` aporta al menos un warning: {plan}"
+    );
+    let cs = plan["changeSetId"]
+        .as_str()
+        .expect("changeSetId")
+        .to_string();
+
+    let antes = instantanea_md(root);
+    let error = s.tool_falla("change_apply", json!({ "changeSetId": cs }));
+
+    assert!(
+        error.contains("INVALID_RESULT"),
+        "las dos cláusulas de la policy rechazan con el mismo código de wire; fue: {error}"
+    );
+    assert!(
+        error.contains("allowWarnings"),
+        "y el mensaje debe nombrar la cláusula CONCRETA que bloqueó (`allowWarnings`), no la otra ni \
+         un genérico; fue: {error}"
+    );
+    assert_eq!(
+        instantanea_md(root),
+        antes,
+        "y tampoco aquí se escribe nada"
+    );
+}
+
+/// **Criterio `apply_de_plan_aplicable_no_cambia` + `apply_con_policy_permisiva_sigue_aplicando`**
+/// (control anti-vacuo, mitad e2e) — **Dado** el MISMO workspace con el error preexistente,
+/// **Cuando** se planifica con `policy: {requireValidResult:false}` y se aplica, **Entonces** el
+/// ciclo funciona exactamente como antes de la historia: `applied:true`, la revisión cambia, el
+/// cambio está en disco y el recibo sirve para revertir.
+///
+/// Es el control que impide que el arreglo degenere en «todo plan sobre un workspace con errores se
+/// rechaza». Verde hoy, y tiene que seguir verde después: el gate solo puede morder donde el plan
+/// dijo que mordería.
+#[test]
+fn apply_con_policy_permisiva_sigue_aplicando_en_sesion_viva() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    proyecto_con_error_preexistente(root);
+
+    let mut s = Sesion::abrir(root);
+    let rev0 = s.revision();
+
+    let plan = s.planifica_con_policy(
+        patch_inocuo(),
+        json!({"requireValidResult": false, "allowWarnings": true}),
+    );
+    assert_eq!(
+        plan["canApply"], true,
+        "precondición del control: con `requireValidResult:false` el MISMO plan sí es aplicable pese \
+         al error preexistente: {plan}"
+    );
+    let cs = plan["changeSetId"]
+        .as_str()
+        .expect("changeSetId")
+        .to_string();
+
+    let apply = s.aplica(&cs);
+    assert_eq!(
+        apply["applied"], true,
+        "un plan con `canApply:true` debe seguir aplicándose exactamente como antes: {apply}"
+    );
+    assert_eq!(
+        paths_cambiados(&apply),
+        vec!["limpio.md"],
+        "y tocar exactamente el documento parcheado: {apply}"
+    );
+    assert_ne!(
+        apply["workspaceRevision"].as_str().unwrap(),
+        rev0,
+        "la publicación mueve la revisión"
+    );
+    assert!(
+        lee(root, "limpio.md").contains("status: revisado"),
+        "el cambio está de verdad en disco:\n{}",
+        lee(root, "limpio.md")
+    );
+    assert!(
+        lee(root, "roto.md").contains("inexistente-previo.md"),
+        "el error preexistente sigue ahí: el apply lo TOLERA, no lo repara — que es justo por lo que \
+         el plan por defecto lo declaraba no aplicable"
+    );
+
+    // El recibo sigue siendo utilizable: el camino feliz completo, no solo el apply.
+    let recibo = apply["receiptId"]
+        .as_str()
+        .expect("el apply devuelve receiptId")
+        .to_string();
+    let revert = s.revierte(&recibo);
+    assert_eq!(
+        revert["reverted"], true,
+        "y el ciclo entero sigue cerrando (plan → apply → revert): {revert}"
+    );
+    assert!(
+        !lee(root, "limpio.md").contains("status: revisado"),
+        "el revert deshace el patch:\n{}",
+        lee(root, "limpio.md")
+    );
+}
+
+/// **Criterio `el_rechazo_por_can_apply_no_deja_rastro_transaccional`** (mitad e2e) — **Dado** un
+/// plan rechazado por este gate, **Cuando** se inspecciona `.lodestar/runtime/`, **Entonces** no hay
+/// journal, ni staging, ni recibo, ni copias de recuperación de esa transacción, y `workspace_status`
+/// no lista recibo alguno: el rechazo ocurre ANTES del lock.
+///
+/// El plan persistido (`runtime/plans/`) y `runtime/audit.jsonl` quedan fuera del criterio a
+/// propósito: el primero es el artefacto que se está juzgando (caduca por TTL) y la segunda se anexa
+/// en todo intento, con éxito o sin él (E13-H10).
+#[test]
+fn el_rechazo_por_can_apply_no_deja_rastro_transaccional() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    proyecto_con_error_preexistente(root);
+
+    let mut s = Sesion::abrir(root);
+
+    let plan = s.planifica_con_policy(
+        patch_inocuo(),
+        json!({"requireValidResult": true, "allowWarnings": true}),
+    );
+    assert_eq!(
+        plan["canApply"], false,
+        "precondición: plan no aplicable: {plan}"
+    );
+    let cs = plan["changeSetId"]
+        .as_str()
+        .expect("changeSetId")
+        .to_string();
+
+    let r = s.tool_cruda("change_apply", json!({ "changeSetId": cs }));
+    assert_eq!(
+        r["isError"],
+        json!(true),
+        "precondición de este criterio: el apply debe rechazarse (hoy publica): {r}"
+    );
+
+    for sub in ["journal", "staging", "receipts", "recovery"] {
+        let residuos = ficheros_bajo(&runtime(root).join(sub));
+        assert!(
+            residuos.is_empty(),
+            "un rechazo por `canApply:false` ocurre ANTES del lock, así que \
+             `.lodestar/runtime/{sub}/` no puede contener nada de esa transacción; contiene {:?}",
+            residuos.keys().collect::<Vec<_>>()
+        );
+    }
+    assert_eq!(
+        recibos_listados(&mut s),
+        Vec::<String>::new(),
+        "ni `workspace_status` puede listar un recibo de algo que nunca se publicó"
     );
 }

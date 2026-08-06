@@ -274,6 +274,7 @@ pub fn validate_result(doc_set: &DocumentSet) -> ValidationReport {
 /// los *documentan*). Antes de este arreglo, omitir una sola clave fallaba con
 /// «missing field …» pese a que ambas ya se declaraban opcionales por contrato.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", default)]
 pub struct PlanPolicy {
     /// Si `true`, un [`ValidationReport`] no conforme (`valid == false`) bloquea `can_apply`.

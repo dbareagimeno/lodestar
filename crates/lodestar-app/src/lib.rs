@@ -1848,6 +1848,7 @@ impl App {
             base_workspace_revision: base_revision,
             plan_hash,
             can_apply,
+            policy,
             expires_at: expires_at_string(),
             normalized_operations: normalized,
             risk,
@@ -1934,6 +1935,15 @@ impl App {
     ///    `change_plan`) y lo compara con el `planHash` persistido; si difiere, el workspace cambió bajo
     ///    el plan → `Err(PlanStale)` y **no escribe**. (El `planHash` mezcla la base y las
     ///    operaciones, así que un cambio del canónico bajo el plan lo invalida.)
+    ///    - **El veredicto del plan VINCULA** (E29-H07, `decisiones §18`): con la base ya
+    ///      verificada, se **recomputa** [`plan::can_apply`] sobre el resultado hipotético del plan
+    ///      con la [`PlanPolicy`] que el cliente mandó a `change_plan` (persistida en el plan). Si
+    ///      es `false` → `Err(InvalidResult)` con un mensaje que **nombra la cláusula** que bloqueó
+    ///      (`requireValidResult`/`allowWarnings`), **antes de tomar el lock** y sin escribir nada:
+    ///      sin staging, sin journal, sin recibo y sin copias de recuperación. Hasta E29-H07
+    ///      `canApply` era un consejo que nadie ejercía y el único filtro que quedaba era el gate de
+    ///      staging —`transactions`, una política distinta— que no muerde con errores preexistentes
+    ///      ni con warnings.
     /// 4. **Transacción**: [`Workspace::apply_transaction_con_recibo`] publica por el único escritor
     ///    (staging → lock → backup → journal + registro durable del recibo → renames atómicos),
     ///    devolviendo `(previous, result, changedPaths)`. Su `assert_writable` rechaza cualquier path
@@ -2028,6 +2038,36 @@ impl App {
                      change_plan sobre el estado actual",
                     plan.change_set_id.0, plan.base_workspace_revision.0, current_base.0
                 ),
+            ));
+        }
+
+        // (3-veredicto) EL VEREDICTO DEL PLAN VINCULA (E29-H07, `decisiones §18`). Hasta esta historia
+        //     `canApply` viajaba al cliente y nadie lo ejercía: un plan que la superficie declaraba
+        //     «no aplicable bajo tu policy» se publicaba igual si el agente insistía, porque el
+        //     único filtro de validez que quedaba era el gate de staging (`rejectNewErrors`/
+        //     `allowExistingErrors` de `transactions`, E20-H04) — una política DISTINTA, que no
+        //     muerde ni con errores PREEXISTENTES ni con warnings. Dos políticas, una publicada y
+        //     otra ejercida.
+        //
+        //     Se RECOMPUTA en vez de leer el `canApply` persistido (la recomendación de la historia):
+        //     el apply re-verifica todo lo demás —el `planHash` sobre la base actual, la revisión— y
+        //     un booleano congelado sería el único veredicto que no se re-computa. Se llama a
+        //     `plan::can_apply`, el MISMO predicado que usó `change_plan` (invariante #3: el
+        //     predicado no se reimplementa aquí), sobre el resultado hipotético reconstruido con
+        //     `plan::apply_normalized_ops` — que es idéntico al que vio `change_plan`, porque el
+        //     paso (3) acaba de verificar que la base y las operaciones son las mismas.
+        //
+        //     Ocurre ANTES de tocar la transacción: sin lock, sin staging, sin journal, sin recibo y
+        //     sin copias de recuperación. Es un veredicto sobre el PLAN, no sobre el disco.
+        let after_plan = DocumentSet::from_files(
+            plan::apply_normalized_ops(doc_set.files(), &plan.normalized_operations)
+                .map_err(|e| AppError::from(&e))?,
+        );
+        let after_report = plan::validate_result(&after_plan);
+        if !plan::can_apply(&after_report, &plan.policy) {
+            return Err(AppError::new(
+                ErrorCode::InvalidResult,
+                plan_policy_rejection_message(&plan, &after_report),
             ));
         }
 
@@ -3128,6 +3168,50 @@ fn plan_file_path(root: &Path, id: &ChangeSetId) -> PathBuf {
         .join(plan_file_name(id))
 }
 
+/// Mensaje del rechazo de `change_apply` cuando el plan **no es aplicable bajo su propia
+/// `PlanPolicy`** (E29-H07, `decisiones §18`).
+///
+/// Nombra la(s) **cláusula(s)** de la policy que bloquearon —`requireValidResult` y/o
+/// `allowWarnings`— y el remedio (replanificar, o relajar la policy). Esa precisión es lo que
+/// sostiene reusar `INVALID_RESULT` en vez de abrir una fila decimoctava en el catálogo: el gate de
+/// **staging** rechaza con el mismo código, pero su mensaje habla de `rejectNewErrors`/
+/// `allowExistingErrors` (la política `transactions`), de modo que los dos vocabularios son
+/// disjuntos y el agente sabe cuál de los dos gates le habló. Este mensaje **no** menciona la
+/// política de staging, ni el de staging la del plan.
+fn plan_policy_rejection_message(plan: &PlanResult, report: &ValidationReport) -> String {
+    let mut clausulas: Vec<String> = Vec::new();
+    if plan.policy.require_valid_result && !report.valid {
+        clausulas.push(format!(
+            "«requireValidResult» es true y el resultado simulado no es válido ({} error(es))",
+            report.summary.errors
+        ));
+    }
+    if !plan.policy.allow_warnings && report.summary.warnings > 0 {
+        clausulas.push(format!(
+            "«allowWarnings» es false y el resultado simulado tiene {} warning(s)",
+            report.summary.warnings
+        ));
+    }
+    if clausulas.is_empty() {
+        // Inalcanzable: este mensaje solo se construye cuando `plan::can_apply` dijo `false`, y ese
+        // predicado no tiene más causas que las dos de arriba. Se cubre para que un futuro campo de
+        // `PlanPolicy` sin rama aquí produzca un mensaje pobre pero honesto, nunca una lista vacía.
+        clausulas.push("la policy del plan no admite este resultado".to_string());
+    }
+    format!(
+        "el plan «{}» no es aplicable bajo la policy con la que se planificó ({}): {}. \
+         No se ha escrito nada. Replanifica sobre el estado actual (change_plan) o vuelve a \
+         planificar con una policy que lo admita",
+        plan.change_set_id.0,
+        // La policy entera, para que el agente vea el contexto de la cláusula citada.
+        format_args!(
+            "requireValidResult={}, allowWarnings={}",
+            plan.policy.require_valid_result, plan.policy.allow_warnings
+        ),
+        clausulas.join("; "),
+    )
+}
+
 /// Persiste el `PlanResult` completo (operaciones normalizadas, revisión base, hash, caducidad,
 /// diff, impacto, validación) en `.lodestar/runtime/plans/<hash>.json` (E12-H09,
 /// `ARCHITECTURE.md §19.4/§19.5`).
@@ -3196,6 +3280,18 @@ pub struct PlanResult {
     pub plan_hash: PlanHash,
     /// `true` si el plan es aplicable bajo la `policy` dada ([`plan::can_apply`]).
     pub can_apply: bool,
+    /// La [`PlanPolicy`] con la que se computó `canApply` — E29-H07 (`decisiones §18`).
+    ///
+    /// Se persiste con el plan porque el veredicto **vincula** al apply: `change_apply` recomputa
+    /// [`plan::can_apply`] con esta policy (invariante #3: el predicado no se reimplementa, y no se
+    /// congela un booleano que el apply no pueda re-verificar como re-verifica el `planHash` y la
+    /// revisión). Un plan persistido por un binario ANTERIOR a E29-H07 no lleva el campo:
+    /// `#[serde(default)]` lo completa con [`PlanPolicy::default`] —la policy más estricta de las
+    /// dos que el wire admite—, de modo que el gate nunca es más laxo de lo que el cliente pidió.
+    /// El desajuste posible (un plan planificado con `requireValidResult:false` que tras actualizar
+    /// el binario se rechaza) se resuelve replanificando, y lo acota el TTL corto del plan.
+    #[serde(default)]
+    pub policy: PlanPolicy,
     /// Instante de caducidad (segundos epoch, wall-clock; fuera del `planHash`).
     pub expires_at: String,
     /// Todas las operaciones normalizadas del plan, en un único change set.
