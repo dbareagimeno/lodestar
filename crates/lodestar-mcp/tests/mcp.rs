@@ -10287,27 +10287,43 @@ fn check_scope_paths_trata_lo_excluido_como_inexistente() {
 /// E29-H05 · Criterio `check_scope_paths_valido_sigue_funcionando` (control anti-vacuo):
 /// Dado un scope con paths que TODOS existen, Cuando se llama, Entonces devuelve el informe (sin
 /// error) exactamente como hoy — el rechazo del path inexistente no puede haberse llevado por delante
-/// el caso feliz.
+/// el caso feliz. Endurecido tras revisión del juez ciego: el fixture antiguo (documento sin
+/// diagnósticos) dejaba pasar un mutante que "valida existencia pero devuelve el conjunto vacío"
+/// (el scope respondería «impecable» sin haber auditado nada, indistinguible del caso feliz). Aquí
+/// `roto.md` tiene un enlace roto propio (`LINK-TARGET-MISSING`), así que el criterio exige que ESE
+/// diagnóstico concreto llegue en `diagnostics`, no solo que `isError` sea `false`.
 #[test]
 fn check_scope_paths_valido_sigue_funcionando() {
-    let dir = workspace_check_paths();
-    let resp = roundtrip(
+    let dir = tempfile::tempdir().unwrap();
+    write(
         dir.path(),
-        &[check_paths_call(&["notas/alfa.md"]).as_str()],
-        1,
+        "roto.md",
+        "# Roto\n\nEnlace a un documento inexistente: [falta](inexistente.md).\n",
     );
+    let resp = roundtrip(dir.path(), &[check_paths_call(&["roto.md"]).as_str()], 1);
 
     assert!(
         resp[0]["result"]["isError"].as_bool() != Some(true),
         "un scope `paths` con paths que TODOS existen no debe fallar: {resp:?}"
     );
+    let diags = check_diagnostics(&resp[0]);
+    let diag = diags
+        .iter()
+        .find(|d| d["code"] == "LINK-TARGET-MISSING")
+        .unwrap_or_else(|| {
+            panic!(
+                "el scope `paths: [\"roto.md\"]` debe traer el LINK-TARGET-MISSING de «roto.md»: \
+                 un informe vacío pasaría por casualidad, no porque el documento se haya auditado \
+                 de verdad. Diagnósticos: {diags:?}"
+            )
+        });
     assert!(
-        resp[0]["result"]["structuredContent"]["diagnostics"].is_array(),
-        "el informe debe traer `diagnostics` (array), aunque esté vacío: {resp:?}"
+        diag_targets(diag).iter().any(|t| t == "roto.md"),
+        "el diagnóstico debe señalar a «roto.md»: {diag:?}"
     );
     assert_eq!(
-        resp[0]["result"]["structuredContent"]["valid"], true,
-        "el único documento del scope no tiene diagnósticos: el informe debe ser válido: {resp:?}"
+        resp[0]["result"]["structuredContent"]["valid"], false,
+        "con un LINK-TARGET-MISSING de severidad Err, el informe del scope debe ser NO válido: {resp:?}"
     );
 }
 
@@ -10460,5 +10476,214 @@ fn mcp_workspace_con_documentos_no_avisa() {
     assert!(
         !diags.iter().any(|d| d["code"] == "WORKSPACE-EMPTY"),
         "un workspace con documentos (index.md) NO debe llevar WORKSPACE-EMPTY: {resp:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// E29-H09 — `instructions` por perfil y `protocolVersion` no soportada.
+//
+// Dos defectos del mismo hallazgo (`decisiones §23/D-01`, caso G1-24 del testbench):
+// (1) `SERVER_INSTRUCTIONS` es una constante única servida sin mirar el `profile`, así que bajo
+//     `readonly` describe el flujo completo de 10 pasos (incluidas las 3 tools de cambio) aunque
+//     `tools/list` sirva solo 7 — un agente que las siga acaba en `-32602`. El test histórico
+//     `instructions_sin_vocabulario_retirado` (línea 177) SOLO ejercita `standard` vía `roundtrip()`,
+//     por eso el drift bajo `readonly` no lo detectó nunca.
+// (2) `protocolVersion` no soportada NO se rechaza: el brazo `initialize` (`main.rs` L200-204) la
+//     descarta con `.filter(...)` y cae a `2024-11-05` como si el cliente hubiera pedido esa versión
+//     — una respuesta de éxito para un handshake que no debería prosperar.
+//
+// Los tests de abajo son NUEVOS (no tocan `instructions_sin_vocabulario_retirado`, que sigue
+// ejercitando solo `standard` y debe seguir verde tal cual): generalizan la guarda a los dos
+// perfiles y fijan el rechazo de versión con el vehículo que la historia pide, `roundtrip_profile`.
+// ---------------------------------------------------------------------------
+
+/// Extrae `instructions` de la respuesta a `initialize` (posición 0 de `resp`).
+fn instructions_de(resp: &[serde_json::Value]) -> String {
+    resp[0]["result"]["instructions"]
+        .as_str()
+        .expect("initialize sirve «instructions» (string)")
+        .to_lowercase()
+}
+
+/// Extrae los nombres de tool servidos por `tools/list` (posición 1 de `resp`).
+fn tools_servidas_de(resp: &[serde_json::Value]) -> Vec<String> {
+    resp[1]["result"]["tools"]
+        .as_array()
+        .expect("tools/list devuelve un array de tools")
+        .iter()
+        .map(|t| {
+            t["name"]
+                .as_str()
+                .expect("cada tool tiene «name»")
+                .to_string()
+        })
+        .collect()
+}
+
+/// E29-H09 · Criterio `instructions_readonly_nombra_solo_las_tools_servidas`:
+/// Dado el servidor con `--profile readonly`, Cuando se hace `initialize` + `tools/list`, Entonces
+/// el conjunto de tools nombradas en `instructions` es EXACTAMENTE el servido por `tools/list` (7):
+/// ni una de menos (un flujo que se salta una tool la deja invisible) ni una de más (nombrar una
+/// tool que `tools/call` va a rechazar con `-32602`).
+#[test]
+fn instructions_readonly_nombra_solo_las_tools_servidas() {
+    let dir = workspace_min();
+    let resp = roundtrip_profile(
+        dir.path(),
+        "readonly",
+        &[
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#,
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#,
+        ],
+        2,
+    );
+
+    let instructions = instructions_de(&resp);
+    let servidas = tools_servidas_de(&resp);
+    assert_eq!(
+        servidas.len(),
+        7,
+        "el perfil readonly debe servir 7 tools en tools/list: {servidas:?}"
+    );
+
+    for tool in &servidas {
+        assert!(
+            instructions.contains(tool.as_str()),
+            "`{tool}` está en `tools/list` bajo readonly pero `instructions` no la nombra:\n{instructions}"
+        );
+    }
+    // Ninguna tool NO servida por este perfil puede aparecer nombrada: seguirla es un -32602.
+    let no_servidas = ["change_plan", "change_apply", "change_revert"];
+    for tool in no_servidas {
+        assert!(
+            !servidas.iter().any(|s| s == tool),
+            "sanity: `{tool}` no debería estar en tools/list bajo readonly: {servidas:?}"
+        );
+        assert!(
+            !instructions.contains(tool),
+            "bajo readonly, `instructions` nombra `{tool}`, que tools/list NO sirve: seguirla \
+             acaba en -32602\n---\n{instructions}"
+        );
+    }
+}
+
+/// E29-H09 · Criterio `instructions_standard_sigue_coincidiendo` (control anti-vacuo): la
+/// generalización de la guarda a los dos perfiles no puede romper el caso `standard`, que ya
+/// funcionaba. Mismo test que `instructions_sin_vocabulario_retirado` en su mitad de conteo, pero
+/// ejercitado explícitamente vía `roundtrip_profile("standard", …)` para que el vehículo sea
+/// simétrico al de `readonly`.
+#[test]
+fn instructions_standard_sigue_coincidiendo() {
+    let dir = workspace_min();
+    let resp = roundtrip_profile(
+        dir.path(),
+        "standard",
+        &[
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#,
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#,
+        ],
+        2,
+    );
+
+    let instructions = instructions_de(&resp);
+    let servidas = tools_servidas_de(&resp);
+    assert_eq!(
+        servidas.len(),
+        10,
+        "el perfil standard debe servir las 10 tools objetivo: {servidas:?}"
+    );
+    for tool in &servidas {
+        assert!(
+            instructions.contains(tool.as_str()),
+            "`{tool}` está en `tools/list` bajo standard pero `instructions` no la nombra:\n{instructions}"
+        );
+    }
+}
+
+/// E29-H09 · Criterio `instructions_readonly_no_nombra_tools_de_cambio` (aserción directa del
+/// síntoma reproducible, caso G1-24): bajo `readonly`, `change_apply` no aparece en el texto de
+/// `instructions`. Es deliberadamente redundante con
+/// `instructions_readonly_nombra_solo_las_tools_servidas` (que ya lo cubre por conjunto) porque la
+/// historia lo pide como aserción propia, más legible cuando falla.
+#[test]
+fn instructions_readonly_no_nombra_tools_de_cambio() {
+    let dir = workspace_min();
+    let resp = roundtrip_profile(
+        dir.path(),
+        "readonly",
+        &[r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#],
+        1,
+    );
+    let instructions = instructions_de(&resp[..1]);
+    assert!(
+        !instructions.contains("change_apply"),
+        "bajo readonly, `instructions` no debe mencionar `change_apply`:\n{instructions}"
+    );
+}
+
+/// E29-H09 · Criterio `protocol_version_no_soportada_se_rechaza`:
+/// Dado un `initialize` con `protocolVersion: "1990-01-01"`, Cuando se llama, Entonces la respuesta
+/// es un error JSON-RPC `-32602` cuyo mensaje lista las tres versiones aceptadas.
+///
+/// Decisión de forma (delegada por la historia a la fase roja, ver spec L1004-1009): la spec MCP
+/// oficial de negociación de versión (2025-06-18, sección «Version Negotiation») dice que si el
+/// servidor no soporta la `protocolVersion` pedida, debe responder con la versión que SÍ soporta y
+/// dejar que el CLIENTE decida cerrar la conexión — no es, en el spec base, un error JSON-RPC. Pero
+/// la propia historia lo prescribe explícitamente distinto para este repo: «Forma propuesta: error
+/// JSON-RPC `-32602`». Se sigue la prescripción explícita de la historia (no la negociación blanda
+/// del spec base) porque coincide con el principio rector de la épica —silencio peor que error— y
+/// con el patrón que el servidor YA usa para "tool no disponible"/"tool desconocida": mantener dos
+/// criterios de rechazo distintos en el mismo servidor (uno blando para protocolVersion, uno duro
+/// para tools) sería la clase de inconsistencia que la épica cierra en `§15`.
+#[test]
+fn protocol_version_no_soportada_se_rechaza() {
+    let dir = workspace_min();
+    let resp = roundtrip(
+        dir.path(),
+        &[
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"1990-01-01"}}"#,
+        ],
+        1,
+    );
+    assert_eq!(
+        resp[0]["error"]["code"], -32602,
+        "protocolVersion no soportada debe rechazarse con -32602: {resp:?}"
+    );
+    let msg = resp[0]["error"]["message"]
+        .as_str()
+        .expect("el error de protocolVersion no soportada lleva mensaje")
+        .to_lowercase();
+    for version in ["2024-11-05", "2025-03-26", "2025-06-18"] {
+        assert!(
+            msg.contains(version),
+            "el mensaje de rechazo debe listar la versión soportada «{version}»: {msg}"
+        );
+    }
+    // Un initialize rechazado es un handshake fallido, no un error de dominio de tool: no debe
+    // llevar `result` (ni siquiera con isError) y el error no es del catálogo de ErrorCode.
+    assert!(
+        resp[0]["result"].is_null(),
+        "un initialize rechazado no debe producir result: {resp:?}"
+    );
+}
+
+/// E29-H09 · Criterio `initialize_sin_version_sigue_funcionando` (control anti-vacuo: el rechazo
+/// de versión no puede cerrarse de más): Dado un `initialize` SIN `protocolVersion`, Cuando se
+/// llama, Entonces responde `2024-11-05` sin error — omitir no es lo mismo que pedir algo imposible.
+#[test]
+fn initialize_sin_version_sigue_funcionando() {
+    let dir = workspace_min();
+    let resp = roundtrip(
+        dir.path(),
+        &[r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#],
+        1,
+    );
+    assert_eq!(
+        resp[0]["result"]["protocolVersion"], "2024-11-05",
+        "sin protocolVersion, el servidor debe responder su versión por defecto sin error: {resp:?}"
+    );
+    assert!(
+        resp[0]["error"].is_null(),
+        "sin protocolVersion no debe haber error: {resp:?}"
     );
 }

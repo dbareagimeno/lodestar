@@ -673,19 +673,45 @@ fn check_scope_paths_trata_lo_excluido_como_inexistente() {
 }
 
 /// `check_scope_paths_valido_sigue_funcionando` (control anti-vacuo, mitad de servicio): un scope
-/// con paths que TODOS existen sigue funcionando exactamente como hoy.
+/// con paths que TODOS existen sigue funcionando exactamente como hoy — y, en particular, sigue
+/// devolviendo el diagnóstico DE ESE documento. Con un fixture sin diagnósticos, un mutante que
+/// "valida existencia pero devuelve el conjunto vacío" (deja `allowed` vacío tras comprobar que el
+/// path resuelve) pasaría igual: `report.valid` seguiría siendo `true` por ausencia de todo, no
+/// porque el documento se haya auditado de verdad. `roto.md` tiene un enlace roto propio
+/// (`LINK-TARGET-MISSING`), así que el criterio exige que el diagnóstico de ESE path concreto
+/// aparezca en el informe — indistinguible solo lo sería si el scope de verdad incluyera el
+/// documento.
 #[test]
 fn check_scope_paths_valido_sigue_funcionando() {
-    let (_dir, app) = app_con_un_documento();
+    let dir = tempfile::tempdir().unwrap();
+    escribe(
+        dir.path(),
+        "roto.md",
+        "# Roto\n\nEnlace a un documento inexistente: [falta](inexistente.md).\n",
+    );
+    let app = App::open(dir.path()).expect("el workspace temporal debe abrir");
+
     let scope = CheckScope::Paths {
-        paths: vec![rp("notas/alfa.md")],
+        paths: vec![rp("roto.md")],
     };
     let report = app
         .knowledge_check(&scope, Some(Severity::Info), false, None, None)
         .expect("un scope `paths` con paths que TODOS existen no debe fallar");
+    let diag = diag_con_codigo(&report, CheckCode::LinkTargetMissing).unwrap_or_else(|| {
+        panic!(
+            "el scope `paths: [\"roto.md\"]` debe traer el LINK-TARGET-MISSING de «roto.md»: un \
+             informe vacío superaría `valid == false` esperado a `true` observado por casualidad, \
+             no porque el documento se haya auditado de verdad. Diagnósticos: [{}]",
+            resumen(&report)
+        )
+    });
     assert!(
-        report.valid,
-        "el único documento del scope no tiene diagnósticos: el informe debe ser válido: {}",
+        diag.targets.iter().any(|t| t.as_str() == "roto.md"),
+        "el diagnóstico debe señalar a «roto.md»: {diag:?}"
+    );
+    assert!(
+        !report.valid,
+        "con un LINK-TARGET-MISSING de severidad Err, el informe del scope debe ser NO válido: {}",
         resumen(&report)
     );
 }
