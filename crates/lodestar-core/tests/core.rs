@@ -2745,3 +2745,245 @@ fn normalize_move_a_si_mismo_no_es_colision() {
         "un `move` a sí mismo no debe añadir ni quitar documentos del workspace",
     );
 }
+
+// ===========================================================================
+// E28-H04 — normalización contra el ESTADO ACUMULADO del change set (fase ROJA).
+//
+// Bloqueante de E28-H02 verificado por juez ciego ejecutando el binario por JSON-RPC
+// (`requirements/epica-28-defectos-destructivos-testbench.md`, «Adenda correctiva»): los guards de
+// H02 comparan contra el `DocumentSet` **inicial** del plan, que deja de ser cierto en cuanto el
+// plan tiene más de una operación tocando paths relacionados. De ahí salen DOS familias de defecto,
+// las dos reproducidas contra el binario real antes de escribir estos tests:
+//
+//   · Falsos negativos DESTRUCTIVOS — el guard no ve la colisión porque mira el estado de partida:
+//     `[move a→final, move b→final]` aplica con `risk: low` y deja en disco solo `final.md` con el
+//     cuerpo de `b` (el de `a` desaparece sin un solo diagnóstico); `[create X, move b→X]` publica
+//     el `move` encima del `create`; `[create X, create X]` deja ganar al segundo en silencio.
+//
+//   · Falsos positivos — REGRESIÓN respecto al commit padre de H02: `[delete X, create X]` y
+//     `[move A→B, create A]` (liberar un path y reocuparlo dentro del mismo plan) funcionaban antes
+//     de H02 —verificado ejecutando el binario del commit `85af8b9`— y hoy rechazan
+//     `DOCUMENT_ALREADY_EXISTS` porque el path sigue ocupado en el `DocumentSet` de partida.
+//
+// LO QUE FIJA ESTA MITAD PURA es la semántica del estado de ocupación acumulado, aislada de la
+// fachada: recorrer la secuencia en orden, ocupando con cada `Create`/`Move.to` y liberando con cada
+// `Delete`/`Move.from`. La superficie de wire la fija `crates/lodestar-mcp/tests/mcp.rs`.
+//
+// STUB DECLARADO EN LA FASE ROJA: `plan::assert_sin_colisiones_intra_plan(files, ops)` (firma +
+// `todo!()`, sin lógica). Se eligió una comprobación sobre la secuencia YA NORMALIZADA porque es la
+// forma MENOS prescriptiva de las dos que la historia deja abiertas (`DocumentSet` hipotético
+// recalculado vs. conjunto de paths llevado aparte): no obliga a ninguna de las dos, solo fija el
+// veredicto. El implementador es libre de darle otra firma o de resolver el acumulado dentro del
+// bucle de `App::change_plan_uncounted`, siempre que estos tests —y los cinco escenarios de
+// `mcp.rs`— queden en verde.
+//
+// ROJO esperado HOY: por PÁNICO del `todo!()` del stub. Cuando exista la lógica, el rojo pasa a ser
+// por aserción (o a verde).
+// ===========================================================================
+
+/// Un `Create` terminal de `path` con un cuerpo reconocible, para poder distinguir en las aserciones
+/// cuál de dos operaciones ganó.
+fn create_op(path: &str, body: &str) -> NormalizedOperation {
+    NormalizedOperation::Create {
+        path: RelPath::new(path).unwrap(),
+        frontmatter: None,
+        body: Some(body.to_string()),
+    }
+}
+
+/// Un `Move` terminal de `from` a `to` (sin reescritura de entrantes: aquí se juzga la OCUPACIÓN de
+/// paths, no la reescritura de enlaces, que ya tiene sus propios tests).
+fn move_op(from: &str, to: &str) -> NormalizedOperation {
+    NormalizedOperation::Move {
+        from: RelPath::new(from).unwrap(),
+        to: RelPath::new(to).unwrap(),
+        rewrite_inbound_links: false,
+    }
+}
+
+/// Un `Delete` terminal de `path`, con la política que no toca a los entrantes (irrelevante para la
+/// ocupación).
+fn delete_op(path: &str) -> NormalizedOperation {
+    NormalizedOperation::Delete {
+        path: RelPath::new(path).unwrap(),
+        inbound_links_policy: InboundLinksPolicy::RemoveLinks,
+    }
+}
+
+/// Comprueba que `resultado` es el error de colisión esperado y que **nombra** el path colisionado
+/// (mismo estilo que `DOCUMENT_NOT_FOUND`, que nombra el ref que no resolvió), sin disfrazarse de
+/// «objetivo no encontrado» —que mandaría al agente a buscar un documento que sí está ocupado—.
+fn asevera_colision_intra_plan(resultado: Result<(), lodestar_core::CoreError>, path: &str) {
+    let err = match resultado {
+        Ok(()) => panic!(
+            "la secuencia colisiona sobre «{path}» DENTRO del propio plan: aceptarla publica una \
+             operación encima de lo que dejó otra del mismo change set, que es exactamente la vía \
+             de pérdida de conocimiento que E28-H02 vino a cerrar (invariante #1)",
+        ),
+        Err(e) => e,
+    };
+    let debug = format!("{err:?}");
+    assert!(
+        !debug.contains("NormalizeTargetNotFound"),
+        "una colisión intra-plan NO puede reusar `NormalizeTargetNotFound` (mapea a \
+         `DOCUMENT_NOT_FOUND`, el código contrario): error = {debug}",
+    );
+    assert!(
+        err.to_string().contains(path),
+        "el error de colisión intra-plan debe NOMBRAR el path colisionado «{path}»; mensaje = {:?}",
+        err.to_string(),
+    );
+}
+
+/// **E28-H04** · mitad pura de `dos_moves_al_mismo_destino_en_el_mismo_plan_es_document_already_exists`:
+/// **Dado** un workspace con `a.md` y `b.md` y **sin** `final.md`, **Cuando** se juzga la secuencia
+/// `[move a→final, move b→final]`, **Entonces** falla con la colisión sobre `final.md`.
+///
+/// Es el falso negativo más grave de los tres: contra el binario real el plan sale con `risk: low`
+/// y, aplicado, deja en disco un único `final.md` con el cuerpo de `b` — el de `a` desaparece.
+#[test]
+fn dos_moves_al_mismo_destino_colisionan_en_el_acumulado() {
+    let files = lodestar_fixtures::file_map(&[
+        ("a.md", "---\ntitle: A\n---\n\n# A\n\ncuerpo de a\n"),
+        ("b.md", "---\ntitle: B\n---\n\n# B\n\ncuerpo de b\n"),
+    ]);
+    assert!(
+        !files.contains_key(&RelPath::new("final.md").unwrap()),
+        "precondición: `final.md` debe estar LIBRE en el estado de partida (por eso el guard de \
+         H02, que solo mira ese estado, no ve nada)",
+    );
+    let ops = vec![move_op("a.md", "final.md"), move_op("b.md", "final.md")];
+
+    asevera_colision_intra_plan(
+        lodestar_core::plan::assert_sin_colisiones_intra_plan(&files, &ops),
+        "final.md",
+    );
+}
+
+/// **E28-H04** · mitad pura de `create_seguido_de_move_al_mismo_path_es_document_already_exists`:
+/// **Dado** un workspace con `b.md` y **sin** `x.md`, **Cuando** se juzga `[create x, move b→x]`,
+/// **Entonces** falla con la colisión sobre `x.md` — el `move` pisaría el documento que el `create`
+/// del propio plan acaba de ocupar.
+#[test]
+fn create_seguido_de_move_al_mismo_path_colisiona_en_el_acumulado() {
+    let files =
+        lodestar_fixtures::file_map(&[("b.md", "---\ntitle: B\n---\n\n# B\n\ncuerpo de b\n")]);
+    let ops = vec![create_op("x.md", "# X nuevo\n"), move_op("b.md", "x.md")];
+
+    asevera_colision_intra_plan(
+        lodestar_core::plan::assert_sin_colisiones_intra_plan(&files, &ops),
+        "x.md",
+    );
+}
+
+/// **E28-H04** · mitad pura de `dos_creates_al_mismo_path_en_el_mismo_plan_es_document_already_exists`:
+/// **Dado** un workspace **sin** `x.md`, **Cuando** se juzga `[create x, create x]`, **Entonces**
+/// falla con la colisión sobre `x.md`.
+///
+/// Contra el binario real hoy los dos `create` se aceptan y gana el segundo en silencio: el agente
+/// que envió dos cuerpos distintos no recibe ninguna señal de que uno se descartó.
+#[test]
+fn dos_creates_al_mismo_path_colisionan_en_el_acumulado() {
+    let files =
+        lodestar_fixtures::file_map(&[("b.md", "---\ntitle: B\n---\n\n# B\n\ncuerpo de b\n")]);
+    let ops = vec![
+        create_op("x.md", "# Primero\n"),
+        create_op("x.md", "# Segundo\n"),
+    ];
+
+    asevera_colision_intra_plan(
+        lodestar_core::plan::assert_sin_colisiones_intra_plan(&files, &ops),
+        "x.md",
+    );
+}
+
+/// **E28-H04** · mitad pura de `delete_seguido_de_create_del_mismo_path_aplica` y de
+/// `move_seguido_de_create_del_path_liberado_aplica`: **Dado** un path que una operación anterior
+/// del MISMO plan **libera**, **Cuando** una posterior lo reocupa, **Entonces** NO es colisión.
+///
+/// Los dos idiomas funcionaban antes de H02 (verificado ejecutando el binario del commit `85af8b9`)
+/// y son la regresión que esta historia revierte. El acumulado tiene que saber liberar, no solo
+/// ocupar: un guard que solo sume paths volvería a rechazarlos.
+#[test]
+fn liberar_y_reocupar_un_path_en_el_mismo_plan_no_es_colision() {
+    // (a) `[delete X, create X]` — recrear un documento borrado dentro del mismo plan.
+    let files = lodestar_fixtures::file_map(&[(
+        "x.md",
+        "---\ntitle: X\n---\n\n# X\n\ncuerpo original de x\n",
+    )]);
+    let ops = vec![delete_op("x.md"), create_op("x.md", "# X recreado\n")];
+    lodestar_core::plan::assert_sin_colisiones_intra_plan(&files, &ops).unwrap_or_else(|e| {
+        panic!(
+            "`[delete X, create X]` LIBERA el path antes de reocuparlo: es un idioma legítimo que \
+             funcionaba antes de E28-H02 y no puede quedar rechazado; error = {e}",
+        )
+    });
+
+    // (b) `[move A→B, create A]` — liberar `A` moviéndolo y reutilizar el path liberado.
+    let files =
+        lodestar_fixtures::file_map(&[("A.md", "---\ntitle: A\n---\n\n# A\n\ncuerpo de a\n")]);
+    let ops = vec![move_op("A.md", "B.md"), create_op("A.md", "# A stub\n")];
+    lodestar_core::plan::assert_sin_colisiones_intra_plan(&files, &ops).unwrap_or_else(|e| {
+        panic!(
+            "`[move A→B, create A]` libera `A.md` con el propio `move`: reocuparlo después es \
+             legítimo y funcionaba antes de E28-H02; error = {e}",
+        )
+    });
+}
+
+/// **E28-H04** · control anti-vacuo del acumulado: la colisión contra el estado de PARTIDA (el caso
+/// de una sola operación que cerró E28-H02) sigue detectándose, y una secuencia sin ninguna
+/// colisión sigue pasando limpia.
+///
+/// Sin esto, el acumulado podría implementarse ignorando `files` (aceptándolo todo salvo repetidos
+/// dentro de la propia lista) o rechazándolo todo.
+#[test]
+fn el_acumulado_arranca_del_estado_de_partida_y_no_rechaza_de_mas() {
+    let files = lodestar_fixtures::file_map(&[
+        (
+            "notas/existente.md",
+            "---\ntitle: Existente\n---\n\n# Existente\n\ncontenido que no se debe pisar\n",
+        ),
+        (
+            "notas/origen.md",
+            "---\ntitle: Origen\n---\n\n# Origen\n\ncuerpo del origen\n",
+        ),
+    ]);
+
+    // (a) El estado acumulado ARRANCA de `files`: un solo `create` sobre un path ya ocupado en
+    //     disco sigue siendo colisión (criterio de H02, que esta historia no puede romper).
+    asevera_colision_intra_plan(
+        lodestar_core::plan::assert_sin_colisiones_intra_plan(
+            &files,
+            &[create_op("notas/existente.md", "# Pisado\n")],
+        ),
+        "notas/existente.md",
+    );
+
+    // (b) …y un `move` de una sola op hacia un destino ocupado en disco, igual.
+    asevera_colision_intra_plan(
+        lodestar_core::plan::assert_sin_colisiones_intra_plan(
+            &files,
+            &[move_op("notas/origen.md", "notas/existente.md")],
+        ),
+        "notas/existente.md",
+    );
+
+    // (c) Una secuencia larga SIN ninguna colisión no puede quedar rechazada: cada op ocupa un path
+    //     distinto y libre. Aquí también va un `move` a sí mismo (`from == to`), que E28-H02 fijó
+    //     como no-op válido y que el acumulado no debe confundir con una reocupación ilegítima.
+    lodestar_core::plan::assert_sin_colisiones_intra_plan(
+        &files,
+        &[
+            create_op("notas/nueva.md", "# Nueva\n"),
+            move_op("notas/origen.md", "notas/origen.md"),
+            create_op("notas/otra.md", "# Otra\n"),
+        ],
+    )
+    .unwrap_or_else(|e| {
+        panic!(
+            "una secuencia donde cada operación ocupa un path LIBRE y distinto no colisiona con \
+             nada; el `move` a sí mismo sigue siendo el no-op válido de E28-H02; error = {e}",
+        )
+    });
+}

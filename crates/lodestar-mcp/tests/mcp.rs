@@ -6477,9 +6477,10 @@ fn el_validador_de_schema_muerde() {
 //  - `build_selection_expression` tira el `ParseError` del core con `map_err(|_| …)`, así que la
 //    MISMA consulta malformada se diagnostica por `knowledge_search` y se calla por `change_plan`.
 //
-// El catálogo NO se toca: sigue teniendo 16 filas (`catalogo_de_errores_tiene_dieciseis_filas`, en
-// `lodestar-core`) y esta historia añade mensaje, no reclasifica códigos — salvo el único caso que
-// declara, `graph_query` sin `ref`/`to`.
+// El catálogo NO lo toca ESTA historia (E26-H11): añade mensaje, no reclasifica códigos — salvo el
+// único caso que declara, `graph_query` sin `ref`/`to`. Cuando se escribió tenía 16 filas; hoy tiene
+// 17 (`catalogo_de_errores_tiene_diecisiete_filas`, en `lodestar-core`) porque E28-H02 lo abrió a
+// conciencia para `DOCUMENT_ALREADY_EXISTS`, ajeno a lo que fija este bloque.
 // ---------------------------------------------------------------------------
 
 /// Parte el texto de error en `(código, mensaje)` **solo** si tiene la forma «CÓDIGO: mensaje» con
@@ -8928,5 +8929,283 @@ fn move_a_si_mismo_no_es_colision() {
         std::fs::read_to_string(dir.path().join("notas/origen.md")).unwrap(),
         original,
         "el documento del `move` a sí mismo debe sobrevivir intacto byte a byte"
+    );
+}
+
+// ===========================================================================
+// E28-H04 — la normalización de un plan juzga cada operación contra el ESTADO ACUMULADO por las
+// operaciones ANTERIORES del mismo plan, no contra el `DocumentSet` con el que empezó.
+//
+// Bloqueante de E28-H02 verificado por juez ciego ejecutando el binario por JSON-RPC
+// (`requirements/epica-28-defectos-destructivos-testbench.md`, «Adenda correctiva»). Los guards que
+// H02 puso en `normalize_create`/`normalize_move` comparan contra el `DocumentSet` **inicial** —el
+// bucle de `App::change_plan_uncounted` pasa el mismo `&doc_set` en cada iteración—, que deja de ser
+// cierto en cuanto el plan tiene más de una operación tocando paths relacionados.
+//
+// Los CINCO escenarios de abajo se reprodujeron uno a uno contra el binario real antes de escribir
+// los tests. Estado de HOY:
+//
+//   (i) FALSOS NEGATIVOS DESTRUCTIVOS — `canApply:true`, `risk: low`, sin un solo diagnóstico:
+//       · `[move a→final, move b→final]` → aplica y deja SOLO `final.md` con el cuerpo de `b`:
+//         el documento `a` desaparece del workspace.
+//       · `[create x, move b→x]`        → aplica y deja `x.md` con el cuerpo de `b`: el `create`
+//         del propio plan queda pisado.
+//       · `[create x, create x]`        → aplica y gana el SEGUNDO en silencio.
+//
+//   (ii) FALSOS POSITIVOS — regresión respecto al commit padre de H02 (`85af8b9`, verificado
+//        ejecutando su binario): dos idiomas legítimos que allí aplicaban y hoy responden
+//        `isError:true` con `DOCUMENT_ALREADY_EXISTS`:
+//       · `[delete x, create x]`   → antes dejaba `x.md` = «# X recreado\n».
+//       · `[move A→B, create A]`   → antes dejaba `B.md` con el original y `A.md` = «# A stub\n».
+//
+// Los tres de (i) fallan HOY porque el plan sale APLICABLE; los dos de (ii) fallan HOY porque el
+// plan se RECHAZA. Los cinco se juzgan por la superficie de wire (respuesta JSON-RPC + disco), no
+// por símbolos Rust, así que no dependen de la forma interna que elija el implementador —la
+// historia deja abiertas dos (`DocumentSet` hipotético recalculado vs. conjunto de paths aparte)—.
+//
+// El control anti-vacuo de la colisión contra DISCO de una sola operación son los tests de H02 de
+// más arriba (`create_sobre_path_existente_es_document_already_exists`,
+// `move_a_destino_ocupado_es_document_already_exists`), que siguen verdes sin tocarse.
+// ===========================================================================
+
+/// Workspace de los escenarios intra-plan: `a.md` y `b.md` con cuerpos distinguibles, y **sin**
+/// `final.md`/`x.md`, que son los destinos que las operaciones del plan van ocupando.
+fn workspace_a_y_b() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "a.md",
+        "---\ntitle: A\n---\n\n# A\n\ncuerpo de a\n",
+    );
+    write(
+        dir.path(),
+        "b.md",
+        "---\ntitle: B\n---\n\n# B\n\ncuerpo de b\n",
+    );
+    dir
+}
+
+/// Planifica `ops` y, si el plan sale aplicable, lo aplica en la misma sesión. Devuelve
+/// `(respuesta_del_plan, respuesta_del_apply_si_la_hubo)`.
+///
+/// Los escenarios de (i) necesitan esto para poder aseverar que HOY el defecto llega hasta el disco;
+/// los de (ii) lo necesitan para verificar el disco final, que es el criterio de la historia.
+fn plan_y_apply(
+    dir: &std::path::Path,
+    ops: serde_json::Value,
+) -> (serde_json::Value, Option<serde_json::Value>) {
+    let plan = roundtrip(
+        dir,
+        &[change_plan_line(None, ops, policy_permisiva()).as_str()],
+        1,
+    );
+    let id = plan[0]["result"]["structuredContent"]["changeSetId"]
+        .as_str()
+        .map(str::to_string);
+    let Some(id) = id else {
+        return (plan[0].clone(), None);
+    };
+    let apply = roundtrip(dir, &[change_apply_line(&id, None).as_str()], 1);
+    (plan[0].clone(), Some(apply[0].clone()))
+}
+
+/// **E28-H04** · Criterio `dos_moves_al_mismo_destino_en_el_mismo_plan_es_document_already_exists`:
+/// **Dado** un workspace con `a.md` y `b.md` y **sin** `final.md`, **Cuando** se planifica
+/// `[{move a→final}, {move b→final}]`, **Entonces** el plan NO queda aplicable y el diagnóstico lleva
+/// `DOCUMENT_ALREADY_EXISTS` nombrando `final.md`.
+///
+/// Es el falso negativo más grave de los tres: hoy el plan sale con `risk: low` y, aplicado, deja en
+/// disco un único `final.md` con el cuerpo de `b` — el documento `a` desaparece del workspace sin
+/// que nada lo señale (invariante #1: la única fuente de verdad, destruida en silencio).
+#[test]
+fn dos_moves_al_mismo_destino_en_el_mismo_plan_es_document_already_exists() {
+    let dir = workspace_a_y_b();
+    let antes = snapshot_md(dir.path());
+
+    let ops = serde_json::json!([
+        { "op": "move", "from": "a.md", "to": "final.md", "rewriteInboundLinks": true },
+        { "op": "move", "from": "b.md", "to": "final.md", "rewriteInboundLinks": true },
+    ]);
+    let plan = roundtrip(
+        dir.path(),
+        &[change_plan_line(None, ops, policy_permisiva()).as_str()],
+        1,
+    );
+
+    asevera_colision(&plan[0], "final.md");
+    assert_eq!(
+        snapshot_md(dir.path()),
+        antes,
+        "`change_plan` no escribe: el conocimiento en disco debe quedar idéntico: {plan:?}"
+    );
+}
+
+/// **E28-H04** · Criterio `create_seguido_de_move_al_mismo_path_es_document_already_exists`:
+/// **Dado** un workspace con `b.md` y **sin** `x.md`, **Cuando** se planifica
+/// `[{create x}, {move b→x}]`, **Entonces** el plan NO queda aplicable y el diagnóstico lleva
+/// `DOCUMENT_ALREADY_EXISTS` nombrando `x.md`.
+///
+/// Hoy el `move` se normaliza contra el `DocumentSet` original —donde `x.md` no existe— y pisa en
+/// silencio el `create` del propio plan: aplicado, `x.md` acaba con el cuerpo de `b`.
+#[test]
+fn create_seguido_de_move_al_mismo_path_es_document_already_exists() {
+    let dir = workspace_a_y_b();
+    let antes = snapshot_md(dir.path());
+
+    let ops = serde_json::json!([
+        { "op": "create", "path": "x.md", "body": "# X nuevo\n\ncuerpo del create\n" },
+        { "op": "move", "from": "b.md", "to": "x.md", "rewriteInboundLinks": true },
+    ]);
+    let plan = roundtrip(
+        dir.path(),
+        &[change_plan_line(None, ops, policy_permisiva()).as_str()],
+        1,
+    );
+
+    asevera_colision(&plan[0], "x.md");
+    assert_eq!(
+        snapshot_md(dir.path()),
+        antes,
+        "`change_plan` no escribe: el conocimiento en disco debe quedar idéntico: {plan:?}"
+    );
+}
+
+/// **E28-H04** · Criterio `dos_creates_al_mismo_path_en_el_mismo_plan_es_document_already_exists`:
+/// **Dado** un workspace **sin** `x.md`, **Cuando** se planifica `[{create x}, {create x}]`,
+/// **Entonces** el plan NO queda aplicable y el diagnóstico lleva `DOCUMENT_ALREADY_EXISTS`
+/// nombrando `x.md`.
+///
+/// Hoy los dos `create` se normalizan contra el mismo `DocumentSet` original, ninguno ve al otro, y
+/// al aplicar gana el segundo: el agente que envió dos cuerpos distintos no recibe ninguna señal de
+/// que uno se descartó.
+#[test]
+fn dos_creates_al_mismo_path_en_el_mismo_plan_es_document_already_exists() {
+    let dir = workspace_a_y_b();
+    let antes = snapshot_md(dir.path());
+
+    let ops = serde_json::json!([
+        { "op": "create", "path": "x.md", "body": "# Primero\n" },
+        { "op": "create", "path": "x.md", "body": "# Segundo\n" },
+    ]);
+    let plan = roundtrip(
+        dir.path(),
+        &[change_plan_line(None, ops, policy_permisiva()).as_str()],
+        1,
+    );
+
+    asevera_colision(&plan[0], "x.md");
+    assert_eq!(
+        snapshot_md(dir.path()),
+        antes,
+        "`change_plan` no escribe: el conocimiento en disco debe quedar idéntico: {plan:?}"
+    );
+}
+
+/// **E28-H04** · Criterio `delete_seguido_de_create_del_mismo_path_aplica`:
+/// **Dado** un workspace con `x.md`, **Cuando** se planifica `[{delete x}, {create x}]`,
+/// **Entonces** el plan es aplicable y `change_apply` deja `x.md` en disco con el cuerpo del
+/// `create`.
+///
+/// Idioma legítimo —recrear un documento borrado dentro del mismo plan— que funcionaba en el commit
+/// padre de H02 (`85af8b9`, verificado ejecutando su binario: dejaba `x.md` = «# X recreado\n») y que
+/// hoy responde `isError:true` con `DOCUMENT_ALREADY_EXISTS`, porque el `create` ve `x.md` todavía
+/// presente en el `DocumentSet` inicial: el `delete` que lo precede en el propio plan no se refleja.
+#[test]
+fn delete_seguido_de_create_del_mismo_path_aplica() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "x.md",
+        "---\ntitle: X\n---\n\n# X\n\ncuerpo original de x\n",
+    );
+
+    let ops = serde_json::json!([
+        { "op": "delete", "ref": { "path": "x.md" }, "inboundLinksPolicy": "remove_links" },
+        { "op": "create", "path": "x.md", "body": "# X recreado\n" },
+    ]);
+    let (plan, apply) = plan_y_apply(dir.path(), ops);
+
+    // (1) El plan vuelve a ser aplicable: liberar y reocupar NO es una colisión.
+    assert!(
+        !plan.to_string().contains(COLISION),
+        "`[delete x, create x]` LIBERA el path antes de reocuparlo: es el idioma legítimo que \
+         funcionaba antes de E28-H02, no una colisión ({COLISION} no debe aparecer): {plan:?}"
+    );
+    let sc = plan_sc(&plan);
+    assert_eq!(
+        sc["canApply"],
+        serde_json::Value::Bool(true),
+        "el plan de recrear un documento borrado en el mismo change set debe ser aplicable: {plan:?}"
+    );
+
+    // (2) Y aplicarlo deja el disco como lo dejaba antes de H02: el cuerpo del SEGUNDO `create`.
+    let apply =
+        apply.unwrap_or_else(|| panic!("el plan aplicable debe traer `changeSetId`: {plan:?}"));
+    let asc = apply_sc(&apply);
+    assert_eq!(
+        asc["applied"],
+        serde_json::Value::Bool(true),
+        "aplicar `[delete x, create x]` debe tener éxito: {apply:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("x.md")).unwrap(),
+        "# X recreado\n",
+        "el disco final debe llevar el cuerpo del `create` que reocupó el path, exactamente como \
+         antes de E28-H02 (sin frontmatter: el `create` no pidió ninguno, `§20.2` invariante 3)"
+    );
+}
+
+/// **E28-H04** · Criterio `move_seguido_de_create_del_path_liberado_aplica`:
+/// **Dado** un workspace con `A.md` y **sin** `B.md`, **Cuando** se planifica
+/// `[{move A→B}, {create A}]`, **Entonces** el plan es aplicable y `change_apply` deja `B.md` con el
+/// contenido movido y `A.md` con el del `create`.
+///
+/// El otro idioma legítimo que H02 regresionó: liberar un path moviéndolo y reutilizarlo en el mismo
+/// plan (el patrón «archivo esto y dejo un stub en su sitio»). En el commit padre de H02 dejaba
+/// `B.md` con el original y `A.md` = «# A stub\n»; hoy responde `DOCUMENT_ALREADY_EXISTS` sobre
+/// `A.md` porque el `DocumentSet` inicial todavía lo tiene ocupado por sí mismo.
+#[test]
+fn move_seguido_de_create_del_path_liberado_aplica() {
+    let dir = tempfile::tempdir().unwrap();
+    let original = "---\ntitle: A\n---\n\n# A\n\ncuerpo de a\n";
+    write(dir.path(), "A.md", original);
+
+    let ops = serde_json::json!([
+        { "op": "move", "from": "A.md", "to": "B.md", "rewriteInboundLinks": true },
+        { "op": "create", "path": "A.md", "body": "# A stub\n" },
+    ]);
+    let (plan, apply) = plan_y_apply(dir.path(), ops);
+
+    // (1) El `move` libera `A.md`, así que el `create` posterior lo reocupa legítimamente.
+    assert!(
+        !plan.to_string().contains(COLISION),
+        "`[move A→B, create A]` libera `A.md` con el propio `move`: reocuparlo después no es una \
+         colisión ({COLISION} no debe aparecer): {plan:?}"
+    );
+    let sc = plan_sc(&plan);
+    assert_eq!(
+        sc["canApply"],
+        serde_json::Value::Bool(true),
+        "el plan de mover un documento y dejar un stub en su path debe ser aplicable: {plan:?}"
+    );
+
+    // (2) Disco final: el original viajó a `B.md` y `A.md` quedó con el stub.
+    let apply =
+        apply.unwrap_or_else(|| panic!("el plan aplicable debe traer `changeSetId`: {plan:?}"));
+    let asc = apply_sc(&apply);
+    assert_eq!(
+        asc["applied"],
+        serde_json::Value::Bool(true),
+        "aplicar `[move A→B, create A]` debe tener éxito: {apply:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("B.md")).unwrap(),
+        original,
+        "el destino del `move` debe llevar el documento ORIGINAL byte a byte, no el stub"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("A.md")).unwrap(),
+        "# A stub\n",
+        "el path liberado debe quedar con el cuerpo del `create` que lo reocupó"
     );
 }

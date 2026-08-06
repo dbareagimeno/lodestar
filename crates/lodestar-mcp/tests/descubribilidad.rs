@@ -1918,8 +1918,9 @@ fn recorte(texto: &str, aguja: &str) -> String {
 
 /// **E26-H11** · La otra dirección del mismo criterio: la **coherencia interna** del contrato.
 ///
-/// `codigos_sin_emisor` es una auditoría con fecha de caducidad («de las 16 filas, estas CUATRO no
-/// se emiten desde ningún camino del producto»). Si una tool declara emitir uno de ellos, una de
+/// `codigos_sin_emisor` es una auditoría con fecha de caducidad («de las 17 filas, estas CUATRO no
+/// se emiten desde ningún camino del producto»; eran 16 hasta que E28-H02 abrió el catálogo con
+/// `DOCUMENT_ALREADY_EXISTS`). Si una tool declara emitir uno de ellos, una de
 /// las dos afirmaciones es falsa y el fichero se contradice a sí mismo — que es literalmente el
 /// defecto U6 que esta historia salda. E25-H02 ya recorrió ese camino en la dirección correcta:
 /// `RECOVERY_FAILED` ganó emisor, entró en los `errores` de `change_apply`/`change_revert` y SALIÓ

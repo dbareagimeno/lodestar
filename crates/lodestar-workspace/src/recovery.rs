@@ -799,6 +799,24 @@ impl Workspace {
     ///   sigue en pie y el siguiente `recover` vuelve a pasar por aquí. Es un reintento seguro porque la
     ///   promoción es **idempotente**: con el pendiente ya retirado no hace nada y el recibo definitivo
     ///   ya está escrito.
+    ///
+    /// # NO es `seal_published_transaction`, aunque se le parezca (registro de E28-H03)
+    ///
+    /// Comparte forma superficial con la coreografía compartida que E28-H01 extrajo para el apply y la
+    /// reversión —promover recibo → limpiar staging → borrar journal— y aun así es deliberadamente
+    /// **otra cosa**, verificada como tal por dos jueces ciegos de la ronda de E28. Las diferencias son
+    /// exactamente las que separan «sellar lo que acabo de publicar» de «cerrar lo que otro proceso
+    /// dejó publicado»:
+    /// - **borra el journal incondicionalmente**, no solo si el recibo quedó a salvo. Aquí el journal
+    ///   declaraba `applied`, así que su único trabajo pendiente era este cierre; en el camino feliz,
+    ///   conservarlo es lo que hace que la recuperación reintente una promoción fallida.
+    /// - **la promoción es idempotente por diseño** (E25-H04), porque esta vía puede ejecutarse más de
+    ///   una vez sobre la misma transacción.
+    /// - **corre fuera de la ventana de publicación normal**, desde el bucle de
+    ///   [`Workspace::recover`] y no desde un camino que acaba de renombrar el canónico.
+    ///
+    /// Fusionarlas obligaría a condicionar el borrado del journal y perdería esas tres propiedades:
+    /// si alguna vez parece código duplicado, esto es lo que hay que releer antes de unificarlo.
     fn finish_recovery_completada(&self, txn_id: &str, journal_path: &Path) {
         let name = recovery_dir_name(txn_id);
         let runtime = self.root.join(".lodestar").join("runtime");
@@ -888,8 +906,9 @@ impl Workspace {
         self.discard_recovery_copies(txn_id)
     }
 
-    /// Comprueba que `txn_id` **no** identifica ya a una transacción con material vigente (E28-H01),
-    /// para que publicar bajo ese id no destruya en silencio el plano de recuperación de otra.
+    /// La señal que delata a `txn_id` como **tomado** por una transacción con material vigente
+    /// (E28-H01), o `None` si está libre. Es el juicio que impide que publicar bajo un id destruya en
+    /// silencio el plano de recuperación de otra transacción.
     ///
     /// El criterio de «vigente» es el mismo con el que el GC del plano de control decide qué está vivo
     /// (`journal/ ∪ receipts/`, ver la documentación de `crate::receipts`), y por la misma razón que
@@ -901,34 +920,92 @@ impl Workspace {
     ///   `recovery/<txnId>/`.
     ///
     /// Un `recovery/<txnId>/` **sin** ninguna de las dos señales NO cuenta como vigente: es un huérfano
-    /// que el GC recoge (E24-H06), y `backup_originals` ya lo reescribe de forma idempotente. Rechazar
-    /// también por él convertiría cualquier resto de una transacción abortada en un bloqueo permanente
-    /// de un id que nadie reclama.
+    /// que el GC recoge (E24-H06), y `backup_originals` ya lo reescribe de forma idempotente. Contarlo
+    /// convertiría cualquier resto de una transacción abortada en un bloqueo permanente de un id que
+    /// nadie reclama.
     ///
-    /// # Errores
-    /// - [`WorkspaceError::WriteConflict`] si el id ya está tomado, nombrando la señal que lo delata.
-    ///   Es un fallo **ruidoso y anterior a la primera escritura**: el canónico no se mueve ni un byte
-    ///   y no queda recuperación pendiente, que es justo lo contrario de degradar a un no-op.
-    fn assert_txn_id_libre(&self, txn_id: &str) -> Result<(), WorkspaceError> {
+    /// Desde E28-H03 su **único** consumidor es `Workspace::resolve_free_txn_id`, que ya no rechaza
+    /// sino que elige otro id: el guard de solo-rechazo que E28-H01 puso en el camino del `revert`
+    /// resultó dejar sin salida una secuencia legítima, así que la decisión entera vive en un punto
+    /// que los dos caminos de publicación comparten. El texto de la señal sobrevive como **motivo**
+    /// del `WriteConflict` que se emite cuando ni siquiera queda una variante libre que probar.
+    fn senal_de_txn_id_tomado(&self, txn_id: &str) -> Option<String> {
         if self.journal_state_of(txn_id).is_some() {
-            return Err(WorkspaceError::WriteConflict(format!(
+            return Some(format!(
                 "la transacción {txn_id} ya tiene un write-ahead journal en curso: publicar bajo ese \
                  identificador sobrescribiría su plano de recuperación y el estado que guarda se \
                  perdería"
-            )));
+            ));
         }
         let recibo = self
             .receipts_dir()
             .join(format!("{}.json", recovery_dir_name(txn_id)));
         if recibo.exists() {
-            return Err(WorkspaceError::WriteConflict(format!(
+            return Some(format!(
                 "la transacción {txn_id} ya tiene un recibo persistido ({}): publicar bajo ese \
                  identificador reescribiría ese recibo y sobrescribiría las copias de recuperación \
                  con las que se deshace",
                 recibo.display()
-            )));
+            ));
         }
-        Ok(())
+        None
+    }
+
+    /// **El punto de decisión de identidad de toda publicación** (E28-H03): dado el `txnId`
+    /// `candidato`, devuelve el primero de su cadena determinista de variantes que **no** identifica
+    /// ya a una transacción con material vigente.
+    ///
+    /// Lo consumen los **dos** caminos que escriben —[`Workspace::apply_transaction_con_recibo`] y
+    /// [`Workspace::revert_transaction_con_recibo`]—, siempre bajo el lock de publicación y **después**
+    /// de la recuperación pendiente, que es lo que hace fiable la lectura del disco: mientras dura el
+    /// lock nadie más puede tomar un id.
+    ///
+    /// # Por qué existe
+    ///
+    /// El `changeSetId` es determinista (`blake3(baseRevision, normalizedOperations)`), así que
+    /// replanificar el mismo cambio sobre la misma base produce el mismo `txnId`. Hasta E28-H03 eso
+    /// dejaba a los dos caminos en el peor sitio posible: el apply **sobrescribía** en silencio
+    /// `recovery/<txnId>/` y `receipts/<txnId>.json` de la transacción anterior —destruyendo las
+    /// únicas copias con las que aquélla se deshacía— y el revert, protegido por
+    /// [`Workspace::assert_txn_id_libre`] desde E28-H01, **fallaba sin salida**: el id derivado ya
+    /// tenía recibo y no había ningún otro que probar, de modo que el re-apply quedaba
+    /// permanentemente no revertible. Resolver la identidad en un solo sitio cierra las dos mitades a
+    /// la vez: nunca se pisa material vigente y nunca se agota la salida.
+    ///
+    /// # Cómo elige, y por qué así
+    ///
+    /// Recorre `candidato`, [`crate::transaction::siguiente_variante_de_txn_id`]`(candidato)`, … hasta que
+    /// [`Workspace::senal_de_txn_id_tomado`] no delate a ninguna señal viva. La cadena comparte
+    /// familia de sufijo con [`crate::revert_transaction_id`] a propósito (`X` → `X-2` → `X-3`;
+    /// `X-revert` → `X-revert-2` → …), así que resolver una colisión recorre exactamente los mismos
+    /// escalones que habría recorrido una cadena de reversiones y ninguno puede tapar al otro.
+    ///
+    /// Es **determinista**: no lleva reloj, ni aleatoriedad, ni contador global. Solo depende del
+    /// candidato y del material que hay en disco, de modo que un reintento tras un crash converge al
+    /// mismo id —la vía RESTAURAR ya retiró journal, pendiente y copias del intento muerto, así que el
+    /// candidato vuelve a estar libre— en vez de sembrar un huérfano nuevo en cada intento.
+    ///
+    /// # Errores
+    /// - [`WorkspaceError::WriteConflict`] si la cadena **no puede avanzar**: la variante siguiente
+    ///   coincide con la actual, que es el punto fijo declarado de `u64::MAX`
+    ///   (ver [`crate::revert_transaction_id`]). Es ruidoso y anterior a la primera escritura, que es
+    ///   justo lo contrario de sobrescribir en silencio.
+    pub(crate) fn resolve_free_txn_id(&self, candidato: &str) -> Result<String, WorkspaceError> {
+        let mut id = candidato.to_string();
+        loop {
+            let Some(motivo) = self.senal_de_txn_id_tomado(&id) else {
+                return Ok(id);
+            };
+            let siguiente = crate::transaction::siguiente_variante_de_txn_id(&id);
+            if siguiente == id {
+                return Err(WorkspaceError::WriteConflict(format!(
+                    "{motivo}. No queda ninguna variante libre del identificador que probar (la \
+                     cadena de variantes agotó su contador): replanifica el cambio sobre el estado \
+                     actual"
+                )));
+            }
+            id = siguiente;
+        }
     }
 
     /// El directorio raíz de las copias de recuperación de una transacción
@@ -975,21 +1052,26 @@ impl Workspace {
     /// edición con la copia respaldada. Es la simetría que le faltaba al camino que deshace: el apply
     /// re-verifica su base bajo el lock desde E13-H02.
     ///
-    /// **`new_txn_id` tiene que estar libre** (E28-H01): si ya identifica a una transacción con
-    /// material vigente —journal presente o recibo persistido, el mismo criterio de «vivo» del GC del
-    /// plano de control— la reversión falla **antes de escribir nada**, en vez de sobrescribir su
-    /// `recovery/`/`receipts/`. Ese material guarda el estado con el que se deshace el propio *undo*, y
-    /// pisarlo lo destruye para siempre. Quien deriva ids con
-    /// [`crate::revert_transaction_id`] nunca ve este error: la derivación es componible por
-    /// construcción y el guard es la red que impide que un llamante futuro reabra el defecto por otra
-    /// vía.
+    /// **`new_txn_id` es un candidato, no un destino** (E28-H01, corregido por E28-H03): si ya
+    /// identifica a una transacción con material vigente —journal presente o recibo persistido, el
+    /// mismo criterio de «vivo» del GC del plano de control— la reversión **no** lo sobrescribe; se
+    /// publica bajo la primera variante libre que devuelve `Workspace::resolve_free_txn_id`. Ese
+    /// material guarda el estado con el que se deshace el propio *undo*, y pisarlo lo destruye para
+    /// siempre; pero rechazar sin alternativa —lo que hacía E28-H01— dejaba sin salida una secuencia
+    /// legítima: tras `apply → revert → re-apply`, el `X-revert` que deriva la fachada ya lo ocupa la
+    /// primera reversión y el re-apply quedaba permanentemente no revertible.
+    ///
+    /// La única igualdad que **sí** se rechaza es `new_txn_id == orig_txn_id`: pedir que la inversa
+    /// publique bajo la identidad de la transacción que deshace no es una colisión de nombres que se
+    /// pueda resolver moviendo el id, es una contradicción del llamante —restauraría desde el mismo
+    /// árbol que estaría reescribiendo— y así se reporta, ruidosamente y sin escribir nada.
     ///
     /// # Errores
     /// - [`WorkspaceError::Io`] si faltan las copias de recuperación de `orig_txn_id` (no se puede
     ///   revertir: transacción no disponible), o ante un fallo de IO de la restauración.
     /// - [`WorkspaceError::WriteConflict`] si el lock ya está tomado (otro publicador), si el
     ///   canónico cambió entre la comprobación de la fachada y la toma del lock (E25-H05) o si
-    ///   `new_txn_id` ya está tomado por una transacción vigente (E28-H01).
+    ///   `new_txn_id` coincide con `orig_txn_id` (E28-H01/E28-H03).
     /// - [`WorkspaceError::PermissionDenied`] si algún path afectado ya no es escribible.
     pub fn revert_transaction(
         &self,
@@ -997,7 +1079,8 @@ impl Workspace {
         new_txn_id: &str,
         observed: &WorkspaceRevision,
     ) -> Result<(WorkspaceRevision, WorkspaceRevision, Vec<RelPath>), WorkspaceError> {
-        self.revert_transaction_con_recibo(orig_txn_id, new_txn_id, observed, None)
+        let p = self.revert_transaction_con_recibo(orig_txn_id, new_txn_id, observed, None)?;
+        Ok((p.previous, p.result, p.changed_paths))
     }
 
     /// [`Workspace::revert_transaction`] que además **registra durablemente el recibo de la inversa
@@ -1021,8 +1104,12 @@ impl Workspace {
     /// journal, la vía COMPLETAR de [`Workspace::recover`] lo promueve sin código nuevo — la
     /// convención que ata journal, copias, registro pendiente y recibo bajo un mismo `txnId` los
     /// localiza a los cuatro. Lo que E28-H01 cambió no es esa convención sino **cómo se deriva** ese
-    /// id: ver [`crate::revert_transaction_id`] y el guard anti-sobrescritura de
-    /// [`Workspace::revert_transaction`].
+    /// id: ver [`crate::revert_transaction_id`]; y lo que E28-H03 cambió es que ese id derivado es un
+    /// **candidato**, resuelto contra el material vigente por `Workspace::resolve_free_txn_id`.
+    ///
+    /// Devuelve una [`crate::PublishedTransaction`] con el `txnId` **efectivo** por delante: quien
+    /// compone el recibo de la inversa (la fachada) ya no puede recalcularlo, porque la identidad se
+    /// decide aquí dentro, bajo el lock.
     ///
     /// # Errores
     /// Los mismos que [`Workspace::revert_transaction`], más un [`WorkspaceError::Io`] si el registro
@@ -1036,7 +1123,7 @@ impl Workspace {
         new_txn_id: &str,
         observed: &WorkspaceRevision,
         recibo: Option<(&ChangeSetId, &SemanticDiff)>,
-    ) -> Result<(WorkspaceRevision, WorkspaceRevision, Vec<RelPath>), WorkspaceError> {
+    ) -> Result<crate::PublishedTransaction, WorkspaceError> {
         // (1) Lock exclusivo de publicación (RAII: liberado al final por `Drop`, incluso en panic).
         let _lock = self.acquire_lock()?;
 
@@ -1066,24 +1153,35 @@ impl Workspace {
         //      porque ocurre con el journal ya en disco—. El canónico no se ha movido ni un byte.
         self.reverify_base_revision(observed)?;
 
-        // (2c) Guard anti-sobrescritura (E28-H01): el `txnId` de la inversa no puede ser el de una
-        //      transacción con material VIGENTE. Publicar bajo un id ya usado no es una colisión de
-        //      nombres cualquiera: `backup_originals` empieza por `remove_dir_all` del árbol previo y
+        // (2c) IDENTIDAD EFECTIVA DE LA INVERSA (E28-H01, corregido por E28-H03), antes de la primera
+        //      escritura y después de la recuperación del paso (2).
+        //
+        //      Publicar bajo un id ya usado no es una colisión de nombres cualquiera:
+        //      `backup_originals` empieza por `remove_dir_all` del árbol previo y
         //      `write_pending_receipt`/`promote_pending_receipt` reescriben su recibo, así que el
         //      estado que ese material guardaba —el *redo* de la cadena de reversiones— desaparece
-        //      para siempre. Eso es exactamente el defecto M-01 del testbench: la fachada derivaba el
-        //      id del `changeSetId` heredado y la inversa colisionaba consigo misma, degradando a un
-        //      no-op silencioso que destruía el redo.
+        //      para siempre (defecto M-01 del testbench). E28-H01 lo cerró rechazando; E28-H03
+        //      descubrió que rechazar **sin alternativa** deja sin salida una secuencia legítima
+        //      (`apply → revert → re-apply → revert`, donde el `X-revert` derivado ya lo ocupa la
+        //      primera reversión), así que la decisión pasa por el punto único de identidad: se
+        //      publica bajo la primera variante LIBRE, con el mismo criterio de «vivo» del GC del
+        //      plano de control (`journal/ ∪ receipts/`).
         //
-        //      Va **antes de la primera escritura** y **después** de la recuperación del paso (2): un
-        //      reintento tras un crash vuelve a derivar el mismo id, pero para entonces la vía
-        //      RESTAURAR ya limpió journal, pendiente y copias de aquel intento, así que el id vuelve
-        //      a estar libre y el reintento procede. Lo que este guard rechaza es solo el material que
-        //      sigue vivo: journal presente (transacción en curso o pendiente de recuperar) o recibo
-        //      persistido (transacción revertible) — el mismo criterio de «vivo» que usa el GC del
-        //      plano de control (`journal/ ∪ receipts/`, ver `crate::receipts`), no un tercer juicio
-        //      escrito a mano.
-        self.assert_txn_id_libre(new_txn_id)?;
+        //      Lo único que sigue siendo un `Err` es `new == orig`: eso no es una colisión que se
+        //      resuelva moviendo el id, sino un llamante que pide restaurar desde el mismo árbol que
+        //      estaría reescribiendo. Se rechaza aquí, ruidosamente y sin haber tocado nada.
+        //
+        //      Determinismo post-crash: un reintento vuelve a derivar el mismo candidato, y para
+        //      entonces la vía RESTAURAR ya limpió journal, pendiente y copias de aquel intento, así
+        //      que el candidato vuelve a estar libre y la resolución converge al mismo id.
+        if new_txn_id == orig_txn_id {
+            return Err(WorkspaceError::WriteConflict(format!(
+                "la reversión de la transacción {orig_txn_id} no puede publicarse bajo esa misma \
+                 identidad: restauraría desde el árbol de recuperación que estaría reescribiendo, y \
+                 el estado que guarda se perdería"
+            )));
+        }
+        let new_txn_id = &self.resolve_free_txn_id(new_txn_id)?;
 
         // (3) Localizar el árbol de recuperación de la transacción a revertir. Si no está, la
         //     transacción ya no es reversible (copias purgadas por el GC, E13-H07).
@@ -1181,9 +1279,16 @@ impl Workspace {
         //         apply llama a la misma función, así que las dos no pueden volver a divergir.
         self.seal_published_transaction(new_txn_id, &journal_path, None, "reversión");
 
-        // (11) Revisión resultante (== `previousRevision` del apply original) + paths restaurados.
+        // (11) Revisión resultante (== `previousRevision` del apply original) + paths restaurados, con
+        //      el `txnId` EFECTIVO por delante (E28-H03): es el `receiptId` de la inversa y la fachada
+        //      ya no puede derivarlo.
         let result = self.workspace_revision()?;
-        Ok((previous, result, affected))
+        Ok(crate::PublishedTransaction {
+            txn_id: new_txn_id.clone(),
+            previous,
+            result,
+            changed_paths: affected,
+        })
     }
 }
 

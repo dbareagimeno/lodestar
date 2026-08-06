@@ -22,6 +22,12 @@
 //!    `index`/`tags` que lo aumente — ningún fichero tiene semántica de catálogo.
 //! 5. `assert_writable(path)` para **cada** afectado — si alguno cae fuera de `writableRoots` (o bajo
 //!    `referenceRoots`), `Err(PermissionDenied)` ANTES de tocar el canónico (E11-H04).
+//!    Y con ellos, la **identidad efectiva** de la transacción (E28-H03): el `txnId` derivado del
+//!    `changeSetId` es un CANDIDATO, y `Workspace::resolve_free_txn_id` devuelve la primera variante
+//!    que no identifica ya a una transacción con material vigente (`journal/ ∪ receipts/`). Se
+//!    resuelve aquí porque es antes de la primera escritura de los cuatro árboles que ese id nombra
+//!    y después de la recuperación del paso (2), y porque el lock del paso (1) garantiza que nadie
+//!    más pueda tomarlo entretanto.
 //! 6. `materialize_staging` + `validate_staging` — resultado hipotético validado sin tocar el
 //!    canónico (E13-H01); el gate diferencial de E20-H04 (`rejectNewErrors`/`allowExistingErrors`)
 //!    rechaza solo si el resultado **introduce** errores que el canónico no tenía.
@@ -59,12 +65,19 @@ use lodestar_core::types::{
 use crate::failpoints::FailPoint;
 use crate::{Workspace, WorkspaceError};
 
-/// Deriva el identificador de transacción de un [`ChangeSetId`]: el hash **desnudo** (sin el prefijo
-/// `changeset:`). Ese mismo id nombra —tras el saneado común de `:`/`/`/`\`— el write-ahead journal
-/// (`<id>.json`), el staging (`staging/<id>/`), las copias de recuperación (`recovery/<id>/`) y el
-/// receipt (`receipts/<id>.json`), de modo que la recuperación (E13-H06) y el GC de recibos
-/// (E13-H07) localizan las cuatro cosas por el mismo id. Como el hash es hexadecimal (sin caracteres
-/// hostiles), el id derivado coincide ya con su forma saneada.
+/// Deriva el identificador de transacción **candidato** de un [`ChangeSetId`]: el hash **desnudo**
+/// (sin el prefijo `changeset:`). Ese mismo id nombra —tras el saneado común de `:`/`/`/`\`— el
+/// write-ahead journal (`<id>.json`), el staging (`staging/<id>/`), las copias de recuperación
+/// (`recovery/<id>/`) y el receipt (`receipts/<id>.json`), de modo que la recuperación (E13-H06) y el
+/// GC de recibos (E13-H07) localizan las cuatro cosas por el mismo id. Como el hash es hexadecimal
+/// (sin caracteres hostiles), el id derivado coincide ya con su forma saneada.
+///
+/// **Candidato, no destino** (E28-H03): el `changeSetId` es determinista, así que replanificar el
+/// mismo cambio sobre la misma base lo repite y con él este id. La identidad EFECTIVA de una
+/// publicación la resuelve `Workspace::resolve_free_txn_id` bajo el lock —la primera variante que no
+/// identifique ya a una transacción con material vigente— y viaja de vuelta en
+/// [`PublishedTransaction::txn_id`]. Recalcular el `receiptId` con esta función desde fuera puede,
+/// por tanto, nombrar a otra transacción.
 pub fn transaction_id(change_set_id: &ChangeSetId) -> String {
     change_set_id
         .0
@@ -76,8 +89,61 @@ pub fn transaction_id(change_set_id: &ChangeSetId) -> String {
 /// Sufijo con el que una transacción **inversa** nombra su material (E13-H09).
 const REVERT_SUFFIX: &str = "-revert";
 
+/// Interpreta `cola` como el contador **canónico** de un sufijo numerado: decimal, sin signo y sin
+/// ceros a la izquierda — exactamente la forma que emiten [`revert_transaction_id`] y
+/// [`siguiente_variante_de_txn_id`], y ninguna otra.
+///
+/// El endurecimiento es deliberado (E28-H03): `parse::<u64>()` acepta `+2` y `01`, así que sin este
+/// filtro `X-revert-+2` y `X-revert-01` incrementarían a `X-revert-3` y `X-revert-2` — ids que otra
+/// transacción de la cadena **ya puede estar usando**. Un sufijo que esta familia de funciones no
+/// emitió no describe un escalón: el id entero es opaco y se le apila un sufijo nuevo, que es lo
+/// único que no puede chocar con un escalón previo.
+fn contador_canonico(cola: &str) -> Option<u64> {
+    if cola.is_empty() || (cola.len() > 1 && cola.starts_with('0')) {
+        return None;
+    }
+    if !cola.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    cola.parse::<u64>().ok()
+}
+
+/// Deriva la **siguiente variante** determinista del `txnId` `txn_id`, para cuando el candidato ya
+/// identifica a una transacción con material vigente (E28-H03).
+///
+/// Es la mitad *sintáctica* del punto de decisión de identidad de
+/// `Workspace::resolve_free_txn_id`: no mira el disco, solo apila el mismo contador numerado que
+/// usa [`revert_transaction_id`] para la cadena de reversiones.
+///
+/// | `txn_id` | siguiente variante |
+/// |---|---|
+/// | `abc123` | `abc123-2` |
+/// | `abc123-2` | `abc123-3` |
+/// | `abc123-revert` | `abc123-revert-2` |
+/// | `abc123-revert-2` | `abc123-revert-3` |
+///
+/// Que la variante de `abc123-revert` sea exactamente `revert_transaction_id("abc123-revert")` no es
+/// casualidad: las dos derivaciones comparten familia de sufijo a propósito, de modo que resolver la
+/// identidad de una reversión colisionada recorre la MISMA cadena que habría recorrido una reversión
+/// encadenada, y ningún escalón puede quedar tapado por el otro.
+///
+/// Solo el contador **canónico** (decimal, sin signo, sin ceros a la izquierda) incrementa; ver
+/// `contador_canonico`. En el borde `u64::MAX` es un **punto fijo declarado**, igual que
+/// [`revert_transaction_id`]: la resolución de identidad libre lo detecta —la variante no avanza— y
+/// devuelve el `WriteConflict` que corresponde, en vez de sobrescribir.
+pub(crate) fn siguiente_variante_de_txn_id(txn_id: &str) -> String {
+    if let Some((cabeza, cola)) = txn_id.rsplit_once('-') {
+        if let Some(n) = contador_canonico(cola) {
+            if !cabeza.is_empty() {
+                return format!("{cabeza}-{}", n.saturating_add(1));
+            }
+        }
+    }
+    format!("{txn_id}-2")
+}
+
 /// Deriva el `txnId` de la transacción que **deshace** a `txn_id`, con identidad propia y componible
-/// sin límite (E28-H01).
+/// escalón a escalón (E28-H01).
 ///
 /// El id de una reversión se deriva del `txnId` de la transacción **que efectivamente deshace** — que
 /// es el `receiptId` de su recibo, porque `change_apply`/`change_revert` nombran cada recibo con el
@@ -100,17 +166,36 @@ const REVERT_SUFFIX: &str = "-revert";
 /// `journal/` y `receipts/` siguen atados por un mismo `txnId` (la convención de `crate::receipts`) sin
 /// que dos transacciones lo compartan jamás.
 ///
+/// # Solo el formato canónico continúa una cadena (E28-H03)
+///
+/// El contador se incrementa **únicamente** si el sufijo está en la forma que esta función emite:
+/// decimal, sin signo y sin ceros a la izquierda (ver `contador_canonico`). Un `X-revert-+2` o un
+/// `X-revert-01` no nacieron aquí, así que no describen el escalón 2 de nada: se tratan como un
+/// `txnId` **opaco** y reciben el sufijo del primer escalón (`X-revert-01-revert`). Adivinar el
+/// número produciría un id que un escalón real de la cadena ya podría estar usando, que es
+/// exactamente lo que esta derivación existe para evitar.
+///
+/// # El borde `u64::MAX` es un punto fijo DECLARADO (E28-H03)
+///
+/// La composición no es ilimitada: en `<base>-revert-{u64::MAX}` el `saturating_add` devuelve el
+/// **mismo** id. Se acepta a propósito, en vez de hacer falible una función pura que se llama en los
+/// dos caminos de publicación, porque alcanzarlo exige 2^64 reversiones encadenadas y cada una tiene
+/// que haber publicado su transacción en disco. Lo que impide que ese punto fijo destruya nada no es
+/// esta función sino `Workspace::resolve_free_txn_id` (E28-H03): publicar bajo un id ya tomado
+/// busca la primera variante libre y, si tampoco puede avanzar, falla ruidosamente **antes** de la
+/// primera escritura.
+///
 /// La derivación es **determinista** —no lleva reloj ni contador global—, que es lo que hace que un
 /// reintento tras un crash vuelva a producir el mismo id y reutilice el material que la recuperación
 /// ya limpió, en vez de sembrar un huérfano nuevo en cada intento. Y como solo añade `-` y dígitos, no
 /// introduce caracteres que el saneado de nombres (`crate::receipts::sanear_nombre`) tenga que
 /// neutralizar: el id derivado ya coincide con su forma saneada si lo estaba el de partida.
 pub fn revert_transaction_id(txn_id: &str) -> String {
-    // `<base>-revert-<n>` → `<base>-revert-<n+1>`, con `n` numérico (el único formato que produce
-    // esta función; cualquier otra cosa cae al caso general de abajo).
+    // `<base>-revert-<n>` → `<base>-revert-<n+1>`, con `n` en la forma CANÓNICA que produce esta
+    // función; cualquier otra cosa cae al caso general de abajo.
     if let Some((cabeza, cola)) = txn_id.rsplit_once('-') {
         if cabeza.ends_with(REVERT_SUFFIX) {
-            if let Ok(n) = cola.parse::<u64>() {
+            if let Some(n) = contador_canonico(cola) {
                 return format!("{cabeza}-{}", n.saturating_add(1));
             }
         }
@@ -121,6 +206,28 @@ pub fn revert_transaction_id(txn_id: &str) -> String {
     }
     // Primer escalón: la convención histórica de E13-H09, intacta.
     format!("{txn_id}{REVERT_SUFFIX}")
+}
+
+/// Lo que una transacción de publicación deja tras de sí, para quien necesita algo más que las
+/// revisiones: el `txnId` **efectivo** bajo el que publicó (E28-H03) y el lote que sustituyó.
+///
+/// El `txnId` viaja en el retorno porque desde E28-H03 **no se puede derivar desde fuera**: la
+/// identidad se resuelve bajo el lock contra el material vigente en disco
+/// (`Workspace::resolve_free_txn_id`), así que un llamante que la recalculara con
+/// [`transaction_id`]/[`revert_transaction_id`] obtendría el candidato, no el id efectivo — y con él
+/// nombraría un recibo que no existe. La fachada (`App::change_apply`/`App::change_revert`) lo usa
+/// como `receiptId`, que es el mismo id por convención (`crate::receipts`).
+#[derive(Debug, Clone)]
+pub struct PublishedTransaction {
+    /// El `txnId` efectivo: nombra `staging/`, `recovery/`, `journal/` y `receipts/` de ESTA
+    /// transacción, y es el `receiptId` de su recibo.
+    pub txn_id: String,
+    /// La [`WorkspaceRevision`] anterior a la transacción (`previousRevision` del recibo).
+    pub previous: WorkspaceRevision,
+    /// La [`WorkspaceRevision`] resultante (`resultRevision` del recibo).
+    pub result: WorkspaceRevision,
+    /// Los paths que la transacción sustituyó (creados/modificados/borrados), en orden determinista.
+    pub changed_paths: Vec<RelPath>,
 }
 
 /// Conjunto de paths **afectados** por llevar `canonical` al estado `result`, en orden determinista
@@ -251,7 +358,8 @@ impl Workspace {
         &self,
         change_set: &ChangeSet,
     ) -> Result<(WorkspaceRevision, WorkspaceRevision, Vec<RelPath>), WorkspaceError> {
-        self.apply_transaction_con_recibo(change_set, None)
+        let p = self.apply_transaction_con_recibo(change_set, None)?;
+        Ok((p.previous, p.result, p.changed_paths))
     }
 
     /// [`Workspace::apply_transaction`] que además **registra durablemente el recibo antes del punto de
@@ -271,6 +379,24 @@ impl Workspace {
     /// recibo es irreversible **para siempre** (`change_revert` → `PLAN_EXPIRED`, y un segundo apply del
     /// mismo plan → `PLAN_STALE` porque la base ya cambió).
     ///
+    /// Devuelve una [`PublishedTransaction`], que además de las revisiones y el lote lleva el `txnId`
+    /// **efectivo** — el que la resolución de identidad de E28-H03 eligió bajo el lock, y que la
+    /// fachada usa como `receiptId`.
+    ///
+    /// # La identidad se resuelve aquí, no se deriva fuera (E28-H03)
+    ///
+    /// El `txnId` **candidato** es el de siempre, `transaction_id(&change_set.id)`. Pero el
+    /// `changeSetId` es determinista (`blake3(baseRevision, normalizedOperations)`), así que
+    /// replanificar el mismo cambio sobre la misma base vuelve a producirlo: hasta E28-H03 el segundo
+    /// apply llamaba a `backup_originals`/`create_journal`/`write_pending_receipt` bajo ese mismo id y
+    /// **sobrescribía en silencio** el `recovery/` y el recibo de la primera transacción, o sea las
+    /// únicas copias con las que aquélla se deshacía (respondiendo `applied: true`). Ahora el
+    /// candidato pasa por `Workspace::resolve_free_txn_id` —bajo el lock y después de la
+    /// recuperación pendiente, con el mismo criterio de «vivo» del GC (`journal/ ∪ receipts/`)— y la
+    /// publicación ocurre bajo la primera variante libre. La convención que ata `staging/`,
+    /// `recovery/`, `journal/` y `receipts/` bajo un mismo id no cambia: cambia **qué** id, y cambia
+    /// antes de la primera escritura de cualquiera de los cuatro.
+    ///
     /// # Errores
     /// Los mismos que [`Workspace::apply_transaction`], más un [`WorkspaceError::Io`] si el registro del
     /// recibo no se puede escribir — que ocurre **antes** del primer rename, así que no publica nada.
@@ -281,7 +407,7 @@ impl Workspace {
         &self,
         change_set: &ChangeSet,
         semantic_diff: Option<&SemanticDiff>,
-    ) -> Result<(WorkspaceRevision, WorkspaceRevision, Vec<RelPath>), WorkspaceError> {
+    ) -> Result<PublishedTransaction, WorkspaceError> {
         // (1) Lock exclusivo de publicación (RAII: liberado al final por `Drop`, incluso en panic).
         let _lock = self.acquire_lock()?;
 
@@ -313,20 +439,33 @@ impl Workspace {
             self.assert_writable(path)?;
         }
 
+        // (5b) IDENTIDAD EFECTIVA DE LA TRANSACCIÓN (E28-H03), antes de la primera escritura de
+        //      cualquiera de los cuatro árboles que nombra. El candidato es el de siempre —el `txnId`
+        //      derivado del `changeSetId`—, pero ese id es determinista y por tanto se repite cuando
+        //      se replanifica el mismo cambio sobre la misma base; publicar bajo él borraría
+        //      (`backup_originals` empieza por `remove_dir_all`) el plano de recuperación de la
+        //      transacción que ya lo ocupa. `resolve_free_txn_id` devuelve la primera variante libre
+        //      con el mismo criterio de «vivo» del GC del plano de control, y lo hace aquí porque es
+        //      donde vale: bajo el lock (nadie más puede tomar un id mientras dura) y después de la
+        //      recuperación del paso (2) (así un reintento post-crash reencuentra su candidato libre y
+        //      converge al mismo id, en vez de sembrar un huérfano por intento).
+        let txn_id = self.resolve_free_txn_id(&transaction_id(&change_set.id))?;
+
         // (6) Staging: materializa y valida el resultado hipotético sin tocar el canónico (E13-H01),
-        //     de modo que el lote publicado coincida exactamente con lo materializado y validado.
+        //     de modo que el lote publicado coincida exactamente con lo materializado y validado. Va
+        //     bajo el `txnId` EFECTIVO, no bajo el candidato: la convención de `crate::receipts` ata
+        //     los cuatro árboles por un mismo id, y el sellado y la recuperación limpian
+        //     `staging/<txnId>/` por ese nombre.
         // E24-H05: `StagingDir` es RAII. Si cualquiera de los pasos (7)–(10) sale por `?`, su
         // `Drop` limpia el árbol — antes se quedaba en disco para siempre, porque el
         // `remove_dir_all` del paso (11) quedaba por debajo del `?`.
-        let mut staging = self.materialize_staging_result(&change_set.id, &result_files)?;
+        let mut staging = self.materialize_staging_en(&txn_id, &result_files)?;
         let staging_path = staging.path().to_path_buf();
         self.validate_staging(&staging)?;
 
         // (7) Control optimista bajo el lock: la base del plan sigue siendo la revisión actual.
         self.reverify_base_revision(&change_set.base_revision)?;
 
-        // Id de transacción: nombra journal, staging, recuperación y receipt (misma convención).
-        let txn_id = transaction_id(&change_set.id);
         let writable = &self.config().workspace.writable_roots;
         let result_rev = lodestar_core::types::workspace_revision(&result_files, writable);
 
@@ -431,7 +570,13 @@ impl Workspace {
         //           [`Workspace::seal_published_transaction`]. La reversión llama a la misma función.
         self.seal_published_transaction(&txn_id, &journal_path, Some(&staging_path), "transacción");
 
-        // (12) Revisión resultante + conjunto de paths cambiados.
-        Ok((previous, result, affected))
+        // (12) Revisión resultante + conjunto de paths cambiados, con el `txnId` efectivo por delante
+        //      (E28-H03): quien compone el recibo lo necesita y ya no puede recalcularlo.
+        Ok(PublishedTransaction {
+            txn_id,
+            previous,
+            result,
+            changed_paths: affected,
+        })
     }
 }
