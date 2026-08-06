@@ -1437,18 +1437,38 @@ fn revertir_tres_veces_compone_sin_perder_estado() {
 // ===========================================================================
 
 /// **Testigo de identidad de fichero** de todo lo que cuelga de `ruta` (un fichero suelto o un
-/// árbol): `ruta relativa POSIX → (device, inode)`, en orden determinista.
+/// árbol): `ruta relativa POSIX → identidad de fichero`, en orden determinista.
 ///
 /// Por qué hace falta además de la comparación por bytes: cuando dos transacciones comparten `txnId`,
 /// el material que la segunda escribe encima de la primera puede ser **byte a byte idéntico** (mismo
 /// estado respaldado, mismas revisiones en el recibo), así que «intactos byte a byte» pasaría sin
-/// que nada esté intacto. El inodo distingue las dos cosas: `io::write_atomic` publica por
+/// que nada esté intacto. La identidad distingue las dos cosas: `io::write_atomic` publica por
 /// `temp+rename` y `backup_originals` empieza por `remove_dir_all`, de modo que una reescritura
-/// estrena inodo aunque el contenido no cambie.
-fn testigo(ruta: &Path) -> BTreeMap<String, (u64, u64)> {
-    use std::os::unix::fs::MetadataExt;
-    fn recorre(d: &Path, base: &Path, out: &mut BTreeMap<String, (u64, u64)>) {
+/// estrena identidad aunque el contenido no cambie.
+///
+/// Multiplataforma con garantías distintas por SO:
+/// - **Unix**: `(dev, ino)`. El inodo es estable frente a cualquier operación que no sea
+///   crear/borrar el fichero, así que distingue con precisión «no lo tocó» de «lo reescribió».
+/// - **Windows**: no hay noción de inodo portable, así que se usa
+///   `(creation_time, last_write_time, file_size)`. Un `rename` atómico crea un fichero nuevo con
+///   `creation_time` distinto del original, que es justo el mecanismo que el motor usa para
+///   publicar (`temp+rename`), así que la garantía observable —distinguir «intacto» de
+///   «reescrito»— se conserva aunque el campo no sea el mismo concepto de bajo nivel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct IdentidadFichero(u64, u64, u64);
+
+fn testigo(ruta: &Path) -> BTreeMap<String, IdentidadFichero> {
+    #[cfg(unix)]
+    fn identidad(m: &std::fs::Metadata) -> IdentidadFichero {
         use std::os::unix::fs::MetadataExt;
+        IdentidadFichero(m.dev(), m.ino(), 0)
+    }
+    #[cfg(windows)]
+    fn identidad(m: &std::fs::Metadata) -> IdentidadFichero {
+        use std::os::windows::fs::MetadataExt;
+        IdentidadFichero(m.creation_time(), m.last_write_time(), m.file_size())
+    }
+    fn recorre(d: &Path, base: &Path, out: &mut BTreeMap<String, IdentidadFichero>) {
         let Ok(entradas) = std::fs::read_dir(d) else {
             return;
         };
@@ -1464,7 +1484,7 @@ fn testigo(ruta: &Path) -> BTreeMap<String, (u64, u64)> {
                 .to_string_lossy()
                 .replace('\\', "/");
             if let Ok(m) = std::fs::metadata(&ruta) {
-                out.insert(rel, (m.dev(), m.ino()));
+                out.insert(rel, identidad(&m));
             }
         }
     }
@@ -1472,7 +1492,7 @@ fn testigo(ruta: &Path) -> BTreeMap<String, (u64, u64)> {
     if ruta.is_dir() {
         recorre(ruta, ruta, &mut out);
     } else if let Ok(m) = std::fs::metadata(ruta) {
-        out.insert(String::new(), (m.dev(), m.ino()));
+        out.insert(String::new(), identidad(&m));
     }
     assert!(
         !out.is_empty(),
