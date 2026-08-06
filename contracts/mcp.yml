@@ -484,6 +484,11 @@
 #        edición externa en la ventana de publicación (antes la pisaban), y un cambio publicado
 #        SIEMPRE deja recibo: un apply que publicó responde éxito aunque falle su cierre.
 
+# E29-H02 (2026-08-06, `decisiones §19(b)`): `policy` de `change_plan` acepta un objeto PARCIAL —una
+# sola clave, o incluso `{}`— y completa cada campo omitido con su default declarado, en vez de
+# fallar con `INVALID_SCHEMA: missing field …`. Redacción, sin cambio de forma: los dos campos ya se
+# declaraban opcionales.
+
 meta:
   fachada: lodestar-mcp (JSON-RPC por stdio; stdout puro, logs a stderr)
   fuente_registro: crates/lodestar-mcp/src/tools.rs        # tools::list()

@@ -1532,11 +1532,14 @@ fn plan_policy_parcial_solo_require_valid_result_toma_default_de_allow_warnings(
         !policy.require_valid_result,
         "el campo ENVIADO se respeta tal cual: {policy:?}"
     );
-    assert_eq!(
+    // LITERAL `true`, no `PlanPolicy::default().allow_warnings`: comparar contra el `Default` es
+    // autorreferencial (mutar el `Default` a `false` haría pasar este test igual). El literal es
+    // el valor que `inputSchema`/`contracts/mcp.yml` publican para `allowWarnings` (`tools.rs`
+    // L193: `"default": true`).
+    assert!(
         policy.allow_warnings,
-        PlanPolicy::default().allow_warnings,
-        "el campo OMITIDO (`allowWarnings`) debe tomar el valor de `PlanPolicy::default()`, \
-         no un error de deserialización: {policy:?}"
+        "el campo OMITIDO (`allowWarnings`) debe tomar `true` — el default que `inputSchema`/ \
+         `contracts/mcp.yml` publican —, no un error de deserialización: {policy:?}"
     );
 }
 
@@ -1557,11 +1560,13 @@ fn plan_policy_parcial_solo_allow_warnings_toma_default_de_require_valid_result(
         !policy.allow_warnings,
         "el campo ENVIADO se respeta tal cual: {policy:?}"
     );
-    assert_eq!(
+    // LITERAL `true`, no `PlanPolicy::default().require_valid_result` (misma razón que en el test
+    // simétrico de arriba): el literal es el valor que `inputSchema`/`contracts/mcp.yml` publican
+    // para `requireValidResult` (`tools.rs` L192: `"default": true`).
+    assert!(
         policy.require_valid_result,
-        PlanPolicy::default().require_valid_result,
-        "el campo OMITIDO (`requireValidResult`) debe tomar el valor de `PlanPolicy::default()`, \
-         no un error de deserialización: {policy:?}"
+        "el campo OMITIDO (`requireValidResult`) debe tomar `true` — el default que \
+         `inputSchema`/`contracts/mcp.yml` publican —, no un error de deserialización: {policy:?}"
     );
 }
 
@@ -1578,10 +1583,18 @@ fn plan_policy_vacia_deserializa_al_default_completo() {
         panic!("`policy: {{}}` debe deserializar al default: {e}; entrada = {v}")
     });
 
+    // LITERALES `true`/`true`, no `PlanPolicy::default()` (misma razón que en los dos tests
+    // anteriores: comparar contra el `Default` es autorreferencial). Son los valores que
+    // `inputSchema`/`contracts/mcp.yml` publican para los dos campos (`tools.rs` L192-193).
     assert_eq!(
         policy,
-        PlanPolicy::default(),
-        "un objeto vacío debe deserializar EXACTAMENTE al `PlanPolicy::default()`: {policy:?}"
+        PlanPolicy {
+            require_valid_result: true,
+            allow_warnings: true,
+        },
+        "un objeto vacío debe deserializar EXACTAMENTE a `{{ requireValidResult: true, \
+         allowWarnings: true }}` — los valores que `inputSchema`/`contracts/mcp.yml` publican —, \
+         no a lo que sea que valga `PlanPolicy::default()` hoy: {policy:?}"
     );
 }
 

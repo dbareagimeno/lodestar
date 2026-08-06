@@ -9436,6 +9436,67 @@ fn policy_con_clave_desconocida_no_cambia_de_comportamiento() {
     );
 }
 
+/// PIN del default `requireValidResult: true` (`PlanPolicy::default()`, `plan.rs:288`), que el
+/// mutation testing del juez ciego encontró SIN cubrir: mutar esa línea a `false` deja el
+/// workspace entero en verde porque ningún test existente ejercita la rama `requireValidResult`
+/// del campo OMITIDO con un resultado NO conforme. Este test nace VERDE (no es la fase roja de
+/// E29-H02: el defecto que arregla la historia es que la deserialización parcial no fallara con
+/// `INVALID_SCHEMA`, no el valor del default) — su función es de PIN, para que una regresión
+/// futura del `Default` (p. ej. a `false`) rompa la suite.
+///
+/// **Dado** un workspace cuyo resultado simulado tiene al menos un error de validación, **Cuando**
+/// se llama a `change_plan` con `policy: {"allowWarnings": false}` (`requireValidResult` OMITIDO),
+/// **Entonces** `canApply` es `false` **porque** la rama `requireValidResult` (default `true`) lo
+/// bloquea — no la rama `allowWarnings`, que en este fixture no dice nada sobre errores. Se
+/// asevera la PRECONDICIÓN del fixture (`errors >= 1`) para que el test no pueda salvarse por otra
+/// rama: si el fixture no tuviera errores, un `requireValidResult` mutado a `false` seguiría dando
+/// `canApply` indeterminado por la rama de warnings, y el pin no pincharía nada.
+#[test]
+fn policy_parcial_sin_require_valid_result_bloquea_por_el_default_true_con_resultado_no_conforme() {
+    let dir = workspace_cinco_relacionados();
+    // `d.md` enlaza a un `.md` inexistente → `LINK-TARGET-MISSING`/Err (mismo patrón que
+    // `plan_no_conforme_rechaza` de `crates/lodestar-core/tests/core.rs`): el resultado hipotético
+    // queda NO conforme, sin depender de ningún warning.
+    let ops = serde_json::json!([
+        { "op": "replace_body", "ref": { "path": "d.md" },
+          "body": "# D\n\n[roto](no-existe.md)\n" },
+    ]);
+    // Solo `allowWarnings`: `requireValidResult` queda OMITIDO — debe tomar el default `true`.
+    let line = change_plan_line(None, ops, serde_json::json!({ "allowWarnings": false }));
+    let resp = roundtrip(dir.path(), &[line.as_str()], 1);
+
+    assert!(
+        resp[0]["result"]["isError"].as_bool() != Some(true),
+        "una `policy` PARCIAL (solo `allowWarnings`) no debe dar isError/INVALID_SCHEMA: {resp:?}"
+    );
+    let sc = plan_sc(&resp[0]);
+
+    // Precondición del fixture: el resultado hipotético tiene >=1 error. Sin esto, un
+    // `requireValidResult` mutado a `false` no se distinguiría de la rama `allowWarnings`, y el
+    // pin no ejercitaría lo que dice ejercitar.
+    let errors = sc["diagnosticsAfter"]["errors"]
+        .as_u64()
+        .unwrap_or_else(|| {
+            panic!("change_plan debe devolver diagnosticsAfter.errors (u64): {sc:?}")
+        });
+    assert!(
+        errors >= 1,
+        "precondición del fixture: el resultado hipotético debe tener >=1 error para que el pin \
+         ejercite la rama `requireValidResult`, no la de `allowWarnings`; diagnosticsAfter = {:?}",
+        sc["diagnosticsAfter"]
+    );
+
+    // `requireValidResult` OMITIDO ⇒ debe tomar el default `true` ⇒ un resultado no conforme
+    // bloquea `canApply`, aunque `allowWarnings:false` no tenga ningún warning que morder.
+    assert_eq!(
+        sc["canApply"],
+        serde_json::Value::Bool(false),
+        "con `requireValidResult` OMITIDO (debe tomar el default `true`) y un resultado NO \
+         conforme, `canApply` debe ser `false`; si el default fuera `false`, este resultado no \
+         conforme no bloquearía nada y `canApply` saldría `true`: {sc:?}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // E29-H01 — Config estricta: el servidor MCP tampoco arranca con una config que no entiende
 // (`requirements/epica-29-honestidad-superficie.md`, `decisiones §16(e)` + `§23/A-08`).
