@@ -266,8 +266,15 @@ pub fn validate_result(doc_set: &DocumentSet) -> ValidationReport {
 
 /// Política de aplicación de un plan — E12-H04. Wire camelCase
 /// (`requireValidResult`/`allowWarnings`) por coherencia con el resto del contrato de plan.
+///
+/// `#[serde(default)]` a nivel de struct (E29-H02, `decisiones §19(b)`): un objeto `policy`
+/// PARCIAL —con solo uno de los dos campos, o incluso `{}`— deserializa completando cada campo
+/// omitido con el valor de [`PlanPolicy::default`], que ya es la única fuente de esos defaults
+/// (invariante #4: no se duplican los literales en el `inputSchema`/`contracts/mcp.yml`, que solo
+/// los *documentan*). Antes de este arreglo, omitir una sola clave fallaba con
+/// «missing field …» pese a que ambas ya se declaraban opcionales por contrato.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", default)]
 pub struct PlanPolicy {
     /// Si `true`, un [`ValidationReport`] no conforme (`valid == false`) bloquea `can_apply`.
     pub require_valid_result: bool,

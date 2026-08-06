@@ -1503,6 +1503,111 @@ fn plan_warnings_permitido() {
     );
 }
 
+// --- E29-H02: `PlanPolicy` parcial respeta el `Default` (`decisiones §19(b)`) --------------------
+//
+// `crates/lodestar-core/src/plan.rs:271` — `PlanPolicy` deriva `Deserialize` con
+// `#[serde(rename_all = "camelCase")]` pero sin `#[serde(default)]` por campo (ni a nivel de
+// struct), pese a que `impl Default for PlanPolicy` ya define los valores exactos que
+// `contracts/mcp.yml`/`inputSchema` publican (`requireValidResult: true`, `allowWarnings: true`).
+// Hoy un objeto PARCIAL (solo una de las dos claves) falla con
+// «missing field `allowWarnings`»/«missing field `requireValidResult`» en vez de tomar el default
+// del campo omitido. Los tres tests de aquí ejercitan el `Deserialize` PURO (sin pasar por la
+// tool MCP): rojo esperado por ASERCIÓN — `serde_json::from_value` devuelve `Err` donde debería
+// devolver `Ok(PlanPolicy { .. })` con el campo omitido en su default.
+
+/// Criterio (mitad núcleo de `policy_parcial_toma_el_default_del_campo_omitido`): **Dado** un JSON
+/// de `policy` que SOLO trae `requireValidResult`, **Cuando** se deserializa a `PlanPolicy`,
+/// **Entonces** deserializa con éxito y `allowWarnings` (el campo omitido) toma el valor de
+/// `PlanPolicy::default()` (`true`), no un error de campo ausente.
+#[test]
+fn plan_policy_parcial_solo_require_valid_result_toma_default_de_allow_warnings() {
+    use lodestar_core::plan::PlanPolicy;
+
+    let v = serde_json::json!({ "requireValidResult": false });
+    let policy: PlanPolicy = serde_json::from_value(v.clone()).unwrap_or_else(|e| {
+        panic!("una policy parcial debe deserializar (default por campo): {e}; entrada = {v}")
+    });
+
+    assert!(
+        !policy.require_valid_result,
+        "el campo ENVIADO se respeta tal cual: {policy:?}"
+    );
+    assert_eq!(
+        policy.allow_warnings,
+        PlanPolicy::default().allow_warnings,
+        "el campo OMITIDO (`allowWarnings`) debe tomar el valor de `PlanPolicy::default()`, \
+         no un error de deserialización: {policy:?}"
+    );
+}
+
+/// Criterio (mitad núcleo de `policy_parcial_respeta_el_campo_enviado`): el caso simétrico —
+/// **Dado** un JSON de `policy` que SOLO trae `allowWarnings`, **Cuando** se deserializa,
+/// **Entonces** `requireValidResult` (el campo omitido) toma el default (`true`) y `allowWarnings`
+/// conserva el valor enviado.
+#[test]
+fn plan_policy_parcial_solo_allow_warnings_toma_default_de_require_valid_result() {
+    use lodestar_core::plan::PlanPolicy;
+
+    let v = serde_json::json!({ "allowWarnings": false });
+    let policy: PlanPolicy = serde_json::from_value(v.clone()).unwrap_or_else(|e| {
+        panic!("una policy parcial debe deserializar (default por campo): {e}; entrada = {v}")
+    });
+
+    assert!(
+        !policy.allow_warnings,
+        "el campo ENVIADO se respeta tal cual: {policy:?}"
+    );
+    assert_eq!(
+        policy.require_valid_result,
+        PlanPolicy::default().require_valid_result,
+        "el campo OMITIDO (`requireValidResult`) debe tomar el valor de `PlanPolicy::default()`, \
+         no un error de deserialización: {policy:?}"
+    );
+}
+
+/// Criterio núcleo de `policy_vacia_equivale_a_omitirla`: **Dado** `policy: {}` (objeto vacío),
+/// **Cuando** se deserializa, **Entonces** el resultado es exactamente `PlanPolicy::default()` —
+/// los DOS campos omitidos toman sus defaults, no solo uno (control anti-vacuo respecto a los dos
+/// tests anteriores, que solo omiten un campo cada uno).
+#[test]
+fn plan_policy_vacia_deserializa_al_default_completo() {
+    use lodestar_core::plan::PlanPolicy;
+
+    let v = serde_json::json!({});
+    let policy: PlanPolicy = serde_json::from_value(v.clone()).unwrap_or_else(|e| {
+        panic!("`policy: {{}}` debe deserializar al default: {e}; entrada = {v}")
+    });
+
+    assert_eq!(
+        policy,
+        PlanPolicy::default(),
+        "un objeto vacío debe deserializar EXACTAMENTE al `PlanPolicy::default()`: {policy:?}"
+    );
+}
+
+/// Control anti-vacuo de `policy_parcial_toma_el_default_del_campo_omitido`: una `policy`
+/// COMPLETA (los dos campos presentes, ambos con el valor NO-default) sigue deserializando tal
+/// cual — el arreglo de los defaults por campo no debe alterar el camino ya-funcionaba.
+#[test]
+fn plan_policy_completa_no_default_deserializa_sin_tocar_los_valores_enviados() {
+    use lodestar_core::plan::PlanPolicy;
+
+    let v = serde_json::json!({ "requireValidResult": false, "allowWarnings": false });
+    let policy: PlanPolicy = serde_json::from_value(v.clone()).unwrap_or_else(|e| {
+        panic!("una policy completa debe seguir deserializando: {e}; entrada = {v}")
+    });
+
+    assert_eq!(
+        policy,
+        PlanPolicy {
+            require_valid_result: false,
+            allow_warnings: false,
+        },
+        "una policy completa con los dos campos en su valor NO-default no debe verse alterada \
+         por el arreglo: {policy:?}"
+    );
+}
+
 // --- E12-H05: normalización de operaciones de contenido -----------------------------------------
 //
 // Fase ROJA: los normalizadores puros de contenido todavía NO existen en producción. Ubicación

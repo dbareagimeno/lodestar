@@ -173,12 +173,9 @@ change_plan
 
 That is the right policy for a workspace you expect to be clean, and the wrong one for a workspace
 you are repairing incrementally — which is why the round trip above passes
-`requireValidResult: false`. Omitting `policy` entirely is fine and uses the defaults above; when
-you do send it, send **both** of its fields, because a partial object is rejected today:
-
-```text
-INVALID_SCHEMA: «policy» no tiene la forma esperada: missing field `allowWarnings`
-```
+`requireValidResult: false`. Omitting `policy` entirely is fine and uses the defaults above; so is
+sending a partial object — `{"requireValidResult": false}` on its own is enough, and the omitted
+field falls back to its own default (`allowWarnings: true`) instead of being rejected.
 
 ## The seven operations
 

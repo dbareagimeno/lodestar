@@ -9211,6 +9211,232 @@ fn move_seguido_de_create_del_path_liberado_aplica() {
 }
 
 // ---------------------------------------------------------------------------
+// E29-H02 — Una `policy` PARCIAL en `change_plan` respeta el `Default` que el contrato promete
+// (`requirements/epica-29-honestidad-superficie.md`, `decisiones §19(b)`).
+//
+// Síntoma: `{"policy": {"requireValidResult": false}}` → `INVALID_SCHEMA: … missing field
+// allowWarnings`, pese a que `contracts/mcp.yml`/`inputSchema` declaran los dos campos opcionales
+// con default. Omitir `policy` ENTERA sí funciona hoy; el caso roto es el intermedio. Causa raíz:
+// `PlanPolicy` (`crates/lodestar-core/src/plan.rs:271`) deriva `Deserialize` sin `#[serde(default)]`
+// por campo. Rojo esperado: `INVALID_SCHEMA` (isError) donde debería salir un plan.
+// ---------------------------------------------------------------------------
+
+/// Criterio `policy_parcial_toma_el_default_del_campo_omitido`: **Dado** un workspace válido,
+/// **Cuando** se llama a `change_plan` con `policy: {"requireValidResult": false}` (sin
+/// `allowWarnings`), **Entonces** el plan se computa (sin `INVALID_SCHEMA`) y `canApply` se evalúa
+/// con `allowWarnings = true` (el default) — aseverado por el EFECTO observable: sobre un
+/// resultado con warnings pero sin errores, `canApply` es `true` (si `allowWarnings` hubiera caído
+/// a `false` por error de deserialización, sería `false`).
+#[test]
+fn policy_parcial_toma_el_default_del_campo_omitido() {
+    let dir = workspace_cinco_relacionados();
+    // Enlace a un fichero de proyecto (no-`.md`) inexistente → `LINK-TARGET-MISSING`/Warn
+    // (`missingWorkspaceFiles: warning`, `§20.9`): el resultado hipotético queda con >=1 warning y
+    // 0 errores, así que la rama `allowWarnings` de `can_apply` es la que decide `canApply`.
+    write(
+        dir.path(),
+        "a.md",
+        "---\ntype: Concept\ntitle: A\ndescription: nodo a del cluster\n---\n\n# A\n\n[Siguiente](b.md)\n\n[guía](guia.pdf)\n",
+    );
+    let ops = serde_json::json!([
+        { "op": "patch_frontmatter", "ref": { "path": "d.md" },
+          "patch": { "description": "d actualizada por el plan" } },
+    ]);
+    // Solo `requireValidResult`: `allowWarnings` queda OMITIDO — el caso roto de la historia.
+    let line = change_plan_line(
+        None,
+        ops,
+        serde_json::json!({ "requireValidResult": false }),
+    );
+    let resp = roundtrip(dir.path(), &[line.as_str()], 1);
+
+    assert!(
+        resp[0]["result"]["isError"].as_bool() != Some(true),
+        "una `policy` PARCIAL (solo `requireValidResult`) no debe dar isError/INVALID_SCHEMA: {resp:?}"
+    );
+    let sc = plan_sc(&resp[0]);
+
+    // Precondición del fixture: el resultado hipotético tiene >=1 warning y 0 errores (si no, el
+    // criterio de `allowWarnings` quedaría vacuo: `canApply` saldría `true` por `requireValidResult`
+    // ya satisfecho, sin ejercitar el campo omitido).
+    let warnings = sc["diagnosticsAfter"]["warnings"]
+        .as_u64()
+        .unwrap_or_else(|| {
+            panic!("change_plan debe devolver diagnosticsAfter.warnings (u64): {sc:?}")
+        });
+    let errors = sc["diagnosticsAfter"]["errors"]
+        .as_u64()
+        .unwrap_or_else(|| {
+            panic!("change_plan debe devolver diagnosticsAfter.errors (u64): {sc:?}")
+        });
+    assert!(
+        warnings >= 1 && errors == 0,
+        "precondición del fixture: el resultado hipotético debe tener >=1 warning y 0 errores \
+         para que el criterio ejercite `allowWarnings`, no `requireValidResult`; diagnosticsAfter = {:?}",
+        sc["diagnosticsAfter"]
+    );
+
+    // `allowWarnings` omitido ⇒ default `true` ⇒ los warnings NO bloquean `canApply`.
+    assert_eq!(
+        sc["canApply"],
+        serde_json::Value::Bool(true),
+        "con `allowWarnings` OMITIDO (debe tomar el default `true`) y solo warnings (sin errores), \
+         `canApply` debe ser `true`; si el campo omitido hubiera caído a `false` por un fallo de \
+         deserialización, `canApply` sería `false`: {sc:?}"
+    );
+}
+
+/// Criterio `policy_parcial_respeta_el_campo_enviado`: el caso simétrico — **Dado** un workspace
+/// cuyo resultado simulado tiene warnings, **Cuando** se llama con
+/// `policy: {"allowWarnings": false}` (sin `requireValidResult`), **Entonces** `canApply` es
+/// `false` (el campo ENVIADO se respeta) y `requireValidResult` vale `true` por defecto — el plan
+/// se sigue computando (sin `INVALID_SCHEMA`; `canApply:false` es un veredicto, no un fallo de la
+/// tool).
+#[test]
+fn policy_parcial_respeta_el_campo_enviado() {
+    let dir = workspace_cinco_relacionados();
+    write(
+        dir.path(),
+        "a.md",
+        "---\ntype: Concept\ntitle: A\ndescription: nodo a del cluster\n---\n\n# A\n\n[Siguiente](b.md)\n\n[guía](guia.pdf)\n",
+    );
+    let ops = serde_json::json!([
+        { "op": "patch_frontmatter", "ref": { "path": "d.md" },
+          "patch": { "description": "d actualizada por el plan" } },
+    ]);
+    // Solo `allowWarnings`: `requireValidResult` queda OMITIDO (debe tomar el default `true`, que
+    // en este fixture es irrelevante porque no hay errores — lo que decide aquí es `allowWarnings`).
+    let line = change_plan_line(None, ops, serde_json::json!({ "allowWarnings": false }));
+    let resp = roundtrip(dir.path(), &[line.as_str()], 1);
+
+    assert!(
+        resp[0]["result"]["isError"].as_bool() != Some(true),
+        "una `policy` PARCIAL (solo `allowWarnings`) no debe dar isError/INVALID_SCHEMA: {resp:?}"
+    );
+    let sc = plan_sc(&resp[0]);
+
+    let warnings = sc["diagnosticsAfter"]["warnings"]
+        .as_u64()
+        .unwrap_or_else(|| {
+            panic!("change_plan debe devolver diagnosticsAfter.warnings (u64): {sc:?}")
+        });
+    assert!(
+        warnings >= 1,
+        "precondición del fixture: el resultado hipotético debe tener >=1 warning para que el \
+         criterio no sea vacuo; diagnosticsAfter = {:?}",
+        sc["diagnosticsAfter"]
+    );
+
+    // `allowWarnings:false` ENVIADO ⇒ se respeta ⇒ el warning bloquea `canApply`.
+    assert_eq!(
+        sc["canApply"],
+        serde_json::Value::Bool(false),
+        "con `allowWarnings:false` ENVIADO y al menos un warning, `canApply` debe ser `false` \
+         (el campo enviado se respeta, no se pisa por el default del campo omitido): {sc:?}"
+    );
+}
+
+/// Criterio `policy_vacia_equivale_a_omitirla`: **Dado** `policy: {}` (objeto vacío), **Cuando** se
+/// planifica, **Entonces** equivale a omitir `policy` entera — mismo `canApply` sobre el MISMO
+/// `operations`/workspace. Control de forma: `policy: {}` no debe dar `INVALID_SCHEMA` ni un
+/// veredicto distinto al de omitir la clave.
+#[test]
+fn policy_vacia_equivale_a_omitirla() {
+    let dir = workspace_cinco_relacionados();
+
+    let linea_vacia = change_plan_line(None, cinco_operaciones(), serde_json::json!({}));
+    let resp_vacia = roundtrip(dir.path(), &[linea_vacia.as_str()], 1);
+    assert!(
+        resp_vacia[0]["result"]["isError"].as_bool() != Some(true),
+        "`policy: {{}}` no debe dar isError/INVALID_SCHEMA: {resp_vacia:?}"
+    );
+    let sc_vacia = plan_sc(&resp_vacia[0]);
+
+    // Omitir `policy` ENTERA: sin la clave en `arguments` (no `change_plan_line`, que siempre la
+    // incluye) — construida a mano para que la ausencia de la clave sea literal.
+    let args_omitida = serde_json::json!({ "operations": cinco_operaciones() });
+    let linea_omitida = serde_json::json!({
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": { "name": "change_plan", "arguments": args_omitida }
+    })
+    .to_string();
+    let resp_omitida = roundtrip(dir.path(), &[linea_omitida.as_str()], 1);
+    assert!(
+        resp_omitida[0]["result"]["isError"].as_bool() != Some(true),
+        "omitir `policy` entera debe seguir funcionando (control anti-vacuo): {resp_omitida:?}"
+    );
+    let sc_omitida = plan_sc(&resp_omitida[0]);
+
+    assert_eq!(
+        sc_vacia["canApply"], sc_omitida["canApply"],
+        "`policy: {{}}` debe producir el MISMO `canApply` que omitir `policy` entera: \
+         vacía = {:?}, omitida = {:?}",
+        sc_vacia["canApply"], sc_omitida["canApply"]
+    );
+}
+
+/// Control anti-vacuo (`policy` completa sigue igual): **Dado** un workspace válido, **Cuando** se
+/// llama a `change_plan` con `policy: {"requireValidResult": false, "allowWarnings": true}` (los
+/// DOS campos presentes — el camino que ya funcionaba hoy), **Entonces** el plan se computa y el
+/// arreglo del campo omitido no debe alterar este caso.
+#[test]
+fn policy_completa_sigue_funcionando_igual() {
+    let dir = workspace_cinco_relacionados();
+    let line = change_plan_line(None, cinco_operaciones(), policy_permisiva());
+    let resp = roundtrip(dir.path(), &[line.as_str()], 1);
+
+    assert!(
+        resp[0]["result"]["isError"].as_bool() != Some(true),
+        "una `policy` COMPLETA no debe verse afectada por el arreglo del campo omitido: {resp:?}"
+    );
+    let sc = plan_sc(&resp[0]);
+    assert!(
+        sc["changeSetId"].as_str().is_some_and(|s| !s.is_empty()),
+        "una `policy` completa debe seguir produciendo un plan con `changeSetId`: {resp:?}"
+    );
+}
+
+/// Control anti-vacuo (clave DESCONOCIDA en `policy` — fija el comportamiento ACTUAL, no lo
+/// cambia: eso es competencia de E29-H08): **Dado** una `policy` con los DOS campos reconocidos
+/// presentes (para que este test sea independiente del arreglo del campo omitido: aísla
+/// exclusivamente el efecto de la clave desconocida) MÁS una clave que no existe en `PlanPolicy`
+/// (p. ej. `"strictMode"`), **Cuando** se planifica, **Entonces** el resultado es el que produce
+/// hoy `#[serde(deny_unknown_fields)]` ausente en `PlanPolicy` — serde IGNORA la clave desconocida
+/// y el plan se computa con los valores de las claves reconocidas, SIN error. Este test no decide
+/// si eso es deseable; solo lo deja fijado para que E29-H08 lo cambie a propósito, no por
+/// accidente de este arreglo.
+#[test]
+fn policy_con_clave_desconocida_no_cambia_de_comportamiento() {
+    let dir = workspace_cinco_relacionados();
+    let ops = serde_json::json!([
+        { "op": "patch_frontmatter", "ref": { "path": "d.md" },
+          "patch": { "description": "d actualizada por el plan" } },
+    ]);
+    let line = change_plan_line(
+        None,
+        ops,
+        serde_json::json!({
+            "requireValidResult": false, "allowWarnings": true, "strictMode": true
+        }),
+    );
+    let resp = roundtrip(dir.path(), &[line.as_str()], 1);
+
+    // Comportamiento HOY (sin `deny_unknown_fields`): la clave desconocida se ignora, no se
+    // rechaza. Si E29-H08 cambia esto a rechazo estricto, este test es el que hay que reescribir
+    // — a propósito, con su propia historia, no como daño colateral de E29-H02.
+    assert!(
+        resp[0]["result"]["isError"].as_bool() != Some(true),
+        "una clave desconocida en `policy` no debe dar isError HOY (comportamiento fijado, no \
+         decidido por esta historia — ver E29-H08): {resp:?}"
+    );
+    let sc = plan_sc(&resp[0]);
+    assert!(
+        sc["changeSetId"].as_str().is_some_and(|s| !s.is_empty()),
+        "con una clave desconocida ignorada, el plan debe seguir produciéndose: {resp:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // E29-H01 — Config estricta: el servidor MCP tampoco arranca con una config que no entiende
 // (`requirements/epica-29-honestidad-superficie.md`, `decisiones §16(e)` + `§23/A-08`).
 //
