@@ -1311,4 +1311,471 @@ mod can_apply_vincula_al_apply {
             "dos orígenes distintos bajo el mismo código exigen, como mínimo, mensajes distintos"
         );
     }
+
+    // -----------------------------------------------------------------------
+    // PINES SOBRE EL PLAN PERSISTIDO (remates del juez ciego de E29-H07).
+    //
+    // Los cinco tests de arriba van por la API pública (`change_plan(policy) → change_apply`), que es
+    // lo correcto para los criterios de la historia: no acoplan el test a la representación. El
+    // precio es que dejan dos mutantes vivos, porque por esa vía el plan persistido SIEMPRE lleva
+    // `policy` y su `canApply` SIEMPRE es congruente con ella:
+    //
+    //   (1) hacer la default de `#[serde(default)] policy` PERMISIVA —un plan sin la clave, el que
+    //       dejó cualquier binario anterior a E29-H07, pasaría el gate—;
+    //   (2) sustituir la recomputación por `if !plan.can_apply` —leer el booleano persistido en vez
+    //       de re-derivarlo—.
+    //
+    // Los dos sobreviven a la suite entera si no se forja el fichero, así que estos dos pines lo
+    // forjan. Nacen **VERDES**: fijan el comportamiento que la implementación ya tiene, no piden uno
+    // nuevo. Y, a diferencia de los cinco de arriba, **sí fijan la representación (ii)** —policy
+    // persistida + recomputación— que es la que el rustdoc de `PlanResult::policy` y el delta de
+    // contrato declaran: si alguien migrase a la (i) (congelar el booleano), el pin (2) tiene que
+    // romperse y obligar a re-ratificar la decisión, no pasar en silencio.
+    //
+    // FORJADO: se reescriben **solo** campos que NO entran en el `planHash` (`policy`, `canApply`).
+    // `compute_plan_hash` mezcla `baseWorkspaceRevision` y `normalizedOperations` y nada más, así que
+    // el paso (3) del apply sigue dando el hash por bueno y el fichero conserva su nombre — el
+    // rechazo, cuando llega, solo puede venir del gate del veredicto. Las guardas de no vacuidad de
+    // cada test lo verifican: si el apply respondiera `PLAN_STALE`/`PLAN_EXPIRED`, el test FALLA.
+    // -----------------------------------------------------------------------
+
+    /// Reescribe **in situ** el plan persistido único de `root` aplicando `mutacion` sobre su JSON.
+    /// No toca `normalizedOperations` ni `baseWorkspaceRevision`, así que el `planHash` y el nombre
+    /// del fichero siguen siendo válidos y el `changeSetId` que devolvió `change_plan` sigue
+    /// sirviendo para el apply.
+    fn reescribe_plan_persistido(root: &Path, mutacion: impl FnOnce(&mut serde_json::Value)) {
+        let (ruta, mut valor) = json_del_plan_unico(root);
+        mutacion(&mut valor);
+        std::fs::write(&ruta, serde_json::to_vec_pretty(&valor).unwrap()).unwrap();
+    }
+
+    /// **Pin de la DEFAULT ESTRICTA** — **Dado** un plan persistido **sin** la clave `policy` (el que
+    /// dejó un binario anterior a E29-H07) sobre un workspace donde la policy por defecto rechaza,
+    /// **Cuando** se aplica, **Entonces** se rechaza con `INVALID_RESULT` nombrando
+    /// `requireValidResult` y no se escribe nada.
+    ///
+    /// Es decir: el `#[serde(default)]` de `PlanResult::policy` completa con la policy **más
+    /// estricta** de las dos que el wire admite (`requireValidResult:true`), nunca con una permisiva.
+    /// Al revés —default laxa— un plan viejo se colaría por el gate justo en el caso que `§18`
+    /// vino a cerrar, y ningún test de la API pública lo notaría porque por esa vía la clave siempre
+    /// está.
+    ///
+    /// VERDE hoy: fija el comportamiento implementado, y mata el mutante «default permisiva».
+    #[test]
+    fn plan_persistido_sin_policy_cae_a_la_default_estricta() {
+        let (dir, app) = app_con_error_preexistente();
+        let root = dir.path();
+
+        // Se planifica con policy PERMISIVA a propósito: así el plan nace aplicable y, al borrar la
+        // clave, lo único que puede rechazarlo después es la default con la que serde la complete.
+        let plan = app
+            .change_plan(None, &patch_inocuo("limpio.md"), policy_permisiva())
+            .expect("el plan permisivo se computa");
+        assert!(
+            plan.can_apply,
+            "precondición: con la policy permisiva el plan nace APLICABLE (el rechazo que se espera \
+             abajo solo puede venir de la default que sustituya a la clave borrada)"
+        );
+
+        // Forjado: el plan de un binario anterior a E29-H07 no tiene el campo.
+        reescribe_plan_persistido(root, |v| {
+            v.as_object_mut().unwrap().remove("policy");
+        });
+        let recargado = app.load_plan(&plan.change_set_id).expect(
+            "el plan forjado debe CARGAR: si no, el apply fallaría por el motivo equivocado",
+        );
+        assert_eq!(
+            recargado.policy,
+            PlanPolicy::default(),
+            "un plan sin la clave `policy` debe deserializar a la default, que es la ESTRICTA \
+             (`requireValidResult:true`): si aquí saliera permisiva, el gate sería más laxo de lo \
+             que el cliente pidió"
+        );
+
+        let antes = canonico_md(root);
+        let err = match app.change_apply(&plan.change_set_id, None) {
+            Ok(aplicado) => panic!(
+                "un plan persistido SIN `policy` —el que dejó un binario anterior a E29-H07— debe \
+                 juzgarse con la default ESTRICTA y rechazarse sobre este workspace (el resultado \
+                 conserva el error preexistente). Se publicó igual: applied={}, changedPaths={:?}",
+                aplicado.applied, aplicado.changed_paths,
+            ),
+            Err(e) => e,
+        };
+        assert_eq!(
+            err.code.as_str(),
+            RECHAZO,
+            "el rechazo del plan sin policy es el mismo {RECHAZO} del veredicto, no un PLAN_STALE ni \
+             un error de deserialización; fue {err}",
+        );
+        assert!(
+            err.message.contains("requireValidResult"),
+            "y nombra la cláusula de la DEFAULT que bloqueó: fue {:?}",
+            err.message,
+        );
+        assert_eq!(canonico_md(root), antes, "y no escribe un solo byte");
+    }
+
+    /// **Contraprueba del pin anterior** (anti-vacuo): un plan persistido **sin** `policy` cuyo
+    /// resultado **sí** es válido bajo la default se aplica con normalidad.
+    ///
+    /// Sin esto, «default estricta» podría implementarse como «todo plan sin policy se rechaza», que
+    /// convertiría el TTL de los planes en curso de una actualización de binario en una pérdida
+    /// gratuita de trabajo. La default es estricta, no prohibitiva.
+    #[test]
+    fn plan_persistido_sin_policy_con_resultado_valido_sigue_aplicando() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        // Workspace LIMPIO: sin errores ni warnings, de modo que la default (`requireValidResult:
+        // true`, `allowWarnings: true`) no tiene nada que objetar.
+        escribe(
+            root,
+            "limpio.md",
+            "---\ntitle: Limpio\n---\n\n# Limpio\n\nDocumento sin problemas.\n",
+        );
+        let app = App::open(root).expect("el workspace temporal debe abrir");
+
+        let plan = app
+            .change_plan(None, &patch_inocuo("limpio.md"), policy_permisiva())
+            .expect("el plan se computa");
+        assert_eq!(
+            plan.diagnostics_after.errors, 0,
+            "precondición: el resultado es válido bajo la default: {:?}",
+            plan.diagnostics_after
+        );
+
+        reescribe_plan_persistido(root, |v| {
+            v.as_object_mut().unwrap().remove("policy");
+        });
+
+        let aplicado = app
+            .change_apply(&plan.change_set_id, None)
+            .unwrap_or_else(|e| {
+                panic!(
+                "un plan sin `policy` cuyo resultado SÍ pasa la default debe aplicarse: la default \
+                 es estricta, no prohibitiva. Fue rechazado con {e}"
+            )
+            });
+        assert!(aplicado.applied, "y publica de verdad: {aplicado:?}");
+        assert!(
+            std::fs::read_to_string(root.join("limpio.md"))
+                .unwrap()
+                .contains("status: revisado"),
+            "el cambio está en disco"
+        );
+    }
+
+    /// **Pin de la RECOMPUTACIÓN** — **Dado** un plan persistido cuyo `canApply` dice `true` pero es
+    /// **incongruente** con su propia `policy` (estricta) y con su resultado (que conserva un error),
+    /// **Cuando** se aplica, **Entonces** se rechaza igualmente.
+    ///
+    /// Fija la representación **(ii)** de la historia —persistir la `PlanPolicy` y **recomputar**
+    /// `plan::can_apply` en el apply— frente a la (i) —congelar el booleano—. La recomendación de la
+    /// spec la eligió por una razón concreta: el apply re-verifica el `planHash` sobre la base actual
+    /// y la revisión bajo el lock, así que un `canApply` congelado sería el **único** veredicto del
+    /// apply que se acepta sin re-derivar. Un booleano persistido es, además, un campo de un fichero
+    /// de runtime editable: leerlo tal cual convierte el gate en una casilla que basta con marcar.
+    ///
+    /// VERDE hoy (`change_apply` llama a `plan::can_apply(&after_report, &plan.policy)`, no mira
+    /// `plan.can_apply`), y mata el mutante `if !plan.can_apply`. **Si alguien migra a la (i), este
+    /// test debe romperse**: es el pin que obliga a re-ratificar la decisión en vez de cambiarla en
+    /// silencio.
+    #[test]
+    fn apply_recomputa_el_veredicto_y_no_se_fia_del_can_apply_persistido() {
+        let (dir, app) = app_con_error_preexistente();
+        let root = dir.path();
+
+        let plan = app
+            .change_plan(None, &patch_inocuo("limpio.md"), PlanPolicy::default())
+            .expect("el plan se computa");
+        assert!(
+            !plan.can_apply,
+            "precondición: bajo la default el plan NO es aplicable (el error preexistente sobrevive)"
+        );
+
+        // Forjado: el booleano MIENTE (`canApply: true`) mientras la policy persistida sigue siendo
+        // la estricta y el resultado sigue teniendo el error. Un apply que leyera el booleano
+        // publicaría; uno que recompute, rechaza.
+        reescribe_plan_persistido(root, |v| {
+            v["canApply"] = serde_json::Value::Bool(true);
+        });
+        let recargado = app
+            .load_plan(&plan.change_set_id)
+            .expect("el plan forjado debe CARGAR");
+        assert!(
+            recargado.can_apply,
+            "precondición del forjado: el `canApply` persistido dice ahora `true`…"
+        );
+        assert!(
+            recargado.policy.require_valid_result,
+            "…mientras su `policy` persistida sigue siendo la estricta: esa es la incongruencia que \
+             el test explota"
+        );
+
+        let antes = canonico_md(root);
+        let err = match app.change_apply(&plan.change_set_id, None) {
+            Ok(aplicado) => panic!(
+                "el apply debe RECOMPUTAR `can_apply` sobre el resultado hipotético con la `policy` \
+                 persistida, no fiarse del booleano del fichero: un `canApply:true` forjado en \
+                 `.lodestar/runtime/plans/` no puede ser la llave que abre la publicación. Se \
+                 publicó: applied={}, changedPaths={:?}",
+                aplicado.applied, aplicado.changed_paths,
+            ),
+            Err(e) => e,
+        };
+        assert_eq!(
+            err.code.as_str(),
+            RECHAZO,
+            "el rechazo recomputado es el mismo {RECHAZO}; fue {err}",
+        );
+        assert!(
+            err.message.contains("requireValidResult"),
+            "y nombra la cláusula que lo bloquea al recomputarlo: fue {:?}",
+            err.message,
+        );
+        assert_eq!(canonico_md(root), antes, "y no escribe un solo byte");
+    }
+}
+
+// ===========================================================================
+// E29-H08 — La TABLA DE CAMPOS LEGALES por operación (condición de entrada)
+// `requirements/epica-29-honestidad-superficie.md §E29-H08` (L820-840) · `decisiones §15`.
+// ===========================================================================
+//
+// `§15` fija esto como **primer criterio de aceptación Y condición de entrada**: la tabla de campos
+// legales por operación se materializa en tests **VERDES antes de tocar el rechazo**, y sigue verde
+// después. La razón es concreta y está medida: `operacion_item_schema()` declara 17 propiedades
+// planas **a propósito** —sin `oneOf` por op— porque `path`/`ref` son intercambiables salvo en
+// `create` y `body` pertenece a DOS ops (`create` y `replace_body`). Activar la validación sin
+// haber fijado antes qué es legal rompería `create` con campos de otra op, o los lotes en los que un
+// agente reutiliza la misma plantilla de objeto.
+//
+// Estos tests nacen **VERDES** (no son la fase roja: fijan lo que HOY funciona) y su valor está en
+// que cualquier rechazo que se implemente encima tenga que seguir pasándolos. La mitad ROJA de la
+// historia vive por el wire, en `crates/lodestar-mcp/tests/mcp.rs` y `tests/descubribilidad.rs`.
+//
+// La tabla (fuente: `normalize_raw_op` en `lodestar-app`, vía `decisiones §15`):
+//
+//   | Campo                                  | Ops                                    |
+//   |----------------------------------------|----------------------------------------|
+//   | `op`                                   | todas (discriminador, obligatorio)     |
+//   | `path`                                 | todas (obligatoria en `create`)        |
+//   | `ref`                                  | todas menos `create`                   |
+//   | `expectedRevision`                     | todas                                  |
+//   | `frontmatter`                          | `create`                               |
+//   | `body`                                 | `create`, `replace_body` (COMPARTIDO)  |
+//   | `patch`                                | `patch_frontmatter`                    |
+//   | `find`,`replace`,`expectedOccurrences` | `replace_text`                         |
+//   | `headingPath`,`mode`,`content`         | `edit_section`                         |
+//   | `from`,`to`,`rewriteInboundLinks`      | `move`                                 |
+//   | `inboundLinksPolicy`                   | `delete`                               |
+mod campos_legales_por_operacion {
+    use super::*;
+    use lodestar_core::types::RelPath;
+
+    /// Workspace con lo justo para ejercer las 7 ops: un documento existente con frontmatter,
+    /// cuerpo con un texto sustituible y una sección con heading (para `edit_section`), más un
+    /// `enlazado.md` con un backlink hacia él (para que `delete` tenga que decidir su
+    /// `inboundLinksPolicy`) y un path libre para `create`.
+    fn app_para_las_siete_ops() -> (tempfile::TempDir, App) {
+        let dir = tempfile::tempdir().unwrap();
+        escribe(
+            dir.path(),
+            "notas/alfa.md",
+            "---\nstatus: accepted\nowner: ana\n---\n\n# Alfa\n\nCuerpo con lodestar dentro.\n\n\
+             ## Seguridad\n\nContenido de la sección.\n",
+        );
+        escribe(
+            dir.path(),
+            "notas/enlazado.md",
+            "---\nstatus: draft\n---\n\n# Enlazado\n\n[hacia alfa](alfa.md)\n",
+        );
+        let app = App::open(dir.path()).expect("el workspace temporal debe abrir");
+        (dir, app)
+    }
+
+    /// La revisión vigente de un documento, para poder mandar `expectedRevision` **con un valor
+    /// real** en cada op: el campo es legal en las 7 y solo se ejercita de verdad si el control
+    /// optimista pasa (con un valor inventado, la op fallaría por `REVISION_CONFLICT` y el test
+    /// mediría otra cosa).
+    fn revision_de(app: &App, path: &str) -> String {
+        let rel = RelPath::new(path).expect("path relativo válido");
+        let doc = app
+            .knowledge_get(
+                &lodestar_core::types::DocumentRef {
+                    path: rel,
+                    id: None,
+                },
+                &["revision".to_string()],
+                None,
+            )
+            .expect("el documento debe existir");
+        serde_json::to_value(&doc)
+            .expect("el `DocumentView` serializa")
+            .get("revision")
+            .and_then(|v| v.as_str())
+            .expect("se pidió `revision` en el include, así que debe venir poblada")
+            .to_string()
+    }
+
+    /// **E29-H08 · Criterio `los_campos_legales_de_cada_operacion_se_aceptan`** (CONDICIÓN DE
+    /// ENTRADA — verde antes de activar el rechazo, y verde después):
+    /// **Dado** un `change_plan` con **una operación de cada uno de los 7 tipos**, cada una con
+    /// **todos** sus campos legales de la tabla, **Cuando** se planifica, **Entonces** las 7 se
+    /// normalizan sin error.
+    ///
+    /// Se planifica cada op **por separado** (7 llamadas, no un lote de 7): las ops de estructura
+    /// interfieren entre sí sobre los mismos paths —un `move` de `alfa.md` dejaría sin objetivo al
+    /// `delete` que le sigue—, y lo que este criterio fija es la LEGALIDAD DE LOS CAMPOS, no la
+    /// composición de un lote. Cada llamada usa el `App` recién montado, así que el estado de
+    /// partida es idéntico para las 7.
+    #[test]
+    fn los_campos_legales_de_cada_operacion_se_aceptan() {
+        // (op, campos legales de ESA op según la tabla). `expectedRevision` se inyecta abajo con
+        // la revisión real del documento objetivo, porque su valor depende del workspace.
+        let casos: Vec<(&str, serde_json::Value)> = vec![
+            // `create`: `path` OBLIGATORIA (no admite `ref`), `frontmatter` y `body` suyos.
+            (
+                "create",
+                serde_json::json!({
+                    "op": "create", "path": "notas/nuevo.md",
+                    "frontmatter": { "status": "draft" },
+                    "body": "# Nuevo\n\nCuerpo del documento nuevo.\n"
+                }),
+            ),
+            // `patch_frontmatter`: forma LARGA del objetivo (`ref`), que es legal en todas menos
+            // `create`.
+            (
+                "patch_frontmatter",
+                serde_json::json!({
+                    "op": "patch_frontmatter", "ref": { "path": "notas/alfa.md" },
+                    "patch": { "status": "review" }
+                }),
+            ),
+            // `replace_body`: la SEGUNDA op de `body`, el campo compartido de la tabla. Aquí con
+            // la forma CORTA (`path`), para que el par (`ref`,`path`) quede ejercitado en las dos.
+            (
+                "replace_body",
+                serde_json::json!({
+                    "op": "replace_body", "path": "notas/alfa.md",
+                    "body": "# Alfa\n\nCuerpo reemplazado entero.\n"
+                }),
+            ),
+            (
+                "replace_text",
+                serde_json::json!({
+                    "op": "replace_text", "path": "notas/alfa.md",
+                    "find": "lodestar", "replace": "Lodestar", "expectedOccurrences": 1
+                }),
+            ),
+            (
+                "edit_section",
+                serde_json::json!({
+                    "op": "edit_section", "path": "notas/alfa.md",
+                    "headingPath": ["Seguridad"], "mode": "replace",
+                    "content": "Contenido nuevo de la sección.\n"
+                }),
+            ),
+            // `move`: `from`/`to` propios + `rewriteInboundLinks`.
+            (
+                "move",
+                serde_json::json!({
+                    "op": "move", "from": "notas/alfa.md", "to": "notas/alfa-movida.md",
+                    "rewriteInboundLinks": true
+                }),
+            ),
+            // `delete`: `inboundLinksPolicy` es OBLIGATORIA aquí porque `alfa.md` tiene un backlink
+            // desde `enlazado.md` (`§20.11` prohíbe elegir en silencio).
+            (
+                "delete",
+                serde_json::json!({
+                    "op": "delete", "path": "notas/alfa.md",
+                    "inboundLinksPolicy": "remove_links"
+                }),
+            ),
+        ];
+
+        for (nombre, mut op) in casos {
+            let (_dir, app) = app_para_las_siete_ops();
+
+            // `expectedRevision` es legal en las 7: se añade con la revisión REAL del documento
+            // objetivo (`create` no tiene documento previo, así que ahí se omite — pedir la
+            // revisión de un documento que aún no existe no es un campo legal, es un sinsentido).
+            // Las seis ops restantes operan sobre `notas/alfa.md`, incluido el `move` (su `from`).
+            if nombre != "create" {
+                op["expectedRevision"] = serde_json::json!(revision_de(&app, "notas/alfa.md"));
+            }
+
+            let resultado =
+                app.change_plan(None, &serde_json::json!([op.clone()]), policy_permisiva());
+            let plan = resultado.unwrap_or_else(|e| {
+                panic!(
+                    "la op «{nombre}» con TODOS sus campos legales de la tabla de `decisiones §15` \
+                     debe normalizarse sin error (condición de entrada de E29-H08: esto funciona \
+                     HOY y el rechazo de campos desconocidos no puede romperlo). Op: {op}\nError: {e}"
+                )
+            });
+            assert_eq!(
+                plan.normalized_operations.len().min(1),
+                1,
+                "la op «{nombre}» debe producir al menos una `NormalizedOperation`: {op}"
+            );
+        }
+    }
+
+    /// **E29-H08 · Control anti-vacuo del campo COMPARTIDO y de las dos formas del objetivo**: la
+    /// tabla dice que `body` pertenece a **dos** ops y que `path`/`ref` son intercambiables salvo en
+    /// `create`. Si el rechazo se escribiera como una partición limpia por op, ESTE es el test que
+    /// cae — y es el riesgo que `decisiones §15` señala como «no teórico».
+    ///
+    /// Nace VERDE y debe seguir verde: fija las dos propiedades que hacen que la validación tenga
+    /// que ser por unión.
+    #[test]
+    fn body_es_legal_en_dos_ops_y_path_y_ref_son_intercambiables() {
+        // (a) `body` en `create` y en `replace_body`: el MISMO campo, dos ops.
+        for (op_kind, op) in [
+            (
+                "create",
+                serde_json::json!({ "op": "create", "path": "notas/otro.md",
+                                    "body": "# Otro\n\ncuerpo\n" }),
+            ),
+            (
+                "replace_body",
+                serde_json::json!({ "op": "replace_body", "path": "notas/alfa.md",
+                                    "body": "# Alfa\n\ncuerpo nuevo\n" }),
+            ),
+        ] {
+            let (_dir, app) = app_para_las_siete_ops();
+            app.change_plan(None, &serde_json::json!([op.clone()]), policy_permisiva())
+                .unwrap_or_else(|e| {
+                    panic!(
+                        "`body` es legal en «{op_kind}» (la tabla lo declara COMPARTIDO entre dos \
+                         ops): {op}\nError: {e}"
+                    )
+                });
+        }
+
+        // (b) `path` y `ref.path` designan el mismo objetivo en una op que no es `create`.
+        for (forma, op) in [
+            (
+                "path (forma corta)",
+                serde_json::json!({ "op": "patch_frontmatter", "path": "notas/alfa.md",
+                                    "patch": { "status": "review" } }),
+            ),
+            (
+                "ref.path (forma larga)",
+                serde_json::json!({ "op": "patch_frontmatter", "ref": { "path": "notas/alfa.md" },
+                                    "patch": { "status": "review" } }),
+            ),
+        ] {
+            let (_dir, app) = app_para_las_siete_ops();
+            app.change_plan(None, &serde_json::json!([op.clone()]), policy_permisiva())
+                .unwrap_or_else(|e| {
+                    panic!(
+                        "el objetivo por «{forma}» debe seguir aceptándose: la tabla los declara \
+                         INTERCAMBIABLES salvo en `create`: {op}\nError: {e}"
+                    )
+                });
+        }
+    }
 }

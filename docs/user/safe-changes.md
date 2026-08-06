@@ -21,7 +21,7 @@ stable and in English.
 
 - [A round trip](#a-round-trip)
 - [What the plan checks](#what-the-plan-checks)
-- [`canApply` is the plan's verdict, not a lock](#canapply-is-the-plans-verdict-not-a-lock)
+- [`canApply` is the plan's verdict, and it binds](#canapply-is-the-plans-verdict-and-it-binds)
 - [The seven operations](#the-seven-operations)
 - [Bulk selections](#bulk-selections)
 - [Optimistic concurrency](#optimistic-concurrency)
@@ -35,7 +35,7 @@ stable and in English.
 
 Raise the retention of the backup runbook from 30 days to 45. First, plan it. The demo workspace
 ships with one deliberate error (a broken link), so the plan is told not to require a fully valid
-result — see [`canApply`](#canapply-is-the-plans-verdict-not-a-lock) below:
+result — see [`canApply`](#canapply-is-the-plans-verdict-and-it-binds) below:
 
 ```json
 change_plan
@@ -141,17 +141,23 @@ transaction, with its own journal and its own recovery copies.
 A plan is stored and stays applicable for **one hour** (`expiresAt`, seconds since the epoch). After
 that, `change_apply` answers `PLAN_EXPIRED` and you plan again.
 
-## `canApply` is the plan's verdict, not a lock
+## `canApply` is the plan's verdict, and it binds
 
 `canApply` answers one question: *would this result satisfy the `policy` I passed to this plan?* It
 is `false` when `requireValidResult` is on and the simulated result is not valid, or when
 `allowWarnings` is off and the result has warnings.
 
-Read it as advice to the caller, and act on it. It is **not** a safety interlock:
-[`contracts/mcp.yml`](../../contracts/mcp.yml) does not state that `change_apply` re-evaluates the
-plan's policy, and what `change_apply` does enforce is its own staging gate, described
-[below](#what-change_apply-guarantees) — a differential check with different criteria. A client that
-ignores `canApply: false` and applies anyway is not being stopped by the policy it declared.
+It is not just advice: **`change_apply` enforces it**. Applying a plan that came back with
+`canApply: false` is refused with `INVALID_RESULT`, before the publication lock is taken and without
+writing a single byte. The apply does not trust the stored verdict either — it **recomputes** it,
+with the same `can_apply` function the plan used and the `policy` that is persisted alongside the
+plan, right after re-checking the plan hash. So the policy you declared is the policy you get, and
+the message names the clause that blocked (`requireValidResult` or `allowWarnings`) so you know
+whether to fix the change or to plan again with a policy that admits the result.
+
+That is separate from the staging gate described [below](#what-change_apply-guarantees), which
+enforces the *workspace's* `transactions` policy with different criteria. Both refuse with
+`INVALID_RESULT`; the message tells you which one spoke.
 
 On the demo workspace this is easy to see, because it ships with one error on purpose. Under the
 default policy (`requireValidResult: true`, `allowWarnings: true`) every plan comes back with
@@ -169,6 +175,15 @@ change_plan
   "diagnosticsBefore": {"errors": 1, "warnings": 0, "info": 0},
   "diagnosticsAfter":  {"errors": 1, "warnings": 0, "info": 0}
 }
+```
+
+Insisting on that plan does not get you past it:
+
+```text
+INVALID_RESULT: el plan «changeset:5bc591c4…» no es aplicable bajo la policy con la que se
+planificó (requireValidResult=true, allowWarnings=true): «requireValidResult» es true y el
+resultado simulado no es válido (1 error(es)). No se ha escrito nada. Replanifica sobre el estado
+actual (change_plan) o vuelve a planificar con una policy que lo admita
 ```
 
 That is the right policy for a workspace you expect to be clean, and the wrong one for a workspace
@@ -318,20 +333,25 @@ whole transaction without having touched your Markdown:
 1. Load the persisted plan — `PLAN_EXPIRED` if it timed out, `PLAN_STALE` if it is gone.
 2. Check `expectedWorkspaceRevision`, if given.
 3. Recompute the plan hash against the current base — `PLAN_STALE` if the workspace moved.
-4. Take the **publication lock**, so two publishers cannot interleave.
-5. Compute the real affected set (created, modified, deleted).
-6. Check every affected path against the configured writable roots — `PERMISSION_DENIED` otherwise.
-7. Stage the result and run the **differential validation gate**: with the defaults, a change may
+4. Re-evaluate the **plan's own policy**: recompute `canApply` over the simulated result with the
+   `policy` persisted with the plan. If the plan was not applicable under it, the whole transaction
+   is refused with `INVALID_RESULT`, naming the clause that blocked (`requireValidResult` or
+   `allowWarnings`). This happens before the lock, so nothing is staged, journalled or written.
+5. Take the **publication lock**, so two publishers cannot interleave.
+6. Compute the real affected set (created, modified, deleted).
+7. Check every affected path against the configured writable roots — `PERMISSION_DENIED` otherwise.
+8. Stage the result and run the **differential validation gate**: with the defaults, a change may
    not introduce diagnostics the workspace did not already have (`rejectNewErrors`), while existing
    problems are tolerated so partial repairs remain possible (`allowExistingErrors`). A violation is
-   `INVALID_RESULT`.
-8. Re-verify the base under the lock.
-9. Write **durable recovery copies** of everything about to change, each with its size and `blake3`
-   fingerprint.
-10. Write the **write-ahead journal**, fsynced.
-11. Persist the receipt — before the point of no return.
-12. Publish with **atomic renames**, one file at a time, through the single writer.
-13. Seal: promote the receipt, drop the journal, clean staging, keep the recovery copies.
+   `INVALID_RESULT` too — with a message about `rejectNewErrors`/`allowExistingErrors`, not about
+   the plan's policy.
+9. Re-verify the base under the lock.
+10. Write **durable recovery copies** of everything about to change, each with its size and `blake3`
+    fingerprint.
+11. Write the **write-ahead journal**, fsynced.
+12. Persist the receipt — before the point of no return.
+13. Publish with **atomic renames**, one file at a time, through the single writer.
+14. Seal: promote the receipt, drop the journal, clean staging, keep the recovery copies.
 
 Two consequences of that order are contract, not implementation detail:
 
@@ -427,7 +447,7 @@ Every failure comes back as a stable code in English plus a message in Spanish, 
 | `PLAN_STALE` | The plan is gone, or the workspace moved under it | Plan again |
 | `PLAN_EXPIRED` | The plan timed out, or the receipt no longer exists | Plan again; the transaction is no longer revertible |
 | `WRITE_CONFLICT` | Another publisher holds the lock, the base moved under the lock, or a file changed inside the publication window (or after the apply you are reverting) | Terminal for that transaction: re-read and plan again |
-| `INVALID_RESULT` | The staging gate refused: the result introduces diagnostics the workspace did not have | Fix the operation, or relax the policy in the config |
+| `INVALID_RESULT` | Two gates share this code, and the message tells them apart. **The plan's verdict**: the plan was not applicable under its own `policy` — the message names `requireValidResult` / `allowWarnings`. **The staging gate**: the result introduces diagnostics the workspace did not have — the message names `rejectNewErrors` / `allowExistingErrors` | Plan again, or use a policy that admits the result: the plan's `policy` argument for the first, `transactions` in the config for the second |
 | `INBOUND_LINKS_EXIST` | `delete` with `reject` on a document with backlinks | Choose another policy, or remove the links first |
 | `PERMISSION_DENIED` | An affected path is outside the writable roots | Check `writableRoots` / `referenceRoots` in the config |
 | `WORKSPACE_RECOVERY_REQUIRED` | An interrupted transaction is still pending and was not resolved | Call `change_plan`: it runs recovery first, and reports `RECOVERY_FAILED` if it cannot |
