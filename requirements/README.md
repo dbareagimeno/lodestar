@@ -180,7 +180,7 @@ español.
 
 | Épica | Estado | Área | Doc |
 |---|---|---|---|
-| **E28** — Fase 0: defectos destructivos del testbench homelab | ✅ completa (2026-08-06) | `change_revert` de un recibo `-revert` restaura de verdad (+ unifica la coreografía de sellado de `decisiones §16(i)`) · guard de colisión en `create`/`move` (`DOCUMENT_ALREADY_EXISTS`, catálogo 16→17) | [epica-28-defectos-destructivos-testbench.md](epica-28-defectos-destructivos-testbench.md) |
+| **E28** — Fase 0: defectos destructivos del testbench homelab | adenda correctiva propuesta (2026-08-06, pendiente de ratificación H03/H04) | `change_revert` de un recibo `-revert` restaura de verdad (+ unifica la coreografía de sellado de `decisiones §16(i)`) · guard de colisión en `create`/`move` (`DOCUMENT_ALREADY_EXISTS`, catálogo 16→17) · **adenda**: identidad de `txnId` libre en `change_apply`/`change_revert` (H03) · normalización contra estado acumulado del change set (H04) | [epica-28-defectos-destructivos-testbench.md](epica-28-defectos-destructivos-testbench.md) |
 | **E29** — Fase 1: honestidad de superficie | propuesta (pendiente de ratificación) | config estricta (`§16e`+A-08) · `policy` parcial (`§19b`) · `has(frontmatter)` (`§19a`) · type error de afijo (A-04) · scope `paths` (A-07) · aviso de workspace vacío (`§16f`) · `canApply` vinculante (`§18`) · wire estricto (`§15`) · `instructions` por perfil + `protocolVersion` (D-01) · repliegue de la API no transaccional (`§16g`) · retirada del `Envelope` (`§16b`) | [epica-29-honestidad-superficie.md](epica-29-honestidad-superficie.md) |
 
 **Orden de construcción (E28)**: `H01` y `H02` son independientes y paralelizables (ficheros y
@@ -188,6 +188,15 @@ garantías distintas); `H01` va primero en la secuencia por gravedad (pérdida d
 ser la prioridad más alta de `decisiones §23`. Los demás hallazgos de esa ficha (D-01/D-02,
 A-01…A-10) quedan **fuera de E28** — tienen su propio dueño (épica de honestidad de superficie,
 ciclo de higiene de `decisiones §16(j)`, o `§19`) y no implican escritura destructiva.
+
+**Adenda correctiva (2026-08-06)**: los jueces ciegos que verificaron `H01`/`H02` (ya integradas en
+`develop`) encontraron un bloqueante en cada una, ejecutando el binario real. `H03` cierra la
+identidad de `txnId` que `H01` dejó libre en el camino de `change_apply` (el guard anti-sobrescritura
+solo vivía en `change_revert`); `H04` cierra la normalización de `change_plan`, que seguía
+comparando contra el `DocumentSet` inicial en vez del estado que el propio plan acumula. `H03`/`H04`
+son independientes entre sí y no dependen de nada nuevo; preceden a cualquier trabajo posterior que
+ejercite el camino transaccional (en particular, el arranque de `E29`). `H04` abre además
+`decisiones §24` (equivalencia de paths por caja/Unicode), explícitamente fuera de su alcance.
 
 **Orden de construcción (E29)**: `H01 → H02 → H03 → H04 → H05 → H06 → H09 → H07 → H08 → H11 → H10`.
 `H01` primero por decisión explícita de `decisiones §16(e)` (fija el criterio «lo desconocido se

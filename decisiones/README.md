@@ -62,6 +62,7 @@ prioridad **filtra**, no ordena. El vocabulario de `estado` es cerrado: `abierta
 | 21 | Comillas en el lenguaje de consulta | tomada | 3 | [`21-comillas-lenguaje-consulta.md`](21-comillas-lenguaje-consulta.md) |
 | 22 | Integridad referencial de los valores del frontmatter | abierta | 3 | [`22-integridad-referencial-frontmatter.md`](22-integridad-referencial-frontmatter.md) |
 | 23 | Hallazgos del testbench MCP sobre el homelab | abierta | **5** | [`23-hallazgos-testbench-homelab.md`](23-hallazgos-testbench-homelab.md) |
+| 24 | Equivalencia de paths por caja/Unicode en el guard de colisión | abierta | 3 | [`24-equivalencia-caja-unicode.md`](24-equivalencia-caja-unicode.md) |
 
 ## Dónde está el criterio hoy
 
@@ -97,10 +98,11 @@ prioridad **filtra**, no ordena. El vocabulario de `estado` es cerrado: `abierta
 §19 y §21. Las tres primeras, más los puntos (b), (e), (f) y (g) de §16, forman la **épica de
 honestidad de superficie**, que es lo siguiente que entra.
 
-**§3, §10, §22** son decisiones vivas de baja urgencia: tienen recomendación estable y esperan un
-caso real que las fuerce (§3 absorbió además el problema de *timeout*/cancelación de §16(d)). §22 es
-el primer hallazgo salido del dogfooding, así que su sitio natural es dentro de la épica de
-evidencia (§9).
+**§3, §10, §22, §24** son decisiones vivas de baja urgencia: tienen recomendación estable (o, en
+el caso de §24, opciones abiertas sin urgencia) y esperan un caso real que las fuerce (§3 absorbió
+además el problema de *timeout*/cancelación de §16(d)). §22 y §24 son hallazgos salidos del
+dogfooding, así que su sitio natural es dentro de la épica de evidencia (§9); §24 nació de la
+verificación por jueces ciegos de la adenda correctiva de E28 (`E28-H04`) y no bloquea esa épica.
 
 **§2, §4, §6, §7, §8** son archivo: la pregunta ya no tiene sujeto porque el código que la motivaba
 se borró (la UI de escritorio, el espejo TS, el merge local, `--range`, `lodestar.toml`). Se
@@ -112,6 +114,10 @@ de idioma partido, no la ficha.
 0. **§23/M-01 — revert del recibo `-revert`** (bug de motor con pérdida de datos): historia
    inmediata y acotada, junta con §16(i) porque es la misma coreografía de sellado. Le sigue
    **§23/A-05** (guard de colisión de `create`/`move`), el único hueco destructivo restante.
+   **Adenda (2026-08-06)**: los jueces ciegos que verificaron esas dos historias (`E28-H01`/`H02`)
+   encontraron un bloqueante en cada una — `E28-H03` cierra la identidad de `txnId` que H01 dejó
+   abierta en el `apply`; `E28-H04` cierra la normalización contra estado acumulado que H02 dejó
+   pendiente. `E28-H04` abre además `§24` (equivalencia de caja/Unicode), fuera de su alcance.
 1. **Épica de honestidad de superficie** — todo lo que la superficie documentada afirma y el motor
    no ejecuta: §19(a), §19(b), §18 vinculante, §16(f) aviso de workspace vacío, §16(e) config
    estricta (absorbe §23/A-08-rechazo), §15 wire estricto (con la tabla de campos por operación

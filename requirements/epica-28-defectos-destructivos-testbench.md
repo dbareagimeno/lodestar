@@ -323,3 +323,370 @@ path existente o un `move` a un destino ocupado producen un plan no aplicable co
 colisión declarado en el contrato, y su `change_apply` queda rechazado sin tocar disco. Las dos
 historias tienen su ciclo TDD completo con juez ciego y mutation testing, dado que ambas tocan el
 motor transaccional o la forma congelada del catálogo de errores.
+
+---
+
+## Adenda correctiva (2026-08-06)
+
+Los jueces ciegos que revisaron la implementación de H01 y H02 (commits `043f233` y `296147b`, ya
+en `develop`) verificaron cada veredicto **ejecutando el binario real** por JSON-RPC — la misma
+disciplina que produjo la épica — y encontraron dos defectos reales, cada uno un bloqueante de la
+historia que arregló: H01 dejó viva una segunda vía de colisión de `txnId` (el `apply`, no el
+`revert`, que sí quedó protegido) y H02 normaliza contra el `DocumentSet` **inicial** del plan en
+vez del estado que las propias operaciones del plan van acumulando, lo que produce tanto falsos
+negativos destructivos como una regresión de dos idiomas legítimos que funcionaban antes de H02.
+**E28-H03** cierra el primero; **E28-H04** cierra el segundo. Los hallazgos no se relitigan aquí:
+se especifican como corrección.
+
+---
+
+## E28-H03 — identidad de transacción libre en la publicación (corrige el bloqueante de H01)
+
+- **Objetivo**: la identidad efectiva de **toda** transacción de publicación —`change_apply` y
+  `change_revert` por igual— se resuelve buscando de forma determinista la primera variante libre
+  del `txnId`, con el mismo criterio de «libre» que ya usa el guard de H01 y el GC del plano de
+  control (`journal/` ∪ `receipts/`), en vez de sobrescribir en silencio (el camino que hoy toma
+  `change_apply`) o fallar sin salida (el camino que hoy toma `change_revert` cuando el `txnId` de
+  su propia reversión ya tiene recibo vigente por culpa de ese primer defecto).
+
+- **Síntoma reproducible** (verificado por JSON-RPC contra el binario real): el `changeSetId` es
+  determinista — `blake3(baseRevision, normalizedOperations)` (`crates/lodestar-app/src/lib.rs`
+  ~L1792, `compute_plan_hash`) — así que replanificar **exactamente** el mismo cambio sobre la
+  misma base produce el mismo `changeSetId`, y por tanto el mismo `txnId`
+  (`transaction_id(&change_set.id)`, `crates/lodestar-workspace/src/transaction.rs:68`). La
+  secuencia `plan → apply(X) → revert(X) → re-plan idéntico → apply(X)` reutiliza literalmente el
+  mismo `txnId` `X` que la primera transacción:
+  - el segundo `apply` **sobrescribe** `recovery/X/` y `receipts/X.json` de la primera
+    transacción, porque `apply_transaction_con_recibo` (`transaction.rs:280`) llama a
+    `backup_originals`/`create_journal`/`write_pending_receipt` directamente, sin pasar antes por
+    el guard `assert_txn_id_libre` que H01 escribió (`crates/lodestar-workspace/src/recovery.rs:912`)
+    — ese guard **solo** lo llama `revert_transaction` (`recovery.rs:1086`), nunca
+    `apply_transaction_con_recibo`;
+  - el `revert(X)` posterior a ese segundo `apply` falla `WRITE_CONFLICT` **sin salida**: el
+    `revert_transaction_id` que deriva su propio `txnId` (`X-revert`) encuentra que `X-revert` ya
+    tiene un recibo persistido — el de la **primera** reversión, la que el paso anterior de la
+    secuencia ya había hecho — y `assert_txn_id_libre` lo rechaza correctamente, pero no hay ningún
+    id alternativo que probar: el re-apply queda **permanentemente no revertible**.
+
+  En el commit padre a H01 (antes de que existiera el guard) esa misma secuencia funcionaba —sin
+  garantía real de no-colisión, pero sin bloquear—; H01 cerró el camino del `revert` con un `Err`
+  ruidoso y dejó abierto el mismo camino en el `apply`, y ahora la combinación de los dos (uno que
+  sobrescribe, otro que rechaza) dejó una secuencia legítima sin salida.
+
+- **Causa raíz**: `assert_txn_id_libre` (`crates/lodestar-workspace/src/recovery.rs:912`) es un
+  guard **rechaza-o-nada**: comprueba si el `txnId` propuesto está libre y falla si no lo está, pero
+  no participa en decidir **cuál** `txnId` usar. `revert_transaction_id` (`transaction.rs:108`) sí
+  deriva un `txnId` distinto en cada escalón de la cadena de reversiones (`X-revert`,
+  `X-revert-2`, …), pero solo para la dirección "revertir un `-revert`"; no existe una derivación
+  equivalente para "publicar de nuevo bajo un `txnId` que ya está tomado por una transacción
+  **distinta** que compartía el mismo `changeSetId`" — el caso de un `apply` re-planificado
+  idéntico.
+
+- **Referencias**: `ARCHITECTURE.md §19.4/§19.5` (modelo transaccional, recibo, copias de
+  recuperación) · `ARCHITECTURE.md §20.11` (operaciones universales) · `contracts/mcp.yml`
+  (`change_apply`/`change_revert`) · `crates/lodestar-workspace/src/transaction.rs`
+  (`transaction_id:68`, `revert_transaction_id:108`, `apply_transaction_con_recibo:280`,
+  `seal_published_transaction:177`) · `crates/lodestar-workspace/src/recovery.rs`
+  (`assert_txn_id_libre:912`, `revert_transaction:994`, `revert_transaction_con_recibo`) ·
+  `crates/lodestar-app/src/lib.rs` (`compute_plan_hash` ~L1792, `App::change_revert_uncounted`) ·
+  `CLAUDE.md` invariante #1 (única fuente de verdad: un recibo pisado es una copia de recuperación
+  perdida) y #5 (único escritor).
+
+- **Alcance**:
+  - Un único punto de decisión de identidad, consumido por **ambos** caminos (`apply` y `revert`):
+    dado un `txnId` candidato, si `assert_txn_id_libre` lo rechaza, deriva la siguiente variante
+    determinista (la misma familia de sufijo numerado que ya usa `revert_transaction_id` para la
+    cadena de reversiones) y reintenta, hasta encontrar la primera libre. Determinista: la misma
+    secuencia de entrada produce siempre el mismo `txnId` final, para que un reintento tras crash
+    converja al mismo material que la recuperación ya conoce (mismo principio que ya documenta
+    `revert_transaction_id`).
+  - `apply_transaction_con_recibo` pasa por este punto de decisión **antes** de
+    `backup_originals`/`create_journal` (el mismo lugar donde hoy calcula `txn_id =
+    transaction_id(&change_set.id)`, `transaction.rs:329`), así que un `apply` cuyo `txnId`
+    "natural" ya está tomado por una transacción vigente (journal presente o recibo persistido) no
+    lo sobrescribe: publica bajo la primera variante libre.
+  - `revert_transaction`/`revert_transaction_con_recibo` consumen el mismo punto de decisión en vez
+    de un `assert_txn_id_libre` de solo-rechazo: si el `txnId` que `revert_transaction_id` deriva
+    ya está tomado (el caso descrito arriba), no falla sin salida — encuentra la siguiente variante
+    libre de la misma familia y revierte bajo ese id.
+  - La convención de nombre que ata `staging/`, `recovery/`, `journal/` y `receipts/` bajo el mismo
+    `txnId` (`receipts.rs:9-15`) se preserva sin cambios: lo que cambia es únicamente cómo se
+    resuelve el `txnId` efectivo antes de la primera escritura, nunca la convención en sí. Los
+    recibos y copias de recuperación **previos** (de cualquier transacción con material vigente)
+    jamás se pisan, en ninguno de los dos caminos.
+
+- **Fuera de alcance**: no cambia la forma de wire de `change_apply`/`change_revert` (mismos
+  parámetros, mismos `ApplyResult`/`RevertResult`); esta historia resuelve identidad **interna**, no
+  la superficie. No toca `change_plan` ni el `planHash`: dos planes idénticos sobre la misma base
+  siguen produciendo el mismo `changeSetId` — eso es determinismo deseado, no el defecto.
+
+- **Criterios de aceptación**:
+  - **Dado** un documento en estado `A`, **Cuando** se ejecuta `plan → apply → revert → re-plan
+    idéntico (misma base, mismas ops) → apply → revert`, **Entonces** las cuatro operaciones
+    (apply, revert, apply, revert) completan con éxito, cada una con un `receiptId` **distinto** de
+    los tres anteriores, y el fichero queda en el estado correcto tras cada paso → **test:
+    `apply_revert_reapply_revert_de_plan_identico_completa_con_cuatro_receipts_unicos`**.
+  - **Dado** ese mismo encadenamiento, **Cuando** se inspecciona `recovery/`/`receipts/` tras el
+    segundo `apply`, **Entonces** las copias y el recibo de la **primera** transacción
+    (`recovery/X/`, `receipts/X.json`) siguen **intactos byte a byte** — el segundo `apply` publicó
+    bajo un `txnId` distinto → **test: `reapply_de_changeset_identico_no_pisa_recovery_ni_receipts_previos`**.
+  - **Dado** el camino de publicación **sin** colisión de `txnId` (el caso normal: cada
+    `changeSetId` es nuevo), **Cuando** se ejecuta la suite existente, **Entonces** los ids
+    derivados son exactamente los de hoy (`X`, `X-revert`, `X-revert-2`, …) → control anti-vacuo:
+    los tests actuales de `transaction_id`/`revert_transaction_id` y de
+    `crates/lodestar-workspace/tests/transactions.rs` siguen verdes sin tocarse.
+  - **Dado** el catálogo de casos del rustdoc de `revert_transaction_id` (la tabla `txn_id` →
+    `reversión` de `transaction.rs:91-95`), **Cuando** se ejercen como tests unitarios uno a uno,
+    **Entonces** cada fila de la tabla tiene su test → **test:
+    `revert_transaction_id_sigue_la_tabla_del_rustdoc`** (parametrizado o uno por fila).
+  - **Dado** un `txn_id` en su borde `-revert-{u64::MAX}`, **Cuando** se deriva su reversión,
+    **Entonces** el comportamiento queda decidido y documentado explícitamente en el rustdoc (hoy es
+    un punto fijo silencioso por `saturating_add`: la siguiente reversión produciría el mismo id y
+    volvería a colisionar) — la fase roja fija si el borde falla ruidosamente o si se acepta el
+    punto fijo con una nota que explique por qué es inofensivo en la práctica → **test:
+    `revert_transaction_id_en_el_borde_u64_max`**.
+  - **Dado** un `txn_id` con un sufijo **no canónico** (`-revert-1` con cero relleno-cero implícito
+    ya cubierto, `-revert-+2`, `-revert-01`), **Cuando** se deriva su reversión, **Entonces** el
+    resultado es el que la fase roja fije con test — cada entrada de esta clase es una decisión
+    explícita, no un comportamiento accidental de `parse::<u64>()` → **test:
+    `revert_transaction_id_con_sufijos_no_canonicos`**.
+  - **Dado** el rustdoc de `revert_transaction_id` (*"componible sin límite"*), **Cuando** se lee
+    tras el arreglo, **Entonces** reconoce explícitamente el borde de `u64::MAX` en vez de afirmar
+    composición ilimitada sin matiz → revisión de diff (criterio estructural, no BDD).
+
+- **Delta de contrato** (`contracts/mcp.yml`):
+  - La fila `change_revert` debe declarar, en su lista `errores:` de `WRITE_CONFLICT`, la causa
+    nueva que introdujo H01: *«el `txnId` derivado para la reversión ya identifica a una
+    transacción con material vigente (journal o recibo)»*. **Si esta historia hace que esa causa
+    desaparezca del camino feliz** (porque ahora se resuelve buscando la variante libre en vez de
+    fallar), la entrada de `errores:` se retira en la misma pasada y se declara, en su lugar, la
+    causa de `WRITE_CONFLICT` que quede vigente (ninguna, salvo las ya existentes de revisión
+    optimista) — la implementación decide cuál de las dos redacciones aplica y la fase roja lo fija
+    con test antes de tocar el contrato.
+  - Igual para `change_apply`: si `apply_transaction_con_recibo` empieza a resolver identidad en
+    vez de sobrescribir, su lista `errores:` no gana ningún código nuevo (el defecto no producía un
+    error, producía una sobrescritura silenciosa) — no hay entrada que añadir ahí, solo el
+    comportamiento corregido.
+  - El mensaje de error de cualquier `WRITE_CONFLICT` que sobreviva debe ser **accionable para un
+    agente** (qué hacer: replanificar, no rutas internas de `recovery/`/`receipts/` que un agente
+    no puede interpretar ni actuar), siguiendo el estilo ya fijado por el resto del catálogo
+    (`ARCHITECTURE.md §20`, principio de E26).
+
+- **Nota de registro sin acción** (no requiere trabajo, se documenta para que no se "unifique" por
+  inercia): `finish_recovery_completada` (`crates/lodestar-workspace/src/recovery.rs` ~L802)
+  comparte forma superficial con `seal_published_transaction` (la coreografía unificada de H01:
+  promover recibo → limpiar staging → borrar journal) pero es la vía **COMPLETAR** post-crash de
+  `Workspace::recover`, con semántica deliberadamente distinta: borrado incondicional del journal
+  (no condicionado a que el recibo quedara a salvo, como sí lo está `seal_published_transaction`),
+  promoción idempotente (E25-H04) y ejecutándose fuera de la ventana de publicación normal. Dos
+  jueces ciegos de la ronda de E28 la verificaron como legítimamente distinta de la coreografía
+  compartida. Queda documentado en el rustdoc de `finish_recovery_completada` para que nadie la
+  fusione con `seal_published_transaction` sin releer por qué son dos caminos.
+
+- **Dependencias**: ninguna (corrige H01, que ya está integrada en `develop`).
+
+- **Pruebas**: `crates/lodestar-workspace/tests/transactions.rs` (unicidad de `txnId` bajo
+  colisión, control anti-vacuo de la convención existente) + tests unitarios de
+  `crates/lodestar-workspace/src/transaction.rs` (tabla de casos de `revert_transaction_id` contra
+  su rustdoc, borde `u64::MAX`, sufijos no canónicos) + arnés de sesión viva `Sesion` de
+  `crates/lodestar-mcp/tests/e2e_ciclo_vida.rs` (la secuencia completa
+  `plan→apply→revert→re-plan→apply→revert` por JSON-RPC, que es como el testbench la reprodujo).
+  Fixtures: `lodestar-fixtures`, workspace mínimo con un documento mutable; no requiere fixtures
+  nuevos.
+
+- **Proceso**: ciclo **completo** (spec → roja → verde → juez ciego con mutation testing) — toca el
+  mismo motor transaccional que H01 y corrige un bloqueante que dos jueces ciegos ya verificaron
+  ejecutando el binario.
+
+---
+
+## E28-H04 — normalización contra el estado acumulado del change set (corrige el bloqueante de H02)
+
+- **Objetivo**: `change_plan` normaliza cada operación de un plan contra el estado que las
+  operaciones **anteriores del mismo plan** van dejando, no contra el `DocumentSet` con el que
+  empezó a planificar. Los idiomas legítimos que dependen de eso (mover dos documentos al mismo
+  destino final en dos pasos, crear un documento y moverlo en el mismo plan) vuelven a funcionar
+  exactamente como antes de H02, y las colisiones reales **dentro** de un mismo plan (dos `create`
+  al mismo path, un `create` que pisa un `move` anterior del propio plan) quedan rechazadas con el
+  mismo `DOCUMENT_ALREADY_EXISTS` que H02 introdujo para las colisiones contra disco.
+
+- **Síntoma reproducible** (verificado por JSON-RPC contra el binario real, sobre el commit de
+  H02): `change_plan` normaliza **todas** las operaciones del array contra el `DocumentSet` inicial
+  del workspace (`crates/lodestar-app/src/lib.rs` ~L1763, el bucle que llama a
+  `normalize_raw_op(&doc_set, raw)` con el mismo `doc_set` en cada iteración; los guards de
+  colisión que H02 añadió viven en `crates/lodestar-core/src/plan.rs`
+  `normalize_create` ~L346 y `normalize_move` ~L848, y los dos comparan contra ese mismo
+  `DocumentSet` fijo). Dos familias de defecto, verificadas ambas:
+  - **Falsos negativos destructivos** (el guard de H02 no ve la colisión):
+    - `[move a→final, move b→final]`: cada `move` se normaliza contra el `DocumentSet` original,
+      donde `final` no existe todavía — el plan entero aplica con `risk: low` y el segundo `move`
+      destruye lo que dejó el primero, sin ningún diagnóstico.
+    - `[create X, move b→X]`: el `move` se normaliza contra el `DocumentSet` original, donde `X`
+      tampoco existe — el `create` de `X` queda pisado en silencio por el `move`.
+    - `[create X, create X]`: el segundo `create` se normaliza contra el mismo `DocumentSet`
+      original que el primero — ninguno de los dos ve al otro, y el segundo gana al aplicar.
+  - **Falsos positivos — regresión respecto al commit padre de H02** (el guard rechaza algo que
+    antes funcionaba y sigue siendo legítimo):
+    - `[delete X, create X]` — recrear un documento borrado en el mismo plan — funcionaba en el
+      commit anterior a H02 y ahora `normalize_create` ve `X` todavía presente en el `DocumentSet`
+      inicial (el `delete` previo del mismo plan no se ha reflejado) y rechaza
+      `DOCUMENT_ALREADY_EXISTS`.
+    - `[move A→B, create A]` — liberar `A` moviéndolo y reutilizar el path en el mismo plan —
+      funcionaba antes de H02 y ahora falla igual, por la misma razón: el `DocumentSet` inicial
+      todavía tiene `A` ocupado por sí mismo en el momento en que se normaliza el `create`.
+
+- **Causa raíz**: el bucle de normalización de `App::change_plan_uncounted`
+  (`crates/lodestar-app/src/lib.rs` ~L1741-1764) pasa el **mismo** `&doc_set` —inmutable, calculado
+  una vez al principio de la función— a cada llamada de `normalize_raw_op`, así que ninguna
+  operación ve el efecto de las que la preceden dentro del propio plan. Los guards de colisión de
+  H02 (`plan.rs` `normalize_create:346`, `normalize_move:847`) son correctos **para el caso de una
+  sola operación contra disco**; el defecto no está en el guard, está en qué `DocumentSet` se le
+  pasa cuando el plan tiene más de una operación tocando paths relacionados.
+
+- **Referencias**: `ARCHITECTURE.md §19.4` (`change_plan`, normalización pura sin escribir) ·
+  `ARCHITECTURE.md §20.11` (operaciones universales) · `contracts/mcp.yml` (`change_plan`,
+  catálogo `ErrorCode`, `DOCUMENT_ALREADY_EXISTS` introducido por H02) ·
+  `crates/lodestar-app/src/lib.rs` (`App::change_plan_uncounted` ~L1700-1770, `single_operation`
+  ~L2899-2924) · `crates/lodestar-core/src/plan.rs` (`normalize_create:340`, `normalize_move:839`) ·
+  `CLAUDE.md` invariante #1 (única fuente de verdad) y #3 (una sola verdad computada: el estado
+  contra el que se valida un plan es el que el plan mismo va construyendo, no un snapshot que deja
+  de ser cierto a la segunda operación).
+
+- **Alcance**:
+  - La normalización del array de operaciones lleva un **estado de ocupación acumulado**,
+    derivado del `DocumentSet` inicial y actualizado en orden por cada operación ya normalizada de
+    ese mismo plan: cada `create`/`move.to` que se acepta **ocupa** su path en ese estado; cada
+    `delete`/`move.from` que se acepta **libera** el suyo. Los guards de `normalize_create`/
+    `normalize_move` consultan ese estado acumulado, no el `DocumentSet` fijo original.
+  - Forma concreta a decidir en la fase roja (no la fija la historia, la fija el análisis): puede
+    ser un `DocumentSet` hipotético que se recalcula tras cada operación aceptada (más simple,
+    reusa `plan::apply_normalized_ops` incrementalmente) o un conjunto de paths ocupados/liberados
+    llevado aparte junto al `DocumentSet` original (más barato, evita recomputar contenido). El
+    criterio de aceptación es el comportamiento observable de los cinco escenarios, no la forma
+    interna.
+  - Las tres colisiones **intra-plan** (`[move a→final, move b→final]`, `[create X, move b→X]`,
+    `[create X, create X]`) deben fallar con `DOCUMENT_ALREADY_EXISTS`, nombrando el `path`
+    colisionado, en la operación que lo detecta (la segunda de cada par).
+  - Los dos idiomas legítimos (`[delete X, create X]`, `[move A→B, create A]`) deben volver a
+    aplicar, con el disco final coincidiendo exactamente con lo que producían antes de H02.
+  - La selección masiva (`selection`+`operation`, expandida por `expand_selection`) queda **fuera**
+    de este acumulado: sigue expandiéndose contra el `DocumentSet` inicial en un solo paso —cada
+    documento seleccionado genera como mucho una operación, y `create`/`move` ya están excluidos de
+    esa vía por `single_operation`— así que no hay secuencia intra-selección que acumular.
+
+- **Fuera de alcance**: equivalencia de paths por mayúscula/minúscula o forma de normalización
+  Unicode (NFC/NFD) — el guard de colisión (de H02 y de esta historia) sigue comparando claves
+  **byte a byte**, sin normalizar. Ver `decisiones/24-equivalencia-caja-unicode.md` (nueva, estado
+  `abierta`): en sistemas de ficheros case-insensitive (macOS/Windows) un `create`/`move` a
+  `Notas/Existente.md` evade el guard byte-a-byte y puede destruir `notas/existente.md` en disco, y
+  esta historia no lo corrige — necesita una decisión de producto sobre qué clave usar para
+  comparar, no una corrección acotada.
+
+- **Criterios de aceptación**:
+  - **Dado** un workspace con `a.md` y `b.md` y sin `final.md`, **Cuando** se llama a `change_plan`
+    con `[{"op":"move","from":"a.md","to":"final.md"},
+    {"op":"move","from":"b.md","to":"final.md"}]`, **Entonces** el plan tiene `canApply: false` con
+    `DOCUMENT_ALREADY_EXISTS` nombrando `final.md` en la segunda operación → **test:
+    `dos_moves_al_mismo_destino_en_el_mismo_plan_es_document_already_exists`**.
+  - **Dado** un workspace con `b.md` y sin `x.md`, **Cuando** se llama a `change_plan` con
+    `[{"op":"create","path":"x.md",...}, {"op":"move","from":"b.md","to":"x.md"}]`, **Entonces** el
+    plan tiene `canApply: false` con `DOCUMENT_ALREADY_EXISTS` nombrando `x.md` → **test:
+    `create_seguido_de_move_al_mismo_path_es_document_already_exists`**.
+  - **Dado** un workspace sin `x.md`, **Cuando** se llama a `change_plan` con
+    `[{"op":"create","path":"x.md",...}, {"op":"create","path":"x.md",...}]`, **Entonces** el plan
+    tiene `canApply: false` con `DOCUMENT_ALREADY_EXISTS` nombrando `x.md` en la segunda operación
+    → **test: `dos_creates_al_mismo_path_en_el_mismo_plan_es_document_already_exists`**.
+  - **Dado** un workspace con `x.md`, **Cuando** se llama a `change_plan` con
+    `[{"op":"delete","path":"x.md"}, {"op":"create","path":"x.md",...}]`, **Entonces** el plan
+    tiene `canApply: true`, y `change_apply` sobre ese `changeSetId` deja `x.md` en disco con el
+    contenido del segundo `create` → **test: `delete_seguido_de_create_del_mismo_path_aplica`**.
+  - **Dado** un workspace con `A.md` y sin `B.md`, **Cuando** se llama a `change_plan` con
+    `[{"op":"move","from":"A.md","to":"B.md"}, {"op":"create","path":"A.md",...}]`, **Entonces** el
+    plan tiene `canApply: true`, y `change_apply` deja `B.md` con el contenido movido y `A.md` con
+    el contenido del `create` → **test: `move_seguido_de_create_del_path_liberado_aplica`**.
+  - **Dado** un workspace con `notas/existente.md` (control anti-vacuo del criterio original de
+    H02), **Cuando** se llama a `change_plan` con una sola operación `{"op":"create",
+    "path":"notas/existente.md"}`, **Entonces** sigue rechazando `DOCUMENT_ALREADY_EXISTS` —la
+    colisión contra disco de una sola operación no se rompe al introducir el acumulado → control
+    anti-vacuo: `create_sobre_path_existente_es_document_already_exists` de H02 sigue verde sin
+    tocarse.
+  - **Dado** una selección masiva (`selection`+`operation`) que pida `{"create": {...}}` o
+    `{"move": {...}}`, **Cuando** se llama a `change_plan`, **Entonces** se rechaza
+    `INVALID_SCHEMA` con el mensaje de `single_operation` (*«create» no aplica a documentos
+    existentes y «move» necesita un destino por documento*) → **test:
+    `seleccion_masiva_rechaza_create_y_move`** (criterio pendiente de H02, cerrado aquí; vive en
+    `crates/lodestar-app/tests/seleccion.rs`).
+
+- **Limpieza de fósiles** (localizados por los jueces, en la misma pasada de esta historia, no como
+  seguimiento separado):
+  - `crates/lodestar-mcp/tests/mcp.rs:6480` — el comentario afirma «El catálogo NO se toca: sigue
+    teniendo 16 filas (`catalogo_de_errores_tiene_dieciseis_filas`…)», y H02 ya lo llevó a 17 y
+    renombró el test. Corregir el comentario para que cite el estado actual (17 filas, nombre del
+    test vigente).
+  - `crates/lodestar-mcp/tests/descubribilidad.rs:1921` — «de las 16 filas» en el rustdoc de la
+    auditoría `codigos_sin_emisor`/`E26-H11`: actualizar a 17.
+  - `contracts/mcp.yml:100` — «El catálogo sigue teniendo 16 filas: se sustituyó una» (nota
+    histórica de `NONCONFORMANT_RESULT → INVALID_RESULT`, E23-H14): sigue siendo cierto **como
+    afirmación histórica** de esa migración, pero en presente induce a error ahora que H02 abrió el
+    catálogo a 17; reformular para que quede claro que describe el estado en E23-H14, no el actual.
+  - `CHANGELOG.md`, sección `[No publicado]`: añadir una entrada bajo un encabezado `### Añadido` (o
+    el que corresponda al estilo de la sección) documentando `DOCUMENT_ALREADY_EXISTS` como código
+    nuevo del catálogo (16→17) y su motivo, siguiendo el estilo de las entradas ya presentes en esa
+    sección.
+
+- **Fuera de alcance explícito**: equivalencia de paths por caja/Unicode → `decisiones
+  §24` (ficha nueva). Cualquier otra operación (`patch_frontmatter`, `replace_text`, `edit_section`,
+  `replace_body`) no cambia de comportamiento — no dependen de existencia de path de la misma forma
+  que `create`/`move`, y sus guards actuales (`document_body`/`op_ref_path`) ya operan sobre el
+  cuerpo tras la normalización de la operación anterior sin el defecto descrito aquí (no colisionan
+  por existencia, colisionan por contenido, que ya se recalcula correctamente entre operaciones vía
+  `document_body` sobre el `doc_set` — el defecto es específico de los dos guards de **existencia**
+  que H02 introdujo).
+
+- **Dependencias**: ninguna (corrige H02, que ya está integrada en `develop`). Independiente de
+  **E28-H03**: ficheros distintos (`lib.rs`/`plan.rs` de `change_plan` vs
+  `transaction.rs`/`recovery.rs` de `change_apply`/`change_revert`), garantías distintas.
+
+- **Pruebas**: `roundtrip()` de `crates/lodestar-mcp/tests/mcp.rs` (arnés de proceso frío, cada
+  escenario es una llamada aislada `change_plan`/`change_apply`) + `crates/lodestar-core/tests/core.rs`
+  (normalización pura con estado acumulado, si la forma elegida en la fase roja vive en el core) +
+  `crates/lodestar-app/tests/plan.rs` (los cinco escenarios BDD, si la forma elegida vive en la
+  fachada) + `crates/lodestar-app/tests/seleccion.rs` (el criterio anti-vacuo de selección masiva
+  pendiente de H02). Fixtures: `lodestar-fixtures`, workspace mínimo con al menos dos documentos
+  existentes para poder ejercer las colisiones intra-plan.
+
+- **Frontera (mcp.yml)**: no cambia la forma de `change_plan` (mismos parámetros, mismo
+  `PlanResult`, mismo catálogo `ErrorCode` de 17 filas que H02 ya fijó); cambia el comportamiento
+  interno de la normalización. No requiere delta de contrato nuevo, solo la limpieza de fósiles ya
+  listada (que corrige texto ya desactualizado, no introduce superficie nueva).
+
+- **Proceso**: ciclo **completo** — toca la normalización pura del core/app que H02 dejó con un
+  bloqueante verificado por jueces ciegos, y siete criterios de aceptación con forma BDD que
+  necesitan roja→verde con separación de poderes.
+
+---
+
+## Orden de construcción (adenda)
+
+```
+H03 (identidad de txn libre en apply/revert)   ┐  independientes entre sí,
+H04 (normalización acumulada create/move)       ┘  paralelizables
+
+Las dos corrigen bloqueantes de historias ya integradas (H01 y H02 respectivamente) y no comparten
+fichero ni garantía; el orden entre ellas es indiferente. Ambas preceden a cualquier trabajo que
+dependa de que change_apply/change_revert/change_plan estén libres de estos dos defectos —en
+particular, cualquier arranque de la épica de honestidad de superficie (E29) que ejercite el camino
+transaccional debe asumir H03/H04 ya integradas.
+```
+
+## Criterio de salida (adenda)
+
+Una secuencia `apply → revert → re-apply idéntico → revert` completa de punta a punta con cuatro
+`receiptId` únicos, sin pisar jamás `recovery/`/`receipts/` de una transacción previa, en **ambos**
+caminos (`change_apply` y `change_revert`). Un plan con `[move a→final, move b→final]`,
+`[create X, move b→X]` o `[create X, create X]` queda `canApply: false` con
+`DOCUMENT_ALREADY_EXISTS`, y `[delete X, create X]`/`[move A→B, create A]` vuelven a aplicar con el
+disco final correcto. Los cuatro fósiles de comentarios/changelog que citaban el catálogo de 16
+filas quedan corregidos. Las dos historias tienen su ciclo TDD completo con juez ciego y mutation
+testing, por tocar el mismo motor transaccional y la misma normalización pura que sus historias
+padre.
