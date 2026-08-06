@@ -17,48 +17,98 @@ use serde_json::{json, Value};
 
 mod tools;
 
+/// Versiones de `protocolVersion` que el servidor soporta de verdad, en el orden que declara
+/// `contracts/mcp.yml` (`meta.protocolo.protocol_versions_aceptadas`). Única fuente de esta lista:
+/// tanto el rechazo (`initialize` con una versión ausente de aquí → `-32602`) como el mensaje que
+/// las enumera se generan a partir de esta constante.
+const PROTOCOL_VERSIONS: [&str; 3] = ["2024-11-05", "2025-03-26", "2025-06-18"];
+
+/// Versión por defecto que responde el servidor cuando el cliente no pide ninguna.
+const DEFAULT_PROTOCOL_VERSION: &str = "2024-11-05";
+
+/// Preámbulo fijo de las instrucciones del servidor (no depende del perfil).
+const SERVER_INSTRUCTIONS_PREAMBULO: &str = "\
+Motor headless de integridad semántica para agentes. Opera sobre la red de documentos Markdown de \
+un proyecto cualquiera: no exige estructura previa, ningún nombre de fichero activa reglas \
+especiales, el frontmatter es YAML arbitrario tuyo y todas las rutas son relativas a la raíz.";
+
+/// Un paso del flujo recomendado: la tool que introduce y el texto que lo describe (sin numerar —
+/// la numeración se genera al componer, para que sobreviva a que un perfil filtre pasos).
+struct Paso {
+    tool: &'static str,
+    texto: &'static str,
+}
+
+/// Los 10 pasos del flujo recomendado, en orden, cada uno atado a la tool que introduce.
+///
+/// **Fuente única de qué tools se nombran** (invariante #3, criterio estructural de E29-H09): el
+/// texto de `instructions` se compone filtrando esta tabla por [`tools::available`] — el MISMO
+/// predicado que decide `tools/list` (`tools::available_tools`) — así que el conjunto de tools
+/// nombradas nunca puede divergir del servido. No hay una segunda lista de nombres escrita a mano.
+const PASOS: [Paso; 10] = [
+    Paso { tool: "workspace_status", texto: "oriéntate primero — config activa, capacidades del perfil, validez y \
+recuento agregado del workspace, recuperación pendiente y los recibos disponibles para revertir." },
+    Paso { tool: "knowledge_search", texto: "localiza documentos por texto libre y por consulta tipada (`where`/`filter`); \
+con `include: [\"frontmatter.<campo>\"]` proyectas metadata de cada resultado sin pedir el documento \
+entero. Devuelve snippets y revisión, nunca cuerpos completos." },
+    Paso { tool: "knowledge_get", texto: "lee un documento concreto con `include` selectivo y secciones acotadas por \
+`headingPath`." },
+    Paso { tool: "metadata_inspect", texto: "descubre las convenciones de metadata de la base (qué campos existen, de qué \
+tipos y qué valores toman) sin necesitar un schema, antes de proponer cambios." },
+    Paso { tool: "graph_query", texto: "consulta el grafo de enlaces — operaciones `backlinks`, `outgoing`, \
+`neighborhood`, `isolated`, `dangling`, `path_between`, `cycles`, `components`." },
+    Paso { tool: "impact_analyze", texto: "evalúa el impacto de un cambio hipotético (afectados directos y transitivos, \
+riesgo) antes de proponerlo." },
+    Paso { tool: "change_plan", texto: "planifica el cambio SIN escribir — normaliza las operaciones, simula en memoria y \
+valida el resultado; devuelve un change set con su hash determinista." },
+    Paso { tool: "change_apply", texto: "aplica el plan calculado con todas las salvaguardas transaccionales; devuelve el \
+recibo." },
+    Paso { tool: "knowledge_check", texto: "audita el conocimiento tras aplicar para confirmar que sigue siendo \
+interpretable y que sus enlaces siguen resolviendo." },
+    Paso { tool: "change_revert", texto: "si algo salió mal, revierte al estado anterior la transacción del `receiptId` \
+que te dio `change_apply` (o el que listó `workspace_status`)." },
+];
+
+/// Nota final del perfil, apéndice del texto compuesto.
+fn nota_de_perfil(profile: Profile) -> &'static str {
+    if profile.writes_enabled() {
+        "Perfil `standard` (por defecto): el flujo completo."
+    } else {
+        "Perfil `readonly`: solo los pasos de lectura y verificación (las tools de cambio no están \
+disponibles)."
+    }
+}
+
 /// Instrucciones del servidor (`instructions` de la respuesta `initialize`, `ARCHITECTURE.md
-/// §19.6`/`§20.1`): orientan al agente con el **flujo recomendado de 10 pasos**, mencionando las 10
-/// tools en el orden en que se espera usarlas. Los nombres de tool son identificadores (no se
-/// traducen); el resto va en español, el idioma del repo (E14-H03).
+/// §19.6`/`§20.1`): orientan al agente con el flujo recomendado, mencionando en orden las tools que
+/// el perfil activo realmente sirve. Los nombres de tool son identificadores (no se traducen); el
+/// resto va en español, el idioma del repo (E14-H03).
 ///
 /// **Esto es superficie de WIRE, no documentación**: viaja en la respuesta de `initialize` y es lo
 /// primero que lee un agente, así que un nombre de operación o un parámetro que ya no existe aquí
 /// se convierte en una llamada fallida del cliente. E23-H13 saldó el drift acumulado
 /// (`huérfanos` → la operación se llama `isolated` desde E16-H02; `conformidad` → el wire dice
-/// `valid` desde E23-H14) y lo blindó con `tests/mcp.rs::instructions_sin_vocabulario_retirado`,
-/// que además comprueba que se nombran exactamente las tools que sirve `tools/list`.
-const SERVER_INSTRUCTIONS: &str = "\
-Motor headless de integridad semántica para agentes. Opera sobre la red de documentos Markdown de \
-un proyecto cualquiera: no exige estructura previa, ningún nombre de fichero activa reglas \
-especiales, el frontmatter es YAML arbitrario tuyo y todas las rutas son relativas a la raíz.
-
-Flujo recomendado en cada sesión (10 pasos, en orden):
-
-1. `workspace_status`: oriéntate primero — config activa, capacidades del perfil, validez y \
-recuento agregado del workspace, recuperación pendiente y los recibos disponibles para revertir.
-2. `knowledge_search`: localiza documentos por texto libre y por consulta tipada (`where`/`filter`); \
-con `include: [\"frontmatter.<campo>\"]` proyectas metadata de cada resultado sin pedir el documento \
-entero. Devuelve snippets y revisión, nunca cuerpos completos.
-3. `knowledge_get`: lee un documento concreto con `include` selectivo y secciones acotadas por \
-`headingPath`.
-4. `metadata_inspect`: descubre las convenciones de metadata de la base (qué campos existen, de qué \
-tipos y qué valores toman) sin necesitar un schema, antes de proponer cambios.
-5. `graph_query`: consulta el grafo de enlaces — operaciones `backlinks`, `outgoing`, \
-`neighborhood`, `isolated`, `dangling`, `path_between`, `cycles`, `components`.
-6. `impact_analyze`: evalúa el impacto de un cambio hipotético (afectados directos y transitivos, \
-riesgo) antes de proponerlo.
-7. `change_plan`: planifica el cambio SIN escribir — normaliza las operaciones, simula en memoria y \
-valida el resultado; devuelve un change set con su hash determinista.
-8. `change_apply`: aplica el plan calculado con todas las salvaguardas transaccionales; devuelve el \
-recibo.
-9. `knowledge_check`: audita el conocimiento tras aplicar para confirmar que sigue siendo \
-interpretable y que sus enlaces siguen resolviendo.
-10. `change_revert`: si algo salió mal, revierte al estado anterior la transacción del `receiptId` \
-que te dio `change_apply` (o el que listó `workspace_status`).
-
-Perfil `readonly`: solo los pasos de lectura y verificación (las tools de cambio no están \
-disponibles). Perfil `standard` (por defecto): el flujo completo.";
+/// `valid` desde E23-H14). E29-H09 saldó un segundo drift —bajo `readonly` el texto seguía
+/// describiendo las 3 tools de cambio, invisibles pero mencionadas— generando el texto **por
+/// perfil** a partir de [`PASOS`] filtrado por [`tools::available`], en vez de servir una constante
+/// única: el conjunto de tools nombradas queda atado estructuralmente al servido por `tools/list`
+/// (`tests/mcp.rs::instructions_sin_vocabulario_retirado` e
+/// `instructions_readonly_nombra_solo_las_tools_servidas` lo comprueban por los dos perfiles).
+fn server_instructions(profile: Profile) -> String {
+    let mut out = String::from(SERVER_INSTRUCTIONS_PREAMBULO);
+    out.push_str("\n\nFlujo recomendado en esta sesión, en orden:\n\n");
+    let mut n = 0usize;
+    for paso in &PASOS {
+        if !tools::available(profile, paso.tool) {
+            continue;
+        }
+        n += 1;
+        out.push_str(&format!("{n}. `{}`: {}\n", paso.tool, paso.texto));
+    }
+    out.push('\n');
+    out.push_str(nota_de_perfil(profile));
+    out
+}
 
 /// Texto de uso (a stderr: stdout es JSON-RPC puro y nada más).
 const USAGE: &str = "\
@@ -195,20 +245,34 @@ fn handle(app: &App, profile: Profile, req: &Value) -> Option<Value> {
     let id = id?;
 
     let result: Result<Value, (i64, String)> = match method {
-        "initialize" => {
-            // Ecoa la versión pedida por el cliente si la conocemos; si no, la nuestra.
-            let version = params
-                .get("protocolVersion")
-                .and_then(Value::as_str)
-                .filter(|v| matches!(*v, "2024-11-05" | "2025-03-26" | "2025-06-18"))
-                .unwrap_or("2024-11-05");
-            Ok(json!({
-                "protocolVersion": version,
+        "initialize" => match params.get("protocolVersion").and_then(Value::as_str) {
+            // Ausente: válida, se responde la versión por defecto del servidor (omitir no es
+            // pedir algo imposible).
+            None => Ok(json!({
+                "protocolVersion": DEFAULT_PROTOCOL_VERSION,
                 "serverInfo": { "name": "lodestar-mcp", "version": env!("CARGO_PKG_VERSION") },
                 "capabilities": { "tools": {} },
-                "instructions": SERVER_INSTRUCTIONS
-            }))
-        }
+                "instructions": server_instructions(profile)
+            })),
+            // Presente y soportada: se ecoa.
+            Some(v) if PROTOCOL_VERSIONS.contains(&v) => Ok(json!({
+                "protocolVersion": v,
+                "serverInfo": { "name": "lodestar-mcp", "version": env!("CARGO_PKG_VERSION") },
+                "capabilities": { "tools": {} },
+                "instructions": server_instructions(profile)
+            })),
+            // Presente y NO soportada: el handshake se rechaza (no se normaliza en silencio a la
+            // versión por defecto). Un `initialize` fallido es un handshake fallido, no un error
+            // de dominio de tool: `-32602` (mismo código que "tool desconocida"/"tool no
+            // disponible bajo este perfil"), sin `result`, y el mensaje lista las aceptadas.
+            Some(v) => Err((
+                -32602,
+                format!(
+                    "protocolVersion no soportada: «{v}». Versiones aceptadas: {}",
+                    PROTOCOL_VERSIONS.join(", ")
+                ),
+            )),
+        },
         // El spec obliga a responder a ping con result vacío ("MUST respond promptly").
         "ping" => Ok(json!({})),
         "tools/list" => Ok(json!({ "tools": tools::available_tools(profile) })),

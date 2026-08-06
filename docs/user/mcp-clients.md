@@ -8,6 +8,7 @@ this page comes from a real run against [`examples/demo/`](../../examples/demo/R
 
 - [Claude Code](#claude-code)
 - [Any client configured with JSON](#any-client-configured-with-json)
+- [Protocol version negotiation](#protocol-version-negotiation)
 - [`--root`: when to pass it, when to omit it](#--root-when-to-pass-it-when-to-omit-it)
 - [Profiles: `readonly` and `standard`](#profiles-readonly-and-standard)
 - [A tour of the ten tools](#a-tour-of-the-ten-tools)
@@ -106,6 +107,21 @@ EOF
 The server reads until `stdin` closes, so piping a file in and a `jq` filter out gives you one
 complete exchange per run. (`2>/dev/null` below just drops the startup log line.)
 
+## Protocol version negotiation
+
+`initialize.params.protocolVersion` is optional. Three outcomes:
+
+- **Omitted** — valid. The server answers with its default, `2024-11-05`, no error.
+- **Present and one of `2024-11-05`, `2025-03-26`, `2025-06-18`** — echoed back as-is.
+- **Present and anything else** — a rejected handshake, not a silent fallback: JSON-RPC error
+  `-32602` with a message listing the three accepted versions, and no `result` at all.
+
+```console
+$ echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"1990-01-01"}}' \
+  | lodestar-mcp --root examples/demo 2>/dev/null
+{"error":{"code":-32602,"message":"protocolVersion no soportada: «1990-01-01». Versiones aceptadas: 2024-11-05, 2025-03-26, 2025-06-18"},"id":1,"jsonrpc":"2.0"}
+```
+
 ## `--root`: when to pass it, when to omit it
 
 `--root` is the workspace root. It is resolved once at startup and stays fixed for the whole
@@ -165,9 +181,11 @@ you want the agent to be able to propose and apply changes.
 
 ## A tour of the ten tools
 
-The `initialize` response carries server instructions describing these ten as a recommended
-ten-step flow, in this order. Below is what each one is *for*; for parameters, return shapes, error
-codes and the exact semantics, the authority is
+The `initialize` response carries server instructions describing a recommended flow, in this order.
+The text depends on the active profile: `standard` gets all ten steps below, `readonly` gets only
+the seven read/verification ones — the three change steps are never mentioned, because naming a
+tool `tools/list` does not serve would just send an agent into a `-32602`. Below is what each one is
+*for*; for parameters, return shapes, error codes and the exact semantics, the authority is
 [`contracts/mcp.yml`](../../contracts/mcp.yml) (written in Spanish, like the rest of the internal
 material), and a worked session lives in
 [`examples/demo/README.md`](../../examples/demo/README.md).

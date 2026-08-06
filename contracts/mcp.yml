@@ -528,6 +528,29 @@
 #     ningún gate al abrir). Solo con `gate.blockWarnings: true` sale `1` — por la política del
 #     usuario, no por el aviso.
 
+# E29-H09 (2026-08-06, `decisiones §23/D-01`, caso G1-24 del testbench): dos correcciones del mismo
+# hallazgo, ambas en `main.rs` (`handle`, brazo `initialize`). La superficie de 10 tools NO cambia,
+# ningún `outputSchema` cambia de forma.
+#   - `instructions` pasa a depender del PERFIL: bajo `readonly` nombra exactamente las 7 tools que
+#     `tools/list` sirve (nunca `change_plan`/`change_apply`/`change_revert`); bajo `standard`, las
+#     10. Antes era una constante única servida sin mirar `profile`, así que en `readonly` seguía
+#     describiendo el flujo de cambio completo — un agente que lo siguiera al pie de la letra topaba
+#     con `-32602`. La generación deriva del MISMO predicado que decide `tools/list`
+#     (`tools::available`, que ya usa `Profile::writes_enabled` + `tools::is_change_tool`): no hay
+#     una segunda lista de nombres de tool escrita a mano que pudiera divergir (invariante #4).
+#   - `protocolVersion` NO soportada deja de aceptarse en silencio (antes: se descartaba con
+#     `.filter(...)` y el servidor respondía éxito con su versión por defecto, como si el cliente
+#     hubiera pedido esa). Ahora se RECHAZA: error JSON-RPC `-32602` (mismo código que "tool
+#     desconocida"/"tool no disponible bajo el perfil") con un mensaje que lista las tres versiones
+#     aceptadas, y SIN `result` — un `initialize` fallido es un handshake fallido, no un error de
+#     dominio de tool, así que no lleva código del catálogo `ErrorCode`. La AUSENCIA de
+#     `protocolVersion` sigue siendo válida: se responde `2024-11-05`, la versión por defecto, sin
+#     error (omitir no es lo mismo que pedir algo imposible). Nota: la spec MCP base (2025-06-18,
+#     «Version Negotiation») prescribe una negociación blanda —el servidor responde con la versión
+#     que sí soporta y deja decidir al cliente—; aquí se sigue la prescripción explícita de la
+#     historia (rechazo duro) porque coincide con el principio rector de la épica y con el patrón que
+#     el servidor ya usa para tool desconocida/no disponible.
+
 meta:
   fachada: lodestar-mcp (JSON-RPC por stdio; stdout puro, logs a stderr)
   fuente_registro: crates/lodestar-mcp/src/tools.rs        # tools::list()
@@ -536,16 +559,33 @@ meta:
   protocolo:
     metodos: [initialize, ping, "tools/list", "tools/call"]
     protocol_versions_aceptadas: ["2024-11-05", "2025-03-26", "2025-06-18"]
+    protocol_version_no_soportada: >-
+      (E29-H09) Una `protocolVersion` presente en `initialize.params` pero AUSENTE de
+      `protocol_versions_aceptadas` se RECHAZA: error JSON-RPC `-32602` (mismo código que "tool
+      desconocida"/"tool no disponible bajo el perfil") con un mensaje que lista las tres versiones
+      aceptadas, y la respuesta NO lleva `result` (main.rs, brazo `initialize`, `PROTOCOL_VERSIONS`).
+      Un handshake rechazado no es un error de dominio de tool: no lleva código del catálogo
+      `ErrorCode`. La AUSENCIA de `protocolVersion` sigue siendo válida — se responde
+      `DEFAULT_PROTOCOL_VERSION` (`2024-11-05`) sin error — y una versión presente Y aceptada se
+      ecoa tal cual, como antes de esta historia.
     instructions: >-
-      La respuesta `initialize` incluye `instructions` (string): el flujo recomendado de 10 pasos
-      en orden — workspace_status → knowledge_search → knowledge_get → metadata_inspect →
+      La respuesta `initialize` incluye `instructions` (string): el flujo recomendado, en orden —
+      workspace_status → knowledge_search → knowledge_get → metadata_inspect →
       graph_query/impact_analyze → change_plan → change_apply → knowledge_check → change_revert
-      (main.rs SERVER_INSTRUCTIONS, E14-H03). Es SUPERFICIE DE WIRE, no documentación: es lo primero
-      que lee un agente, así que un nombre de operación obsoleto ahí se convierte en una llamada
-      fallida. E23-H13 lo saldó (decía «huérfanos», operación renombrada a `isolated` en E16-H02, y
-      «conformidad», vocabulario que E23-H14 sustituyó por `valid`) y lo blindó con
-      `mcp.rs::instructions_sin_vocabulario_retirado`, que prohíbe el vocabulario retirado y exige
-      que el texto nombre EXACTAMENTE las tools que sirve `tools/list`.
+      (main.rs `server_instructions`, E14-H03; generación por perfil desde E29-H09). Es SUPERFICIE
+      DE WIRE, no documentación: es lo primero que lee un agente, así que un nombre de operación
+      obsoleto ahí se convierte en una llamada fallida. E23-H13 saldó el vocabulario retirado (decía
+      «huérfanos», operación renombrada a `isolated` en E16-H02, y «conformidad», vocabulario que
+      E23-H14 sustituyó por `valid`); E29-H09 saldó que el texto dependiera del PERFIL — bajo
+      `readonly` seguía nombrando las 3 tools de cambio aunque `tools/list` no las sirviera (caso
+      G1-24 del testbench). **Garantía declarada por perfil**: el texto nombra EXACTAMENTE las
+      tools que sirve `tools/list` BAJO EL PERFIL ACTIVO — 10 en `standard`, 7 en `readonly`, ni una
+      de menos ni una de más — derivado del MISMO predicado que decide `tools/list`
+      (`tools::available`, que a su vez usa `Profile::writes_enabled` + `tools::is_change_tool`): no
+      hay una segunda lista de nombres de tool. Blindado por
+      `mcp.rs::instructions_sin_vocabulario_retirado` (vocabulario + perfil `standard`),
+      `instructions_readonly_nombra_solo_las_tools_servidas` e
+      `instructions_readonly_no_nombra_tools_de_cambio` (perfil `readonly`).
   perfiles:
     # `lodestar-mcp [--root <dir>] [--profile readonly|standard]`, `standard` por defecto
     # (main.rs parse_args; lodestar_app::Profile). El perfil NO viaja por el wire: el cliente solo
@@ -554,7 +594,8 @@ meta:
     readonly: >-
       Oculta las 3 tools de cambio (`perfil: standard`) de `tools/list` (tools::available_tools) y
       RECHAZA su invocación con -32602 (tools::available), aunque el cliente las llame directamente.
-      `workspace_status.capabilities.writes/transactions/revert` == false.
+      `workspace_status.capabilities.writes/transactions/revert` == false. Desde E29-H09 también
+      acota `instructions`: el texto de `initialize` nombra únicamente las 7 tools de lectura.
     standard: >-
       Superficie completa (tools de lectura + las 3 de cambio). `capabilities.writes` == true.
   errores_protocolo:
@@ -563,6 +604,7 @@ meta:
     - "-32600 Invalid Request (no es objeto / batch no soportado) (main.rs, guarda de `handle`)"
     - "-32601 método no soportado (main.rs, brazo por defecto del `match method`)"
     - "-32602 tool desconocida (tools/call con nombre no registrado, o tool de cambio bajo `readonly`) (main.rs, brazo «tools/call» vía tools::available)"
+    - "-32602 protocolVersion no soportada en `initialize` (presente pero ausente de protocol_versions_aceptadas), mensaje con las versiones aceptadas, sin `result` (main.rs, brazo «initialize», E29-H09)"
   errores_ejecucion: >-
     Un error de ejecución de tool NO viaja como error JSON-RPC: va en el result como
     { content:[{type:text,text:msg}], isError:true } para que el modelo lo vea y corrija.
