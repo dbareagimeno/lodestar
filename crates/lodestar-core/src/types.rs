@@ -1893,8 +1893,10 @@ pub enum TypeError {
     /// `priority starts_with "3"` sin un aviso— y no un veredicto.
     ///
     /// Cubre los **dos** operandos: el campo no-string (`priority starts_with "3"` sobre
-    /// `priority: 3`) y el literal no-string (`status starts_with 3`). Cuando fallan los dos, el que
-    /// se reporta es el **campo**, por ser el que el agente no controla desde la consulta.
+    /// `priority: 3`) y el literal no-string (`status starts_with 3`). El `found` es de **uno** de
+    /// los dos —el campo primero, el literal si el campo sí era string—, así que la variante NO
+    /// dice de qué lado viene: quien redacte el mensaje debe ser neutro respecto al lado y no
+    /// atribuirle el tipo al campo, o mandaría al agente a inspeccionar un campo sano.
     ///
     /// Un campo **inexistente** no llega aquí: la ausencia es `false` (mismo contrato que
     /// [`TypeError::NotAList`]).

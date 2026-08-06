@@ -2412,49 +2412,37 @@ fn starts_with_es_type_error_por_where_y_por_filter() {
 
 /// E29-H04 · La **forma** del error nuevo: variante propia, con campo, operador y tipo encontrado.
 ///
-/// Este test es el que fija el contrato de datos que la historia propone —`NotAString { field,
-/// operator, found }`, con la misma forma que `NotAList` para que el wire de los type errors sea
-/// uniforme— y por eso está separado de los criterios de comportamiento: **no compila hasta que la
-/// variante exista**, así que va detrás de un `cfg` de feature que el implementador activa al
-/// crearla.
+/// Fija el contrato de datos de la historia —`TypeError::NotAString { field, operator, found }`, con
+/// la misma forma que `NotAList` para que el wire de los type errors sea uniforme— y por eso está
+/// separado de los criterios de comportamiento, que solo exigen que el resultado sea `Err`.
 ///
-/// Mientras la variante no exista, el cuerpo real vive comentado y el test verifica lo único
-/// verificable sin ella: que el error de un afijo **no** se disfraza de `OrderNotDefined` ni de
-/// `NotAList`, que son los dos diagnósticos que ya existen y que dirían al agente algo falso («el
-/// orden no está definido» / «esto no es una lista» cuando lo que pasa es que no es un string).
+/// Lo que este test impide, y ningún otro vería: que el afijo se disfrace de uno de los dos
+/// diagnósticos que ya existían. `OrderNotDefined` diría «el orden no está definido» y `NotAList`
+/// «esto no es una lista», y ninguna de las dos cosas es lo que le pasa a `priority starts_with
+/// "3"`: le pasa que no es un string. El `let else` sobre `NotAString` excluye ambas por
+/// construcción, así que no hace falta —ni debe añadirse— una aserción aparte que las descarte.
 ///
-/// TAREA DEL IMPLEMENTADOR (fase verde): descomentar el bloque marcado y borrar el `assert!` de
-/// exclusión de las otras dos variantes que lo precede. No es opcional: sin él, la variante podría
-/// nacer sin `field`/`operator` y `error_de_tipo` (`lodestar-app`) no tendría con qué redactar el
-/// mensaje que los criterios del wire exigen.
+/// La otra mitad, igual de necesaria: los tres campos tienen que **llegar poblados**. Sin ellos,
+/// `error_de_tipo` (`lodestar-app`) no tendría con qué redactar el mensaje que los criterios del
+/// wire exigen (campo, operador y tipo hallado), y el type error nacería mudo — el defecto de vuelta
+/// con otro nombre.
 #[test]
 fn starts_with_produce_la_variante_de_tipo_de_string() {
     let ds = ds_afijo_heterogeneo();
     let expr = parsea("priority starts_with \"3\"");
     let r = eval_en(&ds, "g1-20-numerico.md", &expr);
 
-    assert!(
-        r.is_err()
-            && !matches!(
-                r,
-                Err(TypeError::OrderNotDefined { .. }) | Err(TypeError::NotAList { .. })
-            ),
-        "el type error de un operador de AFIJO no puede reusar los dos diagnósticos existentes: \
-         `OrderNotDefined` diría «el orden no está definido» y `NotAList` «esto no es una lista», y \
-         ninguna de las dos cosas es lo que le pasa a `priority starts_with \"3\"`. Necesita variante \
-         propia (§E29-H04: `NotAString {{ field, operator, found }}`, con la forma de `NotAList`). \
-         Recibido: {r:?}"
-    );
-
-    // ------------------------------------------------------------------
-    // FASE VERDE — descomentado junto con la variante nueva de `TypeError` (E29-H04):
     let Err(TypeError::NotAString {
         field,
         operator,
         found,
     }) = r
     else {
-        panic!("`priority starts_with \"3\"` debe dar `NotAString`, no {r:?}");
+        panic!(
+            "`priority starts_with \"3\"` debe dar `NotAString`: el type error de un operador de \
+             AFIJO necesita variante PROPIA (§E29-H04, con la forma de `NotAList`), no reusar \
+             `OrderNotDefined` ni `NotAList`, que dirían al agente algo falso. Recibido: {r:?}"
+        );
     };
     assert_eq!(
         field,
@@ -2489,7 +2477,6 @@ fn starts_with_produce_la_variante_de_tipo_de_string() {
         ValueType::List,
         "y el tipo hallado es el real de cada campo"
     );
-    // ------------------------------------------------------------------
 }
 
 // =============================================================================

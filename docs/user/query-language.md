@@ -431,12 +431,13 @@ knowledge_search
 
 ```text
 INVALID_SCHEMA: la consulta no es respondible sobre estos datos: en «runbooks/backup.md» la
-comparación sobre el campo «retention_days» tiene un operando de tipo number y el operador de texto
-«starts_with» exige un string a los DOS lados (el campo y el literal): lo que no es texto no tiene
-prefijo ni sufijo que comprobar, y el lenguaje no coerce tipos (§20.8). Ajusta la consulta al tipo
-real del campo: compara con un literal de ese tipo, o usa un operador definido para él («=»/«!=»
-nunca son error — el cruce de tipos es false); metadata_inspect{"mode":"field"} enumera los tipos
-que ese campo toma en el workspace
+comparación entre el campo «retention_days» y su literal tiene un operando de tipo number, y el
+operador de texto «starts_with» exige un string a los DOS lados: lo que no es texto no tiene prefijo
+ni sufijo que comprobar, y el lenguaje no coerce tipos (§20.8). Comprueba los dos lados — el tipo
+que falla puede ser el del campo o el del literal. Ajusta la consulta al tipo real del campo:
+compara con un literal de ese tipo, o usa un operador definido para él («=»/«!=» nunca son error —
+el cruce de tipos es false); metadata_inspect{"mode":"field"} enumera los tipos que ese campo toma
+en el workspace
 ```
 
 A list is not a string either. Asking for the prefix of `tags` does **not** silently test its first
@@ -449,10 +450,9 @@ knowledge_search
 
 ```text
 INVALID_SCHEMA: la consulta no es respondible sobre estos datos: en
-«adr/0001-markdown-source-of-truth.md» la comparación sobre el campo «tags» tiene un operando de
-tipo list y el operador de texto «starts_with» exige un string a los DOS lados (el campo y el
-literal): lo que no es texto no tiene prefijo ni sufijo que comprobar, y el lenguaje no coerce tipos
-(§20.8). …
+«adr/0001-markdown-source-of-truth.md» la comparación entre el campo «tags» y su literal tiene un
+operando de tipo list, y el operador de texto «starts_with» exige un string a los DOS lados: lo que
+no es texto no tiene prefijo ni sufijo que comprobar, y el lenguaje no coerce tipos (§20.8). …
 ```
 
 Until v0.5.0 both of those returned `false` per document, so the answer was a **trimmed** result

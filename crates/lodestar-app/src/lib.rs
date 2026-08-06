@@ -3815,10 +3815,10 @@ fn error_de_tipo(err: &TypeError, path: &RelPath) -> AppError {
             operator,
             found,
         } => format!(
-            "en «{}» la comparación sobre el campo «{field}» tiene un operando de tipo {} y el \
-             operador de texto «{}» exige un string a los DOS lados (el campo y el literal): lo que \
-             no es texto no tiene prefijo ni sufijo que comprobar, y el lenguaje no coerce tipos \
-             (§20.8)",
+            "en «{}» la comparación entre el campo «{field}» y su literal tiene un operando de tipo \
+             {}, y el operador de texto «{}» exige un string a los DOS lados: lo que no es texto no \
+             tiene prefijo ni sufijo que comprobar, y el lenguaje no coerce tipos (§20.8). Comprueba \
+             los dos lados — el tipo que falla puede ser el del campo o el del literal",
             path.as_str(),
             nombre_de_wire(found),
             nombre_de_wire(operator),
