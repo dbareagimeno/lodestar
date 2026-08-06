@@ -9209,3 +9209,98 @@ fn move_seguido_de_create_del_path_liberado_aplica() {
         "el path liberado debe quedar con el cuerpo del `create` que lo reocupó"
     );
 }
+
+// ---------------------------------------------------------------------------
+// E29-H01 — Config estricta: el servidor MCP tampoco arranca con una config que no entiende
+// (`requirements/epica-29-honestidad-superficie.md`, `decisiones §16(e)` + `§23/A-08`).
+//
+// La mitad de workspace vive en `crates/lodestar-workspace/tests/config.rs` y la de CLI en
+// `crates/lodestar-cli/tests/e2e.rs`. Este test cierra el criterio de la **segunda fachada**: el
+// mismo `config.yaml` que hace salir a la CLI con 3 no puede dejar al MCP sirviendo con la política
+// por defecto durante toda una sesión de agente.
+// ---------------------------------------------------------------------------
+
+/// E29-H01 · Criterio `mcp_no_arranca_con_config_de_clave_desconocida`:
+/// **Dado** un `.lodestar/config.yaml` con `workspace: { writeableRoots: ["notas"] }` (typo de
+/// `writableRoots`), **Cuando** arranca `lodestar-mcp`, **Entonces** el proceso falla al abrir el
+/// workspace en vez de servir con la política por defecto.
+///
+/// ## Por qué el MCP tiene su propio criterio
+///
+/// El daño es peor aquí que en la CLI. `lodestar check` es un one-shot y su exit code lo lee un CI;
+/// el MCP **se queda vivo toda la sesión**, y una `writableRoots` descartada por un typo deja la
+/// política de escritura en su default —que es *«todo el workspace es escribible»* (`Vec` vacío =
+/// sin restricción, ver `WorkspaceSection::writable_roots`)—, o sea **más permisiva** que la que el
+/// usuario escribió, delante de un agente que sí puede escribir. Que la CLI aprenda a rechazar no
+/// implica que el MCP lo haga: son dos `main` distintos y el criterio de `§15` es explícito en que
+/// el repo no puede quedarse con dos criterios opuestos.
+///
+/// ## Cómo se observa «no arranca»
+///
+/// Con el patrón documentado en `roundtrip_en`: si el servidor aborta al arrancar, el vector de
+/// respuestas sale **vacío**. Por eso se assertea primero la longitud —para que el rojo se lea como
+/// «el servidor arrancó cuando no debía» y no como un índice fuera de rango— y se usa `tools/list`,
+/// la petición más inofensiva posible: si llega respuesta a eso, el servidor está sirviendo.
+///
+/// El exit code y el mensaje por stderr se comprueban aparte, lanzando el binario sin stdin: el
+/// contrato de arranque del MCP es exit 3 con el motivo por stderr (`main.rs`: «no se pudo abrir el
+/// workspace»), y stdout tiene que seguir siendo JSON-RPC puro —vacío, en este caso—, porque un
+/// cliente que lo parsee no puede encontrarse un mensaje de error suelto.
+///
+/// Fase ROJA: hoy `WorkspaceConfig` no lleva `deny_unknown_fields`, así que `App::open` devuelve
+/// `Ok` y el servidor responde `tools/list` con normalidad.
+#[test]
+fn mcp_no_arranca_con_config_de_clave_desconocida() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "alfa.md",
+        "---\ntype: Nota\ntitle: Alfa\ndescription: d\n---\n\n# Alfa\n\ncuerpo\n",
+    );
+    write(
+        dir.path(),
+        ".lodestar/config.yaml",
+        "workspace:\n  writeableRoots: [\"notas\"]\n",
+    );
+
+    // --- (1) No sirve: ninguna respuesta a la petición más inofensiva ----------------
+    let resp = roundtrip(
+        dir.path(),
+        &[r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#],
+        1,
+    );
+    assert!(
+        resp.is_empty(),
+        "con una clave desconocida en `.lodestar/config.yaml` el servidor NO puede arrancar: \
+         serviría toda la sesión con la política por defecto —más permisiva que la que el usuario \
+         escribió— delante de un agente que puede escribir. Respondió: {resp:?}"
+    );
+
+    // --- (2) …y lo hace con exit 3 y el motivo por stderr ----------------------------
+    let out = Command::new(env!("CARGO_BIN_EXE_lodestar-mcp"))
+        .arg("--root")
+        .arg(dir.path())
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        out.status.code(),
+        Some(3),
+        "el arranque fallido del MCP es exit 3 (`main.rs`, mismo código que la puerta de CI); \
+         stderr=\n{stderr}"
+    );
+    assert!(
+        stderr.contains("writeableRoots"),
+        "el mensaje debe NOMBRAR la clave rechazada: un «no se pudo abrir el workspace» a secas \
+         deja al usuario sin saber qué línea del YAML borrar; stderr=\n{stderr}"
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stdout).trim().is_empty(),
+        "stdout es JSON-RPC puro también cuando el arranque falla: el motivo va por stderr; \
+         stdout=\n{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
