@@ -2006,6 +2006,19 @@ impl App {
             ));
         }
 
+        // (3-bis) Red de colisión intra-plan EN EL LADO QUE ESCRIBE (E28-H04, reserva). El plan es un
+        //     artefacto DURABLE con TTL propio, no un valor en memoria: que `change_plan` haya
+        //     juzgado las operaciones entre sí no protege a este camino, porque el fichero pudo
+        //     escribirlo un binario anterior al guard —o cualquier vía futura que construyera
+        //     `normalizedOperations` sin acumular ocupación—. Sin esto, un plan persistido con
+        //     `[move a→final, move b→final]` publica y `a.md` desaparece en silencio: los pasos (1)
+        //     a (3) juzgan caducidad, revisión y `planHash`, y ninguno de los tres mira una
+        //     operación contra otra. Es el MISMO juicio del core que usa `change_plan`
+        //     (`plan::EstadoOcupacion`, invariante #3), no un criterio nuevo, y se hace ANTES de la
+        //     primera escritura: el disco queda intacto.
+        plan::assert_sin_colisiones_intra_plan(doc_set.files(), &plan.normalized_operations)
+            .map_err(|e| AppError::from(&e))?;
+
         // (4) Publicar por el único escritor (staging → lock → backup → journal + REGISTRO DURABLE DEL
         //     RECIBO → renames). El guard `assert_writable` de la transacción rechaza fuera de
         //     `writableRoots` → PERMISSION_DENIED antes de tocar el canónico. Se presta el

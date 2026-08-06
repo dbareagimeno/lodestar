@@ -4890,7 +4890,7 @@ mod reversion_componible {
 
 mod identidad_de_transaccion_libre {
     use super::*;
-    use lodestar_workspace::{revert_transaction_id, transaction_id};
+    use lodestar_workspace::{revert_transaction_id, transaction_id, WorkspaceError};
 
     /// Un `SemanticDiff` de préstamo para el recibo (esta capa no lo interpreta: lo copia).
     fn diff() -> SemanticDiff {
@@ -5292,5 +5292,197 @@ mod identidad_de_transaccion_libre {
             "y desde ahí la cadena vuelve a avanzar: la derivación nunca devuelve su propia entrada \
              salvo en el punto fijo de `u64::MAX`"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // E28-H03 (cierre de reservas) — las dos salidas de `resolve_free_txn_id` que quedaron sin
+    // testigo: la rama AGOTADA (y la calidad de su mensaje) y el rechazo duro `new == orig`.
+    // -----------------------------------------------------------------------
+
+    /// Un `ChangeReceipt` mínimo bajo `id`, para OCUPAR ese `txnId` con material vigente según el
+    /// criterio del GC del plano de control (`journal/ ∪ receipts/`). El contenido no se interpreta:
+    /// lo que decide es la existencia de `receipts/<id>.json`.
+    fn ocupa_con_recibo(ws: &Workspace, id: &str) {
+        ws.write_receipt(&ChangeReceipt {
+            id: ReceiptId(id.to_string()),
+            change_set_id: ChangeSetId(format!("changeset:{id}")),
+            previous_revision: WorkspaceRevision("blake3:previa".to_string()),
+            result_revision: WorkspaceRevision("blake3:resultante".to_string()),
+            changed_paths: vec![RelPath::new("uno.md").unwrap()],
+            semantic_diff: SemanticDiff::default(),
+        })
+        .expect("sembrar el recibo que ocupa el id");
+    }
+
+    /// **Criterio de la rama AGOTADA** — **Dado** un `txnId` candidato en el punto fijo
+    /// `-revert-{u64::MAX}` **ya ocupado** por un recibo vigente, **Cuando** se intenta publicar una
+    /// reversión bajo él, **Entonces** `resolve_free_txn_id` no puede avanzar (la variante siguiente
+    /// es la misma) y devuelve `WriteConflict` **antes de escribir nada**, con un mensaje
+    /// **accionable para un agente**: dice qué hacer y no filtra rutas internas del runtime.
+    ///
+    /// Es la única rama de la resolución de identidad de E28-H03 que ningún test ejercía. Y su
+    /// mensaje no es un detalle cosmético: el delta de contrato de la historia exige que *«el mensaje
+    /// de error de cualquier `WRITE_CONFLICT` que sobreviva debe ser accionable para un agente (qué
+    /// hacer: replanificar, no rutas internas de `recovery/`/`receipts/` que un agente no puede
+    /// interpretar ni actuar)»*. Hoy el motivo que compone `senal_de_txn_id_tomado` interpola
+    /// `recibo.display()` —la ruta ABSOLUTA de `.lodestar/runtime/receipts/…`, con el directorio
+    /// temporal de la máquina incluido—, así que el `WriteConflict` la arrastra entera.
+    ///
+    /// Cómo se alcanza el punto fijo sin 2^64 reversiones: se pide explícitamente ese `new_txn_id`
+    /// (la API lo admite: es un **candidato**) y se siembra su recibo. `siguiente_variante_de_txn_id`
+    /// satura en `u64::MAX`, así que la cadena no avanza y la rama se ejerce en un test determinista.
+    #[test]
+    fn una_reversion_sin_variante_libre_falla_con_mensaje_accionable_y_sin_rutas_internas() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let ws = siembra_documentos(root, &["uno"]);
+        let a = std::fs::read_to_string(root.join("uno.md")).unwrap();
+
+        // (1) apply real: deja material revertible bajo `e28-h03-agotado`.
+        let cs = cs_modifica(&ws, "e28-h03-agotado", &["uno.md"]);
+        let d = diff();
+        let cs_id = ChangeSetId("e28-h03-agotado".to_string());
+        ws.apply_transaction_con_recibo(&cs, Some(&d))
+            .expect("el apply de partida debe publicar");
+        let b = std::fs::read_to_string(root.join("uno.md")).unwrap();
+        assert_ne!(a, b, "precondición: el apply publica el estado B");
+
+        // (2) El candidato de la reversión es el PUNTO FIJO, y está ocupado por un recibo vigente:
+        //     la cadena de variantes no tiene adónde ir.
+        let borde = format!("e28-h03-agotado-revert-{}", u64::MAX);
+        assert_eq!(
+            revert_transaction_id(&borde),
+            borde,
+            "precondición: el borde `u64::MAX` es el punto fijo declarado de la derivación"
+        );
+        ocupa_con_recibo(&ws, &borde);
+        let recibo_del_borde = std::fs::read(recibo_de(root, &borde))
+            .expect("precondición: el recibo sembrado ocupa el id");
+        let canonico_antes = canonical_md(root);
+
+        let observada = ws.workspace_revision().unwrap();
+        let error = ws
+            .revert_transaction_con_recibo(
+                "e28-h03-agotado",
+                &borde,
+                &observada,
+                Some((&cs_id, &d)),
+            )
+            .expect_err(
+                "sin ninguna variante libre que probar, la reversión tiene que fallar RUIDOSAMENTE \
+                 antes de escribir: la alternativa es pisar el material de la transacción que ocupa \
+                 el id",
+            );
+        let mensaje = format!("{error}");
+
+        // (a) Falla, y no ha tocado nada: ni el canónico ni el material del id ocupado.
+        assert!(
+            matches!(error, WorkspaceError::WriteConflict(_)),
+            "el agotamiento de la cadena de variantes es un `WriteConflict` (wire `WRITE_CONFLICT`), \
+             no un pánico ni un error de IO; fue {error:?}"
+        );
+        assert_eq!(
+            canonical_md(root),
+            canonico_antes,
+            "y el rechazo es anterior a la primera escritura: el canónico no se mueve"
+        );
+        assert_eq!(
+            std::fs::read(recibo_de(root, &borde)).unwrap_or_default(),
+            recibo_del_borde,
+            "ni se reescribe el recibo que ocupaba el id (que es justo lo que el guard existe para \
+             proteger)"
+        );
+        assert!(
+            !recovery_de(root, &borde).exists(),
+            "ni se prepara un árbol de recuperación bajo el id ocupado"
+        );
+        assert!(
+            !ws.recovery_pending(),
+            "ni queda recuperación pendiente: nada llegó a prepararse"
+        );
+
+        // (b) El mensaje es para un AGENTE: acción concreta, cero rutas internas del runtime.
+        assert!(
+            mensaje.contains("replanifica"),
+            "el mensaje debe decir QUÉ HACER (replanificar sobre el estado actual), que es lo único \
+             que un agente puede accionar; fue {mensaje:?}"
+        );
+        for fuga in [".lodestar", "/runtime/", "receipts/", "recovery/"] {
+            assert!(
+                !mensaje.contains(fuga),
+                "el mensaje NO puede filtrar rutas internas del plano de control («{fuga}»): un \
+                 agente no las puede interpretar ni actuar, y el delta de contrato de E28-H03 lo \
+                 exige explícitamente. Fue {mensaje:?}"
+            );
+        }
+        assert!(
+            !mensaje.contains(&root.to_string_lossy().to_string()),
+            "y mucho menos la ruta ABSOLUTA del workspace en esta máquina; fue {mensaje:?}"
+        );
+    }
+
+    /// **Control anti-regresión del rechazo duro** — **Dado** un `new_txn_id` **igual** al
+    /// `orig_txn_id`, **Cuando** se pide la reversión, **Entonces** `WriteConflict` y no se escribe
+    /// nada.
+    ///
+    /// Nace VERDE a propósito: el guard existe (`recovery.rs`, paso (2c)) y esta es la única
+    /// igualdad que E28-H03 decidió **no** resolver moviendo el id — pedir que la inversa publique
+    /// bajo la identidad de la transacción que deshace es una contradicción del llamante, no una
+    /// colisión de nombres: restauraría desde el mismo árbol que estaría reescribiendo. Sin este
+    /// testigo, un refactor que sustituyera el guard por la resolución de variante libre (que
+    /// devolvería `X-2` tan campante) pasaría inadvertido y volvería a abrir el defecto M-01 por otra
+    /// puerta.
+    #[test]
+    fn una_reversion_bajo_la_identidad_de_la_transaccion_que_deshace_se_rechaza() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let ws = siembra_documentos(root, &["uno"]);
+
+        let cs = cs_modifica(&ws, "e28-h03-misma-identidad", &["uno.md"]);
+        let d = diff();
+        let cs_id = ChangeSetId("e28-h03-misma-identidad".to_string());
+        ws.apply_transaction_con_recibo(&cs, Some(&d))
+            .expect("el apply de partida debe publicar");
+
+        let recovery_antes = ficheros_bajo(&recovery_de(root, "e28-h03-misma-identidad"));
+        let recibo_antes = std::fs::read(recibo_de(root, "e28-h03-misma-identidad"))
+            .expect("precondición: el apply deja su recibo persistido");
+        let canonico_antes = canonical_md(root);
+
+        let observada = ws.workspace_revision().unwrap();
+        let error = ws
+            .revert_transaction_con_recibo(
+                "e28-h03-misma-identidad",
+                "e28-h03-misma-identidad",
+                &observada,
+                Some((&cs_id, &d)),
+            )
+            .expect_err(
+                "revertir bajo la MISMA identidad que se deshace tiene que rechazarse: restauraría \
+                 desde el árbol de recuperación que estaría reescribiendo",
+            );
+        assert!(
+            matches!(error, WorkspaceError::WriteConflict(_)),
+            "el rechazo es `WriteConflict` (wire `WRITE_CONFLICT`); fue {error:?}"
+        );
+        let mensaje = format!("{error}");
+        assert!(
+            mensaje.contains("e28-h03-misma-identidad"),
+            "y nombra la transacción implicada, para que el llamante sepa qué pidió mal; fue \
+             {mensaje:?}"
+        );
+
+        assert_eq!(
+            ficheros_bajo(&recovery_de(root, "e28-h03-misma-identidad")),
+            recovery_antes,
+            "nada se escribió: el árbol de recuperación de la transacción sigue igual"
+        );
+        assert_eq!(
+            std::fs::read(recibo_de(root, "e28-h03-misma-identidad")).unwrap_or_default(),
+            recibo_antes,
+            "ni su recibo"
+        );
+        assert_eq!(canonical_md(root), canonico_antes, "ni el canónico");
+        assert!(!ws.recovery_pending(), "ni queda recuperación pendiente");
     }
 }

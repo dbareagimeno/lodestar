@@ -635,13 +635,44 @@ se especifican como corrección.
     sección.
 
 - **Fuera de alcance explícito**: equivalencia de paths por caja/Unicode → `decisiones
-  §24` (ficha nueva). Cualquier otra operación (`patch_frontmatter`, `replace_text`, `edit_section`,
-  `replace_body`) no cambia de comportamiento — no dependen de existencia de path de la misma forma
-  que `create`/`move`, y sus guards actuales (`document_body`/`op_ref_path`) ya operan sobre el
-  cuerpo tras la normalización de la operación anterior sin el defecto descrito aquí (no colisionan
-  por existencia, colisionan por contenido, que ya se recalcula correctamente entre operaciones vía
-  `document_body` sobre el `doc_set` — el defecto es específico de los dos guards de **existencia**
-  que H02 introdujo).
+  §24` (ficha nueva). Las demás operaciones (`patch_frontmatter`, `replace_body`, `replace_text`,
+  `edit_section`, `delete`) no ganan un guard de colisión nuevo en esta historia — su relación con
+  la **existencia** de un path no cambia (siguen exigiendo, vía `document_body`/`op_ref_path`, que
+  el documento exista en el `DocumentSet` contra el que se normalizan). **Corrección (2026-08-06,
+  re-jueces ciegos)**: la frase de una versión anterior de esta historia afirmaba que esas
+  operaciones «ya operan sobre el cuerpo tras la normalización de la operación anterior sin el
+  defecto descrito aquí» — **es falsa**, verificada contra el binario real en tres commits: `[delete
+  A, patch_frontmatter A]` resucita `A.md` con solo el frontmatter nuevo y sin el cuerpo original;
+  `[delete A, replace_body A]` lo resucita con el cuerpo nuevo; `[move A→B, replace_text A]` deja
+  **dos** documentos vivos (`B.md` con el contenido movido y `A.md` resucitado con el resultado del
+  `replace_text`). Es un defecto **preexistente** — idéntico antes y después de H02, no una
+  regresión de esta historia — porque esas operaciones juzgan existencia y contenido contra el
+  `DocumentSet` **inicial** del plan, exactamente la misma vía de estado obsoleto que el resto de
+  esta historia corrige para `create`/`move`, y por tanto pueden **resucitar** un path que una
+  operación anterior del mismo plan liberó (`delete`/`move.from`). Queda fuera de esta historia a
+  propósito — el acumulado que H04 introduce es de **ocupación de path** (para los guards de
+  colisión de `create`/`move`), no de **contenido acumulado** (lo que exigiría que
+  `document_body`/`op_ref_path` resuelvan contra el resultado de las operaciones previas del plan,
+  un cambio de forma distinto y más amplio) — y se registra como hallazgo de seguimiento en la
+  adenda final de esta épica.
+
+  **Ampliación (2026-08-06, re-jueces ciegos): la familia de move-chains preexistentes es mayor que
+  un solo caso.** El texto original de esta historia nombraba únicamente `[create X, move X→Y]` →
+  `NORMALIZE_TARGET_NOT_FOUND` como caso preexistente fuera de alcance (el `create` de `X` no está
+  reflejado en el `DocumentSet` inicial cuando se normaliza el `move` que lo usa como `from`). La
+  verificación de los re-jueces confirma que esa es solo una instancia de una familia más amplia:
+  **cualquier cadena donde el origen (`from`) de un `move`, o el path que una operación de contenido
+  referencia, fue producido por una operación anterior del mismo plan** comparte la misma causa —
+  el cuerpo/existencia se resuelve contra el `doc_set` inicial, no contra el estado acumulado.
+  Instancias adicionales confirmadas: `[move A→B, move B→C]` (el segundo `move` no ve que `B` ya
+  tiene el contenido movido por el primero: falla o usa contenido obsoleto según el estado inicial
+  de `B`); el swap `A↔B` vía un path temporal (`[move A→tmp, move B→A, move tmp→B]`, donde el
+  tercer paso depende del primero). Distinción importante: esta familia es sobre la **ocupación del
+  ORIGEN** (`from` de un `move`, o el path referenciado por una op de contenido) y su contenido, no
+  sobre la ocupación del **DESTINO** (`to` de un `create`/`move`), que es exactamente lo que el
+  acumulado de esta historia sí resuelve. Ambas familias — resurrección por ops de contenido y
+  move-chains por origen — quedan fuera de esta historia y registradas como hallazgo de seguimiento
+  en la adenda final de esta épica.
 
 - **Dependencias**: ninguna (corrige H02, que ya está integrada en `develop`). Independiente de
   **E28-H03**: ficheros distintos (`lib.rs`/`plan.rs` de `change_plan` vs
@@ -690,3 +721,42 @@ disco final correcto. Los cuatro fósiles de comentarios/changelog que citaban e
 filas quedan corregidos. Las dos historias tienen su ciclo TDD completo con juez ciego y mutation
 testing, por tocar el mismo motor transaccional y la misma normalización pura que sus historias
 padre.
+
+---
+
+## Hallazgos preexistentes registrados (2026-08-06, re-jueces)
+
+Durante la verificación ciega de H04 aparecieron dos hallazgos que **no** son bloqueantes de esta
+adenda (no regresionan nada que H01–H04 prometan) pero comparten causa raíz con lo que H04 corrige
+y quedan fuera de su alcance a propósito. Se registran aquí para que no se pierdan ni se relitiguen
+sueltos:
+
+- **Resurrección de paths liberados por operaciones de contenido.** Las operaciones de contenido
+  (`patch_frontmatter`, `replace_body`, `replace_text`, `edit_section`) juzgan existencia y
+  contenido contra el `DocumentSet` **inicial** del plan, igual que `create`/`move` antes de H04, y
+  por tanto pueden **resucitar** un documento que una operación anterior del mismo plan ya
+  borró/movió: `[delete A, patch_frontmatter A]` resucita `A.md` con solo el frontmatter nuevo (sin
+  el cuerpo original); `[delete A, replace_body A]` lo resucita con el cuerpo nuevo; `[move A→B,
+  replace_text A]` deja **dos** documentos vivos (`B.md` con el contenido movido y `A.md`
+  resucitado). Verificado contra el binario en los tres commits.
+- **Move-chains por ocupación del origen.** Cualquier cadena donde el `from` de un `move` (o el
+  path que referencia una operación de contenido) fue producido por una operación anterior del
+  mismo plan comparte la misma causa: `[create X, move X→Y]` (`NORMALIZE_TARGET_NOT_FOUND`),
+  `[move A→B, move B→C]`, y el swap `A↔B` vía path temporal. Es la contraparte simétrica del
+  acumulado de **ocupación del destino** que H04 sí resuelve para `create`/`move`.
+
+**Severidad estimada**: media. Ninguno de los dos ocurre con una sola operación ni con las
+secuencias de un solo paso que el testbench probó por defecto — requieren que un agente construya
+deliberadamente un plan multi-operación sobre paths relacionados. El caso más grave es la
+resurrección-tras-move (`[move A→B, replace_text A]`), que **duplica** conocimiento en vez de solo
+perderlo o bloquearse; los demás son pérdida silenciosa de una operación intermedia o un rechazo
+sin salida (`NORMALIZE_TARGET_NOT_FOUND`), no una escritura que destruye sin diagnóstico.
+
+**Destino propuesto**: una historia futura de «normalización con estado de contenido acumulado» —
+generalizar el acumulado de H04 (hoy limitado a **ocupación de path**) para que
+`document_body`/`op_ref_path` resuelvan también contra el **contenido** que las operaciones previas
+del mismo plan producen, no solo contra si el path está libre u ocupado. Es un cambio de forma más
+amplio que el de H04 (toca la resolución de cuerpo, no solo el guard de existencia) y queda **fuera
+de la campaña actual** (E28); candidato natural para una fase posterior de la campaña de bugfixes
+del testbench homelab (`docs/qa/campana-bugfixes-2026-08.md`) o para `decisiones/23-hallazgos-testbench-homelab.md`
+si se decide priorizarlo junto con el resto de hallazgos pendientes de esa ficha.

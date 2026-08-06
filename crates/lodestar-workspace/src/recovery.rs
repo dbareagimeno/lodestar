@@ -929,6 +929,14 @@ impl Workspace {
     /// resultó dejar sin salida una secuencia legítima, así que la decisión entera vive en un punto
     /// que los dos caminos de publicación comparten. El texto de la señal sobrevive como **motivo**
     /// del `WriteConflict` que se emite cuando ni siquiera queda una variante libre que probar.
+    ///
+    /// # El motivo lo lee un AGENTE (E28-H03, reserva)
+    /// Por eso el texto nombra el `txnId` y lo que pasaría, pero **nunca** una ruta del plano de
+    /// control (`.lodestar/runtime/receipts/…`, `recovery/…`) ni una ruta absoluta de esta máquina:
+    /// acaba tal cual en el `message` del `WRITE_CONFLICT` que cruza la frontera MCP, y ahí una ruta
+    /// interna no es accionable —el agente no puede tocarla— además de filtrar la disposición del
+    /// disco del usuario. El diagnóstico de dónde vive el material es cosa de la recuperación, no
+    /// del mensaje de error.
     fn senal_de_txn_id_tomado(&self, txn_id: &str) -> Option<String> {
         if self.journal_state_of(txn_id).is_some() {
             return Some(format!(
@@ -942,10 +950,9 @@ impl Workspace {
             .join(format!("{}.json", recovery_dir_name(txn_id)));
         if recibo.exists() {
             return Some(format!(
-                "la transacción {txn_id} ya tiene un recibo persistido ({}): publicar bajo ese \
+                "la transacción {txn_id} ya tiene un recibo persistido: publicar bajo ese \
                  identificador reescribiría ese recibo y sobrescribiría las copias de recuperación \
-                 con las que se deshace",
-                recibo.display()
+                 con las que se deshace"
             ));
         }
         None

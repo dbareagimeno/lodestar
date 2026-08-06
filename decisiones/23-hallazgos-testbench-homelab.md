@@ -73,3 +73,12 @@ puntos D-01, A-04, A-07 engordan la épica de honestidad ya acordada; A-02/A-03
 engordan el ciclo de higiene; el resto es §19. El testbench en sí queda como
 activo de §9 (banco de pruebas): re-ejecutable contra cada release con
 `docs/qa/testbench/`.
+
+> **Nota cruzada (2026-08-06, re-jueces ciegos de E28-H04)**: la verificación de la adenda de E28
+> localizó dos familias de defecto **preexistentes** (resurrección de paths liberados por
+> operaciones de contenido tras `delete`/`move`, y move-chains por ocupación del origen) que
+> comparten causa raíz con A-05 pero quedan fuera de su arreglo. Registradas con detalle en la
+> sección «Hallazgos preexistentes registrados» de
+> [`requirements/epica-28-defectos-destructivos-testbench.md`](../requirements/epica-28-defectos-destructivos-testbench.md);
+> no se numeran como punto nuevo de esta tabla, quedan como candidato a priorizar junto al resto de
+> hallazgos pendientes cuando se retome esta ficha.

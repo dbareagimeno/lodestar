@@ -596,3 +596,261 @@ fn destino_libre_y_origen_inexistente_conservan_su_codigo() {
         "un origen inexistente es `DOCUMENT_NOT_FOUND`, no una colisión de destino; el error fue {err}",
     );
 }
+
+// ---------------------------------------------------------------------------
+// E28-H04 (cierre de reserva) — la red de colisiones intra-plan tiene que vivir en el lado que
+// ESCRIBE, no solo en el que planifica.
+//
+// EL HUECO QUE ESTE MÓDULO CIERRA
+//
+// `App::change_plan_uncounted` llama a `plan::assert_sin_colisiones_intra_plan` sobre la secuencia ya
+// normalizada (`lib.rs` ~L1788) y documenta esa llamada como «red de seguridad… deja el veredicto
+// verificado sobre el plan COMPLETO, que es lo que se persiste y se aplica». Pero el plan que se
+// aplica NO vuelve a pasar por ella: `App::change_apply_uncounted` (~L1972-2007) valida
+// `expiresAt` (vía `load_plan`), `expectedWorkspaceRevision` y `planHash`, y con eso publica. La red
+// está exclusivamente en el camino de LECTURA/planificación.
+//
+// Eso importa porque el plan es un artefacto PERSISTIDO y de larga vida
+// (`.lodestar/runtime/plans/<hash>.json`, TTL en `expiresAt`), no un valor en memoria: un plan
+// escrito por un binario anterior al guard —o por cualquier vía futura que construya
+// `normalizedOperations` sin acumular ocupación— sigue siendo aplicable mientras no caduque y su
+// `planHash` case con la base. Ninguna de las tres validaciones del apply mira las operaciones entre
+// sí, así que `[move a→final, move b→final]` se publica: `plan::apply_one` para `Move` hace
+// `files.remove(from)` + `files.insert(to)`, y el segundo `move` pisa lo que dejó el primero — el
+// contenido de `a.md` desaparece del disco sin un solo diagnóstico. Es exactamente el defecto
+// destructivo que H04 describe, entrando por la puerta que H04 no cerró.
+//
+// CÓMO SE FORJA EL PLAN (lo que el implementador debe saber)
+//
+// El plan persistido se reescribe a mano, respetando TODO lo que el gate del apply comprueba, para
+// que el rechazo (cuando llegue) solo pueda venir del guard de colisión y nunca de un tecnicismo:
+//   - `normalizedOperations` ← las dos ops colisionadas, serializadas por el MISMO `serde` que usa
+//     el motor (se construyen como `NormalizedOperation` de `core::types`, no como JSON a mano);
+//   - `planHash` ← recomputado con la fórmula literal de `compute_plan_hash`
+//     (`blake3(baseWorkspaceRevision ‖ 0x00 ‖ serde_json::to_vec(ops))`), sobre la MISMA base que
+//     el workspace tiene ahora, de modo que el paso (3) del apply lo dé por bueno;
+//   - `changeSetId` ← `changeset:<hash desnudo>`, y el fichero se renombra a `<hash desnudo>.json`,
+//     que es la convención de `plan_file_name`/`plan_file_path` por la que `load_plan` lo encuentra;
+//   - `expiresAt` ← el que puso `change_plan` (futuro), intacto.
+// Las guardas de no vacuidad del propio test verifican que el forjado es correcto: si el apply
+// respondiera `PLAN_STALE`/`PLAN_EXPIRED`/`REVISION_CONFLICT`, el test FALLA en vez de darse por
+// bueno, porque un rechazo por el motivo equivocado no demuestra nada.
+// ---------------------------------------------------------------------------
+
+mod colision_intra_plan_en_el_apply {
+    use super::*;
+    use lodestar_core::types::NormalizedOperation;
+
+    /// Monta un workspace con `a.md` y `b.md` (los dos con contenido distinguible) y sin `final.md`.
+    fn app_con_a_y_b() -> (tempfile::TempDir, App) {
+        let dir = tempfile::tempdir().unwrap();
+        escribe(
+            dir.path(),
+            "a.md",
+            "---\ntitle: A\n---\n\n# A\n\ncuerpo de a\n",
+        );
+        escribe(
+            dir.path(),
+            "b.md",
+            "---\ntitle: B\n---\n\n# B\n\ncuerpo de b\n",
+        );
+        let app = App::open(dir.path()).expect("el workspace temporal debe abrir");
+        (dir, app)
+    }
+
+    /// Todos los `.md` del canónico como `ruta → contenido`, para comparar el disco byte a byte
+    /// antes y después del apply rechazado.
+    fn canonico(root: &Path) -> std::collections::BTreeMap<String, String> {
+        let mut out = std::collections::BTreeMap::new();
+        for entry in std::fs::read_dir(root).unwrap().flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) == Some("md") {
+                out.insert(
+                    path.file_name().unwrap().to_string_lossy().to_string(),
+                    std::fs::read_to_string(&path).unwrap(),
+                );
+            }
+        }
+        out
+    }
+
+    /// El `planHash` con la fórmula LITERAL de `App::compute_plan_hash` (privada): `blake3` de la
+    /// revisión base, un `0x00` separador y la serialización JSON de las operaciones normalizadas.
+    fn plan_hash(base: &str, ops: &[NormalizedOperation]) -> String {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(base.as_bytes());
+        hasher.update(b"\0");
+        hasher.update(&serde_json::to_vec(ops).expect("las ops normalizadas serializan"));
+        format!("blake3:{}", hasher.finalize().to_hex())
+    }
+
+    /// Reescribe el plan persistido único de `root` con las `ops` dadas: recalcula `planHash` y
+    /// `changeSetId`, renombra el fichero a `<hash desnudo>.json` y devuelve el `ChangeSetId` con el
+    /// que hay que llamar a `change_apply`. Conserva el resto del JSON (incluido `expiresAt`).
+    fn forja_plan_persistido(root: &Path, base: &str, ops: &[NormalizedOperation]) -> ChangeSetId {
+        let (ruta, mut valor) = json_del_plan_unico(root);
+        let hash = plan_hash(base, ops);
+        let desnudo = hash.strip_prefix("blake3:").unwrap().to_string();
+        valor["normalizedOperations"] = serde_json::to_value(ops).unwrap();
+        valor["planHash"] = serde_json::Value::String(hash);
+        valor["changeSetId"] = serde_json::Value::String(format!("changeset:{desnudo}"));
+        std::fs::remove_file(&ruta).unwrap();
+        let nueva = ruta.with_file_name(format!("{desnudo}.json"));
+        std::fs::write(&nueva, serde_json::to_vec_pretty(&valor).unwrap()).unwrap();
+        ChangeSetId(format!("changeset:{desnudo}"))
+    }
+
+    /// **E28-H04 (reserva)** — **Dado** un plan PERSISTIDO cuyas dos operaciones mueven documentos
+    /// distintos al MISMO destino (`[move a→final, move b→final]`), **Cuando** se llama a
+    /// `change_apply` con su `changeSetId`, **Entonces** la publicación se rechaza con
+    /// `DOCUMENT_ALREADY_EXISTS` y el disco queda intacto byte a byte.
+    ///
+    /// Fija la red de colisión intra-plan **en el lado que ESCRIBE**. Hoy `change_apply` solo juzga
+    /// caducidad, revisión esperada y `planHash`: ninguno de los tres mira las operaciones entre sí,
+    /// así que un plan persistido con la colisión —el que dejaría un binario anterior al guard de
+    /// H04, o cualquier vía futura que construyera `normalizedOperations` sin acumular ocupación—
+    /// aplica y destruye `a.md` en silencio. Que el guard esté en `change_plan` no protege al apply:
+    /// el plan es un artefacto durable con TTL propio, no un valor en memoria.
+    #[test]
+    fn apply_de_plan_persistido_con_colision_intra_plan_rechaza_sin_tocar_disco() {
+        let (dir, app) = app_con_a_y_b();
+        let root = dir.path();
+
+        // (1) Un plan VÁLIDO cualquiera, solo para obtener el fichero persistido con su forma real
+        //     (base, expiresAt, diff, impacto…). Su única op no colisiona.
+        let base = app
+            .change_plan(
+                None,
+                &serde_json::json!([
+                    { "op": "move", "from": "a.md", "to": "final.md", "rewriteInboundLinks": true },
+                ]),
+                policy_permisiva(),
+            )
+            .expect("el plan de partida (un solo move a un destino libre) debe producirse")
+            .base_workspace_revision;
+
+        // (2) Forjado: las DOS ops colisionadas, con el `planHash` recomputado sobre la misma base.
+        let colisionadas = vec![
+            NormalizedOperation::Move {
+                from: RelPath::new("a.md").unwrap(),
+                to: RelPath::new("final.md").unwrap(),
+                rewrite_inbound_links: false,
+            },
+            NormalizedOperation::Move {
+                from: RelPath::new("b.md").unwrap(),
+                to: RelPath::new("final.md").unwrap(),
+                rewrite_inbound_links: false,
+            },
+        ];
+        let id = forja_plan_persistido(root, &base.0, &colisionadas);
+
+        // Guarda de no vacuidad del forjado: el plan forjado tiene que CARGAR (si no, el apply
+        // fallaría por `PLAN_STALE`/`PLAN_EXPIRED` y el rechazo no probaría nada).
+        let cargado = app.load_plan(&id).expect(
+            "el plan forjado debe cargar: si no, el apply fallaría por el motivo equivocado",
+        );
+        assert_eq!(
+            cargado.normalized_operations.len(),
+            2,
+            "el plan forjado debe llevar las DOS operaciones colisionadas"
+        );
+
+        let antes = canonico(root);
+        assert!(
+            antes.contains_key("a.md") && antes.contains_key("b.md"),
+            "precondición: los dos documentos existen antes del apply: {antes:?}"
+        );
+
+        let resultado = app.change_apply(&id, None);
+
+        let err = match resultado {
+            Ok(aplicado) => panic!(
+                "aplicar un plan con dos operaciones que ocupan el MISMO path debe rechazarse: el \
+                 segundo `move` publica encima de lo que dejó el primero y `a.md` desaparece sin \
+                 diagnóstico. El apply respondió applied={} sobre {:?}; el disco quedó en {:?}",
+                aplicado.applied,
+                aplicado.changed_paths,
+                canonico(root),
+            ),
+            Err(e) => e,
+        };
+        assert_eq!(
+            err.code.as_str(),
+            COLISION,
+            "el rechazo debe ser el MISMO código de colisión que emite `change_plan` (una sola \
+             verdad de criterio, invariante #3), no un `PLAN_STALE` ni un error de IO; el error fue \
+             {err}",
+        );
+        assert!(
+            err.message.contains("final.md"),
+            "y debe nombrar el path colisionado, como hace el guard del plan; fue {:?}",
+            err.message,
+        );
+        assert_eq!(
+            canonico(root),
+            antes,
+            "y el rechazo ocurre ANTES de la primera escritura: ni `a.md`, ni `b.md`, ni `final.md` \
+             se mueven un byte"
+        );
+        assert!(
+            !app.workspace().recovery_pending(),
+            "ni queda una transacción a medio publicar: nada llegó a prepararse"
+        );
+    }
+
+    /// Control anti-vacuo del test de arriba: un plan persistido **sin** colisión y forjado por la
+    /// MISMA vía (mismas ops normalizadas, mismo recálculo de `planHash`, mismo renombrado) se
+    /// aplica con éxito.
+    ///
+    /// Sin esto, un arreglo que rechazara todo plan cuyo fichero se hubiera tocado —o directamente
+    /// todo plan con más de una operación— haría pasar el criterio sin cerrar el hueco.
+    #[test]
+    fn apply_de_plan_persistido_forjado_sin_colision_sigue_aplicando() {
+        let (dir, app) = app_con_a_y_b();
+        let root = dir.path();
+
+        let base = app
+            .change_plan(
+                None,
+                &serde_json::json!([
+                    { "op": "move", "from": "a.md", "to": "final.md", "rewriteInboundLinks": true },
+                ]),
+                policy_permisiva(),
+            )
+            .expect("el plan de partida debe producirse")
+            .base_workspace_revision;
+
+        // Dos moves a destinos DISTINTOS: legítimo, y ejercita el mismo forjado.
+        let sin_colision = vec![
+            NormalizedOperation::Move {
+                from: RelPath::new("a.md").unwrap(),
+                to: RelPath::new("final.md").unwrap(),
+                rewrite_inbound_links: false,
+            },
+            NormalizedOperation::Move {
+                from: RelPath::new("b.md").unwrap(),
+                to: RelPath::new("otro.md").unwrap(),
+                rewrite_inbound_links: false,
+            },
+        ];
+        let id = forja_plan_persistido(root, &base.0, &sin_colision);
+
+        app.change_apply(&id, None).unwrap_or_else(|e| {
+            panic!(
+                "un plan persistido forjado por la misma vía pero SIN colisión debe seguir \
+                 aplicándose (si no, el guard nuevo estaría rechazando por el forjado, no por la \
+                 colisión): {e}"
+            )
+        });
+
+        let despues = canonico(root);
+        assert!(
+            despues.contains_key("final.md") && despues.contains_key("otro.md"),
+            "los dos destinos se publican: {despues:?}"
+        );
+        assert!(
+            !despues.contains_key("a.md") && !despues.contains_key("b.md"),
+            "y los orígenes desaparecen, que es lo que hace un `move`: {despues:?}"
+        );
+    }
+}
