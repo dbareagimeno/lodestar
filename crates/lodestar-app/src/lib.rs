@@ -30,7 +30,7 @@ use lodestar_core::types::{
     FRONTMATTER_ANCHOR,
 };
 use lodestar_core::{CoreError, DocumentSet};
-use lodestar_workspace::{transaction_id, Workspace, WorkspaceError};
+use lodestar_workspace::{revert_transaction_id, transaction_id, Workspace, WorkspaceError};
 
 /// Envelope común de protocolo (`ARCHITECTURE.md §19.6`, `docs/history/REFACTOR.md §13`, decisión **D3**).
 ///
@@ -2096,6 +2096,18 @@ impl App {
     /// `workspaceRevision` == `previousRevision` del apply, el estado restaurado) y los paths
     /// restaurados.
     ///
+    /// # Revertir una reversión (E28-H01)
+    ///
+    /// Es una operación como cualquier otra, y **componible sin límite**: el recibo que se revierte
+    /// puede ser el de una reversión previa. La identidad de la inversa se deriva del `receiptId` que
+    /// se deshace —no del `changeSetId` que ese recibo lleva dentro, que las reversiones **heredan** de
+    /// la transacción original— por [`lodestar_workspace::revert_transaction_id`], de modo que cada
+    /// eslabón de la cadena (`X` → `X-revert` → `X-revert-2` → …) tiene su propio journal, sus propias
+    /// copias y su propio recibo. Hasta E28-H01, derivar del `changeSetId` heredado hacía que revertir
+    /// un `-revert` restaurase desde el árbol pre-apply —ya vigente: un no-op declarado exitoso— y
+    /// sobrescribiese su propio material de recuperación, destruyendo el estado *redo* de forma
+    /// permanente y silenciosa (defecto M-01 del testbench homelab).
+    ///
     /// # Auditoría (E13-H10, `ARCHITECTURE.md §19.7`)
     /// Mismo wrapper que [`App::change_apply`]: audita éxito y fallo (incluidos los rechazos de los
     /// pasos 1-3) antes de devolver, sin alterar la semántica. El `changeSetId` auditado es el del
@@ -2170,8 +2182,22 @@ impl App {
         //     escritor puede tocar un `.md` afectado y la reversión le escribiría la copia respaldada
         //     encima. Y el `semanticDiff` del recibo original se presta para que la inversa registre su
         //     propio recibo con su journal, ANTES de su punto de no retorno.
-        let orig_txn_id = transaction_id(&receipt.change_set_id);
-        let revert_txn_id = format!("{orig_txn_id}-revert");
+        //
+        //     E28-H01 — LA IDENTIDAD SE DERIVA DEL RECIBO, NO DEL `changeSetId` QUE LLEVA DENTRO.
+        //     El `txnId` de la transacción que se deshace **es** el `receiptId` de su recibo: así lo
+        //     nombran tanto `change_apply` (paso 5) como esta misma función, y de ahí que un mismo id
+        //     localice su journal, su staging, sus copias y su recibo. Derivarlo del `changeSetId`
+        //     —lo que se hacía hasta aquí— era correcto solo para el primer escalón de la cadena: un
+        //     recibo `X-revert` **hereda** el `changeSetId` original, así que revertirlo recalculaba
+        //     `orig_txn_id = X` y restauraba desde `recovery/X/` (el árbol pre-apply, ya vigente: un
+        //     no-op) mientras `revert_txn_id` volvía a dar `X-revert` y la inversa se sobrescribía a
+        //     sí misma, destruyendo el estado *redo*. Ese era el defecto M-01 del testbench homelab.
+        //
+        //     Se usa `receipt.id`, no el `receiptId` que llegó por parámetro: son el mismo id, pero el
+        //     del recibo es el que el propio recibo declara (y el que `load_receipt` acaba de
+        //     verificar), así que no depende de cómo lo escribiera el llamante.
+        let orig_txn_id = receipt.id.0.clone();
+        let revert_txn_id = revert_transaction_id(&orig_txn_id);
         let (previous, result, changed_paths) = self.workspace.revert_transaction_con_recibo(
             &orig_txn_id,
             &revert_txn_id,
@@ -2196,6 +2222,11 @@ impl App {
         // (6) Receipt de la reversión (inversa: previous/result intercambiados respecto al apply) +
         //     retención. Su id nombra por convención las copias de recuperación de la inversa
         //     (`recovery/<revert_txn_id>/`), que el GC purgará junto al recibo.
+        //
+        //     El `changeSetId` se HEREDA de la transacción deshecha —una reversión no nace de un
+        //     `change_plan`, así que no tiene uno propio— y es trazabilidad, no identidad: desde
+        //     E28-H01 el `txnId` (y con él el `receiptId` y todo el material) se deriva del `receiptId`
+        //     que se revierte, precisamente porque este campo NO distingue los eslabones de la cadena.
         let revert_receipt_id = ReceiptId(revert_txn_id);
         let revert_receipt = ChangeReceipt {
             id: revert_receipt_id.clone(),

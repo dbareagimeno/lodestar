@@ -1736,3 +1736,316 @@ mod reversion_re_verificada {
         }
     }
 }
+
+// ===========================================================================
+// E28-H01 — Round-trip de revisiones y receiptIds al deshacer el *undo* (M-01 del testbench)
+//
+// EL DEFECTO
+//
+// `App::change_revert_uncounted` (`crates/lodestar-app/src/lib.rs` ~L2168) deriva la identidad de la
+// transacción inversa del `changeSetId` que el recibo lleva dentro:
+//
+//     let orig_txn_id = transaction_id(&receipt.change_set_id);
+//     let revert_txn_id = format!("{orig_txn_id}-revert");
+//
+// Un recibo `X-revert` **hereda** el `changeSetId` de la transacción original, así que revertirlo
+// recalcula `orig_txn_id = X` y `revert_txn_id = X-revert`: se restaura desde `recovery/X/` —el árbol
+// pre-apply, que ya es el estado vigente: no-op— y la inversa colisiona consigo misma, sobrescribiendo
+// `recovery/X-revert/` (que guardaba el estado redo) y `receipts/X-revert.json`.
+//
+// QUÉ FIJAN ESTOS TESTS, Y POR QUÉ AQUÍ
+//
+// Los cuatro criterios observables (estado restaurado, identidad propia, material previo intacto,
+// composición) los fija el e2e de `crates/lodestar-mcp/tests/e2e_ciclo_vida.rs`, sobre la sesión viva
+// que reprodujo el testbench. Este módulo cubre lo que solo se ve desde la fachada: el **round-trip de
+// revisiones y receiptIds** —que la inversa de la inversa es un recibo coherente, no un registro
+// degenerado `A→A`— y el **crash a mitad**, con los failpoints que solo `lodestar-app` puede armar
+// porque atraviesan sus dos capas (`FailPoint::TrasJournalPrepared`, dentro de la transacción inversa;
+// `FailPoint::TrasLaTransaccionAntesDelRecibo`, en la fachada).
+//
+// El camino de un `revert` sobre una transacción NORMAL no cambia: lo custodia
+// `reversion_re_verificada::revert_sin_interferencia_sigue_funcionando`, que sigue verde sin tocarse.
+// ===========================================================================
+
+mod revertir_la_reversion {
+    use super::*;
+    use lodestar_app::{Profile, ReceiptSummary, RevertResult};
+    use lodestar_core::types::ReceiptId;
+
+    /// El cuerpo que publica el apply de estos tests: el estado **B**, al que hay que poder volver.
+    const CUERPO_B: &str = "# Resumen\n\ncuerpo del plan\n";
+
+    /// Un workspace con `plan → apply → revert` ya hechos: el punto de partida de deshacer el *undo*.
+    struct Revertida {
+        app: App,
+        /// Bytes de `alfa.md` antes del apply (estado **A**, vigente tras el primer revert).
+        estado_a: String,
+        /// Bytes de `alfa.md` tras el apply (estado **B**, el redo que la segunda reversión restaura).
+        estado_b: String,
+        /// Recibo del primer `revert` — el `-revert` que estos tests revierten.
+        recibo_revert: ReceiptId,
+        /// `RevertResult` del primer revert, para casar revisiones en el round-trip.
+        revert1: RevertResult,
+    }
+
+    /// Semilla + plan + apply + revert, con cada precondición aseverada: sin una reversión real
+    /// publicada no hay ningún `-revert` que revertir y los escenarios no significan nada.
+    fn app_revertida(root: &Path) -> Revertida {
+        semilla(root);
+        let estado_a = std::fs::read_to_string(root.join("alfa.md"))
+            .expect("la semilla debe escribir alfa.md");
+
+        let app = App::open(root).expect("el workspace temporal debe abrir");
+        let ops = json!([{ "op": "replace_body", "path": "alfa.md", "body": CUERPO_B }]);
+        let plan = app
+            .change_plan(None, &ops, policy_permisiva())
+            .expect("planificar una modificación normal debe funcionar");
+        let aplicado = app
+            .change_apply(&plan.change_set_id, None)
+            .expect("aplicar el plan es la precondición de todo revert");
+        let estado_b = std::fs::read_to_string(root.join("alfa.md")).expect("alfa.md debe existir");
+        assert_ne!(
+            estado_b, estado_a,
+            "precondición: el apply tiene que haber publicado de verdad"
+        );
+
+        let revert1 = app
+            .change_revert(&aplicado.receipt_id, None)
+            .expect("revertir un apply normal debe funcionar (camino ya probado)");
+        assert_eq!(
+            std::fs::read_to_string(root.join("alfa.md")).expect("alfa.md debe existir"),
+            estado_a,
+            "precondición: el primer revert devuelve `alfa.md` al estado A"
+        );
+
+        Revertida {
+            app,
+            estado_a,
+            estado_b,
+            recibo_revert: revert1.receipt_id.clone(),
+            revert1,
+        }
+    }
+
+    /// Los bytes de `alfa.md` en disco.
+    fn alfa(root: &Path) -> String {
+        std::fs::read_to_string(root.join("alfa.md")).expect("alfa.md debe existir")
+    }
+
+    /// Los recibos que un agente ve (`workspace_status.receipts`, E23-H11), por id.
+    fn recibo_por_id(app: &App, id: &ReceiptId) -> Option<ReceiptSummary> {
+        app.workspace_status(Profile::Standard)
+            .expect("workspace_status debe responder")
+            .receipts
+            .into_iter()
+            .find(|r| r.receipt_id == *id)
+    }
+
+    /// La revisión actual del workspace, por la misma fachada.
+    fn revision_actual(app: &App) -> String {
+        app.workspace_status(Profile::Standard)
+            .expect("workspace_status debe responder")
+            .workspace_revision
+            .0
+    }
+
+    /// **Round-trip de revisiones y receiptIds** — **Dado** un `-revert` publicado, **Cuando** se
+    /// revierte, **Entonces** la inversa de la inversa es una transacción completa: identidad propia,
+    /// revisiones intercambiadas respecto al recibo que deshace, y un recibo coherente y utilizable.
+    ///
+    /// Hoy devuelve el mismo `receiptId` que revierte, con `previousRevision == resultRevision`: un
+    /// recibo degenerado (`A→A`) escrito **encima** del que describía la primera reversión.
+    #[test]
+    fn revertir_un_revert_deja_un_recibo_coherente() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let r = app_revertida(root);
+
+        let salida = r
+            .app
+            .change_revert(&r.recibo_revert, None)
+            .unwrap_or_else(|e| {
+                panic!(
+                    "deshacer el *undo* tiene que ser una reversión como cualquier otra: \
+                     `change_revert` del recibo {:?} devolvió {} ({e:?})",
+                    r.recibo_revert.0,
+                    e.code.as_str()
+                )
+            });
+
+        assert!(salida.reverted, "se declara revertida: {salida:?}");
+        assert_ne!(
+            salida.receipt_id, r.recibo_revert,
+            "la transacción inversa gana identidad PROPIA: reusar el id del recibo que se revierte \
+             la hace colisionar consigo misma y sobrescribir su `recovery/`/`receipts/`"
+        );
+        assert_eq!(
+            alfa(root),
+            r.estado_b,
+            "y restaura el estado que ese recibo dejó atrás: el redo (B), no el estado vigente (A)"
+        );
+        assert_eq!(
+            salida.previous_workspace_revision.0, r.revert1.workspace_revision.0,
+            "la `previousWorkspaceRevision` de la inversa es la `workspaceRevision` que dejó el \
+             recibo revertido"
+        );
+        assert_eq!(
+            salida.workspace_revision.0, r.revert1.previous_workspace_revision.0,
+            "y su `workspaceRevision` es la `previousWorkspaceRevision` de aquel: el round-trip \
+             cierra (INVERSO al recibo que deshace, `contracts/mcp.yml`)"
+        );
+        assert_ne!(
+            salida.previous_workspace_revision.0, salida.workspace_revision.0,
+            "que además son distintas entre sí: iguales es la firma del no-op silencioso"
+        );
+        assert_eq!(
+            revision_actual(&r.app),
+            salida.workspace_revision.0,
+            "y esa es la revisión REAL del workspace tras deshacer el *undo*"
+        );
+
+        let recibo = recibo_por_id(&r.app, &salida.receipt_id).unwrap_or_else(|| {
+            panic!(
+                "el recibo de la segunda reversión tiene que quedar persistido y visible: sin él la \
+                 cadena no se puede seguir deshaciendo. change_revert devolvió {salida:?}"
+            )
+        });
+        assert_eq!(
+            recibo.result_revision.0, salida.workspace_revision.0,
+            "y es coherente con lo publicado, no un registro decorativo"
+        );
+        assert_eq!(
+            recibo.changed_path_count, 1,
+            "declarando la ruta que restauró"
+        );
+
+        let previo = recibo_por_id(&r.app, &r.recibo_revert).unwrap_or_else(|| {
+            panic!(
+                "el recibo del PRIMER revert tiene que seguir existiendo: describe una transacción \
+                 distinta y es lo que hace reversible la cadena"
+            )
+        });
+        assert_eq!(
+            previo.result_revision.0, r.revert1.workspace_revision.0,
+            "y sin reescribirse: sigue declarando la revisión que aquella reversión dejó ({}), no \
+             la de ahora",
+            r.revert1.workspace_revision.0
+        );
+        assert_eq!(
+            r.estado_a,
+            std::fs::read_to_string(
+                root.join(".lodestar/runtime/recovery")
+                    .join(format!("{}/alfa.md", salida.receipt_id.0))
+            )
+            .unwrap_or_default(),
+            "y la segunda reversión respalda SU estado previo (A) bajo su propia identidad: es lo \
+             que permite deshacerla a su vez"
+        );
+    }
+
+    #[cfg(feature = "test-failpoints")]
+    mod con_seams {
+        use super::*;
+        use lodestar_workspace::failpoints::{self, FailPoint};
+
+        /// Arma `fp`, intenta deshacer el *undo* y comprueba que el punto **se ejerció**
+        /// (`failpoints::disparado` autodesarma al dispararse: si sigue armado, nadie lo consultó y
+        /// el escenario no se reprodujo).
+        fn revierte_cayendo_en(
+            app: &App,
+            receipt_id: &ReceiptId,
+            fp: FailPoint,
+            donde: &str,
+        ) -> Result<RevertResult, lodestar_app::AppError> {
+            failpoints::armar(fp);
+            let resultado = app.change_revert(receipt_id, None);
+            let seguia_armado = failpoints::disparado(fp);
+            failpoints::desarmar();
+            assert!(
+                !seguia_armado,
+                "el punto de caída {fp:?} no se ejerció: nadie lo consulta {donde}. Sin eso el \
+                 escenario no se reproduce y el test pasaría vacuamente"
+            );
+            resultado
+        }
+
+        /// **Criterio 5** (`crash_a_mitad_de_revertir_un_revert_no_deja_parciales`) — **Dado** un
+        /// crash a mitad del `revert` de un `-revert`, **Cuando** se reabre el workspace, **Entonces**
+        /// el canónico converge a uno de los dos bordes (nunca un parcial) y la siguiente operación
+        /// funciona al primer intento.
+        ///
+        /// Los dos puntos cubren los dos lados del punto de no retorno de la inversa: antes del primer
+        /// rename (el canónico no se movió) y con la inversa ya publicada pero sin recibo escrito por
+        /// la fachada. En ambos, tras reabrir y recuperar, `alfa.md` tiene que ser exactamente `A` o
+        /// exactamente `B`, y un `change_revert` posterior del mismo `-revert` tiene que poder dejar
+        /// el workspace en `B` **al primer intento** — que es donde hoy la colisión de identidad
+        /// arrastra el fallo: la segunda transacción escribe sobre el material de la primera, así que
+        /// lo que sobreviva a la caída ya no describe una transacción sino dos mezcladas.
+        #[test]
+        fn crash_a_mitad_de_revertir_un_revert_no_deja_parciales() {
+            let puntos = [
+                (
+                    FailPoint::TrasJournalPrepared,
+                    "en `Workspace::revert_transaction_con_recibo`, tras el journal de la inversa y \
+                     ANTES de su primer rename",
+                ),
+                (
+                    FailPoint::TrasLaTransaccionAntesDelRecibo,
+                    "en `App::change_revert`, entre el retorno de la transacción inversa y su recibo",
+                ),
+            ];
+
+            for (fp, donde) in puntos {
+                let dir = tempfile::tempdir().unwrap();
+                let root = dir.path();
+                let r = app_revertida(root);
+
+                let caida = revierte_cayendo_en(&r.app, &r.recibo_revert, fp, donde);
+                assert!(
+                    caida.is_err(),
+                    "precondición: con {fp:?} armado la reversión no puede reportar éxito: {caida:?}"
+                );
+
+                // Se «reabre» el workspace, como haría el proceso siguiente.
+                drop(r.app);
+                let app2 = App::open(root).expect("reabrir el workspace tras la caída");
+
+                let tras_recuperar = alfa(root);
+                assert!(
+                    tras_recuperar == r.estado_a || tras_recuperar == r.estado_b,
+                    "desde {fp:?}, el canónico debe converger a UNO de los dos bordes de la \
+                     reversión de la reversión, jamás a un parcial.\nen disco: \
+                     {tras_recuperar:?}\nA: {:?}\nB: {:?}",
+                    r.estado_a,
+                    r.estado_b
+                );
+
+                // Y la siguiente operación funciona AL PRIMER INTENTO, dejando el workspace en B.
+                if tras_recuperar == r.estado_a {
+                    let reintento = app2
+                        .change_revert(&r.recibo_revert, None)
+                        .unwrap_or_else(|e| {
+                            panic!(
+                                "tras la caída en {fp:?} y la recuperación, deshacer el *undo* tiene \
+                                 que funcionar al PRIMER intento: devolvió {} ({e:?})",
+                                e.code.as_str()
+                            )
+                        });
+                    assert!(reintento.reverted, "y publicar: {reintento:?}");
+                }
+                assert_eq!(
+                    alfa(root),
+                    r.estado_b,
+                    "el estado final tras {fp:?} es el redo (B): o lo dejó la transacción que \
+                     sobrevivió a la caída, o lo dejó el reintento"
+                );
+                assert_eq!(
+                    revision_actual(&app2),
+                    r.revert1.previous_workspace_revision.0,
+                    "y la revisión que reporta la fachada es la que tenía el workspace en B, la \
+                     misma que el apply original dejó: el estado converge, no queda a medias"
+                );
+            }
+        }
+    }
+}

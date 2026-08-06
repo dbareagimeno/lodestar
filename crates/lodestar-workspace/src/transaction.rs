@@ -40,10 +40,14 @@
 //!     que el GC del plano de control nunca vea la transacción sin respaldo), limpiar staging + journal
 //!     y **conservar** las copias de recuperación (el receipt y el `change_revert` de E13-H09 las
 //!     necesitan). Todo el paso es **best-effort** (E25-H04): está al otro lado del punto de no retorno,
-//!     así que un fallo suyo avisa por stderr y no convierte la publicación en un error.
+//!     así que un fallo suyo avisa por stderr y no convierte la publicación en un error. Desde E28-H01
+//!     esa coreografía vive en **un solo sitio**, [`Workspace::seal_published_transaction`], que
+//!     comparte con la reversión de `crate::recovery` (`decisiones §16(i)`): antes estaba escrita dos
+//!     veces a mano, con la única diferencia de que el apply también limpia `staging/`.
 //! 12. `result = workspace_revision()` — la revisión resultante (`resultRevision`).
 
 use std::collections::BTreeSet;
+use std::path::Path;
 
 use lodestar_core::plan;
 use lodestar_core::types::{
@@ -69,6 +73,56 @@ pub fn transaction_id(change_set_id: &ChangeSetId) -> String {
         .to_string()
 }
 
+/// Sufijo con el que una transacción **inversa** nombra su material (E13-H09).
+const REVERT_SUFFIX: &str = "-revert";
+
+/// Deriva el `txnId` de la transacción que **deshace** a `txn_id`, con identidad propia y componible
+/// sin límite (E28-H01).
+///
+/// El id de una reversión se deriva del `txnId` de la transacción **que efectivamente deshace** — que
+/// es el `receiptId` de su recibo, porque `change_apply`/`change_revert` nombran cada recibo con el
+/// `txnId` de su transacción—, y NO del `changeSetId` que ese recibo lleva dentro. Ese era el defecto
+/// M-01 del testbench homelab: un recibo `X-revert` **hereda** el `changeSetId` de la transacción
+/// original, así que derivar de él recalculaba `X-revert` una segunda vez y la nueva transacción
+/// colisionaba consigo misma, sobrescribiendo el `recovery/` que guardaba el estado *redo*.
+///
+/// La regla es apilar un contador en el sufijo, no repetir el sufijo:
+///
+/// | `txn_id` | reversión |
+/// |---|---|
+/// | `abc123` | `abc123-revert` |
+/// | `abc123-revert` | `abc123-revert-2` |
+/// | `abc123-revert-2` | `abc123-revert-3` |
+///
+/// El primer escalón conserva **exactamente** la convención `<txnId>-revert` de E13-H09 (que fijan
+/// `crash_senal.rs` y `escritura.rs`), y a partir de ahí el contador crece de uno en uno: cada
+/// reversión de la cadena obtiene un nombre que ninguna anterior usó, así que `staging/`, `recovery/`,
+/// `journal/` y `receipts/` siguen atados por un mismo `txnId` (la convención de `crate::receipts`) sin
+/// que dos transacciones lo compartan jamás.
+///
+/// La derivación es **determinista** —no lleva reloj ni contador global—, que es lo que hace que un
+/// reintento tras un crash vuelva a producir el mismo id y reutilice el material que la recuperación
+/// ya limpió, en vez de sembrar un huérfano nuevo en cada intento. Y como solo añade `-` y dígitos, no
+/// introduce caracteres que el saneado de nombres (`crate::receipts::sanear_nombre`) tenga que
+/// neutralizar: el id derivado ya coincide con su forma saneada si lo estaba el de partida.
+pub fn revert_transaction_id(txn_id: &str) -> String {
+    // `<base>-revert-<n>` → `<base>-revert-<n+1>`, con `n` numérico (el único formato que produce
+    // esta función; cualquier otra cosa cae al caso general de abajo).
+    if let Some((cabeza, cola)) = txn_id.rsplit_once('-') {
+        if cabeza.ends_with(REVERT_SUFFIX) {
+            if let Ok(n) = cola.parse::<u64>() {
+                return format!("{cabeza}-{}", n.saturating_add(1));
+            }
+        }
+    }
+    // `<base>-revert` → `<base>-revert-2` (el segundo escalón de la cadena).
+    if txn_id.ends_with(REVERT_SUFFIX) {
+        return format!("{txn_id}-2");
+    }
+    // Primer escalón: la convención histórica de E13-H09, intacta.
+    format!("{txn_id}{REVERT_SUFFIX}")
+}
+
 /// Conjunto de paths **afectados** por llevar `canonical` al estado `result`, en orden determinista
 /// por [`RelPath`] (misma lógica que [`Workspace::publish`]): creados/modificados (el resultado deja
 /// un contenido que difiere del canónico) + borrados (el canónico los tenía y el resultado ya no).
@@ -88,6 +142,83 @@ fn affected_paths(canonical: &FileMap, result: &FileMap) -> Vec<RelPath> {
 }
 
 impl Workspace {
+    /// **Coreografía de sellado** de una transacción ya publicada, compartida por el apply y la
+    /// reversión (E28-H01, `decisiones §16(i)`): promueve el recibo pendiente → limpia el staging (si
+    /// la transacción tenía) → borra el fichero de journal.
+    ///
+    /// Hasta E28-H01 esta secuencia estaba escrita **dos veces a mano**
+    /// —[`Workspace::apply_transaction_con_recibo`] pasos (11a)/(11b)/(11c) y
+    /// `Workspace::revert_transaction_con_recibo` pasos (10a)/(10b)—, con la única diferencia de que el
+    /// apply también limpia `staging/`. Dos copias de un orden cuyo sentido está en el orden mismo son
+    /// exactamente la clase de divergencia que nadie ve hasta que una de las dos se queda atrás; aquí
+    /// vive una sola vez y las dos la llaman.
+    ///
+    /// # El orden es el contrato
+    ///
+    /// 1. **El recibo primero**, antes de tocar el journal: así la transacción pasa de estar respaldada
+    ///    por `journal/` a estarlo por `receipts/` sin un solo instante en el que el GC del plano de
+    ///    control (cuyo criterio de vivos es `journal/ ∪ receipts/`) la vea como basura y le purgue las
+    ///    copias con las que se revierte.
+    /// 2. **El staging** —`Some(path)` solo para el apply; la reversión no materializa staging—, que
+    ///    sobra desde el instante en que la transacción publicó.
+    /// 3. **El journal, y solo si el recibo quedó a salvo**: si la promoción falló, dejarlo en disco es
+    ///    lo que hace que la vía COMPLETAR de [`Workspace::recover`] reintente la promoción en la
+    ///    siguiente operación, en vez de perder el recibo de algo ya publicado.
+    ///
+    /// # Todo es best-effort, a propósito
+    ///
+    /// Corre al otro lado del punto de no retorno: el canónico ya cambió, así que un `Err` aquí
+    /// devolvería un error por algo que SÍ se publicó y el agente actuaría sobre la premisa falsa de
+    /// que su operación no ocurrió (regla de E25-H04, heredada por E25-H05). Cada fallo avisa por
+    /// stderr y el sellado continúa; por eso la función **no devuelve `Result`**.
+    ///
+    /// `que` nombra a la transacción en los avisos (`"transacción"` / `"reversión"`), que es la única
+    /// diferencia que un operador necesita leer en stderr entre los dos caminos.
+    pub(crate) fn seal_published_transaction(
+        &self,
+        txn_id: &str,
+        journal_path: &Path,
+        staging_path: Option<&Path>,
+        que: &str,
+    ) {
+        // (1) El recibo, ANTES de borrar el journal.
+        let recibo_a_salvo = match self.promote_pending_receipt(txn_id) {
+            Ok(()) => true,
+            Err(e) => {
+                eprintln!(
+                    "lodestar: aviso: no se pudo promover el recibo de la {que} {txn_id} ({e}): se \
+                     conserva su journal para que la recuperación lo reintente"
+                );
+                false
+            }
+        };
+
+        // (2) El staging (solo el apply materializa uno).
+        if let Some(staging_path) = staging_path {
+            if staging_path.exists() {
+                if let Err(e) = std::fs::remove_dir_all(staging_path) {
+                    eprintln!(
+                        "lodestar: aviso: no se pudo limpiar el staging {} de la {que} {txn_id} \
+                         ({e}): el cambio está publicado; el GC del plano de control lo recogerá",
+                        staging_path.display()
+                    );
+                }
+            }
+        }
+
+        // (3) El journal, y solo si el recibo quedó a salvo.
+        if recibo_a_salvo && journal_path.exists() {
+            if let Err(e) = std::fs::remove_file(journal_path) {
+                eprintln!(
+                    "lodestar: aviso: no se pudo borrar el journal {} de la {que} {txn_id} ({e}): el \
+                     conocimiento ya está publicado y la recuperación completará el sellado al \
+                     reabrir",
+                    journal_path.display()
+                );
+            }
+        }
+    }
+
     /// Ejecuta la **transacción de publicación** de `change_set` sobre el conocimiento canónico
     /// (E13-H08), componiendo las primitivas de E13-H01…H07 en el orden documentado a nivel de
     /// módulo. Devuelve `(previousRevision, resultRevision, changedPaths)`: la
@@ -295,45 +426,10 @@ impl Workspace {
         let journal_path = journal.path().to_path_buf();
         failpoint!(FailPoint::AntesDeSellar);
 
-        // (11a) El recibo, ANTES de borrar el journal: así la transacción pasa de estar respaldada por
-        //       `journal/` a estarlo por `receipts/` sin un solo instante en el que el GC del plano de
-        //       control (cuyo criterio de vivos es `journal/ ∪ receipts/`) la vea como basura y le
-        //       purgue las copias con las que se revierte. Ese hueco `[sellado, recibo)` existía
-        //       mientras el recibo lo escribía la fachada, ya soltado el lock.
-        let recibo_a_salvo = match self.promote_pending_receipt(&txn_id) {
-            Ok(()) => true,
-            Err(e) => {
-                eprintln!(
-                    "lodestar: aviso: no se pudo promover el recibo de la transacción {txn_id} ({e}): \
-                     se conserva su journal para que la recuperación lo reintente"
-                );
-                false
-            }
-        };
-
-        // (11b) Staging.
-        if staging_path.exists() {
-            if let Err(e) = std::fs::remove_dir_all(&staging_path) {
-                eprintln!(
-                    "lodestar: aviso: no se pudo limpiar el staging {} de la transacción {txn_id} \
-                     ({e}): el cambio está publicado; el GC del plano de control lo recogerá",
-                    staging_path.display()
-                );
-            }
-        }
-
-        // (11c) El journal, y solo si el recibo quedó a salvo: si no, dejarlo en disco es lo que hace
-        //       que la vía COMPLETAR de la recuperación vuelva a intentar la promoción en la siguiente
-        //       operación en vez de perder el recibo de algo ya publicado.
-        if recibo_a_salvo && journal_path.exists() {
-            if let Err(e) = std::fs::remove_file(&journal_path) {
-                eprintln!(
-                    "lodestar: aviso: no se pudo borrar el journal {} de la transacción {txn_id} \
-                     ({e}): el cambio está publicado y la recuperación lo completará al reabrir",
-                    journal_path.display()
-                );
-            }
-        }
+        // (11a/b/c) La coreografía de sellado, en el ÚNICO sitio en el que vive (E28-H01): recibo →
+        //           staging → journal, con el orden y las garantías best-effort documentados en
+        //           [`Workspace::seal_published_transaction`]. La reversión llama a la misma función.
+        self.seal_published_transaction(&txn_id, &journal_path, Some(&staging_path), "transacción");
 
         // (12) Revisión resultante + conjunto de paths cambiados.
         Ok((previous, result, affected))

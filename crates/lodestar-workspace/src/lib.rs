@@ -68,7 +68,7 @@ pub use lock::WorkspaceLock;
 pub use recovery::RecoveryDir;
 pub use snapshot::WorkspaceSnapshot;
 pub use staging::StagingDir;
-pub use transaction::transaction_id;
+pub use transaction::{revert_transaction_id, transaction_id};
 
 /// Handle unificado de un workspace abierto.
 pub struct Workspace {

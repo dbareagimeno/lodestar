@@ -888,6 +888,49 @@ impl Workspace {
         self.discard_recovery_copies(txn_id)
     }
 
+    /// Comprueba que `txn_id` **no** identifica ya a una transacción con material vigente (E28-H01),
+    /// para que publicar bajo ese id no destruya en silencio el plano de recuperación de otra.
+    ///
+    /// El criterio de «vigente» es el mismo con el que el GC del plano de control decide qué está vivo
+    /// (`journal/ ∪ receipts/`, ver la documentación de `crate::receipts`), y por la misma razón que
+    /// allí es ese y no otro (invariante #3: una sola verdad, no un segundo juicio sobre lo mismo):
+    ///
+    /// - **journal presente** → la transacción está a medio publicar o pendiente de recuperar, y su
+    ///   material es justamente lo que la recuperación necesita;
+    /// - **recibo persistido** → la transacción es revertible, y `change_revert` restaura desde
+    ///   `recovery/<txnId>/`.
+    ///
+    /// Un `recovery/<txnId>/` **sin** ninguna de las dos señales NO cuenta como vigente: es un huérfano
+    /// que el GC recoge (E24-H06), y `backup_originals` ya lo reescribe de forma idempotente. Rechazar
+    /// también por él convertiría cualquier resto de una transacción abortada en un bloqueo permanente
+    /// de un id que nadie reclama.
+    ///
+    /// # Errores
+    /// - [`WorkspaceError::WriteConflict`] si el id ya está tomado, nombrando la señal que lo delata.
+    ///   Es un fallo **ruidoso y anterior a la primera escritura**: el canónico no se mueve ni un byte
+    ///   y no queda recuperación pendiente, que es justo lo contrario de degradar a un no-op.
+    fn assert_txn_id_libre(&self, txn_id: &str) -> Result<(), WorkspaceError> {
+        if self.journal_state_of(txn_id).is_some() {
+            return Err(WorkspaceError::WriteConflict(format!(
+                "la transacción {txn_id} ya tiene un write-ahead journal en curso: publicar bajo ese \
+                 identificador sobrescribiría su plano de recuperación y el estado que guarda se \
+                 perdería"
+            )));
+        }
+        let recibo = self
+            .receipts_dir()
+            .join(format!("{}.json", recovery_dir_name(txn_id)));
+        if recibo.exists() {
+            return Err(WorkspaceError::WriteConflict(format!(
+                "la transacción {txn_id} ya tiene un recibo persistido ({}): publicar bajo ese \
+                 identificador reescribiría ese recibo y sobrescribiría las copias de recuperación \
+                 con las que se deshace",
+                recibo.display()
+            )));
+        }
+        Ok(())
+    }
+
     /// El directorio raíz de las copias de recuperación de una transacción
     /// (`.lodestar/runtime/recovery/<txnId saneado>/`), exista o no.
     fn recovery_root(&self, txn_id: &str) -> PathBuf {
@@ -932,11 +975,21 @@ impl Workspace {
     /// edición con la copia respaldada. Es la simetría que le faltaba al camino que deshace: el apply
     /// re-verifica su base bajo el lock desde E13-H02.
     ///
+    /// **`new_txn_id` tiene que estar libre** (E28-H01): si ya identifica a una transacción con
+    /// material vigente —journal presente o recibo persistido, el mismo criterio de «vivo» del GC del
+    /// plano de control— la reversión falla **antes de escribir nada**, en vez de sobrescribir su
+    /// `recovery/`/`receipts/`. Ese material guarda el estado con el que se deshace el propio *undo*, y
+    /// pisarlo lo destruye para siempre. Quien deriva ids con
+    /// [`crate::revert_transaction_id`] nunca ve este error: la derivación es componible por
+    /// construcción y el guard es la red que impide que un llamante futuro reabra el defecto por otra
+    /// vía.
+    ///
     /// # Errores
     /// - [`WorkspaceError::Io`] si faltan las copias de recuperación de `orig_txn_id` (no se puede
     ///   revertir: transacción no disponible), o ante un fallo de IO de la restauración.
-    /// - [`WorkspaceError::WriteConflict`] si el lock ya está tomado (otro publicador) o si el
-    ///   canónico cambió entre la comprobación de la fachada y la toma del lock (E25-H05).
+    /// - [`WorkspaceError::WriteConflict`] si el lock ya está tomado (otro publicador), si el
+    ///   canónico cambió entre la comprobación de la fachada y la toma del lock (E25-H05) o si
+    ///   `new_txn_id` ya está tomado por una transacción vigente (E28-H01).
     /// - [`WorkspaceError::PermissionDenied`] si algún path afectado ya no es escribible.
     pub fn revert_transaction(
         &self,
@@ -966,8 +1019,10 @@ impl Workspace {
     /// criterio de «vivo» del GC (`journal/` ∪ `receipts/`), el árbol `recovery/<txnId>-revert/` quedaba
     /// huérfano y se purgaba: deshacer el *undo* se volvía imposible para siempre. Persistido con el
     /// journal, la vía COMPLETAR de [`Workspace::recover`] lo promueve sin código nuevo — la
-    /// convención de nombre `<txnId>-revert` ya localiza journal, copias, registro pendiente y recibo
-    /// con el mismo id.
+    /// convención que ata journal, copias, registro pendiente y recibo bajo un mismo `txnId` los
+    /// localiza a los cuatro. Lo que E28-H01 cambió no es esa convención sino **cómo se deriva** ese
+    /// id: ver [`crate::revert_transaction_id`] y el guard anti-sobrescritura de
+    /// [`Workspace::revert_transaction`].
     ///
     /// # Errores
     /// Los mismos que [`Workspace::revert_transaction`], más un [`WorkspaceError::Io`] si el registro
@@ -1010,6 +1065,25 @@ impl Workspace {
         //      —a diferencia del aborto de ventana del apply (E25-H02), que sí tiene que sellarse
         //      porque ocurre con el journal ya en disco—. El canónico no se ha movido ni un byte.
         self.reverify_base_revision(observed)?;
+
+        // (2c) Guard anti-sobrescritura (E28-H01): el `txnId` de la inversa no puede ser el de una
+        //      transacción con material VIGENTE. Publicar bajo un id ya usado no es una colisión de
+        //      nombres cualquiera: `backup_originals` empieza por `remove_dir_all` del árbol previo y
+        //      `write_pending_receipt`/`promote_pending_receipt` reescriben su recibo, así que el
+        //      estado que ese material guardaba —el *redo* de la cadena de reversiones— desaparece
+        //      para siempre. Eso es exactamente el defecto M-01 del testbench: la fachada derivaba el
+        //      id del `changeSetId` heredado y la inversa colisionaba consigo misma, degradando a un
+        //      no-op silencioso que destruía el redo.
+        //
+        //      Va **antes de la primera escritura** y **después** de la recuperación del paso (2): un
+        //      reintento tras un crash vuelve a derivar el mismo id, pero para entonces la vía
+        //      RESTAURAR ya limpió journal, pendiente y copias de aquel intento, así que el id vuelve
+        //      a estar libre y el reintento procede. Lo que este guard rechaza es solo el material que
+        //      sigue vivo: journal presente (transacción en curso o pendiente de recuperar) o recibo
+        //      persistido (transacción revertible) — el mismo criterio de «vivo» que usa el GC del
+        //      plano de control (`journal/ ∪ receipts/`, ver `crate::receipts`), no un tercer juicio
+        //      escrito a mano.
+        self.assert_txn_id_libre(new_txn_id)?;
 
         // (3) Localizar el árbol de recuperación de la transacción a revertir. Si no está, la
         //     transacción ya no es reversible (copias purgadas por el GC, E13-H07).
@@ -1101,34 +1175,11 @@ impl Workspace {
         // ocurrió. Se avisa por stderr y se sigue.
         let journal_path = journal.path().to_path_buf();
 
-        // (10a) El recibo, ANTES de borrar el journal: así la inversa pasa de estar respaldada por
-        //       `journal/` a estarlo por `receipts/` sin un solo instante en el que el GC del plano de
-        //       control (cuyo criterio de vivos es `journal/ ∪ receipts/`) la vea como basura y le
-        //       purgue las copias con las que se deshace el propio *undo*.
-        let recibo_a_salvo = match self.promote_pending_receipt(new_txn_id) {
-            Ok(()) => true,
-            Err(e) => {
-                eprintln!(
-                    "lodestar: aviso: no se pudo promover el recibo de la reversión {new_txn_id} \
-                     ({e}): se conserva su journal para que la recuperación lo reintente"
-                );
-                false
-            }
-        };
-
-        // (10b) El journal, y solo si el recibo quedó a salvo: si no, dejarlo en disco es lo que hace
-        //       que la vía COMPLETAR de la recuperación vuelva a intentar la promoción en la siguiente
-        //       operación en vez de perder el recibo de algo ya revertido.
-        if recibo_a_salvo && journal_path.exists() {
-            if let Err(e) = std::fs::remove_file(&journal_path) {
-                eprintln!(
-                    "lodestar: aviso: no se pudo borrar el journal {} de la reversión {new_txn_id} \
-                     ({e}): el conocimiento ya está restaurado y la recuperación completará el sellado \
-                     al reabrir",
-                    journal_path.display()
-                );
-            }
-        }
+        // (10a/b) La coreografía de sellado, en el ÚNICO sitio en el que vive (E28-H01): recibo →
+        //         staging (la inversa no materializa ninguno: `None`) → journal, con el orden y las
+        //         garantías best-effort documentados en `Workspace::seal_published_transaction`. El
+        //         apply llama a la misma función, así que las dos no pueden volver a divergir.
+        self.seal_published_transaction(new_txn_id, &journal_path, None, "reversión");
 
         // (11) Revisión resultante (== `previousRevision` del apply original) + paths restaurados.
         let result = self.workspace_revision()?;
