@@ -53,9 +53,20 @@ nuevo de `decisiones §23`:
   origen) — registrada en la épica E28, sección «Hallazgos preexistentes registrados»; comparte
   causa raíz con A-05 pero queda fuera de su arreglo.
 
-**Observación**: `crash_por_senal_no_deja_parciales` (`crates/lodestar-mcp/tests/crash_senal.rs`)
-es flaky bajo carga (~50% con `--workspace`), preexistente, señalado por tres jueces — candidato a
-historia de higiene.
+**Observación — CERRADA por E30-H02 (`9cd129a`)**: `crash_por_senal_no_deja_parciales`
+(`crates/lodestar-mcp/tests/crash_senal.rs`) era flaky bajo carga (~50% con `--workspace`),
+preexistente, señalado por tres jueces. **No era un test frágil: era un bug real.** Causa raíz —
+`acquire_lock` publicaba el lock en dos pasos no atómicos entre sí (`create_new`, que ya ganaba la
+exclusión con el fichero **vacío**, y solo después el cuerpo). Un `SIGKILL` en esa ventana dejaba en
+disco un lock existente y sin `pid` ni `timestamp`: un estado **terminal**, porque sin pid no hay
+prueba de vida y sin timestamp no hay TTL, así que el workspace quedaba cerrado a la escritura para
+siempre. Bajo carga el scheduler puede desalojar el proceso justo entre las dos llamadas y ensanchar
+la ventana de microsegundos a decenas de milisegundos — la escala exacta de los retrasos escalonados
+del test (40/70/100/130/170 ms), de ahí el ~50 % con la suite entera y el 0 % en aislamiento.
+Arreglo: el cuerpo se escribe y se `fsync`ea en un temporal del mismo directorio y se publica con
+`hard_link` (atómico y no-clobber, conserva la exclusión que daba `create_new`), más el reclamo de
+los locks vacíos que la ventana ya dejó en disco. **Verificado por el juez ciego: 20/20 corridas
+limpias** del test bajo carga.
 
 **Fase 1 cerrada a falta del juez de §16(g)/§16(b) (2026-08-07).** Épica E29 (11/11 historias) en
 `feat/e29-honestidad-superficie`: H01 (`4a52f59`), H02 (`46c1492`+`2f6ecf4`), H03 (`99900d3`), H04
@@ -87,8 +98,10 @@ verificación final, sin veredicto todavía. Pendiente además el merge de la ra
 - **Mensaje duplicado de `INVALID_RESULT` del gate de staging**: el gate de staging que E14-H04
   introdujo puede emitir el mismo mensaje de `INVALID_RESULT` por dos caminos distintos, detectado
   al tocar la validación estricta de E29-H01/H08 — a saldar en la escoba.
-- **Flakiness recurrente de `crash_por_senal_no_deja_parciales`**: sigue viva tras la Fase 1 (ver
-  observación arriba) — **candidata a historia de higiene de la Fase 2**.
+- **Flakiness recurrente de `crash_por_senal_no_deja_parciales`**: ~~sigue viva tras la Fase 1~~ —
+  **CERRADA por E30-H02 (`9cd129a`)**, la historia de higiene de la Fase 2 que se derivó de aquí. No
+  era fragilidad del test sino la ventana no atómica de publicación del lock; ver la observación de
+  arriba para causa raíz, arreglo y las 20/20 corridas limpias del juez.
 
 ## Criterio de cierre por bug
 

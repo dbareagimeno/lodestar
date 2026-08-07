@@ -5,9 +5,12 @@
 //! `.md` en disco son la única fuente de verdad»).
 //!
 //! Modelo **fail-fast** (no bloqueante): adquirir un lock ya tomado devuelve `Err` de inmediato
-//! en vez de esperar. La exclusión mutua se apoya en la creación **atómica y exclusiva** de
-//! fichero del sistema de ficheros (`O_CREAT | O_EXCL`): dos `acquire_lock` concurrentes sobre el
-//! mismo root nunca obtienen ambos el lock. La liberación es **RAII**: el guard
+//! en vez de esperar. La exclusión mutua se apoya en el **enlazado atómico y no-clobber** del
+//! sistema de ficheros (`link(2)`, que falla con `EEXIST` si el destino existe): dos `acquire_lock`
+//! concurrentes sobre el mismo root nunca obtienen ambos el lock. Hasta E30-H02 ese papel lo hacía
+//! la creación exclusiva del propio fichero de lock (`O_CREAT | O_EXCL`), que hoy solo se usa para
+//! el **temporal** donde se escribe el cuerpo antes de publicarlo — ver [`publicar_lock`]. La
+//! liberación es **RAII**: el guard
 //! [`WorkspaceLock`] borra el fichero en su `Drop`, de modo que el lock se suelta SIEMPRE —
 //! incluido durante el desenrollado de pila de un `panic`.
 //!
@@ -509,17 +512,28 @@ fn cuerpo_del_lock(token: &str) -> String {
 ///    cualquier instante deja o bien ningún lock, o bien un lock íntegro — nunca el fichero vacío
 ///    irreclamable que describe el diagnóstico de E30-H02.
 ///
-/// El temporal se borra siempre: si el enlace tuvo éxito, el contenido ya vive en la ruta del lock
-/// (los dos nombres apuntan al mismo inodo, y desenlazar uno no afecta al otro); si falló, no debe
-/// quedar basura en `runtime/`. Su nombre lleva el token, que es único por adquisición, así que dos
-/// publicaciones concurrentes no comparten temporal.
+/// El temporal se borra siempre **en el camino normal**: si el enlace tuvo éxito, el contenido ya
+/// vive en la ruta del lock (los dos nombres apuntan al mismo inodo, y desenlazar uno no afecta al
+/// otro); si falló, no debe quedar basura en `runtime/`. Su nombre lleva el token, que es único por
+/// adquisición, así que dos publicaciones concurrentes no comparten temporal.
 ///
-/// El `fsync` es lo que hace que la garantía sobreviva a un corte de corriente y no solo a un
-/// `SIGKILL`: sin él, el enlace podría llegar a disco antes que los datos del inodo.
+/// **Los temporales huérfanos se barren aquí** ([`barrer_temporales_rancios`]). Un `SIGKILL` entre
+/// el `create_new` del temporal y su desenlace deja el `.lock.<token>.tmp` en disco y **nadie más
+/// lo recogería**: es inerte (vive bajo `.lodestar/runtime/`, fuera del índice de conocimiento y
+/// del `.gitignore` gestionado, y no participa en la exclusión), pero se acumula de forma monótona
+/// en el mismo directorio que el GC de recibos de E25-H03 sí mantiene limpio. Por eso cada
+/// adquisición empieza barriendo lo rancio.
+///
+/// El `fsync` del **fichero** es lo que hace que un `SIGKILL` no pueda publicar un cuerpo a medias:
+/// los datos del inodo están en disco antes de que exista el enlace. Lo que **no** se hace es
+/// `fsync` del **directorio**, así que ante un corte de corriente la entrada del enlace puede
+/// perderse: el resultado es «no hay lock», nunca «hay un lock a medias» — benigno y recuperable
+/// (la siguiente adquisición lo publica de cero), que es la propiedad que este código promete.
 fn publicar_lock(path: &Path, token: &str) -> std::io::Result<()> {
     use std::io::Write as _;
 
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
+    barrer_temporales_rancios(dir);
     let tmp = dir.join(format!(".lock.{token}.tmp"));
 
     // Escritura + `fsync` del cuerpo en el temporal. Si algo falla aquí, el lock no llega a existir.
@@ -542,4 +556,49 @@ fn publicar_lock(path: &Path, token: &str) -> std::io::Result<()> {
     // Pase lo que pase, el temporal se retira: su contenido ya está publicado bajo el otro nombre.
     let _ = std::fs::remove_file(&tmp);
     resultado
+}
+
+/// Borra de `dir` los temporales de publicación (`.lock.<token>.tmp`) más viejos que [`LOCK_TTL`].
+///
+/// **Por qué hace falta**: [`publicar_lock`] retira su temporal en todos sus caminos de retorno,
+/// pero un `SIGKILL` entre el `create_new` y ese borrado no ejecuta ninguno — y ese temporal ya no
+/// pertenece a nadie: no lo mira el walker (`.lodestar/**` está fuera del índice de conocimiento),
+/// no lo versiona git (`runtime/` cae en el `.gitignore` gestionado) y no afecta a la exclusión (la
+/// da el enlace sobre `lock.json`, no los temporales). Es basura inerte, pero **monotónica**: sin
+/// este barrido crece una entrada por crash y nunca decrece.
+///
+/// **Por qué el umbral es [`LOCK_TTL`] y no algo más fino**: un temporal más viejo que el TTL no
+/// puede pertenecer a una publicación en curso —la ventana entre crear el temporal y desenlazarlo
+/// es de microsegundos, y el TTL son 15 minutos—, así que el margen es de órdenes de magnitud. Y
+/// borrar el temporal de un publicador concurrente sería inocuo de todos modos: su `hard_link` ya
+/// habría fallado o triunfado sobre el inodo, que sobrevive mientras alguien lo tenga abierto o
+/// enlazado.
+///
+/// **Best-effort en todo**: un `read_dir` que falla, una entrada sin metadatos o un borrado que no
+/// se puede hacer se ignoran en silencio. Esto es higiene, no corrección: nada de lo que decide el
+/// lock depende de que se ejecute. El coste es un `read_dir` por adquisición sobre un directorio
+/// con un puñado de entradas.
+fn barrer_temporales_rancios(dir: &Path) {
+    let Ok(entradas) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let ahora = std::time::SystemTime::now();
+    for entrada in entradas.flatten() {
+        let nombre = entrada.file_name();
+        let Some(nombre) = nombre.to_str() else {
+            continue;
+        };
+        if !(nombre.starts_with(".lock.") && nombre.ends_with(".tmp")) {
+            continue;
+        }
+        let rancio = entrada
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|m| ahora.duration_since(m).ok())
+            .is_some_and(|edad| edad > LOCK_TTL);
+        if rancio {
+            let _ = std::fs::remove_file(entrada.path());
+        }
+    }
 }
