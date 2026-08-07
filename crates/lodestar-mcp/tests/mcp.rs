@@ -11247,3 +11247,754 @@ fn parametros_opcionales_legitimos_siguen_funcionando() {
         segunda[0]
     );
 }
+
+// ---------------------------------------------------------------------------
+// E30-H01 — Cursores estrictos: malformado o ajeno a la tool es `INVALID_SCHEMA`
+//
+// Defecto (verificado por el wire antes de escribir estos tests, no supuesto):
+//   · A-02 (ROB-05): `decode_cursor` (`lodestar-app/src/lib.rs:3987`) hace
+//     `usize::from_str_radix(cursor, 16).unwrap_or(0)`. Un `cursor: "zzz-no-hex"` cae a offset 0 y
+//     la tool devuelve la PRIMERA página con `isError` ausente: indistinguible de un cliente que
+//     omitió el parámetro a propósito.
+//   · A-03 (ROB-06): las cuatro tools paginadas comparten `pagina()`/`encode_cursor()`/
+//     `decode_cursor()` y el cursor es un offset hex DESNUDO, sin marca de origen. Comprobado por el
+//     wire: el `nextCursor: "2"` que emite `knowledge_check` lo acepta `knowledge_search` y sirve
+//     una página «válida» en forma y ajena en significado.
+//
+// COMPORTAMIENTO que fijan estos tests (lo observable; el encoding interno lo elige la fase verde):
+//   1. Un cursor que no decodifica → `INVALID_SCHEMA` nombrando `cursor` y el valor recibido.
+//   2. Un cursor emitido por OTRA tool → `INVALID_SCHEMA` nombrando que no pertenece a esta tool.
+//   3. Un cursor emitido por otro MODO de `metadata_inspect` → también rechazado (ver la decisión
+//      de abajo).
+//   4. El camino feliz no se toca: un cursor obtenido de una respuesta REAL de la misma tool con
+//      los MISMOS parámetros sigue paginando, y el recorrido completo hasta `nextCursor: null`
+//      reconstruye exactamente el resultado sin paginar.
+//
+// DECISIÓN DE LA FASE ROJA sobre la identidad de consulta (el alcance pide decidirlo y dejarlo
+// escrito, no dejarlo a interpretación):
+//   · **La identidad se ata a (tool, contexto de listado)**, entendiendo por contexto el que
+//     determina QUÉ lista se pagina y en qué orden total cuando la propia tool tiene más de una:
+//     el `mode` (y el `field` en mode «field») de `metadata_inspect`. Ese caso es OBLIGATORIO
+//     porque el criterio 3 de la historia lo exige con test, y porque las dos listas de
+//     `metadata_inspect` tienen órdenes totales distintos: un offset del catálogo sobre el
+//     vocabulario de un campo es exactamente el mismo defecto que A-03 dentro de una sola tool.
+//   · **NO se ata al criterio de selección** (`text`/`where`/`filter` de `knowledge_search`,
+//     `scope`/`minimumSeverity` de `knowledge_check`, `ref`/`depth`/`direction` de `graph_query`).
+//     Razones: (a) el criterio de la historia solo lo exige para el par catalog/field; (b) atarlo a
+//     los parámetros de selección obliga a hashear una entrada de forma libre —y el `filter`/`where`
+//     admiten formas equivalentes que hashearían distinto, convirtiendo en `INVALID_SCHEMA`
+//     paginaciones legítimas—; (c) ese endurecimiento cambia lo que hoy es una respuesta
+//     desalineada, no silenciosamente errónea en la misma medida (el orden total sí depende de la
+//     consulta, pero el cliente que cambia la consulta a mitad de recorrido lo hace a sabiendas).
+//     Queda como **hallazgo de seguimiento declarado**, no como hueco descubierto por accidente:
+//     `cursor_de_otra_consulta_de_la_misma_tool_es_hallazgo_de_seguimiento` lo deja escrito
+//     ejerciendo el comportamiento que esta historia SÍ garantiza (sigue paginando, sin romper).
+//   · **`cursor: ""` (cadena vacía) cuenta como AUSENTE, no como malformado.** Es lo que hace hoy y
+//     lo que `descubribilidad.rs::el_schema_declarado_coincide_con_lo_aceptado` da por bueno al
+//     mandar `json!("")` como valor de ejemplo del parámetro declarado; convertirlo en error
+//     rompería esa guarda por una razón ajena a este defecto. Lo fija
+//     `cursor_vacio_cuenta_como_ausente`.
+//
+// TESTS PREEXISTENTES QUE FIJABAN LA TOLERANCIA: **ninguno**. Se revisó toda la suite
+// (`mcp.rs`, `escala_wire.rs`, `descubribilidad.rs`, `lodestar-app/tests/`): todos los tests de
+// paginación —`search_paginacion`, `el_cursor_es_autosuficiente`, `paginar_no_pierde_ni_duplica`,
+// `graph_query_tiene_default`, `recorre_paginas`— usan cursores OBTENIDOS de respuestas reales,
+// nunca fabricados a mano, así que ninguno depende de que un cursor basura caiga a offset 0. El
+// único cursor sintético de la suite es el `json!("")` de `descubribilidad.rs`, cubierto por la
+// decisión de arriba. No se reescribe ni se toca ningún test existente.
+// ---------------------------------------------------------------------------
+
+/// Un cursor sintáctico**mente** basura: ni hex, ni nada que ninguna codificación razonable emita.
+/// Es el literal que `decisiones §23/A-02` (ROB-05) reporta.
+const CURSOR_BASURA: &str = "zzz-no-hex";
+
+/// Las cuatro tools paginadas con unos argumentos que hoy tienen éxito, más el nombre de la lista
+/// que paginan. `metadata_inspect` aparece una vez por modo: son dos listas con órdenes totales
+/// distintos, y el criterio 3 de la historia las trata como contextos separados.
+fn casos_paginados() -> Vec<(&'static str, serde_json::Value, &'static str)> {
+    vec![
+        (
+            "knowledge_search",
+            serde_json::json!({"text": "nota", "limit": 20}),
+            "results",
+        ),
+        (
+            "knowledge_check",
+            serde_json::json!({"scope": {"kind": "workspace"}, "limit": 20}),
+            "diagnostics",
+        ),
+        (
+            "metadata_inspect",
+            serde_json::json!({"mode": "catalog", "limit": 20}),
+            "fields",
+        ),
+        (
+            "metadata_inspect",
+            serde_json::json!({"mode": "field", "field": "uid", "limit": 20}),
+            "values",
+        ),
+        (
+            "graph_query",
+            serde_json::json!({"operation": "components", "limit": 20}),
+            "nodes",
+        ),
+    ]
+}
+
+/// **E30-H01** · Criterio `cursor_malformado_es_invalid_schema` (A-02 / ROB-05):
+/// **Dado** una llamada con `cursor: "zzz-no-hex"`, **Cuando** se ejecuta, **Entonces** la respuesta
+/// es `INVALID_SCHEMA` nombrando el cursor recibido como no decodificable — **no** una página desde
+/// el offset 0.
+///
+/// Se ejerce en **las cuatro** tools paginadas (cinco llamadas, porque `metadata_inspect` tiene dos
+/// modos): el defecto vive en `decode_cursor`, que las cinco comparten, así que un arreglo que solo
+/// endureciera `knowledge_search` dejaría el mismo agujero en las otras.
+///
+/// El anti-vacuo está dentro del propio test: la MISMA llamada **sin** `cursor` tiene que seguir
+/// devolviendo su página, o «rechazar el cursor basura» habría degenerado en «rechazar la tool».
+#[test]
+fn cursor_malformado_es_invalid_schema() {
+    // `ws_cota_rota` y no `ws_cota`: este último es un ciclo perfecto sin enlaces colgantes, así que
+    // `knowledge_check` sirve CERO diagnósticos sobre él y la precondición de abajo («sin `cursor`
+    // esta llamada debe traer resultados») es insatisfacible para esa tool, con arreglo o sin él.
+    let dir = ws_cota_rota();
+
+    for (tool, args, clave) in casos_paginados() {
+        // (1) Control: sin `cursor`, la llamada tiene éxito y trae su lista (precondición del caso).
+        let ok = roundtrip(dir.path(), &[linea_call(1, tool, args.clone()).as_str()], 1);
+        let sc_ok_ = sc_ok(&ok[0], tool);
+        assert!(
+            !lista(sc_ok_, clave).is_empty(),
+            "precondición de «{tool}/{clave}»: sin `cursor` esta llamada debe traer resultados, o \
+             el caso no discrimina nada: {}",
+            ok[0]
+        );
+
+        // (2) El criterio: con el cursor basura, error.
+        let mut args_basura = args.clone();
+        args_basura["cursor"] = serde_json::json!(CURSOR_BASURA);
+        let resp = roundtrip(dir.path(), &[linea_call(2, tool, args_basura).as_str()], 1);
+        let err = error_de(&resp[0]).unwrap_or_else(|| {
+            panic!(
+                "«{tool}/{clave}» con `cursor: \"{CURSOR_BASURA}\"` debe RECHAZAR la llamada. Hasta \
+                 v0.5.0 `decode_cursor` hacía `usize::from_str_radix(cursor, 16).unwrap_or(0)`, así \
+                 que cualquier basura se reinterpretaba como «empieza desde el principio» y el \
+                 agente recibía la primera página creyendo que había avanzado (ROB-05, \
+                 `decisiones §23/A-02`).\nRespuesta recibida: {}",
+                resp[0]
+            )
+        });
+        assert_eq!(
+            codigo_de(&err),
+            "INVALID_SCHEMA",
+            "un cursor que no decodifica es entrada inválida del agente, con el mismo código que \
+             el resto de la validación de parámetros de «{tool}» (E24-H09/E26-H07): «{err}»"
+        );
+        let (_, mensaje) = codigo_y_mensaje(&err).unwrap_or_else(|| {
+            panic!("«{tool}» debe emitir «CÓDIGO: mensaje» (E26-H07), no el código pelado: «{err}»")
+        });
+        assert!(
+            menciona(mensaje, "cursor"),
+            "…y el mensaje debe NOMBRAR el parámetro `cursor`: es lo que el agente necesita para \
+             saber cuál de sus argumentos corregir (mismo criterio que el resto del catálogo de \
+             type errors): «{err}»"
+        );
+        assert!(
+            mensaje.contains(CURSOR_BASURA),
+            "…y deletrear el valor recibido («{CURSOR_BASURA}»), o el agente no puede distinguir \
+             «mandé un cursor que no vale» de «esta tool no acepta cursor»: «{err}»"
+        );
+    }
+}
+
+/// **E30-H01** · Criterio `cursor_de_otra_tool_es_invalid_schema` (A-03 / ROB-06):
+/// **Dado** un `nextCursor` devuelto por una llamada **real** a `graph_query`, **Cuando** se pasa
+/// ese mismo valor como `cursor` a `knowledge_search`, **Entonces** la respuesta es `INVALID_SCHEMA`
+/// nombrando que el cursor no pertenece a esta tool — **no** una página «válida» de
+/// `knowledge_search`.
+///
+/// El cursor se **obtiene de una respuesta real** (nunca se fabrica): es lo que hace que el caso sea
+/// el defecto reportado y no una variante de «cursor malformado». Hoy `graph_query` emite `"64"`
+/// (100 en hex) y `knowledge_search` lo acepta como offset propio.
+///
+/// Se cruzan las dos direcciones —`graph_query`→`knowledge_search` (el caso literal de la ficha) y
+/// `knowledge_check`→`metadata_inspect`— para que el arreglo no pueda consistir en un caso especial
+/// de un par concreto de tools.
+#[test]
+fn cursor_de_otra_tool_es_invalid_schema() {
+    // `ws_cota_rota` y no `ws_cota`: `knowledge_check` es una de las tools EMISORAS de este cruce y
+    // solo emite `nextCursor` si hay más diagnósticos que la página; sobre el ciclo perfecto de
+    // `ws_cota` no hay ni uno, así que no habría cursor real que cruzar.
+    let dir = ws_cota_rota();
+
+    // Emisor y receptor de cada cruce: (tool emisora, args emisores, tool receptora, args
+    // receptores, lista del receptor).
+    let cruces: [(&str, serde_json::Value, &str, serde_json::Value, &str); 2] = [
+        (
+            "graph_query",
+            serde_json::json!({"operation": "components"}),
+            "knowledge_search",
+            serde_json::json!({"text": "nota", "limit": 20}),
+            "results",
+        ),
+        (
+            "knowledge_check",
+            serde_json::json!({"scope": {"kind": "workspace"}, "limit": 20}),
+            "metadata_inspect",
+            serde_json::json!({"mode": "catalog", "limit": 20}),
+            "fields",
+        ),
+    ];
+
+    for (emisora, args_emisora, receptora, args_receptora, clave) in cruces {
+        // (1) El cursor AJENO, obtenido de una respuesta real de la tool emisora.
+        let p1 = roundtrip(
+            dir.path(),
+            &[linea_call(1, emisora, args_emisora).as_str()],
+            1,
+        );
+        let ajeno = cursor_de(sc_ok(&p1[0], emisora)).unwrap_or_else(|| {
+            panic!(
+                "precondición: «{emisora}» debe emitir un `nextCursor` real que cruzar a \
+                 «{receptora}» (el caso exige un cursor OBTENIDO, no fabricado): {}",
+                p1[0]
+            )
+        });
+
+        // (2) Control anti-vacuo: en su propia tool, ese mismo cursor SÍ vale. Sin esto, un arreglo
+        //     que rechazara todos los cursores pasaría este test.
+        let mut args_propios = args_receptora.clone();
+        let p_propia = roundtrip(
+            dir.path(),
+            &[linea_call(2, emisora, {
+                let mut a = match emisora {
+                    "graph_query" => serde_json::json!({"operation": "components"}),
+                    _ => serde_json::json!({"scope": {"kind": "workspace"}, "limit": 20}),
+                };
+                a["cursor"] = serde_json::Value::String(ajeno.clone());
+                a
+            })
+            .as_str()],
+            1,
+        );
+        assert_eq!(
+            error_de(&p_propia[0]),
+            None,
+            "control anti-vacuo: el cursor que «{emisora}» emitió debe seguir sirviéndole a \
+             «{emisora}». Si también lo rechaza, el arreglo rompió la paginación en vez de \
+             firmarla: {}",
+            p_propia[0]
+        );
+
+        // (3) El criterio: la MISMA cadena, en otra tool, se rechaza.
+        args_propios["cursor"] = serde_json::Value::String(ajeno.clone());
+        let resp = roundtrip(
+            dir.path(),
+            &[linea_call(3, receptora, args_propios).as_str()],
+            1,
+        );
+        let err = error_de(&resp[0]).unwrap_or_else(|| {
+            panic!(
+                "el `nextCursor` «{ajeno}» lo emitió «{emisora}»; «{receptora}» debe RECHAZARLO. \
+                 Hasta v0.5.0 el cursor era un offset hex desnudo compartido por las cuatro tools \
+                 paginadas, así que «{receptora}» lo aceptaba y servía una página válida en forma y \
+                 ajena en significado: el agente cree haber avanzado en la consulta que pidió y ve \
+                 un fragmento de otro resultado (ROB-06, `decisiones §23/A-03`).\nRespuesta \
+                 recibida: {}",
+                resp[0]
+            )
+        });
+        assert_eq!(
+            codigo_de(&err),
+            "INVALID_SCHEMA",
+            "un cursor de otra tool es entrada inválida, con el mismo código que el malformado: \
+             «{err}»"
+        );
+        let (_, mensaje) = codigo_y_mensaje(&err)
+            .unwrap_or_else(|| panic!("debe emitir «CÓDIGO: mensaje» (E26-H07): «{err}»"));
+        assert!(
+            menciona(mensaje, "cursor"),
+            "…nombrando el parámetro `cursor`: «{err}»"
+        );
+        assert!(
+            menciona(mensaje, receptora) || menciona(mensaje, emisora),
+            "…y nombrando de qué tool es el cursor frente a cuál lo esperaba («{emisora}» / \
+             «{receptora}»): sin eso el mensaje es indistinguible del de un cursor basura, y el \
+             agente no sabe que lo que hizo fue mezclar dos paginaciones: «{err}»"
+        );
+
+        // (4) …y el rechazo no puede haber sido «esta tool no pagina»: sin cursor sigue sirviendo.
+        let limpia = roundtrip(
+            dir.path(),
+            &[linea_call(4, receptora, args_receptora).as_str()],
+            1,
+        );
+        assert!(
+            !lista(sc_ok(&limpia[0], receptora), clave).is_empty(),
+            "control anti-vacuo: «{receptora}» sin `cursor` debe seguir sirviendo su lista: {}",
+            limpia[0]
+        );
+    }
+}
+
+/// **E30-H01** · Criterio `cursor_de_otro_modo_de_la_misma_tool_segun_decision_de_fase_roja`:
+/// **Dado** un `nextCursor` devuelto por `metadata_inspect` en modo `catalog`, **Cuando** se pasa a
+/// `metadata_inspect` en modo `field`, **Entonces** también es rechazado.
+///
+/// **La decisión de la fase roja** (declarada arriba, en la cabecera de la sección): la identidad
+/// del cursor se ata a la **tool y al contexto de listado** — para `metadata_inspect`, su `mode` y,
+/// en mode «field», el `field`. Es del mismo género que A-03 **dentro** de una sola tool: el
+/// catálogo se ordena por field path y el vocabulario por conteo→texto, así que un offset del
+/// primero aplicado al segundo apunta a una entrada arbitraria de otra lista. Rechazarlo es la misma
+/// garantía, no una nueva.
+///
+/// Se ejercen las dos direcciones (catalog→field y field→catalog) y, además, el cruce entre **dos
+/// campos distintos** del mismo modo `field`: son dos vocabularios distintos con órdenes totales
+/// distintos, así que la identidad no puede quedarse en el `mode` y olvidar el `field`.
+///
+/// Control anti-vacuo: cada cursor sigue valiendo en su propio modo/campo.
+#[test]
+fn cursor_de_otro_modo_de_la_misma_tool_segun_decision_de_fase_roja() {
+    let dir = ws_cota();
+
+    // Contextos de listado de `metadata_inspect` que este test considera DISTINTOS entre sí.
+    let contextos: [(&str, serde_json::Value, &str); 3] = [
+        ("catalog", serde_json::json!({"mode": "catalog"}), "fields"),
+        (
+            "field:uid",
+            serde_json::json!({"mode": "field", "field": "uid"}),
+            "values",
+        ),
+        (
+            "field:campo000",
+            serde_json::json!({"mode": "field", "field": "campo000"}),
+            "values",
+        ),
+    ];
+
+    // Los dos primeros contextos tienen más entradas que la página por defecto (152 campos y 150
+    // valores de `uid`), así que emiten cursor; `campo000` solo tiene 1 valor y sirve de RECEPTOR.
+    for (i, (nombre_emisor, args_emisor, _)) in contextos.iter().enumerate().take(2) {
+        let p1 = roundtrip(
+            dir.path(),
+            &[linea_call(1, "metadata_inspect", args_emisor.clone()).as_str()],
+            1,
+        );
+        let cursor = cursor_de(sc_ok(&p1[0], "metadata_inspect")).unwrap_or_else(|| {
+            panic!(
+                "precondición: el contexto «{nombre_emisor}» debe emitir un `nextCursor` real \
+                 (>100 entradas con la cota por defecto): {}",
+                p1[0]
+            )
+        });
+
+        // Control anti-vacuo: en SU contexto, ese cursor sigue paginando.
+        let mut propios = args_emisor.clone();
+        propios["cursor"] = serde_json::Value::String(cursor.clone());
+        let propia = roundtrip(
+            dir.path(),
+            &[linea_call(2, "metadata_inspect", propios).as_str()],
+            1,
+        );
+        assert_eq!(
+            error_de(&propia[0]),
+            None,
+            "el cursor de «{nombre_emisor}» debe seguir sirviendo en «{nombre_emisor}»: firmar el \
+             origen no puede consistir en rechazar también el camino feliz: {}",
+            propia[0]
+        );
+
+        // El criterio: el mismo cursor en CUALQUIER otro contexto de la misma tool se rechaza.
+        for (j, (nombre_receptor, args_receptor, clave)) in contextos.iter().enumerate() {
+            if i == j {
+                continue;
+            }
+            let mut ajenos = args_receptor.clone();
+            ajenos["cursor"] = serde_json::Value::String(cursor.clone());
+            let resp = roundtrip(
+                dir.path(),
+                &[linea_call(3, "metadata_inspect", ajenos).as_str()],
+                1,
+            );
+            let err = error_de(&resp[0]).unwrap_or_else(|| {
+                panic!(
+                    "el cursor «{cursor}» lo emitió `metadata_inspect` en el contexto \
+                     «{nombre_emisor}»; en «{nombre_receptor}» debe RECHAZARSE: son dos listas con \
+                     órdenes totales distintos (catálogo por field path, vocabulario por \
+                     conteo→texto, y un vocabulario por campo), así que reinterpretar el offset \
+                     apunta a una entrada arbitraria de otra lista — el mismo defecto que A-03, \
+                     dentro de una sola tool.\nRespuesta recibida ({clave}): {}",
+                    resp[0]
+                )
+            });
+            assert_eq!(
+                codigo_de(&err),
+                "INVALID_SCHEMA",
+                "…con el mismo código que los otros dos casos de cursor ajeno: «{err}»"
+            );
+            let (_, mensaje) = codigo_y_mensaje(&err)
+                .unwrap_or_else(|| panic!("debe emitir «CÓDIGO: mensaje» (E26-H07): «{err}»"));
+            assert!(
+                menciona(mensaje, "cursor"),
+                "…nombrando el parámetro `cursor`: «{err}»"
+            );
+        }
+    }
+}
+
+/// **E30-H01** · Criterio `cursor_legitimo_de_la_misma_tool_sigue_paginando` (ANTI-VACUO clave):
+/// **Dado** un workspace con más documentos que el `limit` de página, **Cuando** se pide la primera
+/// página de `knowledge_search`, se toma su `nextCursor` y se usa **ese** valor exacto en una
+/// segunda llamada con los **mismos** parámetros, **Entonces** la segunda página se sirve
+/// correctamente y sin solaparse con la primera.
+///
+/// El cursor se obtiene de una respuesta **real** (nunca fabricado a mano): es lo que impide que el
+/// roundtrip sea vacuo. Y cada página sale de un proceso FRESCO (`roundtrip` arranca y termina el
+/// servidor), así que el criterio incluye que el cursor firmado siga siendo **autosuficiente** —
+/// la propiedad que `encode_cursor` ya declara y que la historia manda conservar: nada de estado de
+/// sesión.
+#[test]
+fn cursor_legitimo_de_la_misma_tool_sigue_paginando() {
+    let dir = workspace_cincuenta();
+    let args = serde_json::json!({"text": "paginacion", "limit": 20});
+
+    // Página 1 (sin cursor) y su `nextCursor` REAL.
+    let p1 = roundtrip(
+        dir.path(),
+        &[linea_call(1, "knowledge_search", args.clone()).as_str()],
+        1,
+    );
+    let sc1 = sc_ok(&p1[0], "knowledge_search");
+    let pagina1 = search_paths(&p1[0]);
+    assert_eq!(
+        pagina1.len(),
+        20,
+        "precondición: con 50 documentos y `limit: 20` la primera página trae 20: {}",
+        p1[0]
+    );
+    let cursor = cursor_de(sc1).unwrap_or_else(|| {
+        panic!(
+            "precondición: con 50 > 20 resultados debe venir un `nextCursor` real que reusar: {}",
+            p1[0]
+        )
+    });
+
+    // Página 2, con ESE valor exacto y los MISMOS parámetros, en un proceso fresco.
+    let mut args2 = args.clone();
+    args2["cursor"] = serde_json::Value::String(cursor.clone());
+    let p2 = roundtrip(
+        dir.path(),
+        &[linea_call(1, "knowledge_search", args2).as_str()],
+        1,
+    );
+    assert_eq!(
+        error_de(&p2[0]),
+        None,
+        "el `nextCursor` que la propia `knowledge_search` acaba de emitir, reusado con los MISMOS \
+         parámetros, debe seguir paginando: endurecer el cursor no puede romper el camino feliz \
+         que todo cliente que pagina ya usa: {}",
+        p2[0]
+    );
+    let pagina2 = search_paths(&p2[0]);
+    assert_eq!(pagina2.len(), 20, "…y traer los 20 siguientes: {}", p2[0]);
+
+    // Sin solapamiento entre las dos páginas.
+    let en_p1: std::collections::BTreeSet<&String> = pagina1.iter().collect();
+    for path in &pagina2 {
+        assert!(
+            !en_p1.contains(path),
+            "«{path}» aparece en las dos páginas: el cursor legítimo debe CONTINUAR, no reiniciar \
+             (reiniciar es exactamente lo que hacía un cursor no decodificable hasta v0.5.0)"
+        );
+    }
+}
+
+/// **E30-H01** · Criterio del recorrido completo (ANTI-VACUO obligatorio de la historia):
+/// **Dado** el recorrido completo por cursor (primera página → cursor → … hasta `nextCursor: null`),
+/// **Cuando** se concatenan todas las páginas, **Entonces** el conjunto coincide exactamente con el
+/// que produce la tool sin paginar — mismo orden total, sin duplicados ni huecos — en **cada una** de
+/// las cuatro tools paginadas.
+///
+/// Es el par natural de los tres rechazos: garantiza que la firma de origen no rompió lo único que
+/// la paginación tenía que seguir haciendo. Todos los cursores del recorrido salen de respuestas
+/// reales (`recorre_paginas` sigue el `nextCursor` de cada página) y cada página se pide en un
+/// proceso fresco.
+///
+/// `knowledge_check` es la que faltaba en el arnés de E26-H10 (`paginar_no_pierde_ni_duplica` cubre
+/// `graph_query` y los dos modos de `metadata_inspect`): aquí entra con un `limit` pequeño sobre un
+/// workspace con un diagnóstico por documento, que es lo que fuerza varias páginas sin necesitar
+/// mil documentos.
+#[test]
+fn recorrido_completo_por_cursor_legitimo_en_las_cuatro_tools() {
+    let dir = ws_cota_rota();
+
+    // (tool, args de la página acotada, args de la referencia completa, lista)
+    let casos: [(&str, serde_json::Value, serde_json::Value, &str); 4] = [
+        (
+            "knowledge_search",
+            serde_json::json!({"text": TOKEN_BUSCABLE, "limit": 20}),
+            serde_json::json!({"text": TOKEN_BUSCABLE, "limit": 100}),
+            "results",
+        ),
+        (
+            "knowledge_check",
+            serde_json::json!({"scope": {"kind": "workspace"}, "limit": 20}),
+            serde_json::json!({"scope": {"kind": "workspace"}, "limit": 1000}),
+            "diagnostics",
+        ),
+        (
+            "metadata_inspect",
+            serde_json::json!({"mode": "field", "field": "uid", "limit": 20}),
+            serde_json::json!({"mode": "field", "field": "uid", "limit": 1000}),
+            "values",
+        ),
+        (
+            "graph_query",
+            serde_json::json!({"operation": "components", "limit": 20}),
+            serde_json::json!({"operation": "components", "limit": 1000}),
+            "nodes",
+        ),
+    ];
+
+    for (tool, args, args_full, clave) in casos {
+        // La verdad completa, en una sola página.
+        let full = roundtrip(dir.path(), &[linea_call(1, tool, args_full).as_str()], 1);
+        let sc_full = sc_ok(&full[0], tool);
+        let completo = lista(sc_full, clave);
+        assert_eq!(
+            cursor_de(sc_full),
+            None,
+            "precondición de «{tool}/{clave}»: la llamada de referencia debe caber entera en una \
+             página (`nextCursor` nulo): {}",
+            full[0]
+        );
+
+        // El recorrido, cursor a cursor, proceso a proceso.
+        let (recorrido, paginas) = recorre_paginas(dir.path(), tool, &args, clave);
+        assert!(
+            paginas >= 2,
+            "el recorrido de «{tool}/{clave}» se agotó en {paginas} página(s): sin más de una \
+             página este criterio sería vacuo (no habría ni un cursor real que seguir)"
+        );
+        assert_eq!(
+            recorrido, completo,
+            "la concatenación de las {paginas} páginas de «{tool}/{clave}» debe ser EXACTAMENTE el \
+             resultado sin paginar, en el mismo orden: la firma de origen del cursor no puede \
+             perder ni duplicar nada por el camino"
+        );
+        let distintos: std::collections::BTreeSet<String> =
+            recorrido.iter().map(ToString::to_string).collect();
+        assert_eq!(
+            distintos.len(),
+            recorrido.len(),
+            "…y ninguna entrada puede aparecer en dos páginas de «{tool}/{clave}»"
+        );
+    }
+}
+
+/// **E30-H01** · Criterio del `nextCursor` al agotar (segunda mitad del anti-vacuo):
+/// **Dado** el recorrido completo de cada tool paginada, **Cuando** se sirve la última página,
+/// **Entonces** su `nextCursor` está **ausente o es `null`** — nunca un cursor que apunte más allá
+/// del final ni una cadena vacía.
+///
+/// Sin esto, un cursor firmado que nunca se agotara dejaría al agente en un bucle infinito de
+/// páginas vacías, y el recorrido de arriba pasaría igual (su tope de 20 páginas lo cortaría antes).
+/// `cursor_de` ya rechaza la cadena vacía como forma degenerada de «agotado».
+#[test]
+fn el_ultimo_next_cursor_es_nulo_al_agotar() {
+    let dir = ws_cota_rota();
+
+    let casos: [(&str, serde_json::Value, &str); 4] = [
+        (
+            "knowledge_search",
+            serde_json::json!({"text": TOKEN_BUSCABLE, "limit": 20}),
+            "results",
+        ),
+        (
+            "knowledge_check",
+            serde_json::json!({"scope": {"kind": "workspace"}, "limit": 20}),
+            "diagnostics",
+        ),
+        (
+            "metadata_inspect",
+            serde_json::json!({"mode": "field", "field": "uid", "limit": 20}),
+            "values",
+        ),
+        (
+            "graph_query",
+            serde_json::json!({"operation": "components", "limit": 20}),
+            "nodes",
+        ),
+    ];
+
+    for (tool, args, clave) in casos {
+        let mut cursor: Option<String> = None;
+        let mut ultima = serde_json::Value::Null;
+        for vuelta in 0..20 {
+            let mut a = args.clone();
+            if let Some(c) = &cursor {
+                a["cursor"] = serde_json::Value::String(c.clone());
+            }
+            let resp = roundtrip(dir.path(), &[linea_call(1, tool, a).as_str()], 1);
+            let sc = sc_ok(&resp[0], tool).clone();
+            ultima = resp[0].clone();
+            match cursor_de(&sc) {
+                Some(c) => cursor = Some(c),
+                None => {
+                    assert!(
+                        vuelta >= 1,
+                        "«{tool}/{clave}» agotó el recorrido en la primera página: el criterio no \
+                         mide nada si nunca hubo un cursor real que seguir"
+                    );
+                    cursor = None;
+                    break;
+                }
+            }
+            assert!(
+                vuelta < 19,
+                "«{tool}/{clave}» sigue emitiendo `nextCursor` tras 20 páginas: un cursor que no \
+                 se agota deja al agente en un bucle de páginas: última respuesta {ultima}"
+            );
+        }
+        assert!(
+            cursor.is_none(),
+            "…y la última página de «{tool}/{clave}» debe traer `nextCursor` nulo o ausente: \
+             {ultima}"
+        );
+    }
+}
+
+/// **E30-H01** · Decisión declarada de la fase roja (`cursor: ""` == ausente):
+/// **Dado** una llamada con `cursor: ""` (cadena vacía), **Cuando** se ejecuta, **Entonces** se
+/// trata como si el parámetro no viniera: la primera página, sin error.
+///
+/// Es el comportamiento de hoy y el que `descubribilidad.rs::el_schema_declarado_coincide_con_lo_aceptado`
+/// da por bueno al mandar `json!("")` como valor de ejemplo de este parámetro declarado. Convertir
+/// la cadena vacía en `INVALID_SCHEMA` rompería esa guarda por una razón ajena al defecto que esta
+/// historia cierra (un cursor de wire nunca se emite vacío: `cursor_de` ya prohíbe esa forma). Se
+/// deja **fijado con test** para que la decisión no quede a interpretación de quien la lea después.
+#[test]
+fn cursor_vacio_cuenta_como_ausente() {
+    let dir = ws_cota();
+
+    for (tool, args, clave) in casos_paginados() {
+        let sin = roundtrip(dir.path(), &[linea_call(1, tool, args.clone()).as_str()], 1);
+        let esperado = lista(sc_ok(&sin[0], tool), clave);
+
+        let mut vacio = args.clone();
+        vacio["cursor"] = serde_json::json!("");
+        let resp = roundtrip(dir.path(), &[linea_call(2, tool, vacio).as_str()], 1);
+        assert_eq!(
+            error_de(&resp[0]),
+            None,
+            "un `cursor: \"\"` cuenta como AUSENTE (decisión declarada de E30-H01), no como \
+             malformado: «{tool}» debe servir su primera página. Rechazarlo rompería además \
+             `descubribilidad.rs::el_schema_declarado_coincide_con_lo_aceptado`, que manda \
+             exactamente ese valor de ejemplo: {}",
+            resp[0]
+        );
+        assert_eq!(
+            lista(sc_ok(&resp[0], tool), clave),
+            esperado,
+            "…y esa página debe ser idéntica a la de la llamada sin `cursor`: {}",
+            resp[0]
+        );
+    }
+}
+
+/// **E30-H01** · Hallazgo de seguimiento DECLARADO (no un hueco descubierto por accidente):
+/// **Dado** un `nextCursor` legítimo de `knowledge_search`, **Cuando** se reusa en `knowledge_search`
+/// con una **consulta distinta** (otro `text`/`where`), **Entonces** esta historia **no** lo rechaza:
+/// la identidad del cursor se ata a la tool y a su contexto de listado, no al criterio de selección.
+///
+/// La justificación está escrita en la cabecera de la sección (resumen: `where`/`filter` admiten
+/// formas equivalentes que hashearían distinto, y atarlas convertiría paginaciones legítimas en
+/// `INVALID_SCHEMA`). Este test **no** bendice el comportamiento como correcto: fija lo que la
+/// historia SÍ garantiza —que la llamada no revienta— para que quien retome el seguimiento sepa
+/// exactamente qué había cuando lo dejó, y para que la decisión conste en la suite y no solo en la
+/// prosa.
+#[test]
+fn cursor_de_otra_consulta_de_la_misma_tool_es_hallazgo_de_seguimiento() {
+    let dir = ws_cota();
+
+    let p1 = roundtrip(
+        dir.path(),
+        &[linea_call(
+            1,
+            "knowledge_search",
+            serde_json::json!({"text": "nota", "limit": 20}),
+        )
+        .as_str()],
+        1,
+    );
+    let cursor = cursor_de(sc_ok(&p1[0], "knowledge_search")).unwrap_or_else(|| {
+        panic!(
+            "precondición: con {DOCS_COTA} documentos y `limit: 20` debe haber `nextCursor`: {}",
+            p1[0]
+        )
+    });
+
+    // Misma tool, MISMO contexto de listado, distinta consulta: la historia lo deja pasar.
+    let resp = roundtrip(
+        dir.path(),
+        &[linea_call(
+            2,
+            "knowledge_search",
+            serde_json::json!({"text": "nota", "where": "status = \"draft\"",
+                               "limit": 20, "cursor": cursor}),
+        )
+        .as_str()],
+        1,
+    );
+    assert_eq!(
+        error_de(&resp[0]),
+        None,
+        "SEGUIMIENTO DECLARADO de E30-H01: la identidad del cursor se ata a (tool, contexto de \
+         listado), no al criterio de selección, así que un cursor reusado con otra consulta de la \
+         MISMA tool sigue paginando. Si una historia futura decide atarlo también a la consulta, \
+         este test es el que hay que reescribir —a conciencia—, no un rojo sorpresa: {}",
+        resp[0]
+    );
+}
+
+/// **E30-H01** — Workspace del recorrido completo: los [`DOCS_COTA`] documentos de [`ws_cota`] más un
+/// enlace roto por documento, para que `knowledge_check` tenga un diagnóstico por documento y su
+/// recorrido necesite varias páginas con `limit: 20`.
+///
+/// Las cuatro tools paginadas se recorren sobre el MISMO workspace: `knowledge_check` emite 150
+/// `LINK-TARGET-MISSING`, `metadata_inspect{field:uid}` tiene 150 valores distintos,
+/// `graph_query{components}` 150 nodos y `knowledge_search` casa los [`DOCS_BUSCABLES`] documentos
+/// que llevan el token único [`TOKEN_BUSCABLE`] en su cuerpo.
+///
+/// **Por qué la búsqueda se acota a un subconjunto**: el máximo de `knowledge_search.limit` es 100
+/// (E24-H09), así que la llamada de REFERENCIA sin paginar solo existe si el conjunto que casa cabe
+/// en 100. Con un token que casa 60 documentos el recorrido sigue necesitando 3 páginas de 20 y la
+/// referencia cabe entera — que es lo que el criterio compara.
+fn ws_cota_rota() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    for i in 0..DOCS_COTA {
+        let siguiente = format!("n{:03}.md", (i + 1) % DOCS_COTA);
+        let buscable = if i < DOCS_BUSCABLES {
+            format!("\n\n{TOKEN_BUSCABLE}\n")
+        } else {
+            String::new()
+        };
+        write(
+            dir.path(),
+            &format!("n{i:03}.md"),
+            &format!(
+                "---\ncampo{i:03}: {i}\nstatus: draft\nuid: u{i:03}\n---\n\n# Nota {i}\n\n\
+                 [siguiente]({siguiente})\n\n[roto](no-existe-{i:03}.md){buscable}\n"
+            ),
+        );
+    }
+    dir
+}
+
+/// Token que solo llevan los [`DOCS_BUSCABLES`] primeros documentos de [`ws_cota_rota`].
+const TOKEN_BUSCABLE: &str = "buscableunico";
+
+/// Documentos de [`ws_cota_rota`] que casan [`TOKEN_BUSCABLE`]: más de una página de 20 (el
+/// recorrido necesita 3) y menos que el máximo de `knowledge_search` (100), para que exista una
+/// llamada de referencia sin paginar contra la que comparar.
+const DOCS_BUSCABLES: usize = 60;

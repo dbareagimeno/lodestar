@@ -716,12 +716,19 @@ impl App {
         });
 
         let total = results.len();
-        let limit = limit.unwrap_or(DEFAULT_SEARCH_LIMIT).min(MAX_SEARCH_LIMIT);
-        let start = cursor.map(decode_cursor).unwrap_or(0).min(total);
-        let end = start.saturating_add(limit).min(total);
-        let page = results.get(start..end).unwrap_or(&[]).to_vec();
-        // `nextCursor` solo si hubo progreso y quedan resultados (evita bucles con `limit == 0`).
-        let next_cursor = (end > start && end < total).then(|| encode_cursor(end));
+        // E30-H01: la cota la aplica `pagina()`, el punto ÚNICO de mecánica de paginación. Hasta
+        // v0.5.0 estas cuatro líneas estaban copiadas aquí, en `knowledge_check` y en `graph_query`,
+        // cada una con su `decode_cursor` — por eso el defecto del cursor era cuádruple. El
+        // `nextCursor` solo aparece si hubo progreso y quedan resultados (evita bucles con
+        // `limit == 0`), que es la misma regla de antes.
+        let (page, next_cursor) = pagina(
+            results,
+            limit,
+            cursor,
+            DEFAULT_SEARCH_LIMIT,
+            MAX_SEARCH_LIMIT,
+            &CursorScope::KnowledgeSearch,
+        )?;
 
         Ok(SearchResults {
             results: page,
@@ -904,7 +911,8 @@ impl App {
                     cursor,
                     DEFAULT_METADATA_LIMIT,
                     MAX_METADATA_LIMIT,
-                );
+                    &CursorScope::metadata_catalog(),
+                )?;
                 Ok(MetadataInspection::Catalog(MetadataCatalogPage {
                     catalog: MetadataCatalog { fields },
                     next_cursor,
@@ -959,13 +967,18 @@ impl App {
                 // La página se recorta AQUÍ, después de que los agregados
                 // (`present_in`/`missing_in`/`inferred_types`) queden fijados sobre el workspace
                 // entero: se pagina la lista, no la estadística (E26-H10).
+                // E30-H01: el contexto se firma con el path NORMALIZADO, no con el texto tecleado:
+                // «status» y «frontmatter.status» son la misma lista (mismo orden total), así que su
+                // cursor tiene que ser el mismo — la identidad va con el campo que se inspecciona,
+                // no con la forma en que se escribió.
                 let (values, next_cursor) = pagina(
                     std::mem::take(&mut inspection.values),
                     limit,
                     cursor,
                     DEFAULT_METADATA_LIMIT,
                     MAX_METADATA_LIMIT,
-                );
+                    &CursorScope::metadata_field(&inspection.field.to_string()),
+                )?;
                 inspection.values = values;
                 Ok(MetadataInspection::Field(FieldInspectionPage {
                     inspection,
@@ -1120,12 +1133,16 @@ impl App {
         });
 
         let diagnostics_all: Vec<Check> = items.into_iter().map(|(_, c)| c).collect();
-        let total = diagnostics_all.len();
-        let limit = limit.unwrap_or(DEFAULT_CHECK_LIMIT).min(MAX_CHECK_LIMIT);
-        let start = cursor.map(decode_cursor).unwrap_or(0).min(total);
-        let end = start.saturating_add(limit).min(total);
-        let page = diagnostics_all.get(start..end).unwrap_or(&[]).to_vec();
-        let next_cursor = (end > start && end < total).then(|| encode_cursor(end));
+        // E30-H01: misma convergencia que `knowledge_search` — la mecánica de la página vive en
+        // `pagina()`, que es también quien firma y verifica el origen del cursor.
+        let (page, next_cursor) = pagina(
+            diagnostics_all,
+            limit,
+            cursor,
+            DEFAULT_CHECK_LIMIT,
+            MAX_CHECK_LIMIT,
+            &CursorScope::KnowledgeCheck,
+        )?;
 
         Ok(CheckReport {
             valid,
@@ -1450,17 +1467,25 @@ impl App {
         // Orden total y estable por `id` — paginación reproducible entre procesos frescos.
         nodes.sort_by(|a, b| a.id.cmp(&b.id));
 
-        let total = nodes.len();
         // E26-H10: `limit` ausente ya NO significa «el grafo entero». Hasta v0.4.0 `None => total`,
         // así que un `components` —que sirve el `graph_model` completo— volcaba una respuesta del
         // tamaño del workspace. Ahora la página por defecto es `DEFAULT_GRAPH_LIMIT` y el resto se
         // recorre por `nextCursor` (consecuencia declarada de la historia).
-        let limit = limit.unwrap_or(DEFAULT_GRAPH_LIMIT).min(MAX_GRAPH_LIMIT);
-        let start = cursor.map(decode_cursor).unwrap_or(0).min(total);
-        let end = start.saturating_add(limit).min(total);
-        let truncated = end < total;
-        let next_cursor = truncated.then(|| encode_cursor(end));
-        let page_nodes: Vec<GraphNode> = nodes.get(start..end).unwrap_or(&[]).to_vec();
+        // E30-H01: la mecánica —y con ella la firma de origen del cursor— la aplica `pagina()`, el
+        // punto único. `truncated` sigue siendo «quedan nodos fuera de esta página», que es lo mismo
+        // que «hay `nextCursor`»: la única diferencia con la fórmula inline de v0.5.0 es el caso
+        // degenerado `limit == 0` (página vacía sobre un grafo no vacío), donde no emitir cursor es
+        // lo correcto —emitirlo dejaba al agente en un bucle de páginas vacías— y `truncated` deja
+        // de contradecirlo.
+        let (page_nodes, next_cursor) = pagina(
+            nodes,
+            limit,
+            cursor,
+            DEFAULT_GRAPH_LIMIT,
+            MAX_GRAPH_LIMIT,
+            &CursorScope::GraphQuery,
+        )?;
+        let truncated = next_cursor.is_some();
         let page_ids: BTreeSet<&RelPath> = page_nodes.iter().map(|n| &n.id).collect();
         edges.retain(|e| page_ids.contains(&e.source) && page_ids.contains(&e.target));
 
@@ -3976,45 +4001,211 @@ fn find_subseq(hay: &[char], needle: &[char]) -> Option<usize> {
     (0..=hay.len() - needle.len()).find(|&i| hay[i..i + needle.len()] == *needle)
 }
 
-/// Codifica un offset de paginación como cursor opaco (hexadecimal). Autosuficiente: como el orden de
-/// resultados es determinista y solo depende del contenido, un offset reanuda idénticamente en
-/// cualquier servidor fresco.
-fn encode_cursor(offset: usize) -> String {
-    format!("{offset:x}")
+/// **E30-H01**. Identidad de origen que un cursor de paginación
+/// lleva firmada: la **tool** que lo emitió y, cuando la tool pagina más de una lista, el **contexto
+/// de listado** dentro de ella (el `mode`/`field` de `metadata_inspect`).
+///
+/// Es lo que hace que decodificar un cursor ajeno falle de forma determinista en vez de «colar» un
+/// offset numéricamente válido (`decisiones §23/A-03`, ROB-06). La **forma concreta** de la firma en
+/// el wire la elige la fase verde; lo que fijan los tests es el comportamiento observable.
+///
+/// La identidad **no** incluye el criterio de selección (`text`/`where`/`filter`/`scope`/`ref`): ver
+/// la decisión declarada en la cabecera de la sección E30-H01 de
+/// `crates/lodestar-mcp/tests/mcp.rs` y el test
+/// `cursor_de_otra_consulta_de_la_misma_tool_es_hallazgo_de_seguimiento`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum CursorScope {
+    /// Cursor de `knowledge_search` (lista `results`).
+    KnowledgeSearch,
+    /// Cursor de `knowledge_check` (lista `diagnostics`).
+    KnowledgeCheck,
+    /// Cursor de `graph_query` (lista `nodes`).
+    GraphQuery,
+    /// Cursor de `metadata_inspect`, con el contexto de listado que distingue sus dos modos: `None`
+    /// es el catálogo (`mode: "catalog"`), `Some(field)` el vocabulario de ese campo.
+    MetadataInspect(Option<String>),
 }
 
-/// Decodifica un cursor a su offset. Un cursor malformado se interpreta como el inicio (offset 0).
-fn decode_cursor(cursor: &str) -> usize {
-    usize::from_str_radix(cursor, 16).unwrap_or(0)
+impl CursorScope {
+    /// Contexto del catálogo de `metadata_inspect` (`mode: "catalog"`).
+    pub(crate) fn metadata_catalog() -> Self {
+        CursorScope::MetadataInspect(None)
+    }
+
+    /// Contexto del vocabulario de un campo de `metadata_inspect` (`mode: "field"`), que es una
+    /// lista distinta —y con otro orden total— por cada `field`.
+    pub(crate) fn metadata_field(field: &str) -> Self {
+        CursorScope::MetadataInspect(Some(field.to_string()))
+    }
+
+    /// Etiqueta estable del contexto, la que viaja **firmada** dentro del cursor y por la que se
+    /// reconoce a su emisor. Es dato de wire: cambiarla invalida los cursores ya emitidos.
+    fn etiqueta(&self) -> String {
+        match self {
+            CursorScope::KnowledgeSearch => "knowledge_search".to_string(),
+            CursorScope::KnowledgeCheck => "knowledge_check".to_string(),
+            CursorScope::GraphQuery => "graph_query".to_string(),
+            CursorScope::MetadataInspect(None) => "metadata_inspect#catalog".to_string(),
+            CursorScope::MetadataInspect(Some(f)) => format!("metadata_inspect#field:{f}"),
+        }
+    }
+
+    /// Cómo se nombra este contexto en el mensaje de error: la tool y, si la tool pagina más de una
+    /// lista, cuál de ellas. El nombre de la tool viaja como **palabra suelta** (`knowledge_search`,
+    /// no `«knowledge_search»` pegado a otro token) para que el agente pueda buscarlo tal cual.
+    fn descripcion(&self) -> String {
+        match self {
+            CursorScope::MetadataInspect(None) => "metadata_inspect en modo «catalog»".to_string(),
+            CursorScope::MetadataInspect(Some(f)) => {
+                format!("metadata_inspect en modo «field» sobre «{f}»")
+            }
+            otro => otro.etiqueta(),
+        }
+    }
+}
+
+/// **E30-H01**. Codifica un offset de paginación como cursor opaco **firmado con su origen**.
+///
+/// Debe sustituir a [`encode_cursor`] (v0.5.0: `format!("{offset:x}")`, un offset hex desnudo, sin
+/// marca de quién lo emitió). Mantiene la propiedad que el rustdoc de aquella ya declaraba
+/// —**autosuficiente**: como el orden de resultados es determinista y solo depende del contenido, un
+/// offset reanuda idénticamente en cualquier servidor fresco— para la tool y el contexto correctos;
+/// no introduce estado de sesión ni TTL.
+///
+/// # Forma del cursor (dato de wire)
+///
+/// `«<hex(etiqueta|offset)>.<firma>»`, donde la firma son los 8 primeros hex de
+/// `blake3(etiqueta|offset)`. Dos consecuencias buscadas: (a) la etiqueta del emisor se **recupera**
+/// al decodificar, así que un rechazo puede decir de qué contexto venía el cursor y no solo que no
+/// vale; (b) la firma cubre etiqueta **y** offset, así que un cursor fabricado a mano o retocado no
+/// pasa — el cursor es opaco de verdad, no un número disfrazado (`decisiones §23/A-03`).
+///
+/// Sigue sin haber estado de sesión ni TTL: la etiqueta y el offset son todo lo que hace falta, y
+/// `blake3` es determinista, así que dos procesos distintos emiten el **mismo** cursor para el mismo
+/// offset y contexto.
+fn encode_cursor_firmado(offset: usize, scope: &CursorScope) -> String {
+    let payload = format!("{}|{offset:x}", scope.etiqueta());
+    let firma = blake3::hash(payload.as_bytes()).to_hex();
+    let cuerpo: String = payload.bytes().map(|b| format!("{b:02x}")).collect();
+    format!("{cuerpo}.{}", &firma.as_str()[..FIRMA_CURSOR])
+}
+
+/// Hex de firma que lleva cada cursor: suficiente para que retocar un cursor a mano no cuele por
+/// azar, corto para que el cursor siga siendo manejable en una traza.
+const FIRMA_CURSOR: usize = 8;
+
+/// **E30-H01**. Decodifica un cursor a su offset, verificando que fue emitido para `scope`.
+///
+/// **Deja de ser infalible**: [`decode_cursor`] es hoy
+/// `usize::from_str_radix(cursor, 16).unwrap_or(0)`, así que un cursor basura (`decisiones §23/A-02`,
+/// ROB-05) o de otra tool (`§23/A-03`, ROB-06) se reinterpreta en silencio como offset 0 o como una
+/// página ajena. Esta devuelve [`ErrorCode::InvalidSchema`] con un mensaje que **nombra el cursor
+/// recibido** y, cuando es determinable, qué tool lo esperaba frente a cuál lo produjo; la fachada
+/// MCP lo sirve tal cual.
+///
+/// Dos rechazos distintos, con mensajes distintos porque son errores distintos del agente:
+/// **no decodifica** (basura, o un cursor retocado cuya firma no cuadra) y **de otro origen** (una
+/// firma legítima de otro contexto, que se nombra: es la información que le dice al agente que lo
+/// que hizo fue mezclar dos paginaciones).
+fn decode_cursor_firmado(cursor: &str, scope: &CursorScope) -> Result<usize, AppError> {
+    let ilegible = || {
+        AppError::invalid_schema(format!(
+            "«cursor» no es un cursor de paginación de esta superficie: «{cursor}». Un cursor solo \
+             se obtiene del «nextCursor» de una respuesta anterior de {} — no se fabrica a mano ni \
+             se deriva de un número de página; omite el parámetro para empezar por el principio",
+            scope.descripcion()
+        ))
+    };
+
+    let (cuerpo, firma) = cursor.split_once('.').ok_or_else(ilegible)?;
+    if cuerpo.len() % 2 != 0 || firma.len() != FIRMA_CURSOR {
+        return Err(ilegible());
+    }
+    let bytes: Vec<u8> = (0..cuerpo.len() / 2)
+        .map(|i| u8::from_str_radix(&cuerpo[i * 2..i * 2 + 2], 16))
+        .collect::<Result<_, _>>()
+        .map_err(|_| ilegible())?;
+    let payload = String::from_utf8(bytes).map_err(|_| ilegible())?;
+    if &blake3::hash(payload.as_bytes()).to_hex().as_str()[..FIRMA_CURSOR] != firma {
+        return Err(ilegible());
+    }
+
+    let (etiqueta, offset) = payload.rsplit_once('|').ok_or_else(ilegible)?;
+    let offset = usize::from_str_radix(offset, 16).map_err(|_| ilegible())?;
+    if etiqueta != scope.etiqueta() {
+        return Err(AppError::invalid_schema(format!(
+            "«cursor» pertenece a otra paginación: «{cursor}» lo emitió {}, y esta llamada es de \
+             {}. Un cursor no es intercambiable entre tools ni entre contextos de listado — cada \
+             lista tiene su propio orden total, así que reanudar con el offset de otra devolvería \
+             una página ajena; sigue el «nextCursor» de esta misma llamada",
+            emisor_legible(etiqueta),
+            scope.descripcion()
+        )));
+    }
+    Ok(offset)
+}
+
+/// Cómo se nombra en el mensaje de error el contexto que **emitió** un cursor ajeno: se reconstruye
+/// desde la etiqueta firmada, así que sirve incluso para una etiqueta que esta versión ya no emite.
+fn emisor_legible(etiqueta: &str) -> String {
+    match etiqueta.split_once('#') {
+        Some(("metadata_inspect", "catalog")) => "metadata_inspect en modo «catalog»".to_string(),
+        Some(("metadata_inspect", resto)) => format!(
+            "metadata_inspect en modo «field» sobre «{}»",
+            resto.trim_start_matches("field:")
+        ),
+        _ => etiqueta.to_string(),
+    }
+}
+
+/// Traduce el `cursor` recibido por el wire al offset de arranque de la página.
+///
+/// **E30-H01**: aquí vive la decisión declarada de que `cursor: ""` cuenta como **ausente**, no como
+/// malformado — es lo que hacía v0.5.0 y lo que el `inputSchema` da por bueno al anunciar el
+/// parámetro (`descubribilidad.rs` manda exactamente ese valor de ejemplo). Un cursor de wire nunca
+/// se emite vacío, así que la cadena vacía solo puede venir de un cliente que quiso decir «desde el
+/// principio». Cualquier **otra** cadena que no decodifique para este contexto es `INVALID_SCHEMA`
+/// (hasta v0.5.0 caía a offset 0 en silencio: `decisiones §23/A-02`).
+fn offset_de_cursor(cursor: Option<&str>, scope: &CursorScope) -> Result<usize, AppError> {
+    match cursor {
+        None | Some("") => Ok(0),
+        Some(c) => decode_cursor_firmado(c, scope),
+    }
 }
 
 /// Aplica la **cota de página** sobre una lista ya ordenada por su orden total: recorta a
 /// `[start, start + limit)` —con `start` leído del cursor-offset— y devuelve el trozo más el
 /// `next_cursor` al siguiente (o `None` al agotar).
 ///
-/// Es la mecánica que `knowledge_search`/`knowledge_check`/`graph_query` traían escrita a mano; la
-/// comparte `metadata_inspect` desde E26-H10, para que el cursor sea **el mismo** offset hex
-/// autosuficiente en toda la superficie. `limit` ausente → `default_limit`; por encima de
-/// `max_limit` se acota (la fachada MCP ya rechaza antes lo que exceda el máximo declarado en el
-/// `inputSchema`, así que esto es la red de seguridad de cualquier otro llamante).
+/// Es la mecánica que `knowledge_search`/`knowledge_check`/`graph_query` traían **copiada** inline
+/// (las mismas cuatro líneas en tres sitios, con su propio `decode_cursor`); desde E30-H01 las
+/// cuatro tools paginadas pasan por aquí, que es lo que hace que la firma de origen del cursor sea
+/// **una** decisión y no cuatro (invariante #3).
+///
+/// `scope` es la identidad que se firma y se verifica: un cursor de otra tool —o de otro contexto de
+/// listado de la misma tool— no decodifica aquí, y el `Err(InvalidSchema)` sube tal cual a la
+/// fachada. `limit` ausente → `default_limit`; por encima de `max_limit` se acota (la fachada MCP ya
+/// rechaza antes lo que exceda el máximo declarado en el `inputSchema`, así que esto es la red de
+/// seguridad de cualquier otro llamante).
 fn pagina<T>(
     items: Vec<T>,
     limit: Option<usize>,
     cursor: Option<&str>,
     default_limit: usize,
     max_limit: usize,
-) -> (Vec<T>, Option<String>) {
+    scope: &CursorScope,
+) -> Result<(Vec<T>, Option<String>), AppError> {
     let total = items.len();
     let limit = limit.unwrap_or(default_limit).min(max_limit);
-    let start = cursor.map(decode_cursor).unwrap_or(0).min(total);
+    let start = offset_de_cursor(cursor, scope)?.min(total);
     let end = start.saturating_add(limit).min(total);
-    let next_cursor = (end > start && end < total).then(|| encode_cursor(end));
+    let next_cursor = (end > start && end < total).then(|| encode_cursor_firmado(end, scope));
     let page = items
         .into_iter()
         .skip(start)
         .take(end.saturating_sub(start))
         .collect();
-    (page, next_cursor)
+    Ok((page, next_cursor))
 }
 
 // ---------------------------------------------------------------------------
@@ -4214,5 +4405,171 @@ mod tests {
             !anchor.is_markdown(),
             "el ancla no puede parecer un documento: es el plano de control, no un `.md`"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // E30-H01 — Cursores estrictos: el núcleo de codificación
+    //
+    // El comportamiento observable por el wire lo fijan los tests de
+    // `crates/lodestar-mcp/tests/mcp.rs` (sección E30-H01). Aquí se fija la MECÁNICA que lo
+    // sostiene, que es privada y no tiene otra puerta: el par `encode_cursor`/`decode_cursor` y su
+    // uso desde `pagina()`.
+    //
+    // FASE ROJA — los cuatro tests fallan con el `todo!()` de los STUBS `encode_cursor_firmado`/
+    // `decode_cursor_firmado`, declarados en la fase roja como firma + `todo!()` y NADA más. La
+    // firma la fija esta fase porque el criterio no se puede expresar sin ella: la historia manda
+    // que `decode_cursor` «deje de ser infalible» (pase a `Result`) y que el cursor lleve la
+    // identidad de su origen (`CursorScope`).
+    //
+    // POR QUÉ EL PAR VIEJO SIGUE AHÍ: `encode_cursor`/`decode_cursor` los llaman CUATRO sitios de
+    // producción; renombrarlos o cambiarles la firma es reescribir producción, que no es trabajo
+    // del autor de tests. Los stubs conviven con ellos y solo los referencian estos tests, así que
+    // el resto del crate compila y corre igual que antes.
+    //
+    // NOTA para el implementador: `pagina()` es hoy el punto único **solo para
+    // `metadata_inspect`**. `knowledge_search` (L720), `knowledge_check` (L1125) y `graph_query`
+    // (L1459) tienen la mecánica COPIADA inline y llaman a `decode_cursor` por su cuenta. El
+    // alcance de E30-H01 («`pagina()` sigue siendo el único punto de mecánica de paginación») exige
+    // converger las cuatro ahí antes de añadirle el parámetro de identidad, o la firma habrá que
+    // propagarla a mano por cuatro sitios y el siguiente defecto de cursor volverá a ser cuádruple.
+    // Al converger, el par viejo desaparece y el firmado se queda con su nombre.
+    // -----------------------------------------------------------------------
+
+    /// **E30-H01** · Criterio `roundtrip()` del núcleo de codificación:
+    /// **Dado** el par `encode_cursor`/`decode_cursor` tras el arreglo, **Cuando** se codifica un
+    /// offset y se decodifica de vuelta con la identidad de tool/consulta **correcta**, **Entonces**
+    /// el offset recuperado es exactamente el original.
+    ///
+    /// Es la propiedad que la historia manda **conservar**: el cursor sigue siendo autosuficiente
+    /// (un offset reanuda idénticamente en un servidor fresco), solo que ahora lleva firmado de
+    /// dónde salió. Se prueban los bordes que la mecánica de `pagina()` produce de verdad: 0, el
+    /// primer corte y un offset grande.
+    #[test]
+    fn roundtrip() {
+        for scope in [
+            CursorScope::KnowledgeSearch,
+            CursorScope::KnowledgeCheck,
+            CursorScope::GraphQuery,
+            CursorScope::metadata_catalog(),
+            CursorScope::metadata_field("uid"),
+        ] {
+            for offset in [0usize, 1, 20, 100, 152, 99_999] {
+                let cursor = encode_cursor_firmado(offset, &scope);
+                assert_eq!(
+                    decode_cursor_firmado(&cursor, &scope).unwrap_or_else(|e| panic!(
+                        "un cursor recién emitido para su propio scope debe decodificar: {e}"
+                    )),
+                    offset,
+                    "codificar y decodificar con el MISMO scope debe devolver el offset original \
+                     («{cursor}»)"
+                );
+            }
+        }
+    }
+
+    /// **E30-H01** · Mitad de servicio de `cursor_malformado_es_invalid_schema` (A-02 / ROB-05):
+    /// **Dado** una cadena que no es un cursor emitido por esta capa, **Cuando** se decodifica,
+    /// **Entonces** falla — **no** cae a offset 0.
+    ///
+    /// Hasta v0.5.0 `decode_cursor` era `usize::from_str_radix(cursor, 16).unwrap_or(0)`: cualquier
+    /// cadena que no parseara como hex se trataba como «empieza desde el principio», indistinguible
+    /// de un cliente que omite `cursor` a propósito. El error debe además **nombrar el valor
+    /// recibido**, que es lo que la fachada MCP sirve como mensaje del `INVALID_SCHEMA`.
+    #[test]
+    fn un_cursor_que_no_decodifica_no_cae_a_cero() {
+        let scope = CursorScope::KnowledgeSearch;
+        for basura in ["zzz-no-hex", "!!", "  ", "-1", "0x20"] {
+            let err = decode_cursor_firmado(basura, &scope).expect_err(
+                "un cursor que no decodifica debe fallar, no reinterpretarse como offset 0 \
+                 (ROB-05): la respuesta silenciosamente equivocada es peor que el error",
+            );
+            assert!(
+                err.message.contains(basura),
+                "…y el error debe deletrear el valor recibido («{basura}»), que es lo que el agente \
+                 necesita para corregir su llamada: «{}»",
+                err.message
+            );
+            assert_eq!(
+                err.code,
+                ErrorCode::InvalidSchema,
+                "…con el código del catálogo que `decisiones §16(j)` decidió: «{}»",
+                err.message
+            );
+        }
+    }
+
+    /// **E30-H01** · Mitad de servicio de `cursor_de_otra_tool_es_invalid_schema` (A-03 / ROB-06):
+    /// **Dado** un cursor **bien formado** emitido para un scope, **Cuando** se decodifica con otro
+    /// scope, **Entonces** falla — no decodifica a un offset numéricamente válido y ajeno.
+    ///
+    /// Es el defecto por construcción que la ficha nombra: el cursor no llevaba marca de origen, así
+    /// que cualquier hex de cualquier tool decodificaba a un offset que las cuatro aceptaban. Se
+    /// cruzan **todos** los pares distintos, incluidos los dos contextos de `metadata_inspect` y dos
+    /// campos distintos de mode «field» (la decisión declarada en la fase roja: la identidad se ata
+    /// a la tool y a su contexto de listado).
+    #[test]
+    fn un_cursor_de_otro_scope_no_decodifica() {
+        let scopes = [
+            CursorScope::KnowledgeSearch,
+            CursorScope::KnowledgeCheck,
+            CursorScope::GraphQuery,
+            CursorScope::metadata_catalog(),
+            CursorScope::metadata_field("uid"),
+            CursorScope::metadata_field("status"),
+        ];
+        for (i, emisor) in scopes.iter().enumerate() {
+            let cursor = encode_cursor_firmado(100, emisor);
+            for (j, receptor) in scopes.iter().enumerate() {
+                if i == j {
+                    continue;
+                }
+                let err = decode_cursor_firmado(&cursor, receptor)
+                    .err()
+                    .unwrap_or_else(|| {
+                        panic!(
+                        "el cursor «{cursor}» se emitió para {emisor:?} y NO puede decodificar \
+                         para {receptor:?}: hasta v0.5.0 era un offset hex desnudo que las cuatro \
+                         tools compartían, así que colaba como página válida en forma y ajena en \
+                         significado (ROB-06)"
+                    )
+                    });
+                assert_eq!(
+                    err.code,
+                    ErrorCode::InvalidSchema,
+                    "…con el mismo código que el cursor malformado: «{}»",
+                    err.message
+                );
+            }
+        }
+    }
+
+    /// **E30-H01** · Control anti-vacuo del cursor firmado: **Dado** dos offsets distintos del mismo
+    /// scope, **Cuando** se codifican, **Entonces** producen cursores distintos, y un cursor
+    /// **sigue siendo autosuficiente** (no depende de nada del proceso que lo emitió).
+    ///
+    /// Sin esta guarda, «firmar el origen» podría degenerar en un cursor constante (que decodificara
+    /// siempre a 0 y pasara `un_cursor_de_otro_scope_no_decodifica` por accidente) o en un handle de
+    /// sesión, que es justo lo que la historia prohíbe: el cursor debe reanudar idéntico en cualquier
+    /// servidor fresco. La codificación se ejerce dos veces para fijar que es **determinista**: dos
+    /// procesos distintos emiten el mismo cursor para el mismo offset y scope.
+    #[test]
+    fn el_cursor_firmado_sigue_siendo_determinista_y_autosuficiente() {
+        let scope = CursorScope::KnowledgeSearch;
+        let a = encode_cursor_firmado(20, &scope);
+        let b = encode_cursor_firmado(40, &scope);
+        assert_ne!(
+            a, b,
+            "dos offsets distintos del mismo scope deben producir cursores distintos, o el cursor \
+             no codifica el offset"
+        );
+        assert_eq!(
+            a,
+            encode_cursor_firmado(20, &scope),
+            "la codificación debe ser DETERMINISTA (misma entrada → mismo cursor): es lo que hace \
+             que un cursor emitido en un proceso reanude en otro fresco (autosuficiencia, \
+             `§20.10`)"
+        );
+        assert_eq!(decode_cursor_firmado(&a, &scope).ok(), Some(20));
+        assert_eq!(decode_cursor_firmado(&b, &scope).ok(), Some(40));
     }
 }
