@@ -21,9 +21,12 @@
 >
 > **Ya no forman parte de este repo**: la app de escritorio (Tauri + Svelte, movida a
 > `experimental/ui-desktop` con el giro headless), el crate `lodestar-vcs` y `git2` (borrados en
-> `E15-H01`), los generadores `init`/`index`/`tags`/`export`/`import` (`E15-H02`/`H03`) y el arnés
-> diferencial JS-vs-Rust (`E15-H04`). Las secciones de E0–E8 de más abajo conservan esa terminología
-> como **historia del proyecto**; la autoridad viva es `ARCHITECTURE.md §20`.
+> `E15-H01`), los generadores `init`/`index`/`tags`/`export`/`import` (`E15-H02`/`H03`), el arnés
+> diferencial JS-vs-Rust (`E15-H04`) y el `Envelope<T>`/`ErrorEnvelope` de `lodestar-app`
+> (`E29-H11`, `decisiones §16(b)`: capacidad construida en E10-H01/H02 sin consumidor real — el wire
+> siempre fue `structuredContent`/exit codes directos). Las secciones de E0–E8 de más abajo
+> conservan esa terminología como **historia del proyecto**; la autoridad viva es
+> `ARCHITECTURE.md §20`.
 >
 > Lo pendiente está en [`decisiones/`](decisiones/README.md): fechas en el lenguaje de consulta (§12),
 > el **store sin consumidor** (§14, abierto en E23-H16). §12 y §13 se cerraron en E23-H14.

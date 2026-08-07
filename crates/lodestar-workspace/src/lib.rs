@@ -390,7 +390,49 @@ impl Workspace {
     }
 
     /// Crea un documento validado y lo escribe por el único escritor (si es conforme).
+    ///
+    /// **No es transaccional** (E29-H10, `decisiones §16(g)`): escribe directamente con
+    /// `io::write_atomic` — sin lock, sin journal, sin copias de recuperación — esquivando las seis
+    /// garantías del modelo transaccional (`ARCHITECTURE.md §19.5`) que [`Workspace::apply_transaction`]
+    /// sí ofrece. Por eso es `pub(crate)`: ningún consumidor legítimo fuera de este crate debe
+    /// escribir el canónico por aquí; el camino sancionado para publicar cambios es el
+    /// transaccional (`change_plan` → `change_apply`, `apply_transaction` en `transaction.rs`). Se
+    /// conserva (no se retira: `decisiones §16(g)` decidió replegar, no borrar) como primitiva de
+    /// fixtures para los tests de integración del propio crate, bajo `--features test-support`.
+    ///
+    /// `#[allow(dead_code)]`: en una build normal (sin `test-support`) no queda ningún llamante
+    /// dentro del crate — es deliberado, no un descuido; ver el doc-comment de arriba.
+    #[cfg(not(feature = "test-support"))]
+    #[allow(dead_code)]
+    pub(crate) fn create_document(
+        &self,
+        p: &RelPath,
+        ty: &str,
+        title: Option<&str>,
+        body: &str,
+        allow_invalid: bool,
+    ) -> Result<WriteOutcome, WorkspaceError> {
+        self.create_document_impl(p, ty, title, body, allow_invalid)
+    }
+
+    /// Igual que la versión `pub(crate)` de arriba, pero pública **solo** bajo
+    /// `--features test-support` (E29-H10): la usan los tests de integración de este crate
+    /// (`tests/workspace.rs`, `tests/transactions.rs`) como primitiva de fixtures y como sujeto
+    /// directo de prueba del camino de escritura no transaccional. En una build normal esta
+    /// variante no existe: no hay forma de llamarla desde fuera del crate.
+    #[cfg(feature = "test-support")]
     pub fn create_document(
+        &self,
+        p: &RelPath,
+        ty: &str,
+        title: Option<&str>,
+        body: &str,
+        allow_invalid: bool,
+    ) -> Result<WriteOutcome, WorkspaceError> {
+        self.create_document_impl(p, ty, title, body, allow_invalid)
+    }
+
+    fn create_document_impl(
         &self,
         p: &RelPath,
         ty: &str,
@@ -411,7 +453,35 @@ impl Workspace {
 
     /// Escribe contenido **crudo** en un documento (editor multi-escritor), validado por el core.
     /// Rechazo = `written:false` (no un `Err`). Escribe por el único escritor si es conforme.
+    ///
+    /// **No es transaccional** (E29-H10, `decisiones §16(g)`): mismo motivo y mismo repliegue a
+    /// `pub(crate)` que [`Workspace::create_document`] — ver su doc-comment. Hoy no tiene ningún
+    /// llamante, ni siquiera en los tests de integración; se conserva por si algún fixture futuro la
+    /// necesita, bajo `--features test-support`.
+    #[cfg(not(feature = "test-support"))]
+    #[allow(dead_code)]
+    pub(crate) fn write_document(
+        &self,
+        p: &RelPath,
+        raw: &str,
+        allow_invalid: bool,
+    ) -> Result<WriteOutcome, WorkspaceError> {
+        self.write_document_impl(p, raw, allow_invalid)
+    }
+
+    /// Igual que la versión `pub(crate)` de arriba, pero pública **solo** bajo
+    /// `--features test-support` (E29-H10).
+    #[cfg(feature = "test-support")]
     pub fn write_document(
+        &self,
+        p: &RelPath,
+        raw: &str,
+        allow_invalid: bool,
+    ) -> Result<WriteOutcome, WorkspaceError> {
+        self.write_document_impl(p, raw, allow_invalid)
+    }
+
+    fn write_document_impl(
         &self,
         p: &RelPath,
         raw: &str,
@@ -441,7 +511,33 @@ impl Workspace {
     }
 
     /// Aplica un patch de frontmatter (null-borra) y lo escribe si es conforme.
+    ///
+    /// **No es transaccional** (E29-H10, `decisiones §16(g)`): mismo motivo y mismo repliegue a
+    /// `pub(crate)` que [`Workspace::create_document`] — ver su doc-comment.
+    ///
+    /// `#[allow(dead_code)]`: sin llamante dentro del crate en una build normal; deliberado.
+    #[cfg(not(feature = "test-support"))]
+    #[allow(dead_code)]
+    pub(crate) fn merge_frontmatter(
+        &self,
+        p: &RelPath,
+        patch: FrontmatterPatch,
+    ) -> Result<WriteOutcome, WorkspaceError> {
+        self.merge_frontmatter_impl(p, patch)
+    }
+
+    /// Igual que la versión `pub(crate)` de arriba, pero pública **solo** bajo
+    /// `--features test-support` (E29-H10).
+    #[cfg(feature = "test-support")]
     pub fn merge_frontmatter(
+        &self,
+        p: &RelPath,
+        patch: FrontmatterPatch,
+    ) -> Result<WriteOutcome, WorkspaceError> {
+        self.merge_frontmatter_impl(p, patch)
+    }
+
+    fn merge_frontmatter_impl(
         &self,
         p: &RelPath,
         patch: FrontmatterPatch,

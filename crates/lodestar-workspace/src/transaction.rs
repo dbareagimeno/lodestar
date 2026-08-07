@@ -333,7 +333,7 @@ impl Workspace {
     /// (creados/modificados/borrados), en orden determinista.
     ///
     /// Es el **único escritor** (invariante #5): toda escritura del canónico pasa por
-    /// [`Workspace::publish`] (`io::write_atomic`/`io::delete`). La transacción es **recuperable**
+    /// `Workspace::publish_result` (`io::write_atomic`/`io::delete`). La transacción es **recuperable**
     /// (invariante «nunca un estado parcial silencioso»): si el proceso muere en cualquier punto, al
     /// reabrir el workspace [`Workspace::recover`] completa o restaura de forma determinista desde el
     /// write-ahead journal (E13-H03) y las copias de recuperación (E13-H04), que se preparan **antes**

@@ -37,6 +37,16 @@ default = []
 # recovery en producción. La sonda de fallo de PRODUCCIÓN que el implementador thread-eará por el
 # orquestador transaccional también vivirá tras esta feature (contrato documentado en los tests).
 test-failpoints = []
+# E29-H10 (`decisiones §16(g)`): reabre como `pub` la API de escritura NO transaccional de
+# `Workspace` (`create_document`/`write_document`/`merge_frontmatter`/`publish`), que en una build
+# normal es `pub(crate)` — nadie fuera de este crate debe escribir el canónico esquivando el
+# journal/lock/backup del camino transaccional. Los tests de integración
+# (`tests/workspace.rs`, `tests/transactions.rs`) la necesitan como primitiva de fixtures y, en
+# algunos casos, como sujeto directo de prueba del camino no transaccional en sí. Se activa siempre
+# para el harness de tests de ESTE crate vía el auto-dev-dependency de abajo — no hace falta pasar
+# `--features test-support` a mano ni en CI, y ningún consumidor externo (`lodestar-app`/`cli`/
+# `mcp`) la activa jamás porque no la piden.
+test-support = []
 
 [lints]
 workspace = true
@@ -49,3 +59,8 @@ tempfile = "3"
 serde_yaml = { workspace = true }
 # Solo para fabricar a mano una cache con esquema viejo en el test de regresión e2e.
 rusqlite = { version = "0.32", features = ["bundled"] }
+# Auto-dev-dependency (E29-H10): activa `test-support` SOLO para compilar/ejecutar los tests de
+# integración de este crate (`tests/*.rs`), sin que `default` la arrastre para quien depende de
+# `lodestar-workspace` como librería. Es el mismo truco que hace que `cargo test -p
+# lodestar-workspace` no necesite `--features test-support` explícito en la línea de comandos.
+lodestar-workspace = { path = ".", features = ["test-support"] }

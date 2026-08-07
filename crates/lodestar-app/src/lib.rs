@@ -1,14 +1,21 @@
 //! `lodestar-app` — servicios de caso de uso finos sobre `lodestar-workspace`.
 //!
-//! Capa compartida por las dos fachadas de superficie (`lodestar-mcp`, `lodestar-cli`): compone
-//! el `Envelope<T>` de protocolo (framing, no dominio — decisión **D3**, `docs/history/REFACTOR_DISENO_PROPUESTA.md`)
-//! y la fachada `App`, que envuelve un [`lodestar_workspace::Workspace`] y expone los métodos de
-//! caso de uso (`workspace_status` desde E10-H08; `knowledge_search`, … se irán poblando en
-//! E10-H09+).
+//! Capa compartida por las dos fachadas de superficie (`lodestar-mcp`, `lodestar-cli`): la
+//! fachada `App`, que envuelve un [`lodestar_workspace::Workspace`] y expone los métodos de caso
+//! de uso (`workspace_status`, `knowledge_search`, `knowledge_get`, `metadata_inspect`,
+//! `knowledge_check`, `change_plan`, `change_apply`, `change_revert`, …).
 //!
 //! Este crate depende solo de `lodestar-core` + `lodestar-workspace` + `serde`/`serde_json` — nunca
 //! directamente de `rusqlite`/`git2`/`tokio` (invariante #2 de `CLAUDE.md`, verificado por
 //! `cargo tree -p lodestar-app`).
+//!
+//! **Nota histórica (E29-H11, `decisiones §16(b)`)**: hasta esta historia el crate declaraba
+//! además un `Envelope<T>`/`ErrorEnvelope` de protocolo (framing, no dominio — decisión **D3**,
+//! `docs/history/REFACTOR_DISENO_PROPUESTA.md`, construido en E10-H01/H02). Se retiró por no tener
+//! consumidor: el wire real de las tools MCP es `structuredContent` + texto con el código
+//! (`ARCHITECTURE.md §20.10`) y la CLI responde con exit codes — ninguna de las dos fachadas
+//! construyó jamás un envelope. `contracts/mcp.yml` ya documenta esa ausencia («json directo, sin
+//! envelope») en cada tool.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -31,66 +38,6 @@ use lodestar_core::types::{
 };
 use lodestar_core::{CoreError, DocumentSet};
 use lodestar_workspace::{revert_transaction_id, Workspace, WorkspaceError};
-
-/// Envelope común de protocolo (`ARCHITECTURE.md §19.6`, `docs/history/REFACTOR.md §13`, decisión **D3**).
-///
-/// Todas las respuestas de las tools MCP y de los comandos de la CLI se enmarcan en esta forma:
-/// un veredicto (`ok`), la revisión del workspace en el momento de la respuesta, un resumen
-/// compacto pensado para el modelo (`summary`), el payload específico de la operación (`data`) y
-/// tres colecciones auxiliares siempre presentes (`diagnostics`/`warnings`/`resource_links`), nunca
-/// omitidas aunque estén vacías. Wire en camelCase: `workspaceRevision`/`resourceLinks`.
-///
-/// Framing de transporte, no dominio — por eso vive aquí y no en `lodestar_core::types` (los
-/// campos `data`/`diagnostics` sí reusan tipos del core: `Check` y lo que cada servicio devuelva).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Envelope<T> {
-    /// `true` si la operación tuvo éxito (con o sin advertencias); `false` si fue rechazada.
-    pub ok: bool,
-    /// Revisión determinista del workspace en el momento de responder (ver E10-H03).
-    pub workspace_revision: WorkspaceRevision,
-    /// Resumen compacto en lenguaje natural, pensado para que un agente lo lea sin parsear `data`.
-    pub summary: String,
-    /// Payload específico de la operación.
-    pub data: T,
-    /// Diagnósticos de conformidad relevantes para esta respuesta (puede estar vacío).
-    pub diagnostics: Vec<Check>,
-    /// Avisos no bloqueantes (puede estar vacío).
-    pub warnings: Vec<String>,
-    /// Enlaces a recursos adicionales que el agente puede querer inspeccionar (puede estar vacío).
-    pub resource_links: Vec<ResourceLink>,
-}
-
-impl<T> Envelope<T> {
-    /// Construye un envelope de éxito con las colecciones auxiliares vacías — el caso común para
-    /// un servicio que no tiene diagnósticos/avisos/enlaces que añadir.
-    pub fn ok(workspace_revision: WorkspaceRevision, summary: impl Into<String>, data: T) -> Self {
-        Envelope {
-            ok: true,
-            workspace_revision,
-            summary: summary.into(),
-            data,
-            diagnostics: Vec::new(),
-            warnings: Vec::new(),
-            resource_links: Vec::new(),
-        }
-    }
-}
-
-/// Enlace a un recurso adicional referenciado desde una respuesta (`resourceLinks` del envelope,
-/// `docs/history/REFACTOR.md §13`), p. ej. un documento relacionado que el agente puede pedir con
-/// `knowledge_get` a continuación. Forma mínima: URI del recurso (dirección estable, no
-/// necesariamente un `RelPath` — puede referirse a recursos fuera del workspace) y un título
-/// legible opcional.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ResourceLink {
-    /// Dirección estable del recurso.
-    pub uri: String,
-    /// Título legible por humanos/agentes, si se conoce.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub title: Option<String>,
-}
 
 // ---------------------------------------------------------------------------
 // Códigos de error estables (E10-H02, `ARCHITECTURE.md §19.3`, `REFACTOR.md §13`).
@@ -247,44 +194,6 @@ impl From<&CoreError> for AppError {
     /// core viaja **entero** hasta la superficie (invariante #3: una sola verdad computada).
     fn from(err: &CoreError) -> Self {
         AppError::new(error_code(err), err.to_string())
-    }
-}
-
-/// Forma de error de protocolo (`REFACTOR.md §13`): lo que se sirve en vez de un [`Envelope`]
-/// cuando una operación se rechaza. Wire en camelCase; `expected_revision`/`actual_revision`
-/// solo se rellenan para `REVISION_CONFLICT` (control optimista, E12) y `recovery` es un mensaje
-/// legible con el siguiente paso sugerido (p. ej. "vuelve a leer y reintenta").
-///
-/// Esta historia (E10-H02) solo fija la forma — nadie la construye todavía en un flujo real
-/// (eso llega con las tools de E10-H08+ y la planificación de E12/E13).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ErrorEnvelope {
-    /// Código estable del catálogo de 17 (`core::types::ErrorCode`, E28-H02).
-    pub code: ErrorCode,
-    /// Mensaje legible, en español, para un humano o un agente.
-    pub message: String,
-    /// Revisión que el llamante esperaba (solo relevante para `REVISION_CONFLICT`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub expected_revision: Option<WorkspaceRevision>,
-    /// Revisión real encontrada (solo relevante para `REVISION_CONFLICT`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub actual_revision: Option<WorkspaceRevision>,
-    /// Sugerencia legible del siguiente paso para recuperarse del error.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub recovery: Option<String>,
-}
-
-impl ErrorEnvelope {
-    /// Construye un `ErrorEnvelope` mínimo (sin campos de recuperación).
-    pub fn new(code: ErrorCode, message: impl Into<String>) -> Self {
-        ErrorEnvelope {
-            code,
-            message: message.into(),
-            expected_revision: None,
-            actual_revision: None,
-            recovery: None,
-        }
     }
 }
 
@@ -446,9 +355,10 @@ const DEFAULT_SCHEMA_VERSION: &str = "1";
 /// Fachada fina de servicios de caso de uso sobre un [`Workspace`] abierto.
 ///
 /// `App` es lo que consumen `lodestar-mcp` y `lodestar-cli`: un punto de entrada único que
-/// traduce peticiones de protocolo a operaciones del `Workspace` y envuelve las respuestas en
-/// [`Envelope`]. Expone `workspace_status` (E10-H08), `knowledge_search` (E10-H09),
-/// `knowledge_get` (E10-H10), `metadata_inspect` (E20-H03), `knowledge_check`, … .
+/// traduce peticiones de protocolo a operaciones del `Workspace` y devuelve sus tipos de
+/// servicio directamente (`structuredContent` en el MCP, sin envelope — E29-H11). Expone
+/// `workspace_status` (E10-H08), `knowledge_search` (E10-H09), `knowledge_get` (E10-H10),
+/// `metadata_inspect` (E20-H03), `knowledge_check`, … .
 pub struct App {
     workspace: Workspace,
 }
