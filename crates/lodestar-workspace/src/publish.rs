@@ -91,7 +91,40 @@ impl Workspace {
     ///   primer rename (E25-H01).
     /// - [`WorkspaceError::Io`] si falla la lectura del canónico, alguna escritura/borrado atómico o
     ///   la re-persistencia del journal.
+    ///
+    /// **No es la pieza que usa producción** (E29-H10, `decisiones §16(g)`): el orquestador
+    /// transaccional real (`apply_transaction`, en `transaction.rs`) llama directamente a
+    /// [`Workspace::publish_result`] con el `FileMap` que ya materializó y validó en staging, para
+    /// publicar exactamente lo que se validó — nunca a esta función, que recomputa el resultado
+    /// desde `change_set` sin pasar por staging. Por eso se repliega a `pub(crate)`: es una
+    /// composición de conveniencia (`discover_files` + `apply_normalized_ops` + `publish_result`)
+    /// sin lock ni backup propios, y ningún consumidor legítimo fuera de este crate debería
+    /// llamarla en vez del camino transaccional completo. Se conserva (no se retira) como
+    /// primitiva de test bajo `--features test-support`.
+    ///
+    /// `#[allow(dead_code)]`: sin llamante dentro del crate en una build normal; deliberado.
+    #[cfg(not(feature = "test-support"))]
+    #[allow(dead_code)]
+    pub(crate) fn publish(
+        &self,
+        change_set: &ChangeSet,
+        journal: &mut Journal,
+    ) -> Result<WorkspaceRevision, WorkspaceError> {
+        self.publish_impl(change_set, journal)
+    }
+
+    /// Igual que la versión `pub(crate)` de arriba, pero pública **solo** bajo
+    /// `--features test-support` (E29-H10).
+    #[cfg(feature = "test-support")]
     pub fn publish(
+        &self,
+        change_set: &ChangeSet,
+        journal: &mut Journal,
+    ) -> Result<WorkspaceRevision, WorkspaceError> {
+        self.publish_impl(change_set, journal)
+    }
+
+    fn publish_impl(
         &self,
         change_set: &ChangeSet,
         journal: &mut Journal,

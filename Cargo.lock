@@ -1230,6 +1230,7 @@ dependencies = [
  "lodestar-core",
  "lodestar-fixtures",
  "lodestar-store",
+ "lodestar-workspace",
  "rusqlite",
  "serde",
  "serde_json",

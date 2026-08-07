@@ -1,15 +1,15 @@
 ---
 id: 15
 titulo: "¿Debe el servidor rechazar los parámetros que no declara?"
-estado: "tomada"
+estado: "cerrada"
 prioridad: 4
 etiquetas: ["contrato", "mcp", "configuracion"]
 origen: "auditoria"
 abierta_en: "2026-07-25"
-cerrada_en: "2026-08-02"
-revisada_en: "2026-08-02"
-epica: "E24"
-historias: ["E24-H09"]
+cerrada_en: "2026-08-07"
+revisada_en: "2026-08-07"
+epica: "E29"
+historias: ["E24-H09", "E29-H08"]
 relacionadas: [16, 19]
 ---
 
@@ -66,3 +66,9 @@ relacionadas: [16, 19]
   `body` pertenece a dos ops. Un agente que hoy reutiliza la misma plantilla de objeto para varias
   operaciones de un lote —perfectamente válido— empezaría a recibir rechazos si la partición se
   escribe como si fuera limpia.
+
+**Cerrada (2026-08-07) por `E29-H08`** (commits `f7dc5fd` + `f720ba8`, épica
+[`epica-29-honestidad-superficie.md`](../requirements/epica-29-honestidad-superficie.md)): el wire
+rechaza de verdad los parámetros que no declara, validando por unión contra la tabla de campos
+legales por operación fijada arriba; juez ciego APROBADA (11/11) tras el remate que saldó la deuda
+señalada y la cascada a los sub-objetos de operación.

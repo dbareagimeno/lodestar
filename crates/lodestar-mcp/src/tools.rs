@@ -55,9 +55,17 @@ fn politica_de_borrado_invalida(raw_ops: &Value) -> Option<String> {
 /// pero no cómo invocarlas, así que había que adivinar.
 ///
 /// Se declaran **planas** (todas las propiedades juntas, cada una diciendo a qué op pertenece) en
-/// vez de con un `oneOf` por op: el servidor no valida contra este schema —es puramente
-/// declarativo— y un `oneOf` mal escrito confundiría al cliente sin que ningún test lo notara,
-/// mientras que la forma plana no puede rechazar una entrada válida.
+/// vez de con un `oneOf` por op: `path`/`ref` son intercambiables salvo en `create` y `body`
+/// pertenece a **dos** ops (`create` y `replace_body`), así que un `oneOf` por operación rechazaría
+/// entradas válidas —un lote en el que el agente reutiliza la misma plantilla de objeto— sin que
+/// ningún test lo notara.
+///
+/// **E29-H08**: desde v0.6.0 estas propiedades **sí se ejecutan**, pero por **UNIÓN**: son la fuente
+/// única de la que `validacion::union_de_campos_de_operacion` deriva los campos legales de una
+/// operación. Un campo que no esté en la unión de los 17 se rechaza con `INVALID_SCHEMA`
+/// nombrándolo; un campo legal de **otra** op se sigue ignorando (`decisiones §15`). Cerrar la
+/// partición por op —el `oneOf` que sigue sin existir— es decisión **posterior**, declarada, no un
+/// olvido.
 fn operacion_item_schema() -> Value {
     json!({ "type": "object", "properties": {
                      "op": { "type": "string", "enum": ["create", "patch_frontmatter", "replace_body", "replace_text", "edit_section", "move", "delete"],
@@ -261,6 +269,11 @@ pub fn available(profile: Profile, name: &str) -> bool {
 /// solo lo consume `workspace_status` hoy (E10-H08); el resto de tools no dependen del perfil de
 /// arranque (las de cambio se filtran antes, en [`available`]).
 pub fn call(app: &App, profile: Profile, name: &str, params: &Value) -> ToolResult {
+    // E29-H08: antes de leer nada, se RECHAZA lo que el `inputSchema` de la tool no declara. Hasta
+    // v0.5.0 el schema decía `additionalProperties: false` y el despachador leía campo a campo sin
+    // mirar las claves sobrantes, así que un `sort` retirado o un typo como `wheres` se descartaban
+    // en silencio y el agente recibía la respuesta por defecto (`decisiones §15`).
+    crate::validacion::valida_argumentos(name, params)?;
     match name {
         "workspace_status" => {
             let status = app.workspace_status(profile).map_err(|e| e.to_string())?;
@@ -561,8 +574,10 @@ fn to_json<T: serde::Serialize>(v: &T) -> ToolResult {
 // default **en silencio**. El peor caso es `limit: 0`: devolvía 0 resultados, indistinguible de
 // «no hay nada».
 //
-// Esto NO cambia la política sobre parámetros **no declarados**, que se siguen ignorando: eso está
-// escrito en tres sitios y es una decisión, no un descuido.
+// E24-H09 no cambió la política sobre parámetros **no declarados** (entonces se seguían ignorando).
+// **E29-H08 sí**: `decisiones §15` decidió ejecutar lo que el schema declara, así que hoy una clave
+// no declarada se RECHAZA en `validacion::valida_argumentos`, antes de que ningún brazo lea nada.
+// Estos helpers siguen ocupándose solo de los VALORES de las claves que sí existen.
 // ---------------------------------------------------------------------------
 
 /// `limit` validado contra el rango que declara el `inputSchema` de la tool.

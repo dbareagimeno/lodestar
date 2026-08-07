@@ -260,6 +260,21 @@ pub enum CheckCode {
     /// aquello escondía.
     #[serde(rename = "DOC-BOM")]
     DocBom,
+    /// El inventario del workspace quedó **vacío**: ni un solo documento sobrevivió al
+    /// descubrimiento bajo la raíz auditada, ya sea porque no hay ningún `.md` o porque
+    /// `discovery.include`/`discovery.exclude` los excluye a todos. Aviso, no error: un repo
+    /// legítimamente vacío sigue siendo un workspace válido (`§20.1`); el diagnóstico solo hace
+    /// **observable** lo que hoy es indistinguible de un directorio equivocado
+    /// (`decisiones §16(f)`, E29-H06). Severidad `Warn`, intrínseca (`family_of` devuelve `None`,
+    /// como `DOC-NOT-UTF8` y compañía).
+    ///
+    /// Lo produce el **descubrimiento** (`lodestar_workspace::discovery::discover`), como los demás
+    /// diagnósticos de esta familia, para que las dos fachadas lo vean por el mismo canal
+    /// (invariante #3). Viaja **sin `targets`** —igual que `PATH-NOT-UTF8`— porque no describe un
+    /// fichero sino la ausencia de todos, y la raíz no tiene [`RelPath`] que la represente
+    /// (`RelPath::new("")` es `Err` por diseño, invariante #6).
+    #[serde(rename = "WORKSPACE-EMPTY")]
+    WorkspaceEmpty,
 }
 }
 
@@ -278,6 +293,7 @@ impl CheckCode {
             CheckCode::SymlinkUnsupported => "SYMLINK-UNSUPPORTED",
             CheckCode::LinkCaseMismatch => "LINK-CASE-MISMATCH",
             CheckCode::DocBom => "DOC-BOM",
+            CheckCode::WorkspaceEmpty => "WORKSPACE-EMPTY",
         }
     }
 }
@@ -1883,6 +1899,28 @@ pub enum TypeError {
         field: FieldPath,
         operator: ComparisonOperator,
         /// El tipo que tenía el campo (nunca `List`).
+        found: ValueType,
+    },
+    /// Un operador de **texto de afijo** (`starts_with`/`ends_with`) cuyo operando no es un string
+    /// (E29-H04, `decisiones §23/A-04`). Son operadores **exclusivos de strings**: un número, un
+    /// booleano, `null`, una lista o un mapa no tienen prefijo ni sufijo que comprobar, y el
+    /// lenguaje no coerce (`§20.8`), así que devolver `false` era una respuesta silenciosamente
+    /// equivocada —el caso G1-20 del testbench: 7 documentos con `priority: 3` desaparecían de
+    /// `priority starts_with "3"` sin un aviso— y no un veredicto.
+    ///
+    /// Cubre los **dos** operandos: el campo no-string (`priority starts_with "3"` sobre
+    /// `priority: 3`) y el literal no-string (`status starts_with 3`). El `found` es de **uno** de
+    /// los dos —el campo primero, el literal si el campo sí era string—, así que la variante NO
+    /// dice de qué lado viene: quien redacte el mensaje debe ser neutro respecto al lado y no
+    /// atribuirle el tipo al campo, o mandaría al agente a inspeccionar un campo sano.
+    ///
+    /// Un campo **inexistente** no llega aquí: la ausencia es `false` (mismo contrato que
+    /// [`TypeError::NotAList`]).
+    NotAString {
+        field: FieldPath,
+        operator: ComparisonOperator,
+        /// El tipo del operando que **no** es string (nunca `String`): el del campo, o —si el campo
+        /// sí lo era— el del literal.
         found: ValueType,
     },
 }

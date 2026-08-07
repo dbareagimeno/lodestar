@@ -19,17 +19,17 @@
 |---|---|---|---|---|---|---|---|
 | 0 | M-01 + §16(i) | E28-H01 (+H03 adenda) | `revertir_el_revert_restaura_el_estado_post_apply`, `revertir_un_revert_produce_receipt_id_distinto`, `revertir_un_revert_no_toca_recovery_ni_receipts_previos`, `revertir_tres_veces_compone_sin_perder_estado`, `apply_revert_reapply_revert_de_plan_identico_completa_con_cuatro_receipts_unicos` (`e2e_ciclo_vida.rs`) + failpoints en `escritura.rs` | ✓ (2026-08-06) | ✓ | ✓ (panel 3 + re-juez robustez) | ✅ cerrada |
 | 0 | A-05 | E28-H02 (+H04 adenda) | los 6 de `mcp.rs` de H02 + los 5 intra-plan de H04 + `apply_de_plan_persistido_con_colision_intra_plan_rechaza_sin_tocar_disco` (`plan.rs`) | ✓ (2026-08-06) | ✓ | ✓ (panel 3 + re-juez robustez) | ✅ cerrada |
-| 1 | §19(a) | épica honestidad | — | — | — | — | pendiente |
-| 1 | §19(b) | épica honestidad | — | — | — | — | pendiente |
-| 1 | §18 | épica honestidad | — | — | — | — | pendiente |
-| 1 | §15 | épica honestidad | — | — | — | — | pendiente |
-| 1 | §16(e) (+A-08) | épica honestidad | — | — | — | — | pendiente |
-| 1 | §16(f) | épica honestidad | — | — | — | — | pendiente |
-| 1 | §16(g) | épica honestidad | — (compilación+suite) | — | — | — | pendiente |
-| 1 | §16(b) | épica honestidad | — (compilación+suite) | — | — | — | pendiente |
-| 1 | D-01 | épica honestidad | — | — | — | — | pendiente |
-| 1 | A-04 | épica honestidad | — | — | — | — | pendiente |
-| 1 | A-07 | épica honestidad | — | — | — | — | pendiente |
+| 1 | §19(a) | E29-H03 | `has`/`missing` sobre frontmatter pelado (`core.rs`/`mcp.rs`) | ✓ | ✓ | ✓ (7/7) | ✅ cerrada |
+| 1 | §19(b) | E29-H02 | `policy` parcial respeta el `Default` (`core.rs`/`mcp.rs`, remate `2f6ecf4`) | ✓ | ✓ | ✓ (5/5) | ✅ cerrada |
+| 1 | §18 | E29-H07 | `change_apply` rechaza `canApply: false` (`plan.rs`, `e2e_ciclo_vida.rs`) | ✓ | ✓ | ✓ (bloqueante doc saldado en `f97004c`) | ✅ cerrada |
+| 1 | §15 | E29-H08 | validación por unión contra la tabla de campos por operación (`mcp.rs`, `descubribilidad.rs`) | ✓ | ✓ | ✓ (11/11) | ✅ cerrada |
+| 1 | §16(e) (+A-08) | E29-H01 | config estricta: claves desconocidas + familias de `validation` (`e2e.rs`, `config.rs`) | ✓ | ✓ | ✓ (8/8) | ✅ cerrada |
+| 1 | §16(f) | E29-H06 | `WORKSPACE-EMPTY` (warn) sobre raíz sin documentos (`discovery.rs`, `validacion.rs`, remate `6a3a6ca`) | ✓ | ✓ | ✓ (aprobada) | ✅ cerrada |
+| 1 | §16(g) | E29-H10 | repliegue de `create_document`/`write_document`/`merge_frontmatter`/`publish` a `pub(crate)` (compilación+suite) | ✓ | ✓ | ✓ (juez ciego) | ✅ cerrada |
+| 1 | §16(b) | E29-H11 | retirada de `Envelope`/`ErrorEnvelope` (compilación+suite) | ✓ | ✓ | ✓ (juez ciego) | ✅ cerrada |
+| 1 | D-01 | E29-H09 | `instructions` por perfil + rechazo de `protocolVersion` (`main.rs`) | ✓ | ✓ | ✓ (7/7) | ✅ cerrada |
+| 1 | A-04 | E29-H04 | `starts_with`/`ends_with` sobre no-string → type error (`eval.rs`, `consulta.rs`, remate `681ec45`) | ✓ | ✓ | ✓ (7/7) | ✅ cerrada |
+| 1 | A-07 | E29-H05 | scope `paths` exige existencia → `DOCUMENT_NOT_FOUND` (`e2e.rs`, `validacion.rs`) | ✓ | ✓ | ✓ (6/6) | ✅ cerrada |
 | 2 | §16(j) + A-02/A-03 | pendiente | — | — | — | — | pendiente |
 | 2 | §16(l) mutantes | pendiente | — (tests anti-mutante) | — | — | — | pendiente |
 | 3 | D-02, A-01, A-06, A-09, A-10 | historia-escoba | — (guardia donde aplique) | — | — | — | pendiente |
@@ -56,6 +56,39 @@ nuevo de `decisiones §23`:
 **Observación**: `crash_por_senal_no_deja_parciales` (`crates/lodestar-mcp/tests/crash_senal.rs`)
 es flaky bajo carga (~50% con `--workspace`), preexistente, señalado por tres jueces — candidato a
 historia de higiene.
+
+**Fase 1 cerrada a falta del juez de §16(g)/§16(b) (2026-08-07).** Épica E29 (11/11 historias) en
+`feat/e29-honestidad-superficie`: H01 (`4a52f59`), H02 (`46c1492`+`2f6ecf4`), H03 (`99900d3`), H04
+(`b3b79fb`+`681ec45`), H05 (`fc5c26b`), H06 (`88e99b2`+`6a3a6ca`), H07 (`9df617f`+`f97004c`), H08
+(`f7dc5fd`+`f720ba8`), H09 (`5e7edc0`), H10+H11 (`7f519d2`). Suite completa en verde, incluidos los
+dos crates con `--features test-failpoints`; clippy `-D warnings`, `fmt --check` y `cargo doc`
+limpios; pureza del core intacta. Jueces ciegos: H01 8/8, H02 5/5, H03 7/7, H04 7/7, H05 6/6, H06
+aprobada, H07 aprobada (bloqueante doc saldado en el remate), H08 11/11, H09 7/7 — todas las
+reservas MAYORES/bloqueantes saldadas en los commits de remate. **H10/H11 con juez en curso**: en
+verificación final, sin veredicto todavía. Pendiente además el merge de la rama.
+
+**Seguimientos nuevos registrados al cerrar la Fase 1**, sin numerar como punto nuevo de
+`decisiones §23`:
+
+- **Familia `contains`-literal**: variantes de la familia de consulta por substring/literal
+  detectadas durante la implementación de E29-H03/H04, fuera del alcance de esas historias —
+  candidata a Fase 2/escoba.
+- **Divergencia `workspace_status.counts`**: el recuento que sirve `workspace_status` puede divergir
+  del que computan `knowledge_check`/`graph_query` bajo ciertas condiciones de descubrimiento
+  descubiertas al implementar E29-H06 — registrada para verificación en la Fase 2.
+- **SARIF `.lodestar`**: la salida SARIF de `check` puede listar rutas bajo `.lodestar/` en
+  condiciones de borde tocadas por E29-H01/H06 — a revisar en la historia-escoba.
+- **`PATH-NOT-UTF8` sin red vía `full_analysis`**: el diagnóstico de path no-UTF8 puede alcanzar
+  `full_analysis` sin cobertura de test dedicada — hueco detectado al endurecer el scope `paths` de
+  E29-H05.
+- **`protocolVersion` no-string → escoba**: E29-H09 fijó el rechazo de `protocolVersion` no
+  soportada, pero el caso de un `protocolVersion` que no es siquiera un string (tipo incorrecto en
+  el wire) queda sin cubrir — candidato a la historia-escoba.
+- **Mensaje duplicado de `INVALID_RESULT` del gate de staging**: el gate de staging que E14-H04
+  introdujo puede emitir el mismo mensaje de `INVALID_RESULT` por dos caminos distintos, detectado
+  al tocar la validación estricta de E29-H01/H08 — a saldar en la escoba.
+- **Flakiness recurrente de `crash_por_senal_no_deja_parciales`**: sigue viva tras la Fase 1 (ver
+  observación arriba) — **candidata a historia de higiene de la Fase 2**.
 
 ## Criterio de cierre por bug
 

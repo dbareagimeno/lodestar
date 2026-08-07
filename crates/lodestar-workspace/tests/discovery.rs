@@ -1329,3 +1329,75 @@ fn barra_invertida_en_unix_no_enmascara() {
         d.files.keys().map(|p| p.as_str()).collect::<Vec<_>>()
     );
 }
+
+// ---------------------------------------------------------------------------
+// E29-H06 (remate del juez ciego, MENOR-4) — el productor de `WORKSPACE-EMPTY`, a nivel de
+// `discover()` directamente. Hasta esta sección la cobertura del código vivía toda aguas abajo
+// (`lodestar-app`/`lodestar-cli`/`lodestar-mcp`); este test fija el contrato del PRODUCTOR mismo,
+// sin pasar por `full_analysis` ni por su indexado.
+// `requirements/epica-29-honestidad-superficie.md §E29-H06` · `decisiones §16(f)`.
+// ---------------------------------------------------------------------------
+
+/// **Dado** un directorio vacío (sin ningún fichero), **Cuando** se llama a `discover()`,
+/// **Entonces** `Discovered::diagnostics` trae exactamente un `Check` con código `WORKSPACE-EMPTY`,
+/// severidad `warn` y **sin `targets`** (no describe un fichero, describe la ausencia de todos —
+/// `RelPath::new("")` es inválido por diseño, invariante #6 de `CLAUDE.md`).
+#[test]
+fn inventario_vacio_produce_workspace_empty() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let d = discover(dir.path(), &politica()).unwrap();
+
+    assert!(
+        d.files.is_empty(),
+        "precondición: el inventario de documentos debe estar vacío de verdad"
+    );
+    let coincidencias: Vec<&Check> = d
+        .diagnostics
+        .iter()
+        .filter(|c| c.code.as_str() == "WORKSPACE-EMPTY")
+        .collect();
+    assert_eq!(
+        coincidencias.len(),
+        1,
+        "un directorio vacío debe producir EXACTAMENTE un diagnóstico WORKSPACE-EMPTY (no cero, \
+         no varios): {}",
+        resumen(&d.diagnostics)
+    );
+    let check = coincidencias[0];
+    assert_eq!(
+        check.level,
+        lodestar_core::types::Severity::Warn,
+        "WORKSPACE-EMPTY debe ser un AVISO: un directorio vacío sigue siendo un workspace válido \
+         (§20.1). {check:?}"
+    );
+    assert!(
+        check.targets.is_empty(),
+        "WORKSPACE-EMPTY no describe un fichero: debe ir SIN `targets` (como PATH-NOT-UTF8), no \
+         con un `RelPath` sintético de la raíz (`RelPath::new(\"\")` es inválido por invariante \
+         #6): {check:?}"
+    );
+}
+
+/// **Dado** un workspace con documentos, **Cuando** se llama a `discover()`, **Entonces** NO
+/// aparece `WORKSPACE-EMPTY` — control anti-vacuo del productor: el diagnóstico depende de que el
+/// inventario quede REALMENTE vacío, no se dispara siempre.
+#[test]
+fn inventario_con_documentos_no_produce_workspace_empty() {
+    let dir = tempfile::tempdir().unwrap();
+    lodestar_fixtures::materialize(&lodestar_fixtures::arbitrary(), dir.path()).unwrap();
+
+    let d = discover(dir.path(), &politica()).unwrap();
+
+    assert!(
+        !d.files.is_empty(),
+        "precondición: el fixture `arbitrary()` debe dejar documentos en el inventario"
+    );
+    assert!(
+        !d.diagnostics
+            .iter()
+            .any(|c| c.code.as_str() == "WORKSPACE-EMPTY"),
+        "un workspace con documentos NO debe producir WORKSPACE-EMPTY: {}",
+        resumen(&d.diagnostics)
+    );
+}

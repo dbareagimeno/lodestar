@@ -1,15 +1,15 @@
 ---
 id: 19
 titulo: "Hallazgos de documentar la referencia de usuario"
-estado: "tomada"
+estado: "cerrada"
 prioridad: 5
 etiquetas: ["lenguaje-consulta", "contrato", "docs", "mcp"]
 origen: "hallazgo-de-implementacion"
 abierta_en: "2026-08-02"
-cerrada_en: "2026-08-02"
-revisada_en: "2026-08-02"
-epica: "E27"
-historias: ["E27-H11"]
+cerrada_en: "2026-08-07"
+revisada_en: "2026-08-07"
+epica: "E29"
+historias: ["E27-H11", "E29-H02", "E29-H03"]
 relacionadas: [12, 15, 16, 21]
 ---
 
@@ -24,6 +24,10 @@ Escribir `docs/user/query-language.md`/`safe-changes.md` ejecutando cada afirmac
 > documentación de usuario que E27 acaba de publicar en inglés y el motor discrepan, en el camino de
 > los primeros diez minutos de un desconocido — contradicen el principio rector que `§21.5` acaba
 > de ratificar (*la superficie externa solo promete lo que el motor ejecuta hoy*).
+>
+> **Cerrada (2026-08-07)**: (a) y (b) ejecutados por `E29-H03` (`99900d3`) y `E29-H02` (`46c1492` +
+> `2f6ecf4`) respectivamente, ambos con veredicto de juez ciego favorable; (c) ya estaba resuelta en
+> `§21`. Los tres subpuntos quedan ejecutados, así que la ficha se cierra.
 
 - **(a) `has(frontmatter)` nunca casa; `missing(frontmatter)` casa siempre.** `§20.8` lo lista
   («incluido `has(frontmatter)`»), pero sobre la demo devuelve 0 de 10 y su negación 10 de 10,
@@ -34,6 +38,8 @@ Escribir `docs/user/query-language.md`/`safe-changes.md` ejecutando cada afirmac
   `document.has_frontmatter`. Arreglarlo toca `core::eval` → historia propia. **Decidido:
   arreglarlo** (no retirarlo del contrato): `has()` que funciona con todo menos con el anclaje
   pelado es una asimetría que habría que explicar para siempre.
+  **Ejecutado (2026-08-07) por `E29-H03`** (commit `99900d3`): `has(frontmatter)`/
+  `missing(frontmatter)` responden la verdad; juez ciego APROBADA (7/7).
 - **(b) Una `policy` parcial se rechaza aunque el contrato declara ambos campos opcionales.**
   `{"policy": {"requireValidResult": false}}` → `INVALID_SCHEMA: … missing field allowWarnings`.
   `PlanPolicy` tiene `Default` pero sus campos no llevan `#[serde(default)]`
@@ -42,6 +48,8 @@ Escribir `docs/user/query-language.md`/`safe-changes.md` ejecutando cada afirmac
   (validación de argumentos). `safe-changes.md` instruye enviar ambas claves. **Decidido:
   arreglarlo** — el arreglo es que los campos de `PlanPolicy` respeten el `Default` que ya existe,
   y la instrucción de `safe-changes.md` deja de hacer falta.
+  **Ejecutado (2026-08-07) por `E29-H02`** (commits `46c1492` + `2f6ecf4`, remate del juez con
+  literales clavados y default pinchado): juez ciego APROBADA (5/5).
 - **(c) Imprecisión en `§16(a)` caso (3)** — *corregida el 2026-08-02 al disolver §16; el texto
   vigente está en [`§21`](21-comillas-lenguaje-consulta.md)*: una clave literal `a.b` y una anidada `a:{b:…}` en
   **documentos distintos** producen **dos filas** del catálogo con el mismo `name` (no una), y

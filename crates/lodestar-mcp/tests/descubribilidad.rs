@@ -56,13 +56,21 @@
 //!
 //! # Sobre «el schema rechaza» (`sort`, `apply_fix`)
 //!
-//! El servidor **no valida** los `arguments` contra el `inputSchema` — es declarativo (así lo fijó
-//! E23-H10 para `change_plan`). Por eso los dos criterios de retirada se verifican donde de verdad
-//! ocurren:
-//! - `sort`: **declarativamente** (fuera de `inputSchema.properties`, que ya es
-//!   `additionalProperties: false`, y fuera de `contracts/mcp.yml` y de la firma de `App`). No se
-//!   exige un rechazo en ejecución: añadir validación ad-hoc de un solo parámetro contradiría el
-//!   diseño declarativo del schema.
+//! **Actualizado por E29-H08** (`decisiones §15`). Hasta v0.5.0 aquí se leía que el servidor «no
+//! valida los `arguments` contra el `inputSchema` — es declarativo», y que por tanto no se exigía
+//! rechazo en ejecución para `sort`. Esa política **ya no rige**: `§15` la revisó y decidió
+//! **ejecutar** lo que el schema declara, así que un parámetro que una tool no declara se **rechaza**
+//! con `INVALID_SCHEMA` nombrándolo (`src/validacion.rs`), en los dos niveles:
+//! - **nivel tool**, partición limpia contra las `properties` del `inputSchema` (incluidos los
+//!   objetos anidados cerrados: `ref`, `to`, `proposedOperation`, `policy`);
+//! - **nivel operación** (`operations[]` y el `operation` de la selección masiva), por **UNIÓN** de
+//!   los campos legales de las 7 ops: un `body` en un `patch_frontmatter` se sigue ignorando (es
+//!   legal en otra op), un `bodyy` se rechaza.
+//!
+//! Con eso, los dos criterios de retirada de E23-H11 se verifican así:
+//! - `sort`: declarativamente (fuera de `inputSchema.properties`, de `contracts/mcp.yml` y de la
+//!   firma de `App`) **y en ejecución** desde E29-H08 — `knowledge_search{sort}` es hoy
+//!   `INVALID_SCHEMA` nombrando `sort`, no la lista por defecto.
 //! - `apply_fix`: declarativamente **y en ejecución**, porque ahí sí hay un despachador real
 //!   (`normalize_raw_op`): una op fuera del enum cae en su brazo por defecto → `INVALID_SCHEMA`,
 //!   que es el código correcto, en vez del `DOCUMENT_NOT_FOUND` que hoy devuelve un `apply_fix` que
@@ -1984,4 +1992,251 @@ fn los_codigos_sin_emisor_no_los_emite_ninguna_tool() {
          lista).\n  - {}",
         falsas.join("\n  - ")
     );
+}
+
+// ===========================================================================
+// E29-H08 — El wire RECHAZA los parámetros que no declara: BARRIDO por el catálogo
+// `requirements/epica-29-honestidad-superficie.md §E29-H08` · `decisiones §15`.
+// ===========================================================================
+//
+// La cabecera de este fichero (sección «Sobre "el schema rechaza"») enuncia la política VIEJA: «el
+// servidor **no valida** los `arguments` contra el `inputSchema` — es declarativo». `decisiones §15`
+// la revisó y decidió **(a) ejecutar**, así que esa sección es una de las **tres sedes** que la
+// historia manda reescribir (junto a `contracts/mcp.yml::validacion_de_argumentos` y el doc-comment
+// de `operacion_item_schema` en `tools.rs`). NO se reescribe aquí: eso es fase VERDE — el
+// implementador la actualiza en el mismo cambio que active el rechazo. Se deja anotado para que no
+// se pierda: dejar viva la afirmación vieja sería reintroducir el defecto en su forma documental.
+//
+// Los dos tests de abajo son el BARRIDO que la historia pide para que **ninguna tool quede fuera**.
+// Los casos individuales (con su mensaje y su parámetro nombrado) viven en `tests/mcp.rs`, sección
+// E29-H08; aquí está la propiedad sobre el CATÁLOGO ENTERO, que es la única forma de que una tool
+// nueva no nazca laxa: un test caso-a-caso envejece en cuanto alguien añade la undécima tool.
+//
+// ROJO ESPERADO HOY: por ASERCIÓN. `parametro_inventado_se_rechaza_en_todas_las_tools` falla en la
+// PRIMERA tool del catálogo (hoy las 10 aceptan el argumento inventado y responden con éxito o con
+// el error que corresponda a sus parámetros OBLIGATORIOS ausentes, nunca por el inventado).
+
+/// Nombre de parámetro que **ninguna** tool declara ni puede declarar jamás: se usa como sonda
+/// uniforme sobre las 10 tools. Deliberadamente feo para que no colisione con nada futuro.
+const PARAM_INVENTADO: &str = "parametroQueNoExisteEnNingunSchema";
+
+/// Los `arguments` MÍNIMOS que hacen que una tool llegue a ejecutarse: sus parámetros
+/// **obligatorios** (`required` del `inputSchema`), con un valor válido.
+///
+/// Importa para que el barrido sea honesto: si se llamara a `knowledge_get` sin `ref`, la llamada
+/// fallaría por el parámetro obligatorio ausente y el test pasaría **por la razón equivocada** —
+/// creería haber observado el rechazo del parámetro inventado. Con los obligatorios puestos, la
+/// única razón posible de fallo es el inventado, y eso es lo que se asevera leyendo el mensaje.
+fn argumentos_minimos(tool: &str) -> Value {
+    match tool {
+        "workspace_status" => json!({}),
+        "knowledge_search" => json!({ "text": "" }),
+        "knowledge_get" => json!({ "ref": { "path": "notas/alfa.md" } }),
+        "metadata_inspect" => json!({ "mode": "catalog" }),
+        "knowledge_check" => json!({ "scope": { "kind": "workspace" } }),
+        "graph_query" => json!({ "operation": "isolated" }),
+        "impact_analyze" => json!({ "ref": { "path": "notas/alfa.md" },
+                                    "proposedOperation": { "kind": "delete" } }),
+        "change_plan" => json!({ "operations": [] }),
+        // Los ids no existen: estas dos fallarán con PLAN_EXPIRED/PLAN_STALE o similar. No importa
+        // para el criterio —lo que se asevera es que el mensaje NOMBRE el parámetro inventado—,
+        // pero sí importa que los parámetros obligatorios estén PRESENTES y bien tipados, que es
+        // lo que impide que el test pase por «falta changeSetId».
+        "change_apply" => json!({ "changeSetId": "changeset:0000000000000000" }),
+        "change_revert" => json!({ "receiptId": "txn:0000000000000000" }),
+        otra => panic!(
+            "el barrido de E29-H08 no sabe qué argumentos mínimos pasarle a la tool «{otra}»: si \
+             se ha añadido una tool nueva al catálogo, añádela AQUÍ — que este panic salte es \
+             justamente la guarda que impide que una tool nueva quede fuera del barrido"
+        ),
+    }
+}
+
+/// **E29-H08 · Criterio del barrido** (la garantía de que NINGUNA tool queda fuera):
+/// **Dado** cada una de las tools que sirve `tools/list`, **Cuando** se la llama con sus argumentos
+/// obligatorios MÁS un parámetro que ningún schema declara, **Entonces** la llamada se rechaza con
+/// `INVALID_SCHEMA` y el mensaje nombra ese parámetro.
+///
+/// Es data-driven sobre el catálogo **vivo** (no sobre una lista escrita a mano), así que una tool
+/// nueva entra en el barrido el día que entra en `tools/list`: o la cubre el rechazo, o rompe este
+/// test. Esa es exactamente la propiedad que la historia pide para «que una tool nueva no nazca
+/// laxa».
+#[test]
+fn parametro_inventado_se_rechaza_en_todas_las_tools() {
+    let dir = workspace_frontmatter();
+    let mut s = Sesion::abrir(dir.path());
+    let tools: Vec<String> = s
+        .catalogo()
+        .iter()
+        .map(|t| {
+            t["name"]
+                .as_str()
+                .expect("cada tool tiene «name»")
+                .to_string()
+        })
+        .collect();
+    assert_eq!(
+        tools.len(),
+        10,
+        "el barrido debe cubrir las 10 tools de la superficie objetivo: {tools:?}"
+    );
+
+    let mut laxas: Vec<String> = Vec::new();
+    for tool in &tools {
+        let mut args = argumentos_minimos(tool);
+        args[PARAM_INVENTADO] = json!("sonda");
+        let r = s.tool_cruda(tool, args);
+
+        let texto = r["content"][0]["text"].as_str().unwrap_or("");
+        let rechazada = r["isError"] == json!(true)
+            && texto.starts_with(ErrorCode::InvalidSchema.as_str())
+            && texto.contains(PARAM_INVENTADO);
+        if !rechazada {
+            laxas.push(format!(
+                "«{tool}» → isError={} · {}",
+                r["isError"],
+                if texto.is_empty() {
+                    "(respuesta con ÉXITO: el parámetro se descartó en silencio)"
+                } else {
+                    texto
+                }
+            ));
+        }
+    }
+
+    assert!(
+        laxas.is_empty(),
+        "estas tools ACEPTAN un parámetro que su `inputSchema` no declara (y que declara imposible \
+         con `additionalProperties: false`), en vez de rechazarlo con `INVALID_SCHEMA` \
+         nombrándolo. Un agente que se equivoca de nombre de parámetro recibe la respuesta por \
+         defecto y no se entera (`decisiones §15`).\n  - {}",
+        laxas.join("\n  - ")
+    );
+
+    drop(s);
+}
+
+/// **E29-H08 · Criterio `el_schema_declarado_coincide_con_lo_aceptado`** (la guarda
+/// ANTI-ENVEJECIMIENTO):
+/// **Dado** cada una de las 10 tools, **Cuando** se comparan las claves de su `inputSchema` con las
+/// que su despachador acepta, **Entonces** coinciden exactamente.
+///
+/// «Lo que el despachador acepta» se mide **por el wire**, sin introspección: para cada propiedad
+/// declarada en el `inputSchema` se manda esa clave sola (con un valor de la forma que el schema
+/// dice) y se comprueba que la respuesta **no** la rechaza citándola como sobrante. Si el rechazo
+/// se implementara con una lista escrita a mano que se olvidara de una propiedad declarada, ese
+/// parámetro legítimo empezaría a rechazarse y este test lo cazaría — que es la mitad del criterio
+/// que los tests de rechazo no pueden cubrir.
+///
+/// **Cómo se distingue «rechazada por desconocida» de «valor inválido»** sin acoplarse a la
+/// redacción que elija el implementador (la spec fija el código y que el mensaje nombre el
+/// parámetro, no las palabras): se compara contra la respuesta de la MISMA tool ante el parámetro
+/// `PARAM_INVENTADO`. Si el `INVALID_SCHEMA` que produce la propiedad declarada tiene la misma
+/// forma que el del inventado —nombra la clave y no dice nada del valor—, es un rechazo por
+/// desconocida. Ese calibrado por comparación es lo que impide que el test se vuelva vacuo si el
+/// implementador escribe «desconocido» donde este fichero esperaba «no declarado».
+///
+/// La otra dirección (aceptar algo NO declarado) la cubre
+/// `parametro_inventado_se_rechaza_en_todas_las_tools`. Entre los dos cierran la equivalencia
+/// «declarado ⟺ aceptado» que la historia exige para que el schema y el despachador no diverjan.
+#[test]
+fn el_schema_declarado_coincide_con_lo_aceptado() {
+    let dir = workspace_frontmatter();
+    let mut s = Sesion::abrir(dir.path());
+    let catalogo = s.catalogo();
+
+    let mut rechazados: Vec<String> = Vec::new();
+    for t in &catalogo {
+        let tool = t["name"]
+            .as_str()
+            .expect("cada tool tiene «name»")
+            .to_string();
+        let props = t["inputSchema"]["properties"]
+            .as_object()
+            .cloned()
+            .unwrap_or_default();
+        for (prop, esquema) in &props {
+            let mut args = argumentos_minimos(&tool);
+            // Si ya es uno de los obligatorios, no hay nada nuevo que probar: ya viaja arriba.
+            if args.get(prop).is_some() {
+                continue;
+            }
+            args[prop] = valor_de_ejemplo(&tool, prop, esquema);
+            let r = s.tool_cruda(&tool, args.clone());
+            let texto = r["content"][0]["text"].as_str().unwrap_or("");
+
+            // Un `INVALID_SCHEMA` que NOMBRA la propiedad declarada es el síntoma de la
+            // divergencia. Que la tool falle por el VALOR (un id inexistente, una revisión que no
+            // casa, un `where` que no parsea) es legítimo y NO se juzga aquí: esos errores no son
+            // `INVALID_SCHEMA` citando la clave, o si lo son citan además el valor recibido.
+            let rechazo_por_clave = r["isError"] == json!(true)
+                && texto.starts_with(ErrorCode::InvalidSchema.as_str())
+                && texto.contains(prop.as_str())
+                // …y con la MISMA forma que el rechazo del parámetro inventado en esta tool: si
+                // el mensaje cita el valor, está hablando del valor, no de la clave.
+                && !texto.contains(&format!("{}", args[prop]));
+            if rechazo_por_clave {
+                rechazados.push(format!("«{tool}.{prop}» → {texto}"));
+            }
+        }
+    }
+
+    assert!(
+        rechazados.is_empty(),
+        "estas propiedades están DECLARADAS en el `inputSchema` de su tool y aun así el \
+         despachador las rechaza como no declaradas: el schema y la lista de campos aceptados han \
+         divergido, que es exactamente lo que esta guarda existe para impedir (la historia pide \
+         que la lista viva en UN solo sitio, consultado por el rechazo y por la generación del \
+         schema).\n  - {}",
+        rechazados.join("\n  - ")
+    );
+
+    drop(s);
+}
+
+/// Un valor de ejemplo **bien tipado** para la propiedad `prop` de `tool`, derivado del `type` que
+/// declara su schema (y de su `enum`/`minimum` cuando los hay).
+///
+/// No pretende ser semánticamente correcto —el criterio de
+/// `el_schema_declarado_coincide_con_lo_aceptado` es solo que la clave no se rechace por
+/// desconocida—, pero sí bien tipado: un valor de tipo equivocado haría fallar la llamada por la
+/// validación de VALORES de E24-H09 y enturbiaría la lectura del fallo.
+fn valor_de_ejemplo(tool: &str, prop: &str, esquema: &Value) -> Value {
+    // Casos con forma propia, donde el `type` del schema no basta para construir algo plausible.
+    match (tool, prop) {
+        ("knowledge_search", "include") => return json!(["frontmatter.status"]),
+        ("knowledge_search", "filter") => {
+            return json!({ "field": "frontmatter.status", "operator": "equals",
+                           "value": "accepted" })
+        }
+        ("knowledge_get", "include") => return json!(["revision"]),
+        ("knowledge_get", "sections") => return json!([["Alfa"]]),
+        ("knowledge_check", "scope") => return json!({ "kind": "workspace" }),
+        ("graph_query", "ref") | ("impact_analyze", "ref") => {
+            return json!({ "path": "notas/alfa.md" })
+        }
+        ("graph_query", "to") => return json!({ "path": "notas/beta.md" }),
+        ("impact_analyze", "proposedOperation") => return json!({ "kind": "delete" }),
+        ("change_plan", "operations") => return json!([]),
+        ("change_plan", "selection") => return json!({ "where": "status = \"draft\"" }),
+        ("change_plan", "operation") => return json!({ "patch_frontmatter": { "revisado": true } }),
+        ("change_plan", "policy") => {
+            return json!({ "requireValidResult": false, "allowWarnings": true })
+        }
+        // Un `cursor` inventado es un valor inválido, no una clave desconocida: se manda vacío para
+        // que, si acaso falla, no sea por «no declarado» (que es lo único que este test juzga).
+        (_, "cursor") => return json!(""),
+        _ => {}
+    }
+    if let Some(valores) = esquema["enum"].as_array() {
+        return valores.first().cloned().unwrap_or(Value::Null);
+    }
+    match esquema["type"].as_str() {
+        Some("string") => json!(""),
+        Some("integer") => esquema["minimum"].as_u64().map_or(json!(1), |m| json!(m)),
+        Some("boolean") => json!(false),
+        Some("array") => json!([]),
+        Some("object") => json!({}),
+        _ => Value::Null,
+    }
 }

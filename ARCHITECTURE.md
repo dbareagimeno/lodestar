@@ -816,7 +816,7 @@ lodestar-core (PURO)  ◄─ lodestar-store ─┐        lodestar-core ◄─ l
    ▲  (+ core::schema, WorkspaceRevision) ▼
    └──────────────── lodestar-workspace (ÚNICO escritor + staging/journal/locks/recovery + cache + bus)
                               ▲
-                       lodestar-app   (servicios de caso de uso · envelope · mapa de códigos de error)
+                       lodestar-app   (servicios de caso de uso · mapa de códigos de error)
                           ▲       ▲
                    lodestar-mcp · lodestar-cli     (las dos fachadas del motor headless: 5–15 líneas, CERO dominio)
                    (src-tauri RETIRADO de `main` → rama experimental/ui-desktop)
@@ -827,13 +827,15 @@ lodestar-core (PURO)  ◄─ lodestar-store ─┐        lodestar-core ◄─ l
   que, dado un `Schema` + un `Bundle`, producen `Vec<Check>` (extiende `conform`). La **aplicación de
   plantillas** es generación pura (como `gen_index`/`gen_tag_indexes`). **Leer** `.lodestar/schema.yaml` /
   `.lodestar/templates/` es I/O de `workspace` (patrón `Config::load`); el core nunca abre ficheros.
-- **`lodestar-app`**: ensambla `ChangeSet`, conduce plan→validar→aplicar→verificar, construye el
-  **envelope** (decisión D3: el envelope es framing de protocolo, no dominio → vive aquí, no en `core`) y
-  mapea `CoreError`/`WorkspaceError` → **códigos de error** estables.
+- **`lodestar-app`**: ensambla `ChangeSet`, conduce plan→validar→aplicar→verificar y mapea
+  `CoreError`/`WorkspaceError` → **códigos de error** estables. (**Actualización E29-H11,
+  `decisiones §16(b)`**: el crate construyó también un **envelope** de protocolo — decisión D3, «el
+  envelope es framing, no dominio» — pero ninguna fachada llegó a ensamblarlo nunca; el wire real es
+  `structuredContent`/exit codes directos, §20.10. Se retiró por no tener consumidor.)
 
 ### 19.3 Tipos nuevos (invariante #4: UNA vez en `core::types`)
 
-Se congelan en `lodestar-core::types` (salvo el envelope, que va en `lodestar-app`):
+Se congelan en `lodestar-core::types`:
 
 - `ConceptRevision` = `blake3:<hex>` del contenido en disco de un `.md`. **Eleva** el `WriteOutcome.hash`
   (ya `blake3::hash(raw)`) y el gate de la cache (§5) de gate interno a **identidad expuesta**.
@@ -949,8 +951,12 @@ llamada (seguridad §19.7). **Transporte** (decisión D6b): se mantiene **stdio*
 activa **`outputSchema`** derivado con la feature `schemars` (ya preparada, §10 fila 14); `rmcp`
 **diferido**. `contracts/mcp.yml` se **reescribe** 13→10 y el guardián de contrato lo vigila.
 
-**Envelope común** (en `lodestar-app`): `{ ok, workspaceRevision, summary, data, diagnostics, warnings,
-resourceLinks }`; `summary` es texto compacto para el modelo.
+> **Actualización E29-H11** (`decisiones §16(b)`): esta sección describía también un «envelope
+> común» — `{ ok, workspaceRevision, summary, data, diagnostics, warnings, resourceLinks }` — como
+> forma de respuesta compartida por las diez tools. Se construyó (`lodestar-app`, E10-H01) pero
+> ninguna fachada llegó a ensamblarlo jamás: el wire real que sirve cada tool (§20.10,
+> `contracts/mcp.yml`) es su tipo de servicio propio en `structuredContent`, sin envolver, y la CLI
+> responde con exit codes. Se retiró del crate por no tener consumidor.
 
 ### 19.7 Seguridad (§14 de REFACTOR) — simplificada
 

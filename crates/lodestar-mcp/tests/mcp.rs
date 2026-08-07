@@ -7365,6 +7365,306 @@ fn type_error_de_lista_tambien_es_error_de_consulta() {
 }
 
 // ---------------------------------------------------------------------------
+// E29-H04 — `starts_with`/`ends_with` sobre un campo no-string es TYPE ERROR (por el wire)
+//
+// `requirements/epica-29-honestidad-superficie.md §E29-H04` · `decisiones §23/A-04` (criterio
+// **ratificado por el usuario el 2026-08-06**) · caso **G1-20** del testbench homelab
+// (`docs/qa/informe-homelab-2026-08-06.md §3`), que es como se observó el hallazgo: por el wire.
+//
+// SÍNTOMA medido hoy (v0.5.0) sobre un workspace con `priority: 3` (número):
+//   · `knowledge_search {where: "priority starts_with \"3\""}` → `{"results": [], …}` **sin error**;
+//   · `change_plan {selection: {where: <lo mismo>}}` → un plan con `normalizedOperations: []`,
+//     `impact.affectedCount: 0` y **`canApply: true`**, presentado como un plan legítimo.
+// En el homelab eran 7 documentos con `priority: 3` desapareciendo de la respuesta sin un aviso.
+//
+// CAUSA: `core::eval::eval_afijo` devuelve `bool` (no `Result`), así que un campo no-string es
+// `false` y cae en el mismo `continue` que «no casa» — el defecto que E26-H08 cerró para el ORDEN,
+// abierto todavía para los dos operadores de afijo.
+//
+// LO QUE ESTOS TESTS FIJAN, y por qué aquí y no solo en el core: el criterio de la historia es que el
+// error llegue al agente por las DOS superficies que evalúan consultas, con el `INVALID_SCHEMA` del
+// catálogo (no hay código nuevo) y con un mensaje que nombre campo, operador y tipo hallado —el
+// mismo contrato de redacción que `juzga_error_de_tipo` ya exige para `OrderNotDefined`—, y que en
+// `change_plan` **aborte el plan** en vez de reducir la selección en silencio (coherencia con
+// E26-H08). El core solo puede probar que el evaluador yerra; que ese `Err` no se pierda entre el
+// evaluador y el wire solo se ve desde aquí.
+//
+// ROJO esperado HOY: por ASERCIÓN (`error_de` devuelve `None` porque la respuesta es un éxito).
+// ---------------------------------------------------------------------------
+
+/// La consulta del caso **G1-20**: operador de afijo sobre un campo numérico.
+const AFIJO_SOBRE_NUMERO: &str = "priority starts_with \"3\"";
+
+/// Grafías admisibles del tipo `list` en el mensaje (las de `GRAFIAS_NUMBER`/`GRAFIAS_STRING`, para
+/// el criterio de la lista).
+const GRAFIAS_LIST: &[&str] = &["list", "lista", "array", "secuencia", "sequence"];
+
+/// Juzga el error de un type error de **afijo**: código estable + mensaje que permita CORREGIR la
+/// consulta (campo, operador y el tipo real del campo). Es el gemelo de `juzga_error_de_tipo`, con
+/// el tipo esperado parametrizado porque el defecto se manifiesta sobre varias familias.
+fn juzga_error_de_afijo(err: &str, campo: &str, operador: &str, grafias: &[&str], contexto: &str) {
+    assert_eq!(
+        codigo_de(err),
+        "INVALID_SCHEMA",
+        "un type error de afijo es el MISMO tipo de fallo que el del orden y usa el MISMO código del \
+         catálogo —la historia no abre `ErrorCode` ({contexto})—: «{err}»"
+    );
+    let (_, mensaje) = codigo_y_mensaje(err)
+        .unwrap_or_else(|| panic!("{contexto} debe emitir «CÓDIGO: mensaje» (E26-H07): «{err}»"));
+    let bajo = mensaje.to_lowercase();
+    assert!(
+        menciona(&bajo, campo),
+        "el mensaje debe NOMBRAR el campo que choca ({contexto}): «{err}»"
+    );
+    assert!(
+        nombra_tipo(mensaje, grafias),
+        "…y el tipo REAL que el campo tiene en el documento, que es lo que le dice al agente por qué \
+         su operador de texto no aplica ({contexto}): «{err}»"
+    );
+    assert!(
+        menciona(&bajo, operador),
+        "…y el operador exacto: `starts_with` y `ends_with` fallan por la misma razón pero el agente \
+         corrige uno u otro ({contexto}): «{err}»"
+    );
+}
+
+/// Workspace del caso **G1-20**: `priority` numérico en dos documentos y **textual** en un tercero,
+/// más un `tags` lista.
+///
+/// La heterogeneidad es la que hace grave el defecto y discriminante el test: hoy
+/// `priority starts_with "3"` NO devuelve la lista vacía, devuelve `["z-textual.md"]` — una respuesta
+/// recortada y perfectamente creíble. `a-numerico.md` va primero en el orden total (`§20.7`), así que
+/// es el documento que el criterio de determinismo de E26-H08 obliga a nombrar.
+fn ws_afijo_heterogeneo() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "a-numerico.md",
+        "---\npriority: 3\nstatus: active\ntags:\n  - uno\n---\n\n# Numérico\n",
+    );
+    write(
+        dir.path(),
+        "b-numerico.md",
+        "---\npriority: 5\nstatus: draft\n---\n\n# Otro numérico\n",
+    );
+    write(
+        dir.path(),
+        "z-textual.md",
+        "---\npriority: \"3-alta\"\nstatus: activo\n---\n\n# Textual\n",
+    );
+    dir
+}
+
+/// **E29-H04** · Criterio `starts_with_sobre_numero_es_type_error` (por el wire):
+/// **Dado** un workspace con documentos cuyo `priority` es un **número**, **Cuando** se busca con
+/// `where: "priority starts_with \"3\""`, **Entonces** la respuesta es un error `INVALID_SCHEMA` cuyo
+/// mensaje nombra el campo, el operador y el tipo encontrado.
+///
+/// Es el caso G1-20 tal como se observó: por `knowledge_search`, con la respuesta recortada como
+/// única señal (y ninguna señal, por tanto).
+#[test]
+fn starts_with_sobre_numero_es_type_error() {
+    let dir = ws_afijo_heterogeneo();
+    let linea = linea_search(1, AFIJO_SOBRE_NUMERO, None);
+    let resp = roundtrip(dir.path(), &[linea.as_str()], 1);
+
+    let err = error_de(&resp[0]).unwrap_or_else(|| {
+        panic!(
+            "`{AFIJO_SOBRE_NUMERO}` sobre documentos con `priority` NUMÉRICO no es una consulta \
+             respondible: `starts_with` es un operador de TEXTO y el lenguaje no coerce (§20.8). Hoy \
+             `eval_afijo` devuelve `false` para todo campo no-string, así que los documentos \
+             numéricos se excluyen en silencio y la respuesta es la lista de los que casualmente \
+             tenían `priority` textual — el caso G1-20, donde 7 documentos con `priority: 3` \
+             desaparecieron sin un aviso.\nRespuesta recibida: {}",
+            resp[0]
+        )
+    });
+    juzga_error_de_afijo(
+        &err,
+        "priority",
+        "starts_with",
+        GRAFIAS_NUMBER,
+        "knowledge_search",
+    );
+    assert!(
+        err.contains("a-numerico.md"),
+        "…y debe nombrar el PRIMER documento del orden total que yerra (`a-numerico.md`), como todo \
+         type error desde E26-H08: «{err}»"
+    );
+}
+
+/// **E29-H04** · Criterio `ends_with_sobre_numero_es_type_error` (por el wire):
+/// **Dado** ese mismo workspace, **Cuando** se busca con `ends_with` sobre el mismo campo,
+/// **Entonces** el mismo error.
+#[test]
+fn ends_with_sobre_numero_es_type_error() {
+    let dir = ws_afijo_heterogeneo();
+    let linea = linea_search(1, "priority ends_with \"3\"", None);
+    let resp = roundtrip(dir.path(), &[linea.as_str()], 1);
+
+    let err = error_de(&resp[0]).unwrap_or_else(|| {
+        panic!(
+            "`priority ends_with \"3\"` debe fallar igual que su gemelo `starts_with`: comparten \
+             `eval_afijo`, y arreglar uno solo dejaría el hueco abierto por la mitad.\nRespuesta: {}",
+            resp[0]
+        )
+    });
+    juzga_error_de_afijo(
+        &err,
+        "priority",
+        "ends_with",
+        GRAFIAS_NUMBER,
+        "knowledge_search (ends_with)",
+    );
+}
+
+/// **E29-H04** · Criterio `starts_with_sobre_lista_es_type_error` (por el wire):
+/// **Dado** un documento cuyo campo `tags` es una **lista**, **Cuando** se evalúa
+/// `tags starts_with "x"`, **Entonces** es type error (no `false`).
+///
+/// La lista es la familia no-string más frecuente en un frontmatter real después del número, y la
+/// más tentadora para una coerción («¿y si comparo el primer elemento?»): el mensaje debe decir
+/// `list`, no `string`, o el agente corregirá lo que no es.
+#[test]
+fn starts_with_sobre_lista_es_type_error() {
+    let dir = ws_afijo_heterogeneo();
+    let linea = linea_search(1, "tags starts_with \"uno\"", None);
+    let resp = roundtrip(dir.path(), &[linea.as_str()], 1);
+
+    let err = error_de(&resp[0]).unwrap_or_else(|| {
+        panic!(
+            "`tags starts_with \"uno\"` sobre `tags: [uno, dos]` debe ser type error: una lista no \
+             tiene prefijo de texto, y que su primer elemento sí lo tenga es justo la coerción que \
+             §20.8 prohíbe.\nRespuesta: {}",
+            resp[0]
+        )
+    });
+    juzga_error_de_afijo(
+        &err,
+        "tags",
+        "starts_with",
+        GRAFIAS_LIST,
+        "knowledge_search (lista)",
+    );
+}
+
+/// **E29-H04** · Criterio `selection_con_type_error_de_afijo_aborta_el_plan`:
+/// **Dado** un `change_plan` con `selection.where` que produce el type error, **Cuando** se
+/// planifica, **Entonces** el plan **aborta** con `INVALID_SCHEMA` y **no se expande a ninguna
+/// operación** (coherencia con E26-H08).
+///
+/// Es la mitad cara del defecto: hoy `change_plan` con esta selección devuelve un plan con
+/// `normalizedOperations: []`, `impact.affectedCount: 0` y **`canApply: true`** — un plan vacío
+/// presentado como legítimo, que el agente puede aplicar creyendo que tocó los 7 documentos que
+/// buscaba. Y en el fixture heterogéneo es peor que vacío: planifica sobre `z-textual.md`, el único
+/// que casualmente casó.
+///
+/// El test aserta además la **igualdad exacta** con el error de `knowledge_search`: las dos tools
+/// comparten el lenguaje (`§20.10`), así que deben compartir veredicto **y** redacción, como ya
+/// exige `misma_consulta_mismo_error_en_search_y_en_plan` para el orden.
+#[test]
+fn selection_con_type_error_de_afijo_aborta_el_plan() {
+    let dir = ws_afijo_heterogeneo();
+    let l_search = linea_search(1, AFIJO_SOBRE_NUMERO, None);
+    let l_plan = linea_plan(2, AFIJO_SOBRE_NUMERO);
+    let resp = roundtrip(dir.path(), &[l_search.as_str(), l_plan.as_str()], 2);
+
+    let e_plan = error_de(&resp[1]).unwrap_or_else(|| {
+        let sc = &resp[1]["result"]["structuredContent"];
+        panic!(
+            "`change_plan` con `selection.where: {AFIJO_SOBRE_NUMERO}` debe ABORTAR: hoy \
+             `expand_selection` se salta en silencio todo documento cuya evaluación no sea \
+             `Ok(true)`, así que planifica sobre el subconjunto que casualmente casó y lo presenta \
+             como un plan legítimo (`canApply: {}`, `affectedCount: {}`). Un plan que afecta a menos \
+             ficheros de los que el agente seleccionó es la versión cara de la respuesta \
+             silenciosamente equivocada.\nRespuesta: {}",
+            sc["canApply"], sc["impact"]["affectedCount"], resp[1]
+        )
+    });
+    juzga_error_de_afijo(
+        &e_plan,
+        "priority",
+        "starts_with",
+        GRAFIAS_NUMBER,
+        "change_plan",
+    );
+
+    let e_search = error_de(&resp[0]).unwrap_or_else(|| {
+        panic!(
+            "`knowledge_search` con la misma consulta debe fallar también (ver \
+             `starts_with_sobre_numero_es_type_error`): {}",
+            resp[0]
+        )
+    });
+    assert_eq!(
+        e_search, e_plan,
+        "el MISMO `where` sobre el MISMO workspace debe dar el MISMO código y el MISMO mensaje por \
+         las dos tools que aceptan el lenguaje (§20.10, invariante #3)"
+    );
+}
+
+/// **E29-H04** · Control anti-vacuo: `starts_with` sobre un campo **string** sigue casando, y un
+/// campo **ausente** sigue excluyendo sin error.
+///
+/// Los dos criterios anti-vacuo de la historia juntos, por el wire, que es donde importa que el
+/// operador siga siendo usable: el arreglo no puede consistir en hacer ilegal `starts_with`, ni en
+/// convertir en error toda consulta sobre un frontmatter heterogéneo (que es la norma: la mitad de
+/// los documentos de cualquier base real no tienen la clave por la que se pregunta).
+///
+/// **Verde hoy**, y debe seguir verde.
+#[test]
+fn starts_with_sobre_string_y_campo_ausente_siguen_funcionando() {
+    let dir = ws_afijo_heterogeneo();
+    let l_string = linea_search(1, "status starts_with \"act\"", None);
+    let l_ausente = linea_search(2, "inexistente starts_with \"x\"", None);
+    let l_no_casa = linea_search(3, "status starts_with \"zzz\"", None);
+    let resp = roundtrip(
+        dir.path(),
+        &[l_string.as_str(), l_ausente.as_str(), l_no_casa.as_str()],
+        3,
+    );
+
+    assert_eq!(
+        error_de(&resp[0]),
+        None,
+        "`status starts_with \"act\"` es una comparación perfectamente tipada (string vs string): no \
+         puede convertirse en error"
+    );
+    let mut casan = search_paths(&resp[0]);
+    casan.sort();
+    assert_eq!(
+        casan,
+        vec!["a-numerico.md".to_string(), "z-textual.md".to_string()],
+        "…y sigue casando los documentos cuyo `status` empieza por «act» (`active` y `activo`), que \
+         es la prueba de que el operador conserva su trabajo"
+    );
+
+    assert_eq!(
+        error_de(&resp[1]),
+        None,
+        "un campo que NINGÚN documento tiene no es un type error: la ausencia cortocircuita antes de \
+         mirar tipos (E19-H01) y ese contrato no cambia"
+    );
+    assert!(
+        search_paths(&resp[1]).is_empty(),
+        "…y su respuesta es la lista vacía: {:?}",
+        search_paths(&resp[1])
+    );
+
+    assert_eq!(
+        error_de(&resp[2]),
+        None,
+        "y un `false` legítimo —string que no empieza por ese prefijo— sigue siendo ausencia de \
+         resultados, no un fallo"
+    );
+    assert!(
+        search_paths(&resp[2]).is_empty(),
+        "…con su lista vacía: {:?}",
+        search_paths(&resp[2])
+    );
+}
+
+// ---------------------------------------------------------------------------
 // E26-H09 — `metadata_inspect` habla el mismo dialecto de dot-paths que la consulta
 //
 // `App::metadata_inspect` normaliza su `field` con `FieldPath::parse`, mientras `where`, `filter` y
@@ -9207,5 +9507,1743 @@ fn move_seguido_de_create_del_path_liberado_aplica() {
         std::fs::read_to_string(dir.path().join("A.md")).unwrap(),
         "# A stub\n",
         "el path liberado debe quedar con el cuerpo del `create` que lo reocupó"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// E29-H02 — Una `policy` PARCIAL en `change_plan` respeta el `Default` que el contrato promete
+// (`requirements/epica-29-honestidad-superficie.md`, `decisiones §19(b)`).
+//
+// Síntoma: `{"policy": {"requireValidResult": false}}` → `INVALID_SCHEMA: … missing field
+// allowWarnings`, pese a que `contracts/mcp.yml`/`inputSchema` declaran los dos campos opcionales
+// con default. Omitir `policy` ENTERA sí funciona hoy; el caso roto es el intermedio. Causa raíz:
+// `PlanPolicy` (`crates/lodestar-core/src/plan.rs:271`) deriva `Deserialize` sin `#[serde(default)]`
+// por campo. Rojo esperado: `INVALID_SCHEMA` (isError) donde debería salir un plan.
+// ---------------------------------------------------------------------------
+
+/// Criterio `policy_parcial_toma_el_default_del_campo_omitido`: **Dado** un workspace válido,
+/// **Cuando** se llama a `change_plan` con `policy: {"requireValidResult": false}` (sin
+/// `allowWarnings`), **Entonces** el plan se computa (sin `INVALID_SCHEMA`) y `canApply` se evalúa
+/// con `allowWarnings = true` (el default) — aseverado por el EFECTO observable: sobre un
+/// resultado con warnings pero sin errores, `canApply` es `true` (si `allowWarnings` hubiera caído
+/// a `false` por error de deserialización, sería `false`).
+#[test]
+fn policy_parcial_toma_el_default_del_campo_omitido() {
+    let dir = workspace_cinco_relacionados();
+    // Enlace a un fichero de proyecto (no-`.md`) inexistente → `LINK-TARGET-MISSING`/Warn
+    // (`missingWorkspaceFiles: warning`, `§20.9`): el resultado hipotético queda con >=1 warning y
+    // 0 errores, así que la rama `allowWarnings` de `can_apply` es la que decide `canApply`.
+    write(
+        dir.path(),
+        "a.md",
+        "---\ntype: Concept\ntitle: A\ndescription: nodo a del cluster\n---\n\n# A\n\n[Siguiente](b.md)\n\n[guía](guia.pdf)\n",
+    );
+    let ops = serde_json::json!([
+        { "op": "patch_frontmatter", "ref": { "path": "d.md" },
+          "patch": { "description": "d actualizada por el plan" } },
+    ]);
+    // Solo `requireValidResult`: `allowWarnings` queda OMITIDO — el caso roto de la historia.
+    let line = change_plan_line(
+        None,
+        ops,
+        serde_json::json!({ "requireValidResult": false }),
+    );
+    let resp = roundtrip(dir.path(), &[line.as_str()], 1);
+
+    assert!(
+        resp[0]["result"]["isError"].as_bool() != Some(true),
+        "una `policy` PARCIAL (solo `requireValidResult`) no debe dar isError/INVALID_SCHEMA: {resp:?}"
+    );
+    let sc = plan_sc(&resp[0]);
+
+    // Precondición del fixture: el resultado hipotético tiene >=1 warning y 0 errores (si no, el
+    // criterio de `allowWarnings` quedaría vacuo: `canApply` saldría `true` por `requireValidResult`
+    // ya satisfecho, sin ejercitar el campo omitido).
+    let warnings = sc["diagnosticsAfter"]["warnings"]
+        .as_u64()
+        .unwrap_or_else(|| {
+            panic!("change_plan debe devolver diagnosticsAfter.warnings (u64): {sc:?}")
+        });
+    let errors = sc["diagnosticsAfter"]["errors"]
+        .as_u64()
+        .unwrap_or_else(|| {
+            panic!("change_plan debe devolver diagnosticsAfter.errors (u64): {sc:?}")
+        });
+    assert!(
+        warnings >= 1 && errors == 0,
+        "precondición del fixture: el resultado hipotético debe tener >=1 warning y 0 errores \
+         para que el criterio ejercite `allowWarnings`, no `requireValidResult`; diagnosticsAfter = {:?}",
+        sc["diagnosticsAfter"]
+    );
+
+    // `allowWarnings` omitido ⇒ default `true` ⇒ los warnings NO bloquean `canApply`.
+    assert_eq!(
+        sc["canApply"],
+        serde_json::Value::Bool(true),
+        "con `allowWarnings` OMITIDO (debe tomar el default `true`) y solo warnings (sin errores), \
+         `canApply` debe ser `true`; si el campo omitido hubiera caído a `false` por un fallo de \
+         deserialización, `canApply` sería `false`: {sc:?}"
+    );
+}
+
+/// Criterio `policy_parcial_respeta_el_campo_enviado`: el caso simétrico — **Dado** un workspace
+/// cuyo resultado simulado tiene warnings, **Cuando** se llama con
+/// `policy: {"allowWarnings": false}` (sin `requireValidResult`), **Entonces** `canApply` es
+/// `false` (el campo ENVIADO se respeta) y `requireValidResult` vale `true` por defecto — el plan
+/// se sigue computando (sin `INVALID_SCHEMA`; `canApply:false` es un veredicto, no un fallo de la
+/// tool).
+#[test]
+fn policy_parcial_respeta_el_campo_enviado() {
+    let dir = workspace_cinco_relacionados();
+    write(
+        dir.path(),
+        "a.md",
+        "---\ntype: Concept\ntitle: A\ndescription: nodo a del cluster\n---\n\n# A\n\n[Siguiente](b.md)\n\n[guía](guia.pdf)\n",
+    );
+    let ops = serde_json::json!([
+        { "op": "patch_frontmatter", "ref": { "path": "d.md" },
+          "patch": { "description": "d actualizada por el plan" } },
+    ]);
+    // Solo `allowWarnings`: `requireValidResult` queda OMITIDO (debe tomar el default `true`, que
+    // en este fixture es irrelevante porque no hay errores — lo que decide aquí es `allowWarnings`).
+    let line = change_plan_line(None, ops, serde_json::json!({ "allowWarnings": false }));
+    let resp = roundtrip(dir.path(), &[line.as_str()], 1);
+
+    assert!(
+        resp[0]["result"]["isError"].as_bool() != Some(true),
+        "una `policy` PARCIAL (solo `allowWarnings`) no debe dar isError/INVALID_SCHEMA: {resp:?}"
+    );
+    let sc = plan_sc(&resp[0]);
+
+    let warnings = sc["diagnosticsAfter"]["warnings"]
+        .as_u64()
+        .unwrap_or_else(|| {
+            panic!("change_plan debe devolver diagnosticsAfter.warnings (u64): {sc:?}")
+        });
+    assert!(
+        warnings >= 1,
+        "precondición del fixture: el resultado hipotético debe tener >=1 warning para que el \
+         criterio no sea vacuo; diagnosticsAfter = {:?}",
+        sc["diagnosticsAfter"]
+    );
+
+    // `allowWarnings:false` ENVIADO ⇒ se respeta ⇒ el warning bloquea `canApply`.
+    assert_eq!(
+        sc["canApply"],
+        serde_json::Value::Bool(false),
+        "con `allowWarnings:false` ENVIADO y al menos un warning, `canApply` debe ser `false` \
+         (el campo enviado se respeta, no se pisa por el default del campo omitido): {sc:?}"
+    );
+}
+
+/// Criterio `policy_vacia_equivale_a_omitirla`: **Dado** `policy: {}` (objeto vacío), **Cuando** se
+/// planifica, **Entonces** equivale a omitir `policy` entera — mismo `canApply` sobre el MISMO
+/// `operations`/workspace. Control de forma: `policy: {}` no debe dar `INVALID_SCHEMA` ni un
+/// veredicto distinto al de omitir la clave.
+#[test]
+fn policy_vacia_equivale_a_omitirla() {
+    let dir = workspace_cinco_relacionados();
+
+    let linea_vacia = change_plan_line(None, cinco_operaciones(), serde_json::json!({}));
+    let resp_vacia = roundtrip(dir.path(), &[linea_vacia.as_str()], 1);
+    assert!(
+        resp_vacia[0]["result"]["isError"].as_bool() != Some(true),
+        "`policy: {{}}` no debe dar isError/INVALID_SCHEMA: {resp_vacia:?}"
+    );
+    let sc_vacia = plan_sc(&resp_vacia[0]);
+
+    // Omitir `policy` ENTERA: sin la clave en `arguments` (no `change_plan_line`, que siempre la
+    // incluye) — construida a mano para que la ausencia de la clave sea literal.
+    let args_omitida = serde_json::json!({ "operations": cinco_operaciones() });
+    let linea_omitida = serde_json::json!({
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": { "name": "change_plan", "arguments": args_omitida }
+    })
+    .to_string();
+    let resp_omitida = roundtrip(dir.path(), &[linea_omitida.as_str()], 1);
+    assert!(
+        resp_omitida[0]["result"]["isError"].as_bool() != Some(true),
+        "omitir `policy` entera debe seguir funcionando (control anti-vacuo): {resp_omitida:?}"
+    );
+    let sc_omitida = plan_sc(&resp_omitida[0]);
+
+    assert_eq!(
+        sc_vacia["canApply"], sc_omitida["canApply"],
+        "`policy: {{}}` debe producir el MISMO `canApply` que omitir `policy` entera: \
+         vacía = {:?}, omitida = {:?}",
+        sc_vacia["canApply"], sc_omitida["canApply"]
+    );
+}
+
+/// Control anti-vacuo (`policy` completa sigue igual): **Dado** un workspace válido, **Cuando** se
+/// llama a `change_plan` con `policy: {"requireValidResult": false, "allowWarnings": true}` (los
+/// DOS campos presentes — el camino que ya funcionaba hoy), **Entonces** el plan se computa y el
+/// arreglo del campo omitido no debe alterar este caso.
+#[test]
+fn policy_completa_sigue_funcionando_igual() {
+    let dir = workspace_cinco_relacionados();
+    let line = change_plan_line(None, cinco_operaciones(), policy_permisiva());
+    let resp = roundtrip(dir.path(), &[line.as_str()], 1);
+
+    assert!(
+        resp[0]["result"]["isError"].as_bool() != Some(true),
+        "una `policy` COMPLETA no debe verse afectada por el arreglo del campo omitido: {resp:?}"
+    );
+    let sc = plan_sc(&resp[0]);
+    assert!(
+        sc["changeSetId"].as_str().is_some_and(|s| !s.is_empty()),
+        "una `policy` completa debe seguir produciendo un plan con `changeSetId`: {resp:?}"
+    );
+}
+
+/// Control anti-vacuo (clave DESCONOCIDA en `policy`): historia del criterio — E29-H02 (L251-253
+/// de su spec) declaró EXPLÍCITAMENTE que este caso no era suyo y lo delegó en E29-H08 («rechazo
+/// estricto» si esa historia ya estaba integrada). En su primera versión, este test fijaba el
+/// comportamiento TOLERADO-provisional de entonces (sin `deny_unknown_fields`, serde ignoraba la
+/// clave y el plan se computaba igual). **E29-H08 ya está integrada** y volvió ese comportamiento
+/// en rechazo: el wire estricto de parámetros no declarados alcanza también a las claves de
+/// `policy`, así que una `policy` con `"strictMode"` (que no existe en `PlanPolicy`) es HOY
+/// `INVALID_SCHEMA`, nombrando la clave sobrante y las declaradas.
+///
+/// **Dado** una `policy` con los DOS campos reconocidos presentes (para que este test sea
+/// independiente del arreglo del campo omitido: aísla exclusivamente el efecto de la clave
+/// desconocida) MÁS una clave que no existe en `PlanPolicy` (`"strictMode"`), **Cuando** se
+/// planifica, **Entonces** la tool RECHAZA con `INVALID_SCHEMA` y el mensaje nombra `strictMode`.
+#[test]
+fn policy_con_clave_desconocida_se_rechaza_desde_h08() {
+    let dir = workspace_cinco_relacionados();
+    let ops = serde_json::json!([
+        { "op": "patch_frontmatter", "ref": { "path": "d.md" },
+          "patch": { "description": "d actualizada por el plan" } },
+    ]);
+    let line = change_plan_line(
+        None,
+        ops,
+        serde_json::json!({
+            "requireValidResult": false, "allowWarnings": true, "strictMode": true
+        }),
+    );
+    let resp = roundtrip(dir.path(), &[line.as_str()], 1);
+
+    assert_eq!(
+        resp[0]["result"]["isError"],
+        serde_json::Value::Bool(true),
+        "desde E29-H08, una clave desconocida en `policy` debe RECHAZARSE (isError), no \
+         ignorarse: {resp:?}"
+    );
+    let texto = resp[0].to_string();
+    assert!(
+        texto.contains("INVALID_SCHEMA"),
+        "el rechazo debe exponer el código estable «INVALID_SCHEMA»: {resp:?}"
+    );
+    assert!(
+        texto.contains("strictMode"),
+        "el mensaje debe nombrar la clave sobrante «strictMode» (no un rechazo genérico): {resp:?}"
+    );
+}
+
+/// PIN del default `requireValidResult: true` (`PlanPolicy::default()`, `plan.rs:288`), que el
+/// mutation testing del juez ciego encontró SIN cubrir: mutar esa línea a `false` deja el
+/// workspace entero en verde porque ningún test existente ejercita la rama `requireValidResult`
+/// del campo OMITIDO con un resultado NO conforme. Este test nace VERDE (no es la fase roja de
+/// E29-H02: el defecto que arregla la historia es que la deserialización parcial no fallara con
+/// `INVALID_SCHEMA`, no el valor del default) — su función es de PIN, para que una regresión
+/// futura del `Default` (p. ej. a `false`) rompa la suite.
+///
+/// **Dado** un workspace cuyo resultado simulado tiene al menos un error de validación, **Cuando**
+/// se llama a `change_plan` con `policy: {"allowWarnings": false}` (`requireValidResult` OMITIDO),
+/// **Entonces** `canApply` es `false` **porque** la rama `requireValidResult` (default `true`) lo
+/// bloquea — no la rama `allowWarnings`, que en este fixture no dice nada sobre errores. Se
+/// asevera la PRECONDICIÓN del fixture (`errors >= 1`) para que el test no pueda salvarse por otra
+/// rama: si el fixture no tuviera errores, un `requireValidResult` mutado a `false` seguiría dando
+/// `canApply` indeterminado por la rama de warnings, y el pin no pincharía nada.
+#[test]
+fn policy_parcial_sin_require_valid_result_bloquea_por_el_default_true_con_resultado_no_conforme() {
+    let dir = workspace_cinco_relacionados();
+    // `d.md` enlaza a un `.md` inexistente → `LINK-TARGET-MISSING`/Err (mismo patrón que
+    // `plan_no_conforme_rechaza` de `crates/lodestar-core/tests/core.rs`): el resultado hipotético
+    // queda NO conforme, sin depender de ningún warning.
+    let ops = serde_json::json!([
+        { "op": "replace_body", "ref": { "path": "d.md" },
+          "body": "# D\n\n[roto](no-existe.md)\n" },
+    ]);
+    // Solo `allowWarnings`: `requireValidResult` queda OMITIDO — debe tomar el default `true`.
+    let line = change_plan_line(None, ops, serde_json::json!({ "allowWarnings": false }));
+    let resp = roundtrip(dir.path(), &[line.as_str()], 1);
+
+    assert!(
+        resp[0]["result"]["isError"].as_bool() != Some(true),
+        "una `policy` PARCIAL (solo `allowWarnings`) no debe dar isError/INVALID_SCHEMA: {resp:?}"
+    );
+    let sc = plan_sc(&resp[0]);
+
+    // Precondición del fixture: el resultado hipotético tiene >=1 error. Sin esto, un
+    // `requireValidResult` mutado a `false` no se distinguiría de la rama `allowWarnings`, y el
+    // pin no ejercitaría lo que dice ejercitar.
+    let errors = sc["diagnosticsAfter"]["errors"]
+        .as_u64()
+        .unwrap_or_else(|| {
+            panic!("change_plan debe devolver diagnosticsAfter.errors (u64): {sc:?}")
+        });
+    assert!(
+        errors >= 1,
+        "precondición del fixture: el resultado hipotético debe tener >=1 error para que el pin \
+         ejercite la rama `requireValidResult`, no la de `allowWarnings`; diagnosticsAfter = {:?}",
+        sc["diagnosticsAfter"]
+    );
+
+    // `requireValidResult` OMITIDO ⇒ debe tomar el default `true` ⇒ un resultado no conforme
+    // bloquea `canApply`, aunque `allowWarnings:false` no tenga ningún warning que morder.
+    assert_eq!(
+        sc["canApply"],
+        serde_json::Value::Bool(false),
+        "con `requireValidResult` OMITIDO (debe tomar el default `true`) y un resultado NO \
+         conforme, `canApply` debe ser `false`; si el default fuera `false`, este resultado no \
+         conforme no bloquearía nada y `canApply` saldría `true`: {sc:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// E29-H01 — Config estricta: el servidor MCP tampoco arranca con una config que no entiende
+// (`requirements/epica-29-honestidad-superficie.md`, `decisiones §16(e)` + `§23/A-08`).
+//
+// La mitad de workspace vive en `crates/lodestar-workspace/tests/config.rs` y la de CLI en
+// `crates/lodestar-cli/tests/e2e.rs`. Este test cierra el criterio de la **segunda fachada**: el
+// mismo `config.yaml` que hace salir a la CLI con 3 no puede dejar al MCP sirviendo con la política
+// por defecto durante toda una sesión de agente.
+// ---------------------------------------------------------------------------
+
+/// E29-H01 · Criterio `mcp_no_arranca_con_config_de_clave_desconocida`:
+/// **Dado** un `.lodestar/config.yaml` con `workspace: { writeableRoots: ["notas"] }` (typo de
+/// `writableRoots`), **Cuando** arranca `lodestar-mcp`, **Entonces** el proceso falla al abrir el
+/// workspace en vez de servir con la política por defecto.
+///
+/// ## Por qué el MCP tiene su propio criterio
+///
+/// El daño es peor aquí que en la CLI. `lodestar check` es un one-shot y su exit code lo lee un CI;
+/// el MCP **se queda vivo toda la sesión**, y una `writableRoots` descartada por un typo deja la
+/// política de escritura en su default —que es *«todo el workspace es escribible»* (`Vec` vacío =
+/// sin restricción, ver `WorkspaceSection::writable_roots`)—, o sea **más permisiva** que la que el
+/// usuario escribió, delante de un agente que sí puede escribir. Que la CLI aprenda a rechazar no
+/// implica que el MCP lo haga: son dos `main` distintos y el criterio de `§15` es explícito en que
+/// el repo no puede quedarse con dos criterios opuestos.
+///
+/// ## Cómo se observa «no arranca»
+///
+/// Con el patrón documentado en `roundtrip_en`: si el servidor aborta al arrancar, el vector de
+/// respuestas sale **vacío**. Por eso se assertea primero la longitud —para que el rojo se lea como
+/// «el servidor arrancó cuando no debía» y no como un índice fuera de rango— y se usa `tools/list`,
+/// la petición más inofensiva posible: si llega respuesta a eso, el servidor está sirviendo.
+///
+/// El exit code y el mensaje por stderr se comprueban aparte, lanzando el binario sin stdin: el
+/// contrato de arranque del MCP es exit 3 con el motivo por stderr (`main.rs`: «no se pudo abrir el
+/// workspace»), y stdout tiene que seguir siendo JSON-RPC puro —vacío, en este caso—, porque un
+/// cliente que lo parsee no puede encontrarse un mensaje de error suelto.
+///
+/// Fase ROJA: hoy `WorkspaceConfig` no lleva `deny_unknown_fields`, así que `App::open` devuelve
+/// `Ok` y el servidor responde `tools/list` con normalidad.
+#[test]
+fn mcp_no_arranca_con_config_de_clave_desconocida() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "alfa.md",
+        "---\ntype: Nota\ntitle: Alfa\ndescription: d\n---\n\n# Alfa\n\ncuerpo\n",
+    );
+    write(
+        dir.path(),
+        ".lodestar/config.yaml",
+        "workspace:\n  writeableRoots: [\"notas\"]\n",
+    );
+
+    // --- (1) No sirve: ninguna respuesta a la petición más inofensiva ----------------
+    let resp = roundtrip(
+        dir.path(),
+        &[r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#],
+        1,
+    );
+    assert!(
+        resp.is_empty(),
+        "con una clave desconocida en `.lodestar/config.yaml` el servidor NO puede arrancar: \
+         serviría toda la sesión con la política por defecto —más permisiva que la que el usuario \
+         escribió— delante de un agente que puede escribir. Respondió: {resp:?}"
+    );
+
+    // --- (2) …y lo hace con exit 3 y el motivo por stderr ----------------------------
+    let out = Command::new(env!("CARGO_BIN_EXE_lodestar-mcp"))
+        .arg("--root")
+        .arg(dir.path())
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        out.status.code(),
+        Some(3),
+        "el arranque fallido del MCP es exit 3 (`main.rs`, mismo código que la puerta de CI); \
+         stderr=\n{stderr}"
+    );
+    assert!(
+        stderr.contains("writeableRoots"),
+        "el mensaje debe NOMBRAR la clave rechazada: un «no se pudo abrir el workspace» a secas \
+         deja al usuario sin saber qué línea del YAML borrar; stderr=\n{stderr}"
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stdout).trim().is_empty(),
+        "stdout es JSON-RPC puro también cuando el arranque falla: el motivo va por stderr; \
+         stdout=\n{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
+
+// ---------------------------------------------------------------------------
+// E29-H03 — `has(frontmatter)` responde la verdad POR EL WIRE.
+// `requirements/epica-29-honestidad-superficie.md §E29-H03` · `decisiones §19(a)` ·
+// `ARCHITECTURE.md §20.8` (la promesa literal: «existencia `has(x)` `missing(x)` (incluido
+// `has(frontmatter)`)») · `CLAUDE.md` invariante #3.
+//
+// La semántica pura la fijan los tests homónimos de `crates/lodestar-core/tests/consulta.rs`. Este
+// es el caso e2e que la historia pide para que la evidencia rojo→verde sea observable **por el
+// wire**, que es como se observó el hallazgo (escribiendo `docs/user/query-language.md` contra
+// `examples/demo/`: `has(frontmatter)` → 0 de 10, `missing(frontmatter)` → 10 de 10, mientras
+// `document.has_frontmatter = true` → 7).
+//
+// SÍNTOMA verificado hoy (v0.5.0) contra el binario real:
+//   knowledge_search {where: "has(frontmatter)"}      -> []            (deberían ser los 2 con bloque)
+//   knowledge_search {where: "missing(frontmatter)"}  -> los 3         (debería ser el 1 sin bloque)
+//
+// ROJO esperado HOY: por ASERCIÓN (ninguna tool nueva, ningún parámetro nuevo, ningún stub).
+// ---------------------------------------------------------------------------
+
+/// Workspace del criterio e2e: 2 documentos **con** bloque de frontmatter y 1 **sin** él, con
+/// cuerpos deliberadamente parecidos para que solo la presencia del bloque los separe. Los dos con
+/// bloque no comparten ninguna clave (`status` vs `owner`): así el veredicto de `has(frontmatter)`
+/// no puede confundirse con el de `has(<una clave concreta>)`.
+fn workspace_con_y_sin_frontmatter() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "con-claves.md",
+        "---\nstatus: accepted\n---\n\n# Con claves\n\ntexto corriente.\n",
+    );
+    write(
+        dir.path(),
+        "con-otra-clave.md",
+        "---\nowner: ana\n---\n\n# Con otra clave\n\ntexto corriente.\n",
+    );
+    write(
+        dir.path(),
+        "sin-bloque.md",
+        "# Sin bloque\n\ntexto corriente.\n",
+    );
+    dir
+}
+
+/// E29-H03 · Criterio `has_frontmatter_pelado_casa_los_documentos_con_frontmatter` (por el wire):
+/// Dado un workspace con 3 documentos, 2 con bloque de frontmatter y 1 sin él, Cuando se llama a
+/// `knowledge_search` con `where: "has(frontmatter)"`, Entonces devuelve exactamente los 2 con
+/// bloque; con `missing(frontmatter)`, exactamente el 1 sin bloque; y los dos conjuntos coinciden
+/// con los de `document.has_frontmatter` (invariante #3: una sola verdad computada, también por el
+/// wire).
+#[test]
+fn has_frontmatter_por_el_wire_casa_los_documentos_con_frontmatter() {
+    let dir = workspace_con_y_sin_frontmatter();
+    let resp = roundtrip(
+        dir.path(),
+        &[
+            ks_call(serde_json::json!({ "where": "has(frontmatter)" })).as_str(),
+            ks_call(serde_json::json!({ "where": "missing(frontmatter)" })).as_str(),
+            ks_call(serde_json::json!({ "where": "document.has_frontmatter = true" })).as_str(),
+            ks_call(serde_json::json!({ "where": "document.has_frontmatter = false" })).as_str(),
+            ks_call(serde_json::json!({ "filter": { "has": { "field": "frontmatter" } } }))
+                .as_str(),
+        ],
+        5,
+    );
+    let conjunto = |i: usize| -> std::collections::BTreeSet<String> {
+        search_paths(&resp[i]).into_iter().collect()
+    };
+    let con_bloque: std::collections::BTreeSet<String> = ["con-claves.md", "con-otra-clave.md"]
+        .into_iter()
+        .map(String::from)
+        .collect();
+    let sin_bloque: std::collections::BTreeSet<String> =
+        ["sin-bloque.md"].into_iter().map(String::from).collect();
+    // Resumen legible de las 5 consultas para los mensajes de fallo: el `resp` crudo son 5
+    // respuestas JSON-RPC completas (con snippets y revisiones) y esconde el dato que importa.
+    let resumen = format!(
+        "has(frontmatter)={:?} · missing(frontmatter)={:?} · document.has_frontmatter=true{:?} \
+         · =false{:?} · filter{{has:frontmatter}}={:?}",
+        conjunto(0),
+        conjunto(1),
+        conjunto(2),
+        conjunto(3),
+        conjunto(4)
+    );
+
+    // Guarda de no vacuidad: el camino LARGO ya responde bien hoy por el wire, y responde algo
+    // distinto de «todos» y de «ninguno». Es la verdad a la que se atan los asserts de abajo.
+    assert_eq!(
+        conjunto(2),
+        con_bloque,
+        "premisa: `document.has_frontmatter = true` ya distingue hoy los 2 documentos con bloque \
+         por el wire. {resumen}"
+    );
+    assert_eq!(
+        conjunto(3),
+        sin_bloque,
+        "premisa simétrica: `document.has_frontmatter = false` devuelve solo el que no lo tiene. \
+         {resumen}"
+    );
+
+    // (a) `has(frontmatter)` casa los que TIENEN bloque.
+    assert_eq!(
+        conjunto(0),
+        con_bloque,
+        "`has(frontmatter)` debe casar los documentos con bloque de frontmatter. Hoy devuelve [] \
+         para todo workspace —el hallazgo de `§19(a)`: 0 de 10 sobre `examples/demo/`—, que es la \
+         respuesta CONTRARIA a la correcta y sin ningún error que lo delate. {resumen}"
+    );
+
+    // (b) `missing(frontmatter)` casa el que NO lo tiene.
+    assert_eq!(
+        conjunto(1),
+        sin_bloque,
+        "`missing(frontmatter)` debe casar solo el documento sin bloque. Hoy casa los 3 (10 de 10 \
+         sobre `examples/demo/`): es la negación de un `has` que siempre es `false`. {resumen}"
+    );
+
+    // (c) Camino corto y camino largo son el MISMO conjunto por el wire (invariante #3).
+    assert_eq!(
+        conjunto(0),
+        conjunto(2),
+        "`has(frontmatter)` y `document.has_frontmatter = true` deben devolver el mismo conjunto \
+         por el wire: la presencia del bloque no se computa dos veces con dos respuestas. {resumen}"
+    );
+    assert_eq!(
+        conjunto(1),
+        conjunto(3),
+        "…y `missing(frontmatter)` con `document.has_frontmatter = false`. {resumen}"
+    );
+
+    // (d) La otra puerta del wire (`filter` JSON, §20.10) responde lo mismo que `where`.
+    assert_eq!(
+        conjunto(4),
+        conjunto(0),
+        "`{{\"has\":{{\"field\":\"frontmatter\"}}}}` por `filter` debe devolver lo mismo que \
+         `has(frontmatter)` por `where`: comparten `build_field_path` y el mismo `Expression`, y la \
+         superficie no puede tener dos verdades según la puerta. {resumen}"
+    );
+}
+
+/// E29-H03 · Control anti-vacuo por el wire: `has()` con anclaje y sufijo, con clave a secas y con
+/// namespace calculado sigue respondiendo lo mismo que antes del arreglo.
+///
+/// El arreglo toca el camino del anclaje —el mismo que resuelve `frontmatter.<clave>`—, así que si
+/// reconocer el anclaje pelado se llevara por delante el resto del operador, este test lo vería por
+/// la misma puerta por la que se observó el defecto. **Verde hoy**, y debe seguirlo estando.
+#[test]
+fn has_con_sufijo_y_de_namespace_no_cambia_por_el_wire() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "con-claves.md",
+        "---\nstatus: accepted\n---\n\n# Con claves\n\ntexto corriente.\n",
+    );
+    write(
+        dir.path(),
+        "sin-bloque.md",
+        "# Sin bloque\n\ntexto corriente.\n",
+    );
+    let resp = roundtrip(
+        dir.path(),
+        &[
+            ks_call(serde_json::json!({ "where": "has(frontmatter.status)" })).as_str(),
+            ks_call(serde_json::json!({ "where": "has(status)" })).as_str(),
+            ks_call(serde_json::json!({ "where": "has(inventada)" })).as_str(),
+            ks_call(serde_json::json!({ "where": "has(graph.backlinks)" })).as_str(),
+        ],
+        4,
+    );
+    let conjunto = |i: usize| -> std::collections::BTreeSet<String> {
+        search_paths(&resp[i]).into_iter().collect()
+    };
+    let solo_con_claves: std::collections::BTreeSet<String> =
+        ["con-claves.md"].into_iter().map(String::from).collect();
+    let ambos: std::collections::BTreeSet<String> = ["con-claves.md", "sin-bloque.md"]
+        .into_iter()
+        .map(String::from)
+        .collect();
+    let resumen = format!(
+        "has(frontmatter.status)={:?} · has(status)={:?} · has(inventada)={:?} \
+         · has(graph.backlinks)={:?}",
+        conjunto(0),
+        conjunto(1),
+        conjunto(2),
+        conjunto(3)
+    );
+
+    assert_eq!(
+        conjunto(0),
+        solo_con_claves,
+        "`has(frontmatter.status)` (anclaje CON sufijo) sigue direccionando la CLAVE, no el bloque. \
+         {resumen}"
+    );
+    assert_eq!(
+        conjunto(1),
+        solo_con_claves,
+        "`has(status)` sin anclaje responde lo mismo que con él (§20.8). {resumen}"
+    );
+    assert!(
+        conjunto(2).is_empty(),
+        "`has(inventada)` sigue sin casar a nadie: una clave ausente es ausencia, no presencia. \
+         {resumen}"
+    );
+    assert_eq!(
+        conjunto(3),
+        ambos,
+        "`has(graph.backlinks)` sigue siendo trivialmente cierto para TODO documento, incluido el \
+         que no tiene frontmatter (fuera de alcance de E29-H03). {resumen}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// E29-H05 — `knowledge_check` scope `paths` con un path inexistente responde `DOCUMENT_NOT_FOUND`.
+// `requirements/epica-29-honestidad-superficie.md §E29-H05` · `decisiones §23/A-07` (criterio
+// ratificado: `DOCUMENT_NOT_FOUND`) · `decisiones §22` (principio anti-typo) · `CLAUDE.md`
+// invariante #1.
+//
+// SÍNTOMA (caso G1-23 del testbench homelab): `knowledge_check(scope: {kind: "paths",
+// paths: ["no-existe.md"]})` devuelve 0 diagnósticos SIN error — indistinguible de «ese documento
+// está impecable». Con una lista mixta (`["real.md", "typo.md"]`) el resultado es el de `real.md` a
+// secas: el agente cree haber auditado dos documentos y auditó uno.
+//
+// CAUSA RAÍZ (`crates/lodestar-app/src/lib.rs`, `App::scope_paths`, brazo `CheckScope::Paths`):
+// `Ok(paths.iter().cloned().collect())` — mete los `RelPath` en el conjunto sin comprobar que
+// existan en el inventario. Los brazos `Document`/`Affected` sí resuelven con `self.resolve_ref(…)?`
+// y por eso ya dan `DOCUMENT_NOT_FOUND`.
+//
+// ROJO esperado HOY: por ASERCIÓN (ninguna tool nueva, ningún parámetro nuevo, ningún stub — el
+// brazo `Paths` ya existe, solo le falta la comprobación).
+// ---------------------------------------------------------------------------
+
+/// Workspace mínimo del criterio: un único documento real (`notas/alfa.md`), sin enlaces ni
+/// frontmatter que puedan aportar diagnósticos que confundan la lectura del resultado.
+fn workspace_check_paths() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "notas/alfa.md",
+        "# Alfa\n\nDocumento real, sin enlaces ni frontmatter.\n",
+    );
+    dir
+}
+
+/// Construye la línea JSON-RPC de `knowledge_check` con `scope: {kind: "paths", paths: […]}`.
+fn check_paths_call(paths: &[&str]) -> String {
+    let arguments = serde_json::json!({
+        "scope": { "kind": "paths", "paths": paths }
+    });
+    format!(
+        r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"knowledge_check","arguments":{}}}}}"#,
+        arguments
+    )
+}
+
+/// E29-H05 · Criterio `check_scope_paths_con_path_inexistente_falla`:
+/// Dado un workspace con `notas/alfa.md`, Cuando se llama a `knowledge_check` con
+/// `scope: {kind: "paths", paths: ["notas/no-existe.md"]}`, Entonces la respuesta es un error de
+/// EJECUCIÓN de la tool (`isError`, no un error de protocolo JSON-RPC) con el código estable
+/// `DOCUMENT_NOT_FOUND` que nombra el path — el mismo contrato que ya cumplen los scopes `document`
+/// y `affected`.
+#[test]
+fn check_scope_paths_con_path_inexistente_falla() {
+    let dir = workspace_check_paths();
+    let resp = roundtrip(
+        dir.path(),
+        &[check_paths_call(&["notas/no-existe.md"]).as_str()],
+        1,
+    );
+
+    assert_eq!(
+        resp[0]["result"]["isError"], true,
+        "un scope `paths` con un path inexistente debe dar isError en knowledge_check: {resp:?}"
+    );
+    assert!(
+        resp[0]["error"].is_null(),
+        "un path inexistente en scope.paths NO debe ser un error de protocolo JSON-RPC: {resp:?}"
+    );
+    let texto = resp[0].to_string();
+    assert!(
+        texto.contains("DOCUMENT_NOT_FOUND"),
+        "el error debe exponer el código estable «DOCUMENT_NOT_FOUND»: {resp:?}"
+    );
+    assert!(
+        texto.contains("notas/no-existe.md"),
+        "el mensaje debe NOMBRAR el path que no resolvió (mismo estilo que resolve_ref): {resp:?}"
+    );
+}
+
+/// E29-H05 · Criterio `check_scope_paths_falla_aunque_haya_paths_validos`:
+/// Dado ese mismo workspace, Cuando el scope mezcla un path real (`notas/alfa.md`) y uno inexistente
+/// (`notas/typo.md`), Entonces también falla con `DOCUMENT_NOT_FOUND` — no devuelve el informe
+/// parcial del path real. El síntoma exacto del testbench: con una lista mixta, el agente cree haber
+/// auditado dos documentos y auditó uno.
+#[test]
+fn check_scope_paths_falla_aunque_haya_paths_validos() {
+    let dir = workspace_check_paths();
+    let resp = roundtrip(
+        dir.path(),
+        &[check_paths_call(&["notas/alfa.md", "notas/typo.md"]).as_str()],
+        1,
+    );
+
+    assert_eq!(
+        resp[0]["result"]["isError"], true,
+        "una lista mixta (un path real + uno inexistente) debe fallar entera, no devolver el \
+         informe parcial del real: {resp:?}"
+    );
+    let texto = resp[0].to_string();
+    assert!(
+        texto.contains("DOCUMENT_NOT_FOUND"),
+        "el error debe exponer el código estable «DOCUMENT_NOT_FOUND»: {resp:?}"
+    );
+    assert!(
+        texto.contains("notas/typo.md"),
+        "el mensaje debe nombrar el path inexistente, no el real: {resp:?}"
+    );
+}
+
+/// E29-H05 · Criterio `check_scope_paths_reporta_el_primer_path_inexistente`:
+/// Dado un scope con DOS paths inexistentes, Cuando se llama, Entonces el mensaje nombra el
+/// PRIMERO de la lista recibida (orden determinista de la lista tal cual la envió el cliente, no el
+/// orden de un `BTreeSet`), para que el mensaje sea reproducible y apunte a lo que el agente escribió
+/// primero. `zzz-no-existe.md` ordena DESPUÉS de `aaa-no-existe.md` en orden lexicográfico, así que
+/// si el implementador reportara por orden de `BTreeSet` en vez de por orden de la lista recibida,
+/// este test lo distinguiría.
+#[test]
+fn check_scope_paths_reporta_el_primer_path_inexistente() {
+    let dir = workspace_check_paths();
+    let resp = roundtrip(
+        dir.path(),
+        &[check_paths_call(&["zzz-no-existe.md", "aaa-no-existe.md"]).as_str()],
+        1,
+    );
+
+    assert_eq!(
+        resp[0]["result"]["isError"], true,
+        "dos paths inexistentes deben fallar: {resp:?}"
+    );
+    let texto = resp[0].to_string();
+    assert!(
+        texto.contains("zzz-no-existe.md"),
+        "el mensaje debe nombrar el PRIMERO de la lista recibida («zzz-no-existe.md», pese a \
+         ordenar después de «aaa-no-existe.md» en un BTreeSet): {resp:?}"
+    );
+    assert!(
+        !texto.contains("aaa-no-existe.md"),
+        "el mensaje NO debe nombrar el segundo path inexistente: solo el primero de la lista \
+         recibida se reporta: {resp:?}"
+    );
+}
+
+/// E29-H05 · Criterio `check_scope_paths_trata_lo_excluido_como_inexistente`:
+/// Dado un documento excluido por `.lodestarignore`, Cuando se pide en `scope.paths`, Entonces es
+/// `DOCUMENT_NOT_FOUND` (no está en el inventario) — el mismo criterio que ya aplica `resolve_ref`
+/// para los scopes `document`/`affected`: el inventario es la única verdad de qué documentos hay.
+#[test]
+fn check_scope_paths_trata_lo_excluido_como_inexistente() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "notas/alfa.md",
+        "# Alfa\n\nDocumento real, sin enlaces ni frontmatter.\n",
+    );
+    write(
+        dir.path(),
+        "borradores/wip.md",
+        "# WIP\n\nExcluido por .lodestarignore.\n",
+    );
+    write(dir.path(), ".lodestarignore", "borradores/\n");
+
+    let resp = roundtrip(
+        dir.path(),
+        &[check_paths_call(&["borradores/wip.md"]).as_str()],
+        1,
+    );
+
+    assert_eq!(
+        resp[0]["result"]["isError"], true,
+        "un path excluido por .lodestarignore (fuera del inventario) debe dar DOCUMENT_NOT_FOUND, \
+         no un informe vacío: {resp:?}"
+    );
+    let texto = resp[0].to_string();
+    assert!(
+        texto.contains("DOCUMENT_NOT_FOUND"),
+        "el error debe exponer el código estable «DOCUMENT_NOT_FOUND»: {resp:?}"
+    );
+    assert!(
+        texto.contains("borradores/wip.md"),
+        "el mensaje debe nombrar el path excluido: {resp:?}"
+    );
+}
+
+/// E29-H05 · Criterio `check_scope_paths_valido_sigue_funcionando` (control anti-vacuo):
+/// Dado un scope con paths que TODOS existen, Cuando se llama, Entonces devuelve el informe (sin
+/// error) exactamente como hoy — el rechazo del path inexistente no puede haberse llevado por delante
+/// el caso feliz. Endurecido tras revisión del juez ciego: el fixture antiguo (documento sin
+/// diagnósticos) dejaba pasar un mutante que "valida existencia pero devuelve el conjunto vacío"
+/// (el scope respondería «impecable» sin haber auditado nada, indistinguible del caso feliz). Aquí
+/// `roto.md` tiene un enlace roto propio (`LINK-TARGET-MISSING`), así que el criterio exige que ESE
+/// diagnóstico concreto llegue en `diagnostics`, no solo que `isError` sea `false`.
+#[test]
+fn check_scope_paths_valido_sigue_funcionando() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "roto.md",
+        "# Roto\n\nEnlace a un documento inexistente: [falta](inexistente.md).\n",
+    );
+    let resp = roundtrip(dir.path(), &[check_paths_call(&["roto.md"]).as_str()], 1);
+
+    assert!(
+        resp[0]["result"]["isError"].as_bool() != Some(true),
+        "un scope `paths` con paths que TODOS existen no debe fallar: {resp:?}"
+    );
+    let diags = check_diagnostics(&resp[0]);
+    let diag = diags
+        .iter()
+        .find(|d| d["code"] == "LINK-TARGET-MISSING")
+        .unwrap_or_else(|| {
+            panic!(
+                "el scope `paths: [\"roto.md\"]` debe traer el LINK-TARGET-MISSING de «roto.md»: \
+                 un informe vacío pasaría por casualidad, no porque el documento se haya auditado \
+                 de verdad. Diagnósticos: {diags:?}"
+            )
+        });
+    assert!(
+        diag_targets(diag).iter().any(|t| t == "roto.md"),
+        "el diagnóstico debe señalar a «roto.md»: {diag:?}"
+    );
+    assert_eq!(
+        resp[0]["result"]["structuredContent"]["valid"], false,
+        "con un LINK-TARGET-MISSING de severidad Err, el informe del scope debe ser NO válido: {resp:?}"
+    );
+}
+
+/// E29-H05 · Criterio `check_scope_paths_vacio_no_es_error` (control anti-vacuo del borde):
+/// Dado `scope: {kind: "paths", paths: []}`, Cuando se llama, Entonces devuelve un informe vacío SIN
+/// error — un scope `paths` legítimamente vacío no es lo mismo que un path que no resuelve, y el
+/// rechazo de esta historia no puede confundir los dos casos.
+#[test]
+fn check_scope_paths_vacio_no_es_error() {
+    let dir = workspace_check_paths();
+    let resp = roundtrip(dir.path(), &[check_paths_call(&[]).as_str()], 1);
+
+    assert!(
+        resp[0]["result"]["isError"].as_bool() != Some(true),
+        "un scope `paths` VACÍO no debe ser un error: {resp:?}"
+    );
+    let diagnosticos = resp[0]["result"]["structuredContent"]["diagnostics"]
+        .as_array()
+        .unwrap_or_else(|| panic!("el informe debe traer `diagnostics` (array): {resp:?}"));
+    assert!(
+        diagnosticos.is_empty(),
+        "un scope `paths` vacío no puede aportar ningún diagnóstico: {resp:?}"
+    );
+    assert_eq!(
+        resp[0]["result"]["structuredContent"]["valid"], true,
+        "un scope vacío es trivialmente válido: {resp:?}"
+    );
+}
+
+/// E29-H05 · Control anti-vacuo de la historia hermana: los scopes `document`/`affected` con una
+/// referencia inexistente siguen dando `DOCUMENT_NOT_FOUND` exactamente igual que hoy — la corrección
+/// del scope `paths` no puede haber tocado (ni roto) el camino que ya funcionaba.
+#[test]
+fn check_scope_document_y_affected_siguen_dando_document_not_found() {
+    let dir = workspace_check_paths();
+    let doc_call = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"knowledge_check","arguments":{"scope":{"kind":"document","ref":{"path":"notas/no-existe.md"}}}}}"#;
+    let affected_call = r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"knowledge_check","arguments":{"scope":{"kind":"affected","refs":[{"path":"notas/no-existe.md"}],"depth":1}}}}"#;
+    let resp = roundtrip(dir.path(), &[doc_call, affected_call], 2);
+
+    for (i, nombre) in [(0, "document"), (1, "affected")] {
+        assert_eq!(
+            resp[i]["result"]["isError"], true,
+            "scope `{nombre}` con una ref inexistente debe seguir dando isError: {:?}",
+            resp[i]
+        );
+        let texto = resp[i].to_string();
+        assert!(
+            texto.contains("DOCUMENT_NOT_FOUND"),
+            "scope `{nombre}` debe seguir exponiendo DOCUMENT_NOT_FOUND: {:?}",
+            resp[i]
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// E29-H06 — Un workspace vacío se distingue de un directorio equivocado, POR EL WIRE.
+// `requirements/epica-29-honestidad-superficie.md §E29-H06` · `decisiones §16(f)`.
+//
+// SÍNTOMA: un directorio sin `.md` (o cuya `discovery.include` excluye todo) da
+// `workspace_status`/`knowledge_check` sin ningún aviso — indistinguible de un repo legítimamente
+// vacío en vez de un `cd` al directorio equivocado. Esta sección fija el diagnóstico
+// `WORKSPACE-EMPTY` (severidad `warn`) visible en `knowledge_check(scope: workspace)` por el wire,
+// SIN tumbar `valid`.
+//
+// PUERTA DE DECISIÓN DE ANCLAJE (declarada en la spec, resuelta en la fase roja — ver la nota
+// completa en `crates/lodestar-app/tests/validacion.rs`, sección gemela E29-H06, y en
+// `crates/lodestar-cli/tests/e2e.rs`): `RelPath::new("")` es inválido por diseño (invariante #6 de
+// `CLAUDE.md`, único chokepoint de `RelPath`), así que anclar `WORKSPACE-EMPTY` a la raíz como
+// `target` es INVIABLE. Se elige extender el indexado de `App::full_analysis` para que los
+// diagnósticos sin `target` no se descarten. `knowledge_check` en cambio ya soporta un anchor sin
+// target (usa `check.targets.first()...unwrap_or_default()` sobre un `Vec<(String, Check)>`, no un
+// `BTreeMap<RelPath, _>`), así que estos tests SOLO exigen el efecto observable por el wire: el
+// código `WORKSPACE-EMPTY` presente en `structuredContent.diagnostics`, con severidad `warn` y sin
+// tumbar `valid`.
+//
+// ROJO esperado HOY: por ASERCIÓN (no hay productor de `WORKSPACE-EMPTY` en ninguna parte; el stub
+// de `CheckCode::WorkspaceEmpty` en `lodestar-core::types` es solo la firma, sin lógica).
+// ---------------------------------------------------------------------------
+
+/// Construye la línea JSON-RPC de `knowledge_check(scope: workspace)`.
+fn check_workspace_call() -> String {
+    r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"knowledge_check","arguments":{"scope":{"kind":"workspace"}}}}"#.to_string()
+}
+
+/// E29-H06 · Criterio `knowledge_check_en_workspace_vacio_avisa`:
+/// Dado un directorio temporal SIN ningún `.md`, Cuando se llama a `knowledge_check` scope
+/// `workspace`, Entonces el informe incluye el diagnóstico `WORKSPACE-EMPTY` con severidad `warn` y
+/// `valid` sigue siendo `true`.
+#[test]
+fn knowledge_check_en_workspace_vacio_avisa() {
+    let dir = tempfile::tempdir().unwrap();
+    // Un fichero no-Markdown NO debe cambiar nada: el inventario de documentos sigue vacío.
+    write(dir.path(), "LEEME.txt", "esto no es un documento OKF\n");
+
+    let resp = roundtrip(dir.path(), &[check_workspace_call().as_str()], 1);
+    let diags = check_diagnostics(&resp[0]);
+
+    let workspace_empty: Vec<&serde_json::Value> = diags
+        .iter()
+        .filter(|d| d["code"] == "WORKSPACE-EMPTY")
+        .collect();
+    assert!(
+        !workspace_empty.is_empty(),
+        "knowledge_check(scope: workspace) sobre un directorio sin `.md` debe incluir el \
+         diagnóstico WORKSPACE-EMPTY: {resp:?}"
+    );
+    assert!(
+        workspace_empty.iter().all(|d| d["level"] == "warn"),
+        "WORKSPACE-EMPTY debe ser severidad «warn»: {resp:?}"
+    );
+    assert_eq!(
+        resp[0]["result"]["structuredContent"]["valid"],
+        serde_json::Value::Bool(true),
+        "un workspace vacío SIN otros diagnósticos sigue siendo `valid: true` (el aviso no bloquea \
+         el veredicto): {resp:?}"
+    );
+}
+
+/// E29-H06 · Criterio `workspace_con_todo_excluido_tambien_avisa` (mitad MCP): un directorio CON
+/// `.md` pero cuya `discovery.include` los excluye todos también avisa — «no hay inventario», no
+/// solo «no hay ficheros».
+#[test]
+fn mcp_workspace_con_todo_excluido_tambien_avisa() {
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), "notas/alfa.md", "# Alfa\n\ncontenido real.\n");
+    write(
+        dir.path(),
+        ".lodestar/config.yaml",
+        "discovery:\n  include: [\"solo-esto/**/*.md\"]\n",
+    );
+
+    let resp = roundtrip(dir.path(), &[check_workspace_call().as_str()], 1);
+    let diags = check_diagnostics(&resp[0]);
+
+    assert!(
+        diags.iter().any(|d| d["code"] == "WORKSPACE-EMPTY"),
+        "un `discovery.include` que excluye TODO también debe avisar con WORKSPACE-EMPTY por el \
+         wire: {resp:?}"
+    );
+}
+
+/// E29-H06 · Criterio `workspace_con_documentos_no_avisa` (control anti-vacuo, mitad MCP): un
+/// workspace con AL MENOS un documento no lleva `WORKSPACE-EMPTY` en `knowledge_check`.
+#[test]
+fn mcp_workspace_con_documentos_no_avisa() {
+    let dir = workspace_min();
+    let resp = roundtrip(dir.path(), &[check_workspace_call().as_str()], 1);
+    let diags = check_diagnostics(&resp[0]);
+
+    assert!(
+        !diags.iter().any(|d| d["code"] == "WORKSPACE-EMPTY"),
+        "un workspace con documentos (index.md) NO debe llevar WORKSPACE-EMPTY: {resp:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// E29-H09 — `instructions` por perfil y `protocolVersion` no soportada.
+//
+// Dos defectos del mismo hallazgo (`decisiones §23/D-01`, caso G1-24 del testbench):
+// (1) `SERVER_INSTRUCTIONS` es una constante única servida sin mirar el `profile`, así que bajo
+//     `readonly` describe el flujo completo de 10 pasos (incluidas las 3 tools de cambio) aunque
+//     `tools/list` sirva solo 7 — un agente que las siga acaba en `-32602`. El test histórico
+//     `instructions_sin_vocabulario_retirado` (línea 177) SOLO ejercita `standard` vía `roundtrip()`,
+//     por eso el drift bajo `readonly` no lo detectó nunca.
+// (2) `protocolVersion` no soportada NO se rechaza: el brazo `initialize` (`main.rs` L200-204) la
+//     descarta con `.filter(...)` y cae a `2024-11-05` como si el cliente hubiera pedido esa versión
+//     — una respuesta de éxito para un handshake que no debería prosperar.
+//
+// Los tests de abajo son NUEVOS (no tocan `instructions_sin_vocabulario_retirado`, que sigue
+// ejercitando solo `standard` y debe seguir verde tal cual): generalizan la guarda a los dos
+// perfiles y fijan el rechazo de versión con el vehículo que la historia pide, `roundtrip_profile`.
+// ---------------------------------------------------------------------------
+
+/// Extrae `instructions` de la respuesta a `initialize` (posición 0 de `resp`).
+fn instructions_de(resp: &[serde_json::Value]) -> String {
+    resp[0]["result"]["instructions"]
+        .as_str()
+        .expect("initialize sirve «instructions» (string)")
+        .to_lowercase()
+}
+
+/// Extrae los nombres de tool servidos por `tools/list` (posición 1 de `resp`).
+fn tools_servidas_de(resp: &[serde_json::Value]) -> Vec<String> {
+    resp[1]["result"]["tools"]
+        .as_array()
+        .expect("tools/list devuelve un array de tools")
+        .iter()
+        .map(|t| {
+            t["name"]
+                .as_str()
+                .expect("cada tool tiene «name»")
+                .to_string()
+        })
+        .collect()
+}
+
+/// E29-H09 · Criterio `instructions_readonly_nombra_solo_las_tools_servidas`:
+/// Dado el servidor con `--profile readonly`, Cuando se hace `initialize` + `tools/list`, Entonces
+/// el conjunto de tools nombradas en `instructions` es EXACTAMENTE el servido por `tools/list` (7):
+/// ni una de menos (un flujo que se salta una tool la deja invisible) ni una de más (nombrar una
+/// tool que `tools/call` va a rechazar con `-32602`).
+#[test]
+fn instructions_readonly_nombra_solo_las_tools_servidas() {
+    let dir = workspace_min();
+    let resp = roundtrip_profile(
+        dir.path(),
+        "readonly",
+        &[
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#,
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#,
+        ],
+        2,
+    );
+
+    let instructions = instructions_de(&resp);
+    let servidas = tools_servidas_de(&resp);
+    assert_eq!(
+        servidas.len(),
+        7,
+        "el perfil readonly debe servir 7 tools en tools/list: {servidas:?}"
+    );
+
+    for tool in &servidas {
+        assert!(
+            instructions.contains(tool.as_str()),
+            "`{tool}` está en `tools/list` bajo readonly pero `instructions` no la nombra:\n{instructions}"
+        );
+    }
+    // Ninguna tool NO servida por este perfil puede aparecer nombrada: seguirla es un -32602.
+    let no_servidas = ["change_plan", "change_apply", "change_revert"];
+    for tool in no_servidas {
+        assert!(
+            !servidas.iter().any(|s| s == tool),
+            "sanity: `{tool}` no debería estar en tools/list bajo readonly: {servidas:?}"
+        );
+        assert!(
+            !instructions.contains(tool),
+            "bajo readonly, `instructions` nombra `{tool}`, que tools/list NO sirve: seguirla \
+             acaba en -32602\n---\n{instructions}"
+        );
+    }
+}
+
+/// E29-H09 · Criterio `instructions_standard_sigue_coincidiendo` (control anti-vacuo): la
+/// generalización de la guarda a los dos perfiles no puede romper el caso `standard`, que ya
+/// funcionaba. Mismo test que `instructions_sin_vocabulario_retirado` en su mitad de conteo, pero
+/// ejercitado explícitamente vía `roundtrip_profile("standard", …)` para que el vehículo sea
+/// simétrico al de `readonly`.
+#[test]
+fn instructions_standard_sigue_coincidiendo() {
+    let dir = workspace_min();
+    let resp = roundtrip_profile(
+        dir.path(),
+        "standard",
+        &[
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#,
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#,
+        ],
+        2,
+    );
+
+    let instructions = instructions_de(&resp);
+    let servidas = tools_servidas_de(&resp);
+    assert_eq!(
+        servidas.len(),
+        10,
+        "el perfil standard debe servir las 10 tools objetivo: {servidas:?}"
+    );
+    for tool in &servidas {
+        assert!(
+            instructions.contains(tool.as_str()),
+            "`{tool}` está en `tools/list` bajo standard pero `instructions` no la nombra:\n{instructions}"
+        );
+    }
+}
+
+/// E29-H09 · Criterio `instructions_readonly_no_nombra_tools_de_cambio` (aserción directa del
+/// síntoma reproducible, caso G1-24): bajo `readonly`, `change_apply` no aparece en el texto de
+/// `instructions`. Es deliberadamente redundante con
+/// `instructions_readonly_nombra_solo_las_tools_servidas` (que ya lo cubre por conjunto) porque la
+/// historia lo pide como aserción propia, más legible cuando falla.
+#[test]
+fn instructions_readonly_no_nombra_tools_de_cambio() {
+    let dir = workspace_min();
+    let resp = roundtrip_profile(
+        dir.path(),
+        "readonly",
+        &[r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#],
+        1,
+    );
+    let instructions = instructions_de(&resp[..1]);
+    assert!(
+        !instructions.contains("change_apply"),
+        "bajo readonly, `instructions` no debe mencionar `change_apply`:\n{instructions}"
+    );
+}
+
+/// E29-H09 · Criterio `protocol_version_no_soportada_se_rechaza`:
+/// Dado un `initialize` con `protocolVersion: "1990-01-01"`, Cuando se llama, Entonces la respuesta
+/// es un error JSON-RPC `-32602` cuyo mensaje lista las tres versiones aceptadas.
+///
+/// Decisión de forma (delegada por la historia a la fase roja, ver spec L1004-1009): la spec MCP
+/// oficial de negociación de versión (2025-06-18, sección «Version Negotiation») dice que si el
+/// servidor no soporta la `protocolVersion` pedida, debe responder con la versión que SÍ soporta y
+/// dejar que el CLIENTE decida cerrar la conexión — no es, en el spec base, un error JSON-RPC. Pero
+/// la propia historia lo prescribe explícitamente distinto para este repo: «Forma propuesta: error
+/// JSON-RPC `-32602`». Se sigue la prescripción explícita de la historia (no la negociación blanda
+/// del spec base) porque coincide con el principio rector de la épica —silencio peor que error— y
+/// con el patrón que el servidor YA usa para "tool no disponible"/"tool desconocida": mantener dos
+/// criterios de rechazo distintos en el mismo servidor (uno blando para protocolVersion, uno duro
+/// para tools) sería la clase de inconsistencia que la épica cierra en `§15`.
+#[test]
+fn protocol_version_no_soportada_se_rechaza() {
+    let dir = workspace_min();
+    let resp = roundtrip(
+        dir.path(),
+        &[
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"1990-01-01"}}"#,
+        ],
+        1,
+    );
+    assert_eq!(
+        resp[0]["error"]["code"], -32602,
+        "protocolVersion no soportada debe rechazarse con -32602: {resp:?}"
+    );
+    let msg = resp[0]["error"]["message"]
+        .as_str()
+        .expect("el error de protocolVersion no soportada lleva mensaje")
+        .to_lowercase();
+    for version in ["2024-11-05", "2025-03-26", "2025-06-18"] {
+        assert!(
+            msg.contains(version),
+            "el mensaje de rechazo debe listar la versión soportada «{version}»: {msg}"
+        );
+    }
+    // Un initialize rechazado es un handshake fallido, no un error de dominio de tool: no debe
+    // llevar `result` (ni siquiera con isError) y el error no es del catálogo de ErrorCode.
+    assert!(
+        resp[0]["result"].is_null(),
+        "un initialize rechazado no debe producir result: {resp:?}"
+    );
+}
+
+/// E29-H09 · Criterio `initialize_sin_version_sigue_funcionando` (control anti-vacuo: el rechazo
+/// de versión no puede cerrarse de más): Dado un `initialize` SIN `protocolVersion`, Cuando se
+/// llama, Entonces responde `2024-11-05` sin error — omitir no es lo mismo que pedir algo imposible.
+#[test]
+fn initialize_sin_version_sigue_funcionando() {
+    let dir = workspace_min();
+    let resp = roundtrip(
+        dir.path(),
+        &[r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#],
+        1,
+    );
+    assert_eq!(
+        resp[0]["result"]["protocolVersion"], "2024-11-05",
+        "sin protocolVersion, el servidor debe responder su versión por defecto sin error: {resp:?}"
+    );
+    assert!(
+        resp[0]["error"].is_null(),
+        "sin protocolVersion no debe haber error: {resp:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// E29-H08 — El wire RECHAZA los parámetros que no declara.
+// `requirements/epica-29-honestidad-superficie.md §E29-H08` · `decisiones §15` (decidido:
+// **(a) ejecutar** lo que el schema declara) · `decisiones §16(e)` (el criterio gemelo para el
+// disco, que E29-H01 ya aplicó: «el repo no se queda con dos criterios opuestos según si lo
+// desconocido llega por el wire o por disco»).
+//
+// EL DEFECTO: los 10 `inputSchema` declaran `additionalProperties: false` (`tools.rs`, en `list()`
+// y en cada objeto anidado `ref`/`to`/`proposedOperation`) y el servidor NO lo ejecuta: `tools::call`
+// lee campo a campo con `params.get("…")` y nunca mira las claves sobrantes. Medido en la revisión de
+// la v0.3.0 (sonda 4): **15 casos aceptados en silencio**, entre ellos el `sort` que E23-H11 retiró,
+// un `offset` inexistente y typos como `wheres`/`filters`. Un agente que se equivoca de nombre de
+// parámetro recibe la respuesta POR DEFECTO, indistinguible de una legítima.
+//
+// LOS DOS NIVELES DE RECHAZO, CON CRITERIO DISTINTO (alcance de la historia, L841-853):
+//   1. **Nivel tool** (`tools/call` → `arguments`): partición LIMPIA. Una clave que el `inputSchema`
+//      de esa tool no declara → `INVALID_SCHEMA` nombrándola. Lo mismo dentro de los objetos
+//      ANIDADOS que declaran `additionalProperties: false` (`ref`, `to`, `proposedOperation`).
+//   2. **Nivel operación** (`operations[]` de `change_plan` y el `operation` de la selección
+//      masiva): validación por **UNIÓN**, no por partición. Se rechaza lo que no esté en la unión de
+//      los 17 campos legales; NO se rechaza un campo legal para OTRA op. Es decir: un `body` en un
+//      `patch_frontmatter` **se sigue ignorando**, y un `bodyy` se rechaza. Razón (`§15`): `path`/
+//      `ref` son intercambiables salvo en `create` y `body` pertenece a DOS ops, así que una
+//      partición estricta rechazaría lotes válidos —un agente que reutiliza la misma plantilla de
+//      objeto para varias operaciones de un lote— y el `oneOf` por operación sigue sin existir.
+//      Cerrar la partición por op es **decisión posterior**, declarada, no un olvido de esta fase.
+//
+// ROJO ESPERADO HOY: por ASERCIÓN, contra el binario real. Sondado antes de escribir estos tests —
+// `knowledge_search{sort}`, `knowledge_search{wheres}`, `knowledge_get{ref:{depth}}`,
+// `workspace_status{foo}` y `change_plan` con `bodyy` responden HOY los cinco con éxito y el
+// parámetro descartado. No hace falta ningún stub de producción: el rechazo es comportamiento nuevo
+// sobre símbolos que ya existen.
+//
+// REPARTO DE FICHEROS (campo Pruebas de la historia): aquí van los casos por el WIRE (uno por
+// llamada aislada, que es como se observó el hallazgo); el barrido data-driven sobre las 10 tools
+// (`el_schema_declarado_coincide_con_lo_aceptado`) vive en `tests/descubribilidad.rs`, que es donde
+// está la guarda de la política y el arnés que lee `tools/list`; la tabla de campos legales por
+// operación (`los_campos_legales_de_cada_operacion_se_aceptan`, la CONDICIÓN DE ENTRADA) vive en
+// `crates/lodestar-app/tests/plan.rs`, contra `App::change_plan` directamente.
+// ---------------------------------------------------------------------------
+
+/// Construye la línea JSON-RPC de un `tools/call` arbitrario (id 1).
+fn tool_call_line(nombre: &str, arguments: serde_json::Value) -> String {
+    serde_json::json!({
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": { "name": nombre, "arguments": arguments }
+    })
+    .to_string()
+}
+
+/// El mensaje de error de EJECUCIÓN de una tool (`result.content[0].text`), o `None` si la llamada
+/// no falló. `isError` distingue el fallo de tool del error de protocolo (que iría en `error`).
+fn error_de_tool(resp: &serde_json::Value) -> Option<String> {
+    if resp["result"]["isError"].as_bool() != Some(true) {
+        return None;
+    }
+    Some(
+        resp["result"]["content"][0]["text"]
+            .as_str()
+            .expect("un error de tool viaja como texto en content[0].text")
+            .to_string(),
+    )
+}
+
+/// Asevera que la respuesta es un rechazo `INVALID_SCHEMA` cuyo mensaje **nombra** el parámetro
+/// desconocido. Nombrarlo no es cosmética: es la diferencia entre «corrige `wheres`» y «algo de tu
+/// llamada está mal», que es justo el silencio que la historia cierra.
+fn asevera_rechazo_nombrando(resp: &serde_json::Value, desconocido: &str, contexto: &str) {
+    let msg = error_de_tool(resp).unwrap_or_else(|| {
+        panic!(
+            "{contexto}: el parámetro no declarado «{desconocido}» debe RECHAZARSE, no descartarse \
+             en silencio (hoy la llamada responde con éxito y el parámetro ignorado): {resp:?}"
+        )
+    });
+    assert!(
+        msg.starts_with("INVALID_SCHEMA"),
+        "{contexto}: el rechazo debe abrir con el código del catálogo `INVALID_SCHEMA`; fue: {msg}"
+    );
+    assert!(
+        msg.contains(desconocido),
+        "{contexto}: el mensaje debe NOMBRAR el parámetro desconocido «{desconocido}» para que el \
+         agente sepa cuál corregir; fue: {msg}"
+    );
+}
+
+/// Workspace mínimo con un documento de frontmatter real bajo `notas/`, sobre el que se pueden
+/// ejercer tanto las tools de lectura como una op de cambio.
+fn workspace_una_nota() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "notas/alfa.md",
+        "---\nstatus: accepted\n---\n\n# Alfa\n\nCuerpo con la palabra lodestar.\n",
+    );
+    dir
+}
+
+/// E29-H08 · Criterio `parametro_retirado_se_rechaza_nombrandolo`:
+/// **Dado** un `knowledge_search` con `sort: "title"` (parámetro RETIRADO en E23-H11), **Cuando** se
+/// llama, **Entonces** la respuesta es `INVALID_SCHEMA` nombrando `sort`, no la lista por defecto.
+///
+/// Es el caso emblemático de `decisiones §15`: `sort` existió, un cliente de v0.2 lo manda de buena
+/// fe, y hoy recibe resultados en un orden que NO es el que pidió, sin la menor señal. La retirada
+/// de E23-H11 fue solo declarativa (fuera del `inputSchema`); esta historia la hace ejecutable.
+#[test]
+fn parametro_retirado_se_rechaza_nombrandolo() {
+    let dir = workspace_una_nota();
+    let line = tool_call_line(
+        "knowledge_search",
+        serde_json::json!({ "text": "", "sort": "title" }),
+    );
+    let resp = roundtrip(dir.path(), &[line.as_str()], 1);
+    asevera_rechazo_nombrando(&resp[0], "sort", "knowledge_search con el `sort` retirado");
+}
+
+/// E29-H08 · Criterio `typo_de_parametro_se_rechaza`:
+/// **Dado** un `knowledge_search` con `wheres` (typo de `where`), **Cuando** se llama, **Entonces**
+/// `INVALID_SCHEMA` nombrando `wheres`.
+///
+/// El typo es peor que el parámetro retirado: hoy `wheres` se descarta y la búsqueda devuelve TODOS
+/// los documentos, que es una respuesta plausible —el agente cree que su consulta no filtró nada— en
+/// vez de una vacía que le habría hecho sospechar.
+#[test]
+fn typo_de_parametro_se_rechaza() {
+    let dir = workspace_una_nota();
+    let line = tool_call_line(
+        "knowledge_search",
+        serde_json::json!({ "wheres": "status = \"accepted\"" }),
+    );
+    let resp = roundtrip(dir.path(), &[line.as_str()], 1);
+    asevera_rechazo_nombrando(&resp[0], "wheres", "knowledge_search con el typo `wheres`");
+}
+
+/// E29-H08 · Criterio `typo_de_parametro_se_rechaza`, segunda mitad — el rechazo alcanza a las tools
+/// de CAMBIO, no solo a las de lectura.
+///
+/// La historia pide typos «en varias tools representativas (lectura y cambio)». `change_apply` es la
+/// más peligrosa de las tres: un `changeSetID` (con la `D` mayúscula, un typo verosímil de
+/// `changeSetId`) hoy hace que el parámetro obligatorio parezca ausente, así que el agente recibe
+/// «falta el parámetro obligatorio «changeSetId»» sin la menor pista de que sí lo mandó, escrito de
+/// otra forma. Tras la historia debe decírsele que `changeSetID` no existe.
+#[test]
+fn typo_de_parametro_en_tool_de_cambio_se_rechaza() {
+    let dir = workspace_una_nota();
+    let line = tool_call_line(
+        "change_apply",
+        serde_json::json!({ "changeSetID": "changeset:0000", "planId": "x" }),
+    );
+    let resp = roundtrip(dir.path(), &[line.as_str()], 1);
+    asevera_rechazo_nombrando(
+        &resp[0],
+        "changeSetID",
+        "change_apply con el typo `changeSetID`",
+    );
+}
+
+/// E29-H08 · Criterio `clave_desconocida_en_objeto_anidado_se_rechaza`:
+/// **Dado** un `knowledge_get` con `ref: {path: "…", depth: 2}` (clave desconocida en el objeto
+/// **anidado**), **Cuando** se llama, **Entonces** también se rechaza.
+///
+/// El objeto `ref` declara su propio `additionalProperties: false` en el schema (`tools.rs` L117),
+/// así que la promesa incumplida es la misma un nivel más abajo. Hoy `serde_json::from_value` sobre
+/// `DocumentRef` ignora los campos sobrantes y el `depth` desaparece —lo que importa porque `depth`
+/// SÍ existe en otras tools (`graph_query`, `impact_analyze`): un agente puede creer legítimamente
+/// que aquí también hace algo.
+#[test]
+fn clave_desconocida_en_objeto_anidado_se_rechaza() {
+    let dir = workspace_una_nota();
+    let line = tool_call_line(
+        "knowledge_get",
+        serde_json::json!({ "ref": { "path": "notas/alfa.md", "depth": 2 } }),
+    );
+    let resp = roundtrip(dir.path(), &[line.as_str()], 1);
+    asevera_rechazo_nombrando(
+        &resp[0],
+        "depth",
+        "knowledge_get con `depth` dentro del objeto anidado `ref`",
+    );
+}
+
+/// E29-H08 · Criterio `tool_sin_parametros_rechaza_cualquier_argumento`:
+/// **Dado** un `workspace_status` (cuyo schema es el objeto VACÍO con `additionalProperties: false`),
+/// **Cuando** se llama con `{"foo": 1}`, **Entonces** se rechaza.
+///
+/// Es el borde del criterio: una tool sin parámetros declara la lista vacía, y por unión eso
+/// significa que CUALQUIER clave sobra. Sin este caso, una implementación que solo mire tools con
+/// `properties` no vacío pasaría los demás tests.
+#[test]
+fn tool_sin_parametros_rechaza_cualquier_argumento() {
+    let dir = workspace_una_nota();
+    let line = tool_call_line("workspace_status", serde_json::json!({ "foo": 1 }));
+    let resp = roundtrip(dir.path(), &[line.as_str()], 1);
+    asevera_rechazo_nombrando(
+        &resp[0],
+        "foo",
+        "workspace_status (schema de objeto vacío) con un argumento inventado",
+    );
+}
+
+/// E29-H08 · **Remate del juez** — el rechazo de nivel operación DESCIENDE a los sub-objetos:
+/// **Dado** un `change_plan` con una operación cuyo `ref` lleva una clave que el objeto `ref` no
+/// declara, **Cuando** se planifica, **Entonces** `INVALID_SCHEMA` nombrándola con su contexto.
+///
+/// El hueco que cierra: el nivel operación validaba las claves de la op **en su nivel raíz** y no
+/// bajaba a los objetos anidados, así que
+/// `{"op":"patch_frontmatter","ref":{"path":"…","parametroQueNoExiste":1}}` pasaba en silencio. Eso
+/// dejaba al servidor con **dos criterios opuestos para el mismo objeto `ref`** según por dónde
+/// entrara: por `knowledge_get` se rechazaba (`clave_desconocida_en_objeto_anidado_se_rechaza`) y
+/// por una operación de `change_plan` se tragaba. La asimetría es justo la forma que `decisiones
+/// §15` prohíbe —«el repo no se queda con dos criterios opuestos según por dónde llegue lo
+/// desconocido»— y es peor aquí que en la lectura, porque el `ref` de una operación identifica el
+/// documento que se va a **escribir**.
+///
+/// El mensaje debe llevar **contexto**, no solo el nombre: `ref` está anidado, así que decir
+/// «`parametroQueNoExiste` no es un parámetro declarado» a secas obliga al agente a adivinar en
+/// cuál de los objetos de su lote está el typo. Se exige que el error cite también `ref`.
+#[test]
+fn clave_desconocida_en_ref_de_una_operacion_se_rechaza() {
+    let dir = workspace_una_nota();
+    let line = tool_call_line(
+        "change_plan",
+        serde_json::json!({
+            "operations": [
+                { "op": "patch_frontmatter",
+                  "ref": { "path": "notas/alfa.md", "parametroQueNoExiste": 1 },
+                  "patch": { "status": "review" } }
+            ]
+        }),
+    );
+    let resp = roundtrip(dir.path(), &[line.as_str()], 1);
+    asevera_rechazo_nombrando(
+        &resp[0],
+        "parametroQueNoExiste",
+        "change_plan con una clave desconocida DENTRO del `ref` de una operación",
+    );
+    let msg = error_de_tool(&resp[0]).expect("ya aseverado como rechazo justo arriba");
+    assert!(
+        msg.contains("ref"),
+        "el mensaje debe situar la clave desconocida en el objeto `ref` de la operación: sin el \
+         contexto, un agente con un lote de 20 ops no sabe cuál corregir; fue: {msg}"
+    );
+}
+
+/// E29-H08 · **Remate del juez, control anti-vacuo**: el descenso a los sub-objetos de una
+/// operación no puede cerrarse de más. Dos propiedades en el mismo test, porque las dos son la
+/// misma pregunta —«¿qué sub-objetos son cerrados y cuáles abiertos?»— y separarlas invitaría a
+/// arreglar una y romper la otra:
+///
+/// 1. **`ref` legal sigue funcionando**: `{"ref": {"path": "…"}}` dentro de una operación se acepta,
+///    igual que antes del remate. Es la mitad que un descenso demasiado celoso rompería.
+/// 2. **El merge-patch de `patch_frontmatter` sigue EXENTO**: las claves de `patch` son el
+///    frontmatter **del usuario** (`§20.2` invariante 3: YAML arbitrario, ninguna clave tiene
+///    semántica impuesta), así que son abiertas POR DEFINICIÓN y no se pueden validar contra
+///    ninguna lista. Un descenso que tratara `patch` como un objeto cerrado haría imposible
+///    escribir cualquier campo de frontmatter nuevo — sería el peor daño colateral posible de esta
+///    historia, y por eso se fija con un patch de claves deliberadamente inventadas.
+///
+/// Lo mismo aplica a `frontmatter` en `create`, que se comprueba en el mismo barrido por ser el
+/// otro sub-objeto de contenido arbitrario de la tabla de campos legales.
+#[test]
+fn los_subobjetos_abiertos_de_una_operacion_siguen_aceptando_claves_arbitrarias() {
+    let dir = workspace_una_nota();
+
+    // (1) `ref` legal dentro de una operación: sigue planificando.
+    let legal = tool_call_line(
+        "change_plan",
+        serde_json::json!({
+            "operations": [
+                { "op": "patch_frontmatter", "ref": { "path": "notas/alfa.md" },
+                  "patch": { "status": "review" } }
+            ]
+        }),
+    );
+    let resp = roundtrip(dir.path(), &[legal.as_str()], 1);
+    assert!(
+        error_de_tool(&resp[0]).is_none(),
+        "un `ref` con solo `path` (su única clave declarada) debe seguir aceptándose dentro de una \
+         operación: el descenso a los sub-objetos no puede tocar lo declarado: {:?}",
+        resp[0]
+    );
+
+    // (2) El merge-patch y el `frontmatter` de `create`: claves ARBITRARIAS del usuario.
+    let arbitrarias = tool_call_line(
+        "change_plan",
+        serde_json::json!({
+            "operations": [
+                { "op": "patch_frontmatter", "path": "notas/alfa.md",
+                  "patch": { "claveQueSoloExisteEnEsteWorkspace": "x",
+                             "otraInventada": 1, "anidada": { "profunda": true } } },
+                { "op": "create", "path": "notas/nuevo.md",
+                  "frontmatter": { "campoDelUsuario": "y", "sonar.projectKey": "z" },
+                  "body": "# Nuevo\n" }
+            ]
+        }),
+    );
+    let resp = roundtrip(dir.path(), &[arbitrarias.as_str()], 1);
+    assert!(
+        error_de_tool(&resp[0]).is_none(),
+        "las claves de `patch` y de `frontmatter` son el YAML ARBITRARIO del usuario (`§20.2` \
+         invariante 3): son abiertas por definición y NO se validan contra ninguna lista. \
+         Cerrarlas haría imposible escribir un campo de frontmatter nuevo, que es el peor daño \
+         colateral posible de esta historia: {:?}",
+        resp[0]
+    );
+    let sc = plan_sc(&resp[0]);
+    assert_eq!(
+        sc["normalizedOperations"]
+            .as_array()
+            .expect("el plan lleva `normalizedOperations`")
+            .len(),
+        2,
+        "y las dos operaciones deben normalizarse: {sc}"
+    );
+}
+
+/// E29-H08 · Criterio `campo_inexistente_en_una_operacion_se_rechaza`:
+/// **Dado** un `change_plan` con una operación que lleva `bodyy` (typo, NO está en la unión de los
+/// 17 campos legales), **Cuando** se planifica, **Entonces** `INVALID_SCHEMA` nombrando `bodyy`.
+///
+/// Este es el nivel 2 (operación) en su mitad de RECHAZO. La op elegida es `replace_body`, donde
+/// `body` sí es legal: así el typo es de verdad un typo —el agente quería `body`— y el rechazo no se
+/// puede confundir con «campo de otra op». Hoy el plan se computa con el cuerpo SIN sustituir y
+/// `canApply: true`: el agente cree haber reemplazado el cuerpo y no reemplazó nada.
+#[test]
+fn campo_inexistente_en_una_operacion_se_rechaza() {
+    let dir = workspace_una_nota();
+    let line = tool_call_line(
+        "change_plan",
+        serde_json::json!({
+            "operations": [
+                { "op": "replace_body", "path": "notas/alfa.md",
+                  "bodyy": "# Alfa\n\nCuerpo nuevo.\n" }
+            ]
+        }),
+    );
+    let resp = roundtrip(dir.path(), &[line.as_str()], 1);
+    asevera_rechazo_nombrando(
+        &resp[0],
+        "bodyy",
+        "change_plan con el typo `bodyy` en una operación",
+    );
+}
+
+/// E29-H08 · Criterio `campo_inexistente_en_una_operacion_se_rechaza`, mitad de la SELECCIÓN MASIVA:
+/// el mismo criterio de unión rige dentro del objeto `operation` de la selección masiva, que es la
+/// otra forma de wire por la que llegan parámetros de operación (`§20.11`).
+///
+/// La historia declara los dos vehículos en el mismo criterio («`operations[]` de `change_plan`, y
+/// el objeto `operation` de la selección masiva»). Se separa en un test propio porque el camino de
+/// código es OTRO —`expand_selection`/`single_operation`, no `normalize_raw_op` sobre un array—, y
+/// una implementación que solo mire `operations[]` dejaría esta puerta abierta.
+#[test]
+fn campo_inexistente_en_la_seleccion_masiva_se_rechaza() {
+    let dir = workspace_una_nota();
+    let line = tool_call_line(
+        "change_plan",
+        serde_json::json!({
+            "selection": { "where": "status = \"accepted\"" },
+            "operation": { "replace_text": { "find": "lodestar", "replace": "Lodestar",
+                                             "expectedOcurrences": 1 } }
+        }),
+    );
+    let resp = roundtrip(dir.path(), &[line.as_str()], 1);
+    asevera_rechazo_nombrando(
+        &resp[0],
+        "expectedOcurrences",
+        "change_plan (selección masiva) con el typo `expectedOcurrences`",
+    );
+}
+
+/// E29-H08 · Criterio `campo_legal_de_otra_operacion_se_sigue_ignorando` (**la excepción
+/// declarada**, y el control anti-vacuo más importante de la historia):
+/// **Dado** un `change_plan` con una operación `patch_frontmatter` que además lleva `body` (campo
+/// legal de OTRA op), **Cuando** se planifica, **Entonces** se acepta y `body` se ignora, como hoy.
+///
+/// La decisión de diseño ratificada es **validar por UNIÓN, no por partición**: `path`/`ref` son
+/// intercambiables salvo en `create` y `body` pertenece a DOS ops, así que una partición estricta
+/// rompería un lote perfectamente válido en el que un agente reutiliza la misma plantilla de objeto
+/// para varias operaciones. Cerrar la partición por op es decisión POSTERIOR.
+///
+/// Este test nace **VERDE** (fija el comportamiento actual para que la historia no lo cambie por
+/// accidente) y debe seguir verde después: es la mitad del criterio que impide que el rechazo se
+/// cierre de más. Se asevera además que el `body` de verdad NO se aplicó —el diff no toca el
+/// cuerpo—, para que «se ignora» sea una afirmación verificada y no una tautología del `isError`.
+#[test]
+fn campo_legal_de_otra_operacion_se_sigue_ignorando() {
+    let dir = workspace_una_nota();
+    let line = tool_call_line(
+        "change_plan",
+        serde_json::json!({
+            "operations": [
+                { "op": "patch_frontmatter", "path": "notas/alfa.md",
+                  "patch": { "status": "review" },
+                  "body": "# CUERPO QUE NO DEBE APLICARSE\n" }
+            ]
+        }),
+    );
+    let resp = roundtrip(dir.path(), &[line.as_str()], 1);
+
+    assert!(
+        error_de_tool(&resp[0]).is_none(),
+        "un campo legal de OTRA op (`body` en un `patch_frontmatter`) debe SEGUIR ignorándose: la \
+         validación es por UNIÓN de los 17 campos legales, no por partición por op — rechazarlo \
+         rompería los lotes que reutilizan una plantilla de objeto (`decisiones §15`): {:?}",
+        resp[0]
+    );
+    let sc = plan_sc(&resp[0]);
+    assert!(
+        sc["changeSetId"].as_str().is_some_and(|s| !s.is_empty()),
+        "y el plan debe producirse igual que hoy: {:?}",
+        resp[0]
+    );
+    let ops = sc["normalizedOperations"]
+        .as_array()
+        .expect("el plan lleva `normalizedOperations`");
+    assert_eq!(
+        ops.len(),
+        1,
+        "el `body` ignorado no puede generar una operación extra: {ops:?}"
+    );
+    assert!(
+        !serde_json::to_string(sc)
+            .expect("el plan serializa")
+            .contains("CUERPO QUE NO DEBE APLICARSE"),
+        "«ignorado» significa que el `body` no llega al resultado: si apareciera en el plan, no se \
+         estaría ignorando sino aplicando. Plan: {sc}"
+    );
+}
+
+/// E29-H08 · Criterio `la_seleccion_masiva_sigue_funcionando` (control anti-vacuo del caso donde
+/// `params` viaja ENTERO):
+/// **Dado** un `change_plan` en forma de selección masiva, **Cuando** lleva `selection` + `operation`
+/// + `policy` (todo legal), **Entonces** se planifica como hoy.
+///
+/// Es el control que protege la trampa señalada por la propia historia (L854-859): con `selection`,
+/// `tools.rs:468-472` pasa `params.clone()` **entero** a `App::change_plan`, así que el objeto de
+/// argumentos de la tool y el de la selección masiva son el MISMO. Una implementación que valide el
+/// nivel operación sobre ese objeto entero vería `selection`/`operation`/`policy` como «campos de
+/// operación desconocidos» y rompería la selección masiva completa. Nace VERDE y debe seguir verde.
+#[test]
+fn la_seleccion_masiva_sigue_funcionando() {
+    let dir = workspace_una_nota();
+    let line = tool_call_line(
+        "change_plan",
+        serde_json::json!({
+            "selection": { "where": "status = \"accepted\"" },
+            "operation": { "patch_frontmatter": { "status": "review" } },
+            "policy": { "requireValidResult": false, "allowWarnings": true }
+        }),
+    );
+    let resp = roundtrip(dir.path(), &[line.as_str()], 1);
+
+    assert!(
+        error_de_tool(&resp[0]).is_none(),
+        "la selección masiva con `selection`+`operation`+`policy` (todo LEGAL) debe seguir \
+         planificándose: con `selection`, el objeto de argumentos de la tool viaja entero como \
+         `raw_ops`, y confundir sus claves con campos de operación rompería la forma masiva \
+         entera: {:?}",
+        resp[0]
+    );
+    let sc = plan_sc(&resp[0]);
+    let ops = sc["normalizedOperations"]
+        .as_array()
+        .expect("el plan lleva `normalizedOperations`");
+    assert_eq!(
+        ops.len(),
+        1,
+        "la selección debe expandirse sobre el único documento que casa `status = accepted`: {sc}"
+    );
+}
+
+/// E29-H08 · Control anti-vacuo de los parámetros OPCIONALES legítimos (`cursor`/`limit` y compañía):
+/// **Dado** llamadas que usan TODOS los parámetros opcionales que su `inputSchema` declara,
+/// **Cuando** se llaman, **Entonces** siguen funcionando exactamente como hoy.
+///
+/// La historia lo pide explícitamente («cursor/limit y campos opcionales legítimos intactos»). Sin
+/// él, una implementación que rechazara todo lo que no sea obligatorio pasaría los seis tests de
+/// rechazo de arriba y rompería la paginación de la superficie entera. Se ejercitan las tres tools
+/// paginadas + una llamada con `cursor` REAL obtenido de una respuesta previa, que es el uso que un
+/// agente hace de verdad.
+#[test]
+fn parametros_opcionales_legitimos_siguen_funcionando() {
+    let dir = workspace_una_nota();
+    write(
+        dir.path(),
+        "notas/beta.md",
+        "---\nstatus: draft\n---\n\n# Beta\n\nCuerpo con la palabra lodestar.\n",
+    );
+
+    let llamadas = [
+        (
+            "knowledge_search",
+            serde_json::json!({ "text": "lodestar", "where": "status = \"accepted\"",
+                                "filter": { "field": "frontmatter.status", "operator": "equals",
+                                            "value": "accepted" },
+                                "include": ["frontmatter.status"], "limit": 1 }),
+        ),
+        (
+            "knowledge_check",
+            serde_json::json!({ "scope": { "kind": "workspace" }, "minimumSeverity": "info",
+                                "includeSuggestedFixes": false, "limit": 5 }),
+        ),
+        (
+            "metadata_inspect",
+            serde_json::json!({ "mode": "catalog", "limit": 5 }),
+        ),
+        (
+            "graph_query",
+            serde_json::json!({ "operation": "neighborhood", "ref": { "path": "notas/alfa.md" },
+                                "depth": 1, "direction": "both", "limit": 5 }),
+        ),
+    ];
+    for (tool, args) in llamadas {
+        let line = tool_call_line(tool, args.clone());
+        let resp = roundtrip(dir.path(), &[line.as_str()], 1);
+        assert!(
+            error_de_tool(&resp[0]).is_none(),
+            "«{tool}» con SOLO parámetros declarados ({args}) debe seguir funcionando: el rechazo \
+             de lo no declarado no puede tocar lo declarado-y-opcional: {:?}",
+            resp[0]
+        );
+    }
+
+    // Y el `cursor` de verdad: se pagina de una respuesta a la siguiente, que es donde un rechazo
+    // demasiado celoso rompería la paginación sin que ningún caso sintético lo notara.
+    let primera = roundtrip(
+        dir.path(),
+        &[tool_call_line(
+            "knowledge_search",
+            serde_json::json!({ "text": "", "limit": 1 }),
+        )
+        .as_str()],
+        1,
+    );
+    let cursor = primera[0]["result"]["structuredContent"]["nextCursor"]
+        .as_str()
+        .expect("con 2 documentos y limit 1 debe haber `nextCursor`")
+        .to_string();
+    let segunda = roundtrip(
+        dir.path(),
+        &[tool_call_line(
+            "knowledge_search",
+            serde_json::json!({ "text": "", "limit": 1, "cursor": cursor }),
+        )
+        .as_str()],
+        1,
+    );
+    assert!(
+        error_de_tool(&segunda[0]).is_none(),
+        "la segunda página con el `cursor` devuelto por la primera debe servirse igual que hoy: {:?}",
+        segunda[0]
     );
 }

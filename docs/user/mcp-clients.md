@@ -8,6 +8,7 @@ this page comes from a real run against [`examples/demo/`](../../examples/demo/R
 
 - [Claude Code](#claude-code)
 - [Any client configured with JSON](#any-client-configured-with-json)
+- [Protocol version negotiation](#protocol-version-negotiation)
 - [`--root`: when to pass it, when to omit it](#--root-when-to-pass-it-when-to-omit-it)
 - [Profiles: `readonly` and `standard`](#profiles-readonly-and-standard)
 - [A tour of the ten tools](#a-tour-of-the-ten-tools)
@@ -106,6 +107,21 @@ EOF
 The server reads until `stdin` closes, so piping a file in and a `jq` filter out gives you one
 complete exchange per run. (`2>/dev/null` below just drops the startup log line.)
 
+## Protocol version negotiation
+
+`initialize.params.protocolVersion` is optional. Three outcomes:
+
+- **Omitted** — valid. The server answers with its default, `2024-11-05`, no error.
+- **Present and one of `2024-11-05`, `2025-03-26`, `2025-06-18`** — echoed back as-is.
+- **Present and anything else** — a rejected handshake, not a silent fallback: JSON-RPC error
+  `-32602` with a message listing the three accepted versions, and no `result` at all.
+
+```console
+$ echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"1990-01-01"}}' \
+  | lodestar-mcp --root examples/demo 2>/dev/null
+{"error":{"code":-32602,"message":"protocolVersion no soportada: «1990-01-01». Versiones aceptadas: 2024-11-05, 2025-03-26, 2025-06-18"},"id":1,"jsonrpc":"2.0"}
+```
+
 ## `--root`: when to pass it, when to omit it
 
 `--root` is the workspace root. It is resolved once at startup and stays fixed for the whole
@@ -165,9 +181,11 @@ you want the agent to be able to propose and apply changes.
 
 ## A tour of the ten tools
 
-The `initialize` response carries server instructions describing these ten as a recommended
-ten-step flow, in this order. Below is what each one is *for*; for parameters, return shapes, error
-codes and the exact semantics, the authority is
+The `initialize` response carries server instructions describing a recommended flow, in this order.
+The text depends on the active profile: `standard` gets all ten steps below, `readonly` gets only
+the seven read/verification ones — the three change steps are never mentioned, because naming a
+tool `tools/list` does not serve would just send an agent into a `-32602`. Below is what each one is
+*for*; for parameters, return shapes, error codes and the exact semantics, the authority is
 [`contracts/mcp.yml`](../../contracts/mcp.yml) (written in Spanish, like the rest of the internal
 material), and a worked session lives in
 [`examples/demo/README.md`](../../examples/demo/README.md).
@@ -261,6 +279,30 @@ in `workspace_status` tells you which mode you are in.
 **Paths are not found.** Every path in the wire is relative to the root, uses `/` separators, and
 never contains `..` or a leading `/`. If a document lives outside the root, it is outside the
 workspace — restart the server with a root that contains it.
+
+**A parameter I sent was rejected as "not declared".** Since v0.6.0 the server enforces what every
+tool's `inputSchema` has always declared with `additionalProperties: false`: a parameter a tool does
+not declare is an error, named in the message, instead of being silently dropped. Before, a typo or a
+retired parameter got you the *default* response — indistinguishable from a legitimate one. A
+`knowledge_search` with the `sort` parameter retired in v0.4.0 now answers:
+
+```
+INVALID_SCHEMA: «sort» no es un parámetro declarado; «knowledge_search» declara ["cursor", "filter", "include", "limit", "text", "where"]
+```
+
+The message lists the declared parameters, so the fix is usually visible on the spot (`wheres` →
+`where`, `changeSetID` → `changeSetId`). Read the tool's `inputSchema` from `tools/list` for the
+authoritative list — that is the same source the server validates against, so the two cannot drift.
+
+Operations inside `change_plan` follow a deliberately **looser** rule: a field is rejected only if it
+belongs to *no* operation at all. A field that is legal for a *different* operation is still ignored,
+because `path`/`ref` are interchangeable outside `create` and `body` belongs to two operations — so a
+batch that reuses one object template across several operations keeps working. A typo is still
+caught:
+
+```
+INVALID_SCHEMA: «bodyy» no es un campo de operación declarado (operations[0]); los campos legales son ["body", "content", "expectedOccurrences", "expectedRevision", "find", "from", "frontmatter", "headingPath", "inboundLinksPolicy", "mode", "op", "patch", "path", "ref", "replace", "rewriteInboundLinks", "to"]. La validación es por UNIÓN de las 7 operaciones: un campo legal de OTRA op se ignora, pero uno que no existe en ninguna se rechaza.
+```
 
 **The response says the workspace has an unfinished transaction.** A previous publication was
 interrupted. Nothing is lost and nothing needs a manual fix: the next `change_plan` completes or

@@ -6,7 +6,7 @@ prioridad: 5
 etiquetas: ["escritura", "mcp", "contrato", "docs", "dogfooding", "lenguaje-consulta"]
 origen: "dogfooding"
 abierta_en: "2026-08-06"
-revisada_en: "2026-08-06"
+revisada_en: "2026-08-07"
 subpuntos: ["M-01", "D-01", "D-02", "A-01", "A-02", "A-03", "A-04", "A-05", "A-06", "A-07", "A-08", "A-09", "A-10"]
 relacionadas: [3, 9, 14, 16, 18, 19, 22]
 ---
@@ -38,14 +38,14 @@ evidencia y criterio de aceptación.
 |---|---|---|---|---|
 | 1 | ✅ **M-01** revert de un recibo `-revert` | **Bug de motor con pérdida de datos**: no-op silencioso que responde `reverted: true` y sobrescribe las copias del redo | **Ejecutado**: `E28-H01` (`296147b`) + adenda `E28-H03` (`8c86b6b`, `c532929`) | **5** |
 | 2 | ✅ **A-05** `create`/`move` sobre path ocupado | `canApply: true` sin fricción; aplicado, pisa conocimiento. Único hueco con riesgo destructivo para un agente | **Ejecutado**: `E28-H02` (`043f233`) + adenda `E28-H04` (`8c86b6b`, `c532929`) | **4** |
-| 3 | **D-01** `instructions` nombra 10 tools bajo `readonly` (+ `protocolVersion` sin validar) | La superficie afirma lo que el perfil no sirve — la definición literal de la **épica de honestidad de superficie** | Épica de honestidad (junto a §19(a/b), §18, §15, §16(e/f/g/b)) | **4** |
+| 3 | ✅ **D-01** `instructions` nombra 10 tools bajo `readonly` (+ `protocolVersion` sin validar) | La superficie afirma lo que el perfil no sirve — la definición literal de la **épica de honestidad de superficie** | **Ejecutado**: `E29-H09` (`5e7edc0`) | **4** |
 | 4 | **A-02/A-03** cursor malformado → offset 0 · cursor ajeno aceptado | Ya **decidido** en §16(j) (`INVALID_SCHEMA`); el testbench aporta la repro y descubre la variante cross-tool | **Ciclo de higiene** §16(j), ampliando su alcance: un cursor válido-en-forma pero de otro espacio también reinicia en silencio | **3** |
-| 5 | **A-04** `starts_with`/`ends_with` sobre campo no-string → `false` silencioso | El mismo modo de fallo que E26-H08 cerró para el orden; `eval.rs` reconoce el hueco sin test | **Decisión de producto aquí**: alinear con E26-H08 (type error ruidoso, recomendado por coherencia) o fijar el `false` en `query-language.md`. Ejecuta: épica de honestidad | **3** |
-| 6 | **A-08** sintaxis de `validation` por familias, clave desconocida inerte | La mitad «clave desconocida» ya está decidida en §16(e) (config estricta); falta **documentar las familias** (`danglingDocumentLinks`…) que hoy solo existen en `config.rs` | §16(e) para el rechazo · [`§19`](19-hallazgos-referencia-usuario.md) para las familias en `docs/user/` | **3** |
+| 5 | ✅ **A-04** `starts_with`/`ends_with` sobre campo no-string → `false` silencioso | El mismo modo de fallo que E26-H08 cerró para el orden; `eval.rs` reconoce el hueco sin test | **Ejecutado**: `E29-H04` (`b3b79fb`) — type error ruidoso, alineado con E26-H08 | **3** |
+| 6 | ✅ **A-08** sintaxis de `validation` por familias, clave desconocida inerte | La mitad «clave desconocida» ya está decidida en §16(e) (config estricta); falta **documentar las familias** (`danglingDocumentLinks`…) que hoy solo existen en `config.rs` | **Absorbido**: mitad de rechazo por `E29-H01` (`4a52f59`, `§16(e)`) · familias en `docs/user/` para [`§19`](19-hallazgos-referencia-usuario.md) | **3** |
 | 7 | **D-02** `patch_frontmatter`: §20.4 promete null-vs-remove, el wire es RFC 7386 | ARCHITECTURE se contradice internamente; el brazo `Some(Null)` del core es inalcanzable desde MCP | **Decisión de producto aquí**: corregir §20.4 (RFC 7386, recomendado: nadie ha pedido asignar null) o añadir sintaxis de remove al wire. Ejecuta: §19 | **3** |
 | 8 | **A-01** `sections` omite en silencio el heading sin match | Body acotado indistinguible de «todas las secciones existían»; solo lo fija un doc-comment del core | §19 — declarar la omisión en `mcp.yml` y `mcp-clients.md` (o decidir ruido, pero la omisión es defendible) | **2** |
 | 9 | **A-06** `replace_text` 0-ocurrencias sin aserción → plan no-op | El vacío-sin-error solo está documentado para selecciones masivas | §19 — fijar el no-op en el contrato; la aserción `expectedOccurrences` ya es la vía ruidosa opt-in | **2** |
-| 10 | **A-07** `knowledge_check` scope `paths` traga paths inexistentes | Un typo desaparece; la enumeración de errores excluye `paths` de `DOCUMENT_NOT_FOUND` a propósito o por omisión | **Decisión de producto aquí**: `DOCUMENT_NOT_FOUND` (recomendado, coherente con `document`/`affected`) o declarar la tolerancia. Ejecuta: épica de honestidad | **2** |
+| 10 | ✅ **A-07** `knowledge_check` scope `paths` traga paths inexistentes | Un typo desaparece; la enumeración de errores excluye `paths` de `DOCUMENT_NOT_FOUND` a propósito o por omisión | **Ejecutado**: `E29-H05` (`fc5c26b`) — `DOCUMENT_NOT_FOUND`, coherente con `document`/`affected` | **2** |
 | 11 | **A-09** la config se lee una vez por sesión | Un `config.yaml` escrito con el servidor vivo no se aplica; solo lo fija un comentario de `lib.rs` | §19 — declarar el ciclo de vida de la config en `docs/user/`; el comportamiento en sí es razonable | **2** |
 | 12 | **A-10** «path que normaliza a un directorio» (mcp.yml L149-151) | Impreciso: solo la raíz da `workspaceDirectory`; un directorio con nombre es `missing` | §19 — nit de redacción | **1** |
 | 13 | Registro sin acción: 12 esperados nuestros refutados | Lecturas erróneas del contrato que la verificación adversarial corrigió (sección 4 del informe) | Ninguno — material de onboarding para quien escriba contra el contrato | — |

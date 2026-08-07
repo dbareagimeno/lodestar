@@ -50,6 +50,8 @@ pub struct EvalDocument<'a> {
 ///   error.
 /// - `contains`/`contains_any`/`contains_all` exigen que el campo sea lista (excepción: `contains`
 ///   sobre un string es subcadena); sobre un escalar no string es `Err(TypeError::NotAList)`.
+/// - `starts_with`/`ends_with` son exclusivos de strings: un campo (o un literal) de otro tipo es
+///   `Err(TypeError::NotAString)`, **no** `Ok(false)` (E29-H04).
 /// - Un campo **inexistente** en una comparación es `Ok(false)`, nunca error.
 /// - El primer segmento del campo despacha el namespace: `document.*`/`graph.*` se resuelven de
 ///   [`EvalDocument`]/`analysis`; cualquier otro va al frontmatter (E19-H04).
@@ -116,7 +118,7 @@ fn eval_comparison(
         C::Ne => Ok(!valores_iguales(valor, literal)),
         C::Gt | C::Ge | C::Lt | C::Le => eval_orden(field, operator, valor, literal),
         C::Contains => eval_contains(field, operator, valor, literal),
-        C::StartsWith | C::EndsWith => Ok(eval_afijo(operator, valor, literal)),
+        C::StartsWith | C::EndsWith => eval_afijo(field, operator, valor, literal),
         C::ContainsAny | C::ContainsAll => eval_contains_lista(field, operator, valor, literal),
     }
 }
@@ -125,6 +127,7 @@ fn eval_comparison(
 ///
 /// - `document.*` → desde el propio [`EvalDocument`] (ruta/título/existencia de bloque).
 /// - `graph.*` → desde el [`Analysis`] (backlinks/salientes/colgantes/aislamiento).
+/// - `frontmatter` **a secas** → el propio bloque de frontmatter (E29-H03, ver abajo).
 /// - cualquier otro primer segmento → frontmatter (la abreviatura de `frontmatter.` ya se normalizó
 ///   en el parser, `E19-H02`).
 ///
@@ -137,6 +140,24 @@ fn resolver_campo<'a>(
     doc: &EvalDocument<'a>,
     analysis: &'a Analysis,
 ) -> Option<Cow<'a, serde_yaml::Value>> {
+    // E29-H03: el anclaje **pelado** (`frontmatter` a secas) no direcciona ninguna clave: nombra el
+    // BLOQUE. Se reconoce ANTES de desanclar porque `FieldPath::sin_anclaje` devuelve `None` para él
+    // —un `FieldPath` de cero segmentos es inválido por construcción, invariante que sostiene el
+    // dialecto de dot-paths de E26-H09—, y ese `None` lo leía `propiedad_presente` como «propiedad
+    // ausente»: `has(frontmatter)` era `false` para TODO documento y `missing(frontmatter)` `true`,
+    // la respuesta contraria a la correcta y sin error que lo delatase (`decisiones §19(a)`).
+    //
+    // Presente ⇔ el documento tiene bloque, que es **la misma verdad** que sintetiza
+    // `document.has_frontmatter` (`doc.frontmatter.is_some()`, invariante #3: no se computa dos
+    // veces). Se resuelve a `Some(true)` cuando lo hay y a `None` —ausencia— cuando no, de modo que
+    // `has`/`missing` respondan por la vía de existencia que ya existe, sin caso especial propio: un
+    // bloque VACÍO (`---\n---`) rinde `Some(ParsedFrontmatter)` vacío y por tanto cuenta como
+    // presente, exactamente igual que por el camino largo.
+    if field.segments() == [FRONTMATTER_ANCHOR] {
+        return doc
+            .frontmatter
+            .map(|_| Cow::Owned(serde_yaml::Value::Bool(true)));
+    }
     // E24-H08: un path ANCLADO (`frontmatter.<lo que sea>`) va siempre al frontmatter del usuario,
     // aunque su primer segmento coincida con un namespace reservado. El anclaje solo se conserva
     // cuando hace falta desambiguar (lo decide `parse::build_field_path`), así que aquí basta con
@@ -218,6 +239,9 @@ fn valor_conteo(n: usize) -> serde_yaml::Value {
 /// la propiedad como [`QueryValue::String`] (la forma del AST de `§20.8`); se reinterpreta como
 /// [`FieldPath`] (parsea la dot-notation). La existencia se juzga con [`ParsedFrontmatter::get`],
 /// así que una clave a `null`/`""`/`[]` cuenta como **presente**.
+///
+/// `has(frontmatter)` —el anclaje **pelado**— juzga la presencia del **bloque** de frontmatter,
+/// con la misma verdad que `document.has_frontmatter` (E29-H03; la resuelve `resolver_campo`).
 fn eval_function(
     name: FunctionName,
     arguments: &[QueryValue],
@@ -337,22 +361,41 @@ fn eval_contains(
     }
 }
 
-/// `starts_with`/`ends_with`: operadores de texto exclusivos de strings. Con un campo no-string o un
-/// literal no-string no hay prefijo/sufijo que comprobar → `false` (no hay una variante de
-/// [`TypeError`] «no es string», y H01 no la introduce; ningún test lo ejercita).
+/// `starts_with`/`ends_with`: operadores de texto **exclusivos de strings**. Con un campo no-string
+/// —o con un literal no-string— no hay prefijo/sufijo que comprobar y es
+/// [`TypeError::NotAString`], **no** `false` (E29-H04, `decisiones §23/A-04`).
+///
+/// Hasta v0.5.0 esta función devolvía `bool` y su hueco estaba declarado en este mismo doc-comment:
+/// un campo no-string caía en el mismo `false` que «no casa», así que `priority starts_with "3"`
+/// sobre `priority: 3` devolvía una lista **recortada** —indistinguible de la correcta— en vez de
+/// decir que la comparación no está definida (caso G1-20 del testbench). Es el mismo defecto que
+/// E26-H08 cerró para el operador de ORDEN, aquí para los dos afijos.
+///
+/// Se juzga primero el **campo** y después el literal: cuando los dos son no-string se reporta el
+/// del campo, que es el dato del workspace que el agente no controla desde la consulta. Un campo
+/// **inexistente** no llega aquí (la ausencia cortocircuita en [`eval_comparison`]).
 fn eval_afijo(
+    field: &FieldPath,
     operator: ComparisonOperator,
     valor: &serde_yaml::Value,
     literal: &QueryValue,
-) -> bool {
-    let (serde_yaml::Value::String(texto), QueryValue::String(aguja)) = (valor, literal) else {
-        return false;
+) -> Result<bool, TypeError> {
+    let no_es_string = |found: ValueType| TypeError::NotAString {
+        field: field.clone(),
+        operator,
+        found,
     };
-    match operator {
+    let serde_yaml::Value::String(texto) = valor else {
+        return Err(no_es_string(ValueType::of(valor)));
+    };
+    let QueryValue::String(aguja) = literal else {
+        return Err(no_es_string(tipo_de_literal(literal)));
+    };
+    Ok(match operator {
         ComparisonOperator::StartsWith => texto.starts_with(aguja),
         ComparisonOperator::EndsWith => texto.ends_with(aguja),
         _ => unreachable!("eval_afijo solo se invoca con starts_with/ends_with"),
-    }
+    })
 }
 
 /// `contains_any`/`contains_all`: **exclusivos de listas**. Sobre cualquier no-lista —incluido un
@@ -386,7 +429,8 @@ fn eval_contains_lista(
 }
 
 /// El [`ValueType`] de un literal de consulta (el reflejo de [`ValueType::of`] para el operando
-/// derecho), para poblar el `value_type` de un [`TypeError::OrderNotDefined`].
+/// derecho), para poblar el `value_type` de un [`TypeError::OrderNotDefined`] y el `found` de un
+/// [`TypeError::NotAString`] cuyo operando culpable es el literal (E29-H04).
 fn tipo_de_literal(literal: &QueryValue) -> ValueType {
     match literal {
         QueryValue::Null => ValueType::Null,

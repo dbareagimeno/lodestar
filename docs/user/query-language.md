@@ -192,8 +192,8 @@ and the field names are stable and in English. See the note in
 | `<` | `less_than` | idem | |
 | `<=` | `less_than_or_equal` | idem | |
 | `contains` | `contains` | string or list | Substring on a string, membership on a list — the **field's** type decides |
-| `starts_with` | `starts_with` | string | Prefix |
-| `ends_with` | `ends_with` | string | Suffix |
+| `starts_with` | `starts_with` | string (on **both** sides) | Prefix — a non-string field *or* literal is a type error, not `false` |
+| `ends_with` | `ends_with` | string (on **both** sides) | Suffix — same rule |
 | `contains_any` | `contains_any` | list | Shares at least one element with the literal list |
 | `contains_all` | `contains_all` | list | Contains every element of the literal list |
 
@@ -248,9 +248,35 @@ knowledge_search
 
 Both functions respect namespaces exactly as a comparison does, so `has(graph.backlinks)` asks about
 a computed property — which every document has, making it trivially true — while
-`has(frontmatter.graph)` asks whether your frontmatter has a `graph:` key. To ask whether a document
-has a frontmatter block at all, use `document.has_frontmatter` (see
-[Declared limits](#declared-limits)).
+`has(frontmatter.graph)` asks whether your frontmatter has a `graph:` key.
+
+`frontmatter` on its own is the one argument that does not name a key: it names the **block**.
+`has(frontmatter)` matches the documents that carry a frontmatter block and `missing(frontmatter)`
+those that do not — the same answer as `document.has_frontmatter`, which remains available and is
+the form to use inside a larger comparison. A block that opens and closes with no keys (`---\n---`)
+counts as present, by both routes.
+
+```json
+knowledge_search
+{"where": "has(frontmatter)", "limit": 20}
+```
+
+```json
+{"totalApproximate": 7}
+```
+
+(Seven of the demo's ten documents carry frontmatter.)
+
+**Bare `frontmatter` inside a comparison** resolves to that same presence flag — a **boolean** — so
+it behaves like any boolean field. `frontmatter = true` matches exactly the documents that carry a
+block (the same set as `has(frontmatter)` and as `document.has_frontmatter = true`), and any
+operator that is not defined on a boolean is a type error rather than a quiet `false`:
+`frontmatter > 1` and `frontmatter contains "x"` both abort with `INVALID_SCHEMA` naming `bool` as
+the type found, and so does `frontmatter starts_with "x"` — a boolean has no prefix. In a document
+with **no** block the anchor resolves to nothing at all, which is absence, so those same
+comparisons are an ordinary `false` there. That is why `frontmatter = false` matches nobody while
+`missing(frontmatter)` matches the documents without a block: absence is not the boolean `false`.
+`document.has_frontmatter` remains the explicit form, and reads better in a larger expression.
 
 ## Combining conditions
 
@@ -365,16 +391,19 @@ Two traps worth knowing:
 
 ## When a query fails
 
-Three outcomes, and they are deliberately different:
+Outcomes are deliberately different:
 
 | Situation | Result |
 |---|---|
 | A frontmatter field no document has | Matches nothing. Not an error. |
 | An unknown property under `graph.` / `document.` | `INVALID_SCHEMA`, at compile time, naming the valid properties |
 | An ordering comparison against an incompatible type | `INVALID_SCHEMA`, naming the field, the operator, both types and the document where they clashed |
+| A list operator (`contains_any`, `contains_all`, or `contains` on a non-string scalar) on a field that is not a list | `INVALID_SCHEMA`, same shape |
+| A text operator (`starts_with`, `ends_with`) on a value that is not a string | `INVALID_SCHEMA`, same shape |
 
-The third one is the interesting one. `retention_days` is a number in the demo, so ordering it
-against a string aborts the query instead of quietly dropping the document:
+The last three are the interesting ones — they are **type errors**, and they abort the query rather
+than drop a document. `retention_days` is a number in the demo, so ordering it against a string
+aborts instead of quietly dropping the document:
 
 ```json
 knowledge_search
@@ -390,6 +419,46 @@ campo: compara con un literal de ese tipo, o usa un operador definido para él (
 error — el cruce de tipos es false); metadata_inspect{"mode":"field"} enumera los tipos que ese campo
 toma en el workspace
 ```
+
+`starts_with` and `ends_with` are the same story with a different operator. They are **text**
+operators: they need a string on **both** sides — the field *and* the literal — and there is no
+coercion, so a number that merely looks like text is still a number:
+
+```json
+knowledge_search
+{"where": "retention_days starts_with \"3\""}
+```
+
+```text
+INVALID_SCHEMA: la consulta no es respondible sobre estos datos: en «runbooks/backup.md» la
+comparación entre el campo «retention_days» y su literal tiene un operando de tipo number, y el
+operador de texto «starts_with» exige un string a los DOS lados: lo que no es texto no tiene prefijo
+ni sufijo que comprobar, y el lenguaje no coerce tipos (§20.8). Comprueba los dos lados — el tipo
+que falla puede ser el del campo o el del literal. Ajusta la consulta al tipo real del campo:
+compara con un literal de ese tipo, o usa un operador definido para él («=»/«!=» nunca son error —
+el cruce de tipos es false); metadata_inspect{"mode":"field"} enumera los tipos que ese campo toma
+en el workspace
+```
+
+A list is not a string either. Asking for the prefix of `tags` does **not** silently test its first
+element — that would be exactly the coercion the language refuses:
+
+```json
+knowledge_search
+{"where": "tags starts_with \"arch\""}
+```
+
+```text
+INVALID_SCHEMA: la consulta no es respondible sobre estos datos: en
+«adr/0001-markdown-source-of-truth.md» la comparación entre el campo «tags» y su literal tiene un
+operando de tipo list, y el operador de texto «starts_with» exige un string a los DOS lados: lo que
+no es texto no tiene prefijo ni sufijo que comprobar, y el lenguaje no coerce tipos (§20.8). …
+```
+
+Until v0.5.0 both of those returned `false` per document, so the answer was a **trimmed** result
+list — the documents whose field happened to be text — with nothing to tell you the rest had been
+dropped. Not matching is still not an error: `status starts_with "zzz"` over a string field is an
+empty result list, and a field no document has stays an empty result list too.
 
 The error is decided over the whole workspace and **before** `text`, `limit` and `cursor` are
 applied, so it is deterministic: a narrower search or a smaller page will not hide it. The way out
@@ -576,23 +645,6 @@ knowledge_search
 
 All three are avoided the same way: **do not put dots in frontmatter keys**, and do not name a
 top-level key `frontmatter`. Nested maps are the intended way to group.
-
-### `has(frontmatter)` does not test for a frontmatter block
-
-`frontmatter` on its own names the anchor prefix, not a key, so `has(frontmatter)` matches no
-document and `missing(frontmatter)` matches all of them — including the documents that do have
-frontmatter. The property that answers the question is `document.has_frontmatter`:
-
-```json
-knowledge_search
-{"where": "document.has_frontmatter = true", "limit": 20}
-```
-
-```json
-{"totalApproximate": 7}
-```
-
-(Seven of the demo's ten documents carry frontmatter.)
 
 ## Reference
 

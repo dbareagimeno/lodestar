@@ -29,6 +29,7 @@
 use std::path::Path;
 
 use lodestar_core::types::FileMap;
+use lodestar_workspace::config::ValidationSeverity;
 use lodestar_workspace::discovery::DiscoveryPolicy;
 use lodestar_workspace::{Workspace, WorkspaceConfig};
 
@@ -486,5 +487,295 @@ fn exclude_vacio_no_reabre_lodestar() {
              sería un documento escribible al que el control optimista no protege"
         );
         anterior = actual;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// E29-H01 — Config estricta: lo desconocido se rechaza y lo ilegible no degrada a defaults
+// (`requirements/epica-29-honestidad-superficie.md`, `decisiones §16(e)` + `§23/A-08`).
+//
+// Estos tests son la mitad de **workspace** de la historia; la mitad de fachada vive en
+// `crates/lodestar-cli/tests/e2e.rs` (exit 3 del binario) y en `crates/lodestar-mcp/tests/mcp.rs`
+// (el servidor no arranca). Se escriben aquí —contra la API pública `WorkspaceConfig::load` /
+// `Workspace::open`— en vez de en el módulo `#[cfg(test)]` de `src/config.rs`, para fijar el
+// comportamiento por donde lo ven las fachadas: lo que importa no es qué hace `serde_yaml` con una
+// struct, sino que **abrir el workspace** falle.
+//
+// Los tres primeros son ROJOS por diseño (hoy la config tolera en silencio); los dos últimos son
+// los **controles anti-vacuo** que impiden cerrar el rechazo de más, y hoy están en verde: su papel
+// es fallar si el arreglo se pasa de estricto.
+// ---------------------------------------------------------------------------
+
+/// **Dado** un `.lodestar/config.yaml` con `workspace: { writeableRoots: [...] }` (typo de
+/// `writableRoots`), **Cuando** se carga la config, **Entonces** es un error que **nombra la clave**
+/// desconocida — nunca una caída silenciosa a la política por defecto.
+///
+/// Es el hermano de `severidad_desconocida_es_error` para el nivel de la **clave**: hoy
+/// `WorkspaceConfig` y sus secciones llevan `#[serde(rename_all = "camelCase", default)]` pero **no**
+/// `deny_unknown_fields`, así que serde descarta calladamente todo lo que no reconoce y el usuario
+/// se queda con `writable_roots: []`, que significa *«todo el workspace es escribible»* — es decir,
+/// **más permisivo** que lo que creía haber configurado (`decisiones §16(e)`). Una config de
+/// seguridad que se relaja por un typo es peor que no tener config.
+///
+/// Se exige que el mensaje nombre la clave (serde lo hace de serie con `deny_unknown_fields`) y que
+/// conserve el prefijo `.lodestar/config.yaml inválido:` que ya usa `load`: sin la clave, el usuario
+/// sabe que algo está mal pero no **qué** línea borrar.
+#[test]
+fn clave_desconocida_en_seccion_es_error_de_config() {
+    let dir = tempfile::tempdir().unwrap();
+    lodestar_fixtures::materialize(&lodestar_fixtures::arbitrary(), dir.path()).unwrap();
+    escribe_config_yaml(dir.path(), "workspace:\n  writeableRoots: [\"notas\"]\n");
+
+    let err = match WorkspaceConfig::load(dir.path()) {
+        Err(e) => e,
+        Ok(cfg) => panic!(
+            "una clave desconocida («writeableRoots», typo de «writableRoots») debe ser un error de \
+             config: ignorarla deja al usuario con la política por defecto —MÁS permisiva que la que \
+             escribió— sin decirle nada. Se cargó: {:?}",
+            cfg.workspace
+        ),
+    };
+    assert!(
+        err.contains("writeableRoots"),
+        "el error debe NOMBRAR la clave rechazada para que se pueda arreglar; mensaje: {err:?}"
+    );
+    assert!(
+        err.contains("config.yaml"),
+        "…y conservar el prefijo que nombra el fichero (`.lodestar/config.yaml inválido: …`); \
+         mensaje: {err:?}"
+    );
+
+    // Y la apertura del workspace tiene que verlo: la config se valida una sola vez, al abrir, y de
+    // ahí salen el exit 3 de la CLI y el fallo de arranque del MCP.
+    match Workspace::open(dir.path()) {
+        Err(e) => assert!(
+            e.to_string().contains("writeableRoots"),
+            "el error de apertura debe arrastrar el nombre de la clave; mensaje: {}",
+            e
+        ),
+        Ok(ws) => panic!(
+            "abrir un workspace con una clave desconocida en la config debe fallar, no servir la \
+             política por defecto. Se abrió con: {:?}",
+            ws.discovery_policy()
+        ),
+    }
+}
+
+/// **Dado** un `config.yaml` con `validation: { "LINK-TARGET-MISSING": ignore }` —un **código** de
+/// diagnóstico donde el motor espera una **familia**—, **Cuando** se abre el workspace, **Entonces**
+/// es error de config y el mensaje **nombra las familias válidas**.
+///
+/// Es el caso G1-04 del testbench (`docs/qa/informe-homelab-2026-08-06.md`, `decisiones §23/A-08`):
+/// hoy `ValidationSection` es un `BTreeMap<String, ValidationSeverity>` transparente y **abierto a
+/// propósito**, así que la clave se acepta, no casa con ninguna familia de `family_of`, y el
+/// silenciado es **silenciosamente inerte**: el usuario cree haber apagado el diagnóstico y lo sigue
+/// viendo en cada `check`. Un silencio que no silencia es exactamente la «respuesta silenciosamente
+/// equivocada» que el principio rector de la épica prohíbe.
+///
+/// El mensaje tiene que publicar las familias válidas porque rechazar sin decir qué se admite sería
+/// cambiar un silencio por un muro (la razón por la que la historia incorpora también la mitad
+/// documental de A-08).
+#[test]
+fn familia_de_validation_desconocida_es_error_de_config() {
+    let dir = tempfile::tempdir().unwrap();
+    lodestar_fixtures::materialize(&lodestar_fixtures::arbitrary(), dir.path()).unwrap();
+    escribe_config_yaml(
+        dir.path(),
+        "validation:\n  \"LINK-TARGET-MISSING\": ignore\n",
+    );
+
+    let err = match WorkspaceConfig::load(dir.path()) {
+        Err(e) => e,
+        Ok(cfg) => panic!(
+            "`LINK-TARGET-MISSING` es un CÓDIGO de diagnóstico, no una familia de `§20.9`: \
+             aceptarlo lo vuelve un silenciado inerte (caso G1-04). Se cargó: {:?}",
+            cfg.validation
+        ),
+    };
+    assert!(
+        err.contains("LINK-TARGET-MISSING"),
+        "el error debe nombrar la clave rechazada; mensaje: {err:?}"
+    );
+    // Las cinco familias de `§20.9`. Que estén TODAS en el mensaje es lo que convierte el rechazo en
+    // una guía: el usuario que escribió el código tiene delante la familia que buscaba.
+    for familia in [
+        "malformedFrontmatter",
+        "danglingDocumentLinks",
+        "missingWorkspaceFiles",
+        "caseMismatch",
+        "isolatedDocuments",
+    ] {
+        assert!(
+            err.contains(familia),
+            "el error debe enumerar las familias válidas de `§20.9` (falta «{familia}»); \
+             mensaje: {err:?}"
+        );
+    }
+
+    match Workspace::open(dir.path()) {
+        Err(e) => assert!(
+            e.to_string().contains("LINK-TARGET-MISSING"),
+            "el error de apertura debe arrastrar la clave rechazada; mensaje: {}",
+            e
+        ),
+        Ok(_) => panic!(
+            "abrir un workspace cuya `validation` usa un código en lugar de una familia debe fallar"
+        ),
+    }
+}
+
+/// **Dado** un `config.yaml` con `validation: { isolatedDocuments: ignore }`, **Cuando** se abre el
+/// workspace, **Entonces** se acepta sin error.
+///
+/// **Control anti-vacuo de la lista cerrada**. `isolatedDocuments` es la única de las cinco familias
+/// de `§20.9` **sin productor**: el código `ORPHAN` murió en E16-H02 y su default `ignore` es un
+/// no-op, como documenta `family_of`. La tentación al cerrar la lista es derivarla de `family_of` y
+/// dejarla fuera — con lo que un `config.yaml` real (el propio repo puede llevarla) pasaría de
+/// funcionar a no abrir. `§20.9` la declara, así que se acepta: rechazar una familia que el contrato
+/// publica sería cambiar un silencio por una mentira nueva.
+///
+/// Se comprueba además que el dato **sobrevive** a la deserialización (no basta con «no falla»): si
+/// el arreglo la aceptara descartándola, el día que `isolatedDocuments` recupere productor el
+/// silenciado del usuario no se aplicaría.
+#[test]
+fn familia_isolated_documents_sigue_siendo_valida() {
+    let dir = tempfile::tempdir().unwrap();
+    lodestar_fixtures::materialize(&lodestar_fixtures::arbitrary(), dir.path()).unwrap();
+    escribe_config_yaml(
+        dir.path(),
+        "validation:\n  isolatedDocuments: ignore\n  caseMismatch: error\n",
+    );
+
+    let cfg = WorkspaceConfig::load(dir.path()).unwrap_or_else(|e| {
+        panic!(
+            "`isolatedDocuments` es una de las cinco familias que `§20.9` declara: cerrar la lista \
+             NO puede dejarla fuera aunque hoy no tenga productor. Error: {e}"
+        )
+    });
+    assert_eq!(
+        cfg.validation.families.get("isolatedDocuments"),
+        Some(&ValidationSeverity::Ignore),
+        "la familia declarada debe conservarse tras deserializar, no aceptarse y descartarse: \
+         cargado {:?}",
+        cfg.validation
+    );
+    assert_eq!(
+        cfg.validation.families.get("caseMismatch"),
+        Some(&ValidationSeverity::Error),
+        "y las familias con productor siguen cargándose igual: {:?}",
+        cfg.validation
+    );
+
+    Workspace::open(dir.path()).expect(
+        "un workspace cuya `validation` solo usa familias declaradas por `§20.9` debe abrirse",
+    );
+}
+
+/// **Dado** un `config.yaml` con `workspace: { root: "otra" }`, **Cuando** se abre el workspace,
+/// **Entonces** se acepta y se ignora, exactamente como hoy.
+///
+/// **Control anti-vacuo de la excepción declarada**. `workspace.root` es la única clave que
+/// `deny_unknown_fields` **no** puede convertir en error sin decidirlo: `§20.5`/E15-H08 ya declararon
+/// que se ignora a propósito —es circular, este fichero vive *dentro* de la raíz que pretendería
+/// redirigir— y hay `config.yaml` reales que la llevan (el test veterano
+/// `secciones_solo_de_carga_se_deserializan_sin_perder_datos` la ejercita en el módulo unitario).
+/// Aplicar el rechazo estricto sin excepción rompería esos workspaces al arrancar.
+///
+/// «Se ignora» son dos cosas y se aseveran las dos: no tumba el parseo **y** no redirige nada —el
+/// inventario sigue saliendo del directorio real, no de `otra/`.
+#[test]
+fn workspace_root_se_sigue_ignorando_sin_error() {
+    let dir = tempfile::tempdir().unwrap();
+    lodestar_fixtures::materialize(&lodestar_fixtures::arbitrary(), dir.path()).unwrap();
+    // Un directorio hermano REAL dentro del workspace, para que «redirigir» fuera observable si
+    // alguien implementara la clave por error.
+    escribe(dir.path(), "otra/despistada.md", "# Nota de otra raíz\n");
+    escribe_config_yaml(
+        dir.path(),
+        "workspace:\n  root: otra\n  writableRoots: [one]\n",
+    );
+
+    let cfg = WorkspaceConfig::load(dir.path()).unwrap_or_else(|e| {
+        panic!(
+            "`workspace.root` se ignora a propósito desde E15-H08 (`§20.5`: es circular): cerrar \
+             las claves desconocidas NO puede convertirla en un error de arranque, hay config.yaml \
+             reales que la llevan. Error: {e}"
+        )
+    });
+    assert_eq!(
+        cfg.workspace.writable_roots.len(),
+        1,
+        "…y el resto de la sección se sigue cargando: {:?}",
+        cfg.workspace
+    );
+
+    let ws = Workspace::open(dir.path())
+        .expect("un `workspace.root` en la config no puede impedir abrir el workspace");
+    let doc_set = ws.document_set().unwrap();
+    assert!(
+        contiene(doc_set.files(), "otra/despistada.md"),
+        "«ignorar» significa que la raíz sigue siendo la real y `otra/` es un directorio más del \
+         inventario, no la nueva raíz. Inventario: {:?}",
+        rutas(doc_set.files())
+    );
+    assert!(
+        contiene(doc_set.files(), "one/first.md"),
+        "…y nada de fuera de `otra/` desaparece. Inventario: {:?}",
+        rutas(doc_set.files())
+    );
+}
+
+/// **Dado** un `.lodestar/config.yaml` que **existe pero no se puede leer** (aquí: sustituido por un
+/// directorio), **Cuando** se carga la config, **Entonces** es un error que dice que no se pudo
+/// leer — no los defaults.
+///
+/// Hoy `WorkspaceConfig::load` hace `match std::fs::read_to_string(&path) { …, Err(_) =>
+/// WorkspaceConfig::default() }`: **cualquier** error de I/O —permisos, un directorio en su lugar,
+/// un disco que falla— cae al default, mientras `docs/user/ci.md` L295 afirma literalmente *«A
+/// malformed `config.yaml` is exit 3, never a silent fallback to defaults»*. La distinción que la
+/// historia exige es fina y es toda la historia: **ausente** (legítimo, `§20.1` arranque sin
+/// ceremonia) frente a **ilegible** (el usuario escribió una política que Lodestar no está
+/// aplicando).
+///
+/// El sustituto es un **directorio** porque es el único modo portable de provocar un error de
+/// lectura distinto de `NotFound` sin depender de permisos (que `root` o un umask exótico pueden
+/// saltarse en CI).
+#[test]
+fn config_ilegible_no_degrada_a_defaults() {
+    let dir = tempfile::tempdir().unwrap();
+    lodestar_fixtures::materialize(&lodestar_fixtures::arbitrary(), dir.path()).unwrap();
+    // `.lodestar/config.yaml` existe… y es un directorio: `read_to_string` falla con algo que NO es
+    // `NotFound`.
+    std::fs::create_dir_all(dir.path().join(".lodestar/config.yaml"))
+        .expect("crear el «config.yaml» ilegible");
+    assert!(
+        dir.path().join(".lodestar/config.yaml").exists(),
+        "precondición: el fichero de config tiene que EXISTIR para que el caso no sea el de ausencia"
+    );
+
+    let err = match WorkspaceConfig::load(dir.path()) {
+        Err(e) => e,
+        Ok(cfg) => panic!(
+            "un `config.yaml` que existe pero no se puede leer NO puede degradar a defaults: el \
+             usuario declaró una política que Lodestar no está aplicando y nadie se lo dice. Se \
+             cargó: {:?}",
+            cfg.discovery
+        ),
+    };
+    assert!(
+        err.contains("config.yaml"),
+        "el error debe nombrar la ruta que no se pudo leer; mensaje: {err:?}"
+    );
+
+    match Workspace::open(dir.path()) {
+        Err(e) => assert!(
+            e.to_string().contains("config.yaml"),
+            "el error de apertura debe nombrar el fichero ilegible; mensaje: {}",
+            e
+        ),
+        Ok(ws) => panic!(
+            "abrir con la config ilegible debe fallar, no servir la política por defecto: {:?}",
+            ws.discovery_policy()
+        ),
     }
 }

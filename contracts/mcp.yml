@@ -291,8 +291,12 @@
 #     el `inputSchema`. Hasta v0.3.0 la regla de la casa de abajo se cumplía a medias: `limit: 0`
 #     (con `minimum: 1` declarado) devolvía 0 resultados, y `limit: "10"`, `depth: "3"` o
 #     `includeSuggestedFixes: "true"` caían al default EN SILENCIO. Ahora → `INVALID_SCHEMA`.
-#     **La política sobre los NO declarados no cambia**: se siguen ignorando (ver
-#     `validacion_de_argumentos`); revisarla es una decisión abierta, no un bugfix.
+#     **La política sobre los NO declarados no cambiaba AQUÍ**: en v0.3.1 se seguían ignorando, y
+#     revisarla se declaró decisión abierta, no un bugfix. **Esa decisión se tomó**: `decisiones §15`
+#     resolvió ejecutar lo que el schema declara y **E29-H08** (v0.6.0) la aplicó — hoy una clave no
+#     declarada se RECHAZA con `INVALID_SCHEMA` nombrándola. Ver `validacion_de_argumentos`, que es
+#     la regla vigente; esta línea se conserva como historia de por qué el contrato dijo lo
+#     contrario durante dos versiones.
 #   - **Todo error de superficie lleva código del catálogo**: eran 10 de 21 sin código. En especial,
 #     un `where`/`filter` malformado sale con `INVALID_SCHEMA` y no con `INTERNAL_IO_ERROR`, y la
 #     MISMA consulta malformada ya no da dos códigos distintos según entre por `knowledge_search` o
@@ -484,6 +488,128 @@
 #        edición externa en la ventana de publicación (antes la pisaban), y un cambio publicado
 #        SIEMPRE deja recibo: un apply que publicó responde éxito aunque falle su cierre.
 
+# E29-H02 (2026-08-06, `decisiones §19(b)`): `policy` de `change_plan` acepta un objeto PARCIAL —una
+# sola clave, o incluso `{}`— y completa cada campo omitido con su default declarado, en vez de
+# fallar con `INVALID_SCHEMA: missing field …`. Redacción, sin cambio de forma: los dos campos ya se
+# declaraban opcionales.
+
+# E29-H04 (2026-08-06, `decisiones §23/A-04`): los operadores de AFIJO (`starts_with`/`ends_with`)
+# sobre un campo —o un literal— que no es string dejan de responder `false` en silencio y pasan a ser
+# un TYPE ERROR más, con el mismo trato que E26-H08 dio al orden: `INVALID_SCHEMA` con el
+# diagnóstico del core en `knowledge_search`, y ABORTO del plan en la selección masiva de
+# `change_plan`. El catálogo de type errors del lenguaje pasa de dos casos a TRES (orden cruzado ·
+# operador de lista sobre un no-lista · operador de texto sobre un no-string) y el de `ErrorCode`
+# NO se abre: sigue en 17 filas. Cambio de comportamiento observable para cualquier cliente
+# existente: `priority starts_with "3"` sobre un `priority: 3` numérico devolvía una lista
+# RECORTADA —los documentos con ese campo textual— y hoy es un error (caso G1-20 del testbench).
+# Sin cambio: la ausencia del campo sigue siendo `false`, y `starts_with`/`ends_with` sobre strings
+# siguen casando prefijo/sufijo con su `false` legítimo.
+
+# E29-H06 (2026-08-06, `decisiones §16(f)`, `ARCHITECTURE.md §20.9`): el catálogo de `CheckCode`
+# —el enum de wire de `Check.code`— gana la fila `WORKSPACE-EMPTY` (severidad `warn`, productor:
+# DESCUBRIMIENTO). La superficie de 10 tools NO cambia, ningún `outputSchema` cambia de forma (el
+# `Check` ya viaja con su `code`), el catálogo de `ErrorCode` NO se abre (esto no es un error de
+# operación) y ningún código sale.
+#   - Qué avisa: bajo la raíz auditada el inventario quedó VACÍO — ni un solo documento. El mensaje
+#     nombra la raíz y distingue las dos causas probables: no hay ningún `.md`, o los hay y la
+#     política de descubrimiento (`discovery.include`/`exclude`, `.gitignore`, `.lodestarignore`)
+#     los deja a todos fuera.
+#   - Por qué: un `cd` al directorio equivocado respondía «todo en orden» (exit 0 · VÁLIDO,
+#     `counts.documents: 0`), literalmente correcto e indistinguible de un repo legítimamente
+#     vacío. Es el «respondió que sí a algo que no entendió» en la puerta de entrada del producto.
+#   - Severidad **intrínseca y no configurable**: `family_of` devuelve `None`, igual que
+#     `DOC-NOT-UTF8`/`SYMLINK-UNSUPPORTED`/`DOC-BOM`. No se añade una sexta familia a `validation:`.
+#   - **Sin `targets`**, como `PATH-NOT-UTF8`: no describe un fichero sino la ausencia de todos, y
+#     la raíz no tiene `RelPath` que la represente (`RelPath::new("")` es `Err` por diseño). En
+#     `knowledge_check` viaja igual que cualquier otro diagnóstico (su `anchor` de orden/paginación
+#     es la cadena vacía); en el `Analysis` de `lodestar check --json`/`--sarif` —que indexa por
+#     `RelPath`— entra bajo la clave sintética `.lodestar` (el plano de control, suelo duro del
+#     descubrimiento: nunca es un documento, así que no puede pisar los diagnósticos de un fichero
+#     real). Hasta v0.5.0 los diagnósticos sin `target` se DESCARTABAN al componer ese `Analysis`,
+#     así que la CLI no los veía; desde E29-H06 los ve por esa clave.
+#   - **Exit codes intactos**: un workspace vacío sin otros diagnósticos sigue saliendo `0` y
+#     `valid: true` (`§20.1`: cualquier directorio es un workspace válido y no se reintroduce
+#     ningún gate al abrir). Solo con `gate.blockWarnings: true` sale `1` — por la política del
+#     usuario, no por el aviso.
+
+# E29-H07 (2026-08-07, `decisiones §18`): `canApply` deja de ser un consejo y VINCULA al apply. Un
+# plan cuyo `canApply` era `false` bajo la `PlanPolicy` con la que se planificó ya no se puede
+# publicar: `change_apply` lo rechaza con `INVALID_RESULT`, ANTES de tomar el lock y sin escribir
+# nada. La superficie de 10 tools NO cambia y el catálogo de `ErrorCode` NO se abre: sigue en 17
+# filas.
+#   - Qué cambia observablemente: hasta v0.5.0 `change_plan` respondía `canApply:false` y el mismo
+#     `changeSetId` se aplicaba igual si el cliente insistía (`applied:true` con
+#     `validation.valid:false` y sin diagnósticos nuevos). El único filtro que quedaba era el gate de
+#     STAGING (`transactions.rejectNewErrors`/`allowExistingErrors`, E20-H04), una política DISTINTA
+#     que no muerde ni con errores PREEXISTENTES ni con warnings: dos políticas, una publicada y
+#     otra ejercida. Un cliente que ignoraba `canApply` a propósito ve ahora un error donde antes
+#     publicaba; el remedio es replanificar, o planificar con una policy que admita el resultado.
+#   - Por qué se REUSA `INVALID_RESULT` y no se abre la fila 18 (la carga de la prueba de `§18`): es
+#     el mismo predicado —«el resultado simulado no supera la política vigente»—, con el mismo
+#     remedio, y los dos gates son distinguibles POR EL MENSAJE porque sus vocabularios son
+#     disjuntos: el del plan nombra `requireValidResult`/`allowWarnings` y NUNCA
+#     `rejectNewErrors`/`allowExistingErrors`; el de staging, al revés. Verificado por
+#     `lodestar-app/tests/plan.rs::mensaje_del_rechazo_no_se_confunde_con_el_gate_de_staging`.
+#   - Cómo se ejerce: el veredicto se RECOMPUTA en el apply con `core::plan::can_apply` (invariante
+#     #3: el predicado no se reimplementa) sobre el resultado hipotético del plan, usando la
+#     `PlanPolicy` que ahora se PERSISTE con el plan. No se congela el booleano: el apply re-verifica
+#     el `planHash` y la revisión, y `canApply` no podía ser el único veredicto no re-computado.
+#   - Compatibilidad de planes persistidos por un binario ANTERIOR: `PlanResult.policy` es
+#     `#[serde(default)]`, así que un plan viejo sin el campo se juzga con `PlanPolicy::default()`
+#     (`requireValidResult:true`, `allowWarnings:true`) — la más estricta de las dos que el wire
+#     admite, de modo que el gate nunca es más laxo de lo que su cliente pidió. Un plan viejo
+#     planificado con `requireValidResult:false` puede así rechazarse tras actualizar; se resuelve
+#     replanificando y lo acota el TTL corto del plan.
+
+# E29-H08 (2026-08-07, `decisiones §15`): **el wire RECHAZA los parámetros que no declara**. Es el
+# cambio más profundo de la épica porque reescribe la REGLA DE LA CASA (`validacion_de_argumentos`,
+# abajo), que hasta v0.5.0 decía «el servidor IGNORA lo que no declara» mientras los 10 `inputSchema`
+# publicaban `additionalProperties: false`: el contrato se contradecía a sí mismo y el motor cumplía
+# la mitad mentirosa.
+#   - **Qué cambia en el comportamiento**: una clave no declarada es `INVALID_SCHEMA` **nombrándola**
+#     (y listando las declaradas, para que el agente sepa cuál quiso escribir). Antes se descartaba y
+#     la llamada devolvía la respuesta POR DEFECTO: `knowledge_search{sort:"title"}` servía resultados
+#     en un orden que no era el pedido, y `{wheres:"…"}` devolvía TODOS los documentos —una respuesta
+#     plausible— en vez de la vacía que habría hecho sospechar. 15 casos medidos (sonda 4 de la
+#     revisión de v0.3.0).
+#   - **NINGÚN `inputSchema` cambia** y no hay código de error nuevo: `INVALID_SCHEMA` ya existía y
+#     `additionalProperties: false` ya estaba declarado. Lo único que cambia es que se CUMPLE.
+#   - **De dónde salen las claves legales**: del propio `inputSchema` que sirve `tools/list`,
+#     recorrido como JSON (`crates/lodestar-mcp/src/validacion.rs`). No hay lista paralela escrita a
+#     mano que pueda divergir del schema publicado — es la guarda anti-envejecimiento que pedía la
+#     historia, y la vigila `descubribilidad.rs::el_schema_declarado_coincide_con_lo_aceptado` en las
+#     dos direcciones (nada declarado se rechaza; nada no declarado se acepta).
+#   - **La excepción del nivel operación** (UNIÓN, no partición) y **por qué** está enunciada en
+#     `validacion_de_argumentos`: `path`/`ref` intercambiables y `body` compartido entre dos ops.
+#     Cerrar la partición por op es trabajo FUTURO declarado, no un olvido.
+#   - **Efecto colateral declarado**: una clave desconocida dentro de `policy` (objeto anidado con
+#     `additionalProperties: false`) pasa a rechazarse. E29-H02 dejó ese caso explícitamente sin
+#     decidir («el comportamiento es el que fije E29-H08»), y aquí se decide: se rechaza, por la
+#     misma razón que el resto.
+
+# E29-H09 (2026-08-06, `decisiones §23/D-01`, caso G1-24 del testbench): dos correcciones del mismo
+# hallazgo, ambas en `main.rs` (`handle`, brazo `initialize`). La superficie de 10 tools NO cambia,
+# ningún `outputSchema` cambia de forma.
+#   - `instructions` pasa a depender del PERFIL: bajo `readonly` nombra exactamente las 7 tools que
+#     `tools/list` sirve (nunca `change_plan`/`change_apply`/`change_revert`); bajo `standard`, las
+#     10. Antes era una constante única servida sin mirar `profile`, así que en `readonly` seguía
+#     describiendo el flujo de cambio completo — un agente que lo siguiera al pie de la letra topaba
+#     con `-32602`. La generación deriva del MISMO predicado que decide `tools/list`
+#     (`tools::available`, que ya usa `Profile::writes_enabled` + `tools::is_change_tool`): no hay
+#     una segunda lista de nombres de tool escrita a mano que pudiera divergir (invariante #4).
+#   - `protocolVersion` NO soportada deja de aceptarse en silencio (antes: se descartaba con
+#     `.filter(...)` y el servidor respondía éxito con su versión por defecto, como si el cliente
+#     hubiera pedido esa). Ahora se RECHAZA: error JSON-RPC `-32602` (mismo código que "tool
+#     desconocida"/"tool no disponible bajo el perfil") con un mensaje que lista las tres versiones
+#     aceptadas, y SIN `result` — un `initialize` fallido es un handshake fallido, no un error de
+#     dominio de tool, así que no lleva código del catálogo `ErrorCode`. La AUSENCIA de
+#     `protocolVersion` sigue siendo válida: se responde `2024-11-05`, la versión por defecto, sin
+#     error (omitir no es lo mismo que pedir algo imposible). Nota: la spec MCP base (2025-06-18,
+#     «Version Negotiation») prescribe una negociación blanda —el servidor responde con la versión
+#     que sí soporta y deja decidir al cliente—; aquí se sigue la prescripción explícita de la
+#     historia (rechazo duro) porque coincide con el principio rector de la épica y con el patrón que
+#     el servidor ya usa para tool desconocida/no disponible.
+
 meta:
   fachada: lodestar-mcp (JSON-RPC por stdio; stdout puro, logs a stderr)
   fuente_registro: crates/lodestar-mcp/src/tools.rs        # tools::list()
@@ -492,16 +618,33 @@ meta:
   protocolo:
     metodos: [initialize, ping, "tools/list", "tools/call"]
     protocol_versions_aceptadas: ["2024-11-05", "2025-03-26", "2025-06-18"]
+    protocol_version_no_soportada: >-
+      (E29-H09) Una `protocolVersion` presente en `initialize.params` pero AUSENTE de
+      `protocol_versions_aceptadas` se RECHAZA: error JSON-RPC `-32602` (mismo código que "tool
+      desconocida"/"tool no disponible bajo el perfil") con un mensaje que lista las tres versiones
+      aceptadas, y la respuesta NO lleva `result` (main.rs, brazo `initialize`, `PROTOCOL_VERSIONS`).
+      Un handshake rechazado no es un error de dominio de tool: no lleva código del catálogo
+      `ErrorCode`. La AUSENCIA de `protocolVersion` sigue siendo válida — se responde
+      `DEFAULT_PROTOCOL_VERSION` (`2024-11-05`) sin error — y una versión presente Y aceptada se
+      ecoa tal cual, como antes de esta historia.
     instructions: >-
-      La respuesta `initialize` incluye `instructions` (string): el flujo recomendado de 10 pasos
-      en orden — workspace_status → knowledge_search → knowledge_get → metadata_inspect →
+      La respuesta `initialize` incluye `instructions` (string): el flujo recomendado, en orden —
+      workspace_status → knowledge_search → knowledge_get → metadata_inspect →
       graph_query/impact_analyze → change_plan → change_apply → knowledge_check → change_revert
-      (main.rs SERVER_INSTRUCTIONS, E14-H03). Es SUPERFICIE DE WIRE, no documentación: es lo primero
-      que lee un agente, así que un nombre de operación obsoleto ahí se convierte en una llamada
-      fallida. E23-H13 lo saldó (decía «huérfanos», operación renombrada a `isolated` en E16-H02, y
-      «conformidad», vocabulario que E23-H14 sustituyó por `valid`) y lo blindó con
-      `mcp.rs::instructions_sin_vocabulario_retirado`, que prohíbe el vocabulario retirado y exige
-      que el texto nombre EXACTAMENTE las tools que sirve `tools/list`.
+      (main.rs `server_instructions`, E14-H03; generación por perfil desde E29-H09). Es SUPERFICIE
+      DE WIRE, no documentación: es lo primero que lee un agente, así que un nombre de operación
+      obsoleto ahí se convierte en una llamada fallida. E23-H13 saldó el vocabulario retirado (decía
+      «huérfanos», operación renombrada a `isolated` en E16-H02, y «conformidad», vocabulario que
+      E23-H14 sustituyó por `valid`); E29-H09 saldó que el texto dependiera del PERFIL — bajo
+      `readonly` seguía nombrando las 3 tools de cambio aunque `tools/list` no las sirviera (caso
+      G1-24 del testbench). **Garantía declarada por perfil**: el texto nombra EXACTAMENTE las
+      tools que sirve `tools/list` BAJO EL PERFIL ACTIVO — 10 en `standard`, 7 en `readonly`, ni una
+      de menos ni una de más — derivado del MISMO predicado que decide `tools/list`
+      (`tools::available`, que a su vez usa `Profile::writes_enabled` + `tools::is_change_tool`): no
+      hay una segunda lista de nombres de tool. Blindado por
+      `mcp.rs::instructions_sin_vocabulario_retirado` (vocabulario + perfil `standard`),
+      `instructions_readonly_nombra_solo_las_tools_servidas` e
+      `instructions_readonly_no_nombra_tools_de_cambio` (perfil `readonly`).
   perfiles:
     # `lodestar-mcp [--root <dir>] [--profile readonly|standard]`, `standard` por defecto
     # (main.rs parse_args; lodestar_app::Profile). El perfil NO viaja por el wire: el cliente solo
@@ -510,7 +653,8 @@ meta:
     readonly: >-
       Oculta las 3 tools de cambio (`perfil: standard`) de `tools/list` (tools::available_tools) y
       RECHAZA su invocación con -32602 (tools::available), aunque el cliente las llame directamente.
-      `workspace_status.capabilities.writes/transactions/revert` == false.
+      `workspace_status.capabilities.writes/transactions/revert` == false. Desde E29-H09 también
+      acota `instructions`: el texto de `initialize` nombra únicamente las 7 tools de lectura.
     standard: >-
       Superficie completa (tools de lectura + las 3 de cambio). `capabilities.writes` == true.
   errores_protocolo:
@@ -519,6 +663,7 @@ meta:
     - "-32600 Invalid Request (no es objeto / batch no soportado) (main.rs, guarda de `handle`)"
     - "-32601 método no soportado (main.rs, brazo por defecto del `match method`)"
     - "-32602 tool desconocida (tools/call con nombre no registrado, o tool de cambio bajo `readonly`) (main.rs, brazo «tools/call» vía tools::available)"
+    - "-32602 protocolVersion no soportada en `initialize` (presente pero ausente de protocol_versions_aceptadas), mensaje con las versiones aceptadas, sin `result` (main.rs, brazo «initialize», E29-H09)"
   errores_ejecucion: >-
     Un error de ejecución de tool NO viaja como error JSON-RPC: va en el result como
     { content:[{type:text,text:msg}], isError:true } para que el modelo lo vea y corrija.
@@ -545,20 +690,36 @@ meta:
     `descubribilidad.rs::los_codigos_del_contrato_estan_en_el_catalogo` lo trata como el único valor
     admisible de una entrada de `errores:` que no sea una de las 17 filas.
   validacion_de_argumentos: >-
-    REGLA DE LA CASA, enunciada aquí una vez porque hasta E23-H11 vivía implícita en tres semánticas
-    distintas: **el servidor valida los VALORES de los parámetros que declara, e IGNORA lo que no
-    declara.** No valida `arguments` contra el `inputSchema` — este es DECLARATIVO por diseño
-    (E23-H10), y quien lo valida es el cliente, para lo cual todos los objetos llevan
-    `additionalProperties: false`. El criterio operativo es: se RECHAZA cuando hay un despachador que
-    de todos modos tiene que interpretar el valor (`operations[].op`, `inboundLinksPolicy`, `mode` de
-    `metadata_inspect`, el `include` de `knowledge_search`), y se IGNORA cuando el valor no llega a
-    ningún intérprete y el schema cerrado ya lo declara imposible (p. ej. mandar el `sort` retirado en
-    E23-H11, o el `externalReferences` retirado del `include` de `knowledge_get` en E23-H12: son
-    propiedades/valores desconocidos y como tales se descartan). La diferencia con el defecto que
-    E23 salda —superficie que anuncia y no cumple— es que aquí no hay nada anunciado: es tolerancia
-    genérica y uniforme, no una promesa falsa.
-    DEUDA DECLARADA: ese `additionalProperties: false` es él mismo una afirmación que el servidor no
-    ejecuta. Preexistente a E23-H11 (política de E23-H10), registrada para que no se descubra dos veces.
+    REGLA DE LA CASA (**reescrita por E29-H08**, `decisiones §15`): **el servidor valida los VALORES
+    de los parámetros que declara Y RECHAZA las claves que no declara.** Hasta v0.5.0 esta regla
+    decía lo contrario —«e IGNORA lo que no declara»—: los 10 `inputSchema` publicaban
+    `additionalProperties: false` y el despachador leía campo a campo sin mirar las claves sobrantes,
+    así que el `sort` retirado en E23-H11, un `offset` inexistente o un typo como `wheres` se
+    descartaban en silencio y el agente recibía la respuesta POR DEFECTO, indistinguible de una
+    legítima (15 casos medidos en la revisión de la v0.3.0, sonda 4). Era una superficie que anuncia
+    y no cumple, que es justo el defecto que la épica de honestidad cierra.
+    NIVEL TOOL (`arguments` de `tools/call`): partición LIMPIA. Una clave que el `inputSchema` de esa
+    tool no declara es `INVALID_SCHEMA` **nombrándola**, y lo mismo dentro de los objetos anidados
+    que el schema declara cerrados (`ref`, `to`, `proposedOperation`, `policy`). Las claves legales
+    se DERIVAN del propio `inputSchema` que sirve `tools/list` (una sola fuente: schema publicado y
+    lista ejecutada no pueden divergir).
+    NIVEL OPERACIÓN (`operations[]` de `change_plan` y el `operation` de la selección masiva):
+    validación por **UNIÓN**, no por partición. Se rechaza lo que no esté en la unión de los campos
+    legales de las 7 operaciones; NO se rechaza un campo legal para OTRA op. Es decir: un `body` en
+    un `patch_frontmatter` **se sigue ignorando**, y un `bodyy` se rechaza. La razón es concreta y no
+    teórica: `path`/`ref` son intercambiables salvo en `create` y `body` pertenece a DOS ops
+    (`create` y `replace_body`), así que una partición estricta rechazaría lotes VÁLIDOS —un agente
+    que reutiliza la misma plantilla de objeto para varias operaciones de un lote—. Excepción
+    declarada dentro de la excepción: el valor de `patch_frontmatter` en la selección masiva ES el
+    merge-patch de frontmatter, o sea claves ARBITRARIAS del usuario (`§20.2` invariante 3 prohíbe
+    imponer vocabulario), y por tanto no se valida como campos de operación.
+    Cerrar la partición por op —el `oneOf` por operación que sigue sin existir en
+    `operacion_item_schema`— es **trabajo futuro declarado, no un olvido**: exige decidir antes qué
+    pasa con los lotes de plantilla reutilizada.
+    DEUDA SALDADA: hasta v0.5.0 aquí se declaraba que ese `additionalProperties: false` era él mismo
+    una afirmación que el servidor NO ejecutaba —deuda preexistente a E23-H11, registrada para que no
+    se descubriera dos veces—. **E29-H08 la saldó**: hoy se ejecuta, con los dos niveles descritos
+    arriba.
   arranque: >-
     `lodestar-mcp [--root <dir>] [--profile readonly|standard]` (main.rs parse_args, E15-H06,
     `ARCHITECTURE.md §20.5`). Sin `--root` la raíz es `std::env::current_dir()`. NO hay argumento
@@ -597,7 +758,7 @@ tools:
     params: []
     retorno: "WorkspaceStatus (lodestar_app) — json directo, sin envelope"
     output_schema: "sí — schemars::schema_for!(WorkspaceStatus), vía lodestar_app::schemas::workspace_status_schema()"
-    errores: ["WorkspaceError"]
+    errores: ["WorkspaceError", "INVALID_SCHEMA (parámetro no declarado: su `inputSchema` es el objeto VACÍO, así que CUALQUIER argumento sobra — E29-H08)"]
     semantica: >-
       Config activa, capacidades del perfil de arranque (`readonly`/`standard`),
       conformidad y recuento agregado (documents/links/isolated/dangling/errors/warnings).
@@ -636,7 +797,7 @@ tools:
       - { nombre: cursor, tipo: string, requerido: false, semantica: "cursor opaco (offset codificado en hex) devuelto en nextCursor" }
     retorno: "SearchResults (lodestar_app): { results: [SearchResult], nextCursor, totalApproximate } — json directo, sin envelope. SearchResult NUNCA lleva body; desde E19-H05 tampoco los campos privilegiados OKF type/status/description/tags — solo path, title (derivado), snippet, score, revision (+ id, siempre ausente en v2), y desde E23-H11 `frontmatter` (solo si se pidió algo en `include`: el mapa de los field paths proyectados)"
     output_schema: "sí — schemars::schema_for!(SearchResults), vía lodestar_app::schemas::knowledge_search_schema()"
-    errores: ["INVALID_SCHEMA (un `where`/`filter` malformado, con el diagnóstico del parser del core en el mensaje — E24-H10/E26-H07; una entrada de `include` que no sea «frontmatter.<fieldPath>» válida — E23-H11, se rechaza en el despachador, antes de tocar el workspace, y NO devuelve página de resultados; desde E26-H08 un TYPE ERROR de evaluación: comparar un campo con un literal de tipo incompatible, p. ej. `priority >= \"high\"` sobre `priority: 2`; y los VALORES declarados fuera de rango o de tipo — `text`/`where`/`cursor` que no sean cadena, `limit` fuera de [1, 100] — E24-H09)", "WorkspaceError"]
+    errores: ["INVALID_SCHEMA (un `where`/`filter` malformado, con el diagnóstico del parser del core en el mensaje — E24-H10/E26-H07; una entrada de `include` que no sea «frontmatter.<fieldPath>» válida — E23-H11, se rechaza en el despachador, antes de tocar el workspace, y NO devuelve página de resultados; desde E26-H08 un TYPE ERROR de evaluación: comparar un campo con un literal de tipo incompatible, p. ej. `priority >= \"high\"` sobre `priority: 2`, y desde E29-H04 también un operador de TEXTO sobre un valor que no es string, p. ej. `priority starts_with \"3\"` sobre `priority: 3`; y los VALORES declarados fuera de rango o de tipo — `text`/`where`/`cursor` que no sean cadena, `limit` fuera de [1, 100] — E24-H09)", "WorkspaceError"]
     semantica: >-
       Localiza documentos por texto libre y por el lenguaje de consulta tipado (where/filter), con
       snippet compacto y `revision` (DocumentRevision), sin devolver cuerpos completos. El filtrado
@@ -648,10 +809,17 @@ tools:
       mentir al agente, un criterio alternativo rompería el cursor-offset, que se apoya en que el
       orden dependa solo del contenido.
       Un error de TIPO durante la evaluación aborta la consulta con INVALID_SCHEMA nombrando
-      campo, operador, los dos tipos y el DOCUMENTO donde chocaron (E26-H08). Hasta v0.4.0 EXCLUÍA
-      el documento en silencio, así que la respuesta era una lista recortada indistinguible de la
-      correcta, decidida documento a documento. No casar (Ok(false)) sigue siendo ausencia, no
-      error, y un campo ausente tampoco es error. El error se decide sobre el ORDEN TOTAL de
+      campo, operador, el/los tipo(s) implicados y el DOCUMENTO donde chocaron (E26-H08). Hasta
+      v0.4.0 EXCLUÍA el documento en silencio, así que la respuesta era una lista recortada
+      indistinguible de la correcta, decidida documento a documento. Son TRES los casos (E29-H04):
+      (1) ORDEN CRUZADO — `>`/`>=`/`<`/`<=` fuera de number-vs-number o string-vs-string; (2)
+      OPERADOR DE LISTA sobre un no-lista — `contains` sobre un escalar no string,
+      `contains_any`/`contains_all` sobre cualquier no-lista; (3) OPERADOR DE TEXTO sobre un
+      no-string — `starts_with`/`ends_with` con el CAMPO o el LITERAL de otro tipo (hasta v0.5.0
+      devolvía `false`, así que `priority starts_with "3"` sobre un `priority: 3` numérico servía la
+      lista recortada de los documentos con ese campo textual: caso G1-20 del testbench,
+      `decisiones §23/A-04`). No casar (Ok(false)) sigue siendo ausencia, no error, y un campo
+      ausente tampoco es error. El error se decide sobre el ORDEN TOTAL de
       Analysis::documents (se reporta el PRIMER documento que yerra) y ANTES de aplicar `text` y
       `limit`/`cursor`: es un error de la CONSULTA, no del subconjunto, así que ni un `text` más
       estrecho ni una página más pequeña lo tapan — la misma consulta sobre el mismo workspace da
@@ -698,19 +866,21 @@ tools:
     fuente: crates/lodestar-mcp/src/tools.rs
     historia: E10-H12
     params:
-      - { nombre: scope, tipo: "object (CheckScope)", requerido: true, semantica: "discriminado por «kind»: workspace (todos) | document{ref} | paths{paths} | affected{refs,depth} (vecindario/blast-radius, DocumentSet::neighborhood Direction::Both)" }
+      - { nombre: scope, tipo: "object (CheckScope)", requerido: true, semantica: "discriminado por «kind»: workspace (todos) | document{ref} | paths{paths} | affected{refs,depth} (vecindario/blast-radius, DocumentSet::neighborhood Direction::Both). E29-H05: en «paths», CADA path de la lista debe existir en el inventario (mismo criterio que resuelve `ref` en document/affected, invariante #3) — el primero que no resuelva, en el ORDEN RECIBIDO, da DOCUMENT_NOT_FOUND y aborta el scope entero (no hay informe parcial de los paths que sí existían). Un path presente en disco pero excluido del inventario por `.gitignore`/`.lodestarignore`/`discovery` cuenta como inexistente: el inventario, no el filesystem, es la verdad de qué documentos hay. Hasta v0.5.0 el brazo «paths» no comprobaba nada (`Ok(paths.iter().cloned().collect())`) y un path inexistente o excluido simplemente no aportaba diagnósticos, indistinguible de «ese documento está impecable» (caso G1-23 del testbench, `decisiones §23/A-07`). «paths: []» sigue siendo un scope legítimamente vacío, sin error" }
       - { nombre: minimumSeverity, tipo: string, requerido: false, valores: ["err", "warn", "info"], default: "info (ya excluye Pass)", semantica: "umbral de lo DEVUELTO; summary/valid se computan sobre todo el scope, antes del umbral" }
       - { nombre: includeSuggestedFixes, tipo: boolean, default: false, semantica: "false vacía «fixes» en cada diagnóstico. HOY `fixes` ESTÁ SIEMPRE VACÍO, así que este parámetro apaga algo ya apagado: el único productor de `Fix` (`validate_relations`/`REL-TARGET`) desapareció con `core::schema` en E20-H03, y NADIE construye un `Fix` en todo el árbol. E23-H11 decidió CONSERVAR este lado de lectura —un array vacío se lee como «no hay sugerencias» y es verdad— y retirar solo la op de escritura `apply_fix`, que sí mentía: era invocable, fallaba siempre y devolvía DOCUMENT_NOT_FOUND, mandando al agente a buscar el problema donde no estaba. El análisis completo y la condición de entrada para reactivarlo, en `docs/history/PROPUESTA_FIXES.md`" }
       - { nombre: limit, tipo: integer, default: 100, minimo: 1, maximo: 1000 }
       - { nombre: cursor, tipo: string, requerido: false, semantica: "cursor opaco de paginación devuelto en nextCursor" }
     retorno: "CheckReport (lodestar_app): { valid, summary: CheckSummary, diagnostics: [Check], workspaceRevision, nextCursor } — json directo, sin envelope"
     output_schema: "sí — schemars::schema_for!(CheckReport), vía lodestar_app::schemas::knowledge_check_schema()"
-    errores: ["INVALID_SCHEMA (falta «scope» o su forma no encaja con el enum de «kind»; «minimumSeverity» fuera de {err, warn, info}; «includeSuggestedFixes» que no sea booleano; «limit» fuera de [1, 1000] o no entero; «cursor» que no sea cadena — E24-H09, la regla de la casa aplicada a los valores DECLARADOS; el contrato no lo listaba hasta E26-H11 pese a que `tipo_incorrecto_es_invalid_schema` lo fija por el wire desde v0.3.1)", "DOCUMENT_NOT_FOUND (ref inexistente en scope document/affected)", "WorkspaceError"]
+    errores: ["INVALID_SCHEMA (falta «scope» o su forma no encaja con el enum de «kind»; «minimumSeverity» fuera de {err, warn, info}; «includeSuggestedFixes» que no sea booleano; «limit» fuera de [1, 1000] o no entero; «cursor» que no sea cadena — E24-H09, la regla de la casa aplicada a los valores DECLARADOS; el contrato no lo listaba hasta E26-H11 pese a que `tipo_incorrecto_es_invalid_schema` lo fija por el wire desde v0.3.1)", "DOCUMENT_NOT_FOUND (ref inexistente en scope document/affected; desde E29-H05 TAMBIÉN en scope paths, cuando algún path de la lista no resuelve en el inventario —incluido uno excluido por discovery—, nombrando el primero en el orden recibido)", "WorkspaceError"]
     semantica: >-
       Audita conocimiento (diagnósticos de DocumentSet::analyze) con scope y severidad mínima. En
       scope workspace añade los diagnósticos de DESCUBRIMIENTO (§20.9, E20-H04:
       DOC-NOT-UTF8/DOC-TOO-LARGE/SYMLINK-UNSUPPORTED/PATH-NOT-UTF8 + colisiones de capitalización
-      del inventario), cuyo objetivo no es un documento (o no lo tienen). La severidad de cada
+      del inventario; y desde E29-H06 WORKSPACE-EMPTY, `warn` sin `targets`, cuando el inventario
+      queda VACÍO bajo la raíz — 0 documentos, por no haber `.md` o porque discovery los excluye a
+      todos; no tumba `valid`), cuyo objetivo no es un documento (o no lo tienen). La severidad de cada
       diagnóstico la fija la sección `validation` de la config por familia (E20-H04): un override
       reclasifica cada diagnóstico de la familia, `ignore` lo suprime; con los defaults de §20.9 es
       la identidad. Cada diagnóstico lleva un `id` estable dentro de una revisión
@@ -790,10 +960,10 @@ tools:
       - { nombre: "operations[].inboundLinksPolicy", tipo: string, requerido: "obligatorio para «delete» cuando el documento tiene backlinks (E21-H03, §Fase 12)", valores: ["reject", "remove_links"], semantica: "política ante enlaces entrantes de un «delete». §Fase 12 prohíbe elegirla en silencio: un «delete» con backlinks y SIN esta clave → INVALID_SCHEMA (falta un campo requerido), distinto del INBOUND_LINKS_EXIST que da «reject» explícito con backlinks. Sin backlinks no hay nada que decidir y la omisión se permite. Un valor no reconocido → INVALID_SCHEMA, con un mensaje que NOMBRA las válidas (E23-H05). «retarget» y «create_stub» se RETIRARON en E23-H05: estaban declaradas desde E12-H06 pero no implementadas (normalize_delete emitía solo el Delete, dejando los entrantes rotos), así que se aceptaban sin ejecutarse. No se implementan porque ninguna tiene semántica que inventar sin más datos del llamador: «retarget» no tiene campo de destino y «create_stub» no tiene criterio de contenido. Los valores válidos viven UNA vez, en core::types::InboundLinksPolicy::WIRE_VALUES" }
       - { nombre: selection, tipo: object, requerido: "condicional (forma-objeto de selección masiva, E21-H02)", semantica: "{ where: «<consulta E19>» | filter: {…} } — la consulta tipada (§20.8/§20.10, el MISMO Expression que knowledge_search) selecciona documentos del workspace; junto a «operation» sustituye al array «operations». Sin criterio (ni where ni filter), o malformado → INVALID_SCHEMA" }
       - { nombre: operation, tipo: object, requerido: "condicional (con selection)", semantica: "{ <op universal>: {<parámetros>} } — la op codifica su tipo como CLAVE (p. ej. { patch_frontmatter: { status: \"review\" } }) y se expande a UNA NormalizedOperation por documento seleccionado. Solo ops con sentido en masa: patch_frontmatter | replace_text | delete (create/move no aplican a una selección de documentos existentes; la cuarta admitida, `apply_fix`, salió con su op en E23-H11). Objeto que no sea de una sola clave admitida → INVALID_SCHEMA" }
-      - { nombre: policy, tipo: object, requerido: false, semantica: "{ requireValidResult?, allowWarnings? } (PlanPolicy, E12-H04); por defecto exige conformidad y permite warnings" }
-    retorno: "PlanResult (lodestar_app): { changeSetId, baseWorkspaceRevision, planHash, canApply, expiresAt, normalizedOperations: [NormalizedOperation], risk, semanticDiff, impact: { affectedDocuments, affectedCount }, capturedRevisions: { «path»: «blake3:…» }, diagnosticsBefore, diagnosticsAfter } — json directo, sin envelope. `capturedRevisions` (E21-H02) lleva una entrada por documento de una selección masiva (su DocumentRevision, el snapshot de §Fase 12); vacío {} en la forma-array"
+      - { nombre: policy, tipo: object, requerido: false, semantica: "{ requireValidResult?, allowWarnings? } (PlanPolicy, E12-H04); por defecto exige conformidad y permite warnings. Cada campo es independientemente opcional (E29-H02, `decisiones §19(b)`): un objeto PARCIAL —una sola clave, o incluso «policy: {}»— completa el campo omitido con su default, igual que omitir «policy» entera; hasta v0.5.0 el `Deserialize` de PlanPolicy exigía las DOS claves si el objeto estaba presente y una policy parcial daba INVALID_SCHEMA «missing field …» pese a que este contrato ya declaraba los dos campos opcionales" }
+    retorno: "PlanResult (lodestar_app): { changeSetId, baseWorkspaceRevision, planHash, canApply, policy, expiresAt, normalizedOperations: [NormalizedOperation], risk, semanticDiff, impact: { affectedDocuments, affectedCount }, capturedRevisions: { «path»: «blake3:…» }, diagnosticsBefore, diagnosticsAfter } — json directo, sin envelope. `capturedRevisions` (E21-H02) lleva una entrada por documento de una selección masiva (su DocumentRevision, el snapshot de §Fase 12); vacío {} en la forma-array. `policy` (E29-H07) es la PlanPolicy efectiva con la que se computó `canApply` —la enviada, con los defaults ya aplicados—: se devuelve y se persiste con el plan porque `change_apply` la RECOMPUTA para ejercer el veredicto (`decisiones §18`), de modo que el cliente ve exactamente bajo qué política se le juzgará al aplicar"
     output_schema: "sí — schemars::schema_for!(PlanResult), vía lodestar_app::schemas::change_plan_schema()"
-    errores: ["REVISION_CONFLICT (workspace o documento cambiado)", "INVALID_SCHEMA (op desconocida o parámetro inválido; un `where`/`filter` de `selection` malformado, CON el diagnóstico del parser del core en el mensaje — E26-H07; hasta v0.4.0 `build_selection_expression` lo descartaba con `map_err(|_| …)` y la misma consulta se diagnosticaba por knowledge_search y se callaba por change_plan; y un TYPE ERROR al evaluar `selection.where`/`selection.filter` — E26-H08: una selección masiva ya no salta documentos en silencio, y el error es el MISMO código y el MISMO texto que daría knowledge_search con esa consulta)", "DOCUMENT_NOT_FOUND (objetivo de normalización inexistente)", "DOCUMENT_ALREADY_EXISTS (E28-H02: create sobre un path ya ocupado por un documento existente; move cuyo «to» ya está ocupado. Simétrico de DOCUMENT_NOT_FOUND —la dirección contraria— y el mensaje NOMBRA el path colisionado. Hasta v0.5.0 no había guard: el plan salía con canApply:true y el apply PISABA el documento existente sin un solo diagnóstico. Un move con from == to no es colisión: sigue siendo el no-op válido de siempre. E28-H04: el mismo código cubre las colisiones INTRA-PLAN —dos ops del mismo change set que reclaman el path— porque el guard consulta la ocupación acumulada; liberar y reocupar en el mismo plan NO es colisión)", "INBOUND_LINKS_EXIST (delete «reject» con entrantes)", "PERMISSION_DENIED (path-traversal)", "RECOVERY_FAILED (E25-H02: la recuperación transparente del paso (0) —E24-H03— no pudo restaurar una transacción interrumpida porque sus copias no verifican; su journal y sus copias quedan en .lodestar/runtime/journal/quarantine/<txnId>/ y el mensaje nombra la ruta; la SIGUIENTE llamada ya no encuentra recuperación pendiente)", "INTERNAL_IO_ERROR (carga de config)", "WorkspaceError"]
+    errores: ["REVISION_CONFLICT (workspace o documento cambiado)", "INVALID_SCHEMA (op desconocida o parámetro inválido; un `where`/`filter` de `selection` malformado, CON el diagnóstico del parser del core en el mensaje — E26-H07; hasta v0.4.0 `build_selection_expression` lo descartaba con `map_err(|_| …)` y la misma consulta se diagnosticaba por knowledge_search y se callaba por change_plan; y un TYPE ERROR al evaluar `selection.where`/`selection.filter` — E26-H08: una selección masiva ya no salta documentos en silencio, y el error es el MISMO código y el MISMO texto que daría knowledge_search con esa consulta; desde E29-H04 los TRES casos de type error del lenguaje —orden cruzado, operador de lista sobre un no-lista y operador de TEXTO (`starts_with`/`ends_with`) sobre un no-string— abortan igual)", "DOCUMENT_NOT_FOUND (objetivo de normalización inexistente)", "DOCUMENT_ALREADY_EXISTS (E28-H02: create sobre un path ya ocupado por un documento existente; move cuyo «to» ya está ocupado. Simétrico de DOCUMENT_NOT_FOUND —la dirección contraria— y el mensaje NOMBRA el path colisionado. Hasta v0.5.0 no había guard: el plan salía con canApply:true y el apply PISABA el documento existente sin un solo diagnóstico. Un move con from == to no es colisión: sigue siendo el no-op válido de siempre. E28-H04: el mismo código cubre las colisiones INTRA-PLAN —dos ops del mismo change set que reclaman el path— porque el guard consulta la ocupación acumulada; liberar y reocupar en el mismo plan NO es colisión)", "INBOUND_LINKS_EXIST (delete «reject» con entrantes)", "PERMISSION_DENIED (path-traversal)", "RECOVERY_FAILED (E25-H02: la recuperación transparente del paso (0) —E24-H03— no pudo restaurar una transacción interrumpida porque sus copias no verifican; su journal y sus copias quedan en .lodestar/runtime/journal/quarantine/<txnId>/ y el mensaje nombra la ruta; la SIGUIENTE llamada ya no encuentra recuperación pendiente)", "INTERNAL_IO_ERROR (carga de config)", "WorkspaceError"]
     semantica: >-
       Orquesta un plan de cambios SIN escribir (invariante #1; aplicar es change_apply, E13): toda
       la simulación es sobre un DocumentSet en memoria. Acepta DOS formas de wire: la forma-ARRAY
@@ -802,7 +972,10 @@ tools:
       documento seleccionado, capturando su DocumentRevision en «capturedRevisions» (snapshot de
       §Fase 12); una selección que no casa nada da un plan vacío sin error, pero un TYPE ERROR al
       evaluar la consulta ABORTA el plan (INVALID_SCHEMA, E26-H08: hasta v0.4.0 el documento que
-      erraba se saltaba en silencio y el plan afectaba a menos ficheros de los seleccionados). La
+      erraba se saltaba en silencio y el plan afectaba a menos ficheros de los seleccionados). Eso
+      vale para los TRES casos de type error del lenguaje, no solo para el orden: desde E29-H04 un
+      `starts_with`/`ends_with` sobre un valor que no es string también aborta, donde hasta v0.5.0
+      recortaba la selección en silencio y presentaba el plan resultante con canApply:true. La
       consulta decide el conjunto recorriendo el ORDEN TOTAL de Analysis::documents ANTES de
       expandir ninguna operación, así que el documento nombrado en el error no depende del orden en
       que el planificador toque los documentos. Verifica
@@ -813,6 +986,12 @@ tools:
       estructura puede producir varias NormalizedOperation, p. ej. move + N ReplaceBody), construye
       el workspace hipotético (plan::apply_normalized_ops) y deriva semanticDiff (E12-H03), risk
       (E12-H02) y validación antes/después (E12-H04); `canApply` = can_apply(report, policy).
+      `canApply` VINCULA al apply desde E29-H07 (`decisiones §18`): no es un consejo que el cliente
+      pueda ignorar insistiendo, sino el veredicto que `change_apply` RECOMPUTA —con la `policy` que
+      se persiste junto al plan— y con el que rechaza (INVALID_RESULT, antes del lock y sin escribir)
+      un plan que salió `canApply:false`. Aplicar un plan no aplicable exige replanificar, o
+      planificar con una `policy` que admita el resultado; hasta v0.5.0 el mismo `changeSetId` se
+      publicaba igual y `canApply` era una afirmación que el motor no respaldaba.
       `planHash` DETERMINISTA = blake3(baseWorkspaceRevision ‖ serialización JSON canónica de las
       normalizedOperations) — mismo input+base ⇒ mismo hash, input distinto ⇒ hash distinto; NO
       depende del reloj (`expiresAt` sí es wall-clock pero queda fuera del hash). `changeSetId` se
@@ -827,7 +1006,7 @@ tools:
       - { nombre: expectedWorkspaceRevision, tipo: string, requerido: false, semantica: "control optimista a nivel de workspace («blake3:…»); si se omite se adopta la revisión actual, si no coincide → REVISION_CONFLICT" }
     retorno: "ApplyResult (lodestar_app): { receiptId, applied, previousWorkspaceRevision, workspaceRevision, changedPaths, semanticDiff, validation: { valid, errors, warnings } } — json directo, sin envelope"
     output_schema: "sí — schemars::schema_for!(ApplyResult), vía lodestar_app::schemas::change_apply_schema()"
-    errores: ["PLAN_EXPIRED (plan caducado)", "PLAN_STALE (plan ausente/ilegible, o el workspace cambió bajo él ⇒ planHash recomputado difiere)", "REVISION_CONFLICT (expectedWorkspaceRevision no coincide, o la base cambió entre plan y apply)", "WRITE_CONFLICT (TRES emisores, los tres ANTES del primer rename y sin escribir nada en el canónico: (1) el lock de publicación ya lo tiene otro publicador VIVO — `Workspace::acquire_lock`, E13-H02; un lock huérfano se reclama y no da error, E23-H23/E25-H06; (2) la base del plan cambió entre el plan y el apply, RE-VERIFICADA bajo el lock — `reverify_base_revision`, E13-H02; (3) el conocimiento canónico cambió dentro de la ventana `[T1, T3)`, entre el cálculo del lote y su publicación: otro proceso, el usuario, o un `.md` aparecido bajo un `referenceRoot` que el control optimista no puede ver porque `workspace_revision` excluye lo que queda fuera de `writableRoots`. Ese tercer caso lo detecta `publish_result` comparando el canónico de T1 con el de T3 (E25-H01) y el aborto SELLA su propia transacción bajo el mismo lock (E25-H02), así que no deja recuperación pendiente que la siguiente llamada pudiera aplicar encima de la edición externa. El mensaje NOMBRA los paths divergentes. Es terminal para esa transacción: el agente replanifica sobre el conocimiento actual. Este contrato no lo listaba hasta E26-H11 —incoherencia interna anotada por el juez ciego de E25-H01— pese a que `change_revert` sí lo declara y la `semantica` de abajo ya narraba el aborto)", "PERMISSION_DENIED (un path afectado cae fuera de writableRoots / bajo un referenceRoot)", "INVALID_RESULT (gate diferencial de E20-H04: el resultado INTRODUCE errores que el canónico no tenía con rejectNewErrors, o deja errores con allowExistingErrors:false)", "WORKSPACE_RECOVERY_REQUIRED (recuperación pendiente no completada)", "DOCUMENT_ALREADY_EXISTS (E28-H04, reserva: el plan PERSISTIDO que se aplica contiene una colisión INTRA-PLAN —dos de sus `normalizedOperations` reclaman el mismo path, p. ej. `[move a→final, move b→final]`—. El plan es un artefacto durable con TTL propio, así que el guard de `change_plan` no basta: un plan escrito por un binario anterior a E28-H04, o por cualquier vía futura que normalizara sin acumular ocupación, publicaba y el primer destino desaparecía en silencio. Se juzga con la MISMA función del core que usa `change_plan` (`plan::assert_sin_colisiones_intra_plan`, invariante #3) y ANTES del primer rename: el mensaje NOMBRA el path colisionado y el disco queda intacto)", "RECOVERY_FAILED (E25-H02: una transacción interrumpida no se pudo restaurar porque sus copias no verifican; su journal y sus copias quedan en .lodestar/runtime/journal/quarantine/<txnId>/ y el mensaje nombra la ruta; la SIGUIENTE llamada ya no encuentra recuperación pendiente)", "INTERNAL_IO_ERROR (carga de config, IO de la transacción)", "WorkspaceError"]
+    errores: ["INVALID_SCHEMA (parámetro no declarado — E29-H08; p. ej. el typo «changeSetID» por «changeSetId», que hasta v0.5.0 se descartaba y salía como «falta el parámetro obligatorio changeSetId», sin pista de que sí se había mandado escrito de otra forma)", "PLAN_EXPIRED (plan caducado)", "PLAN_STALE (plan ausente/ilegible, o el workspace cambió bajo él ⇒ planHash recomputado difiere)", "REVISION_CONFLICT (expectedWorkspaceRevision no coincide, o la base cambió entre plan y apply)", "WRITE_CONFLICT (TRES emisores, los tres ANTES del primer rename y sin escribir nada en el canónico: (1) el lock de publicación ya lo tiene otro publicador VIVO — `Workspace::acquire_lock`, E13-H02; un lock huérfano se reclama y no da error, E23-H23/E25-H06; (2) la base del plan cambió entre el plan y el apply, RE-VERIFICADA bajo el lock — `reverify_base_revision`, E13-H02; (3) el conocimiento canónico cambió dentro de la ventana `[T1, T3)`, entre el cálculo del lote y su publicación: otro proceso, el usuario, o un `.md` aparecido bajo un `referenceRoot` que el control optimista no puede ver porque `workspace_revision` excluye lo que queda fuera de `writableRoots`. Ese tercer caso lo detecta `publish_result` comparando el canónico de T1 con el de T3 (E25-H01) y el aborto SELLA su propia transacción bajo el mismo lock (E25-H02), así que no deja recuperación pendiente que la siguiente llamada pudiera aplicar encima de la edición externa. El mensaje NOMBRA los paths divergentes. Es terminal para esa transacción: el agente replanifica sobre el conocimiento actual. Este contrato no lo listaba hasta E26-H11 —incoherencia interna anotada por el juez ciego de E25-H01— pese a que `change_revert` sí lo declara y la `semantica` de abajo ya narraba el aborto)", "PERMISSION_DENIED (un path afectado cae fuera de writableRoots / bajo un referenceRoot)", "INVALID_RESULT (DOS emisores, ambos ANTES del primer rename y sin escribir nada; comparten código porque comparten predicado —«el resultado simulado no supera la política vigente»— y remedio —replanificar o relajar la política—, y se distinguen POR EL MENSAJE, que nombra las cláusulas de SU política y nunca las de la otra: (1) VEREDICTO DEL PLAN (E29-H07, `decisiones §18`): el plan tenía `canApply:false` bajo la `PlanPolicy` con la que se planificó —persistida con él— y el apply lo RECOMPUTA con `core::plan::can_apply` (invariante #3) ANTES de tomar el lock, o sea antes de que WRITE_CONFLICT/PERMISSION_DENIED puedan aparecer y sin staging, journal, recibo ni copias de recuperación; el mensaje NOMBRA la cláusula que bloqueó —`requireValidResult` (resultado no válido) y/o `allowWarnings` (resultado válido pero con warnings)—. Hasta v0.5.0 `canApply` viajaba al cliente y NADIE lo ejercía: el plan se publicaba igual si el agente insistía. Un plan persistido por un binario anterior a E29-H07 no lleva la policy y se juzga con `PlanPolicy::default()`, la más estricta. (2) GATE DIFERENCIAL DE STAGING (E20-H04, dentro de la transacción y con la política `transactions`, que es OTRA): el resultado INTRODUCE errores que el canónico no tenía con rejectNewErrors, o deja errores con allowExistingErrors:false; su mensaje habla de `rejectNewErrors`/`allowExistingErrors`. El (1) juzga la policy del PLAN y muerde con errores PREEXISTENTES o con warnings —casos en los que el (2) no tiene nada que objetar—; el (2) juzga los errores NUEVOS que el (1) no mira)", "WORKSPACE_RECOVERY_REQUIRED (recuperación pendiente no completada)", "DOCUMENT_ALREADY_EXISTS (E28-H04, reserva: el plan PERSISTIDO que se aplica contiene una colisión INTRA-PLAN —dos de sus `normalizedOperations` reclaman el mismo path, p. ej. `[move a→final, move b→final]`—. El plan es un artefacto durable con TTL propio, así que el guard de `change_plan` no basta: un plan escrito por un binario anterior a E28-H04, o por cualquier vía futura que normalizara sin acumular ocupación, publicaba y el primer destino desaparecía en silencio. Se juzga con la MISMA función del core que usa `change_plan` (`plan::assert_sin_colisiones_intra_plan`, invariante #3) y ANTES del primer rename: el mensaje NOMBRA el path colisionado y el disco queda intacto)", "RECOVERY_FAILED (E25-H02: una transacción interrumpida no se pudo restaurar porque sus copias no verifican; su journal y sus copias quedan en .lodestar/runtime/journal/quarantine/<txnId>/ y el mensaje nombra la ruta; la SIGUIENTE llamada ya no encuentra recuperación pendiente)", "INTERNAL_IO_ERROR (carga de config, IO de la transacción)", "WorkspaceError"]
     semantica: >-
       Aplica un plan vigente por el ÚNICO ESCRITOR (invariante #5) con la mecánica de publicación
       recuperable de E13 (invariante «nunca un estado parcial silencioso»). Pasos de plan: carga el
@@ -835,7 +1014,17 @@ tools:
       `expectedWorkspaceRevision` si viene → RE-VERIFICA el `planHash` recomputándolo sobre la base
       ACTUAL del workspace (`blake3(revisiónActual ‖ normalizedOperations)`, la misma función que
       change_plan); si difiere del persistido, el workspace cambió bajo el plan ⇒ PLAN_STALE y NO
-      escribe. Luego delega en `Workspace::apply_transaction`, que ejecuta EN ORDEN: lock de
+      escribe. → EL VEREDICTO DEL PLAN VINCULA (E29-H07, `decisiones §18`): con la base ya
+      verificada, RECOMPUTA `canApply` = can_apply(validate_result(resultado hipotético), policy DEL
+      PLAN) con la misma función del core que usó change_plan (invariante #3, sobre la `PlanPolicy`
+      que ahora se persiste en el PlanResult); si es `false` ⇒ INVALID_RESULT nombrando la cláusula
+      que bloqueó (`requireValidResult`/`allowWarnings`) y NO escribe. Este gate ocurre ANTES de
+      tomar el lock y de tocar staging —es un veredicto sobre el PLAN, no sobre el disco—, así que un
+      plan rechazado por él no deja journal, ni staging, ni recibo, ni copias de recuperación (sí
+      queda su plan persistido, que caduca por TTL, y su línea en audit.jsonl, que registra TODO
+      intento). Hasta v0.5.0 no existía: `canApply` se publicaba y no se ejercía, y el único filtro
+      que quedaba era el gate de staging de abajo, con OTRA política. Luego delega en
+      `Workspace::apply_transaction`, que ejecuta EN ORDEN: lock de
       publicación (E13-H02) → cálculo del conjunto afectado real (creados/modificados/borrados) →
       `assert_writable` de cada afectado ANTES de tocar el canónico (E11-H04 → PERMISSION_DENIED) →
       staging + gate diferencial de cambios (E13-H01/E20-H04: rechaza con INVALID_RESULT solo
@@ -889,7 +1078,7 @@ tools:
       - { nombre: expectedWorkspaceRevision, tipo: string, requerido: false, semantica: "control optimista a nivel de workspace («blake3:…»); si se omite se adopta la revisión actual, si no coincide → REVISION_CONFLICT" }
     retorno: "RevertResult (lodestar_app): { reverted, receiptId, previousWorkspaceRevision, workspaceRevision, changedPaths, semanticDiff } — json directo, sin envelope. Es INVERSO al apply: previousWorkspaceRevision == resultRevision del apply revertido; workspaceRevision == previousRevision del apply (estado restaurado)"
     output_schema: "sí — schemars::schema_for!(RevertResult), vía lodestar_app::schemas::change_revert_schema()"
-    errores: ["PLAN_EXPIRED (receipt no disponible: caducado/purgado por retención — reuso documentado del catálogo congelado de ErrorCode, no hay variante «receipt no encontrado»)", "REVISION_CONFLICT (expectedWorkspaceRevision no coincide con la revisión actual)", "WRITE_CONFLICT (CUATRO emisores, los cuatro antes de la primera escritura: (1) un fichero afectado —o cualquier otro— cambió tras el apply, o sea la revisión actual ya no es la resultRevision del receipt; comprobado antes de tomar el lock y RE-VERIFICADO bajo él, E25-H05; (2) el lock de publicación ya lo tiene otro publicador vivo; y los DOS BORDES de la identidad de la inversa, declarados aquí como casos extremos y no como camino ordinario: (3) el llamante pide publicar la inversa bajo la MISMA identidad que deshace (`newTxnId == origTxnId`) —no es una colisión de nombres que se resuelva moviendo el id, sino una contradicción: restauraría desde el mismo árbol de recuperación que estaría reescribiendo—, y (4) la cadena de variantes NO PUEDE AVANZAR porque el candidato es el punto fijo `u64::MAX` (`X-revert-18446744073709551615`) y ese id ya está tomado por material vigente, de modo que no queda ninguna variante libre que probar. Lo que NO es un emisor es el caso ORDINARIO de que el `txnId` derivado esté ocupado: E28-H01 lo rechazaba y E28-H03 lo retiró del camino feliz —la identidad se resuelve buscando la primera variante LIBRE, con el mismo criterio de «vivo» del GC (journal ∪ receipts), en vez de fallar sin salida—, así que republicar y volver a revertir el mismo cambio ya no deja una transacción permanentemente no revertible; solo el punto fijo agota la cadena. Los mensajes dicen qué hacer —replanificar el cambio sobre el estado actual— y NINGUNO menciona rutas internas del plano de control: ni `.lodestar`, ni `runtime/`, ni `receipts/`/`recovery/`, ni rutas absolutas de la máquina. Verificado por `lodestar-workspace/tests/transactions.rs::identidad_de_transaccion_libre`)", "PERMISSION_DENIED (un path afectado ya no es escribible)", "RECOVERY_FAILED (E25-H02, mismo caso: la reversión también recupera antes de revertir, así que hereda el fallo y la cuarentena)", "INTERNAL_IO_ERROR (carga de config, IO de la transacción, copias de recuperación ausentes)", "WorkspaceError"]
+    errores: ["INVALID_SCHEMA (parámetro no declarado — E29-H08)", "PLAN_EXPIRED (receipt no disponible: caducado/purgado por retención — reuso documentado del catálogo congelado de ErrorCode, no hay variante «receipt no encontrado»)", "REVISION_CONFLICT (expectedWorkspaceRevision no coincide con la revisión actual)", "WRITE_CONFLICT (CUATRO emisores, los cuatro antes de la primera escritura: (1) un fichero afectado —o cualquier otro— cambió tras el apply, o sea la revisión actual ya no es la resultRevision del receipt; comprobado antes de tomar el lock y RE-VERIFICADO bajo él, E25-H05; (2) el lock de publicación ya lo tiene otro publicador vivo; y los DOS BORDES de la identidad de la inversa, declarados aquí como casos extremos y no como camino ordinario: (3) el llamante pide publicar la inversa bajo la MISMA identidad que deshace (`newTxnId == origTxnId`) —no es una colisión de nombres que se resuelva moviendo el id, sino una contradicción: restauraría desde el mismo árbol de recuperación que estaría reescribiendo—, y (4) la cadena de variantes NO PUEDE AVANZAR porque el candidato es el punto fijo `u64::MAX` (`X-revert-18446744073709551615`) y ese id ya está tomado por material vigente, de modo que no queda ninguna variante libre que probar. Lo que NO es un emisor es el caso ORDINARIO de que el `txnId` derivado esté ocupado: E28-H01 lo rechazaba y E28-H03 lo retiró del camino feliz —la identidad se resuelve buscando la primera variante LIBRE, con el mismo criterio de «vivo» del GC (journal ∪ receipts), en vez de fallar sin salida—, así que republicar y volver a revertir el mismo cambio ya no deja una transacción permanentemente no revertible; solo el punto fijo agota la cadena. Los mensajes dicen qué hacer —replanificar el cambio sobre el estado actual— y NINGUNO menciona rutas internas del plano de control: ni `.lodestar`, ni `runtime/`, ni `receipts/`/`recovery/`, ni rutas absolutas de la máquina. Verificado por `lodestar-workspace/tests/transactions.rs::identidad_de_transaccion_libre`)", "PERMISSION_DENIED (un path afectado ya no es escribible)", "RECOVERY_FAILED (E25-H02, mismo caso: la reversión también recupera antes de revertir, así que hereda el fallo y la cuarentena)", "INTERNAL_IO_ERROR (carga de config, IO de la transacción, copias de recuperación ausentes)", "WorkspaceError"]
     semantica: >-
       Revierte una transacción RECIENTE y no alterada por el ÚNICO ESCRITOR (invariante #5),
       devolviendo el conocimiento canónico al estado ANTERIOR al apply desde sus copias de

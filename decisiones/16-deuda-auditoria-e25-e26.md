@@ -29,12 +29,12 @@ relacionadas: [3, 14, 15, 21]
 | Punto | Qué era | Destino (2026-08-02) |
 |---|---|---|
 | (a) | *Quoting* en el lenguaje de consulta | → ficha propia [`§21`](21-comillas-lenguaje-consulta.md). **Decidido: añadir comillas**, con puerta de diseño. |
-| (b) | `Envelope` sin llamantes | **Decidido: retirarlo.** Trabajo, no decisión. |
+| (b) | `Envelope` sin llamantes | **Decidido: retirarlo.** Trabajo, no decisión. **Saldado por `E29-H11`** (commit `7f519d2`): `Envelope<T>`/`ErrorEnvelope` retirados de `lodestar-app`. |
 | (c) | Cache y watcher sin uso en producción | → absorbido por [`§14`](14-store-sin-consumidor.md). |
 | (d) | MCP monohilo, sin *timeout* ni cancelación | → absorbido por [`§3`](03-transporte-mcp-rmcp.md). |
-| (e) | La config no rechaza claves desconocidas | **Decidido: estricto.** Historia propia y primera de la épica de honestidad. |
-| (f) | Workspace vacío indistinguible de directorio equivocado | **Decidido: aviso `warn`, sin tocar exit codes.** |
-| (g) | API pública de `Workspace` no transaccional | **Decidido: cerrarlas al exterior** (`pub(crate)` / solo test). |
+| (e) | La config no rechaza claves desconocidas | **Decidido: estricto.** Historia propia y primera de la épica de honestidad. **Saldado por `E29-H01`** (commit `4a52f59`): `deny_unknown_fields` + familias de `validation` contra lista cerrada. |
+| (f) | Workspace vacío indistinguible de directorio equivocado | **Decidido: aviso `warn`, sin tocar exit codes.** **Saldado por `E29-H06`** (commit `88e99b2`): diagnóstico `WORKSPACE-EMPTY` (warn). |
+| (g) | API pública de `Workspace` no transaccional | **Decidido: cerrarlas al exterior** (`pub(crate)` / solo test). **Saldado por `E29-H10`** (commit `7f519d2`): `create_document`/`write_document`/`merge_frontmatter` replegadas. |
 | (h) | Escritores de runtime sin lock | **Registrado sin acción**; se cierra si aparece un caso real o al tocar el GC. Único punto que sigue vivo aquí. |
 | (i) | Secuencia de sellado duplicada `apply`/`revert` | **Saldado por `E28-H01`** (commit `296147b`): extraída a `seal_published_transaction`, único camino compartido. |
 | (j) | Un cursor basura reinicia la paginación en silencio | **Decidido: `INVALID_SCHEMA`**, en el ciclo de higiene. |
@@ -69,6 +69,10 @@ relacionadas: [3, 14, 15, 21]
 - **Decidido (2026-08-02): retirarlo**, como se retiró `lodestar-vcs` en E15-H01. Tras E26-H07 el
   wire ya es honesto sin envelope; mantener dos formas de respuesta —una en uso y otra por si
   acaso— es la duplicación que el invariante #4 existe para evitar.
+- **Saldado (2026-08-07) por `E29-H11`** (commit `7f519d2`, épica
+  [`epica-29-honestidad-superficie.md`](../requirements/epica-29-honestidad-superficie.md)):
+  `Envelope<T>`/`ErrorEnvelope` retirados de `lodestar-app`; ninguna fachada perdió capacidad porque
+  ninguna los consumía.
 
 ### (c) La cache SQLite y el watcher siguen sin uso en producción
 
@@ -102,6 +106,11 @@ relacionadas: [3, 14, 15, 21]
   fallo de seguridad, no tolerancia amable. **Historia propia y primera de la épica de honestidad**,
   separada de [`§15`](15-parametros-no-declarados.md) para que su cierre no dependa del trabajo
   mayor del wire. Momento más barato posible: sin usuarios externos, la ruptura es nula.
+- **Saldado (2026-08-07) por `E29-H01`** (commit `4a52f59`, épica
+  [`epica-29-honestidad-superficie.md`](../requirements/epica-29-honestidad-superficie.md)):
+  `deny_unknown_fields` en `WorkspaceConfig` y todas sus secciones, más las claves de `validation`
+  contra la lista cerrada `VALIDATION_FAMILIES`; config ilegible distingue de config ausente (exit 3
+  en ambas fachadas, no *defaults* silenciosos).
 
 ### (f) Un workspace vacío es indistinguible de un directorio equivocado
 
@@ -114,6 +123,10 @@ relacionadas: [3, 14, 15, 21]
   documentos descubiertos bajo esta raíz». Conserva el contrato de la puerta de CI (un repo
   legítimamente vacío sigue pasando) y cierra el engaño en la primera experiencia de cualquier
   usuario nuevo. Entra en la épica de honestidad.
+- **Saldado (2026-08-07) por `E29-H06`** (commit `88e99b2`, remate `6a3a6ca`, épica
+  [`epica-29-honestidad-superficie.md`](../requirements/epica-29-honestidad-superficie.md)):
+  diagnóstico `WORKSPACE-EMPTY` (warn) cuando la raíz no descubre ningún documento; exit codes
+  intactos.
 
 ### (g) API pública de `Workspace` no transaccional (defecto **S8** de la auditoría)
 
@@ -125,6 +138,10 @@ relacionadas: [3, 14, 15, 21]
 - **Decidido (2026-08-02): (a) replegar a `pub(crate)`** / marcar como primitivas de test. Una API
   pública que rompe el invariante nuclear del crate es una trampa con fecha de caducidad: funciona
   hasta que alguien la llama. Sin llamadores, cerrarla no cuesta nada. Entra en la épica de honestidad.
+- **Saldado (2026-08-07) por `E29-H10`** (commit `7f519d2`, épica
+  [`epica-29-honestidad-superficie.md`](../requirements/epica-29-honestidad-superficie.md)):
+  `create_document`, `write_document` y `merge_frontmatter` replegadas a `pub(crate)`/primitivas de
+  test; ningún llamador de producción perdió capacidad.
 
 ### (h) Los escritores de runtime no toman el lock
 

@@ -1,14 +1,21 @@
 //! `lodestar-app` — servicios de caso de uso finos sobre `lodestar-workspace`.
 //!
-//! Capa compartida por las dos fachadas de superficie (`lodestar-mcp`, `lodestar-cli`): compone
-//! el `Envelope<T>` de protocolo (framing, no dominio — decisión **D3**, `docs/history/REFACTOR_DISENO_PROPUESTA.md`)
-//! y la fachada `App`, que envuelve un [`lodestar_workspace::Workspace`] y expone los métodos de
-//! caso de uso (`workspace_status` desde E10-H08; `knowledge_search`, … se irán poblando en
-//! E10-H09+).
+//! Capa compartida por las dos fachadas de superficie (`lodestar-mcp`, `lodestar-cli`): la
+//! fachada `App`, que envuelve un [`lodestar_workspace::Workspace`] y expone los métodos de caso
+//! de uso (`workspace_status`, `knowledge_search`, `knowledge_get`, `metadata_inspect`,
+//! `knowledge_check`, `change_plan`, `change_apply`, `change_revert`, …).
 //!
 //! Este crate depende solo de `lodestar-core` + `lodestar-workspace` + `serde`/`serde_json` — nunca
 //! directamente de `rusqlite`/`git2`/`tokio` (invariante #2 de `CLAUDE.md`, verificado por
 //! `cargo tree -p lodestar-app`).
+//!
+//! **Nota histórica (E29-H11, `decisiones §16(b)`)**: hasta esta historia el crate declaraba
+//! además un `Envelope<T>`/`ErrorEnvelope` de protocolo (framing, no dominio — decisión **D3**,
+//! `docs/history/REFACTOR_DISENO_PROPUESTA.md`, construido en E10-H01/H02). Se retiró por no tener
+//! consumidor: el wire real de las tools MCP es `structuredContent` + texto con el código
+//! (`ARCHITECTURE.md §20.10`) y la CLI responde con exit codes — ninguna de las dos fachadas
+//! construyó jamás un envelope. `contracts/mcp.yml` ya documenta esa ausencia («json directo, sin
+//! envelope») en cada tool.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -31,66 +38,6 @@ use lodestar_core::types::{
 };
 use lodestar_core::{CoreError, DocumentSet};
 use lodestar_workspace::{revert_transaction_id, Workspace, WorkspaceError};
-
-/// Envelope común de protocolo (`ARCHITECTURE.md §19.6`, `docs/history/REFACTOR.md §13`, decisión **D3**).
-///
-/// Todas las respuestas de las tools MCP y de los comandos de la CLI se enmarcan en esta forma:
-/// un veredicto (`ok`), la revisión del workspace en el momento de la respuesta, un resumen
-/// compacto pensado para el modelo (`summary`), el payload específico de la operación (`data`) y
-/// tres colecciones auxiliares siempre presentes (`diagnostics`/`warnings`/`resource_links`), nunca
-/// omitidas aunque estén vacías. Wire en camelCase: `workspaceRevision`/`resourceLinks`.
-///
-/// Framing de transporte, no dominio — por eso vive aquí y no en `lodestar_core::types` (los
-/// campos `data`/`diagnostics` sí reusan tipos del core: `Check` y lo que cada servicio devuelva).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Envelope<T> {
-    /// `true` si la operación tuvo éxito (con o sin advertencias); `false` si fue rechazada.
-    pub ok: bool,
-    /// Revisión determinista del workspace en el momento de responder (ver E10-H03).
-    pub workspace_revision: WorkspaceRevision,
-    /// Resumen compacto en lenguaje natural, pensado para que un agente lo lea sin parsear `data`.
-    pub summary: String,
-    /// Payload específico de la operación.
-    pub data: T,
-    /// Diagnósticos de conformidad relevantes para esta respuesta (puede estar vacío).
-    pub diagnostics: Vec<Check>,
-    /// Avisos no bloqueantes (puede estar vacío).
-    pub warnings: Vec<String>,
-    /// Enlaces a recursos adicionales que el agente puede querer inspeccionar (puede estar vacío).
-    pub resource_links: Vec<ResourceLink>,
-}
-
-impl<T> Envelope<T> {
-    /// Construye un envelope de éxito con las colecciones auxiliares vacías — el caso común para
-    /// un servicio que no tiene diagnósticos/avisos/enlaces que añadir.
-    pub fn ok(workspace_revision: WorkspaceRevision, summary: impl Into<String>, data: T) -> Self {
-        Envelope {
-            ok: true,
-            workspace_revision,
-            summary: summary.into(),
-            data,
-            diagnostics: Vec::new(),
-            warnings: Vec::new(),
-            resource_links: Vec::new(),
-        }
-    }
-}
-
-/// Enlace a un recurso adicional referenciado desde una respuesta (`resourceLinks` del envelope,
-/// `docs/history/REFACTOR.md §13`), p. ej. un documento relacionado que el agente puede pedir con
-/// `knowledge_get` a continuación. Forma mínima: URI del recurso (dirección estable, no
-/// necesariamente un `RelPath` — puede referirse a recursos fuera del workspace) y un título
-/// legible opcional.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ResourceLink {
-    /// Dirección estable del recurso.
-    pub uri: String,
-    /// Título legible por humanos/agentes, si se conoce.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub title: Option<String>,
-}
 
 // ---------------------------------------------------------------------------
 // Códigos de error estables (E10-H02, `ARCHITECTURE.md §19.3`, `REFACTOR.md §13`).
@@ -247,44 +194,6 @@ impl From<&CoreError> for AppError {
     /// core viaja **entero** hasta la superficie (invariante #3: una sola verdad computada).
     fn from(err: &CoreError) -> Self {
         AppError::new(error_code(err), err.to_string())
-    }
-}
-
-/// Forma de error de protocolo (`REFACTOR.md §13`): lo que se sirve en vez de un [`Envelope`]
-/// cuando una operación se rechaza. Wire en camelCase; `expected_revision`/`actual_revision`
-/// solo se rellenan para `REVISION_CONFLICT` (control optimista, E12) y `recovery` es un mensaje
-/// legible con el siguiente paso sugerido (p. ej. "vuelve a leer y reintenta").
-///
-/// Esta historia (E10-H02) solo fija la forma — nadie la construye todavía en un flujo real
-/// (eso llega con las tools de E10-H08+ y la planificación de E12/E13).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ErrorEnvelope {
-    /// Código estable del catálogo de 17 (`core::types::ErrorCode`, E28-H02).
-    pub code: ErrorCode,
-    /// Mensaje legible, en español, para un humano o un agente.
-    pub message: String,
-    /// Revisión que el llamante esperaba (solo relevante para `REVISION_CONFLICT`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub expected_revision: Option<WorkspaceRevision>,
-    /// Revisión real encontrada (solo relevante para `REVISION_CONFLICT`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub actual_revision: Option<WorkspaceRevision>,
-    /// Sugerencia legible del siguiente paso para recuperarse del error.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub recovery: Option<String>,
-}
-
-impl ErrorEnvelope {
-    /// Construye un `ErrorEnvelope` mínimo (sin campos de recuperación).
-    pub fn new(code: ErrorCode, message: impl Into<String>) -> Self {
-        ErrorEnvelope {
-            code,
-            message: message.into(),
-            expected_revision: None,
-            actual_revision: None,
-            recovery: None,
-        }
     }
 }
 
@@ -446,9 +355,10 @@ const DEFAULT_SCHEMA_VERSION: &str = "1";
 /// Fachada fina de servicios de caso de uso sobre un [`Workspace`] abierto.
 ///
 /// `App` es lo que consumen `lodestar-mcp` y `lodestar-cli`: un punto de entrada único que
-/// traduce peticiones de protocolo a operaciones del `Workspace` y envuelve las respuestas en
-/// [`Envelope`]. Expone `workspace_status` (E10-H08), `knowledge_search` (E10-H09),
-/// `knowledge_get` (E10-H10), `metadata_inspect` (E20-H03), `knowledge_check`, … .
+/// traduce peticiones de protocolo a operaciones del `Workspace` y devuelve sus tipos de
+/// servicio directamente (`structuredContent` en el MCP, sin envelope — E29-H11). Expone
+/// `workspace_status` (E10-H08), `knowledge_search` (E10-H09), `knowledge_get` (E10-H10),
+/// `metadata_inspect` (E20-H03), `knowledge_check`, … .
 pub struct App {
     workspace: Workspace,
 }
@@ -668,9 +578,11 @@ impl App {
     /// diagnóstico del parser del core (E24-H10, E26-H07).
     ///
     /// **Un [`TypeError`] al evaluar ABORTA la consulta** (E26-H08): una expresión bien formada
-    /// sobre datos de otro tipo (p. ej. `priority >= "high"` sobre un `priority` numérico) devuelve
-    /// `Err(AppError)` con `INVALID_SCHEMA` y un mensaje que nombra campo, operador, los dos tipos y
-    /// el documento (`error_de_tipo`). Hasta v0.4.0 ese documento se **excluía en silencio** —el
+    /// sobre datos de otro tipo (p. ej. `priority >= "high"` sobre un `priority` numérico, o
+    /// `priority starts_with "3"` sobre ese mismo campo numérico desde E29-H04) devuelve
+    /// `Err(AppError)` con `INVALID_SCHEMA` y un mensaje que nombra campo, operador, los tipos
+    /// implicados y el documento (`error_de_tipo`). Hasta v0.4.0 ese documento se **excluía en
+    /// silencio** —el
     /// criterio de E19-H04: «el corpus es heterogéneo y un tipo incompatible no debe tumbar la
     /// consulta sobre los demás»—, y el precio era una lista recortada, decidida documento a
     /// documento, indistinguible de la correcta; sobre un corpus homogéneo, un `[]` indistinguible
@@ -1242,7 +1154,23 @@ impl App {
                 let path = self.resolve_ref(r#ref)?;
                 Ok(std::iter::once(path).collect())
             }
-            CheckScope::Paths { paths } => Ok(paths.iter().cloned().collect()),
+            CheckScope::Paths { paths } => {
+                // E29-H05: cada path debe existir en el inventario, exactamente el mismo criterio
+                // que ya aplican los brazos `Document`/`Affected` vía `resolve_ref` (invariante #3
+                // — una sola verdad de existencia; se reusa en vez de duplicar el predicado). El
+                // primero que no resuelva, en el orden RECIBIDO (no el del `BTreeSet` de salida),
+                // decide el `DOCUMENT_NOT_FOUND`.
+                let mut set: BTreeSet<RelPath> = BTreeSet::new();
+                for path in paths {
+                    let r#ref = DocumentRef {
+                        path: path.clone(),
+                        id: None,
+                    };
+                    let resolved = self.resolve_ref(&r#ref)?;
+                    set.insert(resolved);
+                }
+                Ok(set)
+            }
             CheckScope::Affected { refs, depth } => {
                 let mut set: BTreeSet<RelPath> = BTreeSet::new();
                 for r in refs {
@@ -1280,10 +1208,15 @@ impl App {
     ///    mitad del catálogo de `§20.9` era invisible desde la puerta de CI.
     ///
     /// Los de descubrimiento se indexan en `diagnostics` **por su primer `target`** (el fichero que
-    /// describen), que por definición **no** es uno de `analysis.documents`. Un diagnóstico sin
-    /// `target` —`PATH-NOT-UTF8`, cuyo path no es representable como [`RelPath`]— no tiene clave con
-    /// la que entrar en el mapa y **solo** se surface a por `knowledge_check`, que los lleva en una
-    /// lista aparte; queda documentado como límite del wire del `Analysis`, no como olvido.
+    /// describen), que por definición **no** es uno de `analysis.documents`. Un diagnóstico **sin**
+    /// `target` —`PATH-NOT-UTF8`, cuyo path no es representable como [`RelPath`], o el
+    /// `WORKSPACE-EMPTY` de E29-H06, que describe la ausencia de todos— no tiene un fichero con el
+    /// que entrar en el mapa. Hasta v0.5.0 se **descartaba** ahí mismo, así que solo lo veía
+    /// `knowledge_check` (que los lleva en una lista aparte) y la puerta de CI se quedaba sin la
+    /// mitad del catálogo. Desde E29-H06 entran bajo [`ANCHOR_WORKSPACE`], una clave **sintética**
+    /// que no puede colisionar con ningún documento (el plano de control `.lodestar/` es el suelo
+    /// duro del descubrimiento, `discovery::CONTROL_PLANE_EXCLUDE`), y por tanto tampoco puede
+    /// pisar los diagnósticos de un fichero real.
     pub fn full_analysis(&self) -> Result<Analysis, AppError> {
         let (doc_set, discovery_diagnostics) = self.workspace.document_set_with_discovery()?;
         let mut analysis = doc_set.analyze().clone();
@@ -1301,14 +1234,16 @@ impl App {
             });
         }
 
-        // 2. Diagnósticos de descubrimiento, bajo la clave de su primer `target`.
+        // 2. Diagnósticos de descubrimiento, bajo la clave de su primer `target` — y los que no
+        //    tienen ninguno, bajo el ancla sintética del workspace (E29-H06).
         for mut check in discovery_diagnostics {
             let Some(level) = validation.effective_severity(&check) else {
                 continue;
             };
             check.level = level;
-            let Some(anchor) = check.targets.first().cloned() else {
-                continue;
+            let anchor = match check.targets.first().cloned() {
+                Some(target) => target,
+                None => anchor_workspace(),
             };
             analysis.diagnostics.entry(anchor).or_default().push(check);
         }
@@ -1823,6 +1758,7 @@ impl App {
             base_workspace_revision: base_revision,
             plan_hash,
             can_apply,
+            policy,
             expires_at: expires_at_string(),
             normalized_operations: normalized,
             risk,
@@ -1909,6 +1845,15 @@ impl App {
     ///    `change_plan`) y lo compara con el `planHash` persistido; si difiere, el workspace cambió bajo
     ///    el plan → `Err(PlanStale)` y **no escribe**. (El `planHash` mezcla la base y las
     ///    operaciones, así que un cambio del canónico bajo el plan lo invalida.)
+    ///    - **El veredicto del plan VINCULA** (E29-H07, `decisiones §18`): con la base ya
+    ///      verificada, se **recomputa** [`plan::can_apply`] sobre el resultado hipotético del plan
+    ///      con la [`PlanPolicy`] que el cliente mandó a `change_plan` (persistida en el plan). Si
+    ///      es `false` → `Err(InvalidResult)` con un mensaje que **nombra la cláusula** que bloqueó
+    ///      (`requireValidResult`/`allowWarnings`), **antes de tomar el lock** y sin escribir nada:
+    ///      sin staging, sin journal, sin recibo y sin copias de recuperación. Hasta E29-H07
+    ///      `canApply` era un consejo que nadie ejercía y el único filtro que quedaba era el gate de
+    ///      staging —`transactions`, una política distinta— que no muerde con errores preexistentes
+    ///      ni con warnings.
     /// 4. **Transacción**: [`Workspace::apply_transaction_con_recibo`] publica por el único escritor
     ///    (staging → lock → backup → journal + registro durable del recibo → renames atómicos),
     ///    devolviendo `(previous, result, changedPaths)`. Su `assert_writable` rechaza cualquier path
@@ -2003,6 +1948,36 @@ impl App {
                      change_plan sobre el estado actual",
                     plan.change_set_id.0, plan.base_workspace_revision.0, current_base.0
                 ),
+            ));
+        }
+
+        // (3-veredicto) EL VEREDICTO DEL PLAN VINCULA (E29-H07, `decisiones §18`). Hasta esta historia
+        //     `canApply` viajaba al cliente y nadie lo ejercía: un plan que la superficie declaraba
+        //     «no aplicable bajo tu policy» se publicaba igual si el agente insistía, porque el
+        //     único filtro de validez que quedaba era el gate de staging (`rejectNewErrors`/
+        //     `allowExistingErrors` de `transactions`, E20-H04) — una política DISTINTA, que no
+        //     muerde ni con errores PREEXISTENTES ni con warnings. Dos políticas, una publicada y
+        //     otra ejercida.
+        //
+        //     Se RECOMPUTA en vez de leer el `canApply` persistido (la recomendación de la historia):
+        //     el apply re-verifica todo lo demás —el `planHash` sobre la base actual, la revisión— y
+        //     un booleano congelado sería el único veredicto que no se re-computa. Se llama a
+        //     `plan::can_apply`, el MISMO predicado que usó `change_plan` (invariante #3: el
+        //     predicado no se reimplementa aquí), sobre el resultado hipotético reconstruido con
+        //     `plan::apply_normalized_ops` — que es idéntico al que vio `change_plan`, porque el
+        //     paso (3) acaba de verificar que la base y las operaciones son las mismas.
+        //
+        //     Ocurre ANTES de tocar la transacción: sin lock, sin staging, sin journal, sin recibo y
+        //     sin copias de recuperación. Es un veredicto sobre el PLAN, no sobre el disco.
+        let after_plan = DocumentSet::from_files(
+            plan::apply_normalized_ops(doc_set.files(), &plan.normalized_operations)
+                .map_err(|e| AppError::from(&e))?,
+        );
+        let after_report = plan::validate_result(&after_plan);
+        if !plan::can_apply(&after_report, &plan.policy) {
+            return Err(AppError::new(
+                ErrorCode::InvalidResult,
+                plan_policy_rejection_message(&plan, &after_report),
             ));
         }
 
@@ -3103,6 +3078,50 @@ fn plan_file_path(root: &Path, id: &ChangeSetId) -> PathBuf {
         .join(plan_file_name(id))
 }
 
+/// Mensaje del rechazo de `change_apply` cuando el plan **no es aplicable bajo su propia
+/// `PlanPolicy`** (E29-H07, `decisiones §18`).
+///
+/// Nombra la(s) **cláusula(s)** de la policy que bloquearon —`requireValidResult` y/o
+/// `allowWarnings`— y el remedio (replanificar, o relajar la policy). Esa precisión es lo que
+/// sostiene reusar `INVALID_RESULT` en vez de abrir una fila decimoctava en el catálogo: el gate de
+/// **staging** rechaza con el mismo código, pero su mensaje habla de `rejectNewErrors`/
+/// `allowExistingErrors` (la política `transactions`), de modo que los dos vocabularios son
+/// disjuntos y el agente sabe cuál de los dos gates le habló. Este mensaje **no** menciona la
+/// política de staging, ni el de staging la del plan.
+fn plan_policy_rejection_message(plan: &PlanResult, report: &ValidationReport) -> String {
+    let mut clausulas: Vec<String> = Vec::new();
+    if plan.policy.require_valid_result && !report.valid {
+        clausulas.push(format!(
+            "«requireValidResult» es true y el resultado simulado no es válido ({} error(es))",
+            report.summary.errors
+        ));
+    }
+    if !plan.policy.allow_warnings && report.summary.warnings > 0 {
+        clausulas.push(format!(
+            "«allowWarnings» es false y el resultado simulado tiene {} warning(s)",
+            report.summary.warnings
+        ));
+    }
+    if clausulas.is_empty() {
+        // Inalcanzable: este mensaje solo se construye cuando `plan::can_apply` dijo `false`, y ese
+        // predicado no tiene más causas que las dos de arriba. Se cubre para que un futuro campo de
+        // `PlanPolicy` sin rama aquí produzca un mensaje pobre pero honesto, nunca una lista vacía.
+        clausulas.push("la policy del plan no admite este resultado".to_string());
+    }
+    format!(
+        "el plan «{}» no es aplicable bajo la policy con la que se planificó ({}): {}. \
+         No se ha escrito nada. Replanifica sobre el estado actual (change_plan) o vuelve a \
+         planificar con una policy que lo admita",
+        plan.change_set_id.0,
+        // La policy entera, para que el agente vea el contexto de la cláusula citada.
+        format_args!(
+            "requireValidResult={}, allowWarnings={}",
+            plan.policy.require_valid_result, plan.policy.allow_warnings
+        ),
+        clausulas.join("; "),
+    )
+}
+
 /// Persiste el `PlanResult` completo (operaciones normalizadas, revisión base, hash, caducidad,
 /// diff, impacto, validación) en `.lodestar/runtime/plans/<hash>.json` (E12-H09,
 /// `ARCHITECTURE.md §19.4/§19.5`).
@@ -3171,6 +3190,18 @@ pub struct PlanResult {
     pub plan_hash: PlanHash,
     /// `true` si el plan es aplicable bajo la `policy` dada ([`plan::can_apply`]).
     pub can_apply: bool,
+    /// La [`PlanPolicy`] con la que se computó `canApply` — E29-H07 (`decisiones §18`).
+    ///
+    /// Se persiste con el plan porque el veredicto **vincula** al apply: `change_apply` recomputa
+    /// [`plan::can_apply`] con esta policy (invariante #3: el predicado no se reimplementa, y no se
+    /// congela un booleano que el apply no pueda re-verificar como re-verifica el `planHash` y la
+    /// revisión). Un plan persistido por un binario ANTERIOR a E29-H07 no lleva el campo:
+    /// `#[serde(default)]` lo completa con [`PlanPolicy::default`] —la policy más estricta de las
+    /// dos que el wire admite—, de modo que el gate nunca es más laxo de lo que el cliente pidió.
+    /// El desajuste posible (un plan planificado con `requireValidResult:false` que tras actualizar
+    /// el binario se rechaza) se resuelve replanificando, y lo acota el TTL corto del plan.
+    #[serde(default)]
+    pub policy: PlanPolicy,
     /// Instante de caducidad (segundos epoch, wall-clock; fuera del `planHash`).
     pub expires_at: String,
     /// Todas las operaciones normalizadas del plan, en un único change set.
@@ -3300,6 +3331,41 @@ pub struct CheckReport {
     pub workspace_revision: WorkspaceRevision,
     /// Cursor opaco a la siguiente página, o `None` si no quedan más diagnósticos.
     pub next_cursor: Option<String>,
+}
+
+/// Clave **sintética** con la que los diagnósticos de descubrimiento **sin `target`** entran en
+/// [`Analysis::diagnostics`], que es un `BTreeMap<RelPath, Vec<Check>>` y por tanto exige una clave
+/// (E29-H06).
+///
+/// Es `.lodestar`, el **plano de control** del workspace, y **jamás** puede ser un documento del
+/// inventario ni pisar los diagnósticos de un fichero real. La garantía la sostienen **dos** piezas
+/// distintas, porque el suelo duro por sí solo no cubre el literal:
+///
+/// 1. **Lo que hay bajo `.lodestar/`**: el suelo duro del descubrimiento
+///    (`lodestar_workspace::discovery::CONTROL_PLANE_EXCLUDE`) excluye `.lodestar/**` sin que
+///    ninguna config pueda re-incluirlo, así que ningún `.lodestar/loquesea.md` entra al inventario.
+/// 2. **La entrada literal `.lodestar`** (un **fichero** llamado así, sin barra): ese glob **no** la
+///    cubre —`.lodestar/**` casa con lo de dentro de un directorio, no con una entrada suelta—, y la
+///    cierra el arranque: `.lodestar` como fichero hace que leer `<root>/.lodestar/config.yaml` dé
+///    `ENOTDIR`, y desde **E29-H01** un `config.yaml` que existe pero no se puede leer es error de
+///    apertura (`App::open` falla, `exit 3`) en vez de degradar a los valores por defecto. Es decir:
+///    en un workspace que **abre**, esa entrada no existe, y donde existiera no hay `Analysis` que
+///    indexar.
+///
+/// No es un `RelPath` de la raíz —no existe: `RelPath::new("")` es
+/// `Err` por diseño, invariante #6— sino una etiqueta estable que dice «esto es del workspace, no
+/// de un fichero tuyo»: los diagnósticos que la usan (`PATH-NOT-UTF8`, `WORKSPACE-EMPTY`) siguen
+/// viajando con `targets` **vacío**, que es la verdad, y su severidad cuenta igual para
+/// `Analysis::hard_fail`/`warn_count` y para el gate de `lodestar check`.
+pub const ANCHOR_WORKSPACE: &str = ".lodestar";
+
+/// El [`RelPath`] de [`ANCHOR_WORKSPACE`].
+///
+/// # Pánico
+/// Nunca: `.lodestar` es un literal válido para [`RelPath::new`] (relativo, un solo segmento, sin
+/// `..` ni backslashes), y el test `ancla_de_workspace_es_relpath_valido` lo clava.
+fn anchor_workspace() -> RelPath {
+    RelPath::new(ANCHOR_WORKSPACE).expect("«.lodestar» es un RelPath válido por construcción")
 }
 
 /// Id estable de un diagnóstico dentro de una revisión (E10-H12): `diag:blake3:<hex>` donde
@@ -3764,7 +3830,12 @@ fn evalua_documento(
 
 /// Traduce un [`TypeError`] del evaluador —el que produce una consulta bien formada sobre datos de
 /// otro tipo— al [`AppError`] de superficie: `INVALID_SCHEMA` con un mensaje que nombra **el campo,
-/// el operador, los dos tipos y el documento** donde chocaron, más cómo salir del error.
+/// el operador, el/los tipo(s) implicados y el documento** donde chocaron, más cómo salir del error.
+///
+/// Son **tres** las variantes desde E29-H04 —orden cruzado, operador de lista sobre un no-lista y
+/// operador de texto (`starts_with`/`ends_with`) sobre un no-string—, y el `match` de abajo es
+/// **exhaustivo a propósito**: es el mecanismo que garantiza que ningún `TypeError` nuevo del core
+/// llegue al wire sin mensaje propio.
 ///
 /// Hasta v0.4.0 este `Err` se descartaba en los dos consumidores con el mismo `continue` que un
 /// `Ok(false)`, así que `priority >= "high"` sobre un `priority` numérico devolvía `[]` —o una lista
@@ -3803,8 +3874,22 @@ fn error_de_tipo(err: &TypeError, path: &RelPath) -> AppError {
             nombre_de_wire(found),
             nombre_de_wire(operator),
         ),
-        // El enum del core es cerrado (dos variantes): una tercera rompería la compilación aquí,
-        // que es justo lo que se quiere — un `TypeError` nuevo sin mensaje sería el defecto de vuelta.
+        TypeError::NotAString {
+            field,
+            operator,
+            found,
+        } => format!(
+            "en «{}» la comparación entre el campo «{field}» y su literal tiene un operando de tipo \
+             {}, y el operador de texto «{}» exige un string a los DOS lados: lo que no es texto no \
+             tiene prefijo ni sufijo que comprobar, y el lenguaje no coerce tipos (§20.8). Comprueba \
+             los dos lados — el tipo que falla puede ser el del campo o el del literal",
+            path.as_str(),
+            nombre_de_wire(found),
+            nombre_de_wire(operator),
+        ),
+        // El match es EXHAUSTIVO a propósito (E26-H08): una variante nueva del enum del core rompe
+        // la compilación aquí, que es justo lo que se quiere — un `TypeError` sin mensaje propio
+        // sería el defecto de vuelta. Son tres desde E29-H04.
     };
     // La salida sugerida tiene que RESOLVER el error que se reporta. `has(campo)` no vale: la
     // ausencia nunca produce un `TypeError` (cortocircuita antes de mirar el tipo), así que el
@@ -4109,5 +4194,25 @@ pub mod schemas {
     /// `outputSchema` de `change_revert` (== [`RevertResult`]).
     pub fn change_revert_schema() -> Value {
         schema_of::<RevertResult>()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// El ancla sintética de los diagnósticos sin `target` (E29-H06) debe ser un [`RelPath`]
+    /// válido: `anchor_workspace()` hace `expect` sobre ella y un cambio del literal que la
+    /// invalidara (una barra inicial, un `..`) tumbaría `full_analysis` en caliente.
+    #[test]
+    fn ancla_de_workspace_es_relpath_valido() {
+        let anchor = RelPath::new(ANCHOR_WORKSPACE)
+            .expect("ANCHOR_WORKSPACE debe ser construible como RelPath");
+        assert_eq!(anchor.as_str(), ANCHOR_WORKSPACE);
+        assert_eq!(anchor_workspace(), anchor);
+        assert!(
+            !anchor.is_markdown(),
+            "el ancla no puede parecer un documento: es el plano de control, no un `.md`"
+        );
     }
 }
