@@ -1544,8 +1544,8 @@ viven en `develop`, pero aún no cruzaron a `main` por el ciclo de release descr
 | **E29-H09** `instructions`/`protocolVersion` coherentes | `5e7edc0` | APROBADA (7/7) | `instructions` nombra exactamente las tools que el perfil sirve; `protocolVersion` no soportada deja de aceptarse en silencio. |
 | **E29-H07** `canApply` vinculante | `9df617f` + `f97004c` (remate: doc deja de negar el gate, pines fijan la representación) | aprobada (bloqueante doc saldado) | `change_apply` rechaza un plan con `canApply: false` bajo su propia policy. |
 | **E29-H08** wire estricto | `f7dc5fd` + `f720ba8` (remate: deuda saldada, cascada a sub-objetos) | APROBADA (11/11) | `additionalProperties: false` se ejecuta de verdad (validación por unión contra la tabla de campos legales por operación de `§15`). |
-| **E29-H10** repliegue de la API no transaccional | `7f519d2` | en verificación final | `create_document`/`write_document`/`merge_frontmatter` replegadas a `pub(crate)`/test. |
-| **E29-H11** retirada del `Envelope` | `7f519d2` | en verificación final | `Envelope<T>`/`ErrorEnvelope` de `lodestar-app` retirados (§16(b): capacidad construida en E10-H01/H02 sin consumidor real). |
+| **E29-H10** repliegue de la API no transaccional | `7f519d2` | juez ciego: APROBADA | `create_document`/`write_document`/`merge_frontmatter`/`publish` replegadas a `pub(crate)` (tests vía feature `test-support`, verificado con consumidor externo). |
+| **E29-H11** retirada del `Envelope` | `7f519d2` | juez ciego: APROBADA | `Envelope<T>`/`ErrorEnvelope`/`ResourceLink` de `lodestar-app` retirados (§16(b): capacidad construida en E10-H01/H02 sin consumidor real; cero residuos verificados). |
 
 **Invariantes verificados**: suite completa en verde, incluidos los dos crates con
 `--features test-failpoints` (`lodestar-workspace` y `lodestar-app`); `cargo clippy --workspace

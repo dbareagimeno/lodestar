@@ -25,8 +25,8 @@
 | 1 | §15 | E29-H08 | validación por unión contra la tabla de campos por operación (`mcp.rs`, `descubribilidad.rs`) | ✓ | ✓ | ✓ (11/11) | ✅ cerrada |
 | 1 | §16(e) (+A-08) | E29-H01 | config estricta: claves desconocidas + familias de `validation` (`e2e.rs`, `config.rs`) | ✓ | ✓ | ✓ (8/8) | ✅ cerrada |
 | 1 | §16(f) | E29-H06 | `WORKSPACE-EMPTY` (warn) sobre raíz sin documentos (`discovery.rs`, `validacion.rs`, remate `6a3a6ca`) | ✓ | ✓ | ✓ (aprobada) | ✅ cerrada |
-| 1 | §16(g) | E29-H10 | repliegue de `create_document`/`write_document`/`merge_frontmatter` a `pub(crate)` (compilación+suite) | ✓ | ✓ | en verificación final | 🔶 pendiente de juez |
-| 1 | §16(b) | E29-H11 | retirada de `Envelope`/`ErrorEnvelope` (compilación+suite) | ✓ | ✓ | en verificación final | 🔶 pendiente de juez |
+| 1 | §16(g) | E29-H10 | repliegue de `create_document`/`write_document`/`merge_frontmatter`/`publish` a `pub(crate)` (compilación+suite) | ✓ | ✓ | ✓ (juez ciego) | ✅ cerrada |
+| 1 | §16(b) | E29-H11 | retirada de `Envelope`/`ErrorEnvelope` (compilación+suite) | ✓ | ✓ | ✓ (juez ciego) | ✅ cerrada |
 | 1 | D-01 | E29-H09 | `instructions` por perfil + rechazo de `protocolVersion` (`main.rs`) | ✓ | ✓ | ✓ (7/7) | ✅ cerrada |
 | 1 | A-04 | E29-H04 | `starts_with`/`ends_with` sobre no-string → type error (`eval.rs`, `consulta.rs`, remate `681ec45`) | ✓ | ✓ | ✓ (7/7) | ✅ cerrada |
 | 1 | A-07 | E29-H05 | scope `paths` exige existencia → `DOCUMENT_NOT_FOUND` (`e2e.rs`, `validacion.rs`) | ✓ | ✓ | ✓ (6/6) | ✅ cerrada |
