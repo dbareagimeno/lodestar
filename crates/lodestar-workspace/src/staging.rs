@@ -262,8 +262,12 @@ impl Workspace {
             // Aborta: limpia el staging (best-effort) y no toca el canónico.
             let _ = std::fs::remove_dir_all(staging.path());
             let nuevos = after_errors.difference(&before_errors).count();
+            // Solo la parte VARIABLE del motivo: la frase «el resultado del plan no pasa la política
+            // de cambios» la antepone ya la plantilla `thiserror` de `WorkspaceError::InvalidResult`
+            // (`error.rs`). Repetirla aquí la duplicaba literalmente en el `Display` final —el
+            // mensaje que ve el agente por el wire— (E30-H03 seguimiento 11).
             return Err(WorkspaceError::InvalidResult(format!(
-                "el resultado del plan no pasa la política de cambios: {nuevos} error(es) nuevo(s), \
+                "{nuevos} error(es) nuevo(s), \
                  {} error(es) en total (rejectNewErrors={}, allowExistingErrors={})",
                 after_errors.len(),
                 cfg.transactions.reject_new_errors,

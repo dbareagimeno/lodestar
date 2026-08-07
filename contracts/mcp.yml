@@ -148,9 +148,19 @@
 #     byte a byte, el `span` de bytes del destino dentro del CUERPO y el destino ya clasificado
 #     (`LinkTarget`, `§20.6`: document/workspaceFile/externalUri/selfAnchor/missing/
 #     workspaceDirectory/escapesWorkspace). `kind` ∈ inline/reference/collapsed/shortcut/autolink.
-#     `workspaceDirectory` (E23-H11) es un DIRECTORIO contenido en el workspace, alcanzado por
-#     navegación pura (`./`, `..`, `../`) o por un path que normaliza a un directorio (`../docs/..`);
-#     su `value` es el path del directorio, o `null` para la RAÍZ (no hay RelPath que la nombre).
+#     `workspaceDirectory` (E23-H11) es un DIRECTORIO contenido en el workspace alcanzado por
+#     navegación pura: el href NO nombra ningún segmento propio, solo `.`/`..` (`./`, `..`, `../`,
+#     `../..`), o los nombra y los deshace hasta la RAÍZ (`../docs/..`). Su `value` es el path del
+#     directorio, o `null` para la RAÍZ (no hay RelPath que la nombre).
+#     PRECISIÓN (E30-H03, `decisiones §23/A-10`): un path que normaliza a un directorio CON NOMBRE
+#     PROPIO —`guias/`, o `../docs/..` sobre un workspace cuya raíz aún queda por encima— NO es
+#     `workspaceDirectory` sino `missing`, y el `../docs/..` del ejemplo solo cae aquí porque
+#     normaliza a la raíz, no por «normalizar a un directorio». El criterio real es el de
+#     `core::links::clasificar`: si tras aplicar `.`/`..` NO queda ningún segmento nombrado, es un
+#     directorio; si queda alguno, se clasifica contra el inventario de DOCUMENTOS y ficheros, que
+#     no conoce directorios — así que un destino que es un directorio con nombre sale `missing`
+#     (`Warn`, no tumba la puerta de CI). Decidir «esto es un directorio» por la barra final sería
+#     la heurística que `§20.6` prohíbe.
 #     No es nodo del grafo y NO produce diagnóstico. Hasta E23-H11 estos destinos caían en
 #     `escapesWorkspace`, que es Err, así que un `[volver](../)` legítimo tumbaba `lodestar check`.
 #     `escapesWorkspace` queda para lo que de verdad sale POR ENCIMA de la raíz, y sigue siendo Err.
@@ -251,6 +261,37 @@
 #     agente que perdía el `receiptId` de `change_apply` no podía revertir aunque el recibo siguiera
 #     en disco. **No es una 11ª tool**: la superficie converge en 10 (`§19.6`) y este es el sitio
 #     donde ya vive `recovery.pendingTransaction`.
+#
+# E30-H03 (escoba documental y nits, `decisiones §23/D-02,A-01,A-06,A-09,A-10` + seguimientos de los
+# jueces de E28/E29): pasada de higiene. La mayoría es DECLARAR lo que el motor ya hacía; lo poco que
+# cambia de comportamiento va nombrado aquí. Cambios de wire (dos):
+#   - `contains` sobre un campo STRING con un literal NO-STRING pasa a ser TYPE ERROR
+#     (`INVALID_SCHEMA`) en vez de `false` silencioso, por coherencia con el criterio que E29-H04
+#     ratificó para `starts_with`/`ends_with` (A-04). `contains` sobre una LISTA no cambia: sigue
+#     siendo pertenencia con literales de cualquier tipo. Detalle en la `semantica` de
+#     `knowledge_search`.
+#   - `initialize` con `protocolVersion` PRESENTE pero de tipo no-string (número, booleano, array,
+#     objeto, o `null` EXPLÍCITO) pasa a rechazarse con JSON-RPC `-32602`, el mismo código que la
+#     versión no soportada, nombrando el tipo recibido. Hasta v0.5.0
+#     `params.get("protocolVersion").and_then(Value::as_str)` colapsaba «presente con tipo
+#     incorrecto» con «ausente» y respondía handshake con ÉXITO y la versión por defecto. OMITIR la
+#     clave sigue siendo válido y sigue dando el default: son casos distintos y ahora se distinguen.
+# Lo demás es documental, y queda declarado en su sitio de este contrato: la omisión silenciosa de
+# un `headingPath` sin match en `knowledge_get.sections` (A-01); el CICLO DE VIDA de la config —una
+# lectura por apertura de workspace, sin recarga en caliente (A-09, en `errores_ejecucion`); la
+# redacción precisa de `workspaceDirectory` —solo la RAÍZ, no «un directorio con nombre» (A-10); y
+# la LIMITACIÓN CONOCIDA de `workspace_status.counts`, que no ve los diagnósticos de descubrimiento
+# sobre ficheros fuera del inventario y por tanto puede divergir de `knowledge_check`, que es el
+# recuento con autoridad (seguimiento 7, verificado ejecutando). Fuera de este fichero: `§20.4` de
+# ARCHITECTURE.md deja de prometer que `patch_frontmatter` distingue «asignar null» de «eliminar»
+# —es merge-patch RFC 7386 y no hay forma de expresar lo primero por el wire— (D-02, criterio
+# ratificado el 2026-08-06); el SARIF de `lodestar check` deja de colgar los diagnósticos SIN target
+# (`WORKSPACE-EMPTY`, `PATH-NOT-UTF8`) de una `artifactLocation` `.lodestar` que no es un documento
+# y que a menudo ni existe en disco — ahora salen sin `locations`, como SARIF 2.1.0 prescribe para
+# el hallazgo que no pertenece a ningún artefacto (seguimiento 8); y el mensaje de `INVALID_RESULT`
+# del gate de staging deja de traer duplicada la frase «el resultado del plan no pasa la política de
+# cambios», que la plantilla del error anteponía a un String que ya la llevaba (seguimiento 11). El
+# catálogo de `ErrorCode` NO se abre: sigue en 17 filas, y ninguna tool cambia de forma.
 #
 # E10-H13 (decisión D6b, `docs/history/REFACTOR.md §13`, `decisiones §3`): las 10 tools activas declaran
 # `outputSchema` (JSON Schema derivado con `schemars::schema_for!` desde el tipo de respuesta real
@@ -712,6 +753,19 @@ meta:
     enumerarlo a mano sería justo la clase de lista que envejece en silencio (E26-H11). El test
     `descubribilidad.rs::los_codigos_del_contrato_estan_en_el_catalogo` lo trata como el único valor
     admisible de una entrada de `errores:` que no sea una de las 17 filas.
+    CICLO DE VIDA DE LA CONFIG (E30-H03, `decisiones §23/A-09`): `.lodestar/config.yaml` se lee
+    UNA SOLA VEZ, al abrir el workspace (`Workspace::open`, que es el arranque del proceso servidor
+    o la apertura de la CLI), y su contenido queda FIJO durante toda la sesión: no hay recarga en
+    caliente ni relectura por llamada. Un `config.yaml` editado con el servidor MCP vivo NO surte
+    efecto hasta reiniciarlo. Que varias tools listen `INTERNAL_IO_ERROR (carga de config)` en sus
+    `errores:` NO significa que la relean: es el centinela de que ESE fallo, ocurrido al abrir,
+    puede aflorar por la primera llamada que toque el workspace. Lo mismo vale para la raíz
+    (`--root`/cwd, canonicalizada al arrancar y fija, `§20.5`) y para la política de descubrimiento
+    derivada de la config: la firma de `Workspace::discovery_policy` es infalible precisamente
+    porque el YAML se valida una vez y un workspace abierto siempre tiene política válida. Desde
+    E29-H01, además, un `config.yaml` que EXISTE y no se puede leer o parsear es error de APERTURA
+    (la sesión no arranca, `exit 3` en la CLI), no una degradación silenciosa a los valores por
+    defecto.
   validacion_de_argumentos: >-
     REGLA DE LA CASA (**reescrita por E29-H08**, `decisiones §15`): **el servidor valida los VALORES
     de los parámetros que declara Y RECHAZA las claves que no declara.** Hasta v0.5.0 esta regla
@@ -807,6 +861,27 @@ tools:
       `maximumReceipts` la lista sigue larga hasta la siguiente escritura. Un `.json` corrupto o
       ilegible se salta, para que un recibo roto no impida ver los sanos. Antes no había forma de
       listarlos: perder el `receiptId` dejaba el undo inalcanzable pese a estar persistido.
+      ⚠️ LIMITACIÓN CONOCIDA — `counts.errors`/`counts.warnings` y `valid` NO ven los diagnósticos
+      de DESCUBRIMIENTO (E30-H03 seguimiento 7, verificado ejecutando): esta tool computa sobre
+      `DocumentSet::analyze()` —los diagnósticos de los documentos INVENTARIADOS— mientras que
+      `knowledge_check` (y `lodestar check`) computan sobre `App::full_analysis()`, que además
+      fusiona los diagnósticos que emite el propio descubrimiento y aplica la política de severidad
+      de la config. Divergen, entonces, exactamente en lo que el descubrimiento diagnostica sobre
+      ficheros que NO llegan al inventario. Casos verificados que reproducen hoy: un workspace SIN
+      ningún documento (`WORKSPACE-EMPTY`: `knowledge_check` da `warnings: 1`, `workspace_status`
+      da `warnings: 0` y `documents: 0` — un agente que solo llame a esta tool sobre un directorio
+      equivocado lo ve sano); un `.md` que es un SYMLINK (`SYMLINK-UNSUPPORTED`); un `.md` que no
+      es UTF-8 (`DOC-NOT-UTF8`); y todo `.md` excluido por `.lodestarignore`/`discovery.exclude`
+      cuando no queda ninguno. PRECISIÓN sobre la sospecha que registró la campaña: el criterio NO
+      es «el diagnóstico no tiene target» —`SYMLINK-UNSUPPORTED` y `DOC-NOT-UTF8` SÍ lo llevan y
+      divergen igual—, sino «su fichero no está en el inventario», así que ningún `analyze()` lo
+      alcanza. Los diagnósticos de documentos inventariados (`LINK-TARGET-MISSING`, `DOC-BOM`,
+      frontmatter inválido, marcadores de conflicto…) SÍ coinciden en las dos tools, verificado.
+      EL RECUENTO CON AUTORIDAD ES EL DE `knowledge_check` (invariante #3: una sola verdad
+      computada; esta tool es el resumen rápido de orientación, no el cómputo canónico). Un agente
+      que necesite el veredicto de validez debe llamar a `knowledge_check`, no leer `valid` de
+      aquí. Es limitación DECLARADA, no defecto abierto: homogeneizarla cambiaría el significado de
+      `counts` (que hoy es «de lo inventariado») y es trabajo con dueño propio.
 
   - nombre: knowledge_search
     fuente: crates/lodestar-mcp/src/tools.rs
@@ -820,7 +895,7 @@ tools:
       - { nombre: cursor, tipo: string, requerido: false, semantica: "cursor opaco de paginación devuelto en nextCursor. E30-H01: OPACO DE VERDAD — lleva firmado (blake3) el contexto emisor, así que solo lo emite el «nextCursor» de una llamada anterior y no se fabrica a mano. Un cursor que no decodifica, o que emitió OTRA tool (u otro contexto de listado), es INVALID_SCHEMA nombrando el problema: NO se reinterpreta como offset 0 ni se acepta como página de otro contexto. La cadena vacía cuenta como AUSENTE (primera página). La identidad NO incluye el criterio de selección (text/where/filter): reusar un cursor con otra consulta de la misma tool sigue paginando" }
     retorno: "SearchResults (lodestar_app): { results: [SearchResult], nextCursor, totalApproximate } — json directo, sin envelope. SearchResult NUNCA lleva body; desde E19-H05 tampoco los campos privilegiados OKF type/status/description/tags — solo path, title (derivado), snippet, score, revision (+ id, siempre ausente en v2), y desde E23-H11 `frontmatter` (solo si se pidió algo en `include`: el mapa de los field paths proyectados)"
     output_schema: "sí — schemars::schema_for!(SearchResults), vía lodestar_app::schemas::knowledge_search_schema()"
-    errores: ["INVALID_SCHEMA (un `where`/`filter` malformado, con el diagnóstico del parser del core en el mensaje — E24-H10/E26-H07; una entrada de `include` que no sea «frontmatter.<fieldPath>» válida — E23-H11, se rechaza en el despachador, antes de tocar el workspace, y NO devuelve página de resultados; desde E26-H08 un TYPE ERROR de evaluación: comparar un campo con un literal de tipo incompatible, p. ej. `priority >= \"high\"` sobre `priority: 2`, y desde E29-H04 también un operador de TEXTO sobre un valor que no es string, p. ej. `priority starts_with \"3\"` sobre `priority: 3`; y los VALORES declarados fuera de rango o de tipo — `text`/`where`/`cursor` que no sean cadena, `limit` fuera de [1, 100] — E24-H09; y desde E30-H01 un `cursor` que NO DECODIFICA (malformado, retocado, o fabricado a mano) o que emitió OTRA tool: hasta v0.5.0 el primero caía a offset 0 en silencio y el segundo servía una página ajena — `decisiones §23/A-02,A-03`)", "WorkspaceError"]
+    errores: ["INVALID_SCHEMA (un `where`/`filter` malformado, con el diagnóstico del parser del core en el mensaje — E24-H10/E26-H07; una entrada de `include` que no sea «frontmatter.<fieldPath>» válida — E23-H11, se rechaza en el despachador, antes de tocar el workspace, y NO devuelve página de resultados; desde E26-H08 un TYPE ERROR de evaluación: comparar un campo con un literal de tipo incompatible, p. ej. `priority >= \"high\"` sobre `priority: 2`, y desde E29-H04 también un operador de TEXTO sobre un valor que no es string, p. ej. `priority starts_with \"3\"` sobre `priority: 3`; desde E30-H03 eso incluye `contains` SOBRE UN CAMPO STRING con un literal no-string (`titulo contains 3`), donde `contains` significa subcadena y una aguja que no es texto no tiene subcadena que buscar — sobre un campo LISTA `contains` sigue siendo pertenencia y admite literales de CUALQUIER tipo, sin error (`decisiones §23`, seguimiento de A-04); y los VALORES declarados fuera de rango o de tipo — `text`/`where`/`cursor` que no sean cadena, `limit` fuera de [1, 100] — E24-H09; y desde E30-H01 un `cursor` que NO DECODIFICA (malformado, retocado, o fabricado a mano) o que emitió OTRA tool: hasta v0.5.0 el primero caía a offset 0 en silencio y el segundo servía una página ajena — `decisiones §23/A-02,A-03`)", "WorkspaceError"]
     semantica: >-
       Localiza documentos por texto libre y por el lenguaje de consulta tipado (where/filter), con
       snippet compacto y `revision` (DocumentRevision), sin devolver cuerpos completos. El filtrado
@@ -841,8 +916,15 @@ tools:
       no-string — `starts_with`/`ends_with` con el CAMPO o el LITERAL de otro tipo (hasta v0.5.0
       devolvía `false`, así que `priority starts_with "3"` sobre un `priority: 3` numérico servía la
       lista recortada de los documentos con ese campo textual: caso G1-20 del testbench,
-      `decisiones §23/A-04`). No casar (Ok(false)) sigue siendo ausencia, no error, y un campo
-      ausente tampoco es error. El error se decide sobre el ORDEN TOTAL de
+      `decisiones §23/A-04`), y desde E30-H03 también `contains` SOBRE UN CAMPO STRING con un
+      literal no-string (`titulo contains 3`): sobre un string `contains` significa SUBCADENA, y una
+      aguja que no es texto no tiene subcadena que buscar, así que es el mismo type error por
+      coherencia directa con A-04 (mismo `TypeError::NotAString`, con el tipo del LITERAL). Ojo a la
+      asimetría deliberada de `contains`, el único operador cuyo significado decide el TIPO DEL
+      CAMPO: sobre una LISTA sigue siendo pertenencia y admite literales de CUALQUIER tipo sin error
+      (`tags contains 3` busca el número 3 entre los elementos y no casa si no está — ausencia, no
+      error); sobre un escalar que no es string ni lista sigue siendo el caso (2). No casar
+      (Ok(false)) sigue siendo ausencia, no error, y un campo ausente tampoco es error. El error se decide sobre el ORDEN TOTAL de
       Analysis::documents (se reporta el PRIMER documento que yerra) y ANTES de aplicar `text` y
       `limit`/`cursor`: es un error de la CONSULTA, no del subconjunto, así que ni un `text` más
       estrecho ni una página más pequeña lo tapan — la misma consulta sobre el mismo workspace da
@@ -854,7 +936,7 @@ tools:
     params:
       - { nombre: ref, tipo: "object (DocumentRef)", requerido: true, semantica: "{ path: RelPath }, identidad del documento" }
       - { nombre: include, tipo: "array<string>", requerido: false, semantica: "campos a poblar: frontmatter/body/revision/outgoingLinks/backlinks/diagnostics; un campo no pedido queda ausente (None), nunca un valor por defecto disfrazado. Desde E16-H01 «frontmatter» es el YAML ARBITRARIO del documento (objeto libre con las claves del usuario, tipos YAML reales: numero/booleano/null/lista/objeto), NO la proyeccion de 7 campos conocidos del extinto core::types::Frontmatter; un documento sin bloque devuelve {}" }
-      - { nombre: sections, tipo: "array<array<string>>", requerido: false, semantica: "headingPaths para acotar «body» (solo si «body» ∈ include), p. ej. [[\"Security\",\"Token rotation\"]]" }
+      - { nombre: sections, tipo: "array<array<string>>", requerido: false, semantica: "headingPaths para acotar «body» (solo si «body» ∈ include), p. ej. [[\"Security\",\"Token rotation\"]]. Las secciones que casan se concatenan EN EL ORDEN PEDIDO, separadas por una línea en blanco. OMISIÓN SILENCIOSA (E30-H03, `decisiones §23/A-01`): un headingPath que NO casa con ningún heading del documento —título distinto, jerarquía distinta, o el documento no tiene ese heading— se OMITE del resultado sin error y sin aviso; no hay campo que liste los que no casaron. Consecuencia: si NINGUNO de los headingPaths pedidos casa, «body» es la CADENA VACÍA, indistinguible de una sección realmente vacía. Un headingPath es una ruta de títulos ANIDADOS (cada segmento se busca DENTRO del rango del anterior), y el emparejamiento es por título EXACTO. Comportamiento declarado, no defecto: un cliente que necesite distinguir «sección vacía» de «heading inexistente» debe pedir el body entero (sin «sections») o comprobar los headings con otra llamada. Fuente: core::model::extract_sections" }
     retorno: "json { document: DocumentView } — envoltorio de un solo campo, NO DocumentView a secas (lodestar_app::KnowledgeGetResponse describe esta forma exacta)"
     output_schema: "sí — schemars::schema_for!(KnowledgeGetResponse), vía lodestar_app::schemas::knowledge_get_schema()"
     errores: ["INVALID_SCHEMA (falta «ref», o «ref»/«include»/«sections» no tienen la forma esperada — el mensaje conserva el texto de serde, que dice qué valores se admitían, precedido del código: E24-H10/E26-H07)", "DOCUMENT_NOT_FOUND (el «ref» no es un documento del workspace)", "WorkspaceError"]
@@ -986,7 +1068,7 @@ tools:
       - { nombre: policy, tipo: object, requerido: false, semantica: "{ requireValidResult?, allowWarnings? } (PlanPolicy, E12-H04); por defecto exige conformidad y permite warnings. Cada campo es independientemente opcional (E29-H02, `decisiones §19(b)`): un objeto PARCIAL —una sola clave, o incluso «policy: {}»— completa el campo omitido con su default, igual que omitir «policy» entera; hasta v0.5.0 el `Deserialize` de PlanPolicy exigía las DOS claves si el objeto estaba presente y una policy parcial daba INVALID_SCHEMA «missing field …» pese a que este contrato ya declaraba los dos campos opcionales" }
     retorno: "PlanResult (lodestar_app): { changeSetId, baseWorkspaceRevision, planHash, canApply, policy, expiresAt, normalizedOperations: [NormalizedOperation], risk, semanticDiff, impact: { affectedDocuments, affectedCount }, capturedRevisions: { «path»: «blake3:…» }, diagnosticsBefore, diagnosticsAfter } — json directo, sin envelope. `capturedRevisions` (E21-H02) lleva una entrada por documento de una selección masiva (su DocumentRevision, el snapshot de §Fase 12); vacío {} en la forma-array. `policy` (E29-H07) es la PlanPolicy efectiva con la que se computó `canApply` —la enviada, con los defaults ya aplicados—: se devuelve y se persiste con el plan porque `change_apply` la RECOMPUTA para ejercer el veredicto (`decisiones §18`), de modo que el cliente ve exactamente bajo qué política se le juzgará al aplicar"
     output_schema: "sí — schemars::schema_for!(PlanResult), vía lodestar_app::schemas::change_plan_schema()"
-    errores: ["REVISION_CONFLICT (workspace o documento cambiado)", "INVALID_SCHEMA (op desconocida o parámetro inválido; un `where`/`filter` de `selection` malformado, CON el diagnóstico del parser del core en el mensaje — E26-H07; hasta v0.4.0 `build_selection_expression` lo descartaba con `map_err(|_| …)` y la misma consulta se diagnosticaba por knowledge_search y se callaba por change_plan; y un TYPE ERROR al evaluar `selection.where`/`selection.filter` — E26-H08: una selección masiva ya no salta documentos en silencio, y el error es el MISMO código y el MISMO texto que daría knowledge_search con esa consulta; desde E29-H04 los TRES casos de type error del lenguaje —orden cruzado, operador de lista sobre un no-lista y operador de TEXTO (`starts_with`/`ends_with`) sobre un no-string— abortan igual)", "DOCUMENT_NOT_FOUND (objetivo de normalización inexistente)", "DOCUMENT_ALREADY_EXISTS (E28-H02: create sobre un path ya ocupado por un documento existente; move cuyo «to» ya está ocupado. Simétrico de DOCUMENT_NOT_FOUND —la dirección contraria— y el mensaje NOMBRA el path colisionado. Hasta v0.5.0 no había guard: el plan salía con canApply:true y el apply PISABA el documento existente sin un solo diagnóstico. Un move con from == to no es colisión: sigue siendo el no-op válido de siempre. E28-H04: el mismo código cubre las colisiones INTRA-PLAN —dos ops del mismo change set que reclaman el path— porque el guard consulta la ocupación acumulada; liberar y reocupar en el mismo plan NO es colisión)", "INBOUND_LINKS_EXIST (delete «reject» con entrantes)", "PERMISSION_DENIED (path-traversal)", "RECOVERY_FAILED (E25-H02: la recuperación transparente del paso (0) —E24-H03— no pudo restaurar una transacción interrumpida porque sus copias no verifican; su journal y sus copias quedan en .lodestar/runtime/journal/quarantine/<txnId>/ y el mensaje nombra la ruta; la SIGUIENTE llamada ya no encuentra recuperación pendiente)", "INTERNAL_IO_ERROR (carga de config)", "WorkspaceError"]
+    errores: ["REVISION_CONFLICT (workspace o documento cambiado)", "INVALID_SCHEMA (op desconocida o parámetro inválido; un `where`/`filter` de `selection` malformado, CON el diagnóstico del parser del core en el mensaje — E26-H07; hasta v0.4.0 `build_selection_expression` lo descartaba con `map_err(|_| …)` y la misma consulta se diagnosticaba por knowledge_search y se callaba por change_plan; y un TYPE ERROR al evaluar `selection.where`/`selection.filter` — E26-H08: una selección masiva ya no salta documentos en silencio, y el error es el MISMO código y el MISMO texto que daría knowledge_search con esa consulta; desde E29-H04, y ampliado en E30-H03, los type errors del lenguaje —orden cruzado, operador de lista sobre un no-lista y operador de TEXTO sobre un no-string: `starts_with`/`ends_with` a cualquiera de los dos lados, y `contains` sobre un campo STRING con un literal no-string, donde significa subcadena— abortan igual)", "DOCUMENT_NOT_FOUND (objetivo de normalización inexistente)", "DOCUMENT_ALREADY_EXISTS (E28-H02: create sobre un path ya ocupado por un documento existente; move cuyo «to» ya está ocupado. Simétrico de DOCUMENT_NOT_FOUND —la dirección contraria— y el mensaje NOMBRA el path colisionado. Hasta v0.5.0 no había guard: el plan salía con canApply:true y el apply PISABA el documento existente sin un solo diagnóstico. Un move con from == to no es colisión: sigue siendo el no-op válido de siempre. E28-H04: el mismo código cubre las colisiones INTRA-PLAN —dos ops del mismo change set que reclaman el path— porque el guard consulta la ocupación acumulada; liberar y reocupar en el mismo plan NO es colisión)", "INBOUND_LINKS_EXIST (delete «reject» con entrantes)", "PERMISSION_DENIED (path-traversal)", "RECOVERY_FAILED (E25-H02: la recuperación transparente del paso (0) —E24-H03— no pudo restaurar una transacción interrumpida porque sus copias no verifican; su journal y sus copias quedan en .lodestar/runtime/journal/quarantine/<txnId>/ y el mensaje nombra la ruta; la SIGUIENTE llamada ya no encuentra recuperación pendiente)", "INTERNAL_IO_ERROR (carga de config)", "WorkspaceError"]
     semantica: >-
       Orquesta un plan de cambios SIN escribir (invariante #1; aplicar es change_apply, E13): toda
       la simulación es sobre un DocumentSet en memoria. Acepta DOS formas de wire: la forma-ARRAY
@@ -996,8 +1078,10 @@ tools:
       §Fase 12); una selección que no casa nada da un plan vacío sin error, pero un TYPE ERROR al
       evaluar la consulta ABORTA el plan (INVALID_SCHEMA, E26-H08: hasta v0.4.0 el documento que
       erraba se saltaba en silencio y el plan afectaba a menos ficheros de los seleccionados). Eso
-      vale para los TRES casos de type error del lenguaje, no solo para el orden: desde E29-H04 un
-      `starts_with`/`ends_with` sobre un valor que no es string también aborta, donde hasta v0.5.0
+      vale para TODOS los casos de type error del lenguaje, no solo para el orden: desde E29-H04 un
+      `starts_with`/`ends_with` sobre un valor que no es string también aborta, y desde E30-H03
+      también un `contains` sobre un campo STRING con un literal no-string (sobre un campo LISTA
+      sigue siendo pertenencia y admite literales de cualquier tipo), donde hasta v0.5.0
       recortaba la selección en silencio y presentaba el plan resultante con canApply:true. La
       consulta decide el conjunto recorriendo el ORDEN TOTAL de Analysis::documents ANTES de
       expandir ninguna operación, así que el documento nombrado en el error no depende del orden en

@@ -459,6 +459,54 @@ fn rechaza_errores_nuevos() {
     );
 }
 
+/// **E30-H03** (seguimiento 11, `decisiones §23`) · `mensaje_de_invalid_result_no_esta_duplicado`:
+/// **Dado** un `change_apply` cuyo resultado no pasa la política de cambios, **Cuando** se lee el
+/// mensaje de error, **Entonces** la frase "el resultado del plan no pasa la política de cambios"
+/// aparece **una sola vez**.
+///
+/// Causa raíz verificada (`requirements/epica-30-higiene-escoba.md` E30-H03 punto 11):
+/// `WorkspaceError::InvalidResult` lleva la plantilla de `thiserror`
+/// `#[error("el resultado del plan no pasa la política de cambios: {0}")]`
+/// (`crates/lodestar-workspace/src/error.rs:28-29`), y el `String` que le pasa
+/// `crates/lodestar-workspace/src/staging.rs:265-271` **ya empieza con esa misma frase** — el
+/// `Display` de `thiserror` la antepone otra vez, así que el mensaje final la repite dos veces
+/// seguidas. Reutiliza el mismo escenario que `rechaza_errores_nuevos` (un `change_apply` que
+/// introduce un error nuevo sobre un workspace con error preexistente) porque es el camino real
+/// que produce `ErrorCode::InvalidResult` con el mensaje construido por `validate_staging`.
+#[test]
+fn mensaje_de_invalid_result_no_esta_duplicado() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    semilla_con_error_preexistente(root);
+
+    let app = App::open(root).expect("el workspace temporal debe abrir");
+
+    let ops = json!([
+        { "op": "create", "path": "nuevo.md",
+          "body": "# Nuevo\n\nEnlace roto recién introducido: [otro](inexistente-nuevo.md).\n" },
+    ]);
+
+    let err = planifica_y_aplica(&app, &ops).expect_err(
+        "un cambio que introduce un enlace roto NUEVO debe rechazarse con INVALID_RESULT",
+    );
+    assert_eq!(
+        err.code,
+        ErrorCode::InvalidResult,
+        "precondición: el error debe ser INVALID_RESULT para que el test ejerza el mensaje correcto; \
+         era {} ({err:?})",
+        err.code.as_str()
+    );
+
+    let frase = "el resultado del plan no pasa la política de cambios";
+    let apariciones = err.message.matches(frase).count();
+    assert_eq!(
+        apariciones, 1,
+        "la frase «{frase}» debe aparecer UNA sola vez en el mensaje, no duplicada por la plantilla \
+         de `thiserror` anteponiéndose a un `String` que ya la lleva: {:?}",
+        err.message
+    );
+}
+
 // ===========================================================================
 // E23-H01 — Una sola verdad de validación (mitad `lodestar-app`)
 //

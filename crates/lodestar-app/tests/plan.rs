@@ -1779,3 +1779,68 @@ mod campos_legales_por_operacion {
         }
     }
 }
+
+// ===========================================================================
+// E30-H03 — seguimiento A-06: `replace_text` sin ocurrencias en forma-array es un no-op silencioso
+// (`requirements/epica-30-higiene-escoba.md` E30-H03 punto A-06, `decisiones §23`).
+//
+// `docs/user/safe-changes.md` ya documenta el vacío-sin-error para SELECCIONES MASIVAS ("a
+// selection that matches nothing produces an empty plan, not an error"), pero no fija el mismo
+// comportamiento para la forma-array (`operations: [{...}]`) de operaciones sueltas, que es un
+// camino de código distinto (no pasa por `select`/`captured_revisions`). Este test de guardia FIJA
+// el comportamiento actual: un `replace_text` cuyo `find` no aparece en el documento, sin
+// `expectedOccurrences` (que sería lo que convertiría un recuento distinto de 0 en error), produce
+// un plan `canApply: true` con diff vacío para ese documento — ninguna operación normalizada lo
+// modifica y `semantic_diff` no lo lista como `modified`/`body_changes`.
+//
+// GUARDA (nace VERDE, `E30-H03` lo declara documental salvo el test): no se ha encontrado en el
+// repo un test previo (E28/E29) que ejerza exactamente esta combinación (forma-array +
+// `replace_text` + `find` sin match + sin `expectedOccurrences`); los tests de `replace_text`
+// existentes (`los_campos_legales_de_cada_operacion_se_aceptan`, arriba) usan un `find` que SÍ
+// aparece. Congela el comportamiento para que un cambio futuro que lo convierta en error o en un
+// plan con contenido lo note.
+// ===========================================================================
+
+/// **A-06** · `replace_text_sin_ocurrencias_en_forma_array_es_noop`: **Dado** un documento sin
+/// ninguna ocurrencia de un `find` dado, **Cuando** se llama a `change_plan` con `replace_text` en
+/// forma-array sin `expectedOccurrences`, **Entonces** el plan resultante tiene `canApply: true` y
+/// un diff vacío para ese documento (sin error).
+#[test]
+fn replace_text_sin_ocurrencias_en_forma_array_es_noop() {
+    let (_dir, app) = app_con_workspace();
+
+    // `alfa.md` (ver `app_con_workspace`) no contiene la cadena «esta-cadena-no-existe-en-el-doc».
+    let ops = serde_json::json!([
+        { "op": "replace_text", "path": "alfa.md",
+          "find": "esta-cadena-no-existe-en-el-doc", "replace": "sustituto" },
+    ]);
+
+    let plan = app.change_plan(None, &ops, policy_permisiva()).expect(
+        "un `replace_text` cuyo `find` no aparece no debe fallar al planificar: es un no-op",
+    );
+
+    assert!(
+        plan.can_apply,
+        "un plan no-op (find sin ocurrencias, sin expectedOccurrences) debe ser `canApply: true`: {plan:?}"
+    );
+    let alfa = lodestar_core::types::RelPath::new("alfa.md").unwrap();
+    assert!(
+        !plan.semantic_diff.modified.contains(&alfa),
+        "el diff no debe listar `alfa.md` como modificado si `find` no tuvo ninguna ocurrencia: \
+         {:?}",
+        plan.semantic_diff
+    );
+    assert!(
+        !plan.semantic_diff.body_changes.contains(&alfa),
+        "el diff no debe listar cambios de cuerpo en `alfa.md` si `find` no tuvo ninguna ocurrencia: \
+         {:?}",
+        plan.semantic_diff
+    );
+    assert!(
+        plan.semantic_diff.created.is_empty()
+            && plan.semantic_diff.deleted.is_empty()
+            && plan.semantic_diff.moved.is_empty(),
+        "un `replace_text` no-op no debe producir ningún otro tipo de cambio en el diff: {:?}",
+        plan.semantic_diff
+    );
+}

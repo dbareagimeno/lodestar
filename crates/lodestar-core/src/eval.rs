@@ -338,6 +338,15 @@ fn eval_orden(
 /// una **lista** es pertenencia; sobre cualquier otro escalar (número, booleano, `null`) o un mapa
 /// es [`TypeError::NotAList`]. (`contains_any`/`contains_all` son exclusivos de listas; ver
 /// [`eval_contains_lista`].)
+///
+/// Sobre un campo string, el literal comparado **también** debe ser string: una aguja que no es
+/// texto no tiene subcadena que buscar, así que es [`TypeError::NotAString`] con el tipo del
+/// **literal**, no un `false` silencioso (E30-H03 seguimiento 6, `decisiones §23`). Es el mismo
+/// criterio que E29-H04 ratificó para `starts_with`/`ends_with` (`decisiones §23/A-04`): hasta
+/// v0.5.0, `titulo contains 3` sobre `titulo: "auth3"` devolvía `false` —indistinguible de «la
+/// subcadena no aparece»— cuando en realidad la consulta está mal tipada. El campo se juzga
+/// primero: un campo que no es ni string ni lista sigue siendo [`TypeError::NotAList`] (es el
+/// operando del workspace, no el de la consulta).
 fn eval_contains(
     field: &FieldPath,
     operator: ComparisonOperator,
@@ -346,11 +355,16 @@ fn eval_contains(
 ) -> Result<bool, TypeError> {
     use serde_yaml::Value as V;
     match valor {
-        // Subcadena: solo tiene sentido con un literal string (sin coerción, otro literal no casa).
-        V::String(texto) => Ok(match literal {
-            QueryValue::String(aguja) => texto.contains(aguja),
-            _ => false,
-        }),
+        // Subcadena: solo tiene sentido con un literal string (sin coerción); otro literal es un
+        // type error del LADO DEL LITERAL, no un `false` que oculte la consulta mal tipada.
+        V::String(texto) => match literal {
+            QueryValue::String(aguja) => Ok(texto.contains(aguja)),
+            otro => Err(TypeError::NotAString {
+                field: field.clone(),
+                operator,
+                found: tipo_de_literal(otro),
+            }),
+        },
         // Pertenencia: el literal es un elemento de la lista (comparado por valor e igualdad de tipo).
         V::Sequence(items) => Ok(items.iter().any(|el| valores_iguales(untag(el), literal))),
         otro => Err(TypeError::NotAList {

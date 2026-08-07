@@ -1253,17 +1253,7 @@ impl App {
 
         // 2. Diagnósticos de descubrimiento, bajo la clave de su primer `target` — y los que no
         //    tienen ninguno, bajo el ancla sintética del workspace (E29-H06).
-        for mut check in discovery_diagnostics {
-            let Some(level) = validation.effective_severity(&check) else {
-                continue;
-            };
-            check.level = level;
-            let anchor = match check.targets.first().cloned() {
-                Some(target) => target,
-                None => anchor_workspace(),
-            };
-            analysis.diagnostics.entry(anchor).or_default().push(check);
-        }
+        fusiona_diagnosticos_de_descubrimiento(&mut analysis, discovery_diagnostics, validation);
 
         Ok(analysis)
     }
@@ -3391,6 +3381,47 @@ pub const ANCHOR_WORKSPACE: &str = ".lodestar";
 /// `..` ni backslashes), y el test `ancla_de_workspace_es_relpath_valido` lo clava.
 fn anchor_workspace() -> RelPath {
     RelPath::new(ANCHOR_WORKSPACE).expect("«.lodestar» es un RelPath válido por construcción")
+}
+
+/// Fusiona los diagnósticos de **descubrimiento** dentro de un [`Analysis`] ya calculado, aplicando
+/// la política de severidad y anclando cada uno bajo la clave que le corresponde (E29-H06).
+///
+/// Es la mitad del cuerpo de [`App::full_analysis`] que **no** depende del disco: recibe el
+/// `Analysis` de los documentos, la lista de diagnósticos de descubrimiento y la sección
+/// `validation`, y no lee nada más. Se extrajo a función propia en **E30-H03** (seguimiento 9)
+/// precisamente para que sea ejercitable con un [`Check`] **sintético**: los diagnósticos que la
+/// motivan —`PATH-NOT-UTF8` y `WORKSPACE-EMPTY`— nacen de condiciones del sistema de ficheros que
+/// no se pueden fabricar en un test portable (en APFS no hay forma de crear un nombre de fichero
+/// que no sea UTF-8 válido), así que sin este seam el camino de anclaje solo se podía observar de
+/// refilón.
+///
+/// Las tres reglas que fija, y que un test puede clavar una a una:
+/// 1. Una familia reclasificada a `ignore` por la config **no entra** (se descarta, como los
+///    diagnósticos de documento).
+/// 2. Un diagnóstico **con** `targets` se ancla bajo su **primer** target, mezclándose con los
+///    diagnósticos que ese documento ya tuviera.
+/// 3. Un diagnóstico **sin** `targets` se ancla bajo [`anchor_workspace`], nunca se descarta: es
+///    exactamente el caso que hasta E29-H06 desaparecía en silencio por no tener clave con la que
+///    entrar al mapa.
+///
+/// La severidad efectiva se escribe en el propio `check.level` antes de insertarlo, así que el
+/// diagnóstico anclado cuenta ya reclasificado para `hard_fail`/`warn_count`.
+fn fusiona_diagnosticos_de_descubrimiento(
+    analysis: &mut Analysis,
+    discovery_diagnostics: Vec<Check>,
+    validation: &lodestar_workspace::config::ValidationSection,
+) {
+    for mut check in discovery_diagnostics {
+        let Some(level) = validation.effective_severity(&check) else {
+            continue;
+        };
+        check.level = level;
+        let anchor = match check.targets.first().cloned() {
+            Some(target) => target,
+            None => anchor_workspace(),
+        };
+        analysis.diagnostics.entry(anchor).or_default().push(check);
+    }
 }
 
 /// Id estable de un diagnóstico dentro de una revisión (E10-H12): `diag:blake3:<hex>` donde

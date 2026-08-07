@@ -1901,18 +1901,26 @@ pub enum TypeError {
         /// El tipo que tenía el campo (nunca `List`).
         found: ValueType,
     },
-    /// Un operador de **texto de afijo** (`starts_with`/`ends_with`) cuyo operando no es un string
-    /// (E29-H04, `decisiones §23/A-04`). Son operadores **exclusivos de strings**: un número, un
-    /// booleano, `null`, una lista o un mapa no tienen prefijo ni sufijo que comprobar, y el
-    /// lenguaje no coerce (`§20.8`), así que devolver `false` era una respuesta silenciosamente
-    /// equivocada —el caso G1-20 del testbench: 7 documentos con `priority: 3` desaparecían de
-    /// `priority starts_with "3"` sin un aviso— y no un veredicto.
+    /// Un operador de **texto** cuyo operando no es un string: los afijos
+    /// (`starts_with`/`ends_with`, E29-H04, `decisiones §23/A-04`) y `contains` **sobre un campo
+    /// string**, donde significa subcadena (E30-H03 seguimiento 6). Son operadores que solo tienen
+    /// sentido entre strings: un número, un booleano, `null`, una lista o un mapa no tienen
+    /// prefijo, sufijo ni subcadena que comprobar, y el lenguaje no coerce (`§20.8`), así que
+    /// devolver `false` era una respuesta silenciosamente equivocada —el caso G1-20 del testbench:
+    /// 7 documentos con `priority: 3` desaparecían de `priority starts_with "3"` sin un aviso— y no
+    /// un veredicto.
     ///
     /// Cubre los **dos** operandos: el campo no-string (`priority starts_with "3"` sobre
-    /// `priority: 3`) y el literal no-string (`status starts_with 3`). El `found` es de **uno** de
-    /// los dos —el campo primero, el literal si el campo sí era string—, así que la variante NO
-    /// dice de qué lado viene: quien redacte el mensaje debe ser neutro respecto al lado y no
-    /// atribuirle el tipo al campo, o mandaría al agente a inspeccionar un campo sano.
+    /// `priority: 3`) y el literal no-string (`status starts_with 3`, `titulo contains 3`). El
+    /// `found` es de **uno** de los dos —el campo primero, el literal si el campo sí era string—,
+    /// así que la variante NO dice de qué lado viene: quien redacte el mensaje debe ser neutro
+    /// respecto al lado y no atribuirle el tipo al campo, o mandaría al agente a inspeccionar un
+    /// campo sano.
+    ///
+    /// Para `contains` solo emerge con un campo **string**: un campo que no es ni string ni lista
+    /// sigue siendo [`TypeError::NotAList`] (el operando que falla es el del workspace, no el de la
+    /// consulta), y sobre una **lista** el literal puede ser de cualquier tipo (pertenencia por
+    /// valor, sin restricción de string).
     ///
     /// Un campo **inexistente** no llega aquí: la ausencia es `false` (mismo contrato que
     /// [`TypeError::NotAList`]).
