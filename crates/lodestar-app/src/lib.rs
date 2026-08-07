@@ -3858,7 +3858,8 @@ fn evalua_documento(
 /// el operador, el/los tipo(s) implicados y el documento** donde chocaron, más cómo salir del error.
 ///
 /// Son **tres** las variantes desde E29-H04 —orden cruzado, operador de lista sobre un no-lista y
-/// operador de texto (`starts_with`/`ends_with`) sobre un no-string—, y el `match` de abajo es
+/// operador de texto (`starts_with`/`ends_with`, y desde E30-H03 también `contains` con literal
+/// no-string sobre un campo string) sobre un no-string—, y el `match` de abajo es
 /// **exhaustivo a propósito**: es el mecanismo que garantiza que ningún `TypeError` nuevo del core
 /// llegue al wire sin mensaje propio.
 ///
@@ -3906,7 +3907,8 @@ fn error_de_tipo(err: &TypeError, path: &RelPath) -> AppError {
         } => format!(
             "en «{}» la comparación entre el campo «{field}» y su literal tiene un operando de tipo \
              {}, y el operador de texto «{}» exige un string a los DOS lados: lo que no es texto no \
-             tiene prefijo ni sufijo que comprobar, y el lenguaje no coerce tipos (§20.8). Comprueba \
+             tiene prefijo, sufijo ni subcadena que comprobar, y el lenguaje no coerce tipos \
+             (§20.8). Comprueba \
              los dos lados — el tipo que falla puede ser el del campo o el del literal",
             path.as_str(),
             nombre_de_wire(found),
@@ -4077,8 +4079,19 @@ impl CursorScope {
 /// `«<hex(etiqueta|offset)>.<firma>»`, donde la firma son los 8 primeros hex de
 /// `blake3(etiqueta|offset)`. Dos consecuencias buscadas: (a) la etiqueta del emisor se **recupera**
 /// al decodificar, así que un rechazo puede decir de qué contexto venía el cursor y no solo que no
-/// vale; (b) la firma cubre etiqueta **y** offset, así que un cursor fabricado a mano o retocado no
-/// pasa — el cursor es opaco de verdad, no un número disfrazado (`decisiones §23/A-03`).
+/// vale; (b) la firma cubre etiqueta **y** offset, así que un cursor **retocado** —cambiar un dígito
+/// del offset, mover un cursor de una tool a otra— no pasa (`decisiones §23/A-03`).
+///
+/// # Lo que la firma NO es
+///
+/// **No es defensa contra forja deliberada**, y el contrato no debe prometerlo: `blake3` va aquí
+/// **sin clave** y el esquema está documentado, así que quien quiera fabricar un cursor válido para
+/// cualquier tool y offset puede hacerlo. Es un mecanismo **anti-confusión** —detecta el retoque
+/// accidental y el cruce de cursores entre tools, que es el defecto que E30-H01 cierra—, no un
+/// control de autenticidad. Un cursor forjado con la firma correcta se acepta, y eso es inocuo: lo
+/// único que un cliente consigue así es pedir un offset, que es exactamente lo que el parámetro
+/// expresa. Si algún día el cursor llegara a codificar algo que no sea posición, esta propiedad
+/// habría que revisarla (haría falta clave, y entonces dejaría de ser autosuficiente).
 ///
 /// Sigue sin haber estado de sesión ni TTL: la etiqueta y el offset son todo lo que hace falta, y
 /// `blake3` es determinista, así que dos procesos distintos emiten el **mismo** cursor para el mismo
@@ -4110,22 +4123,38 @@ const FIRMA_CURSOR: usize = 8;
 fn decode_cursor_firmado(cursor: &str, scope: &CursorScope) -> Result<usize, AppError> {
     let ilegible = || {
         AppError::invalid_schema(format!(
-            "«cursor» no es un cursor de paginación de esta superficie: «{cursor}». Un cursor solo \
-             se obtiene del «nextCursor» de una respuesta anterior de {} — no se fabrica a mano ni \
-             se deriva de un número de página; omite el parámetro para empezar por el principio",
+            "«cursor» no es un cursor de paginación de esta superficie: «{cursor}». Un cursor se \
+             toma del «nextCursor» de una respuesta anterior de {} — no se deriva de un número de \
+             página; omite el parámetro para empezar por el principio",
             scope.descripcion()
         ))
     };
 
     let (cuerpo, firma) = cursor.split_once('.').ok_or_else(ilegible)?;
-    if cuerpo.len() % 2 != 0 || firma.len() != FIRMA_CURSOR {
+    // Un cursor emitido por esta capa es hex ASCII puro en sus dos mitades. Comprobarlo ANTES de
+    // trocear no es un lujo: el troceo de abajo va por bytes, y un cursor con un carácter multibyte
+    // («🔥.807e307a») partía el proceso en un índice que no era frontera de carácter —panic, no
+    // error—, y con él la sesión JSON-RPC entera. Un cursor no-ASCII es malformado como cualquier
+    // otro: `INVALID_SCHEMA`, nunca un panic.
+    let ascii_hex = |s: &str| s.bytes().all(|b| b.is_ascii_hexdigit());
+    if !ascii_hex(cuerpo)
+        || !ascii_hex(firma)
+        || cuerpo.len() % 2 != 0
+        || firma.len() != FIRMA_CURSOR
+    {
         return Err(ilegible());
     }
-    let bytes: Vec<u8> = (0..cuerpo.len() / 2)
-        .map(|i| u8::from_str_radix(&cuerpo[i * 2..i * 2 + 2], 16))
+    let bytes: Vec<u8> = cuerpo
+        .as_bytes()
+        .chunks_exact(2)
+        .map(|par| {
+            // `par` es hex ASCII verificado arriba, así que ni el `from_utf8` ni el parseo fallan.
+            u8::from_str_radix(std::str::from_utf8(par).unwrap_or("zz"), 16)
+        })
         .collect::<Result<_, _>>()
         .map_err(|_| ilegible())?;
     let payload = String::from_utf8(bytes).map_err(|_| ilegible())?;
+    // La firma recomputada es hex ASCII de blake3, así que este corte sí es seguro por construcción.
     if &blake3::hash(payload.as_bytes()).to_hex().as_str()[..FIRMA_CURSOR] != firma {
         return Err(ilegible());
     }

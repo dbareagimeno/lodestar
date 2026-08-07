@@ -468,7 +468,9 @@
 #     una respuesta, y `metadata_inspect` era la única de las 10 tools sin `limit` ni `cursor` en
 #     ninguno de sus dos modos. Hoy: `graph_query.limit` default 100 / máximo 1000, y
 #     `metadata_inspect` gana `limit`+`cursor` (default 100 / máximo 1000) en los dos modos con el
-#     mismo cursor-offset hex autosuficiente del resto de la superficie. La cota vive en la FACHADA:
+#     mismo cursor autosuficiente del resto de la superficie —entonces un offset hex desnudo; desde
+#     `E30-H01` el cursor va firmado con su origen, ver la entrada de esa historia—. La cota vive en
+#     la FACHADA:
 #     el core sigue puro y sirviendo la verdad completa (invariantes #2 y #3). Y la ESTADÍSTICA no se
 #     pagina — `presentIn`/`missingIn`/`inferredTypes` describen todo el workspace—: lo que se pagina
 #     es la lista.

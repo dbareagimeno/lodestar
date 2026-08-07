@@ -10695,6 +10695,89 @@ fn initialize_sin_version_sigue_funcionando() {
 }
 
 // ---------------------------------------------------------------------------
+// E30-H03 — seguimiento 10: `protocolVersion` presente pero de tipo NO string.
+//
+// `requirements/epica-30-higiene-escoba.md` E30-H03 punto 10 (`decisiones §23`, seguimiento sin
+// numerar de los jueces ciegos de E28/E29). `E29-H09` fijó el rechazo de una `protocolVersion`
+// STRING pero no soportada (arriba, `protocol_version_no_soportada_se_rechaza`); este seguimiento
+// cubre el hueco distinto: `protocolVersion` presente con un valor que NO es string en absoluto
+// (número, `null` explícito, objeto). Causa raíz: `main.rs` L249,
+// `params.get("protocolVersion").and_then(Value::as_str)` — `.and_then` devuelve `None` tanto si
+// la clave está ausente como si está presente con un tipo no-string, y el código no distingue los
+// dos casos: cae al brazo de "ausente" y responde éxito con la versión por defecto. Debe
+// distinguir "ausente" (éxito, ver `initialize_sin_version_sigue_funcionando`, control anti-vacuo
+// que este bloque NO duplica) de "presente con tipo incorrecto" (rechazo `-32602`, mismo código
+// que la versión no soportada).
+// ---------------------------------------------------------------------------
+
+/// E30-H03 (seguimiento 10) · Criterio `protocol_version_no_string_es_rechazado`:
+/// Dado un `initialize` con `protocolVersion: 12345` (número), Cuando se procesa, Entonces la
+/// respuesta es un error JSON-RPC `-32602` que nombra que `protocolVersion` debe ser una cadena
+/// (no un éxito silencioso con la versión por defecto).
+#[test]
+fn protocol_version_no_string_es_rechazado() {
+    let dir = workspace_min();
+    let resp = roundtrip(
+        dir.path(),
+        &[r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":12345}}"#],
+        1,
+    );
+    assert_eq!(
+        resp[0]["error"]["code"], -32602,
+        "protocolVersion numérica (12345) debe rechazarse con -32602, no colar como ausente: {resp:?}"
+    );
+    let msg = resp[0]["error"]["message"]
+        .as_str()
+        .expect("el error de protocolVersion no-string lleva mensaje")
+        .to_lowercase();
+    assert!(
+        msg.contains("protocolversion") && msg.contains("cadena") || msg.contains("string"),
+        "el mensaje debe nombrar que protocolVersion debe ser una cadena/string: {msg}"
+    );
+    assert!(
+        resp[0]["result"].is_null(),
+        "un initialize con protocolVersion de tipo incorrecto no debe producir result: {resp:?}"
+    );
+}
+
+/// E30-H03 (seguimiento 10) · Variante `protocol_version_null_explicito_es_rechazado`: un
+/// `protocolVersion: null` **explícito** (la clave está presente, con valor JSON `null`) no es lo
+/// mismo que omitir la clave — sigue siendo "presente con tipo incorrecto", no "ausente".
+#[test]
+fn protocol_version_null_explicito_es_rechazado() {
+    let dir = workspace_min();
+    let resp = roundtrip(
+        dir.path(),
+        &[r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":null}}"#],
+        1,
+    );
+    assert_eq!(
+        resp[0]["error"]["code"], -32602,
+        "protocolVersion: null EXPLÍCITO debe rechazarse con -32602, distinto de omitir la clave: {resp:?}"
+    );
+    assert!(
+        resp[0]["result"].is_null(),
+        "un initialize con protocolVersion: null explícito no debe producir result: {resp:?}"
+    );
+}
+
+/// E30-H03 (seguimiento 10) · Variante `protocol_version_objeto_es_rechazado`: un `protocolVersion`
+/// que es un objeto JSON (tipo claramente incorrecto) también se rechaza, no solo los escalares.
+#[test]
+fn protocol_version_objeto_es_rechazado() {
+    let dir = workspace_min();
+    let resp = roundtrip(
+        dir.path(),
+        &[r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":{"x":1}}}"#],
+        1,
+    );
+    assert_eq!(
+        resp[0]["error"]["code"], -32602,
+        "protocolVersion como objeto debe rechazarse con -32602: {resp:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // E29-H08 — El wire RECHAZA los parámetros que no declara.
 // `requirements/epica-29-honestidad-superficie.md §E29-H08` · `decisiones §15` (decidido:
 // **(a) ejecutar** lo que el schema declara) · `decisiones §16(e)` (el criterio gemelo para el
@@ -11404,6 +11487,94 @@ fn cursor_malformado_es_invalid_schema() {
             "…y deletrear el valor recibido («{CURSOR_BASURA}»), o el agente no puede distinguir \
              «mandé un cursor que no vale» de «esta tool no acepta cursor»: «{err}»"
         );
+    }
+}
+
+/// **E30-H01** · Regresión de robustez encontrada por un juez ciego EJECUTANDO (no leyendo) el
+/// arreglo de este mismo criterio: un cursor con un carácter multibyte hacía `panic!` —
+/// `byte index 2 is not a char boundary` — dentro de `decode_cursor_firmado`, y ese panic tumbaba el
+/// proceso `lodestar-mcp` entero (`rc=101`), matando la sesión JSON-RPC completa en vez de servir un
+/// error. Causa: el troceo hex de `cuerpo` indexaba por posición de **carácter** de un `&str` que
+/// podía contener bytes UTF-8 de más de un byte, así que el corte `cuerpo[i*2..i*2+2]` caía a media
+/// secuencia multibyte. El arreglo (ya en el árbol, sin commitear) antepone un guard
+/// `is_ascii_hexdigit` sobre `cuerpo` y `firma` antes de trocear, y trocea por
+/// `as_bytes().chunks_exact(2)` en vez de por índice de carácter.
+///
+/// **Dado** un cursor con caracteres no-ASCII de distinto ancho en UTF-8, **Cuando** se manda a
+/// cualquiera de las cuatro tools paginadas, **Entonces** la respuesta es `INVALID_SCHEMA` (un error
+/// SERVIDO, nunca un panic) — y, crítico, **la sesión JSON-RPC sobrevive**: una llamada posterior en
+/// la MISMA tubería stdin/stdout recibe respuesta. Es lo único que distingue «error servido» de
+/// «proceso muerto», y ningún test anterior de la sección lo comprobaba (todos abren un proceso,
+/// mandan una sola llamada mala y lo cierran, así que un panic que mata el proceso justo después de
+/// escribir el mensaje de error habría pasado desapercibido).
+///
+/// Tres cuerpos de cursor, elegidos por cómo desalinean (o no) el troceo de 2 bytes:
+///   · `"🔥.807e307a"` — emoji, 4 bytes UTF-8: el caso que el juez reprodujo.
+///   · `"中中.deadbeef"` — CJK, 3 bytes cada carácter (6 en total): mismo género de fallo con otro
+///     ancho, para no fijar la regresión a un solo tamaño de carácter.
+///   · `"ññ.deadbeef"` — contraste documentado a propósito: `ñ` ocupa 2 bytes en UTF-8, así que
+///     `chunks_exact(2)` cae ALINEADO con la frontera de carácter y este caso en concreto no
+///     reventaba ni antes del arreglo (el guard ASCII lo rechaza igual, pero por una vía distinta:
+///     sin él, este cursor en concreto habría producido un byte inválido en vez de un panic de
+///     frontera — dos síntomas del mismo defecto de fondo, «el cuerpo puede no ser ASCII»).
+#[test]
+fn cursor_no_ascii_no_tumba_el_servidor() {
+    let dir = ws_cota_rota();
+
+    const CURSORES_NO_ASCII: &[&str] = &["🔥.807e307a", "中中.deadbeef", "ññ.deadbeef"];
+
+    for (tool, args, clave) in casos_paginados() {
+        for cursor in CURSORES_NO_ASCII {
+            let mut args_malos = args.clone();
+            args_malos["cursor"] = serde_json::json!(cursor);
+
+            // Dos líneas en la MISMA sesión: la llamada con el cursor no-ASCII y, a continuación,
+            // una llamada inocua. Si el proceso hubiera hecho panic al procesar la primera, la
+            // segunda respuesta no llegaría nunca y `roundtrip` se quedaría sin las 2 esperadas
+            // (bloqueado hasta EOF de un `stdout` ya cerrado, o devolviendo menos de las pedidas).
+            let resp = roundtrip(
+                dir.path(),
+                &[
+                    linea_call(1, tool, args_malos).as_str(),
+                    linea_call(2, "workspace_status", serde_json::json!({})).as_str(),
+                ],
+                2,
+            );
+            assert_eq!(
+                resp.len(),
+                2,
+                "«{tool}/{clave}» con `cursor: \"{cursor}\"`: la sesión debe sobrevivir y responder \
+                 a AMBAS llamadas. Si solo llega 1 respuesta (o 0), el proceso murió al procesar el \
+                 cursor no-ASCII — exactamente el `panic!` (`byte index 2 is not a char boundary`, \
+                 rc=101) que un juez ciego de robustez encontró EJECUTANDO este caso, no leyendo el \
+                 código: {resp:?}"
+            );
+
+            let err = error_de(&resp[0]).unwrap_or_else(|| {
+                panic!(
+                    "«{tool}/{clave}» con `cursor: \"{cursor}\"` debe RECHAZAR la llamada con un \
+                     error servido, no aceptarla ni (peor) hacer panic: {}",
+                    resp[0]
+                )
+            });
+            assert_eq!(
+                codigo_de(&err),
+                "INVALID_SCHEMA",
+                "un cursor no-ASCII es tan malformado como el hex basura de \
+                 `cursor_malformado_es_invalid_schema`: mismo código: «{err}»"
+            );
+
+            // La segunda respuesta (`workspace_status`) es la prueba crítica de la sesión viva: debe
+            // tener éxito con normalidad, como si la llamada anterior nunca hubiera pasado de ser un
+            // error de cliente.
+            assert_eq!(
+                error_de(&resp[1]),
+                None,
+                "la sesión debe seguir sirviendo tras el cursor no-ASCII: `workspace_status` \
+                 inmediatamente después debe tener éxito, no arrastrar ningún estado roto: {}",
+                resp[1]
+            );
+        }
     }
 }
 
