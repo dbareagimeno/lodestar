@@ -2536,7 +2536,10 @@ mod identidad_libre_al_republicar {
 mod mutantes_16l {
     use super::*;
     use lodestar_app::Profile;
-    use lodestar_workspace::failpoints::{self, FailPoint, PuntoDeGancho};
+    // `PuntoDeGancho` solo lo consume el test de la ventana de publicación, que es `#[cfg(unix)]`.
+    // Importarlo aquí lo deja huérfano en Windows, y con `-D warnings` eso es un error de
+    // compilación —lo cazó el CI de windows-latest—, así que va dentro del propio test.
+    use lodestar_workspace::failpoints::{self, FailPoint};
 
     /// Rutas del plano de control que el barrido de huérfanos juzga.
     fn runtime(root: &Path) -> PathBuf {
@@ -2639,6 +2642,7 @@ mod mutantes_16l {
     #[test]
     #[cfg(unix)]
     fn una_promocion_de_recibo_fallida_conserva_el_journal() {
+        use lodestar_workspace::failpoints::PuntoDeGancho;
         use std::os::unix::fs::PermissionsExt;
 
         let dir = tempfile::tempdir().unwrap();
