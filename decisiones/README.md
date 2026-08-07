@@ -61,7 +61,7 @@ prioridad **filtra**, no ordena. El vocabulario de `estado` es cerrado: `abierta
 | 20 | Renombrado del proyecto | abierta | **5** | [`20-renombrado-del-proyecto.md`](20-renombrado-del-proyecto.md) |
 | 21 | Comillas en el lenguaje de consulta | tomada | 3 | [`21-comillas-lenguaje-consulta.md`](21-comillas-lenguaje-consulta.md) |
 | 22 | Integridad referencial de los valores del frontmatter | abierta | 3 | [`22-integridad-referencial-frontmatter.md`](22-integridad-referencial-frontmatter.md) |
-| 23 | Hallazgos del testbench MCP sobre el homelab | abierta | **5** | [`23-hallazgos-testbench-homelab.md`](23-hallazgos-testbench-homelab.md) |
+| 23 | Hallazgos del testbench MCP sobre el homelab | cerrada | **5** | [`23-hallazgos-testbench-homelab.md`](23-hallazgos-testbench-homelab.md) |
 | 24 | Equivalencia de paths por caja/Unicode en el guard de colisión | abierta | 3 | [`24-equivalencia-caja-unicode.md`](24-equivalencia-caja-unicode.md) |
 
 ## Dónde está el criterio hoy

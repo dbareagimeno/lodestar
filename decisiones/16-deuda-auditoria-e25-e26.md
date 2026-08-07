@@ -37,9 +37,20 @@ relacionadas: [3, 14, 15, 21]
 | (g) | API pública de `Workspace` no transaccional | **Decidido: cerrarlas al exterior** (`pub(crate)` / solo test). **Saldado por `E29-H10`** (commit `7f519d2`): `create_document`/`write_document`/`merge_frontmatter` replegadas. |
 | (h) | Escritores de runtime sin lock | **Registrado sin acción**; se cierra si aparece un caso real o al tocar el GC. Único punto que sigue vivo aquí. |
 | (i) | Secuencia de sellado duplicada `apply`/`revert` | **Saldado por `E28-H01`** (commit `296147b`): extraída a `seal_published_transaction`, único camino compartido. |
-| (j) | Un cursor basura reinicia la paginación en silencio | **Decidido: `INVALID_SCHEMA`**, en el ciclo de higiene. |
+| (j) | Un cursor basura reinicia la paginación en silencio | **Decidido: `INVALID_SCHEMA`**, en el ciclo de higiene. **Saldado por `E30-H01`** (commit `8359294`, ampliado con `§23/A-02,A-03`): el cursor va firmado con su origen, así que el malformado **y** el de otra tool se rechazan en vez de servir la página 1. Remate de robustez en `2d32eeb` — un cursor no-ASCII hacía `panic!` y tumbaba la sesión. |
 | (k) | Matriz de trazabilidad sin filas de E15–E24 | **Decidido: historia propia**, con cada fila verificada contra su épica. |
-| (l) | Deuda de fuerza de suite (mutantes) | **Decidido: pasada de `/mutantes` acotada** en el ciclo de higiene. La divergencia core↔store de E26-H09 va con [`§14`](14-store-sin-consumidor.md). |
+| (l) | Deuda de fuerza de suite (mutantes) | **Decidido: pasada de `/mutantes` acotada** en el ciclo de higiene. La divergencia core↔store de E26-H09 va con [`§14`](14-store-sin-consumidor.md). **Saldado en E30** (2026-08-07): pasada acotada sobre los supervivientes registrados — **6 confirmados vivos y muertos con test** (E25-H01g, E25-H02 ×2, E25-H03c, E25-H04k, y uno **nuevo** en la cota de `pagina()` que la convergencia de E30-H01 dejó sin arnés). Dos revelaban **diagnósticos que mentían**: el mensaje de cuarentena afirmaba «nada se ha borrado» mientras borraba el sidecar de huellas. La pasada destapó además una **superficie pública muerta** — ver nota de abajo. |
+
+> **Hallazgo nuevo de la pasada de `§16(l)` (2026-08-07), sin numerar como subpunto**:
+> `Workspace::revert_transaction` (`crates/lodestar-workspace/src/recovery.rs:1083`) es **superficie
+> pública muerta**. Sustituir su cuerpo entero por `unreachable!()` deja **los 52 binarios de test
+> del workspace en verde**, y no tiene un solo llamador en el repo: la fachada usa
+> `revert_transaction_con_recibo`, y las demás menciones son comentarios. Es exactamente la
+> categoría de **(b)** (`Envelope` sin llamantes) y **(g)** (API no transaccional), ambas resueltas
+> **por decisión de retirar o replegar**, no añadiendo tests — escribirle un test consagraría una
+> superficie que quizá deba desaparecer. Tres salidas posibles: repliegue a `pub(crate)`, retirada,
+> o conservarla con test si se le ve consumidor futuro. **Queda a criterio del usuario**; no se
+> actuó en E30 precisamente porque no es higiene, es superficie.
 
 ---
 

@@ -452,6 +452,13 @@ de cambiar).
        **Cuando** se evalúa `campo contains 3` (literal numérico), **Entonces** la respuesta es
        `INVALID_SCHEMA`/`TypeError` en vez de `false` → **test: `contains_con_literal_no_string_sobre_string_es_type_error`**
        (solo se implementa si la ratificación llega antes de cerrar esta historia; si no, queda fuera).
+     - ✅ **DESENLACE (2026-08-07)**: el usuario **ratificó el type error** antes de cerrar la
+       historia, así que se ejecutó el **segundo** criterio, no el documental mínimo. Implementado en
+       `crates/lodestar-core/src/eval.rs` con el test que esta spec nombra
+       (`crates/lodestar-core/tests/consulta.rs`). El enunciado de arriba describe el estado
+       **anterior** (`false` silencioso) — se conserva como redactado para no reescribir la historia.
+       Sobre campo **lista** `contains` no cambia: sigue siendo pertenencia y admite literales de
+       cualquier tipo, asimetría deliberada porque ahí el tipo del campo decide el significado.
 
   7. **Divergencia `workspace_status.counts` vs. `knowledge_check`**: el recuento que sirve
      `workspace_status` puede divergir del que computan `knowledge_check`/`graph_query` bajo ciertas
