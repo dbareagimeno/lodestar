@@ -1790,8 +1790,21 @@ mod campos_legales_por_operacion {
 // camino de código distinto (no pasa por `select`/`captured_revisions`). Este test de guardia FIJA
 // el comportamiento actual: un `replace_text` cuyo `find` no aparece en el documento, sin
 // `expectedOccurrences` (que sería lo que convertiría un recuento distinto de 0 en error), produce
-// un plan `canApply: true` con diff vacío para ese documento — ninguna operación normalizada lo
-// modifica y `semantic_diff` no lo lista como `modified`/`body_changes`.
+// un plan `canApply: true` sin cambios de contenido para ese documento — ninguna operación
+// normalizada lo modifica y `semantic_diff` no lo lista en `body_changes`/`frontmatter_changes`.
+//
+// CAVEAT DOCUMENTADO (`docs/user/safe-changes.md`, «One caveat while planning a no-op»): el
+// documento **sí** puede aparecer en `semantic_diff.modified` aunque no cambie nada semántico.
+// `modified` es una comparación de BYTES, y un `replace_text` se normaliza a una reescritura de
+// documento entero que RESERIALIZA el frontmatter: un bloque escrito en estilo flow
+// (`tags: [a, b]`) vuelve en estilo block (`tags:\n- a\n- b`). Contenido equivalente, bytes
+// distintos. Este test fija esa REALIDAD, no la excepción: la primera versión (commit `0ef66d2`)
+// aseveraba `!modified.contains(&alfa)` sobre el fixture `app_con_workspace()`, cuya única virtud
+// era no tener frontmatter en estilo flow — pasaba por accidente del fixture y afirmaba lo
+// contrario de lo que la doc del mismo commit declara. Un juez ciego lo demostró añadiendo
+// `tags: [a, b]` al fixture. SEGUIMIENTO ABIERTO: la historia futura del reserializado de
+// frontmatter (que haría que un no-op no toque los bytes) es la que debe invertir esta aserción;
+// hasta entonces, el test documenta el defecto conocido en vez de fingir que no existe.
 //
 // GUARDA (nace VERDE, `E30-H03` lo declara documental salvo el test): no se ha encontrado en el
 // repo un test previo (E28/E29) que ejerza exactamente esta combinación (forma-array +
@@ -1801,17 +1814,44 @@ mod campos_legales_por_operacion {
 // plan con contenido lo note.
 // ===========================================================================
 
+/// Workspace del criterio A-06, con los **dos** estilos de frontmatter que separan el caveat de la
+/// regla: `flow.md` lo escribe en estilo flow (`tags: [a, b]` — la reserialización lo reescribe) y
+/// `block.md` en estilo block (los bytes ya son los canónicos, así que nada cambia). Se monta aquí
+/// en vez de reusar `app_con_workspace()` para que el criterio no dependa de un detalle accidental
+/// de un fixture compartido: **esa** dependencia era justamente el defecto de la primera versión.
+fn app_con_frontmatter_flow_y_block() -> (tempfile::TempDir, App) {
+    let dir = tempfile::tempdir().unwrap();
+    escribe(
+        dir.path(),
+        "flow.md",
+        "---\ntype: Concept\ntitle: Flow\ndescription: Frontmatter en estilo flow\ntags: [a, b]\n---\n\n# Resumen\n\ncuerpo\n",
+    );
+    escribe(
+        dir.path(),
+        "block.md",
+        "---\ntype: Concept\ntitle: Block\ndescription: Frontmatter en estilo block\ntags:\n- a\n- b\n---\n\n# Resumen\n\ncuerpo\n",
+    );
+    let app = App::open(dir.path()).expect("el workspace temporal debe abrir");
+    (dir, app)
+}
+
 /// **A-06** · `replace_text_sin_ocurrencias_en_forma_array_es_noop`: **Dado** un documento sin
 /// ninguna ocurrencia de un `find` dado, **Cuando** se llama a `change_plan` con `replace_text` en
 /// forma-array sin `expectedOccurrences`, **Entonces** el plan resultante tiene `canApply: true` y
-/// un diff vacío para ese documento (sin error).
+/// **ningún cambio de contenido** para ese documento (sin error): `bodyChanges` y
+/// `frontmatterChanges` vacíos.
+///
+/// Sobre `modified` el test fija la realidad documentada, no la que gustaría: ver el CAVEAT del
+/// bloque de arriba y `docs/user/safe-changes.md`.
 #[test]
 fn replace_text_sin_ocurrencias_en_forma_array_es_noop() {
-    let (_dir, app) = app_con_workspace();
+    let (_dir, app) = app_con_frontmatter_flow_y_block();
 
-    // `alfa.md` (ver `app_con_workspace`) no contiene la cadena «esta-cadena-no-existe-en-el-doc».
+    // Ninguno de los dos documentos contiene la cadena «esta-cadena-no-existe-en-el-doc».
     let ops = serde_json::json!([
-        { "op": "replace_text", "path": "alfa.md",
+        { "op": "replace_text", "path": "flow.md",
+          "find": "esta-cadena-no-existe-en-el-doc", "replace": "sustituto" },
+        { "op": "replace_text", "path": "block.md",
           "find": "esta-cadena-no-existe-en-el-doc", "replace": "sustituto" },
     ]);
 
@@ -1823,17 +1863,44 @@ fn replace_text_sin_ocurrencias_en_forma_array_es_noop() {
         plan.can_apply,
         "un plan no-op (find sin ocurrencias, sin expectedOccurrences) debe ser `canApply: true`: {plan:?}"
     );
-    let alfa = lodestar_core::types::RelPath::new("alfa.md").unwrap();
+    let flow = lodestar_core::types::RelPath::new("flow.md").unwrap();
+    let block = lodestar_core::types::RelPath::new("block.md").unwrap();
+
+    // LO QUE A-06 PIDE DE VERDAD: cero cambios de contenido en ninguno de los dos documentos.
+    for doc in [&flow, &block] {
+        assert!(
+            !plan.semantic_diff.body_changes.contains(doc),
+            "el diff no debe listar cambios de CUERPO en `{doc}` si `find` no tuvo ninguna \
+             ocurrencia: {:?}",
+            plan.semantic_diff
+        );
+        assert!(
+            !plan.semantic_diff.frontmatter_changes.contains(doc),
+            "un `replace_text` no-op no toca el frontmatter de `{doc}`: reserializarlo no es \
+             cambiarlo (`frontmatterChanges` es semántico, no de bytes): {:?}",
+            plan.semantic_diff
+        );
+    }
+
+    // EL CAVEAT, FIJADO COMO REALIDAD (`docs/user/safe-changes.md`): `modified` es comparación de
+    // BYTES, así que el documento con frontmatter en estilo FLOW aparece como modificado —la
+    // reescritura de documento entero lo reserializa a estilo block— aunque no cambie nada
+    // semántico. El documento cuyo frontmatter YA está en la forma canónica NO aparece: es el
+    // anti-vacuo que demuestra que `modified` responde al churn de bytes y no a que la operación
+    // sea un no-op.
     assert!(
-        !plan.semantic_diff.modified.contains(&alfa),
-        "el diff no debe listar `alfa.md` como modificado si `find` no tuvo ninguna ocurrencia: \
-         {:?}",
+        plan.semantic_diff.modified.contains(&flow),
+        "CAVEAT DOCUMENTADO: un no-op sobre un documento con frontmatter en estilo flow SÍ aparece \
+         en `modified` (la reserialización cambia los bytes). Si esto ha dejado de ser cierto, el \
+         seguimiento del reserializado se ha cerrado: invierte la aserción y actualiza el caveat de \
+         `docs/user/safe-changes.md`. {:?}",
         plan.semantic_diff
     );
     assert!(
-        !plan.semantic_diff.body_changes.contains(&alfa),
-        "el diff no debe listar cambios de cuerpo en `alfa.md` si `find` no tuvo ninguna ocurrencia: \
-         {:?}",
+        !plan.semantic_diff.modified.contains(&block),
+        "ANTI-VACUO: un documento cuyo frontmatter ya está en la forma canónica no cambia de bytes, \
+         así que un no-op NO puede listarlo en `modified` — si lo hace, `modified` ha dejado de \
+         significar «los bytes difieren»: {:?}",
         plan.semantic_diff
     );
     assert!(

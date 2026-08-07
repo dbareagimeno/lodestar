@@ -10731,7 +10731,11 @@ fn protocol_version_no_string_es_rechazado() {
         .expect("el error de protocolVersion no-string lleva mensaje")
         .to_lowercase();
     assert!(
-        msg.contains("protocolversion") && msg.contains("cadena") || msg.contains("string"),
+        // Paréntesis EXPLÍCITOS: en Rust `&&` liga más que `||`, así que sin ellos la expresión
+        // era `(protocolversion && cadena) || string` — un mensaje que dijera «string» sin nombrar
+        // el parámetro habría pasado. La intención es la conjunción: nombrar el PARÁMETRO **y**
+        // decir que debe ser una cadena/string.
+        msg.contains("protocolversion") && (msg.contains("cadena") || msg.contains("string")),
         "el mensaje debe nombrar que protocolVersion debe ser una cadena/string: {msg}"
     );
     assert!(
