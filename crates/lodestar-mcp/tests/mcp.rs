@@ -10893,6 +10893,122 @@ fn tool_sin_parametros_rechaza_cualquier_argumento() {
     );
 }
 
+/// E29-H08 · **Remate del juez** — el rechazo de nivel operación DESCIENDE a los sub-objetos:
+/// **Dado** un `change_plan` con una operación cuyo `ref` lleva una clave que el objeto `ref` no
+/// declara, **Cuando** se planifica, **Entonces** `INVALID_SCHEMA` nombrándola con su contexto.
+///
+/// El hueco que cierra: el nivel operación validaba las claves de la op **en su nivel raíz** y no
+/// bajaba a los objetos anidados, así que
+/// `{"op":"patch_frontmatter","ref":{"path":"…","parametroQueNoExiste":1}}` pasaba en silencio. Eso
+/// dejaba al servidor con **dos criterios opuestos para el mismo objeto `ref`** según por dónde
+/// entrara: por `knowledge_get` se rechazaba (`clave_desconocida_en_objeto_anidado_se_rechaza`) y
+/// por una operación de `change_plan` se tragaba. La asimetría es justo la forma que `decisiones
+/// §15` prohíbe —«el repo no se queda con dos criterios opuestos según por dónde llegue lo
+/// desconocido»— y es peor aquí que en la lectura, porque el `ref` de una operación identifica el
+/// documento que se va a **escribir**.
+///
+/// El mensaje debe llevar **contexto**, no solo el nombre: `ref` está anidado, así que decir
+/// «`parametroQueNoExiste` no es un parámetro declarado» a secas obliga al agente a adivinar en
+/// cuál de los objetos de su lote está el typo. Se exige que el error cite también `ref`.
+#[test]
+fn clave_desconocida_en_ref_de_una_operacion_se_rechaza() {
+    let dir = workspace_una_nota();
+    let line = tool_call_line(
+        "change_plan",
+        serde_json::json!({
+            "operations": [
+                { "op": "patch_frontmatter",
+                  "ref": { "path": "notas/alfa.md", "parametroQueNoExiste": 1 },
+                  "patch": { "status": "review" } }
+            ]
+        }),
+    );
+    let resp = roundtrip(dir.path(), &[line.as_str()], 1);
+    asevera_rechazo_nombrando(
+        &resp[0],
+        "parametroQueNoExiste",
+        "change_plan con una clave desconocida DENTRO del `ref` de una operación",
+    );
+    let msg = error_de_tool(&resp[0]).expect("ya aseverado como rechazo justo arriba");
+    assert!(
+        msg.contains("ref"),
+        "el mensaje debe situar la clave desconocida en el objeto `ref` de la operación: sin el \
+         contexto, un agente con un lote de 20 ops no sabe cuál corregir; fue: {msg}"
+    );
+}
+
+/// E29-H08 · **Remate del juez, control anti-vacuo**: el descenso a los sub-objetos de una
+/// operación no puede cerrarse de más. Dos propiedades en el mismo test, porque las dos son la
+/// misma pregunta —«¿qué sub-objetos son cerrados y cuáles abiertos?»— y separarlas invitaría a
+/// arreglar una y romper la otra:
+///
+/// 1. **`ref` legal sigue funcionando**: `{"ref": {"path": "…"}}` dentro de una operación se acepta,
+///    igual que antes del remate. Es la mitad que un descenso demasiado celoso rompería.
+/// 2. **El merge-patch de `patch_frontmatter` sigue EXENTO**: las claves de `patch` son el
+///    frontmatter **del usuario** (`§20.2` invariante 3: YAML arbitrario, ninguna clave tiene
+///    semántica impuesta), así que son abiertas POR DEFINICIÓN y no se pueden validar contra
+///    ninguna lista. Un descenso que tratara `patch` como un objeto cerrado haría imposible
+///    escribir cualquier campo de frontmatter nuevo — sería el peor daño colateral posible de esta
+///    historia, y por eso se fija con un patch de claves deliberadamente inventadas.
+///
+/// Lo mismo aplica a `frontmatter` en `create`, que se comprueba en el mismo barrido por ser el
+/// otro sub-objeto de contenido arbitrario de la tabla de campos legales.
+#[test]
+fn los_subobjetos_abiertos_de_una_operacion_siguen_aceptando_claves_arbitrarias() {
+    let dir = workspace_una_nota();
+
+    // (1) `ref` legal dentro de una operación: sigue planificando.
+    let legal = tool_call_line(
+        "change_plan",
+        serde_json::json!({
+            "operations": [
+                { "op": "patch_frontmatter", "ref": { "path": "notas/alfa.md" },
+                  "patch": { "status": "review" } }
+            ]
+        }),
+    );
+    let resp = roundtrip(dir.path(), &[legal.as_str()], 1);
+    assert!(
+        error_de_tool(&resp[0]).is_none(),
+        "un `ref` con solo `path` (su única clave declarada) debe seguir aceptándose dentro de una \
+         operación: el descenso a los sub-objetos no puede tocar lo declarado: {:?}",
+        resp[0]
+    );
+
+    // (2) El merge-patch y el `frontmatter` de `create`: claves ARBITRARIAS del usuario.
+    let arbitrarias = tool_call_line(
+        "change_plan",
+        serde_json::json!({
+            "operations": [
+                { "op": "patch_frontmatter", "path": "notas/alfa.md",
+                  "patch": { "claveQueSoloExisteEnEsteWorkspace": "x",
+                             "otraInventada": 1, "anidada": { "profunda": true } } },
+                { "op": "create", "path": "notas/nuevo.md",
+                  "frontmatter": { "campoDelUsuario": "y", "sonar.projectKey": "z" },
+                  "body": "# Nuevo\n" }
+            ]
+        }),
+    );
+    let resp = roundtrip(dir.path(), &[arbitrarias.as_str()], 1);
+    assert!(
+        error_de_tool(&resp[0]).is_none(),
+        "las claves de `patch` y de `frontmatter` son el YAML ARBITRARIO del usuario (`§20.2` \
+         invariante 3): son abiertas por definición y NO se validan contra ninguna lista. \
+         Cerrarlas haría imposible escribir un campo de frontmatter nuevo, que es el peor daño \
+         colateral posible de esta historia: {:?}",
+        resp[0]
+    );
+    let sc = plan_sc(&resp[0]);
+    assert_eq!(
+        sc["normalizedOperations"]
+            .as_array()
+            .expect("el plan lleva `normalizedOperations`")
+            .len(),
+        2,
+        "y las dos operaciones deben normalizarse: {sc}"
+    );
+}
+
 /// E29-H08 · Criterio `campo_inexistente_en_una_operacion_se_rechaza`:
 /// **Dado** un `change_plan` con una operación que lleva `bodyy` (typo, NO está en la unión de los
 /// 17 campos legales), **Cuando** se planifica, **Entonces** `INVALID_SCHEMA` nombrando `bodyy`.

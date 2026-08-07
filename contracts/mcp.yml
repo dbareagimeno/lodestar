@@ -716,8 +716,10 @@ meta:
     Cerrar la partición por op —el `oneOf` por operación que sigue sin existir en
     `operacion_item_schema`— es **trabajo futuro declarado, no un olvido**: exige decidir antes qué
     pasa con los lotes de plantilla reutilizada.
-    DEUDA DECLARADA: ese `additionalProperties: false` es él mismo una afirmación que el servidor no
-    ejecuta. Preexistente a E23-H11 (política de E23-H10), registrada para que no se descubra dos veces.
+    DEUDA SALDADA: hasta v0.5.0 aquí se declaraba que ese `additionalProperties: false` era él mismo
+    una afirmación que el servidor NO ejecutaba —deuda preexistente a E23-H11, registrada para que no
+    se descubriera dos veces—. **E29-H08 la saldó**: hoy se ejecuta, con los dos niveles descritos
+    arriba.
   arranque: >-
     `lodestar-mcp [--root <dir>] [--profile readonly|standard]` (main.rs parse_args, E15-H06,
     `ARCHITECTURE.md §20.5`). Sin `--root` la raíz es `std::env::current_dir()`. NO hay argumento

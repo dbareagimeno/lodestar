@@ -49,8 +49,12 @@ pub fn valida_argumentos(tool: &str, args: &Value) -> Result<(), String> {
 /// diga qué corregir y **dónde**.
 fn valida_objeto(valor: &Value, schema: &Value, contexto: &str) -> Result<(), String> {
     let Some(obj) = valor.as_object() else {
-        // Un no-objeto en la raíz de `arguments` (o en un anidado) es un error de FORMA, que ya
-        // juzga el despachador con su propio mensaje: aquí no se duplica.
+        // Un no-objeto no tiene claves que juzgar, así que este módulo no dice nada de él. Lo que
+        // pase después NO es uniforme y conviene no fingir que lo es: donde el despachador
+        // deserializa el parámetro (`ref`/`scope`/`policy`…) sale un error de FORMA con su propio
+        // mensaje, pero las tools de lectura que leen con `params.get(…).and_then(…)` degradan a su
+        // valor por defecto. Eso es PREEXISTENTE a E29-H08 —que solo juzga claves desconocidas, no
+        // valores— y queda fuera de sus criterios; se anota aquí para que no se lea como resuelto.
         return Ok(());
     };
     let declaradas = schema["properties"].as_object();
@@ -124,6 +128,27 @@ fn valida_operaciones_de_change_plan(tool: &str, args: &Value) -> Result<(), Str
                     ));
                 }
             }
+            // Y la cascada a los sub-objetos que el `items` declara con sus propias `properties`
+            // (`ref`, y `to` cuando viaja como objeto). Sin esto había una asimetría contra el
+            // principio de la épica: el mismo `ref: {path, parametroQueNoExiste}` se rechazaba por
+            // `knowledge_get` y pasaba en silencio dentro de una operación. `patch`/`frontmatter`
+            // quedan FUERA por construcción: el schema los declara `type: object` SIN `properties`
+            // —son claves arbitrarias del usuario (`§20.2` invariante 3)—, así que `valida_objeto`
+            // no desciende a ellos.
+            //
+            // Se desciende a los HIJOS directamente, sin pasar el elemento entero por
+            // `valida_objeto`: esa función valida el nivel que recibe por PARTICIÓN, y el nivel
+            // operación es por UNIÓN (ya juzgado arriba, con su propio mensaje). Aquí solo se
+            // reutiliza su cascada.
+            let item = item_schema_de_operacion();
+            if let Some(props) = item["properties"].as_object() {
+                for (clave, hijo) in obj {
+                    let sub = &props[clave];
+                    if sub["type"] == "object" && sub["properties"].is_object() {
+                        valida_objeto(hijo, sub, &format!("operations[{i}].{clave}"))?;
+                    }
+                }
+            }
         }
     }
     // (2) La forma de selección masiva. `operation` es un objeto de UNA clave (el tipo de op) cuyo
@@ -151,6 +176,16 @@ fn valida_operaciones_de_change_plan(tool: &str, args: &Value) -> Result<(), Str
         }
     }
     Ok(())
+}
+
+/// El schema de UN elemento de `operations[]`, tal cual lo publica el `inputSchema` de
+/// `change_plan` (o sea, `tools::operacion_item_schema`). Misma fuente única que
+/// [`union_de_campos_de_operacion`]: de aquí salen tanto los campos legales como los sub-objetos a
+/// los que hay que descender.
+fn item_schema_de_operacion() -> Value {
+    schema_de("change_plan")
+        .map(|s| s["properties"]["operations"]["items"].clone())
+        .unwrap_or(Value::Null)
 }
 
 /// La **unión** de los campos legales de las 7 operaciones, derivada de las `properties` que
