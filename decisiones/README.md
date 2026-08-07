@@ -53,11 +53,11 @@ prioridad **filtra**, no ordena. El vocabulario de `estado` es cerrado: `abierta
 | 12 | Comparación de fechas en el lenguaje de consulta | cerrada | 1 | [`12-fechas-en-consultas.md`](12-fechas-en-consultas.md) |
 | 13 | `Conformant → Valid` | cerrada | 1 | [`13-conformant-a-valid.md`](13-conformant-a-valid.md) |
 | 14 | El store (E18) no tiene ningún consumidor | abierta | **5** | [`14-store-sin-consumidor.md`](14-store-sin-consumidor.md) |
-| 15 | ¿Rechazar los parámetros no declarados? | tomada | 4 | [`15-parametros-no-declarados.md`](15-parametros-no-declarados.md) |
+| 15 | ¿Rechazar los parámetros no declarados? | cerrada | 4 | [`15-parametros-no-declarados.md`](15-parametros-no-declarados.md) |
 | 16 | Deuda declarada por la auditoría de E25/E26 | cerrada (disuelta) | 4 | [`16-deuda-auditoria-e25-e26.md`](16-deuda-auditoria-e25-e26.md) |
 | 17 | Superficie externa y apertura OSS | cerrada | 3 | [`17-superficie-externa-oss.md`](17-superficie-externa-oss.md) |
-| 18 | `canApply: false` no vincula a `change_apply` | tomada | 4 | [`18-canapply-no-vincula-apply.md`](18-canapply-no-vincula-apply.md) |
-| 19 | Hallazgos de documentar la referencia de usuario | tomada | 5 | [`19-hallazgos-referencia-usuario.md`](19-hallazgos-referencia-usuario.md) |
+| 18 | `canApply: false` no vincula a `change_apply` | cerrada | 4 | [`18-canapply-no-vincula-apply.md`](18-canapply-no-vincula-apply.md) |
+| 19 | Hallazgos de documentar la referencia de usuario | cerrada | 5 | [`19-hallazgos-referencia-usuario.md`](19-hallazgos-referencia-usuario.md) |
 | 20 | Renombrado del proyecto | abierta | **5** | [`20-renombrado-del-proyecto.md`](20-renombrado-del-proyecto.md) |
 | 21 | Comillas en el lenguaje de consulta | tomada | 3 | [`21-comillas-lenguaje-consulta.md`](21-comillas-lenguaje-consulta.md) |
 | 22 | Integridad referencial de los valores del frontmatter | abierta | 3 | [`22-integridad-referencial-frontmatter.md`](22-integridad-referencial-frontmatter.md) |
@@ -94,9 +94,9 @@ prioridad **filtra**, no ordena. El vocabulario de `estado` es cerrado: `abierta
   (¿`DOCUMENT_NOT_FOUND` en scope `paths`?) — con recomendación escrita en la ficha; el resto
   ya tiene dueño.
 
-**Ya decididas, pendientes de ejecutar** (`estado: tomada` — son trabajo, no criterio): §15, §18,
-§19 y §21. Las tres primeras, más los puntos (b), (e), (f) y (g) de §16, forman la **épica de
-honestidad de superficie**, que es lo siguiente que entra.
+**Ya decididas, pendientes de ejecutar** (`estado: tomada` — son trabajo, no criterio): §21. §15,
+§18 y §19 —más los puntos (b), (e), (f) y (g) de §16— formaban la **épica de honestidad de
+superficie**; **cerradas el 2026-08-07** por `E29` (11/11 historias, pendiente de merge).
 
 **§3, §10, §22, §24** son decisiones vivas de baja urgencia: tienen recomendación estable (o, en
 el caso de §24, opciones abiertas sin urgencia) y esperan un caso real que las fuerce (§3 absorbió
@@ -123,12 +123,19 @@ de idioma partido, no la ficha.
    [`docs/qa/campana-bugfixes-2026-08.md`](../docs/qa/campana-bugfixes-2026-08.md) e
    [`IMPLEMENTATION_STATUS.md`](../IMPLEMENTATION_STATUS.md). **Siguiente**: la épica de honestidad
    `E29` (ya ratificada).
-1. **Épica de honestidad de superficie** — todo lo que la superficie documentada afirma y el motor
+1. ✅ **Épica de honestidad de superficie** — todo lo que la superficie documentada afirma y el motor
    no ejecuta: §19(a), §19(b), §18 vinculante, §16(f) aviso de workspace vacío, §16(e) config
    estricta (absorbe §23/A-08-rechazo), §15 wire estricto (con la tabla de campos por operación
    como primer criterio de aceptación), §16(g) cerrar la API no transaccional, §16(b) retirar el
    `Envelope`, y del testbench: §23/D-01 (`instructions` por perfil + `protocolVersion`),
    §23/A-04 y §23/A-07 (si se decide ruido).
+   **Ejecutado (2026-08-07)**: `E29` completa — 11/11 historias en `feat/e29-honestidad-superficie`,
+   todas con juez ciego favorable y remates saldados (H10/H11 en verificación final); detalle en
+   [`IMPLEMENTATION_STATUS.md`](../IMPLEMENTATION_STATUS.md) y
+   [`docs/qa/campana-bugfixes-2026-08.md`](../docs/qa/campana-bugfixes-2026-08.md). **Siguiente**: el
+   ciclo de higiene (punto 2, §16(j) ampliado con §23/A-02/A-03) y la historia-escoba de
+   `docs/qa/campana-bugfixes-2026-08.md` (Fase 3: D-02, A-01, A-06, A-09, A-10 y los seguimientos
+   nuevos registrados al cerrar la Fase 1).
 2. **Ciclo de higiene** — §16(i) coreografía única de sellado (ver punto 0), §16(j) cursor
    inválido **ampliado con §23/A-02/A-03** (cursor ajeno), §16(l) pasada acotada de `/mutantes`.
 3. **Épica de evidencia** — banco de pruebas (§9) + dogfooding; §23 aporta la primera corrida

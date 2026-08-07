@@ -534,7 +534,8 @@ superficie de producto; git queda como crate dormido) y `decisiones §0`. Descom
     `tools/list` Y su invocación se rechaza con `-32602` ANTES del despacho (`main.rs`, antes de
     `tools::call()`) — **cierra la reserva de gating por perfil de E13-H08**: ocultar de la lista no
     basta, un cliente que las llame igualmente no planifica/aplica/revierte. `initialize` devuelve
-    `instructions` (`SERVER_INSTRUCTIONS`) con el flujo de 10 pasos EN ORDEN. `workspace_status.
+    `instructions` (`SERVER_INSTRUCTIONS` [retirado en E29-H09: hoy `server_instructions(profile)`])
+    con el flujo de 10 pasos EN ORDEN. `workspace_status.
     capabilities` ya coherente con el perfil (E10-H08). Tests `perfil_readonly_sin_cambio`,
     `instrucciones_flujo` (orden de la espina, no "string no vacío"), `perfil_readonly_rechaza_cambio`
     (endurecido: invoca directamente las 3 de cambio bajo readonly con ids inexistentes → `-32602`;
@@ -1523,6 +1524,41 @@ reservas).
 suite en verde en `develop` — la épica está **completa a falta del merge**: los cuatro commits ya
 viven en `develop`, pero aún no cruzaron a `main` por el ciclo de release descrito en
 `RELEASING.md`.
+
+## Fase 1 de la campaña de bugfixes del testbench homelab (E29 — honestidad de superficie) — COMPLETA (a falta del juez de H10/H11 y merge)
+
+> **Origen**: `decisiones/23-hallazgos-testbench-homelab.md` (D-01, A-04, A-07) + el orden de trabajo
+> de `decisiones/README.md` (punto 1: §19a/b, §18 vinculante, §16f, §16e, §15, §16g, §16b). Épica:
+> [`epica-29-honestidad-superficie.md`](requirements/epica-29-honestidad-superficie.md). Tablero de
+> campaña: [`docs/qa/campana-bugfixes-2026-08.md`](docs/qa/campana-bugfixes-2026-08.md). Rama
+> `feat/e29-honestidad-superficie`, **11/11 historias implementadas, pendiente de merge**.
+
+| Historia | Commits | Veredicto del juez | Detalle |
+|---|---|---|---|
+| **E29-H01** config estricta (`§16e`+A-08) | `4a52f59` | APROBADA (8/8) | `deny_unknown_fields` en `WorkspaceConfig` y sus secciones; familias de `validation` contra la lista cerrada `VALIDATION_FAMILIES`; config ilegible → `Err` (exit 3), no *defaults* silenciosos. |
+| **E29-H02** `policy` parcial respeta el `Default` | `46c1492` + `2f6ecf4` (remate del juez) | APROBADA (5/5) | Campos de `PlanPolicy` con `#[serde(default)]`; el remate clava literales y el default por campo omitido. |
+| **E29-H03** `has`/`missing` responden la verdad | `99900d3` | APROBADA (7/7) | El anclaje pelado (`has(frontmatter)`) deja de ser el único argumento donde ambos operadores mienten. |
+| **E29-H04** afijo sobre no-string es type error | `b3b79fb` + `681ec45` (remate: mensaje neutro) | APROBADA (7/7) | `starts_with`/`ends_with` sobre un campo no-string producen el mismo type error ruidoso que E26-H08 fijó para el orden. |
+| **E29-H05** scope `paths` exige existencia | `fc5c26b` | APROBADA (6/6) | Un path inexistente en el scope `paths` de `knowledge_check` responde `DOCUMENT_NOT_FOUND`, simétrico con `document`/`affected`. |
+| **E29-H06** workspace vacío avisa | `88e99b2` + `6a3a6ca` (remate: mensaje, ancla, productor con red) | aprobada | `WORKSPACE-EMPTY` (warn) cuando la raíz no descubre ningún documento; no toca exit codes. |
+| **E29-H09** `instructions`/`protocolVersion` coherentes | `5e7edc0` | APROBADA (7/7) | `instructions` nombra exactamente las tools que el perfil sirve; `protocolVersion` no soportada deja de aceptarse en silencio. |
+| **E29-H07** `canApply` vinculante | `9df617f` + `f97004c` (remate: doc deja de negar el gate, pines fijan la representación) | aprobada (bloqueante doc saldado) | `change_apply` rechaza un plan con `canApply: false` bajo su propia policy. |
+| **E29-H08** wire estricto | `f7dc5fd` + `f720ba8` (remate: deuda saldada, cascada a sub-objetos) | APROBADA (11/11) | `additionalProperties: false` se ejecuta de verdad (validación por unión contra la tabla de campos legales por operación de `§15`). |
+| **E29-H10** repliegue de la API no transaccional | `7f519d2` | en verificación final | `create_document`/`write_document`/`merge_frontmatter` replegadas a `pub(crate)`/test. |
+| **E29-H11** retirada del `Envelope` | `7f519d2` | en verificación final | `Envelope<T>`/`ErrorEnvelope` de `lodestar-app` retirados (§16(b): capacidad construida en E10-H01/H02 sin consumidor real). |
+
+**Invariantes verificados**: suite completa en verde, incluidos los dos crates con
+`--features test-failpoints` (`lodestar-workspace` y `lodestar-app`); `cargo clippy --workspace
+--all-targets --all-features --locked -- -D warnings` limpio; `cargo fmt --all --check` limpio;
+`cargo doc --workspace --no-deps --locked` limpio; pureza del core intacta (`cargo tree -p
+lodestar-core` sin tokio/rusqlite/git2/notify/tauri/zip). `/contrato --check` coherente tras cada
+historia que tocó la frontera (H01, H02, H04, H05, H06, H07, H08, H09).
+
+**Estado real**: las 11 historias están implementadas, con todas las reservas MAYORES/bloqueantes de
+sus jueces ciegos saldadas en los commits de remate (H02, H04, H06, H07, H08) — la épica está
+**completa a falta del juez de H10/H11 y del merge**: los commits ya viven en
+`feat/e29-honestidad-superficie`, pero H10/H11 aún no tienen veredicto de juez ciego y la rama no ha
+cruzado a `develop`.
 
 ## Defectos posteriores a E27
 

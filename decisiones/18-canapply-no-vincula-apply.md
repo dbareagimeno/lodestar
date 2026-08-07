@@ -1,15 +1,15 @@
 ---
 id: 18
 titulo: "canApply false no vincula a change_apply"
-estado: "tomada"
+estado: "cerrada"
 prioridad: 4
 etiquetas: ["contrato", "mcp", "escritura"]
 origen: "hallazgo-de-implementacion"
 abierta_en: "2026-08-02"
-cerrada_en: "2026-08-02"
-revisada_en: "2026-08-02"
-epica: "E27"
-historias: ["E27-H03"]
+cerrada_en: "2026-08-07"
+revisada_en: "2026-08-07"
+epica: "E29"
+historias: ["E29-H07"]
 relacionadas: [13, 15]
 ---
 
@@ -41,3 +41,9 @@ existente del catálogo de 16 o justifica el decimoséptimo — el catálogo sol
 `policy: {requireValidResult: false}` — coherente con el error deliberado del workspace — y no
 muestra la incoherencia; `docs/user/safe-changes.md` describe `canApply` como veredicto del **plan**,
 sin prometer que apply lo re-ejerza. Esa redacción hay que revisarla al implementar.
+
+**Cerrada (2026-08-07) por `E29-H07`** (commits `9df617f` + `f97004c`, épica
+[`epica-29-honestidad-superficie.md`](../requirements/epica-29-honestidad-superficie.md)):
+`change_apply` rechaza los planes con `canApply: false` bajo su propia policy; juez ciego aprobada,
+con el bloqueante de documentación (la doc que negaba el gate) saldado en el remate, que además fija
+los pines de representación.
