@@ -656,6 +656,91 @@ mod ventana_de_publicacion {
             "un apply rechazado por WRITE_CONFLICT no puede haber pisado la edición de otro proceso"
         );
     }
+
+    /// **`decisiones §16(l)`, mutante (g)** — el mensaje del conflicto de ventana tiene que
+    /// **nombrar los paths que divergieron**.
+    ///
+    /// El mutante que sobrevivía: vaciar `paths_divergentes`
+    /// (`crates/lodestar-workspace/src/publish.rs`) a `String::new()`. El aborto seguía ocurriendo
+    /// y `write_conflict_de_la_ventana_llega_a_la_fachada` seguía verde, porque solo asevera el
+    /// **código**. Pero `WRITE_CONFLICT` es terminal: el agente que lo recibe replanifica a ciegas
+    /// si el mensaje no le dice **qué** cambió bajo sus pies. El diagnóstico es la única salida de
+    /// esa información, así que aquí se fija como comportamiento.
+    ///
+    /// Se editan **dos** `.md` dentro de la ventana —uno del lote (`alfa.md`) y otro ajeno a él
+    /// (`beta.md`)— porque el conjunto que importa es el del **canónico entero**, no el de los
+    /// paths que la transacción iba a tocar: un `.md` nuevo o modificado fuera del lote es
+    /// exactamente el caso que el control optimista de revisión no ve.
+    #[test]
+    fn el_write_conflict_de_la_ventana_nombra_los_paths_divergentes() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        semilla(root);
+        // Un segundo documento, ajeno al lote de la transacción.
+        escribe(
+            root,
+            "beta.md",
+            "---\ntype: Nota\ntitle: Beta\ndescription: Segundo documento\n---\n\n# Resumen\n\ncuerpo\n",
+        );
+
+        let app = App::open(root).expect("el workspace temporal debe abrir");
+
+        let ops = json!([
+            { "op": "replace_body", "path": "alfa.md", "body": "# Resumen\n\ncuerpo del plan\n" },
+        ]);
+        let plan = app
+            .change_plan(None, &ops, policy_permisiva())
+            .expect("planificar una modificación normal debe funcionar");
+
+        // «Otro proceso» toca dos documentos dentro de la ventana: uno del lote y uno ajeno.
+        let ruta_alfa = root.join("alfa.md");
+        let ruta_beta = root.join("beta.md");
+        {
+            let (a, b) = (ruta_alfa.clone(), ruta_beta.clone());
+            failpoints::armar_gancho(PuntoDeGancho::AntesDePublicar, move || {
+                std::fs::write(
+                    &a,
+                    "---\ntype: Nota\ntitle: Alfa\ndescription: Primer documento\n---\n\n# Resumen\n\nEDICIÓN EXTERNA\n",
+                )
+                .expect("el gancho debe poder editar alfa.md");
+                std::fs::write(
+                    &b,
+                    "---\ntype: Nota\ntitle: Beta\ndescription: Segundo documento\n---\n\n# Resumen\n\nOTRA EDICIÓN EXTERNA\n",
+                )
+                .expect("el gancho debe poder editar beta.md");
+            });
+        }
+        let resultado = app.change_apply(&plan.change_set_id, None);
+        failpoints::desarmar_ganchos();
+
+        let err = match resultado {
+            Err(e) => e,
+            Ok(aplicado) => panic!(
+                "aplicar sobre un canónico que cambió dentro de la ventana debe rechazarse, pero \
+                 la fachada informó de una publicación: applied={}, changedPaths={:?}",
+                aplicado.applied, aplicado.changed_paths
+            ),
+        };
+        assert_eq!(
+            err.code,
+            ErrorCode::WriteConflict,
+            "precondición: el aborto de ventana sigue siendo WRITE_CONFLICT; era: {err:?}"
+        );
+
+        let mensaje = err.message.clone();
+        assert!(
+            mensaje.contains("alfa.md"),
+            "el diagnóstico del conflicto de ventana debe NOMBRAR el `.md` del lote que otro \
+             proceso cambió (`alfa.md`): sin esa lista, `WRITE_CONFLICT` es terminal y el agente \
+             replanifica sin saber qué se movió bajo sus pies. Mensaje: {mensaje}"
+        );
+        assert!(
+            mensaje.contains("beta.md"),
+            "y también el que cambió FUERA del lote (`beta.md`): el conjunto que se compara es el \
+             canónico entero, que es precisamente lo que el control optimista de revisión no ve. \
+             Mensaje: {mensaje}"
+        );
+    }
 }
 
 // ===========================================================================
@@ -2424,6 +2509,240 @@ mod identidad_libre_al_republicar {
         assert!(
             recibo_de(root, &apply2.receipt_id.0).exists(),
             "y su recibo propio"
+        );
+    }
+}
+
+// ===========================================================================
+// `decisiones §16(l)` — pasada de mutantes acotada a E25/E26.
+//
+// Dos supervivientes registrados que la suite no mordía, confirmados vivos aplicando la mutación a
+// mano y corriendo la suite entera de los dos crates:
+//
+// - **mutante (c)** — E25-H03: el `gc_receipts_con_el_lock_tomado(&lock)` de
+//   `App::recover_if_pending` (`crates/lodestar-app/src/lib.rs`) se puede **eliminar** entero y no
+//   falla ni un test. El testigo tipado (`&WorkspaceLock`) impide llamar al GC sin el lock, pero no
+//   obliga a llamarlo: si la línea desaparece, el único camino que barre justo después de un crash
+//   deja de barrer y la basura del plano de control se acumula para siempre. Mitigado no es cubierto.
+//
+// - **mutante (k)** — E25-H04: el guard `recibo_a_salvo` de `seal_published_transaction`
+//   (`crates/lodestar-workspace/src/transaction.rs`) se puede quitar de la condición que borra el
+//   journal, y la suite sigue verde. Ese guard es lo que hace que una promoción de recibo FALLIDA
+//   conserve el journal, que es lo único que le queda a la recuperación para reintentarla: sin él,
+//   una transacción publicada se queda sin recibo Y sin journal, o sea irreversible para siempre.
+// ===========================================================================
+
+#[cfg(feature = "test-failpoints")]
+mod mutantes_16l {
+    use super::*;
+    use lodestar_app::Profile;
+    use lodestar_workspace::failpoints::{self, FailPoint, PuntoDeGancho};
+
+    /// Rutas del plano de control que el barrido de huérfanos juzga.
+    fn runtime(root: &Path) -> PathBuf {
+        root.join(".lodestar").join("runtime")
+    }
+
+    /// **`decisiones §16(l)`, mutante (c)** — la recuperación **barre** el plano de control.
+    ///
+    /// **Dado** un workspace que viene de un crash (journal pendiente) y con basura huérfana en
+    /// `runtime/staging/` y `runtime/recovery/` —ni journal ni recibo la respaldan—, **Cuando** la
+    /// siguiente operación dispara `App::recover_if_pending`, **Entonces** además de recuperar,
+    /// **barre**: los huérfanos desaparecen.
+    ///
+    /// Justo después de un crash es cuando hay basura en el plano de control, y este es el ÚNICO
+    /// camino que la recoge en ese momento: `gc_receipts` (el que adquiere el lock él mismo) no
+    /// puede llamarse desde aquí porque el lock no es reentrante y se convertiría en un no-op
+    /// permanente. Por eso E25-H03 introdujo la variante que toma el guard como testigo. El testigo
+    /// garantiza que si se barre es **bajo el lock**; lo que ningún test fijaba —y lo que este fija—
+    /// es que **se barre**.
+    #[test]
+    fn la_recuperacion_barre_los_huerfanos_del_plano_de_control() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        semilla(root);
+
+        let app = App::open(root).expect("el workspace temporal debe abrir");
+        let ops = json!([
+            { "op": "replace_body", "path": "alfa.md", "body": "# Resumen\n\ncuerpo del plan\n" },
+        ]);
+        let plan = app
+            .change_plan(None, &ops, policy_permisiva())
+            .expect("planificar una modificación normal debe funcionar");
+
+        // Un crash DESPUÉS de publicar y sin sellar: el journal queda en disco, así que al reabrir
+        // hay recuperación pendiente y `recover_if_pending` tiene que atenderla (y barrer).
+        failpoints::armar(FailPoint::TrasPublicarSinSellar);
+        let _ = app.change_apply(&plan.change_set_id, None);
+        failpoints::desarmar();
+        drop(app);
+
+        // Basura huérfana: ni `journal/<id>.json` ni `receipts/<id>.json` la respaldan, así que el
+        // criterio de «vivos» del barrido (journal ∪ receipts) la condena.
+        escribe(
+            root,
+            ".lodestar/runtime/staging/huerfano-mut16l/alfa.md",
+            "basura de una transacción que nunca llegó a publicar",
+        );
+        escribe(
+            root,
+            ".lodestar/runtime/recovery/huerfano-mut16l/alfa.md",
+            "copia de recuperación sin dueño",
+        );
+        let staging_huerfano = runtime(root).join("staging").join("huerfano-mut16l");
+        let recovery_huerfano = runtime(root).join("recovery").join("huerfano-mut16l");
+        assert!(
+            staging_huerfano.is_dir() && recovery_huerfano.is_dir(),
+            "precondición: la basura huérfana tiene que estar en disco antes de recuperar"
+        );
+
+        // Reabrir y disparar la recuperación por el camino real (`change_plan` la invoca).
+        let app2 = App::open(root).expect("reabrir el workspace debe funcionar");
+        assert!(
+            app2.workspace_status(Profile::Standard)
+                .expect("workspace_status debe responder")
+                .recovery
+                .pending_transaction,
+            "precondición: al reabrir tras el crash tiene que haber una recuperación pendiente \
+             (si no, `recover_if_pending` sale por el atajo y el test sería vacuo)"
+        );
+        let _ = app2.change_plan(None, &ops, policy_permisiva());
+
+        assert!(
+            !staging_huerfano.exists(),
+            "la recuperación tiene que BARRER el plano de control: el staging huérfano {} sigue \
+             ahí. Justo después de un crash es cuando se produce esta basura, y este es el único \
+             camino que la recoge en ese momento",
+            staging_huerfano.display()
+        );
+        assert!(
+            !recovery_huerfano.exists(),
+            "y también el árbol de copias huérfano {}: sin dueño en `journal/` ni en `receipts/` \
+             no sirve para revertir nada y se acumula sin límite",
+            recovery_huerfano.display()
+        );
+    }
+
+    /// **`decisiones §16(l)`, mutante (k)** — si la promoción del recibo **falla**, el sellado
+    /// **conserva el journal**.
+    ///
+    /// **Dado** un apply que publica y cuya promoción de recibo no puede completarse (el directorio
+    /// de recibos definitivos está en solo-lectura), **Cuando** se sella, **Entonces** el fichero de
+    /// journal sigue en disco.
+    ///
+    /// Es el orden que documenta `seal_published_transaction`: el journal es lo único que le queda a
+    /// la vía COMPLETAR de `Workspace::recover` para **reintentar** la promoción en la siguiente
+    /// operación. Borrarlo con el recibo perdido deja una transacción publicada sin recibo y sin
+    /// rastro: `change_revert` responde `PLAN_EXPIRED` para siempre y el material de reversión se lo
+    /// lleva el GC por huérfano. Y se comprueba que la reversión sigue siendo posible después, que
+    /// es la consecuencia observable de haber conservado el journal.
+    #[test]
+    #[cfg(unix)]
+    fn una_promocion_de_recibo_fallida_conserva_el_journal() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        semilla(root);
+        let original =
+            std::fs::read_to_string(root.join("alfa.md")).expect("la semilla escribe alfa.md");
+
+        let app = App::open(root).expect("el workspace temporal debe abrir");
+        let ops = json!([
+            { "op": "replace_body", "path": "alfa.md", "body": "# Resumen\n\ncuerpo del plan\n" },
+        ]);
+        let plan = app
+            .change_plan(None, &ops, policy_permisiva())
+            .expect("planificar una modificación normal debe funcionar");
+
+        // Control de entorno: si los permisos no deniegan (root), no hay fallo que inyectar.
+        let receipts = runtime(root).join("receipts");
+        std::fs::create_dir_all(&receipts).unwrap();
+        let permisos_originales = std::fs::metadata(&receipts).unwrap().permissions();
+        std::fs::set_permissions(&receipts, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let deniega = std::fs::write(receipts.join(".sonda"), b"x").is_err();
+        std::fs::set_permissions(&receipts, permisos_originales.clone()).unwrap();
+        let _ = std::fs::remove_file(receipts.join(".sonda"));
+        if !deniega {
+            eprintln!(
+                "AVISO (§16(l), mutante k): este entorno no deniega escritura por permisos \
+                 (¿root?); `una_promocion_de_recibo_fallida_conserva_el_journal` se salta"
+            );
+            return;
+        }
+
+        // El candado se pone DENTRO de la ventana `[T1, T3)`, no antes: `receipts/pending/` es
+        // subdirectorio de `receipts/`, y el registro durable del recibo se escribe ahí ANTES del
+        // primer rename (E25-H04). Candar el directorio desde el principio mataría esa escritura y
+        // la transacción abortaría antes de publicar — que es otro escenario. Con el gancho, el
+        // pendiente ya está en disco y lo único que el candado rompe es su PROMOCIÓN durante el
+        // sellado, que corre al otro lado del punto de no retorno.
+        {
+            let receipts = receipts.clone();
+            failpoints::armar_gancho(PuntoDeGancho::AntesDePublicar, move || {
+                std::fs::set_permissions(&receipts, std::fs::Permissions::from_mode(0o500))
+                    .expect("el gancho debe poder candar `receipts/`");
+            });
+        }
+        let resultado = app.change_apply(&plan.change_set_id, None);
+        failpoints::desarmar_ganchos();
+        std::fs::set_permissions(&receipts, permisos_originales).unwrap();
+
+        // El canónico SÍ se publicó: el fallo es posterior al punto de no retorno.
+        assert_eq!(
+            std::fs::read_to_string(root.join("alfa.md")).unwrap(),
+            "---\ntype: Nota\ntitle: Alfa\ndescription: Primer documento\n---\n\n# Resumen\n\ncuerpo del plan\n",
+            "precondición: el apply tiene que haber cruzado el punto de no retorno (si no, no hay \
+             sellado que probar). change_apply devolvió: {resultado:?}"
+        );
+
+        // El journal SOBREVIVE: es el único asidero que le queda a la recuperación para reintentar
+        // la promoción del recibo perdido.
+        let journals: Vec<PathBuf> = std::fs::read_dir(runtime(root).join("journal"))
+            .map(|rd| {
+                rd.flatten()
+                    .map(|e| e.path())
+                    .filter(|p| p.extension().and_then(|x| x.to_str()) == Some("json"))
+                    .collect()
+            })
+            .unwrap_or_default();
+        assert!(
+            !journals.is_empty(),
+            "con la promoción del recibo fallida, el sellado NO puede borrar el journal: es lo \
+             único que le queda a la vía COMPLETAR de la recuperación para reintentarla. Sin él, \
+             una transacción publicada queda sin recibo y sin rastro — irreversible para siempre, \
+             y su material de reversión se lo lleva el GC por huérfano"
+        );
+
+        // Y la consecuencia observable de haberlo conservado: la siguiente operación recupera,
+        // promueve el recibo que faltaba, y la transacción vuelve a ser reversible.
+        let app2 = App::open(root).expect("reabrir el workspace debe funcionar");
+        let recibo = app2
+            .workspace_status(Profile::Standard)
+            .expect("workspace_status debe responder")
+            .receipts
+            .into_iter()
+            .find(|r| r.change_set_id == plan.change_set_id)
+            .unwrap_or_else(|| {
+                panic!(
+                    "tras reabrir, la recuperación tiene que haber promovido el recibo que la \
+                     promoción fallida dejó pendiente: para eso se conservó el journal"
+                )
+            });
+        let revertido = app2
+            .change_revert(&recibo.receipt_id, None)
+            .unwrap_or_else(|e| {
+                panic!(
+                    "y con el recibo promovido la transacción tiene que ser reversible; \
+                     change_revert devolvió {} ({e:?})",
+                    e.code.as_str()
+                )
+            });
+        assert!(revertido.reverted, "la reversión se declara hecha");
+        assert_eq!(
+            std::fs::read_to_string(root.join("alfa.md")).unwrap(),
+            original,
+            "y el canónico vuelve a su estado original"
         );
     }
 }

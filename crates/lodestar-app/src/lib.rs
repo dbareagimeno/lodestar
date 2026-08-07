@@ -4468,6 +4468,159 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // E30-H03 (seguimiento 9) — `PATH-NOT-UTF8` sin `targets` llega a `full_analysis`
+    //
+    // `fusiona_diagnosticos_de_descubrimiento` es la mitad del cuerpo de `App::full_analysis` que
+    // NO toca el disco, extraída en E30-H03 precisamente para poder ejercerla con un `Check`
+    // SINTÉTICO: los diagnósticos que la motivan —`PATH-NOT-UTF8`, `WORKSPACE-EMPTY`— nacen de
+    // condiciones del sistema de ficheros que no se fabrican de forma portable (en APFS no hay
+    // manera de crear un nombre de fichero que no sea UTF-8 válido).
+    //
+    // El test de abajo clava las TRES reglas que su rustdoc enumera, cada una con su propia
+    // aserción, para que mutar cualquiera de las tres haga fallar el test:
+    //   1. familia reclasificada a `ignore` por config → se DESCARTA;
+    //   2. `Check` CON `targets` → se ancla bajo su PRIMER target, junto a lo que ese documento ya
+    //      tuviera;
+    //   3. `Check` SIN `targets` → se ancla bajo `anchor_workspace()`, NUNCA se descarta.
+    // -----------------------------------------------------------------------
+
+    /// Un [`Check`] sintético mínimo con el código, la severidad y los `targets` pedidos.
+    fn check_sintetico(
+        level: Severity,
+        code: lodestar_core::types::CheckCode,
+        targets: &[&str],
+    ) -> Check {
+        Check::new(
+            level,
+            code,
+            format!("diagnóstico sintético {}", code.as_str()),
+            targets
+                .iter()
+                .map(|t| RelPath::new(t).expect("target del test debe ser un RelPath válido"))
+                .collect(),
+        )
+    }
+
+    /// **E30-H03 (seguimiento 9)** · `path_not_utf8_sin_targets_llega_a_full_analysis`: **Dado** un
+    /// [`Check`] sintético con código `PATH-NOT-UTF8` y **sin** `targets`, **Cuando** se inyecta en
+    /// el camino de `full_analysis` (su costura pura,
+    /// [`fusiona_diagnosticos_de_descubrimiento`]), **Entonces** aparece en el resultado final —
+    /// bajo [`ANCHOR_WORKSPACE`] y contando para [`Analysis::warn_count`]— en vez de desaparecer
+    /// en silencio por no tener clave con la que entrar al mapa.
+    ///
+    /// Clava además, en la misma pasada, las otras dos reglas de la función (anclaje por primer
+    /// target y descarte de la familia puesta a `ignore`), que son las que dan sentido a la
+    /// tercera: sin ellas, «no se descarta nunca» sería trivialmente cierto.
+    #[test]
+    fn path_not_utf8_sin_targets_llega_a_full_analysis() {
+        use lodestar_core::types::CheckCode;
+        use lodestar_workspace::config::{
+            ValidationSection, ValidationSeverity, FAMILY_MALFORMED_FRONTMATTER,
+        };
+
+        // El documento `alfa.md` ya trae un diagnóstico propio: la regla 2 debe MEZCLAR el
+        // diagnóstico de descubrimiento con él, no reemplazarlo.
+        let alfa = RelPath::new("alfa.md").unwrap();
+        let previo = check_sintetico(Severity::Info, CheckCode::LinkCaseMismatch, &["alfa.md"]);
+        let mut analysis = Analysis {
+            documents: vec![alfa.clone()],
+            diagnostics: BTreeMap::from([(alfa.clone(), vec![previo.clone()])]),
+            ..Analysis::default()
+        };
+
+        // Config: la familia `malformedFrontmatter` (la de `FM-UNCLOSED`) queda a `ignore`.
+        let validation = ValidationSection {
+            families: BTreeMap::from([(
+                FAMILY_MALFORMED_FRONTMATTER.to_string(),
+                ValidationSeverity::Ignore,
+            )]),
+        };
+
+        let sin_targets = check_sintetico(Severity::Warn, CheckCode::PathNotUtf8, &[]);
+        let con_target = check_sintetico(Severity::Err, CheckCode::DocTooLarge, &["alfa.md"]);
+        let suprimido = check_sintetico(Severity::Err, CheckCode::FmUnclosed, &["alfa.md"]);
+
+        fusiona_diagnosticos_de_descubrimiento(
+            &mut analysis,
+            vec![sin_targets, con_target, suprimido],
+            &validation,
+        );
+
+        // REGLA 3 — el `PATH-NOT-UTF8` sin `targets` sobrevive, bajo el ancla del workspace.
+        let del_ancla = analysis
+            .diagnostics
+            .get(&anchor_workspace())
+            .unwrap_or_else(|| {
+                panic!(
+                    "un diagnóstico de descubrimiento SIN `targets` debe anclarse bajo \
+                     «{ANCHOR_WORKSPACE}», nunca descartarse: {:?}",
+                    analysis.diagnostics
+                )
+            });
+        assert!(
+            del_ancla.iter().any(|c| c.code == CheckCode::PathNotUtf8),
+            "`PATH-NOT-UTF8` sin `targets` debe llegar al `Analysis` final: {del_ancla:?}"
+        );
+        assert!(
+            del_ancla
+                .iter()
+                .all(|c| c.targets.is_empty() || c.code != CheckCode::PathNotUtf8),
+            "el anclaje no puede FALSEAR los `targets`: el diagnóstico sigue viajando con la \
+             verdad («no hay fichero»), la clave del mapa es solo la etiqueta: {del_ancla:?}"
+        );
+
+        // REGLA 2 — el que SÍ tiene `targets` va bajo su primer target, junto al que ya estaba.
+        let de_alfa = analysis
+            .diagnostics
+            .get(&alfa)
+            .expect("`alfa.md` conserva su entrada en el mapa");
+        assert!(
+            de_alfa.contains(&previo),
+            "el anclaje por target no puede pisar los diagnósticos que el documento ya tenía: \
+             {de_alfa:?}"
+        );
+        assert!(
+            de_alfa.iter().any(|c| c.code == CheckCode::DocTooLarge),
+            "un diagnóstico de descubrimiento CON `targets` se ancla bajo su primer target, no \
+             bajo «{ANCHOR_WORKSPACE}»: {de_alfa:?}"
+        );
+        assert!(
+            !analysis
+                .diagnostics
+                .get(&anchor_workspace())
+                .is_some_and(|v| v.iter().any(|c| c.code == CheckCode::DocTooLarge)),
+            "un diagnóstico CON `targets` NO puede acabar bajo el ancla del workspace: {:?}",
+            analysis.diagnostics
+        );
+
+        // REGLA 1 — la familia puesta a `ignore` se descarta, venga de donde venga.
+        assert!(
+            analysis
+                .diagnostics
+                .values()
+                .flatten()
+                .all(|c| c.code != CheckCode::FmUnclosed),
+            "una familia reclasificada a `ignore` por la config no entra al `Analysis`: {:?}",
+            analysis.diagnostics
+        );
+
+        // La severidad EFECTIVA se escribe en el propio `check.level` antes de insertarlo, así que
+        // el diagnóstico anclado cuenta ya reclasificado para `hard_fail`/`warn_count`.
+        assert_eq!(
+            analysis.warn_count(),
+            1,
+            "el `PATH-NOT-UTF8` anclado cuenta como aviso en el recuento final: {:?}",
+            analysis.diagnostics
+        );
+        assert_eq!(
+            analysis.hard_fail(),
+            1,
+            "solo `alfa.md` tiene un error (el `DOC-TOO-LARGE` anclado por target): {:?}",
+            analysis.diagnostics
+        );
+    }
+
+    // -----------------------------------------------------------------------
     // E30-H01 — Cursores estrictos: el núcleo de codificación
     //
     // El comportamiento observable por el wire lo fijan los tests de
@@ -4631,5 +4784,59 @@ mod tests {
         );
         assert_eq!(decode_cursor_firmado(&a, &scope).ok(), Some(20));
         assert_eq!(decode_cursor_firmado(&b, &scope).ok(), Some(40));
+    }
+
+    /// **`decisiones §16(l)`** (superviviente nuevo, hallado en la pasada de mutantes) — `pagina()`
+    /// **acota** el `limit` a `max_limit`, y aplica `default_limit` cuando no llega ninguno.
+    ///
+    /// El mutante que sobrevivía: quitar el `.min(max_limit)` de `pagina()`. Ningún test fallaba,
+    /// porque las cuatro tools llegan hoy por la fachada MCP, que ya rechaza antes lo que exceda el
+    /// `maximum` del `inputSchema`. Pero `pagina()` es la **red de seguridad** de cualquier otro
+    /// llamante —el propio rustdoc lo dice— y una red que nadie comprueba no es una red: sin la
+    /// cota, un `limit` desmedido devuelve la lista entera en una respuesta, que es exactamente el
+    /// desbordamiento de payload que E26-H10 cerró.
+    ///
+    /// Se asevera sobre la **mecánica de paginación** (cuántos elementos trae la página y si hay
+    /// `nextCursor`), no sobre la forma del código.
+    #[test]
+    fn pagina_acota_el_limit_al_maximo() {
+        let scope = CursorScope::KnowledgeSearch;
+        let items: Vec<usize> = (0..500).collect();
+
+        // (1) Un `limit` por encima del máximo se acota al máximo, y por tanto queda continuación.
+        let (page, next) = pagina(items.clone(), Some(9_999), None, 20, 100, &scope)
+            .expect("paginar sin cursor no puede fallar");
+        assert_eq!(
+            page.len(),
+            100,
+            "un `limit` de 9999 con `max_limit` 100 debe servir 100 elementos, no los 500: sin la \
+             cota, `pagina()` devuelve la lista entera en una respuesta — el desbordamiento de \
+             payload que E26-H10 cerró — y deja de ser la red de seguridad que su contrato promete"
+        );
+        assert!(
+            next.is_some(),
+            "y al haber acotado quedan elementos por servir, así que tiene que emitir `nextCursor`: \
+             sin él la página acotada sería una truncadura silenciosa, que es peor que no acotar"
+        );
+
+        // (2) Control anti-vacuo: un `limit` POR DEBAJO del máximo se respeta tal cual.
+        let (page, _) = pagina(items.clone(), Some(7), None, 20, 100, &scope)
+            .expect("paginar sin cursor no puede fallar");
+        assert_eq!(
+            page.len(),
+            7,
+            "la cota solo recorta por arriba: un `limit` legítimo se sirve entero (si no, el \
+             arreglo sería «devolver siempre max_limit», que rompe la paginación)"
+        );
+
+        // (3) Sin `limit` manda el `default_limit`, no el máximo.
+        let (page, _) =
+            pagina(items, None, None, 20, 100, &scope).expect("paginar sin cursor no puede fallar");
+        assert_eq!(
+            page.len(),
+            20,
+            "sin `limit` explícito manda `default_limit` (20), no `max_limit`: son dos parámetros \
+             distintos y confundirlos multiplica por 5 el payload de toda llamada sin `limit`"
+        );
     }
 }
