@@ -16,6 +16,7 @@ use lodestar_app::{App, Profile};
 use serde_json::{json, Value};
 
 mod tools;
+mod validacion;
 
 /// Versiones de `protocolVersion` que el servidor soporta de verdad, en el orden que declara
 /// `contracts/mcp.yml` (`meta.protocolo.protocol_versions_aceptadas`). Única fuente de esta lista:

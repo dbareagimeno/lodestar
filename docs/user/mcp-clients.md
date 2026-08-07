@@ -280,6 +280,30 @@ in `workspace_status` tells you which mode you are in.
 never contains `..` or a leading `/`. If a document lives outside the root, it is outside the
 workspace — restart the server with a root that contains it.
 
+**A parameter I sent was rejected as "not declared".** Since v0.6.0 the server enforces what every
+tool's `inputSchema` has always declared with `additionalProperties: false`: a parameter a tool does
+not declare is an error, named in the message, instead of being silently dropped. Before, a typo or a
+retired parameter got you the *default* response — indistinguishable from a legitimate one. A
+`knowledge_search` with the `sort` parameter retired in v0.4.0 now answers:
+
+```
+INVALID_SCHEMA: «sort» no es un parámetro declarado; «knowledge_search» declara ["cursor", "filter", "include", "limit", "text", "where"]
+```
+
+The message lists the declared parameters, so the fix is usually visible on the spot (`wheres` →
+`where`, `changeSetID` → `changeSetId`). Read the tool's `inputSchema` from `tools/list` for the
+authoritative list — that is the same source the server validates against, so the two cannot drift.
+
+Operations inside `change_plan` follow a deliberately **looser** rule: a field is rejected only if it
+belongs to *no* operation at all. A field that is legal for a *different* operation is still ignored,
+because `path`/`ref` are interchangeable outside `create` and `body` belongs to two operations — so a
+batch that reuses one object template across several operations keeps working. A typo is still
+caught:
+
+```
+INVALID_SCHEMA: «bodyy» no es un campo de operación declarado (operations[0]); los campos legales son ["body", "content", "expectedOccurrences", "expectedRevision", "find", "from", "frontmatter", "headingPath", "inboundLinksPolicy", "mode", "op", "patch", "path", "ref", "replace", "rewriteInboundLinks", "to"]. La validación es por UNIÓN de las 7 operaciones: un campo legal de OTRA op se ignora, pero uno que no existe en ninguna se rechaza.
+```
+
 **The response says the workspace has an unfinished transaction.** A previous publication was
 interrupted. Nothing is lost and nothing needs a manual fix: the next `change_plan` completes or
 undoes it before planning anything new.

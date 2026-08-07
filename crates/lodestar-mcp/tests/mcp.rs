@@ -9696,17 +9696,21 @@ fn policy_completa_sigue_funcionando_igual() {
     );
 }
 
-/// Control anti-vacuo (clave DESCONOCIDA en `policy` — fija el comportamiento ACTUAL, no lo
-/// cambia: eso es competencia de E29-H08): **Dado** una `policy` con los DOS campos reconocidos
-/// presentes (para que este test sea independiente del arreglo del campo omitido: aísla
-/// exclusivamente el efecto de la clave desconocida) MÁS una clave que no existe en `PlanPolicy`
-/// (p. ej. `"strictMode"`), **Cuando** se planifica, **Entonces** el resultado es el que produce
-/// hoy `#[serde(deny_unknown_fields)]` ausente en `PlanPolicy` — serde IGNORA la clave desconocida
-/// y el plan se computa con los valores de las claves reconocidas, SIN error. Este test no decide
-/// si eso es deseable; solo lo deja fijado para que E29-H08 lo cambie a propósito, no por
-/// accidente de este arreglo.
+/// Control anti-vacuo (clave DESCONOCIDA en `policy`): historia del criterio — E29-H02 (L251-253
+/// de su spec) declaró EXPLÍCITAMENTE que este caso no era suyo y lo delegó en E29-H08 («rechazo
+/// estricto» si esa historia ya estaba integrada). En su primera versión, este test fijaba el
+/// comportamiento TOLERADO-provisional de entonces (sin `deny_unknown_fields`, serde ignoraba la
+/// clave y el plan se computaba igual). **E29-H08 ya está integrada** y volvió ese comportamiento
+/// en rechazo: el wire estricto de parámetros no declarados alcanza también a las claves de
+/// `policy`, así que una `policy` con `"strictMode"` (que no existe en `PlanPolicy`) es HOY
+/// `INVALID_SCHEMA`, nombrando la clave sobrante y las declaradas.
+///
+/// **Dado** una `policy` con los DOS campos reconocidos presentes (para que este test sea
+/// independiente del arreglo del campo omitido: aísla exclusivamente el efecto de la clave
+/// desconocida) MÁS una clave que no existe en `PlanPolicy` (`"strictMode"`), **Cuando** se
+/// planifica, **Entonces** la tool RECHAZA con `INVALID_SCHEMA` y el mensaje nombra `strictMode`.
 #[test]
-fn policy_con_clave_desconocida_no_cambia_de_comportamiento() {
+fn policy_con_clave_desconocida_se_rechaza_desde_h08() {
     let dir = workspace_cinco_relacionados();
     let ops = serde_json::json!([
         { "op": "patch_frontmatter", "ref": { "path": "d.md" },
@@ -9721,18 +9725,20 @@ fn policy_con_clave_desconocida_no_cambia_de_comportamiento() {
     );
     let resp = roundtrip(dir.path(), &[line.as_str()], 1);
 
-    // Comportamiento HOY (sin `deny_unknown_fields`): la clave desconocida se ignora, no se
-    // rechaza. Si E29-H08 cambia esto a rechazo estricto, este test es el que hay que reescribir
-    // — a propósito, con su propia historia, no como daño colateral de E29-H02.
-    assert!(
-        resp[0]["result"]["isError"].as_bool() != Some(true),
-        "una clave desconocida en `policy` no debe dar isError HOY (comportamiento fijado, no \
-         decidido por esta historia — ver E29-H08): {resp:?}"
+    assert_eq!(
+        resp[0]["result"]["isError"],
+        serde_json::Value::Bool(true),
+        "desde E29-H08, una clave desconocida en `policy` debe RECHAZARSE (isError), no \
+         ignorarse: {resp:?}"
     );
-    let sc = plan_sc(&resp[0]);
+    let texto = resp[0].to_string();
     assert!(
-        sc["changeSetId"].as_str().is_some_and(|s| !s.is_empty()),
-        "con una clave desconocida ignorada, el plan debe seguir produciéndose: {resp:?}"
+        texto.contains("INVALID_SCHEMA"),
+        "el rechazo debe exponer el código estable «INVALID_SCHEMA»: {resp:?}"
+    );
+    assert!(
+        texto.contains("strictMode"),
+        "el mensaje debe nombrar la clave sobrante «strictMode» (no un rechazo genérico): {resp:?}"
     );
 }
 
@@ -10685,5 +10691,443 @@ fn initialize_sin_version_sigue_funcionando() {
     assert!(
         resp[0]["error"].is_null(),
         "sin protocolVersion no debe haber error: {resp:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// E29-H08 — El wire RECHAZA los parámetros que no declara.
+// `requirements/epica-29-honestidad-superficie.md §E29-H08` · `decisiones §15` (decidido:
+// **(a) ejecutar** lo que el schema declara) · `decisiones §16(e)` (el criterio gemelo para el
+// disco, que E29-H01 ya aplicó: «el repo no se queda con dos criterios opuestos según si lo
+// desconocido llega por el wire o por disco»).
+//
+// EL DEFECTO: los 10 `inputSchema` declaran `additionalProperties: false` (`tools.rs`, en `list()`
+// y en cada objeto anidado `ref`/`to`/`proposedOperation`) y el servidor NO lo ejecuta: `tools::call`
+// lee campo a campo con `params.get("…")` y nunca mira las claves sobrantes. Medido en la revisión de
+// la v0.3.0 (sonda 4): **15 casos aceptados en silencio**, entre ellos el `sort` que E23-H11 retiró,
+// un `offset` inexistente y typos como `wheres`/`filters`. Un agente que se equivoca de nombre de
+// parámetro recibe la respuesta POR DEFECTO, indistinguible de una legítima.
+//
+// LOS DOS NIVELES DE RECHAZO, CON CRITERIO DISTINTO (alcance de la historia, L841-853):
+//   1. **Nivel tool** (`tools/call` → `arguments`): partición LIMPIA. Una clave que el `inputSchema`
+//      de esa tool no declara → `INVALID_SCHEMA` nombrándola. Lo mismo dentro de los objetos
+//      ANIDADOS que declaran `additionalProperties: false` (`ref`, `to`, `proposedOperation`).
+//   2. **Nivel operación** (`operations[]` de `change_plan` y el `operation` de la selección
+//      masiva): validación por **UNIÓN**, no por partición. Se rechaza lo que no esté en la unión de
+//      los 17 campos legales; NO se rechaza un campo legal para OTRA op. Es decir: un `body` en un
+//      `patch_frontmatter` **se sigue ignorando**, y un `bodyy` se rechaza. Razón (`§15`): `path`/
+//      `ref` son intercambiables salvo en `create` y `body` pertenece a DOS ops, así que una
+//      partición estricta rechazaría lotes válidos —un agente que reutiliza la misma plantilla de
+//      objeto para varias operaciones de un lote— y el `oneOf` por operación sigue sin existir.
+//      Cerrar la partición por op es **decisión posterior**, declarada, no un olvido de esta fase.
+//
+// ROJO ESPERADO HOY: por ASERCIÓN, contra el binario real. Sondado antes de escribir estos tests —
+// `knowledge_search{sort}`, `knowledge_search{wheres}`, `knowledge_get{ref:{depth}}`,
+// `workspace_status{foo}` y `change_plan` con `bodyy` responden HOY los cinco con éxito y el
+// parámetro descartado. No hace falta ningún stub de producción: el rechazo es comportamiento nuevo
+// sobre símbolos que ya existen.
+//
+// REPARTO DE FICHEROS (campo Pruebas de la historia): aquí van los casos por el WIRE (uno por
+// llamada aislada, que es como se observó el hallazgo); el barrido data-driven sobre las 10 tools
+// (`el_schema_declarado_coincide_con_lo_aceptado`) vive en `tests/descubribilidad.rs`, que es donde
+// está la guarda de la política y el arnés que lee `tools/list`; la tabla de campos legales por
+// operación (`los_campos_legales_de_cada_operacion_se_aceptan`, la CONDICIÓN DE ENTRADA) vive en
+// `crates/lodestar-app/tests/plan.rs`, contra `App::change_plan` directamente.
+// ---------------------------------------------------------------------------
+
+/// Construye la línea JSON-RPC de un `tools/call` arbitrario (id 1).
+fn tool_call_line(nombre: &str, arguments: serde_json::Value) -> String {
+    serde_json::json!({
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": { "name": nombre, "arguments": arguments }
+    })
+    .to_string()
+}
+
+/// El mensaje de error de EJECUCIÓN de una tool (`result.content[0].text`), o `None` si la llamada
+/// no falló. `isError` distingue el fallo de tool del error de protocolo (que iría en `error`).
+fn error_de_tool(resp: &serde_json::Value) -> Option<String> {
+    if resp["result"]["isError"].as_bool() != Some(true) {
+        return None;
+    }
+    Some(
+        resp["result"]["content"][0]["text"]
+            .as_str()
+            .expect("un error de tool viaja como texto en content[0].text")
+            .to_string(),
+    )
+}
+
+/// Asevera que la respuesta es un rechazo `INVALID_SCHEMA` cuyo mensaje **nombra** el parámetro
+/// desconocido. Nombrarlo no es cosmética: es la diferencia entre «corrige `wheres`» y «algo de tu
+/// llamada está mal», que es justo el silencio que la historia cierra.
+fn asevera_rechazo_nombrando(resp: &serde_json::Value, desconocido: &str, contexto: &str) {
+    let msg = error_de_tool(resp).unwrap_or_else(|| {
+        panic!(
+            "{contexto}: el parámetro no declarado «{desconocido}» debe RECHAZARSE, no descartarse \
+             en silencio (hoy la llamada responde con éxito y el parámetro ignorado): {resp:?}"
+        )
+    });
+    assert!(
+        msg.starts_with("INVALID_SCHEMA"),
+        "{contexto}: el rechazo debe abrir con el código del catálogo `INVALID_SCHEMA`; fue: {msg}"
+    );
+    assert!(
+        msg.contains(desconocido),
+        "{contexto}: el mensaje debe NOMBRAR el parámetro desconocido «{desconocido}» para que el \
+         agente sepa cuál corregir; fue: {msg}"
+    );
+}
+
+/// Workspace mínimo con un documento de frontmatter real bajo `notas/`, sobre el que se pueden
+/// ejercer tanto las tools de lectura como una op de cambio.
+fn workspace_una_nota() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "notas/alfa.md",
+        "---\nstatus: accepted\n---\n\n# Alfa\n\nCuerpo con la palabra lodestar.\n",
+    );
+    dir
+}
+
+/// E29-H08 · Criterio `parametro_retirado_se_rechaza_nombrandolo`:
+/// **Dado** un `knowledge_search` con `sort: "title"` (parámetro RETIRADO en E23-H11), **Cuando** se
+/// llama, **Entonces** la respuesta es `INVALID_SCHEMA` nombrando `sort`, no la lista por defecto.
+///
+/// Es el caso emblemático de `decisiones §15`: `sort` existió, un cliente de v0.2 lo manda de buena
+/// fe, y hoy recibe resultados en un orden que NO es el que pidió, sin la menor señal. La retirada
+/// de E23-H11 fue solo declarativa (fuera del `inputSchema`); esta historia la hace ejecutable.
+#[test]
+fn parametro_retirado_se_rechaza_nombrandolo() {
+    let dir = workspace_una_nota();
+    let line = tool_call_line(
+        "knowledge_search",
+        serde_json::json!({ "text": "", "sort": "title" }),
+    );
+    let resp = roundtrip(dir.path(), &[line.as_str()], 1);
+    asevera_rechazo_nombrando(&resp[0], "sort", "knowledge_search con el `sort` retirado");
+}
+
+/// E29-H08 · Criterio `typo_de_parametro_se_rechaza`:
+/// **Dado** un `knowledge_search` con `wheres` (typo de `where`), **Cuando** se llama, **Entonces**
+/// `INVALID_SCHEMA` nombrando `wheres`.
+///
+/// El typo es peor que el parámetro retirado: hoy `wheres` se descarta y la búsqueda devuelve TODOS
+/// los documentos, que es una respuesta plausible —el agente cree que su consulta no filtró nada— en
+/// vez de una vacía que le habría hecho sospechar.
+#[test]
+fn typo_de_parametro_se_rechaza() {
+    let dir = workspace_una_nota();
+    let line = tool_call_line(
+        "knowledge_search",
+        serde_json::json!({ "wheres": "status = \"accepted\"" }),
+    );
+    let resp = roundtrip(dir.path(), &[line.as_str()], 1);
+    asevera_rechazo_nombrando(&resp[0], "wheres", "knowledge_search con el typo `wheres`");
+}
+
+/// E29-H08 · Criterio `typo_de_parametro_se_rechaza`, segunda mitad — el rechazo alcanza a las tools
+/// de CAMBIO, no solo a las de lectura.
+///
+/// La historia pide typos «en varias tools representativas (lectura y cambio)». `change_apply` es la
+/// más peligrosa de las tres: un `changeSetID` (con la `D` mayúscula, un typo verosímil de
+/// `changeSetId`) hoy hace que el parámetro obligatorio parezca ausente, así que el agente recibe
+/// «falta el parámetro obligatorio «changeSetId»» sin la menor pista de que sí lo mandó, escrito de
+/// otra forma. Tras la historia debe decírsele que `changeSetID` no existe.
+#[test]
+fn typo_de_parametro_en_tool_de_cambio_se_rechaza() {
+    let dir = workspace_una_nota();
+    let line = tool_call_line(
+        "change_apply",
+        serde_json::json!({ "changeSetID": "changeset:0000", "planId": "x" }),
+    );
+    let resp = roundtrip(dir.path(), &[line.as_str()], 1);
+    asevera_rechazo_nombrando(
+        &resp[0],
+        "changeSetID",
+        "change_apply con el typo `changeSetID`",
+    );
+}
+
+/// E29-H08 · Criterio `clave_desconocida_en_objeto_anidado_se_rechaza`:
+/// **Dado** un `knowledge_get` con `ref: {path: "…", depth: 2}` (clave desconocida en el objeto
+/// **anidado**), **Cuando** se llama, **Entonces** también se rechaza.
+///
+/// El objeto `ref` declara su propio `additionalProperties: false` en el schema (`tools.rs` L117),
+/// así que la promesa incumplida es la misma un nivel más abajo. Hoy `serde_json::from_value` sobre
+/// `DocumentRef` ignora los campos sobrantes y el `depth` desaparece —lo que importa porque `depth`
+/// SÍ existe en otras tools (`graph_query`, `impact_analyze`): un agente puede creer legítimamente
+/// que aquí también hace algo.
+#[test]
+fn clave_desconocida_en_objeto_anidado_se_rechaza() {
+    let dir = workspace_una_nota();
+    let line = tool_call_line(
+        "knowledge_get",
+        serde_json::json!({ "ref": { "path": "notas/alfa.md", "depth": 2 } }),
+    );
+    let resp = roundtrip(dir.path(), &[line.as_str()], 1);
+    asevera_rechazo_nombrando(
+        &resp[0],
+        "depth",
+        "knowledge_get con `depth` dentro del objeto anidado `ref`",
+    );
+}
+
+/// E29-H08 · Criterio `tool_sin_parametros_rechaza_cualquier_argumento`:
+/// **Dado** un `workspace_status` (cuyo schema es el objeto VACÍO con `additionalProperties: false`),
+/// **Cuando** se llama con `{"foo": 1}`, **Entonces** se rechaza.
+///
+/// Es el borde del criterio: una tool sin parámetros declara la lista vacía, y por unión eso
+/// significa que CUALQUIER clave sobra. Sin este caso, una implementación que solo mire tools con
+/// `properties` no vacío pasaría los demás tests.
+#[test]
+fn tool_sin_parametros_rechaza_cualquier_argumento() {
+    let dir = workspace_una_nota();
+    let line = tool_call_line("workspace_status", serde_json::json!({ "foo": 1 }));
+    let resp = roundtrip(dir.path(), &[line.as_str()], 1);
+    asevera_rechazo_nombrando(
+        &resp[0],
+        "foo",
+        "workspace_status (schema de objeto vacío) con un argumento inventado",
+    );
+}
+
+/// E29-H08 · Criterio `campo_inexistente_en_una_operacion_se_rechaza`:
+/// **Dado** un `change_plan` con una operación que lleva `bodyy` (typo, NO está en la unión de los
+/// 17 campos legales), **Cuando** se planifica, **Entonces** `INVALID_SCHEMA` nombrando `bodyy`.
+///
+/// Este es el nivel 2 (operación) en su mitad de RECHAZO. La op elegida es `replace_body`, donde
+/// `body` sí es legal: así el typo es de verdad un typo —el agente quería `body`— y el rechazo no se
+/// puede confundir con «campo de otra op». Hoy el plan se computa con el cuerpo SIN sustituir y
+/// `canApply: true`: el agente cree haber reemplazado el cuerpo y no reemplazó nada.
+#[test]
+fn campo_inexistente_en_una_operacion_se_rechaza() {
+    let dir = workspace_una_nota();
+    let line = tool_call_line(
+        "change_plan",
+        serde_json::json!({
+            "operations": [
+                { "op": "replace_body", "path": "notas/alfa.md",
+                  "bodyy": "# Alfa\n\nCuerpo nuevo.\n" }
+            ]
+        }),
+    );
+    let resp = roundtrip(dir.path(), &[line.as_str()], 1);
+    asevera_rechazo_nombrando(
+        &resp[0],
+        "bodyy",
+        "change_plan con el typo `bodyy` en una operación",
+    );
+}
+
+/// E29-H08 · Criterio `campo_inexistente_en_una_operacion_se_rechaza`, mitad de la SELECCIÓN MASIVA:
+/// el mismo criterio de unión rige dentro del objeto `operation` de la selección masiva, que es la
+/// otra forma de wire por la que llegan parámetros de operación (`§20.11`).
+///
+/// La historia declara los dos vehículos en el mismo criterio («`operations[]` de `change_plan`, y
+/// el objeto `operation` de la selección masiva»). Se separa en un test propio porque el camino de
+/// código es OTRO —`expand_selection`/`single_operation`, no `normalize_raw_op` sobre un array—, y
+/// una implementación que solo mire `operations[]` dejaría esta puerta abierta.
+#[test]
+fn campo_inexistente_en_la_seleccion_masiva_se_rechaza() {
+    let dir = workspace_una_nota();
+    let line = tool_call_line(
+        "change_plan",
+        serde_json::json!({
+            "selection": { "where": "status = \"accepted\"" },
+            "operation": { "replace_text": { "find": "lodestar", "replace": "Lodestar",
+                                             "expectedOcurrences": 1 } }
+        }),
+    );
+    let resp = roundtrip(dir.path(), &[line.as_str()], 1);
+    asevera_rechazo_nombrando(
+        &resp[0],
+        "expectedOcurrences",
+        "change_plan (selección masiva) con el typo `expectedOcurrences`",
+    );
+}
+
+/// E29-H08 · Criterio `campo_legal_de_otra_operacion_se_sigue_ignorando` (**la excepción
+/// declarada**, y el control anti-vacuo más importante de la historia):
+/// **Dado** un `change_plan` con una operación `patch_frontmatter` que además lleva `body` (campo
+/// legal de OTRA op), **Cuando** se planifica, **Entonces** se acepta y `body` se ignora, como hoy.
+///
+/// La decisión de diseño ratificada es **validar por UNIÓN, no por partición**: `path`/`ref` son
+/// intercambiables salvo en `create` y `body` pertenece a DOS ops, así que una partición estricta
+/// rompería un lote perfectamente válido en el que un agente reutiliza la misma plantilla de objeto
+/// para varias operaciones. Cerrar la partición por op es decisión POSTERIOR.
+///
+/// Este test nace **VERDE** (fija el comportamiento actual para que la historia no lo cambie por
+/// accidente) y debe seguir verde después: es la mitad del criterio que impide que el rechazo se
+/// cierre de más. Se asevera además que el `body` de verdad NO se aplicó —el diff no toca el
+/// cuerpo—, para que «se ignora» sea una afirmación verificada y no una tautología del `isError`.
+#[test]
+fn campo_legal_de_otra_operacion_se_sigue_ignorando() {
+    let dir = workspace_una_nota();
+    let line = tool_call_line(
+        "change_plan",
+        serde_json::json!({
+            "operations": [
+                { "op": "patch_frontmatter", "path": "notas/alfa.md",
+                  "patch": { "status": "review" },
+                  "body": "# CUERPO QUE NO DEBE APLICARSE\n" }
+            ]
+        }),
+    );
+    let resp = roundtrip(dir.path(), &[line.as_str()], 1);
+
+    assert!(
+        error_de_tool(&resp[0]).is_none(),
+        "un campo legal de OTRA op (`body` en un `patch_frontmatter`) debe SEGUIR ignorándose: la \
+         validación es por UNIÓN de los 17 campos legales, no por partición por op — rechazarlo \
+         rompería los lotes que reutilizan una plantilla de objeto (`decisiones §15`): {:?}",
+        resp[0]
+    );
+    let sc = plan_sc(&resp[0]);
+    assert!(
+        sc["changeSetId"].as_str().is_some_and(|s| !s.is_empty()),
+        "y el plan debe producirse igual que hoy: {:?}",
+        resp[0]
+    );
+    let ops = sc["normalizedOperations"]
+        .as_array()
+        .expect("el plan lleva `normalizedOperations`");
+    assert_eq!(
+        ops.len(),
+        1,
+        "el `body` ignorado no puede generar una operación extra: {ops:?}"
+    );
+    assert!(
+        !serde_json::to_string(sc)
+            .expect("el plan serializa")
+            .contains("CUERPO QUE NO DEBE APLICARSE"),
+        "«ignorado» significa que el `body` no llega al resultado: si apareciera en el plan, no se \
+         estaría ignorando sino aplicando. Plan: {sc}"
+    );
+}
+
+/// E29-H08 · Criterio `la_seleccion_masiva_sigue_funcionando` (control anti-vacuo del caso donde
+/// `params` viaja ENTERO):
+/// **Dado** un `change_plan` en forma de selección masiva, **Cuando** lleva `selection` + `operation`
+/// + `policy` (todo legal), **Entonces** se planifica como hoy.
+///
+/// Es el control que protege la trampa señalada por la propia historia (L854-859): con `selection`,
+/// `tools.rs:468-472` pasa `params.clone()` **entero** a `App::change_plan`, así que el objeto de
+/// argumentos de la tool y el de la selección masiva son el MISMO. Una implementación que valide el
+/// nivel operación sobre ese objeto entero vería `selection`/`operation`/`policy` como «campos de
+/// operación desconocidos» y rompería la selección masiva completa. Nace VERDE y debe seguir verde.
+#[test]
+fn la_seleccion_masiva_sigue_funcionando() {
+    let dir = workspace_una_nota();
+    let line = tool_call_line(
+        "change_plan",
+        serde_json::json!({
+            "selection": { "where": "status = \"accepted\"" },
+            "operation": { "patch_frontmatter": { "status": "review" } },
+            "policy": { "requireValidResult": false, "allowWarnings": true }
+        }),
+    );
+    let resp = roundtrip(dir.path(), &[line.as_str()], 1);
+
+    assert!(
+        error_de_tool(&resp[0]).is_none(),
+        "la selección masiva con `selection`+`operation`+`policy` (todo LEGAL) debe seguir \
+         planificándose: con `selection`, el objeto de argumentos de la tool viaja entero como \
+         `raw_ops`, y confundir sus claves con campos de operación rompería la forma masiva \
+         entera: {:?}",
+        resp[0]
+    );
+    let sc = plan_sc(&resp[0]);
+    let ops = sc["normalizedOperations"]
+        .as_array()
+        .expect("el plan lleva `normalizedOperations`");
+    assert_eq!(
+        ops.len(),
+        1,
+        "la selección debe expandirse sobre el único documento que casa `status = accepted`: {sc}"
+    );
+}
+
+/// E29-H08 · Control anti-vacuo de los parámetros OPCIONALES legítimos (`cursor`/`limit` y compañía):
+/// **Dado** llamadas que usan TODOS los parámetros opcionales que su `inputSchema` declara,
+/// **Cuando** se llaman, **Entonces** siguen funcionando exactamente como hoy.
+///
+/// La historia lo pide explícitamente («cursor/limit y campos opcionales legítimos intactos»). Sin
+/// él, una implementación que rechazara todo lo que no sea obligatorio pasaría los seis tests de
+/// rechazo de arriba y rompería la paginación de la superficie entera. Se ejercitan las tres tools
+/// paginadas + una llamada con `cursor` REAL obtenido de una respuesta previa, que es el uso que un
+/// agente hace de verdad.
+#[test]
+fn parametros_opcionales_legitimos_siguen_funcionando() {
+    let dir = workspace_una_nota();
+    write(
+        dir.path(),
+        "notas/beta.md",
+        "---\nstatus: draft\n---\n\n# Beta\n\nCuerpo con la palabra lodestar.\n",
+    );
+
+    let llamadas = [
+        (
+            "knowledge_search",
+            serde_json::json!({ "text": "lodestar", "where": "status = \"accepted\"",
+                                "filter": { "field": "frontmatter.status", "operator": "equals",
+                                            "value": "accepted" },
+                                "include": ["frontmatter.status"], "limit": 1 }),
+        ),
+        (
+            "knowledge_check",
+            serde_json::json!({ "scope": { "kind": "workspace" }, "minimumSeverity": "info",
+                                "includeSuggestedFixes": false, "limit": 5 }),
+        ),
+        (
+            "metadata_inspect",
+            serde_json::json!({ "mode": "catalog", "limit": 5 }),
+        ),
+        (
+            "graph_query",
+            serde_json::json!({ "operation": "neighborhood", "ref": { "path": "notas/alfa.md" },
+                                "depth": 1, "direction": "both", "limit": 5 }),
+        ),
+    ];
+    for (tool, args) in llamadas {
+        let line = tool_call_line(tool, args.clone());
+        let resp = roundtrip(dir.path(), &[line.as_str()], 1);
+        assert!(
+            error_de_tool(&resp[0]).is_none(),
+            "«{tool}» con SOLO parámetros declarados ({args}) debe seguir funcionando: el rechazo \
+             de lo no declarado no puede tocar lo declarado-y-opcional: {:?}",
+            resp[0]
+        );
+    }
+
+    // Y el `cursor` de verdad: se pagina de una respuesta a la siguiente, que es donde un rechazo
+    // demasiado celoso rompería la paginación sin que ningún caso sintético lo notara.
+    let primera = roundtrip(
+        dir.path(),
+        &[tool_call_line(
+            "knowledge_search",
+            serde_json::json!({ "text": "", "limit": 1 }),
+        )
+        .as_str()],
+        1,
+    );
+    let cursor = primera[0]["result"]["structuredContent"]["nextCursor"]
+        .as_str()
+        .expect("con 2 documentos y limit 1 debe haber `nextCursor`")
+        .to_string();
+    let segunda = roundtrip(
+        dir.path(),
+        &[tool_call_line(
+            "knowledge_search",
+            serde_json::json!({ "text": "", "limit": 1, "cursor": cursor }),
+        )
+        .as_str()],
+        1,
+    );
+    assert!(
+        error_de_tool(&segunda[0]).is_none(),
+        "la segunda página con el `cursor` devuelto por la primera debe servirse igual que hoy: {:?}",
+        segunda[0]
     );
 }
