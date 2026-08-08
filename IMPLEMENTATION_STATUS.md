@@ -1667,6 +1667,20 @@ Cierra las dos fichas que la campaña dejó abiertas porque exigían criterio de
   `.md` con `tags: [atlas, overview]` da `modified: []`, `noOpOperations: [{index: 0, op:
   "replace_body", path: "overview.md"}]` y **md5 idéntico**; uno que sí casa cambia el cuerpo y deja
   el frontmatter en estilo flow.
+- **El PR creó la misma superficie muerta que retiraba** — lo cazó el juez ciego de H02 mutando el
+  parámetro a inerte y viendo los 740 tests en verde. Al dejar `ReplaceBody` de reconstruir
+  documentos, `build_raw_with_bom` se quedó sin un llamador que pasara `bom: true`; se fusionó con
+  `build_raw`. La ironía es la lección: H01 retira superficie muerta **en el mismo rango de commits**
+  en que H02 la crea, y ninguna suite lo habría notado.
+- **Un test escrito para fijar un límite midió otra cosa.** El límite por-documento de
+  `noOpOperations` se iba a fijar con «dos ops sobre el mismo path, solo una vacía → ninguna se
+  declara». La realidad medida fue peor: la segunda op se normaliza contra el estado **inicial**
+  (defecto preexistente de la normalización multi-op), deshace a la primera, y el documento acaba
+  idéntico, así que **ambas** se declaran. El test fija lo medido, no lo supuesto.
+- **La documentación prometía de más sobre `edit_section`**: contrato y `docs/user/` afirmaban que el
+  campo cubre «reescribir una sección con su contenido actual». Verificado por el wire: depende de la
+  forma del documento, porque `normalize_edit_section` fija la separación de la sección. Prometer lo
+  que el binario no cumple es el modo de fallo que **originó** `§26`, reapareciendo al cerrarla.
 
 ## Defectos posteriores a E27
 
