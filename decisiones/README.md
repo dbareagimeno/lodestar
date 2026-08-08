@@ -63,8 +63,8 @@ prioridad **filtra**, no ordena. El vocabulario de `estado` es cerrado: `abierta
 | 22 | Integridad referencial de los valores del frontmatter | abierta | 3 | [`22-integridad-referencial-frontmatter.md`](22-integridad-referencial-frontmatter.md) |
 | 23 | Hallazgos del testbench MCP sobre el homelab | cerrada | **5** | [`23-hallazgos-testbench-homelab.md`](23-hallazgos-testbench-homelab.md) |
 | 24 | Equivalencia de paths por caja/Unicode en el guard de colisión | abierta | 3 | [`24-equivalencia-caja-unicode.md`](24-equivalencia-caja-unicode.md) |
-| 25 | Superficie pública muerta: `Workspace::revert_transaction` | abierta | 3 | [`25-superficie-muerta-revert-transaction.md`](25-superficie-muerta-revert-transaction.md) |
-| 26 | Un `replace_text` sin coincidencias reescribe y reserializa el frontmatter | abierta | 3 | [`26-replace-text-noop-reserializa.md`](26-replace-text-noop-reserializa.md) |
+| 25 | Superficie pública muerta: `Workspace::revert_transaction` | cerrada | 3 | [`25-superficie-muerta-revert-transaction.md`](25-superficie-muerta-revert-transaction.md) |
+| 26 | Un `replace_text` sin coincidencias reescribe y reserializa el frontmatter | cerrada | 3 | [`26-replace-text-noop-reserializa.md`](26-replace-text-noop-reserializa.md) |
 
 ## Dónde está el criterio hoy
 
@@ -146,12 +146,18 @@ de idioma partido, no la ficha.
    la pasada de mutantes (6 supervivientes muertos). PR #28. Con ella **§23 queda cerrada**: sus 12
    subpuntos accionables están ejecutados. Detalle en
    [`docs/qa/campana-bugfixes-2026-08.md`](../docs/qa/campana-bugfixes-2026-08.md).
-   **La campaña dejó dos hallazgos que exigen criterio, con ficha propia**: [`§25`](25-superficie-muerta-revert-transaction.md)
+   **La campaña dejó dos hallazgos que exigían criterio, con ficha propia**: [`§25`](25-superficie-muerta-revert-transaction.md)
    (`Workspace::revert_transaction` es superficie pública sin llamadores — mismo modo de fallo que
    §16(b)/§16(g), que se resolvieron **retirando**) y [`§26`](26-replace-text-noop-reserializa.md)
-   (un `replace_text` sin coincidencias reescribe el fichero y reserializa el frontmatter). **Ambas
-   son el siguiente trabajo natural**: acotadas, con recomendación escrita y criterio de aceptación
-   listo.
+   (un `replace_text` sin coincidencias reescribe el fichero y reserializa el frontmatter).
+   ✅ **Ejecutadas (2026-08-08) por `E31`** ([épica](../requirements/epica-31-seguimientos-campana.md)),
+   que cierra las dos: H01 retiró la función —la salida (1) que §25 recomendaba resultó
+   **incompilable**, porque al replegar a `pub(crate)` clippy la marcó como `dead_code` y el CI corre
+   con `-D warnings`— y H02 hizo quirúrgica la reescritura del cuerpo. §26 resultó ser **tres**
+   defectos, no uno: además del frontmatter reserializado, un separador que inyectaba una línea en
+   blanco y —lo grave— **el frontmatter ilegible que se borraba entero, que es pérdida de datos**.
+   El plan gana además `noOpOperations`, la señal de «ejecuté tu operación, resultado: sin efecto»
+   que `docs/user/safe-changes.md` ya echaba de menos por escrito.
 3. **Épica de evidencia** — banco de pruebas (§9) + dogfooding; §23 aporta la primera corrida
    completa y el arnés re-ejecutable. **Cierra §14 con datos.** ~~Los nits documentales de §23
    (D-02, A-01, A-06, A-09, A-10) van con §19 según toque cada fichero.~~ — **ejecutados en

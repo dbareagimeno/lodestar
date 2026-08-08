@@ -1,14 +1,34 @@
 ---
 id: 25
 titulo: "Superficie pública muerta: Workspace::revert_transaction"
-estado: "abierta"
+estado: "cerrada"
 prioridad: 3
 etiquetas: ["escritura", "api", "higiene", "mutantes"]
 origen: "mutantes"
 abierta_en: "2026-08-07"
-revisada_en: "2026-08-07"
+revisada_en: "2026-08-08"
+cerrada_en: "2026-08-08"
 relacionadas: [16, 23]
 ---
+
+> **CERRADA el 2026-08-08 por `E31-H01`** — pero **no por la salida (1) que esta ficha recomendaba**.
+> Se ejecutó la **(2), retirada completa**, y el motivo lo decidió el compilador: al replegar a
+> `pub(crate)`, `clippy` marcó la función como `dead_code` —no la usaba nadie **tampoco dentro del
+> crate**—, y como el CI corre con `-D warnings`, el repliegue era **literalmente incompilable**. Con
+> `pub` el aviso no salía porque una función pública puede tener consumidores externos; replegarla
+> fue justo lo que lo destapó. Las únicas alternativas eran `#[allow(dead_code)]` —conservar el
+> código muerto *y* silenciar al detector que lo encontró— o la retirada que esta ficha ya
+> contemplaba.
+>
+> **Y el argumento con el que esta ficha desaconsejaba retirarla era falso**: dice que la función
+> «tiene un papel interno (es el cuerpo que `revert_transaction_con_recibo` envuelve)». Es al revés
+> — era un **wrapper de tres líneas** sobre ella, así que no había nada que reorganizar. Lo único
+> que costó fue la documentación: su doc-comment era el único sitio donde vivía la descripción de la
+> mecánica de reversión, y se trasladó a `revert_transaction_con_recibo`, que es donde esa mecánica
+> ocurre de verdad.
+>
+> Verificado por juez ciego, que además comprobó desde un consumidor externo que la función ya no es
+> alcanzable, y que la suite no ganó ni un test para justificarla (el criterio anti-vacuo).
 
 # §25 — Superficie pública muerta: `Workspace::revert_transaction`
 

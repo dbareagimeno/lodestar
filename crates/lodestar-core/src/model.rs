@@ -387,7 +387,14 @@ pub struct PatchedDocument {
     pub raw: String,
     /// `true` si el bloque de frontmatter se **reserializó entero** en vez de editarse in situ —
     /// es decir, si se ha perdido el texto original del bloque (formato, comillas, comentarios
-    /// YAML). Lo consume `change_plan` (E21) para declararlo en el plan.
+    /// YAML).
+    ///
+    /// > **Sin consumidor hoy** (E31-H02). Esta línea decía que «lo consume `change_plan` (E21) para
+    /// > declararlo en el plan», y era **falso**: ese consumo nunca se escribió, y fuera de este
+    /// > módulo solo lo leen los tests. Se conserva porque la señal es correcta y responde a una
+    /// > pregunta legítima —«¿se perdió el formato del bloque al parchearlo?»—, pero no debe
+    /// > confundirse con `PlanResult.noOpOperations`, que responde a otra distinta («¿esta operación
+    /// > cambió algo?») y sí viaja al wire.
     ///
     /// **Crear** un bloque donde no había ninguno **no** es reserialización: no se pierde texto
     /// del usuario porque no había texto que perder.

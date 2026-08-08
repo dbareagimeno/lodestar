@@ -134,13 +134,13 @@ ejecútalo*— aplicada un nivel más arriba: **cuando dudes de si un test muerd
 - **Mensaje duplicado de `INVALID_RESULT` del gate de staging**: ~~a saldar en la escoba~~ —
   **CERRADO por E30-H03**. El `format!` de staging repetía la frase que la plantilla de `thiserror`
   ya antepone. Corregido en el emisor, no en la plantilla (que E20-H04/E29-H07 aseveran).
-- **`Workspace::revert_transaction` es superficie pública muerta** — **NUEVO, abierto**. Lo destapó
+- **`Workspace::revert_transaction` es superficie pública muerta** — **CERRADO por `E31-H01`** (2026-08-08): se **RETIRÓ**, no se replegó — al hacer el `pub(crate)` que §25 recomendaba, clippy la marcó como `dead_code` (no la usaba nadie ni dentro del crate) y con el CI en `-D warnings` el repliegue era incompilable. Lo destapó
   la pasada de mutantes de `§16(l)`: sustituir su cuerpo entero por `unreachable!()` deja **los 52
   binarios de test del workspace en verde**, y no tiene un solo llamador (la fachada usa
   `revert_transaction_con_recibo`). No se actuó a propósito: es la categoría de `§16(b)`/`§16(g)`,
   que se resolvieron **retirando o replegando por decisión**, no añadiendo tests. **Ficha propia**:
   [`decisiones §25`](../../decisiones/25-superficie-muerta-revert-transaction.md).
-- **`replace_text` no-op que reserializa el frontmatter** — **NUEVO, abierto**. Un `replace_text`
+- **`replace_text` no-op que reserializa el frontmatter** — **CERRADO por `E31-H02`** (2026-08-08): resultaron ser TRES defectos —el frontmatter reserializado, un separador que inyectaba una línea en blanco y el frontmatter ILEGIBLE que se borraba entero (pérdida de datos)—, los tres cerrados por el mismo patch quirúrgico. El plan gana además `noOpOperations`. Un `replace_text`
   que no casa NADA reescribe el fichero igualmente: normaliza a un `replace_body` de documento
   entero que reserializa el frontmatter, convirtiendo `tags: [a, b]` de estilo flow a bloque. El
   `semanticDiff` lo reporta como `modified` con `bodyChanges` y `frontmatterChanges` **vacíos**.

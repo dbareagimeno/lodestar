@@ -1,14 +1,42 @@
 ---
 id: 26
 titulo: "Un replace_text sin coincidencias reescribe el fichero y reserializa el frontmatter"
-estado: "abierta"
+estado: "cerrada"
 prioridad: 3
 etiquetas: ["escritura", "normalizacion", "dogfooding", "frontmatter"]
 origen: "juez-ciego"
 abierta_en: "2026-08-07"
-revisada_en: "2026-08-07"
+revisada_en: "2026-08-08"
+cerrada_en: "2026-08-08"
 relacionadas: [23, 22]
 ---
+
+> **CERRADA el 2026-08-08 por `E31-H02`**, con la salida **(2)** que esta ficha recomendaba —atacar
+> la normalización, no el síntoma— **más una ampliación**: el plan declara ahora las operaciones sin
+> efecto en `PlanResult.noOpOperations`. Sin ella, arreglar el churn dejaba al agente **peor
+> informado que antes**: el documento desaparecía de `modified` y nada explicaba la operación. La
+> salida (1) —no generar la op— se descartó por eso mismo: la habría borrado de
+> `normalizedOperations`.
+>
+> **Tres correcciones a lo que esta ficha daba por supuesto**, todas verificadas ejecutando:
+>
+> 1. **El arreglo no era «no reserializar lo que no se pidió tocar» sino un splice.** Preservar el
+>    `ParsedFrontmatter` original no habría servido de nada: `build_raw_with_bom` serializa
+>    `fm.value` e **ignora `fm.raw`** siempre. La solución es `raw[..body_offset] + cuerpo`
+>    (`model::replace_body_preservando_cabecera`), que es el **inverso exacto** de `SplitFront::body`.
+> 2. **El defecto tenía dos hermanos que esta ficha no vio**, y el splice los cierra a los tres de
+>    una vez porque corta por **posición de bytes** y no por si el YAML se interpreta: el separador
+>    se normalizaba a `---\n\n` (una línea en blanco inyectada en cada reescritura), y —lo grave— el
+>    frontmatter **ilegible se borraba entero**. Eso último es **pérdida de datos**, y no había un
+>    solo test que combinara frontmatter ilegible con una operación de cuerpo.
+> 3. **El criterio 1 se cumplió solo.** No hizo falta código para que el no-op dejara de tocar disco:
+>    el escritor computa su lote por diferencia de bytes, así que en cuanto los bytes coinciden no
+>    hay nada que escribir. Se verificó **antes** de implementar que una transacción de lote vacío
+>    aplica y revierte sin degenerar.
+>
+> El test que fijaba el defecto se invirtió, como su propio mensaje mandaba, y se le añadió un tercer
+> documento de fixture: tras el arreglo los dos originales se comportan igual, así que sin él un
+> motor que no escribiera **nunca** nada habría pasado el test entero.
 
 # §26 — Un `replace_text` sin coincidencias reescribe el fichero y reserializa el frontmatter
 
