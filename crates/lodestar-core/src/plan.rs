@@ -1205,27 +1205,6 @@ pub fn assert_sin_colisiones_intra_plan(
     Ok(())
 }
 
-/// Frontmatter, cuerpo y **marca de BOM** actuales del `.md` en `path` dentro de `files`.
-///
-/// El frontmatter es `None` cuando el documento **no tiene bloque** —no un mapping vacío—, porque
-/// esa distinción es la que separa «conservar el documento tal cual» de «inventarle un bloque». Ver
-/// el brazo `ReplaceBody` de [`apply_one`]: hasta E23-H03 aquí se devolvía
-/// `unwrap_or_default()`, y reescribir el cuerpo de un documento sin frontmatter le **inyectaba un
-/// `---\n{}\n---`**.
-///
-/// El tercer elemento es la misma lección un nivel más abajo (E24-H01): ni el frontmatter ni el
-/// cuerpo llevan el BOM UTF-8, así que reconstruir el documento sin esta marca lo **perdería**.
-fn parsed_of(files: &FileMap, path: &RelPath) -> (Option<serde_yaml::Mapping>, String, bool) {
-    match files.get(path) {
-        Some(raw) => {
-            let parsed = model::parse_file(path.as_str(), raw);
-            let map = parsed.frontmatter.as_ref().map(|fm| fm.mapping().clone());
-            (map, parsed.body, model::has_bom(raw))
-        }
-        None => (None, String::new(), false),
-    }
-}
-
 /// Aplica una única operación normalizada sobre `files` (mutación in situ). Ver
 /// [`apply_normalized_ops`].
 fn apply_one(files: &mut FileMap, op: &NormalizedOperation) -> Result<(), CoreError> {
@@ -1260,21 +1239,22 @@ fn apply_one(files: &mut FileMap, op: &NormalizedOperation) -> Result<(), CoreEr
             files.insert(path.clone(), patched.raw);
         }
         NormalizedOperation::ReplaceBody { path, body } => {
-            // El frontmatter del documento se conserva **incluida su ausencia** (E23-H03): un
-            // documento sin bloque sigue sin bloque. Antes se reconstruía con
-            // `ParsedFrontmatter::from_mapping(map)` sobre un mapping vacío por defecto, así que
-            // reescribir el cuerpo de un `README.md` sin frontmatter le colaba un `---\n{}\n---`.
-            // Y como `move` con `rewriteInboundLinks` reescribe el cuerpo de CADA emisor, mover un
-            // documento corrompía de una tacada todos sus enlazantes sin frontmatter.
+            // Patch QUIRÚRGICO del cuerpo (E31-H02, `decisiones §26`), simétrico al del brazo
+            // `PatchFrontmatter` de arriba: se sustituye el cuerpo y la CABECERA sobrevive byte a
+            // byte, sin pasar por ningún serializador. Eso conserva de una vez —y por
+            // construcción, no por ramas que se coordinan— las tres cosas que la reconstrucción
+            // anterior perdía: el estilo del YAML (`tags: [a, b]` no se vuelve lista en bloque),
+            // el separador exacto, y el bloque ILEGIBLE, cuyo borrado era pérdida de datos.
             //
-            // E24-H01: por el mismo motivo se conserva el BOM UTF-8. Ni el frontmatter ni el
-            // cuerpo lo llevan (`SplitFront::body` lo deja fuera), así que hay que reemitirlo
-            // explícitamente o un `replace_body` se lo comería.
-            let (map, _, bom) = parsed_of(files, path);
-            let fm = map.map(ParsedFrontmatter::from_mapping);
+            // Lo que ya cumplía la reconstrucción y sigue cumpliéndose, ahora gratis: la
+            // **ausencia** de frontmatter se conserva (E23-H03 — un `README.md` sin bloque no
+            // recibe un `---\n{}\n---`, que era lo que corrompía a los enlazantes en cada `move`
+            // con `rewriteInboundLinks`) y el BOM UTF-8 tampoco se lo come nadie (E24-H01),
+            // porque queda a la izquierda del corte.
+            let raw = files.get(path).cloned().unwrap_or_default();
             files.insert(
                 path.clone(),
-                model::build_raw_with_bom(fm.as_ref(), body, bom),
+                model::replace_body_preservando_cabecera(&raw, body),
             );
         }
         NormalizedOperation::Move { from, to, .. } => {

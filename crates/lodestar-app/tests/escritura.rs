@@ -2698,7 +2698,12 @@ mod mutantes_16l {
         // El canónico SÍ se publicó: el fallo es posterior al punto de no retorno.
         assert_eq!(
             std::fs::read_to_string(root.join("alfa.md")).unwrap(),
-            "---\ntype: Nota\ntitle: Alfa\ndescription: Primer documento\n---\n\n# Resumen\n\ncuerpo del plan\n",
+            // E31-H02 (`decisiones §26`): el separador ya NO se normaliza. El `replace_body` de
+            // arriba pide `"# Resumen\n\ncuerpo del plan\n"` —sin salto inicial— y eso es
+            // exactamente lo que se escribe tras la cabecera, que termina en `---\n`. Hasta v0.5.0
+            // la reconstrucción emitía `---\n\n` + cuerpo e INYECTABA una línea en blanco que nadie
+            // había pedido; esta aserción la daba por buena sin que ese fuera su objeto.
+            "---\ntype: Nota\ntitle: Alfa\ndescription: Primer documento\n---\n# Resumen\n\ncuerpo del plan\n",
             "precondición: el apply tiene que haber cruzado el punto de no retorno (si no, no hay \
              sellado que probar). change_apply devolvió: {resultado:?}"
         );
@@ -2752,4 +2757,105 @@ mod mutantes_16l {
             "y el canónico vuelve a su estado original"
         );
     }
+}
+
+// ==============================================================================================
+// E31-H02 (§26) — el no-op no toca el disco
+// ==============================================================================================
+
+/// **E31-H02 · criterio 1 de `decisiones §26`** — **Dado** un documento con frontmatter en estilo
+/// *flow*, **Cuando** se planifica **y se aplica** un `replace_text` cuyo `find` no casa ninguna
+/// ocurrencia, **Entonces** el fichero en disco queda **byte a byte idéntico**, `changedPaths` va
+/// vacío y la `workspaceRevision` no avanza.
+///
+/// Es la prueba de extremo a extremo del defecto: los tests del core cubren la normalización, pero
+/// §26 se reportó como churn en el **disco** —contaminaba el `git diff` de quien versiona su
+/// workspace—, así que el criterio se verifica donde se sufría. Hasta v0.5.0 este `replace_text`
+/// reescribía el `.md` reserializando `tags: [a, b]` a estilo bloque, sin cambiar nada semántico.
+#[test]
+fn replace_text_sin_coincidencias_no_toca_el_disco() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let original = "---\ntype: Concept\ntitle: Overview\ntags: [atlas, overview]\n---\n\n# Overview\n\ncuerpo\n";
+    std::fs::write(root.join("overview.md"), original).unwrap();
+
+    let app = App::open(root).expect("el workspace temporal debe abrir");
+    let rev_antes = app
+        .workspace_status(lodestar_app::Profile::Standard)
+        .expect("workspace_status debe funcionar")
+        .workspace_revision;
+
+    let plan = app
+        .change_plan(
+            None,
+            &json!([{ "op": "replace_text", "path": "overview.md",
+                      "find": "no-existe-esta-cadena", "replace": "x" }]),
+            policy_permisiva(),
+        )
+        .expect("un `replace_text` sin coincidencias debe planificar: es un no-op, no un error");
+
+    let aplicado = app
+        .change_apply(&plan.change_set_id, None)
+        .expect("aplicar un plan no-op no debe fallar");
+
+    assert_eq!(
+        std::fs::read_to_string(root.join("overview.md")).unwrap(),
+        original,
+        "EL CRITERIO 1 DE §26: un `replace_text` que no casa nada no puede cambiar un solo byte del \
+         fichero. Si el frontmatter vuelve en estilo bloque, la reserialización ha regresado"
+    );
+    assert!(
+        aplicado.changed_paths.is_empty(),
+        "un apply que no cambia bytes no cambia paths: {:?}",
+        aplicado.changed_paths
+    );
+    assert_eq!(
+        app.workspace_status(lodestar_app::Profile::Standard)
+            .expect("workspace_status debe funcionar")
+            .workspace_revision,
+        rev_antes,
+        "…y la revisión del workspace no puede avanzar por una operación vacía (§26: «hace que \
+         `workspaceRevision` avance por una operación vacía»)"
+    );
+}
+
+/// **E31-H02 · criterio 2 de `decisiones §26`** — **Dado** un documento con frontmatter en estilo
+/// *flow*, **Cuando** se le cambia **solo el cuerpo**, **Entonces** conserva el estilo *flow* de su
+/// frontmatter, y el cuerpo sí cambia.
+///
+/// El anti-vacuo va dentro: sin la aserción del cuerpo nuevo, un motor que no escribiera nunca nada
+/// pasaría este test.
+#[test]
+fn cambiar_el_cuerpo_no_reformatea_el_frontmatter() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::write(
+        root.join("overview.md"),
+        "---\ntype: Concept\ntitle: Overview\ntags: [atlas, overview]\n---\n\n# Overview\n\nreemplázame\n",
+    )
+    .unwrap();
+
+    let app = App::open(root).expect("el workspace temporal debe abrir");
+    let plan = app
+        .change_plan(
+            None,
+            &json!([{ "op": "replace_text", "path": "overview.md",
+                      "find": "reemplázame", "replace": "reemplazado" }]),
+            policy_permisiva(),
+        )
+        .expect("planificar un `replace_text` que sí casa no debe fallar");
+    app.change_apply(&plan.change_set_id, None)
+        .expect("aplicar un `replace_text` que sí casa no debe fallar");
+
+    let resultante = std::fs::read_to_string(root.join("overview.md")).unwrap();
+    assert!(
+        resultante.contains("tags: [atlas, overview]"),
+        "EL CRITERIO 2 DE §26: cambiar el CUERPO no puede reformatear la cabecera — el estilo flow \
+         del usuario es suyo, no una forma canónica que el motor pueda normalizar. Resultó:\n{resultante}"
+    );
+    assert!(
+        resultante.contains("reemplazado") && !resultante.contains("reemplázame"),
+        "ANTI-VACUO: y el cuerpo SÍ tiene que haber cambiado, o este test pasaría con un motor que \
+         no escribe nada. Resultó:\n{resultante}"
+    );
 }

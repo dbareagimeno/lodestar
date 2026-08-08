@@ -346,8 +346,13 @@ pub fn parse_frontmatter(raw: &str) -> Option<ParsedFrontmatter> {
 /// > La edición **quirúrgica** del bloque (reutilizar `raw`/`span` en vez de reserializar) es
 /// > E16-H04; aquí siempre se reserializa el `value`.
 ///
-/// El documento resultante **no lleva [`BOM`]**. Quien reconstruye un documento que sí lo tenía
-/// —el brazo `ReplaceBody` de `plan::apply_normalized_ops`— usa [`build_raw_with_bom`].
+/// El documento resultante **no lleva [`BOM`]**; [`build_raw_with_bom`] lo reemite.
+///
+/// > **Cuándo NO usar esta función** (E31-H02): solo compone documentos **nuevos** —`create`, y los
+/// > flujos de escritura del `DocumentSet`—, donde no hay bytes previos que preservar y
+/// > reserializar es lo correcto. Para sustituir el cuerpo de un documento que **ya existe** está
+/// > [`replace_body_preservando_cabecera`], que no toca su cabecera: reconstruir aquí un documento
+/// > existente le reformatea el frontmatter que nadie pidió tocar (`decisiones §26`).
 pub fn build_raw(fm: Option<&ParsedFrontmatter>, body: &str) -> String {
     build_raw_with_bom(fm, body, false)
 }
@@ -516,6 +521,42 @@ fn splice(raw: &str, span: &std::ops::Range<usize>, bloque: &str) -> String {
         "\n"
     };
     format!("{}{bloque}{sep}{cola}", &raw[..span.start])
+}
+
+/// Sustituye el **cuerpo** de `raw` por `body`, dejando su **cabecera byte a byte** (E31-H02,
+/// `decisiones §26`).
+///
+/// Es el **inverso exacto** de [`SplitFront::body`], y esa simetría es el punto: leer el cuerpo es
+/// `&raw[body_offset..]`, así que escribirlo es `&raw[..body_offset] + body`. Todo lo que quede a la
+/// izquierda de ese offset —el [`BOM`], el bloque de frontmatter con sus delimitadores, y el
+/// separador que lo sigue— sobrevive **literal**, sin pasar por ningún serializador.
+///
+/// Sustituye a la reconstrucción `build_raw_with_bom(parse_file(raw).frontmatter, body)` que hacía
+/// el brazo `ReplaceBody` de `plan::apply_normalized_ops` hasta v0.5.0, y que tenía tres defectos de
+/// la misma familia —los tres, churn de bytes que nadie pidió—:
+///
+/// 1. **Reserializaba el YAML**: un `tags: [a, b]` en estilo *flow* volvía en estilo bloque, con sus
+///    comillas y comentarios perdidos por el camino. Es el síntoma que abrió `§26`.
+/// 2. **Normalizaba el separador** a `---\n\n`, así que un documento escrito `---\n…\n---\ncuerpo`
+///    ganaba una línea en blanco a cada reescritura.
+/// 3. **Borraba el frontmatter ILEGIBLE**, que es pérdida de datos: [`parse_file`] devuelve
+///    `frontmatter: None` tanto para «no hay bloque» como para «hay bloque y su YAML no se deja
+///    leer», de modo que reescribir el cuerpo de un documento con la cabecera rota se llevaba la
+///    cabecera por delante. Aquí no puede pasar: el corte lo decide [`split_front`] por **posición
+///    de bytes**, no por si el YAML se interpreta.
+///
+/// Los tres brazos de [`SplitFront`] colapsan en la misma expresión, y cada uno hereda su semántica
+/// de [`SplitFront::body_offset`]:
+/// - [`SplitFront::Bloque`] → prefijo = BOM + bloque + delimitadores + separador.
+/// - [`SplitFront::Sin`] → prefijo = solo el BOM (E24-H01), que **no** es parte del cuerpo; la
+///   ausencia de bloque se conserva por construcción (E23-H03): no había cabecera y no se inventa.
+/// - [`SplitFront::SinCerrar`] → igual que `Sin`. Un bloque que abre y nunca cierra no define ningún
+///   corte, así que [`SplitFront::body`] considera cuerpo el documento entero y esta función lo
+///   sustituye entero. Es la única lectura coherente: fingir un corte que el motor no reconoce
+///   rompería la simetría que hace correcta a toda la función.
+pub fn replace_body_preservando_cabecera(raw: &str, body: &str) -> String {
+    let corte = split_front(raw).body_offset(raw);
+    format!("{}{body}", &raw[..corte])
 }
 
 /// Una clave de primer nivel localizada en el TEXTO del bloque: su nombre y el rango de líneas

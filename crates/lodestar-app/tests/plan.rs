@@ -1793,18 +1793,25 @@ mod campos_legales_por_operacion {
 // un plan `canApply: true` sin cambios de contenido para ese documento — ninguna operación
 // normalizada lo modifica y `semantic_diff` no lo lista en `body_changes`/`frontmatter_changes`.
 //
-// CAVEAT DOCUMENTADO (`docs/user/safe-changes.md`, «One caveat while planning a no-op»): el
-// documento **sí** puede aparecer en `semantic_diff.modified` aunque no cambie nada semántico.
-// `modified` es una comparación de BYTES, y un `replace_text` se normaliza a una reescritura de
-// documento entero que RESERIALIZA el frontmatter: un bloque escrito en estilo flow
-// (`tags: [a, b]`) vuelve en estilo block (`tags:\n- a\n- b`). Contenido equivalente, bytes
-// distintos. Este test fija esa REALIDAD, no la excepción: la primera versión (commit `0ef66d2`)
-// aseveraba `!modified.contains(&alfa)` sobre el fixture `app_con_workspace()`, cuya única virtud
-// era no tener frontmatter en estilo flow — pasaba por accidente del fixture y afirmaba lo
-// contrario de lo que la doc del mismo commit declara. Un juez ciego lo demostró añadiendo
-// `tags: [a, b]` al fixture. SEGUIMIENTO ABIERTO: la historia futura del reserializado de
-// frontmatter (que haría que un no-op no toque los bytes) es la que debe invertir esta aserción;
-// hasta entonces, el test documenta el defecto conocido en vez de fingir que no existe.
+// EL CAVEAT SE CERRÓ EN E31-H02 (`decisiones §26`), y este test es donde se nota. Su historia, que
+// vale la pena conservar porque es una lección de método:
+//
+//   1. La primera versión (commit `0ef66d2`) aseveraba `!modified.contains(&alfa)` sobre el fixture
+//      compartido `app_con_workspace()`, y PASABA — pero por accidente: aquel fixture no tenía
+//      ningún frontmatter en estilo flow. Afirmaba lo contrario de lo que la doc de su propio
+//      commit declaraba. Un juez ciego lo tumbó añadiendo `tags: [a, b]`.
+//   2. La segunda (commit `8621e40`) invirtió la aserción para fijar la REALIDAD en vez del deseo:
+//      el documento en flow SÍ aparecía en `modified`, porque un `replace_text` se normalizaba a
+//      una reescritura de documento entero que RESERIALIZABA el frontmatter (`tags: [a, b]` volvía
+//      como `tags:\n- a\n- b`). Contenido equivalente, bytes distintos. Dejó escrito qué hacer
+//      cuando el seguimiento se cerrara: invertirla otra vez.
+//   3. E31-H02 lo cerró: la cabecera se preserva byte a byte (`model::replace_body_preservando_cabecera`),
+//      así que un no-op ya no toca el fichero y `modified` sale VACÍO. Esta es esa tercera versión.
+//
+// La moraleja de las tres: el fixture de dos documentos (flow + block) NO es decorativo. En (1) su
+// ausencia hizo pasar un test falso; hoy `block.md` sigue siendo el control de que la ausencia de
+// ambos en `modified` no es vacua, y el tercer documento (`casa.md`) prueba que el diff SÍ reacciona
+// cuando hay algo que reportar.
 //
 // GUARDA (nace VERDE, `E30-H03` lo declara documental salvo el test): no se ha encontrado en el
 // repo un test previo (E28/E29) que ejerza exactamente esta combinación (forma-array +
@@ -1830,6 +1837,15 @@ fn app_con_frontmatter_flow_y_block() -> (tempfile::TempDir, App) {
         dir.path(),
         "block.md",
         "---\ntype: Concept\ntitle: Block\ndescription: Frontmatter en estilo block\ntags:\n- a\n- b\n---\n\n# Resumen\n\ncuerpo\n",
+    );
+    // ANTI-VACUO de E31-H02: un tercer documento, también en estilo flow, sobre el que el
+    // `replace_text` SÍ casa. Sin él, tras preservar la cabecera los dos primeros se comportan
+    // igual (ninguno aparece en `modified`) y un `apply_one` que no escribiera NUNCA nada pasaría
+    // el test entero. Este documento obliga a que el camino de escritura siga funcionando.
+    escribe(
+        dir.path(),
+        "casa.md",
+        "---\ntype: Concept\ntitle: Casa\ndescription: Frontmatter en estilo flow\ntags: [a, b]\n---\n\n# Resumen\n\nreemplázame\n",
     );
     let app = App::open(dir.path()).expect("el workspace temporal debe abrir");
     (dir, app)
@@ -1882,25 +1898,21 @@ fn replace_text_sin_ocurrencias_en_forma_array_es_noop() {
         );
     }
 
-    // EL CAVEAT, FIJADO COMO REALIDAD (`docs/user/safe-changes.md`): `modified` es comparación de
-    // BYTES, así que el documento con frontmatter en estilo FLOW aparece como modificado —la
-    // reescritura de documento entero lo reserializa a estilo block— aunque no cambie nada
-    // semántico. El documento cuyo frontmatter YA está en la forma canónica NO aparece: es el
-    // anti-vacuo que demuestra que `modified` responde al churn de bytes y no a que la operación
-    // sea un no-op.
+    // E31-H02 (`decisiones §26`): un no-op es un no-op DE VERDAD, también en bytes. La cabecera se
+    // preserva byte a byte, así que el documento en estilo FLOW ya no se reserializa y NO aparece en
+    // `modified` — que es lo que el usuario espera de una operación que no casó nada. Hasta v0.5.0
+    // esta aserción estaba invertida y documentaba el defecto (ver el bloque de arriba).
     assert!(
-        plan.semantic_diff.modified.contains(&flow),
-        "CAVEAT DOCUMENTADO: un no-op sobre un documento con frontmatter en estilo flow SÍ aparece \
-         en `modified` (la reserialización cambia los bytes). Si esto ha dejado de ser cierto, el \
-         seguimiento del reserializado se ha cerrado: invierte la aserción y actualiza el caveat de \
-         `docs/user/safe-changes.md`. {:?}",
+        !plan.semantic_diff.modified.contains(&flow),
+        "un `replace_text` sin coincidencias NO puede modificar el documento: desde E31-H02 la \
+         cabecera se preserva byte a byte, así que un frontmatter en estilo flow (`tags: [a, b]`) \
+         ya no se reserializa a estilo block y el no-op no toca el fichero. Si esto falla, el \
+         reserializado ha vuelto: {:?}",
         plan.semantic_diff
     );
     assert!(
         !plan.semantic_diff.modified.contains(&block),
-        "ANTI-VACUO: un documento cuyo frontmatter ya está en la forma canónica no cambia de bytes, \
-         así que un no-op NO puede listarlo en `modified` — si lo hace, `modified` ha dejado de \
-         significar «los bytes difieren»: {:?}",
+        "y el documento cuyo frontmatter ya estaba en la forma canónica tampoco, claro: {:?}",
         plan.semantic_diff
     );
     assert!(
@@ -1909,5 +1921,42 @@ fn replace_text_sin_ocurrencias_en_forma_array_es_noop() {
             && plan.semantic_diff.moved.is_empty(),
         "un `replace_text` no-op no debe producir ningún otro tipo de cambio en el diff: {:?}",
         plan.semantic_diff
+    );
+
+    // ANTI-VACUO (E31-H02): tras preservar la cabecera, `flow.md` y `block.md` se comportan igual,
+    // así que un `apply_one` que no escribiera NUNCA nada pasaría todo lo de arriba. Este segundo
+    // plan, sobre un `find` que SÍ casa, obliga a que el camino de escritura siga vivo — y de paso
+    // fija el criterio 2 de `§26`: cambiar el CUERPO no reformatea el frontmatter.
+    let casa = lodestar_core::types::RelPath::new("casa.md").unwrap();
+    let plan_efectivo = app
+        .change_plan(
+            None,
+            &serde_json::json!([
+                { "op": "replace_text", "path": "casa.md",
+                  "find": "reemplázame", "replace": "reemplazado" },
+            ]),
+            policy_permisiva(),
+        )
+        .expect("un `replace_text` cuyo `find` SÍ aparece debe planificar");
+
+    assert!(
+        plan_efectivo.semantic_diff.modified.contains(&casa),
+        "ANTI-VACUO: un `replace_text` que SÍ casa tiene que aparecer en `modified` — si no, el \
+         camino de escritura ha dejado de escribir y las aserciones de arriba pasan por vacuidad: \
+         {:?}",
+        plan_efectivo.semantic_diff
+    );
+    assert!(
+        plan_efectivo.semantic_diff.body_changes.contains(&casa),
+        "…y el cambio debe contarse como de CUERPO, que es lo que se pidió: {:?}",
+        plan_efectivo.semantic_diff
+    );
+    assert!(
+        !plan_efectivo
+            .semantic_diff
+            .frontmatter_changes
+            .contains(&casa),
+        "…y NO como cambio de frontmatter: nadie pidió tocar la cabecera (§26): {:?}",
+        plan_efectivo.semantic_diff
     );
 }
