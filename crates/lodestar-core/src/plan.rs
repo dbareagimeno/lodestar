@@ -1274,15 +1274,20 @@ fn apply_one(files: &mut FileMap, op: &NormalizedOperation) -> Result<(), CoreEr
     Ok(())
 }
 
-/// El documento que una operación normalizada **nombra**: su objetivo, y para un `move` su
-/// **destino** (que es donde queda el contenido tras aplicarla).
+/// El documento donde queda el contenido **después** de aplicar la operación: su objetivo, y para
+/// un `move` su **destino**.
+///
+/// El nombre insiste en «resultante» a propósito, porque `lodestar-app` tiene otra función que
+/// resuelve el documento de una operación **del wire, sin normalizar** y que para un `move` devuelve
+/// su `from` — la que se valida antes de tocar nada. Las dos son correctas para su fase; llamarlas
+/// igual invitaba a coger la que no era.
 ///
 /// Lo consume el `noOpOperations` del plan (E31-H02, `decisiones §26`) para decir de QUÉ documento
 /// habla una operación sin efecto. Match exhaustivo **sin comodín**, con el mismo criterio que
 /// [`assert_sin_colisiones_intra_plan`]: si algún día entra una variante nueva, el compilador obliga
 /// a decidir aquí cuál es su documento en vez de dejarla caer en un `_` que devolvería el path
 /// equivocado en silencio.
-pub fn op_target_path(op: &NormalizedOperation) -> &RelPath {
+pub fn documento_resultante_de(op: &NormalizedOperation) -> &RelPath {
     match op {
         NormalizedOperation::Create { path, .. }
         | NormalizedOperation::PatchFrontmatter { path, .. }

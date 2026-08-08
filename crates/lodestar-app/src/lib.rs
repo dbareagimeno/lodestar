@@ -1760,6 +1760,17 @@ impl App {
         //     lote afectado (`affected_paths`)—, así que el plan no puede prometer un no-op que el
         //     apply luego escriba, ni al revés. Un `move` no puede ser no-op salvo `from == to`: si
         //     el origen desaparece, hay cambio aunque el destino case byte a byte.
+        //
+        //     LÍMITE CONOCIDO, y es el precio de usar el predicado del escritor: la comparación es
+        //     POR PATH (estado inicial contra final), no por operación, así que varias ops sobre el
+        //     MISMO documento comparten el veredicto de ese documento. Y como cada op se normaliza
+        //     contra el estado INICIAL (defecto preexistente, ajeno a §26), dos ops sobre un mismo
+        //     path donde la segunda reescribe el cuerpo original lo dejan idéntico: las DOS salen
+        //     declaradas, aunque una escribiera mirada en solitario. Se acepta a conciencia: la
+        //     alternativa —simular op por op— sería una SEGUNDA verdad de «qué cambia», y el repo ya
+        //     pagó ese precio (invariante #3). El caso que motiva el campo (una op por documento,
+        //     incluido el bulk de `selection`, que expande exactamente una) es exacto. Fijado por
+        //     `el_veredicto_de_no_op_es_por_documento_no_por_operacion` y declarado en el contrato.
         let after_files_ref = after.files();
         let no_op_operations: Vec<NoOpOperation> = normalized
             .iter()
@@ -1769,7 +1780,7 @@ impl App {
                 _ => true,
             })
             .filter_map(|(index, op)| {
-                let path = plan::op_target_path(op);
+                let path = plan::documento_resultante_de(op);
                 (files.get(path) == after_files_ref.get(path)).then(|| NoOpOperation {
                     index,
                     path: path.clone(),

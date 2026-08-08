@@ -346,37 +346,33 @@ pub fn parse_frontmatter(raw: &str) -> Option<ParsedFrontmatter> {
 /// > La edición **quirúrgica** del bloque (reutilizar `raw`/`span` en vez de reserializar) es
 /// > E16-H04; aquí siempre se reserializa el `value`.
 ///
-/// El documento resultante **no lleva [`BOM`]**; [`build_raw_with_bom`] lo reemite.
+/// El documento resultante **no lleva [`BOM`]**: quien compone con esta función parte de cero, y un
+/// documento nuevo no arrastra marca de codificación.
 ///
 /// > **Cuándo NO usar esta función** (E31-H02): solo compone documentos **nuevos** —`create`, y los
 /// > flujos de escritura del `DocumentSet`—, donde no hay bytes previos que preservar y
 /// > reserializar es lo correcto. Para sustituir el cuerpo de un documento que **ya existe** está
 /// > [`replace_body_preservando_cabecera`], que no toca su cabecera: reconstruir aquí un documento
 /// > existente le reformatea el frontmatter que nadie pidió tocar (`decisiones §26`).
-pub fn build_raw(fm: Option<&ParsedFrontmatter>, body: &str) -> String {
-    build_raw_with_bom(fm, body, false)
-}
-
-/// Como [`build_raw`], pero reemitiendo el [`BOM`] UTF-8 al frente cuando `bom` es `true`
-/// (E24-H01).
 ///
-/// `build_raw` recibe `(frontmatter, cuerpo)` y **ninguno de los dos lleva la marca** —
-/// [`SplitFront::body`] la deja fuera del cuerpo a propósito—, así que la reemisión tiene que
-/// llegar como dato aparte: es exactamente la misma lección de E23-H03 (conservar «la ausencia de
-/// frontmatter») un nivel más abajo. Sin esto, un `replace_body` sobre un `.md` con BOM lo
-/// perdería, y como `move --rewriteInboundLinks` reescribe el cuerpo de CADA enlazante, bastaría
-/// un `move` para reescribir en silencio la codificación de medio workspace.
-pub fn build_raw_with_bom(fm: Option<&ParsedFrontmatter>, body: &str, bom: bool) -> String {
-    let prefijo = if bom { BOM } else { "" };
+/// > **Nota histórica**: hasta E31-H02 existía una variante `build_raw_with_bom(fm, body, bom)` que
+/// > reemitía el [`BOM`] UTF-8 al frente. La necesitaba el brazo `ReplaceBody` de
+/// > `plan::apply_normalized_ops`, que **reconstruía** documentos existentes y por tanto tenía que
+/// > devolver una marca que `SplitFront::body` deja fuera del cuerpo (E24-H01). Ese brazo ya no
+/// > reconstruye nada —hace splice sobre el `raw`, con lo que el BOM ni siquiera se mueve de sitio—,
+/// > así que la variante se quedó **sin un solo llamador que pasara `true`** y se retiró: componer
+/// > un documento nuevo con BOM no lo pide nadie. La garantía de E24-H01 no se pierde, la cumple
+/// > ahora la estructura (ver [`replace_body_preservando_cabecera`]).
+pub fn build_raw(fm: Option<&ParsedFrontmatter>, body: &str) -> String {
     let Some(fm) = fm else {
-        return format!("{prefijo}{body}");
+        return body.to_string();
     };
     let y = serde_yaml::to_string(&fm.value)
         .unwrap_or_default()
         .trim_end()
         .to_string();
     let body_trimmed = body.trim_start_matches('\n');
-    format!("{prefijo}---\n{y}\n---\n\n{body_trimmed}")
+    format!("---\n{y}\n---\n\n{body_trimmed}")
 }
 
 /// El documento resultante de aplicar un [`crate::types::FrontmatterPatch`]

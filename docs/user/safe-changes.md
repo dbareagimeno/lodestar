@@ -261,9 +261,15 @@ knowing:
 - The operation **stays** in `normalizedOperations`; `index` points at it there. The field is
   additive — nothing is removed from the plan.
 - `op` names the **normalized** operation, so a `replace_text` shows up as `replace_body`.
-- It covers **any** operation with no effect, not just `replace_text`: an `edit_section` that
-  rewrites a section with the content it already had, a `patch_frontmatter` that writes the value
-  that was already there, a `move` with `from == to`.
+- It does not discriminate by operation type: **any** operation whose document ends up identical is
+  listed — a `patch_frontmatter` writing the value that was already there, a `move` with
+  `from == to`. Careful with `edit_section`: rewriting a section with the content it already had is
+  a no-op *only if the bytes come out the same*, and section editing fixes the blank lines around
+  the section, so it often does not.
+- The verdict is **per document**, not per operation: it compares the document before and after the
+  whole plan. One operation per document — including bulk `selection`, which expands to exactly one
+  — is exact. Several operations on the *same* path all share that path's verdict, so keep one
+  operation per document when you want to read this field per operation.
 
 **Pass `expectedOccurrences` whenever you know how many replacements you expect** — it turns a wrong
 count, zero included, into a refusal *before* you apply. `noOpOperations` tells you afterwards that

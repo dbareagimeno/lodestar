@@ -2098,3 +2098,63 @@ fn un_plan_sin_la_clave_no_op_operations_se_sigue_aplicando() {
                  `planHash`, así que su ausencia no puede invalidar el plan",
     );
 }
+
+/// **E31-H02(B) · límite declarado** — **Dado** un plan con **dos** operaciones sobre el **mismo**
+/// documento, una efectiva y otra vacía, **Cuando** se planifica, **Entonces** el veredicto es del
+/// DOCUMENTO, no de cada operación: ninguna de las dos se declara no-op, porque el documento sí
+/// cambió.
+///
+/// No es un defecto oculto: es el precio, aceptado a conciencia, de derivar la señal del **mismo**
+/// predicado con el que el escritor computa su lote afectado (invariante #3 — la alternativa, simular
+/// operación por operación, sería una segunda verdad de «qué cambia»). El caso que motiva el campo
+/// —una operación por documento, incluido el bulk de `selection`, que expande exactamente una— es
+/// exacto. Este test **fija el límite** para que nadie lo descubra en producción, y para que si
+/// alguna vez se decide afinarlo, el cambio sea deliberado y no accidental. Está declarado en
+/// `contracts/mcp.yml` y en `docs/user/safe-changes.md`.
+#[test]
+fn el_veredicto_de_no_op_es_por_documento_no_por_operacion() {
+    let (_dir, app) = app_con_frontmatter_flow_y_block();
+
+    let plan = app
+        .change_plan(
+            None,
+            &serde_json::json!([
+                // (0) SÍ cambia el documento.
+                { "op": "replace_text", "path": "casa.md",
+                  "find": "reemplázame", "replace": "reemplazado" },
+                // (1) NO cambia nada… pero sobre el MISMO documento que (0).
+                { "op": "replace_text", "path": "casa.md",
+                  "find": "esta-cadena-no-existe-en-el-doc", "replace": "x" },
+            ]),
+            policy_permisiva(),
+        )
+        .expect("dos ops sobre el mismo documento deben planificar");
+
+    // Las DOS salen declaradas, y el documento acaba sin cambios: la op (1) se normalizó contra el
+    // estado INICIAL —no contra lo que dejó la (0)—, así que reescribe el cuerpo original encima y
+    // DESHACE la (0). Ese es un defecto preexistente y ajeno a §26 (la normalización multi-op sobre
+    // un mismo path), pero determina lo que aquí se observa, así que el test lo fija tal cual en vez
+    // de fingir un resultado más limpio.
+    assert_eq!(
+        plan.no_op_operations.len(),
+        2,
+        "LÍMITE DECLARADO: el veredicto es del DOCUMENTO, no de cada operación. Con dos ops sobre el \
+         mismo path el documento acaba idéntico —la segunda deshace a la primera al normalizarse \
+         contra el estado inicial— y AMBAS se declaran sin efecto, pese a que la (0) sí escribía \
+         mirada en solitario. Si esto cambia, el predicado se ha afinado a por-operación (o se ha \
+         arreglado la normalización multi-op): actualiza `contracts/mcp.yml`, \
+         `docs/user/safe-changes.md` y el comentario de `change_plan`. {:?}",
+        plan.no_op_operations
+    );
+    assert!(
+        plan.semantic_diff.modified.is_empty(),
+        "coherencia: si las dos se declaran sin efecto es porque el documento NO cambió — el diff \
+         tiene que decir lo mismo, o la señal estaría mintiendo: {:?}",
+        plan.semantic_diff
+    );
+    assert_eq!(
+        plan.normalized_operations.len(),
+        2,
+        "y las dos operaciones siguen en el plan, como siempre"
+    );
+}
