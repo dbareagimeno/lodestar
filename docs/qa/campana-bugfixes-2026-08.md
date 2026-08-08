@@ -138,14 +138,15 @@ ejecútalo*— aplicada un nivel más arriba: **cuando dudes de si un test muerd
   la pasada de mutantes de `§16(l)`: sustituir su cuerpo entero por `unreachable!()` deja **los 52
   binarios de test del workspace en verde**, y no tiene un solo llamador (la fachada usa
   `revert_transaction_con_recibo`). No se actuó a propósito: es la categoría de `§16(b)`/`§16(g)`,
-  que se resolvieron **retirando o replegando por decisión**, no añadiendo tests. Registrado en
-  `decisiones §16`, a criterio del usuario.
+  que se resolvieron **retirando o replegando por decisión**, no añadiendo tests. **Ficha propia**:
+  [`decisiones §25`](../../decisiones/25-superficie-muerta-revert-transaction.md).
 - **`replace_text` no-op que reserializa el frontmatter** — **NUEVO, abierto**. Un `replace_text`
   que no casa NADA reescribe el fichero igualmente: normaliza a un `replace_body` de documento
   entero que reserializa el frontmatter, convirtiendo `tags: [a, b]` de estilo flow a bloque. El
   `semanticDiff` lo reporta como `modified` con `bodyChanges` y `frontmatterChanges` **vacíos**.
   Detectado al documentar A-06 en E30-H03 y dejado fuera de su alcance por causa raíz distinta;
-  documentado como caveat en `docs/user/safe-changes.md`. Quiere su propia historia.
+  documentado como caveat en `docs/user/safe-changes.md`. **Ficha propia**:
+  [`decisiones §26`](../../decisiones/26-replace-text-noop-reserializa.md).
 - **Flakiness recurrente de `crash_por_senal_no_deja_parciales`**: ~~sigue viva tras la Fase 1~~ —
   **CERRADA por E30-H02 (`9cd129a`)**, la historia de higiene de la Fase 2 que se derivó de aquí. No
   era fragilidad del test sino la ventana no atómica de publicación del lock; ver la observación de

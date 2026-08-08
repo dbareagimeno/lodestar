@@ -45,7 +45,7 @@ evidencia y criterio de aceptación.
 | 6 | ✅ **A-08** sintaxis de `validation` por familias, clave desconocida inerte | La mitad «clave desconocida» ya está decidida en §16(e) (config estricta); falta **documentar las familias** (`danglingDocumentLinks`…) que hoy solo existen en `config.rs` | **Absorbido**: mitad de rechazo por `E29-H01` (`4a52f59`, `§16(e)`) · familias en `docs/user/` para [`§19`](19-hallazgos-referencia-usuario.md) | **3** |
 | 7 | ✅ **D-02** `patch_frontmatter`: §20.4 promete null-vs-remove, el wire es RFC 7386 | ARCHITECTURE se contradice internamente; el brazo `Some(Null)` del core es inalcanzable desde MCP | **Ejecutado**: `E30-H03` (`0ef66d2`) — criterio ratificado (corregir §20.4). Los cinco sitios declaran RFC 7386, con un matiz **verificado ejecutando**: `null` borra solo en el nivel superior del patch; anidado sobrevive como YAML null literal | **3** |
 | 8 | ✅ **A-01** `sections` omite en silencio el heading sin match | Body acotado indistinguible de «todas las secciones existían»; solo lo fija un doc-comment del core | **Ejecutado**: `E30-H03` (`0ef66d2`) — omisión declarada en `mcp.yml` y `mcp-clients.md`, con la consecuencia explícita: si ningún headingPath casa, `body` es la cadena vacía, indistinguible de una sección vacía | **2** |
-| 9 | ⚠️ **A-06** `replace_text` 0-ocurrencias sin aserción → plan no-op | El vacío-sin-error solo está documentado para selecciones masivas | **Documentado** en `E30-H03` (`docs/user/safe-changes.md`), pero la verificación **destapó un defecto real distinto**: el no-op **reescribe el fichero** —normaliza a `replace_body` de documento entero y reserializa el frontmatter (`tags: [a, b]` de flow a bloque), con `semanticDiff.modified` no vacío y `bodyChanges`/`frontmatterChanges` vacíos. Fuera del alcance de H03 por causa raíz distinta; **quiere historia propia** | **2** |
+| 9 | ⚠️ **A-06** `replace_text` 0-ocurrencias sin aserción → plan no-op | El vacío-sin-error solo está documentado para selecciones masivas | **Documentado** en `E30-H03` (`docs/user/safe-changes.md`), pero la verificación **destapó un defecto real distinto**: el no-op **reescribe el fichero** —normaliza a `replace_body` de documento entero y reserializa el frontmatter (`tags: [a, b]` de flow a bloque), con `semanticDiff.modified` no vacío y `bodyChanges`/`frontmatterChanges` vacíos. Fuera del alcance de H03 por causa raíz distinta; promovido a ficha propia: **[`§26`](26-replace-text-noop-reserializa.md)** | **2** |
 | 10 | ✅ **A-07** `knowledge_check` scope `paths` traga paths inexistentes | Un typo desaparece; la enumeración de errores excluye `paths` de `DOCUMENT_NOT_FOUND` a propósito o por omisión | **Ejecutado**: `E29-H05` (`fc5c26b`) — `DOCUMENT_NOT_FOUND`, coherente con `document`/`affected` | **2** |
 | 11 | ✅ **A-09** la config se lee una vez por sesión | Un `config.yaml` escrito con el servidor vivo no se aplica; solo lo fija un comentario de `lib.rs` | **Ejecutado**: `E30-H03` (`0ef66d2`) — ciclo de vida declarado en `mcp.yml` y `mcp-clients.md`: se lee al abrir y queda fijo toda la sesión; una config ilegible impide arrancar, no degrada en silencio | **2** |
 | 12 | ✅ **A-10** «path que normaliza a un directorio» (mcp.yml L149-151) | Impreciso: solo la raíz da `workspaceDirectory`; un directorio con nombre es `missing` | **Ejecutado**: `E30-H03` (`0ef66d2`) — redacción precisada y **verificada contra `core::links::clasificar`**: el criterio es que no sobreviva ningún segmento con nombre a la normalización; un directorio con nombre da `missing` | **1** |
@@ -82,10 +82,12 @@ se registran porque el valor del dogfooding está justamente en esto:
    `tags: [a, b]` al fixture: el test falla. Un test que finge que un defecto
    conocido no existe es peor que no tenerlo, porque congela lo accidental.
 
-Seguimientos abiertos que **sobreviven a este cierre**: el `replace_text` no-op
-que reserializa, [`§24`](24-equivalencia-caja-unicode.md) (equivalencia de paths
-por caja/Unicode), y las dos familias preexistentes de normalización registradas en
-la épica E28. El testbench queda como activo de [`§9`](09-transversales-diferidas.md):
+Seguimientos abiertos que **sobreviven a este cierre**, cada uno con dueño:
+[`§25`](25-superficie-muerta-revert-transaction.md) (`Workspace::revert_transaction`
+es superficie pública sin llamadores), [`§26`](26-replace-text-noop-reserializa.md)
+(el `replace_text` no-op que reserializa el frontmatter, nacido de verificar A-06),
+[`§24`](24-equivalencia-caja-unicode.md) (equivalencia de paths por caja/Unicode), y
+las dos familias preexistentes de normalización registradas en la épica E28. El testbench queda como activo de [`§9`](09-transversales-diferidas.md):
 re-ejecutable contra cada release con `docs/qa/testbench/`.
 
 ## Lo que exigía criterio (lo demás era trabajo)

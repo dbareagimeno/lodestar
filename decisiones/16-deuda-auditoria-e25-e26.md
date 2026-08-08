@@ -48,9 +48,10 @@ relacionadas: [3, 14, 15, 21]
 > `revert_transaction_con_recibo`, y las demás menciones son comentarios. Es exactamente la
 > categoría de **(b)** (`Envelope` sin llamantes) y **(g)** (API no transaccional), ambas resueltas
 > **por decisión de retirar o replegar**, no añadiendo tests — escribirle un test consagraría una
-> superficie que quizá deba desaparecer. Tres salidas posibles: repliegue a `pub(crate)`, retirada,
-> o conservarla con test si se le ve consumidor futuro. **Queda a criterio del usuario**; no se
-> actuó en E30 precisamente porque no es higiene, es superficie.
+> superficie que quizá deba desaparecer. **Promovido a ficha propia**:
+> [`§25`](25-superficie-muerta-revert-transaction.md), con las tres salidas, la recomendación
+> (repliegue a `pub(crate)`) y su criterio de aceptación. No se actuó en E30 precisamente porque no
+> es higiene, es superficie.
 
 ---
 
