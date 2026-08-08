@@ -160,6 +160,14 @@ $ lodestar check --sarif
 Locations are document-level: the result names the file, not a line range. Alerts therefore attach
 to the file rather than to a specific line.
 
+**A few diagnostics have no location at all.** `WORKSPACE-EMPTY` and `PATH-NOT-UTF8` are about the
+workspace, not about a document you wrote — there is no file to point at — so their results are
+emitted **without a `locations` array**, which is what SARIF 2.1.0 prescribes for a finding that
+belongs to no artifact. They still carry their `ruleId`, `level` and `message`, and they still count
+toward the exit code. If you post-process the SARIF, do not assume `.locations[0]` exists: the `jq`
+one-liner above would print `null` for those rows. Use
+`.locations[0].physicalLocation.artifactLocation.uri // "(workspace)"` if you want a placeholder.
+
 `--json` and `--sarif` are mutually exclusive; pick one per invocation.
 
 ## A complete GitHub Actions workflow

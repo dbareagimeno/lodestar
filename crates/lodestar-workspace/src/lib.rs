@@ -510,7 +510,8 @@ impl Workspace {
         Ok(self.document_set()?.list_documents())
     }
 
-    /// Aplica un patch de frontmatter (null-borra) y lo escribe si es conforme.
+    /// Aplica un patch de frontmatter (merge-patch RFC 7386: una clave a `None` **elimina** la
+    /// clave; una clave ausente del mapa no se toca) y lo escribe si es conforme.
     ///
     /// **No es transaccional** (E29-H10, `decisiones §16(g)`): mismo motivo y mismo repliegue a
     /// `pub(crate)` que [`Workspace::create_document`] — ver su doc-comment.

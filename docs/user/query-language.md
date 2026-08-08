@@ -400,8 +400,9 @@ Outcomes are deliberately different:
 | An ordering comparison against an incompatible type | `INVALID_SCHEMA`, naming the field, the operator, both types and the document where they clashed |
 | A list operator (`contains_any`, `contains_all`, or `contains` on a non-string scalar) on a field that is not a list | `INVALID_SCHEMA`, same shape |
 | A text operator (`starts_with`, `ends_with`) on a value that is not a string | `INVALID_SCHEMA`, same shape |
+| `contains` on a **string** field with a literal that is not a string (`title contains 3`) | `INVALID_SCHEMA`, same shape — on a string field `contains` means *substring*, and a non-string needle has no substring to look for |
 
-The last three are the interesting ones — they are **type errors**, and they abort the query rather
+The last four are the interesting ones — they are **type errors**, and they abort the query rather
 than drop a document. `retention_days` is a number in the demo, so ordering it against a string
 aborts instead of quietly dropping the document:
 
@@ -432,8 +433,8 @@ knowledge_search
 ```text
 INVALID_SCHEMA: la consulta no es respondible sobre estos datos: en «runbooks/backup.md» la
 comparación entre el campo «retention_days» y su literal tiene un operando de tipo number, y el
-operador de texto «starts_with» exige un string a los DOS lados: lo que no es texto no tiene prefijo
-ni sufijo que comprobar, y el lenguaje no coerce tipos (§20.8). Comprueba los dos lados — el tipo
+operador de texto «starts_with» exige un string a los DOS lados: lo que no es texto no tiene prefijo,
+sufijo ni subcadena que comprobar, y el lenguaje no coerce tipos (§20.8). Comprueba los dos lados — el tipo
 que falla puede ser el del campo o el del literal. Ajusta la consulta al tipo real del campo:
 compara con un literal de ese tipo, o usa un operador definido para él («=»/«!=» nunca son error —
 el cruce de tipos es false); metadata_inspect{"mode":"field"} enumera los tipos que ese campo toma
@@ -452,13 +453,37 @@ knowledge_search
 INVALID_SCHEMA: la consulta no es respondible sobre estos datos: en
 «adr/0001-markdown-source-of-truth.md» la comparación entre el campo «tags» y su literal tiene un
 operando de tipo list, y el operador de texto «starts_with» exige un string a los DOS lados: lo que
-no es texto no tiene prefijo ni sufijo que comprobar, y el lenguaje no coerce tipos (§20.8). …
+no es texto no tiene prefijo, sufijo ni subcadena que comprobar, y el lenguaje no coerce tipos
+(§20.8). …
 ```
 
 Until v0.5.0 both of those returned `false` per document, so the answer was a **trimmed** result
 list — the documents whose field happened to be text — with nothing to tell you the rest had been
 dropped. Not matching is still not an error: `status starts_with "zzz"` over a string field is an
 empty result list, and a field no document has stays an empty result list too.
+
+`contains` joins them **when the field is a string**. On a string field `contains` means *substring*,
+so the needle has to be a string too; a number, a boolean or `null` on the right-hand side is the
+same mistyped comparison, not a miss:
+
+```json
+knowledge_search
+{"where": "title contains 3"}
+```
+
+```text
+INVALID_SCHEMA: la consulta no es respondible sobre estos datos: en «overview.md» la comparación
+entre el campo «title» y su literal tiene un operando de tipo number, y el operador de texto
+«contains» exige un string a los DOS lados: lo que no es texto no tiene prefijo, sufijo ni subcadena
+que comprobar, y el lenguaje no coerce tipos (§20.8). …
+```
+
+This is **only** about a string field. `contains` is the one operator whose meaning is decided by the
+field's type, and the other two readings are untouched: on a **list** it is membership, where a
+non-string literal is perfectly legitimate (`tags contains 3` looks for the number `3` among the
+elements and quietly finds nothing if it is not there — a miss, not an error); on any other scalar or
+a map it stays the list-operator error of the table above. Until v0.5.0 a non-string needle on a
+string field returned `false` per document, which read exactly like "the substring is not there".
 
 The error is decided over the whole workspace and **before** `text`, `limit` and `cursor` are
 applied, so it is deterministic: a narrower search or a smaller page will not hide it. The way out

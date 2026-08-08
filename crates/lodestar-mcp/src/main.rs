@@ -227,6 +227,21 @@ fn rpc_error(id: Value, code: i64, message: &str) -> Value {
     json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } })
 }
 
+/// El nombre JSON del tipo de un valor, para mensajes de error que rechazan un tipo del wire
+/// (E30-H03 seguimiento 10). Nombra el tipo tal como lo escribe el cliente en su JSON —`number`,
+/// `null`, `object`…—, no el tipo interno de `serde_json`, porque el destinatario del mensaje es
+/// quien redactó ese JSON.
+fn tipo_json(v: &Value) -> &'static str {
+    match v {
+        Value::Null => "null",
+        Value::Bool(_) => "boolean",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
+}
+
 /// Despacha un mensaje JSON-RPC. Devuelve `None` para notificaciones (sin `id`).
 fn handle(app: &App, profile: Profile, req: &Value) -> Option<Value> {
     // Un mensaje que no es un objeto (array de batch, string, número…) es un request
@@ -246,7 +261,12 @@ fn handle(app: &App, profile: Profile, req: &Value) -> Option<Value> {
     let id = id?;
 
     let result: Result<Value, (i64, String)> = match method {
-        "initialize" => match params.get("protocolVersion").and_then(Value::as_str) {
+        // El `match` distingue TRES casos, no dos (E30-H03 seguimiento 10): hasta v0.5.0 el
+        // `.and_then(Value::as_str)` colapsaba «clave ausente» con «clave presente con un valor que
+        // no es string» —número, `null` explícito, objeto—, y el segundo caía al brazo de ausente:
+        // handshake con ÉXITO y versión por defecto ante un tipo que el wire no admite. Ahora la
+        // presencia se mira antes que el tipo.
+        "initialize" => match params.get("protocolVersion") {
             // Ausente: válida, se responde la versión por defecto del servidor (omitir no es
             // pedir algo imposible).
             None => Ok(json!({
@@ -256,20 +276,33 @@ fn handle(app: &App, profile: Profile, req: &Value) -> Option<Value> {
                 "instructions": server_instructions(profile)
             })),
             // Presente y soportada: se ecoa.
-            Some(v) if PROTOCOL_VERSIONS.contains(&v) => Ok(json!({
+            Some(Value::String(v)) if PROTOCOL_VERSIONS.contains(&v.as_str()) => Ok(json!({
                 "protocolVersion": v,
                 "serverInfo": { "name": "lodestar-mcp", "version": env!("CARGO_PKG_VERSION") },
                 "capabilities": { "tools": {} },
                 "instructions": server_instructions(profile)
             })),
-            // Presente y NO soportada: el handshake se rechaza (no se normaliza en silencio a la
-            // versión por defecto). Un `initialize` fallido es un handshake fallido, no un error
-            // de dominio de tool: `-32602` (mismo código que "tool desconocida"/"tool no
+            // Presente, string y NO soportada: el handshake se rechaza (no se normaliza en silencio
+            // a la versión por defecto). Un `initialize` fallido es un handshake fallido, no un
+            // error de dominio de tool: `-32602` (mismo código que "tool desconocida"/"tool no
             // disponible bajo este perfil"), sin `result`, y el mensaje lista las aceptadas.
-            Some(v) => Err((
+            Some(Value::String(v)) => Err((
                 -32602,
                 format!(
                     "protocolVersion no soportada: «{v}». Versiones aceptadas: {}",
+                    PROTOCOL_VERSIONS.join(", ")
+                ),
+            )),
+            // Presente pero NO string (número, booleano, `null` explícito, lista, objeto): tipo
+            // incorrecto en el wire, mismo código que la versión no soportada. Un `null` explícito
+            // NO es lo mismo que omitir la clave: quien la manda está declarando algo, y lo que
+            // declara no es una versión.
+            Some(otro) => Err((
+                -32602,
+                format!(
+                    "protocolVersion debe ser una cadena (string) y llegó un {}: {otro}. \
+                     Versiones aceptadas: {}",
+                    tipo_json(otro),
                     PROTOCOL_VERSIONS.join(", ")
                 ),
             )),

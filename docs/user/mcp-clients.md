@@ -113,8 +113,14 @@ complete exchange per run. (`2>/dev/null` below just drops the startup log line.
 
 - **Omitted** — valid. The server answers with its default, `2024-11-05`, no error.
 - **Present and one of `2024-11-05`, `2025-03-26`, `2025-06-18`** — echoed back as-is.
-- **Present and anything else** — a rejected handshake, not a silent fallback: JSON-RPC error
-  `-32602` with a message listing the three accepted versions, and no `result` at all.
+- **Present as a string, but any other value** — a rejected handshake, not a silent fallback:
+  JSON-RPC error `-32602` with a message listing the three accepted versions, and no `result` at
+  all.
+- **Present but not a string at all** (a number, a boolean, an array, an object, or an explicit
+  `null`) — rejected the same way, `-32602`, with a message naming the type that arrived. Sending
+  `"protocolVersion": null` is *not* the same as omitting the key: the key is there, and what it
+  declares is not a version. Until v0.5.0 all of these were treated as "omitted" and got a
+  successful handshake with the default version.
 
 ```console
 $ echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"1990-01-01"}}' \
@@ -136,6 +142,15 @@ session; every path in every request and response is relative to it.
 Any directory qualifies. There is no `init`, no `.lodestar/` requirement, no index file and no
 mandatory frontmatter: point it at a documentation repository, a monorepo's `docs/`, or a folder of
 notes.
+
+**The configuration is read once, at startup.** If `.lodestar/config.yaml` exists, the server loads
+it when it opens the workspace and keeps that content for the whole session. There is no hot reload
+and no per-call re-read: **editing `config.yaml` while the server is running changes nothing until
+you restart it**. That covers everything the file configures — validation severities, discovery
+excludes, writable roots, transaction policy and receipt retention. If the file exists but cannot be
+read or parsed, the server does not start at all (it never falls back to defaults quietly). The same
+applies to the CLI, which opens the workspace per invocation, so there each run does pick up the
+current file.
 
 ## Profiles: `readonly` and `standard`
 
@@ -222,7 +237,11 @@ paths, titles, snippets and revisions — never full bodies — with cursor pagi
 **`knowledge_get`** — *Give me this document.* Retrieves one document with a selective `include`
 (`frontmatter`, `body`, `revision`, `outgoingLinks`, `backlinks`, `diagnostics`); anything not asked
 for is not populated. `sections` narrows the body to specific headings, so an agent can read one
-section instead of a whole file.
+section instead of a whole file. Each entry is a *path* of nested heading titles, matched exactly,
+and the matching sections are concatenated in the order you asked for them. **A `headingPath` that
+matches nothing is dropped silently** — no error, no field listing what was skipped — so if none of
+the paths you asked for match, `body` comes back as the empty string, indistinguishable from a
+genuinely empty section. If you need to tell those two apart, read the whole body instead.
 
 **`metadata_inspect`** — *What conventions does this project actually use?* Two modes: `catalog`
 lists every frontmatter field with how many documents carry it and which types it takes; `field`

@@ -209,7 +209,7 @@ Lodestar has no document types.
 
 Parameter names and shapes live in [`contracts/mcp.yml`](../../contracts/mcp.yml) under
 `change_plan`; they are also declared in the tool's `inputSchema`, which your MCP client can show
-you. Two behaviours are worth calling out because they are refusals by design:
+you. Three behaviours are worth calling out — two refusals by design, and one silence by design:
 
 **`delete` never guesses what to do with inbound links.** If the document has backlinks, the policy
 is mandatory:
@@ -234,6 +234,31 @@ con la política «reject»
 
 `remove_links` deletes the document and removes the references to it. Before choosing, ask
 `impact_analyze` what a delete would cost.
+
+**`replace_text` that finds nothing is a silent no-op, not an error.** If `find` does not occur in
+the document and you did not pass `expectedOccurrences`, the plan is produced normally with
+`canApply: true` and nothing to show for it — no diagnostic, no warning, no field saying "zero
+replacements". This holds in the `operations` array form, not just in bulk selections:
+
+```json
+change_plan
+{"operations": [{"op": "replace_text", "path": "overview.md",
+                 "find": "a string that is not there", "replace": "x"}],
+ "policy": {"requireValidResult": false, "allowWarnings": true}}
+```
+
+The plan comes back with `canApply: true`, an empty `semanticDiff.bodyChanges` and an empty
+`semanticDiff.frontmatterChanges`. **Pass `expectedOccurrences` whenever you know how many
+replacements you expect** — it turns a wrong count, zero included, into a refusal. Without it a typo
+in `find` is indistinguishable from a successful change, which is the one failure mode the whole
+plan/apply cycle exists to prevent.
+
+> One caveat while planning a no-op: the document may still appear in `semanticDiff.modified` even
+> though `bodyChanges` and `frontmatterChanges` are empty. `modified` is a raw byte comparison, and
+> a `replace_text` is normalized into a whole-document rewrite that reserializes the frontmatter —
+> so a block written in YAML flow style (`tags: [a, b]`) comes back in block style (`tags:\n- a\n-
+> b`). The content is equivalent; the bytes are not. Read `bodyChanges`/`frontmatterChanges` to know
+> whether anything actually changed.
 
 ## Bulk selections
 

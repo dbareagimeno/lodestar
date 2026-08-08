@@ -224,7 +224,7 @@ impl Bundle {
   pub fn validate_draft(&self, fm: &Frontmatter, body: &str) -> Vec<Check>; // contenido SIN guardar
   // escritura validada (OKF logic, NO en la fachada)
   pub fn create_concept(&self, p: &RelPath, ty: &str, /*…*/) -> WriteOutcome;
-  pub fn merge_frontmatter(&self, p: &RelPath, patch: FrontmatterPatch) -> WriteOutcome; // null borra
+  pub fn merge_frontmatter(&self, p: &RelPath, patch: FrontmatterPatch) -> WriteOutcome; // merge-patch RFC 7386: null ELIMINA la clave
   // generación PURA: devuelve un plan; la workspace lo aplica
   pub fn gen_index(&self, dir: &str) -> Mutation;
   pub fn gen_tag_indexes(&self) -> Mutation;                // purga tags obsoletos
@@ -397,7 +397,7 @@ Tabla de comandos (nombres congelados): `open_bundle` · `pick_dir` · `get_snap
 Scope = **semántica, no CRUD** (Claude Code ya tiene Read/Write/Edit). Logs solo a stderr; stdout = JSON-RPC.
 
 - **Tools**: `find_backlinks` · `find_orphans` · `find_dangling` · `neighborhood(concept, depth, direction)` ·
-  `conformance_check(path?)` · `query(dsl)` · `create_concept`(validado) · `update_frontmatter`(validado, patch con null-borra) ·
+  `conformance_check(path?)` · `query(dsl)` · `create_concept`(validado) · `update_frontmatter`(validado, patch merge-patch RFC 7386: `null` elimina la clave) ·
   `generate_index` · `generate_tag_indexes`.
 - **Resources** (read-only): lista de concepts · índice de frontmatter · gate de conformidad en vivo · grafo de enlaces.
 - No expone `read_file`/`write_file`. El valor es lo que los ficheros crudos no dan barato: backlinks resueltos,
@@ -512,7 +512,7 @@ como cualquier escritor externo. `commit`/`restore`/`switch_branch`/`merge`/`ini
 | 10 | DDL del grafo definido por dos arquitectos; `checks` vs `diagnostics` | `store` es dueño único del DDL; ORPHAN/LINK-STUB **sintetizados** (no materializados); columnas casan con los nombres del `Check`. |
 | 11 | `body:` subcadena (proto) vs FTS MATCH (token) | Subcadena en todas las fachadas; FTS solo como acelerador superset. Un solo `match_token`. |
 | 12 | Generadores puros vs que escriben | Puros (devuelven `Mutation`); la workspace aplica y diffea para `{written,removed,unchanged}`. |
-| 13 | `merge_frontmatter` (patch, null-borra) no existía en el core | Vive en el **core** (es lógica OKF), no en el MCP. |
+| 13 | `merge_frontmatter` (patch merge-patch RFC 7386: `null` elimina la clave) no existía en el core | Vive en el **core** (es lógica OKF), no en el MCP. |
 | 14 | Falta `schemars` para el outputSchema del MCP | Feature `schemars` en el core que gatea `#[derive(JsonSchema)]` en los DTO públicos. |
 | 15 | ¿Dónde vive git? | Crate `lodestar-vcs`, hermana de `store`; core sin git. **Transporte híbrido**: libgit2 para lo *local* (no ejecuta hooks/config al abrir/indexar = RCE-safe) + binario `git` confinado a la *red* (push/pull/fetch, iniciados por el usuario, heredan su auth). El shell-out nunca corre en open/index. |
 | 16 | "Restore soft" podía **perder trabajo sin commitear** | Restore/cambio de rama/merge son no-destructivos *de historial* pero reescriben el working tree → **checkpoint automático** si hay cambios sin commitear; excluyen `log.md` curado; **regeneran** `index`/`tags` tras aplicar. |
@@ -849,7 +849,9 @@ Se congelan en `lodestar-core::types`:
   risk: RiskAssessment, semantic_diff: SemanticDiff, validation: ValidationReport, expires_at }`.
 - `NormalizedOperation` — enum de las 11 ops resueltas a escrituras (`create`/`patch_frontmatter`/
   `replace_body`/`edit_section`/`replace_text`/`move`/`delete`/`add_relation`/`remove_relation`/
-  `transition_status`/`apply_fix`); reutiliza `FrontmatterPatch` (merge-patch RFC 7386, null-borra).
+  `transition_status`/`apply_fix`); reutiliza `FrontmatterPatch` (merge-patch RFC 7386: una clave
+  presente con valor `null` **elimina** esa clave, que es lo que el propio RFC define — no una
+  capacidad adicional de distinguir «asignar null» de «eliminar»).
   **Hoy son SIETE** (§20.11): `add_relation`/`remove_relation`/`transition_status` cayeron con el
   modelo universal (`E21-H01`) y `apply_fix` en `E23-H11` (sin productor de `Fix` desde que
   `E20-H03` retiró `core::schema`, fallaba siempre). Las 11 de esta línea son el diseño de época.
@@ -1095,10 +1097,32 @@ lo deja fuera, y quien traduzca un offset del cuerpo a una posición del fichero
 **Título derivado** — `frontmatter.title` → primer heading H1 → nombre del fichero. Es **solo una
 heurística de presentación**: `title` no se convierte en propiedad reservada.
 
-**Edición de frontmatter** — la operación genérica es `patch_frontmatter` (`set` + `remove`), que
-modifica solo las claves pedidas, preserva las demás, no reordena innecesariamente, mantiene el
-cuerpo intacto y **distingue explícitamente asignar `null` de eliminar una clave**. El plan debe
-declarar si el bloque se reserializará entero.
+**Edición de frontmatter** — la operación genérica es `patch_frontmatter`, que modifica solo las
+claves pedidas, preserva las demás, no reordena innecesariamente y mantiene el cuerpo intacto. Su
+semántica es **merge-patch RFC 7386**, sin más (corregido en E30-H03, `decisiones §23/D-02` —
+criterio ratificado el 2026-08-06):
+
+- una clave **ausente** del patch no se toca;
+- una clave presente con un valor **se escribe o reemplaza** con él;
+- una clave presente con valor **`null` se ELIMINA**. Eso es exactamente lo que RFC 7386 define, no
+  una capacidad adicional del motor.
+
+Corolario, y es el punto que este párrafo afirmaba al revés hasta v0.5.0: **no existe forma, por
+esta vía, de asignar literalmente `null` a una clave de primer nivel** — el wire no puede expresar
+esa distinción porque el `null` es el sentinel de borrado. Verificado ejecutando: `{"status":"~"}` y
+`{"status":"null"}` escriben el *string* `'~'`/`'null'`, no el null YAML. El `Some(Null)` que el
+tipo del core (`FrontmatterPatch`) sí sabría representar es **inalcanzable desde
+`patch_frontmatter`**, que serializa como merge-patch.
+
+Matiz verificado, porque el borrado **no** es uniforme por profundidad: el `null` es sentinel de
+borrado **solo en el primer nivel del patch**. Anidado dentro de un mapa o de una lista del valor
+(`{"meta": {"a": null}}`, `{"tags": [null, 1]}`) sobrevive como null YAML literal, porque a partir
+del primer nivel el valor se escribe tal cual en vez de recorrerse como patch. Un `null` ya presente
+en el fichero también se preserva si el patch no nombra su clave.
+
+Ampliar el wire para expresar «asignar `null`» queda **fuera de alcance** salvo que aparezca un caso
+real que lo pida (`decisiones §23`): quien necesite ese valor debe pasarlo como cualquier otro
+escalar, y el propio RFC no lo permite. El plan debe declarar si el bloque se reserializará entero.
 
 ### 20.5 Descubrimiento (§3 de REFACTOR_PHASE_2)
 

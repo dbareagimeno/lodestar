@@ -5506,3 +5506,369 @@ mod identidad_de_transaccion_libre {
         assert!(!ws.recovery_pending(), "ni queda recuperación pendiente");
     }
 }
+
+// ===========================================================================
+// E30-H02 — Un lock cuyo CUERPO no llegó a escribirse es huérfano irreclamable
+// (`requirements/epica-30-higiene-escoba.md`, H02). Fase ROJA.
+//
+// CAUSA RAÍZ DIAGNOSTICADA (reproducida, no supuesta)
+//
+// `acquire_lock` (`lock.rs:139-188`) publica el lock en DOS pasos que no son atómicos entre sí:
+//
+//   1. `OpenOptions::create_new(true).open(&path)` — el fichero de lock aparece en disco **vacío**.
+//      Es aquí donde se gana la exclusión mutua (`O_CREAT | O_EXCL`).
+//   2. `escribir_cuerpo(&mut file, &token)` — recién ahora el fichero declara `pid`, `host`,
+//      `timestamp` y `token`.
+//
+// Entre (1) y (2) hay una ventana. Si el proceso muere ahí —`SIGKILL`, OOM killer, corte de luz—,
+// queda en disco un fichero de lock **existente y vacío**. Y ese estado es TERMINAL para
+// `reclamar_si_huerfano` (`lock.rs:237-294`):
+//
+//   - `read_to_string` devuelve `Ok("")` → NO entra por la rama «ilegible».
+//   - `serde_json::from_str("")` falla → `unwrap_or(Value::Null)` → `meta` es `Null`.
+//   - `meta.get("pid")` es `None`  → `vida = Vida::Desconocida` (no hay pid al que preguntar).
+//   - `meta.get("timestamp")` es `None` → `edad = None` → `caducado = false`.
+//   - `reclamable = match Desconocida => caducado` = **false**.
+//
+// Resultado: `Reclamo::Vivo("")` — y como el detalle es la cadena vacía, el mensaje que llega al
+// wire es exactamente «el lock de publicación ya está tomado (…)» **sin sufijo de pid**, que es el
+// síntoma que registraron los tres jueces. Lo grave no es el mensaje: es que **no hay salida**. El
+// `LOCK_TTL` es la «red portable» para cuando no se puede afirmar nada, pero el TTL se computa
+// sobre el `timestamp` del cuerpo… que es justo lo que no se escribió. Sin `timestamp` no hay edad,
+// sin edad no hay caducidad, y el workspace queda **cerrado a la escritura para siempre**, hasta
+// que un humano borre el fichero a mano. Es la misma clase de defecto que E23-H23 cerró para el
+// lock con pid muerto, por la única vía que aquélla no cubrió: el lock que ni siquiera llegó a
+// tener pid.
+//
+// EVIDENCIA DE REPRODUCCIÓN (E30-H02, fase roja)
+//
+//   - `crates/lodestar-mcp/tests/diagnostico_lock_e30h02.rs::sonda_e30h02_sigkill_apuntado_a_la_ventana_del_cuerpo`
+//     apunta el `SIGKILL` a la ventana sondeando la EXISTENCIA del fichero de lock desde otro
+//     proceso (mismo truco de disparo por estado durable que ya usa `crash_senal.rs`): **30/30**
+//     muertes dejan el lock creado y vacío, y **30/30** veces el primer `change_apply` del proceso
+//     siguiente responde `WRITE_CONFLICT`.
+//   - `…::sonda_e30h02_lock_con_cuerpo_no_escrito` fabrica los tres cuerpos posibles de la ventana
+//     (vacío, JSON truncado, JSON sin `pid`/`timestamp`) y los tres producen el mismo conflicto
+//     terminal.
+//   - `…::sonda_e30h02_reclamo_tras_sigkill_cosechado` (40 repeticiones, retrasos a ciegas) da
+//     **0/40** fallos: con el cuerpo ya escrito la reclamación por pid muerto funciona. La ventana
+//     del cuerpo es, por tanto, el discriminante — no la prueba de vida.
+//
+// POR QUÉ ESTO EXPLICA LA FLAKINESS DE `crash_por_senal_no_deja_parciales`
+//
+// Ese test escalona `SIGKILL` a 40/70/100/130/170 ms del inicio del `change_apply` y luego exige
+// que el PRIMER `change_apply` del proceso siguiente funcione. En una máquina descargada el paso
+// (1)→(2) tarda microsegundos y ningún retraso cae dentro (medido: sonda D, 44 muertes, cuerpo
+// íntegro de 132 bytes siempre). Bajo `cargo test --workspace` la máquina está saturada y el
+// proceso puede ser **desalojado por el scheduler justo entre las dos llamadas**, ensanchando la
+// ventana de microsegundos a decenas de milisegundos — que es exactamente la escala de los retrasos
+// del test. De ahí que falle ~50 % con la suite entera y nunca en aislamiento.
+//
+// EL CRITERIO QUE FIJA ESTE TEST
+//
+// Un lock cuyo cuerpo no se pudo interpretar —porque no llegó a escribirse— **no** puede tratarse
+// como un dueño vivo indefinidamente. La forma del arreglo la elige el implementador (publicar el
+// cuerpo de forma atómica para que la ventana no exista; o tratar el cuerpo no interpretable como
+// reclamable con el mismo criterio conservador que el resto); lo que este test fija es el EFECTO
+// observable: el workspace no queda cerrado a la escritura para siempre por un fichero vacío.
+//
+// Es unix-only por coherencia con el resto del módulo de lock: el escenario nace de un `SIGKILL`.
+// ===========================================================================
+
+#[cfg(unix)]
+mod lock_con_cuerpo_no_escrito {
+    use super::*;
+
+    /// Planta en `.lodestar/runtime/lock.json` el `cuerpo` indicado, creando el directorio si falta.
+    /// Es el estado que deja un proceso muerto entre `create_new` y `escribir_cuerpo`.
+    fn plantar_cuerpo(ws: &Workspace, cuerpo: &str) {
+        let path = ws.lock_path();
+        let runtime = path
+            .parent()
+            .expect("el lock cuelga de `.lodestar/runtime/`");
+        std::fs::create_dir_all(runtime).expect("crear `.lodestar/runtime/`");
+        std::fs::write(&path, cuerpo).expect("plantar el fichero de lock del escenario");
+    }
+
+    /// **E30-H02** · Criterio — **Dado** un fichero de lock que existe pero cuyo cuerpo nunca se
+    /// escribió (la ventana `[create_new, escribir_cuerpo)` de `acquire_lock`), **Cuando** un
+    /// proceso posterior intenta adquirir el lock, **Entonces** lo consigue: un cuerpo que no
+    /// declara ni `pid` ni `timestamp` no puede sostener un lock vivo para siempre.
+    ///
+    /// ROJO HOY: `reclamar_si_huerfano` resuelve `Vida::Desconocida` (sin pid) + `caducado = false`
+    /// (sin timestamp) → `reclamable = false` → `Reclamo::Vivo("")`, y `acquire_lock` devuelve
+    /// `WriteConflict`. El `LOCK_TTL` no rescata nada porque se computa sobre el `timestamp` que
+    /// falta: el workspace queda cerrado a la escritura de forma **permanente**.
+    #[test]
+    fn un_lock_con_cuerpo_vacio_no_bloquea_para_siempre() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = Workspace::open(dir.path()).unwrap();
+        plantar_cuerpo(&ws, "");
+
+        let guard = ws.acquire_lock().unwrap_or_else(|e| {
+            panic!(
+                "un fichero de lock VACÍO es el rastro de un proceso que murió entre `create_new` y \
+                 `escribir_cuerpo`: no declara pid ni timestamp, así que ni la prueba de vida ni el \
+                 LOCK_TTL pueden liberarlo jamás y el workspace queda cerrado a la escritura para \
+                 siempre. Tiene que poder reclamarse; fue: {e}"
+            )
+        });
+        assert!(
+            ws.lock_path().exists(),
+            "y tras reclamarlo el lock es del nuevo dueño: su fichero existe mientras el guard viva"
+        );
+        drop(guard);
+        assert!(
+            !ws.lock_path().exists(),
+            "y el guard lo libera al dropearse, como cualquier lock legítimamente adquirido"
+        );
+    }
+
+    /// **E30-H02** · Misma ventana, cuerpo **a medio escribir**: el proceso alcanzó a emitir unos
+    /// bytes del JSON antes de morir. `serde_json` falla igual que con el vacío, así que el estado
+    /// resultante es el mismo huérfano irreclamable.
+    #[test]
+    fn un_lock_con_cuerpo_truncado_no_bloquea_para_siempre() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = Workspace::open(dir.path()).unwrap();
+        plantar_cuerpo(&ws, "{\"owner\":\"dbar");
+
+        let guard = ws.acquire_lock().unwrap_or_else(|e| {
+            panic!(
+                "un cuerpo de lock truncado a mitad de escritura tampoco declara pid ni timestamp: \
+                 mismo huérfano irreclamable que el cuerpo vacío. Tiene que poder reclamarse; \
+                 fue: {e}"
+            )
+        });
+        drop(guard);
+    }
+
+    /// **E30-H02** · Control ANTI-VACUO — el arreglo no puede consistir en «reclamar cualquier lock
+    /// que no entienda». Un lock cuyo cuerpo **sí** es interpretable y declara un dueño **vivo de
+    /// esta máquina** (el propio proceso de test) sigue siendo intocable: es el invariante de
+    /// escritor único que `reclamar_si_huerfano` garantiza hoy (`Vida::Viva` ⇒ el TTL no manda) y
+    /// que este test impide relajar de rebote.
+    #[test]
+    fn un_lock_de_un_dueño_vivo_sigue_sin_reclamarse() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = Workspace::open(dir.path()).unwrap();
+
+        // Cuerpo REAL (para que viajen todos los campos que escriba la implementación), con el pid
+        // de ESTE proceso —indudablemente vivo— y una marca de tiempo rancia: ni siquiera el TTL
+        // vencido puede reclamar el lock de alguien que está vivo (E25-H06).
+        let guard = ws
+            .acquire_lock()
+            .expect("tomar el lock para leer su cuerpo");
+        let raw = std::fs::read_to_string(ws.lock_path()).expect("leer el fichero de lock");
+        drop(guard);
+        let mut meta: serde_json::Value =
+            serde_json::from_str(&raw).expect("el cuerpo del lock es JSON legible desde fuera");
+        meta["pid"] = serde_json::json!(std::process::id());
+        meta["timestamp"] = serde_json::json!(0);
+        plantar_cuerpo(&ws, &format!("{meta}\n"));
+
+        let error = ws.acquire_lock().err().unwrap_or_else(|| {
+            panic!(
+                "el lock de un dueño VIVO de esta máquina no se reclama nunca, ni con el TTL \
+                 vencido (E25-H06): reclamarlo rompería el escritor único. Si este test se pone \
+                 rojo, el arreglo de E30-H02 ha relajado el criterio de «vivo» en vez de cerrar la \
+                 ventana del cuerpo no escrito"
+            )
+        });
+        assert!(
+            matches!(error, lodestar_workspace::WorkspaceError::WriteConflict(_)),
+            "y se rechaza como conflicto de escritura (wire `WRITE_CONFLICT`); fue {error:?}"
+        );
+    }
+
+    /// Antedata `mtime`/`atime` de `path` en `segundos`. Es la única forma de fabricar un temporal
+    /// «rancio» sin esperar el [`LOCK_TTL`] real (15 minutos). `libc` ya es dependencia unix de este
+    /// crate para la prueba de vida por pid, así que no entra código externo nuevo.
+    fn envejecer(path: &std::path::Path, segundos: i64) {
+        let ahora = i64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("reloj posterior a la época")
+                .as_secs(),
+        )
+        .expect("epoch cabe en i64");
+        let t = libc::timeval {
+            tv_sec: ahora - segundos,
+            tv_usec: 0,
+        };
+        let times = [t, t];
+        let c = std::ffi::CString::new(path.to_str().expect("ruta UTF-8")).expect("ruta sin NUL");
+        // SAFETY: `utimes` solo lee el puntero a la ruta (C-string válida y viva) y el array de dos
+        // `timeval` que se le pasa; no toca memoria del llamante ni retiene los punteros.
+        let rc = unsafe { libc::utimes(c.as_ptr(), times.as_ptr()) };
+        assert_eq!(rc, 0, "antedatar {}", path.display());
+    }
+
+    /// **E30-H02 · remate de higiene** — **Dado** un `.lodestar/runtime/` sembrado de temporales de
+    /// publicación huérfanos (`.lock.<token>.tmp`) más viejos que el TTL, **Cuando** se adquiere el
+    /// lock, **Entonces** desaparecen — y **solo** ellos: ni el temporal reciente de un publicador
+    /// concurrente ni los ficheros que no son temporales de lock se tocan.
+    ///
+    /// POR QUÉ: `publicar_lock` retira su temporal en todos sus caminos de retorno, pero un
+    /// `SIGKILL` entre el `create_new` y ese borrado no ejecuta ninguno (medido: 34/40 muertes
+    /// reales lo dejan). Ese temporal es inerte —fuera del índice, fuera de git, ajeno a la
+    /// exclusión— pero **nadie más lo recoge**, así que crece una entrada por crash y nunca decrece.
+    /// El barrido por antigüedad es la escoba; este test es su red.
+    ///
+    /// ANTI-VACUO doble: si el barrido pasara a borrar por patrón sin mirar la edad se llevaría el
+    /// temporal reciente (el de un publicador concurrente en plena carrera); si borrara por edad sin
+    /// mirar el patrón se llevaría los recibos y el journal, que viven en el mismo directorio.
+    #[test]
+    fn los_temporales_de_publicacion_rancios_se_barren_al_adquirir() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = Workspace::open(dir.path()).unwrap();
+        let runtime = ws
+            .lock_path()
+            .parent()
+            .expect("el lock cuelga de `.lodestar/runtime/`")
+            .to_path_buf();
+        std::fs::create_dir_all(&runtime).expect("crear `.lodestar/runtime/`");
+
+        // Basura acumulada por crashes pasados: rancia de sobra (una hora > TTL de 15 min).
+        for i in 0..20 {
+            let p = runtime.join(format!(".lock.token{i}.tmp"));
+            std::fs::write(&p, "{}").expect("plantar temporal huérfano");
+            envejecer(&p, 3600);
+        }
+        // (a) Temporal RECIENTE: el de un publicador que podría estar en plena carrera. Intocable.
+        let reciente = runtime.join(".lock.enCurso.tmp");
+        std::fs::write(&reciente, "{}").expect("plantar temporal reciente");
+        // (b) Fichero ajeno y viejo: el barrido va por patrón, no por edad a secas.
+        let ajeno = runtime.join("receipt-viejo.json");
+        std::fs::write(&ajeno, "{}").expect("plantar fichero ajeno");
+        envejecer(&ajeno, 3600);
+
+        let guard = ws.acquire_lock().expect("adquirir el lock");
+        let restantes: Vec<String> = std::fs::read_dir(&runtime)
+            .expect("listar `.lodestar/runtime/`")
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        drop(guard);
+
+        let temporales: Vec<&String> = restantes
+            .iter()
+            .filter(|n| n.starts_with(".lock.") && n.ends_with(".tmp"))
+            .collect();
+        assert_eq!(
+            temporales,
+            vec![&".lock.enCurso.tmp".to_string()],
+            "los 20 temporales rancios se barren y SOLO sobrevive el reciente (el de la propia \
+             publicación ya se retiró por su camino normal); quedaron: {restantes:?}"
+        );
+        assert!(
+            ajeno.exists(),
+            "y el barrido no toca nada que no sea `.lock.*.tmp`: los recibos y el journal viven en \
+             este mismo directorio"
+        );
+    }
+
+    /// Cuerpo REAL del lock (el que escribe una adquisición de verdad, con todos los campos que la
+    /// implementación ponga: `host`, `token`, …) con las claves de `quitar` **eliminadas**. Es la
+    /// forma de fabricar los cuerpos PARCIALES de los dos tests de frontera de abajo sin tener que
+    /// enumerar a mano lo que el cuerpo lleva.
+    fn cuerpo_real_sin(ws: &Workspace, quitar: &[&str]) -> serde_json::Value {
+        let guard = ws
+            .acquire_lock()
+            .expect("tomar el lock para leer el cuerpo que escribe la implementación");
+        let raw = std::fs::read_to_string(ws.lock_path()).expect("leer el fichero de lock");
+        drop(guard);
+        let mut meta: serde_json::Value = serde_json::from_str(&raw).unwrap_or_else(|e| {
+            panic!("el cuerpo del lock debe ser JSON legible: {e}; era {raw:?}")
+        });
+        let obj = meta
+            .as_object_mut()
+            .expect("el cuerpo del lock es un objeto JSON");
+        for clave in quitar {
+            obj.remove(*clave);
+        }
+        meta
+    }
+
+    /// **E30-H02 · frontera del criterio de cuerpo no interpretable** — **Dado** un lock cuyo cuerpo
+    /// declara un `pid` **vivo de esta máquina** pero **no** declara `timestamp`, **Cuando** otro
+    /// proceso intenta adquirirlo, **Entonces** falla con `WRITE_CONFLICT` y el lock sobrevive byte
+    /// a byte.
+    ///
+    /// POR QUÉ EXISTE: el reclamo del cuerpo no interpretable se decide con `pid.is_none() &&
+    /// ts.is_none()`. Ese `&&` es la frontera exacta entre «nadie escribió nada» (reclamable) y
+    /// «hay un dueño declarado» (intocable), y sin este test la mutación a `||` **sobrevive a la
+    /// suite entera**: con ella, un escritor VIVO que declarase pid sin timestamp perdería su lock
+    /// y dos procesos publicarían a la vez — el invariante #5 roto en silencio. Los tests que ya
+    /// existían no la muerden porque ninguno ejercita un cuerpo **parcial**: o declaran los dos
+    /// campos (dueño vivo/muerto de E25-H06) o ninguno (cuerpo vacío/truncado de arriba).
+    ///
+    /// UNIX-ONLY, como el resto del módulo: la prueba de vida por pid solo existe en Unix.
+    #[test]
+    fn un_lock_con_pid_vivo_y_sin_timestamp_no_se_reclama() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = Workspace::open(dir.path()).unwrap();
+
+        let mut meta = cuerpo_real_sin(&ws, &["timestamp"]);
+        meta["pid"] = serde_json::json!(std::process::id());
+        let cuerpo = format!("{meta}\n");
+        plantar_cuerpo(&ws, &cuerpo);
+
+        let error = ws.acquire_lock().err().unwrap_or_else(|| {
+            panic!(
+                "un cuerpo que declara `pid` NO es un cuerpo «no interpretable»: hay un dueño, y \
+                 aquí está VIVO en esta máquina, así que el lock es intocable (E25-H06). Si esto \
+                 se pone rojo, el criterio de E30-H02 se ha relajado de `pid.is_none() && \
+                 ts.is_none()` a un `||` y un escritor vivo pierde su lock"
+            )
+        });
+        assert!(
+            matches!(error, lodestar_workspace::WorkspaceError::WriteConflict(_)),
+            "y se rechaza como conflicto de escritura (wire `WRITE_CONFLICT`); fue {error:?}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(ws.lock_path()).expect("el lock vivo debe seguir en disco"),
+            cuerpo,
+            "y sobrevive byte a byte: no se reclama, no se reescribe, no se toca"
+        );
+    }
+
+    /// **E30-H02 · frontera del criterio de cuerpo no interpretable** — **Dado** un lock cuyo cuerpo
+    /// **no** declara `pid` pero sí un `timestamp` **reciente**, **Cuando** otro proceso intenta
+    /// adquirirlo, **Entonces** falla con `WRITE_CONFLICT` y el lock sobrevive byte a byte.
+    ///
+    /// Es la otra mitad de la frontera del `&&`: sin pid no hay prueba de vida, pero el `timestamp`
+    /// sí da edad, y con el TTL sin vencer el criterio portable de E25-H06 dice **no reclamar**. Un
+    /// `||` en `pid.is_none() && ts.is_none()` lo reclamaría al instante, saltándose el TTL entero.
+    #[test]
+    fn un_lock_sin_pid_y_con_timestamp_reciente_no_se_reclama() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = Workspace::open(dir.path()).unwrap();
+
+        let mut meta = cuerpo_real_sin(&ws, &["pid"]);
+        let ahora = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("reloj posterior a la época")
+            .as_secs();
+        meta["timestamp"] = serde_json::json!(ahora);
+        let cuerpo = format!("{meta}\n");
+        plantar_cuerpo(&ws, &cuerpo);
+
+        let error = ws.acquire_lock().err().unwrap_or_else(|| {
+            panic!(
+                "un cuerpo sin `pid` pero con `timestamp` reciente SÍ es interpretable: no hay \
+                 prueba de vida, así que manda el LOCK_TTL (E25-H06) y con el TTL sin vencer el \
+                 lock no se reclama. Reclamarlo aquí sería saltarse el TTL entero"
+            )
+        });
+        assert!(
+            matches!(error, lodestar_workspace::WorkspaceError::WriteConflict(_)),
+            "y se rechaza como conflicto de escritura (wire `WRITE_CONFLICT`); fue {error:?}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(ws.lock_path()).expect("el lock reciente debe seguir en disco"),
+            cuerpo,
+            "y sobrevive byte a byte: no se reclama, no se reescribe, no se toca"
+        );
+    }
+}

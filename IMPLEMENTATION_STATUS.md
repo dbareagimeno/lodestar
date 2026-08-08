@@ -1427,7 +1427,7 @@ arregla): `decisiones §18` (`canApply: false` no vincula a `change_apply`) y `�
 nunca casa, contradice `§20.8`; b: `policy` parcial rechazada pese a campos opcionales del contrato;
 c: imprecisión de `§16.a` caso 3). Todos tocan la frontera o el core → historias propias fuera de E27.
 
-## Fase 0 de la campaña de bugfixes del testbench homelab (E28) — COMPLETA (pendiente de merge)
+## Fase 0 de la campaña de bugfixes del testbench homelab (E28) — COMPLETA
 
 > **Origen**: `decisiones/23-hallazgos-testbench-homelab.md` (M-01 y A-05, prioridades 5 y 4 — las
 > dos filas con **riesgo real de pérdida de conocimiento**, ejecutadas antes que cualquier otro
@@ -1525,7 +1525,7 @@ suite en verde en `develop` — la épica está **completa a falta del merge**: 
 viven en `develop`, pero aún no cruzaron a `main` por el ciclo de release descrito en
 `RELEASING.md`.
 
-## Fase 1 de la campaña de bugfixes del testbench homelab (E29 — honestidad de superficie) — COMPLETA (a falta del juez de H10/H11 y merge)
+## Fase 1 de la campaña de bugfixes del testbench homelab (E29 — honestidad de superficie) — COMPLETA
 
 > **Origen**: `decisiones/23-hallazgos-testbench-homelab.md` (D-01, A-04, A-07) + el orden de trabajo
 > de `decisiones/README.md` (punto 1: §19a/b, §18 vinculante, §16f, §16e, §15, §16g, §16b). Épica:
@@ -1554,11 +1554,54 @@ viven en `develop`, pero aún no cruzaron a `main` por el ciclo de release descr
 lodestar-core` sin tokio/rusqlite/git2/notify/tauri/zip). `/contrato --check` coherente tras cada
 historia que tocó la frontera (H01, H02, H04, H05, H06, H07, H08, H09).
 
-**Estado real**: las 11 historias están implementadas, con todas las reservas MAYORES/bloqueantes de
-sus jueces ciegos saldadas en los commits de remate (H02, H04, H06, H07, H08) — la épica está
-**completa a falta del juez de H10/H11 y del merge**: los commits ya viven en
-`feat/e29-honestidad-superficie`, pero H10/H11 aún no tienen veredicto de juez ciego y la rama no ha
-cruzado a `develop`.
+**Estado real**: las 11 historias están implementadas y **mergeadas** (PR #27, merge `fb48c03`), con
+todas las reservas MAYORES/bloqueantes de sus jueces ciegos saldadas en los commits de remate (H02,
+H04, H06, H07, H08) y H10/H11 aprobadas por juez ciego (`1c09af3`).
+
+## Fases 2-3 de la campaña de bugfixes del testbench homelab (E30 — higiene y escoba) — COMPLETA (pendiente de merge)
+
+Épica cerrada el **2026-08-07** (`requirements/epica-30-higiene-escoba.md`, ratificada por el
+usuario). Cierra el **ciclo de higiene** de `decisiones §16(j)/(l)` ampliado con `§23/A-02,A-03`, la
+flakiness del lock que tres jueces habían señalado, y la **escoba documental** de los nits de `§23`
+más los seguimientos acumulados durante las Fases 0 y 1. Con ella, `decisiones §23` queda **cerrada**:
+sus 12 subpuntos accionables están ejecutados.
+
+| Historia | Commits | Juez ciego | Qué cierra |
+|---|---|---|---|
+| **E30-H01** cursores estrictos y firmados | `8359294` + `2d32eeb` (remate de robustez) | RECHAZADA → saldada | El cursor va firmado con su origen: malformado, retocado o **de otra tool** se rechaza con `INVALID_SCHEMA` en vez de servir la página 1 (`§16(j)` + `§23/A-02,A-03`). |
+| **E30-H02** publicación atómica del lock | `9cd129a` + `6b5c2b7` (4 remates) | APROBADA con reservas, saldadas | La flakiness de `crash_por_senal_no_deja_parciales` **no era un test frágil: era un bug real** — un `SIGKILL` en la ventana no atómica dejaba un lock vacío y **terminal**, cerrando el workspace a la escritura para siempre. |
+| **E30-H03** escoba: 3 defectos + 11 criterios documentales | `0ef66d2` + `8621e40` (3 MAYOR) | APROBADA CON RESERVAS (9/11), saldadas | `contains` con literal no-string → type error; `protocolVersion` no-string → `-32602`; prefijo duplicado de `INVALID_RESULT`; D-02/A-01/A-06/A-09/A-10 y los seguimientos de SARIF y `counts`. |
+| **§16(l)** pasada de mutantes | `9d09c62` | n/a (higiene de suite) | 6 supervivientes confirmados y muertos con test. Dos revelaban **diagnósticos que mentían** (el mensaje de cuarentena decía «nada se ha borrado» mientras borraba el sidecar). |
+
+**Lo que la ejecución corrigió sobre lo que la campaña suponía** — se registra porque es el valor
+real del dogfooding, y porque repite la lección de E23 (*leer el código no basta: ejecútalo*):
+
+- **La firma de cursores introdujo una regresión de robustez que la suite no vio**: un cursor
+  no-ASCII (`«🔥.807e307a»`) hacía `panic!` por un corte fuera de frontera de carácter y se llevaba
+  la **sesión JSON-RPC entera** (rc=101), en las cuatro tools paginadas. Lo cazó el juez ciego de
+  robustez ejecutando el binario, no los tests.
+- **Los tres tests preexistentes del reclamo de locks dejaban pasar la mutación `&&`→`||`**, que
+  reclama locks de dueños vivos. Es decir: cubrían el camino, no la frontera.
+- **Una hipótesis registrada era falsa.** La divergencia de `workspace_status.counts` se había
+  anotado como «diagnósticos sin target»; verificarla la refutó (`SYMLINK-UNSUPPORTED` y
+  `DOC-NOT-UTF8` sí llevan targets y divergen igual). El criterio real es que el fichero nunca entra
+  al inventario.
+- **A-06 era la punta de otro defecto**: un `replace_text` que no casa nada **reescribe el fichero**
+  y reserializa el frontmatter. Fuera del alcance de H03 por causa raíz distinta; **abierto**.
+- **Un test aseveraba la negación del defecto que su propio commit documentaba** (el de guardia de
+  A-06), y pasaba solo porque el fixture no tenía frontmatter en estilo flow. El juez lo demostró
+  añadiendo `tags: [a, b]`. Corregido con fixture propio de dos documentos, donde el de estilo block
+  es el anti-vacuo.
+- **Dos arreglos llegaron sin red**: el de SARIF sin un solo test (neutralizar el guard dejaba los 51
+  tests del crate en verde) y una costura extraída «para que sea ejercitable» que **nadie ejerció**.
+- **La pasada de mutantes destapó superficie pública muerta**: `Workspace::revert_transaction` con el
+  cuerpo en `unreachable!()` deja los 52 binarios de test del workspace en verde. Registrado en
+  `decisiones §16`, **sin actuar**: es la categoría de `§16(b)`/`§16(g)`, que se resolvieron por
+  decisión de retirar, no añadiendo tests.
+
+**La lección**: los cuatro fallos de arriba convivían con la suite **en verde**. E23 dejó escrito
+*«cuando dudes de si algo funciona, ejecútalo»*; E30 añade el piso de arriba — **cuando dudes de si
+un test muerde, mútalo**.
 
 ## Defectos posteriores a E27
 

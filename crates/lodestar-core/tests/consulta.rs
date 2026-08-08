@@ -625,6 +625,67 @@ fn error_de_tipo_contains_escalar() {
     );
 }
 
+/// Criterio: `contains` con un literal **no-string** sobre un campo **string** es un `TypeError`
+/// (`contains_con_literal_no_string_sobre_string_es_type_error`, `E30-H03` seguimiento 6,
+/// `decisiones §23`).
+///
+/// `eval_contains` trata el campo string como texto (subcadena), así que solo un literal string
+/// tiene sentido como aguja; hasta ahora un literal no-string devolvía `Ok(false)` en silencio
+/// (`titulo contains 3` sobre `titulo: "auth3"` no encontraba nada, indistinguible de "no aparece
+/// la subcadena '3'" cuando en realidad la consulta está mal tipada). Decisión ratificada por el
+/// usuario (2026-08-06): mismo mecanismo que `A-04` (`error_de_tipo_afijo_literal_no_string` /
+/// `eval_afijo`, `E29-H04`) — el literal no-string sobre un campo string reporta
+/// [`TypeError::NotAString`] con `found` el tipo del **literal**, no `TypeError::NotAList` (que es
+/// el error reservado al campo que no es ni string ni lista, ver
+/// `error_de_tipo_contains_escalar`) ni un `false` silencioso.
+///
+/// Anti-vacuo: `contains` legítimo string-string (`contains_string`) y sobre listas
+/// (`contains_lista`, `contains_any_ok`, `contains_all_ok`) deben seguir intactos — este test los
+/// re-ejercita explícitamente para que un arreglo defectuoso que capture *todo* `contains` como
+/// error no pase desapercibido.
+#[test]
+fn contains_con_literal_no_string_sobre_string_es_type_error() {
+    let f = fm("titulo: authentication");
+
+    // El caso nuevo: literal numérico sobre campo string.
+    let r = eval(&cmp("titulo", Op::Contains, num(3)), &f);
+    assert!(
+        matches!(
+            r,
+            Err(TypeError::NotAString {
+                found: ValueType::Number,
+                ..
+            })
+        ),
+        "`titulo contains 3` debe ser NotAString{{number}} (mismo mecanismo que A-04), no {r:?}"
+    );
+    assert_ne!(
+        r,
+        Ok(false),
+        "`contains` con literal no-string sobre un campo string es ERROR, no `false` silencioso"
+    );
+
+    // Anti-vacuo: el `contains` legítimo string-string sigue funcionando exactamente igual.
+    assert_eq!(
+        eval(&cmp("titulo", Op::Contains, qstr("auth")), &f),
+        Ok(true),
+        "anti-vacuo: `titulo contains \"auth\"` (string-string) sigue siendo subcadena, no error"
+    );
+    assert_eq!(
+        eval(&cmp("titulo", Op::Contains, qstr("xyz")), &f),
+        Ok(false),
+        "anti-vacuo: `titulo contains \"xyz\"` (string-string, no aparece) sigue siendo `false`"
+    );
+
+    // Anti-vacuo: `contains` sobre listas con literal string sigue siendo pertenencia, no error.
+    let lista = fm(concat!("owners:\n", "  - platform\n", "  - security"));
+    assert_eq!(
+        eval(&cmp("owners", Op::Contains, qstr("security")), &lista),
+        Ok(true),
+        "anti-vacuo: `owners contains \"security\"` (lista) sigue siendo pertenencia"
+    );
+}
+
 /// Criterio: una propiedad con tipos distintos en dos documentos se evalúa según el tipo de **su**
 /// documento (`tipos_heterogeneos`).
 ///
