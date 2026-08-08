@@ -1960,3 +1960,141 @@ fn replace_text_sin_ocurrencias_en_forma_array_es_noop() {
         plan_efectivo.semantic_diff
     );
 }
+
+// ==============================================================================================
+// E31-H02 (B) · `noOpOperations` — el plan declara lo que NO tuvo efecto (`decisiones §26`)
+// ==============================================================================================
+
+/// **E31-H02(B)** — **Dado** un plan con una operación efectiva y otra sin efecto, **Cuando** se
+/// planifica, **Entonces** `noOpOperations` lista **solo** la vacía, y `normalizedOperations`
+/// conserva **las dos**.
+///
+/// Es el anti-vacuo del campo: un `noOpOperations` que listara todas las operaciones, o ninguna,
+/// pasaría cualquier test que solo mirase la vacía. Y fija el requisito que motivó la señal: la
+/// operación sin efecto **no se elimina** del plan, se ANOTA — si desapareciera de
+/// `normalizedOperations`, el agente no podría distinguir «la ejecuté y no hizo nada» de «nunca la
+/// mandaste».
+#[test]
+fn no_op_operations_lista_solo_las_operaciones_sin_efecto() {
+    let (_dir, app) = app_con_frontmatter_flow_y_block();
+
+    let ops = serde_json::json!([
+        // (0) SIN efecto: el `find` no aparece por ninguna parte.
+        { "op": "replace_text", "path": "flow.md",
+          "find": "esta-cadena-no-existe-en-el-doc", "replace": "sustituto" },
+        // (1) CON efecto: `casa.md` contiene «reemplázame».
+        { "op": "replace_text", "path": "casa.md",
+          "find": "reemplázame", "replace": "reemplazado" },
+    ]);
+    let plan = app
+        .change_plan(None, &ops, policy_permisiva())
+        .expect("planificar una op vacía junto a una efectiva no debe fallar");
+
+    assert_eq!(
+        plan.normalized_operations.len(),
+        2,
+        "las DOS operaciones siguen en el plan: la señal de no-op es aditiva, no sustituye ni \
+         elimina (§26). Resultó: {:?}",
+        plan.normalized_operations
+    );
+
+    let paths: Vec<&str> = plan
+        .no_op_operations
+        .iter()
+        .map(|n| n.path.as_str())
+        .collect();
+    assert_eq!(
+        paths,
+        vec!["flow.md"],
+        "`noOpOperations` debe listar EXACTAMENTE la operación sin efecto: ni la efectiva (o el \
+         campo no discrimina y es ruido) ni ninguna (o no informa de nada). Resultó: {:?}",
+        plan.no_op_operations
+    );
+
+    let no_op = &plan.no_op_operations[0];
+    assert_eq!(
+        no_op.index, 0,
+        "el índice debe apuntar a la posición REAL de la operación dentro de \
+         `normalizedOperations`, que es la que el cliente puede indexar: {no_op:?}"
+    );
+    assert_eq!(
+        plan.normalized_operations[no_op.index], plan.normalized_operations[0],
+        "y ese índice tiene que resolver a la operación de la que habla, no a otra"
+    );
+    assert_eq!(
+        no_op.op, "replace_body",
+        "el `op` nombra la operación YA NORMALIZADA —un `replace_text` se normaliza a \
+         `replace_body`—, porque es lo que `index` indexa: {no_op:?}"
+    );
+}
+
+/// **E31-H02(B)** — **Dado** un plan cuyas operaciones son todas efectivas, **Cuando** se
+/// planifica, **Entonces** `noOpOperations` va **vacío**.
+///
+/// El control negativo del test de arriba: sin él, un campo que listara siempre algo (o que se
+/// rellenara por error con todas las ops) podría pasar desapercibido.
+#[test]
+fn no_op_operations_va_vacio_cuando_todo_tuvo_efecto() {
+    let (_dir, app) = app_con_frontmatter_flow_y_block();
+
+    let plan = app
+        .change_plan(
+            None,
+            &serde_json::json!([
+                { "op": "replace_text", "path": "casa.md",
+                  "find": "reemplázame", "replace": "reemplazado" },
+            ]),
+            policy_permisiva(),
+        )
+        .expect("planificar una op efectiva no debe fallar");
+
+    assert!(
+        plan.no_op_operations.is_empty(),
+        "una operación que SÍ cambia el documento no puede declararse sin efecto: {:?}",
+        plan.no_op_operations
+    );
+}
+
+/// **E31-H02(B)** — **Dado** un plan **persistido por un binario anterior** (sin la clave
+/// `noOpOperations`), **Cuando** se carga y se aplica, **Entonces** funciona, con la lista vacía por
+/// defecto.
+///
+/// Los planes viven en `.lodestar/runtime/plans/` con un TTL propio, así que un binario nuevo puede
+/// encontrarse planes escritos por el anterior. El campo va **fuera del `planHash`** (que cubre
+/// `baseWorkspaceRevision ‖ normalizedOperations`), de modo que su ausencia no invalida el hash: es
+/// el mismo patrón con que E29-H07 introdujo `policy`, y este test es la guardia que aquella no
+/// tuvo.
+#[test]
+fn un_plan_sin_la_clave_no_op_operations_se_sigue_aplicando() {
+    let (dir, app) = app_con_frontmatter_flow_y_block();
+    let root = dir.path();
+
+    let plan = app
+        .change_plan(
+            None,
+            &serde_json::json!([
+                { "op": "replace_text", "path": "casa.md",
+                  "find": "reemplázame", "replace": "reemplazado" },
+            ]),
+            policy_permisiva(),
+        )
+        .expect("planificar debe funcionar");
+
+    // Se reescribe el plan persistido SIN la clave, como lo habría dejado un binario anterior.
+    let (ruta, mut valor) = json_del_plan_unico(root);
+    assert!(
+        valor
+            .as_object_mut()
+            .expect("el plan persistido es un objeto")
+            .remove("noOpOperations")
+            .is_some(),
+        "precondición: el plan que se acaba de persistir DEBE llevar la clave, o este test no \
+         estaría probando nada (sería vacuo)"
+    );
+    std::fs::write(&ruta, serde_json::to_vec_pretty(&valor).unwrap()).unwrap();
+
+    app.change_apply(&plan.change_set_id, None).expect(
+        "un plan sin la clave `noOpOperations` debe aplicarse igual: el campo va fuera del \
+                 `planHash`, así que su ausencia no puede invalidar el plan",
+    );
+}

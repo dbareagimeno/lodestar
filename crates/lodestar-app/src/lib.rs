@@ -1754,6 +1754,30 @@ impl App {
             }
         }
 
+        // (4-ter) Operaciones SIN EFECTO (E31-H02, `decisiones §26`): las que se materializaron y
+        //     dejaron el documento que nombran **exactamente igual** que estaba. El predicado es la
+        //     comparación de BYTES de la línea de arriba —el mismo con el que el escritor computa su
+        //     lote afectado (`affected_paths`)—, así que el plan no puede prometer un no-op que el
+        //     apply luego escriba, ni al revés. Un `move` no puede ser no-op salvo `from == to`: si
+        //     el origen desaparece, hay cambio aunque el destino case byte a byte.
+        let after_files_ref = after.files();
+        let no_op_operations: Vec<NoOpOperation> = normalized
+            .iter()
+            .enumerate()
+            .filter(|(_, op)| match op {
+                NormalizedOperation::Move { from, to, .. } => from == to,
+                _ => true,
+            })
+            .filter_map(|(index, op)| {
+                let path = plan::op_target_path(op);
+                (files.get(path) == after_files_ref.get(path)).then(|| NoOpOperation {
+                    index,
+                    path: path.clone(),
+                    op: plan::op_variant_name(op),
+                })
+            })
+            .collect();
+
         let risk = plan::assess_risk(&normalized, &doc_set, &after);
         let semantic_diff = plan::semantic_diff(&doc_set, &after);
         let before_report = plan::validate_result(&doc_set);
@@ -1776,6 +1800,7 @@ impl App {
             policy,
             expires_at: expires_at_string(),
             normalized_operations: normalized,
+            no_op_operations,
             risk,
             semantic_diff,
             impact,
@@ -3233,10 +3258,53 @@ pub struct PlanResult {
     /// Vacío (`{}`) para la forma de array de operaciones sueltas, que no nace de una selección.
     #[serde(default)]
     pub captured_revisions: BTreeMap<RelPath, DocumentRevision>,
+    /// Operaciones del plan que se materializaron pero cuyo resultado es **idéntico** al documento
+    /// de partida (E31-H02, `decisiones §26`).
+    ///
+    /// Ni error ni advertencia: es la respuesta honesta a *«ejecuté tu operación, resultado: sin
+    /// efecto»*, que hasta v0.5.0 el plan **no sabía dar**. Un `replace_text` cuyo `find` no casaba
+    /// nada aparecía en `normalizedOperations` exactamente igual que uno efectivo, y la única pista
+    /// —que el documento saliera en `semanticDiff.modified`— era además ENGAÑOSA: salía por el churn
+    /// de bytes de la reserialización, no porque hubiera cambiado algo. Con la cabecera ya
+    /// preservada ese churn desapareció, así que sin este campo la operación vacía no dejaría
+    /// ninguna traza y el agente no podría distinguir «se procesaron 40 documentos y 28 no tenían
+    /// coincidencias» de «solo se seleccionaron 12».
+    ///
+    /// **Derivado, no declarado**: se computa comparando los bytes del documento antes y después de
+    /// la simulación — el mismo predicado con el que el escritor decide su lote afectado
+    /// (`affected_paths`), así que no puede divergir de lo que el apply hará. Cubre **cualquier**
+    /// operación sin efecto, no solo `replace_text`: también un `edit_section` que reescribe una
+    /// sección con su contenido actual, un `patch_frontmatter` que escribe el valor que ya estaba o
+    /// un `move` con `from == to`.
+    ///
+    /// La operación **no** se elimina de [`Self::normalized_operations`] —la señal es aditiva— y el
+    /// campo va **fuera del `planHash`**, que cubre `baseWorkspaceRevision ‖ normalizedOperations`:
+    /// el hash es la identidad de *lo que se pidió*, y «resultó no-op» es una propiedad *del
+    /// resultado*. Por eso ningún `planHash` cambia y un plan persistido por un binario anterior se
+    /// lee con la lista vacía (`#[serde(default)]`, el patrón de `policy` en E29-H07).
+    #[serde(default)]
+    pub no_op_operations: Vec<NoOpOperation>,
     /// Conteo de diagnósticos del workspace ANTES del plan.
     pub diagnostics_before: ValidationSummary,
     /// Conteo de diagnósticos del workspace hipotético DESPUÉS del plan.
     pub diagnostics_after: ValidationSummary,
+}
+
+/// Una operación del plan que **no tuvo efecto**: se materializó y su resultado es idéntico al
+/// documento de partida (E31-H02, `decisiones §26`). Ver [`PlanResult::no_op_operations`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct NoOpOperation {
+    /// Índice de la operación dentro de [`PlanResult::normalized_operations`], que **conserva** la
+    /// operación: este campo apunta a ella, no la sustituye.
+    pub index: usize,
+    /// El documento que la operación nombra (su destino, para un `move`).
+    pub path: RelPath,
+    /// Tipo de la operación **ya normalizada**, en el vocabulario snake_case del wire
+    /// (`lodestar_core::plan::op_variant_name`, una sola verdad de nombres). Ojo: la normalización
+    /// puede diferir de lo que se pidió —un `replace_text` se normaliza a `replace_body`—, y aquí se
+    /// nombra lo normalizado porque es lo que `index` indexa.
+    pub op: String,
 }
 
 /// Resumen de impacto de un plan (E12-H08): los documentos que el plan crea/modifica/borra/mueve, y

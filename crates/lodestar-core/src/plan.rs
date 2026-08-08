@@ -1274,8 +1274,33 @@ fn apply_one(files: &mut FileMap, op: &NormalizedOperation) -> Result<(), CoreEr
     Ok(())
 }
 
-/// Nombre de la variante (para el mensaje de [`CoreError::OperationNotApplicable`]).
-fn op_variant_name(op: &NormalizedOperation) -> String {
+/// El documento que una operación normalizada **nombra**: su objetivo, y para un `move` su
+/// **destino** (que es donde queda el contenido tras aplicarla).
+///
+/// Lo consume el `noOpOperations` del plan (E31-H02, `decisiones §26`) para decir de QUÉ documento
+/// habla una operación sin efecto. Match exhaustivo **sin comodín**, con el mismo criterio que
+/// [`assert_sin_colisiones_intra_plan`]: si algún día entra una variante nueva, el compilador obliga
+/// a decidir aquí cuál es su documento en vez de dejarla caer en un `_` que devolvería el path
+/// equivocado en silencio.
+pub fn op_target_path(op: &NormalizedOperation) -> &RelPath {
+    match op {
+        NormalizedOperation::Create { path, .. }
+        | NormalizedOperation::PatchFrontmatter { path, .. }
+        | NormalizedOperation::ReplaceBody { path, .. }
+        | NormalizedOperation::ReplaceText { path, .. }
+        | NormalizedOperation::EditSection { path, .. }
+        | NormalizedOperation::Delete { path, .. } => path,
+        NormalizedOperation::Move { to, .. } => to,
+    }
+}
+
+/// Nombre de la variante en el vocabulario del wire (snake_case), tal como lo nombra el
+/// `inputSchema` de `change_plan`.
+///
+/// Lo consumen el mensaje de [`CoreError::OperationNotApplicable`] y, desde E31-H02, el
+/// `noOpOperations` del plan: **una sola verdad** para los nombres de operación (invariante #4), de
+/// modo que añadir una variante no pueda dejar dos catálogos discrepando.
+pub fn op_variant_name(op: &NormalizedOperation) -> String {
     match op {
         NormalizedOperation::Create { .. } => "create",
         NormalizedOperation::PatchFrontmatter { .. } => "patch_frontmatter",
