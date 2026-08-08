@@ -63,6 +63,8 @@ prioridad **filtra**, no ordena. El vocabulario de `estado` es cerrado: `abierta
 | 22 | Integridad referencial de los valores del frontmatter | abierta | 3 | [`22-integridad-referencial-frontmatter.md`](22-integridad-referencial-frontmatter.md) |
 | 23 | Hallazgos del testbench MCP sobre el homelab | cerrada | **5** | [`23-hallazgos-testbench-homelab.md`](23-hallazgos-testbench-homelab.md) |
 | 24 | Equivalencia de paths por caja/Unicode en el guard de colisión | abierta | 3 | [`24-equivalencia-caja-unicode.md`](24-equivalencia-caja-unicode.md) |
+| 25 | Superficie pública muerta: `Workspace::revert_transaction` | abierta | 3 | [`25-superficie-muerta-revert-transaction.md`](25-superficie-muerta-revert-transaction.md) |
+| 26 | Un `replace_text` sin coincidencias reescribe y reserializa el frontmatter | abierta | 3 | [`26-replace-text-noop-reserializa.md`](26-replace-text-noop-reserializa.md) |
 
 ## Dónde está el criterio hoy
 
@@ -135,12 +137,25 @@ de idioma partido, no la ficha.
    [`docs/qa/campana-bugfixes-2026-08.md`](../docs/qa/campana-bugfixes-2026-08.md). **Siguiente**: el
    ciclo de higiene (punto 2, §16(j) ampliado con §23/A-02/A-03) y la historia-escoba de
    `docs/qa/campana-bugfixes-2026-08.md` (Fase 3: D-02, A-01, A-06, A-09, A-10 y los seguimientos
-   nuevos registrados al cerrar la Fase 1).
-2. **Ciclo de higiene** — §16(i) coreografía única de sellado (ver punto 0), §16(j) cursor
+   nuevos registrados al cerrar la Fase 1) — **ambas ejecutadas en `E30`, ver punto 2**.
+2. ✅ **Ciclo de higiene** — §16(i) coreografía única de sellado (ver punto 0), §16(j) cursor
    inválido **ampliado con §23/A-02/A-03** (cursor ajeno), §16(l) pasada acotada de `/mutantes`.
+   **Ejecutado (2026-08-07)**: `E30` completa — H01 cursores firmados, H02 publicación atómica del
+   lock (la flakiness que tres jueces trataban como test frágil **era un bug real**: un `SIGKILL` en
+   la ventana no atómica cerraba el workspace a la escritura para siempre), H03 escoba documental, y
+   la pasada de mutantes (6 supervivientes muertos). PR #28. Con ella **§23 queda cerrada**: sus 12
+   subpuntos accionables están ejecutados. Detalle en
+   [`docs/qa/campana-bugfixes-2026-08.md`](../docs/qa/campana-bugfixes-2026-08.md).
+   **La campaña dejó dos hallazgos que exigen criterio, con ficha propia**: [`§25`](25-superficie-muerta-revert-transaction.md)
+   (`Workspace::revert_transaction` es superficie pública sin llamadores — mismo modo de fallo que
+   §16(b)/§16(g), que se resolvieron **retirando**) y [`§26`](26-replace-text-noop-reserializa.md)
+   (un `replace_text` sin coincidencias reescribe el fichero y reserializa el frontmatter). **Ambas
+   son el siguiente trabajo natural**: acotadas, con recomendación escrita y criterio de aceptación
+   listo.
 3. **Épica de evidencia** — banco de pruebas (§9) + dogfooding; §23 aporta la primera corrida
-   completa y el arnés re-ejecutable. **Cierra §14 con datos.** Los nits documentales de §23
-   (D-02, A-01, A-06, A-09, A-10) van con §19 según toque cada fichero.
+   completa y el arnés re-ejecutable. **Cierra §14 con datos.** ~~Los nits documentales de §23
+   (D-02, A-01, A-06, A-09, A-10) van con §19 según toque cada fichero.~~ — **ejecutados en
+   `E30-H03`** (2026-08-07), no quedan pendientes para esta épica.
 4. **§20 renombrado del proyecto** (alcance total, incluido `.lodestar/`, con migración). Descongela
    §1/§9-firma y §17-DA.
 5. **§21 comillas en el lenguaje de consulta** (puerta de diseño propia).
