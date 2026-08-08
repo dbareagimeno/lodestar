@@ -1196,7 +1196,7 @@ tools:
       `expectedWorkspaceRevision` si viene → REVISION_CONFLICT; (3) comprueba que el workspace sigue
       en la `resultRevision` que dejó el apply (la revisión actual del conocimiento escribible == la
       del receipt) → WRITE_CONFLICT y NO revierte si algún fichero afectado cambió tras el apply.
-      Luego delega en `Workspace::revert_transaction`, que bajo el lock de publicación (E13-H02)
+      Luego delega en `Workspace::revert_transaction_con_recibo`, que bajo el lock de publicación (E13-H02)
       RE-VERIFICA esa misma revisión (E25-H05: el paso (3) mira sin el lock, y en esa ventana otro
       escritor puede tocar un `.md` afectado → WRITE_CONFLICT sin escribir nada, en vez de pisarlo con
       la copia respaldada), verifica que las copias de recuperación existen, respalda el estado actual

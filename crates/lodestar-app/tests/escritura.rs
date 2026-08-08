@@ -973,7 +973,7 @@ mod recibo_tras_el_punto_de_no_retorno {
     ///
     /// Esta es la prueba de que el recibo es **utilizable**, y con los dos puntos de
     /// `apply_transaction` exige algo más que persistirlo temprano: al no haberse sellado la
-    /// transacción, el journal queda `applied` en disco, así que `revert_transaction` recupera primero
+    /// transacción, el journal queda `applied` en disco, así que `revert_transaction_con_recibo` recupera primero
     /// (su paso 2) y la vía **COMPLETAR** de `recovery.rs` pasa hoy por `finish_recovery`, que
     /// **borra las copias de recuperación** (`discard_recovery_copies`) — y sin copias no hay
     /// reversión posible. «La recuperación por la vía COMPLETAR lo da por bueno» (alcance de la
@@ -1327,15 +1327,15 @@ mod recibo_tras_el_punto_de_no_retorno {
 //
 // **(b) Revert sin re-verificación bajo el lock.** `change_revert_uncounted` compara la revisión
 // actual con `receipt.result_revision` en `crates/lodestar-app/src/lib.rs:1845-1857` — **antes** de
-// tomar el lock, que lo toma `revert_transaction` (`recovery.rs:898`). En esa ventana otro escritor
+// tomar el lock, que lo toma `revert_transaction_con_recibo` (`recovery.rs:898`). En esa ventana otro escritor
 // puede tocar un `.md` afectado y la reversión lo sobrescribe con la copia respaldada, en silencio.
 // La simetría con el apply está rota: `apply_transaction` sí vuelve a comprobar la base bajo el lock
-// (`reverify_base_revision`, `transaction.rs:195`) y `revert_transaction` no tiene equivalente.
+// (`reverify_base_revision`, `transaction.rs:195`) y `revert_transaction_con_recibo` no tiene equivalente.
 //
 // **(c) La reversión conserva la forma exacta de S5** (hallazgo MAYOR-2 del juez ciego de E25-H04).
 // E25-H04 cerró «publicar implica recibo» solo en el camino del apply. En el espejo,
 // `write_receipt(&revert_receipt)` sale por `?` (`lib.rs:1880-1882`) **después** de que
-// `revert_transaction` haya publicado la inversa (`:1863-1866`), y `revert_transaction`
+// `revert_transaction_con_recibo` haya publicado la inversa (`:1863-1866`), y `revert_transaction_con_recibo`
 // (`recovery.rs:892`) no llama a `write_pending_receipt` (`receipts.rs:225`) — así que no hay
 // registro durable que la vía COMPLETAR (`finish_recovery_completada:769`) pueda promover. Un
 // `SIGKILL` o un `ENOSPC` entre el último rename de la inversa y su recibo devuelve `Err` sobre algo
@@ -1347,16 +1347,16 @@ mod recibo_tras_el_punto_de_no_retorno {
 //
 // 1. `PuntoDeGancho::AntesDeRestaurar` — **variante nueva** (stub añadido a
 //    `crates/lodestar-workspace/src/failpoints.rs`, sin lógica). El implementador la dispara con un
-//    `ejecutar_gancho` cfg-gateado dentro de `revert_transaction`, entre su entrada y su primera
+//    `ejecutar_gancho` cfg-gateado dentro de `revert_transaction_con_recibo`, entre su entrada y su primera
 //    escritura y **antes** de la re-verificación bajo el lock — es el espejo de
 //    `AntesDePublicar` (E25-H01) para el camino que deshace. Como el gancho **continúa**, reproduce
 //    lo que un `FailPoint` no sabe: la edición ajena ocurre *y el flujo sigue*.
 // 2. `FailPoint::TrasLaTransaccionAntesDelRecibo` — **la que ya existe** (E25-H04), consultada
-//    también desde `App::change_revert`, entre el retorno de `revert_transaction` y el
+//    también desde `App::change_revert`, entre el retorno de `revert_transaction_con_recibo` y el
 //    `write_receipt` de la inversa. Mismo `failpoints::disparado(..)` y mismo autodesarme, que es lo
 //    que permite comprobar que el punto **se ejerció** y que el escenario no pasó vacuamente.
 // 3. `FailPoint::TrasJournalPrepared` — **la que ya existe** (E24-H13), ejercida también en
-//    `revert_transaction` justo después de su journal (y del registro durable del recibo que la
+//    `revert_transaction_con_recibo` justo después de su journal (y del registro durable del recibo que la
 //    historia le añade) y **antes** del primer rename de la inversa. Es lo que hace fuerte al control
 //    anti-vacuo: sin ella, «no dejar recibo» se cumpliría trivialmente en escenarios que ni siquiera
 //    llegan a escribir el registro.
@@ -1565,7 +1565,7 @@ mod reversion_re_verificada {
             assert!(
                 testigo.load(Ordering::SeqCst),
                 "el gancho `PuntoDeGancho::AntesDeRestaurar` no se ejerció: nadie lo dispara en el \
-                 camino de `Workspace::revert_transaction`. Sin él, la edición externa de la ventana \
+                 camino de `Workspace::revert_transaction_con_recibo`. Sin él, la edición externa de la ventana \
                  `[comprobación de la fachada, primera escritura de la inversa)` no ocurre y este \
                  escenario no prueba nada — ver el rustdoc de la variante para dónde debe vivir el \
                  `ejecutar_gancho`"
@@ -1659,8 +1659,8 @@ mod reversion_re_verificada {
         /// **Entonces** la inversa está publicada **y** existe su recibo.
         ///
         /// Hoy devuelve `Err` sobre algo ya publicado y sin recibo: `write_receipt` sale por `?`
-        /// (`lib.rs:1880-1882`) después de que `revert_transaction` haya restaurado el canónico, y
-        /// `revert_transaction` no persiste ningún registro durable antes de su punto de no retorno.
+        /// (`lib.rs:1880-1882`) después de que `revert_transaction_con_recibo` haya restaurado el canónico, y
+        /// `revert_transaction_con_recibo` no persiste ningún registro durable antes de su punto de no retorno.
         /// El arreglo no puede consistir en escribir el recibo *después* —el proceso puede no llegar
         /// ahí—, sino en persistirlo con el journal de la inversa y promoverlo al sellar, con la
         /// misma mecánica que E25-H04 dio al apply (`write_pending_receipt`/`promote_pending_receipt`,
@@ -1675,7 +1675,7 @@ mod reversion_re_verificada {
                 &a.app,
                 &a.receipt_id,
                 FailPoint::TrasLaTransaccionAntesDelRecibo,
-                "en el camino de `App::change_revert`, entre el retorno de `revert_transaction` y el \
+                "en el camino de `App::change_revert`, entre el retorno de `revert_transaction_con_recibo` y el \
                  `write_receipt` de la inversa",
             );
 
@@ -1799,7 +1799,7 @@ mod reversion_re_verificada {
                     &a.app,
                     &a.receipt_id,
                     FailPoint::TrasJournalPrepared,
-                    "en `Workspace::revert_transaction`, tras crear el journal de la inversa (y su \
+                    "en `Workspace::revert_transaction_con_recibo`, tras crear el journal de la inversa (y su \
                      registro durable de recibo) y ANTES del primer rename",
                 )
                 .expect_err("el failpoint aborta la reversión antes del primer rename");

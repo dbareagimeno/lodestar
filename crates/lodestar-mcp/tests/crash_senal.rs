@@ -546,7 +546,7 @@ fn crash_tras_publicar_deja_transaccion_reversible() {
 // (`requirements/epica-25-endurecimiento-escritura.md`, bloque B, defecto (c)). Fase ROJA.
 //
 // El test de arriba cubre el camino del apply. Este cubre **el espejo**, que es el hallazgo MAYOR-2
-// del juez ciego de E25-H04: `revert_transaction` (`recovery.rs:892`) no escribe ningún registro
+// del juez ciego de E25-H04: `revert_transaction_con_recibo` (`recovery.rs:892`) no escribe ningún registro
 // durable antes de su punto de no retorno, y el `write_receipt` de la inversa sale por `?` en la
 // fachada (`crates/lodestar-app/src/lib.rs:1880-1882`) **después** de que el canónico ya haya vuelto
 // atrás. Un `SIGKILL` entre el último rename de la inversa y su recibo deja el conocimiento
