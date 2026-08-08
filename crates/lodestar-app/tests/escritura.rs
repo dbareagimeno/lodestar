@@ -1327,17 +1327,19 @@ mod recibo_tras_el_punto_de_no_retorno {
 //
 // **(b) Revert sin re-verificación bajo el lock.** `change_revert_uncounted` compara la revisión
 // actual con `receipt.result_revision` en `crates/lodestar-app/src/lib.rs:1845-1857` — **antes** de
-// tomar el lock, que lo toma `revert_transaction_con_recibo` (`recovery.rs:898`). En esa ventana otro escritor
+// tomar el lock, que lo toma la reversión después. En esa ventana otro escritor
 // puede tocar un `.md` afectado y la reversión lo sobrescribe con la copia respaldada, en silencio.
-// La simetría con el apply está rota: `apply_transaction` sí vuelve a comprobar la base bajo el lock
-// (`reverify_base_revision`, `transaction.rs:195`) y `revert_transaction_con_recibo` no tiene equivalente.
+// La simetría con el apply estaba rota: `apply_transaction` sí volvía a comprobar la base bajo el
+// lock (`reverify_base_revision`) y el camino que deshace NO tenía equivalente — hasta que E25-H05
+// se lo dio (hoy `revert_transaction_con_recibo` llama a `reverify_base_revision`, `recovery.rs:1155`).
 //
 // **(c) La reversión conserva la forma exacta de S5** (hallazgo MAYOR-2 del juez ciego de E25-H04).
 // E25-H04 cerró «publicar implica recibo» solo en el camino del apply. En el espejo,
 // `write_receipt(&revert_receipt)` sale por `?` (`lib.rs:1880-1882`) **después** de que
-// `revert_transaction_con_recibo` haya publicado la inversa (`:1863-1866`), y `revert_transaction_con_recibo`
-// (`recovery.rs:892`) no llama a `write_pending_receipt` (`receipts.rs:225`) — así que no hay
-// registro durable que la vía COMPLETAR (`finish_recovery_completada:769`) pueda promover. Un
+// la reversión haya publicado la inversa (`:1863-1866`), y la variante que se usaba entonces
+// —`Workspace::revert_transaction`, retirada en E31-H01— NO llamaba a `write_pending_receipt`
+// (`receipts.rs:225`): delegaba con `recibo: None`, así que no había
+// registro durable que la vía COMPLETAR (`finish_recovery_completada:769`) pudiera promover. Un
 // `SIGKILL` o un `ENOSPC` entre el último rename de la inversa y su recibo devuelve `Err` sobre algo
 // PUBLICADO y sin recibo: el agente cree que no se revirtió, el canónico dice lo contrario, y como el
 // recibo es el criterio de «vivo» del GC (`journal/ ∪ receipts/`), el árbol `recovery/<txnId>-revert/`
@@ -1658,9 +1660,10 @@ mod reversion_re_verificada {
         /// publicación de la inversa y su recibo**, **Cuando** se llama a `change_revert`,
         /// **Entonces** la inversa está publicada **y** existe su recibo.
         ///
-        /// Hoy devuelve `Err` sobre algo ya publicado y sin recibo: `write_receipt` sale por `?`
-        /// (`lib.rs:1880-1882`) después de que `revert_transaction_con_recibo` haya restaurado el canónico, y
-        /// `revert_transaction_con_recibo` no persiste ningún registro durable antes de su punto de no retorno.
+        /// ANTES de E25-H05 devolvía `Err` sobre algo ya publicado y sin recibo: `write_receipt` salía
+        /// por `?` (`lib.rs:1880-1882`) después de que la reversión hubiera restaurado el canónico, y la
+        /// variante de entonces —`Workspace::revert_transaction`, con `recibo: None`, retirada en
+        /// E31-H01— NO persistía ningún registro durable antes de su punto de no retorno.
         /// El arreglo no puede consistir en escribir el recibo *después* —el proceso puede no llegar
         /// ahí—, sino en persistirlo con el journal de la inversa y promoverlo al sellar, con la
         /// misma mecánica que E25-H04 dio al apply (`write_pending_receipt`/`promote_pending_receipt`,

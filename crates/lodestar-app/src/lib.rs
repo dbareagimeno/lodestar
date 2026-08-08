@@ -2233,7 +2233,7 @@ impl App {
 
         // (5) Restaurar por el único escritor (transacción inversa recuperable con journal propio).
         //     `current` viaja con la llamada para que se **re-verifique BAJO EL LOCK** (E25-H05): el
-        //     paso (4) mira sin lock —lo toma `revert_transaction`—, así que en esa ventana otro
+        //     paso (4) mira sin lock —lo toma `revert_transaction_con_recibo`—, así que en esa ventana otro
         //     escritor puede tocar un `.md` afectado y la reversión le escribiría la copia respaldada
         //     encima. Y el `semanticDiff` del recibo original se presta para que la inversa registre su
         //     propio recibo con su journal, ANTES de su punto de no retorno.
