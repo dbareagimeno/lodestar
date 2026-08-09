@@ -18,6 +18,15 @@ fn write(dir: &std::path::Path, rel: &str, content: &str) {
 // `initialize_ecoa_version_soportada`.
 
 /// Arranca el servidor sobre un workspace, envía `lines` y devuelve las primeras `expect` respuestas.
+///
+/// **Escribir puede fallar, y no es un fallo del test**: hay casos que ejercitan precisamente el
+/// gate de arranque —una config con una clave desconocida, un `--root` inválido—, donde el servidor
+/// muere ANTES de leer nada. Ahí la tubería ya está cerrada y el `write` devuelve `EPIPE`; si eso
+/// reventara el arnés, el test que comprueba esa muerte fallaría **por conseguir lo que buscaba**, y
+/// solo a veces: es una carrera entre la muerte del hijo y la escritura del padre, así que pasa en
+/// local y falla bajo la carga del CI. Un `EPIPE` se traduce en «no llegaron respuestas», que es lo
+/// que esos tests aseveran. Mismo criterio que `roundtrip_con_config` (más abajo), donde ya se había
+/// resuelto sin propagarlo aquí.
 fn roundtrip(dir: &std::path::Path, lines: &[&str], expect: usize) -> Vec<serde_json::Value> {
     let mut child = Command::new(env!("CARGO_BIN_EXE_lodestar-mcp"))
         .arg("--root")
@@ -30,9 +39,11 @@ fn roundtrip(dir: &std::path::Path, lines: &[&str], expect: usize) -> Vec<serde_
     let mut stdin = child.stdin.take().unwrap();
     let mut stdout = BufReader::new(child.stdout.take().unwrap());
     for l in lines {
-        writeln!(stdin, "{l}").unwrap();
+        if writeln!(stdin, "{l}").is_err() {
+            break;
+        }
     }
-    stdin.flush().unwrap();
+    let _ = stdin.flush();
     drop(stdin);
     let mut out = Vec::new();
     for line in (&mut stdout).lines().map_while(Result::ok) {
@@ -336,10 +347,13 @@ fn roundtrip_profile(
         .unwrap();
     let mut stdin = child.stdin.take().unwrap();
     let mut stdout = BufReader::new(child.stdout.take().unwrap());
+    // Mismo criterio que `roundtrip`: un `--profile` inválido también muere en el arranque.
     for l in lines {
-        writeln!(stdin, "{l}").unwrap();
+        if writeln!(stdin, "{l}").is_err() {
+            break;
+        }
     }
-    stdin.flush().unwrap();
+    let _ = stdin.flush();
     drop(stdin);
     let mut out = Vec::new();
     for line in (&mut stdout).lines().map_while(Result::ok) {
