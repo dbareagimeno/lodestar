@@ -3784,3 +3784,156 @@ fn preservar_la_cabecera_no_mueve_la_revision() {
          aserciones de arriba se cumplirían con una revisión constante"
     );
 }
+
+// ---------------------------------------------------------------------------
+// E32-H01 — tandas (a) y (b): la red que faltaba bajo E31-H02/`§26`, medida por
+// la pasada de mutantes que cerró E31 (`decisiones §27`).
+//
+// Ninguno de estos tests documenta un defecto: fijan comportamiento CORRECTO que
+// hoy se puede mutar sin que nada se ponga rojo. La evidencia de cada uno es su
+// mutación (criterio [EVIDENCIA] de la historia): aplicada al árbol, el test se
+// ve en ROJO; revertida, en VERDE.
+// ---------------------------------------------------------------------------
+
+/// El mismo documento en las dos codificaciones de línea. El universo CRLF de los tests de
+/// `lodestar-core` era UNA línea (y de otra cosa) cuando `§27` lo midió, con el precedente
+/// reciente de E30 (`f7301a8`): un defecto que solo se veía en Windows.
+const DOC_CON_LF: &str = "---\ntitle: hola\n---\ncuerpo\n";
+const DOC_CON_CRLF: &str = "---\r\ntitle: hola\r\n---\r\ncuerpo\r\n";
+
+/// Tanda (a) — criterio `[BDD-a]`: **Dado** un documento con finales CRLF y su gemelo en LF,
+/// **Cuando** `split_front` los corta, **Entonces** el corte es el mismo en ambos.
+///
+/// `replace_body_preservando_cabecera` (E31-H02) es literalmente
+/// `&raw[..split_front(raw).body_offset(raw)] + body`: si el corte se desvía un byte en CRLF, la
+/// función parte el documento en medio del `\r\n` y su promesa entera —«la cabecera sobrevive byte
+/// a byte»— se cae en cualquier workspace escrito en Windows.
+///
+/// Mutaciones que este test mata (`§27 (a)`, verificadas sobrevivientes contra la suite entera):
+/// - `model.rs:133` `nl - 1` → `nl + 1` — el recorte del `\r` de cola del delimitador: el
+///   `fm_text` CRLF saldría con `\r\n` de cola (aserción 1).
+/// - `model.rs:140` `body_start += 1` → `-=` — el consumo del `\r` tras el `---` de cierre: el
+///   cuerpo CRLF empezaría en el último `-` del delimitador (aserción 2).
+#[test]
+fn split_front_corta_igual_con_crlf_que_con_lf() {
+    let sf_lf = model::split_front(DOC_CON_LF);
+    let sf_crlf = model::split_front(DOC_CON_CRLF);
+
+    // (1) El texto YAML del bloque es idéntico en las dos codificaciones y sin `\r` de cola: el
+    //     `\r` de un CRLF pertenece al delimitador, no al bloque.
+    let fm_lf = sf_lf
+        .fm_text(DOC_CON_LF)
+        .expect("el gemelo LF tiene bloque cerrado");
+    let fm_crlf = sf_crlf
+        .fm_text(DOC_CON_CRLF)
+        .expect("el gemelo CRLF tiene bloque cerrado");
+    assert_eq!(
+        fm_crlf, fm_lf,
+        "el texto YAML del bloque debe ser el MISMO con CRLF que con LF"
+    );
+    assert_eq!(fm_lf, "title: hola");
+    assert!(
+        !fm_crlf.ends_with('\r'),
+        "el `\\r` del delimitador de cierre no es texto del bloque; fm_text = {fm_crlf:?}"
+    );
+
+    // (2) El cuerpo empieza en su primer carácter real, en las dos codificaciones.
+    assert_eq!(sf_lf.body(DOC_CON_LF), "cuerpo\n");
+    assert_eq!(
+        sf_crlf.body(DOC_CON_CRLF),
+        "cuerpo\r\n",
+        "tras el `---` de cierre se consume exactamente un CRLF: ni un byte más ni uno menos"
+    );
+
+    // (3) El round-trip de E31-H02 en la variante CRLF: leer el cuerpo y reescribirlo tal cual
+    //     devuelve los mismos bytes. Es la aserción que ata el corte a la garantía de
+    //     `replace_body_preservando_cabecera` («la cabecera sobrevive byte a byte»).
+    assert_eq!(
+        model::replace_body_preservando_cabecera(DOC_CON_CRLF, sf_crlf.body(DOC_CON_CRLF)),
+        DOC_CON_CRLF,
+        "round-trip CRLF: cuerpo leído y reescrito tal cual = documento intacto"
+    );
+    // …y con un cuerpo NUEVO, la cabecera CRLF entera (bloque + delimitadores + su `\r\n`)
+    // sobrevive literal — fija el punto de corte en términos absolutos, no solo consistentes.
+    assert_eq!(
+        model::replace_body_preservando_cabecera(DOC_CON_CRLF, "nuevo\r\n"),
+        "---\r\ntitle: hola\r\n---\r\nnuevo\r\n",
+    );
+}
+
+/// Bloque cuyo texto es SOLO whitespace: YAML lo parsea a `null` (mapa vacío) y el escaneo por
+/// líneas no encuentra entradas. Es el único caso en que el camino quirúrgico, forzado a aplicar
+/// cero ediciones, normalizaría el bloque (colapsa el whitespace) en vez de devolverlo intacto —
+/// exactamente lo que el guard de no-op impide.
+const DOC_BLOQUE_WHITESPACE: &str = "---\n   \n---\n\ncuerpo\n";
+
+/// Tanda (b) — criterios `[BDD-b1]`: **Dado** un documento con frontmatter de formato distintivo,
+/// **Cuando** se aplica un patch sin efecto, **Entonces** el resultado es **byte a byte** el
+/// documento original y `reserialized == false`.
+///
+/// Es el mismo churn que `§26` erradicó en `replace_body` (E31-H02), en la mitad que ya era
+/// quirúrgica desde E16-H04 — y que no tenía test que lo fijara. Mutaciones que mata (`§27 (b)`):
+/// `model.rs:485`, el guard `edits.is_empty()` que devuelve el documento byte a byte cuando el
+/// plan quirúrgico no produce ediciones — neutralizado, el camino quirúrgico «aplica» cero
+/// ediciones, que en el escenario (c) reescribe el bloque.
+#[test]
+fn patch_sin_efecto_devuelve_el_documento_byte_a_byte() {
+    // (a) Escribir el valor que YA estaba, con el bloque de formato distintivo de `DOC_FLOW`
+    //     (lista flow, comillas, comentario): ni un byte cambia y nada se reserializa.
+    let res = parchear(DOC_FLOW, &parche(&[("status", s("draft"))]));
+    assert_eq!(
+        res.raw, DOC_FLOW,
+        "escribir en `status` el valor que ya tenía no puede tocar ni un byte del documento"
+    );
+    assert!(!res.reserialized);
+
+    // (b) Borrar una clave que no está: el plan quirúrgico produce CERO ediciones y el guard
+    //     de no-op devuelve el documento original.
+    let res = parchear(DOC_FLOW, &parche(&[("fantasma", None)]));
+    assert_eq!(
+        res.raw, DOC_FLOW,
+        "borrar una clave inexistente es un no-op: documento byte a byte"
+    );
+    assert!(!res.reserialized);
+
+    // (c) El mismo no-op sobre un bloque de SOLO whitespace: sin el guard, el camino quirúrgico
+    //     colapsaría el whitespace del usuario al «aplicar» cero ediciones. Es el escenario que
+    //     distingue el guard de la identidad accidental de los dos anteriores.
+    let res = parchear(DOC_BLOQUE_WHITESPACE, &parche(&[("fantasma", None)]));
+    assert_eq!(
+        res.raw, DOC_BLOQUE_WHITESPACE,
+        "un patch sin efecto no toca ni un byte — tampoco el whitespace del bloque"
+    );
+    assert!(!res.reserialized);
+}
+
+/// Tanda (b), complemento — criterio `[BDD-b2]`: **Dado** un bloque cuyo escaneo por líneas no es
+/// fiable, **Cuando** se aplica un patch con ediciones, **Entonces** cae al fallback de
+/// reserialización y lo declara (`reserialized == true`).
+///
+/// El fixture: una clave numérica con cero decimal de cola (`1.50:`). El escaneo textual la ve
+/// como `"1.50"`, pero YAML la parsea al float `1.5` — las claves escaneadas y las parseadas no casan,
+/// y editar por líneas un bloque mal escaneado sería corromper el YAML del usuario. La validación
+/// de `model.rs:478-480` detecta el desajuste y fuerza el fallback, que siempre es correcto.
+///
+/// Mutación que mata (`§27 (b)`): `model.rs:480` `&&` → `||` — afloja la validación (la igualdad
+/// de LONGITUDES bastaría aunque los NOMBRES no casen) y el patch entraría por el camino
+/// quirúrgico con `reserialized == false`.
+#[test]
+fn patch_con_bloque_mal_escaneado_cae_al_fallback_y_lo_declara() {
+    let doc = "---\n1.50: enero\ntitle: x\n---\n\ncuerpo\n";
+    let res = parchear(doc, &parche(&[("title", s("y"))]));
+
+    assert!(
+        res.reserialized,
+        "con una clave cuyo texto (`1.50`) no casa con su valor parseado (`1.5`), el escaneo por \
+         líneas no es fiable: el patch debe reserializar Y DECLARARLO.\nresultado:\n{}",
+        res.raw
+    );
+    // El patch se aplicó de verdad (anti-vacuo): el título nuevo está en el bloque.
+    assert!(
+        bloque(&res.raw).contains("title: y"),
+        "el fallback aplica el patch, no lo descarta.\nbloque:\n{}",
+        bloque(&res.raw)
+    );
+}
