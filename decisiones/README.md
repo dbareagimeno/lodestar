@@ -65,7 +65,7 @@ prioridad **filtra**, no ordena. El vocabulario de `estado` es cerrado: `abierta
 | 24 | Equivalencia de paths por caja/Unicode en el guard de colisión | abierta | 3 | [`24-equivalencia-caja-unicode.md`](24-equivalencia-caja-unicode.md) |
 | 25 | Superficie pública muerta: `Workspace::revert_transaction` | cerrada | 3 | [`25-superficie-muerta-revert-transaction.md`](25-superficie-muerta-revert-transaction.md) |
 | 26 | Un `replace_text` sin coincidencias reescribe y reserializa el frontmatter | cerrada | 3 | [`26-replace-text-noop-reserializa.md`](26-replace-text-noop-reserializa.md) |
-| 27 | Seis gaps de suite en `model.rs`/`plan.rs`, medidos por mutantes | abierta | 3 | [`27-gaps-de-suite-en-model-y-plan.md`](27-gaps-de-suite-en-model-y-plan.md) |
+| 27 | Seis gaps de suite en `model.rs`/`plan.rs`, medidos por mutantes | cerrada | 3 | [`27-gaps-de-suite-en-model-y-plan.md`](27-gaps-de-suite-en-model-y-plan.md) |
 
 ## Dónde está el criterio hoy
 
@@ -101,11 +101,13 @@ prioridad **filtra**, no ordena. El vocabulario de `estado` es cerrado: `abierta
 §18 y §19 —más los puntos (b), (e), (f) y (g) de §16— formaban la **épica de honestidad de
 superficie**; **cerradas el 2026-08-07** por `E29` (11/11 historias, pendiente de merge).
 
-**§27** (gaps de suite medidos por mutantes) es **deuda de tests, no comportamiento roto**: nada de
-lo que lista es un defecto, son seis funciones del core que un cambio futuro podría romper sin que
-nada se ponga rojo. Su recomendación escrita es partirla — (a) y (b) con el próximo ciclo de higiene,
-por sujetar lo que `E31` acaba de construir; (c)–(f) a la épica de evidencia de §9, que es donde hay
-criterio para priorizar deuda antigua.
+**§27** (gaps de suite medidos por mutantes) era **deuda de tests, no comportamiento roto**, y está
+**cerrada (2026-08-10) por `E32-H01`**: el usuario eligió la salida (1) —las seis tandas de una
+vez, no la partición que recomendaba la ficha— y los seis tests entraron con su evidencia por
+mutación (cada uno visto en rojo con la mutación aplicada). Los supervivientes del alcance bajan de
+97 a 62, ninguno de los seis gaps sigue vivo; lo que queda es la cola clasificada como «no merece
+test» más los falsos positivos de alcance re-verificados contra `lodestar-app`, con
+`relative_dir_href` señalada como punto de partida si la épica de evidencia (§9) quiere otra tanda.
 
 **§3, §10, §22, §24** son decisiones vivas de baja urgencia: tienen recomendación estable (o, en
 el caso de §24, opciones abiertas sin urgencia) y esperan un caso real que las fuerce (§3 absorbió
@@ -171,6 +173,10 @@ de idioma partido, no la ficha.
    funciones. Dos de ellos, CRLF en `split_front` y el no-op de `patch_frontmatter`, caen **justo
    debajo** de lo que E31 acaba de construir: `replace_body_preservando_cabecera` se apoya en
    `body_offset`, y no hay un solo test de CRLF en el core que avise si se desvía.
+   ✅ **Ejecutada (2026-08-10) por `E32-H01`**
+   ([épica](../requirements/epica-32-gaps-suite-mutantes.md)): las seis tandas de una vez (salida 1,
+   a elección del usuario), cada test verificado con su mutación en rojo, supervivientes del alcance
+   de 97 a 62 y ninguno de los seis gaps vivo. **§27 cerrada.**
 3. **Épica de evidencia** — banco de pruebas (§9) + dogfooding; §23 aporta la primera corrida
    completa y el arnés re-ejecutable. **Cierra §14 con datos.** ~~Los nits documentales de §23
    (D-02, A-01, A-06, A-09, A-10) van con §19 según toque cada fichero.~~ — **ejecutados en
