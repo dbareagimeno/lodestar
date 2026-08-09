@@ -1124,6 +1124,16 @@ Ampliar el wire para expresar «asignar `null`» queda **fuera de alcance** salv
 real que lo pida (`decisiones §23`): quien necesite ese valor debe pasarlo como cualquier otro
 escalar, y el propio RFC no lo permite. El plan debe declarar si el bloque se reserializará entero.
 
+> **E31-H02 (`decisiones §26`)**: reescribir el **cuerpo** ya no reserializa nunca la cabecera. El
+> brazo `ReplaceBody` —al que normalizan `replace_text`, `edit_section`, `replace_body`,
+> `delete remove_links` y el `rewriteInboundLinks` de `move`— es hoy un patch quirúrgico
+> (`model::replace_body_preservando_cabecera`), inverso exacto de `SplitFront::body`: la cabecera
+> sobrevive byte a byte, incluido su separador y **el bloque cuyo YAML no se deja leer**, que hasta
+> v0.5.0 se borraba en silencio. El único camino que aún puede reserializar es la edición del propio
+> frontmatter (`patch_frontmatter`), y solo cuando el patch quirúrgico no alcanza: eso es lo que
+> declara `PatchedDocument.reserialized`. Una operación cuyo resultado es idéntico al documento de
+> partida se anota en `PlanResult.noOpOperations` en vez de desaparecer del plan.
+
 ### 20.5 Descubrimiento (§3 de REFACTOR_PHASE_2)
 
 La raíz es `--root` si se da, si no `std::env::current_dir()`, canonicalizada al arrancar y **fija

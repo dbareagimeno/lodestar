@@ -1027,8 +1027,8 @@ impl Workspace {
 
     /// Recoge, en orden determinista por [`RelPath`], las copias byte-a-byte del árbol de
     /// recuperación de `recovery_root` (cada fichero salvo el manifiesto `.absent`), como pares
-    /// `(rutaCanónica, contenido)`. Auxiliar de [`Workspace::revert_transaction`] (no toca disco:
-    /// solo lee las copias).
+    /// `(rutaCanónica, contenido)`. Auxiliar de [`Workspace::revert_transaction_con_recibo`] (no
+    /// toca disco: solo lee las copias).
     fn collect_backups(
         &self,
         recovery_root: &Path,
@@ -1039,8 +1039,17 @@ impl Workspace {
     }
 
     /// Revierte la transacción `orig_txn_id` como una **nueva transacción inversa recuperable**
-    /// (E13-H09, `ARCHITECTURE.md §19.5/§19.6`, `REFACTOR §11.3`), devolviendo el conocimiento
-    /// canónico al estado ANTERIOR a `orig_txn_id` desde sus copias de recuperación (E13-H04).
+    /// (E13-H09, `ARCHITECTURE.md §19.5/§19.6`), y además **registra durablemente el recibo de la
+    /// inversa antes de su punto de no retorno** (E25-H05, defecto (c)).
+    ///
+    /// Es la **única** vía para deshacer una transacción. Hasta E31-H01 (`decisiones §25`) convivía
+    /// con una `Workspace::revert_transaction` que delegaba aquí con `recibo: None` y aplanaba el
+    /// resultado a tupla; se **retiró** porque no la llamaba nadie —ni fuera del crate ni dentro— y
+    /// porque lo que ofrecía era una reversión **sin registro durable**, que puede quedarse sin
+    /// vuelta atrás: sin recibo, el criterio de «vivo» del GC del plano de control (`journal/` ∪
+    /// `receipts/`) no ve su árbol de recuperación y lo purga. La pasada de `/mutantes` de `§16(l)`
+    /// la había encontrado sustituyendo su cuerpo por `unreachable!()` sin que ninguno de los 52
+    /// binarios de test del workspace se pusiera rojo; es el mismo desenlace que `§16(b)`.
     ///
     /// Toda escritura del canónico va por el **único escritor** (invariante #5): las copias
     /// respaldadas se restauran con `io::write_atomic` y los paths que se habían creado (marcados
@@ -1048,9 +1057,7 @@ impl Workspace {
     /// lock de publicación (E13-H02) respalda el estado ACTUAL de los afectados en su propio árbol
     /// de recuperación (`new_txn_id`) y registra su intención en un write-ahead journal propio
     /// (E13-H03) **antes** del primer rename, de modo que una caída a mitad converge determinista al
-    /// reabrir (E13-H06). Devuelve `(previousRevision, resultRevision, changedPaths)`: la
-    /// [`WorkspaceRevision`] antes (== `resultRevision` del apply original) y después (==
-    /// `previousRevision` del apply original) de la reversión, y los paths que restauró.
+    /// reabrir (E13-H06).
     ///
     /// `observed` es la [`WorkspaceRevision`] que la fachada vio al decidir que la transacción era
     /// reversible, y se **re-verifica bajo el lock** antes de la primera escritura (E25-H05): la
@@ -1072,26 +1079,6 @@ impl Workspace {
     /// publique bajo la identidad de la transacción que deshace no es una colisión de nombres que se
     /// pueda resolver moviendo el id, es una contradicción del llamante —restauraría desde el mismo
     /// árbol que estaría reescribiendo— y así se reporta, ruidosamente y sin escribir nada.
-    ///
-    /// # Errores
-    /// - [`WorkspaceError::Io`] si faltan las copias de recuperación de `orig_txn_id` (no se puede
-    ///   revertir: transacción no disponible), o ante un fallo de IO de la restauración.
-    /// - [`WorkspaceError::WriteConflict`] si el lock ya está tomado (otro publicador), si el
-    ///   canónico cambió entre la comprobación de la fachada y la toma del lock (E25-H05) o si
-    ///   `new_txn_id` coincide con `orig_txn_id` (E28-H01/E28-H03).
-    /// - [`WorkspaceError::PermissionDenied`] si algún path afectado ya no es escribible.
-    pub fn revert_transaction(
-        &self,
-        orig_txn_id: &str,
-        new_txn_id: &str,
-        observed: &WorkspaceRevision,
-    ) -> Result<(WorkspaceRevision, WorkspaceRevision, Vec<RelPath>), WorkspaceError> {
-        let p = self.revert_transaction_con_recibo(orig_txn_id, new_txn_id, observed, None)?;
-        Ok((p.previous, p.result, p.changed_paths))
-    }
-
-    /// [`Workspace::revert_transaction`] que además **registra durablemente el recibo de la inversa
-    /// antes de su punto de no retorno** (E25-H05, defecto (c)).
     ///
     /// Es la variante que usa la fachada (`App::change_revert`), y el espejo exacto de
     /// [`Workspace::apply_transaction_con_recibo`]: `recibo` presta las dos piezas del
@@ -1119,9 +1106,16 @@ impl Workspace {
     /// decide aquí dentro, bajo el lock.
     ///
     /// # Errores
-    /// Los mismos que [`Workspace::revert_transaction`], más un [`WorkspaceError::Io`] si el registro
-    /// del recibo no se puede escribir — que ocurre **antes** del primer rename, así que no publica
-    /// nada. A partir de la publicación de la inversa el cierre (promoción del recibo, borrado del
+    /// - [`WorkspaceError::Io`] si faltan las copias de recuperación de `orig_txn_id` (no se puede
+    ///   revertir: transacción no disponible), ante un fallo de IO de la restauración, o si el
+    ///   registro del recibo no se puede escribir — este último **antes** del primer rename, así que
+    ///   no publica nada.
+    /// - [`WorkspaceError::WriteConflict`] si el lock ya está tomado (otro publicador), si el
+    ///   canónico cambió entre la comprobación de la fachada y la toma del lock (E25-H05) o si
+    ///   `new_txn_id` coincide con `orig_txn_id` (E28-H01/E28-H03).
+    /// - [`WorkspaceError::PermissionDenied`] si algún path afectado ya no es escribible.
+    ///
+    /// A partir de la publicación de la inversa el cierre (promoción del recibo, borrado del
     /// journal) es best-effort con aviso por stderr: un `Err` ahí convertiría una reversión consumada
     /// en un fallo aparente.
     pub fn revert_transaction_con_recibo(

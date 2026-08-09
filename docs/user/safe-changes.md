@@ -235,10 +235,10 @@ con la política «reject»
 `remove_links` deletes the document and removes the references to it. Before choosing, ask
 `impact_analyze` what a delete would cost.
 
-**`replace_text` that finds nothing is a silent no-op, not an error.** If `find` does not occur in
-the document and you did not pass `expectedOccurrences`, the plan is produced normally with
-`canApply: true` and nothing to show for it — no diagnostic, no warning, no field saying "zero
-replacements". This holds in the `operations` array form, not just in bulk selections:
+**`replace_text` that finds nothing is a no-op, not an error — and the plan says so.** If `find`
+does not occur in the document and you did not pass `expectedOccurrences`, the plan is produced
+normally with `canApply: true`, and the operation is listed in **`noOpOperations`**. This holds in
+the `operations` array form, not just in bulk selections:
 
 ```json
 change_plan
@@ -247,18 +247,40 @@ change_plan
  "policy": {"requireValidResult": false, "allowWarnings": true}}
 ```
 
-The plan comes back with `canApply: true`, an empty `semanticDiff.bodyChanges` and an empty
-`semanticDiff.frontmatterChanges`. **Pass `expectedOccurrences` whenever you know how many
-replacements you expect** — it turns a wrong count, zero included, into a refusal. Without it a typo
-in `find` is indistinguishable from a successful change, which is the one failure mode the whole
-plan/apply cycle exists to prevent.
+The plan comes back with `canApply: true`, empty `semanticDiff.bodyChanges`,
+`frontmatterChanges` and `modified`, and:
 
-> One caveat while planning a no-op: the document may still appear in `semanticDiff.modified` even
-> though `bodyChanges` and `frontmatterChanges` are empty. `modified` is a raw byte comparison, and
-> a `replace_text` is normalized into a whole-document rewrite that reserializes the frontmatter —
-> so a block written in YAML flow style (`tags: [a, b]`) comes back in block style (`tags:\n- a\n-
-> b`). The content is equivalent; the bytes are not. Read `bodyChanges`/`frontmatterChanges` to know
-> whether anything actually changed.
+```json
+"noOpOperations": [{"index": 0, "path": "overview.md", "op": "replace_body"}]
+```
+
+Read `noOpOperations` to tell "I ran it and it changed nothing" from "you never sent it" — after a
+bulk `replace_text` over 40 documents that matched in 12, it names the other 28. Three details worth
+knowing:
+
+- The operation **stays** in `normalizedOperations`; `index` points at it there. The field is
+  additive — nothing is removed from the plan.
+- `op` names the **normalized** operation, so a `replace_text` shows up as `replace_body`.
+- It does not discriminate by operation type: **any** operation whose document ends up identical is
+  listed — a `patch_frontmatter` writing the value that was already there, a `move` with
+  `from == to`. Careful with `edit_section`: rewriting a section with the content it already had is
+  a no-op *only if the bytes come out the same*, and section editing fixes the blank lines around
+  the section, so it often does not.
+- The verdict is **per document**, not per operation: it compares the document before and after the
+  whole plan. One operation per document — including bulk `selection`, which expands to exactly one
+  — is exact. Several operations on the *same* path all share that path's verdict, so keep one
+  operation per document when you want to read this field per operation.
+
+**Pass `expectedOccurrences` whenever you know how many replacements you expect** — it turns a wrong
+count, zero included, into a refusal *before* you apply. `noOpOperations` tells you afterwards that
+nothing happened; `expectedOccurrences` refuses up front, which is stronger when you already know
+the answer.
+
+> A no-op is a no-op on disk too: it does not rewrite the file, does not move `workspaceRevision`,
+> and does not show up in `semanticDiff.modified`. Up to v0.5.0 it did — every body rewrite rebuilt
+> the whole document and reserialized its frontmatter, so a block written in YAML flow style
+> (`tags: [a, b]`) came back in block style. Your files keep their own formatting now: changing a
+> body never reformats the header.
 
 ## Bulk selections
 

@@ -9,6 +9,26 @@ y el proyecto sigue [Versionado Semántico](https://semver.org/lang/es/).
 
 ### Añadido
 
+- **`change_plan` declara las operaciones que no tuvieron efecto** (`E31-H02`,
+  [`decisiones §26`](decisiones/26-replace-text-noop-reserializa.md)). Campo nuevo en el retorno:
+
+  ```json
+  "noOpOperations": [{"index": 0, "path": "overview.md", "op": "replace_body"}]
+  ```
+
+  Es la respuesta a *«ejecuté tu operación, resultado: sin efecto»*, que el plan **no sabía dar**: un
+  `replace_text` cuyo `find` no casaba nada aparecía en `normalizedOperations` indistinguible de uno
+  efectivo. Tras un `replace_text` masivo sobre 40 documentos que casó en 12, este campo **nombra los
+  otros 28** — antes no había forma de separar «la ejecuté y no cambió nada» de «nunca la mandaste».
+  La documentación de usuario ya echaba de menos exactamente esto («*no field saying "zero
+  replacements"*»).
+
+  Tres detalles: la operación **sigue** en `normalizedOperations` (`index` apunta ahí — la señal es
+  aditiva); `op` nombra la operación **ya normalizada**, así que un `replace_text` figura como
+  `replace_body`; y cubre **cualquier** operación sin efecto, no solo `replace_text`. Va **fuera del
+  `planHash`**, de modo que ningún plan existente cambia de identidad y los persistidos por versiones
+  anteriores se siguen aplicando.
+
 - **`DOCUMENT_ALREADY_EXISTS`: el catálogo de errores pasa de 16 a 17 códigos** (`E28-H02`, ampliado
   en `E28-H04`; épica [`epica-28`](requirements/epica-28-defectos-destructivos-testbench.md)). Es el
   simétrico exacto de `DOCUMENT_NOT_FOUND` —los dos describen un desajuste entre lo que la operación
@@ -32,6 +52,32 @@ y el proyecto sigue [Versionado Semántico](https://semver.org/lang/es/).
   `move` con `from == to` **no** es colisión: sigue siendo el no-op válido de siempre.
 
 ### Corregido
+
+- **Reescribir el cuerpo de un documento le reformateaba la cabecera** (`E31-H02`,
+  [`decisiones §26`](decisiones/26-replace-text-noop-reserializa.md)). Toda operación que tocaba el
+  cuerpo —`replace_text`, `edit_section`, `replace_body`, `delete` con `remove_links` y `move`,
+  **incluido el `rewriteInboundLinks` que reescribe el cuerpo de cada enlazante**— reconstruía el
+  documento entero y **reserializaba su frontmatter**. Efectos, los tres observables en tus ficheros:
+
+  - un bloque escrito en estilo *flow* (`tags: [a, b]`) volvía en estilo bloque, con sus comillas y
+    comentarios YAML perdidos por el camino;
+  - el separador se normalizaba a `---\n\n`, **inyectando una línea en blanco** en cada reescritura
+    de un `.md` que no la tuviera;
+  - **el frontmatter ilegible se borraba entero**: un bloque cuyo YAML no se deja leer desaparecía al
+    reescribir el **cuerpo**. Eso es **pérdida de datos**, y no había un solo test que combinara las
+    dos cosas.
+
+  El síntoma que lo destapó era el más inocente: un `replace_text` cuyo `find` **no casaba nada**
+  reescribía el fichero igualmente, ensuciando el `git diff` de quien versiona su workspace y
+  haciendo avanzar `workspaceRevision` por una operación vacía. Ahora la cabecera se preserva **byte
+  a byte** (patch quirúrgico, el mismo criterio que la edición de frontmatter cumple desde `E16-H04`)
+  y un no-op no toca el disco. Un `move` ya no puede reformatear medio workspace.
+
+- **`Workspace::revert_transaction` era superficie pública sin un solo llamador** (`E31-H01`,
+  [`decisiones §25`](decisiones/25-superficie-muerta-revert-transaction.md)). Ofrecía una reversión
+  **sin recibo durable**, que puede quedarse sin vuelta atrás: sin recibo, el GC del plano de control
+  no ve su árbol de recuperación y lo purga. Se retira; la vía pública sigue siendo
+  `revert_transaction_con_recibo`, que es la que usa la fachada. Sin impacto en el wire.
 
 - **Un plan con varias operaciones se normalizaba contra el workspace de partida, no contra lo que
   el propio plan iba dejando** (`E28-H04`). El bucle de `change_plan` pasaba el **mismo**

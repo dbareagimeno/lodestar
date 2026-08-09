@@ -973,7 +973,7 @@ mod recibo_tras_el_punto_de_no_retorno {
     ///
     /// Esta es la prueba de que el recibo es **utilizable**, y con los dos puntos de
     /// `apply_transaction` exige algo más que persistirlo temprano: al no haberse sellado la
-    /// transacción, el journal queda `applied` en disco, así que `revert_transaction` recupera primero
+    /// transacción, el journal queda `applied` en disco, así que `revert_transaction_con_recibo` recupera primero
     /// (su paso 2) y la vía **COMPLETAR** de `recovery.rs` pasa hoy por `finish_recovery`, que
     /// **borra las copias de recuperación** (`discard_recovery_copies`) — y sin copias no hay
     /// reversión posible. «La recuperación por la vía COMPLETAR lo da por bueno» (alcance de la
@@ -1327,17 +1327,19 @@ mod recibo_tras_el_punto_de_no_retorno {
 //
 // **(b) Revert sin re-verificación bajo el lock.** `change_revert_uncounted` compara la revisión
 // actual con `receipt.result_revision` en `crates/lodestar-app/src/lib.rs:1845-1857` — **antes** de
-// tomar el lock, que lo toma `revert_transaction` (`recovery.rs:898`). En esa ventana otro escritor
+// tomar el lock, que lo toma la reversión después. En esa ventana otro escritor
 // puede tocar un `.md` afectado y la reversión lo sobrescribe con la copia respaldada, en silencio.
-// La simetría con el apply está rota: `apply_transaction` sí vuelve a comprobar la base bajo el lock
-// (`reverify_base_revision`, `transaction.rs:195`) y `revert_transaction` no tiene equivalente.
+// La simetría con el apply estaba rota: `apply_transaction` sí volvía a comprobar la base bajo el
+// lock (`reverify_base_revision`) y el camino que deshace NO tenía equivalente — hasta que E25-H05
+// se lo dio (hoy `revert_transaction_con_recibo` llama a `reverify_base_revision`, `recovery.rs:1155`).
 //
 // **(c) La reversión conserva la forma exacta de S5** (hallazgo MAYOR-2 del juez ciego de E25-H04).
 // E25-H04 cerró «publicar implica recibo» solo en el camino del apply. En el espejo,
 // `write_receipt(&revert_receipt)` sale por `?` (`lib.rs:1880-1882`) **después** de que
-// `revert_transaction` haya publicado la inversa (`:1863-1866`), y `revert_transaction`
-// (`recovery.rs:892`) no llama a `write_pending_receipt` (`receipts.rs:225`) — así que no hay
-// registro durable que la vía COMPLETAR (`finish_recovery_completada:769`) pueda promover. Un
+// la reversión haya publicado la inversa (`:1863-1866`), y la variante que se usaba entonces
+// —`Workspace::revert_transaction`, retirada en E31-H01— NO llamaba a `write_pending_receipt`
+// (`receipts.rs:225`): delegaba con `recibo: None`, así que no había
+// registro durable que la vía COMPLETAR (`finish_recovery_completada:769`) pudiera promover. Un
 // `SIGKILL` o un `ENOSPC` entre el último rename de la inversa y su recibo devuelve `Err` sobre algo
 // PUBLICADO y sin recibo: el agente cree que no se revirtió, el canónico dice lo contrario, y como el
 // recibo es el criterio de «vivo» del GC (`journal/ ∪ receipts/`), el árbol `recovery/<txnId>-revert/`
@@ -1347,16 +1349,16 @@ mod recibo_tras_el_punto_de_no_retorno {
 //
 // 1. `PuntoDeGancho::AntesDeRestaurar` — **variante nueva** (stub añadido a
 //    `crates/lodestar-workspace/src/failpoints.rs`, sin lógica). El implementador la dispara con un
-//    `ejecutar_gancho` cfg-gateado dentro de `revert_transaction`, entre su entrada y su primera
+//    `ejecutar_gancho` cfg-gateado dentro de `revert_transaction_con_recibo`, entre su entrada y su primera
 //    escritura y **antes** de la re-verificación bajo el lock — es el espejo de
 //    `AntesDePublicar` (E25-H01) para el camino que deshace. Como el gancho **continúa**, reproduce
 //    lo que un `FailPoint` no sabe: la edición ajena ocurre *y el flujo sigue*.
 // 2. `FailPoint::TrasLaTransaccionAntesDelRecibo` — **la que ya existe** (E25-H04), consultada
-//    también desde `App::change_revert`, entre el retorno de `revert_transaction` y el
+//    también desde `App::change_revert`, entre el retorno de `revert_transaction_con_recibo` y el
 //    `write_receipt` de la inversa. Mismo `failpoints::disparado(..)` y mismo autodesarme, que es lo
 //    que permite comprobar que el punto **se ejerció** y que el escenario no pasó vacuamente.
 // 3. `FailPoint::TrasJournalPrepared` — **la que ya existe** (E24-H13), ejercida también en
-//    `revert_transaction` justo después de su journal (y del registro durable del recibo que la
+//    `revert_transaction_con_recibo` justo después de su journal (y del registro durable del recibo que la
 //    historia le añade) y **antes** del primer rename de la inversa. Es lo que hace fuerte al control
 //    anti-vacuo: sin ella, «no dejar recibo» se cumpliría trivialmente en escenarios que ni siquiera
 //    llegan a escribir el registro.
@@ -1565,7 +1567,7 @@ mod reversion_re_verificada {
             assert!(
                 testigo.load(Ordering::SeqCst),
                 "el gancho `PuntoDeGancho::AntesDeRestaurar` no se ejerció: nadie lo dispara en el \
-                 camino de `Workspace::revert_transaction`. Sin él, la edición externa de la ventana \
+                 camino de `Workspace::revert_transaction_con_recibo`. Sin él, la edición externa de la ventana \
                  `[comprobación de la fachada, primera escritura de la inversa)` no ocurre y este \
                  escenario no prueba nada — ver el rustdoc de la variante para dónde debe vivir el \
                  `ejecutar_gancho`"
@@ -1658,9 +1660,10 @@ mod reversion_re_verificada {
         /// publicación de la inversa y su recibo**, **Cuando** se llama a `change_revert`,
         /// **Entonces** la inversa está publicada **y** existe su recibo.
         ///
-        /// Hoy devuelve `Err` sobre algo ya publicado y sin recibo: `write_receipt` sale por `?`
-        /// (`lib.rs:1880-1882`) después de que `revert_transaction` haya restaurado el canónico, y
-        /// `revert_transaction` no persiste ningún registro durable antes de su punto de no retorno.
+        /// ANTES de E25-H05 devolvía `Err` sobre algo ya publicado y sin recibo: `write_receipt` salía
+        /// por `?` (`lib.rs:1880-1882`) después de que la reversión hubiera restaurado el canónico, y la
+        /// variante de entonces —`Workspace::revert_transaction`, con `recibo: None`, retirada en
+        /// E31-H01— NO persistía ningún registro durable antes de su punto de no retorno.
         /// El arreglo no puede consistir en escribir el recibo *después* —el proceso puede no llegar
         /// ahí—, sino en persistirlo con el journal de la inversa y promoverlo al sellar, con la
         /// misma mecánica que E25-H04 dio al apply (`write_pending_receipt`/`promote_pending_receipt`,
@@ -1675,7 +1678,7 @@ mod reversion_re_verificada {
                 &a.app,
                 &a.receipt_id,
                 FailPoint::TrasLaTransaccionAntesDelRecibo,
-                "en el camino de `App::change_revert`, entre el retorno de `revert_transaction` y el \
+                "en el camino de `App::change_revert`, entre el retorno de `revert_transaction_con_recibo` y el \
                  `write_receipt` de la inversa",
             );
 
@@ -1799,7 +1802,7 @@ mod reversion_re_verificada {
                     &a.app,
                     &a.receipt_id,
                     FailPoint::TrasJournalPrepared,
-                    "en `Workspace::revert_transaction`, tras crear el journal de la inversa (y su \
+                    "en `Workspace::revert_transaction_con_recibo`, tras crear el journal de la inversa (y su \
                      registro durable de recibo) y ANTES del primer rename",
                 )
                 .expect_err("el failpoint aborta la reversión antes del primer rename");
@@ -2695,7 +2698,12 @@ mod mutantes_16l {
         // El canónico SÍ se publicó: el fallo es posterior al punto de no retorno.
         assert_eq!(
             std::fs::read_to_string(root.join("alfa.md")).unwrap(),
-            "---\ntype: Nota\ntitle: Alfa\ndescription: Primer documento\n---\n\n# Resumen\n\ncuerpo del plan\n",
+            // E31-H02 (`decisiones §26`): el separador ya NO se normaliza. El `replace_body` de
+            // arriba pide `"# Resumen\n\ncuerpo del plan\n"` —sin salto inicial— y eso es
+            // exactamente lo que se escribe tras la cabecera, que termina en `---\n`. Hasta v0.5.0
+            // la reconstrucción emitía `---\n\n` + cuerpo e INYECTABA una línea en blanco que nadie
+            // había pedido; esta aserción la daba por buena sin que ese fuera su objeto.
+            "---\ntype: Nota\ntitle: Alfa\ndescription: Primer documento\n---\n# Resumen\n\ncuerpo del plan\n",
             "precondición: el apply tiene que haber cruzado el punto de no retorno (si no, no hay \
              sellado que probar). change_apply devolvió: {resultado:?}"
         );
@@ -2749,4 +2757,105 @@ mod mutantes_16l {
             "y el canónico vuelve a su estado original"
         );
     }
+}
+
+// ==============================================================================================
+// E31-H02 (§26) — el no-op no toca el disco
+// ==============================================================================================
+
+/// **E31-H02 · criterio 1 de `decisiones §26`** — **Dado** un documento con frontmatter en estilo
+/// *flow*, **Cuando** se planifica **y se aplica** un `replace_text` cuyo `find` no casa ninguna
+/// ocurrencia, **Entonces** el fichero en disco queda **byte a byte idéntico**, `changedPaths` va
+/// vacío y la `workspaceRevision` no avanza.
+///
+/// Es la prueba de extremo a extremo del defecto: los tests del core cubren la normalización, pero
+/// §26 se reportó como churn en el **disco** —contaminaba el `git diff` de quien versiona su
+/// workspace—, así que el criterio se verifica donde se sufría. Hasta v0.5.0 este `replace_text`
+/// reescribía el `.md` reserializando `tags: [a, b]` a estilo bloque, sin cambiar nada semántico.
+#[test]
+fn replace_text_sin_coincidencias_no_toca_el_disco() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let original = "---\ntype: Concept\ntitle: Overview\ntags: [atlas, overview]\n---\n\n# Overview\n\ncuerpo\n";
+    std::fs::write(root.join("overview.md"), original).unwrap();
+
+    let app = App::open(root).expect("el workspace temporal debe abrir");
+    let rev_antes = app
+        .workspace_status(lodestar_app::Profile::Standard)
+        .expect("workspace_status debe funcionar")
+        .workspace_revision;
+
+    let plan = app
+        .change_plan(
+            None,
+            &json!([{ "op": "replace_text", "path": "overview.md",
+                      "find": "no-existe-esta-cadena", "replace": "x" }]),
+            policy_permisiva(),
+        )
+        .expect("un `replace_text` sin coincidencias debe planificar: es un no-op, no un error");
+
+    let aplicado = app
+        .change_apply(&plan.change_set_id, None)
+        .expect("aplicar un plan no-op no debe fallar");
+
+    assert_eq!(
+        std::fs::read_to_string(root.join("overview.md")).unwrap(),
+        original,
+        "EL CRITERIO 1 DE §26: un `replace_text` que no casa nada no puede cambiar un solo byte del \
+         fichero. Si el frontmatter vuelve en estilo bloque, la reserialización ha regresado"
+    );
+    assert!(
+        aplicado.changed_paths.is_empty(),
+        "un apply que no cambia bytes no cambia paths: {:?}",
+        aplicado.changed_paths
+    );
+    assert_eq!(
+        app.workspace_status(lodestar_app::Profile::Standard)
+            .expect("workspace_status debe funcionar")
+            .workspace_revision,
+        rev_antes,
+        "…y la revisión del workspace no puede avanzar por una operación vacía (§26: «hace que \
+         `workspaceRevision` avance por una operación vacía»)"
+    );
+}
+
+/// **E31-H02 · criterio 2 de `decisiones §26`** — **Dado** un documento con frontmatter en estilo
+/// *flow*, **Cuando** se le cambia **solo el cuerpo**, **Entonces** conserva el estilo *flow* de su
+/// frontmatter, y el cuerpo sí cambia.
+///
+/// El anti-vacuo va dentro: sin la aserción del cuerpo nuevo, un motor que no escribiera nunca nada
+/// pasaría este test.
+#[test]
+fn cambiar_el_cuerpo_no_reformatea_el_frontmatter() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::write(
+        root.join("overview.md"),
+        "---\ntype: Concept\ntitle: Overview\ntags: [atlas, overview]\n---\n\n# Overview\n\nreemplázame\n",
+    )
+    .unwrap();
+
+    let app = App::open(root).expect("el workspace temporal debe abrir");
+    let plan = app
+        .change_plan(
+            None,
+            &json!([{ "op": "replace_text", "path": "overview.md",
+                      "find": "reemplázame", "replace": "reemplazado" }]),
+            policy_permisiva(),
+        )
+        .expect("planificar un `replace_text` que sí casa no debe fallar");
+    app.change_apply(&plan.change_set_id, None)
+        .expect("aplicar un `replace_text` que sí casa no debe fallar");
+
+    let resultante = std::fs::read_to_string(root.join("overview.md")).unwrap();
+    assert!(
+        resultante.contains("tags: [atlas, overview]"),
+        "EL CRITERIO 2 DE §26: cambiar el CUERPO no puede reformatear la cabecera — el estilo flow \
+         del usuario es suyo, no una forma canónica que el motor pueda normalizar. Resultó:\n{resultante}"
+    );
+    assert!(
+        resultante.contains("reemplazado") && !resultante.contains("reemplázame"),
+        "ANTI-VACUO: y el cuerpo SÍ tiene que haber cambiado, o este test pasaría con un motor que \
+         no escribe nada. Resultó:\n{resultante}"
+    );
 }

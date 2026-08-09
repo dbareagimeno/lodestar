@@ -166,16 +166,17 @@ pub enum PuntoDeGancho {
     TrasElBackup,
     /// Dentro de la ventana de la **reversión** (E25-H05): entre la comprobación de
     /// `receipt.result_revision` que hace la fachada (`App::change_revert`, `lib.rs:1845-1857`) y la
-    /// **primera escritura** de `Workspace::revert_transaction` (el `backup_originals` de su paso 7).
+    /// **primera escritura** de `Workspace::revert_transaction_con_recibo` (el `backup_originals` de
+    /// su paso 7).
     ///
     /// Es el espejo de [`PuntoDeGancho::AntesDePublicar`] para el camino que deshace: la fachada mira
-    /// la revisión **sin el lock** —lo toma `revert_transaction` después (`recovery.rs:898`)—, así que
+    /// la revisión **sin el lock** —lo toma la reversión después—, así que
     /// en ese hueco otro escritor puede tocar un `.md` afectado y la reversión lo sobrescribe con la
     /// copia respaldada, en silencio. El gancho del test hace de ese «otro escritor» y deja que la
     /// reversión **continúe**, que es lo que [`FailPoint`] no sabe hacer.
     ///
-    /// **Dónde debe dispararlo el implementador**: dentro de `revert_transaction`, en cualquier punto
-    /// entre su entrada y su primera escritura, y **antes** de la re-verificación de la base bajo el
+    /// **Dónde debe dispararlo el implementador**: dentro de `revert_transaction_con_recibo`, en
+    /// cualquier punto entre su entrada y su primera escritura, y **antes** de la re-verificación bajo el
     /// lock (`reverify_base_revision`, `lib.rs:203`) — que es justamente lo que tiene que cazar la
     /// edición. Colocarlo *después* de la re-verificación, o después del primer rename, es
     /// observablemente distinto y los tests de E25-H05 lo distinguen (esperan `WriteConflict` y el
@@ -183,7 +184,7 @@ pub enum PuntoDeGancho {
     ///
     /// La variante nació como STUB de la fase roja de E25-H05 y **ya la ejerce el orquestador**: el
     /// `ejecutar_gancho` cfg-gateado vive en `recovery.rs`, entre la recuperación del paso (2) de
-    /// `revert_transaction` y su re-verificación (2b), igual que E25-H01/H03 hicieron en
+    /// `revert_transaction_con_recibo` y su re-verificación (2b), igual que E25-H01/H03 hicieron en
     /// `transaction.rs`.
     AntesDeRestaurar,
 }

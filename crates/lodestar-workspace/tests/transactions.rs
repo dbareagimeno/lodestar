@@ -1846,11 +1846,20 @@ mod seam_real {
         for (i, fp) in puntos.iter().enumerate() {
             let (dir, ws, original) = tres_documentos();
             let cs = cs_modifica_los_tres(&ws, &format!("e24-h13-{i}"));
-            // `ReplaceBody` CONSERVA el frontmatter (E23-H03), así que el borde «resultado» es el
-            // original con el cuerpo sustituido — no solo el cuerpo.
+            // `ReplaceBody` CONSERVA el frontmatter (E23-H03), así que el borde «resultado» es la
+            // CABECERA original —byte a byte, incluido su separador (E31-H02, `decisiones §26`)—
+            // seguida del cuerpo que pide la operación, que es `"# {n}\n\ncuerpo NUEVO\n"` SIN
+            // salto inicial. Hasta v0.5.0 el esperado se construía sustituyendo texto sobre el
+            // original, y casaba porque la reconstrucción inyectaba un `\n` tras el `---` de
+            // cierre; con la cabecera preservada el motor escribe exactamente lo que se le pidió,
+            // así que el borde se compone igual que lo compone el motor.
             let resultado_esperado: BTreeMap<String, String> = original
                 .iter()
-                .map(|(k, v)| (k.clone(), v.replace("cuerpo original", "cuerpo NUEVO")))
+                .map(|(k, v)| {
+                    let n = k.trim_end_matches(".md");
+                    let corte = lodestar_core::model::split_front(v).body_offset(v);
+                    (k.clone(), format!("{}# {n}\n\ncuerpo NUEVO\n", &v[..corte]))
+                })
                 .collect();
 
             failpoints::armar(*fp);
@@ -3695,7 +3704,7 @@ mod aborto_de_ventana {
 // EL DEFECTO (S3)
 //
 // `gc_receipts` se invoca DESPUÉS de que la transacción suelte el lock (`lodestar-app/src/lib.rs`,
-// tras `apply_transaction`/`revert_transaction`), y `gc_runtime_huerfanos`
+// tras `apply_transaction`/`revert_transaction_con_recibo`), y `gc_runtime_huerfanos`
 // (`src/receipts.rs:314-360`) purga TODO directorio de `staging/`/`recovery/` —y todo sidecar
 // `recovery/<txn>.digests.json`— cuyo stem no aparezca ni en `journal/` ni en `receipts/`. Ese
 // criterio es correcto con un solo proceso y FALSO con dos: entre `backup_originals`
@@ -4276,8 +4285,8 @@ mod gc_y_transacciones_vivas {
 // - **Ventana del revert y recibo de la inversa** (criterios 1, 2, 4 y 5) →
 //   `crates/lodestar-app/tests/escritura.rs`, módulo `reversion_re_verificada`. La ventana que
 //   describen empieza en la FACHADA (`App::change_revert` mira `receipt.result_revision` **antes**
-//   de que `revert_transaction` tome el lock), así que solo se reproduce entera desde ahí; y
-//   `revert_transaction` gana en esta historia un parámetro (la revisión observada), de modo que un
+//   de que `revert_transaction_con_recibo` tome el lock), así que solo se reproduce entera desde ahí; y
+//   `revert_transaction_con_recibo` gana en esta historia un parámetro (la revisión observada), de modo que un
 //   test que lo llamara directamente obligaría al implementador a tocar los tests del autor.
 // - **Crash real durante la reversión** → `crates/lodestar-mcp/tests/crash_senal.rs`
 //   (`crash_durante_revert_deja_inversa_reversible`), donde ya vive el arnés de `SIGKILL`.
@@ -5871,4 +5880,98 @@ mod lock_con_cuerpo_no_escrito {
             "y sobrevive byte a byte: no se reclama, no se reescribe, no se toca"
         );
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// E31-H02 — el lote VACÍO (§26)
+// ---------------------------------------------------------------------------------------------
+
+/// **E31-H02 (riesgo bloqueante)** · Una transacción cuyo resultado NO difiere del canónico
+/// produce un lote afectado **vacío** (`affected_paths`, `transaction.rs:236`), y esa ruta no
+/// tiene ningún guard: `assert_writable`, `backup_originals` y `create_journal` la recorren
+/// sobre un slice de cero elementos.
+///
+/// Hoy ese camino es inalcanzable desde `replace_text` porque la reserialización del frontmatter
+/// siempre cambia bytes (§26). En cuanto el splice preserve la cabecera **pasa a ser alcanzable**,
+/// así que esta prueba fija que la mecánica lo tolera: publica sin error, no mueve la revisión y
+/// deja el `.md` byte a byte.
+///
+/// **Dado** un workspace con un documento, **Cuando** se aplica una transacción cuyo resultado es
+/// idéntico al canónico, **Entonces** no falla, `changed_paths` va vacío y la revisión no se mueve.
+#[test]
+fn transaccion_con_lote_vacio_no_degenera() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws = Workspace::open(dir.path()).unwrap();
+
+    // Frontmatter en estilo FLOW a propósito (§26): antes de E31-H02 este documento no podía
+    // producir un lote vacío —la reserialización lo reescribía siempre—, y ese era justamente el
+    // defecto. Con la cabecera preservada, un `ReplaceBody` con el cuerpo que ya tiene no cambia
+    // ni un byte, así que el lote sale vacío y esta prueba ejerce el camino que interesa.
+    let contenido = "---\ntype: Nota\ntitle: A\ntags: [a, b]\n---\n\n# A\n\ncuerpo\n";
+    std::fs::write(dir.path().join("a.md"), contenido).unwrap();
+
+    let rev_antes = ws.workspace_revision().unwrap();
+
+    // Un `ReplaceBody` con EXACTAMENTE el cuerpo que el documento ya tiene: el resultado
+    // hipotético coincide con el canónico, así que el lote afectado sale vacío. El cuerpo se toma
+    // de `parse_file` en vez de escribirlo a mano porque `SplitFront::body` incluye el salto que
+    // sigue al `---` de cierre: un literal «a ojo» no casa, y el test fallaría por su propio error
+    // en vez de por el del motor.
+    let cuerpo_actual = lodestar_core::model::parse_file("a.md", contenido).body;
+    let cs = change_set(
+        "changeset:lote-vacio",
+        vec![NormalizedOperation::ReplaceBody {
+            path: RelPath::new("a.md").unwrap(),
+            body: cuerpo_actual,
+        }],
+    );
+    let cs = ChangeSet {
+        base_revision: rev_antes.clone(),
+        ..cs
+    };
+
+    let publicada = ws
+        .apply_transaction_con_recibo(&cs, None)
+        .expect("una transacción con lote vacío debe publicar sin error");
+
+    assert!(
+        publicada.changed_paths.is_empty(),
+        "un lote vacío no cambia ningún path: {:?}",
+        publicada.changed_paths
+    );
+    assert_eq!(
+        ws.workspace_revision().unwrap(),
+        rev_antes,
+        "si no se escribe nada, la revisión del workspace no puede moverse"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("a.md")).unwrap(),
+        contenido,
+        "el documento debe quedar byte a byte como estaba"
+    );
+
+    // La otra mitad del riesgo: el recibo de una transacción vacía tiene que ser REVERSIBLE, no
+    // un callejón sin salida. Deshacer «nada» debe ser un no-op limpio, no un `Err` de copias
+    // ausentes: `backup_originals` corrió sobre un lote vacío, así que el árbol de recuperación
+    // existe pero no contiene ni un fichero.
+    let rev_tras_apply = ws.workspace_revision().unwrap();
+    let revertida = ws
+        .revert_transaction_con_recibo(
+            &publicada.txn_id,
+            &format!("{}-revert", publicada.txn_id),
+            &rev_tras_apply,
+            None,
+        )
+        .expect("revertir una transacción de lote vacío no puede fallar: no hay nada que deshacer");
+
+    assert!(
+        revertida.changed_paths.is_empty(),
+        "deshacer un lote vacío tampoco cambia ningún path: {:?}",
+        revertida.changed_paths
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("a.md")).unwrap(),
+        contenido,
+        "y el documento sigue byte a byte como estaba, tras aplicar Y revertir"
+    );
 }

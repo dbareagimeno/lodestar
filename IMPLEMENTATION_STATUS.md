@@ -1603,6 +1603,85 @@ real del dogfooding, y porque repite la lección de E23 (*leer el código no bas
 *«cuando dudes de si algo funciona, ejecútalo»*; E30 añade el piso de arriba — **cuando dudes de si
 un test muerde, mútalo**.
 
+## Los dos seguimientos de la campaña (E31) — COMPLETA (2026-08-08)
+
+Épica: [`requirements/epica-31-seguimientos-campana.md`](requirements/epica-31-seguimientos-campana.md).
+Cierra las dos fichas que la campaña dejó abiertas porque exigían criterio del usuario:
+[`§25`](decisiones/25-superficie-muerta-revert-transaction.md) y
+[`§26`](decisiones/26-replace-text-noop-reserializa.md).
+
+| Historia | Qué cierra | Estado |
+|---|---|---|
+| E31-H01 | `§25` — `Workspace::revert_transaction` se **retira** | ✅ |
+| E31-H02 | `§26` — la cabecera se preserva byte a byte + `noOpOperations` | ✅ |
+
+- **H01 ejecutó la salida que la ficha desaconsejaba, y la decidió el compilador.** `§25` recomendaba
+  replegar a `pub(crate)` por reversible; al hacerlo, **clippy la marcó como `dead_code`** —no la
+  usaba nadie tampoco dentro del crate— y con el CI en `-D warnings` el repliegue era
+  **incompilable**. Con `pub` el aviso no salía porque una función pública puede tener consumidores
+  externos: replegarla fue lo que lo destapó. El argumento de la ficha para preferir el repliegue
+  («es el cuerpo que `revert_transaction_con_recibo` envuelve») era además **falso**: era un wrapper
+  de tres líneas sobre ella. Lo único que costó fue trasladar su doc-comment, el único sitio donde
+  vivía la descripción de la mecánica de reversión.
+
+- **H02 destapó que `§26` eran TRES defectos, no uno.** La ficha reportaba el frontmatter
+  reserializado (`tags: [a, b]` → estilo bloque). El brazo `ReplaceBody` perdía además el
+  **separador** (normalizado a `---\n\n`, o sea una línea en blanco inyectada en cada reescritura) y
+  —lo grave— **borraba entero el frontmatter ILEGIBLE**: `parse_file` devuelve `None` tanto para «no
+  hay bloque» como para «hay bloque y su YAML no se deja leer», así que reescribir el **cuerpo** de
+  un documento con la cabecera rota se llevaba la cabecera por delante. **Pérdida de datos, sin un
+  solo test** que combinara frontmatter ilegible con una operación de cuerpo.
+
+  Los tres caen con el mismo arreglo —`model::replace_body_preservando_cabecera`, inverso exacto de
+  `SplitFront::body`— porque corta por **posición de bytes** y no por si el YAML se interpreta. El
+  radio era todo lo que normaliza a `ReplaceBody`: `replace_text`, `edit_section`, `replace_body`,
+  `delete remove_links` y `move` — incluido el `rewriteInboundLinks`, que reescribe el cuerpo de
+  **cada enlazante**, así que un `move` podía reformatear medio workspace.
+
+- **La ampliación sobre la ficha**: `PlanResult.noOpOperations`. Con el churn eliminado, una
+  operación sin efecto no dejaba **ninguna** traza, y el agente no podía distinguir «se procesaron 40
+  y 28 no casaron» de «solo se seleccionaron 12». `docs/user/safe-changes.md` ya nombraba el hueco
+  por escrito: *«no field saying "zero replacements"»*. Va fuera del `planHash` —el hash es la
+  identidad de lo que se **pidió**; «resultó no-op» es una propiedad del **resultado**— y la
+  operación **no** se elimina del plan.
+
+### Lo que esta épica añade al método
+
+- **El riesgo que no se podía cerrar leyendo, se cerró ejecutando ANTES de implementar.** Con el
+  arreglo, un no-op deja de tocar disco y la transacción publica un lote de **cero paths** — camino
+  sin ningún guard. Se escribió `transaccion_con_lote_vacio_no_degenera` primero: aplicar y revertir
+  un lote vacío funcionan. Y el primer intento de ese test **falló porque no conseguía producir un
+  lote vacío**, lo que reprodujo `§26` aislado en la capa de transacción, tres capas por debajo de
+  donde lo reportó el juez ciego.
+- **Dos tests preexistentes fijaban el defecto sin saberlo** y cambiaron de expectativa (no de
+  intención): `una_promocion_de_recibo_fallida_conserva_el_journal` y
+  `recovery_sin_parciales_por_el_orquestador_real` daban por buena la línea en blanco inyectada. El
+  segundo construía su borde esperado sustituyendo texto sobre el original, así que **solo casaba
+  gracias al defecto**.
+- **El fixture del test invertido dejó de ser anti-vacuo al arreglarse el bug.** Tras preservar la
+  cabecera, sus dos documentos se comportan igual, así que un motor que no escribiera **nunca** nada
+  habría pasado el test entero; hizo falta un tercer documento sobre el que la operación **sí** casa.
+  Es el mismo modo de fallo que originó `§26` (un test verde que no probaba nada), reapareciendo al
+  cerrarla.
+- **Verificado por el wire real**, que es como se destapó: `replace_text` sin coincidencias sobre un
+  `.md` con `tags: [atlas, overview]` da `modified: []`, `noOpOperations: [{index: 0, op:
+  "replace_body", path: "overview.md"}]` y **md5 idéntico**; uno que sí casa cambia el cuerpo y deja
+  el frontmatter en estilo flow.
+- **El PR creó la misma superficie muerta que retiraba** — lo cazó el juez ciego de H02 mutando el
+  parámetro a inerte y viendo los 740 tests en verde. Al dejar `ReplaceBody` de reconstruir
+  documentos, `build_raw_with_bom` se quedó sin un llamador que pasara `bom: true`; se fusionó con
+  `build_raw`. La ironía es la lección: H01 retira superficie muerta **en el mismo rango de commits**
+  en que H02 la crea, y ninguna suite lo habría notado.
+- **Un test escrito para fijar un límite midió otra cosa.** El límite por-documento de
+  `noOpOperations` se iba a fijar con «dos ops sobre el mismo path, solo una vacía → ninguna se
+  declara». La realidad medida fue peor: la segunda op se normaliza contra el estado **inicial**
+  (defecto preexistente de la normalización multi-op), deshace a la primera, y el documento acaba
+  idéntico, así que **ambas** se declaran. El test fija lo medido, no lo supuesto.
+- **La documentación prometía de más sobre `edit_section`**: contrato y `docs/user/` afirmaban que el
+  campo cubre «reescribir una sección con su contenido actual». Verificado por el wire: depende de la
+  forma del documento, porque `normalize_edit_section` fija la separación de la sección. Prometer lo
+  que el binario no cumple es el modo de fallo que **originó** `§26`, reapareciendo al cerrarla.
+
 ## Defectos posteriores a E27
 
 | Defecto | Estado | Nota |

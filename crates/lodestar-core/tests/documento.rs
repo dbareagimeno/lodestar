@@ -2516,13 +2516,22 @@ use lodestar_core::types::workspace_revision;
 /// El BOM UTF-8 (`EF BB BF`) como `&str`.
 const BOM: &str = "\u{feff}";
 
-/// El documento del síntoma, byte a byte: BOM + un frontmatter válido de **dos** claves. La
+/// El documento del síntoma, byte a byte: BOM + un frontmatter válido de **tres** claves. La
 /// segunda clave (`owner`) es la que la corrupción destruye, así que es el testigo del daño real.
+///
+/// **E31-H02 (`decisiones §26`)**: la tercera clave, `tags: [a, b]`, está escrita en estilo *flow*
+/// **a propósito**. Sin ella el fixture estaba en forma canónica *block*, o sea exactamente la que
+/// `serde_yaml` emite al reserializar, y `bom_roundtrip_byte_a_byte` pasaba **por casualidad**: un
+/// `ReplaceBody` reserializaba el bloque entero y devolvía los mismos bytes de vuelta. Con `tags`
+/// en *flow*, reserializar produce `tags:\n- a\n- b`, así que el round-trip solo cierra si el
+/// camino de escritura **preserva los bytes** del bloque en vez de reconstruirlo. Es el mismo
+/// defecto de método que originó `§26` (ver su «Nota de método»).
 const DOC_CON_BOM: &str = concat!(
     "\u{feff}",
     "---\n",
     "status: draft\n",
     "owner: ana\n",
+    "tags: [a, b]\n",
     "---\n",
     "\n",
     "# Con BOM\n",
@@ -2537,6 +2546,7 @@ const DOC_SIN_BOM: &str = concat!(
     "---\n",
     "status: draft\n",
     "owner: ana\n",
+    "tags: [a, b]\n",
     "---\n",
     "\n",
     "# Con BOM\n",
@@ -2599,8 +2609,12 @@ fn bom_no_se_traga_el_frontmatter() {
     // (b) Las claves REALES, con su tipo YAML (`§20.4`: metadata arbitraria, sin coerción).
     assert_eq!(
         claves(pf),
-        BTreeSet::from(["status".to_string(), "owner".to_string()]),
-        "el frontmatter tras el BOM debe traer sus DOS claves reales, no el mapa vacío"
+        BTreeSet::from([
+            "status".to_string(),
+            "owner".to_string(),
+            "tags".to_string()
+        ]),
+        "el frontmatter tras el BOM debe traer sus TRES claves reales, no el mapa vacío"
     );
     assert_eq!(
         pf.get(&fp("status")),
@@ -2686,8 +2700,12 @@ fn patch_sobre_bom_no_duplica_bloque() {
     });
     assert_eq!(
         claves(&pf),
-        BTreeSet::from(["status".to_string(), "owner".to_string()]),
-        "el patch toca `status` y NADA más: `owner` debe seguir en el bloque. Documento \
+        BTreeSet::from([
+            "status".to_string(),
+            "owner".to_string(),
+            "tags".to_string()
+        ]),
+        "el patch toca `status` y NADA más: `owner` y `tags` deben seguir en el bloque. Documento \
          resultante:\n{:?}",
         res.raw
     );
@@ -2723,8 +2741,12 @@ fn patch_sobre_bom_no_duplica_bloque() {
         .expect("el documento parcheado debe volver a leerse CON frontmatter");
     assert_eq!(
         claves(refm),
-        BTreeSet::from(["status".to_string(), "owner".to_string()]),
-        "releer el resultado debe dar las dos claves: si el patch dejó dos bloques, el segundo \
+        BTreeSet::from([
+            "status".to_string(),
+            "owner".to_string(),
+            "tags".to_string()
+        ]),
+        "releer el resultado debe dar las tres claves: si el patch dejó dos bloques, el segundo \
          (con `owner`) es texto muerto que la siguiente escritura borra para siempre. Documento \
          resultante:\n{:?}",
         res.raw
@@ -2751,6 +2773,13 @@ fn patch_sobre_bom_no_duplica_bloque() {
 /// La ruta A necesita una **precondición explícita** para no ser vacua: si el cuerpo leído fuese
 /// el fichero entero (el defecto de hoy), reescribirlo daría los mismos bytes de casualidad. Por
 /// eso se asevera primero que lo leído es el cuerpo de verdad.
+///
+/// > **E31-H02 (`decisiones §26`)** — este test pasaba **por la razón equivocada**: `DOC_CON_BOM`
+/// > estaba en forma canónica *block*, así que la ruta A reserializaba el bloque y le salían los
+/// > mismos bytes de casualidad. El fixture lleva ahora `tags: [a, b]` en estilo *flow* (ver su
+/// > doc), que reserializar convierte en `tags:\n- a\n- b`: la igualdad byte a byte de la ruta A
+/// > deja de ser un accidente y pasa a exigir de verdad que `ReplaceBody` **no** reconstruya el
+/// > bloque. Por eso este test es hoy ROJO y forma parte de la fase roja de E31-H02.
 #[test]
 fn bom_roundtrip_byte_a_byte() {
     let path = rp("bom.md");
@@ -3145,5 +3174,613 @@ fn bom_sin_frontmatter_tambien_avisa() {
         cs.iter().any(|c| c == "DOC-BOM"),
         "el aviso es del FICHERO (su codificación), no del bloque de frontmatter: un `.md` con \
          BOM y sin frontmatter también debe avisarlo. Códigos: {cs:?}"
+    );
+}
+
+// ===========================================================================
+// E31-H02 — El frontmatter no se reserializa cuando nadie pidió tocarlo
+// (`requirements/epica-31-seguimientos-campana.md §E31-H02`,
+// `decisiones/26-replace-text-noop-reserializa.md §26`, `ARCHITECTURE.md §20.4`,
+// `CLAUDE.md` invariante #3 —una sola verdad de patcheo—). Fase ROJA.
+//
+// ## El defecto
+//
+// El brazo `ReplaceBody` de `plan::apply_one` (`plan.rs:1262-1279`) reconstruye el documento con
+// `model::build_raw_with_bom`, que **serializa `fm.value` e ignora `fm.raw`**. O sea: reescribir el
+// CUERPO reformatea la CABECERA, que nadie pidió tocar. Reproducido ejecutando el core:
+//
+//     entrada: "---\n# comentario\ntags: [a, b]\ntitle: \"Con comillas\"\n---\n\n# H\n\nviejo\n"
+//     salida : "---\ntags:\n- a\n- b\ntitle: Con comillas\n---\n\n# H\n\nviejo\n"
+//
+// Se pierden el comentario YAML, el estilo *flow* de `tags` y las comillas de `title`. Es
+// exactamente lo que E16-H04 arregló para `patch_frontmatter` (patch quirúrgico, `reserialized`) y
+// que este brazo hermano nunca recibió.
+//
+// ## El radio, que es mucho mayor que el síntoma
+//
+// TODO lo que normaliza a `ReplaceBody` comparte el defecto: `replace_text` (`plan.rs:533`),
+// `edit_section` (`:581`), `replace_body` (`:638`), `move` —incluido `rewriteInboundLinks`, que
+// reescribe el cuerpo de CADA enlazante (`:1021`, `:1045`)— y `delete remove_links` (`:1100`). Un
+// solo `move` puede hoy reformatear el frontmatter de medio workspace.
+//
+// ## Dos defectos más de la misma familia, hoy sin test
+//
+//   - **Línea en blanco inyectada**: `build_raw_with_bom` normaliza el separador a `---\n\n`, así
+//     que un `.md` escrito `---\n…\n---\ncuerpo` vuelve con un `\n` de más.
+//   - **Frontmatter ilegible BORRADO (pérdida de datos)**: `parse_file` devuelve
+//     `frontmatter: None` tanto para «no hay bloque» como para «hay bloque con YAML inválido», así
+//     que un `ReplaceBody` sobre un documento con el bloque roto **elimina el bloque entero del
+//     usuario**. Es la trampa que el rustdoc de `patch_frontmatter` (`model.rs:420-424`) documenta
+//     y esquiva; este brazo cae en ella.
+//
+// ## Qué fija esta fase roja (y qué NO)
+//
+// El criterio es **la conservación de bytes**, no el camino: los tests se escriben contra
+// `plan::apply_normalized_ops` (lo que materializa el `.md` que publica el único escritor) y NO
+// contra la función nueva que el alcance propone
+// (`model::replace_body_preservando_cabecera(raw, body)`), para que el implementador elija cómo
+// la estructura sin que la fase roja se lo dicte. No hace falta ningún stub: el rojo es POR
+// ASERCIÓN, no por compilación.
+//
+// ## El caso `SinCerrar`, razonado (lo pide el alcance)
+//
+// Con el bloque **abierto y nunca cerrado**, `SplitFront::body_offset` vale `bom_len(raw)`, así que
+// `SplitFront::body` devuelve el documento ENTERO —el bloque incluido, degradado a texto del
+// cuerpo—. El comportamiento coherente, y el que la simetría lectura/escritura del splice produce
+// sola, es:
+//
+//   - una operación que reescribe el cuerpo **derivándolo del que leyó** (`replace_text`,
+//     `edit_section`, `move`, `delete remove_links`) conserva el bloque, porque el bloque viaja
+//     DENTRO de ese cuerpo. Es lo que se asevera abajo, y lo que hoy ya ocurre: aquí el test es
+//     **anti-regresión** (el arreglo no puede romperlo), no rojo.
+//   - un `replace_body` desnudo, en cambio, sustituye el documento entero — y debe hacerlo: el
+//     llamador pidió reemplazar exactamente lo que `knowledge_get` le devolvió como cuerpo, que
+//     en este documento es todo el fichero. Fingir una cabecera que el motor no sabe leer sería
+//     inventarse un corte que `SplitFront` no reconoce.
+//
+// El caso que SÍ es rojo hoy es su gemelo `Bloque` + YAML inválido: ahí el corte existe, el bloque
+// está fuera del cuerpo, y el brazo lo borra.
+//
+// ## Rojo esperado HOY (todo por aserción)
+//
+//   - `replace_body_preserva_frontmatter_flow`             → `tags: [a, b]` vuelve en block style.
+//   - `replace_body_no_inyecta_linea_en_blanco`            → un `\n` de más tras el `---`.
+//   - `replace_body_no_borra_frontmatter_ilegible`         → el bloque con YAML inválido desaparece.
+//   - `edit_section_preserva_la_cabecera`                  → (familia 1/4).
+//   - `move_con_reescritura_de_entrantes_preserva_la_cabecera` → (familia 2/4, el radio grande).
+//   - `delete_remove_links_preserva_la_cabecera`           → (familia 3/4).
+//   - `replace_text_sin_coincidencias_no_toca_un_byte`     → (familia 4/4, el síntoma de la ficha).
+//   - `preservar_la_cabecera_no_mueve_la_revision`         → la `WorkspaceRevision` avanza sin cambio.
+//   - `bom_roundtrip_byte_a_byte` (arriba)                 → con el fixture ya en *flow*, ruta A.
+// ===========================================================================
+
+use lodestar_core::types::{EditSectionMode, InboundLinksPolicy};
+
+/// El documento del síntoma: frontmatter en estilo **flow** (`tags: [a, b]`), con un **comentario
+/// YAML** y un valor **entrecomillado**. Los tres rasgos son texto del usuario que la
+/// reserialización destruye, y ninguno sobrevive a un `serde_yaml::to_string`.
+const DOC_FLOW: &str = concat!(
+    "---\n",
+    "# el porqué de estas etiquetas\n",
+    "tags: [a, b]\n",
+    "title: \"Con comillas\"\n",
+    "status: draft\n",
+    "---\n",
+    "\n",
+    "# Documento\n",
+    "\n",
+    "cuerpo viejo\n",
+);
+
+/// Documento escrito **sin línea en blanco** tras el `---` de cierre. Es una forma real (hay
+/// fixtures así en `crates/lodestar-mcp/tests/e2e_migracion.rs`), y `build_raw_with_bom` la
+/// normaliza a `---\n\n`, o sea le inyecta un `\n` que el usuario no escribió.
+const DOC_SEPARADOR_PEGADO: &str = concat!("---\n", "title: X\n", "---\n", "# H\n");
+
+/// La cabecera de `raw` según el corte del propio core: `raw[..body_offset]`. Es el prefijo que
+/// una operación de CUERPO no puede tocar, expresado con la misma verdad (`model::split_front`)
+/// que usa la lectura — y no con un literal copiado, que se desincronizaría del fixture.
+fn cabecera(raw: &str) -> &str {
+    &raw[..model::split_front(raw).body_offset(raw)]
+}
+
+/// Aplica `ops` sobre `files` y devuelve el `.md` completo de `path` tras aplicarlas.
+fn tras_aplicar(
+    files: &FileMap,
+    ops: &[lodestar_core::types::NormalizedOperation],
+    path: &RelPath,
+) -> String {
+    plan::apply_normalized_ops(files, ops)
+        .expect("aplicar en memoria un change set normalizado no debe fallar")
+        .get(path)
+        .cloned()
+        .unwrap_or_else(|| {
+            panic!(
+                "`{}` debe seguir existiendo tras la operación",
+                path.as_str()
+            )
+        })
+}
+
+/// Criterio `replace_body_preserva_frontmatter_flow` — **Dado** un documento con frontmatter en
+/// estilo *flow*, con comentario YAML y comillas, **Cuando** se le cambia **solo el cuerpo**,
+/// **Entonces** la cabecera queda **byte a byte idéntica** y el cuerpo es el nuevo (E31-H02, §26).
+///
+/// La aserción fuerte es la igualdad byte a byte de `raw[..body_offset]`, no «que `tags` siga
+/// siendo una lista»: lo que se pierde hoy no son datos sino **texto del usuario** (formato,
+/// comentarios, comillas), y solo la comparación literal lo detecta.
+///
+/// **Anti-vacuo obligatorio**: se asevera además que el cuerpo **SÍ cambió**. Sin esa guarda, un
+/// `apply_one` que no escribiera nunca nada —o un fixture cuyo cuerpo nuevo fuese el viejo— pasaría
+/// este test sin probar absolutamente nada.
+#[test]
+fn replace_body_preserva_frontmatter_flow() {
+    let path = rp("flow.md");
+    let files = mapa(&[("flow.md", DOC_FLOW)]);
+
+    // Guarda del fixture: el bloque está en una forma que NO es la canónica de `serde_yaml`. Si
+    // lo estuviera, reserializar devolvería los mismos bytes y el criterio sería vacuo (es
+    // exactamente el defecto de método que originó `§26`).
+    let bloque_original = cabecera(DOC_FLOW);
+    assert!(
+        bloque_original.contains("tags: [a, b]")
+            && bloque_original.contains("# el porqué")
+            && bloque_original.contains("\"Con comillas\""),
+        "guarda del fixture: la cabecera debe llevar estilo flow, comentario YAML y comillas — los \
+         tres rasgos que la reserialización destruye. Cabecera = {bloque_original:?}"
+    );
+
+    let doc_set = DocumentSet::from_files(files.clone());
+    let cuerpo_nuevo = "\n# Documento\n\ncuerpo NUEVO\n".to_string();
+    let op = plan::normalize_replace_body(&doc_set, &path, cuerpo_nuevo.clone())
+        .expect("reescribir el cuerpo de un documento existente no debe fallar la normalización");
+    let resultado = tras_aplicar(&files, &[op], &path);
+
+    // (a) ANTI-VACUO: el cuerpo SÍ cambió. Sin esto, un no-op universal pasaría el test.
+    let releido = model::parse_file(path.as_str(), &resultado);
+    assert_eq!(
+        releido.body, cuerpo_nuevo,
+        "anti-vacuo: la operación debe haber escrito el cuerpo NUEVO. Si el cuerpo no cambia, la \
+         igualdad de la cabecera no prueba nada (cualquier implementación que no escriba nunca \
+         pasaría).\nDocumento resultante = {resultado:?}"
+    );
+    assert_ne!(
+        releido.body,
+        model::parse_file(path.as_str(), DOC_FLOW).body,
+        "anti-vacuo: el cuerpo nuevo debe ser DISTINTO del viejo"
+    );
+
+    // (b) El criterio: la cabecera —bloque, delimitadores y separador— es la MISMA, byte a byte.
+    assert_eq!(
+        cabecera(&resultado),
+        bloque_original,
+        "reescribir el CUERPO no puede reformatear la CABECERA: nadie pidió tocar el frontmatter. \
+         Hoy `apply_one` reconstruye el documento con `build_raw_with_bom`, que serializa \
+         `fm.value` e ignora `fm.raw`, así que se pierden el comentario YAML, el estilo flow de \
+         `tags` y las comillas de `title` (§26).\n  esperado = {bloque_original:?}\n  \
+         obtenido = {:?}",
+        cabecera(&resultado)
+    );
+
+    // (c) …y por tanto el documento entero es exactamente «cabecera original + cuerpo nuevo».
+    assert_eq!(
+        resultado,
+        format!("{bloque_original}{cuerpo_nuevo}"),
+        "el documento resultante debe ser el splice exacto: los bytes de la cabecera original más \
+         el cuerpo pedido, sin nada más en medio"
+    );
+
+    // (d) Los datos, además del texto, siguen ahí (por si alguien «arreglase» esto vaciando el
+    // bloque): las tres claves con sus tipos YAML.
+    let pf = model::parse_frontmatter(&resultado).unwrap_or_else(|| {
+        panic!("el documento resultante debe seguir teniendo frontmatter legible: {resultado:?}")
+    });
+    assert_eq!(
+        claves(&pf),
+        BTreeSet::from([
+            "tags".to_string(),
+            "title".to_string(),
+            "status".to_string()
+        ]),
+        "las tres claves del usuario siguen en el bloque tras reescribir el cuerpo"
+    );
+}
+
+/// Criterio `replace_body_no_inyecta_linea_en_blanco` — **Dado** un documento escrito
+/// `---\n…\n---\ncuerpo` (sin línea en blanco tras el delimitador de cierre), **Cuando** se le
+/// reescribe el cuerpo con **el mismo contenido**, **Entonces** los bytes son idénticos: no se
+/// inyecta separador (E31-H02, hallazgo 5 de la épica).
+///
+/// Hoy `build_raw_with_bom` normaliza el separador a `---\n\n` **y** recorta los `\n` iniciales del
+/// cuerpo (`body.trim_start_matches('\n')`), así que la escritura impone su propia forma sobre la
+/// del usuario. El único escritor no está para reformatear ficheros que nadie le pidió cambiar
+/// (invariante #1: los `.md` en disco son la fuente de verdad).
+#[test]
+fn replace_body_no_inyecta_linea_en_blanco() {
+    let path = rp("pegado.md");
+    let files = mapa(&[("pegado.md", DOC_SEPARADOR_PEGADO)]);
+
+    // Guarda del fixture: tras el `---` de cierre viene el cuerpo DIRECTAMENTE.
+    assert!(
+        DOC_SEPARADOR_PEGADO.contains("---\n# H\n"),
+        "guarda del fixture: el cuerpo debe empezar pegado al delimitador de cierre, sin línea en \
+         blanco de por medio. Documento = {DOC_SEPARADOR_PEGADO:?}"
+    );
+
+    let doc_set = DocumentSet::from_files(files.clone());
+    // El MISMO cuerpo que se acaba de leer: la operación es un no-op semántico, así que también
+    // debe serlo en bytes.
+    let cuerpo = model::parse_file(path.as_str(), DOC_SEPARADOR_PEGADO).body;
+    let op = plan::normalize_replace_body(&doc_set, &path, cuerpo)
+        .expect("reescribir el cuerpo de un documento existente no debe fallar la normalización");
+    let resultado = tras_aplicar(&files, &[op], &path);
+
+    assert_eq!(
+        resultado, DOC_SEPARADOR_PEGADO,
+        "leer el cuerpo y volver a escribirlo TAL CUAL debe devolver los MISMOS bytes: el motor no \
+         normaliza el separador del usuario. Hoy `build_raw_with_bom` fuerza `---\\n\\n` y añade \
+         una línea en blanco que nadie escribió, ensuciando el `git diff` de quien versione su \
+         workspace.\n  esperado = {DOC_SEPARADOR_PEGADO:?}\n  obtenido = {resultado:?}"
+    );
+    assert_eq!(
+        workspace_revision(
+            &plan::apply_normalized_ops(
+                &files,
+                &[plan::normalize_replace_body(
+                    &doc_set,
+                    &path,
+                    model::parse_file(path.as_str(), DOC_SEPARADOR_PEGADO).body
+                )
+                .expect("normalizar no debe fallar")]
+            )
+            .expect("aplicar no debe fallar"),
+            &[]
+        ),
+        workspace_revision(&files, &[]),
+        "y como los bytes no cambian, la `WorkspaceRevision` tampoco puede moverse"
+    );
+}
+
+/// Criterio `replace_body_no_borra_frontmatter_ilegible` — **Dado** un documento con frontmatter
+/// **ilegible**, **Cuando** una operación reescribe su cuerpo, **Entonces** el bloque **sobrevive
+/// literal** (E31-H02, hallazgo 5: hoy se borra, y es **pérdida de datos**).
+///
+/// Los dos documentos ilegibles del repo (`DOC_FM_YAML_ROTO`, `DOC_FM_SIN_CERRAR`) llegan al brazo
+/// `ReplaceBody` como `frontmatter: None` —indistinguibles de «no hay bloque»—, así que el brazo
+/// reconstruye el documento **sin** bloque y la metadata del usuario desaparece para siempre. Es la
+/// trampa que el rustdoc de `model::patch_frontmatter` documenta y evita; este hermano cae en ella.
+///
+/// **Los dos casos NO son el mismo criterio**, y el test lo declara por separado:
+///
+///   - **`Bloque` + YAML inválido**: hay corte, el bloque está FUERA del cuerpo, y hoy se borra →
+///     **rojo**. Debe sobrevivir byte a byte.
+///   - **`SinCerrar`**: no hay corte (`body_offset == bom_len`), así que el bloque viaja DENTRO del
+///     cuerpo que la operación lee y reescribe → sobrevive solo. Aquí el test es
+///     **anti-regresión**: el arreglo tiene que seguir preservándolo, y el camino por el que lo
+///     preserva es la simetría exacta con `SplitFront::body` (que es lo que el splice da gratis).
+#[test]
+fn replace_body_no_borra_frontmatter_ilegible() {
+    for (caso, doc, esperado_split) in [
+        (
+            "bloque cerrado con YAML inválido",
+            DOC_FM_YAML_ROTO,
+            "Bloque",
+        ),
+        (
+            "bloque que abre y nunca cierra",
+            DOC_FM_SIN_CERRAR,
+            "SinCerrar",
+        ),
+    ] {
+        let path = rp("roto.md");
+        let files = mapa(&[("roto.md", doc)]);
+
+        // Premisa: el documento es ilegible y llega como `frontmatter: None` — que es justo lo que
+        // lo hace confundible con la ausencia de bloque.
+        let parsed = model::parse_file(path.as_str(), doc);
+        assert!(
+            parsed.frontmatter.is_none() && parsed.fm_err.is_some(),
+            "[{caso}] premisa: el documento debe ser ilegible y llegar como `frontmatter: None`"
+        );
+        assert!(
+            format!("{:?}", model::split_front(doc)).starts_with(esperado_split),
+            "[{caso}] premisa: el corte debe ser `{esperado_split}`, que es lo que distingue los \
+             dos casos. Obtenido: {:?}",
+            model::split_front(doc)
+        );
+
+        // Una operación de CUERPO: `replace_text` sobre una cadena que sí está en el cuerpo (así el
+        // test no es vacuo por «no cambió nada»).
+        let doc_set = DocumentSet::from_files(files.clone());
+        let op = plan::normalize_replace_text(&doc_set, &path, "cuerpo", "CUERPO", None)
+            .expect("normalizar un `replace_text` sobre un documento existente no debe fallar");
+        let resultado = tras_aplicar(&files, &[op], &path);
+
+        // (a) ANTI-VACUO: la operación escribió de verdad.
+        assert!(
+            resultado.contains("CUERPO"),
+            "[{caso}] anti-vacuo: el `replace_text` debe haber tocado el cuerpo. \
+             Resultado = {resultado:?}"
+        );
+
+        // (b) El criterio: el bloque ilegible sobrevive LITERAL. Se compara la primera línea del
+        // bloque y su contenido, que es lo que hoy desaparece entero.
+        let primera = doc.lines().next().unwrap_or_default();
+        assert!(
+            resultado.starts_with(primera),
+            "[{caso}] el bloque de frontmatter del usuario debe sobrevivir: reescribir el CUERPO \
+             no puede borrar una cabecera que el motor no sabe leer — eso es pérdida de datos \
+             silenciosa (§26, hallazgo 5). El documento resultante debería empezar por \
+             {primera:?}.\n  original  = {doc:?}\n  resultante = {resultado:?}"
+        );
+        for linea in doc.lines().take_while(|l| !l.contains("cuerpo")) {
+            assert!(
+                resultado.contains(linea),
+                "[{caso}] la línea {linea:?} del documento original se ha perdido al reescribir el \
+                 cuerpo.\n  original   = {doc:?}\n  resultante = {resultado:?}"
+            );
+        }
+
+        // (c) Y el resultado es exactamente «cabecera original + cuerpo reescrito»: ni un byte de
+        // más entre una y otro.
+        assert_eq!(
+            resultado,
+            format!(
+                "{}{}",
+                cabecera(doc),
+                parsed.body.replace("cuerpo", "CUERPO")
+            ),
+            "[{caso}] el documento resultante debe ser el splice exacto de la cabecera original \
+             (`raw[..body_offset]`, la misma que lee `SplitFront::body`) con el cuerpo reescrito"
+        );
+    }
+}
+
+// --- La familia entera (criterio «el radio ampliado» de E31-H02) -------------------------------
+//
+// El defecto NO es de `replace_text`: es del brazo `ReplaceBody`, y **todo** lo que normaliza a él
+// lo hereda. Los cuatro tests que siguen ejercen los cuatro caminos, uno por test (y no cuatro
+// bloques dentro de uno) para que cada uno sea rojo, y luego verde, **por separado**: en un solo
+// test el primer `assert_eq!` que falla oculta a los otros tres, y el implementador no sabría si
+// arregló la familia o solo su primer miembro.
+//
+// Cada uno lleva su propia guarda anti-vacua (la operación reescribió el cuerpo de verdad), porque
+// sin ella una implementación que no escribiera nunca nada los pasaría todos.
+
+/// Un enlazante con frontmatter en estilo *flow*: es el documento que `move --rewriteInboundLinks`
+/// y `delete --remove_links` reescriben **en cadena**, sin que el usuario los haya nombrado.
+const ENLAZANTE_FLOW: &str = concat!(
+    "---\n",
+    "tags: [x, y]\n",
+    "title: \"Enlazante\"\n",
+    "---\n",
+    "\n",
+    "# Enlazante\n",
+    "\n",
+    "Enlaza a [Destino](destino.md).\n",
+);
+
+/// El documento enlazado, también en *flow*. Tiene a su vez un enlace **saliente** relativo para
+/// que `normalize_move` emita además el `ReplaceBody` que rebasa su propio cuerpo (`plan.rs:1021`).
+/// Sin ese saliente el documento movido no se reescribiría, y aseverar sobre SU cabecera sería
+/// vacuo: pasaría hoy mismo, sin arreglo ninguno.
+const DESTINO_FLOW: &str =
+    "---\ntags: [d]\n---\n\n# Destino\n\nVuelve a [Enlazante](enlazante.md).\n";
+
+/// Criterio «la familia entera» (1/4) — **Dado** un documento con frontmatter *flow*, **Cuando** un
+/// `edit_section` reescribe una sección con **el contenido que ya tenía**, **Entonces** la cabecera
+/// no se reformatea (E31-H02, §26).
+///
+/// El contenido idéntico hace de la operación un no-op semántico: no hay ninguna excusa para que el
+/// fichero cambie un solo byte, y menos en una zona que la operación ni siquiera nombra.
+#[test]
+fn edit_section_preserva_la_cabecera() {
+    let path = rp("flow.md");
+    let files = mapa(&[("flow.md", DOC_FLOW)]);
+    let doc_set = DocumentSet::from_files(files.clone());
+    let op = plan::normalize_edit_section(
+        &doc_set,
+        &path,
+        &["Documento".to_string()],
+        EditSectionMode::Replace,
+        "cuerpo viejo",
+    )
+    .expect("editar una sección existente no debe fallar la normalización");
+    let resultado = tras_aplicar(&files, &[op], &path);
+
+    // Anti-vacuo: la operación materializó el contenido pedido.
+    assert!(
+        resultado.contains("cuerpo viejo"),
+        "anti-vacuo: el contenido pedido debe estar en el cuerpo resultante: {resultado:?}"
+    );
+    assert_eq!(
+        cabecera(&resultado),
+        cabecera(DOC_FLOW),
+        "editar una SECCIÓN del cuerpo no puede reformatear el frontmatter: la operación ni \
+         siquiera nombra la cabecera, y aun así hoy la reserializa porque `edit_section` normaliza \
+         a `ReplaceBody` (§26, el radio de la ficha).\n  esperado = {:?}\n  obtenido = {:?}",
+        cabecera(DOC_FLOW),
+        cabecera(&resultado)
+    );
+}
+
+/// Criterio «la familia entera» (2/4) — **Dado** un documento enlazado desde otro con frontmatter
+/// *flow*, **Cuando** se mueve con `rewriteInboundLinks`, **Entonces** ni el **enlazante** ni el
+/// documento **movido** cambian de cabecera (E31-H02, §26).
+///
+/// Este es el **radio grande** de la ficha: `normalize_move` emite un `ReplaceBody` por CADA
+/// documento entrante, así que un solo `move` puede hoy reformatear el frontmatter de medio
+/// workspace — de documentos que el usuario ni mencionó en su petición.
+#[test]
+fn move_con_reescritura_de_entrantes_preserva_la_cabecera() {
+    let files = mapa(&[
+        ("enlazante.md", ENLAZANTE_FLOW),
+        ("destino.md", DESTINO_FLOW),
+    ]);
+    let doc_set = DocumentSet::from_files(files.clone());
+    let ops = plan::normalize_move(&doc_set, &rp("destino.md"), &rp("docs/destino.md"), true)
+        .expect("mover un documento existente no debe fallar la normalización");
+    let publicado = plan::apply_normalized_ops(&files, &ops)
+        .expect("aplicar un `move` con reescritura de entrantes no debe fallar");
+
+    let reescrito = publicado
+        .get(&rp("enlazante.md"))
+        .expect("el enlazante debe seguir existiendo tras el `move`");
+    let movido = publicado
+        .get(&rp("docs/destino.md"))
+        .expect("el documento movido debe existir en su destino");
+
+    // Anti-vacuo (los dos): el `move` reescribió de verdad el cuerpo de ambos.
+    assert!(
+        reescrito.contains("docs/destino.md"),
+        "anti-vacuo: `rewriteInboundLinks` debe haber reapuntado el enlace del enlazante a \
+         `docs/destino.md`: {reescrito:?}"
+    );
+    assert!(
+        movido.contains("../enlazante.md"),
+        "anti-vacuo: el saliente del documento movido debe haberse rebasado a `../enlazante.md` — \
+         si su cuerpo no se reescribiera, aseverar sobre su cabecera sería vacuo: {movido:?}"
+    );
+
+    assert_eq!(
+        cabecera(reescrito),
+        cabecera(ENLAZANTE_FLOW),
+        "mover un documento no puede reformatear el frontmatter de sus ENLAZANTES: el usuario pidió \
+         mover `destino.md`, no reescribir la cabecera de `enlazante.md`. Este es el radio grande \
+         de §26 — un solo `move` reformatea el frontmatter de medio workspace.\n  \
+         esperado = {:?}\n  obtenido = {:?}",
+        cabecera(ENLAZANTE_FLOW),
+        cabecera(reescrito)
+    );
+    assert_eq!(
+        cabecera(movido),
+        cabecera(DESTINO_FLOW),
+        "el documento MOVIDO cambia de path y de enlaces salientes, no de frontmatter: su cabecera \
+         debe llegar al destino byte a byte.\n  esperado = {:?}\n  obtenido = {:?}",
+        cabecera(DESTINO_FLOW),
+        cabecera(movido)
+    );
+}
+
+/// Criterio «la familia entera» (3/4) — **Dado** un documento enlazado desde otro con frontmatter
+/// *flow*, **Cuando** se borra con `remove_links`, **Entonces** el enlazante conserva su cabecera
+/// (E31-H02, §26).
+///
+/// Mismo daño colateral que el `move`: se pidió borrar un documento, y el precio es la cabecera
+/// reformateada de todo el que lo enlazaba.
+#[test]
+fn delete_remove_links_preserva_la_cabecera() {
+    let files = mapa(&[
+        ("enlazante.md", ENLAZANTE_FLOW),
+        ("destino.md", DESTINO_FLOW),
+    ]);
+    let doc_set = DocumentSet::from_files(files.clone());
+    let ops = plan::normalize_delete(&doc_set, &rp("destino.md"), InboundLinksPolicy::RemoveLinks)
+        .expect("borrar con `remove_links` no debe fallar la normalización");
+    let publicado = plan::apply_normalized_ops(&files, &ops)
+        .expect("aplicar un `delete remove_links` no debe fallar");
+
+    let reescrito = publicado
+        .get(&rp("enlazante.md"))
+        .expect("el enlazante debe seguir existiendo tras el `delete`");
+
+    // Anti-vacuo: el `delete` desenlazó de verdad.
+    assert!(
+        !reescrito.contains("(destino.md)"),
+        "anti-vacuo: `remove_links` debe haber desenlazado el enlace al documento borrado: \
+         {reescrito:?}"
+    );
+    assert_eq!(
+        cabecera(reescrito),
+        cabecera(ENLAZANTE_FLOW),
+        "desenlazar a los entrantes no puede reformatear su frontmatter: se pidió borrar \
+         `destino.md`, no reescribir la cabecera de quien lo enlazaba.\n  esperado = {:?}\n  \
+         obtenido = {:?}",
+        cabecera(ENLAZANTE_FLOW),
+        cabecera(reescrito)
+    );
+}
+
+/// Criterio «la familia entera» (4/4) — **Dado** un documento con frontmatter *flow*, **Cuando** un
+/// `replace_text` **no casa ninguna ocurrencia**, **Entonces** el documento queda byte a byte igual
+/// (E31-H02, §26: el síntoma literal con el que se abrió la ficha).
+///
+/// Es el caso que el juez ciego reprodujo por el wire sobre `examples/demo/overview.md`. La
+/// aserción es la igualdad del documento ENTERO, no solo de la cabecera: un no-op tiene que ser un
+/// no-op de verdad, cabecera y cuerpo.
+#[test]
+fn replace_text_sin_coincidencias_no_toca_un_byte() {
+    let path = rp("flow.md");
+    let files = mapa(&[("flow.md", DOC_FLOW)]);
+    let doc_set = DocumentSet::from_files(files.clone());
+    let op = plan::normalize_replace_text(&doc_set, &path, "no-casa-con-nada", "z", None)
+        .expect("normalizar un `replace_text` sobre un documento existente no debe fallar");
+    let resultado = tras_aplicar(&files, &[op], &path);
+
+    assert_eq!(
+        resultado, DOC_FLOW,
+        "un `replace_text` cuyo patrón no casa NINGUNA ocurrencia debe dejar el documento byte a \
+         byte igual: es el síntoma con el que se abrió §26. Hoy `tags: [a, b]` vuelve como lista en \
+         block style, se pierden el comentario YAML y las comillas de `title`, y el documento entra \
+         en `semanticDiff.modified` sin un solo cambio semántico — churn que contamina el `git \
+         diff` de quien versione su workspace.\n  esperado = {DOC_FLOW:?}\n  obtenido = {resultado:?}"
+    );
+}
+
+/// Criterio `preservar_la_cabecera_no_mueve_la_revision` — **Dado** cualquiera de los casos
+/// anteriores en que los bytes no deben cambiar, **Cuando** se aplican, **Entonces** la
+/// `WorkspaceRevision` **no se mueve** (E31-H02).
+///
+/// `types::workspace_revision` hashea los bytes CRUDOS del `FileMap`, así que el churn de bytes de
+/// §26 no es cosmético: hace avanzar la revisión del workspace por una operación vacía, y con ella
+/// invalida caches, dispara reconciliaciones del watcher y puede provocar conflictos de escritura
+/// optimista. Mismo patrón que la aserción de `bom_roundtrip_byte_a_byte`.
+#[test]
+fn preservar_la_cabecera_no_mueve_la_revision() {
+    let path = rp("flow.md");
+    let files = mapa(&[("flow.md", DOC_FLOW)]);
+    let rev_antes = workspace_revision(&files, &[]);
+    let doc_set = DocumentSet::from_files(files.clone());
+
+    // (a) `replace_text` sin coincidencias: la operación de la ficha.
+    let op = plan::normalize_replace_text(&doc_set, &path, "no-casa-con-nada", "z", None)
+        .expect("normalizar no debe fallar");
+    let despues = plan::apply_normalized_ops(&files, &[op]).expect("aplicar no debe fallar");
+    assert_eq!(
+        workspace_revision(&despues, &[]),
+        rev_antes,
+        "un `replace_text` sin coincidencias no puede mover la `WorkspaceRevision`: no cambió nada \
+         y la revisión hashea los bytes crudos. Hoy avanza porque la escritura reserializa el \
+         frontmatter (§26).\n  documento resultante = {:?}",
+        despues.get(&path)
+    );
+
+    // (b) Round-trip de cuerpo: leer el cuerpo y volver a escribirlo tal cual.
+    let cuerpo = model::parse_file(path.as_str(), DOC_FLOW).body;
+    let op =
+        plan::normalize_replace_body(&doc_set, &path, cuerpo).expect("normalizar no debe fallar");
+    let despues = plan::apply_normalized_ops(&files, &[op]).expect("aplicar no debe fallar");
+    assert_eq!(
+        despues.get(&path).map(String::as_str),
+        Some(DOC_FLOW),
+        "leer el cuerpo y reescribirlo TAL CUAL debe devolver los mismos bytes"
+    );
+    assert_eq!(
+        workspace_revision(&despues, &[]),
+        rev_antes,
+        "y por tanto tampoco puede mover la `WorkspaceRevision`"
+    );
+
+    // (c) Anti-vacuo de este test: cuando el cuerpo SÍ cambia, la revisión SÍ se mueve. Sin esta
+    // aserción, una `workspace_revision` constante pasaría las dos de arriba.
+    let op =
+        plan::normalize_replace_body(&doc_set, &path, "\n# Documento\n\notra cosa\n".to_string())
+            .expect("normalizar no debe fallar");
+    let despues = plan::apply_normalized_ops(&files, &[op]).expect("aplicar no debe fallar");
+    assert_ne!(
+        workspace_revision(&despues, &[]),
+        rev_antes,
+        "anti-vacuo: un cambio REAL del cuerpo sí debe mover la `WorkspaceRevision` — si no, las \
+         aserciones de arriba se cumplirían con una revisión constante"
     );
 }
