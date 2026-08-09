@@ -262,10 +262,14 @@ knowing:
   additive — nothing is removed from the plan.
 - `op` names the **normalized** operation, so a `replace_text` shows up as `replace_body`.
 - It does not discriminate by operation type: **any** operation whose document ends up identical is
-  listed — a `patch_frontmatter` writing the value that was already there, a `move` with
-  `from == to`. Careful with `edit_section`: rewriting a section with the content it already had is
-  a no-op *only if the bytes come out the same*, and section editing fixes the blank lines around
-  the section, so it often does not.
+  listed — a `move` with `from == to`, a `patch_frontmatter` writing the scalar that was already
+  there. The test is **bytes**, not meaning, and two cases catch people out:
+  - **`patch_frontmatter` over a collection in flow style.** Patching `tags` with `["a","b"]` when
+    the block already reads `tags: [a, b]` is *not* a no-op: the key you patch is rewritten in block
+    style, so the bytes differ even though the value does not. Untouched keys keep their formatting;
+    the patched one does not.
+  - **`edit_section` with the content it already had.** A no-op *only if the bytes come out the
+    same*, and section editing fixes the blank lines around the section — so often they do not.
 - The verdict is **per document**, not per operation: it compares the document before and after the
   whole plan. One operation per document — including bulk `selection`, which expands to exactly one
   — is exact. Several operations on the *same* path all share that path's verdict, so keep one
@@ -279,8 +283,9 @@ the answer.
 > A no-op is a no-op on disk too: it does not rewrite the file, does not move `workspaceRevision`,
 > and does not show up in `semanticDiff.modified`. Up to v0.5.0 it did — every body rewrite rebuilt
 > the whole document and reserialized its frontmatter, so a block written in YAML flow style
-> (`tags: [a, b]`) came back in block style. Your files keep their own formatting now: changing a
-> body never reformats the header.
+> (`tags: [a, b]`) came back in block style. **Changing a body never reformats the header now**, and
+> editing the frontmatter leaves every key you did not name byte for byte. The one thing still
+> reserialized is the key a `patch_frontmatter` actually writes.
 
 ## Bulk selections
 
@@ -496,6 +501,7 @@ Every failure comes back as a stable code in English plus a message in Spanish, 
 | `WRITE_CONFLICT` | Another publisher holds the lock, the base moved under the lock, or a file changed inside the publication window (or after the apply you are reverting) | Terminal for that transaction: re-read and plan again |
 | `INVALID_RESULT` | Two gates share this code, and the message tells them apart. **The plan's verdict**: the plan was not applicable under its own `policy` — the message names `requireValidResult` / `allowWarnings`. **The staging gate**: the result introduces diagnostics the workspace did not have — the message names `rejectNewErrors` / `allowExistingErrors` | Plan again, or use a policy that admits the result: the plan's `policy` argument for the first, `transactions` in the config for the second |
 | `INBOUND_LINKS_EXIST` | `delete` with `reject` on a document with backlinks | Choose another policy, or remove the links first |
+| `DOCUMENT_ALREADY_EXISTS` | A path a `create` (or the `to` of a `move`) claims is already taken — by a document on disk, or by an earlier operation of the same plan | Pick another path, or edit the document that is already there. The message names the path |
 | `PERMISSION_DENIED` | An affected path is outside the writable roots | Check `writableRoots` / `referenceRoots` in the config |
 | `WORKSPACE_RECOVERY_REQUIRED` | An interrupted transaction is still pending and was not resolved | Call `change_plan`: it runs recovery first, and reports `RECOVERY_FAILED` if it cannot |
 | `RECOVERY_FAILED` | An interrupted transaction could not be restored; material is quarantined | Read the path in the message before doing anything else |
