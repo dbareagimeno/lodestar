@@ -21,7 +21,7 @@ stable and in English.
 
 - [A round trip](#a-round-trip)
 - [What the plan checks](#what-the-plan-checks)
-- [`canApply` is the plan's verdict, not a lock](#canapply-is-the-plans-verdict-not-a-lock)
+- [`canApply` is the plan's verdict, and it binds](#canapply-is-the-plans-verdict-and-it-binds)
 - [The seven operations](#the-seven-operations)
 - [Bulk selections](#bulk-selections)
 - [Optimistic concurrency](#optimistic-concurrency)
@@ -35,7 +35,7 @@ stable and in English.
 
 Raise the retention of the backup runbook from 30 days to 45. First, plan it. The demo workspace
 ships with one deliberate error (a broken link), so the plan is told not to require a fully valid
-result — see [`canApply`](#canapply-is-the-plans-verdict-not-a-lock) below:
+result — see [`canApply`](#canapply-is-the-plans-verdict-and-it-binds) below:
 
 ```json
 change_plan
@@ -141,17 +141,23 @@ transaction, with its own journal and its own recovery copies.
 A plan is stored and stays applicable for **one hour** (`expiresAt`, seconds since the epoch). After
 that, `change_apply` answers `PLAN_EXPIRED` and you plan again.
 
-## `canApply` is the plan's verdict, not a lock
+## `canApply` is the plan's verdict, and it binds
 
 `canApply` answers one question: *would this result satisfy the `policy` I passed to this plan?* It
 is `false` when `requireValidResult` is on and the simulated result is not valid, or when
 `allowWarnings` is off and the result has warnings.
 
-Read it as advice to the caller, and act on it. It is **not** a safety interlock:
-[`contracts/mcp.yml`](../../contracts/mcp.yml) does not state that `change_apply` re-evaluates the
-plan's policy, and what `change_apply` does enforce is its own staging gate, described
-[below](#what-change_apply-guarantees) — a differential check with different criteria. A client that
-ignores `canApply: false` and applies anyway is not being stopped by the policy it declared.
+It is not just advice: **`change_apply` enforces it**. Applying a plan that came back with
+`canApply: false` is refused with `INVALID_RESULT`, before the publication lock is taken and without
+writing a single byte. The apply does not trust the stored verdict either — it **recomputes** it,
+with the same `can_apply` function the plan used and the `policy` that is persisted alongside the
+plan, right after re-checking the plan hash. So the policy you declared is the policy you get, and
+the message names the clause that blocked (`requireValidResult` or `allowWarnings`) so you know
+whether to fix the change or to plan again with a policy that admits the result.
+
+That is separate from the staging gate described [below](#what-change_apply-guarantees), which
+enforces the *workspace's* `transactions` policy with different criteria. Both refuse with
+`INVALID_RESULT`; the message tells you which one spoke.
 
 On the demo workspace this is easy to see, because it ships with one error on purpose. Under the
 default policy (`requireValidResult: true`, `allowWarnings: true`) every plan comes back with
@@ -171,14 +177,20 @@ change_plan
 }
 ```
 
-That is the right policy for a workspace you expect to be clean, and the wrong one for a workspace
-you are repairing incrementally — which is why the round trip above passes
-`requireValidResult: false`. Omitting `policy` entirely is fine and uses the defaults above; when
-you do send it, send **both** of its fields, because a partial object is rejected today:
+Insisting on that plan does not get you past it:
 
 ```text
-INVALID_SCHEMA: «policy» no tiene la forma esperada: missing field `allowWarnings`
+INVALID_RESULT: el plan «changeset:5bc591c4…» no es aplicable bajo la policy con la que se
+planificó (requireValidResult=true, allowWarnings=true): «requireValidResult» es true y el
+resultado simulado no es válido (1 error(es)). No se ha escrito nada. Replanifica sobre el estado
+actual (change_plan) o vuelve a planificar con una policy que lo admita
 ```
+
+That is the right policy for a workspace you expect to be clean, and the wrong one for a workspace
+you are repairing incrementally — which is why the round trip above passes
+`requireValidResult: false`. Omitting `policy` entirely is fine and uses the defaults above; so is
+sending a partial object — `{"requireValidResult": false}` on its own is enough, and the omitted
+field falls back to its own default (`allowWarnings: true`) instead of being rejected.
 
 ## The seven operations
 
@@ -197,7 +209,7 @@ Lodestar has no document types.
 
 Parameter names and shapes live in [`contracts/mcp.yml`](../../contracts/mcp.yml) under
 `change_plan`; they are also declared in the tool's `inputSchema`, which your MCP client can show
-you. Two behaviours are worth calling out because they are refusals by design:
+you. Three behaviours are worth calling out — two refusals by design, and one silence by design:
 
 **`delete` never guesses what to do with inbound links.** If the document has backlinks, the policy
 is mandatory:
@@ -222,6 +234,53 @@ con la política «reject»
 
 `remove_links` deletes the document and removes the references to it. Before choosing, ask
 `impact_analyze` what a delete would cost.
+
+**`replace_text` that finds nothing is a no-op, not an error — and the plan says so.** If `find`
+does not occur in the document and you did not pass `expectedOccurrences`, the plan is produced
+normally with `canApply: true`, and the operation is listed in **`noOpOperations`**. This holds in
+the `operations` array form, not just in bulk selections:
+
+```json
+change_plan
+{"operations": [{"op": "replace_text", "path": "overview.md",
+                 "find": "a string that is not there", "replace": "x"}],
+ "policy": {"requireValidResult": false, "allowWarnings": true}}
+```
+
+The plan comes back with `canApply: true`, empty `semanticDiff.bodyChanges`,
+`frontmatterChanges` and `modified`, and:
+
+```json
+"noOpOperations": [{"index": 0, "path": "overview.md", "op": "replace_body"}]
+```
+
+Read `noOpOperations` to tell "I ran it and it changed nothing" from "you never sent it" — after a
+bulk `replace_text` over 40 documents that matched in 12, it names the other 28. Three details worth
+knowing:
+
+- The operation **stays** in `normalizedOperations`; `index` points at it there. The field is
+  additive — nothing is removed from the plan.
+- `op` names the **normalized** operation, so a `replace_text` shows up as `replace_body`.
+- It does not discriminate by operation type: **any** operation whose document ends up identical is
+  listed — a `patch_frontmatter` writing the value that was already there, a `move` with
+  `from == to`. Careful with `edit_section`: rewriting a section with the content it already had is
+  a no-op *only if the bytes come out the same*, and section editing fixes the blank lines around
+  the section, so it often does not.
+- The verdict is **per document**, not per operation: it compares the document before and after the
+  whole plan. One operation per document — including bulk `selection`, which expands to exactly one
+  — is exact. Several operations on the *same* path all share that path's verdict, so keep one
+  operation per document when you want to read this field per operation.
+
+**Pass `expectedOccurrences` whenever you know how many replacements you expect** — it turns a wrong
+count, zero included, into a refusal *before* you apply. `noOpOperations` tells you afterwards that
+nothing happened; `expectedOccurrences` refuses up front, which is stronger when you already know
+the answer.
+
+> A no-op is a no-op on disk too: it does not rewrite the file, does not move `workspaceRevision`,
+> and does not show up in `semanticDiff.modified`. Up to v0.5.0 it did — every body rewrite rebuilt
+> the whole document and reserialized its frontmatter, so a block written in YAML flow style
+> (`tags: [a, b]`) came back in block style. Your files keep their own formatting now: changing a
+> body never reformats the header.
 
 ## Bulk selections
 
@@ -321,20 +380,25 @@ whole transaction without having touched your Markdown:
 1. Load the persisted plan — `PLAN_EXPIRED` if it timed out, `PLAN_STALE` if it is gone.
 2. Check `expectedWorkspaceRevision`, if given.
 3. Recompute the plan hash against the current base — `PLAN_STALE` if the workspace moved.
-4. Take the **publication lock**, so two publishers cannot interleave.
-5. Compute the real affected set (created, modified, deleted).
-6. Check every affected path against the configured writable roots — `PERMISSION_DENIED` otherwise.
-7. Stage the result and run the **differential validation gate**: with the defaults, a change may
+4. Re-evaluate the **plan's own policy**: recompute `canApply` over the simulated result with the
+   `policy` persisted with the plan. If the plan was not applicable under it, the whole transaction
+   is refused with `INVALID_RESULT`, naming the clause that blocked (`requireValidResult` or
+   `allowWarnings`). This happens before the lock, so nothing is staged, journalled or written.
+5. Take the **publication lock**, so two publishers cannot interleave.
+6. Compute the real affected set (created, modified, deleted).
+7. Check every affected path against the configured writable roots — `PERMISSION_DENIED` otherwise.
+8. Stage the result and run the **differential validation gate**: with the defaults, a change may
    not introduce diagnostics the workspace did not already have (`rejectNewErrors`), while existing
    problems are tolerated so partial repairs remain possible (`allowExistingErrors`). A violation is
-   `INVALID_RESULT`.
-8. Re-verify the base under the lock.
-9. Write **durable recovery copies** of everything about to change, each with its size and `blake3`
-   fingerprint.
-10. Write the **write-ahead journal**, fsynced.
-11. Persist the receipt — before the point of no return.
-12. Publish with **atomic renames**, one file at a time, through the single writer.
-13. Seal: promote the receipt, drop the journal, clean staging, keep the recovery copies.
+   `INVALID_RESULT` too — with a message about `rejectNewErrors`/`allowExistingErrors`, not about
+   the plan's policy.
+9. Re-verify the base under the lock.
+10. Write **durable recovery copies** of everything about to change, each with its size and `blake3`
+    fingerprint.
+11. Write the **write-ahead journal**, fsynced.
+12. Persist the receipt — before the point of no return.
+13. Publish with **atomic renames**, one file at a time, through the single writer.
+14. Seal: promote the receipt, drop the journal, clean staging, keep the recovery copies.
 
 Two consequences of that order are contract, not implementation detail:
 
@@ -430,7 +494,7 @@ Every failure comes back as a stable code in English plus a message in Spanish, 
 | `PLAN_STALE` | The plan is gone, or the workspace moved under it | Plan again |
 | `PLAN_EXPIRED` | The plan timed out, or the receipt no longer exists | Plan again; the transaction is no longer revertible |
 | `WRITE_CONFLICT` | Another publisher holds the lock, the base moved under the lock, or a file changed inside the publication window (or after the apply you are reverting) | Terminal for that transaction: re-read and plan again |
-| `INVALID_RESULT` | The staging gate refused: the result introduces diagnostics the workspace did not have | Fix the operation, or relax the policy in the config |
+| `INVALID_RESULT` | Two gates share this code, and the message tells them apart. **The plan's verdict**: the plan was not applicable under its own `policy` — the message names `requireValidResult` / `allowWarnings`. **The staging gate**: the result introduces diagnostics the workspace did not have — the message names `rejectNewErrors` / `allowExistingErrors` | Plan again, or use a policy that admits the result: the plan's `policy` argument for the first, `transactions` in the config for the second |
 | `INBOUND_LINKS_EXIST` | `delete` with `reject` on a document with backlinks | Choose another policy, or remove the links first |
 | `PERMISSION_DENIED` | An affected path is outside the writable roots | Check `writableRoots` / `referenceRoots` in the config |
 | `WORKSPACE_RECOVERY_REQUIRED` | An interrupted transaction is still pending and was not resolved | Call `change_plan`: it runs recovery first, and reports `RECOVERY_FAILED` if it cannot |

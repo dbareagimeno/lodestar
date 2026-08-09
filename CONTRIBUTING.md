@@ -25,6 +25,17 @@ the discussion belongs upstream of the code, where changing your mind is still c
 GitHub Discussions is intentionally disabled for now. Issues are the channel; if the traffic ever
 justifies a second one, it will be enabled then.
 
+## Branches
+
+**Send every pull request to `develop`.** It is the integration branch and the repository's default
+branch, so a pull request opened from the GitHub UI already targets it — if you branched from `main`
+by hand, change the base before asking for a review.
+
+`main` is the released branch: it only ever receives a release pull request from `develop`, and
+every `vX.Y.Z` tag points at a commit on it. That is what makes `main` a reliable answer to "what is
+actually published right now". The full release runbook is [`RELEASING.md`](RELEASING.md) (in
+Spanish).
+
 ## Running the gates locally
 
 These are the same commands CI runs. Run them before opening a pull request:
@@ -80,7 +91,7 @@ Lodestar splits languages by **audience**, not by directory
 - **English** for everything an adopter reads before deciding: `README.md`, `docs/user/`,
   `examples/demo/`, this file, `SECURITY.md`, `CODE_OF_CONDUCT.md` and the `.github/` templates.
 - **Spanish** for everything that governs the development of the repository: `ARCHITECTURE.md`,
-  `DECISIONES.md`, `requirements/`, `docs/`, `contracts/`, source comments, error messages on the
+  `decisiones/`, `requirements/`, `docs/`, `contracts/`, source comments, error messages on the
   wire and commit messages.
 
 So yes — once you go past the README you will find the internal documentation in Spanish, and that

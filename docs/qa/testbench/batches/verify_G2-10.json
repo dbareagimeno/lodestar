@@ -1,0 +1,15 @@
+{
+  "batch": "VERIFY-G2-10",
+  "root": "worktree",
+  "profile": "standard",
+  "fixtures": "dirlinks",
+  "cases": [
+    {"id": "G2-10v", "fresh_root": true, "steps": [
+       {"kind": "call", "tool": "knowledge_get", "arguments": {"ref": {"path": "a/b/doc.md"}, "include": ["outgoingLinks"]}},
+       {"kind": "call", "tool": "change_plan", "arguments": {"operations": [{"op": "move", "from": "a/b/doc.md", "to": "doc.md", "rewriteInboundLinks": true}]}},
+       {"kind": "call", "tool": "change_apply", "arguments": {"changeSetId": "@step1.structured.changeSetId"}},
+       {"kind": "shell", "cmd": "cat doc.md"},
+       {"kind": "call", "tool": "knowledge_get", "arguments": {"ref": {"path": "doc.md"}, "include": ["outgoingLinks"]}},
+       {"kind": "call", "tool": "knowledge_check", "arguments": {"scope": {"kind": "workspace"}, "minimumSeverity": "info", "limit": 1000}}]}
+  ]
+}

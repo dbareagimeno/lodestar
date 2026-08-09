@@ -1592,3 +1592,92 @@ fn check_sin_recuperacion_no_avisa() {
         "sin transacción a medias, `recoveryPending` es false: {v}"
     );
 }
+
+// ===========================================================================
+// E30-H03 (seguimiento 8) — SARIF sin `artifactLocation` bajo `.lodestar`
+//
+// `App::full_analysis` indexa los diagnósticos de descubrimiento SIN `targets`
+// (`WORKSPACE-EMPTY`, `PATH-NOT-UTF8`) bajo el ancla SINTÉTICA `ANCHOR_WORKSPACE` (`.lodestar`,
+// E29-H06): el mapa de `Analysis::diagnostics` necesita una clave y la raíz no es un `RelPath`
+// (invariante #6). El serializador SARIF (`crates/lodestar-cli/src/sarif.rs`) tiene un guard que
+// reconoce ese ancla y emite el `result` SIN `locations`, porque emitirla como `artifactLocation`
+// sería una afirmación FALSA sobre el disco: `.lodestar` no es un documento del workspace y, en el
+// caso más común —un workspace vacío, sin `.lodestar/` creado—, ni siquiera existe, así que un
+// `upload-sarif` colgaría la alerta de un fichero fantasma.
+//
+// El guard es una sola línea y no tenía test: neutralizarlo (`let sintetico = false && …`) dejaba
+// la suite entera de `lodestar-cli` en verde. Este test lo muerde por los dos lados.
+// ===========================================================================
+
+/// **E30-H03 (seguimiento 8)** · `sarif_no_lista_artefactos_bajo_lodestar`: **Dado** un workspace
+/// vacío (que produce `WORKSPACE-EMPTY`, un diagnóstico sin `targets`), **Cuando** se genera
+/// `lodestar check --sarif`, **Entonces** (a) ninguna `artifactLocation` del documento apunta bajo
+/// `.lodestar` —de hecho el `result` sintético no lleva `locations` en absoluto— **y** (b) el
+/// hallazgo `WORKSPACE-EMPTY` **sí** sale, con su `ruleId`, su `level` y su `message`.
+///
+/// La mitad (b) es el **anti-vacuo**: sin ella el test pasaría con un SARIF vacío, que es
+/// exactamente la regresión contraria (suprimir el diagnóstico en vez de anclarlo bien).
+#[test]
+fn sarif_no_lista_artefactos_bajo_lodestar() {
+    // Un directorio SIN un solo `.md`: el inventario queda vacío y el descubrimiento emite
+    // `WORKSPACE-EMPTY` (severidad `Warn`, sin `targets`).
+    let dir = temp_dir("sarif-ancla");
+
+    let out = bin()
+        .arg("--path")
+        .arg(dir.path())
+        .args(["check", "--sarif"])
+        .output()
+        .unwrap();
+    let v: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("`check --sarif` debe emitir JSON válido");
+    let results = v["runs"][0]["results"]
+        .as_array()
+        .expect("el SARIF lleva `runs[0].results`")
+        .clone();
+
+    // (b) ANTI-VACUO — el hallazgo sale entero: código, nivel y mensaje.
+    let vacio = results
+        .iter()
+        .find(|r| r["ruleId"] == "WORKSPACE-EMPTY")
+        .unwrap_or_else(|| {
+            panic!(
+                "el SARIF debe surfacear `WORKSPACE-EMPTY`: no anclarlo a un fichero NO puede \
+                 significar suprimirlo. results = {results:#?}"
+            )
+        });
+    assert_eq!(
+        vacio["level"], "warning",
+        "`WORKSPACE-EMPTY` es un aviso y así debe viajar en SARIF: {vacio:#?}"
+    );
+    assert!(
+        vacio["message"]["text"]
+            .as_str()
+            .is_some_and(|t| !t.is_empty()),
+        "el `result` sin `locations` conserva su mensaje: {vacio:#?}"
+    );
+
+    // (a) Ningún `result` cuelga de `.lodestar` — el sintético va SIN `locations`.
+    assert!(
+        vacio.get("locations").is_none(),
+        "un diagnóstico anclado al workspace (sin `targets`) debe emitirse SIN `locations`: \
+         `.lodestar` es una etiqueta sintética, no un artefacto del disco. result = {vacio:#?}"
+    );
+    for r in &results {
+        let uris: Vec<&str> = r["locations"]
+            .as_array()
+            .map(|ls| {
+                ls.iter()
+                    .filter_map(|l| l["physicalLocation"]["artifactLocation"]["uri"].as_str())
+                    .collect()
+            })
+            .unwrap_or_default();
+        assert!(
+            !uris
+                .iter()
+                .any(|u| *u == ".lodestar" || u.starts_with(".lodestar/")),
+            "ninguna `artifactLocation` puede apuntar bajo `.lodestar`: no es un documento del \
+             workspace y en un workspace vacío ni siquiera existe. result = {r:#?}"
+        );
+    }
+}

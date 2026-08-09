@@ -1,0 +1,24 @@
+{
+  "batch": "L4",
+  "root": "worktree",
+  "profile": "standard",
+  "fixtures": "mdi",
+  "cases": [
+    {"id": "MDI-10", "steps": [
+       {"kind": "call", "tool": "metadata_inspect", "arguments": {"mode": "catalog", "limit": 1000}},
+       {"kind": "call", "tool": "metadata_inspect", "arguments": {"mode": "field", "field": "sonar.projectKey"}},
+       {"kind": "call", "tool": "knowledge_search", "arguments": {"where": "sonar.projectKey = \"atlas-api\""}}],
+     "esperado": "Paso 0: el catálogo ANUNCIA sonar.projectKey (del fixture dot-key.md). Paso 1: presentIn 0 o equivalente — la clave con punto literal NO es direccionable (el path desciende a un mapa sonar inexistente). Paso 2: results [] sin error. Clase límite 1 documentada. Fuente: query-language.md Three things the dot-path dialect cannot say (1); mcp.yml metadata_inspect clases límite"},
+    {"id": "MDI-10b", "steps": [
+       {"kind": "call", "tool": "metadata_inspect", "arguments": {"mode": "field", "field": "env.region"}},
+       {"kind": "call", "tool": "knowledge_search", "arguments": {"where": "env.region contains \"e\"", "include": ["frontmatter.env.region"]}}],
+     "esperado": "Fixtures nested-env.md (env:{region:us-east}) y flat-env.md (clave literal env.region:eu-west). Catálogo anuncia ambas como env.region (indistinguibles); solo la ANIDADA es alcanzable: paso 1 debe devolver únicamente nested-env.md con us-east. Fuente: query-language.md clase límite 3 (ejemplo literal)"},
+    {"id": "MDI-11", "tool": "metadata_inspect",
+     "arguments": {"mode": "field", "field": "frontmatter.x"},
+     "esperado": "Error INVALID_SCHEMA RUIDOSO (no presentIn:0 silencioso): el prefijo frontmatter. es el anclaje y colisiona con la clave literal frontmatter del fixture; el mensaje explica la colisión y sugiere knowledge_search{include:[frontmatter.frontmatter.x]}. Fuente: query-language.md clase límite 2 (texto casi literal); mcp.yml E26-H09"},
+    {"id": "MDI-12", "steps": [
+       {"kind": "call", "tool": "knowledge_search", "arguments": {"include": ["frontmatter.frontmatter.x"], "limit": 100}},
+       {"kind": "call", "tool": "knowledge_search", "arguments": {"where": "frontmatter.x = 1"}}],
+     "esperado": "Paso 0: SOLO fixtures/frontmatter-key.md proyecta {\"frontmatter.x\": 1}; el resto, mapa vacío. Única superficie que lee la clave bajo un frontmatter literal. Paso 1: [] sin error — frontmatter.x en where se lee como anclaje + clave x de primer nivel, que nadie tiene. Fuente: query-language.md clase límite 2"}
+  ]
+}

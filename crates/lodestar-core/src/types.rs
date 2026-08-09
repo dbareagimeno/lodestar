@@ -4,7 +4,7 @@
 //! DTO paralela (principio #4). **Ya no hay espejo TypeScript que sincronizar**: el `.d.ts`
 //! generado con ts-rs/specta (E0-H04/E6-H03) existía para la UI de escritorio, que se retiró de
 //! `main` a la rama `experimental/ui-desktop` con el giro headless (`§19.1`) llevándose consigo
-//! `frontend/src/lib/ipc/types.ts` — y con ello `DECISIONES.md §4`, hoy obsoleta. Lo que sí se
+//! `frontend/src/lib/ipc/types.ts` — y con ello `decisiones §4`, hoy obsoleta. Lo que sí se
 //! deriva desde aquí es el **JSON Schema** del `outputSchema` de las tools MCP, vía la feature
 //! `schemars` (ver la macro `schema_derive!` de abajo).
 
@@ -260,6 +260,21 @@ pub enum CheckCode {
     /// aquello escondía.
     #[serde(rename = "DOC-BOM")]
     DocBom,
+    /// El inventario del workspace quedó **vacío**: ni un solo documento sobrevivió al
+    /// descubrimiento bajo la raíz auditada, ya sea porque no hay ningún `.md` o porque
+    /// `discovery.include`/`discovery.exclude` los excluye a todos. Aviso, no error: un repo
+    /// legítimamente vacío sigue siendo un workspace válido (`§20.1`); el diagnóstico solo hace
+    /// **observable** lo que hoy es indistinguible de un directorio equivocado
+    /// (`decisiones §16(f)`, E29-H06). Severidad `Warn`, intrínseca (`family_of` devuelve `None`,
+    /// como `DOC-NOT-UTF8` y compañía).
+    ///
+    /// Lo produce el **descubrimiento** (`lodestar_workspace::discovery::discover`), como los demás
+    /// diagnósticos de esta familia, para que las dos fachadas lo vean por el mismo canal
+    /// (invariante #3). Viaja **sin `targets`** —igual que `PATH-NOT-UTF8`— porque no describe un
+    /// fichero sino la ausencia de todos, y la raíz no tiene [`RelPath`] que la represente
+    /// (`RelPath::new("")` es `Err` por diseño, invariante #6).
+    #[serde(rename = "WORKSPACE-EMPTY")]
+    WorkspaceEmpty,
 }
 }
 
@@ -278,6 +293,7 @@ impl CheckCode {
             CheckCode::SymlinkUnsupported => "SYMLINK-UNSUPPORTED",
             CheckCode::LinkCaseMismatch => "LINK-CASE-MISMATCH",
             CheckCode::DocBom => "DOC-BOM",
+            CheckCode::WorkspaceEmpty => "WORKSPACE-EMPTY",
         }
     }
 }
@@ -1299,7 +1315,7 @@ pub fn workspace_revision(files: &FileMap, writable: &[RelPath]) -> WorkspaceRev
 // ---------------------------------------------------------------------------
 
 schema_derive! {
-/// Los 16 códigos de error estables del protocolo (`REFACTOR §13`). UNA sola enum, igual que
+/// Los 17 códigos de error estables del protocolo (`REFACTOR §13`). UNA sola enum, igual que
 /// `CheckCode`: el valor de wire ES la cadena SCREAMING_SNAKE (rename por variante, NO el
 /// `PascalCase` por defecto de serde ni el guion de `CheckCode`). Cualquier fachada que traduzca
 /// un error a protocolo usa una de estas variantes — está prohibido redefinir estos códigos fuera
@@ -1307,6 +1323,12 @@ schema_derive! {
 ///
 /// Esta historia (E10-H02) solo fija el contrato de wire y el punto de mapeo; los flujos reales
 /// que producen cada código llegan en E12/E13 (fuera de alcance aquí).
+///
+/// # Cambios conscientes del catálogo
+///
+/// El catálogo es superficie de wire **congelada** y solo se ha abierto a conciencia dos veces:
+/// E23-H14 (`NONCONFORMANT_RESULT` → `INVALID_RESULT`) y **E28-H02**, que añade la fila 17,
+/// [`ErrorCode::DocumentAlreadyExists`], para el guard de colisión de `create`/`move`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum ErrorCode {
     #[serde(rename = "WORKSPACE_NOT_FOUND")]
@@ -1315,6 +1337,12 @@ pub enum ErrorCode {
     WorkspaceRecoveryRequired,
     #[serde(rename = "DOCUMENT_NOT_FOUND")]
     DocumentNotFound,
+    /// El destino de una operación que CREA un documento (`create`, o el `to` de un `move`) ya está
+    /// ocupado por un documento existente (E28-H02). Simétrico de
+    /// [`ErrorCode::DocumentNotFound`]: los dos describen un desajuste entre lo que la operación
+    /// asume sobre la **existencia** de un `path` y lo que hay realmente en el workspace.
+    #[serde(rename = "DOCUMENT_ALREADY_EXISTS")]
+    DocumentAlreadyExists,
     #[serde(rename = "AMBIGUOUS_REFERENCE")]
     AmbiguousReference,
     #[serde(rename = "REVISION_CONFLICT")]
@@ -1352,6 +1380,7 @@ impl ErrorCode {
             ErrorCode::WorkspaceNotFound => "WORKSPACE_NOT_FOUND",
             ErrorCode::WorkspaceRecoveryRequired => "WORKSPACE_RECOVERY_REQUIRED",
             ErrorCode::DocumentNotFound => "DOCUMENT_NOT_FOUND",
+            ErrorCode::DocumentAlreadyExists => "DOCUMENT_ALREADY_EXISTS",
             ErrorCode::AmbiguousReference => "AMBIGUOUS_REFERENCE",
             ErrorCode::RevisionConflict => "REVISION_CONFLICT",
             ErrorCode::PlanStale => "PLAN_STALE",
@@ -1870,6 +1899,36 @@ pub enum TypeError {
         field: FieldPath,
         operator: ComparisonOperator,
         /// El tipo que tenía el campo (nunca `List`).
+        found: ValueType,
+    },
+    /// Un operador de **texto** cuyo operando no es un string: los afijos
+    /// (`starts_with`/`ends_with`, E29-H04, `decisiones §23/A-04`) y `contains` **sobre un campo
+    /// string**, donde significa subcadena (E30-H03 seguimiento 6). Son operadores que solo tienen
+    /// sentido entre strings: un número, un booleano, `null`, una lista o un mapa no tienen
+    /// prefijo, sufijo ni subcadena que comprobar, y el lenguaje no coerce (`§20.8`), así que
+    /// devolver `false` era una respuesta silenciosamente equivocada —el caso G1-20 del testbench:
+    /// 7 documentos con `priority: 3` desaparecían de `priority starts_with "3"` sin un aviso— y no
+    /// un veredicto.
+    ///
+    /// Cubre los **dos** operandos: el campo no-string (`priority starts_with "3"` sobre
+    /// `priority: 3`) y el literal no-string (`status starts_with 3`, `titulo contains 3`). El
+    /// `found` es de **uno** de los dos —el campo primero, el literal si el campo sí era string—,
+    /// así que la variante NO dice de qué lado viene: quien redacte el mensaje debe ser neutro
+    /// respecto al lado y no atribuirle el tipo al campo, o mandaría al agente a inspeccionar un
+    /// campo sano.
+    ///
+    /// Para `contains` solo emerge con un campo **string**: un campo que no es ni string ni lista
+    /// sigue siendo [`TypeError::NotAList`] (el operando que falla es el del workspace, no el de la
+    /// consulta), y sobre una **lista** el literal puede ser de cualquier tipo (pertenencia por
+    /// valor, sin restricción de string).
+    ///
+    /// Un campo **inexistente** no llega aquí: la ausencia es `false` (mismo contrato que
+    /// [`TypeError::NotAList`]).
+    NotAString {
+        field: FieldPath,
+        operator: ComparisonOperator,
+        /// El tipo del operando que **no** es string (nunca `String`): el del campo, o —si el campo
+        /// sí lo era— el del literal.
         found: ValueType,
     },
 }

@@ -11,7 +11,7 @@
 > producto **antes** del giro headless (`§19`) y de la migración a Markdown universal (`§20`).
 > Siguen siendo ciertas las filas de **Backend/Rust**, **Cache SQLite/FTS5**, **Watcher `notify`**,
 > **Fachada agentes (MCP)** y **Fachada CI (CLI)** — salvo que `rmcp` sigue sin adoptarse
-> (`DECISIONES §3`) y que la semántica ya no es «OKF» sino Markdown universal (`§20`).
+> (`decisiones §3`) y que la semántica ya no es «OKF» sino Markdown universal (`§20`).
 > **Han dejado de ser ciertas**: «Shell de escritorio (Tauri v2)» y «Frontend (Svelte 5 + Vite)»
 > —la UI se retiró de `main` a la rama `experimental/ui-desktop` con el giro headless (`§19.1`)— y
 > **«Versionado: git»**, que salió de la superficie en `E9-H02` y del repo en `E15-H01`: no existe
@@ -43,7 +43,7 @@
    definen **una vez** en `lodestar-core` y cruzan a las fachadas **sin capa DTO paralela**.
    *(La regla sigue vigente; la frase de época decía «cruzan a Tauri/MCP/CLI» y que el `.d.ts` se
    genera con ts-rs/specta. **Ya no hay espejo TS**: desapareció al retirar la UI a
-   `experimental/ui-desktop`, y con él la nota de `DECISIONES §4`. Lo que sí se deriva de los tipos
+   `experimental/ui-desktop`, y con él la nota de `decisiones §4`. Lo que sí se deriva de los tipos
    Rust es el **JSON Schema** de los `outputSchema` del MCP, vía `schemars`.)*
 
 ---
@@ -224,7 +224,7 @@ impl Bundle {
   pub fn validate_draft(&self, fm: &Frontmatter, body: &str) -> Vec<Check>; // contenido SIN guardar
   // escritura validada (OKF logic, NO en la fachada)
   pub fn create_concept(&self, p: &RelPath, ty: &str, /*…*/) -> WriteOutcome;
-  pub fn merge_frontmatter(&self, p: &RelPath, patch: FrontmatterPatch) -> WriteOutcome; // null borra
+  pub fn merge_frontmatter(&self, p: &RelPath, patch: FrontmatterPatch) -> WriteOutcome; // merge-patch RFC 7386: null ELIMINA la clave
   // generación PURA: devuelve un plan; la workspace lo aplica
   pub fn gen_index(&self, dir: &str) -> Mutation;
   pub fn gen_tag_indexes(&self) -> Mutation;                // purga tags obsoletos
@@ -397,7 +397,7 @@ Tabla de comandos (nombres congelados): `open_bundle` · `pick_dir` · `get_snap
 Scope = **semántica, no CRUD** (Claude Code ya tiene Read/Write/Edit). Logs solo a stderr; stdout = JSON-RPC.
 
 - **Tools**: `find_backlinks` · `find_orphans` · `find_dangling` · `neighborhood(concept, depth, direction)` ·
-  `conformance_check(path?)` · `query(dsl)` · `create_concept`(validado) · `update_frontmatter`(validado, patch con null-borra) ·
+  `conformance_check(path?)` · `query(dsl)` · `create_concept`(validado) · `update_frontmatter`(validado, patch merge-patch RFC 7386: `null` elimina la clave) ·
   `generate_index` · `generate_tag_indexes`.
 - **Resources** (read-only): lista de concepts · índice de frontmatter · gate de conformidad en vivo · grafo de enlaces.
 - No expone `read_file`/`write_file`. El valor es lo que los ficheros crudos no dan barato: backlinks resueltos,
@@ -512,7 +512,7 @@ como cualquier escritor externo. `commit`/`restore`/`switch_branch`/`merge`/`ini
 | 10 | DDL del grafo definido por dos arquitectos; `checks` vs `diagnostics` | `store` es dueño único del DDL; ORPHAN/LINK-STUB **sintetizados** (no materializados); columnas casan con los nombres del `Check`. |
 | 11 | `body:` subcadena (proto) vs FTS MATCH (token) | Subcadena en todas las fachadas; FTS solo como acelerador superset. Un solo `match_token`. |
 | 12 | Generadores puros vs que escriben | Puros (devuelven `Mutation`); la workspace aplica y diffea para `{written,removed,unchanged}`. |
-| 13 | `merge_frontmatter` (patch, null-borra) no existía en el core | Vive en el **core** (es lógica OKF), no en el MCP. |
+| 13 | `merge_frontmatter` (patch merge-patch RFC 7386: `null` elimina la clave) no existía en el core | Vive en el **core** (es lógica OKF), no en el MCP. |
 | 14 | Falta `schemars` para el outputSchema del MCP | Feature `schemars` en el core que gatea `#[derive(JsonSchema)]` en los DTO públicos. |
 | 15 | ¿Dónde vive git? | Crate `lodestar-vcs`, hermana de `store`; core sin git. **Transporte híbrido**: libgit2 para lo *local* (no ejecuta hooks/config al abrir/indexar = RCE-safe) + binario `git` confinado a la *red* (push/pull/fetch, iniciados por el usuario, heredan su auth). El shell-out nunca corre en open/index. |
 | 16 | "Restore soft" podía **perder trabajo sin commitear** | Restore/cambio de rama/merge son no-destructivos *de historial* pero reescriben el working tree → **checkpoint automático** si hay cambios sin commitear; excluyen `log.md` curado; **regeneran** `index`/`tags` tras aplicar. |
@@ -816,7 +816,7 @@ lodestar-core (PURO)  ◄─ lodestar-store ─┐        lodestar-core ◄─ l
    ▲  (+ core::schema, WorkspaceRevision) ▼
    └──────────────── lodestar-workspace (ÚNICO escritor + staging/journal/locks/recovery + cache + bus)
                               ▲
-                       lodestar-app   (servicios de caso de uso · envelope · mapa de códigos de error)
+                       lodestar-app   (servicios de caso de uso · mapa de códigos de error)
                           ▲       ▲
                    lodestar-mcp · lodestar-cli     (las dos fachadas del motor headless: 5–15 líneas, CERO dominio)
                    (src-tauri RETIRADO de `main` → rama experimental/ui-desktop)
@@ -827,13 +827,15 @@ lodestar-core (PURO)  ◄─ lodestar-store ─┐        lodestar-core ◄─ l
   que, dado un `Schema` + un `Bundle`, producen `Vec<Check>` (extiende `conform`). La **aplicación de
   plantillas** es generación pura (como `gen_index`/`gen_tag_indexes`). **Leer** `.lodestar/schema.yaml` /
   `.lodestar/templates/` es I/O de `workspace` (patrón `Config::load`); el core nunca abre ficheros.
-- **`lodestar-app`**: ensambla `ChangeSet`, conduce plan→validar→aplicar→verificar, construye el
-  **envelope** (decisión D3: el envelope es framing de protocolo, no dominio → vive aquí, no en `core`) y
-  mapea `CoreError`/`WorkspaceError` → **códigos de error** estables.
+- **`lodestar-app`**: ensambla `ChangeSet`, conduce plan→validar→aplicar→verificar y mapea
+  `CoreError`/`WorkspaceError` → **códigos de error** estables. (**Actualización E29-H11,
+  `decisiones §16(b)`**: el crate construyó también un **envelope** de protocolo — decisión D3, «el
+  envelope es framing, no dominio» — pero ninguna fachada llegó a ensamblarlo nunca; el wire real es
+  `structuredContent`/exit codes directos, §20.10. Se retiró por no tener consumidor.)
 
 ### 19.3 Tipos nuevos (invariante #4: UNA vez en `core::types`)
 
-Se congelan en `lodestar-core::types` (salvo el envelope, que va en `lodestar-app`):
+Se congelan en `lodestar-core::types`:
 
 - `ConceptRevision` = `blake3:<hex>` del contenido en disco de un `.md`. **Eleva** el `WriteOutcome.hash`
   (ya `blake3::hash(raw)`) y el gate de la cache (§5) de gate interno a **identidad expuesta**.
@@ -847,7 +849,9 @@ Se congelan en `lodestar-core::types` (salvo el envelope, que va en `lodestar-ap
   risk: RiskAssessment, semantic_diff: SemanticDiff, validation: ValidationReport, expires_at }`.
 - `NormalizedOperation` — enum de las 11 ops resueltas a escrituras (`create`/`patch_frontmatter`/
   `replace_body`/`edit_section`/`replace_text`/`move`/`delete`/`add_relation`/`remove_relation`/
-  `transition_status`/`apply_fix`); reutiliza `FrontmatterPatch` (merge-patch RFC 7386, null-borra).
+  `transition_status`/`apply_fix`); reutiliza `FrontmatterPatch` (merge-patch RFC 7386: una clave
+  presente con valor `null` **elimina** esa clave, que es lo que el propio RFC define — no una
+  capacidad adicional de distinguir «asignar null» de «eliminar»).
   **Hoy son SIETE** (§20.11): `add_relation`/`remove_relation`/`transition_status` cayeron con el
   modelo universal (`E21-H01`) y `apply_fix` en `E23-H11` (sin productor de `Fix` desde que
   `E20-H03` retiró `core::schema`, fallaba siempre). Las 11 de esta línea son el diseño de época.
@@ -893,7 +897,7 @@ transactions:
 # identity: DORMIDA (git fuera de superficie; se conserva por si vcs vuelve)
 ```
 
-> **Actualización E15-H08**: `lodestar.toml` **ya no existe** (borrado; cierra `DECISIONES.md §8`),
+> **Actualización E15-H08**: `lodestar.toml` **ya no existe** (borrado; cierra `decisiones §8`),
 > así que `.lodestar/config.yaml` es el único fichero de configuración del motor. El esquema de
 > arriba se **amplía** con dos secciones que documentan `§20.5` y `§20.9`: `discovery`
 > (`include`/`exclude`/`respectGitignore`/`respectLodestarIgnore`/`followSymlinks`/
@@ -945,12 +949,16 @@ Diez tools (`REFACTOR §8`): **READ** `workspace_status` · `knowledge_search` �
 **Perfiles** (§12 de REFACTOR): `readonly` = las 7 de lectura/verificación; `standard` = añade las 3 de
 cambio. Se eligen **al arrancar** (`lodestar-mcp --profile readonly|standard`). **Política** de
 conformidad al arrancar (`--policy strict`, `strict` por defecto): no hay `allow_nonconformant` por
-llamada (seguridad §19.7). **Transporte** (decisión D6b): se mantiene **stdio** (DECISIONES §3) y se
+llamada (seguridad §19.7). **Transporte** (decisión D6b): se mantiene **stdio** (decisiones §3) y se
 activa **`outputSchema`** derivado con la feature `schemars` (ya preparada, §10 fila 14); `rmcp`
 **diferido**. `contracts/mcp.yml` se **reescribe** 13→10 y el guardián de contrato lo vigila.
 
-**Envelope común** (en `lodestar-app`): `{ ok, workspaceRevision, summary, data, diagnostics, warnings,
-resourceLinks }`; `summary` es texto compacto para el modelo.
+> **Actualización E29-H11** (`decisiones §16(b)`): esta sección describía también un «envelope
+> común» — `{ ok, workspaceRevision, summary, data, diagnostics, warnings, resourceLinks }` — como
+> forma de respuesta compartida por las diez tools. Se construyó (`lodestar-app`, E10-H01) pero
+> ninguna fachada llegó a ensamblarlo jamás: el wire real que sirve cada tool (§20.10,
+> `contracts/mcp.yml`) es su tipo de servicio propio en `structuredContent`, sin envolver, y la CLI
+> responde con exit codes. Se retiró del crate por no tener consumidor.
 
 ### 19.7 Seguridad (§14 de REFACTOR) — simplificada
 
@@ -1051,7 +1059,7 @@ Se **añaden** a los invariantes #1–#6 de `CLAUDE.md`, que siguen íntegros. L
 > `§19.3`, declarado congelado. Era el **único** de los 29 criterios de aceptación de
 > `REFACTOR_PHASE_2` demostrablemente incumplido («no existe terminología OKF en la API pública»).
 > Se cerró aprovechando que v0.3.0 ya es incompatible con v0.2.x: romper el wire costaba cero
-> entonces y dejaba de costarlo en cuanto se publicara. Ver `DECISIONES.md §13`.
+> entonces y dejaba de costarlo en cuanto se publicara. Ver `decisiones §13`.
 >
 > Wire resultante: `conformant` → `valid` · `requireConformantResult` → `requireValidResult` ·
 > `allowNonconformant` → `allowInvalid` · `NONCONFORMANT_RESULT` → `INVALID_RESULT`.
@@ -1089,10 +1097,42 @@ lo deja fuera, y quien traduzca un offset del cuerpo a una posición del fichero
 **Título derivado** — `frontmatter.title` → primer heading H1 → nombre del fichero. Es **solo una
 heurística de presentación**: `title` no se convierte en propiedad reservada.
 
-**Edición de frontmatter** — la operación genérica es `patch_frontmatter` (`set` + `remove`), que
-modifica solo las claves pedidas, preserva las demás, no reordena innecesariamente, mantiene el
-cuerpo intacto y **distingue explícitamente asignar `null` de eliminar una clave**. El plan debe
-declarar si el bloque se reserializará entero.
+**Edición de frontmatter** — la operación genérica es `patch_frontmatter`, que modifica solo las
+claves pedidas, preserva las demás, no reordena innecesariamente y mantiene el cuerpo intacto. Su
+semántica es **merge-patch RFC 7386**, sin más (corregido en E30-H03, `decisiones §23/D-02` —
+criterio ratificado el 2026-08-06):
+
+- una clave **ausente** del patch no se toca;
+- una clave presente con un valor **se escribe o reemplaza** con él;
+- una clave presente con valor **`null` se ELIMINA**. Eso es exactamente lo que RFC 7386 define, no
+  una capacidad adicional del motor.
+
+Corolario, y es el punto que este párrafo afirmaba al revés hasta v0.5.0: **no existe forma, por
+esta vía, de asignar literalmente `null` a una clave de primer nivel** — el wire no puede expresar
+esa distinción porque el `null` es el sentinel de borrado. Verificado ejecutando: `{"status":"~"}` y
+`{"status":"null"}` escriben el *string* `'~'`/`'null'`, no el null YAML. El `Some(Null)` que el
+tipo del core (`FrontmatterPatch`) sí sabría representar es **inalcanzable desde
+`patch_frontmatter`**, que serializa como merge-patch.
+
+Matiz verificado, porque el borrado **no** es uniforme por profundidad: el `null` es sentinel de
+borrado **solo en el primer nivel del patch**. Anidado dentro de un mapa o de una lista del valor
+(`{"meta": {"a": null}}`, `{"tags": [null, 1]}`) sobrevive como null YAML literal, porque a partir
+del primer nivel el valor se escribe tal cual en vez de recorrerse como patch. Un `null` ya presente
+en el fichero también se preserva si el patch no nombra su clave.
+
+Ampliar el wire para expresar «asignar `null`» queda **fuera de alcance** salvo que aparezca un caso
+real que lo pida (`decisiones §23`): quien necesite ese valor debe pasarlo como cualquier otro
+escalar, y el propio RFC no lo permite. El plan debe declarar si el bloque se reserializará entero.
+
+> **E31-H02 (`decisiones §26`)**: reescribir el **cuerpo** ya no reserializa nunca la cabecera. El
+> brazo `ReplaceBody` —al que normalizan `replace_text`, `edit_section`, `replace_body`,
+> `delete remove_links` y el `rewriteInboundLinks` de `move`— es hoy un patch quirúrgico
+> (`model::replace_body_preservando_cabecera`), inverso exacto de `SplitFront::body`: la cabecera
+> sobrevive byte a byte, incluido su separador y **el bloque cuyo YAML no se deja leer**, que hasta
+> v0.5.0 se borraba en silencio. El único camino que aún puede reserializar es la edición del propio
+> frontmatter (`patch_frontmatter`), y solo cuando el patch quirúrgico no alcanza: eso es lo que
+> declara `PatchedDocument.reserialized`. Una operación cuyo resultado es idéntico al documento de
+> partida se anota en `PlanResult.noOpOperations` en vez de desaparecer del plan.
 
 ### 20.5 Descubrimiento (§3 de REFACTOR_PHASE_2)
 
@@ -1404,7 +1444,7 @@ en E16/E17; E20 aporta solo la **política** y la semántica nueva de `knowledge
 
 ## 21. Superficie externa y distribución (E27)
 
-> **Ratificada el 2026-08-01** (puerta 1 de la épica E27, `DECISIONES.md §17`). **Aditiva: no
+> **Ratificada el 2026-08-01** (puerta 1 de la épica E27, `decisiones §17`). **Aditiva: no
 > supersede nada.** Regula lo que el proyecto muestra hacia fuera —README, documentación de usuario,
 > demo, pipeline de release y embudo de contribución—, no el motor. Contexto: una review OSS externa
 > (evaluada y verificada punto a punto, 2026-08-01) concluyó que el proyecto está **por delante de su
@@ -1414,7 +1454,7 @@ en E16/E17; E20 aporta solo la **política** y la semántica nueva de `knowledge
 
 - **Superficie pública, en inglés**: `README.md`, `docs/user/`, `examples/demo/`, `CONTRIBUTING.md`,
   `SECURITY.md`, `CODE_OF_CONDUCT.md` y los templates de `.github/`.
-- **Interno, sigue en español**: `ARCHITECTURE.md`, `DECISIONES.md`, `requirements/`, `docs/` (specs
+- **Interno, sigue en español**: `ARCHITECTURE.md`, `decisiones/`, `requirements/`, `docs/` (specs
   y workflows), `contracts/`, código, comentarios, mensajes de error del wire y commits.
 - La frontera es de **audiencia**, no de directorio: lo que un adoptante lee antes de decidir se
   escribe en inglés; lo que gobierna el desarrollo del repo se queda en español.
@@ -1422,7 +1462,7 @@ en E16/E17; E20 aporta solo la **política** y la semántica nueva de `knowledge
 ### 21.2 Distribución
 
 - **Vías soportadas**: binarios precompilados de GitHub Releases (3 plataformas) y
-  `cargo install --git`. **crates.io queda diferido** (`DECISIONES.md §17`, reabrible): publicar es
+  `cargo install --git`. **crates.io queda diferido** (`decisiones §17`, reabrible): publicar es
   permanente y los crates de dominio no están pensados como API de librería estable.
 - **Guardarraíles del pipeline** (`.github/workflows/release.yml`, E27-H01):
   1. un step temprano **falla si `github.ref_name != "v" + workspace.package.version`** — convierte
@@ -1456,9 +1496,9 @@ en E16/E17; E20 aporta solo la **política** y la semántica nueva de `knowledge
   fallback. El alcance declarado es honesto con el producto: motor local por stdio, sin red — la
   superficie de ataque relevante es parsing y path-traversal (chokepoint `RelPath`, invariante #6).
 
-### 21.5 Regla transversal de honestidad (ligada a `DECISIONES.md §14`)
+### 21.5 Regla transversal de honestidad (ligada a `decisiones §14`)
 
-**Mientras `DECISIONES.md §14` siga abierta** (el store SQLite no tiene consumidor y el watcher no
+**Mientras `decisiones §14` siga abierta** (el store SQLite no tiene consumidor y el watcher no
 corre en el motor), la superficie externa **no presenta `reindex`/la cache como camino de lectura del
 producto ni promete rendimiento a escala**. La cache se describe como lo que es: derivada y
 reconstruible. Es el principio de E23 («la documentación no afirma nada falso») aplicado donde el

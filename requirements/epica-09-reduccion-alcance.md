@@ -40,7 +40,7 @@
 
 ### E9-H02 — Retirar los subcomandos git de la CLI (conservando `check`)
 - **Objetivo**: la CLI deja de exponer `log`/`last-conforming`/`branch`/`switch`/`merge`/`pull`/`push`/`hooks`.
-- **Referencias**: `ARCHITECTURE.md §19.1`, `§19.6` · decisión **D-check** (`DECISIONES §0`) ·
+- **Referencias**: `ARCHITECTURE.md §19.1`, `§19.6` · decisión **D-check** (`decisiones §0`) ·
   `crates/lodestar-cli/src/git.rs`, `crates/lodestar-cli/src/main.rs`.
 - **Alcance**:
   - Quitar del enum de subcomandos de clap y del dispatch los 8 subcomandos git; borrar/vaciar el uso de
@@ -84,7 +84,7 @@
 
 ### E9-H04 — Congelar la UI en el flujo de desarrollo (`.claude/`, `CLAUDE.md`, `docs/WORKFLOWS.md`)
 - **Objetivo**: que el proceso de desarrollo trate `frontend/` y `src-tauri/` como **congelados** y no los toque.
-- **Referencias**: `ARCHITECTURE.md §19.1` · decisión de UI congelada (`DECISIONES §0`) ·
+- **Referencias**: `ARCHITECTURE.md §19.1` · decisión de UI congelada (`decisiones §0`) ·
   `.claude/README.md`, `.claude/skills/ux/`, `.claude/agents/disenador-ux.md`, `CLAUDE.md`, `docs/WORKFLOWS.md`.
 - **Alcance**:
   - Anotar en `.claude/README.md` y `docs/WORKFLOWS.md` que el motor es **headless**: los skills `/ciclo`,

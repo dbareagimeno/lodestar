@@ -1,0 +1,40 @@
+{
+  "batch": "verify_G1-12",
+  "root": "worktree",
+  "profile": "standard",
+  "fixtures": "gaps",
+  "cases": [
+    {
+      "id": "G1-12-verify",
+      "steps": [
+        {
+          "kind": "call",
+          "tool": "graph_query",
+          "arguments": {
+            "operation": "backlinks",
+            "ref": { "path": "fixtures/sin-entrantes.md" }
+          }
+        },
+        {
+          "kind": "call",
+          "tool": "change_plan",
+          "arguments": {
+            "operations": [
+              { "op": "delete", "path": "fixtures/sin-entrantes.md" }
+            ],
+            "policy": { "requireValidResult": false, "allowWarnings": true }
+          }
+        },
+        {
+          "kind": "call",
+          "tool": "change_apply",
+          "arguments": { "changeSetId": "@step1.structured.changeSetId" }
+        },
+        {
+          "kind": "shell",
+          "cmd": "test -f fixtures/sin-entrantes.md && echo EXISTE || echo BORRADO"
+        }
+      ]
+    }
+  ]
+}

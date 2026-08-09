@@ -266,8 +266,16 @@ pub fn validate_result(doc_set: &DocumentSet) -> ValidationReport {
 
 /// Política de aplicación de un plan — E12-H04. Wire camelCase
 /// (`requireValidResult`/`allowWarnings`) por coherencia con el resto del contrato de plan.
+///
+/// `#[serde(default)]` a nivel de struct (E29-H02, `decisiones §19(b)`): un objeto `policy`
+/// PARCIAL —con solo uno de los dos campos, o incluso `{}`— deserializa completando cada campo
+/// omitido con el valor de [`PlanPolicy::default`], que ya es la única fuente de esos defaults
+/// (invariante #4: no se duplican los literales en el `inputSchema`/`contracts/mcp.yml`, que solo
+/// los *documentan*). Antes de este arreglo, omitir una sola clave fallaba con
+/// «missing field …» pese a que ambas ya se declaraban opcionales por contrato.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", default)]
 pub struct PlanPolicy {
     /// Si `true`, un [`ValidationReport`] no conforme (`valid == false`) bloquea `can_apply`.
     pub require_valid_result: bool,
@@ -309,6 +317,106 @@ pub fn can_apply(report: &ValidationReport, policy: &PlanPolicy) -> bool {
 // Estructura (move/delete) y semántica (relaciones/status) quedan para E12-H06/H07.
 // ---------------------------------------------------------------------------
 
+/// Estado de **ocupación de paths** con el que se juzgan las colisiones de existencia — E28-H04.
+///
+/// Es la **única verdad** sobre «¿este path ya está ocupado?» del pipeline de plan (invariante #3 de
+/// `CLAUDE.md`): la consultan tanto los guards de una sola operación de E28-H02
+/// ([`normalize_create`], [`normalize_move`]) como el recorrido acumulado de
+/// [`assert_sin_colisiones_intra_plan`]. Sin ella habría dos criterios de colisión —uno contra disco
+/// y otro intra-plan— que podrían divergir.
+///
+/// Arranca del `FileMap` del workspace (lo que hay en disco) y va registrando el **delta** que las
+/// operaciones ya aceptadas del plan producen: cada `create`/`move.to` **ocupa** su path, cada
+/// `delete`/`move.from` lo **libera**. Solo guarda el delta, así que construirla y clonarla es
+/// barato aunque el workspace tenga decenas de miles de documentos: no copia ni reparsea el mapa.
+///
+/// La comparación de paths es **byte a byte** (la clave del `FileMap`), sin normalizar caja ni forma
+/// Unicode — fuera de alcance por decisión explícita, ver `decisiones/24-equivalencia-caja-unicode.md`.
+#[derive(Debug, Clone)]
+pub struct EstadoOcupacion<'a> {
+    /// Lo que hay en disco al empezar a planificar (la fuente de verdad, invariante #1).
+    base: &'a FileMap,
+    /// Paths que el plan ha ocupado y que no estaban ocupados en `base`.
+    ocupados: BTreeSet<RelPath>,
+    /// Paths que el plan ha liberado (y que por tanto vuelven a poder reocuparse).
+    liberados: BTreeSet<RelPath>,
+}
+
+impl<'a> EstadoOcupacion<'a> {
+    /// Estado inicial: exactamente lo que hay en `files`, sin ninguna operación aplicada.
+    pub fn nueva(files: &'a FileMap) -> Self {
+        Self {
+            base: files,
+            ocupados: BTreeSet::new(),
+            liberados: BTreeSet::new(),
+        }
+    }
+
+    /// ¿`path` tiene documento en este estado (disco + lo que el plan lleva hecho)?
+    pub fn esta_ocupado(&self, path: &RelPath) -> bool {
+        if self.ocupados.contains(path) {
+            return true;
+        }
+        self.base.contains_key(path) && !self.liberados.contains(path)
+    }
+
+    /// Marca `path` como ocupado (lo hace un `create` o el destino de un `move` ya aceptados).
+    pub fn ocupar(&mut self, path: &RelPath) {
+        self.liberados.remove(path);
+        self.ocupados.insert(path.clone());
+    }
+
+    /// Marca `path` como libre (lo hace un `delete` o el origen de un `move` ya aceptados).
+    pub fn liberar(&mut self, path: &RelPath) {
+        self.ocupados.remove(path);
+        self.liberados.insert(path.clone());
+    }
+
+    /// Registra el efecto de una operación **ya aceptada** sobre la ocupación.
+    ///
+    /// Un `move` libera su origen **antes** de ocupar su destino, para que el no-op `from == to`
+    /// (E28-H02) deje el path ocupado, que es lo que de verdad queda en disco. Las operaciones que
+    /// solo tocan contenido (`patch_frontmatter`, `replace_body`, `replace_text`, `edit_section`) no
+    /// mueven la ocupación de ningún path.
+    pub fn aplicar(&mut self, op: &NormalizedOperation) {
+        match op {
+            NormalizedOperation::Create { path, .. } => self.ocupar(path),
+            NormalizedOperation::Move { from, to, .. } => {
+                self.liberar(from);
+                self.ocupar(to);
+            }
+            NormalizedOperation::Delete { path, .. } => self.liberar(path),
+            NormalizedOperation::PatchFrontmatter { .. }
+            | NormalizedOperation::ReplaceBody { .. }
+            | NormalizedOperation::ReplaceText { .. }
+            | NormalizedOperation::EditSection { .. } => {}
+        }
+    }
+
+    /// Veredicto de colisión de un `create` sobre `path`: `Err` si el path ya está ocupado.
+    ///
+    /// # Errores
+    /// [`CoreError::DocumentAlreadyExists`] con el path colisionado.
+    pub fn asevera_libre(&self, path: &RelPath) -> Result<(), CoreError> {
+        if self.esta_ocupado(path) {
+            return Err(CoreError::DocumentAlreadyExists(path.clone()));
+        }
+        Ok(())
+    }
+
+    /// Veredicto de colisión del destino de un `move`: `Err` si `to` está ocupado por **otro**
+    /// documento. `from == to` no es colisión (el destino coincide consigo mismo, E28-H02).
+    ///
+    /// # Errores
+    /// [`CoreError::DocumentAlreadyExists`] con el destino colisionado.
+    pub fn asevera_destino_libre(&self, from: &RelPath, to: &RelPath) -> Result<(), CoreError> {
+        if from == to {
+            return Ok(());
+        }
+        self.asevera_libre(to)
+    }
+}
+
 /// Normaliza un `create`: el documento nuevo es **exactamente** lo que pidió el llamador.
 ///
 /// - `frontmatter`: YAML **arbitrario y opcional**. `None` crea el `.md` **sin bloque de
@@ -330,14 +438,48 @@ pub fn can_apply(report: &ValidationReport, policy: &PlanPolicy) -> bool {
 /// no se materializa como metadata. Quien quiera un `title:` explícito lo pasa en `frontmatter`.
 ///
 /// # Errores
-/// No falla (un `path` ya presente en el workspace no se rechaza aquí; esa política es de la
-/// workspace). La firma devuelve `Result` por coherencia con las otras normalizaciones.
+/// [`CoreError::DocumentAlreadyExists`] si `path` **ya tiene fichero** en el workspace (E28-H02).
+///
+/// Hasta E28-H02 esta función descartaba el `DocumentSet` (lo recibía como `_workspace`) y emitía
+/// el `Create` sin condición alguna, así que un `create` sobre un documento existente producía un
+/// plan aplicable que lo **pisaba sin un solo diagnóstico** (defecto A-05 del testbench homelab,
+/// `decisiones/23-hallazgos-testbench-homelab.md`). El guard vive aquí, en la normalización pura:
+/// es donde está la fuente de verdad (el `DocumentSet`) y donde el plan aún no existe.
+///
+/// Juzga contra el estado de partida del workspace. Cuando la operación va **dentro de un plan con
+/// más operaciones**, el llamador usa [`normalize_create_en`] con el estado acumulado (E28-H04): el
+/// criterio de colisión es el mismo ([`EstadoOcupacion`]), lo que cambia es contra qué estado se
+/// aplica.
 pub fn normalize_create(
-    _workspace: &DocumentSet,
+    workspace: &DocumentSet,
     path: &RelPath,
     frontmatter: Option<FrontmatterPatch>,
     body: Option<String>,
 ) -> Result<NormalizedOperation, CoreError> {
+    normalize_create_en(
+        &EstadoOcupacion::nueva(workspace.files()),
+        path,
+        frontmatter,
+        body,
+    )
+}
+
+/// Como [`normalize_create`], pero juzgando la colisión contra el **estado de ocupación acumulado**
+/// del change set en curso, no contra el workspace de partida — E28-H04.
+///
+/// Es la variante que usa el bucle de normalización de un plan con varias operaciones: así un
+/// `create` ve el path que un `delete`/`move` anterior del mismo plan **liberó** (idioma legítimo) y,
+/// al revés, ve ocupado el que otro `create`/`move` anterior ya reclamó (colisión intra-plan).
+///
+/// # Errores
+/// [`CoreError::DocumentAlreadyExists`] si `path` ya está ocupado en `estado`.
+pub fn normalize_create_en(
+    estado: &EstadoOcupacion<'_>,
+    path: &RelPath,
+    frontmatter: Option<FrontmatterPatch>,
+    body: Option<String>,
+) -> Result<NormalizedOperation, CoreError> {
+    estado.asevera_libre(path)?;
     Ok(NormalizedOperation::Create {
         path: path.clone(),
         frontmatter,
@@ -821,14 +963,51 @@ fn remove_inline_links(
 /// un path afectado de más) en los planes donde el documento no tiene salientes relativos.
 ///
 /// # Errores
-/// [`CoreError::NormalizeTargetNotFound`] si algún documento entrante no tiene fichero en el workspace
-/// (no debería ocurrir: los entrantes salen del propio workspace).
+/// - [`CoreError::DocumentAlreadyExists`] si el destino `to` **ya tiene fichero** en el workspace
+///   (E28-H02): el rename publicaría encima del documento existente. `from == to` **no** es una
+///   colisión —el destino coincide consigo mismo, no con un documento distinto— y sigue siendo el
+///   no-op válido de siempre.
+/// - [`CoreError::NormalizeTargetNotFound`] si `from` (o algún documento entrante) no tiene fichero
+///   en el workspace. La dirección contraria conserva su código: un origen inexistente es
+///   `DOCUMENT_NOT_FOUND`, no una colisión de destino.
+///
+/// Igual que [`normalize_create`], juzga el destino contra el estado de partida; dentro de un plan
+/// con más operaciones el llamador usa [`normalize_move_en`] con el estado acumulado (E28-H04).
 pub fn normalize_move(
     doc_set: &DocumentSet,
     from: &RelPath,
     to: &RelPath,
     rewrite_inbound_links: bool,
 ) -> Result<Vec<NormalizedOperation>, CoreError> {
+    normalize_move_en(
+        &EstadoOcupacion::nueva(doc_set.files()),
+        doc_set,
+        from,
+        to,
+        rewrite_inbound_links,
+    )
+}
+
+/// Como [`normalize_move`], pero juzgando la ocupación del destino contra el **estado acumulado**
+/// del change set en curso — E28-H04.
+///
+/// El `doc_set` se sigue necesitando aparte: de ahí salen el cuerpo del documento movido y sus
+/// enlaces entrantes (contenido), que [`EstadoOcupacion`] no guarda —solo lleva qué paths están
+/// ocupados—.
+///
+/// # Errores
+/// Los mismos que [`normalize_move`], con la colisión de destino juzgada contra `estado`.
+pub fn normalize_move_en(
+    estado: &EstadoOcupacion<'_>,
+    doc_set: &DocumentSet,
+    from: &RelPath,
+    to: &RelPath,
+    rewrite_inbound_links: bool,
+) -> Result<Vec<NormalizedOperation>, CoreError> {
+    // E28-H02/H04: el destino no puede estar ocupado por OTRO documento —ni en disco, ni por una
+    // operación anterior del mismo plan—. Mover un documento sobre sí mismo (`from == to`) es un
+    // no-op, no una colisión.
+    estado.asevera_destino_libre(from, to)?;
     let mut ops = vec![NormalizedOperation::Move {
         from: from.clone(),
         to: to.clone(),
@@ -982,25 +1161,48 @@ pub fn apply_normalized_ops(
     Ok(out)
 }
 
-/// Frontmatter, cuerpo y **marca de BOM** actuales del `.md` en `path` dentro de `files`.
+/// Comprueba que la secuencia `ops` no contiene ninguna **colisión intra-plan** de existencia —
+/// E28-H04.
 ///
-/// El frontmatter es `None` cuando el documento **no tiene bloque** —no un mapping vacío—, porque
-/// esa distinción es la que separa «conservar el documento tal cual» de «inventarle un bloque». Ver
-/// el brazo `ReplaceBody` de [`apply_one`]: hasta E23-H03 aquí se devolvía
-/// `unwrap_or_default()`, y reescribir el cuerpo de un documento sin frontmatter le **inyectaba un
-/// `---\n{}\n---`**.
+/// Los guards de E28-H02 (`normalize_create`/`normalize_move`) juzgan **una** operación contra el
+/// `DocumentSet` con el que empezó a planificar. Cuando el plan tiene varias operaciones que tocan
+/// paths relacionados, ese `DocumentSet` deja de ser cierto a partir de la segunda: ninguna op ve el
+/// efecto de las que la preceden. Esta función cierra el hueco recorriendo `ops` **en orden** sobre
+/// un estado de ocupación acumulado que arranca de `files`: cada `Create`/`Move.to` aceptado
+/// **ocupa** su path; cada `Delete`/`Move.from` aceptado lo **libera**.
 ///
-/// El tercer elemento es la misma lección un nivel más abajo (E24-H01): ni el frontmatter ni el
-/// cuerpo llevan el BOM UTF-8, así que reconstruir el documento sin esta marca lo **perdería**.
-fn parsed_of(files: &FileMap, path: &RelPath) -> (Option<serde_yaml::Mapping>, String, bool) {
-    match files.get(path) {
-        Some(raw) => {
-            let parsed = model::parse_file(path.as_str(), raw);
-            let map = parsed.frontmatter.as_ref().map(|fm| fm.mapping().clone());
-            (map, parsed.body, model::has_bom(raw))
+/// Por eso `[delete X, create X]` y `[move A→B, create A]` son legítimos (liberar y reocupar), y
+/// `[move a→final, move b→final]`, `[create X, move b→X]` y `[create X, create X]` no lo son: el
+/// segundo miembro de cada par publicaría encima de lo que dejó el primero.
+///
+/// El criterio de colisión es **el mismo** que el de los guards de una sola operación: los tres
+/// caminos consultan [`EstadoOcupacion`] (invariante #3 de `CLAUDE.md`, una sola verdad computada).
+/// Lo único que cambia es contra qué estado se pregunta — el de partida o el acumulado.
+///
+/// # Errores
+/// [`CoreError::DocumentAlreadyExists`] con el path colisionado, en cuanto la primera operación
+/// intenta ocupar un path que el estado acumulado ya tiene ocupado.
+pub fn assert_sin_colisiones_intra_plan(
+    files: &FileMap,
+    ops: &[NormalizedOperation],
+) -> Result<(), CoreError> {
+    let mut estado = EstadoOcupacion::nueva(files);
+    for op in ops {
+        match op {
+            NormalizedOperation::Create { path, .. } => estado.asevera_libre(path)?,
+            NormalizedOperation::Move { from, to, .. } => estado.asevera_destino_libre(from, to)?,
+            // Sin comodín a propósito: las operaciones de contenido no ocupan ningún path, y si
+            // algún día entra una variante nueva que sí lo haga, el compilador obliga a decidir aquí
+            // si colisiona — en vez de dejarla pasar en silencio hasta el disco.
+            NormalizedOperation::Delete { .. }
+            | NormalizedOperation::PatchFrontmatter { .. }
+            | NormalizedOperation::ReplaceBody { .. }
+            | NormalizedOperation::ReplaceText { .. }
+            | NormalizedOperation::EditSection { .. } => {}
         }
-        None => (None, String::new(), false),
+        estado.aplicar(op);
     }
+    Ok(())
 }
 
 /// Aplica una única operación normalizada sobre `files` (mutación in situ). Ver
@@ -1037,21 +1239,22 @@ fn apply_one(files: &mut FileMap, op: &NormalizedOperation) -> Result<(), CoreEr
             files.insert(path.clone(), patched.raw);
         }
         NormalizedOperation::ReplaceBody { path, body } => {
-            // El frontmatter del documento se conserva **incluida su ausencia** (E23-H03): un
-            // documento sin bloque sigue sin bloque. Antes se reconstruía con
-            // `ParsedFrontmatter::from_mapping(map)` sobre un mapping vacío por defecto, así que
-            // reescribir el cuerpo de un `README.md` sin frontmatter le colaba un `---\n{}\n---`.
-            // Y como `move` con `rewriteInboundLinks` reescribe el cuerpo de CADA emisor, mover un
-            // documento corrompía de una tacada todos sus enlazantes sin frontmatter.
+            // Patch QUIRÚRGICO del cuerpo (E31-H02, `decisiones §26`), simétrico al del brazo
+            // `PatchFrontmatter` de arriba: se sustituye el cuerpo y la CABECERA sobrevive byte a
+            // byte, sin pasar por ningún serializador. Eso conserva de una vez —y por
+            // construcción, no por ramas que se coordinan— las tres cosas que la reconstrucción
+            // anterior perdía: el estilo del YAML (`tags: [a, b]` no se vuelve lista en bloque),
+            // el separador exacto, y el bloque ILEGIBLE, cuyo borrado era pérdida de datos.
             //
-            // E24-H01: por el mismo motivo se conserva el BOM UTF-8. Ni el frontmatter ni el
-            // cuerpo lo llevan (`SplitFront::body` lo deja fuera), así que hay que reemitirlo
-            // explícitamente o un `replace_body` se lo comería.
-            let (map, _, bom) = parsed_of(files, path);
-            let fm = map.map(ParsedFrontmatter::from_mapping);
+            // Lo que ya cumplía la reconstrucción y sigue cumpliéndose, ahora gratis: la
+            // **ausencia** de frontmatter se conserva (E23-H03 — un `README.md` sin bloque no
+            // recibe un `---\n{}\n---`, que era lo que corrompía a los enlazantes en cada `move`
+            // con `rewriteInboundLinks`) y el BOM UTF-8 tampoco se lo come nadie (E24-H01),
+            // porque queda a la izquierda del corte.
+            let raw = files.get(path).cloned().unwrap_or_default();
             files.insert(
                 path.clone(),
-                model::build_raw_with_bom(fm.as_ref(), body, bom),
+                model::replace_body_preservando_cabecera(&raw, body),
             );
         }
         NormalizedOperation::Move { from, to, .. } => {
@@ -1071,8 +1274,38 @@ fn apply_one(files: &mut FileMap, op: &NormalizedOperation) -> Result<(), CoreEr
     Ok(())
 }
 
-/// Nombre de la variante (para el mensaje de [`CoreError::OperationNotApplicable`]).
-fn op_variant_name(op: &NormalizedOperation) -> String {
+/// El documento donde queda el contenido **después** de aplicar la operación: su objetivo, y para
+/// un `move` su **destino**.
+///
+/// El nombre insiste en «resultante» a propósito, porque `lodestar-app` tiene otra función que
+/// resuelve el documento de una operación **del wire, sin normalizar** y que para un `move` devuelve
+/// su `from` — la que se valida antes de tocar nada. Las dos son correctas para su fase; llamarlas
+/// igual invitaba a coger la que no era.
+///
+/// Lo consume el `noOpOperations` del plan (E31-H02, `decisiones §26`) para decir de QUÉ documento
+/// habla una operación sin efecto. Match exhaustivo **sin comodín**, con el mismo criterio que
+/// [`assert_sin_colisiones_intra_plan`]: si algún día entra una variante nueva, el compilador obliga
+/// a decidir aquí cuál es su documento en vez de dejarla caer en un `_` que devolvería el path
+/// equivocado en silencio.
+pub fn documento_resultante_de(op: &NormalizedOperation) -> &RelPath {
+    match op {
+        NormalizedOperation::Create { path, .. }
+        | NormalizedOperation::PatchFrontmatter { path, .. }
+        | NormalizedOperation::ReplaceBody { path, .. }
+        | NormalizedOperation::ReplaceText { path, .. }
+        | NormalizedOperation::EditSection { path, .. }
+        | NormalizedOperation::Delete { path, .. } => path,
+        NormalizedOperation::Move { to, .. } => to,
+    }
+}
+
+/// Nombre de la variante en el vocabulario del wire (snake_case), tal como lo nombra el
+/// `inputSchema` de `change_plan`.
+///
+/// Lo consumen el mensaje de [`CoreError::OperationNotApplicable`] y, desde E31-H02, el
+/// `noOpOperations` del plan: **una sola verdad** para los nombres de operación (invariante #4), de
+/// modo que añadir una variante no pueda dejar dos catálogos discrepando.
+pub fn op_variant_name(op: &NormalizedOperation) -> String {
     match op {
         NormalizedOperation::Create { .. } => "create",
         NormalizedOperation::PatchFrontmatter { .. } => "patch_frontmatter",

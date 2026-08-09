@@ -1,0 +1,48 @@
+{
+  "batch": "verify_G1-14b",
+  "root": "worktree",
+  "profile": "standard",
+  "fixtures": null,
+  "cases": [
+    {
+      "id": "G1-14b",
+      "fresh_root": true,
+      "steps": [
+        {
+          "kind": "shell",
+          "cmd": "grep -n 'optional' pendientes/wol-bastion.md; true"
+        },
+        {
+          "kind": "call",
+          "tool": "change_plan",
+          "arguments": {
+            "operations": [
+              {
+                "op": "patch_frontmatter",
+                "path": "pendientes/wol-bastion.md",
+                "patch": { "optional": null }
+              }
+            ]
+          }
+        },
+        {
+          "kind": "call",
+          "tool": "change_apply",
+          "arguments": { "changeSetId": "@step1.structured.changeSetId" }
+        },
+        {
+          "kind": "call",
+          "tool": "knowledge_get",
+          "arguments": {
+            "ref": { "path": "pendientes/wol-bastion.md" },
+            "include": ["frontmatter"]
+          }
+        },
+        {
+          "kind": "shell",
+          "cmd": "grep -n 'optional' pendientes/wol-bastion.md; echo EXIT=$?; true"
+        }
+      ]
+    }
+  ]
+}

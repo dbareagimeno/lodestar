@@ -34,7 +34,7 @@ mirar en medio. Cuando la duda sea «¿esto sigue siendo cierto aquí?», la res
   detección, no una política de reintento.
 - **Un `lodestar recover` como subcomando.** Sigue siendo el hueco residual declarado por E24-H04, y
   E25-H02 lo estrecha (un journal irrecuperable deja de encallar el workspace) sin cerrarlo.
-- **Conectar el store** (`DECISIONES §14`). Sigue sin consumidor.
+- **Conectar el store** (`decisiones §14`). Sigue sin consumidor.
 - **La publicación de la release y los documentos de estado** (`CHANGELOG.md`,
   `IMPLEMENTATION_STATUS.md`, `requirements/README.md`, `requirements/trazabilidad.md`). Esta épica y
   E26 comparten rama y nota de release; el cierre documental se planifica aparte, con las
@@ -641,7 +641,7 @@ extremo del mismo camino (después de publicar) y su seam de failpoints en `lode
 **H05** reusa para el revert; **H06** es la única independiente en contenido, y va al final porque el
 criterio de propiedad que endurece lo puede haber adoptado H03.
 
-Ninguna historia está **[BLOQUEADA]**: no dependen de ninguna decisión abierta de `DECISIONES.md`.
+Ninguna historia está **[BLOQUEADA]**: no dependen de ninguna decisión abierta de `decisiones/`.
 
 ## Proceso por historia
 

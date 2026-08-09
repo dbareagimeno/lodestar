@@ -1,0 +1,13 @@
+{
+  "batch": "G4c",
+  "root": "worktree",
+  "profile": "standard",
+  "fixtures": "cfg_validation+chk_a",
+  "cases": [
+    {"id": "G1-04", "steps": [
+       {"kind": "call", "tool": "workspace_status", "arguments": {}},
+       {"kind": "call", "tool": "knowledge_check", "arguments": {"scope": {"kind": "document", "ref": {"path": "fixtures/enlace-roto.md"}}}},
+       {"kind": "call", "tool": "knowledge_check", "arguments": {"scope": {"kind": "document", "ref": {"path": "fixtures/enlace-roto-warn.md"}}}}],
+     "esperado": "Config: validation con LINK-TARGET-MISSING: ignore (sintaxis EXACTA desconocida — §19.4 solo dice 'validation (severidad por familia)'). Si el servidor NO arranca (config inválida): el arnés registrará el fallo de sesión — ese literal ES el hallazgo (sintaxis de validation no documentada en ninguna fuente de usuario). Si arranca: paso 1 SIN LINK-TARGET-MISSING (ignore suprime la familia entera, también el warn del paso 2) y counts del paso 0 bajan en consecuencia. Cualquiera de los dos resultados es dato documental valioso. Fuente: mcp.yml knowledge_check semantica (validation por familia, E20-H04); ARCHITECTURE §19.4"}
+  ]
+}

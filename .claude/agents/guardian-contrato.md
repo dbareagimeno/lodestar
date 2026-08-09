@@ -34,7 +34,7 @@ trabajo es detectar (y, si te lo piden, corregir) el drift entre ellas.
 
 ## Reglas duras
 - Los 7 invariantes no negociables de `CLAUDE.md` mandan (aquí sobre todo el #4: tipos una sola
-  vez, sin capa DTO); no cierres decisiones abiertas de `DECISIONES.md` — repórtalas y que decida
+  vez, sin capa DTO); no cierres decisiones abiertas de `decisiones/` — repórtalas y que decida
   el usuario.
 - No cambies comportamiento: solo YAML y comentarios. Si detectas que la corrección exige tocar
   lógica, repórtalo como drift BLOQUEANTE y no lo toques.

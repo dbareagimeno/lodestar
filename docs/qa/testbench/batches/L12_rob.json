@@ -1,0 +1,60 @@
+{
+  "batch": "L12",
+  "root": "real",
+  "profile": "readonly",
+  "fixtures": null,
+  "cases": [
+    {"id": "ROB-07", "tool": "knowledge_search",
+     "arguments": {"where": "has(tags)", "limit": 1},
+     "esperado": "Exactamente 1 resultado + nextCursor no-null; orden determinista (score desc, path asc). totalApproximate sigue reflejando el total. Fuente: mcp.yml knowledge_search (orden determinista, base del cursor)"},
+    {"id": "ROB-08", "tool": "knowledge_search",
+     "arguments": {"where": "has(tags)", "limit": 100},
+     "esperado": "36 resultados (cabe entero), nextCursor null. Fuente: mcp.yml knowledge_search limit [1,100]"},
+    {"id": "ROB-09", "tool": "knowledge_search",
+     "arguments": {"where": "has(tags)", "limit": 101},
+     "esperado": "Error INVALID_SCHEMA: el máximo de knowledge_search es 100 (NO 1000 como graph_query/metadata_inspect/knowledge_check — asimetría documentada). Fuente: mcp.yml knowledge_search errores (limit fuera de [1,100])"},
+    {"id": "ROB-10", "tool": "knowledge_search",
+     "arguments": {"where": "has(tags)", "limit": 0},
+     "esperado": "Error INVALID_SCHEMA: limit < 1 (E24-H09, ya no devuelve 0 resultados en silencio). Fuente: mcp.yml E24-H09"},
+    {"id": "ROB-11", "tool": "knowledge_search",
+     "arguments": {"where": "has(tags)", "limit": "10"},
+     "esperado": "Error INVALID_SCHEMA: limit string, tipo incorrecto ya no cae al default (E24-H09). Fuente: mcp.yml E24-H09"},
+    {"id": "ROB-13", "tool": "knowledge_search",
+     "arguments": {"where": "type = \"equipo\"", "sort": "title"},
+     "esperado": "sort (parámetro RETIRADO en E23-H11) se IGNORA en silencio: responde normal, sin error — additionalProperties:false es declarativo, el servidor no valida el schema en runtime; solo los valores DECLARADOS se validan. Fuente: mcp.yml regla de la casa (E24-H09) + retirada de sort (E23-H11)"},
+    {"id": "ROB-14", "tool": "workspace_status",
+     "arguments": {"foo": "bar"},
+     "esperado": "Parámetro desconocido ignorado; respuesta normal de workspace_status. Fuente: mcp.yml regla de la casa"},
+    {"id": "ROB-15", "steps": [
+       {"kind": "raw", "line": "{\"jsonrpc\":\"2.0\",\"id\":99,\"method\":\"tools/call\","},
+       {"kind": "call", "tool": "workspace_status", "arguments": {}}],
+     "esperado": "Paso 0: respuesta -32700 Parse error con id null (JSON inválido). Paso 1: el servidor SIGUE VIVO y responde normal (el parse error no lo tumba). Fuente: mcp.yml bucle JSON-RPC (-32700)"},
+    {"id": "ROB-16", "steps": [
+       {"kind": "raw", "line": "{\"jsonrpc\":\"2.0\",\"id\":100,\"method\":\"tools/call\",\"params\":{\"name\":\"query\",\"arguments\":{}}}"},
+       {"kind": "raw", "line": "{\"jsonrpc\":\"2.0\",\"id\":101,\"method\":\"tools/call\",\"params\":{\"name\":\"find_orphans\",\"arguments\":{}}}"}],
+     "esperado": "Ambos: error de PROTOCOLO -32602 tool desconocida (las 10 heredadas retiradas en E14-H06 caen en el brazo por defecto SIN ejecutarse). Fuente: mcp.yml E14-H06"},
+    {"id": "ROB-19", "steps": [
+       {"kind": "spawn", "args": ["--root", "/ruta/que/no/existe"]}],
+     "esperado": "Exit code 3, stderr nombra la ruta, stdout vacío, sin panic. Fuente: mcp.yml (arranque, exit 3)"},
+    {"id": "ROB-21", "steps": [
+       {"kind": "spawn", "args": ["--profile", "perfil-invalido"]}],
+     "esperado": "Registrar: perfil desconocido debería rechazarse en el arranque (exit != 0 con mensaje) — el contrato solo declara readonly|standard; candidato CONTRATO-AMBIGUO si arranca igual. Fuente: ayuda del binario"},
+    {"id": "ROB-06", "steps": [
+       {"kind": "call", "tool": "graph_query", "arguments": {"operation": "components", "limit": 1}},
+       {"kind": "call", "tool": "knowledge_search", "arguments": {"where": "has(tags)", "limit": 1, "cursor": "@step0.structured.nextCursor"}}],
+     "esperado": "Cursor de graph_query reutilizado en knowledge_search: el esquema es el mismo (offset hex) así que puede ACEPTARLO aunque semánticamente sea otro espacio — registrar el comportamiento (¿acepta? ¿INVALID_SCHEMA?). Candidato CONTRATO-AMBIGUO. Fuente: mcp.yml cursor (mismo esquema entre tools)"},
+    {"id": "ROB-22", "tool": "knowledge_search",
+     "arguments": {"text": "wireguard"},
+     "esperado": "Búsqueda libre sobre nombre/frontmatter/cuerpo: al menos servicios/wireguard.md entre los hits, con snippet y score. Fuente: query-language.md (text); mcp.yml knowledge_search"},
+    {"id": "ROB-23", "tool": "knowledge_search",
+     "arguments": {"text": "wireguard", "where": "type = \"decision\""},
+     "esperado": "text ∩ where: solo decisiones que mencionan wireguard (p. ej. solo-51820-expuesto, split-tunnel). Subconjunto estricto de ROB-22. Fuente: query-language.md Combining conditions (text intersecta)"},
+    {"id": "ROB-24", "tool": "knowledge_search",
+     "arguments": {"where": "document.has_frontmatter = true", "limit": 100},
+     "esperado": "Los 36 (todo homelab lleva frontmatter). has(frontmatter) NO respondería esto (anclaje); la propiedad correcta es document.has_frontmatter. Fuente: query-language.md has(frontmatter) does not test"},
+    {"id": "ROB-25", "steps": [
+       {"kind": "call", "tool": "knowledge_search", "arguments": {"where": "missing(frontmatter)", "limit": 100}},
+       {"kind": "call", "tool": "knowledge_search", "arguments": {"where": "has(frontmatter)", "limit": 100}}],
+     "esperado": "Trampa documentada: frontmatter a secas nombra el anclaje, no una clave → has(frontmatter) matchea 0 docs y missing(frontmatter) matchea los 36 (incluidos los que SÍ tienen frontmatter). Fuente: query-language.md has(frontmatter) does not test for a frontmatter block"}
+  ]
+}

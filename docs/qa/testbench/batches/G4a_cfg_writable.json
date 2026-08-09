@@ -1,0 +1,15 @@
+{
+  "batch": "G4a",
+  "root": "worktree",
+  "profile": "standard",
+  "fixtures": "cfg_writable",
+  "cases": [
+    {"id": "G1-02", "steps": [
+       {"kind": "call", "tool": "workspace_status", "arguments": {}},
+       {"kind": "call", "tool": "change_plan", "arguments": {"operations": [{"op": "patch_frontmatter", "path": "equipos/bastion.md", "patch": {"x": 1}}], "policy": {"requireValidResult": false, "allowWarnings": true}}},
+       {"kind": "call", "tool": "change_apply", "arguments": {"changeSetId": "@step1.structured.changeSetId"}},
+       {"kind": "call", "tool": "change_plan", "arguments": {"operations": [{"op": "patch_frontmatter", "path": "pendientes/wol-bastion.md", "patch": {"priority": 1}}], "policy": {"requireValidResult": false, "allowWarnings": true}}},
+       {"kind": "shell", "cmd": "git status --porcelain -- equipos/"}],
+     "esperado": "Config: writableRoots=[pendientes]. Pasos 1-2: equipos/ fuera de las raíces escribibles → PERMISSION_DENIED; el contrato lo sitúa en el APPLY (assert_writable antes de tocar canónico); registrar si el PLAN ya lo anticipa (candidato CONTRATO-AMBIGUO). bastion.md intacto (paso 4 git limpio en equipos/). Paso 3: pendientes/ sigue escribible — el plan se emite normal. NOTA: workspace_revision se computa sobre writableRoots, así que baseWorkspaceRevision difiere del baseline global — registrarlo, no es fallo. Si @step1 no produce changeSetId (plan ya rechazado), el paso 2 tendrá harness_exception por placeholder: eso REGISTRA que el rechazo fue en plan. Fuente: mcp.yml change_apply PERMISSION_DENIED + semantica paso 6; ARCHITECTURE §19.4"}
+  ]
+}

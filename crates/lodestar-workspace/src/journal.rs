@@ -158,8 +158,9 @@ impl Journal {
     /// (deja el registro internamente coherente: sin `pending` bajo un estado `applied`) y
     /// **re-persiste** el journal a disco con fsync.
     ///
-    /// Se llama una sola vez, al final de [`Workspace::publish`], después de que el último rename
-    /// se haya completado. `applied` es lo que E13-H06 leerá para decidir **completar** una
+    /// Se llama una sola vez, al final de `Workspace::publish_result` (el núcleo de publicación,
+    /// `pub(crate)` desde E29-H10), después de que el último rename se haya completado. `applied`
+    /// es lo que E13-H06 leerá para decidir **completar** una
     /// publicación interrumpida (todo renombrado, solo falta sellar), frente a `applying`/`prepared`
     /// (renames parciales que hay que **restaurar**).
     ///

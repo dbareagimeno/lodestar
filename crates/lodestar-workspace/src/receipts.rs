@@ -182,7 +182,11 @@ fn write_runtime_atomic(path: &Path, bytes: &[u8]) -> Result<(), WorkspaceError>
 
 impl Workspace {
     /// El directorio de recibos persistidos (`.lodestar/runtime/receipts/`), exista o no.
-    fn receipts_dir(&self) -> PathBuf {
+    ///
+    /// `pub(crate)` desde E28-H01: el guard anti-sobrescritura de `crate::recovery` pregunta aquí si
+    /// un `txnId` ya tiene recibo, en vez de recomponer la ruta por su cuenta (la convención de nombre
+    /// que ata recibo, journal, staging y copias vive en este módulo y en ningún otro).
+    pub(crate) fn receipts_dir(&self) -> PathBuf {
         self.root.join(".lodestar").join("runtime").join("receipts")
     }
 

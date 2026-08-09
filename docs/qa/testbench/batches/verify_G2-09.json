@@ -1,0 +1,18 @@
+{
+  "batch": "VERIFY-G2-09",
+  "root": "worktree",
+  "profile": "standard",
+  "fixtures": null,
+  "cases": [
+    {"id": "G2-09v", "fresh_root": true, "steps": [
+       {"kind": "call", "tool": "change_plan", "arguments": {"operations": [{"op": "patch_frontmatter", "path": "pendientes/wol-bastion.md", "patch": {"g2j": 1}}]}},
+       {"kind": "shell", "cmd": "mkdir -p .lodestar/runtime/journal && printf '{\"txnId\":\"txn-fantasma\",\"state\":\"prepared\"}' > .lodestar/runtime/journal/txn-fantasma.json && ls .lodestar/runtime/journal/"},
+       {"kind": "call", "tool": "workspace_status", "arguments": {}},
+       {"kind": "shell", "cmd": "ls .lodestar/runtime/journal/ 2>&1; ls .lodestar/runtime/recovery/ 2>&1"},
+       {"kind": "call", "tool": "change_apply", "arguments": {"changeSetId": "@step0.structured.changeSetId"}},
+       {"kind": "shell", "cmd": "ls .lodestar/runtime/journal/ 2>&1; ls .lodestar/runtime/journal/quarantine/ 2>&1"},
+       {"kind": "call", "tool": "workspace_status", "arguments": {}},
+       {"kind": "shell", "cmd": "git status --porcelain -- . ':!.lodestar'"}],
+     "esperado": "Reproducir G2-09: pendingTransaction=true con journal fantasma; change_apply corre recuperacion transparente (paso 2 de apply_transaction_con_recibo), la resuelve con exito (prepared sin copias ni sidecar = caida pre-backup, nada que restaurar), borra el journal al sellar la recuperacion (finish_recovery), sin quarantine y sin error; flag a false despues."}
+  ]
+}

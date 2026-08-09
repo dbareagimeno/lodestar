@@ -42,6 +42,19 @@ pub enum CoreError {
     #[error("objetivo de normalización no encontrado: {0}")]
     NormalizeTargetNotFound(String),
 
+    /// Al normalizar una operación que CREA un documento (E28-H02) —un `create`, o el destino `to`
+    /// de un `move`— el path ya está ocupado por un documento existente. Emitir la operación
+    /// publicaría **encima** del documento, que es la vía directa a perder la única fuente de
+    /// verdad (invariante #1 de `CLAUDE.md`).
+    ///
+    /// Es el simétrico exacto de [`Self::NormalizeTargetNotFound`] —los dos describen un desajuste
+    /// entre lo que la operación asume sobre la existencia de un `path` y lo que hay en el
+    /// workspace— y por eso NO se reusa aquella: mapea a `DOCUMENT_NOT_FOUND` y mandaría al agente
+    /// a buscar un documento que justamente **sí** existe. Lleva el path colisionado y mapea a
+    /// `ErrorCode::DocumentAlreadyExists` (wire `"DOCUMENT_ALREADY_EXISTS"`).
+    #[error("el documento «{0}» ya existe: la operación lo sobrescribiría")]
+    DocumentAlreadyExists(RelPath),
+
     /// Restricción de relación violada. **Sin productor desde E20-H03**: con el retiro de
     /// `core::schema` (`§20.10`, modelo universal) `add_relation`/`remove_relation` dejan de validar
     /// contra tipos/cardinalidad, así que esta variante ya no se construye. Se conserva para no

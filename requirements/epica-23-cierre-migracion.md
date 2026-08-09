@@ -5,7 +5,7 @@
 > **Objetivo de la épica**: que v0.3.0 salga sin defectos conocidos en el camino de escritura, con la
 > puerta de CI cubriendo la garantía nuclear del producto, con una superficie MCP que un agente pueda
 > usar leyendo solo el schema, y con los documentos de estado diciendo la verdad.
-> Referencias maestras: `ARCHITECTURE.md §20` (entero), `docs/REFACTOR_PHASE_2.md`, `DECISIONES.md`.
+> Referencias maestras: `ARCHITECTURE.md §20` (entero), `docs/REFACTOR_PHASE_2.md`, `decisiones/`.
 
 **Origen**: revisión de la PR #17 (2026-07-25). Los defectos del bloque A **no se dedujeron leyendo
 código**: se reprodujeron ejecutando los binarios `lodestar` y `lodestar-mcp` contra workspaces de
@@ -528,7 +528,7 @@ en la sección de E23 de [`IMPLEMENTATION_STATUS.md`](../IMPLEMENTATION_STATUS.m
     de aceptación literal de E22-H03** («marcar la migración E15–E22 como completa»): está
     incumplido. La cabecera describe la UI Tauri, «~113 tests» (son ~381) y los subcomandos git
     `log`/`last-conforming`/`branch`/`switch`/`merge`/`hooks`, borrados en E9-H02 y cuyo crate murió
-    en E15-H01. E15-H08 no tiene entrada propia pese a cerrar `DECISIONES §8`.
+    en E15-H01. E15-H08 no tiene entrada propia pese a cerrar `decisiones §8`.
   - `requirements/README.md`: E20 marcada como *(pendiente)* y sin enlace; el «hueco de cableado
     pendiente, con dueño (E20)» ya lo cerró E20-H04.
   - `CHANGELOG.md` dice `Bundle → DocumentSet` donde `ARCHITECTURE §20.3` dice `Bundle → Workspace`.
@@ -568,20 +568,20 @@ en la sección de E23 de [`IMPLEMENTATION_STATUS.md`](../IMPLEMENTATION_STATUS.m
 
 ### E23-H14 — Cerrar o documentar las decisiones abiertas
 
-- **`DECISIONES §12` (fechas)**: las comparaciones son **lexicográficas** porque `serde_yaml` 0.9 no
+- **`decisiones §12` (fechas)**: las comparaciones son **lexicográficas** porque `serde_yaml` 0.9 no
   tipa timestamps. Se recomendó «(a) para E19 y reevaluar en E20»; E19 y E20 cerraron sin tocarla, y
   la limitación **no está documentada en ninguna superficie de usuario** (ni README ni contrato).
   Es una coerción implícita de facto en un motor que presume de no tener ninguna. **Mínimo
   aceptable**: declararlo por escrito en el contrato y el README, y marcar la decisión como cerrada
   en la opción (a).
-- **`DECISIONES §13` (`Conformant → Valid`)**: el **único de los 29 criterios de aceptación** de
+- **`decisiones §13` (`Conformant → Valid`)**: el **único de los 29 criterios de aceptación** de
   `REFACTOR_PHASE_2` demostrablemente incompleto («no existe terminología OKF en la API pública»:
   sobreviven `conformant`, `requireConformantResult`, `NONCONFORMANT_RESULT`). v0.3.0 ya es
   incompatible, así que es el momento barato de abrir el catálogo de errores **una sola vez**.
 - **Criterios de aceptación**: ninguna de las dos decisiones queda en estado ABIERTA/APLAZADA sin una
   línea de resolución fechada; si se cierra §13, `grep -i conformant` sobre la superficie activa no
   devuelve nada.
-- **Dependencias**: `DECISIONES §13` toca el catálogo congelado → coordinar con E23-H10.
+- **Dependencias**: `decisiones §13` toca el catálogo congelado → coordinar con E23-H10.
 
 ---
 
@@ -669,7 +669,7 @@ haya que rellenar. Se registra en `contracts/mcp.yml` para que la próxima audit
 - **Criterios de aceptación**: el documento existe, no propone implementación en esta PR, y es
   consumible por `/planificar` (tiene diagnóstico, principio, alcance propuesto y preguntas abiertas).
 
-### E23-H16 — `DECISIONES.md §14`: qué hacemos con el store
+### E23-H16 — `decisiones §14`: qué hacemos con el store
 
 - **Objetivo**: registrar como **decisión abierta que requiere criterio del usuario** que la épica
   E18 entera es capacidad construida sin consumidor.
@@ -688,7 +688,7 @@ haya que rellenar. Se registra en `contracts/mcp.yml` para que la próxima audit
   real en cuanto se conecte.
 - **Opciones a decidir**: (a) conectarlo con invalidación por hash y alinear el walker con
   `DiscoveryPolicy`; (b) declarar que la cache solo sirve a `reindex` y documentarlo; (c) retirarla.
-- **Criterios de aceptación**: `DECISIONES.md` gana una sección §14 con contexto, hallazgo,
+- **Criterios de aceptación**: `decisiones/` gana la entrada §14 con contexto, hallazgo,
   agravante, opciones y recomendación — **sin tomar la decisión** (`CLAUDE.md`: «no las tomes por tu
   cuenta: propón y pregunta»).
 

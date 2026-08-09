@@ -1,12 +1,21 @@
 name: CI
 
-# Gate de calidad: ninguna rama puede mergearse a `main` sin pasar TODOS estos jobs.
-# (Para bloquear el merge de verdad, activa "Require status checks to pass" en la
-#  protección de rama de `main` y marca como obligatorios: rust, core-purity.)
+# Gate de calidad: ninguna rama puede mergearse a `develop` (ni de ahí a `main`) sin
+# pasar TODOS estos jobs.
+# La protección de rama de `develop` y `main` exige que pasen estos checks (ojo: el
+# nombre del check es el `name:` del job, no su id, y la matriz lo expande por SO):
+#   Rust · fmt · clippy · build · test (ubuntu-latest | macos-14 | windows-latest)
+#   Core puro (sin tokio/rusqlite/git2/notify/tauri/zip)
+#   Smoke de la demo (examples/demo)
+# Si renombras un job, actualiza también la lista de checks obligatorios en GitHub o
+# la protección quedará exigiendo un check que ya no existe (y bloqueará todo merge).
+#
+# `develop` es la rama de integración y la rama por defecto del repo; `main` solo recibe
+# releases desde `develop` (ver RELEASING.md). Por eso el push dispara en las dos.
 
 on:
   push:
-    branches: [main]
+    branches: [develop, main]
   pull_request:
 
 # Cancela runs antiguos de la misma rama/PR para no malgastar minutos.
@@ -143,7 +152,7 @@ jobs:
       - name: Los códigos de error solo se definen en core::types
         run: |
           set -euo pipefail
-          patron='"(WORKSPACE_NOT_FOUND|WORKSPACE_RECOVERY_REQUIRED|DOCUMENT_NOT_FOUND|AMBIGUOUS_REFERENCE|REVISION_CONFLICT|PLAN_STALE|PLAN_EXPIRED|PERMISSION_DENIED|INVALID_SCHEMA|INVALID_RESULT|INBOUND_LINKS_EXIST|RELATION_CONSTRAINT_VIOLATION|WRITE_CONFLICT|RESULT_TOO_LARGE|RECOVERY_FAILED|INTERNAL_IO_ERROR)"'
+          patron='"(WORKSPACE_NOT_FOUND|WORKSPACE_RECOVERY_REQUIRED|DOCUMENT_NOT_FOUND|DOCUMENT_ALREADY_EXISTS|AMBIGUOUS_REFERENCE|REVISION_CONFLICT|PLAN_STALE|PLAN_EXPIRED|PERMISSION_DENIED|INVALID_SCHEMA|INVALID_RESULT|INBOUND_LINKS_EXIST|RELATION_CONSTRAINT_VIOLATION|WRITE_CONFLICT|RESULT_TOO_LARGE|RECOVERY_FAILED|INTERNAL_IO_ERROR)"'
           # `crates/*/src/` de todos los crates MENOS lodestar-core (que es donde deben vivir).
           fuentes=$(find crates -path 'crates/lodestar-core' -prune -o -path '*/src/*' -name '*.rs' -print)
           if [ -n "$fuentes" ] && echo "$fuentes" | xargs grep -nE "$patron" 2>/dev/null | grep -vE '^\s*//|///'; then

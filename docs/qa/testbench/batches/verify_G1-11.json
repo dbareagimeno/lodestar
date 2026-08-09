@@ -1,0 +1,45 @@
+{
+  "batch": "verify_G1-11",
+  "root": "worktree",
+  "profile": "standard",
+  "fixtures": "gaps",
+  "cases": [
+    {
+      "id": "G1-11-v",
+      "steps": [
+        {
+          "kind": "call",
+          "tool": "change_plan",
+          "arguments": {
+            "operations": [
+              {
+                "op": "create",
+                "path": "pendientes/wol-bastion.md",
+                "frontmatter": { "title": "Pisado" },
+                "body": "x\n"
+              }
+            ]
+          }
+        },
+        {
+          "kind": "call",
+          "tool": "change_plan",
+          "arguments": {
+            "operations": [
+              {
+                "op": "move",
+                "from": "guias/tmux.md",
+                "to": "README.md",
+                "rewriteInboundLinks": true
+              }
+            ]
+          }
+        },
+        {
+          "kind": "shell",
+          "cmd": "git status --porcelain -- pendientes/wol-bastion.md README.md guias/tmux.md"
+        }
+      ]
+    }
+  ]
+}

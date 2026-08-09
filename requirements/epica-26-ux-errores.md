@@ -25,7 +25,7 @@ y corregir por mensaje.**
 **Fuera de alcance (explícito)**:
 
 - **Rechazar parámetros NO declarados.** Sigue siendo la decisión abierta que E24-H18 registró en
-  `DECISIONES.md`; la política vigente (`contracts/mcp.yml:311-325`) es «se validan los VALORES de lo
+  `decisiones/`; la política vigente (`contracts/mcp.yml:311-325`) es «se validan los VALORES de lo
   declarado, se ignora lo no declarado» y esta épica **la cumple**, no la revisa.
 - **Añadir códigos al catálogo.** `ErrorCode` sigue teniendo **16 filas** (`§19.3`, invariante #4).
   Todas las historias resuelven con los códigos existentes; la única fila que cambia de estado en
@@ -520,7 +520,7 @@ funcionalmente de ella salvo en H11, que recoge su delta de contrato. Si por cua
 paralelizan, el único punto de encuentro es `contracts/mcp.yml`.
 
 Ninguna historia está **[BLOQUEADA]**. La única decisión abierta que roza esta épica —rechazar
-parámetros **no** declarados, `DECISIONES.md` (E24-H18)— está explícitamente fuera de alcance y
+parámetros **no** declarados, `decisiones/` (E24-H18)— está explícitamente fuera de alcance y
 ninguna historia la presupone en ningún sentido.
 
 ## Proceso por historia

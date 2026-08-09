@@ -7,6 +7,139 @@ y el proyecto sigue [Versionado Semántico](https://semver.org/lang/es/).
 
 ## [No publicado]
 
+## [0.6.0] - 2026-08-09
+
+> **Al actualizar desde 0.5.0, un cambio puede romperte**: el wire pasó a ser **estricto** con los
+> parámetros no declarados (`E29`). Una llamada que enviara un campo de más —un typo como
+> `changeSetID` por `changeSetId`, o un parámetro que el schema no declara— antes se **aceptaba en
+> silencio, descartando el campo**; ahora responde `INVALID_SCHEMA` nombrándolo. Es deliberado: un
+> parámetro aceptado y no ejecutado es una respuesta silenciosamente equivocada, y esa es peor que un
+> error. Si tu cliente enviaba campos de más sin saberlo, ahora lo sabrá.
+>
+> El resto de la versión es aditivo o correctivo. Dos de los arreglos son de **pérdida de datos**: el
+> `revert` que podía destruir el material con el que se deshace un *undo* (`E28`) y la reescritura de
+> cuerpo que borraba un frontmatter ilegible (`E31`).
+
+### Añadido
+
+- **`change_plan` declara las operaciones que no tuvieron efecto** (`E31-H02`,
+  [`decisiones §26`](decisiones/26-replace-text-noop-reserializa.md)). Campo nuevo en el retorno:
+
+  ```json
+  "noOpOperations": [{"index": 0, "path": "overview.md", "op": "replace_body"}]
+  ```
+
+  Es la respuesta a *«ejecuté tu operación, resultado: sin efecto»*, que el plan **no sabía dar**: un
+  `replace_text` cuyo `find` no casaba nada aparecía en `normalizedOperations` indistinguible de uno
+  efectivo. Tras un `replace_text` masivo sobre 40 documentos que casó en 12, este campo **nombra los
+  otros 28** — antes no había forma de separar «la ejecuté y no cambió nada» de «nunca la mandaste».
+  La documentación de usuario ya echaba de menos exactamente esto («*no field saying "zero
+  replacements"*»).
+
+  Tres detalles: la operación **sigue** en `normalizedOperations` (`index` apunta ahí — la señal es
+  aditiva); `op` nombra la operación **ya normalizada**, así que un `replace_text` figura como
+  `replace_body`; y cubre **cualquier** operación sin efecto, no solo `replace_text`. Va **fuera del
+  `planHash`**, de modo que ningún plan existente cambia de identidad y los persistidos por versiones
+  anteriores se siguen aplicando.
+
+- **`DOCUMENT_ALREADY_EXISTS`: el catálogo de errores pasa de 16 a 17 códigos** (`E28-H02`, ampliado
+  en `E28-H04`; épica [`epica-28`](requirements/epica-28-defectos-destructivos-testbench.md)). Es el
+  simétrico exacto de `DOCUMENT_NOT_FOUND` —los dos describen un desajuste entre lo que la operación
+  asume sobre la existencia de un `path` y lo que hay en el workspace— y lo emite `change_plan`
+  cuando una operación que **crea** un path (un `create`, o el `to` de un `move`) lo encuentra ya
+  ocupado. El mensaje **nombra** el path colisionado.
+
+  **Por qué hacía falta un código nuevo** (defecto A-05 del testbench homelab,
+  [`decisiones §23`](decisiones/23-hallazgos-testbench-homelab.md)): hasta v0.5.0 no había guard
+  ninguno. `create` sobre un documento existente y `move` hacia un destino ocupado salían con
+  `canApply: true` y el apply **pisaba el documento sin un solo diagnóstico** — la vía directa a
+  perder la única fuente de verdad (invariante #1). Reusar `DOCUMENT_NOT_FOUND` habría mandado al
+  agente a buscar un documento que justamente **sí** está.
+
+  Cubre las dos familias de colisión con el mismo criterio (`core::plan::EstadoOcupacion`, una sola
+  verdad computada):
+  - **contra disco** (`E28-H02`): el path ya tiene documento en el workspace;
+  - **intra-plan** (`E28-H04`): el path lo ocupó una operación **anterior del mismo change set**
+    (`[move a→final, move b→final]`, `[create X, move b→X]`, `[create X, create X]`).
+
+  `move` con `from == to` **no** es colisión: sigue siendo el no-op válido de siempre.
+
+### Corregido
+
+- **Reescribir el cuerpo de un documento le reformateaba la cabecera** (`E31-H02`,
+  [`decisiones §26`](decisiones/26-replace-text-noop-reserializa.md)). Toda operación que tocaba el
+  cuerpo —`replace_text`, `edit_section`, `replace_body`, `delete` con `remove_links` y `move`,
+  **incluido el `rewriteInboundLinks` que reescribe el cuerpo de cada enlazante**— reconstruía el
+  documento entero y **reserializaba su frontmatter**. Efectos, los tres observables en tus ficheros:
+
+  - un bloque escrito en estilo *flow* (`tags: [a, b]`) volvía en estilo bloque, con sus comillas y
+    comentarios YAML perdidos por el camino;
+  - el separador se normalizaba a `---\n\n`, **inyectando una línea en blanco** en cada reescritura
+    de un `.md` que no la tuviera;
+  - **el frontmatter ilegible se borraba entero**: un bloque cuyo YAML no se deja leer desaparecía al
+    reescribir el **cuerpo**. Eso es **pérdida de datos**, y no había un solo test que combinara las
+    dos cosas.
+
+  El síntoma que lo destapó era el más inocente: un `replace_text` cuyo `find` **no casaba nada**
+  reescribía el fichero igualmente, ensuciando el `git diff` de quien versiona su workspace y
+  haciendo avanzar `workspaceRevision` por una operación vacía. Ahora la cabecera se preserva **byte
+  a byte** (patch quirúrgico, el mismo criterio que la edición de frontmatter cumple desde `E16-H04`)
+  y un no-op no toca el disco. Un `move` ya no puede reformatear medio workspace.
+
+- **`Workspace::revert_transaction` era superficie pública sin un solo llamador** (`E31-H01`,
+  [`decisiones §25`](decisiones/25-superficie-muerta-revert-transaction.md)). Ofrecía una reversión
+  **sin recibo durable**, que puede quedarse sin vuelta atrás: sin recibo, el GC del plano de control
+  no ve su árbol de recuperación y lo purga. Se retira; la vía pública sigue siendo
+  `revert_transaction_con_recibo`, que es la que usa la fachada. Sin impacto en el wire.
+
+- **Un plan con varias operaciones se normalizaba contra el workspace de partida, no contra lo que
+  el propio plan iba dejando** (`E28-H04`). El bucle de `change_plan` pasaba el **mismo**
+  `DocumentSet` inicial a cada operación, así que ninguna veía el efecto de las anteriores. De ahí
+  salían dos defectos opuestos, los dos reproducidos por JSON-RPC contra el binario:
+  - **Falsos negativos destructivos**: `[move a→final, move b→final]` salía con `risk: low` y, al
+    aplicarse, dejaba en disco un único `final.md` con el cuerpo de `b` — el documento `a`
+    desaparecía sin diagnóstico. Igual `[create X, move b→X]` (el `move` pisaba el `create`) y
+    `[create X, create X]` (ganaba el segundo en silencio).
+  - **Falsos positivos**: `[delete X, create X]` y `[move A→B, create A]` —liberar un path y
+    reocuparlo dentro del mismo plan, idiomas legítimos que funcionaban antes de `E28-H02`— pasaron
+    a rechazarse con `DOCUMENT_ALREADY_EXISTS` porque el guard veía el path todavía ocupado en el
+    estado inicial.
+
+  Ahora la normalización lleva un **estado de ocupación acumulado**: arranca del disco y cada
+  operación aceptada lo actualiza en orden (un `create`/`move.to` **ocupa**, un `delete`/`move.from`
+  **libera**). Los cinco escenarios quedan fijados por tests de wire en
+  `crates/lodestar-mcp/tests/mcp.rs` y por su mitad pura en `crates/lodestar-core/tests/core.rs`. La
+  selección masiva (`selection`+`operation`) queda fuera del acumulado a propósito: `create`/`move`
+  no son operaciones admitidas por esa vía, así que no hay secuencia que acumular.
+
+  **Fuera de alcance**: la comparación de paths sigue siendo **byte a byte**, sin normalizar caja ni
+  forma Unicode — ver [`decisiones §24`](decisiones/24-equivalencia-caja-unicode.md).
+
+- **`metadata_inspect` declaraba un `outputSchema` que el spec MCP no admite, y eso tumbaba las diez
+  tools.** El spec exige que todo `outputSchema` sea un JSON Schema **de tipo `object`**; el de
+  `metadata_inspect` salía con `anyOf` en la raíz y **sin `type`**. Un cliente estricto no degrada la
+  tool inválida: **rechaza la lista completa**, así que Claude Code no registraba ninguna de las 10 y
+  el servidor era inusable desde ese cliente.
+
+  **Causa raíz**: los `outputSchema` se derivan con `schemars` del tipo Rust que sirve cada servicio
+  (decisión D6b). Nueve son `struct` → `type: "object"`. `MetadataInspection` es el **único `enum`**
+  de la superficie y lleva `#[serde(untagged)]`: schemars lo deriva como `anyOf` de las variantes y
+  no infiere `type` en la raíz. Ahora `schemas::metadata_inspect_schema()` se lo fija.
+
+  **El wire NO cambia**: las dos variantes ya eran objetos, así que declarar `type: "object"` en la
+  raíz no excluye ninguna respuesta válida —solo declara lo que el `anyOf` no sabe expresar—. La
+  respuesta sigue siendo `{ fields, nextCursor }` o `{ field, values, … }`, sin discriminador.
+
+  **Por qué la suite no lo veía**: la invariante «la raíz es un objeto» estaba escrita para el input
+  (`tools_list_lleva_input_schema`, en las 10) y nunca para el output. El
+  `tools_declaran_outputschema` de E10-H13 miraba **5** de las 10 y aceptaba cualquier clave
+  estructural —con **`anyOf` explícitamente en su allowlist**—, así que pasaba en verde sobre el
+  schema defectuoso. El `structured_content_conforma_output_schema` de E24-H15 tampoco podía verlo:
+  mide que la salida **conforma** su schema, y un `anyOf` sin `type` conforma perfectamente.
+  Se endurece ese criterio (las 10, raíz `type: "object"`) y se añade la guardia gemela en proceso,
+  `tools.rs::tools_list_lleva_output_schema_de_tipo_object`. Ambas verificadas en rojo antes del
+  arreglo.
+
 ## [0.5.0] - 2026-08-01
 
 **Endurecimiento del camino de escritura y de la superficie de errores** (épicas `E25`/`E26`, 11
@@ -187,7 +320,7 @@ viajaron ya en la v0.4.0 y se repiten aquí porque ese bloque recoge el delta co
 Las 11 historias pasaron por **juez ciego** con *mutation testing* pedido en el encargo; las 11
 volvieron `APROBADA CON RESERVAS` y **todas las reservas mayores se cerraron en el mismo ciclo**. Lo
 que se decidió **no** arreglar aquí queda registrado, con su origen y su motivo, en
-[`DECISIONES §16`](DECISIONES.md) — doce puntos, de `(a)` a `(l)`: los tres límites de *quoting* del
+[`decisiones §16`](decisiones/16-deuda-auditoria-e25-e26.md) — doce puntos, de `(a)` a `(l)`: los tres límites de *quoting* del
 lenguaje de consulta, el `Envelope` sin llamantes, la cache SQLite y el watcher sin uso en
 producción, el servidor MCP monohilo sin *timeout* ni cancelación, la config que no rechaza claves
 desconocidas, el workspace vacío indistinguible de un directorio equivocado, la API pública no
@@ -545,7 +678,7 @@ y pipeline de release multiplataforma.
 - **Pipeline de release multiplataforma** (`release.yml`): compila macOS Apple
   Silicon (arm64), Windows y Linux, y publica un GitHub Release en borrador con los
   bundles (dmg/deb/appimage/nsis) y los binarios de CLI/MCP. Bundles **sin firmar**
-  (la firma/notarización queda diferida — ver `DECISIONES.md`).
+  (la firma/notarización queda diferida — ver `decisiones §1`).
 - **CI multiplataforma**: el job de Rust (fmt/clippy/build/test/doc) corre en Linux,
   macOS y Windows; se mantienen los jobs `core-purity` y `frontend`.
 
@@ -554,7 +687,8 @@ y pipeline de release multiplataforma.
 - **Heading por defecto de los conceptos**: ahora `# {Tipo} - {Nombre}` (antes
   `# Resumen`).
 
-[No publicado]: https://github.com/dbareagimeno/lodestar/compare/0.5.0...HEAD
+[No publicado]: https://github.com/dbareagimeno/lodestar/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/dbareagimeno/lodestar/compare/0.5.0...v0.6.0
 [0.5.0]: https://github.com/dbareagimeno/lodestar/compare/v0.4.0...0.5.0
 [0.4.0]: https://github.com/dbareagimeno/lodestar/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/dbareagimeno/lodestar/compare/v0.3.0...v0.3.1

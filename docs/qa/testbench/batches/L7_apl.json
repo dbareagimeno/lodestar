@@ -1,0 +1,70 @@
+{
+  "batch": "L7",
+  "root": "worktree",
+  "profile": "standard",
+  "fixtures": null,
+  "cases": [
+    {"id": "APL-01", "fresh_root": true, "steps": [
+       {"kind": "shell", "cmd": "shasum -a 256 pendientes/wol-bastion.md"},
+       {"kind": "call", "tool": "change_plan", "arguments": {"operations": [{"op": "patch_frontmatter", "path": "pendientes/wol-bastion.md", "patch": {"priority": 1}}]}},
+       {"kind": "call", "tool": "change_apply", "arguments": {"changeSetId": "@step1.structured.changeSetId"}},
+       {"kind": "shell", "cmd": "git diff -- pendientes/wol-bastion.md"},
+       {"kind": "call", "tool": "change_revert", "arguments": {"receiptId": "@step2.structured.receiptId"}},
+       {"kind": "shell", "cmd": "shasum -a 256 pendientes/wol-bastion.md && git status --porcelain -- . ':!.lodestar'"}],
+     "esperado": "Round trip completo. Paso 2: applied true, receiptId, changedPaths=[pendientes/wol-bastion.md], previousWorkspaceRevision == baseWorkspaceRevision del plan, validation.valid true (workspace limpio). Paso 3: el diff toca SOLO la línea priority (edición quirúrgica, resto byte a byte). Paso 4: reverted true, receiptId con sufijo -revert, workspaceRevision == la previa al apply. Paso 5: sha256 IDÉNTICO al del paso 0 y git status limpio — restauración byte a byte. Fuente: safe-changes.md A round trip"},
+    {"id": "APL-07", "fresh_root": true, "steps": [
+       {"kind": "call", "tool": "change_plan", "arguments": {"operations": [{"op": "patch_frontmatter", "path": "pendientes/wol-bastion.md", "patch": {"priority": 1}}]}},
+       {"kind": "shell", "cmd": "printf '\\n<!-- edicion externa -->\\n' >> pendientes/streaming-de-musica.md"},
+       {"kind": "call", "tool": "change_apply", "arguments": {"changeSetId": "@step0.structured.changeSetId"}}],
+     "esperado": "Paso 2: Error PLAN_STALE — el workspace cambió bajo el plan (planHash recomputado difiere); el mensaje da ambas revisiones y manda replanificar. Nada escrito. Fuente: safe-changes.md Optimistic concurrency (PLAN_STALE)"},
+    {"id": "APL-08", "fresh_root": true, "steps": [
+       {"kind": "call", "tool": "change_plan", "arguments": {"operations": [{"op": "patch_frontmatter", "path": "pendientes/wol-bastion.md", "patch": {"priority": 1}}]}},
+       {"kind": "call", "tool": "change_apply", "arguments": {"changeSetId": "@step0.structured.changeSetId"}},
+       {"kind": "shell", "cmd": "printf '\\n<!-- edicion externa tras apply -->\\n' >> pendientes/wol-bastion.md"},
+       {"kind": "call", "tool": "change_revert", "arguments": {"receiptId": "@step1.structured.receiptId"}}],
+     "esperado": "Paso 3: Error WRITE_CONFLICT — el conocimiento cambió después del apply, revertir pisaría ese cambio; no se restaura nada (terminal para la transacción). Fuente: safe-changes.md Optimistic concurrency (WRITE_CONFLICT en revert)"},
+    {"id": "APL-09", "fresh_root": true, "steps": [
+       {"kind": "call", "tool": "change_plan", "arguments": {"operations": [{"op": "delete", "path": "equipos/bastion.md", "inboundLinksPolicy": "reject"}], "policy": {"requireValidResult": false, "allowWarnings": true}}},
+       {"kind": "call", "tool": "change_apply", "arguments": {"changeSetId": "@step0.structured.changeSetId"}}],
+     "esperado": "Semántica exacta a REGISTRAR: safe-changes.md muestra INBOUND_LINKS_EXIST con reject explícito y backlinks; si salta ya en el plan (paso 0) o en el apply (paso 1) es el detalle a documentar. Esperado: uno de los dos pasos falla con INBOUND_LINKS_EXIST y bastion NO se borra. Fuente: safe-changes.md The seven operations; mcp.yml change_plan errores (INBOUND_LINKS_EXIST)"},
+    {"id": "APL-10", "fresh_root": true, "steps": [
+       {"kind": "call", "tool": "knowledge_check", "arguments": {"scope": {"kind": "workspace"}, "minimumSeverity": "err"}},
+       {"kind": "call", "tool": "change_plan", "arguments": {"operations": [{"op": "delete", "path": "guias/tmux.md", "inboundLinksPolicy": "remove_links"}], "policy": {"requireValidResult": false, "allowWarnings": true}}},
+       {"kind": "call", "tool": "change_apply", "arguments": {"changeSetId": "@step1.structured.changeSetId"}},
+       {"kind": "shell", "cmd": "test -f guias/tmux.md && echo EXISTE || echo BORRADO"},
+       {"kind": "call", "tool": "knowledge_check", "arguments": {"scope": {"kind": "workspace"}, "minimumSeverity": "err"}},
+       {"kind": "call", "tool": "change_revert", "arguments": {"receiptId": "@step2.structured.receiptId"}},
+       {"kind": "shell", "cmd": "test -f guias/tmux.md && echo RESTAURADO || echo AUSENTE"}],
+     "esperado": "Paso 1: el plan expande delete + reescrituras de los docs que enlazan a tmux.md (normalizedOperations > 1 si tiene entrantes). Paso 3: BORRADO. Paso 4: MISMOS errores que paso 0 (0 en workspace limpio) — remove_links no deja LINK-TARGET-MISSING nuevos. Paso 6: RESTAURADO (revert deshace delete + reescrituras). Fuente: safe-changes.md remove_links; mcp.yml normalize (una op puede producir varias)"},
+    {"id": "APL-11", "fresh_root": true, "steps": [
+       {"kind": "call", "tool": "change_plan", "arguments": {"operations": [{"op": "patch_frontmatter", "path": "pendientes/wol-bastion.md", "patch": {"priority": 1}}]}},
+       {"kind": "call", "tool": "workspace_status", "arguments": {}},
+       {"kind": "call", "tool": "change_apply", "arguments": {"changeSetId": "@step0.structured.changeSetId"}},
+       {"kind": "call", "tool": "workspace_status", "arguments": {}}],
+     "esperado": "Paso 0: canApply TRUE con policy default (homelab está limpio, a diferencia del demo con error deliberado). Paso 3 vs paso 1: workspaceRevision cambia tras el apply; receipts gana una entrada con receiptId/changeSetId/resultRevision/changedPathCount=1 (recibos listados newest first). Fuente: safe-changes.md canApply + Receipts and retention"},
+    {"id": "APL-12", "fresh_root": true, "steps": [
+       {"kind": "call", "tool": "change_plan", "arguments": {"operations": [{"op": "replace_text", "path": "guias/tmux.md", "find": "tmux", "replace": "tmux", "expectedOccurrences": 99999}]}},
+       {"kind": "call", "tool": "change_plan", "arguments": {"operations": [{"op": "move", "from": "guias/tmux.md", "to": "guias/tmux-renombrada.md", "rewriteInboundLinks": true}]}},
+       {"kind": "call", "tool": "change_apply", "arguments": {"changeSetId": "@step1.structured.changeSetId"}},
+       {"kind": "shell", "cmd": "test -f guias/tmux-renombrada.md && echo MOVIDO; grep -rl 'tmux-renombrada.md' --include='*.md' . | head -5"},
+       {"kind": "call", "tool": "graph_query", "arguments": {"operation": "dangling"}}],
+     "esperado": "Paso 0: replace_text con expectedOccurrences que no casa → error (registrar código: familia INVALID_SCHEMA/INVALID_RESULT). Paso 1: move normaliza a move + N reescrituras de entrantes. Paso 3: fichero movido y los que enlazaban actualizados. Paso 4: dangling sigue VACÍO (rewriteInboundLinks true no deja enlaces rotos). Fuente: safe-changes.md What the plan checks (1); mcp.yml move from/to/rewriteInboundLinks"},
+    {"id": "APL-13", "fresh_root": true, "steps": [
+       {"kind": "call", "tool": "change_plan", "arguments": {"operations": [{"op": "create", "path": "pendientes/caso-de-prueba.md", "frontmatter": {"title": "Caso de prueba", "type": "pendiente", "status": "abierto", "priority": 3, "optional": true, "affects": ["bastion"], "tags": ["prueba"], "updated": "2026-08-05"}, "body": "# Caso de prueba\n\nCreado por el arnés.\n"}]}},
+       {"kind": "call", "tool": "change_apply", "arguments": {"changeSetId": "@step0.structured.changeSetId"}},
+       {"kind": "call", "tool": "knowledge_get", "arguments": {"ref": {"path": "pendientes/caso-de-prueba.md"}, "include": ["frontmatter"]}},
+       {"kind": "call", "tool": "knowledge_search", "arguments": {"where": "graph.isolated = true"}}],
+     "esperado": "create + apply funciona; paso 2 devuelve el frontmatter con tipos correctos (priority number, optional bool). Paso 3: el doc nuevo SIN enlaces aparece como isolated (nadie lo enlaza y no enlaza a nadie con enlaces internos... OJO: su body no tiene enlaces → isolated true esperado). semanticDiff.created=[el doc]. Fuente: mcp.yml create; §20.7 isolated"},
+    {"id": "APL-14", "fresh_root": true, "steps": [
+       {"kind": "call", "tool": "change_plan", "arguments": {"operations": [{"op": "edit_section", "path": "guias/tmux.md", "headingPath": ["Mantener sesiones vivas con tmux"], "mode": "append", "content": "\nLínea añadida por el arnés.\n"}]}},
+       {"kind": "call", "tool": "change_apply", "arguments": {"changeSetId": "@step0.structured.changeSetId"}},
+       {"kind": "shell", "cmd": "grep -c 'Línea añadida por el arnés' guias/tmux.md"}],
+     "esperado": "edit_section con headingPath del H1 real del doc: si el heading no existe el plan falla (registrar); si existe, apply y grep = 1. Los modos válidos de mode los declara el inputSchema — si append no es válido, registrar el error como dato del contrato. Fuente: mcp.yml edit_section headingPath/mode/content"},
+    {"id": "REV-03", "fresh_root": true, "steps": [
+       {"kind": "call", "tool": "change_plan", "arguments": {"operations": [{"op": "patch_frontmatter", "path": "pendientes/wol-bastion.md", "patch": {"priority": 1}}]}},
+       {"kind": "call", "tool": "change_apply", "arguments": {"changeSetId": "@step0.structured.changeSetId"}},
+       {"kind": "call", "tool": "change_revert", "arguments": {"receiptId": "@step1.structured.receiptId"}},
+       {"kind": "call", "tool": "change_revert", "arguments": {"receiptId": "@step1.structured.receiptId"}}],
+     "esperado": "Doble revert del mismo recibo: el paso 2 revierte; el paso 3 debe FALLAR (el workspace ya no está en la revisión post-apply → WRITE_CONFLICT, o el recibo ya consumido → PLAN_EXPIRED; registrar el código real — detalle no explícito en el contrato, candidato CONTRATO-AMBIGUO). Fuente: safe-changes.md change_revert (revert = transacción inversa nueva)"}
+  ]
+}

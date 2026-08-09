@@ -1,0 +1,12 @@
+{
+  "batch": "G4d",
+  "root": "worktree",
+  "profile": "standard",
+  "fixtures": "cfg_broken",
+  "cases": [
+    {"id": "G1-05", "no_server": true, "steps": [
+       {"kind": "spawn", "args": ["--root", "@root"]},
+       {"kind": "spawn", "args": ["--root", "@root", "--profile", "readonly"]}],
+     "esperado": "Config rota (gate.blockWarnings: \"yes please\", el typo literal de quickstart). AMBOS perfiles: exit code 3, stderr nombra config.yaml y el campo (invalid type: string, expected a boolean), stdout vacío, sin panic — JAMÁS arranca con defaults (un typo no puede aflojar un gate en silencio). Fuente: ci.md (malformed config es exit 3, never a silent fallback); quickstart.md (mensaje literal); mcp.yml arranque exit 3"}
+  ]
+}

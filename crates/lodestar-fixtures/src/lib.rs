@@ -8,7 +8,7 @@
 //!   ni frontmatter obligatorio, con los casos límite del descubrimiento.
 //! - **Bundles OKF heredados** ([`valid`], [`with_issues`], [`synthetic`]) — de v0.2.x. Su único
 //!   consumidor vivo son los tests de `lodestar-store`; se retirarán con ellos cuando se resuelva
-//!   el destino del store (`DECISIONES.md §14`).
+//!   el destino del store (`decisiones §14`).
 //!
 //! Todos son deterministas: misma llamada ⇒ mismos bytes.
 

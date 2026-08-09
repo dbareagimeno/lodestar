@@ -1,0 +1,28 @@
+{
+  "batch": "verify_G2-03",
+  "root": "worktree",
+  "profile": "standard",
+  "fixtures": "kinds",
+  "cases": [
+    {
+      "id": "G2-03v",
+      "steps": [
+        {
+          "kind": "call",
+          "tool": "knowledge_get",
+          "arguments": { "ref": { "path": "fixtures/kinds.md" }, "include": ["outgoingLinks"] }
+        },
+        {
+          "kind": "call",
+          "tool": "graph_query",
+          "arguments": { "operation": "backlinks", "ref": { "path": "fixtures/destino.md" } }
+        },
+        {
+          "kind": "call",
+          "tool": "knowledge_get",
+          "arguments": { "ref": { "path": "fixtures/destino.md" }, "include": ["backlinks"] }
+        }
+      ]
+    }
+  ]
+}

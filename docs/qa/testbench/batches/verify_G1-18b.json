@@ -1,0 +1,23 @@
+{
+  "batch": "verify_G1-18b",
+  "root": "worktree",
+  "profile": "standard",
+  "fixtures": "gaps",
+  "cases": [
+    {
+      "id": "G1-18b",
+      "fresh_root": true,
+      "steps": [
+        {"kind": "call", "tool": "change_plan", "arguments": {"operations": [{"op": "patch_frontmatter", "path": "pendientes/wol-bastion.md", "patch": {"priority": 1}}]}},
+        {"kind": "call", "tool": "change_apply", "arguments": {"changeSetId": "@step0.structured.changeSetId"}},
+        {"kind": "shell", "cmd": "grep -n '^priority' pendientes/wol-bastion.md && ls .lodestar/runtime/recovery/ && grep -rl 'priority' .lodestar/runtime/recovery/ | head"},
+        {"kind": "call", "tool": "change_revert", "arguments": {"receiptId": "@step1.structured.receiptId"}},
+        {"kind": "call", "tool": "workspace_status", "arguments": {}},
+        {"kind": "shell", "cmd": "grep -n '^priority' pendientes/wol-bastion.md && ls .lodestar/runtime/recovery/ && for d in .lodestar/runtime/recovery/*/; do echo \"== $d\"; grep -h '^priority' \"$d\"pendientes/wol-bastion.md 2>/dev/null; done"},
+        {"kind": "call", "tool": "change_revert", "arguments": {"receiptId": "@step3.structured.receiptId"}},
+        {"kind": "call", "tool": "workspace_status", "arguments": {}},
+        {"kind": "shell", "cmd": "grep -n '^priority' pendientes/wol-bastion.md && ls .lodestar/runtime/recovery/ && for d in .lodestar/runtime/recovery/*/; do echo \"== $d\"; grep -h '^priority' \"$d\"pendientes/wol-bastion.md 2>/dev/null; done && ls .lodestar/runtime/receipts/ 2>/dev/null && for f in .lodestar/runtime/receipts/*; do echo \"== $f\"; python3 -c \"import json,sys;d=json.load(open('$f'));print(d.get('previousRevision') or d.get('previous_revision'), '->', d.get('resultRevision') or d.get('result_revision'))\" 2>/dev/null || head -c 400 \"$f\"; done"}
+      ]
+    }
+  ]
+}

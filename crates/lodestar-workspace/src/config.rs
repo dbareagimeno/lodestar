@@ -1,10 +1,10 @@
 //! Configuración **por-workspace**: `<root>/.lodestar/config.yaml` (`ARCHITECTURE.md §20.5`, `§20.9`;
-//! `DECISIONES.md §0` D4/D5).
+//! `decisiones §0` D4/D5).
 //!
 //! Desde E15-H08 es el **único** fichero de configuración del motor: el `lodestar.toml` legado
 //! (`Config`/`GateConfig`) se borró —dos ficheros de config para lo mismo era deuda, y su otro
 //! habitante (`identity`) murió en E15-H01—, de modo que un `lodestar.toml` en la raíz es hoy un
-//! fichero más del proyecto: ni se lee, ni su sintaxis importa (cierra `DECISIONES.md §8`).
+//! fichero más del proyecto: ni se lee, ni su sintaxis importa (cierra `decisiones §8`).
 //!
 //! La regla que gobierna todo lo que hay aquí es **la config LIMITA, nunca habilita**
 //! (`ARCHITECTURE.md §20.1`): su ausencia no impide usar Lodestar (defaults seguros = los de
@@ -15,7 +15,8 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use lodestar_core::types::{Analysis, Check, CheckCode, RelPath, Severity};
-use serde::Deserialize;
+use serde::de::Error as _;
+use serde::{Deserialize, Deserializer};
 
 use crate::discovery::{DiscoveryPolicy, CONTROL_PLANE_EXCLUDE};
 
@@ -27,8 +28,21 @@ pub const WORKSPACE_CONFIG_FILE: &str = ".lodestar/config.yaml";
 /// El mapeo YAML usa claves `camelCase` (`writableRoots`, `respectGitignore`, `blockWarnings`, …)
 /// que se deserializan a los campos `snake_case` de estas structs. Todas las secciones son
 /// opcionales y traen defaults seguros.
+///
+/// # Claves desconocidas (E29-H01)
+///
+/// Desde E29-H01 tanto esta struct como **todas** sus secciones llevan
+/// `#[serde(deny_unknown_fields)]`: una clave que el motor no reconoce es un **error de config**, no
+/// un descarte silencioso (`decisiones §16(e)`). El motivo es que el silencio afloja: un
+/// `writeableRoots` (typo de `writableRoots`) dejaba la política de escritura en su default —`Vec`
+/// vacío = *«todo el workspace es escribible»*—, o sea **más permisiva** que la que el usuario
+/// escribió, sin decir una palabra.
+///
+/// La **única excepción declarada** es [`WorkspaceSection::root`], que se sigue deserializando y
+/// descartando (ver su doc-comment): hay `config.yaml` reales que la llevan y `§20.5` ya declaró que
+/// se ignora a propósito.
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase", default)]
+#[serde(rename_all = "camelCase", default, deny_unknown_fields)]
 pub struct WorkspaceConfig {
     /// Raíces de escritura/lectura del workspace (la *write policy* de `§20.1`).
     pub workspace: WorkspaceSection,
@@ -52,8 +66,20 @@ pub struct WorkspaceConfig {
 /// > sale **exclusivamente** de `--root` (o `--path`) o del cwd, y es fija durante toda la sesión.
 /// > La clave se ignora si aparece en el YAML: no redirige nada.
 #[derive(Debug, Clone, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase", default)]
+#[serde(rename_all = "camelCase", default, deny_unknown_fields)]
 pub struct WorkspaceSection {
+    /// **Excepción declarada al rechazo de claves desconocidas** (E29-H01): `workspace.root` se
+    /// deserializa y se **descarta**.
+    ///
+    /// No es una capacidad a medias sino la forma de mantener el comportamiento que `§20.5`/E15-H08
+    /// ya habían decidido —la clave se ignora porque es circular— ahora que
+    /// `deny_unknown_fields` convertiría en error de arranque cualquier clave que la struct no
+    /// declare. Hay `config.yaml` reales que la llevan: rechazarlos rompería workspaces vivos sin
+    /// que nadie lo hubiera decidido.
+    ///
+    /// El dato se guarda para que `PartialEq`/`Debug` no mientan sobre lo que traía el YAML, pero
+    /// **ningún** consumidor lo lee: la raíz sale exclusivamente de `--root`/`--path` o del cwd.
+    pub root: Option<String>,
     /// Raíces donde Lodestar puede escribir (validado en E11-H04; aquí solo se carga el dato).
     ///
     /// **`Vec` vacío significa "todo el workspace es escribible"** (sin restricción) — no es una
@@ -79,6 +105,7 @@ pub struct WorkspaceSection {
 impl Default for WorkspaceSection {
     fn default() -> Self {
         WorkspaceSection {
+            root: None,
             writable_roots: Vec::new(),
             reference_roots: Vec::new(),
             ignored: default_ignored(),
@@ -102,7 +129,7 @@ fn default_ignored() -> Vec<String> {
 /// La política **efectiva** se obtiene con [`DiscoverySection::policy`], que es donde se inyecta el
 /// suelo duro `.lodestar/**`.
 #[derive(Debug, Clone, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase", default)]
+#[serde(rename_all = "camelCase", default, deny_unknown_fields)]
 pub struct DiscoverySection {
     /// Globs de lo que **entra** en el inventario (por defecto `**/*.md`).
     pub include: Vec<String>,
@@ -176,17 +203,56 @@ impl DiscoverySection {
 /// Sección `validation` (`ARCHITECTURE.md §20.9`): severidad por **familia de diagnóstico**
 /// (`malformedFrontmatter: error`, `isolatedDocuments: ignore`, …).
 ///
-/// Es un mapa abierto a propósito: las familias no son una lista cerrada, así que se **carga sin
-/// perder datos**, conservando literalmente las claves del YAML. Lo único que se valida es la
-/// severidad, cuyo catálogo sí es cerrado ([`ValidationSeverity`]): un `warn` mal escrito es
-/// exactamente el typo que la regla «una config rota es un error, no un default» quiere cazar.
+/// # Lista cerrada de familias (E29-H01)
+///
+/// Hasta E29-H01 era un mapa **abierto a propósito**, y esa apertura era una mentira barata: una
+/// clave que no fuera ninguna de las cinco familias de `§20.9` se cargaba sin rechistar y luego no
+/// casaba con nada en `family_of`, de modo que el silenciado quedaba **silenciosamente inerte**.
+/// El caso real (G1-04 del testbench, `decisiones §23/A-08`) es escribir un **código** de
+/// diagnóstico donde el motor espera una **familia**: `"LINK-TARGET-MISSING": ignore` — el usuario
+/// cree haber apagado el diagnóstico y lo sigue viendo en cada `check`.
+///
+/// Desde E29-H01 la clave se valida contra [`VALIDATION_FAMILIES`] y una familia desconocida es un
+/// **error de config** cuyo mensaje **enumera las cinco válidas**: rechazar sin decir qué se admite
+/// cambiaría un silencio por un muro.
+///
+/// El dato se sigue conservando en un `BTreeMap` con la clave literal del YAML (no se normaliza ni
+/// se convierte a un enum): [`effective_severity`](ValidationSection::effective_severity) lo
+/// consulta por el nombre que devuelve `family_of`, y guardar la cadena mantiene una sola verdad de
+/// los nombres —las constantes `FAMILY_*`— sin un segundo catálogo paralelo.
 ///
 /// Desde **E20-H04** la política se **aplica** vía [`ValidationSection::effective_severity`].
-#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
-#[serde(transparent)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct ValidationSection {
     /// Familia de diagnóstico (tal cual aparece en el YAML) → severidad configurada.
     pub families: BTreeMap<String, ValidationSeverity>,
+}
+
+impl<'de> Deserialize<'de> for ValidationSection {
+    /// Deserializa el mapa `familia → severidad` **validando cada clave** contra
+    /// [`VALIDATION_FAMILIES`] (E29-H01).
+    ///
+    /// Se escribe a mano en vez de con `#[serde(transparent)]` + un enum de claves porque el enum
+    /// obligaría a duplicar los nombres de las familias en un tercer sitio (las constantes
+    /// `FAMILY_*`, el enum y el catálogo del mensaje de error). Deserializando al `BTreeMap` y
+    /// validando después, la lista vive **solo** en `VALIDATION_FAMILIES`, que a su vez se construye
+    /// desde las constantes.
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let families = BTreeMap::<String, ValidationSeverity>::deserialize(d)?;
+        if let Some(desconocida) = families.keys().find(|k| !es_familia_valida(k)) {
+            return Err(D::Error::custom(format!(
+                "«{desconocida}» no es una familia de validación de `§20.9`. Las claves de \
+                 `validation` son FAMILIAS, no códigos de diagnóstico. Familias válidas: {}",
+                VALIDATION_FAMILIES.join(", ")
+            )));
+        }
+        Ok(ValidationSection { families })
+    }
+}
+
+/// ¿Es `clave` una de las familias de validación que `§20.9` declara?
+fn es_familia_valida(clave: &str) -> bool {
+    VALIDATION_FAMILIES.contains(&clave)
 }
 
 /// Familia `malformedFrontmatter` (`§20.9`): frontmatter no interpretable. Cubre `FM-UNCLOSED` y
@@ -202,6 +268,32 @@ pub const FAMILY_MISSING_WORKSPACE_FILES: &str = "missingWorkspaceFiles";
 /// Familia `caseMismatch` (`§20.9`): capitalización no portable (`LINK-CASE-MISMATCH`, venga del
 /// descubrimiento o de un enlace). Default: `warning`.
 pub const FAMILY_CASE_MISMATCH: &str = "caseMismatch";
+/// Familia `isolatedDocuments` (`§20.9`): documentos sin enlaces internos entrantes ni salientes.
+/// Default: `ignore`.
+///
+/// **No tiene productor** desde E16-H02: el documento aislado dejó de ser un diagnóstico (el código
+/// `ORPHAN` murió y pasó a ser una propiedad consultable), así que su default `ignore` es un no-op y
+/// `family_of` nunca la devuelve. Aun así se **acepta** en la config: `§20.9` la declara, y
+/// rechazar una familia que el contrato publica rompería `config.yaml` reales por una asimetría
+/// interna del motor. Es exactamente el motivo por el que esta constante existe aparte de
+/// `family_of`.
+pub const FAMILY_ISOLATED_DOCUMENTS: &str = "isolatedDocuments";
+
+/// Las **cinco** familias de validación que `§20.9` declara — la lista cerrada contra la que se
+/// valida cada clave de la sección `validation` (E29-H01), y el catálogo que se enumera al usuario
+/// cuando escribe una que no está.
+///
+/// Se construye **desde** las constantes `FAMILY_*` para que los nombres vivan en un solo sitio: si
+/// una familia se renombra, el mensaje de error y la validación se mueven con ella sin tocar nada
+/// más. El orden es el de `§20.9` (las cuatro con productor y, al final, `isolatedDocuments`), no
+/// el alfabético: es el orden en que se lee en la documentación de usuario.
+pub const VALIDATION_FAMILIES: [&str; 5] = [
+    FAMILY_MALFORMED_FRONTMATTER,
+    FAMILY_DANGLING_DOCUMENT_LINKS,
+    FAMILY_MISSING_WORKSPACE_FILES,
+    FAMILY_CASE_MISMATCH,
+    FAMILY_ISOLATED_DOCUMENTS,
+];
 
 /// La **familia de diagnóstico** (`§20.9`) a la que pertenece un [`Check`], o `None` si su código
 /// no está gobernado por ninguna familia configurable (su severidad es intrínseca y no se puede
@@ -212,9 +304,11 @@ pub const FAMILY_CASE_MISMATCH: &str = "caseMismatch";
 /// `missingWorkspaceFiles`. Es el **mismo discriminador** ([`RelPath::is_markdown`]) con el que
 /// `links::diagnose` asigna la severidad hardcodeada, de modo que aplicar el default no cambia nada.
 ///
-/// La familia `isolatedDocuments` de `§20.9` **no** aparece aquí: el documento aislado dejó de ser
-/// un diagnóstico (el código `ORPHAN` murió en E16-H02, es una propiedad consultable). Su default
-/// `ignore` es, por tanto, un no-op — no hay nada que suprimir.
+/// La familia [`FAMILY_ISOLATED_DOCUMENTS`] de `§20.9` **no** aparece aquí: el documento aislado
+/// dejó de ser un diagnóstico (el código `ORPHAN` murió en E16-H02, es una propiedad consultable).
+/// Su default `ignore` es, por tanto, un no-op — no hay nada que suprimir. Esto **no** la saca de
+/// [`VALIDATION_FAMILIES`]: la lista cerrada de la config es la de `§20.9`, no la de los
+/// productores vivos (E29-H01).
 fn family_of(check: &Check) -> Option<&'static str> {
     match check.code {
         CheckCode::FmUnclosed | CheckCode::FmYamlInvalid => Some(FAMILY_MALFORMED_FRONTMATTER),
@@ -268,7 +362,7 @@ pub enum ValidationSeverity {
 
 /// Puerta de conformidad: strictness de `lodestar check` (`ARCHITECTURE.md §7.3`).
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase", default)]
+#[serde(rename_all = "camelCase", default, deny_unknown_fields)]
 pub struct GateSection {
     /// Si `true`, los avisos (`Warn`) también hacen fallar la puerta (además de los errores).
     pub block_warnings: bool,
@@ -280,7 +374,7 @@ pub struct GateSection {
 /// Tipos deliberadamente simples (`String`/`usize`): la unidad de `retain_receipts_for` (p. ej.
 /// `"24h"`) la interpreta quien implemente la retención, no este loader.
 #[derive(Debug, Clone, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase", default)]
+#[serde(rename_all = "camelCase", default, deny_unknown_fields)]
 pub struct TransactionsSection {
     /// Durante cuánto tiempo se retiene un recibo antes de purgarlo (p. ej. `"24h"`).
     pub retain_receipts_for: String,
@@ -309,8 +403,18 @@ impl Default for TransactionsSection {
 impl WorkspaceConfig {
     /// Carga `<root>/.lodestar/config.yaml` si existe; si no, devuelve los defaults seguros (la
     /// ausencia de fichero **no** es un error: `§20.1`, arranque sin ceremonia). YAML malformado,
-    /// o un `writableRoots`/`referenceRoots` con un componente inválido (p. ej. `..`, rechazado
-    /// por `RelPath`), sí es un error explícito — nunca se silencia a defaults.
+    /// una clave desconocida, una familia de `validation` fuera de [`VALIDATION_FAMILIES`], o un
+    /// `writableRoots`/`referenceRoots` con un componente inválido (p. ej. `..`, rechazado por
+    /// `RelPath`), sí es un error explícito — nunca se silencia a defaults.
+    ///
+    /// # Ausente frente a ilegible (E29-H01)
+    ///
+    /// Solo [`std::io::ErrorKind::NotFound`] cae a [`WorkspaceConfig::default`]. **Cualquier otro**
+    /// error de lectura —permisos, un directorio en lugar del fichero, un disco que falla— es
+    /// `Err`: hasta E29-H01 un `Err(_)` a secas los igualaba todos al caso legítimo, de modo que un
+    /// usuario con una política escrita y no aplicada no se enteraba. La distinción es fina y es
+    /// toda la diferencia: **ausente** es un estado válido y permanente; **ilegible** significa que
+    /// hay una política declarada que Lodestar no está obedeciendo.
     ///
     /// Tras deserializar, inyecta siempre los obligatorios (`.lodestar/runtime`, `.git`) en
     /// `workspace.ignored` (merge + dedupe): `#[serde(default)]` reemplaza la lista entera cuando
@@ -322,7 +426,16 @@ impl WorkspaceConfig {
         let mut cfg = match std::fs::read_to_string(&path) {
             Ok(text) => serde_yaml::from_str::<WorkspaceConfig>(&text)
                 .map_err(|e| format!("{WORKSPACE_CONFIG_FILE} inválido: {e}"))?,
-            Err(_) => WorkspaceConfig::default(),
+            // Ausente: el único caso legítimo (`§20.1`, arranque sin ceremonia).
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => WorkspaceConfig::default(),
+            // Ilegible: existe una config que el usuario escribió y que no se está aplicando.
+            Err(e) => {
+                return Err(format!(
+                    "{WORKSPACE_CONFIG_FILE} no se pudo leer: {e}. El fichero existe pero no es \
+                     legible; Lodestar NO cae a los valores por defecto, porque eso aplicaría una \
+                     política distinta de la declarada sin avisar"
+                ))
+            }
         };
         for obligatorio in default_ignored() {
             if !cfg.workspace.ignored.contains(&obligatorio) {

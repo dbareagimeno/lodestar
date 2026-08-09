@@ -5,9 +5,12 @@
 //! `.md` en disco son la única fuente de verdad»).
 //!
 //! Modelo **fail-fast** (no bloqueante): adquirir un lock ya tomado devuelve `Err` de inmediato
-//! en vez de esperar. La exclusión mutua se apoya en la creación **atómica y exclusiva** de
-//! fichero del sistema de ficheros (`O_CREAT | O_EXCL`): dos `acquire_lock` concurrentes sobre el
-//! mismo root nunca obtienen ambos el lock. La liberación es **RAII**: el guard
+//! en vez de esperar. La exclusión mutua se apoya en el **enlazado atómico y no-clobber** del
+//! sistema de ficheros (`link(2)`, que falla con `EEXIST` si el destino existe): dos `acquire_lock`
+//! concurrentes sobre el mismo root nunca obtienen ambos el lock. Hasta E30-H02 ese papel lo hacía
+//! la creación exclusiva del propio fichero de lock (`O_CREAT | O_EXCL`), que hoy solo se usa para
+//! el **temporal** donde se escribe el cuerpo antes de publicarlo — ver [`publicar_lock`]. La
+//! liberación es **RAII**: el guard
 //! [`WorkspaceLock`] borra el fichero en su `Drop`, de modo que el lock se suelta SIEMPRE —
 //! incluido durante el desenrollado de pila de un `panic`.
 //!
@@ -101,11 +104,33 @@ impl Workspace {
     /// tomado (por este u otro handle sobre el mismo root) devuelve `Err` de inmediato, sin
     /// bloquear — no hay dos escritores.
     ///
-    /// La exclusión se apoya en `OpenOptions::create_new` (`O_CREAT | O_EXCL`): la creación del
-    /// fichero es atómica a nivel de sistema de ficheros, así que dos intentos concurrentes nunca
-    /// tienen ambos éxito. El fichero registra `owner`/`pid`/`host`/`timestamp`/`token`; su
-    /// contenido no participa en la exclusión (esa la da la existencia del fichero, no su cuerpo),
-    /// pero desde E25-H06 **sí** decide quién puede liberarlo y quién puede reclamarlo.
+    /// El fichero registra `owner`/`pid`/`host`/`timestamp`/`token`. Su contenido no participa en la
+    /// exclusión (esa la da la existencia del fichero, no su cuerpo), pero desde E25-H06 **sí**
+    /// decide quién puede liberarlo y quién puede reclamarlo.
+    ///
+    /// **E30-H02 — el lock nace con su cuerpo puesto.** Hasta v0.3.x la publicación eran dos pasos
+    /// no atómicos entre sí: `create_new` (el fichero aparecía **vacío**, y ahí se ganaba la
+    /// exclusión) y solo después `escribir_cuerpo`. Un `SIGKILL` en esa ventana dejaba en disco un
+    /// lock existente y vacío, que es un estado **terminal**: sin `pid` no hay prueba de vida y sin
+    /// `timestamp` no hay edad, así que ni la prueba de vida ni el TTL del lock podían liberarlo
+    /// jamás y el workspace quedaba cerrado a la escritura para siempre. Bajo carga la ventana se
+    /// ensancha de microsegundos a decenas de milisegundos (el proceso puede ser desalojado por el
+    /// scheduler justo entre las dos llamadas), que es lo que hacía intermitente a
+    /// `crash_por_senal_no_deja_parciales`. El diagnóstico completo, con su evidencia de reproducción
+    /// (30/30), está en la cabecera del módulo `lock_con_cuerpo_no_escrito` de
+    /// `crates/lodestar-workspace/tests/transactions.rs`.
+    ///
+    /// El arreglo elegido es **publicar el cuerpo de forma atómica** (`publicar_lock`): el cuerpo
+    /// se escribe (y se fuerza a disco con `fsync`) en un temporal del **mismo** directorio y se
+    /// publica en la ruta del lock con `hard_link`, que es atómico y **no-clobber** —falla con
+    /// `EEXIST` si el lock ya existe—, de modo que conserva exactamente la exclusión mutua que daba
+    /// `create_new`. El lock, por tanto, nunca es visible vacío: o no está, o está entero. `rename`
+    /// **no** sirve aquí porque pisa el destino en silencio, y con él se perdería la exclusión.
+    ///
+    /// Cerrar la ventana no basta por sí solo: los locks vacíos que la ventana ya dejó en disco
+    /// siguen ahí. De su reclamo se ocupa `reclamar_si_huerfano`, que trata un cuerpo **no
+    /// interpretable** como el rastro de esa ventana — ver allí por qué eso no relaja el criterio de
+    /// «vivo» de E25-H06.
     ///
     /// Crea `.lodestar/runtime/` si falta. El [`WorkspaceLock`] devuelto libera el lock al
     /// dropearse (RAII), incluso en un `panic`.
@@ -116,10 +141,11 @@ impl Workspace {
     ///
     /// # Errores
     /// - [`WorkspaceError::WriteConflict`] si el lock ya está tomado (el fichero ya existe).
-    /// - [`WorkspaceError::Io`] si falla la creación del directorio runtime o la escritura del
-    ///   fichero por otro motivo distinto de «ya existe» — incluida la del **cuerpo** (E25-H06: sin
-    ///   el token escrito el guard no podría demostrar la propiedad ni liberar su lock, así que la
-    ///   adquisición se deshace en vez de publicar un lock que nadie podría soltar).
+    /// - [`WorkspaceError::Io`] si falla la creación del directorio runtime o la publicación del
+    ///   fichero por otro motivo distinto de «ya existe». Desde E30-H02 un cuerpo a medio escribir
+    ///   ya no puede publicarse: el fallo ocurre sobre el temporal, que se borra sin que el lock
+    ///   llegue a existir (E25-H06: sin el token escrito el guard no podría demostrar la propiedad
+    ///   ni liberar su lock).
     pub fn acquire_lock(&self) -> Result<WorkspaceLock, WorkspaceError> {
         let path = self.lock_path();
 
@@ -134,30 +160,26 @@ impl Workspace {
             std::fs::create_dir_all(parent)?;
         }
 
-        // `create_new` = O_CREAT | O_EXCL: falla si el fichero ya existe. Es el punto de exclusión
-        // mutua atómica; el `AlreadyExists` se traduce a un conflicto de escritura (lock tomado).
-        let mut file = match std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)
-        {
-            Ok(f) => f,
+        // El cuerpo NO es solo diagnóstico (E25-H06): lleva el token que prueba la propiedad y el
+        // `host` que decide si el pid es interpretable aquí. Desde E30-H02 se publica con él ya
+        // dentro y de una sola vez, así que el lock jamás es visible sin token ni timestamp.
+        let token = token_de_propiedad();
+        match publicar_lock(&path, &token) {
+            Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
                 // El lock existe. Antes de rendirse: ¿lo dejó un proceso que ya no está? (E23-H23)
                 match reclamar_si_huerfano(&path) {
-                    Reclamo::Reclamado => std::fs::OpenOptions::new()
-                        .write(true)
-                        .create_new(true)
-                        .open(&path)
-                        // Si en la ventana entre el borrado y esta reapertura otro proceso ganó la
-                        // carrera, `AlreadyExists` otra vez: se rinde, no se reintenta en bucle.
-                        .map_err(|_| {
+                    Reclamo::Reclamado => {
+                        // Si en la ventana entre el borrado y esta republicación otro proceso ganó
+                        // la carrera, `AlreadyExists` otra vez: se rinde, no se reintenta en bucle.
+                        publicar_lock(&path, &token).map_err(|_| {
                             WorkspaceError::WriteConflict(format!(
                                 "el lock de publicación lo tomó otro proceso mientras se \
                                  reclamaba uno huérfano ({})",
                                 path.display()
                             ))
-                        })?,
+                        })?;
+                    }
                     Reclamo::Vivo(detalle) => {
                         return Err(WorkspaceError::WriteConflict(format!(
                             "el lock de publicación ya está tomado ({}){detalle}",
@@ -166,22 +188,12 @@ impl Workspace {
                     }
                 }
             }
-            Err(e) => return Err(WorkspaceError::from(e)),
-        };
-
-        // El cuerpo ya NO es solo diagnóstico (E25-H06): lleva el token que prueba la propiedad y el
-        // `host` que decide si el pid es interpretable aquí. Si no se puede escribir, este guard no
-        // podría liberar su propio lock (`es_mi_lock` no encontraría token) y el workspace quedaría
-        // cerrado a la escritura hasta que venciera el TTL. Ante ese fallo se deshace la adquisición
-        // —el fichero recién creado es indudablemente nuestro— y se propaga el error.
-        let token = token_de_propiedad();
-        if let Err(e) = escribir_cuerpo(&mut file, &token) {
-            drop(file);
-            let _ = std::fs::remove_file(&path);
-            return Err(WorkspaceError::Io(format!(
-                "no se pudo escribir el cuerpo del lock de publicación ({}): {e}",
-                path.display()
-            )));
+            Err(e) => {
+                return Err(WorkspaceError::Io(format!(
+                    "no se pudo publicar el lock de publicación ({}): {e}",
+                    path.display()
+                )));
+            }
         }
 
         Ok(WorkspaceLock { path, token })
@@ -208,7 +220,7 @@ enum Reclamo {
 /// Decide si un lock existente es **huérfano** y, si lo es, lo borra — E23-H23.
 ///
 /// Hasta E23-H23 esto no existía: `acquire_lock` solo miraba si el fichero existía, y el `pid` que
-/// escribe [`escribir_cuerpo`] **nadie lo leía de vuelta**. Un `lodestar-mcp` muerto por `SIGKILL` o
+/// escribe [`cuerpo_del_lock`] **nadie lo leía de vuelta**. Un `lodestar-mcp` muerto por `SIGKILL` o
 /// por el OOM killer dejaba el fichero en disco y el workspace quedaba **cerrado a la escritura
 /// para siempre**, hasta que un humano lo borrara a mano — y por la frontera MCP el agente solo veía
 /// un `WRITE_CONFLICT` pelado, sin pista de qué mirar.
@@ -232,6 +244,16 @@ enum Reclamo {
 /// reclamarse al instante—; el error contrario (reclamar el lock de un escritor vivo de otra
 /// máquina) rompe el escritor único, que no lo es.
 ///
+/// **E30-H02 — un cuerpo que no declara NADA no sostiene un lock.** Si el cuerpo no aporta ni `pid`
+/// ni `timestamp` (fichero vacío, JSON truncado, o cualquier cosa que no sea un objeto legible), el
+/// criterio de abajo lo condena a `Vida::Desconocida` + `caducado = false` **para siempre**: el TTL
+/// se computa sobre un `timestamp` que no existe, así que no hay salida y el workspace queda cerrado
+/// a la escritura hasta que un humano borre el fichero. Ese estado es el rastro que dejaba la ventana
+/// de publicación en dos pasos que [`Workspace::acquire_lock`] cerró, y desde E30-H02 se **reclama**.
+/// No relaja el criterio de «vivo» de E25-H06: éste protege locks con un dueño declarado, y aquí no
+/// hay ninguno —nadie llegó a escribirlo—, ni token con el que un guard pudiera reclamarse suyo. Un
+/// cuerpo con `pid` **o** `timestamp` (cualquiera de los dos) no entra por esa vía.
+///
 /// Ante la duda **no se reclama**: un fichero ilegible, un `pid` ausente o un reloj que va hacia
 /// atrás dejan el lock intacto. Perder disponibilidad es recuperable; romper el escritor único, no.
 fn reclamar_si_huerfano(path: &Path) -> Reclamo {
@@ -248,6 +270,27 @@ fn reclamar_si_huerfano(path: &Path) -> Reclamo {
         .unwrap_or("desconocido");
     let host = meta.get("host").and_then(serde_json::Value::as_str);
     let ts = meta.get("timestamp").and_then(serde_json::Value::as_u64);
+
+    // E30-H02 — cuerpo NO INTERPRETABLE: ni `pid` al que preguntar ni `timestamp` con el que medir
+    // edad. Es el rastro de la ventana `[create_new, escribir_cuerpo)` que existía hasta E30-H02 (un
+    // lock creado vacío o a medio escribir por un proceso muerto ahí dentro), y es un estado
+    // TERMINAL con el criterio de abajo: `vida` sería `Desconocida` y `caducado` sería `false` para
+    // siempre, así que el workspace quedaría cerrado a la escritura hasta que un humano borrara el
+    // fichero a mano. Se reclama.
+    //
+    // Esto NO relaja el criterio de «vivo» de E25-H06, que habla de locks cuyo cuerpo SÍ declara un
+    // dueño: aquí no hay dueño que proteger —nadie escribió uno— y, por construcción, tampoco un
+    // token con el que ningún guard pueda reclamarse propietario en su `Drop`. Un cuerpo que declara
+    // `pid` o `timestamp` (aunque sea uno solo de los dos) no entra por aquí y se juzga con el
+    // criterio de siempre.
+    if pid.is_none() && ts.is_none() {
+        if std::fs::remove_file(path).is_ok() {
+            return Reclamo::Reclamado;
+        }
+        return Reclamo::Vivo(
+            "; el lock no declara dueño (cuerpo no interpretable) y no se pudo retirar".to_string(),
+        );
+    }
 
     let edad = ts.and_then(|t| {
         std::time::SystemTime::now()
@@ -435,8 +478,10 @@ fn token_de_propiedad() -> String {
 /// Se serializa con `serde_json` —y no a mano, como hasta v0.3.1— porque ahora hay dos campos de
 /// texto de procedencia externa (`owner` del entorno, `host` del sistema) y escaparlos a mano es un
 /// footgun sin ninguna contrapartida: la dependencia ya estaba ahí para leerlo.
-fn escribir_cuerpo(file: &mut std::fs::File, token: &str) -> std::io::Result<()> {
-    use std::io::Write as _;
+///
+/// Desde E30-H02 solo **produce el texto**: quien lo lleva a disco es [`publicar_lock`], que lo hace
+/// aparecer entero de una sola vez.
+fn cuerpo_del_lock(token: &str) -> String {
     let owner = std::env::var("USER")
         .or_else(|_| std::env::var("USERNAME"))
         .unwrap_or_else(|_| "desconocido".to_string());
@@ -450,5 +495,110 @@ fn escribir_cuerpo(file: &mut std::fs::File, token: &str) -> std::io::Result<()>
         "timestamp": ts,
         "token": token,
     });
-    writeln!(file, "{cuerpo}")
+    format!("{cuerpo}\n")
+}
+
+/// Publica el fichero de lock **con su cuerpo ya dentro**, de forma atómica y exclusiva — E30-H02.
+///
+/// Es el punto de exclusión mutua del lock, y sostiene DOS propiedades a la vez:
+///
+/// 1. **Exclusión**: `hard_link` es no-clobber — si la ruta del lock ya existe falla con `EEXIST`
+///    (`ErrorKind::AlreadyExists`), exactamente igual que el `O_CREAT | O_EXCL` de `create_new` al
+///    que sustituye. Dos publicaciones concurrentes nunca tienen ambas éxito. `rename` **no** vale:
+///    pisa el destino en silencio y con él se perdería la exclusión.
+/// 2. **Nunca visible a medias**: el cuerpo se escribe y se `fsync`ea en un temporal del **mismo**
+///    directorio (mismo sistema de ficheros, requisito de `link`) *antes* de enlazarlo. Cuando el
+///    lock aparece en su ruta, ya declara `pid`, `host`, `timestamp` y `token`. Un `SIGKILL` en
+///    cualquier instante deja o bien ningún lock, o bien un lock íntegro — nunca el fichero vacío
+///    irreclamable que describe el diagnóstico de E30-H02.
+///
+/// El temporal se borra siempre **en el camino normal**: si el enlace tuvo éxito, el contenido ya
+/// vive en la ruta del lock (los dos nombres apuntan al mismo inodo, y desenlazar uno no afecta al
+/// otro); si falló, no debe quedar basura en `runtime/`. Su nombre lleva el token, que es único por
+/// adquisición, así que dos publicaciones concurrentes no comparten temporal.
+///
+/// **Los temporales huérfanos se barren aquí** ([`barrer_temporales_rancios`]). Un `SIGKILL` entre
+/// el `create_new` del temporal y su desenlace deja el `.lock.<token>.tmp` en disco y **nadie más
+/// lo recogería**: es inerte (vive bajo `.lodestar/runtime/`, fuera del índice de conocimiento y
+/// del `.gitignore` gestionado, y no participa en la exclusión), pero se acumula de forma monótona
+/// en el mismo directorio que el GC de recibos de E25-H03 sí mantiene limpio. Por eso cada
+/// adquisición empieza barriendo lo rancio.
+///
+/// El `fsync` del **fichero** es lo que hace que un `SIGKILL` no pueda publicar un cuerpo a medias:
+/// los datos del inodo están en disco antes de que exista el enlace. Lo que **no** se hace es
+/// `fsync` del **directorio**, así que ante un corte de corriente la entrada del enlace puede
+/// perderse: el resultado es «no hay lock», nunca «hay un lock a medias» — benigno y recuperable
+/// (la siguiente adquisición lo publica de cero), que es la propiedad que este código promete.
+fn publicar_lock(path: &Path, token: &str) -> std::io::Result<()> {
+    use std::io::Write as _;
+
+    let dir = path.parent().unwrap_or_else(|| Path::new("."));
+    barrer_temporales_rancios(dir);
+    let tmp = dir.join(format!(".lock.{token}.tmp"));
+
+    // Escritura + `fsync` del cuerpo en el temporal. Si algo falla aquí, el lock no llega a existir.
+    let escritura = (|| -> std::io::Result<()> {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)?;
+        file.write_all(cuerpo_del_lock(token).as_bytes())?;
+        file.sync_all()
+    })();
+    if let Err(e) = escritura {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+
+    // Publicación atómica y no-clobber. El `EEXIST` de aquí es el «lock ya tomado» que el llamante
+    // traduce a conflicto (y que dispara el intento de reclamo por huérfano).
+    let resultado = std::fs::hard_link(&tmp, path);
+    // Pase lo que pase, el temporal se retira: su contenido ya está publicado bajo el otro nombre.
+    let _ = std::fs::remove_file(&tmp);
+    resultado
+}
+
+/// Borra de `dir` los temporales de publicación (`.lock.<token>.tmp`) más viejos que [`LOCK_TTL`].
+///
+/// **Por qué hace falta**: [`publicar_lock`] retira su temporal en todos sus caminos de retorno,
+/// pero un `SIGKILL` entre el `create_new` y ese borrado no ejecuta ninguno — y ese temporal ya no
+/// pertenece a nadie: no lo mira el walker (`.lodestar/**` está fuera del índice de conocimiento),
+/// no lo versiona git (`runtime/` cae en el `.gitignore` gestionado) y no afecta a la exclusión (la
+/// da el enlace sobre `lock.json`, no los temporales). Es basura inerte, pero **monotónica**: sin
+/// este barrido crece una entrada por crash y nunca decrece.
+///
+/// **Por qué el umbral es [`LOCK_TTL`] y no algo más fino**: un temporal más viejo que el TTL no
+/// puede pertenecer a una publicación en curso —la ventana entre crear el temporal y desenlazarlo
+/// es de microsegundos, y el TTL son 15 minutos—, así que el margen es de órdenes de magnitud. Y
+/// borrar el temporal de un publicador concurrente sería inocuo de todos modos: su `hard_link` ya
+/// habría fallado o triunfado sobre el inodo, que sobrevive mientras alguien lo tenga abierto o
+/// enlazado.
+///
+/// **Best-effort en todo**: un `read_dir` que falla, una entrada sin metadatos o un borrado que no
+/// se puede hacer se ignoran en silencio. Esto es higiene, no corrección: nada de lo que decide el
+/// lock depende de que se ejecute. El coste es un `read_dir` por adquisición sobre un directorio
+/// con un puñado de entradas.
+fn barrer_temporales_rancios(dir: &Path) {
+    let Ok(entradas) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let ahora = std::time::SystemTime::now();
+    for entrada in entradas.flatten() {
+        let nombre = entrada.file_name();
+        let Some(nombre) = nombre.to_str() else {
+            continue;
+        };
+        if !(nombre.starts_with(".lock.") && nombre.ends_with(".tmp")) {
+            continue;
+        }
+        let rancio = entrada
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|m| ahora.duration_since(m).ok())
+            .is_some_and(|edad| edad > LOCK_TTL);
+        if rancio {
+            let _ = std::fs::remove_file(entrada.path());
+        }
+    }
 }

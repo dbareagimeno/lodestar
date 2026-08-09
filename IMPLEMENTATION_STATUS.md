@@ -15,15 +15,20 @@
 > corre desde E23-H06); `clippy -D warnings` y `cargo doc -D warnings` limpios; pureza del core
 > verificada por CI. **El recuento exacto de tests lo fija la nota de release** (E24-H18:
 > `cargo test --workspace -- --list | grep -c ": test$"`); fijado en la **v0.5.0**: **541 tests**
-> (eran 486 al cerrar E24, antes de las 11 historias de E25/E26).
+> (eran 486 al cerrar E24, antes de las 11 historias de E25/E26). En `develop` van **542**: +1 por la
+> guardia del `outputSchema` (ver «Defectos posteriores a E27» al final); la cifra de la v0.5.0 no se
+> reescribe — la fija su release.
 >
 > **Ya no forman parte de este repo**: la app de escritorio (Tauri + Svelte, movida a
 > `experimental/ui-desktop` con el giro headless), el crate `lodestar-vcs` y `git2` (borrados en
-> `E15-H01`), los generadores `init`/`index`/`tags`/`export`/`import` (`E15-H02`/`H03`) y el arnés
-> diferencial JS-vs-Rust (`E15-H04`). Las secciones de E0–E8 de más abajo conservan esa terminología
-> como **historia del proyecto**; la autoridad viva es `ARCHITECTURE.md §20`.
+> `E15-H01`), los generadores `init`/`index`/`tags`/`export`/`import` (`E15-H02`/`H03`), el arnés
+> diferencial JS-vs-Rust (`E15-H04`) y el `Envelope<T>`/`ErrorEnvelope` de `lodestar-app`
+> (`E29-H11`, `decisiones §16(b)`: capacidad construida en E10-H01/H02 sin consumidor real — el wire
+> siempre fue `structuredContent`/exit codes directos). Las secciones de E0–E8 de más abajo
+> conservan esa terminología como **historia del proyecto**; la autoridad viva es
+> `ARCHITECTURE.md §20`.
 >
-> Lo pendiente está en [`DECISIONES.md`](DECISIONES.md): fechas en el lenguaje de consulta (§12),
+> Lo pendiente está en [`decisiones/`](decisiones/README.md): fechas en el lenguaje de consulta (§12),
 > el **store sin consumidor** (§14, abierto en E23-H16). §12 y §13 se cerraron en E23-H14.
 
 ## Cómo correrlo
@@ -60,8 +65,8 @@ subcomandos git de la CLI —`log`/`last-conforming`/`branch`/`switch`/`merge`/`
 | **E3** `lodestar-store` | ✅ Hecho | DDL dueño único (`files`/`links`/`tags`/`diagnostics` + FTS5 + `commit_conformance`), cold rebuild, watcher `notify-debouncer-full` con **gate por hash blake3**, síntesis SQL (backlinks/orphans/dangling/blast-radius CTE), FTS5 con escapado, bus `IndexEvent` (crossbeam), trait `ConceptStore`. **13 tests**: paridad SQL==core, property incremental==core (120 ediciones), watcher en vivo, FTS. |
 | **E4** `lodestar-vcs` | ✅ Hecho | libgit2 local + red por binario `git` + **resolve_rev**, **staged_files**, **switch** (sin tocar working tree), **merge** (3-vías a nivel de árbol con marcadores + `MERGE_HEAD`), **install_hooks**, **tree_oid**. Cache de conformidad por tree-oid en el store, cableada en la workspace. **12 tests**. |
 | **E5** `lodestar-workspace` | ✅ Hecho | Handle unificado, único escritor, snapshot, commit/restore con checkpoint, switch/merge, conformidad cacheada por tree-oid, config (`lodestar.toml`), y **bus de eventos en vivo** (`open_live`/`enable_cache`/`subscribe`) con **update optimista** de la cache tras cada escritura. **12 tests**. |
-| **E6** Tauri + frontend | ✅ Hecho | **Fachada Tauri v2** real: comandos congelados sobre `Workspace` + estado del bundle + forwarder del bus `IndexEvent` → evento `bundle:changed` (UI en vivo). Binario `lodestar-desktop` compila; CI de Rust instala webkit y construye el frontend antes. **Frontend Svelte 5 funcional**: layout de 3 columnas colapsables, árbol filtrable, editor multi-escritor con validación y diagnósticos localizados, panel de enlaces, **isla imperativa del grafo** (`createStarMap`, SVG+rAF, sin `{#each}`), modo **Cambios** (diff + commit). `npm run check`/`build` verdes. Pulido en [`DECISIONES.md §2`](DECISIONES.md). |
-| **E7** `lodestar-mcp` | 🟢 Parcial | 13 tools sobre la workspace + bucle JSON-RPC por stdio (stdout puro). **Golden cross-fachada** (tool==workspace) + e2e. **5 tests**. Pendiente: transporte `rmcp` oficial + resources (ver [`DECISIONES.md §3`](DECISIONES.md)). |
+| **E6** Tauri + frontend | ✅ Hecho | **Fachada Tauri v2** real: comandos congelados sobre `Workspace` + estado del bundle + forwarder del bus `IndexEvent` → evento `bundle:changed` (UI en vivo). Binario `lodestar-desktop` compila; CI de Rust instala webkit y construye el frontend antes. **Frontend Svelte 5 funcional**: layout de 3 columnas colapsables, árbol filtrable, editor multi-escritor con validación y diagnósticos localizados, panel de enlaces, **isla imperativa del grafo** (`createStarMap`, SVG+rAF, sin `{#each}`), modo **Cambios** (diff + commit). `npm run check`/`build` verdes. Pulido en [`decisiones §2`](decisiones/02-port-ui-prototipo.md). |
+| **E7** `lodestar-mcp` | 🟢 Parcial | 13 tools sobre la workspace + bucle JSON-RPC por stdio (stdout puro). **Golden cross-fachada** (tool==workspace) + e2e. **5 tests**. Pendiente: transporte `rmcp` oficial + resources (ver [`decisiones §3`](decisiones/03-transporte-mcp-rmcp.md)). |
 | **E8** Transversales | 🟢 Parcial | Hechos: exit codes/SARIF, escritura atómica, **zip-slip cerrado por RelPath en `import`**, identidad de commits + override por `lodestar.toml`, trailer Co-Authored-By del agente, gitignore de `.lodestar/`, **config por-bundle (`lodestar.toml`: strictness + identidad)**, **`lodestar import`** (zip del prototipo o dir), **`init` con git init + commit inicial real**, **i18n keyed por código** (catálogo español), **arnés diferencial JS-vs-Rust (§12)**, y **pipeline de release multiplataforma** (`release.yml`: macOS arm64/Windows/Linux → bundles sin firmar + binarios CLI/MCP; Release en borrador) con **CI multiplataforma** (job de Rust en las 3 plataformas). Pendiente: **firma/notarización** de bundles + updater, gate de bench (§11), threat model. |
 
 ## Infraestructura de proceso (2026-07-10)
@@ -81,7 +86,7 @@ El repo tiene ahora una **estructura de agentes y skills** para el desarrollo po
   (invariante #4). Verificación con `/contrato --check`.
 - **Mutation testing a demanda**: `cargo-mutants` configurado (`.cargo/mutants.toml`), sin CI.
 - Primera historia acordada para el nuevo flujo: **ts-rs** (E0-H04/E6-H03,
-  [`DECISIONES.md §4`](DECISIONES.md)).
+  [`decisiones §4`](decisiones/04-generacion-dts-ts-rs.md)).
 
 ## Cobertura de historias (destacadas)
 
@@ -151,7 +156,7 @@ verificación empírica; ~40 defectos corregidos con tests de regresión. Lo má
 - **Pipeline de release** (`.github/workflows/release.yml`): se dispara con el tag `vX.Y.Z`, compila
   **macOS Apple Silicon (arm64)**, **Windows** y **Linux**, y crea un GitHub Release en **borrador**
   con los bundles (dmg/deb/appimage/nsis) + los binarios de CLI/MCP. Bundles **sin firmar** (firma/
-  notarización diferida — ver [`DECISIONES.md`](DECISIONES.md)). `bundle.active = true` y los iconos
+  notarización diferida — ver [`decisiones §1`](decisiones/01-build-fachada-escritorio.md)). `bundle.active = true` y los iconos
   de marca (estrella dorada) integrados. Runbook en [`RELEASING.md`](RELEASING.md).
 - **CI multiplataforma**: el job `rust` (fmt/clippy/build/test/doc) corre en `ubuntu-latest`,
   `macos-14` y `windows-latest` (`fail-fast: false`); el paso de `apt` (webkitgtk/soup) queda
@@ -185,17 +190,26 @@ verificación empírica; ~40 defectos corregidos con tests de regresión. Lo má
   modo que un `Drop` no puede liberar el lock de otro dueño ni se reclama el de un pid vivo.
 - ~~**git vocabulario directo**~~ — retirado con `lodestar-vcs` en `E15-H01` (`§20.13`).
 
-## Próximos pasos (ver [`DECISIONES.md`](DECISIONES.md))
+## Próximos pasos (ver [`decisiones/`](decisiones/README.md))
+
+> **Repriorización conjunta del 2026-08-02** — el orden de trabajo vigente vive al final de
+> [`decisiones/README.md`](decisiones/README.md) y es: **(1)** épica de honestidad de superficie
+> (§19a/b, §18 vinculante, §16f, §16e, §15, §16g, §16b) · **(2)** ciclo de higiene (§16 i/j/l) ·
+> **(3)** épica de evidencia = banco de pruebas §9 + dogfooding, que **cierra §14 con datos** ·
+> **(4)** renombrado del proyecto (`§20`, nuevo, alcance total incluido `.lodestar/`; congela la
+> firma de binarios y crates.io) · **(5)** comillas en el lenguaje (`§21`) · **(6)** ghosts (`§10`).
+> En esa pasada **`§16` se disolvió** en sus dueños reales y **`§5` se cerró**. La lista de abajo es
+> anterior y se conserva como registro de lo que estaba pendiente al cerrar E23/E24.
 
 **E23 está cerrada, así que nada bloquea el merge de v0.3.0.** Lo que sigue está abierto a criterio
 del usuario:
 
-1. **`DECISIONES §14`** — el store (épica E18) no tiene consumidor: ninguna tool lee de SQLite y
+1. **`decisiones §14`** — el store (épica E18) no tiene consumidor: ninguna tool lee de SQLite y
    `document_set()` reparsea la base entera en cada llamada. Decidir si se conecta, se acota o se
    retira. Va con la deuda hermana: el walker del store **no aplica la `DiscoveryPolicy`**, así que
    la paridad core↔store solo se sostiene bajo política por defecto — inocua mientras nadie lea el
    store, bug real en cuanto se conecte.
-2. ~~`DECISIONES §12` (fechas) y `§13` (`Conformant → Valid`)~~ — **cerradas en E23-H14**: las
+2. ~~`decisiones §12` (fechas) y `§13` (`Conformant → Valid`)~~ — **cerradas en E23-H14**: las
    fechas se declaran lexicográficas por escrito, y el catálogo de errores se abrió la única vez
    para completar la pareja de `§20.3`.
 3. **`docs/history/PROPUESTA_CLI.md`** — la CLI como gestor de KB (hoy solo es puerta de CI). Pendiente de
@@ -204,7 +218,7 @@ del usuario:
 4. **`docs/history/PROPUESTA_FIXES.md`** — reactivar los arreglos sugeridos (`Fix`/`apply_fix`, la op
    retirada en `E23-H11`). Condición de entrada: que existan productores de `Fix` que justifiquen la
    maquinaria del `fixId` direccionable entre revisiones.
-5. **`DECISIONES §3`/`§9`** — `rmcp` oficial + resources cuando un cliente lo exija; gate de bench y
+5. **`decisiones §3`/`§9`** — `rmcp` oficial + resources cuando un cliente lo exija; gate de bench y
    threat model.
 
 Deuda menor registrada, con dueño futuro: `Workspace::materialize_staging` es API pública que
@@ -214,7 +228,7 @@ chokepoint o convertirse en el quinto.
 
 **Añadido al cerrar E25/E26**: la auditoría del camino de escritura y las reservas de sus jueces
 ciegos dejaron **once puntos de deuda declarada** —lo que quedó explícitamente fuera de esa tanda,
-cada uno con su origen— en la sección nueva [`DECISIONES §16`](DECISIONES.md). Ninguno bloquea el
+cada uno con su origen— en la sección nueva [`decisiones §16`](decisiones/16-deuda-auditoria-e25-e26.md). Ninguno bloquea el
 merge: van de sintaxis de *quoting* que hoy es ruidosa pero correcta, a capacidad construida sin
 consumidor (`Envelope`, la cache SQLite), pasando por API pública no transaccional sin llamadores y
 por la matriz de trazabilidad, que sigue **sin filas de E15–E24**.
@@ -222,7 +236,7 @@ por la matriz de trazabilidad, que sigue **sin filas de E15–E24**.
 ## Giro a motor headless de integridad semántica (E9–E14) — COMPLETO
 
 Refactor de `docs/history/REFACTOR.md`, diseño ratificado en `ARCHITECTURE.md §19` (supersede §13 en
-superficie de producto; git queda como crate dormido) y `DECISIONES.md §0`. Descomposición en
+superficie de producto; git queda como crate dormido) y `decisiones §0`. Descomposición en
 `requirements/epica-09..14` (47 historias, orden E9→E14).
 
 - **E9 — Reducción de alcance** (Fase 0):
@@ -520,7 +534,8 @@ superficie de producto; git queda como crate dormido) y `DECISIONES.md §0`. Des
     `tools/list` Y su invocación se rechaza con `-32602` ANTES del despacho (`main.rs`, antes de
     `tools::call()`) — **cierra la reserva de gating por perfil de E13-H08**: ocultar de la lista no
     basta, un cliente que las llame igualmente no planifica/aplica/revierte. `initialize` devuelve
-    `instructions` (`SERVER_INSTRUCTIONS`) con el flujo de 10 pasos EN ORDEN. `workspace_status.
+    `instructions` (`SERVER_INSTRUCTIONS` [retirado en E29-H09: hoy `server_instructions(profile)`])
+    con el flujo de 10 pasos EN ORDEN. `workspace_status.
     capabilities` ya coherente con el perfil (E10-H08). Tests `perfil_readonly_sin_cambio`,
     `instrucciones_flujo` (orden de la espina, no "string no vacío"), `perfil_readonly_rechaza_cambio`
     (endurecido: invoca directamente las 3 de cambio bajo readonly con ids inexistentes → `-32602`;
@@ -610,7 +625,7 @@ superficie de producto; git queda como crate dormido) y `DECISIONES.md §0`. Des
 | **E15** Workspace universal | ✅ Completa | Retirada de vcs/generadores/init-zip/prototipo · raíz = `cwd` · descubrimiento recursivo · config opcional (H01–H09). |
 | **E16** Modelo documental genérico | ✅ Completa | `ParsedFrontmatter` YAML arbitrario · sin ficheros reservados · título derivado · patch quirúrgico · diagnósticos mínimos · `Concept`→`Document` (H01–H06). |
 | **E17** Enlaces y grafo universal | ✅ Completa | `pulldown-cmark` en el core · `LinkTarget` · diagnósticos de enlace · `Analysis` nueva · grafo universal + cableado de `other_files`. |
-| **E18** Store v2 | ✅ Completa | DDL nuevo, metadata anidada por field path, links genéricos, cold rebuild, paridad core/store. **Sin consumidor en el producto** → `DECISIONES §14`. |
+| **E18** Store v2 | ✅ Completa | DDL nuevo, metadata anidada por field path, links genéricos, cold rebuild, paridad core/store. **Sin consumidor en el producto** → `decisiones §14`. |
 | **E19** Lenguaje de consulta | ✅ Completa | Parser · AST único · type checking sin coerción · namespaces `document.*`/`graph.*` · filtro JSON equivalente. |
 | **E20** Inspección y validación genéricas | ✅ Completa | `metadata_inspect` (retira `core::schema`) · política `rejectNewErrors`/`allowExistingErrors` · diagnósticos de descubrimiento cableados. |
 | **E21** Contrato MCP y transacciones genéricas | ✅ Completa | 8 operaciones universales · selecciones masivas por consulta · `move` por span · `delete` con política explícita. |
@@ -663,7 +678,7 @@ superficie de producto; git queda como crate dormido) y `DECISIONES.md §0`. Des
   observarla (`locale_cmp` sobrevive en `core::model`, hoy sin consumidor — candidato a borrarse en
   E16 si sigue huérfano).
 - 📌 **Punteros de proceso actualizados**: `.claude/agents/*` (autor-tests, implementador,
-  historiador, planificador), `.claude/README.md`, `DECISIONES.md §9` y
+  historiador, planificador), `.claude/README.md`, `decisiones §9` y
   `requirements/paridad-auditoria.md` daban por vivo el arnés diferencial y el `npm ci` de
   `prototype/harness/`; ahora lo declaran retirado en `E15-H04`.
 - ⚖️ **Juez ciego (H01–H04)**: **APROBADA CON RESERVAS**, 11/11 criterios cumplen. Hallazgos
@@ -813,7 +828,7 @@ superficie de producto; git queda como crate dormido) y `DECISIONES.md §0`. Des
 - ⚠️ **Deuda declarada al cerrar E16**: (1) `Severity::Warn` se ha quedado **sin productor** en
   `all_checks`, así que `PlanPolicy::allowWarnings` y `gate.blockWarnings` son inalcanzables desde
   datos reales hasta que E17 traiga `LINK-CASE-MISMATCH` y E20 la política de severidades; (2) la
-  pareja `Conformant → Valid` de `§20.3` está a medias — ver `DECISIONES.md` **§13** (cerrada
+  pareja `Conformant → Valid` de `§20.3` está a medias — ver `decisiones §13` (cerrada
   después en E23-H14);
   (3) `core::types` sigue documentando el `.d.ts` generado por ts-rs, falso desde que se retiró la UI.
 
@@ -946,7 +961,7 @@ superficie de producto; git queda como crate dormido) y `DECISIONES.md §0`. Des
   `delete_document` **exige política explícita** (`§Fase 12`: no elegir en silencio).
 - ✅ **E21-H04** — **`OkfDiff` → `SnapshotDiff` + limpieza del contrato** (cierra E21). El diff de wire
   ya era `types::SemanticDiff` (E12); el de `diff.rs` pasa a `SnapshotDiff` (neutro). Contrato sin
-  vocabulario OKF en superficie activa; `DECISIONES §13` (`Conformant → Valid`) documentada como
+  vocabulario OKF en superficie activa; `decisiones §13` (`Conformant → Valid`) documentada como
   aplazada (toca el catálogo de errores congelado).
 
 ### E22 — Migración de repos OKF y publicación
@@ -1053,11 +1068,11 @@ superficie de producto; git queda como crate dormido) y `DECISIONES.md §0`. Des
 - ✅ **E23-H13/H14/H15/H16** — **Los documentos dejan de contradecirse**. La tabla de la migración
   decía «E15–E22 EN CURSO» **350 líneas por encima del detalle que las daba por cerradas** (era
   criterio de aceptación literal de E22-H03, incumplido); la cabecera describía la UI Tauri y
-  subcomandos git borrados en E9-H02. `DECISIONES §12` (fechas **lexicográficas**, porque
+  subcomandos git borrados en E9-H02. `decisiones §12` (fechas **lexicográficas**, porque
   `serde_yaml` 0.9 no tipa timestamps) y **§13** (`Conformant → Valid`) cerradas: §13 era el **único
   de los 29 criterios de `REFACTOR_PHASE_2` demostrablemente incumplido**, y se saldó abriendo el
   catálogo de 16 códigos **la única vez**, aprovechando que v0.3 ya era incompatible con v0.2. Y se
-  escribieron `docs/history/PROPUESTA_CLI.md` y `DECISIONES §14` (el store de E18 **entero, sin ningún
+  escribieron `docs/history/PROPUESTA_CLI.md` y `decisiones §14` (el store de E18 **entero, sin ningún
   consumidor**) para que dos decisiones no se perdieran.
   - **Lo que la barrida final encontró y que nadie había mirado**: el texto `instructions` que el
     servidor sirve en `initialize` —lo primero que lee un agente, y **superficie de wire**, no
@@ -1144,7 +1159,7 @@ criterio ratificado en E19-H04. Ninguna historia de v0.3.1 depende de ellas.
   del catálogo (antes 10). La misma consulta malformada daba **dos códigos distintos** según la
   tool. Nueva variante `WorkspaceError::InvalidSchema` para no seguir aplanando entrada inválida
   contra fallo de I/O. Lo que **no** cambia: los parámetros no declarados se siguen ignorando — eso
-  es revisar un criterio ratificado, y queda como `DECISIONES §15`.
+  es revisar un criterio ratificado, y queda como `decisiones §15`.
 - ✅ **E24-H13/H14** — **El crash se prueba de verdad**. La feature `test-failpoints` existía desde
   E13-H06 pero **ningún fichero de `src/` la referenciaba**: los tests componían el estado
   post-crash a mano y **en orden distinto al del orquestador** (journal antes que backup, cuando
@@ -1338,7 +1353,7 @@ Las **11 historias** pasaron por juez ciego (agente fresco, solo spec + diff) co
 pedido explícitamente en el encargo. **Las 11 volvieron `APROBADA CON RESERVAS`**, y **todas las
 reservas MAYORES se cerraron en el mismo ciclo**: ninguna historia se dio por cerrada con una reserva
 mayor viva. Las **menores** —flecos de **fuerza de suite**, casi todos mutantes supervivientes en
-ramas de diagnóstico— quedan **declaradas** en [`DECISIONES §16(l)`](DECISIONES.md), no cerradas:
+ramas de diagnóstico— quedan **declaradas** en [`decisiones §16(l)`](decisiones/16-deuda-auditoria-e25-e26.md#l-deuda-de-fuerza-de-suite-y-flecos-menores-registrados-por-los-jueces-ciegos), no cerradas:
 ninguna describe un defecto observable hoy, y dos de ellas se arreglan con un refactor, no con un
 test.
 
@@ -1351,7 +1366,7 @@ Lo que merece quedar registrado, porque cambió el plan:
   lección de E23 en su forma útil: la spec se corrige cuando implementar demuestra que estaba
   incompleta, no se implementa alrededor de ella.
 - **Cuatro reservas no eran defectos de la historia sino deuda real del repo**, así que no se
-  cerraron en código: se **declararon** en [`DECISIONES §16`](DECISIONES.md) con su origen — los
+  cerraron en código: se **declararon** en [`decisiones §16`](decisiones/16-deuda-auditoria-e25-e26.md) con su origen — los
   escritores de runtime sin lock (juez de H03), la duplicación de la secuencia de sellado
   `apply`/`revert` (juez de H05), los tres límites latentes de *quoting* del lenguaje (H09) y el
   cursor basura que reinicia en silencio (juez de H10). Los **flecos menores** de siete historias van
@@ -1378,7 +1393,7 @@ Lo que merece quedar registrado, porque cambió el plan:
 
 ## Producto, distribución y apertura OSS (E27) — COMPLETA (2026-08-02; H10 bloqueada)
 
-> Primera épica de **superficie externa** (`ARCHITECTURE.md §21`, `DECISIONES.md §17`): el motor no
+> Primera épica de **superficie externa** (`ARCHITECTURE.md §21`, `decisiones §17`): el motor no
 > cambia — cero deltas de contrato, cero cambios de comportamiento en `crates/*/src` (solo
 > comentarios/doc-comments al mover docs). Origen: la review OSS externa del 2026-08-01, verificada
 > punto a punto. Antes de la épica: retro-tag `v0.5.0` (el tag `0.5.0` sin prefijo nunca disparó
@@ -1389,15 +1404,15 @@ Lo que merece quedar registrado, porque cambió el plan:
 |---|---|---|
 | E27-H01 guardarraíles de release | ✅ | `scripts/verifica-tag-release.sh` (3 casos ejecutados: v0.5.0→0, v0.6.0→1, 0.5.0→1) + `SHA256SUMS-<target>.txt` generado y verificado en el propio job. **Verificación diferida declarada**: la próxima release real (3 archivos + 3 checksums) la cierra. |
 | E27-H03 `examples/demo/` | ✅ | 10 docs EN, enlace roto + huérfano deliberados y comentados; guion de 2 min con salidas reales. **Enmienda**: el huérfano se enseña vía `graph_query isolated` (el código `ORPHAN` murió en E16-H02), no vía `check`. |
-| E27-H02 README en inglés | ✅ | Binarios de Releases + `cargo install --git` (probado de verdad), quickstart contra la demo, `claude mcp add` + JSON genérico, roadmap → `DECISIONES.md`. Cero promesas de rendimiento (grep del criterio). |
+| E27-H02 README en inglés | ✅ | Binarios de Releases + `cargo install --git` (probado de verdad), quickstart contra la demo, `claude mcp add` + JSON genérico, roadmap → `decisiones/`. Cero promesas de rendimiento (grep del criterio). |
 | E27-H04 smoke de la demo | ✅ | `scripts/demo-smoke.sh` + job `demo-smoke` en `ci.yml`. Control anti-vacuo ejecutado (romper un enlace → falla). El smoke ya cazó una deriva real: añadir el README-guion cambió el blast radius 4/7→5/8. |
 | E27-H06 `docs/` vigente vs superseded | ✅ | `docs/history/` con los 4 superseded (git mv, historia conservada), índice por audiencias, cero citas a rutas viejas (grep del criterio). `REFACTOR_PHASE_2.md` no se mueve (`§17`-DC). |
 | E27-H05 `docs/user/` operativos | ✅ | quickstart/mcp-clients/ci en EN, todo ejecutado (parte con el binario de la release v0.5.0). El workflow de ejemplo de `ci.md` **se ejecutó en Actions** (run 30721903304, rama efímera): install → check → SARIF subido a code scanning → gate bloquea con exit 1, cada step como documenta. |
-| E27-H11 `docs/user/` de referencia | ✅ | query-language/safe-changes en EN, ~45 tool calls, citas del binario verificadas verbatim (9/9), revisión cruzada contra `contracts/mcp.yml` declarada. Destapó los 3 hallazgos de `DECISIONES §19`. |
+| E27-H11 `docs/user/` de referencia | ✅ | query-language/safe-changes en EN, ~45 tool calls, citas del binario verificadas verbatim (9/9), revisión cruzada contra `contracts/mcp.yml` declarada. Destapó los 3 hallazgos de `decisiones §19`. |
 | E27-H07 `requirements/` veraz | ✅ | Banner HISTÓRICA en E0–E8, invariantes zombis #4/#7 corregidos, regla de idioma `§21.1` registrada, Done sin gates del frontend retirado. |
 | E27-H08 comunidad | ✅ | CONTRIBUTING (issues-first `§17`-DB) + SECURITY (PVR **habilitado y verificado** + email) + Covenant 2.1 verbatim (diff: 1 línea, el contacto). Community profile se verifica tras el merge (lee `main`). |
 | E27-H09 templates | ✅ | 3 formularios YAML válidos + PR template con los gates exactos del CI. Render de GitHub se comprueba tras el merge. |
-| E27-H10 crates.io | ⛔ | **[BLOQUEADA por `DECISIONES §17`-DA]** (diferida, reabrible). |
+| E27-H10 crates.io | ⛔ | **[BLOQUEADA por decisiones §17]** (diferida, reabrible). |
 
 **Veredicto del juez ciego** (agente fresco, solo spec + diff, criterios re-ejecutados por él,
 incluido el control anti-vacuo y ~30 llamadas MCP): **APROBADA CON RESERVAS (solo menores)** —
@@ -1408,6 +1423,295 @@ verificaciones post-merge declaradas (community profile / render de templates) y
 H01 (la cierra la próxima release).
 
 **Hallazgos registrados al implementar** (regla de la épica: documentar ejecutando destapa, no
-arregla): `DECISIONES §18` (`canApply: false` no vincula a `change_apply`) y `§19` (a: `has(frontmatter)`
+arregla): `decisiones §18` (`canApply: false` no vincula a `change_apply`) y `§19` (a: `has(frontmatter)`
 nunca casa, contradice `§20.8`; b: `policy` parcial rechazada pese a campos opcionales del contrato;
 c: imprecisión de `§16.a` caso 3). Todos tocan la frontera o el core → historias propias fuera de E27.
+
+## Fase 0 de la campaña de bugfixes del testbench homelab (E28) — COMPLETA
+
+> **Origen**: `decisiones/23-hallazgos-testbench-homelab.md` (M-01 y A-05, prioridades 5 y 4 — las
+> dos filas con **riesgo real de pérdida de conocimiento**, ejecutadas antes que cualquier otro
+> hallazgo de la tabla) y `docs/qa/informe-homelab-2026-08-06.md` (caso G1-18 para M-01, caso G1-11
+> para A-05). Épica: [`epica-28-defectos-destructivos-testbench.md`](requirements/epica-28-defectos-destructivos-testbench.md).
+> Tablero de campaña: [`docs/qa/campana-bugfixes-2026-08.md`](docs/qa/campana-bugfixes-2026-08.md).
+> Commits: `043f233` (H02), `296147b` (H01), `8c86b6b` (adenda H03+H04), `c532929` (cierre de
+> reservas de los re-jueces) — los cuatro en `develop`, **pendiente de merge a `main`**.
+
+| Historia | Estado | Detalle |
+|---|---|---|
+| **E28-H01** `change_revert` de un `-revert` restaura de verdad | ✅ | Identidad propia del `txnId` de cada reversión + coreografía de sellado unificada (`decisiones §16(i)`). |
+| **E28-H02** guard de colisión en `create`/`move` | ✅ | `DOCUMENT_ALREADY_EXISTS`, catálogo `ErrorCode` 16→17. |
+| **E28-H03** identidad de transacción libre en la publicación (adenda) | ✅ | Corrige el bloqueante que el juez de H01 dejó en `change_apply`. |
+| **E28-H04** normalización contra el estado acumulado del change set (adenda) | ✅ | Corrige el bloqueante que el juez de H02 dejó en las colisiones intra-plan. |
+
+- ✅ **E28-H01** (`296147b`) — **Revertir un recibo `-revert` era un no-op silencioso que destruía el
+  redo**. La identidad de una reversión se derivaba del `changeSetId` heredado, que colisionaba
+  consigo misma: `revert(revert(X))` recalculaba el mismo `txnId` `X-revert` que el primer revert,
+  así que restauraba un árbol que ya estaba vigente (no-op) y sobrescribía en silencio
+  `recovery/X-revert/` —la única copia del estado que el primer revert había dejado— sin que ningún
+  error lo señalara. Ahora `revert_transaction_id` deriva la identidad del **`receiptId`** que se
+  revierte, no del `changeSetId`, apilando un contador (`-revert`, `-revert-2`, …) que compone sin
+  límite. Guard anti-sobrescritura en `revert_transaction_con_recibo` con el mismo criterio de
+  «vivo» que usa el GC (`journal ∪ receipts`). De paso satura `decisiones §16(i)`: la coreografía
+  de sellado duplicada entre `apply_transaction_con_recibo` y `revert_transaction_con_recibo` se
+  extrae a `seal_published_transaction`, un único camino compartido.
+- ✅ **E28-H02** (`043f233`) — **`create`/`move` sobre un destino ocupado aplicaban sin fricción y
+  pisaban conocimiento existente**. `normalize_create` descartaba el `DocumentSet` (literalmente
+  `_workspace`) y `normalize_move` nunca consultaba `doc_set.files()` para el destino `to`. Ahora
+  los dos comprueban la ocupación del path y fallan con el código nuevo `DOCUMENT_ALREADY_EXISTS`
+  (catálogo `ErrorCode` 16→17, simétrico de `DOCUMENT_NOT_FOUND`), nombrando el path colisionado;
+  `move` con `from == to` sigue siendo no-op válido, no una colisión. Delta de contrato declarado en
+  `contracts/mcp.yml`.
+- ✅ **E28-H03** (`8c86b6b`) — **Bloqueante que el juez ciego de H01 dejó vivo**: el guard
+  anti-sobrescritura de H01 solo protegía `change_revert`; `change_apply` seguía calculando
+  `txn_id = transaction_id(&change_set.id)` sin pasar por él, así que replanificar el mismo cambio
+  (mismo `changeSetId` determinista) y volver a aplicarlo **sobrescribía** `recovery/`/`receipts/`
+  de la primera transacción, y el `revert` posterior quedaba **sin salida** (`WRITE_CONFLICT`
+  permanente, el `txnId` de su propia reversión ya estaba tomado). Ahora `resolve_free_txn_id`
+  resuelve la identidad efectiva de **ambos** caminos buscando de forma determinista la primera
+  variante libre (mismo criterio `journal ∪ receipts`) antes de la primera escritura:
+  `apply → revert → re-apply idéntico → revert` completa con **cuatro `receiptId` únicos**, sin
+  pisar nunca material previo. `revert_transaction_id` endurece el sufijo al formato canónico y su
+  rustdoc declara explícitamente el borde `u64::MAX`.
+- ✅ **E28-H04** (`8c86b6b`) — **Bloqueante que el juez ciego de H02 dejó vivo**: los guards de H02
+  normalizaban cada operación del plan contra el `DocumentSet` **inicial**, así que colisiones
+  reales **dentro** de un mismo plan (`[move a→final, move b→final]`, `[create X, move b→X]`,
+  `[create X, create X]`) no se veían — falsos negativos destructivos — mientras que idiomas
+  legítimos que dependían de la secuencia (`[delete X, create X]`, `[move A→B, create A]`) se
+  rechazaban por error — regresión respecto al commit padre de H02. Ahora la normalización lleva un
+  estado de ocupación acumulado (`EstadoOcupacion`: `create`/`move.to` ocupan, `delete`/`move.from`
+  liberan) que cada operación del plan actualiza en orden, con el mismo juicio de colisión que el
+  guard contra disco (invariante #3, una sola verdad computada). Abre `decisiones §24`
+  (equivalencia de paths por caja/Unicode), explícitamente fuera de su alcance.
+- **Cierre de reservas de los re-jueces** (`c532929`) — la red de colisiones intra-plan pasa a ser
+  **vinculante en `change_apply`** (el plan persistido es un artefacto durable que pudo escribirse
+  con un binario sin el guard; la de `change_plan` queda como diagnóstico temprano, ambas llaman al
+  mismo juicio del core); el motivo del `WRITE_CONFLICT` residual deja de filtrar rutas del plano de
+  control (regla fijada en rustdoc: el motivo lo lee un agente); contrato sincronizado
+  (`DOCUMENT_ALREADY_EXISTS` declarado en `change_apply`, los cuatro emisores de `WRITE_CONFLICT` en
+  `change_revert` incluidos los dos bordes `u64::MAX`, el no-op `move` `from == to` deja su path
+  ocupado en el acumulado); y dos familias de defecto preexistentes (resurrección de paths por
+  operaciones de contenido, move-chains por ocupación del origen) quedan registradas como
+  seguimiento, fuera de esta épica, en la sección «Hallazgos preexistentes registrados» de la spec.
+
+### Veredictos de los jueces ciegos (E28)
+
+**H01 y H02** pasaron cada una por **panel de 3 jueces ciegos** (agentes frescos, solo spec + diff,
+tres lentes distintas). Cada panel localizó un bloqueante real **ejecutando el binario por
+JSON-RPC** —la misma disciplina que produjo el hallazgo original—: el de H01 en el camino de
+`change_apply` (cerrado por H03); el de H02 en la normalización intra-plan (cerrado por H04). Tras
+la adenda, **re-jueces ciegos de robustez** verificaron H03/H04 con el mismo método y devolvieron
+**APROBADA CON RESERVAS**; las reservas se saldaron en el mismo ciclo (`c532929`), sin ninguna
+viva. `/contrato --check` quedó **COHERENTE en dos pasadas** (tras la adenda y tras el cierre de
+reservas).
+
+### Invariantes que esta épica deja verificados
+
+- **Suite completa en verde**, incluidos ambos crates con `--features test-failpoints`
+  (`lodestar-workspace` y `lodestar-app`) — 583+ tests tras las cuatro historias.
+- **Única fuente de verdad (#1) y único escritor (#5)**: ninguna transacción de publicación
+  (`apply` o `revert`) puede ya pisar `recovery/`/`receipts/` de una transacción con material
+  vigente; la identidad se resuelve buscando, no sobrescribiendo ni fallando sin salida.
+- **Una sola verdad computada (#3)**: el guard de colisión de `create`/`move` juzga con el mismo
+  criterio contra disco y contra el estado acumulado del propio plan; la coreografía de sellado de
+  `apply`/`revert` vive en un único camino compartido (`seal_published_transaction`).
+- **Un solo contrato de tipos (#4)**: catálogo `ErrorCode` en 17 filas (16→17,
+  `DOCUMENT_ALREADY_EXISTS`), delta declarado en `contracts/mcp.yml` y verificado por
+  `/contrato --check` en dos pasadas.
+- **clippy `-D warnings`, `cargo fmt --check` y `cargo doc` limpios** en los cuatro commits.
+
+**Estado real**: las cuatro historias están implementadas, verificadas por jueces ciegos y con la
+suite en verde en `develop` — la épica está **completa a falta del merge**: los cuatro commits ya
+viven en `develop`, pero aún no cruzaron a `main` por el ciclo de release descrito en
+`RELEASING.md`.
+
+## Fase 1 de la campaña de bugfixes del testbench homelab (E29 — honestidad de superficie) — COMPLETA
+
+> **Origen**: `decisiones/23-hallazgos-testbench-homelab.md` (D-01, A-04, A-07) + el orden de trabajo
+> de `decisiones/README.md` (punto 1: §19a/b, §18 vinculante, §16f, §16e, §15, §16g, §16b). Épica:
+> [`epica-29-honestidad-superficie.md`](requirements/epica-29-honestidad-superficie.md). Tablero de
+> campaña: [`docs/qa/campana-bugfixes-2026-08.md`](docs/qa/campana-bugfixes-2026-08.md). Rama
+> `feat/e29-honestidad-superficie`, **11/11 historias implementadas, pendiente de merge**.
+
+| Historia | Commits | Veredicto del juez | Detalle |
+|---|---|---|---|
+| **E29-H01** config estricta (`§16e`+A-08) | `4a52f59` | APROBADA (8/8) | `deny_unknown_fields` en `WorkspaceConfig` y sus secciones; familias de `validation` contra la lista cerrada `VALIDATION_FAMILIES`; config ilegible → `Err` (exit 3), no *defaults* silenciosos. |
+| **E29-H02** `policy` parcial respeta el `Default` | `46c1492` + `2f6ecf4` (remate del juez) | APROBADA (5/5) | Campos de `PlanPolicy` con `#[serde(default)]`; el remate clava literales y el default por campo omitido. |
+| **E29-H03** `has`/`missing` responden la verdad | `99900d3` | APROBADA (7/7) | El anclaje pelado (`has(frontmatter)`) deja de ser el único argumento donde ambos operadores mienten. |
+| **E29-H04** afijo sobre no-string es type error | `b3b79fb` + `681ec45` (remate: mensaje neutro) | APROBADA (7/7) | `starts_with`/`ends_with` sobre un campo no-string producen el mismo type error ruidoso que E26-H08 fijó para el orden. |
+| **E29-H05** scope `paths` exige existencia | `fc5c26b` | APROBADA (6/6) | Un path inexistente en el scope `paths` de `knowledge_check` responde `DOCUMENT_NOT_FOUND`, simétrico con `document`/`affected`. |
+| **E29-H06** workspace vacío avisa | `88e99b2` + `6a3a6ca` (remate: mensaje, ancla, productor con red) | aprobada | `WORKSPACE-EMPTY` (warn) cuando la raíz no descubre ningún documento; no toca exit codes. |
+| **E29-H09** `instructions`/`protocolVersion` coherentes | `5e7edc0` | APROBADA (7/7) | `instructions` nombra exactamente las tools que el perfil sirve; `protocolVersion` no soportada deja de aceptarse en silencio. |
+| **E29-H07** `canApply` vinculante | `9df617f` + `f97004c` (remate: doc deja de negar el gate, pines fijan la representación) | aprobada (bloqueante doc saldado) | `change_apply` rechaza un plan con `canApply: false` bajo su propia policy. |
+| **E29-H08** wire estricto | `f7dc5fd` + `f720ba8` (remate: deuda saldada, cascada a sub-objetos) | APROBADA (11/11) | `additionalProperties: false` se ejecuta de verdad (validación por unión contra la tabla de campos legales por operación de `§15`). |
+| **E29-H10** repliegue de la API no transaccional | `7f519d2` | juez ciego: APROBADA | `create_document`/`write_document`/`merge_frontmatter`/`publish` replegadas a `pub(crate)` (tests vía feature `test-support`, verificado con consumidor externo). |
+| **E29-H11** retirada del `Envelope` | `7f519d2` | juez ciego: APROBADA | `Envelope<T>`/`ErrorEnvelope`/`ResourceLink` de `lodestar-app` retirados (§16(b): capacidad construida en E10-H01/H02 sin consumidor real; cero residuos verificados). |
+
+**Invariantes verificados**: suite completa en verde, incluidos los dos crates con
+`--features test-failpoints` (`lodestar-workspace` y `lodestar-app`); `cargo clippy --workspace
+--all-targets --all-features --locked -- -D warnings` limpio; `cargo fmt --all --check` limpio;
+`cargo doc --workspace --no-deps --locked` limpio; pureza del core intacta (`cargo tree -p
+lodestar-core` sin tokio/rusqlite/git2/notify/tauri/zip). `/contrato --check` coherente tras cada
+historia que tocó la frontera (H01, H02, H04, H05, H06, H07, H08, H09).
+
+**Estado real**: las 11 historias están implementadas y **mergeadas** (PR #27, merge `fb48c03`), con
+todas las reservas MAYORES/bloqueantes de sus jueces ciegos saldadas en los commits de remate (H02,
+H04, H06, H07, H08) y H10/H11 aprobadas por juez ciego (`1c09af3`).
+
+## Fases 2-3 de la campaña de bugfixes del testbench homelab (E30 — higiene y escoba) — COMPLETA (pendiente de merge)
+
+Épica cerrada el **2026-08-07** (`requirements/epica-30-higiene-escoba.md`, ratificada por el
+usuario). Cierra el **ciclo de higiene** de `decisiones §16(j)/(l)` ampliado con `§23/A-02,A-03`, la
+flakiness del lock que tres jueces habían señalado, y la **escoba documental** de los nits de `§23`
+más los seguimientos acumulados durante las Fases 0 y 1. Con ella, `decisiones §23` queda **cerrada**:
+sus 12 subpuntos accionables están ejecutados.
+
+| Historia | Commits | Juez ciego | Qué cierra |
+|---|---|---|---|
+| **E30-H01** cursores estrictos y firmados | `8359294` + `2d32eeb` (remate de robustez) | RECHAZADA → saldada | El cursor va firmado con su origen: malformado, retocado o **de otra tool** se rechaza con `INVALID_SCHEMA` en vez de servir la página 1 (`§16(j)` + `§23/A-02,A-03`). |
+| **E30-H02** publicación atómica del lock | `9cd129a` + `6b5c2b7` (4 remates) | APROBADA con reservas, saldadas | La flakiness de `crash_por_senal_no_deja_parciales` **no era un test frágil: era un bug real** — un `SIGKILL` en la ventana no atómica dejaba un lock vacío y **terminal**, cerrando el workspace a la escritura para siempre. |
+| **E30-H03** escoba: 3 defectos + 11 criterios documentales | `0ef66d2` + `8621e40` (3 MAYOR) | APROBADA CON RESERVAS (9/11), saldadas | `contains` con literal no-string → type error; `protocolVersion` no-string → `-32602`; prefijo duplicado de `INVALID_RESULT`; D-02/A-01/A-06/A-09/A-10 y los seguimientos de SARIF y `counts`. |
+| **§16(l)** pasada de mutantes | `9d09c62` | n/a (higiene de suite) | 6 supervivientes confirmados y muertos con test. Dos revelaban **diagnósticos que mentían** (el mensaje de cuarentena decía «nada se ha borrado» mientras borraba el sidecar). |
+
+**Lo que la ejecución corrigió sobre lo que la campaña suponía** — se registra porque es el valor
+real del dogfooding, y porque repite la lección de E23 (*leer el código no basta: ejecútalo*):
+
+- **La firma de cursores introdujo una regresión de robustez que la suite no vio**: un cursor
+  no-ASCII (`«🔥.807e307a»`) hacía `panic!` por un corte fuera de frontera de carácter y se llevaba
+  la **sesión JSON-RPC entera** (rc=101), en las cuatro tools paginadas. Lo cazó el juez ciego de
+  robustez ejecutando el binario, no los tests.
+- **Los tres tests preexistentes del reclamo de locks dejaban pasar la mutación `&&`→`||`**, que
+  reclama locks de dueños vivos. Es decir: cubrían el camino, no la frontera.
+- **Una hipótesis registrada era falsa.** La divergencia de `workspace_status.counts` se había
+  anotado como «diagnósticos sin target»; verificarla la refutó (`SYMLINK-UNSUPPORTED` y
+  `DOC-NOT-UTF8` sí llevan targets y divergen igual). El criterio real es que el fichero nunca entra
+  al inventario.
+- **A-06 era la punta de otro defecto**: un `replace_text` que no casa nada **reescribe el fichero**
+  y reserializa el frontmatter. Fuera del alcance de H03 por causa raíz distinta; **abierto**.
+- **Un test aseveraba la negación del defecto que su propio commit documentaba** (el de guardia de
+  A-06), y pasaba solo porque el fixture no tenía frontmatter en estilo flow. El juez lo demostró
+  añadiendo `tags: [a, b]`. Corregido con fixture propio de dos documentos, donde el de estilo block
+  es el anti-vacuo.
+- **Dos arreglos llegaron sin red**: el de SARIF sin un solo test (neutralizar el guard dejaba los 51
+  tests del crate en verde) y una costura extraída «para que sea ejercitable» que **nadie ejerció**.
+- **La pasada de mutantes destapó superficie pública muerta**: `Workspace::revert_transaction` con el
+  cuerpo en `unreachable!()` deja los 52 binarios de test del workspace en verde. Registrado en
+  `decisiones §16`, **sin actuar**: es la categoría de `§16(b)`/`§16(g)`, que se resolvieron por
+  decisión de retirar, no añadiendo tests.
+
+**La lección**: los cuatro fallos de arriba convivían con la suite **en verde**. E23 dejó escrito
+*«cuando dudes de si algo funciona, ejecútalo»*; E30 añade el piso de arriba — **cuando dudes de si
+un test muerde, mútalo**.
+
+## Los dos seguimientos de la campaña (E31) — COMPLETA (2026-08-08)
+
+Épica: [`requirements/epica-31-seguimientos-campana.md`](requirements/epica-31-seguimientos-campana.md).
+Cierra las dos fichas que la campaña dejó abiertas porque exigían criterio del usuario:
+[`§25`](decisiones/25-superficie-muerta-revert-transaction.md) y
+[`§26`](decisiones/26-replace-text-noop-reserializa.md).
+
+| Historia | Qué cierra | Estado |
+|---|---|---|
+| E31-H01 | `§25` — `Workspace::revert_transaction` se **retira** | ✅ |
+| E31-H02 | `§26` — la cabecera se preserva byte a byte + `noOpOperations` | ✅ |
+
+- **H01 ejecutó la salida que la ficha desaconsejaba, y la decidió el compilador.** `§25` recomendaba
+  replegar a `pub(crate)` por reversible; al hacerlo, **clippy la marcó como `dead_code`** —no la
+  usaba nadie tampoco dentro del crate— y con el CI en `-D warnings` el repliegue era
+  **incompilable**. Con `pub` el aviso no salía porque una función pública puede tener consumidores
+  externos: replegarla fue lo que lo destapó. El argumento de la ficha para preferir el repliegue
+  («es el cuerpo que `revert_transaction_con_recibo` envuelve») era además **falso**: era un wrapper
+  de tres líneas sobre ella. Lo único que costó fue trasladar su doc-comment, el único sitio donde
+  vivía la descripción de la mecánica de reversión.
+
+- **H02 destapó que `§26` eran TRES defectos, no uno.** La ficha reportaba el frontmatter
+  reserializado (`tags: [a, b]` → estilo bloque). El brazo `ReplaceBody` perdía además el
+  **separador** (normalizado a `---\n\n`, o sea una línea en blanco inyectada en cada reescritura) y
+  —lo grave— **borraba entero el frontmatter ILEGIBLE**: `parse_file` devuelve `None` tanto para «no
+  hay bloque» como para «hay bloque y su YAML no se deja leer», así que reescribir el **cuerpo** de
+  un documento con la cabecera rota se llevaba la cabecera por delante. **Pérdida de datos, sin un
+  solo test** que combinara frontmatter ilegible con una operación de cuerpo.
+
+  Los tres caen con el mismo arreglo —`model::replace_body_preservando_cabecera`, inverso exacto de
+  `SplitFront::body`— porque corta por **posición de bytes** y no por si el YAML se interpreta. El
+  radio era todo lo que normaliza a `ReplaceBody`: `replace_text`, `edit_section`, `replace_body`,
+  `delete remove_links` y `move` — incluido el `rewriteInboundLinks`, que reescribe el cuerpo de
+  **cada enlazante**, así que un `move` podía reformatear medio workspace.
+
+- **La ampliación sobre la ficha**: `PlanResult.noOpOperations`. Con el churn eliminado, una
+  operación sin efecto no dejaba **ninguna** traza, y el agente no podía distinguir «se procesaron 40
+  y 28 no casaron» de «solo se seleccionaron 12». `docs/user/safe-changes.md` ya nombraba el hueco
+  por escrito: *«no field saying "zero replacements"»*. Va fuera del `planHash` —el hash es la
+  identidad de lo que se **pidió**; «resultó no-op» es una propiedad del **resultado**— y la
+  operación **no** se elimina del plan.
+
+### Lo que esta épica añade al método
+
+- **El riesgo que no se podía cerrar leyendo, se cerró ejecutando ANTES de implementar.** Con el
+  arreglo, un no-op deja de tocar disco y la transacción publica un lote de **cero paths** — camino
+  sin ningún guard. Se escribió `transaccion_con_lote_vacio_no_degenera` primero: aplicar y revertir
+  un lote vacío funcionan. Y el primer intento de ese test **falló porque no conseguía producir un
+  lote vacío**, lo que reprodujo `§26` aislado en la capa de transacción, tres capas por debajo de
+  donde lo reportó el juez ciego.
+- **Dos tests preexistentes fijaban el defecto sin saberlo** y cambiaron de expectativa (no de
+  intención): `una_promocion_de_recibo_fallida_conserva_el_journal` y
+  `recovery_sin_parciales_por_el_orquestador_real` daban por buena la línea en blanco inyectada. El
+  segundo construía su borde esperado sustituyendo texto sobre el original, así que **solo casaba
+  gracias al defecto**.
+- **El fixture del test invertido dejó de ser anti-vacuo al arreglarse el bug.** Tras preservar la
+  cabecera, sus dos documentos se comportan igual, así que un motor que no escribiera **nunca** nada
+  habría pasado el test entero; hizo falta un tercer documento sobre el que la operación **sí** casa.
+  Es el mismo modo de fallo que originó `§26` (un test verde que no probaba nada), reapareciendo al
+  cerrarla.
+- **Verificado por el wire real**, que es como se destapó: `replace_text` sin coincidencias sobre un
+  `.md` con `tags: [atlas, overview]` da `modified: []`, `noOpOperations: [{index: 0, op:
+  "replace_body", path: "overview.md"}]` y **md5 idéntico**; uno que sí casa cambia el cuerpo y deja
+  el frontmatter en estilo flow.
+- **El PR creó la misma superficie muerta que retiraba** — lo cazó el juez ciego de H02 mutando el
+  parámetro a inerte y viendo los 740 tests en verde. Al dejar `ReplaceBody` de reconstruir
+  documentos, `build_raw_with_bom` se quedó sin un llamador que pasara `bom: true`; se fusionó con
+  `build_raw`. La ironía es la lección: H01 retira superficie muerta **en el mismo rango de commits**
+  en que H02 la crea, y ninguna suite lo habría notado.
+- **Un test escrito para fijar un límite midió otra cosa.** El límite por-documento de
+  `noOpOperations` se iba a fijar con «dos ops sobre el mismo path, solo una vacía → ninguna se
+  declara». La realidad medida fue peor: la segunda op se normaliza contra el estado **inicial**
+  (defecto preexistente de la normalización multi-op), deshace a la primera, y el documento acaba
+  idéntico, así que **ambas** se declaran. El test fija lo medido, no lo supuesto.
+- **La documentación prometía de más sobre `edit_section`**: contrato y `docs/user/` afirmaban que el
+  campo cubre «reescribir una sección con su contenido actual». Verificado por el wire: depende de la
+  forma del documento, porque `normalize_edit_section` fija la separación de la sección. Prometer lo
+  que el binario no cumple es el modo de fallo que **originó** `§26`, reapareciendo al cerrarla.
+
+## Defectos posteriores a E27
+
+| Defecto | Estado | Nota |
+|---|---|---|
+| `outputSchema` de `metadata_inspect` sin `type: "object"` | ✅ | Claude Code **rechazaba la lista completa de tools**. |
+
+- ✅ **`outputSchema` no conforme al spec MCP** — el spec exige que todo `outputSchema` sea un JSON
+  Schema **de tipo `object`**; el de `metadata_inspect` salía con `anyOf` en la raíz y **sin
+  `type`**. Un cliente estricto no degrada la tool inválida: **rechaza la lista entera**, así que
+  Claude Code no registraba ninguna de las 10 y el motor era inusable desde ese cliente — el defecto
+  tenía radio de servidor, no de tool.
+
+  **Causa raíz**: los `outputSchema` se derivan con `schemars` del tipo Rust real de cada servicio
+  (D6b, `ARCHITECTURE.md §10` fila 6). Nueve salidas son `struct` y schemars les emite
+  `type: "object"` gratis; `MetadataInspection` es el **único `enum`** de la superficie y lleva
+  `#[serde(untagged)]`, que schemars traduce a un `anyOf` de las variantes sin inferir `type` en la
+  raíz (en el caso general las ramas podrían ser de tipos JSON distintos). El arreglo lo fija en
+  `schemas::metadata_inspect_schema()`, **sin tocar el wire**: las dos variantes ya eran objetos, así
+  que declararlo en la raíz no excluye ninguna respuesta válida.
+
+  **Por qué la suite no mordía** (el patrón de E23, otra vez): la invariante «la raíz es un objeto»
+  estaba escrita para el input —`tools_list_lleva_input_schema`, y sobre las 10— y **nunca para el
+  output**. El `tools_declaran_outputschema` de E10-H13 miraba **5** de las 10 y daba por bueno que
+  apareciera cualquier clave estructural, con **`anyOf` explícitamente en su allowlist**: pasaba en
+  verde sobre el schema roto, no por accidente sino porque su criterio solo pedía «parece un JSON
+  Schema». El `structured_content_conforma_output_schema` de E24-H15 tampoco podía verlo: mide que la
+  salida **conforma** su schema declarado, y un `anyOf` sin `type` conforma perfectamente.
+
+  **Verificado**: el defecto se reprodujo por stdio (`tools/list` contra el binario) antes de tocar
+  nada, y las dos guardias nuevas se vieron **en rojo** revirtiendo el arreglo. Hoy vigilan la
+  invariante en las 10 tools `tools.rs::tools_list_lleva_output_schema_de_tipo_object` (en proceso) y
+  el `tools_declaran_outputschema` endurecido (e2e). La regla queda escrita en `contracts/mcp.yml`,
+  que hasta ahora no la exigía en ninguna parte.

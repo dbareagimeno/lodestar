@@ -156,12 +156,38 @@ impl Workspace {
         id: &ChangeSetId,
         result: &FileMap,
     ) -> Result<StagingDir, WorkspaceError> {
+        self.materialize_staging_en(&staging_dir_name(id), result)
+    }
+
+    /// [`Workspace::materialize_staging_result`] bajo un **`txnId` ya resuelto** en vez del
+    /// `changeSetId` (E28-H03).
+    ///
+    /// Es lo que usa la transacción desde que la identidad se decide en tiempo de publicación
+    /// (`Workspace::resolve_free_txn_id`): el nombre del staging tiene que ser el `txnId` EFECTIVO,
+    /// porque la convención de `crate::receipts` ata `staging/`, `recovery/`, `journal/` y
+    /// `receipts/` bajo un mismo id, y tanto el sellado como la vía COMPLETAR de la recuperación
+    /// limpian `staging/<txnId>/` por ese nombre. Con el `changeSetId` un apply que resolviera una
+    /// variante libre dejaría el árbol de staging huérfano bajo el candidato.
+    ///
+    /// El nombre del directorio pasa por el **mismo saneado** que el resto del plano de control
+    /// (`crate::receipts::sanear_nombre`, el que aplican `recovery/`, `journal/` y `receipts/`): un
+    /// `changeSetId` con `:`/`/`/`\` no puede convertir el árbol de staging en una jerarquía anidada
+    /// que ni el sellado ni la recuperación sabrían encontrar. Con ids normales (el hash hexadecimal
+    /// más sufijos de `-` y dígitos) el saneado es la identidad.
+    ///
+    /// # Errores
+    /// - [`WorkspaceError::Io`] si falla la creación de directorios o la escritura del staging.
+    pub(crate) fn materialize_staging_en(
+        &self,
+        txn_id: &str,
+        result: &FileMap,
+    ) -> Result<StagingDir, WorkspaceError> {
         let dir = self
             .root
             .join(".lodestar")
             .join("runtime")
             .join("staging")
-            .join(staging_dir_name(id));
+            .join(crate::receipts::sanear_nombre(txn_id));
 
         // Reintento idempotente: parte de un directorio limpio.
         if dir.exists() {
@@ -236,8 +262,12 @@ impl Workspace {
             // Aborta: limpia el staging (best-effort) y no toca el canónico.
             let _ = std::fs::remove_dir_all(staging.path());
             let nuevos = after_errors.difference(&before_errors).count();
+            // Solo la parte VARIABLE del motivo: la frase «el resultado del plan no pasa la política
+            // de cambios» la antepone ya la plantilla `thiserror` de `WorkspaceError::InvalidResult`
+            // (`error.rs`). Repetirla aquí la duplicaba literalmente en el `Display` final —el
+            // mensaje que ve el agente por el wire— (E30-H03 seguimiento 11).
             return Err(WorkspaceError::InvalidResult(format!(
-                "el resultado del plan no pasa la política de cambios: {nuevos} error(es) nuevo(s), \
+                "{nuevos} error(es) nuevo(s), \
                  {} error(es) en total (rejectNewErrors={}, allowExistingErrors={})",
                 after_errors.len(),
                 cfg.transactions.reject_new_errors,

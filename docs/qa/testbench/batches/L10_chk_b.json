@@ -1,0 +1,37 @@
+{
+  "batch": "L10",
+  "root": "worktree",
+  "profile": "standard",
+  "fixtures": "chk_b",
+  "cases": [
+    {"id": "CHK-12", "steps": [
+       {"kind": "call", "tool": "knowledge_check", "arguments": {"scope": {"kind": "document", "ref": {"path": "fixtures/fecha-mala.md"}}}},
+       {"kind": "call", "tool": "metadata_inspect", "arguments": {"mode": "field", "field": "updated"}}],
+     "esperado": "Paso 0: SIN diagnóstico — updated: 2026-8-5 sin comillas es YAML válido; el daño es semántico, no estructural. Paso 1: registrar el TIPO inferido para ese valor (¿string? ¿otro?) — la lib YAML no tipa timestamps según query-language.md, así que se espera string entre los inferredTypes junto a los demás. Si aparece un tipo no-string, se ha roto la homogeneidad de updated en el espacio: documentarlo. Fuente: query-language.md Dates are strings"},
+    {"id": "CHK-13", "steps": [
+       {"kind": "call", "tool": "knowledge_check", "arguments": {"scope": {"kind": "document", "ref": {"path": "fixtures/priority-string.md"}}}},
+       {"kind": "call", "tool": "metadata_inspect", "arguments": {"mode": "field", "field": "priority"}},
+       {"kind": "call", "tool": "knowledge_search", "arguments": {"where": "priority >= 1"}}],
+     "esperado": "Paso 0: sin diagnóstico (YAML válido). Paso 1: inferredTypes AHORA {number:9, string:1} — el fixture rompe la homogeneidad. Paso 2: la consulta de orden que ANTES funcionaba ahora ABORTA con INVALID_SCHEMA nombrando fixtures/priority-string.md (campo priority, number vs string invertido: campo string vs literal number). Demuestra que UN solo doc rompe las comparaciones de orden en TODO el espacio, como avisa convenciones.md. Fuente: query-language.md When a query fails; convenciones.md regla 4"},
+    {"id": "CHK-14", "tool": "knowledge_check",
+     "arguments": {"scope": {"kind": "workspace"}, "minimumSeverity": "info", "limit": 1000},
+     "esperado": "Entre los diagnósticos de workspace (los de descubrimiento solo salen en scope workspace): DOC-NOT-UTF8 nivel warn para fixtures/binario.md. Fuente: mcp.yml knowledge_check semantica (E20-H04); discovery.rs",
+     "nota": "este caso workspace-wide sirve también para CHK-15/16/17"},
+    {"id": "CHK-15", "tool": "knowledge_check",
+     "arguments": {"scope": {"kind": "workspace"}, "minimumSeverity": "warn", "limit": 1000},
+     "esperado": "SYMLINK-UNSUPPORTED nivel warn para fixtures/enlace-simbolico.md (followSymlinks false por defecto). Fuente: discovery.rs; ARCHITECTURE §20.5"},
+    {"id": "CHK-16", "tool": "knowledge_check",
+     "arguments": {"scope": {"kind": "workspace"}, "minimumSeverity": "warn", "limit": 1000},
+     "esperado": "DOC-TOO-LARGE nivel warn para fixtures/gigante.md (>10 MiB, DEFAULT_MAX_DOCUMENT_BYTES); mensaje con el tamaño observado. Fuente: discovery.rs L49"},
+    {"id": "CHK-17", "tool": "knowledge_check",
+     "arguments": {"scope": {"kind": "document", "ref": {"path": "fixtures/con-bom.md"}}},
+     "esperado": "DOC-BOM nivel warn; el documento se interpreta igualmente (E24-H02) y el BOM se conserva. Registrar si DOC-BOM sale en scope document o solo workspace. Fuente: mcp.yml E24-H02; conform.rs"},
+    {"id": "CHK-18", "tool": "knowledge_check",
+     "arguments": {"scope": {"kind": "document", "ref": {"path": "fixtures/bom-mas-roto.md"}}},
+     "esperado": "AMBOS diagnósticos: DOC-BOM (warn) Y FM-YAML-INVALID (err) — el BOM se emite antes del corte por frontmatter ilegible porque es propiedad del fichero. Fuente: conform.rs (orden de emisión)"},
+    {"id": "CHK-27", "steps": [
+       {"kind": "call", "tool": "workspace_status", "arguments": {}},
+       {"kind": "call", "tool": "knowledge_check", "arguments": {"scope": {"kind": "workspace"}, "minimumSeverity": "info", "limit": 1000}}],
+     "esperado": "Coherencia agregada: workspace_status.counts.errors/warnings del paso 0 == recuento por severidad de los diagnósticos del paso 1 (mismo workspace, misma revisión). El summary del check cuenta TODO antes del umbral. Fuente: mcp.yml workspace_status counts + knowledge_check"}
+  ]
+}

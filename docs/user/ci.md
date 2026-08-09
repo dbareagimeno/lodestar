@@ -160,6 +160,14 @@ $ lodestar check --sarif
 Locations are document-level: the result names the file, not a line range. Alerts therefore attach
 to the file rather than to a specific line.
 
+**A few diagnostics have no location at all.** `WORKSPACE-EMPTY` and `PATH-NOT-UTF8` are about the
+workspace, not about a document you wrote — there is no file to point at — so their results are
+emitted **without a `locations` array**, which is what SARIF 2.1.0 prescribes for a finding that
+belongs to no artifact. They still carry their `ruleId`, `level` and `message`, and they still count
+toward the exit code. If you post-process the SARIF, do not assume `.locations[0]` exists: the `jq`
+one-liner above would print `null` for those rows. Use
+`.locations[0].physicalLocation.artifactLocation.uri // "(workspace)"` if you want a placeholder.
+
 `--json` and `--sarif` are mutually exclusive; pick one per invocation.
 
 ## A complete GitHub Actions workflow
@@ -292,12 +300,59 @@ $ echo $?
 0
 ```
 
-A malformed `config.yaml` is exit `3`, never a silent fallback to defaults: a typo must not quietly
-loosen a gate you tightened on purpose.
+A `config.yaml` the engine cannot use is exit `3`, never a silent fallback to defaults: a typo must
+not quietly loosen a gate you tightened on purpose. That covers malformed YAML, a key the engine
+does not recognise, and a file that exists but cannot be read. A file that is simply *absent* is not
+an error — running without any configuration is a supported, permanent state.
 
-The same file can also lower or raise the severity of individual diagnostic families and restrict
-which directories are walked. Configuration can only ever *restrict*: its absence never stops
-Lodestar from working, and no key can grant a permission the engine does not give by default.
+### Diagnostic families
+
+The same file can lower or raise the severity of individual diagnostic families, and restrict which
+directories are walked. Configuration can only ever *restrict*: its absence never stops Lodestar
+from working, and no key can grant a permission the engine does not give by default.
+
+The keys under `validation` are **families**, not diagnostic codes. There are exactly five:
+
+| Family | Default | What it covers |
+|---|---|---|
+| `malformedFrontmatter` | `error` | Frontmatter that cannot be parsed: `FM-UNCLOSED`, `FM-YAML-INVALID` |
+| `danglingDocumentLinks` | `error` | A link to a Markdown **document** that does not exist (`LINK-TARGET-MISSING` whose missing target is a `.md`) |
+| `missingWorkspaceFiles` | `warning` | A link to a **project file** that does not exist (`LINK-TARGET-MISSING` whose missing target is not a document) — an image, a script, a PDF |
+| `caseMismatch` | `warning` | Capitalisation that does not survive a case-sensitive filesystem (`LINK-CASE-MISMATCH`) |
+| `isolatedDocuments` | `ignore` | Documents with no internal links in or out. Currently produces no diagnostic — isolation is a queryable property, not a finding — so this key is accepted but has no effect |
+
+Each key takes `error`, `warning` or `ignore`. An override reclassifies *every* diagnostic in the
+family; `ignore` suppresses them:
+
+```console
+$ cat .lodestar/config.yaml
+validation:
+  missingWorkspaceFiles: ignore
+$ lodestar check
+
+2 documentos · 0 con errores · 0 avisos · VÁLIDO
+$ echo $?
+0
+```
+
+Note that `LINK-TARGET-MISSING` — one code — is split across two families by the kind of target
+that is missing. That is deliberate: a broken link between two documents breaks the knowledge graph,
+while a missing image usually does not, so they are worth different severities out of the box.
+
+Writing a **code** where a family belongs is an error, not a silent no-op:
+
+```console
+$ cat .lodestar/config.yaml
+validation:
+  "LINK-TARGET-MISSING": ignore
+$ lodestar check
+error: error de IO: .lodestar/config.yaml inválido: «LINK-TARGET-MISSING» no es una familia de validación de `§20.9`. Las claves de `validation` son FAMILIAS, no códigos de diagnóstico. Familias válidas: malformedFrontmatter, danglingDocumentLinks, missingWorkspaceFiles, caseMismatch, isolatedDocuments
+$ echo $?
+3
+```
+
+Accepting that key would be worse than rejecting it: you would believe the diagnostic was silenced
+and keep seeing it on every run.
 
 ---
 

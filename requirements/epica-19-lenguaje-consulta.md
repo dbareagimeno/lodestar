@@ -19,7 +19,7 @@ un **error de tipo**. Es lo que separa este lenguaje de un grep sofisticado.
 `get_text`. Construirlo sobre `get_text` reintroduciría la coerción a string que E16 retiró, **sin
 que ningún test lo note** (para números ISO y fechas el orden lexicográfico suele coincidir).
 
-**Decisión de partida (`DECISIONES.md §12`)**: `serde_yaml` 0.9 no tipa timestamps, así que las
+**Decisión de partida (`decisiones §12`)**: `serde_yaml` 0.9 no tipa timestamps, así que las
 fechas son `String`. Para E19 se **declara explícitamente** que la comparación de fechas es
 lexicográfica —correcta para ISO-8601 bien formado— y se reevalúa en E20. No se introduce un tipo
 fecha propio en esta épica.

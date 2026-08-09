@@ -1,0 +1,16 @@
+{
+  "batch": "G4b",
+  "root": "worktree",
+  "profile": "standard",
+  "fixtures": "cfg_receipts",
+  "cases": [
+    {"id": "G1-03", "steps": [
+       {"kind": "call", "tool": "change_plan", "arguments": {"operations": [{"op": "patch_frontmatter", "path": "pendientes/wol-bastion.md", "patch": {"a": 1}}]}},
+       {"kind": "call", "tool": "change_apply", "arguments": {"changeSetId": "@step0.structured.changeSetId"}},
+       {"kind": "call", "tool": "change_plan", "arguments": {"operations": [{"op": "patch_frontmatter", "path": "pendientes/streaming-de-musica.md", "patch": {"a": 1}}]}},
+       {"kind": "call", "tool": "change_apply", "arguments": {"changeSetId": "@step2.structured.changeSetId"}},
+       {"kind": "call", "tool": "workspace_status", "arguments": {}},
+       {"kind": "call", "tool": "change_revert", "arguments": {"receiptId": "@step1.structured.receiptId"}}],
+     "esperado": "Config: maximumReceipts=1. Paso 4: receipts lista SOLO el recibo del SEGUNDO apply (el GC corre tras cada apply y purga el primero). Paso 5: revert del recibo purgado → PLAN_EXPIRED con 'esa transacción ya no es reversible (el recibo nunca existió o la retención lo purgó)' — la purga borra también las copias de recuperación. Fuente: safe-changes.md Receipts and retention (texto literal); mcp.yml workspace_status receipts"}
+  ]
+}

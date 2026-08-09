@@ -1,0 +1,41 @@
+{
+  "batch": "verify_G1-23",
+  "root": "worktree",
+  "profile": "standard",
+  "fixtures": "chk_a+chk_b",
+  "cases": [
+    {
+      "id": "G1-23-v1-original",
+      "tool": "knowledge_check",
+      "arguments": {
+        "scope": {
+          "kind": "paths",
+          "paths": ["fixtures/roto-unclosed.md", "no-existe.md"]
+        }
+      },
+      "esperado": "reproducir: se ignora el path fantasma en silencio"
+    },
+    {
+      "id": "G1-23-v2-solo-fantasma",
+      "tool": "knowledge_check",
+      "arguments": {
+        "scope": {
+          "kind": "paths",
+          "paths": ["no-existe.md"]
+        }
+      },
+      "esperado": "control: ¿scope 100% inexistente da error o valid:true vacio?"
+    },
+    {
+      "id": "G1-23-v3-document-fantasma",
+      "tool": "knowledge_check",
+      "arguments": {
+        "scope": {
+          "kind": "document",
+          "ref": { "path": "no-existe.md" }
+        }
+      },
+      "esperado": "control: scope document con ref inexistente debe dar DOCUMENT_NOT_FOUND segun contrato"
+    }
+  ]
+}

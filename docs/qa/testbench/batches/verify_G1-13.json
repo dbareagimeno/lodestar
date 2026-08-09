@@ -1,0 +1,38 @@
+{
+  "batch": "verify_G1-13",
+  "root": "worktree",
+  "profile": "standard",
+  "fixtures": "gaps",
+  "cases": [
+    {
+      "id": "G1-13-v",
+      "steps": [
+        {
+          "kind": "call",
+          "tool": "change_plan",
+          "arguments": {
+            "operations": [
+              {
+                "op": "replace_text",
+                "path": "fixtures/contador.md",
+                "find": "zzz-no-esta",
+                "replace": "w"
+              }
+            ]
+          }
+        },
+        {
+          "kind": "call",
+          "tool": "change_apply",
+          "arguments": {
+            "changeSetId": "@step0.structured.changeSetId"
+          }
+        },
+        {
+          "kind": "shell",
+          "cmd": "cat fixtures/contador.md"
+        }
+      ]
+    }
+  ]
+}

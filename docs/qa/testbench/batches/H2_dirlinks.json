@@ -1,0 +1,23 @@
+{
+  "batch": "H2",
+  "root": "worktree",
+  "profile": "standard",
+  "fixtures": "dirlinks",
+  "cases": [
+    {"id": "G2-02", "steps": [
+       {"kind": "call", "tool": "knowledge_get", "arguments": {"ref": {"path": "fixtures/raiz-dir.md"}, "include": ["outgoingLinks"]}},
+       {"kind": "call", "tool": "knowledge_check", "arguments": {"scope": {"kind": "document", "ref": {"path": "fixtures/raiz-dir.md"}}}},
+       {"kind": "call", "tool": "knowledge_get", "arguments": {"ref": {"path": "a/b/doc.md"}, "include": ["outgoingLinks"]}},
+       {"kind": "call", "tool": "knowledge_check", "arguments": {"scope": {"kind": "document", "ref": {"path": "a/b/doc.md"}}}},
+       {"kind": "call", "tool": "graph_query", "arguments": {"operation": "outgoing", "ref": {"path": "a/b/doc.md"}}}],
+     "esperado": "Paso 0: [g](guias/) → target {kind: missing, value≈'guias'} — NUNCA document(guias/tmux.md) ni workspaceDirectory: sin heurística de barra final ('[x](guias/) es Missing(\"guias\"), nunca guias/index.md'). Paso 1: LINK-TARGET-MISSING nivel WARN (el destino 'guias' no sería .md). Paso 2: [volver](../) → workspaceDirectory value 'a'; [raiz](../../) → workspaceDirectory value null (la RAÍZ no tiene RelPath). Paso 3: CERO diagnósticos en a/b/doc.md. Paso 4: 0 aristas desde esos enlaces (workspaceDirectory no es nodo). Fuente: ARCHITECTURE L1169-1173; mcp.yml L149-152"},
+    {"id": "G2-10", "fresh_root": true, "steps": [
+       {"kind": "call", "tool": "knowledge_get", "arguments": {"ref": {"path": "a/b/doc.md"}, "include": ["outgoingLinks"]}},
+       {"kind": "call", "tool": "change_plan", "arguments": {"operations": [{"op": "move", "from": "a/b/doc.md", "to": "doc.md", "rewriteInboundLinks": true}]}},
+       {"kind": "call", "tool": "change_apply", "arguments": {"changeSetId": "@step1.structured.changeSetId"}},
+       {"kind": "shell", "cmd": "cat doc.md"},
+       {"kind": "call", "tool": "knowledge_get", "arguments": {"ref": {"path": "doc.md"}, "include": ["outgoingLinks"]}},
+       {"kind": "call", "tool": "knowledge_check", "arguments": {"scope": {"kind": "workspace"}, "minimumSeverity": "info", "limit": 1000}}],
+     "esperado": "move de a/b/doc.md (profundidad 2) a doc.md (raíz): move_document recalcula TAMBIÉN los destinos de navegación pura (E23-H11) — si no, un ../ pasaría a señalar otro directorio en silencio. Paso 3: registrar los hrefs recalculados literales. Paso 4: los destinos SEMÁNTICOS se conservan — workspaceDirectory value 'a' y value null igual que antes del move (paso 0). Paso 5: 0 diagnósticos nuevos. Fuente: ARCHITECTURE L1171-1173 (texto literal)"}
+  ]
+}

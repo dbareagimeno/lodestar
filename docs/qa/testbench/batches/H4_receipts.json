@@ -1,0 +1,22 @@
+{
+  "batch": "H4",
+  "root": "worktree",
+  "profile": "standard",
+  "fixtures": null,
+  "cases": [
+    {"id": "G2-04", "steps": [
+       {"kind": "call", "tool": "change_plan", "arguments": {"operations": [{"op": "patch_frontmatter", "path": "pendientes/wol-bastion.md", "patch": {"g2r": 1}}]}},
+       {"kind": "call", "tool": "change_apply", "arguments": {"changeSetId": "@step0.structured.changeSetId"}},
+       {"kind": "call", "tool": "change_plan", "arguments": {"operations": [{"op": "patch_frontmatter", "path": "pendientes/wol-bastion.md", "patch": {"g2r": 2}}]}},
+       {"kind": "call", "tool": "change_apply", "arguments": {"changeSetId": "@step2.structured.changeSetId"}},
+       {"kind": "call", "tool": "workspace_status", "arguments": {}},
+       {"kind": "shell", "cmd": "mkdir -p .lodestar && printf 'transactions:\\n  maximumReceipts: 1\\n' > .lodestar/config.yaml"},
+       {"kind": "call", "tool": "workspace_status", "arguments": {}},
+       {"kind": "shell", "cmd": "R=$(ls -t .lodestar/runtime/receipts/*.json | tail -1) && printf 'basura{' > \"$R\" && echo corrompido: $R"},
+       {"kind": "call", "tool": "workspace_status", "arguments": {}},
+       {"kind": "call", "tool": "change_plan", "arguments": {"operations": [{"op": "patch_frontmatter", "path": "pendientes/wol-bastion.md", "patch": {"g2r": 3}}]}},
+       {"kind": "call", "tool": "change_apply", "arguments": {"changeSetId": "@step9.structured.changeSetId"}},
+       {"kind": "call", "tool": "workspace_status", "arguments": {}}],
+     "esperado": "Paso 4: 2 receipts, más reciente primero. Paso 6 (config maximumReceipts=1 escrita DESPUÉS): AÚN 2 recibos — list_receipts devuelve lo que hay en disco sin truncar; la cota la impone el GC, que solo corre tras apply/revert. (Si la sesión cachea la config y no la relee, registrar — el contrato lista 'INTERNAL_IO_ERROR (carga de config)' por llamada, sugiriendo relectura.) Paso 8 (un recibo corrupto): lista SOLO el sano, sin error — 'un .json corrupto se salta para que un recibo roto no impida ver los sanos'. Pasos 9-11: tras el tercer apply el GC purga → 1 recibo. Fuente: mcp.yml L618-622; safe-changes.md Receipts and retention"}
+  ]
+}
