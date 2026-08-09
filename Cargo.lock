@@ -1135,7 +1135,7 @@ dependencies = [
 
 [[package]]
 name = "lodestar-app"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "blake3",
  "lodestar-core",
@@ -1149,7 +1149,7 @@ dependencies = [
 
 [[package]]
 name = "lodestar-cli"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1164,7 +1164,7 @@ dependencies = [
 
 [[package]]
 name = "lodestar-core"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "blake3",
  "lodestar-fixtures",
@@ -1181,7 +1181,7 @@ dependencies = [
 
 [[package]]
 name = "lodestar-fixtures"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "lodestar-core",
  "tempfile",
@@ -1189,7 +1189,7 @@ dependencies = [
 
 [[package]]
 name = "lodestar-mcp"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "jsonschema",
  "libc",
@@ -1204,7 +1204,7 @@ dependencies = [
 
 [[package]]
 name = "lodestar-store"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "blake3",
  "crossbeam-channel",
@@ -1222,7 +1222,7 @@ dependencies = [
 
 [[package]]
 name = "lodestar-workspace"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "crossbeam-channel",
  "ignore",

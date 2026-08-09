@@ -7,6 +7,19 @@ y el proyecto sigue [Versionado Semántico](https://semver.org/lang/es/).
 
 ## [No publicado]
 
+## [0.6.0] - 2026-08-09
+
+> **Al actualizar desde 0.5.0, un cambio puede romperte**: el wire pasó a ser **estricto** con los
+> parámetros no declarados (`E29`). Una llamada que enviara un campo de más —un typo como
+> `changeSetID` por `changeSetId`, o un parámetro que el schema no declara— antes se **aceptaba en
+> silencio, descartando el campo**; ahora responde `INVALID_SCHEMA` nombrándolo. Es deliberado: un
+> parámetro aceptado y no ejecutado es una respuesta silenciosamente equivocada, y esa es peor que un
+> error. Si tu cliente enviaba campos de más sin saberlo, ahora lo sabrá.
+>
+> El resto de la versión es aditivo o correctivo. Dos de los arreglos son de **pérdida de datos**: el
+> `revert` que podía destruir el material con el que se deshace un *undo* (`E28`) y la reescritura de
+> cuerpo que borraba un frontmatter ilegible (`E31`).
+
 ### Añadido
 
 - **`change_plan` declara las operaciones que no tuvieron efecto** (`E31-H02`,
@@ -674,7 +687,8 @@ y pipeline de release multiplataforma.
 - **Heading por defecto de los conceptos**: ahora `# {Tipo} - {Nombre}` (antes
   `# Resumen`).
 
-[No publicado]: https://github.com/dbareagimeno/lodestar/compare/0.5.0...HEAD
+[No publicado]: https://github.com/dbareagimeno/lodestar/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/dbareagimeno/lodestar/compare/0.5.0...v0.6.0
 [0.5.0]: https://github.com/dbareagimeno/lodestar/compare/v0.4.0...0.5.0
 [0.4.0]: https://github.com/dbareagimeno/lodestar/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/dbareagimeno/lodestar/compare/v0.3.0...v0.3.1
