@@ -1731,8 +1731,10 @@ el usuario frente a la (2) que la ficha recomendaba: las seis tandas de una vez,
 stub sino **la mutación aplicada al árbol** (criterio [EVIDENCIA] de la spec): 16 mutaciones vistas
 en rojo a mano —2 de `split_front`, 2 de `patch_frontmatter`, 2 de `relation_changes`, 1 de
 `ensure_exists`, 5 de `sort_paths_cmp`, 4 de `locate_section`— y una más demostrada **equivalente**
-(el `-`→`+` del desempate final de `sort_paths_cmp`: en ese punto `i == j` siempre, así que no es
-observable; es la cláusula de equivalencia de la ficha aplicada).
+(el `-`→`+` aplicado a la vez sobre los dos restandos del desempate final de `sort_paths_cmp`: en
+ese punto `i == j` siempre, así que no es observable). Precisión que fijó el juez ciego: esa doble
+sustitución **no es un mutante de cargo-mutants** — los dos reales de esa línea mutan un `-` cada
+uno y el test nuevo los caza (`caught.txt`); ahí no queda ningún superviviente.
 
 **Verificación de cierre medida, no leída**: re-pasada de `/mutantes` con el alcance exacto de la
 ficha (`-p lodestar-core --file crates/lodestar-core/src/model.rs --file
@@ -1760,6 +1762,15 @@ evidencia se ejecuta, no se lee»):
   tira numérica en falso (exige un par dígito-contra-letra en la divergencia) y los dos `<`→`<=` de
   los bucles (exigen un path que **termine en dígito**, y todos acababan en `.md`). Sin la
   re-pasada de cierre, esos tres habrían quedado vivos con la ficha «cerrada».
-- **Un superviviente puede ser inmatable y estar bien.** El `-`→`+` del desempate final es
-  equivalente demostrable; forzar un test ahí habría consagrado un detalle accidental. Retirarlo
+- **Un superviviente puede ser inmatable y estar bien.** La doble sustitución del desempate final
+  es equivalente demostrable; forzar un test ahí habría consagrado un detalle accidental. Retirarla
   con la razón escrita es parte del protocolo, no una excepción.
+
+**Juez ciego (2026-08-10): APROBADA CON RESERVAS, las dos MENOR y documentales, saldadas en el
+mismo PR.** El juez verificó **ejecutando**: dos mutaciones de la tabla en ciclo rojo→revert→verde
+(`model.rs:133`, `plan.rs:591`), el falso positivo de `plan.rs:172` contra la suite de
+`lodestar-app`, los mutantes reales del desempate de `sort_paths_cmp` contra `caught.txt`, y los
+gates del crate. Las reservas: (1) la letra de [Cierre] choca con la atribución de nombre de
+cargo-mutants (`:172` se lista bajo `semantic_diff` sin ser el gap (c)) — saldada dejándolo escrito
+aquí y en el cierre de `§27`; (2) la nota de equivalencia original daba a entender un superviviente
+inmatable que no existe — saldada reescribiéndola (es el párrafo de arriba).

@@ -200,11 +200,14 @@ ejecuta, no se lee»):
    los dos `<`→`<=` de los bucles internos (exigen un path que **termine en dígito**, y todos
    acababan en `.md`). El vector final añade `doc-7.md`/`doc-abc.md` y `v2` a secas; la segunda
    re-pasada no deja ninguno.
-3. **Un mutante de la zona resultó equivalente demostrable** (verificado a mano, no forzado a
-   test): el `-`→`+` del desempate final de `sort_paths_cmp` no es observable, porque llegar ahí
-   exige que todas las tiras numéricas empataran también en longitud — `i == j` siempre en ese
-   punto, y `len − i` ordena igual que `len + i`. Es la ilustración exacta de la cláusula de
-   equivalencia de arriba, aplicada a un mutante suelto y no a una tanda.
+3. **Una mutación probada a mano resultó equivalente demostrable — pero solo la doble.** Al
+   verificar la tanda (e) se aplicó el `-`→`+` sobre **los dos** restandos del desempate final de
+   `sort_paths_cmp` a la vez, y esa doble sustitución no es observable: llegar ahí exige que todas
+   las tiras numéricas empataran también en longitud, así que `i == j` siempre y `len − i` ordena
+   igual que `len + i`. Ojo con la letra pequeña, que fijó el juez ciego: los dos mutantes que
+   cargo-mutants genera de verdad en esa línea mutan **un** `-` cada uno, sí son observables y el
+   test nuevo **los caza** (constan en `caught.txt`). No hay ningún superviviente inmatable ahí; la
+   anécdota solo ilustra la cláusula de equivalencia con una mutación que el runner no genera.
 
 **Resultado medido** (mismo alcance, `-p lodestar-core --file …/model.rs --file …/plan.rs`,
 333 mutantes): los supervivientes bajan de **97 a 62** (242 muertos, 25 inviables, los mismos 4
