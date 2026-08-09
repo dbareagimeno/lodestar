@@ -1715,3 +1715,62 @@ Cierra las dos fichas que la campaña dejó abiertas porque exigían criterio de
   invariante en las 10 tools `tools.rs::tools_list_lleva_output_schema_de_tipo_object` (en proceso) y
   el `tools_declaran_outputschema` endurecido (e2e). La regla queda escrita en `contracts/mcp.yml`,
   que hasta ahora no la exigía en ninguna parte.
+
+## Los seis gaps de suite de §27 (E32) — COMPLETA (2026-08-10)
+
+Épica: [`requirements/epica-32-gaps-suite-mutantes.md`](requirements/epica-32-gaps-suite-mutantes.md).
+Cierra [`§27`](decisiones/27-gaps-de-suite-en-model-y-plan.md) entera — la salida (1), elegida por
+el usuario frente a la (2) que la ficha recomendaba: las seis tandas de una vez, en una historia.
+
+| Historia | Qué cierra | Estado |
+|---|---|---|
+| E32-H01 | `§27` — los seis tests de suite que la ficha deja especificados | ✅ |
+
+**Tests-only sobre `lodestar-core`**: siete tests nuevos (la tanda (b) son dos), tres en
+`tests/documento.rs` y cuatro en `tests/core.rs`, cero líneas de producción. La fase roja no fue un
+stub sino **la mutación aplicada al árbol** (criterio [EVIDENCIA] de la spec): 16 mutaciones vistas
+en rojo a mano —2 de `split_front`, 2 de `patch_frontmatter`, 2 de `relation_changes`, 1 de
+`ensure_exists`, 5 de `sort_paths_cmp`, 4 de `locate_section`— y una más demostrada **equivalente**
+(el `-`→`+` aplicado a la vez sobre los dos restandos del desempate final de `sort_paths_cmp`: en
+ese punto `i == j` siempre, así que no es observable). Precisión que fijó el juez ciego: esa doble
+sustitución **no es un mutante de cargo-mutants** — los dos reales de esa línea mutan un `-` cada
+uno y el test nuevo los caza (`caught.txt`); ahí no queda ningún superviviente.
+
+**Verificación de cierre medida, no leída**: re-pasada de `/mutantes` con el alcance exacto de la
+ficha (`-p lodestar-core --file crates/lodestar-core/src/model.rs --file
+crates/lodestar-core/src/plan.rs`, 333 mutantes: 242 muertos, 62 supervivientes, 25 inviables, 4
+timeouts). Supervivientes: de **97 (E31) a 62**, y **ninguno de los seis gaps sigue vivo**. Los
+tres que rozan funciones con nombre en la ficha —`plan.rs:172` (`frontmatter_changes`, dentro de
+`semantic_diff` pero fuera de los seis gaps) y los dos de `op_variant_name`— son los falsos
+positivos de alcance que la ficha ya documentaba, **re-verificados ejecutando**: con la mutación
+aplicada, la suite de `lodestar-app` se pone en rojo. El resto es la cola clasificada como «no
+merece test». Los 4 timeouts persisten como no concluyentes.
+
+De paso, la pasada dejó una lección operativa: con el disco al 99%, cargo-mutants produce
+**«caught» espurios** (el binario de test que no puede escribir falla, y ese fallo cuenta como
+mutante cazado) — las dos primeras corridas dieron 53 y 59 supervivientes con listas
+inconsistentes entre sí, y solo la corrida con 22 GB libres dio la cifra estable y coherente con la
+clasificación de la ficha. La evidencia también depende de que el arnés esté sano.
+
+**Las dos lecciones que dejó la ejecución** (las dos refuerzan la de la propia ficha — «la
+evidencia se ejecuta, no se lee»):
+
+- **Dos de los seis fixtures propuestos por la ficha no mataban lo que prometían.** El de
+  `patch_frontmatter` (clave `01:`) no fuerza el fallback —`serde_yaml` la parsea como string y el
+  escaneo casa; hizo falta `1.50:`, cuyo texto sí diverge de su valor parseado— y el vector de
+  `sort_paths_cmp` mataba 14 de 17: la **primera** re-pasada dejó vivos el `&&`→`||` que abre la
+  tira numérica en falso (exige un par dígito-contra-letra en la divergencia) y los dos `<`→`<=` de
+  los bucles (exigen un path que **termine en dígito**, y todos acababan en `.md`). Sin la
+  re-pasada de cierre, esos tres habrían quedado vivos con la ficha «cerrada».
+- **Un superviviente puede ser inmatable y estar bien.** La doble sustitución del desempate final
+  es equivalente demostrable; forzar un test ahí habría consagrado un detalle accidental. Retirarla
+  con la razón escrita es parte del protocolo, no una excepción.
+
+**Juez ciego (2026-08-10): APROBADA CON RESERVAS, las dos MENOR y documentales, saldadas en el
+mismo PR.** El juez verificó **ejecutando**: dos mutaciones de la tabla en ciclo rojo→revert→verde
+(`model.rs:133`, `plan.rs:591`), el falso positivo de `plan.rs:172` contra la suite de
+`lodestar-app`, los mutantes reales del desempate de `sort_paths_cmp` contra `caught.txt`, y los
+gates del crate. Las reservas: (1) la letra de [Cierre] choca con la atribución de nombre de
+cargo-mutants (`:172` se lista bajo `semantic_diff` sin ser el gap (c)) — saldada dejándolo escrito
+aquí y en el cierre de `§27`; (2) la nota de equivalencia original daba a entender un superviviente
+inmatable que no existe — saldada reescribiéndola (es el párrafo de arriba).

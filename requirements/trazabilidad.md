@@ -263,3 +263,22 @@ de `§10`/`§12`; corrigen bloqueantes de historias ya integradas.
 |---|---|---|
 | `changeSetId` determinista reutiliza el mismo `txnId` en un re-apply idéntico: `change_apply` sobrescribe `recovery/`/`receipts/` de la transacción previa (guard anti-sobrescritura de H01 solo vivía en `change_revert`), y el `revert` posterior queda sin salida (`WRITE_CONFLICT`) | veredicto de juez ciego sobre `E28-H01`, reproducido por JSON-RPC | E28-H03 |
 | `change_plan` normaliza cada operación contra el `DocumentSet` inicial, no el acumulado del propio plan: falsos negativos destructivos (`[move a→final, move b→final]`, `[create X, move b→X]`, `[create X, create X]`) y regresión de dos idiomas legítimos (`[delete X, create X]`, `[move A→B, create A]`) | veredicto de juez ciego sobre `E28-H02`, reproducido por JSON-RPC | E28-H04 (abre `decisiones §24`, equivalencia de caja/Unicode, fuera de su alcance) |
+
+---
+
+## E32 — Gaps de suite medidos por mutantes → historias
+
+> Origen: `decisiones §27` (pasada de `/mutantes` que cerró E31, 2026-08-08, acotada a
+> `crates/lodestar-core/src/model.rs` y `plan.rs`). Ninguna fila toca una decisión de `§10`/`§12`:
+> son **agujeros de suite** sobre comportamiento correcto, cada uno verificado aplicando la mutación
+> al árbol y viendo la suite en verde. Trabajo tests-only; la evidencia de cada test es su mutación
+> (rojo con ella, verde sin ella — lección de E30/E31).
+
+| Gap (§27) | Función | Historia |
+|---|---|---|
+| (a) CRLF en `split_front` sin un solo test (red bajo `E31-H02`/`§26`) | `model::split_front` | E32-H01 |
+| (b) El no-op byte a byte de `patch_frontmatter` sin quien lo sujete | `model::patch_frontmatter` | E32-H01 |
+| (c) `relation_changes` jamás aseverado, y viaja al wire en las 3 tools de cambio | `plan::semantic_diff` | E32-H01 |
+| (d) `ensure_exists` puede devolver siempre `Ok` sin que nada se ponga rojo | `plan::ensure_exists` | E32-H01 |
+| (e) `sort_paths_cmp` es contractual (ordena `semanticDiff.*`) y lo cubre un test de 2 paths | `model::sort_paths_cmp` | E32-H01 |
+| (f) `locate_section` puede editar la sección hermana homónima | `model::locate_section` | E32-H01 |

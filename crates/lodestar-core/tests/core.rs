@@ -3105,3 +3105,274 @@ fn el_acumulado_arranca_del_estado_de_partida_y_no_rechaza_de_mas() {
         )
     });
 }
+
+// ---------------------------------------------------------------------------
+// E32-H01 — tandas (c)–(f) de `decisiones §27`: los gaps de suite preexistentes
+// que midió la pasada de mutantes de E31 sobre `model.rs`/`plan.rs`.
+//
+// Ninguno documenta un defecto: fijan comportamiento CORRECTO que hoy se puede
+// mutar —o invertir entero— sin que nada se ponga rojo. La evidencia de cada
+// test es su mutación (criterio [EVIDENCIA] de la historia): aplicada al árbol,
+// el test en ROJO; revertida, en VERDE.
+// ---------------------------------------------------------------------------
+
+/// Tanda (c) — criterio `[BDD-c]`: **Dado** tres documentos —uno que añade un enlace, otro que
+/// quita el suyo, y un tercero cuyo cuerpo cambia sin tocar enlaces—, **Cuando** se computa
+/// `semantic_diff`, **Entonces** `relation_changes` contiene exactamente los dos primeros.
+///
+/// Era el más grave de los cuatro preexistentes: los tres tests de `semantic_diff` de arriba
+/// aseveran `created`/`modified` y los diagnósticos, pero jamás `relation_changes` — el predicado
+/// entero (`plan.rs:182`) se podía invertir con la suite en verde, y `semanticDiff` viaja al wire
+/// en las TRES tools de cambio (`contracts/mcp.yml`). El `!contains` del tercer documento es lo
+/// que mata la mutación: sin él, un predicado que lo lista todo también pasaría.
+#[test]
+fn diff_marca_relation_changes_solo_donde_cambian_los_enlaces() {
+    let suma = RelPath::new("suma.md").unwrap();
+    let resta = RelPath::new("resta.md").unwrap();
+    let prosa = RelPath::new("prosa.md").unwrap();
+
+    // `ancla.md` existe intacto en ambos estados: es el destino de los enlaces que van y vienen.
+    let ancla = (
+        "ancla.md",
+        "---\ntype: N\ntitle: Ancla\n---\n\n# Ancla\n\ncuerpo\n",
+    );
+    let before = DocumentSet::from_files(fm(&[
+        ancla,
+        (
+            "suma.md",
+            "---\ntype: N\ntitle: Suma\n---\n\n# Suma\n\nsin enlaces\n",
+        ),
+        (
+            "resta.md",
+            "---\ntype: N\ntitle: Resta\n---\n\n# Resta\n\n[ancla](ancla.md)\n",
+        ),
+        (
+            "prosa.md",
+            "---\ntype: N\ntitle: Prosa\n---\n\n# Prosa\n\ncuerpo viejo\n",
+        ),
+    ]));
+    let after = DocumentSet::from_files(fm(&[
+        ancla,
+        // `suma` AÑADE un enlace…
+        (
+            "suma.md",
+            "---\ntype: N\ntitle: Suma\n---\n\n# Suma\n\nahora [ancla](ancla.md)\n",
+        ),
+        // …`resta` QUITA el suyo…
+        (
+            "resta.md",
+            "---\ntype: N\ntitle: Resta\n---\n\n# Resta\n\nya sin enlaces\n",
+        ),
+        // …y `prosa` cambia el cuerpo SIN tocar enlaces (el caso que mata la mutación).
+        (
+            "prosa.md",
+            "---\ntype: N\ntitle: Prosa\n---\n\n# Prosa\n\ncuerpo nuevo\n",
+        ),
+    ]));
+
+    let diff = lodestar_core::plan::semantic_diff(&before, &after);
+
+    assert!(
+        diff.relation_changes.contains(&suma),
+        "añadir un enlace ES un cambio de relaciones; relation_changes = {:?}",
+        diff.relation_changes,
+    );
+    assert!(
+        diff.relation_changes.contains(&resta),
+        "quitar un enlace ES un cambio de relaciones; relation_changes = {:?}",
+        diff.relation_changes,
+    );
+    assert!(
+        !diff.relation_changes.contains(&prosa),
+        "un cambio de cuerpo sin tocar enlaces NO es un cambio de relaciones; \
+         relation_changes = {:?}",
+        diff.relation_changes,
+    );
+    // Anti-vacuo: el diff SÍ vio cambiar a `prosa` — su ausencia de `relation_changes` es
+    // clasificación, no ceguera.
+    assert!(
+        diff.body_changes.contains(&prosa),
+        "el cuerpo de `prosa` cambió y el diff debe verlo en `body_changes` = {:?}",
+        diff.body_changes,
+    );
+}
+
+/// Tanda (d) — criterio `[BDD-d]`: **Dado** un path sin fichero en el workspace, **Cuando** se
+/// normaliza un `patch_frontmatter` y un `replace_body` sobre él, **Entonces** ambos devuelven
+/// `CoreError::NormalizeTargetNotFound` con el path en el error.
+///
+/// `ensure_exists` (`plan.rs:591`) es el punto ÚNICO de verificación de existencia de estos dos
+/// normalizadores: neutralizado a `Ok(())` —lo permitía la suite entera, core y app—, planificar
+/// sobre un path inexistente seguiría adelante inventando el documento.
+#[test]
+fn normalizar_contenido_sobre_documento_inexistente_da_target_not_found() {
+    let doc_set = DocumentSet::from_files(fm(&[(
+        "real.md",
+        "---\ntype: N\ntitle: Real\n---\n\n# Real\n\ncuerpo\n",
+    )]));
+    let fantasma = RelPath::new("no-existe/fantasma.md").unwrap();
+
+    let patch = FrontmatterPatch(
+        [(
+            "status".to_string(),
+            Some(serde_yaml::Value::String("draft".to_string())),
+        )]
+        .into_iter()
+        .collect(),
+    );
+    let err = lodestar_core::plan::normalize_patch_frontmatter(&doc_set, &fantasma, patch)
+        .expect_err("un `patch_frontmatter` sobre un path inexistente debe fallar al normalizar");
+    match &err {
+        lodestar_core::CoreError::NormalizeTargetNotFound(p) => assert!(
+            p.contains("no-existe/fantasma.md"),
+            "el error debe nombrar el path que no existe; payload = {p:?}",
+        ),
+        otro => panic!("se esperaba `NormalizeTargetNotFound`, llegó {otro:?}"),
+    }
+
+    let err =
+        lodestar_core::plan::normalize_replace_body(&doc_set, &fantasma, "cuerpo\n".to_string())
+            .expect_err("un `replace_body` sobre un path inexistente debe fallar al normalizar");
+    match &err {
+        lodestar_core::CoreError::NormalizeTargetNotFound(p) => assert!(
+            p.contains("no-existe/fantasma.md"),
+            "el error debe nombrar el path que no existe; payload = {p:?}",
+        ),
+        otro => panic!("se esperaba `NormalizeTargetNotFound`, llegó {otro:?}"),
+    }
+}
+
+/// Tanda (e) — criterio `[BDD-e]`: **Dado** paths que mezclan prefijos comunes, longitudes
+/// distintas, ceros a la izquierda, números en medio y no-ASCII, **Cuando** se ordenan con
+/// `sort_paths_cmp`, **Entonces** el orden total es el esperado y antisimétrico.
+///
+/// `sort_paths_cmp` SÍ es contractual (la sospecha contraria de la pasada era falsa): ordena las
+/// claves de `diff_snap` (`diff.rs:144`) y ese orden se propaga al wire vía
+/// `semanticDiff.created/modified/deleted`. Lo cubría un solo test de dos paths
+/// (`diff_snap_ordena_numeric_aware`), que ejercitaba la rama numérica y nada más: 17 mutantes
+/// sobrevivían. El `assert_eq!` del VECTOR ENTERO (no `contains`) es lo que mata los `<`→`<=`/`==`
+/// de los bucles y desempates; la antisimetría cubre las fronteras por pares.
+///
+/// Dos casos los exigió la RE-PASADA de `/mutantes` (el primer vector los omitía y sus mutantes
+/// seguían vivos): un par **dígito contra letra** en el punto de divergencia (`doc-abc` vs
+/// `doc-100`/`doc-7`, mata el `&&`→`||` que abriría la tira numérica en falso) y un path que
+/// **termina en dígito** (`v2` a secas, sin extensión: la tira numérica toca el fin de cadena y
+/// mata los `<`→`<=` de los dos bucles internos, que con `<=` indexan fuera).
+#[test]
+fn sort_paths_cmp_es_un_orden_total_estable() {
+    use std::cmp::Ordering;
+
+    // El orden esperado, razonado caso a caso:
+    let esperado = [
+        "a.md",         // `.` (0x2E) ordena antes que `/` (0x2F)…
+        "a/b.md",       // …así que el fichero corto va antes que el directorio homónimo.
+        "doc-2.md",     // mismo valor numérico que `doc-002`: menos ceros a la izquierda primero.
+        "doc-002.md",   // 2 == 2, pero con más ceros: después.
+        "doc-7.md",     // 2 < 7 por valor…
+        "doc-10.md",    // …y 7 < 10 por VALOR (no lexicográfico: "10" < "7" como texto).
+        "doc-10a.md",   // tras la tira `10` empatada, `.` (0x2E) < `a` (0x61).
+        "doc-100.md",   // 10 < 100 por valor.
+        "doc-abc.md",   // dígito contra letra: la tira numérica NO se abre en falso — `1` < `a`.
+        "v2",           // path SIN extensión que termina en dígito: la tira toca el fin de cadena.
+        "v2/cap-3.md",  // prefijo común con el anterior: el más corto primero. 3 < 21 por valor…
+        "v2/cap-21.md", // …
+        "v10/cap-1.md", // v2 < v10 por valor.
+        "zeta.md",      // prefijo común con el siguiente: el más corto primero.
+        "zeta.md.old",  // …
+        "árbol.md",     // no-ASCII: `á` (U+00E1) > `z` (0x7A), por code-point.
+    ];
+
+    // Se parte de una mezcla (no de la lista ya ordenada) para que el sort trabaje de verdad.
+    let mut mezclado = [
+        "doc-100.md",
+        "zeta.md.old",
+        "a/b.md",
+        "doc-abc.md",
+        "doc-002.md",
+        "v10/cap-1.md",
+        "árbol.md",
+        "doc-10a.md",
+        "a.md",
+        "v2",
+        "v2/cap-21.md",
+        "doc-2.md",
+        "doc-7.md",
+        "zeta.md",
+        "v2/cap-3.md",
+        "doc-10.md",
+    ];
+    mezclado.sort_by(|a, b| model::sort_paths_cmp(a, b));
+    assert_eq!(mezclado, esperado, "el orden total no es el esperado");
+
+    // Antisimetría y reflexividad sobre TODOS los pares: `cmp(a,b)` es el reverso exacto de
+    // `cmp(b,a)`, y `Equal` solo consigo mismo (es un orden, no una equivalencia laxa).
+    for (i, a) in esperado.iter().enumerate() {
+        for (j, b) in esperado.iter().enumerate() {
+            assert_eq!(
+                model::sort_paths_cmp(a, b),
+                model::sort_paths_cmp(b, a).reverse(),
+                "antisimetría rota entre {a:?} y {b:?}",
+            );
+            assert_eq!(
+                model::sort_paths_cmp(a, b) == Ordering::Equal,
+                i == j,
+                "{a:?} y {b:?} solo pueden ser iguales si son el mismo path",
+            );
+        }
+    }
+}
+
+/// Tanda (f) — criterio `[BDD-f]`: **Dado** un cuerpo con `## Security → ### Rotation` y
+/// `## Deploy → ### Rotation` de contenidos distintos, **Cuando** `locate_section` resuelve cada
+/// `heading_path`, **Entonces** cada uno devuelve el rango de SU subsección.
+///
+/// El estrechamiento de rango (`model.rs:887`) garantiza que el segundo segmento case DENTRO del
+/// primero. Roto (`&&` → `||`), un `edit_section(["Deploy","Rotation"])` editaría la `Rotation`
+/// que cuelga de `Security` — escritura en el sitio equivocado, en silencio: la categoría de
+/// defecto de E28. La tercera aserción (la `Rotation` que solo existe como HERMANA justo después
+/// de `Backup` no resuelve) mata además el `<` → `<=` de la frontera superior del rango, y las
+/// subsecciones pegadas a su heading padre (sin línea de por medio) atan el `>=` de la inferior.
+#[test]
+fn locate_section_no_cruza_a_una_seccion_hermana_con_el_mismo_titulo() {
+    let body = concat!(
+        "## Security\n",
+        "### Rotation\n",
+        "secreto-rota-cada-90-dias\n",
+        "## Deploy\n",
+        "### Rotation\n",
+        "despliegue-rota-al-publicar\n",
+        "## Backup\n",
+        "sin subsecciones: la Rotation de abajo es su hermana, no su hija\n",
+        "## Rotation\n",
+        "seccion-hermana-de-nivel-2\n",
+    );
+    let headings = model::parse_headings(body);
+    let path = |segs: &[&str]| -> Vec<String> { segs.iter().map(|s| s.to_string()).collect() };
+
+    // Cada `Rotation` resuelve a SU contenido, no al de la homónima bajo otro heading.
+    let (ini, fin) = model::locate_section(&headings, body.len(), &path(&["Security", "Rotation"]))
+        .expect("`Security → Rotation` existe");
+    assert!(
+        body[ini..fin].contains("secreto-rota-cada-90-dias")
+            && !body[ini..fin].contains("despliegue"),
+        "la `Rotation` de `Security` es la del secreto; rango = {:?}",
+        &body[ini..fin],
+    );
+
+    let (ini, fin) = model::locate_section(&headings, body.len(), &path(&["Deploy", "Rotation"]))
+        .expect("`Deploy → Rotation` existe");
+    assert!(
+        body[ini..fin].contains("despliegue-rota-al-publicar")
+            && !body[ini..fin].contains("secreto"),
+        "la `Rotation` de `Deploy` es la del despliegue; rango = {:?}",
+        &body[ini..fin],
+    );
+
+    // La `Rotation` de nivel 2 que viene JUSTO DESPUÉS de `Backup` es su hermana, no su hija: el
+    // path no existe. (Su línea empieza exactamente en `content_end` de `Backup`: es la frontera
+    // exclusiva del rango.)
+    assert!(
+        model::locate_section(&headings, body.len(), &path(&["Backup", "Rotation"])).is_none(),
+        "una sección hermana con el título buscado NO es una subsección",
+    );
+}
