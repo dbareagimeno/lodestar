@@ -36,18 +36,18 @@ platform, named `lodestar-cli-<version>-<target>.<ext>`:
 With the [GitHub CLI](https://cli.github.com/):
 
 ```console
-$ gh release download v0.5.0 --repo dbareagimeno/lodestar \
+$ gh release download v0.6.0 --repo dbareagimeno/lodestar \
     --pattern 'lodestar-cli-*-aarch64-apple-darwin.tar.gz'
-$ tar -xzf lodestar-cli-v0.5.0-aarch64-apple-darwin.tar.gz
+$ tar -xzf lodestar-cli-v0.6.0-aarch64-apple-darwin.tar.gz
 $ ./lodestar --version
-lodestar 0.5.0
+lodestar 0.6.0
 ```
 
 Or with `curl`, straight from the release URL:
 
 ```console
-$ curl -sSfLO https://github.com/dbareagimeno/lodestar/releases/download/v0.5.0/lodestar-cli-v0.5.0-x86_64-unknown-linux-gnu.tar.gz
-$ tar -xzf lodestar-cli-v0.5.0-x86_64-unknown-linux-gnu.tar.gz
+$ curl -sSfLO https://github.com/dbareagimeno/lodestar/releases/download/v0.6.0/lodestar-cli-v0.6.0-x86_64-unknown-linux-gnu.tar.gz
+$ tar -xzf lodestar-cli-v0.6.0-x86_64-unknown-linux-gnu.tar.gz
 ```
 
 Both archives contain exactly two files, `lodestar` and `lodestar-mcp` (`.exe` on Windows). Put
@@ -57,12 +57,12 @@ them anywhere on your `PATH`:
 mv lodestar lodestar-mcp ~/.local/bin/
 ```
 
-**Verify the download.** Releases published after `v0.5.0` also ship a `SHA256SUMS-<target>.txt`
+**Verify the download.** Releases ship a `SHA256SUMS-<target>.txt`
 next to each archive. Download it into the same directory and check the archive before unpacking:
 
 ```console
 $ shasum -a 256 -c SHA256SUMS-aarch64-apple-darwin.txt
-lodestar-cli-v0.5.0-aarch64-apple-darwin.tar.gz: OK
+lodestar-cli-v0.6.0-aarch64-apple-darwin.tar.gz: OK
 ```
 
 On Linux use `sha256sum -c` instead. A non-zero exit code means the file does not match what the

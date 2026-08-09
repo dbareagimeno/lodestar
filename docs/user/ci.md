@@ -191,7 +191,7 @@ jobs:
   lodestar:
     runs-on: ubuntu-latest
     env:
-      LODESTAR_VERSION: v0.5.0
+      LODESTAR_VERSION: v0.6.0
       LODESTAR_TARGET: x86_64-unknown-linux-gnu
     steps:
       - uses: actions/checkout@v4
@@ -205,7 +205,7 @@ jobs:
             --repo dbareagimeno/lodestar \
             --pattern "lodestar-cli-$LODESTAR_VERSION-$LODESTAR_TARGET.tar.gz" \
             --pattern "SHA256SUMS-$LODESTAR_TARGET.txt"
-          # Releases published after v0.5.0 ship the checksums file; verify it when present.
+          # Releases ship a checksums file; verify it when present.
           if [ -f "SHA256SUMS-$LODESTAR_TARGET.txt" ]; then
             sha256sum -c "SHA256SUMS-$LODESTAR_TARGET.txt"
           fi
