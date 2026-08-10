@@ -282,3 +282,26 @@ de `§10`/`§12`; corrigen bloqueantes de historias ya integradas.
 | (d) `ensure_exists` puede devolver siempre `Ok` sin que nada se ponga rojo | `plan::ensure_exists` | E32-H01 |
 | (e) `sort_paths_cmp` es contractual (ordena `semanticDiff.*`) y lo cubre un test de 2 paths | `model::sort_paths_cmp` | E32-H01 |
 | (f) `locate_section` puede editar la sección hermana homónima | `model::locate_section` | E32-H01 |
+
+---
+
+## E33 — Épica de evidencia (`ARCHITECTURE.md §22`) → historias
+
+> Origen: `decisiones §9` punto 1 (condición de entrada de `§14`) + orden de trabajo punto 3;
+> diseño ratificado 2026-08-10 (`ARCHITECTURE.md §22`). Ninguna historia toca una decisión de
+> `§10`/`§12` ni **cierra** una ficha abierta: la épica produce evidencia y deja las decisiones al
+> usuario. Las filas mapean decisión/concern → historia que aporta el dato o el instrumento.
+
+| Decisión / concern | Qué aporta la épica | Historia |
+|---|---|---|
+| `decisiones §9` punto 1 — gate de rendimiento con umbrales | Los números (3 variantes × 3 escalas) | E33-H04 |
+| `decisiones §9` punto 1 — «umbrales explícitos» | Umbrales ratificados con datos (puerta interna) + `--gate` + smoke CI | E33-H05 |
+| `decisiones §9` — «banco permanente por release» (README de `decisiones/`) | Runner asertable/portable + paso de `RELEASING.md` + corrida datada | E33-H02, E33-H07 |
+| `decisiones §14` — «no se decide sin medir» (condición de entrada) | Paquete de evidencia: mediciones + dogfooding + coste de conexión + análisis a/b/c, «lista para decidir» | E33-H08 (datos de H04/H06) |
+| `decisiones §14` absorción `§16(c)` (watcher sin `enable_cache`) | Inventariado en el paquete de evidencia (qué pasa con él en cada salida) | E33-H08 |
+| `decisiones §14` absorción `§16(l)` (divergencia `field_path` core↔store) | Inventariado en el paquete de evidencia como coste de conexión | E33-H08 |
+| `decisiones §22` — integridad referencial del frontmatter (abierta) | Centinela que fija el statu quo citando la ficha, sin cerrarla | E33-H03 |
+| `decisiones §24` — equivalencia caja/Unicode (abierta) | Centinela que fija el statu quo por plataforma, sin cerrarla | E33-H03 |
+| `decisiones §23` — «el testbench queda como activo de §9» | Corpus canónico + porte asertable de los `verify_*` e invariantes del informe | E33-H01, E33-H02 |
+| `ARCHITECTURE.md §21.5` — la superficie no promete rendimiento mientras `§14` siga abierta | Preservada explícitamente: banco interno, sin promesa externa (fuera de alcance en todas) | E33 (transversal) |
+| E14-H05 — arnés de escala ~10k | Generador extraído a `lodestar-fixtures` con perfiles plano/realista; `escala.rs` migrado sin cambiar aserciones | E33-H01 |
