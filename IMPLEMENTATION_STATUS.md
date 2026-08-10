@@ -1774,3 +1774,50 @@ gates del crate. Las reservas: (1) la letra de [Cierre] choca con la atribución
 cargo-mutants (`:172` se lista bajo `semantic_diff` sin ser el gap (c)) — saldada dejándolo escrito
 aquí y en el cierre de `§27`; (2) la nota de equivalencia original daba a entender un superviviente
 inmatable que no existe — saldada reescribiéndola (es el párrafo de arriba).
+
+## Épica de evidencia (E33) — EN CURSO (arrancada 2026-08-10)
+
+Épica: [`requirements/epica-33-banco-evidencia.md`](requirements/epica-33-banco-evidencia.md).
+Diseño ratificado como `ARCHITECTURE.md §22` (D1–D9, todas con la recomendación aceptada). Ejecuta
+`decisiones §9` punto 1 (banco de pruebas permanente + gate de rendimiento) y produce la evidencia
+que `decisiones §14` exige como condición de entrada; **no cierra `§14`, ni `§22`, ni `§24`**.
+Ninguna historia toca `contracts/mcp.yml`.
+
+| Historia | Qué entrega | Estado |
+|---|---|---|
+| E33-H01 | Corpus canónico determinista y generador de escala compartido | ✅ |
+| E33-H02 | Runner asertable y portable del banco de conformidad | ⏳ |
+| E33-H03 | Centinelas de las decisiones abiertas `§22` y `§24` | ⏳ |
+| E33-H04 | Banco de rendimiento: primera corrida completa (3 variantes × 3 escalas) | ⏳ |
+| E33-H05 | Umbrales ratificados, gate codificado y smoke en CI | ⏳ **puerta interna de umbrales** |
+| E33-H06 | Dogfooding acotado con registro | ⏳ |
+| E33-H07 | Enganche a release: runbook, workflow y corrida datada | ⏳ |
+| E33-H08 | Paquete de evidencia para decidir `decisiones §14` | ⏳ |
+
+**E33-H01 (2026-08-10)**: el módulo `escala` de `lodestar-fixtures` (perfiles `Plano`/`Realista`,
+PRNG SplitMix64 propio para que ninguna dependencia pueda alterar el corpus en silencio),
+`escala.rs` de E14-H05 migrado al generador compartido **con las aserciones intactas y el corpus
+plano byte-idéntico** (verificado contra el generador original reconstruido vía `git show`, y
+anclado hacia el futuro por `tests/ancla_plano.rs` con hash dorado), y el corpus canónico python
+(`docs/qa/testbench/make_corpus.py`, 92 `.md` deterministas con 11 códigos de diagnóstico, sets
+patológicos de `make_fixtures.py` integrados y las semillas de los centinelas de H03).
+
+TDD con separación de poderes: el autor validó sus 5 tests contra un prototipo desechable (3
+mutantes, 3 cazados) antes de entregar el rojo. **Panel de 3 jueces ciegos**: APROBADA CON RESERVAS
+×3, con dos MAYOR saldados en la misma rama — (1) el par NFC/NFD del corpus no era un par (difería
+también en sufijo ASCII) y su docstring afirmaba un colapso APFS falso: ahora es `canción.md` en
+las dos formas, con el comportamiento **medido** por plataforma; (2) una flakiness reportada del
+test de BDD-2 («diagnósticos = []» 3 veces seguidas, luego 70+ verdes): **no reproducida en 1.385
+corridas** bajo presión y sin mecanismo en el código (grafo y diagnósticos salen del mismo
+`analyze()`; la apertura es hermética y no hereda config de ancestros) — registrada como
+no-reproducida, atribuible a contaminación del entorno del juicio. **Re-juez fresco: APROBADA**,
+los 6 hallazgos saldados con evidencia ejecutada (148/148 corridas verdes, filesystem y ancla
+reverificados). Hallazgo nuevo MENOR anotado para H03: el generador python salta el auto-sorteo de
+enlaces donde el Rust lo desplaza — con otra semilla, un «conectado» del corpus canónico podría
+quedar sin salientes.
+
+Dos matices del motor que H02 debe conocer al escribir esperados (documentados en
+`make_corpus.py`/README): un enlace a directorio **con nombre** (`guias/`) es `LINK-TARGET-MISSING`
+deliberado (solo la navegación pura `../`/`./` es `WorkspaceDirectory`), y el **conteo de
+documentos del corpus depende del filesystem** (el par de caja colapsa en APFS y coexiste en ext4)
+— los esperados no pueden ser conteos absolutos.

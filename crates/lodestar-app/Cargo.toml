@@ -37,6 +37,10 @@ workspace = true
 [dev-dependencies]
 serde_json = { workspace = true }
 tempfile = "3"
+# E33-H01: el generador de escala compartido (`ARCHITECTURE.md §22.2`) vive en el crate de fixtures
+# —nunca en el core (invariante #2) ni inline en un test—, y los arneses de escala de esta fachada
+# (`escala.rs`, `corpus_realista.rs`) lo consumen desde ahí.
+lodestar-fixtures = { workspace = true }
 # Los tests de `plan.rs` que forjan un plan PERSISTIDO (E28-H03/H04, adenda) tienen que recomputar
 # el `planHash` exactamente como lo hace `compute_plan_hash` — `blake3(baseRevision ‖ 0x00 ‖ JSON de
 # las normalizedOperations)`— o el gate de `change_apply` los rechazaría con `PLAN_STALE` y el test

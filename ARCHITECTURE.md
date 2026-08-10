@@ -1505,3 +1505,127 @@ reconstruible. Es el principio de E23 («la documentación no afirma nada falso�
 coste de una afirmación falsa es mayor.
 
 **Principio rector de E27**: *la superficie externa solo promete lo que el motor ejecuta hoy.*
+
+---
+
+## 22. Banco de pruebas y gate de rendimiento (épica de evidencia)
+
+> **Ratificada el 2026-08-10** (puerta de diseño de la épica de evidencia; la ejecuta `E33`,
+> `requirements/epica-33-banco-evidencia.md`). Cierra el diseño de `decisiones §9` punto 1 (gate de
+> rendimiento, condición de entrada de `decisiones §14`) y convierte el testbench de `decisiones §23`
+> (189 casos contra el homelab, `docs/qa/testbench/`) en **banco permanente por release**. Esta
+> sección es **instrumento interno**: mientras `decisiones §14` siga abierta, `§21.5` sigue vigente y
+> **nada de lo que el banco mida se promete en la superficie externa**. La épica que la ejecuta
+> produce datos y análisis; **no cierra** `decisiones §14`, `§22` ni `§24` — esas decisiones son del
+> usuario. (Ojo con la numeración: en esta sección, `decisiones §N` es siempre una ficha de
+> `decisiones/`, no una sección de este documento.)
+
+### 22.1 Las dos piezas del banco
+
+El banco separa dos preocupaciones de vida distinta, con el arnés JSON-RPC/stdio
+(`docs/qa/testbench/lodestar_harness.py`) como ejecutor común de todo lo que toca el wire:
+
+1. **Banco de conformidad** (python, `docs/qa/testbench/`): casos esperado-vs-real **asertables**
+   contra el contrato. Hereda el arnés de `decisiones §23` (sesiones por lote, worktrees efímeros,
+   placeholders `@stepN`, distinción error-de-tool vs error-de-protocolo) y le añade lo que le
+   faltaba para ser permanente: veredicto mecánico, portabilidad y un corpus propio (§22.2, §22.3).
+2. **Banco de rendimiento** (Rust, crate interno `lodestar-bench`, `publish = false`): mide los
+   servicios de `App` —el patrón de E14-H05— más una calibración sobre el wire MCP real vía el
+   arnés python (§22.4, §22.5).
+
+### 22.2 Corpus canónico y generador de escala
+
+- **El homelab deja de ser el campo de pruebas del gate**: es privado, mutable y no-CI. Queda como
+  corrida **opcional de dogfooding** (el modo `--root` del arnés se conserva).
+- **Corpus canónico de conformidad**: generado **determinísticamente** (script versionado, semilla
+  fija) — ~50–100 documentos con la fauna completa: grafo de enlaces con huérfanos y dangling,
+  frontmatter heterogéneo y consultable, y los sets patológicos de `make_fixtures.py` integrados.
+  Los esperados del banco se escriben contra él, así son estables.
+- **Generador de escala**: el de E14-H05 (`crates/lodestar-app/tests/escala.rs`) se extrae a código
+  compartido y gana dos perfiles — **plano** (10k homogéneo, comparable con las cifras históricas de
+  E14-H05) y **realista** (distribución de enlaces y frontmatter modelada sobre corpus reales) — y
+  tres escalas (~100 / ~1k / ~10k).
+  - *Precisión de implementación (E33-H01, no cambia el diseño)*: el perfil realista entregado usa
+    una distribución **sintética y uniforme** (PRNG determinista), **no** calibrada contra corpus
+    reales. Cumple el propósito —que no se mida solo sobre el corpus plano: hay enlaces que
+    resolver, backlinks que computar y frontmatter heterogéneo que consultar—, pero no reproduce la
+    cola larga típica de un corpus humano. Si alguna medición llegara a depender de esa forma,
+    habría que calibrarla primero.
+- Regla heredada del repo: las fixtures grandes **se generan en runtime** (tempdir), nunca se
+  commitean.
+
+### 22.3 Esperados asertables y veredicto mecánico
+
+- El formato de lote gana un campo `expect` evaluable por el runner (código de error esperado,
+  subcampos del `structuredContent`, invariantes como «`workspaceRevision` intacta»). El runner
+  emite PASS/FAIL por caso y un resumen agregado; **cero veredictos manuales** en la corrida por
+  release (la verificación adversarial humana queda para campañas exploratorias).
+- **Criterio de selección**: entra al banco lo que asevera **contrato estable** (códigos,
+  invariantes, formas de respuesta), no lo que asevera contenido de un corpus concreto. Base: los
+  `verify_*` de `decisiones §23`, los invariantes transversales verificados conformes (informe
+  2026-08-06 §5) y una muestra por lote temático.
+- **Centinelas de decisiones abiertas** (`decisiones §22` y `§24`): casos cuyo esperado es el
+  **comportamiento vigente**, citando la ficha abierta. Si el comportamiento cambia, el centinela
+  falla y obliga a actualizar esperado y ficha a la vez. El banco **detecta** el cambio; **no lo
+  juzga** ni cierra la ficha.
+
+### 22.4 Métricas, umbrales y baseline (el gate de `decisiones §9` punto 1)
+
+- **Qué se mide**: cold-open (`App::open` + primera llamada) y **coste por llamada** —el sustituto
+  ratificado del histórico «edit→UI < 150 ms», que murió con la UI— como p50/p95 de N iteraciones
+  por tool de lectura y por el ciclo `change_plan`→`change_apply`, más el tamaño de payload (proxy
+  de tokens), a las tres escalas y en las tres variantes de camino de lectura (§22.5).
+- **Umbral-tras-medición**: los umbrales **no se inventan a priori** — la primera corrida produce
+  los números y el usuario los ratifica con ellos delante (puerta interna de la épica). Anclas de
+  esa conversación: **p95 ≤ 1 s por tool de lectura a 10k** y **cold-open ≤ 5 s**. Ratificados, el
+  gate se codifica y falla (exit ≠ 0) si se violan.
+- **Baseline por máquina**: los umbrales absolutos solo se juzgan en la máquina donde se ratificó
+  la baseline (la de release); cada release registra su corrida para tendencia. En CI solo corre un
+  **smoke barato** (escala mínima, sin umbral absoluto) que garantiza que los artefactos del banco
+  compilan y corren — que el banco no se pudra en silencio.
+
+### 22.5 Medir «con cache» sin conectarla
+
+El producto no lee el store (`decisiones §14`); el banco lo mide **sin tocar el camino de lectura**,
+por la API pública existente, en tres variantes:
+
+1. **Disco-reparseo** — el producto actual (`Workspace::document_set()` → `discovery::discover` en
+   cada llamada).
+2. **SQLite-raw** — `Store::rebuild()` + `Store::document_set()` (`DocumentSet::from_store`).
+   **Advertencia que la evidencia debe rotular**: `from_store` reconstruye el `FileMap` desde los
+   `raw` en SQL y **re-parsea**; esta variante mide la cache *tal como está construida* (ahorra
+   walk+IO, no parse). Se registra también el coste del `rebuild` (el precio de tener la cache).
+3. **RAM-memoizado** — un `DocumentSet` construido una vez y reutilizado entre llamadas: la **cota
+   superior** de lo que cualquier cache puede dar, y una alternativa que `decisiones §14` debe ver.
+
+Ninguna variante conecta el store al producto ni roza el invariante #3: son caminos de **medición**
+dentro del bench. El paquete de evidencia inventaría además el coste de conexión ya conocido
+(walker del store sin `DiscoveryPolicy`, divergencia `field_path` core↔store —`§16(l)`—, y el
+destino del watcher —`§16(c)`—) como parte del precio de la opción (a) de `decisiones §14`.
+
+### 22.6 Enganche a release
+
+El banco corre **por release**: `RELEASING.md` gana un paso (lo escribe la historia que entrega el
+enganche, no antes de que la herramienta exista) — correr conformidad + rendimiento contra el
+binario release en la máquina de la baseline y **commitear la corrida datada** en `docs/qa/`. Eso
+es, literalmente, «banco permanente por release». Opcionalmente, un `workflow_dispatch` lo dispara
+a demanda (conformidad + smoke, sin juzgar umbrales absolutos en runners compartidos).
+
+### 22.7 Dogfooding acotado con registro
+
+La otra mitad del dato de `decisiones §14`: ¿el reparseo por llamada **molesta** en uso real
+(~100 docs) o solo en el arnés sintético (10k)? Protocolo: (1) el propio repo (`decisiones/` +
+`requirements/`) se usa como workspace lodestar vía MCP en las sesiones de trabajo — las consultas
+que `decisiones/README.md` ya documenta, ejecutadas de verdad; (2) diario de fricciones en
+`docs/qa/` (fecha · tool · fricción · latencia percibida); (3) el número frío que acompaña a la
+percepción: la corrida del banco a escala «repo real»; (4) **ventana acotada** — el dogfooding
+computa para `decisiones §14` hasta que el paquete de evidencia se cierra; lo posterior alimenta
+fichas nuevas, no bloquea el cierre.
+
+### 22.8 El paquete de evidencia para `decisiones §14`
+
+Un documento único y datado en `docs/qa/` con: la tabla de mediciones (variantes × escalas ×
+tools), el dato de dogfooding, el inventario del coste de conexión (§22.5), y el análisis de las
+tres salidas de la ficha —conectar / acotar / retirar— **contra los datos**, actualizando o
+refutando la recomendación escrita en ella. Termina en **«lista para decidir»**: la decisión, su
+ratificación y el cambio de estado de `decisiones §14` son del usuario, fuera de la épica.
