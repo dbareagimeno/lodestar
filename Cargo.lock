@@ -1139,6 +1139,7 @@ version = "0.6.0"
 dependencies = [
  "blake3",
  "lodestar-core",
+ "lodestar-fixtures",
  "lodestar-workspace",
  "schemars",
  "serde",
@@ -1183,6 +1184,7 @@ dependencies = [
 name = "lodestar-fixtures"
 version = "0.6.0"
 dependencies = [
+ "blake3",
  "lodestar-core",
  "tempfile",
 ]

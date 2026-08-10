@@ -1545,6 +1545,12 @@ El banco separa dos preocupaciones de vida distinta, con el arnés JSON-RPC/stdi
   compartido y gana dos perfiles — **plano** (10k homogéneo, comparable con las cifras históricas de
   E14-H05) y **realista** (distribución de enlaces y frontmatter modelada sobre corpus reales) — y
   tres escalas (~100 / ~1k / ~10k).
+  - *Precisión de implementación (E33-H01, no cambia el diseño)*: el perfil realista entregado usa
+    una distribución **sintética y uniforme** (PRNG determinista), **no** calibrada contra corpus
+    reales. Cumple el propósito —que no se mida solo sobre el corpus plano: hay enlaces que
+    resolver, backlinks que computar y frontmatter heterogéneo que consultar—, pero no reproduce la
+    cola larga típica de un corpus humano. Si alguna medición llegara a depender de esa forma,
+    habría que calibrarla primero.
 - Regla heredada del repo: las fixtures grandes **se generan en runtime** (tempdir), nunca se
   commitean.
 

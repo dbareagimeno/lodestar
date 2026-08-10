@@ -49,6 +49,7 @@ use std::time::Instant;
 use lodestar_app::{App, Profile};
 use lodestar_core::plan::PlanPolicy;
 use lodestar_core::types::ErrorCode;
+use lodestar_fixtures::escala::{self, Perfil, CENTINELA_CUERPO};
 
 /// Escribe un `.md` (creando los directorios intermedios) dentro del workspace temporal.
 fn escribe(root: &Path, rel: &str, contenido: &str) {
@@ -75,43 +76,41 @@ fn policy_permisiva() -> PlanPolicy {
 // la latencia se registra Y el payload queda acotado (resúmenes/snippets, NO el cuerpo entero).
 // ===========================================================================
 
-/// Nº de documentos sintéticos: respeta el «~10k» de la spec (search es O(n), representativo de escala).
+/// Nº de documentos sintéticos: respeta el «~10k» de la spec (search es O(n), representativo de
+/// escala). El corpus plano del generador compartido cuenta su `index.md` entre los documentos que
+/// escribe, así que se pide uno más para que sigan siendo los mismos 10 000 `c/documento-*.md` que
+/// medía E14-H05 — el corpus es byte a byte el de entonces y sus cifras siguen comparables.
 const N_CONCEPTOS: usize = 10_000;
 
 /// Marca única enterrada al FINAL del cuerpo de cada documento, lejos de cualquier término buscado y
 /// más allá de la ventana del snippet (160 chars): si aparece en la respuesta, un cuerpo completo
 /// viajó. Sirve de centinela robusto de «payload NO incluye el body».
-const CENTINELA: &str = "CENTINELA-CUERPO-QUE-NO-DEBE-VIAJAR";
+///
+/// E33-H01: la cadena la define ahora el generador compartido ([`CENTINELA_CUERPO`]) — el centinela
+/// tiene que ser el MISMO que entierra el corpus, o el test pasaría por no encontrar algo que nunca
+/// se escribió.
+const CENTINELA: &str = CENTINELA_CUERPO;
 
 /// Cuerpo grande (~2 KB) por documento: un arranque con el término buscable, mucho relleno, y el
 /// centinela al final (bien pasado el snippet window de 160 chars).
+///
+/// E33-H01: delega en el generador compartido (`lodestar_fixtures::escala::cuerpo_plano`), que es
+/// quien escribe el corpus; así la reconstrucción del tamaño del cuerpo con la que este test acota
+/// el payload no puede divergir del cuerpo real.
 fn cuerpo_grande(i: usize) -> String {
-    let relleno = "Contenido de relleno sintetico para dar cuerpo al documento. ".repeat(40);
-    format!(
-        "# Documento {i}\n\nEste documento sintetico numero {i} describe un tema de prueba.\n\n{relleno}\n\n{CENTINELA}-{i}\n"
-    )
+    escala::cuerpo_plano(i)
 }
 
 /// Construye en `root` un workspace con `N_CONCEPTOS` documentos de cuerpo grande. El `index.md` es
 /// mínimo (no lista los 10k: la conformidad no importa para search, y listar 10k enlaces solo
 /// ralentizaría sin cambiar el conjunto que casa). Cada documento casa el término «documento» por su
 /// título/descripción/cuerpo.
+///
+/// E33-H01: el generador se extrajo a `lodestar-fixtures` (`ARCHITECTURE.md §22.2`) para que el
+/// banco de evidencia mida sobre exactamente este corpus; aquí solo queda la llamada.
 fn genera_workspace_grande(root: &Path) {
-    escribe(
-        root,
-        "index.md",
-        "---\ntype: Index\ntitle: Bundle\ndescription: Índice del bundle\nokf_version: \"0.1\"\n---\n\n# Bundle grande\n",
-    );
-    for i in 0..N_CONCEPTOS {
-        escribe(
-            root,
-            &format!("c/documento-{i:05}.md"),
-            &format!(
-                "---\ntype: Concept\ntitle: Documento {i}\ndescription: documento sintetico numero {i}\n---\n\n{}",
-                cuerpo_grande(i)
-            ),
-        );
-    }
+    escala::genera(root, Perfil::Plano, N_CONCEPTOS + 1, 0)
+        .expect("el generador de escala debe escribir el corpus plano");
 }
 
 #[test]
