@@ -1,45 +1,23 @@
 ---
 name: mutantes
-description: Mutation testing con cargo-mutants sobre lodestar-core - detecta qué mutaciones del código sobreviven a la suite (= dónde los tests no muerden) y propone tests que las maten. A demanda, sin CI. Útil tras cerrar una historia o antes/después de un refactor.
-argument-hint: "[-p <crate>] [--file <ruta desde la raíz del workspace>]"
+description: Ejecuta cargo-mutants de forma acotada para detectar gaps reales de tests. Úsalo tras lógica nueva o antes/después de un refactor; no es un gate rutinario de CI.
+argument-hint: "[-p <crate>] [--file <ruta>]"
 ---
 
-# /mutantes — ¿tus tests muerden?
+# /mutantes — comprobar que la suite muerde
 
-cargo-mutants introduce mutaciones en el código (invierte condiciones, devuelve valores por
-defecto, elimina ramas…) y corre la suite: cada **mutante superviviente** es un cambio de
-comportamiento que ningún test detectó — un agujero real de la suite.
+1. Comprueba `cargo mutants --version`; pide permiso antes de instalar si falta.
+2. Acota por crate y, preferentemente, por fichero:
 
-## Pasos
+   ```bash
+   cargo mutants -p lodestar-core --file crates/lodestar-core/src/query.rs --no-times
+   ```
 
-1. **Comprueba la instalación**: `cargo mutants --version`. Si no está, indícale al usuario
-   `cargo install cargo-mutants` (o `brew install cargo-mutants`) y para — no lo instales sin
-   preguntar.
-2. **Acota el alcance** (una corrida completa del workspace es lenta y no es el objetivo):
-   - Por defecto: `cargo mutants -p lodestar-core --no-times`
-   - Con `--file`: añade `--file <ruta>` con la ruta **desde la raíz del workspace** (p. ej.
-     `--file crates/lodestar-core/src/query.rs`; el patrón usa semántica gitignore anclada a la
-     raíz — `src/query.rs` a secas no casa nada). Es el modo recomendado tras cerrar una
-     historia, apuntando a los módulos que tocó.
-   - La config compartida vive en `.cargo/mutants.toml` (exclusiones y timeouts).
-   - Corre con timeout generoso de Bash (10 min) y `run_in_background` si el alcance es más de un
-     fichero.
-3. **Analiza los resultados** (`mutants.out/`): `missed.txt` (supervivientes — lo importante),
-   `caught.txt`, `unviable.txt`, `timeout.txt`. Lanza un agente (tipo `general-purpose`,
-   `model: opus`) con la lista de supervivientes y los ficheros afectados para que:
-   - Clasifique cada superviviente: **gap real de la suite** vs **mutante trivial/equivalente**
-     (p. ej. mutaciones en código de presentación de errores o en `Display`).
-   - Para cada gap real, proponga el test concreto que lo mataría (fichero destino + esbozo del
-     assert), siguiendo los patrones del repo (`crates/*/tests/*.rs`, fixtures de
-     `lodestar-fixtures`).
-4. **Reporta al usuario**: totales (caught/missed/unviable), la lista de gaps reales priorizada, y
-   los tests propuestos. **No escribas los tests sin que el usuario elija cuáles** — los gaps a
-   veces revelan código muerto que conviene borrar en vez de testear.
+3. Lee `missed.txt`, `caught.txt`, `unviable.txt` y `timeout.txt` de la salida nueva.
+4. Para cada superviviente, demuestra el cambio de comportamiento y clasifica: gap real, mutante
+   equivalente o código muerto.
+5. Propón el test mínimo para cada gap real, con fichero y assertion. No escribas tests ni borres
+   código salvo petición explícita.
 
-## Contexto del repo
-
-- `lodestar-core` es el candidato ideal: crate puro, tests rápidos. Los diferenciales se saltan
-  sin node, así que la señal de mutantes ahí puede ser parcial — dilo en el informe si aplica.
-- Uso en refactors: corre antes y después con el mismo alcance; si después sobreviven mutantes que
-  antes morían, el refactor debilitó la suite.
-- `mutants.out*/` no se commitea (está en `.gitignore`).
+En refactors, usa exactamente el mismo alcance antes y después. Un mutante que antes moría y ahora
+sobrevive indica una suite debilitada.

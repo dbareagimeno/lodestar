@@ -1,0 +1,4 @@
+interface:
+  display_name: "Planificar arquitectura"
+  short_description: "Diseña y descompone cambios arquitectónicos"
+  default_prompt: "Use $planificar para convertir esta propuesta en diseño ratificable e historias ordenadas."

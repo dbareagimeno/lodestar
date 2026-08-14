@@ -1,0 +1,4 @@
+interface:
+  display_name: "Especificar historia"
+  short_description: "Redacta historias BDD listas para ratificar"
+  default_prompt: "Use $especificar para convertir este cambio de comportamiento en una historia verificable."

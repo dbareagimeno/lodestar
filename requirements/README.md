@@ -238,7 +238,7 @@ Cada historia tiene un identificador estable `E<épica>-H<nn>` y esta plantilla:
 ```
 ### E1-H07 — Título corto y accionable
 - **Objetivo**: una frase: qué capacidad entrega.
-- **Referencias**: ARCHITECTURE §X.Y · prototipo `funcA`/`funcB` · historias relacionadas.
+- **Referencias**: ARCHITECTURE §X.Y · spec/decisiones vigentes · historias relacionadas.
 - **Alcance**: el trabajo concreto, en viñetas. Incluye señales de API (firmas Rust) cuando el
   contrato las fija.
 - **Fuera de alcance**: lo que NO entra (para evitar scope creep).
@@ -254,7 +254,7 @@ Una historia está `Done` cuando:
 1. **Compila** en el workspace sin warnings nuevos (`cargo build`/`cargo clippy -- -D warnings`).
    Los gates del frontend (`svelte-check`/`tsc`) se retiraron de `main` con la UI
    (`experimental/ui-desktop`).
-2. **Tiene tests** que cubren su comportamiento (unit + el arnés de paridad/golden que aplique) y
+2. **Tiene tests** que cubren su comportamiento (unit + golden/integración que aplique) y
    **pasan** (`cargo test --workspace`, más `--features test-failpoints` en los crates que lo
    gatean).
 3. **Respeta los invariantes no negociables** de `CLAUDE.md` / `ARCHITECTURE.md §2,§10`:
@@ -262,7 +262,7 @@ Una historia está `Done` cuando:
    newtype.
 4. **No reintroduce duplicación de tipos** ni capa DTO paralela (principio #4).
 5. **Documenta** la superficie pública nueva (`///` en Rust) en español.
-6. El **arnés de paridad** de su fase sigue verde (cuando exista).
+6. Las comprobaciones específicas de su frontera o política siguen verdes.
 
 ## Invariantes que toda historia debe preservar (recordatorio)
 

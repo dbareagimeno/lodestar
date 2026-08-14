@@ -1,38 +1,25 @@
 ---
 name: ciclo
-description: Pipeline completo de una historia - /historia (spec + ratificación) → /tdd (rojo-verde) → /contrato --check si toca la frontera → /juzgar (juez ciego) → docs de estado → commit en rama. El camino feliz para features; úsalo cuando el usuario pida "hacer X" de principio a fin.
-argument-hint: <descripción de la feature | ID E<n>-H<nn>>
+description: Orquesta una historia ratificada o un bugfix completo con rojo y verde separados, contrato/docs, gates reales y revisión fresca. Para arquitectura usa /planificar; para docs mecánicas aplica un check específico.
+argument-hint: <descripción de bug | ID E<n>-H<nn>>
 ---
 
-# /ciclo — de necesidad a commit juzgado
+# /ciclo — entrega completa
 
-Encadena el flujo completo del repo. Cada etapa tiene su skill; tú orquestas y no te saltas puertas.
+1. **Clasifica**: bug inequívoco (issue/reproducción), historia ratificada, docs/mecánico o
+   arquitectura. Redirige arquitectura a `/planificar` y specs sin ratificar a `/historia`.
+2. **Base**: trabaja en el checkout actual basado en `develop`. No crees rama ni commit salvo
+   petición explícita.
+3. **Rojo**: toma `target/agent-state/pre-red.json`, lanza `autor-tests` y ejecuta
+   `phase-scope.py verify-tests-only`.
+4. **Lock**: bloquea los tests y fixtures exactos con `tdd-test-lock.py snapshot`.
+5. **Verde**: lanza `implementador`; verifica el lock antes y después. Si un test contradice una
+   spec inequívoca, arbitra con un juez fresco; si la spec es ambigua, vuelve al usuario.
+6. **Entrega**: completa contrato, docs y estado afectados.
+7. **Gates**: usa `agent-gates.sh full`; añade `contract` cuando toque MCP.
+8. **Juicio**: ejecuta `/juzgar` sobre el entregable completo. Tras reparar un fallo reproducible,
+   repite gates y usa jueces nuevos.
 
-## Etapas (en orden, con sus puertas)
-
-1. **Spec** — si no hay historia ratificada para el argumento, ejecuta `/historia`. **Puerta:
-   ratificación explícita del usuario.** (Si ya existe historia ratificada, salta a 2. Si el
-   alcance NO cabe en una historia, esto no es un ciclo: redirige a `/planificar`, que produce la
-   épica cuyas historias sí se ejecutan con `/ciclo`.)
-2. **Rama** — trabaja en una rama `claude/<slug-de-la-historia>` desde `main` actualizado.
-3. **TDD** — ejecuta `/tdd <ID>` (rojo → verde → gates). **Puerta: gates locales en verde.**
-4. **Contrato** — si el diff toca `core::types`, las tools de `lodestar-mcp` o `contracts/mcp.yml`,
-   ejecuta `/contrato --check`. **Puerta: sin drift BLOQUEANTE.**
-5. **Juicio** — ejecuta `/juzgar <ID>` (añade `--panel` si el diff es grande, toca la frontera o
-   superficies de seguridad). **Puerta: veredicto APROBADA (o CON RESERVAS aceptadas explícitamente
-   por el usuario).** Si RECHAZADA: vuelve a la etapa que el veredicto señale (3 si es de
-   implementación, 1 si es de spec) y re-juzga con un juez fresco — nunca negocies con el mismo juez.
-6. **Estado** — actualiza `IMPLEMENTATION_STATUS.md` (y `decisiones/` si la historia cerró o abrió
-   algo) en el mismo cambio.
-7. **Commit** — mensaje en español que nombra la historia (`E<n>-H<nn>: <qué entrega>`). El push/PR
-   queda a criterio del usuario: propónlo, no lo hagas por defecto.
-
-## Opcionales que puedes proponer al cierre
-
-- `/mutantes --file <módulos tocados>` para medir si la suite nueva muerde.
-- `/simplify` si el verde dejó complejidad evidente.
-
-## Regla de oro
-
-Las puertas no se negocian en caliente: si una falla, se vuelve atrás con el artefacto corregido.
-El coste de re-ratificar una spec es minutos; el de un invariante roto en `main`, no.
+No pares para pedir permiso ante un bug inequívoco dentro del alcance. Sí para una decisión
+normativa, una spec ambigua o una ampliación material. Entrega diff y evidencia; no hagas commit,
+push ni PR por defecto.
