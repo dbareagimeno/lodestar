@@ -681,11 +681,11 @@ meta:
   fuente_bucle: crates/lodestar-mcp/src/main.rs            # handle()
   protocolo:
     metodos: [initialize, ping, "tools/list", "tools/call"]
-    protocol_versions_aceptadas: ["2024-11-05", "2025-03-26", "2025-06-18"]
+    protocol_versions_aceptadas: ["2024-11-05", "2025-03-26", "2025-06-18", "2025-11-25"]
     protocol_version_no_soportada: >-
       (E29-H09) Una `protocolVersion` presente en `initialize.params` pero AUSENTE de
       `protocol_versions_aceptadas` se RECHAZA: error JSON-RPC `-32602` (mismo código que "tool
-      desconocida"/"tool no disponible bajo el perfil") con un mensaje que lista las tres versiones
+      desconocida"/"tool no disponible bajo el perfil") con un mensaje que lista las versiones
       aceptadas, y la respuesta NO lleva `result` (main.rs, brazo `initialize`, `PROTOCOL_VERSIONS`).
       Un handshake rechazado no es un error de dominio de tool: no lleva código del catálogo
       `ErrorCode`. La AUSENCIA de `protocolVersion` sigue siendo válida — se responde

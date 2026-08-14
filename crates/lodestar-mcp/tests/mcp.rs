@@ -10643,7 +10643,7 @@ fn instructions_readonly_no_nombra_tools_de_cambio() {
 
 /// E29-H09 · Criterio `protocol_version_no_soportada_se_rechaza`:
 /// Dado un `initialize` con `protocolVersion: "1990-01-01"`, Cuando se llama, Entonces la respuesta
-/// es un error JSON-RPC `-32602` cuyo mensaje lista las tres versiones aceptadas.
+/// es un error JSON-RPC `-32602` cuyo mensaje lista las versiones aceptadas.
 ///
 /// Decisión de forma (delegada por la historia a la fase roja, ver spec L1004-1009): la spec MCP
 /// oficial de negociación de versión (2025-06-18, sección «Version Negotiation») dice que si el
@@ -10673,7 +10673,7 @@ fn protocol_version_no_soportada_se_rechaza() {
         .as_str()
         .expect("el error de protocolVersion no soportada lleva mensaje")
         .to_lowercase();
-    for version in ["2024-11-05", "2025-03-26", "2025-06-18"] {
+    for version in ["2024-11-05", "2025-03-26", "2025-06-18", "2025-11-25"] {
         assert!(
             msg.contains(version),
             "el mensaje de rechazo debe listar la versión soportada «{version}»: {msg}"
@@ -10705,6 +10705,35 @@ fn initialize_sin_version_sigue_funcionando() {
     assert!(
         resp[0]["error"].is_null(),
         "sin protocolVersion no debe haber error: {resp:?}"
+    );
+}
+
+/// Criterio `protocol_version_2025_11_25_es_aceptada` (reporte de un adoptante, issue
+/// dbareagimeno/lodestar#38): `PROTOCOL_VERSIONS` se quedó fija en las tres versiones del spec MCP
+/// vigentes cuando E29-H09 endureció el rechazo, y Claude Code ya negocia `"2025-11-25"` — una
+/// versión real del spec MCP posterior a `2025-06-18`, no una versión inventada como `"1990-01-01"`
+/// en `protocol_version_no_soportada_se_rechaza`. Sin la versión añadida a la lista, este initialize
+/// se rechazaba con `-32602` igual que uno inventado, y el rechazo duro deliberado de E29-H09 se
+/// llevaba por delante un cliente real y conforme al spec. Dado un `initialize` con
+/// `protocolVersion: "2025-11-25"`, Cuando se llama, Entonces se ecoa sin error — el mismo tratamiento
+/// que cualquier otra versión soportada.
+#[test]
+fn protocol_version_2025_11_25_es_aceptada() {
+    let dir = workspace_min();
+    let resp = roundtrip(
+        dir.path(),
+        &[
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25"}}"#,
+        ],
+        1,
+    );
+    assert_eq!(
+        resp[0]["result"]["protocolVersion"], "2025-11-25",
+        "protocolVersion 2025-11-25 debe ecoarse sin error: {resp:?}"
+    );
+    assert!(
+        resp[0]["error"].is_null(),
+        "protocolVersion 2025-11-25 no debe rechazarse: {resp:?}"
     );
 }
 

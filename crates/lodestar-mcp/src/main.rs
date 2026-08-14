@@ -22,7 +22,7 @@ mod validacion;
 /// `contracts/mcp.yml` (`meta.protocolo.protocol_versions_aceptadas`). Única fuente de esta lista:
 /// tanto el rechazo (`initialize` con una versión ausente de aquí → `-32602`) como el mensaje que
 /// las enumera se generan a partir de esta constante.
-const PROTOCOL_VERSIONS: [&str; 3] = ["2024-11-05", "2025-03-26", "2025-06-18"];
+const PROTOCOL_VERSIONS: [&str; 4] = ["2024-11-05", "2025-03-26", "2025-06-18", "2025-11-25"];
 
 /// Versión por defecto que responde el servidor cuando el cliente no pide ninguna.
 const DEFAULT_PROTOCOL_VERSION: &str = "2024-11-05";

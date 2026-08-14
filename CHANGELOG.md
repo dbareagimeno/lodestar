@@ -7,6 +7,15 @@ y el proyecto sigue [Versionado Semántico](https://semver.org/lang/es/).
 
 ## [No publicado]
 
+### Arreglado
+
+- **`lodestar-mcp` acepta `protocolVersion: "2025-11-25"`** (issue #38). `PROTOCOL_VERSIONS`
+  se quedó fija en las tres versiones del spec MCP vigentes cuando E29-H09 endureció el rechazo
+  de versiones no soportadas; desde entonces el spec sumó `2025-11-25`, y clientes conformes que
+  la negocian —Claude Code entre ellos— topaban con el mismo `-32602` que una versión inventada.
+  El rechazo duro deliberado de E29-H09 sigue intacto para cualquier versión que de verdad no se
+  soporte; lo único que cambia es que la lista ya no está desactualizada.
+
 ## [0.6.0] - 2026-08-09
 
 > **Al actualizar desde 0.5.0, un cambio puede romperte**: el wire pasó a ser **estricto** con los
