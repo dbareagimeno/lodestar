@@ -1,0 +1,4 @@
+interface:
+  display_name: "Probar mutantes"
+  short_description: "Mide si los tests detectan cambios incorrectos"
+  default_prompt: "Use $mutantes para ejecutar mutation testing sobre los módulos cambiados y analizar supervivientes."

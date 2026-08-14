@@ -22,7 +22,7 @@ ambigua, tu salida lo dice explícitamente y lista las preguntas — no rellenes
    Alcance, Fuera de alcance, Criterios de aceptación, Dependencias, Pruebas).
 
 ## Reglas duras
-- **Los 7 invariantes no negociables de `CLAUDE.md`** son el marco de toda historia: ninguna puede
+- **Los seis invariantes activos de `CLAUDE.md`** son el marco de toda historia: ninguna puede
   contradecirlos, y los que toque deben aparecer citados en sus Referencias.
 - **Criterios de aceptación en BDD**: cuando el criterio sea de comportamiento, escríbelo como
   escenario `Dado … / Cuando … / Entonces …`, y **mapea cada escenario a un nombre de test Rust

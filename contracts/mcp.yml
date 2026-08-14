@@ -1,6 +1,6 @@
 # Contrato MCP — spec de SUPERFICIE Y SEMÁNTICA de las tools del servidor MCP.
 #
-# Se verifica contra el código real con `/contrato --check` (agente `guardian-contrato`).
+# Se verifica contra el código real con `scripts/agent-gates.sh contract`.
 # Refleja `crates/lodestar-mcp/src/tools.rs` (registro `list()` + despacho `call()`) y el
 # bucle JSON-RPC de `crates/lodestar-mcp/src/main.rs`.
 #
@@ -17,14 +17,14 @@
 #     dicen la verdad; el par fichero+nombre de función es inambiguo y sobrevive a cualquier commit
 #     que no renombre nada. Volver a poner líneas exige, antes, algo que las compruebe.
 #
-# INVARIANTES: shells finos sobre `App`/`Workspace`, CERO lógica OKF propia (misma verdad que
-# CLI/Tauri; test golden cross-fachada lo verifica). Las tools de cambio (`change_apply`/
+# INVARIANTES: shells finos sobre `App`/`Workspace`, CERO lógica documental propia (misma verdad que
+# CLI/MCP; los tests cross-fachada lo verifican). Las tools de cambio (`change_apply`/
 # `change_revert`) escriben el `.md` atómico por el ÚNICO escritor; nunca la cache. `ref.path`
 # se valida a `RelPath` (rechaza absolutas/`..`, chokepoint de traversal).
 #
-# E9-H01: las 3 tools git (history/last_conforming_commit/commit) se retiraron de esta
-# superficie; `Workspace::vcs_log`/`last_conforming`/`commit` siguen existiendo sin consumidor
-# MCP (crate `vcs` dormido, decisión #1 — no se borran).
+# E9-H01 retiró las 3 tools git (history/last_conforming_commit/commit) de esta superficie.
+# E15-H01 completó la retirada: `lodestar-vcs`, git2 y la mecánica asociada ya no existen en el
+# workspace activo.
 #
 # E10 (§19, decisión "0. Giro a motor headless" — decisiones §0): la superficie MCP migra de las
 # 10 tools heredadas (tras la retirada de las 3 tools git en E9-H01) a un objetivo de 10 tools
