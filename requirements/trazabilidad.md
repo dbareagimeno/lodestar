@@ -263,6 +263,7 @@ de `§10`/`§12`; corrigen bloqueantes de historias ya integradas.
 |---|---|---|
 | `changeSetId` determinista reutiliza el mismo `txnId` en un re-apply idéntico: `change_apply` sobrescribe `recovery/`/`receipts/` de la transacción previa (guard anti-sobrescritura de H01 solo vivía en `change_revert`), y el `revert` posterior queda sin salida (`WRITE_CONFLICT`) | veredicto de juez ciego sobre `E28-H01`, reproducido por JSON-RPC | E28-H03 |
 | `change_plan` normaliza cada operación contra el `DocumentSet` inicial, no el acumulado del propio plan: falsos negativos destructivos (`[move a→final, move b→final]`, `[create X, move b→X]`, `[create X, create X]`) y regresión de dos idiomas legítimos (`[delete X, create X]`, `[move A→B, create A]`) | veredicto de juez ciego sobre `E28-H02`, reproducido por JSON-RPC | E28-H04 (abre `decisiones §24`, equivalencia de caja/Unicode, fuera de su alcance) |
+| Seguimiento de E28-H04: operaciones de contenido, move-chains y selecciones estructurales seguían normalizando contra contenido base; varios `ReplaceBody` sobre el mismo path perdían intención y `noOpOperations` congelaba el veredicto por documento | re-jueces de E28-H04 + regresión MCP en procesos frescos | Bugfix de planificación secuencial previo a E33-H04 (base/working, no-op por terminal, runtime v2) |
 
 ---
 

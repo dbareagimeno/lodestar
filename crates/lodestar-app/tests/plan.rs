@@ -36,8 +36,8 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use lodestar_app::{App, PlanResult};
-use lodestar_core::plan::PlanPolicy;
-use lodestar_core::types::{ChangeSetId, ErrorCode};
+use lodestar_core::plan::{self, PlanPolicy};
+use lodestar_core::types::{ChangeSetId, ErrorCode, RelPath, WorkspaceRevision};
 
 /// Escribe un `.md` (creando los directorios intermedios) dentro del workspace temporal.
 fn escribe(root: &Path, rel: &str, contenido: &str) {
@@ -265,7 +265,6 @@ fn plan_fuera_de_revision() {
 // deteniéndose en el equivalente a `FailPoint::EntreRenames`. Es lo que un crash real deja en disco.
 // ---------------------------------------------------------------------------
 
-use lodestar_core::types::RelPath;
 use lodestar_workspace::Workspace;
 
 /// Monta un workspace con una transacción interrumpida durable: copias de recuperación de los dos
@@ -674,14 +673,9 @@ mod colision_intra_plan_en_el_apply {
         out
     }
 
-    /// El `planHash` con la fórmula LITERAL de `App::compute_plan_hash` (privada): `blake3` de la
-    /// revisión base, un `0x00` separador y la serialización JSON de las operaciones normalizadas.
+    /// El `planHash` delegado a la única verdad del core; no se duplica aquí la fórmula interna.
     fn plan_hash(base: &str, ops: &[NormalizedOperation]) -> String {
-        let mut hasher = blake3::Hasher::new();
-        hasher.update(base.as_bytes());
-        hasher.update(b"\0");
-        hasher.update(&serde_json::to_vec(ops).expect("las ops normalizadas serializan"));
-        format!("blake3:{}", hasher.finalize().to_hex())
+        plan::compute_plan_hash(&WorkspaceRevision(base.to_string()), ops).0
     }
 
     /// Reescribe el plan persistido único de `root` con las `ops` dadas: recalcula `planHash` y
@@ -2099,30 +2093,21 @@ fn un_plan_sin_la_clave_no_op_operations_se_sigue_aplicando() {
     );
 }
 
-/// **E31-H02(B) · límite declarado** — **Dado** un plan con **dos** operaciones sobre el **mismo**
-/// documento, una efectiva y otra vacía, **Cuando** se planifica, **Entonces** el veredicto es del
-/// DOCUMENTO, no de cada operación: ninguna de las dos se declara no-op, porque el documento sí
-/// cambió.
-///
-/// No es un defecto oculto: es el precio, aceptado a conciencia, de derivar la señal del **mismo**
-/// predicado con el que el escritor computa su lote afectado (invariante #3 — la alternativa, simular
-/// operación por operación, sería una segunda verdad de «qué cambia»). El caso que motiva el campo
-/// —una operación por documento, incluido el bulk de `selection`, que expande exactamente una— es
-/// exacto. Este test **fija el límite** para que nadie lo descubra en producción, y para que si
-/// alguna vez se decide afinarlo, el cambio sea deliberado y no accidental. Está declarado en
-/// `contracts/mcp.yml` y en `docs/user/safe-changes.md`.
+/// **E31-H02(B)** — Una operación efectiva seguida de una sustitución sin coincidencias se
+/// normaliza contra el `working` que dejó la primera: el cambio efectivo sobrevive y solo la
+/// operación terminal figura en `noOpOperations`.
 #[test]
-fn el_veredicto_de_no_op_es_por_documento_no_por_operacion() {
-    let (_dir, app) = app_con_frontmatter_flow_y_block();
+fn no_op_se_calcula_por_operacion_sobre_working_secuencial() {
+    let (dir, app) = app_con_frontmatter_flow_y_block();
 
     let plan = app
         .change_plan(
             None,
             &serde_json::json!([
-                // (0) SÍ cambia el documento.
+                // (0) SÍ cambia el documento y debe sobrevivir.
                 { "op": "replace_text", "path": "casa.md",
                   "find": "reemplázame", "replace": "reemplazado" },
-                // (1) NO cambia nada… pero sobre el MISMO documento que (0).
+                // (1) NO cambia nada contra el working ya modificado.
                 { "op": "replace_text", "path": "casa.md",
                   "find": "esta-cadena-no-existe-en-el-doc", "replace": "x" },
             ]),
@@ -2130,31 +2115,28 @@ fn el_veredicto_de_no_op_es_por_documento_no_por_operacion() {
         )
         .expect("dos ops sobre el mismo documento deben planificar");
 
-    // Las DOS salen declaradas, y el documento acaba sin cambios: la op (1) se normalizó contra el
-    // estado INICIAL —no contra lo que dejó la (0)—, así que reescribe el cuerpo original encima y
-    // DESHACE la (0). Ese es un defecto preexistente y ajeno a §26 (la normalización multi-op sobre
-    // un mismo path), pero determina lo que aquí se observa, así que el test lo fija tal cual en vez
-    // de fingir un resultado más limpio.
     assert_eq!(
         plan.no_op_operations.len(),
-        2,
-        "LÍMITE DECLARADO: el veredicto es del DOCUMENTO, no de cada operación. Con dos ops sobre el \
-         mismo path el documento acaba idéntico —la segunda deshace a la primera al normalizarse \
-         contra el estado inicial— y AMBAS se declaran sin efecto, pese a que la (0) sí escribía \
-         mirada en solitario. Si esto cambia, el predicado se ha afinado a por-operación (o se ha \
-         arreglado la normalización multi-op): actualiza `contracts/mcp.yml`, \
-         `docs/user/safe-changes.md` y el comentario de `change_plan`. {:?}",
+        1,
+        "solo la sustitución terminal sin coincidencias es no-op: {:?}",
         plan.no_op_operations
     );
     assert!(
-        plan.semantic_diff.modified.is_empty(),
-        "coherencia: si las dos se declaran sin efecto es porque el documento NO cambió — el diff \
-         tiene que decir lo mismo, o la señal estaría mintiendo: {:?}",
+        plan.semantic_diff
+            .modified
+            .contains(&RelPath::new("casa.md").unwrap()),
+        "el cambio efectivo debe sobrevivir en el diff: {:?}",
         plan.semantic_diff
     );
+    assert_eq!(plan.no_op_operations[0].index, 1);
     assert_eq!(
         plan.normalized_operations.len(),
         2,
         "y las dos operaciones siguen en el plan, como siempre"
     );
+    app.change_apply(&plan.change_set_id, None)
+        .expect("el working secuencial debe poder aplicarse");
+    let final_raw = std::fs::read_to_string(dir.path().join("casa.md")).unwrap();
+    assert!(final_raw.contains("reemplazado"));
+    assert!(!final_raw.contains("reemplázame"));
 }

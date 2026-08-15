@@ -36,7 +36,7 @@
 //! `SemanticDiff`, E12-H04 `ValidationReport` sí lo necesitan); esta heurística de riesgo solo
 //! necesita el workspace *antes* del cambio para medir backlinks del documento afectado.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::diff::{diff_snap, BodyHunk, ChangeKind};
 use crate::error::CoreError;
@@ -52,6 +52,9 @@ use crate::types::{
     RiskLevel, SemanticDiff, Severity, ValidationReport, ValidationSummary,
 };
 use crate::DocumentSet;
+
+/// Versión interna de la semántica del planificador. No forma parte del wire de `PlanResult`.
+pub const PLAN_SEMANTICS_VERSION: u32 = 2;
 
 /// A partir de este número de backlinks entrantes, el factor de riesgo es `High` (por debajo,
 /// `Medium`, siempre que haya al menos uno).
@@ -489,12 +492,15 @@ pub fn normalize_create_en(
 
 /// Cuerpo (tras el frontmatter) del documento en `path`, o `Err(NormalizeTargetNotFound)` si el
 /// path no tiene fichero en el workspace. Reusa `model::parse_file` (la misma verdad del core).
-fn document_body(doc_set: &DocumentSet, path: &RelPath) -> Result<String, CoreError> {
-    let raw = doc_set
-        .files()
+fn document_body_en(files: &FileMap, path: &RelPath) -> Result<String, CoreError> {
+    let raw = files
         .get(path)
         .ok_or_else(|| CoreError::NormalizeTargetNotFound(path.as_str().to_string()))?;
     Ok(model::parse_file(path.as_str(), raw).body)
+}
+
+fn document_body(doc_set: &DocumentSet, path: &RelPath) -> Result<String, CoreError> {
+    document_body_en(doc_set.files(), path)
 }
 
 /// Normaliza un `replace_text`: sustituye todas las ocurrencias literales de `find` por `replace`
@@ -516,7 +522,18 @@ pub fn normalize_replace_text(
     replace: &str,
     expected_occurrences: Option<usize>,
 ) -> Result<NormalizedOperation, CoreError> {
-    let body = document_body(doc_set, path)?;
+    normalize_replace_text_en(doc_set.files(), path, find, replace, expected_occurrences)
+}
+
+/// Como [`normalize_replace_text`], pero contra un `FileMap` de trabajo acumulado.
+pub fn normalize_replace_text_en(
+    files: &FileMap,
+    path: &RelPath,
+    find: &str,
+    replace: &str,
+    expected_occurrences: Option<usize>,
+) -> Result<NormalizedOperation, CoreError> {
+    let body = document_body_en(files, path)?;
 
     if let Some(expected) = expected_occurrences {
         let found = if find.is_empty() {
@@ -558,7 +575,18 @@ pub fn normalize_edit_section(
     mode: EditSectionMode,
     content: &str,
 ) -> Result<NormalizedOperation, CoreError> {
-    let body = document_body(doc_set, path)?;
+    normalize_edit_section_en(doc_set.files(), path, heading_path, mode, content)
+}
+
+/// Como [`normalize_edit_section`], pero contra un `FileMap` de trabajo acumulado.
+pub fn normalize_edit_section_en(
+    files: &FileMap,
+    path: &RelPath,
+    heading_path: &[String],
+    mode: EditSectionMode,
+    content: &str,
+) -> Result<NormalizedOperation, CoreError> {
+    let body = document_body_en(files, path)?;
     let headings = model::parse_headings(&body);
     let (start, end) =
         model::locate_section(&headings, body.len(), heading_path).ok_or_else(|| {
@@ -584,19 +612,6 @@ pub fn normalize_edit_section(
     })
 }
 
-/// `Err(NormalizeTargetNotFound)` si `path` no tiene fichero en el workspace. Punto único de
-/// verificación de existencia para los normalizadores que solo necesitan saber que el documento
-/// objetivo existe (sin leer su cuerpo).
-fn ensure_exists(doc_set: &DocumentSet, path: &RelPath) -> Result<(), CoreError> {
-    if doc_set.files().contains_key(path) {
-        Ok(())
-    } else {
-        Err(CoreError::NormalizeTargetNotFound(
-            path.as_str().to_string(),
-        ))
-    }
-}
-
 /// Normaliza un `patch_frontmatter`: aplica un merge-patch RFC 7386 al frontmatter de un documento
 /// existente (E12-H05, reserva completada en E12-H08).
 ///
@@ -614,7 +629,20 @@ pub fn normalize_patch_frontmatter(
     path: &RelPath,
     patch: FrontmatterPatch,
 ) -> Result<NormalizedOperation, CoreError> {
-    ensure_exists(doc_set, path)?;
+    normalize_patch_frontmatter_en(doc_set.files(), path, patch)
+}
+
+/// Como [`normalize_patch_frontmatter`], contra el mapa acumulado.
+pub fn normalize_patch_frontmatter_en(
+    files: &FileMap,
+    path: &RelPath,
+    patch: FrontmatterPatch,
+) -> Result<NormalizedOperation, CoreError> {
+    if !files.contains_key(path) {
+        return Err(CoreError::NormalizeTargetNotFound(
+            path.as_str().to_string(),
+        ));
+    }
     Ok(NormalizedOperation::PatchFrontmatter {
         path: path.clone(),
         patch,
@@ -634,7 +662,20 @@ pub fn normalize_replace_body(
     path: &RelPath,
     body: String,
 ) -> Result<NormalizedOperation, CoreError> {
-    ensure_exists(doc_set, path)?;
+    normalize_replace_body_en(doc_set.files(), path, body)
+}
+
+/// Como [`normalize_replace_body`], contra el mapa acumulado.
+pub fn normalize_replace_body_en(
+    files: &FileMap,
+    path: &RelPath,
+    body: String,
+) -> Result<NormalizedOperation, CoreError> {
+    if !files.contains_key(path) {
+        return Err(CoreError::NormalizeTargetNotFound(
+            path.as_str().to_string(),
+        ));
+    }
     Ok(NormalizedOperation::ReplaceBody {
         path: path.clone(),
         body,
@@ -1156,28 +1197,46 @@ pub fn apply_normalized_ops(
 ) -> Result<FileMap, CoreError> {
     let mut out = files.clone();
     for op in ops {
-        apply_one(&mut out, op)?;
+        apply_normalized_operation(&mut out, op)?;
     }
     Ok(out)
+}
+
+/// Aplica una única operación terminal y devuelve si cambió alguno de sus paths afectados.
+pub fn apply_normalized_operation(
+    files: &mut FileMap,
+    op: &NormalizedOperation,
+) -> Result<bool, CoreError> {
+    let affected: Vec<RelPath> = match op {
+        NormalizedOperation::Move { from, to, .. } => vec![from.clone(), to.clone()],
+        _ => vec![documento_resultante_de(op).clone()],
+    };
+    let before: BTreeMap<RelPath, Option<String>> = affected
+        .iter()
+        .map(|path| (path.clone(), files.get(path).cloned()))
+        .collect();
+    apply_one(files, op)?;
+    Ok(affected
+        .iter()
+        .any(|path| before.get(path) != Some(&files.get(path).cloned())))
 }
 
 /// Comprueba que la secuencia `ops` no contiene ninguna **colisión intra-plan** de existencia —
 /// E28-H04.
 ///
-/// Los guards de E28-H02 (`normalize_create`/`normalize_move`) juzgan **una** operación contra el
-/// `DocumentSet` con el que empezó a planificar. Cuando el plan tiene varias operaciones que tocan
-/// paths relacionados, ese `DocumentSet` deja de ser cierto a partir de la segunda: ninguna op ve el
-/// efecto de las que la preceden. Esta función cierra el hueco recorriendo `ops` **en orden** sobre
-/// un estado de ocupación acumulado que arranca de `files`: cada `Create`/`Move.to` aceptado
-/// **ocupa** su path; cada `Delete`/`Move.from` aceptado lo **libera**.
+/// Los normalizadores de `change_plan` ya juzgan cada raw operation contra el working acumulado.
+/// Esta función conserva una segunda línea de defensa sobre el artefacto terminal completo —también
+/// para planes persistidos o cualquier productor futuro— recorriendo `ops` **en orden** sobre un
+/// estado de ocupación que arranca de `files`: cada `Create`/`Move.to` aceptado **ocupa** su path;
+/// cada `Delete`/`Move.from` aceptado lo **libera**.
 ///
 /// Por eso `[delete X, create X]` y `[move A→B, create A]` son legítimos (liberar y reocupar), y
 /// `[move a→final, move b→final]`, `[create X, move b→X]` y `[create X, create X]` no lo son: el
 /// segundo miembro de cada par publicaría encima de lo que dejó el primero.
 ///
-/// El criterio de colisión es **el mismo** que el de los guards de una sola operación: los tres
-/// caminos consultan [`EstadoOcupacion`] (invariante #3 de `CLAUDE.md`, una sola verdad computada).
-/// Lo único que cambia es contra qué estado se pregunta — el de partida o el acumulado.
+/// El criterio de colisión es **el mismo** que el de los normalizadores: todos consultan
+/// [`EstadoOcupacion`] sobre el estado acumulado (invariante #3 de `CLAUDE.md`, una sola verdad
+/// computada).
 ///
 /// # Errores
 /// [`CoreError::DocumentAlreadyExists`] con el path colisionado, en cuanto la primera operación
@@ -1316,4 +1375,22 @@ pub fn op_variant_name(op: &NormalizedOperation) -> String {
         NormalizedOperation::Delete { .. } => "delete",
     }
     .to_string()
+}
+
+/// Hash determinista y versionado de un plan. La versión evita que dos semánticas de
+/// normalización distintas compartan identidad de runtime.
+pub fn compute_plan_hash(
+    base: &crate::types::WorkspaceRevision,
+    ops: &[NormalizedOperation],
+) -> crate::types::PlanHash {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"lodestar/change-plan");
+    hasher.update(b"\0");
+    hasher.update(&PLAN_SEMANTICS_VERSION.to_be_bytes());
+    hasher.update(b"\0");
+    hasher.update(base.0.as_bytes());
+    hasher.update(b"\0");
+    let serialized = serde_json::to_vec(ops).expect("NormalizedOperation siempre serializa");
+    hasher.update(&serialized);
+    crate::types::PlanHash(format!("blake3:{}", hasher.finalize().to_hex()))
 }

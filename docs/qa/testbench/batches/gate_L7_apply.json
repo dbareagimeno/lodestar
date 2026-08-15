@@ -345,6 +345,55 @@
           "describe": "…y que el segundo revert hizo ALGO: su revisión difiere de la del primero. Sin esto, el no-op silencioso de M-01 pasaría el invariante anterior."
         }
       ]
+    },
+    {
+      "id": "L7-APL-SECUENCIAL-MISMO-DOCUMENTO",
+      "fresh_root": true,
+      "descripcion": "Regresión de alta severidad del seguimiento E28-H04: change_plan + change_apply publican las tres sustituciones acumuladas sobre un mismo documento; el test Rust MCP complementario reinicia el proceso entre ambas llamadas.",
+      "steps": [
+        {
+          "kind": "shell",
+          "cmd": "printf '\\nMARCADOR_ALFA MARCADOR_BETA MARCADOR_GAMMA\\n' >> guias/doc-00.md",
+          "expect": { "describe": "Planta los tres tokens que deben sobrevivir juntos.", "rc": 0 }
+        },
+        {
+          "kind": "call",
+          "tool": "change_plan",
+          "arguments": {
+            "operations": [
+              { "op": "replace_text", "path": "guias/doc-00.md", "find": "MARCADOR_ALFA", "replace": "ALFA_CAMBIADA", "expectedOccurrences": 1 },
+              { "op": "replace_text", "path": "guias/doc-00.md", "find": "MARCADOR_BETA", "replace": "BETA_CAMBIADA", "expectedOccurrences": 1 },
+              { "op": "replace_text", "path": "guias/doc-00.md", "find": "MARCADOR_GAMMA", "replace": "GAMMA_CAMBIADA", "expectedOccurrences": 1 }
+            ],
+            "policy": { "requireValidResult": false, "allowWarnings": true }
+          },
+          "expect": {
+            "describe": "El plan conserva las tres terminales acumuladas y es aplicable.",
+            "is_error": false,
+            "equals": { "structured.canApply": true },
+            "length": { "structured.normalizedOperations": 3, "structured.noOpOperations": 0 }
+          }
+        },
+        {
+          "kind": "call",
+          "tool": "change_apply",
+          "arguments": { "changeSetId": "@step1.structured.changeSetId" },
+          "expect": {
+            "describe": "El apply reproduce exclusivamente las terminales del plan.",
+            "is_error": false,
+            "equals": { "structured.applied": true, "structured.changedPaths": ["guias/doc-00.md"] }
+          }
+        },
+        {
+          "kind": "shell",
+          "cmd": "grep -c 'ALFA_CAMBIADA BETA_CAMBIADA GAMMA_CAMBIADA' guias/doc-00.md",
+          "expect": {
+            "describe": "Comprobación material: ninguna sustitución fue restaurada por un ReplaceBody posterior.",
+            "rc": 0,
+            "equals": { "stdout": "1\n" }
+          }
+        }
+      ]
     }
   ]
 }

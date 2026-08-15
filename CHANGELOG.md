@@ -7,6 +7,25 @@ y el proyecto sigue [Versionado Semántico](https://semver.org/lang/es/).
 
 ## [No publicado]
 
+### Corregido
+
+- **Alta severidad — `change_plan` ya no pierde silenciosamente operaciones de contenido sobre el
+  mismo documento.** Cada operación cruda se normaliza ahora contra el resultado acumulado de las
+  anteriores y cada terminal se aplica inmediatamente al estado de planificación con el mismo
+  mutador canónico que usa el replay. Esto compone correctamente cadenas de `replace_text`/
+  `edit_section`, operaciones posteriores sobre documentos creados o movidos y las reescrituras
+  múltiples producidas por selecciones `delete/remove_links`. `expectedWorkspaceRevision` y
+  `expectedRevision` continúan juzgándose contra el snapshot base.
+- **`noOpOperations` se decide por operación normalizada y estado inmediato**, no por documento
+  comparando el principio y el final del plan. Las operaciones permanecen en
+  `normalizedOperations`; un plan de efecto neto cero puede tener diff vacío sin contener no-ops.
+- **Los planes runtime anteriores se invalidan con `PLAN_STALE`.** El fichero persistido gana un
+  `plannerSemanticsVersion` interno y el dominio de `planHash` incluye esa versión. El campo no se
+  añade a `PlanResult` ni cambia la forma del wire MCP; sí cambian, de forma deliberada, todos los
+  `planHash`/`changeSetId`, que son opacos. Los planes sin versión o de semántica anterior deben
+  volver a producirse con `change_plan` porque ya no conservan la intención cruda necesaria para
+  reparar sus `ReplaceBody` resueltos.
+
 ## [0.6.0] - 2026-08-09
 
 > **Al actualizar desde 0.5.0, un cambio puede romperte**: el wire pasó a ser **estricto** con los
@@ -39,8 +58,8 @@ y el proyecto sigue [Versionado Semántico](https://semver.org/lang/es/).
   Tres detalles: la operación **sigue** en `normalizedOperations` (`index` apunta ahí — la señal es
   aditiva); `op` nombra la operación **ya normalizada**, así que un `replace_text` figura como
   `replace_body`; y cubre **cualquier** operación sin efecto, no solo `replace_text`. Va **fuera del
-  `planHash`**, de modo que ningún plan existente cambia de identidad y los persistidos por versiones
-  anteriores se siguen aplicando.
+  `planHash`**. Esa fue la compatibilidad de `0.6.0`; queda supersedida en `[No publicado]` por el
+  versionado de la semántica secuencial, que cambia la identidad y rechaza planes runtime anteriores.
 
 - **`DOCUMENT_ALREADY_EXISTS`: el catálogo de errores pasa de 16 a 17 códigos** (`E28-H02`, ampliado
   en `E28-H04`; épica [`epica-28`](requirements/epica-28-defectos-destructivos-testbench.md)). Es el
@@ -105,12 +124,13 @@ y el proyecto sigue [Versionado Semántico](https://semver.org/lang/es/).
     a rechazarse con `DOCUMENT_ALREADY_EXISTS` porque el guard veía el path todavía ocupado en el
     estado inicial.
 
-  Ahora la normalización lleva un **estado de ocupación acumulado**: arranca del disco y cada
+  En `0.6.0` la normalización llevaba un **estado de ocupación acumulado**: arrancaba del disco y cada
   operación aceptada lo actualiza en orden (un `create`/`move.to` **ocupa**, un `delete`/`move.from`
   **libera**). Los cinco escenarios quedan fijados por tests de wire en
   `crates/lodestar-mcp/tests/mcp.rs` y por su mitad pura en `crates/lodestar-core/tests/core.rs`. La
-  selección masiva (`selection`+`operation`) queda fuera del acumulado a propósito: `create`/`move`
-  no son operaciones admitidas por esa vía, así que no hay secuencia que acumular.
+  selección masiva (`selection`+`operation`) quedaba fuera del acumulado. `[No publicado]`
+  supersede ese límite: acumula también contenido y materializa secuencialmente cada instancia de
+  selección, incluidas las varias terminales que puede producir un `delete/remove_links`.
 
   **Fuera de alcance**: la comparación de paths sigue siendo **byte a byte**, sin normalizar caja ni
   forma Unicode — ver [`decisiones §24`](decisiones/24-equivalencia-caja-unicode.md).
