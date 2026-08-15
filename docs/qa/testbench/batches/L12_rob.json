@@ -1,6 +1,6 @@
 {
   "batch": "L12",
-  "root": "real",
+  "root": "worktree",
   "profile": "readonly",
   "fixtures": null,
   "cases": [

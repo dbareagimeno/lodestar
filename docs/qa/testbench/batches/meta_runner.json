@@ -1,0 +1,207 @@
+{
+  "batch": "meta_runner",
+  "descripcion": "Autotest del banco: el runner se prueba a sí mismo (E33-H02, BDD-1 y BDD-2). META-01 es un caso cuyo `expect` casa con la respuesta real del motor y debe dar PASS con exit 0; META-02 lleva un esperado DELIBERADAMENTE FALSO y debe dar FAIL nombrando el subcampo que discrepó, fuera del gate. La semántica de cada clave de `expect` está fijada en ../FORMATO_EXPECT.md.",
+  "root": "corpus",
+  "profile": "readonly",
+  "fixtures": null,
+  "cases": [
+    {
+      "id": "META-01",
+      "gate": true,
+      "descripcion": "BDD-1 — todas las familias de aserción del formato, sobre respuestas reales del corpus canónico y sin un solo esperado que dependa del sistema de ficheros (FORMATO_EXPECT.md §6).",
+      "steps": [
+        {
+          "kind": "list_tools",
+          "expect": {
+            "describe": "Perfil readonly: exactamente las 7 tools de lectura, sin las 3 de cambio (ARCHITECTURE.md §19.6).",
+            "length": { "tools": 7 },
+            "contains": { "tools": "workspace_status" },
+            "not_contains": { "tools": "change_apply" }
+          }
+        },
+        {
+          "kind": "call",
+          "tool": "workspace_status",
+          "arguments": {},
+          "expect": {
+            "describe": "Forma de la respuesta y capabilities de readonly. Los `counts` se aseveran por TIPO, nunca por valor: su número depende del filesystem (ver README, colisiones de caja y NFC/NFD).",
+            "is_error": false,
+            "equals": {
+              "structured.capabilities.writes": false,
+              "structured.capabilities.transactions": false,
+              "structured.capabilities.revert": false,
+              "structured.recovery.pendingTransaction": false,
+              "structured.formatVersion": "0.2"
+            },
+            "present": ["structured.counts.documents", "structured.counts.links", "structured.receipts"],
+            "type": { "structured.counts.documents": "number", "structured.knowledgeRoots": "array" },
+            "matches": { "structured.workspaceRevision": "^blake3:[0-9a-f]{64}$" }
+          }
+        },
+        {
+          "kind": "call",
+          "tool": "knowledge_get",
+          "arguments": { "ref": { "path": "guias/doc-00.md" } },
+          "expect": {
+            "describe": "Documento existente del corpus: su título lo determina su propio contenido, no el inventario, así que es un `equals` legítimo.",
+            "is_error": false,
+            "equals": { "structured.document.path": "guias/doc-00.md", "structured.document.title": "Documento 00" },
+            "matches": { "structured.document.revision": "^blake3:[0-9a-f]{64}$" }
+          }
+        },
+        {
+          "kind": "call",
+          "tool": "knowledge_get",
+          "arguments": { "ref": { "path": "no/existe/jamas.md" } },
+          "expect": {
+            "describe": "Error de TOOL (no de protocolo): código estable del contrato.",
+            "error_code": "DOCUMENT_NOT_FOUND",
+            "is_error": true,
+            "absent": ["structured"]
+          }
+        },
+        {
+          "kind": "call",
+          "tool": "graph_query",
+          "arguments": { "operation": "orphans", "limit": 2 },
+          "expect": {
+            "describe": "«orphans» se retiró en E16-H02 SIN alias: hoy es INVALID_SCHEMA y el mensaje enumera las ocho operaciones válidas.",
+            "error_code": "INVALID_SCHEMA",
+            "contains": { "text": "isolated" }
+          }
+        },
+        {
+          "kind": "call",
+          "tool": "knowledge_check",
+          "arguments": { "scope": { "kind": "document", "ref": { "path": "notas/escapa.md" } } },
+          "expect": {
+            "describe": "Scope de UN documento: aquí el conteo sí es estable (depende solo de ese fichero). Enlace que sale de la raíz → Err no configurable.",
+            "is_error": false,
+            "equals": {
+              "structured.valid": false,
+              "structured.summary.errors": 1,
+              "structured.summary.warnings": 0,
+              "structured.diagnostics.0.code": "LINK-ESCAPES-WORKSPACE",
+              "structured.diagnostics.0.level": "err"
+            },
+            "length": { "structured.diagnostics": 1 },
+            "absent": ["structured.nextCursor"]
+          }
+        },
+        {
+          "kind": "call",
+          "tool": "knowledge_check",
+          "arguments": { "scope": { "kind": "document", "ref": { "path": "guias/case-mismatch.md" } } },
+          "expect": {
+            "describe": "El mismo scope-documento con un aviso: `valid` sigue siendo true porque un warn no invalida.",
+            "is_error": false,
+            "equals": {
+              "structured.valid": true,
+              "structured.summary.warnings": 1,
+              "structured.diagnostics.0.code": "LINK-CASE-MISMATCH",
+              "structured.diagnostics.0.level": "warn"
+            },
+            "min_length": { "structured.diagnostics": 1 }
+          }
+        },
+        {
+          "kind": "call",
+          "tool": "knowledge_search",
+          "arguments": { "where": "type = \"guia\"", "limit": 2 },
+          "expect": {
+            "describe": "Página acotada: nunca más resultados que el `limit`, y hay al menos uno (el corpus tiene guías en cualquier filesystem).",
+            "is_error": false,
+            "min_length": { "structured.results": 1 },
+            "type": { "structured.results": "array", "structured.totalApproximate": "number" },
+            "present": ["structured.results.0.path", "structured.results.0.revision"]
+          }
+        },
+        {
+          "kind": "call",
+          "tool": "knowledge_search",
+          "arguments": { "where": "has(tags)", "limit": 1001 },
+          "expect": {
+            "describe": "E26-H10 — ninguna respuesta viaja sin cota: un limit fuera de [1, 100] es INVALID_SCHEMA.",
+            "error_code": "INVALID_SCHEMA",
+            "contains": { "text": "limit" }
+          }
+        },
+        {
+          "kind": "call",
+          "tool": "workspace_status",
+          "arguments": {},
+          "expect": {
+            "describe": "Segunda lectura idéntica: sostiene el invariante de caso «lecturas no mutan» (paso 9 vs paso 1).",
+            "is_error": false,
+            "matches": { "structured.workspaceRevision": "^blake3:[0-9a-f]{64}$" }
+          }
+        }
+      ],
+      "expect": [
+        {
+          "invariant": "same",
+          "steps": [1, 9],
+          "path": "structured.workspaceRevision",
+          "describe": "Invariante transversal del informe §5: una tanda de lecturas deja la workspaceRevision intacta."
+        },
+        {
+          "invariant": "same",
+          "steps": [5, 6],
+          "path": "structured.workspaceRevision",
+          "describe": "La revisión que ecoa knowledge_check es la del workspace, no la del documento consultado: idéntica entre dos scopes distintos."
+        }
+      ]
+    },
+    {
+      "id": "META-02",
+      "gate": false,
+      "descripcion": "BDD-2 — DEMOSTRACIÓN, deliberadamente falsa y FUERA DEL GATE. Solo se ejecuta con --incluir-demos. Debe dar FAIL y el resumen debe nombrar los subcampos que discreparon: `structured.capabilities.writes` (esperado true, real false), `structured.document.title` (esperado «Titulo Inventado», real «Documento 00») y el invariante `same` entre pasos con revisiones distintas. Si algún día este caso diera PASS, el runner habría dejado de morder.",
+      "steps": [
+        {
+          "kind": "call",
+          "tool": "workspace_status",
+          "arguments": {},
+          "expect": {
+            "describe": "FALSO A PROPÓSITO: en readonly `writes` es false. Debe fallar por `structured.capabilities.writes`.",
+            "is_error": false,
+            "equals": { "structured.capabilities.writes": true }
+          }
+        },
+        {
+          "kind": "call",
+          "tool": "knowledge_get",
+          "arguments": { "ref": { "path": "guias/doc-00.md" } },
+          "expect": {
+            "describe": "FALSO A PROPÓSITO: el título real es «Documento 00». Debe fallar por `structured.document.title`.",
+            "equals": { "structured.document.title": "Titulo Inventado" }
+          }
+        },
+        {
+          "kind": "call",
+          "tool": "knowledge_get",
+          "arguments": { "ref": { "path": "equipos/doc-01.md" } },
+          "expect": {
+            "describe": "Este paso, aislado, es CIERTO: sirve para que el invariante de caso de abajo sea lo único que falle entre los pasos 1 y 2.",
+            "is_error": false,
+            "equals": { "structured.document.path": "equipos/doc-01.md" }
+          }
+        }
+      ],
+      "expect": [
+        {
+          "invariant": "same",
+          "steps": [1, 2],
+          "path": "structured.document.revision",
+          "describe": "FALSO A PROPÓSITO: son dos documentos distintos, así que sus revisiones difieren. Debe fallar el invariante `same`."
+        }
+      ]
+    },
+    {
+      "id": "META-03",
+      "descripcion": "Un caso EXPLORATORIO (sin `expect` en ningún paso): se ejecuta y se registra, no computa al veredicto (ni PASS ni FAIL). Es la garantía de que los lotes históricos del homelab siguen corriendo tal cual bajo el runner nuevo.",
+      "steps": [
+        { "kind": "call", "tool": "metadata_inspect", "arguments": { "mode": "catalog", "limit": 3 } }
+      ]
+    }
+  ]
+}

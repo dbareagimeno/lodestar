@@ -1,0 +1,345 @@
+{
+  "batch": "gate_L6_plan",
+  "descripcion": "L6 del gate — `change_plan`: forma del plan, HASH DETERMINISTA (invariante transversal del informe §5), normalización, policy efectiva y los guards que muerden en la planificación. Porte del lote temático L6 (`batches/L6_pln.json`) contra el corpus canónico. OJO al matiz del campo de pruebas nuevo: el corpus tiene errores preexistentes a propósito, así que los planes que deban ser aplicables declaran `requireValidResult: false` — con el default (`true`) el plan sale con `canApply: false`, y eso también se asevera.",
+  "root": "corpus",
+  "profile": "standard",
+  "fixtures": null,
+  "cases": [
+    {
+      "id": "L6-PLN-01",
+      "fresh_root": true,
+      "descripcion": "Origen: L6_pln.json PLN-01 — forma completa del PlanResult y, sobre todo, que PLANIFICAR NO ESCRIBE. Fuente: safe-changes.md «A round trip»; mcp.yml change_plan retorno.",
+      "steps": [
+        {
+          "kind": "shell",
+          "cmd": "shasum -a 256 guias/doc-00.md | cut -d' ' -f1",
+          "expect": { "describe": "Huella del documento ANTES de planificar.", "rc": 0 }
+        },
+        {
+          "kind": "call",
+          "tool": "change_plan",
+          "arguments": {
+            "operations": [{ "op": "patch_frontmatter", "path": "guias/doc-00.md", "patch": { "priority": 1 } }],
+            "policy": { "requireValidResult": false, "allowWarnings": true }
+          },
+          "expect": {
+            "describe": "Todas las piezas que el contrato promete del plan: identidad, hash, base, política EFECTIVA (E29-H07), operación normalizada, diff semántico e impacto.",
+            "is_error": false,
+            "equals": {
+              "structured.canApply": true,
+              "structured.policy.requireValidResult": false,
+              "structured.policy.allowWarnings": true,
+              "structured.normalizedOperations.0.op": "patch_frontmatter",
+              "structured.normalizedOperations.0.path": "guias/doc-00.md",
+              "structured.semanticDiff.modified.0": "guias/doc-00.md",
+              "structured.semanticDiff.frontmatterChanges.0": "guias/doc-00.md",
+              "structured.impact.affectedDocuments.0": "guias/doc-00.md",
+              "structured.impact.affectedCount": 1,
+              "structured.capturedRevisions": {}
+            },
+            "matches": {
+              "structured.changeSetId": "^changeset:[0-9a-f]{64}$",
+              "structured.planHash": "^blake3:[0-9a-f]{64}$",
+              "structured.baseWorkspaceRevision": "^blake3:[0-9a-f]{64}$"
+            },
+            "present": ["structured.expiresAt", "structured.risk.level", "structured.diagnosticsBefore", "structured.diagnosticsAfter", "structured.noOpOperations"]
+          }
+        },
+        {
+          "kind": "shell",
+          "cmd": "shasum -a 256 guias/doc-00.md | cut -d' ' -f1",
+          "expect": { "describe": "Huella DESPUÉS de planificar.", "rc": 0 }
+        }
+      ],
+      "expect": [
+        {
+          "invariant": "same",
+          "steps": [0, 2],
+          "path": "stdout",
+          "describe": "INVARIANTE CENTRAL del modelo transaccional: `change_plan` simula y no escribe una sola línea. La huella del documento afectado es idéntica antes y después de planificar."
+        }
+      ]
+    },
+    {
+      "id": "L6-PLN-02-HASH-DETERMINISTA",
+      "fresh_root": true,
+      "descripcion": "Origen: L6_pln.json PLN-02 e invariante transversal del informe §5 («hash determinista de planes», verificado conforme). El planHash es blake3(base ‖ ops canónicas) y NO depende del reloj.",
+      "steps": [
+        {
+          "kind": "call",
+          "tool": "change_plan",
+          "arguments": {
+            "operations": [{ "op": "patch_frontmatter", "path": "guias/doc-00.md", "patch": { "priority": 1 } }],
+            "policy": { "requireValidResult": false, "allowWarnings": true }
+          },
+          "expect": { "describe": "Primer plan.", "is_error": false, "matches": { "structured.planHash": "^blake3:[0-9a-f]{64}$" } }
+        },
+        {
+          "kind": "call",
+          "tool": "change_plan",
+          "arguments": {
+            "operations": [{ "op": "patch_frontmatter", "path": "guias/doc-00.md", "patch": { "priority": 1 } }],
+            "policy": { "requireValidResult": false, "allowWarnings": true }
+          },
+          "expect": { "describe": "El MISMO plan, otra vez.", "is_error": false }
+        },
+        {
+          "kind": "call",
+          "tool": "change_plan",
+          "arguments": {
+            "operations": [{ "op": "patch_frontmatter", "path": "guias/doc-00.md", "patch": { "priority": 2 } }],
+            "policy": { "requireValidResult": false, "allowWarnings": true }
+          },
+          "expect": { "describe": "Un plan DISTINTO (otro valor en el patch).", "is_error": false }
+        }
+      ],
+      "expect": [
+        {
+          "invariant": "same",
+          "steps": [0, 1],
+          "path": "structured.planHash",
+          "describe": "Mismo input + misma base ⇒ mismo hash. Si el reloj entrara en el hash, esto fallaría."
+        },
+        {
+          "invariant": "same",
+          "steps": [0, 1],
+          "path": "structured.changeSetId",
+          "describe": "…y el mismo changeSetId: la identidad del plan es su contenido, no su momento."
+        },
+        {
+          "invariant": "differs",
+          "steps": [0, 2],
+          "path": "structured.planHash",
+          "describe": "El contraste que da valor al invariante: un patch distinto SÍ cambia el hash. Sin esta mitad, un hash constante pasaría el `same` de arriba."
+        }
+      ]
+    },
+    {
+      "id": "L6-PLN-DEFAULTS-POLICY",
+      "descripcion": "Origen: L6_pln.json PLN-03 y hallazgo E29-H07 (la policy efectiva se devuelve). Statu quo verificado ejecutando: los defaults REALES son `requireValidResult: true` y `allowWarnings: true`.",
+      "steps": [
+        {
+          "kind": "call",
+          "tool": "change_plan",
+          "arguments": { "operations": [{ "op": "patch_frontmatter", "path": "guias/doc-00.md", "patch": { "priority": 1 } }] },
+          "expect": {
+            "describe": "Sin `policy`, el plan ecoa la EFECTIVA con los defaults ya aplicados: el cliente ve bajo qué política se le juzgará al aplicar. Sobre un corpus con errores preexistentes, ese default deja `canApply: false` — y eso es una promesa cumplida, no un fallo.",
+            "is_error": false,
+            "equals": {
+              "structured.policy.requireValidResult": true,
+              "structured.policy.allowWarnings": true,
+              "structured.canApply": false
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "L6-PLN-DELETE-INBOUND",
+      "fresh_root": true,
+      "descripcion": "Origen: L6_pln.json + `decisiones §23` Fase 12 / E21-H03. Conserva el guard de `guias/doc-00.md` con entrante (README.md), y porta G1-12: delete de `fixtures/sin-entrantes.md` sin entrantes/0 backlinks, con default normalizado `reject` y borrado material.",
+      "steps": [
+        {
+          "kind": "call",
+          "tool": "change_plan",
+          "arguments": { "operations": [{ "op": "delete", "path": "guias/doc-00.md" }] },
+          "expect": {
+            "describe": "Sin `inboundLinksPolicy` y CON backlinks: falta un campo requerido ⇒ INVALID_SCHEMA, y el mensaje enumera las dos políticas válidas.",
+            "error_code": "INVALID_SCHEMA",
+            "contains": { "text": "inboundLinksPolicy" }
+          }
+        },
+        {
+          "kind": "call",
+          "tool": "change_plan",
+          "arguments": { "operations": [{ "op": "delete", "path": "guias/doc-00.md", "inboundLinksPolicy": "reject" }] },
+          "expect": {
+            "describe": "Con `reject` explícito y backlinks: código DISTINTO, INBOUND_LINKS_EXIST. La diferencia entre «no elegiste» y «elegiste rechazar» es contractual.",
+            "error_code": "INBOUND_LINKS_EXIST"
+          }
+        },
+        {
+          "kind": "call",
+          "tool": "change_plan",
+          "arguments": {
+            "operations": [{ "op": "delete", "path": "guias/doc-00.md", "inboundLinksPolicy": "remove_links" }],
+            "policy": { "requireValidResult": false, "allowWarnings": true }
+          },
+          "expect": {
+            "describe": "Con `remove_links` el plan SÍ sale, y su impacto incluye el documento que hay que reescribir además del borrado: dos documentos afectados por una sola op.",
+            "is_error": false,
+            "equals": { "structured.canApply": true, "structured.impact.affectedCount": 2 },
+            "contains": { "structured.impact.affectedDocuments": "README.md" }
+          }
+        }
+        ,{
+          "kind": "call",
+          "tool": "graph_query",
+          "arguments": {
+            "operation": "backlinks",
+            "ref": { "path": "fixtures/sin-entrantes.md" }
+          },
+          "expect": {
+            "describe": "G1-12: el documento no tiene entrantes; el grafo confirma cero backlinks.",
+            "is_error": false,
+            "equals": { "structured.summary.edgeCount": 0 },
+            "length": { "structured.edges": 0 }
+          }
+        }
+        ,{
+          "kind": "call",
+          "tool": "change_plan",
+          "arguments": {
+            "operations": [
+              { "op": "delete", "path": "fixtures/sin-entrantes.md" }
+            ],
+            "policy": { "requireValidResult": false, "allowWarnings": true }
+          },
+          "expect": {
+            "describe": "G1-12: sin backlinks se permite omitir inboundLinksPolicy; el plan materializa el default inerte `reject` y sigue siendo aplicable.",
+            "is_error": false,
+            "equals": {
+              "structured.canApply": true,
+              "structured.normalizedOperations.0.inbound_links_policy": "reject"
+            }
+          }
+        }
+        ,{
+          "kind": "call",
+          "tool": "change_apply",
+          "arguments": { "changeSetId": "@step4.structured.changeSetId" },
+          "expect": {
+            "describe": "G1-12: se aplica el plan de borrado encadenado.",
+            "is_error": false,
+            "equals": { "structured.applied": true },
+            "contains": { "structured.changedPaths": "fixtures/sin-entrantes.md" }
+          }
+        }
+        ,{
+          "kind": "shell",
+          "cmd": "test ! -e fixtures/sin-entrantes.md",
+          "expect": {
+            "describe": "G1-12: el borrado se observa materialmente en disco.",
+            "rc": 0
+          }
+        }
+      ]
+    },
+    {
+      "id": "L6-PLN-OCUPADO",
+      "descripcion": "Origen: hallazgo A-05 de `decisiones §23` (`create`/`move` sobre path ocupado, prio 4, «único hueco con riesgo destructivo para un agente»), SALDADO por E28-H02. El esperado es el comportamiento CORREGIDO: hoy no hay plan que aplicar.",
+      "steps": [
+        {
+          "kind": "call",
+          "tool": "change_plan",
+          "arguments": { "operations": [{ "op": "create", "path": "guias/doc-00.md", "frontmatter": { "title": "Pisado" }, "body": "x\n" }] },
+          "expect": {
+            "describe": "A-05, mitad `create`: antes de E28-H02 esto daba `canApply: true` y aplicado pisaba conocimiento. HOY la normalización falla nombrando el path.",
+            "error_code": "DOCUMENT_ALREADY_EXISTS",
+            "contains": { "text": "guias/doc-00.md" }
+          }
+        },
+        {
+          "kind": "call",
+          "tool": "change_plan",
+          "arguments": { "operations": [{ "op": "move", "from": "fixtures/contador.md", "to": "equipos/doc-01.md" }] },
+          "expect": {
+            "describe": "A-05, mitad `move`: destino ocupado, mismo código.",
+            "error_code": "DOCUMENT_ALREADY_EXISTS",
+            "contains": { "text": "equipos/doc-01.md" }
+          }
+        },
+        {
+          "kind": "call",
+          "tool": "change_plan",
+          "arguments": {
+            "operations": [
+              { "op": "create", "path": "guias/nuevo-del-banco.md", "frontmatter": { "title": "Uno" }, "body": "a\n" },
+              { "op": "create", "path": "guias/nuevo-del-banco.md", "frontmatter": { "title": "Dos" }, "body": "b\n" }
+            ]
+          },
+          "expect": {
+            "describe": "E28-H04: el guard juzga contra el estado ACUMULADO por las ops anteriores del MISMO plan, no contra el workspace de partida. Dos `create` al mismo path nuevo colisionan aunque el path no exista en disco.",
+            "error_code": "DOCUMENT_ALREADY_EXISTS",
+            "contains": { "text": "guias/nuevo-del-banco.md" }
+          }
+        },
+        {
+          "kind": "call",
+          "tool": "change_plan",
+          "arguments": {
+            "operations": [{ "op": "move", "from": "fixtures/contador.md", "to": "fixtures/contador.md" }],
+            "policy": { "requireValidResult": false, "allowWarnings": true }
+          },
+          "expect": {
+            "describe": "Borde declarado del guard: `move` con from == to NO es colisión, es un no-op válido — y el plan lo DECLARA como tal (E31-H02, `decisiones §26`) en vez de dejarlo indistinguible de una op efectiva.",
+            "is_error": false,
+            "equals": {
+              "structured.noOpOperations.0.op": "move",
+              "structured.noOpOperations.0.path": "fixtures/contador.md",
+              "structured.impact.affectedCount": 0
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "L6-PLN-REVISION-CONFLICT",
+      "descripcion": "Origen: informe §5 (familia de conflictos verificada conforme: `REVISION_CONFLICT` entre otros). Control optimista por DOCUMENTO y por WORKSPACE, los dos en la planificación.",
+      "steps": [
+        {
+          "kind": "call",
+          "tool": "change_plan",
+          "arguments": {
+            "operations": [{
+              "op": "patch_frontmatter",
+              "path": "guias/doc-00.md",
+              "patch": { "priority": 1 },
+              "expectedRevision": "blake3:0000000000000000000000000000000000000000000000000000000000000000"
+            }]
+          },
+          "expect": {
+            "describe": "`expectedRevision` por documento: si el documento cambió bajo el agente, el plan no se emite. El mensaje nombra el documento, la revisión declarada y la actual.",
+            "error_code": "REVISION_CONFLICT",
+            "contains": { "text": "guias/doc-00.md" }
+          }
+        },
+        {
+          "kind": "call",
+          "tool": "change_plan",
+          "arguments": {
+            "operations": [{ "op": "patch_frontmatter", "path": "guias/doc-00.md", "patch": { "priority": 1 } }],
+            "expectedWorkspaceRevision": "blake3:0000000000000000000000000000000000000000000000000000000000000000"
+          },
+          "expect": {
+            "describe": "`expectedWorkspaceRevision` a nivel de llamada: el mismo control, con el grano del workspace entero.",
+            "error_code": "REVISION_CONFLICT",
+            "contains": { "text": "expectedWorkspaceRevision" }
+          }
+        }
+      ]
+    },
+    {
+      "id": "L6-PLN-SELECCION-MASIVA",
+      "descripcion": "Origen: L6_pln.json PLN-04 — forma-objeto (`selection` + `operation`): una operación normalizada por documento seleccionado, y `capturedRevisions` con el snapshot de cada uno (§Fase 12, E21-H02).",
+      "steps": [
+        {
+          "kind": "call",
+          "tool": "change_plan",
+          "arguments": {
+            "selection": { "where": "type = \"guia\" and status = \"activo\"" },
+            "operation": { "patch_frontmatter": { "revisado_por_el_banco": true } },
+            "policy": { "requireValidResult": false, "allowWarnings": true }
+          },
+          "expect": {
+            "describe": "La forma-objeto EXPANDE la selección: `capturedRevisions` deja de estar vacío (a diferencia de la forma-array) y cada entrada es un blake3. Se asevera la forma y una cota, no cuántos documentos casan.",
+            "is_error": false,
+            "equals": { "structured.canApply": true },
+            "type": { "structured.capturedRevisions": "object", "structured.normalizedOperations": "array" },
+            "min_length": { "structured.normalizedOperations": 1, "structured.capturedRevisions": 1 }
+          }
+        }
+      ]
+    }
+  ]
+}

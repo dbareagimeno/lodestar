@@ -1786,7 +1786,7 @@ Ninguna historia toca `contracts/mcp.yml`.
 | Historia | Qué entrega | Estado |
 |---|---|---|
 | E33-H01 | Corpus canónico determinista y generador de escala compartido | ✅ |
-| E33-H02 | Runner asertable y portable del banco de conformidad | ⏳ |
+| E33-H02 | Runner asertable y portable del banco de conformidad | ✅ |
 | E33-H03 | Centinelas de las decisiones abiertas `§22` y `§24` | ⏳ |
 | E33-H04 | Banco de rendimiento: primera corrida completa (3 variantes × 3 escalas) | ⏳ |
 | E33-H05 | Umbrales ratificados, gate codificado y smoke en CI | ⏳ **puerta interna de umbrales** |
@@ -1815,6 +1815,13 @@ los 6 hallazgos saldados con evidencia ejecutada (148/148 corridas verdes, files
 reverificados). Hallazgo nuevo MENOR anotado para H03: el generador python salta el auto-sorteo de
 enlaces donde el Rust lo desplaza — con otra semilla, un «conectado» del corpus canónico podría
 quedar sin salientes.
+
+**E33-H02 (2026-08-10)**: el runner JSON-RPC/stdio acepta `expect` evaluable, emite PASS/FAIL
+mecánico y exit code, parametriza binario y root sin rutas de máquina, y aplica readonly duro contra
+roots reales. El autotest del runner (`selftest_runner.py`) quedó en **12/12 comprobaciones**; la
+corrida BDD-3 del banco canónico quedó en **97/97 casos PASS, 0 FAIL, exit 0**, documentada en
+[`docs/qa/corrida-banco-2026-08-10.md`](docs/qa/corrida-banco-2026-08-10.md). H03–H08 permanecen
+pendientes; esta evidencia no cierra `decisiones §14`, `§22` ni `§24`, ni altera la frontera MCP.
 
 Dos matices del motor que H02 debe conocer al escribir esperados (documentados en
 `make_corpus.py`/README): un enlace a directorio **con nombre** (`guias/`) es `LINK-TARGET-MISSING`

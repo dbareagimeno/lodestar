@@ -1,0 +1,310 @@
+{
+  "batch": "gate_invariantes",
+  "descripcion": "Los INVARIANTES TRANSVERSALES del informe `docs/qa/informe-homelab-2026-08-06.md` §5 («Áreas verificadas conformes destacables»), portados como casos asertables contra el corpus canónico. No son de una tool concreta: son propiedades que atraviesan la superficie y que, si se rompieran, romperían la confianza en todo lo demás. Los que ya viven en su lote temático se citan aquí y no se duplican: hash determinista de planes y revert byte a byte están en gate_L6/gate_L7, los exit codes de la CLI en gate_H, los cursores firmados en gate_L12.",
+  "root": "corpus",
+  "profile": "readonly",
+  "fixtures": null,
+  "cases": [
+    {
+      "id": "INV-WHERE-EQUIV-FILTER",
+      "descripcion": "Informe §5: «la equivalencia `where ≡ filter` también en los ERRORES». El rechazo vive en `core::parse::build_field_path`, punto único de las dos formas — así que un error de una debe ser el mismo error de la otra.",
+      "steps": [
+        {
+          "kind": "call",
+          "tool": "knowledge_search",
+          "arguments": { "where": "type = \"guia\"", "limit": 5 },
+          "expect": { "describe": "Camino feliz por `where`.", "is_error": false }
+        },
+        {
+          "kind": "call",
+          "tool": "knowledge_search",
+          "arguments": { "filter": { "field": "type", "operator": "equals", "value": "guia" }, "limit": 5 },
+          "expect": { "describe": "El MISMO criterio por `filter`.", "is_error": false }
+        },
+        {
+          "kind": "call",
+          "tool": "knowledge_search",
+          "arguments": { "where": "graph.backlink > 0" },
+          "expect": {
+            "describe": "Camino de error por `where`: typo bajo namespace reservado.",
+            "error_code": "INVALID_SCHEMA",
+            "contains": { "text": "graph.backlinks" }
+          }
+        },
+        {
+          "kind": "call",
+          "tool": "knowledge_search",
+          "arguments": { "filter": { "field": "graph.backlink", "operator": "greater_than", "value": 0 } },
+          "expect": {
+            "describe": "El MISMO error por `filter`. Verificado ejecutando: el texto es byte a byte idéntico a partir de «`graph.backlink` no existe», y solo cambia el nombre del parámetro citado al principio («where» vs «filter») — que es correcto, porque es el parámetro que el agente escribió.",
+            "error_code": "INVALID_SCHEMA",
+            "contains": { "text": "graph.backlinks" }
+          }
+        }
+      ],
+      "expect": [
+        {
+          "invariant": "same",
+          "steps": [0, 1],
+          "path": "structured.results",
+          "describe": "Equivalencia en el camino feliz: los mismos resultados, en el mismo orden."
+        },
+        {
+          "invariant": "same",
+          "steps": [0, 1],
+          "path": "structured.totalApproximate",
+          "describe": "…y el mismo total."
+        },
+        {
+          "invariant": "same",
+          "steps": [2, 3],
+          "path": "error_code",
+          "describe": "Equivalencia en el camino de ERROR, que es la mitad que el informe §5 destaca: las dos formas comparten compilador, así que comparten diagnóstico. Si una empezara a aceptar lo que la otra rechaza, el lenguaje tendría dos semánticas."
+        }
+      ]
+    },
+    {
+      "id": "INV-LECTURAS-NO-MUTAN",
+      "descripcion": "Informe §método: «el repo real quedó byte-idéntico (misma `workspaceRevision` blake3 antes y después)». Aquí en perfil READONLY, que es como se corre contra un root real; el mismo invariante en perfil standard vive en gate_L8 · L8-READONLY-NO-MUTA.",
+      "steps": [
+        {
+          "kind": "call",
+          "tool": "workspace_status",
+          "arguments": {},
+          "expect": { "describe": "Antes.", "is_error": false }
+        },
+        {
+          "kind": "call",
+          "tool": "knowledge_get",
+          "arguments": { "ref": { "path": "guias/doc-00.md" }, "include": ["frontmatter", "body", "outgoingLinks", "backlinks"] },
+          "expect": { "describe": "La lectura más completa de un documento.", "is_error": false }
+        },
+        {
+          "kind": "call",
+          "tool": "metadata_inspect",
+          "arguments": { "mode": "catalog", "limit": 1000 },
+          "expect": { "describe": "El catálogo entero.", "is_error": false }
+        },
+        {
+          "kind": "call",
+          "tool": "impact_analyze",
+          "arguments": { "ref": { "path": "guias/doc-00.md" }, "proposedOperation": { "kind": "delete" } },
+          "expect": { "describe": "Un análisis de impacto: SIMULA un borrado y no borra nada.", "is_error": false }
+        },
+        {
+          "kind": "call",
+          "tool": "workspace_status",
+          "arguments": {},
+          "expect": { "describe": "Después.", "is_error": false }
+        }
+      ],
+      "expect": [
+        {
+          "invariant": "same",
+          "steps": [0, 4],
+          "path": "structured.workspaceRevision",
+          "describe": "Ni siquiera `impact_analyze`, que razona sobre un borrado, toca un byte. Es lo que hace seguro correr el banco contra conocimiento real."
+        }
+      ]
+    },
+    {
+      "id": "INV-REVISION-ES-DEL-CONTENIDO",
+      "descripcion": "Invariante que sostiene el control optimista entero (§22.3 y la familia REVISION_CONFLICT/PLAN_STALE): la `revision` de un documento es función de SU contenido, y la `workspaceRevision` del conjunto. Dos documentos distintos tienen revisiones distintas; el mismo documento leído dos veces, la misma.",
+      "steps": [
+        {
+          "kind": "call",
+          "tool": "knowledge_get",
+          "arguments": { "ref": { "path": "guias/doc-00.md" } },
+          "expect": {
+            "describe": "Primera lectura.",
+            "is_error": false,
+            "matches": { "structured.document.revision": "^blake3:[0-9a-f]{64}$" }
+          }
+        },
+        {
+          "kind": "call",
+          "tool": "knowledge_get",
+          "arguments": { "ref": { "path": "guias/doc-00.md" } },
+          "expect": { "describe": "Segunda lectura del MISMO documento.", "is_error": false }
+        },
+        {
+          "kind": "call",
+          "tool": "knowledge_get",
+          "arguments": { "ref": { "path": "equipos/doc-01.md" } },
+          "expect": { "describe": "Un documento DISTINTO.", "is_error": false }
+        },
+        {
+          "kind": "call",
+          "tool": "knowledge_search",
+          "arguments": { "where": "document.path = \"guias/doc-00.md\"", "limit": 1 },
+          "expect": {
+            "describe": "Y el mismo documento visto por OTRA tool.",
+            "is_error": false,
+            "length": { "structured.results": 1 }
+          }
+        }
+      ],
+      "expect": [
+        {
+          "invariant": "same",
+          "steps": [0, 1],
+          "path": "structured.document.revision",
+          "describe": "Determinismo: leer dos veces da la misma revisión. Si llevara un timestamp o un contador, esto fallaría y el control optimista sería ruido."
+        },
+        {
+          "invariant": "differs",
+          "steps": [0, 2],
+          "path": "structured.document.revision",
+          "describe": "…y documentos distintos dan revisiones distintas. Es la mitad que impide que un `same` vacuo (una constante) pase el invariante anterior."
+        }
+      ]
+    },
+    {
+      "id": "INV-ORDEN-DETERMINISTA",
+      "descripcion": "Informe §5: «cursor autosuficiente entre procesos, PORQUE el orden depende solo del contenido». La paginación entera se apoya en que dos llamadas idénticas devuelvan lo mismo en el mismo orden — incluso desde procesos distintos.",
+      "steps": [
+        {
+          "kind": "call",
+          "tool": "knowledge_search",
+          "arguments": { "where": "has(tags)", "limit": 10 },
+          "expect": { "describe": "Una página.", "is_error": false, "length": { "structured.results": 10 } }
+        },
+        {
+          "kind": "call",
+          "tool": "knowledge_search",
+          "arguments": { "where": "has(tags)", "limit": 10 },
+          "expect": { "describe": "La MISMA llamada, otra vez, en la misma sesión.", "is_error": false }
+        },
+        {
+          "kind": "call",
+          "tool": "graph_query",
+          "arguments": { "operation": "isolated", "limit": 10 },
+          "expect": { "describe": "Y lo mismo para el grafo.", "is_error": false }
+        },
+        {
+          "kind": "call",
+          "tool": "graph_query",
+          "arguments": { "operation": "isolated", "limit": 10 },
+          "expect": { "describe": "Repetida.", "is_error": false }
+        }
+      ],
+      "expect": [
+        {
+          "invariant": "same",
+          "steps": [0, 1],
+          "path": "structured.results",
+          "describe": "Orden total y estable en `knowledge_search`: mismos documentos, misma secuencia. Sin esto, un cursor sería un puntero a un orden que ya cambió."
+        },
+        {
+          "invariant": "same",
+          "steps": [0, 1],
+          "path": "structured.nextCursor",
+          "describe": "…y hasta el cursor emitido es el mismo, porque se deriva del orden y no del reloj."
+        },
+        {
+          "invariant": "same",
+          "steps": [2, 3],
+          "path": "structured.nodes",
+          "describe": "El mismo determinismo en `graph_query`, cuyo orden nace de un recorrido de grafo: tampoco depende de un `HashMap` recorrido al azar."
+        }
+      ]
+    },
+    {
+      "id": "INV-ERRORES-TIENEN-CODIGO",
+      "descripcion": "Informe §5 y E24-H10: TODO error de superficie lleva código del catálogo, ninguno filtra internos de serde ni cae a `INTERNAL_IO_ERROR`. Se ejercitan cinco entradas malformadas de familias distintas y se asevera que las cinco salen por la puerta buena.",
+      "steps": [
+        {
+          "kind": "call",
+          "tool": "knowledge_search",
+          "arguments": { "filter": { "field": "status", "operator": "equalz", "value": "activo" } },
+          "expect": {
+            "describe": "Operador inventado en la forma JSON.",
+            "error_code": "INVALID_SCHEMA",
+            "not_contains": { "text": "INTERNAL_IO_ERROR" }
+          }
+        },
+        {
+          "kind": "call",
+          "tool": "knowledge_search",
+          "arguments": { "filter": { "banana": [1] } },
+          "expect": {
+            "describe": "Filtro con una forma que no es un filtro.",
+            "error_code": "INVALID_SCHEMA",
+            "not_contains": { "text": "INTERNAL_IO_ERROR" }
+          }
+        },
+        {
+          "kind": "call",
+          "tool": "knowledge_search",
+          "arguments": { "filter": { "field": "status", "operator": "equals" } },
+          "expect": {
+            "describe": "Filtro incompleto (sin `value`).",
+            "error_code": "INVALID_SCHEMA",
+            "not_contains": { "text": "INTERNAL_IO_ERROR" }
+          }
+        },
+        {
+          "kind": "call",
+          "tool": "knowledge_search",
+          "arguments": { "where": "type = = = \"guia\"" },
+          "expect": {
+            "describe": "Sintaxis rota del lenguaje textual: sale por el mismo sitio que las formas JSON, no por un panic ni por un error genérico.",
+            "error_code": "INVALID_SCHEMA",
+            "not_contains": { "text": "INTERNAL_IO_ERROR" }
+          }
+        },
+        {
+          "kind": "call",
+          "tool": "knowledge_check",
+          "arguments": { "scope": "workspace" },
+          "expect": {
+            "describe": "Un enum internally-tagged pasado como cadena: el mensaje explica la forma esperada. Es el tipo de error que antes filtraba el texto crudo de serde.",
+            "error_code": "INVALID_SCHEMA"
+          }
+        },
+        {
+          "kind": "call",
+          "tool": "workspace_status",
+          "arguments": {},
+          "expect": {
+            "describe": "Y la sesión sigue en pie tras las cinco: ninguna entrada malformada tumba el servidor.",
+            "is_error": false,
+            "present": ["structured.workspaceRevision"]
+          }
+        }
+      ]
+    },
+    {
+      "id": "INV-DOT-PATH-TRES-CLASES",
+      "descripcion": "Informe §5: «las 3 clases límite del dialecto de dot-paths», verificadas conformes. Su detalle vive en gate_L3 (L3-MDI-10/11/10b); aquí se fija la propiedad que las une: NINGUNA de las tres degrada en un error genérico ni en un resultado plausible-pero-falso — o son un rechazo que EXPLICA, o son un vacío honesto.",
+      "steps": [
+        {
+          "kind": "call",
+          "tool": "metadata_inspect",
+          "arguments": { "mode": "field", "field": "sonar.projectKey" },
+          "expect": { "describe": "Clase 1 (punto literal): vacío honesto, sin error.", "is_error": false, "equals": { "structured.presentIn": 0 } }
+        },
+        {
+          "kind": "call",
+          "tool": "metadata_inspect",
+          "arguments": { "mode": "field", "field": "frontmatter.x" },
+          "expect": {
+            "describe": "Clase 2 (colisión con el anclaje): rechazo que EXPLICA y da la alternativa.",
+            "error_code": "INVALID_SCHEMA",
+            "contains": { "text": "knowledge_search" }
+          }
+        },
+        {
+          "kind": "call",
+          "tool": "metadata_inspect",
+          "arguments": { "mode": "field", "field": "env.region" },
+          "expect": {
+            "describe": "Clase 3 (anidado vs clave plana indistinguibles en el catálogo): responde con lo alcanzable y nada más.",
+            "is_error": false,
+            "equals": { "structured.presentIn": 1 }
+          }
+        }
+      ]
+    }
+  ]
+}

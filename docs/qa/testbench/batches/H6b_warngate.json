@@ -7,7 +7,7 @@
     {"id": "G2-06b", "steps": [
        {"kind": "call", "tool": "workspace_status", "arguments": {}},
        {"kind": "call", "tool": "knowledge_check", "arguments": {"scope": {"kind": "workspace"}, "minimumSeverity": "info", "limit": 1000}},
-       {"kind": "shell", "cmd": "/Users/dbarea/repos/lodestar/target/debug/lodestar check; echo EXIT=$?"}],
+       {"kind": "shell", "cmd": "@bin.cli check; echo EXIT=$?"}],
      "esperado": "CON gate.blockWarnings: true y el mismo warn del fixture: la promesa 'one engine, one truth' (quickstart L138-139: el veredicto del CLI es el mismo que knowledge_check) implica que valid debe ser FALSE también por MCP. Paso 0/1: REGISTRAR valid de workspace_status y knowledge_check — si siguen true mientras el CLI da exit 1 con 'NO VÁLIDO (avisos bloqueados por .lodestar/config.yaml)' (paso 2, ci.md L279), es discrepancia CLI-vs-MCP a reportar. Fuente: ci.md L276-293; quickstart.md L138-139"}
   ]
 }
