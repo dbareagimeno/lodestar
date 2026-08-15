@@ -1,0 +1,178 @@
+{
+  "batch": "gate_L2_proyeccion",
+  "descripcion": "L2 del gate — proyecciones de `knowledge_search.include` y de `knowledge_get` (`frontmatter`/`body`/`outgoingLinks`/`backlinks`/`sections`). Porte del lote temático L2 (`batches/L2_prj.json`) contra el corpus canónico.",
+  "root": "corpus",
+  "profile": "readonly",
+  "fixtures": null,
+  "cases": [
+    {
+      "id": "L2-PRJ-02",
+      "descripcion": "Origen: L2_prj.json PRJ-02 — el prefijo `frontmatter.` es OBLIGATORIO en `include` aunque sea opcional en `where`. Fuente: query-language.md «Projecting fields».",
+      "steps": [
+        {
+          "kind": "call",
+          "tool": "knowledge_search",
+          "arguments": { "where": "type = \"guia\"", "include": ["status"] },
+          "expect": {
+            "describe": "Asimetría deliberada del lenguaje: en `include` el anclaje es obligatorio, y omitirlo es error ruidoso, no proyección vacía.",
+            "error_code": "INVALID_SCHEMA",
+            "contains": { "text": "frontmatter." }
+          }
+        }
+      ]
+    },
+    {
+      "id": "L2-PRJ-03",
+      "descripcion": "Origen: L2_prj.json PRJ-03 — proyectar un campo que nadie tiene no es error y la clave queda AUSENTE, nunca null.",
+      "steps": [
+        {
+          "kind": "call",
+          "tool": "knowledge_search",
+          "arguments": { "where": "type = \"guia\"", "include": ["frontmatter.campo_inexistente"], "limit": 3 },
+          "expect": {
+            "describe": "El mapa `frontmatter` del hit existe y está VACÍO: la clave ausente no se rellena con null (nunca defaults disfrazados).",
+            "is_error": false,
+            "min_length": { "structured.results": 1 },
+            "type": { "structured.results.0.frontmatter": "object" },
+            "length": { "structured.results.0.frontmatter": 0 }
+          }
+        }
+      ]
+    },
+    {
+      "id": "L2-PRJ-05",
+      "descripcion": "Origen: L2_prj.json PRJ-05 — `knowledge_get` sin `include`: `title` SIEMPRE presente (E24-H11) y el resto AUSENTE por no pedirse (mcp.yml E24-H09/H11).",
+      "steps": [
+        {
+          "kind": "call",
+          "tool": "knowledge_get",
+          "arguments": { "ref": { "path": "guias/doc-00.md" } },
+          "expect": {
+            "describe": "Lo no pedido no viaja: `frontmatter`/`body`/`outgoingLinks`/`backlinks` ausentes. Es la regla anti-payload-inflado del contrato.",
+            "is_error": false,
+            "present": ["structured.document.path", "structured.document.title", "structured.document.revision"],
+            "absent": [
+              "structured.document.frontmatter",
+              "structured.document.body",
+              "structured.document.outgoingLinks",
+              "structured.document.backlinks"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "L2-PRJ-04",
+      "descripcion": "Origen: L2_prj.json PRJ-04 — `include: [frontmatter]` devuelve el YAML COMPLETO con sus tipos reales (listas como listas, números como números), no aplanado.",
+      "steps": [
+        {
+          "kind": "call",
+          "tool": "knowledge_get",
+          "arguments": { "ref": { "path": "guias/doc-00.md" }, "include": ["frontmatter"] },
+          "expect": {
+            "describe": "Tipos preservados: `tags` es lista, `title` cadena. El corpus da a doc-00 una `priority` de tipo cadena (mezcla deliberada), y eso también se preserva tal cual.",
+            "is_error": false,
+            "type": {
+              "structured.document.frontmatter": "object",
+              "structured.document.frontmatter.tags": "array",
+              "structured.document.frontmatter.title": "string"
+            },
+            "equals": { "structured.document.frontmatter.title": "Documento 00" },
+            "min_length": { "structured.document.frontmatter.tags": 1 }
+          }
+        }
+      ]
+    },
+    {
+      "id": "L2-PRJ-08",
+      "descripcion": "Origen: L2_prj.json PRJ-08 — `outgoingLinks` como [ResolvedLink] con la clasificación del destino (`document` vs `missing`). El corpus da a doc-00 ambas clases a propósito (make_corpus.py: dangling a .md y a fichero de proyecto).",
+      "steps": [
+        {
+          "kind": "call",
+          "tool": "knowledge_get",
+          "arguments": { "ref": { "path": "guias/doc-00.md" }, "include": ["outgoingLinks"] },
+          "expect": {
+            "describe": "Cada enlace lleva `href`, `kind`, `span` y un `target` clasificado. Se asevera la FORMA del primero, no la lista entera (su orden depende del cuerpo generado).",
+            "is_error": false,
+            "type": { "structured.document.outgoingLinks": "array" },
+            "min_length": { "structured.document.outgoingLinks": 2 },
+            "present": [
+              "structured.document.outgoingLinks.0.href",
+              "structured.document.outgoingLinks.0.kind",
+              "structured.document.outgoingLinks.0.target.kind",
+              "structured.document.outgoingLinks.0.span.start"
+            ]
+          }
+        },
+        {
+          "kind": "call",
+          "tool": "knowledge_get",
+          "arguments": { "ref": { "path": "guias/doc-00.md" }, "include": ["outgoingLinks", "backlinks"] },
+          "expect": {
+            "describe": "Matiz REAL verificado ejecutando: al pedir `backlinks` junto a `outgoingLinks`, los salientes viajan DOS veces — bajo `outgoingLinks` y bajo `backlinks.out`. Se fija como statu quo (no se juzga): es la clase de duplicación de payload que un agente no espera.",
+            "is_error": false,
+            "type": {
+              "structured.document.outgoingLinks": "array",
+              "structured.document.backlinks.out": "array",
+              "structured.document.backlinks.inbound": "array"
+            }
+          }
+        }
+      ],
+      "expect": [
+        {
+          "invariant": "same",
+          "steps": [0, 1],
+          "path": "structured.document.outgoingLinks",
+          "describe": "Pedir además los backlinks no cambia los salientes: la misma lista, byte a byte, con y sin la proyección extra."
+        }
+      ]
+    },
+    {
+      "id": "L2-PRJ-BACKLINKS",
+      "descripcion": "Origen: L2_prj.json PRJ-09 + informe §4 (G2-03): `knowledge_get.backlinks` da UNA ENTRADA POR ENLACE con su `link`, mientras `graph_query.backlinks` deduplica por vecino. El corpus enlaza guias/doc-00.md desde el README.",
+      "steps": [
+        {
+          "kind": "call",
+          "tool": "knowledge_get",
+          "arguments": { "ref": { "path": "guias/doc-00.md" }, "include": ["backlinks"] },
+          "expect": {
+            "describe": "El backlink trae el ORIGEN y el enlace concreto que lo produce — el dato que `graph_query` no da.",
+            "is_error": false,
+            "type": { "structured.document.backlinks.inbound": "array" },
+            "min_length": { "structured.document.backlinks.inbound": 1 },
+            "equals": { "structured.document.backlinks.inbound.0.from": "README.md" },
+            "present": ["structured.document.backlinks.inbound.0.link.href"]
+          }
+        }
+      ]
+    },
+    {
+      "id": "L2-PRJ-SECTIONS",
+      "descripcion": "Origen: L2_prj.json PRJ-06/PRJ-07 y hallazgo A-01 de `decisiones §23` (saldado documentalmente por E30-H03): un `headingPath` sin match se OMITE en silencio, y si ninguno casa el `body` es la cadena vacía. El esperado del banco es el statu quo declarado, no el bug.",
+      "steps": [
+        {
+          "kind": "call",
+          "tool": "knowledge_get",
+          "arguments": { "ref": { "path": "guias/doc-00.md" }, "include": ["body"], "sections": [["Relacionados"]] },
+          "expect": {
+            "describe": "Body acotado a una sección: trae su CONTENIDO y no el resto del documento. Matiz verificado ejecutando: el heading que selecciona la sección NO viaja en el recorte, solo lo que cuelga de él.",
+            "is_error": false,
+            "contains": { "structured.document.body": "[Documento 39](../notas/doc-39.md)" },
+            "not_contains": { "structured.document.body": "Documento canonico numero 0" }
+          }
+        },
+        {
+          "kind": "call",
+          "tool": "knowledge_get",
+          "arguments": { "ref": { "path": "guias/doc-00.md" }, "include": ["body"], "sections": [["Seccion Que No Existe Jamas"]] },
+          "expect": {
+            "describe": "A-01, comportamiento VIGENTE declarado en mcp.yml/mcp-clients.md por E30-H03: ningún heading casa ⇒ `body` vacío, sin error. Indistinguible de una sección vacía, y así está documentado.",
+            "is_error": false,
+            "equals": { "structured.document.body": "" }
+          }
+        }
+      ]
+    }
+  ]
+}

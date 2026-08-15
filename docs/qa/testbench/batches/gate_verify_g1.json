@@ -1,0 +1,233 @@
+{
+  "batch": "gate_verify_g1",
+  "descripcion": "Las repros `verify_G1-*` de `decisiones §23` que aún no viven en un lote temático, REESCRITAS contra el corpus canónico. Cada caso conserva la referencia a su hallazgo de origen. Regla de este lote (y de todo el gate): los hallazgos ya SALDADOS por E28/E29/E30/E31 se aseveran con el comportamiento CORREGIDO — el banco fija el statu quo del motor, no el bug histórico.\n\nLos que ya están portados en otro sitio: G1-04 (config por familias) en gate_G · G1-11 (create/move ocupado, A-05) en gate_L6 · G1-12 (delete sin entrantes/0 backlinks) en gate_L6 · G1-18b (M-01, revert del revert) en gate_L7 · G1-20 (A-04, starts_with sobre no-string) en gate_L1 · G1-23 (A-07, paths fantasma) en gate_L11 · G1-24 (D-01, instructions) en gate_G · CHK-27 (counts vs summary) en gate_L11.",
+  "root": "corpus",
+  "profile": "standard",
+  "fixtures": null,
+  "cases": [
+    {
+      "id": "V-G1-07-TITULO-DERIVADO",
+      "descripcion": "Origen: `batches/verify_G1-07.json` e informe §4 (G1-07, uno de los doce esperados refutados: «el título derivado de un fichero pelado es el stem EN MINÚSCULAS, sin Title Case»). Fuente: §20.2, la cascada de derivación del título.",
+      "steps": [
+        {
+          "kind": "call",
+          "tool": "knowledge_get",
+          "arguments": { "ref": { "path": "fixtures/sin-title-fm.md" } },
+          "expect": {
+            "describe": "Escalón 2 de la cascada: sin `title` en el frontmatter, manda el H1 del cuerpo, TAL CUAL está escrito.",
+            "is_error": false,
+            "equals": { "structured.document.title": "Titulo Desde El H1" }
+          }
+        },
+        {
+          "kind": "call",
+          "tool": "knowledge_get",
+          "arguments": { "ref": { "path": "fixtures/pelado.md" } },
+          "expect": {
+            "describe": "Escalón 3: sin frontmatter y sin H1, el título es el STEM del fichero — «pelado», en minúsculas y sin la extensión. NO «Pelado» ni «pelado.md». Es justo la lectura que la verificación adversarial refutó.",
+            "is_error": false,
+            "equals": { "structured.document.title": "pelado" }
+          }
+        },
+        {
+          "kind": "call",
+          "tool": "knowledge_search",
+          "arguments": { "where": "document.title = \"Pelado\"" },
+          "expect": {
+            "describe": "Y la comparación es sensible a la caja: buscar «Pelado» no lo encuentra. Sin este paso, el `equals` de arriba no probaría que la minúscula importa.",
+            "is_error": false,
+            "length": { "structured.results": 0 }
+          }
+        },
+        {
+          "kind": "call",
+          "tool": "knowledge_search",
+          "arguments": { "where": "document.title = \"pelado.md\"" },
+          "expect": {
+            "describe": "…ni con la extensión: el título es el stem, no el nombre del fichero.",
+            "is_error": false,
+            "length": { "structured.results": 0 }
+          }
+        }
+      ]
+    },
+    {
+      "id": "V-G1-22-DOT-PATH-INCLUDE",
+      "descripcion": "Origen: `batches/verify_G1-22.json` e informe §4 (G1-22, esperado refutado): `include: [\"frontmatter.submapa.1\"]` devuelve la clave PLANA «submapa.1» — «el sufijo TAL CUAL se pidió, sin re-anidar». Y los valores YAML no representables en JSON (`.inf`) viajan como `null`.",
+      "steps": [
+        {
+          "kind": "call",
+          "tool": "knowledge_search",
+          "arguments": {
+            "where": "document.path = \"fixtures/raros.md\"",
+            "include": ["frontmatter.flotante", "frontmatter.submapa", "frontmatter.submapa.1"]
+          },
+          "expect": {
+            "describe": "Tres proyecciones del mismo documento en una: (a) `.inf` no es representable en JSON y viaja como `null` —no como cadena ni como error—; (b) el mapa anidado viaja anidado; (c) el dot-path devuelve una clave PLANA con punto literal junto a la anidada. Las tres conviven en el mismo mapa, que es lo sorprendente y por eso se fija.",
+            "is_error": false,
+            "length": { "structured.results": 1, "structured.results.0.frontmatter": 3 },
+            "equals": {
+              "structured.results.0.frontmatter.flotante": null,
+              "structured.results.0.frontmatter.submapa": { "1": "uno" }
+            },
+            "contains": { "text": "\"submapa.1\":\"uno\"" }
+          }
+        }
+      ]
+    },
+    {
+      "id": "V-G1-13-REPLACE-TEXT-NOOP",
+      "fresh_root": true,
+      "descripcion": "Origen: `batches/verify_G1-13.json` + hallazgo A-06 de `decisiones §23`, cuya VERIFICACIÓN destapó un defecto distinto —el `replace_text` sin coincidencias REESCRIBÍA el fichero y reserializaba el frontmatter—, promovido a ficha propia `decisiones §26` y ejecutado en E31-H02. El esperado es el statu quo: el plan DECLARA el no-op.",
+      "steps": [
+        {
+          "kind": "call",
+          "tool": "change_plan",
+          "arguments": {
+            "operations": [{ "op": "replace_text", "path": "fixtures/contador.md", "find": "zzz-no-esta-en-el-fichero", "replace": "w" }],
+            "policy": { "requireValidResult": false, "allowWarnings": true }
+          },
+          "expect": {
+            "describe": "A-06/§26: el plan sigue emitiéndose (no es un error), la operación se NORMALIZA a `replace_body` —de ahí venía la reserialización—, pero hoy figura en `noOpOperations` con su índice y su path, e `impact.affectedCount` es 0. Antes de E31-H02 la op aparecía en `normalizedOperations` indistinguible de una efectiva, y la única pista (salir en `semanticDiff.modified`) era ENGAÑOSA, porque salía por el churn de bytes de la reserialización.",
+            "is_error": false,
+            "equals": {
+              "structured.canApply": true,
+              "structured.noOpOperations.0.index": 0,
+              "structured.noOpOperations.0.op": "replace_body",
+              "structured.noOpOperations.0.path": "fixtures/contador.md",
+              "structured.impact.affectedCount": 0,
+              "structured.semanticDiff.modified": [],
+              "structured.semanticDiff.frontmatterChanges": []
+            },
+            "length": { "structured.normalizedOperations": 1 }
+          }
+        },
+        {
+          "kind": "shell",
+          "cmd": "shasum -a 256 fixtures/contador.md | cut -d' ' -f1",
+          "expect": { "describe": "Huella antes de aplicar el no-op.", "rc": 0 }
+        },
+        {
+          "kind": "call",
+          "tool": "change_apply",
+          "arguments": { "changeSetId": "@step0.structured.changeSetId" },
+          "expect": {
+            "describe": "Y aplicarlo no rompe nada: la transacción se sella con la lista de paths cambiados VACÍA.",
+            "is_error": false,
+            "equals": { "structured.applied": true, "structured.changedPaths": [] }
+          }
+        },
+        {
+          "kind": "shell",
+          "cmd": "shasum -a 256 fixtures/contador.md | cut -d' ' -f1",
+          "expect": { "describe": "Huella después.", "rc": 0 }
+        }
+      ],
+      "expect": [
+        {
+          "invariant": "same",
+          "steps": [1, 3],
+          "path": "stdout",
+          "describe": "EL corazón de `decisiones §26`: aplicar un no-op deja el fichero BYTE A BYTE idéntico. Antes reescribía el documento entero y convertía `tags: [a, b]` de estilo flow a bloque — un cambio real en disco sin un cambio real de contenido."
+        }
+      ]
+    },
+    {
+      "id": "V-G1-14-PATCH-RFC-7386",
+      "fresh_root": true,
+      "descripcion": "Origen: `batches/verify_G1-14.json`/`verify_G1-14b.json` + hallazgo D-02 de `decisiones §23` (ARCHITECTURE §20.4 prometía distinguir asignar-`null` de eliminar-clave, y el wire no puede expresarlo), RESUELTO por E30-H03 con el criterio ratificado: corregir §20.4 y declarar RFC 7386 en los cinco sitios.",
+      "steps": [
+        {
+          "kind": "shell",
+          "cmd": "grep -c '^campo_nulo: null$' fixtures/nulo.md",
+          "expect": { "describe": "De partida, el documento tiene la clave con null explícito.", "rc": 0, "equals": { "stdout": "1\n" } }
+        },
+        {
+          "kind": "call",
+          "tool": "change_plan",
+          "arguments": {
+            "operations": [{
+              "op": "patch_frontmatter",
+              "path": "fixtures/nulo.md",
+              "patch": { "campo_nulo": null, "nuevo_del_banco": { "anidado": null } }
+            }],
+            "policy": { "requireValidResult": false, "allowWarnings": true }
+          },
+          "expect": {
+            "describe": "El patch viaja tal cual al plan: `null` arriba y `null` anidado.",
+            "is_error": false,
+            "equals": { "structured.canApply": true, "structured.normalizedOperations.0.op": "patch_frontmatter" }
+          }
+        },
+        {
+          "kind": "call",
+          "tool": "change_apply",
+          "arguments": { "changeSetId": "@step1.structured.changeSetId" },
+          "expect": { "describe": "Aplicado.", "is_error": false, "equals": { "structured.applied": true } }
+        },
+        {
+          "kind": "shell",
+          "cmd": "grep -c '^campo_nulo' fixtures/nulo.md || echo BORRADA",
+          "expect": {
+            "describe": "D-02, primera mitad: RFC 7386 — un `null` EN EL NIVEL SUPERIOR del patch BORRA la clave. La línea desaparece del fichero.",
+            "contains": { "stdout": "BORRADA" }
+          }
+        },
+        {
+          "kind": "shell",
+          "cmd": "grep -A1 '^nuevo_del_banco:' fixtures/nulo.md",
+          "expect": {
+            "describe": "D-02, segunda mitad — el matiz que E30-H03 VERIFICÓ EJECUTANDO y que ninguna fuente decía: un `null` ANIDADO **sobrevive** como YAML null literal, porque el merge-patch solo recorre el nivel que fusiona. Las dos mitades juntas son el contrato real de `patch_frontmatter`.",
+            "rc": 0,
+            "contains": { "stdout": "anidado: null" }
+          }
+        }
+      ]
+    },
+    {
+      "id": "V-G2-03-KINDS-DE-ENLACE",
+      "descripcion": "Origen: `batches/verify_G2-03.json` e informe §4 (G2-03, esperado refutado): `graph_query.backlinks` DEDUPLICA por vecino (es un grafo), mientras `knowledge_get.backlinks` da una entrada POR ENLACE. Aquí además se agota el enum de `kind`.",
+      "steps": [
+        {
+          "kind": "call",
+          "tool": "knowledge_get",
+          "arguments": { "ref": { "path": "fixtures/kinds.md" }, "include": ["outgoingLinks"] },
+          "expect": {
+            "describe": "Las cuatro formas de enlace de Markdown que no son la inline: referencia completa, colapsada, atajo y autolink. Las tres primeras resuelven al MISMO documento; la cuarta es un URI externo, con su propia clase de `target`.",
+            "is_error": false,
+            "length": { "structured.document.outgoingLinks": 4 },
+            "equals": {
+              "structured.document.outgoingLinks.0.kind": "reference",
+              "structured.document.outgoingLinks.1.kind": "collapsed",
+              "structured.document.outgoingLinks.2.kind": "shortcut",
+              "structured.document.outgoingLinks.3.kind": "autolink",
+              "structured.document.outgoingLinks.3.target.kind": "externalUri"
+            }
+          }
+        },
+        {
+          "kind": "call",
+          "tool": "graph_query",
+          "arguments": { "operation": "backlinks", "ref": { "path": "fixtures/destino.md" } },
+          "expect": {
+            "describe": "G2-03: aunque `kinds.md` enlaza a `destino.md` TRES veces, el grafo tiene UNA arista. Deduplicar por vecino no es una pérdida de información, es lo que hace del grafo un grafo — y quien necesite el detalle lo pide a `knowledge_get.backlinks`.",
+            "is_error": false,
+            "length": { "structured.edges": 1, "structured.nodes": 2 },
+            "equals": { "structured.edges.0.source": "fixtures/kinds.md", "structured.summary.edgeCount": 1 }
+          }
+        },
+        {
+          "kind": "call",
+          "tool": "knowledge_get",
+          "arguments": { "ref": { "path": "fixtures/destino.md" }, "include": ["backlinks"] },
+          "expect": {
+            "describe": "…y aquí SÍ están las tres entradas, una por enlace, cada una con su `link`. Es la otra mitad del contraste.",
+            "is_error": false,
+            "length": { "structured.document.backlinks.inbound": 3 },
+            "equals": { "structured.document.backlinks.inbound.0.from": "fixtures/kinds.md" }
+          }
+        }
+      ]
+    }
+  ]
+}

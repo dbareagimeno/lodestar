@@ -1,0 +1,199 @@
+{
+  "batch": "gate_verify_g2",
+  "descripcion": "Las repros `verify_G2-*` de `decisiones §23` que cierran el porte, reescritas contra el corpus canónico y conservando la referencia a su hallazgo de origen. Complementa a `gate_verify_g1.json`; entre los dos, más los lotes temáticos, quedan cubiertas las 19 repros `verify_*` del testbench histórico (el informe habla de 18 hallazgos: `G1-04` y `G2-04` tienen dos ficheros cada uno, la repro y su control).",
+  "root": "corpus",
+  "profile": "standard",
+  "fixtures": null,
+  "cases": [
+    {
+      "id": "V-G2-10-MOVE-Y-NAVEGACION",
+      "fresh_root": true,
+      "descripcion": "Origen: `batches/verify_G2-10.json` e informe §4 (G2-10, esperado refutado): un `move` que sube un documento de `a/b/` a la raíz degrada su `[volver](../)` de «directorio del workspace» a `missing('a')` — composición inevitable de dos reglas del MISMO párrafo de §20.6 —, y el plan lo PREDICE en `diagnosticsIntroduced`. Que el plan avise por adelantado es lo que convierte una sorpresa en una decisión informada.",
+      "steps": [
+        {
+          "kind": "shell",
+          "cmd": "mkdir -p a/b && printf -- '---\\ntitle: Doc profundo del banco\\ntype: prueba\\n---\\n\\n[volver](../) y [raiz](../../)\\n' > a/b/doc.md && printf -- '---\\ntitle: Otro del banco\\ntype: prueba\\n---\\n\\nVer [doc](b/doc.md).\\n' > a/otro.md && echo listo",
+          "expect": { "describe": "El set `dirlinks` plantado a mano, para que el caso se lea sin salir del lote.", "rc": 0, "contains": { "stdout": "listo" } }
+        },
+        {
+          "kind": "call",
+          "tool": "knowledge_check",
+          "arguments": { "scope": { "kind": "document", "ref": { "path": "a/b/doc.md" } } },
+          "expect": {
+            "describe": "ANTES del move: navegación PURA desde `a/b/`, cero diagnósticos. `../` y `../../` no nombran nada, así que son legítimos (E23-H11).",
+            "is_error": false,
+            "length": { "structured.diagnostics": 0 }
+          }
+        },
+        {
+          "kind": "call",
+          "tool": "change_plan",
+          "arguments": {
+            "operations": [{ "op": "move", "from": "a/b/doc.md", "to": "doc-movido.md", "rewriteInboundLinks": true }],
+            "policy": { "requireValidResult": false, "allowWarnings": true }
+          },
+          "expect": {
+            "describe": "G2-10: el plan del move PREDICE el diagnóstico que va a introducir, antes de escribir nada. `diagnosticsIntroduced` no está vacío y el motivo es un enlace que deja de resolver.",
+            "is_error": false,
+            "equals": { "structured.canApply": true },
+            "min_length": { "structured.semanticDiff.diagnosticsIntroduced": 1 },
+            "contains": { "text": "diagnosticsIntroduced" }
+          }
+        },
+        {
+          "kind": "call",
+          "tool": "change_apply",
+          "arguments": { "changeSetId": "@step2.structured.changeSetId" },
+          "expect": {
+            "describe": "El apply mueve el documento Y reescribe el enlace entrante de `a/otro.md` (`rewriteInboundLinks: true`): dos paths cambiados por una sola operación.",
+            "is_error": false,
+            "equals": { "structured.applied": true },
+            "min_length": { "structured.changedPaths": 2 }
+          }
+        },
+        {
+          "kind": "call",
+          "tool": "knowledge_check",
+          "arguments": { "scope": { "kind": "document", "ref": { "path": "doc-movido.md" } } },
+          "expect": {
+            "describe": "DESPUÉS: desde la raíz, `../` sí sale del workspace y `../../` también. El diagnóstico que el plan anunció está aquí. El motor no se equivocó: avisó.",
+            "is_error": false,
+            "min_length": { "structured.diagnostics": 1 }
+          }
+        },
+        {
+          "kind": "shell",
+          "cmd": "grep -c 'doc-movido.md' a/otro.md",
+          "expect": {
+            "describe": "Y el enlace entrante quedó reescrito al nuevo destino: `rewriteInboundLinks` cumple.",
+            "rc": 0,
+            "equals": { "stdout": "1\n" }
+          }
+        }
+      ]
+    },
+    {
+      "id": "V-G2-04-RETENCION-GC",
+      "fresh_root": true,
+      "descripcion": "Origen: `batches/verify_G2-04.json` y `verify_G2-04b.json` (repro y control del hallazgo A-09) — la retención de recibos la impone el GC, que solo corre TRAS un apply/revert; `workspace_status` lista lo que hay en disco sin truncar. Y la config se lee UNA vez al abrir la sesión, así que escribirla con el servidor vivo NO la aplica. Fuente: mcp.yml L618-622; safe-changes.md «Receipts and retention».",
+      "steps": [
+        {
+          "kind": "call",
+          "tool": "change_plan",
+          "arguments": {
+            "operations": [{ "op": "patch_frontmatter", "path": "guias/doc-00.md", "patch": { "g": 1 } }],
+            "policy": { "requireValidResult": false, "allowWarnings": true }
+          },
+          "expect": { "describe": "Transacción 1.", "is_error": false }
+        },
+        {
+          "kind": "call",
+          "tool": "change_apply",
+          "arguments": { "changeSetId": "@step0.structured.changeSetId" },
+          "expect": { "describe": "Aplicada.", "is_error": false, "equals": { "structured.applied": true } }
+        },
+        {
+          "kind": "call",
+          "tool": "change_plan",
+          "arguments": {
+            "operations": [{ "op": "patch_frontmatter", "path": "guias/doc-00.md", "patch": { "g": 2 } }],
+            "policy": { "requireValidResult": false, "allowWarnings": true }
+          },
+          "expect": { "describe": "Transacción 2.", "is_error": false }
+        },
+        {
+          "kind": "call",
+          "tool": "change_apply",
+          "arguments": { "changeSetId": "@step2.structured.changeSetId" },
+          "expect": { "describe": "Aplicada.", "is_error": false, "equals": { "structured.applied": true } }
+        },
+        {
+          "kind": "call",
+          "tool": "workspace_status",
+          "arguments": {},
+          "expect": { "describe": "Dos recibos en disco.", "is_error": false, "length": { "structured.receipts": 2 } }
+        },
+        {
+          "kind": "shell",
+          "cmd": "mkdir -p .lodestar && printf 'transactions:\\n  maximumReceipts: 1\\n' > .lodestar/config.yaml && echo escrita",
+          "expect": { "describe": "Se baja la retención a 1… con el servidor YA ABIERTO.", "rc": 0 }
+        },
+        {
+          "kind": "call",
+          "tool": "workspace_status",
+          "arguments": {},
+          "expect": {
+            "describe": "A-09: SIGUE habiendo dos recibos. Ni la config se relee (se fijó al abrir la sesión) ni `workspace_status` trunca la lista: devuelve lo que hay en disco. Dos razones independientes para el mismo resultado observado, ambas declaradas por E30-H03.",
+            "is_error": false,
+            "length": { "structured.receipts": 2 }
+          }
+        },
+        {
+          "kind": "shell",
+          "cmd": "python3 @testbench/receipt_retention_probe.py @root @bin.mcp # change_apply en sesión nueva; LATEST=1",
+          "expect": {
+            "describe": "Después de demostrar con la sesión viva que maximumReceipts:1 no se relee (COUNT=2), se abre una sesión MCP NUEVA; su apply posterior dispara GC y workspace_status conserva solo el receipt más reciente.",
+            "rc": 0,
+            "contains": { "stdout": "COUNT=1" },
+            "matches": { "stdout": "LATEST_MATCH=True" }
+          }
+        },
+        {
+          "kind": "shell",
+          "cmd": "R=$(ls -t .lodestar/runtime/receipts/*.json | tail -1) && cp \"$R\" .lodestar/runtime/receipts/corrupt.json && printf 'basura{' > .lodestar/runtime/receipts/corrupt.json && echo corrompido",
+          "expect": { "describe": "Se añade un recibo corrupto junto al único retenido; el lector debe saltarlo sin ocultar el sano.", "rc": 0, "contains": { "stdout": "corrompido" } }
+        },
+        {
+          "kind": "call",
+          "tool": "workspace_status",
+          "arguments": {},
+          "expect": {
+            "describe": "Un recibo corrupto se SALTA en silencio y la llamada sirve el sano: «un recibo roto no impide ver los demás». Degradar aquí es correcto — la alternativa sería que un fichero ilegible dejara al agente sin poder deshacer nada.",
+            "is_error": false,
+            "length": { "structured.receipts": 1 }
+          }
+        }
+      ]
+    },
+    {
+      "id": "V-G1-04-VALIDATION-CONFIG-VIVA",
+      "fresh_root": true,
+      "descripcion": "Origen: `batches/verify_G1-04.json` — el control del ciclo de vida de la config aplicado a `validation`: con la sesión ya abierta, escribir una política nueva NO cambia los diagnósticos que se sirven. Es la misma A-09 vista desde otra tool, y el contraste con proceso nuevo está en gate_G · G-CONFIG-VALIDATION-FAMILIAS.",
+      "steps": [
+        {
+          "kind": "call",
+          "tool": "knowledge_check",
+          "arguments": { "scope": { "kind": "document", "ref": { "path": "fixtures/enlace-roto.md" } } },
+          "expect": {
+            "describe": "Sin config: el enlace roto a `.md` es un error.",
+            "is_error": false,
+            "equals": { "structured.diagnostics.0.code": "LINK-TARGET-MISSING", "structured.diagnostics.0.level": "err" }
+          }
+        },
+        {
+          "kind": "shell",
+          "cmd": "mkdir -p .lodestar && printf 'validation:\\n  danglingDocumentLinks: ignore\\n' > .lodestar/config.yaml && echo escrita",
+          "expect": { "describe": "Se silencia la familia… con el servidor abierto.", "rc": 0 }
+        },
+        {
+          "kind": "call",
+          "tool": "knowledge_check",
+          "arguments": { "scope": { "kind": "document", "ref": { "path": "fixtures/enlace-roto.md" } } },
+          "expect": {
+            "describe": "El diagnóstico SIGUE saliendo: la política vigente es la que se leyó al abrir. Un agente que escriba config y espere efecto inmediato se equivoca, y el contrato lo declara desde E30-H03.",
+            "is_error": false,
+            "equals": { "structured.diagnostics.0.code": "LINK-TARGET-MISSING", "structured.diagnostics.0.level": "err" }
+          }
+        }
+      ],
+      "expect": [
+        {
+          "invariant": "same",
+          "steps": [0, 2],
+          "path": "structured.diagnostics",
+          "describe": "Idénticos, elemento a elemento: la config escrita en caliente no tiene efecto alguno dentro de la sesión."
+        }
+      ]
+    }
+  ]
+}

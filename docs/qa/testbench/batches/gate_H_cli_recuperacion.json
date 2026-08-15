@@ -1,0 +1,268 @@
+{
+  "batch": "gate_H_cli_recuperacion",
+  "descripcion": "Lote H del gate — la CLI `lodestar check` con sus EXIT CODES CONGELADOS, el arranque de `lodestar-mcp`, el gate de avisos y la recuperación transparente de transacciones. Porte de los lotes H (`batches/H1_discovery.json`, `H4_receipts.json`, `H5_cursor_cli.json`, `H6a/H6b_warngate.json`, `H8_recovery.json`) contra el corpus canónico. La CLI se invoca por el token `@bin.cli`, nunca por una ruta de máquina.",
+  "root": "corpus",
+  "profile": "standard",
+  "fixtures": null,
+  "cases": [
+    {
+      "id": "H-CLI-EXIT-CODES",
+      "fresh_root": true,
+      "no_server": true,
+      "descripcion": "Origen: `batches/H5_cursor_cli.json` G2-07 e informe §5 («CLI `check`/`--json`/`--sarif` con exit codes congelados», verificado conforme). Los cuatro códigos que el producto CONGELA: 0 válido · 1 hard-fail · 2 uso · 3 runtime/IO. El corpus tiene errores a propósito, así que el camino de `0` se prueba en un directorio limpio.",
+      "steps": [
+        {
+          "kind": "shell",
+          "cmd": "@bin.cli check > /dev/null 2>&1; echo EXIT=$?",
+          "expect": {
+            "describe": "Workspace con errores ⇒ exit 1 (hard-fail). Es la puerta de CI del producto.",
+            "rc": 0,
+            "contains": { "stdout": "EXIT=1" }
+          }
+        },
+        {
+          "kind": "shell",
+          "cmd": "python3 -c 'import json,subprocess,sys; r=subprocess.run([sys.argv[1], \"check\", \"--json\"], capture_output=True, text=True); d=json.loads(r.stdout); print(\"CLAVES=\" + \",\".join(sorted(d))); print(\"VALID=\" + str(d[\"valid\"])); print(\"CLI_EXIT=\" + str(r.returncode)); sys.exit(r.returncode)' @bin.cli",
+          "expect": {
+            "describe": "`--json` captura y valida el objeto antes de devolver el exit REAL de la CLI; se aseveran los NOMBRES (contrato), no los conteos del corpus.",
+            "rc": 1,
+            "contains": { "stdout": "CLAVES=dangling,diagnostics,documents,incoming,isolated,outgoing,recoveryPending,valid" },
+            "not_contains": { "stdout": "VALID=True" },
+            "matches": { "stdout": "CLI_EXIT=1" }
+          }
+        },
+        {
+          "kind": "shell",
+          "cmd": "python3 -c 'import json,subprocess,sys; r=subprocess.run([sys.argv[1], \"check\", \"--sarif\"], capture_output=True, text=True); d=json.loads(r.stdout); print(\"SARIF=\" + d[\"version\"]); print(\"DRIVER=\" + d[\"runs\"][0][\"tool\"][\"driver\"][\"name\"]); print(\"RULEID=\" + d[\"runs\"][0][\"results\"][0][\"ruleId\"]); print(\"CLI_EXIT=\" + str(r.returncode)); sys.exit(r.returncode)' @bin.cli",
+          "expect": {
+            "describe": "`--sarif` captura y valida SARIF 2.1.0 antes de devolver el exit REAL de la CLI; el `ruleId` permite a un CI anotar el PR línea a línea.",
+            "rc": 1,
+            "contains": { "stdout": "SARIF=2.1.0" },
+            "matches": { "stdout": "CLI_EXIT=1" }
+          }
+        },
+        {
+          "kind": "shell",
+          "cmd": "@bin.cli check --json --sarif > /dev/null 2>&1; echo EXIT=$?",
+          "expect": {
+            "describe": "Dos formatos de salida a la vez son EXCLUYENTES ⇒ exit 2 (uso incorrecto), no 1.",
+            "rc": 0,
+            "contains": { "stdout": "EXIT=2" }
+          }
+        },
+        {
+          "kind": "shell",
+          "cmd": "@bin.cli check --flag-que-no-existe > /dev/null 2>&1; echo EXIT=$?",
+          "expect": {
+            "describe": "Flag desconocida ⇒ exit 2. La distinción 1 vs 2 es la que permite a un CI diferenciar «tu conocimiento está roto» de «invocaste mal la herramienta».",
+            "rc": 0,
+            "contains": { "stdout": "EXIT=2" }
+          }
+        },
+        {
+          "kind": "shell",
+          "cmd": "cd / && @bin.cli --path @root check > /dev/null 2>&1; echo EXIT=$?",
+          "expect": {
+            "describe": "`--path` desde otro cwd equivale a haber entrado en el directorio: mismo veredicto, mismo exit.",
+            "rc": 0,
+            "contains": { "stdout": "EXIT=1" }
+          }
+        },
+        {
+          "kind": "shell",
+          "cmd": "T=$(mktemp -d) && printf -- '---\\ntitle: Limpio\\n---\\n\\n# Limpio\\n\\nSin enlaces.\\n' > \"$T/limpio.md\" && @bin.cli --path \"$T\" check > /dev/null 2>&1; echo EXIT=$?; rm -rf \"$T\"",
+          "expect": {
+            "describe": "El otro extremo del rango: un workspace SIN diagnósticos ⇒ exit 0. Sin este paso, «exit 1» podría ser el único código que la CLI sabe dar.",
+            "rc": 0,
+            "contains": { "stdout": "EXIT=0" }
+          }
+        },
+        {
+          "kind": "shell",
+          "cmd": "@bin.cli --path /dev/null check > /dev/null 2>&1; R=$?; echo CLI_EXIT=$R; exit $R",
+          "expect": {
+            "describe": "Raíz ilegible ⇒ exit 3 de runtime/IO, observado directamente desde la CLI (no desde MCP).",
+            "rc": 3,
+            "contains": { "stdout": "CLI_EXIT=3" }
+          }
+        }
+      ]
+    },
+    {
+      "id": "H-MCP-ARRANQUE",
+      "fresh_root": true,
+      "no_server": true,
+      "descripcion": "Origen: `batches/G0_real.json` ROB-21 e informe §4 («`--profile` inválido es exit 2 documentado, no ambigüedad» — uno de los doce esperados refutados). Fuente: mcp.yml `mcp.arranque`: «exit 2 uso · 3 raíz irresoluble o workspace no abrible».",
+      "steps": [
+        {
+          "kind": "shell",
+          "cmd": "@bin.mcp --root @root --profile perfil-invalido < /dev/null > /dev/null 2>&1; echo EXIT=$?",
+          "expect": {
+            "describe": "Perfil inválido ⇒ exit 2 (uso). El mensaje nombra el valor recibido y los dos válidos.",
+            "rc": 0,
+            "contains": { "stdout": "EXIT=2" }
+          }
+        },
+        {
+          "kind": "shell",
+          "cmd": "@bin.mcp --root /no/existe/jamas/del/banco < /dev/null > /dev/null 2>&1; echo EXIT=$?",
+          "expect": {
+            "describe": "Raíz inexistente ⇒ exit 3 (runtime/IO), NO 2. La asimetría con el caso anterior es el contrato de arranque, y es la que permite a un supervisor distinguir «me invocaste mal» de «tu entorno está mal».",
+            "rc": 0,
+            "contains": { "stdout": "EXIT=3" }
+          }
+        },
+        {
+          "kind": "shell",
+          "cmd": "@bin.mcp --root @root --profile perfil-invalido < /dev/null 2>&1 >/dev/null | head -1",
+          "expect": {
+            "describe": "Y el mensaje va a stderr, nunca a stdout: stdout es el canal JSON-RPC y ensuciarlo rompería a cualquier cliente MCP.",
+            "rc": 0,
+            "contains": { "stdout": "perfil-invalido" }
+          }
+        }
+      ]
+    },
+    {
+      "id": "H-WARNGATE",
+      "fresh_root": true,
+      "no_server": true,
+      "descripcion": "Origen: `batches/H6a_warngate.json`/`H6b_warngate.json` y `verify_G2-06b.json`, e informe §4 (G2-06b, otro esperado refutado): con `gate.blockWarnings: true`, `valid` SIGUE SIENDO true (0 errores) y aun así el CLI da exit 1. `blocked ≠ invalid`, y ambos son correctos por contrato.",
+      "steps": [
+        {
+          "kind": "shell",
+          "cmd": "T=$(mktemp -d) && printf -- '---\\ntitle: WG index\\n---\\n\\n[on](wg-onboarding.md) y [m](mapa.png)\\n' > \"$T/wg-index.md\" && printf -- '---\\ntitle: WG onboarding\\n---\\n\\n[idx](wg-index.md)\\n' > \"$T/wg-onboarding.md\" && @bin.cli --path \"$T\" check > /dev/null 2>&1; echo EXIT_SIN_GATE=$?; mkdir -p \"$T/.lodestar\" && printf 'gate:\\n  blockWarnings: true\\n' > \"$T/.lodestar/config.yaml\" && @bin.cli --path \"$T\" check > /dev/null 2>&1; echo EXIT_CON_GATE=$?; @bin.cli --path \"$T\" check --json | python3 -c 'import json,sys; print(\"VALID=\" + str(json.load(sys.stdin)[\"valid\"]))'; rm -rf \"$T\"",
+          "expect": {
+            "describe": "Los tres datos en una sola corrida para que el contraste sea inequívoco: 1 aviso y 0 errores ⇒ SIN gate exit 0 · CON gate exit 1 · y `valid` TRUE en ambos casos. Un aviso no invalida el conocimiento; el gate es una POLÍTICA DE PUBLICACIÓN encima, no un cambio del veredicto.",
+            "rc": 0,
+            "contains": { "stdout": "EXIT_SIN_GATE=0" },
+            "matches": { "stdout": "EXIT_CON_GATE=1[\\s\\S]*VALID=True" }
+          }
+        }
+      ]
+    },
+    {
+      "id": "H-RECEIPTS-RETENCION",
+      "fresh_root": true,
+      "descripcion": "Origen: `batches/H4_receipts.json` y `verify_G2-04.json`/`verify_G2-04b.json` (repro del hallazgo A-09) — `workspace_status.receipts` lista lo que hay EN DISCO, más reciente primero; la cota la impone el GC, que solo corre tras apply/revert.",
+      "steps": [
+        {
+          "kind": "call",
+          "tool": "workspace_status",
+          "arguments": {},
+          "expect": { "describe": "Sin transacciones aún: la lista está vacía, no ausente.", "is_error": false, "length": { "structured.receipts": 0 } }
+        },
+        {
+          "kind": "call",
+          "tool": "change_plan",
+          "arguments": {
+            "operations": [{ "op": "patch_frontmatter", "path": "guias/doc-00.md", "patch": { "r": 1 } }],
+            "policy": { "requireValidResult": false, "allowWarnings": true }
+          },
+          "expect": { "describe": "Primera transacción.", "is_error": false }
+        },
+        {
+          "kind": "call",
+          "tool": "change_apply",
+          "arguments": { "changeSetId": "@step1.structured.changeSetId" },
+          "expect": { "describe": "Aplicada.", "is_error": false, "equals": { "structured.applied": true } }
+        },
+        {
+          "kind": "call",
+          "tool": "change_plan",
+          "arguments": {
+            "operations": [{ "op": "patch_frontmatter", "path": "guias/doc-00.md", "patch": { "r": 2 } }],
+            "policy": { "requireValidResult": false, "allowWarnings": true }
+          },
+          "expect": { "describe": "Segunda transacción.", "is_error": false }
+        },
+        {
+          "kind": "call",
+          "tool": "change_apply",
+          "arguments": { "changeSetId": "@step3.structured.changeSetId" },
+          "expect": { "describe": "Aplicada.", "is_error": false, "equals": { "structured.applied": true } }
+        },
+        {
+          "kind": "call",
+          "tool": "workspace_status",
+          "arguments": {},
+          "expect": {
+            "describe": "Dos recibos, EL MÁS RECIENTE PRIMERO, cada uno con su `changeSetId`, su `resultRevision` y el número de paths tocados. El orden es contractual: un agente que quiera «deshacer lo último» toma el primero.",
+            "is_error": false,
+            "length": { "structured.receipts": 2 },
+            "present": ["structured.receipts.0.receiptId", "structured.receipts.0.changeSetId",
+                        "structured.receipts.0.resultRevision", "structured.receipts.0.changedPathCount"],
+            "equals": { "structured.receipts.0.changedPathCount": 1 }
+          }
+        }
+      ],
+      "expect": [
+        {
+          "invariant": "same",
+          "steps": [4, 5],
+          "path": "structured.workspaceRevision",
+          "describe": "El `resultRevision` del recibo más reciente y la revisión que reporta el status hablan del mismo estado."
+        },
+        {
+          "invariant": "differs",
+          "steps": [2, 4],
+          "path": "structured.receiptId",
+          "describe": "Dos transacciones distintas ⇒ dos recibos distintos. Sin esto, un recibo reutilizado (la causa raíz de M-01) pasaría desapercibido."
+        }
+      ]
+    },
+    {
+      "id": "H-RECUPERACION-TRANSPARENTE",
+      "fresh_root": true,
+      "descripcion": "Origen: `batches/verify_G2-09.json` e informe §4 (G2-09, esperado refutado): un JOURNAL FANTASMA no bloquea — `change_apply` corre la recuperación transparente primero, la resuelve (prepared sin copias = caída pre-backup, nada que restaurar), sella y sigue. Sin quarantine y sin error.",
+      "steps": [
+        {
+          "kind": "call",
+          "tool": "change_plan",
+          "arguments": {
+            "operations": [{ "op": "patch_frontmatter", "path": "guias/doc-00.md", "patch": { "j": 1 } }],
+            "policy": { "requireValidResult": false, "allowWarnings": true }
+          },
+          "expect": { "describe": "Un plan legítimo, planificado ANTES de plantar el journal.", "is_error": false }
+        },
+        {
+          "kind": "shell",
+          "cmd": "mkdir -p .lodestar/runtime/journal && printf '{\"txnId\":\"txn-fantasma\",\"state\":\"prepared\"}' > .lodestar/runtime/journal/txn-fantasma.json && ls .lodestar/runtime/journal/",
+          "expect": {
+            "describe": "Se planta un write-ahead journal sin sellar: el rastro que deja un crash entre el `prepare` y el `commit`.",
+            "rc": 0,
+            "contains": { "stdout": "txn-fantasma.json" }
+          }
+        },
+        {
+          "kind": "call",
+          "tool": "change_apply",
+          "arguments": { "changeSetId": "@step0.structured.changeSetId" },
+          "expect": {
+            "describe": "G2-09: el apply NO devuelve WORKSPACE_RECOVERY_REQUIRED. Corre la recuperación como paso 2 de su propio camino, la resuelve y aplica. La probabilidad de que un agente vea un workspace que exija recuperación MANUAL es, por diseño, casi nula.",
+            "is_error": false,
+            "equals": { "structured.applied": true }
+          }
+        },
+        {
+          "kind": "shell",
+          "cmd": "ls .lodestar/runtime/journal/ 2>/dev/null | grep -c 'txn-fantasma' || echo SELLADO",
+          "expect": {
+            "describe": "Y el journal fantasma quedó SELLADO (borrado por `finish_recovery`), no en cuarentena: no había copias que restaurar porque la caída fue pre-backup.",
+            "contains": { "stdout": "SELLADO" }
+          }
+        },
+        {
+          "kind": "call",
+          "tool": "workspace_status",
+          "arguments": {},
+          "expect": {
+            "describe": "El flag de transacción pendiente vuelve a false: el workspace está sano y el agente puede seguir trabajando.",
+            "is_error": false,
+            "equals": { "structured.recovery.pendingTransaction": false }
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,116 @@
+{
+  "batch": "gate_L8_readonly",
+  "descripcion": "L8 del gate — el perfil `readonly` OCULTA y RECHAZA. Porte del lote temático L8 (`batches/L8_readonly.json`) contra el corpus canónico. Es el lote que asevera la distinción error-de-protocolo vs error-de-tool: readonly no ejecuta las tools de cambio devolviendo un error de dominio, es que no existen en la sesión.",
+  "root": "corpus",
+  "profile": "readonly",
+  "fixtures": null,
+  "cases": [
+    {
+      "id": "L8-ROB-17",
+      "descripcion": "Origen: L8_readonly.json ROB-17 — las 7 tools de lectura y el rechazo de las 3 de cambio. Fuente: safe-changes.md (readonly hides and refuses); mcp-clients.md «Profiles»; ARCHITECTURE.md §19.6.",
+      "steps": [
+        {
+          "kind": "list_tools",
+          "expect": {
+            "describe": "Exactamente 7 tools, nombradas: si alguna de cambio se colara aquí, el perfil habría dejado de ocultar.",
+            "length": { "tools": 7 },
+            "contains": { "tools": "workspace_status" },
+            "not_contains": { "tools": "change_plan" }
+          }
+        },
+        {
+          "kind": "call",
+          "tool": "change_plan",
+          "arguments": { "operations": [{ "op": "patch_frontmatter", "path": "guias/doc-00.md", "patch": { "x": 1 } }] },
+          "expect": {
+            "describe": "Error de PROTOCOLO JSON-RPC -32602 («tool desconocida»), NO un `isError` de tool: readonly no la ejecuta ni para rechazarla. Es la distinción que el arnés hace y que el banco necesita fijar.",
+            "protocol_error_code": -32602,
+            "absent": ["structured", "is_error"]
+          }
+        },
+        {
+          "kind": "call",
+          "tool": "change_apply",
+          "arguments": { "changeSetId": "changeset:00" },
+          "expect": { "describe": "Igual para apply.", "protocol_error_code": -32602 }
+        },
+        {
+          "kind": "call",
+          "tool": "change_revert",
+          "arguments": { "receiptId": "00" },
+          "expect": { "describe": "…y para revert. Las tres, sin excepción.", "protocol_error_code": -32602 }
+        }
+      ]
+    },
+    {
+      "id": "L8-ROB-18-CAPABILITIES",
+      "descripcion": "Origen: L8_readonly.json ROB-18 — las `capabilities` que anuncia `workspace_status` en readonly. La superficie no debe afirmar lo que el perfil no sirve (la lección de D-01, saldada por E29-H09).",
+      "steps": [
+        {
+          "kind": "call",
+          "tool": "workspace_status",
+          "arguments": {},
+          "expect": {
+            "describe": "Las tres capabilities de escritura en false. Es el contraste EXACTO del paso 1 de gate_L7 · L7-APL-01, donde en standard las tres son true.",
+            "is_error": false,
+            "equals": {
+              "structured.capabilities.writes": false,
+              "structured.capabilities.transactions": false,
+              "structured.capabilities.revert": false
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "L8-READONLY-NO-MUTA",
+      "descripcion": "Origen: informe 2026-08-06 §método («el repo real quedó byte-idéntico: misma workspaceRevision blake3 antes y después») — el invariante que sostiene la REGLA DURA de readonly, portado como caso asertable.",
+      "steps": [
+        {
+          "kind": "call",
+          "tool": "workspace_status",
+          "arguments": {},
+          "expect": { "describe": "Revisión antes de una tanda de lecturas.", "is_error": false }
+        },
+        {
+          "kind": "call",
+          "tool": "knowledge_search",
+          "arguments": { "where": "has(tags)", "limit": 50 },
+          "expect": { "describe": "Lectura 1.", "is_error": false }
+        },
+        {
+          "kind": "call",
+          "tool": "knowledge_check",
+          "arguments": { "scope": { "kind": "workspace" }, "minimumSeverity": "info", "limit": 1000 },
+          "expect": { "describe": "Lectura 2 — la más cara: recorre el workspace entero.", "is_error": false }
+        },
+        {
+          "kind": "call",
+          "tool": "graph_query",
+          "arguments": { "operation": "components", "limit": 100 },
+          "expect": { "describe": "Lectura 3.", "is_error": false }
+        },
+        {
+          "kind": "call",
+          "tool": "workspace_status",
+          "arguments": {},
+          "expect": { "describe": "Revisión después.", "is_error": false }
+        }
+      ],
+      "expect": [
+        {
+          "invariant": "same",
+          "steps": [0, 4],
+          "path": "structured.workspaceRevision",
+          "describe": "Una tanda de lecturas deja la `workspaceRevision` INTACTA. Es lo que justifica correr el banco contra un root real bajo readonly sin miedo, y por eso es un caso del gate y no una nota del README."
+        },
+        {
+          "invariant": "same",
+          "steps": [0, 4],
+          "path": "structured.counts",
+          "describe": "…y el inventario entero, no solo su hash."
+        }
+      ]
+    }
+  ]
+}

@@ -7,8 +7,8 @@
     {"id": "G2-06b-v", "steps": [
        {"kind": "call", "tool": "workspace_status", "arguments": {}},
        {"kind": "call", "tool": "knowledge_check", "arguments": {"scope": {"kind": "workspace"}, "minimumSeverity": "info", "limit": 1000}},
-       {"kind": "shell", "cmd": "/Users/dbarea/repos/lodestar/target/debug/lodestar check; echo EXIT=$?"},
-       {"kind": "shell", "cmd": "/Users/dbarea/repos/lodestar/target/debug/lodestar check --json | python3 -c 'import json,sys; d=json.load(sys.stdin); print(\"CLI_JSON_valid=\", d[\"valid\"])'; echo EXIT_JSON=$?"}
+       {"kind": "shell", "cmd": "@bin.cli check; echo EXIT=$?"},
+       {"kind": "shell", "cmd": "@bin.cli check --json | python3 -c 'import json,sys; d=json.load(sys.stdin); print(\"CLI_JSON_valid=\", d[\"valid\"])'; echo EXIT_JSON=$?"}
     ]}
   ]
 }

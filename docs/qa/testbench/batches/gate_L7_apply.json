@@ -1,0 +1,350 @@
+{
+  "batch": "gate_L7_apply",
+  "descripcion": "L7 del gate — `change_apply`/`change_revert`: round trip byte a byte y la FAMILIA DE CONFLICTOS completa (`PLAN_STALE`, `INVALID_RESULT`, `PERMISSION_DENIED`, `WRITE_CONFLICT`, `PLAN_EXPIRED`). Porte del lote temático L7 (`batches/L7_apl.json`) más los invariantes transversales del informe §5 verificados conformes («revert byte a byte», «familia de conflictos»). Cada caso corre en su propia copia efímera del corpus (`fresh_root`), así ninguno hereda el estado del anterior.",
+  "root": "corpus",
+  "profile": "standard",
+  "fixtures": null,
+  "cases": [
+    {
+      "id": "L7-APL-01-ROUND-TRIP",
+      "fresh_root": true,
+      "descripcion": "Origen: L7_apl.json APL-01 e invariante transversal del informe §5 («revert byte a byte», verificado conforme). Es EL caso del modelo transaccional: plan → apply → revert deja el documento idéntico, byte a byte, y el workspace en su revisión original.",
+      "steps": [
+        {
+          "kind": "shell",
+          "cmd": "shasum -a 256 guias/doc-00.md | cut -d' ' -f1",
+          "expect": { "describe": "Huella de partida.", "rc": 0 }
+        },
+        {
+          "kind": "call",
+          "tool": "workspace_status",
+          "arguments": {},
+          "expect": {
+            "describe": "Estado de partida. En perfil standard las tres capabilities de escritura están activas — el contraste exacto con readonly (ver gate_L8).",
+            "is_error": false,
+            "equals": {
+              "structured.capabilities.writes": true,
+              "structured.capabilities.transactions": true,
+              "structured.capabilities.revert": true
+            },
+            "length": { "structured.receipts": 0 }
+          }
+        },
+        {
+          "kind": "call",
+          "tool": "change_plan",
+          "arguments": {
+            "operations": [{ "op": "patch_frontmatter", "path": "guias/doc-00.md", "patch": { "priority": 1 } }],
+            "policy": { "requireValidResult": false, "allowWarnings": true }
+          },
+          "expect": { "describe": "El plan.", "is_error": false, "equals": { "structured.canApply": true } }
+        },
+        {
+          "kind": "call",
+          "tool": "change_apply",
+          "arguments": { "changeSetId": "@step2.structured.changeSetId" },
+          "expect": {
+            "describe": "El apply escribe exactamente lo que el plan prometió: un solo path cambiado, y la revisión previa es la base sobre la que se planificó.",
+            "is_error": false,
+            "equals": { "structured.applied": true, "structured.changedPaths": ["guias/doc-00.md"] },
+            "matches": { "structured.workspaceRevision": "^blake3:[0-9a-f]{64}$" },
+            "present": ["structured.receiptId", "structured.validation.valid", "structured.previousWorkspaceRevision"]
+          }
+        },
+        {
+          "kind": "shell",
+          "cmd": "grep -c '^priority: 1$' guias/doc-00.md",
+          "expect": { "describe": "La edición es QUIRÚRGICA: la línea de priority quedó escrita.", "rc": 0, "equals": { "stdout": "1\n" } }
+        },
+        {
+          "kind": "call",
+          "tool": "change_revert",
+          "arguments": { "receiptId": "@step3.structured.receiptId" },
+          "expect": {
+            "describe": "El revert es una transacción INVERSA: su receiptId apila el sufijo `-revert` sobre el del apply, y su `workspaceRevision` es la anterior al apply.",
+            "is_error": false,
+            "equals": { "structured.reverted": true, "structured.changedPaths": ["guias/doc-00.md"] },
+            "matches": { "structured.receiptId": "-revert$" }
+          }
+        },
+        {
+          "kind": "shell",
+          "cmd": "shasum -a 256 guias/doc-00.md | cut -d' ' -f1",
+          "expect": { "describe": "Huella tras el round trip completo.", "rc": 0 }
+        }
+      ],
+      "expect": [
+        {
+          "invariant": "same",
+          "steps": [0, 6],
+          "path": "stdout",
+          "describe": "RESTAURACIÓN BYTE A BYTE: la huella sha256 del documento tras plan→apply→revert es idéntica a la de partida. No «equivalente»: idéntica."
+        },
+        {
+          "invariant": "same",
+          "steps": [1, 5],
+          "path": "structured.workspaceRevision",
+          "describe": "…y el workspace vuelve exactamente a su revisión original. Es el invariante que hace del revert un deshacer de verdad y no una edición compensatoria."
+        },
+        {
+          "invariant": "differs",
+          "steps": [3, 5],
+          "path": "structured.workspaceRevision",
+          "describe": "El contraste que impide que los dos `same` de arriba pasen de forma vacua: entre el apply y el revert la revisión SÍ cambió (si no, no se habría escrito nada)."
+        }
+      ]
+    },
+    {
+      "id": "L7-APL-07-PLAN-STALE",
+      "fresh_root": true,
+      "descripcion": "Origen: L7_apl.json APL-07 e informe §5 («concurrencia optimista» verificada conforme). Fuente: safe-changes.md «Optimistic concurrency».",
+      "steps": [
+        {
+          "kind": "call",
+          "tool": "change_plan",
+          "arguments": {
+            "operations": [{ "op": "patch_frontmatter", "path": "guias/doc-00.md", "patch": { "priority": 1 } }],
+            "policy": { "requireValidResult": false, "allowWarnings": true }
+          },
+          "expect": { "describe": "Plan sobre el estado actual.", "is_error": false, "equals": { "structured.canApply": true } }
+        },
+        {
+          "kind": "shell",
+          "cmd": "printf '\\n<!-- edicion externa del banco -->\\n' >> equipos/doc-01.md",
+          "expect": { "describe": "Alguien edita el workspace por fuera — y OTRO documento, no el afectado.", "rc": 0 }
+        },
+        {
+          "kind": "call",
+          "tool": "change_apply",
+          "arguments": { "changeSetId": "@step0.structured.changeSetId" },
+          "expect": {
+            "describe": "El plan se juzga contra el workspace ENTERO, no solo contra los documentos que toca: cambiar cualquier fichero lo invalida. El mensaje da las dos revisiones y manda replanificar; nada se escribe.",
+            "error_code": "PLAN_STALE",
+            "contains": { "text": "change_plan" },
+            "absent": ["structured"]
+          }
+        },
+        {
+          "kind": "shell",
+          "cmd": "grep -c 'priority' guias/doc-00.md; grep -c '^priority: 1$' guias/doc-00.md || true",
+          "expect": { "describe": "Comprobación material: el documento del plan abortado NO tiene la línea que el plan prometía.", "not_contains": { "stdout": "1\n1\n" } }
+        }
+      ]
+    },
+    {
+      "id": "L7-APL-PLAN-INEXISTENTE",
+      "fresh_root": true,
+      "descripcion": "Origen: informe §5 (familia de conflictos). Matiz verificado ejecutando y que merece fijarse: un PLAN inexistente es `PLAN_STALE`, mientras que un RECIBO inexistente es `PLAN_EXPIRED`. La asimetría es real y un agente la sufriría.",
+      "steps": [
+        {
+          "kind": "call",
+          "tool": "change_apply",
+          "arguments": { "changeSetId": "changeset:0000000000000000000000000000000000000000000000000000000000000000" },
+          "expect": {
+            "describe": "Plan que nunca existió (o purgado): PLAN_STALE con un texto DISTINTO del de la base cambiada («ya no está disponible» vs «el conocimiento cambió»).",
+            "error_code": "PLAN_STALE",
+            "contains": { "text": "change_plan" }
+          }
+        },
+        {
+          "kind": "call",
+          "tool": "change_revert",
+          "arguments": { "receiptId": "0000000000000000000000000000000000000000000000000000000000000000" },
+          "expect": {
+            "describe": "Recibo que nunca existió (o purgado por retención): PLAN_EXPIRED, no PLAN_STALE.",
+            "error_code": "PLAN_EXPIRED"
+          }
+        },
+        {
+          "kind": "call",
+          "tool": "change_revert",
+          "arguments": { "transactionId": "0000" },
+          "expect": {
+            "describe": "Y el nombre del parámetro es `receiptId`: uno inventado es INVALID_SCHEMA que ENUMERA los declarados, en vez de ignorarse en silencio.",
+            "error_code": "INVALID_SCHEMA",
+            "contains": { "text": "receiptId" }
+          }
+        }
+      ]
+    },
+    {
+      "id": "L7-APL-INVALID-RESULT",
+      "fresh_root": true,
+      "descripcion": "Origen: informe §5 (`INVALID_RESULT` verificado conforme) y mcp.yml `requireValidResult`. El gate de validez lo ejerce el APPLY recomputando la policy con la que se planificó (`decisiones §18`), no el plan.",
+      "steps": [
+        {
+          "kind": "call",
+          "tool": "change_plan",
+          "arguments": {
+            "operations": [{ "op": "replace_body", "path": "guias/doc-00.md", "body": "# Documento 00\n\nEnlace roto a proposito: [x](../zz-nada/inexistente-del-banco.md)\n" }]
+          },
+          "expect": {
+            "describe": "Con la policy por defecto (`requireValidResult: true`) el plan SE EMITE pero se declara no aplicable: el motor no oculta el plan, lo marca.",
+            "is_error": false,
+            "equals": { "structured.canApply": false, "structured.policy.requireValidResult": true }
+          }
+        },
+        {
+          "kind": "call",
+          "tool": "change_apply",
+          "arguments": { "changeSetId": "@step0.structured.changeSetId" },
+          "expect": {
+            "describe": "Y aplicarlo de todos modos es INVALID_RESULT, con el recuento de errores y la instrucción de replanificar. «No se ha escrito nada» es parte del contrato.",
+            "error_code": "INVALID_RESULT",
+            "contains": { "text": "requireValidResult" }
+          }
+        },
+        {
+          "kind": "shell",
+          "cmd": "grep -c 'inexistente-del-banco' guias/doc-00.md || echo AUSENTE",
+          "expect": { "describe": "Comprobación material de «no se ha escrito nada».", "contains": { "stdout": "AUSENTE" } }
+        }
+      ]
+    },
+    {
+      "id": "L7-APL-WRITE-CONFLICT",
+      "fresh_root": true,
+      "descripcion": "Origen: informe §5 (`WRITE_CONFLICT` verificado conforme). Es el guard del REVERT: si el conocimiento cambió después del apply, deshacer pisaría ese cambio.",
+      "steps": [
+        {
+          "kind": "call",
+          "tool": "change_plan",
+          "arguments": {
+            "operations": [{ "op": "patch_frontmatter", "path": "guias/doc-00.md", "patch": { "priority": 1 } }],
+            "policy": { "requireValidResult": false, "allowWarnings": true }
+          },
+          "expect": { "describe": "Plan.", "is_error": false }
+        },
+        {
+          "kind": "call",
+          "tool": "change_apply",
+          "arguments": { "changeSetId": "@step0.structured.changeSetId" },
+          "expect": { "describe": "Apply.", "is_error": false, "equals": { "structured.applied": true } }
+        },
+        {
+          "kind": "shell",
+          "cmd": "printf '\\n<!-- alguien edito despues del apply -->\\n' >> guias/doc-00.md",
+          "expect": { "describe": "Edición externa DESPUÉS del apply, sobre el documento afectado.", "rc": 0 }
+        },
+        {
+          "kind": "call",
+          "tool": "change_revert",
+          "arguments": { "receiptId": "@step1.structured.receiptId" },
+          "expect": {
+            "describe": "El revert se niega: restaurar la copia de seguridad borraría la edición ajena. «No se ha restaurado nada» — el revert es seguro, no ciego.",
+            "error_code": "WRITE_CONFLICT"
+          }
+        },
+        {
+          "kind": "shell",
+          "cmd": "grep -c 'alguien edito despues del apply' guias/doc-00.md",
+          "expect": { "describe": "Y la edición ajena sigue ahí, intacta.", "rc": 0, "equals": { "stdout": "1\n" } }
+        }
+      ]
+    },
+    {
+      "id": "L7-APL-PERMISSION-DENIED",
+      "fresh_root": true,
+      "no_server": false,
+      "descripcion": "Origen: informe §5 (`PERMISSION_DENIED` y `writableRoots` verificados conformes) + hallazgo A-09 (la config se lee UNA vez al abrir la sesión, declarado por E30-H03). Como la config debe existir ANTES de abrir la sesión y este lote comparte el arranque, el caso escribe la config y luego habla por un proceso NUEVO lanzado a mano.",
+      "steps": [
+        {
+          "kind": "shell",
+          "cmd": "mkdir -p .lodestar && printf 'workspace:\\n  writableRoots: [guias]\\n' > .lodestar/config.yaml && echo escrita",
+          "expect": { "describe": "Config con un solo root escribible.", "rc": 0, "contains": { "stdout": "escrita" } }
+        },
+        {
+          "kind": "shell",
+          "cmd": "printf '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"clientInfo\":{\"name\":\"banco\",\"version\":\"0\"}}}\\n{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\\n{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"change_plan\",\"arguments\":{\"operations\":[{\"op\":\"patch_frontmatter\",\"path\":\"equipos/doc-01.md\",\"patch\":{\"priority\":1}}],\"policy\":{\"requireValidResult\":false,\"allowWarnings\":true}}}}\\n' | @bin.mcp --root @root --profile standard | tail -1",
+          "expect": {
+            "describe": "Proceso NUEVO (la config solo se lee al abrir): planificar fuera del writableRoot NO falla. El plan es optimista y no comprueba permisos — asimetría real, verificada ejecutando.",
+            "rc": 0,
+            "contains": { "stdout": "changeSetId" },
+            "not_contains": { "stdout": "PERMISSION_DENIED" }
+          }
+        },
+        {
+          "kind": "shell",
+          "cmd": "CS=$(printf '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"clientInfo\":{\"name\":\"banco\",\"version\":\"0\"}}}\\n{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\\n{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"change_plan\",\"arguments\":{\"operations\":[{\"op\":\"patch_frontmatter\",\"path\":\"equipos/doc-01.md\",\"patch\":{\"priority\":1}}],\"policy\":{\"requireValidResult\":false,\"allowWarnings\":true}}}}\\n' | @bin.mcp --root @root --profile standard | tail -1 | python3 -c 'import json,sys; d=json.load(sys.stdin); print(json.loads(d[\"result\"][\"content\"][0][\"text\"])[\"changeSetId\"])') && printf '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"clientInfo\":{\"name\":\"banco\",\"version\":\"0\"}}}\\n{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\\n{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"change_apply\",\"arguments\":{\"changeSetId\":\"'$CS'\"}}}\\n' | @bin.mcp --root @root --profile standard | tail -1",
+          "expect": {
+            "describe": "El APPLY sí deniega, nombrando el path y el concepto («no cae bajo ningún writableRoot configurado»). El permiso se ejerce donde se escribe, no donde se simula.",
+            "rc": 0,
+            "contains": { "stdout": "PERMISSION_DENIED" }
+          }
+        },
+        {
+          "kind": "shell",
+          "cmd": "grep -c '^priority: 1$' equipos/doc-01.md || echo NO_ESCRITO",
+          "expect": { "describe": "Comprobación material: el documento fuera del root escribible quedó intacto.", "contains": { "stdout": "NO_ESCRITO" } }
+        }
+      ]
+    },
+    {
+      "id": "L7-APL-REVERT-DEL-REVERT",
+      "fresh_root": true,
+      "descripcion": "Origen: hallazgo M-01 de `decisiones §23` (prio 5, BUG DE MOTOR con pérdida de datos: `change_revert` de un recibo `-revert` era un no-op silencioso que además destruía el redo), SALDADO por E28-H01 + adenda E28-H03. El esperado es el comportamiento CORREGIDO: deshacer el deshacer FUNCIONA y encadena.",
+      "steps": [
+        {
+          "kind": "call",
+          "tool": "change_plan",
+          "arguments": {
+            "operations": [{ "op": "patch_frontmatter", "path": "guias/doc-00.md", "patch": { "priority": 1 } }],
+            "policy": { "requireValidResult": false, "allowWarnings": true }
+          },
+          "expect": { "describe": "Plan.", "is_error": false }
+        },
+        {
+          "kind": "call",
+          "tool": "change_apply",
+          "arguments": { "changeSetId": "@step0.structured.changeSetId" },
+          "expect": { "describe": "Apply: el estado B.", "is_error": false, "equals": { "structured.applied": true } }
+        },
+        {
+          "kind": "call",
+          "tool": "change_revert",
+          "arguments": { "receiptId": "@step1.structured.receiptId" },
+          "expect": {
+            "describe": "Revert #1: vuelta al estado A. Su recibo apila el sufijo.",
+            "is_error": false,
+            "equals": { "structured.reverted": true },
+            "matches": { "structured.receiptId": "-revert$" }
+          }
+        },
+        {
+          "kind": "call",
+          "tool": "change_revert",
+          "arguments": { "receiptId": "@step2.structured.receiptId" },
+          "expect": {
+            "describe": "M-01, el corazón del hallazgo: revertir el `-revert` REHACE (vuelta a B) en vez de ser un no-op que responde `reverted: true` sin hacer nada. Y el sufijo NUMERA (`-revert-2`) en vez de colisionar con el recibo que se está revirtiendo, que era la causa raíz de la pérdida del redo.",
+            "is_error": false,
+            "equals": { "structured.reverted": true },
+            "matches": { "structured.receiptId": "-revert-2$" }
+          }
+        },
+        {
+          "kind": "shell",
+          "cmd": "grep -c '^priority: 1$' guias/doc-00.md",
+          "expect": {
+            "describe": "Comprobación MATERIAL del redo: tras revertir el revert, el cambio del apply está otra vez en disco. Antes de E28-H01 el fichero se quedaba en A y el redo era irrecuperable.",
+            "rc": 0,
+            "equals": { "stdout": "1\n" }
+          }
+        }
+      ],
+      "expect": [
+        {
+          "invariant": "same",
+          "steps": [1, 3],
+          "path": "structured.workspaceRevision",
+          "describe": "El redo devuelve el workspace EXACTAMENTE al estado que dejó el apply: misma revisión. Es la prueba de que el `-revert` del `-revert` restaura las copias correctas (`recovery/X-revert/`) y no las del apply original."
+        },
+        {
+          "invariant": "differs",
+          "steps": [2, 3],
+          "path": "structured.workspaceRevision",
+          "describe": "…y que el segundo revert hizo ALGO: su revisión difiere de la del primero. Sin esto, el no-op silencioso de M-01 pasaría el invariante anterior."
+        }
+      ]
+    }
+  ]
+}

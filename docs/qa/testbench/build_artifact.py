@@ -1,13 +1,28 @@
 #!/usr/bin/env python3
 """Construye la página del Artifact con la matriz completa embebida."""
+import argparse
 import json
 import html as H
+from pathlib import Path
 
-SC = "/private/tmp/claude-501/-Users-dbarea-repos-homelab/7d9d0da7-8bbf-4b49-8144-597003faaf00/scratchpad"
+
+DEFAULT_INPUT_DIR = Path(__file__).resolve().parent
+DEFAULT_OUTPUT = DEFAULT_INPUT_DIR / "artifact_lodestar.html"
+
+
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument("--input-dir", type=Path, default=DEFAULT_INPUT_DIR,
+                    help="directorio con matriz_r1.json, matriz_r2.json y matriz_r3.json")
+parser.add_argument("--out", type=Path, default=DEFAULT_OUTPUT,
+                    help="fichero HTML de salida")
+args = parser.parse_args()
+input_dir = args.input_dir
+output = args.out
 
 casos = []
 for n in (1, 2, 3):
-    d = json.load(open(f"{SC}/results/matriz_r{n}.json"))
+    with (input_dir / f"matriz_r{n}.json").open(encoding="utf-8") as matriz:
+        d = json.load(matriz)
     for c in d["casos"]:
         ver = c.get("verificacion") or {}
         final = ver.get("clasificacion") or ("PASS" if c["veredicto"] == "PASS" else c["veredicto"])
@@ -195,5 +210,7 @@ render();
 </script>
 """
 page = page.replace("__CARDS__", cards).replace("__DATA__", DATA)
-open(f"{SC}/artifact_lodestar.html", "w").write(page)
+output.parent.mkdir(parents=True, exist_ok=True)
+with output.open("w", encoding="utf-8") as artifact:
+    artifact.write(page)
 print("artifact generado:", len(page), "bytes,", len(casos), "casos")

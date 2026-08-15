@@ -1,0 +1,229 @@
+{
+  "batch": "gate_L9_check_a",
+  "descripcion": "L9 del gate — el CATÁLOGO de diagnósticos de contenido con sus severidades (`knowledge_check`, scope documento). Porte del lote temático L9 (`batches/L9_chk_a.json`) contra el corpus canónico, que ya integra el set `chk_a` de `make_fixtures.py`. Todos los conteos de este lote son de scope DOCUMENTO —dependen de un solo fichero, no del inventario—, así que son `equals` legítimos (FORMATO_EXPECT.md §6).",
+  "root": "corpus",
+  "profile": "readonly",
+  "fixtures": null,
+  "cases": [
+    {
+      "id": "L9-CHK-01-FM-UNCLOSED",
+      "descripcion": "Origen: L9_chk_a.json CHK-01. Fuente: mcp.yml catálogo CheckCode (ex OKF-FM02).",
+      "steps": [
+        {
+          "kind": "call",
+          "tool": "knowledge_check",
+          "arguments": { "scope": { "kind": "document", "ref": { "path": "fixtures/roto-unclosed.md" } } },
+          "expect": {
+            "describe": "Frontmatter abierto sin cerrar: `err`, y el `id` del diagnóstico tiene la forma estable `diag:blake3:<hex>` (es lo que permite deduplicar entre corridas).",
+            "is_error": false,
+            "equals": {
+              "structured.valid": false,
+              "structured.summary.errors": 1,
+              "structured.summary.warnings": 0,
+              "structured.diagnostics.0.code": "FM-UNCLOSED",
+              "structured.diagnostics.0.level": "err"
+            },
+            "length": { "structured.diagnostics": 1 },
+            "matches": { "structured.diagnostics.0.id": "^diag:blake3:[0-9a-f]{64}$" }
+          }
+        }
+      ]
+    },
+    {
+      "id": "L9-CHK-02-FM-YAML-INVALID",
+      "descripcion": "Origen: L9_chk_a.json CHK-02 — el diagnóstico rellena `range` con las líneas de CONTENIDO del bloque (E16-H05).",
+      "steps": [
+        {
+          "kind": "call",
+          "tool": "knowledge_check",
+          "arguments": { "scope": { "kind": "document", "ref": { "path": "fixtures/roto-yaml.md" } } },
+          "expect": {
+            "describe": "YAML inválido dentro de un frontmatter bien delimitado: `err` con rango. Contrasta con FM-UNCLOSED, que es un fallo de DELIMITACIÓN, no de contenido.",
+            "is_error": false,
+            "equals": {
+              "structured.valid": false,
+              "structured.summary.errors": 1,
+              "structured.diagnostics.0.code": "FM-YAML-INVALID",
+              "structured.diagnostics.0.level": "err"
+            },
+            "present": ["structured.diagnostics.0.range.startLine", "structured.diagnostics.0.range.endLine"],
+            "type": { "structured.diagnostics.0.range.startLine": "number" }
+          }
+        }
+      ]
+    },
+    {
+      "id": "L9-CHK-03-CONFLICT-MARKER",
+      "descripcion": "Origen: L9_chk_a.json CHK-03. Fuente: mcp.yml catálogo (ex OKF-CONFLICT).",
+      "steps": [
+        {
+          "kind": "call",
+          "tool": "knowledge_check",
+          "arguments": { "scope": { "kind": "document", "ref": { "path": "fixtures/conflicto.md" } } },
+          "expect": {
+            "describe": "Marcadores de conflicto git sin resolver en el cuerpo: `err`.",
+            "is_error": false,
+            "equals": {
+              "structured.valid": false,
+              "structured.summary.errors": 1,
+              "structured.diagnostics.0.code": "DOC-CONFLICT-MARKER",
+              "structured.diagnostics.0.level": "err"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "L9-CHK-04-05-MISMO-CODIGO-DOS-NIVELES",
+      "descripcion": "Origen: L9_chk_a.json CHK-04/CHK-05 y E17-H03 — `LINK-TARGET-MISSING` es EL MISMO código con severidad distinta según la extensión del destino: `.md` es `err` (sería conocimiento), otra cosa es `warn` (sería fichero de proyecto). Es la pareja que da sentido al catálogo.",
+      "steps": [
+        {
+          "kind": "call",
+          "tool": "knowledge_check",
+          "arguments": { "scope": { "kind": "document", "ref": { "path": "fixtures/enlace-roto.md" } } },
+          "expect": {
+            "describe": "Destino `.md` inexistente ⇒ `err`, y el documento NO es válido.",
+            "is_error": false,
+            "equals": {
+              "structured.valid": false,
+              "structured.summary.errors": 1,
+              "structured.summary.warnings": 0,
+              "structured.diagnostics.0.code": "LINK-TARGET-MISSING",
+              "structured.diagnostics.0.level": "err"
+            }
+          }
+        },
+        {
+          "kind": "call",
+          "tool": "knowledge_check",
+          "arguments": { "scope": { "kind": "document", "ref": { "path": "fixtures/enlace-roto-warn.md" } } },
+          "expect": {
+            "describe": "Destino que no es `.md` ⇒ `warn`, y `valid` SIGUE SIENDO true: un aviso no invalida. Esa es la mitad del contraste que nadie debe confundir con `blocked` (ver gate_H · el gate de avisos de la CLI).",
+            "is_error": false,
+            "equals": {
+              "structured.valid": true,
+              "structured.summary.errors": 0,
+              "structured.summary.warnings": 1,
+              "structured.diagnostics.0.code": "LINK-TARGET-MISSING",
+              "structured.diagnostics.0.level": "warn"
+            }
+          }
+        }
+      ],
+      "expect": [
+        {
+          "invariant": "same",
+          "steps": [0, 1],
+          "path": "structured.diagnostics.0.code",
+          "describe": "El MISMO código en los dos pasos: la severidad la decide el destino, no el código. Si alguien partiera el código en dos, este invariante lo cazaría."
+        },
+        {
+          "invariant": "differs",
+          "steps": [0, 1],
+          "path": "structured.diagnostics.0.level",
+          "describe": "…y los niveles difieren, que es justo lo que se está fijando."
+        }
+      ]
+    },
+    {
+      "id": "L9-CHK-06-ESCAPES",
+      "descripcion": "Origen: L9_chk_a.json CHK-06 — un destino por encima de la raíz es `err` NO CONFIGURABLE: el motor no puede seguirlo ni reescribirlo.",
+      "steps": [
+        {
+          "kind": "call",
+          "tool": "knowledge_check",
+          "arguments": { "scope": { "kind": "document", "ref": { "path": "notas/escapa.md" } } },
+          "expect": {
+            "describe": "Se usa el documento del propio corpus (`notas/escapa.md`), no el homónimo del set chk_a, porque el corpus lo planta a propósito en su red temática.",
+            "is_error": false,
+            "equals": {
+              "structured.valid": false,
+              "structured.summary.errors": 1,
+              "structured.diagnostics.0.code": "LINK-ESCAPES-WORKSPACE",
+              "structured.diagnostics.0.level": "err"
+            },
+            "contains": { "structured.diagnostics.0.msg": "raíz del workspace" }
+          }
+        }
+      ]
+    },
+    {
+      "id": "L9-CHK-07-CASE-MISMATCH",
+      "descripcion": "Origen: L9_chk_a.json CHK-07 — un destino que coincide con uno real SALVO capitalización o forma Unicode es `warn` (no portable entre sistemas de ficheros), y el diagnóstico NOMBRA la ruta real en `related`.",
+      "steps": [
+        {
+          "kind": "call",
+          "tool": "knowledge_check",
+          "arguments": { "scope": { "kind": "document", "ref": { "path": "guias/case-mismatch.md" } } },
+          "expect": {
+            "describe": "Se usa `guias/case-mismatch.md` del corpus (que apunta a `Guias/Doc-00.md` con `guias/doc-00.md` existiendo) y NO el `fixtures/case-mismatch.md` del set chk_a, cuyo destino `equipos/Bastion.md` era del homelab y en este corpus no tiene contraparte real: allí el diagnóstico degrada a LINK-TARGET-MISSING. Es exactamente el reescribir-contra-el-campo-nuevo que pide la historia.",
+            "is_error": false,
+            "equals": {
+              "structured.valid": true,
+              "structured.summary.warnings": 1,
+              "structured.summary.errors": 0,
+              "structured.diagnostics.0.code": "LINK-CASE-MISMATCH",
+              "structured.diagnostics.0.level": "warn",
+              "structured.diagnostics.0.related.0": "guias/doc-00.md"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "L9-CHK-08-NAVEGACION-PURA",
+      "descripcion": "Origen: L9_chk_a.json CHK-08 y E23-H11 — la navegación PURA (`../`, `./`, hrefs que no NOMBRAN nada) es legítima y NO produce diagnóstico. Es el contraste que impide que el banco confunda «enlace raro» con «error».",
+      "steps": [
+        {
+          "kind": "call",
+          "tool": "knowledge_check",
+          "arguments": { "scope": { "kind": "document", "ref": { "path": "notas/navegacion.md" } } },
+          "expect": {
+            "describe": "Cero diagnósticos. El matiz vigente de `links::clasificar`, que el propio corpus documenta: un href que SÍ nombra algo (`guias/`) es `Missing` aunque acabe en barra — ese otro caso lo cubre L9-CHK-DIRLINK.",
+            "is_error": false,
+            "equals": { "structured.valid": true, "structured.summary.errors": 0, "structured.summary.warnings": 0 },
+            "length": { "structured.diagnostics": 0 }
+          }
+        }
+      ]
+    },
+    {
+      "id": "L9-CHK-DIRLINK",
+      "descripcion": "Origen: hallazgo A-10 de `decisiones §23` (mcp.yml L149-151 impreciso sobre «un path que normaliza a un directorio»), SALDADO por E30-H03 con la redacción precisada y VERIFICADA contra `core::links::clasificar`: solo la raíz da `workspaceDirectory`; un directorio CON NOMBRE es `missing`.",
+      "steps": [
+        {
+          "kind": "call",
+          "tool": "knowledge_check",
+          "arguments": { "scope": { "kind": "document", "ref": { "path": "fixtures/raiz-dir.md" } } },
+          "expect": {
+            "describe": "A-10: `[g](guias/)` nombra un segmento que sobrevive a la normalización ⇒ `missing` ⇒ LINK-TARGET-MISSING de nivel `warn` (no es `.md`). El statu quo, no el bug.",
+            "is_error": false,
+            "equals": {
+              "structured.valid": true,
+              "structured.summary.warnings": 1,
+              "structured.diagnostics.0.code": "LINK-TARGET-MISSING",
+              "structured.diagnostics.0.level": "warn"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "L9-CHK-09-WIKILINK",
+      "descripcion": "Origen: L9_chk_a.json CHK-09 e informe §5 («wikilinks aislados por diseño», verificado conforme). Un `[[wikilink]]` NO es un enlace para Lodestar: ni resuelve, ni cuenta como arista, ni produce diagnóstico.",
+      "steps": [
+        {
+          "kind": "call",
+          "tool": "knowledge_check",
+          "arguments": { "scope": { "kind": "document", "ref": { "path": "fixtures/wikilink.md" } } },
+          "expect": {
+            "describe": "Cero diagnósticos: el wikilink es texto, no enlace. Si algún día se soportaran, este caso cambiaría de esperado a la vez que la decisión — que es justo para lo que sirve fijarlo.",
+            "is_error": false,
+            "equals": { "structured.valid": true },
+            "length": { "structured.diagnostics": 0 }
+          }
+        }
+      ]
+    }
+  ]
+}

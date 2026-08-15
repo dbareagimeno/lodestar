@@ -1,0 +1,181 @@
+{
+  "batch": "gate_L11_scopes",
+  "descripcion": "L11 del gate — los cuatro SCOPES de `knowledge_check` (`document`, `paths`, `affected`, `workspace`) y el umbral `minimumSeverity`. Porte del lote temático L11 (`batches/L11_chk_scopes.json`) contra el corpus canónico.",
+  "root": "corpus",
+  "profile": "readonly",
+  "fixtures": null,
+  "cases": [
+    {
+      "id": "L11-CHK-20-21-SCOPE-ACOTA",
+      "descripcion": "Origen: L11_chk_scopes.json CHK-20/CHK-21 — el scope ACOTA de verdad: `document` trae los de UN fichero y `paths` los de exactamente los nombrados, no los del resto de fixtures rotos.",
+      "steps": [
+        {
+          "kind": "call",
+          "tool": "knowledge_check",
+          "arguments": { "scope": { "kind": "document", "ref": { "path": "fixtures/roto-unclosed.md" } } },
+          "expect": {
+            "describe": "Scope documento: un diagnóstico, el suyo.",
+            "is_error": false,
+            "length": { "structured.diagnostics": 1 },
+            "equals": { "structured.diagnostics.0.code": "FM-UNCLOSED" }
+          }
+        },
+        {
+          "kind": "call",
+          "tool": "knowledge_check",
+          "arguments": { "scope": { "kind": "paths", "paths": ["fixtures/roto-unclosed.md", "fixtures/roto-yaml.md"] } },
+          "expect": {
+            "describe": "Scope paths: exactamente los dos documentos nombrados, cada uno con su diagnóstico, y ni uno del resto del corpus (que tiene decenas).",
+            "is_error": false,
+            "length": { "structured.diagnostics": 2 },
+            "equals": { "structured.summary.errors": 2, "structured.summary.warnings": 0 },
+            "contains": { "text": "FM-YAML-INVALID" }
+          }
+        }
+      ]
+    },
+    {
+      "id": "L11-CHK-23-UMBRAL",
+      "descripcion": "Origen: L11_chk_scopes.json CHK-23 — `minimumSeverity` filtra la LISTA pero no el `summary`, que se computa antes del umbral. Es un detalle contractual que un agente confundiría con facilidad.",
+      "steps": [
+        {
+          "kind": "call",
+          "tool": "knowledge_check",
+          "arguments": { "scope": { "kind": "workspace" }, "minimumSeverity": "info", "limit": 1000 },
+          "expect": { "describe": "Todo.", "is_error": false, "min_length": { "structured.diagnostics": 10 } }
+        },
+        {
+          "kind": "call",
+          "tool": "knowledge_check",
+          "arguments": { "scope": { "kind": "workspace" }, "minimumSeverity": "err", "limit": 1000 },
+          "expect": {
+            "describe": "Solo errores: la lista se acorta y ningún elemento tiene nivel `warn`.",
+            "is_error": false,
+            "equals": { "structured.diagnostics.0.level": "err" },
+            "min_length": { "structured.diagnostics": 1 }
+          }
+        }
+      ],
+      "expect": [
+        {
+          "invariant": "same",
+          "steps": [0, 1],
+          "path": "structured.summary",
+          "describe": "EL invariante del umbral: el `summary` es IDÉNTICO con y sin filtro — cuenta todo lo que hay, no lo que se devuelve. Quien pagine con `minimumSeverity` y sume el summary se llevaría una sorpresa, y esto lo fija."
+        },
+        {
+          "invariant": "same",
+          "steps": [0, 1],
+          "path": "structured.valid",
+          "describe": "…y `valid` tampoco depende del umbral: es una propiedad del workspace, no de la consulta."
+        }
+      ]
+    },
+    {
+      "id": "L11-CHK-24-DOCUMENT-FANTASMA",
+      "descripcion": "Origen: L11_chk_scopes.json CHK-24 + hallazgo A-07 de `decisiones §23` (scope `paths` TRAGABA los paths inexistentes en silencio; un typo desaparecía), SALDADO por E29-H05 con `DOCUMENT_NOT_FOUND` por simetría con `document`/`affected`.",
+      "steps": [
+        {
+          "kind": "call",
+          "tool": "knowledge_check",
+          "arguments": { "scope": { "kind": "document", "ref": { "path": "no-existe-jamas.md" } } },
+          "expect": {
+            "describe": "Scope `document` con ref inexistente: siempre fue error.",
+            "error_code": "DOCUMENT_NOT_FOUND"
+          }
+        },
+        {
+          "kind": "call",
+          "tool": "knowledge_check",
+          "arguments": { "scope": { "kind": "paths", "paths": ["no-existe-jamas.md"] } },
+          "expect": {
+            "describe": "A-07: scope `paths` 100% fantasma. HOY es DOCUMENT_NOT_FOUND; antes de E29-H05 devolvía 0 diagnósticos y `valid: true`, indistinguible de «todo correcto».",
+            "error_code": "DOCUMENT_NOT_FOUND"
+          }
+        },
+        {
+          "kind": "call",
+          "tool": "knowledge_check",
+          "arguments": { "scope": { "kind": "paths", "paths": ["fixtures/roto-unclosed.md", "no-existe-jamas.md"] } },
+          "expect": {
+            "describe": "A-07, la mitad más peligrosa: un path REAL junto a un typo. Hoy el typo hace fallar la llamada entera en vez de colarse; el agente se entera.",
+            "error_code": "DOCUMENT_NOT_FOUND",
+            "contains": { "text": "no-existe-jamas.md" }
+          }
+        }
+      ]
+    },
+    {
+      "id": "L11-CHK-22-AFFECTED",
+      "descripcion": "Origen: L11_chk_scopes.json CHK-22 — scope `affected`: el blast-radius entrante a profundidad N. Los diagnósticos del vecindario, no los del workspace entero.",
+      "steps": [
+        {
+          "kind": "call",
+          "tool": "knowledge_check",
+          "arguments": { "scope": { "kind": "affected", "refs": [{ "path": "guias/doc-00.md" }], "depth": 1 } },
+          "expect": {
+            "describe": "Se asevera que la llamada responde y que su alcance es ESTRICTAMENTE MENOR que el workspace (paso 1), no cuántos diagnósticos trae.",
+            "is_error": false,
+            "type": { "structured.diagnostics": "array", "structured.summary.errors": "number" }
+          }
+        },
+        {
+          "kind": "call",
+          "tool": "knowledge_check",
+          "arguments": { "scope": { "kind": "workspace" }, "minimumSeverity": "info", "limit": 1000 },
+          "expect": { "describe": "El workspace entero, para el contraste.", "is_error": false }
+        }
+      ],
+      "expect": [
+        {
+          "invariant": "differs",
+          "steps": [0, 1],
+          "path": "structured.summary",
+          "describe": "El scope acotado NO ve lo mismo que el workspace: si coincidieran, `affected` no estaría acotando nada. Es la forma de aseverar el acotamiento sin fijar un conteo del inventario."
+        },
+        {
+          "invariant": "same",
+          "steps": [0, 1],
+          "path": "structured.workspaceRevision",
+          "describe": "…y, aun así, los dos scopes ecoan la MISMA `workspaceRevision`: la revisión es del workspace, no del subconjunto consultado."
+        }
+      ]
+    },
+    {
+      "id": "L11-CHK-27-COUNTS-VS-SUMMARY",
+      "descripcion": "Origen: `batches/verify_CHK-27.json` e informe §4 (CHK-27, uno de los doce esperados REFUTADOS por la verificación adversarial): `workspace_status.counts` deriva de `Analysis` (inventario) mientras el check en scope workspace AÑADE los diagnósticos de descubrimiento. NO son iguales por contrato, y este caso lo fija para que nadie vuelva a leerlo como un bug.",
+      "steps": [
+        {
+          "kind": "call",
+          "tool": "workspace_status",
+          "arguments": {},
+          "expect": {
+            "describe": "Los `counts` del inventario: `workspace_status` NO publica un `summary` de diagnósticos ni una lista de ellos. Las dos superficies no son intercambiables, y eso empieza por su forma.",
+            "is_error": false,
+            "type": { "structured.counts.errors": "number", "structured.counts.warnings": "number" },
+            "absent": ["structured.summary", "structured.diagnostics"]
+          }
+        },
+        {
+          "kind": "call",
+          "tool": "knowledge_check",
+          "arguments": { "scope": { "kind": "workspace" }, "minimumSeverity": "info", "limit": 1000 },
+          "expect": {
+            "describe": "El check workspace-wide sí trae `summary` y `diagnostics`, y NO trae `counts`: son dos vistas con fuentes distintas (inventario vs inventario + descubrimiento), no dos nombres de lo mismo. Su divergencia numérica está registrada en el informe §4 y NO se asevera aquí (dependería del corpus): lo que el gate fija es que son superficies separadas y que consultarlas es dos llamadas, no una.",
+            "is_error": false,
+            "type": { "structured.summary.errors": "number", "structured.diagnostics": "array" },
+            "absent": ["structured.counts"]
+          }
+        }
+      ],
+      "expect": [
+        {
+          "invariant": "same",
+          "steps": [0, 1],
+          "path": "structured.workspaceRevision",
+          "describe": "Lo único que las dos superficies SÍ comparten y debe coincidir: la revisión del workspace sobre la que ambas hablan. Sin esto, comparar sus números no tendría ni sentido."
+        }
+      ]
+    }
+  ]
+}
