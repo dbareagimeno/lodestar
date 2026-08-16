@@ -979,6 +979,17 @@ impl Inventory {
         Inventory::build(files.keys().cloned().collect(), BTreeSet::new())
     }
 
+    /// Reemplaza el conjunto de documentos conservando los ficheros de proyecto ya conocidos.
+    /// Si una ruta pasa a ser documento, prevalece sobre `other_files`.
+    pub(crate) fn replacing_documents<I>(&self, documents: I) -> Inventory
+    where
+        I: IntoIterator<Item = RelPath>,
+    {
+        let documents: BTreeSet<RelPath> = documents.into_iter().collect();
+        let other_files = self.other_files.difference(&documents).cloned().collect();
+        Inventory::build(documents, other_files)
+    }
+
     /// Construye el inventario y su índice plegado. Los documentos entran **antes** que el resto
     /// de ficheros y en orden de `RelPath`, así que si dos rutas colisionan al plegar
     /// capitalización gana siempre la misma (determinismo: el veredicto no depende del orden de

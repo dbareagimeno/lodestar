@@ -321,7 +321,7 @@
     },
     {
       "id": "L6-PLN-SELECCION-MASIVA",
-      "descripcion": "Origen: L6_pln.json PLN-04 — forma-objeto (`selection` + `operation`): una operación normalizada por documento seleccionado, y `capturedRevisions` con el snapshot de cada uno (§Fase 12, E21-H02).",
+      "descripcion": "Origen: L6_pln.json PLN-04 — forma-objeto (`selection` + `operation`): el conjunto y `capturedRevisions` se fijan sobre base; las instancias raw se materializan después en orden y una puede producir varias terminales.",
       "steps": [
         {
           "kind": "call",
@@ -337,6 +337,51 @@
             "equals": { "structured.canApply": true },
             "type": { "structured.capturedRevisions": "object", "structured.normalizedOperations": "array" },
             "min_length": { "structured.normalizedOperations": 1, "structured.capturedRevisions": 1 }
+          }
+        }
+      ]
+    },
+    {
+      "id": "L6-PLN-SECUENCIAL-MISMO-DOCUMENTO",
+      "fresh_root": true,
+      "descripcion": "Regresión del seguimiento de E28-H04: varias operaciones de contenido sobre el mismo path se normalizan contra working, una cadena puede consumir texto recién creado y noOpOperations juzga cada terminal sobre su estado inmediato.",
+      "steps": [
+        {
+          "kind": "shell",
+          "cmd": "printf '\\nMARCADOR_ALFA MARCADOR_BETA MARCADOR_GAMMA CADENA_A\\n' >> guias/doc-00.md",
+          "expect": { "describe": "Planta cuatro tokens únicos en un documento del corpus.", "rc": 0 }
+        },
+        {
+          "kind": "call",
+          "tool": "change_plan",
+          "arguments": {
+            "operations": [
+              { "op": "replace_text", "path": "guias/doc-00.md", "find": "MARCADOR_ALFA", "replace": "ALFA_CAMBIADA", "expectedOccurrences": 1 },
+              { "op": "replace_text", "path": "guias/doc-00.md", "find": "MARCADOR_BETA", "replace": "BETA_CAMBIADA", "expectedOccurrences": 1 },
+              { "op": "replace_text", "path": "guias/doc-00.md", "find": "MARCADOR_GAMMA", "replace": "GAMMA_CAMBIADA", "expectedOccurrences": 1 },
+              { "op": "replace_text", "path": "guias/doc-00.md", "find": "CADENA_A", "replace": "CADENA_B", "expectedOccurrences": 1 },
+              { "op": "replace_text", "path": "guias/doc-00.md", "find": "CADENA_B", "replace": "CADENA_C", "expectedOccurrences": 1 },
+              { "op": "replace_text", "path": "guias/doc-00.md", "find": "NO_EXISTE_EN_EL_CORPUS", "replace": "X" }
+            ],
+            "policy": { "requireValidResult": false, "allowWarnings": true }
+          },
+          "expect": {
+            "describe": "Los ReplaceBody son acumulativos: el segundo conserva ALFA, el tercero conserva ALFA+BETA y el último efectivo ve CADENA_B. Solo la sexta terminal es no-op.",
+            "is_error": false,
+            "equals": {
+              "structured.canApply": true,
+              "structured.noOpOperations.0.index": 5,
+              "structured.noOpOperations.0.op": "replace_body",
+              "structured.noOpOperations.0.path": "guias/doc-00.md"
+            },
+            "length": { "structured.normalizedOperations": 6, "structured.noOpOperations": 1 },
+            "contains": {
+              "structured.normalizedOperations.0.body": "ALFA_CAMBIADA",
+              "structured.normalizedOperations.1.body": "ALFA_CAMBIADA",
+              "structured.normalizedOperations.2.body": "BETA_CAMBIADA",
+              "structured.normalizedOperations.4.body": "CADENA_C",
+              "structured.normalizedOperations.5.body": "GAMMA_CAMBIADA"
+            }
           }
         }
       ]

@@ -2638,6 +2638,37 @@ fn plan_change_set_id(resp: &serde_json::Value) -> String {
         .to_string()
 }
 
+/// Regresión secuencial en la frontera MCP: plan y apply ocurren en procesos stdio distintos y el
+/// plan persistido debe conservar el `working` acumulado de las tres sustituciones.
+#[test]
+fn change_plan_apply_en_procesos_mcp_distintos_conserva_tres_sustituciones() {
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), "index.md", "# Index\n");
+    write(
+        dir.path(),
+        "doc.md",
+        "---\ntype: Note\ntitle: Doc\n---\n\nAAA BBB CCC\n",
+    );
+    let ops = serde_json::json!([
+        {"op":"replace_text","path":"doc.md","find":"AAA","replace":"A1"},
+        {"op":"replace_text","path":"doc.md","find":"BBB","replace":"B1"},
+        {"op":"replace_text","path":"doc.md","find":"CCC","replace":"C1"}
+    ]);
+    let plan_resp = roundtrip(
+        dir.path(),
+        &[&change_plan_line(None, ops, policy_permisiva())],
+        1,
+    );
+    let change_set_id = plan_change_set_id(&plan_resp[0]);
+    let apply_resp = roundtrip(dir.path(), &[&change_apply_line(&change_set_id, None)], 1);
+    assert_eq!(apply_sc(&apply_resp[0])["applied"], true);
+    let final_raw = std::fs::read_to_string(dir.path().join("doc.md")).unwrap();
+    assert!(
+        final_raw.contains("A1") && final_raw.contains("B1") && final_raw.contains("C1"),
+        "plan/apply MCP en procesos distintos debe conservar las tres sustituciones: {final_raw}"
+    );
+}
+
 /// Fuerza la caducidad de un plan persistido reescribiendo su `expiresAt` a un instante pasado
 /// («0» epoch), como haría el paso de caducidad de E12-H09 al comparar contra `now`. El fichero es
 /// `.lodestar/runtime/plans/<hash>.json`, donde `<hash>` es el `changeSetId` sin el prefijo

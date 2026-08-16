@@ -1356,6 +1356,24 @@ de contenido, plan inmutable, snapshot de precondiciones, staging, journal, escr
 recovery, receipt y revert se conservan tal cual — aplicados a Markdown genérico en vez de a
 documentos conformes con OKF.
 
+La composición dentro de un `change_plan` sí queda fijada con dos estados distintos. `base` es el
+snapshot inmutable que juzga `expectedWorkspaceRevision`, cada `expectedRevision` y, en una
+selección masiva, el conjunto de documentos y sus revisiones capturadas. `working` arranca como una
+copia de `base`: cada intención cruda se normaliza contra el resultado acumulado de las anteriores y
+cada `NormalizedOperation` terminal se materializa inmediatamente, en el orden emitido, antes de
+normalizar la siguiente intención. Una intención estructural puede producir varias terminales.
+
+`normalizedOperations` continúa siendo la representación determinista que autoriza el plan:
+`replace_text` y `edit_section` bajan a `ReplaceBody`, y `change_apply` reproduce esas terminales sin
+volver a buscar texto ni interpretar la intención cruda. El estado `working` final debe ser idéntico,
+byte a byte y en existencia de paths, a reproducir `normalizedOperations` desde `base` con el
+aplicador canónico. `noOpOperations` se decide para cada terminal contra su estado inmediatamente
+anterior; una secuencia puede tener diff neto vacío sin que ninguna de sus operaciones sea no-op.
+
+La semántica del planificador forma parte de la identidad interna del plan persistido. Un runtime no
+aplica planes creados con una versión anterior: responde `PLAN_STALE` y exige volver a llamar a
+`change_plan`. La versión no se añade al `PlanResult` público ni al wire MCP.
+
 Cambia la **validación previa**: de *"¿el resultado es conforme con OKF?"* a *"¿es parseable? ¿queda
 dentro del workspace? ¿respeta la política de escritura? ¿introduce diagnósticos nuevos? ¿coincide con
 las revisiones del plan? ¿mantiene consistencia entre inventario, store y grafo?"*.

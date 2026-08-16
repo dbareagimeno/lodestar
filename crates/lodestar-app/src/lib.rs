@@ -31,10 +31,10 @@ use lodestar_core::text::loose_text_match;
 use lodestar_core::types::{
     workspace_revision, Analysis, Backlinks, ChangeReceipt, ChangeSet, ChangeSetId, Check,
     Direction, DocumentRef, DocumentRevision, Edge, EditSectionMode, ErrorCode, Expression,
-    FieldInspection, FieldPath, FrontmatterPatch, GraphNode, InboundLinksPolicy, MetadataCatalog,
-    NormalizedOperation, PlanHash, ReceiptId, RelPath, ResolvedLink, RiskAssessment, SemanticDiff,
-    Severity, TypeError, ValidationReport, ValidationSummary, WorkspaceRevision,
-    FRONTMATTER_ANCHOR,
+    FieldInspection, FieldPath, FileMap, FrontmatterPatch, GraphNode, InboundLinksPolicy,
+    MetadataCatalog, NormalizedOperation, PlanHash, ReceiptId, RelPath, ResolvedLink,
+    RiskAssessment, SemanticDiff, Severity, TypeError, ValidationReport, ValidationSummary,
+    WorkspaceRevision, FRONTMATTER_ANCHOR,
 };
 use lodestar_core::{CoreError, DocumentSet};
 use lodestar_workspace::{revert_transaction_id, Workspace, WorkspaceError};
@@ -361,6 +361,68 @@ const DEFAULT_SCHEMA_VERSION: &str = "1";
 /// `metadata_inspect` (E20-H03), `knowledge_check`, … .
 pub struct App {
     workspace: Workspace,
+}
+
+struct PlanSimulation {
+    working_files: FileMap,
+    normalized_operations: Vec<NormalizedOperation>,
+    no_op_operations: Vec<NoOpOperation>,
+}
+
+fn simulate_plan(base: &DocumentSet, raw_ops: &[Value]) -> Result<PlanSimulation, AppError> {
+    let base_files = base.files();
+    let mut working_files = base_files.clone();
+    let mut normalized_operations = Vec::new();
+    let mut no_op_operations = Vec::new();
+
+    for raw in raw_ops {
+        if let Some(expected) = raw.get("expectedRevision").and_then(Value::as_str) {
+            let target = op_target_path(raw)?;
+            let actual = base_files.get(&target).map(|content| {
+                DocumentRevision::from_hash(*blake3::hash(content.as_bytes()).as_bytes())
+            });
+            if actual.as_ref().map(|r| r.0.as_str()) != Some(expected) {
+                return Err(AppError::new(
+                    ErrorCode::RevisionConflict,
+                    format!(
+                        "«{}» ya no está en la revisión «{expected}» que declara la operación (ahora es {}). Vuelve a leerlo (knowledge_get) y replanifica",
+                        target.as_str(),
+                        actual.map(|r| format!("«{}»", r.0)).unwrap_or_else(|| "inexistente".to_string())
+                    ),
+                ));
+            }
+        }
+
+        let terminals = normalize_raw_op(base, &working_files, raw)?;
+        for op in terminals {
+            let index = normalized_operations.len();
+            let changed = plan::apply_normalized_operation(&mut working_files, &op)
+                .map_err(|e| AppError::from(&e))?;
+            if !changed {
+                no_op_operations.push(NoOpOperation {
+                    index,
+                    path: plan::documento_resultante_de(&op).clone(),
+                    op: plan::op_variant_name(&op),
+                });
+            }
+            normalized_operations.push(op);
+        }
+    }
+
+    let replay = plan::apply_normalized_ops(base_files, &normalized_operations)
+        .map_err(|e| AppError::from(&e))?;
+    if replay != working_files {
+        return Err(AppError::new(
+            ErrorCode::InternalIoError,
+            "la simulación secuencial no coincide con el replay canónico",
+        ));
+    }
+
+    Ok(PlanSimulation {
+        working_files,
+        normalized_operations,
+        no_op_operations,
+    })
 }
 
 impl App {
@@ -1621,10 +1683,10 @@ impl App {
     ///      tarde. **Solo** se consulta el descubrimiento: `writableRoots`/`referenceRoots`
     ///      siguen comprobándose exclusivamente en el apply (E11-H04), donde vive el único
     ///      escritor.
-    /// 5. **`planHash` DETERMINISTA**: `blake3(baseWorkspaceRevision ‖ 0x00 ‖ serialización JSON
-    ///    canónica de las normalizedOperations)` — mismo input + misma base ⇒ mismo hash; input
-    ///    distinto ⇒ hash distinto. **No** depende del reloj (`expiresAt` sí es wall-clock, pero
-    ///    queda FUERA del hash). `changeSetId` se deriva del `planHash`.
+    /// 5. **`planHash` DETERMINISTA**: lo calcula `lodestar_core::plan::compute_plan_hash` con
+    ///    dominio y versión de semántica internos; mismo input + misma base ⇒ mismo hash, y el
+    ///    reloj no participa (`expiresAt` sí es wall-clock, pero queda FUERA del hash).
+    ///    `changeSetId` se deriva del `planHash`.
     ///
     /// Devuelve un [`PlanResult`] (proyección de servicio) con el plan completo. `Err(AppError)`
     /// —código estable **y** mensaje— para el wire de error (mismo patrón que el resto de servicios
@@ -1674,10 +1736,10 @@ impl App {
         // (2)+(3) Normalización, acumulando en un ÚNICO change set. Dos formas de wire:
         //   · Array de ops sueltas `[ {op, …}, … ]` (E12-H08), con control optimista por op.
         //   · Selección masiva `{ selection: {where|filter}, operation: {<op>: {…}} }` (E21-H02):
-        //     la consulta E19 elige documentos del workspace y la operación se expande a una
-        //     `NormalizedOperation` por documento seleccionado, capturando su `DocumentRevision`.
-        let (normalized, captured_revisions): (
-            Vec<NormalizedOperation>,
+        //     la consulta E19 fija paths y revisiones base; cada raw se materializa después contra
+        //     el working acumulado y puede producir varias terminales.
+        let (raw_operations, captured_revisions): (
+            Vec<Value>,
             BTreeMap<RelPath, DocumentRevision>,
         ) = if raw_ops.get("selection").is_some() {
             expand_selection(&doc_set, raw_ops)?
@@ -1688,45 +1750,15 @@ impl App {
                      masiva «{selection, operation}»",
                 )
             })?;
-            let mut normalized: Vec<NormalizedOperation> = Vec::new();
-            // E28-H04: la ocupación de paths con la que se juzgan las colisiones de existencia es
-            // ACUMULADA — arranca del disco y cada op ya normalizada la actualiza (un `create`/
-            // `move.to` ocupa, un `delete`/`move.from` libera). Hasta H04 todas las ops se
-            // normalizaban contra el `doc_set` de partida, que deja de ser cierto a la segunda:
-            // `[move a→final, move b→final]` aplicaba destruyendo `a` en silencio y
-            // `[delete X, create X]` se rechazaba pese a ser legítimo. El criterio de colisión es el
-            // mismo que el de una sola operación (`plan::EstadoOcupacion`, invariante #3): lo que
-            // cambia es contra qué estado se pregunta.
-            let mut ocupacion = plan::EstadoOcupacion::nueva(files);
-            for raw in ops_arr {
-                if let Some(expected) = raw.get("expectedRevision").and_then(Value::as_str) {
-                    let target = op_target_path(raw)?;
-                    let actual = files.get(&target).map(|raw_md| {
-                        DocumentRevision::from_hash(*blake3::hash(raw_md.as_bytes()).as_bytes())
-                    });
-                    if actual.as_ref().map(|r| r.0.as_str()) != Some(expected) {
-                        return Err(AppError::new(
-                            ErrorCode::RevisionConflict,
-                            format!(
-                                "«{}» ya no está en la revisión «{expected}» que declara la \
-                                 operación (ahora es {}). Vuelve a leerlo (knowledge_get) y \
-                                 replanifica",
-                                target.as_str(),
-                                actual
-                                    .map(|r| format!("«{}»", r.0))
-                                    .unwrap_or_else(|| "inexistente".to_string())
-                            ),
-                        ));
-                    }
-                }
-                let ops = normalize_raw_op(&doc_set, &ocupacion, raw)?;
-                for op in &ops {
-                    ocupacion.aplicar(op);
-                }
-                normalized.extend(ops);
-            }
-            (normalized, BTreeMap::new())
+            (ops_arr.to_vec(), BTreeMap::new())
         };
+
+        let PlanSimulation {
+            working_files,
+            normalized_operations,
+            no_op_operations,
+        } = simulate_plan(&doc_set, &raw_operations)?;
+        let normalized = &normalized_operations;
 
         // (3-bis) Red de seguridad de E28-H04 sobre la secuencia YA normalizada, venga del array de
         //     ops o de la selección masiva: ninguna operación puede ocupar un path que otra del
@@ -1735,13 +1767,11 @@ impl App {
         //     sobre el plan COMPLETO, que es lo que se persiste y se aplica: si alguna vía futura
         //     construyera `normalized` sin acumular, la colisión se ve aquí y no en disco. Comparte
         //     criterio con los guards (`plan::EstadoOcupacion`), así que no puede divergir de ellos.
-        plan::assert_sin_colisiones_intra_plan(files, &normalized)
+        plan::assert_sin_colisiones_intra_plan(files, normalized)
             .map_err(|e| AppError::from(&e))?;
 
         // (4) DocumentSet hipotético + análisis del plan (todo en memoria, sin escribir).
-        let after_files =
-            plan::apply_normalized_ops(files, &normalized).map_err(|e| AppError::from(&e))?;
-        let after = DocumentSet::from_files(after_files);
+        let after = doc_set.rebase_files(working_files);
 
         // (4-bis) Guard de descubrimiento (E15-H09): ningún path que el plan escribiría puede
         //     quedar fuera del inventario. Se comprueban los creados/modificados —los borrados
@@ -1754,42 +1784,10 @@ impl App {
             }
         }
 
-        // (4-ter) Operaciones SIN EFECTO (E31-H02, `decisiones §26`): las que se materializaron y
-        //     dejaron el documento que nombran **exactamente igual** que estaba. El predicado es la
-        //     comparación de BYTES de la línea de arriba —el mismo con el que el escritor computa su
-        //     lote afectado (`affected_paths`)—, así que el plan no puede prometer un no-op que el
-        //     apply luego escriba, ni al revés. Un `move` no puede ser no-op salvo `from == to`: si
-        //     el origen desaparece, hay cambio aunque el destino case byte a byte.
-        //
-        //     LÍMITE CONOCIDO, y es el precio de usar el predicado del escritor: la comparación es
-        //     POR PATH (estado inicial contra final), no por operación, así que varias ops sobre el
-        //     MISMO documento comparten el veredicto de ese documento. Y como cada op se normaliza
-        //     contra el estado INICIAL (defecto preexistente, ajeno a §26), dos ops sobre un mismo
-        //     path donde la segunda reescribe el cuerpo original lo dejan idéntico: las DOS salen
-        //     declaradas, aunque una escribiera mirada en solitario. Se acepta a conciencia: la
-        //     alternativa —simular op por op— sería una SEGUNDA verdad de «qué cambia», y el repo ya
-        //     pagó ese precio (invariante #3). El caso que motiva el campo (una op por documento,
-        //     incluido el bulk de `selection`, que expande exactamente una) es exacto. Fijado por
-        //     `el_veredicto_de_no_op_es_por_documento_no_por_operacion` y declarado en el contrato.
-        let after_files_ref = after.files();
-        let no_op_operations: Vec<NoOpOperation> = normalized
-            .iter()
-            .enumerate()
-            .filter(|(_, op)| match op {
-                NormalizedOperation::Move { from, to, .. } => from == to,
-                _ => true,
-            })
-            .filter_map(|(index, op)| {
-                let path = plan::documento_resultante_de(op);
-                (files.get(path) == after_files_ref.get(path)).then(|| NoOpOperation {
-                    index,
-                    path: path.clone(),
-                    op: plan::op_variant_name(op),
-                })
-            })
-            .collect();
-
-        let risk = plan::assess_risk(&normalized, &doc_set, &after);
+        // (4-ter) Cada terminal se clasificó inmediatamente al aplicarse sobre el working. El
+        //     resultado conserva el índice de la terminal dentro de `normalizedOperations`, por
+        //     lo que un raw estructural que produce varias terminales puede aportar varias señales.
+        let risk = plan::assess_risk(normalized, &doc_set, &after);
         let semantic_diff = plan::semantic_diff(&doc_set, &after);
         let before_report = plan::validate_result(&doc_set);
         let after_report = plan::validate_result(&after);
@@ -1797,7 +1795,7 @@ impl App {
         let impact = PlanImpact::from_diff(&semantic_diff);
 
         // (5) planHash determinista (independiente del reloj) + id derivado.
-        let plan_hash = compute_plan_hash(&base_revision, &normalized);
+        let plan_hash = plan::compute_plan_hash(&base_revision, normalized);
         let change_set_id = ChangeSetId(format!(
             "changeset:{}",
             plan_hash.0.strip_prefix("blake3:").unwrap_or(&plan_hash.0)
@@ -1810,7 +1808,7 @@ impl App {
             can_apply,
             policy,
             expires_at: expires_at_string(),
-            normalized_operations: normalized,
+            normalized_operations,
             no_op_operations,
             risk,
             semantic_diff,
@@ -1833,10 +1831,10 @@ impl App {
     /// Carga el plan persistido `id` desde `.lodestar/runtime/plans/` (E12-H09,
     /// `ARCHITECTURE.md §19.4/§19.5`).
     ///
-    /// `Err(ErrorCode::PlanStale)` si el fichero no existe, no se puede leer o no deserializa a un
-    /// `PlanResult` válido — el wire no distingue "changeSetId desconocido" de "runtime purgado" y
-    /// `PLAN_STALE` es el código ya reservado para "este plan ya no es utilizable" (E12-H08 lo deja
-    /// declarado y sin emisor; aquí gana su primer uso real).
+    /// `Err(ErrorCode::PlanStale)` si el fichero no existe, no se puede leer, no deserializa a un
+    /// registro válido o su `plannerSemanticsVersion` no es la vigente. Un plan legacy se rechaza
+    /// antes de mirar `expiresAt`: conserva terminales resueltas pero no la intención raw necesaria
+    /// para repararlas con seguridad, así que el único remedio es replanificar.
     ///
     /// `Err(ErrorCode::PlanExpired)` si `expiresAt` (segundos epoch, wall-clock) ya quedó en el
     /// pasado respecto de `SystemTime::now()`. El reloj de pared vive aquí, en la fachada de `app`
@@ -1861,7 +1859,19 @@ impl App {
         };
         let path = plan_file_path(self.workspace.root(), id);
         let raw = std::fs::read(&path).map_err(|_| no_utilizable())?;
-        let plan: PlanResult = serde_json::from_slice(&raw).map_err(|_| no_utilizable())?;
+        let persisted: PersistedPlan = serde_json::from_slice(&raw).map_err(|_| no_utilizable())?;
+        if persisted.planner_semantics_version != plan::PLAN_SEMANTICS_VERSION {
+            return Err(AppError::new(
+                ErrorCode::PlanStale,
+                format!(
+                    "el plan «{}» usa la semántica anterior del planificador (versión {}); la versión vigente es {}. Vuelve a llamar a change_plan para obtener un plan actualizado",
+                    id.0,
+                    persisted.planner_semantics_version,
+                    plan::PLAN_SEMANTICS_VERSION,
+                ),
+            ));
+        }
+        let plan = persisted.plan;
 
         let expires_at: u64 = plan.expires_at.parse().map_err(|_| no_utilizable())?;
         let now = std::time::SystemTime::now()
@@ -1892,7 +1902,7 @@ impl App {
     /// 2. **Control optimista de workspace**: si viene `expected_workspace_revision` y no coincide
     ///    con la revisión actual → `Err(RevisionConflict)`.
     /// 3. **Verificar `planHash`**: recomputa el hash determinista sobre la base ACTUAL del workspace
-    ///    (`compute_plan_hash(revisión_actual, plan.normalizedOperations)`, la misma función que
+    ///    (`plan::compute_plan_hash(revisión_actual, plan.normalizedOperations)`, la misma función que
     ///    `change_plan`) y lo compara con el `planHash` persistido; si difiere, el workspace cambió bajo
     ///    el plan → `Err(PlanStale)` y **no escribe**. (El `planHash` mezcla la base y las
     ///    operaciones, así que un cambio del canónico bajo el plan lo invalida.)
@@ -1989,7 +1999,7 @@ impl App {
 
         // (3) Verificar `planHash` sobre la base ACTUAL: si el workspace cambió bajo el plan, el hash
         //     recomputado difiere del persistido → PLAN_STALE (no se escribe).
-        let recomputed = compute_plan_hash(&current_base, &plan.normalized_operations);
+        let recomputed = plan::compute_plan_hash(&current_base, &plan.normalized_operations);
         if recomputed != plan.plan_hash {
             return Err(AppError::new(
                 ErrorCode::PlanStale,
@@ -2020,7 +2030,7 @@ impl App {
         //
         //     Ocurre ANTES de tocar la transacción: sin lock, sin staging, sin journal, sin recibo y
         //     sin copias de recuperación. Es un veredicto sobre el PLAN, no sobre el disco.
-        let after_plan = DocumentSet::from_files(
+        let after_plan = doc_set.rebase_files(
             plan::apply_normalized_ops(doc_set.files(), &plan.normalized_operations)
                 .map_err(|e| AppError::from(&e))?,
         );
@@ -2724,13 +2734,12 @@ fn op_kind_de(op: &Value) -> &str {
 /// desconocido o un parámetro inválido → `Err(ErrorCode::InvalidSchema)`; los errores del core se
 /// mapean con [`error_code`].
 ///
-/// `estado` es la ocupación de paths **acumulada** por las operaciones anteriores del mismo change
-/// set (E28-H04): contra ella juzgan su colisión de existencia `create` y el destino de `move`, para
-/// que una op vea lo que las de delante ocuparon o liberaron. El `doc_set` sigue siendo el del
-/// workspace de partida y es de donde sale todo el **contenido** (cuerpos, entrantes, frontmatter).
+/// `working_files` es el mapa acumulado: cada terminal anterior ya está aplicada. Las operaciones
+/// de contenido y `create` leen directamente ese mapa; solo `move`/`delete` reconstruyen un
+/// `DocumentSet` rebased cuando necesitan grafo, backlinks o inventario.
 fn normalize_raw_op(
-    doc_set: &DocumentSet,
-    estado: &plan::EstadoOcupacion<'_>,
+    base: &DocumentSet,
+    working_files: &FileMap,
     op: &Value,
 ) -> Result<Vec<NormalizedOperation>, AppError> {
     let kind = op.get("op").and_then(Value::as_str).ok_or_else(|| {
@@ -2764,14 +2773,15 @@ fn normalize_raw_op(
                 }
             };
             let body = op.get("body").and_then(Value::as_str).map(str::to_string);
-            plan::normalize_create_en(estado, &path, frontmatter, body)
+            let estado = plan::EstadoOcupacion::nueva(working_files);
+            plan::normalize_create_en(&estado, &path, frontmatter, body)
                 .map(one)
                 .map_err(|e| AppError::from(&e))
         }
         "patch_frontmatter" => {
             let path = op_ref_path(op)?;
             let patch = op_patch(op)?;
-            plan::normalize_patch_frontmatter(doc_set, &path, patch)
+            plan::normalize_patch_frontmatter_en(working_files, &path, patch)
                 .map(one)
                 .map_err(|e| AppError::from(&e))
         }
@@ -2782,7 +2792,7 @@ fn normalize_raw_op(
                 .and_then(Value::as_str)
                 .unwrap_or("")
                 .to_string();
-            plan::normalize_replace_body(doc_set, &path, body)
+            plan::normalize_replace_body_en(working_files, &path, body)
                 .map(one)
                 .map_err(|e| AppError::from(&e))
         }
@@ -2794,7 +2804,7 @@ fn normalize_raw_op(
                 .get("expectedOccurrences")
                 .and_then(Value::as_u64)
                 .map(|n| n as usize);
-            plan::normalize_replace_text(doc_set, &path, find, replace, expected)
+            plan::normalize_replace_text_en(working_files, &path, find, replace, expected)
                 .map(one)
                 .map_err(|e| AppError::from(&e))
         }
@@ -2816,7 +2826,7 @@ fn normalize_raw_op(
                 _ => EditSectionMode::Replace,
             };
             let content = op.get("content").and_then(Value::as_str).unwrap_or("");
-            plan::normalize_edit_section(doc_set, &path, &heading_path, mode, content)
+            plan::normalize_edit_section_en(working_files, &path, &heading_path, mode, content)
                 .map(one)
                 .map_err(|e| AppError::from(&e))
         }
@@ -2827,11 +2837,14 @@ fn normalize_raw_op(
                 .get("rewriteInboundLinks")
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
-            plan::normalize_move_en(estado, doc_set, &from, &to, rewrite)
+            let current = base.rebase_files(working_files.clone());
+            let estado = plan::EstadoOcupacion::nueva(working_files);
+            plan::normalize_move_en(&estado, &current, &from, &to, rewrite)
                 .map_err(|e| AppError::from(&e))
         }
         "delete" => {
             let path = op_ref_path(op)?;
+            let current = base.rebase_files(working_files.clone());
             let policy = match op.get("inboundLinksPolicy").and_then(Value::as_str) {
                 Some("reject") => InboundLinksPolicy::Reject,
                 Some("remove_links") => InboundLinksPolicy::RemoveLinks,
@@ -2842,7 +2855,7 @@ fn normalize_raw_op(
                 // `INBOUND_LINKS_EXIST` que produce un `reject` explícito con backlinks. Sin
                 // backlinks no hay nada que decidir, así que se permite (borrado limpio).
                 None => {
-                    let entrantes = doc_set.backlinks(&path).inbound.len();
+                    let entrantes = current.backlinks(&path).inbound.len();
                     if entrantes == 0 {
                         InboundLinksPolicy::Reject
                     } else {
@@ -2866,7 +2879,7 @@ fn normalize_raw_op(
                     )))
                 }
             };
-            plan::normalize_delete(doc_set, &path, policy).map_err(|e| AppError::from(&e))
+            plan::normalize_delete(&current, &path, policy).map_err(|e| AppError::from(&e))
         }
         // NOTA E23-H11: `"apply_fix"` ya NO tiene brazo propio — cae en el de por defecto, o sea
         // que un `apply_fix` es hoy una op desconocida (`INVALID_SCHEMA`), el mismo trato que
@@ -2888,8 +2901,9 @@ fn normalize_raw_op(
 ///
 /// La consulta E19 (`selection.where` textual o `selection.filter` JSON, traducidas al MISMO
 /// [`Expression`] que `knowledge_search`) se evalúa contra **cada** documento del workspace; los que
-/// casan reciben **una** [`NormalizedOperation`] cada uno, expandiendo la `operation` (que codifica el
-/// tipo como CLAVE, `{patch_frontmatter: {…}}`) con ese `path`. Solo se admiten las ops con sentido en
+/// casan reciben una instancia raw cada uno, expandiendo la `operation` (que codifica el tipo como
+/// CLAVE, `{patch_frontmatter: {…}}`) con ese `path`. La materialización posterior puede producir
+/// varias terminales por instancia. Solo se admiten las ops con sentido en
 /// masa (`patch_frontmatter`/`replace_text`/`delete` — `apply_fix` salió con la op en E23-H11);
 /// `create` no aplica a documentos existentes. Cada documento seleccionado captura además su
 /// [`DocumentRevision`] actual (el mismo blake3 que reporta `knowledge_get`) — el *snapshot de
@@ -2914,13 +2928,7 @@ fn normalize_raw_op(
 fn expand_selection(
     doc_set: &DocumentSet,
     raw: &Value,
-) -> Result<
-    (
-        Vec<NormalizedOperation>,
-        BTreeMap<RelPath, DocumentRevision>,
-    ),
-    AppError,
-> {
+) -> Result<(Vec<Value>, BTreeMap<RelPath, DocumentRevision>), AppError> {
     let selection = raw.get("selection").ok_or_else(|| {
         AppError::invalid_schema(
             "una selección masiva necesita «selection» con «where» (consulta textual) o «filter» \
@@ -2964,28 +2972,23 @@ fn expand_selection(
         }
     }
 
-    // (2) …y solo entonces se expande la operación sobre los documentos elegidos.
-    //
-    // E28-H04: la selección masiva queda FUERA del estado de ocupación acumulado, a propósito. Cada
-    // documento seleccionado genera como mucho una operación, y `single_operation` ya excluye de
-    // esta vía las dos únicas que ocupan un path (`create` y `move`), así que no hay secuencia
-    // intra-selección que acumular: la ocupación de partida es la del workspace y no se mueve.
-    let ocupacion = plan::EstadoOcupacion::nueva(files);
-    let mut normalized: Vec<NormalizedOperation> = Vec::new();
+    // (2) La selección fija paths y revisiones sobre `base`; la intención raw se materializa
+    // después, en orden, contra el working acumulado.
+    let mut raw_operations: Vec<Value> = Vec::new();
     let mut captured: BTreeMap<RelPath, DocumentRevision> = BTreeMap::new();
     for path in seleccionados {
         let Some(raw_md) = files.get(path) else {
             continue;
         };
         let raw_op = build_selected_op(op_kind, op_params, path)?;
-        normalized.extend(normalize_raw_op(doc_set, &ocupacion, &raw_op)?);
+        raw_operations.push(raw_op);
         captured.insert(
             path.clone(),
             DocumentRevision::from_hash(*blake3::hash(raw_md.as_bytes()).as_bytes()),
         );
     }
 
-    Ok((normalized, captured))
+    Ok((raw_operations, captured))
 }
 
 /// Traduce la consulta de una [`expand_selection`] (`where` textual o `filter` JSON) al [`Expression`]
@@ -3094,20 +3097,6 @@ fn op_patch(op: &Value) -> Result<FrontmatterPatch, AppError> {
     })
 }
 
-/// `planHash` determinista: `blake3(baseWorkspaceRevision ‖ 0x00 ‖ serialización JSON de las
-/// normalizedOperations)`. La serialización de `serde_json` es estable (orden de campos por
-/// declaración; `FrontmatterPatch` es un `BTreeMap` ordenado), así que el mismo plan sobre la misma
-/// base produce el mismo hash entre procesos frescos, y un plan distinto uno distinto. **No**
-/// depende del reloj.
-fn compute_plan_hash(base: &WorkspaceRevision, ops: &[NormalizedOperation]) -> PlanHash {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(base.0.as_bytes());
-    hasher.update(b"\0");
-    let serialized = serde_json::to_vec(ops).expect("NormalizedOperation siempre serializa a JSON");
-    hasher.update(&serialized);
-    PlanHash(format!("blake3:{}", hasher.finalize().to_hex()))
-}
-
 /// Nombre de fichero saneado para persistir un plan bajo `.lodestar/runtime/plans/` (E12-H09): el
 /// hash hexadecimal DESNUDO del `changeSetId` (sin el prefijo `changeset:`) más `.json`. El
 /// `changeSetId` completo lleva `:`, hostil a nombres de fichero en Windows — el hash desnudo basta
@@ -3127,6 +3116,19 @@ fn plan_file_path(root: &Path, id: &ChangeSetId) -> PathBuf {
         .join("runtime")
         .join("plans")
         .join(plan_file_name(id))
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PersistedPlan {
+    #[serde(default = "legacy_planner_semantics_version")]
+    planner_semantics_version: u32,
+    #[serde(flatten)]
+    plan: PlanResult,
+}
+
+fn legacy_planner_semantics_version() -> u32 {
+    1
 }
 
 /// Mensaje del rechazo de `change_apply` cuando el plan **no es aplicable bajo su propia
@@ -3200,7 +3202,11 @@ fn persist_plan(ws: &Workspace, plan: &PlanResult) -> Result<(), AppError> {
     let dir = ws.root().join(".lodestar").join("runtime").join("plans");
     std::fs::create_dir_all(&dir).map_err(io)?;
     let path = dir.join(plan_file_name(&plan.change_set_id));
-    let json = serde_json::to_vec_pretty(plan).map_err(|e| {
+    let persisted = PersistedPlan {
+        planner_semantics_version: plan::PLAN_SEMANTICS_VERSION,
+        plan: plan.clone(),
+    };
+    let json = serde_json::to_vec_pretty(&persisted).map_err(|e| {
         AppError::new(
             ErrorCode::InternalIoError,
             format!(
@@ -3237,7 +3243,8 @@ pub struct PlanResult {
     pub change_set_id: ChangeSetId,
     /// Revisión del workspace sobre la que se computó el plan ([`workspace_revision`]).
     pub base_workspace_revision: WorkspaceRevision,
-    /// Hash determinista del plan (mismo input + misma base ⇒ mismo hash).
+    /// Hash determinista y versionado del plan (mismo input + misma base + misma semántica ⇒ mismo
+    /// hash). La versión es interna al runtime y no añade un campo al wire de este tipo.
     pub plan_hash: PlanHash,
     /// `true` si el plan es aplicable bajo la `policy` dada ([`plan::can_apply`]).
     pub can_apply: bool,
@@ -3246,11 +3253,9 @@ pub struct PlanResult {
     /// Se persiste con el plan porque el veredicto **vincula** al apply: `change_apply` recomputa
     /// [`plan::can_apply`] con esta policy (invariante #3: el predicado no se reimplementa, y no se
     /// congela un booleano que el apply no pueda re-verificar como re-verifica el `planHash` y la
-    /// revisión). Un plan persistido por un binario ANTERIOR a E29-H07 no lleva el campo:
-    /// `#[serde(default)]` lo completa con [`PlanPolicy::default`] —la policy más estricta de las
-    /// dos que el wire admite—, de modo que el gate nunca es más laxo de lo que el cliente pidió.
-    /// El desajuste posible (un plan planificado con `requireValidResult:false` que tras actualizar
-    /// el binario se rechaza) se resuelve replanificando, y lo acota el TTL corto del plan.
+    /// revisión). Dentro de la semántica vigente, un registro forjado o parcial que no lleve el
+    /// campo cae por `#[serde(default)]` a [`PlanPolicy::default`], la policy más estricta. Los planes
+    /// de semánticas anteriores se rechazan antes como `PLAN_STALE`; no llegan a este fallback.
     #[serde(default)]
     pub policy: PlanPolicy,
     /// Instante de caducidad (segundos epoch, wall-clock; fuera del `planHash`).
@@ -3269,8 +3274,8 @@ pub struct PlanResult {
     /// Vacío (`{}`) para la forma de array de operaciones sueltas, que no nace de una selección.
     #[serde(default)]
     pub captured_revisions: BTreeMap<RelPath, DocumentRevision>,
-    /// Operaciones del plan que se materializaron pero cuyo resultado es **idéntico** al documento
-    /// de partida (E31-H02, `decisiones §26`).
+    /// Terminales del plan que se materializaron pero cuyo resultado es **idéntico** al estado
+    /// inmediatamente anterior de sus paths (E31-H02, `decisiones §26`).
     ///
     /// Ni error ni advertencia: es la respuesta honesta a *«ejecuté tu operación, resultado: sin
     /// efecto»*, que hasta v0.5.0 el plan **no sabía dar**. Un `replace_text` cuyo `find` no casaba
@@ -3281,18 +3286,16 @@ pub struct PlanResult {
     /// ninguna traza y el agente no podría distinguir «se procesaron 40 documentos y 28 no tenían
     /// coincidencias» de «solo se seleccionaron 12».
     ///
-    /// **Derivado, no declarado**: se computa comparando los bytes del documento antes y después de
-    /// la simulación — el mismo predicado con el que el escritor decide su lote afectado
-    /// (`affected_paths`), así que no puede divergir de lo que el apply hará. Cubre **cualquier**
-    /// operación sin efecto, no solo `replace_text`: también un `edit_section` que reescribe una
-    /// sección con su contenido actual, un `patch_frontmatter` que escribe el valor que ya estaba o
-    /// un `move` con `from == to`.
+    /// **Derivado, no declarado**: se decide al aplicar cada terminal sobre el working y comparar
+    /// solo sus paths afectados. Cubre cualquier terminal sin efecto, incluido un `ReplaceBody`
+    /// idéntico, un patch sin cambios o un `move` con `from == to`.
     ///
     /// La operación **no** se elimina de [`Self::normalized_operations`] —la señal es aditiva— y el
-    /// campo va **fuera del `planHash`**, que cubre `baseWorkspaceRevision ‖ normalizedOperations`:
-    /// el hash es la identidad de *lo que se pidió*, y «resultó no-op» es una propiedad *del
-    /// resultado*. Por eso ningún `planHash` cambia y un plan persistido por un binario anterior se
-    /// lee con la lista vacía (`#[serde(default)]`, el patrón de `policy` en E29-H07).
+    /// campo va **fuera del `planHash`**, que cubre dominio y versión interna de semántica,
+    /// `baseWorkspaceRevision` y `normalizedOperations`: el hash es la identidad de las terminales
+    /// autorizadas, y «resultó no-op» es una observación derivada del replay. `#[serde(default)]`
+    /// conserva compatibilidad aditiva dentro de la semántica vigente; los planes de semántica
+    /// anterior se rechazan como `PLAN_STALE`.
     #[serde(default)]
     pub no_op_operations: Vec<NoOpOperation>,
     /// Conteo de diagnósticos del workspace ANTES del plan.
@@ -3301,8 +3304,9 @@ pub struct PlanResult {
     pub diagnostics_after: ValidationSummary,
 }
 
-/// Una operación del plan que **no tuvo efecto**: se materializó y su resultado es idéntico al
-/// documento de partida (E31-H02, `decisiones §26`). Ver [`PlanResult::no_op_operations`].
+/// Una terminal del plan que **no tuvo efecto**: se materializó y su resultado es idéntico al
+/// estado inmediatamente anterior (E31-H02, `decisiones §26`). Ver
+/// [`PlanResult::no_op_operations`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct NoOpOperation {

@@ -1,7 +1,7 @@
 # Banco de pruebas (`ARCHITECTURE.md §22`)
 
 > **Estado (E33-H02).** El banco de **conformidad** está completo y es asertable: corpus canónico
-> determinista (H01), runner con veredicto mecánico PASS/FAIL y exit code (H02), y un gate de **97
+> determinista (H01), runner con veredicto mecánico PASS/FAIL y exit code (H02), y un gate de **99
 > casos** que corre contra el corpus con **0 FAIL**. Quedan fuera, por historia: los centinelas de
 > `decisiones §22` (integridad referencial de frontmatter) y `§24` (caja/Unicode) (**H03**), el banco de **rendimiento** y sus umbrales (**H04**/**H05**), el
 > dogfooding (**H06**), el enganche a release y CI (**H07**) y el paquete de evidencia para
@@ -130,8 +130,9 @@ al siguiente) siguen funcionando igual que siempre.
 
 ## Qué cubre el gate, y qué no
 
-**16 lotes · 97 casos · 0 FAIL** (corrida datada en
-[`../corrida-banco-2026-08-10.md`](../corrida-banco-2026-08-10.md)).
+**16 lotes · 99 casos**. La corrida histórica de 97 casos está datada en
+[`../corrida-banco-2026-08-10.md`](../corrida-banco-2026-08-10.md); los dos casos añadidos después
+fijan la semántica secuencial de `change_plan` y su publicación por `change_apply`.
 
 | Lote | Qué asevera |
 |---|---|
@@ -139,8 +140,8 @@ al siguiente) siguen funcionando igual que siempre.
 | `gate_L2_proyeccion` | `include` de `knowledge_search` y `knowledge_get`; lo no pedido no viaja; `sections` |
 | `gate_L3_metadata` | `metadata_inspect` en sus dos modos y **las tres clases límite** del dialecto de dot-paths |
 | `gate_L5_grafo` | las ocho operaciones de `graph_query`, `outgoing ≡ neighborhood(1,out)`, `impact_analyze` |
-| `gate_L6_plan` | forma del plan, **hash determinista**, guards de `delete`/`create`/`move`, `REVISION_CONFLICT` |
-| `gate_L7_apply` | round trip **byte a byte** y la familia de conflictos completa |
+| `gate_L6_plan` | forma del plan, **hash determinista y versionado**, composición secuencial/no-op por terminal, guards de `delete`/`create`/`move`, `REVISION_CONFLICT` |
+| `gate_L7_apply` | round trip **byte a byte**, replay secuencial en disco y la familia de conflictos completa |
 | `gate_L8_readonly` | el perfil oculta **y** rechaza (-32602), y las lecturas no mutan |
 | `gate_L9_check_a` | el catálogo de diagnósticos de contenido con sus severidades |
 | `gate_L10_check_b` | patologías binarias/estructurales y la frontera daño-estructural vs daño-semántico |
