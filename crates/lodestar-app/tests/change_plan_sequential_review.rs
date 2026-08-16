@@ -243,8 +243,8 @@ fn selection_delete_remove_links_publica_las_dos_bajas_y_la_reescritura_acumulad
 
 #[derive(Debug, PartialEq, Eq)]
 struct TreeSnapshot {
-    directories: BTreeSet<String>,
-    files: BTreeMap<String, Vec<u8>>,
+    directories: BTreeSet<PathBuf>,
+    files: BTreeMap<PathBuf, Vec<u8>>,
 }
 
 fn tree_snapshot_without_audit(root: &Path) -> TreeSnapshot {
@@ -252,12 +252,8 @@ fn tree_snapshot_without_audit(root: &Path) -> TreeSnapshot {
         for entry in std::fs::read_dir(dir).unwrap() {
             let entry = entry.unwrap();
             let path = entry.path();
-            let rel = path
-                .strip_prefix(root)
-                .unwrap()
-                .to_string_lossy()
-                .into_owned();
-            if rel == ".lodestar/runtime/audit.jsonl" {
+            let rel = path.strip_prefix(root).unwrap().to_path_buf();
+            if rel == Path::new(".lodestar/runtime/audit.jsonl") {
                 continue;
             }
             if entry.file_type().unwrap().is_dir() {
