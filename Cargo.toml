@@ -24,7 +24,7 @@ rust-version = "1.80"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
-blake3 = "1"
+blake3 = "=1.8.2"
 thiserror = "1"
 once_cell = "1"
 regex = "1"
@@ -41,9 +41,16 @@ lodestar-app = { path = "crates/lodestar-app", version = "0.6.0" }
 # Solo-dev y `publish = false`: sin `version` para que cargo la descarte al empaquetar.
 lodestar-fixtures = { path = "crates/lodestar-fixtures" }
 # Fachadas / infra
-clap = { version = "4", features = ["derive"] }
+clap = { version = "=4.5.61", features = ["derive"] }
 anyhow = "1"
-ignore = "0.4"
+ignore = "=0.4.23"
+
+# Cargo no aplica el MSRV declarado por las crates del workspace a sus transitivas. Esta tabla es
+# política mecanizable: Cargo.lock materializa el pin y agent-gates impide que una actualización de
+# serde_yaml arrastre indexmap >=2.12 (MSRV 1.82) al workspace que conserva Rust 1.80.
+[workspace.metadata.msrv-pins]
+indexmap = "=2.11.4"
+clap_lex = "=1.0.1"
 
 [workspace.lints.clippy]
 all = "warn"

@@ -1,8 +1,9 @@
 # Contrato MCP — spec de SUPERFICIE Y SEMÁNTICA de las tools del servidor MCP.
 #
 # Se verifica contra el código real con `scripts/agent-gates.sh contract`.
-# Refleja `crates/lodestar-mcp/src/tools.rs` (registro `list()` + despacho `call()`) y el
-# bucle JSON-RPC de `crates/lodestar-mcp/src/main.rs`.
+# Refleja `LodestarMcpService` (`crates/lodestar-mcp/src/lib.rs`), que posee la semántica neutral
+# y reutiliza `tools.rs` (registro `list()` + despacho `call()`). Desde E34-H03, rmcp posee
+# transporte stdio, framing y ciclo de vida; `main.rs` sólo conecta el servicio con ese transporte.
 #
 # REGLAS (ver contracts/README.md):
 #   - Los TIPOS NO se definen aquí: se REFERENCIAN por nombre de `lodestar_core::types` /
@@ -651,6 +652,86 @@
 #     decidir («el comportamiento es el que fije E29-H08»), y aquí se decide: se rechaza, por la
 #     misma razón que el resto.
 
+# E34-H01 ratifica la política dual-era; E34-H03 sustituye el framing manual por rmcp/stdio y fija
+# el executor serial; H04/H05 cierran los dos wires y H06 la cancelación cooperativa y conformidad.
+
+protocol_policy:
+  latest: Modern
+  transport: stdio
+  eras:
+    Modern:
+      version: "2026-07-28"
+      lifecycle: stateless
+      request_metadata: required
+      request_metadata_location: params._meta
+      request_metadata_keys:
+        - io.modelcontextprotocol/protocolVersion
+        - io.modelcontextprotocol/clientCapabilities
+        - io.modelcontextprotocol/clientInfo
+      client_info:
+        required: [name, version]
+        non_empty_strings: true
+      methods: ["server/discover", "tools/list", "tools/call"]
+      forbidden_methods: [initialize, ping, "resources/list", "prompts/list"]
+      discover:
+        supportedVersions: ["2026-07-28"]
+        capabilities: { tools: {} }
+        resultType: complete
+        ttlMs: 0
+        cacheScope: private
+        serverInfo_metadata_key: io.modelcontextprotocol/serverInfo
+      tools_list:
+        resultType: complete
+        ttlMs: 0
+        cacheScope: private
+      tools_call:
+        resultType: complete
+      errors:
+        metadata_invalida: -32602
+        version_no_soportada: -32022
+        metodo_ausente: -32601
+    Legacy:
+      version: "2025-11-25"
+      lifecycle: initialize
+      request_metadata: absent
+      methods: [initialize, "notifications/initialized", ping, "tools/list", "tools/call"]
+      forbidden_methods: ["server/discover", "resources/list", "prompts/list"]
+      initialize:
+        negotiation: always_legacy_baseline
+        accepts_any_offered_version_string: true
+        serverInfo: required
+        instructions: profile_filtered
+        capabilities: { tools: {} }
+      notifications_initialized:
+        response: absent
+      ping:
+        result: {}
+      forbidden_result_fields: [resultType, ttlMs, cacheScope]
+      errors:
+        metodo_ausente: -32601
+  capabilities:
+    tools: {}
+  dependencies:
+    rmcp: "3.1.2"
+    tokio: true
+    scope: lodestar-mcp
+  msrv: "1.88"
+  tools:
+    - workspace_status
+    - knowledge_search
+    - knowledge_get
+    - metadata_inspect
+    - knowledge_check
+    - graph_query
+    - impact_analyze
+    - change_plan
+    - change_apply
+    - change_revert
+
+# E34-H01 (2026-08-17): la política dual-era vive en el bloque único `protocol_policy` de este
+# contrato. `initialize` pertenece al lifecycle Legacy; Modern es stateless y no hace handshake.
+# H04 completa el wire Modern; H05 completa el wire Legacy. Las dos eras comparten catálogo.
+#
 # E29-H09 (2026-08-06, `decisiones §23/D-01`, caso G1-24 del testbench): dos correcciones del mismo
 # hallazgo, ambas en `main.rs` (`handle`, brazo `initialize`). La superficie de 10 tools NO cambia,
 # ningún `outputSchema` cambia de forma.
@@ -661,41 +742,63 @@
 #     con `-32602`. La generación deriva del MISMO predicado que decide `tools/list`
 #     (`tools::available`, que ya usa `Profile::writes_enabled` + `tools::is_change_tool`): no hay
 #     una segunda lista de nombres de tool escrita a mano que pudiera divergir (invariante #4).
-#   - `protocolVersion` NO soportada deja de aceptarse en silencio (antes: se descartaba con
-#     `.filter(...)` y el servidor respondía éxito con su versión por defecto, como si el cliente
-#     hubiera pedido esa). Ahora se RECHAZA: error JSON-RPC `-32602` (mismo código que "tool
-#     desconocida"/"tool no disponible bajo el perfil") con un mensaje que lista las tres versiones
-#     aceptadas, y SIN `result` — un `initialize` fallido es un handshake fallido, no un error de
-#     dominio de tool, así que no lleva código del catálogo `ErrorCode`. La AUSENCIA de
-#     `protocolVersion` sigue siendo válida: se responde `2024-11-05`, la versión por defecto, sin
-#     error (omitir no es lo mismo que pedir algo imposible). Nota: la spec MCP base (2025-06-18,
-#     «Version Negotiation») prescribe una negociación blanda —el servidor responde con la versión
-#     que sí soporta y deja decidir al cliente—; aquí se sigue la prescripción explícita de la
-#     historia (rechazo duro) porque coincide con el principio rector de la épica y con el patrón que
-#     el servidor ya usa para tool desconocida/no disponible.
+#   - E34 supera la regla histórica de rechazo por fecha en `initialize`: cualquier revisión string
+#     dentro de un initialize MCP bien formado selecciona Legacy y negocia exclusivamente su
+#     baseline. Los params obligatorios y el framing los valida rmcp; no existe un pre-parser de
+#     Lodestar. Modern es stateless, no usa `initialize` y H04 completa su rechazo por versión.
 
 meta:
   fachada: lodestar-mcp (JSON-RPC por stdio; stdout puro, logs a stderr)
+  servicio: crates/lodestar-mcp/src/lib.rs              # LodestarMcpService
+  propietario_catalogo_y_semantica: LodestarMcpService
   fuente_registro: crates/lodestar-mcp/src/tools.rs        # tools::list()
   fuente_despacho: crates/lodestar-mcp/src/tools.rs        # tools::call()
-  fuente_bucle: crates/lodestar-mcp/src/main.rs            # handle()
+  transporte: rmcp::transport::stdio
+  adaptador_rmcp: SerialExecutor<LodestarMcpService>
+  framing: json-rpc por línea, propiedad de rmcp 3.1.2
+  eof: cierre limpio tras drenar respuestas en curso
+  stdout: exclusivamente mensajes MCP
+  stderr: logs y diagnósticos de proceso
+  ejecucion_tools: serial mediante SerialExecutor; una llamada mantiene el turno hasta terminar
+  cancelacion:
+    notificacion: notifications/cancelled de rmcp, correlacionada por requestId y sin respuesta
+    antes_del_turno: >-
+      El adaptador observa RequestContext.ct mientras espera el turno serial. Una request cancelada
+      en cola no entra en LodestarMcpService, no ejecuta la tool y rmcp suprime su respuesta.
+    despues_de_admitir: >-
+      Tras adquirir el turno y comprobar el token, la llamada síncrona de App termina bajo el mismo
+      executor. Una cancelación tardía no interrumpe, revierte ni despublica una transacción: el
+      canónico, el receipt y el estado de recuperación conservan la semántica transaccional.
+    sin_request_id: no cancela otra request
+    mecanismos_excluidos: [tasks, MRTR, reanudacion, cancelacion_http]
   protocolo:
-    metodos: [initialize, ping, "tools/list", "tools/call"]
-    protocol_versions_aceptadas: ["2024-11-05", "2025-03-26", "2025-06-18"]
+    politica: protocol_policy
+    metodos_por_era:
+      Modern: ["server/discover", "tools/list", "tools/call"]
+      Legacy: [initialize, "notifications/initialized", ping, "tools/list", "tools/call"]
     protocol_version_no_soportada: >-
-      (E29-H09) Una `protocolVersion` presente en `initialize.params` pero AUSENTE de
-      `protocol_versions_aceptadas` se RECHAZA: error JSON-RPC `-32602` (mismo código que "tool
-      desconocida"/"tool no disponible bajo el perfil") con un mensaje que lista las tres versiones
-      aceptadas, y la respuesta NO lleva `result` (main.rs, brazo `initialize`, `PROTOCOL_VERSIONS`).
-      Un handshake rechazado no es un error de dominio de tool: no lleva código del catálogo
-      `ErrorCode`. La AUSENCIA de `protocolVersion` sigue siendo válida — se responde
-      `DEFAULT_PROTOCOL_VERSION` (`2024-11-05`) sin error — y una versión presente Y aceptada se
-      ecoa tal cual, como antes de esta historia.
+      Una request stateless cuya versión no resuelve `protocol_policy` se rechaza con -32022,
+      data.requested igual a la versión recibida y data.supported igual a la lista Modern
+      implementada. No cae a Legacy ni ejecuta tools. `initialize` no usa esa resolución:
+      selecciona siempre Legacy y responde su baseline aunque el string solicitado sea antiguo o
+      futuro, sin crear una tercera rama. La forma de InitializeRequestParams la valida rmcp.
+    modern: >-
+      Cada request lleva protocolVersion, clientCapabilities y clientInfo (name/version no vacíos)
+      en params._meta. server/discover
+      anuncia exclusivamente Modern, capabilities.tools, instrucciones, resultType complete,
+      ttlMs 0, cacheScope private y serverInfo en metadata. tools/list conserva esos hints;
+      tools/call conserva resultType complete. initialize y ping no existen en esta superficie.
+    legacy: >-
+      initialize selecciona siempre la única baseline Legacy para cualquier protocolVersion string
+      ofrecida y devuelve serverInfo, capabilities.tools e instrucciones filtradas por perfil.
+      notifications/initialized no produce respuesta; ping devuelve result vacío; tools/list y
+      tools/call reutilizan el catálogo neutral. Ningún resultado Legacy lleva resultType, ttlMs o
+      cacheScope, y server/discover devuelve method not found.
     instructions: >-
       La respuesta `initialize` incluye `instructions` (string): el flujo recomendado, en orden —
       workspace_status → knowledge_search → knowledge_get → metadata_inspect →
       graph_query/impact_analyze → change_plan → change_apply → knowledge_check → change_revert
-      (main.rs `server_instructions`, E14-H03; generación por perfil desde E29-H09). Es SUPERFICIE
+      (`LodestarMcpService::instructions`, E14-H03; generación por perfil desde E29-H09). Es SUPERFICIE
       DE WIRE, no documentación: es lo primero que lee un agente, así que un nombre de operación
       obsoleto ahí se convierte en una llamada fallida. E23-H13 saldó el vocabulario retirado (decía
       «huérfanos», operación renombrada a `isolated` en E16-H02, y «conformidad», vocabulario que
@@ -712,8 +815,9 @@ meta:
   perfiles:
     # `lodestar-mcp [--root <dir>] [--profile readonly|standard]`, `standard` por defecto
     # (main.rs parse_args; lodestar_app::Profile). El perfil NO viaja por el wire: el cliente solo
-    # ve su efecto. Fuente única del efecto = `Profile::writes_enabled()` (standard ⇒ true) +
-    # `tools::is_change_tool` (E14-H03).
+    # ve su efecto. Ambos perfiles son filtros del MISMO `LodestarMcpService`, no servidores ni
+    # registros distintos. Fuente única del efecto = `Profile::writes_enabled()` (standard ⇒ true)
+    # + `tools::is_change_tool` (E14-H03).
     readonly: >-
       Oculta las 3 tools de cambio (`perfil: standard`) de `tools/list` (tools::available_tools) y
       RECHAZA su invocación con -32602 (tools::available), aunque el cliente las llame directamente.
@@ -722,12 +826,11 @@ meta:
     standard: >-
       Superficie completa (tools de lectura + las 3 de cambio). `capabilities.writes` == true.
   errores_protocolo:
-    # Fuente: `main.rs` — el bucle de lectura para -32700 y los brazos de `handle()` para el resto.
-    - "-32700 Parse error (JSON imparseable), id null (main.rs, bucle de lectura de stdin)"
-    - "-32600 Invalid Request (no es objeto / batch no soportado) (main.rs, guarda de `handle`)"
-    - "-32601 método no soportado (main.rs, brazo por defecto del `match method`)"
-    - "-32602 tool desconocida (tools/call con nombre no registrado, o tool de cambio bajo `readonly`) (main.rs, brazo «tools/call» vía tools::available)"
-    - "-32602 protocolVersion no soportada en `initialize` (presente pero ausente de protocol_versions_aceptadas), mensaje con las versiones aceptadas, sin `result` (main.rs, brazo «initialize», E29-H09)"
+    # Fuente: framing/dispatch oficial de rmcp + overrides de ServerHandler en src/lib.rs.
+    - "JSON no parseable: rmcp lo ignora sin contaminar stdout; no hay id correlacionable"
+    - "-32600 Invalid Request para JSON bien formado que no representa un mensaje JSON-RPC"
+    - "-32601 método no soportado; resources/prompts/completion y el resto de no objetivos se sobrescriben explícitamente como method not found"
+    - "-32602 tool desconocida (nombre no registrado o tool de cambio bajo readonly), adaptado por el ServerHandler"
   errores_ejecucion: >-
     Un error de ejecución de tool NO viaja como error JSON-RPC: va en el result como
     { content:[{type:text,text:msg}], isError:true } para que el modelo lo vea y corrija.
@@ -1325,3 +1428,4 @@ codigos_sin_emisor:
     - { codigo: RESULT_TOO_LARGE, motivo: "mapeado desde `CoreError::SizeGuardExceeded`, pero esa variante NO se construye en ninguna parte del árbol. El presupuesto de payload se respeta por diseño (knowledge_search nunca devuelve cuerpos, hay límites de página), no por este error" }
     - { codigo: RELATION_CONSTRAINT_VIOLATION, motivo: "mapeado desde `CoreError::RelationConstraintViolation` (`lodestar-app::error_code`), pero esa variante NO se construye en ninguna parte del árbol: su único productor validaba el target contra un `RelationDef`, y `core::schema` se retiró en E20-H03 (modelo universal §20.10 — una relación es un enlace Markdown y nada más). Un enlace roto lo reporta hoy `LINK-TARGET-MISSING`, no este código" }
     - { codigo: AMBIGUOUS_REFERENCE, motivo: "RESERVADO por diseño (`lodestar-app/src/lib.rs`): hoy un DocumentRef solo admite `path`, que es exacto por construcción. Se activará si alguna vez existe resolución por `id` o por título" }
+

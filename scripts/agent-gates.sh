@@ -47,6 +47,17 @@ gate_dependency_policy() {
     return 1
   fi
 
+  if ! grep -Fq 'indexmap = "=2.11.4"' Cargo.toml || \
+     ! awk '/^name = "indexmap"$/{found=1; next} found && /^version = /{exit($0 == "version = \"2.11.4\"" ? 0 : 1)} END{if (!found) exit 1}' Cargo.lock; then
+    printf '%s\n' "ERROR: indexmap debe permanecer en 2.11.4 para conservar MSRV 1.80" >&2
+    return 1
+  fi
+  if ! grep -Fq 'clap_lex = "=1.0.1"' Cargo.toml || \
+     ! awk '/^name = "clap_lex"$/{found=1; next} found && /^version = /{exit($0 == "version = \"1.0.1\"" ? 0 : 1)} END{if (!found) exit 1}' Cargo.lock; then
+    printf '%s\n' "ERROR: clap_lex debe permanecer en 1.0.1 para conservar MSRV 1.80" >&2
+    return 1
+  fi
+
   printf '%s\n' "política de dependencias y tipos: OK"
 }
 
@@ -56,12 +67,31 @@ gate_policy() {
   gate_dependency_policy
 }
 
+configure_e34_tokio_stream_source() {
+  local cargo_home source
+  if [[ -n "${E34_TOKIO_STREAM_SOURCE:-}" ]]; then
+    return
+  fi
+  cargo_home="${CARGO_HOME:-${HOME}/.cargo}"
+  source="$(find "$cargo_home/registry/src" -mindepth 2 -maxdepth 2 -type d \
+    -name 'tokio-stream-0.1.17' -print -quit 2>/dev/null || true)"
+  if [[ -z "$source" && -f "$lodestar_root/target/agent-state/e34-h03/tokio-stream-0.1.17/Cargo.toml" ]]; then
+    source="$lodestar_root/target/agent-state/e34-h03/tokio-stream-0.1.17"
+  fi
+  if [[ -z "$source" ]]; then
+    printf '%s\n' "ERROR: falta la fuente tokio-stream 0.1.17 para los clientes rmcp oficiales" >&2
+    return 1
+  fi
+  export E34_TOKIO_STREAM_SOURCE="$source"
+}
+
 gate_full() {
   python3 scripts/check-agent-guidance.py --include-legacy
   gate_contract_static
   cargo fmt --all --check
   cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
   cargo build --workspace --all-targets --locked
+  configure_e34_tokio_stream_source
   cargo test --workspace --locked
   cargo test -p lodestar-workspace --features test-failpoints --locked
   cargo test -p lodestar-app --features test-failpoints --locked

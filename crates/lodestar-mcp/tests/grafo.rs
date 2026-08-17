@@ -46,6 +46,27 @@ use std::collections::BTreeSet;
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
 
+const INJECTED_INITIALIZE_ID: &str = "__lodestar_legacy_harness_initialize__";
+
+fn legacy_transcript(lines: &[&str]) -> (Vec<String>, bool) {
+    let initialize = serde_json::json!({
+        "jsonrpc": "2.0", "id": INJECTED_INITIALIZE_ID, "method": "initialize",
+        "params": {"protocolVersion": "2025-11-25", "capabilities": {},
+                   "clientInfo": {"name": "lodestar-tests", "version": "1"}}
+    })
+    .to_string();
+    (
+        std::iter::once(initialize)
+            .chain(std::iter::once(
+                serde_json::json!({"jsonrpc":"2.0","method":"notifications/initialized"})
+                    .to_string(),
+            ))
+            .chain(lines.iter().map(|line| (*line).to_owned()))
+            .collect(),
+        true,
+    )
+}
+
 /// Escribe un fichero dentro del workspace temporal, creando los directorios intermedios.
 fn write(dir: &std::path::Path, rel: &str, content: &str) {
     let p = dir.join(rel);
@@ -56,6 +77,7 @@ fn write(dir: &std::path::Path, rel: &str, content: &str) {
 /// Arranca el servidor sobre un workspace, envía `lines` y devuelve las primeras `expect`
 /// respuestas (mismo arnés que `mcp.rs`).
 fn roundtrip(dir: &std::path::Path, lines: &[&str], expect: usize) -> Vec<serde_json::Value> {
+    let (transcript, injected_initialize) = legacy_transcript(lines);
     let mut child = Command::new(env!("CARGO_BIN_EXE_lodestar-mcp"))
         .arg("--root")
         .arg(dir)
@@ -66,14 +88,19 @@ fn roundtrip(dir: &std::path::Path, lines: &[&str], expect: usize) -> Vec<serde_
         .unwrap();
     let mut stdin = child.stdin.take().unwrap();
     let mut stdout = BufReader::new(child.stdout.take().unwrap());
-    for l in lines {
+    for l in &transcript {
         writeln!(stdin, "{l}").unwrap();
     }
     stdin.flush().unwrap();
     drop(stdin);
     let mut out = Vec::new();
     for line in (&mut stdout).lines().map_while(Result::ok) {
-        out.push(serde_json::from_str(&line).expect("stdout = JSON-RPC puro"));
+        let response: serde_json::Value =
+            serde_json::from_str(&line).expect("stdout = JSON-RPC puro");
+        if injected_initialize && response["id"] == INJECTED_INITIALIZE_ID {
+            continue;
+        }
+        out.push(response);
         if out.len() == expect {
             break;
         }

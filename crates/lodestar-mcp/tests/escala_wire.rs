@@ -22,6 +22,25 @@ const N: usize = 10_000;
 /// `app/tests/escala.rs`: al final, porque el `snippet` **sí** es una ventana acotada del principio
 /// del cuerpo y debe seguir viajando — lo que no puede viajar es el cuerpo ENTERO.
 const CENTINELA: &str = "CENTINELA-CUERPO-QUE-NO-DEBE-VIAJAR";
+const INITIALIZE_ID: &str = "__lodestar_legacy_harness_initialize__";
+
+fn inicializa(stdin: &mut impl Write, stdout: &mut impl BufRead) {
+    let init = serde_json::json!({"jsonrpc":"2.0","id":INITIALIZE_ID,"method":"initialize",
+        "params":{"protocolVersion":"2025-11-25","capabilities":{},
+                  "clientInfo":{"name":"lodestar-tests","version":"1"}}});
+    writeln!(stdin, "{init}").unwrap();
+    stdin.flush().unwrap();
+    let mut linea = String::new();
+    stdout.read_line(&mut linea).unwrap();
+    let respuesta: serde_json::Value = serde_json::from_str(&linea).expect("initialize JSON-RPC");
+    assert_eq!(
+        respuesta["id"], INITIALIZE_ID,
+        "respuesta de initialize desalineada"
+    );
+    let notification = serde_json::json!({"jsonrpc":"2.0","method":"notifications/initialized"});
+    writeln!(stdin, "{notification}").unwrap();
+    stdin.flush().unwrap();
+}
 
 fn genera(root: &std::path::Path) {
     let relleno = "lorem ipsum dolor sit amet ".repeat(40);
@@ -55,6 +74,7 @@ fn escala_por_el_wire_acota_payload() {
         .expect("arrancar lodestar-mcp");
     let mut stdin = child.stdin.take().unwrap();
     let mut stdout = BufReader::new(child.stdout.take().unwrap());
+    inicializa(&mut stdin, &mut stdout);
 
     let mut pide = |id: u64, nombre: &str, args: serde_json::Value| -> (serde_json::Value, usize) {
         let msg = serde_json::json!({"jsonrpc":"2.0","id":id,"method":"tools/call",
@@ -185,6 +205,7 @@ fn graph_query_tiene_default() {
         .expect("arrancar lodestar-mcp");
     let mut stdin = child.stdin.take().unwrap();
     let mut stdout = BufReader::new(child.stdout.take().unwrap());
+    inicializa(&mut stdin, &mut stdout);
 
     let mut pide = |id: u64, nombre: &str, args: serde_json::Value| -> (serde_json::Value, usize) {
         let msg = serde_json::json!({"jsonrpc":"2.0","id":id,"method":"tools/call",

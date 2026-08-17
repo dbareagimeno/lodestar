@@ -5,6 +5,8 @@ name: CI
 # La protección de rama de `develop` y `main` exige que pasen estos checks (ojo: el
 # nombre del check es el `name:` del job, no su id, y la matriz lo expande por SO):
 #   Rust · fmt · clippy · build · test (ubuntu-latest | macos-14 | windows-latest)
+#   MSRV · workspace sin MCP (Rust 1.80.1)
+#   MSRV · fachada MCP (Rust 1.88.0)
 #   Core puro (sin tokio/rusqlite/git2/notify/tauri/zip)
 #   Smoke de la demo (examples/demo)
 # Si renombras un job, actualiza también la lista de checks obligatorios en GitHub o
@@ -74,6 +76,30 @@ jobs:
       - name: Build (todo el workspace, todos los targets)
         run: cargo build --workspace --all-targets --locked
 
+      # Los clientes oficiales H03/H06 son crates auxiliares aislados que ejecutan Cargo offline,
+      # para demostrar que no heredan por accidente los features del servidor. Este paso obtiene
+      # su dependencia exacta sin incorporarla al grafo de producción/tests de lodestar-mcp y
+      # comunica la ruta portable a ambos harnesses.
+      - name: Localiza tokio-stream para clientes rmcp oficiales
+        shell: pwsh
+        run: |
+          $cargoHome = if ($env:CARGO_HOME) { $env:CARGO_HOME } else { Join-Path $HOME ".cargo" }
+          $probe = Join-Path $env:RUNNER_TEMP "e34-tokio-stream-source"
+          New-Item -ItemType Directory -Force $probe | Out-Null
+          @'
+          [package]
+          name = "e34-tokio-stream-source"
+          version = "0.0.0"
+          edition = "2021"
+
+          [dependencies]
+          tokio-stream = "=0.1.17"
+          '@ | Set-Content -Path (Join-Path $probe "Cargo.toml") -Encoding utf8
+          cargo fetch --manifest-path (Join-Path $probe "Cargo.toml")
+          $source = Get-ChildItem (Join-Path $cargoHome "registry/src") -Directory -Recurse -Filter "tokio-stream-0.1.17" | Select-Object -First 1 -ExpandProperty FullName
+          if (-not $source) { throw "falta tokio-stream 0.1.17 en el cache de Cargo" }
+          "E34_TOKIO_STREAM_SOURCE=$source" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
       - name: Tests
         run: cargo test --workspace --locked
 
@@ -101,6 +127,29 @@ jobs:
         run: cargo doc --workspace --no-deps --locked
         env:
           RUSTDOCFLAGS: "-D warnings"
+
+  # E34-H01: rmcp eleva únicamente la fachada MCP. Estos dos checks impiden que
+  # una actualización transitiva eleve en silencio el resto del workspace o que
+  # lodestar-mcp deje de compilar con el MSRV ratificado para la fachada.
+  msrv-workspace:
+    name: MSRV · workspace sin MCP (Rust 1.80.1)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.80.1
+      - uses: Swatinem/rust-cache@v2
+      - name: Compila el workspace conservado en Rust 1.80
+        run: cargo check --workspace --exclude lodestar-mcp --locked
+
+  msrv-mcp:
+    name: MSRV · fachada MCP (Rust 1.88.0)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.88.0
+      - uses: Swatinem/rust-cache@v2
+      - name: Compila exclusivamente la fachada MCP
+        run: cargo check -p lodestar-mcp --locked
 
   # ---------------------------------------------------------------------------
   # Invariante #2 (ARCHITECTURE.md §2.2, §10 fila 2, E8-H11): el core es PURO.

@@ -7,6 +7,24 @@ y el proyecto sigue [Versionado Semántico](https://semver.org/lang/es/).
 
 ## [No publicado]
 
+### Cambiado
+
+- La fachada MCP se organiza en dos eras explícitas: `Modern` implementa MCP
+  `2026-07-28` de forma stateless con metadata por petición y
+  `server/discover`; `Legacy` mantiene una sola baseline MCP `2025-11-25` con
+  `initialize`, `notifications/initialized` y `ping`. Las revisiones anteriores
+  dejan de ser compatibles y `initialize` siempre negocia hacia esa baseline.
+- `lodestar-mcp` usa ahora el SDK oficial `rmcp` 3.1.2 sobre stdio para
+  transporte, framing y ciclo de vida. El catálogo, los esquemas y el
+  dispatcher de las diez tools siguen teniendo una única implementación, y
+  todas las llamadas cruzan el executor serial propietario de `App`.
+- `lodestar-mcp` eleva su MSRV a Rust 1.88; el resto del workspace conserva
+  Rust 1.80. `Cargo.lock` fija `indexmap` 2.11.4 y `clap_lex` 1.0.1 como las
+  últimas versiones compatibles con el carril Rust 1.80.
+- Cancelación MCP segura: abandonar una petición no interrumpe una transacción
+  ya iniciada; el trabajo continúa serializado hasta un límite seguro antes de
+  atender la siguiente llamada.
+
 ### Corregido
 
 - **Alta severidad — `change_plan` ya no pierde silenciosamente operaciones de contenido sobre el

@@ -23,6 +23,57 @@ fn escribe(root: &Path, rel: &str, contenido: &str) {
 
 /// Arranca `lodestar-mcp --root <dir>`, envía las líneas JSON-RPC y recoge `expect` respuestas.
 fn mcp(dir: &Path, lineas: &[String], expect: usize) -> Vec<Value> {
+    const INJECTED_INITIALIZE_ID: &str = "__lodestar_legacy_harness_initialize__";
+    let has_initialize = lineas.iter().any(|line| {
+        serde_json::from_str::<Value>(line)
+            .ok()
+            .and_then(|request| {
+                request["method"]
+                    .as_str()
+                    .map(|method| method == "initialize")
+            })
+            .unwrap_or(false)
+    });
+    let mut transcript = if has_initialize {
+        lineas.to_vec()
+    } else {
+        vec![
+            json!({"jsonrpc":"2.0","id":INJECTED_INITIALIZE_ID,"method":"initialize",
+                    "params":{"protocolVersion":"2025-11-25","capabilities":{},
+                              "clientInfo":{"name":"lodestar-tests","version":"1"}}})
+            .to_string(),
+            json!({"jsonrpc":"2.0","method":"notifications/initialized"}).to_string(),
+        ]
+    };
+    if has_initialize
+        && !transcript.iter().any(|line| {
+            serde_json::from_str::<Value>(line)
+                .ok()
+                .and_then(|request| {
+                    request["method"]
+                        .as_str()
+                        .map(|method| method == "notifications/initialized")
+                })
+                .unwrap_or(false)
+        })
+    {
+        if let Some(index) = transcript.iter().position(|line| {
+            serde_json::from_str::<Value>(line)
+                .ok()
+                .and_then(|request| {
+                    request["method"]
+                        .as_str()
+                        .map(|method| method == "initialize")
+                })
+                .unwrap_or(false)
+        }) {
+            transcript.insert(
+                index + 1,
+                json!({"jsonrpc":"2.0","method":"notifications/initialized"}).to_string(),
+            );
+        }
+    }
+    let injected_initialize = !has_initialize;
     let mut child = Command::new(env!("CARGO_BIN_EXE_lodestar-mcp"))
         .arg("--root")
         .arg(dir)
@@ -33,19 +84,43 @@ fn mcp(dir: &Path, lineas: &[String], expect: usize) -> Vec<Value> {
         .unwrap();
     let mut stdin = child.stdin.take().unwrap();
     let mut stdout = BufReader::new(child.stdout.take().unwrap());
-    for l in lineas {
+    for l in &transcript {
         writeln!(stdin, "{l}").unwrap();
     }
     stdin.flush().unwrap();
     drop(stdin);
     let mut out = Vec::new();
     for line in (&mut stdout).lines().map_while(Result::ok) {
-        out.push(serde_json::from_str(&line).expect("stdout = JSON-RPC puro"));
+        let response: Value = serde_json::from_str(&line).expect("stdout = JSON-RPC puro");
+        if injected_initialize && response["id"] == INJECTED_INITIALIZE_ID {
+            continue;
+        }
+        out.push(response);
         if out.len() == expect {
             break;
         }
     }
     child.wait().ok();
+    // rmcp puede completar requests independientes en paralelo. Recuperamos el orden del
+    // transcript siempre que los ids sean únicos, sin reordenar casos históricos con ids repetidos.
+    let ids: Vec<Value> = lineas
+        .iter()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter(|request| request["method"] != "notifications/initialized")
+        .filter_map(|request| request.get("id").cloned())
+        .collect();
+    let unique = ids
+        .iter()
+        .map(Value::to_string)
+        .collect::<std::collections::BTreeSet<_>>()
+        .len()
+        == ids.len();
+    if unique && ids.len() == out.len() {
+        return ids
+            .into_iter()
+            .filter_map(|id| out.iter().find(|response| response["id"] == id).cloned())
+            .collect();
+    }
     out
 }
 
@@ -57,7 +132,11 @@ fn call(id: u32, name: &str, args: Value) -> String {
 }
 
 fn init() -> String {
-    json!({"jsonrpc":"2.0","id":0,"method":"initialize","params":{}}).to_string()
+    json!({"jsonrpc":"2.0","id":0,"method":"initialize","params":{
+        "protocolVersion":"2025-11-25", "capabilities": {},
+        "clientInfo":{"name":"lodestar-e2e-migracion","version":"1"}
+    }})
+    .to_string()
 }
 
 /// El `structuredContent` de una respuesta `tools/call`.

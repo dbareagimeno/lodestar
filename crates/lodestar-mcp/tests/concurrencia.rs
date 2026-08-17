@@ -71,8 +71,27 @@ impl Servidor {
             .stderr(Stdio::null())
             .spawn()
             .expect("arrancar lodestar-mcp");
-        let stdin = child.stdin.take().expect("stdin del servidor");
-        let stdout = BufReader::new(child.stdout.take().expect("stdout del servidor"));
+        let mut stdin = child.stdin.take().expect("stdin del servidor");
+        let mut stdout = BufReader::new(child.stdout.take().expect("stdout del servidor"));
+        let initialize = serde_json::json!({
+            "jsonrpc": "2.0", "id": "__lodestar_legacy_harness_initialize__", "method": "initialize",
+            "params": {"protocolVersion": "2025-11-25", "capabilities": {},
+                       "clientInfo": {"name": "lodestar-tests", "version": "1"}}
+        });
+        writeln!(stdin, "{initialize}").expect("escribir initialize");
+        stdin.flush().expect("flush initialize");
+        let mut respuesta = String::new();
+        stdout.read_line(&mut respuesta).expect("leer initialize");
+        let respuesta: serde_json::Value =
+            serde_json::from_str(&respuesta).expect("initialize JSON-RPC");
+        assert_eq!(respuesta["id"], "__lodestar_legacy_harness_initialize__");
+        writeln!(
+            stdin,
+            "{}",
+            serde_json::json!({"jsonrpc":"2.0","method":"notifications/initialized"})
+        )
+        .expect("escribir initialized");
+        stdin.flush().expect("flush initialized");
         Servidor {
             child,
             stdin,
