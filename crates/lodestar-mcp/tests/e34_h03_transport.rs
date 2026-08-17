@@ -586,10 +586,10 @@ fn run_executor_probe(root: &Path) -> Output {
     let app_path = mcp_path.join("../lodestar-app");
     let workspace_path = mcp_path.join("../lodestar-workspace");
     let manifest = format!(
-        "[package]\nname = \"e34-h03-executor-probe\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[dependencies]\nlodestar-mcp = {{ path = \"{}\" }}\nlodestar-app = {{ path = \"{}\", features = [\"test-failpoints\"] }}\nlodestar-workspace = {{ path = \"{}\", features = [\"test-failpoints\"] }}\nserde_json = \"1\"\ntokio = {{ version = \"1\", features = [\"rt\", \"sync\", \"time\"] }}\n",
-        mcp_path.display(),
-        app_path.display(),
-        workspace_path.display(),
+        "[package]\nname = \"e34-h03-executor-probe\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[dependencies]\nlodestar-mcp = {{ path = {} }}\nlodestar-app = {{ path = {}, features = [\"test-failpoints\"] }}\nlodestar-workspace = {{ path = {}, features = [\"test-failpoints\"] }}\nserde_json = \"1\"\ntokio = {{ version = \"1\", features = [\"rt\", \"sync\", \"time\"] }}\n",
+        toml_basic_string(&mcp_path.to_string_lossy()),
+        toml_basic_string(&app_path.to_string_lossy()),
+        toml_basic_string(&workspace_path.to_string_lossy()),
     );
     write_file(helper.path(), "Cargo.toml", &manifest);
     write_file(helper.path(), "src/main.rs", EXECUTOR_PROBE_MAIN);
