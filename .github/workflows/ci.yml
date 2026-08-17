@@ -5,7 +5,9 @@ name: CI
 # La protección de rama de `develop` y `main` exige que pasen estos checks (ojo: el
 # nombre del check es el `name:` del job, no su id, y la matriz lo expande por SO):
 #   Rust · fmt · clippy · build · test (ubuntu-latest | macos-14 | windows-latest)
-#   Core puro (sin tokio/rusqlite/git2/notify/tauri/zip)
+#   MSRV · workspace sin MCP (Rust 1.80.1)
+#   MSRV · fachada MCP (Rust 1.88.0)
+#   Core puro + gate completo (sin tokio/rusqlite/git2/notify/tauri/zip)
 #   Smoke de la demo (examples/demo)
 # Si renombras un job, actualiza también la lista de checks obligatorios en GitHub o
 # la protección quedará exigiendo un check que ya no existe (y bloqueará todo merge).
@@ -74,6 +76,32 @@ jobs:
       - name: Build (todo el workspace, todos los targets)
         run: cargo build --workspace --all-targets --locked
 
+      # Los clientes oficiales H03/H06 son crates auxiliares aislados que ejecutan Cargo offline,
+      # para demostrar que no heredan por accidente los features del servidor. Este paso obtiene
+      # su dependencia exacta sin incorporarla al grafo de producción/tests de lodestar-mcp y
+      # comunica la ruta portable a ambos harnesses.
+      - name: Localiza tokio-stream para clientes rmcp oficiales
+        shell: pwsh
+        run: |
+          $cargoHome = if ($env:CARGO_HOME) { $env:CARGO_HOME } else { Join-Path $HOME ".cargo" }
+          $probe = Join-Path $env:RUNNER_TEMP "e34-tokio-stream-source"
+          New-Item -ItemType Directory -Force $probe | Out-Null
+          New-Item -ItemType Directory -Force (Join-Path $probe "src") | Out-Null
+          New-Item -ItemType File -Force (Join-Path $probe "src/lib.rs") | Out-Null
+          @'
+          [package]
+          name = "e34-tokio-stream-source"
+          version = "0.0.0"
+          edition = "2021"
+
+          [dependencies]
+          tokio-stream = "=0.1.17"
+          '@ | Set-Content -Path (Join-Path $probe "Cargo.toml") -Encoding utf8
+          cargo fetch --manifest-path (Join-Path $probe "Cargo.toml")
+          $source = Get-ChildItem (Join-Path $cargoHome "registry/src") -Directory -Recurse -Filter "tokio-stream-0.1.17" | Select-Object -First 1 -ExpandProperty FullName
+          if (-not $source) { throw "falta tokio-stream 0.1.17 en el cache de Cargo" }
+          "E34_TOKIO_STREAM_SOURCE=$source" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
       - name: Tests
         run: cargo test --workspace --locked
 
@@ -102,9 +130,33 @@ jobs:
         env:
           RUSTDOCFLAGS: "-D warnings"
 
+  # E34-H01: rmcp eleva únicamente la fachada MCP. Estos dos checks impiden que
+  # una actualización transitiva eleve en silencio el resto del workspace o que
+  # lodestar-mcp deje de compilar con el MSRV ratificado para la fachada.
+  msrv-workspace:
+    name: MSRV · workspace sin MCP (Rust 1.80.1)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.80.1
+      - uses: Swatinem/rust-cache@v2
+      - name: Compila el workspace conservado en Rust 1.80
+        run: cargo check --workspace --exclude lodestar-mcp --locked
+
+  msrv-mcp:
+    name: MSRV · fachada MCP (Rust 1.88.0)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.88.0
+      - uses: Swatinem/rust-cache@v2
+      - name: Compila exclusivamente la fachada MCP
+        run: cargo check -p lodestar-mcp --locked
+
   # ---------------------------------------------------------------------------
   # Invariante #2 (ARCHITECTURE.md §2.2, §10 fila 2, E8-H11): el core es PURO.
-  # Falla si lodestar-core adquiere una dependencia de I/O/DB/git/runtime/GUI.
+  # El gate compartido comprueba además dependencias retiradas, fuente única de códigos,
+  # coherencia estructural MCP y que la guidance de agentes no haya reintroducido reglas obsoletas.
   # ---------------------------------------------------------------------------
   core-purity:
     name: Core puro (sin tokio/rusqlite/git2/notify/tauri/zip)
@@ -113,54 +165,31 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Verifica el árbol de dependencias de lodestar-core
+      - name: Descarga el grafo bloqueado antes de los gates
+        run: cargo fetch --locked
+      - name: Prepara tokio-stream para los clientes rmcp oficiales
+        shell: bash
         run: |
           set -euo pipefail
-          tree="$(cargo tree -p lodestar-core --edges normal --prefix none --locked)"
-          echo "$tree"
-          forbidden='^(tokio|rusqlite|libsqlite3-sys|git2|libgit2-sys|notify|notify-debouncer-full|tauri|tauri-build|zip) '
-          if echo "$tree" | grep -Eq "$forbidden"; then
-            echo "::error::lodestar-core arrastra una dependencia prohibida (debe permanecer puro)."
-            echo "$tree" | grep -E "$forbidden" || true
-            exit 1
-          fi
-          echo "OK: lodestar-core es puro."
-
-      # E15-H01/H03: git y el formato zip salieron del REPO, no solo de la superficie.
-      # Criterio de aceptación de E15-H01: `cargo tree --workspace` no muestra `git2` ni
-      # `lodestar-vcs`; el de E15-H03: no muestra `zip`.
-      - name: Verifica que git y zip no están en el workspace
-        run: |
-          set -euo pipefail
-          tree="$(cargo tree --workspace --edges normal --prefix none --locked)"
-          forbidden='^(git2|libgit2-sys|lodestar-vcs|zip) '
-          if echo "$tree" | grep -Eq "$forbidden"; then
-            echo "::error::el workspace arrastra git2/lodestar-vcs/zip, retirados en E15-H01/H03."
-            echo "$tree" | grep -E "$forbidden" || true
-            exit 1
-          fi
-          echo "OK: sin git2/lodestar-vcs/zip en el workspace."
-
-      # E24-H17: el doc-comment de `core::types::ErrorCode` afirma desde E10-H02 que «está
-      # prohibido redefinir estos códigos fuera de `core::types` (grep de CI)». Ese grep NO
-      # existía: el job solo tenía los dos `cargo tree` de arriba. Aquí está.
-      #
-      # Qué caza: que otro crate declare su propia tabla de códigos de wire en vez de consumir
-      # `ErrorCode::as_str()` — que es como se cuela una segunda verdad del catálogo (invariante #4:
-      # un solo contrato de tipos). Se buscan literales SCREAMING_SNAKE del catálogo fuera de
-      # `lodestar-core`, excluyendo los tests (que los asertan a propósito) y los comentarios.
-      - name: Los códigos de error solo se definen en core::types
-        run: |
-          set -euo pipefail
-          patron='"(WORKSPACE_NOT_FOUND|WORKSPACE_RECOVERY_REQUIRED|DOCUMENT_NOT_FOUND|DOCUMENT_ALREADY_EXISTS|AMBIGUOUS_REFERENCE|REVISION_CONFLICT|PLAN_STALE|PLAN_EXPIRED|PERMISSION_DENIED|INVALID_SCHEMA|INVALID_RESULT|INBOUND_LINKS_EXIST|RELATION_CONSTRAINT_VIOLATION|WRITE_CONFLICT|RESULT_TOO_LARGE|RECOVERY_FAILED|INTERNAL_IO_ERROR)"'
-          # `crates/*/src/` de todos los crates MENOS lodestar-core (que es donde deben vivir).
-          fuentes=$(find crates -path 'crates/lodestar-core' -prune -o -path '*/src/*' -name '*.rs' -print)
-          if [ -n "$fuentes" ] && echo "$fuentes" | xargs grep -nE "$patron" 2>/dev/null | grep -vE '^\s*//|///'; then
-            echo "::error::un crate fuera de lodestar-core declara literales del catálogo de ErrorCode."
-            echo "Los códigos de wire se definen UNA vez en core::types y se consumen con ErrorCode::as_str()."
-            exit 1
-          fi
-          echo "OK: los códigos de error solo se definen en core::types."
+          probe="${RUNNER_TEMP}/e34-tokio-stream-source"
+          cargo_home="${CARGO_HOME:-${HOME}/.cargo}"
+          mkdir -p "$probe/src"
+          printf '%s\n' \
+            '[package]' \
+            'name = "e34-tokio-stream-source"' \
+            'version = "0.0.0"' \
+            'edition = "2021"' \
+            '' \
+            '[dependencies]' \
+            'tokio-stream = "=0.1.17"' > "$probe/Cargo.toml"
+          : > "$probe/src/lib.rs"
+          cargo fetch --manifest-path "$probe/Cargo.toml"
+          source="$(find "$cargo_home/registry/src" -mindepth 2 -maxdepth 2 -type d \
+            -name 'tokio-stream-0.1.17' -print -quit)"
+          test -n "$source"
+          echo "E34_TOKIO_STREAM_SOURCE=$source" >> "$GITHUB_ENV"
+      - name: Gate completo de arquitectura, contrato y entrega
+        run: ./scripts/agent-gates.sh full
 
   # ---------------------------------------------------------------------------
   # E27-H04: el guion de examples/demo no puede pudrirse en silencio. El job

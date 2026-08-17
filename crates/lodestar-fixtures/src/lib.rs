@@ -10,7 +10,12 @@
 //!   consumidor vivo son los tests de `lodestar-store`; se retirarán con ellos cuando se resuelva
 //!   el destino del store (`decisiones §14`).
 //!
+//! A ellos se suma el **generador de escala** ([`escala`], E33-H01): corpus sintéticos grandes
+//! parametrizados por perfil/tamaño/semilla, para el banco de evidencia de `ARCHITECTURE.md §22`.
+//!
 //! Todos son deterministas: misma llamada ⇒ mismos bytes.
+
+pub mod escala;
 
 use std::path::Path;
 

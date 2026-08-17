@@ -1,0 +1,145 @@
+{
+  "batch": "gate_L1_consulta",
+  "descripcion": "L1 del gate — lenguaje de consulta (`where`/`filter`): tipos, namespaces reservados, errores de compilación y type errors de evaluación. Porte del lote temático L1 (`batches/L1_typ.json`, matriz original de `decisiones §23`) reescrito contra el corpus canónico: lo que se asevera son CÓDIGOS y FORMAS del contrato, nunca conteos del inventario (FORMATO_EXPECT.md §6).",
+  "root": "corpus",
+  "profile": "readonly",
+  "fixtures": null,
+  "cases": [
+    {
+      "id": "L1-TYP-01",
+      "descripcion": "Origen: L1_typ.json TYP-01/TYP-06 (conjunción de condiciones sobre frontmatter). Reescrito: el corpus usa `type`/`status` en vez de los del homelab.",
+      "steps": [
+        {
+          "kind": "call",
+          "tool": "knowledge_search",
+          "arguments": { "where": "type = \"guia\" and status = \"activo\"", "include": ["frontmatter.type", "frontmatter.status"], "limit": 50 },
+          "expect": {
+            "describe": "Conjunción: TODO hit proyecta exactamente los dos valores pedidos. Se asevera el primero (forma + valores), no cuántos hay: el número depende del corpus.",
+            "is_error": false,
+            "min_length": { "structured.results": 1 },
+            "equals": {
+              "structured.results.0.frontmatter.type": "guia",
+              "structured.results.0.frontmatter.status": "activo"
+            },
+            "type": { "structured.results": "array", "structured.totalApproximate": "number" }
+          }
+        }
+      ]
+    },
+    {
+      "id": "L1-TYP-04",
+      "descripcion": "Origen: L1_typ.json TYP-04 — namespace reservado `graph.` como propiedad calculada consultable. El corpus tiene documentos aislados a propósito (N_AISLADOS de make_corpus.py), así que hay al menos uno.",
+      "steps": [
+        {
+          "kind": "call",
+          "tool": "knowledge_search",
+          "arguments": { "where": "graph.isolated = true", "limit": 5 },
+          "expect": {
+            "describe": "`graph.isolated` es una propiedad CALCULADA legítima en `where` (a diferencia de metadata_inspect, que la rechaza). Cota inferior, no conteo: el nº de aislados depende del filesystem.",
+            "is_error": false,
+            "min_length": { "structured.results": 1 },
+            "present": ["structured.results.0.path"]
+          }
+        }
+      ]
+    },
+    {
+      "id": "L1-TYP-07",
+      "descripcion": "Origen: L1_typ.json TYP-07 — typo bajo namespace reservado. Fuente: query-language.md «Reserved namespaces»; mcp.yml E24-H07.",
+      "steps": [
+        {
+          "kind": "call",
+          "tool": "knowledge_search",
+          "arguments": { "where": "graph.backlink > 0" },
+          "expect": {
+            "describe": "Error en COMPILACIÓN (no lista vacía silenciosa) y el mensaje enumera las cuatro propiedades válidas del namespace, más el anclaje que salva la colisión.",
+            "error_code": "INVALID_SCHEMA",
+            "contains": { "text": "graph.backlinks" },
+            "absent": ["structured"]
+          }
+        }
+      ]
+    },
+    {
+      "id": "L1-TYP-08",
+      "descripcion": "Origen: L1_typ.json TYP-08 — propiedad desconocida bajo `document.`. Fuente: query-language.md «When a query fails», fila 2.",
+      "steps": [
+        {
+          "kind": "call",
+          "tool": "knowledge_search",
+          "arguments": { "where": "document.pathh = \"a.md\"" },
+          "expect": {
+            "describe": "Un typo bajo `document.` es error, no [] silencioso: el namespace es cerrado.",
+            "error_code": "INVALID_SCHEMA"
+          }
+        }
+      ]
+    },
+    {
+      "id": "L1-TYP-09",
+      "descripcion": "Origen: L1_typ.json TYP-09 — un campo de frontmatter que nadie tiene NO es un error: el espacio de claves es abierto. Es el contraste que da sentido a TYP-07/TYP-08.",
+      "steps": [
+        {
+          "kind": "call",
+          "tool": "knowledge_search",
+          "arguments": { "where": "campo_inventado_que_nadie_tiene = 3", "limit": 5 },
+          "expect": {
+            "describe": "Sin error y sin resultados: un campo libre inexistente simplemente no casa. Aquí `length 0` es legítimo — no es un conteo del inventario, es la ausencia total de una clave inventada.",
+            "is_error": false,
+            "length": { "structured.results": 0 }
+          }
+        }
+      ]
+    },
+    {
+      "id": "L1-TYP-ORDEN-MIXTO",
+      "descripcion": "Origen: informe §5 «todo el catálogo… type errors del orden» + L10_chk_b.json CHK-13. El corpus mezcla `priority` número y cadena a propósito (make_corpus.py), así que una comparación de ORDEN aborta con type error ruidoso (E26-H08) en vez de recortar la lista en silencio.",
+      "steps": [
+        {
+          "kind": "call",
+          "tool": "knowledge_search",
+          "arguments": { "where": "priority >= 3" },
+          "expect": {
+            "describe": "UN solo documento con `priority` de otro tipo rompe la comparación de orden en TODO el espacio, y el motor lo dice en vez de callar. El mensaje nombra el campo culpable.",
+            "error_code": "INVALID_SCHEMA",
+            "contains": { "text": "priority" }
+          }
+        }
+      ]
+    },
+    {
+      "id": "L1-TYP-IGUALDAD-NO-TIPA",
+      "descripcion": "Origen: query-language.md L96 — «`=` and `!=` are **never** type errors». El contraste exacto de L1-TYP-ORDEN-MIXTO sobre el MISMO campo mixto.",
+      "steps": [
+        {
+          "kind": "call",
+          "tool": "knowledge_search",
+          "arguments": { "where": "priority = 3", "include": ["frontmatter.priority"], "limit": 5 },
+          "expect": {
+            "describe": "El mismo campo que aborta con `>=` responde sin error con `=`: la desigualdad de tipos es simplemente false, nunca error. Es la asimetría declarada del lenguaje.",
+            "is_error": false,
+            "type": { "structured.results": "array" },
+            "equals": { "structured.results.0.frontmatter.priority": 3 }
+          }
+        }
+      ]
+    },
+    {
+      "id": "L1-TYP-HAS-MISSING",
+      "descripcion": "Origen: L1_typ.json (has/missing de query-language.md). El corpus tiene `revisor: null` explícito cada 5 documentos: `has()` mira la PRESENCIA de la clave, no su valor.",
+      "steps": [
+        {
+          "kind": "call",
+          "tool": "knowledge_search",
+          "arguments": { "where": "has(revisor)", "include": ["frontmatter.revisor"], "limit": 5 },
+          "expect": {
+            "describe": "`has()` sobre una clave presente con valor null: casa igualmente. La proyección devuelve el null literal, no omite la clave.",
+            "is_error": false,
+            "min_length": { "structured.results": 1 },
+            "present": ["structured.results.0.frontmatter.revisor"]
+          }
+        }
+      ]
+    }
+  ]
+}

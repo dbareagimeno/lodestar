@@ -235,27 +235,21 @@ parte del motor headless ni del flujo de desarrollo de v2; su diseño se documen
   decisión significa además actualizar su frontmatter (`estado`, `cerrada_en`, `revisada_en`) y la
   fila correspondiente en `decisiones/README.md`.
 
-## Flujo de trabajo con agentes (SDD · TDD · BDD · jueces ciegos)
+## Flujo de trabajo con agentes
 
-El desarrollo se organiza con los agentes y skills de `.claude/` — mapa completo y workflows por
-tipo de trabajo en [`.claude/README.md`](.claude/README.md); guía explicativa (porqué del proceso,
-pirámide, recetas con diagramas) en [`docs/WORKFLOWS.md`](docs/WORKFLOWS.md).
+La referencia común es [`docs/CODEX_WORKFLOW.md`](docs/CODEX_WORKFLOW.md), resumida en
+[`docs/WORKFLOWS.md`](docs/WORKFLOWS.md). Codex usa `AGENTS.md`, `.agents/skills/` y
+`.codex/agents/`; `.claude/` se conserva como capa de compatibilidad alineada con el mismo proceso.
 
-**El motor es headless (`§19.1`, `E9-H04`): la UI de escritorio se retiró de `main` a la rama
-`experimental/ui-desktop`.** Con ella se retiraron el skill `/ux` y el agente `disenador-ux` (el
-circuito UX ya no existe en `main`); si la UI vuelve a evolucionar, se hace en esa rama.
+El nivel depende del riesgo: docs/mecánico usa cambio directo y check específico; un bug usa
+reproducción, rojo, fix, gates y revisión fresca; una feature acotada usa historia ratificada y
+rojo/verde separados; arquitectura usa dos ratificaciones antes de dividirse en historias.
 
-| Skill | Cuándo |
-|---|---|
-| `/planificar <spec\|§N>` | Features grandes: diseño ratificado + épica de historias ordenadas (2 puertas). |
-| `/historia <desc\|ID>` | Trabajo que cabe en una historia: spec en `requirements/` + ratificación. |
-| `/tdd <ID>` | Rojo→verde→refactor con separación de poderes (autor-tests ≠ implementador). |
-| `/juzgar [ID] [--panel]` | Juez **ciego** (agente fresco, solo spec+diff) antes de commitear/mergear. |
-| `/contrato [--check]` | Coherencia de la frontera MCP↔`core::types` contra `contracts/mcp.yml`. |
-| `/mutantes [--file ruta]` | cargo-mutants scoped: ¿la suite muerde donde tocaste? |
-| `/ciclo <desc\|ID>` | Pipeline completo (historia→tdd→contrato→juez→docs→commit). Úsalo para features. |
+La separación no depende solo de prompts: `phase-scope.py` limita la fase roja a tests/fixtures y
+`tdd-test-lock.py` bloquea por hash los ficheros aceptados. Los gates ejecutables son
+`scripts/agent-gates.sh contract|policy|full`; `full` incluye los tests de `lodestar-workspace` y
+`lodestar-app` con `test-failpoints`.
 
-Reglas de proceso: **nada se implementa sin historia ratificada**; el implementador **no puede
-tocar los tests** del autor; a los jueces **nunca** se les pasa contexto de la conversación (esa es
-la garantía de imparcialidad); `contracts/*.yml` describe la superficie de la frontera pero los
-tipos viven solo en `core::types` (invariante #4).
+Los jueces reciben solo spec, diff, autoridades y gates. Código, contrato, docs y estado afectados
+se completan antes del juicio. Ramas, commits, pushes y PRs se realizan únicamente a petición
+explícita; el resultado normal es un diff verde y revisado sobre una base `develop`.

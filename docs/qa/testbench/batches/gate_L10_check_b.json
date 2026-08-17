@@ -1,0 +1,151 @@
+{
+  "batch": "gate_L10_check_b",
+  "descripcion": "L10 del gate — las patologías BINARIAS y ESTRUCTURALES del catálogo (`DOC-BOM`, `DOC-NOT-UTF8`, `DOC-TOO-LARGE`, `SYMLINK-UNSUPPORTED`) y la frontera entre «daño estructural» y «daño semántico». Porte del lote temático L10 (`batches/L10_chk_b.json`) contra el corpus canónico, que integra el set `chk_b`. Ojo: los diagnósticos de DESCUBRIMIENTO solo salen en scope workspace, así que este lote los busca ahí (E20-H04).",
+  "root": "corpus",
+  "profile": "readonly",
+  "fixtures": null,
+  "cases": [
+    {
+      "id": "L10-CHK-17-BOM",
+      "descripcion": "Origen: L10_chk_b.json CHK-17 — un BOM UTF-8 es `warn`: se puede leer, pero no es lo que un `.md` debería llevar. Informe §5: «BOM preservado byte a byte tras apply», verificado conforme.",
+      "steps": [
+        {
+          "kind": "call",
+          "tool": "knowledge_check",
+          "arguments": { "scope": { "kind": "document", "ref": { "path": "fixtures/con-bom.md" } } },
+          "expect": {
+            "describe": "El BOM no impide parsear el frontmatter: solo hay UN diagnóstico, y es un aviso.",
+            "is_error": false,
+            "equals": {
+              "structured.valid": true,
+              "structured.summary.warnings": 1,
+              "structured.summary.errors": 0,
+              "structured.diagnostics.0.code": "DOC-BOM",
+              "structured.diagnostics.0.level": "warn"
+            },
+            "length": { "structured.diagnostics": 1 }
+          }
+        }
+      ]
+    },
+    {
+      "id": "L10-CHK-18-BOM-MAS-ROTO",
+      "descripcion": "Origen: L10_chk_b.json CHK-18 — BOM + YAML inválido: los diagnósticos se ACUMULAN, no se enmascaran. El BOM no impide diagnosticar el YAML de debajo.",
+      "steps": [
+        {
+          "kind": "call",
+          "tool": "knowledge_check",
+          "arguments": { "scope": { "kind": "document", "ref": { "path": "fixtures/bom-mas-roto.md" } } },
+          "expect": {
+            "describe": "Dos diagnósticos sobre el mismo fichero, uno de cada nivel: el aviso del BOM y el error del YAML. Es la prueba de que el pipeline no corta en el primer hallazgo.",
+            "is_error": false,
+            "equals": { "structured.valid": false, "structured.summary.errors": 1, "structured.summary.warnings": 1 },
+            "length": { "structured.diagnostics": 2 }
+          }
+        }
+      ]
+    },
+    {
+      "id": "L10-CHK-12-13-DANO-SEMANTICO",
+      "descripcion": "Origen: L10_chk_b.json CHK-12/CHK-13 — la frontera del catálogo: una fecha sin comillas y una `priority` de tipo distinto al del resto son YAML VÁLIDO. El daño es SEMÁNTICO y el checker no lo reporta; quien lo revela es `metadata_inspect` y el type error de la consulta.",
+      "steps": [
+        {
+          "kind": "call",
+          "tool": "knowledge_check",
+          "arguments": { "scope": { "kind": "document", "ref": { "path": "fixtures/priority-string.md" } } },
+          "expect": {
+            "describe": "CERO diagnósticos: romper la homogeneidad de tipos de un campo NO es un problema de conformidad. Es deliberado, y fijarlo evita que alguien «arregle» el checker convirtiéndolo en un validador de esquemas (que el motor no tiene: §20 retiró core::schema).",
+            "is_error": false,
+            "equals": { "structured.valid": true },
+            "length": { "structured.diagnostics": 0 }
+          }
+        },
+        {
+          "kind": "call",
+          "tool": "knowledge_check",
+          "arguments": { "scope": { "kind": "document", "ref": { "path": "fixtures/fecha-mala.md" } } },
+          "expect": {
+            "describe": "Igual con `updated: 2026-8-5` sin comillas: YAML válido, cero diagnósticos.",
+            "is_error": false,
+            "length": { "structured.diagnostics": 0 }
+          }
+        },
+        {
+          "kind": "call",
+          "tool": "metadata_inspect",
+          "arguments": { "mode": "field", "field": "priority" },
+          "expect": {
+            "describe": "Y aquí SÍ se ve: `inferredTypes` con dos tipos. La superficie que revela el daño semántico es la de metadata, no la de conformidad — y esa división de trabajo es lo que fija este caso.",
+            "is_error": false,
+            "present": ["structured.inferredTypes.number", "structured.inferredTypes.string"]
+          }
+        }
+      ]
+    },
+    {
+      "id": "L10-CHK-14-15-16-DESCUBRIMIENTO",
+      "descripcion": "Origen: L10_chk_b.json CHK-14/CHK-15/CHK-16 — los tres diagnósticos que NACEN EN EL DESCUBRIMIENTO (no del contenido parseado) y por eso solo aparecen en scope workspace: fichero no-UTF8, symlink y fichero de más de 10 MiB. Fuente: mcp.yml knowledge_check semántica (E20-H04); discovery.rs.",
+      "steps": [
+        {
+          "kind": "call",
+          "tool": "knowledge_check",
+          "arguments": { "scope": { "kind": "workspace" }, "minimumSeverity": "info", "limit": 1000 },
+          "expect": {
+            "describe": "Los tres códigos están presentes en el texto de la respuesta workspace-wide. Se aseveran por PRESENCIA DEL CÓDIGO y no por posición ni por conteo: cuántos diagnósticos hay en total depende del filesystem (FORMATO_EXPECT.md §6).",
+            "is_error": false,
+            "equals": { "structured.valid": false },
+            "contains": { "text": "DOC-NOT-UTF8" },
+            "min_length": { "structured.diagnostics": 10 }
+          }
+        },
+        {
+          "kind": "call",
+          "tool": "knowledge_check",
+          "arguments": { "scope": { "kind": "workspace" }, "minimumSeverity": "warn", "limit": 1000 },
+          "expect": {
+            "describe": "Los tres son AVISOS, así que sobreviven al umbral `warn`: un fichero ilegible o gigante no invalida el workspace, lo señala.",
+            "is_error": false,
+            "contains": { "text": "SYMLINK-UNSUPPORTED" }
+          }
+        },
+        {
+          "kind": "call",
+          "tool": "knowledge_check",
+          "arguments": { "scope": { "kind": "workspace" }, "minimumSeverity": "err", "limit": 1000 },
+          "expect": {
+            "describe": "…y con umbral `err` desaparecen los tres, que es la prueba de su severidad. El `summary`, en cambio, sigue contando TODO: se computa antes del umbral.",
+            "is_error": false,
+            "not_contains": { "text": "DOC-NOT-UTF8" },
+            "contains": { "text": "FM-UNCLOSED" }
+          }
+        }
+      ]
+    },
+    {
+      "id": "L10-CHK-TOO-LARGE-Y-SYMLINK",
+      "descripcion": "Origen: L10_chk_b.json CHK-15/CHK-16 con el grano fino: qué documento produce cada diagnóstico. Se asevera el par (código, target), que depende del fichero concreto y no del inventario.",
+      "steps": [
+        {
+          "kind": "call",
+          "tool": "knowledge_check",
+          "arguments": { "scope": { "kind": "workspace" }, "minimumSeverity": "warn", "limit": 1000 },
+          "expect": {
+            "describe": "El symlink del corpus se planta relativo a propósito (make_corpus.py) para no meter una ruta de máquina en el árbol; el diagnóstico es el mismo.",
+            "is_error": false,
+            "contains": { "text": "fixtures/enlace-simbolico.md" }
+          }
+        },
+        {
+          "kind": "call",
+          "tool": "knowledge_check",
+          "arguments": { "scope": { "kind": "workspace" }, "minimumSeverity": "warn", "limit": 1000 },
+          "expect": {
+            "describe": "Y el fichero de más de 10 MiB de `chk_b`, con su código propio.",
+            "is_error": false,
+            "contains": { "text": "DOC-TOO-LARGE" }
+          }
+        }
+      ]
+    }
+  ]
+}

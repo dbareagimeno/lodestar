@@ -238,6 +238,10 @@ impl Workspace {
             }
             journal.mark_applied(rel)?;
             failpoint!(FailPoint::EntreRenames);
+            #[cfg(feature = "test-failpoints")]
+            crate::failpoints::ejecutar_gancho(
+                crate::failpoints::PuntoDeGancho::DespuesDelPrimerRename,
+            );
         }
 
         // Todas las operaciones aplicadas: el journal pasa a `applied` (E13-H05).

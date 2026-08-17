@@ -760,3 +760,12 @@ amplio que el de H04 (toca la resolución de cuerpo, no solo el guard de existen
 de la campaña actual** (E28); candidato natural para una fase posterior de la campaña de bugfixes
 del testbench homelab (`docs/qa/campana-bugfixes-2026-08.md`) o para `decisiones/23-hallazgos-testbench-homelab.md`
 si se decide priorizarlo junto con el resto de hallazgos pendientes de esa ficha.
+
+> **Seguimiento cerrado antes de E33-H04 (2026-08-15).** El bugfix de planificación secuencial
+> generaliza finalmente el acumulado de H04 a existencia **y contenido**: `base` queda inmutable para
+> las precondiciones y cada raw op se normaliza contra un `working FileMap` que recibe de inmediato
+> sus terminales. Cubre las resurrecciones, move-chains, varias reescrituras sobre el mismo origen y
+> selecciones `delete/remove_links`; el no-op pasa a decidirse por terminal. Como los planes legacy
+> solo conservan los cuerpos terminales ya resueltos, el runtime los rechaza con `PLAN_STALE` y
+> exige replanificar. Este cierre es un bugfix independiente, no una reapertura de E28 ni una historia
+> funcional de E33.

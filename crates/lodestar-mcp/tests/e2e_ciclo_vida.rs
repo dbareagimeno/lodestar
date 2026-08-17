@@ -74,12 +74,27 @@ impl Sesion {
             salida,
             siguiente_id: 1,
         };
-        let hola = sesion.peticion("initialize", json!({"protocolVersion":"2025-06-18"}));
+        let hola = sesion.peticion(
+            "initialize",
+            json!({
+                "protocolVersion": "2025-11-25",
+                "capabilities": {},
+                "clientInfo": {"name": "lodestar-e2e-ciclo-vida", "version": "1"}
+            }),
+        );
         assert_eq!(
             hola["result"]["serverInfo"]["name"], "lodestar-mcp",
             "el handshake debe identificar al servidor: {hola}"
         );
+        sesion.notificacion("notifications/initialized", json!({}));
         sesion
+    }
+
+    /// Envía una notificación JSON-RPC sin esperar respuesta: `initialized` no tiene `id`.
+    fn notificacion(&mut self, metodo: &str, params: Value) {
+        let linea = json!({"jsonrpc":"2.0","method":metodo,"params":params}).to_string();
+        writeln!(self.entrada, "{linea}").expect("escribir notificación");
+        self.entrada.flush().expect("vaciar notificación");
     }
 
     /// Manda **una** línea JSON-RPC y lee **una** respuesta del mismo proceso.

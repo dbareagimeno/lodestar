@@ -1,0 +1,173 @@
+{
+  "batch": "gate_L5_grafo",
+  "descripcion": "L5 del gate — `graph_query` y sus ocho operaciones, más `impact_analyze`. Porte del lote temático L5 (`batches/L5_grf.json`) contra el corpus canónico, que tiene grafo real con aislados, dangling y ciclos a propósito.",
+  "root": "corpus",
+  "profile": "readonly",
+  "fixtures": null,
+  "cases": [
+    {
+      "id": "L5-GRF-01",
+      "descripcion": "Origen: L5_grf.json GRF-01 — forma de `backlinks`: nodos con {id, title, ghost} SIN type/status, y aristas origen→destino.",
+      "steps": [
+        {
+          "kind": "call",
+          "tool": "graph_query",
+          "arguments": { "operation": "backlinks", "ref": { "path": "guias/doc-00.md" } },
+          "expect": {
+            "describe": "El README del corpus enlaza a guias/doc-00.md, así que el backlink existe en cualquier filesystem. El GraphNode NO lleva type ni status: el grafo es de enlaces, no de metadata.",
+            "is_error": false,
+            "min_length": { "structured.nodes": 2 },
+            "equals": {
+              "structured.edges.0.source": "README.md",
+              "structured.edges.0.target": "guias/doc-00.md",
+              "structured.edges.0.dangling": false
+            },
+            "present": ["structured.nodes.0.id", "structured.nodes.0.title", "structured.nodes.0.ghost",
+                        "structured.summary.nodeCount", "structured.summary.edgeCount",
+                        "structured.summary.truncated"],
+            "absent": ["structured.nodes.0.type", "structured.nodes.0.status"]
+          }
+        }
+      ]
+    },
+    {
+      "id": "L5-GRF-02",
+      "descripcion": "Origen: L5_grf.json GRF-02 — `outgoing` ≡ `neighborhood(ref, 1, out)` POR CONTRATO (outgoing reusa neighborhood). Es un invariante entre pasos, no un conteo.",
+      "steps": [
+        {
+          "kind": "call",
+          "tool": "graph_query",
+          "arguments": { "operation": "outgoing", "ref": { "path": "guias/doc-00.md" } },
+          "expect": { "describe": "Los salientes a un salto.", "is_error": false }
+        },
+        {
+          "kind": "call",
+          "tool": "graph_query",
+          "arguments": { "operation": "neighborhood", "ref": { "path": "guias/doc-00.md" }, "depth": 1, "direction": "out" },
+          "expect": { "describe": "El vecindario equivalente.", "is_error": false }
+        }
+      ],
+      "expect": [
+        {
+          "invariant": "same",
+          "steps": [0, 1],
+          "path": "structured.nodes",
+          "describe": "Equivalencia declarada en mcp.yml: los MISMOS nodos, en el mismo orden. Si esto se rompiera, `outgoing` habría dejado de ser un alias de neighborhood."
+        },
+        {
+          "invariant": "same",
+          "steps": [0, 1],
+          "path": "structured.edges",
+          "describe": "…y las mismas aristas."
+        }
+      ]
+    },
+    {
+      "id": "L5-GRF-04-ISOLATED",
+      "descripcion": "Origen: L5_grf.json GRF-04 — `isolated` = documentos sin enlaces internos ni de entrada ni de salida. El corpus deja N_AISLADOS documentos finales sin enlazar a propósito (make_corpus.py).",
+      "steps": [
+        {
+          "kind": "call",
+          "tool": "graph_query",
+          "arguments": { "operation": "isolated", "limit": 5 },
+          "expect": {
+            "describe": "Cota inferior y forma, nunca conteo: cuántos aislados hay depende del filesystem (los pares caja/NFC-NFD colisionan en APFS). Ningún aislado tiene aristas, por definición.",
+            "is_error": false,
+            "min_length": { "structured.nodes": 1 },
+            "length": { "structured.edges": 0 },
+            "equals": { "structured.summary.edgeCount": 0 }
+          }
+        }
+      ]
+    },
+    {
+      "id": "L5-GRF-05-DANGLING",
+      "descripcion": "Origen: L5_grf.json GRF-05 — `dangling` devuelve nodos FANTASMA (`ghost: true`): destinos enlazados que no existen. El corpus siembra dangling cada 11 y cada 13 documentos.",
+      "steps": [
+        {
+          "kind": "call",
+          "tool": "graph_query",
+          "arguments": { "operation": "dangling", "limit": 5 },
+          "expect": {
+            "describe": "El marcador `ghost` es lo que distingue un destino inexistente de un documento real: se asevera esa bandera, no QUÉ documentos son (el conjunto depende del filesystem por las colisiones Unicode).",
+            "is_error": false,
+            "min_length": { "structured.nodes": 1 },
+            "equals": { "structured.nodes.0.ghost": true }
+          }
+        }
+      ]
+    },
+    {
+      "id": "L5-GRF-06-PATH-BETWEEN",
+      "descripcion": "Origen: L5_grf.json GRF-06/GRF-07 — sin camino dirigido la respuesta es VACÍA, nunca un error. `notas/navegacion.md` no enlaza a nadie, así que nadie llega a él desde una guía.",
+      "steps": [
+        {
+          "kind": "call",
+          "tool": "graph_query",
+          "arguments": { "operation": "path_between", "ref": { "path": "guias/doc-00.md" }, "to": { "path": "notas/navegacion.md" } },
+          "expect": {
+            "describe": "«Sin camino» es una respuesta legítima, no una condición de error. Es la distinción que evita que un agente trate el vacío como fallo.",
+            "is_error": false,
+            "length": { "structured.nodes": 0, "structured.edges": 0 },
+            "equals": { "structured.summary.nodeCount": 0, "structured.summary.truncated": false }
+          }
+        },
+        {
+          "kind": "call",
+          "tool": "graph_query",
+          "arguments": { "operation": "path_between", "ref": { "path": "README.md" }, "to": { "path": "guias/doc-00.md" } },
+          "expect": {
+            "describe": "Contraste: cuando SÍ hay camino, los nodos vienen en orden y las aristas los encadenan. El README enlaza a doc-00 directamente.",
+            "is_error": false,
+            "min_length": { "structured.nodes": 2 },
+            "equals": { "structured.nodes.0.id": "README.md" }
+          }
+        }
+      ]
+    },
+    {
+      "id": "L5-GRF-OPERACION-INVALIDA",
+      "descripcion": "Origen: hallazgo E16-H02 (`orphans` se retiró SIN alias) — el mismo caso que META-01 asevera, aquí en su lote temático. El mensaje enumera las OCHO operaciones válidas.",
+      "steps": [
+        {
+          "kind": "call",
+          "tool": "graph_query",
+          "arguments": { "operation": "orphans" },
+          "expect": {
+            "describe": "Una operación retirada no se traduce en silencio: INVALID_SCHEMA con la enumeración completa, que es lo que permite a un agente autocorregirse.",
+            "error_code": "INVALID_SCHEMA",
+            "contains": { "text": "isolated" }
+          }
+        }
+      ]
+    },
+    {
+      "id": "L5-IMP-AFFECTED",
+      "descripcion": "Origen: informe §4 (IMP-05) — `directlyAffected` cuenta ENLACES y `transitivelyAffected` cuenta DOCUMENTOS: no son comparables. Es uno de los doce esperados que la verificación adversarial refutó, y se fija para que nadie repita la lectura errónea.",
+      "steps": [
+        {
+          "kind": "call",
+          "tool": "impact_analyze",
+          "arguments": { "ref": { "path": "guias/doc-00.md" }, "proposedOperation": { "kind": "delete" } },
+          "expect": {
+            "describe": "Las dos magnitudes viven bajo `summary` y son NÚMEROS de cosas distintas: `directlyAffected` son backlinks (enlaces) y `transitivelyAffected` es el tamaño del blast-radius (documentos). Aquí coinciden en 1 porque el único entrante es el README, y ese 1 sí es estable: depende de un enlace concreto del corpus, no del inventario.",
+            "is_error": false,
+            "type": { "structured.summary.directlyAffected": "number", "structured.summary.transitivelyAffected": "number" },
+            "equals": { "structured.affectedDocuments.0": "README.md", "structured.summary.directlyAffected": 1 },
+            "present": ["structured.summary.risk", "structured.blockingReferences", "structured.recommendations"]
+          }
+        },
+        {
+          "kind": "call",
+          "tool": "impact_analyze",
+          "arguments": { "ref": { "path": "guias/doc-00.md" } },
+          "expect": {
+            "describe": "`proposedOperation.kind` es OBLIGATORIO: el impacto se juzga contra una operación concreta, no en abstracto. Omitirlo es error ruidoso, no un análisis por defecto.",
+            "error_code": "INVALID_SCHEMA",
+            "contains": { "text": "proposedOperation" }
+          }
+        }
+      ]
+    }
+  ]
+}

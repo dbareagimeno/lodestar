@@ -1,0 +1,171 @@
+{
+  "batch": "gate_G_descubrimiento",
+  "descripcion": "Lote G del gate — DESCUBRIMIENTO y configuración: `.lodestarignore`, `writableRoots`/`referenceRoots`, config rota y ciclo de vida de la config. Porte de los lotes G (`batches/G0_real.json`, `G2_gaps.json`, `G3_dirty.json`, `G4*_cfg_*.json`) contra el corpus canónico. Cada caso usa `fresh_root` porque inyecta su propia configuración, y la config SOLO se lee al abrir la sesión (hallazgo A-09, declarado por E30-H03).",
+  "root": "corpus",
+  "profile": "standard",
+  "fixtures": null,
+  "cases": [
+    {
+      "id": "G-IGNORE-PODA",
+      "fresh_root": true,
+      "descripcion": "Origen: `batches/verify_G2-01.json` (repro del caso G2-01) e informe §4 — uno de los doce esperados REFUTADOS: un documento excluido por `.lodestarignore` cae en el lado PODADO (`missing`), no en un «excluido-pero-visitado». El propio §20.6 anticipa la confusión.",
+      "steps": [
+        {
+          "kind": "shell",
+          "cmd": "printf 'borrador.md\\nignorados/\\n' > .lodestarignore && printf -- '---\\ntitle: Borrador excluido\\ntype: prueba\\n---\\n\\n# Borrador\\n' > borrador.md && mkdir -p ignorados && printf -- '---\\ntitle: Oculto podado\\ntype: prueba\\n---\\n\\n# Oculto\\n' > ignorados/oculto.md && printf -- '---\\ntitle: Enlazador del banco\\ntype: prueba\\n---\\n\\n[b](borrador.md) y [o](ignorados/oculto.md)\\n' > enlazador-ignore.md && echo listo",
+          "expect": { "describe": "Se planta el set `ignore` a mano para que el caso sea legible sin salir del lote.", "rc": 0, "contains": { "stdout": "listo" } }
+        },
+        {
+          "kind": "call",
+          "tool": "knowledge_get",
+          "arguments": { "ref": { "path": "borrador.md" } },
+          "expect": {
+            "describe": "El documento excluido NO EXISTE para el motor: DOCUMENT_NOT_FOUND, igual que un path inventado. No hay una tercera categoría «existe pero no cuenta».",
+            "error_code": "DOCUMENT_NOT_FOUND"
+          }
+        },
+        {
+          "kind": "call",
+          "tool": "knowledge_get",
+          "arguments": { "ref": { "path": "enlazador-ignore.md" }, "include": ["outgoingLinks"] },
+          "expect": {
+            "describe": "Y quien lo enlaza ve `missing`, no una categoría de excluido: los enlaces a documentos ignorados son dangling a todos los efectos. Ese es el precio declarado de podar.",
+            "is_error": false,
+            "equals": {
+              "structured.document.outgoingLinks.0.target.kind": "missing",
+              "structured.document.outgoingLinks.1.target.kind": "missing"
+            },
+            "length": { "structured.document.outgoingLinks": 2 }
+          }
+        }
+      ]
+    },
+    {
+      "id": "G-REFROOTS",
+      "fresh_root": true,
+      "descripcion": "Origen: lote G2-08 (`fixtures: refroots`) e informe §5 («`referenceRoots` (visibles, no escribibles, fuera de `workspace_revision`)», verificado conforme). Los dos roots se anuncian por separado en `workspace_status`.",
+      "steps": [
+        {
+          "kind": "shell",
+          "cmd": "mkdir -p .lodestar && printf 'workspace:\\n  writableRoots: [pendientes]\\n  referenceRoots: [equipos]\\n' > .lodestar/config.yaml && echo listo",
+          "expect": { "describe": "Config con un root escribible y otro de solo referencia.", "rc": 0 }
+        },
+        {
+          "kind": "call",
+          "tool": "workspace_status",
+          "arguments": {},
+          "expect": {
+            "describe": "OJO: la config se escribió DESPUÉS de abrir la sesión de este caso, así que aún no aplica — es justo el hallazgo A-09. La aserción de este paso es el estado SIN config, y el contraste está en los pasos por proceso nuevo de abajo.",
+            "is_error": false,
+            "length": { "structured.knowledgeRoots": 0, "structured.referenceRoots": 0 }
+          }
+        },
+        {
+          "kind": "shell",
+          "cmd": "printf '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"clientInfo\":{\"name\":\"banco\",\"version\":\"0\"}}}\\n{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\\n{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"workspace_status\",\"arguments\":{}}}\\n' | @bin.mcp --root @root --profile standard | tail -1",
+          "expect": {
+            "describe": "A-09, la otra mitad: un PROCESO NUEVO sí ve la config. Los dos roots se anuncian con nombres distintos porque son cosas distintas — uno se escribe, el otro solo se lee.",
+            "rc": 0,
+            "contains": { "stdout": "\"knowledgeRoots\":[\"pendientes\"]" },
+            "not_contains": { "stdout": "\"referenceRoots\":[]" }
+          }
+        }
+      ]
+    },
+    {
+      "id": "G-REFROOT-INMUTABLE",
+      "fresh_root": true,
+      "descripcion": "Origen: lote G2-08 — un `referenceRoot` es VISIBLE pero NUNCA escribible, y el motor lo dice con un mensaje PROPIO, distinto del de «fuera de todo writableRoot» (ver gate_L7 · L7-APL-PERMISSION-DENIED). Dos causas, dos mensajes: eso es lo que hace accionable el error.",
+      "steps": [
+        {
+          "kind": "shell",
+          "cmd": "mkdir -p .lodestar && printf 'workspace:\\n  writableRoots: [pendientes]\\n  referenceRoots: [equipos]\\n' > .lodestar/config.yaml && echo listo",
+          "expect": { "describe": "Config antes de hablar por un proceso nuevo.", "rc": 0 }
+        },
+        {
+          "kind": "shell",
+          "cmd": "CS=$(printf '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"clientInfo\":{\"name\":\"banco\",\"version\":\"0\"}}}\\n{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\\n{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"change_plan\",\"arguments\":{\"operations\":[{\"op\":\"patch_frontmatter\",\"path\":\"equipos/doc-01.md\",\"patch\":{\"x\":1}}],\"policy\":{\"requireValidResult\":false,\"allowWarnings\":true}}}}\\n' | @bin.mcp --root @root --profile standard | tail -1 | python3 -c 'import json,sys; d=json.load(sys.stdin); print(json.loads(d[\"result\"][\"content\"][0][\"text\"])[\"changeSetId\"])') && printf '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"clientInfo\":{\"name\":\"banco\",\"version\":\"0\"}}}\\n{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\\n{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"change_apply\",\"arguments\":{\"changeSetId\":\"'$CS'\"}}}\\n' | @bin.mcp --root @root --profile standard | tail -1",
+          "expect": {
+            "describe": "El apply deniega con la razón EXACTA: «cae bajo un referenceRoot (inmutable)». Compárese con el otro PERMISSION_DENIED, que dice «no cae bajo ningún writableRoot configurado».",
+            "rc": 0,
+            "contains": { "stdout": "referenceRoot" }
+          }
+        }
+      ]
+    },
+    {
+      "id": "G-CONFIG-ROTA",
+      "fresh_root": true,
+      "no_server": true,
+      "descripcion": "Origen: lote G4d (`fixtures: cfg_broken`) e informe §3 (A-08: «contrasta con la config rota, que sí es exit 3 ruidoso»). Una config ilegible IMPIDE ARRANCAR; no degrada en silencio a los defaults. Declarado por E30-H03 en mcp.yml y mcp-clients.md.",
+      "steps": [
+        {
+          "kind": "shell",
+          "cmd": "mkdir -p .lodestar && printf 'gate:\\n  blockWarnings: \"yes please\"\\n' > .lodestar/config.yaml && echo listo",
+          "expect": { "describe": "Un valor con el tipo equivocado en la config.", "rc": 0 }
+        },
+        {
+          "kind": "shell",
+          "cmd": "printf '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"clientInfo\":{\"name\":\"banco\",\"version\":\"0\"}}}\\n' | @bin.mcp --root @root --profile standard > /dev/null 2>&1; echo EXIT=$?",
+          "expect": {
+            "describe": "El servidor NO arranca: exit 3 (raíz irresoluble o workspace no abrible), el mismo código con el que la CLI señala un error de runtime. Fallar ruidosamente es la política declarada: una config que se ignora sería una política de validación silenciosamente distinta de la pedida.",
+            "rc": 0,
+            "contains": { "stdout": "EXIT=3" }
+          }
+        }
+      ]
+    },
+    {
+      "id": "G-CONFIG-VALIDATION-FAMILIAS",
+      "fresh_root": true,
+      "descripcion": "Origen: `batches/verify_G1-04.json` y `verify_G1-04_familias.json` (repro del hallazgo A-08 de `decisiones §23`: la sintaxis de `validation` usa FAMILIAS —`danglingDocumentLinks`, `missingWorkspaceFiles`…—, no códigos de diagnóstico, y hasta E29-H01 una clave desconocida era silenciosamente inerte). Hoy la config es ESTRICTA (`§16(e)`), así que el esperado es el comportamiento CORREGIDO: una clave desconocida no arranca.",
+      "steps": [
+        {
+          "kind": "shell",
+          "cmd": "mkdir -p .lodestar && printf 'validation:\\n  LINK-TARGET-MISSING: ignore\\n' > .lodestar/config.yaml && printf '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"clientInfo\":{\"name\":\"banco\",\"version\":\"0\"}}}\\n' | @bin.mcp --root @root --profile standard > /dev/null 2>&1; echo EXIT=$?",
+          "expect": {
+            "describe": "A-08, mitad «clave desconocida»: usar un CÓDIGO de diagnóstico donde va una FAMILIA ya no es inerte — la config estricta de E29-H01 lo rechaza al abrir. Antes se aceptaba y no hacía nada, y el usuario creía haber silenciado un diagnóstico que seguía saltando.",
+            "rc": 0,
+            "contains": { "stdout": "EXIT=3" }
+          }
+        },
+        {
+          "kind": "shell",
+          "cmd": "printf 'validation:\\n  danglingDocumentLinks: ignore\\n  missingWorkspaceFiles: ignore\\n' > .lodestar/config.yaml && printf '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"clientInfo\":{\"name\":\"banco\",\"version\":\"0\"}}}\\n{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\\n{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"knowledge_check\",\"arguments\":{\"scope\":{\"kind\":\"document\",\"ref\":{\"path\":\"fixtures/enlace-roto.md\"}}}}}\\n' | @bin.mcp --root @root --profile standard | tail -1",
+          "expect": {
+            "describe": "A-08, mitad «familias»: con la sintaxis CORRECTA la config sí muerde — el enlace roto a `.md` deja de diagnosticarse. Es la prueba de que las familias existen y funcionan, que era lo que ninguna fuente de usuario listaba.",
+            "rc": 0,
+            "not_contains": { "stdout": "LINK-TARGET-MISSING" }
+          }
+        }
+      ]
+    },
+    {
+      "id": "G-INICIALIZACION-PROTOCOLO",
+      "fresh_root": true,
+      "no_server": true,
+      "descripcion": "Origen: `batches/G0_real.json` G1-24 e informe §2 (D-01: bajo readonly, `instructions` nombraba las 10 tools mientras `tools/list` servía 7; un agente que siguiera las instructions acababa en -32602), SALDADO por E29-H09. El esperado es la superficie HONESTA de hoy.",
+      "steps": [
+        {
+          "kind": "shell",
+          "cmd": "printf '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"clientInfo\":{\"name\":\"banco\",\"version\":\"0\"}}}\\n' | @bin.mcp --root @root --profile readonly | head -1",
+          "expect": {
+            "describe": "D-01: en readonly, el texto de `instructions` NO nombra las tools de cambio. Si volviera a nombrarlas, mandaría al agente a un -32602 — y este caso lo cazaría.",
+            "rc": 0,
+            "contains": { "stdout": "instructions" },
+            "not_contains": { "stdout": "change_apply" }
+          }
+        },
+        {
+          "kind": "shell",
+          "cmd": "printf '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"clientInfo\":{\"name\":\"banco\",\"version\":\"0\"}}}\\n' | @bin.mcp --root @root --profile standard | head -1",
+          "expect": {
+            "describe": "Contraste: en standard SÍ las nombra, porque sí las sirve. La honestidad de superficie es «di lo que sirves», no «no digas nada».",
+            "rc": 0,
+            "contains": { "stdout": "change_apply" }
+          }
+        }
+      ]
+    }
+  ]
+}

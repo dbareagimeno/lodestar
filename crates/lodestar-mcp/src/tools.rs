@@ -386,7 +386,7 @@ pub fn call(app: &App, profile: Profile, name: &str, params: &Value) -> ToolResu
                     return Err(format!(
                         "{}: «minimumSeverity» debe ser «err», «warn» o «info»; recibido «{other}»",
                         ErrorCode::InvalidSchema.as_str()
-                    ))
+                    ));
                 }
                 None => None,
             };
@@ -682,7 +682,10 @@ mod tests {
     fn app_with_fixture() -> (tempfile::TempDir, App) {
         let dir = tempfile::tempdir().unwrap();
         for (p, c) in [
-            ("index.md", "---\ntype: Index\ntitle: Bundle\ndescription: Índice del bundle\nokf_version: \"0.1\"\n---\n\n# Bundle\n\n* [Alfa](alfa.md)\n"),
+            (
+                "index.md",
+                "---\ntype: Index\ntitle: Bundle\ndescription: Índice del bundle\nokf_version: \"0.1\"\n---\n\n# Bundle\n\n* [Alfa](alfa.md)\n",
+            ),
             (
                 "alfa.md",
                 "---\ntype: Concept\ntitle: Alfa\ndescription: d\n---\n\n# H\n\n[huerfano falta](/no-existe.md)\n",

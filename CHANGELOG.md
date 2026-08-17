@@ -7,6 +7,37 @@ y el proyecto sigue [Versionado Semántico](https://semver.org/lang/es/).
 
 ## [No publicado]
 
+## [0.6.1] - 2026-08-17
+
+### Cambiado
+
+- **MCP pasa a dos eras explícitas con `rmcp 3.1.2` sobre stdio (`E34`)**. Modern
+  (`2026-07-28`) es stateless y usa metadata por request, `server/discover`, `resultType` y hints de
+  cache privada; Legacy negocia siempre su única baseline (`2025-11-25`) mediante
+  `initialize`/`notifications/initialized` y conserva `ping`. No se aceptan automáticamente
+  revisiones futuras ni se mantienen ramas para fechas históricas. Las dos eras reutilizan el mismo
+  catálogo y dispatcher de diez tools, con los perfiles `standard` y `readonly` intactos.
+
+  **Migración**: clientes Legacy deben enviar un `initialize` completo y aceptar la baseline
+  negociada aunque solicitaran otra revisión; clientes Modern no deben enviar `initialize` ni
+  `ping`, y repiten versión, capacidades e identidad en `_meta`. La issue #38 queda reproducida y
+  corregida; la estrategia de ampliar una allow-list histórica de la PR #39 queda superada.
+
+- **Cancelación MCP segura (`E34-H06`)**. Una `notifications/cancelled` con `requestId` evita que
+  una llamada aún en cola ejecute la tool. Si la llamada ya adquirió el turno serial, termina la
+  transacción de `App` de forma indivisible: no hay rollback implícito ni publicación parcial, y un
+  receipt ya creado sigue siendo válido. stdout continúa reservado a MCP, los logs van a stderr y
+  EOF cierra limpiamente el servidor.
+
+### Corregido
+
+- El watcher de macOS usa el backend kqueue de `notify`, evitando que FSEvents deje sin observar
+  publicaciones atómicas en entornos donde el proceso no recibe esos eventos.
+
+> **Recuento de tests de esta versión: 788** — medido con el criterio de E24-H18,
+> `cargo test --workspace -- --list | grep -c ": test$"`; no incluye los tests gateados tras
+> `--features test-failpoints`.
+
 ## [0.6.0] - 2026-08-09
 
 > **Al actualizar desde 0.5.0, un cambio puede romperte**: el wire pasó a ser **estricto** con los
@@ -687,8 +718,9 @@ y pipeline de release multiplataforma.
 - **Heading por defecto de los conceptos**: ahora `# {Tipo} - {Nombre}` (antes
   `# Resumen`).
 
-[No publicado]: https://github.com/dbareagimeno/lodestar/compare/v0.6.0...HEAD
-[0.6.0]: https://github.com/dbareagimeno/lodestar/compare/0.5.0...v0.6.0
+[No publicado]: https://github.com/dbareagimeno/lodestar/compare/v0.6.1...HEAD
+[0.6.1]: https://github.com/dbareagimeno/lodestar/compare/v0.6.0...v0.6.1
+[0.6.0]: https://github.com/dbareagimeno/lodestar/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/dbareagimeno/lodestar/compare/v0.4.0...0.5.0
 [0.4.0]: https://github.com/dbareagimeno/lodestar/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/dbareagimeno/lodestar/compare/v0.3.0...v0.3.1

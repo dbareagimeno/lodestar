@@ -56,6 +56,42 @@ use std::process::{Command, Stdio};
 
 use serde_json::{json, Value};
 
+const INJECTED_INITIALIZE_ID: &str = "__lodestar_legacy_harness_initialize__";
+
+fn legacy_transcript(lines: &[String]) -> (Vec<String>, bool) {
+    if lines.iter().any(|line| {
+        serde_json::from_str::<Value>(line)
+            .ok()
+            .and_then(|request| {
+                request["method"]
+                    .as_str()
+                    .map(|method| method == "initialize")
+            })
+            .unwrap_or(false)
+    }) {
+        return (lines.to_vec(), false);
+    }
+    let initialize = json!({
+        "jsonrpc": "2.0", "id": INJECTED_INITIALIZE_ID, "method": "initialize",
+        "params": {"protocolVersion": "2025-11-25", "capabilities": {},
+                   "clientInfo": {"name": "lodestar-tests", "version": "1"}}
+    })
+    .to_string();
+    (
+        std::iter::once(initialize)
+            .chain(std::iter::once(
+                json!({"jsonrpc":"2.0","method":"notifications/initialized"}).to_string(),
+            ))
+            .chain(lines.iter().cloned())
+            .collect(),
+        true,
+    )
+}
+
+fn is_injected_initialize_response(response: &Value) -> bool {
+    response["id"] == INJECTED_INITIALIZE_ID
+}
+
 // ---------------------------------------------------------------------------
 // Arnés e2e (local a este binario de test; los helpers de `mcp.rs` viven en otro binario).
 // ---------------------------------------------------------------------------
@@ -70,6 +106,7 @@ fn write(dir: &std::path::Path, rel: &str, content: &str) {
 /// Arranca el servidor MCP (perfil `standard`) sobre `dir`, envía `lines` y devuelve las primeras
 /// `expect` respuestas JSON-RPC. stdout debe ser JSON-RPC puro.
 fn roundtrip(dir: &std::path::Path, lines: &[String], expect: usize) -> Vec<Value> {
+    let (transcript, injected_initialize) = legacy_transcript(lines);
     let mut child = Command::new(env!("CARGO_BIN_EXE_lodestar-mcp"))
         .arg("--root")
         .arg(dir)
@@ -80,18 +117,25 @@ fn roundtrip(dir: &std::path::Path, lines: &[String], expect: usize) -> Vec<Valu
         .unwrap();
     let mut stdin = child.stdin.take().unwrap();
     let mut stdout = BufReader::new(child.stdout.take().unwrap());
-    for l in lines {
+    for l in &transcript {
         writeln!(stdin, "{l}").unwrap();
     }
     stdin.flush().unwrap();
-    drop(stdin);
     let mut out = Vec::new();
     for line in (&mut stdout).lines().map_while(Result::ok) {
-        out.push(serde_json::from_str(&line).expect("stdout = JSON-RPC puro"));
+        let response: Value = serde_json::from_str(&line).expect("stdout = JSON-RPC puro");
+        if injected_initialize && is_injected_initialize_response(&response) {
+            continue;
+        }
+        out.push(response);
         if out.len() == expect {
             break;
         }
     }
+    // Mantener stdin abierto hasta recoger las respuestas evita que EOF cancele una operación
+    // grande antes de que termine en Windows, donde el apply puede tardar más que el envío del
+    // lote. El proceso se cierra después de haber observado exactamente el viaje solicitado.
+    drop(stdin);
     child.wait().ok();
     out
 }

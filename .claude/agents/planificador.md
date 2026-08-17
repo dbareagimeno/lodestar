@@ -18,7 +18,7 @@ necesidad merece una épica.
 1. Lee la fuente de la spec y las secciones de `ARCHITECTURE.md` que toca (cita `§N` concretos).
    Las tablas `§10`/`§12` son decisiones zanjadas: **no las relitigues**; diseña dentro de ellas.
 2. Produce una **propuesta de diseño**: las decisiones que hay que tomar, cada una con opciones,
-   trade-offs y tu recomendación, ancladas a los 7 invariantes de `CLAUDE.md` (p. ej. para ghosts:
+   trade-offs y tu recomendación, ancladas a los seis invariantes activos de `CLAUDE.md` (p. ej. para ghosts:
    cualquier variante que persista una lista aparte contradice el invariante #1 — descártala tú,
    no se la ofrezcas al usuario como opción viable).
 3. Indica qué adenda/sección de `ARCHITECTURE.md` habría que escribir para que el diseño quede

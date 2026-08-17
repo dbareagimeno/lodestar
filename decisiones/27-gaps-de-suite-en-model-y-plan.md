@@ -1,16 +1,27 @@
 ---
 id: 27
 titulo: "Seis gaps de suite en model.rs y plan.rs, medidos por mutantes"
-estado: "abierta"
+estado: "cerrada"
 prioridad: 3
 etiquetas: ["tests", "mutantes", "core", "higiene"]
 origen: "mutantes"
 abierta_en: "2026-08-09"
-revisada_en: "2026-08-09"
+revisada_en: "2026-08-10"
+cerrada_en: "2026-08-10"
 relacionadas: [9, 16, 26]
 ---
 
 # §27 — Seis gaps de suite en `model.rs` y `plan.rs`, medidos por mutantes
+
+> **CERRADA (2026-08-10) por `E32-H01`**
+> ([épica](../requirements/epica-32-gaps-suite-mutantes.md)): el usuario eligió la **salida (1)** —
+> las seis tandas en una historia propia— en vez de la (2) recomendada, y las seis se ejecutaron
+> con el criterio de aceptación de abajo cumplido: **cada test se vio en ROJO con su(s)
+> mutación(es) aplicada(s) al árbol y en verde sin ellas** (16 mutaciones vistas en rojo a mano,
+> más una demostrada equivalente), y la
+> re-pasada de `/mutantes` con el mismo alcance dejó de listar las seis funciones en `missed.txt`.
+> Los detalles de ejecución que se desviaron de esta ficha, con su porqué, en el
+> [cierre](#cierre-2026-08-10-lo-que-la-ejecución-corrigió-de-esta-ficha) al final.
 
 > **Origen**: la pasada de `/mutantes` que cerró la épica `E31` (2026-08-08), acotada a los dos
 > ficheros que esa épica tocó: `crates/lodestar-core/src/model.rs` y
@@ -170,3 +181,43 @@ sin relación entre sí viajen en un mismo PR.
 - Si al escribir un test resulta que el comportamiento mutado era **correcto** —que el supervivor era
   equivalente y no gap—, se **retira** de esta ficha con la razón escrita, en vez de forzar un test
   que consagre un detalle accidental.
+
+## Cierre (2026-08-10): lo que la ejecución corrigió de esta ficha
+
+Las seis tandas se ejecutaron y **ninguna se retiró**: los seis gaps eran reales. Pero la ejecución
+corrigió tres detalles de esta ficha, y los tres refuerzan su propia lección («la evidencia se
+ejecuta, no se lee»):
+
+1. **El fixture propuesto en (b) para el `480` no funcionaba tal cual**: una clave `01:` no fuerza
+   el fallback porque `serde_yaml` la parsea como **string** `"01"` (no como el entero `1`), así que
+   el escaneo por líneas casa y el patch entra por el camino quirúrgico. El fixture real es `1.50:`
+   (float `1.5`), cuyo texto sí diverge de su valor parseado. Verificado en ambas direcciones: el
+   test en verde sin mutación y en rojo con el `&&`→`||` aplicado.
+2. **El test propuesto en (e) mataba 14 de los 17, no los 17**: la primera re-pasada dejó vivos 3
+   supervivientes de `sort_paths_cmp` que el vector propuesto no podía distinguir — el `&&`→`||`
+   que abre la tira numérica **en falso** (exige un par dígito-contra-letra en el punto de
+   divergencia, y todos los paths del vector divergían dígito-contra-dígito o letra-contra-letra) y
+   los dos `<`→`<=` de los bucles internos (exigen un path que **termine en dígito**, y todos
+   acababan en `.md`). El vector final añade `doc-7.md`/`doc-abc.md` y `v2` a secas; la segunda
+   re-pasada no deja ninguno.
+3. **Una mutación probada a mano resultó equivalente demostrable — pero solo la doble.** Al
+   verificar la tanda (e) se aplicó el `-`→`+` sobre **los dos** restandos del desempate final de
+   `sort_paths_cmp` a la vez, y esa doble sustitución no es observable: llegar ahí exige que todas
+   las tiras numéricas empataran también en longitud, así que `i == j` siempre y `len − i` ordena
+   igual que `len + i`. Ojo con la letra pequeña, que fijó el juez ciego: los dos mutantes que
+   cargo-mutants genera de verdad en esa línea mutan **un** `-` cada uno, sí son observables y el
+   test nuevo **los caza** (constan en `caught.txt`). No hay ningún superviviente inmatable ahí; la
+   anécdota solo ilustra la cláusula de equivalencia con una mutación que el runner no genera.
+
+**Resultado medido** (mismo alcance, `-p lodestar-core --file …/model.rs --file …/plan.rs`,
+333 mutantes): los supervivientes bajan de **97 a 62** (242 muertos, 25 inviables, los mismos 4
+timeouts no concluyentes), y **ninguno de los seis gaps de esta ficha sigue vivo**. De los 62, el
+único que toca una función con nombre aquí es `plan.rs:172` (`frontmatter_changes`, dentro de
+`semantic_diff` pero **fuera** de los seis gaps): es el falso positivo de alcance que esta misma
+ficha documenta arriba, y se **re-verificó ejecutando** — con la mutación aplicada, la suite de
+`lodestar-app` se pone en rojo; ídem los dos de `op_variant_name` (`plan.rs:1309`). El resto es la
+cola ya clasificada en «lo que NO merece test» (`relative_dir_href` y compañía, `accion`, los
+umbrales de `assess_risk`, `locale_cmp`, brazos defensivos, más `scan_top_level`/`split_key_line`,
+que quedan con la misma consideración). La séptima tanda potencial (`relative_dir_href`, 17
+supervivientes) sigue **abierta a propósito**: esta ficha la deja señalada como el punto de partida
+si algún día se quiere otra tanda, y su sitio es la épica de evidencia (`§9`).

@@ -1,0 +1,240 @@
+{
+  "batch": "gate_L12_robustez",
+  "descripcion": "L12 del gate — robustez de la superficie: paginación con CURSORES FIRMADOS, cotas de `limit`, validación de argumentos y errores de protocolo JSON-RPC. Porte del lote temático L12 (`batches/L12_rob.json`) contra el corpus canónico, más las regresiones de los hallazgos A-02/A-03 de `decisiones §23` (saldados por E30-H01).",
+  "root": "corpus",
+  "profile": "readonly",
+  "fixtures": null,
+  "cases": [
+    {
+      "id": "L12-ROB-07-08-PAGINACION",
+      "descripcion": "Origen: L12_rob.json ROB-07/ROB-08 e informe §5 («cursor autosuficiente entre procesos», verificado conforme). Orden determinista, páginas sin solape ni hueco.",
+      "steps": [
+        {
+          "kind": "call",
+          "tool": "knowledge_search",
+          "arguments": { "where": "has(tags)", "limit": 5 },
+          "expect": {
+            "describe": "Página 1: exactamente el `limit` pedido y un `nextCursor` no nulo (el corpus tiene muchos más de 5 documentos con tags en cualquier filesystem).",
+            "is_error": false,
+            "length": { "structured.results": 5 },
+            "type": { "structured.nextCursor": "string" },
+            "matches": { "structured.nextCursor": "^[0-9a-f]+\\.[0-9a-f]{8}$" }
+          }
+        },
+        {
+          "kind": "call",
+          "tool": "knowledge_search",
+          "arguments": { "where": "has(tags)", "limit": 5, "cursor": "@step0.structured.nextCursor" },
+          "expect": {
+            "describe": "Página 2 reanudando con el cursor de la 1: otros 5, y otro cursor.",
+            "is_error": false,
+            "length": { "structured.results": 5 }
+          }
+        }
+      ],
+      "expect": [
+        {
+          "invariant": "differs",
+          "steps": [0, 1],
+          "path": "structured.results.0.path",
+          "describe": "SIN SOLAPE: el primer resultado de la página 2 no es el de la página 1. Es la forma barata de aseverar que el cursor avanza de verdad en vez de reservir la primera página — que es exactamente el modo de fallo del hallazgo A-02."
+        },
+        {
+          "invariant": "differs",
+          "steps": [0, 1],
+          "path": "structured.nextCursor",
+          "describe": "…y el cursor de la página 2 no es el de la 1."
+        },
+        {
+          "invariant": "same",
+          "steps": [0, 1],
+          "path": "structured.totalApproximate",
+          "describe": "El total NO cambia al paginar: es del conjunto, no de la página."
+        }
+      ]
+    },
+    {
+      "id": "L12-ROB-05-CURSOR-MALFORMADO",
+      "descripcion": "Origen: hallazgo A-02 de `decisiones §23` (ROB-05: un cursor malformado caía a OFFSET 0 EN SILENCIO por `decode_cursor(...).unwrap_or(0)`, devolviendo la página 1 indistinguible de datos correctos), SALDADO por E30-H01. El esperado es el comportamiento CORREGIDO.",
+      "steps": [
+        {
+          "kind": "call",
+          "tool": "knowledge_search",
+          "arguments": { "where": "has(tags)", "limit": 5, "cursor": "zzz-no-hex" },
+          "expect": {
+            "describe": "A-02: hoy INVALID_SCHEMA. Antes de E30-H01 esto devolvía la página 1 sin error — la «lista recortada indistinguible de la correcta» que E24/E26 declaraban cerrada en otros puntos.",
+            "error_code": "INVALID_SCHEMA",
+            "contains": { "text": "cursor" },
+            "absent": ["structured"]
+          }
+        },
+        {
+          "kind": "call",
+          "tool": "knowledge_search",
+          "arguments": { "where": "has(tags)", "limit": 5, "cursor": "ñ" },
+          "expect": {
+            "describe": "Remate de robustez de la misma familia (commit 2d32eeb): un cursor NO-ASCII hacía `panic!` y se llevaba la sesión JSON-RPC entera. Hoy es el mismo error limpio.",
+            "error_code": "INVALID_SCHEMA"
+          }
+        },
+        {
+          "kind": "call",
+          "tool": "workspace_status",
+          "arguments": {},
+          "expect": {
+            "describe": "Y LA SESIÓN SIGUE VIVA tras el cursor no-ASCII: este paso es la aserción de verdad del panic. Si el proceso hubiera muerto, aquí habría un error de protocolo o una excepción del arnés.",
+            "is_error": false,
+            "matches": { "structured.workspaceRevision": "^blake3:[0-9a-f]{64}$" }
+          }
+        }
+      ]
+    },
+    {
+      "id": "L12-ROB-06-CURSOR-AJENO",
+      "descripcion": "Origen: hallazgo A-03 de `decisiones §23` (ROB-06: un `nextCursor` de `graph_query` era ACEPTADO por `knowledge_search` y reinterpretado como offset propio — página válida pero semánticamente equivocada), SALDADO por E30-H01 firmando el cursor con su origen.",
+      "steps": [
+        {
+          "kind": "call",
+          "tool": "graph_query",
+          "arguments": { "operation": "components", "limit": 1 },
+          "expect": {
+            "describe": "Un cursor legítimo… de OTRA tool.",
+            "is_error": false,
+            "type": { "structured.nextCursor": "string" }
+          }
+        },
+        {
+          "kind": "call",
+          "tool": "knowledge_search",
+          "arguments": { "where": "has(tags)", "limit": 5, "cursor": "@step0.structured.nextCursor" },
+          "expect": {
+            "describe": "A-03: hoy el cursor lleva su origen firmado y la tool receptora lo rechaza NOMBRANDO ambas. El mensaje explica POR QUÉ no es intercambiable (cada lista tiene su propio orden total), que es lo que evita que un agente lo tome por un fallo transitorio.",
+            "error_code": "INVALID_SCHEMA",
+            "contains": { "text": "graph_query" }
+          }
+        }
+      ]
+    },
+    {
+      "id": "L12-ROB-09-11-COTAS-LIMIT",
+      "descripcion": "Origen: L12_rob.json ROB-09/ROB-10/ROB-11 y E24-H09/E26-H10 — ninguna respuesta viaja sin cota, y la ASIMETRÍA de máximos entre tools está declarada: 100 en knowledge_search, 1000 en las otras tres.",
+      "steps": [
+        {
+          "kind": "call",
+          "tool": "knowledge_search",
+          "arguments": { "where": "has(tags)", "limit": 101 },
+          "expect": {
+            "describe": "El máximo de knowledge_search es 100, no 1000. El mensaje da el rango, así que un agente se autocorrige.",
+            "error_code": "INVALID_SCHEMA",
+            "contains": { "text": "100" }
+          }
+        },
+        {
+          "kind": "call",
+          "tool": "graph_query",
+          "arguments": { "operation": "isolated", "limit": 1001 },
+          "expect": {
+            "describe": "…mientras que el de graph_query es 1000: la asimetría es real y está declarada.",
+            "error_code": "INVALID_SCHEMA",
+            "contains": { "text": "1000" }
+          }
+        },
+        {
+          "kind": "call",
+          "tool": "knowledge_search",
+          "arguments": { "where": "has(tags)", "limit": 0 },
+          "expect": {
+            "describe": "E24-H09: `limit: 0` ya no devuelve 0 resultados en silencio.",
+            "error_code": "INVALID_SCHEMA"
+          }
+        },
+        {
+          "kind": "call",
+          "tool": "knowledge_search",
+          "arguments": { "where": "has(tags)", "limit": "10" },
+          "expect": {
+            "describe": "E24-H09: un `limit` de tipo incorrecto tampoco cae al default. El tipo se valida, no se adivina.",
+            "error_code": "INVALID_SCHEMA"
+          }
+        }
+      ]
+    },
+    {
+      "id": "L12-ROB-13-14-PARAMS-DESCONOCIDOS",
+      "descripcion": "Origen: L12_rob.json ROB-13/ROB-14, con el esperado REESCRITO contra el statu quo. Aquellos casos fijaban la regla de la casa ANTIGUA («el servidor ignora lo que no declara»), que el contrato revirtió: hasta v0.5.0 los 10 `inputSchema` publicaban `additionalProperties: false` mientras el motor descartaba las claves no declaradas —el contrato se contradecía y el motor cumplía la mitad mentirosa—. HOY una clave no declarada es INVALID_SCHEMA nombrándola. Este caso es justo la clase de regresión que el banco existe para detectar: el esperado histórico habría dado FAIL.",
+      "steps": [
+        {
+          "kind": "call",
+          "tool": "workspace_status",
+          "arguments": { "parametro_que_no_existe": "bar" },
+          "expect": {
+            "describe": "Clave desconocida en una tool SIN parámetros: rechazo que NOMBRA la clave y dice que la tool no declara ninguno.",
+            "error_code": "INVALID_SCHEMA",
+            "contains": { "text": "parametro_que_no_existe" }
+          }
+        },
+        {
+          "kind": "call",
+          "tool": "knowledge_search",
+          "arguments": { "where": "type = \"guia\"", "sort": "title", "limit": 3 },
+          "expect": {
+            "describe": "`sort` se RETIRÓ en E23-H11 y hoy NO se ignora: el mensaje enumera las claves legales, que es lo que convierte el rechazo en algo accionable para un agente. Antes esto servía resultados en un orden que no era el pedido — una respuesta plausible e indistinguible de la correcta.",
+            "error_code": "INVALID_SCHEMA",
+            "contains": { "text": "sort" }
+          }
+        },
+        {
+          "kind": "call",
+          "tool": "knowledge_search",
+          "arguments": { "where": "type = \"guia\"", "limit": 3 },
+          "expect": {
+            "describe": "Contraste: sin la clave espuria, la MISMA consulta responde. El rechazo es de la clave, no de la consulta.",
+            "is_error": false,
+            "min_length": { "structured.results": 1 }
+          }
+        }
+      ]
+    },
+    {
+      "id": "L12-ROB-15-PROTOCOLO",
+      "descripcion": "Origen: L12_rob.json ROB-15/ROB-16 — errores de PROTOCOLO JSON-RPC frente a errores de tool. Fuente: mcp.yml `errores_protocolo`.",
+      "steps": [
+        {
+          "kind": "raw",
+          "line": "{\"jsonrpc\":\"2.0\",\"id\":901,\"method\":\"metodo_que_no_existe\"}",
+          "expect": {
+            "describe": "Método inexistente ⇒ -32601 (Method not found), un error de PROTOCOLO. No hay `isError` porque no hubo tool que ejecutar.",
+            "equals": { "response.error.code": -32601 }
+          }
+        },
+        {
+          "kind": "raw",
+          "line": "{json roto sin cerrar",
+          "expect": {
+            "describe": "JSON ilegible ⇒ -32700 (Parse error). El servidor responde y SIGUE VIVO: una línea corrupta no tumba la sesión.",
+            "equals": { "response.error.code": -32700 }
+          }
+        },
+        {
+          "kind": "call",
+          "tool": "tool_que_no_existe",
+          "arguments": {},
+          "expect": {
+            "describe": "Tool inexistente ⇒ -32602, el mismo código con el que readonly rechaza las de cambio (ver gate_L8): desde fuera, «no existe» y «no está en tu perfil» son indistinguibles por diseño.",
+            "protocol_error_code": -32602
+          }
+        },
+        {
+          "kind": "call",
+          "tool": "workspace_status",
+          "arguments": {},
+          "expect": {
+            "describe": "Y tras las tres agresiones la sesión responde con normalidad. Es la aserción que convierte lo anterior en una prueba de robustez y no solo de códigos.",
+            "is_error": false,
+            "present": ["structured.workspaceRevision"]
+          }
+        }
+      ]
+    }
+  ]
+}

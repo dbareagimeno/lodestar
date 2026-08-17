@@ -3,6 +3,7 @@ name = "lodestar-fixtures"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+rust-version.workspace = true
 description = "Workspaces de ejemplo reusables por los tests de todos los crates."
 # Solo para tests: nunca se publica en crates.io.
 publish = false
@@ -11,7 +12,11 @@ publish = false
 lodestar-core = { workspace = true }
 
 [dev-dependencies]
-tempfile = "3"
+tempfile = "=3.24.0"
+# E33-H01: la huella de los árboles generados (path → digest del contenido) con la que el test de
+# determinismo compara dos corridas. Mismo criterio de hash que ya usa el repo, y mantiene legible
+# el mensaje de fallo (comparar los bytes crudos volcaría megabytes de corpus).
+blake3 = { workspace = true }
 
 [lints]
 workspace = true

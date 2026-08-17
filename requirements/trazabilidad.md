@@ -263,3 +263,46 @@ de `§10`/`§12`; corrigen bloqueantes de historias ya integradas.
 |---|---|---|
 | `changeSetId` determinista reutiliza el mismo `txnId` en un re-apply idéntico: `change_apply` sobrescribe `recovery/`/`receipts/` de la transacción previa (guard anti-sobrescritura de H01 solo vivía en `change_revert`), y el `revert` posterior queda sin salida (`WRITE_CONFLICT`) | veredicto de juez ciego sobre `E28-H01`, reproducido por JSON-RPC | E28-H03 |
 | `change_plan` normaliza cada operación contra el `DocumentSet` inicial, no el acumulado del propio plan: falsos negativos destructivos (`[move a→final, move b→final]`, `[create X, move b→X]`, `[create X, create X]`) y regresión de dos idiomas legítimos (`[delete X, create X]`, `[move A→B, create A]`) | veredicto de juez ciego sobre `E28-H02`, reproducido por JSON-RPC | E28-H04 (abre `decisiones §24`, equivalencia de caja/Unicode, fuera de su alcance) |
+| Seguimiento de E28-H04: operaciones de contenido, move-chains y selecciones estructurales seguían normalizando contra contenido base; varios `ReplaceBody` sobre el mismo path perdían intención y `noOpOperations` congelaba el veredicto por documento | re-jueces de E28-H04 + regresión MCP en procesos frescos | Bugfix de planificación secuencial previo a E33-H04 (base/working, no-op por terminal, runtime v2) |
+
+---
+
+## E32 — Gaps de suite medidos por mutantes → historias
+
+> Origen: `decisiones §27` (pasada de `/mutantes` que cerró E31, 2026-08-08, acotada a
+> `crates/lodestar-core/src/model.rs` y `plan.rs`). Ninguna fila toca una decisión de `§10`/`§12`:
+> son **agujeros de suite** sobre comportamiento correcto, cada uno verificado aplicando la mutación
+> al árbol y viendo la suite en verde. Trabajo tests-only; la evidencia de cada test es su mutación
+> (rojo con ella, verde sin ella — lección de E30/E31).
+
+| Gap (§27) | Función | Historia |
+|---|---|---|
+| (a) CRLF en `split_front` sin un solo test (red bajo `E31-H02`/`§26`) | `model::split_front` | E32-H01 |
+| (b) El no-op byte a byte de `patch_frontmatter` sin quien lo sujete | `model::patch_frontmatter` | E32-H01 |
+| (c) `relation_changes` jamás aseverado, y viaja al wire en las 3 tools de cambio | `plan::semantic_diff` | E32-H01 |
+| (d) `ensure_exists` puede devolver siempre `Ok` sin que nada se ponga rojo | `plan::ensure_exists` | E32-H01 |
+| (e) `sort_paths_cmp` es contractual (ordena `semanticDiff.*`) y lo cubre un test de 2 paths | `model::sort_paths_cmp` | E32-H01 |
+| (f) `locate_section` puede editar la sección hermana homónima | `model::locate_section` | E32-H01 |
+
+---
+
+## E33 — Épica de evidencia (`ARCHITECTURE.md §22`) → historias
+
+> Origen: `decisiones §9` punto 1 (condición de entrada de `§14`) + orden de trabajo punto 3;
+> diseño ratificado 2026-08-10 (`ARCHITECTURE.md §22`). Ninguna historia toca una decisión de
+> `§10`/`§12` ni **cierra** una ficha abierta: la épica produce evidencia y deja las decisiones al
+> usuario. Las filas mapean decisión/concern → historia que aporta el dato o el instrumento.
+
+| Decisión / concern | Qué aporta la épica | Historia |
+|---|---|---|
+| `decisiones §9` punto 1 — gate de rendimiento con umbrales | Los números (3 variantes × 3 escalas) | E33-H04 |
+| `decisiones §9` punto 1 — «umbrales explícitos» | Umbrales ratificados con datos (puerta interna) + `--gate` + smoke CI | E33-H05 |
+| `decisiones §9` — «banco permanente por release» (README de `decisiones/`) | Runner asertable/portable + paso de `RELEASING.md` + corrida datada | E33-H02, E33-H07 |
+| `decisiones §14` — «no se decide sin medir» (condición de entrada) | Paquete de evidencia: mediciones + dogfooding + coste de conexión + análisis a/b/c, «lista para decidir» | E33-H08 (datos de H04/H06) |
+| `decisiones §14` absorción `§16(c)` (watcher sin `enable_cache`) | Inventariado en el paquete de evidencia (qué pasa con él en cada salida) | E33-H08 |
+| `decisiones §14` absorción `§16(l)` (divergencia `field_path` core↔store) | Inventariado en el paquete de evidencia como coste de conexión | E33-H08 |
+| `decisiones §22` — integridad referencial del frontmatter (abierta) | Centinela que fija el statu quo citando la ficha, sin cerrarla | E33-H03 |
+| `decisiones §24` — equivalencia caja/Unicode (abierta) | Centinela que fija el statu quo por plataforma, sin cerrarla | E33-H03 |
+| `decisiones §23` — «el testbench queda como activo de §9» | Corpus canónico + porte asertable de los `verify_*` e invariantes del informe | E33-H01, E33-H02 |
+| `ARCHITECTURE.md §21.5` — la superficie no promete rendimiento mientras `§14` siga abierta | Preservada explícitamente: banco interno, sin promesa externa (fuera de alcance en todas) | E33 (transversal) |
+| E14-H05 — arnés de escala ~10k | Generador extraído a `lodestar-fixtures` con perfiles plano/realista; `escala.rs` migrado sin cambiar aserciones | E33-H01 |

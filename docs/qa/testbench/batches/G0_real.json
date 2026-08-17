@@ -1,6 +1,6 @@
 {
   "batch": "G0",
-  "root": "real",
+  "root": "worktree",
   "profile": "readonly",
   "fixtures": null,
   "cases": [
@@ -20,10 +20,10 @@
        {"kind": "call", "tool": "knowledge_search", "arguments": {"filter": {"field": "status", "operator": "equals"}}}],
      "esperado": "Los tres: INVALID_SCHEMA con diagnóstico útil, sin internos de serde crudos ni INTERNAL_IO_ERROR (E24-H10). Registrar los 3 mensajes literales. Fuente: mcp.yml E24-H09/H10; query-language.md The JSON filter form"},
     {"id": "G1-24", "steps": [
-       {"kind": "shell", "cmd": "printf '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{},\"clientInfo\":{\"name\":\"t\",\"version\":\"0\"}}}\\n' | /Users/dbarea/repos/lodestar/target/release/lodestar-mcp --root /Users/dbarea/repos/homelab --profile readonly"},
-       {"kind": "shell", "cmd": "printf '{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"1990-01-01\",\"capabilities\":{},\"clientInfo\":{\"name\":\"t\",\"version\":\"0\"}}}\\n' | /Users/dbarea/repos/lodestar/target/release/lodestar-mcp --root /Users/dbarea/repos/homelab --profile readonly"},
-       {"kind": "shell", "cmd": "printf '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"clientInfo\":{\"name\":\"t\",\"version\":\"0\"}}}\\n{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\\n{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"ping\"}\\n{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"metodo_inventado\"}\\n' | /Users/dbarea/repos/lodestar/target/release/lodestar-mcp --root /Users/dbarea/repos/homelab --profile readonly"},
-       {"kind": "shell", "cmd": "printf '[{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"ping\"}]\\n' | /Users/dbarea/repos/lodestar/target/release/lodestar-mcp --root /Users/dbarea/repos/homelab --profile readonly"}],
+       {"kind": "shell", "cmd": "printf '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{},\"clientInfo\":{\"name\":\"t\",\"version\":\"0\"}}}\\n' | @bin.mcp --root @root --profile readonly"},
+       {"kind": "shell", "cmd": "printf '{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"1990-01-01\",\"capabilities\":{},\"clientInfo\":{\"name\":\"t\",\"version\":\"0\"}}}\\n' | @bin.mcp --root @root --profile readonly"},
+       {"kind": "shell", "cmd": "printf '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"clientInfo\":{\"name\":\"t\",\"version\":\"0\"}}}\\n{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\\n{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"ping\"}\\n{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"metodo_inventado\"}\\n' | @bin.mcp --root @root --profile readonly"},
+       {"kind": "shell", "cmd": "printf '[{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"ping\"}]\\n' | @bin.mcp --root @root --profile readonly"}],
      "esperado": "Paso 0: initialize acepta 2025-06-18; el result lleva instructions que nombra EXACTAMENTE las tools activas del perfil (7 en readonly), sin vocabulario retirado (huérfanos, conformidad). Paso 1: versión no aceptada — REGISTRAR el comportamiento (contrato lista aceptadas, no el rechazo; candidato CONTRATO-AMBIGUO). Paso 2: ping responde (registrar forma del result); metodo_inventado → -32601. Paso 3: batch array → -32600 Invalid Request. Fuente: mcp.yml protocolo (metodos, protocol_versions_aceptadas, instructions) y errores_protocolo"}
   ]
 }

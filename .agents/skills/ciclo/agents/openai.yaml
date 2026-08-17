@@ -1,0 +1,4 @@
+interface:
+  display_name: "Ejecutar ciclo"
+  short_description: "Orquesta rojo, verde, gates y revisión"
+  default_prompt: "Use $ciclo para implementar esta historia con rojo y verde separados, gates y revisión fresca."

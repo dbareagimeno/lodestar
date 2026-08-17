@@ -3,7 +3,7 @@
 > Mapea las épicas/historias de [`requirements/`](requirements/) a su estado real en esta rama.
 > Construido en el **orden de fases ratificado** (`ARCHITECTURE.md §14`), validando con tests en cada fase.
 >
-> **Resumen** (actualizado al cierre de `E25`/`E26`): el repo es un **motor headless de integridad
+> **Resumen** (actualizado durante `E34`): el repo es un **motor headless de integridad
 > semántica** sobre workspaces Markdown universales (`ARCHITECTURE.md §20`). Las épicas **E0–E8**
 > (fundacionales), **E9–E14** (giro headless), **E15–E22** (migración de OKF a Markdown universal),
 > **E23** (cierre: defectos hallados en la revisión de la PR #17), **E24** (cierre de los defectos
@@ -15,9 +15,8 @@
 > corre desde E23-H06); `clippy -D warnings` y `cargo doc -D warnings` limpios; pureza del core
 > verificada por CI. **El recuento exacto de tests lo fija la nota de release** (E24-H18:
 > `cargo test --workspace -- --list | grep -c ": test$"`); fijado en la **v0.5.0**: **541 tests**
-> (eran 486 al cerrar E24, antes de las 11 historias de E25/E26). En `develop` van **542**: +1 por la
-> guardia del `outputSchema` (ver «Defectos posteriores a E27» al final); la cifra de la v0.5.0 no se
-> reescribe — la fija su release.
+> (eran 486 al cerrar E24, antes de las 11 historias de E25/E26). La **v0.6.1** enumera **788 tests**
+> con el mismo criterio; no incluye los tests gateados tras `--features test-failpoints`.
 >
 > **Ya no forman parte de este repo**: la app de escritorio (Tauri + Svelte, movida a
 > `experimental/ui-desktop` con el giro headless), el crate `lodestar-vcs` y `git2` (borrados en
@@ -28,13 +27,27 @@
 > conservan esa terminología como **historia del proyecto**; la autoridad viva es
 > `ARCHITECTURE.md §20`.
 >
+> **E34 completa (H01–H06)**: H01 ratifica exactamente Modern MCP `2026-07-28` y Legacy MCP `2025-11-25`,
+> diez tools y solo la capacidad `tools`; fija `rmcp = 3.1.2`/Tokio y MSRV `1.88` exclusivamente
+> en `lodestar-mcp`. H02 ya extrajo `LodestarMcpService` como dueño neutral del catálogo,
+> dispatcher, perfiles e instrucciones, con paridad no vacía contra la fachada. H03 retiró el
+> bucle JSON-RPC manual: `SerialExecutor<LodestarMcpService>` se sirve con rmcp/stdio, mantiene un
+> único turno sobre `App`, separa stdout/stderr y cierra limpiamente por EOF. H04 completa Modern:
+> requests stateless con metadata obligatoria de versión, capacidades e identidad, discovery,
+> list/call, errores de versión, resultType y cache privada, sin initialize ni ping. H05 completa
+> Legacy: negociación cerrada, initialized silencioso, ping, perfiles y envelopes sin
+> campos Modern, con la issue #38 reproducida y PR #39 superada. H06 observa la cancelación rmcp
+> antes del turno serial, preserva la indivisibilidad después de admitir la llamada y cierra la
+> conformidad con clientes oficiales, raw exacto, stdout/stderr y EOF. Los hashes de locks, rojos
+> y gates quedan auditables en `docs/qa/e34-interoperabilidad-mcp-evidencia.md`.
+>
 > Lo pendiente está en [`decisiones/`](decisiones/README.md): fechas en el lenguaje de consulta (§12),
 > el **store sin consumidor** (§14, abierto en E23-H16). §12 y §13 se cerraron en E23-H14.
 
 ## Cómo correrlo
 
 ```bash
-cargo test --workspace --locked                       # 541 tests (v0.5.0)
+cargo test --workspace --locked                       # 788 tests (v0.6.1)
 cargo test -p lodestar-workspace --features test-failpoints --locked   # crash-recovery (E13-H06)
 cargo test -p lodestar-app --features test-failpoints --locked         # ventana de publicación (E25-H01)
 cargo run -p lodestar-cli -- check [--path <dir>]     # la puerta de CI (exit 0/1/2/3)
@@ -66,7 +79,7 @@ subcomandos git de la CLI —`log`/`last-conforming`/`branch`/`switch`/`merge`/`
 | **E4** `lodestar-vcs` | ✅ Hecho | libgit2 local + red por binario `git` + **resolve_rev**, **staged_files**, **switch** (sin tocar working tree), **merge** (3-vías a nivel de árbol con marcadores + `MERGE_HEAD`), **install_hooks**, **tree_oid**. Cache de conformidad por tree-oid en el store, cableada en la workspace. **12 tests**. |
 | **E5** `lodestar-workspace` | ✅ Hecho | Handle unificado, único escritor, snapshot, commit/restore con checkpoint, switch/merge, conformidad cacheada por tree-oid, config (`lodestar.toml`), y **bus de eventos en vivo** (`open_live`/`enable_cache`/`subscribe`) con **update optimista** de la cache tras cada escritura. **12 tests**. |
 | **E6** Tauri + frontend | ✅ Hecho | **Fachada Tauri v2** real: comandos congelados sobre `Workspace` + estado del bundle + forwarder del bus `IndexEvent` → evento `bundle:changed` (UI en vivo). Binario `lodestar-desktop` compila; CI de Rust instala webkit y construye el frontend antes. **Frontend Svelte 5 funcional**: layout de 3 columnas colapsables, árbol filtrable, editor multi-escritor con validación y diagnósticos localizados, panel de enlaces, **isla imperativa del grafo** (`createStarMap`, SVG+rAF, sin `{#each}`), modo **Cambios** (diff + commit). `npm run check`/`build` verdes. Pulido en [`decisiones §2`](decisiones/02-port-ui-prototipo.md). |
-| **E7** `lodestar-mcp` | 🟢 Parcial | 13 tools sobre la workspace + bucle JSON-RPC por stdio (stdout puro). **Golden cross-fachada** (tool==workspace) + e2e. **5 tests**. Pendiente: transporte `rmcp` oficial + resources (ver [`decisiones §3`](decisiones/03-transporte-mcp-rmcp.md)). |
+| **E7** `lodestar-mcp` | 🟢 Superada por E34 | La superficie vigente tiene 10 tools y perfiles `standard`/`readonly`. E34-H01 cerró [`decisiones §3`](decisiones/03-transporte-mcp-rmcp.md), fijó la política dual-era y adoptó `rmcp = 3.1.2`; H02 extrajo el servicio neutral único; H03 ya sirve ese servicio por rmcp/stdio con executor serial; H04–H06 completan ambos wires y la conformidad. Resources queda explícitamente fuera de alcance. |
 | **E8** Transversales | 🟢 Parcial | Hechos: exit codes/SARIF, escritura atómica, **zip-slip cerrado por RelPath en `import`**, identidad de commits + override por `lodestar.toml`, trailer Co-Authored-By del agente, gitignore de `.lodestar/`, **config por-bundle (`lodestar.toml`: strictness + identidad)**, **`lodestar import`** (zip del prototipo o dir), **`init` con git init + commit inicial real**, **i18n keyed por código** (catálogo español), **arnés diferencial JS-vs-Rust (§12)**, y **pipeline de release multiplataforma** (`release.yml`: macOS arm64/Windows/Linux → bundles sin firmar + binarios CLI/MCP; Release en borrador) con **CI multiplataforma** (job de Rust en las 3 plataformas). Pendiente: **firma/notarización** de bundles + updater, gate de bench (§11), threat model. |
 
 ## Infraestructura de proceso (2026-07-10)
@@ -81,8 +94,8 @@ El repo tiene ahora una **estructura de agentes y skills** para el desarrollo po
 - **Skills** (`.claude/skills/`): `/planificar` (features grandes: diseño + épica, 2 puertas) ·
   `/historia` · `/tdd` · `/juzgar [--panel]` · `/contrato [--check]` · `/mutantes` · `/ciclo`
   (pipeline completo por historia).
-- **Contratos de la frontera** (`contracts/`): `ipc.yml` (comandos Tauri + eventos) y `mcp.yml`
-  (13 tools), extraídos del código real; los tipos siguen viviendo solo en `core::types`
+- **Contratos de la frontera** (`contracts/`): `ipc.yml` histórico y `mcp.yml` vigente
+  (10 tools, Modern/Legacy), extraídos del código real; los tipos siguen viviendo solo en `core::types`
   (invariante #4). Verificación con `/contrato --check`.
 - **Mutation testing a demanda**: `cargo-mutants` configurado (`.cargo/mutants.toml`), sin CI.
 - Primera historia acordada para el nuevo flujo: **ts-rs** (E0-H04/E6-H03,
@@ -218,8 +231,8 @@ del usuario:
 4. **`docs/history/PROPUESTA_FIXES.md`** — reactivar los arreglos sugeridos (`Fix`/`apply_fix`, la op
    retirada en `E23-H11`). Condición de entrada: que existan productores de `Fix` que justifiquen la
    maquinaria del `fixId` direccionable entre revisiones.
-5. **`decisiones §3`/`§9`** — `rmcp` oficial + resources cuando un cliente lo exija; gate de bench y
-   threat model.
+5. **`decisiones §9`** — gate de bench y threat model. `decisiones §3` quedó cerrada por E34:
+   `rmcp` oficial sobre stdio, sin resources ni transports de red.
 
 Deuda menor registrada, con dueño futuro: `Workspace::materialize_staging` es API pública que
 escribe bajo `.lodestar/` **sin pasar por ninguno de los cuatro chokepoints** de `E23-H12`; hoy es
@@ -1715,3 +1728,116 @@ Cierra las dos fichas que la campaña dejó abiertas porque exigían criterio de
   invariante en las 10 tools `tools.rs::tools_list_lleva_output_schema_de_tipo_object` (en proceso) y
   el `tools_declaran_outputschema` endurecido (e2e). La regla queda escrita en `contracts/mcp.yml`,
   que hasta ahora no la exigía en ninguna parte.
+
+## Los seis gaps de suite de §27 (E32) — COMPLETA (2026-08-10)
+
+Épica: [`requirements/epica-32-gaps-suite-mutantes.md`](requirements/epica-32-gaps-suite-mutantes.md).
+Cierra [`§27`](decisiones/27-gaps-de-suite-en-model-y-plan.md) entera — la salida (1), elegida por
+el usuario frente a la (2) que la ficha recomendaba: las seis tandas de una vez, en una historia.
+
+| Historia | Qué cierra | Estado |
+|---|---|---|
+| E32-H01 | `§27` — los seis tests de suite que la ficha deja especificados | ✅ |
+
+**Tests-only sobre `lodestar-core`**: siete tests nuevos (la tanda (b) son dos), tres en
+`tests/documento.rs` y cuatro en `tests/core.rs`, cero líneas de producción. La fase roja no fue un
+stub sino **la mutación aplicada al árbol** (criterio [EVIDENCIA] de la spec): 16 mutaciones vistas
+en rojo a mano —2 de `split_front`, 2 de `patch_frontmatter`, 2 de `relation_changes`, 1 de
+`ensure_exists`, 5 de `sort_paths_cmp`, 4 de `locate_section`— y una más demostrada **equivalente**
+(el `-`→`+` aplicado a la vez sobre los dos restandos del desempate final de `sort_paths_cmp`: en
+ese punto `i == j` siempre, así que no es observable). Precisión que fijó el juez ciego: esa doble
+sustitución **no es un mutante de cargo-mutants** — los dos reales de esa línea mutan un `-` cada
+uno y el test nuevo los caza (`caught.txt`); ahí no queda ningún superviviente.
+
+**Verificación de cierre medida, no leída**: re-pasada de `/mutantes` con el alcance exacto de la
+ficha (`-p lodestar-core --file crates/lodestar-core/src/model.rs --file
+crates/lodestar-core/src/plan.rs`, 333 mutantes: 242 muertos, 62 supervivientes, 25 inviables, 4
+timeouts). Supervivientes: de **97 (E31) a 62**, y **ninguno de los seis gaps sigue vivo**. Los
+tres que rozan funciones con nombre en la ficha —`plan.rs:172` (`frontmatter_changes`, dentro de
+`semantic_diff` pero fuera de los seis gaps) y los dos de `op_variant_name`— son los falsos
+positivos de alcance que la ficha ya documentaba, **re-verificados ejecutando**: con la mutación
+aplicada, la suite de `lodestar-app` se pone en rojo. El resto es la cola clasificada como «no
+merece test». Los 4 timeouts persisten como no concluyentes.
+
+De paso, la pasada dejó una lección operativa: con el disco al 99%, cargo-mutants produce
+**«caught» espurios** (el binario de test que no puede escribir falla, y ese fallo cuenta como
+mutante cazado) — las dos primeras corridas dieron 53 y 59 supervivientes con listas
+inconsistentes entre sí, y solo la corrida con 22 GB libres dio la cifra estable y coherente con la
+clasificación de la ficha. La evidencia también depende de que el arnés esté sano.
+
+**Las dos lecciones que dejó la ejecución** (las dos refuerzan la de la propia ficha — «la
+evidencia se ejecuta, no se lee»):
+
+- **Dos de los seis fixtures propuestos por la ficha no mataban lo que prometían.** El de
+  `patch_frontmatter` (clave `01:`) no fuerza el fallback —`serde_yaml` la parsea como string y el
+  escaneo casa; hizo falta `1.50:`, cuyo texto sí diverge de su valor parseado— y el vector de
+  `sort_paths_cmp` mataba 14 de 17: la **primera** re-pasada dejó vivos el `&&`→`||` que abre la
+  tira numérica en falso (exige un par dígito-contra-letra en la divergencia) y los dos `<`→`<=` de
+  los bucles (exigen un path que **termine en dígito**, y todos acababan en `.md`). Sin la
+  re-pasada de cierre, esos tres habrían quedado vivos con la ficha «cerrada».
+- **Un superviviente puede ser inmatable y estar bien.** La doble sustitución del desempate final
+  es equivalente demostrable; forzar un test ahí habría consagrado un detalle accidental. Retirarla
+  con la razón escrita es parte del protocolo, no una excepción.
+
+**Juez ciego (2026-08-10): APROBADA CON RESERVAS, las dos MENOR y documentales, saldadas en el
+mismo PR.** El juez verificó **ejecutando**: dos mutaciones de la tabla en ciclo rojo→revert→verde
+(`model.rs:133`, `plan.rs:591`), el falso positivo de `plan.rs:172` contra la suite de
+`lodestar-app`, los mutantes reales del desempate de `sort_paths_cmp` contra `caught.txt`, y los
+gates del crate. Las reservas: (1) la letra de [Cierre] choca con la atribución de nombre de
+cargo-mutants (`:172` se lista bajo `semantic_diff` sin ser el gap (c)) — saldada dejándolo escrito
+aquí y en el cierre de `§27`; (2) la nota de equivalencia original daba a entender un superviviente
+inmatable que no existe — saldada reescribiéndola (es el párrafo de arriba).
+
+## Épica de evidencia (E33) — EN CURSO (arrancada 2026-08-10)
+
+Épica: [`requirements/epica-33-banco-evidencia.md`](requirements/epica-33-banco-evidencia.md).
+Diseño ratificado como `ARCHITECTURE.md §22` (D1–D9, todas con la recomendación aceptada). Ejecuta
+`decisiones §9` punto 1 (banco de pruebas permanente + gate de rendimiento) y produce la evidencia
+que `decisiones §14` exige como condición de entrada; **no cierra `§14`, ni `§22`, ni `§24`**.
+Ninguna historia toca `contracts/mcp.yml`.
+
+| Historia | Qué entrega | Estado |
+|---|---|---|
+| E33-H01 | Corpus canónico determinista y generador de escala compartido | ✅ |
+| E33-H02 | Runner asertable y portable del banco de conformidad | ✅ |
+| E33-H03 | Centinelas de las decisiones abiertas `§22` y `§24` | ⏳ |
+| E33-H04 | Banco de rendimiento: primera corrida completa (3 variantes × 3 escalas) | ⏳ |
+| E33-H05 | Umbrales ratificados, gate codificado y smoke en CI | ⏳ **puerta interna de umbrales** |
+| E33-H06 | Dogfooding acotado con registro | ⏳ |
+| E33-H07 | Enganche a release: runbook, workflow y corrida datada | ⏳ |
+| E33-H08 | Paquete de evidencia para decidir `decisiones §14` | ⏳ |
+
+**E33-H01 (2026-08-10)**: el módulo `escala` de `lodestar-fixtures` (perfiles `Plano`/`Realista`,
+PRNG SplitMix64 propio para que ninguna dependencia pueda alterar el corpus en silencio),
+`escala.rs` de E14-H05 migrado al generador compartido **con las aserciones intactas y el corpus
+plano byte-idéntico** (verificado contra el generador original reconstruido vía `git show`, y
+anclado hacia el futuro por `tests/ancla_plano.rs` con hash dorado), y el corpus canónico python
+(`docs/qa/testbench/make_corpus.py`, 92 `.md` deterministas con 11 códigos de diagnóstico, sets
+patológicos de `make_fixtures.py` integrados y las semillas de los centinelas de H03).
+
+TDD con separación de poderes: el autor validó sus 5 tests contra un prototipo desechable (3
+mutantes, 3 cazados) antes de entregar el rojo. **Panel de 3 jueces ciegos**: APROBADA CON RESERVAS
+×3, con dos MAYOR saldados en la misma rama — (1) el par NFC/NFD del corpus no era un par (difería
+también en sufijo ASCII) y su docstring afirmaba un colapso APFS falso: ahora es `canción.md` en
+las dos formas, con el comportamiento **medido** por plataforma; (2) una flakiness reportada del
+test de BDD-2 («diagnósticos = []» 3 veces seguidas, luego 70+ verdes): **no reproducida en 1.385
+corridas** bajo presión y sin mecanismo en el código (grafo y diagnósticos salen del mismo
+`analyze()`; la apertura es hermética y no hereda config de ancestros) — registrada como
+no-reproducida, atribuible a contaminación del entorno del juicio. **Re-juez fresco: APROBADA**,
+los 6 hallazgos saldados con evidencia ejecutada (148/148 corridas verdes, filesystem y ancla
+reverificados). Hallazgo nuevo MENOR anotado para H03: el generador python salta el auto-sorteo de
+enlaces donde el Rust lo desplaza — con otra semilla, un «conectado» del corpus canónico podría
+quedar sin salientes.
+
+**E33-H02 (2026-08-10)**: el runner JSON-RPC/stdio acepta `expect` evaluable, emite PASS/FAIL
+mecánico y exit code, parametriza binario y root sin rutas de máquina, y aplica readonly duro contra
+roots reales. El autotest del runner (`selftest_runner.py`) quedó en **12/12 comprobaciones**; la
+corrida BDD-3 del banco canónico quedó en **97/97 casos PASS, 0 FAIL, exit 0**, documentada en
+[`docs/qa/corrida-banco-2026-08-10.md`](docs/qa/corrida-banco-2026-08-10.md). H03–H08 permanecen
+pendientes; esta evidencia no cierra `decisiones §14`, `§22` ni `§24`, ni altera la frontera MCP.
+
+Dos matices del motor que H02 debe conocer al escribir esperados (documentados en
+`make_corpus.py`/README): un enlace a directorio **con nombre** (`guias/`) es `LINK-TARGET-MISSING`
+deliberado (solo la navegación pura `../`/`./` es `WorkspaceDirectory`), y el **conteo de
+documentos del corpus depende del filesystem** (el par de caja colapsa en APFS y coexiste en ext4)
+— los esperados no pueden ser conteos absolutos.

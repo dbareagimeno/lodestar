@@ -7,7 +7,7 @@
     {"id": "G2-06a", "steps": [
        {"kind": "call", "tool": "workspace_status", "arguments": {}},
        {"kind": "call", "tool": "knowledge_check", "arguments": {"scope": {"kind": "workspace"}, "minimumSeverity": "info", "limit": 1000}},
-       {"kind": "shell", "cmd": "/Users/dbarea/repos/lodestar/target/debug/lodestar check; echo EXIT=$?"}],
+       {"kind": "shell", "cmd": "@bin.cli check; echo EXIT=$?"}],
      "esperado": "SIN config: el fixture añade 1 warn (enlace a mapa.png inexistente → LINK-TARGET-MISSING warn) y 0 err. Paso 0: valid true, counts warnings>=1, errors 0. Paso 1: valid true, el warn listado. Paso 2: CLI exit 0 (warnings no bloquean por defecto). Fuente: ci.md L276-293; quickstart.md L138-139 (one engine, one truth)"}
   ]
 }

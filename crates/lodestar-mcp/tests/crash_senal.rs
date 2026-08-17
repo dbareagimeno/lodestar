@@ -48,12 +48,24 @@ impl Sesion {
             .expect("arrancar lodestar-mcp");
         let stdin = proc.stdin.take().expect("stdin");
         let stdout = BufReader::new(proc.stdout.take().expect("stdout"));
-        Sesion {
+        let mut sesion = Sesion {
             proc,
             stdin: Some(stdin),
             stdout,
             id: 0,
-        }
+        };
+        sesion.envia(
+            "initialize",
+            serde_json::json!({
+                "protocolVersion": "2025-11-25",
+                "capabilities": {},
+                "clientInfo": {"name": "lodestar-crash-senal", "version": "1"}
+            }),
+        );
+        let respuesta = sesion.lee();
+        assert_eq!(respuesta["result"]["serverInfo"]["name"], "lodestar-mcp");
+        sesion.notificacion("notifications/initialized");
+        sesion
     }
 
     fn envia(&mut self, metodo: &str, params: serde_json::Value) {
@@ -70,6 +82,17 @@ impl Sesion {
         let mut linea = String::new();
         self.stdout.read_line(&mut linea).expect("leer respuesta");
         serde_json::from_str(&linea).expect("stdout = JSON-RPC puro")
+    }
+
+    fn notificacion(&mut self, metodo: &str) {
+        let stdin = self.stdin.as_mut().expect("stdin vivo");
+        writeln!(
+            stdin,
+            "{}",
+            serde_json::json!({"jsonrpc":"2.0","method":metodo})
+        )
+        .expect("escribir notificación");
+        stdin.flush().expect("flush notificación");
     }
 
     /// `tools/call` que exige éxito y devuelve el `structuredContent`.
@@ -220,11 +243,6 @@ fn crash_por_senal_no_deja_parciales() {
 
         // (2) Se reabre —como haría el proceso siguiente— y se deja que el motor recupere.
         let mut s2 = Sesion::abrir(dir.path());
-        s2.envia(
-            "initialize",
-            serde_json::json!({"protocolVersion": "2025-06-18", "capabilities": {}}),
-        );
-        let _ = s2.lee();
         let estado = s2.tool("workspace_status", serde_json::json!({}));
         if estado["recovery"]["pendingTransaction"]
             .as_bool()
@@ -445,11 +463,6 @@ fn crash_tras_publicar_deja_transaccion_reversible() {
         // Se reabre y se deja que el motor recupere, SIN tocar el canónico: `change_plan` dispara la
         // recuperación (E24-H03) y no publica nada.
         let mut s2 = Sesion::abrir(dir.path());
-        s2.envia(
-            "initialize",
-            serde_json::json!({"protocolVersion": "2025-06-18", "capabilities": {}}),
-        );
-        let _ = s2.lee();
         let _ = s2.tool(
             "change_plan",
             serde_json::json!({
@@ -645,11 +658,6 @@ fn crash_durante_revert_deja_inversa_reversible() {
         // Se reabre y se deja que el motor recupere, SIN tocar el canónico (`change_plan` dispara la
         // recuperación y no publica nada).
         let mut s2 = Sesion::abrir(dir.path());
-        s2.envia(
-            "initialize",
-            serde_json::json!({"protocolVersion": "2025-06-18", "capabilities": {}}),
-        );
-        let _ = s2.lee();
         let _ = s2.tool(
             "change_plan",
             serde_json::json!({

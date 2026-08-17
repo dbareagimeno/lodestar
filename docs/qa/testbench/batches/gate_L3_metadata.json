@@ -1,0 +1,228 @@
+{
+  "batch": "gate_L3_metadata",
+  "descripcion": "L3/L4 del gate — `metadata_inspect` en sus dos modos y las TRES clases límite del dialecto de dot-paths. Porte de los lotes temáticos L3 (`batches/L3_mdi_real.json`) y L4 (`batches/L4_mdi_fixtures.json`) contra el corpus canónico, que ya integra el set `mdi` de `make_fixtures.py`.",
+  "root": "corpus",
+  "profile": "readonly",
+  "fixtures": null,
+  "cases": [
+    {
+      "id": "L3-MDI-01",
+      "descripcion": "Origen: L3_mdi_real.json MDI-01 — forma del catálogo. `presentIn` cuenta DOCUMENTOS y un mapping anidado aparece junto a sus hojas como campos propios.",
+      "steps": [
+        {
+          "kind": "call",
+          "tool": "metadata_inspect",
+          "arguments": { "mode": "catalog", "limit": 100 },
+          "expect": {
+            "describe": "Se asevera la FORMA de la entrada y que el catálogo no viene vacío; el conjunto exacto de campos depende del corpus y por tanto NO se fija (FORMATO_EXPECT.md §6).",
+            "is_error": false,
+            "type": {
+              "structured.fields": "array",
+              "structured.fields.0.presentIn": "number",
+              "structured.fields.0.name": "string",
+              "structured.fields.0.inferredTypes": "object"
+            },
+            "min_length": { "structured.fields": 5 },
+            "present": [
+              "structured.fields.0.name",
+              "structured.fields.0.presentIn",
+              "structured.fields.0.inferredTypes"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "L3-MDI-03",
+      "descripcion": "Origen: L3_mdi_real.json MDI-03 — `mode: field` sobre un campo con tipos MEZCLADOS. El corpus da a `priority` número en la mayoría y cadena en uno de cada cuatro a propósito (make_corpus.py), así que `inferredTypes` tiene dos claves.",
+      "steps": [
+        {
+          "kind": "call",
+          "tool": "metadata_inspect",
+          "arguments": { "mode": "field", "field": "priority" },
+          "expect": {
+            "describe": "La heterogeneidad de tipos se VE en `inferredTypes`: es la superficie que permite a un agente descubrir por qué una comparación de orden abortará (ver gate_L1 · L1-TYP-ORDEN-MIXTO). Los conteos son del filesystem, así que solo se aseveran los TIPOS presentes.",
+            "is_error": false,
+            "equals": { "structured.field": "priority" },
+            "present": ["structured.inferredTypes.number", "structured.inferredTypes.string"],
+            "type": { "structured.presentIn": "number", "structured.missingIn": "number", "structured.values": "array" }
+          }
+        }
+      ]
+    },
+    {
+      "id": "L3-MDI-04",
+      "descripcion": "Origen: L3_mdi_real.json MDI-04 — un namespace reservado a secas NO es metadata. Fuente: mcp.yml metadata_inspect (E26-H09).",
+      "steps": [
+        {
+          "kind": "call",
+          "tool": "metadata_inspect",
+          "arguments": { "mode": "field", "field": "graph.backlinks" },
+          "expect": {
+            "describe": "Error RUIDOSO, no `presentIn: 0` silencioso: las propiedades calculadas no viven en ningún frontmatter. El mensaje remite a graph_query y da el anclaje que sí funcionaría.",
+            "error_code": "INVALID_SCHEMA",
+            "contains": { "text": "graph_query" }
+          }
+        }
+      ]
+    },
+    {
+      "id": "L3-MDI-05",
+      "descripcion": "Origen: L3_mdi_real.json MDI-05 — `frontmatter.` es un anclaje OPCIONAL en `mode: field`, y el `field` que se ecoa es el NORMALIZADO.",
+      "steps": [
+        {
+          "kind": "call",
+          "tool": "metadata_inspect",
+          "arguments": { "mode": "field", "field": "status" },
+          "expect": {
+            "describe": "Sin anclaje.",
+            "is_error": false,
+            "equals": { "structured.field": "status" }
+          }
+        },
+        {
+          "kind": "call",
+          "tool": "metadata_inspect",
+          "arguments": { "mode": "field", "field": "frontmatter.status" },
+          "expect": {
+            "describe": "Con anclaje: el `field` ecoado es el mismo path normalizado, no el que se pidió.",
+            "is_error": false,
+            "equals": { "structured.field": "status" }
+          }
+        }
+      ],
+      "expect": [
+        {
+          "invariant": "same",
+          "steps": [0, 1],
+          "path": "structured.values",
+          "describe": "Equivalencia estricta del anclaje: los dos modos de nombrar el MISMO campo dan el mismo vocabulario, elemento a elemento y en el mismo orden."
+        },
+        {
+          "invariant": "same",
+          "steps": [0, 1],
+          "path": "structured.presentIn",
+          "describe": "…y la misma presencia."
+        }
+      ]
+    },
+    {
+      "id": "L3-MDI-06-07",
+      "descripcion": "Origen: L3_mdi_real.json MDI-06/MDI-07/MDI-08 — validación de argumentos de la tool.",
+      "steps": [
+        {
+          "kind": "call",
+          "tool": "metadata_inspect",
+          "arguments": { "mode": "field" },
+          "expect": {
+            "describe": "`field` es obligatorio con `mode: field`.",
+            "error_code": "INVALID_SCHEMA",
+            "contains": { "text": "field" }
+          }
+        },
+        {
+          "kind": "call",
+          "tool": "metadata_inspect",
+          "arguments": { "mode": "invalido" },
+          "expect": {
+            "describe": "`mode` fuera de {catalog, field}: el mensaje enumera los dos válidos.",
+            "error_code": "INVALID_SCHEMA",
+            "contains": { "text": "catalog" }
+          }
+        },
+        {
+          "kind": "call",
+          "tool": "metadata_inspect",
+          "arguments": {},
+          "expect": {
+            "describe": "Sin `mode`: mismo código, nunca un default disfrazado.",
+            "error_code": "INVALID_SCHEMA"
+          }
+        }
+      ]
+    },
+    {
+      "id": "L3-MDI-10-LIMITE-1",
+      "descripcion": "Origen: L4_mdi_fixtures.json MDI-10 — CLASE LÍMITE 1 del dialecto de dot-paths: una clave con PUNTO LITERAL (`\"sonar.projectKey\"` de fixtures/dot-key.md) se ANUNCIA en el catálogo pero NO es direccionable, porque el path desciende a un mapa `sonar` que no existe. Fuente: query-language.md «Three things the dot-path dialect cannot say» (1).",
+      "steps": [
+        {
+          "kind": "call",
+          "tool": "metadata_inspect",
+          "arguments": { "mode": "field", "field": "sonar.projectKey" },
+          "expect": {
+            "describe": "Statu quo declarado: `presentIn: 0` SIN error, aunque el catálogo anuncie el nombre. Aquí el 0 es legítimo (no es un conteo de inventario: es la afirmación de que ningún documento tiene el mapa anidado).",
+            "is_error": false,
+            "equals": { "structured.presentIn": 0 },
+            "length": { "structured.values": 0 }
+          }
+        },
+        {
+          "kind": "call",
+          "tool": "knowledge_search",
+          "arguments": { "where": "sonar.projectKey = \"atlas-api\"" },
+          "expect": {
+            "describe": "Y la consulta correspondiente tampoco la alcanza: [] sin error.",
+            "is_error": false,
+            "length": { "structured.results": 0 }
+          }
+        }
+      ]
+    },
+    {
+      "id": "L3-MDI-11-LIMITE-2",
+      "descripcion": "Origen: L4_mdi_fixtures.json MDI-11/MDI-12 — CLASE LÍMITE 2: una clave de primer nivel llamada literalmente `frontmatter` (fixtures/frontmatter-key.md) COLISIONA con el anclaje del lenguaje. Fuente: query-language.md clase límite 2; mcp.yml E26-H09.",
+      "steps": [
+        {
+          "kind": "call",
+          "tool": "metadata_inspect",
+          "arguments": { "mode": "field", "field": "frontmatter.x" },
+          "expect": {
+            "describe": "Error RUIDOSO que EXPLICA la colisión y da la salida (`knowledge_search{include:[frontmatter.frontmatter.x]}`), en vez de un `presentIn: 0` que parecería «ese campo no existe».",
+            "error_code": "INVALID_SCHEMA",
+            "contains": { "text": "frontmatter.frontmatter.x" }
+          }
+        },
+        {
+          "kind": "call",
+          "tool": "knowledge_search",
+          "arguments": { "include": ["frontmatter.frontmatter.x"], "limit": 100 },
+          "expect": {
+            "describe": "La única superficie que SÍ lee esa clave: el prefijo es anclaje y el sufijo, literal.",
+            "is_error": false,
+            "min_length": { "structured.results": 1 }
+          }
+        }
+      ]
+    },
+    {
+      "id": "L3-MDI-10b-LIMITE-3",
+      "descripcion": "Origen: L4_mdi_fixtures.json MDI-10b — CLASE LÍMITE 3: `env: {region: us-east}` (nested-env.md) y la clave literal `\"env.region\": eu-west` (flat-env.md) se anuncian IGUAL en el catálogo, pero solo la anidada es alcanzable. Fuente: query-language.md clase límite 3.",
+      "steps": [
+        {
+          "kind": "call",
+          "tool": "metadata_inspect",
+          "arguments": { "mode": "field", "field": "env.region" },
+          "expect": {
+            "describe": "El catálogo no puede distinguirlas, pero la inspección solo VE la anidada: un único valor, `us-east`, nunca `eu-west`.",
+            "is_error": false,
+            "equals": { "structured.presentIn": 1, "structured.values.0.value": "us-east" },
+            "length": { "structured.values": 1 }
+          }
+        },
+        {
+          "kind": "call",
+          "tool": "knowledge_search",
+          "arguments": { "where": "env.region contains \"e\"", "include": ["frontmatter.env.region"], "limit": 10 },
+          "expect": {
+            "describe": "Y la consulta devuelve SOLO el documento anidado; el de la clave plana (`eu-west`) es inalcanzable por diseño. La proyección devuelve el SUFIJO TAL CUAL se pidió, sin re-anidar (informe §4, G1-22): la clave del mapa es la cadena «env.region» con punto literal. Por eso el valor se asevera sobre `text` con `contains` y no con un path: el selector de FORMATO_EXPECT.md §3.1 declara que una clave con punto literal no es direccionable, y este es justo ese caso.",
+            "is_error": false,
+            "length": { "structured.results": 1 },
+            "equals": { "structured.results.0.path": "fixtures/nested-env.md" },
+            "contains": { "text": "\"env.region\":\"us-east\"" },
+            "not_contains": { "text": "eu-west" }
+          }
+        }
+      ]
+    }
+  ]
+}

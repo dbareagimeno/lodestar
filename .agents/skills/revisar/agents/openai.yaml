@@ -1,0 +1,4 @@
+interface:
+  display_name: "Revisar entrega"
+  short_description: "Revisión fresca basada en evidencia verificable"
+  default_prompt: "Use $revisar para juzgar este diff completo contra su spec y las autoridades del repositorio."

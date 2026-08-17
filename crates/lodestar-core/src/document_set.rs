@@ -65,6 +65,13 @@ impl DocumentSet {
         &self.files
     }
 
+    /// Reconstruye el agregado para un nuevo mapa de documentos, preservando los ficheros de
+    /// proyecto no documentales del inventario original.
+    pub fn rebase_files(&self, files: crate::types::FileMap) -> Self {
+        let inventory = self.inventory.replacing_documents(files.keys().cloned());
+        Self::build(files, inventory)
+    }
+
     /// El inventario con el que se resuelven los enlaces: los documentos de este `FileMap` más los
     /// ficheros del proyecto declarados en [`DocumentSet::with_other_files`].
     pub fn inventory(&self) -> &Inventory {

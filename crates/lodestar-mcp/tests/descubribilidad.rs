@@ -126,12 +126,39 @@ impl Sesion {
             salida,
             siguiente_id: 1,
         };
-        let hola = sesion.peticion("initialize", json!({"protocolVersion":"2025-06-18"}));
+        let hola = sesion.peticion(
+            "initialize",
+            json!({
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": {
+                    "name": "lodestar-descubribilidad",
+                    "version": "1"
+                }
+            }),
+        );
         assert_eq!(
             hola["result"]["serverInfo"]["name"], "lodestar-mcp",
             "el handshake debe identificar al servidor: {hola}"
         );
+        sesion.notificacion("notifications/initialized", json!({}));
         sesion
+    }
+
+    /// Manda una notificación JSON-RPC y solo vacía el stdin: al no tener `id`, no corresponde
+    /// leer ninguna respuesta que pudiera desalinear la siguiente petición.
+    fn notificacion(&mut self, metodo: &str, params: Value) {
+        let linea = json!({
+            "jsonrpc": "2.0",
+            "method": metodo,
+            "params": params
+        })
+        .to_string();
+        writeln!(self.entrada, "{linea}")
+            .expect("escribir la notificación en el stdin del servidor");
+        self.entrada
+            .flush()
+            .expect("vaciar el stdin del servidor tras la notificación");
     }
 
     /// Manda **una** línea JSON-RPC y lee **una** respuesta del mismo proceso, aseverando la
@@ -2207,13 +2234,13 @@ fn valor_de_ejemplo(tool: &str, prop: &str, esquema: &Value) -> Value {
         ("knowledge_search", "include") => return json!(["frontmatter.status"]),
         ("knowledge_search", "filter") => {
             return json!({ "field": "frontmatter.status", "operator": "equals",
-                           "value": "accepted" })
+                           "value": "accepted" });
         }
         ("knowledge_get", "include") => return json!(["revision"]),
         ("knowledge_get", "sections") => return json!([["Alfa"]]),
         ("knowledge_check", "scope") => return json!({ "kind": "workspace" }),
         ("graph_query", "ref") | ("impact_analyze", "ref") => {
-            return json!({ "path": "notas/alfa.md" })
+            return json!({ "path": "notas/alfa.md" });
         }
         ("graph_query", "to") => return json!({ "path": "notas/beta.md" }),
         ("impact_analyze", "proposedOperation") => return json!({ "kind": "delete" }),
@@ -2221,7 +2248,7 @@ fn valor_de_ejemplo(tool: &str, prop: &str, esquema: &Value) -> Value {
         ("change_plan", "selection") => return json!({ "where": "status = \"draft\"" }),
         ("change_plan", "operation") => return json!({ "patch_frontmatter": { "revisado": true } }),
         ("change_plan", "policy") => {
-            return json!({ "requireValidResult": false, "allowWarnings": true })
+            return json!({ "requireValidResult": false, "allowWarnings": true });
         }
         // Un `cursor` inventado es un valor inválido, no una clave desconocida: se manda vacío para
         // que, si acaso falla, no sea por «no declarado» (que es lo único que este test juzga).

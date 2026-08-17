@@ -70,6 +70,10 @@ def call(method, params):
         sys.exit(f"respuesta de error en {method}: {resp}")
     return resp["result"]
 
+def notify(method, params):
+    proc.stdin.write(json.dumps({"jsonrpc": "2.0", "method": method, "params": params}) + "\n")
+    proc.stdin.flush()
+
 def tool(name, args):
     return call("tools/call", {"name": name, "arguments": args})["structuredContent"]
 
@@ -77,7 +81,12 @@ def aserta(cond, msg):
     if not cond:
         sys.exit(f"assert fallido: {msg}")
 
-call("initialize", {})
+call("initialize", {
+    "protocolVersion": "2025-11-25",
+    "capabilities": {},
+    "clientInfo": {"name": "lodestar-demo-smoke", "version": "1.0.0"},
+})
+notify("notifications/initialized", {})
 
 r = tool("knowledge_search", {"where": "has(service) and service.tier = 1",
                               "include": ["frontmatter.oncall"]})

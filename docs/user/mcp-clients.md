@@ -8,7 +8,7 @@ this page comes from a real run against [`examples/demo/`](../../examples/demo/R
 
 - [Claude Code](#claude-code)
 - [Any client configured with JSON](#any-client-configured-with-json)
-- [Protocol version negotiation](#protocol-version-negotiation)
+- [Protocol version policy](#protocol-version-policy)
 - [`--root`: when to pass it, when to omit it](#--root-when-to-pass-it-when-to-omit-it)
 - [Profiles: `readonly` and `standard`](#profiles-readonly-and-standard)
 - [A tour of the ten tools](#a-tour-of-the-ten-tools)
@@ -82,6 +82,10 @@ it.)
 There is no positional argument and no other transport: `lodestar-mcp [--root <dir>]
 [--profile readonly|standard]` is the whole startup surface.
 
+The process is served by the official Rust SDK, `rmcp 3.1.2`. It owns line framing, the MCP
+lifecycle and EOF shutdown. Closing the client's stdin closes the server cleanly after in-flight
+responses finish; Lodestar never prints a banner or log to stdout.
+
 ### Poking the server by hand
 
 Because the protocol is line-delimited JSON on `stdio`, you can drive it from a shell — which is how
@@ -89,17 +93,20 @@ every console block below was produced. Three request files, run from `examples/
 
 ```bash
 cat > requests.jsonl <<'EOF'
-{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05"}}
+{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"raw-harness","version":"1"}}}
+{"jsonrpc":"2.0","method":"notifications/initialized"}
 {"jsonrpc":"2.0","id":2,"method":"tools/list"}
 EOF
 
 cat > status.jsonl <<'EOF'
-{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05"}}
+{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"raw-harness","version":"1"}}}
+{"jsonrpc":"2.0","method":"notifications/initialized"}
 {"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"workspace_status","arguments":{}}}
 EOF
 
 cat > call-change-plan.jsonl <<'EOF'
-{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05"}}
+{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"raw-harness","version":"1"}}}
+{"jsonrpc":"2.0","method":"notifications/initialized"}
 {"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"change_plan","arguments":{"operations":[{"op":"patch_frontmatter","path":"adr/0002-event-bus.md","patch":{"status":"accepted"}}]}}}
 EOF
 ```
@@ -107,26 +114,61 @@ EOF
 The server reads until `stdin` closes, so piping a file in and a `jq` filter out gives you one
 complete exchange per run. (`2>/dev/null` below just drops the startup log line.)
 
-## Protocol version negotiation
+## Protocol version policy
 
-`initialize.params.protocolVersion` is optional. Three outcomes:
+Lodestar freezes exactly two MCP eras. Modern (`2026-07-28`) is stateless and is the explicit
+latest policy; Legacy (`2025-11-25`) uses the `initialize` lifecycle. Both eras expose the same
+ten tools and announce only the `tools` capability. Stateless requests using another date are
+rejected; `initialize` is the explicit Legacy selector and always negotiates its one baseline.
 
-- **Omitted** — valid. The server answers with its default, `2024-11-05`, no error.
-- **Present and one of `2024-11-05`, `2025-03-26`, `2025-06-18`** — echoed back as-is.
-- **Present as a string, but any other value** — a rejected handshake, not a silent fallback:
-  JSON-RPC error `-32602` with a message listing the three accepted versions, and no `result` at
-  all.
-- **Present but not a string at all** (a number, a boolean, an array, an object, or an explicit
-  `null`) — rejected the same way, `-32602`, with a message naming the type that arrived. Sending
-  `"protocolVersion": null` is *not* the same as omitting the key: the key is there, and what it
-  declares is not a version. Until v0.5.0 all of these were treated as "omitted" and got a
-  successful handshake with the default version.
+Modern requests carry their protocol version and client capabilities in `params._meta` on every
+request. There is no Modern handshake: a client may open directly with `server/discover`,
+`tools/list` or `tools/call`. For example:
 
-```console
-$ echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"1990-01-01"}}' \
-  | lodestar-mcp --root examples/demo 2>/dev/null
-{"error":{"code":-32602,"message":"protocolVersion no soportada: «1990-01-01». Versiones aceptadas: 2024-11-05, 2025-03-26, 2025-06-18"},"id":1,"jsonrpc":"2.0"}
+```json
+{"jsonrpc":"2.0","id":1,"method":"server/discover","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{},"io.modelcontextprotocol/clientInfo":{"name":"raw-harness","version":"1"}}}}
 ```
+
+Discovery returns only the Modern revision, the `tools` capability, profile-filtered instructions,
+`resultType: "complete"`, `ttlMs: 0`, `cacheScope: "private"`, and `serverInfo` in response
+metadata. Every Modern request repeats protocol version, client capabilities and a client identity
+with non-empty `name` and `version`. Modern `tools/list` carries the same result and cache hints;
+Modern `tools/call` carries `resultType: "complete"`. Omitting or malforming required metadata
+returns `-32602`. An unknown
+stateless revision returns `-32022` with the requested and supported revisions and never falls back
+to Legacy. `initialize` and `ping` are not Modern methods and return method not found.
+
+Legacy clients negotiate `2025-11-25` during `initialize`. Clients should select one of these two
+explicit eras.
+
+For the Legacy lifecycle, send a complete MCP `initialize`: string `protocolVersion`,
+`capabilities` and `clientInfo`, followed by `notifications/initialized`. Any requested version
+string selects Legacy and the response negotiates its sole baseline, `2025-11-25`; an old or future
+string does not create support for that revision and never selects Modern. Parameter shape and
+types are validated by rmcp before Lodestar's handler, so clients should not rely on the permissive
+partial initialize accepted by the retired manual loop.
+
+After the handshake, Legacy supports only `ping`, `tools/list` and `tools/call` (plus the
+`notifications/initialized` notification). `server/discover` is Modern-only. Legacy responses do
+not contain `resultType`, `ttlMs` or `cacheScope`.
+
+## Cancellation and shutdown
+
+For an in-flight request, send the standard `notifications/cancelled` notification with its
+`requestId`. rmcp correlates the notification and emits no response for it. If the request is still
+waiting for Lodestar's serial turn, it is discarded before the tool runs. A notification without a
+`requestId` does not cancel another call.
+
+Cancellation is cooperative, not rollback. Once a tool has acquired the serial turn, Lodestar lets
+the synchronous `App` operation finish so a Markdown transaction is never interrupted halfway
+through publication. A late cancellation therefore does not undo an already completed change; its
+receipt remains valid. To undo such a change, use `change_revert` explicitly. Closing stdin ends the
+stdio session cleanly after in-flight work drains.
+
+This also closes [issue #38](https://github.com/dbareagimeno/lodestar/issues/38): its exact
+`initialize` frame now negotiates the Legacy baseline instead of returning `-32602`. Pull request
+#39 is superseded because merely adding one revision to a historical allow-list would still reject
+older or future strings; E34 always negotiates the single Legacy baseline.
 
 ## `--root`: when to pass it, when to omit it
 
@@ -163,6 +205,10 @@ current file.
 
 The three change tools are `change_plan`, `change_apply` and `change_revert`. Under `readonly` they
 do not appear in `tools/list`:
+
+Both profiles use the same `LodestarMcpService`, catalog and dispatcher. `readonly` is a startup
+filter over that service: it removes exactly the three change tools and rejects direct calls to
+them; it is not a second server with a separately maintained schema or implementation.
 
 ```console
 $ lodestar-mcp --root . --profile readonly < requests.jsonl | jq -c 'select(.id==2)|.result.tools|map(.name)'

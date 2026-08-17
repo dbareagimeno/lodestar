@@ -51,12 +51,24 @@ impl Sesion {
             .expect("arrancar lodestar-mcp");
         let stdin = proc.stdin.take().expect("stdin");
         let stdout = BufReader::new(proc.stdout.take().expect("stdout"));
-        Sesion {
+        let mut sesion = Sesion {
             proc,
             stdin: Some(stdin),
             stdout,
             id: 0,
-        }
+        };
+        sesion.envia(
+            "initialize",
+            serde_json::json!({
+                "protocolVersion": "2025-11-25",
+                "capabilities": {},
+                "clientInfo": {"name": "lodestar-diagnostico-lock", "version": "1"}
+            }),
+        );
+        let respuesta = sesion.lee();
+        assert_eq!(respuesta["result"]["serverInfo"]["name"], "lodestar-mcp");
+        sesion.notificacion("notifications/initialized");
+        sesion
     }
 
     fn pid(&self) -> u32 {
@@ -77,6 +89,17 @@ impl Sesion {
         let mut linea = String::new();
         self.stdout.read_line(&mut linea).expect("leer respuesta");
         serde_json::from_str(&linea).expect("stdout = JSON-RPC puro")
+    }
+
+    fn notificacion(&mut self, metodo: &str) {
+        let stdin = self.stdin.as_mut().expect("stdin vivo");
+        writeln!(
+            stdin,
+            "{}",
+            serde_json::json!({"jsonrpc":"2.0","method":metodo})
+        )
+        .expect("escribir notificación");
+        stdin.flush().expect("flush notificación");
     }
 
     fn tool_cruda(&mut self, nombre: &str, args: serde_json::Value) -> serde_json::Value {
@@ -249,11 +272,6 @@ fn sonda_e30h02_reclamo_tras_sigkill_cosechado() {
         let lock = lee_lock(dir.path());
 
         let mut s2 = Sesion::abrir(dir.path());
-        s2.envia(
-            "initialize",
-            serde_json::json!({"protocolVersion": "2025-06-18", "capabilities": {}}),
-        );
-        let _ = s2.lee();
         let plan2 = s2.tool_cruda(
             "change_plan",
             serde_json::json!({
@@ -320,11 +338,6 @@ fn sonda_e30h02_reclamo_con_dueño_zombi() {
         let vida_zombi = lock.pid.map_or("(sin pid)", vida);
 
         let mut s2 = Sesion::abrir(dir.path());
-        s2.envia(
-            "initialize",
-            serde_json::json!({"protocolVersion": "2025-06-18", "capabilities": {}}),
-        );
-        let _ = s2.lee();
         let plan2 = s2.tool_cruda(
             "change_plan",
             serde_json::json!({
@@ -383,11 +396,6 @@ fn sonda_e30h02_lock_con_cuerpo_no_escrito() {
         std::fs::write(runtime.join("lock.json"), cuerpo).unwrap();
 
         let mut s = Sesion::abrir(dir.path());
-        s.envia(
-            "initialize",
-            serde_json::json!({"protocolVersion": "2025-06-18", "capabilities": {}}),
-        );
-        let _ = s.lee();
         let plan = s.tool_cruda(
             "change_plan",
             serde_json::json!({
@@ -450,11 +458,6 @@ fn sonda_e30h02_sigkill_apuntado_a_la_ventana_del_cuerpo() {
         }
 
         let mut s2 = Sesion::abrir(dir.path());
-        s2.envia(
-            "initialize",
-            serde_json::json!({"protocolVersion": "2025-06-18", "capabilities": {}}),
-        );
-        let _ = s2.lee();
         let plan2 = s2.tool_cruda(
             "change_plan",
             serde_json::json!({

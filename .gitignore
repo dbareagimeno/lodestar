@@ -40,3 +40,10 @@ mutants.out*/
 # lodestar: cache y runtime desechables (no versionar)
 .lodestar/index.db
 .lodestar/runtime/
+
+# Banco de pruebas (E33): los corpus se GENERAN en runtime y nunca se commitean
+# (`ARCHITECTURE.md §22.2`), igual que los worktrees efímeros y el scratch del arnés.
+docs/qa/testbench/wt/
+docs/qa/testbench/corpus*/
+__pycache__/
+*.pyc

@@ -122,9 +122,11 @@ transaction, with its own journal and its own recovery copies.
 
 `change_plan` does everything except write:
 
-1. **Normalizes** each operation into concrete paths and content. One high-level operation can
-   expand into several — a `move` with `rewriteInboundLinks` becomes the move plus one rewrite per
-   linking document — and all of them travel as a single change set.
+1. **Normalizes in order** against an in-memory working copy. Each operation sees the result of the
+   previous ones, and every terminal operation is applied to that copy before the next operation is
+   interpreted. One high-level operation can expand into several — a `move` with
+   `rewriteInboundLinks` becomes the move plus one rewrite per linking document — and those
+   terminal operations are staged in their emitted order.
 2. **Captures revisions**: the `baseWorkspaceRevision` it planned against, plus (for a bulk
    selection) the `DocumentRevision` of every selected document in `capturedRevisions`.
 3. **Simulates** the result in memory and derives the `semanticDiff` (created, deleted, moved,
@@ -133,13 +135,16 @@ transaction, with its own journal and its own recovery copies.
    `risk` level with its reasons.
 5. **Validates** the hypothetical result: `diagnosticsBefore` and `diagnosticsAfter` let you see
    whether the change repairs, preserves or degrades the workspace.
-6. **Stamps identity**: `planHash` is `blake3(baseWorkspaceRevision ‖ normalized operations)`, so
-   the same input on the same base always yields the same hash — and a different input never does.
-   The `changeSetId` derives from it. The hash does **not** depend on the clock; `expiresAt` does,
-   and is not part of it.
+6. **Stamps identity**: `planHash` covers a Lodestar domain, the internal planner-semantics version,
+   `baseWorkspaceRevision`, and the normalized operations. The same input on the same base and
+   planner semantics yields the same hash — and a different input does not. The `changeSetId`
+   derives from it. The hash does **not** depend on the clock; `expiresAt` does, and is not part of
+   it.
 
 A plan is stored and stays applicable for **one hour** (`expiresAt`, seconds since the epoch). After
-that, `change_apply` answers `PLAN_EXPIRED` and you plan again.
+that, `change_apply` answers `PLAN_EXPIRED` and you plan again. A stored plan produced with an older
+planner semantics is rejected earlier as `PLAN_STALE`: its resolved terminal bodies cannot be
+repaired safely without the original intent, so call `change_plan` again.
 
 ## `canApply` is the plan's verdict, and it binds
 
@@ -261,19 +266,26 @@ knowing:
 - The operation **stays** in `normalizedOperations`; `index` points at it there. The field is
   additive — nothing is removed from the plan.
 - `op` names the **normalized** operation, so a `replace_text` shows up as `replace_body`.
-- It does not discriminate by operation type: **any** operation whose document ends up identical is
-  listed — a `move` with `from == to`, a `patch_frontmatter` writing the scalar that was already
-  there. The test is **bytes**, not meaning, and two cases catch people out:
+- It does not discriminate by operation type: **any terminal operation** that leaves its affected
+  paths byte-for-byte and existence-for-existence unchanged is listed — a `move` with `from == to`,
+  or a `patch_frontmatter` writing the scalar that was already there. The comparison is against the
+  state immediately before that terminal operation, not against the beginning or end of the whole
+  plan. Two cases catch people out:
   - **`patch_frontmatter` over a collection in flow style.** Patching `tags` with `["a","b"]` when
     the block already reads `tags: [a, b]` is *not* a no-op: the key you patch is rewritten in block
     style, so the bytes differ even though the value does not. Untouched keys keep their formatting;
     the patched one does not.
   - **`edit_section` with the content it already had.** A no-op *only if the bytes come out the
     same*, and section editing fixes the blank lines around the section — so often they do not.
-- The verdict is **per document**, not per operation: it compares the document before and after the
-  whole plan. One operation per document — including bulk `selection`, which expands to exactly one
-  — is exact. Several operations on the *same* path all share that path's verdict, so keep one
-  operation per document when you want to read this field per operation.
+- The verdict is **per terminal operation**. Several operations on the same path receive independent
+  verdicts. Consequently, `AAA → BBB → AAA` can have an empty net `semanticDiff` and an empty
+  `noOpOperations`: both replacements changed the state they received, even though the complete
+  plan returned to its starting bytes.
+
+Several edits to one document are safe in one plan and compose in order. For example, three
+`replace_text` operations can replace `ALFA`, then `BETA`, then `GAMMA`; the second normalized
+`ReplaceBody` already contains the `ALFA` edit and the third contains all three. A later operation
+can also search for text introduced by an earlier one.
 
 **Pass `expectedOccurrences` whenever you know how many replacements you expect** — it turns a wrong
 count, zero included, into a refusal *before* you apply. `noOpOperations` tells you afterwards that
@@ -289,8 +301,11 @@ the answer.
 
 ## Bulk selections
 
-Instead of an `operations` array you can pass a `selection` plus a single `operation`, and the
-operation expands to one per selected document. The selection speaks the
+Instead of an `operations` array you can pass a `selection` plus a single `operation`. Lodestar
+first fixes the selected paths and their revisions against the base snapshot, then instantiates the
+operation for each selected document in deterministic order. Each instance is normalized against
+the working result of the previous instances, and one instance can emit several terminal
+operations (for example, a `delete` with `remove_links`). The selection speaks the
 [query language](query-language.md); `patch_frontmatter`, `replace_text` and `delete` are the
 operations that make sense in bulk.
 

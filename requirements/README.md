@@ -180,9 +180,11 @@ español.
 
 | Épica | Estado | Área | Doc |
 |---|---|---|---|
-| **E28** — Fase 0: defectos destructivos del testbench homelab | completa (H01-H04), pendiente de merge | `change_revert` de un recibo `-revert` restaura de verdad (+ unifica la coreografía de sellado de `decisiones §16(i)`) · guard de colisión en `create`/`move` (`DOCUMENT_ALREADY_EXISTS`, catálogo 16→17) · **adenda**: identidad de `txnId` libre en `change_apply`/`change_revert` (H03) · normalización contra estado acumulado del change set (H04) | [epica-28-defectos-destructivos-testbench.md](epica-28-defectos-destructivos-testbench.md) |
-| **E29** — Fase 1: honestidad de superficie | completa (H01-H11), pendiente de merge | config estricta (`§16e`+A-08) · `policy` parcial (`§19b`) · `has(frontmatter)` (`§19a`) · type error de afijo (A-04) · scope `paths` (A-07) · aviso de workspace vacío (`§16f`) · `canApply` vinculante (`§18`) · wire estricto (`§15`) · `instructions` por perfil + `protocolVersion` (D-01) · repliegue de la API no transaccional (`§16g`) · retirada del `Envelope` (`§16b`) | [epica-29-honestidad-superficie.md](epica-29-honestidad-superficie.md) |
-| **E30** — Fase 2+3: ciclo de higiene y escoba | propuesta, pendiente de ratificación | cursores estrictos: malformado/ajeno es `INVALID_SCHEMA` (`§16j`+A-02/A-03) · diagnóstico y arreglo de la flakiness de `crash_por_senal_no_deja_parciales` · escoba documental: D-02 (merge-patch RFC 7386 en `§20.4`), A-01, A-06, A-09, A-10 + seguimientos de E28/E29 (`contains` con literal no-string, divergencia `workspace_status.counts`, SARIF bajo `.lodestar/`, `PATH-NOT-UTF8` sin red, `protocolVersion` no-string, mensaje duplicado de `INVALID_RESULT`) | [epica-30-higiene-escoba.md](epica-30-higiene-escoba.md) |
+| **E28** — Fase 0: defectos destructivos del testbench homelab | completa (H01-H04) | `change_revert` de un recibo `-revert` restaura de verdad (+ unifica la coreografía de sellado de `decisiones §16(i)`) · guard de colisión en `create`/`move` (`DOCUMENT_ALREADY_EXISTS`, catálogo 16→17) · **adenda**: identidad de `txnId` libre en `change_apply`/`change_revert` (H03) · normalización contra estado acumulado del change set (H04) | [epica-28-defectos-destructivos-testbench.md](epica-28-defectos-destructivos-testbench.md) |
+| **E29** — Fase 1: honestidad de superficie | completa (H01-H11) | config estricta (`§16e`+A-08) · `policy` parcial (`§19b`) · `has(frontmatter)` (`§19a`) · type error de afijo (A-04) · scope `paths` (A-07) · aviso de workspace vacío (`§16f`) · `canApply` vinculante (`§18`) · wire estricto (`§15`) · `instructions` por perfil + `protocolVersion` (D-01) · repliegue de la API no transaccional (`§16g`) · retirada del `Envelope` (`§16b`) | [epica-29-honestidad-superficie.md](epica-29-honestidad-superficie.md) |
+| **E30** — Fase 2+3: ciclo de higiene y escoba | completa (H01-H03, 2026-08-07) | cursores estrictos: malformado/ajeno es `INVALID_SCHEMA` (`§16j`+A-02/A-03) · diagnóstico y arreglo de la flakiness de `crash_por_senal_no_deja_parciales` · escoba documental: D-02 (merge-patch RFC 7386 en `§20.4`), A-01, A-06, A-09, A-10 + seguimientos de E28/E29 (`contains` con literal no-string, divergencia `workspace_status.counts`, SARIF bajo `.lodestar/`, `PATH-NOT-UTF8` sin red, `protocolVersion` no-string, mensaje duplicado de `INVALID_RESULT`) | [epica-30-higiene-escoba.md](epica-30-higiene-escoba.md) |
+| **E31** — los dos seguimientos de la campaña | completa (H01-H02, 2026-08-08) | retirada de `Workspace::revert_transaction` (`§25`) · la cabecera se preserva byte a byte + `noOpOperations` en el plan (`§26`) · su pasada de `/mutantes` de cierre abre `decisiones §27` | [epica-31-seguimientos-campana.md](epica-31-seguimientos-campana.md) |
+| **E32** — los seis gaps de suite de `§27` | completa (H01, 2026-08-10) | tests-only sobre `lodestar-core`: CRLF en `split_front` · no-op de `patch_frontmatter` + fallback declarado · `relation_changes` de `semantic_diff` · `NormalizeTargetNotFound` de los normalizadores · orden total de `sort_paths_cmp` · estrechamiento de rango de `locate_section` — cada test verificado con su mutación en rojo | [epica-32-gaps-suite-mutantes.md](epica-32-gaps-suite-mutantes.md) |
 
 **Orden de construcción (E28)**: `H01` y `H02` son independientes y paralelizables (ficheros y
 garantías distintas); `H01` va primero en la secuencia por gravedad (pérdida de datos activa) y por
@@ -207,6 +209,28 @@ E28-H01 esté integrada**, por compartir `crates/lodestar-workspace/tests/transa
 rector**: *la superficie solo promete lo que el motor ejecuta hoy* (`§21.5` generalizado del exterior
 al wire), con el corolario de E26: *una respuesta silenciosamente equivocada es peor que un error*.
 
+## Mapa de la épica de evidencia (`ARCHITECTURE.md §22`)
+
+> Origen: `decisiones §9` punto 1 (gate de rendimiento, **condición de entrada de `decisiones
+> §14`**) + orden de trabajo de `decisiones/README.md`, punto 3. Diseño **ratificado el 2026-08-10**
+> (`ARCHITECTURE.md §22`). Convierte el testbench de `decisiones §23` (`docs/qa/testbench/`) en
+> banco permanente por release, mide cold-open y coste por llamada a ~10k en tres variantes de
+> camino de lectura, y produce el paquete de evidencia que deja `§14` **lista para decidir** — sin
+> decidirla: la épica produce datos, la decisión es del usuario.
+
+| Épica | Estado | Área | Doc |
+|---|---|---|---|
+| **E33** — Épica de evidencia: banco permanente + gate de rendimiento + dogfooding | planificada (ratificada 2026-08-10) | corpus canónico determinista + generador de escala compartido · runner asertable (veredicto mecánico, portable) · centinelas `§22`/`§24` · bench 3 variantes × 3 escalas (`lodestar-bench`, `publish = false`) · umbrales-tras-medición con **puerta interna** + smoke CI · dogfooding acotado con diario · enganche a `RELEASING.md` + corrida datada · paquete de evidencia para `§14` | [epica-33-banco-evidencia.md](epica-33-banco-evidencia.md) |
+
+**Orden de construcción (E33)**: `H01 → H02 → H04 → H03 → H05 → H06 → H07 → H08`, con las ramas de
+conformidad (H02→H03) y rendimiento (H04→H05) **paralelizables** tras H01. **H05 lleva una puerta
+interna**: los umbrales del gate los ratifica el usuario con la primera corrida de H04 delante
+(anclas: p95 ≤ 1 s por tool de lectura a 10k; cold-open ≤ 5 s) — su segunda mitad no se implementa
+sin esa ratificación. Ninguna historia toca `contracts/mcp.yml` ni está `[BLOQUEADA]` por decisión
+abierta. **Principio rector**: *medir antes que opinar, registrar antes que decidir* — el banco
+produce hechos re-ejecutables; los umbrales, `§14` y `§22`/`§24` los decide el usuario con los
+números delante, fuera del banco.
+
 ## Formato de una historia
 
 Cada historia tiene un identificador estable `E<épica>-H<nn>` y esta plantilla:
@@ -214,7 +238,7 @@ Cada historia tiene un identificador estable `E<épica>-H<nn>` y esta plantilla:
 ```
 ### E1-H07 — Título corto y accionable
 - **Objetivo**: una frase: qué capacidad entrega.
-- **Referencias**: ARCHITECTURE §X.Y · prototipo `funcA`/`funcB` · historias relacionadas.
+- **Referencias**: ARCHITECTURE §X.Y · spec/decisiones vigentes · historias relacionadas.
 - **Alcance**: el trabajo concreto, en viñetas. Incluye señales de API (firmas Rust) cuando el
   contrato las fija.
 - **Fuera de alcance**: lo que NO entra (para evitar scope creep).
@@ -230,7 +254,7 @@ Una historia está `Done` cuando:
 1. **Compila** en el workspace sin warnings nuevos (`cargo build`/`cargo clippy -- -D warnings`).
    Los gates del frontend (`svelte-check`/`tsc`) se retiraron de `main` con la UI
    (`experimental/ui-desktop`).
-2. **Tiene tests** que cubren su comportamiento (unit + el arnés de paridad/golden que aplique) y
+2. **Tiene tests** que cubren su comportamiento (unit + golden/integración que aplique) y
    **pasan** (`cargo test --workspace`, más `--features test-failpoints` en los crates que lo
    gatean).
 3. **Respeta los invariantes no negociables** de `CLAUDE.md` / `ARCHITECTURE.md §2,§10`:
@@ -238,7 +262,7 @@ Una historia está `Done` cuando:
    newtype.
 4. **No reintroduce duplicación de tipos** ni capa DTO paralela (principio #4).
 5. **Documenta** la superficie pública nueva (`///` en Rust) en español.
-6. El **arnés de paridad** de su fase sigue verde (cuando exista).
+6. Las comprobaciones específicas de su frontera o política siguen verdes.
 
 ## Invariantes que toda historia debe preservar (recordatorio)
 

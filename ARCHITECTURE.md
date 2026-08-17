@@ -10,8 +10,8 @@
 > **⚠️ TABLA DE ÉPOCA (v0.2), no el stack vigente.** Es la primera tabla del documento y describe el
 > producto **antes** del giro headless (`§19`) y de la migración a Markdown universal (`§20`).
 > Siguen siendo ciertas las filas de **Backend/Rust**, **Cache SQLite/FTS5**, **Watcher `notify`**,
-> **Fachada agentes (MCP)** y **Fachada CI (CLI)** — salvo que `rmcp` sigue sin adoptarse
-> (`decisiones §3`) y que la semántica ya no es «OKF» sino Markdown universal (`§20`).
+> **Fachada agentes (MCP)** y **Fachada CI (CLI)** — con `rmcp` adoptado por E34 sobre stdio
+> (`decisiones §3`) y con semántica Markdown universal, ya no «OKF» (`§20`).
 > **Han dejado de ser ciertas**: «Shell de escritorio (Tauri v2)» y «Frontend (Svelte 5 + Vite)»
 > —la UI se retiró de `main` a la rama `experimental/ui-desktop` con el giro headless (`§19.1`)— y
 > **«Versionado: git»**, que salió de la superficie en `E9-H02` y del repo en `E15-H01`: no existe
@@ -396,12 +396,50 @@ Tabla de comandos (nombres congelados): `open_bundle` · `pick_dir` · `get_snap
 ### 7.2 MCP (`lodestar-mcp`, rmcp, stdio)
 Scope = **semántica, no CRUD** (Claude Code ya tiene Read/Write/Edit). Logs solo a stderr; stdout = JSON-RPC.
 
-- **Tools**: `find_backlinks` · `find_orphans` · `find_dangling` · `neighborhood(concept, depth, direction)` ·
-  `conformance_check(path?)` · `query(dsl)` · `create_concept`(validado) · `update_frontmatter`(validado, patch merge-patch RFC 7386: `null` elimina la clave) ·
-  `generate_index` · `generate_tag_indexes`.
-- **Resources** (read-only): lista de concepts · índice de frontmatter · gate de conformidad en vivo · grafo de enlaces.
-- No expone `read_file`/`write_file`. El valor es lo que los ficheros crudos no dan barato: backlinks resueltos,
-  ghosts, huérfanos, impacto, la puerta OKF, query estructurada y **escrituras validadas**.
+**E34 — política dual-era ratificada.** La fachada usa `rmcp = 3.1.2` y Tokio únicamente en
+`lodestar-mcp`, cuyo MSRV es `1.88`; el workspace y las demás crates conservan `1.80`. La única
+fuente de versiones es `crates/lodestar-mcp/src/protocol_policy.rs`: Modern (`2026-07-28`) es
+`LATEST` explícito y stateless; Legacy (`2025-11-25`) conserva el lifecycle de handshake. Fuera de
+`initialize`, cualquier otra fecha (incluidas futuras, draft o intermedias) se rechaza;
+`initialize` siempre selecciona la baseline Legacy, sin crear una rama para la fecha solicitada. Ambas eras comparten el mismo
+catálogo de diez tools y anuncian únicamente la capacidad `tools`; no se añaden capacidades ni
+objetivos fuera de esa lista. E34-H01 fija esta política; H02–H06 implementan servicio, transporte
+y wire por separado.
+
+- **Tools**: `workspace_status` · `knowledge_search` · `knowledge_get` · `metadata_inspect` ·
+  `knowledge_check` · `graph_query` · `impact_analyze` · `change_plan` · `change_apply` ·
+  `change_revert`. El catálogo es único para Modern y Legacy y cada perfil solo filtra las tools
+  de cambio.
+- **Servicio neutral**: `LodestarMcpService` posee `App` + `Profile` y es la única entrada para
+  discovery, catálogo, dispatch, ping e instrucciones. No lee ni escribe stdio; el transporte y
+  ambas eras adaptan sus mensajes al mismo servicio. `standard` y `readonly` son filtros de este
+  único catálogo, no servidores ni registros paralelos.
+- **Transporte oficial y único turno de App**: `SerialExecutor<LodestarMcpService>` es el
+  `ServerHandler` real. `LodestarMcpServer` es sólo el adaptador de lifecycle: delega todas las
+  requests al executor, anuncia Legacy al handshake y deja que el handler valide Modern por
+  metadata. Se sirve por `rmcp::transport::stdio()`; rmcp posee framing, lifecycle, flush y cierre
+  por EOF, y `main.rs` no parsea JSON-RPC. Toda `tools/call` toma el executor hasta completar la
+  llamada, de modo que dos tareas Tokio nunca acceden concurrentemente al mismo `App` ni dejan una
+  transacción a medias por perder el turno. Mientras una request espera ese turno, el adaptador
+  observa el `RequestContext.ct` de rmcp: si se cancela, no entra en el servicio ni ejecuta la tool.
+  Una vez admitida, la llamada síncrona termina indivisiblemente; una cancelación tardía no revierte
+  ni despublica el canónico. stdout queda reservado al wire y los logs salen por stderr.
+- **Modern (`2026-07-28`)**: lifecycle stateless sin `initialize` ni `ping`. Cada request declara
+  versión, capacidades e identidad (`clientInfo.name`/`version`) del cliente en `params._meta`.
+  `server/discover` anuncia exclusivamente
+  Modern, `tools`, instrucciones y `serverInfo` en metadata; discovery y `tools/list` llevan
+  `resultType: complete`, `ttlMs: 0` y `cacheScope: private`, y `tools/call` lleva `resultType:
+  complete`. Una versión ajena falla con `-32022`; metadata ausente o malformada falla con
+  `-32602`, sin fallback ni ejecución.
+- **Legacy (`2025-11-25`)**: `initialize` selecciona siempre esta baseline para cualquier revisión
+  string ofrecida, devuelve `serverInfo`, capacidad `tools` e instrucciones filtradas por perfil;
+  `notifications/initialized` no responde y `ping` devuelve `{}`. Sirve únicamente initialize,
+  initialized, ping, list y call: `server/discover` es `-32601`. Sus resultados no incluyen
+  `resultType`, `ttlMs` ni `cacheScope`.
+- **Capacidades**: únicamente `tools`; no se anuncian capacidades adicionales.
+- No expone `read_file`/`write_file`. El valor es lo que los ficheros crudos no dan barato:
+  backlinks resueltos, destinos ausentes, documentos aislados, impacto, validación universal,
+  consulta estructurada y **escrituras validadas**.
 
 ### 7.3 CLI (`lodestar-cli`, clap)
 Subcomandos `init` · `check` · `index` · `tags` · `export` · `reindex` · `import` (+ los subcomandos git de §13.7:
@@ -949,9 +987,10 @@ Diez tools (`REFACTOR §8`): **READ** `workspace_status` · `knowledge_search` �
 **Perfiles** (§12 de REFACTOR): `readonly` = las 7 de lectura/verificación; `standard` = añade las 3 de
 cambio. Se eligen **al arrancar** (`lodestar-mcp --profile readonly|standard`). **Política** de
 conformidad al arrancar (`--policy strict`, `strict` por defecto): no hay `allow_nonconformant` por
-llamada (seguridad §19.7). **Transporte** (decisión D6b): se mantiene **stdio** (decisiones §3) y se
-activa **`outputSchema`** derivado con la feature `schemars` (ya preparada, §10 fila 14); `rmcp`
-**diferido**. `contracts/mcp.yml` se **reescribe** 13→10 y el guardián de contrato lo vigila.
+llamada (seguridad §19.7). **Transporte** (decisión §3, cerrada por E34): se mantiene **stdio**, con
+`rmcp = 3.1.2` y Tokio únicamente en `lodestar-mcp`; `outputSchema` sigue derivado con la feature
+`schemars` (ya preparada, §10 fila 14). `contracts/mcp.yml` se **reescribe** 13→10 y el guardián
+de contrato lo vigila.
 
 > **Actualización E29-H11** (`decisiones §16(b)`): esta sección describía también un «envelope
 > común» — `{ ok, workspaceRevision, summary, data, diagnostics, warnings, resourceLinks }` — como
@@ -1329,6 +1368,14 @@ aplicar.
 
 ### 20.10 Superficie MCP (supersede §19.6 en una tool)
 
+La política de protocolo de E34-H01 es única y auditable: Modern `2026-07-28` (stateless) y Legacy
+`2025-11-25` (handshake), con Modern seleccionado explícitamente como `LATEST`. Las requests
+stateless no aceptan fechas futuras o intermedias; `initialize` selecciona siempre Legacy y negocia
+su baseline, sea antigua o futura la revisión solicitada. El catálogo y la capacidad anunciada son los mismos en
+ambas eras: solo `tools`; resources, prompts, sampling, elicitation, tasks, MRTR y subscriptions
+quedan fuera. E34-H04/H05 implementan los dos wires sobre el servicio neutral y E34-H06 cierra la
+serialización, cancelación cooperativa, clientes oficiales y arnés raw exacto.
+
 Diez tools, con **un solo cambio** respecto de §19.6: `schema_inspect` → **`metadata_inspect`**
 (catálogo de propiedades con `presentIn`/`inferredTypes`, inspección de una propiedad con sus valores
 y frecuencias, y soporte de propiedades anidadas `service.tier`, `release.target.date`). Permite a un
@@ -1505,3 +1552,127 @@ reconstruible. Es el principio de E23 («la documentación no afirma nada falso�
 coste de una afirmación falsa es mayor.
 
 **Principio rector de E27**: *la superficie externa solo promete lo que el motor ejecuta hoy.*
+
+---
+
+## 22. Banco de pruebas y gate de rendimiento (épica de evidencia)
+
+> **Ratificada el 2026-08-10** (puerta de diseño de la épica de evidencia; la ejecuta `E33`,
+> `requirements/epica-33-banco-evidencia.md`). Cierra el diseño de `decisiones §9` punto 1 (gate de
+> rendimiento, condición de entrada de `decisiones §14`) y convierte el testbench de `decisiones §23`
+> (189 casos contra el homelab, `docs/qa/testbench/`) en **banco permanente por release**. Esta
+> sección es **instrumento interno**: mientras `decisiones §14` siga abierta, `§21.5` sigue vigente y
+> **nada de lo que el banco mida se promete en la superficie externa**. La épica que la ejecuta
+> produce datos y análisis; **no cierra** `decisiones §14`, `§22` ni `§24` — esas decisiones son del
+> usuario. (Ojo con la numeración: en esta sección, `decisiones §N` es siempre una ficha de
+> `decisiones/`, no una sección de este documento.)
+
+### 22.1 Las dos piezas del banco
+
+El banco separa dos preocupaciones de vida distinta, con el arnés JSON-RPC/stdio
+(`docs/qa/testbench/lodestar_harness.py`) como ejecutor común de todo lo que toca el wire:
+
+1. **Banco de conformidad** (python, `docs/qa/testbench/`): casos esperado-vs-real **asertables**
+   contra el contrato. Hereda el arnés de `decisiones §23` (sesiones por lote, worktrees efímeros,
+   placeholders `@stepN`, distinción error-de-tool vs error-de-protocolo) y le añade lo que le
+   faltaba para ser permanente: veredicto mecánico, portabilidad y un corpus propio (§22.2, §22.3).
+2. **Banco de rendimiento** (Rust, crate interno `lodestar-bench`, `publish = false`): mide los
+   servicios de `App` —el patrón de E14-H05— más una calibración sobre el wire MCP real vía el
+   arnés python (§22.4, §22.5).
+
+### 22.2 Corpus canónico y generador de escala
+
+- **El homelab deja de ser el campo de pruebas del gate**: es privado, mutable y no-CI. Queda como
+  corrida **opcional de dogfooding** (el modo `--root` del arnés se conserva).
+- **Corpus canónico de conformidad**: generado **determinísticamente** (script versionado, semilla
+  fija) — ~50–100 documentos con la fauna completa: grafo de enlaces con huérfanos y dangling,
+  frontmatter heterogéneo y consultable, y los sets patológicos de `make_fixtures.py` integrados.
+  Los esperados del banco se escriben contra él, así son estables.
+- **Generador de escala**: el de E14-H05 (`crates/lodestar-app/tests/escala.rs`) se extrae a código
+  compartido y gana dos perfiles — **plano** (10k homogéneo, comparable con las cifras históricas de
+  E14-H05) y **realista** (distribución de enlaces y frontmatter modelada sobre corpus reales) — y
+  tres escalas (~100 / ~1k / ~10k).
+  - *Precisión de implementación (E33-H01, no cambia el diseño)*: el perfil realista entregado usa
+    una distribución **sintética y uniforme** (PRNG determinista), **no** calibrada contra corpus
+    reales. Cumple el propósito —que no se mida solo sobre el corpus plano: hay enlaces que
+    resolver, backlinks que computar y frontmatter heterogéneo que consultar—, pero no reproduce la
+    cola larga típica de un corpus humano. Si alguna medición llegara a depender de esa forma,
+    habría que calibrarla primero.
+- Regla heredada del repo: las fixtures grandes **se generan en runtime** (tempdir), nunca se
+  commitean.
+
+### 22.3 Esperados asertables y veredicto mecánico
+
+- El formato de lote gana un campo `expect` evaluable por el runner (código de error esperado,
+  subcampos del `structuredContent`, invariantes como «`workspaceRevision` intacta»). El runner
+  emite PASS/FAIL por caso y un resumen agregado; **cero veredictos manuales** en la corrida por
+  release (la verificación adversarial humana queda para campañas exploratorias).
+- **Criterio de selección**: entra al banco lo que asevera **contrato estable** (códigos,
+  invariantes, formas de respuesta), no lo que asevera contenido de un corpus concreto. Base: los
+  `verify_*` de `decisiones §23`, los invariantes transversales verificados conformes (informe
+  2026-08-06 §5) y una muestra por lote temático.
+- **Centinelas de decisiones abiertas** (`decisiones §22` y `§24`): casos cuyo esperado es el
+  **comportamiento vigente**, citando la ficha abierta. Si el comportamiento cambia, el centinela
+  falla y obliga a actualizar esperado y ficha a la vez. El banco **detecta** el cambio; **no lo
+  juzga** ni cierra la ficha.
+
+### 22.4 Métricas, umbrales y baseline (el gate de `decisiones §9` punto 1)
+
+- **Qué se mide**: cold-open (`App::open` + primera llamada) y **coste por llamada** —el sustituto
+  ratificado del histórico «edit→UI < 150 ms», que murió con la UI— como p50/p95 de N iteraciones
+  por tool de lectura y por el ciclo `change_plan`→`change_apply`, más el tamaño de payload (proxy
+  de tokens), a las tres escalas y en las tres variantes de camino de lectura (§22.5).
+- **Umbral-tras-medición**: los umbrales **no se inventan a priori** — la primera corrida produce
+  los números y el usuario los ratifica con ellos delante (puerta interna de la épica). Anclas de
+  esa conversación: **p95 ≤ 1 s por tool de lectura a 10k** y **cold-open ≤ 5 s**. Ratificados, el
+  gate se codifica y falla (exit ≠ 0) si se violan.
+- **Baseline por máquina**: los umbrales absolutos solo se juzgan en la máquina donde se ratificó
+  la baseline (la de release); cada release registra su corrida para tendencia. En CI solo corre un
+  **smoke barato** (escala mínima, sin umbral absoluto) que garantiza que los artefactos del banco
+  compilan y corren — que el banco no se pudra en silencio.
+
+### 22.5 Medir «con cache» sin conectarla
+
+El producto no lee el store (`decisiones §14`); el banco lo mide **sin tocar el camino de lectura**,
+por la API pública existente, en tres variantes:
+
+1. **Disco-reparseo** — el producto actual (`Workspace::document_set()` → `discovery::discover` en
+   cada llamada).
+2. **SQLite-raw** — `Store::rebuild()` + `Store::document_set()` (`DocumentSet::from_store`).
+   **Advertencia que la evidencia debe rotular**: `from_store` reconstruye el `FileMap` desde los
+   `raw` en SQL y **re-parsea**; esta variante mide la cache *tal como está construida* (ahorra
+   walk+IO, no parse). Se registra también el coste del `rebuild` (el precio de tener la cache).
+3. **RAM-memoizado** — un `DocumentSet` construido una vez y reutilizado entre llamadas: la **cota
+   superior** de lo que cualquier cache puede dar, y una alternativa que `decisiones §14` debe ver.
+
+Ninguna variante conecta el store al producto ni roza el invariante #3: son caminos de **medición**
+dentro del bench. El paquete de evidencia inventaría además el coste de conexión ya conocido
+(walker del store sin `DiscoveryPolicy`, divergencia `field_path` core↔store —`§16(l)`—, y el
+destino del watcher —`§16(c)`—) como parte del precio de la opción (a) de `decisiones §14`.
+
+### 22.6 Enganche a release
+
+El banco corre **por release**: `RELEASING.md` gana un paso (lo escribe la historia que entrega el
+enganche, no antes de que la herramienta exista) — correr conformidad + rendimiento contra el
+binario release en la máquina de la baseline y **commitear la corrida datada** en `docs/qa/`. Eso
+es, literalmente, «banco permanente por release». Opcionalmente, un `workflow_dispatch` lo dispara
+a demanda (conformidad + smoke, sin juzgar umbrales absolutos en runners compartidos).
+
+### 22.7 Dogfooding acotado con registro
+
+La otra mitad del dato de `decisiones §14`: ¿el reparseo por llamada **molesta** en uso real
+(~100 docs) o solo en el arnés sintético (10k)? Protocolo: (1) el propio repo (`decisiones/` +
+`requirements/`) se usa como workspace lodestar vía MCP en las sesiones de trabajo — las consultas
+que `decisiones/README.md` ya documenta, ejecutadas de verdad; (2) diario de fricciones en
+`docs/qa/` (fecha · tool · fricción · latencia percibida); (3) el número frío que acompaña a la
+percepción: la corrida del banco a escala «repo real»; (4) **ventana acotada** — el dogfooding
+computa para `decisiones §14` hasta que el paquete de evidencia se cierra; lo posterior alimenta
+fichas nuevas, no bloquea el cierre.
+
+### 22.8 El paquete de evidencia para `decisiones §14`
+
+Un documento único y datado en `docs/qa/` con: la tabla de mediciones (variantes × escalas ×
+tools), el dato de dogfooding, el inventario del coste de conexión (§22.5), y el análisis de las
+tres salidas de la ficha —conectar / acotar / retirar— **contra los datos**, actualizando o
+refutando la recomendación escrita en ella. Termina en **«lista para decidir»**: la decisión, su
+ratificación y el cambio de estado de `decisiones §14` son del usuario, fuera de la épica.

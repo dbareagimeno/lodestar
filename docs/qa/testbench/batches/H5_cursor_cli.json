@@ -1,22 +1,22 @@
 {
   "batch": "H5",
-  "root": "real",
+  "root": "worktree",
   "profile": "readonly",
   "fixtures": null,
   "cases": [
     {"id": "G2-05", "no_server": true, "steps": [
-       {"kind": "shell", "cmd": "cd /private/tmp/claude-501/-Users-dbarea-repos-homelab/7d9d0da7-8bbf-4b49-8144-597003faaf00/scratchpad && python3 lodestar_harness.py --root /Users/dbarea/repos/homelab --profile readonly --call knowledge_search '{\"where\": \"has(tags)\", \"limit\": 5}'"},
-       {"kind": "shell", "cmd": "cd /private/tmp/claude-501/-Users-dbarea-repos-homelab/7d9d0da7-8bbf-4b49-8144-597003faaf00/scratchpad && python3 lodestar_harness.py --root /Users/dbarea/repos/homelab --profile readonly --call knowledge_search '{\"where\": \"has(tags)\", \"limit\": 5, \"cursor\": \"5\"}'"},
-       {"kind": "shell", "cmd": "cd /private/tmp/claude-501/-Users-dbarea-repos-homelab/7d9d0da7-8bbf-4b49-8144-597003faaf00/scratchpad && python3 lodestar_harness.py --root /Users/dbarea/repos/homelab --profile readonly --call knowledge_search '{\"where\": \"has(tags)\", \"limit\": 100}'"},
-       {"kind": "shell", "cmd": "cd /private/tmp/claude-501/-Users-dbarea-repos-homelab/7d9d0da7-8bbf-4b49-8144-597003faaf00/scratchpad && python3 lodestar_harness.py --root /Users/dbarea/repos/homelab --profile readonly --call metadata_inspect '{\"mode\": \"catalog\", \"limit\": 3}' && python3 lodestar_harness.py --root /Users/dbarea/repos/homelab --profile readonly --call metadata_inspect '{\"mode\": \"catalog\", \"limit\": 3, \"cursor\": \"3\"}'"}],
+       {"kind": "shell", "cmd": "cd @testbench && python3 lodestar_harness.py --root @root --profile readonly --binary @bin.mcp --call knowledge_search '{\"where\": \"has(tags)\", \"limit\": 5}'"},
+       {"kind": "shell", "cmd": "cd @testbench && python3 lodestar_harness.py --root @root --profile readonly --binary @bin.mcp --call knowledge_search '{\"where\": \"has(tags)\", \"limit\": 5, \"cursor\": \"5\"}'"},
+       {"kind": "shell", "cmd": "cd @testbench && python3 lodestar_harness.py --root @root --profile readonly --binary @bin.mcp --call knowledge_search '{\"where\": \"has(tags)\", \"limit\": 100}'"},
+       {"kind": "shell", "cmd": "cd @testbench && python3 lodestar_harness.py --root @root --profile readonly --binary @bin.mcp --call metadata_inspect '{\"mode\": \"catalog\", \"limit\": 3}' && python3 lodestar_harness.py --root @root --profile readonly --binary @bin.mcp --call metadata_inspect '{\"mode\": \"catalog\", \"limit\": 3, \"cursor\": \"3\"}'"}],
      "esperado": "CURSOR ENTRE PROCESOS: cada invocación --call es un PROCESO FRESCO del servidor. Paso 0: 5 paths + nextCursor (será '5' hex). Paso 1 (proceso nuevo con cursor '5'): los 5 SIGUIENTES sin repetición ni hueco. Paso 2: lista completa de 36 — verificar que concat(paso0, paso1) == sus 10 primeros EXACTOS ('autosuficiente: reanuda idéntico en un proceso fresco, porque el orden depende solo del contenido'). Paso 3: mismo sándwich con metadata_inspect catalog (3+3 vs catálogo completo de MDI-01). NOTA: si el nextCursor real del paso 0 no es '5', usar el literal devuelto y re-ejecutar a mano la continuación. Fuente: mcp.yml L643/L681/L736 (cursor autosuficiente cross-proceso)"},
     {"id": "G2-07", "no_server": true, "steps": [
-       {"kind": "shell", "cmd": "cd /Users/dbarea/repos/lodestar/examples/demo && /Users/dbarea/repos/lodestar/target/debug/lodestar check; echo EXIT=$?"},
-       {"kind": "shell", "cmd": "cd /Users/dbarea/repos/lodestar/examples/demo && /Users/dbarea/repos/lodestar/target/debug/lodestar check --json; echo EXIT=$?"},
-       {"kind": "shell", "cmd": "cd /Users/dbarea/repos/lodestar/examples/demo && /Users/dbarea/repos/lodestar/target/debug/lodestar check --sarif | head -50; echo EXIT=$?"},
-       {"kind": "shell", "cmd": "cd /Users/dbarea/repos/lodestar/examples/demo && /Users/dbarea/repos/lodestar/target/debug/lodestar check --json --sarif; echo EXIT=$?"},
-       {"kind": "shell", "cmd": "cd /Users/dbarea/repos/lodestar/examples/demo && /Users/dbarea/repos/lodestar/target/debug/lodestar check --nope; echo EXIT=$?"},
-       {"kind": "shell", "cmd": "cd /Users/dbarea/repos/lodestar && /Users/dbarea/repos/lodestar/target/debug/lodestar --path examples/demo check; echo EXIT=$?"}],
+       {"kind": "shell", "cmd": "cd @repo/examples/demo && @bin.cli check; echo EXIT=$?"},
+       {"kind": "shell", "cmd": "cd @repo/examples/demo && @bin.cli check --json; echo EXIT=$?"},
+       {"kind": "shell", "cmd": "cd @repo/examples/demo && @bin.cli check --sarif | head -50; echo EXIT=$?"},
+       {"kind": "shell", "cmd": "cd @repo/examples/demo && @bin.cli check --json --sarif; echo EXIT=$?"},
+       {"kind": "shell", "cmd": "cd @repo/examples/demo && @bin.cli check --nope; echo EXIT=$?"},
+       {"kind": "shell", "cmd": "cd @repo && @bin.cli --path examples/demo check; echo EXIT=$?"}],
      "esperado": "CLI check sobre examples/demo (solo lectura, 10 docs con 1 error deliberado). Paso 0: EXIT=1, línea '✗ [LINK-TARGET-MISSING] runbooks/incident-response.md…', summary '10 documentos · 1 con errores · 0 avisos · NO VÁLIDO'. Paso 1: JSON con exactamente las 8 claves (dangling, diagnostics, documents, incoming, isolated, outgoing, recoveryPending, valid); valid false; isolated [notes/scratchpad.md]; EXIT=1 se conserva. Paso 2: SARIF 2.1.0, ruleId LINK-TARGET-MISSING, level error. Paso 3: --json --sarif excluyentes (registrar rechazo, EXIT=2). Paso 4: flag desconocida EXIT=2. Paso 5: --path examples/demo equivale a cd. Fuente: quickstart.md L90-99/L141-173; ci.md L34-52/L64-119/L163"}
   ]
 }
