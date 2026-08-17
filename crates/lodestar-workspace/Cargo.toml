@@ -55,7 +55,7 @@ workspace = true
 # Workspaces de prueba compartidos (E15-H05): `arbitrary`, `with_edge_cases`, `materialize` y
 # `materialize_disk_only`, consumidos por `tests/discovery.rs` (E15-H07).
 lodestar-fixtures = { workspace = true }
-tempfile = "3"
+tempfile = "=3.24.0"
 serde_yaml = { workspace = true }
 # Solo para fabricar a mano una cache con esquema viejo en el test de regresión e2e.
 rusqlite = { version = "0.32", features = ["bundled"] }

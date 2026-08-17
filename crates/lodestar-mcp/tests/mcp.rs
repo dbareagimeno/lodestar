@@ -9,13 +9,156 @@ fn write(dir: &std::path::Path, rel: &str, content: &str) {
     std::fs::write(p, content).unwrap();
 }
 
+const INJECTED_INITIALIZE_ID: &str = "__lodestar_legacy_harness_initialize__";
+
+/// Completa los transcripts heredados con el lifecycle Legacy que exige rmcp.
+///
+/// La respuesta del initialize inyectado se descarta, de modo que `expect` y los índices de los
+/// casos históricos siguen describiendo únicamente las respuestas que el caso pidió. Un initialize
+/// escrito por el propio caso nunca se toca: esto es importante para que los tests de parámetros
+/// inválidos sigan observando el rechazo tipado del transporte.
+fn legacy_transcript(lines: &[&str]) -> (Vec<String>, bool) {
+    let has_initialize = lines.iter().any(|line| {
+        serde_json::from_str::<serde_json::Value>(line)
+            .ok()
+            .and_then(|request| {
+                request
+                    .get("method")
+                    .and_then(serde_json::Value::as_str)
+                    .map(|method| method == "initialize")
+            })
+            .unwrap_or(false)
+    });
+    if has_initialize {
+        let mut transcript: Vec<String> = lines.iter().map(|line| (*line).to_owned()).collect();
+        let has_initialized_notification = lines.iter().any(|line| {
+            serde_json::from_str::<serde_json::Value>(line)
+                .ok()
+                .and_then(|request| {
+                    request
+                        .get("method")
+                        .and_then(serde_json::Value::as_str)
+                        .map(|method| method == "notifications/initialized")
+                })
+                .unwrap_or(false)
+        });
+        if !has_initialized_notification {
+            if let Some(index) = transcript.iter().position(|line| {
+                serde_json::from_str::<serde_json::Value>(line)
+                    .ok()
+                    .and_then(|request| {
+                        request
+                            .get("method")
+                            .and_then(serde_json::Value::as_str)
+                            .map(|method| method == "initialize")
+                    })
+                    == Some(true)
+            }) {
+                transcript.insert(
+                    index + 1,
+                    r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#.to_owned(),
+                );
+            }
+        }
+        return (transcript, false);
+    }
+
+    let initialize = format!(
+        r#"{{"jsonrpc":"2.0","id":"{INJECTED_INITIALIZE_ID}","method":"initialize","params":{{"protocolVersion":"2025-11-25","capabilities":{{}},"clientInfo":{{"name":"lodestar-tests","version":"1"}}}}}}"#
+    );
+    let mut transcript = vec![
+        initialize,
+        r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#.to_owned(),
+    ];
+    transcript.extend(lines.iter().map(|line| (*line).to_owned()));
+    (transcript, true)
+}
+
+fn is_injected_initialize_response(response: &serde_json::Value) -> bool {
+    response["id"] == INJECTED_INITIALIZE_ID
+        && response["error"].is_null()
+        && response["result"]["protocolVersion"] == "2025-11-25"
+}
+
+/// rmcp puede completar requests independientes en paralelo. Los transcripts heredados, en
+/// cambio, aseveran posiciones en el orden escrito; cuando todos los requests tienen ids únicos
+/// recuperamos ese orden sin inventar ni descartar respuestas. Casos con ids repetidos o con
+/// parseo silencioso conservan el orden wire observado.
+fn preserve_request_order(
+    lines: &[&str],
+    responses: Vec<serde_json::Value>,
+) -> Vec<serde_json::Value> {
+    let ids: Vec<serde_json::Value> = lines
+        .iter()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter(|request| request["method"] != "notifications/initialized")
+        .filter_map(|request| request.get("id").cloned())
+        .collect();
+    let unique = ids
+        .iter()
+        .map(serde_json::Value::to_string)
+        .collect::<std::collections::BTreeSet<_>>()
+        .len()
+        == ids.len();
+    if !unique || ids.len() != responses.len() {
+        return responses;
+    }
+    ids.into_iter()
+        .filter_map(|id| {
+            responses
+                .iter()
+                .find(|response| response["id"] == id)
+                .cloned()
+        })
+        .collect()
+}
+
+fn sequential_exchange_allowed(transcript: &[String]) -> bool {
+    transcript.iter().all(|line| {
+        let Ok(request) = serde_json::from_str::<serde_json::Value>(line) else {
+            return false;
+        };
+        // Un JSON bien formado pero con shape inválido sigue siendo un request del transporte:
+        // rmcp debe contestarlo secuencialmente con `-32600` (id null).
+        if !request.is_object() {
+            return true;
+        }
+        let Some(object) = request.as_object() else {
+            return false;
+        };
+        if object.get("method").and_then(serde_json::Value::as_str)
+            == Some("notifications/initialized")
+        {
+            return true;
+        }
+        if object.get("id").is_none() {
+            return false;
+        }
+        if object.get("method").and_then(serde_json::Value::as_str) == Some("initialize") {
+            let Some(params) = object.get("params").and_then(serde_json::Value::as_object) else {
+                return false;
+            };
+            return params
+                .get("protocolVersion")
+                .is_some_and(serde_json::Value::is_string)
+                && params
+                    .get("capabilities")
+                    .is_some_and(serde_json::Value::is_object)
+                && params
+                    .get("clientInfo")
+                    .is_some_and(serde_json::Value::is_object);
+        }
+        true
+    })
+}
+
 // NOTA E14-H06: el test `handshake_y_tools_call_conformance` se RETIRÓ al retirar la superficie
 // heredada. Ejercitaba dos cosas heredadas —`query` presente en `tools/list` y la salida de
 // `conformance_check` (`conform`/`hardFail`)— más una no-heredada (el `serverInfo.name` de
 // `initialize`). La conformidad la cubre hoy `knowledge_check` (scope workspace) y sus tests e2e
 // (`check_detecta_edicion_directa`, `check_scope_affected`, `check_ids_estables`); la presencia de
-// las tools la fija `tools_list_solo_objetivo`; el `serverInfo.name` se migró a
-// `initialize_ecoa_version_soportada`.
+// las tools la fija `tools_list_solo_objetivo`; el `serverInfo.name` se exige en las pruebas de
+// negociación Legacy.
 
 /// Arranca el servidor sobre un workspace, envía `lines` y devuelve las primeras `expect` respuestas.
 ///
@@ -28,6 +171,7 @@ fn write(dir: &std::path::Path, rel: &str, content: &str) {
 /// que esos tests aseveran. Mismo criterio que `roundtrip_con_config` (más abajo), donde ya se había
 /// resuelto sin propagarlo aquí.
 fn roundtrip(dir: &std::path::Path, lines: &[&str], expect: usize) -> Vec<serde_json::Value> {
+    let (transcript, injected_initialize) = legacy_transcript(lines);
     let mut child = Command::new(env!("CARGO_BIN_EXE_lodestar-mcp"))
         .arg("--root")
         .arg(dir)
@@ -38,22 +182,59 @@ fn roundtrip(dir: &std::path::Path, lines: &[&str], expect: usize) -> Vec<serde_
         .unwrap();
     let mut stdin = child.stdin.take().unwrap();
     let mut stdout = BufReader::new(child.stdout.take().unwrap());
-    for l in lines {
-        if writeln!(stdin, "{l}").is_err() {
-            break;
-        }
-    }
-    let _ = stdin.flush();
-    drop(stdin);
     let mut out = Vec::new();
-    for line in (&mut stdout).lines().map_while(Result::ok) {
-        out.push(serde_json::from_str(&line).expect("stdout = JSON-RPC puro"));
-        if out.len() == expect {
-            break;
+    if sequential_exchange_allowed(&transcript) {
+        for request in &transcript {
+            if writeln!(stdin, "{request}").is_err() {
+                break;
+            }
+            let parsed: serde_json::Value = serde_json::from_str(request).unwrap();
+            if parsed["method"] == "notifications/initialized" {
+                continue;
+            }
+            let mut line = String::new();
+            if stdout
+                .read_line(&mut line)
+                .ok()
+                .filter(|count| *count > 0)
+                .is_none()
+            {
+                break;
+            }
+            let response: serde_json::Value =
+                serde_json::from_str(&line).expect("stdout = JSON-RPC puro");
+            if injected_initialize && is_injected_initialize_response(&response) {
+                continue;
+            }
+            out.push(response);
+            if out.len() == expect {
+                break;
+            }
+        }
+        let _ = stdin.flush();
+        drop(stdin);
+    } else {
+        for l in &transcript {
+            if writeln!(stdin, "{l}").is_err() {
+                break;
+            }
+        }
+        let _ = stdin.flush();
+        drop(stdin);
+        for line in (&mut stdout).lines().map_while(Result::ok) {
+            let response: serde_json::Value =
+                serde_json::from_str(&line).expect("stdout = JSON-RPC puro");
+            if injected_initialize && is_injected_initialize_response(&response) {
+                continue;
+            }
+            out.push(response);
+            if out.len() == expect {
+                break;
+            }
         }
     }
     child.wait().ok();
-    out
+    preserve_request_order(lines, out)
 }
 
 fn workspace_min() -> tempfile::TempDir {
@@ -66,8 +247,9 @@ fn workspace_min() -> tempfile::TempDir {
     dir
 }
 
-/// E2E del protocolo: parse error → -32700 (no silencio), ping → {}, método desconocido → -32601,
-/// tool desconocida → -32602, error de EJECUCIÓN de tool → result con isError (no error JSON-RPC).
+/// E2E del protocolo: sintaxis no parseable silenciosa, ping → {}, método desconocido → -32601,
+/// tool desconocida → -32602, error de EJECUCIÓN de tool → result con isError (no error JSON-RPC),
+/// y JSON bien formado con shape inválido → -32600 con id null.
 #[test]
 fn protocolo_errores_y_ping() {
     let dir = workspace_min();
@@ -80,18 +262,44 @@ fn protocolo_errores_y_ping() {
             r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"no_existe","arguments":{}}}"#,
             r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"knowledge_get","arguments":{"ref":{"path":"../fuera.md"}}}}"#,
         ],
-        5,
+        4,
     );
-    assert_eq!(resp[0]["error"]["code"], -32700);
-    assert_eq!(resp[0]["id"], serde_json::Value::Null);
-    assert_eq!(resp[1]["result"], serde_json::json!({}));
-    assert_eq!(resp[2]["error"]["code"], -32601);
-    assert_eq!(resp[3]["error"]["code"], -32602);
+    assert_eq!(
+        resp.len(),
+        4,
+        "parseo inválido debe ser silencioso; respuestas: {resp:?}"
+    );
+    // rmcp ignora silenciosamente la línea no parseable; las respuestas conservan los índices de
+    // las peticiones JSON que sí llegaron al transporte.
+    assert_eq!(
+        resp.iter().find(|response| response["id"] == 1).unwrap()["result"],
+        serde_json::json!({})
+    );
+    assert_eq!(
+        resp.iter().find(|response| response["id"] == 2).unwrap()["error"]["code"],
+        -32601
+    );
+    assert_eq!(
+        resp.iter().find(|response| response["id"] == 3).unwrap()["error"]["code"],
+        -32602
+    );
     // Ruta inválida (`../` fuera del workspace) = error de EJECUCIÓN de la tool → isError en el result,
     // no un error de protocolo. Vehículo migrado en E14-H06 de la tool heredada `find_backlinks` a la
     // tool objetivo `knowledge_get` (la propiedad probada es del protocolo, no de la tool retirada).
-    assert_eq!(resp[4]["result"]["isError"], true);
-    assert!(resp[4]["error"].is_null());
+    let domain = resp.iter().find(|response| response["id"] == 4).unwrap();
+    assert_eq!(domain["result"]["isError"], true);
+    assert!(domain["error"].is_null());
+    let invalid_shape = roundtrip(dir.path(), &["[]"], 1);
+    assert_eq!(
+        invalid_shape.len(),
+        1,
+        "shape inválido debe producir una respuesta"
+    );
+    let invalid_shape = invalid_shape
+        .iter()
+        .find(|response| response["error"]["code"] == -32600)
+        .unwrap();
+    assert!(invalid_shape["id"].is_null());
 }
 
 /// tools/list lleva inputSchema (obligatorio en el spec) y structuredContent siempre es objeto.
@@ -150,22 +358,35 @@ fn tools_list_schema_y_structured_content_objeto() {
 // `# {Tipo} - {Nombre}` de la heredada `create_concept`. Esa nueva semántica es una responsabilidad
 // del core (con su propia cobertura en `plan.rs`), no un hueco de la superficie MCP.
 
-/// initialize ecoa la protocolVersion del cliente si la soporta.
+/// E34-H01/H05 · Criterio `legacy_initialize_y_negociacion_fechas`:
+/// cualquier revisión string del cliente selecciona la única baseline legacy.
 #[test]
-fn initialize_ecoa_version_soportada() {
-    let dir = workspace_min();
-    let resp = roundtrip(
-        dir.path(),
-        &[
-            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26"}}"#,
-        ],
-        1,
-    );
-    assert_eq!(resp[0]["result"]["protocolVersion"], "2025-03-26");
-    // Migrado desde `handshake_y_tools_call_conformance` (retirado en E14-H06 al retirar la tool
-    // heredada `conformance_check`): la única propiedad no-heredada de aquel test era que
-    // `initialize` identifica al servidor por nombre. Se conserva aquí.
-    assert_eq!(resp[0]["result"]["serverInfo"]["name"], "lodestar-mcp");
+fn initialize_cualquier_version_string_negocia_legacy() {
+    // Incluye la baseline, una revisión histórica, una fecha inventada antigua, una futura y
+    // Modern: ninguna fecha string puede cambiar la era ni producir un rechazo.
+    for (id, offered) in [
+        (1, "2025-11-25"),
+        (2, "2025-03-26"),
+        (3, "1990-01-01"),
+        (4, "2099-12-31"),
+        (5, "2026-07-28"),
+    ] {
+        let dir = workspace_min();
+        let request = format!(
+            r#"{{"jsonrpc":"2.0","id":{id},"method":"initialize","params":{{"protocolVersion":"{offered}","capabilities":{{}},"clientInfo":{{"name":"lodestar-tests","version":"1"}}}}}}"#
+        );
+        let resp = roundtrip(dir.path(), &[request.as_str()], 1);
+        assert_eq!(
+            resp[0]["error"],
+            serde_json::Value::Null,
+            "{offered}: {resp:?}"
+        );
+        assert_eq!(
+            resp[0]["result"]["protocolVersion"], "2025-11-25",
+            "initialize siempre negocia Legacy aunque el cliente ofrezca {offered}: {resp:?}"
+        );
+        assert_eq!(resp[0]["result"]["serverInfo"]["name"], "lodestar-mcp");
+    }
 }
 
 /// E23-H13 · Guarda del texto `instructions` servido en `initialize`.
@@ -190,7 +411,7 @@ fn instructions_sin_vocabulario_retirado() {
     let resp = roundtrip(
         dir.path(),
         &[
-            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#,
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"lodestar-tests","version":"1"}}}"#,
             r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#,
         ],
         2,
@@ -335,6 +556,7 @@ fn roundtrip_profile(
     lines: &[&str],
     expect: usize,
 ) -> Vec<serde_json::Value> {
+    let (transcript, injected_initialize) = legacy_transcript(lines);
     let mut child = Command::new(env!("CARGO_BIN_EXE_lodestar-mcp"))
         .arg("--root")
         .arg(dir)
@@ -348,22 +570,58 @@ fn roundtrip_profile(
     let mut stdin = child.stdin.take().unwrap();
     let mut stdout = BufReader::new(child.stdout.take().unwrap());
     // Mismo criterio que `roundtrip`: un `--profile` inválido también muere en el arranque.
-    for l in lines {
-        if writeln!(stdin, "{l}").is_err() {
-            break;
+    let mut out = Vec::new();
+    if sequential_exchange_allowed(&transcript) {
+        for request in &transcript {
+            if writeln!(stdin, "{request}").is_err() {
+                break;
+            }
+            let parsed: serde_json::Value = serde_json::from_str(request).unwrap();
+            if parsed["method"] == "notifications/initialized" {
+                continue;
+            }
+            let mut line = String::new();
+            if stdout
+                .read_line(&mut line)
+                .ok()
+                .filter(|count| *count > 0)
+                .is_none()
+            {
+                break;
+            }
+            let response: serde_json::Value =
+                serde_json::from_str(&line).expect("stdout = JSON-RPC puro");
+            if injected_initialize && is_injected_initialize_response(&response) {
+                continue;
+            }
+            out.push(response);
+            if out.len() == expect {
+                break;
+            }
+        }
+    } else {
+        for l in &transcript {
+            if writeln!(stdin, "{l}").is_err() {
+                break;
+            }
+        }
+        let _ = stdin.flush();
+        for line in (&mut stdout).lines().map_while(Result::ok) {
+            let response: serde_json::Value =
+                serde_json::from_str(&line).expect("stdout = JSON-RPC puro");
+            if injected_initialize && is_injected_initialize_response(&response) {
+                continue;
+            }
+            out.push(response);
+            if out.len() == expect {
+                break;
+            }
         }
     }
     let _ = stdin.flush();
     drop(stdin);
-    let mut out = Vec::new();
-    for line in (&mut stdout).lines().map_while(Result::ok) {
-        out.push(serde_json::from_str(&line).expect("stdout = JSON-RPC puro"));
-        if out.len() == expect {
-            break;
-        }
-    }
     child.wait().ok();
-    out
+    preserve_request_order(lines, out)
 }
 
 /// Workspace con **exactamente 4 documentos aislados**: un `index.md` raíz que no enlaza a nadie más
@@ -3381,7 +3639,9 @@ fn instrucciones_flujo() {
     let dir = workspace_min();
     let resp = roundtrip(
         dir.path(),
-        &[r#"{"jsonrpc":"2.0","id":1,"method":"initialize"}"#],
+        &[
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"lodestar-tests","version":"1"}}}"#,
+        ],
         1,
     );
     let instructions = resp[0]["result"]["instructions"]
@@ -3703,6 +3963,7 @@ fn roundtrip_en(
     lines: &[&str],
     expect: usize,
 ) -> Vec<serde_json::Value> {
+    let (transcript, injected_initialize) = legacy_transcript(lines);
     let mut child = Command::new(env!("CARGO_BIN_EXE_lodestar-mcp"))
         .args(args)
         .current_dir(cwd)
@@ -3713,24 +3974,60 @@ fn roundtrip_en(
         .unwrap();
     let mut stdin = child.stdin.take().unwrap();
     let mut stdout = BufReader::new(child.stdout.take().unwrap());
-    for l in lines {
-        // El servidor puede haber muerto ya (gate de arranque): un EPIPE al escribir no debe
-        // reventar el arnés, debe traducirse en «no llegaron respuestas».
-        if writeln!(stdin, "{l}").is_err() {
-            break;
+    let mut out = Vec::new();
+    if sequential_exchange_allowed(&transcript) {
+        for request in &transcript {
+            if writeln!(stdin, "{request}").is_err() {
+                break;
+            }
+            let parsed: serde_json::Value = serde_json::from_str(request).unwrap();
+            if parsed["method"] == "notifications/initialized" {
+                continue;
+            }
+            let mut line = String::new();
+            if stdout
+                .read_line(&mut line)
+                .ok()
+                .filter(|count| *count > 0)
+                .is_none()
+            {
+                break;
+            }
+            let response: serde_json::Value =
+                serde_json::from_str(&line).expect("stdout = JSON-RPC puro");
+            if injected_initialize && is_injected_initialize_response(&response) {
+                continue;
+            }
+            out.push(response);
+            if out.len() == expect {
+                break;
+            }
+        }
+    } else {
+        for l in &transcript {
+            // El servidor puede haber muerto ya (gate de arranque): un EPIPE al escribir no debe
+            // reventar el arnés, debe traducirse en «no llegaron respuestas».
+            if writeln!(stdin, "{l}").is_err() {
+                break;
+            }
+        }
+        let _ = stdin.flush();
+        for line in (&mut stdout).lines().map_while(Result::ok) {
+            let response: serde_json::Value =
+                serde_json::from_str(&line).expect("stdout = JSON-RPC puro");
+            if injected_initialize && is_injected_initialize_response(&response) {
+                continue;
+            }
+            out.push(response);
+            if out.len() == expect {
+                break;
+            }
         }
     }
     let _ = stdin.flush();
     drop(stdin);
-    let mut out = Vec::new();
-    for line in (&mut stdout).lines().map_while(Result::ok) {
-        out.push(serde_json::from_str(&line).expect("stdout = JSON-RPC puro"));
-        if out.len() == expect {
-            break;
-        }
-    }
     child.wait().ok();
-    out
+    preserve_request_order(lines, out)
 }
 
 /// E15-H06 · Criterio `arranca_en_directorio_arbitrario`:
@@ -5143,7 +5440,7 @@ fn readonly_no_escribe_nada() {
 
     // Sesión de SOLO LECTURA: las 7 tools que el perfil `readonly` sigue exponiendo.
     let lineas = [
-        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}"#.to_string(),
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"lodestar-tests","version":"1"}}}"#.to_string(),
         r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#.to_string(),
         linea_call(3, "workspace_status", serde_json::json!({})),
         linea_call(4, "knowledge_search", serde_json::json!({ "text": "alfa" })),
@@ -5495,7 +5792,6 @@ fn frontmatter_no_es_oraculo_de_ficheros_del_host() {
         )],
         1,
     );
-
     let documento = &resp[0]["result"]["structuredContent"]["document"];
     let texto = documento.to_string();
     assert!(
@@ -7779,6 +8075,11 @@ fn anclaje_frontmatter_alcanza_la_clave_reservada() {
         1,
     );
     assert_eq!(
+        resp.len(),
+        1,
+        "protocolVersion null explícita debe producir una respuesta INVALID_PARAMS; el transporte devolvió {resp:?}"
+    );
+    assert_eq!(
         error_de(&resp[0]),
         None,
         "`frontmatter.` es la sintaxis que el propio parser recomienda para alcanzar una clave \
@@ -8113,7 +8414,6 @@ fn clave_frontmatter_literal_colisiona_con_ruido() {
         &[linea_inspect(1, "frontmatter.status").as_str()],
         1,
     );
-
     assert_eq!(
         error_de(&resp2[0]),
         None,
@@ -10531,7 +10831,7 @@ fn mcp_workspace_con_documentos_no_avisa() {
 }
 
 // ---------------------------------------------------------------------------
-// E29-H09 — `instructions` por perfil y `protocolVersion` no soportada.
+// E34-H01/H05 — baseline Legacy para cualquier revisión string y tipos inválidos.
 //
 // Dos defectos del mismo hallazgo (`decisiones §23/D-01`, caso G1-24 del testbench):
 // (1) `SERVER_INSTRUCTIONS` es una constante única servida sin mirar el `profile`, así que bajo
@@ -10539,9 +10839,8 @@ fn mcp_workspace_con_documentos_no_avisa() {
 //     `tools/list` sirva solo 7 — un agente que las siga acaba en `-32602`. El test histórico
 //     `instructions_sin_vocabulario_retirado` (línea 177) SOLO ejercita `standard` vía `roundtrip()`,
 //     por eso el drift bajo `readonly` no lo detectó nunca.
-// (2) `protocolVersion` no soportada NO se rechaza: el brazo `initialize` (`main.rs` L200-204) la
-//     descarta con `.filter(...)` y cae a `2024-11-05` como si el cliente hubiera pedido esa versión
-//     — una respuesta de éxito para un handshake que no debería prosperar.
+// (2) La negociación de `initialize` no debe ecoar la revisión ofrecida ni activar Modern:
+// cualquier string selecciona `2025-11-25`, incluida una revisión inventada.
 //
 // Los tests de abajo son NUEVOS (no tocan `instructions_sin_vocabulario_retirado`, que sigue
 // ejercitando solo `standard` y debe seguir verde tal cual): generalizan la guarda a los dos
@@ -10583,7 +10882,7 @@ fn instructions_readonly_nombra_solo_las_tools_servidas() {
         dir.path(),
         "readonly",
         &[
-            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#,
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"lodestar-tests","version":"1"}}}"#,
             r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#,
         ],
         2,
@@ -10630,7 +10929,7 @@ fn instructions_standard_sigue_coincidiendo() {
         dir.path(),
         "standard",
         &[
-            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#,
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"lodestar-tests","version":"1"}}}"#,
             r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#,
         ],
         2,
@@ -10662,7 +10961,9 @@ fn instructions_readonly_no_nombra_tools_de_cambio() {
     let resp = roundtrip_profile(
         dir.path(),
         "readonly",
-        &[r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#],
+        &[
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"lodestar-tests","version":"1"}}}"#,
+        ],
         1,
     );
     let instructions = instructions_de(&resp[..1]);
@@ -10672,158 +10973,32 @@ fn instructions_readonly_no_nombra_tools_de_cambio() {
     );
 }
 
-/// E29-H09 · Criterio `protocol_version_no_soportada_se_rechaza`:
-/// Dado un `initialize` con `protocolVersion: "1990-01-01"`, Cuando se llama, Entonces la respuesta
-/// es un error JSON-RPC `-32602` cuyo mensaje lista las tres versiones aceptadas.
-///
-/// Decisión de forma (delegada por la historia a la fase roja, ver spec L1004-1009): la spec MCP
-/// oficial de negociación de versión (2025-06-18, sección «Version Negotiation») dice que si el
-/// servidor no soporta la `protocolVersion` pedida, debe responder con la versión que SÍ soporta y
-/// dejar que el CLIENTE decida cerrar la conexión — no es, en el spec base, un error JSON-RPC. Pero
-/// la propia historia lo prescribe explícitamente distinto para este repo: «Forma propuesta: error
-/// JSON-RPC `-32602`». Se sigue la prescripción explícita de la historia (no la negociación blanda
-/// del spec base) porque coincide con el principio rector de la épica —silencio peor que error— y
-/// con el patrón que el servidor YA usa para "tool no disponible"/"tool desconocida": mantener dos
-/// criterios de rechazo distintos en el mismo servidor (uno blando para protocolVersion, uno duro
-/// para tools) sería la clase de inconsistencia que la épica cierra en `§15`.
+/// E34-H05 · Criterio `legacy_initialize_y_negociacion_fechas` (guard negativa): una revisión
+/// string antigua, futura o Modern tampoco se rechaza ni se refleja en la respuesta.
 #[test]
-fn protocol_version_no_soportada_se_rechaza() {
-    let dir = workspace_min();
-    let resp = roundtrip(
-        dir.path(),
-        &[
-            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"1990-01-01"}}"#,
-        ],
-        1,
-    );
-    assert_eq!(
-        resp[0]["error"]["code"], -32602,
-        "protocolVersion no soportada debe rechazarse con -32602: {resp:?}"
-    );
-    let msg = resp[0]["error"]["message"]
-        .as_str()
-        .expect("el error de protocolVersion no soportada lleva mensaje")
-        .to_lowercase();
-    for version in ["2024-11-05", "2025-03-26", "2025-06-18"] {
-        assert!(
-            msg.contains(version),
-            "el mensaje de rechazo debe listar la versión soportada «{version}»: {msg}"
+fn protocol_version_string_no_soportada_se_acepta_y_negocia_legacy() {
+    for (id, offered) in [
+        (1, "2025-03-26"),
+        (2, "1990-01-01"),
+        (3, "2099-12-31"),
+        (4, "2026-07-28"),
+    ] {
+        let dir = workspace_min();
+        let request = format!(
+            r#"{{"jsonrpc":"2.0","id":{id},"method":"initialize","params":{{"protocolVersion":"{offered}","capabilities":{{}},"clientInfo":{{"name":"lodestar-tests","version":"1"}}}}}}"#
         );
+        let resp = roundtrip(dir.path(), &[request.as_str()], 1);
+        assert_eq!(
+            resp[0]["error"],
+            serde_json::Value::Null,
+            "{offered}: {resp:?}"
+        );
+        assert_eq!(
+            resp[0]["result"]["protocolVersion"], "2025-11-25",
+            "la revisión {offered} no debe reflejarse ni activar otra era: {resp:?}"
+        );
+        assert_eq!(resp[0]["result"]["serverInfo"]["name"], "lodestar-mcp");
     }
-    // Un initialize rechazado es un handshake fallido, no un error de dominio de tool: no debe
-    // llevar `result` (ni siquiera con isError) y el error no es del catálogo de ErrorCode.
-    assert!(
-        resp[0]["result"].is_null(),
-        "un initialize rechazado no debe producir result: {resp:?}"
-    );
-}
-
-/// E29-H09 · Criterio `initialize_sin_version_sigue_funcionando` (control anti-vacuo: el rechazo
-/// de versión no puede cerrarse de más): Dado un `initialize` SIN `protocolVersion`, Cuando se
-/// llama, Entonces responde `2024-11-05` sin error — omitir no es lo mismo que pedir algo imposible.
-#[test]
-fn initialize_sin_version_sigue_funcionando() {
-    let dir = workspace_min();
-    let resp = roundtrip(
-        dir.path(),
-        &[r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#],
-        1,
-    );
-    assert_eq!(
-        resp[0]["result"]["protocolVersion"], "2024-11-05",
-        "sin protocolVersion, el servidor debe responder su versión por defecto sin error: {resp:?}"
-    );
-    assert!(
-        resp[0]["error"].is_null(),
-        "sin protocolVersion no debe haber error: {resp:?}"
-    );
-}
-
-// ---------------------------------------------------------------------------
-// E30-H03 — seguimiento 10: `protocolVersion` presente pero de tipo NO string.
-//
-// `requirements/epica-30-higiene-escoba.md` E30-H03 punto 10 (`decisiones §23`, seguimiento sin
-// numerar de los jueces ciegos de E28/E29). `E29-H09` fijó el rechazo de una `protocolVersion`
-// STRING pero no soportada (arriba, `protocol_version_no_soportada_se_rechaza`); este seguimiento
-// cubre el hueco distinto: `protocolVersion` presente con un valor que NO es string en absoluto
-// (número, `null` explícito, objeto). Causa raíz: `main.rs` L249,
-// `params.get("protocolVersion").and_then(Value::as_str)` — `.and_then` devuelve `None` tanto si
-// la clave está ausente como si está presente con un tipo no-string, y el código no distingue los
-// dos casos: cae al brazo de "ausente" y responde éxito con la versión por defecto. Debe
-// distinguir "ausente" (éxito, ver `initialize_sin_version_sigue_funcionando`, control anti-vacuo
-// que este bloque NO duplica) de "presente con tipo incorrecto" (rechazo `-32602`, mismo código
-// que la versión no soportada).
-// ---------------------------------------------------------------------------
-
-/// E30-H03 (seguimiento 10) · Criterio `protocol_version_no_string_es_rechazado`:
-/// Dado un `initialize` con `protocolVersion: 12345` (número), Cuando se procesa, Entonces la
-/// respuesta es un error JSON-RPC `-32602` que nombra que `protocolVersion` debe ser una cadena
-/// (no un éxito silencioso con la versión por defecto).
-#[test]
-fn protocol_version_no_string_es_rechazado() {
-    let dir = workspace_min();
-    let resp = roundtrip(
-        dir.path(),
-        &[r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":12345}}"#],
-        1,
-    );
-    assert_eq!(
-        resp[0]["error"]["code"], -32602,
-        "protocolVersion numérica (12345) debe rechazarse con -32602, no colar como ausente: {resp:?}"
-    );
-    let msg = resp[0]["error"]["message"]
-        .as_str()
-        .expect("el error de protocolVersion no-string lleva mensaje")
-        .to_lowercase();
-    assert!(
-        // Paréntesis EXPLÍCITOS: en Rust `&&` liga más que `||`, así que sin ellos la expresión
-        // era `(protocolversion && cadena) || string` — un mensaje que dijera «string» sin nombrar
-        // el parámetro habría pasado. La intención es la conjunción: nombrar el PARÁMETRO **y**
-        // decir que debe ser una cadena/string.
-        msg.contains("protocolversion") && (msg.contains("cadena") || msg.contains("string")),
-        "el mensaje debe nombrar que protocolVersion debe ser una cadena/string: {msg}"
-    );
-    assert!(
-        resp[0]["result"].is_null(),
-        "un initialize con protocolVersion de tipo incorrecto no debe producir result: {resp:?}"
-    );
-}
-
-/// E30-H03 (seguimiento 10) · Variante `protocol_version_null_explicito_es_rechazado`: un
-/// `protocolVersion: null` **explícito** (la clave está presente, con valor JSON `null`) no es lo
-/// mismo que omitir la clave — sigue siendo "presente con tipo incorrecto", no "ausente".
-#[test]
-fn protocol_version_null_explicito_es_rechazado() {
-    let dir = workspace_min();
-    let resp = roundtrip(
-        dir.path(),
-        &[r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":null}}"#],
-        1,
-    );
-    assert_eq!(
-        resp[0]["error"]["code"], -32602,
-        "protocolVersion: null EXPLÍCITO debe rechazarse con -32602, distinto de omitir la clave: {resp:?}"
-    );
-    assert!(
-        resp[0]["result"].is_null(),
-        "un initialize con protocolVersion: null explícito no debe producir result: {resp:?}"
-    );
-}
-
-/// E30-H03 (seguimiento 10) · Variante `protocol_version_objeto_es_rechazado`: un `protocolVersion`
-/// que es un objeto JSON (tipo claramente incorrecto) también se rechaza, no solo los escalares.
-#[test]
-fn protocol_version_objeto_es_rechazado() {
-    let dir = workspace_min();
-    let resp = roundtrip(
-        dir.path(),
-        &[r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":{"x":1}}}"#],
-        1,
-    );
-    assert_eq!(
-        resp[0]["error"]["code"], -32602,
-        "protocolVersion como objeto debe rechazarse con -32602: {resp:?}"
-    );
 }
 
 // ---------------------------------------------------------------------------

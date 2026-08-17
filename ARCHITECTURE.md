@@ -10,8 +10,8 @@
 > **⚠️ TABLA DE ÉPOCA (v0.2), no el stack vigente.** Es la primera tabla del documento y describe el
 > producto **antes** del giro headless (`§19`) y de la migración a Markdown universal (`§20`).
 > Siguen siendo ciertas las filas de **Backend/Rust**, **Cache SQLite/FTS5**, **Watcher `notify`**,
-> **Fachada agentes (MCP)** y **Fachada CI (CLI)** — salvo que `rmcp` sigue sin adoptarse
-> (`decisiones §3`) y que la semántica ya no es «OKF» sino Markdown universal (`§20`).
+> **Fachada agentes (MCP)** y **Fachada CI (CLI)** — con `rmcp` adoptado por E34 sobre stdio
+> (`decisiones §3`) y con semántica Markdown universal, ya no «OKF» (`§20`).
 > **Han dejado de ser ciertas**: «Shell de escritorio (Tauri v2)» y «Frontend (Svelte 5 + Vite)»
 > —la UI se retiró de `main` a la rama `experimental/ui-desktop` con el giro headless (`§19.1`)— y
 > **«Versionado: git»**, que salió de la superficie en `E9-H02` y del repo en `E15-H01`: no existe
@@ -396,12 +396,50 @@ Tabla de comandos (nombres congelados): `open_bundle` · `pick_dir` · `get_snap
 ### 7.2 MCP (`lodestar-mcp`, rmcp, stdio)
 Scope = **semántica, no CRUD** (Claude Code ya tiene Read/Write/Edit). Logs solo a stderr; stdout = JSON-RPC.
 
-- **Tools**: `find_backlinks` · `find_orphans` · `find_dangling` · `neighborhood(concept, depth, direction)` ·
-  `conformance_check(path?)` · `query(dsl)` · `create_concept`(validado) · `update_frontmatter`(validado, patch merge-patch RFC 7386: `null` elimina la clave) ·
-  `generate_index` · `generate_tag_indexes`.
-- **Resources** (read-only): lista de concepts · índice de frontmatter · gate de conformidad en vivo · grafo de enlaces.
-- No expone `read_file`/`write_file`. El valor es lo que los ficheros crudos no dan barato: backlinks resueltos,
-  ghosts, huérfanos, impacto, la puerta OKF, query estructurada y **escrituras validadas**.
+**E34 — política dual-era ratificada.** La fachada usa `rmcp = 3.1.2` y Tokio únicamente en
+`lodestar-mcp`, cuyo MSRV es `1.88`; el workspace y las demás crates conservan `1.80`. La única
+fuente de versiones es `crates/lodestar-mcp/src/protocol_policy.rs`: Modern (`2026-07-28`) es
+`LATEST` explícito y stateless; Legacy (`2025-11-25`) conserva el lifecycle de handshake. Fuera de
+`initialize`, cualquier otra fecha (incluidas futuras, draft o intermedias) se rechaza;
+`initialize` siempre selecciona la baseline Legacy, sin crear una rama para la fecha solicitada. Ambas eras comparten el mismo
+catálogo de diez tools y anuncian únicamente la capacidad `tools`; no se añaden capacidades ni
+objetivos fuera de esa lista. E34-H01 fija esta política; H02–H06 implementan servicio, transporte
+y wire por separado.
+
+- **Tools**: `workspace_status` · `knowledge_search` · `knowledge_get` · `metadata_inspect` ·
+  `knowledge_check` · `graph_query` · `impact_analyze` · `change_plan` · `change_apply` ·
+  `change_revert`. El catálogo es único para Modern y Legacy y cada perfil solo filtra las tools
+  de cambio.
+- **Servicio neutral**: `LodestarMcpService` posee `App` + `Profile` y es la única entrada para
+  discovery, catálogo, dispatch, ping e instrucciones. No lee ni escribe stdio; el transporte y
+  ambas eras adaptan sus mensajes al mismo servicio. `standard` y `readonly` son filtros de este
+  único catálogo, no servidores ni registros paralelos.
+- **Transporte oficial y único turno de App**: `SerialExecutor<LodestarMcpService>` es el
+  `ServerHandler` real. `LodestarMcpServer` es sólo el adaptador de lifecycle: delega todas las
+  requests al executor, anuncia Legacy al handshake y deja que el handler valide Modern por
+  metadata. Se sirve por `rmcp::transport::stdio()`; rmcp posee framing, lifecycle, flush y cierre
+  por EOF, y `main.rs` no parsea JSON-RPC. Toda `tools/call` toma el executor hasta completar la
+  llamada, de modo que dos tareas Tokio nunca acceden concurrentemente al mismo `App` ni dejan una
+  transacción a medias por perder el turno. Mientras una request espera ese turno, el adaptador
+  observa el `RequestContext.ct` de rmcp: si se cancela, no entra en el servicio ni ejecuta la tool.
+  Una vez admitida, la llamada síncrona termina indivisiblemente; una cancelación tardía no revierte
+  ni despublica el canónico. stdout queda reservado al wire y los logs salen por stderr.
+- **Modern (`2026-07-28`)**: lifecycle stateless sin `initialize` ni `ping`. Cada request declara
+  versión, capacidades e identidad (`clientInfo.name`/`version`) del cliente en `params._meta`.
+  `server/discover` anuncia exclusivamente
+  Modern, `tools`, instrucciones y `serverInfo` en metadata; discovery y `tools/list` llevan
+  `resultType: complete`, `ttlMs: 0` y `cacheScope: private`, y `tools/call` lleva `resultType:
+  complete`. Una versión ajena falla con `-32022`; metadata ausente o malformada falla con
+  `-32602`, sin fallback ni ejecución.
+- **Legacy (`2025-11-25`)**: `initialize` selecciona siempre esta baseline para cualquier revisión
+  string ofrecida, devuelve `serverInfo`, capacidad `tools` e instrucciones filtradas por perfil;
+  `notifications/initialized` no responde y `ping` devuelve `{}`. Sirve únicamente initialize,
+  initialized, ping, list y call: `server/discover` es `-32601`. Sus resultados no incluyen
+  `resultType`, `ttlMs` ni `cacheScope`.
+- **Capacidades**: únicamente `tools`; no se anuncian capacidades adicionales.
+- No expone `read_file`/`write_file`. El valor es lo que los ficheros crudos no dan barato:
+  backlinks resueltos, destinos ausentes, documentos aislados, impacto, validación universal,
+  consulta estructurada y **escrituras validadas**.
 
 ### 7.3 CLI (`lodestar-cli`, clap)
 Subcomandos `init` · `check` · `index` · `tags` · `export` · `reindex` · `import` (+ los subcomandos git de §13.7:
@@ -949,9 +987,10 @@ Diez tools (`REFACTOR §8`): **READ** `workspace_status` · `knowledge_search` �
 **Perfiles** (§12 de REFACTOR): `readonly` = las 7 de lectura/verificación; `standard` = añade las 3 de
 cambio. Se eligen **al arrancar** (`lodestar-mcp --profile readonly|standard`). **Política** de
 conformidad al arrancar (`--policy strict`, `strict` por defecto): no hay `allow_nonconformant` por
-llamada (seguridad §19.7). **Transporte** (decisión D6b): se mantiene **stdio** (decisiones §3) y se
-activa **`outputSchema`** derivado con la feature `schemars` (ya preparada, §10 fila 14); `rmcp`
-**diferido**. `contracts/mcp.yml` se **reescribe** 13→10 y el guardián de contrato lo vigila.
+llamada (seguridad §19.7). **Transporte** (decisión §3, cerrada por E34): se mantiene **stdio**, con
+`rmcp = 3.1.2` y Tokio únicamente en `lodestar-mcp`; `outputSchema` sigue derivado con la feature
+`schemars` (ya preparada, §10 fila 14). `contracts/mcp.yml` se **reescribe** 13→10 y el guardián
+de contrato lo vigila.
 
 > **Actualización E29-H11** (`decisiones §16(b)`): esta sección describía también un «envelope
 > común» — `{ ok, workspaceRevision, summary, data, diagnostics, warnings, resourceLinks }` — como
@@ -1329,6 +1368,14 @@ aplicar.
 
 ### 20.10 Superficie MCP (supersede §19.6 en una tool)
 
+La política de protocolo de E34-H01 es única y auditable: Modern `2026-07-28` (stateless) y Legacy
+`2025-11-25` (handshake), con Modern seleccionado explícitamente como `LATEST`. Las requests
+stateless no aceptan fechas futuras o intermedias; `initialize` selecciona siempre Legacy y negocia
+su baseline, sea antigua o futura la revisión solicitada. El catálogo y la capacidad anunciada son los mismos en
+ambas eras: solo `tools`; resources, prompts, sampling, elicitation, tasks, MRTR y subscriptions
+quedan fuera. E34-H04/H05 implementan los dos wires sobre el servicio neutral y E34-H06 cierra la
+serialización, cancelación cooperativa, clientes oficiales y arnés raw exacto.
+
 Diez tools, con **un solo cambio** respecto de §19.6: `schema_inspect` → **`metadata_inspect`**
 (catálogo de propiedades con `presentIn`/`inferredTypes`, inspección de una propiedad con sus valores
 y frecuencias, y soporte de propiedades anidadas `service.tier`, `release.target.date`). Permite a un
@@ -1647,3 +1694,4 @@ tools), el dato de dogfooding, el inventario del coste de conexión (§22.5), y 
 tres salidas de la ficha —conectar / acotar / retirar— **contra los datos**, actualizando o
 refutando la recomendación escrita en ella. Termina en **«lista para decidir»**: la decisión, su
 ratificación y el cambio de estado de `decisiones §14` son del usuario, fuera de la épica.
+

@@ -41,7 +41,7 @@ prioridad **filtra**, no ordena. El vocabulario de `estado` es cerrado: `abierta
 | 0 | Giro a motor headless de integridad semántica | ratificada | 2 | [`00-giro-headless.md`](00-giro-headless.md) |
 | 1 | Firma/notarización de binarios (ex-fachada Tauri) | diferida | 3 | [`01-build-fachada-escritorio.md`](01-build-fachada-escritorio.md) |
 | 2 | Port de la UI del prototipo | obsoleta | 1 | [`02-port-ui-prototipo.md`](02-port-ui-prototipo.md) |
-| 3 | Transporte MCP: stdio propio frente a rmcp | abierta | 2 | [`03-transporte-mcp-rmcp.md`](03-transporte-mcp-rmcp.md) |
+| 3 | Transporte MCP: rmcp oficial sobre stdio | cerrada | 2 | [`03-transporte-mcp-rmcp.md`](03-transporte-mcp-rmcp.md) |
 | 4 | Generación del `.d.ts` desde Rust | obsoleta | 1 | [`04-generacion-dts-ts-rs.md`](04-generacion-dts-ts-rs.md) |
 | 5 | i18n multi-idioma | cerrada | 1 | [`05-i18n-multi-idioma.md`](05-i18n-multi-idioma.md) |
 | 6 | Semántica de `merge` local | obsoleta | 1 | [`06-semantica-merge-local.md`](06-semantica-merge-local.md) |
@@ -109,9 +109,9 @@ mutación (cada uno visto en rojo con la mutación aplicada). Los supervivientes
 test» más los falsos positivos de alcance re-verificados contra `lodestar-app`, con
 `relative_dir_href` señalada como punto de partida si la épica de evidencia (§9) quiere otra tanda.
 
-**§3, §10, §22, §24** son decisiones vivas de baja urgencia: tienen recomendación estable (o, en
-el caso de §24, opciones abiertas sin urgencia) y esperan un caso real que las fuerce (§3 absorbió
-además el problema de *timeout*/cancelación de §16(d)). §22 y §24 son hallazgos salidos del
+**§10, §22, §24** son decisiones vivas de baja urgencia: tienen recomendación estable (o, en
+el caso de §24, opciones abiertas sin urgencia) y esperan un caso real que las fuerce. §3 quedó
+cerrada por E34-H01 y absorbió el problema de *timeout*/cancelación de §16(d). §22 y §24 son hallazgos salidos del
 dogfooding, así que su sitio natural es dentro de la épica de evidencia (§9); §24 nació de la
 verificación por jueces ciegos de la adenda correctiva de E28 (`E28-H04`) y no bloquea esa épica.
 

@@ -36,7 +36,7 @@ workspace = true
 
 [dev-dependencies]
 serde_json = { workspace = true }
-tempfile = "3"
+tempfile = "=3.24.0"
 # E33-H01: el generador de escala compartido (`ARCHITECTURE.md §22.2`) vive en el crate de fixtures
 # —nunca en el core (invariante #2) ni inline en un test—, y los arneses de escala de esta fachada
 # (`escala.rs`, `corpus_realista.rs`) lo consumen desde ahí.

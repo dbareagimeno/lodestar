@@ -3,7 +3,7 @@
 > Mapea las épicas/historias de [`requirements/`](requirements/) a su estado real en esta rama.
 > Construido en el **orden de fases ratificado** (`ARCHITECTURE.md §14`), validando con tests en cada fase.
 >
-> **Resumen** (actualizado al cierre de `E25`/`E26`): el repo es un **motor headless de integridad
+> **Resumen** (actualizado durante `E34`): el repo es un **motor headless de integridad
 > semántica** sobre workspaces Markdown universales (`ARCHITECTURE.md §20`). Las épicas **E0–E8**
 > (fundacionales), **E9–E14** (giro headless), **E15–E22** (migración de OKF a Markdown universal),
 > **E23** (cierre: defectos hallados en la revisión de la PR #17), **E24** (cierre de los defectos
@@ -27,6 +27,20 @@
 > siempre fue `structuredContent`/exit codes directos). Las secciones de E0–E8 de más abajo
 > conservan esa terminología como **historia del proyecto**; la autoridad viva es
 > `ARCHITECTURE.md §20`.
+>
+> **E34 completa (H01–H06)**: H01 ratifica exactamente Modern MCP `2026-07-28` y Legacy MCP `2025-11-25`,
+> diez tools y solo la capacidad `tools`; fija `rmcp = 3.1.2`/Tokio y MSRV `1.88` exclusivamente
+> en `lodestar-mcp`. H02 ya extrajo `LodestarMcpService` como dueño neutral del catálogo,
+> dispatcher, perfiles e instrucciones, con paridad no vacía contra la fachada. H03 retiró el
+> bucle JSON-RPC manual: `SerialExecutor<LodestarMcpService>` se sirve con rmcp/stdio, mantiene un
+> único turno sobre `App`, separa stdout/stderr y cierra limpiamente por EOF. H04 completa Modern:
+> requests stateless con metadata obligatoria de versión, capacidades e identidad, discovery,
+> list/call, errores de versión, resultType y cache privada, sin initialize ni ping. H05 completa
+> Legacy: negociación cerrada, initialized silencioso, ping, perfiles y envelopes sin
+> campos Modern, con la issue #38 reproducida y PR #39 superada. H06 observa la cancelación rmcp
+> antes del turno serial, preserva la indivisibilidad después de admitir la llamada y cierra la
+> conformidad con clientes oficiales, raw exacto, stdout/stderr y EOF. Los hashes de locks, rojos
+> y gates quedan auditables en `docs/qa/e34-interoperabilidad-mcp-evidencia.md`.
 >
 > Lo pendiente está en [`decisiones/`](decisiones/README.md): fechas en el lenguaje de consulta (§12),
 > el **store sin consumidor** (§14, abierto en E23-H16). §12 y §13 se cerraron en E23-H14.
@@ -66,7 +80,7 @@ subcomandos git de la CLI —`log`/`last-conforming`/`branch`/`switch`/`merge`/`
 | **E4** `lodestar-vcs` | ✅ Hecho | libgit2 local + red por binario `git` + **resolve_rev**, **staged_files**, **switch** (sin tocar working tree), **merge** (3-vías a nivel de árbol con marcadores + `MERGE_HEAD`), **install_hooks**, **tree_oid**. Cache de conformidad por tree-oid en el store, cableada en la workspace. **12 tests**. |
 | **E5** `lodestar-workspace` | ✅ Hecho | Handle unificado, único escritor, snapshot, commit/restore con checkpoint, switch/merge, conformidad cacheada por tree-oid, config (`lodestar.toml`), y **bus de eventos en vivo** (`open_live`/`enable_cache`/`subscribe`) con **update optimista** de la cache tras cada escritura. **12 tests**. |
 | **E6** Tauri + frontend | ✅ Hecho | **Fachada Tauri v2** real: comandos congelados sobre `Workspace` + estado del bundle + forwarder del bus `IndexEvent` → evento `bundle:changed` (UI en vivo). Binario `lodestar-desktop` compila; CI de Rust instala webkit y construye el frontend antes. **Frontend Svelte 5 funcional**: layout de 3 columnas colapsables, árbol filtrable, editor multi-escritor con validación y diagnósticos localizados, panel de enlaces, **isla imperativa del grafo** (`createStarMap`, SVG+rAF, sin `{#each}`), modo **Cambios** (diff + commit). `npm run check`/`build` verdes. Pulido en [`decisiones §2`](decisiones/02-port-ui-prototipo.md). |
-| **E7** `lodestar-mcp` | 🟢 Parcial | 13 tools sobre la workspace + bucle JSON-RPC por stdio (stdout puro). **Golden cross-fachada** (tool==workspace) + e2e. **5 tests**. Pendiente: transporte `rmcp` oficial + resources (ver [`decisiones §3`](decisiones/03-transporte-mcp-rmcp.md)). |
+| **E7** `lodestar-mcp` | 🟢 Superada por E34 | La superficie vigente tiene 10 tools y perfiles `standard`/`readonly`. E34-H01 cerró [`decisiones §3`](decisiones/03-transporte-mcp-rmcp.md), fijó la política dual-era y adoptó `rmcp = 3.1.2`; H02 extrajo el servicio neutral único; H03 ya sirve ese servicio por rmcp/stdio con executor serial; H04–H06 completan ambos wires y la conformidad. Resources queda explícitamente fuera de alcance. |
 | **E8** Transversales | 🟢 Parcial | Hechos: exit codes/SARIF, escritura atómica, **zip-slip cerrado por RelPath en `import`**, identidad de commits + override por `lodestar.toml`, trailer Co-Authored-By del agente, gitignore de `.lodestar/`, **config por-bundle (`lodestar.toml`: strictness + identidad)**, **`lodestar import`** (zip del prototipo o dir), **`init` con git init + commit inicial real**, **i18n keyed por código** (catálogo español), **arnés diferencial JS-vs-Rust (§12)**, y **pipeline de release multiplataforma** (`release.yml`: macOS arm64/Windows/Linux → bundles sin firmar + binarios CLI/MCP; Release en borrador) con **CI multiplataforma** (job de Rust en las 3 plataformas). Pendiente: **firma/notarización** de bundles + updater, gate de bench (§11), threat model. |
 
 ## Infraestructura de proceso (2026-07-10)
@@ -81,8 +95,8 @@ El repo tiene ahora una **estructura de agentes y skills** para el desarrollo po
 - **Skills** (`.claude/skills/`): `/planificar` (features grandes: diseño + épica, 2 puertas) ·
   `/historia` · `/tdd` · `/juzgar [--panel]` · `/contrato [--check]` · `/mutantes` · `/ciclo`
   (pipeline completo por historia).
-- **Contratos de la frontera** (`contracts/`): `ipc.yml` (comandos Tauri + eventos) y `mcp.yml`
-  (13 tools), extraídos del código real; los tipos siguen viviendo solo en `core::types`
+- **Contratos de la frontera** (`contracts/`): `ipc.yml` histórico y `mcp.yml` vigente
+  (10 tools, Modern/Legacy), extraídos del código real; los tipos siguen viviendo solo en `core::types`
   (invariante #4). Verificación con `/contrato --check`.
 - **Mutation testing a demanda**: `cargo-mutants` configurado (`.cargo/mutants.toml`), sin CI.
 - Primera historia acordada para el nuevo flujo: **ts-rs** (E0-H04/E6-H03,
@@ -218,8 +232,8 @@ del usuario:
 4. **`docs/history/PROPUESTA_FIXES.md`** — reactivar los arreglos sugeridos (`Fix`/`apply_fix`, la op
    retirada en `E23-H11`). Condición de entrada: que existan productores de `Fix` que justifiquen la
    maquinaria del `fixId` direccionable entre revisiones.
-5. **`decisiones §3`/`§9`** — `rmcp` oficial + resources cuando un cliente lo exija; gate de bench y
-   threat model.
+5. **`decisiones §9`** — gate de bench y threat model. `decisiones §3` quedó cerrada por E34:
+   `rmcp` oficial sobre stdio, sin resources ni transports de red.
 
 Deuda menor registrada, con dueño futuro: `Workspace::materialize_staging` es API pública que
 escribe bajo `.lodestar/` **sin pasar por ninguno de los cuatro chokepoints** de `E23-H12`; hoy es
@@ -1844,3 +1858,4 @@ Dos matices del motor que H02 debe conocer al escribir esperados (documentados e
 deliberado (solo la navegación pura `../`/`./` es `WorkspaceDirectory`), y el **conteo de
 documentos del corpus depende del filesystem** (el par de caja colapsa en APFS y coexiste en ext4)
 — los esperados no pueden ser conteos absolutos.
+

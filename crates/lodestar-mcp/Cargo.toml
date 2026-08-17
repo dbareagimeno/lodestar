@@ -6,7 +6,7 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 readme.workspace = true
-rust-version.workspace = true
+rust-version = "1.88"
 description = "Fachada de agentes (MCP/stdio) sobre Workspace. Semántica, no CRUD."
 keywords = ["okf", "mcp", "knowledge-base", "agents", "markdown"]
 categories = ["development-tools"]
@@ -22,12 +22,14 @@ lodestar-app = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }
+rmcp = { version = "=3.1.2", default-features = false, features = ["server", "transport-io", "transport-async-rw"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std", "sync"] }
 
 [lints]
 workspace = true
 
 [dev-dependencies]
-tempfile = "3"
+tempfile = "=3.24.0"
 # E24-H15: valida que el `structuredContent` que emite cada tool CONFORMA el `outputSchema` que
 # declara. Es lo que hace un cliente MCP estricto, y hasta ahora nada lo comprobaba: el test
 # existente solo miraba 5 de las 10 tools y solo que el schema «tuviera alguna clave estructural».
