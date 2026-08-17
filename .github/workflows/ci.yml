@@ -7,7 +7,7 @@ name: CI
 #   Rust · fmt · clippy · build · test (ubuntu-latest | macos-14 | windows-latest)
 #   MSRV · workspace sin MCP (Rust 1.80.1)
 #   MSRV · fachada MCP (Rust 1.88.0)
-#   Core puro (sin tokio/rusqlite/git2/notify/tauri/zip)
+#   Core puro + gate completo (sin tokio/rusqlite/git2/notify/tauri/zip)
 #   Smoke de la demo (examples/demo)
 # Si renombras un job, actualiza también la lista de checks obligatorios en GitHub o
 # la protección quedará exigiendo un check que ya no existe (y bloqueará todo merge).
@@ -165,8 +165,31 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Política compartida de arquitectura, contrato y agentes
-        run: ./scripts/agent-gates.sh policy
+      - name: Descarga el grafo bloqueado antes de los gates
+        run: cargo fetch --locked
+      - name: Prepara tokio-stream para los clientes rmcp oficiales
+        shell: bash
+        run: |
+          set -euo pipefail
+          probe="${RUNNER_TEMP}/e34-tokio-stream-source"
+          cargo_home="${CARGO_HOME:-${HOME}/.cargo}"
+          mkdir -p "$probe/src"
+          printf '%s\n' \
+            '[package]' \
+            'name = "e34-tokio-stream-source"' \
+            'version = "0.0.0"' \
+            'edition = "2021"' \
+            '' \
+            '[dependencies]' \
+            'tokio-stream = "=0.1.17"' > "$probe/Cargo.toml"
+          : > "$probe/src/lib.rs"
+          cargo fetch --manifest-path "$probe/Cargo.toml"
+          source="$(find "$cargo_home/registry/src" -mindepth 2 -maxdepth 2 -type d \
+            -name 'tokio-stream-0.1.17' -print -quit)"
+          test -n "$source"
+          echo "E34_TOKIO_STREAM_SOURCE=$source" >> "$GITHUB_ENV"
+      - name: Gate completo de arquitectura, contrato y entrega
+        run: ./scripts/agent-gates.sh full
 
   # ---------------------------------------------------------------------------
   # E27-H04: el guion de examples/demo no puede pudrirse en silencio. El job

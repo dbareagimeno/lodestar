@@ -121,7 +121,6 @@ fn roundtrip(dir: &std::path::Path, lines: &[String], expect: usize) -> Vec<Valu
         writeln!(stdin, "{l}").unwrap();
     }
     stdin.flush().unwrap();
-    drop(stdin);
     let mut out = Vec::new();
     for line in (&mut stdout).lines().map_while(Result::ok) {
         let response: Value = serde_json::from_str(&line).expect("stdout = JSON-RPC puro");
@@ -133,6 +132,10 @@ fn roundtrip(dir: &std::path::Path, lines: &[String], expect: usize) -> Vec<Valu
             break;
         }
     }
+    // Mantener stdin abierto hasta recoger las respuestas evita que EOF cancele una operación
+    // grande antes de que termine en Windows, donde el apply puede tardar más que el envío del
+    // lote. El proceso se cierra después de haber observado exactamente el viaje solicitado.
+    drop(stdin);
     child.wait().ok();
     out
 }

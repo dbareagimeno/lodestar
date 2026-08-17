@@ -64,6 +64,7 @@ gate_dependency_policy() {
 gate_policy() {
   python3 scripts/check-agent-guidance.py --include-legacy
   gate_contract_static
+  cargo metadata --locked --format-version 1 >/dev/null
   gate_dependency_policy
 }
 
@@ -88,6 +89,7 @@ configure_e34_tokio_stream_source() {
 gate_full() {
   python3 scripts/check-agent-guidance.py --include-legacy
   gate_contract_static
+  cargo metadata --locked --format-version 1 >/dev/null
   cargo fmt --all --check
   cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
   cargo build --workspace --all-targets --locked

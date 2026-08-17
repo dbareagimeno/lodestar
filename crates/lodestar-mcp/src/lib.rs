@@ -13,13 +13,13 @@ use lodestar_app::{App, Profile};
 use rmcp::{
     handler::server::ServerHandler,
     model::{
-        CacheScope, CallToolRequestParams, CallToolResponse, CallToolResult, ClientRequest,
+        CallToolRequestParams, CallToolResponse, CallToolResult, ClientRequest,
         CompleteRequestMethod, CompleteRequestParams, CompleteResult, DiscoverRequestMethod,
         DiscoverResult, ErrorData, Implementation, InitializeRequestParams, InitializeResult,
         InitializeResultMethod, ListPromptsRequestMethod, ListPromptsResult,
         ListResourceTemplatesRequestMethod, ListResourceTemplatesResult,
         ListResourcesRequestMethod, ListResourcesResult, ListToolsResult, PaginatedRequestParams,
-        ProtocolVersion, ResultType, ServerCapabilities, ServerInfo, Tool,
+        ProtocolVersion, ServerCapabilities, ServerInfo, Tool,
     },
     service::{MaybeSendFuture, NotificationContext, RequestContext, Service, ServiceRole},
     RoleServer,
@@ -163,7 +163,11 @@ fn rmcp_call_result(value: Value) -> Result<CallToolResult, ErrorData> {
 }
 
 fn validate_modern_request_metadata(context: &RequestContext<RoleServer>) -> Result<(), ErrorData> {
-    if !protocol_policy::is_modern(context.protocol_version().as_ref()) {
+    let Some(policy) = protocol_policy::policy_for_protocol(context.protocol_version().as_ref())
+    else {
+        return Ok(());
+    };
+    if !policy.requires_request_metadata() {
         return Ok(());
     }
 
@@ -189,15 +193,30 @@ impl ServerHandler for SerialExecutor<LodestarMcpService> {
         _context: RequestContext<RoleServer>,
     ) -> impl Future<Output = Result<DiscoverResult, ErrorData>> + MaybeSendFuture + '_ {
         async move {
-            if !protocol_policy::is_modern(_context.protocol_version().as_ref()) {
+            let Some(policy) =
+                protocol_policy::policy_for_protocol(_context.protocol_version().as_ref())
+            else {
+                return Err(ErrorData::method_not_found::<DiscoverRequestMethod>());
+            };
+            if !policy.is_stateless() {
                 return Err(ErrorData::method_not_found::<DiscoverRequestMethod>());
             }
             validate_modern_request_metadata(&_context)?;
             let info = self.run(|service| server_info(service)).await;
-            Ok(DiscoverResult::from_server_info(
+            let mut result = DiscoverResult::from_server_info(
                 vec![protocol_policy::modern_protocol_version()],
                 info,
-            ))
+            );
+            if let Some(result_type) = policy.result_type_wire() {
+                result.result_type = result_type;
+            }
+            if let Some(ttl_ms) = policy.cache_ttl_ms {
+                result = result.with_ttl_ms(ttl_ms);
+            }
+            if let Some(cache_scope) = policy.cache_scope_wire() {
+                result = result.with_cache_scope(cache_scope);
+            }
+            Ok(result)
         }
     }
 
@@ -246,7 +265,9 @@ impl ServerHandler for SerialExecutor<LodestarMcpService> {
         context: RequestContext<RoleServer>,
     ) -> impl Future<Output = Result<InitializeResult, ErrorData>> + MaybeSendFuture + '_ {
         let metadata_version = context.meta.protocol_version();
-        if protocol_policy::is_modern(metadata_version.as_ref()) {
+        if protocol_policy::policy_for_protocol(metadata_version.as_ref())
+            .is_some_and(|policy| !policy.initialize)
+        {
             return std::future::ready(
                 Err(ErrorData::method_not_found::<InitializeResultMethod>()),
             );
@@ -278,14 +299,21 @@ impl ServerHandler for SerialExecutor<LodestarMcpService> {
     ) -> Result<ListToolsResult, ErrorData> {
         validate_modern_request_metadata(&context)?;
         let catalog = self.run(|service| service.list()).await;
-        let result = ListToolsResult::with_all_items(rmcp_tools(catalog)?);
-        Ok(
-            if protocol_policy::is_modern(context.protocol_version().as_ref()) {
-                result.with_ttl_ms(0).with_cache_scope(CacheScope::Private)
-            } else {
-                result
-            },
-        )
+        let mut result = ListToolsResult::with_all_items(rmcp_tools(catalog)?);
+        if let Some(policy) =
+            protocol_policy::policy_for_protocol(context.protocol_version().as_ref())
+        {
+            if let Some(result_type) = policy.result_type_wire() {
+                result.result_type = Some(result_type);
+            }
+            if let Some(ttl_ms) = policy.cache_ttl_ms {
+                result = result.with_ttl_ms(ttl_ms);
+            }
+            if let Some(cache_scope) = policy.cache_scope_wire() {
+                result = result.with_cache_scope(cache_scope);
+            }
+        }
+        Ok(result)
     }
 
     fn call_tool(
@@ -302,8 +330,10 @@ impl ServerHandler for SerialExecutor<LodestarMcpService> {
                 .await
                 .map_err(|error| ErrorData::invalid_params(error, None))?;
             let mut result = rmcp_call_result(result)?;
-            if protocol_policy::is_modern(context.protocol_version().as_ref()) {
-                result.result_type = Some(ResultType::COMPLETE);
+            if let Some(policy) =
+                protocol_policy::policy_for_protocol(context.protocol_version().as_ref())
+            {
+                result.result_type = policy.result_type_wire();
             }
             Ok(CallToolResponse::Complete(result))
         }
@@ -397,7 +427,6 @@ impl Service<RoleServer> for LodestarMcpServer {
             // A session that already negotiated Legacy must instead expose the method as
             // unavailable, without that Modern validation or a DiscoverResult response.
             if matches!(&request, ClientRequest::DiscoverRequest(_))
-                && context.meta.protocol_version().is_none()
                 && context.peer.peer_info().is_some_and(|info| {
                     info.protocol_version == protocol_policy::legacy_protocol_version()
                 })

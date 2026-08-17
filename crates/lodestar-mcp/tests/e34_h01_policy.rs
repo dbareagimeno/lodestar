@@ -1,4 +1,4 @@
-//! Rojo de E34-H01: política dual-era, dependencias acotadas y catálogo cerrado.
+//! E34-H01: política dual-era, dependencias acotadas y catálogo cerrado.
 //!
 //! Este archivo es deliberadamente independiente de `main.rs`: C1 incluye el seam puro de
 //! `protocol_policy` y C3 habla con el binario real por stdio.
@@ -135,7 +135,7 @@ fn workspace_root() -> PathBuf {
 
 fn cargo_metadata() -> Value {
     let output = Command::new("cargo")
-        .args(["metadata", "--no-deps", "--format-version", "1"])
+        .args(["metadata", "--locked", "--no-deps", "--format-version", "1"])
         .current_dir(workspace_root())
         .output()
         .expect("cargo metadata arranca");
@@ -162,9 +162,8 @@ fn package<'a>(packages: &'a [Value], name: &str) -> &'a Value {
 
 /// C1 — el seam ejecutable resuelve únicamente las dos eras y rechaza cualquier otra fecha.
 ///
-/// `policy_for` es la consulta ejecutable que H01 exige añadir al seam puro. La implementación
-/// actual solo expone `resolve`, por lo que este test debe quedar rojo por error de compilación
-/// hasta que exista esa API; no se sustituye por una inspección textual de producción.
+/// `policy_for` es la consulta ejecutable que H01 exige en el seam puro; no se sustituye por una
+/// inspección textual de producción.
 #[test]
 fn mcp_policy_matrix() {
     assert_eq!(protocol_policy::LATEST, MODERNA);

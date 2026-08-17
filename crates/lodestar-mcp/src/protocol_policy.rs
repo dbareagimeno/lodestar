@@ -30,6 +30,40 @@ pub struct Policy {
     pub ping: bool,
 }
 
+impl Policy {
+    /// Indica si la era exige el lifecycle stateless de Modern.
+    #[allow(dead_code)]
+    pub fn is_stateless(&self) -> bool {
+        self.lifecycle == "stateless"
+    }
+
+    /// Indica si cada request de la era debe llevar metadata MCP válida.
+    #[allow(dead_code)]
+    pub fn requires_request_metadata(&self) -> bool {
+        self.request_metadata == "required"
+    }
+
+    /// Convierte el discriminador de resultado de la política al tipo oficial de rmcp.
+    #[allow(dead_code)]
+    pub fn result_type_wire(&self) -> Option<rmcp::model::ResultType> {
+        match self.result_type.as_deref() {
+            Some("complete") => Some(rmcp::model::ResultType::COMPLETE),
+            None => None,
+            Some(other) => panic!("resultType de política no soportado: {other}"),
+        }
+    }
+
+    /// Convierte el scope de cache de la política al tipo oficial de rmcp.
+    #[allow(dead_code)]
+    pub fn cache_scope_wire(&self) -> Option<rmcp::model::CacheScope> {
+        match self.cache_scope {
+            Some("private") => Some(rmcp::model::CacheScope::Private),
+            None => None,
+            Some(other) => panic!("cacheScope de política no soportado: {other}"),
+        }
+    }
+}
+
 /// La versión más reciente es una selección explícita, no un fallback implícito.
 pub const LATEST: &str = MODERN;
 
@@ -68,6 +102,11 @@ pub fn policy_for(era: Era) -> Policy {
             ping: true,
         },
     }
+}
+
+/// Devuelve la política de la versión tipada de una request, si pertenece a una era ratificada.
+pub fn policy_for_protocol(version: Option<&rmcp::model::ProtocolVersion>) -> Option<Policy> {
+    version.and_then(|version| era_for_protocol(version).map(policy_for))
 }
 
 /// Negocia el lifecycle `initialize`, que siempre pertenece a la era Legacy.
@@ -113,7 +152,7 @@ pub fn era_for_protocol(version: &rmcp::model::ProtocolVersion) -> Option<Era> {
 /// Indica si una request pertenece a la era Modern.
 #[allow(dead_code)]
 pub fn is_modern(version: Option<&rmcp::model::ProtocolVersion>) -> bool {
-    version.is_some_and(|version| era_for_protocol(version) == Some(Era::Modern))
+    policy_for_protocol(version).is_some_and(|policy| policy.is_stateless())
 }
 
 /// Versión Legacy en la representación tipada que consume rmcp.

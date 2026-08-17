@@ -45,6 +45,7 @@ edition = "2024"
 [dependencies]
 lodestar-mcp = { path = "__MCP__" }
 lodestar-app = { path = "__APP__" }
+lodestar-workspace = { path = "__WORKSPACE__", features = ["test-failpoints"] }
 rmcp = { version = "=3.1.2", default-features = false, features = ["server", "transport-async-rw"] }
 serde_json = "1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "io-util", "sync"] }
@@ -52,10 +53,11 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "io-util", "sy
 
 const CANCEL_PROBE_MAIN: &str = r#"use lodestar_app::{App, Profile};
 use lodestar_mcp::{LodestarMcpServer, LodestarMcpService, SerialExecutor};
+use lodestar_workspace::failpoints::{armar_gancho_global, PuntoDeGancho};
 use rmcp::{RoleServer, Service};
 use rmcp::service::{MaybeSendFuture, NotificationContext, RequestContext, ServiceRole};
 use serde_json::json;
-use std::{env, error::Error, path::Path, sync::mpsc as std_mpsc};
+use std::{env, error::Error, path::Path, sync::{Arc, Mutex}, sync::mpsc as std_mpsc};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::{mpsc, oneshot};
 
@@ -193,19 +195,38 @@ async fn main() -> Result<(), Box<dyn Error>> {
         }
     }
 
+    let (entered_tx, entered_rx) = oneshot::channel();
+    let entered_tx = Arc::new(Mutex::new(Some(entered_tx)));
+    let entered_tx_hook = Arc::clone(&entered_tx);
+    let (release_tx, release_rx) = std_mpsc::sync_channel(0);
+    armar_gancho_global(PuntoDeGancho::DespuesDelPrimerRename, move || {
+        if let Some(sender) = entered_tx_hook.lock().unwrap().take() {
+            let _ = sender.send(());
+        }
+        release_rx.recv().unwrap();
+    });
     client_write.write_all(frame(3, "tools/call", json!({"name":"change_apply","arguments":{"changeSetId":late_change_set_id}})).as_bytes()).await?;
     client_write.flush().await?;
-    let response3 = lines.next_line().await?.ok_or("missing late apply response")?;
-    let response3: serde_json::Value = serde_json::from_str(&response3)?;
-    if response3["id"] != 3 || response3["result"]["structuredContent"]["applied"] != true { return Err(format!("late apply failed: {response3}").into()); }
-    let published_note = std::fs::read(Path::new(&root).join("note.md"))?;
-    client_write.write_all(b"{\"jsonrpc\":\"2.0\",\"method\":\"notifications/cancelled\",\"params\":{\"requestId\":3,\"reason\":\"too-late\"}}\n").await?;
+    let (id3, context3) = events_rx.recv().await.ok_or("missing late apply request")?;
+    if id3 != rmcp::model::RequestId::Number(3) { return Err("late request id mismatch".into()); }
+    entered_rx.await?;
+    client_write.write_all(b"{\"jsonrpc\":\"2.0\",\"method\":\"notifications/cancelled\",\"params\":{\"requestId\":3,\"reason\":\"after-first-rename\"}}\n").await?;
     client_write.flush().await?;
+    ack_rx.recv().await.ok_or("missing late cancellation notification ack")?;
+    context3.ct.cancelled().await;
+    release_tx.send(()).map_err(|_| "release post-rename hook dropped")?;
+    while let Some(id) = done_rx.recv().await {
+        if id == rmcp::model::RequestId::Number(3) { break; }
+    }
+    let published_note = std::fs::read(Path::new(&root).join("note.md"))?;
     client_write.write_all(frame(4, "tools/call", json!({"name":"workspace_status","arguments":{}})).as_bytes()).await?;
     client_write.flush().await?;
     let response4 = lines.next_line().await?.ok_or("missing control response")?;
     let response4: serde_json::Value = serde_json::from_str(&response4)?;
     if response4["id"] != 4 { return Err(format!("cancelled response leaked: {response4}").into()); }
+    if response4["result"]["structuredContent"]["valid"] != true { return Err(format!("late cancel dejó estado inválido: {response4}").into()); }
+    if response4["result"]["structuredContent"]["recovery"]["pendingTransaction"] != false { return Err(format!("late cancel dejó recovery pendiente: {response4}").into()); }
+    if response4["result"]["structuredContent"]["receipts"].as_array().is_none_or(|receipts| receipts.is_empty()) { return Err(format!("late cancel perdió el receipt: {response4}").into()); }
     if std::fs::read(Path::new(&root).join("note.md"))? != published_note { return Err("late cancel revirtió publicación".into()); }
     let receipts = Path::new(&root).join(".lodestar/runtime/receipts");
     if !receipts.exists() || std::fs::read_dir(receipts)?.next().transpose()?.is_none() {
@@ -224,6 +245,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     } else {
         println!("CANCEL_PROBE_SUPPRESSED");
     }
+    println!("CANCEL_PROBE_LATE_PRESERVED");
     Ok(())
 }
 "#;
@@ -249,11 +271,15 @@ fn cancelacion_transaccional_sin_parciales() {
         .replace(
             "__APP__",
             &toml_basic_string_content(mcp.join("../lodestar-app").to_str().unwrap()),
+        )
+        .replace(
+            "__WORKSPACE__",
+            &toml_basic_string_content(mcp.join("../lodestar-workspace").to_str().unwrap()),
         );
     write_text(&helper.path().join("Cargo.toml"), &manifest);
     write_text(&helper.path().join("src/main.rs"), CANCEL_PROBE_MAIN);
     let root = workspace_fixture();
-    let target = mcp.join("../../target/agent-state/e34-h06/cancel-target");
+    let target = helper.path().join("target");
     let output = Command::new("cargo")
         .args(["run", "--offline", "--manifest-path"])
         .arg(helper.path().join("Cargo.toml"))
@@ -271,6 +297,12 @@ fn cancelacion_transaccional_sin_parciales() {
     assert!(
         String::from_utf8_lossy(&output.stdout).contains("CANCEL_PROBE_SUPPRESSED"),
         "una escritura cancelada antes del FIFO no puede publicarse: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("CANCEL_PROBE_LATE_PRESERVED"),
+        "la cancelación post-rename debe conservar publicación, receipt y estado: stdout={} stderr={}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
@@ -329,6 +361,39 @@ async fn serializacion_concurrente_final_coherente() {
                     call_wire(7, modern, "knowledge_search", json!({"text":"Note"})),
                 ]);
                 assert_eq!(
+                    batch.len(),
+                    3,
+                    "cada request debe conservar exactamente una respuesta"
+                );
+                let response5 = batch
+                    .iter()
+                    .find(|response| response["id"] == 5)
+                    .expect("la respuesta del primer apply conserva el id 5");
+                let response6 = batch
+                    .iter()
+                    .find(|response| response["id"] == 6)
+                    .expect("la respuesta del segundo apply conserva el id 6");
+                let response7 = batch
+                    .iter()
+                    .find(|response| response["id"] == 7)
+                    .expect("la respuesta de lectura conserva el id 7");
+                let applied5 = response5["result"]["structuredContent"]["applied"] == true;
+                let applied6 = response6["result"]["structuredContent"]["applied"] == true;
+                assert_ne!(
+                    applied5, applied6,
+                    "exactamente uno de los dos planes concurrentes debe publicar: {batch:?}"
+                );
+                for (response, applied, id) in [(response5, applied5, 5), (response6, applied6, 6)]
+                {
+                    if !applied {
+                        assert_eq!(
+                            response["result"]["isError"],
+                            true,
+                            "el plan obsoleto debe conservar su id {id} y devolver error: {batch:?}"
+                        );
+                    }
+                }
+                assert_eq!(
                     batch
                         .iter()
                         .filter(|r| r["result"]["structuredContent"]["applied"] == true)
@@ -344,8 +409,7 @@ async fn serializacion_concurrente_final_coherente() {
                     1,
                     "un conflicto de plan obsoleto: {batch:?}"
                 );
-                assert!(batch.iter().find(|r| r["id"] == 7).unwrap()["result"]
-                    ["structuredContent"]["results"]
+                assert!(response7["result"]["structuredContent"]["results"]
                     .as_array()
                     .is_some_and(|v| !v.is_empty()));
                 let plan3 = wire.send(call_wire(8, modern, "change_plan", plan_args("h06-wire-C")));
@@ -380,9 +444,10 @@ async fn serializacion_concurrente_final_coherente() {
                     true
                 );
                 let final_bytes = std::fs::read_to_string(root.path().join("note.md")).unwrap();
-                assert!(
-                    final_bytes.contains("h06-wire-D"),
-                    "última publicación pierde orden: {final_bytes}"
+                assert_eq!(
+                    final_bytes,
+                    "---\ntype: Note\ntitle: Note\nestado: h06-wire-D\n---\n\n# Note\n\nnon-empty H06 fixture\n",
+                    "las publicaciones seriales deben dejar bytes finales exactos, sin parciales"
                 );
             } else {
                 let batch = wire.send_batch(&[
@@ -520,6 +585,50 @@ async fn serializacion_concurrente_final_coherente() {
     assert!(std::fs::read_to_string(root.path().join("note.md"))
         .unwrap()
         .contains("concurrent-D"));
+
+    // La misma barrera se ejerce también con el perfil readonly. Aquí no hay publicación por
+    // diseño del perfil: tres lecturas reales quedan pendientes detrás del turno ocupado y luego
+    // deben completar sin observar un estado intermedio ni escribir bytes.
+    let root = workspace_fixture();
+    let before = std::fs::read(root.path().join("note.md")).unwrap();
+    let app = App::open(root.path()).expect("fixture readonly abre");
+    let executor = SerialExecutor::new(LodestarMcpService::new(app, Profile::Readonly));
+    let (entered_tx, entered_rx) = mpsc::sync_channel(1);
+    let (release_tx, release_rx) = mpsc::sync_channel(0);
+    let held = executor.clone();
+    let holder = std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(held.run(|_| {
+            entered_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+        }));
+    });
+    entered_rx.recv().unwrap();
+    let mut readonly_futures = Vec::new();
+    for (name, args) in [
+        ("knowledge_search", json!({"text": "Note"})),
+        ("knowledge_get", json!({"ref": {"path": "note.md"}})),
+        ("workspace_status", json!({})),
+    ] {
+        let worker = executor.clone();
+        let mut future = Box::pin(async move { worker.call(name, args).await });
+        std::future::poll_fn(|cx| match future.as_mut().poll(cx) {
+            Poll::Pending => Poll::Ready(()),
+            Poll::Ready(_) => panic!("lectura readonly terminó antes de liberar el holder"),
+        })
+        .await;
+        readonly_futures.push(future);
+    }
+    release_tx.send(()).unwrap();
+    holder.join().unwrap();
+    for future in readonly_futures {
+        let response = future.await.unwrap();
+        assert!(response["structuredContent"].is_object());
+    }
+    assert_eq!(std::fs::read(root.path().join("note.md")).unwrap(), before);
 }
 
 fn plan_args(value: &str) -> serde_json::Value {
@@ -666,6 +775,9 @@ impl Wire {
         serde_json::from_str(line.trim_end()).expect("wire JSON")
     }
     fn send_batch(&mut self, values: &[serde_json::Value]) -> Vec<serde_json::Value> {
+        // Barrera determinista de transporte: todos los frames superpuestos se escriben y se
+        // vacía stdin antes de leer la primera respuesta. Así el servidor recibe el lote como
+        // carga concurrente sin depender de sleeps o de una carrera temporal del scheduler.
         for value in values {
             writeln!(self.stdin, "{value}").unwrap();
         }
@@ -1007,4 +1119,81 @@ fn stdout_stderr_eof_final() {
             assert_eq!(ids, expected_ids, "ids/orden exactos");
         }
     }
+}
+
+/// H06-C1 — una cancelación wire enviada después de una respuesta de publicación no puede
+/// despublicar el primer rename ya confirmado. Se comprueban el receipt concreto y el estado
+/// computado para que un simple fichero que siga presente no oculte recuperación pendiente.
+#[test]
+fn cancelacion_wire_tardia_despues_del_primer_rename_conserva_publicacion_y_estado() {
+    let root = workspace_fixture();
+    let mut wire = Wire::start(root.path(), "standard");
+
+    let initialized = wire.send(initialize_request(1));
+    assert_eq!(initialized["result"]["protocolVersion"], "2025-11-25");
+    wire.notify(json!({"jsonrpc":"2.0","method":"notifications/initialized"}));
+
+    let plan = wire.send(call_wire(
+        2,
+        false,
+        "change_plan",
+        plan_args("h06-late-wire"),
+    ));
+    let change_set_id = plan["result"]["structuredContent"]["changeSetId"]
+        .as_str()
+        .filter(|id| !id.is_empty())
+        .expect("change_plan debe producir un changeset real")
+        .to_owned();
+    let applied = wire.send(call_wire(
+        3,
+        false,
+        "change_apply",
+        json!({"changeSetId": change_set_id}),
+    ));
+    assert_eq!(applied["result"]["structuredContent"]["applied"], true);
+    let receipt_id = applied["result"]["structuredContent"]["receiptId"]
+        .as_str()
+        .filter(|id| !id.is_empty())
+        .expect("una publicación debe devolver receiptId")
+        .to_owned();
+    let published_note = std::fs::read(root.path().join("note.md")).unwrap();
+    assert!(
+        published_note
+            .windows(b"h06-late-wire".len())
+            .any(|window| window == b"h06-late-wire"),
+        "la guarda anti-vacuidad exige observar el primer rename publicado"
+    );
+
+    // La respuesta de `change_apply` solo se emite después de que la transacción ha cruzado el
+    // primer rename. Enviar ahora el wire cancellation ejerce el negativo tardío sin una carrera.
+    wire.notify(json!({
+        "jsonrpc":"2.0",
+        "method":"notifications/cancelled",
+        "params":{"requestId":3,"reason":"after-first-rename"}
+    }));
+    let status_response = wire.send(call_wire(4, false, "workspace_status", json!({})));
+    let status = &status_response["result"]["structuredContent"];
+    assert_eq!(
+        status["valid"], true,
+        "el estado publicado debe seguir siendo válido"
+    );
+    assert_eq!(
+        status["recovery"]["pendingTransaction"], false,
+        "la cancelación tardía no puede dejar recuperación pendiente"
+    );
+    let receipts = status["receipts"]
+        .as_array()
+        .expect("workspace_status debe exponer receipts");
+    assert!(
+        receipts
+            .iter()
+            .any(|receipt| receipt["receiptId"] == receipt_id),
+        "el receipt publicado debe seguir localizable tras la cancelación tardía: {status}"
+    );
+    assert_eq!(
+        std::fs::read(root.path().join("note.md")).unwrap(),
+        published_note,
+        "la cancelación tardía no puede restaurar ni borrar la publicación"
+    );
+    wire.close();
 }
