@@ -36,18 +36,18 @@ platform, named `lodestar-cli-<version>-<target>.<ext>`:
 With the [GitHub CLI](https://cli.github.com/):
 
 ```console
-$ gh release download v0.6.0 --repo dbareagimeno/lodestar \
+$ gh release download v0.6.1 --repo dbareagimeno/lodestar \
     --pattern 'lodestar-cli-*-aarch64-apple-darwin.tar.gz'
-$ tar -xzf lodestar-cli-v0.6.0-aarch64-apple-darwin.tar.gz
+$ tar -xzf lodestar-cli-v0.6.1-aarch64-apple-darwin.tar.gz
 $ ./lodestar --version
-lodestar 0.6.0
+lodestar 0.6.1
 ```
 
 Or with `curl`, straight from the release URL:
 
 ```console
-$ curl -sSfLO https://github.com/dbareagimeno/lodestar/releases/download/v0.6.0/lodestar-cli-v0.6.0-x86_64-unknown-linux-gnu.tar.gz
-$ tar -xzf lodestar-cli-v0.6.0-x86_64-unknown-linux-gnu.tar.gz
+$ curl -sSfLO https://github.com/dbareagimeno/lodestar/releases/download/v0.6.1/lodestar-cli-v0.6.1-x86_64-unknown-linux-gnu.tar.gz
+$ tar -xzf lodestar-cli-v0.6.1-x86_64-unknown-linux-gnu.tar.gz
 ```
 
 Both archives contain exactly two files, `lodestar` and `lodestar-mcp` (`.exe` on Windows). Put
@@ -62,7 +62,7 @@ next to each archive. Download it into the same directory and check the archive 
 
 ```console
 $ shasum -a 256 -c SHA256SUMS-aarch64-apple-darwin.txt
-lodestar-cli-v0.6.0-aarch64-apple-darwin.tar.gz: OK
+lodestar-cli-v0.6.1-aarch64-apple-darwin.tar.gz: OK
 ```
 
 On Linux use `sha256sum -c` instead. A non-zero exit code means the file does not match what the
@@ -73,7 +73,7 @@ time you run them.
 
 ### Option B — build from source
 
-Requires Rust 1.80 or later:
+Requires Rust 1.80 or later for the CLI and Rust 1.88 or later for `lodestar-mcp`:
 
 ```bash
 cargo install --git https://github.com/dbareagimeno/lodestar lodestar-cli
