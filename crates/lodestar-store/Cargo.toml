@@ -19,7 +19,7 @@ serde_json = { workspace = true }
 serde_yaml = { workspace = true }
 ignore = { workspace = true }
 rusqlite = { version = "0.32", features = ["bundled"] }
-notify = "6"
+notify = { version = "6", features = ["macos_kqueue"] }
 notify-debouncer-full = "0.3"
 crossbeam-channel = "0.5"
 
