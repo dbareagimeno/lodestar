@@ -12393,4 +12393,3 @@ const TOKEN_BUSCABLE: &str = "buscableunico";
 /// recorrido necesita 3) y menos que el máximo de `knowledge_search` (100), para que exista una
 /// llamada de referencia sin paginar contra la que comparar.
 const DOCS_BUSCABLES: usize = 60;
-
