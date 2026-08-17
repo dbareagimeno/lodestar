@@ -76,7 +76,8 @@ it with `shasum -a 256 -c SHA256SUMS-<target>.txt` (or `sha256sum -c`) before un
 
 The binaries are unsigned, so macOS and Windows may ask for confirmation the first time.
 
-You can also build from source (Rust 1.80 or later):
+You can also build from source. The CLI requires Rust 1.80 or later; the MCP server requires Rust
+1.88 or later:
 
 ```bash
 cargo install --git https://github.com/dbareagimeno/lodestar lodestar-cli
