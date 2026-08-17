@@ -228,6 +228,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
 }
 "#;
 
+fn toml_basic_string_content(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
+        .replace('\t', "\\t")
+}
+
 /// C1 — una cancelación wire real cancela el `RequestContext` mientras la request espera el FIFO.
 /// La barrera es el lock real de `SerialExecutor`: al liberar el primer turno, un adaptador
 /// incorrecto deja pasar la escritura cancelada y el probe devuelve un rojo observable.
@@ -236,8 +245,11 @@ fn cancelacion_transaccional_sin_parciales() {
     let helper = tempfile::tempdir().unwrap();
     let mcp = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let manifest = CANCEL_PROBE_CARGO
-        .replace("__MCP__", mcp.to_str().unwrap())
-        .replace("__APP__", mcp.join("../lodestar-app").to_str().unwrap());
+        .replace("__MCP__", &toml_basic_string_content(mcp.to_str().unwrap()))
+        .replace(
+            "__APP__",
+            &toml_basic_string_content(mcp.join("../lodestar-app").to_str().unwrap()),
+        );
     write_text(&helper.path().join("Cargo.toml"), &manifest);
     write_text(&helper.path().join("src/main.rs"), CANCEL_PROBE_MAIN);
     let root = workspace_fixture();

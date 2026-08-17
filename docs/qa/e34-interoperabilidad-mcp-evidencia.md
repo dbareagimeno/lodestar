@@ -16,7 +16,7 @@ en `target/agent-state/e34-hNN/pre-red.json`; los locks se generaron después de
 | H03 | Los casos de transporte detectaron el lector/framing manual y la ausencia del cliente oficial rmcp. | `e34_h03_transport.rs` `97183aa067f1104db511f654bd01adea26a57baf196bcebfc42d3784f3c3252e` |
 | H04 | Discovery y metadata Modern no existían; las respuestas carecían de `resultType` y cache hints. | `e34_h04_modern.rs` `e8e2f833cb09eb9ec8e204dbea7ba85358a97ac2fbd3215638e221582e4f8e7d` |
 | H05 | La reproducción cruda de issue #38 devolvía el rechazo histórico en vez de negociar Legacy. | `e34_h05_legacy.rs` `a93981f6ec9736a379d5c1dc85fcb3554baabb95413aaf1932b6810849d12e23` |
-| H06 | Tres pruebas pasaban y `cancelacion_transaccional_sin_parciales` fallaba porque la request cancelada llegaba a alterar el Markdown. | `e34_h06_conformance.rs` `f790ba0df21656c4d5f620bf4ada7f3d935f55cdb922e6cdb1e644dd4bdc33ad` |
+| H06 | Tres pruebas pasaban y `cancelacion_transaccional_sin_parciales` fallaba porque la request cancelada llegaba a alterar el Markdown. | `e34_h06_conformance.rs` `0c07d34aede2b97b4377ad65600acb4c728beed34d766cab429c2d726754831e` |
 
 `verify-tests-only` pasó en cada fase roja. `tdd-test-lock.py verify` pasó antes y después de cada
 verde. H06 necesitó un microciclo de formato: se restauró el fallo de cancelación, se ejecutó
@@ -29,6 +29,13 @@ requests ni sus aserciones. El lock H03 original del rojo funcional era
 `ce3c6fe1cffa91a19635ac34a2228ac8c28122ff6af7d045f192268d39e99885`; después del microciclo de
 portabilidad se regeneró al hash H03 mostrado en la tabla y `tdd-test-lock.py verify` volvió a
 terminar con `exit 0`.
+
+CI #102 comprobó que C3 ya pasaba en Windows y reveló el mismo defecto de escape en el manifest
+auxiliar de cancelación H06. Se aplicó el mismo escape TOML exclusivamente a las rutas de
+`lodestar-mcp` y `lodestar-app`; el probe, la barrera, las requests y las aserciones de cancelación
+permanecieron intactos. El lock H06 original del rojo funcional era
+`f790ba0df21656c4d5f620bf4ada7f3d935f55cdb922e6cdb1e644dd4bdc33ad`; tras este microciclo se
+regeneró al hash H06 mostrado en la tabla y su `verify` terminó con `exit 0`.
 
 ## Verde y gates
 
