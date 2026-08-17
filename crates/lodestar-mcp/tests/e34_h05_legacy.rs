@@ -576,15 +576,22 @@ fn harness_raw_legacy_exacto() {
         b"{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n";
     let discover_request =
         b"{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"server/discover\",\"params\":{}}\n";
-    let ping_request = b"{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"ping\",\"params\":{}}\n";
+    let discover_with_modern_metadata = b"{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"server/discover\",\"params\":{\"_meta\":{\"io.modelcontextprotocol/protocolVersion\":\"2026-07-28\",\"io.modelcontextprotocol/clientCapabilities\":{},\"io.modelcontextprotocol/clientInfo\":{\"name\":\"modern\",\"version\":\"1\"}}}}\n";
+    let ping_request = b"{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"ping\",\"params\":{}}\n";
     let expected_initialize = expected_initialize_frame(root.path(), Profile::Standard);
     let expected_discover =
         b"{\"jsonrpc\":\"2.0\",\"id\":2,\"error\":{\"code\":-32601,\"message\":\"server/discover\"}}\n";
-    let expected_ping = b"{\"jsonrpc\":\"2.0\",\"id\":3,\"result\":{}}\n";
     assert_eq!(session.request(initialize_request), expected_initialize);
     session.notification(initialized_notification);
     assert_eq!(session.request(discover_request), expected_discover);
-    assert_eq!(session.request(ping_request), expected_ping);
+    assert_eq!(
+        session.request(discover_with_modern_metadata),
+        b"{\"jsonrpc\":\"2.0\",\"id\":3,\"error\":{\"code\":-32601,\"message\":\"server/discover\"}}\n"
+    );
+    assert_eq!(
+        session.request(ping_request),
+        b"{\"jsonrpc\":\"2.0\",\"id\":4,\"result\":{}}\n"
+    );
     let (success, remaining_stdout, stderr) = session.finish();
     assert!(success);
     assert!(remaining_stdout.is_empty(), "EOF no puede inventar frames");
