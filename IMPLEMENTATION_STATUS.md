@@ -15,9 +15,8 @@
 > corre desde E23-H06); `clippy -D warnings` y `cargo doc -D warnings` limpios; pureza del core
 > verificada por CI. **El recuento exacto de tests lo fija la nota de release** (E24-H18:
 > `cargo test --workspace -- --list | grep -c ": test$"`); fijado en la **v0.5.0**: **541 tests**
-> (eran 486 al cerrar E24, antes de las 11 historias de E25/E26). En `develop` van **542**: +1 por la
-> guardia del `outputSchema` (ver «Defectos posteriores a E27» al final); la cifra de la v0.5.0 no se
-> reescribe — la fija su release.
+> (eran 486 al cerrar E24, antes de las 11 historias de E25/E26). La **v0.6.1** enumera **788 tests**
+> con el mismo criterio; no incluye los tests gateados tras `--features test-failpoints`.
 >
 > **Ya no forman parte de este repo**: la app de escritorio (Tauri + Svelte, movida a
 > `experimental/ui-desktop` con el giro headless), el crate `lodestar-vcs` y `git2` (borrados en
@@ -48,7 +47,7 @@
 ## Cómo correrlo
 
 ```bash
-cargo test --workspace --locked                       # 541 tests (v0.5.0)
+cargo test --workspace --locked                       # 788 tests (v0.6.1)
 cargo test -p lodestar-workspace --features test-failpoints --locked   # crash-recovery (E13-H06)
 cargo test -p lodestar-app --features test-failpoints --locked         # ventana de publicación (E25-H01)
 cargo run -p lodestar-cli -- check [--path <dir>]     # la puerta de CI (exit 0/1/2/3)
@@ -416,8 +415,7 @@ superficie de producto; git queda como crate dormido) y `decisiones §0`. Descom
   - ✅ **E12-H08** — Tool `change_plan` (integración central, perfil standard): dispatcher de los 11
     ops crudos → normalizadores del core; `apply_normalized_ops` construye el bundle hipotético EN
     MEMORIA (no escribe, invariante #1); semantic_diff + assess_risk + validate_result + impact;
-    planHash determinista (hoy: dominio + versión interna de semántica +
-    baseWorkspaceRevision + normalizedOperations, SIN reloj);
+    planHash determinista (blake3 de baseWorkspaceRevision + normalizedOperations, SIN reloj);
     REVISION_CONFLICT por-op (ConceptRevision) y a nivel workspace. Cierra reserva de H05
     (patch_frontmatter/replace_body). outputSchema + mcp.yml. Juez ciego: APROBADA (4/4).
     **A rastrear**: gating por perfil (readonly debe rechazar tools de cambio) → E14-H03.
@@ -970,9 +968,8 @@ superficie de producto; git queda como crate dormido) y `decisiones §0`. Descom
   universales; `impact_analyze.kind` restringido a `{move, delete}`. Sin pérdida de capacidad: un
   `transition_status` es un `patch_frontmatter` (probado por test). La mecánica transaccional intacta.
 - ✅ **E21-H02/H03** — **Selecciones masivas + move/delete genéricos**. `change_plan` acepta
-  `{selection: {where|filter}, operation}` → una instancia raw por documento que casa;
-  `capturedRevisions` con la revisión de cada uno. Una instancia puede bajar a varias terminales
-  (`delete/remove_links`), que se materializan secuencialmente. `move_document` reescribe backlinks por el **`span`** (cubriendo las
+  `{selection: {where|filter}, operation}` → una op por documento que casa; `capturedRevisions` con la
+  revisión de cada uno. `move_document` reescribe backlinks por el **`span`** (cubriendo las
   definiciones de referencia que la regex no veía; spans procesados de mayor a menor offset).
   `delete_document` **exige política explícita** (`§Fase 12`: no elegir en silencio).
 - ✅ **E21-H04** — **`OkfDiff` → `SnapshotDiff` + limpieza del contrato** (cierra E21). El diff de wire
@@ -1693,9 +1690,6 @@ Cierra las dos fichas que la campaña dejó abiertas porque exigían criterio de
   declara». La realidad medida fue peor: la segunda op se normaliza contra el estado **inicial**
   (defecto preexistente de la normalización multi-op), deshace a la primera, y el documento acaba
   idéntico, así que **ambas** se declaran. El test fija lo medido, no lo supuesto.
-  **Actualización:** ese comportamiento histórico quedó supersedido por el bugfix de planificación
-  secuencial: el test se invirtió y `noOpOperations` se calcula ahora por terminal contra su estado
-  inmediato, usando el mismo aplicador canónico del replay.
 - **La documentación prometía de más sobre `edit_section`**: contrato y `docs/user/` afirmaban que el
   campo cubre «reescribir una sección con su contenido actual». Verificado por el wire: depende de la
   forma del documento, porque `normalize_edit_section` fija la separación de la sección. Prometer lo
@@ -1706,17 +1700,6 @@ Cierra las dos fichas que la campaña dejó abiertas porque exigían criterio de
 | Defecto | Estado | Nota |
 |---|---|---|
 | `outputSchema` de `metadata_inspect` sin `type: "object"` | ✅ | Claude Code **rechazaba la lista completa de tools**. |
-| `change_plan` perdía operaciones de contenido sucesivas sobre el mismo documento | ✅ | Semántica base/working secuencial, selección acumulada y planes runtime legacy rechazados antes de E33-H04. |
-
-- ✅ **Normalización secuencial completa de `change_plan`** — cierra el seguimiento registrado por
-  los re-jueces de E28-H04. El planner conserva `base` para las precondiciones y materializa cada
-  terminal sobre un `working FileMap` antes de normalizar la siguiente raw op. Esto elimina tanto la
-  pérdida silenciosa de varios `ReplaceBody` sobre un path como la resurrección tras delete/move y
-  las move-chains. La selección fija sus paths/revisiones sobre base, pero ejecuta sus instancias en
-  orden sobre working. `noOpOperations` pasa a ser por terminal, el inventario conserva
-  `other_files`, y los planes persistidos sin `plannerSemanticsVersion: 2` se rechazan `PLAN_STALE`.
-  El campo de versión es solo runtime y no amplía `PlanResult`/MCP. Se corrige antes de medir
-  `change_plan → change_apply` en E33-H04 para no fijar una baseline del motor defectuoso.
 
 - ✅ **`outputSchema` no conforme al spec MCP** — el spec exige que todo `outputSchema` sea un JSON
   Schema **de tipo `object`**; el de `metadata_inspect` salía con `anyOf` en la raíz y **sin
@@ -1858,4 +1841,3 @@ Dos matices del motor que H02 debe conocer al escribir esperados (documentados e
 deliberado (solo la navegación pura `../`/`./` es `WorkspaceDirectory`), y el **conteo de
 documentos del corpus depende del filesystem** (el par de caja colapsa en APFS y coexiste en ext4)
 — los esperados no pueden ser conteos absolutos.
-
