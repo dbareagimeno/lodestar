@@ -651,6 +651,95 @@ fn modern_result_type_y_cache_hints() {
     session.finish();
 }
 
+/// H04-C4 — llamadas Modern equivalentes son estables y ninguna respuesta de tool queda servida
+/// desde una cache mutable del workspace: se repite el mismo listado byte-semántico y luego se
+/// fuerza una publicación real antes de repetir una búsqueda cuyo resultado debe cambiar.
+#[test]
+fn modern_llamadas_equivalentes_estables_sin_cache_mutable_del_workspace() {
+    let root = workspace_fixture();
+    let mut session = Session::new(root.path());
+
+    let first_list = session.send(list(1));
+    let second_list = session.send(list(2));
+    let first_list_result = result(&first_list).clone();
+    let second_list_result = result(&second_list).clone();
+    assert_eq!(first_list_result, second_list_result);
+    assert_modern_result_type(&first_list_result);
+    assert_cache_hints(&first_list_result);
+    assert_eq!(first_list_result["ttlMs"], 0);
+    assert_eq!(first_list_result["cacheScope"], "private");
+    assert_eq!(
+        first_list_result["tools"].as_array().map(Vec::len),
+        Some(TOOLS.len()),
+        "la estabilidad no puede aprobar con un catálogo vacío"
+    );
+
+    let before = session.send(call(
+        3,
+        "knowledge_search",
+        json!({"text": "modern-cache-marker"}),
+    ));
+    let before_result = result(&before);
+    assert_modern_result_type(before_result);
+    assert!(before_result["structuredContent"]["results"]
+        .as_array()
+        .is_some_and(|results| results.is_empty()));
+
+    let plan = session.send(call(
+        4,
+        "change_plan",
+        json!({
+            "operations": [{
+                "op": "patch_frontmatter",
+                "ref": {"path": "note.md"},
+                "patch": {"estado": "modern-cache-marker"}
+            }],
+            "policy": {"requireValidResult": false, "allowWarnings": true}
+        }),
+    ));
+    let change_set_id = result(&plan)["structuredContent"]["changeSetId"]
+        .as_str()
+        .filter(|id| !id.is_empty())
+        .expect("el plan de control debe ser real")
+        .to_owned();
+    let applied = session.send(call(
+        5,
+        "change_apply",
+        json!({"changeSetId": change_set_id}),
+    ));
+    assert_eq!(result(&applied)["structuredContent"]["applied"], true);
+
+    // La primera búsqueda fue deliberadamente vacía y la publicación introduce el término. Si
+    // existiera una cache mutable del workspace, la llamada equivalente devolvería ese vacío viejo.
+    let after = session.send(call(
+        6,
+        "knowledge_search",
+        json!({"text": "modern-cache-marker"}),
+    ));
+    let after_result = result(&after).clone();
+    assert_modern_result_type(&after_result);
+    let after_results = after_result["structuredContent"]["results"]
+        .as_array()
+        .expect("knowledge_search debe devolver results");
+    assert!(
+        !after_results.is_empty(),
+        "la búsqueda debe observar la publicación real"
+    );
+    assert!(after_results.iter().any(|item| item["path"] == "note.md"));
+
+    let equivalent_after = session.send(call(
+        7,
+        "knowledge_search",
+        json!({"text": "modern-cache-marker"}),
+    ));
+    assert_eq!(
+        after_result,
+        result(&equivalent_after).clone(),
+        "llamadas equivalentes sobre el mismo estado deben ser estables"
+    );
+    session.finish();
+}
+
 #[test]
 fn modern_ping_method_not_found() {
     let root = workspace_fixture();
