@@ -38,6 +38,7 @@
 //! el test de señal de E24-H14, que mata el binario.
 
 use std::cell::{Cell, RefCell};
+use std::sync::{Mutex, OnceLock};
 
 /// Punto de la transacción en el que se puede inyectar una caída, **en el orden real de
 /// `apply_transaction`**.
@@ -164,6 +165,12 @@ pub enum PuntoDeGancho {
     /// producción). El mecanismo que protege el material de la transacción viva —GC bajo el lock o
     /// marca durable de «en curso»— lo elige el implementador.
     TrasElBackup,
+    /// Después de completar el primer rename atómico del canónico y marcarlo en el journal.
+    ///
+    /// Permite ejercer la cancelación tardía con una barrera determinista: el cliente puede
+    /// cancelar cuando la publicación ya cruzó el punto de no retorno y la transacción debe
+    /// continuar sin restaurar ni borrar lo publicado.
+    DespuesDelPrimerRename,
     /// Dentro de la ventana de la **reversión** (E25-H05): entre la comprobación de
     /// `receipt.result_revision` que hace la fachada (`App::change_revert`, `lib.rs:1845-1857`) y la
     /// **primera escritura** de `Workspace::revert_transaction_con_recibo` (el `backup_originals` de
@@ -192,12 +199,16 @@ pub enum PuntoDeGancho {
 /// Gancho armado (el punto que lo dispara y el cierre a ejecutar), o nada.
 type GanchoArmado = Option<(PuntoDeGancho, Box<dyn Fn()>)>;
 
+type GanchoGlobal = Option<(PuntoDeGancho, Box<dyn Fn() + Send>)>;
+
 thread_local! {
     /// Gancho armado para el hilo actual, o `None`. `thread_local` por el mismo motivo que
     /// [`ARMADO`]: los tests del repo corren en paralelo dentro del mismo proceso y un estado
     /// global haría que el gancho de un test interfiriese con la transacción de otro.
     static GANCHO: RefCell<GanchoArmado> = const { RefCell::new(None) };
 }
+
+static GANCHO_GLOBAL: OnceLock<Mutex<GanchoGlobal>> = OnceLock::new();
 
 /// Arma un gancho para el **hilo actual**. Se dispara **una sola vez** y se desarma solo, de modo
 /// que una transacción posterior del mismo test no vuelva a ejecutarlo. Armar un gancho nuevo
@@ -206,9 +217,25 @@ pub fn armar_gancho(punto: PuntoDeGancho, gancho: impl Fn() + 'static) {
     GANCHO.with(|g| *g.borrow_mut() = Some((punto, Box::new(gancho))));
 }
 
+/// Arma un gancho que puede dispararse desde cualquier hilo del orquestador.
+///
+/// Sólo se usa para probes gateados que necesitan mantener una request bloqueada mientras el
+/// bucle de transporte procesa otra señal (por ejemplo, una cancelación tardía). La variante
+/// thread-local de [`armar_gancho`] sigue siendo la predeterminada para los tests que no necesitan
+/// cruzar hilos.
+pub fn armar_gancho_global(punto: PuntoDeGancho, gancho: impl Fn() + Send + 'static) {
+    *GANCHO_GLOBAL
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .expect("gancho global no está envenenado") = Some((punto, Box::new(gancho)));
+}
+
 /// Desarma cualquier gancho del hilo actual (higiene: el gancho puede no haberse disparado).
 pub fn desarmar_ganchos() {
     GANCHO.with(|g| *g.borrow_mut() = None);
+    if let Some(global) = GANCHO_GLOBAL.get() {
+        *global.lock().expect("gancho global no está envenenado") = None;
+    }
 }
 
 /// Ejecuta el gancho armado para `punto`, si lo hay, y **continúa**: a diferencia de
@@ -226,6 +253,18 @@ pub(crate) fn ejecutar_gancho(punto: PuntoDeGancho) {
         }
     });
     if let Some(gancho) = armado {
+        gancho();
+        return;
+    }
+
+    let global = GANCHO_GLOBAL.get().and_then(|global| {
+        let mut slot = global.lock().expect("gancho global no está envenenado");
+        match slot.as_ref() {
+            Some((p, _)) if *p == punto => slot.take().map(|(_, gancho)| gancho),
+            _ => None,
+        }
+    });
+    if let Some(gancho) = global {
         gancho();
     }
 }
