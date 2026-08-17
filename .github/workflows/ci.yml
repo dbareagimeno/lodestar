@@ -86,6 +86,8 @@ jobs:
           $cargoHome = if ($env:CARGO_HOME) { $env:CARGO_HOME } else { Join-Path $HOME ".cargo" }
           $probe = Join-Path $env:RUNNER_TEMP "e34-tokio-stream-source"
           New-Item -ItemType Directory -Force $probe | Out-Null
+          New-Item -ItemType Directory -Force (Join-Path $probe "src") | Out-Null
+          New-Item -ItemType File -Force (Join-Path $probe "src/lib.rs") | Out-Null
           @'
           [package]
           name = "e34-tokio-stream-source"
