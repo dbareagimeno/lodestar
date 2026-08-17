@@ -1,6 +1,3 @@
-Warning: truncated output (original token count: 141659)
-Total output lines: 12364
-
 //! Test de integración del MCP (E7): handshake + tools/call sobre stdio. stdout debe ser JSON-RPC puro.
 
 use std::io::{BufRead, BufReader, Write};
@@ -4356,7 +4353,3671 @@ fn rechaza_escape() {
 //      actual** y el ROJO es puro fallo de aserción (no `todo!()` ni símbolo inexistente): NO hace
 //      falta ningún stub de producción. El dispatcher actual (`main.rs`/`tools.rs`) lee solo
 //      `text`/`filters`/`sort`/`limit`/`cursor` y NO valida `additionalProperties`, así que hoy
-//      IGNORA …41659 tokens truncated…odo `field`.
+//      IGNORA `where`/`filter` → la búsqueda devuelve TODOS los documentos (`text` vacío) y las
+//      aserciones muerden por la razón correcta (el lenguaje no está cableado).
+//   3. El test insignia `search_propiedad_de_grafo` es más fuerte e2e: demuestra que TODA la tubería
+//      (dispatch MCP → `App` → evaluador del core que ve el `Analysis`/grafo) está cableada, no solo
+//      una unidad.
+//
+// CONTRATO nuevo fijado (fase ROJA — el cableado del lenguaje aún NO existe):
+//   arguments: { text?: string, where?: string, filter?: object(§20.10), sort?, limit?, cursor? }
+//     · `where` (textual) y `filter` (JSON) → el MISMO `Expression` (E19-H01…H04) → filtro,
+//       intersectado con el FTS de `text` (como hoy).
+//   structuredContent.results[*]: conserva `path`, `title` (derivado) y `snippet` (+ `revision`,
+//     `score`, `id` genéricos); NO lleva `type`/`status`/`description`/`tags` privilegiados.
+//
+// NOTA para el implementador (fuera de mi alcance — NO son tests):
+//   · `contracts/mcp.yml` cambia: el `inputSchema` de `knowledge_search` pasa de `filters` a
+//     `where`/`filter`, y el `SearchResult` pierde los 4 campos OKF. Es superficie, no test; lo
+//     verifica `/contrato --check`, no un `#[test]`.
+//   · Rompen al retirar `SearchFilters`/`query`/DSL vieja (inventario en el informe): en este mismo
+//     fichero, `search_filtra_tipo`; en `lodestar-app/tests/escala.rs`,
+//     `bench_search_payload_acotado`; en `lodestar-core/tests/core.rs`, los tests de `DocumentSet::
+//     query`. Su migración/retirada es trabajo del implementador (no los toco: solo añado).
+
+/// Construye la línea JSON-RPC de un `tools/call` a `knowledge_search` con `arguments` arbitrarios.
+/// Usa `serde_json::json!` para no pelear con el escapado de comillas del `where`.
+fn ks_call(arguments: serde_json::Value) -> String {
+    serde_json::json!({
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": { "name": "knowledge_search", "arguments": arguments }
+    })
+    .to_string()
+}
+
+/// Workspace con documentos de distinto `status` en frontmatter y, por lo demás, texto/metadata
+/// indistinguibles: el único criterio que separa los aceptados es el valor de la propiedad `status`.
+fn workspace_estados() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "index.md",
+        "---\ntitle: Índice\n---\n\n# Índice\n\ncontenido común.\n",
+    );
+    write(
+        dir.path(),
+        "aceptada-uno.md",
+        "---\ntitle: Aceptada uno\nstatus: accepted\n---\n\n# Aceptada uno\n\ncontenido común.\n",
+    );
+    write(
+        dir.path(),
+        "aceptada-dos.md",
+        "---\ntitle: Aceptada dos\nstatus: accepted\n---\n\n# Aceptada dos\n\ncontenido común.\n",
+    );
+    write(
+        dir.path(),
+        "borrador.md",
+        "---\ntitle: Borrador\nstatus: draft\n---\n\n# Borrador\n\ncontenido común.\n",
+    );
+    write(
+        dir.path(),
+        "revision.md",
+        "---\ntitle: Revisión\nstatus: review\n---\n\n# Revisión\n\ncontenido común.\n",
+    );
+    dir
+}
+
+/// E19-H05 · Criterio `search_where`:
+/// Dado `knowledge_search {where: "status = \"accepted\""}`, Cuando se busca, Entonces solo aparecen
+/// los documentos cuyo `status` de frontmatter es `accepted` (los demás, y `index.md` sin `status`,
+/// quedan fuera). NO vacuo: los documentos de otro `status` deben quedar EXCLUIDOS (un stub que hoy
+/// ignora `where` los devuelve todos y muerde aquí).
+#[test]
+fn search_where() {
+    let dir = workspace_estados();
+    let resp = roundtrip(
+        dir.path(),
+        &[ks_call(serde_json::json!({ "where": "status = \"accepted\"" })).as_str()],
+        1,
+    );
+    let paths = search_paths(&resp[0]);
+    let tiene = |p: &str| paths.iter().any(|x| x == p);
+
+    assert!(
+        !paths.is_empty(),
+        "el `where` `status = \"accepted\"` debe devolver al menos un documento: {resp:?}"
+    );
+    for aceptada in ["aceptada-uno.md", "aceptada-dos.md"] {
+        assert!(
+            tiene(aceptada),
+            "el documento `{aceptada}` (status: accepted) debe aparecer con `where` status=accepted: {resp:?}"
+        );
+    }
+    for otra in ["borrador.md", "revision.md"] {
+        assert!(
+            !tiene(otra),
+            "el documento `{otra}` (status != accepted) NO debe aparecer: el `where` filtra por metadata: {resp:?}"
+        );
+    }
+    assert!(
+        !tiene("index.md"),
+        "`index.md` no tiene `status`: un campo ausente en una comparación es `false`, no debe casar `status = \"accepted\"`: {resp:?}"
+    );
+}
+
+/// E19-H05 · Criterio `search_filter_equivalente`:
+/// Dado el `filter` JSON equivalente al `where` anterior, Cuando se busca por ambas vías, Entonces
+/// devuelven EL MISMO conjunto de documentos — y ese conjunto es exactamente los aceptados. La
+/// equivalencia se prueba de PUNTA A PUNTA por la superficie de `knowledge_search` (la equivalencia
+/// a nivel de AST ya la cubre E19-H03; aquí NO se duplica). El ancla al conjunto esperado impide el
+/// pase vacuo de «ambas vías ignoran el filtro y devuelven todo».
+#[test]
+fn search_filter_equivalente() {
+    let dir = workspace_estados();
+
+    let por_where = roundtrip(
+        dir.path(),
+        &[ks_call(serde_json::json!({ "where": "status = \"accepted\"" })).as_str()],
+        1,
+    );
+    let mut set_where = search_paths(&por_where[0]);
+    set_where.sort();
+
+    let por_filter = roundtrip(
+        dir.path(),
+        &[ks_call(serde_json::json!({
+            "filter": { "field": "frontmatter.status", "operator": "equals", "value": "accepted" }
+        }))
+        .as_str()],
+        1,
+    );
+    let mut set_filter = search_paths(&por_filter[0]);
+    set_filter.sort();
+
+    // (1) Mismo conjunto por ambas vías: `where` textual y `filter` JSON son equivalentes.
+    assert_eq!(
+        set_where, set_filter,
+        "`where` y `filter` equivalentes deben devolver EL MISMO conjunto de documentos: \
+         where={por_where:?} filter={por_filter:?}"
+    );
+
+    // (2) Y ese conjunto es exactamente los aceptados (ancla no vacía ⇒ no vacuo).
+    let mut esperado = vec!["aceptada-dos.md".to_string(), "aceptada-uno.md".to_string()];
+    esperado.sort();
+    assert_eq!(
+        set_filter, esperado,
+        "el `filter` equivalente debe seleccionar exactamente los documentos con status=accepted, \
+         no todos los documentos: {por_filter:?}"
+    );
+}
+
+/// Workspace con documentos enlazados y no enlazados, indistinguibles por texto/metadata: solo el
+/// GRAFO los separa. `index.md` enlaza a `enlazado.md` (1 backlink); `huerfano.md` no recibe enlaces.
+fn workspace_enlaces() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "index.md",
+        "---\ntitle: Índice\n---\n\n# Índice\n\n* [Enlazado](enlazado.md)\n",
+    );
+    write(
+        dir.path(),
+        "enlazado.md",
+        "---\ntitle: Enlazado\n---\n\n# Enlazado\n\ncontenido idéntico.\n",
+    );
+    write(
+        dir.path(),
+        "huerfano.md",
+        "---\ntitle: Huérfano\n---\n\n# Huérfano\n\ncontenido idéntico.\n",
+    );
+    dir
+}
+
+/// E19-H05 · Criterio `search_propiedad_de_grafo` (TEST INSIGNIA):
+/// Dado `knowledge_search {where: "graph.backlinks = 0"}`, Cuando se busca, Entonces devuelve los
+/// documentos NO enlazados (`huerfano.md`) y EXCLUYE los enlazados (`enlazado.md`, con 1 backlink
+/// desde `index.md`). Es la prueba de que detrás está el evaluador NUEVO —que ve el grafo— y no un
+/// grep de subcadena, que no puede expresar `graph.backlinks = 0`. `enlazado.md` y `huerfano.md`
+/// tienen cuerpo/metadata idénticos: solo la propiedad calculada del grafo los distingue.
+#[test]
+fn search_propiedad_de_grafo() {
+    let dir = workspace_enlaces();
+    let resp = roundtrip(
+        dir.path(),
+        &[ks_call(serde_json::json!({ "where": "graph.backlinks = 0" })).as_str()],
+        1,
+    );
+    let paths = search_paths(&resp[0]);
+    let tiene = |p: &str| paths.iter().any(|x| x == p);
+
+    assert!(
+        !paths.is_empty(),
+        "`graph.backlinks = 0` debe devolver los documentos no enlazados: {resp:?}"
+    );
+    assert!(
+        tiene("huerfano.md"),
+        "`huerfano.md` no recibe enlaces (backlinks 0): debe aparecer con `graph.backlinks = 0`: {resp:?}"
+    );
+    assert!(
+        !tiene("enlazado.md"),
+        "`enlazado.md` recibe 1 backlink desde `index.md`: NO debe aparecer con `graph.backlinks = 0` \
+         (una consulta de subcadena no podría excluirlo — es la prueba del evaluador de grafo): {resp:?}"
+    );
+}
+
+/// Workspace con un documento cuyo frontmatter TIENE los antiguos campos privilegiados OKF
+/// (`type`/`status`/`description`/`tags`) poblados y un cuerpo que casa «autenticación».
+fn workspace_con_metadata() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "index.md",
+        "---\ntitle: Índice\n---\n\n# Índice\n\n* [doc](doc.md)\n",
+    );
+    write(
+        dir.path(),
+        "doc.md",
+        "---\ntype: decision\ntitle: Documento con metadata\nstatus: accepted\ndescription: Una descripción\ntags:\n  - seguridad\n  - redes\n---\n\n# Documento\n\ncuerpo sobre autenticación y redes.\n",
+    );
+    dir
+}
+
+/// E19-H05 · Criterio `search_result_sin_campos_okf`:
+/// Dado un documento cuyo frontmatter lleva `type`/`status`/`description`/`tags`, Cuando aparece en
+/// `knowledge_search`, Entonces el resultado del wire NO surfacea esos campos como privilegiados —
+/// aunque estén en el frontmatter— y sí conserva `path`, `title` (derivado) y `snippet`.
+#[test]
+fn search_result_sin_campos_okf() {
+    let dir = workspace_con_metadata();
+    let resp = roundtrip(
+        dir.path(),
+        &[ks_call(serde_json::json!({ "text": "autenticación" })).as_str()],
+        1,
+    );
+    let results = search_paths_values(&resp[0]);
+
+    let doc = results
+        .iter()
+        .find(|r| r["path"] == "doc.md")
+        .unwrap_or_else(|| panic!("el documento que casa «autenticación» debe aparecer: {resp:?}"));
+
+    // Conserva `path`, `title` (derivado) y `snippet`.
+    assert_eq!(
+        doc["path"], "doc.md",
+        "el resultado conserva `path` (identidad del documento): {doc:?}"
+    );
+    assert!(
+        !doc["title"].as_str().unwrap_or("").is_empty(),
+        "el resultado conserva un `title` derivado no vacío: {doc:?}"
+    );
+    assert!(
+        !doc["snippet"].as_str().unwrap_or("").is_empty(),
+        "el resultado conserva un `snippet` no vacío: {doc:?}"
+    );
+
+    // NO surfacea los antiguos campos privilegiados OKF, aunque estén en el frontmatter del documento.
+    for campo in ["type", "status", "description", "tags"] {
+        assert!(
+            doc.get(campo).is_none(),
+            "el resultado de `knowledge_search` NO debe llevar el campo privilegiado OKF `{campo}`: \
+             está en el frontmatter, pero deja de ser un campo de wire (el filtrado por metadata pasa \
+             por el lenguaje): {doc:?}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// E20-H03 — Sustituir `schema_inspect` por `metadata_inspect` y retirar `core::schema`.
+//
+// UBICACIÓN: los 3 criterios se ejercitan **e2e por la tool MCP** (campo Pruebas de la historia +
+// coherente con E10-H11 y E19-H05): lo que importa fijar aquí es el contrato de **wire** (nombre de
+// la tool en `tools/list`, forma del `structuredContent` del catálogo y de la inspección) sin
+// acoplar los tests a la firma interna que el implementador elija (`App::metadata_inspect`, un tipo
+// wire de `lodestar-app` o un `derive` directo sobre los tipos de `core::types`). Por eso NO hay
+// stub en `src/`: la tool ausente da un ROJO limpio en runtime.
+//
+// FASE ROJA: la tool `metadata_inspect` NO está en `tools::list()` todavía y la vieja
+// `schema_inspect` SÍ, así que:
+//   · `tool_es_metadata_inspect` falla por partida doble: `metadata_inspect` ausente Y
+//     `schema_inspect` presente.
+//   · `metadata_inspect_catalog`/`metadata_inspect_field` invocan una tool inexistente →
+//     `tools/call` responde `-32602` y `result` es `null` → los asserts que leen
+//     `structuredContent.*` fallan por AUSENCIA de la tool/servicio (no por un valor erróneo).
+//
+// CONTRATO DE WIRE que fija esta fase (los 4 tipos de retorno de E20-H01/H02
+// —`MetadataCatalog`/`FieldStats`/`FieldInspection`/`ValueCount`— quedaron SIN serde a propósito
+// para que H03 lo clave):
+//   arguments: { mode: "catalog" }                       -> catálogo de propiedades
+//            | { mode: "field", field: "<dot.path>" }    -> inspección de un campo
+//   structuredContent (mode "catalog"): {
+//     fields: [ { name: "<dot.path>", presentIn: N, inferredTypes: { "<tipo>": N, … } } ]
+//   }
+//   structuredContent (mode "field"): {
+//     field: "<dot.path>", presentIn: N, missingIn: N,
+//     inferredTypes: { "<tipo>": N, … },
+//     values: [ { value: <valor en su tipo JSON natural>, count: N } ]
+//   }
+// Decisiones de wire (autor de tests, clavadas por los asserts de abajo):
+//   · El path del campo es la clave `name` en el CATÁLOGO y `field` en la INSPECCIÓN (§Fase 6:
+//     `{"name":"status",…}` vs `{"field":"status",…}`); un `FieldPath` rinde a su string punteado
+//     (`"service.tier"`), no a un array de segmentos.
+//   · `inferredTypes` es un OBJETO `{nombre-de-tipo-en-minúscula: conteo}`, NO un array de pares:
+//     el `BTreeMap<ValueType, usize>` interno se aplana a `{ "string": N, "number": N }`.
+//   · `values[*].value` conserva su tipo JSON natural: un número es número, un string es string
+//     (sin coerción — el número `5` y el string `"5"` son valores distintos).
+// ---------------------------------------------------------------------------
+
+/// Workspace con metadata heterogénea sobre el campo `status`, servible por AMBOS modos de
+/// `metadata_inspect` (catálogo e inspección) con números coherentes entre sí:
+///   · `status` presente en 6 de 8 documentos (2 sin frontmatter → ausente);
+///   · tipos: 5 string (`accepted`×3, `draft`×2) + 1 number (`status: 5`);
+///   · valores escalares: `accepted`×3, `draft`×2, `5`(número)×1.
+///
+/// No vacuo por diseño: los conteos discriminan (present 6 ≠ total 8), los tipos son mixtos
+/// (string y number) y hay un valor NUMÉRICO — así el wire de `inferredTypes` (objeto por tipo) y
+/// el de `values` (tipo JSON natural) se ejercitan de verdad, no con un único string uniforme.
+fn workspace_metadata() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    for (slug, status) in [
+        ("p1", "accepted"),
+        ("p2", "accepted"),
+        ("p3", "accepted"),
+        ("p4", "draft"),
+        ("p5", "draft"),
+    ] {
+        write(
+            dir.path(),
+            &format!("{slug}.md"),
+            &format!("---\nstatus: {status}\n---\n\n# {slug}\n\ncuerpo.\n"),
+        );
+    }
+    // `status` NUMÉRICO: un `5` a secas es un número YAML, no un string (sin coerción).
+    write(
+        dir.path(),
+        "p6.md",
+        "---\nstatus: 5\n---\n\n# p6\n\ncuerpo.\n",
+    );
+    // 2 documentos SIN frontmatter → `status` ausente (missingIn == 2).
+    write(dir.path(), "p7.md", "# p7\n\nsin frontmatter.\n");
+    write(dir.path(), "p8.md", "# p8\n\nsin frontmatter.\n");
+    dir
+}
+
+/// E20-H03 · Criterio `tool_es_metadata_inspect`:
+/// Dado el MCP, Cuando se pide `tools/list`, Entonces aparece `metadata_inspect` y NO
+/// `schema_inspect`. Se asevera lo uno Y lo otro (presencia de la nueva, ausencia de la vieja): no
+/// basta con añadir `metadata_inspect` dejando `schema_inspect` en la superficie.
+#[test]
+fn tool_es_metadata_inspect() {
+    let dir = workspace_min();
+    let resp = roundtrip(
+        dir.path(),
+        &[r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#],
+        1,
+    );
+    let tools = nombres_de_tools(&resp[0]);
+    assert!(
+        tools.contains("metadata_inspect"),
+        "tools/list debe incluir la tool «metadata_inspect»: {tools:?}"
+    );
+    assert!(
+        !tools.contains("schema_inspect"),
+        "tools/list NO debe incluir la tool retirada «schema_inspect»: {tools:?}"
+    );
+}
+
+/// E20-H03 · Criterio `metadata_inspect_catalog`:
+/// Dado `metadata_inspect {mode: "catalog"}`, Cuando se llama, Entonces devuelve el catálogo de H01:
+/// `fields` con `name`/`presentIn`/`inferredTypes` (§Fase 6).
+#[test]
+fn metadata_inspect_catalog() {
+    let dir = workspace_metadata();
+    let resp = roundtrip(
+        dir.path(),
+        &[
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"metadata_inspect","arguments":{"mode":"catalog"}}}"#,
+        ],
+        1,
+    );
+    let sc = &resp[0]["result"]["structuredContent"];
+    let fields = sc["fields"].as_array().unwrap_or_else(|| {
+        panic!("metadata_inspect(catalog) debe devolver structuredContent.fields (array): {resp:?}")
+    });
+
+    // El campo `status` aparece con clave `name` (§Fase 6: `{"name":"status",…}`), no `field`.
+    let status = fields
+        .iter()
+        .find(|f| f["name"] == "status")
+        .unwrap_or_else(|| {
+            panic!("el catálogo debe listar el campo «status» bajo la clave `name`: {resp:?}")
+        });
+
+    // `presentIn`: en 6 de los 8 documentos (los conteos discriminan → no vacuo).
+    assert_eq!(
+        status["presentIn"].as_u64(),
+        Some(6),
+        "status.presentIn debe ser 6 (presente en 6 de 8 documentos): {status:?}"
+    );
+
+    // `inferredTypes` es un OBJETO {tipo-en-minúscula: conteo}, NO un array de pares.
+    let tipos = &status["inferredTypes"];
+    assert!(
+        tipos.is_object(),
+        "inferredTypes debe ser un objeto {{tipo: conteo}}, no un array de pares: {status:?}"
+    );
+    assert_eq!(
+        tipos["string"].as_u64(),
+        Some(5),
+        "inferredTypes.string debe ser 5 (accepted×3 + draft×2): {status:?}"
+    );
+    assert_eq!(
+        tipos["number"].as_u64(),
+        Some(1),
+        "inferredTypes.number debe ser 1 (`status: 5` es un número, sin coerción a string): {status:?}"
+    );
+}
+
+/// E20-H03 · Criterio `metadata_inspect_field`:
+/// Dado `metadata_inspect {mode: "field", field: "status"}`, Cuando se llama, Entonces devuelve la
+/// inspección de H02: `presentIn`/`missingIn`/`inferredTypes`/`values` con `value`/`count` (§Fase 6).
+#[test]
+fn metadata_inspect_field() {
+    let dir = workspace_metadata();
+    let resp = roundtrip(
+        dir.path(),
+        &[
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"metadata_inspect","arguments":{"mode":"field","field":"status"}}}"#,
+        ],
+        1,
+    );
+    let sc = &resp[0]["result"]["structuredContent"];
+    // Rojo limpio si la tool no existe: `structuredContent` nulo → panic explicando el porqué.
+    assert!(
+        sc.is_object(),
+        "metadata_inspect(field) debe devolver structuredContent (objeto): {resp:?}"
+    );
+
+    // El path inspeccionado viaja con la clave `field` (§Fase 6: `{"field":"status",…}`), no `name`.
+    assert_eq!(
+        sc["field"], "status",
+        "la inspección debe llevar `field` == «status» (string punteado del FieldPath): {resp:?}"
+    );
+
+    // Presencia/ausencia sobre el total: present 6 + missing 2 == 8 documentos.
+    assert_eq!(
+        sc["presentIn"].as_u64(),
+        Some(6),
+        "status.presentIn debe ser 6: {resp:?}"
+    );
+    assert_eq!(
+        sc["missingIn"].as_u64(),
+        Some(2),
+        "status.missingIn debe ser 2 (2 documentos sin frontmatter): {resp:?}"
+    );
+
+    // `inferredTypes` como objeto {tipo: conteo}, misma forma que en el catálogo.
+    let tipos = &sc["inferredTypes"];
+    assert!(
+        tipos.is_object(),
+        "inferredTypes debe ser un objeto {{tipo: conteo}}: {resp:?}"
+    );
+    assert_eq!(
+        tipos["string"].as_u64(),
+        Some(5),
+        "inferredTypes.string: {resp:?}"
+    );
+    assert_eq!(
+        tipos["number"].as_u64(),
+        Some(1),
+        "inferredTypes.number: {resp:?}"
+    );
+
+    // `values`: lista de `{value, count}` con el valor en su TIPO JSON natural.
+    let values = sc["values"].as_array().unwrap_or_else(|| {
+        panic!(
+            "metadata_inspect(field) debe devolver `values` (array de {{value, count}}): {resp:?}"
+        )
+    });
+
+    // Un valor STRING conserva su tipo string y su conteo (accepted×3).
+    let accepted = values
+        .iter()
+        .find(|v| v["value"] == "accepted")
+        .unwrap_or_else(|| panic!("`values` debe incluir el string «accepted»: {resp:?}"));
+    assert!(
+        accepted["value"].is_string(),
+        "el valor «accepted» debe viajar como string JSON: {accepted:?}"
+    );
+    assert_eq!(
+        accepted["count"].as_u64(),
+        Some(3),
+        "«accepted» aparece en 3 documentos: {accepted:?}"
+    );
+
+    // Un valor NUMÉRICO conserva su tipo número (no se convierte a `"5"`): clava el tipo JSON natural.
+    let numerico = values
+        .iter()
+        .find(|v| v["value"].is_number())
+        .unwrap_or_else(|| {
+            panic!("`values` debe incluir el valor NUMÉRICO como número JSON (no como string): {resp:?}")
+        });
+    assert_eq!(
+        numerico["value"].as_i64(),
+        Some(5),
+        "el valor numérico debe ser 5 (número, sin coerción a string): {numerico:?}"
+    );
+    assert_eq!(
+        numerico["count"].as_u64(),
+        Some(1),
+        "el valor numérico 5 aparece en 1 documento: {numerico:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// E23-H04 — `pendingTransaction` real
+// (`requirements/epica-23-cierre-migracion.md`, `crates/lodestar-workspace/src/recovery.rs`)
+//
+// SÍNTOMA: `workspace_status.recovery.pendingTransaction` es un `false` LITERAL en
+// `crates/lodestar-app/src/lib.rs` (`StatusRecovery { pending_transaction: false }`), pese a que
+// `Workspace::recovery_pending()` existe y funciona desde E13-H06. Tras un crash, la primera tool
+// que llama un agente le miente: planifica con normalidad y solo descubre el problema cuando
+// `change_apply` explota con `WORKSPACE_RECOVERY_REQUIRED`.
+//
+// UBICACIÓN: por la **frontera MCP JSON-RPC real** (binario `lodestar-mcp` sobre stdio), no por la
+// capa `App`. Es criterio DURO de la historia: éste es el sexto hueco de cableado de la misma
+// familia (E17 `other_files`, E20-H04 diagnósticos, E22-H04 selección masiva) y todos los anteriores
+// se escaparon precisamente porque se probaban en `App`.
+//
+// MONTAJE del estado «transacción a medias»: SIN la feature `test-failpoints` (que vive en
+// `lodestar-workspace` y no está activada aquí). Se compone con las MISMAS primitivas públicas y
+// durables que usa `simular_caida` en `crates/lodestar-workspace/tests/transactions.rs`
+// (`backup_originals` de E13-H04 + `create_journal`/`mark_applied` de E13-H03), deteniéndose en el
+// equivalente a `FailPoint::EntreRenames`: journal `applying`, 1 de 2 renames hechos, copias de
+// recuperación listas y ningún `done`. Es exactamente lo que un crash real deja en disco.
+// ---------------------------------------------------------------------------
+
+use lodestar_core::types::RelPath;
+use lodestar_workspace::Workspace;
+
+/// Id de la transacción interrumpida. Un mismo id nombra el journal (`<id>.json`) y las copias de
+/// recuperación (`recovery/<id>/`), como fija la convención de E13-H06.
+const TXN_A_MEDIAS: &str = "txn-e23-h04-a-medias";
+
+/// Monta un workspace con una **transacción a medias** durable en disco: dos documentos canónicos,
+/// copias de recuperación de ambos, un write-ahead journal en estado `applying` con el primer rename
+/// ya marcado y el segundo `pending`, y el canónico reflejando solo ese primer rename.
+///
+/// El `Workspace` se abre y se **dropea** dentro de esta función: eso es la «caída». Nada sella el
+/// journal a `done`, así que `Workspace::recovery_pending()` queda en `true` para cualquier proceso
+/// que abra después el mismo directorio — incluido el servidor MCP.
+///
+/// Nota sobre las revisiones del journal: se pasa la misma `WorkspaceRevision` como base y como
+/// resultado porque la recuperación (`JournalHeader` en `recovery.rs`) solo lee `txnId` y `state`
+/// del JSON — los campos de revisión no participan en la detección de recuperación pendiente.
+fn workspace_transaccion_a_medias() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write(root, "notas/uno.md", "# Uno\n\ncuerpo original de uno\n");
+    write(root, "notas/dos.md", "# Dos\n\ncuerpo original de dos\n");
+
+    let ws = Workspace::open(root).expect("el workspace de prueba debe abrir");
+    let uno = RelPath::new("notas/uno.md").unwrap();
+    let dos = RelPath::new("notas/dos.md").unwrap();
+    let afectados = [uno.clone(), dos];
+    let base = ws
+        .workspace_revision()
+        .expect("revisión base del workspace");
+
+    // (H04) Copias de recuperación de los originales afectados: preceden a todo rename.
+    ws.backup_originals(TXN_A_MEDIAS, &afectados)
+        .expect("preparar las copias de recuperación");
+    // (H03) Write-ahead journal `prepared`, fsynced antes de tocar el canónico.
+    let mut journal = ws
+        .create_journal(TXN_A_MEDIAS, &afectados, &base, &base)
+        .expect("crear el write-ahead journal");
+    // (H05) Primer rename «hecho»: el canónico ya refleja el cambio de `notas/uno.md`…
+    std::fs::write(
+        root.join("notas/uno.md"),
+        "# Uno\n\ncuerpo NUEVO a medio publicar\n",
+    )
+    .unwrap();
+    journal
+        .mark_applied(&uno)
+        .expect("marcar el primer rename en el journal");
+    // …y aquí «se cae»: el segundo rename nunca ocurre y el journal nunca llega a `done`.
+
+    dir
+}
+
+/// **E23-H04** · Criterio `status_reporta_recovery_pendiente`:
+/// **Dado** un workspace con una transacción a medias (journal presente), **Cuando** se llama a
+/// `workspace_status` **por MCP**, **Entonces** `recovery.pendingTransaction` es `true`.
+///
+/// ROJO hoy: `App::workspace_status` construye `StatusRecovery { pending_transaction: false }` con un
+/// literal, sin consultar `Workspace::recovery_pending()`, así que la tool responde `false` sobre un
+/// workspace que sí necesita recuperación.
+///
+/// La precondición (`recovery_pending()` directo sobre el mismo directorio) NO es decorativa: prueba
+/// que el fixture montó de verdad el estado interrumpido, de modo que un `false` en la respuesta solo
+/// puede ser el hueco de cableado y nunca un fixture mal montado.
+#[test]
+fn status_reporta_recovery_pendiente() {
+    let dir = workspace_transaccion_a_medias();
+
+    // Precondición no vacua: el estado en disco es realmente una recuperación pendiente.
+    let ws = Workspace::open(dir.path()).expect("reabrir el workspace de prueba");
+    assert!(
+        ws.recovery_pending(),
+        "precondición: el fixture debe dejar una recuperación PENDIENTE (journal no-`done` bajo \
+         .lodestar/runtime/journal/)"
+    );
+    drop(ws);
+
+    let resp = roundtrip(
+        dir.path(),
+        &[
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"workspace_status","arguments":{}}}"#,
+        ],
+        1,
+    );
+    let sc = &resp[0]["result"]["structuredContent"];
+    assert_eq!(
+        sc["recovery"]["pendingTransaction"],
+        serde_json::Value::Bool(true),
+        "con una transacción a medias en disco, workspace_status debe reportar \
+         recovery.pendingTransaction == true (hoy es un `false` literal en \
+         `App::workspace_status`, sin consultar `Workspace::recovery_pending()`): {resp:?}"
+    );
+}
+
+/// **E23-H04** · Criterio `status_sin_recovery_pendiente` (**control anti-vacuo**):
+/// **Dado** un workspace limpio, **Cuando** se llama a `workspace_status`, **Entonces**
+/// `recovery.pendingTransaction` es `false`.
+///
+/// Impide que el criterio anterior se satisfaga cableando un `true` literal (el defecto simétrico al
+/// de hoy). GUARDA verde en la fase roja —el literal actual ya devuelve `false`—; su valor es de
+/// regresión sobre la implementación futura.
+#[test]
+fn status_sin_recovery_pendiente() {
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), "notas/uno.md", "# Uno\n\ncuerpo original\n");
+    write(dir.path(), "notas/dos.md", "# Dos\n\ncuerpo original\n");
+
+    // Precondición no vacua: este workspace NO tiene recuperación pendiente (el par exacto del
+    // fixture de `status_reporta_recovery_pendiente`, sin el journal interrumpido).
+    let ws = Workspace::open(dir.path()).expect("el workspace limpio debe abrir");
+    assert!(
+        !ws.recovery_pending(),
+        "precondición: un workspace recién creado no tiene ninguna transacción a medias"
+    );
+    drop(ws);
+
+    let resp = roundtrip(
+        dir.path(),
+        &[
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"workspace_status","arguments":{}}}"#,
+        ],
+        1,
+    );
+    let sc = &resp[0]["result"]["structuredContent"];
+    assert_eq!(
+        sc["recovery"]["pendingTransaction"],
+        serde_json::Value::Bool(false),
+        "sobre un workspace limpio, workspace_status debe reportar \
+         recovery.pendingTransaction == false: {resp:?}"
+    );
+}
+
+// ===========================================================================
+// E23-H09 · Bordes (`requirements/epica-23-cierre-migracion.md`)
+//
+// Lo que separa «funciona en un tempdir limpio» de «funciona en un repo real». Es cobertura que
+// faltaba, no fase roja: se espera que estos tests pasen.
+//
+// La concurrencia ENTRE PROCESOS (`dos_procesos_un_ganador`, `lock_huerfano`) vive en
+// `crates/lodestar-mcp/tests/concurrencia.rs`, que necesita mantener dos servidores vivos a la vez
+// y no puede usar el `roundtrip` de este fichero. El Unicode en rutas, en
+// `crates/lodestar-workspace/tests/discovery.rs`.
+// ===========================================================================
+
+/// El texto del error de EJECUCIÓN de una tool: `crates/lodestar-mcp/src/tools.rs` pone ahí el
+/// código estable (`ErrorCode::as_str()`), nunca el `Debug` de la variante. Verifica de paso que el
+/// rechazo llegó como `isError` y **no** como error de protocolo JSON-RPC.
+fn texto_de_error(resp: &serde_json::Value) -> String {
+    assert_eq!(
+        resp["result"]["isError"], true,
+        "se esperaba un error de EJECUCIÓN de la tool (isError en el result): {resp:?}"
+    );
+    assert!(
+        resp["error"].is_null(),
+        "un rechazo del motor NO debe viajar como error de protocolo JSON-RPC: {resp:?}"
+    );
+    resp["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap_or_else(|| panic!("el error debe traer su código estable como texto: {resp:?}"))
+        .to_string()
+}
+
+/// Frontmatter **sintácticamente inválido** dentro de un bloque bien delimitado: el mismo
+/// disparador de `FM-YAML-INVALID` que ya usa `workspace_editado_a_mano`, aquí como dato de
+/// entrada del camino de ESCRITURA.
+const FM_ROTO: &str =
+    "---\ntitle: : :\n  - roto\nestado: escrito a pelo\n---\n\n# Nota rota\n\ncuerpo valioso.\n";
+
+/// Bloque de frontmatter que abre y **nunca cierra** (`FM-UNCLOSED`): la otra mitad de «ilegible».
+/// Va en el mismo test porque son dos ramas distintas de `model::patch_frontmatter`
+/// (`SplitFront::SinCerrar` vs. YAML que no parsea) y arreglar una no arregla la otra.
+const FM_SIN_CERRAR: &str =
+    "---\nestado: abierto\n\n# Nota sin cerrar\n\notro cuerpo valioso que no se puede perder.\n";
+
+/// **E23-H09** · Criterio `patch_sobre_frontmatter_ilegible`:
+/// **Dado** un documento cuyo frontmatter no se puede interpretar, **Cuando** se le aplica un
+/// `patch_frontmatter`, **Entonces** la operación falla limpio (`INVALID_SCHEMA`) y el `.md` queda
+/// **byte a byte** como estaba.
+///
+/// Es la vía más directa a pérdida de datos del usuario y hasta esta historia solo estaba probada
+/// en el camino de LECTURA (`check_detecta_edicion_directa` → `FM-YAML-INVALID`). En escritura, la
+/// alternativa peligrosa sería «reconstruir el bloque encima» con las claves que sí se entienden:
+/// eso borraría en silencio lo que el usuario había escrito. El core lo evita a propósito
+/// (`crates/lodestar-core/src/plan.rs`, rama `PatchFrontmatter`: «un frontmatter ilegible hace
+/// fallar la operación en vez de reconstruirse encima»); aquí se fija **por la frontera MCP** y
+/// **verificando el disco**, que es donde se pierde el dato.
+///
+/// El fallo ocurre ya en `change_plan` —que simula el cambio en memoria— así que no llega a existir
+/// un plan que aplicar: mejor todavía, el agente se entera antes de pedir la escritura.
+///
+/// Anti-vacuo: la tercera parte del test aplica el MISMO patch a un documento sano y comprueba que
+/// ese sí planifica y escribe. Sin ella, un `patch_frontmatter` roto de raíz pasaría este test.
+#[test]
+fn patch_sobre_frontmatter_ilegible() {
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), "roto-yaml.md", FM_ROTO);
+    write(dir.path(), "sin-cerrar.md", FM_SIN_CERRAR);
+    write(
+        dir.path(),
+        "sano.md",
+        "---\nestado: borrador\n---\n\n# Sano\n\ncuerpo.\n",
+    );
+
+    // Copia byte a byte del estado previo de los dos documentos ilegibles.
+    let antes: Vec<(String, Vec<u8>)> = ["roto-yaml.md", "sin-cerrar.md"]
+        .iter()
+        .map(|p| {
+            (
+                (*p).to_string(),
+                std::fs::read(dir.path().join(p)).expect("leer el documento ilegible"),
+            )
+        })
+        .collect();
+
+    for (ruta, contenido_previo) in &antes {
+        let ops = serde_json::json!([
+            { "op": "patch_frontmatter", "ref": { "path": ruta },
+              "patch": { "estado": "PATCH-QUE-NO-DEBE-APLICARSE" } }
+        ]);
+        let resp = roundtrip(
+            dir.path(),
+            &[change_plan_line(None, ops, policy_permisiva()).as_str()],
+            1,
+        );
+
+        // (a) Falla limpio, con el código estable del catálogo — no un panic ni un plan silencioso.
+        let codigo = texto_de_error(&resp[0]);
+        assert!(
+            codigo.contains("INVALID_SCHEMA"),
+            "parchear el frontmatter de «{ruta}» (ilegible) debe rechazarse con INVALID_SCHEMA \
+             —precondición de la operación incumplida por el dato de entrada—, no con «{codigo}»: \
+             {resp:?}"
+        );
+
+        // (b) LO ESENCIAL: el fichero del usuario sigue **byte a byte** como estaba.
+        let ahora = std::fs::read(dir.path().join(ruta)).expect("releer el documento ilegible");
+        assert_eq!(
+            &ahora,
+            contenido_previo,
+            "un patch rechazado NO puede tocar el documento: «{ruta}» debe quedar byte a byte \
+             igual. Antes: {:?} · Ahora: {:?}",
+            String::from_utf8_lossy(contenido_previo),
+            String::from_utf8_lossy(&ahora)
+        );
+        // Redundante a propósito y legible en el informe de fallo: el bloque original sobrevive.
+        let texto = String::from_utf8_lossy(&ahora);
+        assert!(
+            !texto.contains("PATCH-QUE-NO-DEBE-APLICARSE"),
+            "la clave del patch no puede haberse colado en «{ruta}»: {texto:?}"
+        );
+    }
+
+    // (c) Anti-vacuo: el mismo patch sobre un documento con frontmatter legible SÍ planifica.
+    let ops_sanas = serde_json::json!([
+        { "op": "patch_frontmatter", "ref": { "path": "sano.md" },
+          "patch": { "estado": "PATCH-QUE-SI-SE-APLICA" } }
+    ]);
+    let plan = roundtrip(
+        dir.path(),
+        &[change_plan_line(None, ops_sanas, policy_permisiva()).as_str()],
+        1,
+    );
+    assert!(
+        plan[0]["result"]["isError"].as_bool() != Some(true),
+        "el MISMO patch sobre un documento sano debe planificar sin error (si no, el rechazo de \
+         arriba no probaría nada sobre el frontmatter ilegible): {plan:?}"
+    );
+    let id = plan_change_set_id(&plan[0]);
+    let aplicado = roundtrip(dir.path(), &[change_apply_line(&id, None).as_str()], 1);
+    assert_eq!(
+        apply_sc(&aplicado[0])["applied"],
+        serde_json::Value::Bool(true),
+        "y debe poder aplicarse: {aplicado:?}"
+    );
+    let sano = std::fs::read_to_string(dir.path().join("sano.md")).unwrap();
+    assert!(
+        sano.contains("PATCH-QUE-SI-SE-APLICA"),
+        "el documento sano sí recibe el patch: {sano:?}"
+    );
+    // Y la transacción no arrastró a los ilegibles, que ni siquiera estaban en su change set.
+    for (ruta, contenido_previo) in &antes {
+        assert_eq!(
+            &std::fs::read(dir.path().join(ruta)).unwrap(),
+            contenido_previo,
+            "publicar un cambio sobre otro documento no puede reescribir «{ruta}»"
+        );
+    }
+}
+
+/// **E23-H09** · Criterio «códigos del catálogo sin emisor», primer caso alcanzable:
+/// **Dado** `lodestar-mcp --root <ruta que no existe>`, **Cuando** se arranca, **Entonces** falla
+/// con un mensaje legible por stderr y exit code 3, sin panic y sin ensuciar stdout.
+///
+/// El arranque es el único punto de la superficie donde «no hay workspace» puede ocurrir: dentro de
+/// una sesión, la raíz ya está canonicalizada y fija (`§20.5`). Se asevera lo que el producto
+/// promete de verdad —stdout es JSON-RPC **puro**, así que un fallo de arranque no puede escribir
+/// nada ahí— y que no hay panic (un `unwrap` en el arranque sería un fallo de robustez visible para
+/// cualquier cliente MCP, que vería el proceso morir sin explicación).
+///
+/// **HALLAZGO registrado por este test**: el catálogo congelado de 16 códigos tiene
+/// `WORKSPACE_NOT_FOUND`, pero **ningún camino del producto lo emite** — el arranque sale por
+/// `std::process::exit(3)` con texto plano, no por el envelope de error. Aquí se fija el
+/// comportamiento REAL (exit 3 + mensaje que nombra la ruta), no el que el catálogo insinúa.
+#[test]
+fn root_inexistente_falla_legible_sin_panic() {
+    let base = tempfile::tempdir().unwrap();
+    let inexistente = base.path().join("no-existe").join("ni-de-lejos");
+    assert!(
+        !inexistente.exists(),
+        "precondición: la ruta del test no debe existir"
+    );
+
+    let salida = Command::new(env!("CARGO_BIN_EXE_lodestar-mcp"))
+        .arg("--root")
+        .arg(&inexistente)
+        .stdin(Stdio::null())
+        .output()
+        .expect("ejecutar lodestar-mcp");
+
+    let stderr = String::from_utf8_lossy(&salida.stderr).into_owned();
+    let stdout = String::from_utf8_lossy(&salida.stdout).into_owned();
+    eprintln!(
+        "[root-inexistente] exit={:?} stderr={stderr:?}",
+        salida.status.code()
+    );
+
+    assert_eq!(
+        salida.status.code(),
+        Some(3),
+        "una raíz que no existe es un fallo de runtime/IO: exit 3 (stderr: {stderr:?})"
+    );
+    assert!(
+        !stderr.contains("panicked"),
+        "el arranque no puede paniquear ante una ruta inexistente: {stderr:?}"
+    );
+    assert!(
+        stderr.contains("lodestar-mcp"),
+        "el mensaje debe identificar al programa: {stderr:?}"
+    );
+    assert!(
+        stderr.contains("ni-de-lejos"),
+        "el mensaje debe nombrar la ruta que no se pudo resolver (si no, el usuario no sabe qué \
+         arreglar): {stderr:?}"
+    );
+    assert!(
+        stdout.is_empty(),
+        "stdout es JSON-RPC PURO: un fallo de arranque no puede escribir nada ahí, ni siquiera un \
+         mensaje de ayuda: {stdout:?}"
+    );
+}
+
+/// **E23-H09** · Criterio «códigos del catálogo sin emisor», caso `INTERNAL_IO_ERROR`:
+/// **Dado** un workspace en el que `.lodestar/runtime/plans/` **no puede existir** como directorio,
+/// **Cuando** se pide un `change_plan`, **Entonces** la tool responde `INTERNAL_IO_ERROR` en vez de
+/// paniquear o de devolver un plan que no se podrá aplicar.
+///
+/// Es el único de los cuatro códigos huérfanos del catálogo (`AMBIGUOUS_REFERENCE`,
+/// `RESULT_TOO_LARGE`, `RECOVERY_FAILED`, `INTERNAL_IO_ERROR`) con un camino alcanzable desde la
+/// superficie: los otros tres no tienen productor en el árbol (ver el informe de la historia).
+///
+/// El escenario se monta plantando un **fichero** donde el motor espera un directorio, que es la
+/// forma portable de provocar un fallo de I/O real (los permisos POSIX no se comportan igual en
+/// Windows ni bajo root). Modela un caso de campo: un `.lodestar/` corrupto o un volumen que
+/// rechaza la escritura.
+///
+/// De paso fija dos propiedades de robustez: abrir el workspace **no** aborta por esto (desde
+/// E23-H12 la apertura ni siquiera mira el runtime — el scaffold se retiró y cada consumidor crea su
+/// directorio al escribir), y la lectura sigue funcionando pese al runtime roto.
+#[test]
+fn plan_con_runtime_no_escribible_da_internal_io_error() {
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), "nota.md", "# Nota\n\ncuerpo.\n");
+
+    // Un FICHERO donde `persist_plan` necesita un directorio: `create_dir_all` fallará.
+    std::fs::create_dir_all(dir.path().join(".lodestar/runtime")).unwrap();
+    std::fs::write(
+        dir.path().join(".lodestar/runtime/plans"),
+        b"no soy un directorio\n",
+    )
+    .unwrap();
+
+    let ops = serde_json::json!([
+        { "op": "patch_frontmatter", "ref": { "path": "nota.md" }, "patch": { "estado": "x" } }
+    ]);
+    let resp = roundtrip(
+        dir.path(),
+        &[
+            change_plan_line(None, ops, policy_permisiva()).as_str(),
+            // El servidor sigue vivo y sirviendo lecturas pese al runtime roto.
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"knowledge_get","arguments":{"ref":{"path":"nota.md"}}}}"#,
+        ],
+        2,
+    );
+
+    let codigo = texto_de_error(&resp[0]);
+    assert!(
+        codigo.contains("INTERNAL_IO_ERROR"),
+        "un fallo de I/O al persistir el plan debe reportarse como INTERNAL_IO_ERROR (fallo del \
+         motor/entorno, no del agente), no como «{codigo}»: {resp:?}"
+    );
+
+    // No se corrompió nada ni se abortó el proceso: la lectura posterior responde con normalidad.
+    assert!(
+        resp[1]["result"]["isError"].as_bool() != Some(true),
+        "el servidor debe seguir sirviendo lecturas con el runtime roto: {resp:?}"
+    );
+    assert_eq!(
+        resp[1]["result"]["structuredContent"]["document"]["path"], "nota.md",
+        "y devolver el documento pedido: {resp:?}"
+    );
+
+    // El obstáculo sigue siendo un fichero: el motor no lo ha borrado por su cuenta para hacerse
+    // sitio (eso sería destruir algo del usuario para poder escribir su scratch).
+    assert!(
+        dir.path().join(".lodestar/runtime/plans").is_file(),
+        "el motor no debe borrar lo que encuentra en su ruta de runtime"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("nota.md")).unwrap(),
+        "# Nota\n\ncuerpo.\n",
+        "planificar no escribe el canónico, ni siquiera cuando falla"
+    );
+}
+
+// ===========================================================================
+// E23-H12 — Higiene de efectos secundarios y retirada de las claves privilegiadas
+// (`requirements/epica-23-cierre-migracion.md §E23-H12`). Fase ROJA.
+//
+// DOS DEFECTOS, UNA HISTORIA:
+//
+// 1. `Workspace::open` (`crates/lodestar-workspace/src/lib.rs:83-84`) ejecuta
+//    `gitignore::ensure_gitignore(root)` + `runtime::ensure_runtime_scaffold(root)` ANTES de leer
+//    nada, así que **arrancar el MCP —incluso en perfil `readonly`— reescribe el `.gitignore` del
+//    proyecto** y le crea `.lodestar/runtime/{plans,receipts,staging}`. Para el pitch «cd
+//    my-project && lodestar-mcp sobre cualquier proyecto» es una escritura no solicitada; en CI,
+//    un working tree sucio. Los dos efectos pasan a ser perezosos: el scaffold se borra sin
+//    sustituto (sus ocho consumidores ya hacen su `create_dir_all`) y el `.gitignore` se ajusta en
+//    los cuatro chokepoints de escritura (`enable_cache`, `acquire_lock`, `persist_plan`,
+//    `try_append_audit`).
+//
+// 2. `implemented_by`/`verified_by` son las últimas claves de frontmatter con **semántica impuesta
+//    y no configurable** (`crates/lodestar-workspace/src/external_refs.rs:25`), contra el
+//    invariante 3 de `§20.2`. Se retiran sin sustituto (decisión del usuario, 2026-07-26) y con
+//    ellas la opción `include:["externalReferences"]` de `knowledge_get`, que se quedaría sin
+//    fuente: una opción que siempre devuelve vacío es el patrón que E23 está saldando.
+// ===========================================================================
+
+/// Snapshot determinista del árbol bajo `dir`: `(ruta relativa, bytes)` ordenado. Captura contenido
+/// Y existencia, así que detecta lo mismo un fichero modificado que uno creado o borrado.
+///
+/// Solo recoge FICHEROS: los subdirectorios vacíos del scaffold de runtime no dejan rastro aquí y
+/// hay que aseverarlos aparte (por eso los tests preguntan además por `.lodestar/`).
+fn snapshot_arbol(dir: &std::path::Path) -> Vec<(String, Vec<u8>)> {
+    fn recorrer(
+        base: &std::path::Path,
+        actual: &std::path::Path,
+        acc: &mut Vec<(String, Vec<u8>)>,
+    ) {
+        let mut entradas: Vec<std::path::PathBuf> = std::fs::read_dir(actual)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .collect();
+        entradas.sort();
+        for p in entradas {
+            if p.is_dir() {
+                recorrer(base, &p, acc);
+            } else {
+                let rel = p.strip_prefix(base).unwrap().to_string_lossy().into_owned();
+                acc.push((rel, std::fs::read(&p).unwrap()));
+            }
+        }
+    }
+    let mut acc = Vec::new();
+    recorrer(dir, dir, &mut acc);
+    acc.sort();
+    acc
+}
+
+/// Una línea `tools/call` serializada con `serde_json` (nunca interpolada: los argumentos llevan
+/// rutas y texto libre).
+fn linea_call(id: u32, tool: &str, args: serde_json::Value) -> String {
+    serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "method": "tools/call",
+        "params": { "name": tool, "arguments": args }
+    })
+    .to_string()
+}
+
+/// **E23-H12** · Criterio `readonly_no_escribe_nada`: **Dado** un proyecto con un `.gitignore`
+/// propio, **Cuando** se arranca el MCP en perfil `readonly` y se hace una sesión de solo lectura,
+/// **Entonces** el proyecto queda intacto: ni el `.gitignore` cambia ni aparece `.lodestar/`.
+///
+/// El criterio de la historia lo enuncia como «`git status --porcelain` sale vacío»; aquí se asevera
+/// la propiedad que hay debajo, y de forma más estricta que `git status`: el árbol ENTERO byte a
+/// byte (`git status` no vería un fichero ya ignorado) más la no-existencia de `.lodestar/`, que es
+/// donde caería el scaffold de runtime (directorios vacíos que un snapshot de ficheros no ve).
+///
+/// El `.gitignore` lleva CRLF y línea en blanco final a propósito: son los dos detalles que la
+/// primera reescritura de `ensure_gitignore` normaliza, o sea que el fichero volvería con otros
+/// bytes conservando todas sus reglas. Comparar contenido lógico no vería el defecto.
+///
+/// NO-VACUIDAD: la sesión tiene que haber SERVIDO de verdad (`workspace_status` con su
+/// `workspaceRevision`, `knowledge_search` encontrando el documento y `knowledge_check` con
+/// veredicto), no simplemente arrancar y morir; un servidor que rechazara todo también dejaría el
+/// árbol intacto.
+#[test]
+fn readonly_no_escribe_nada() {
+    let dir = tempfile::tempdir().unwrap();
+    let gitignore_original: &[u8] = b"target/\r\n*.log\r\n\r\n";
+    std::fs::write(dir.path().join(".gitignore"), gitignore_original).unwrap();
+    write(
+        dir.path(),
+        "guia.md",
+        "---\nestado: vigente\n---\n\n# Guía\n\nVer [alfa](notas/alfa.md).\n",
+    );
+    write(dir.path(), "notas/alfa.md", "# Alfa\n\nCuerpo de alfa.\n");
+
+    let antes = snapshot_arbol(dir.path());
+
+    // Sesión de SOLO LECTURA: las 7 tools que el perfil `readonly` sigue exponiendo.
+    let lineas = [
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"lodestar-tests","version":"1"}}}"#.to_string(),
+        r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#.to_string(),
+        linea_call(3, "workspace_status", serde_json::json!({})),
+        linea_call(4, "knowledge_search", serde_json::json!({ "text": "alfa" })),
+        linea_call(
+            5,
+            "knowledge_get",
+            serde_json::json!({
+                "ref": { "path": "guia.md" },
+                "include": ["frontmatter", "body", "outgoingLinks", "backlinks", "diagnostics"]
+            }),
+        ),
+        linea_call(6, "metadata_inspect", serde_json::json!({ "mode": "catalog" })),
+        linea_call(
+            7,
+            "knowledge_check",
+            serde_json::json!({ "scope": { "kind": "workspace" } }),
+        ),
+        linea_call(
+            8,
+            "graph_query",
+            serde_json::json!({ "operation": "isolated" }),
+        ),
+    ];
+    let refs: Vec<&str> = lineas.iter().map(String::as_str).collect();
+    let resp = roundtrip_profile(dir.path(), "readonly", &refs, lineas.len());
+
+    // --- guarda anti-vacua: la sesión de lectura funcionó de verdad -----------------------------
+    assert_eq!(
+        resp.len(),
+        lineas.len(),
+        "el servidor debe responder a las {} peticiones de la sesión: {resp:?}",
+        lineas.len()
+    );
+    assert!(
+        resp[2]["result"]["structuredContent"]["workspaceRevision"]
+            .as_str()
+            .unwrap_or("")
+            .starts_with("blake3:"),
+        "workspace_status debe haber servido el estado del workspace: {resp:?}"
+    );
+    assert!(
+        search_paths(&resp[3]).contains(&"notas/alfa.md".to_string()),
+        "knowledge_search debe haber encontrado `notas/alfa.md`: {resp:?}"
+    );
+    assert_eq!(
+        resp[4]["result"]["structuredContent"]["document"]["path"], "guia.md",
+        "knowledge_get debe haber servido el documento: {resp:?}"
+    );
+    assert_eq!(
+        resp[6]["result"]["structuredContent"]["valid"],
+        serde_json::Value::Bool(true),
+        "knowledge_check debe haber emitido veredicto sobre un workspace válido: {resp:?}"
+    );
+
+    // --- el criterio: cero escrituras -----------------------------------------------------------
+    let gitignore_tras_sesion = std::fs::read(dir.path().join(".gitignore")).unwrap();
+    assert_eq!(
+        gitignore_tras_sesion,
+        gitignore_original,
+        "una sesión `readonly` no puede tocar el `.gitignore` del proyecto: era {:?} y quedó {:?}",
+        String::from_utf8_lossy(gitignore_original),
+        String::from_utf8_lossy(&gitignore_tras_sesion)
+    );
+    assert!(
+        !dir.path().join(".lodestar").exists(),
+        "una sesión `readonly` no puede hacer aparecer `.lodestar/` (ni siquiera el scaffold vacío \
+         de runtime): sobre el proyecto de un tercero es una escritura no solicitada"
+    );
+    assert_eq!(
+        snapshot_arbol(dir.path()),
+        antes,
+        "una sesión `readonly` no debe modificar, crear ni borrar NINGÚN fichero del proyecto"
+    );
+}
+
+/// El `document` de una respuesta `knowledge_get`, normalizado para comparar dos documentos gemelos
+/// que solo se diferencian en el NOMBRE de una clave de frontmatter: se quita `revision` (blake3 del
+/// contenido — difiere por fuerza, porque el nombre de la clave forma parte de los bytes) y se
+/// sustituyen la ruta y la clave por marcadores.
+fn documento_normalizado(resp: &serde_json::Value, ruta: &str, clave: &str) -> String {
+    let mut doc = resp["result"]["structuredContent"]["document"].clone();
+    assert!(
+        doc.is_object(),
+        "knowledge_get debe devolver `document` como objeto: {resp:?}"
+    );
+    if let Some(obj) = doc.as_object_mut() {
+        obj.remove("revision");
+    }
+    doc.to_string().replace(ruta, "DOC").replace(clave, "CLAVE")
+}
+
+/// **E23-H12** · Criterio `claves_de_frontmatter_sin_semantica_impuesta`: **Dado** un documento con
+/// `implemented_by: María`, **Cuando** se audita el workspace, **Entonces** no se emite ningún
+/// diagnóstico — ningún nombre de campo tiene semántica impuesta.
+///
+/// SE EJERCE POR `knowledge_check` scope `workspace`, que es el mismo motor que `lodestar check`
+/// (invariante #3: desde E23-H01 ambos salen de `App::full_analysis`), y por la superficie donde el
+/// privilegio es OBSERVABLE, que es `knowledge_get`.
+///
+/// POR QUÉ NO BASTA LA MITAD LITERAL: el diagnóstico `EXTREF-MISSING` ya murió en E20-H03, así que
+/// «`check` no dice nada de `implemented_by`» es hoy trivialmente cierto y un test que solo aseverase
+/// eso sería VACUO. Lo que sigue vivo —y lo que esta historia mata— es que Lodestar interpreta el
+/// valor de esas dos claves como una **ruta de fichero** y la resuelve contra disco: con
+/// `implemented_by: María` (un nombre de persona), `knowledge_get(include:[externalReferences])`
+/// devuelve hoy `[{path:"María", exists:false}]`, o sea que trata a María como un fichero de código
+/// que falta.
+///
+/// FORMA DEL TEST — DIFERENCIAL: dos documentos gemelos, idénticos salvo el NOMBRE de la clave
+/// (`implemented_by` vs `autor_favorito`). «Ningún nombre de campo tiene semántica impuesta»
+/// significa exactamente que sus proyecciones son indistinguibles módulo ese nombre. Hoy difieren
+/// (uno trae `externalReferences` poblado, el otro vacío) ⇒ ROJO. La formulación es robusta frente a
+/// cómo se implemente la retirada: da igual que la opción `externalReferences` pase a rechazarse o a
+/// no existir, mientras los gemelos se traten igual.
+#[test]
+fn claves_de_frontmatter_sin_semantica_impuesta() {
+    let dir = tempfile::tempdir().unwrap();
+    // `referenceRoots` configurado: el escenario en el que la maquinaria de refs externas está más
+    // «viva» posible, para que su retirada no pueda pasar por casualidad.
+    write(
+        dir.path(),
+        ".lodestar/config.yaml",
+        "workspace:\n  referenceRoots: [src]\n",
+    );
+    write(dir.path(), "src/lib.rs", "// código del proyecto\n");
+    write(
+        dir.path(),
+        "docs/con-clave-privilegiada.md",
+        "---\nimplemented_by: María\n---\n\n# Ficha\n\ncuerpo.\n",
+    );
+    write(
+        dir.path(),
+        "docs/con-clave-cualquiera.md",
+        "---\nautor_favorito: María\n---\n\n# Ficha\n\ncuerpo.\n",
+    );
+
+    let include = serde_json::json!([
+        "frontmatter",
+        "body",
+        "outgoingLinks",
+        "backlinks",
+        "diagnostics",
+        "externalReferences"
+    ]);
+    let lineas = [
+        linea_call(
+            1,
+            "knowledge_check",
+            serde_json::json!({ "scope": { "kind": "workspace" } }),
+        ),
+        linea_call(
+            2,
+            "knowledge_get",
+            serde_json::json!({ "ref": { "path": "docs/con-clave-privilegiada.md" }, "include": include }),
+        ),
+        linea_call(
+            3,
+            "knowledge_get",
+            serde_json::json!({ "ref": { "path": "docs/con-clave-cualquiera.md" }, "include": include }),
+        ),
+    ];
+    let refs: Vec<&str> = lineas.iter().map(String::as_str).collect();
+    let resp = roundtrip(dir.path(), &refs, lineas.len());
+
+    // --- mitad literal del criterio: auditar no emite NINGÚN diagnóstico ------------------------
+    let diags = check_diagnostics(&resp[0]);
+    assert!(
+        diags.is_empty(),
+        "un documento con `implemented_by: María` (un nombre de persona, no una ruta) no puede \
+         producir diagnóstico alguno: ningún nombre de campo tiene semántica impuesta. \
+         Diagnósticos: {diags:?}"
+    );
+
+    // --- la mitad que muerde: los gemelos son indistinguibles módulo el nombre de la clave ------
+    let privilegiada =
+        documento_normalizado(&resp[1], "docs/con-clave-privilegiada.md", "implemented_by");
+    let cualquiera =
+        documento_normalizado(&resp[2], "docs/con-clave-cualquiera.md", "autor_favorito");
+    assert_eq!(
+        privilegiada, cualquiera,
+        "`implemented_by` debe ser metadata del usuario como `autor_favorito`: sus proyecciones \
+         tienen que ser idénticas módulo el nombre de la clave. Hoy no lo son porque Lodestar \
+         interpreta el valor de `implemented_by` como una ruta y lo resuelve contra disco"
+    );
+
+    // Guarda anti-vacua: la comparación de arriba solo significa algo si el frontmatter del usuario
+    // viajó de verdad (dos `document` vacíos también serían iguales).
+    assert_eq!(
+        resp[1]["result"]["structuredContent"]["document"]["frontmatter"]["implemented_by"],
+        serde_json::Value::String("María".to_string()),
+        "el frontmatter del usuario debe viajar VERBATIM, con su clave y su valor: {resp:?}"
+    );
+}
+
+/// **E23-H12** · Criterio `external_references_retirada_del_wire`: **Dado** un `knowledge_get`,
+/// **Entonces** `externalReferences` no está en el enum de `include` ni en `contracts/mcp.yml`.
+///
+/// Se aseveran las TRES caras de la retirada, porque cada una se puede incumplir por separado:
+///   1. el **schema declarado** a los clientes (`tools/list` → `inputSchema` de `knowledge_get`),
+///      que es lo que un agente lee para saber qué puede pedir;
+///   2. el **contrato** `contracts/mcp.yml`, la spec de la frontera. Se compara contra el YAML
+///      **parseado** (sección `tools:`), no contra el texto crudo: los comentarios `#` del fichero
+///      son memoria histórica de la migración y documentar ahí la retirada debe seguir siendo
+///      legítimo — lo que no puede sobrevivir es la superficie declarada;
+///   3. el **comportamiento**: pedir el campo retirado no puede resucitarlo en la respuesta. Sin
+///      esto, quitarlo del enum y dejar el código vivo pasaría por «hecho» y el wire seguiría
+///      devolviendo un campo indocumentado.
+#[test]
+fn external_references_retirada_del_wire() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        ".lodestar/config.yaml",
+        "workspace:\n  referenceRoots: [src]\n",
+    );
+    write(dir.path(), "src/existe.rs", "fn main() {}\n");
+    write(
+        dir.path(),
+        "tarea.md",
+        "---\nimplemented_by:\n  - src/existe.rs\n---\n\n# Tarea\n\ncuerpo.\n",
+    );
+
+    let resp = roundtrip(
+        dir.path(),
+        &[
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#,
+            &linea_call(
+                2,
+                "knowledge_get",
+                serde_json::json!({
+                    "ref": { "path": "tarea.md" },
+                    "include": ["frontmatter", "externalReferences"]
+                }),
+            ),
+        ],
+        2,
+    );
+
+    // --- 1. el enum de `include` que se le declara al cliente ------------------------------------
+    let tools = resp[0]["result"]["tools"]
+        .as_array()
+        .expect("tools/list devuelve un array");
+    let get = tools
+        .iter()
+        .find(|t| t["name"] == "knowledge_get")
+        .unwrap_or_else(|| panic!("`knowledge_get` debe seguir en el catálogo: {tools:?}"));
+    let valores: Vec<String> = get["inputSchema"]["properties"]["include"]["items"]["enum"]
+        .as_array()
+        .unwrap_or_else(|| panic!("`include` debe declarar su enum de valores: {get}"))
+        .iter()
+        .filter_map(|v| v.as_str().map(String::from))
+        .collect();
+    assert!(
+        !valores.iter().any(|v| v == "externalReferences"),
+        "`externalReferences` no puede seguir en el enum de `include` de `knowledge_get`: sin \
+         `implemented_by`/`verified_by` no tiene fuente, y una opción que siempre devolvería vacío \
+         es el patrón que E23 salda. Enum: {valores:?}"
+    );
+    // Guarda anti-vacua: el enum sigue existiendo y con sus valores vivos.
+    for vivo in [
+        "frontmatter",
+        "body",
+        "outgoingLinks",
+        "backlinks",
+        "diagnostics",
+    ] {
+        assert!(
+            valores.iter().any(|v| v == vivo),
+            "el enum de `include` debe conservar «{vivo}»: {valores:?}"
+        );
+    }
+
+    // --- 2. el contrato de la frontera -----------------------------------------------------------
+    let contrato = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../contracts/mcp.yml");
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        &std::fs::read_to_string(&contrato)
+            .unwrap_or_else(|e| panic!("no se pudo leer {}: {e}", contrato.display())),
+    )
+    .expect("`contracts/mcp.yml` debe ser YAML válido");
+    let superficie = serde_yaml::to_string(&yaml["tools"]).unwrap();
+    assert!(
+        !superficie.contains("externalReferences"),
+        "la sección `tools:` de `contracts/mcp.yml` no puede seguir declarando `externalReferences` \
+         en `knowledge_get`"
+    );
+    // Guarda anti-vacua: se está mirando la sección correcta y con contenido.
+    assert!(
+        superficie.contains("knowledge_get") && superficie.contains("outgoingLinks"),
+        "el test debe estar leyendo la superficie real de `contracts/mcp.yml`"
+    );
+
+    // --- 3. el comportamiento: pedirlo no lo resucita --------------------------------------------
+    let documento = &resp[1]["result"]["structuredContent"]["document"];
+    assert!(
+        documento.get("externalReferences").is_none(),
+        "pedir el campo retirado no puede hacer que reaparezca en la respuesta: {documento}"
+    );
+    assert!(
+        documento["frontmatter"]["implemented_by"].is_array(),
+        "guarda anti-vacua: el documento se sirvió y su frontmatter viajó tal cual (`implemented_by` \
+         es hoy una lista más de metadata del usuario): {documento}"
+    );
+}
+
+/// **E23-H12** · Regresión de SEGURIDAD migrada desde `ref_externa_traversal`
+/// (`crates/lodestar-workspace/tests/reference_roots.rs`, hallada por un juez ciego): `knowledge_get`
+/// **no puede ser un oráculo de existencia de ficheros arbitrarios del host**.
+///
+/// El vector original era `implemented_by: [/etc/hosts]` / `verified_by: [../secreto.txt]`: si
+/// Lodestar resuelve contra disco una cadena cruda del frontmatter con un `join` ingenuo, un agente
+/// puede preguntar por cualquier ruta del sistema y leer la respuesta `exists:true/false`. E23-H12
+/// retira la resolución entera, así que el contrato se ENDURECE: antes se prohibía `exists:true`,
+/// ahora se prohíbe **cualquier** resolución.
+///
+/// El escenario es determinista con independencia del entorno: el workspace vive en un
+/// subdirectorio y el `secreto.txt` está en su PADRE, fuera de él (con un `root.join` crudo,
+/// `../secreto.txt` alcanza un fichero REAL).
+///
+/// Las claves siguen viajando como metadata —`frontmatter` las ecoa verbatim, que es justo el
+/// punto: son datos del usuario, no instrucciones para el motor—; lo que no puede viajar es su
+/// resolución.
+#[test]
+fn frontmatter_no_es_oraculo_de_ficheros_del_host() {
+    let base = tempfile::tempdir().unwrap();
+    let root = base.path().join("workspace");
+    std::fs::create_dir_all(&root).unwrap();
+    // El "secreto" vive FUERA del workspace, en el directorio padre.
+    std::fs::write(base.path().join("secreto.txt"), "datos sensibles\n").unwrap();
+
+    write(
+        &root,
+        ".lodestar/config.yaml",
+        "workspace:\n  referenceRoots: [src]\n",
+    );
+    write(
+        &root,
+        "ficha.md",
+        "---\nimplemented_by:\n  - /etc/hosts\nverified_by:\n  - ../secreto.txt\n---\n\n# Ficha\n\ncuerpo.\n",
+    );
+
+    let resp = roundtrip(
+        &root,
+        &[&linea_call(
+            1,
+            "knowledge_get",
+            serde_json::json!({
+                "ref": { "path": "ficha.md" },
+                "include": ["frontmatter", "body", "diagnostics", "externalReferences"]
+            }),
+        )],
+        1,
+    );
+    let documento = &resp[0]["result"]["structuredContent"]["document"];
+    let texto = documento.to_string();
+    assert!(
+        documento.get("externalReferences").is_none(),
+        "ninguna resolución de rutas del frontmatter puede viajar en la respuesta: {documento}"
+    );
+    assert!(
+        !texto.contains("exists"),
+        "la respuesta no puede llevar veredictos de existencia de ficheros del host (oráculo, \
+         invariante #6): {documento}"
+    );
+    assert!(
+        !texto.contains("datos sensibles"),
+        "jamás puede viajar el CONTENIDO de un fichero de fuera del workspace: {documento}"
+    );
+    // Las claves son metadata del usuario y viajan como tal (guarda anti-vacua: el documento se
+    // sirvió de verdad).
+    assert_eq!(
+        documento["frontmatter"]["verified_by"][0],
+        serde_json::Value::String("../secreto.txt".to_string()),
+        "el frontmatter se ecoa verbatim: son datos del usuario, no instrucciones para el motor: \
+         {documento}"
+    );
+}
+
+/// **E23-H12** · Guarda del OTRO lado del criterio: hacer perezoso el ajuste del `.gitignore` no es
+/// lo mismo que retirarlo. **Dado** un proyecto cuyo `.gitignore` no menciona a lodestar, **Cuando**
+/// se ejerce un camino de ESCRITURA (`change_plan` → `change_apply`), **Entonces** el bloque
+/// gestionado aparece y el contenido propio del usuario se conserva.
+///
+/// Sin esto, «que abrir no escriba» se podría satisfacer borrando `ensure_gitignore`, y el proyecto
+/// acabaría versionando `.lodestar/index.db` (una base SQLite derivada) y `.lodestar/runtime/`
+/// (planes, recibos y staging), que es el problema que aquel ajuste resolvía.
+///
+/// ## Cada chokepoint por separado (corrección de un hallazgo de juez ciego)
+///
+/// La versión anterior de este test comprobaba el `.gitignore` tras `change_plan` y **luego** tras
+/// `change_apply`, sin restaurarlo entre medias: cuando llegaba a la segunda comprobación el bloque
+/// ya estaba puesto por `persist_plan`, así que la segunda no podía distinguir nada (borrar el
+/// ajuste de `acquire_lock` o el de `try_append_audit` dejaba la suite entera en verde). Ahora el
+/// `.gitignore` se **restaura a su estado original entre fase y fase**, de modo que cada fase solo
+/// puede pasar si el chokepoint que ejerce hace el ajuste por sí mismo:
+///
+///   1. `change_plan` → `persist_plan`, que persiste el plan bajo `.lodestar/runtime/plans/` **sin**
+///      tomar el lock.
+///   2. `change_apply` con un `changeSetId` INEXISTENTE → falla en el paso 1 (plan no encontrado),
+///      o sea que no llega ni a `acquire_lock` ni a `persist_plan`… pero **audita igual** (cada
+///      intento, con éxito o sin él, anexa a `.lodestar/runtime/audit.jsonl`). Es el único camino de
+///      la superficie que ejerce `try_append_audit` en solitario.
+///   3. `change_apply` real: el camino completo end-to-end (lock + publicación + auditoría), que es
+///      la propiedad que ve el usuario. Esta fase **no discrimina** entre `acquire_lock` y
+///      `try_append_audit` —el segundo corre siempre al final del primero— y no pretende hacerlo:
+///      `acquire_lock` se aísla donde sí se puede, en `workspace.rs::lock_ajusta_el_gitignore`
+///      (crate sin auditoría). `enable_cache` lo cubren `gitignore_parte_lodestar` y
+///      `adopcion_ajusta_gitignore`.
+///
+/// NO es fase roja: es regresión sobre la implementación de esta historia.
+#[test]
+fn escribir_si_ajusta_el_gitignore() {
+    let dir = tempfile::tempdir().unwrap();
+    /// El `.gitignore` del usuario, sin rastro de lodestar: el estado de partida de cada fase.
+    const GITIGNORE_USUARIO: &str = "target/\n";
+    write(
+        dir.path(),
+        "nota.md",
+        "---\nestado: borrador\n---\n\n# Nota\n",
+    );
+
+    /// Las entradas que el bloque gestionado garantiza (`workspace/src/gitignore.rs`).
+    const ENTRADAS: [&str; 2] = [".lodestar/index.db", ".lodestar/runtime/"];
+    // Devuelve el `.gitignore` al estado del usuario: sin esto, una fase heredaría el ajuste de la
+    // anterior y pasaría sin ejercer su propio chokepoint (el defecto que halló el juez).
+    let restaura = || {
+        write(dir.path(), ".gitignore", GITIGNORE_USUARIO);
+    };
+    let comprueba = |momento: &str| {
+        let gi = std::fs::read_to_string(dir.path().join(".gitignore"))
+            .unwrap_or_else(|e| panic!("{momento}: el `.gitignore` debe existir: {e}"));
+        assert_ne!(
+            gi, GITIGNORE_USUARIO,
+            "{momento}: el `.gitignore` sigue exactamente como lo dejó el usuario, así que este \
+             camino de escritura NO ajustó nada"
+        );
+        for entrada in ENTRADAS {
+            assert!(
+                gi.lines().any(|l| l.trim() == entrada),
+                "{momento}: el `.gitignore` debe ignorar «{entrada}» (la cache y el runtime son \
+                 derivados y desechables: versionarlos es el defecto que este ajuste evita). \
+                 Era:\n{gi}"
+            );
+        }
+        assert!(
+            gi.lines().any(|l| l.trim() == "target/"),
+            "{momento}: el ajuste debe preservar el `.gitignore` propio del usuario. Era:\n{gi}"
+        );
+        assert!(
+            !gi.lines().any(|l| l.trim() == ".lodestar/config.yaml"),
+            "{momento}: la config canónica NO se ignora (va versionada). Era:\n{gi}"
+        );
+    };
+
+    // (1) `persist_plan` aislado: `change_plan` persiste el plan sin tomar el lock ni auditar.
+    restaura();
+    let ops = serde_json::json!([
+        { "op": "patch_frontmatter", "ref": { "path": "nota.md" }, "patch": { "estado": "vigente" } }
+    ]);
+    let plan = roundtrip(
+        dir.path(),
+        &[change_plan_line(None, ops, policy_permisiva()).as_str()],
+        1,
+    );
+    let id = plan_change_set_id(&plan[0]);
+    comprueba("tras change_plan (persist_plan)");
+
+    // (2) `try_append_audit` aislado: un apply de un plan que NO existe aborta antes de tocar el
+    // lock, pero el intento se audita igual — y auditar hace nacer runtime desechable.
+    restaura();
+    let fallido = roundtrip(
+        dir.path(),
+        &[change_apply_line("changeset:no-existe", None).as_str()],
+        1,
+    );
+    assert_eq!(
+        fallido[0]["result"]["isError"],
+        serde_json::Value::Bool(true),
+        "guarda: el apply de un plan inexistente debe FALLAR (si se ejecutara, la fase dejaría de \
+         aislar la auditoría): {fallido:?}"
+    );
+    assert!(
+        dir.path().join(".lodestar/runtime/audit.jsonl").is_file(),
+        "guarda: el intento fallido tiene que haber auditado de verdad; si no hay `audit.jsonl`, \
+         esta fase no está ejerciendo `try_append_audit`"
+    );
+    comprueba("tras un change_apply fallido (try_append_audit)");
+
+    // (3) El camino completo, tal y como lo vive el usuario: lock + publicación + auditoría.
+    restaura();
+    let applied = roundtrip(dir.path(), &[change_apply_line(&id, None).as_str()], 1);
+    assert_eq!(
+        apply_sc(&applied[0])["applied"],
+        serde_json::Value::Bool(true),
+        "guarda de no vacuidad: el apply tiene que haberse ejecutado de verdad: {applied:?}"
+    );
+    comprueba("tras change_apply");
+}
+
+// ---------------------------------------------------------------------------
+// E24-H01 — Un BOM deja de tragarse el frontmatter (por el WIRE).
+// `requirements/epica-24-cierre-defectos-v031.md §E24-H01` · `ARCHITECTURE.md §20.4` ·
+// `CLAUDE.md` invariante #1 («los `.md` en disco son la única fuente de verdad»). Fase ROJA.
+//
+// Estos tres tests son la reproducción EXACTA del síntoma de la historia, ejercida sobre el
+// binario real por JSON-RPC (el arnés `roundtrip`), porque es así como se descubrió: el fichero
+// con BOM se escribe en disco, y lo que se juzga son los BYTES que quedan en disco después.
+// La misma semántica, en el núcleo puro, la fijan los tests homónimos de
+// `crates/lodestar-core/tests/documento.rs`.
+//
+// SÍNTOMA verificado hoy contra `lodestar-mcp` (v0.3.0):
+//   knowledge_get  -> frontmatter {} · body = el fichero ENTERO (BOM y bloque incluidos)
+//   where "document.has_frontmatter = true"  -> []      (y `= false` -> ['bom.md'])
+//   patch_frontmatter {"status":"review"} + apply deja en disco
+//     b'---\nstatus: review\n---\n\n\xef\xbb\xbf---\nstatus: draft\nowner: ana\n---\n\n# Con BOM…'
+//   Dos bloques; `owner: ana` degradado a texto del cuerpo, listo para que el siguiente
+//   `replace_body` lo borre para siempre.
+//
+// ROJO esperado HOY: por ASERCIÓN en los tres (ninguna API nueva, ningún stub).
+// ---------------------------------------------------------------------------
+
+/// El documento del síntoma, byte a byte: BOM UTF-8 (`EF BB BF`) + frontmatter de **dos** claves.
+/// `owner` es la clave testigo: es la que la corrupción de hoy destruye.
+const DOC_CON_BOM: &str =
+    "\u{feff}---\nstatus: draft\nowner: ana\n---\n\n# Con BOM\n\ncuerpo original\n";
+
+/// Workspace con el documento del síntoma **y** un gemelo sin BOM. El gemelo es el control de no
+/// vacuidad de las consultas: `document.has_frontmatter = true` ya lo devuelve hoy, así que si un
+/// arreglo rompiera el caso normal, estos tests lo verían.
+fn workspace_con_bom() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), "bom.md", DOC_CON_BOM);
+    write(
+        dir.path(),
+        "sin_bom.md",
+        "---\nstatus: draft\nowner: ana\n---\n\n# Sin BOM\n\ncuerpo original\n",
+    );
+    dir
+}
+
+/// Los BYTES de un `.md` del workspace. Se leen como bytes —y no como `String`— porque el BOM es
+/// precisamente lo que se juzga y una lectura descuidada lo escondería.
+fn bytes_de(root: &std::path::Path, rel: &str) -> Vec<u8> {
+    std::fs::read(root.join(rel)).unwrap_or_else(|e| panic!("`{rel}` debe existir en disco: {e}"))
+}
+
+/// Rendición legible de unos bytes para los mensajes de aserción (el BOM se ve como `\u{feff}`).
+fn como_texto(bytes: &[u8]) -> String {
+    format!("{:?}", String::from_utf8_lossy(bytes))
+}
+
+/// Número de líneas delimitadoras de frontmatter (`---`) de un `.md`, tolerando el BOM en la
+/// primera. Un documento con **un** bloque tiene exactamente dos; la corrupción produce cuatro.
+fn delimitadores(bytes: &[u8]) -> usize {
+    String::from_utf8_lossy(bytes)
+        .lines()
+        .filter(|l| l.trim_start_matches('\u{feff}') == "---")
+        .count()
+}
+
+/// La `workspaceRevision` que reporta `workspace_status` sobre el workspace de `root`.
+fn revision_de(root: &std::path::Path) -> String {
+    let status = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"workspace_status","arguments":{}}}"#;
+    let resp = roundtrip(root, &[status], 1);
+    resp[0]["result"]["structuredContent"]["workspaceRevision"]
+        .as_str()
+        .unwrap_or_else(|| panic!("workspace_status debe devolver `workspaceRevision`: {resp:?}"))
+        .to_string()
+}
+
+/// Planifica **una** operación y la aplica, exigiendo que el apply tenga éxito (guarda de no
+/// vacuidad: si la operación no llega a ejecutarse, el estado de disco no prueba nada).
+fn planifica_y_aplica(root: &std::path::Path, op: serde_json::Value) -> serde_json::Value {
+    let plan = roundtrip(
+        root,
+        &[change_plan_line(None, serde_json::json!([op]), policy_permisiva()).as_str()],
+        1,
+    );
+    let id = plan_change_set_id(&plan[0]);
+    let apply = roundtrip(root, &[change_apply_line(&id, None).as_str()], 1);
+    assert_eq!(
+        apply_sc(&apply[0])["applied"],
+        serde_json::Value::Bool(true),
+        "guarda: la operación debe aplicarse de verdad para que el criterio no sea vacuo: {apply:?}"
+    );
+    apply_sc(&apply[0]).clone()
+}
+
+/// E24-H01 · Criterio `bom_no_se_traga_el_frontmatter`:
+/// Dado un `.md` con BOM y frontmatter válido, Cuando se lee con `knowledge_get`, Entonces
+/// `frontmatter` trae las claves reales y `document.has_frontmatter` es `true`.
+#[test]
+fn bom_no_se_traga_el_frontmatter() {
+    let dir = workspace_con_bom();
+    // Guarda del fixture: el fichero que se acaba de escribir empieza de verdad por `EF BB BF`.
+    assert_eq!(
+        bytes_de(dir.path(), "bom.md").get(..3),
+        Some([0xEF, 0xBB, 0xBF].as_slice()),
+        "guarda del fixture: `bom.md` debe empezar por el BOM UTF-8"
+    );
+
+    let get = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"knowledge_get","arguments":{"ref":{"path":"bom.md"},"include":["frontmatter","body"]}}}"#;
+    let con_fm = ks_call(serde_json::json!({ "where": "document.has_frontmatter = true" }));
+    let sin_fm = ks_call(serde_json::json!({ "where": "document.has_frontmatter = false" }));
+    let resp = roundtrip(dir.path(), &[get, con_fm.as_str(), sin_fm.as_str()], 3);
+
+    // (a) El frontmatter que viaja son las CLAVES REALES, no el mapa vacío.
+    let doc = &resp[0]["result"]["structuredContent"]["document"];
+    assert_eq!(
+        doc["frontmatter"]["status"],
+        serde_json::json!("draft"),
+        "`knowledge_get` sobre un `.md` con BOM debe devolver su `status` real; hoy devuelve el \
+         frontmatter vacío y la metadata del usuario es invisible: {resp:?}"
+    );
+    assert_eq!(
+        doc["frontmatter"]["owner"],
+        serde_json::json!("ana"),
+        "…y su `owner`, que es la clave que la corrupción de esta historia destruye: {resp:?}"
+    );
+
+    // (b) El `body` es el CUERPO, no el fichero entero con su bloque dentro.
+    let body = doc["body"].as_str().unwrap_or_else(|| {
+        panic!("`knowledge_get` con include=[body] debe traer `body`: {resp:?}")
+    });
+    assert!(
+        !body.contains("status: draft"),
+        "el bloque de frontmatter NO puede viajar dentro del `body`: body = {body:?}"
+    );
+    assert!(
+        !body.starts_with('\u{feff}'),
+        "el BOM pertenece a la cabecera del fichero, no al cuerpo: body = {body:?}"
+    );
+    assert_eq!(
+        body, "\n# Con BOM\n\ncuerpo original\n",
+        "el cuerpo debe ser exactamente el que sigue al bloque, igual que en un `.md` sin BOM"
+    );
+
+    // (c) `document.has_frontmatter` es `true` para el documento con BOM.
+    let con: std::collections::BTreeSet<String> = search_paths(&resp[1]).into_iter().collect();
+    assert!(
+        con.contains("sin_bom.md"),
+        "guarda de no vacuidad: el gemelo SIN BOM ya casa `document.has_frontmatter = true` en \
+         v0.3.0 y debe seguir casando: {resp:?}"
+    );
+    assert!(
+        con.contains("bom.md"),
+        "`document.has_frontmatter` debe ser `true` para el `.md` con BOM: su bloque está \
+         presente y cerrado. Casaron {con:?}: {resp:?}"
+    );
+
+    // (d) …y por tanto NO casa la consulta complementaria (control anti-vacuo de la anterior).
+    let sin: std::collections::BTreeSet<String> = search_paths(&resp[2]).into_iter().collect();
+    assert!(
+        !sin.contains("bom.md"),
+        "`bom.md` no puede aparecer como documento SIN frontmatter: casaron {sin:?}: {resp:?}"
+    );
+}
+
+/// E24-H01 · Criterio `patch_sobre_bom_no_duplica_bloque`:
+/// Dado ese documento, Cuando se le aplica `patch_frontmatter`, Entonces el resultado tiene un
+/// solo bloque, conserva las claves que no se tocaron y empieza por el BOM.
+///
+/// Se juzga sobre los BYTES publicados en disco (invariante #1), no sobre la respuesta de la tool.
+#[test]
+fn patch_sobre_bom_no_duplica_bloque() {
+    let dir = workspace_con_bom();
+
+    planifica_y_aplica(
+        dir.path(),
+        serde_json::json!({
+            "op": "patch_frontmatter", "ref": { "path": "bom.md" },
+            "patch": { "status": "review" }
+        }),
+    );
+
+    let publicado = bytes_de(dir.path(), "bom.md");
+
+    // (a) Empieza por el BOM: no se le antepone un bloque por delante.
+    assert_eq!(
+        publicado.get(..3),
+        Some([0xEF, 0xBB, 0xBF].as_slice()),
+        "el `.md` publicado debe seguir empezando por el BOM UTF-8 (EF BB BF); hoy el patch le \
+         antepone un bloque nuevo. En disco quedó: {}",
+        como_texto(&publicado)
+    );
+
+    // (b) UN SOLO bloque de frontmatter.
+    assert_eq!(
+        delimitadores(&publicado),
+        2,
+        "el `.md` publicado debe tener UN solo bloque (2 líneas «---»); la corrupción deja 4 y \
+         degrada el bloque original a texto del cuerpo. En disco quedó: {}",
+        como_texto(&publicado)
+    );
+
+    // (c) La clave no tocada sobrevive, una sola vez, y la tocada tiene el valor nuevo.
+    let texto = String::from_utf8_lossy(&publicado).to_string();
+    assert_eq!(
+        texto.matches("owner: ana").count(),
+        1,
+        "`owner: ana` debe aparecer EXACTAMENTE una vez: ni borrada ni duplicada en un segundo \
+         bloque muerto. En disco quedó: {}",
+        como_texto(&publicado)
+    );
+    assert!(
+        !texto.contains("status: draft"),
+        "el valor viejo de `status` no puede sobrevivir en un bloque degradado a cuerpo. En disco \
+         quedó: {}",
+        como_texto(&publicado)
+    );
+
+    // (d) Y el motor vuelve a leer el documento entero: nada quedó fuera de su alcance, así que el
+    // siguiente `replace_body` (el segundo paso del síntoma) no tiene nada que destruir.
+    let get = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"knowledge_get","arguments":{"ref":{"path":"bom.md"},"include":["frontmatter"]}}}"#;
+    let resp = roundtrip(dir.path(), &[get], 1);
+    let fm = &resp[0]["result"]["structuredContent"]["document"]["frontmatter"];
+    assert_eq!(
+        fm["status"],
+        serde_json::json!("review"),
+        "tras el patch, `status` debe valer «review»: {resp:?}"
+    );
+    assert_eq!(
+        fm["owner"],
+        serde_json::json!("ana"),
+        "…y `owner: ana` debe seguir siendo metadata VIVA, no texto muerto del cuerpo: {resp:?}"
+    );
+}
+
+/// E24-H01 · Criterio `bom_roundtrip_byte_a_byte` (**control anti-vacuo de la historia**):
+/// Dado ese documento, Cuando se lee y se reescribe sin cambios, Entonces los bytes son idénticos
+/// y la `WorkspaceRevision` no cambia.
+///
+/// Sin este criterio, un arreglo que se limitase a **strippear** el BOM al leer pasaría los otros
+/// dos. Aquí no: `workspace_revision` hashea los bytes crudos del `FileMap`, así que strippear al
+/// leer y no al reemitir declararía un cambio espurio en cada round-trip — justo lo que el alcance
+/// de la historia prohíbe («el BOM NO se normaliza en la lectura de disco»).
+///
+/// Dos rutas, las dos que un agente usa de verdad:
+///   - **A. `replace_body`** con el `body` que acaba de devolver `knowledge_get`: obliga a
+///     **reemitir** el BOM al reconstruir el documento. Lleva una precondición explícita (el
+///     cuerpo leído debe ser el cuerpo) sin la cual sería vacua: si el `body` fuese el fichero
+///     entero —el defecto de hoy—, reescribirlo devolvería los mismos bytes por accidente.
+///   - **B. `patch_frontmatter`** escribiendo en `status` el valor que **ya** tenía: obliga a
+///     **conservarlo**. Es roja hoy por sí sola.
+#[test]
+fn bom_roundtrip_byte_a_byte() {
+    let dir = workspace_con_bom();
+    let antes = bytes_de(dir.path(), "bom.md");
+    let revision_antes = revision_de(dir.path());
+
+    // --- Ruta A: leer el cuerpo por el wire y volver a escribirlo tal cual.
+    let get = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"knowledge_get","arguments":{"ref":{"path":"bom.md"},"include":["body"]}}}"#;
+    let leido = roundtrip(dir.path(), &[get], 1);
+    let body = leido[0]["result"]["structuredContent"]["document"]["body"]
+        .as_str()
+        .unwrap_or_else(|| panic!("`knowledge_get` debe traer el `body` de `bom.md`: {leido:?}"))
+        .to_string();
+    assert!(
+        !body.starts_with('\u{feff}') && !body.contains("status: draft"),
+        "precondición del round-trip: el `body` leído debe ser el cuerpo, no el fichero entero — \
+         si no, reescribirlo devolvería los mismos bytes por accidente y el criterio sería vacuo. \
+         body = {body:?}"
+    );
+
+    planifica_y_aplica(
+        dir.path(),
+        serde_json::json!({
+            "op": "replace_body", "ref": { "path": "bom.md" }, "body": body
+        }),
+    );
+
+    let tras_a = bytes_de(dir.path(), "bom.md");
+    assert_eq!(
+        tras_a.get(..3),
+        Some([0xEF, 0xBB, 0xBF].as_slice()),
+        "reescribir el cuerpo debe REEMITIR el BOM: es del usuario, no ruido a normalizar. En \
+         disco quedó: {}",
+        como_texto(&tras_a)
+    );
+    assert_eq!(
+        como_texto(&tras_a),
+        como_texto(&antes),
+        "leer y reescribir sin cambios debe dejar los MISMOS bytes en disco"
+    );
+    assert_eq!(
+        revision_de(dir.path()),
+        revision_antes,
+        "un round-trip sin cambios no puede mover la `WorkspaceRevision`: declararía un cambio \
+         espurio —y con él conflictos de escritura— en cada lectura-escritura de un `.md` con BOM"
+    );
+
+    // --- Ruta B: escribir en `status` el valor que ya tenía.
+    planifica_y_aplica(
+        dir.path(),
+        serde_json::json!({
+            "op": "patch_frontmatter", "ref": { "path": "bom.md" },
+            "patch": { "status": "draft" }
+        }),
+    );
+
+    let tras_b = bytes_de(dir.path(), "bom.md");
+    assert_eq!(
+        como_texto(&tras_b),
+        como_texto(&antes),
+        "escribir en `status` el valor que ya tenía no cambia el documento: mismos bytes, BOM \
+         incluido"
+    );
+    assert_eq!(
+        revision_de(dir.path()),
+        revision_antes,
+        "un patch que no cambia ningún valor no puede mover la `WorkspaceRevision`"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// E24-H09/H10 — La superficie de error deja de mentir
+//
+// H09: `contracts/mcp.yml` («regla de la casa») dice que el servidor **valida los VALORES de los
+// parámetros que declara**. No lo hacía: `limit: "10"`, `limit: 0` (el schema declara `minimum: 1`)
+// o `includeSuggestedFixes: "true"` caían al default EN SILENCIO. El peor caso es `limit: 0`, que
+// devolvía 0 resultados — indistinguible de «no hay nada».
+//
+// H10: 10 de los 21 errores de superficie viajaban como texto suelto, sin código del catálogo, y la
+// MISMA consulta malformada daba dos códigos distintos según la tool (`INTERNAL_IO_ERROR` por
+// `knowledge_search`, `INVALID_SCHEMA` por la selección de `change_plan`).
+//
+// Lo que NO cambia: los parámetros **no declarados** se siguen ignorando. Es la regla de la casa,
+// escrita en tres sitios, y revisarla es un cambio de política, no un bugfix.
+// ---------------------------------------------------------------------------
+
+/// Workspace mínimo con dos documentos, para que un `limit` mal puesto sea observable.
+fn ws_dos_docs() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), "a.md", "---\ns: 1\n---\n\n# A\n");
+    write(dir.path(), "b.md", "---\ns: 2\n---\n\n# B\n");
+    dir
+}
+
+/// Texto del error de ejecución de una tool, o `None` si la llamada tuvo éxito.
+fn error_de(resp: &serde_json::Value) -> Option<String> {
+    let res = resp.get("result")?;
+    res.get("isError")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+        .then(|| res["content"][0]["text"].as_str().unwrap_or("").to_string())
+}
+
+/// **E24-H09** — un `limit` fuera del rango declarado o de otro tipo se RECHAZA.
+#[test]
+fn limit_fuera_de_rango_es_invalid_schema() {
+    let dir = ws_dos_docs();
+    let casos = [
+        serde_json::json!({"text": "", "limit": 0}),
+        serde_json::json!({"text": "", "limit": 9999}),
+        serde_json::json!({"text": "", "limit": -5}),
+        serde_json::json!({"text": "", "limit": "10"}),
+    ];
+    let lineas: Vec<String> = casos
+        .iter()
+        .enumerate()
+        .map(|(i, args)| {
+            serde_json::json!({"jsonrpc":"2.0","id": i + 1,"method":"tools/call",
+                "params":{"name":"knowledge_search","arguments": args}})
+            .to_string()
+        })
+        .collect();
+    let refs: Vec<&str> = lineas.iter().map(String::as_str).collect();
+    let resp = roundtrip(dir.path(), &refs, casos.len());
+
+    for (i, r) in resp.iter().enumerate() {
+        let err = error_de(r).unwrap_or_else(|| {
+            panic!(
+                "el caso {i} ({}) debe RECHAZARSE: el `inputSchema` declara `minimum: 1, \
+                 maximum: 100`, y hasta E24-H09 estos valores caían al default en silencio. \
+                 `limit: 0` devolvía 0 resultados, indistinguible de «no hay nada». Respuesta: {r}",
+                casos[i]
+            )
+        });
+        assert!(
+            err.starts_with("INVALID_SCHEMA"),
+            "el rechazo debe llevar el código estable del catálogo: {err}"
+        );
+    }
+}
+
+/// **E24-H09** — control anti-vacuo: un `limit` válido sigue funcionando exactamente igual.
+#[test]
+fn limit_valido_sigue_funcionando() {
+    let dir = ws_dos_docs();
+    let linea = serde_json::json!({"jsonrpc":"2.0","id":1,"method":"tools/call",
+        "params":{"name":"knowledge_search","arguments":{"text":"","limit":1}}})
+    .to_string();
+    let resp = roundtrip(dir.path(), &[linea.as_str()], 1);
+    assert!(
+        error_de(&resp[0]).is_none(),
+        "un `limit` dentro del rango no puede rechazarse: {}",
+        resp[0]
+    );
+    assert_eq!(
+        resp[0]["result"]["structuredContent"]["results"]
+            .as_array()
+            .map(Vec::len),
+        Some(1),
+        "y debe seguir acotando la página: {}",
+        resp[0]
+    );
+}
+
+/// **E24-H09** — un booleano y un entero con el tipo equivocado se rechazan.
+#[test]
+fn tipo_incorrecto_es_invalid_schema() {
+    let dir = ws_dos_docs();
+    let l1 = serde_json::json!({"jsonrpc":"2.0","id":1,"method":"tools/call",
+        "params":{"name":"knowledge_check","arguments":{"scope":{"kind":"workspace"},
+                  "includeSuggestedFixes":"true"}}})
+    .to_string();
+    let l2 = serde_json::json!({"jsonrpc":"2.0","id":2,"method":"tools/call",
+        "params":{"name":"graph_query","arguments":{"operation":"backlinks",
+                  "ref":{"path":"a.md"},"depth":"3"}}})
+    .to_string();
+    let resp = roundtrip(dir.path(), &[l1.as_str(), l2.as_str()], 2);
+
+    for (i, r) in resp.iter().enumerate() {
+        let err = error_de(r).unwrap_or_else(|| {
+            panic!("el caso {i} debe rechazarse en vez de caer al default en silencio: {r}")
+        });
+        assert!(
+            err.starts_with("INVALID_SCHEMA"),
+            "con código estable: {err}"
+        );
+    }
+}
+
+/// **E24-H10** — un `where` malformado sale con `INVALID_SCHEMA`, no con `INTERNAL_IO_ERROR`.
+#[test]
+fn where_malformado_es_invalid_schema() {
+    let dir = ws_dos_docs();
+    let linea = serde_json::json!({"jsonrpc":"2.0","id":1,"method":"tools/call",
+        "params":{"name":"knowledge_search","arguments":{"text":"","where":"status ="}}})
+    .to_string();
+    let resp = roundtrip(dir.path(), &[linea.as_str()], 1);
+    let err = error_de(&resp[0]).expect("una consulta malformada debe fallar");
+    assert!(
+        err.starts_with("INVALID_SCHEMA"),
+        "un typo del agente en su consulta es entrada inválida, no un error interno de I/O del \
+         motor (hasta v0.3.0 salía INTERNAL_IO_ERROR): {err}"
+    );
+}
+
+/// **E24-H10** — la MISMA consulta malformada da el MISMO código por las dos tools que la aceptan.
+///
+/// Es la asimetría concreta que cierra la historia: por `knowledge_search` salía
+/// `INTERNAL_IO_ERROR` y por la selección masiva de `change_plan`, `INVALID_SCHEMA`.
+#[test]
+fn misma_consulta_mismo_codigo_en_las_dos_tools() {
+    let dir = ws_dos_docs();
+    let l1 = serde_json::json!({"jsonrpc":"2.0","id":1,"method":"tools/call",
+        "params":{"name":"knowledge_search","arguments":{"text":"","where":"))) and and"}}})
+    .to_string();
+    let l2 = serde_json::json!({"jsonrpc":"2.0","id":2,"method":"tools/call",
+        "params":{"name":"change_plan","arguments":{
+            "selection":{"where":"))) and and"},
+            "operation":{"patch_frontmatter":{"patch":{"x":1}}}}}})
+    .to_string();
+    let resp = roundtrip(dir.path(), &[l1.as_str(), l2.as_str()], 2);
+
+    let e1 = error_de(&resp[0]).expect("knowledge_search debe fallar");
+    let e2 = error_de(&resp[1]).expect("change_plan debe fallar");
+    assert!(
+        e1.starts_with("INVALID_SCHEMA") && e2.starts_with("INVALID_SCHEMA"),
+        "la misma consulta malformada debe dar el mismo código por las dos tools.\n\
+         knowledge_search: {e1}\nchange_plan:       {e2}"
+    );
+}
+
+/// **E24-H10** — un parámetro obligatorio ausente lleva código estable.
+#[test]
+fn parametro_obligatorio_ausente_es_invalid_schema() {
+    let dir = ws_dos_docs();
+    let casos: [(&str, serde_json::Value); 5] = [
+        ("knowledge_get", serde_json::json!({})),
+        ("metadata_inspect", serde_json::json!({})),
+        ("knowledge_check", serde_json::json!({})),
+        ("graph_query", serde_json::json!({})),
+        ("change_apply", serde_json::json!({})),
+    ];
+    let lineas: Vec<String> = casos
+        .iter()
+        .enumerate()
+        .map(|(i, (n, args))| {
+            serde_json::json!({"jsonrpc":"2.0","id": i + 1,"method":"tools/call",
+                "params":{"name": n,"arguments": args}})
+            .to_string()
+        })
+        .collect();
+    let refs: Vec<&str> = lineas.iter().map(String::as_str).collect();
+    let resp = roundtrip(dir.path(), &refs, casos.len());
+
+    for (i, r) in resp.iter().enumerate() {
+        let err = error_de(r)
+            .unwrap_or_else(|| panic!("{} sin su parámetro obligatorio debe fallar", casos[i].0));
+        assert!(
+            err.starts_with("INVALID_SCHEMA"),
+            "«falta el parámetro X» viajaba como texto suelto, sin nada por lo que un agente \
+             pueda ramificar. Tool {}: {err}",
+            casos[i].0
+        );
+    }
+}
+
+/// **E24-H10** — los mensajes de error no filtran internos de serde.
+///
+/// **Ampliado en E26-H07** a `change_plan`: la misma `mensaje_de_filtro` que sanea el `FilterError`
+/// para `knowledge_search` debe servir a la selección masiva, que hasta v0.4.0 devolvía
+/// «INVALID_SCHEMA» pelado (no filtraba el interno de serde… porque no decía nada). La exigencia
+/// es la misma para las dos tools, y por eso el caso se añade a la tabla en vez de a un test aparte:
+/// una segunda copia del saneado sería justo lo que prohíbe el invariante #3.
+#[test]
+fn errores_no_filtran_internos_de_serde() {
+    let dir = ws_dos_docs();
+    let casos: [(&str, serde_json::Value); 2] = [
+        (
+            "knowledge_search",
+            serde_json::json!({"text": "", "filter": {"nope": 1}}),
+        ),
+        (
+            "change_plan",
+            serde_json::json!({"selection": {"filter": {"nope": 1}},
+                               "operation": {"patch_frontmatter": {"patch": {"x": 1}}}}),
+        ),
+    ];
+    let lineas: Vec<String> = casos
+        .iter()
+        .enumerate()
+        .map(|(i, (n, args))| {
+            serde_json::json!({"jsonrpc":"2.0","id": i + 1,"method":"tools/call",
+                "params":{"name": n,"arguments": args}})
+            .to_string()
+        })
+        .collect();
+    let refs: Vec<&str> = lineas.iter().map(String::as_str).collect();
+    let resp = roundtrip(dir.path(), &refs, casos.len());
+
+    for (i, (tool, _)) in casos.iter().enumerate() {
+        let err = error_de(&resp[i]).unwrap_or_else(|| {
+            panic!("un filtro malformado debe fallar por «{tool}»: {}", resp[i])
+        });
+        assert!(
+            !err.contains("untagged enum"),
+            "«data did not match any variant of untagged enum WireNode» es un interno de \
+             implementación que no le dice a nadie qué arreglar en su filtro. Tool «{tool}»: {err}"
+        );
+        assert!(
+            err.contains("field") && err.contains("operator"),
+            "el mensaje debe decir qué forma se esperaba. Tool «{tool}»: {err}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// E24-H11 — `knowledge_get` devuelve el título derivado
+//
+// La derivación (`frontmatter.title` → primer H1 → nombre del fichero, §20.2) funcionaba y viajaba
+// en `knowledge_search` y en `graph_query`, pero NO en la tool que lee un documento: su
+// `DocumentView` traía `path`/`revision`/`frontmatter`/`body`/`outgoingLinks`/`backlinks`/
+// `diagnostics` y nada más. Un agente que siguiera el flujo recomendado (buscar → leer) perdía el
+// título al leer, y el `include` cerrado tampoco le dejaba pedirlo.
+// ---------------------------------------------------------------------------
+
+/// **E24-H11** — las tres fuentes de la cascada de `§20.2` llegan por `knowledge_get`.
+#[test]
+fn get_devuelve_titulo_derivado() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "con_fm.md",
+        "---\ntitle: Desde Frontmatter\n---\n\n# Otro H1\n",
+    );
+    write(dir.path(), "con_h1.md", "# Desde H1\n\ncuerpo\n");
+    write(dir.path(), "pelado.md", "solo texto, sin heading\n");
+
+    let esperado = [
+        ("con_fm.md", "Desde Frontmatter"),
+        ("con_h1.md", "Desde H1"),
+        ("pelado.md", "pelado"),
+    ];
+    let lineas: Vec<String> = esperado
+        .iter()
+        .enumerate()
+        .map(|(i, (p, _))| {
+            serde_json::json!({"jsonrpc":"2.0","id": i + 1,"method":"tools/call",
+                "params":{"name":"knowledge_get","arguments":{"ref":{"path": p}}}})
+            .to_string()
+        })
+        .collect();
+    let refs: Vec<&str> = lineas.iter().map(String::as_str).collect();
+    let resp = roundtrip(dir.path(), &refs, esperado.len());
+
+    for (i, (path, titulo)) in esperado.iter().enumerate() {
+        let doc = &resp[i]["result"]["structuredContent"]["document"];
+        assert_eq!(
+            doc["title"].as_str(),
+            Some(*titulo),
+            "`knowledge_get` debe traer el título derivado por la cascada de §20.2 \
+             (frontmatter.title → primer H1 → nombre del fichero) para {path}: {}",
+            resp[i]
+        );
+    }
+}
+
+/// **E24-H11** — control anti-vacuo: el título de `knowledge_get` coincide con el de
+/// `knowledge_search`.
+///
+/// Es lo que impide que sea una SEGUNDA implementación del título (invariante #3): si alguien
+/// derivara el título aquí con otro criterio, este test lo caza.
+#[test]
+fn titulo_coincide_entre_get_y_search() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "con_fm.md",
+        "---\ntitle: Desde Frontmatter\n---\n\n# Otro H1\n",
+    );
+    write(dir.path(), "con_h1.md", "# Desde H1\n\ncuerpo\n");
+    write(dir.path(), "pelado.md", "solo texto\n");
+
+    let l_search = serde_json::json!({"jsonrpc":"2.0","id":1,"method":"tools/call",
+        "params":{"name":"knowledge_search","arguments":{"text":""}}})
+    .to_string();
+    let l_get: Vec<String> = ["con_fm.md", "con_h1.md", "pelado.md"]
+        .iter()
+        .enumerate()
+        .map(|(i, p)| {
+            serde_json::json!({"jsonrpc":"2.0","id": i + 2,"method":"tools/call",
+                "params":{"name":"knowledge_get","arguments":{"ref":{"path": p}}}})
+            .to_string()
+        })
+        .collect();
+    let mut refs: Vec<&str> = vec![l_search.as_str()];
+    refs.extend(l_get.iter().map(String::as_str));
+    let resp = roundtrip(dir.path(), &refs, 4);
+
+    let de_search: std::collections::BTreeMap<String, String> = resp[0]["result"]
+        ["structuredContent"]["results"]
+        .as_array()
+        .expect("results")
+        .iter()
+        .map(|r| {
+            (
+                r["path"].as_str().unwrap_or_default().to_string(),
+                r["title"].as_str().unwrap_or_default().to_string(),
+            )
+        })
+        .collect();
+
+    for r in resp.iter().skip(1) {
+        let doc = &r["result"]["structuredContent"]["document"];
+        let path = doc["path"].as_str().expect("path").to_string();
+        assert_eq!(
+            doc["title"].as_str().map(str::to_string),
+            de_search.get(&path).cloned(),
+            "el título de `knowledge_get` y el de `knowledge_search` deben salir de la MISMA \
+             función del core, no de dos implementaciones (invariante #3). Path: {path}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// E24-H15 — El `structuredContent` CONFORMA el `outputSchema` declarado
+//
+// Los 10 `outputSchema` se derivan con `schemars` desde el tipo Rust que sirve cada servicio, así
+// que en teoría no pueden divergir. En la práctica nadie lo comprobaba: `tools_declaran_outputschema`
+// mira 5 de las 10 y solo que el schema «tenga alguna clave estructural», y un brazo del despachador
+// que construya el JSON a mano (como hace `knowledge_get` con su envoltorio `{document}`) puede
+// apartarse del tipo sin que nada lo note.
+//
+// Un cliente MCP estricto SÍ valida. Esto es una guardia anti-drift, no la corrección de un defecto:
+// al escribirla, las 10 conformaban.
+// ---------------------------------------------------------------------------
+
+/// Valida `instancia` contra `schema`, devolviendo los errores en texto.
+fn errores_de_schema(schema: &serde_json::Value, instancia: &serde_json::Value) -> Vec<String> {
+    let validador = jsonschema::validator_for(schema)
+        .unwrap_or_else(|e| panic!("el propio outputSchema no es un JSON Schema válido: {e}"));
+    validador
+        .iter_errors(instancia)
+        .map(|e| format!("{} en {}", e, e.instance_path()))
+        .collect()
+}
+
+/// **E24-H15** — la salida real de las 10 tools conforma su `outputSchema`.
+#[test]
+fn structured_content_conforma_output_schema() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "alfa.md",
+        "---\nstatus: draft\npriority: 2\ntags:\n  - uno\n---\n\n# Alfa\n\nVer [beta](notas/beta.md) y [roto](no-existe.md).\n",
+    );
+    write(
+        dir.path(),
+        "notas/beta.md",
+        "---\nstatus: accepted\n---\n\n# Beta\n\n## Sección\n\ncuerpo\n\n[alfa](../alfa.md)\n",
+    );
+
+    // Llamadas que cubren las 10 tools (varias formas de las polimórficas).
+    let llamadas: Vec<(&str, serde_json::Value)> = vec![
+        ("workspace_status", serde_json::json!({})),
+        (
+            "knowledge_search",
+            serde_json::json!({"text": "", "include": ["frontmatter.status"]}),
+        ),
+        (
+            "knowledge_get",
+            serde_json::json!({"ref": {"path": "alfa.md"},
+            "include": ["frontmatter","body","revision","outgoingLinks","backlinks","diagnostics"]}),
+        ),
+        ("metadata_inspect", serde_json::json!({"mode": "catalog"})),
+        (
+            "metadata_inspect",
+            serde_json::json!({"mode": "field", "field": "tags"}),
+        ),
+        (
+            "knowledge_check",
+            serde_json::json!({"scope": {"kind": "workspace"}, "includeSuggestedFixes": true}),
+        ),
+        (
+            "graph_query",
+            serde_json::json!({"operation": "neighborhood", "ref": {"path": "alfa.md"}, "depth": 2, "direction": "both"}),
+        ),
+        (
+            "graph_query",
+            serde_json::json!({"operation": "components"}),
+        ),
+        ("graph_query", serde_json::json!({"operation": "dangling"})),
+        (
+            "impact_analyze",
+            serde_json::json!({"ref": {"path": "alfa.md"}, "proposedOperation": {"kind": "move"}}),
+        ),
+    ];
+
+    let mut lineas =
+        vec![serde_json::json!({"jsonrpc":"2.0","id":0,"method":"tools/list"}).to_string()];
+    for (i, (nombre, args)) in llamadas.iter().enumerate() {
+        lineas.push(
+            serde_json::json!({"jsonrpc":"2.0","id": i + 1,"method":"tools/call",
+                "params":{"name": nombre,"arguments": args}})
+            .to_string(),
+        );
+    }
+    // Las 3 de cambio, encadenadas: plan -> apply -> revert.
+    lineas.push(
+        serde_json::json!({"jsonrpc":"2.0","id":100,"method":"tools/call","params":{
+            "name":"change_plan","arguments":{
+                "operations":[{"op":"patch_frontmatter","path":"alfa.md","patch":{"status":"review"}}],
+                "policy":{"requireValidResult":false,"allowWarnings":true}}}})
+        .to_string(),
+    );
+    let refs: Vec<&str> = lineas.iter().map(String::as_str).collect();
+    let resp = roundtrip(dir.path(), &refs, lineas.len());
+
+    let tools: std::collections::BTreeMap<String, serde_json::Value> = resp[0]["result"]["tools"]
+        .as_array()
+        .expect("tools/list")
+        .iter()
+        .map(|t| {
+            (
+                t["name"].as_str().unwrap_or_default().to_string(),
+                t["outputSchema"].clone(),
+            )
+        })
+        .collect();
+    assert_eq!(tools.len(), 10, "deben ser las 10 tools objetivo");
+
+    let mut validadas: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for (i, (nombre, args)) in llamadas.iter().enumerate() {
+        let r = &resp[i + 1];
+        let sc = &r["result"]["structuredContent"];
+        assert!(
+            !r["result"]["isError"].as_bool().unwrap_or(false),
+            "la llamada a «{nombre}» con {args} debe tener éxito para poder validar su salida: {r}"
+        );
+        let errores = errores_de_schema(&tools[*nombre], sc);
+        assert!(
+            errores.is_empty(),
+            "el `structuredContent` de «{nombre}» NO conforma su `outputSchema` declarado. Un \
+             cliente MCP estricto lo rechazaría.\nViolaciones: {errores:#?}"
+        );
+        validadas.insert((*nombre).to_string());
+    }
+
+    // change_plan (la última respuesta): su salida también conforma.
+    let plan = &resp[lineas.len() - 1]["result"]["structuredContent"];
+    let errores = errores_de_schema(&tools["change_plan"], plan);
+    assert!(
+        errores.is_empty(),
+        "el `structuredContent` de «change_plan» no conforma su `outputSchema`: {errores:#?}"
+    );
+    validadas.insert("change_plan".to_string());
+
+    // change_apply y change_revert, en una sesión aparte (necesitan el changeSetId del plan).
+    let cs = plan["changeSetId"].as_str().expect("changeSetId");
+    let l_apply = serde_json::json!({"jsonrpc":"2.0","id":1,"method":"tools/call",
+        "params":{"name":"change_apply","arguments":{"changeSetId": cs}}})
+    .to_string();
+    let resp2 = roundtrip(dir.path(), &[l_apply.as_str()], 1);
+    let apply = &resp2[0]["result"]["structuredContent"];
+    let errores = errores_de_schema(&tools["change_apply"], apply);
+    assert!(
+        errores.is_empty(),
+        "el `structuredContent` de «change_apply» no conforma su `outputSchema`: {errores:#?}"
+    );
+    validadas.insert("change_apply".to_string());
+
+    let receipt = apply["receiptId"].as_str().expect("receiptId");
+    let l_revert = serde_json::json!({"jsonrpc":"2.0","id":1,"method":"tools/call",
+        "params":{"name":"change_revert","arguments":{"receiptId": receipt}}})
+    .to_string();
+    let resp3 = roundtrip(dir.path(), &[l_revert.as_str()], 1);
+    let revert = &resp3[0]["result"]["structuredContent"];
+    let errores = errores_de_schema(&tools["change_revert"], revert);
+    assert!(
+        errores.is_empty(),
+        "el `structuredContent` de «change_revert» no conforma su `outputSchema`: {errores:#?}"
+    );
+    validadas.insert("change_revert".to_string());
+
+    // Cobertura: las 10, sin excepción. Es lo que impide que este test se degrade con el tiempo a
+    // «las que resultaron fáciles de llamar».
+    let declaradas: std::collections::BTreeSet<String> = tools.keys().cloned().collect();
+    assert_eq!(
+        validadas, declaradas,
+        "se deben validar TODAS las tools declaradas, no un subconjunto"
+    );
+}
+
+/// **E24-H15** — control anti-vacuo del validador: una salida deliberadamente incoherente falla.
+///
+/// Sin esto, un `errores_de_schema` que devolviera siempre la lista vacía —por un schema mal
+/// cargado, por ejemplo— haría pasar el test de arriba sin validar nada.
+#[test]
+fn el_validador_de_schema_muerde() {
+    let schema = serde_json::json!({
+        "type": "object",
+        "properties": { "results": { "type": "array" } },
+        "required": ["results"]
+    });
+    assert!(
+        errores_de_schema(&schema, &serde_json::json!({"results": []})).is_empty(),
+        "una instancia correcta no puede producir errores"
+    );
+    assert!(
+        !errores_de_schema(&schema, &serde_json::json!({"results": "no soy un array"})).is_empty(),
+        "una instancia que viola el schema DEBE producir errores: si no, el test de conformidad no \
+         está validando nada"
+    );
+    assert!(
+        !errores_de_schema(&schema, &serde_json::json!({})).is_empty(),
+        "un campo requerido ausente debe detectarse"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// E26-H07 — Todo error de superficie lleva código Y mensaje
+//
+// E24-H10 puso el código estable al frente del mensaje… en `knowledge_search` y en las
+// comprobaciones locales del despachador. Las otras OCHO tools siguen haciendo
+// `.map_err(|e| e.as_str().to_string())`: el agente recibe literalmente «INVALID_SCHEMA», sin una
+// palabra sobre QUÉ parámetro, QUÉ valor o QUÉ se esperaba. No es un descuido del despachador —los
+// productores de `lodestar-app` son `Result<_, ErrorCode>` y no tienen dónde poner el mensaje—, y
+// por eso el arreglo es de la fachada entera, no de ocho `format!`.
+//
+// Dos consecuencias concretas de no tener sitio para el mensaje:
+//  - `graph_query` sin `ref` responde `DOCUMENT_NOT_FOUND` (el rustdoc lo admite: «no hay un código
+//    de falta-parámetro en el catálogo»), así que quien OLVIDA el `ref` recibe el mismo error que
+//    quien apunta a un documento que no existe, y toma el camino de recuperación equivocado;
+//  - `build_selection_expression` tira el `ParseError` del core con `map_err(|_| …)`, así que la
+//    MISMA consulta malformada se diagnostica por `knowledge_search` y se calla por `change_plan`.
+//
+// El catálogo NO lo toca ESTA historia (E26-H11): añade mensaje, no reclasifica códigos — salvo el
+// único caso que declara, `graph_query` sin `ref`/`to`. Cuando se escribió tenía 16 filas; hoy tiene
+// 17 (`catalogo_de_errores_tiene_diecisiete_filas`, en `lodestar-core`) porque E28-H02 lo abrió a
+// conciencia para `DOCUMENT_ALREADY_EXISTS`, ajeno a lo que fija este bloque.
+// ---------------------------------------------------------------------------
+
+/// Parte el texto de error en `(código, mensaje)` **solo** si tiene la forma «CÓDIGO: mensaje» con
+/// el código estable de `ErrorCode::as_str()` (SCREAMING_SNAKE) al frente. `None` si el texto es el
+/// código pelado, o si lo que abre no es un código del catálogo.
+fn codigo_y_mensaje(err: &str) -> Option<(&str, &str)> {
+    let (codigo, mensaje) = err.split_once(": ")?;
+    (!codigo.is_empty()
+        && codigo
+            .chars()
+            .all(|c| c.is_ascii_uppercase() || c == '_' || c.is_ascii_digit()))
+    .then(|| (codigo, mensaje.trim()))
+}
+
+/// El código que abre el texto de error, o el texto entero si viene pelado (que es justo lo que
+/// esta historia arregla): sirve para juzgar el CÓDIGO con independencia de si ya trae mensaje.
+fn codigo_de(err: &str) -> &str {
+    codigo_y_mensaje(err).map_or(err, |(codigo, _)| codigo)
+}
+
+/// ¿El mensaje **nombra** ese identificador (parámetro, operación) como token, y no como trozo de
+/// otra palabra? Acepta cualquier delimitador —«ref», "ref", `ref` o ref suelto— porque lo que el
+/// criterio exige es que el mensaje lo nombre, no una tipografía concreta; pero rechaza
+/// «referencia» o «documento» como forma de «nombrar» `ref` o `to`.
+fn menciona(texto: &str, token: &str) -> bool {
+    texto
+        .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+        .any(|t| t == token)
+}
+
+/// **E26-H07** — las 8 tools que hoy devuelven el código pelado emiten «CÓDIGO: mensaje».
+///
+/// Cada caso provoca el error **más común** de su tool por el camino que hoy no tiene mensaje: el
+/// del productor de `lodestar-app` (no las comprobaciones locales del despachador, que desde
+/// E24-H10 ya lo llevan). El código esperado se asevera además tal cual sale hoy: esta historia
+/// AÑADE mensaje y no reclasifica el catálogo, así que envolver el arreglo en un «todo es
+/// INVALID_SCHEMA» sería otro defecto, no el arreglo.
+#[test]
+fn todas_las_tools_dan_codigo_y_mensaje() {
+    let dir = ws_dos_docs();
+    let casos: [(&str, serde_json::Value, &str); 8] = [
+        (
+            "knowledge_get",
+            serde_json::json!({"ref": {"path": "no-existe.md"}}),
+            "DOCUMENT_NOT_FOUND",
+        ),
+        (
+            "metadata_inspect",
+            serde_json::json!({"mode": "field"}),
+            "INVALID_SCHEMA",
+        ),
+        (
+            "knowledge_check",
+            serde_json::json!({"scope": {"kind": "document", "ref": {"path": "no-existe.md"}}}),
+            "DOCUMENT_NOT_FOUND",
+        ),
+        (
+            "graph_query",
+            serde_json::json!({"operation": "chorizo"}),
+            "INVALID_SCHEMA",
+        ),
+        (
+            "impact_analyze",
+            serde_json::json!({"ref": {"path": "no-existe.md"},
+                               "proposedOperation": {"kind": "move"}}),
+            "DOCUMENT_NOT_FOUND",
+        ),
+        (
+            "change_plan",
+            serde_json::json!({"operations": [
+                {"op": "patch_frontmatter", "path": "no-existe.md", "patch": {"x": 1}}]}),
+            "DOCUMENT_NOT_FOUND",
+        ),
+        (
+            "change_apply",
+            serde_json::json!({"changeSetId": "cs:no-existe"}),
+            "PLAN_STALE",
+        ),
+        (
+            "change_revert",
+            serde_json::json!({"receiptId": "rc:no-existe"}),
+            "PLAN_EXPIRED",
+        ),
+    ];
+
+    let lineas: Vec<String> = casos
+        .iter()
+        .enumerate()
+        .map(|(i, (n, args, _))| {
+            serde_json::json!({"jsonrpc":"2.0","id": i + 1,"method":"tools/call",
+                "params":{"name": n,"arguments": args}})
+            .to_string()
+        })
+        .collect();
+    let refs: Vec<&str> = lineas.iter().map(String::as_str).collect();
+    let resp = roundtrip(dir.path(), &refs, casos.len());
+
+    // Se acumulan TODAS las tools que incumplen antes de fallar: el defecto es de las ocho a la
+    // vez, y un panic en la primera obligaría a descubrirlas de una en una.
+    let mut incumplen: Vec<String> = Vec::new();
+    for (i, (tool, args, codigo_esperado)) in casos.iter().enumerate() {
+        let err = error_de(&resp[i]).unwrap_or_else(|| {
+            panic!(
+                "«{tool}» con {args} debe fallar para poder juzgar su error: {}",
+                resp[i]
+            )
+        });
+        match codigo_y_mensaje(&err) {
+            None => incumplen.push(format!(
+                "{tool}: CÓDIGO PELADO «{err}» (se esperaba «{codigo_esperado}: <mensaje>»)"
+            )),
+            Some((codigo, mensaje)) => {
+                if codigo != *codigo_esperado {
+                    incumplen.push(format!(
+                        "{tool}: código «{codigo}», se esperaba «{codigo_esperado}» — E26-H07 \
+                         AÑADE mensaje, no reclasifica el catálogo (su único cambio de código es \
+                         `graph_query` sin «ref»)"
+                    ));
+                } else if mensaje.len() < 10 || mensaje == codigo {
+                    incumplen.push(format!(
+                        "{tool}: el mensaje debe ser accionable, no un relleno ni el código \
+                         repetido: «{err}»"
+                    ));
+                }
+            }
+        }
+    }
+    assert!(
+        incumplen.is_empty(),
+        "estas tools no emiten «CÓDIGO: mensaje». El agente puede ramificar por el código, pero \
+         no tiene una palabra sobre qué parámetro, qué valor o qué se esperaba — que es lo que \
+         necesita para CORREGIR. La forma es la que `knowledge_search` emite desde E24-H10:\n  {}",
+        incumplen.join("\n  ")
+    );
+}
+
+/// **E26-H07** — olvidar el parámetro NO es «el documento no existe».
+///
+/// Las cuatro operaciones que exigen un extremo (`backlinks`/`outgoing`/`neighborhood` piden `ref`;
+/// `path_between` pide además `to`) devuelven hoy `DOCUMENT_NOT_FOUND` cuando el parámetro ni
+/// siquiera viene. El agente que olvidó el `ref` recibe el mismo error que el que apuntó a un
+/// documento inexistente, y toma el camino de recuperación equivocado (buscar el documento, en vez
+/// de mirar su llamada).
+#[test]
+fn graph_query_sin_ref_es_invalid_schema() {
+    let dir = ws_dos_docs();
+    // (argumentos, operación, parámetro ausente)
+    let casos: [(serde_json::Value, &str, &str); 4] = [
+        (
+            serde_json::json!({"operation": "backlinks"}),
+            "backlinks",
+            "ref",
+        ),
+        (
+            serde_json::json!({"operation": "outgoing"}),
+            "outgoing",
+            "ref",
+        ),
+        (
+            serde_json::json!({"operation": "neighborhood"}),
+            "neighborhood",
+            "ref",
+        ),
+        (
+            serde_json::json!({"operation": "path_between", "ref": {"path": "a.md"}}),
+            "path_between",
+            "to",
+        ),
+    ];
+
+    let lineas: Vec<String> = casos
+        .iter()
+        .enumerate()
+        .map(|(i, (args, _, _))| {
+            serde_json::json!({"jsonrpc":"2.0","id": i + 1,"method":"tools/call",
+                "params":{"name":"graph_query","arguments": args}})
+            .to_string()
+        })
+        .collect();
+    let refs: Vec<&str> = lineas.iter().map(String::as_str).collect();
+    let resp = roundtrip(dir.path(), &refs, casos.len());
+
+    for (i, (args, operacion, parametro)) in casos.iter().enumerate() {
+        let err = error_de(&resp[i])
+            .unwrap_or_else(|| panic!("{args} debe fallar: falta «{parametro}»: {}", resp[i]));
+        // El CÓDIGO se juzga primero y con independencia del mensaje: el defecto U2 es que
+        // «falta el parámetro» y «el documento no existe» son hoy el mismo error.
+        assert_eq!(
+            codigo_de(&err),
+            "INVALID_SCHEMA",
+            "que FALTE «{parametro}» es un esquema de entrada inválido, no un documento que no \
+             existe: hasta v0.4.0 salía DOCUMENT_NOT_FOUND, indistinguible de un «{parametro}» \
+             presente que no resuelve. Error completo: «{err}»"
+        );
+        let (_, mensaje) = codigo_y_mensaje(&err)
+            .unwrap_or_else(|| panic!("el error de {args} debe llevar código Y mensaje: «{err}»"));
+        assert!(
+            menciona(mensaje, parametro),
+            "el mensaje debe NOMBRAR el parámetro que falta («{parametro}»): «{err}»"
+        );
+        assert!(
+            menciona(mensaje, operacion),
+            "…y la operación que lo exige («{operacion}»), porque no todas lo exigen: «{err}»"
+        );
+    }
+}
+
+/// **E26-H07** — control anti-vacuo: el arreglo no puede consistir en mapear todo a
+/// `INVALID_SCHEMA`.
+///
+/// Un `ref` (o un `to`) PRESENTE que no resuelve es exactamente lo que dice
+/// `DOCUMENT_NOT_FOUND`, y debe seguir siéndolo: es la distinción que la historia existe para
+/// crear. Lo que sí cambia es que ahora también trae mensaje.
+#[test]
+fn ref_que_no_resuelve_sigue_siendo_not_found() {
+    let dir = ws_dos_docs();
+    let casos: [serde_json::Value; 2] = [
+        serde_json::json!({"operation": "backlinks", "ref": {"path": "no-existe.md"}}),
+        serde_json::json!({"operation": "path_between", "ref": {"path": "a.md"},
+                           "to": {"path": "no-existe.md"}}),
+    ];
+
+    let lineas: Vec<String> = casos
+        .iter()
+        .enumerate()
+        .map(|(i, args)| {
+            serde_json::json!({"jsonrpc":"2.0","id": i + 1,"method":"tools/call",
+                "params":{"name":"graph_query","arguments": args}})
+            .to_string()
+        })
+        .collect();
+    let refs: Vec<&str> = lineas.iter().map(String::as_str).collect();
+    let resp = roundtrip(dir.path(), &refs, casos.len());
+
+    for (i, args) in casos.iter().enumerate() {
+        let err = error_de(&resp[i])
+            .unwrap_or_else(|| panic!("{args} apunta a un documento inexistente: {}", resp[i]));
+        // Primero el control (el CÓDIGO no puede cambiar), después la exigencia nueva (mensaje).
+        assert_eq!(
+            codigo_de(&err),
+            "DOCUMENT_NOT_FOUND",
+            "un extremo PRESENTE que no resuelve es lo que su nombre dice. Si esto pasara a \
+             INVALID_SCHEMA, la distinción que introduce E26-H07 se habría perdido por el otro \
+             lado. Error completo: «{err}»"
+        );
+        assert!(
+            codigo_y_mensaje(&err).is_some_and(|(_, m)| !m.is_empty()),
+            "…y también él lleva ahora mensaje, en la forma «CÓDIGO: mensaje»: «{err}»"
+        );
+    }
+}
+
+/// **E26-H07** — la misma consulta malformada se diagnostica igual por las dos tools que la aceptan.
+///
+/// `build_search_expression` (`knowledge_search`) entrega el texto del `ParseError` del core;
+/// `build_selection_expression` (la selección masiva de `change_plan`) lo tira con
+/// `map_err(|_| ErrorCode::InvalidSchema)`. E24-H10 cerró esa asimetría para el CÓDIGO y la dejó
+/// abierta para el MENSAJE.
+///
+/// El diagnóstico esperado se toma del **core**, no de un literal: así el test no fija la redacción
+/// del parser, solo exige que llegue entera a las dos superficies (invariante #3, una sola verdad).
+#[test]
+fn change_plan_conserva_el_error_del_parser() {
+    let dir = ws_dos_docs();
+    const CONSULTA: &str = "status =";
+    let diagnostico = lodestar_core::parse::parse(CONSULTA)
+        .expect_err("«status =» es una consulta malformada: al parser le falta el valor")
+        .message;
+
+    let l_search = serde_json::json!({"jsonrpc":"2.0","id":1,"method":"tools/call",
+        "params":{"name":"knowledge_search","arguments":{"text":"","where": CONSULTA}}})
+    .to_string();
+    let l_plan = serde_json::json!({"jsonrpc":"2.0","id":2,"method":"tools/call",
+        "params":{"name":"change_plan","arguments":{
+            "selection":{"where": CONSULTA},
+            "operation":{"patch_frontmatter":{"patch":{"x":1}}}}}})
+    .to_string();
+    let resp = roundtrip(dir.path(), &[l_search.as_str(), l_plan.as_str()], 2);
+
+    let e_search = error_de(&resp[0]).expect("knowledge_search debe fallar");
+    let e_plan = error_de(&resp[1]).expect("change_plan debe fallar");
+
+    // Control: por `knowledge_search` el diagnóstico ya viaja (E24-H10). Si esto fallara, el
+    // esperado se habría desalineado del core y el test de abajo no probaría nada.
+    assert!(
+        e_search.contains(&diagnostico),
+        "el diagnóstico del parser («{diagnostico}») debe seguir llegando por knowledge_search: \
+         «{e_search}»"
+    );
+    let (codigo, mensaje) = codigo_y_mensaje(&e_plan)
+        .unwrap_or_else(|| panic!("change_plan debe emitir «CÓDIGO: mensaje»: «{e_plan}»"));
+    assert_eq!(codigo, "INVALID_SCHEMA", "mismo código por las dos tools");
+    assert!(
+        mensaje.contains(&diagnostico),
+        "el MISMO `where` malformado debe dar el MISMO diagnóstico por las dos tools que lo \
+         aceptan: `build_selection_expression` lo descarta con `map_err(|_| …)`, así que \
+         change_plan devolvía «INVALID_SCHEMA» a secas.\n\
+         diagnóstico del core: «{diagnostico}»\n\
+         knowledge_search:     «{e_search}»\n\
+         change_plan:          «{e_plan}»"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// E26-H08 — Un `TypeError` de consulta se REPORTA, no excluye documentos en silencio
+//
+// Los dos consumidores del lenguaje descartan la evaluación con
+// `if !matches!(evaluate(...), Ok(true)) { continue; }` —`knowledge_search` y la selección masiva de
+// `change_plan` (`expand_selection`)—, así que un `Err(TypeError)` cae en el MISMO `continue` que un
+// `Ok(false)`: el documento se excluye. Efectos que estos tests reproducen:
+//   · una consulta con un error de tipo real devuelve `[]` sin un solo aviso, indistinguible de «no
+//     hay resultados»;
+//   · sobre una base heterogénea la exclusión se decide documento a documento, así que la respuesta
+//     es una lista RECORTADA que nadie puede distinguir de la correcta;
+//   · en `change_plan` es peor: una selección masiva salta documentos en silencio y el plan afecta a
+//     menos ficheros de los que el agente cree haber seleccionado.
+//
+// Es el principio de E24-H07 («una respuesta silenciosamente equivocada es peor que un error»)
+// aplicado a la EVALUACIÓN, después de que E24-H07/H08 lo aplicaran al parseo. Los rustdoc de
+// `lib.rs` consagran hoy lo contrario («sin propagarse a la búsqueda entera» / «sin abortar el
+// plan»): E26-H08 revisa ese criterio, igual que E24-H07 revisó el de E19-H04.
+//
+// Lo que NO cambia (y por eso hay dos controles anti-vacuos): `Ok(false)` sigue siendo AUSENCIA —no
+// casar no es un error—, y un campo ausente sigue excluyendo su documento sin ruido.
+// ---------------------------------------------------------------------------
+
+/// La consulta del defecto: orden (`>=`) entre un campo numérico y un literal string. Es
+/// `TypeError::OrderNotDefined` en el core desde E19-H01 (`error_de_tipo_orden_cruzado`), y hasta
+/// v0.4.0 se traducía a «este documento no casa».
+const ORDEN_CRUZADO: &str = "priority >= \"high\"";
+
+/// Grafías admisibles del tipo `number` en el mensaje: la del wire (`ValueType` serializa en
+/// minúscula, y es la que ve el agente en `metadata_inspect.inferredTypes`) o su nombre en español
+/// —los mensajes van en español (E26-H07)—. Lo que el criterio exige es que el mensaje NOMBRE el
+/// tipo, no una tipografía concreta.
+const GRAFIAS_NUMBER: &[&str] = &["number", "numero", "número", "numerico", "numérico"];
+
+/// Ídem para `string`.
+const GRAFIAS_STRING: &[&str] = &["string", "cadena", "texto"];
+
+/// ¿El mensaje nombra ese tipo en alguna de sus grafías admisibles?
+fn nombra_tipo(mensaje: &str, grafias: &[&str]) -> bool {
+    let bajo = mensaje.to_lowercase();
+    grafias.iter().any(|g| menciona(&bajo, g))
+}
+
+/// Juzga el error de un `TypeError` de orden cruzado: código estable + un mensaje que permita
+/// CORREGIR la consulta (campo, operador y los dos tipos que chocan). `contexto` identifica la tool
+/// en el fallo.
+fn juzga_error_de_tipo(err: &str, contexto: &str) {
+    assert_eq!(
+        codigo_de(err),
+        "INVALID_SCHEMA",
+        "un error de TIPO al evaluar es una consulta que el motor no puede responder sobre estos \
+         datos, y el catálogo ya tiene el código para eso ({contexto}): «{err}»"
+    );
+    let (_, mensaje) = codigo_y_mensaje(err)
+        .unwrap_or_else(|| panic!("{contexto} debe emitir «CÓDIGO: mensaje» (E26-H07): «{err}»"));
+    assert!(
+        menciona(&mensaje.to_lowercase(), "priority"),
+        "el mensaje debe NOMBRAR el campo que choca ({contexto}): «{err}»"
+    );
+    assert!(
+        nombra_tipo(mensaje, GRAFIAS_NUMBER),
+        "…el tipo que tiene el campo en el documento (number) ({contexto}): «{err}»"
+    );
+    assert!(
+        nombra_tipo(mensaje, GRAFIAS_STRING),
+        "…y el tipo del literal con el que se le comparó (string), que es la mitad del diagnóstico \
+         sin la cual el agente no sabe qué lado corregir ({contexto}): «{err}»"
+    );
+    assert!(
+        mensaje.contains(">=") || menciona(&mensaje.to_lowercase(), "greater_than_or_equal"),
+        "…y el operador, porque `=` sobre los MISMOS operandos es legal (es `false`, no error): \
+         solo el ORDEN yerra ({contexto}): «{err}»"
+    );
+}
+
+/// Workspace **homogéneo**: los dos documentos tienen `priority` numérico, así que
+/// `priority >= "high"` es un error de tipo en todos. Hoy la consulta devuelve `[]` —«no hay
+/// resultados»— sin un solo aviso.
+fn ws_priority_numerico() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "alfa.md",
+        "---\npriority: 2\nstatus: draft\n---\n\n# Alfa\n",
+    );
+    write(
+        dir.path(),
+        "beta.md",
+        "---\npriority: 5\nstatus: draft\n---\n\n# Beta\n",
+    );
+    dir
+}
+
+/// Workspace **heterogéneo** —el escenario real del defecto—: `priority` es string en unos
+/// documentos y número en otros, de modo que `priority >= "high"` casa unos, yerra en otros y hoy
+/// devuelve una lista recortada.
+///
+/// El reparto es DISCRIMINANTE para el criterio de determinismo:
+///   · `alfa.md` es el primero del orden total y **no** yerra (string vs string): quien reporte «el
+///     primer documento» sin más, o el primero que casa, nombrará el documento equivocado;
+///   · `bravo.md` es el primero del orden total que **sí** yerra → es el que debe salir nombrado;
+///   · `zulu.md` yerra también, pero el ÚLTIMO: quien acumule los errores y reporte el último (o
+///     todos) hará que el mensaje dependa de dónde paró el motor, no del workspace.
+fn ws_priority_heterogeneo() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "alfa.md",
+        "---\npriority: high\nstatus: draft\n---\n\n# Alfa\n",
+    );
+    write(
+        dir.path(),
+        "bravo.md",
+        "---\npriority: 2\nstatus: draft\n---\n\n# Bravo\n",
+    );
+    write(
+        dir.path(),
+        "charlie.md",
+        "---\npriority: urgent\nstatus: draft\n---\n\n# Charlie\n",
+    );
+    write(
+        dir.path(),
+        "zulu.md",
+        "---\npriority: 9\nstatus: draft\n---\n\n# Zulu\n",
+    );
+    dir
+}
+
+/// La llamada JSON-RPC a `knowledge_search` con un `where` (y opcionalmente un `limit`).
+fn linea_search(id: u32, donde: &str, limit: Option<u32>) -> String {
+    let mut args = serde_json::json!({"text": "", "where": donde});
+    if let Some(l) = limit {
+        args["limit"] = serde_json::json!(l);
+    }
+    serde_json::json!({"jsonrpc":"2.0","id": id,"method":"tools/call",
+        "params":{"name":"knowledge_search","arguments": args}})
+    .to_string()
+}
+
+/// La llamada JSON-RPC a `change_plan` con la MISMA consulta como `selection.where`. La política es
+/// permisiva a propósito: lo que se juzga es la EXPANSIÓN de la selección, no el veredicto de
+/// conformidad del resultado.
+fn linea_plan(id: u32, donde: &str) -> String {
+    serde_json::json!({"jsonrpc":"2.0","id": id,"method":"tools/call",
+        "params":{"name":"change_plan","arguments":{
+            "selection": {"where": donde},
+            "operation": {"patch_frontmatter": {"status": "review"}},
+            "policy": {"requireValidResult": false, "allowWarnings": true}}}})
+    .to_string()
+}
+
+/// **E26-H08** — un error de TIPO aborta la consulta con `INVALID_SCHEMA`, en vez de devolver `[]`.
+///
+/// Hoy `knowledge_search` responde `{"results": []}`: una lista vacía que el agente lee como «no hay
+/// documentos con esa prioridad», cuando lo que ocurrió es que su consulta no es respondible sobre
+/// estos datos. Es la respuesta silenciosamente equivocada que E24-H07 declaró peor que un error.
+#[test]
+fn type_error_de_orden_es_error_de_consulta() {
+    let dir = ws_priority_numerico();
+    let linea = linea_search(1, ORDEN_CRUZADO, None);
+    let resp = roundtrip(dir.path(), &[linea.as_str()], 1);
+
+    let err = error_de(&resp[0]).unwrap_or_else(|| {
+        panic!(
+            "`{ORDEN_CRUZADO}` sobre documentos con `priority` NUMÉRICO no es una consulta que el \
+             motor pueda responder: comparar el orden de un número con un string es \
+             `TypeError::OrderNotDefined` en el core desde E19-H01. Hasta v0.4.0 cada documento que \
+             erraba se EXCLUÍA, así que la respuesta era `[]` —indistinguible de «no hay \
+             resultados»— y el agente no tenía forma de enterarse.\nRespuesta recibida: {}",
+            resp[0]
+        )
+    });
+    juzga_error_de_tipo(&err, "knowledge_search");
+}
+
+/// **E26-H08** — la misma consulta da el mismo error por las dos superficies que la aceptan.
+///
+/// `knowledge_search` y `change_plan.selection` comparten el lenguaje (`§20.10`: `where`/`filter`
+/// significan lo mismo en las dos), así que también deben compartir el veredicto y su redacción. En
+/// `change_plan` el defecto es además el más caro: la selección masiva salta documentos en silencio
+/// y el plan toca menos ficheros de los que el agente cree haber seleccionado.
+#[test]
+fn misma_consulta_mismo_error_en_search_y_en_plan() {
+    let dir = ws_priority_numerico();
+    let l_search = linea_search(1, ORDEN_CRUZADO, None);
+    let l_plan = linea_plan(2, ORDEN_CRUZADO);
+    let resp = roundtrip(dir.path(), &[l_search.as_str(), l_plan.as_str()], 2);
+
+    let e_search = error_de(&resp[0]).unwrap_or_else(|| {
+        panic!(
+            "`knowledge_search` con `{ORDEN_CRUZADO}` debe fallar (ver \
+             `type_error_de_orden_es_error_de_consulta`): {}",
+            resp[0]
+        )
+    });
+    let e_plan = error_de(&resp[1]).unwrap_or_else(|| {
+        panic!(
+            "`change_plan` con `selection.where: {ORDEN_CRUZADO}` debe fallar: hoy `expand_selection` \
+             se salta en silencio TODO documento cuya evaluación yerra, así que planifica sobre un \
+             subconjunto que nadie pidió (aquí, el conjunto vacío) y lo presenta como un plan \
+             legítimo.\nRespuesta recibida: {}",
+            resp[1]
+        )
+    });
+
+    juzga_error_de_tipo(&e_plan, "change_plan");
+    assert_eq!(
+        e_search, e_plan,
+        "el MISMO `where` sobre el MISMO workspace debe dar el MISMO código y el MISMO mensaje por \
+         las dos tools que aceptan el lenguaje: si divergen, el agente aprende a corregir con una \
+         superficie y se queda a ciegas con la otra (§20.10, invariante #3)"
+    );
+}
+
+/// **E26-H08** — el error reportado es determinista: mismo workspace y misma consulta, mismo error
+/// palabra por palabra, y siempre sobre el mismo documento.
+///
+/// Sobre una base heterogénea hay VARIOS documentos que yerran, así que «cuál se reporta» tiene que
+/// estar decidido por el workspace y no por el camino que tomó el motor. El criterio de la historia
+/// es el **primer documento del orden total ya existente** (`Analysis::documents`, ordenado por
+/// `RelPath`) — la premisa está clavada en el core por `primer_type_error_en_el_orden_total`
+/// (`lodestar-core/tests/consulta.rs`).
+///
+/// Cuatro observaciones distintas del mismo workspace, que es lo que hace al test discriminante:
+/// dos procesos frescos, una página más pequeña y la otra tool. Ninguna puede cambiar el veredicto.
+#[test]
+fn el_type_error_reportado_es_determinista() {
+    let dir = ws_priority_heterogeneo();
+    let linea = linea_search(1, ORDEN_CRUZADO, None);
+
+    // (1) y (2): dos servidores recién arrancados, sin estado compartido.
+    let r1 = roundtrip(dir.path(), &[linea.as_str()], 1);
+    let r2 = roundtrip(dir.path(), &[linea.as_str()], 1);
+    let e1 = error_de(&r1[0]).unwrap_or_else(|| {
+        panic!(
+            "sobre una base heterogénea la consulta `{ORDEN_CRUZADO}` devuelve hoy los documentos \
+             de `priority` textual y CALLA sobre los numéricos: una lista recortada, decidida \
+             documento a documento, que nadie puede distinguir de la correcta.\nRespuesta: {}",
+            r1[0]
+        )
+    });
+    let e2 = error_de(&r2[0]).expect("la segunda ejecución debe fallar igual que la primera");
+    assert_eq!(
+        e1, e2,
+        "dos ejecuciones de la misma consulta sobre el mismo workspace deben dar el MISMO error, \
+         palabra por palabra"
+    );
+    juzga_error_de_tipo(&e1, "knowledge_search (base heterogénea)");
+
+    // El documento nombrado es el PRIMERO del orden total que yerra, no el primero del orden
+    // (`alfa.md`, que no yerra) ni el último que yerra (`zulu.md`).
+    assert!(
+        e1.contains("bravo.md"),
+        "el error debe nombrar el documento sobre el que se produjo, y ser el PRIMERO del orden \
+         total de `Analysis::documents` que yerra: `alfa.md` va antes pero su `priority` es string \
+         (no yerra), así que el nombrado es `bravo.md`. Error: «{e1}»"
+    );
+    assert!(
+        !e1.contains("zulu.md"),
+        "…y SOLO ese: reportar el último documento que yerra (o todos) hace que el mensaje dependa \
+         de dónde paró el motor en vez de del workspace, que es justo el no-determinismo que la \
+         historia cierra. Error: «{e1}»"
+    );
+
+    // (3) El tamaño de página no puede cambiar el veredicto: si el motor evaluara perezosamente
+    //     hasta llenar la página, con `limit: 1` le bastaría `alfa.md` (que casa) para responder
+    //     antes de llegar a `bravo.md`, y la MISMA consulta tendría éxito o fracaso según el
+    //     `limit` — un resultado que depende de un parámetro invisible para el problema.
+    let l_limit = linea_search(1, ORDEN_CRUZADO, Some(1));
+    let r3 = roundtrip(dir.path(), &[l_limit.as_str()], 1);
+    let e3 = error_de(&r3[0]).unwrap_or_else(|| {
+        panic!(
+            "la misma consulta con `limit: 1` debe fallar igual: el veredicto de una consulta no \
+             puede depender del tamaño de la página.\nRespuesta: {}",
+            r3[0]
+        )
+    });
+    assert_eq!(e3, e1, "…y con el mismo texto exacto");
+
+    // (4) Y por `change_plan`, cuyo bucle es OTRO: el documento reportado lo fija el orden total,
+    //     no el orden en que el planificador toque los documentos.
+    let l_plan = linea_plan(1, ORDEN_CRUZADO);
+    let r4 = roundtrip(dir.path(), &[l_plan.as_str()], 1);
+    let e4 = error_de(&r4[0]).unwrap_or_else(|| {
+        panic!(
+            "la selección masiva sobre la base heterogénea debe fallar en vez de planificar sobre \
+             los documentos que «sí casaron».\nRespuesta: {}",
+            r4[0]
+        )
+    });
+    assert_eq!(
+        e4, e1,
+        "las dos tools deben nombrar el MISMO documento con el MISMO texto: el criterio es el orden \
+         total de `Analysis::documents`, no el orden de evaluación de cada consumidor"
+    );
+}
+
+/// **E26-H08** — control anti-vacuo: no casar sigue siendo AUSENCIA, no error.
+///
+/// El arreglo no puede consistir en convertir cualquier resultado vacío en un fallo: `Ok(false)` es
+/// exclusión y solo `Err` cambia de tratamiento. El control lleva su propio control: la misma
+/// consulta con el valor que SÍ está en los documentos devuelve los dos, de modo que el `[]` de
+/// arriba significa «no casa» y no «la búsqueda está rota».
+#[test]
+fn no_casar_sigue_siendo_ausencia() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "alfa.md",
+        "---\nstatus: draft\ntitle: Alfa\n---\n\n# Alfa\n",
+    );
+    write(
+        dir.path(),
+        "beta.md",
+        "---\nstatus: draft\ntitle: Beta\n---\n\n# Beta\n",
+    );
+
+    let l_vacia = linea_search(1, "status = borrador", None);
+    let l_control = linea_search(2, "status = draft", None);
+    let resp = roundtrip(dir.path(), &[l_vacia.as_str(), l_control.as_str()], 2);
+
+    assert_eq!(
+        error_de(&resp[0]),
+        None,
+        "`status = borrador` sobre documentos con `status: draft` es una comparación PERFECTAMENTE \
+         tipada (string vs string) que simplemente no casa: eso es ausencia, no error"
+    );
+    assert!(
+        search_paths(&resp[0]).is_empty(),
+        "…y su respuesta es la lista vacía: {:?}",
+        search_paths(&resp[0])
+    );
+
+    let mut casan = search_paths(&resp[1]);
+    casan.sort();
+    assert_eq!(
+        casan,
+        vec!["alfa.md".to_string(), "beta.md".to_string()],
+        "control del control: la MISMA maquinaria con el valor que sí está devuelve los dos \
+         documentos, así que el `[]` de arriba es un veredicto y no una búsqueda rota"
+    );
+}
+
+/// **E26-H08** — control anti-vacuo: un campo AUSENTE excluye su documento sin error, como hasta
+/// ahora.
+///
+/// La ausencia cortocircuita antes de comprobar tipos (`campo_inexistente`, E19-H01): no se puede
+/// errar sobre un tipo que no se tiene. El documento sin `priority` va PRIMERO en el orden total a
+/// propósito: una implementación que abortara ante todo lo que no sea `Ok(true)` moriría en él.
+#[test]
+fn campo_ausente_no_es_type_error() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "a-sin-priority.md",
+        "---\nstatus: draft\ntitle: Sin prioridad\n---\n\n# Sin prioridad\n",
+    );
+    write(
+        dir.path(),
+        "b-con-priority.md",
+        "---\nstatus: draft\npriority: 5\n---\n\n# Con prioridad\n",
+    );
+
+    let linea = linea_search(1, "priority >= 3", None);
+    let resp = roundtrip(dir.path(), &[linea.as_str()], 1);
+
+    assert_eq!(
+        error_de(&resp[0]),
+        None,
+        "preguntar por una clave que un documento no tiene es legítimo (el frontmatter es metadata \
+         arbitraria): la ausencia excluye el documento, no rompe la consulta"
+    );
+    assert_eq!(
+        search_paths(&resp[0]),
+        vec!["b-con-priority.md".to_string()],
+        "…y el documento que SÍ tiene la clave, con el tipo correcto, sigue casando"
+    );
+}
+
+/// La llamada JSON-RPC a `knowledge_search` combinando un `text` NO vacío con un `where`.
+fn linea_search_con_texto(id: u32, texto: &str, donde: &str) -> String {
+    serde_json::json!({"jsonrpc":"2.0","id": id,"method":"tools/call",
+        "params":{"name":"knowledge_search","arguments":{"text": texto, "where": donde}}})
+    .to_string()
+}
+
+/// **E26-H08** — un `text` más estrecho NO puede tapar el error de tipo.
+///
+/// El resto de tests de la familia usan `text: ""`, así que ninguno fija el ORDEN entre los dos
+/// criterios de `knowledge_search`, y el orden es justo lo que decide el alcance del error: si el
+/// `text` se aplicase primero, un documento descartado por texto nunca llegaría a evaluarse y su
+/// `TypeError` desaparecería. La misma consulta sería entonces legal o ilegal según un parámetro que
+/// no habla de tipos, y **añadir palabras a la búsqueda arreglaría la consulta** — el mismo
+/// resultado-que-depende-de-lo-invisible que la historia cierra.
+///
+/// El criterio es que el error es de la CONSULTA («este `where` no es respondible sobre este
+/// workspace»), no del subconjunto que el `text` deja pasar: el `where` se evalúa sobre el orden
+/// total de `Analysis::documents`, y por eso el veredicto es idéntico —byte a byte— al de `text: ""`.
+///
+/// Discriminante por construcción: `text: "alfa"` casa **solo** `alfa.md` (que NO yerra: su
+/// `priority` es string) y descarta `bravo.md` (que sí yerra, y es el que debe seguir saliendo
+/// nombrado).
+#[test]
+fn el_text_no_tapa_el_type_error() {
+    let dir = ws_priority_heterogeneo();
+
+    // Control de la premisa: con ese `text` y SIN `where`, la búsqueda devuelve solo `alfa.md` —de
+    // modo que el `text` de verdad descarta a `bravo.md`, y el test no es vacuo.
+    let l_solo_texto = serde_json::json!({"jsonrpc":"2.0","id":1,"method":"tools/call",
+        "params":{"name":"knowledge_search","arguments":{"text":"alfa"}}})
+    .to_string();
+    let l_texto_y_where = linea_search_con_texto(2, "alfa", ORDEN_CRUZADO);
+    let l_solo_where = linea_search(3, ORDEN_CRUZADO, None);
+    let resp = roundtrip(
+        dir.path(),
+        &[
+            l_solo_texto.as_str(),
+            l_texto_y_where.as_str(),
+            l_solo_where.as_str(),
+        ],
+        3,
+    );
+
+    assert_eq!(
+        search_paths(&resp[0]),
+        vec!["alfa.md".to_string()],
+        "premisa del test: `text: \"alfa\"` acota la búsqueda a `alfa.md` y deja fuera a `bravo.md` \
+         (el documento que yerra). Si esto cambiara, el caso de abajo dejaría de discriminar"
+    );
+
+    let con_texto = error_de(&resp[1]).unwrap_or_else(|| {
+        panic!(
+            "un `text` que descarta al documento mal tipado NO puede convertir una consulta \
+             imposible en una respuesta: el `where` se evalúa sobre el orden total, no sobre lo que \
+             el `text` deje pasar.\nRespuesta: {}",
+            resp[1]
+        )
+    });
+    juzga_error_de_tipo(
+        &con_texto,
+        "knowledge_search (con `text` que excluye el documento)",
+    );
+    assert!(
+        con_texto.contains("bravo.md"),
+        "…y sigue nombrando `bravo.md`, aunque el `text` lo hubiera descartado: «{con_texto}»"
+    );
+
+    let sin_texto = error_de(&resp[2]).expect("y con `text: \"\"` también falla");
+    assert_eq!(
+        con_texto, sin_texto,
+        "el veredicto y su texto deben ser IDÉNTICOS con y sin `text`: si un `text` más estrecho \
+         cambiara el error (o lo hiciera desaparecer), el agente podría «arreglar» una consulta mal \
+         tipada añadiendo palabras a la búsqueda"
+    );
+}
+
+/// **E26-H08** — la otra variante de `TypeError` también aborta: `NotAList`.
+///
+/// `OrderNotDefined` (el `>=` cruzado) es el generador más probable en una base real, pero el enum
+/// del core tiene DOS variantes y las dos llegan por el mismo camino. Sin este caso, la rama
+/// `NotAList` del traductor de la fachada no la ejercita nadie: podría no emitir mensaje —o emitir
+/// el del orden— y la suite no se enteraría.
+///
+/// **Ojo con la semántica real de `contains`** (verificada contra el evaluador del core antes de
+/// escribir el test, `eval_contains`): sobre un **string** `contains` es SUBCADENA, no error, así
+/// que `tags contains "x"` sobre `tags: solo` es `Ok(false)` y **no** dispara nada. `NotAList` sale
+/// de los dos casos que este test usa:
+///   · `contains` sobre un escalar **no string** (aquí un número);
+///   · `contains_any`/`contains_all` sobre cualquier no-lista (aquí un string) — son exclusivos de
+///     listas, y es el caso realista de quien escribió un tag suelto sin lista.
+#[test]
+fn type_error_de_lista_tambien_es_error_de_consulta() {
+    let dir = tempfile::tempdir().unwrap();
+    // Orden total: `a-lista.md` < `b-escalar.md` < `c-numero.md`. El primero del orden NO yerra en
+    // ninguno de los dos casos, así que el documento nombrado no puede salir por accidente.
+    write(
+        dir.path(),
+        "a-lista.md",
+        "---\ntags:\n  - uno\n  - dos\n---\n\n# Con lista\n",
+    );
+    write(
+        dir.path(),
+        "b-escalar.md",
+        "---\ntags: solo\n---\n\n# Tag suelto\n",
+    );
+    write(
+        dir.path(),
+        "c-numero.md",
+        "---\npriority: 2\n---\n\n# Número\n",
+    );
+
+    let l_contains_num = linea_search(1, "priority contains \"2\"", None);
+    let l_contains_any = linea_search(2, "tags contains_any [\"uno\"]", None);
+    let l_subcadena = linea_search(3, "tags contains \"sol\"", None);
+    let resp = roundtrip(
+        dir.path(),
+        &[
+            l_contains_num.as_str(),
+            l_contains_any.as_str(),
+            l_subcadena.as_str(),
+        ],
+        3,
+    );
+
+    // (1) `contains` sobre un número: el operador de lista sobre un escalar no-string.
+    let e_num = error_de(&resp[0]).unwrap_or_else(|| {
+        panic!(
+            "`priority contains \"2\"` sobre `priority: 2` es `TypeError::NotAList` en el core: un \
+             operador de lista sobre un número. Debe abortar la consulta igual que el orden \
+             cruzado, no devolver una lista recortada.\nRespuesta: {}",
+            resp[0]
+        )
+    });
+    let (codigo, mensaje) = codigo_y_mensaje(&e_num)
+        .unwrap_or_else(|| panic!("debe emitir «CÓDIGO: mensaje»: «{e_num}»"));
+    assert_eq!(
+        codigo, "INVALID_SCHEMA",
+        "mismo código que el otro TypeError"
+    );
+    assert!(
+        menciona(&mensaje.to_lowercase(), "priority"),
+        "el mensaje debe nombrar el campo: «{e_num}»"
+    );
+    assert!(
+        nombra_tipo(mensaje, GRAFIAS_NUMBER),
+        "…y el tipo REAL del campo (number), que es lo que le dice al agente por qué su `contains` \
+         no aplica: «{e_num}»"
+    );
+    assert!(
+        menciona(&mensaje.to_lowercase(), "contains"),
+        "…y el operador que lo exigía: «{e_num}»"
+    );
+    assert!(
+        e_num.contains("c-numero.md"),
+        "…y el documento donde chocó: «{e_num}»"
+    );
+
+    // (2) `contains_any` sobre un string: exclusivo de listas. El primero del orden (`a-lista.md`)
+    //     casa sin errar, así que el nombrado es el segundo.
+    let e_any = error_de(&resp[1]).unwrap_or_else(|| {
+        panic!(
+            "`tags contains_any [\"uno\"]` sobre `tags: solo` (string) es `NotAList`: \
+             `contains_any` es exclusivo de listas. Hasta v0.4.0 ese documento se excluía en \
+             silencio, así que la respuesta era la lista de los que SÍ tenían lista.\nRespuesta: {}",
+            resp[1]
+        )
+    });
+    let (codigo, mensaje) = codigo_y_mensaje(&e_any)
+        .unwrap_or_else(|| panic!("debe emitir «CÓDIGO: mensaje»: «{e_any}»"));
+    assert_eq!(codigo, "INVALID_SCHEMA", "mismo código");
+    assert!(
+        menciona(&mensaje.to_lowercase(), "tags") && nombra_tipo(mensaje, GRAFIAS_STRING),
+        "el mensaje debe nombrar el campo y su tipo real (string): «{e_any}»"
+    );
+    assert!(
+        menciona(&mensaje.to_lowercase(), "contains_any"),
+        "…y el operador exacto, que es distinto del `contains` a secas: «{e_any}»"
+    );
+    assert!(
+        e_any.contains("b-escalar.md") && !e_any.contains("c-numero.md"),
+        "…y el documento donde chocó, que es el primero del orden total que yerra (`a-lista.md` va \
+         antes y casa sin errar): «{e_any}»"
+    );
+
+    // (3) Control anti-vacuo: `contains` sobre un STRING es subcadena, no error. El arreglo no
+    //     puede consistir en hacer ilegal todo `contains` sobre lo que no sea una lista.
+    assert_eq!(
+        error_de(&resp[2]),
+        None,
+        "`tags contains \"sol\"` sobre `tags: solo` es SUBCADENA (el tipo del campo decide el \
+         significado del operador, `eval_contains`): eso no es un error de tipo"
+    );
+    assert_eq!(
+        search_paths(&resp[2]),
+        vec!["b-escalar.md".to_string()],
+        "…y casa el documento del tag suelto, sin que la lista de `a-lista.md` (que no contiene la \
+         subcadena) ni la ausencia de `tags` en `c-numero.md` lo estropeen"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// E29-H04 — `starts_with`/`ends_with` sobre un campo no-string es TYPE ERROR (por el wire)
+//
+// `requirements/epica-29-honestidad-superficie.md §E29-H04` · `decisiones §23/A-04` (criterio
+// **ratificado por el usuario el 2026-08-06**) · caso **G1-20** del testbench homelab
+// (`docs/qa/informe-homelab-2026-08-06.md §3`), que es como se observó el hallazgo: por el wire.
+//
+// SÍNTOMA medido hoy (v0.5.0) sobre un workspace con `priority: 3` (número):
+//   · `knowledge_search {where: "priority starts_with \"3\""}` → `{"results": [], …}` **sin error**;
+//   · `change_plan {selection: {where: <lo mismo>}}` → un plan con `normalizedOperations: []`,
+//     `impact.affectedCount: 0` y **`canApply: true`**, presentado como un plan legítimo.
+// En el homelab eran 7 documentos con `priority: 3` desapareciendo de la respuesta sin un aviso.
+//
+// CAUSA: `core::eval::eval_afijo` devuelve `bool` (no `Result`), así que un campo no-string es
+// `false` y cae en el mismo `continue` que «no casa» — el defecto que E26-H08 cerró para el ORDEN,
+// abierto todavía para los dos operadores de afijo.
+//
+// LO QUE ESTOS TESTS FIJAN, y por qué aquí y no solo en el core: el criterio de la historia es que el
+// error llegue al agente por las DOS superficies que evalúan consultas, con el `INVALID_SCHEMA` del
+// catálogo (no hay código nuevo) y con un mensaje que nombre campo, operador y tipo hallado —el
+// mismo contrato de redacción que `juzga_error_de_tipo` ya exige para `OrderNotDefined`—, y que en
+// `change_plan` **aborte el plan** en vez de reducir la selección en silencio (coherencia con
+// E26-H08). El core solo puede probar que el evaluador yerra; que ese `Err` no se pierda entre el
+// evaluador y el wire solo se ve desde aquí.
+//
+// ROJO esperado HOY: por ASERCIÓN (`error_de` devuelve `None` porque la respuesta es un éxito).
+// ---------------------------------------------------------------------------
+
+/// La consulta del caso **G1-20**: operador de afijo sobre un campo numérico.
+const AFIJO_SOBRE_NUMERO: &str = "priority starts_with \"3\"";
+
+/// Grafías admisibles del tipo `list` en el mensaje (las de `GRAFIAS_NUMBER`/`GRAFIAS_STRING`, para
+/// el criterio de la lista).
+const GRAFIAS_LIST: &[&str] = &["list", "lista", "array", "secuencia", "sequence"];
+
+/// Juzga el error de un type error de **afijo**: código estable + mensaje que permita CORREGIR la
+/// consulta (campo, operador y el tipo real del campo). Es el gemelo de `juzga_error_de_tipo`, con
+/// el tipo esperado parametrizado porque el defecto se manifiesta sobre varias familias.
+fn juzga_error_de_afijo(err: &str, campo: &str, operador: &str, grafias: &[&str], contexto: &str) {
+    assert_eq!(
+        codigo_de(err),
+        "INVALID_SCHEMA",
+        "un type error de afijo es el MISMO tipo de fallo que el del orden y usa el MISMO código del \
+         catálogo —la historia no abre `ErrorCode` ({contexto})—: «{err}»"
+    );
+    let (_, mensaje) = codigo_y_mensaje(err)
+        .unwrap_or_else(|| panic!("{contexto} debe emitir «CÓDIGO: mensaje» (E26-H07): «{err}»"));
+    let bajo = mensaje.to_lowercase();
+    assert!(
+        menciona(&bajo, campo),
+        "el mensaje debe NOMBRAR el campo que choca ({contexto}): «{err}»"
+    );
+    assert!(
+        nombra_tipo(mensaje, grafias),
+        "…y el tipo REAL que el campo tiene en el documento, que es lo que le dice al agente por qué \
+         su operador de texto no aplica ({contexto}): «{err}»"
+    );
+    assert!(
+        menciona(&bajo, operador),
+        "…y el operador exacto: `starts_with` y `ends_with` fallan por la misma razón pero el agente \
+         corrige uno u otro ({contexto}): «{err}»"
+    );
+}
+
+/// Workspace del caso **G1-20**: `priority` numérico en dos documentos y **textual** en un tercero,
+/// más un `tags` lista.
+///
+/// La heterogeneidad es la que hace grave el defecto y discriminante el test: hoy
+/// `priority starts_with "3"` NO devuelve la lista vacía, devuelve `["z-textual.md"]` — una respuesta
+/// recortada y perfectamente creíble. `a-numerico.md` va primero en el orden total (`§20.7`), así que
+/// es el documento que el criterio de determinismo de E26-H08 obliga a nombrar.
+fn ws_afijo_heterogeneo() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "a-numerico.md",
+        "---\npriority: 3\nstatus: active\ntags:\n  - uno\n---\n\n# Numérico\n",
+    );
+    write(
+        dir.path(),
+        "b-numerico.md",
+        "---\npriority: 5\nstatus: draft\n---\n\n# Otro numérico\n",
+    );
+    write(
+        dir.path(),
+        "z-textual.md",
+        "---\npriority: \"3-alta\"\nstatus: activo\n---\n\n# Textual\n",
+    );
+    dir
+}
+
+/// **E29-H04** · Criterio `starts_with_sobre_numero_es_type_error` (por el wire):
+/// **Dado** un workspace con documentos cuyo `priority` es un **número**, **Cuando** se busca con
+/// `where: "priority starts_with \"3\""`, **Entonces** la respuesta es un error `INVALID_SCHEMA` cuyo
+/// mensaje nombra el campo, el operador y el tipo encontrado.
+///
+/// Es el caso G1-20 tal como se observó: por `knowledge_search`, con la respuesta recortada como
+/// única señal (y ninguna señal, por tanto).
+#[test]
+fn starts_with_sobre_numero_es_type_error() {
+    let dir = ws_afijo_heterogeneo();
+    let linea = linea_search(1, AFIJO_SOBRE_NUMERO, None);
+    let resp = roundtrip(dir.path(), &[linea.as_str()], 1);
+
+    let err = error_de(&resp[0]).unwrap_or_else(|| {
+        panic!(
+            "`{AFIJO_SOBRE_NUMERO}` sobre documentos con `priority` NUMÉRICO no es una consulta \
+             respondible: `starts_with` es un operador de TEXTO y el lenguaje no coerce (§20.8). Hoy \
+             `eval_afijo` devuelve `false` para todo campo no-string, así que los documentos \
+             numéricos se excluyen en silencio y la respuesta es la lista de los que casualmente \
+             tenían `priority` textual — el caso G1-20, donde 7 documentos con `priority: 3` \
+             desaparecieron sin un aviso.\nRespuesta recibida: {}",
+            resp[0]
+        )
+    });
+    juzga_error_de_afijo(
+        &err,
+        "priority",
+        "starts_with",
+        GRAFIAS_NUMBER,
+        "knowledge_search",
+    );
+    assert!(
+        err.contains("a-numerico.md"),
+        "…y debe nombrar el PRIMER documento del orden total que yerra (`a-numerico.md`), como todo \
+         type error desde E26-H08: «{err}»"
+    );
+}
+
+/// **E29-H04** · Criterio `ends_with_sobre_numero_es_type_error` (por el wire):
+/// **Dado** ese mismo workspace, **Cuando** se busca con `ends_with` sobre el mismo campo,
+/// **Entonces** el mismo error.
+#[test]
+fn ends_with_sobre_numero_es_type_error() {
+    let dir = ws_afijo_heterogeneo();
+    let linea = linea_search(1, "priority ends_with \"3\"", None);
+    let resp = roundtrip(dir.path(), &[linea.as_str()], 1);
+
+    let err = error_de(&resp[0]).unwrap_or_else(|| {
+        panic!(
+            "`priority ends_with \"3\"` debe fallar igual que su gemelo `starts_with`: comparten \
+             `eval_afijo`, y arreglar uno solo dejaría el hueco abierto por la mitad.\nRespuesta: {}",
+            resp[0]
+        )
+    });
+    juzga_error_de_afijo(
+        &err,
+        "priority",
+        "ends_with",
+        GRAFIAS_NUMBER,
+        "knowledge_search (ends_with)",
+    );
+}
+
+/// **E29-H04** · Criterio `starts_with_sobre_lista_es_type_error` (por el wire):
+/// **Dado** un documento cuyo campo `tags` es una **lista**, **Cuando** se evalúa
+/// `tags starts_with "x"`, **Entonces** es type error (no `false`).
+///
+/// La lista es la familia no-string más frecuente en un frontmatter real después del número, y la
+/// más tentadora para una coerción («¿y si comparo el primer elemento?»): el mensaje debe decir
+/// `list`, no `string`, o el agente corregirá lo que no es.
+#[test]
+fn starts_with_sobre_lista_es_type_error() {
+    let dir = ws_afijo_heterogeneo();
+    let linea = linea_search(1, "tags starts_with \"uno\"", None);
+    let resp = roundtrip(dir.path(), &[linea.as_str()], 1);
+
+    let err = error_de(&resp[0]).unwrap_or_else(|| {
+        panic!(
+            "`tags starts_with \"uno\"` sobre `tags: [uno, dos]` debe ser type error: una lista no \
+             tiene prefijo de texto, y que su primer elemento sí lo tenga es justo la coerción que \
+             §20.8 prohíbe.\nRespuesta: {}",
+            resp[0]
+        )
+    });
+    juzga_error_de_afijo(
+        &err,
+        "tags",
+        "starts_with",
+        GRAFIAS_LIST,
+        "knowledge_search (lista)",
+    );
+}
+
+/// **E29-H04** · Criterio `selection_con_type_error_de_afijo_aborta_el_plan`:
+/// **Dado** un `change_plan` con `selection.where` que produce el type error, **Cuando** se
+/// planifica, **Entonces** el plan **aborta** con `INVALID_SCHEMA` y **no se expande a ninguna
+/// operación** (coherencia con E26-H08).
+///
+/// Es la mitad cara del defecto: hoy `change_plan` con esta selección devuelve un plan con
+/// `normalizedOperations: []`, `impact.affectedCount: 0` y **`canApply: true`** — un plan vacío
+/// presentado como legítimo, que el agente puede aplicar creyendo que tocó los 7 documentos que
+/// buscaba. Y en el fixture heterogéneo es peor que vacío: planifica sobre `z-textual.md`, el único
+/// que casualmente casó.
+///
+/// El test aserta además la **igualdad exacta** con el error de `knowledge_search`: las dos tools
+/// comparten el lenguaje (`§20.10`), así que deben compartir veredicto **y** redacción, como ya
+/// exige `misma_consulta_mismo_error_en_search_y_en_plan` para el orden.
+#[test]
+fn selection_con_type_error_de_afijo_aborta_el_plan() {
+    let dir = ws_afijo_heterogeneo();
+    let l_search = linea_search(1, AFIJO_SOBRE_NUMERO, None);
+    let l_plan = linea_plan(2, AFIJO_SOBRE_NUMERO);
+    let resp = roundtrip(dir.path(), &[l_search.as_str(), l_plan.as_str()], 2);
+
+    let e_plan = error_de(&resp[1]).unwrap_or_else(|| {
+        let sc = &resp[1]["result"]["structuredContent"];
+        panic!(
+            "`change_plan` con `selection.where: {AFIJO_SOBRE_NUMERO}` debe ABORTAR: hoy \
+             `expand_selection` se salta en silencio todo documento cuya evaluación no sea \
+             `Ok(true)`, así que planifica sobre el subconjunto que casualmente casó y lo presenta \
+             como un plan legítimo (`canApply: {}`, `affectedCount: {}`). Un plan que afecta a menos \
+             ficheros de los que el agente seleccionó es la versión cara de la respuesta \
+             silenciosamente equivocada.\nRespuesta: {}",
+            sc["canApply"], sc["impact"]["affectedCount"], resp[1]
+        )
+    });
+    juzga_error_de_afijo(
+        &e_plan,
+        "priority",
+        "starts_with",
+        GRAFIAS_NUMBER,
+        "change_plan",
+    );
+
+    let e_search = error_de(&resp[0]).unwrap_or_else(|| {
+        panic!(
+            "`knowledge_search` con la misma consulta debe fallar también (ver \
+             `starts_with_sobre_numero_es_type_error`): {}",
+            resp[0]
+        )
+    });
+    assert_eq!(
+        e_search, e_plan,
+        "el MISMO `where` sobre el MISMO workspace debe dar el MISMO código y el MISMO mensaje por \
+         las dos tools que aceptan el lenguaje (§20.10, invariante #3)"
+    );
+}
+
+/// **E29-H04** · Control anti-vacuo: `starts_with` sobre un campo **string** sigue casando, y un
+/// campo **ausente** sigue excluyendo sin error.
+///
+/// Los dos criterios anti-vacuo de la historia juntos, por el wire, que es donde importa que el
+/// operador siga siendo usable: el arreglo no puede consistir en hacer ilegal `starts_with`, ni en
+/// convertir en error toda consulta sobre un frontmatter heterogéneo (que es la norma: la mitad de
+/// los documentos de cualquier base real no tienen la clave por la que se pregunta).
+///
+/// **Verde hoy**, y debe seguir verde.
+#[test]
+fn starts_with_sobre_string_y_campo_ausente_siguen_funcionando() {
+    let dir = ws_afijo_heterogeneo();
+    let l_string = linea_search(1, "status starts_with \"act\"", None);
+    let l_ausente = linea_search(2, "inexistente starts_with \"x\"", None);
+    let l_no_casa = linea_search(3, "status starts_with \"zzz\"", None);
+    let resp = roundtrip(
+        dir.path(),
+        &[l_string.as_str(), l_ausente.as_str(), l_no_casa.as_str()],
+        3,
+    );
+
+    assert_eq!(
+        error_de(&resp[0]),
+        None,
+        "`status starts_with \"act\"` es una comparación perfectamente tipada (string vs string): no \
+         puede convertirse en error"
+    );
+    let mut casan = search_paths(&resp[0]);
+    casan.sort();
+    assert_eq!(
+        casan,
+        vec!["a-numerico.md".to_string(), "z-textual.md".to_string()],
+        "…y sigue casando los documentos cuyo `status` empieza por «act» (`active` y `activo`), que \
+         es la prueba de que el operador conserva su trabajo"
+    );
+
+    assert_eq!(
+        error_de(&resp[1]),
+        None,
+        "un campo que NINGÚN documento tiene no es un type error: la ausencia cortocircuita antes de \
+         mirar tipos (E19-H01) y ese contrato no cambia"
+    );
+    assert!(
+        search_paths(&resp[1]).is_empty(),
+        "…y su respuesta es la lista vacía: {:?}",
+        search_paths(&resp[1])
+    );
+
+    assert_eq!(
+        error_de(&resp[2]),
+        None,
+        "y un `false` legítimo —string que no empieza por ese prefijo— sigue siendo ausencia de \
+         resultados, no un fallo"
+    );
+    assert!(
+        search_paths(&resp[2]).is_empty(),
+        "…con su lista vacía: {:?}",
+        search_paths(&resp[2])
+    );
+}
+
+// ---------------------------------------------------------------------------
+// E26-H09 — `metadata_inspect` habla el mismo dialecto de dot-paths que la consulta
+//
+// `App::metadata_inspect` normaliza su `field` con `FieldPath::parse`, mientras `where`, `filter` y
+// `has`/`missing` pasan todos por `core::parse::build_field_path` (E24-H07/H08). Dos dialectos para
+// el mismo texto, con tres consecuencias que estos tests reproducen por el wire:
+//   · `field: "frontmatter.graph.backlinks"` —la sintaxis que el propio mensaje de error del parser
+//     recomienda— busca una clave de primer nivel llamada `frontmatter` y devuelve `presentIn: 0`:
+//     silenciosamente equivocado sobre un dato que SÍ existe;
+//   · `field: "graph.backlinks"` inspecciona la clave del frontmatter, mientras el mismo texto en un
+//     `where` consulta el GRAFO: el mismo dot-path significa dos cosas según la tool;
+//   · `field: "frontmatter.status"` (la abreviatura legal del lenguaje) devuelve `presentIn: 0`
+//     sobre una base llena de `status`.
+//
+// Lo que la historia decide, y estos tests clavan: `metadata_inspect` hereda las TRES reglas del
+// lenguaje (abreviatura, anclaje y rechazo bajo namespace reservado) y, además, un namespace
+// reservado VÁLIDO no es inspeccionable —`metadata_inspect` describe metadata, y una propiedad
+// calculada no vive en ningún frontmatter—, con un mensaje que dice por dónde sí (`graph_query` o
+// el anclaje `frontmatter.`).
+// ---------------------------------------------------------------------------
+
+/// Workspace con una clave de frontmatter que **colisiona** con un namespace reservado
+/// (`graph.backlinks`, con el valor 7) más un `status` normal en 2 de los 3 documentos.
+///
+/// Discriminante por diseño: el 7 del frontmatter no coincide con ningún backlink real del grafo
+/// (los tres documentos están aislados, 0 backlinks), así que una respuesta que venga del grafo no
+/// puede confundirse con una que venga del frontmatter.
+fn ws_reservado_en_frontmatter() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "alfa.md",
+        "---\nstatus: draft\ngraph:\n  backlinks: 7\ndocument:\n  path: falso.md\n---\n\n# Alfa\n",
+    );
+    write(
+        dir.path(),
+        "bravo.md",
+        "---\nstatus: draft\n---\n\n# Bravo\n",
+    );
+    write(dir.path(), "charlie.md", "# Charlie\n\nsin frontmatter.\n");
+    dir
+}
+
+/// La llamada JSON-RPC a `metadata_inspect` en modo `field`.
 fn linea_inspect(id: u32, field: &str) -> String {
     linea_call(
         id,
