@@ -2144,8 +2144,8 @@ mod revertir_la_reversion {
 //
 // EL BLOQUEANTE QUE H01 DEJÓ ABIERTO
 //
-// El `changeSetId` es determinista (`compute_plan_hash` = `blake3(baseRevision,
-// normalizedOperations)`, `lib.rs` ~L1792), así que replanificar EXACTAMENTE el mismo cambio sobre la
+// El `changeSetId` es determinista (`compute_plan_hash` mezcla el dominio, la versión de semántica,
+// `baseRevision` y `normalizedOperations`, `lib.rs` ~L1792), así que replanificar EXACTAMENTE el mismo cambio sobre la
 // misma base devuelve el mismo `changeSetId` y, con él, el mismo `txnId`. H01 protegió el camino del
 // `revert` con `assert_txn_id_libre` (`recovery.rs:912`) pero dejó abierto el del `apply`
 // (`transaction.rs:280`, que llama a `backup_originals`/`create_journal`/`write_pending_receipt` sin

@@ -440,26 +440,28 @@ Ejemplo:
 {
   "op": "patch_frontmatter",
   "path": "docs/authentication.md",
-  "set": {
+  "patch": {
     "status": "accepted",
     "owners": ["platform", "security"],
-    "reviewed": true
-  },
-  "remove": [
-    "deprecated_field"
-  ]
+    "reviewed": true,
+    "deprecated_field": null
+  }
 }
 ```
 
 ## Requisitos de edición
 
-* Modificar solo las claves solicitadas.
-* Preservar las demás claves.
-* No eliminar frontmatter desconocido.
-* Mostrar en el plan si se reserializará todo el bloque.
-* Evitar reordenamientos innecesarios.
-* Mantener el cuerpo intacto.
-* Diferenciar explícitamente entre asignar `null` y eliminar una clave.
+* Aplicar el merge-patch RFC 7386 de forma recursiva: los objetos fusionan sus claves a cualquier
+  profundidad y un target que no sea objeto empieza como objeto vacío.
+* Preservar semánticamente las claves y descendientes que el patch no menciona; un `null` en un
+  objeto del patch elimina únicamente la clave nombrada.
+* Sustituir arrays y escalares de forma atómica, sin mergear arrays por índice.
+* La función pura del core devuelve `PatchedDocument.reserialized` para indicar si tuvo que
+  reserializar todo el bloque; esa señal es interna y no forma parte del wire de `change_plan`.
+* Evitar reordenamientos innecesarios y mantener el cuerpo intacto.
+* No existe, por el wire RFC 7386, una forma distinta de asignar literalmente `null` y eliminar una
+  clave: `null` es el sentinel de borrado. Un `null` dentro de una lista es un elemento de datos
+  porque la lista se sustituye completa.
 
 ---
 
@@ -1258,8 +1260,7 @@ Ejemplo:
     "where": "type = \"decision\" and status = \"draft\""
   },
   "operation": {
-    "type": "patch_frontmatter",
-    "set": {
+    "patch_frontmatter": {
       "status": "review"
     }
   }

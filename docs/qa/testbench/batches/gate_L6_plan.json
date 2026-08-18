@@ -63,7 +63,7 @@
     {
       "id": "L6-PLN-02-HASH-DETERMINISTA",
       "fresh_root": true,
-      "descripcion": "Origen: L6_pln.json PLN-02 e invariante transversal del informe §5 («hash determinista de planes», verificado conforme). El planHash es blake3(base ‖ ops canónicas) y NO depende del reloj.",
+      "descripcion": "Origen: L6_pln.json PLN-02 e invariante transversal del informe §5 («hash determinista de planes», verificado conforme). El planHash es blake3 del dominio/versionado, base y ops canónicas; NO depende del reloj.",
       "steps": [
         {
           "kind": "call",

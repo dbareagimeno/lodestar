@@ -415,7 +415,8 @@ superficie de producto; git queda como crate dormido) y `decisiones §0`. Descom
   - ✅ **E12-H08** — Tool `change_plan` (integración central, perfil standard): dispatcher de los 11
     ops crudos → normalizadores del core; `apply_normalized_ops` construye el bundle hipotético EN
     MEMORIA (no escribe, invariante #1); semantic_diff + assess_risk + validate_result + impact;
-    planHash determinista (blake3 de baseWorkspaceRevision + normalizedOperations, SIN reloj);
+    planHash determinista y versionado (dominio + versión de semántica + baseWorkspaceRevision +
+    normalizedOperations, SIN reloj; `expiresAt` queda fuera del hash);
     REVISION_CONFLICT por-op (ConceptRevision) y a nivel workspace. Cierra reserva de H05
     (patch_frontmatter/replace_body). outputSchema + mcp.yml. Juez ciego: APROBADA (4/4).
     **A rastrear**: gating por perfil (readonly debe rechazar tools de cambio) → E14-H03.
@@ -1787,6 +1788,21 @@ gates del crate. Las reservas: (1) la letra de [Cierre] choca con la atribución
 cargo-mutants (`:172` se lista bajo `semantic_diff` sin ser el gap (c)) — saldada dejándolo escrito
 aquí y en el cierre de `§27`; (2) la nota de equivalencia original daba a entender un superviviente
 inmatable que no existe — saldada reescribiéndola (es el párrafo de arriba).
+
+## Issue #46 — merge-patch recursivo de `patch_frontmatter` — CORREGIDO (preparado para 0.6.2)
+
+El merge de frontmatter ya no sustituye un objeto anidado por el fragmento superficial recibido.
+`model::merge_frontmatter_patch` es el único núcleo RFC 7386 que reutilizan el parche raw, la
+simulación de `change_plan`, la aplicación de `change_apply` y la creación de documentos. Conserva
+hermanos y descendientes no mencionados, elimina `null` en el objeto que lo contiene, sustituye
+arrays atómicamente y trata un objeto sobre un target no objeto como un mapa vacío. La igualdad
+semántica se detecta antes de escribir, y el cuerpo Markdown queda intacto.
+
+La regresión está cubierta por un oráculo RFC 7386 independiente en
+[`crates/lodestar-core/tests/patch_frontmatter_rfc7386.rs`](crates/lodestar-core/tests/patch_frontmatter_rfc7386.rs),
+por `change_plan`/`change_apply` en App y por un proceso MCP real. Contrato, arquitectura, guía de
+cambios y changelog están actualizados. El salto de `PLAN_SEMANTICS_VERSION` de 2 a 3 invalida
+planes persistidos con la semántica superficial antes de que `change_apply` pueda escribirlos.
 
 ## Épica de evidencia (E33) — EN CURSO (arrancada 2026-08-10)
 

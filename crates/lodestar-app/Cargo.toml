@@ -42,8 +42,8 @@ tempfile = "=3.24.0"
 # (`escala.rs`, `corpus_realista.rs`) lo consumen desde ahí.
 lodestar-fixtures = { workspace = true }
 # Los tests de `plan.rs` que forjan un plan PERSISTIDO (E28-H03/H04, adenda) tienen que recomputar
-# el `planHash` exactamente como lo hace `compute_plan_hash` — `blake3(baseRevision ‖ 0x00 ‖ JSON de
-# las normalizedOperations)`— o el gate de `change_apply` los rechazaría con `PLAN_STALE` y el test
-# pasaría por la razón equivocada. Es la misma dependencia (y la misma versión del workspace) que
-# usa el crate, no un segundo criterio de hash.
+# el `planHash` exactamente como lo hace `compute_plan_hash` — dominio `lodestar/change-plan`, versión
+# de semántica, `baseRevision` y JSON de las `normalizedOperations`, con separadores 0x00— o el gate
+# de `change_apply` los rechazaría con `PLAN_STALE` y el test pasaría por la razón equivocada. Es la
+# misma dependencia (y la misma versión del workspace) que usa el crate, no un segundo criterio.
 blake3 = { workspace = true }
