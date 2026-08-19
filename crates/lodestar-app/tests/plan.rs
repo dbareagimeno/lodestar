@@ -626,8 +626,9 @@ fn destino_libre_y_origen_inexistente_conservan_su_codigo() {
 //   - `normalizedOperations` ← las dos ops colisionadas, serializadas por el MISMO `serde` que usa
 //     el motor (se construyen como `NormalizedOperation` de `core::types`, no como JSON a mano);
 //   - `planHash` ← recomputado con la fórmula literal de `compute_plan_hash`
-//     (`blake3(baseWorkspaceRevision ‖ 0x00 ‖ serde_json::to_vec(ops))`), sobre la MISMA base que
-//     el workspace tiene ahora, de modo que el paso (3) del apply lo dé por bueno;
+//     (`blake3("lodestar/change-plan" ‖ 0x00 ‖ PLAN_SEMANTICS_VERSION como u32 BE ‖ 0x00 ‖
+//     baseWorkspaceRevision ‖ 0x00 ‖ serde_json::to_vec(ops))`), sobre la MISMA base que el
+//     workspace tiene ahora, de modo que el paso (3) del apply lo dé por bueno;
 //   - `changeSetId` ← `changeset:<hash desnudo>`, y el fichero se renombra a `<hash desnudo>.json`,
 //     que es la convención de `plan_file_name`/`plan_file_path` por la que `load_plan` lo encuentra;
 //   - `expiresAt` ← el que puso `change_plan` (futuro), intacto.
@@ -2055,7 +2056,7 @@ fn no_op_operations_va_vacio_cuando_todo_tuvo_efecto() {
 ///
 /// Los planes viven en `.lodestar/runtime/plans/` con un TTL propio, así que un binario nuevo puede
 /// encontrarse planes escritos por el anterior. El campo va **fuera del `planHash`** (que cubre
-/// `baseWorkspaceRevision ‖ normalizedOperations`), de modo que su ausencia no invalida el hash: es
+/// el dominio, la versión interna, `baseWorkspaceRevision ‖ normalizedOperations`), de modo que su ausencia no invalida el hash: es
 /// el mismo patrón con que E29-H07 introdujo `policy`, y este test es la guardia que aquella no
 /// tuvo.
 #[test]

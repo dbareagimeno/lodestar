@@ -202,9 +202,12 @@ pub struct Backlinks { pub inbound: Vec<LinkRef>,   // quién enlaza aquí (con 
 #[serde(rename_all = "camelCase")]
 pub struct Neighborhood { pub root: RelPath, pub nodes: Vec<GraphNode>, pub edges: Vec<Edge> }
 
-/// Patch de frontmatter (merge_frontmatter / MCP update_frontmatter). Semántica merge-patch (RFC 7386):
-/// clave→Some(v) escribe/reemplaza; clave→None BORRA; clave AUSENTE del mapa = no se toca. El tercer
-/// estado se modela con la pertenencia al mapa (evita el Option<Option<_>> y su trampa en serde).
+/// Patch de frontmatter (merge_frontmatter / MCP patch_frontmatter). Semántica merge-patch (RFC 7386):
+/// `Some(v)` escribe/reemplaza y `None` BORRA una clave de primer nivel; si `v` es un objeto, sus
+/// claves se fusionan recursivamente, un `null` en cualquier objeto del patch borra solo esa clave
+/// y los arrays se sustituyen atómicamente. Una clave ausente del patch, a cualquier profundidad,
+/// no se toca. El tercer estado se modela con la pertenencia al mapa (evita el Option<Option<_>> y
+/// su trampa en serde).
 pub struct FrontmatterPatch(pub BTreeMap<String, Option<serde_yaml::Value>>);
 ```
 
@@ -1141,10 +1144,13 @@ claves pedidas, preserva las demás, no reordena innecesariamente y mantiene el 
 semántica es **merge-patch RFC 7386**, sin más (corregido en E30-H03, `decisiones §23/D-02` —
 criterio ratificado el 2026-08-06):
 
-- una clave **ausente** del patch no se toca;
-- una clave presente con un valor **se escribe o reemplaza** con él;
-- una clave presente con valor **`null` se ELIMINA**. Eso es exactamente lo que RFC 7386 define, no
-  una capacidad adicional del motor.
+- una clave **ausente** del patch no se toca, aunque esté dentro de un objeto anidado;
+- una clave presente con un objeto se **fusiona recursivamente**: si el target no es un objeto se
+  empieza desde `{}`, y se conservan los hermanos y descendientes que el patch no menciona;
+- una clave presente con un valor no objeto —incluido un array— se **sustituye atómicamente**;
+- una clave presente con valor **`null` se ELIMINA** en cualquier objeto del patch. Un `null` dentro
+  de un array se conserva como elemento porque el array completo es atómico. Es exactamente lo que
+  RFC 7386 define, no una operación superficial de primer nivel.
 
 Corolario, y es el punto que este párrafo afirmaba al revés hasta v0.5.0: **no existe forma, por
 esta vía, de asignar literalmente `null` a una clave de primer nivel** — el wire no puede expresar
@@ -1153,15 +1159,16 @@ esa distinción porque el `null` es el sentinel de borrado. Verificado ejecutand
 tipo del core (`FrontmatterPatch`) sí sabría representar es **inalcanzable desde
 `patch_frontmatter`**, que serializa como merge-patch.
 
-Matiz verificado, porque el borrado **no** es uniforme por profundidad: el `null` es sentinel de
-borrado **solo en el primer nivel del patch**. Anidado dentro de un mapa o de una lista del valor
-(`{"meta": {"a": null}}`, `{"tags": [null, 1]}`) sobrevive como null YAML literal, porque a partir
-del primer nivel el valor se escribe tal cual en vez de recorrerse como patch. Un `null` ya presente
-en el fichero también se preserva si el patch no nombra su clave.
+Matiz verificado sobre el wire: el `null` es sentinel de borrado en cada mapa que se recorre, pero
+no se interpreta dentro de una lista (`{"meta": {"a": null}}` borra `meta.a`, mientras que
+`{"tags": [null, 1]}` sustituye `tags` por una lista cuyo primer elemento es null). Un `null` ya
+presente en el fichero se preserva si el patch no nombra su ruta.
 
 Ampliar el wire para expresar «asignar `null`» queda **fuera de alcance** salvo que aparezca un caso
 real que lo pida (`decisiones §23`): quien necesite ese valor debe pasarlo como cualquier otro
-escalar, y el propio RFC no lo permite. El plan debe declarar si el bloque se reserializará entero.
+escalar, y el propio RFC no lo permite. Cuando un objeto anidado no puede editarse por líneas —por
+ejemplo, una entrada flow que debe fusionarse con sus hermanas— el plan puede reserializar el bloque
+entero; la igualdad semántica se detecta antes y queda como `noOpOperations` sin escribir.
 
 > **E31-H02 (`decisiones §26`)**: reescribir el **cuerpo** ya no reserializa nunca la cabecera. El
 > brazo `ReplaceBody` —al que normalizan `replace_text`, `edit_section`, `replace_body`,

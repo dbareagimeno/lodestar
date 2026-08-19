@@ -82,6 +82,13 @@ el que ata las dos mutaciones a la garantía de `E31-H02`.
 Es el mismo churn que `§26` acaba de erradicar en la otra mitad del camino de escritura, en la mitad
 que ya era quirúrgica desde `E16-H04` — y sin test que lo fije.
 
+**Actualización posterior (#46, 2026-08-19).** La implementación recursiva detecta la igualdad
+semántica antes de entrar en este plan, por lo que el antiguo guard `edits.is_empty()` dejó de ser
+necesario y fue retirado. La garantía que sí introduce #46 —fusionar un objeto sobre un escalar sin
+perder formato de hermanos— queda fijada por la regresión de la historia en
+`crates/lodestar-core/tests/patch_frontmatter_rfc7386.rs` y por la pasada de mutantes de esta
+entrega.
+
 **Test propuesto** — `documento.rs`, `patch_sin_efecto_devuelve_el_documento_byte_a_byte()`:
 frontmatter con formato distintivo (flow `tags: [a, b]`, comillas, un comentario), patch que escribe
 el valor que ya estaba, `assert_eq!(resultado.raw, raw)` exacto y `reserialized == false`. Con un

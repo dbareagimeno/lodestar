@@ -11,7 +11,7 @@
 
 use serde_yaml::Value as Yaml;
 
-use crate::types::{FmError, ParsedFrontmatter};
+use crate::types::{FmError, FrontmatterPatch, ParsedFrontmatter};
 
 /// El **BOM UTF-8** (`U+FEFF`, bytes `EF BB BF`) tal y como puede aparecer al frente de un `.md`
 /// (E24-H01).
@@ -375,6 +375,67 @@ pub fn build_raw(fm: Option<&ParsedFrontmatter>, body: &str) -> String {
     format!("---\n{y}\n---\n\n{body_trimmed}")
 }
 
+/// Aplica la semántica de merge-patch RFC 7386 al frontmatter, conservando la distinción interna
+/// de [`FrontmatterPatch`]: `None` elimina una clave de primer nivel y `Some(Yaml::Null)` escribe
+/// un null YAML explícito. Los valores anidados ya no tienen esa distinción: allí un null del
+/// patch es el sentinel RFC que elimina únicamente la clave nombrada.
+///
+/// La función es pura y es el único punto de merge que comparten la edición raw, la creación y el
+/// replay de planes. Un objeto sobre un target que no sea objeto parte de un mapa vacío; arrays y
+/// escalares sustituyen el valor completo.
+pub(crate) fn merge_frontmatter_patch(target: Yaml, patch: &FrontmatterPatch) -> Yaml {
+    let mut target = match target {
+        Yaml::Mapping(map) => map,
+        _ => serde_yaml::Mapping::new(),
+    };
+
+    for (key, patch_value) in &patch.0 {
+        let key = Yaml::String(key.clone());
+        match patch_value {
+            None => {
+                target.shift_remove(&key);
+            }
+            Some(patch_value) => {
+                if let Some(existing) = target.get_mut(&key) {
+                    let previous = std::mem::replace(existing, Yaml::Null);
+                    *existing = merge_patch_value(previous, patch_value);
+                } else {
+                    target.insert(key, merge_patch_value(Yaml::Null, patch_value));
+                }
+            }
+        }
+    }
+
+    Yaml::Mapping(target)
+}
+
+/// Núcleo recursivo RFC 7386. La representación de `FrontmatterPatch` solo se adapta en el
+/// nivel exterior; a partir de aquí todos los objetos se recorren y todos los null eliminan su
+/// clave, mientras que los valores no objeto sustituyen atómicamente.
+fn merge_patch_value(target: Yaml, patch: &Yaml) -> Yaml {
+    let Yaml::Mapping(patch_map) = patch else {
+        return patch.clone();
+    };
+
+    let mut target = match target {
+        Yaml::Mapping(map) => map,
+        _ => serde_yaml::Mapping::new(),
+    };
+    for (key, patch_value) in patch_map {
+        if *patch_value == Yaml::Null {
+            target.shift_remove(key);
+            continue;
+        }
+        if let Some(existing) = target.get_mut(key) {
+            let previous = std::mem::replace(existing, Yaml::Null);
+            *existing = merge_patch_value(previous, patch_value);
+        } else {
+            target.insert(key.clone(), merge_patch_value(Yaml::Null, patch_value));
+        }
+    }
+    Yaml::Mapping(target)
+}
+
 /// El documento resultante de aplicar un [`crate::types::FrontmatterPatch`]
 /// (`ARCHITECTURE.md §20.4`, E16-H04).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -409,8 +470,9 @@ pub struct PatchedDocument {
 ///    claves tocadas, y las claves nuevas se añaden al final del bloque. Se toma cuando **cada**
 ///    clave del patch, o bien no existe en el bloque, o bien existe en el primer nivel con su
 ///    valor escrito **en una sola línea** (`clave: escalar`, `clave: [a, b]` en flow style,
-///    `clave:` vacío). Las líneas no tocadas llegan al resultado **byte a byte**: el flow style
-///    sigue en flow, las comillas siguen como estaban y los comentarios YAML sobreviven.
+///    `clave:` vacío), y no hay que fusionar un objeto anidado existente. Las líneas no tocadas
+///    llegan al resultado **byte a byte**: el flow style sigue en flow, las comillas siguen como
+///    estaban y los comentarios YAML sobreviven.
 /// 2. **Reserialización** (`reserialized: true`) — se vuelca el mapa entero con `serde_yaml`,
 ///    perdiendo el texto original del bloque pero **ningún dato**: se conservan todas las claves,
 ///    su orden de aparición y sus tipos. Se toma cuando alguna clave tocada ocupa varias líneas
@@ -442,8 +504,10 @@ pub fn patch_frontmatter(
         }
         // Sin bloque: se crea uno con las claves que el patch escribe (`§20.4`).
         SplitFront::Sin => {
-            let mut map = serde_yaml::Mapping::new();
-            crate::document_set::apply_patch(&mut map, patch.clone());
+            let map = serde_yaml::Mapping::new();
+            let Yaml::Mapping(map) = merge_frontmatter_patch(Yaml::Mapping(map), patch) else {
+                unreachable!("un patch de frontmatter siempre produce un objeto raíz")
+            };
             if map.is_empty() {
                 // Un patch que solo borra claves inexistentes no toca el documento.
                 return Ok(PatchedDocument {
@@ -470,6 +534,16 @@ pub fn patch_frontmatter(
         .as_mapping()
         .cloned()
         .unwrap_or_else(serde_yaml::Mapping::new);
+    let merged = merge_frontmatter_patch(valor.clone(), patch);
+
+    // La igualdad semántica es un no-op incluso si el texto original usa flow style, comentarios
+    // o una representación distinta. En ese caso no se toca ni se reserializa ningún byte.
+    if merged == valor {
+        return Ok(PatchedDocument {
+            raw: raw.to_string(),
+            reserialized: false,
+        });
+    }
 
     // Claves de primer nivel del mapa parseado, rendidas a texto y en orden de aparición: es la
     // referencia contra la que se valida el escaneo por líneas.
@@ -480,19 +554,19 @@ pub fn patch_frontmatter(
             && entradas.iter().map(|e| &e.clave).eq(claves.iter())
     });
 
-    match plan_surgical(patch, escaneo.as_deref(), &claves) {
-        // Sin ediciones el documento no cambia: se devuelve byte a byte.
-        Some(edits) if edits.is_empty() => Ok(PatchedDocument {
-            raw: raw.to_string(),
-            reserialized: false,
-        }),
+    match plan_surgical(
+        patch,
+        &mapa,
+        merged.as_mapping().expect("merge raíz objeto"),
+        escaneo.as_deref(),
+        &claves,
+    ) {
         Some(edits) => Ok(PatchedDocument {
             raw: splice(raw, &span, &apply_line_edits(texto, &edits)),
             reserialized: false,
         }),
         None => {
-            let mut mapa = mapa;
-            crate::document_set::apply_patch(&mut mapa, patch.clone());
+            let mapa = merged.as_mapping().expect("merge raíz objeto").clone();
             Ok(PatchedDocument {
                 raw: splice(raw, &span, &dump_mapping(&mapa)),
                 reserialized: true,
@@ -665,6 +739,8 @@ struct LineEdit {
 /// (`entradas` es `None`), o alguna clave tocada ocupa más de una línea.
 fn plan_surgical(
     patch: &crate::types::FrontmatterPatch,
+    original: &serde_yaml::Mapping,
+    merged: &serde_yaml::Mapping,
     entradas: Option<&[TopLevelEntry]>,
     claves: &[String],
 ) -> Option<Vec<LineEdit>> {
@@ -676,12 +752,26 @@ fn plan_surgical(
             // Borrar una clave que no está es un no-op: no necesita ni localizar ni reserializar.
             (false, None) => continue,
             // Clave nueva: se añade una línea al final del bloque.
-            (false, Some(v)) => {
+            (false, Some(_)) => {
                 entradas?;
-                anexos.extend(render_entry(clave, v));
+                anexos.extend(render_entry(
+                    clave,
+                    merged.get(Yaml::String(clave.clone()))?,
+                ));
             }
             (true, _) => {
                 let entrada = entradas?.iter().find(|e| &e.clave == clave)?;
+                // Un objeto patch sobre un objeto existente requiere recorrer el valor completo.
+                // En particular, una entrada flow ocupa una sola línea pero no puede sustituirse
+                // por el patch superficial sin perder sus hermanas.
+                if matches!(valor, Some(Yaml::Mapping(_)))
+                    && matches!(
+                        original.get(Yaml::String(clave.clone())),
+                        Some(Yaml::Mapping(_))
+                    )
+                {
+                    return None;
+                }
                 if entrada.fin != entrada.inicio + 1 {
                     // Valor multilínea (mapa/lista en block style, block scalar): tocarlo es
                     // tocar la estructura entera → reserialización.
@@ -690,10 +780,10 @@ fn plan_surgical(
                 edits.push(LineEdit {
                     inicio: entrada.inicio,
                     fin: entrada.fin,
-                    lineas: valor
-                        .as_ref()
-                        .map(|v| render_entry(clave, v))
-                        .unwrap_or_default(),
+                    lineas: match valor {
+                        Some(_) => render_entry(clave, merged.get(Yaml::String(clave.clone()))?),
+                        None => Vec::new(),
+                    },
                 });
             }
         }

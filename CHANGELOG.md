@@ -7,6 +7,15 @@ y el proyecto sigue [Versionado Semántico](https://semver.org/lang/es/).
 
 ## [No publicado]
 
+### Corregido
+
+- **`patch_frontmatter` ya no pierde metadata anidada** (`#46`, preparado para 0.6.2). El merge-patch
+  ahora sigue RFC 7386 recursivamente: los objetos conservan hermanos y descendientes no mencionados,
+  `null` elimina solo la clave de su objeto y arrays/escalares se sustituyen atómicamente. La
+  simulación de `change_plan`, `change_apply` y el wire real comparten la misma semántica. Se evita
+  además reescribir un documento cuando el resultado es un no-op semántico. Los planes persistidos
+  con la semántica anterior se rechazan como `PLAN_STALE` en vez de reaplicarse con reglas nuevas.
+
 ## [0.6.1] - 2026-08-17
 
 ### Cambiado
