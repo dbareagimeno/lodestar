@@ -191,7 +191,7 @@ jobs:
   lodestar:
     runs-on: ubuntu-latest
     env:
-      LODESTAR_VERSION: v0.6.1
+      LODESTAR_VERSION: v0.6.2
       LODESTAR_TARGET: x86_64-unknown-linux-gnu
     steps:
       - uses: actions/checkout@v4
