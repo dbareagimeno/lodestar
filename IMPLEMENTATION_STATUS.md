@@ -15,7 +15,7 @@
 > corre desde E23-H06); `clippy -D warnings` y `cargo doc -D warnings` limpios; pureza del core
 > verificada por CI. **El recuento exacto de tests lo fija la nota de release** (E24-H18:
 > `cargo test --workspace -- --list | grep -c ": test$"`); fijado en la **v0.5.0**: **541 tests**
-> (eran 486 al cerrar E24, antes de las 11 historias de E25/E26). La **v0.6.1** enumera **788 tests**
+> (eran 486 al cerrar E24, antes de las 11 historias de E25/E26). La **v0.6.2** enumera **831 tests**
 > con el mismo criterio; no incluye los tests gateados tras `--features test-failpoints`.
 >
 > **Ya no forman parte de este repo**: la app de escritorio (Tauri + Svelte, movida a
@@ -47,7 +47,7 @@
 ## Cómo correrlo
 
 ```bash
-cargo test --workspace --locked                       # 788 tests (v0.6.1)
+cargo test --workspace --locked                       # 831 tests (v0.6.2)
 cargo test -p lodestar-workspace --features test-failpoints --locked   # crash-recovery (E13-H06)
 cargo test -p lodestar-app --features test-failpoints --locked         # ventana de publicación (E25-H01)
 cargo run -p lodestar-cli -- check [--path <dir>]     # la puerta de CI (exit 0/1/2/3)
