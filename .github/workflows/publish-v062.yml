@@ -1,0 +1,89 @@
+name: Publish v0.6.2
+
+on:
+  push:
+    branches:
+      - agent/publish-v062
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Publica v0.6.2 solo si el borrador está completo
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ -f .release-v062-published ]]; then
+            echo "Marcador de publicación ya presente; no hay nada que hacer."
+            exit 0
+          fi
+
+          tag="v0.6.2"
+          expected_sha="73251af05fa2c4589447294719854801a23ae4aa"
+
+          git fetch --tags origin
+          actual_sha="$(git rev-list -n 1 "$tag")"
+          if [[ "$actual_sha" != "$expected_sha" ]]; then
+            echo "ERROR: $tag apunta a $actual_sha, no a $expected_sha" >&2
+            exit 1
+          fi
+
+          gh release view "$tag" --json isDraft,assets,url,tagName > /tmp/release.json
+
+          expected_assets=(
+            "SHA256SUMS-aarch64-apple-darwin.txt"
+            "SHA256SUMS-x86_64-pc-windows-msvc.txt"
+            "SHA256SUMS-x86_64-unknown-linux-gnu.txt"
+            "lodestar-cli-v0.6.2-aarch64-apple-darwin.tar.gz"
+            "lodestar-cli-v0.6.2-x86_64-pc-windows-msvc.zip"
+            "lodestar-cli-v0.6.2-x86_64-unknown-linux-gnu.tar.gz"
+          )
+
+          printf '%s\n' "${expected_assets[@]}" | sort > /tmp/expected-assets.txt
+          jq -r '.assets[].name' /tmp/release.json | sort > /tmp/actual-assets.txt
+
+          if ! diff -u /tmp/expected-assets.txt /tmp/actual-assets.txt; then
+            echo "ERROR: el release no contiene exactamente los 6 artefactos esperados." >&2
+            exit 1
+          fi
+
+          asset_count="$(jq '.assets | length' /tmp/release.json)"
+          if [[ "$asset_count" != "6" ]]; then
+            echo "ERROR: se esperaban 6 artefactos y hay $asset_count" >&2
+            exit 1
+          fi
+
+          if jq -e '.isDraft == true' /tmp/release.json >/dev/null; then
+            gh release edit "$tag" --draft=false
+          fi
+
+          gh release view "$tag" --json isDraft,assets,url,tagName > /tmp/published.json
+          if ! jq -e '.isDraft == false and (.assets | length == 6)' /tmp/published.json >/dev/null; then
+            echo "ERROR: la release no quedó publicada correctamente." >&2
+            exit 1
+          fi
+
+          release_url="$(jq -r '.url' /tmp/published.json)"
+          {
+            echo "tag=$tag"
+            echo "sha=$actual_sha"
+            echo "assets=6"
+            echo "draft=false"
+            echo "url=$release_url"
+          } > .release-v062-published
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .release-v062-published
+          git commit -m "chore: record v0.6.2 publication"
+          git push
