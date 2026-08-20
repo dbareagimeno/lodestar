@@ -7,6 +7,21 @@ y el proyecto sigue [Versionado Semántico](https://semver.org/lang/es/).
 
 ## [No publicado]
 
+## [0.6.2] - 2026-08-20
+
+### Corregido
+
+- **Alta severidad — `patch_frontmatter` ya no pierde metadata anidada** (`#46`). El merge-patch
+  ahora sigue RFC 7386 recursivamente: los objetos conservan hermanos y descendientes no mencionados,
+  `null` elimina solo la clave de su objeto y arrays/escalares se sustituyen atómicamente. La
+  simulación de `change_plan`, `change_apply` y el wire real comparten la misma semántica. Se evita
+  además reescribir un documento cuando el resultado es un no-op semántico. Los planes persistidos
+  con la semántica anterior se rechazan como `PLAN_STALE` en vez de reaplicarse con reglas nuevas.
+
+> **Recuento de tests de esta versión: 831** — medido con el criterio de E24-H18,
+> `cargo test --workspace -- --list | grep -c ": test$"`; no incluye los tests gateados tras
+> `--features test-failpoints`.
+
 ## [0.6.1] - 2026-08-17
 
 ### Cambiado
@@ -718,7 +733,8 @@ y pipeline de release multiplataforma.
 - **Heading por defecto de los conceptos**: ahora `# {Tipo} - {Nombre}` (antes
   `# Resumen`).
 
-[No publicado]: https://github.com/dbareagimeno/lodestar/compare/v0.6.1...HEAD
+[No publicado]: https://github.com/dbareagimeno/lodestar/compare/v0.6.2...HEAD
+[0.6.2]: https://github.com/dbareagimeno/lodestar/compare/v0.6.1...v0.6.2
 [0.6.1]: https://github.com/dbareagimeno/lodestar/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/dbareagimeno/lodestar/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/dbareagimeno/lodestar/compare/v0.4.0...0.5.0

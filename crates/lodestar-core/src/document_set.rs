@@ -385,28 +385,3 @@ impl DocumentSet {
         }
     }
 }
-
-/// Aplica un `FrontmatterPatch` (merge-patch RFC 7386) sobre el mapa YAML de un frontmatter:
-/// `Some(v)` escribe/reemplaza el valor **tal cual** (sin coercionarlo a string), `None` borra la
-/// clave, y una clave ausente del patch no se toca.
-///
-/// Escribir sobre una clave existente conserva su posición y borrar usa `shift_remove` (no
-/// `swap_remove`): el orden de aparición del resto de claves queda intacto.
-///
-/// `pub(crate)`: además de [`DocumentSet::merge_frontmatter`], lo reutiliza `crate::plan`
-/// (E12-H08, `apply_normalized_ops`) para materializar en memoria un `Create`/`PatchFrontmatter`
-/// sobre el `FileMap` hipotético — una sola lógica de merge-patch en todo el core (invariante #3
-/// de `CLAUDE.md`), nunca reimplementada.
-pub(crate) fn apply_patch(map: &mut serde_yaml::Mapping, patch: FrontmatterPatch) {
-    for (key, val) in patch.0 {
-        let key = serde_yaml::Value::String(key);
-        match val {
-            Some(v) => {
-                map.insert(key, v);
-            }
-            None => {
-                map.shift_remove(&key);
-            }
-        }
-    }
-}

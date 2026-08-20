@@ -533,7 +533,7 @@ fn runtime_plan_lleva_version_interna_y_planresult_no_la_expone() {
         serde_json::from_str(&std::fs::read_to_string(&files[0]).unwrap()).unwrap();
     assert_eq!(
         runtime.get("plannerSemanticsVersion"),
-        Some(&json!(2)),
+        Some(&json!(plan::PLAN_SEMANTICS_VERSION)),
         "el plan runtime nuevo debe fijar la semántica interna vigente: {runtime}"
     );
 }

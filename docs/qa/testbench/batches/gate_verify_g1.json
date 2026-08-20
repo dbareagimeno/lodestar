@@ -135,7 +135,7 @@
     {
       "id": "V-G1-14-PATCH-RFC-7386",
       "fresh_root": true,
-      "descripcion": "Origen: `batches/verify_G1-14.json`/`verify_G1-14b.json` + hallazgo D-02 de `decisiones §23` (ARCHITECTURE §20.4 prometía distinguir asignar-`null` de eliminar-clave, y el wire no puede expresarlo), RESUELTO por E30-H03 con el criterio ratificado: corregir §20.4 y declarar RFC 7386 en los cinco sitios.",
+      "descripcion": "Origen: `batches/verify_G1-14.json`/`verify_G1-14b.json` + hallazgo D-02 de `decisiones §23`; el bloqueo #46 corrige la semántica superficial y la hace coincidir con RFC 7386 recursivo en ARCHITECTURE §20.4, el contrato y el wire.",
       "steps": [
         {
           "kind": "shell",
@@ -177,9 +177,10 @@
           "kind": "shell",
           "cmd": "grep -A1 '^nuevo_del_banco:' fixtures/nulo.md",
           "expect": {
-            "describe": "D-02, segunda mitad — el matiz que E30-H03 VERIFICÓ EJECUTANDO y que ninguna fuente decía: un `null` ANIDADO **sobrevive** como YAML null literal, porque el merge-patch solo recorre el nivel que fusiona. Las dos mitades juntas son el contrato real de `patch_frontmatter`.",
+            "describe": "#46: un `null` dentro de un objeto de patch borra la clave anidada nombrada; el objeto vacío resultante conserva la semántica RFC 7386 y no pierde otras claves.",
             "rc": 0,
-            "contains": { "stdout": "anidado: null" }
+            "contains": { "stdout": "nuevo_del_banco:" },
+            "not_contains": { "stdout": "anidado: null" }
           }
         }
       ]

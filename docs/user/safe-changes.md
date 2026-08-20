@@ -205,7 +205,7 @@ Lodestar has no document types.
 | `op` | Does |
 |---|---|
 | `create` | Creates a document with optional frontmatter and body |
-| `patch_frontmatter` | Merges keys into the frontmatter, preserving untouched lines byte for byte |
+| `patch_frontmatter` | Applies a recursive RFC 7386 merge-patch; untouched metadata survives, and untouched lines stay byte-for-byte when surgical editing is possible |
 | `replace_body` | Replaces the body, keeping the frontmatter |
 | `replace_text` | Replaces occurrences of a literal string, optionally asserting how many |
 | `edit_section` | Edits the content under a heading path |
@@ -214,7 +214,12 @@ Lodestar has no document types.
 
 Parameter names and shapes live in [`contracts/mcp.yml`](../../contracts/mcp.yml) under
 `change_plan`; they are also declared in the tool's `inputSchema`, which your MCP client can show
-you. Three behaviours are worth calling out — two refusals by design, and one silence by design:
+you. `patch_frontmatter` follows RFC 7386 recursively: an object patch preserves unmentioned
+siblings and descendants, a `null` removes the named key at that object level, and an array replaces
+the complete previous array. If the target is not an object, an object patch starts from an empty
+object. A nested merge may reserialize the frontmatter block, but it never drops metadata the patch
+did not name and it never changes the Markdown body. Three behaviours are worth calling out — two
+refusals by design, and one silence by design:
 
 **`delete` never guesses what to do with inbound links.** If the document has backlinks, the policy
 is mandatory:
@@ -271,10 +276,10 @@ knowing:
   or a `patch_frontmatter` writing the scalar that was already there. The comparison is against the
   state immediately before that terminal operation, not against the beginning or end of the whole
   plan. Two cases catch people out:
-  - **`patch_frontmatter` over a collection in flow style.** Patching `tags` with `["a","b"]` when
-    the block already reads `tags: [a, b]` is *not* a no-op: the key you patch is rewritten in block
-    style, so the bytes differ even though the value does not. Untouched keys keep their formatting;
-    the patched one does not.
+  - **`patch_frontmatter` with an already equal value.** A scalar, array, or nested object patch is
+    a no-op when the RFC 7386 result is semantically identical, even if the existing YAML uses flow
+    style or comments. A nested patch that really changes a value may reserialize the whole block;
+    the merge still preserves every unmentioned sibling and descendant.
   - **`edit_section` with the content it already had.** A no-op *only if the bytes come out the
     same*, and section editing fixes the blank lines around the section — so often they do not.
 - The verdict is **per terminal operation**. Several operations on the same path receive independent
@@ -296,8 +301,10 @@ the answer.
 > and does not show up in `semanticDiff.modified`. Up to v0.5.0 it did — every body rewrite rebuilt
 > the whole document and reserialized its frontmatter, so a block written in YAML flow style
 > (`tags: [a, b]`) came back in block style. **Changing a body never reformats the header now**, and
-> editing the frontmatter leaves every key you did not name byte for byte. The one thing still
-> reserialized is the key a `patch_frontmatter` actually writes.
+> editing the frontmatter leaves every key you did not name semantically intact. A simple patch can
+> edit one entry in place; a recursive object patch may reserialize the block because preserving
+> its nested siblings requires materializing the merged value. In either case the body and all
+> metadata outside the changed semantic value survive, and an equal result is not written.
 
 ## Bulk selections
 

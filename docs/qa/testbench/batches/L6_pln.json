@@ -12,7 +12,7 @@
        {"kind": "call", "tool": "change_plan", "arguments": {"operations": [{"op": "patch_frontmatter", "path": "pendientes/wol-bastion.md", "patch": {"priority": 1}}]}},
        {"kind": "call", "tool": "change_plan", "arguments": {"operations": [{"op": "patch_frontmatter", "path": "pendientes/wol-bastion.md", "patch": {"priority": 1}}]}},
        {"kind": "call", "tool": "change_plan", "arguments": {"operations": [{"op": "patch_frontmatter", "path": "pendientes/wol-bastion.md", "patch": {"priority": 2}}]}}],
-     "esperado": "CRÍTICO hash determinista: pasos 0 y 1 → MISMO planHash y MISMO changeSetId (mismo input + misma base). Paso 2 (patch distinto) → planHash DIFERENTE. Fuente: mcp.yml change_plan (planHash = blake3(base ‖ ops canónicas), no depende del reloj); safe-changes.md What the plan checks (6)"},
+     "esperado": "CRÍTICO hash determinista: pasos 0 y 1 → MISMO planHash y MISMO changeSetId (mismo input + misma base). Paso 2 (patch distinto) → planHash DIFERENTE. Fuente: mcp.yml change_plan (planHash = blake3 del dominio/versionado, base y ops canónicas; no depende del reloj); safe-changes.md What the plan checks (6)"},
     {"id": "PLN-04", "tool": "change_plan",
      "arguments": {"selection": {"where": "type = \"pendiente\" and status = \"abierto\""}, "operation": {"patch_frontmatter": {"reviewed": true}}, "policy": {"requireValidResult": false, "allowWarnings": true}},
      "esperado": "Forma-objeto masiva: normalizedOperations con UNA entrada por pendiente abierto (6 esperados); capturedRevisions con una entrada blake3 por doc seleccionado; impact.affectedCount coherente. Fuente: safe-changes.md Bulk selections; mcp.yml change_plan selection/operation"},

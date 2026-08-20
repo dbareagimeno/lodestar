@@ -54,7 +54,7 @@ use crate::types::{
 use crate::DocumentSet;
 
 /// Versión interna de la semántica del planificador. No forma parte del wire de `PlanResult`.
-pub const PLAN_SEMANTICS_VERSION: u32 = 2;
+pub const PLAN_SEMANTICS_VERSION: u32 = 3;
 
 /// A partir de este número de backlinks entrantes, el factor de riesgo es `High` (por debajo,
 /// `Medium`, siempre que haya al menos uno).
@@ -1175,7 +1175,8 @@ pub fn normalize_delete(
 /// hipotético — E12-H08. **Puro**: no toca disco ni reloj; el `files` de entrada queda intacto.
 ///
 /// Cada operación se materializa reusando la única canonicalización del core
-/// (`model::build_raw`/`model::parse_file` y `document_set::apply_patch`, invariante #3 de `CLAUDE.md`):
+/// (`model::build_raw`/`model::parse_file` y `model::merge_frontmatter_patch`, invariante #3 de
+/// `CLAUDE.md`):
 /// - [`NormalizedOperation::Create`]: escribe el `.md` nuevo con el frontmatter del patch aplicado
 ///   sobre uno vacío y el cuerpo dado (o un heading por defecto `# {título}` si `body` es `None`).
 /// - [`NormalizedOperation::PatchFrontmatter`]: aplica el merge-patch al frontmatter existente,
@@ -1277,8 +1278,13 @@ fn apply_one(files: &mut FileMap, op: &NormalizedOperation) -> Result<(), CoreEr
             // el cuerpo verbatim, así que el `.md` es exactamente lo que pidió el llamador — nada de
             // un `---\n---` vacío, y desde luego nada de `type`/`title` inyectados.
             let fm = frontmatter.as_ref().map(|patch| {
-                let mut map = serde_yaml::Mapping::new();
-                crate::document_set::apply_patch(&mut map, patch.clone());
+                let value = model::merge_frontmatter_patch(
+                    serde_yaml::Value::Mapping(serde_yaml::Mapping::new()),
+                    patch,
+                );
+                let serde_yaml::Value::Mapping(map) = value else {
+                    unreachable!("un patch de frontmatter siempre produce un objeto raíz")
+                };
                 ParsedFrontmatter::from_mapping(map)
             });
             let body = body.clone().unwrap_or_else(|| {
