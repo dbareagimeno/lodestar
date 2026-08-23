@@ -211,8 +211,16 @@
           "kind": "raw",
           "line": "{json roto sin cerrar",
           "expect": {
-            "describe": "JSON ilegible ⇒ -32700 (Parse error). El servidor responde y SIGUE VIVO: una línea corrupta no tumba la sesión.",
-            "equals": { "response.error.code": -32700 }
+            "describe": "JSON no parseable sin id ⇒ silencio: rmcp ignora la línea sin publicar un frame. El servidor SIGUE VIVO.",
+            "equals": { "response": null }
+          }
+        },
+        {
+          "kind": "raw",
+          "line": "{\"jsonrpc\":\"2.0\",\"method\":\"metodo_que_no_existe\"}",
+          "expect": {
+            "describe": "Una notificación JSON-RPC sin id tampoco tiene respuesta, aunque el método no exista.",
+            "equals": { "response": null }
           }
         },
         {
@@ -229,9 +237,9 @@
           "tool": "workspace_status",
           "arguments": {},
           "expect": {
-            "describe": "Y tras las tres agresiones la sesión responde con normalidad. Es la aserción que convierte lo anterior en una prueba de robustez y no solo de códigos.",
+            "describe": "Y tras las cuatro agresiones la sesión responde con normalidad. Es la aserción que convierte lo anterior en una prueba de robustez y no solo de códigos.",
             "is_error": false,
-            "present": ["structured.workspaceRevision"]
+            "matches": { "structured.workspaceRevision": "^blake3:[0-9a-f]{64}$" }
           }
         }
       ]

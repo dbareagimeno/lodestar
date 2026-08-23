@@ -1574,6 +1574,14 @@ coste de una afirmación falsa es mayor.
 > usuario. (Ojo con la numeración: en esta sección, `decisiones §N` es siempre una ficha de
 > `decisiones/`, no una sección de este documento.)
 
+**Retención de evidencia (adenda ratificada 2026-08-23).** La permanencia por release se obtiene
+versionando el resumen y un manifiesto verificable, no el volcado bruto. El manifiesto identifica
+cada resultado externo duradero por URL estable, SHA-256, tamaño y versión de esquema. Los tests
+usan fixtures pequeñas y validan el manifiesto; no dependen de volcados completos de 10k/100k.
+Esta política no cambia mediciones, umbrales ni conclusiones ratificadas. Entradas, fixtures,
+matrices y calibraciones pequeñas continúan versionadas; los resultados generados se publican
+fuera de Git.
+
 ### 22.1 Las dos piezas del banco
 
 El banco separa dos preocupaciones de vida distinta, con el arnés JSON-RPC/stdio
@@ -1630,9 +1638,10 @@ El banco separa dos preocupaciones de vida distinta, con el arnés JSON-RPC/stdi
   por tool de lectura y por el ciclo `change_plan`→`change_apply`, más el tamaño de payload (proxy
   de tokens), a las tres escalas y en las tres variantes de camino de lectura (§22.5).
 - **Umbral-tras-medición**: los umbrales **no se inventan a priori** — la primera corrida produce
-  los números y el usuario los ratifica con ellos delante (puerta interna de la épica). Anclas de
-  esa conversación: **p95 ≤ 1 s por tool de lectura a 10k** y **cold-open ≤ 5 s**. Ratificados, el
-  gate se codifica y falla (exit ≠ 0) si se violan.
+  los números y el usuario los ratifica con ellos delante (puerta interna de la épica).
+  **Ratificados el 2026-08-22**: **p95 ≤ 1 s por tool de lectura a 10k** y **cold-open ≤ 5 s**, como
+  techos máximos de regresión del producto disco-reparseo, no como criterio para descartar SQLite.
+  El gate falla (exit ≠ 0) si se violan.
 - **Baseline por máquina**: los umbrales absolutos solo se juzgan en la máquina donde se ratificó
   la baseline (la de release); cada release registra su corrida para tendencia. En CI solo corre un
   **smoke barato** (escala mínima, sin umbral absoluto) que garantiza que los artefactos del banco
@@ -1657,13 +1666,37 @@ dentro del bench. El paquete de evidencia inventaría además el coste de conexi
 (walker del store sin `DiscoveryPolicy`, divergencia `field_path` core↔store —`§16(l)`—, y el
 destino del watcher —`§16(c)`—) como parte del precio de la opción (a) de `decisiones §14`.
 
+### 22.5a Sonda extrema parametrizable (E33-H09)
+
+El bench dispone además de un modo `--extreme --profile P --scale N --iterations M`, opt-in y
+separado de full, smoke, CI y del gate H05. `N` y `M` son enteros positivos sin whitelist. El
+preflight comprueba espacio de disco antes de materializar y declara expresamente que no verifica
+memoria; `memory_verification` queda insertado como estado estructurado `unverified` con motivo.
+Su resultado estructurado queda insertado en el informe (`checked` con disponible/requerido o
+`unverified` cuando `df` no es verificable). Cuando el espacio no es verificable,
+`--confirm-extreme` es obligatorio para cualquier escala. Desde un millón de documentos
+`--confirm-extreme` es siempre obligatorio después del preflight: la insuficiencia de disco conocida
+gana incluso con confirmación; el espacio suficiente o no verificable permite continuar solo con
+esa confirmación. El cálculo actual (`32 KiB × scale + 256 MiB`) es una heurística conservadora y
+modificable: el contrato exige una estimación positiva, trazable y coherente, no esa fórmula. Un
+`--root` explícito debe ser
+inicialmente inexistente, queda bajo un guard RAII y se elimina al terminar; las salidas se exigen
+fuera de él. Cada variante se ejecuta en un worker aislado y recoge el pico RSS mediante
+`getrusage(RUSAGE_SELF).ru_maxrss`, con baseline antes de cargar el corpus, pico absoluto final,
+delta reconciliable, unidades dependientes de plataforma convertidas a bytes y método/ámbito en la
+evidencia. SQLite separa rebuild y bytes principal/WAL/SHM; wire y escritura
+quedan fuera. De la corrida Realista/100k datada se conservan en Git el resumen y el manifiesto; el
+resultado bruto queda como artefacto externo duradero. Sigue siendo evidencia interna, no una
+promesa externa ni un umbral de §14.
+
 ### 22.6 Enganche a release
 
 El banco corre **por release**: `RELEASING.md` gana un paso (lo escribe la historia que entrega el
 enganche, no antes de que la herramienta exista) — correr conformidad + rendimiento contra el
-binario release en la máquina de la baseline y **commitear la corrida datada** en `docs/qa/`. Eso
-es, literalmente, «banco permanente por release». Opcionalmente, un `workflow_dispatch` lo dispara
-a demanda (conformidad + smoke, sin juzgar umbrales absolutos en runners compartidos).
+binario release en la máquina de la baseline, publicar los resultados brutos como artefactos
+duraderos y **commitear sus resúmenes y manifiesto** en `docs/qa/`. Eso es, literalmente, «banco
+permanente por release». Opcionalmente, un `workflow_dispatch` lo dispara a demanda (conformidad +
+smoke, sin juzgar umbrales absolutos en runners compartidos).
 
 ### 22.7 Dogfooding acotado con registro
 

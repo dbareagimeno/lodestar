@@ -1,0 +1,2281 @@
+{
+  "metadata": {
+    "default_features": [],
+    "manifest_path": "/private/tmp/h04-api-baseline.8vit/src/crates/lodestar-app/Cargo.toml",
+    "manifest_processed": true,
+    "package": "lodestar-app",
+    "source_commit": "0a91b74d2d48ff431e2574639fd73910b357f0f1"
+  },
+  "semantic": [
+    {
+      "kind": "module",
+      "name": "lodestar_app",
+      "path": "lodestar_app"
+    },
+    {
+      "details": {
+        "const": {
+          "expr": "\".lodestar\"",
+          "is_literal": true,
+          "value": null
+        },
+        "type": {
+          "borrowed_ref": {
+            "is_mutable": false,
+            "lifetime": null,
+            "type": {
+              "primitive": "str"
+            }
+          }
+        }
+      },
+      "kind": "constant",
+      "name": "ANCHOR_WORKSPACE",
+      "path": "lodestar_app::ANCHOR_WORKSPACE"
+    },
+    {
+      "fields": [],
+      "generics": [],
+      "kind": "struct",
+      "methods": [],
+      "name": "App",
+      "path": "lodestar_app::App"
+    },
+    {
+      "fields": [
+        {
+          "name": "code",
+          "type": "lodestar_core::types::ErrorCode"
+        },
+        {
+          "name": "message",
+          "type": "String"
+        }
+      ],
+      "generics": [],
+      "kind": "struct",
+      "methods": [],
+      "name": "AppError",
+      "path": "lodestar_app::AppError"
+    },
+    {
+      "fields": [
+        {
+          "name": "applied",
+          "type": "bool"
+        },
+        {
+          "name": "changed_paths",
+          "type": "Vec<lodestar_core::types::RelPath>"
+        },
+        {
+          "name": "previous_workspace_revision",
+          "type": "lodestar_core::types::WorkspaceRevision"
+        },
+        {
+          "name": "receipt_id",
+          "type": "lodestar_core::types::ReceiptId"
+        },
+        {
+          "name": "semantic_diff",
+          "type": "lodestar_core::types::SemanticDiff"
+        },
+        {
+          "name": "validation",
+          "type": "ApplyValidation"
+        },
+        {
+          "name": "workspace_revision",
+          "type": "lodestar_core::types::WorkspaceRevision"
+        }
+      ],
+      "generics": [],
+      "kind": "struct",
+      "methods": [],
+      "name": "ApplyResult",
+      "path": "lodestar_app::ApplyResult"
+    },
+    {
+      "fields": [
+        {
+          "name": "errors",
+          "type": "usize"
+        },
+        {
+          "name": "valid",
+          "type": "bool"
+        },
+        {
+          "name": "warnings",
+          "type": "usize"
+        }
+      ],
+      "generics": [],
+      "kind": "struct",
+      "methods": [],
+      "name": "ApplyValidation",
+      "path": "lodestar_app::ApplyValidation"
+    },
+    {
+      "fields": [
+        {
+          "name": "base_revision",
+          "type": "Option<String>"
+        },
+        {
+          "name": "change_set_id",
+          "type": "String"
+        },
+        {
+          "name": "client",
+          "type": "String"
+        },
+        {
+          "name": "paths",
+          "type": "Vec<String>"
+        },
+        {
+          "name": "result",
+          "type": "String"
+        },
+        {
+          "name": "result_revision",
+          "type": "Option<String>"
+        },
+        {
+          "name": "timestamp",
+          "type": "String"
+        },
+        {
+          "name": "tool",
+          "type": "String"
+        }
+      ],
+      "generics": [],
+      "kind": "struct",
+      "methods": [],
+      "name": "AuditEntry",
+      "path": "lodestar_app::AuditEntry"
+    },
+    {
+      "fields": [
+        {
+          "name": "path",
+          "type": "lodestar_core::types::RelPath"
+        },
+        {
+          "name": "reason",
+          "type": "String"
+        }
+      ],
+      "generics": [],
+      "kind": "struct",
+      "methods": [],
+      "name": "BlockingReference",
+      "path": "lodestar_app::BlockingReference"
+    },
+    {
+      "fields": [
+        {
+          "name": "diagnostics",
+          "type": "Vec<lodestar_core::types::Check>"
+        },
+        {
+          "name": "next_cursor",
+          "type": "Option<String>"
+        },
+        {
+          "name": "summary",
+          "type": "CheckSummary"
+        },
+        {
+          "name": "valid",
+          "type": "bool"
+        },
+        {
+          "name": "workspace_revision",
+          "type": "lodestar_core::types::WorkspaceRevision"
+        }
+      ],
+      "generics": [],
+      "kind": "struct",
+      "methods": [],
+      "name": "CheckReport",
+      "path": "lodestar_app::CheckReport"
+    },
+    {
+      "generics": [],
+      "kind": "enum",
+      "methods": [],
+      "name": "CheckScope",
+      "path": "lodestar_app::CheckScope",
+      "variants": [
+        {
+          "kind": {
+            "struct": {
+              "fields": [
+                {
+                  "name": "depth",
+                  "type": "u32"
+                },
+                {
+                  "name": "refs",
+                  "type": "Vec<lodestar_core::types::DocumentRef>"
+                }
+              ],
+              "has_stripped_fields": false
+            }
+          },
+          "name": "Affected"
+        },
+        {
+          "kind": {
+            "struct": {
+              "fields": [
+                {
+                  "name": "ref",
+                  "type": "lodestar_core::types::DocumentRef"
+                }
+              ],
+              "has_stripped_fields": false
+            }
+          },
+          "name": "Document"
+        },
+        {
+          "kind": {
+            "struct": {
+              "fields": [
+                {
+                  "name": "paths",
+                  "type": "Vec<lodestar_core::types::RelPath>"
+                }
+              ],
+              "has_stripped_fields": false
+            }
+          },
+          "name": "Paths"
+        },
+        {
+          "kind": "plain",
+          "name": "Workspace"
+        }
+      ]
+    },
+    {
+      "fields": [
+        {
+          "name": "errors",
+          "type": "usize"
+        },
+        {
+          "name": "info",
+          "type": "usize"
+        },
+        {
+          "name": "warnings",
+          "type": "usize"
+        }
+      ],
+      "generics": [],
+      "kind": "struct",
+      "methods": [],
+      "name": "CheckSummary",
+      "path": "lodestar_app::CheckSummary"
+    },
+    {
+      "fields": [
+        {
+          "name": "backlinks",
+          "type": "Option<lodestar_core::types::Backlinks>"
+        },
+        {
+          "name": "body",
+          "type": "Option<String>"
+        },
+        {
+          "name": "diagnostics",
+          "type": "Option<Vec<lodestar_core::types::Check>>"
+        },
+        {
+          "name": "frontmatter",
+          "type": "Option<serde_yaml::Value>"
+        },
+        {
+          "name": "outgoing_links",
+          "type": "Option<Vec<lodestar_core::types::ResolvedLink>>"
+        },
+        {
+          "name": "path",
+          "type": "lodestar_core::types::RelPath"
+        },
+        {
+          "name": "revision",
+          "type": "lodestar_core::types::DocumentRevision"
+        },
+        {
+          "name": "title",
+          "type": "String"
+        }
+      ],
+      "generics": [],
+      "kind": "struct",
+      "methods": [],
+      "name": "DocumentView",
+      "path": "lodestar_app::DocumentView"
+    },
+    {
+      "fields": [
+        {
+          "name": "inspection",
+          "type": "lodestar_core::types::FieldInspection"
+        },
+        {
+          "name": "next_cursor",
+          "type": "Option<String>"
+        }
+      ],
+      "generics": [],
+      "kind": "struct",
+      "methods": [],
+      "name": "FieldInspectionPage",
+      "path": "lodestar_app::FieldInspectionPage"
+    },
+    {
+      "fields": [],
+      "generics": [],
+      "kind": "struct",
+      "methods": [],
+      "name": "FrontmatterProjection",
+      "path": "lodestar_app::FrontmatterProjection"
+    },
+    {
+      "fields": [
+        {
+          "name": "edges",
+          "type": "Vec<lodestar_core::types::Edge>"
+        },
+        {
+          "name": "next_cursor",
+          "type": "Option<String>"
+        },
+        {
+          "name": "nodes",
+          "type": "Vec<lodestar_core::types::GraphNode>"
+        },
+        {
+          "name": "summary",
+          "type": "GraphQuerySummary"
+        }
+      ],
+      "generics": [],
+      "kind": "struct",
+      "methods": [],
+      "name": "GraphQueryResult",
+      "path": "lodestar_app::GraphQueryResult"
+    },
+    {
+      "fields": [
+        {
+          "name": "edge_count",
+          "type": "usize"
+        },
+        {
+          "name": "node_count",
+          "type": "usize"
+        },
+        {
+          "name": "truncated",
+          "type": "bool"
+        }
+      ],
+      "generics": [],
+      "kind": "struct",
+      "methods": [],
+      "name": "GraphQuerySummary",
+      "path": "lodestar_app::GraphQuerySummary"
+    },
+    {
+      "fields": [
+        {
+          "name": "affected_documents",
+          "type": "Vec<lodestar_core::types::RelPath>"
+        },
+        {
+          "name": "blocking_references",
+          "type": "Vec<BlockingReference>"
+        },
+        {
+          "name": "recommendations",
+          "type": "Vec<String>"
+        },
+        {
+          "name": "summary",
+          "type": "ImpactSummary"
+        }
+      ],
+      "generics": [],
+      "kind": "struct",
+      "methods": [],
+      "name": "ImpactReport",
+      "path": "lodestar_app::ImpactReport"
+    },
+    {
+      "fields": [
+        {
+          "name": "blocking_references",
+          "type": "usize"
+        },
+        {
+          "name": "directly_affected",
+          "type": "usize"
+        },
+        {
+          "name": "risk",
+          "type": "String"
+        },
+        {
+          "name": "transitively_affected",
+          "type": "usize"
+        }
+      ],
+      "generics": [],
+      "kind": "struct",
+      "methods": [],
+      "name": "ImpactSummary",
+      "path": "lodestar_app::ImpactSummary"
+    },
+    {
+      "fields": [
+        {
+          "name": "document",
+          "type": "DocumentView"
+        }
+      ],
+      "generics": [],
+      "kind": "struct",
+      "methods": [],
+      "name": "KnowledgeGetResponse",
+      "path": "lodestar_app::KnowledgeGetResponse"
+    },
+    {
+      "fields": [
+        {
+          "name": "catalog",
+          "type": "lodestar_core::types::MetadataCatalog"
+        },
+        {
+          "name": "next_cursor",
+          "type": "Option<String>"
+        }
+      ],
+      "generics": [],
+      "kind": "struct",
+      "methods": [],
+      "name": "MetadataCatalogPage",
+      "path": "lodestar_app::MetadataCatalogPage"
+    },
+    {
+      "generics": [],
+      "kind": "enum",
+      "methods": [],
+      "name": "MetadataInspection",
+      "path": "lodestar_app::MetadataInspection",
+      "variants": [
+        {
+          "kind": {
+            "tuple": [
+              "MetadataCatalogPage"
+            ]
+          },
+          "name": "Catalog"
+        },
+        {
+          "kind": {
+            "tuple": [
+              "FieldInspectionPage"
+            ]
+          },
+          "name": "Field"
+        }
+      ]
+    },
+    {
+      "fields": [
+        {
+          "name": "index",
+          "type": "usize"
+        },
+        {
+          "name": "op",
+          "type": "String"
+        },
+        {
+          "name": "path",
+          "type": "lodestar_core::types::RelPath"
+        }
+      ],
+      "generics": [],
+      "kind": "struct",
+      "methods": [],
+      "name": "NoOpOperation",
+      "path": "lodestar_app::NoOpOperation"
+    },
+    {
+      "fields": [
+        {
+          "name": "affected_count",
+          "type": "usize"
+        },
+        {
+          "name": "affected_documents",
+          "type": "Vec<lodestar_core::types::RelPath>"
+        }
+      ],
+      "generics": [],
+      "kind": "struct",
+      "methods": [],
+      "name": "PlanImpact",
+      "path": "lodestar_app::PlanImpact"
+    },
+    {
+      "fields": [
+        {
+          "name": "base_workspace_revision",
+          "type": "lodestar_core::types::WorkspaceRevision"
+        },
+        {
+          "name": "can_apply",
+          "type": "bool"
+        },
+        {
+          "name": "captured_revisions",
+          "type": "std::collections::BTreeMap<lodestar_core::types::RelPath, lodestar_core::types::DocumentRevision>"
+        },
+        {
+          "name": "change_set_id",
+          "type": "lodestar_core::types::ChangeSetId"
+        },
+        {
+          "name": "diagnostics_after",
+          "type": "lodestar_core::types::ValidationSummary"
+        },
+        {
+          "name": "diagnostics_before",
+          "type": "lodestar_core::types::ValidationSummary"
+        },
+        {
+          "name": "expires_at",
+          "type": "String"
+        },
+        {
+          "name": "impact",
+          "type": "PlanImpact"
+        },
+        {
+          "name": "no_op_operations",
+          "type": "Vec<NoOpOperation>"
+        },
+        {
+          "name": "normalized_operations",
+          "type": "Vec<lodestar_core::types::NormalizedOperation>"
+        },
+        {
+          "name": "plan_hash",
+          "type": "lodestar_core::types::PlanHash"
+        },
+        {
+          "name": "policy",
+          "type": "lodestar_core::plan::PlanPolicy"
+        },
+        {
+          "name": "risk",
+          "type": "lodestar_core::types::RiskAssessment"
+        },
+        {
+          "name": "semantic_diff",
+          "type": "lodestar_core::types::SemanticDiff"
+        }
+      ],
+      "generics": [],
+      "kind": "struct",
+      "methods": [],
+      "name": "PlanResult",
+      "path": "lodestar_app::PlanResult"
+    },
+    {
+      "generics": [],
+      "kind": "enum",
+      "methods": [],
+      "name": "Profile",
+      "path": "lodestar_app::Profile",
+      "variants": [
+        {
+          "kind": "plain",
+          "name": "Readonly"
+        },
+        {
+          "kind": "plain",
+          "name": "Standard"
+        }
+      ]
+    },
+    {
+      "fields": [
+        {
+          "name": "change_set_id",
+          "type": "lodestar_core::types::ChangeSetId"
+        },
+        {
+          "name": "changed_path_count",
+          "type": "usize"
+        },
+        {
+          "name": "receipt_id",
+          "type": "lodestar_core::types::ReceiptId"
+        },
+        {
+          "name": "result_revision",
+          "type": "lodestar_core::types::WorkspaceRevision"
+        }
+      ],
+      "generics": [],
+      "kind": "struct",
+      "methods": [],
+      "name": "ReceiptSummary",
+      "path": "lodestar_app::ReceiptSummary"
+    },
+    {
+      "fields": [
+        {
+          "name": "changed_paths",
+          "type": "Vec<lodestar_core::types::RelPath>"
+        },
+        {
+          "name": "previous_workspace_revision",
+          "type": "lodestar_core::types::WorkspaceRevision"
+        },
+        {
+          "name": "receipt_id",
+          "type": "lodestar_core::types::ReceiptId"
+        },
+        {
+          "name": "reverted",
+          "type": "bool"
+        },
+        {
+          "name": "semantic_diff",
+          "type": "lodestar_core::types::SemanticDiff"
+        },
+        {
+          "name": "workspace_revision",
+          "type": "lodestar_core::types::WorkspaceRevision"
+        }
+      ],
+      "generics": [],
+      "kind": "struct",
+      "methods": [],
+      "name": "RevertResult",
+      "path": "lodestar_app::RevertResult"
+    },
+    {
+      "fields": [
+        {
+          "name": "frontmatter",
+          "type": "Option<std::collections::BTreeMap<String, serde_json::Value>>"
+        },
+        {
+          "name": "id",
+          "type": "Option<String>"
+        },
+        {
+          "name": "path",
+          "type": "lodestar_core::types::RelPath"
+        },
+        {
+          "name": "revision",
+          "type": "lodestar_core::types::DocumentRevision"
+        },
+        {
+          "name": "score",
+          "type": "f64"
+        },
+        {
+          "name": "snippet",
+          "type": "String"
+        },
+        {
+          "name": "title",
+          "type": "String"
+        }
+      ],
+      "generics": [],
+      "kind": "struct",
+      "methods": [],
+      "name": "SearchResult",
+      "path": "lodestar_app::SearchResult"
+    },
+    {
+      "fields": [
+        {
+          "name": "next_cursor",
+          "type": "Option<String>"
+        },
+        {
+          "name": "results",
+          "type": "Vec<SearchResult>"
+        },
+        {
+          "name": "total_approximate",
+          "type": "usize"
+        }
+      ],
+      "generics": [],
+      "kind": "struct",
+      "methods": [],
+      "name": "SearchResults",
+      "path": "lodestar_app::SearchResults"
+    },
+    {
+      "fields": [
+        {
+          "name": "external_references",
+          "type": "bool"
+        },
+        {
+          "name": "revert",
+          "type": "bool"
+        },
+        {
+          "name": "schemas",
+          "type": "bool"
+        },
+        {
+          "name": "transactions",
+          "type": "bool"
+        },
+        {
+          "name": "writes",
+          "type": "bool"
+        }
+      ],
+      "generics": [],
+      "kind": "struct",
+      "methods": [],
+      "name": "StatusCapabilities",
+      "path": "lodestar_app::StatusCapabilities"
+    },
+    {
+      "fields": [
+        {
+          "name": "dangling",
+          "type": "usize"
+        },
+        {
+          "name": "documents",
+          "type": "usize"
+        },
+        {
+          "name": "errors",
+          "type": "usize"
+        },
+        {
+          "name": "isolated",
+          "type": "usize"
+        },
+        {
+          "name": "links",
+          "type": "usize"
+        },
+        {
+          "name": "warnings",
+          "type": "usize"
+        }
+      ],
+      "generics": [],
+      "kind": "struct",
+      "methods": [],
+      "name": "StatusCounts",
+      "path": "lodestar_app::StatusCounts"
+    },
+    {
+      "fields": [
+        {
+          "name": "pending_transaction",
+          "type": "bool"
+        }
+      ],
+      "generics": [],
+      "kind": "struct",
+      "methods": [],
+      "name": "StatusRecovery",
+      "path": "lodestar_app::StatusRecovery"
+    },
+    {
+      "fields": [
+        {
+          "name": "capabilities",
+          "type": "StatusCapabilities"
+        },
+        {
+          "name": "counts",
+          "type": "StatusCounts"
+        },
+        {
+          "name": "format_version",
+          "type": "String"
+        },
+        {
+          "name": "knowledge_roots",
+          "type": "Vec<lodestar_core::types::RelPath>"
+        },
+        {
+          "name": "receipts",
+          "type": "Vec<ReceiptSummary>"
+        },
+        {
+          "name": "recovery",
+          "type": "StatusRecovery"
+        },
+        {
+          "name": "reference_roots",
+          "type": "Vec<lodestar_core::types::RelPath>"
+        },
+        {
+          "name": "root",
+          "type": "String"
+        },
+        {
+          "name": "schema_version",
+          "type": "String"
+        },
+        {
+          "name": "valid",
+          "type": "bool"
+        },
+        {
+          "name": "workspace_revision",
+          "type": "lodestar_core::types::WorkspaceRevision"
+        }
+      ],
+      "generics": [],
+      "kind": "struct",
+      "methods": [],
+      "name": "WorkspaceStatus",
+      "path": "lodestar_app::WorkspaceStatus"
+    },
+    {
+      "kind": "struct_field",
+      "name": "affected_count",
+      "path": "lodestar_app::affected_count"
+    },
+    {
+      "kind": "struct_field",
+      "name": "affected_documents",
+      "path": "lodestar_app::affected_documents"
+    },
+    {
+      "kind": "struct_field",
+      "name": "affected_documents",
+      "path": "lodestar_app::affected_documents"
+    },
+    {
+      "kind": "struct_field",
+      "name": "applied",
+      "path": "lodestar_app::applied"
+    },
+    {
+      "kind": "struct_field",
+      "name": "backlinks",
+      "path": "lodestar_app::backlinks"
+    },
+    {
+      "kind": "struct_field",
+      "name": "base_revision",
+      "path": "lodestar_app::base_revision"
+    },
+    {
+      "kind": "struct_field",
+      "name": "base_workspace_revision",
+      "path": "lodestar_app::base_workspace_revision"
+    },
+    {
+      "kind": "struct_field",
+      "name": "blocking_references",
+      "path": "lodestar_app::blocking_references"
+    },
+    {
+      "kind": "struct_field",
+      "name": "blocking_references",
+      "path": "lodestar_app::blocking_references"
+    },
+    {
+      "kind": "struct_field",
+      "name": "body",
+      "path": "lodestar_app::body"
+    },
+    {
+      "kind": "struct_field",
+      "name": "can_apply",
+      "path": "lodestar_app::can_apply"
+    },
+    {
+      "kind": "struct_field",
+      "name": "capabilities",
+      "path": "lodestar_app::capabilities"
+    },
+    {
+      "kind": "struct_field",
+      "name": "captured_revisions",
+      "path": "lodestar_app::captured_revisions"
+    },
+    {
+      "kind": "struct_field",
+      "name": "catalog",
+      "path": "lodestar_app::catalog"
+    },
+    {
+      "kind": "function",
+      "name": "change_apply",
+      "path": "lodestar_app::change_apply",
+      "signature": {
+        "async": false,
+        "const": false,
+        "generics": [],
+        "inputs": [
+          [
+            "self",
+            "&Self"
+          ],
+          [
+            "change_set_id",
+            "&ChangeSetId"
+          ],
+          [
+            "expected_workspace_revision",
+            "Option<WorkspaceRevision>"
+          ]
+        ],
+        "output": "Result<ApplyResult, AppError>",
+        "unsafe": false
+      }
+    },
+    {
+      "kind": "function",
+      "name": "change_plan",
+      "path": "lodestar_app::change_plan",
+      "signature": {
+        "async": false,
+        "const": false,
+        "generics": [],
+        "inputs": [
+          [
+            "self",
+            "&Self"
+          ],
+          [
+            "expected_workspace_revision",
+            "Option<WorkspaceRevision>"
+          ],
+          [
+            "raw_ops",
+            "&Value"
+          ],
+          [
+            "policy",
+            "PlanPolicy"
+          ]
+        ],
+        "output": "Result<PlanResult, AppError>",
+        "unsafe": false
+      }
+    },
+    {
+      "kind": "function",
+      "name": "change_revert",
+      "path": "lodestar_app::change_revert",
+      "signature": {
+        "async": false,
+        "const": false,
+        "generics": [],
+        "inputs": [
+          [
+            "self",
+            "&Self"
+          ],
+          [
+            "receipt_id",
+            "&ReceiptId"
+          ],
+          [
+            "expected_workspace_revision",
+            "Option<WorkspaceRevision>"
+          ]
+        ],
+        "output": "Result<RevertResult, AppError>",
+        "unsafe": false
+      }
+    },
+    {
+      "kind": "struct_field",
+      "name": "change_set_id",
+      "path": "lodestar_app::change_set_id"
+    },
+    {
+      "kind": "struct_field",
+      "name": "change_set_id",
+      "path": "lodestar_app::change_set_id"
+    },
+    {
+      "kind": "struct_field",
+      "name": "change_set_id",
+      "path": "lodestar_app::change_set_id"
+    },
+    {
+      "kind": "struct_field",
+      "name": "changed_path_count",
+      "path": "lodestar_app::changed_path_count"
+    },
+    {
+      "kind": "struct_field",
+      "name": "changed_paths",
+      "path": "lodestar_app::changed_paths"
+    },
+    {
+      "kind": "struct_field",
+      "name": "changed_paths",
+      "path": "lodestar_app::changed_paths"
+    },
+    {
+      "kind": "struct_field",
+      "name": "client",
+      "path": "lodestar_app::client"
+    },
+    {
+      "kind": "struct_field",
+      "name": "code",
+      "path": "lodestar_app::code"
+    },
+    {
+      "kind": "struct_field",
+      "name": "counts",
+      "path": "lodestar_app::counts"
+    },
+    {
+      "kind": "struct_field",
+      "name": "dangling",
+      "path": "lodestar_app::dangling"
+    },
+    {
+      "kind": "struct_field",
+      "name": "diagnostics",
+      "path": "lodestar_app::diagnostics"
+    },
+    {
+      "kind": "struct_field",
+      "name": "diagnostics",
+      "path": "lodestar_app::diagnostics"
+    },
+    {
+      "kind": "struct_field",
+      "name": "diagnostics_after",
+      "path": "lodestar_app::diagnostics_after"
+    },
+    {
+      "kind": "struct_field",
+      "name": "diagnostics_before",
+      "path": "lodestar_app::diagnostics_before"
+    },
+    {
+      "kind": "struct_field",
+      "name": "directly_affected",
+      "path": "lodestar_app::directly_affected"
+    },
+    {
+      "kind": "struct_field",
+      "name": "document",
+      "path": "lodestar_app::document"
+    },
+    {
+      "kind": "struct_field",
+      "name": "documents",
+      "path": "lodestar_app::documents"
+    },
+    {
+      "kind": "struct_field",
+      "name": "edge_count",
+      "path": "lodestar_app::edge_count"
+    },
+    {
+      "kind": "struct_field",
+      "name": "edges",
+      "path": "lodestar_app::edges"
+    },
+    {
+      "kind": "function",
+      "name": "error_code",
+      "path": "lodestar_app::error_code",
+      "signature": {
+        "async": false,
+        "const": false,
+        "generics": [],
+        "inputs": [
+          [
+            "err",
+            "&lodestar_core::CoreError"
+          ]
+        ],
+        "output": "lodestar_core::types::ErrorCode",
+        "unsafe": false
+      }
+    },
+    {
+      "kind": "struct_field",
+      "name": "errors",
+      "path": "lodestar_app::errors"
+    },
+    {
+      "kind": "struct_field",
+      "name": "errors",
+      "path": "lodestar_app::errors"
+    },
+    {
+      "kind": "struct_field",
+      "name": "errors",
+      "path": "lodestar_app::errors"
+    },
+    {
+      "kind": "struct_field",
+      "name": "expires_at",
+      "path": "lodestar_app::expires_at"
+    },
+    {
+      "kind": "struct_field",
+      "name": "external_references",
+      "path": "lodestar_app::external_references"
+    },
+    {
+      "kind": "function",
+      "name": "field_path",
+      "path": "lodestar_app::field_path",
+      "signature": {
+        "async": false,
+        "const": false,
+        "generics": [],
+        "inputs": [
+          [
+            "self",
+            "&Self"
+          ]
+        ],
+        "output": "&FieldPath",
+        "unsafe": false
+      }
+    },
+    {
+      "kind": "struct_field",
+      "name": "format_version",
+      "path": "lodestar_app::format_version"
+    },
+    {
+      "kind": "function",
+      "name": "from_workspace",
+      "path": "lodestar_app::from_workspace",
+      "signature": {
+        "async": false,
+        "const": false,
+        "generics": [],
+        "inputs": [
+          [
+            "workspace",
+            "Workspace"
+          ]
+        ],
+        "output": "Self",
+        "unsafe": false
+      }
+    },
+    {
+      "kind": "struct_field",
+      "name": "frontmatter",
+      "path": "lodestar_app::frontmatter"
+    },
+    {
+      "kind": "struct_field",
+      "name": "frontmatter",
+      "path": "lodestar_app::frontmatter"
+    },
+    {
+      "kind": "function",
+      "name": "full_analysis",
+      "path": "lodestar_app::full_analysis",
+      "signature": {
+        "async": false,
+        "const": false,
+        "generics": [],
+        "inputs": [
+          [
+            "self",
+            "&Self"
+          ]
+        ],
+        "output": "Result<Analysis, AppError>",
+        "unsafe": false
+      }
+    },
+    {
+      "kind": "function",
+      "name": "graph_query",
+      "path": "lodestar_app::graph_query",
+      "signature": {
+        "async": false,
+        "const": false,
+        "generics": [],
+        "inputs": [
+          [
+            "self",
+            "&Self"
+          ],
+          [
+            "operation",
+            "&str"
+          ],
+          [
+            "r",
+            "Option<&DocumentRef>"
+          ],
+          [
+            "to",
+            "Option<&DocumentRef>"
+          ],
+          [
+            "depth",
+            "Option<u32>"
+          ],
+          [
+            "direction",
+            "Option<&str>"
+          ],
+          [
+            "limit",
+            "Option<usize>"
+          ],
+          [
+            "cursor",
+            "Option<&str>"
+          ]
+        ],
+        "output": "Result<GraphQueryResult, AppError>",
+        "unsafe": false
+      }
+    },
+    {
+      "kind": "struct_field",
+      "name": "id",
+      "path": "lodestar_app::id"
+    },
+    {
+      "kind": "struct_field",
+      "name": "impact",
+      "path": "lodestar_app::impact"
+    },
+    {
+      "kind": "function",
+      "name": "impact_analyze",
+      "path": "lodestar_app::impact_analyze",
+      "signature": {
+        "async": false,
+        "const": false,
+        "generics": [],
+        "inputs": [
+          [
+            "self",
+            "&Self"
+          ],
+          [
+            "r",
+            "&DocumentRef"
+          ],
+          [
+            "kind",
+            "&str"
+          ],
+          [
+            "depth",
+            "Option<u32>"
+          ]
+        ],
+        "output": "Result<ImpactReport, AppError>",
+        "unsafe": false
+      }
+    },
+    {
+      "kind": "struct_field",
+      "name": "index",
+      "path": "lodestar_app::index"
+    },
+    {
+      "kind": "struct_field",
+      "name": "info",
+      "path": "lodestar_app::info"
+    },
+    {
+      "kind": "struct_field",
+      "name": "inspection",
+      "path": "lodestar_app::inspection"
+    },
+    {
+      "kind": "function",
+      "name": "invalid_schema",
+      "path": "lodestar_app::invalid_schema",
+      "signature": {
+        "async": false,
+        "const": false,
+        "generics": [
+          {
+            "kind": {
+              "type": {
+                "bounds": [
+                  {
+                    "trait_bound": {
+                      "generic_params": [],
+                      "modifier": "none",
+                      "trait": {
+                        "args": {
+                          "angle_bracketed": {
+                            "args": [
+                              {
+                                "type": {
+                                  "resolved_path": {
+                                    "args": null,
+                                    "path": "String"
+                                  }
+                                }
+                              }
+                            ],
+                            "constraints": []
+                          }
+                        },
+                        "path": "Into"
+                      }
+                    }
+                  }
+                ],
+                "default": null,
+                "is_synthetic": true
+              }
+            },
+            "name": "impl Into<String>"
+          }
+        ],
+        "inputs": [
+          [
+            "message",
+            "{\"impl_trait\":[{\"trait_bound\":{\"generic_params\":[],\"modifier\":\"none\",\"trait\":{\"args\":{\"angle_bracketed\":{\"args\":[{\"type\":{\"resolved_path\":{\"args\":null,\"path\":\"String\"}}}],\"constraints\":[]}},\"path\":\"Into\"}}}]}"
+          ]
+        ],
+        "output": "Self",
+        "unsafe": false
+      }
+    },
+    {
+      "kind": "struct_field",
+      "name": "isolated",
+      "path": "lodestar_app::isolated"
+    },
+    {
+      "kind": "function",
+      "name": "key",
+      "path": "lodestar_app::key",
+      "signature": {
+        "async": false,
+        "const": false,
+        "generics": [],
+        "inputs": [
+          [
+            "self",
+            "&Self"
+          ]
+        ],
+        "output": "&str",
+        "unsafe": false
+      }
+    },
+    {
+      "kind": "function",
+      "name": "knowledge_check",
+      "path": "lodestar_app::knowledge_check",
+      "signature": {
+        "async": false,
+        "const": false,
+        "generics": [],
+        "inputs": [
+          [
+            "self",
+            "&Self"
+          ],
+          [
+            "scope",
+            "&CheckScope"
+          ],
+          [
+            "minimum_severity",
+            "Option<Severity>"
+          ],
+          [
+            "include_suggested_fixes",
+            "bool"
+          ],
+          [
+            "limit",
+            "Option<usize>"
+          ],
+          [
+            "cursor",
+            "Option<&str>"
+          ]
+        ],
+        "output": "Result<CheckReport, AppError>",
+        "unsafe": false
+      }
+    },
+    {
+      "kind": "function",
+      "name": "knowledge_get",
+      "path": "lodestar_app::knowledge_get",
+      "signature": {
+        "async": false,
+        "const": false,
+        "generics": [],
+        "inputs": [
+          [
+            "self",
+            "&Self"
+          ],
+          [
+            "r",
+            "&DocumentRef"
+          ],
+          [
+            "include",
+            "&[String]"
+          ],
+          [
+            "sections",
+            "Option<&[Vec<String>]>"
+          ]
+        ],
+        "output": "Result<DocumentView, AppError>",
+        "unsafe": false
+      }
+    },
+    {
+      "kind": "struct_field",
+      "name": "knowledge_roots",
+      "path": "lodestar_app::knowledge_roots"
+    },
+    {
+      "kind": "function",
+      "name": "knowledge_search",
+      "path": "lodestar_app::knowledge_search",
+      "signature": {
+        "async": false,
+        "const": false,
+        "generics": [],
+        "inputs": [
+          [
+            "self",
+            "&Self"
+          ],
+          [
+            "text",
+            "&str"
+          ],
+          [
+            "where_expr",
+            "Option<&str>"
+          ],
+          [
+            "filter",
+            "Option<&Value>"
+          ],
+          [
+            "include",
+            "&[FrontmatterProjection]"
+          ],
+          [
+            "limit",
+            "Option<usize>"
+          ],
+          [
+            "cursor",
+            "Option<&str>"
+          ]
+        ],
+        "output": "Result<SearchResults, AppError>",
+        "unsafe": false
+      }
+    },
+    {
+      "kind": "struct_field",
+      "name": "links",
+      "path": "lodestar_app::links"
+    },
+    {
+      "kind": "function",
+      "name": "load_plan",
+      "path": "lodestar_app::load_plan",
+      "signature": {
+        "async": false,
+        "const": false,
+        "generics": [],
+        "inputs": [
+          [
+            "self",
+            "&Self"
+          ],
+          [
+            "id",
+            "&ChangeSetId"
+          ]
+        ],
+        "output": "Result<PlanResult, AppError>",
+        "unsafe": false
+      }
+    },
+    {
+      "kind": "struct_field",
+      "name": "message",
+      "path": "lodestar_app::message"
+    },
+    {
+      "kind": "function",
+      "name": "metadata_inspect",
+      "path": "lodestar_app::metadata_inspect",
+      "signature": {
+        "async": false,
+        "const": false,
+        "generics": [],
+        "inputs": [
+          [
+            "self",
+            "&Self"
+          ],
+          [
+            "mode",
+            "&str"
+          ],
+          [
+            "field",
+            "Option<&str>"
+          ],
+          [
+            "limit",
+            "Option<usize>"
+          ],
+          [
+            "cursor",
+            "Option<&str>"
+          ]
+        ],
+        "output": "Result<MetadataInspection, AppError>",
+        "unsafe": false
+      }
+    },
+    {
+      "kind": "function",
+      "name": "new",
+      "path": "lodestar_app::new",
+      "signature": {
+        "async": false,
+        "const": false,
+        "generics": [
+          {
+            "kind": {
+              "type": {
+                "bounds": [
+                  {
+                    "trait_bound": {
+                      "generic_params": [],
+                      "modifier": "none",
+                      "trait": {
+                        "args": {
+                          "angle_bracketed": {
+                            "args": [
+                              {
+                                "type": {
+                                  "resolved_path": {
+                                    "args": null,
+                                    "path": "String"
+                                  }
+                                }
+                              }
+                            ],
+                            "constraints": []
+                          }
+                        },
+                        "path": "Into"
+                      }
+                    }
+                  }
+                ],
+                "default": null,
+                "is_synthetic": true
+              }
+            },
+            "name": "impl Into<String>"
+          }
+        ],
+        "inputs": [
+          [
+            "code",
+            "ErrorCode"
+          ],
+          [
+            "message",
+            "{\"impl_trait\":[{\"trait_bound\":{\"generic_params\":[],\"modifier\":\"none\",\"trait\":{\"args\":{\"angle_bracketed\":{\"args\":[{\"type\":{\"resolved_path\":{\"args\":null,\"path\":\"String\"}}}],\"constraints\":[]}},\"path\":\"Into\"}}}]}"
+          ]
+        ],
+        "output": "Self",
+        "unsafe": false
+      }
+    },
+    {
+      "kind": "struct_field",
+      "name": "next_cursor",
+      "path": "lodestar_app::next_cursor"
+    },
+    {
+      "kind": "struct_field",
+      "name": "next_cursor",
+      "path": "lodestar_app::next_cursor"
+    },
+    {
+      "kind": "struct_field",
+      "name": "next_cursor",
+      "path": "lodestar_app::next_cursor"
+    },
+    {
+      "kind": "struct_field",
+      "name": "next_cursor",
+      "path": "lodestar_app::next_cursor"
+    },
+    {
+      "kind": "struct_field",
+      "name": "next_cursor",
+      "path": "lodestar_app::next_cursor"
+    },
+    {
+      "kind": "struct_field",
+      "name": "no_op_operations",
+      "path": "lodestar_app::no_op_operations"
+    },
+    {
+      "kind": "struct_field",
+      "name": "node_count",
+      "path": "lodestar_app::node_count"
+    },
+    {
+      "kind": "struct_field",
+      "name": "nodes",
+      "path": "lodestar_app::nodes"
+    },
+    {
+      "kind": "struct_field",
+      "name": "normalized_operations",
+      "path": "lodestar_app::normalized_operations"
+    },
+    {
+      "kind": "struct_field",
+      "name": "op",
+      "path": "lodestar_app::op"
+    },
+    {
+      "kind": "function",
+      "name": "open",
+      "path": "lodestar_app::open",
+      "signature": {
+        "async": false,
+        "const": false,
+        "generics": [],
+        "inputs": [
+          [
+            "root",
+            "&Path"
+          ]
+        ],
+        "output": "Result<Self, WorkspaceError>",
+        "unsafe": false
+      }
+    },
+    {
+      "kind": "struct_field",
+      "name": "outgoing_links",
+      "path": "lodestar_app::outgoing_links"
+    },
+    {
+      "kind": "function",
+      "name": "parse",
+      "path": "lodestar_app::parse",
+      "signature": {
+        "async": false,
+        "const": false,
+        "generics": [],
+        "inputs": [
+          [
+            "entrada",
+            "&str"
+          ]
+        ],
+        "output": "Result<Self, ErrorCode>",
+        "unsafe": false
+      }
+    },
+    {
+      "kind": "function",
+      "name": "parse_all",
+      "path": "lodestar_app::parse_all",
+      "signature": {
+        "async": false,
+        "const": false,
+        "generics": [],
+        "inputs": [
+          [
+            "entradas",
+            "&[String]"
+          ]
+        ],
+        "output": "Result<Vec<Self>, ErrorCode>",
+        "unsafe": false
+      }
+    },
+    {
+      "kind": "struct_field",
+      "name": "path",
+      "path": "lodestar_app::path"
+    },
+    {
+      "kind": "struct_field",
+      "name": "path",
+      "path": "lodestar_app::path"
+    },
+    {
+      "kind": "struct_field",
+      "name": "path",
+      "path": "lodestar_app::path"
+    },
+    {
+      "kind": "struct_field",
+      "name": "path",
+      "path": "lodestar_app::path"
+    },
+    {
+      "kind": "struct_field",
+      "name": "paths",
+      "path": "lodestar_app::paths"
+    },
+    {
+      "kind": "struct_field",
+      "name": "pending_transaction",
+      "path": "lodestar_app::pending_transaction"
+    },
+    {
+      "kind": "struct_field",
+      "name": "plan_hash",
+      "path": "lodestar_app::plan_hash"
+    },
+    {
+      "kind": "struct_field",
+      "name": "policy",
+      "path": "lodestar_app::policy"
+    },
+    {
+      "kind": "struct_field",
+      "name": "previous_workspace_revision",
+      "path": "lodestar_app::previous_workspace_revision"
+    },
+    {
+      "kind": "struct_field",
+      "name": "previous_workspace_revision",
+      "path": "lodestar_app::previous_workspace_revision"
+    },
+    {
+      "kind": "struct_field",
+      "name": "reason",
+      "path": "lodestar_app::reason"
+    },
+    {
+      "kind": "struct_field",
+      "name": "receipt_id",
+      "path": "lodestar_app::receipt_id"
+    },
+    {
+      "kind": "struct_field",
+      "name": "receipt_id",
+      "path": "lodestar_app::receipt_id"
+    },
+    {
+      "kind": "struct_field",
+      "name": "receipt_id",
+      "path": "lodestar_app::receipt_id"
+    },
+    {
+      "kind": "struct_field",
+      "name": "receipts",
+      "path": "lodestar_app::receipts"
+    },
+    {
+      "kind": "struct_field",
+      "name": "recommendations",
+      "path": "lodestar_app::recommendations"
+    },
+    {
+      "kind": "struct_field",
+      "name": "recovery",
+      "path": "lodestar_app::recovery"
+    },
+    {
+      "kind": "struct_field",
+      "name": "reference_roots",
+      "path": "lodestar_app::reference_roots"
+    },
+    {
+      "kind": "function",
+      "name": "resolve_ref",
+      "path": "lodestar_app::resolve_ref",
+      "signature": {
+        "async": false,
+        "const": false,
+        "generics": [],
+        "inputs": [
+          [
+            "self",
+            "&Self"
+          ],
+          [
+            "r",
+            "&DocumentRef"
+          ]
+        ],
+        "output": "Result<RelPath, AppError>",
+        "unsafe": false
+      }
+    },
+    {
+      "kind": "struct_field",
+      "name": "result",
+      "path": "lodestar_app::result"
+    },
+    {
+      "kind": "struct_field",
+      "name": "result_revision",
+      "path": "lodestar_app::result_revision"
+    },
+    {
+      "kind": "struct_field",
+      "name": "result_revision",
+      "path": "lodestar_app::result_revision"
+    },
+    {
+      "kind": "struct_field",
+      "name": "results",
+      "path": "lodestar_app::results"
+    },
+    {
+      "kind": "struct_field",
+      "name": "revert",
+      "path": "lodestar_app::revert"
+    },
+    {
+      "kind": "struct_field",
+      "name": "reverted",
+      "path": "lodestar_app::reverted"
+    },
+    {
+      "kind": "struct_field",
+      "name": "revision",
+      "path": "lodestar_app::revision"
+    },
+    {
+      "kind": "struct_field",
+      "name": "revision",
+      "path": "lodestar_app::revision"
+    },
+    {
+      "kind": "struct_field",
+      "name": "risk",
+      "path": "lodestar_app::risk"
+    },
+    {
+      "kind": "struct_field",
+      "name": "risk",
+      "path": "lodestar_app::risk"
+    },
+    {
+      "kind": "struct_field",
+      "name": "root",
+      "path": "lodestar_app::root"
+    },
+    {
+      "kind": "struct_field",
+      "name": "schema_version",
+      "path": "lodestar_app::schema_version"
+    },
+    {
+      "kind": "module",
+      "name": "schemas",
+      "path": "lodestar_app::schemas"
+    },
+    {
+      "kind": "struct_field",
+      "name": "schemas",
+      "path": "lodestar_app::schemas"
+    },
+    {
+      "kind": "function",
+      "name": "change_apply_schema",
+      "path": "lodestar_app::schemas::change_apply_schema",
+      "signature": {
+        "async": false,
+        "const": false,
+        "generics": [],
+        "inputs": [],
+        "output": "serde_json::Value",
+        "unsafe": false
+      }
+    },
+    {
+      "kind": "function",
+      "name": "change_plan_schema",
+      "path": "lodestar_app::schemas::change_plan_schema",
+      "signature": {
+        "async": false,
+        "const": false,
+        "generics": [],
+        "inputs": [],
+        "output": "serde_json::Value",
+        "unsafe": false
+      }
+    },
+    {
+      "kind": "function",
+      "name": "change_revert_schema",
+      "path": "lodestar_app::schemas::change_revert_schema",
+      "signature": {
+        "async": false,
+        "const": false,
+        "generics": [],
+        "inputs": [],
+        "output": "serde_json::Value",
+        "unsafe": false
+      }
+    },
+    {
+      "kind": "function",
+      "name": "graph_query_schema",
+      "path": "lodestar_app::schemas::graph_query_schema",
+      "signature": {
+        "async": false,
+        "const": false,
+        "generics": [],
+        "inputs": [],
+        "output": "serde_json::Value",
+        "unsafe": false
+      }
+    },
+    {
+      "kind": "function",
+      "name": "impact_analyze_schema",
+      "path": "lodestar_app::schemas::impact_analyze_schema",
+      "signature": {
+        "async": false,
+        "const": false,
+        "generics": [],
+        "inputs": [],
+        "output": "serde_json::Value",
+        "unsafe": false
+      }
+    },
+    {
+      "kind": "function",
+      "name": "knowledge_check_schema",
+      "path": "lodestar_app::schemas::knowledge_check_schema",
+      "signature": {
+        "async": false,
+        "const": false,
+        "generics": [],
+        "inputs": [],
+        "output": "serde_json::Value",
+        "unsafe": false
+      }
+    },
+    {
+      "kind": "function",
+      "name": "knowledge_get_schema",
+      "path": "lodestar_app::schemas::knowledge_get_schema",
+      "signature": {
+        "async": false,
+        "const": false,
+        "generics": [],
+        "inputs": [],
+        "output": "serde_json::Value",
+        "unsafe": false
+      }
+    },
+    {
+      "kind": "function",
+      "name": "knowledge_search_schema",
+      "path": "lodestar_app::schemas::knowledge_search_schema",
+      "signature": {
+        "async": false,
+        "const": false,
+        "generics": [],
+        "inputs": [],
+        "output": "serde_json::Value",
+        "unsafe": false
+      }
+    },
+    {
+      "kind": "function",
+      "name": "metadata_inspect_schema",
+      "path": "lodestar_app::schemas::metadata_inspect_schema",
+      "signature": {
+        "async": false,
+        "const": false,
+        "generics": [],
+        "inputs": [],
+        "output": "serde_json::Value",
+        "unsafe": false
+      }
+    },
+    {
+      "kind": "function",
+      "name": "workspace_status_schema",
+      "path": "lodestar_app::schemas::workspace_status_schema",
+      "signature": {
+        "async": false,
+        "const": false,
+        "generics": [],
+        "inputs": [],
+        "output": "serde_json::Value",
+        "unsafe": false
+      }
+    },
+    {
+      "kind": "struct_field",
+      "name": "score",
+      "path": "lodestar_app::score"
+    },
+    {
+      "kind": "struct_field",
+      "name": "semantic_diff",
+      "path": "lodestar_app::semantic_diff"
+    },
+    {
+      "kind": "struct_field",
+      "name": "semantic_diff",
+      "path": "lodestar_app::semantic_diff"
+    },
+    {
+      "kind": "struct_field",
+      "name": "semantic_diff",
+      "path": "lodestar_app::semantic_diff"
+    },
+    {
+      "kind": "struct_field",
+      "name": "snippet",
+      "path": "lodestar_app::snippet"
+    },
+    {
+      "kind": "struct_field",
+      "name": "summary",
+      "path": "lodestar_app::summary"
+    },
+    {
+      "kind": "struct_field",
+      "name": "summary",
+      "path": "lodestar_app::summary"
+    },
+    {
+      "kind": "struct_field",
+      "name": "summary",
+      "path": "lodestar_app::summary"
+    },
+    {
+      "kind": "struct_field",
+      "name": "timestamp",
+      "path": "lodestar_app::timestamp"
+    },
+    {
+      "kind": "struct_field",
+      "name": "title",
+      "path": "lodestar_app::title"
+    },
+    {
+      "kind": "struct_field",
+      "name": "title",
+      "path": "lodestar_app::title"
+    },
+    {
+      "kind": "struct_field",
+      "name": "tool",
+      "path": "lodestar_app::tool"
+    },
+    {
+      "kind": "struct_field",
+      "name": "total_approximate",
+      "path": "lodestar_app::total_approximate"
+    },
+    {
+      "kind": "struct_field",
+      "name": "transactions",
+      "path": "lodestar_app::transactions"
+    },
+    {
+      "kind": "struct_field",
+      "name": "transitively_affected",
+      "path": "lodestar_app::transitively_affected"
+    },
+    {
+      "kind": "struct_field",
+      "name": "truncated",
+      "path": "lodestar_app::truncated"
+    },
+    {
+      "kind": "struct_field",
+      "name": "valid",
+      "path": "lodestar_app::valid"
+    },
+    {
+      "kind": "struct_field",
+      "name": "valid",
+      "path": "lodestar_app::valid"
+    },
+    {
+      "kind": "struct_field",
+      "name": "valid",
+      "path": "lodestar_app::valid"
+    },
+    {
+      "kind": "struct_field",
+      "name": "validation",
+      "path": "lodestar_app::validation"
+    },
+    {
+      "kind": "struct_field",
+      "name": "warnings",
+      "path": "lodestar_app::warnings"
+    },
+    {
+      "kind": "struct_field",
+      "name": "warnings",
+      "path": "lodestar_app::warnings"
+    },
+    {
+      "kind": "struct_field",
+      "name": "warnings",
+      "path": "lodestar_app::warnings"
+    },
+    {
+      "kind": "function",
+      "name": "workspace",
+      "path": "lodestar_app::workspace",
+      "signature": {
+        "async": false,
+        "const": false,
+        "generics": [],
+        "inputs": [
+          [
+            "self",
+            "&Self"
+          ]
+        ],
+        "output": "&Workspace",
+        "unsafe": false
+      }
+    },
+    {
+      "kind": "function",
+      "name": "workspace_error_code",
+      "path": "lodestar_app::workspace_error_code",
+      "signature": {
+        "async": false,
+        "const": false,
+        "generics": [],
+        "inputs": [
+          [
+            "err",
+            "&lodestar_workspace::WorkspaceError"
+          ]
+        ],
+        "output": "lodestar_core::types::ErrorCode",
+        "unsafe": false
+      }
+    },
+    {
+      "kind": "struct_field",
+      "name": "workspace_revision",
+      "path": "lodestar_app::workspace_revision"
+    },
+    {
+      "kind": "struct_field",
+      "name": "workspace_revision",
+      "path": "lodestar_app::workspace_revision"
+    },
+    {
+      "kind": "struct_field",
+      "name": "workspace_revision",
+      "path": "lodestar_app::workspace_revision"
+    },
+    {
+      "kind": "struct_field",
+      "name": "workspace_revision",
+      "path": "lodestar_app::workspace_revision"
+    },
+    {
+      "kind": "function",
+      "name": "workspace_status",
+      "path": "lodestar_app::workspace_status",
+      "signature": {
+        "async": false,
+        "const": false,
+        "generics": [],
+        "inputs": [
+          [
+            "self",
+            "&Self"
+          ],
+          [
+            "profile",
+            "Profile"
+          ]
+        ],
+        "output": "Result<WorkspaceStatus, AppError>",
+        "unsafe": false
+      }
+    },
+    {
+      "kind": "struct_field",
+      "name": "writes",
+      "path": "lodestar_app::writes"
+    },
+    {
+      "kind": "function",
+      "name": "writes_enabled",
+      "path": "lodestar_app::writes_enabled",
+      "signature": {
+        "async": false,
+        "const": false,
+        "generics": [],
+        "inputs": [
+          [
+            "self",
+            "Self"
+          ]
+        ],
+        "output": "bool",
+        "unsafe": false
+      }
+    }
+  ]
+}

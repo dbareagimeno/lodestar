@@ -6,10 +6,10 @@ prioridad: 5
 etiquetas: ["store", "rendimiento", "watcher", "descubrimiento"]
 origen: "revision-de-pr"
 abierta_en: "2026-07-25"
-revisada_en: "2026-08-02"
+revisada_en: "2026-08-23"
 epica: "E23"
-historias: ["E23-H16"]
-bloqueada_por: "evidencia"
+historias: ["E23-H16", "E33-H09"]
+bloqueada_por: "evidencia disponible; ratificación normativa del usuario pendiente"
 relacionadas: [3, 9, 16]
 ---
 
@@ -75,3 +75,35 @@ relacionadas: [3, 9, 16]
 - **Sigue siendo prioridad 5** y sigue gobernando a las demás: mientras esté abierta,
   `ARCHITECTURE.md §21.5` prohíbe que la superficie externa prometa la cache o el rendimiento a
   escala.
+
+## Evidencia disponible — E33-H08 (2026-08-22)
+
+La condición de entrada ya tiene un paquete trazable: [`evidencia-14-store-2026-08.md`](../docs/qa/evidencia-14-store-2026-08.md).
+Incluye la corrida H04 de las tres variantes en las tres escalas, la calibración wire, el número
+frío y el dogfooding de H06, además del inventario actual del walker sin `DiscoveryPolicy`, la
+divergencia de `field_path` y el papel posible del watcher. La evidencia está disponible para
+decidir, pero este apunte no decide entre conectar, acotar o retirar.
+
+El `estado: "abierta"` y `prioridad: 5` no cambian. La recomendación histórica de conectar (a)
+queda registrada como hipótesis pendiente de ratificación: H08 la contrasta con los datos y deja
+explícitos sus costes, pero no la convierte en decisión ni la revoca.
+
+## Extensión ratificada — E33-H09 (2026-08-22)
+
+Antes de la decisión final, el usuario exige que el banco acepte una escala positiva arbitraria y
+que se ejecute al menos Realista/100k, midiendo también tamaños y RSS por variante. H09 está
+ratificada con una iteración a 100k; 1M queda admitido por parametrización y protegido por preflight,
+pero no es ejecución obligatoria. El presupuesto actual de disco (`32 KiB × scale + 256 MiB`) es una
+heurística modificable, no un contrato ni un criterio de descarte de SQLite. La optimización de
+memoria se decide después de medir.
+
+La extensión ya está ejecutada: el [manifiesto de evidencia de v0.6.2](../docs/qa/corridas/v0.6.2/manifest.json)
+identifica el bruto externo de H09 y su [resumen](../docs/qa/e33-h09-realista-100k-2026-08-23.md)
+contiene 100.004 documentos, 134.783.275 bytes Markdown, 659.578.880 bytes SQLite, equivalencia
+funcional entre las tres variantes y pico RSS por worker aislado. El rebuild SQLite fue de
+`1_868_411_002_750 ns` (~31,14 min); los picos RSS fueron 972.439.552 bytes (disco), 985.530.368 bytes
+(SQLite) y 839.974.912 bytes (RAM), con baseline de 2.637.824 bytes y delta reconciliable por worker.
+Esto completa la evidencia técnica solicitada, pero
+`§14` sigue abierta: no escoge conectar, acotar ni retirar, no cambia la prioridad y no usa los
+techos H05/10k como umbral para la nueva escala. La corrida y la capacidad permanecen en el repo
+como resumen y artefacto externo inventariado para evaluar mejoras futuras de rendimiento.

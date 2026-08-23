@@ -1,0 +1,35 @@
+{
+ "kind": "call",
+ "tool": "workspace_status",
+ "arguments": {},
+ "is_error": false,
+ "text": "{\"capabilities\":{\"externalReferences\":true,\"revert\":false,\"schemas\":false,\"transactions\":false,\"writes\":false},\"counts\":{\"dangling\":1441,\"documents\":10004,\"errors\":782,\"isolated\":1429,\"links\":17963,\"warnings\":660},\"formatVersion\":\"0.2\",\"knowledgeRoots\":[],\"receipts\":[],\"recovery\":{\"pendingTransaction\":false},\"referenceRoots\":[],\"root\":\"/private/tmp/lodestar-e33-h04-wire-10k\",\"schemaVersion\":\"1\",\"valid\":false,\"workspaceRevision\":\"blake3:223db5df6fe1c5352b231ee4215f4fca819d70b70ee20f1ace66ddde4a2c7de6\"}",
+ "structured": {
+  "capabilities": {
+   "externalReferences": true,
+   "revert": false,
+   "schemas": false,
+   "transactions": false,
+   "writes": false
+  },
+  "counts": {
+   "dangling": 1441,
+   "documents": 10004,
+   "errors": 782,
+   "isolated": 1429,
+   "links": 17963,
+   "warnings": 660
+  },
+  "formatVersion": "0.2",
+  "knowledgeRoots": [],
+  "receipts": [],
+  "recovery": {
+   "pendingTransaction": false
+  },
+  "referenceRoots": [],
+  "root": "/private/tmp/lodestar-e33-h04-wire-10k",
+  "schemaVersion": "1",
+  "valid": false,
+  "workspaceRevision": "blake3:223db5df6fe1c5352b231ee4215f4fca819d70b70ee20f1ace66ddde4a2c7de6"
+ }
+}

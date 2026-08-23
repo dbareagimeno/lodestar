@@ -71,6 +71,13 @@ cumplen. Un `expect: {}` vacío no asevera nada y **no** convierte el caso en as
 | `rc` | int | Solo pasos `shell`/`spawn`: el código de salida del proceso es exactamente ese. |
 | `describe` | string | Prosa libre: qué asevera este paso y **por qué** (fuente/hallazgo). No se evalúa; el runner la **imprime** en el detalle de un FAIL. |
 
+En un paso `kind: "raw"`, el arnés publica la respuesta bajo `response`. Si el servidor ignora la
+línea ya enviada porque no existe un `id` correlacionable, `response` vale `null`; el silencio se
+exige con `equals: {"response": null}`. No debe inventarse un error JSON-RPC para una notificación
+o una línea que el transporte descarta. El EOF de stdout o la salida del proceso son estados
+terminales, nunca silencio: una vez observados, el arnés no vuelve a escribir operaciones
+`raw`, RPC ni barreras de resincronización en esa sesión.
+
 ### 3.1 El selector de path
 
 Se reutiliza **el mismo dialecto de los placeholders `@stepN.…`** que el arnés ya implementa

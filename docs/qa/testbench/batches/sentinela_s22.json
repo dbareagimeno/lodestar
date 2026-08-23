@@ -1,0 +1,52 @@
+{
+  "batch": "sentinela_s22",
+  "descripcion": "Centinela E33-H03 de decisiones §22: las referencias de frontmatter rotas permanecen silenciosas pero inspeccionables.",
+  "root": "corpus",
+  "profile": "readonly",
+  "fixtures": null,
+  "cases": [
+    {
+      "id": "S22-01",
+      "gate": true,
+      "descripcion": "decisiones §22 — knowledge_check no diagnostica referencias de frontmatter huérfanas.",
+      "steps": [{
+        "kind": "call",
+        "tool": "knowledge_check",
+        "arguments": {"scope": {"kind": "document", "ref": {"path": "centinelas/ref-frontmatter-rota.md"}}},
+        "expect": {
+          "is_error": false,
+          "equals": {"structured.valid": true, "structured.summary.errors": 0, "structured.summary.warnings": 0},
+          "length": {"structured.diagnostics": 0},
+          "describe": "§22 fija el statu quo silencioso para relacionadas y affects."
+        }
+      }]
+    },
+    {
+      "id": "S22-02",
+      "gate": true,
+      "descripcion": "decisiones §22 — metadata_inspect conserva visibles los dos valores huérfanos.",
+      "steps": [
+        {
+          "kind": "call",
+          "tool": "metadata_inspect",
+          "arguments": {"mode": "field", "field": "relacionadas"},
+          "expect": {
+            "is_error": false,
+            "equals": {"structured.field": "relacionadas", "structured.presentIn": 1, "structured.values.0.value": 99, "structured.values.0.count": 1},
+            "describe": "§22 mantiene observable relacionadas: [99]."
+          }
+        },
+        {
+          "kind": "call",
+          "tool": "metadata_inspect",
+          "arguments": {"mode": "field", "field": "affects"},
+          "expect": {
+            "is_error": false,
+            "equals": {"structured.field": "affects", "structured.presentIn": 1, "structured.values.0.value": "typo-inexistente", "structured.values.0.count": 1},
+            "describe": "§22 mantiene observable affects: [typo-inexistente]."
+          }
+        }
+      ]
+    }
+  ]
+}

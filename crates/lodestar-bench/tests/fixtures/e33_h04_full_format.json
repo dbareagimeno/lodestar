@@ -1,0 +1,4039 @@
+{
+  "schema_version": "e33-h04-v2-full",
+  "profiles": [
+    "plano",
+    "realista"
+  ],
+  "scales": [
+    100,
+    1000,
+    10000
+  ],
+  "runs": [
+    {
+      "profile": "plano",
+      "scale": 100,
+      "measurements": [
+        {
+          "variant": "disk-reparseo",
+          "document_count": 100,
+          "cold_open": {
+            "sample_count": 2,
+            "p50_ns": 1,
+            "p95_ns": 1,
+            "payload_bytes": 28,
+            "result": {
+              "counts": {
+                "documents": 100
+              }
+            },
+            "sample_elapsed_ns": [
+              1,
+              1
+            ]
+          },
+          "tools": {
+            "workspace_status": {
+              "sample_count": 2,
+              "p50_ns": 1,
+              "p95_ns": 1,
+              "payload_bytes": 41,
+              "result": {
+                "counts": {
+                  "documents": 100
+                },
+                "valid": true
+              },
+              "sample_elapsed_ns": [
+                1,
+                1
+              ]
+            },
+            "knowledge_search": {
+              "sample_count": 2,
+              "p50_ns": 1,
+              "p95_ns": 1,
+              "payload_bytes": 35,
+              "result": {
+                "results": [
+                  {
+                    "path": "control.md"
+                  }
+                ]
+              },
+              "sample_elapsed_ns": [
+                1,
+                1
+              ]
+            },
+            "knowledge_get": {
+              "sample_count": 2,
+              "p50_ns": 1,
+              "p95_ns": 1,
+              "payload_bytes": 38,
+              "result": {
+                "path": "child.md",
+                "body": "# Child\n"
+              },
+              "sample_elapsed_ns": [
+                1,
+                1
+              ]
+            },
+            "metadata_inspect": {
+              "sample_count": 2,
+              "p50_ns": 1,
+              "p95_ns": 1,
+              "payload_bytes": 49,
+              "result": {
+                "presentIn": 1,
+                "inferredTypes": {
+                  "tags": "string"
+                }
+              },
+              "sample_elapsed_ns": [
+                1,
+                1
+              ]
+            },
+            "graph_query": {
+              "sample_count": 2,
+              "p50_ns": 1,
+              "p95_ns": 1,
+              "payload_bytes": 113,
+              "result": {
+                "nodes": [
+                  {
+                    "path": "control.md"
+                  }
+                ],
+                "edges": [
+                  {
+                    "from": "control.md",
+                    "to": "child.md"
+                  }
+                ],
+                "summary": {
+                  "nodes": 1,
+                  "edges": 1
+                }
+              },
+              "sample_elapsed_ns": [
+                1,
+                1
+              ]
+            },
+            "impact_analyze": {
+              "sample_count": 2,
+              "p50_ns": 1,
+              "p95_ns": 1,
+              "payload_bytes": 107,
+              "result": {
+                "summary": {
+                  "directlyAffected": 1
+                },
+                "affectedDocuments": [
+                  "child.md"
+                ],
+                "recommendations": [
+                  "review references"
+                ]
+              },
+              "sample_elapsed_ns": [
+                1,
+                1
+              ]
+            },
+            "knowledge_check": {
+              "sample_count": 2,
+              "p50_ns": 1,
+              "p95_ns": 1,
+              "payload_bytes": 134,
+              "result": {
+                "valid": true,
+                "summary": {
+                  "documents": 100
+                },
+                "diagnostics": [
+                  {
+                    "severity": "info",
+                    "message": "valid"
+                  }
+                ],
+                "workspaceRevision": "fixture-e33-h04"
+              },
+              "sample_elapsed_ns": [
+                1,
+                1
+              ]
+            }
+          }
+        },
+        {
+          "variant": "sqlite-raw",
+          "document_count": 100,
+          "cold_open": {
+            "sample_count": 2,
+            "p50_ns": 1,
+            "p95_ns": 1,
+            "payload_bytes": 28,
+            "result": {
+              "counts": {
+                "documents": 100
+              }
+            },
+            "sample_elapsed_ns": [
+              1,
+              1
+            ]
+          },
+          "tools": {
+            "workspace_status": {
+              "sample_count": 2,
+              "p50_ns": 1,
+              "p95_ns": 1,
+              "payload_bytes": 41,
+              "result": {
+                "counts": {
+                  "documents": 100
+                },
+                "valid": true
+              },
+              "sample_elapsed_ns": [
+                1,
+                1
+              ]
+            },
+            "knowledge_search": {
+              "sample_count": 2,
+              "p50_ns": 1,
+              "p95_ns": 1,
+              "payload_bytes": 35,
+              "result": {
+                "results": [
+                  {
+                    "path": "control.md"
+                  }
+                ]
+              },
+              "sample_elapsed_ns": [
+                1,
+                1
+              ]
+            },
+            "knowledge_get": {
+              "sample_count": 2,
+              "p50_ns": 1,
+              "p95_ns": 1,
+              "payload_bytes": 38,
+              "result": {
+                "path": "child.md",
+                "body": "# Child\n"
+              },
+              "sample_elapsed_ns": [
+                1,
+                1
+              ]
+            },
+            "metadata_inspect": {
+              "sample_count": 2,
+              "p50_ns": 1,
+              "p95_ns": 1,
+              "payload_bytes": 49,
+              "result": {
+                "presentIn": 1,
+                "inferredTypes": {
+                  "tags": "string"
+                }
+              },
+              "sample_elapsed_ns": [
+                1,
+                1
+              ]
+            },
+            "graph_query": {
+              "sample_count": 2,
+              "p50_ns": 1,
+              "p95_ns": 1,
+              "payload_bytes": 113,
+              "result": {
+                "nodes": [
+                  {
+                    "path": "control.md"
+                  }
+                ],
+                "edges": [
+                  {
+                    "from": "control.md",
+                    "to": "child.md"
+                  }
+                ],
+                "summary": {
+                  "nodes": 1,
+                  "edges": 1
+                }
+              },
+              "sample_elapsed_ns": [
+                1,
+                1
+              ]
+            },
+            "impact_analyze": {
+              "sample_count": 2,
+              "p50_ns": 1,
+              "p95_ns": 1,
+              "payload_bytes": 107,
+              "result": {
+                "summary": {
+                  "directlyAffected": 1
+                },
+                "affectedDocuments": [
+                  "child.md"
+                ],
+                "recommendations": [
+                  "review references"
+                ]
+              },
+              "sample_elapsed_ns": [
+                1,
+                1
+              ]
+            },
+            "knowledge_check": {
+              "sample_count": 2,
+              "p50_ns": 1,
+              "p95_ns": 1,
+              "payload_bytes": 134,
+              "result": {
+                "valid": true,
+                "summary": {
+                  "documents": 100
+                },
+                "diagnostics": [
+                  {
+                    "severity": "info",
+                    "message": "valid"
+                  }
+                ],
+                "workspaceRevision": "fixture-e33-h04"
+              },
+              "sample_elapsed_ns": [
+                1,
+                1
+              ]
+            }
+          },
+          "rebuild": {
+            "sample_count": 2,
+            "p50_ns": 1,
+            "p95_ns": 1,
+            "payload_bytes": 16,
+            "result": {
+              "rebuilt": true
+            },
+            "sample_elapsed_ns": [
+              1,
+              1
+            ]
+          }
+        },
+        {
+          "variant": "ram-memoizado",
+          "document_count": 100,
+          "cold_open": {
+            "sample_count": 2,
+            "p50_ns": 1,
+            "p95_ns": 1,
+            "payload_bytes": 28,
+            "result": {
+              "counts": {
+                "documents": 100
+              }
+            },
+            "sample_elapsed_ns": [
+              1,
+              1
+            ]
+          },
+          "tools": {
+            "workspace_status": {
+              "sample_count": 2,
+              "p50_ns": 1,
+              "p95_ns": 1,
+              "payload_bytes": 41,
+              "result": {
+                "counts": {
+                  "documents": 100
+                },
+                "valid": true
+              },
+              "sample_elapsed_ns": [
+                1,
+                1
+              ]
+            },
+            "knowledge_search": {
+              "sample_count": 2,
+              "p50_ns": 1,
+              "p95_ns": 1,
+              "payload_bytes": 35,
+              "result": {
+                "results": [
+                  {
+                    "path": "control.md"
+                  }
+                ]
+              },
+              "sample_elapsed_ns": [
+                1,
+                1
+              ]
+            },
+            "knowledge_get": {
+              "sample_count": 2,
+              "p50_ns": 1,
+              "p95_ns": 1,
+              "payload_bytes": 38,
+              "result": {
+                "path": "child.md",
+                "body": "# Child\n"
+              },
+              "sample_elapsed_ns": [
+                1,
+                1
+              ]
+            },
+            "metadata_inspect": {
+              "sample_count": 2,
+              "p50_ns": 1,
+              "p95_ns": 1,
+              "payload_bytes": 49,
+              "result": {
+                "presentIn": 1,
+                "inferredTypes": {
+                  "tags": "string"
+                }
+              },
+              "sample_elapsed_ns": [
+                1,
+                1
+              ]
+            },
+            "graph_query": {
+              "sample_count": 2,
+              "p50_ns": 1,
+              "p95_ns": 1,
+              "payload_bytes": 113,
+              "result": {
+                "nodes": [
+                  {
+                    "path": "control.md"
+                  }
+                ],
+                "edges": [
+                  {
+                    "from": "control.md",
+                    "to": "child.md"
+                  }
+                ],
+                "summary": {
+                  "nodes": 1,
+                  "edges": 1
+                }
+              },
+              "sample_elapsed_ns": [
+                1,
+                1
+              ]
+            },
+            "impact_analyze": {
+              "sample_count": 2,
+              "p50_ns": 1,
+              "p95_ns": 1,
+              "payload_bytes": 107,
+              "result": {
+                "summary": {
+                  "directlyAffected": 1
+                },
+                "affectedDocuments": [
+                  "child.md"
+                ],
+                "recommendations": [
+                  "review references"
+                ]
+              },
+              "sample_elapsed_ns": [
+                1,
+                1
+              ]
+            },
+            "knowledge_check": {
+              "sample_count": 2,
+              "p50_ns": 1,
+              "p95_ns": 1,
+              "payload_bytes": 134,
+              "result": {
+                "valid": true,
+                "summary": {
+                  "documents": 100
+                },
+                "diagnostics": [
+                  {
+                    "severity": "info",
+                    "message": "valid"
+                  }
+                ],
+                "workspaceRevision": "fixture-e33-h04"
+              },
+              "sample_elapsed_ns": [
+                1,
+                1
+              ]
+            }
+          }
+        }
+      ],
+      "change_cycle": {
+        "source": "app/disk",
+        "metric": {
+          "sample_count": 2,
+          "p50_ns": 1,
+          "p95_ns": 1,
+          "payload_bytes": 1,
+          "result": {}
+        }
+      },
+      "app_results": {
+        "workspace_status": {
+          "counts": {
+            "documents": 100
+          },
+          "valid": true
+        },
+        "knowledge_search": {
+          "results": [
+            {
+              "path": "control.md"
+            }
+          ]
+        },
+        "knowledge_get": {
+          "path": "child.md",
+          "body": "# Child\n"
+        },
+        "metadata_inspect": {
+          "presentIn": 1,
+          "inferredTypes": {
+            "tags": "string"
+          }
+        },
+        "graph_query": {
+          "nodes": [
+            {
+              "path": "control.md"
+            }
+          ],
+          "edges": [
+            {
+              "from": "control.md",
+              "to": "child.md"
+            }
+          ],
+          "summary": {
+            "nodes": 1,
+            "edges": 1
+          }
+        },
+        "impact_analyze": {
+          "summary": {
+            "directlyAffected": 1
+          },
+          "affectedDocuments": [
+            "child.md"
+          ],
+          "recommendations": [
+            "review references"
+          ]
+        },
+        "knowledge_check": {
+          "valid": true,
+          "summary": {
+            "documents": 100
+          },
+          "diagnostics": [
+            {
+              "severity": "info",
+              "message": "valid"
+            }
+          ],
+          "workspaceRevision": "fixture-e33-h04"
+        }
+      },
+      "seam_results": {
+        "workspace_status": {
+          "counts": {
+            "documents": 100
+          },
+          "valid": true
+        },
+        "knowledge_search": {
+          "results": [
+            {
+              "path": "control.md"
+            }
+          ]
+        },
+        "knowledge_get": {
+          "path": "child.md",
+          "body": "# Child\n"
+        },
+        "metadata_inspect": {
+          "presentIn": 1,
+          "inferredTypes": {
+            "tags": "string"
+          }
+        },
+        "graph_query": {
+          "nodes": [
+            {
+              "path": "control.md"
+            }
+          ],
+          "edges": [
+            {
+              "from": "control.md",
+              "to": "child.md"
+            }
+          ],
+          "summary": {
+            "nodes": 1,
+            "edges": 1
+          }
+        },
+        "impact_analyze": {
+          "summary": {
+            "directlyAffected": 1
+          },
+          "affectedDocuments": [
+            "child.md"
+          ],
+          "recommendations": [
+            "review references"
+          ]
+        },
+        "knowledge_check": {
+          "valid": true,
+          "summary": {
+            "documents": 100
+          },
+          "diagnostics": [
+            {
+              "severity": "info",
+              "message": "valid"
+            }
+          ],
+          "workspaceRevision": "fixture-e33-h04"
+        }
+      },
+      "negative_results": {
+        "knowledge_get": {
+          "app": {
+            "error": {
+              "code": "not_found",
+              "message": "document not found"
+            }
+          },
+          "seam": {
+            "error": {
+              "code": "not_found",
+              "message": "document not found"
+            }
+          }
+        },
+        "metadata_inspect": {
+          "app": {
+            "error": {
+              "code": "invalid_field",
+              "message": "field not found"
+            }
+          },
+          "seam": {
+            "error": {
+              "code": "invalid_field",
+              "message": "field not found"
+            }
+          }
+        }
+      }
+    },
+    {
+      "profile": "plano",
+      "scale": 1000,
+      "measurements": [
+        {
+          "variant": "disk-reparseo",
+          "document_count": 1000,
+          "cold_open": {
+            "sample_count": 2,
+            "p50_ns": 1,
+            "p95_ns": 1,
+            "payload_bytes": 29,
+            "result": {
+              "counts": {
+                "documents": 1000
+              }
+            },
+            "sample_elapsed_ns": [
+              1,
+              1
+            ]
+          },
+          "tools": {
+            "workspace_status": {
+              "sample_count": 2,
+              "p50_ns": 1,
+              "p95_ns": 1,
+              "payload_bytes": 42,
+              "result": {
+                "counts": {
+                  "documents": 1000
+                },
+                "valid": true
+              },
+              "sample_elapsed_ns": [
+                1,
+                1
+              ]
+            },
+            "knowledge_search": {
+              "sample_count": 2,
+              "p50_ns": 1,
+              "p95_ns": 1,
+              "payload_bytes": 35,
+              "result": {
+                "results": [
+                  {
+                    "path": "control.md"
+                  }
+                ]
+              },
+              "sample_elapsed_ns": [
+                1,
+                1
+              ]
+            },
+            "knowledge_get": {
+              "sample_count": 2,
+              "p50_ns": 1,
+              "p95_ns": 1,
+              "payload_bytes": 38,
+              "result": {
+                "path": "child.md",
+                "body": "# Child\n"
+              },
+              "sample_elapsed_ns": [
+                1,
+                1
+              ]
+            },
+            "metadata_inspect": {
+              "sample_count": 2,
+              "p50_ns": 1,
+              "p95_ns": 1,
+              "payload_bytes": 49,
+              "result": {
+                "presentIn": 1,
+                "inferredTypes": {
+                  "tags": "string"
+                }
+              },
+              "sample_elapsed_ns": [
+                1,
+                1
+              ]
+            },
+            "graph_query": {
+              "sample_count": 2,
+              "p50_ns": 1,
+              "p95_ns": 1,
+              "payload_bytes": 113,
+              "result": {
+                "nodes": [
+                  {
+                    "path": "control.md"
+                  }
+                ],
+                "edges": [
+                  {
+                    "from": "control.md",
+                    "to": "child.md"
+                  }
+                ],
+                "summary": {
+                  "nodes": 1,
+                  "edges": 1
+                }
+              },
+              "sample_elapsed_ns": [
+                1,
+                1
+              ]
+            },
+            "impact_analyze": {
+              "sample_count": 2,
+              "p50_ns": 1,
+              "p95_ns": 1,
+              "payload_bytes": 107,
+              "result": {
+                "summary": {
+                  "directlyAffected": 1
+                },
+                "affectedDocuments": [
+                  "child.md"
+                ],
+                "recommendations": [
+                  "review references"
+                ]
+              },
+              "sample_elapsed_ns": [
+                1,
+                1
+              ]
+            },
+            "knowledge_check": {
+              "sample_count": 2,
+              "p50_ns": 1,
+              "p95_ns": 1,
+              "payload_bytes": 135,
+              "result": {
+                "valid": true,
+                "summary": {
+                  "documents": 1000
+                },
+                "diagnostics": [
+                  {
+                    "severity": "info",
+                    "message": "valid"
+                  }
+                ],
+                "workspaceRevision": "fixture-e33-h04"
+              },
+              "sample_elapsed_ns": [
+                1,
+                1
+              ]
+            }
+          }
+        },
+        {
+          "variant": "sqlite-raw",
+          "document_count": 1000,
+          "cold_open": {
+            "sample_count": 2,
+            "p50_ns": 1,
+            "p95_ns": 1,
+            "payload_bytes": 29,
+            "result": {
+              "counts": {
+                "documents": 1000
+              }
+            },
+            "sample_elapsed_ns": [
+              1,
+              1
+            ]
+          },
+          "tools": {
+            "workspace_status": {
+              "sample_count": 2,
+              "p50_ns": 1,
+              "p95_ns": 1,
+              "payload_bytes": 42,
+              "result": {
+                "counts": {
+                  "documents": 1000
+                },
+                "valid": true
+              },
+              "sample_elapsed_ns": [
+                1,
+                1
+              ]
+            },
+            "knowledge_search": {
+              "sample_count": 2,
+              "p50_ns": 1,
+              "p95_ns": 1,
+              "payload_bytes": 35,
+              "result": {
+                "results": [
+                  {
+                    "path": "control.md"
+                  }
+                ]
+              },
+              "sample_elapsed_ns": [
+                1,
+                1
+              ]
+            },
+            "knowledge_get": {
+              "sample_count": 2,
+              "p50_ns": 1,
+              "p95_ns": 1,
+              "payload_bytes": 38,
+              "result": {
+                "path": "child.md",
+                "body": "# Child\n"
+              },
+              "sample_elapsed_ns": [
+                1,
+                1
+              ]
+            },
+            "metadata_inspect": {
+              "sample_count": 2,
+              "p50_ns": 1,
+              "p95_ns": 1,
+              "payload_bytes": 49,
+              "result": {
+                "presentIn": 1,
+                "inferredTypes": {
+                  "tags": "string"
+                }
+              },
+              "sample_elapsed_ns": [
+                1,
+                1
+              ]
+            },
+            "graph_query": {
+              "sample_count": 2,
+              "p50_ns": 1,
+              "p95_ns": 1,
+              "payload_bytes": 113,
+              "result": {
+                "nodes": [
+                  {
+                    "path": "control.md"
+                  }
+                ],
+                "edges": [
+                  {
+                    "from": "control.md",
+                    "to": "child.md"
+                  }
+                ],
+                "summary": {
+                  "nodes": 1,
+                  "edges": 1
+                }
+              },
+              "sample_elapsed_ns": [
+                1,
+                1
+              ]
+            },
+            "impact_analyze": {
+              "sample_count": 2,
+              "p50_ns": 1,
+              "p95_ns": 1,
+              "payload_bytes": 107,
+              "result": {
+                "summary": {
+                  "directlyAffected": 1
+                },
+                "affectedDocuments": [
+                  "child.md"
+                ],
+                "recommendations": [
+                  "review references"
+                ]
+              },
+              "sample_elapsed_ns": [
+                1,
+                1
+              ]
+            },
+            "knowledge_check": {
+              "sample_count": 2,
+              "p50_ns": 1,
+              "p95_ns": 1,
+              "payload_bytes": 135,
+              "result": {
+                "valid": true,
+                "summary": {
+                  "documents": 1000
+                },
+                "diagnostics": [
+                  {
+                    "severity": "info",
+                    "message": "valid"
+                  }
+                ],
+                "workspaceRevision": "fixture-e33-h04"
+              },
+              "sample_elapsed_ns": [
+                1,
+                1
+              ]
+            }
+          },
+          "rebuild": {
+            "sample_count": 2,
+            "p50_ns": 1,
+            "p95_ns": 1,
+            "payload_bytes": 16,
+            "result": {
+              "rebuilt": true
+            },
+            "sample_elapsed_ns": [
+              1,
+              1
+            ]
+          }
+        },
+        {
+          "variant": "ram-memoizado",
+          "document_count": 1000,
+          "cold_open": {
+            "sample_count": 2,
+            "p50_ns": 1,
+            "p95_ns": 1,
+            "payload_bytes": 29,
+            "result": {
+              "counts": {
+                "documents": 1000
+              }
+            },
+            "sample_elapsed_ns": [
+              1,
+              1
+            ]
+          },
+          "tools": {
+            "workspace_status": {
+              "sample_count": 2,
+              "p50_ns": 1,
+              "p95_ns": 1,
+              "payload_bytes": 42,
+              "result": {
+                "counts": {
+                  "documents": 1000
+                },
+                "valid": true
+              },
+              "sample_elapsed_ns": [
+                1,
+                1
+              ]
+            },
+            "knowledge_search": {
+              "sample_count": 2,
+              "p50_ns": 1,
+              "p95_ns": 1,
+              "payload_bytes": 35,
+              "result": {
+                "results": [
+                  {
+                    "path": "control.md"
+                  }
+                ]
+              },
+              "sample_elapsed_ns": [
+                1,
+                1
+              ]
+            },
+            "knowledge_get": {
+              "sample_count": 2,
+              "p50_ns": 1,
+              "p95_ns": 1,
+              "payload_bytes": 38,
+              "result": {
+                "path": "child.md",
+                "body": "# Child\n"
+              },
+              "sample_elapsed_ns": [
+                1,
+                1
+              ]
+            },
+            "metadata_inspect": {
+              "sample_count": 2,
+              "p50_ns": 1,
+              "p95_ns": 1,
+              "payload_bytes": 49,
+              "result": {
+                "presentIn": 1,
+                "inferredTypes": {
+                  "tags": "string"
+                }
+              },
+              "sample_elapsed_ns": [
+                1,
+                1
+              ]
+            },
+            "graph_query": {
+              "sample_count": 2,
+              "p50_ns": 1,
+              "p95_ns": 1,
+              "payload_bytes": 113,
+              "result": {
+                "nodes": [
+                  {
+                    "path": "control.md"
+                  }
+                ],
+                "edges": [
+                  {
+                    "from": "control.md",
+                    "to": "child.md"
+                  }
+                ],
+                "summary": {
+                  "nodes": 1,
+                  "edges": 1
+                }
+              },
+              "sample_elapsed_ns": [
+                1,
+                1
+              ]
+            },
+            "impact_analyze": {
+              "sample_count": 2,
+              "p50_ns": 1,
+              "p95_ns": 1,
+              "payload_bytes": 107,
+              "result": {
+                "summary": {
+                  "directlyAffected": 1
+                },
+                "affectedDocuments": [
+                  "child.md"
+                ],
+                "recommendations": [
+                  "review references"
+                ]
+              },
+              "sample_elapsed_ns": [
+                1,
+                1
+              ]
+            },
+            "knowledge_check": {
+              "sample_count": 2,
+              "p50_ns": 1,
+              "p95_ns": 1,
+              "payload_bytes": 135,
+              "result": {
+                "valid": true,
+                "summary": {
+                  "documents": 1000
+                },
+                "diagnostics": [
+                  {
+                    "severity": "info",
+                    "message": "valid"
+                  }
+                ],
+                "workspaceRevision": "fixture-e33-h04"
+              },
+              "sample_elapsed_ns": [
+                1,
+                1
+              ]
+            }
+          }
+        }
+      ],
+      "change_cycle": {
+        "source": "app/disk",
+        "metric": {
+          "sample_count": 2,
+          "p50_ns": 1,
+          "p95_ns": 1,
+          "payload_bytes": 1,
+          "result": {}
+        }
+      },
+      "app_results": {
+        "workspace_status": {
+          "counts": {
+            "documents": 1000
+          },
+          "valid": true
+        },
+        "knowledge_search": {
+          "results": [
+            {
+              "path": "control.md"
+            }
+          ]
+        },
+        "knowledge_get": {
+          "path": "child.md",
+          "body": "# Child\n"
+        },
+        "metadata_inspect": {
+          "presentIn": 1,
+          "inferredTypes": {
+            "tags": "string"
+          }
+        },
+        "graph_query": {
+          "nodes": [
+            {
+              "path": "control.md"
+            }
+          ],
+          "edges": [
+            {
+              "from": "control.md",
+              "to": "child.md"
+            }
+          ],
+          "summary": {
+            "nodes": 1,
+            "edges": 1
+          }
+        },
+        "impact_analyze": {
+          "summary": {
+            "directlyAffected": 1
+          },
+          "affectedDocuments": [
+            "child.md"
+          ],
+          "recommendations": [
+            "review references"
+          ]
+        },
+        "knowledge_check": {
+          "valid": true,
+          "summary": {
+            "documents": 1000
+          },
+          "diagnostics": [
+            {
+              "severity": "info",
+              "message": "valid"
+            }
+          ],
+          "workspaceRevision": "fixture-e33-h04"
+        }
+      },
+      "seam_results": {
+        "workspace_status": {
+          "counts": {
+            "documents": 1000
+          },
+          "valid": true
+        },
+        "knowledge_search": {
+          "results": [
+            {
+              "path": "control.md"
+            }
+          ]
+        },
+        "knowledge_get": {
+          "path": "child.md",
+          "body": "# Child\n"
+        },
+        "metadata_inspect": {
+          "presentIn": 1,
+          "inferredTypes": {
+            "tags": "string"
+          }
+        },
+        "graph_query": {
+          "nodes": [
+            {
+              "path": "control.md"
+            }
+          ],
+          "edges": [
+            {
+              "from": "control.md",
+              "to": "child.md"
+            }
+          ],
+          "summary": {
+            "nodes": 1,
+            "edges": 1
+          }
+        },
+        "impact_analyze": {
+          "summary": {
+            "directlyAffected": 1
+          },
+          "affectedDocuments": [
+            "child.md"
+          ],
+          "recommendations": [
+            "review references"
+          ]
+        },
+        "knowledge_check": {
+          "valid": true,
+          "summary": {
+            "documents": 1000
+          },
+          "diagnostics": [
+            {
+              "severity": "info",
+              "message": "valid"
+            }
+          ],
+          "workspaceRevision": "fixture-e33-h04"
+        }
+      },
+      "negative_results": {
+        "knowledge_get": {
+          "app": {
+            "error": {
+              "code": "not_found",
+              "message": "document not found"
+            }
+          },
+          "seam": {
+            "error": {
+              "code": "not_found",
+              "message": "document not found"
+            }
+          }
+        },
+        "metadata_inspect": {
+          "app": {
+            "error": {
+              "code": "invalid_field",
+              "message": "field not found"
+            }
+          },
+          "seam": {
+            "error": {
+              "code": "invalid_field",
+              "message": "field not found"
+            }
+          }
+        }
+      }
+    },
+    {
+      "profile": "plano",
+      "scale": 10000,
+      "measurements": [
+        {
+          "variant": "disk-reparseo",
+          "document_count": 10000,
+          "cold_open": {
+            "sample_count": 2,
+            "p50_ns": 1,
+            "p95_ns": 1,
+            "payload_bytes": 30,
+            "result": {
+              "counts": {
+                "documents": 10000
+              }
+            },
+            "sample_elapsed_ns": [
+              1,
+              1
+            ]
+          },
+          "tools": {
+            "workspace_status": {
+              "sample_count": 2,
+              "p50_ns": 1,
+              "p95_ns": 1,
+              "payload_bytes": 43,
+              "result": {
+                "counts": {
+                  "documents": 10000
+                },
+                "valid": true
+              },
+              "sample_elapsed_ns": [
+                1,
+                1
+              ]
+            },
+            "knowledge_search": {
+              "sample_count": 2,
+              "p50_ns": 1,
+              "p95_ns": 1,
+              "payload_bytes": 35,
+              "result": {
+                "results": [
+                  {
+                    "path": "control.md"
+                  }
+                ]
+              },
+              "sample_elapsed_ns": [
+                1,
+                1
+              ]
+            },
+            "knowledge_get": {
+              "sample_count": 2,
+              "p50_ns": 1,
+              "p95_ns": 1,
+              "payload_bytes": 38,
+              "result": {
+                "path": "child.md",
+                "body": "# Child\n"
+              },
+              "sample_elapsed_ns": [
+                1,
+                1
+              ]
+            },
+            "metadata_inspect": {
+              "sample_count": 2,
+              "p50_ns": 1,
+              "p95_ns": 1,
+              "payload_bytes": 49,
+              "result": {
+                "presentIn": 1,
+                "inferredTypes": {
+                  "tags": "string"
+                }
+              },
+              "sample_elapsed_ns": [
+                1,
+                1
+              ]
+            },
+            "graph_query": {
+              "sample_count": 2,
+              "p50_ns": 1,
+              "p95_ns": 1,
+              "payload_bytes": 113,
+              "result": {
+                "nodes": [
+                  {
+                    "path": "control.md"
+                  }
+                ],
+                "edges": [
+                  {
+                    "from": "control.md",
+                    "to": "child.md"
+                  }
+                ],
+                "summary": {
+                  "nodes": 1,
+                  "edges": 1
+                }
+              },
+              "sample_elapsed_ns": [
+                1,
+                1
+              ]
+            },
+            "impact_analyze": {
+              "sample_count": 2,
+              "p50_ns": 1,
+              "p95_ns": 1,
+              "payload_bytes": 107,
+              "result": {
+                "summary": {
+                  "directlyAffected": 1
+                },
+                "affectedDocuments": [
+                  "child.md"
+                ],
+                "recommendations": [
+                  "review references"
+                ]
+              },
+              "sample_elapsed_ns": [
+                1,
+                1
+              ]
+            },
+            "knowledge_check": {
+              "sample_count": 2,
+              "p50_ns": 1,
+              "p95_ns": 1,
+              "payload_bytes": 136,
+              "result": {
+                "valid": true,
+                "summary": {
+                  "documents": 10000
+                },
+                "diagnostics": [
+                  {
+                    "severity": "info",
+                    "message": "valid"
+                  }
+                ],
+                "workspaceRevision": "fixture-e33-h04"
+              },
+              "sample_elapsed_ns": [
+                1,
+                1
+              ]
+            }
+          }
+        },
+        {
+          "variant": "sqlite-raw",
+          "document_count": 10000,
+          "cold_open": {
+            "sample_count": 2,
+            "p50_ns": 1,
+            "p95_ns": 1,
+            "payload_bytes": 30,
+            "result": {
+              "counts": {
+                "documents": 10000
+              }
+            },
+            "sample_elapsed_ns": [
+              1,
+              1
+            ]
+          },
+          "tools": {
+            "workspace_status": {
+              "sample_count": 2,
+              "p50_ns": 1,
+              "p95_ns": 1,
+              "payload_bytes": 43,
+              "result": {
+                "counts": {
+                  "documents": 10000
+                },
+                "valid": true
+              },
+              "sample_elapsed_ns": [
+                1,
+                1
+              ]
+            },
+            "knowledge_search": {
+              "sample_count": 2,
+              "p50_ns": 1,
+              "p95_ns": 1,
+              "payload_bytes": 35,
+              "result": {
+                "results": [
+                  {
+                    "path": "control.md"
+                  }
+                ]
+              },
+              "sample_elapsed_ns": [
+                1,
+                1
+              ]
+            },
+            "knowledge_get": {
+              "sample_count": 2,
+              "p50_ns": 1,
+              "p95_ns": 1,
+              "payload_bytes": 38,
+              "result": {
+                "path": "child.md",
+                "body": "# Child\n"
+              },
+              "sample_elapsed_ns": [
+                1,
+                1
+              ]
+            },
+            "metadata_inspect": {
+              "sample_count": 2,
+              "p50_ns": 1,
+              "p95_ns": 1,
+              "payload_bytes": 49,
+              "result": {
+                "presentIn": 1,
+                "inferredTypes": {
+                  "tags": "string"
+                }
+              },
+              "sample_elapsed_ns": [
+                1,
+                1
+              ]
+            },
+            "graph_query": {
+              "sample_count": 2,
+              "p50_ns": 1,
+              "p95_ns": 1,
+              "payload_bytes": 113,
+              "result": {
+                "nodes": [
+                  {
+                    "path": "control.md"
+                  }
+                ],
+                "edges": [
+                  {
+                    "from": "control.md",
+                    "to": "child.md"
+                  }
+                ],
+                "summary": {
+                  "nodes": 1,
+                  "edges": 1
+                }
+              },
+              "sample_elapsed_ns": [
+                1,
+                1
+              ]
+            },
+            "impact_analyze": {
+              "sample_count": 2,
+              "p50_ns": 1,
+              "p95_ns": 1,
+              "payload_bytes": 107,
+              "result": {
+                "summary": {
+                  "directlyAffected": 1
+                },
+                "affectedDocuments": [
+                  "child.md"
+                ],
+                "recommendations": [
+                  "review references"
+                ]
+              },
+              "sample_elapsed_ns": [
+                1,
+                1
+              ]
+            },
+            "knowledge_check": {
+              "sample_count": 2,
+              "p50_ns": 1,
+              "p95_ns": 1,
+              "payload_bytes": 136,
+              "result": {
+                "valid": true,
+                "summary": {
+                  "documents": 10000
+                },
+                "diagnostics": [
+                  {
+                    "severity": "info",
+                    "message": "valid"
+                  }
+                ],
+                "workspaceRevision": "fixture-e33-h04"
+              },
+              "sample_elapsed_ns": [
+                1,
+                1
+              ]
+            }
+          },
+          "rebuild": {
+            "sample_count": 2,
+            "p50_ns": 1,
+            "p95_ns": 1,
+            "payload_bytes": 16,
+            "result": {
+              "rebuilt": true
+            },
+            "sample_elapsed_ns": [
+              1,
+              1
+            ]
+          }
+        },
+        {
+          "variant": "ram-memoizado",
+          "document_count": 10000,
+          "cold_open": {
+            "sample_count": 2,
+            "p50_ns": 1,
+            "p95_ns": 1,
+            "payload_bytes": 30,
+            "result": {
+              "counts": {
+                "documents": 10000
+              }
+            },
+            "sample_elapsed_ns": [
+              1,
+              1
+            ]
+          },
+          "tools": {
+            "workspace_status": {
+              "sample_count": 2,
+              "p50_ns": 1,
+              "p95_ns": 1,
+              "payload_bytes": 43,
+              "result": {
+                "counts": {
+                  "documents": 10000
+                },
+                "valid": true
+              },
+              "sample_elapsed_ns": [
+                1,
+                1
+              ]
+            },
+            "knowledge_search": {
+              "sample_count": 2,
+              "p50_ns": 1,
+              "p95_ns": 1,
+              "payload_bytes": 35,
+              "result": {
+                "results": [
+                  {
+                    "path": "control.md"
+                  }
+                ]
+              },
+              "sample_elapsed_ns": [
+                1,
+                1
+              ]
+            },
+            "knowledge_get": {
+              "sample_count": 2,
+              "p50_ns": 1,
+              "p95_ns": 1,
+              "payload_bytes": 38,
+              "result": {
+                "path": "child.md",
+                "body": "# Child\n"
+              },
+              "sample_elapsed_ns": [
+                1,
+                1
+              ]
+            },
+            "metadata_inspect": {
+              "sample_count": 2,
+              "p50_ns": 1,
+              "p95_ns": 1,
+              "payload_bytes": 49,
+              "result": {
+                "presentIn": 1,
+                "inferredTypes": {
+                  "tags": "string"
+                }
+              },
+              "sample_elapsed_ns": [
+                1,
+                1
+              ]
+            },
+            "graph_query": {
+              "sample_count": 2,
+              "p50_ns": 1,
+              "p95_ns": 1,
+              "payload_bytes": 113,
+              "result": {
+                "nodes": [
+                  {
+                    "path": "control.md"
+                  }
+                ],
+                "edges": [
+                  {
+                    "from": "control.md",
+                    "to": "child.md"
+                  }
+                ],
+                "summary": {
+                  "nodes": 1,
+                  "edges": 1
+                }
+              },
+              "sample_elapsed_ns": [
+                1,
+                1
+              ]
+            },
+            "impact_analyze": {
+              "sample_count": 2,
+              "p50_ns": 1,
+              "p95_ns": 1,
+              "payload_bytes": 107,
+              "result": {
+                "summary": {
+                  "directlyAffected": 1
+                },
+                "affectedDocuments": [
+                  "child.md"
+                ],
+                "recommendations": [
+                  "review references"
+                ]
+              },
+              "sample_elapsed_ns": [
+                1,
+                1
+              ]
+            },
+            "knowledge_check": {
+              "sample_count": 2,
+              "p50_ns": 1,
+              "p95_ns": 1,
+              "payload_bytes": 136,
+              "result": {
+                "valid": true,
+                "summary": {
+                  "documents": 10000
+                },
+                "diagnostics": [
+                  {
+                    "severity": "info",
+                    "message": "valid"
+                  }
+                ],
+                "workspaceRevision": "fixture-e33-h04"
+              },
+              "sample_elapsed_ns": [
+                1,
+                1
+              ]
+            }
+          }
+        }
+      ],
+      "change_cycle": {
+        "source": "app/disk",
+        "metric": {
+          "sample_count": 2,
+          "p50_ns": 1,
+          "p95_ns": 1,
+          "payload_bytes": 1,
+          "result": {}
+        }
+      },
+      "app_results": {
+        "workspace_status": {
+          "counts": {
+            "documents": 10000
+          },
+          "valid": true
+        },
+        "knowledge_search": {
+          "results": [
+            {
+              "path": "control.md"
+            }
+          ]
+        },
+        "knowledge_get": {
+          "path": "child.md",
+          "body": "# Child\n"
+        },
+        "metadata_inspect": {
+          "presentIn": 1,
+          "inferredTypes": {
+            "tags": "string"
+          }
+        },
+        "graph_query": {
+          "nodes": [
+            {
+              "path": "control.md"
+            }
+          ],
+          "edges": [
+            {
+              "from": "control.md",
+              "to": "child.md"
+            }
+          ],
+          "summary": {
+            "nodes": 1,
+            "edges": 1
+          }
+        },
+        "impact_analyze": {
+          "summary": {
+            "directlyAffected": 1
+          },
+          "affectedDocuments": [
+            "child.md"
+          ],
+          "recommendations": [
+            "review references"
+          ]
+        },
+        "knowledge_check": {
+          "valid": true,
+          "summary": {
+            "documents": 10000
+          },
+          "diagnostics": [
+            {
+              "severity": "info",
+              "message": "valid"
+            }
+          ],
+          "workspaceRevision": "fixture-e33-h04"
+        }
+      },
+      "seam_results": {
+        "workspace_status": {
+          "counts": {
+            "documents": 10000
+          },
+          "valid": true
+        },
+        "knowledge_search": {
+          "results": [
+            {
+              "path": "control.md"
+            }
+          ]
+        },
+        "knowledge_get": {
+          "path": "child.md",
+          "body": "# Child\n"
+        },
+        "metadata_inspect": {
+          "presentIn": 1,
+          "inferredTypes": {
+            "tags": "string"
+          }
+        },
+        "graph_query": {
+          "nodes": [
+            {
+              "path": "control.md"
+            }
+          ],
+          "edges": [
+            {
+              "from": "control.md",
+              "to": "child.md"
+            }
+          ],
+          "summary": {
+            "nodes": 1,
+            "edges": 1
+          }
+        },
+        "impact_analyze": {
+          "summary": {
+            "directlyAffected": 1
+          },
+          "affectedDocuments": [
+            "child.md"
+          ],
+          "recommendations": [
+            "review references"
+          ]
+        },
+        "knowledge_check": {
+          "valid": true,
+          "summary": {
+            "documents": 10000
+          },
+          "diagnostics": [
+            {
+              "severity": "info",
+              "message": "valid"
+            }
+          ],
+          "workspaceRevision": "fixture-e33-h04"
+        }
+      },
+      "negative_results": {
+        "knowledge_get": {
+          "app": {
+            "error": {
+              "code": "not_found",
+              "message": "document not found"
+            }
+          },
+          "seam": {
+            "error": {
+              "code": "not_found",
+              "message": "document not found"
+            }
+          }
+        },
+        "metadata_inspect": {
+          "app": {
+            "error": {
+              "code": "invalid_field",
+              "message": "field not found"
+            }
+          },
+          "seam": {
+            "error": {
+              "code": "invalid_field",
+              "message": "field not found"
+            }
+          }
+        }
+      }
+    },
+    {
+      "profile": "realista",
+      "scale": 100,
+      "measurements": [
+        {
+          "variant": "disk-reparseo",
+          "document_count": 100,
+          "cold_open": {
+            "sample_count": 2,
+            "p50_ns": 1,
+            "p95_ns": 1,
+            "payload_bytes": 28,
+            "result": {
+              "counts": {
+                "documents": 100
+              }
+            },
+            "sample_elapsed_ns": [
+              1,
+              1
+            ]
+          },
+          "tools": {
+            "workspace_status": {
+              "sample_count": 2,
+              "p50_ns": 1,
+              "p95_ns": 1,
+              "payload_bytes": 41,
+              "result": {
+                "counts": {
+                  "documents": 100
+                },
+                "valid": true
+              },
+              "sample_elapsed_ns": [
+                1,
+                1
+              ]
+            },
+            "knowledge_search": {
+              "sample_count": 2,
+              "p50_ns": 1,
+              "p95_ns": 1,
+              "payload_bytes": 35,
+              "result": {
+                "results": [
+                  {
+                    "path": "control.md"
+                  }
+                ]
+              },
+              "sample_elapsed_ns": [
+                1,
+                1
+              ]
+            },
+            "knowledge_get": {
+              "sample_count": 2,
+              "p50_ns": 1,
+              "p95_ns": 1,
+              "payload_bytes": 38,
+              "result": {
+                "path": "child.md",
+                "body": "# Child\n"
+              },
+              "sample_elapsed_ns": [
+                1,
+                1
+              ]
+            },
+            "metadata_inspect": {
+              "sample_count": 2,
+              "p50_ns": 1,
+              "p95_ns": 1,
+              "payload_bytes": 49,
+              "result": {
+                "presentIn": 1,
+                "inferredTypes": {
+                  "tags": "string"
+                }
+              },
+              "sample_elapsed_ns": [
+                1,
+                1
+              ]
+            },
+            "graph_query": {
+              "sample_count": 2,
+              "p50_ns": 1,
+              "p95_ns": 1,
+              "payload_bytes": 113,
+              "result": {
+                "nodes": [
+                  {
+                    "path": "control.md"
+                  }
+                ],
+                "edges": [
+                  {
+                    "from": "control.md",
+                    "to": "child.md"
+                  }
+                ],
+                "summary": {
+                  "nodes": 1,
+                  "edges": 1
+                }
+              },
+              "sample_elapsed_ns": [
+                1,
+                1
+              ]
+            },
+            "impact_analyze": {
+              "sample_count": 2,
+              "p50_ns": 1,
+              "p95_ns": 1,
+              "payload_bytes": 107,
+              "result": {
+                "summary": {
+                  "directlyAffected": 1
+                },
+                "affectedDocuments": [
+                  "child.md"
+                ],
+                "recommendations": [
+                  "review references"
+                ]
+              },
+              "sample_elapsed_ns": [
+                1,
+                1
+              ]
+            },
+            "knowledge_check": {
+              "sample_count": 2,
+              "p50_ns": 1,
+              "p95_ns": 1,
+              "payload_bytes": 134,
+              "result": {
+                "valid": true,
+                "summary": {
+                  "documents": 100
+                },
+                "diagnostics": [
+                  {
+                    "severity": "info",
+                    "message": "valid"
+                  }
+                ],
+                "workspaceRevision": "fixture-e33-h04"
+              },
+              "sample_elapsed_ns": [
+                1,
+                1
+              ]
+            }
+          }
+        },
+        {
+          "variant": "sqlite-raw",
+          "document_count": 100,
+          "cold_open": {
+            "sample_count": 2,
+            "p50_ns": 1,
+            "p95_ns": 1,
+            "payload_bytes": 28,
+            "result": {
+              "counts": {
+                "documents": 100
+              }
+            },
+            "sample_elapsed_ns": [
+              1,
+              1
+            ]
+          },
+          "tools": {
+            "workspace_status": {
+              "sample_count": 2,
+              "p50_ns": 1,
+              "p95_ns": 1,
+              "payload_bytes": 41,
+              "result": {
+                "counts": {
+                  "documents": 100
+                },
+                "valid": true
+              },
+              "sample_elapsed_ns": [
+                1,
+                1
+              ]
+            },
+            "knowledge_search": {
+              "sample_count": 2,
+              "p50_ns": 1,
+              "p95_ns": 1,
+              "payload_bytes": 35,
+              "result": {
+                "results": [
+                  {
+                    "path": "control.md"
+                  }
+                ]
+              },
+              "sample_elapsed_ns": [
+                1,
+                1
+              ]
+            },
+            "knowledge_get": {
+              "sample_count": 2,
+              "p50_ns": 1,
+              "p95_ns": 1,
+              "payload_bytes": 38,
+              "result": {
+                "path": "child.md",
+                "body": "# Child\n"
+              },
+              "sample_elapsed_ns": [
+                1,
+                1
+              ]
+            },
+            "metadata_inspect": {
+              "sample_count": 2,
+              "p50_ns": 1,
+              "p95_ns": 1,
+              "payload_bytes": 49,
+              "result": {
+                "presentIn": 1,
+                "inferredTypes": {
+                  "tags": "string"
+                }
+              },
+              "sample_elapsed_ns": [
+                1,
+                1
+              ]
+            },
+            "graph_query": {
+              "sample_count": 2,
+              "p50_ns": 1,
+              "p95_ns": 1,
+              "payload_bytes": 113,
+              "result": {
+                "nodes": [
+                  {
+                    "path": "control.md"
+                  }
+                ],
+                "edges": [
+                  {
+                    "from": "control.md",
+                    "to": "child.md"
+                  }
+                ],
+                "summary": {
+                  "nodes": 1,
+                  "edges": 1
+                }
+              },
+              "sample_elapsed_ns": [
+                1,
+                1
+              ]
+            },
+            "impact_analyze": {
+              "sample_count": 2,
+              "p50_ns": 1,
+              "p95_ns": 1,
+              "payload_bytes": 107,
+              "result": {
+                "summary": {
+                  "directlyAffected": 1
+                },
+                "affectedDocuments": [
+                  "child.md"
+                ],
+                "recommendations": [
+                  "review references"
+                ]
+              },
+              "sample_elapsed_ns": [
+                1,
+                1
+              ]
+            },
+            "knowledge_check": {
+              "sample_count": 2,
+              "p50_ns": 1,
+              "p95_ns": 1,
+              "payload_bytes": 134,
+              "result": {
+                "valid": true,
+                "summary": {
+                  "documents": 100
+                },
+                "diagnostics": [
+                  {
+                    "severity": "info",
+                    "message": "valid"
+                  }
+                ],
+                "workspaceRevision": "fixture-e33-h04"
+              },
+              "sample_elapsed_ns": [
+                1,
+                1
+              ]
+            }
+          },
+          "rebuild": {
+            "sample_count": 2,
+            "p50_ns": 1,
+            "p95_ns": 1,
+            "payload_bytes": 16,
+            "result": {
+              "rebuilt": true
+            },
+            "sample_elapsed_ns": [
+              1,
+              1
+            ]
+          }
+        },
+        {
+          "variant": "ram-memoizado",
+          "document_count": 100,
+          "cold_open": {
+            "sample_count": 2,
+            "p50_ns": 1,
+            "p95_ns": 1,
+            "payload_bytes": 28,
+            "result": {
+              "counts": {
+                "documents": 100
+              }
+            },
+            "sample_elapsed_ns": [
+              1,
+              1
+            ]
+          },
+          "tools": {
+            "workspace_status": {
+              "sample_count": 2,
+              "p50_ns": 1,
+              "p95_ns": 1,
+              "payload_bytes": 41,
+              "result": {
+                "counts": {
+                  "documents": 100
+                },
+                "valid": true
+              },
+              "sample_elapsed_ns": [
+                1,
+                1
+              ]
+            },
+            "knowledge_search": {
+              "sample_count": 2,
+              "p50_ns": 1,
+              "p95_ns": 1,
+              "payload_bytes": 35,
+              "result": {
+                "results": [
+                  {
+                    "path": "control.md"
+                  }
+                ]
+              },
+              "sample_elapsed_ns": [
+                1,
+                1
+              ]
+            },
+            "knowledge_get": {
+              "sample_count": 2,
+              "p50_ns": 1,
+              "p95_ns": 1,
+              "payload_bytes": 38,
+              "result": {
+                "path": "child.md",
+                "body": "# Child\n"
+              },
+              "sample_elapsed_ns": [
+                1,
+                1
+              ]
+            },
+            "metadata_inspect": {
+              "sample_count": 2,
+              "p50_ns": 1,
+              "p95_ns": 1,
+              "payload_bytes": 49,
+              "result": {
+                "presentIn": 1,
+                "inferredTypes": {
+                  "tags": "string"
+                }
+              },
+              "sample_elapsed_ns": [
+                1,
+                1
+              ]
+            },
+            "graph_query": {
+              "sample_count": 2,
+              "p50_ns": 1,
+              "p95_ns": 1,
+              "payload_bytes": 113,
+              "result": {
+                "nodes": [
+                  {
+                    "path": "control.md"
+                  }
+                ],
+                "edges": [
+                  {
+                    "from": "control.md",
+                    "to": "child.md"
+                  }
+                ],
+                "summary": {
+                  "nodes": 1,
+                  "edges": 1
+                }
+              },
+              "sample_elapsed_ns": [
+                1,
+                1
+              ]
+            },
+            "impact_analyze": {
+              "sample_count": 2,
+              "p50_ns": 1,
+              "p95_ns": 1,
+              "payload_bytes": 107,
+              "result": {
+                "summary": {
+                  "directlyAffected": 1
+                },
+                "affectedDocuments": [
+                  "child.md"
+                ],
+                "recommendations": [
+                  "review references"
+                ]
+              },
+              "sample_elapsed_ns": [
+                1,
+                1
+              ]
+            },
+            "knowledge_check": {
+              "sample_count": 2,
+              "p50_ns": 1,
+              "p95_ns": 1,
+              "payload_bytes": 134,
+              "result": {
+                "valid": true,
+                "summary": {
+                  "documents": 100
+                },
+                "diagnostics": [
+                  {
+                    "severity": "info",
+                    "message": "valid"
+                  }
+                ],
+                "workspaceRevision": "fixture-e33-h04"
+              },
+              "sample_elapsed_ns": [
+                1,
+                1
+              ]
+            }
+          }
+        }
+      ],
+      "change_cycle": {
+        "source": "app/disk",
+        "metric": {
+          "sample_count": 2,
+          "p50_ns": 1,
+          "p95_ns": 1,
+          "payload_bytes": 1,
+          "result": {}
+        }
+      },
+      "app_results": {
+        "workspace_status": {
+          "counts": {
+            "documents": 100
+          },
+          "valid": true
+        },
+        "knowledge_search": {
+          "results": [
+            {
+              "path": "control.md"
+            }
+          ]
+        },
+        "knowledge_get": {
+          "path": "child.md",
+          "body": "# Child\n"
+        },
+        "metadata_inspect": {
+          "presentIn": 1,
+          "inferredTypes": {
+            "tags": "string"
+          }
+        },
+        "graph_query": {
+          "nodes": [
+            {
+              "path": "control.md"
+            }
+          ],
+          "edges": [
+            {
+              "from": "control.md",
+              "to": "child.md"
+            }
+          ],
+          "summary": {
+            "nodes": 1,
+            "edges": 1
+          }
+        },
+        "impact_analyze": {
+          "summary": {
+            "directlyAffected": 1
+          },
+          "affectedDocuments": [
+            "child.md"
+          ],
+          "recommendations": [
+            "review references"
+          ]
+        },
+        "knowledge_check": {
+          "valid": true,
+          "summary": {
+            "documents": 100
+          },
+          "diagnostics": [
+            {
+              "severity": "info",
+              "message": "valid"
+            }
+          ],
+          "workspaceRevision": "fixture-e33-h04"
+        }
+      },
+      "seam_results": {
+        "workspace_status": {
+          "counts": {
+            "documents": 100
+          },
+          "valid": true
+        },
+        "knowledge_search": {
+          "results": [
+            {
+              "path": "control.md"
+            }
+          ]
+        },
+        "knowledge_get": {
+          "path": "child.md",
+          "body": "# Child\n"
+        },
+        "metadata_inspect": {
+          "presentIn": 1,
+          "inferredTypes": {
+            "tags": "string"
+          }
+        },
+        "graph_query": {
+          "nodes": [
+            {
+              "path": "control.md"
+            }
+          ],
+          "edges": [
+            {
+              "from": "control.md",
+              "to": "child.md"
+            }
+          ],
+          "summary": {
+            "nodes": 1,
+            "edges": 1
+          }
+        },
+        "impact_analyze": {
+          "summary": {
+            "directlyAffected": 1
+          },
+          "affectedDocuments": [
+            "child.md"
+          ],
+          "recommendations": [
+            "review references"
+          ]
+        },
+        "knowledge_check": {
+          "valid": true,
+          "summary": {
+            "documents": 100
+          },
+          "diagnostics": [
+            {
+              "severity": "info",
+              "message": "valid"
+            }
+          ],
+          "workspaceRevision": "fixture-e33-h04"
+        }
+      },
+      "negative_results": {
+        "knowledge_get": {
+          "app": {
+            "error": {
+              "code": "not_found",
+              "message": "document not found"
+            }
+          },
+          "seam": {
+            "error": {
+              "code": "not_found",
+              "message": "document not found"
+            }
+          }
+        },
+        "metadata_inspect": {
+          "app": {
+            "error": {
+              "code": "invalid_field",
+              "message": "field not found"
+            }
+          },
+          "seam": {
+            "error": {
+              "code": "invalid_field",
+              "message": "field not found"
+            }
+          }
+        }
+      }
+    },
+    {
+      "profile": "realista",
+      "scale": 1000,
+      "measurements": [
+        {
+          "variant": "disk-reparseo",
+          "document_count": 1000,
+          "cold_open": {
+            "sample_count": 2,
+            "p50_ns": 1,
+            "p95_ns": 1,
+            "payload_bytes": 29,
+            "result": {
+              "counts": {
+                "documents": 1000
+              }
+            },
+            "sample_elapsed_ns": [
+              1,
+              1
+            ]
+          },
+          "tools": {
+            "workspace_status": {
+              "sample_count": 2,
+              "p50_ns": 1,
+              "p95_ns": 1,
+              "payload_bytes": 42,
+              "result": {
+                "counts": {
+                  "documents": 1000
+                },
+                "valid": true
+              },
+              "sample_elapsed_ns": [
+                1,
+                1
+              ]
+            },
+            "knowledge_search": {
+              "sample_count": 2,
+              "p50_ns": 1,
+              "p95_ns": 1,
+              "payload_bytes": 35,
+              "result": {
+                "results": [
+                  {
+                    "path": "control.md"
+                  }
+                ]
+              },
+              "sample_elapsed_ns": [
+                1,
+                1
+              ]
+            },
+            "knowledge_get": {
+              "sample_count": 2,
+              "p50_ns": 1,
+              "p95_ns": 1,
+              "payload_bytes": 38,
+              "result": {
+                "path": "child.md",
+                "body": "# Child\n"
+              },
+              "sample_elapsed_ns": [
+                1,
+                1
+              ]
+            },
+            "metadata_inspect": {
+              "sample_count": 2,
+              "p50_ns": 1,
+              "p95_ns": 1,
+              "payload_bytes": 49,
+              "result": {
+                "presentIn": 1,
+                "inferredTypes": {
+                  "tags": "string"
+                }
+              },
+              "sample_elapsed_ns": [
+                1,
+                1
+              ]
+            },
+            "graph_query": {
+              "sample_count": 2,
+              "p50_ns": 1,
+              "p95_ns": 1,
+              "payload_bytes": 113,
+              "result": {
+                "nodes": [
+                  {
+                    "path": "control.md"
+                  }
+                ],
+                "edges": [
+                  {
+                    "from": "control.md",
+                    "to": "child.md"
+                  }
+                ],
+                "summary": {
+                  "nodes": 1,
+                  "edges": 1
+                }
+              },
+              "sample_elapsed_ns": [
+                1,
+                1
+              ]
+            },
+            "impact_analyze": {
+              "sample_count": 2,
+              "p50_ns": 1,
+              "p95_ns": 1,
+              "payload_bytes": 107,
+              "result": {
+                "summary": {
+                  "directlyAffected": 1
+                },
+                "affectedDocuments": [
+                  "child.md"
+                ],
+                "recommendations": [
+                  "review references"
+                ]
+              },
+              "sample_elapsed_ns": [
+                1,
+                1
+              ]
+            },
+            "knowledge_check": {
+              "sample_count": 2,
+              "p50_ns": 1,
+              "p95_ns": 1,
+              "payload_bytes": 135,
+              "result": {
+                "valid": true,
+                "summary": {
+                  "documents": 1000
+                },
+                "diagnostics": [
+                  {
+                    "severity": "info",
+                    "message": "valid"
+                  }
+                ],
+                "workspaceRevision": "fixture-e33-h04"
+              },
+              "sample_elapsed_ns": [
+                1,
+                1
+              ]
+            }
+          }
+        },
+        {
+          "variant": "sqlite-raw",
+          "document_count": 1000,
+          "cold_open": {
+            "sample_count": 2,
+            "p50_ns": 1,
+            "p95_ns": 1,
+            "payload_bytes": 29,
+            "result": {
+              "counts": {
+                "documents": 1000
+              }
+            },
+            "sample_elapsed_ns": [
+              1,
+              1
+            ]
+          },
+          "tools": {
+            "workspace_status": {
+              "sample_count": 2,
+              "p50_ns": 1,
+              "p95_ns": 1,
+              "payload_bytes": 42,
+              "result": {
+                "counts": {
+                  "documents": 1000
+                },
+                "valid": true
+              },
+              "sample_elapsed_ns": [
+                1,
+                1
+              ]
+            },
+            "knowledge_search": {
+              "sample_count": 2,
+              "p50_ns": 1,
+              "p95_ns": 1,
+              "payload_bytes": 35,
+              "result": {
+                "results": [
+                  {
+                    "path": "control.md"
+                  }
+                ]
+              },
+              "sample_elapsed_ns": [
+                1,
+                1
+              ]
+            },
+            "knowledge_get": {
+              "sample_count": 2,
+              "p50_ns": 1,
+              "p95_ns": 1,
+              "payload_bytes": 38,
+              "result": {
+                "path": "child.md",
+                "body": "# Child\n"
+              },
+              "sample_elapsed_ns": [
+                1,
+                1
+              ]
+            },
+            "metadata_inspect": {
+              "sample_count": 2,
+              "p50_ns": 1,
+              "p95_ns": 1,
+              "payload_bytes": 49,
+              "result": {
+                "presentIn": 1,
+                "inferredTypes": {
+                  "tags": "string"
+                }
+              },
+              "sample_elapsed_ns": [
+                1,
+                1
+              ]
+            },
+            "graph_query": {
+              "sample_count": 2,
+              "p50_ns": 1,
+              "p95_ns": 1,
+              "payload_bytes": 113,
+              "result": {
+                "nodes": [
+                  {
+                    "path": "control.md"
+                  }
+                ],
+                "edges": [
+                  {
+                    "from": "control.md",
+                    "to": "child.md"
+                  }
+                ],
+                "summary": {
+                  "nodes": 1,
+                  "edges": 1
+                }
+              },
+              "sample_elapsed_ns": [
+                1,
+                1
+              ]
+            },
+            "impact_analyze": {
+              "sample_count": 2,
+              "p50_ns": 1,
+              "p95_ns": 1,
+              "payload_bytes": 107,
+              "result": {
+                "summary": {
+                  "directlyAffected": 1
+                },
+                "affectedDocuments": [
+                  "child.md"
+                ],
+                "recommendations": [
+                  "review references"
+                ]
+              },
+              "sample_elapsed_ns": [
+                1,
+                1
+              ]
+            },
+            "knowledge_check": {
+              "sample_count": 2,
+              "p50_ns": 1,
+              "p95_ns": 1,
+              "payload_bytes": 135,
+              "result": {
+                "valid": true,
+                "summary": {
+                  "documents": 1000
+                },
+                "diagnostics": [
+                  {
+                    "severity": "info",
+                    "message": "valid"
+                  }
+                ],
+                "workspaceRevision": "fixture-e33-h04"
+              },
+              "sample_elapsed_ns": [
+                1,
+                1
+              ]
+            }
+          },
+          "rebuild": {
+            "sample_count": 2,
+            "p50_ns": 1,
+            "p95_ns": 1,
+            "payload_bytes": 16,
+            "result": {
+              "rebuilt": true
+            },
+            "sample_elapsed_ns": [
+              1,
+              1
+            ]
+          }
+        },
+        {
+          "variant": "ram-memoizado",
+          "document_count": 1000,
+          "cold_open": {
+            "sample_count": 2,
+            "p50_ns": 1,
+            "p95_ns": 1,
+            "payload_bytes": 29,
+            "result": {
+              "counts": {
+                "documents": 1000
+              }
+            },
+            "sample_elapsed_ns": [
+              1,
+              1
+            ]
+          },
+          "tools": {
+            "workspace_status": {
+              "sample_count": 2,
+              "p50_ns": 1,
+              "p95_ns": 1,
+              "payload_bytes": 42,
+              "result": {
+                "counts": {
+                  "documents": 1000
+                },
+                "valid": true
+              },
+              "sample_elapsed_ns": [
+                1,
+                1
+              ]
+            },
+            "knowledge_search": {
+              "sample_count": 2,
+              "p50_ns": 1,
+              "p95_ns": 1,
+              "payload_bytes": 35,
+              "result": {
+                "results": [
+                  {
+                    "path": "control.md"
+                  }
+                ]
+              },
+              "sample_elapsed_ns": [
+                1,
+                1
+              ]
+            },
+            "knowledge_get": {
+              "sample_count": 2,
+              "p50_ns": 1,
+              "p95_ns": 1,
+              "payload_bytes": 38,
+              "result": {
+                "path": "child.md",
+                "body": "# Child\n"
+              },
+              "sample_elapsed_ns": [
+                1,
+                1
+              ]
+            },
+            "metadata_inspect": {
+              "sample_count": 2,
+              "p50_ns": 1,
+              "p95_ns": 1,
+              "payload_bytes": 49,
+              "result": {
+                "presentIn": 1,
+                "inferredTypes": {
+                  "tags": "string"
+                }
+              },
+              "sample_elapsed_ns": [
+                1,
+                1
+              ]
+            },
+            "graph_query": {
+              "sample_count": 2,
+              "p50_ns": 1,
+              "p95_ns": 1,
+              "payload_bytes": 113,
+              "result": {
+                "nodes": [
+                  {
+                    "path": "control.md"
+                  }
+                ],
+                "edges": [
+                  {
+                    "from": "control.md",
+                    "to": "child.md"
+                  }
+                ],
+                "summary": {
+                  "nodes": 1,
+                  "edges": 1
+                }
+              },
+              "sample_elapsed_ns": [
+                1,
+                1
+              ]
+            },
+            "impact_analyze": {
+              "sample_count": 2,
+              "p50_ns": 1,
+              "p95_ns": 1,
+              "payload_bytes": 107,
+              "result": {
+                "summary": {
+                  "directlyAffected": 1
+                },
+                "affectedDocuments": [
+                  "child.md"
+                ],
+                "recommendations": [
+                  "review references"
+                ]
+              },
+              "sample_elapsed_ns": [
+                1,
+                1
+              ]
+            },
+            "knowledge_check": {
+              "sample_count": 2,
+              "p50_ns": 1,
+              "p95_ns": 1,
+              "payload_bytes": 135,
+              "result": {
+                "valid": true,
+                "summary": {
+                  "documents": 1000
+                },
+                "diagnostics": [
+                  {
+                    "severity": "info",
+                    "message": "valid"
+                  }
+                ],
+                "workspaceRevision": "fixture-e33-h04"
+              },
+              "sample_elapsed_ns": [
+                1,
+                1
+              ]
+            }
+          }
+        }
+      ],
+      "change_cycle": {
+        "source": "app/disk",
+        "metric": {
+          "sample_count": 2,
+          "p50_ns": 1,
+          "p95_ns": 1,
+          "payload_bytes": 1,
+          "result": {}
+        }
+      },
+      "app_results": {
+        "workspace_status": {
+          "counts": {
+            "documents": 1000
+          },
+          "valid": true
+        },
+        "knowledge_search": {
+          "results": [
+            {
+              "path": "control.md"
+            }
+          ]
+        },
+        "knowledge_get": {
+          "path": "child.md",
+          "body": "# Child\n"
+        },
+        "metadata_inspect": {
+          "presentIn": 1,
+          "inferredTypes": {
+            "tags": "string"
+          }
+        },
+        "graph_query": {
+          "nodes": [
+            {
+              "path": "control.md"
+            }
+          ],
+          "edges": [
+            {
+              "from": "control.md",
+              "to": "child.md"
+            }
+          ],
+          "summary": {
+            "nodes": 1,
+            "edges": 1
+          }
+        },
+        "impact_analyze": {
+          "summary": {
+            "directlyAffected": 1
+          },
+          "affectedDocuments": [
+            "child.md"
+          ],
+          "recommendations": [
+            "review references"
+          ]
+        },
+        "knowledge_check": {
+          "valid": true,
+          "summary": {
+            "documents": 1000
+          },
+          "diagnostics": [
+            {
+              "severity": "info",
+              "message": "valid"
+            }
+          ],
+          "workspaceRevision": "fixture-e33-h04"
+        }
+      },
+      "seam_results": {
+        "workspace_status": {
+          "counts": {
+            "documents": 1000
+          },
+          "valid": true
+        },
+        "knowledge_search": {
+          "results": [
+            {
+              "path": "control.md"
+            }
+          ]
+        },
+        "knowledge_get": {
+          "path": "child.md",
+          "body": "# Child\n"
+        },
+        "metadata_inspect": {
+          "presentIn": 1,
+          "inferredTypes": {
+            "tags": "string"
+          }
+        },
+        "graph_query": {
+          "nodes": [
+            {
+              "path": "control.md"
+            }
+          ],
+          "edges": [
+            {
+              "from": "control.md",
+              "to": "child.md"
+            }
+          ],
+          "summary": {
+            "nodes": 1,
+            "edges": 1
+          }
+        },
+        "impact_analyze": {
+          "summary": {
+            "directlyAffected": 1
+          },
+          "affectedDocuments": [
+            "child.md"
+          ],
+          "recommendations": [
+            "review references"
+          ]
+        },
+        "knowledge_check": {
+          "valid": true,
+          "summary": {
+            "documents": 1000
+          },
+          "diagnostics": [
+            {
+              "severity": "info",
+              "message": "valid"
+            }
+          ],
+          "workspaceRevision": "fixture-e33-h04"
+        }
+      },
+      "negative_results": {
+        "knowledge_get": {
+          "app": {
+            "error": {
+              "code": "not_found",
+              "message": "document not found"
+            }
+          },
+          "seam": {
+            "error": {
+              "code": "not_found",
+              "message": "document not found"
+            }
+          }
+        },
+        "metadata_inspect": {
+          "app": {
+            "error": {
+              "code": "invalid_field",
+              "message": "field not found"
+            }
+          },
+          "seam": {
+            "error": {
+              "code": "invalid_field",
+              "message": "field not found"
+            }
+          }
+        }
+      }
+    },
+    {
+      "profile": "realista",
+      "scale": 10000,
+      "measurements": [
+        {
+          "variant": "disk-reparseo",
+          "document_count": 10000,
+          "cold_open": {
+            "sample_count": 2,
+            "p50_ns": 1,
+            "p95_ns": 1,
+            "payload_bytes": 30,
+            "result": {
+              "counts": {
+                "documents": 10000
+              }
+            },
+            "sample_elapsed_ns": [
+              1,
+              1
+            ]
+          },
+          "tools": {
+            "workspace_status": {
+              "sample_count": 2,
+              "p50_ns": 1,
+              "p95_ns": 1,
+              "payload_bytes": 43,
+              "result": {
+                "counts": {
+                  "documents": 10000
+                },
+                "valid": true
+              },
+              "sample_elapsed_ns": [
+                1,
+                1
+              ]
+            },
+            "knowledge_search": {
+              "sample_count": 2,
+              "p50_ns": 1,
+              "p95_ns": 1,
+              "payload_bytes": 35,
+              "result": {
+                "results": [
+                  {
+                    "path": "control.md"
+                  }
+                ]
+              },
+              "sample_elapsed_ns": [
+                1,
+                1
+              ]
+            },
+            "knowledge_get": {
+              "sample_count": 2,
+              "p50_ns": 1,
+              "p95_ns": 1,
+              "payload_bytes": 38,
+              "result": {
+                "path": "child.md",
+                "body": "# Child\n"
+              },
+              "sample_elapsed_ns": [
+                1,
+                1
+              ]
+            },
+            "metadata_inspect": {
+              "sample_count": 2,
+              "p50_ns": 1,
+              "p95_ns": 1,
+              "payload_bytes": 49,
+              "result": {
+                "presentIn": 1,
+                "inferredTypes": {
+                  "tags": "string"
+                }
+              },
+              "sample_elapsed_ns": [
+                1,
+                1
+              ]
+            },
+            "graph_query": {
+              "sample_count": 2,
+              "p50_ns": 1,
+              "p95_ns": 1,
+              "payload_bytes": 113,
+              "result": {
+                "nodes": [
+                  {
+                    "path": "control.md"
+                  }
+                ],
+                "edges": [
+                  {
+                    "from": "control.md",
+                    "to": "child.md"
+                  }
+                ],
+                "summary": {
+                  "nodes": 1,
+                  "edges": 1
+                }
+              },
+              "sample_elapsed_ns": [
+                1,
+                1
+              ]
+            },
+            "impact_analyze": {
+              "sample_count": 2,
+              "p50_ns": 1,
+              "p95_ns": 1,
+              "payload_bytes": 107,
+              "result": {
+                "summary": {
+                  "directlyAffected": 1
+                },
+                "affectedDocuments": [
+                  "child.md"
+                ],
+                "recommendations": [
+                  "review references"
+                ]
+              },
+              "sample_elapsed_ns": [
+                1,
+                1
+              ]
+            },
+            "knowledge_check": {
+              "sample_count": 2,
+              "p50_ns": 1,
+              "p95_ns": 1,
+              "payload_bytes": 136,
+              "result": {
+                "valid": true,
+                "summary": {
+                  "documents": 10000
+                },
+                "diagnostics": [
+                  {
+                    "severity": "info",
+                    "message": "valid"
+                  }
+                ],
+                "workspaceRevision": "fixture-e33-h04"
+              },
+              "sample_elapsed_ns": [
+                1,
+                1
+              ]
+            }
+          }
+        },
+        {
+          "variant": "sqlite-raw",
+          "document_count": 10000,
+          "cold_open": {
+            "sample_count": 2,
+            "p50_ns": 1,
+            "p95_ns": 1,
+            "payload_bytes": 30,
+            "result": {
+              "counts": {
+                "documents": 10000
+              }
+            },
+            "sample_elapsed_ns": [
+              1,
+              1
+            ]
+          },
+          "tools": {
+            "workspace_status": {
+              "sample_count": 2,
+              "p50_ns": 1,
+              "p95_ns": 1,
+              "payload_bytes": 43,
+              "result": {
+                "counts": {
+                  "documents": 10000
+                },
+                "valid": true
+              },
+              "sample_elapsed_ns": [
+                1,
+                1
+              ]
+            },
+            "knowledge_search": {
+              "sample_count": 2,
+              "p50_ns": 1,
+              "p95_ns": 1,
+              "payload_bytes": 35,
+              "result": {
+                "results": [
+                  {
+                    "path": "control.md"
+                  }
+                ]
+              },
+              "sample_elapsed_ns": [
+                1,
+                1
+              ]
+            },
+            "knowledge_get": {
+              "sample_count": 2,
+              "p50_ns": 1,
+              "p95_ns": 1,
+              "payload_bytes": 38,
+              "result": {
+                "path": "child.md",
+                "body": "# Child\n"
+              },
+              "sample_elapsed_ns": [
+                1,
+                1
+              ]
+            },
+            "metadata_inspect": {
+              "sample_count": 2,
+              "p50_ns": 1,
+              "p95_ns": 1,
+              "payload_bytes": 49,
+              "result": {
+                "presentIn": 1,
+                "inferredTypes": {
+                  "tags": "string"
+                }
+              },
+              "sample_elapsed_ns": [
+                1,
+                1
+              ]
+            },
+            "graph_query": {
+              "sample_count": 2,
+              "p50_ns": 1,
+              "p95_ns": 1,
+              "payload_bytes": 113,
+              "result": {
+                "nodes": [
+                  {
+                    "path": "control.md"
+                  }
+                ],
+                "edges": [
+                  {
+                    "from": "control.md",
+                    "to": "child.md"
+                  }
+                ],
+                "summary": {
+                  "nodes": 1,
+                  "edges": 1
+                }
+              },
+              "sample_elapsed_ns": [
+                1,
+                1
+              ]
+            },
+            "impact_analyze": {
+              "sample_count": 2,
+              "p50_ns": 1,
+              "p95_ns": 1,
+              "payload_bytes": 107,
+              "result": {
+                "summary": {
+                  "directlyAffected": 1
+                },
+                "affectedDocuments": [
+                  "child.md"
+                ],
+                "recommendations": [
+                  "review references"
+                ]
+              },
+              "sample_elapsed_ns": [
+                1,
+                1
+              ]
+            },
+            "knowledge_check": {
+              "sample_count": 2,
+              "p50_ns": 1,
+              "p95_ns": 1,
+              "payload_bytes": 136,
+              "result": {
+                "valid": true,
+                "summary": {
+                  "documents": 10000
+                },
+                "diagnostics": [
+                  {
+                    "severity": "info",
+                    "message": "valid"
+                  }
+                ],
+                "workspaceRevision": "fixture-e33-h04"
+              },
+              "sample_elapsed_ns": [
+                1,
+                1
+              ]
+            }
+          },
+          "rebuild": {
+            "sample_count": 2,
+            "p50_ns": 1,
+            "p95_ns": 1,
+            "payload_bytes": 16,
+            "result": {
+              "rebuilt": true
+            },
+            "sample_elapsed_ns": [
+              1,
+              1
+            ]
+          }
+        },
+        {
+          "variant": "ram-memoizado",
+          "document_count": 10000,
+          "cold_open": {
+            "sample_count": 2,
+            "p50_ns": 1,
+            "p95_ns": 1,
+            "payload_bytes": 30,
+            "result": {
+              "counts": {
+                "documents": 10000
+              }
+            },
+            "sample_elapsed_ns": [
+              1,
+              1
+            ]
+          },
+          "tools": {
+            "workspace_status": {
+              "sample_count": 2,
+              "p50_ns": 1,
+              "p95_ns": 1,
+              "payload_bytes": 43,
+              "result": {
+                "counts": {
+                  "documents": 10000
+                },
+                "valid": true
+              },
+              "sample_elapsed_ns": [
+                1,
+                1
+              ]
+            },
+            "knowledge_search": {
+              "sample_count": 2,
+              "p50_ns": 1,
+              "p95_ns": 1,
+              "payload_bytes": 35,
+              "result": {
+                "results": [
+                  {
+                    "path": "control.md"
+                  }
+                ]
+              },
+              "sample_elapsed_ns": [
+                1,
+                1
+              ]
+            },
+            "knowledge_get": {
+              "sample_count": 2,
+              "p50_ns": 1,
+              "p95_ns": 1,
+              "payload_bytes": 38,
+              "result": {
+                "path": "child.md",
+                "body": "# Child\n"
+              },
+              "sample_elapsed_ns": [
+                1,
+                1
+              ]
+            },
+            "metadata_inspect": {
+              "sample_count": 2,
+              "p50_ns": 1,
+              "p95_ns": 1,
+              "payload_bytes": 49,
+              "result": {
+                "presentIn": 1,
+                "inferredTypes": {
+                  "tags": "string"
+                }
+              },
+              "sample_elapsed_ns": [
+                1,
+                1
+              ]
+            },
+            "graph_query": {
+              "sample_count": 2,
+              "p50_ns": 1,
+              "p95_ns": 1,
+              "payload_bytes": 113,
+              "result": {
+                "nodes": [
+                  {
+                    "path": "control.md"
+                  }
+                ],
+                "edges": [
+                  {
+                    "from": "control.md",
+                    "to": "child.md"
+                  }
+                ],
+                "summary": {
+                  "nodes": 1,
+                  "edges": 1
+                }
+              },
+              "sample_elapsed_ns": [
+                1,
+                1
+              ]
+            },
+            "impact_analyze": {
+              "sample_count": 2,
+              "p50_ns": 1,
+              "p95_ns": 1,
+              "payload_bytes": 107,
+              "result": {
+                "summary": {
+                  "directlyAffected": 1
+                },
+                "affectedDocuments": [
+                  "child.md"
+                ],
+                "recommendations": [
+                  "review references"
+                ]
+              },
+              "sample_elapsed_ns": [
+                1,
+                1
+              ]
+            },
+            "knowledge_check": {
+              "sample_count": 2,
+              "p50_ns": 1,
+              "p95_ns": 1,
+              "payload_bytes": 136,
+              "result": {
+                "valid": true,
+                "summary": {
+                  "documents": 10000
+                },
+                "diagnostics": [
+                  {
+                    "severity": "info",
+                    "message": "valid"
+                  }
+                ],
+                "workspaceRevision": "fixture-e33-h04"
+              },
+              "sample_elapsed_ns": [
+                1,
+                1
+              ]
+            }
+          }
+        }
+      ],
+      "change_cycle": {
+        "source": "app/disk",
+        "metric": {
+          "sample_count": 2,
+          "p50_ns": 1,
+          "p95_ns": 1,
+          "payload_bytes": 1,
+          "result": {}
+        }
+      },
+      "app_results": {
+        "workspace_status": {
+          "counts": {
+            "documents": 10000
+          },
+          "valid": true
+        },
+        "knowledge_search": {
+          "results": [
+            {
+              "path": "control.md"
+            }
+          ]
+        },
+        "knowledge_get": {
+          "path": "child.md",
+          "body": "# Child\n"
+        },
+        "metadata_inspect": {
+          "presentIn": 1,
+          "inferredTypes": {
+            "tags": "string"
+          }
+        },
+        "graph_query": {
+          "nodes": [
+            {
+              "path": "control.md"
+            }
+          ],
+          "edges": [
+            {
+              "from": "control.md",
+              "to": "child.md"
+            }
+          ],
+          "summary": {
+            "nodes": 1,
+            "edges": 1
+          }
+        },
+        "impact_analyze": {
+          "summary": {
+            "directlyAffected": 1
+          },
+          "affectedDocuments": [
+            "child.md"
+          ],
+          "recommendations": [
+            "review references"
+          ]
+        },
+        "knowledge_check": {
+          "valid": true,
+          "summary": {
+            "documents": 10000
+          },
+          "diagnostics": [
+            {
+              "severity": "info",
+              "message": "valid"
+            }
+          ],
+          "workspaceRevision": "fixture-e33-h04"
+        }
+      },
+      "seam_results": {
+        "workspace_status": {
+          "counts": {
+            "documents": 10000
+          },
+          "valid": true
+        },
+        "knowledge_search": {
+          "results": [
+            {
+              "path": "control.md"
+            }
+          ]
+        },
+        "knowledge_get": {
+          "path": "child.md",
+          "body": "# Child\n"
+        },
+        "metadata_inspect": {
+          "presentIn": 1,
+          "inferredTypes": {
+            "tags": "string"
+          }
+        },
+        "graph_query": {
+          "nodes": [
+            {
+              "path": "control.md"
+            }
+          ],
+          "edges": [
+            {
+              "from": "control.md",
+              "to": "child.md"
+            }
+          ],
+          "summary": {
+            "nodes": 1,
+            "edges": 1
+          }
+        },
+        "impact_analyze": {
+          "summary": {
+            "directlyAffected": 1
+          },
+          "affectedDocuments": [
+            "child.md"
+          ],
+          "recommendations": [
+            "review references"
+          ]
+        },
+        "knowledge_check": {
+          "valid": true,
+          "summary": {
+            "documents": 10000
+          },
+          "diagnostics": [
+            {
+              "severity": "info",
+              "message": "valid"
+            }
+          ],
+          "workspaceRevision": "fixture-e33-h04"
+        }
+      },
+      "negative_results": {
+        "knowledge_get": {
+          "app": {
+            "error": {
+              "code": "not_found",
+              "message": "document not found"
+            }
+          },
+          "seam": {
+            "error": {
+              "code": "not_found",
+              "message": "document not found"
+            }
+          }
+        },
+        "metadata_inspect": {
+          "app": {
+            "error": {
+              "code": "invalid_field",
+              "message": "field not found"
+            }
+          },
+          "seam": {
+            "error": {
+              "code": "invalid_field",
+              "message": "field not found"
+            }
+          }
+        }
+      }
+    }
+  ],
+  "wire_calibration": {
+  "binary": "lodestar-mcp",
+  "build_profile": "release",
+  "clock": "/usr/bin/time -p (wall clock, resolución 0.01 s)",
+  "corpus_documents": 10004,
+  "corpus_profile": "realista",
+  "date": "2026-08-22",
+  "excluded_observations": [
+    {
+      "knowledge_search_real_seconds": [
+        0.29,
+        0.29,
+        0.29,
+        0.29,
+        0.29
+      ],
+      "reason": "pasada exploratoria anterior a la serie formal; se conserva íntegra y no entra en sus percentiles",
+      "series": "exploratoria previa completa",
+      "workspace_status_real_seconds": [
+        1.65,
+        0.25,
+        0.26,
+        0.25,
+        0.25
+      ]
+    }
+  ],
+  "harness": "docs/qa/testbench/lodestar_harness.py",
+  "interpretation": "La medida wire incluye arnés Python, arranque del proceso MCP, initialize, JSON-RPC/stdio, adquisición vigente de App y ejecución de la tool. El perfil readonly es la regla dura del arnés para roots reales; el banco interno usa standard, por lo que no se afirma igualdad del payload de capacidades.",
+  "process_protocol": "cinco procesos MCP frescos por tool; cada proceso incluye initialize, tools/call y cierre",
+  "profile": "realista",
+  "results": [
+    {
+      "arguments": {},
+      "p50_seconds": 0.26,
+      "p95_seconds": 0.29,
+      "payload_bytes": 1298,
+      "payload_bytes_stdout": 1298,
+      "payload_bytes_structured_content": 506,
+      "real_seconds": [
+        0.29,
+        0.25,
+        0.26,
+        0.25,
+        0.26
+      ],
+      "result_check": {
+        "documents": 10004,
+        "is_error": false
+      },
+      "sample_count": 5,
+      "tool": "workspace_status"
+    },
+    {
+      "arguments": {
+        "text": "marker-search-h04",
+        "where": "service = \"bench\""
+      },
+      "p50_seconds": 0.29,
+      "p95_seconds": 0.29,
+      "payload_bytes": 800,
+      "payload_bytes_stdout": 800,
+      "payload_bytes_structured_content": 269,
+      "real_seconds": [
+        0.29,
+        0.29,
+        0.29,
+        0.29,
+        0.29
+      ],
+      "result_check": {
+        "is_error": false,
+        "path": "control.md",
+        "total_approximate": 1
+      },
+      "sample_count": 5,
+      "tool": "knowledge_search"
+    }
+  ],
+  "runtime_profile": "readonly",
+  "scale": 10000,
+  "status": "complete",
+  "transport": "JSON-RPC/stdio"
+},
+  "commit": "fixture",
+  "provenance": {
+    "commit": "fixture",
+    "working_tree_clean": true
+  }
+}

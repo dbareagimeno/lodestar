@@ -303,6 +303,14 @@ cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 CI runs formatting, strict linting, build, documentation and tests — including the crash-recovery
 scenarios — on Linux, macOS and Windows.
 
+The internal E33 performance bank is `lodestar-bench` (`publish = false`). Its
+[`README`](crates/lodestar-bench/README.md) links the usage guide and the current-metrics reference;
+the release gate is documented in [`docs/qa/testbench/README.md`](docs/qa/testbench/README.md). It
+measures the seven read tools and cold-open, and its ratified absolute ceilings apply only to the
+`disk-reparseo` 10k variant on the explicitly identified release machine. Shared CI runs only the
+cheap smoke; SQLite measurements remain evidence and are neither an optimization promise nor a
+veto.
+
 ## Documentation
 
 Start with the [guided demo](examples/demo/README.md): every command and every MCP call in it comes

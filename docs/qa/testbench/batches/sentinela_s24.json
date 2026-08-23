@@ -1,0 +1,61 @@
+{
+  "batch": "sentinela_s24",
+  "descripcion": "Centinela E33-H03 de decisiones §24: el plan conserva la comparación byte a byte de caja y Unicode.",
+  "root": "corpus",
+  "profile": "standard",
+  "fixtures": null,
+  "cases": [
+    {
+      "id": "S24-01",
+      "gate": true,
+      "fresh_root": true,
+      "descripcion": "decisiones §24 — APFS/NTFS (case-insensitive) fusionarían el gemelo por caja, mientras ext4 (case-sensitive) permite coexistencia; el caso solo se planifica y no aplica.",
+      "steps": [{
+        "kind": "call",
+        "tool": "change_plan",
+        "arguments": {
+          "operations": [{"op": "create", "path": "centinelas/caja/INFORME.md", "body": "# Centinela caja\n"}],
+          "policy": {"requireValidResult": false, "allowWarnings": true}
+        },
+        "expect": {
+          "is_error": false,
+          "equals": {
+            "structured.canApply": true,
+            "structured.normalizedOperations.0.path": "centinelas/caja/INFORME.md",
+            "structured.semanticDiff.created.0": "centinelas/caja/INFORME.md",
+            "structured.impact.affectedDocuments.0": "centinelas/caja/INFORME.md",
+            "structured.noOpOperations": []
+          },
+          "not_contains": {"text": "DOCUMENT_ALREADY_EXISTS"},
+          "describe": "§24 fija el path byte a byte, su creación y su impacto sin ejecutar change_apply; APFS/NTFS y ext4 difieren en la colisión."
+        }
+      }]
+    },
+    {
+      "id": "S24-02",
+      "gate": true,
+      "fresh_root": true,
+      "descripcion": "decisiones §24 — APFS/NTFS (normalizantes o case-insensitive) tratarían el gemelo NFD como existente, mientras ext4 (case-sensitive y no normalizante) permite coexistencia; el caso solo se planifica y no aplica.",
+      "steps": [{
+        "kind": "call",
+        "tool": "change_plan",
+        "arguments": {
+          "operations": [{"op": "create", "path": "centinelas/unicode/revisión.md", "body": "# Centinela Unicode revisión\n"}],
+          "policy": {"requireValidResult": false, "allowWarnings": true}
+        },
+        "expect": {
+          "is_error": false,
+          "equals": {
+            "structured.canApply": true,
+            "structured.normalizedOperations.0.path": "centinelas/unicode/revisión.md",
+            "structured.semanticDiff.created.0": "centinelas/unicode/revisión.md",
+            "structured.impact.affectedDocuments.0": "centinelas/unicode/revisión.md",
+            "structured.noOpOperations": []
+          },
+          "not_contains": {"text": "DOCUMENT_ALREADY_EXISTS"},
+          "describe": "§24 fija el path byte a byte, su creación y su impacto sin ejecutar change_apply; APFS/NTFS y ext4 difieren en la colisión Unicode."
+        }
+      }]
+    }
+  ]
+}

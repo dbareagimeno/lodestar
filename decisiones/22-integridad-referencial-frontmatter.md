@@ -6,7 +6,7 @@ prioridad: 3
 etiquetas: ["lenguaje-consulta", "grafo", "contrato", "dogfooding"]
 origen: "dogfooding"
 abierta_en: "2026-08-04"
-revisada_en: "2026-08-04"
+revisada_en: "2026-08-22"
 relacionadas: [9, 19, 21]
 ---
 
@@ -103,6 +103,14 @@ metadata_inspect {"mode": "field", "field": "affects"}
 Devuelve todos los valores con su recuento, y un valor huérfano con `(1)` entre
 otros de recuento alto es casi siempre una errata. Funciona, pero **no falla en
 CI**, que es justo lo que se le pediría.
+
+## Centinela del banco (E33-H03)
+
+El banco mantiene el statu quo en `docs/qa/testbench/batches/sentinela_s22.json`:
+`S22-01` fija el silencio de `knowledge_check` ante `relacionadas: [99]` y
+`affects: [typo-inexistente]`, y `S22-02` deja ambos valores huérfanos
+inspeccionables mediante `metadata_inspect`. Esta anotación no cierra la ficha;
+su estado sigue siendo `abierta`.
 
 ## Orden
 

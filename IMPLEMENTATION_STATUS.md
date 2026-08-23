@@ -44,6 +44,22 @@
 > Lo pendiente está en [`decisiones/`](decisiones/README.md): fechas en el lenguaje de consulta (§12),
 > el **store sin consumidor** (§14, abierto en E23-H16). §12 y §13 se cerraron en E23-H14.
 
+### E33-H04 — banco de rendimiento (2026-08-22)
+
+✅ Completado. La corrida oficial está identificada en el [manifiesto de evidencia v0.6.2](docs/qa/corridas/v0.6.2/manifest.json),
+con [resumen H04](docs/qa/e33-h04-banco-rendimiento-2026-08-22.md); el bruto se publica comprimido fuera de Git.
+usa el binario `lodestar-bench` en `release`, dos perfiles (Plano/Realista), tres escalas
+(100/1000/10000), tres variantes de lectura y 10 muestras por tool y por ciclo. Cada ciclo
+`change_plan`→`change_apply` corre por `App` sobre una copia privada del corpus, conserva el root
+medido intacto y registra documentos antes/después, preparación, planes, applies y recibos reales.
+En Realista/10k: disco-reparseo cold-open p95 **248.8 ms** y peor lectura
+(`impact_analyze`) p95 **481.5 ms**; SQLite-raw `rebuild` p95 **14.05 s**; ciclo App/disco p95
+**3.38 s**. La calibración wire formal
+readonly da p95 **0.29 s** para `workspace_status` y `knowledge_search`; la observación exploratoria
+de 1.65 s queda excluida. Son evidencia de H04 para H05/§14. Los máximos ya ratificados de **1 s
+por tool de lectura a 10k** y **5 s de cold-open** son techos de regresión del producto disco-
+reparseo, no una promesa externa ni un motivo para descartar SQLite.
+
 ## Cómo correrlo
 
 ```bash
@@ -1816,19 +1832,20 @@ Ninguna historia toca `contracts/mcp.yml`.
 |---|---|---|
 | E33-H01 | Corpus canónico determinista y generador de escala compartido | ✅ |
 | E33-H02 | Runner asertable y portable del banco de conformidad | ✅ |
-| E33-H03 | Centinelas de las decisiones abiertas `§22` y `§24` | ⏳ |
-| E33-H04 | Banco de rendimiento: primera corrida completa (3 variantes × 3 escalas) | ⏳ |
-| E33-H05 | Umbrales ratificados, gate codificado y smoke en CI | ⏳ **puerta interna de umbrales** |
-| E33-H06 | Dogfooding acotado con registro | ⏳ |
-| E33-H07 | Enganche a release: runbook, workflow y corrida datada | ⏳ |
-| E33-H08 | Paquete de evidencia para decidir `decisiones §14` | ⏳ |
+| E33-H03 | Centinelas de las decisiones abiertas `§22` y `§24` | ✅ |
+| E33-H04 | Banco de rendimiento: primera corrida completa (3 variantes × 3 escalas) | ✅ |
+| E33-H05 | Umbrales ratificados, gate codificado y smoke en CI | ✅ |
+| E33-H06 | Dogfooding acotado con registro | ✅ |
+| E33-H07 | Enganche a release: runbook, workflow y corrida datada | ⏳ local listo; BDD externo pendiente |
+| E33-H08 | Paquete de evidencia para decidir `decisiones §14` | ✅ |
+| E33-H09 | Sonda extrema parametrizable y evidencia Realista/100k | ✅ |
 
 **E33-H01 (2026-08-10)**: el módulo `escala` de `lodestar-fixtures` (perfiles `Plano`/`Realista`,
 PRNG SplitMix64 propio para que ninguna dependencia pueda alterar el corpus en silencio),
 `escala.rs` de E14-H05 migrado al generador compartido **con las aserciones intactas y el corpus
 plano byte-idéntico** (verificado contra el generador original reconstruido vía `git show`, y
 anclado hacia el futuro por `tests/ancla_plano.rs` con hash dorado), y el corpus canónico python
-(`docs/qa/testbench/make_corpus.py`, 92 `.md` deterministas con 11 códigos de diagnóstico, sets
+(`docs/qa/testbench/make_corpus.py`, 93 `.md` deterministas en APFS (94 en ext4), con 11 códigos de diagnóstico, sets
 patológicos de `make_fixtures.py` integrados y las semillas de los centinelas de H03).
 
 TDD con separación de poderes: el autor validó sus 5 tests contra un prototipo desechable (3
@@ -1849,8 +1866,92 @@ quedar sin salientes.
 mecánico y exit code, parametriza binario y root sin rutas de máquina, y aplica readonly duro contra
 roots reales. El autotest del runner (`selftest_runner.py`) quedó en **12/12 comprobaciones**; la
 corrida BDD-3 del banco canónico quedó en **97/97 casos PASS, 0 FAIL, exit 0**, documentada en
-[`docs/qa/corrida-banco-2026-08-10.md`](docs/qa/corrida-banco-2026-08-10.md). H03–H08 permanecen
-pendientes; esta evidencia no cierra `decisiones §14`, `§22` ni `§24`, ni altera la frontera MCP.
+[`docs/qa/corrida-banco-2026-08-10.md`](docs/qa/corrida-banco-2026-08-10.md). Las historias
+posteriores de E33 están entregadas localmente salvo el BDD remoto de H07; esta evidencia no cierra
+`decisiones §14`, `§22` ni `§24`, ni altera la frontera MCP.
+
+**E33-H03 (2026-08-22)**: los lotes `sentinela_s22.json` y `sentinela_s24.json` entran en
+`LOTES_DEL_GATE` y fijan el statu quo vigente de las dos fichas abiertas. El corpus canónico
+genera `relacionadas: [99]` y `affects: [typo-inexistente]` sin enlaces de cuerpo; `S22-01`/`S22-02`
+aseveran silencio e inspección, y `S24-01`/`S24-02` planifican los gemelos por caja/Unicode sin
+aplicar cambios destructivos. Ambas fichas conservan `estado: "abierta"` y registran
+`revisada_en: "2026-08-22"`; no cambia el motor ni el contrato MCP.
+
+**E33-H06 (2026-08-22)**: tres sesiones MCP reales en perfil `readonly` ejercitaron las consultas
+operativas de decisiones contra este repo sin reformulación, error ni mutación; el diario registra
+`0,05 s` por sesión y ausencia de fricción observable a 133 documentos. La corrida fría asociada
+queda inventariada en el manifiesto y su resumen conserva las tres variantes, dos muestras
+por lectura y el rebuild separado; no extrapola ese juicio humano a 10k ni decide el store.
+
+**E33-H08 (2026-08-22)**: el paquete [`docs/qa/evidencia-14-store-2026-08.md`](docs/qa/evidencia-14-store-2026-08.md)
+deja `decisiones §14` **lista para decidir**, sin tomar ninguna de sus tres salidas. La tabla es
+trazable a H04/H05/H06 y el inventario verifica contra el árbol actual el walker sin
+`DiscoveryPolicy`, la divergencia de `field_path`, los llamadores de cache y el watcher. Explicita
+las preguntas de conectar/acotar/retirar y, si se conecta, SQLite/RAM/ambas. La ficha §14 conserva
+`estado: abierta` y `prioridad: 5`; §9 sigue abierta y mantiene pendiente el BDD remoto de H07,
+además de firma y threat model. No hay delta de contrato ni decisión de producto.
+
+**E33-H09 (2026-08-23)**: `lodestar-bench --extreme` acepta `--profile`, cualquier `--scale` positiva
+y `--iterations`, con preflight de espacio antes de materializar. `memory_verification` declara
+estructuradamente `status=unverified` con motivo; la confirmación es siempre obligatoria para 1M
+después del preflight, incluso con recursos comprobados, y la insuficiencia conocida gana. El
+presupuesto actual `32 KiB × scale + 256 MiB` queda documentado como heurística modificable, no
+como contrato ni umbral de descarte. Las siete
+lecturas × tres variantes corren en workers aislados y miden baseline, pico RSS real y delta con
+`getrusage`; rebuild SQLite y footprint de Markdown/SQLite quedan
+separados. La corrida identificada en el manifiesto, con resumen versionado,
+contiene 100.004 documentos, 134.783.275 bytes Markdown, 659.578.880 bytes SQLite, equivalencia
+funcional `true`, rebuild de `1_868_411_002_750 ns` (~31,14 min), RSS por variante (972.439.552 bytes
+disco, 985.530.368 bytes SQLite, 839.974.912 bytes RAM), baseline de 2.637.824 bytes por worker y
+preflight checked con 8.729.272.320 bytes disponibles frente a 3.545.235.456 requeridos. H09 no altera full/smoke/H05/CI, contrato,
+API pública ni decide §14; la evidencia 100k queda como activo permanente para futuras mejoras de
+rendimiento.
+
+**E33-H04 (2026-08-22)**: `lodestar-bench` (`publish = false`) mide diez muestras de cada una de
+las siete lecturas en Plano/Realista × 100/1k/10k mediante una pieza de lectura común sobre un
+`DocumentSet` adquirido. `App` conserva la adquisición de disco y su API por defecto; SQLite llama
+a `Store::document_set()` dentro de cada muestra y registra `rebuild` aparte; RAM reutiliza una
+única adquisición. Las tres variantes producen JSON exactamente igual tool por tool y el ciclo
+`change_plan`→`change_apply` sigue pasando solo por `App` y el escritor único. La corrida release y
+la calibración MCP/stdio real están en
+[`docs/qa/e33-h04-banco-rendimiento-2026-08-22.md`](docs/qa/e33-h04-banco-rendimiento-2026-08-22.md)
+y su JSON externo asociado. En Realista/10k, el producto obtuvo cold-open p95 **248,8 ms** y peor lectura
+(`impact_analyze`) p95 **481,5 ms**; SQLite-raw obtuvo `rebuild` p95 **14,05 s** y el ciclo
+App/disco p95 fue **3,38 s**. La serie wire formal en perfil `readonly` obtuvo p95 ≈0,290 s tanto para
+`workspace_status` como para `knowledge_search`. La pasada exploratoria previa completa también se
+conserva en el JSON —incluida una observación de 1,65 s de `workspace_status`— y queda fuera de los
+percentiles formales de forma explícita. El usuario ratificó el 2026-08-22 los máximos de 5 s/1 s
+como techos de regresión del producto, no como criterio para descartar SQLite.
+
+**E33-H05 (2026-08-22)**: el gate `lodestar-bench --gate --report PATH --thresholds PATH
+--baseline PATH --machine-id ID` valida estrictamente los informes H04, extrae un único perfil de
+la baseline aplicable y selecciona en el informe actual solo ese perfil junto a
+`disk-reparseo` a escala 10000. En `release-macbook-2026-08` comprueba los p95 de las siete
+lecturas y cold-open frente a `docs/qa/testbench/umbrales.json`, registrando márgenes o el detalle
+de cada incumplimiento. Fuera de esa máquina nunca juzga absolutos: compara tendencia frente a una
+baseline propia si existe y, si no existe, declara que la comparación no está disponible sin
+inventarla. La baseline compacta anonimizada conserva los números Realista/10k de H04. El smoke
+de CI ejecuta `cargo run -p lodestar-bench -- --smoke` sin gate absoluto. No hay delta en
+`contracts/mcp.yml` ni en la API pública; SQLite sigue siendo medición, no objetivo ni veto.
+En la calibración wire, `payload_bytes` legado tiene una única unidad: bytes del stdout completo;
+`payload_bytes_stdout` y `payload_bytes_structured_content` son campos explícitos derivados de cada
+raw versionado (1298/800 y 506/269 respectivamente en esta corrida).
+Esta historia no conecta el store ni cambia `contracts/mcp.yml`.
+
+**E33-H07 (2026-08-22)**: `RELEASING.md` añade, tras el changelog y antes del PR a `develop`, el
+paso obligatorio de conformidad canónica (`--run-all`) y rendimiento full con `lodestar-bench
+--gate` contra el binario release en la máquina de baseline; cualquier FAIL es stop-the-line. El
+workflow manual [`testbench.yml`](.github/workflows/testbench.yml) ejecuta la conformidad canónica
+y una smoke de rendimiento en runner compartido, sin `--gate`, `--thresholds` ni `--baseline`, y
+sube sus resultados como artefacto. La convención de dos resúmenes (`conformidad.md` y
+`rendimiento.md`) más `manifest.json` y la primera corrida datada de `v0.6.2` están en
+[`docs/qa/corridas/v0.6.2/`](docs/qa/corridas/v0.6.2/): conformidad real `103/103 PASS` sobre los
+18 lotes del gate integrado, y el informe H04 full de rendimiento reutilizado es trazable al
+commit `0c9d0ba` de la versión. No se inventa
+un run GitHub. La validación local del workflow quedó documentada con parseo YAML (`Psych`) y smoke
+del bench en verde; queda un único pendiente externo, ejecutar `workflow_dispatch` tras
+integrar/publicar y enlazar un run verde al PR; por eso H07 no se marca plenamente completada
+todavía.
 
 Dos matices del motor que H02 debe conocer al escribir esperados (documentados en
 `make_corpus.py`/README): un enlace a directorio **con nombre** (`guias/`) es `LINK-TARGET-MISSING`

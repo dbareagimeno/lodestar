@@ -1,0 +1,202 @@
+name: Testbench manual
+
+# E33-H07: disparo bajo demanda para comprobar que el banco canónico sigue ejecutable.
+# Este runner compartido NO es la máquina de baseline: solo corre conformidad y smoke.
+on:
+  workflow_dispatch:
+    inputs:
+      seed:
+        description: "Semilla del banco de rendimiento smoke"
+        required: false
+        default: "33"
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  testbench:
+    name: Testbench canónico + smoke
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Instala toolchain (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache de cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Prepara directorio del artefacto
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "${RUNNER_TEMP}/lodestar-testbench"
+          {
+            echo "# Testbench manual"
+            echo
+            echo "Este run ejecuta conformidad canónica y rendimiento smoke."
+            echo "No juzga umbrales absolutos en el runner compartido."
+          } > "${RUNNER_TEMP}/lodestar-testbench/README.md"
+
+      - name: Compila binarios release del banco
+        run: cargo build --release --locked -p lodestar-cli -p lodestar-mcp -p lodestar-bench
+
+      - name: Genera corpus canónico y corre conformidad completa
+        shell: bash
+        run: |
+          set -euo pipefail
+          # El arnés y sus procesos hijos deben crear temporales dentro del espacio efímero del
+          # runner, que después queda fuera de la evidencia publicable.
+          export TMPDIR="${RUNNER_TEMP}"
+          artifact_dir="${RUNNER_TEMP}/lodestar-testbench"
+          corpus="${RUNNER_TEMP}/lodestar-testbench-corpus"
+          mkdir -p "$corpus"
+          python3 docs/qa/testbench/make_corpus.py "$corpus"
+          python3 docs/qa/testbench/lodestar_harness.py \
+            --run-all \
+            --root-corpus "$corpus" \
+            --binary target/release/lodestar-mcp \
+            --binary-cli target/release/lodestar \
+            --out "$artifact_dir/conformidad.raw.json" \
+            > "$artifact_dir/conformidad.stdout"
+          python3 - "$artifact_dir/conformidad.raw.json" "$artifact_dir/conformidad.json" "$RUNNER_TEMP" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          source, destination, *roots = sys.argv[1:]
+          source, destination = map(Path, (source, destination))
+          # macOS puede exponer el mismo temp root como /var/... y /private/var/...; redáctalo
+          # por su forma canónica para no dejar un prefijo absoluto pegado al placeholder.
+          redaction_roots = [(str(Path.cwd()), "<repo>"), (str(Path.cwd().resolve()), "<repo>")]
+          for root in roots:
+              if root:
+                  path = Path(root)
+                  redaction_roots.extend(
+                      [(str(path), "<ephemeral-root>"), (str(path.resolve()), "<ephemeral-root>")]
+                  )
+          # Un root no canónico puede ser un prefijo del canónico (p. ej. /var frente a
+          # /private/var); sustituir primero el más largo evita dejar un prefijo absoluto pegado.
+          redaction_roots.sort(key=lambda item: len(item[0]), reverse=True)
+          def redact(value):
+              if isinstance(value, dict):
+                  return {key: redact(child) for key, child in value.items()}
+              if isinstance(value, list):
+                  return [redact(child) for child in value]
+              if not isinstance(value, str):
+                  return value
+              for root, placeholder in redaction_roots:
+                  value = value.replace(root, placeholder)
+              return value
+          destination.write_text(
+              json.dumps(redact(json.loads(source.read_text(encoding="utf-8"))), ensure_ascii=False, indent=1) + "\n",
+              encoding="utf-8",
+          )
+          PY
+          {
+            echo "# Conformidad canónica"
+            echo
+            echo "Las rutas del runner se sustituyen por marcadores portables."
+            sed -E "s#${artifact_dir}#<artifact-root>#g; s#${corpus}#<ephemeral-root>#g" \
+              "$artifact_dir/conformidad.stdout"
+          } > "$artifact_dir/conformidad.md"
+          # Los raw quedan disponibles para diagnosticar un fallo, pero no forman parte de la
+          # lista de publicación de abajo porque conservan las rutas originales del runner.
+
+      - name: Rendimiento smoke (sin gate absoluto)
+        shell: bash
+        env:
+          TESTBENCH_SEED: ${{ inputs.seed }}
+        run: |
+          set -euo pipefail
+          artifact_dir="${RUNNER_TEMP}/lodestar-testbench"
+          cargo run --release -p lodestar-bench --locked -- \
+            --smoke --seed "$TESTBENCH_SEED" \
+            --json-output "$artifact_dir/rendimiento-smoke.json" \
+            --markdown-output "$artifact_dir/rendimiento-smoke.md" \
+            > /dev/null
+          {
+            echo
+            echo "## Rendimiento smoke"
+            echo
+            echo "PASS: el banco smoke terminó; los umbrales absolutos no se juzgan en runners compartidos."
+          } >> "$artifact_dir/README.md"
+
+      - name: Comprueba que la evidencia publicable no filtra rutas privadas
+        id: portable_evidence
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          artifact_dir="${RUNNER_TEMP}/lodestar-testbench"
+          python3 - "$artifact_dir" "${GITHUB_WORKSPACE:-}" "${RUNNER_TEMP:-}" "${RUNNER_WORKSPACE:-}" <<'PY'
+          import re
+          import sys
+          from pathlib import Path
+
+          artifact_dir = Path(sys.argv[1])
+          publishable = [
+              artifact_dir / "README.md",
+              artifact_dir / "conformidad.json",
+              artifact_dir / "conformidad.md",
+              artifact_dir / "rendimiento-smoke.json",
+              artifact_dir / "rendimiento-smoke.md",
+          ]
+          missing = [path.name for path in publishable if not path.is_file()]
+          if missing:
+              raise SystemExit(
+                  "faltan salidas publicables para comprobar: " + ", ".join(missing)
+              )
+
+          # Los roots concretos cubren el checkout, RUNNER_TEMP y el workspace efímero de GitHub.
+          # La expresión adicional cubre las convenciones de runners POSIX/Windows aunque cambie
+          # el valor de una variable; no inspecciona tiempos ni aplica ningún umbral de rendimiento.
+          roots = []
+          for label, value in zip(
+              ("GITHUB_WORKSPACE", "RUNNER_TEMP", "RUNNER_WORKSPACE"), sys.argv[2:]
+          ):
+              if value:
+                  roots.append((label, str(Path(value).resolve()).replace("\\", "/")))
+          private_path = re.compile(
+              # `</ephemeral-root>/tmp/...` no es una ruta absoluta: el `/tmp` pertenece al
+              # sufijo lógico del placeholder. El `>` en el lookbehind evita ese falso positivo.
+              r"(?<![A-Za-z0-9_+.>\-])"
+              r"(?:/(?:Users|home|private|tmp|var/folders|runner|builds|workspace|workspaces|"
+              r"opt/hostedtoolcache|github/workspace)(?:/[^\s\"'<>`|)]*)?"
+              r"|[A-Za-z]:[\\/](?:Users|home|runner|builds|workspace|workspaces)(?:[\\/][^\s\"'<>`|)]*)?)"
+          )
+          findings = []
+          for path in publishable:
+              text = path.read_text(encoding="utf-8", errors="replace")
+              normalized = text.replace("\\/", "/").replace("\\", "/")
+              for label, root in roots:
+                  if root and root in normalized:
+                      findings.append(f"{path.name}: contiene {label} sin redacción")
+              for match in private_path.finditer(normalized):
+                  findings.append(f"{path.name}: contiene una ruta privada absoluta")
+                  break
+          if findings:
+              raise SystemExit("\n".join(["salidas publicables no portables:", *findings]))
+          print("PASS: las cinco salidas publicables no contienen rutas privadas absolutas")
+          PY
+
+      - name: Publica evidencia del run
+        if: always() && steps.portable_evidence.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: testbench-${{ github.run_id }}
+          # Publica solo salidas saneadas; los ficheros raw con rutas del runner nunca entran
+          # en el artefacto, ni siquiera si un paso anterior falla.
+          path: |
+            ${{ runner.temp }}/lodestar-testbench/README.md
+            ${{ runner.temp }}/lodestar-testbench/conformidad.json
+            ${{ runner.temp }}/lodestar-testbench/conformidad.md
+            ${{ runner.temp }}/lodestar-testbench/rendimiento-smoke.json
+            ${{ runner.temp }}/lodestar-testbench/rendimiento-smoke.md
+          if-no-files-found: error
+          retention-days: 30

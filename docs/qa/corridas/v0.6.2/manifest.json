@@ -1,0 +1,86 @@
+{
+  "schema_version": "e33-evidence-manifest-v1",
+  "release": "v0.6.2",
+  "results": [
+    {
+      "id": "e33-h04-rendimiento",
+      "summary": "docs/qa/e33-h04-banco-rendimiento-2026-08-22.md",
+      "artifact": {
+        "url": "https://github.com/dbareagimeno/lodestar/releases/download/v0.6.2/e33-h04-full-2026-08-22.json.gz",
+        "sha256": "4f674f4c9d2f2d70c3b44560746a428eb60d0c01a730583297e8791fde573e37",
+        "size_bytes": 664278,
+        "media_type": "application/gzip",
+        "compression": "gzip"
+      },
+      "raw": {
+        "sha256": "123ec26fdcbfefabcbded3f0a292c845c2561a18e321d0af5d13dee7bc35ba49",
+        "size_bytes": 12265034,
+        "schema_version": "e33-h04-v2-full"
+      }
+    },
+    {
+      "id": "e33-h06-rendimiento",
+      "summary": "docs/qa/e33-h06-repo-real-2026-08-22.md",
+      "artifact": {
+        "url": "https://github.com/dbareagimeno/lodestar/releases/download/v0.6.2/e33-h06-repo-real-2026-08-22.json.gz",
+        "sha256": "9f3d9bb9b798dd1fcda6f4b65e1519c3e2d86f2541f4d91e9fb1183ccbbcfa78",
+        "size_bytes": 59051,
+        "media_type": "application/gzip",
+        "compression": "gzip"
+      },
+      "raw": {
+        "sha256": "93759485c40fea77839c45a7c59b5faea9a88eeb17827d78fb940b74f0532bad",
+        "size_bytes": 687046,
+        "schema_version": "e33-h04-v2"
+      }
+    },
+    {
+      "id": "e33-h07-conformidad",
+      "summary": "docs/qa/corridas/v0.6.2/conformidad.md",
+      "artifact": {
+        "url": "https://github.com/dbareagimeno/lodestar/releases/download/v0.6.2/e33-h07-v0.6.2-conformidad.json.gz",
+        "sha256": "48197c30bbf6b6b44fca4fa9ca7c92e658583f776378177451fa67b3d50c9ff6",
+        "size_bytes": 82020,
+        "media_type": "application/gzip",
+        "compression": "gzip"
+      },
+      "raw": {
+        "sha256": "6e5eb1f53251eed8e552037b4f975b9b8c239b00e624e1715799d581f0ed1806",
+        "size_bytes": 820794,
+        "schema_version": "e33-h07-conformidad-v1"
+      }
+    },
+    {
+      "id": "e33-h07-rendimiento",
+      "summary": "docs/qa/corridas/v0.6.2/rendimiento.md",
+      "artifact": {
+        "url": "https://github.com/dbareagimeno/lodestar/releases/download/v0.6.2/e33-h07-v0.6.2-rendimiento.json.gz",
+        "sha256": "053b808bd9e510dc6e57c130c4622aa7187f47f4e87c233fcf835abe1bd2588d",
+        "size_bytes": 662552,
+        "media_type": "application/gzip",
+        "compression": "gzip"
+      },
+      "raw": {
+        "sha256": "456752042e02b1ab111d686786d2a02838afb593a78e817fc4a495840ea2c0f0",
+        "size_bytes": 12252638,
+        "schema_version": "e33-h04-v2-full"
+      }
+    },
+    {
+      "id": "e33-h09-rendimiento",
+      "summary": "docs/qa/e33-h09-realista-100k-2026-08-23.md",
+      "artifact": {
+        "url": "https://github.com/dbareagimeno/lodestar/releases/download/v0.6.2/e33-h09-realista-100k-2026-08-23.json.gz",
+        "sha256": "a7979be6c81b43ecd771d85d0590bdedc03dff6e59559e7d35649b8beb776346",
+        "size_bytes": 27530,
+        "media_type": "application/gzip",
+        "compression": "gzip"
+      },
+      "raw": {
+        "sha256": "d7d88ffe0b137deadcb7deda71eac6fa9f01df0109866e87cb8390cb98d2e8d9",
+        "size_bytes": 273900,
+        "schema_version": "e33-h09-v1"
+      }
+    }
+  ]
+}

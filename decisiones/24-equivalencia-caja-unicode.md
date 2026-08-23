@@ -6,7 +6,7 @@ prioridad: 3
 etiquetas: ["escritura", "contrato", "dogfooding", "filesystem"]
 origen: "dogfooding"
 abierta_en: "2026-08-06"
-revisada_en: "2026-08-06"
+revisada_en: "2026-08-22"
 relacionadas: [22, 23]
 ---
 
@@ -71,6 +71,13 @@ propio filesystem sea el árbitro?) que no tiene una respuesta obligada por el b
    y en `docs/user/` que la detección de colisión es byte a byte y que un workspace sobre un
    filesystem case-insensitive puede perder datos por esta vía. Traslada el riesgo al usuario con
    conocimiento, sin cambiar código.
+
+## Centinela del banco (E33-H03)
+
+El banco mantiene el statu quo en `docs/qa/testbench/batches/sentinela_s24.json`:
+`S24-01` y `S24-02` planifican los gemelos por caja y por forma Unicode y esperan
+`canApply: true`, sin ejecutar `change_apply`. La anotación cita el comportamiento
+vigente por plataforma y no cierra la ficha; su estado sigue siendo `abierta`.
 
 ## Orden
 

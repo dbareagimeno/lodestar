@@ -6,7 +6,8 @@
 >
 > Esta corrida es evidencia datada, no un umbral: `§22` es instrumento interno y mientras
 > `decisiones §14` siga abierta **nada de lo que el banco mida se promete en la superficie
-> externa** (`§21.5`). El enganche a release —correr esto por cada versión y commitear la corrida—
+> externa** (`§21.5`). El enganche a release —correr esto por cada versión y commitear el resumen y
+> manifiesto, con el bruto publicado fuera de Git—
 > es `E33-H07`; aquí se establece el punto de partida. Esta evidencia completa **E33-H02**; H03–H08
 > permanecen pendientes.
 

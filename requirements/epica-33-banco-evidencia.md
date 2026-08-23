@@ -29,6 +29,19 @@ hechos re-ejecutables; toda decisión —los umbrales (puerta interna de H05), e
 números delante. Ante la duda de si un caso del banco debe «arreglar» algo: no — fija el statu quo
 y cita la ficha.
 
+### Adenda ratificada 2026-08-23 — retención de evidencia fuera de Git
+
+La evidencia permanente de E33 se compone de **resumen y manifiesto versionados**. Los resultados
+brutos pueden almacenarse como artefactos duraderos fuera de Git, identificados en el manifiesto
+por URL estable, SHA-256, tamaño y versión de esquema. Las pruebas usan fixtures pequeñas y validan
+el manifiesto; no dependen de volcados completos de 10k/100k. Esta adenda sustituye únicamente las
+exigencias posteriores de commitear o versionar el JSON bruto: no modifica el benchmark, los
+umbrales ni las métricas ratificadas.
+
+Los JSON que son entradas, fixtures, matrices o calibraciones pequeñas siguen siendo fuente
+versionada. Los resultados generados de una corrida se conservan fuera de Git; sus resúmenes y
+manifiestos permiten localizar el bruto, comprobar sus bytes y reproducir la medición.
+
 **Frontera MCP**: **ninguna historia toca `contracts/mcp.yml`** ni el comportamiento de ninguna
 tool. La épica añade herramientas de medición y verificación *alrededor* del motor (scripts del
 banco, un crate interno `publish = false`, docs); el único código Rust nuevo consume APIs públicas
@@ -47,6 +60,7 @@ explícitamente.
 | E33-H06 | Dogfooding acotado con registro | no | — |
 | E33-H07 | Enganche a release: runbook, workflow y corrida datada | no | — |
 | E33-H08 | Paquete de evidencia para decidir `decisiones §14` | no | — |
+| E33-H09 | Sonda extrema parametrizable: Realista/100k, tamaños y footprint de memoria | no | **RATIFICADA 2026-08-22** |
 
 ---
 
@@ -143,7 +157,8 @@ explícitamente.
     como demostración; no forma parte del gate).
   - **[BDD-3] Dado** el banco completo sobre el corpus canónico recién generado, **Cuando** corre
     `run_all` (el modo que ejecuta todos los lotes del gate), **Entonces** termina con 0 FAIL
-    → la corrida completa commiteada como resultado datado (primera corrida del banco nuevo).
+    → resumen y manifiesto de la corrida completa publicados como resultado datado; el bruto se
+    conserva como artefacto externo de la release (primera corrida del banco nuevo).
   - **[Estructural]** Ni una ruta absoluta de máquina en `docs/qa/testbench/` (grep sin
     `/Users/`); la regla dura generalizada está implementada y documentada; los 18 `verify_*`
     portados conservan la referencia a su hallazgo de origen (`§23` fila / caso del informe);
@@ -210,19 +225,92 @@ explícitamente.
   (`crates/lodestar-store/src/lib.rs`) y `DocumentSet::from_store`
   (`crates/lodestar-core/src/store_trait.rs` — **re-parsea los `raw`**: la advertencia que el
   informe debe rotular) · generador compartido de H01 · invariantes #1–#3 (medir, no conectar).
+
+### Adenda ratificada 2026-08-22 — seam interno de lectura independiente
+
+Esta adenda precisa únicamente la mecánica interna necesaria para medir H04. La nueva pieza debe
+ser independiente y conservar intacta la implementación observable actual: no cambia el producto,
+la frontera MCP ni las decisiones abiertas. Sustituye cualquier freeze byte a byte de la
+implementación interna de `lodestar-app`.
+
+- Se extrae una única pieza interna de servicios de lectura que recibe un `DocumentSet` ya
+  adquirido y concentra la lógica vigente de `workspace_status`, `knowledge_search`,
+  `knowledge_get`, `metadata_inspect`, `graph_query`, `impact_analyze` y `knowledge_check`.
+  `App` y el banco consumen esa misma pieza sin cambiar firmas, resultados ni errores públicos.
+- Las siete lecturas públicas de `App` conservan su adquisición actual desde disco y delegan
+  únicamente la lógica posterior. El producto sigue entrando por `App::open`; no se conecta
+  ninguna cache.
+- El banco ejecuta las siete lecturas mediante la misma pieza interna. Disco-reparseo conserva la
+  adquisición vigente en cada muestra; SQLite-raw incluye una nueva llamada a
+  `Store::document_set()` en cada muestra y registra `Store::rebuild()` por separado; RAM-memoizado
+  reutiliza un único `DocumentSet` construido antes de medir.
+- La equivalencia funcional se comprueba para cada una de las siete tools. Normalizar significa
+  solo canonicalizar la representación JSON de los objetos: no permite eliminar campos,
+  reordenar arrays, sustituir valores, ignorar códigos o mensajes de error ni recortar resultados.
+- `change_plan`→`change_apply` permanece fuera de la pieza de lectura y se mide exclusivamente por
+  `App`, sobre el camino vigente de disco y bajo el escritor único. La matriz de tres variantes
+  aplica a las siete lecturas, no a la escritura.
+- La mecánica de visibilidad o enlace interno entre crates queda a elección de implementación,
+  pero la superficie pública por defecto de `lodestar-app` no gana símbolos ni firmas,
+  `lodestar-app` no añade una dependencia **directa** de `lodestar-store` y el crate interno del
+  banco puede depender directamente de ambos. La dependencia transitiva ya vigente
+  `lodestar-app`→`lodestar-workspace`→`lodestar-store` permanece intacta.
+
+**Fuera de alcance de la adenda**: conectar `lodestar-store` a `App` o `lodestar-workspace`;
+introducir una API pública soportada para el banco; cambiar firmas públicas de `App`, schemas, wire
+MCP, códigos, mensajes u orden observable; duplicar en el banco la lógica de las siete lecturas;
+usar la pieza para planificar o aplicar; optimizar; cerrar `decisiones §14`; o prometer rendimiento
+externamente.
+
+**Criterios adicionales de aceptación**:
+
+- **[BDD-A1] Dado** un corpus de control no vacío con metadata heterogénea, enlaces internos, un
+  dangling, backlinks, impacto transitivo y diagnósticos, **Cuando** cada lectura se ejecuta por el
+  `App` vigente y por la pieza interna sobre el mismo `DocumentSet`, **Entonces** cada par devuelve
+  exactamente el mismo `Result` normalizado, incluidos campos, orden de listas y, donde aplique,
+  código y mensaje de error → `las_siete_lecturas_conservan_resultado_y_error_de_app`.
+- **[BDD-A2] Dado** ese corpus y los mismos argumentos, **Cuando** se ejecutan disco-reparseo,
+  SQLite-raw y RAM-memoizado, **Entonces** sus respuestas son exactamente iguales tool por tool y
+  el fallo identifica la tool divergente → `equivalencia_exacta_por_tool_en_tres_variantes`.
+- **[BDD-A3] Dado** un marcador funcional distinto para cada lectura, **Cuando** se valida el
+  corpus antes de comparar, **Entonces** las siete lecturas demuestran respectivamente recuentos,
+  búsqueda, obtención, metadata, grafo, impacto y diagnóstico no vacíos →
+  `corpus_control_ejercita_las_siete_lecturas`.
+- **[BDD-A4] Dadas** dos muestras con una mutación controlada de la fuente entre ambas, **Cuando**
+  se ejecuta cada proveedor, **Entonces** disco y SQLite reflejan su segunda adquisición, RAM
+  conserva el `DocumentSet` inicial y `rebuild` figura separado de los percentiles por tool →
+  `cada_muestra_respeta_la_adquisicion_de_su_variante`.
+- **[BDD-A5] Dado** un cambio aplicable, **Cuando** el banco mide `change_plan`→`change_apply`,
+  **Entonces** ambas operaciones pasan por las APIs públicas de `App`, el Markdown cambia una sola
+  vez bajo el escritor único y el informe solo contiene la fuente producto/disco para el ciclo →
+  `ciclo_de_cambio_permanece_en_app_y_escritor_unico`.
+- **[Estructural-A6]** La API pública por defecto de `lodestar-app` permanece igual;
+  `contracts/mcp.yml` no cambia; el manifiesto y `cargo metadata` de `lodestar-app` no contienen
+  una dependencia **directa** de `lodestar-store`; el banco sí puede depender directamente de
+  ambos crates; y los tests MCP/CLI vigentes siguen verdes. La ruta transitiva ya existente a
+  través de `lodestar-workspace` no se elimina ni cuenta como delta de H04. Estos guards reemplazan
+  cualquier aserción sobre bytes, texto o disposición interna de `lodestar-app`.
+
+**Delta de contrato de la adenda**: ninguno en `contracts/mcp.yml`, API pública Rust, CLI o wire
+MCP. La documentación interna de H04 sí explicará qué incluye cada muestra, separará `rebuild`,
+limitará la matriz de tres variantes a las siete lecturas y recordará que SQLite-raw ahorra
+walk+I/O, no parseo.
+
 - **Alcance**:
   - Crate interno **`crates/lodestar-bench`** (`publish = false`, como `lodestar-fixtures`), con un
     binario que: genera el corpus (generador de H01, perfiles plano y realista), y mide —
     **cold-open** (`App::open` + `workspace_status`) y **p50/p95 de N iteraciones** por tool de
     lectura (`workspace_status`, `knowledge_search` con `where`, `knowledge_get`,
-    `metadata_inspect`, `graph_query`, `impact_analyze`, `knowledge_check`) más el ciclo
-    `change_plan`→`change_apply`, con **payload en bytes** por respuesta serializada — en las
-    **tres variantes**: (1) el producto actual; (2) `Store::rebuild()` + `Store::document_set()`
-    por la API pública, **registrando también el coste del `rebuild`**; (3) un `DocumentSet`
-    construido una vez y reutilizado entre llamadas.
+    `metadata_inspect`, `graph_query`, `impact_analyze`, `knowledge_check`), con **payload en
+    bytes** por respuesta serializada, en las **tres variantes**: (1) el producto actual;
+    (2) `Store::rebuild()` + una adquisición `Store::document_set()` dentro de cada muestra,
+    **registrando el coste del `rebuild` por separado**; (3) un `DocumentSet` construido una vez y
+    reutilizado entre llamadas. El ciclo `change_plan`→`change_apply` se mide aparte y solo por el
+    producto actual mediante `App`.
   - **Salida en formato estable**: JSON por corrida + resumen Markdown datado (máquina, binario,
-    commit, semilla), pensado para comparar releases. La **primera corrida completa a 10k** se
-    commitea datada en `docs/qa/`.
+    commit, semilla), pensado para comparar releases. De la **primera corrida completa a 10k** se
+    versionan el resumen y el manifiesto en `docs/qa/`; el JSON bruto se conserva como artefacto
+    externo duradero conforme a la adenda de retención.
   - **Calibración de wire**: una muestra (al menos `workspace_status` y `knowledge_search` a 10k)
     medida también por el arnés python contra el binario `lodestar-mcp` real, para acotar el
     overhead del framing JSON-RPC/stdio frente a la medición sobre `App`.
@@ -232,21 +320,23 @@ explícitamente.
   posterior a `§14`); optimizar nada; prometer nada en la superficie externa (`§21.5`).
 - **Criterios de aceptación**:
   - **[BDD-1] Dado** el corpus plano a escala mínima, **Cuando** corre el banco en modo smoke,
-    **Entonces** el informe JSON contiene las 3 variantes × todas las tools con p50/p95 y payload,
+    **Entonces** el informe JSON contiene las 3 variantes × las siete tools de lectura con p50/p95
+    y payload, más el ciclo de cambio rotulado solo como producto/disco,
     y las tres variantes reportan el **mismo** número de documentos y los mismos resultados
     funcionales de una consulta de control (las variantes miden lo mismo, no cosas distintas)
     → test: `informe_completo_y_variantes_equivalentes_en_smoke` (`crates/lodestar-bench`).
   - **[BDD-2] Dado** dos corridas smoke con la misma semilla, **Cuando** se comparan sus informes,
     **Entonces** la estructura (claves, escalas, tools, variantes) es idéntica — solo cambian los
     tiempos → test: `formato_de_informe_estable` (`crates/lodestar-bench`).
-  - **[Estructural]** La corrida completa real (3 escalas, 3 variantes, ambos perfiles) está
-    commiteada datada en `docs/qa/`; la calibración de wire está en el mismo informe; el resumen
-    MD rotula explícitamente la advertencia de `from_store` (SQLite-raw ahorra walk+IO, no parse);
-    `cargo tree -p lodestar-core` sigue puro (el bench no añade nada al core) y el workspace
-    compila con clippy `-D warnings`; cero delta en `contracts/mcp.yml`.
+  - **[Estructural]** La corrida completa real (3 escalas, 3 variantes, ambos perfiles) tiene
+    resumen datado y manifiesto commiteados en `docs/qa/`; el manifiesto enlaza el JSON bruto con
+    URL estable, SHA-256, tamaño y versión de esquema. La calibración de wire está en el mismo
+    paquete; el resumen MD rotula explícitamente la advertencia de `from_store` (SQLite-raw ahorra
+    walk+IO, no parse); `cargo tree -p lodestar-core` sigue puro (el bench no añade nada al core) y
+    el workspace compila con clippy `-D warnings`; cero delta en `contracts/mcp.yml`.
 - **Dependencias**: E33-H01.
 - **Pruebas**: los dos tests del crate `lodestar-bench` en modo smoke (rápidos, entran a la suite
-  normal) + la corrida real como artefacto commiteado.
+  normal) + fixtures pequeñas para el formato + validación del manifiesto de la corrida real.
 
 ---
 
@@ -259,6 +349,11 @@ explícitamente.
 > que el usuario ratifique los umbrales con la primera corrida delante.** No es una
 > `[BLOQUEADA por decisiones §N]` — la decisión no existe aún porque su input es H04 — pero el
 > efecto es el mismo: sin ratificación no hay gate.
+>
+> **Ratificación de la puerta (2026-08-22):** con la corrida H04 delante, el usuario ratifica
+> **p95 ≤ 1 s por tool de lectura a 10k** y **cold-open ≤ 5 s** como cifras **máximas** del gate de
+> regresión del producto disco-reparseo. Son techos para detectar una degradación, no objetivos de
+> optimización ni una razón automática para descartar SQLite. Queda autorizada la mitad 2.
 
 - **Objetivo**: convertir la medición en **gate**: umbrales explícitos ratificados con datos, un
   modo `--gate` que falla si se violan, baseline por máquina para tendencia, y un smoke en CI que
@@ -336,20 +431,21 @@ explícitamente.
     (tres variantes) y el veredicto de cierre explícito; toda fricción nueva con entidad de
     decisión quedó registrada como candidata (no arreglada por inercia).
   - **[BDD-1] Dado** el snapshot del repo real, **Cuando** corre el banco de H04 a esa escala,
-    **Entonces** el informe incluye las tres variantes sobre ese corpus → la corrida anexada al
-    diario (artefacto, generada por el binario ya testeado en H04).
+    **Entonces** el informe incluye las tres variantes sobre ese corpus → resumen y manifiesto
+    anexados al diario; el bruto externo fue generado por el binario ya testeado en H04.
 - **Dependencias**: E33-H04 (el número frío; el uso y el diario pueden empezar antes y en
   paralelo).
-- **Pruebas**: el diario y su corrida anexa son el entregable verificable; no hay tests nuevos de
-  código (H04 ya prueba el binario).
+- **Pruebas**: el diario, el resumen y el manifiesto de su corrida anexa son el entregable
+  verificable; no hay tests nuevos de código (H04 ya prueba el binario).
 
 ---
 
 ## E33-H07 — Enganche a release: runbook, workflow y corrida datada
 
 - **Objetivo**: el banco pasa de re-ejecutable a **permanente por release**: paso del runbook en
-  `RELEASING.md`, workflow manual opcional, y el patrón de corrida datada commiteada — la
-  definición literal de lo que `decisiones/README.md` pedía para `§9`.
+  `RELEASING.md`, workflow manual opcional, y el patrón de resumen y manifiesto datados
+  commiteados con resultados brutos externos — la definición literal de lo que
+  `decisiones/README.md` pedía para `§9`.
 - **Referencias**: `ARCHITECTURE.md §22.6` · `RELEASING.md` (pasos 1–8 actuales; el nuevo entra
   tras el paso 2) · decisión de la puerta de diseño: el paso del runbook se escribe **aquí**, no en
   la adenda, para que el runbook nunca instruya correr una herramienta inexistente ·
@@ -357,17 +453,17 @@ explícitamente.
 - **Alcance**:
   - **Paso nuevo en `RELEASING.md`** (entre el changelog y el PR a `develop`): correr el banco
     completo —conformidad (`run_all`) + rendimiento con `--gate`— contra el **binario release**
-    en la máquina de la baseline, y commitear la corrida datada en `docs/qa/corridas/vX.Y.Z/`
-    (JSON + resumen MD de ambos bancos) en el mismo PR de versión. Un FAIL del banco es un
-    stop-the-line del release (mismo rango que un CI rojo).
+    en la máquina de la baseline, publicar los JSON brutos como artefactos duraderos y commitear
+    en `docs/qa/corridas/vX.Y.Z/` el resumen MD de ambos bancos más su manifiesto. Un FAIL del
+    banco es un stop-the-line del release (mismo rango que un CI rojo).
   - **`workflow_dispatch`** opcional (`.github/workflows/testbench.yml`): corre conformidad sobre
     el corpus canónico + smoke de rendimiento en el runner, **sin juzgar umbrales absolutos**
     (documentado en el propio workflow) — para disparar el banco a demanda sin la máquina de
     baseline.
   - Plantilla/convención de la corrida datada documentada en el README del banco.
-  - **Primera corrida oficial completa** con el patrón nuevo, commiteada (puede ser la de H04/H02
-    re-etiquetada si no hay release en curso; si la épica coincide con un release, la de ese
-    release).
+  - **Primera corrida oficial completa** con el patrón nuevo, con resúmenes y manifiesto
+    commiteados (puede ser la de H04/H02 re-etiquetada si no hay release en curso; si la épica
+    coincide con un release, la de ese release).
 - **Fuera de alcance**: automatizar el gate absoluto en runners compartidos; firma de binarios
   (`decisiones §1`, congelada por `§20`); cualquier cambio al pipeline `release.yml` de binarios.
 - **Criterios de aceptación**:
@@ -375,12 +471,12 @@ explícitamente.
     conformidad + smoke y publica el resumen como artefacto del run, sin juzgar umbrales absolutos
     → verificación: un run real del workflow en verde enlazado en el PR.
   - **[Estructural]** `RELEASING.md` contiene el paso con el comando exacto y el destino de la
-    corrida; `docs/qa/corridas/` existe con la primera corrida datada conforme a la plantilla; el
-    README del banco documenta la convención; el paso deja claro que el gate absoluto solo vale en
-    la máquina de la baseline (coherente con H05).
+    corrida; `docs/qa/corridas/` existe con la primera corrida datada conforme a la plantilla y
+    con manifiesto verificable; el README del banco documenta la convención; el paso deja claro
+    que el gate absoluto solo vale en la máquina de la baseline (coherente con H05).
 - **Dependencias**: E33-H02, E33-H05.
-- **Pruebas**: el run real del workflow + la corrida commiteada; no hay lógica nueva que testear
-  (el runbook y el workflow orquestan lo ya probado en H02/H04/H05).
+- **Pruebas**: el run real del workflow + resúmenes y manifiesto commiteados; no hay lógica nueva
+  que testear (el runbook y el workflow orquestan lo ya probado en H02/H04/H05).
 
 ---
 
@@ -413,15 +509,94 @@ explícitamente.
   acotar o retirar nada; cerrar `§22`/`§24`.
 - **Criterios de aceptación**:
   - **[Estructural — el entregable es un documento]** El paquete contiene las cinco partes del
-    alcance; cada cifra citada existe en una corrida commiteada (trazable por fecha/fichero); el
-    inventario del coste de conexión cita fichero y línea del árbol actual; el análisis cubre las
-    tres salidas sin declarar ninguna elegida; el documento termina en «lista para decidir»; las
-    anotaciones de `§14`, `§9` y `decisiones/README.md` están hechas con los estados **intactos**;
-    `IMPLEMENTATION_STATUS.md` refleja la épica.
+    alcance; cada cifra citada existe en un resumen commiteado y su manifiesto trazable enlaza el
+    resultado bruto; el inventario del coste de conexión cita fichero y línea del árbol actual; el
+    análisis cubre las tres salidas sin declarar ninguna elegida; el documento termina en «lista
+    para decidir»; las anotaciones de `§14`, `§9` y `decisiones/README.md` están hechas con los
+    estados **intactos**; `IMPLEMENTATION_STATUS.md` refleja la épica.
 - **Dependencias**: E33-H04, E33-H06 (y cita los umbrales de E33-H05 si ya están ratificados).
 - **Pruebas**: no aplica código; la verificación es documental (juez ciego con encargo de comprobar
   que ninguna afirmación numérica carece de corrida trazable y que ninguna decisión abierta se da
   por tomada).
+
+---
+
+## E33-H09 — Sonda extrema parametrizable: Realista/100k, tamaños y footprint de memoria
+
+> **RATIFICADA el 2026-08-22.** `--scale N` admite cualquier entero positivo; la entrega ejecuta
+> y registra Realista/100k con una iteración. Full, smoke y el gate H05/10k no cambian. 1M queda
+> admitido con preflight y confirmación explícita, pero no es obligatorio. `§14` permanece abierta
+> y pendiente de esta evidencia; cualquier optimización de memoria se decide después de medir.
+>
+> **ADENDA ratificada el 2026-08-23.** El presupuesto actual de disco
+> (`32 KiB × scale + 256 MiB`) es una heurística conservadora y modificable, no parte del contrato
+> de H09. Las pruebas exigen una estimación positiva, trazable y coherente con el espacio disponible,
+> pero no fijan esa fórmula para futuras mejoras.
+
+- **Objetivo**: extender el banco interno con una sonda extrema opt-in que parametriza perfil,
+  escala e iteraciones y produce una medición Realista/100k trazable de las tres variantes,
+  incluyendo tiempos, tamaños y memoria. La historia mide; no optimiza ni conecta el store.
+- **Referencias**: `ARCHITECTURE.md §21.5`, `§22.2`, `§22.4` y `§22.5` · E33-H01/H04/H05/H08 ·
+  `decisiones §14` · `docs/qa/evidencia-14-store-2026-08.md`.
+- **Alcance**:
+  - modo extremo separado y explícito, con una escala por ejecución y parámetros obligatorios
+    equivalentes a `--extreme --profile realista --scale N --iterations M`;
+  - `N` acepta cualquier entero positivo representable, sin whitelist; `M` es positivo y explícito;
+  - las siete lecturas de H04 en `disk-reparseo`, `sqlite-raw` y `ram-memoizado`, con los mismos
+    argumentos y equivalencia exacta de resultados;
+  - cold-open y muestras por lectura; `Store::rebuild()` separado; conteo y bytes reales del corpus;
+    SQLite `main_bytes`, `wal_bytes`, `shm_bytes`, `auxiliary_bytes` y `total_bytes` medidos y
+    coherentes;
+  - pico RSS absoluto por variante y, si el método lo permite, delta respecto a su proceso base;
+    cada valor declara método, unidades, plataforma y ámbito. Una plataforma sin medición fiable
+    declara `unavailable` con motivo, nunca cero ni una estimación disfrazada;
+  - preflight antes de materializar el corpus: comprueba espacio de disco y declara que no verifica
+    memoria. Para 1M o más, `--confirm-extreme` es siempre obligatorio después del preflight; la
+    insuficiencia comprobada falla incluso con confirmación y sin dejar corpus parcial;
+  - un `--root` explícito debe ser inicialmente inexistente, queda bajo guard RAII y se elimina al
+    terminar; las salidas persistidas deben estar fuera del root autolimpiable;
+  - corrida real Realista/100k, una iteración, resumen Markdown y manifiesto datados en
+    `docs/qa/`; el JSON bruto se conserva fuera de Git y el corpus temporal no se versiona.
+- **Fuera de alcance**: cambiar el full oficial, smoke, H05/10k o CI; ejecutar obligatoriamente 1M;
+  wire y `change_plan`→`change_apply` en la sonda extrema; conectar SQLite a producto; optimizar
+  RAM, parsing, store, walker o invalidación; prometer rendimiento; cambiar `contracts/mcp.yml`,
+  API pública, CLI de producto o MCP; escoger o cerrar `§14`.
+- **Criterios de aceptación**:
+  - **[BDD-1 — opt-in y validación] Dado** full/smoke sin el modo extremo, **Cuando** corren,
+    **Entonces** mantienen escalas, iteraciones, formato y semántica. **Dado** el modo extremo sin
+    perfil/escala/iteraciones, con cero o perfil desconocido, **Entonces** falla antes de crear el
+    corpus y nombra el parámetro → `modo_extremo_exige_parametros_y_no_altera_full_smoke`.
+  - **[BDD-2 — escala abierta] Dada** cualquier escala positiva representable, incluida 1M,
+    **Cuando** se valida la invocación, **Entonces** no se rechaza por no pertenecer a una lista.
+    Una escala cero, negativa o desbordada se rechaza → `scale_acepta_entero_positivo_sin_whitelist`.
+  - **[BDD-3 — equivalencia] Dado** un corpus extremo no vacío, **Cuando** se ejecutan las siete
+    lecturas en las tres variantes, **Entonces** los resultados normalizados son exactamente
+    iguales; el fallo identifica variante, tool y camino divergente →
+    `variantes_extremas_conservan_equivalencia_funcional`.
+  - **[BDD-4 — métricas] Dadas** `M` iteraciones, **Cuando** termina la sonda, **Entonces** cada
+    lectura conserva exactamente `M` muestras y sus estadísticas; rebuild queda separado de los
+    percentiles de SQLite → `extremo_registra_muestras_y_rebuild_separado`.
+  - **[BDD-5 — footprint] Dada** una corrida, **Cuando** se inspecciona el informe, **Entonces**
+    contiene conteos y tamaños medidos del corpus y SQLite, y RSS por variante con método/unidades/
+    ámbito o un estado no disponible honesto → `extremo_registra_tamanos_y_rss_honesto`.
+  - **[BDD-6 — preflight] Dada** una escala cuyo espacio requerido supera al disponible, **Cuando**
+    corre el preflight, **Entonces** falla antes de escribir y comunica disponible/requerido.
+    **Dada** 1M con recursos no verificables, **Entonces** exige confirmación explícita →
+    `preflight_extremo_falla_sin_parciales_y_1m_exige_confirmacion_si_es_incierto`.
+  - **[Estructural-7 — evidencia 100k]** existe una corrida datada Realista/100k, una iteración,
+    tres variantes × siete lecturas, resultados no vacíos, conteo independiente, tamaños y RSS;
+    el resumen conserva esas métricas y el manifiesto identifica el JSON bruto sin rutas privadas
+    mediante URL estable, SHA-256, tamaño y versión de esquema.
+  - **[Estructural-8 — no regresión]** H05 sigue seleccionando solo disco/10k; el informe extremo
+    no se usa como umbral; CI no ejecuta la sonda; `contracts/mcp.yml` y la API pública no cambian;
+    `§14` continúa abierta y la documentación interna no convierte 100k en promesa.
+- **Pruebas**: integración en `crates/lodestar-bench/tests/` con fixtures pequeñas para negativos,
+  formato y anti-vacuidad, locks verificables y validación del manifiesto; ninguna prueba depende
+  del volcado 100k ni lo ejecuta rutinariamente en CI.
+- **Dependencias**: E33-H01, E33-H04, E33-H05 y E33-H08. No depende del BDD remoto de H07.
+- **Delta de contrato**: ninguno. Se actualizan README del banco, `ARCHITECTURE.md §22`, estado,
+  trazabilidad, changelog, `decisiones §14` y el paquete H08 para reflejar que la decisión espera
+  la extensión 100k, sin alterar prioridad ni escoger salida.
 
 ---
 
@@ -432,10 +607,10 @@ H01 ──► H02 ──► H03 ─────────────┐
   │                              ├──► H07
   └──► H04 ──► (PUERTA) H05 ─────┘
          │
-         └──► H06 ──► H08
+         └──► H06 ──► H08 ──► H09
 ```
 
-**Secuencia propuesta**: `H01 → H02 → H04 → H03 → H05 → H06 → H07 → H08`.
+**Secuencia ejecutada/ampliada**: `H01 → H02 → H04 → H03 → H05 → H06 → H07 → H08 → H09`.
 
 - **H01 es prerrequisito de todo** (sin corpus no hay banco ni bench).
 - Tras H01, las dos ramas son **paralelizables**: conformidad (H02 → H03) y rendimiento (H04 →
@@ -445,7 +620,8 @@ H01 ──► H02 ──► H03 ─────────────┐
 - **H06** puede empezar su diario en cualquier momento, pero cierra tras H04 (necesita el número
   frío).
 - **H07** exige banco corrible (H02) y gate ratificado (H05).
-- **H08 cierra la épica**: necesita mediciones (H04) y dogfooding (H06); H07 puede ir en paralelo.
+- **H08** cerró el paquete 10k; **H09** entregó la extensión ratificada con escala abierta,
+  footprint y la evidencia 100k. H07 puede completar su BDD remoto en paralelo.
 
 Ninguna historia está `[BLOQUEADA por decisiones §N]`: las decisiones abiertas que la épica roza
 (`§14`, `§22`, `§24`, `§20`) están **explícitamente fuera de alcance** en las historias que las
@@ -456,8 +632,8 @@ tocan, y la única puerta es la interna de H05, que se resuelve con datos produc
 
 - `decisiones §9`: punto 1 anotado como ejecutado (el banco corre por release); la ficha **sigue
   abierta** por firma/notarización (congelada por `§20`) y threat model.
-- `decisiones §14`: evidencia disponible enlazada; **estado intacto** — la decisión es el paso
-  siguiente del usuario, fuera de la épica.
+- `decisiones §14`: evidencia 10k y extensión H09/100k disponibles; **estado intacto** — la
+  decisión sigue siendo del usuario y no se escoge ninguna salida.
 - `decisiones §22`/`§24`: centinelas anotados; **estados intactos**.
 - `IMPLEMENTATION_STATUS.md`, fila de E33 en `requirements/README.md` y sección E33 de
   [`trazabilidad.md`](trazabilidad.md).

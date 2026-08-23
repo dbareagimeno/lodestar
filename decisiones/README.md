@@ -52,7 +52,7 @@ prioridad **filtra**, no ordena. El vocabulario de `estado` es cerrado: `abierta
 | 11 | `pulldown-cmark` en `lodestar-core` | tomada | 1 | [`11-pulldown-cmark-en-core.md`](11-pulldown-cmark-en-core.md) |
 | 12 | Comparación de fechas en el lenguaje de consulta | cerrada | 1 | [`12-fechas-en-consultas.md`](12-fechas-en-consultas.md) |
 | 13 | `Conformant → Valid` | cerrada | 1 | [`13-conformant-a-valid.md`](13-conformant-a-valid.md) |
-| 14 | El store (E18) no tiene ningún consumidor | abierta | **5** | [`14-store-sin-consumidor.md`](14-store-sin-consumidor.md) |
+| 14 | El store (E18) no tiene ningún consumidor | abierta · evidencia disponible ([paquete](../docs/qa/evidencia-14-store-2026-08.md)) | **5** | [`14-store-sin-consumidor.md`](14-store-sin-consumidor.md) |
 | 15 | ¿Rechazar los parámetros no declarados? | cerrada | 4 | [`15-parametros-no-declarados.md`](15-parametros-no-declarados.md) |
 | 16 | Deuda declarada por la auditoría de E25/E26 | cerrada (disuelta) | 4 | [`16-deuda-auditoria-e25-e26.md`](16-deuda-auditoria-e25-e26.md) |
 | 17 | Superficie externa y apertura OSS | cerrada | 3 | [`17-superficie-externa-oss.md`](17-superficie-externa-oss.md) |
@@ -89,9 +89,11 @@ prioridad **filtra**, no ordena. El vocabulario de `estado` es cerrado: `abierta
   **Congela** la firma de binarios (§1/§9) y crates.io (§17-DA): no se firma ni se reserva nada bajo
   un nombre que va a cambiar.
 - **§14 — el store sin consumidor** (prio 5). Sigue gobernando a las demás, pero ya **no se decide a
-  ciegas**: su condición de entrada es el banco de pruebas de §9. Absorbe §16(c) y §16(l/E26-H09).
-- **§9 — banco de pruebas** (prio 4). Ya tiene primera entrega (el testbench de §23,
-  re-ejecutable en `docs/qa/testbench/`); falta convertirlo en banco permanente por release.
+  ciegas**: el banco de pruebas de §9 y el paquete de evidencia de [`E33-H08`](../docs/qa/evidencia-14-store-2026-08.md)
+  dejan la ficha lista para decidir, sin escoger salida. Absorbe §16(c) y §16(l/E26-H09).
+- **§9 — banco de pruebas** (prio 4). Tiene el testbench de §23 re-ejecutable, el runbook y la
+  convención de resúmenes/manifiesto con brutos externos, además de un workflow manual validado localmente; falta
+  ejecutar el `workflow_dispatch` remoto y enlazar un run verde para cerrar el BDD de integración.
 - **§23 — hallazgos del testbench** (prio 5 por M-01). Tres subpuntos piden criterio —
   A-04 (¿type error ruidoso?), D-02 (¿corregir §20.4 o ampliar el wire?), A-07
   (¿`DOCUMENT_NOT_FOUND` en scope `paths`?) — con recomendación escrita en la ficha; el resto

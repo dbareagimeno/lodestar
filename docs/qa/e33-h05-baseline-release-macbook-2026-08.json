@@ -1,0 +1,37 @@
+{
+  "schema_version": "e33-h05-baseline-v1",
+  "absolute_machine_id": "release-macbook-2026-08",
+  "source": "E33-H04 bruto externo de v0.6.2 (release, realista/10000, disk-reparseo); ver docs/qa/corridas/v0.6.2/manifest.json",
+  "machines": {
+    "release-macbook-2026-08": {
+      "machine_id": "release-macbook-2026-08",
+      "report": {
+        "schema_version": "e33-h04-v2-full",
+        "profiles": ["realista"],
+        "scales": [10000],
+        "runs": [
+          {
+            "profile": "realista",
+            "scale": 10000,
+            "measurements": [
+              {
+                "variant": "disk-reparseo",
+                "document_count": 10004,
+                "tools": {
+                  "graph_query": {"p95_ns": 243586125},
+                  "impact_analyze": {"p95_ns": 481542291},
+                  "knowledge_check": {"p95_ns": 251015708},
+                  "knowledge_get": {"p95_ns": 481312208},
+                  "knowledge_search": {"p95_ns": 288724209},
+                  "metadata_inspect": {"p95_ns": 201016375},
+                  "workspace_status": {"p95_ns": 265405167}
+                },
+                "cold_open": {"p95_ns": 248825583}
+              }
+            ]
+          }
+        ]
+      }
+    }
+  }
+}
