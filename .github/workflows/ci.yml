@@ -51,6 +51,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Instala toolchain (stable + rustfmt + clippy)
         uses: dtolnay/rust-toolchain@stable
@@ -104,6 +106,10 @@ jobs:
 
       - name: Tests
         run: cargo test --workspace --locked
+
+      # E33-H05: smoke del banco; los runners compartidos nunca juzgan umbrales absolutos.
+      - name: Smoke del banco de rendimiento (sin gate absoluto)
+        run: cargo run -p lodestar-bench -- --smoke
 
       # E23-H06: los 4 tests de crash-recovery de E13-H06 viven tras `#[cfg(feature =
       # "test-failpoints")]` (`crates/lodestar-workspace/tests/transactions.rs`), así que el paso de
@@ -163,6 +169,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Descarga el grafo bloqueado antes de los gates

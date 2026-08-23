@@ -1,0 +1,20 @@
+{
+  "schema_version": "e33-h04-tests-v4",
+  "suite_tests": [
+    "crates/lodestar-bench/tests/a6_dependencias.rs",
+    "crates/lodestar-bench/tests/e33_h04_red.rs",
+    "crates/lodestar-bench/tests/e33_h04_repair_red2.rs",
+    "crates/lodestar-bench/tests/e33_h04_review_repair_red.rs",
+    "crates/lodestar-bench/tests/e33_h04_final_review_red.rs",
+    "crates/lodestar-bench/tests/e33_h04_repair2_red.rs",
+    "crates/lodestar-bench/tests/e33_h04_review_repair3_red.rs",
+    "crates/lodestar-bench/tests/a6_ci_portabilidad.rs"
+  ],
+  "owned_test": "crates/lodestar-bench/tests/e33_h04_review_repair3_red.rs",
+  "criteria_tests": {
+    "portable_manifest": "suite_manifest_portable_y_declara_los_tests_contemporaneos",
+    "a6": "a6_dependency_guard_defaults_to_real_lodestar_app_manifest",
+    "wire": "wire_calibration_chain_derives_both_payloads_and_rejects_legacy_mutation",
+    "renderer": "renderer_oficial_incluye_cabeceras_wire_de_stdout_y_structured_content"
+  }
+}

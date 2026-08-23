@@ -1,0 +1,544 @@
+{
+  "binary": "lodestar-bench",
+  "build_profile": "release",
+  "captured_at": "2026-08-23T03:15:39+0200",
+  "change_cycle": {
+    "reason": "modo extremo excluye escritura",
+    "status": "not_applicable"
+  },
+  "commit": "0c9d0ba7980a0d1059d918844ab3864f361b661b",
+  "confirmed": false,
+  "coordinator_pid": 87160,
+  "corpus": {
+    "bytes": 134783275,
+    "document_count": 100004,
+    "unit": "bytes de Markdown en disco"
+  },
+  "corpus_profile": "realista",
+  "equivalence_divergences": [],
+  "functional_equivalence": true,
+  "iterations": 1,
+  "machine": "macos/aarch64",
+  "measurements": [
+    {
+      "cold_open": {
+        "p50_ns": 9496607584,
+        "p95_ns": 9496607584,
+        "payload_bytes": 485,
+        "result": {
+          "marker": "marker-cold-open-h09"
+        },
+        "sample_count": 1,
+        "sample_elapsed_ns": [
+          9496607584
+        ]
+      },
+      "document_count": 100004,
+      "rss": {
+        "absolute_bytes": 972439552,
+        "baseline_bytes": 2637824,
+        "delta_bytes": 969801728,
+        "method": "getrusage(RUSAGE_SELF).ru_maxrss",
+        "platform": "macos/aarch64",
+        "raw_units": "bytes",
+        "raw_value": 972439552,
+        "scope": "pico absoluto del proceso worker aislado por variante",
+        "status": "available",
+        "units": "bytes",
+        "worker_isolated": true
+      },
+      "tools": {
+        "graph_query": {
+          "p50_ns": 9443957625,
+          "p95_ns": 9443957625,
+          "payload_bytes": 7204,
+          "result": {
+            "edges": [
+              {
+                "source": "control.md",
+                "target": "child.md"
+              }
+            ],
+            "nodes": [
+              {
+                "id": "child.md"
+              }
+            ]
+          },
+          "sample_count": 1,
+          "sample_elapsed_ns": [
+            9443957625
+          ]
+        },
+        "impact_analyze": {
+          "p50_ns": 18780040583,
+          "p95_ns": 18780040583,
+          "payload_bytes": 261,
+          "result": {
+            "affectedDocuments": [
+              "child.md"
+            ],
+            "summary": {
+              "count": 1
+            }
+          },
+          "sample_count": 1,
+          "sample_elapsed_ns": [
+            18780040583
+          ]
+        },
+        "knowledge_check": {
+          "p50_ns": 9601487583,
+          "p95_ns": 9601487583,
+          "payload_bytes": 36032,
+          "result": {
+            "diagnostics": [
+              {
+                "severity": "warning",
+                "message": "marker-check-h04"
+              }
+            ],
+            "summary": {
+              "diagnostics": 1
+            }
+          },
+          "sample_count": 1,
+          "sample_elapsed_ns": [
+            9601487583
+          ]
+        },
+        "knowledge_get": {
+          "p50_ns": 18873182917,
+          "p95_ns": 18873182917,
+          "payload_bytes": 747,
+          "result": {
+            "body": "marker-get-h04",
+            "path": "child.md"
+          },
+          "sample_count": 1,
+          "sample_elapsed_ns": [
+            18873182917
+          ]
+        },
+        "knowledge_search": {
+          "p50_ns": 9895816292,
+          "p95_ns": 9895816292,
+          "payload_bytes": 269,
+          "result": {
+            "results": [
+              {
+                "text": "marker-search-h04"
+              }
+            ]
+          },
+          "sample_count": 1,
+          "sample_elapsed_ns": [
+            9895816292
+          ]
+        },
+        "metadata_inspect": {
+          "p50_ns": 8952881042,
+          "p95_ns": 8952881042,
+          "payload_bytes": 393,
+          "result": {
+            "presentIn": 1,
+            "values": [
+              {
+                "value": "marker-metadata-h04"
+              }
+            ]
+          },
+          "sample_count": 1,
+          "sample_elapsed_ns": [
+            8952881042
+          ]
+        },
+        "workspace_status": {
+          "p50_ns": 9644680416,
+          "p95_ns": 9644680416,
+          "payload_bytes": 485,
+          "result": {
+            "counts": {
+              "documents": 100004
+            }
+          },
+          "sample_count": 1,
+          "sample_elapsed_ns": [
+            9644680416
+          ]
+        }
+      },
+      "variant": "disk-reparseo",
+      "worker_isolated": true,
+      "worker_pid": 87229
+    },
+    {
+      "cold_open": {
+        "p50_ns": 1371578333,
+        "p95_ns": 1371578333,
+        "payload_bytes": 485,
+        "result": {
+          "marker": "marker-cold-open-h09"
+        },
+        "sample_count": 1,
+        "sample_elapsed_ns": [
+          1371578333
+        ]
+      },
+      "document_count": 100004,
+      "percentiles_includes_rebuild": false,
+      "rebuild": {
+        "p50_ns": 1868411002750,
+        "p95_ns": 1868411002750,
+        "payload_bytes": 4,
+        "result": {
+          "marker": "marker-sqlite-rebuild-h09"
+        },
+        "sample_count": 1,
+        "sample_elapsed_ns": [
+          1868411002750
+        ]
+      },
+      "rss": {
+        "absolute_bytes": 985530368,
+        "baseline_bytes": 2637824,
+        "delta_bytes": 982892544,
+        "method": "getrusage(RUSAGE_SELF).ru_maxrss",
+        "platform": "macos/aarch64",
+        "raw_units": "bytes",
+        "raw_value": 985530368,
+        "scope": "pico absoluto del proceso worker aislado por variante",
+        "status": "available",
+        "units": "bytes",
+        "worker_isolated": true
+      },
+      "tools": {
+        "graph_query": {
+          "p50_ns": 1225562000,
+          "p95_ns": 1225562000,
+          "payload_bytes": 7204,
+          "result": {
+            "edges": [
+              {
+                "source": "control.md",
+                "target": "child.md"
+              }
+            ],
+            "nodes": [
+              {
+                "id": "child.md"
+              }
+            ]
+          },
+          "sample_count": 1,
+          "sample_elapsed_ns": [
+            1225562000
+          ]
+        },
+        "impact_analyze": {
+          "p50_ns": 1159556208,
+          "p95_ns": 1159556208,
+          "payload_bytes": 261,
+          "result": {
+            "affectedDocuments": [
+              "child.md"
+            ],
+            "summary": {
+              "count": 1
+            }
+          },
+          "sample_count": 1,
+          "sample_elapsed_ns": [
+            1159556208
+          ]
+        },
+        "knowledge_check": {
+          "p50_ns": 1288498375,
+          "p95_ns": 1288498375,
+          "payload_bytes": 36032,
+          "result": {
+            "diagnostics": [
+              {
+                "severity": "warning",
+                "message": "marker-check-h04"
+              }
+            ],
+            "summary": {
+              "diagnostics": 1
+            }
+          },
+          "sample_count": 1,
+          "sample_elapsed_ns": [
+            1288498375
+          ]
+        },
+        "knowledge_get": {
+          "p50_ns": 1176441167,
+          "p95_ns": 1176441167,
+          "payload_bytes": 747,
+          "result": {
+            "body": "marker-get-h04",
+            "path": "child.md"
+          },
+          "sample_count": 1,
+          "sample_elapsed_ns": [
+            1176441167
+          ]
+        },
+        "knowledge_search": {
+          "p50_ns": 1660400250,
+          "p95_ns": 1660400250,
+          "payload_bytes": 269,
+          "result": {
+            "results": [
+              {
+                "text": "marker-search-h04"
+              }
+            ]
+          },
+          "sample_count": 1,
+          "sample_elapsed_ns": [
+            1660400250
+          ]
+        },
+        "metadata_inspect": {
+          "p50_ns": 790267667,
+          "p95_ns": 790267667,
+          "payload_bytes": 393,
+          "result": {
+            "presentIn": 1,
+            "values": [
+              {
+                "value": "marker-metadata-h04"
+              }
+            ]
+          },
+          "sample_count": 1,
+          "sample_elapsed_ns": [
+            790267667
+          ]
+        },
+        "workspace_status": {
+          "p50_ns": 2428974792,
+          "p95_ns": 2428974792,
+          "payload_bytes": 485,
+          "result": {
+            "counts": {
+              "documents": 100004
+            }
+          },
+          "sample_count": 1,
+          "sample_elapsed_ns": [
+            2428974792
+          ]
+        }
+      },
+      "variant": "sqlite-raw",
+      "worker_isolated": true,
+      "worker_pid": 87679
+    },
+    {
+      "cold_open": {
+        "p50_ns": 10327592750,
+        "p95_ns": 10327592750,
+        "payload_bytes": 485,
+        "result": {
+          "marker": "marker-cold-open-h09"
+        },
+        "sample_count": 1,
+        "sample_elapsed_ns": [
+          10327592750
+        ]
+      },
+      "document_count": 100004,
+      "rss": {
+        "absolute_bytes": 839974912,
+        "baseline_bytes": 2637824,
+        "delta_bytes": 837337088,
+        "method": "getrusage(RUSAGE_SELF).ru_maxrss",
+        "platform": "macos/aarch64",
+        "raw_units": "bytes",
+        "raw_value": 839974912,
+        "scope": "pico absoluto del proceso worker aislado por variante",
+        "status": "available",
+        "units": "bytes",
+        "worker_isolated": true
+      },
+      "tools": {
+        "graph_query": {
+          "p50_ns": 75970708,
+          "p95_ns": 75970708,
+          "payload_bytes": 7204,
+          "result": {
+            "edges": [
+              {
+                "source": "control.md",
+                "target": "child.md"
+              }
+            ],
+            "nodes": [
+              {
+                "id": "child.md"
+              }
+            ]
+          },
+          "sample_count": 1,
+          "sample_elapsed_ns": [
+            75970708
+          ]
+        },
+        "impact_analyze": {
+          "p50_ns": 11000,
+          "p95_ns": 11000,
+          "payload_bytes": 261,
+          "result": {
+            "affectedDocuments": [
+              "child.md"
+            ],
+            "summary": {
+              "count": 1
+            }
+          },
+          "sample_count": 1,
+          "sample_elapsed_ns": [
+            11000
+          ]
+        },
+        "knowledge_check": {
+          "p50_ns": 140946750,
+          "p95_ns": 140946750,
+          "payload_bytes": 36032,
+          "result": {
+            "diagnostics": [
+              {
+                "severity": "warning",
+                "message": "marker-check-h04"
+              }
+            ],
+            "summary": {
+              "diagnostics": 1
+            }
+          },
+          "sample_count": 1,
+          "sample_elapsed_ns": [
+            140946750
+          ]
+        },
+        "knowledge_get": {
+          "p50_ns": 19625,
+          "p95_ns": 19625,
+          "payload_bytes": 747,
+          "result": {
+            "body": "marker-get-h04",
+            "path": "child.md"
+          },
+          "sample_count": 1,
+          "sample_elapsed_ns": [
+            19625
+          ]
+        },
+        "knowledge_search": {
+          "p50_ns": 481821458,
+          "p95_ns": 481821458,
+          "payload_bytes": 269,
+          "result": {
+            "results": [
+              {
+                "text": "marker-search-h04"
+              }
+            ]
+          },
+          "sample_count": 1,
+          "sample_elapsed_ns": [
+            481821458
+          ]
+        },
+        "metadata_inspect": {
+          "p50_ns": 23085334,
+          "p95_ns": 23085334,
+          "payload_bytes": 393,
+          "result": {
+            "presentIn": 1,
+            "values": [
+              {
+                "value": "marker-metadata-h04"
+              }
+            ]
+          },
+          "sample_count": 1,
+          "sample_elapsed_ns": [
+            23085334
+          ]
+        },
+        "workspace_status": {
+          "p50_ns": 523447750,
+          "p95_ns": 523447750,
+          "payload_bytes": 485,
+          "result": {
+            "counts": {
+              "documents": 100004
+            }
+          },
+          "sample_count": 1,
+          "sample_elapsed_ns": [
+            523447750
+          ]
+        }
+      },
+      "variant": "ram-memoizado",
+      "worker_isolated": true,
+      "worker_pid": 92199
+    }
+  ],
+  "mode": "extreme",
+  "platform": {
+    "arch": "aarch64",
+    "os": "macos"
+  },
+  "preflight": {
+    "available_bytes": 8729272320,
+    "confirmed": false,
+    "memory_verification": {
+      "reason": "el preflight no verifica memoria/RSS; se mide después en el worker aislado con getrusage",
+      "status": "unverified"
+    },
+    "required_bytes": 3545235456,
+    "resource_scope": "espacio de disco; memoria/RSS no se verifica en preflight",
+    "status": "checked"
+  },
+  "profile": "realista",
+  "provenance": {
+    "commit": "0c9d0ba7980a0d1059d918844ab3864f361b661b",
+    "working_tree_clean": false
+  },
+  "scale": 100000,
+  "schema_version": "e33-h09-v1",
+  "seed": 33,
+  "sqlite": {
+    "auxiliary_bytes": 0,
+    "main_bytes": 659578880,
+    "scope": "<root>/.lodestar/index.db y auxiliares WAL/SHM; medido al finalizar",
+    "shm_bytes": 0,
+    "total_bytes": 659578880,
+    "unit": "bytes",
+    "wal_bytes": 0
+  },
+  "tools": [
+    "workspace_status",
+    "knowledge_search",
+    "knowledge_get",
+    "metadata_inspect",
+    "graph_query",
+    "impact_analyze",
+    "knowledge_check"
+  ],
+  "variants": [
+    "disk-reparseo",
+    "sqlite-raw",
+    "ram-memoizado"
+  ],
+  "wire_calibration": {
+    "reason": "modo extremo excluye wire",
+    "status": "not_applicable"
+  }
+}

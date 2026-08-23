@@ -23,15 +23,18 @@ relacionadas: [1, 14, 20]
   tomar sin un solo número. Va en la **épica de evidencia** junto al dogfooding. (El umbral
   «edit→UI < 150 ms» del enunciado original **ya no aplica**: no hay UI desde el giro headless; el
   equivalente es el coste por llamada MCP.)
-  **EN EJECUCIÓN (2026-08-10)**: diseño ratificado como `ARCHITECTURE.md §22` (banco en dos piezas,
-  corpus canónico determinista, umbral-tras-medición con anclas p95 ≤ 1 s por tool a 10k y
-  cold-open ≤ 5 s, medición de la cache por API pública sin conectarla, enganche release-first,
-  dogfooding acotado, centinelas de `§22`/`§24`); lo ejecuta la épica **`E33`**
-  ([`requirements/epica-33-banco-evidencia.md`](../requirements/epica-33-banco-evidencia.md)),
-  que parte del testbench re-ejecutable de [`§23`](23-hallazgos-testbench-homelab.md)
-  (`docs/qa/testbench/`). Los umbrales definitivos se ratifican a mitad de épica, con la primera
-  corrida delante (`E33-H05`). Este punto se cierra cuando el banco corra por release; la ficha
-  sigue abierta por sus otros dos puntos.
+  **ENTREGADO LOCALMENTE (2026-08-22, E33)**: el diseño está ratificado como `ARCHITECTURE.md §22`
+  (banco en dos piezas, corpus canónico determinista, umbral-tras-medición con anclas p95 ≤ 1 s
+  por tool a 10k y cold-open ≤ 5 s, medición de la cache por API pública sin conectarla, enganche
+  release-first, dogfooding acotado y centinelas de `§22`/`§24`). H04–H06 dejan versionados el
+  banco, los umbrales y la evidencia de uso; H07 deja preparado `RELEASING.md`, la convención de
+  artefactos y el workflow manual. La corrida local y la validación de configuración/smoke están
+  documentadas, pero todavía no se ha ejecutado el `workflow_dispatch` remoto ni enlazado un run
+  verde (requiere integrar, commitear y publicar). Por tanto, el BDD remoto de H07 sigue pendiente
+  y este punto no se presenta como un banco ya ejecutado por release/CI. El paquete de
+  [`E33-H08`](../docs/qa/evidencia-14-store-2026-08.md) deja disponible el dato para `decisiones §14`.
+  La ficha §9 **sigue abierta** por la verificación BDD remota pendiente, firma/notarización y
+  threat model; esos estados y prioridades no cambian.
 - **Firma/notarización + updater — prioridad 3, SUBE… y queda CONGELADA por
   [`§20`](20-renombrado-del-proyecto.md).** Sube porque E27 convirtió los binarios de GitHub
   Releases en el **camino de instalación recomendado**, y salen sin firmar: el aviso de Gatekeeper

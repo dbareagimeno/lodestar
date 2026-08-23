@@ -31,8 +31,9 @@ Qué contiene (~60–90 documentos, según flags):
      `chk_b`, `gaps`, `dirlinks`, `kinds`): la fauna de diagnósticos que el banco
      asevera. Se omiten con `--no-patologicos` cuando se quiere un corpus limpio.
   4. Las **semillas de los centinelas de H03** (`centinelas/`): una referencia de
-     frontmatter rota, un par de paths que difieren solo en caja y un par NFC/NFD.
-     Son los casos cuyo esperado es el comportamiento vigente de `decisiones §22`/`§24`.
+     frontmatter rota, un par de paths que difieren solo en caja, el par NFC/NFD histórico
+     de H01 y una semilla NFC separada para planificar su gemelo NFD. Son los casos cuyo
+     esperado es el comportamiento vigente de `decisiones §22`/`§24`.
 
 Verificación del determinismo (el comando que documenta `README.md`):
 
@@ -142,11 +143,12 @@ def red_tematica(dest, rng):
             'updated: "%s"' % fecha,
             "tags: [%s, %s]" % (etiqueta_a, etiqueta_b),
         ]
-        # Campo de REFERENCIA en frontmatter (estilo `relacionadas:`) y un null explícito
-        # cada pocos documentos: material para las queries del banco.
+        # El campo de referencia `relacionadas:` queda reservado a la semilla del
+        # centinela H03, para que su valor huérfano sea inspeccionable sin ruido del
+        # corpus sintético.
         if not aislado and i % 3 == 0 and conectados > 1:
-            otro = (i + 1 + rng.hasta(conectados - 1)) % conectados
-            fm += ["relacionadas:", "  - %s" % ruta_tematica(otro)]
+            # Conserva la secuencia histórica del PRNG aunque el valor no se emita.
+            rng.hasta(conectados - 1)
         if i % 5 == 0:
             fm.append("revisor: null")
         fm += ["---", ""]
@@ -209,15 +211,15 @@ def centinelas(dest):
     actualizar esperado y ficha a la vez. Aquí solo se planta el material; el esperado lo
     escribe H03.
     """
-    # (a) Referencia de FRONTMATTER rota: `relacionadas:` apunta a un documento que no
-    # existe. Vigente: el grafo solo mira enlaces del CUERPO, así que esto NO es un
-    # diagnóstico de enlace ni una arista — el centinela fija justo eso.
+    # (a) Referencias de FRONTMATTER rotas: `relacionadas: [99]` y
+    # `affects: [typo-inexistente]` apuntan a valores que no existen. Vigente: el grafo
+    # solo mira enlaces del CUERPO, así que esto NO es un diagnóstico ni una arista.
     w(dest, "centinelas/ref-frontmatter-rota.md",
       '---\ntitle: Referencia de frontmatter rota\ntype: nota\nstatus: pendiente\n'
       'priority: 4\nupdated: "2026-06-06"\ntags: [datos]\n'
-      "relacionadas:\n  - centinelas/no-existe-jamas.md\n---\n\n"
+      "relacionadas:\n  - 99\naffects:\n  - typo-inexistente\n---\n\n"
       "# Referencia de frontmatter rota\n\n"
-      "El destino de `relacionadas:` no existe; el cuerpo no enlaza a nadie.\n")
+      "Los valores de frontmatter no existen; el cuerpo no enlaza a nadie.\n")
 
     # (b) Par de paths que difieren SOLO en caja. OJO, y esto es el dato que el centinela
     # de H03 tiene que fijar: en APFS/HFS+ (macOS, insensible a la caja por defecto) el
@@ -255,6 +257,14 @@ def centinelas(dest):
       '---\ntitle: Forma NFD\ntype: nota\nstatus: activo\npriority: 2\n'
       'updated: "2026-08-02"\ntags: [datos]\n---\n\n# Forma NFD\n\n'
       "Escrito con el nombre de fichero en forma DESCOMPUESTA (NFD).\n")
+    # Semilla separada para S24-02: solo existe la forma NFC de «revisión» en el
+    # corpus. El caso del banco planifica crear su gemelo NFD y así no reutiliza la
+    # pareja histórica `canción` de H01 como fixture de la colisión.
+    revision_nfc = unicodedata.normalize("NFC", "revisión")
+    w(dest, "centinelas/unicode/%s.md" % revision_nfc,
+      '---\ntitle: Semilla Unicode revisión\ntype: nota\nstatus: activo\npriority: 2\n'
+      'updated: "2026-08-05"\ntags: [datos]\n---\n\n# Semilla Unicode revisión\n\n'
+      "Escrito únicamente con el nombre de fichero en forma NFC.\n")
     # Control ASCII: mismo patrón de nombre sin un solo carácter compuesto, para poder
     # distinguir «esto lo hace la normalización Unicode» de «esto lo hace el resolutor de
     # enlaces».

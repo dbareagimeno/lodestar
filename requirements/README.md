@@ -220,9 +220,14 @@ al wire), con el corolario de E26: *una respuesta silenciosamente equivocada es 
 
 | Épica | Estado | Área | Doc |
 |---|---|---|---|
-| **E33** — Épica de evidencia: banco permanente + gate de rendimiento + dogfooding | planificada (ratificada 2026-08-10) | corpus canónico determinista + generador de escala compartido · runner asertable (veredicto mecánico, portable) · centinelas `§22`/`§24` · bench 3 variantes × 3 escalas (`lodestar-bench`, `publish = false`) · umbrales-tras-medición con **puerta interna** + smoke CI · dogfooding acotado con diario · enganche a `RELEASING.md` + corrida datada · paquete de evidencia para `§14` | [epica-33-banco-evidencia.md](epica-33-banco-evidencia.md) |
+| **E33** — Épica de evidencia: banco permanente + gate de rendimiento + dogfooding | H09 entregada; BDD remoto de H07 pendiente (2026-08-23) | H01–H09 entregadas localmente · H09 conserva sonda extrema parametrizable, footprint y corrida Realista/100k como activo para evaluar mejoras; `§14` sigue abierta y falta ejecutar/enlazar `workflow_dispatch` | [epica-33-banco-evidencia.md](epica-33-banco-evidencia.md) |
 
-**Orden de construcción (E33)**: `H01 → H02 → H04 → H03 → H05 → H06 → H07 → H08`, con las ramas de
+La evidencia permanente de E33 se versiona como resúmenes Markdown y el manifiesto
+[`docs/qa/corridas/v0.6.2/manifest.json`](../docs/qa/corridas/v0.6.2/manifest.json); los JSON
+generados se publican comprimidos fuera de Git. Fixtures, matrices, wire y baseline pequeños
+siguen versionados.
+
+**Orden de construcción (E33)**: `H01 → H02 → H04 → H03 → H05 → H06 → H07 → H08 → H09`, con las ramas de
 conformidad (H02→H03) y rendimiento (H04→H05) **paralelizables** tras H01. **H05 lleva una puerta
 interna**: los umbrales del gate los ratifica el usuario con la primera corrida de H04 delante
 (anclas: p95 ≤ 1 s por tool de lectura a 10k; cold-open ≤ 5 s) — su segunda mitad no se implementa

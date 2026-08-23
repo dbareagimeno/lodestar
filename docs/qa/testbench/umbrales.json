@@ -1,0 +1,10 @@
+{
+  "schema_version": "e33-h05-thresholds-v1",
+  "ratified_on": "2026-08-22",
+  "reference": "E33-H05 D4: ratificación de umbrales con la corrida release H04 delante",
+  "absolute_machine_id": "release-macbook-2026-08",
+  "variant": "disk-reparseo",
+  "scale": 10000,
+  "p95_ns": 1000000000,
+  "cold_open_ns": 5000000000
+}

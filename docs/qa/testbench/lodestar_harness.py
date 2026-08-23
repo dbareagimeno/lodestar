@@ -54,12 +54,15 @@ incorrecto · 3 error de ejecución del banco.
 import argparse
 import json
 import os
+import queue
 import re
 import shlex
+import signal
 import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import uuid
 
@@ -95,6 +98,8 @@ LOTES_DEL_GATE = [
     "batches/gate_invariantes.json",
     "batches/gate_verify_g1.json",
     "batches/gate_verify_g2.json",
+    "batches/sentinela_s22.json",
+    "batches/sentinela_s24.json",
 ]
 
 
@@ -172,6 +177,23 @@ class LodestarSession:
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, bufsize=1,
         )
+        self._stdout_queue = queue.Queue()
+        self._stdout_eof = object()
+        self._stdout_reader = None
+        self._stdout_reader_lock = threading.Lock()
+        self._stdout_read_ack = threading.Event()
+        self._stdout_eof_seen = threading.Event()
+        self._stdout_waiting_ack = False
+        self._terminal_lock = threading.Lock()
+        self._terminal_drain_lock = threading.Lock()
+        self._terminal_stderr = None
+        # Cada token representa el único -32600 idless que puede emitir un invalid vencido.
+        self._raw_pending_idless = 0
+        self._raw_needs_resync = False
+        self._raw_pending_ids = []
+        self._raw_reserved_ids = []
+        self._raw_backlog = []
+        self._start_stdout_reader()
         self._next_id = 1
         try:
             self._initialize()
@@ -180,37 +202,242 @@ class LodestarSession:
             self.close()
             raise
 
-    def _send(self, obj):
-        self.proc.stdin.write(json.dumps(obj) + "\n")
-        self.proc.stdin.flush()
+    def _start_stdout_reader(self):
+        """Arranca el único consumidor de stdout de la sesión."""
+        with self._stdout_reader_lock:
+            if self._stdout_reader is not None:
+                return
+            self._stdout_reader = threading.Thread(
+                target=self._stdout_reader_loop,
+                name="lodestar-stdout-reader",
+                daemon=True,
+            )
+            self._stdout_reader.start()
+
+    def _ensure_stdout_reader(self):
+        """Inicializa el lector también para dobles que construyen la sesión sin ``__init__``."""
+        if not hasattr(self, "_stdout_reader_lock"):
+            self._stdout_reader_lock = threading.Lock()
+        if not hasattr(self, "_stdout_queue"):
+            self._stdout_queue = queue.Queue()
+        if not hasattr(self, "_stdout_eof"):
+            self._stdout_eof = object()
+        if not hasattr(self, "_stdout_reader"):
+            self._stdout_reader = None
+        if not hasattr(self, "_stdout_read_ack"):
+            self._stdout_read_ack = threading.Event()
+        if not hasattr(self, "_stdout_eof_seen"):
+            self._stdout_eof_seen = threading.Event()
+        if not hasattr(self, "_stdout_waiting_ack"):
+            self._stdout_waiting_ack = False
+        self._start_stdout_reader()
+
+    def _stdout_reader_loop(self):
+        try:
+            while True:
+                line = self.proc.stdout.readline()
+                if line == "":
+                    break
+                self._stdout_queue.put(line)
+                self._stdout_read_ack.wait()
+                self._stdout_read_ack.clear()
+        except (OSError, ValueError):
+            pass
+        finally:
+            self._stdout_eof_seen.set()
+            self._stdout_queue.put(self._stdout_eof)
+
+    def _stdout_item(self, timeout):
+        self._ensure_stdout_reader()
+        if self._stdout_waiting_ack:
+            self._stdout_read_ack.set()
+            self._stdout_waiting_ack = False
+        # Un frame ya materializado pertenece al write anterior y conserva autoridad
+        # sobre EOF/exit observado concurrentemente.
+        try:
+            item = self._stdout_queue.get_nowait()
+            if item is not self._stdout_eof:
+                self._stdout_waiting_ack = True
+            return item
+        except queue.Empty:
+            pass
+        if self._stdout_eof_seen.is_set():
+            return self._stdout_eof
+        if timeout <= 0:
+            return None
+        try:
+            item = self._stdout_queue.get(timeout=timeout)
+            if item is not self._stdout_eof:
+                self._stdout_waiting_ack = True
+            return item
+        except queue.Empty:
+            return None
+
+    def _terminal_snapshot(self, cache_stderr=False):
+        """Devuelve ``(exit, stderr)`` si stdout ya es terminal o el proceso acabó.
+
+        No arranca aquí el lector lazy de los dobles: en una sesión real ya está activo,
+        y arrancarlo antes del primer write cambiaría la causalidad que prueba el arnés.
+        """
+        returncode = self.proc.poll()
+        eof_seen = getattr(self, "_stdout_eof_seen", None)
+        if returncode is None and not (eof_seen is not None and eof_seen.is_set()):
+            return None
+        stderr = ""
+        if cache_stderr and returncode is not None:
+            if not hasattr(self, "_terminal_lock"):
+                self._terminal_lock = threading.Lock()
+            if not hasattr(self, "_terminal_stderr"):
+                self._terminal_stderr = None
+            with self._terminal_lock:
+                if self._terminal_stderr is None:
+                    stream = getattr(self.proc, "stderr", None)
+                    try:
+                        self._terminal_stderr = stream.read() if stream is not None else ""
+                    except (OSError, ValueError):
+                        self._terminal_stderr = ""
+                stderr = self._terminal_stderr
+        return returncode, stderr
+
+    def _drain_terminal_stdout(self):
+        """Libera el backpressure y conserva toda salida anterior al EOF terminal."""
+        if not hasattr(self, "_terminal_drain_lock"):
+            self._terminal_drain_lock = threading.Lock()
+        with self._terminal_drain_lock:
+            deadline = time.monotonic() + 0.1
+            while True:
+                remaining = deadline - time.monotonic()
+                line = self._stdout_item(max(0, remaining))
+                if line is None or line is self._stdout_eof:
+                    break
+                if not line.strip():
+                    continue
+                try:
+                    response = self._strict_json_loads(line)
+                except (json.JSONDecodeError, ValueError):
+                    self._preserve_unparseable_response(line)
+                    continue
+                if self._consume_raw_pending_id(response):
+                    continue
+                if self._consume_raw_pending_invalid_error(response):
+                    continue
+                self._raw_backlog.append(line)
+            if self._stdout_waiting_ack:
+                self._stdout_read_ack.set()
+                self._stdout_waiting_ack = False
+
+    def _pop_raw_backlog_result(self):
+        self._ensure_raw_sync_state()
+        if not self._raw_backlog:
+            return False, None
+        frame = self._raw_backlog.pop(0)
+        if isinstance(frame, dict) and "unparseable_response" in frame:
+            return True, frame
+        try:
+            return True, self._strict_json_loads(frame)
+        except (TypeError, json.JSONDecodeError, ValueError):
+            return True, {"unparseable_response": str(frame).strip()}
+
+    def _terminal_eof_error(self, req_id, context=None):
+        # Sólo las respuestas RPC publican stderr estable. Raw y resync conservan el
+        # stream para que el runner pueda recoger su diagnóstico de proceso al cerrar.
+        terminal = self._terminal_snapshot()
+        if terminal is None:
+            return None
+        self._drain_terminal_stdout()
+        terminal = self._terminal_snapshot(cache_stderr=context != "resync")
+        returncode, stderr = terminal
+        if context == "resync":
+            return RuntimeError(
+                "resync encontró EOF durante barrera JSON-RPC; "
+                f"exit={returncode}; stderr={stderr[:2000]}"
+            )
+        return RuntimeError(
+            f"EOF del servidor esperando id={req_id}; "
+            f"exit={returncode}; stderr={stderr[:2000]}"
+        )
+
+    def _raw_terminal_result(self):
+        terminal = self._terminal_snapshot()
+        if terminal is None:
+            return False, None
+        self._drain_terminal_stdout()
+        has_backlog, response = self._pop_raw_backlog_result()
+        if has_backlog:
+            return True, response
+        return True, {"server_exited": terminal[0]}
+
+    @staticmethod
+    def _strict_json_dumps(obj):
+        try:
+            return json.dumps(obj, allow_nan=False)
+        except (TypeError, ValueError) as error:
+            raise ValueError(f"no se puede enviar JSON estricto: {error}") from error
+
+    def _send(self, obj, req_id=None):
+        terminal_error = self._terminal_eof_error(req_id)
+        if terminal_error is not None:
+            raise terminal_error
+        encoded = self._strict_json_dumps(obj)
+        try:
+            self.proc.stdin.write(encoded + "\n")
+            self.proc.stdin.flush()
+        except (ValueError, BrokenPipeError, OSError) as error:
+            terminal_error = self._terminal_eof_error(req_id)
+            if terminal_error is not None:
+                raise terminal_error from error
+            raise
 
     def _read_response(self, req_id, timeout=30):
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            line = self.proc.stdout.readline()
-            if not line:
-                err = self.proc.stderr.read() if self.proc.poll() is not None else ""
-                raise RuntimeError(f"EOF del servidor esperando id={req_id}; stderr={err[:2000]}")
+        self._ensure_raw_sync_state()
+        self._ensure_raw_pending_ids()
+        deadline = time.monotonic() + timeout
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            line = self._stdout_item(remaining)
+            if line is None:
+                break
+            if line is self._stdout_eof:
+                terminal_error = self._terminal_eof_error(req_id)
+                if terminal_error is not None:
+                    raise terminal_error
             line = line.strip()
             if not line:
                 continue
             try:
-                resp = json.loads(line)
-            except json.JSONDecodeError:
+                resp = self._strict_json_loads(line)
+            except (json.JSONDecodeError, ValueError):
+                self._preserve_unparseable_response(line)
                 continue
-            if resp.get("id") == req_id:
+            if self._is_jsonrpc_response(resp) and self._same_jsonrpc_id(
+                req_id, resp.get("id")
+            ):
                 return resp
-            # respuestas a otros id o notificaciones: se ignoran
+            if not self._consume_raw_pending_id(resp):
+                self._raw_backlog.append(line)
+            # Las deudas exactas se consumen; el resto queda observable en FIFO.
+        terminal_error = self._terminal_eof_error(req_id)
+        if terminal_error is not None:
+            raise terminal_error
+        if self.proc.poll() is None:
+            self._raw_pending_ids.append(req_id)
         raise RuntimeError(f"timeout esperando respuesta a id={req_id}")
 
     def rpc(self, method, params=None):
-        req_id = self._next_id
-        self._next_id += 1
+        deadline = time.monotonic() + 30
+        self._resync_before_operation(deadline)
+        req_id = self._allocate_rpc_id()
+        self._reserve_raw_id(req_id)
         req = {"jsonrpc": "2.0", "id": req_id, "method": method}
         if params is not None:
             req["params"] = params
-        self._send(req)
-        return self._read_response(req_id)
+        try:
+            self._send(req, req_id=req_id)
+            return self._read_response(req_id, timeout=max(0, deadline - time.monotonic()))
+        finally:
+            self._release_raw_id(req_id)
 
     def _initialize(self):
         resp = self.rpc("initialize", {
@@ -243,28 +470,409 @@ class LodestarSession:
             out["error_code"] = out["text"].split(":", 1)[0].strip()
         return out
 
-    def raw_line(self, line, timeout=5):
-        """Envía una línea cruda y devuelve la primera línea de respuesta (o None)."""
-        self.proc.stdin.write(line + "\n")
-        self.proc.stdin.flush()
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            resp_line = self.proc.stdout.readline()
-            if resp_line.strip():
+    @staticmethod
+    def _raw_request_kind(line):
+        """Clasifica una línea cruda según la respuesta que puede emitir rmcp."""
+        try:
+            request = LodestarSession._strict_json_loads(line)
+        except (TypeError, json.JSONDecodeError, ValueError):
+            return "silence", None
+        if not isinstance(request, dict):
+            return "invalid", None
+        if request.get("jsonrpc") != "2.0" or "method" not in request:
+            return "invalid", None
+        if not isinstance(request["method"], str):
+            return "invalid", None
+        if "params" in request and request["params"] is not None and not isinstance(
+            request["params"], dict
+        ):
+            return "invalid", None
+        if "id" not in request or request["id"] is None:
+            return "silence", None
+
+        request_id = request["id"]
+        if LodestarSession._is_valid_jsonrpc_id(request_id):
+            return "request", request_id
+        # rmcp rechaza estos ids al deserializar y no publica un error JSON-RPC. Se
+        # distinguen de las formas ``invalid`` que sí pueden emitir -32600 para no
+        # registrar una deuda idless inexistente cuando vence el plazo.
+        return "rejected_id", None
+
+    @staticmethod
+    def _is_valid_jsonrpc_id(value):
+        """Acepta sólo ids JSON-RPC que rmcp puede correlacionar."""
+        return isinstance(value, str) or (
+            type(value) is int and -(2**63) <= value <= 2**63 - 1
+        )
+
+    @staticmethod
+    def _same_jsonrpc_id(expected, actual):
+        """Correlaciona ids JSON-RPC sin equivalencias entre tipos JSON."""
+        return type(actual) is type(expected) and actual == expected
+
+    @staticmethod
+    def _strict_json_loads(text):
+        """Parsea JSON RFC estricto, rechazando constantes no finitas de Python."""
+        def reject_nonfinite(constant):
+            raise ValueError(f"constante JSON no finita: {constant}")
+
+        return json.loads(text, parse_constant=reject_nonfinite)
+
+    @staticmethod
+    def _is_jsonrpc_response(message):
+        """Reconoce sólo respuestas JSON-RPC 2.0, nunca requests o notificaciones."""
+        if (
+            not isinstance(message, dict)
+            or message.get("jsonrpc") != "2.0"
+            or "method" in message
+            or (("result" in message) == ("error" in message))
+        ):
+            return False
+        if "result" in message:
+            return True
+        error = message["error"]
+        return (
+            isinstance(error, dict)
+            and type(error.get("code")) is int
+            and isinstance(error.get("message"), str)
+        )
+
+    def _ensure_raw_sync_state(self):
+        """Inicializa la barrera para dobles que omiten ``__init__``."""
+        if not hasattr(self, "_raw_pending_idless"):
+            self._raw_pending_idless = 0
+        if not hasattr(self, "_raw_needs_resync"):
+            self._raw_needs_resync = False
+        if not hasattr(self, "_raw_backlog"):
+            self._raw_backlog = []
+
+    def _ensure_raw_pending_ids(self):
+        """Inicializa los ids vencidos para dobles que omiten ``__init__``."""
+        if not hasattr(self, "_raw_pending_ids"):
+            self._raw_pending_ids = []
+        if not hasattr(self, "_raw_reserved_ids"):
+            self._raw_reserved_ids = []
+
+    def _preserve_unparseable_response(self, raw):
+        """Conserva el texto JSON inválido como diagnóstico observable en FIFO."""
+        self._ensure_raw_sync_state()
+        self._raw_backlog.append({"unparseable_response": raw.strip()})
+
+    def _raw_id_in_use(self, candidate):
+        """Comprueba deudas y reservas sin coerciones entre tipos JSON."""
+        self._ensure_raw_pending_ids()
+        return any(
+            self._same_jsonrpc_id(candidate, occupied)
+            for occupied in self._raw_pending_ids + self._raw_reserved_ids
+        )
+
+    def _reserve_raw_id(self, request_id):
+        self._ensure_raw_pending_ids()
+        self._raw_reserved_ids.append(request_id)
+
+    def _release_raw_id(self, request_id):
+        self._ensure_raw_pending_ids()
+        for index, reserved_id in enumerate(self._raw_reserved_ids):
+            if self._same_jsonrpc_id(request_id, reserved_id):
+                del self._raw_reserved_ids[index]
+                return
+
+    def _allocate_rpc_id(self):
+        """Asigna el siguiente entero que no esté pendiente ni reservado."""
+        request_id = self._next_id
+        while self._raw_id_in_use(request_id):
+            request_id += 1
+        self._next_id = request_id + 1
+        return request_id
+
+    def _allocate_barrier_id(self):
+        """Genera un id string único respecto de toda deuda o reserva local."""
+        while True:
+            request_id = f"lodestar-testbench-resync:{uuid.uuid4()}"
+            if not self._raw_id_in_use(request_id):
+                return request_id
+
+    def _consume_raw_pending_id(self, response):
+        """Consume una deuda idful sólo por coincidencia exacta de tipo y valor."""
+        self._ensure_raw_pending_ids()
+        if not self._is_jsonrpc_response(response):
+            return False
+        response_id = response.get("id")
+        for index, pending_id in enumerate(self._raw_pending_ids):
+            if self._same_jsonrpc_id(pending_id, response_id):
+                del self._raw_pending_ids[index]
+                return True
+        return False
+
+    def _is_attributable_invalid_response(self, response):
+        """Reconoce el único error idless atribuible a una entrada ``invalid``."""
+        if not self._is_jsonrpc_response(response) or "error" not in response:
+            return False
+        error = response["error"]
+        return (
+            response.get("id") is None
+            and type(error.get("code")) is int
+            and error.get("code") == -32600
+        )
+
+    def _consume_raw_pending_invalid_error(self, response):
+        """Consume un único -32600 idless por cada invalid vencido."""
+        self._ensure_raw_sync_state()
+        if self._raw_pending_idless and self._is_attributable_invalid_response(response):
+            self._raw_pending_idless -= 1
+            return True
+        return False
+
+    def _clear_covered_pending_ids(self, covered_ids):
+        """Extingue en el ACK sólo las deudas que existían al iniciar la barrera."""
+        self._ensure_raw_pending_ids()
+        for covered_id in covered_ids:
+            for index, pending_id in enumerate(self._raw_pending_ids):
+                if self._same_jsonrpc_id(covered_id, pending_id):
+                    del self._raw_pending_ids[index]
+                    break
+
+    def _complete_resync_barrier(self, response, barrier_id, covered_pending_ids):
+        """Cierra la cohorte sólo ante el ACK estricto de la barrera actual."""
+        if not (
+            self._is_jsonrpc_response(response)
+            and self._same_jsonrpc_id(barrier_id, response.get("id"))
+        ):
+            return False
+        self._consume_raw_pending_id(response)
+        self._raw_needs_resync = False
+        self._raw_pending_idless = 0
+        self._clear_covered_pending_ids(covered_pending_ids)
+        return True
+
+    def _drain_queued_barrier_ack(self, barrier_id, covered_pending_ids, deadline):
+        """Busca sin bloquear un ACK que ya estaba en la cola al fallar ``flush``."""
+        if not hasattr(self, "_stdout_queue"):
+            return False
+        first_inspection = True
+        while first_inspection or time.monotonic() <= deadline:
+            first_inspection = False
+            line = self._stdout_item(0)
+            if line is None or line is self._stdout_eof:
+                return False
+            if not line.strip():
+                continue
+            try:
+                response = self._strict_json_loads(line)
+            except (json.JSONDecodeError, ValueError):
+                self._preserve_unparseable_response(line)
+                continue
+            if self._complete_resync_barrier(
+                response, barrier_id, covered_pending_ids
+            ):
+                return True
+            if self._consume_raw_pending_id(response):
+                continue
+            if self._consume_raw_pending_invalid_error(response):
+                continue
+            self._raw_backlog.append(line)
+        return False
+
+    def _resync_before_operation(self, deadline, colliding_request_id=None):
+        """Delimita mediante un ping toda salida previa a la próxima operación pública."""
+        self._ensure_raw_sync_state()
+        self._ensure_raw_pending_ids()
+        has_exact_collision = colliding_request_id is not None and any(
+            self._same_jsonrpc_id(colliding_request_id, pending_id)
+            for pending_id in self._raw_pending_ids
+        )
+        if not self._raw_needs_resync and not has_exact_collision:
+            return True
+
+        covered_pending_ids = list(self._raw_pending_ids)
+        barrier_id = self._allocate_barrier_id()
+        self._reserve_raw_id(barrier_id)
+        try:
+            terminal_error = self._terminal_eof_error(barrier_id, context="resync")
+            if terminal_error is not None:
+                self._raw_needs_resync = True
+                raise terminal_error
+            try:
+                encoded = self._strict_json_dumps(
+                    {"jsonrpc": "2.0", "id": barrier_id, "method": "ping"}
+                )
+                self.proc.stdin.write(encoded + "\n")
+            except (ValueError, BrokenPipeError, OSError) as error:
+                self._raw_needs_resync = True
+                terminal_error = self._terminal_eof_error(barrier_id, context="resync")
+                if terminal_error is not None:
+                    raise terminal_error from error
+                raise RuntimeError(
+                    f"resync falló al escribir la barrera JSON-RPC: {error}"
+                ) from error
+            # Desde que write retorna, el ping puede estar en vuelo aunque flush falle.
+            self._raw_pending_ids.append(barrier_id)
+            try:
+                self.proc.stdin.flush()
+            except (ValueError, BrokenPipeError, OSError) as error:
+                if self._drain_queued_barrier_ack(
+                    barrier_id, covered_pending_ids, deadline
+                ):
+                    return True
+                self._raw_needs_resync = True
+                terminal_error = self._terminal_eof_error(barrier_id, context="resync")
+                if terminal_error is not None:
+                    raise terminal_error from error
+                raise RuntimeError(
+                    f"resync falló al hacer flush de la barrera JSON-RPC: {error}"
+                ) from error
+            while True:
+                remaining = deadline - time.monotonic()
+                line = self._stdout_item(max(0, remaining))
+                if line is None:
+                    returncode = self.proc.poll()
+                    if returncode is None:
+                        self._raw_needs_resync = True
+                        raise RuntimeError("resync timeout esperando ACK de barrera JSON-RPC")
+                    raise RuntimeError(
+                        f"resync abortado por salida del servidor; exit={returncode}"
+                    )
+                if line is self._stdout_eof:
+                    terminal_error = self._terminal_eof_error(barrier_id, context="resync")
+                    if terminal_error is not None:
+                        self._raw_needs_resync = True
+                        raise terminal_error
+                if not line.strip():
+                    continue
                 try:
-                    return json.loads(resp_line)
-                except json.JSONDecodeError:
-                    return {"unparseable_response": resp_line.strip()}
-            if self.proc.poll() is not None:
-                return {"server_exited": self.proc.returncode}
+                    response = self._strict_json_loads(line)
+                except (json.JSONDecodeError, ValueError):
+                    self._preserve_unparseable_response(line)
+                    continue
+                if self._complete_resync_barrier(
+                    response, barrier_id, covered_pending_ids
+                ):
+                    return True
+                if self._consume_raw_pending_id(response):
+                    continue
+                if self._consume_raw_pending_invalid_error(response):
+                    continue
+                self._raw_backlog.append(line)
+        finally:
+            self._release_raw_id(barrier_id)
+
+    def _raw_operation_item(self, timeout, request_kind):
+        """Entrega primero el backlog sólo a operaciones raw que pueden observarlo."""
+        self._ensure_raw_sync_state()
+        if request_kind in ("silence", "rejected_id") and self._raw_backlog:
+            return self._raw_backlog.pop(0)
+        return self._stdout_item(timeout)
+
+    def _raw_line_timeout(self, request_kind, expected_id):
+        """Registra la respuesta que todavía puede llegar tras vencer el plazo."""
+        self._ensure_raw_sync_state()
+        self._ensure_raw_pending_ids()
+        if self.proc.poll() is None:
+            if request_kind == "invalid":
+                self._raw_pending_idless += 1
+                self._raw_needs_resync = True
+            elif request_kind == "request":
+                self._raw_pending_ids.append(expected_id)
         return None
+
+    def raw_line(self, line, timeout=5):
+        """Envía una línea cruda y devuelve su respuesta antes del plazo (o ``None``).
+
+        El JSON no parseable, las notificaciones sin ``id`` y los ids rechazados por rmcp
+        son silencio de protocolo. Un frame observado durante ese silencio sólo se
+        descarta si su ``id`` coincide exactamente con una request vencida. Los frames
+        idful sin esa deuda y los frames sin id, con ``null`` o con un id fuera del dominio
+        correlacionable se conservan para no fabricar silencio frente a una salida real.
+        Si una entrada ``invalid`` vence, un ping interno delimita y drena sus posibles
+        frames antes de enviar la operación pública siguiente.
+        """
+        self._ensure_raw_sync_state()
+        self._ensure_raw_pending_ids()
+        request_kind, expected_id = self._raw_request_kind(line)
+        deadline = time.monotonic() + timeout
+        self._resync_before_operation(
+            deadline,
+            colliding_request_id=expected_id if request_kind == "request" else None,
+        )
+        is_terminal, terminal_result = self._raw_terminal_result()
+        if is_terminal:
+            return terminal_result
+        try:
+            self.proc.stdin.write(line + "\n")
+            self.proc.stdin.flush()
+        except (ValueError, BrokenPipeError, OSError):
+            is_terminal, terminal_result = self._raw_terminal_result()
+            if is_terminal:
+                return terminal_result
+            raise
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return self._raw_line_timeout(request_kind, expected_id)
+            resp_line = self._raw_operation_item(remaining, request_kind)
+            if resp_line is None:
+                return self._raw_line_timeout(request_kind, expected_id)
+            if resp_line is self._stdout_eof:
+                has_backlog, response = self._pop_raw_backlog_result()
+                if has_backlog:
+                    return response
+                return {"server_exited": self.proc.poll()}
+            if isinstance(resp_line, dict) and "unparseable_response" in resp_line:
+                return resp_line
+            if not resp_line.strip():
+                continue
+            try:
+                response = self._strict_json_loads(resp_line)
+            except (json.JSONDecodeError, ValueError):
+                if request_kind in ("silence", "rejected_id"):
+                    return {"unparseable_response": resp_line.strip()}
+                self._preserve_unparseable_response(resp_line)
+                continue
+            if request_kind in ("silence", "rejected_id"):
+                if isinstance(response, dict) and self._is_valid_jsonrpc_id(
+                    response.get("id")
+                ):
+                    if self._consume_raw_pending_id(response):
+                        continue
+                    return response
+                return response
+            if not isinstance(response, dict):
+                self._raw_backlog.append(resp_line)
+                continue
+            if (
+                request_kind == "invalid"
+                and self._is_attributable_invalid_response(response)
+            ):
+                return response
+            if (
+                request_kind == "request"
+                and self._is_jsonrpc_response(response)
+                and self._same_jsonrpc_id(expected_id, response.get("id"))
+            ):
+                return response
+            if not self._consume_raw_pending_id(response):
+                self._raw_backlog.append(resp_line)
 
     def close(self):
         try:
             self.proc.stdin.close()
             self.proc.wait(timeout=5)
         except Exception:
-            self.proc.kill()
+            try:
+                self.proc.kill()
+                self.proc.wait(timeout=5)
+            except Exception:
+                pass
+        try:
+            self.proc.stdout.close()
+        except (AttributeError, OSError, ValueError):
+            pass
+        reader = getattr(self, "_stdout_reader", None)
+        if reader is not None and reader is not threading.current_thread():
+            read_ack = getattr(self, "_stdout_read_ack", None)
+            if read_ack is not None:
+                read_ack.set()
+            reader.join(timeout=5)
 
 
 # --------------------------------------------------------------- roots desechables

@@ -1,0 +1,23 @@
+{
+ "kind": "call",
+ "tool": "knowledge_search",
+ "arguments": {
+  "text": "marker-search-h04",
+  "where": "service = \"bench\""
+ },
+ "is_error": false,
+ "text": "{\"nextCursor\":null,\"results\":[{\"path\":\"control.md\",\"revision\":\"blake3:2a8c9ea8d39a8e23eaee10eb1cdd6080a870a3ef5e5de4de708d98fe29094bc3\",\"score\":1.0,\"snippet\":\"# Control marker-search-h04 [child](child.md) [missing](missing.md)\",\"title\":\"Control\"}],\"totalApproximate\":1}",
+ "structured": {
+  "nextCursor": null,
+  "results": [
+   {
+    "path": "control.md",
+    "revision": "blake3:2a8c9ea8d39a8e23eaee10eb1cdd6080a870a3ef5e5de4de708d98fe29094bc3",
+    "score": 1.0,
+    "snippet": "# Control marker-search-h04 [child](child.md) [missing](missing.md)",
+    "title": "Control"
+   }
+  ],
+  "totalApproximate": 1
+ }
+}

@@ -39,9 +39,12 @@ esa base; los bugs históricos ya cerrados no forman parte del roadmap.
 Hay, no obstante, trabajo documentado que debe cerrarse o resolverse antes de construir las capas
 nuevas:
 
-- **E33 — banco de evidencia**: H01 (corpus reproducible) y H02 (runner asertable) están hechas;
-  quedan H03–H08: centinelas, banco de rendimiento, umbrales, dogfooding, enganche a release y el
-  paquete de evidencia para decidir el destino del store.
+- **E33 — banco de evidencia**: H01–H06, H08 y H09 están entregadas; H07 está lista y validada
+  localmente, pero conserva pendiente su BDD externo (`workflow_dispatch` real enlazado). H09 deja
+  la sonda parametrizable y la evidencia Realista/100k como resumen y manifiesto versionados, con
+  los brutos comprimidos fuera de Git. El paquete deja
+  `decisiones §14` lista para decidir sin escoger entre conectar, acotar o retirar, y sin convertir
+  los techos del camino disco en un veto a SQLite.
 - **decisiones §20 — renombrado del proyecto**: el nombre Lodestar colisiona con otro proyecto
   conocido y el cambio acordado es total, incluido el directorio de estado `.lodestar/`.
 - **decisiones §21 — comillas en el lenguaje de consulta**: decisión ya tomada para poder expresar
@@ -56,16 +59,18 @@ nuevas:
 
 ---
 
-## Fase 0 — Cerrar el banco de evidencia
+## Fase 0 — Cerrar el banco de evidencia (cierre externo pendiente)
 
-**Objetivo:** terminar E33-H03…H08 y obtener datos reproducibles de rendimiento y dogfooding.
+**Objetivo:** cerrar el BDD remoto de E33-H07; las mediciones, los umbrales, el dogfooding, la
+sonda extrema y el paquete de decisión de H03–H06/H08/H09 ya están disponibles.
 
 Esta fase es condición de entrada para conectar el store al camino de lectura real. En particular,
 se deben medir cold-open y coste por llamada con los caminos previstos por el diseño de E33, fijar
 umbrales y dejar el banco ejecutable por release.
 
-**Termina cuando:** existe el paquete de evidencia que permite decidir `decisiones §14` —el store
-SQLite/FTS5 ya construido pero todavía sin consumidor en las tools— con datos y no por intuición.
+**Termina cuando:** además del paquete y la evidencia 100k que ya permiten decidir `decisiones §14`,
+existe un run real verde del workflow manual enlazado a su PR. `§14` sigue abierta: ninguna fase posterior puede
+interpretar este cierre como ratificación automática de conectar SQLite/FTS5.
 
 ## Fase 1 — Renombrado total
 
@@ -451,8 +456,8 @@ cada puerta de diseño y no quedan congelados por este roadmap.
 ## Dependencias principales
 
 ```text
-E33: evidencia ───────────────────────────────┐
-                                             │
+E33: evidencia → ratificación §14 ────────────┐
+                                             │ (solo si se elige conectar)
 renombrado → hardening → ergonomía → store/cache → contratos → referencias tipadas
                                                                │
                                                                ▼
@@ -465,9 +470,10 @@ renombrado → hardening → ergonomía → store/cache → contratos → refere
                                                      extractores opcionales
 ```
 
-E33 alimenta con evidencia la decisión del store; el renombrado fija antes el nombre y el directorio
-de estado definitivos. El hardening cierra corrección conocida y la fase de ergonomía estabiliza la
-experiencia externa antes de hacer que todas las lecturas dependan de un camino optimizado o de
+E33 alimenta con evidencia la decisión del store; no selecciona su salida. Si §14 ratifica acotar o
+retirar, la fase 4 se reescribe antes de ejecutarse para reflejar esa decisión. El renombrado fija
+antes el nombre y el directorio de estado definitivos. El hardening cierra corrección conocida y la
+fase de ergonomía estabiliza la experiencia externa antes de cambiar el camino de lectura o de
 ensanchar el dominio.
 
 ## Fuera del camino crítico

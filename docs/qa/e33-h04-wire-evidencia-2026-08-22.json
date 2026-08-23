@@ -1,0 +1,239 @@
+{
+  "binary": "target/release/lodestar-mcp",
+  "corpus": "/private/tmp/lodestar-e33-h04-wire-10k",
+  "observations": [
+    {
+      "args": {},
+      "binary": "target/release/lodestar-mcp",
+      "command": "python3 docs/qa/testbench/lodestar_harness.py --root /private/tmp/lodestar-e33-h04-wire-10k --profile readonly --binary target/release/lodestar-mcp --call workspace_status {}",
+      "index": 1,
+      "payload_bytes": 1298,
+      "payload_bytes_stdout": 1298,
+      "payload_bytes_structured_content": 506,
+      "profile": "readonly",
+      "raw_stdout": "docs/qa/e33-h04-wire-raw/workspace_status-1.stdout.json",
+      "result_check": {
+        "documents": 10004,
+        "is_error": false
+      },
+      "root": "/private/tmp/lodestar-e33-h04-wire-10k",
+      "sha256_stdout": "24076bdf89f0ec9a30f9c3112d9756761a8515586e68798b8935691252078a00",
+      "sha256_transcript": "26e38ab6956179b187af070af8e70b5cf5f13a3cbf6c16b6fa25082f03afa2a9",
+      "time_transcript": "docs/qa/e33-h04-wire-raw/workspace_status-1.time",
+      "tool": "workspace_status",
+      "wall_seconds": 0.29
+    },
+    {
+      "args": {},
+      "binary": "target/release/lodestar-mcp",
+      "command": "python3 docs/qa/testbench/lodestar_harness.py --root /private/tmp/lodestar-e33-h04-wire-10k --profile readonly --binary target/release/lodestar-mcp --call workspace_status {}",
+      "index": 2,
+      "payload_bytes": 1298,
+      "payload_bytes_stdout": 1298,
+      "payload_bytes_structured_content": 506,
+      "profile": "readonly",
+      "raw_stdout": "docs/qa/e33-h04-wire-raw/workspace_status-2.stdout.json",
+      "result_check": {
+        "documents": 10004,
+        "is_error": false
+      },
+      "root": "/private/tmp/lodestar-e33-h04-wire-10k",
+      "sha256_stdout": "24076bdf89f0ec9a30f9c3112d9756761a8515586e68798b8935691252078a00",
+      "sha256_transcript": "973cc9646bb6c34298652a211e7f2a674cb418cb726deec5b03dc5945f21221d",
+      "time_transcript": "docs/qa/e33-h04-wire-raw/workspace_status-2.time",
+      "tool": "workspace_status",
+      "wall_seconds": 0.25
+    },
+    {
+      "args": {},
+      "binary": "target/release/lodestar-mcp",
+      "command": "python3 docs/qa/testbench/lodestar_harness.py --root /private/tmp/lodestar-e33-h04-wire-10k --profile readonly --binary target/release/lodestar-mcp --call workspace_status {}",
+      "index": 3,
+      "payload_bytes": 1298,
+      "payload_bytes_stdout": 1298,
+      "payload_bytes_structured_content": 506,
+      "profile": "readonly",
+      "raw_stdout": "docs/qa/e33-h04-wire-raw/workspace_status-3.stdout.json",
+      "result_check": {
+        "documents": 10004,
+        "is_error": false
+      },
+      "root": "/private/tmp/lodestar-e33-h04-wire-10k",
+      "sha256_stdout": "24076bdf89f0ec9a30f9c3112d9756761a8515586e68798b8935691252078a00",
+      "sha256_transcript": "80ed505240b60e3a7484e75efa7536e2ec9f31defc2fc8a056ef63e52c12e6f9",
+      "time_transcript": "docs/qa/e33-h04-wire-raw/workspace_status-3.time",
+      "tool": "workspace_status",
+      "wall_seconds": 0.26
+    },
+    {
+      "args": {},
+      "binary": "target/release/lodestar-mcp",
+      "command": "python3 docs/qa/testbench/lodestar_harness.py --root /private/tmp/lodestar-e33-h04-wire-10k --profile readonly --binary target/release/lodestar-mcp --call workspace_status {}",
+      "index": 4,
+      "payload_bytes": 1298,
+      "payload_bytes_stdout": 1298,
+      "payload_bytes_structured_content": 506,
+      "profile": "readonly",
+      "raw_stdout": "docs/qa/e33-h04-wire-raw/workspace_status-4.stdout.json",
+      "result_check": {
+        "documents": 10004,
+        "is_error": false
+      },
+      "root": "/private/tmp/lodestar-e33-h04-wire-10k",
+      "sha256_stdout": "24076bdf89f0ec9a30f9c3112d9756761a8515586e68798b8935691252078a00",
+      "sha256_transcript": "973cc9646bb6c34298652a211e7f2a674cb418cb726deec5b03dc5945f21221d",
+      "time_transcript": "docs/qa/e33-h04-wire-raw/workspace_status-4.time",
+      "tool": "workspace_status",
+      "wall_seconds": 0.25
+    },
+    {
+      "args": {},
+      "binary": "target/release/lodestar-mcp",
+      "command": "python3 docs/qa/testbench/lodestar_harness.py --root /private/tmp/lodestar-e33-h04-wire-10k --profile readonly --binary target/release/lodestar-mcp --call workspace_status {}",
+      "index": 5,
+      "payload_bytes": 1298,
+      "payload_bytes_stdout": 1298,
+      "payload_bytes_structured_content": 506,
+      "profile": "readonly",
+      "raw_stdout": "docs/qa/e33-h04-wire-raw/workspace_status-5.stdout.json",
+      "result_check": {
+        "documents": 10004,
+        "is_error": false
+      },
+      "root": "/private/tmp/lodestar-e33-h04-wire-10k",
+      "sha256_stdout": "24076bdf89f0ec9a30f9c3112d9756761a8515586e68798b8935691252078a00",
+      "sha256_transcript": "80ed505240b60e3a7484e75efa7536e2ec9f31defc2fc8a056ef63e52c12e6f9",
+      "time_transcript": "docs/qa/e33-h04-wire-raw/workspace_status-5.time",
+      "tool": "workspace_status",
+      "wall_seconds": 0.26
+    },
+    {
+      "args": {
+        "text": "marker-search-h04",
+        "where": "service = \"bench\""
+      },
+      "binary": "target/release/lodestar-mcp",
+      "command": "python3 docs/qa/testbench/lodestar_harness.py --root /private/tmp/lodestar-e33-h04-wire-10k --profile readonly --binary target/release/lodestar-mcp --call knowledge_search {\"text\":\"marker-search-h04\",\"where\":\"service = \\\"bench\\\"\"}",
+      "index": 1,
+      "payload_bytes": 800,
+      "payload_bytes_stdout": 800,
+      "payload_bytes_structured_content": 269,
+      "profile": "readonly",
+      "raw_stdout": "docs/qa/e33-h04-wire-raw/knowledge_search-1.stdout.json",
+      "result_check": {
+        "is_error": false,
+        "path": "control.md",
+        "total_approximate": 1
+      },
+      "root": "/private/tmp/lodestar-e33-h04-wire-10k",
+      "sha256_stdout": "a9cd3f19e99d3503fcfd8fa3574b9bbeb1be4d193c0b25b8f31c3619ecc5d3f3",
+      "sha256_transcript": "aa17221adbc1835ec1170226a1eba1c7eb9ca00ea6666d258e22eee6c1445824",
+      "time_transcript": "docs/qa/e33-h04-wire-raw/knowledge_search-1.time",
+      "tool": "knowledge_search",
+      "wall_seconds": 0.29
+    },
+    {
+      "args": {
+        "text": "marker-search-h04",
+        "where": "service = \"bench\""
+      },
+      "binary": "target/release/lodestar-mcp",
+      "command": "python3 docs/qa/testbench/lodestar_harness.py --root /private/tmp/lodestar-e33-h04-wire-10k --profile readonly --binary target/release/lodestar-mcp --call knowledge_search {\"text\":\"marker-search-h04\",\"where\":\"service = \\\"bench\\\"\"}",
+      "index": 2,
+      "payload_bytes": 800,
+      "payload_bytes_stdout": 800,
+      "payload_bytes_structured_content": 269,
+      "profile": "readonly",
+      "raw_stdout": "docs/qa/e33-h04-wire-raw/knowledge_search-2.stdout.json",
+      "result_check": {
+        "is_error": false,
+        "path": "control.md",
+        "total_approximate": 1
+      },
+      "root": "/private/tmp/lodestar-e33-h04-wire-10k",
+      "sha256_stdout": "a9cd3f19e99d3503fcfd8fa3574b9bbeb1be4d193c0b25b8f31c3619ecc5d3f3",
+      "sha256_transcript": "aa17221adbc1835ec1170226a1eba1c7eb9ca00ea6666d258e22eee6c1445824",
+      "time_transcript": "docs/qa/e33-h04-wire-raw/knowledge_search-2.time",
+      "tool": "knowledge_search",
+      "wall_seconds": 0.29
+    },
+    {
+      "args": {
+        "text": "marker-search-h04",
+        "where": "service = \"bench\""
+      },
+      "binary": "target/release/lodestar-mcp",
+      "command": "python3 docs/qa/testbench/lodestar_harness.py --root /private/tmp/lodestar-e33-h04-wire-10k --profile readonly --binary target/release/lodestar-mcp --call knowledge_search {\"text\":\"marker-search-h04\",\"where\":\"service = \\\"bench\\\"\"}",
+      "index": 3,
+      "payload_bytes": 800,
+      "payload_bytes_stdout": 800,
+      "payload_bytes_structured_content": 269,
+      "profile": "readonly",
+      "raw_stdout": "docs/qa/e33-h04-wire-raw/knowledge_search-3.stdout.json",
+      "result_check": {
+        "is_error": false,
+        "path": "control.md",
+        "total_approximate": 1
+      },
+      "root": "/private/tmp/lodestar-e33-h04-wire-10k",
+      "sha256_stdout": "a9cd3f19e99d3503fcfd8fa3574b9bbeb1be4d193c0b25b8f31c3619ecc5d3f3",
+      "sha256_transcript": "aa17221adbc1835ec1170226a1eba1c7eb9ca00ea6666d258e22eee6c1445824",
+      "time_transcript": "docs/qa/e33-h04-wire-raw/knowledge_search-3.time",
+      "tool": "knowledge_search",
+      "wall_seconds": 0.29
+    },
+    {
+      "args": {
+        "text": "marker-search-h04",
+        "where": "service = \"bench\""
+      },
+      "binary": "target/release/lodestar-mcp",
+      "command": "python3 docs/qa/testbench/lodestar_harness.py --root /private/tmp/lodestar-e33-h04-wire-10k --profile readonly --binary target/release/lodestar-mcp --call knowledge_search {\"text\":\"marker-search-h04\",\"where\":\"service = \\\"bench\\\"\"}",
+      "index": 4,
+      "payload_bytes": 800,
+      "payload_bytes_stdout": 800,
+      "payload_bytes_structured_content": 269,
+      "profile": "readonly",
+      "raw_stdout": "docs/qa/e33-h04-wire-raw/knowledge_search-4.stdout.json",
+      "result_check": {
+        "is_error": false,
+        "path": "control.md",
+        "total_approximate": 1
+      },
+      "root": "/private/tmp/lodestar-e33-h04-wire-10k",
+      "sha256_stdout": "a9cd3f19e99d3503fcfd8fa3574b9bbeb1be4d193c0b25b8f31c3619ecc5d3f3",
+      "sha256_transcript": "aa17221adbc1835ec1170226a1eba1c7eb9ca00ea6666d258e22eee6c1445824",
+      "time_transcript": "docs/qa/e33-h04-wire-raw/knowledge_search-4.time",
+      "tool": "knowledge_search",
+      "wall_seconds": 0.29
+    },
+    {
+      "args": {
+        "text": "marker-search-h04",
+        "where": "service = \"bench\""
+      },
+      "binary": "target/release/lodestar-mcp",
+      "command": "python3 docs/qa/testbench/lodestar_harness.py --root /private/tmp/lodestar-e33-h04-wire-10k --profile readonly --binary target/release/lodestar-mcp --call knowledge_search {\"text\":\"marker-search-h04\",\"where\":\"service = \\\"bench\\\"\"}",
+      "index": 5,
+      "payload_bytes": 800,
+      "payload_bytes_stdout": 800,
+      "payload_bytes_structured_content": 269,
+      "profile": "readonly",
+      "raw_stdout": "docs/qa/e33-h04-wire-raw/knowledge_search-5.stdout.json",
+      "result_check": {
+        "is_error": false,
+        "path": "control.md",
+        "total_approximate": 1
+      },
+      "root": "/private/tmp/lodestar-e33-h04-wire-10k",
+      "sha256_stdout": "a9cd3f19e99d3503fcfd8fa3574b9bbeb1be4d193c0b25b8f31c3619ecc5d3f3",
+      "sha256_transcript": "aa17221adbc1835ec1170226a1eba1c7eb9ca00ea6666d258e22eee6c1445824",
+      "time_transcript": "docs/qa/e33-h04-wire-raw/knowledge_search-5.time",
+      "tool": "knowledge_search",
+      "wall_seconds": 0.29
+    }
+  ],
+  "official_artifact": "docs/qa/e33-h04-wire-artifact-2026-08-22.json",
+  "profile": "readonly",
+  "schema_version": "e33-h04-wire-evidencia-2026-08-22"
+}

@@ -298,11 +298,13 @@ de `§10`/`§12`; corrigen bloqueantes de historias ya integradas.
 | `decisiones §9` punto 1 — gate de rendimiento con umbrales | Los números (3 variantes × 3 escalas) | E33-H04 |
 | `decisiones §9` punto 1 — «umbrales explícitos» | Umbrales ratificados con datos (puerta interna) + `--gate` + smoke CI | E33-H05 |
 | `decisiones §9` — «banco permanente por release» (README de `decisiones/`) | Runner asertable/portable + paso de `RELEASING.md` + corrida datada | E33-H02, E33-H07 |
+| E33 — retención de evidencia fuera de Git | Resúmenes y manifiesto versionados; brutos comprimidos con URL, SHA-256, tamaño y esquema; fixtures pequeñas en tests | Adenda E33 (2026-08-23) |
 | `decisiones §14` — «no se decide sin medir» (condición de entrada) | Paquete de evidencia: mediciones + dogfooding + coste de conexión + análisis a/b/c, «lista para decidir» | E33-H08 (datos de H04/H06) |
+| `decisiones §14` — validar escala extrema y footprint antes de ratificar | Sonda `--extreme` parametrizable y corrida Realista/100k con tamaños, rebuild y RSS aislado; evidencia permanente para futuras mejoras | E33-H09 |
 | `decisiones §14` absorción `§16(c)` (watcher sin `enable_cache`) | Inventariado en el paquete de evidencia (qué pasa con él en cada salida) | E33-H08 |
 | `decisiones §14` absorción `§16(l)` (divergencia `field_path` core↔store) | Inventariado en el paquete de evidencia como coste de conexión | E33-H08 |
-| `decisiones §22` — integridad referencial del frontmatter (abierta) | Centinela que fija el statu quo citando la ficha, sin cerrarla | E33-H03 |
-| `decisiones §24` — equivalencia caja/Unicode (abierta) | Centinela que fija el statu quo por plataforma, sin cerrarla | E33-H03 |
+| `decisiones §22` — integridad referencial del frontmatter (abierta) | `S22-01`/`S22-02`: silencio de `knowledge_check` e inspección de `relacionadas: [99]` y `affects: [typo-inexistente]`, citando la ficha sin cerrarla | E33-H03 |
+| `decisiones §24` — equivalencia caja/Unicode (abierta) | `S24-01`/`S24-02`: planificación byte a byte sin `change_apply`, citando la ficha sin cerrarla | E33-H03 |
 | `decisiones §23` — «el testbench queda como activo de §9» | Corpus canónico + porte asertable de los `verify_*` e invariantes del informe | E33-H01, E33-H02 |
 | `ARCHITECTURE.md §21.5` — la superficie no promete rendimiento mientras `§14` siga abierta | Preservada explícitamente: banco interno, sin promesa externa (fuera de alcance en todas) | E33 (transversal) |
 | E14-H05 — arnés de escala ~10k | Generador extraído a `lodestar-fixtures` con perfiles plano/realista; `escala.rs` migrado sin cambiar aserciones | E33-H01 |

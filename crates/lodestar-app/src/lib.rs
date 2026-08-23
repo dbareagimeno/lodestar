@@ -37,7 +37,7 @@ use lodestar_core::types::{
     WorkspaceRevision, FRONTMATTER_ANCHOR,
 };
 use lodestar_core::{CoreError, DocumentSet};
-use lodestar_workspace::{revert_transaction_id, Workspace, WorkspaceError};
+use lodestar_workspace::{revert_transaction_id, Workspace, WorkspaceConfig, WorkspaceError};
 
 // ---------------------------------------------------------------------------
 // Códigos de error estables (E10-H02, `ARCHITECTURE.md §19.3`, `REFACTOR.md §13`).
@@ -522,10 +522,20 @@ impl App {
 
     pub fn workspace_status(&self, profile: Profile) -> Result<WorkspaceStatus, AppError> {
         let doc_set = self.workspace.document_set()?;
+        let context = ReadContext::from_app(self);
+        self.workspace_status_with_document_set(&doc_set, profile, &context)
+    }
+
+    fn workspace_status_with_document_set(
+        &self,
+        doc_set: &DocumentSet,
+        profile: Profile,
+        context: &ReadContext,
+    ) -> Result<WorkspaceStatus, AppError> {
         let files = doc_set.files();
         let analysis = doc_set.analyze();
-        let root = self.workspace.root();
-        let cfg = self.workspace.config();
+        let root = &context.root;
+        let cfg = &context.config;
 
         let revision = workspace_revision(files, &cfg.workspace.writable_roots);
         // Aristas del grafo: los enlaces INTERNOS (documentos y fantasmas). Los externos, los
@@ -565,23 +575,13 @@ impl App {
             recovery: StatusRecovery {
                 // E23-H04: computado, no literal. `recovery_pending()` mira los journals no sellados
                 // de `.lodestar/runtime/`, la única fuente durable de «hay algo a medias».
-                pending_transaction: self.workspace.recovery_pending(),
+                pending_transaction: context.recovery_pending,
             },
             // E23-H11: los recibos persistidos, acotados a lo justo para elegir cuál revertir. Sin
             // este listado, un agente que perdía el `receiptId` de `change_apply` no podía revertir
             // aunque el recibo siguiera en disco. No es una 11ª tool: la superficie converge en 10
             // (`§19.6`) y este es el sitio donde ya vive `recovery.pendingTransaction`.
-            receipts: self
-                .workspace
-                .list_receipts()
-                .into_iter()
-                .map(|r| ReceiptSummary {
-                    receipt_id: r.id,
-                    change_set_id: r.change_set_id,
-                    result_revision: r.result_revision,
-                    changed_path_count: r.changed_paths.len(),
-                })
-                .collect(),
+            receipts: context.receipts.clone(),
         })
     }
 
@@ -673,6 +673,22 @@ impl App {
         cursor: Option<&str>,
     ) -> Result<SearchResults, AppError> {
         let doc_set = self.workspace.document_set()?;
+        self.knowledge_search_with_document_set(
+            &doc_set, text, where_expr, filter, include, limit, cursor,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn knowledge_search_with_document_set(
+        &self,
+        doc_set: &DocumentSet,
+        text: &str,
+        where_expr: Option<&str>,
+        filter: Option<&Value>,
+        include: &[FrontmatterProjection],
+        limit: Option<usize>,
+        cursor: Option<&str>,
+    ) -> Result<SearchResults, AppError> {
         let analysis = doc_set.analyze();
         let files = doc_set.files();
 
@@ -843,11 +859,21 @@ impl App {
     ) -> Result<DocumentView, AppError> {
         let path = self.resolve_ref(r)?;
         let doc_set = self.workspace.document_set()?;
+        self.knowledge_get_with_document_set(&doc_set, &path, include, sections)
+    }
+
+    fn knowledge_get_with_document_set(
+        &self,
+        doc_set: &DocumentSet,
+        path: &RelPath,
+        include: &[String],
+        sections: Option<&[Vec<String>]>,
+    ) -> Result<DocumentView, AppError> {
         let files = doc_set.files();
         // `resolve_ref` ya comprobó que `path` está en `Analysis::documents`, que se computa a
         // partir de este mismo `FileMap` (invariante #3) — así que el fichero existe.
         let raw = files
-            .get(&path)
+            .get(path)
             .expect("resolve_ref garantiza presencia en el FileMap");
         let parsed = model::parse_file(path.as_str(), raw);
         let revision = DocumentRevision::from_hash(*blake3::hash(raw.as_bytes()).as_bytes());
@@ -866,24 +892,24 @@ impl App {
             doc_set
                 .analyze()
                 .outgoing
-                .get(&path)
+                .get(path)
                 .cloned()
                 .unwrap_or_default()
         });
-        let backlinks = wants("backlinks").then(|| doc_set.backlinks(&path));
+        let backlinks = wants("backlinks").then(|| doc_set.backlinks(path));
         let diagnostics = wants("diagnostics").then(|| {
             doc_set
                 .analyze()
                 .diagnostics
-                .get(&path)
+                .get(path)
                 .cloned()
                 .unwrap_or_default()
         });
         // Mismo cómputo que `knowledge_search` y `graph_query` (invariante #3: una sola verdad
         // computada, nunca una segunda implementación del título).
-        let title = model::derived_title(parsed.frontmatter.as_ref(), &parsed.body, &path);
+        let title = model::derived_title(parsed.frontmatter.as_ref(), &parsed.body, path);
         Ok(DocumentView {
-            path,
+            path: path.clone(),
             title,
             revision,
             frontmatter,
@@ -963,10 +989,20 @@ impl App {
         cursor: Option<&str>,
     ) -> Result<MetadataInspection, AppError> {
         let doc_set = self.workspace.document_set()?;
+        self.metadata_inspect_with_document_set(&doc_set, mode, field, limit, cursor)
+    }
 
+    fn metadata_inspect_with_document_set(
+        &self,
+        doc_set: &DocumentSet,
+        mode: &str,
+        field: Option<&str>,
+        limit: Option<usize>,
+        cursor: Option<&str>,
+    ) -> Result<MetadataInspection, AppError> {
         match mode {
             "catalog" => {
-                let catalog = metadata::catalog(&doc_set);
+                let catalog = metadata::catalog(doc_set);
                 let (fields, next_cursor) = pagina(
                     catalog.fields,
                     limit,
@@ -1007,7 +1043,7 @@ impl App {
                         mensaje_namespace_no_inspeccionable(&field_path, props),
                     ));
                 }
-                let mut inspection = metadata::inspect_field(&doc_set, &field_path);
+                let mut inspection = metadata::inspect_field(doc_set, &field_path);
                 // E26-H09: un `field` que empieza por el ANCLAJE y no encuentra nada puede ser la
                 // colisión con una clave de primer nivel llamada literalmente `frontmatter`, que el
                 // catálogo SÍ anuncia con ese texto (es su nombre literal, no un anclaje). Devolver
@@ -1016,7 +1052,7 @@ impl App {
                 // catálogo —la misma verdad que el agente leyó— y solo en el caso vacío, que es el
                 // único ambiguo: si la resolución anclada encuentra algo, manda ella.
                 if inspection.present_in == 0 && empieza_por_el_anclaje(field) {
-                    let anunciado = metadata::catalog(&doc_set)
+                    let anunciado = metadata::catalog(doc_set)
                         .fields
                         .iter()
                         .any(|e| e.field.to_string() == field);
@@ -1104,8 +1140,34 @@ impl App {
         cursor: Option<&str>,
     ) -> Result<CheckReport, AppError> {
         let (doc_set, discovery_diagnostics) = self.workspace.document_set_with_discovery()?;
+        self.knowledge_check_with_document_set(
+            &doc_set,
+            discovery_diagnostics,
+            scope,
+            minimum_severity,
+            include_suggested_fixes,
+            limit,
+            cursor,
+            self.workspace.config(),
+            &|r| self.resolve_ref(r),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn knowledge_check_with_document_set(
+        &self,
+        doc_set: &DocumentSet,
+        discovery_diagnostics: Vec<Check>,
+        scope: &CheckScope,
+        minimum_severity: Option<Severity>,
+        include_suggested_fixes: bool,
+        limit: Option<usize>,
+        cursor: Option<&str>,
+        config: &WorkspaceConfig,
+        resolver: &dyn Fn(&DocumentRef) -> Result<RelPath, AppError>,
+    ) -> Result<CheckReport, AppError> {
         let analysis = doc_set.analyze();
-        let cfg = self.workspace.config();
+        let cfg = config;
         // Política de severidad por familia (`§20.9`, E20-H04): reclasifica o suprime cada
         // diagnóstico según `validation`. Con la config por defecto es la identidad.
         let validation = &cfg.validation;
@@ -1113,7 +1175,7 @@ impl App {
         let revision = workspace_revision(doc_set.files(), &cfg.workspace.writable_roots);
 
         // Conjunto de paths del scope.
-        let allowed = self.scope_paths(&doc_set, analysis, scope)?;
+        let allowed = Self::scope_paths(doc_set, analysis, scope, resolver)?;
 
         // Compón (anchor, check) por cada documento del scope, con id estable. El `anchor` es el
         // path del documento (para el orden determinista); en los diagnósticos de descubrimiento sin
@@ -1222,15 +1284,15 @@ impl App {
     /// Resuelve el conjunto de paths que abarca un [`CheckScope`] (E10-H12). Ver la doc de
     /// [`App::knowledge_check`] para la semántica de cada variante.
     fn scope_paths(
-        &self,
         doc_set: &DocumentSet,
         analysis: &Analysis,
         scope: &CheckScope,
+        resolver: &dyn Fn(&DocumentRef) -> Result<RelPath, AppError>,
     ) -> Result<BTreeSet<RelPath>, AppError> {
         match scope {
             CheckScope::Workspace => Ok(analysis.documents.iter().cloned().collect()),
             CheckScope::Document { r#ref } => {
-                let path = self.resolve_ref(r#ref)?;
+                let path = resolver(r#ref)?;
                 Ok(std::iter::once(path).collect())
             }
             CheckScope::Paths { paths } => {
@@ -1245,7 +1307,7 @@ impl App {
                         path: path.clone(),
                         id: None,
                     };
-                    let resolved = self.resolve_ref(&r#ref)?;
+                    let resolved = resolver(&r#ref)?;
                     set.insert(resolved);
                 }
                 Ok(set)
@@ -1253,7 +1315,7 @@ impl App {
             CheckScope::Affected { refs, depth } => {
                 let mut set: BTreeSet<RelPath> = BTreeSet::new();
                 for r in refs {
-                    let path = self.resolve_ref(r)?;
+                    let path = resolver(r)?;
                     let nb = doc_set.neighborhood(&path, *depth, Direction::Both);
                     for node in &nb.nodes {
                         set.insert(node.id.clone());
@@ -1391,7 +1453,32 @@ impl App {
         cursor: Option<&str>,
     ) -> Result<GraphQueryResult, AppError> {
         let doc_set = self.workspace.document_set()?;
+        self.graph_query_with_document_set(
+            &doc_set,
+            operation,
+            r,
+            to,
+            depth,
+            direction,
+            limit,
+            cursor,
+            &|reference| self.resolve_ref(reference),
+        )
+    }
 
+    #[allow(clippy::too_many_arguments)]
+    fn graph_query_with_document_set(
+        &self,
+        doc_set: &DocumentSet,
+        operation: &str,
+        r: Option<&DocumentRef>,
+        to: Option<&DocumentRef>,
+        depth: Option<u32>,
+        direction: Option<&str>,
+        limit: Option<usize>,
+        cursor: Option<&str>,
+        resolver: &dyn Fn(&DocumentRef) -> Result<RelPath, AppError>,
+    ) -> Result<GraphQueryResult, AppError> {
         // Extremo (`ref` u `to`) de las operaciones que lo exigen (E26-H07). Que FALTE es
         // `INVALID_SCHEMA` —el agente tiene que mirar su llamada— y que no RESUELVA es
         // `DOCUMENT_NOT_FOUND` (lo dice `resolve_ref`) —el agente tiene que buscar el documento—:
@@ -1403,7 +1490,7 @@ impl App {
                      operaciones isolated/dangling/cycles/components no lo llevan"
                 ))
             })?;
-            self.resolve_ref(r)
+            resolver(r)
         };
 
         let (mut nodes, mut edges): (Vec<GraphNode>, Vec<Edge>) = match operation {
@@ -1589,30 +1676,31 @@ impl App {
         kind: &str,
         depth: Option<u32>,
     ) -> Result<ImpactReport, AppError> {
-        // E21-H01: `kind` restringido a las operaciones de impacto del modelo universal (`§20.10`).
-        // Los `kind` semánticos retirados caen aquí como esquema de entrada inválido.
-        if kind != "move" && kind != "delete" {
-            return Err(AppError::invalid_schema(format!(
-                "«proposedOperation.kind» debe ser «move» o «delete»; recibido «{kind}». Los kind \
-                 semánticos (deprecate, transition_status, change_relation, replace_document) se \
-                 retiraron en E21-H01 con el modelo que los definía"
-            )));
-        }
+        validate_impact_kind(kind)?;
         let path = self.resolve_ref(r)?;
         let doc_set = self.workspace.document_set()?;
+        self.impact_analyze_with_document_set(&doc_set, &path, kind, depth)
+    }
 
+    fn impact_analyze_with_document_set(
+        &self,
+        doc_set: &DocumentSet,
+        path: &RelPath,
+        kind: &str,
+        depth: Option<u32>,
+    ) -> Result<ImpactReport, AppError> {
         // `directlyAffected`: backlinks DIRECTOS entrantes (verdad del core).
-        let directly_affected = doc_set.backlinks(&path).inbound.len();
+        let directly_affected = doc_set.backlinks(path).inbound.len();
 
         // `transitivelyAffected`: blast-radius entrante (`neighborhood(In)`), excluido el propio
         // `ref`. Profundidad grande por defecto para cubrir todo el alcance transitivo, no solo el
         // vecindario inmediato (paridad con `Store::blast_radius`, invariante #3).
-        let nb = doc_set.neighborhood(&path, depth.unwrap_or(u32::MAX), Direction::In);
+        let nb = doc_set.neighborhood(path, depth.unwrap_or(u32::MAX), Direction::In);
         let mut affected_documents: Vec<RelPath> = nb
             .nodes
             .into_iter()
             .map(|n| n.id)
-            .filter(|id| id != &path)
+            .filter(|id| id != path)
             .collect();
         affected_documents.sort();
         let transitively_affected = affected_documents.len();
@@ -2410,6 +2498,208 @@ impl App {
                 entry.tool
             );
         }
+    }
+}
+
+#[derive(Clone)]
+struct ReadContext {
+    root: PathBuf,
+    config: WorkspaceConfig,
+    recovery_pending: bool,
+    receipts: Vec<ReceiptSummary>,
+}
+
+impl ReadContext {
+    fn from_app(app: &App) -> Self {
+        let receipts = app
+            .workspace
+            .list_receipts()
+            .into_iter()
+            .map(|receipt| ReceiptSummary {
+                receipt_id: receipt.id,
+                change_set_id: receipt.change_set_id,
+                result_revision: receipt.result_revision,
+                changed_path_count: receipt.changed_paths.len(),
+            })
+            .collect();
+        Self {
+            root: app.workspace.root().to_path_buf(),
+            config: app.workspace.config().clone(),
+            recovery_pending: app.workspace.recovery_pending(),
+            receipts,
+        }
+    }
+}
+
+fn validate_impact_kind(kind: &str) -> Result<(), AppError> {
+    if kind != "move" && kind != "delete" {
+        return Err(AppError::invalid_schema(format!(
+            "«proposedOperation.kind» debe ser «move» o «delete»; recibido «{kind}». Los kind \
+             semánticos (deprecate, transition_status, change_relation, replace_document) se \
+             retiraron en E21-H01 con el modelo que los definía"
+        )));
+    }
+    Ok(())
+}
+
+/// Servicios de lectura sobre un `DocumentSet` ya adquirido.
+///
+/// Esta superficie solo existe con `bench-internal`: el producto por defecto sigue exponiendo
+/// exactamente los métodos de `App` y adquiriendo desde disco. El banco usa este mismo código para
+/// comparar adquisiciones alternativas sin conectar el store al producto.
+#[cfg(feature = "bench-internal")]
+pub struct ReadServices<'a> {
+    app: &'a App,
+    doc_set: &'a DocumentSet,
+    context: ReadContext,
+    discovery_diagnostics: Vec<Check>,
+}
+
+#[cfg(feature = "bench-internal")]
+impl<'a> ReadServices<'a> {
+    pub(crate) fn new(app: &'a App, doc_set: &'a DocumentSet) -> Self {
+        Self {
+            app,
+            doc_set,
+            context: ReadContext::from_app(app),
+            discovery_diagnostics: Vec::new(),
+        }
+    }
+
+    pub fn with_discovery_diagnostics(mut self, diagnostics: Vec<Check>) -> Self {
+        self.discovery_diagnostics = diagnostics;
+        self
+    }
+
+    pub fn workspace_status(&self, profile: Profile) -> Result<WorkspaceStatus, AppError> {
+        self.app
+            .workspace_status_with_document_set(self.doc_set, profile, &self.context)
+    }
+
+    pub fn knowledge_search(
+        &self,
+        text: &str,
+        where_expr: Option<&str>,
+        filter: Option<&Value>,
+        include: &[FrontmatterProjection],
+        limit: Option<usize>,
+        cursor: Option<&str>,
+    ) -> Result<SearchResults, AppError> {
+        self.app.knowledge_search_with_document_set(
+            self.doc_set,
+            text,
+            where_expr,
+            filter,
+            include,
+            limit,
+            cursor,
+        )
+    }
+
+    pub fn knowledge_get(
+        &self,
+        r: &DocumentRef,
+        include: &[String],
+        sections: Option<&[Vec<String>]>,
+    ) -> Result<DocumentView, AppError> {
+        let path = resolve_ref_in_document_set(self.doc_set, r)?;
+        self.app
+            .knowledge_get_with_document_set(self.doc_set, &path, include, sections)
+    }
+
+    pub fn metadata_inspect(
+        &self,
+        mode: &str,
+        field: Option<&str>,
+        limit: Option<usize>,
+        cursor: Option<&str>,
+    ) -> Result<MetadataInspection, AppError> {
+        self.app
+            .metadata_inspect_with_document_set(self.doc_set, mode, field, limit, cursor)
+    }
+
+    pub fn knowledge_check(
+        &self,
+        scope: &CheckScope,
+        minimum_severity: Option<Severity>,
+        include_suggested_fixes: bool,
+        limit: Option<usize>,
+        cursor: Option<&str>,
+    ) -> Result<CheckReport, AppError> {
+        self.app.knowledge_check_with_document_set(
+            self.doc_set,
+            self.discovery_diagnostics.clone(),
+            scope,
+            minimum_severity,
+            include_suggested_fixes,
+            limit,
+            cursor,
+            &self.context.config,
+            &|r| resolve_ref_in_document_set(self.doc_set, r),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn graph_query(
+        &self,
+        operation: &str,
+        r: Option<&DocumentRef>,
+        to: Option<&DocumentRef>,
+        depth: Option<u32>,
+        direction: Option<&str>,
+        limit: Option<usize>,
+        cursor: Option<&str>,
+    ) -> Result<GraphQueryResult, AppError> {
+        self.app.graph_query_with_document_set(
+            self.doc_set,
+            operation,
+            r,
+            to,
+            depth,
+            direction,
+            limit,
+            cursor,
+            &|r| resolve_ref_in_document_set(self.doc_set, r),
+        )
+    }
+
+    pub fn impact_analyze(
+        &self,
+        r: &DocumentRef,
+        kind: &str,
+        depth: Option<u32>,
+    ) -> Result<ImpactReport, AppError> {
+        validate_impact_kind(kind)?;
+        let path = resolve_ref_in_document_set(self.doc_set, r)?;
+        self.app
+            .impact_analyze_with_document_set(self.doc_set, &path, kind, depth)
+    }
+}
+
+#[cfg(feature = "bench-internal")]
+impl App {
+    /// Crea el seam interno para el banco; no añade símbolos en la compilación por defecto.
+    pub fn read_services<'a>(&'a self, doc_set: &'a DocumentSet) -> ReadServices<'a> {
+        ReadServices::new(self, doc_set)
+    }
+}
+
+#[cfg(feature = "bench-internal")]
+fn resolve_ref_in_document_set(
+    doc_set: &DocumentSet,
+    r: &DocumentRef,
+) -> Result<RelPath, AppError> {
+    if doc_set.analyze().documents.contains(&r.path) {
+        Ok(r.path.clone())
+    } else {
+        Err(AppError::new(
+            ErrorCode::DocumentNotFound,
+            format!(
+                "«{}» no es un documento del workspace: la identidad de un documento es su \
+                 ruta relativa, tal y como la devuelven knowledge_search o graph_query",
+                r.path.as_str()
+            ),
+        ))
     }
 }
 

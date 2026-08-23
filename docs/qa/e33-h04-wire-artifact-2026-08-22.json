@@ -1,0 +1,56 @@
+{
+  "binary": "target/release/lodestar-mcp",
+  "profile": "realista",
+  "results": [
+    {
+      "arguments": {},
+      "p50_seconds": 0.26,
+      "p95_seconds": 0.29,
+      "payload_bytes": 1298,
+      "payload_bytes_stdout": 1298,
+      "payload_bytes_structured_content": 506,
+      "real_seconds": [
+        0.29,
+        0.25,
+        0.26,
+        0.25,
+        0.26
+      ],
+      "result_check": {
+        "documents": 10004,
+        "is_error": false
+      },
+      "sample_count": 5,
+      "tool": "workspace_status"
+    },
+    {
+      "arguments": {
+        "text": "marker-search-h04",
+        "where": "service = \"bench\""
+      },
+      "p50_seconds": 0.29,
+      "p95_seconds": 0.29,
+      "payload_bytes": 800,
+      "payload_bytes_stdout": 800,
+      "payload_bytes_structured_content": 269,
+      "real_seconds": [
+        0.29,
+        0.29,
+        0.29,
+        0.29,
+        0.29
+      ],
+      "result_check": {
+        "is_error": false,
+        "path": "control.md",
+        "total_approximate": 1
+      },
+      "sample_count": 5,
+      "tool": "knowledge_search"
+    }
+  ],
+  "root": "/private/tmp/lodestar-e33-h04-wire-10k",
+  "runtime_profile": "readonly",
+  "scale": 10000,
+  "schema_version": "e33-h04-wire-2026-08-22"
+}

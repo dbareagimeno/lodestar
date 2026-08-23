@@ -25,6 +25,8 @@ schemars = { workspace = true }
 
 [features]
 default = []
+# Seam interno de medición de E33-H04. No forma parte de la superficie por defecto ni del wire.
+bench-internal = []
 # Passthrough del arnés de fallo/gancho de `lodestar-workspace` (E25-H01). No cablea nada en
 # producción: solo permite que los tests de esta fachada armen los seams del orquestador
 # transaccional (p. ej. inyectar una edición externa en la ventana `[T1, T3)` de la publicación) y

@@ -7,6 +7,53 @@ y el proyecto sigue [Versionado Semántico](https://semver.org/lang/es/).
 
 ## [No publicado]
 
+### Añadido
+
+- **Sonda extrema de rendimiento (E33-H09)**. `lodestar-bench --extreme` acepta escala e
+  iteraciones arbitrarias, hace preflight de espacio y mide las tres variantes × siete lecturas
+  con workers aislados y pico RSS atribuible. La corrida Realista/100k queda registrada mediante su
+  resumen Markdown y manifiesto (el JSON bruto se publica comprimido fuera de Git); no cambia full/smoke/H05/CI ni
+  decide `decisiones §14`. El `README` del crate enlaza una guía operativa permanente y una
+  referencia separada con las métricas H04/10k y H09/100k vigentes, para repetir corridas y evaluar
+  futuras optimizaciones sin sobrescribir la evidencia primaria.
+
+- **Paquete de decisión del store (E33-H06/H08)**. Tres sesiones de dogfooding `readonly` y una
+  corrida fría sobre el repo real complementan el banco sintético; el documento
+  `docs/qa/evidencia-14-store-2026-08.md` reúne mediciones, costes de conexión y las salidas
+  conectar/acotar/retirar. `decisiones §14` queda lista para ratificación, pero sigue abierta y no
+  se conecta, acota ni retira el store.
+
+- **Centinelas de las decisiones abiertas §22 y §24** (`E33-H03`). El banco de conformidad añade
+  `sentinela_s22.json` y `sentinela_s24.json` a `--run-all`, fija referencias de frontmatter
+  huérfanas inspeccionables y verifica planes de colisión por caja/Unicode sin aplicar cambios.
+  Ambas fichas permanecen abiertas.
+
+- **Enganche del testbench a releases (E33-H07)**. `RELEASING.md` exige correr conformidad
+  canónica y rendimiento full con `lodestar-bench --gate` en la máquina de baseline antes del PR
+  a `develop`; un FAIL es stop-the-line. El workflow manual `testbench.yml` publica conformidad y
+  rendimiento smoke sin juzgar umbrales absolutos, y la primera corrida bajo la convención queda
+  en `docs/qa/corridas/v0.6.2/` (18 lotes, 103/103 PASS en conformidad). El enlace a un run remoto
+  en verde
+  queda pendiente de ejecutar tras integrar/publicar.
+
+- **Gate interno de rendimiento E33-H05**. `lodestar-bench --gate` lee informes H04 con la
+  interfaz explícita `--report`, `--thresholds`, `--baseline` y `--machine-id`; juzga los techos
+  ratificados de `disk-reparseo`/10k solo en la máquina de baseline, y fuera de ella declara y
+  compara únicamente tendencia. La baseline y la constancia están versionadas en `docs/qa/`.
+  El smoke de CI no juzga absolutos. Esto no cambia el contrato MCP ni convierte SQLite en veto.
+
+- **Banco de rendimiento reproducible** (`E33-H04`). El crate interno y no publicable
+  `lodestar-bench` compara las siete lecturas actuales por disco-reparseo, SQLite-raw y
+  RAM-memoizado en perfiles Plano/Realista a 100/1k/10k documentos, con `rebuild` separado,
+  equivalencia JSON exacta y el ciclo de escritura restringido a `App`. La primera corrida release
+  y su calibración MCP/stdio real quedan registradas en `docs/qa/`; no se conecta SQLite al
+  producto ni cambia el contrato MCP.
+  La corrida oficial release del 2026-08-22 usa 10 muestras por lectura y por ciclo en las seis
+  combinaciones perfil/escala. En Realista/10k, disco-reparseo registra cold-open p95 de 248.8 ms y
+  peor lectura (`impact_analyze`) p95 de 481.5 ms; SQLite-raw registra `rebuild` p95 de 14.05 s; el ciclo
+  App/disco p95 es 3.38 s. La calibración formal wire readonly registra p95 de 0.29 s para
+  `workspace_status` y `knowledge_search`; la pasada exploratoria de 1.65 s queda excluida.
+
 ## [0.6.2] - 2026-08-20
 
 ### Corregido
