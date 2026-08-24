@@ -6,12 +6,16 @@
 //! No se inspecciona ni se modifica código de producción desde los tests.
 
 use std::collections::BTreeMap;
+use std::error::Error;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Output, Stdio};
 use std::sync::{mpsc, Arc, Barrier};
 use std::time::Duration;
 
+use lodestar_app::{App, Profile};
+use lodestar_mcp::{LodestarMcpService, SerialExecutor};
+use lodestar_workspace::failpoints::{self, PuntoDeGancho};
 use serde_json::{json, Value};
 
 fn write_file(root: &Path, relative: &str, contents: &str) {
@@ -228,8 +232,20 @@ fn command_output_with_timeout(mut command: Command, timeout: Duration) -> Outpu
         }
         if std::time::Instant::now() >= deadline {
             let _ = process.kill();
-            let _ = process.wait();
-            panic!("comando auxiliar agotó su timeout de {timeout:?}");
+            let status = process.wait().expect("esperar comando auxiliar tras kill");
+            let stdout = stdout_task
+                .join()
+                .expect("lector stdout auxiliar tras timeout")
+                .expect("drenar stdout auxiliar tras timeout");
+            let stderr = stderr_task
+                .join()
+                .expect("lector stderr auxiliar tras timeout")
+                .expect("drenar stderr auxiliar tras timeout");
+            panic!(
+                "comando auxiliar agotó su timeout de {timeout:?}: status={status}, stdout={:?}, stderr={:?}",
+                String::from_utf8_lossy(&stdout),
+                String::from_utf8_lossy(&stderr)
+            );
         }
         std::thread::sleep(Duration::from_millis(25));
     };
@@ -423,12 +439,6 @@ fn stdio_eof_limpio() {
     assert!(frames.iter().all(|frame| frame["jsonrpc"] == "2.0"));
 }
 
-const EXECUTOR_PROBE_MAIN: &str = r#"use lodestar_app::{App, Profile};
-use lodestar_mcp::{LodestarMcpService, SerialExecutor};
-use lodestar_workspace::failpoints::{self, PuntoDeGancho};
-use serde_json::{json, Value};
-use std::{env, error::Error, path::Path, sync::{mpsc, Arc, Barrier}, thread, time::Duration};
-
 fn plan_args(value: &str) -> Value {
     json!({
         "operations": [{
@@ -447,13 +457,17 @@ fn change_set_id(value: &Value) -> Result<String, Box<dyn Error>> {
         .to_owned())
 }
 
-fn assert_domain_conflict(value: &Value) -> Result<(), Box<dyn Error>> {
-    let object = value.as_object().ok_or("domain error envelope is not an object")?;
+fn assert_probe_domain_conflict(value: &Value) -> Result<(), Box<dyn Error>> {
+    let object = value
+        .as_object()
+        .ok_or("domain error envelope is not an object")?;
     if object.len() != 2 || !object.contains_key("content") || !object.contains_key("isError") {
         return Err(format!("unexpected domain error envelope: {value}").into());
     }
     if value["isError"] != true || !value["structuredContent"].is_null() {
-        return Err(format!("domain error must be isError without success payload: {value}").into());
+        return Err(
+            format!("domain error must be isError without success payload: {value}").into(),
+        );
     }
     let content = value["content"]
         .as_array()
@@ -479,13 +493,14 @@ fn assert_domain_conflict(value: &Value) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn main() -> Result<(), Box<dyn Error>> {
-    let root = env::var("E34_C3_ROOT")?;
-    let app = App::open(Path::new(&root))?;
+fn run_serial_executor_probe(root: &Path) -> Result<(), Box<dyn Error>> {
+    let app = App::open(root)?;
     let service = LodestarMcpService::new(app, Profile::Standard);
     let executor = SerialExecutor::new(service);
 
-    let setup = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+    let setup = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
     let (id_a, id_b) = setup.block_on(async {
         let plan_a = executor.call("change_plan", plan_args("ganador-A")).await?;
         let plan_b = executor.call("change_plan", plan_args("ganador-B")).await?;
@@ -498,15 +513,22 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let executor_a = executor.clone();
     let gate_a = Arc::clone(&gate);
-    let thread_a = thread::spawn(move || {
-        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let thread_a = std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
         runtime.block_on(async move {
             let entered_tx = entered_tx;
             failpoints::armar_gancho(PuntoDeGancho::AntesDePublicar, move || {
-                entered_tx.send(()).expect("señalar entrada de change_apply A");
+                entered_tx
+                    .send(())
+                    .expect("señalar entrada de change_apply A");
                 gate_a.wait();
             });
-            let result = executor_a.call("change_apply", json!({"changeSetId": id_a})).await;
+            let result = executor_a
+                .call("change_apply", json!({"changeSetId": id_a}))
+                .await;
             failpoints::desarmar_ganchos();
             result
         })
@@ -514,14 +536,24 @@ fn main() -> Result<(), Box<dyn Error>> {
     entered_rx.recv_timeout(Duration::from_secs(5))?;
 
     let executor_b = executor.clone();
-    let thread_b = thread::spawn(move || {
-        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let thread_b = std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
         let result = runtime.block_on(async move {
-            executor_b.call("change_apply", json!({"changeSetId": id_b})).await
+            executor_b
+                .call("change_apply", json!({"changeSetId": id_b}))
+                .await
         });
-        returned_b_tx.send(result).expect("entregar resultado de change_apply B");
+        returned_b_tx
+            .send(result)
+            .expect("entregar resultado de change_apply B");
     });
-    if returned_b_rx.recv_timeout(Duration::from_millis(200)).is_ok() {
+    if returned_b_rx
+        .recv_timeout(Duration::from_millis(200))
+        .is_ok()
+    {
         return Err("change_apply B retornó antes de liberar A: executor no serializa".into());
     }
     gate.wait();
@@ -532,8 +564,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     if result_a["structuredContent"]["applied"] != true {
         return Err(format!("A no publicó: {result_a}").into());
     }
-    assert_domain_conflict(&result_b)?;
-    let contents = std::fs::read_to_string(Path::new(&root).join("note.md"))?;
+    assert_probe_domain_conflict(&result_b)?;
+    let contents = std::fs::read_to_string(root.join("note.md"))?;
     if !contents.contains("ganador-A") || contents.contains("ganador-B") {
         return Err(format!(
             "el primer apply debe observarse en el estado compartido y descartar B: {contents}"
@@ -542,13 +574,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     // Control anti-implementación «rechazar siempre el segundo apply»: sobre el estado ya
-    // publicado, dos planes nuevos y válidos deben poder aplicarse consecutivamente. Así el
-    // rechazo de B arriba tiene que proceder de la revisión/plan obsoleto, no de la posición de
-    // la llamada en una secuencia.
-    let sequence = SerialExecutor::new(LodestarMcpService::new(
-        App::open(Path::new(&root))?,
-        Profile::Standard,
-    ));
+    // publicado, dos planes nuevos y válidos deben poder aplicarse consecutivamente.
+    let sequence =
+        SerialExecutor::new(LodestarMcpService::new(App::open(root)?, Profile::Standard));
     setup.block_on(async {
         let plan_c = sequence.call("change_plan", plan_args("ganador-C")).await?;
         let id_c = change_set_id(&plan_c)?;
@@ -571,42 +599,26 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
         Ok::<_, Box<dyn Error>>(())
     })?;
-    let contents = std::fs::read_to_string(Path::new(&root).join("note.md"))?;
+    let contents = std::fs::read_to_string(root.join("note.md"))?;
     if !contents.contains("ganador-D") {
-        return Err(format!("el segundo apply válido no dejó su efecto en disco: {contents}").into());
+        return Err(
+            format!("el segundo apply válido no dejó su efecto en disco: {contents}").into(),
+        );
     }
     println!("E34_H03_SERIAL_OK:change_apply_A_then_B");
     Ok(())
 }
-"#;
 
 fn run_executor_probe(root: &Path) -> Output {
-    let helper = tempfile::tempdir().expect("tempdir para probe de SerialExecutor");
-    let mcp_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let app_path = mcp_path.join("../lodestar-app");
-    let workspace_path = mcp_path.join("../lodestar-workspace");
-    let manifest = format!(
-        "[package]\nname = \"e34-h03-executor-probe\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[dependencies]\nlodestar-mcp = {{ path = {} }}\nlodestar-app = {{ path = {}, features = [\"test-failpoints\"] }}\nlodestar-workspace = {{ path = {}, features = [\"test-failpoints\"] }}\nserde_json = \"1\"\ntokio = {{ version = \"1\", features = [\"rt\", \"sync\", \"time\"] }}\n",
-        toml_basic_string(&mcp_path.to_string_lossy()),
-        toml_basic_string(&app_path.to_string_lossy()),
-        toml_basic_string(&workspace_path.to_string_lossy()),
-    );
-    write_file(helper.path(), "Cargo.toml", &manifest);
-    write_file(helper.path(), "src/main.rs", EXECUTOR_PROBE_MAIN);
-    let target_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../target/agent-state/e34-h03/executor-target");
-    std::fs::create_dir_all(&target_dir).expect("crear target persistente del probe");
-    let mut cargo = Command::new("cargo");
-    cargo.args([
-        "run",
-        "--offline",
-        "--manifest-path",
-        helper.path().join("Cargo.toml").to_str().unwrap(),
-        "--target-dir",
-        target_dir.to_str().unwrap(),
+    let mut command = Command::new(std::env::current_exe().expect("ruta del integration-test"));
+    command.args([
+        "--exact",
+        "stdio_concurrencia_executor_serial",
+        "--nocapture",
     ]);
-    cargo.env("E34_C3_ROOT", root);
-    command_output_with_timeout(cargo, Duration::from_secs(90))
+    command.env("E34_H03_C3_CHILD", "1");
+    command.env("E34_C3_ROOT", root);
+    command_output_with_timeout(command, Duration::from_secs(10))
 }
 
 struct Running {
@@ -736,16 +748,18 @@ impl Running {
 /// C3 — dos aplicaciones concurrentes se serializan y una observa el efecto de la otra.
 #[test]
 fn stdio_concurrencia_executor_serial() {
+    if std::env::var_os("E34_H03_C3_CHILD").is_some() {
+        let root = PathBuf::from(
+            std::env::var_os("E34_C3_ROOT").expect("el child probe recibe E34_C3_ROOT"),
+        );
+        run_serial_executor_probe(&root)
+            .unwrap_or_else(|error| panic!("probe SerialExecutor falló: {error}"));
+        return;
+    }
+
     let probe_root = workspace_fixture();
     let probe = run_executor_probe(probe_root.path());
-    if !probe.status.success() {
-        let stderr = String::from_utf8_lossy(&probe.stderr);
-        assert!(
-            stderr.contains("SerialExecutor"),
-            "el probe C3 sólo puede fallar por la API SerialExecutor ausente: {stderr}"
-        );
-        panic!("E34-H03 C3 rojo: el probe SerialExecutor no compila aún; stderr={stderr}");
-    }
+    assert_success(&probe);
     assert!(
         String::from_utf8_lossy(&probe.stdout).contains("E34_H03_SERIAL_OK:change_apply_A_then_B"),
         "el probe SerialExecutor debe demostrar exclusión y orden: stdout={:?}, stderr={:?}",

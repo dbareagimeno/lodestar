@@ -30,6 +30,8 @@ workspace = true
 
 [dev-dependencies]
 tempfile = "=3.24.0"
+lodestar-app = { workspace = true, features = ["test-failpoints"] }
+lodestar-workspace = { workspace = true, features = ["test-failpoints"] }
 # E24-H15: valida que el `structuredContent` que emite cada tool CONFORMA el `outputSchema` que
 # declara. Es lo que hace un cliente MCP estricto, y hasta ahora nada lo comprobaba: el test
 # existente solo miraba 5 de las 10 tools y solo que el schema «tuviera alguna clave estructural».
