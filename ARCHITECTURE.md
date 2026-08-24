@@ -935,6 +935,8 @@ gate:
 transactions:
   retainReceiptsFor: 24h
   maximumReceipts:   20
+performance:
+  maxMemory:         256MiB
 # identity: DORMIDA (git fuera de superficie; se conserva por si vcs vuelve)
 ```
 
@@ -943,8 +945,9 @@ transactions:
 > arriba se **amplía** con dos secciones que documentan `§20.5` y `§20.9`: `discovery`
 > (`include`/`exclude`/`respectGitignore`/`respectLodestarIgnore`/`followSymlinks`/
 > `maxDocumentBytes`) y `validation` (severidad por familia de diagnóstico), más
-> `transactions.rejectNewErrors`/`allowExistingErrors`. `validation` y la política de cambios **solo
-> se cargan**: aplicarlas es E20. `workspace.root` **no** se implementa (circular, `§20.5`).
+> `transactions.rejectNewErrors`/`allowExistingErrors` y `performance.maxMemory` (el presupuesto
+> ratificado en `§23`). `validation` y la política de cambios **solo se cargan**: aplicarlas es E20.
+> `workspace.root` **no** se implementa (circular, `§20.5`).
 
 `.lodestar/` se parte en **dos naturalezas**:
 
@@ -1716,3 +1719,91 @@ tools), el dato de dogfooding, el inventario del coste de conexión (§22.5), y 
 tres salidas de la ficha —conectar / acotar / retirar— **contra los datos**, actualizando o
 refutando la recomendación escrita en ella. Termina en **«lista para decidir»**: la decisión, su
 ratificación y el cambio de estado de `decisiones §14` son del usuario, fuera de la épica.
+
+## 23. Presupuesto de memoria retenida (E35-H01)
+
+> **Adenda de diseño ratificada el 2026-08-24.** Esta sección fija el contrato de configuración y
+> la política de la issue #53, titulada originalmente **E34-H01**. La trazabilidad local normativa es
+> **E34-H01 → E35-H01**; no debe confundirse con E34-H01, la historia ya cerrada de interoperabilidad
+> MCP. E35-H01 cubre la configuración, `MemoryBudget` y sus subpresupuestos, tests, mensajes y
+> documentación. El texto de diseño por sí solo no constituye evidencia de ejecución; la entrega
+> implementada consta en `IMPLEMENTATION_STATUS.md` y en sus tests. Esta sección no cambia el
+> contrato MCP, no conecta SQLite al camino de lectura ni implementa la cache W-TinyLFU.
+> `decisiones §14` permanece abierta y esta adenda no elige entre conectar, acotar o retirar el store.
+
+### 23.1 Configuración pública y gramática
+
+La única perilla pública de esta política es `performance.maxMemory` en
+`.lodestar/config.yaml`:
+
+```yaml
+performance:
+  maxMemory: 256MiB
+```
+
+Si el campo se omite, el valor es **256 MiB**. El valor mínimo admitido es **64 MiB**. El scalar
+YAML semántico, una vez deserializado, debe satisfacer exactamente la gramática
+`[1-9][0-9]*(MiB|GiB)`: no admite espacios en su contenido, fracciones, ceros iniciales ni unidades
+alternativas, y distingue mayúsculas y minúsculas. El whitespace sintáctico que YAML separa antes
+de un newline, comentario, coma o `}` no forma parte del scalar y es válido; por ejemplo,
+`performance: {maxMemory: 256MiB }` equivale a `256MiB`. En cambio, `0MiB`, `064MiB`, `1.5GiB`,
+`"256MiB "`, `" 256MiB"`, `256 MiB`, `256mib` y `256MB` no lo son. No se introduce un
+scanner/lexer source-aware ni un parser YAML paralelo.
+
+El parser convierte MiB/GiB a bytes internos `u64` usando factores binarios (`1024^2` y `1024^3`)
+y aritmética y conversiones *checked*. Un texto que desborde `u64`, o un valor por debajo de
+64 MiB, se rechaza con un error accionable que nombra `performance.maxMemory`, el valor recibido y
+la regla que incumple. La carga conserva el camino de errores existente: en la superficie MCP el
+fallo se mapea a `INTERNAL_IO_ERROR`; no se añade un código ni un campo al contrato.
+
+La validación de configuración no consulta cgroups, RSS ni la memoria disponible del host al abrir
+un workspace. La aceptación del valor depende solo de su sintaxis, rango y conversión segura.
+Configuraciones anteriores son compatibles por adición cuando omiten `performance.maxMemory` y
+reciben el default; un binario antiguo puede rechazar el campo nuevo y esa asimetría se documenta
+como compatibilidad esperable.
+
+### 23.2 Contabilidad y cuotas internas
+
+Sea `N` el total, en bytes, de `performance.maxMemory`: es memoria retenida y controlable que
+Lodestar puede contabilizar y liberar, no un límite de RSS. `MemoryBudget` se crea una sola vez al
+abrir el workspace y tiene un único owner: `lodestar-workspace::Workspace::open`. Ni
+`lodestar-core`, ni `lodestar-store`, ni las fachadas crean o poseen otro presupuesto; reciben, si
+corresponde, los subpresupuestos que ese owner les entrega.
+
+La partición normativa es exacta y agota `N`. Se calcula siempre sobre el mismo `N` entero:
+
+- `SQLite = floor(30 * N / 100)`: cuota interna blanda para memoria retenida atribuible a SQLite.
+- `W-TinyLFU = floor(20 * N / 100)`: cuota interna blanda para la cache W-TinyLFU.
+- `Work = N - SQLite - W-TinyLFU`: reserva protegida **dentro de `N`** para el trabajo en curso;
+  recibe todo residuo de las dos divisiones. Las caches nunca pueden invadir esos bytes, aunque
+  queden libres.
+
+Por tanto, `SQLite + W-TinyLFU + Work = N` exactamente. `Work` es al menos el 50 % de `N`, pero no
+se calcula como `floor(50 * N / 100)`: esa expresión perdería el residuo.
+
+Las cuotas de SQLite y W-TinyLFU son blandas y no son perillas públicas ni límites MCP; la
+contabilidad total sigue acotada por `N` y ninguna cache puede tomar la reserva `Work`. No existe una
+cuarta reserva, un pool sin tope ni un tamaño separado o abierto para la reserva protegida. Las
+mediciones históricas de RSS del banco (§22.5a) siguen siendo evidencia diagnóstica separada y no
+verifican ni sustituyen este presupuesto.
+
+### 23.3 Documentos grandes y fallo explícito
+
+`discovery.maxDocumentBytes` sigue siendo el límite de admisión documental. Un documento admitido
+puede procesarse fuera de la cache retenida —por ejemplo, mediante una ruta acotada de lectura y
+parseo— cuando hacerlo sea seguro bajo el presupuesto. El motor no debe forzar su inserción en la
+cache ni reintentar indefinidamente expulsiones y recargas: si no puede procesarlo de forma segura,
+falla explícitamente por el camino de error existente (`INTERNAL_IO_ERROR` en MCP), con un mensaje
+accionable que indique el documento, el límite relevante y la acción posible. Esto evita *thrashing*
+y no sustituye el diagnóstico vigente de documento que excede `maxDocumentBytes`. Esta semántica se
+ratifica ahora; la implementación efectiva de la ruta fuera de cache, del fallo explícito y de la
+protección contra *thrashing* corresponde a las issues posteriores **#55, #57, #59 y #62**, según la
+historia concreta, y no es una promesa de E35-H01.
+
+### 23.4 Alcance de la adenda
+
+E35-H01 implementa la carga de `performance.maxMemory`, `MemoryBudget` y sus subpresupuestos,
+junto con sus tests, mensajes accionables y documentación. No modifica
+`contracts/mcp.yml`, no abre presets ni knobs adicionales, no conecta SQLite al camino de lectura,
+no implementa la cache W-TinyLFU y no resuelve `decisiones §14`. Las rutas efectivas descritas en
+§23.3 pertenecen al trabajo posterior indicado allí y deberán respetar esta sección.

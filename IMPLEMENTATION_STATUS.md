@@ -44,6 +44,35 @@
 > Lo pendiente está en [`decisiones/`](decisiones/README.md): fechas en el lenguaje de consulta (§12),
 > el **store sin consumidor** (§14, abierto en E23-H16). §12 y §13 se cerraron en E23-H14.
 
+### E35-H01 — presupuesto de memoria retenida (issue #53; implementada)
+
+✅ **Implementada y verificada el 2026-08-24.** La issue está titulada originalmente **E34-H01** y
+se materializa localmente como **E34-H01 → E35-H01**; no es la historia E34-H01 de MCP.
+
+La implementación añade a `lodestar-workspace` la única perilla pública
+`performance.maxMemory`, con default `256MiB`, mínimo `64MiB` y gramática estricta
+`[1-9][0-9]*(MiB|GiB)`. Convierte MiB/GiB a bytes `u64` con aritmética *checked*, rechaza campos
+desconocidos y produce errores accionables por el camino existente `INTERNAL_IO_ERROR`, sin delta
+en el contrato MCP. `Workspace::open` construye una sola instancia de `MemoryBudget` y la expone
+como su único owner; no se consulta cgroup/RSS al abrir.
+
+Sea `N` el total controlable de `performance.maxMemory`: SQLite y W-TinyLFU tienen cuotas internas
+blandas `floor(30*N/100)` y `floor(20*N/100)`, respectivamente, y `Work = N - SQLite - W-TinyLFU`
+es la reserva protegida dentro de `N` que recibe todo residuo. La suma es exacta; no existe una
+cuarta reserva, un pool sin tope ni un tamaño abierto, y las caches nunca invaden `Work`.
+
+La evidencia dirigida está en `crates/lodestar-workspace/tests/e35_h01_config_red.rs` (gramática,
+mínimo, overflow, configuración estricta y ausencia de consumidores),
+`crates/lodestar-workspace/tests/e35_h01_memory.rs` (default independiente del host, ownership y
+partición exacta), `crates/lodestar-mcp/tests/e35_h01_memory.rs` (proyección del error existente) y
+`crates/lodestar-fixtures/tests/e35_h01_docs.rs` (C9 documental de fórmula y trazabilidad).
+
+La semántica de procesar fuera de cache cuando sea seguro, fallar explícitamente si no lo es y
+evitar *thrashing* queda deferida a las issues posteriores **#55, #57, #59 y #62**, según la
+historia concreta. E35-H01 no conecta SQLite al camino de lectura, no implementa la cache
+W-TinyLFU, no modifica `contracts/mcp.yml` y mantiene `decisiones §14` abierta. Configs antiguas
+omiten el campo y usan el default; binarios antiguos pueden rechazarlo.
+
 ### E33-H04 — banco de rendimiento (2026-08-22)
 
 ✅ Completado. La corrida oficial está identificada en el [manifiesto de evidencia v0.6.2](docs/qa/corridas/v0.6.2/manifest.json),

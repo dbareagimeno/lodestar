@@ -6,7 +6,7 @@
 
 use std::{error::Error, path::PathBuf};
 
-use lodestar_app::{App, Profile};
+use lodestar_app::{App, AppError, Profile};
 use lodestar_mcp::{LodestarMcpServer, LodestarMcpService, SerialExecutor};
 use rmcp::ServiceExt;
 
@@ -84,7 +84,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let app = match App::open(&root) {
         Ok(app) => app,
         Err(error) => {
-            eprintln!("lodestar-mcp: no se pudo abrir el workspace: {error}");
+            let error = AppError::from(error);
+            eprintln!("{error}");
             std::process::exit(3);
         }
     };

@@ -27,6 +27,7 @@ pub mod discovery;
 /// `--features test-failpoints`.
 #[cfg(feature = "test-failpoints")]
 pub mod failpoints;
+mod memory;
 
 /// Aborta la transacción si el punto de caída está armado (E24-H13).
 ///
@@ -61,10 +62,11 @@ mod snapshot;
 mod staging;
 mod transaction;
 
-pub use config::WorkspaceConfig;
+pub use config::{PerformanceSection, WorkspaceConfig};
 pub use error::WorkspaceError;
 pub use journal::{Journal, JournalState, OpState};
 pub use lock::WorkspaceLock;
+pub use memory::MemoryBudget;
 pub use recovery::RecoveryDir;
 pub use snapshot::WorkspaceSnapshot;
 pub use staging::StagingDir;
@@ -75,6 +77,8 @@ pub struct Workspace {
     root: PathBuf,
     /// Configuración de la sesión (`.lodestar/config.yaml`), leída **una sola vez** al abrir.
     config: WorkspaceConfig,
+    /// Presupuesto único de memoria de esta apertura (`ARCHITECTURE.md §23`).
+    memory_budget: MemoryBudget,
     /// Cache incremental (SQLite/FTS5). `None` mientras no se active con
     /// [`Workspace::enable_cache`] (el caso de la CLI one-shot, que lee del core y no la necesita).
     cache: Option<Arc<Store>>,
@@ -114,9 +118,12 @@ impl Workspace {
         // La config se lee UNA vez por sesión: la raíz y su política son fijas mientras el
         // workspace vive (`ARCHITECTURE.md §20.5`). Es lo ÚNICO que hace abrir: una lectura.
         let config = WorkspaceConfig::load(root).map_err(WorkspaceError::Io)?;
+        let memory_budget = MemoryBudget::from_bytes(config.performance.max_memory_bytes())
+            .map_err(WorkspaceError::Io)?;
         Ok(Workspace {
             root: root.to_path_buf(),
             config,
+            memory_budget,
             cache: None,
             _watcher: None,
         })
@@ -127,6 +134,11 @@ impl Workspace {
     /// proyecto.
     pub fn config(&self) -> &WorkspaceConfig {
         &self.config
+    }
+
+    /// Presupuesto construido una sola vez por [`Workspace::open`].
+    pub fn memory_budget(&self) -> &MemoryBudget {
+        &self.memory_budget
     }
 
     /// La [`DiscoveryPolicy`] efectiva del workspace (`ARCHITECTURE.md §20.5`).
