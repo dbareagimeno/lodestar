@@ -302,7 +302,7 @@ de `§10`/`§12`; corrigen bloqueantes de historias ya integradas.
 | `decisiones §14` — «no se decide sin medir» (condición de entrada) | Paquete de evidencia: mediciones + dogfooding + coste de conexión + análisis a/b/c, «lista para decidir» | E33-H08 (datos de H04/H06) |
 | `decisiones §14` — validar escala extrema y footprint antes de ratificar | Sonda `--extreme` parametrizable y corrida Realista/100k con tamaños, rebuild y RSS aislado; evidencia permanente para futuras mejoras | E33-H09 |
 | `decisiones §14` absorción `§16(c)` (watcher sin `enable_cache`) | Inventariado en el paquete de evidencia (qué pasa con él en cada salida) | E33-H08 |
-| `decisiones §14` absorción `§16(l)` (divergencia `field_path` core↔store) | Inventariado en el paquete de evidencia como coste de conexión | E33-H08 |
+| `decisiones §14` absorción `§16(l)` (`field_path` core↔store) | Resuelta por E35-H02: `fields.field_path` conserva la representación anclada del core; C6 mantiene la paridad | E35-H02 |
 | `decisiones §22` — integridad referencial del frontmatter (abierta) | `S22-01`/`S22-02`: silencio de `knowledge_check` e inspección de `relacionadas: [99]` y `affects: [typo-inexistente]`, citando la ficha sin cerrarla | E33-H03 |
 | `decisiones §24` — equivalencia caja/Unicode (abierta) | `S24-01`/`S24-02`: planificación byte a byte sin `change_apply`, citando la ficha sin cerrarla | E33-H03 |
 | `decisiones §23` — «el testbench queda como activo de §9» | Corpus canónico + porte asertable de los `verify_*` e invariantes del informe | E33-H01, E33-H02 |

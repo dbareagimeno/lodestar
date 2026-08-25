@@ -34,13 +34,13 @@ fn rows_to_relpaths(
 /// así que guardarlos obligaría a invalidar en cascada (`§10` fila 10, la razón por la que
 /// `LINK-STUB` tampoco se materializaba).
 ///
-/// El veredicto lo da **el core**, no SQL: la cache sirve las filas (`files.path`/`files.raw`) y
-/// el core las clasifica con [`DocumentSet::analyze`]. Es el mismo patrón que
+/// El veredicto lo da **el core**, no SQL: la cache sirve las filas (`documents.path`/
+/// `documents.body`) y el core las clasifica con [`DocumentSet::analyze`]. Es el mismo patrón que
 /// [`search_substring`] — reproducir en SQL la resolución de `§20.6` (contención, percent-decoding,
 /// plegado Unicode de mayúsculas) sería un segundo algoritmo divergente, justo lo que prohíbe el
 /// invariante #3.
 fn link_diagnostics(conn: &Connection) -> Result<Vec<(RelPath, Vec<Check>)>, StoreError> {
-    let mut stmt = conn.prepare("SELECT path, raw FROM documents ORDER BY path")?;
+    let mut stmt = conn.prepare("SELECT path, body FROM documents ORDER BY path")?;
     let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
     let mut files = FileMap::new();
     for row in rows {
@@ -78,7 +78,7 @@ fn link_diagnostics(conn: &Connection) -> Result<Vec<(RelPath, Vec<Check>)>, Sto
 pub(crate) fn hard_fail(conn: &Connection) -> Result<usize, StoreError> {
     let mut con_error: std::collections::BTreeSet<RelPath> = rows_to_relpaths(
         conn,
-        "SELECT DISTINCT document_path FROM diagnostics WHERE severity = 'err' ORDER BY document_path",
+        "SELECT DISTINCT d.path FROM diagnostics x JOIN documents d ON d.doc_id=x.doc_id WHERE x.severity='err' ORDER BY d.path",
         &[],
     )?
     .into_iter()
@@ -117,15 +117,17 @@ pub(crate) fn documents(conn: &Connection) -> Result<Vec<RelPath>, StoreError> {
 /// Backlinks de un documento (`incoming[path]`): quien lo enlaza, venga de donde venga.
 ///
 /// Solo las **aristas del grafo** (`is_edge = 1`): un enlace externo o a un fichero del proyecto no
-/// es un entrante. La forma es la del store v1 —`source_path`/`target_path` sustituyen a `src`/`dst`—
-/// y el JOIN con `documents` restringe a destinos que existen, como antes.
+/// es un entrante. Las filas relacionan `source_doc_id`/`target_doc_id`; los JOIN con `documents`
+/// proyectan las rutas y restringen a destinos que existen.
 pub(crate) fn backlinks(conn: &Connection, path: &RelPath) -> Result<Vec<RelPath>, StoreError> {
     rows_to_relpaths(
         conn,
-        r#"SELECT DISTINCT l.source_path
-           FROM links l JOIN documents f ON f.path = l.target_path
-           WHERE l.target_path = ?1 AND l.is_edge = 1
-           ORDER BY l.source_path"#,
+        r#"SELECT DISTINCT source.path
+           FROM links l
+           JOIN documents source ON source.doc_id = l.source_doc_id
+           JOIN documents target ON target.doc_id = l.target_doc_id
+           WHERE target.path = ?1 AND l.is_edge = 1
+           ORDER BY source.path"#,
         &[&path.as_str()],
     )
 }
@@ -138,8 +140,8 @@ pub(crate) fn isolated(conn: &Connection) -> Result<Vec<RelPath>, StoreError> {
     rows_to_relpaths(
         conn,
         r#"SELECT f.path FROM documents f
-           WHERE NOT EXISTS (SELECT 1 FROM links l WHERE l.target_path = f.path AND l.is_edge = 1)
-             AND NOT EXISTS (SELECT 1 FROM links o WHERE o.source_path = f.path AND o.is_edge = 1)
+           WHERE NOT EXISTS (SELECT 1 FROM links l WHERE l.target_doc_id = f.doc_id AND l.is_edge = 1)
+             AND NOT EXISTS (SELECT 1 FROM links o WHERE o.source_doc_id = f.doc_id AND o.is_edge = 1)
            ORDER BY f.path"#,
         &[],
     )
@@ -152,8 +154,8 @@ pub(crate) fn dangling(conn: &Connection) -> Result<Vec<RelPath>, StoreError> {
     rows_to_relpaths(
         conn,
         r#"SELECT DISTINCT l.target_path
-           FROM links l LEFT JOIN documents f ON f.path = l.target_path
-           WHERE l.is_edge = 1 AND f.path IS NULL
+           FROM links l LEFT JOIN documents f ON f.doc_id = l.target_doc_id
+           WHERE l.is_edge = 1 AND l.target_doc_id IS NULL AND f.doc_id IS NULL
            ORDER BY l.target_path"#,
         &[],
     )
@@ -171,10 +173,11 @@ pub(crate) fn blast_radius(
         r#"WITH RECURSIVE br(path, d) AS (
                SELECT ?1, 0
                UNION
-               SELECT l.source_path, br.d + 1
+               SELECT source.path, br.d + 1
                FROM links l
-               JOIN br ON l.target_path = br.path
-               JOIN documents f ON f.path = l.target_path
+               JOIN documents target ON target.doc_id = l.target_doc_id
+               JOIN documents source ON source.doc_id = l.source_doc_id
+               JOIN br ON target.path = br.path
                WHERE l.is_edge = 1 AND br.d < ?2
            )
            SELECT DISTINCT path FROM br ORDER BY path"#,
@@ -189,7 +192,8 @@ pub(crate) fn fts_candidates(conn: &Connection, needle: &str) -> Result<Vec<RelP
     let escaped = format!("\"{}\"", needle.replace('"', "\"\""));
     rows_to_relpaths(
         conn,
-        "SELECT path FROM documents_fts WHERE documents_fts MATCH ?1 ORDER BY path",
+        "SELECT d.path FROM documents_fts f JOIN documents d ON d.doc_id=f.rowid \
+         WHERE documents_fts MATCH ?1 ORDER BY d.path",
         &[&escaped],
     )
 }
@@ -223,7 +227,11 @@ pub(crate) fn outgoing_links(
     source: &RelPath,
 ) -> Result<Vec<crate::OutgoingLink>, StoreError> {
     let mut stmt = conn.prepare(
-        "SELECT raw_href, target_kind, target_path, fragment FROM links WHERE source_path = ?1",
+        "SELECT l.raw_href, l.target_kind, COALESCE(target.path,l.target_path), l.fragment
+         FROM links l
+         JOIN documents source ON source.doc_id = l.source_doc_id
+         LEFT JOIN documents target ON target.doc_id = l.target_doc_id
+         WHERE source.path = ?1",
     )?;
     let rows = stmt.query_map([source.as_str()], |r| {
         Ok((
@@ -249,7 +257,7 @@ pub(crate) fn search_substring(
     needle: &str,
 ) -> Result<Vec<RelPath>, StoreError> {
     let needle_lower = needle.to_lowercase();
-    let mut stmt = conn.prepare("SELECT path, raw FROM documents ORDER BY path")?;
+    let mut stmt = conn.prepare("SELECT path, body FROM documents ORDER BY path")?;
     let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
     let mut out = Vec::new();
     for row in rows {

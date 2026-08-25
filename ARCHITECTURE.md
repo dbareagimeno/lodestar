@@ -1456,6 +1456,119 @@ La metadata se indexa **recursivamente** por field path (`service.name`, `servic
 valor JSON original y tipo. FTS indexa path, título derivado, body y valores textuales del
 frontmatter — **sin depender** de campos concretos como `type`, `status` o `tags`.
 
+### 20.12.1 Adenda ratificada E35-H02 — esquema SQLite vNext por IDs (issue #54)
+
+La issue #54 conserva en GitHub el título histórico `[E34-H02]`; la trazabilidad normativa local es
+**E34-H02 → E35-H02**. Esta adenda supersede el modelo conceptual de §20.12 en lo relativo al DDL
+persistido. El índice sigue siendo una cache derivada y desechable: `USER_VERSION = 6`, y una versión
+anterior o un DDL incompatible se elimina y se recrea completo, sin migrar filas ni modificar ningún
+Markdown.
+
+El DDL vNext efectivo es el siguiente; las claves foráneas y los índices secundarios hacen explícita
+la integridad y las consultas dirigidas:
+
+```sql
+documents(
+  doc_id INTEGER PRIMARY KEY,
+  path TEXT UNIQUE NOT NULL,
+  title TEXT NOT NULL DEFAULT '',
+  body TEXT NOT NULL DEFAULT '',
+  frontmatter_json TEXT NOT NULL DEFAULT '{}',
+  frontmatter_text TEXT NOT NULL DEFAULT '',
+  content_hash BLOB NOT NULL,
+  mtime INTEGER NOT NULL DEFAULT 0,
+  size INTEGER NOT NULL DEFAULT 0
+)
+fields(
+  field_id INTEGER PRIMARY KEY,
+  field_path TEXT UNIQUE NOT NULL
+)
+metadata(
+  doc_id INTEGER NOT NULL REFERENCES documents(doc_id) ON DELETE CASCADE,
+  field_id INTEGER NOT NULL REFERENCES fields(field_id),
+  value_json TEXT NOT NULL,
+  value_type TEXT NOT NULL,
+  PRIMARY KEY (doc_id, field_id)
+)
+other_files(path TEXT PRIMARY KEY)
+links(
+  link_id INTEGER PRIMARY KEY,
+  source_doc_id INTEGER NOT NULL REFERENCES documents(doc_id) ON DELETE CASCADE,
+  target_doc_id INTEGER REFERENCES documents(doc_id) ON DELETE SET NULL,
+  raw_href TEXT NOT NULL,
+  target_kind TEXT NOT NULL,
+  target_path TEXT,
+  fragment TEXT,
+  resolved INTEGER NOT NULL,
+  is_edge INTEGER NOT NULL
+)
+diagnostics(
+  diagnostic_id INTEGER PRIMARY KEY,
+  doc_id INTEGER NOT NULL REFERENCES documents(doc_id) ON DELETE CASCADE,
+  code TEXT NOT NULL,
+  severity TEXT NOT NULL,
+  message TEXT NOT NULL,
+  range_json TEXT
+)
+```
+
+Los índices secundarios son `idx_metadata_doc(doc_id)`, `idx_metadata_field(field_id)`,
+`idx_links_target_doc(target_doc_id)`, `idx_links_target_path(target_path)`,
+`idx_links_source_doc(source_doc_id)`, `idx_diag_doc(doc_id)` y `idx_diag_severity(severity)`.
+
+`metadata`, `links` y `diagnostics` se consultan por sus IDs y no repiten la ruta del documento.
+`fields.field_path` es el diccionario único de las rutas producidas por el `walk` del core; los
+namespaces reservados se guardan exactamente en su forma anclada. Un destino-documento conocido
+usa `links.target_doc_id` y deja `target_path` nulo. Un destino que no se puede materializar conserva
+`target_path` con `target_doc_id IS NULL`, para que la invalidación dirigida futura pueda reatarlo;
+las claves y la clasificación siguen siendo la proyección del core.
+
+FTS5 usa la variante **contentless** con `content=''` y `columnsize=0`. Al no tener tabla de
+contenido, no se declara `content_rowid`: el único escritor inserta explícitamente `rowid = doc_id`
+en cada fila de FTS5 y los candidatos se vuelven a ligar a `documents` por ese ID:
+
+```sql
+CREATE VIRTUAL TABLE documents_fts USING fts5(
+  path UNINDEXED, title, body, frontmatter_text,
+  content='', columnsize=0
+);
+```
+
+`documents.body` conserva el **snapshot Markdown completo y exacto** (frontmatter y cuerpo incluidos)
+y es la única copia completa del contenido en las tablas SQLite de Lodestar; las shadow tables de FTS5
+son estructuras derivadas del índice, no una segunda fuente canónica. FTS recibe `body` al insertar,
+pero contentless no conserva una tabla de contenido. Los candidatos se sirven con un `JOIN documents
+d ON d.doc_id = documents_fts.rowid` y se confirman con la semántica del core. Cuando se sirve el
+snapshot, la API interna `DocumentStore::raw` lee `documents.body` desde SQLite y
+`DocumentSet::from_store` entrega ese mismo snapshot al core para su análisis; no relee el Markdown
+desde disco en ese camino. El Markdown en disco sigue siendo la fuente canónica: SQLite es cache
+derivada y reconstruible, y no se convierte en camino de lectura por defecto mientras `decisiones §14`
+siga abierta.
+
+Como contentless no puede recuperar los valores de las columnas para el comando especial `delete`,
+el único escritor lee antes del cambio la tupla antigua exacta (`path`, `title`, `body` y
+`frontmatter_text`) desde `documents`, ejecuta el borrado FTS con `rowid = doc_id` y esos valores, y
+después inserta la versión nueva con el mismo `rowid`. El mismo protocolo se usa al eliminar un
+documento; `documents.body` es el snapshot exacto que hace posible mantener FTS sin otra copia
+completa.
+
+La apertura comprueba tanto `PRAGMA user_version` como las columnas y el DDL FTS. Si cualquiera no
+coincide, cierra y elimina físicamente la cache (`index.db` y sus sidecars WAL/SHM), crea el DDL vNext
+desde cero y fija la versión 6; así no sobreviven tablas, vistas, triggers ni índices heredados. El
+contenido Markdown se compara byte a byte en las pruebas de reconstrucción.
+El banco expone `sqlite.dbstat` por objeto (tablas, índices, FTS y shadow tables), bytes no atribuibles
+y la reconciliación exacta con `main_bytes`; WAL/SHM y el total de fichero se informan aparte.
+
+La elección contentless queda respaldada por el spike reproducible de
+[`docs/qa/e35-h02-fts-spike-2026-08-25.md`](docs/qa/e35-h02-fts-spike-2026-08-25.md): sobre 10.000
+documentos con snapshot Markdown y frontmatter no vacío, `dbstat` midió `524288 bytes` para
+contentless frente a `651264 bytes` para external-content, una reducción de `126976 bytes`. Las dos
+variantes produjeron búsquedas exclusivas de body `[4201]`, exclusivas de frontmatter `[9877]` y
+`shared_count=10000`, además del ciclo de update/delete.
+El objetivo de footprint Realista/100k `≤ 2,5×` es una métrica de ingeniería no bloqueante (`gate = false`), y
+`decisiones §14` permanece abierta. Esta historia no conecta SQLite a App/MCP, no cambia
+`contracts/mcp.yml`, no implementa rebuild streaming/watcher dirigido ni decide la salida de §14.
+
 ### 20.13 Migración de repositorios OKF existentes
 
 **No se modifican destructivamente los documentos anteriores.** `type: decision` / `status: accepted`
@@ -1657,17 +1770,21 @@ por la API pública existente, en tres variantes:
 
 1. **Disco-reparseo** — el producto actual (`Workspace::document_set()` → `discovery::discover` en
    cada llamada).
-2. **SQLite-raw** — `Store::rebuild()` + `Store::document_set()` (`DocumentSet::from_store`).
-   **Advertencia que la evidencia debe rotular**: `from_store` reconstruye el `FileMap` desde los
-   `raw` en SQL y **re-parsea**; esta variante mide la cache *tal como está construida* (ahorra
-   walk+IO, no parse). Se registra también el coste del `rebuild` (el precio de tener la cache).
+2. **SQLite-snapshot** — `Store::rebuild()` + `Store::document_set()` (`DocumentSet::from_store`;
+   el nombre de variante `sqlite-raw` se conserva en los informes existentes por compatibilidad).
+   `from_store` reconstruye el `FileMap` desde el snapshot Markdown completo de `documents.body` y el
+   core lo re-parsea; no relee el Markdown desde disco en esa variante. Se registra también el coste
+   del `rebuild` (el precio de tener la cache). La variante sigue siendo una medición de una cache
+   derivada, no una decisión de conectar SQLite al producto.
 3. **RAM-memoizado** — un `DocumentSet` construido una vez y reutilizado entre llamadas: la **cota
    superior** de lo que cualquier cache puede dar, y una alternativa que `decisiones §14` debe ver.
 
 Ninguna variante conecta el store al producto ni roza el invariante #3: son caminos de **medición**
 dentro del bench. El paquete de evidencia inventaría además el coste de conexión ya conocido
-(walker del store sin `DiscoveryPolicy`, divergencia `field_path` core↔store —`§16(l)`—, y el
-destino del watcher —`§16(c)`—) como parte del precio de la opción (a) de `decisiones §14`.
+(walker del store sin `DiscoveryPolicy` y el destino del watcher —`§16(c)`—) como parte del precio de
+la opción (a) de `decisiones §14`. La divergencia de `field_path` core↔store dejó de ser una deuda:
+`fields.field_path` conserva la forma anclada que publica el `walk` del core; C6 también cubre la
+reclasificación de enlaces cuando solo cambia el conjunto de `other_files` (asset presente/ausente).
 
 ### 22.5a Sonda extrema parametrizable (E33-H09)
 

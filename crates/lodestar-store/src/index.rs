@@ -4,11 +4,11 @@
 //! `synth`). La clasificación de enlaces (`target_kind`) y la metadata (`walk`) son proyecciones de
 //! la única verdad del core, nunca un segundo navegador (invariante #3).
 
-use rusqlite::{params, Transaction};
+use rusqlite::{params, OptionalExtension, Transaction};
 
 use lodestar_core::links;
 use lodestar_core::model;
-use lodestar_core::types::{CheckCode, Inventory, LinkTarget, RelPath, Severity};
+use lodestar_core::types::{CheckCode, FieldPath, Inventory, LinkTarget, RelPath, Severity};
 
 use crate::error::StoreError;
 
@@ -81,19 +81,17 @@ fn target_kind(target: &LinkTarget) -> String {
 }
 
 /// El path de destino sin fragmento (la columna `links.target_path`), o `None` para los destinos
-/// que no son un **fichero** del workspace (externo, anchor propio, directorio, escape).
+/// sin path persistible (externo, anchor propio o escape). Un `WorkspaceDirectory(Some(path))`
+/// conserva su ruta; la variante `None` representa la raíz y sigue sin path.
 fn target_path(target: &LinkTarget) -> Option<String> {
     match target {
         LinkTarget::Document(p) | LinkTarget::WorkspaceFile(p) | LinkTarget::Missing(p) => {
             Some(p.as_str().to_string())
         }
-        // Un directorio (E23-H11) sí tiene path a veces, pero `target_path` es la columna del
-        // destino-fichero: indexar ahí un directorio lo haría indistinguible de un `.md` en las
-        // consultas de la cache. El `kind` del wire (`workspaceDirectory`) ya lo identifica.
-        LinkTarget::WorkspaceDirectory(_)
-        | LinkTarget::ExternalUri(_)
-        | LinkTarget::SelfAnchor(_)
-        | LinkTarget::EscapesWorkspace => None,
+        LinkTarget::WorkspaceDirectory(path) => path.as_ref().map(|path| path.as_str().to_string()),
+        LinkTarget::ExternalUri(_) | LinkTarget::SelfAnchor(_) | LinkTarget::EscapesWorkspace => {
+            None
+        }
     }
 }
 
@@ -110,15 +108,61 @@ fn is_resolved(target: &LinkTarget) -> bool {
 
 /// Borra todas las filas materializadas de un path (en todas las tablas de documento).
 pub(crate) fn delete_file(tx: &Transaction, path: &RelPath) -> Result<(), StoreError> {
-    let p = path.as_str();
-    tx.execute("DELETE FROM documents WHERE path = ?1", params![p])?;
-    tx.execute("DELETE FROM metadata WHERE document_path = ?1", params![p])?;
-    tx.execute("DELETE FROM links WHERE source_path = ?1", params![p])?;
+    let Some(doc_id) = tx
+        .query_row(
+            "SELECT doc_id FROM documents WHERE path = ?1",
+            params![path.as_str()],
+            |r| r.get::<_, i64>(0),
+        )
+        .optional()?
+    else {
+        return Ok(());
+    };
     tx.execute(
-        "DELETE FROM diagnostics WHERE document_path = ?1",
-        params![p],
+        "UPDATE links SET target_path=(SELECT path FROM documents WHERE doc_id=?1),target_doc_id=NULL,target_kind='missing',resolved=0 WHERE target_doc_id=?1",
+        params![doc_id],
     )?;
-    tx.execute("DELETE FROM documents_fts WHERE path = ?1", params![p])?;
+    delete_fts_row(tx, doc_id)?;
+    tx.execute("DELETE FROM documents WHERE doc_id = ?1", params![doc_id])?;
+    Ok(())
+}
+
+fn delete_fts_row(tx: &Transaction, doc_id: i64) -> Result<(), StoreError> {
+    let old = tx
+        .query_row(
+            "SELECT path, title, body, frontmatter_text FROM documents WHERE doc_id=?1 AND length(content_hash)>0",
+            params![doc_id],
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                ))
+            },
+        )
+        .optional()?;
+    // Contentless FTS5 no admite un escaneo por `rowid` para comprobar presencia. Un hash no vacío
+    // identifica las filas que el único escritor ya indexó; el comando `delete` es idempotente para
+    // el caso de una cache parcialmente escrita y necesita los valores antiguos explícitos.
+    if let Some((path, title, body, frontmatter_text)) = old {
+        tx.execute(
+            "INSERT INTO documents_fts(documents_fts,rowid,path,title,body,frontmatter_text) VALUES('delete',?1,?2,?3,?4,?5)",
+            params![doc_id, path, title, body, frontmatter_text],
+        )?;
+    }
+    Ok(())
+}
+
+/// Reserva todos los `doc_id` de un rebuild antes de proyectar metadata, enlaces y diagnósticos.
+/// Así un enlace hacia un documento que aparece después en el walker sigue teniendo su FK.
+pub(crate) fn seed_document_ids(tx: &Transaction, paths: &[RelPath]) -> Result<(), StoreError> {
+    for path in paths {
+        tx.execute(
+            "INSERT OR IGNORE INTO documents(path,title,body,frontmatter_json,frontmatter_text,content_hash,mtime,size) VALUES(?1,'','','{}','',zeroblob(0),0,0)",
+            params![path.as_str()],
+        )?;
+    }
     Ok(())
 }
 
@@ -138,8 +182,6 @@ pub(crate) fn upsert_file(
     size: i64,
     inventory: &Inventory,
 ) -> Result<(), StoreError> {
-    delete_file(tx, path)?;
-
     let parsed = model::parse_file(path.as_str(), raw);
     let fm = parsed.frontmatter.clone();
     let hash = blake3::hash(raw.as_bytes());
@@ -153,20 +195,37 @@ pub(crate) fn upsert_file(
         .unwrap_or_else(|| "{}".to_string());
     let p = path.as_str();
 
+    let existing_doc_id: Option<i64> = tx
+        .query_row(
+            "SELECT doc_id FROM documents WHERE path=?1",
+            params![p],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let doc_id = match existing_doc_id {
+        Some(doc_id) => doc_id,
+        None => {
+            tx.execute(
+                "INSERT INTO documents(path,title,body,frontmatter_json,frontmatter_text,content_hash,mtime,size) VALUES(?1,'','','{}','',zeroblob(0),0,0)",
+                params![p],
+            )?;
+            tx.last_insert_rowid()
+        }
+    };
+    // El único escritor actualiza el documento y sus proyecciones en la misma transacción.
+    delete_fts_row(tx, doc_id)?;
+    tx.execute("DELETE FROM metadata WHERE doc_id=?1", params![doc_id])?;
+    tx.execute("DELETE FROM links WHERE source_doc_id=?1", params![doc_id])?;
+    tx.execute("DELETE FROM diagnostics WHERE doc_id=?1", params![doc_id])?;
     tx.execute(
-        r#"INSERT INTO documents
-           (path, title, body, raw, frontmatter_json, content_hash, mtime, size)
-           VALUES (?1,?2,?3,?4,?5,?6,?7,?8)"#,
-        params![
-            p,
-            title,
-            parsed.body,
-            raw,
-            fm_json,
-            hash.as_bytes().as_slice(),
-            mtime,
-            size,
-        ],
+        "UPDATE documents SET path=?1,title=?2,body=?3,frontmatter_json=?4,frontmatter_text=?5,content_hash=?6,mtime=?7,size=?8 WHERE doc_id=?9",
+        params![p, title, raw, fm_json, "", hash.as_bytes().as_slice(), mtime, size, doc_id],
+    )?;
+    // La materialización incremental puede haber escrito antes un enlace dangling hacia este
+    // path. Al reaparecer el documento, se reata el FK y su clasificación.
+    tx.execute(
+        "UPDATE links SET target_doc_id=?1,target_path=NULL,target_kind='document',resolved=1,is_edge=1 WHERE target_path=?2 AND target_kind='missing' AND target_doc_id IS NULL",
+        params![doc_id, p],
     )?;
 
     // Metadata genérica: una fila por propiedad direccionable del frontmatter (`walk`, E18-H01),
@@ -182,7 +241,17 @@ pub(crate) fn upsert_file(
     // mismo `walk` que puebla `metadata` para no volver a navegar el `Value`.
     let mut fts_frontmatter: Vec<String> = Vec::new();
     if let Some(f) = fm.as_ref() {
+        let mut metadata_by_path: std::collections::BTreeMap<
+            String,
+            (FieldPath, String, &'static str, bool),
+        > = std::collections::BTreeMap::new();
         for (field_path, valor) in f.walk() {
+            let anchored = field_path.es_namespace_reservado();
+            let field_path: FieldPath = if anchored {
+                field_path.anclado()
+            } else {
+                field_path
+            };
             let vtype = value_type(valor);
             let value_json = serde_json::to_string(
                 &serde_json::to_value(valor).unwrap_or(serde_json::Value::Null),
@@ -191,10 +260,29 @@ pub(crate) fn upsert_file(
             if vtype == "string" || vtype == "array" {
                 fts_frontmatter.push(value_json.clone());
             }
+            let key = field_path.to_string();
+            let replace = metadata_by_path
+                .get(&key)
+                .map_or(true, |(_, _, _, previous_anchored)| {
+                    anchored && !previous_anchored
+                });
+            if replace {
+                metadata_by_path.insert(key, (field_path, value_json, vtype, anchored));
+            }
+        }
+        for (field_path, value_json, vtype, _) in metadata_by_path.into_values() {
             tx.execute(
-                "INSERT INTO metadata (document_path, field_path, value_json, value_type) \
-                 VALUES (?1,?2,?3,?4)",
-                params![p, field_path.to_string(), value_json, vtype],
+                "INSERT OR IGNORE INTO fields(field_path) VALUES(?1)",
+                params![field_path.to_string()],
+            )?;
+            let field_id: i64 = tx.query_row(
+                "SELECT field_id FROM fields WHERE field_path=?1",
+                params![field_path.to_string()],
+                |r| r.get(0),
+            )?;
+            tx.execute(
+                "INSERT INTO metadata(doc_id,field_id,value_json,value_type) VALUES(?1,?2,?3,?4)",
+                params![doc_id, field_id, value_json, vtype],
             )?;
         }
     }
@@ -202,9 +290,14 @@ pub(crate) fn upsert_file(
     // FTS5 sin campos privilegiados (E18-H03, `§20.12`): `path` + título derivado + `body` +
     // `frontmatter_text` (los valores textuales de la metadata, recogidos arriba). `description`
     // deja de tener trato especial: es metadata como cualquier otra. Sigue siendo solo un acelerador.
+    let frontmatter_text = fts_frontmatter.join(" ");
     tx.execute(
-        "INSERT INTO documents_fts (path, title, body, frontmatter_text) VALUES (?1,?2,?3,?4)",
-        params![p, title, parsed.body, fts_frontmatter.join(" ")],
+        "UPDATE documents SET frontmatter_text=?1 WHERE doc_id=?2",
+        params![frontmatter_text, doc_id],
+    )?;
+    tx.execute(
+        "INSERT INTO documents_fts(rowid,path,title,body,frontmatter_text) VALUES(?1,?2,?3,?4,?5)",
+        params![doc_id, p, title, raw, frontmatter_text],
     )?;
 
     // Enlaces: TODOS los del cuerpo, en orden de aparición, con su clasificación (`§20.6`). A
@@ -215,15 +308,31 @@ pub(crate) fn upsert_file(
     // consultas de grafo de `synth` (backlinks/aislados/colgantes/blast-radius).
     for raw_link in links::extract_links(&parsed.body) {
         let resuelto = links::resolve(&raw_link, path, inventory);
+        let target_doc_id: Option<i64> = match &resuelto.target {
+            LinkTarget::Document(target) => tx
+                .query_row(
+                    "SELECT doc_id FROM documents WHERE path=?1",
+                    params![target.as_str()],
+                    |r| r.get(0),
+                )
+                .optional()?,
+            _ => None,
+        };
+        let persisted_target_path = if target_doc_id.is_some() {
+            None
+        } else {
+            target_path(&resuelto.target)
+        };
         tx.execute(
             r#"INSERT INTO links
-               (source_path, raw_href, target_kind, target_path, fragment, resolved, is_edge)
-               VALUES (?1,?2,?3,?4,?5,?6,?7)"#,
+               (source_doc_id, target_doc_id, raw_href, target_kind, target_path, fragment, resolved, is_edge)
+               VALUES (?1,?2,?3,?4,?5,?6,?7,?8)"#,
             params![
-                p,
+                doc_id,
+                target_doc_id,
                 resuelto.href,
                 target_kind(&resuelto.target),
-                target_path(&resuelto.target),
+                persisted_target_path,
                 resuelto.fragment,
                 is_resolved(&resuelto.target) as i64,
                 resuelto.target.internal_path().is_some() as i64,
@@ -238,10 +347,9 @@ pub(crate) fn upsert_file(
             .range
             .map(|r| serde_json::to_string(&r).unwrap_or_else(|_| "null".to_string()));
         tx.execute(
-            "INSERT INTO diagnostics (document_path, code, severity, message, range_json) \
-             VALUES (?1,?2,?3,?4,?5)",
+            "INSERT INTO diagnostics (doc_id, code, severity, message, range_json) VALUES (?1,?2,?3,?4,?5)",
             params![
-                p,
+                doc_id,
                 check.code.as_str(),
                 severity_str(check.level),
                 check.msg,

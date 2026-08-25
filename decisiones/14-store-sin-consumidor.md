@@ -68,10 +68,10 @@ relacionadas: [3, 9, 16]
     reconciliar, así que hoy el invariante #5 se sostiene por el **protocolo de escritura**
     (temp+fsync+rename por el único camino), no por el watcher. Cualquier opción que se elija tiene
     que decir qué pasa con él.
-  - **(l/E26-H09)** **divergencia latente core↔store**: el catálogo publica nombres **anclados**
-    (`frontmatter.graph.backlinks`) mientras el store indexa `metadata.field_path` con los nombres
-    crudos de `walk`. Hoy no hay discrepancia observable porque esa columna no la lee nadie; es la
-    segunda cosa que se rompe el día que se conecte, junto con la `DiscoveryPolicy` del walker.
+  - **(l/E26-H09)** El catálogo y `fields.field_path` ya comparten la forma **anclada** publicada por
+    el `walk` del core. C6 verifica la paridad observable y la reclasificación cuando solo cambia el
+    conjunto de `other_files`; las deudas abiertas de esta ficha siguen siendo el walker sin
+    `DiscoveryPolicy` y el destino del watcher.
 - **Sigue siendo prioridad 5** y sigue gobernando a las demás: mientras esté abierta,
   `ARCHITECTURE.md §21.5` prohíbe que la superficie externa prometa la cache o el rendimiento a
   escala.
@@ -80,8 +80,8 @@ relacionadas: [3, 9, 16]
 
 La condición de entrada ya tiene un paquete trazable: [`evidencia-14-store-2026-08.md`](../docs/qa/evidencia-14-store-2026-08.md).
 Incluye la corrida H04 de las tres variantes en las tres escalas, la calibración wire, el número
-frío y el dogfooding de H06, además del inventario actual del walker sin `DiscoveryPolicy`, la
-divergencia de `field_path` y el papel posible del watcher. La evidencia está disponible para
+frío y el dogfooding de H06, además del inventario actual del walker sin `DiscoveryPolicy` y el papel
+posible del watcher. La divergencia de `field_path` quedó resuelta por E35-H02; la evidencia está disponible para
 decidir, pero este apunte no decide entre conectar, acotar o retirar.
 
 El `estado: "abierta"` y `prioridad: 5` no cambian. La recomendación histórica de conectar (a)
@@ -129,3 +129,26 @@ historia concreta; E35-H01 no promete ejecutarla. Esta adenda cubre config,
 `MemoryBudget`/subpresupuestos, tests, mensajes y documentación; no decide la salida de §14, no
 conecta SQLite, no implementa la cache W-TinyLFU y no cambia `estado: "abierta"` ni la prioridad de
 la ficha. Los detalles normativos están en [`ARCHITECTURE.md §23`](../ARCHITECTURE.md#23-presupuesto-de-memoria-retenida-e35-h01).
+
+## Adenda de implementación — E35-H02 / issue #54 (2026-08-25)
+
+La historia **E35-H02**, trazada desde el título histórico `[E34-H02]` como **E34-H02 → E35-H02**,
+reconstruye el esquema derivado con `USER_VERSION = 6`. `documents` usa `doc_id INTEGER PRIMARY KEY`
+y ya no contiene `raw`; metadata, diagnostics y enlaces referencian IDs, `fields` internan una sola
+vez los paths anclados y los destinos conocidos de enlaces se unen mediante `target_doc_id`. Un
+destino que no se puede materializar conserva `target_path` con ID nulo.
+
+La implementación elige FTS5 contentless (`content=''`, `columnsize=0`) según el spike medido y
+documentado en [`docs/qa/e35-h02-fts-spike-2026-08-25.md`](../docs/qa/e35-h02-fts-spike-2026-08-25.md):
+`524288 bytes` frente a `651264 bytes` de external-content en el mismo test versionado de 10.000
+documentos, con reducción `126976` por `docsize`. El único escritor inserta manualmente `rowid = doc_id`, y los candidatos se proyectan
+con `JOIN documents`; antes de update/delete lee los valores antiguos exactos —incluido
+`documents.body`— para el comando FTS5 `delete`. `documents.body` conserva el snapshot Markdown
+completo y exacto como única copia completa de contenido SQLite; `DocumentStore`/core leen el snapshot
+desde SQLite. El Markdown en disco sigue siendo la fuente canónica, SQLite permanece cache derivada y
+no es lectura por defecto. No hay consumidor App/MCP nuevo; el banco expone `sqlite.dbstat` por objeto
+y mantiene el objetivo de footprint `≤ 2,5×` como objetivo no bloqueante, con `gate = false`.
+
+Esta mejora de la cache no decide entre **conectarla**, **acotarla** o **retirarla**. El frontmatter
+de esta ficha conserva `estado: "abierta"`, `prioridad: 5` y la recomendación histórica pendiente;
+E35-H02 no cambia la prioridad, no cierra §14 y no altera el contrato MCP/CLI.

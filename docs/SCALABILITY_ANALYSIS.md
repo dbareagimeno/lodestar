@@ -64,7 +64,11 @@ Puntos relevantes:
 3. `walk_disk()` acumula todos los Markdown, incluido su contenido, antes de indexarlos.
 4. `DocumentSet` mantiene simultáneamente el `FileMap`, documentos parseados, inventario y, bajo demanda, un `Analysis` completo.
 5. La planificación de cambios crea un `working_files` a partir del `FileMap` completo.
-6. SQLite almacena simultáneamente `raw`, `body` y `frontmatter_json`; el frontmatter se vuelve a proyectar en `metadata`, y FTS vuelve a indexar cuerpo y texto de metadata.
+6. El esquema histórico almacenaba simultáneamente `raw`, un `body` parseado y `frontmatter_json`;
+   E35-H02 lo reemplaza localmente por `documents(doc_id, body, frontmatter_json, ...)`, sin `raw`.
+   `documents.body` conserva el snapshot Markdown completo y exacto, FTS5 contentless (`content=''`,
+   `columnsize=0`) recibe esa columna con `rowid = doc_id` manual, y el snapshot cacheado lo consumen
+   `DocumentStore` y el core.
 7. Algunas operaciones servidas desde SQLite vuelven a reconstruir estructuras globales del core para mantener la paridad semántica.
 8. La búsqueda exacta de subcadena termina leyendo y parseando todas las filas candidatas del corpus.
 
@@ -183,7 +187,17 @@ evidencia, pero no sustituyen el contrato ni se validan contra cgroup al abrir.
 
 ### 4. Compactar el esquema SQLite
 
-El esquema actual repite paths y contenido. A gran escala conviene utilizar identificadores enteros internos.
+La compactación de IDs y la eliminación de la duplicación completa `raw`/`body` ya está materializada por
+**E35-H02** (issue #54, **E34-H02 → E35-H02**). El DDL vigente, el spike FTS y el informe `dbstat`
+están descritos en [`ARCHITECTURE.md §20.12.1`](../ARCHITECTURE.md#20121-adenda-ratificada-e35-h02--esquema-sqlite-vnext-por-ids-issue-54)
+y [`docs/qa/e35-h02-fts-spike-2026-08-25.md`](qa/e35-h02-fts-spike-2026-08-25.md). Los párrafos y el
+modelo conceptual siguientes conservan las alternativas de diseño que precedieron a esa ratificación;
+no describen un trabajo pendiente de E35-H02.
+El informe de footprint conserva `objective.max_ratio = 2.5`, `gate = false` y `read_default = false`;
+el límite es un objetivo no bloqueante y SQLite sigue fuera de la lectura por defecto mientras §14
+esté abierta.
+
+El esquema histórico repetía paths y contenido. A gran escala conviene utilizar identificadores enteros internos.
 
 Ejemplo conceptual:
 
@@ -221,10 +235,15 @@ Cambios especialmente interesantes:
 
 - no repetir `document_path` textual en todas las tablas secundarias;
 - internar nombres de campos repetidos;
-- evitar guardar el frontmatter completo y todas sus proyecciones cuando no sea necesario;
-- evitar almacenar simultáneamente `raw` y `body`.
+- conservar un único snapshot Markdown completo en `documents.body`, y derivar de él
+  `frontmatter_json`/`frontmatter_text` sin añadir otra copia completa;
+- evitar almacenar simultáneamente `raw` y un segundo `body` parseado.
 
-Una opción especialmente atractiva es que SQLite no almacene el contenido Markdown completo. `knowledge_get` puede leer el fichero canónico bajo demanda y comprobar su hash contra el índice. Si no coincide, se reindexa el documento.
+E35-H02 no elige la opción de omitir el contenido Markdown del índice: el snapshot completo en
+`documents.body` permite que `DocumentStore` y el core lean la cache sin una segunda lectura de disco.
+El Markdown en disco sigue siendo la fuente canónica; la versión/hash de la cache se valida y se
+reconstruye cuando corresponde, y SQLite no se convierte en lectura por defecto mientras §14 esté
+abierta.
 
 Para fuentes futuras que no vivan como archivos locales podría existir un almacén de blobs separado, comprimido y direccionado por hash.
 
@@ -238,7 +257,12 @@ Para mantener búsqueda por subcadena puede estudiarse el tokenizer `trigram` de
 2. el core verifica la coincidencia exacta únicamente sobre esos candidatos;
 3. se leen solo los resultados necesarios para completar la página y producir snippets.
 
-También deben evaluarse tablas FTS contentless y opciones como `detail`/`columnsize` para reducir espacio, siempre mediante benchmarks y sin romper el contrato de búsqueda.
+E35-H02 ya selecciona FTS5 contentless (`content=''`, `columnsize=0`) y liga cada `rowid` a
+`documents.doc_id` de forma manual; la consulta de candidatos hace `JOIN documents` antes de la
+confirmación exacta del core. Quedan para historias posteriores el tokenizer trigram y opciones como
+`detail`, siempre mediante benchmarks y sin romper el contrato de búsqueda. El protocolo de update y
+delete conserva los valores antiguos exactos de `documents.body` (y las demás columnas indexadas)
+antes de emitir el comando FTS5 correspondiente.
 
 Las búsquedas globales deben ser paginadas y tener límites estrictos. Nunca deberían materializar cientos de miles de resultados en memoria.
 
@@ -429,9 +453,15 @@ En instalaciones locales o de un solo nodo Redis no debería ser necesario.
 
 ### Fase 4 — Compactación
 
-14. IDs enteros para documentos, campos y destinos.
-15. Eliminar duplicaciones de `raw`/`body`/frontmatter.
-16. Evaluar FTS contentless y sus opciones de compactación.
+14. ✅ E35-H02: IDs enteros para documentos, campos y destinos materializables.
+15. ✅ E35-H02: eliminar la duplicación completa de `raw`/`body` y conservar un único snapshot
+    Markdown completo y exacto en `documents.body`.
+16. ✅ E35-H02: comparar FTS contentless/external-content mediante spike y seleccionar
+    contentless (`content=''`, `columnsize=0`); el test versionado de 10.000 documentos con snapshot
+    Markdown y frontmatter no vacío midió `524288 bytes` frente a `651264 bytes`, con body exclusivo
+    `[4201]`, frontmatter exclusivo `[9877]`, `shared_count=10000` y ciclo de update/delete. La
+    reducción es `126976 bytes` (`docsize` de external).
+    Las optimizaciones posteriores de tokenizer/detail siguen abiertas.
 17. Construcciones por generación y cambios de esquema sin downtime.
 
 ### Fase 5 — Escala empresarial distribuida

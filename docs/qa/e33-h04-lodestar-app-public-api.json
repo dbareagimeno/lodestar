@@ -4,7 +4,7 @@
     "manifest_path": "/private/tmp/h04-api-baseline.8vit/src/crates/lodestar-app/Cargo.toml",
     "manifest_processed": true,
     "package": "lodestar-app",
-    "source_commit": "478e397eb75e7337be11ad4a5742f1c59b780f0c"
+    "source_commit": "1da2ee8585d6162ef76402fabc9d7febefa04c39"
   },
   "semantic": [
     {

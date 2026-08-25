@@ -486,15 +486,16 @@ walk+I/O, no parseo.
   documento único con todos los datos, el inventario del coste de conexión y el análisis de las
   tres salidas — **sin tomar la decisión**, que es del usuario y ocurre fuera de esta épica.
 - **Referencias**: `ARCHITECTURE.md §22.8` · `decisiones §14` (las tres salidas a/b/c, su
-  recomendación escrita, y sus absorciones `§16(c)` watcher y `§16(l)` `field_path`) ·
+  recomendación escrita, y su absorción `§16(c)` watcher; `§16(l)` quedó resuelta por E35-H02) ·
   `ARCHITECTURE.md §21.5` (que esta historia NO desactiva) · H04 (mediciones) · H06 (dogfooding).
 - **Alcance**:
   - `docs/qa/evidencia-14-store-2026-08.md` con: (1) la **tabla de mediciones** (3 variantes × 3
     escalas × tools, p50/p95 + payload + coste del `rebuild`, con la calibración de wire); (2) el
     **dato de dogfooding** (veredicto de fricción a escala repo + número frío); (3) el **inventario
     del coste de conexión**, verificado contra el árbol actual, no citado de memoria: walker del
-    store sin `DiscoveryPolicy` (`§20.5`), divergencia de nombres `metadata.field_path` core↔store
-    (`§16(l)`), y el destino del watcher (`§16(c)` — qué papel tendría en cada salida); (4) el
+    store sin `DiscoveryPolicy` (`§20.5`) y el destino del watcher (`§16(c)` — qué papel tendría en
+    cada salida); la divergencia de nombres `metadata.field_path` core↔store (`§16(l)`) quedó
+    resuelta por E35-H02; (4) el
     **análisis de las tres salidas** — conectar / acotar / retirar — contra los datos, incluyendo
     qué dice la comparación SQLite-raw vs RAM-memoizado sobre qué significaría «conectar»
     (¿SQLite, memoización, ambas?), actualizando o refutando la recomendación (a) escrita en la
