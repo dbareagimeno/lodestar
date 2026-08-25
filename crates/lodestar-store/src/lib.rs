@@ -60,9 +60,7 @@ impl Store {
         // (p. ej. un índice nuevo sobre una columna renombrada), se borra y se recrea limpio
         // en vez de dejar `open()` fallando para siempre.
         let conn = open_and_migrate(&db).or_else(|_| {
-            for suffix in ["", "-wal", "-shm"] {
-                let _ = std::fs::remove_file(dir.join(format!("{DB_FILE}{suffix}")));
-            }
+            remove_cache_files(&db)?;
             open_and_migrate(&db)
         })?;
         Ok(Store {
@@ -107,6 +105,8 @@ impl Store {
         let tx = conn.transaction()?;
         schema::truncate_all(&tx)?;
         write_other_files(&tx, &others)?;
+        let paths: Vec<RelPath> = disk.iter().map(|(path, _, _, _)| path.clone()).collect();
+        index::seed_document_ids(&tx, &paths)?;
         let mut changed = Vec::new();
         for (path, content, mtime, size) in &disk {
             index::upsert_file(&tx, path, content, *mtime, *size, &inventory)?;
@@ -194,15 +194,25 @@ impl Store {
         let event = {
             let mut conn = self.conn.lock().unwrap();
             let cached = cached_paths(&conn)?;
+            let cached_others = cached_other_files(&conn)?;
+            let other_files_changed = cached_others != others;
             let disk_set: std::collections::BTreeSet<RelPath> =
                 disk.iter().map(|(p, _, _, _)| p.clone()).collect();
 
             let tx = conn.transaction()?;
+            // Reserva los IDs de todos los documentos del snapshot antes de proyectar cualquier
+            // upsert. Así un enlace entre dos ficheros que aparecen en la misma tanda ve también
+            // el destino futuro, igual que en el rebuild en frío, sin alterar los hashes ni el
+            // delta de eventos de los documentos que no cambiaron.
+            let paths: Vec<RelPath> = disk.iter().map(|(path, _, _, _)| path.clone()).collect();
+            index::seed_document_ids(&tx, &paths)?;
             write_other_files(&tx, &others)?;
             let mut changed = Vec::new();
             for (path, content, mtime, size) in &disk {
                 let new_hash = blake3::hash(content.as_bytes());
-                if current_hash_tx(&tx, path)?.as_deref() != Some(new_hash.as_bytes().as_slice()) {
+                let hash_changed =
+                    current_hash_tx(&tx, path)?.as_deref() != Some(new_hash.as_bytes().as_slice());
+                if other_files_changed || hash_changed {
                     // TOCTOU: el walk se hizo ANTES de tomar el lock; una escritura del único
                     // escritor pudo colarse en medio (su upsert optimista ya está en la cache).
                     // Se relee el fichero con el lock tomado para no pisar contenido nuevo con
@@ -216,8 +226,9 @@ impl Store {
                         Err(_) => (content.as_str(), *mtime, *size),
                     };
                     let fresh_hash = blake3::hash(content.as_bytes());
-                    if current_hash_tx(&tx, path)?.as_deref()
-                        == Some(fresh_hash.as_bytes().as_slice())
+                    if !other_files_changed
+                        && current_hash_tx(&tx, path)?.as_deref()
+                            == Some(fresh_hash.as_bytes().as_slice())
                     {
                         continue;
                     }
@@ -370,10 +381,70 @@ impl Store {
     pub fn document_set(&self) -> DocumentSet {
         DocumentSet::from_store(self)
     }
+
+    /// Desglose persistente de SQLite mediante `dbstat`. La conexión rusqlite permanece encapsulada
+    /// en `lodestar-store`; consumidores como `lodestar-bench` reciben solo JSON estructurado.
+    pub fn dbstat_report(&self) -> Result<serde_json::Value, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute_batch(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS temp.lodestar_dbstat USING dbstat(main)",
+        )?;
+        let page_count: u64 =
+            conn.query_row("PRAGMA page_count", [], |r| r.get::<_, i64>(0))? as u64;
+        let page_size: u64 = conn.query_row("PRAGMA page_size", [], |r| r.get::<_, i64>(0))? as u64;
+        let main_bytes = page_count.saturating_mul(page_size);
+        let mut stmt = conn.prepare(
+            "WITH dbstat_sizes AS (
+                 SELECT name, SUM(pgsize) AS bytes
+                 FROM temp.lodestar_dbstat
+                 GROUP BY name
+             ), names AS (
+                 SELECT name FROM main.sqlite_schema
+                 UNION
+                 SELECT name FROM dbstat_sizes
+             )
+             SELECT names.name, sqlite_schema.type, COALESCE(dbstat_sizes.bytes,0)
+             FROM names
+             LEFT JOIN main.sqlite_schema ON sqlite_schema.name=names.name
+             LEFT JOIN dbstat_sizes ON dbstat_sizes.name=names.name
+             ORDER BY names.name",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, Option<String>>(1)?,
+                r.get::<_, i64>(2)? as u64,
+            ))
+        })?;
+        let mut objects = Vec::new();
+        let mut attributed = 0_u64;
+        for row in rows {
+            let (name, schema_type, bytes) = row?;
+            let kind = if name == "documents_fts" {
+                "fts"
+            } else if name.starts_with("documents_fts_") {
+                "fts_shadow"
+            } else if schema_type.as_deref() == Some("index") {
+                "index"
+            } else {
+                "table"
+            };
+            attributed = attributed.saturating_add(bytes);
+            objects.push(serde_json::json!({"name": name, "kind": kind, "bytes": bytes}));
+        }
+        let unattributed = main_bytes.saturating_sub(attributed);
+        Ok(serde_json::json!({
+            "main_bytes": main_bytes,
+            "page_count": page_count,
+            "page_size": page_size,
+            "objects": objects,
+            "unattributed_bytes": unattributed,
+        }))
+    }
 }
 
-/// El store sirve el corpus al core sin materializar todos los cuerpos en RAM de golpe
-/// (lee `raw` por path desde SQL). El core sigue puro: la impl SQL vive aquí.
+/// El store sirve al core el snapshot Markdown exacto conservado en SQLite. El snapshot es derivado
+/// del disco por el único escritor durante rebuild/upsert; el disco sigue siendo la fuente canónica.
 impl DocumentStore for Store {
     fn paths(&self) -> Vec<RelPath> {
         let conn = self.conn.lock().unwrap();
@@ -394,7 +465,7 @@ impl DocumentStore for Store {
     fn raw(&self, path: &RelPath) -> Option<String> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
-            "SELECT raw FROM documents WHERE path = ?1",
+            "SELECT body FROM documents WHERE path=?1",
             [path.as_str()],
             |r| r.get::<_, String>(0),
         )
@@ -464,19 +535,40 @@ fn open_and_migrate(db: &Path) -> Result<Connection, StoreError> {
     if schema::read_user_version(&conn)? != schema::USER_VERSION
         || !schema::schema_is_current(&conn)?
     {
-        // Rebuild limpio si la versión no coincide O si el esquema derivó pese a coincidir la
-        // versión (p. ej. un build antiguo con `user_version=1` pero una tabla `files` sin la
-        // columna `hash`). `create_schema` es `IF NOT EXISTS`, así que NO sanaría la tabla vieja:
-        // el upsert reventaría con «no column named hash». La cache es derivada/desechable, así
-        // que la política ratificada es tirarla y recrearla limpia (nunca migración in-place).
-        schema::drop_schema(&conn)?;
-        schema::create_schema(&conn)?;
-        schema::set_user_version(&conn)?;
+        // La cache es desechable: cerrar y eliminar el fichero completo evita que objetos SQLite
+        // ajenos (triggers, vistas, tablas o índices) sobrevivan a un rebuild basado en una lista
+        // de drops. El workspace Markdown nunca entra en este alcance.
+        drop(conn);
+        remove_cache_files(db)?;
+        return create_fresh_cache(db);
     } else {
-        // Misma versión y esquema vigente: el DDL es idempotente (IF NOT EXISTS) y sana tablas perdidas.
+        // Misma versión y esquema vigente: el DDL idempotente completa cualquier detalle declarado
+        // por el constructor sin reabrir una migración ni cambiar la cache validada.
         schema::create_schema(&conn)?;
     }
     Ok(conn)
+}
+
+fn create_fresh_cache(db: &Path) -> Result<Connection, StoreError> {
+    let conn = Connection::open(db)?;
+    schema::apply_pragmas(&conn)?;
+    schema::create_schema(&conn)?;
+    schema::set_user_version(&conn)?;
+    Ok(conn)
+}
+
+fn remove_cache_files(db: &Path) -> Result<(), StoreError> {
+    for suffix in ["", "-wal", "-shm"] {
+        let mut os_path = db.as_os_str().to_os_string();
+        os_path.push(suffix);
+        let path = PathBuf::from(os_path);
+        match std::fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(StoreError::Io(format!("{}: {error}", path.display()))),
+        }
+    }
+    Ok(())
 }
 
 fn current_hash(conn: &Connection, path: &RelPath) -> Result<Option<Vec<u8>>, StoreError> {
@@ -487,6 +579,12 @@ fn current_hash(conn: &Connection, path: &RelPath) -> Result<Option<Vec<u8>>, St
             |r| r.get::<_, Vec<u8>>(0),
         )
         .ok())
+}
+
+fn cached_other_files(
+    conn: &Connection,
+) -> Result<std::collections::BTreeSet<RelPath>, StoreError> {
+    Ok(synth::read_other_files(conn)?.into_iter().collect())
 }
 
 fn current_hash_tx(

@@ -1081,6 +1081,59 @@ No depender de campos concretos como `type`, `status` o `tags`.
 
 El resultado calculado por el core puro debe coincidir con el recuperado desde SQLite.
 
+### Adenda ratificada E35-H02 — esquema vNext (issue #54; E34-H02 → E35-H02)
+
+La issue #54 materializa el DDL descrito arriba como un esquema relacional por IDs. Esta adenda
+supersede el modelo conceptual anterior en lo relativo a las columnas persistidas: `USER_VERSION = 6`
+y cualquier versión o DDL incompatible provoca un rebuild completo de la cache, nunca una migración
+in-place. El rebuild no modifica los ficheros Markdown.
+
+El modelo efectivo es:
+
+```sql
+documents(doc_id INTEGER PRIMARY KEY, path TEXT UNIQUE NOT NULL, title TEXT NOT NULL,
+          body TEXT NOT NULL, frontmatter_json TEXT NOT NULL, frontmatter_text TEXT NOT NULL,
+          content_hash BLOB NOT NULL, mtime INTEGER NOT NULL, size INTEGER NOT NULL);
+fields(field_id INTEGER PRIMARY KEY, field_path TEXT UNIQUE NOT NULL);
+metadata(doc_id INTEGER NOT NULL REFERENCES documents(doc_id) ON DELETE CASCADE,
+         field_id INTEGER NOT NULL REFERENCES fields(field_id),
+         value_json TEXT NOT NULL, value_type TEXT NOT NULL,
+         PRIMARY KEY (doc_id, field_id));
+links(link_id INTEGER PRIMARY KEY,
+      source_doc_id INTEGER NOT NULL REFERENCES documents(doc_id) ON DELETE CASCADE,
+      target_doc_id INTEGER REFERENCES documents(doc_id) ON DELETE SET NULL,
+      raw_href TEXT NOT NULL, target_kind TEXT NOT NULL, target_path TEXT,
+      fragment TEXT, resolved INTEGER NOT NULL, is_edge INTEGER NOT NULL);
+diagnostics(diagnostic_id INTEGER PRIMARY KEY,
+            doc_id INTEGER NOT NULL REFERENCES documents(doc_id) ON DELETE CASCADE,
+            code TEXT NOT NULL, severity TEXT NOT NULL, message TEXT NOT NULL, range_json TEXT);
+```
+
+`other_files(path PRIMARY KEY)` conserva el inventario de ficheros no Markdown para que el core
+clasifique los enlaces. Metadata, enlaces y diagnósticos referencian `doc_id`; los paths repetidos de
+metadata se internan una sola vez en `fields` y los namespaces reservados se guardan en forma
+anclada. Un destino-documento conocido usa `target_doc_id` (con `target_path` nulo); un destino no
+materializable conserva `target_path` con ID nulo para la invalidación dirigida futura.
+
+FTS5 se implementa como contentless (`content=''`, `columnsize=0`) sobre `path`, título derivado,
+`body` y `frontmatter_text`. Al no tener tabla de contenido, cada inserción escribe manualmente
+`rowid = doc_id`; los candidatos se recuperan con un `JOIN` a `documents` y después se confirman con
+el core. `raw` desaparece del DDL vNext: `body` conserva el snapshot Markdown completo y exacto
+(frontmatter y cuerpo incluidos), es la única copia completa del contenido en SQLite y es la fuente
+de los valores enviados al índice. `DocumentStore`/core leen ese snapshot desde SQLite en el camino
+cacheado; el Markdown en disco sigue siendo la fuente canónica y la cache continúa siendo derivada,
+reconstruible y no predeterminada.
+
+Contentless exige mantenimiento explícito: antes de actualizar o borrar, el único escritor lee desde
+`documents` los valores antiguos exactos (`path`, `title`, `body`, `frontmatter_text`), ejecuta el
+comando FTS5 `delete` con `rowid = doc_id` y esos valores, y solo después escribe la nueva versión (o
+elimina el documento). El spike medido, la elección de variante y la métrica `dbstat` están en
+[`docs/qa/e35-h02-fts-spike-2026-08-25.md`](qa/e35-h02-fts-spike-2026-08-25.md).
+
+Esta adenda no conecta SQLite a App/MCP, no modifica el contrato MCP/CLI y no cierra `decisiones
+§14`. El objetivo de footprint Realista/100k `≤ 2,5×` se informa como objetivo de ingeniería, no
+como gate ni como permiso para hacer SQLite la lectura por defecto.
+
 ---
 
 # Fase 10: validación genérica

@@ -7,7 +7,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use lodestar_core::types::{Direction, FileMap, RelPath};
+use lodestar_core::types::{Direction, FieldPath, FileMap, RelPath};
 use lodestar_core::DocumentSet;
 use lodestar_store::Store;
 
@@ -726,12 +726,14 @@ fn filas_metadata(root: &Path, doc: &str) -> Vec<FilaMetadata> {
     let conn = conexion(root);
     let mut stmt = conn
         .prepare(
-            "SELECT field_path, value_json, value_type FROM metadata \
-             WHERE document_path = ?1 ORDER BY field_path",
+            "SELECT f.field_path, m.value_json, m.value_type \
+             FROM metadata m JOIN documents d ON d.doc_id = m.doc_id \
+             JOIN fields f ON f.field_id = m.field_id \
+             WHERE d.path = ?1 ORDER BY f.field_path",
         )
         .expect(
-            "el store v2 debe materializar la tabla `metadata(document_path, field_path, \
-             value_json, value_type)` (`§20.12`, E18-H01)",
+            "el store vNext debe materializar `metadata(doc_id, field_id, value_json, value_type)` \
+             y el diccionario `fields(field_id, field_path)` (`§20.12`, E35-H02)",
         );
     let filas = stmt
         .query_map([doc], |r| {
@@ -743,6 +745,19 @@ fn filas_metadata(root: &Path, doc: &str) -> Vec<FilaMetadata> {
         })
         .unwrap();
     filas.map(|f| f.unwrap()).collect()
+}
+
+/// Desancla únicamente para cruzar la representación persistida con `ParsedFrontmatter::get`.
+/// E35-H02 conserva en `fields` la forma pública anclada del core para `graph.*`/`document.*`.
+fn core_field_path(field_path: &str) -> FieldPath {
+    let persisted = FieldPath::parse(field_path)
+        .unwrap_or_else(|e| panic!("field_path persistido inválido {field_path:?}: {e:?}"));
+    if persisted.segments().first().map(String::as_str) == Some("frontmatter") {
+        FieldPath::from_segments(persisted.segments().iter().skip(1).cloned())
+            .expect("path anclado con sufijo válido")
+    } else {
+        persisted
+    }
 }
 
 /// La fila de un `field_path` concreto (falla con un mensaje útil si no está).
@@ -778,8 +793,7 @@ fn assert_metadata_coincide_con_el_core(raw: &str, filas: &[FilaMetadata]) {
         .expect("el documento de este test tiene frontmatter");
 
     for fila in filas {
-        let path = lodestar_core::types::FieldPath::parse(&fila.field_path)
-            .unwrap_or_else(|e| panic!("`{}` no es un FieldPath válido: {e:?}", fila.field_path));
+        let path = core_field_path(&fila.field_path);
         let valor = fm.get(&path).unwrap_or_else(|| {
             panic!(
                 "la cache materializó `{}`, pero `ParsedFrontmatter::get` no lo resuelve: el \
@@ -1105,10 +1119,14 @@ fn cache_v3_se_reconstruye() {
     let conn = conexion(dir.path());
     assert!(
         conn.prepare(
-            "SELECT path, title, body, raw, frontmatter_json, content_hash FROM documents LIMIT 0"
+            "SELECT doc_id, path, title, body, frontmatter_json, content_hash FROM documents LIMIT 0"
         )
         .is_ok(),
-        "el DDL v2 debe crear `documents(path, title, body, raw, frontmatter_json, content_hash)`"
+        "el DDL vNext debe crear `documents(doc_id, path, title, body, frontmatter_json, content_hash)` sin raw duplicado"
+    );
+    assert!(
+        conn.prepare("SELECT raw FROM documents LIMIT 0").is_err(),
+        "vNext no debe conservar la copia completa `raw` junto a `body`"
     );
     // …y NINGUNA columna promovida de OKF ni la tabla `tags` (criterio de salida de la épica: el
     // frontmatter es metadata arbitraria, `tags` es una propiedad como cualquier otra).
@@ -1151,6 +1169,8 @@ struct FilaEnlace {
     target_path: Option<String>,
     fragment: Option<String>,
     resolved: i64,
+    target_doc_id: Option<i64>,
+    target_doc_path: Option<String>,
 }
 
 /// Filas de `links` de un documento origen, ordenadas por `raw_href`.
@@ -1158,12 +1178,16 @@ fn filas_enlaces(root: &Path, source: &str) -> Vec<FilaEnlace> {
     let conn = conexion(root);
     let mut stmt = conn
         .prepare(
-            "SELECT raw_href, target_kind, target_path, fragment, resolved FROM links \
-             WHERE source_path = ?1 ORDER BY raw_href",
+            "SELECT l.raw_href, l.target_kind, l.target_path, l.fragment, l.resolved, \
+                    l.target_doc_id, d.path \
+             FROM links l \
+             LEFT JOIN documents d ON d.doc_id = l.target_doc_id \
+             WHERE l.source_doc_id = (SELECT doc_id FROM documents WHERE path = ?1) \
+             ORDER BY l.raw_href",
         )
         .expect(
-            "el store v2 debe materializar `links(source_path, raw_href, target_kind, \
-             target_path, fragment, resolved)` (`§20.12`, E18-H02)",
+            "el store vNext debe materializar `links(source_doc_id, target_doc_id, raw_href, \
+             target_kind, target_path, fragment, resolved)` (`§20.12`, E35-H02)",
         );
     let filas = stmt
         .query_map([source], |r| {
@@ -1173,6 +1197,8 @@ fn filas_enlaces(root: &Path, source: &str) -> Vec<FilaEnlace> {
                 target_path: r.get(2)?,
                 fragment: r.get(3)?,
                 resolved: r.get(4)?,
+                target_doc_id: r.get(5)?,
+                target_doc_path: r.get(6)?,
             })
         })
         .unwrap();
@@ -1233,6 +1259,8 @@ fn ws_seis_clases() -> FileMap {
 /// aristas internas.
 #[test]
 fn links_materializa_las_5_clases() {
+    type ObservedLink<'a> = (&'a str, &'a str, bool, Option<&'a str>, Option<&'a str>);
+
     let dir = tempfile::tempdir().unwrap();
     let files = ws_seis_clases();
     write_all(dir.path(), &files);
@@ -1253,14 +1281,18 @@ fn links_materializa_las_5_clases() {
 
     let filas = filas_enlaces(dir.path(), "raiz.md");
 
-    // (1) Las seis clases, con su `target_kind`, su `target_path` y el `raw_href` intacto (los
-    //     externos y los anchors NO tienen path: la columna es NULL, no una cadena vacía).
-    let observado: Vec<(&str, &str, Option<&str>)> = filas
+    // (1) Las seis clases, con su `target_kind`, su referente físico cuando es un documento y el
+    //     `raw_href` intacto. Un documento conocido se une por `target_doc_id` a `documents.path`
+    //     y deja `links.target_path` NULL; los destinos no materializables conservan su path para
+    //     invalidación dirigida.
+    let observado: Vec<ObservedLink<'_>> = filas
         .iter()
         .map(|f| {
             (
                 f.raw_href.as_str(),
                 f.target_kind.as_str(),
+                f.target_doc_id.is_some(),
+                f.target_doc_path.as_deref(),
                 f.target_path.as_deref(),
             )
         })
@@ -1268,14 +1300,16 @@ fn links_materializa_las_5_clases() {
     assert_eq!(
         observado,
         vec![
-            ("#raiz", "selfAnchor", None),
-            ("../../../etc/passwd", "escapesWorkspace", None),
-            ("docs/auth.md", "document", Some("docs/auth.md")),
-            ("https://example.com/x", "externalUri", None),
-            ("no-existe.md", "missing", Some("no-existe.md")),
+            ("#raiz", "selfAnchor", false, None, None),
+            ("../../../etc/passwd", "escapesWorkspace", false, None, None),
+            ("docs/auth.md", "document", true, Some("docs/auth.md"), None),
+            ("https://example.com/x", "externalUri", false, None, None),
+            ("no-existe.md", "missing", false, None, Some("no-existe.md")),
             (
                 "src/auth/token_service.rs",
                 "workspaceFile",
+                false,
+                None,
                 Some("src/auth/token_service.rs")
             ),
         ],
@@ -1359,16 +1393,25 @@ fn links_separa_el_fragmento() {
 
     let filas = filas_enlaces(dir.path(), "raiz.md");
 
-    // (1) El criterio: el fragmento va en su columna y el destino no lo arrastra…
+    // (1) El criterio: el fragmento va en su columna y el destino conocido se une por
+    // `target_doc_id` a `documents.path`, dejando `links.target_path` NULL…
     let con_fragmento = filas
         .iter()
         .find(|f| f.raw_href == "docs/auth.md#la-seccion")
         .unwrap_or_else(|| panic!("falta la fila del enlace con fragmento; hay: {filas:?}"));
     assert_eq!(con_fragmento.fragment.as_deref(), Some("la-seccion"));
+    assert!(
+        con_fragmento.target_doc_id.is_some(),
+        "un documento conocido debe referenciarse por `target_doc_id`"
+    );
     assert_eq!(
-        con_fragmento.target_path.as_deref(),
+        con_fragmento.target_doc_path.as_deref(),
         Some("docs/auth.md"),
-        "`target_path` es el destino normalizado SIN el fragmento"
+        "`target_doc_id` debe unir con `documents.path`"
+    );
+    assert_eq!(
+        con_fragmento.target_path, None,
+        "un documento conocido usa `target_doc_id`; `links.target_path` queda NULL"
     );
     // …y el `raw_href` sigue siendo el href original, byte a byte (lo necesita `move_document`).
     assert_eq!(con_fragmento.raw_href, "docs/auth.md#la-seccion");
@@ -1410,11 +1453,11 @@ fn filas_diagnostics(root: &Path, doc: &str) -> Vec<FilaDiag> {
     let mut stmt = conn
         .prepare(
             "SELECT code, severity, message, range_json FROM diagnostics \
-             WHERE document_path = ?1 ORDER BY code",
+             WHERE doc_id = (SELECT doc_id FROM documents WHERE path = ?1) ORDER BY code",
         )
         .expect(
-            "el store v2 debe materializar `diagnostics(document_path, code, severity, message, \
-             range_json)` (`§20.12`, E18-H02)",
+            "el store vNext debe materializar `diagnostics(doc_id, code, severity, message, \
+             range_json)` (`§20.12`, E35-H02)",
         );
     let filas = stmt
         .query_map([doc], |r| {
@@ -1636,10 +1679,10 @@ fn target_path_de(t: &lodestar_core::types::LinkTarget) -> Option<String> {
         // E23-H11: un directorio no es un destino-fichero, así que no entra en `target_path`
         // (espeja `lodestar_store::index::target_path`, la función de producción que este helper
         // deriva del enum del core).
-        LinkTarget::WorkspaceDirectory(_)
-        | LinkTarget::ExternalUri(_)
-        | LinkTarget::SelfAnchor(_)
-        | LinkTarget::EscapesWorkspace => None,
+        LinkTarget::WorkspaceDirectory(path) => path.as_ref().map(|p| p.as_str().to_string()),
+        LinkTarget::ExternalUri(_) | LinkTarget::SelfAnchor(_) | LinkTarget::EscapesWorkspace => {
+            None
+        }
     }
 }
 
@@ -1693,7 +1736,7 @@ fn assert_paridad_con_inventario(store: &Store, files: &FileMap, other_files: &[
     );
 
     for p in &a.documents {
-        // incoming: orígenes distintos (el store sintetiza `SELECT DISTINCT source_path`).
+        // incoming: orígenes distintos (el store sintetiza sobre `source_doc_id`).
         let mut expected: Vec<RelPath> = a
             .incoming
             .get(p)

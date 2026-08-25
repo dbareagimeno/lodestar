@@ -118,8 +118,73 @@ Los campos principales del JSON extremo son:
 - `functional_equivalence` y `equivalence_divergences`: comparación de las tres variantes;
 - `preflight`: espacio disponible/requerido y estado explícito de verificación de memoria.
 
+La variante SQLite (identificada como `sqlite-raw` en informes históricos) reconstruye el
+`DocumentSet` desde el snapshot Markdown completo y exacto de `documents.body`; `DocumentStore` y el
+core consumen ese snapshot, sin releer el Markdown desde disco en ese camino. El disco sigue siendo
+la fuente canónica y la cache SQLite se valida/reconstruye como derivada. Esta variante es una
+medición del banco y no activa SQLite como lectura por defecto.
+
 Con una sola iteración, p50 y p95 son la misma muestra. Para comparar latencias estables, aumenta
 `--iterations` sólo después de estimar el coste total.
+
+### Desglose SQLite con `dbstat` (E35-H02)
+
+El objeto `sqlite.dbstat` dentro de `sqlite` desglosa el fichero principal por objeto SQLite. Su
+forma relevante es:
+
+```json
+{
+  "main_bytes": 123456,
+  "page_count": 30,
+  "page_size": 4096,
+  "objects": [
+    {"name": "documents", "kind": "table", "bytes": 40960},
+    {"name": "idx_links_target_doc", "kind": "index", "bytes": 8192},
+    {"name": "documents_fts", "kind": "fts", "bytes": 4096},
+    {"name": "documents_fts_data", "kind": "fts_shadow", "bytes": 32768}
+  ],
+  "unattributed_bytes": 0
+}
+```
+
+`kind` distingue tablas, índices, la tabla virtual FTS y sus shadow tables. E35-H02 usa FTS5
+contentless (`content=''`, `columnsize=0`): recibe `documents.body` al insertar, pero no conserva una
+tabla de contenido ni una segunda copia completa. El único escritor asigna manualmente `rowid=doc_id`;
+la consulta de candidatos hace `JOIN documents d ON d.doc_id = documents_fts.rowid` antes de la
+confirmación del core. La suma de `objects[].bytes` más `unattributed_bytes` debe ser exactamente
+`main_bytes`; cualquier objeto no vacío esperado debe aparecer en el listado. El informe superior conserva además `sqlite.main_bytes`, `wal_bytes`,
+`shm_bytes`, `auxiliary_bytes` y `total_bytes`: esos últimos incluyen los auxiliares WAL/SHM y no se
+mezclan con la reconciliación `dbstat` del fichero principal.
+
+La prueba versionada del spike sobre 10.000 documentos (`c5_spike_fts_mismo_corpus_dbstat_y_eleccion_reconciliada`)
+midió `524288 bytes` para contentless y `651264 bytes` para external-content. El corpus contiene
+snapshot Markdown completo y frontmatter no vacío: ambas variantes
+devolvieron los mismos candidatos, y ambas ejercitaron update/delete pasando al comando FTS5 los
+valores antiguos exactos leídos desde `documents` (incluido el snapshot completo de `documents.body`).
+Las búsquedas body exclusiva `[4201]`, frontmatter exclusiva `[9877]` y compartida (`10000`) fueron
+iguales; external añade `documents_fts_docsize=126976` al desglose contentless
+(`documents_fts=0`, `config=4096`, `data=516096`, `idx=4096`).
+La medición se puede reproducir con:
+
+```text
+cargo test -p lodestar-store --test e35_h02_schema_vnext_red \
+  c5_spike_fts_mismo_corpus_dbstat_y_eleccion_reconciliada -- --nocapture
+```
+
+El campo `footprint` del informe extremo expresa una intención de ingeniería, no una decisión de
+producto:
+
+```json
+"footprint": {
+  "objective": {"max_ratio": 2.5, "gate": false},
+  "read_default": false
+}
+```
+
+`max_ratio = 2.5` es el objetivo Realista/100k; `gate = false` significa que esta corrida no bloquea
+la entrega por footprint. `read_default = false` conserva la honestidad de `ARCHITECTURE.md §21.5`
+mientras `decisiones §14` siga abierta. No conviertas ninguno de estos campos en un umbral local ni
+presentes SQLite como camino normal de lectura.
 
 ## Comparar dos corridas
 

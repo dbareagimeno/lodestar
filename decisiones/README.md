@@ -99,6 +99,13 @@ prioridad **filtra**, no ordena. El vocabulario de `estado` es cerrado: `abierta
   no implementa la cache W-TinyLFU y no cambia el estado abierto de esta ficha.
   El procesamiento fuera de cache, el fallo explícito y la protección contra *thrashing* se
   difieren a las issues posteriores **#55, #57, #59 y #62**.
+  La adenda **E35-H02** (issue #54, trazada **E34-H02 → E35-H02**) compacta el DDL con `doc_id`,
+  `fields`, relaciones por IDs, el snapshot Markdown completo en `documents.body`, FTS5 contentless
+  (`content=''`, `columnsize=0`, `rowid = doc_id` manual) y `sqlite.dbstat`; los candidatos se
+  proyectan mediante `JOIN documents` y update/delete usan los valores antiguos exactos del snapshot.
+  Mejora la base técnica, pero no conecta el store a App/MCP, no activa SQLite como lectura por defecto
+  y no cambia `estado: "abierta"` ni la prioridad de §14. El objetivo de footprint `≤ 2,5×` sigue
+  siendo no bloqueante (`gate = false`).
 - **§9 — banco de pruebas** (prio 4). Tiene el testbench de §23 re-ejecutable, el runbook y la
   convención de resúmenes/manifiesto con brutos externos, además de un workflow manual validado localmente; falta
   ejecutar el `workflow_dispatch` remoto y enlazar un run verde para cerrar el BDD de integración.

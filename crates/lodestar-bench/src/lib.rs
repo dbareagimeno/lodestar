@@ -1445,12 +1445,16 @@ fn sqlite_size_report(root: &Path) -> Value {
     let wal_bytes = file_size("index.db-wal");
     let shm_bytes = file_size("index.db-shm");
     let auxiliary_bytes = wal_bytes.saturating_add(shm_bytes);
+    let dbstat = Store::open(root)
+        .and_then(|store| store.dbstat_report())
+        .unwrap_or_else(|error| json!({"error": error.to_string(), "main_bytes": 0, "objects": [], "unattributed_bytes": 0}));
     json!({
         "main_bytes": main_bytes,
         "wal_bytes": wal_bytes,
         "shm_bytes": shm_bytes,
         "auxiliary_bytes": auxiliary_bytes,
         "total_bytes": main_bytes.saturating_add(auxiliary_bytes),
+        "dbstat": dbstat,
         "unit": "bytes",
         "scope": "<root>/.lodestar/index.db y auxiliares WAL/SHM; medido al finalizar"
     })
@@ -1543,6 +1547,10 @@ fn extreme_report(
         "platform": {"os": std::env::consts::OS, "arch": std::env::consts::ARCH},
         "corpus": corpus,
         "sqlite": sqlite,
+        "footprint": {
+            "objective": {"max_ratio": 2.5, "gate": false},
+            "read_default": false
+        },
         "preflight": preflight,
         "wire_calibration": {"status": "not_applicable", "reason": "modo extremo excluye wire"},
         "change_cycle": {"status": "not_applicable", "reason": "modo extremo excluye escritura"}

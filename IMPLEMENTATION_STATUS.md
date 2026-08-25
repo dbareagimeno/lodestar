@@ -73,6 +73,49 @@ historia concreta. E35-H01 no conecta SQLite al camino de lectura, no implementa
 W-TinyLFU, no modifica `contracts/mcp.yml` y mantiene `decisiones §14` abierta. Configs antiguas
 omiten el campo y usan el default; binarios antiguos pueden rechazarlo.
 
+### E35-H02 — esquema SQLite vNext compacto por IDs (issue #54; implementada)
+
+✅ **Implementada y verificada con evidencia dirigida el 2026-08-25.** La issue #54 conserva el
+título histórico `[E34-H02]` y se materializa localmente como **E34-H02 → E35-H02**. La cache usa
+`USER_VERSION = 6`; una cache v5 o un DDL incompatible se descarta y se reconstruye sin migrar filas
+in-place ni modificar el Markdown.
+
+La evidencia disponible cubre los ocho criterios de la historia:
+
+- `documents` tiene `doc_id INTEGER PRIMARY KEY`, `path` único, un `body` con el snapshot Markdown
+  completo y exacto (frontmatter y cuerpo incluidos) y no `raw`; metadata, diagnostics y enlaces usan
+  foreign keys por ID;
+- `fields(field_id, field_path)` es un diccionario único y conserva los paths anclados que publica el
+  core; destinos conocidos usan `target_doc_id` y los no materializables conservan `target_path`
+  con ID nulo;
+- FTS5 es contentless (`content=''`, `columnsize=0`), con `rowid = doc_id` insertado manualmente;
+  los candidatos se ligan a `documents` mediante `JOIN` y devuelven resultados reales. El test
+  versionado de 10.000 documentos con snapshot Markdown y frontmatter no vacío midió `524288 bytes`
+  para contentless frente a `651264 bytes` para external-content (reducción `126976` por `docsize`),
+  y verificó body exclusivo `[4201]`, frontmatter exclusivo `[9877]`, `shared_count=10000` y ciclo
+  de update/delete equivalentes; la evidencia está en
+  [`docs/qa/e35-h02-fts-spike-2026-08-25.md`](docs/qa/e35-h02-fts-spike-2026-08-25.md);
+- Como contentless no conserva los valores de columna, el único escritor lee antes del update/delete
+  los valores antiguos exactos (`path`, `title`, `body`, `frontmatter_text`) desde `documents` y los
+  entrega al comando FTS5 `delete`; `documents.body` sigue siendo el único snapshot Markdown completo;
+- `DocumentStore` y el core leen el snapshot exacto desde `documents.body`, mientras el Markdown en
+  disco sigue siendo la fuente canónica; `outgoing` proyecta los enlaces mediante join y la paridad
+  observable core↔store conserva Unicode, metadata, enlaces dangling y diagnostics;
+- `reconcile_all` compara el inventario `other_files` antes de escribirlo y reproyecta todos los
+  documentos cuando solo cambia un asset; C6 verifica la reclasificación exacta `missing`↔`workspaceFile`.
+- `lodestar-bench` informa `sqlite.dbstat` por tablas, índices, FTS y shadow tables, con bytes no
+  atribuibles y reconciliación exacta contra `main_bytes`;
+- el informe de footprint conserva `objective.max_ratio = 2.5`, `objective.gate = false` y
+  `read_default = false`.
+
+La evidencia de comportamiento está en
+`crates/lodestar-store/tests/e35_h02_schema_vnext_red.rs` y la de formato del banco en
+`crates/lodestar-bench/tests/e35_h02_benchmark_red.rs`; el spike y la documentación interna son
+parte de esta entrega. E35-H02 no conecta SQLite a `App`/MCP, no cambia `contracts/mcp.yml` ni la
+configuración pública, no implementa rebuild streaming/watcher dirigido y mantiene `decisiones §14`
+abierta. El objetivo `≤ 2,5×` no es un gate ni una promesa externa; la revisión fresca y el gate
+completo de entrega se registran por separado cuando correspondan.
+
 ### E33-H04 — banco de rendimiento (2026-08-22)
 
 ✅ Completado. La corrida oficial está identificada en el [manifiesto de evidencia v0.6.2](docs/qa/corridas/v0.6.2/manifest.json),
