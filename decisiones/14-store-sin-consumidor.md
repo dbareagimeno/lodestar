@@ -6,7 +6,7 @@ prioridad: 5
 etiquetas: ["store", "rendimiento", "watcher", "descubrimiento"]
 origen: "revision-de-pr"
 abierta_en: "2026-07-25"
-revisada_en: "2026-08-23"
+revisada_en: "2026-08-24"
 epica: "E23"
 historias: ["E23-H16", "E33-H09"]
 bloqueada_por: "evidencia disponible; ratificación normativa del usuario pendiente"
@@ -107,3 +107,25 @@ Esto completa la evidencia técnica solicitada, pero
 `§14` sigue abierta: no escoge conectar, acotar ni retirar, no cambia la prioridad y no usa los
 techos H05/10k como umbral para la nueva escala. La corrida y la capacidad permanecen en el repo
 como resumen y artefacto externo inventariado para evaluar mejoras futuras de rendimiento.
+
+## Adenda de diseño ratificada — E35-H01 / issue #53 (2026-08-24)
+
+La primera ratificación explícita de la issue #53 —titulada originalmente **E34-H01** y trazada
+localmente como **E34-H01 → E35-H01**— fija una política para la memoria retenida y controlable:
+`N` es el total de
+`performance.maxMemory`, `SQLite = floor(30*N/100)`, `W-TinyLFU = floor(20*N/100)` y
+`Work = N - SQLite - W-TinyLFU` es la reserva protegida dentro de `N`, que recibe todo residuo. Las
+tres partes agotan `N` exactamente: no hay cuarta reserva, pool sin tope ni tamaño abierto, y las
+caches nunca invaden `Work`. La configuración tiene default `256MiB`, mínimo `64MiB`, gramática estricta
+`[1-9][0-9]*(MiB|GiB)` y conversión a `u64` con aritmética *checked*. El presupuesto no es RSS, no
+se valida contra cgroup/RSS al abrir y no añade códigos MCP: los fallos siguen el camino existente de
+`INTERNAL_IO_ERROR` con mensaje accionable. El owner único de `MemoryBudget` es
+`lodestar-workspace::Workspace::open`.
+
+Los documentos admitidos por `discovery.maxDocumentBytes` podrán procesarse fuera de cache cuando
+sea seguro; si no, deben fallar explícitamente sin *thrashing*. Esa semántica se define ahora, pero
+la implementación efectiva corresponde a las issues posteriores **#55, #57, #59 y #62**, según la
+historia concreta; E35-H01 no promete ejecutarla. Esta adenda cubre config,
+`MemoryBudget`/subpresupuestos, tests, mensajes y documentación; no decide la salida de §14, no
+conecta SQLite, no implementa la cache W-TinyLFU y no cambia `estado: "abierta"` ni la prioridad de
+la ficha. Los detalles normativos están en [`ARCHITECTURE.md §23`](../ARCHITECTURE.md#23-presupuesto-de-memoria-retenida-e35-h01).

@@ -162,11 +162,23 @@ fn canonical_md(root: &Path) -> BTreeMap<String, String> {
             if path.is_dir() {
                 walk(&path, root, out);
             } else if path.extension().is_some_and(|e| e == "md") {
-                let rel = path
-                    .strip_prefix(root)
-                    .unwrap()
-                    .to_string_lossy()
-                    .to_string();
+                let rel = lodestar_workspace::discovery::rel_path_from(
+                    path.strip_prefix(root).unwrap_or_else(|e| {
+                        panic!(
+                            "el documento {} debe estar bajo la raíz {}: {e}",
+                            path.display(),
+                            root.display()
+                        )
+                    }),
+                )
+                .unwrap_or_else(|check| {
+                    panic!(
+                        "la ruta canónica {} debe ser representable como RelPath: {check:?}",
+                        path.display()
+                    )
+                })
+                .as_str()
+                .to_owned();
                 let content = std::fs::read_to_string(&path).unwrap();
                 out.insert(rel, content);
             }
@@ -3814,9 +3826,9 @@ mod gc_y_transacciones_vivas {
 
     /// Un pid que con certeza **no** corresponde a ningún proceso vivo: se arranca el propio binario
     /// de test con `--list` (enumera los tests y sale 0 sin ejecutar ninguno) y se espera a que
-    /// muera. Portable —no depende de rangos de pid del sistema— y realista: es exactamente el hueco
-    /// que deja un proceso que se fue. Mismo truco que `pid_muerto()` en
-    /// `crates/lodestar-mcp/tests/concurrencia.rs`.
+    /// muera. Solo se usa en Unix, donde la prueba de vida por pid forma parte del criterio del
+    /// lock; Windows debe ejercer el camino portable por TTL que cubre el caso siguiente.
+    #[cfg(unix)]
     fn pid_inexistente() -> u32 {
         let exe = std::env::current_exe().expect("ruta del binario de test");
         let mut hijo = std::process::Command::new(exe)
@@ -4087,26 +4099,31 @@ mod gc_y_transacciones_vivas {
         }
 
         // ---- (b) crash REAL en la ventana: mismo material + señal de propiedad de un pid muerto --
-        let dir = tempfile::tempdir().unwrap();
-        let ws_a = siembra_documentos(dir.path(), &["uno", "dos"]);
-        let id = "e25-h03-dueno-muerto";
-        let cs = cs_modifica(&ws_a, id, &["uno.md", "dos.md"]);
+        // La prueba de vida por pid no existe en Windows; allí este escenario pasaría por la razón
+        // equivocada (el TTL), así que solo se ejerce en Unix. El caso portable de abajo fija
+        // explícitamente la señal rancia y deja que el TTL sea el discriminante en todas partes.
+        #[cfg(unix)]
+        {
+            let dir = tempfile::tempdir().unwrap();
+            let ws_a = siembra_documentos(dir.path(), &["uno", "dos"]);
+            let id = "e25-h03-dueno-muerto";
+            let cs = cs_modifica(&ws_a, id, &["uno.md", "dos.md"]);
 
-        let ventana = congelar_en_la_ventana(ws_a, cs);
-        // Foto del plano de control con la transacción VIVA dentro de la ventana: contiene el árbol,
-        // el sidecar, el staging y —sea cual sea el mecanismo— la señal durable de propiedad.
-        let foto = ficheros_bajo(&runtime_de(dir.path()));
-        assert!(
+            let ventana = congelar_en_la_ventana(ws_a, cs);
+            // Foto del plano de control con la transacción VIVA dentro de la ventana: contiene el árbol,
+            // el sidecar, el staging y —sea cual sea el mecanismo— la señal durable de propiedad.
+            let foto = ficheros_bajo(&runtime_de(dir.path()));
+            assert!(
             foto.keys()
                 .any(|r| r.starts_with(&format!("recovery/{id}"))),
             "precondición: la foto debe incluir el material de recuperación de la ventana: {:?}",
             foto.keys().collect::<Vec<_>>()
         );
-        let señales: Vec<&String> = foto
-            .keys()
-            .filter(|r| !r.starts_with("recovery/") && !r.starts_with("staging/"))
-            .collect();
-        assert!(
+            let señales: Vec<&String> = foto
+                .keys()
+                .filter(|r| !r.starts_with("recovery/") && !r.starts_with("staging/"))
+                .collect();
+            assert!(
             !señales.is_empty(),
             "precondición del escenario: mientras la transacción está viva en la ventana tiene que \
              existir en disco ALGUNA señal durable de propiedad (el fichero de lock, o la marca de \
@@ -4114,52 +4131,174 @@ mod gc_y_transacciones_vivas {
              Sin ninguna, este caso no se distinguiría del (a): {:?}",
             foto.keys().collect::<Vec<_>>()
         );
-        ventana
-            .liberar()
-            .expect("la transacción congelada publica al liberarla");
+            ventana
+                .liberar()
+                .expect("la transacción congelada publica al liberarla");
 
-        // Se repone el estado que dejaría un crash en esa ventana: todo lo que la foto tenía y el
-        // sellado se llevó, con el pid de ESTE proceso (vivo) sustituido por uno inexistente. El
-        // journal NO se repone: el crash ocurrió antes de crearlo, que es lo que hace del material
-        // un huérfano invisible para el criterio `journal/` ∪ `receipts/`.
-        let vivo = std::process::id().to_string();
-        let muerto = pid_inexistente().to_string();
-        for (rel, bytes) in &foto {
-            let destino = runtime_de(dir.path()).join(rel);
-            if destino.exists() {
-                continue;
+            // Se repone el estado que dejaría un crash en esa ventana: todo lo que la foto tenía y el
+            // sellado se llevó, con el pid de ESTE proceso (vivo) sustituido por uno inexistente. El
+            // journal NO se repone: el crash ocurrió antes de crearlo, que es lo que hace del material
+            // un huérfano invisible para el criterio `journal/` ∪ `receipts/`.
+            let vivo = std::process::id().to_string();
+            let muerto = pid_inexistente().to_string();
+            for (rel, bytes) in &foto {
+                let destino = runtime_de(dir.path()).join(rel);
+                if destino.exists() {
+                    continue;
+                }
+                if let Some(padre) = destino.parent() {
+                    std::fs::create_dir_all(padre).unwrap();
+                }
+                let contenido = match std::str::from_utf8(bytes) {
+                    Ok(texto) => texto.replace(&vivo, &muerto).into_bytes(),
+                    Err(_) => bytes.clone(),
+                };
+                std::fs::write(&destino, contenido).unwrap();
             }
-            if let Some(padre) = destino.parent() {
-                std::fs::create_dir_all(padre).unwrap();
-            }
-            let contenido = match std::str::from_utf8(bytes) {
-                Ok(texto) => texto.replace(&vivo, &muerto).into_bytes(),
-                Err(_) => bytes.clone(),
-            };
-            std::fs::write(&destino, contenido).unwrap();
-        }
-        assert!(
-            !journal_de(dir.path(), id).exists(),
-            "precondición: el crash es ANTERIOR al journal, así que no puede haber ninguno"
-        );
+            assert!(
+                !journal_de(dir.path(), id).exists(),
+                "precondición: el crash es ANTERIOR al journal, así que no puede haber ninguno"
+            );
 
-        let ws_b = Workspace::open(dir.path()).unwrap();
-        gc_con_limite(ws_b).expect("el GC nunca falla");
+            let ws_b = Workspace::open(dir.path()).unwrap();
+            gc_con_limite(ws_b).expect("el GC nunca falla");
 
-        assert!(
+            assert!(
             !recovery_de(dir.path(), id).exists(),
             "el dueño de esta ventana está MUERTO (pid inexistente): su material es basura y el GC \
              tiene que recogerlo. Una señal de propiedad sin criterio de rancidez deja basura \
              inmortal en cada crash — es el defecto que E23-H23 ya cerró para el lock"
         );
-        assert!(
-            !sidecar_de(dir.path(), id).exists(),
-            "y su sidecar de huellas con él"
-        );
-        assert!(
-            !staging_de(dir.path(), id).exists(),
-            "y su staging, que es el huérfano que motivó el barrido de E24-H06"
-        );
+            assert!(
+                !sidecar_de(dir.path(), id).exists(),
+                "y su sidecar de huellas con él"
+            );
+            assert!(
+                !staging_de(dir.path(), id).exists(),
+                "y su staging, que es el huérfano que motivó el barrido de E24-H06"
+            );
+        }
+
+        // ---- (c) señal rancia por TTL: el camino portable que también debe cubrir Windows ----
+        // Se captura el mismo estado real de la ventana, pero se modifica únicamente el timestamp
+        // normativo del lock JSON. El host remoto hace que Unix tampoco consulte la vida del pid:
+        // en ambos sistemas el único criterio disponible es el TTL, sin dormir 15 minutos.
+        {
+            let dir = tempfile::tempdir().unwrap();
+            let ws_a = siembra_documentos(dir.path(), &["uno", "dos"]);
+            let id = "e25-h03-senal-rancia-ttl";
+            let cs = cs_modifica(&ws_a, id, &["uno.md", "dos.md"]);
+
+            let ventana = congelar_en_la_ventana(ws_a, cs);
+            let runtime = runtime_de(dir.path());
+            let foto = ficheros_bajo(&runtime);
+            let lock_rel = "lock.json";
+            let lock_bytes = foto
+                .get(lock_rel)
+                .expect("precondición: la ventana debe dejar el lock durable en runtime/");
+            let mut lock: serde_json::Value = serde_json::from_slice(lock_bytes)
+                .expect("precondición: la señal/lock real debe ser JSON interpretable");
+            assert!(
+                lock.get("timestamp")
+                    .and_then(serde_json::Value::as_u64)
+                    .is_some(),
+                "precondición: el lock real debe declarar el timestamp normativo que usa el TTL: {lock}"
+            );
+
+            assert!(
+                recovery_de(dir.path(), id).is_dir(),
+                "precondición: la ventana debe tener recovery materializado: {}",
+                recovery_de(dir.path(), id).display()
+            );
+            assert!(
+                sidecar_de(dir.path(), id).is_file(),
+                "precondición: la ventana debe tener sidecar materializado: {}",
+                sidecar_de(dir.path(), id).display()
+            );
+            assert!(
+                staging_de(dir.path(), id).is_dir(),
+                "precondición: la ventana debe tener staging materializado: {}",
+                staging_de(dir.path(), id).display()
+            );
+            assert!(
+                !journal_de(dir.path(), id).exists(),
+                "precondición: la señal se captura antes de create_journal: {}",
+                journal_de(dir.path(), id).display()
+            );
+
+            // La forma y el campo vienen del lock real; solo lo convertimos en una marca rancia.
+            // Un host ajeno evita que Unix convierta el pid actual del test en una señal viva.
+            lock["host"] = serde_json::json!("host-remoto-del-test");
+            lock["timestamp"] = serde_json::json!(0_u64);
+            let lock_rancio = serde_json::to_vec(&lock).expect("serializar el lock rancio");
+
+            ventana
+                .liberar()
+                .expect("la transacción congelada debe poder publicar");
+
+            // El crash se modela restaurando exclusivamente el estado durable capturado antes del
+            // journal. El recibo no existe porque este arnés llama a apply_transaction sin recibo.
+            for (rel, bytes) in &foto {
+                let destino = runtime.join(rel);
+                if destino.exists() {
+                    continue;
+                }
+                if let Some(padre) = destino.parent() {
+                    std::fs::create_dir_all(padre).unwrap();
+                }
+                let bytes = if rel == lock_rel { &lock_rancio } else { bytes };
+                std::fs::write(&destino, bytes).unwrap();
+            }
+
+            assert!(
+                recovery_de(dir.path(), id).is_dir(),
+                "precondición restaurada: recovery debe estar presente antes del GC"
+            );
+            assert!(
+                sidecar_de(dir.path(), id).is_file(),
+                "precondición restaurada: sidecar debe estar presente antes del GC"
+            );
+            assert!(
+                staging_de(dir.path(), id).is_dir(),
+                "precondición restaurada: staging debe estar presente antes del GC"
+            );
+            assert!(
+                !journal_de(dir.path(), id).exists(),
+                "precondición restaurada: el crash ocurre antes del journal"
+            );
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(
+                    &std::fs::read_to_string(runtime.join(lock_rel)).unwrap()
+                )
+                .unwrap()["timestamp"],
+                serde_json::json!(0_u64),
+                "la señal restaurada debe ser rancia por el timestamp normativo"
+            );
+
+            let ws_b = Workspace::open(dir.path()).unwrap();
+            gc_con_limite(ws_b).expect("el GC nunca falla");
+
+            assert!(
+                !recovery_de(dir.path(), id).exists(),
+                "el GC portable debe purgar por TTL el recovery de la señal rancia"
+            );
+            assert!(
+                !sidecar_de(dir.path(), id).exists(),
+                "el GC portable debe purgar por TTL el sidecar junto al recovery"
+            );
+            assert!(
+                !staging_de(dir.path(), id).exists(),
+                "el GC portable debe purgar por TTL el staging huérfano"
+            );
+            assert!(
+                !journal_de(dir.path(), id).exists(),
+                "el GC portable no debe inventar un journal al purgar"
+            );
+            assert!(
+                !runtime.join(lock_rel).exists(),
+                "el lock rancio reclamado por TTL debe quedar liberado al terminar el GC"
+            );
+        }
     }
 
     /// **E25-H03** · Criterio 3 — **Dado** una transacción que termina, **Cuando** ha terminado,

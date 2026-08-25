@@ -4,11 +4,54 @@
 
 Los benchmarks actuales son asumibles hasta ~10.000 documentos. Extrapolando los resultados observados, un corpus de 1.000.000 de documentos podría alcanzar aproximadamente 10 GB de RAM y unos 50 segundos de rebuild en un M4 base.
 
+Estas cifras son una extrapolación histórica de mediciones de proceso y no un contrato de memoria:
+RSS no es la métrica normativa del producto. La adenda ratificada **E35-H01** (issue #53, titulada
+originalmente **E34-H01** y trazada localmente como **E34-H01 → E35-H01**) fija el presupuesto de memoria retenida y controlable en
+`ARCHITECTURE.md §23`; la implementación de ese alcance está entregada y verificada en los tests
+dirigidos de E35-H01.
+
 Un millón de documentos no tiene por qué ser el caso habitual, pero sí es una escala empresarial plausible. El problema principal no es si SQLite puede almacenar esa cantidad de filas, sino cuántas representaciones del corpus mantiene Lodestar simultáneamente y cuántas operaciones recorren el corpus completo.
 
 La propiedad objetivo debería ser:
 
 > El rebuild completo sigue siendo proporcional al tamaño del corpus, pero la memoria queda limitada por una cuota fija; el arranque normal reutiliza el índice existente y las operaciones cuestan en función de los documentos afectados, no del corpus completo.
+
+## Presupuesto ratificado de memoria (E35-H01)
+
+La configuración pública es únicamente `performance.maxMemory` en `.lodestar/config.yaml`:
+
+```yaml
+performance:
+  maxMemory: 256MiB
+```
+
+Su ausencia usa **256 MiB** y el mínimo es **64 MiB**. El scalar YAML semántico, una vez
+deserializado, debe satisfacer exactamente `[1-9][0-9]*(MiB|GiB)`, case-sensitive, sin espacios en
+su contenido, fracciones ni ceros iniciales. El whitespace sintáctico separado antes de newline,
+comentario, coma o `}` no integra el valor; por ello `performance: {maxMemory: 256MiB }` equivale
+a `256MiB`. Sí son inválidos `"256MiB "`, `" 256MiB"` y `256 MiB`, además de `0MiB`, `064MiB`,
+`1.5GiB`, `256mib` y `256MB`. La conversión a bytes usa `u64` y aritmética *checked*; un valor
+inválido, menor que el mínimo o que desborde se rechaza con un mensaje accionable por el camino de
+error existente, sin delta en MCP. No se introduce un scanner/lexer source-aware ni un parser YAML
+paralelo. No se consulta cgroup ni RSS al abrir.
+
+Sea `N` el total de `performance.maxMemory`, contado como memoria retenida y controlable, no RSS.
+SQLite dispone de una cuota interna blanda `floor(30 * N / 100)` y W-TinyLFU de otra
+`floor(20 * N / 100)`. `Work = N - SQLite - W-TinyLFU` es la reserva protegida dentro de `N`,
+recibe todo residuo y las caches nunca la invaden. Las tres partes agotan `N` exactamente: no existe
+una cuarta reserva, un pool sin tope ni un tamaño abierto. El
+único owner de `MemoryBudget` es `lodestar-workspace::Workspace::open`; core, store y fachadas no lo
+crean ni lo poseen. Las cuotas no son límites públicos ni crean presets o knobs adicionales.
+W-TinyLFU es un rol de cache futuro: esta adenda no implementa la cache ni conecta SQLite al camino
+de lectura.
+
+`discovery.maxDocumentBytes` sigue siendo admisión documental. La semántica ratificada permite que
+un documento admitido se procese fuera de cache si es seguro; si no lo es, debe fallar explícitamente
+por el camino existente, sin reintentos que produzcan *thrashing*. La implementación efectiva de
+esas rutas corresponde a las issues posteriores **#55, #57, #59 y #62**, según la historia concreta;
+E35-H01 no promete ejecutarlas. Configs antiguas omiten el campo nuevo y usan el default; binarios
+antiguos pueden rechazarlo. El detalle normativo está en
+[`ARCHITECTURE.md §23`](../ARCHITECTURE.md#23-presupuesto-de-memoria-retenida-e35-h01).
 
 ## Diagnóstico del diseño actual
 
@@ -125,16 +168,18 @@ Cada worker:
 
 La tubería debería tener varios workers de lectura/parseo, una cola limitada por bytes, un único escritor SQLite y backpressure.
 
-La memoria pasa así de depender de `N documentos` a depender de una cuota configurable:
+La memoria pasa así de depender del número de documentos a depender de una cuota configurable:
 
 ```text
 cache SQLite
 + cola de indexación
 + documentos en procesamiento
-+ cache LRU de documentos calientes
++ cache interna de documentos calientes (rol W-TinyLFU futuro)
 ```
 
-Conviene introducir un presupuesto explícito de memoria y medir cuál es un valor razonable en la práctica.
+E35-H01 ratifica el presupuesto explícito y su default; su alcance incluye la contabilidad y los
+tests de memoria retenida/controlable por categoría. Las mediciones de RSS pueden acompañar la
+evidencia, pero no sustituyen el contrato ni se validan contra cgroup al abrir.
 
 ### 4. Compactar el esquema SQLite
 
@@ -370,7 +415,7 @@ En instalaciones locales o de un solo nodo Redis no debería ser necesario.
 ### Fase 2 — Memoria acotada
 
 5. Rebuild en streaming.
-6. Cola limitada por bytes y presupuesto de memoria configurable.
+6. Presupuesto `performance.maxMemory`, cola limitada por bytes y contabilidad de memoria retenida.
 7. Escritor SQLite dedicado y lectores separados.
 8. Paginación obligatoria para resultados potencialmente grandes.
 
@@ -401,7 +446,7 @@ Mantener ~10k documentos en la suite habitual, añadir ~100k a ejecuciones más 
 
 Medir:
 
-- tiempo y pico de RAM de rebuild frío;
+- tiempo y memoria retenida/controlable por categoría del rebuild frío;
 - apertura con índice válido;
 - reconciliación sin cambios;
 - reconciliación con 0,1 % y 1 % de documentos modificados;
@@ -415,14 +460,17 @@ Medir:
 - bytes de índice por documento;
 - tamaño máximo del WAL/temporales;
 - tiempo de cambio de generación/esquema;
-- comportamiento con límites de memoria de contenedor.
+- comportamiento con límites de memoria de contenedor (solo evidencia diagnóstica; no se valida
+  cgroup/RSS al abrir).
 
 Separar en las mediciones:
 
-- heap propio del proceso;
+- memoria retenida/controlable contabilizada por Lodestar;
 - memoria de SQLite;
+- memoria de trabajo y de la cache caliente;
 - page cache del sistema operativo;
-- memoria mapeada si se utiliza mmap.
+- memoria mapeada si se utiliza mmap;
+- RSS, únicamente como contexto no normativo.
 
 ## Conclusión
 
@@ -438,4 +486,7 @@ La prioridad debería ser:
 6. reemplazar clones globales durante planificación por overlays;
 7. introducir Redis únicamente cuando exista una necesidad real de coordinación entre máquinas.
 
-Con este modelo, un corpus de un millón de documentos puede requerir varios GB de almacenamiento persistente —especialmente por el índice textual—, pero el uso de RAM debería depender de un presupuesto configurable y no crecer linealmente con todo el corpus. El arranque normal debería abrir una generación existente y reconciliar cambios, no reconstruir el mundo.
+Con este modelo, un corpus de un millón de documentos puede requerir varios GB de almacenamiento persistente —especialmente por el índice textual—, pero la memoria retenida debería depender de
+`performance.maxMemory` y no crecer linealmente con todo el corpus. El arranque normal debería
+abrir una generación existente y reconciliar cambios, no reconstruir el mundo. Esta política no
+resuelve `decisiones §14`, no conecta SQLite y no implementa W-TinyLFU.

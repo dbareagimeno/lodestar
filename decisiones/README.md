@@ -90,7 +90,15 @@ prioridad **filtra**, no ordena. El vocabulario de `estado` es cerrado: `abierta
   un nombre que va a cambiar.
 - **§14 — el store sin consumidor** (prio 5). Sigue gobernando a las demás, pero ya **no se decide a
   ciegas**: el banco de pruebas de §9 y el paquete de evidencia de [`E33-H08`](../docs/qa/evidencia-14-store-2026-08.md)
-  dejan la ficha lista para decidir, sin escoger salida. Absorbe §16(c) y §16(l/E26-H09).
+  dejan la ficha lista para decidir, sin escoger salida. Absorbe §16(c) y §16(l/E26-H09). La adenda
+  de diseño **E35-H01** (issue #53, titulada originalmente **E34-H01** y trazada localmente como
+  **E34-H01 → E35-H01**) fija un
+  presupuesto público de memoria retenida (`N = el total controlable de performance.maxMemory`):
+  `SQLite = floor(30*N/100)`, `W-TinyLFU = floor(20*N/100)` y `Work = N - SQLite - W-TinyLFU`
+  es el residuo protegido dentro de `N`; la suma es exacta. No conecta SQLite,
+  no implementa la cache W-TinyLFU y no cambia el estado abierto de esta ficha.
+  El procesamiento fuera de cache, el fallo explícito y la protección contra *thrashing* se
+  difieren a las issues posteriores **#55, #57, #59 y #62**.
 - **§9 — banco de pruebas** (prio 4). Tiene el testbench de §23 re-ejecutable, el runbook y la
   convención de resúmenes/manifiesto con brutos externos, además de un workflow manual validado localmente; falta
   ejecutar el `workflow_dispatch` remoto y enlazar un run verde para cerrar el BDD de integración.

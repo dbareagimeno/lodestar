@@ -56,6 +56,90 @@ pub struct WorkspaceConfig {
     /// Política transaccional y retención del histórico de recibos (E13; la política de cambios de
     /// `§20.9` **solo se carga** aquí, su mecánica es E20).
     pub transactions: TransactionsSection,
+    /// Presupuesto público de memoria retenida (`ARCHITECTURE.md §23`).
+    pub performance: PerformanceSection,
+}
+
+/// Configuración de performance pública. E35-H01 mantiene una sola perilla: `maxMemory`.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", default, deny_unknown_fields)]
+pub struct PerformanceSection {
+    /// Texto original del presupuesto, por ejemplo `256MiB`.
+    pub max_memory: String,
+}
+
+impl Default for PerformanceSection {
+    fn default() -> Self {
+        Self {
+            max_memory: "256MiB".to_string(),
+        }
+    }
+}
+
+impl PerformanceSection {
+    /// Devuelve el presupuesto efectivo en bytes. `WorkspaceConfig::load` valida antes de
+    /// exponer una configuración; el `expect` evita introducir una segunda ruta de error en el
+    /// acceso posterior a una config ya validada.
+    pub fn max_memory_bytes(&self) -> u64 {
+        parse_max_memory(&self.max_memory).expect("performance.maxMemory debe estar validado")
+    }
+
+    fn validate(&self) -> Result<(), String> {
+        parse_max_memory(&self.max_memory).map(|_| ())
+    }
+}
+
+const MEMORY_GRAMMAR: &str = "[1-9][0-9]*(MiB|GiB)";
+const MIN_MEMORY_BYTES: u64 = 64 * 1024 * 1024;
+
+fn parse_max_memory(received: &str) -> Result<u64, String> {
+    let (magnitude, factor, unit) = if let Some(value) = received.strip_suffix("MiB") {
+        (
+            value,
+            1024_u64.checked_mul(1024).expect("factor constante"),
+            "MiB",
+        )
+    } else if let Some(value) = received.strip_suffix("GiB") {
+        (
+            value,
+            1024_u64
+                .checked_mul(1024)
+                .and_then(|v| v.checked_mul(1024))
+                .expect("factor constante"),
+            "GiB",
+        )
+    } else {
+        return Err(format!(
+            "performance.maxMemory recibió «{received}»: incumple la gramática {MEMORY_GRAMMAR}"
+        ));
+    };
+
+    if magnitude.is_empty()
+        || !magnitude.as_bytes().iter().all(u8::is_ascii_digit)
+        || magnitude.starts_with('0')
+    {
+        return Err(format!(
+            "performance.maxMemory recibió «{received}»: incumple la gramática {MEMORY_GRAMMAR}"
+        ));
+    }
+
+    let amount = magnitude.parse::<u64>().map_err(|_| {
+        format!(
+            "performance.maxMemory recibió «{received}»: desbordamiento de u64 al convertir la magnitud"
+        )
+    })?;
+    let bytes = amount.checked_mul(factor).ok_or_else(|| {
+        format!(
+            "performance.maxMemory recibió «{received}»: desbordamiento de u64 al convertir {unit}"
+        )
+    })?;
+    if bytes < MIN_MEMORY_BYTES {
+        return Err(format!(
+            "performance.maxMemory recibió «{received}»: el mínimo es 64MiB ({} bytes)",
+            MIN_MEMORY_BYTES
+        ));
+    }
+    Ok(bytes)
 }
 
 /// Raíces de escritura/lectura del workspace (`ARCHITECTURE.md §20.1`).
@@ -424,8 +508,14 @@ impl WorkspaceConfig {
     pub fn load(root: &Path) -> Result<WorkspaceConfig, String> {
         let path = root.join(WORKSPACE_CONFIG_FILE);
         let mut cfg = match std::fs::read_to_string(&path) {
-            Ok(text) => serde_yaml::from_str::<WorkspaceConfig>(&text)
-                .map_err(|e| format!("{WORKSPACE_CONFIG_FILE} inválido: {e}"))?,
+            Ok(text) => {
+                let cfg = serde_yaml::from_str::<WorkspaceConfig>(&text)
+                    .map_err(|e| format!("{WORKSPACE_CONFIG_FILE} inválido: {e}"))?;
+                cfg.performance
+                    .validate()
+                    .map_err(|e| format!("{WORKSPACE_CONFIG_FILE} inválido: {e}"))?;
+                cfg
+            }
             // Ausente: el único caso legítimo (`§20.1`, arranque sin ceremonia).
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => WorkspaceConfig::default(),
             // Ilegible: existe una config que el usuario escribió y que no se está aplicando.

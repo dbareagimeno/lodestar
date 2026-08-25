@@ -324,6 +324,39 @@ workspace:
 
 Esta configuración no debe ser necesaria para el caso normal.
 
+### Adenda E35-H01 — presupuesto de memoria (issue #53)
+
+La issue #53 está titulada originalmente **E34-H01**; la trazabilidad local normativa es
+**E34-H01 → E35-H01**. La configuración pública puede incluir un presupuesto de memoria retenida:
+
+```yaml
+performance:
+  maxMemory: 256MiB
+```
+
+El campo es opcional (default **256 MiB**) y admite como mínimo **64 MiB**. Su scalar YAML
+semántico, una vez deserializado, debe satisfacer exactamente `[1-9][0-9]*(MiB|GiB)`: no admite
+espacios en su contenido, fracciones, ceros iniciales ni cambios de mayúsculas. El whitespace
+sintáctico separado antes de newline, comentario, coma o `}` no integra el valor; por ello
+`performance: {maxMemory: 256MiB }` equivale a `256MiB`. Sí son inválidos `"256MiB "`,
+`" 256MiB"` y `256 MiB`, además de `0MiB`, `064MiB`, `1.5GiB`, `256mib` y `256MB`. Se convierte
+a bytes `u64` con aritmética *checked*; valores inválidos, fuera de rango o por debajo del mínimo
+producen un error accionable por el camino existente, sin añadir un código MCP. No se introduce un
+scanner/lexer source-aware ni un parser YAML paralelo. `N` es el total de `performance.maxMemory`;
+SQLite tiene una cuota interna blanda de
+`floor(30 * N / 100)` y W-TinyLFU otra de `floor(20 * N / 100)`. `Work = N - SQLite - W-TinyLFU`
+es la reserva protegida dentro de `N`, recibe todo residuo y las caches nunca la invaden. La suma
+es exactamente `N`: no existe una cuarta reserva, un pool sin tope ni un tamaño abierto. El único
+owner de `MemoryBudget` es `lodestar-workspace::Workspace::open`; core, store y fachadas no lo
+crean ni lo poseen. La política completa está ratificada en
+[`ARCHITECTURE.md §23`](../ARCHITECTURE.md#23-presupuesto-de-memoria-retenida-e35-h01).
+
+La adenda es compatible por adición: una config antigua que omite el campo usa el default, mientras
+que un binario antiguo puede rechazar el campo nuevo. No se consulta cgroup/RSS al abrir el
+workspace y no se definen presets ni knobs adicionales, públicos o internos. El alcance de E35-H01
+incluye config, `MemoryBudget`/subpresupuestos, tests, mensajes y documentación; no conecta SQLite,
+no implementa la cache W-TinyLFU ni cambia el contrato MCP.
+
 ---
 
 # Fase 3: descubrimiento recursivo universal
@@ -372,6 +405,13 @@ discovery:
 * Paths representables de manera segura.
 * Tamaño máximo por documento configurable.
 * Symlinks desactivados.
+
+`discovery.maxDocumentBytes` es un límite de admisión, no una obligación de retener cada documento
+en cache. La semántica ratificada permite procesar un documento admitido fuera de cache cuando sea
+seguro; si no lo es, debe fallar explícitamente por el camino de error existente, sin reintentos que
+provoquen *thrashing*. La memoria normativa es la retenida y controlable, no el RSS del proceso. La
+implementación efectiva de esas rutas corresponde a las issues posteriores **#55, #57, #59 y #62**,
+según la historia concreta; E35-H01 no promete ejecutarlas.
 
 ---
 
