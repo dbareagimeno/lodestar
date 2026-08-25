@@ -1,6 +1,8 @@
 //! Fase roja de E35-H02 para el informe reproducible del banco.
 
-use serde_json::Value;
+use rusqlite::Connection;
+use serde_json::{json, Value};
+use std::collections::{BTreeMap, BTreeSet};
 use std::process::{Command, Output};
 
 use lodestar_app::App;
@@ -42,40 +44,50 @@ fn tiny_extreme(context: &str) -> Value {
 }
 
 fn direct_sqlite_oracle(path: &std::path::Path) -> Value {
-    let script = r#"
-import json, sqlite3, sys
-db = sqlite3.connect(sys.argv[1])
-db.execute("CREATE VIRTUAL TABLE temp.oracle_dbstat USING dbstat(main)")
-schema = {name: typ for name, typ in db.execute("SELECT name, type FROM main.sqlite_schema")}
-pages = {name: size for name, size in db.execute("SELECT name, SUM(pgsize) FROM temp.oracle_dbstat GROUP BY name")}
-names = set(schema) | set(pages)
-objects = []
-for name in sorted(names):
-    typ = schema.get(name)
-    size = pages.get(name, 0)
-    if name == "documents_fts":
-        kind = "fts"
-    elif name.startswith("documents_fts_"):
-        kind = "fts_shadow"
-    elif typ == "index" or name.startswith("sqlite_autoindex_"):
-        kind = "index"
-    else:
-        kind = "table"
-    objects.append({"name": name, "kind": kind, "bytes": size})
-page_count = db.execute("PRAGMA page_count").fetchone()[0]
-page_size = db.execute("PRAGMA page_size").fetchone()[0]
-print(json.dumps({"main_bytes": page_count * page_size, "objects": objects}))
-"#;
-    let output = Command::new("python3")
-        .args(["-c", script, path.to_str().unwrap()])
-        .output()
-        .expect("C7: ejecutar oráculo sqlite3");
-    assert!(
-        output.status.success(),
-        "C7: oráculo sqlite3 falló: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    serde_json::from_slice(&output.stdout).expect("C7: JSON del oráculo sqlite3")
+    let db = Connection::open(path).expect("C7: abrir conexión SQLite del oráculo");
+    db.execute_batch("CREATE VIRTUAL TABLE temp.oracle_dbstat USING dbstat(main)")
+        .expect("C7: activar dbstat en la conexión del oráculo");
+    let mut schema_stmt = db
+        .prepare("SELECT name, type FROM main.sqlite_schema")
+        .expect("C7: leer schema SQLite del oráculo");
+    let schema: BTreeMap<String, String> = schema_stmt
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .expect("C7: filas del schema SQLite del oráculo")
+        .collect::<Result<_, _>>()
+        .expect("C7: materializar schema SQLite del oráculo");
+    let mut pages_stmt = db
+        .prepare("SELECT name, SUM(pgsize) FROM temp.oracle_dbstat GROUP BY name")
+        .expect("C7: leer páginas dbstat del oráculo");
+    let pages: BTreeMap<String, u64> = pages_stmt
+        .query_map([], |row| Ok((row.get(0)?, row.get::<_, i64>(1)? as u64)))
+        .expect("C7: filas dbstat del oráculo")
+        .collect::<Result<_, _>>()
+        .expect("C7: materializar páginas dbstat del oráculo");
+    let names: BTreeSet<String> = schema.keys().chain(pages.keys()).cloned().collect();
+    let objects = names
+        .into_iter()
+        .map(|name| {
+            let schema_type = schema.get(&name).map(String::as_str);
+            let size = pages.get(&name).copied().unwrap_or(0);
+            let kind = if name == "documents_fts" {
+                "fts"
+            } else if name.starts_with("documents_fts_") {
+                "fts_shadow"
+            } else if schema_type == Some("index") || name.starts_with("sqlite_autoindex_") {
+                "index"
+            } else {
+                "table"
+            };
+            json!({"name": name, "kind": kind, "bytes": size})
+        })
+        .collect::<Vec<_>>();
+    let page_count: u64 = db
+        .query_row("PRAGMA page_count", [], |row| row.get::<_, i64>(0))
+        .expect("C7: page_count del oráculo") as u64;
+    let page_size: u64 = db
+        .query_row("PRAGMA page_size", [], |row| row.get::<_, i64>(0))
+        .expect("C7: page_size del oráculo") as u64;
+    json!({"main_bytes": page_count * page_size, "objects": objects})
 }
 
 /// C7 — dbstat desglosa tablas, índices y FTS, y reconcilia main_bytes exactamente.
