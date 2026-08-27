@@ -4,7 +4,6 @@
 //! fichero no aporta seams de producción: FIFO, failpoints y trazas son únicamente mecanismos de
 //! observación del comportamiento ya expuesto por el store.
 
-#[cfg(unix)]
 use std::collections::BTreeSet;
 use std::path::Path;
 #[cfg(unix)]
