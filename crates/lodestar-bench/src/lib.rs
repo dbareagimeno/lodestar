@@ -1668,17 +1668,19 @@ fn extreme_report(
         .get("p95_ns")
         .and_then(Value::as_u64)
         .unwrap_or(1);
-    let observed_peak = sqlite_rebuild
+    let sampled_peak = sqlite_rebuild
         .get("rss")
         .and_then(|rss| rss.get("absolute_bytes"))
         .and_then(Value::as_u64)
-        .or_else(|| {
-            sqlite_rebuild
-                .get("report")
-                .and_then(|report| report.get("peak_rss_bytes"))
-                .and_then(Value::as_u64)
-        })
         .unwrap_or(1);
+    let reported_phase_peak = sqlite_rebuild
+        .get("report")
+        .and_then(|report| report.get("peak_rss_bytes"))
+        .and_then(Value::as_u64)
+        .unwrap_or(1);
+    // The external high-water mark and the in-rebuild sampler use different kernel APIs and can
+    // differ slightly in attribution/rounding. The objective must conservatively cover both.
+    let observed_peak = sampled_peak.max(reported_phase_peak);
     Ok(json!({
         "schema_version": "e33-h09-v1",
         "mode": "extreme",

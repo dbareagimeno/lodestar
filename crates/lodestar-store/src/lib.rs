@@ -1448,7 +1448,7 @@ fn replace_durable(next: &Path, active: &Path) -> Result<(), StoreError> {
         if result == 0 {
             return Err(StoreError::Io(std::io::Error::last_os_error().to_string()));
         }
-        return Ok(());
+        Ok(())
     }
     #[cfg(not(windows))]
     {
@@ -2034,9 +2034,8 @@ impl SqlTrace {
             .map(|duration| duration.as_nanos())
             .unwrap_or_default();
         let build_id = format!("{}-{timestamp}", std::process::id());
-        let file = match std::env::var_os("LODESTAR_H03_SQL_TRACE") {
+        let file = match sql_trace_path_for(next) {
             Some(path) => {
-                let path = PathBuf::from(path);
                 if let Some(parent) = path.parent() {
                     std::fs::create_dir_all(parent)
                         .map_err(|error| StoreError::Io(error.to_string()))?;
@@ -2058,7 +2057,6 @@ impl SqlTrace {
         };
         trace.emit(serde_json::json!({"event":"header","seq":0,"build_id":trace.build_id}))?;
         trace.seq = 1;
-        let _ = next;
         Ok(trace)
     }
 
@@ -2106,4 +2104,19 @@ impl SqlTrace {
         }
         Ok(())
     }
+}
+
+fn sql_trace_path_for(next: &Path) -> Option<PathBuf> {
+    let path = PathBuf::from(std::env::var_os("LODESTAR_H03_SQL_TRACE")?);
+    let trace_name = path.file_name()?.to_string_lossy();
+    let next_name = next.file_name()?.to_string_lossy();
+
+    // A process-wide diagnostic seam can briefly be visible to a rebuild for another root when
+    // tests or callers rebuild independent workspaces concurrently. If the requested trace names
+    // this concrete next generation, only its sibling database may claim it. Arbitrarily named
+    // external collectors (for example the benchmark report) remain supported.
+    if trace_name.starts_with(&format!("{next_name}.")) && path.parent() != next.parent() {
+        return None;
+    }
+    Some(path)
 }
