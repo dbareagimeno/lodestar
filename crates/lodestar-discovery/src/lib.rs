@@ -237,11 +237,7 @@ pub fn discover_inventory(
             other_files.insert(rel);
             continue;
         }
-        let included = include.matched(path, false).is_whitelist()
-            || (path
-                .extension()
-                .is_some_and(|extension| extension.eq_ignore_ascii_case("md"))
-                && policy.include.iter().any(|pattern| pattern == "**/*.md"));
+        let included = include_matches(&include, path);
         if !included {
             other_files.insert(rel);
             continue;
@@ -571,4 +567,22 @@ fn build_overrides(
     builder
         .build()
         .map_err(|error| DiscoveryError::Policy(error.to_string()))
+}
+
+fn include_matches(include: &Override, path: &Path) -> bool {
+    if include.matched(path, false).is_whitelist() {
+        return true;
+    }
+    if !path
+        .extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("md"))
+    {
+        return false;
+    }
+
+    ["md", "mD", "Md", "MD"].into_iter().any(|extension| {
+        include
+            .matched(path.with_extension(extension), false)
+            .is_whitelist()
+    })
 }

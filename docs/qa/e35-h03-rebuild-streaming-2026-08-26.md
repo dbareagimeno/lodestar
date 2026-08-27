@@ -51,8 +51,12 @@ target/release/lodestar-bench --extreme --profile realista --scale <1000|10000|1
   commit; un `DELETE` directo, incluida una shadow table fuera de esa ventana, sigue denegado.
 - La proyección conserva en `documents.frontmatter_text` exactamente la misma cadena que inserta en
   FTS, de modo que un upsert/remove posterior puede ejecutar el delete contentless con la tupla
-  antigua exacta. La publicación sincroniza el directorio en Unix y usa
-  `MoveFileExW(..., MOVEFILE_WRITE_THROUGH)` como barrera equivalente en Windows.
+  antigua exacta. La publicación sincroniza el directorio en Unix; en Windows abre el candidato
+  con `FILE_FLAG_WRITE_THROUGH` y ejecuta `FileRenameInfoEx` con
+  `REPLACE_IF_EXISTS | POSIX_SEMANTICS`, de modo que el rename vuelca su metadata, los handles
+  antiguos conservan el snapshot previo y las aperturas nuevas resuelven la generación publicada.
+  Esa barrera es el primer paso posterior al rename y precede tanto la reapertura de SQLite como la
+  confirmación de la guarda reversible de publicación.
 
 ## Resultados
 

@@ -427,7 +427,6 @@ impl Store {
         if failpoint_for(&self.root, "corrupt_next_before_integrity") {
             corrupt_sqlite_file(&next)?;
         }
-        sync_generation(&next)?;
         let validate_start = Instant::now();
         let validate_started_at = index_finished_at;
         let validate_rss_window = RssWindow::new()?;
@@ -440,6 +439,7 @@ impl Store {
                 return Err(error);
             }
         }
+        sync_generation(&next)?;
         let validate_ns = validate_start.elapsed().as_nanos() as u64;
         let validate_finished_at = monotonic_ns();
         let validate_rss = validate_rss_window.finish(validate_finished_at)?;
@@ -594,6 +594,17 @@ impl Store {
             }
             return Err(StoreError::Io(error.to_string()));
         }
+        let directory_sync = (|| -> Result<(), StoreError> {
+            sync_directory(active.parent().expect("cache directory"))?;
+            Ok(())
+        })();
+        if let Err(error) = directory_sync {
+            // The rename is already the point of no return. Keep a usable disk-backed handle in
+            // the shared state; its old identity makes the next writer refresh from the published
+            // path instead of leaving the in-memory placeholder installed.
+            *guard = standby;
+            return Err(error);
+        }
         #[cfg(windows)]
         publication.commit();
         let published = match open_sqlite(&active) {
@@ -616,7 +627,6 @@ impl Store {
             .db_identity
             .lock()
             .unwrap_or_else(|poison| poison.into_inner()) = identity;
-        sync_directory(active.parent().expect("cache directory"))?;
         Ok(())
     }
 
@@ -1587,37 +1597,8 @@ fn checkpoint_active_generation(conn: &Connection, active: &Path) -> Result<(), 
 fn replace_durable(next: &Path, active: &Path) -> Result<(), StoreError> {
     #[cfg(windows)]
     {
-        use std::os::windows::ffi::OsStrExt;
-        use windows_sys::Win32::Storage::FileSystem::{
-            MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
-        };
-
-        let next_wide: Vec<u16> = next
-            .as_os_str()
-            .encode_wide()
-            .chain(std::iter::once(0))
-            .collect();
-        let active_wide: Vec<u16> = active
-            .as_os_str()
-            .encode_wide()
-            .chain(std::iter::once(0))
-            .collect();
-        let result = unsafe {
-            MoveFileExW(
-                next_wide.as_ptr(),
-                active_wide.as_ptr(),
-                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-            )
-        };
-        if result == 0 {
-            return Err(StoreError::Io(format!(
-                "MoveFileExW replace {} with {} failed: {}",
-                active.display(),
-                next.display(),
-                std::io::Error::last_os_error()
-            )));
-        }
-        Ok(())
+        windows_vfs::replace_durable(next, active)
+            .map_err(|error| StoreError::Io(error.to_string()))
     }
     #[cfg(not(windows))]
     {
@@ -1638,8 +1619,8 @@ fn sync_directory(path: &Path) -> Result<(), StoreError> {
     {
         #[cfg(windows)]
         {
-            // MoveFileExW with MOVEFILE_WRITE_THROUGH in replace_durable already supplies the
-            // Windows directory-entry durability barrier; validate that this call has a real
+            // The source handle uses FILE_FLAG_WRITE_THROUGH, which makes NTFS flush metadata
+            // changes caused by its FileRenameInfoEx operation. Validate that this call has a real
             // cache directory rather than silently accepting an empty path.
             if path.as_os_str().is_empty() {
                 return Err(StoreError::Io(

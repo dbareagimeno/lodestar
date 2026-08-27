@@ -20,11 +20,15 @@ use windows_sys::Win32::Foundation::{
     HANDLE, INVALID_HANDLE_VALUE,
 };
 use windows_sys::Win32::Storage::FileSystem::{
-    CreateFileW, CreateHardLinkW, FileDispositionInfoEx, FileRenameInfo, LockFileEx, ReOpenFile,
-    SetFileInformationByHandle, DELETE, FILE_ATTRIBUTE_NORMAL, FILE_DISPOSITION_FLAG_DELETE,
-    FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE, FILE_DISPOSITION_FLAG_POSIX_SEMANTICS,
-    FILE_DISPOSITION_INFO_EX, FILE_FLAG_OPEN_REPARSE_POINT, FILE_RENAME_INFO, FILE_SHARE_DELETE,
-    FILE_SHARE_READ, FILE_SHARE_WRITE, LOCKFILE_FAIL_IMMEDIATELY, OPEN_EXISTING,
+    CreateFileW, CreateHardLinkW, FileDispositionInfoEx, FileRenameInfo, FileRenameInfoEx,
+    LockFileEx, ReOpenFile, SetFileInformationByHandle, DELETE, FILE_ATTRIBUTE_NORMAL,
+    FILE_DISPOSITION_FLAG_DELETE, FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE,
+    FILE_DISPOSITION_FLAG_POSIX_SEMANTICS, FILE_DISPOSITION_INFO_EX, FILE_FLAG_OPEN_REPARSE_POINT,
+    FILE_FLAG_WRITE_THROUGH, FILE_RENAME_INFO, FILE_SHARE_DELETE, FILE_SHARE_READ,
+    FILE_SHARE_WRITE, LOCKFILE_FAIL_IMMEDIATELY, OPEN_EXISTING,
+};
+use windows_sys::Win32::System::WindowsProgramming::{
+    FILE_RENAME_FLAG_POSIX_SEMANTICS, FILE_RENAME_FLAG_REPLACE_IF_EXISTS,
 };
 use windows_sys::Win32::System::IO::OVERLAPPED;
 
@@ -114,7 +118,8 @@ struct StagedSidecar {
 
 /// Holds DELETE access to the active main file and stages both sidecars under reversible names.
 /// Until `commit`, dropping the guard rolls every staged name back. Holding the main handle also
-/// prevents a late non-cooperating opener from making `MoveFileExW` fail after sidecars moved.
+/// prevents a late non-cooperating opener from entering between sidecar staging and main-file
+/// replacement.
 pub(crate) struct PublicationGuard {
     _main: OwnedHandle,
     sidecars: Vec<StagedSidecar>,
@@ -139,7 +144,7 @@ impl Drop for PublicationGuard {
         }
         for staged in self.sidecars.iter().rev() {
             if let Some(handle) = &staged.renamed_handle {
-                let _ = rename_handle_to(&staged.original, handle.0);
+                let _ = rename_handle_to(&staged.original, handle.0, None);
             } else if create_hard_link(&staged.original, &staged.tombstone).is_ok() {
                 let _ = remove_sidecar(&staged.tombstone);
             }
@@ -354,6 +359,38 @@ pub(crate) fn open(path: &Path) -> rusqlite::Result<Connection> {
     Connection::open_with_flags_and_vfs(path, OpenFlags::default(), VFS_NAME)
 }
 
+/// Publishes a complete candidate while readers and the rollback connection still hold the old
+/// main file open. POSIX replacement keeps those handles attached to the previous file object and
+/// makes later opens resolve the candidate. WRITE_THROUGH also flushes rename metadata on NTFS.
+pub(crate) fn replace_durable(next: &Path, active: &Path) -> std::io::Result<()> {
+    let wide = wide_path(next);
+    let handle = unsafe {
+        CreateFileW(
+            wide.as_ptr(),
+            GENERIC_READ | GENERIC_WRITE | DELETE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            ptr::null(),
+            OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_WRITE_THROUGH,
+            ptr::null_mut(),
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE {
+        return Err(operation_error(
+            "CreateFileW publication source handle",
+            next,
+            std::io::Error::last_os_error(),
+        ));
+    }
+    let handle = OwnedHandle(handle);
+    rename_handle_to(
+        active,
+        handle.0,
+        Some(FILE_RENAME_FLAG_REPLACE_IF_EXISTS | FILE_RENAME_FLAG_POSIX_SEMANTICS),
+    )
+    .map_err(|error| operation_error("FileRenameInfoEx POSIX replace", active, error))
+}
+
 /// Rust 1.80 implements `remove_file` with `DeleteFileW`, which rejects a mapped WAL shared-memory
 /// file even when every opener supplied `FILE_SHARE_DELETE`. POSIX disposition removes the name
 /// immediately while storage remains alive for stale mapped handles.
@@ -423,7 +460,7 @@ fn rename_sidecar_tombstone(path: &Path, handle: HANDLE) -> std::io::Result<Path
     })?;
     for _ in 0..16 {
         let tombstone = next_tombstone(path, file_name);
-        let error = match rename_handle_to(&tombstone, handle) {
+        let error = match rename_handle_to(&tombstone, handle, None) {
             Ok(()) => return Ok(tombstone),
             Err(error) => error,
         };
@@ -449,7 +486,11 @@ fn next_tombstone(path: &Path, file_name: &std::ffi::OsStr) -> PathBuf {
     path.with_file_name(tombstone_name)
 }
 
-fn rename_handle_to(target: &Path, handle: HANDLE) -> std::io::Result<()> {
+fn rename_handle_to(
+    target: &Path,
+    handle: HANDLE,
+    extended_flags: Option<u32>,
+) -> std::io::Result<()> {
     let mut wide = wide_path(target);
     wide.pop();
     let name_bytes = wide.len().checked_mul(2).ok_or_else(|| {
@@ -469,7 +510,11 @@ fn rename_handle_to(target: &Path, handle: HANDLE) -> std::io::Result<()> {
     let mut storage = vec![0usize; words];
     let info = storage.as_mut_ptr().cast::<FILE_RENAME_INFO>();
     unsafe {
-        (*info).Anonymous.ReplaceIfExists = false;
+        if let Some(flags) = extended_flags {
+            (*info).Anonymous.Flags = flags;
+        } else {
+            (*info).Anonymous.ReplaceIfExists = false;
+        }
         (*info).RootDirectory = ptr::null_mut();
         (*info).FileNameLength = name_bytes as u32;
         ptr::copy_nonoverlapping(
@@ -478,8 +523,13 @@ fn rename_handle_to(target: &Path, handle: HANDLE) -> std::io::Result<()> {
             wide.len(),
         );
     }
+    let information_class = if extended_flags.is_some() {
+        FileRenameInfoEx
+    } else {
+        FileRenameInfo
+    };
     let renamed = unsafe {
-        SetFileInformationByHandle(handle, FileRenameInfo, info.cast(), total_bytes as u32)
+        SetFileInformationByHandle(handle, information_class, info.cast(), total_bytes as u32)
     };
     if renamed == 0 {
         Err(std::io::Error::last_os_error())
