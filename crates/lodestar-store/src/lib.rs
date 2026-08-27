@@ -27,6 +27,8 @@ mod index;
 mod schema;
 mod synth;
 mod watch;
+#[cfg(windows)]
+mod windows_vfs;
 
 pub use error::StoreError;
 pub use event::IndexEvent;
@@ -505,18 +507,70 @@ impl Store {
 
     fn swap_active(&self, next: &Path) -> Result<(), StoreError> {
         let active = self.root.join(CACHE_DIR).join(DB_FILE);
+        // Keep an unopened-WAL handle to the current generation so every pre-publication failure
+        // can restore a usable disk-backed connection after the old connection has been closed.
+        // Opening the main file alone does not attach this handle to the old winShmNode.
+        let standby = open_sqlite(&active)?;
         let placeholder = Connection::open_in_memory()?;
         let mut guard = self.state.conn.lock().unwrap();
         let old = std::mem::replace(&mut *guard, placeholder);
-        old.close()
-            .map_err(|(_, error)| StoreError::Sqlite(error))?;
-        remove_cache_sidecars(&active)?;
+        if failpoint_for(&self.root, "sidecar_cleanup") {
+            *guard = old;
+            return Err(StoreError::Io("injected sidecar cleanup failure".into()));
+        }
+        #[cfg(windows)]
+        let publication = match windows_vfs::prepare_publication(
+            &active,
+            failpoint_for(&self.root, "sidecar_cleanup_after_first"),
+        ) {
+            Ok(publication) => publication,
+            Err(error) => {
+                *guard = old;
+                return Err(StoreError::Io(error.to_string()));
+            }
+        };
+        #[cfg(not(windows))]
+        match remove_cache_sidecars(&active) {
+            Ok(()) => {}
+            Err(error) => {
+                *guard = old;
+                return Err(error);
+            }
+        }
+        if let Err((old, error)) = old.close() {
+            #[cfg(windows)]
+            drop(publication);
+            *guard = old;
+            return Err(StoreError::Sqlite(error));
+        }
         if let Err(error) = replace_durable(next, &active) {
-            let reopened = open_and_migrate(&active)?;
-            *guard = reopened;
+            #[cfg(windows)]
+            drop(publication);
+            let restoration = activate_published_connection(&standby);
+            *guard = standby;
+            if let Err(restoration) = restoration {
+                return Err(StoreError::Io(format!(
+                    "database publication failed ({error}); restoring active connection failed ({restoration})"
+                )));
+            }
             return Err(StoreError::Io(error.to_string()));
         }
-        *guard = open_and_migrate(&active)?;
+        #[cfg(windows)]
+        publication.commit();
+        let published = match open_sqlite(&active) {
+            Ok(published) => published,
+            Err(error) => {
+                // The old generation is unnamed after a successful replacement, but retaining its
+                // live connection is still safer than exposing the in-memory placeholder. The
+                // unchanged identity forces the next writer through external refresh again.
+                *guard = standby;
+                return Err(error);
+            }
+        };
+        drop(standby);
+        let activation = activate_published_connection(&published);
+        *guard = published;
+        activation?;
         let identity = db_identity(&active).map_err(|error| StoreError::Io(error.to_string()))?;
         *self
             .state
@@ -548,10 +602,23 @@ impl Store {
             return Ok(());
         }
 
-        let replacement = open_and_migrate(db)?;
-        let old = std::mem::replace(&mut *conn, replacement);
-        old.close()
-            .map_err(|(_, error)| StoreError::Sqlite(error))?;
+        // Open the new main handle before releasing the old snapshot, but do not execute any
+        // pragma/query yet: on Windows that would attach the new connection to the old generation's
+        // process-local WAL shared-memory node (win32 keys it by filename). Once the old connection
+        // is closed, migration may safely initialize WAL for the published generation.
+        let replacement = open_sqlite(db)?;
+        let placeholder = Connection::open_in_memory()?;
+        let old = std::mem::replace(&mut *conn, placeholder);
+        if let Err((old, error)) = old.close() {
+            *conn = old;
+            return Err(StoreError::Sqlite(error));
+        }
+        // Publish the disk-backed replacement into RootState even if activating WAL or validating
+        // its schema fails. Callers receive the error, but subsequent opens can retry instead of
+        // becoming permanently attached to the temporary in-memory placeholder.
+        let activation = activate_published_connection(&replacement);
+        *conn = replacement;
+        activation?;
         *known = db_identity(db).map_err(|error| StoreError::Io(error.to_string()))?;
         Ok(())
     }
@@ -986,7 +1053,11 @@ fn build_inventory_from_db(conn: &Connection, current: &RelPath) -> Result<Inven
 /// Abre la conexión y migra el esquema. El check de `user_version` va ANTES de crear el DDL
 /// nuevo: aplicarlo sobre un esquema viejo puede fallar (índice sobre columna inexistente).
 fn open_and_migrate(db: &Path) -> Result<Connection, StoreError> {
-    let conn = Connection::open(db)?;
+    let conn = open_sqlite(db)?;
+    migrate_connection(conn, db)
+}
+
+fn migrate_connection(conn: Connection, db: &Path) -> Result<Connection, StoreError> {
     schema::apply_pragmas(&conn)?;
     if schema::read_user_version(&conn)? != schema::USER_VERSION
         || !schema::schema_is_current(&conn)?
@@ -1005,26 +1076,67 @@ fn open_and_migrate(db: &Path) -> Result<Connection, StoreError> {
     Ok(conn)
 }
 
+/// Activates a generation already published by Lodestar without any destructive migration.
+/// Rebuild candidates always carry the current schema; an incompatible published generation is
+/// an error and remains disk-backed so a later operation can retry or rebuild it explicitly.
+fn activate_published_connection(conn: &Connection) -> Result<(), StoreError> {
+    schema::apply_pragmas(conn)?;
+    if schema::read_user_version(conn)? != schema::USER_VERSION || !schema::schema_is_current(conn)?
+    {
+        return Err(StoreError::Io(
+            "published cache generation has an incompatible schema".into(),
+        ));
+    }
+    schema::create_schema(conn)?;
+    Ok(())
+}
+
 fn create_fresh_cache(db: &Path) -> Result<Connection, StoreError> {
-    let conn = Connection::open(db)?;
+    let conn = open_sqlite(db)?;
     schema::apply_pragmas(&conn)?;
     schema::create_schema(&conn)?;
     schema::set_user_version(&conn)?;
     Ok(conn)
 }
 
+/// Opens a Lodestar-owned on-disk database. Windows uses an explicitly selected VFS whose file
+/// handles opt into delete sharing, which is required for the ratified publish-by-rename protocol.
+/// Other SQLite users keep the platform default VFS and its default sharing semantics.
+pub(crate) fn open_sqlite(path: &Path) -> Result<Connection, StoreError> {
+    #[cfg(windows)]
+    {
+        windows_vfs::open(path).map_err(StoreError::from)
+    }
+    #[cfg(not(windows))]
+    {
+        Connection::open(path).map_err(StoreError::from)
+    }
+}
+
 fn remove_cache_files(db: &Path) -> Result<(), StoreError> {
-    for suffix in ["", "-wal", "-shm"] {
+    // Retire sidecars first. If either removal fails, the named main database remains present and
+    // can be reopened; deleting the main file first would leave a partially retired cache.
+    for suffix in ["-wal", "-shm", ""] {
         let mut os_path = db.as_os_str().to_os_string();
         os_path.push(suffix);
         let path = PathBuf::from(os_path);
-        match std::fs::remove_file(&path) {
+        match remove_published_cache_file(&path) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(StoreError::Io(format!("{}: {error}", path.display()))),
         }
     }
     Ok(())
+}
+
+#[cfg(not(windows))]
+fn remove_published_cache_file(path: &Path) -> std::io::Result<()> {
+    std::fs::remove_file(path)
+}
+
+#[cfg(windows)]
+fn remove_published_cache_file(path: &Path) -> std::io::Result<()> {
+    windows_vfs::remove_sidecar(path)
 }
 
 fn current_hash(conn: &Connection, path: &RelPath) -> Result<Option<Vec<u8>>, StoreError> {
@@ -1392,13 +1504,23 @@ fn remove_cache_sidecars(db: &Path) -> Result<(), StoreError> {
     for suffix in ["-wal", "-shm"] {
         let mut os_path = db.as_os_str().to_os_string();
         os_path.push(suffix);
-        match std::fs::remove_file(PathBuf::from(os_path)) {
+        match remove_published_sidecar(&PathBuf::from(os_path)) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(StoreError::Io(error.to_string())),
         }
     }
     Ok(())
+}
+
+#[cfg(not(windows))]
+fn remove_published_sidecar(path: &Path) -> std::io::Result<()> {
+    std::fs::remove_file(path)
+}
+
+#[cfg(windows)]
+fn remove_published_sidecar(path: &Path) -> std::io::Result<()> {
+    windows_vfs::remove_sidecar(path)
 }
 
 fn sync_generation(path: &Path) -> Result<(), StoreError> {

@@ -6,7 +6,7 @@
 use rusqlite::Connection;
 use std::collections::BTreeMap;
 
-use crate::error::StoreError;
+use crate::{error::StoreError, open_sqlite};
 
 /// Versión del esquema vNext de E35-H02. Un bump fuerza reconstrucción total.
 pub const USER_VERSION: i64 = 6;
@@ -29,7 +29,7 @@ pub(crate) fn apply_build_pragmas(conn: &Connection) -> Result<(), StoreError> {
 }
 
 pub(crate) fn open_build_connection(path: &std::path::Path) -> Result<Connection, StoreError> {
-    let conn = Connection::open(path)?;
+    let conn = open_sqlite(path)?;
     apply_build_pragmas(&conn)?;
     create_schema(&conn)?;
     set_user_version(&conn)?;
@@ -37,8 +37,8 @@ pub(crate) fn open_build_connection(path: &std::path::Path) -> Result<Connection
 }
 
 pub(crate) fn validate_database(path: &std::path::Path) -> Result<(), StoreError> {
-    let conn = Connection::open(path)
-        .map_err(|error| StoreError::Io(format!("integrity_check: {error}")))?;
+    let conn =
+        open_sqlite(path).map_err(|error| StoreError::Io(format!("integrity_check: {error}")))?;
     let integrity: String = conn
         .query_row("PRAGMA integrity_check", [], |row| row.get(0))
         .map_err(|error| StoreError::Io(format!("integrity_check: {error}")))?;
