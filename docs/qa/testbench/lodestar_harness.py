@@ -184,6 +184,7 @@ class LodestarSession:
         self._stdout_read_ack = threading.Event()
         self._stdout_eof_seen = threading.Event()
         self._stdout_waiting_ack = False
+        self._stdout_replay = []
         self._terminal_lock = threading.Lock()
         self._terminal_drain_lock = threading.Lock()
         self._terminal_stderr = None
@@ -230,6 +231,8 @@ class LodestarSession:
             self._stdout_eof_seen = threading.Event()
         if not hasattr(self, "_stdout_waiting_ack"):
             self._stdout_waiting_ack = False
+        if not hasattr(self, "_stdout_replay"):
+            self._stdout_replay = []
         self._start_stdout_reader()
 
     def _stdout_reader_loop(self):
@@ -249,6 +252,10 @@ class LodestarSession:
 
     def _stdout_item(self, timeout):
         self._ensure_stdout_reader()
+        # Un item obtenido después del deadline aún no fue entregado al consumidor.
+        # Reproducirlo antes de liberar su ACK conserva tanto FIFO como backpressure.
+        if self._stdout_replay:
+            return self._stdout_replay.pop(0)
         if self._stdout_waiting_ack:
             self._stdout_read_ack.set()
             self._stdout_waiting_ack = False
@@ -760,8 +767,8 @@ class LodestarSession:
         """Entrega primero el backlog sólo a operaciones raw que pueden observarlo."""
         self._ensure_raw_sync_state()
         if request_kind in ("silence", "rejected_id") and self._raw_backlog:
-            return self._raw_backlog.pop(0)
-        return self._stdout_item(timeout)
+            return self._raw_backlog.pop(0), False
+        return self._stdout_item(timeout), True
 
     def _raw_line_timeout(self, request_kind, expected_id):
         """Registra la respuesta que todavía puede llegar tras vencer el plazo."""
@@ -809,8 +816,16 @@ class LodestarSession:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 return self._raw_line_timeout(request_kind, expected_id)
-            resp_line = self._raw_operation_item(remaining, request_kind)
+            resp_line, came_from_stdout = self._raw_operation_item(
+                remaining, request_kind
+            )
             if resp_line is None:
+                return self._raw_line_timeout(request_kind, expected_id)
+            if time.monotonic() >= deadline:
+                if came_from_stdout:
+                    self._stdout_replay.insert(0, resp_line)
+                else:
+                    self._raw_backlog.insert(0, resp_line)
                 return self._raw_line_timeout(request_kind, expected_id)
             if resp_line is self._stdout_eof:
                 has_backlog, response = self._pop_raw_backlog_result()
