@@ -58,7 +58,8 @@ pub struct Discovered {
 }
 
 /// Primera pasada del descubrimiento. Conserva exactamente la política del walker canónico, pero
-/// solo paths, metadata compacta implícita y diagnósticos; la validación UTF-8 usa un buffer fijo.
+/// solo paths, metadata compacta implícita y diagnósticos; la validación UTF-8 se difiere a la
+/// segunda pasada que materializa cada candidato.
 pub fn discover_inventory(
     root: &Path,
     policy: &DiscoveryPolicy,

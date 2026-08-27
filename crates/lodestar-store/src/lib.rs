@@ -18,7 +18,7 @@ use std::time::Instant;
 use rusqlite::hooks::{AuthAction, Authorization};
 use rusqlite::Connection;
 
-use lodestar_core::types::{Inventory, RelPath};
+use lodestar_core::types::{Check, CheckCode, Inventory, RelPath, Severity};
 use lodestar_core::{DocumentSet, DocumentStore};
 
 mod error;
@@ -227,6 +227,9 @@ impl Store {
             Some(discovered) => canonical_rebuild_snapshot(&root, discovered),
             None => capture_rebuild_snapshot(&root, paths, others, directories)?,
         };
+        let diagnostics = discovered
+            .map(|discovered| discovered.diagnostics.clone())
+            .unwrap_or_default();
         pause_after_snapshot_before_read(&root)?;
         verify_rebuild_snapshot(&snapshot)?;
         let inventory_finished_at = monotonic_ns();
@@ -278,6 +281,7 @@ impl Store {
             inventory_rss,
             inventory_finished_at,
             snapshot,
+            diagnostics,
         )
     }
 
@@ -292,6 +296,7 @@ impl Store {
         inventory_rss: RssMeasurement,
         inventory_finished_at: u64,
         snapshot: RebuildSnapshot,
+        mut diagnostics: Vec<Check>,
     ) -> Result<serde_json::Value, StoreError>
     where
         I: IntoIterator<Item = Result<(RelPath, Option<String>, i64, i64), StoreError>>,
@@ -321,10 +326,8 @@ impl Store {
             "other_files",
             "INSERT OR IGNORE INTO other_files(path) VALUES(?1)",
         );
-        let mut rows_written = 0_u64;
         for path in &others {
             inserts_other.execute([path.as_str()])?;
-            rows_written += 1;
             trace.execute(
                 "other_files",
                 "INSERT OR IGNORE INTO other_files(path) VALUES(?1)",
@@ -347,7 +350,7 @@ impl Store {
         }
         let mut documents_read = 0_u64;
         let mut max_live_body_bytes = 0_u64;
-        let mut relational_inserts = rows_written;
+        let mut relational_inserts = others.len() as u64;
         let mut fts_inserts = 0_u64;
         let mut indexed_paths = Vec::new();
         for item in docs {
@@ -355,18 +358,23 @@ impl Store {
             documents_read += 1;
             let Some(raw) = raw else {
                 inserts_other.execute([path.as_str()])?;
-                rows_written += 1;
+                relational_inserts += 1;
                 trace.execute(
                     "other_files",
                     "INSERT OR IGNORE INTO other_files(path) VALUES(?1)",
                 );
+                diagnostics.push(Check::new(
+                    Severity::Warn,
+                    CheckCode::DocNotUtf8,
+                    format!("«{}» no es UTF-8 válido", path.as_str()),
+                    vec![path],
+                ));
                 continue;
             };
             max_live_body_bytes = max_live_body_bytes.max(raw.len() as u64);
             let parsed = lodestar_core::model::parse_file(path.as_str(), &raw);
             seed.execute([path.as_str()])?;
             let doc_id = tx.last_insert_rowid();
-            rows_written += 1;
             relational_inserts += 1;
             trace.execute("documents", "INSERT INTO documents(path,...) VALUES(...)");
             inventory.promote_document(path.clone());
@@ -406,13 +414,7 @@ impl Store {
         let index_ns = index_started.elapsed().as_nanos() as u64;
         let index_finished_at = monotonic_ns();
         let index_rss = index_rss_window.finish(index_finished_at)?;
-        trace.footer(
-            false,
-            documents_read,
-            rows_written,
-            relational_inserts,
-            fts_inserts,
-        );
+        trace.footer(false, documents_read, relational_inserts, fts_inserts);
         drop(next_conn);
 
         // Revalidate the complete canonical snapshot after the streaming pass and before any
@@ -432,13 +434,7 @@ impl Store {
             Ok(()) => trace.lifecycle("integrity_check", "ok"),
             Err(error) => {
                 trace.lifecycle("integrity_check", "error");
-                trace.footer(
-                    true,
-                    documents_read,
-                    rows_written,
-                    relational_inserts,
-                    fts_inserts,
-                );
+                trace.footer(true, documents_read, relational_inserts, fts_inserts);
                 return Err(error);
             }
         }
@@ -462,13 +458,7 @@ impl Store {
         verify_rebuild_snapshot(&snapshot)?;
         if failpoint_for(&self.root, "before_swap") {
             trace.lifecycle("swap", "blocked");
-            trace.footer(
-                true,
-                documents_read,
-                rows_written,
-                relational_inserts,
-                fts_inserts,
-            );
+            trace.footer(true, documents_read, relational_inserts, fts_inserts);
             return Err(StoreError::Io("H03 failpoint before_swap".into()));
         }
         let swap_started = Instant::now();
@@ -485,13 +475,7 @@ impl Store {
             .max(index_rss.peak_rss_bytes)
             .max(validate_rss.peak_rss_bytes)
             .max(swap_rss.peak_rss_bytes);
-        trace.footer(
-            true,
-            documents_read,
-            rows_written,
-            relational_inserts,
-            fts_inserts,
-        );
+        trace.footer(true, documents_read, relational_inserts, fts_inserts);
         let _ = trace.finish();
         self.state.bus.emit(IndexEvent {
             changed: indexed_paths,
@@ -515,6 +499,7 @@ impl Store {
             "integrity_checked_before_swap": true,
             "duration_ns": duration_ns,
             "build_id": trace.build_id,
+            "diagnostics": diagnostics,
         }))
     }
 
@@ -751,13 +736,22 @@ impl Store {
         let discovered = lodestar_discovery::discover_inventory(&self.root, &policy)
             .map_err(|error| StoreError::Io(error.to_string()))?;
         let mut docs = Vec::with_capacity(discovered.documents.len());
+        let mut other_files = discovered.other_files;
         for rp in discovered.documents {
             let path = self.root.join(rp.as_str());
             let content = match std::fs::read_to_string(&path) {
                 Ok(c) => c,
+                Err(error) if error.kind() == std::io::ErrorKind::InvalidData => {
+                    eprintln!(
+                        "lodestar-store: aviso: se clasifica {} como no-documento (no UTF-8): {error}",
+                        path.display()
+                    );
+                    other_files.insert(rp);
+                    continue;
+                }
                 Err(e) => {
                     eprintln!(
-                        "lodestar-store: aviso: se salta {} (no UTF-8 o ilegible): {e}",
+                        "lodestar-store: aviso: se salta {} (ilegible): {e}",
                         path.display()
                     );
                     continue;
@@ -766,7 +760,7 @@ impl Store {
             let (mtime, size) = fs_meta(&path);
             docs.push((rp, content, mtime, size));
         }
-        Ok((docs, discovered.other_files))
+        Ok((docs, other_files))
     }
 
     /// First pass of the cold builder: only paths and the non-document inventory are retained.
@@ -2092,8 +2086,8 @@ impl SqlTrace {
         self.seq += 1;
     }
 
-    fn footer(&mut self, complete: bool, documents: u64, rows: u64, relational: u64, fts: u64) {
-        let _ = self.emit(serde_json::json!({"event":"footer","seq":self.seq,"build_id":self.build_id,"complete":complete,"counts":{"prepare":self.prepares,"execute":self.executes,"delete":self.deletes,"documents_read":documents,"rows_written":rows,"relational_inserts":relational,"fts_inserts":fts}}));
+    fn footer(&mut self, complete: bool, documents: u64, relational: u64, fts: u64) {
+        let _ = self.emit(serde_json::json!({"event":"footer","seq":self.seq,"build_id":self.build_id,"complete":complete,"counts":{"prepare":self.prepares,"execute":self.executes,"delete":self.deletes,"documents_read":documents,"rows_written":relational + fts,"relational_inserts":relational,"fts_inserts":fts}}));
         self.seq += 1;
     }
 

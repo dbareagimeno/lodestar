@@ -1,9 +1,9 @@
 //! E35-H03 C2/C4 — la ruta canónica no debe leer cuerpos durante el inventario.
 //!
-//! `discover_inventory` valida UTF-8 abriendo cada candidato y el store vuelve a abrirlo para
-//! proyectarlo. El informe solo cuenta la segunda operación (`documents_read = N`), por lo que
-//! una aserción basada únicamente en ese contador sería vacua. Este test combina una señal de
-//! acceso al cuerpo entre las dos fases con el seam de auditoría de la lectura de proyección.
+//! `discover_inventory` conserva paths y metadata sin abrir candidatos; el store abre cada cuerpo
+//! una sola vez para validarlo y proyectarlo. El informe cuenta esa operación
+//! (`documents_read = N`), y este test la contrasta con una señal de acceso al cuerpo entre ambas
+//! fases y con el seam de auditoría de la lectura de proyección.
 
 use std::fs::{self, File, FileTimes};
 use std::path::Path;
@@ -57,8 +57,8 @@ fn rp(path: &str) -> RelPath {
 
 /// C2/C4 — **Dado** un documento UTF-8 grande admitido por discovery, **cuando** se ejecuta la
 /// ruta canónica `discover_inventory` + `rebuild_from_discovered_inventory`, **entonces** el
-/// cuerpo debe abrirse una sola vez, en la segunda pasada. La implementación actual deja dos
-/// accesos observables aunque el informe diga que leyó N documentos.
+/// cuerpo debe abrirse una sola vez, en la segunda pasada, y el inventario no debe producir ningún
+/// acceso observable al payload.
 #[test]
 fn c2_c4_canonical_inventory_and_rebuild_read_each_admitted_body_once() {
     let _env = env_lock()
@@ -90,11 +90,14 @@ fn c2_c4_canonical_inventory_and_rebuild_read_each_admitted_body_once() {
     );
     let after_discovery = access_time_ns(&document);
     let discovery_body_read = after_discovery > before_discovery;
+    assert!(
+        !discovery_body_read,
+        "C2/C4: discovery no debe abrir/leer el cuerpo admitido (atime: {before_discovery}->{after_discovery})"
+    );
 
-    // Aísla la señal de cada fase: el siguiente cambio de atime solo puede provenir de la
-    // lectura de proyección. El mtime/fingerprint del snapshot no cambia.
-    reset_access_time(&document);
-    let before_rebuild = access_time_ns(&document);
+    // Conserva una única línea temporal de atime: el siguiente cambio solo puede provenir de la
+    // lectura de proyección posterior al inventario descubierto.
+    let before_rebuild = after_discovery;
     std::env::set_var("LODESTAR_H03_TEST_READ_AUDIT", &audit);
     let report = store
         .rebuild_from_discovered_inventory(&discovered)

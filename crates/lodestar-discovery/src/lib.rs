@@ -187,8 +187,19 @@ pub fn discover_inventory(
         }
         let path = entry.path();
         let relative = path.strip_prefix(root).unwrap_or(path);
-        let relative_text = relative.to_string_lossy();
-        let relative_text = normalize_native_separator(&relative_text);
+        let Some(relative_text) = relative.to_str() else {
+            diagnostics.push(Check::new(
+                Severity::Warn,
+                CheckCode::PathNotUtf8,
+                format!(
+                    "«{}» no es una ruta representable: el documento no entra en el inventario",
+                    relative.display()
+                ),
+                Vec::new(),
+            ));
+            continue;
+        };
+        let relative_text = normalize_native_separator(relative_text);
         let Ok(rel) = RelPath::new(&relative_text) else {
             diagnostics.push(Check::new(
                 Severity::Warn,
