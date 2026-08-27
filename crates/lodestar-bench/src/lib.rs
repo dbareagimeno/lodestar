@@ -1056,6 +1056,9 @@ fn variant_row_with_cold_iterations(
             // externo puede reconstruir el mismo SQLite entre READY y CONTINUE; por eso cada
             // muestra abre una conexión fresca y solo mide `document_set` + servicio.
             let initial_store = Store::open(root).context("abrir store SQLite")?;
+            if std::env::var_os("LODESTAR_H03_SQL_TRACE").is_some() {
+                std::env::set_var("LODESTAR_H03_SQL_TRACE_ROOT", root);
+            }
             let timing_log = sqlite_timing_log_enabled();
             if timing_log {
                 sqlite_timing_log("phase:rebuild:start");
@@ -1067,8 +1070,10 @@ fn variant_row_with_cold_iterations(
             }
             // This sample is deliberately taken after rebuild:end and before opening the first
             // read connection, so it cannot attribute query allocations to the rebuild.
-            let measured_rebuild_rss =
-                rebuild_rss_report(std::env::var_os(RSS_SAMPLER_ENV).as_deref());
+            let measured_rebuild_rss = reconcile_rebuild_rss(
+                rebuild_rss_report(std::env::var_os(RSS_SAMPLER_ENV).as_deref()),
+                &rebuild_report,
+            );
             let expose_rebuild_evidence = public_rebuild_evidence
                 || std::env::var_os(RSS_SAMPLER_ENV).is_some()
                 || std::env::var_os("LODESTAR_H03_SQL_TRACE").is_some()
@@ -1361,6 +1366,35 @@ fn rebuild_rss_report(test_sampler: Option<&OsStr>) -> Value {
         }
     }
     fallback
+}
+
+fn reconcile_rebuild_rss(mut sampled: Value, rebuild_report: &Value) -> Value {
+    let Some(sampled_peak) = sampled.get("absolute_bytes").and_then(Value::as_u64) else {
+        return sampled;
+    };
+    let Some(phase_peak) = rebuild_report.get("peak_rss_bytes").and_then(Value::as_u64) else {
+        return sampled;
+    };
+    if phase_peak <= sampled_peak {
+        return sampled;
+    }
+    if let Value::Object(object) = &mut sampled {
+        let sampled_method = object
+            .get("method")
+            .and_then(Value::as_str)
+            .unwrap_or("external RSS sampler")
+            .to_owned();
+        object.insert("sampled_absolute_bytes".into(), json!(sampled_peak));
+        object.insert("phase_peak_rss_bytes".into(), json!(phase_peak));
+        object.insert("absolute_bytes".into(), json!(phase_peak));
+        object.insert(
+            "method".into(),
+            json!(format!(
+                "max({sampled_method}, RebuildReport.peak_rss_bytes)"
+            )),
+        );
+    }
+    sampled
 }
 
 fn h03_rss_trace_sample(bytes: u64) {
@@ -1668,19 +1702,17 @@ fn extreme_report(
         .get("p95_ns")
         .and_then(Value::as_u64)
         .unwrap_or(1);
-    let sampled_peak = sqlite_rebuild
+    let observed_peak = sqlite_rebuild
         .get("rss")
         .and_then(|rss| rss.get("absolute_bytes"))
         .and_then(Value::as_u64)
+        .or_else(|| {
+            sqlite_rebuild
+                .get("report")
+                .and_then(|report| report.get("peak_rss_bytes"))
+                .and_then(Value::as_u64)
+        })
         .unwrap_or(1);
-    let reported_phase_peak = sqlite_rebuild
-        .get("report")
-        .and_then(|report| report.get("peak_rss_bytes"))
-        .and_then(Value::as_u64)
-        .unwrap_or(1);
-    // The external high-water mark and the in-rebuild sampler use different kernel APIs and can
-    // differ slightly in attribution/rounding. The objective must conservatively cover both.
-    let observed_peak = sampled_peak.max(reported_phase_peak);
     Ok(json!({
         "schema_version": "e33-h09-v1",
         "mode": "extreme",

@@ -2108,15 +2108,14 @@ impl SqlTrace {
 
 fn sql_trace_path_for(next: &Path) -> Option<PathBuf> {
     let path = PathBuf::from(std::env::var_os("LODESTAR_H03_SQL_TRACE")?);
-    let trace_name = path.file_name()?.to_string_lossy();
-    let next_name = next.file_name()?.to_string_lossy();
-
-    // A process-wide diagnostic seam can briefly be visible to a rebuild for another root when
-    // tests or callers rebuild independent workspaces concurrently. If the requested trace names
-    // this concrete next generation, only its sibling database may claim it. Arbitrarily named
-    // external collectors (for example the benchmark report) remain supported.
-    if trace_name.starts_with(&format!("{next_name}.")) && path.parent() != next.parent() {
-        return None;
+    if path.parent() == next.parent() {
+        return Some(path);
     }
-    Some(path)
+
+    // A process-wide diagnostic seam can briefly be visible to a rebuild for another root. An
+    // external collector must therefore name its owner explicitly; root-local traces are scoped
+    // by their parent directory without requiring the extra marker.
+    let requested_root = PathBuf::from(std::env::var_os("LODESTAR_H03_SQL_TRACE_ROOT")?);
+    let next_root = next.parent()?.parent()?;
+    (requested_root == next_root).then_some(path)
 }
