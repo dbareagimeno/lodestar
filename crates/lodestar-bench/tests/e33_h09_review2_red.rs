@@ -237,14 +237,14 @@ fn workers_rss_y_sqlite_exponen_identidad_y_unidades_reconciliables() {
             "worker_pid debe ser único por variante"
         );
         let rss = row["rss"].as_object().expect("rss objeto");
-        if matches!(platform, "macos" | "linux") {
+        if matches!(platform, "macos" | "linux" | "windows") {
             assert_eq!(rss["status"], "available");
             let raw = rss["raw_value"].as_u64().expect("raw_value entero");
             let absolute = rss["absolute_bytes"]
                 .as_u64()
                 .expect("absolute_bytes entero");
             let units = rss["raw_units"].as_str().expect("raw_units string");
-            if platform == "macos" {
+            if matches!(platform, "macos" | "windows") {
                 assert_eq!(units, "bytes");
                 assert_eq!(absolute, raw);
             } else {
