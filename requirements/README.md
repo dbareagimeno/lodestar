@@ -236,15 +236,17 @@ abierta. **Principio rector**: *medir antes que opinar, registrar antes que deci
 produce hechos re-ejecutables; los umbrales, `§14` y `§22`/`§24` los decide el usuario con los
 números delante, fuera del banco.
 
-## Mapa de E35 — memoria y esquema SQLite vNext
+## Mapa de E35 — memoria y SQLite vNext
 
 La colisión histórica de identificadores se conserva explícitamente en la trazabilidad local: las
-issues de GitHub tituladas `[E34-H01]` y `[E34-H02]` se materializan como **E35-H01** y **E35-H02**.
+issues de GitHub tituladas `[E34-H01]`, `[E34-H02]` y `[E34-H03]` se materializan como **E35-H01**,
+**E35-H02** y **E35-H03**.
 
 | Historia | Origen | Estado de entrega | Área | Documento |
 |---|---|---|---|---|
 | **E35-H01** — contrato de memoria retenida | #53 (`E34-H01` → `E35-H01`) | ✅ implementada | `performance.maxMemory` y `MemoryBudget` | [epica-35-presupuesto-memoria.md](epica-35-presupuesto-memoria.md) |
 | **E35-H02** — esquema SQLite vNext compacto por IDs | #54 (`E34-H02` → `E35-H02`), parent #52 | ✅ implementada y verificada con evidencia dirigida | DDL `USER_VERSION=6`, IDs, `fields`, FTS5 contentless (`content=''`, `columnsize=0`) y `dbstat` | [e35-h02-esquema-sqlite-vnext.md](e35-h02-esquema-sqlite-vnext.md) |
+| **E35-H03** — rebuild SQLite streaming, insert-only y atómico | #55 (`E34-H03` → `E35-H03`), parent #52 | ✅ implementada y verificada | `.next`, dos pasadas, política canónica, statements reutilizados, integridad y swap atómico | [e35-h03-rebuild-sqlite-streaming.md](e35-h03-rebuild-sqlite-streaming.md) |
 
 E35-H02 es la fundación técnica de #55/E35-H03, #56/E35-H04 y #59/E35-H07. No conecta el store a
 `App`/MCP, no cambia `contracts/mcp.yml` ni la configuración pública, y no cierra `decisiones §14`.

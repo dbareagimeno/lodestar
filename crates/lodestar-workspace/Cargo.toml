@@ -13,6 +13,7 @@ categories = ["filesystem", "development-tools"]
 
 [dependencies]
 lodestar-core = { workspace = true }
+lodestar-discovery = { workspace = true }
 lodestar-store = { workspace = true }
 thiserror = { workspace = true }
 ignore = { workspace = true }

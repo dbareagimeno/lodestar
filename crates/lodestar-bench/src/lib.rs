@@ -1013,6 +1013,7 @@ fn variant_row(
         c,
         acquisition_trace,
         None,
+        false,
     )
 }
 
@@ -1028,12 +1029,15 @@ fn variant_row_with_cold_iterations(
     c: &Calls,
     acquisition_trace: &mut Map<String, Value>,
     timing_trace: Option<&SqliteTimingTrace>,
+    public_rebuild_evidence: bool,
 ) -> Result<Value> {
     let mut measurements: BTreeMap<String, Vec<(Duration, Value)>> = TOOLS
         .iter()
         .map(|tool| ((*tool).to_string(), Vec::with_capacity(iterations)))
         .collect();
     let mut rebuild_samples: Vec<(Duration, Value)> = Vec::new();
+    let mut rebuild_rss: Option<Value> = None;
+    let mut rebuild_report_public: Option<Value> = None;
     let mut trace_tools = Map::new();
     let last: BTreeMap<String, Value> = match variant {
         "disk-reparseo" => {
@@ -1057,9 +1061,23 @@ fn variant_row_with_cold_iterations(
                 sqlite_timing_log("phase:rebuild:start");
             }
             let rebuild_start = Instant::now();
-            initial_store.rebuild().context("rebuild SQLite")?;
+            let rebuild_report = initial_store.rebuild().context("rebuild SQLite")?;
             if timing_log {
                 sqlite_timing_log("phase:rebuild:end");
+            }
+            // This sample is deliberately taken after rebuild:end and before opening the first
+            // read connection, so it cannot attribute query allocations to the rebuild.
+            let measured_rebuild_rss =
+                rebuild_rss_report(std::env::var_os(RSS_SAMPLER_ENV).as_deref());
+            let expose_rebuild_evidence = public_rebuild_evidence
+                || std::env::var_os(RSS_SAMPLER_ENV).is_some()
+                || std::env::var_os("LODESTAR_H03_SQL_TRACE").is_some()
+                || std::env::var_os("LODESTAR_H03_RSS_TRACE").is_some();
+            if expose_rebuild_evidence {
+                rebuild_rss = Some(measured_rebuild_rss);
+            }
+            if expose_rebuild_evidence {
+                rebuild_report_public = Some(rebuild_report);
             }
             let rebuild_elapsed = timing_trace
                 .map(|trace| Duration::from_nanos(trace.rebuild_elapsed_ns))
@@ -1147,7 +1165,25 @@ fn variant_row_with_cold_iterations(
         ),
     );
     if !rebuild_samples.is_empty() {
-        row.insert("rebuild".into(), metric(&rebuild_samples));
+        let mut rebuild = metric(&rebuild_samples);
+        if let Value::Object(object) = &mut rebuild {
+            if rebuild_samples
+                .last()
+                .is_some_and(|(_, result)| result.is_object())
+            {
+                object.insert(
+                    "report".into(),
+                    rebuild_samples.last().expect("rebuild sample").1.clone(),
+                );
+            }
+            if let Some(report) = rebuild_report_public {
+                object.insert("report".into(), report);
+            }
+            if let Some(rss) = rebuild_rss {
+                object.insert("rss".into(), rss);
+            }
+        }
+        row.insert("rebuild".into(), rebuild);
         row.insert("percentiles_includes_rebuild".into(), json!(false));
     }
     acquisition_trace.insert(variant.to_owned(), Value::Object(trace_tools));
@@ -1236,6 +1272,10 @@ fn path_is_within(path: &Path, root: &Path) -> bool {
 fn rss_sampler_report(path: &OsStr, phase: Option<&str>) -> Value {
     let platform = format!("{}/{}", std::env::consts::OS, std::env::consts::ARCH);
     let mut command = Command::new(path);
+    command.env(
+        "LODESTAR_BENCH_TEST_RSS_PID",
+        std::process::id().to_string(),
+    );
     if let Some(phase) = phase {
         command.env("LODESTAR_BENCH_TEST_RSS_PHASE", phase);
     }
@@ -1247,7 +1287,9 @@ fn rss_sampler_report(path: &OsStr, phase: Option<&str>) -> Value {
                 "reason": "sampler RSS interno terminó con error",
                 "method": "LODESTAR_BENCH_TEST_RSS_SAMPLER stdout u64",
                 "units": "bytes",
-                "scope": "proceso worker aislado por variante",
+                "scope": if phase == Some("rebuild") { "rebuild phase del proceso worker aislado" } else { "proceso worker aislado por variante" },
+                "phase": phase,
+                "captured_before_queries": phase == Some("rebuild"),
                 "platform": platform
             });
         }
@@ -1257,7 +1299,9 @@ fn rss_sampler_report(path: &OsStr, phase: Option<&str>) -> Value {
                 "reason": format!("no se pudo ejecutar sampler RSS interno: {error}"),
                 "method": "LODESTAR_BENCH_TEST_RSS_SAMPLER stdout u64",
                 "units": "bytes",
-                "scope": "proceso worker aislado por variante",
+                "scope": if phase == Some("rebuild") { "rebuild phase del proceso worker aislado" } else { "proceso worker aislado por variante" },
+                "phase": phase,
+                "captured_before_queries": phase == Some("rebuild"),
                 "platform": platform
             });
         }
@@ -1273,7 +1317,9 @@ fn rss_sampler_report(path: &OsStr, phase: Option<&str>) -> Value {
                 "reason": "sampler RSS interno no devolvió un u64 positivo por stdout",
                 "method": "LODESTAR_BENCH_TEST_RSS_SAMPLER stdout u64",
                 "units": "bytes",
-                "scope": "proceso worker aislado por variante",
+                "scope": if phase == Some("rebuild") { "rebuild phase del proceso worker aislado" } else { "proceso worker aislado por variante" },
+                "phase": phase,
+                "captured_before_queries": phase == Some("rebuild"),
                 "platform": platform
             });
         }
@@ -1285,9 +1331,49 @@ fn rss_sampler_report(path: &OsStr, phase: Option<&str>) -> Value {
         "absolute_bytes": raw,
         "method": "LODESTAR_BENCH_TEST_RSS_SAMPLER stdout u64",
         "units": "bytes",
-        "scope": "pico absoluto del proceso worker aislado por variante",
+        "scope": if phase == Some("rebuild") { "pico RSS de rebuild antes de queries" } else { "pico absoluto del proceso worker aislado por variante" },
+        "phase": phase,
+        "captured_before_queries": phase == Some("rebuild"),
         "platform": platform
     })
+}
+
+fn rebuild_rss_report(test_sampler: Option<&OsStr>) -> Value {
+    if let Some(path) = test_sampler {
+        let sampled = rss_sampler_report(path, Some("rebuild"));
+        if sampled.get("status").and_then(Value::as_str) == Some("available") {
+            return sampled;
+        }
+    }
+
+    let mut fallback = rss_peak_report(None, Some("rebuild"));
+    if let Value::Object(object) = &mut fallback {
+        object.insert("phase".into(), json!("rebuild"));
+        object.insert("captured_before_queries".into(), json!(true));
+        object.insert(
+            "scope".into(),
+            json!("rebuild phase del proceso worker aislado (fallback getrusage)"),
+        );
+        if object.get("status").and_then(Value::as_str) == Some("available") {
+            if let Some(bytes) = object.get("absolute_bytes").and_then(Value::as_u64) {
+                h03_rss_trace_sample(bytes);
+            }
+        }
+    }
+    fallback
+}
+
+fn h03_rss_trace_sample(bytes: u64) {
+    let Some(path) = std::env::var_os("LODESTAR_H03_RSS_TRACE") else {
+        return;
+    };
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let _ = writeln!(file, "rss_sample:rebuild:{}:{bytes}", std::process::id());
+    }
 }
 
 #[allow(clippy::needless_return)]
@@ -1339,10 +1425,58 @@ fn rss_peak_report(test_sampler: Option<&OsStr>, phase: Option<&str>) -> Value {
             "platform": format!("{}/{}", std::env::consts::OS, std::env::consts::ARCH)
         });
     }
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::System::ProcessStatus::{
+            GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS,
+        };
+        use windows_sys::Win32::System::Threading::GetCurrentProcess;
+        let mut counters = std::mem::MaybeUninit::<PROCESS_MEMORY_COUNTERS>::zeroed();
+        let ok = unsafe {
+            GetProcessMemoryInfo(
+                GetCurrentProcess(),
+                counters.as_mut_ptr(),
+                std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32,
+            )
+        };
+        if ok == 0 {
+            return json!({
+                "status": "unavailable",
+                "reason": format!("GetProcessMemoryInfo: {}", std::io::Error::last_os_error()),
+                "method": "GetProcessMemoryInfo(PROCESS_MEMORY_COUNTERS.PeakWorkingSetSize)",
+                "units": "bytes",
+                "scope": "pico absoluto del proceso worker aislado por variante",
+                "platform": format!("{}/{}", std::env::consts::OS, std::env::consts::ARCH)
+            });
+        }
+        let peak = unsafe { counters.assume_init() }.PeakWorkingSetSize as u64;
+        if peak == 0 {
+            return json!({
+                "status": "unavailable",
+                "reason": "GetProcessMemoryInfo devolvió PeakWorkingSetSize=0",
+                "method": "GetProcessMemoryInfo(PROCESS_MEMORY_COUNTERS.PeakWorkingSetSize)",
+                "units": "bytes",
+                "scope": "pico absoluto del proceso worker aislado por variante",
+                "platform": format!("{}/{}", std::env::consts::OS, std::env::consts::ARCH)
+            });
+        }
+        return json!({
+            "status": "available",
+            "raw_value": peak,
+            "raw_units": "bytes",
+            "absolute_bytes": peak,
+            "method": "GetProcessMemoryInfo(PROCESS_MEMORY_COUNTERS.PeakWorkingSetSize)",
+            "units": "bytes",
+            "scope": "pico absoluto del proceso worker aislado por variante",
+            "phase": phase,
+            "captured_before_queries": phase == Some("rebuild"),
+            "platform": format!("{}/{}", std::env::consts::OS, std::env::consts::ARCH)
+        });
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     json!({
         "status": "unavailable",
-        "reason": "plataforma sin getrusage(RUSAGE_SELF).ru_maxrss soportado por el banco",
+        "reason": "plataforma sin API de working set soportada por el banco",
         "method": "unavailable",
         "units": "bytes",
         "scope": "proceso worker aislado por variante",
@@ -1524,6 +1658,27 @@ fn extreme_report(
     let corpus = corpus_size_report(root)?;
     let sqlite = sqlite_size_report(root);
     let commit = git_commit().unwrap_or_else(|| "unknown".into());
+    let sqlite_rebuild = rows
+        .iter()
+        .find(|row| row.get("variant").and_then(Value::as_str) == Some("sqlite-raw"))
+        .and_then(|row| row.get("rebuild"))
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    let observed_ns = sqlite_rebuild
+        .get("p95_ns")
+        .and_then(Value::as_u64)
+        .unwrap_or(1);
+    let observed_peak = sqlite_rebuild
+        .get("rss")
+        .and_then(|rss| rss.get("absolute_bytes"))
+        .and_then(Value::as_u64)
+        .or_else(|| {
+            sqlite_rebuild
+                .get("report")
+                .and_then(|report| report.get("peak_rss_bytes"))
+                .and_then(Value::as_u64)
+        })
+        .unwrap_or(1);
     Ok(json!({
         "schema_version": "e33-h09-v1",
         "mode": "extreme",
@@ -1543,6 +1698,15 @@ fn extreme_report(
         "measurements": rows,
         "functional_equivalence": functional_equivalence,
         "equivalence_divergences": divergences,
+        "rebuild_objectives": {
+            "max_duration_seconds": 60,
+            "max_peak_rss_bytes": 512 * 1024 * 1024u64,
+            "gate": false,
+            "observed_duration_seconds": (observed_ns as f64) / 1_000_000_000.0,
+            "observed_peak_rss_bytes": observed_peak,
+            "provenance": {"profile": profile, "scale": scale, "iterations": iterations, "machine": machine_label(), "commit": commit},
+            "command": format!("lodestar-bench --extreme --profile {profile} --scale {scale} --iterations {iterations}")
+        },
         "captured_at": captured_at(),
         "platform": {"os": std::env::consts::OS, "arch": std::env::consts::ARCH},
         "corpus": corpus,
@@ -1596,6 +1760,11 @@ fn spawn_extreme_worker(
         .with_context(|| format!("parsear informe del worker extremo {variant}"))?;
     if let Value::Object(object) = &mut row {
         object.insert("worker_pid".into(), json!(worker_pid));
+        if let Some(rebuild) = object.get_mut("rebuild").and_then(Value::as_object_mut) {
+            if let Some(rss) = rebuild.get_mut("rss").and_then(Value::as_object_mut) {
+                rss.insert("worker_pid".into(), json!(worker_pid));
+            }
+        }
     }
     Ok(row)
 }
@@ -1627,6 +1796,7 @@ fn run_extreme_worker(root: &Path, variant: &str, iterations: usize) -> Result<V
         &calls,
         &mut trace,
         timing_trace.as_ref(),
+        true,
     )?;
     if let Some(path) = test_sampler.as_deref() {
         let _ = rss_sampler_report(path, Some("load-end"));

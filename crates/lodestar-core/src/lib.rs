@@ -35,5 +35,18 @@ pub use error::CoreError;
 pub use store_trait::DocumentStore;
 pub use types::*;
 
+/// Diagnósticos que dependen únicamente del cuerpo de un documento.
+///
+/// El llamante conserva el `Parsed` ya calculado y el core delega en la autoridad única de
+/// conformidad; los diagnósticos de enlaces, que necesitan el inventario completo, se añaden en
+/// [`DocumentSet::analyze`].
+pub fn local_diagnostics(
+    path: &types::RelPath,
+    parsed: &model::Parsed,
+    raw: &str,
+) -> Vec<types::Check> {
+    conform::validate_file(path, parsed, raw)
+}
+
 #[cfg(feature = "render")]
 pub mod render;

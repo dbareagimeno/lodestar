@@ -18,7 +18,7 @@ use lodestar_core::types::{Analysis, Check, CheckCode, RelPath, Severity};
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer};
 
-use crate::discovery::{DiscoveryPolicy, CONTROL_PLANE_EXCLUDE};
+pub use lodestar_discovery::DiscoverySection;
 
 /// Ruta del fichero de configuración, relativa al root del workspace.
 pub const WORKSPACE_CONFIG_FILE: &str = ".lodestar/config.yaml";
@@ -199,89 +199,6 @@ impl Default for WorkspaceSection {
 
 fn default_ignored() -> Vec<String> {
     vec![".lodestar/runtime".to_string(), ".git".to_string()]
-}
-
-/// Sección `discovery` (`ARCHITECTURE.md §20.5`): la política de descubrimiento declarada por el
-/// usuario, antes de aplicarle el **suelo duro**.
-///
-/// Sus defaults son, campo a campo, los de [`DiscoveryPolicy::default`] —se derivan de ella, no se
-/// reescriben— para que escribir la política por defecto documentada en `§20.5` dentro del
-/// `config.yaml` dé exactamente el mismo comportamiento que no escribir nada. Si divergieran,
-/// declarar los valores «de fábrica» cambiaría el descubrimiento: una config que *habilita* en vez
-/// de limitar.
-///
-/// La política **efectiva** se obtiene con [`DiscoverySection::policy`], que es donde se inyecta el
-/// suelo duro `.lodestar/**`.
-#[derive(Debug, Clone, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase", default, deny_unknown_fields)]
-pub struct DiscoverySection {
-    /// Globs de lo que **entra** en el inventario (por defecto `**/*.md`).
-    pub include: Vec<String>,
-    /// Globs de lo que queda **fuera**, con prioridad sobre `include`.
-    ///
-    /// Lo que el usuario escriba aquí **reemplaza** la lista por defecto (no hace merge), con una
-    /// única excepción innegociable: `.lodestar/**` (ver [`DiscoverySection::policy`]).
-    pub exclude: Vec<String>,
-    /// Aplicar los `.gitignore` del árbol (por defecto `true`).
-    pub respect_gitignore: bool,
-    /// Aplicar los `.lodestarignore` del árbol (por defecto `true`).
-    pub respect_lodestar_ignore: bool,
-    /// Seguir symlinks (por defecto `false`: se reportan con `SYMLINK-UNSUPPORTED`).
-    pub follow_symlinks: bool,
-    /// Tamaño máximo por documento en bytes; por encima se reporta `DOC-TOO-LARGE`.
-    pub max_document_bytes: usize,
-}
-
-impl Default for DiscoverySection {
-    fn default() -> Self {
-        // Derivada de la política del motor: una sola fuente de verdad para los defaults de `§20.5`.
-        let p = DiscoveryPolicy::default();
-        DiscoverySection {
-            include: p.include,
-            exclude: p.exclude,
-            respect_gitignore: p.respect_gitignore,
-            respect_lodestar_ignore: p.respect_lodestar_ignore,
-            follow_symlinks: p.follow_symlinks,
-            max_document_bytes: p.max_document_bytes,
-        }
-    }
-}
-
-impl DiscoverySection {
-    /// La [`DiscoveryPolicy`] **efectiva**: lo declarado por el usuario con el **suelo duro**
-    /// [`CONTROL_PLANE_EXCLUDE`] (`.lodestar/**`) inyectado siempre.
-    ///
-    /// El suelo duro vive aquí —en la construcción de la política, no en el default de la
-    /// sección— porque un default es sobreescribible por definición: un usuario que escriba
-    /// `exclude: []`, o que liste sus propias exclusiones sin repetir las de fábrica (lo natural),
-    /// se llevaría por delante la exclusión que sostiene un invariante del motor. Inyectándolo al
-    /// construir la política, **toda** vía de obtención (config deserializada, `default()`,
-    /// construida a mano) la lleva.
-    ///
-    /// El invariante que protege (`§20.5`, corrección E15-H07): *todo documento del inventario
-    /// tiene que contar para la [`lodestar_core::types::workspace_revision`]*. Un `.md` bajo
-    /// `.lodestar/` sería nodo del grafo, analizable y escribible, pero **ciego al control
-    /// optimista** —la revisión excluye `.lodestar/` por decisión **D5** y no puede dejar de
-    /// hacerlo: `StagingDir` materializa ahí copias `.md` de los documentos cuya escritura está
-    /// guardando, así que si contaran, `reverify_base_revision` fallaría *a causa del apply en
-    /// curso*. `.lodestar/` es el plano de control de Lodestar (config, cache, runtime), nunca
-    /// conocimiento del usuario.
-    ///
-    /// La config puede, por tanto, **añadir** exclusiones; nunca quitar esa.
-    pub fn policy(&self) -> DiscoveryPolicy {
-        let mut exclude = self.exclude.clone();
-        if !exclude.iter().any(|g| g == CONTROL_PLANE_EXCLUDE) {
-            exclude.push(CONTROL_PLANE_EXCLUDE.to_string());
-        }
-        DiscoveryPolicy {
-            include: self.include.clone(),
-            exclude,
-            respect_gitignore: self.respect_gitignore,
-            respect_lodestar_ignore: self.respect_lodestar_ignore,
-            follow_symlinks: self.follow_symlinks,
-            max_document_bytes: self.max_document_bytes,
-        }
-    }
 }
 
 /// Sección `validation` (`ARCHITECTURE.md §20.9`): severidad por **familia de diagnóstico**
@@ -603,7 +520,10 @@ transactions:
             let cfg: WorkspaceConfig = serde_yaml::from_str(yaml).expect("YAML válido");
             let policy = cfg.discovery.policy();
             assert!(
-                policy.exclude.iter().any(|g| g == CONTROL_PLANE_EXCLUDE),
+                policy
+                    .exclude
+                    .iter()
+                    .any(|g| g == lodestar_discovery::CONTROL_PLANE_EXCLUDE),
                 "el suelo duro debe estar en la política efectiva de «{yaml}»: {:?}",
                 policy.exclude
             );
@@ -612,7 +532,7 @@ transactions:
                 policy
                     .exclude
                     .iter()
-                    .filter(|g| *g == CONTROL_PLANE_EXCLUDE)
+                    .filter(|g| *g == lodestar_discovery::CONTROL_PLANE_EXCLUDE)
                     .count(),
                 1
             );

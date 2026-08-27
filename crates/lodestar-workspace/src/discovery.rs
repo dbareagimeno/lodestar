@@ -19,90 +19,18 @@ use std::path::Path;
 
 use ignore::gitignore::GitignoreBuilder;
 use ignore::overrides::{Override, OverrideBuilder};
-use ignore::{Match, WalkBuilder};
+use ignore::Match;
 use lodestar_core::types::{Check, CheckCode, FileMap, RelPath, Severity};
 
 use crate::error::WorkspaceError;
 use crate::Workspace;
 
-/// Nombre del fichero de exclusiones propio de Lodestar (mismo formato que un `.gitignore`).
-pub const LODESTAR_IGNORE_FILENAME: &str = ".lodestarignore";
-
-/// Nombre del fichero de exclusiones estándar del árbol que el walker respeta cuando
-/// [`DiscoveryPolicy::respect_gitignore`] está activo.
 pub const GITIGNORE_FILENAME: &str = ".gitignore";
 
-/// El **suelo duro** del descubrimiento: el plano de control de Lodestar (`.lodestar/` entero).
-///
-/// No es un default sobreescribible sino una exclusión que la config puede **añadir pero nunca
-/// quitar** ([`crate::config::DiscoverySection::policy`] la inyecta siempre): sostiene la
-/// invariante de consistencia de [`DiscoveryPolicy::exclude`].
-pub const CONTROL_PLANE_EXCLUDE: &str = ".lodestar/**";
-
-/// Tamaño máximo por documento **por defecto**: 10 MiB.
-///
-/// Un `.md` de conocimiento no llega ahí ni de lejos (10 MiB son ~10 millones de caracteres
-/// ASCII, dos órdenes de magnitud por encima del documento más grande que se ve en la práctica),
-/// así que el límite no recorta trabajo legítimo; existe para que un binario renombrado a `.md` o
-/// un volcado accidental no se cargue entero en memoria — y ahora, además, se **reporte**
-/// (`DOC-TOO-LARGE`) en vez de desaparecer en silencio.
-pub const DEFAULT_MAX_DOCUMENT_BYTES: usize = 10 * 1024 * 1024;
-
-/// Política de descubrimiento (`ARCHITECTURE.md §20.5`). Los campos son públicos a propósito: se
-/// construye por actualización funcional (`DiscoveryPolicy { .., ..Default::default() }`).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DiscoveryPolicy {
-    /// Globs (estilo `.gitignore`) de lo que **entra** en el inventario. Por defecto `**/*.md`.
-    ///
-    /// Es un **filtro final sobre los ficheros supervivientes**, no una lista blanca que mande
-    /// sobre el resto de la política: lo que `exclude`, `.gitignore` o `.lodestarignore` hayan
-    /// dejado fuera sigue fuera aunque case con un `include` (ver [`discover`], «orden de
-    /// precedencia»). Un `include` vacío no incluye nada.
-    ///
-    /// No se aplica a **directorios**: un directorio no entra nunca en el inventario, y podarlo
-    /// por `include` cortaría el descenso a los documentos que sí casan (`**/*.md` no casa con
-    /// `docs/`, pero sí con `docs/api.md`).
-    pub include: Vec<String>,
-    /// Globs de lo que queda **fuera**, con prioridad sobre `include`. Por defecto `.git/**` y
-    /// **`.lodestar/**` entero** ([`CONTROL_PLANE_EXCLUDE`]) — no solo `runtime/`. `.lodestar/**`
-    /// es además el **suelo duro** que la config no puede levantar (E15-H08).
-    ///
-    /// La razón no es higiene, es una **invariante de consistencia**: todo documento del inventario
-    /// tiene que contar para la [`lodestar_core::types::workspace_revision`], o el control optimista
-    /// dejaría de protegerlo en silencio (sería nodo del grafo, analizable y escribible, con
-    /// cambios que nunca mueven la revisión). Y `workspace_revision` **no puede** dejar de excluir
-    /// `.lodestar/` (decisión D5): `StagingDir` materializa ahí un árbol `.md` completo —copias de
-    /// los documentos cuya escritura está guardando— así que si contara, `reverify_base_revision`
-    /// fallaría *a causa del apply en curso*; el motor transaccional invalidaría su propia base al
-    /// preparar la escritura. Igual con las copias de recuperación.
-    ///
-    /// Por eso el arreglo va por aquí y no por la revisión. `.lodestar/` es el **plano de control**
-    /// de Lodestar (config, cache, runtime), nunca conocimiento del usuario.
-    pub exclude: Vec<String>,
-    /// Aplicar los `.gitignore` del árbol. Por defecto `true`.
-    pub respect_gitignore: bool,
-    /// Aplicar los [`LODESTAR_IGNORE_FILENAME`] del árbol. Por defecto `true`.
-    pub respect_lodestar_ignore: bool,
-    /// Seguir symlinks. Por defecto `false`: un symlink se reporta (`SYMLINK-UNSUPPORTED`) y no
-    /// entra en el inventario.
-    pub follow_symlinks: bool,
-    /// Tamaño máximo por documento en bytes; por encima se reporta `DOC-TOO-LARGE` y el documento
-    /// no entra en el inventario. Por defecto [`DEFAULT_MAX_DOCUMENT_BYTES`].
-    pub max_document_bytes: usize,
-}
-
-impl Default for DiscoveryPolicy {
-    fn default() -> Self {
-        DiscoveryPolicy {
-            include: vec!["**/*.md".to_string()],
-            exclude: vec![".git/**".to_string(), CONTROL_PLANE_EXCLUDE.to_string()],
-            respect_gitignore: true,
-            respect_lodestar_ignore: true,
-            follow_symlinks: false,
-            max_document_bytes: DEFAULT_MAX_DOCUMENT_BYTES,
-        }
-    }
-}
+pub use lodestar_discovery::{
+    DiscoveredInventory, DiscoveryPolicy, CONTROL_PLANE_EXCLUDE, DEFAULT_MAX_DOCUMENT_BYTES,
+    LODESTAR_IGNORE_FILENAME,
+};
 
 /// Resultado del descubrimiento: el inventario y los diagnósticos que lo explican.
 #[derive(Debug, Clone, Default)]
@@ -127,6 +55,16 @@ pub struct Discovered {
     pub other_files: BTreeSet<RelPath>,
     /// Diagnósticos de descubrimiento (`§20.9`), en orden determinista.
     pub diagnostics: Vec<Check>,
+}
+
+/// Primera pasada del descubrimiento. Conserva exactamente la política del walker canónico, pero
+/// solo paths, metadata compacta implícita y diagnósticos; la validación UTF-8 usa un buffer fijo.
+pub fn discover_inventory(
+    root: &Path,
+    policy: &DiscoveryPolicy,
+) -> Result<DiscoveredInventory, WorkspaceError> {
+    lodestar_discovery::discover_inventory(root, policy)
+        .map_err(|error| WorkspaceError::Io(error.to_string()))
 }
 
 /// Descubre el inventario de documentos bajo `root` según `policy`.
@@ -161,205 +99,92 @@ pub struct Discovered {
 /// # Errores
 /// - [`WorkspaceError::Io`] si algún glob de `policy` es inválido (desde E15-H08 la política puede
 ///   venir del `config.yaml` del usuario, así que es alcanzable con un glob mal escrito).
+///
+/// Única entrada de descubrimiento: el walker y la admisión pertenecen al crate compartido.
 pub fn discover(root: &Path, policy: &DiscoveryPolicy) -> Result<Discovered, WorkspaceError> {
-    let include = build_include(root, policy)?;
-    let mut builder = WalkBuilder::new(root);
-    builder
-        .overrides(build_excludes(root, policy)?)
-        // Un directorio oculto (`.oculto/`) es conocimiento como cualquier otro: solo lo excluyen
-        // los globs y los ficheros de ignore.
-        .hidden(false)
-        .follow_links(policy.follow_symlinks)
-        .git_ignore(policy.respect_gitignore)
-        // Sin esto, `WalkBuilder` solo aplica `.gitignore` DENTRO de un repo git — y el caso que
-        // persigue la épica es justo el directorio arbitrario sin `.git/`.
-        .require_git(false)
-        // El inventario depende solo del árbol bajo la raíz: ni ficheros de ignore de directorios
-        // ancestros, ni el `.gitignore` global del usuario, ni `.git/info/exclude` (no versionado).
-        // Así el mismo árbol da el mismo inventario en cualquier máquina.
-        .parents(false)
-        .git_global(false)
-        .git_exclude(false)
-        // Recorrido ordenado: hace deterministas también los DIAGNÓSTICOS (el inventario ya lo es
-        // por ser un `BTreeMap`).
-        .sort_by_file_name(|a, b| a.cmp(b));
-    if policy.respect_lodestar_ignore {
-        builder.add_custom_ignore_filename(LODESTAR_IGNORE_FILENAME);
-    }
-
+    let inventory = lodestar_discovery::discover_inventory(root, policy)
+        .map_err(|error| WorkspaceError::Io(error.to_string()))?;
     let mut files = FileMap::new();
-    let mut other_files: BTreeSet<RelPath> = BTreeSet::new();
-    let mut diagnostics: Vec<Check> = Vec::new();
-
-    for entry in builder.build() {
-        let entry = match entry {
-            Ok(e) => e,
-            Err(e) => {
-                // Entrada ilegible (p. ej. permisos de un directorio). El catálogo de `§20.9` no
-                // tiene código para esto y esta historia no inventa códigos: se avisa por stderr y
-                // se sigue, como hacía `io::load_bundle`.
-                eprintln!("lodestar: aviso: entrada ilegible en el workspace: {e}");
-                continue;
-            }
-        };
-        if entry.depth() == 0 {
-            continue; // la propia raíz
-        }
-        let path = entry.path();
-        let rel = path.strip_prefix(root).unwrap_or(path);
-        let file_type = entry.file_type();
-
-        // Un directorio nunca entra en el inventario NI en `other_files` (`LinkTarget` no modela
-        // directorios, `§20.6` precisión 2b), y tampoco se le aplica el filtro `include`: podarlo
-        // aquí cortaría el descenso a los documentos que sí casan.
-        if file_type.is_some_and(|t| t.is_dir()) {
-            continue;
-        }
-
-        // Symlink de DIRECTORIO (E24-H12): se comprueba ANTES del filtro `include` porque un
-        // symlink a un directorio no acaba en `.md` y por tanto nunca lo pasaría — se iba a
-        // `other_files` en silencio, ocultando TODOS los documentos que hubiera detrás. Un
-        // symlink a un fichero suelto sigue tratándose más abajo (y uno que no sea `.md` sigue sin
-        // merecer diagnóstico: no es un documento que Lodestar «no esté viendo»).
-        if file_type.is_some_and(|t| t.is_symlink()) && path.metadata().is_ok_and(|m| m.is_dir()) {
-            diagnostics.push(match rel_path_from(rel) {
-                Ok(rp) => {
-                    let diag = Check::new(
-                        Severity::Warn,
-                        CheckCode::SymlinkUnsupported,
-                        format!(
-                            "«{}» es un enlace simbólico a un directorio: Lodestar no sigue                              symlinks, así que NINGÚN documento que haya detrás entra en el                              inventario",
-                            rp.as_str()
-                        ),
-                        vec![rp.clone()],
-                    );
-                    other_files.insert(rp);
-                    diag
-                }
-                Err(diag) => diag,
-            });
-            continue;
-        }
-
-        // Filtro `include`, el ÚLTIMO de la cadena de precedencia (ver la doc de esta función).
-        // Se aplica a todo no-directorio, symlinks incluidos: un `enlace.txt` no es un documento
-        // que Lodestar «no esté viendo», así que no merece diagnóstico. Lo que no pasa el filtro no
-        // desaparece: es un fichero del proyecto que EXISTE, así que va a `other_files` para que un
-        // enlace a él sea `WorkspaceFile` y no `Missing`.
-        if !incluido(&include, path) {
-            // Una ruta no representable se salta **en silencio** aquí: `PATH-NOT-UTF8` denuncia un
-            // documento que Lodestar no puede ver, y esto no es un documento (igual que el filtro
-            // `include` no emite diagnóstico).
-            if let Ok(rp) = rel_path_from(rel) {
-                other_files.insert(rp);
-            }
-            continue;
-        }
-
-        // Symlink: no se sigue (política) pero TAMPOCO se ignora en silencio — el usuario tiene
-        // que enterarse de que hay un documento que Lodestar no está viendo.
-        if file_type.is_some_and(|t| t.is_symlink()) {
-            diagnostics.push(match rel_path_from(rel) {
-                Ok(rp) => {
-                    let diag = Check::new(
-                        Severity::Warn,
-                        CheckCode::SymlinkUnsupported,
-                        format!(
-                            "«{}» es un enlace simbólico: Lodestar no sigue symlinks, así que el \
-                             documento no entra en el inventario",
-                            rp.as_str()
-                        ),
-                        vec![rp.clone()],
-                    );
-                    // No es documento, pero la ruta existe: un enlace a ella no «falta».
-                    other_files.insert(rp);
-                    diag
-                }
-                Err(diag) => diag,
-            });
-            continue;
-        }
-        if !file_type.is_some_and(|t| t.is_file()) {
-            // FIFOs, sockets…: no son documentos, pero existen.
-            if let Ok(rp) = rel_path_from(rel) {
-                other_files.insert(rp);
-            }
-            continue;
-        }
-
-        let rp = match rel_path_from(rel) {
-            Ok(rp) => rp,
-            Err(diag) => {
-                diagnostics.push(diag);
-                continue;
-            }
-        };
-
-        // Tamaño ANTES de leer (por eso no se usa `WalkBuilder::max_filesize`, que además
-        // descartaría el fichero en silencio): un volcado de 5 GB no se carga en memoria para
-        // luego rechazarlo.
-        let size = entry.metadata().map(|m| m.len()).ok();
-        if size.is_some_and(|n| n > policy.max_document_bytes as u64) {
-            diagnostics.push(demasiado_grande(&rp, size, policy.max_document_bytes));
-            // Fuera del inventario, pero en disco: `WorkspaceFile`, no `Missing`.
-            other_files.insert(rp);
-            continue;
-        }
-        let bytes = match std::fs::read(path) {
-            Ok(b) => b,
-            Err(e) => {
-                eprintln!(
-                    "lodestar: aviso: se salta {} (ilegible): {e}",
-                    path.display()
-                );
-                other_files.insert(rp);
-                continue;
-            }
-        };
-        // Red de seguridad para cuando `metadata()` no dio tamaño.
-        if bytes.len() > policy.max_document_bytes {
-            diagnostics.push(demasiado_grande(
-                &rp,
-                Some(bytes.len() as u64),
-                policy.max_document_bytes,
-            ));
-            other_files.insert(rp);
-            continue;
-        }
-        match String::from_utf8(bytes) {
+    let mut other_files = inventory.other_files;
+    let mut diagnostics = inventory.diagnostics;
+    for path in inventory.documents {
+        let full = root.join(path.as_str());
+        match std::fs::read_to_string(&full) {
             Ok(content) => {
-                files.insert(rp, content);
+                files.insert(path, content);
             }
-            Err(e) => {
-                let pos = e.utf8_error().valid_up_to();
+            Err(error) if error.kind() == std::io::ErrorKind::InvalidData => {
                 diagnostics.push(Check::new(
                     Severity::Warn,
                     CheckCode::DocNotUtf8,
-                    format!(
-                        "«{}» no es UTF-8 válido (primer byte inválido en el offset {pos}): el \
-                         documento no entra en el inventario",
-                        rp.as_str()
-                    ),
-                    vec![rp.clone()],
+                    format!("«{}» no es UTF-8 válido", path.as_str()),
+                    vec![path.clone()],
                 ));
-                other_files.insert(rp);
+                other_files.insert(path);
+            }
+            Err(error) => {
+                eprintln!(
+                    "lodestar: aviso: se salta {} (ilegible): {error}",
+                    full.display()
+                );
+                other_files.insert(path);
             }
         }
     }
-
-    // Colisiones de capitalización: propiedad del inventario COMPLETO, no de un fichero suelto.
     diagnostics.extend(case_collisions(&files));
-    // Inventario vacío: propiedad del descubrimiento ENTERO (E29-H06).
     if files.is_empty() {
-        diagnostics.push(inventario_vacio(root, &other_files));
+        diagnostics.push(Check::new(
+            Severity::Warn,
+            CheckCode::WorkspaceEmpty,
+            workspace_empty_message(root, &other_files),
+            Vec::new(),
+        ));
     }
-    diagnostics.sort_by(|a, b| clave_orden(a).cmp(&clave_orden(b)));
-
+    diagnostics.sort_by(|left, right| {
+        left.code
+            .as_str()
+            .cmp(right.code.as_str())
+            .then_with(|| left.msg.cmp(&right.msg))
+    });
     Ok(Discovered {
         files,
         other_files,
         diagnostics,
     })
+}
+
+fn workspace_empty_message(root: &Path, other_files: &BTreeSet<RelPath>) -> String {
+    let markdown_discarded: Vec<&RelPath> = other_files
+        .iter()
+        .filter(|path| path.is_markdown())
+        .collect();
+    let cause = if markdown_discarded.is_empty() {
+        "no hay ningún fichero «.md» bajo esa raíz, o la política de descubrimiento \
+         (`discovery.include`/`exclude`, `.gitignore`, `.lodestarignore`) los descarta antes de \
+         visitarlos: comprueba que es el directorio que creías"
+            .to_string()
+    } else {
+        let listed: Vec<&str> = markdown_discarded
+            .iter()
+            .take(3)
+            .map(|p| p.as_str())
+            .collect();
+        format!(
+            "hay {} fichero(s) «.md» bajo esa raíz ({}{}) pero la política de descubrimiento \
+             (`discovery.include`/`exclude`) los deja a TODOS fuera del inventario",
+            markdown_discarded.len(),
+            listed.join(", "),
+            if markdown_discarded.len() > listed.len() {
+                ", …"
+            } else {
+                ""
+            }
+        )
+    };
+    format!(
+        "el workspace «{}» no tiene NINGÚN documento en el inventario: {cause}",
+        root.display()
+    )
 }
 
 impl Workspace {
@@ -555,8 +380,12 @@ fn excluido_por_ficheros_de_ignore(
 /// Se emite **un** diagnóstico por grupo de rutas equivalentes (no uno por fichero), nombrando a
 /// todas las implicadas en `targets`.
 pub fn case_collisions(files: &FileMap) -> Vec<Check> {
+    case_collisions_paths(&files.keys().cloned().collect::<Vec<_>>())
+}
+
+fn case_collisions_paths(paths: &[RelPath]) -> Vec<Check> {
     let mut grupos: BTreeMap<String, Vec<RelPath>> = BTreeMap::new();
-    for path in files.keys() {
+    for path in paths {
         grupos
             .entry(path.as_str().to_lowercase())
             .or_default()
@@ -580,61 +409,6 @@ pub fn case_collisions(files: &FileMap) -> Vec<Check> {
             )
         })
         .collect()
-}
-
-/// Diagnóstico de **inventario vacío** (`WORKSPACE-EMPTY`, E29-H06, `decisiones §16(f)`).
-///
-/// Ni un solo documento sobrevivió al descubrimiento bajo `root`. Es un **aviso**, no un error: un
-/// repo legítimamente vacío sigue siendo un workspace válido (`§20.1` — cualquier directorio lo es,
-/// y esta historia **no** reintroduce ningún gate al abrir). Lo que arregla es la ambigüedad: hasta
-/// v0.5.0 un `cd` al directorio equivocado respondía «todo en orden», indistinguible de un
-/// workspace vacío de verdad.
-///
-/// Va **sin `targets`**, como `PATH-NOT-UTF8`: no describe un fichero sino la ausencia de todos, y
-/// la raíz no tiene [`RelPath`] que la represente (invariante #6: `RelPath::new("")` es `Err` por
-/// diseño). Quien lo indexa por documento decide su clave — ver `App::full_analysis`.
-///
-/// El mensaje nombra la **raíz** sobre la que se descubrió y distingue las dos causas probables:
-/// no hay ningún `.md` bajo esa raíz, o los hay pero el descubrimiento los descarta a todos. La
-/// segunda se detecta por los `.md` que el walker **visitó** y acabaron en `other_files` (los que
-/// no pasan `include`); los podados antes de visitarse (`exclude`/`.gitignore`/`.lodestarignore`)
-/// no dejan rastro, así que el mensaje genérico menciona igualmente la política de descubrimiento
-/// como sospechosa.
-fn inventario_vacio(root: &Path, other_files: &BTreeSet<RelPath>) -> Check {
-    let markdown_descartado: Vec<&RelPath> =
-        other_files.iter().filter(|p| p.is_markdown()).collect();
-    let causa = if markdown_descartado.is_empty() {
-        "no hay ningún fichero «.md» bajo esa raíz, o la política de descubrimiento \
-         (`discovery.include`/`exclude`, `.gitignore`, `.lodestarignore`) los descarta antes de \
-         visitarlos: comprueba que es el directorio que creías"
-            .to_string()
-    } else {
-        let listado: Vec<&str> = markdown_descartado
-            .iter()
-            .take(3)
-            .map(|p| p.as_str())
-            .collect();
-        format!(
-            "hay {} fichero(s) «.md» bajo esa raíz ({}{}) pero la política de descubrimiento \
-             (`discovery.include`/`exclude`) los deja a TODOS fuera del inventario",
-            markdown_descartado.len(),
-            listado.join(", "),
-            if markdown_descartado.len() > listado.len() {
-                ", …"
-            } else {
-                ""
-            }
-        )
-    };
-    Check::new(
-        Severity::Warn,
-        CheckCode::WorkspaceEmpty,
-        format!(
-            "el workspace «{}» no tiene NINGÚN documento en el inventario: {causa}",
-            root.display()
-        ),
-        Vec::new(),
-    )
 }
 
 /// Convierte una ruta **relativa a la raíz** del sistema de ficheros en un [`RelPath`].
@@ -691,34 +465,6 @@ pub fn rel_path_from(rel: &Path) -> Result<RelPath, Check> {
             "no es una ruta relativa válida del workspace ({e})"
         ))
     })
-}
-
-/// El `Check` de `DOC-TOO-LARGE` para `rp`, con el tamaño observado si se conoce.
-fn demasiado_grande(rp: &RelPath, size: Option<u64>, limite: usize) -> Check {
-    let observado = match size {
-        Some(n) => format!("{n} bytes"),
-        None => "tamaño desconocido".to_string(),
-    };
-    Check::new(
-        Severity::Warn,
-        CheckCode::DocTooLarge,
-        format!(
-            "«{}» supera el tamaño máximo por documento ({observado} > {limite}): el documento no \
-             entra en el inventario",
-            rp.as_str()
-        ),
-        vec![rp.clone()],
-    )
-}
-
-/// Clave de orden total de un diagnóstico (código, rutas, mensaje) — hace determinista la salida
-/// aunque el recorrido del sistema de ficheros no lo sea.
-fn clave_orden(c: &Check) -> (&'static str, Vec<&str>, &str) {
-    (
-        c.code.as_str(),
-        c.targets.iter().map(|t| t.as_str()).collect(),
-        c.msg.as_str(),
-    )
 }
 
 /// El error de un glob inválido de la política, con el glob culpable en el mensaje.

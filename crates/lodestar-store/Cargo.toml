@@ -13,12 +13,14 @@ categories = ["database", "caching"]
 
 [dependencies]
 lodestar-core = { workspace = true }
+lodestar-discovery = { workspace = true }
 blake3 = { workspace = true }
 thiserror = { workspace = true }
 serde_json = { workspace = true }
+serde = { workspace = true }
 serde_yaml = { workspace = true }
 ignore = { workspace = true }
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.32", features = ["bundled", "hooks"] }
 notify = { version = "6", features = ["macos_kqueue"] }
 notify-debouncer-full = "0.3"
 crossbeam-channel = "0.5"
@@ -29,3 +31,9 @@ tempfile = "=3.24.0"
 
 [lints]
 workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_ProcessStatus", "Win32_System_Threading"] }

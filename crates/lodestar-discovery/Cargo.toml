@@ -1,0 +1,25 @@
+[package]
+name = "lodestar-discovery"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+rust-version.workspace = true
+description = "Inventario compacto y política canónica de descubrimiento de workspaces Markdown."
+keywords = ["okf", "knowledge-base", "markdown", "discovery", "filesystem"]
+categories = ["filesystem", "text-processing"]
+
+[dependencies]
+lodestar-core = { workspace = true }
+ignore = { workspace = true }
+serde = { workspace = true }
+serde_yaml = { workspace = true }
+thiserror = { workspace = true }
+
+[lints]
+workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem"] }

@@ -265,15 +265,20 @@ impl Workspace {
         if self.cache.is_some() {
             return Ok(());
         }
-        // El `.gitignore` se ajusta ANTES de crear la cache (nunca se versiona un `index.db` a
-        // medio nacer) — ver `gitignore::ensure_gitignore`: texto plano, sin git. Desde E23-H12 lo
-        // hace este método, no `Workspace::open`: abrir para leer no puede tocar el proyecto.
+        // El `.gitignore` gestionado forma parte del estado estable que observa la policy efectiva
+        // (en particular `include: ["**/*"]`); por eso se materializa antes del snapshot canónico.
         self.ensure_managed_gitignore();
+        // Store materializa el plano de control derivado (`.lodestar/`). Debe existir antes de
+        // capturar el fingerprint raíz: crearlo después haría que Lodestar invalidase su propio
+        // inventario en el primer `reindex` de un workspace sin cache.
         let store = Arc::new(Store::open(&self.root)?);
+        let discovered =
+            lodestar_discovery::discover_inventory(&self.root, &self.discovery_policy())
+                .map_err(|error| WorkspaceError::Io(error.to_string()))?;
         // Watcher ANTES del rebuild: un guardado externo durante el rebuild inicial genera
         // evento y se reconcilia; al revés quedaba una ventana ciega hasta el siguiente evento.
         let watcher = store.watch()?;
-        store.rebuild()?;
+        store.rebuild_from_discovered_inventory(&discovered)?;
         self.cache = Some(store);
         self._watcher = Some(watcher);
         Ok(())

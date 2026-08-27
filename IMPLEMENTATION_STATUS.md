@@ -116,6 +116,37 @@ configuración pública, no implementa rebuild streaming/watcher dirigido y mant
 abierta. El objetivo `≤ 2,5×` no es un gate ni una promesa externa; la revisión fresca y el gate
 completo de entrega se registran por separado cuando correspondan.
 
+### E35-H03 — rebuild SQLite streaming, insert-only y atómico (issue #55; implementada)
+
+✅ **Implementada y verificada el 2026-08-26.** `Workspace::enable_cache` reutiliza la
+`DiscoveryPolicy` mediante un inventario compacto de candidatos, assets y directorios recorridos
+que no abre cuerpos. La segunda pasada lee cada candidato una vez: los UTF-8 válidos se parsean una
+vez y reutilizan el mismo `Parsed`; los inválidos pasan a `other_files` con `DOC-NOT-UTF8`. Los
+enlaces a candidatos posteriores se reatan al promocionarlos, con semántica de `LinkTarget` y una
+actualización `O(log N)` del inventario. Los
+fingerprints de raíz —incluido el destino real si es symlink—, entradas y directorios nacen en
+discovery y se verifican allí, al entrar en Store, tras el streaming y justo antes del swap. El
+store lee/proyecta un documento por vez, sin un tercer walker, y cualquier alta, baja, rename o
+mutación detectada durante la segunda pasada aborta sin publicar. Construye
+`.lodestar/index.db.next` sin deletes por
+documento y reutiliza statements preparados. La generación se valida, sincroniza y publica por
+rename atómico; el activo anterior sirve lecturas hasta el swap y open/rebuild/upsert/remove/
+reconcile comparten mutex local y lock nativo interproceso RAII. Un authorizer SQLite deniega los
+deletes lógicos y reconcilia los diez prepares reales, con una excepción acotada al mantenimiento
+shadow interno de FTS5 durante su INSERT auditado/commit. La telemetría separa
+`max_live_body_bytes` del RSS específico del rebuild y reporta inventory/index/validate/swap.
+
+La evidencia está en los tests E35-H03 de `lodestar-store`, `lodestar-workspace` y
+`lodestar-bench`, incluida concurrencia, y en el [resumen de la matriz Realista opt-in
+1k/10k/100k](docs/qa/e35-h03-rebuild-streaming-2026-08-26.md). En la verificación de implementación
+sobre `macos/aarch64` (no una corrida de release),
+100k observó `13,584 s` y `136.445.952 bytes` de high-water mark del worker aislado, capturado justo
+después del rebuild y antes de queries; el informe conserva aparte el RSS actual muestreado por cada
+fase. La corrida por release deberá repetirse y publicar la retención exigida por §22. Los objetivos
+de 60 s y 512 MiB siguen con `gate=false`. No hay delta en
+`contracts/mcp.yml`, no se conecta SQLite al camino normal de App/MCP y `decisiones §14` permanece
+abierta.
+
 ### E33-H04 — banco de rendimiento (2026-08-22)
 
 ✅ Completado. La corrida oficial está identificada en el [manifiesto de evidencia v0.6.2](docs/qa/corridas/v0.6.2/manifest.json),
@@ -307,9 +338,9 @@ del usuario:
 
 1. **`decisiones §14`** — el store (épica E18) no tiene consumidor: ninguna tool lee de SQLite y
    `document_set()` reparsea la base entera en cada llamada. Decidir si se conecta, se acota o se
-   retira. Va con la deuda hermana: el walker del store **no aplica la `DiscoveryPolicy`**, así que
-   la paridad core↔store solo se sostiene bajo política por defecto — inocua mientras nadie lea el
-   store, bug real en cuanto se conecte.
+   retira. La deuda hermana que acompañaba esta entrada —el walker del store sin
+   `DiscoveryPolicy`— quedó **saldada en E35-H03** mediante `lodestar-discovery`; la decisión de
+   conectar, acotar o retirar el store permanece abierta.
 2. ~~`decisiones §12` (fechas) y `§13` (`Conformant → Valid`)~~ — **cerradas en E23-H14**: las
    fechas se declaran lexicográficas por escrito, y el catálogo de errores se abrió la única vez
    para completar la pareja de `§20.3`.
@@ -1957,8 +1988,9 @@ por lectura y el rebuild separado; no extrapola ese juicio humano a 10k ni decid
 
 **E33-H08 (2026-08-22)**: el paquete [`docs/qa/evidencia-14-store-2026-08.md`](docs/qa/evidencia-14-store-2026-08.md)
 deja `decisiones §14` **lista para decidir**, sin tomar ninguna de sus tres salidas. La tabla es
-trazable a H04/H05/H06 y el inventario verifica contra el árbol actual el walker sin
-`DiscoveryPolicy`, la divergencia de `field_path`, los llamadores de cache y el watcher. Explicita
+trazable a H04/H05/H06 y el inventario verificó entonces el walker sin `DiscoveryPolicy`, deuda
+posteriormente saldada por E35-H03, además de la divergencia de `field_path`, los llamadores de cache
+y el watcher. Explicita
 las preguntas de conectar/acotar/retirar y, si se conecta, SQLite/RAM/ambas. La ficha §14 conserva
 `estado: abierta` y `prioridad: 5`; §9 sigue abierta y mantiene pendiente el BDD remoto de H07,
 además de firma y threat model. No hay delta de contrato ni decisión de producto.
