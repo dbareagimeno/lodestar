@@ -47,6 +47,8 @@ igual que CI.
 
 ## Integración
 
-Todo desarrollo se basa en `develop`. `main` recibe únicamente releases según `RELEASING.md`.
-Rama, commit, push y PR se realizan solo cuando el usuario los solicita; la garantía principal es
-un diff completo, verde y revisado.
+Todo desarrollo se basa en `develop`; cada historia usa un worktree y una rama nuevos creados tras
+actualizar esa base. `main` recibe únicamente releases según `RELEASING.md`. Commit, push y PR se
+realizan solo cuando el usuario los solicita. Cuando ya existe una ejecución remota, la historia no
+se cierra hasta que el CI del SHA vigente queda verde; cada rojo se repara y su causa se añade al
+registro inmutable `qa/ci-failures.jsonl`.

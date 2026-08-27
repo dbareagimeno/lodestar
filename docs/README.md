@@ -32,6 +32,10 @@ El criterio de este directorio es **vigente / superseded**, no viejo/nuevo
   `history/` porque **gobierna**: ~50 ficheros del repo la citan.
 - [`WORKFLOWS.md`](WORKFLOWS.md) — cómo se desarrolla en este repo (SDD, TDD,
   jueces ciegos) y por qué.
+  - [`CODEX_WORKFLOW.md`](CODEX_WORKFLOW.md) — runbook operativo completo: worktree por historia,
+    rojo/verde, gates, revisión y seguimiento de CI hasta verde.
+  - [`qa/ci-failures.jsonl`](qa/ci-failures.jsonl) — registro append-only de causas raíz de rojos
+    CI y acciones preventivas para agentes, skills y gates.
 
 ## Arqueología (superseded)
 
