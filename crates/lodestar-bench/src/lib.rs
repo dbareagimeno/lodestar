@@ -1091,6 +1091,7 @@ fn variant_row_with_cold_iterations(
                 sqlite_timing_log(&format!("consume:rebuild:{}", rebuild_elapsed.as_nanos()));
             }
             rebuild_samples.push((rebuild_elapsed, json!(true)));
+            drop(initial_store);
             for index in 1..=iterations {
                 for tool in TOOLS {
                     await_test_barrier(&format!("{variant}-{tool}-{index}"));
