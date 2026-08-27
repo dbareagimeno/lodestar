@@ -16,10 +16,11 @@ use std::sync::OnceLock;
 use rusqlite::{ffi, Connection, OpenFlags};
 use windows_sys::Win32::Foundation::{
     CloseHandle, ERROR_ALREADY_EXISTS, ERROR_FILE_EXISTS, ERROR_FILE_NOT_FOUND,
-    ERROR_PATH_NOT_FOUND, GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE,
+    ERROR_INVALID_FUNCTION, ERROR_NOT_SUPPORTED, ERROR_PATH_NOT_FOUND, GENERIC_READ, GENERIC_WRITE,
+    HANDLE, INVALID_HANDLE_VALUE,
 };
 use windows_sys::Win32::Storage::FileSystem::{
-    CreateFileW, FileDispositionInfoEx, FileRenameInfo, LockFileEx, ReOpenFile,
+    CreateFileW, CreateHardLinkW, FileDispositionInfoEx, FileRenameInfo, LockFileEx, ReOpenFile,
     SetFileInformationByHandle, DELETE, FILE_ATTRIBUTE_NORMAL, FILE_DISPOSITION_FLAG_DELETE,
     FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE, FILE_DISPOSITION_FLAG_POSIX_SEMANTICS,
     FILE_DISPOSITION_INFO_EX, FILE_FLAG_OPEN_REPARSE_POINT, FILE_RENAME_INFO, FILE_SHARE_DELETE,
@@ -108,7 +109,7 @@ impl Drop for OwnedHandle {
 struct StagedSidecar {
     original: PathBuf,
     tombstone: PathBuf,
-    handle: OwnedHandle,
+    renamed_handle: Option<OwnedHandle>,
 }
 
 /// Holds DELETE access to the active main file and stages both sidecars under reversible names.
@@ -124,22 +125,9 @@ impl PublicationGuard {
     pub(crate) fn commit(mut self) {
         self.committed = true;
         for staged in &self.sidecars {
-            let disposition = FILE_DISPOSITION_INFO_EX {
-                Flags: FILE_DISPOSITION_FLAG_DELETE
-                    | FILE_DISPOSITION_FLAG_POSIX_SEMANTICS
-                    | FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE,
-            };
             // Publication already committed. A driver without POSIX disposition may leave only a
             // uniquely named, unreachable tombstone; it can never alias a later active sidecar.
-            let _ = unsafe {
-                SetFileInformationByHandle(
-                    staged.handle.0,
-                    FileDispositionInfoEx,
-                    (&disposition as *const FILE_DISPOSITION_INFO_EX).cast(),
-                    std::mem::size_of::<FILE_DISPOSITION_INFO_EX>() as u32,
-                )
-            };
-            let _ = std::fs::remove_file(&staged.tombstone);
+            let _ = remove_sidecar(&staged.tombstone);
         }
     }
 }
@@ -150,7 +138,11 @@ impl Drop for PublicationGuard {
             return;
         }
         for staged in self.sidecars.iter().rev() {
-            let _ = rename_handle_to(&staged.original, staged.handle.0);
+            if let Some(handle) = &staged.renamed_handle {
+                let _ = rename_handle_to(&staged.original, handle.0);
+            } else if create_hard_link(&staged.original, &staged.tombstone).is_ok() {
+                let _ = remove_sidecar(&staged.tombstone);
+            }
         }
     }
 }
@@ -180,11 +172,11 @@ pub(crate) fn prepare_publication(
         committed: false,
     };
     for (index, (original, handle)) in pending.into_iter().enumerate() {
-        let tombstone = rename_sidecar_tombstone(&original, handle.0)?;
+        let (tombstone, renamed_handle) = stage_sidecar_tombstone(&original, handle)?;
         guard.sidecars.push(StagedSidecar {
             original,
             tombstone,
-            handle,
+            renamed_handle,
         });
         if inject_after_first && index == 0 {
             let cache = db.parent().ok_or_else(|| {
@@ -215,6 +207,92 @@ pub(crate) fn prepare_publication(
         }
     }
     Ok(guard)
+}
+
+/// Gives the old sidecar a private hard-link name before removing its active name. Unlike rename,
+/// POSIX disposition is documented to unlink the name immediately even while the SHM remains
+/// mapped. The private link keeps the bytes reachable for rollback; stale SQLite handles keep
+/// using the same file object until they close.
+fn stage_sidecar_tombstone(
+    path: &Path,
+    handle: OwnedHandle,
+) -> std::io::Result<(PathBuf, Option<OwnedHandle>)> {
+    let file_name = path.file_name().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "sidecar path has no file name",
+        )
+    })?;
+    for _ in 0..16 {
+        let tombstone = next_tombstone(path, file_name);
+        match create_hard_link(&tombstone, path) {
+            Ok(()) => {
+                if let Err(error) = dispose_handle(handle.0) {
+                    drop(handle);
+                    let _ = remove_sidecar(&tombstone);
+                    return Err(error);
+                }
+                // POSIX disposition removes the opened link when this handle closes. The private
+                // hard link and any stale SQLite mappings continue to reference the same bytes.
+                drop(handle);
+                return Ok((tombstone, None));
+            }
+            Err(error) => match error.raw_os_error() {
+                Some(code)
+                    if code == ERROR_ALREADY_EXISTS as i32 || code == ERROR_FILE_EXISTS as i32 =>
+                {
+                    continue;
+                }
+                Some(code)
+                    if code == ERROR_INVALID_FUNCTION as i32
+                        || code == ERROR_NOT_SUPPORTED as i32 =>
+                {
+                    // FAT/exFAT do not support hard links. Once the active connection has been
+                    // checkpointed and closed, the classic same-directory rename remains
+                    // reversible and retains compatibility with those filesystems.
+                    let tombstone = rename_sidecar_tombstone(path, handle.0)?;
+                    return Ok((tombstone, Some(handle)));
+                }
+                _ => return Err(error),
+            },
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        "no unique stale sidecar tombstone name available",
+    ))
+}
+
+fn create_hard_link(link: &Path, existing: &Path) -> std::io::Result<()> {
+    let link = wide_path(link);
+    let existing = wide_path(existing);
+    let created = unsafe { CreateHardLinkW(link.as_ptr(), existing.as_ptr(), ptr::null()) };
+    if created == 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+fn dispose_handle(handle: HANDLE) -> std::io::Result<()> {
+    let disposition = FILE_DISPOSITION_INFO_EX {
+        Flags: FILE_DISPOSITION_FLAG_DELETE
+            | FILE_DISPOSITION_FLAG_POSIX_SEMANTICS
+            | FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE,
+    };
+    let disposed = unsafe {
+        SetFileInformationByHandle(
+            handle,
+            FileDispositionInfoEx,
+            (&disposition as *const FILE_DISPOSITION_INFO_EX).cast(),
+            std::mem::size_of::<FILE_DISPOSITION_INFO_EX>() as u32,
+        )
+    };
+    if disposed == 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
 }
 
 fn open_delete_handle(path: &Path) -> std::io::Result<HANDLE> {
@@ -322,10 +400,7 @@ fn rename_sidecar_tombstone(path: &Path, handle: HANDLE) -> std::io::Result<Path
         )
     })?;
     for _ in 0..16 {
-        let sequence = STALE_SIDECAR_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-        let mut tombstone_name = file_name.to_os_string();
-        tombstone_name.push(format!(".lodestar-stale-{}-{sequence}", std::process::id()));
-        let tombstone = path.with_file_name(tombstone_name);
+        let tombstone = next_tombstone(path, file_name);
         let error = match rename_handle_to(&tombstone, handle) {
             Ok(()) => return Ok(tombstone),
             Err(error) => error,
@@ -343,6 +418,13 @@ fn rename_sidecar_tombstone(path: &Path, handle: HANDLE) -> std::io::Result<Path
         std::io::ErrorKind::AlreadyExists,
         "no unique stale sidecar tombstone name available",
     ))
+}
+
+fn next_tombstone(path: &Path, file_name: &std::ffi::OsStr) -> PathBuf {
+    let sequence = STALE_SIDECAR_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let mut tombstone_name = file_name.to_os_string();
+    tombstone_name.push(format!(".lodestar-stale-{}-{sequence}", std::process::id()));
+    path.with_file_name(tombstone_name)
 }
 
 fn rename_handle_to(target: &Path, handle: HANDLE) -> std::io::Result<()> {

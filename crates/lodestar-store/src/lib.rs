@@ -518,6 +518,17 @@ impl Store {
             *guard = old;
             return Err(StoreError::Io("injected sidecar cleanup failure".into()));
         }
+        // Sidecar retirement necessarily precedes the single-file swap. Make the old main file a
+        // complete, durable snapshot first, so a process death in that narrow interval can reopen
+        // it without depending on the retired WAL/SHM names.
+        if let Err(error) = checkpoint_active_generation(&old, &active) {
+            *guard = old;
+            return Err(error);
+        }
+        if let Err((old, error)) = old.close() {
+            *guard = old;
+            return Err(StoreError::Sqlite(error));
+        }
         #[cfg(windows)]
         let publication = match windows_vfs::prepare_publication(
             &active,
@@ -525,7 +536,13 @@ impl Store {
         ) {
             Ok(publication) => publication,
             Err(error) => {
-                *guard = old;
+                let restoration = activate_published_connection(&standby);
+                *guard = standby;
+                if let Err(restoration) = restoration {
+                    return Err(StoreError::Io(format!(
+                        "sidecar publication failed ({error}); restoring active connection failed ({restoration})"
+                    )));
+                }
                 return Err(StoreError::Io(error.to_string()));
             }
         };
@@ -533,15 +550,37 @@ impl Store {
         match remove_cache_sidecars(&active) {
             Ok(()) => {}
             Err(error) => {
-                *guard = old;
+                let restoration = activate_published_connection(&standby);
+                *guard = standby;
+                if let Err(restoration) = restoration {
+                    return Err(StoreError::Io(format!(
+                        "sidecar publication failed ({error}); restoring active connection failed ({restoration})"
+                    )));
+                }
                 return Err(error);
             }
         }
-        if let Err((old, error)) = old.close() {
-            #[cfg(windows)]
-            drop(publication);
-            *guard = old;
-            return Err(StoreError::Sqlite(error));
+        if failpoint_for(&self.root, "pause_after_sidecar_cleanup_before_swap") {
+            let cache_dir = self.root.join(CACHE_DIR);
+            let pause = cache_dir.join("h03-sidecars-retired-before-swap");
+            let release = cache_dir.join("h03-release-sidecars-retired-before-swap");
+            if let Err(error) = std::fs::write(&pause, b"paused\n") {
+                #[cfg(windows)]
+                drop(publication);
+                let restoration = activate_published_connection(&standby);
+                *guard = standby;
+                if let Err(restoration) = restoration {
+                    return Err(StoreError::Io(format!(
+                        "write post-sidecar marker failed ({error}); restoring active connection failed ({restoration})"
+                    )));
+                }
+                return Err(StoreError::Io(error.to_string()));
+            }
+            while !release.exists() {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            let _ = std::fs::remove_file(&pause);
+            let _ = std::fs::remove_file(&release);
         }
         if let Err(error) = replace_durable(next, &active) {
             #[cfg(windows)]
@@ -1527,6 +1566,19 @@ fn sync_generation(path: &Path) -> Result<(), StoreError> {
         .map_err(|error| StoreError::Io(error.to_string()))?;
     file.sync_all()
         .map_err(|error| StoreError::Io(error.to_string()))
+}
+
+fn checkpoint_active_generation(conn: &Connection, active: &Path) -> Result<(), StoreError> {
+    let (busy, frames, checkpointed): (i64, i64, i64) =
+        conn.query_row("PRAGMA wal_checkpoint(FULL)", [], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })?;
+    if busy != 0 || frames != checkpointed {
+        return Err(StoreError::Io(format!(
+            "active WAL checkpoint was incomplete (busy={busy}, frames={frames}, checkpointed={checkpointed})"
+        )));
+    }
+    sync_generation(active)
 }
 
 /// Replaces the active generation atomically on the same volume and makes the publication
