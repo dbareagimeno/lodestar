@@ -6,7 +6,7 @@
 use serde_json::{Map, Value};
 use std::collections::BTreeSet;
 use std::fs;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use tempfile::TempDir;
@@ -608,10 +608,22 @@ fn cada_muestra_respeta_la_adquisicion_de_su_variante() {
         .expect("spawn acquisition probe");
     let stdout = child.stdout.take().expect("probe stdout");
     let mut lines = BufReader::new(stdout).lines();
-    let ready = lines
-        .next()
-        .expect("BDD-A4: READY line")
-        .expect("BDD-A4: READY UTF-8");
+    let ready = match lines.next() {
+        Some(line) => line.expect("BDD-A4: READY UTF-8"),
+        None => {
+            drop(child.stdin.take());
+            let mut stderr = Vec::new();
+            child
+                .stderr
+                .take()
+                .expect("BDD-A4 stderr")
+                .read_to_end(&mut stderr)
+                .expect("BDD-A4 stderr read");
+            let status = child.wait().expect("BDD-A4 child wait before READY");
+            let stderr = String::from_utf8_lossy(&stderr);
+            panic!("BDD-A4: falta READY; el proceso terminó con status={status}; stderr={stderr}");
+        }
+    };
     let ready: Value = serde_json::from_str(&ready).expect("BDD-A4: READY JSON");
     assert_eq!(required(&ready, "event", "BDD-A4 READY"), "READY");
     fs::write(
