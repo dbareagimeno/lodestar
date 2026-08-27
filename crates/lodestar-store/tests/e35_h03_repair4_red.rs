@@ -4,10 +4,15 @@
 //! fichero no aporta seams de producción: FIFO, failpoints y trazas son únicamente mecanismos de
 //! observación del comportamiento ya expuesto por el store.
 
+#[cfg(unix)]
 use std::collections::BTreeSet;
 use std::path::Path;
-use std::sync::{mpsc, Arc, Mutex, OnceLock};
+#[cfg(unix)]
+use std::sync::{mpsc, Arc};
+use std::sync::{Mutex, OnceLock};
+#[cfg(unix)]
 use std::thread;
+#[cfg(unix)]
 use std::time::{Duration, Instant};
 
 #[cfg(unix)]
@@ -37,6 +42,7 @@ fn env_lock() -> &'static Mutex<()> {
     LOCK.get_or_init(|| Mutex::new(()))
 }
 
+#[cfg(unix)]
 fn wait_for_marker(path: &Path) -> bool {
     let deadline = Instant::now() + Duration::from_secs(2);
     while !path.exists() && Instant::now() < deadline {
@@ -201,6 +207,7 @@ fn c1_open_and_build_debe_recibir_inventario_de_policy_canonica() {
 /// El test reescribe un fichero regular con payload distinto pero del mismo tamaño, restaura el
 /// mtime capturado y libera la barrera. Solo una verificación de contenido/lectura protegida puede
 /// abortar la generación; el índice activo anterior debe quedar consultable.
+#[cfg(unix)]
 #[test]
 fn c6_toctou_mismo_tamano_mtime_restaurado_aborta_y_preserva_activo() {
     let _env = env_lock()
