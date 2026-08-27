@@ -1500,6 +1500,7 @@ fn matches_discovery_fingerprint(
         && current.ctime_ns == expected.ctime_ns
 }
 
+#[cfg(not(windows))]
 fn remove_cache_sidecars(db: &Path) -> Result<(), StoreError> {
     for suffix in ["-wal", "-shm"] {
         let mut os_path = db.as_os_str().to_os_string();
@@ -1516,11 +1517,6 @@ fn remove_cache_sidecars(db: &Path) -> Result<(), StoreError> {
 #[cfg(not(windows))]
 fn remove_published_sidecar(path: &Path) -> std::io::Result<()> {
     std::fs::remove_file(path)
-}
-
-#[cfg(windows)]
-fn remove_published_sidecar(path: &Path) -> std::io::Result<()> {
-    windows_vfs::remove_sidecar(path)
 }
 
 fn sync_generation(path: &Path) -> Result<(), StoreError> {
