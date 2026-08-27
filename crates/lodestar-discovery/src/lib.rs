@@ -408,7 +408,7 @@ fn windows_handle_fingerprint(
             std::ptr::null(),
             OPEN_EXISTING,
             flags,
-            0,
+            std::ptr::null_mut(),
         )
     };
     if handle == INVALID_HANDLE_VALUE {
