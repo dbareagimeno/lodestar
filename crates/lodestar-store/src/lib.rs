@@ -1610,7 +1610,12 @@ fn replace_durable(next: &Path, active: &Path) -> Result<(), StoreError> {
             )
         };
         if result == 0 {
-            return Err(StoreError::Io(std::io::Error::last_os_error().to_string()));
+            return Err(StoreError::Io(format!(
+                "MoveFileExW replace {} with {} failed: {}",
+                active.display(),
+                next.display(),
+                std::io::Error::last_os_error()
+            )));
         }
         Ok(())
     }

@@ -151,7 +151,10 @@ pub(crate) fn prepare_publication(
     db: &Path,
     inject_after_first: bool,
 ) -> std::io::Result<PublicationGuard> {
-    let main = OwnedHandle(open_delete_handle(db)?);
+    let main = OwnedHandle(
+        open_delete_handle(db)
+            .map_err(|error| operation_error("CreateFileW DELETE handle", db, error))?,
+    );
     let mut pending = Vec::new();
     // SHM is the file most likely to expose a non-cooperating mapped handle. Open every existing
     // target before mutating any name, so sharing violations fail without partial retirement.
@@ -162,7 +165,13 @@ pub(crate) fn prepare_publication(
         match open_delete_handle(&path) {
             Ok(handle) => pending.push((path, OwnedHandle(handle))),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error),
+            Err(error) => {
+                return Err(operation_error(
+                    "CreateFileW DELETE sidecar handle",
+                    &path,
+                    error,
+                ));
+            }
         }
     }
 
@@ -230,7 +239,11 @@ fn stage_sidecar_tombstone(
                 if let Err(error) = dispose_handle(handle.0) {
                     drop(handle);
                     let _ = remove_sidecar(&tombstone);
-                    return Err(error);
+                    return Err(operation_error(
+                        "FileDispositionInfoEx POSIX unlink",
+                        path,
+                        error,
+                    ));
                 }
                 // POSIX disposition removes the opened link when this handle closes. The private
                 // hard link and any stale SQLite mappings continue to reference the same bytes.
@@ -250,10 +263,12 @@ fn stage_sidecar_tombstone(
                     // FAT/exFAT do not support hard links. Once the active connection has been
                     // checkpointed and closed, the classic same-directory rename remains
                     // reversible and retains compatibility with those filesystems.
-                    let tombstone = rename_sidecar_tombstone(path, handle.0)?;
+                    let tombstone = rename_sidecar_tombstone(path, handle.0).map_err(|error| {
+                        operation_error("FileRenameInfo fallback staging", path, error)
+                    })?;
                     return Ok((tombstone, Some(handle)));
                 }
-                _ => return Err(error),
+                _ => return Err(operation_error("CreateHardLinkW staging", path, error)),
             },
         }
     }
@@ -261,6 +276,13 @@ fn stage_sidecar_tombstone(
         std::io::ErrorKind::AlreadyExists,
         "no unique stale sidecar tombstone name available",
     ))
+}
+
+fn operation_error(operation: &str, path: &Path, error: std::io::Error) -> std::io::Error {
+    std::io::Error::new(
+        error.kind(),
+        format!("{operation} for {} failed: {error}", path.display()),
+    )
 }
 
 fn create_hard_link(link: &Path, existing: &Path) -> std::io::Result<()> {
