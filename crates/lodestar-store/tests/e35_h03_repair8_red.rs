@@ -5,6 +5,8 @@
 //! fingerprint del enlace, no el directorio al que apunta, por lo que una alta en el destino no
 //! invalida el snapshot y puede publicarse de forma silenciosa.
 
+#![cfg(unix)]
+
 use std::path::Path;
 use std::sync::{Mutex, OnceLock};
 use std::thread;

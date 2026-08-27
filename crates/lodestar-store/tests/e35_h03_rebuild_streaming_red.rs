@@ -3,10 +3,13 @@
 //! solo cambia después de verificar la generación completa.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
 #[cfg(unix)]
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
+#[cfg(unix)]
 use std::process::{Child, Command};
 use std::sync::{Mutex, OnceLock};
+#[cfg(unix)]
 use std::time::{Duration, Instant};
 
 #[cfg(unix)]
