@@ -8,6 +8,18 @@
 const STORE_SOURCE: &str = include_str!("../src/lib.rs");
 const WINDOWS_VFS_SOURCE: &str = include_str!("../src/windows_vfs.rs");
 
+struct NormalizedSources {
+    store: String,
+    windows_vfs: String,
+}
+
+fn normalized_sources() -> NormalizedSources {
+    NormalizedSources {
+        store: STORE_SOURCE.replace("\r\n", "\n"),
+        windows_vfs: WINDOWS_VFS_SOURCE.replace("\r\n", "\n"),
+    }
+}
+
 fn section<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
     let start_at = source
         .find(start)
@@ -293,16 +305,17 @@ fn assert_rejected(result: Result<(), String>, expected: &str) {
 /// y `PreparedCandidate` debe conservarlo aunque el rename consuma el handle.
 #[test]
 fn c5_c6_windows_prepared_candidate_conserva_file_id_del_handle_validado() {
-    candidate_identity_contract(WINDOWS_VFS_SOURCE)
+    let sources = normalized_sources();
+    candidate_identity_contract(&sources.windows_vfs)
         .unwrap_or_else(|error| panic!("rojo causal CI27: {error}"));
 
-    let wrong_object = WINDOWS_VFS_SOURCE.replacen(
+    let wrong_object = sources.windows_vfs.replacen(
         "let identity = file_identity(handle)",
         "let identity = file_identity(original)",
         1,
     );
     assert_ne!(
-        wrong_object, WINDOWS_VFS_SOURCE,
+        wrong_object, sources.windows_vfs,
         "guarda anti-vacuidad: debe existir la captura del FILE_ID candidato"
     );
     assert_rejected(
@@ -316,18 +329,19 @@ fn c5_c6_windows_prepared_candidate_conserva_file_id_del_handle_validado() {
 /// basta: ambos pueden seguir viendo la generación anterior, como demostró el rojo Windows CI27.
 #[test]
 fn c5_c6_post_rename_autentica_pathname_y_rootstate_contra_candidate_id() {
-    native_identity_probe_contract(WINDOWS_VFS_SOURCE)
+    let sources = normalized_sources();
+    native_identity_probe_contract(&sources.windows_vfs)
         .unwrap_or_else(|error| panic!("rojo causal CI28: {error}"));
-    published_identity_contract(STORE_SOURCE, WINDOWS_VFS_SOURCE)
+    published_identity_contract(&sources.store, &sources.windows_vfs)
         .unwrap_or_else(|error| panic!("rojo causal CI27: {error}"));
 
-    let pathname_as_connection = WINDOWS_VFS_SOURCE.replacen(
+    let pathname_as_connection = sources.windows_vfs.replacen(
         "file_identity(connection_main_handle(connection)?)",
         "path_identity(std::path::Path::new(\"index.db\"))",
         1,
     );
     assert_ne!(
-        pathname_as_connection, WINDOWS_VFS_SOURCE,
+        pathname_as_connection, sources.windows_vfs,
         "guarda anti-vacuidad: debe existir la derivación desde connection_main_handle"
     );
     assert_rejected(
@@ -335,17 +349,17 @@ fn c5_c6_post_rename_autentica_pathname_y_rootstate_contra_candidate_id() {
         "handle main nativo de esa Connection",
     );
 
-    let wrong_comparison = STORE_SOURCE.replacen(
+    let wrong_comparison = sources.store.replacen(
         "candidate_identity != root_state_identity",
         "pathname_identity != root_state_identity",
         1,
     );
     assert_ne!(
-        wrong_comparison, STORE_SOURCE,
+        wrong_comparison, sources.store,
         "guarda anti-vacuidad: debe existir la comparación candidate↔RootState"
     );
     assert_rejected(
-        published_identity_contract(&wrong_comparison, WINDOWS_VFS_SOURCE),
+        published_identity_contract(&wrong_comparison, &sources.windows_vfs),
         "candidate_identity != root_state_identity",
     );
 }
@@ -356,11 +370,12 @@ fn c5_c6_post_rename_autentica_pathname_y_rootstate_contra_candidate_id() {
 /// cerrarse después del rename durable y antes de cualquier autenticación del pathname.
 #[test]
 fn c5_windows_cierra_standby_antes_de_abrir_target_post_rename() {
-    post_rename_open_order_contract(STORE_SOURCE)
+    let sources = normalized_sources();
+    post_rename_open_order_contract(&sources.store)
         .unwrap_or_else(|error| panic!("rojo causal CI27: {error}"));
 
     let swap = section(
-        STORE_SOURCE,
+        &sources.store,
         "    fn swap_active(",
         "\n    #[cfg(windows)]\n    fn verify_published_document_count(",
     );
@@ -376,8 +391,8 @@ fn c5_windows_cierra_standby_antes_de_abrir_target_post_rename() {
         .expect("guarda anti-vacuidad: cierre ordenado de standby");
     let without_ordered_drop = format!(
         "{}{}",
-        &STORE_SOURCE[..STORE_SOURCE.find(swap).unwrap() + drop_at],
-        &STORE_SOURCE[STORE_SOURCE.find(swap).unwrap() + drop_at + "drop(standby);".len()..]
+        &sources.store[..sources.store.find(swap).unwrap() + drop_at],
+        &sources.store[sources.store.find(swap).unwrap() + drop_at + "drop(standby);".len()..]
     );
     assert_rejected(
         post_rename_open_order_contract(&without_ordered_drop),
@@ -391,16 +406,19 @@ fn c5_windows_cierra_standby_antes_de_abrir_target_post_rename() {
 /// causal y no otro retry ciego.
 #[test]
 fn c6_mismatch_post_swap_diagnostica_file_ids_y_sidecars_wal_shm() {
-    sidecar_diagnostic_contract(STORE_SOURCE, WINDOWS_VFS_SOURCE)
+    let sources = normalized_sources();
+    sidecar_diagnostic_contract(&sources.store, &sources.windows_vfs)
         .unwrap_or_else(|error| panic!("rojo causal CI27: {error}"));
 
-    let without_shm = WINDOWS_VFS_SOURCE.replacen("[\"-wal\", \"-shm\"]", "[\"-wal\"]", 1);
+    let without_shm = sources
+        .windows_vfs
+        .replacen("[\"-wal\", \"-shm\"]", "[\"-wal\"]", 1);
     assert_ne!(
-        without_shm, WINDOWS_VFS_SOURCE,
+        without_shm, sources.windows_vfs,
         "guarda anti-vacuidad: el diagnóstico debe declarar WAL y SHM"
     );
     assert_rejected(
-        sidecar_diagnostic_contract(STORE_SOURCE, &without_shm),
+        sidecar_diagnostic_contract(&sources.store, &without_shm),
         "[\"-wal\", \"-shm\"]",
     );
 }

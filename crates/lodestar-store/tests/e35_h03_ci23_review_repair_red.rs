@@ -9,6 +9,20 @@ const STORE_SOURCE: &str = include_str!("../src/lib.rs");
 const SCHEMA_SOURCE: &str = include_str!("../src/schema.rs");
 const WINDOWS_VFS_SOURCE: &str = include_str!("../src/windows_vfs.rs");
 
+struct NormalizedSources {
+    store: String,
+    schema: String,
+    windows_vfs: String,
+}
+
+fn normalized_sources() -> NormalizedSources {
+    NormalizedSources {
+        store: STORE_SOURCE.replace("\r\n", "\n"),
+        schema: SCHEMA_SOURCE.replace("\r\n", "\n"),
+        windows_vfs: WINDOWS_VFS_SOURCE.replace("\r\n", "\n"),
+    }
+}
+
 fn section<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
     let start_at = source
         .find(start)
@@ -230,13 +244,14 @@ fn assert_contract_rejected(result: Result<(), String>, expected_reason: &str) {
 /// writer from changing the validated candidate before publication.
 #[test]
 fn c5_c6_windows_publica_el_mismo_handle_validado_sin_reabrir_next_por_path() {
+    let sources = normalized_sources();
     let rebuild = section(
-        STORE_SOURCE,
+        &sources.store,
         "fn rebuild_from_inventory_with_duration(",
         "\n    fn swap_active(",
     );
     let validation = section(
-        SCHEMA_SOURCE,
+        &sources.schema,
         "pub(crate) fn validate_database(",
         "\npub(crate) fn read_user_version(",
     );
@@ -252,8 +267,8 @@ fn c5_c6_windows_publica_el_mismo_handle_validado_sin_reabrir_next_por_path() {
     );
 
     assert!(
-        SCHEMA_SOURCE.contains("open_validation_connection")
-            && SCHEMA_SOURCE.contains("OpenFlags::SQLITE_OPEN_READ_ONLY"),
+        sources.schema.contains("open_validation_connection")
+            && sources.schema.contains("OpenFlags::SQLITE_OPEN_READ_ONLY"),
         "C5/C6: the validation Connection must be opened explicitly read-only"
     );
     assert!(
@@ -261,18 +276,18 @@ fn c5_c6_windows_publica_el_mismo_handle_validado_sin_reabrir_next_por_path() {
         "C5/C6: integrity and FK validation must consume the caller's live &Connection"
     );
     assert!(
-        WINDOWS_VFS_SOURCE.contains("SQLITE_FCNTL_FILE_POINTER")
-            && WINDOWS_VFS_SOURCE.contains("sqlite3_file_control"),
+        sources.windows_vfs.contains("SQLITE_FCNTL_FILE_POINTER")
+            && sources.windows_vfs.contains("sqlite3_file_control"),
         "C5/C6 Windows: publication must derive its pinned native handle from the sqlite3_file owned by the validation Connection"
     );
 
     let prepared = section(
-        WINDOWS_VFS_SOURCE,
+        &sources.windows_vfs,
         "pub(crate) struct PreparedCandidate",
         "pub(crate) fn replace_durable",
     );
     let preparation = section(
-        WINDOWS_VFS_SOURCE,
+        &sources.windows_vfs,
         "pub(crate) fn prepare_candidate(connection: &Connection)",
         "\nimpl PreparedCandidate",
     );
@@ -339,7 +354,7 @@ fn c5_c6_windows_publica_el_mismo_handle_validado_sin_reabrir_next_por_path() {
     );
 
     let swap = section(
-        STORE_SOURCE,
+        &sources.store,
         "    fn swap_active(",
         "\n    /// Reabre la conexión compartida",
     );
@@ -350,7 +365,7 @@ fn c5_c6_windows_publica_el_mismo_handle_validado_sin_reabrir_next_por_path() {
     );
 
     let replace = section(
-        WINDOWS_VFS_SOURCE,
+        &sources.windows_vfs,
         "pub(crate) fn replace_durable",
         "\n/// Rust 1.80",
     );
@@ -375,8 +390,9 @@ fn c5_c6_windows_publica_el_mismo_handle_validado_sin_reabrir_next_por_path() {
 /// oráculo aunque conserve todos los nombres de API esperados.
 #[test]
 fn c5_c6_guardas_contrafactuales_rechazan_handle_reabierto_o_poseido_incorrecto() {
+    let sources = normalized_sources();
     let preparation = section(
-        WINDOWS_VFS_SOURCE,
+        &sources.windows_vfs,
         "pub(crate) fn prepare_candidate(connection: &Connection)",
         "\nimpl PreparedCandidate",
     );
@@ -496,8 +512,9 @@ fn c5_c6_guardas_contrafactuales_rechazan_handle_reabierto_o_poseido_incorrecto(
 /// reemplaza `original`: `ReOpenFile` debe consumir sin sombreado el handle del sqlite3_file.
 #[test]
 fn c5_c6_contrafactual_rechaza_sombrear_original_antes_de_reopenfile() {
+    let sources = normalized_sources();
     let preparation = section(
-        WINDOWS_VFS_SOURCE,
+        &sources.windows_vfs,
         "pub(crate) fn prepare_candidate(connection: &Connection)",
         "\nimpl PreparedCandidate",
     );
@@ -530,8 +547,9 @@ fn c5_c6_contrafactual_rechaza_sombrear_original_antes_de_reopenfile() {
 /// mutation and no alternate corridor after success.
 #[test]
 fn c5_c6_windows_publica_destino_nt_absoluto_en_un_unico_syscall() {
+    let sources = normalized_sources();
     let rename = section(
-        WINDOWS_VFS_SOURCE,
+        &sources.windows_vfs,
         "fn rename_handle_to(",
         "\nfn wide_path(path: &Path)",
     );
@@ -549,8 +567,12 @@ fn c5_c6_windows_publica_destino_nt_absoluto_en_un_unico_syscall() {
     );
     assert!(
         rename.contains("FileRenameInfoEx")
-            && WINDOWS_VFS_SOURCE.contains("FILE_RENAME_FLAG_REPLACE_IF_EXISTS")
-            && WINDOWS_VFS_SOURCE.contains("FILE_RENAME_FLAG_POSIX_SEMANTICS"),
+            && sources
+                .windows_vfs
+                .contains("FILE_RENAME_FLAG_REPLACE_IF_EXISTS")
+            && sources
+                .windows_vfs
+                .contains("FILE_RENAME_FLAG_POSIX_SEMANTICS"),
         "anti-vacuity guard: the single publication must retain FileRenameInfoEx POSIX replace semantics"
     );
     assert!(

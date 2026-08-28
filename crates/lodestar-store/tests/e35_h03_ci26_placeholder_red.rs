@@ -9,24 +9,28 @@
 
 const STORE_SOURCE: &str = include_str!("../src/lib.rs");
 
-fn swap_protocol() -> &'static str {
-    let start = STORE_SOURCE
-        .find("    fn swap_active(")
-        .expect("guarda anti-vacuidad: falta swap_active");
-    let end = STORE_SOURCE[start..]
-        .find("\n    #[cfg(windows)]\n    fn verify_published_document_count(")
-        .expect("guarda anti-vacuidad: falta el límite posterior de swap_active");
-    &STORE_SOURCE[start..start + end]
+fn normalized_store_source() -> String {
+    STORE_SOURCE.replace("\r\n", "\n")
 }
 
-fn rebuild_protocol() -> &'static str {
-    let start = STORE_SOURCE
+fn swap_protocol(source: &str) -> &str {
+    let start = source
+        .find("    fn swap_active(")
+        .expect("guarda anti-vacuidad: falta swap_active");
+    let end = source[start..]
+        .find("\n    #[cfg(windows)]\n    fn verify_published_document_count(")
+        .expect("guarda anti-vacuidad: falta el límite posterior de swap_active");
+    &source[start..start + end]
+}
+
+fn rebuild_protocol(source: &str) -> &str {
+    let start = source
         .find("fn rebuild_from_inventory_with_duration(")
         .expect("guarda anti-vacuidad: falta rebuild_from_inventory_with_duration");
-    let end = STORE_SOURCE[start..]
+    let end = source[start..]
         .find("\n    fn swap_active(")
         .expect("guarda anti-vacuidad: falta el límite posterior del rebuild");
-    &STORE_SOURCE[start..start + end]
+    &source[start..start + end]
 }
 
 fn unique_position(source: &str, needle: &str, reason: &str) -> Result<usize, String> {
@@ -356,8 +360,9 @@ fn assert_rejected(result: Result<(), String>, expected: &str) {
 /// reproduce exactamente el `unable to open database file` observado en Windows CI29.
 #[test]
 fn c6_windows_abre_fallback_antes_del_handle_delete_y_lo_transporta_hasta_swap() {
-    let rebuild = rebuild_protocol();
-    candidate_fallback_contract(rebuild, swap_protocol())
+    let source = normalized_store_source();
+    let rebuild = rebuild_protocol(&source);
+    candidate_fallback_contract(rebuild, swap_protocol(&source))
         .unwrap_or_else(|error| panic!("rojo causal CI29: {error}"));
 
     // Contrafactual causal: conserva todas las operaciones pero mueve la apertura RO después de
@@ -373,7 +378,7 @@ fn c6_windows_abre_fallback_antes_del_handle_delete_y_lo_transporta_hasta_swap()
         "guarda anti-vacuidad: el contrafactual debe intercambiar open RO y handle DELETE"
     );
     assert_rejected(
-        candidate_fallback_contract(&moved_after_prepare, swap_protocol()),
+        candidate_fallback_contract(&moved_after_prepare, swap_protocol(&source)),
         "antes de adquirir el handle DELETE",
     );
 }
@@ -383,6 +388,7 @@ fn c6_windows_abre_fallback_antes_del_handle_delete_y_lo_transporta_hasta_swap()
 /// el placeholder produciría `no such table` en la siguiente apertura.
 #[test]
 fn c6_windows_error_post_rename_restaura_candidate_standby() {
+    let source = normalized_store_source();
     let compliant = r#"Err(error) => {
         *guard = candidate_standby;
         return Err(StoreError::Io(error.to_string()));
@@ -401,12 +407,12 @@ fn c6_windows_error_post_rename_restaura_candidate_standby() {
         "fallback candidato disk-backed",
     );
 
-    post_rename_recovery_contract(rebuild_protocol(), swap_protocol())
+    post_rename_recovery_contract(rebuild_protocol(&source), swap_protocol(&source))
         .unwrap_or_else(|error| panic!("rojo causal CI29: {error}"));
 
     // Mutation test local: borrar CADA restauración que protege una salida real debe ser
     // observado por esa salida, no quedar oculto por otra asignación anterior del protocolo.
-    let protocol = swap_protocol();
+    let protocol = swap_protocol(&source);
     let post_start = protocol
         .find("let directory_sync =")
         .expect("guarda anti-vacuidad: inicio post-rename");
@@ -428,7 +434,7 @@ fn c6_windows_error_post_rename_restaura_candidate_standby() {
             "drop(candidate_standby);",
         );
         assert_rejected(
-            post_rename_recovery_contract(rebuild_protocol(), &mutant),
+            post_rename_recovery_contract(rebuild_protocol(&source), &mutant),
             &format!("salida post-rename #{ordinal}"),
         );
         cursor = return_at + "return publication_error(".len();
@@ -440,6 +446,7 @@ fn c6_windows_error_post_rename_restaura_candidate_standby() {
 /// cualquier restauración de la generación anterior después de consumir el rename.
 #[test]
 fn c6_windows_post_rename_no_reinstala_standby_viejo() {
+    let source = normalized_store_source();
     let compliant = r#"Err(error) => {
         *guard = candidate_standby;
         return Err(error);
@@ -452,7 +459,7 @@ fn c6_windows_post_rename_no_reinstala_standby_viejo() {
         "fallback candidato disk-backed",
     );
 
-    post_rename_recovery_contract(rebuild_protocol(), swap_protocol())
+    post_rename_recovery_contract(rebuild_protocol(&source), swap_protocol(&source))
         .unwrap_or_else(|error| panic!("rojo causal CI29: {error}"));
 }
 
@@ -461,7 +468,8 @@ fn c6_windows_post_rename_no_reinstala_standby_viejo() {
 /// la conexión publicada solo puede sustituirlo cuando las dos operaciones ya han terminado.
 #[test]
 fn c6_windows_salidas_implicitas_conservan_fallback_hasta_identidad_persistida() {
-    let protocol = swap_protocol();
+    let source = normalized_store_source();
+    let protocol = swap_protocol(&source);
     implicit_exit_recovery_contract(protocol)
         .unwrap_or_else(|error| panic!("rojo causal CI30: {error}"));
 
@@ -476,7 +484,7 @@ fn c6_windows_salidas_implicitas_conservan_fallback_hasta_identidad_persistida()
 
     // Evidencia del gap previo: el oráculo CI29 solo enumeraba los cuatro `return` explícitos y
     // aceptaba que estas dos salidas dejaran instalado el placeholder.
-    post_rename_recovery_contract(rebuild_protocol(), &deleted)
+    post_rename_recovery_contract(rebuild_protocol(&source), &deleted)
         .expect("guarda histórica: CI29 no observaba las salidas implícitas");
     assert_rejected(
         implicit_exit_recovery_contract(&deleted),
@@ -492,7 +500,7 @@ fn c6_windows_salidas_implicitas_conservan_fallback_hasta_identidad_persistida()
         );
     assert_ne!(moved_tail, tail, "guarda anti-vacuidad: mover fallback");
     let moved = format!("{prefix}{moved_tail}");
-    post_rename_recovery_contract(rebuild_protocol(), &moved)
+    post_rename_recovery_contract(rebuild_protocol(&source), &moved)
         .expect("guarda histórica: CI29 aceptaba instalar fallback tras activation?");
     assert_rejected(
         implicit_exit_recovery_contract(&moved),
@@ -525,7 +533,8 @@ fn c6_windows_salidas_implicitas_conservan_fallback_hasta_identidad_persistida()
 /// un segundo open que invalide la comprobación.
 #[test]
 fn c6_windows_fallback_distinto_falla_y_binding_autenticado_no_se_reabre() {
-    let rebuild = rebuild_protocol();
+    let source = normalized_store_source();
+    let rebuild = rebuild_protocol(&source);
     fallback_authentication_contract(rebuild)
         .unwrap_or_else(|error| panic!("rojo causal CI30: {error}"));
 
@@ -540,7 +549,7 @@ fn c6_windows_fallback_distinto_falla_y_binding_autenticado_no_se_reabre() {
         shadow_before_identity, rebuild,
         "guarda anti-vacuidad: insertar shadow exacto antes de connection_identity"
     );
-    candidate_fallback_contract(&shadow_before_identity, swap_protocol())
+    candidate_fallback_contract(&shadow_before_identity, swap_protocol(&source))
         .expect("guarda histórica: el contrato base acepta el shadow previo a identity");
     ci30_transport_contract(&shadow_before_identity)
         .expect("guarda histórica: CI30 empezaba a vigilar después del shadow");
@@ -561,7 +570,7 @@ fn c6_windows_fallback_distinto_falla_y_binding_autenticado_no_se_reabre() {
         return_at..return_at + "return Err".len(),
         "let _ignored = Err",
     );
-    candidate_fallback_contract(&inert_branch, swap_protocol())
+    candidate_fallback_contract(&inert_branch, swap_protocol(&source))
         .expect("guarda histórica: CI29 aceptaba un branch mismatch inerte");
     assert_rejected(
         fallback_authentication_contract(&inert_branch),
@@ -575,7 +584,7 @@ fn c6_windows_fallback_distinto_falla_y_binding_autenticado_no_se_reabre() {
         1,
     );
     assert_ne!(shadowed, rebuild, "guarda anti-vacuidad: insertar shadow");
-    candidate_fallback_contract(&shadowed, swap_protocol())
+    candidate_fallback_contract(&shadowed, swap_protocol(&source))
         .expect("guarda histórica: CI29 aceptaba sombrear el binding autenticado");
     assert_rejected(
         fallback_authentication_contract(&shadowed),
@@ -588,7 +597,7 @@ fn c6_windows_fallback_distinto_falla_y_binding_autenticado_no_se_reabre() {
         1,
     );
     assert_ne!(reopened, rebuild, "guarda anti-vacuidad: insertar reopen");
-    candidate_fallback_contract(&reopened, swap_protocol())
+    candidate_fallback_contract(&reopened, swap_protocol(&source))
         .expect("guarda histórica: CI29 aceptaba reabrir .next tras autenticar");
     assert_rejected(
         fallback_authentication_contract(&reopened),
