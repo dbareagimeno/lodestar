@@ -368,8 +368,11 @@ pub(crate) fn open(path: &Path) -> rusqlite::Result<Connection> {
 /// Owns the exact Windows file object exposed by the read-only SQLite validation connection.
 /// The duplicate denies new writers while integrity/FK checks, the pause seam, and publication
 /// complete, so pathname replacement cannot substitute different bytes after validation.
+pub(crate) type FileIdentity = (u64, [u8; 16]);
+
 pub(crate) struct PreparedCandidate {
     handle: OwnedHandle,
+    identity: FileIdentity,
 }
 
 pub(crate) fn prepare_candidate(connection: &Connection) -> std::io::Result<PreparedCandidate> {
@@ -399,12 +402,25 @@ pub(crate) fn prepare_candidate(connection: &Connection) -> std::io::Result<Prep
     if handle == INVALID_HANDLE_VALUE {
         return Err(std::io::Error::last_os_error());
     }
+    let identity = file_identity(handle);
+    let identity = match identity {
+        Ok(identity) => identity,
+        Err(error) => {
+            let _ = unsafe { CloseHandle(handle) };
+            return Err(error);
+        }
+    };
     Ok(PreparedCandidate {
         handle: OwnedHandle(handle),
+        identity,
     })
 }
 
 impl PreparedCandidate {
+    pub(crate) fn identity(&self) -> FileIdentity {
+        self.identity
+    }
+
     pub(crate) fn sync(&self) -> std::io::Result<()> {
         if unsafe { FlushFileBuffers(self.handle.0) } == 0 {
             Err(std::io::Error::last_os_error())
@@ -486,17 +502,33 @@ pub(crate) fn remove_sidecar(path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Confirms that a SQLite connection reopened after publication owns the same file object that the
-/// active pathname resolves to. On Windows an already-open generation may survive a POSIX replace;
-/// comparing file IDs prevents such a stale handle from being installed in `RootState` silently.
-pub(crate) fn connection_matches_path(
-    connection: &Connection,
-    path: &Path,
-) -> std::io::Result<bool> {
-    let connection_handle = connection_main_handle(connection)?;
+pub(crate) fn connection_identity(connection: &Connection) -> std::io::Result<FileIdentity> {
+    file_identity(connection_main_handle(connection)?)
+}
+
+pub(crate) fn path_identity(path: &Path) -> std::io::Result<FileIdentity> {
     let path_handle = open_read_handle(path)?;
     let path_handle = OwnedHandle(path_handle);
-    Ok(file_identity(connection_handle)? == file_identity(path_handle.0)?)
+    file_identity(path_handle.0)
+}
+
+pub(crate) fn sidecar_diagnostics(path: &Path) -> String {
+    ["-wal", "-shm"]
+        .into_iter()
+        .map(|suffix| {
+            let mut os_path = path.as_os_str().to_os_string();
+            os_path.push(suffix);
+            let sidecar = PathBuf::from(os_path);
+            match path_identity(&sidecar) {
+                Ok(identity) => format!("{suffix}=present:{identity:?}"),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    format!("{suffix}=absent")
+                }
+                Err(error) => format!("{suffix}=error:{error}"),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 fn connection_main_handle(connection: &Connection) -> std::io::Result<HANDLE> {
@@ -537,7 +569,7 @@ fn open_read_handle(path: &Path) -> std::io::Result<HANDLE> {
     }
 }
 
-fn file_identity(handle: HANDLE) -> std::io::Result<(u64, [u8; 16])> {
+fn file_identity(handle: HANDLE) -> std::io::Result<FileIdentity> {
     let mut identity = FILE_ID_INFO::default();
     let result = unsafe {
         GetFileInformationByHandleEx(

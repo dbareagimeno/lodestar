@@ -20,6 +20,7 @@ use rusqlite::Connection;
 
 use lodestar_core::types::{Check, CheckCode, Inventory, RelPath, Severity};
 use lodestar_core::{DocumentSet, DocumentStore};
+use lodestar_discovery::DiscoveryPolicy;
 
 mod error;
 mod event;
@@ -52,6 +53,7 @@ pub type OutgoingLink = (String, String, Option<String>, Option<String>);
 /// La cache de un workspace: base SQLite + bus de eventos. Compuesta por la workspace (E5).
 pub struct Store {
     root: PathBuf,
+    discovery_policy: DiscoveryPolicy,
     state: Arc<RootState>,
 }
 
@@ -114,7 +116,38 @@ impl Store {
     /// no coincide, hace un rebuild limpio del esquema. **No** indexa: llama a [`Store::rebuild`].
     pub fn open(root: &Path) -> Result<Self, StoreError> {
         let root = std::path::absolute(root).map_err(|error| StoreError::Io(error.to_string()))?;
+        let discovery_policy = lodestar_discovery::load_policy(&root)
+            .map_err(|error| StoreError::Io(error.to_string()))?;
         let dir = root.join(CACHE_DIR);
+        Self::open_captured(root, dir, discovery_policy)
+    }
+
+    /// Abre la cache y la reconstruye desde disco en una sola operación (lo habitual al arrancar).
+    pub fn open_and_build(root: &Path) -> Result<Self, StoreError> {
+        let store = Store::open(root)?;
+        store.rebuild()?;
+        Ok(store)
+    }
+
+    /// Abre la cache con la política efectiva ya capturada por la sesión propietaria.
+    ///
+    /// Este es el punto de inyección para el workspace: evita volver a leer `config.yaml` al
+    /// activar o reconciliar la cache. Los consumidores directos deben usar [`Store::open`], que
+    /// carga la política exactamente una vez.
+    pub fn open_with_policy(
+        root: &Path,
+        discovery_policy: DiscoveryPolicy,
+    ) -> Result<Self, StoreError> {
+        let root = std::path::absolute(root).map_err(|error| StoreError::Io(error.to_string()))?;
+        let dir = root.join(CACHE_DIR);
+        Self::open_captured(root, dir, discovery_policy)
+    }
+
+    fn open_captured(
+        root: PathBuf,
+        dir: PathBuf,
+        discovery_policy: DiscoveryPolicy,
+    ) -> Result<Self, StoreError> {
         std::fs::create_dir_all(&dir).map_err(|e| StoreError::Io(e.to_string()))?;
         let db = dir.join(DB_FILE);
         // Opening can create or replace a derived database while applying the schema. Serialize
@@ -125,7 +158,11 @@ impl Store {
         // (p. ej. un índice nuevo sobre una columna renombrada), se borra y se recrea limpio
         // en vez de dejar `open()` fallando para siempre.
         let state = shared_state(&root, &db)?;
-        let store = Store { root, state };
+        let store = Store {
+            root,
+            discovery_policy,
+            state,
+        };
         store.refresh_external_database_under_gate(&db)?;
         unlock_file(&_open_gate).map_err(|error| {
             StoreError::Io(format!(
@@ -133,13 +170,6 @@ impl Store {
                 dir.join("h03-writer.lock").display()
             ))
         })?;
-        Ok(store)
-    }
-
-    /// Abre la cache y la reconstruye desde disco en una sola operación (lo habitual al arrancar).
-    pub fn open_and_build(root: &Path) -> Result<Self, StoreError> {
-        let store = Store::open(root)?;
-        store.rebuild()?;
         Ok(store)
     }
 
@@ -450,6 +480,8 @@ impl Store {
                     next.display()
                 ))
             })?;
+        #[cfg(windows)]
+        let candidate_identity = candidate.identity();
         drop(validation_conn);
         #[cfg(windows)]
         let candidate_sync = candidate.sync();
@@ -489,7 +521,7 @@ impl Store {
         #[cfg(not(windows))]
         self.swap_active(&next)?;
         #[cfg(windows)]
-        self.verify_published_document_count(candidate_document_count)?;
+        self.verify_published_document_count(candidate_document_count, candidate_identity)?;
         let swap_rss_finished_at = monotonic_ns();
         let swap_rss = swap_rss_window.finish(swap_rss_finished_at)?;
         let swap_ns = swap_started.elapsed().as_nanos() as u64;
@@ -538,6 +570,29 @@ impl Store {
     ) -> Result<(), StoreError> {
         #[cfg(windows)]
         let _ = next;
+        #[cfg(windows)]
+        let candidate_identity = candidate.identity();
+        #[cfg(windows)]
+        let candidate_standby = schema::open_validation_connection(next).map_err(|error| {
+            StoreError::Io(format!(
+                "open validated candidate fallback {}: {error}",
+                next.display()
+            ))
+        })?;
+        #[cfg(windows)]
+        let candidate_standby_identity = windows_vfs::connection_identity(&candidate_standby)
+            .map_err(|error| {
+                StoreError::Io(format!(
+                    "authenticate validated candidate fallback {}: {error}",
+                    next.display()
+                ))
+            })?;
+        #[cfg(windows)]
+        if candidate_standby_identity != candidate_identity {
+            return Err(StoreError::Io(format!(
+                "validated candidate fallback identity mismatch: candidate_id={candidate_identity:?}; fallback_id={candidate_standby_identity:?}"
+            )));
+        }
         let active = self.root.join(CACHE_DIR).join(DB_FILE);
         // Keep an unopened-WAL handle to the current generation so every pre-publication failure
         // can restore a usable disk-backed connection after the old connection has been closed.
@@ -629,77 +684,76 @@ impl Store {
         })();
         if let Err(error) = directory_sync {
             // The rename is already the point of no return. Keep a usable disk-backed handle in
-            // the shared state; its old identity makes the next writer refresh from the published
-            // path instead of leaving the in-memory placeholder installed.
-            *guard = standby;
-            return Err(error);
+            // the shared state; the candidate fallback owns the validated generation and avoids
+            // leaving the in-memory placeholder installed.
+            #[cfg(windows)]
+            {
+                *guard = candidate_standby;
+            }
+            #[cfg(not(windows))]
+            {
+                install_disk_connection(&mut guard, standby);
+            }
+            return publication_error(error);
         }
+        #[cfg(windows)]
+        drop(standby);
         #[cfg(windows)]
         publication.commit();
         let published = match open_sqlite(&active) {
             Ok(published) => published,
             Err(error) => {
-                // The old generation is unnamed after a successful replacement, but retaining its
-                // live connection is still safer than exposing the in-memory placeholder. The
-                // unchanged identity forces the next writer through external refresh again.
-                *guard = standby;
-                return Err(error);
+                // The candidate fallback owns the validated generation even when resolving the
+                // newly published pathname fails.
+                #[cfg(windows)]
+                {
+                    *guard = candidate_standby;
+                }
+                #[cfg(not(windows))]
+                {
+                    install_disk_connection(&mut guard, standby);
+                }
+                return publication_error(error);
             }
         };
         #[cfg(windows)]
-        let published = match windows_vfs::connection_matches_path(&published, &active) {
-            Ok(true) => {
-                drop(standby);
-                published
-            }
-            Ok(false) => {
-                // A pathname reopen performed while the unnamed previous generation is still
-                // alive may retain that previous file object on Windows. Close that unauthenticated
-                // reopen, but retain standby as the disk-backed recovery until its replacement has
-                // been opened and authenticated successfully.
-                drop(published);
-                let replacement = match open_sqlite(&active) {
-                    Ok(replacement) => replacement,
-                    Err(error) => {
-                        *guard = standby;
-                        return Err(error);
-                    }
-                };
-                match windows_vfs::connection_matches_path(&replacement, &active) {
-                    Ok(true) => {
-                        drop(standby);
-                        replacement
-                    }
-                    Ok(false) => {
-                        *guard = standby;
-                        return Err(StoreError::Io(
-                            "published SQLite connection does not match the active pathname after stale-handle retry"
-                                .into(),
-                        ));
-                    }
-                    Err(error) => {
-                        *guard = standby;
-                        return Err(StoreError::Io(format!(
-                            "authenticate retried SQLite connection against {}: {error}",
-                            active.display()
-                        )));
-                    }
-                }
-            }
+        let published_identity = match windows_vfs::connection_identity(&published) {
+            Ok(identity) => identity,
             Err(error) => {
-                *guard = standby;
-                return Err(StoreError::Io(format!(
-                    "authenticate published SQLite connection against {}: {error}",
+                *guard = candidate_standby;
+                return publication_error(StoreError::Io(format!(
+                    "authenticate published SQLite connection against candidate {}: {error}",
                     active.display()
                 )));
             }
         };
+        #[cfg(windows)]
+        if published_identity != candidate_identity {
+            *guard = candidate_standby;
+            return publication_error(StoreError::Io(format!(
+                "published SQLite connection identity mismatch: candidate_id={candidate_identity:?}; root_state_id={published_identity:?}"
+            )));
+        }
         #[cfg(not(windows))]
         drop(standby);
         let activation = activate_published_connection(&published);
-        *guard = published;
+        #[cfg(windows)]
+        {
+            // From this point every fallible exit retains the validated generation. On success it
+            // is replaced with the authenticated pathname connection below.
+            *guard = candidate_standby;
+        }
+        #[cfg(not(windows))]
+        {
+            *guard = published;
+        }
         activation?;
         let identity = db_identity(&active).map_err(|error| StoreError::Io(error.to_string()))?;
+        #[cfg(windows)]
+        {
+            let candidate_standby = std::mem::replace(&mut *guard, published);
+            drop(candidate_standby);
+        }
         *self
             .state
             .db_identity
@@ -709,8 +763,18 @@ impl Store {
     }
 
     #[cfg(windows)]
-    fn verify_published_document_count(&self, candidate_count: i64) -> Result<(), StoreError> {
+    fn verify_published_document_count(
+        &self,
+        candidate_count: i64,
+        candidate_identity: windows_vfs::FileIdentity,
+    ) -> Result<(), StoreError> {
         let active = self.root.join(CACHE_DIR).join(DB_FILE);
+        let pathname_identity = windows_vfs::path_identity(&active).map_err(|error| {
+            StoreError::Io(format!(
+                "identify published pathname {}: {error}",
+                active.display()
+            ))
+        })?;
         let path_connection = schema::open_validation_connection(&active).map_err(|error| {
             StoreError::Io(format!(
                 "open published pathname {} for row-count authentication: {error}",
@@ -727,20 +791,30 @@ impl Store {
             })?;
         drop(path_connection);
 
-        let root_state_count: i64 = self
+        let root_state = self
             .state
             .conn
             .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
+            .unwrap_or_else(|poison| poison.into_inner());
+        let root_state_identity =
+            windows_vfs::connection_identity(&root_state).map_err(|error| {
+                StoreError::Io(format!("identify published RootState connection: {error}"))
+            })?;
+        let root_state_count: i64 = root_state
             .query_row("SELECT COUNT(*) FROM documents", [], |row| row.get(0))
             .map_err(|error| {
                 StoreError::Io(format!(
                     "count documents through published RootState connection: {error}; candidate={candidate_count}; pathname={path_count}"
                 ))
             })?;
-        if candidate_count != path_count || candidate_count != root_state_count {
+        if candidate_identity != pathname_identity
+            || candidate_identity != root_state_identity
+            || candidate_count != path_count
+            || candidate_count != root_state_count
+        {
+            let sidecars = windows_vfs::sidecar_diagnostics(&active);
             return Err(StoreError::Io(format!(
-                "published generation row-count mismatch: candidate={candidate_count}; pathname={path_count}; root_state={root_state_count}"
+                "published generation authentication mismatch: candidate={candidate_count}; pathname={path_count}; root_state={root_state_count}; candidate_id={candidate_identity:?}; pathname_id={pathname_identity:?}; root_state_id={root_state_identity:?}; sidecars={sidecars}"
             )));
         }
         Ok(())
@@ -963,9 +1037,7 @@ impl Store {
         ),
         StoreError,
     > {
-        let policy = lodestar_discovery::load_policy(&self.root)
-            .map_err(|error| StoreError::Io(error.to_string()))?;
-        let discovered = lodestar_discovery::discover_inventory(&self.root, &policy)
+        let discovered = lodestar_discovery::discover_inventory(&self.root, &self.discovery_policy)
             .map_err(|error| StoreError::Io(error.to_string()))?;
         let mut docs = Vec::with_capacity(discovered.documents.len());
         let mut other_files = discovered.other_files;
@@ -997,9 +1069,7 @@ impl Store {
 
     /// First pass of the cold builder: only paths and the non-document inventory are retained.
     fn walk_inventory(&self) -> Result<lodestar_discovery::DiscoveredInventory, StoreError> {
-        let policy = lodestar_discovery::load_policy(&self.root)
-            .map_err(|error| StoreError::Io(error.to_string()))?;
-        lodestar_discovery::discover_inventory(&self.root, &policy)
+        lodestar_discovery::discover_inventory(&self.root, &self.discovery_policy)
             .map_err(|error| StoreError::Io(error.to_string()))
     }
 
@@ -1720,6 +1790,15 @@ fn restore_after_publication_failure(
         )));
     }
     Err(StoreError::Io(error.to_string()))
+}
+
+fn publication_error(error: StoreError) -> Result<(), StoreError> {
+    Err(error)
+}
+
+#[cfg(not(windows))]
+fn install_disk_connection(guard: &mut Connection, connection: Connection) {
+    *guard = connection;
 }
 
 /// Replaces the active generation atomically on the same volume and makes the publication

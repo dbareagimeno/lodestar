@@ -271,7 +271,10 @@ impl Workspace {
         // Store materializa el plano de control derivado (`.lodestar/`). Debe existir antes de
         // capturar el fingerprint raíz: crearlo después haría que Lodestar invalidase su propio
         // inventario en el primer `reindex` de un workspace sin cache.
-        let store = Arc::new(Store::open(&self.root)?);
+        let store = Arc::new(Store::open_with_policy(
+            &self.root,
+            self.discovery_policy(),
+        )?);
         let discovered =
             lodestar_discovery::discover_inventory(&self.root, &self.discovery_policy())
                 .map_err(|error| WorkspaceError::Io(error.to_string()))?;

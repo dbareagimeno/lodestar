@@ -176,7 +176,7 @@ fn prepared_candidate_contract(preparation: &str) -> Result<(), String> {
             "debe comprobar el resultado de ReOpenFile antes de poseerlo",
         ),
         (
-            "Ok(PreparedCandidate {\n        handle: OwnedHandle(handle),\n    })",
+            "handle: OwnedHandle(handle),",
             "PreparedCandidate debe poseer exactamente el handle devuelto por ReOpenFile",
         ),
     ];
@@ -495,8 +495,8 @@ fn c5_c6_guardas_contrafactuales_rechazan_handle_reabierto_o_poseido_incorrecto(
     );
 
     let wrongly_owned_original = preparation.replacen(
-        "handle: OwnedHandle(handle)",
-        "handle: OwnedHandle(original)",
+        "handle: OwnedHandle(handle),",
+        "handle: OwnedHandle(original),",
         1,
     );
     assert_ne!(
@@ -509,8 +509,8 @@ fn c5_c6_guardas_contrafactuales_rechazan_handle_reabierto_o_poseido_incorrecto(
     );
 
     let wrongly_owned_unrelated = preparation.replacen(
-        "handle: OwnedHandle(handle)",
-        "handle: OwnedHandle(unrelated_handle)",
+        "handle: OwnedHandle(handle),",
+        "handle: OwnedHandle(unrelated_handle),",
         1,
     );
     assert_ne!(
