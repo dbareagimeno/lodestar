@@ -104,6 +104,13 @@ jobs:
           if (-not $source) { throw "falta tokio-stream 0.1.17 en el cache de Cargo" }
           "E34_TOKIO_STREAM_SOURCE=$source" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
+      # E35-H03: la publicación SQLite solo puede autenticarse en Windows real. Ejecutar el
+      # harness causal antes del workspace evita que los bancos E33, mucho más largos, oculten el
+      # primer borde roto y garantiza que el diagnóstico conserva FILE_ID y paths del swap.
+      - name: Publicación SQLite Win32 causal (antes del workspace)
+        if: runner.os == 'Windows'
+        run: cargo test -p lodestar-store --test e35_h03_ci33_windows_rename_red --locked -- --nocapture
+
       - name: Tests
         run: cargo test --workspace --locked
 
