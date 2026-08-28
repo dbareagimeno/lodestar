@@ -130,13 +130,21 @@ fn c5_c6_win32_publica_candidate_file_id_en_active_sin_tocar_cwd_homonimo() {
         .sync()
         .expect("sincronizar candidato antes del swap");
 
-    let publication = {
+    let publication_guard = windows_vfs::prepare_publication(&active, false).unwrap_or_else(|error| {
+        panic!(
+            "rojo causal CI46: el flujo real debe mantener PublicationGuard sobre active antes del rename: {error}; candidate={candidate_id:?}; candidate_standby={:?}; {}",
+            windows_vfs::connection_identity(&candidate_standby),
+            cache_diagnostics(&cache, &active, &next)
+        )
+    });
+
+    let rename_result = {
         let _cwd_guard = CurrentDirGuard::switch_to(&unrelated_cwd);
         windows_vfs::replace_durable(candidate, &active)
     };
-    publication.unwrap_or_else(|error| {
+    rename_result.unwrap_or_else(|error| {
         panic!(
-            "C5: el swap atómico del candidato válido debe publicarse: {error}; candidate={candidate_id:?}; candidate_standby={:?}; {}",
+            "rojo causal CI46: FileRenameInfoEx debe aceptar el candidato mientras PublicationGuard conserva DELETE sobre active: {error}; candidate={candidate_id:?}; candidate_standby={:?}; {}",
             windows_vfs::connection_identity(&candidate_standby),
             cache_diagnostics(&cache, &active, &next)
         )
@@ -196,6 +204,7 @@ fn c5_c6_win32_publica_candidate_file_id_en_active_sin_tocar_cwd_homonimo() {
         b"CI33-CWD-MUST-NOT-CHANGE\n",
         "C6: publicar la cache no puede reemplazar un pathname homónimo resuelto contra el cwd; candidate={candidate_id:?}; active={active_id:?}; root_state={published_id:?}; {diagnostics_after_swap}"
     );
+    publication_guard.commit();
 }
 
 /// CI41 — `prepare_candidate` reabre el mismo objeto mientras la conexión SQLite escribible sigue
@@ -286,6 +295,7 @@ fn c5_c6_win32_publica_candidate_file_id_en_active_sin_tocar_cwd_homonimo() {
         "let candidate_standby =",
         "let candidate = windows_vfs::prepare_candidate(&candidate_connection)",
         "let candidate_standby_id_before =",
+        "let publication_guard = windows_vfs::prepare_publication(&active, false)",
         "windows_vfs::replace_durable(candidate, &active)",
         "!next.exists()",
         "let active_id = windows_vfs::path_identity(&active)",
@@ -296,6 +306,7 @@ fn c5_c6_win32_publica_candidate_file_id_en_active_sin_tocar_cwd_homonimo() {
         "sentinel(&candidate_standby)",
         "sentinel(&old)",
         "std::fs::read(&cwd_homonym)",
+        "publication_guard.commit()",
     ] {
         let positions: Vec<_> = native_test
             .match_indices(marker)
