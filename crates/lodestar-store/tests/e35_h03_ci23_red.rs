@@ -54,8 +54,8 @@ fn c5_c6_windows_rename_usa_un_solo_destino_win32_absoluto_con_root_null() {
     );
     assert!(
         rename.contains(
-            "SetFileInformationByHandle(handle, FileRenameInfoEx, info.cast(), total_bytes as u32)"
-        ),
+            "SetFileInformationByHandle(handle, FileRenameInfoEx, info.cast(), buffer_size)"
+        ) && rename.contains("let buffer_size = u32::try_from(total_bytes)"),
         "guarda anti-vacuidad: el único syscall debe operar sobre el mismo handle candidato con FileRenameInfoEx"
     );
     assert_eq!(

@@ -647,8 +647,27 @@ fn rename_handle_to(
             "rename target is too long",
         )
     })?;
+    wide.push(0);
+    let buffer_bytes = name_bytes.checked_add(2).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "rename buffer is too large",
+        )
+    })?;
     let header_bytes = std::mem::offset_of!(FILE_RENAME_INFO, FileName);
-    let total_bytes = header_bytes.checked_add(name_bytes).ok_or_else(|| {
+    let total_bytes = header_bytes.checked_add(buffer_bytes).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "rename buffer is too large",
+        )
+    })?;
+    let file_name_length = u32::try_from(name_bytes).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "rename target is too long",
+        )
+    })?;
+    let buffer_size = u32::try_from(total_bytes).map_err(|_| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             "rename buffer is too large",
@@ -660,16 +679,15 @@ fn rename_handle_to(
     unsafe {
         (*info).Anonymous.Flags = extended_flags.unwrap_or(0);
         (*info).RootDirectory = ptr::null_mut();
-        (*info).FileNameLength = name_bytes as u32;
+        (*info).FileNameLength = file_name_length;
         ptr::copy_nonoverlapping(
             wide.as_ptr(),
             ptr::addr_of_mut!((*info).FileName).cast::<u16>(),
             wide.len(),
         );
     }
-    let renamed = unsafe {
-        SetFileInformationByHandle(handle, FileRenameInfoEx, info.cast(), total_bytes as u32)
-    };
+    let renamed =
+        unsafe { SetFileInformationByHandle(handle, FileRenameInfoEx, info.cast(), buffer_size) };
     if renamed == 0 {
         Err(std::io::Error::last_os_error())
     } else {

@@ -620,8 +620,9 @@ fn c5_c6_windows_publica_destino_win32_absoluto_en_un_unico_syscall() {
     assert!(
         unique_position(
             rename,
-            "SetFileInformationByHandle(handle, FileRenameInfoEx, info.cast(), total_bytes as u32)",
-        ) < unique_position(rename, "if renamed == 0 {"),
+            "SetFileInformationByHandle(handle, FileRenameInfoEx, info.cast(), buffer_size)",
+        ) < unique_position(rename, "if renamed == 0 {")
+            && rename.contains("let buffer_size = u32::try_from(total_bytes)"),
         "C5/C6 Windows: the sole syscall must precede its sole error gate"
     );
 

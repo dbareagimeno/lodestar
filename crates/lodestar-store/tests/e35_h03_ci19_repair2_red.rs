@@ -490,8 +490,8 @@ fn c5_c6_contrafactual_rechaza_anteponer_un_rename_relativo() {
     assert_ok(windows_replace_contract(replace, rename));
 
     let extra_relative = rename.replacen(
-        "let renamed = unsafe {",
-        "let _relative_renamed = unsafe {\n        SetFileInformationByHandle(handle, FileRenameInfoEx, info.cast(), total_bytes as u32)\n    };\n    let renamed = unsafe {",
+        "    let renamed =",
+        "    let _relative_renamed = unsafe {\n        SetFileInformationByHandle(handle, FileRenameInfoEx, info.cast(), buffer_size)\n    };\n    let renamed =",
         1,
     );
     assert_ne!(
