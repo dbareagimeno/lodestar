@@ -2,8 +2,8 @@
 //!
 //! These tests run on every host and inspect the Windows implementation that the crate ships.
 //! They pin relationships that cannot be exercised on a Unix runner: the validated SQLite file
-//! object must remain the publication source, and SMB-incompatible relative renames get one
-//! narrowly conditioned absolute retry.
+//! object must remain the publication source, and the same-directory target must be published by
+//! one unambiguous simple-name `FileRenameInfoEx` operation.
 
 const STORE_SOURCE: &str = include_str!("../src/lib.rs");
 const SCHEMA_SOURCE: &str = include_str!("../src/schema.rs");
@@ -222,37 +222,6 @@ fn assert_contract_rejected(result: Result<(), String>, expected_reason: &str) {
         error.contains(expected_reason),
         "la mutación fue rechazada por una razón distinta: esperada `{expected_reason}`, observada `{error}`"
     );
-}
-
-fn braced_block_from<'a>(source: &'a str, marker_at: usize, marker: &str) -> &'a str {
-    assert!(
-        source[marker_at..].starts_with(marker),
-        "anti-vacuity guard: expected `{marker}` at byte {marker_at}"
-    );
-    let open_at = marker_at
-        + source[marker_at..]
-            .find('{')
-            .unwrap_or_else(|| panic!("anti-vacuity guard: `{marker}` has no opening brace"));
-    let mut depth = 0usize;
-    for (offset, byte) in source.as_bytes()[open_at..].iter().enumerate() {
-        match byte {
-            b'{' => depth += 1,
-            b'}' => {
-                depth = depth
-                    .checked_sub(1)
-                    .unwrap_or_else(|| panic!("anti-vacuity guard: unbalanced `{marker}` block"));
-                if depth == 0 {
-                    return &source[marker_at..=open_at + offset];
-                }
-            }
-            _ => {}
-        }
-    }
-    panic!("anti-vacuity guard: unterminated `{marker}` block")
-}
-
-fn unique_braced_block_at<'a>(source: &'a str, marker: &str) -> &'a str {
-    braced_block_from(source, unique_position(source, marker), marker)
 }
 
 /// C5/C6 — validation, the pause seam, and the atomic rename must all refer to one pinned file
@@ -556,137 +525,81 @@ fn c5_c6_contrafactual_rechaza_sombrear_original_antes_de_reopenfile() {
     );
 }
 
-/// C5/C6 — some SMB servers reject the relative `RootDirectory` form with
-/// `ERROR_INVALID_PARAMETER`. Only that pre-mutation failure may retry with an absolute target;
-/// the retry must retain the extended atomic replace flags and no successful first rename may be
-/// followed by another mutation.
+/// C5/C6 — native Windows evidence rejects both a DOS absolute target and a parent-handle target.
+/// Because candidate and active share a directory, publication uses only `active.file_name()` with
+/// `RootDirectory=NULL`. There is one mutation and no alternate corridor after success.
 #[test]
-fn c5_c6_windows_smb_reintenta_absoluto_solo_tras_invalid_parameter() {
+fn c5_c6_windows_publica_nombre_simple_en_un_unico_syscall() {
     let rename = section(
         WINDOWS_VFS_SOURCE,
         "fn rename_handle_to(",
         "\nfn wide_path(path: &Path)",
     );
 
-    let failed_gate = "if renamed == 0 {";
-    let failed_gate_positions: Vec<_> = rename
-        .match_indices(failed_gate)
-        .map(|(at, _)| at)
-        .collect();
     assert_eq!(
-        failed_gate_positions.len(),
-        2,
-        "anti-vacuity guard: primary and fallback calls must each test their result once; positions={failed_gate_positions:?}"
-    );
-    let failed_gate_at = failed_gate_positions[0];
-    let primary = &rename[..failed_gate_at];
-    let failed_attempt = braced_block_from(rename, failed_gate_at, failed_gate);
-    let invalid_parameter_gate =
-        "if error.raw_os_error() != Some(ERROR_INVALID_PARAMETER as i32) {";
-    let rejected_other_error = unique_braced_block_at(failed_attempt, invalid_parameter_gate);
-    let absolute_at = unique_position(failed_attempt, "let mut wide = wide_path(target);");
-    let fallback = &failed_attempt[absolute_at..];
-
-    assert!(
-        primary.contains("target.parent()")
-            && primary.contains("target.file_name()")
-            && primary.contains("(*info).RootDirectory = parent_handle"),
-        "anti-vacuity guard: the primary attempt must remain the reparse-safe relative RootDirectory rename"
+        rename.matches("SetFileInformationByHandle(").count(),
+        1,
+        "C5/C6 Windows: publication must have exactly one native rename syscall"
     );
     assert!(
-        primary.contains("FileRenameInfoEx")
+        rename.contains("target.file_name()")
+            && rename.contains("wide_path(Path::new(file_name))")
+            && rename.contains("(*info).RootDirectory = ptr::null_mut()"),
+        "C5/C6 Windows: the sole syscall must receive only target.file_name() with RootDirectory=NULL"
+    );
+    assert!(
+        rename.contains("FileRenameInfoEx")
             && WINDOWS_VFS_SOURCE.contains("FILE_RENAME_FLAG_REPLACE_IF_EXISTS")
             && WINDOWS_VFS_SOURCE.contains("FILE_RENAME_FLAG_POSIX_SEMANTICS"),
-        "anti-vacuity guard: the primary publication must retain FileRenameInfoEx POSIX replace semantics"
+        "anti-vacuity guard: the single publication must retain FileRenameInfoEx POSIX replace semantics"
     );
     assert!(
-        failed_attempt.contains("ERROR_INVALID_PARAMETER"),
-        "C5/C6 Windows SMB: the absolute fallback must be gated specifically by ERROR_INVALID_PARAMETER"
+        !rename.contains("(*info).RootDirectory = parent_handle")
+            && !rename.contains("ERROR_INVALID_PARAMETER")
+            && !rename.contains("CreateFileW(")
+            && !rename.contains("target.parent()")
+            && !rename.contains("wide_path(target)"),
+        "C5/C6 Windows: no parent-handle, full-path or INVALID_PARAMETER fallback may remain"
+    );
+    assert_eq!(
+        rename
+            .matches("(*info).Anonymous.Flags = extended_flags.unwrap_or(0);")
+            .count(),
+        1,
+        "C5 Windows: the requested strong flags must be materialized exactly once"
     );
     assert!(
-        !primary.contains("wide_path(target)")
-            && !primary.contains("RootDirectory = ptr::null_mut()"),
-        "C5/C6 Windows SMB: the primary attempt cannot construct or use the absolute fallback"
-    );
-    assert!(
-        rejected_other_error.contains("return Err(error);")
-            && unique_position(failed_attempt, "return Err(error);") < absolute_at,
-        "C5/C6 Windows SMB: every non-INVALID_PARAMETER error must return before constructing the absolute destination"
-    );
-    assert!(
-        fallback.contains("(*info).RootDirectory = ptr::null_mut()")
-            && fallback.contains("wide_path(target)"),
-        "C5/C6 Windows SMB: only the failed INVALID_PARAMETER branch may rebuild FILE_RENAME_INFO with NULL RootDirectory and an absolute destination"
+        unique_position(
+            rename,
+            "SetFileInformationByHandle(handle, FileRenameInfoEx, info.cast(), total_bytes as u32)",
+        ) < unique_position(rename, "if renamed == 0 {"),
+        "C5/C6 Windows: the sole syscall must precede its sole error gate"
     );
 
-    assert_eq!(
-        failed_attempt.find(failed_gate),
-        Some(0),
-        "C5/C6 Windows SMB: the fallback protocol must be nested under the failed primary result"
+    let relative_counterfactual = rename.replacen(
+        "(*info).RootDirectory = ptr::null_mut()",
+        "(*info).RootDirectory = parent_handle",
+        1,
+    );
+    assert_ne!(
+        relative_counterfactual, rename,
+        "anti-vacuity guard: the mutation must find the real RootDirectory assignment"
     );
     assert!(
-        unique_position(
-            primary,
-            "SetFileInformationByHandle(handle, FileRenameInfoEx, info.cast(), total_bytes as u32)",
-        ) < failed_gate_at,
-        "C5/C6 Windows SMB: the primary syscall must precede its zero-result gate"
+        relative_counterfactual.contains("(*info).RootDirectory = parent_handle")
+            && !relative_counterfactual.contains("(*info).RootDirectory = ptr::null_mut()"),
+        "anti-vacuity guard: the counterfactual must remove the sole simple-name anchor"
+    );
+
+    let full_path_counterfactual =
+        rename.replacen("wide_path(Path::new(file_name))", "wide_path(target)", 1);
+    assert_ne!(
+        full_path_counterfactual, rename,
+        "anti-vacuity guard: the mutation must find the simple-name serialization"
     );
     assert!(
-        unique_position(
-            failed_attempt,
-            "let error = std::io::Error::last_os_error();"
-        ) > failed_gate.len(),
-        "C5/C6 Windows SMB: the zero-result gate must precede capture of the OS error"
-    );
-    assert_precedes(
-        failed_attempt,
-        "let error = std::io::Error::last_os_error();",
-        invalid_parameter_gate,
-        "C5/C6 Windows SMB: raw_os_error may only classify the captured failed syscall",
-    );
-    assert_precedes(
-        failed_attempt,
-        invalid_parameter_gate,
-        "let mut wide = wide_path(target);",
-        "C5/C6 Windows SMB: the exact INVALID_PARAMETER gate must precede absolute path construction",
-    );
-    assert_eq!(
-        primary.matches("SetFileInformationByHandle(").count(),
-        1,
-        "C5/C6 Windows SMB: the primary branch must issue exactly one rename"
-    );
-    assert_eq!(
-        fallback.matches("SetFileInformationByHandle(").count(),
-        1,
-        "C5/C6 Windows SMB: the failed INVALID_PARAMETER branch must issue exactly one fallback rename"
-    );
-    assert_eq!(
-        primary
-            .matches("(*info).Anonymous.Flags = extended_flags.unwrap_or(0);")
-            .count(),
-        1,
-        "C5 Windows SMB: the primary attempt must use the requested extended flags exactly once"
-    );
-    assert_eq!(
-        fallback
-            .matches("(*info).Anonymous.Flags = extended_flags.unwrap_or(0);")
-            .count(),
-        1,
-        "C5 Windows SMB: the fallback must retain the same extended flags exactly once"
-    );
-    assert_eq!(
-        primary.matches("FileRenameInfoEx").count(),
-        1,
-        "C5 Windows SMB: the primary attempt must use FileRenameInfoEx"
-    );
-    assert_eq!(
-        fallback.matches("FileRenameInfoEx").count(),
-        1,
-        "C5 Windows SMB: the fallback must use FileRenameInfoEx rather than weakening the protocol"
-    );
-    assert!(
-        failed_attempt.contains("let mut wide = wide_path(target);")
-            && !rename[failed_gate_at + failed_attempt.len()..].contains("wide_path(target)"),
-        "C5/C6 Windows SMB: successful primary publication must bypass all absolute-fallback construction"
+        full_path_counterfactual.contains("wide_path(target)")
+            && !full_path_counterfactual.contains("wide_path(Path::new(file_name))"),
+        "anti-vacuity guard: the counterfactual must replace simple-name serialization with a full path"
     );
 }

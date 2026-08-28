@@ -16,18 +16,17 @@ use std::sync::OnceLock;
 use rusqlite::{ffi, Connection, OpenFlags};
 use windows_sys::Win32::Foundation::{
     CloseHandle, ERROR_ALREADY_EXISTS, ERROR_FILE_EXISTS, ERROR_FILE_NOT_FOUND,
-    ERROR_INVALID_FUNCTION, ERROR_INVALID_PARAMETER, ERROR_NOT_SUPPORTED, ERROR_PATH_NOT_FOUND,
-    GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE,
+    ERROR_INVALID_FUNCTION, ERROR_NOT_SUPPORTED, ERROR_PATH_NOT_FOUND, GENERIC_READ, GENERIC_WRITE,
+    HANDLE, INVALID_HANDLE_VALUE,
 };
 use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, CreateHardLinkW, FileDispositionInfoEx, FileIdInfo, FileRenameInfoEx,
     FlushFileBuffers, GetFileInformationByHandleEx, LockFileEx, ReOpenFile,
     SetFileInformationByHandle, DELETE, FILE_ATTRIBUTE_NORMAL, FILE_DISPOSITION_FLAG_DELETE,
     FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE, FILE_DISPOSITION_FLAG_POSIX_SEMANTICS,
-    FILE_DISPOSITION_INFO_EX, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
-    FILE_FLAG_WRITE_THROUGH, FILE_ID_INFO, FILE_READ_ATTRIBUTES, FILE_RENAME_INFO,
-    FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TRAVERSE, LOCKFILE_FAIL_IMMEDIATELY,
-    OPEN_EXISTING,
+    FILE_DISPOSITION_INFO_EX, FILE_FLAG_OPEN_REPARSE_POINT, FILE_FLAG_WRITE_THROUGH, FILE_ID_INFO,
+    FILE_RENAME_INFO, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    LOCKFILE_FAIL_IMMEDIATELY, OPEN_EXISTING,
 };
 use windows_sys::Win32::System::WindowsProgramming::{
     FILE_RENAME_FLAG_POSIX_SEMANTICS, FILE_RENAME_FLAG_REPLACE_IF_EXISTS,
@@ -626,37 +625,12 @@ fn rename_handle_to(
     handle: HANDLE,
     extended_flags: Option<u32>,
 ) -> std::io::Result<()> {
-    let parent = target.parent();
-    let parent = parent
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
     let file_name = target.file_name().ok_or_else(|| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             "rename target has no file name",
         )
     })?;
-    let wide_parent = wide_path(parent);
-    let parent_handle = unsafe {
-        CreateFileW(
-            wide_parent.as_ptr(),
-            FILE_TRAVERSE | FILE_READ_ATTRIBUTES,
-            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-            ptr::null(),
-            OPEN_EXISTING,
-            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
-            ptr::null_mut(),
-        )
-    };
-    if parent_handle == INVALID_HANDLE_VALUE {
-        return Err(operation_error(
-            "CreateFileW rename parent handle",
-            parent,
-            std::io::Error::last_os_error(),
-        ));
-    }
-    let _parent_handle_guard = OwnedHandle(parent_handle);
-
     let mut wide = wide_path(Path::new(file_name));
     wide.pop();
     let name_bytes = wide.len().checked_mul(2).ok_or_else(|| {
@@ -677,7 +651,7 @@ fn rename_handle_to(
     let info = storage.as_mut_ptr().cast::<FILE_RENAME_INFO>();
     unsafe {
         (*info).Anonymous.Flags = extended_flags.unwrap_or(0);
-        (*info).RootDirectory = parent_handle;
+        (*info).RootDirectory = ptr::null_mut();
         (*info).FileNameLength = name_bytes as u32;
         ptr::copy_nonoverlapping(
             wide.as_ptr(),
@@ -689,49 +663,7 @@ fn rename_handle_to(
         SetFileInformationByHandle(handle, FileRenameInfoEx, info.cast(), total_bytes as u32)
     };
     if renamed == 0 {
-        let error = std::io::Error::last_os_error();
-        if error.raw_os_error() != Some(ERROR_INVALID_PARAMETER as i32) {
-            return Err(error);
-        }
-
-        // Some SMB implementations reject the RootDirectory-relative form. INVALID_PARAMETER is
-        // a pre-mutation failure, so retry exactly once with the same extended flags and an
-        // absolute target. No other error is safe evidence that the first call changed nothing.
-        let mut wide = wide_path(target);
-        wide.pop();
-        let name_bytes = wide.len().checked_mul(2).ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "absolute rename target is too long",
-            )
-        })?;
-        let total_bytes = header_bytes.checked_add(name_bytes).ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "absolute rename buffer is too large",
-            )
-        })?;
-        let words = total_bytes.div_ceil(std::mem::size_of::<usize>());
-        let mut storage = vec![0usize; words];
-        let info = storage.as_mut_ptr().cast::<FILE_RENAME_INFO>();
-        unsafe {
-            (*info).Anonymous.Flags = extended_flags.unwrap_or(0);
-            (*info).RootDirectory = ptr::null_mut();
-            (*info).FileNameLength = name_bytes as u32;
-            ptr::copy_nonoverlapping(
-                wide.as_ptr(),
-                ptr::addr_of_mut!((*info).FileName).cast::<u16>(),
-                wide.len(),
-            );
-        }
-        let renamed = unsafe {
-            SetFileInformationByHandle(handle, FileRenameInfoEx, info.cast(), total_bytes as u32)
-        };
-        if renamed == 0 {
-            Err(std::io::Error::last_os_error())
-        } else {
-            Ok(())
-        }
+        Err(std::io::Error::last_os_error())
     } else {
         Ok(())
     }

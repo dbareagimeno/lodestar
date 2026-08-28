@@ -3,9 +3,8 @@
 //! Un `fsync` físico no tiene un observable portátil desde una integración y el runner de esta
 //! fase es macOS, por lo que el reemplazo Windows tampoco puede ejecutarse. Estos tests leen el
 //! mismo fuente que compila el crate y fijan las propiedades binarias del protocolo: el objeto
-//! validado llega por handle a la publicación, el fallback Windows queda acotado a un único error
-//! pre-mutation, y después del rename visible la primera operación fallable es la barrera del
-//! directorio.
+//! validado llega por handle a una única publicación same-directory con nombre simple inequívoco,
+//! y después del rename visible la primera operación fallable es la barrera del directorio.
 
 const STORE_SOURCE: &str = include_str!("../src/lib.rs");
 const WINDOWS_VFS_SOURCE: &str = include_str!("../src/windows_vfs.rs");
@@ -119,70 +118,54 @@ fn windows_replace_contract(replace: &str, rename: &str) -> Result<(), String> {
         }
     }
 
-    if rename.matches("SetFileInformationByHandle(").count() != 2 {
-        return Err(
-            "rename_handle_to debe tener un syscall primario y como máximo un fallback".into(),
-        );
+    if rename.matches("SetFileInformationByHandle(").count() != 1 {
+        return Err("rename_handle_to debe tener exactamente un syscall atómico".into());
     }
     if rename
         .matches("SetFileInformationByHandle(handle, FileRenameInfoEx")
         .count()
-        != 2
+        != 1
     {
-        return Err("ambos intentos deben usar FileRenameInfoEx sobre el mismo handle".into());
+        return Err("el único intento debe usar FileRenameInfoEx sobre el mismo handle".into());
     }
     if rename
         .matches("(*info).Anonymous.Flags = extended_flags.unwrap_or(0);")
         .count()
-        != 2
+        != 1
     {
-        return Err("primario y fallback deben materializar exactamente los mismos flags".into());
+        return Err("el único intento debe materializar exactamente una vez los flags".into());
     }
-    if rename.matches("if renamed == 0 {").count() != 2 {
-        return Err(
-            "el fallback solo puede evaluarse si falla el syscall primario; deben comprobarse por separado primario y fallback"
-                .into(),
-        );
+    if rename.matches("if renamed == 0 {").count() != 1 {
+        return Err("el único syscall debe tener exactamente un gate de error".into());
     }
     require(
         rename,
-        "if error.raw_os_error() != Some(ERROR_INVALID_PARAMETER as i32) {\n            return Err(error);\n        }",
-        "todo error distinto de ERROR_INVALID_PARAMETER debe retornar antes del fallback",
+        "target.file_name()",
+        "el destino del único rename debe derivar el nombre simple del target same-directory",
     )?;
-    let captured_error = "let error = std::io::Error::last_os_error();";
-    let captured_at = unique_position(rename, captured_error)?;
-    let classifier = "if error.raw_os_error() != Some(ERROR_INVALID_PARAMETER as i32) {";
-    let classifier_at = unique_position(rename, classifier)?;
-    if captured_at >= classifier_at {
-        return Err("el error del syscall debe capturarse antes de clasificarlo".into());
-    }
-    let error_corridor = &rename[captured_at..classifier_at];
-    if error_corridor.matches("let error").count() != 1 {
-        return Err(
-            "error no puede sombrearse entre last_os_error y la condición ERROR_INVALID_PARAMETER"
-                .into(),
-        );
-    }
-    precedes(
-        rename,
-        "return Err(error);",
-        "let mut wide = wide_path(target);",
-        "otros errores deben retornar antes de resolver el target absoluto",
-    )?;
-    let primary_failure_at = rename
-        .find("if renamed == 0 {")
-        .expect("la cuenta anterior garantiza la rama primaria");
-    let absolute_target_at = unique_position(rename, "let mut wide = wide_path(target);")?;
-    if primary_failure_at >= absolute_target_at {
-        return Err(
-            "el target absoluto pertenece exclusivamente a la rama de fallo primario".into(),
-        );
-    }
     require(
         rename,
-        "    } else {\n        Ok(())\n    }",
-        "el éxito primario debe terminar sin ejecutar el fallback",
+        "wide_path(Path::new(file_name))",
+        "FileName debe serializar solo el nombre simple derivado del target",
     )?;
+    require(
+        rename,
+        "(*info).RootDirectory = ptr::null_mut();",
+        "el rename same-directory por nombre simple debe usar RootDirectory=NULL",
+    )?;
+    for forbidden_relative_protocol in [
+        "(*info).RootDirectory = parent_handle",
+        "ERROR_INVALID_PARAMETER",
+        "CreateFileW(",
+        "target.parent()",
+        "wide_path(target)",
+    ] {
+        reject(
+            rename,
+            forbidden_relative_protocol,
+            "la publicación no puede conservar parent-handle, path completo ni fallback posterior",
+        )?;
+    }
     Ok(())
 }
 
@@ -378,7 +361,7 @@ fn ci24_windows_swap_consumira_next_explicitamente_sin_silenciar_warnings() {
 /// Guardas de mutación — prueban que los oráculos anteriores no son vacuos ni aceptan versiones
 /// plausibles pero incorrectas del protocolo Windows.
 #[test]
-fn guardas_contrafactuales_rechazan_reopen_fallback_flags_y_commit_prematuro() {
+fn guardas_contrafactuales_rechazan_reopen_relative_flags_y_commit_prematuro() {
     let replace = section(
         WINDOWS_VFS_SOURCE,
         "pub(crate) fn replace_durable(candidate: PreparedCandidate, active: &Path)",
@@ -389,6 +372,7 @@ fn guardas_contrafactuales_rechazan_reopen_fallback_flags_y_commit_prematuro() {
         "fn rename_handle_to(\n    target: &Path,\n    handle: HANDLE,\n    extended_flags: Option<u32>,\n)",
         "\nfn wide_path(path: &Path)",
     );
+    assert_ok(windows_replace_contract(replace, rename));
 
     let reopened = replace.replacen(
         "    rename_handle_to(",
@@ -403,17 +387,23 @@ fn guardas_contrafactuales_rechazan_reopen_fallback_flags_y_commit_prematuro() {
     let unconditional = rename.replacen("if renamed == 0 {", "if true {", 1);
     assert_rejected(
         windows_replace_contract(replace, &unconditional),
-        "solo puede evaluarse si falla",
+        "exactamente un gate de error",
     );
 
-    let another_error = rename.replacen(
-        "ERROR_INVALID_PARAMETER as i32",
-        "ERROR_NOT_SUPPORTED as i32",
+    let relative_root = rename.replacen(
+        "(*info).RootDirectory = ptr::null_mut();",
+        "(*info).RootDirectory = parent_handle;",
         1,
     );
     assert_rejected(
-        windows_replace_contract(replace, &another_error),
-        "distinto de ERROR_INVALID_PARAMETER",
+        windows_replace_contract(replace, &relative_root),
+        "RootDirectory=NULL",
+    );
+
+    let full_target = rename.replacen("wide_path(Path::new(file_name))", "wide_path(target)", 1);
+    assert_rejected(
+        windows_replace_contract(replace, &full_target),
+        "solo el nombre simple",
     );
 
     let weakened_flags = replace.replacen(
@@ -444,10 +434,10 @@ fn guardas_contrafactuales_rechazan_reopen_fallback_flags_y_commit_prematuro() {
     );
 }
 
-/// Negativo C5/C6 — la rama SMB solo puede clasificarse con el error del syscall primario. Un
-/// binding posterior fabricado como INVALID_PARAMETER no puede habilitar el fallback.
+/// Negativo C5/C6 — conservar el nombre simple en otra rama no legitima introducir un primer
+/// intento alternativo: el protocolo completo debe contener un solo syscall y un solo target.
 #[test]
-fn c5_c6_contrafactual_rechaza_sombrear_error_capturado_antes_de_clasificar() {
+fn c5_c6_contrafactual_rechaza_anteponer_un_rename_relativo() {
     let replace = section(
         WINDOWS_VFS_SOURCE,
         "pub(crate) fn replace_durable(candidate: PreparedCandidate, active: &Path)",
@@ -460,23 +450,24 @@ fn c5_c6_contrafactual_rechaza_sombrear_error_capturado_antes_de_clasificar() {
     );
     assert_ok(windows_replace_contract(replace, rename));
 
-    let shadowed_error = rename.replacen(
-        "let error = std::io::Error::last_os_error();",
-        "let error = std::io::Error::last_os_error();\n        let error = std::io::Error::from_raw_os_error(ERROR_INVALID_PARAMETER as i32);",
+    let extra_relative = rename.replacen(
+        "let renamed = unsafe {",
+        "let _relative_renamed = unsafe {\n        SetFileInformationByHandle(handle, FileRenameInfoEx, info.cast(), total_bytes as u32)\n    };\n    let renamed = unsafe {",
         1,
     );
     assert_ne!(
-        shadowed_error, rename,
-        "guarda anti-vacuidad: la mutación debe insertar el sombreado tras last_os_error"
+        extra_relative, rename,
+        "guarda anti-vacuidad: la mutación debe anteponer un segundo syscall"
     );
     assert!(
-        shadowed_error.contains(
-            "let error = std::io::Error::from_raw_os_error(ERROR_INVALID_PARAMETER as i32);\n        if error.raw_os_error()"
-        ),
-        "guarda anti-vacuidad: la condición debe observar el error sombreado en el contrafactual"
+        extra_relative
+            .matches("SetFileInformationByHandle(")
+            .count()
+            == rename.matches("SetFileInformationByHandle(").count() + 1,
+        "guarda anti-vacuidad: el contrafactual debe tener exactamente un rename adicional"
     );
     assert_rejected(
-        windows_replace_contract(replace, &shadowed_error),
-        "error no puede sombrearse",
+        windows_replace_contract(replace, &extra_relative),
+        "exactamente un syscall atómico",
     );
 }
