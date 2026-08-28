@@ -16,16 +16,17 @@ use std::sync::OnceLock;
 use rusqlite::{ffi, Connection, OpenFlags};
 use windows_sys::Win32::Foundation::{
     CloseHandle, ERROR_ALREADY_EXISTS, ERROR_FILE_EXISTS, ERROR_FILE_NOT_FOUND,
-    ERROR_INVALID_FUNCTION, ERROR_NOT_SUPPORTED, ERROR_PATH_NOT_FOUND, GENERIC_READ, GENERIC_WRITE,
-    HANDLE, INVALID_HANDLE_VALUE,
+    ERROR_INVALID_FUNCTION, ERROR_INVALID_PARAMETER, ERROR_NOT_SUPPORTED, ERROR_PATH_NOT_FOUND,
+    GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE,
 };
 use windows_sys::Win32::Storage::FileSystem::{
-    CreateFileW, CreateHardLinkW, FileDispositionInfoEx, FileRenameInfo, FileRenameInfoEx,
+    CreateFileW, CreateHardLinkW, FileDispositionInfoEx, FileRenameInfoEx, FlushFileBuffers,
     LockFileEx, ReOpenFile, SetFileInformationByHandle, DELETE, FILE_ATTRIBUTE_NORMAL,
     FILE_DISPOSITION_FLAG_DELETE, FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE,
-    FILE_DISPOSITION_FLAG_POSIX_SEMANTICS, FILE_DISPOSITION_INFO_EX, FILE_FLAG_OPEN_REPARSE_POINT,
-    FILE_FLAG_WRITE_THROUGH, FILE_RENAME_INFO, FILE_SHARE_DELETE, FILE_SHARE_READ,
-    FILE_SHARE_WRITE, LOCKFILE_FAIL_IMMEDIATELY, OPEN_EXISTING,
+    FILE_DISPOSITION_FLAG_POSIX_SEMANTICS, FILE_DISPOSITION_INFO_EX, FILE_FLAG_BACKUP_SEMANTICS,
+    FILE_FLAG_OPEN_REPARSE_POINT, FILE_FLAG_WRITE_THROUGH, FILE_READ_ATTRIBUTES, FILE_RENAME_INFO,
+    FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TRAVERSE, LOCKFILE_FAIL_IMMEDIATELY,
+    OPEN_EXISTING,
 };
 use windows_sys::Win32::System::WindowsProgramming::{
     FILE_RENAME_FLAG_POSIX_SEMANTICS, FILE_RENAME_FLAG_REPLACE_IF_EXISTS,
@@ -349,43 +350,76 @@ fn open_delete_handle(path: &Path) -> std::io::Result<HANDLE> {
     }
 }
 
-pub(crate) fn open(path: &Path) -> rusqlite::Result<Connection> {
+pub(crate) fn open_with_flags(path: &Path, flags: OpenFlags) -> rusqlite::Result<Connection> {
     initialize().map_err(|message| {
         rusqlite::Error::SqliteFailure(
             ffi::Error::new(ffi::SQLITE_CANTOPEN),
             Some(format!("initialize {VFS_NAME}: {message}")),
         )
     })?;
-    Connection::open_with_flags_and_vfs(path, OpenFlags::default(), VFS_NAME)
+    Connection::open_with_flags_and_vfs(path, flags, VFS_NAME)
+}
+
+pub(crate) fn open(path: &Path) -> rusqlite::Result<Connection> {
+    open_with_flags(path, OpenFlags::default())
+}
+
+/// Owns the exact Windows file object exposed by the read-only SQLite validation connection.
+/// The duplicate denies new writers while integrity/FK checks, the pause seam, and publication
+/// complete, so pathname replacement cannot substitute different bytes after validation.
+pub(crate) struct PreparedCandidate {
+    handle: OwnedHandle,
+}
+
+pub(crate) fn prepare_candidate(connection: &Connection) -> std::io::Result<PreparedCandidate> {
+    let mut file: *mut ffi::sqlite3_file = ptr::null_mut();
+    let result = unsafe {
+        ffi::sqlite3_file_control(
+            connection.handle(),
+            b"main\0".as_ptr().cast::<c_char>(),
+            ffi::SQLITE_FCNTL_FILE_POINTER,
+            ptr::addr_of_mut!(file).cast(),
+        )
+    };
+    if result != ffi::SQLITE_OK || file.is_null() {
+        return Err(std::io::Error::other(format!(
+            "sqlite3_file_control SQLITE_FCNTL_FILE_POINTER returned {result}"
+        )));
+    }
+    let original = unsafe { (*file.cast::<WinFilePrefix>()).handle };
+    let handle = unsafe {
+        ReOpenFile(
+            original,
+            GENERIC_READ | GENERIC_WRITE | DELETE,
+            FILE_SHARE_READ | FILE_SHARE_DELETE,
+            FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_WRITE_THROUGH,
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(PreparedCandidate {
+        handle: OwnedHandle(handle),
+    })
+}
+
+impl PreparedCandidate {
+    pub(crate) fn sync(&self) -> std::io::Result<()> {
+        if unsafe { FlushFileBuffers(self.handle.0) } == 0 {
+            Err(std::io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
+    }
 }
 
 /// Publishes a complete candidate while readers and the rollback connection still hold the old
 /// main file open. POSIX replacement keeps those handles attached to the previous file object and
 /// makes later opens resolve the candidate. WRITE_THROUGH also flushes rename metadata on NTFS.
-pub(crate) fn replace_durable(next: &Path, active: &Path) -> std::io::Result<()> {
-    let wide = wide_path(next);
-    let handle = unsafe {
-        CreateFileW(
-            wide.as_ptr(),
-            GENERIC_READ | GENERIC_WRITE | DELETE,
-            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-            ptr::null(),
-            OPEN_EXISTING,
-            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_WRITE_THROUGH,
-            ptr::null_mut(),
-        )
-    };
-    if handle == INVALID_HANDLE_VALUE {
-        return Err(operation_error(
-            "CreateFileW publication source handle",
-            next,
-            std::io::Error::last_os_error(),
-        ));
-    }
-    let handle = OwnedHandle(handle);
+pub(crate) fn replace_durable(candidate: PreparedCandidate, active: &Path) -> std::io::Result<()> {
     rename_handle_to(
         active,
-        handle.0,
+        candidate.handle.0,
         Some(FILE_RENAME_FLAG_REPLACE_IF_EXISTS | FILE_RENAME_FLAG_POSIX_SEMANTICS),
     )
     .map_err(|error| operation_error("FileRenameInfoEx POSIX replace", active, error))
@@ -491,7 +525,38 @@ fn rename_handle_to(
     handle: HANDLE,
     extended_flags: Option<u32>,
 ) -> std::io::Result<()> {
-    let mut wide = wide_path(target);
+    let parent = target.parent();
+    let parent = parent
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let file_name = target.file_name().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "rename target has no file name",
+        )
+    })?;
+    let wide_parent = wide_path(parent);
+    let parent_handle = unsafe {
+        CreateFileW(
+            wide_parent.as_ptr(),
+            FILE_TRAVERSE | FILE_READ_ATTRIBUTES,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            ptr::null(),
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+            ptr::null_mut(),
+        )
+    };
+    if parent_handle == INVALID_HANDLE_VALUE {
+        return Err(operation_error(
+            "CreateFileW rename parent handle",
+            parent,
+            std::io::Error::last_os_error(),
+        ));
+    }
+    let _parent_handle_guard = OwnedHandle(parent_handle);
+
+    let mut wide = wide_path(Path::new(file_name));
     wide.pop();
     let name_bytes = wide.len().checked_mul(2).ok_or_else(|| {
         std::io::Error::new(
@@ -510,12 +575,8 @@ fn rename_handle_to(
     let mut storage = vec![0usize; words];
     let info = storage.as_mut_ptr().cast::<FILE_RENAME_INFO>();
     unsafe {
-        if let Some(flags) = extended_flags {
-            (*info).Anonymous.Flags = flags;
-        } else {
-            (*info).Anonymous.ReplaceIfExists = false;
-        }
-        (*info).RootDirectory = ptr::null_mut();
+        (*info).Anonymous.Flags = extended_flags.unwrap_or(0);
+        (*info).RootDirectory = parent_handle;
         (*info).FileNameLength = name_bytes as u32;
         ptr::copy_nonoverlapping(
             wide.as_ptr(),
@@ -523,16 +584,53 @@ fn rename_handle_to(
             wide.len(),
         );
     }
-    let information_class = if extended_flags.is_some() {
-        FileRenameInfoEx
-    } else {
-        FileRenameInfo
-    };
     let renamed = unsafe {
-        SetFileInformationByHandle(handle, information_class, info.cast(), total_bytes as u32)
+        SetFileInformationByHandle(handle, FileRenameInfoEx, info.cast(), total_bytes as u32)
     };
     if renamed == 0 {
-        Err(std::io::Error::last_os_error())
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() != Some(ERROR_INVALID_PARAMETER as i32) {
+            return Err(error);
+        }
+
+        // Some SMB implementations reject the RootDirectory-relative form. INVALID_PARAMETER is
+        // a pre-mutation failure, so retry exactly once with the same extended flags and an
+        // absolute target. No other error is safe evidence that the first call changed nothing.
+        let mut wide = wide_path(target);
+        wide.pop();
+        let name_bytes = wide.len().checked_mul(2).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "absolute rename target is too long",
+            )
+        })?;
+        let total_bytes = header_bytes.checked_add(name_bytes).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "absolute rename buffer is too large",
+            )
+        })?;
+        let words = total_bytes.div_ceil(std::mem::size_of::<usize>());
+        let mut storage = vec![0usize; words];
+        let info = storage.as_mut_ptr().cast::<FILE_RENAME_INFO>();
+        unsafe {
+            (*info).Anonymous.Flags = extended_flags.unwrap_or(0);
+            (*info).RootDirectory = ptr::null_mut();
+            (*info).FileNameLength = name_bytes as u32;
+            ptr::copy_nonoverlapping(
+                wide.as_ptr(),
+                ptr::addr_of_mut!((*info).FileName).cast::<u16>(),
+                wide.len(),
+            );
+        }
+        let renamed = unsafe {
+            SetFileInformationByHandle(handle, FileRenameInfoEx, info.cast(), total_bytes as u32)
+        };
+        if renamed == 0 {
+            Err(std::io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
     } else {
         Ok(())
     }

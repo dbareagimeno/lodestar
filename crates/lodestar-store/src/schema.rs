@@ -3,7 +3,7 @@
 //! La cache es derivada y desechable: cualquier versión o forma incompatible se elimina y se
 //! vuelve a crear. No existe una migración de filas, y el Markdown del workspace nunca se escribe.
 
-use rusqlite::Connection;
+use rusqlite::{Connection, OpenFlags};
 use std::collections::BTreeMap;
 
 use crate::{error::StoreError, open_sqlite};
@@ -36,9 +36,15 @@ pub(crate) fn open_build_connection(path: &std::path::Path) -> Result<Connection
     Ok(conn)
 }
 
-pub(crate) fn validate_database(path: &std::path::Path) -> Result<(), StoreError> {
-    let conn =
-        open_sqlite(path).map_err(|error| StoreError::Io(format!("integrity_check: {error}")))?;
+pub(crate) fn open_validation_connection(path: &std::path::Path) -> Result<Connection, StoreError> {
+    #[cfg(windows)]
+    let conn = crate::windows_vfs::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    #[cfg(not(windows))]
+    let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    Ok(conn)
+}
+
+pub(crate) fn validate_database(conn: &Connection) -> Result<(), StoreError> {
     let integrity: String = conn
         .query_row("PRAGMA integrity_check", [], |row| row.get(0))
         .map_err(|error| StoreError::Io(format!("integrity_check: {error}")))?;

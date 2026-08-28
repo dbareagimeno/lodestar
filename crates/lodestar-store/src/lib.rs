@@ -113,6 +113,7 @@ impl Store {
     /// Abre (o crea) la cache en `<root>/.lodestar/index.db`. Aplica el DDL; si `user_version`
     /// no coincide, hace un rebuild limpio del esquema. **No** indexa: llama a [`Store::rebuild`].
     pub fn open(root: &Path) -> Result<Self, StoreError> {
+        let root = std::path::absolute(root).map_err(|error| StoreError::Io(error.to_string()))?;
         let dir = root.join(CACHE_DIR);
         std::fs::create_dir_all(&dir).map_err(|e| StoreError::Io(e.to_string()))?;
         let db = dir.join(DB_FILE);
@@ -123,11 +124,8 @@ impl Store {
         // La cache es DESECHABLE: si el fichero está corrupto o el esquema viejo no migra
         // (p. ej. un índice nuevo sobre una columna renombrada), se borra y se recrea limpio
         // en vez de dejar `open()` fallando para siempre.
-        let state = shared_state(root, &db)?;
-        let store = Store {
-            root: root.to_path_buf(),
-            state,
-        };
+        let state = shared_state(&root, &db)?;
+        let store = Store { root, state };
         store.refresh_external_database_under_gate(&db)?;
         unlock_file(&_open_gate).map_err(|error| {
             StoreError::Io(format!(
@@ -201,8 +199,8 @@ impl Store {
         discovered: &lodestar_discovery::DiscoveredInventory,
     ) -> Result<serde_json::Value, StoreError> {
         let _writer = self.writer_guard()?;
-        verify_canonical_discovery_snapshot(&self.root, discovered)?;
         let inventory_window = RssWindow::new()?;
+        verify_canonical_discovery_snapshot(&self.root, discovered)?;
         self.rebuild_from_inventory_with_duration(
             &discovered.documents,
             &discovered.other_files,
@@ -303,16 +301,15 @@ impl Store {
     where
         I: IntoIterator<Item = Result<(RelPath, Option<String>, i64, i64), StoreError>>,
     {
-        let started = Instant::now();
+        let index_started = Instant::now();
+        let index_started_at = inventory_finished_at;
+        let index_rss_window = RssWindow::new()?;
         let next = self.root.join(CACHE_DIR).join("index.db.next");
         remove_cache_files(&next)?;
         let mut trace = SqlTrace::new(&next)?;
         let mut next_conn = schema::open_build_connection(&next)?;
         let sql_audit = SqlAudit::new();
         next_conn.authorizer(Some(sql_audit.authorizer()));
-        let index_started = Instant::now();
-        let index_started_at = inventory_finished_at;
-        let index_rss_window = RssWindow::new()?;
         let tx = next_conn.transaction()?;
         if failpoint_for(&self.root, "untraced_delete_during_build") {
             tx.execute("DELETE FROM documents WHERE 0", [])?;
@@ -413,24 +410,30 @@ impl Store {
         tx.commit()?;
         drop(fts_commit);
         sql_audit.assert_balanced()?;
-        let index_ns = index_started.elapsed().as_nanos() as u64;
-        let index_finished_at = monotonic_ns();
-        let index_rss = index_rss_window.finish(index_finished_at)?;
         trace.footer(false, documents_read, relational_inserts, fts_inserts);
         drop(next_conn);
+        let index_rss_finished_at = monotonic_ns();
+        let index_rss = index_rss_window.finish(index_rss_finished_at)?;
+        let index_ns = index_started.elapsed().as_nanos() as u64;
+        let index_finished_at = monotonic_ns();
 
         // Revalidate the complete canonical snapshot after the streaming pass and before any
         // integrity check/swap. This closes the window where an admitted or non-document entry
         // changes while another body is being projected.
+        let validate_start = Instant::now();
+        let validate_started_at = index_finished_at;
+        let validate_rss_window = RssWindow::new()?;
         verify_rebuild_snapshot(&snapshot)?;
 
         if failpoint_for(&self.root, "corrupt_next_before_integrity") {
             corrupt_sqlite_file(&next)?;
         }
-        let validate_start = Instant::now();
-        let validate_started_at = index_finished_at;
-        let validate_rss_window = RssWindow::new()?;
-        let check = schema::validate_database(&next);
+        let validation_conn = schema::open_validation_connection(&next)?;
+        #[cfg(windows)]
+        let candidate = windows_vfs::prepare_candidate(&validation_conn)
+            .map_err(|error| StoreError::Io(error.to_string()))?;
+        let check = schema::validate_database(&validation_conn);
+        drop(validation_conn);
         match check {
             Ok(()) => trace.lifecycle("integrity_check", "ok"),
             Err(error) => {
@@ -439,10 +442,19 @@ impl Store {
                 return Err(error);
             }
         }
+        #[cfg(windows)]
+        let candidate_sync = candidate.sync();
+        #[cfg(windows)]
+        candidate_sync.map_err(|error| StoreError::Io(error.to_string()))?;
+        #[cfg(not(windows))]
         sync_generation(&next)?;
+        let validate_rss_finished_at = monotonic_ns();
+        let validate_rss = validate_rss_window.finish(validate_rss_finished_at)?;
         let validate_ns = validate_start.elapsed().as_nanos() as u64;
         let validate_finished_at = monotonic_ns();
-        let validate_rss = validate_rss_window.finish(validate_finished_at)?;
+        let swap_started = Instant::now();
+        let swap_started_at = validate_finished_at;
+        let swap_rss_window = RssWindow::new()?;
         if failpoint_for(&self.root, "pause_before_swap") {
             let cache_dir = self.root.join(CACHE_DIR);
             let pause = cache_dir.join("h03-pause-before-swap");
@@ -463,15 +475,18 @@ impl Store {
             trace.footer(true, documents_read, relational_inserts, fts_inserts);
             return Err(StoreError::Io("H03 failpoint before_swap".into()));
         }
-        let swap_started = Instant::now();
-        let swap_started_at = validate_finished_at;
-        let swap_rss_window = RssWindow::new()?;
+        #[cfg(windows)]
+        self.swap_active(&next, candidate)?;
+        #[cfg(not(windows))]
         self.swap_active(&next)?;
+        let swap_rss_finished_at = monotonic_ns();
+        let swap_rss = swap_rss_window.finish(swap_rss_finished_at)?;
         let swap_ns = swap_started.elapsed().as_nanos() as u64;
         let swap_finished_at = monotonic_ns();
-        let swap_rss = swap_rss_window.finish(swap_finished_at)?;
         trace.lifecycle("swap", "ok");
-        let duration_ns = started.elapsed().as_nanos() as u64;
+        let duration_ns = swap_finished_at
+            .saturating_sub(inventory_rss.window_started_at)
+            .max(1);
         let peak_rss = inventory_rss
             .peak_rss_bytes
             .max(index_rss.peak_rss_bytes)
@@ -505,7 +520,11 @@ impl Store {
         }))
     }
 
-    fn swap_active(&self, next: &Path) -> Result<(), StoreError> {
+    fn swap_active(
+        &self,
+        next: &Path,
+        #[cfg(windows)] candidate: windows_vfs::PreparedCandidate,
+    ) -> Result<(), StoreError> {
         let active = self.root.join(CACHE_DIR).join(DB_FILE);
         // Keep an unopened-WAL handle to the current generation so every pre-publication failure
         // can restore a usable disk-backed connection after the old connection has been closed.
@@ -582,17 +601,14 @@ impl Store {
             let _ = std::fs::remove_file(&pause);
             let _ = std::fs::remove_file(&release);
         }
-        if let Err(error) = replace_durable(next, &active) {
-            #[cfg(windows)]
+        #[cfg(windows)]
+        if let Err(error) = replace_durable(candidate, &active) {
             drop(publication);
-            let restoration = activate_published_connection(&standby);
-            *guard = standby;
-            if let Err(restoration) = restoration {
-                return Err(StoreError::Io(format!(
-                    "database publication failed ({error}); restoring active connection failed ({restoration})"
-                )));
-            }
-            return Err(StoreError::Io(error.to_string()));
+            return restore_after_publication_failure(&mut guard, standby, error);
+        }
+        #[cfg(not(windows))]
+        if let Err(error) = replace_durable(next, &active) {
+            return restore_after_publication_failure(&mut guard, standby, error);
         }
         let directory_sync = (|| -> Result<(), StoreError> {
             sync_directory(active.parent().expect("cache directory"))?;
@@ -1591,19 +1607,36 @@ fn checkpoint_active_generation(conn: &Connection, active: &Path) -> Result<(), 
     sync_generation(active)
 }
 
+fn restore_after_publication_failure(
+    guard: &mut Connection,
+    standby: Connection,
+    error: StoreError,
+) -> Result<(), StoreError> {
+    let restoration = activate_published_connection(&standby);
+    *guard = standby;
+    if let Err(restoration) = restoration {
+        return Err(StoreError::Io(format!(
+            "database publication failed ({error}); restoring active connection failed ({restoration})"
+        )));
+    }
+    Err(StoreError::Io(error.to_string()))
+}
+
 /// Replaces the active generation atomically on the same volume and makes the publication
 /// durable before returning. Windows needs the write-through flag because `rename` has no
 /// equivalent durability guarantee for the directory entry.
+#[cfg(windows)]
+fn replace_durable(
+    candidate: windows_vfs::PreparedCandidate,
+    active: &Path,
+) -> Result<(), StoreError> {
+    windows_vfs::replace_durable(candidate, active)
+        .map_err(|error| StoreError::Io(error.to_string()))
+}
+
+#[cfg(not(windows))]
 fn replace_durable(next: &Path, active: &Path) -> Result<(), StoreError> {
-    #[cfg(windows)]
-    {
-        windows_vfs::replace_durable(next, active)
-            .map_err(|error| StoreError::Io(error.to_string()))
-    }
-    #[cfg(not(windows))]
-    {
-        std::fs::rename(next, active).map_err(|error| StoreError::Io(error.to_string()))
-    }
+    std::fs::rename(next, active).map_err(|error| StoreError::Io(error.to_string()))
 }
 
 fn sync_directory(path: &Path) -> Result<(), StoreError> {

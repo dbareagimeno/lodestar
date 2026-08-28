@@ -2,8 +2,9 @@
 //!
 //! La persistencia fisica de `fsync` no ofrece un observable determinista y portatil desde una
 //! integracion. Este test lee exactamente los fuentes que compila `lodestar-store` y fija el
-//! protocolo ratificado completo: ambas validaciones SQLite terminan antes de sincronizar la
-//! generacion, y esa sincronizacion precede al rename y al fsync del directorio.
+//! protocolo ratificado completo: una conexion de validacion read-only ejecuta ambas validaciones
+//! SQLite, se cierra antes de sincronizar el candidato ya preparado, y esa sincronizacion precede
+//! al rename y al fsync inmediato del directorio.
 
 const STORE_SOURCE: &str = include_str!("../src/lib.rs");
 const SCHEMA_SOURCE: &str = include_str!("../src/schema.rs");
@@ -45,23 +46,26 @@ fn assert_precedes(protocol: &str, earlier: &str, later: &str, criterion: &str) 
 fn c5_c6_integridad_y_fk_preceden_sync_generacion_rename_y_fsync_directorio() {
     let validation = section(
         SCHEMA_SOURCE,
-        "pub(crate) fn validate_database(path: &std::path::Path) -> Result<(), StoreError> {",
+        "pub(crate) fn validate_database(",
         "\npub(crate) fn read_user_version(",
     );
     let rebuild = section(
         STORE_SOURCE,
         "    fn rebuild_iter<I>(",
-        "\n    fn swap_active(&self, next: &Path)",
+        "\n    fn swap_active(",
     );
     let swap = section(
         STORE_SOURCE,
-        "    fn swap_active(&self, next: &Path) -> Result<(), StoreError> {",
+        "    fn swap_active(",
         "\n    /// Reabre la conexión compartida",
     );
 
-    // Guardas anti-vacuidad: el helper invocado por el rebuild contiene las dos comprobaciones
-    // normativas, en ese orden, y solo devuelve exito despues de ambas. Al retornar, su `conn`
-    // local ya queda fuera de alcance antes de que el caller pueda sincronizar el fichero.
+    // Guardas anti-vacuidad: el helper recibe la conexion viva preparada por el rebuild y contiene
+    // las dos comprobaciones normativas, en ese orden.
+    assert!(
+        validation.contains("&Connection"),
+        "C5/C6: validate_database debe operar sobre la misma &Connection de validacion"
+    );
     assert_precedes(
         validation,
         "\"PRAGMA integrity_check\"",
@@ -75,34 +79,72 @@ fn c5_c6_integridad_y_fk_preceden_sync_generacion_rename_y_fsync_directorio() {
         "C5/C6: validate_database no puede devolver exito antes de foreign_key_check",
     );
 
-    // Cadena causal del candidato: cerrar la conexion de carga no basta. La llamada que ejecuta
-    // ambos PRAGMA debe terminar antes de la unica sincronizacion de `.next`, y esta antes de
-    // entrar en la ruta que publica el nombre activo.
+    // Cadena causal del candidato: la conexion read-only se abre y produce el candidato preparado;
+    // esa misma conexion ejecuta ambos PRAGMA, se cierra y solo entonces se sincroniza el handle.
     assert_precedes(
         rebuild,
-        "drop(next_conn);",
-        "let check = schema::validate_database(&next);",
-        "guarda anti-vacuidad: la conexion de carga `.next` debe estar cerrada antes de validar",
+        "open_validation_connection(&next)",
+        "prepare_candidate(&validation_conn)",
+        "C5/C6: debe abrirse la conexion de validacion antes de preparar su candidato",
     );
     assert_precedes(
         rebuild,
-        "let check = schema::validate_database(&next);",
-        "sync_generation(&next)?;",
-        "C5/C6: integrity_check + foreign_key_check deben completarse antes de sincronizar `.next`",
+        "prepare_candidate(&validation_conn)",
+        "validate_database(&validation_conn)",
+        "C5/C6: el candidato debe derivarse de la misma conexion antes de integrity/FK",
     );
     assert_precedes(
         rebuild,
-        "sync_generation(&next)?;",
-        "self.swap_active(&next)?;",
-        "C5/C6: la generacion candidata debe sincronizarse antes de publicarla",
+        "validate_database(&validation_conn)",
+        "drop(validation_conn);",
+        "C5/C6: integrity_check + foreign_key_check deben completarse antes de cerrar la conexion",
+    );
+    assert_precedes(
+        rebuild,
+        "drop(validation_conn);",
+        "candidate.sync()",
+        "C5/C6: la conexion de validacion debe cerrarse antes de FlushFileBuffers del candidato",
+    );
+    assert_precedes(
+        rebuild,
+        "candidate.sync()",
+        "pause_before_swap",
+        "C5/C6: el candidato debe sincronizarse antes de la pausa pre-publicacion",
+    );
+    assert_precedes(
+        rebuild,
+        "pause_before_swap",
+        "self.swap_active(&next, candidate)",
+        "C5/C6: la pausa debe preceder la publicacion del mismo candidato preparado",
     );
 
-    // Cadena causal de publicacion: `replace_durable` es el unico rename del protocolo comun y
-    // el fsync del directorio debe ocurrir inmediatamente despues, antes de cualquier exito.
+    // Cadena causal de publicacion: el candidato se pasa de forma explicita al unico rename y el
+    // fsync del directorio aparece como el siguiente paso con efecto, antes de reabrir o confirmar.
     assert_precedes(
         swap,
-        "if let Err(error) = replace_durable(next, &active)",
+        "if let Err(error) = replace_durable(candidate, &active)",
         "sync_directory(active.parent().expect(\"cache directory\"))?",
         "C5/C6: el rename debe preceder al fsync del directorio",
     );
+    let rename_at = unique_position(
+        swap,
+        "if let Err(error) = replace_durable(candidate, &active)",
+    );
+    let after_rename = &swap[rename_at..];
+    let directory_sync_at = unique_position(
+        after_rename,
+        "sync_directory(active.parent().expect(\"cache directory\"))?",
+    );
+    for forbidden in [
+        "open_sqlite(",
+        "activate_published_connection(",
+        ".commit()",
+    ] {
+        if let Some(at) = after_rename.find(forbidden) {
+            assert!(
+                directory_sync_at < at,
+                "C5/C6: el fsync del directorio debe ser inmediato tras rename, antes de `{forbidden}`"
+            );
+        }
+    }
 }

@@ -2,9 +2,10 @@
 //!
 //! Un `fsync` físico no tiene un observable portátil desde una integración y el runner de esta
 //! fase es macOS, por lo que el reemplazo Windows tampoco puede ejecutarse. Estos tests leen el
-//! mismo fuente que compila el crate y fijan las dos propiedades que sí son binarias: después del
-//! rename visible no puede existir una salida fallable antes de la barrera del directorio, y la
-//! rama Windows debe reemplazar `index.db` mediante una única operación del sistema.
+//! mismo fuente que compila el crate y fijan las propiedades binarias del protocolo: el objeto
+//! validado llega por handle a la publicación, el fallback Windows queda acotado a un único error
+//! pre-mutation, y después del rename visible la primera operación fallable es la barrera del
+//! directorio.
 
 const STORE_SOURCE: &str = include_str!("../src/lib.rs");
 const WINDOWS_VFS_SOURCE: &str = include_str!("../src/windows_vfs.rs");
@@ -20,101 +21,88 @@ fn section<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
     &remainder[..end_at]
 }
 
-fn unique_position(haystack: &str, needle: &str) -> usize {
+fn unique_position(haystack: &str, needle: &str) -> Result<usize, String> {
     let positions: Vec<_> = haystack.match_indices(needle).map(|(at, _)| at).collect();
-    assert_eq!(
-        positions.len(),
-        1,
-        "guarda anti-vacuidad: `{needle}` debe identificar exactamente un paso; posiciones={positions:?}"
-    );
-    positions[0]
-}
-
-fn assert_precedes(protocol: &str, earlier: &str, later: &str, reason: &str) {
-    let earlier_at = unique_position(protocol, earlier);
-    let later_at = unique_position(protocol, later);
-    assert!(
-        earlier_at < later_at,
-        "{reason}; orden observado `{later}`@{later_at} antes de `{earlier}`@{earlier_at}"
-    );
-}
-
-/// C5/C6 + ARCH §20.12.2 — el éxito del rename es el punto en el que `index.db` ya muestra la
-/// generación nueva. La sincronización del directorio debe ser el primer paso de éxito posterior:
-/// reabrir SQLite, activar WAL, actualizar identidad o confirmar guards antes de esa barrera puede
-/// fallar, devolver `Err` y dejar sin ejecutar el único `fsync` que hace durable el nombre nuevo.
-#[test]
-fn c5_c6_rename_visible_no_tiene_salida_fallable_antes_del_fsync_del_directorio() {
-    let swap = section(
-        STORE_SOURCE,
-        "    fn swap_active(&self, next: &Path) -> Result<(), StoreError> {",
-        "\n    /// Reabre la conexión compartida",
-    );
-
-    let replace = "if let Err(error) = replace_durable(next, &active)";
-    let success_boundary = "#[cfg(windows)]\n        publication.commit();";
-    let directory_barrier = "sync_directory(active.parent().expect(\"cache directory\"))?";
-
-    // Anti-vacuidad causal: el test inspecciona la ruta real de publicación y las operaciones
-    // fallables reales que han de permanecer después de la barrera, no comentarios ni un helper
-    // desconectado.
-    assert_precedes(
-        swap,
-        replace,
-        success_boundary,
-        "el límite de éxito debe estar después del intento real de reemplazo",
-    );
-    for fallible_after_publish in [
-        "let published = match open_sqlite(&active)",
-        "activation?;",
-        "db_identity(&active).map_err(|error| StoreError::Io(error.to_string()))?",
-    ] {
-        assert_precedes(
-            swap,
-            directory_barrier,
-            fallible_after_publish,
-            "C5/C6: ninguna operación fallable post-rename puede omitir la barrera durable",
-        );
+    if positions.len() != 1 {
+        return Err(format!(
+            "`{needle}` debe identificar exactamente un paso; posiciones={positions:?}"
+        ));
     }
-    assert_precedes(
-        swap,
-        directory_barrier,
-        success_boundary,
-        "C5/C6: el guard reversible tampoco se confirma antes de hacer durable el rename",
+    Ok(positions[0])
+}
+
+fn require(source: &str, needle: &str, reason: &str) -> Result<(), String> {
+    if source.contains(needle) {
+        Ok(())
+    } else {
+        Err(format!("{reason}; falta `{needle}`"))
+    }
+}
+
+fn reject(source: &str, needle: &str, reason: &str) -> Result<(), String> {
+    if source.contains(needle) {
+        Err(format!("{reason}; apareció `{needle}`"))
+    } else {
+        Ok(())
+    }
+}
+
+fn precedes(source: &str, earlier: &str, later: &str, reason: &str) -> Result<(), String> {
+    let earlier_at = unique_position(source, earlier)?;
+    let later_at = unique_position(source, later)?;
+    if earlier_at < later_at {
+        Ok(())
+    } else {
+        Err(format!(
+            "{reason}; orden observado `{later}`@{later_at} antes de `{earlier}`@{earlier_at}"
+        ))
+    }
+}
+
+fn assert_ok(result: Result<(), String>) {
+    result.unwrap_or_else(|error| panic!("guarda anti-vacuidad: {error}"));
+}
+
+fn assert_rejected(result: Result<(), String>, expected_reason: &str) {
+    let error = result.expect_err("la mutación contrafactual debía ser rechazada");
+    assert!(
+        error.contains(expected_reason),
+        "la mutación falló por una razón distinta: esperado `{expected_reason}`, observado `{error}`"
     );
 }
 
-/// C5/C6 + Windows — `retirar index.db` seguido de `instalar index.db.next` deja una ventana real
-/// sin nombre activo si el proceso cae. La implementación Windows debe usar exactamente una
-/// operación `FileRenameInfoEx` con replace-atómico, y el caller no puede soltar su guard antes de
-/// que la barrera durable quede confirmada.
-#[test]
-fn c5_windows_usa_un_solo_replace_atomico_y_protege_su_barrera_durable() {
-    let replace = section(
-        WINDOWS_VFS_SOURCE,
-        "pub(crate) fn replace_durable(next: &Path, active: &Path) -> std::io::Result<()> {",
-        "\n}\n\n/// Rust 1.80 implements `remove_file`",
-    );
-    let rename_primitive = section(
-        WINDOWS_VFS_SOURCE,
-        "fn rename_handle_to(",
-        "\nfn wide_path(path: &Path)",
-    );
-
-    assert_eq!(
-        replace.matches("rename_handle_to(").count(),
-        1,
-        "C5 Windows: la publicación debe contener una única operación de rename/reemplazo"
-    );
-    assert!(
-        replace.contains("FILE_RENAME_FLAG_REPLACE_IF_EXISTS")
-            && replace.contains("FILE_RENAME_FLAG_POSIX_SEMANTICS"),
-        "C5 Windows: FileRenameInfoEx debe reemplazar el nombre existente en una operación"
-    );
-    assert!(
-        replace.contains("FILE_FLAG_WRITE_THROUGH"),
-        "C5/C6 Windows: el handle del candidato debe pedir la barrera durable"
-    );
+fn windows_replace_contract(replace: &str, rename: &str) -> Result<(), String> {
+    for forbidden_path_reopen in [
+        "CreateFileW(",
+        "ReOpenFile(",
+        "Connection::open",
+        "open_sqlite(",
+        "wide_path(candidate",
+    ] {
+        reject(
+            replace,
+            forbidden_path_reopen,
+            "replace_durable debe consumir el handle ya validado sin reabrir el candidato por path",
+        )?;
+    }
+    require(
+        replace,
+        "pub(crate) fn replace_durable(candidate: PreparedCandidate, active: &Path)",
+        "la publicación Windows debe consumir PreparedCandidate por valor",
+    )?;
+    require(
+        replace,
+        "candidate.handle.0",
+        "el syscall debe operar sobre el objeto de fichero conservado desde validación",
+    )?;
+    require(
+        replace,
+        "Some(FILE_RENAME_FLAG_REPLACE_IF_EXISTS | FILE_RENAME_FLAG_POSIX_SEMANTICS)",
+        "el replace principal debe conservar simultáneamente replace-if-exists y POSIX semantics",
+    )?;
+    if replace.matches("rename_handle_to(").count() != 1 {
+        return Err("replace_durable debe delegar exactamente un protocolo de rename".into());
+    }
     for forbidden_two_step in [
         "remove_file(active)",
         "remove_sidecar(active)",
@@ -122,35 +110,309 @@ fn c5_windows_usa_un_solo_replace_atomico_y_protege_su_barrera_durable() {
         "MoveFileExW",
         "std::fs::rename",
     ] {
-        assert!(
-            !replace.contains(forbidden_two_step),
-            "C5 Windows: `{forbidden_two_step}` permitiría retirar el nombre activo fuera del único replace"
+        for protocol in [replace, rename] {
+            reject(
+                protocol,
+                forbidden_two_step,
+                "la publicación no puede retirar el nombre activo fuera del único replace",
+            )?;
+        }
+    }
+
+    if rename.matches("SetFileInformationByHandle(").count() != 2 {
+        return Err(
+            "rename_handle_to debe tener un syscall primario y como máximo un fallback".into(),
         );
     }
-    assert_eq!(
-        rename_primitive
-            .matches("SetFileInformationByHandle(")
-            .count(),
-        1,
-        "C5 Windows: el primitive debe terminar en una sola llamada atómica del sistema"
-    );
-    assert!(
-        rename_primitive.contains("FileRenameInfoEx"),
-        "guarda anti-vacuidad: los flags de reemplazo deben enviarse como FileRenameInfoEx"
-    );
+    if rename
+        .matches("SetFileInformationByHandle(handle, FileRenameInfoEx")
+        .count()
+        != 2
+    {
+        return Err("ambos intentos deben usar FileRenameInfoEx sobre el mismo handle".into());
+    }
+    if rename
+        .matches("(*info).Anonymous.Flags = extended_flags.unwrap_or(0);")
+        .count()
+        != 2
+    {
+        return Err("primario y fallback deben materializar exactamente los mismos flags".into());
+    }
+    if rename.matches("if renamed == 0 {").count() != 2 {
+        return Err(
+            "el fallback solo puede evaluarse si falla el syscall primario; deben comprobarse por separado primario y fallback"
+                .into(),
+        );
+    }
+    require(
+        rename,
+        "if error.raw_os_error() != Some(ERROR_INVALID_PARAMETER as i32) {\n            return Err(error);\n        }",
+        "todo error distinto de ERROR_INVALID_PARAMETER debe retornar antes del fallback",
+    )?;
+    let captured_error = "let error = std::io::Error::last_os_error();";
+    let captured_at = unique_position(rename, captured_error)?;
+    let classifier = "if error.raw_os_error() != Some(ERROR_INVALID_PARAMETER as i32) {";
+    let classifier_at = unique_position(rename, classifier)?;
+    if captured_at >= classifier_at {
+        return Err("el error del syscall debe capturarse antes de clasificarlo".into());
+    }
+    let error_corridor = &rename[captured_at..classifier_at];
+    if error_corridor.matches("let error").count() != 1 {
+        return Err(
+            "error no puede sombrearse entre last_os_error y la condición ERROR_INVALID_PARAMETER"
+                .into(),
+        );
+    }
+    precedes(
+        rename,
+        "return Err(error);",
+        "let mut wide = wide_path(target);",
+        "otros errores deben retornar antes de resolver el target absoluto",
+    )?;
+    let primary_failure_at = rename
+        .find("if renamed == 0 {")
+        .expect("la cuenta anterior garantiza la rama primaria");
+    let absolute_target_at = unique_position(rename, "let mut wide = wide_path(target);")?;
+    if primary_failure_at >= absolute_target_at {
+        return Err(
+            "el target absoluto pertenece exclusivamente a la rama de fallo primario".into(),
+        );
+    }
+    require(
+        rename,
+        "    } else {\n        Ok(())\n    }",
+        "el éxito primario debe terminar sin ejecutar el fallback",
+    )?;
+    Ok(())
+}
 
-    // La guarda de publicación mantiene reversibles los sidecars. Confirmarla antes del paso que
-    // el protocolo común reconoce como barrera permitiría devolver un error posterior sin rollback
-    // ni durabilidad demostrada.
+fn publication_order_contract(swap: &str) -> Result<(), String> {
+    let replace = "if let Err(error) = replace_durable(candidate, &active)";
+    let directory_barrier = "sync_directory(active.parent().expect(\"cache directory\"))?";
+    let commit = "#[cfg(windows)]\n        publication.commit();";
+
+    precedes(
+        swap,
+        replace,
+        directory_barrier,
+        "la barrera debe ocurrir después del replace visible",
+    )?;
+    // Las dos ramas cfg terminan inmediatamente en el bloque común de directory_sync. Así, en
+    // Windows no se puede insertar otra operación fallable entre el Ok del rename y la barrera.
+    require(
+        swap,
+        "#[cfg(not(windows))]\n        if let Err(error) = replace_durable(next, &active) {\n            return restore_after_publication_failure(&mut guard, standby, error);\n        }\n        let directory_sync = (|| -> Result<(), StoreError> {\n            sync_directory(active.parent().expect(\"cache directory\"))?;",
+        "directory_sync debe ser el primer efecto fallable común tras las ramas de rename",
+    )?;
+    for fallible_after_publish in [
+        commit,
+        "let published = match open_sqlite(&active)",
+        "let activation = activate_published_connection(&published);",
+        "activation?;",
+        "db_identity(&active).map_err(|error| StoreError::Io(error.to_string()))?",
+    ] {
+        precedes(
+            swap,
+            directory_barrier,
+            fallible_after_publish,
+            "ningún commit, reopen, activación o identidad puede adelantarse a la barrera durable",
+        )?;
+    }
+    Ok(())
+}
+
+/// C5/C6 + Windows — el candidato se obtiene de la misma conexión de solo lectura que pasa
+/// integridad/FK, se mantiene por handle al cerrar SQLite y `replace_durable` lo consume sin volver
+/// a resolver el pathname susceptible de sustitución.
+#[test]
+fn c5_windows_publica_el_mismo_objeto_validado_sin_reopen_por_path() {
+    let validation = section(
+        STORE_SOURCE,
+        "        let validation_conn = schema::open_validation_connection(&next)?;",
+        "        let validate_ns = validate_start.elapsed().as_nanos() as u64;",
+    );
+    assert_ok(precedes(
+        validation,
+        "let validation_conn = schema::open_validation_connection(&next)?;",
+        "let candidate = windows_vfs::prepare_candidate(&validation_conn)",
+        "PreparedCandidate debe proceder de la conexión de validación",
+    ));
+    assert_ok(precedes(
+        validation,
+        "let candidate = windows_vfs::prepare_candidate(&validation_conn)",
+        "let check = schema::validate_database(&validation_conn);",
+        "el handle debe fijar el objeto exacto que valida SQLite",
+    ));
+    assert_ok(precedes(
+        validation,
+        "let check = schema::validate_database(&validation_conn);",
+        "drop(validation_conn);",
+        "la conexión debe completar la validación antes de cerrarse",
+    ));
+    assert_ok(precedes(
+        validation,
+        "drop(validation_conn);",
+        "let candidate_sync = candidate.sync();",
+        "el handle candidato debe sobrevivir al cierre de la conexión",
+    ));
+
+    let rebuild_to_swap = section(
+        STORE_SOURCE,
+        "        let validation_conn = schema::open_validation_connection(&next)?;",
+        "        let swap_ns = swap_started.elapsed().as_nanos() as u64;",
+    );
+    assert_ok(require(
+        rebuild_to_swap,
+        "self.swap_active(&next, candidate)?;",
+        "el mismo PreparedCandidate debe llegar por valor al swap Windows",
+    ));
+
+    let store_replace = section(
+        STORE_SOURCE,
+        "#[cfg(windows)]\nfn replace_durable(\n    candidate: windows_vfs::PreparedCandidate,\n    active: &Path,\n)",
+        "\n\n#[cfg(not(windows))]",
+    );
+    assert_ok(require(
+        store_replace,
+        "windows_vfs::replace_durable(candidate, active)",
+        "el wrapper cfg(windows) debe reenviar el PreparedCandidate sin convertirlo en path",
+    ));
+    for forbidden_reopen in ["CreateFileW(", "ReOpenFile(", "open_sqlite(", "&next"] {
+        assert_ok(reject(
+            store_replace,
+            forbidden_reopen,
+            "el wrapper replace_durable no puede reabrir el candidato",
+        ));
+    }
+
+    let replace = section(
+        WINDOWS_VFS_SOURCE,
+        "pub(crate) fn replace_durable(candidate: PreparedCandidate, active: &Path)",
+        "\n}\n\n/// Rust 1.80 implements `remove_file`",
+    );
+    let rename = section(
+        WINDOWS_VFS_SOURCE,
+        "fn rename_handle_to(\n    target: &Path,\n    handle: HANDLE,\n    extended_flags: Option<u32>,\n)",
+        "\nfn wide_path(path: &Path)",
+    );
+    assert_ok(windows_replace_contract(replace, rename));
+}
+
+/// C5/C6 — el éxito del rename es el punto visible de la generación nueva. La sincronización del
+/// directorio es el primer efecto fallable posterior; solo después se puede confirmar el guard,
+/// reabrir SQLite, activar la conexión o publicar su identidad.
+#[test]
+fn c5_c6_directory_sync_es_la_primera_barrera_fallable_post_rename() {
     let swap = section(
         STORE_SOURCE,
-        "    fn swap_active(&self, next: &Path) -> Result<(), StoreError> {",
+        "    fn swap_active(\n        &self,\n        next: &Path,\n        #[cfg(windows)] candidate: windows_vfs::PreparedCandidate,\n    )",
         "\n    /// Reabre la conexión compartida",
     );
-    assert_precedes(
-        swap,
-        "sync_directory(active.parent().expect(\"cache directory\"))?",
-        "#[cfg(windows)]\n        publication.commit();",
-        "C5/C6 Windows: la barrera durable debe quedar protegida por PublicationGuard",
+    assert_ok(publication_order_contract(swap));
+}
+
+/// Guardas de mutación — prueban que los oráculos anteriores no son vacuos ni aceptan versiones
+/// plausibles pero incorrectas del protocolo Windows.
+#[test]
+fn guardas_contrafactuales_rechazan_reopen_fallback_flags_y_commit_prematuro() {
+    let replace = section(
+        WINDOWS_VFS_SOURCE,
+        "pub(crate) fn replace_durable(candidate: PreparedCandidate, active: &Path)",
+        "\n}\n\n/// Rust 1.80 implements `remove_file`",
+    );
+    let rename = section(
+        WINDOWS_VFS_SOURCE,
+        "fn rename_handle_to(\n    target: &Path,\n    handle: HANDLE,\n    extended_flags: Option<u32>,\n)",
+        "\nfn wide_path(path: &Path)",
+    );
+
+    let reopened = replace.replacen(
+        "    rename_handle_to(",
+        "    let _reopened = CreateFileW(candidate_path);\n    rename_handle_to(",
+        1,
+    );
+    assert_rejected(
+        windows_replace_contract(&reopened, rename),
+        "sin reabrir el candidato por path",
+    );
+
+    let unconditional = rename.replacen("if renamed == 0 {", "if true {", 1);
+    assert_rejected(
+        windows_replace_contract(replace, &unconditional),
+        "solo puede evaluarse si falla",
+    );
+
+    let another_error = rename.replacen(
+        "ERROR_INVALID_PARAMETER as i32",
+        "ERROR_NOT_SUPPORTED as i32",
+        1,
+    );
+    assert_rejected(
+        windows_replace_contract(replace, &another_error),
+        "distinto de ERROR_INVALID_PARAMETER",
+    );
+
+    let weakened_flags = replace.replacen(
+        "Some(FILE_RENAME_FLAG_REPLACE_IF_EXISTS | FILE_RENAME_FLAG_POSIX_SEMANTICS)",
+        "Some(FILE_RENAME_FLAG_REPLACE_IF_EXISTS)",
+        1,
+    );
+    assert_rejected(
+        windows_replace_contract(&weakened_flags, rename),
+        "replace-if-exists y POSIX semantics",
+    );
+
+    let swap = section(
+        STORE_SOURCE,
+        "    fn swap_active(\n        &self,\n        next: &Path,\n        #[cfg(windows)] candidate: windows_vfs::PreparedCandidate,\n    )",
+        "\n    /// Reabre la conexión compartida",
+    );
+    let without_late_commit =
+        swap.replacen("#[cfg(windows)]\n        publication.commit();", "", 1);
+    let early_commit = without_late_commit.replacen(
+        "        let directory_sync = (|| -> Result<(), StoreError> {",
+        "        #[cfg(windows)]\n        publication.commit();\n        let directory_sync = (|| -> Result<(), StoreError> {",
+        1,
+    );
+    assert_rejected(
+        publication_order_contract(&early_commit),
+        "primer efecto fallable común",
+    );
+}
+
+/// Negativo C5/C6 — la rama SMB solo puede clasificarse con el error del syscall primario. Un
+/// binding posterior fabricado como INVALID_PARAMETER no puede habilitar el fallback.
+#[test]
+fn c5_c6_contrafactual_rechaza_sombrear_error_capturado_antes_de_clasificar() {
+    let replace = section(
+        WINDOWS_VFS_SOURCE,
+        "pub(crate) fn replace_durable(candidate: PreparedCandidate, active: &Path)",
+        "\n}\n\n/// Rust 1.80 implements `remove_file`",
+    );
+    let rename = section(
+        WINDOWS_VFS_SOURCE,
+        "fn rename_handle_to(\n    target: &Path,\n    handle: HANDLE,\n    extended_flags: Option<u32>,\n)",
+        "\nfn wide_path(path: &Path)",
+    );
+    assert_ok(windows_replace_contract(replace, rename));
+
+    let shadowed_error = rename.replacen(
+        "let error = std::io::Error::last_os_error();",
+        "let error = std::io::Error::last_os_error();\n        let error = std::io::Error::from_raw_os_error(ERROR_INVALID_PARAMETER as i32);",
+        1,
+    );
+    assert_ne!(
+        shadowed_error, rename,
+        "guarda anti-vacuidad: la mutación debe insertar el sombreado tras last_os_error"
+    );
+    assert!(
+        shadowed_error.contains(
+            "let error = std::io::Error::from_raw_os_error(ERROR_INVALID_PARAMETER as i32);\n        if error.raw_os_error()"
+        ),
+        "guarda anti-vacuidad: la condición debe observar el error sombreado en el contrafactual"
+    );
+    assert_rejected(
+        windows_replace_contract(replace, &shadowed_error),
+        "error no puede sombrearse",
     );
 }
