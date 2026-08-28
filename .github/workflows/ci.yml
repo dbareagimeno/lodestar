@@ -111,6 +111,10 @@ jobs:
         if: runner.os == 'Windows'
         run: cargo test -p lodestar-store --test e35_h03_ci33_windows_rename_red --locked -- --nocapture
 
+      - name: Publicación SQLite integrada en bench (antes del workspace)
+        if: runner.os == 'Windows'
+        run: cargo test -p lodestar-bench --test e35_h03_ci47_bench_acquisition_red --locked -- --nocapture
+
       - name: Tests
         run: cargo test --workspace --locked
 
