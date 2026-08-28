@@ -9,6 +9,18 @@
 const STORE_SOURCE: &str = include_str!("../src/lib.rs");
 const WINDOWS_VFS_SOURCE: &str = include_str!("../src/windows_vfs.rs");
 
+struct NormalizedSources {
+    store: String,
+    windows_vfs: String,
+}
+
+fn normalized_sources() -> NormalizedSources {
+    NormalizedSources {
+        store: STORE_SOURCE.replace("\r\n", "\n"),
+        windows_vfs: WINDOWS_VFS_SOURCE.replace("\r\n", "\n"),
+    }
+}
+
 fn section<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
     let start_at = source
         .find(start)
@@ -248,8 +260,9 @@ fn windows_next_parameter_contract(swap: &str) -> Result<(), String> {
 /// a resolver el pathname susceptible de sustitución.
 #[test]
 fn c5_windows_publica_el_mismo_objeto_validado_sin_reopen_por_path() {
+    let sources = normalized_sources();
     let validation = section(
-        STORE_SOURCE,
+        &sources.store,
         "        let validation_conn = schema::open_validation_connection(&next)?;",
         "        let validate_ns = validate_start.elapsed().as_nanos() as u64;",
     );
@@ -279,7 +292,7 @@ fn c5_windows_publica_el_mismo_objeto_validado_sin_reopen_por_path() {
     ));
 
     let rebuild_to_swap = section(
-        STORE_SOURCE,
+        &sources.store,
         "        let validation_conn = schema::open_validation_connection(&next)?;",
         "        let swap_ns = swap_started.elapsed().as_nanos() as u64;",
     );
@@ -290,7 +303,7 @@ fn c5_windows_publica_el_mismo_objeto_validado_sin_reopen_por_path() {
     ));
 
     let store_replace = section(
-        STORE_SOURCE,
+        &sources.store,
         "#[cfg(windows)]\nfn replace_durable(\n    candidate: windows_vfs::PreparedCandidate,\n    active: &Path,\n)",
         "\n\n#[cfg(not(windows))]",
     );
@@ -308,12 +321,12 @@ fn c5_windows_publica_el_mismo_objeto_validado_sin_reopen_por_path() {
     }
 
     let replace = section(
-        WINDOWS_VFS_SOURCE,
+        &sources.windows_vfs,
         "pub(crate) fn replace_durable(candidate: PreparedCandidate, active: &Path)",
         "\n}\n\n/// Rust 1.80 implements `remove_file`",
     );
     let rename = section(
-        WINDOWS_VFS_SOURCE,
+        &sources.windows_vfs,
         "fn rename_handle_to(\n    target: &Path,\n    handle: HANDLE,\n    extended_flags: Option<u32>,\n)",
         "\nfn wide_path(path: &Path)",
     );
@@ -325,8 +338,9 @@ fn c5_windows_publica_el_mismo_objeto_validado_sin_reopen_por_path() {
 /// reabrir SQLite, activar la conexión o publicar su identidad.
 #[test]
 fn c5_c6_directory_sync_es_la_primera_barrera_fallable_post_rename() {
+    let sources = normalized_sources();
     let swap = section(
-        STORE_SOURCE,
+        &sources.store,
         "    fn swap_active(\n        &self,\n        next: &Path,\n        #[cfg(windows)] candidate: windows_vfs::PreparedCandidate,\n        #[cfg(windows)] candidate_standby: Connection,\n    )",
         "\n    /// Reabre la conexión compartida",
     );
@@ -338,8 +352,9 @@ fn c5_c6_directory_sync_es_la_primera_barrera_fallable_post_rename() {
 /// el parámetro, mientras publica el `PreparedCandidate` fijado por handle.
 #[test]
 fn ci24_windows_swap_consumira_next_explicitamente_sin_silenciar_warnings() {
+    let sources = normalized_sources();
     let swap = section(
-        STORE_SOURCE,
+        &sources.store,
         "    fn swap_active(\n        &self,\n        next: &Path,\n        #[cfg(windows)] candidate: windows_vfs::PreparedCandidate,\n        #[cfg(windows)] candidate_standby: Connection,\n    )",
         "\n    /// Reabre la conexión compartida",
     );
@@ -375,13 +390,14 @@ fn ci24_windows_swap_consumira_next_explicitamente_sin_silenciar_warnings() {
 /// plausibles pero incorrectas del protocolo Windows.
 #[test]
 fn guardas_contrafactuales_rechazan_reopen_relative_flags_y_commit_prematuro() {
+    let sources = normalized_sources();
     let replace = section(
-        WINDOWS_VFS_SOURCE,
+        &sources.windows_vfs,
         "pub(crate) fn replace_durable(candidate: PreparedCandidate, active: &Path)",
         "\n}\n\n/// Rust 1.80 implements `remove_file`",
     );
     let rename = section(
-        WINDOWS_VFS_SOURCE,
+        &sources.windows_vfs,
         "fn rename_handle_to(\n    target: &Path,\n    handle: HANDLE,\n    extended_flags: Option<u32>,\n)",
         "\nfn wide_path(path: &Path)",
     );
@@ -431,7 +447,7 @@ fn guardas_contrafactuales_rechazan_reopen_relative_flags_y_commit_prematuro() {
     );
 
     let swap = section(
-        STORE_SOURCE,
+        &sources.store,
         "    fn swap_active(\n        &self,\n        next: &Path,\n        #[cfg(windows)] candidate: windows_vfs::PreparedCandidate,\n        #[cfg(windows)] candidate_standby: Connection,\n    )",
         "\n    /// Reabre la conexión compartida",
     );
@@ -452,13 +468,14 @@ fn guardas_contrafactuales_rechazan_reopen_relative_flags_y_commit_prematuro() {
 /// alternativo: el protocolo completo debe contener un solo syscall y un solo target.
 #[test]
 fn c5_c6_contrafactual_rechaza_anteponer_un_rename_relativo() {
+    let sources = normalized_sources();
     let replace = section(
-        WINDOWS_VFS_SOURCE,
+        &sources.windows_vfs,
         "pub(crate) fn replace_durable(candidate: PreparedCandidate, active: &Path)",
         "\n}\n\n/// Rust 1.80 implements `remove_file`",
     );
     let rename = section(
-        WINDOWS_VFS_SOURCE,
+        &sources.windows_vfs,
         "fn rename_handle_to(\n    target: &Path,\n    handle: HANDLE,\n    extended_flags: Option<u32>,\n)",
         "\nfn wide_path(path: &Path)",
     );
