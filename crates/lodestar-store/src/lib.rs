@@ -525,6 +525,8 @@ impl Store {
         next: &Path,
         #[cfg(windows)] candidate: windows_vfs::PreparedCandidate,
     ) -> Result<(), StoreError> {
+        #[cfg(windows)]
+        let _ = next;
         let active = self.root.join(CACHE_DIR).join(DB_FILE);
         // Keep an unopened-WAL handle to the current generation so every pre-publication failure
         // can restore a usable disk-backed connection after the old connection has been closed.

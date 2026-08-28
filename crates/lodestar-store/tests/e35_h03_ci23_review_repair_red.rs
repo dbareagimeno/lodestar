@@ -123,8 +123,8 @@ fn prepared_candidate_contract(preparation: &str) -> Result<(), String> {
     )?;
     contract_unique_position(
         file_pointer_query,
-        "b\"main\\0\".as_ptr().cast::<c_char>(),",
-        "SQLITE_FCNTL_FILE_POINTER debe consultar exactamente la base main",
+        "c\"main\".as_ptr(),",
+        "SQLITE_FCNTL_FILE_POINTER debe consultar exactamente la base main con un literal C idiomático",
     )?;
     contract_unique_position(
         file_pointer_query,
@@ -140,9 +140,7 @@ fn prepared_candidate_contract(preparation: &str) -> Result<(), String> {
     let handle_at = file_pointer_query
         .find("\n            connection.handle(),")
         .unwrap();
-    let main_at = file_pointer_query
-        .find("b\"main\\0\".as_ptr().cast::<c_char>(),")
-        .unwrap();
+    let main_at = file_pointer_query.find("c\"main\".as_ptr(),").unwrap();
     let opcode_at = file_pointer_query
         .find("ffi::SQLITE_FCNTL_FILE_POINTER,")
         .unwrap();
@@ -444,18 +442,28 @@ fn c5_c6_guardas_contrafactuales_rechazan_handle_reabierto_o_poseido_incorrecto(
         "exactamente connection.handle()",
     );
 
-    let another_database = preparation.replacen(
-        "b\"main\\0\".as_ptr().cast::<c_char>(),",
-        "b\"temp\\0\".as_ptr().cast::<c_char>(),",
-        1,
-    );
+    let another_database = preparation.replacen("c\"main\".as_ptr(),", "c\"temp\".as_ptr(),", 1);
     assert_ne!(
         another_database, preparation,
         "guarda anti-vacuidad: la mutación debe encontrar el nombre main"
     );
     assert_contract_rejected(
         prepared_candidate_contract(&another_database),
-        "exactamente la base main",
+        "exactamente la base main con un literal C idiomático",
+    );
+
+    let manual_c_string = preparation.replacen(
+        "c\"main\".as_ptr(),",
+        "b\"main\\0\".as_ptr().cast::<c_char>(),",
+        1,
+    );
+    assert_ne!(
+        manual_c_string, preparation,
+        "guarda anti-vacuidad: la mutación debe encontrar el literal C main"
+    );
+    assert_contract_rejected(
+        prepared_candidate_contract(&manual_c_string),
+        "exactamente la base main con un literal C idiomático",
     );
 
     let unrelated_output = preparation.replacen(

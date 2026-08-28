@@ -376,7 +376,7 @@ pub(crate) fn prepare_candidate(connection: &Connection) -> std::io::Result<Prep
     let result = unsafe {
         ffi::sqlite3_file_control(
             connection.handle(),
-            b"main\0".as_ptr().cast::<c_char>(),
+            c"main".as_ptr(),
             ffi::SQLITE_FCNTL_FILE_POINTER,
             ptr::addr_of_mut!(file).cast(),
         )

@@ -221,6 +221,32 @@ fn publication_order_contract(swap: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn windows_next_parameter_contract(swap: &str) -> Result<(), String> {
+    require(
+        swap,
+        "    fn swap_active(\n        &self,\n        next: &Path,\n        #[cfg(windows)] candidate: windows_vfs::PreparedCandidate,\n    )",
+        "swap_active debe preservar la firma y la semántica path de next en todas las plataformas",
+    )?;
+    for forbidden in [
+        "#[allow(unused)]",
+        "#[allow(unused_variables)]",
+        "#[allow(warnings)]",
+        "_next: &Path",
+    ] {
+        reject(
+            swap,
+            forbidden,
+            "el parámetro next no puede silenciarse con allow ni ocultarse mediante renombrado",
+        )?;
+    }
+    require(
+        swap,
+        "        #[cfg(windows)]\n        let _ = next;",
+        "la compilación Windows debe consumir next explícitamente sin alterar la firma compartida",
+    )?;
+    Ok(())
+}
+
 /// C5/C6 + Windows — el candidato se obtiene de la misma conexión de solo lectura que pasa
 /// integridad/FK, se mantiene por handle al cerrar SQLite y `replace_durable` lo consume sin volver
 /// a resolver el pathname susceptible de sustitución.
@@ -309,6 +335,44 @@ fn c5_c6_directory_sync_es_la_primera_barrera_fallable_post_rename() {
         "\n    /// Reabre la conexión compartida",
     );
     assert_ok(publication_order_contract(swap));
+}
+
+/// CI24 Windows Clippy — `next` sigue siendo parte de la firma portable porque la rama Unix lo
+/// publica por pathname. La rama Windows debe reconocerlo explícitamente, sin `allow` ni renombrar
+/// el parámetro, mientras publica el `PreparedCandidate` fijado por handle.
+#[test]
+fn ci24_windows_swap_consumira_next_explicitamente_sin_silenciar_warnings() {
+    let swap = section(
+        STORE_SOURCE,
+        "    fn swap_active(\n        &self,\n        next: &Path,\n        #[cfg(windows)] candidate: windows_vfs::PreparedCandidate,\n    )",
+        "\n    /// Reabre la conexión compartida",
+    );
+    assert_ok(windows_next_parameter_contract(swap));
+
+    let without_explicit_use =
+        swap.replacen("        #[cfg(windows)]\n        let _ = next;\n", "", 1);
+    assert_ne!(
+        without_explicit_use, swap,
+        "guarda anti-vacuidad: el contrafactual debe retirar el uso Windows explícito de next"
+    );
+    assert_rejected(
+        windows_next_parameter_contract(&without_explicit_use),
+        "debe consumir next explícitamente",
+    );
+
+    let hidden_with_allow = swap.replacen(
+        "        #[cfg(windows)]\n        let _ = next;",
+        "        #[cfg(windows)]\n        #[allow(unused_variables)]\n        let _ = next;",
+        1,
+    );
+    assert_ne!(
+        hidden_with_allow, swap,
+        "guarda anti-vacuidad: el contrafactual debe insertar el allow prohibido"
+    );
+    assert_rejected(
+        windows_next_parameter_contract(&hidden_with_allow),
+        "no puede silenciarse con allow",
+    );
 }
 
 /// Guardas de mutación — prueban que los oráculos anteriores no son vacuos ni aceptan versiones
