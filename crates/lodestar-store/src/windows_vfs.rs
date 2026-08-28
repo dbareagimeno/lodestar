@@ -20,11 +20,12 @@ use windows_sys::Win32::Foundation::{
     GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE,
 };
 use windows_sys::Win32::Storage::FileSystem::{
-    CreateFileW, CreateHardLinkW, FileDispositionInfoEx, FileRenameInfoEx, FlushFileBuffers,
-    LockFileEx, ReOpenFile, SetFileInformationByHandle, DELETE, FILE_ATTRIBUTE_NORMAL,
-    FILE_DISPOSITION_FLAG_DELETE, FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE,
-    FILE_DISPOSITION_FLAG_POSIX_SEMANTICS, FILE_DISPOSITION_INFO_EX, FILE_FLAG_BACKUP_SEMANTICS,
-    FILE_FLAG_OPEN_REPARSE_POINT, FILE_FLAG_WRITE_THROUGH, FILE_READ_ATTRIBUTES, FILE_RENAME_INFO,
+    CreateFileW, CreateHardLinkW, FileDispositionInfoEx, FileIdInfo, FileRenameInfoEx,
+    FlushFileBuffers, GetFileInformationByHandleEx, LockFileEx, ReOpenFile,
+    SetFileInformationByHandle, DELETE, FILE_ATTRIBUTE_NORMAL, FILE_DISPOSITION_FLAG_DELETE,
+    FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE, FILE_DISPOSITION_FLAG_POSIX_SEMANTICS,
+    FILE_DISPOSITION_INFO_EX, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+    FILE_FLAG_WRITE_THROUGH, FILE_ID_INFO, FILE_READ_ATTRIBUTES, FILE_RENAME_INFO,
     FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TRAVERSE, LOCKFILE_FAIL_IMMEDIATELY,
     OPEN_EXISTING,
 };
@@ -483,6 +484,74 @@ pub(crate) fn remove_sidecar(path: &Path) -> std::io::Result<()> {
         return Err(std::io::Error::last_os_error());
     }
     Ok(())
+}
+
+/// Confirms that a SQLite connection reopened after publication owns the same file object that the
+/// active pathname resolves to. On Windows an already-open generation may survive a POSIX replace;
+/// comparing file IDs prevents such a stale handle from being installed in `RootState` silently.
+pub(crate) fn connection_matches_path(
+    connection: &Connection,
+    path: &Path,
+) -> std::io::Result<bool> {
+    let connection_handle = connection_main_handle(connection)?;
+    let path_handle = open_read_handle(path)?;
+    let path_handle = OwnedHandle(path_handle);
+    Ok(file_identity(connection_handle)? == file_identity(path_handle.0)?)
+}
+
+fn connection_main_handle(connection: &Connection) -> std::io::Result<HANDLE> {
+    let mut file: *mut ffi::sqlite3_file = ptr::null_mut();
+    let result = unsafe {
+        ffi::sqlite3_file_control(
+            connection.handle(),
+            c"main".as_ptr(),
+            ffi::SQLITE_FCNTL_FILE_POINTER,
+            ptr::addr_of_mut!(file).cast(),
+        )
+    };
+    if result != ffi::SQLITE_OK || file.is_null() {
+        return Err(std::io::Error::other(format!(
+            "sqlite3_file_control SQLITE_FCNTL_FILE_POINTER returned {result}"
+        )));
+    }
+    Ok(unsafe { (*file.cast::<WinFilePrefix>()).handle })
+}
+
+fn open_read_handle(path: &Path) -> std::io::Result<HANDLE> {
+    let wide = wide_path(path);
+    let handle = unsafe {
+        CreateFileW(
+            wide.as_ptr(),
+            GENERIC_READ,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            ptr::null(),
+            OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
+            ptr::null_mut(),
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(handle)
+    }
+}
+
+fn file_identity(handle: HANDLE) -> std::io::Result<(u64, [u8; 16])> {
+    let mut identity = FILE_ID_INFO::default();
+    let result = unsafe {
+        GetFileInformationByHandleEx(
+            handle,
+            FileIdInfo,
+            ptr::addr_of_mut!(identity).cast(),
+            std::mem::size_of::<FILE_ID_INFO>() as u32,
+        )
+    };
+    if result == 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok((identity.VolumeSerialNumber, identity.FileId.Identifier))
+    }
 }
 
 fn rename_sidecar_tombstone(path: &Path, handle: HANDLE) -> std::io::Result<PathBuf> {

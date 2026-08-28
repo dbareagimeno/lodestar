@@ -433,7 +433,6 @@ impl Store {
         let candidate = windows_vfs::prepare_candidate(&validation_conn)
             .map_err(|error| StoreError::Io(error.to_string()))?;
         let check = schema::validate_database(&validation_conn);
-        drop(validation_conn);
         match check {
             Ok(()) => trace.lifecycle("integrity_check", "ok"),
             Err(error) => {
@@ -442,6 +441,16 @@ impl Store {
                 return Err(error);
             }
         }
+        #[cfg(windows)]
+        let candidate_document_count: i64 = validation_conn
+            .query_row("SELECT COUNT(*) FROM documents", [], |row| row.get(0))
+            .map_err(|error| {
+                StoreError::Io(format!(
+                    "count validated candidate {} before publication: {error}",
+                    next.display()
+                ))
+            })?;
+        drop(validation_conn);
         #[cfg(windows)]
         let candidate_sync = candidate.sync();
         #[cfg(windows)]
@@ -479,6 +488,8 @@ impl Store {
         self.swap_active(&next, candidate)?;
         #[cfg(not(windows))]
         self.swap_active(&next)?;
+        #[cfg(windows)]
+        self.verify_published_document_count(candidate_document_count)?;
         let swap_rss_finished_at = monotonic_ns();
         let swap_rss = swap_rss_window.finish(swap_rss_finished_at)?;
         let swap_ns = swap_started.elapsed().as_nanos() as u64;
@@ -635,6 +646,55 @@ impl Store {
                 return Err(error);
             }
         };
+        #[cfg(windows)]
+        let published = match windows_vfs::connection_matches_path(&published, &active) {
+            Ok(true) => {
+                drop(standby);
+                published
+            }
+            Ok(false) => {
+                // A pathname reopen performed while the unnamed previous generation is still
+                // alive may retain that previous file object on Windows. Close that unauthenticated
+                // reopen, but retain standby as the disk-backed recovery until its replacement has
+                // been opened and authenticated successfully.
+                drop(published);
+                let replacement = match open_sqlite(&active) {
+                    Ok(replacement) => replacement,
+                    Err(error) => {
+                        *guard = standby;
+                        return Err(error);
+                    }
+                };
+                match windows_vfs::connection_matches_path(&replacement, &active) {
+                    Ok(true) => {
+                        drop(standby);
+                        replacement
+                    }
+                    Ok(false) => {
+                        *guard = standby;
+                        return Err(StoreError::Io(
+                            "published SQLite connection does not match the active pathname after stale-handle retry"
+                                .into(),
+                        ));
+                    }
+                    Err(error) => {
+                        *guard = standby;
+                        return Err(StoreError::Io(format!(
+                            "authenticate retried SQLite connection against {}: {error}",
+                            active.display()
+                        )));
+                    }
+                }
+            }
+            Err(error) => {
+                *guard = standby;
+                return Err(StoreError::Io(format!(
+                    "authenticate published SQLite connection against {}: {error}",
+                    active.display()
+                )));
+            }
+        };
+        #[cfg(not(windows))]
         drop(standby);
         let activation = activate_published_connection(&published);
         *guard = published;
@@ -645,6 +705,44 @@ impl Store {
             .db_identity
             .lock()
             .unwrap_or_else(|poison| poison.into_inner()) = identity;
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    fn verify_published_document_count(&self, candidate_count: i64) -> Result<(), StoreError> {
+        let active = self.root.join(CACHE_DIR).join(DB_FILE);
+        let path_connection = schema::open_validation_connection(&active).map_err(|error| {
+            StoreError::Io(format!(
+                "open published pathname {} for row-count authentication: {error}",
+                active.display()
+            ))
+        })?;
+        let path_count: i64 = path_connection
+            .query_row("SELECT COUNT(*) FROM documents", [], |row| row.get(0))
+            .map_err(|error| {
+                StoreError::Io(format!(
+                    "count documents through published pathname {}: {error}",
+                    active.display()
+                ))
+            })?;
+        drop(path_connection);
+
+        let root_state_count: i64 = self
+            .state
+            .conn
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .query_row("SELECT COUNT(*) FROM documents", [], |row| row.get(0))
+            .map_err(|error| {
+                StoreError::Io(format!(
+                    "count documents through published RootState connection: {error}; candidate={candidate_count}; pathname={path_count}"
+                ))
+            })?;
+        if candidate_count != path_count || candidate_count != root_state_count {
+            return Err(StoreError::Io(format!(
+                "published generation row-count mismatch: candidate={candidate_count}; pathname={path_count}; root_state={root_state_count}"
+            )));
+        }
         Ok(())
     }
 
