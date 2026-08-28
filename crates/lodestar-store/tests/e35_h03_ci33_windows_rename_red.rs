@@ -5,11 +5,14 @@
 //! que resuelva `index.db` fuera del directorio de la cache.
 
 #[cfg(windows)]
+#[allow(dead_code)]
 #[path = "../src/windows_vfs.rs"]
 mod windows_vfs;
 
 #[cfg(not(windows))]
 const WINDOWS_VFS_SOURCE: &str = include_str!("../src/windows_vfs.rs");
+#[cfg(not(windows))]
+const HARNESS_SOURCE: &str = include_str!("e35_h03_ci33_windows_rename_red.rs");
 
 #[cfg(windows)]
 fn sqlite_with_sentinel(path: &std::path::Path, sentinel: &str) -> rusqlite::Connection {
@@ -95,6 +98,22 @@ fn c5_c6_win32_publica_candidate_file_id_en_active_sin_tocar_cwd_homonimo() {
 #[cfg(not(windows))]
 #[test]
 fn c5_c6_win32_publica_candidate_file_id_en_active_sin_tocar_cwd_homonimo() {
+    let harness_declarations = HARNESS_SOURCE
+        .split("#[cfg(not(windows))]\nconst WINDOWS_VFS_SOURCE")
+        .next()
+        .expect("guarda anti-vacuidad: prefijo de declaraciones del harness");
+    assert_eq!(
+        harness_declarations.matches("#[allow(dead_code)]").count(),
+        1,
+        "CI34: la excepción dead_code debe existir exactamente una vez y solo en el módulo privado del harness"
+    );
+    assert!(
+        harness_declarations.contains(
+            "#[cfg(windows)]\n#[allow(dead_code)]\n#[path = \"../src/windows_vfs.rs\"]\nmod windows_vfs;"
+        ) && !harness_declarations.contains("#![allow(dead_code)]"),
+        "CI34: dead_code debe acotarse al módulo windows_vfs incluido, nunca al crate de test"
+    );
+
     let start = WINDOWS_VFS_SOURCE
         .find("fn rename_handle_to(")
         .expect("guarda anti-vacuidad: existe el helper real de publicación Win32");
