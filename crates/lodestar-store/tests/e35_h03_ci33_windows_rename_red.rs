@@ -15,6 +15,25 @@ const WINDOWS_VFS_SOURCE: &str = include_str!("../src/windows_vfs.rs");
 const HARNESS_SOURCE: &str = include_str!("e35_h03_ci33_windows_rename_red.rs");
 
 #[cfg(windows)]
+struct CurrentDirGuard(std::path::PathBuf);
+
+#[cfg(windows)]
+impl CurrentDirGuard {
+    fn switch_to(path: &std::path::Path) -> Self {
+        let original = std::env::current_dir().expect("cwd original");
+        std::env::set_current_dir(path).expect("separar cwd del target de cache");
+        Self(original)
+    }
+}
+
+#[cfg(windows)]
+impl Drop for CurrentDirGuard {
+    fn drop(&mut self) {
+        std::env::set_current_dir(&self.0).expect("restaurar cwd tras el syscall");
+    }
+}
+
+#[cfg(windows)]
 fn sqlite_with_sentinel(path: &std::path::Path, sentinel: &str) -> rusqlite::Connection {
     let connection =
         windows_vfs::open(path).expect("abrir SQLite mediante el VFS real de Lodestar");
@@ -34,7 +53,7 @@ fn sentinel(connection: &rusqlite::Connection) -> String {
 }
 
 /// C5/C6 — con la generación anterior todavía abierta, el único `FileRenameInfoEx` debe mover el
-/// mismo FILE_ID que pasó validación al `active` usando su destino NT absoluto. Una apertura
+/// mismo FILE_ID que pasó validación al `active` usando su destino Win32 absoluto preservado. Una apertura
 /// posterior ve el candidato, el handle antiguo conserva el snapshot anterior y un `index.db`
 /// homónimo bajo el cwd —incluso en otra unidad— queda byte a byte intacto.
 #[cfg(windows)]
@@ -62,10 +81,10 @@ fn c5_c6_win32_publica_candidate_file_id_en_active_sin_tocar_cwd_homonimo() {
         .sync()
         .expect("sincronizar candidato antes del swap");
 
-    let original_cwd = std::env::current_dir().expect("cwd original");
-    std::env::set_current_dir(&unrelated_cwd).expect("separar cwd del target de cache");
-    let publication = windows_vfs::replace_durable(candidate, &active);
-    std::env::set_current_dir(&original_cwd).expect("restaurar cwd tras el syscall");
+    let publication = {
+        let _cwd_guard = CurrentDirGuard::switch_to(&unrelated_cwd);
+        windows_vfs::replace_durable(candidate, &active)
+    };
     publication.expect("C5: el swap atómico del candidato válido debe publicarse");
 
     let active_id = windows_vfs::path_identity(&active)
@@ -143,7 +162,8 @@ fn ci41_prepare_candidate_reopen_comparte_lectura_escritura_y_borrado() {
 }
 
 /// El mismo criterio se ejecuta en hosts no Windows como guarda estructural del artefacto que el
-/// harness nativo compilará: un único syscall, destino NT absoluto y `RootDirectory = NULL`.
+/// harness nativo compilará: un único syscall, destino Win32 absoluto preservado y
+/// `RootDirectory = NULL`.
 #[cfg(not(windows))]
 #[test]
 fn c5_c6_win32_publica_candidate_file_id_en_active_sin_tocar_cwd_homonimo() {
@@ -179,13 +199,14 @@ fn c5_c6_win32_publica_candidate_file_id_en_active_sin_tocar_cwd_homonimo() {
     );
     assert!(
         rename.contains("wide_path(target)")
-            && rename.contains("windows_nt_path::to_nt_rename_path(&wide)")
+            && rename.contains("windows_rename_path::validate_win32_rename_path(&wide)")
             && rename.contains("(*info).RootDirectory = ptr::null_mut()")
             && !rename.contains("(*info).RootDirectory = parent_handle")
             && !rename.contains("CreateFileW(")
             && !rename.contains("target.parent()")
             && !rename.contains("target.file_name()")
-            && !rename.contains("wide_path(Path::new(file_name))"),
-        "C5/C6: el artefacto Win32 debe convertir active a destino NT absoluto con RootDirectory=NULL"
+            && !rename.contains("wide_path(Path::new(file_name))")
+            && !rename.contains(r#"\??\"#),
+        "C5/C6: el artefacto Win32 debe preservar active como destino Win32 absoluto con RootDirectory=NULL, sin prefijo Object Manager"
     );
 }

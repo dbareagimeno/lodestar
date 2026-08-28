@@ -33,8 +33,8 @@ use windows_sys::Win32::System::WindowsProgramming::{
 };
 use windows_sys::Win32::System::IO::OVERLAPPED;
 
-#[path = "windows_nt_path.rs"]
-mod windows_nt_path;
+#[path = "windows_rename_path.rs"]
+mod windows_rename_path;
 
 const VFS_NAME: &str = "lodestar-win32-delete-share";
 const VFS_NAME_C: &[u8] = b"lodestar-win32-delete-share\0";
@@ -635,7 +635,7 @@ fn rename_handle_to(
             "rename target is not NUL terminated",
         ));
     }
-    let wide = windows_nt_path::to_nt_rename_path(&wide).map_err(|error| {
+    windows_rename_path::validate_win32_rename_path(&wide).map_err(|error| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             format!("invalid absolute rename target: {error}"),
