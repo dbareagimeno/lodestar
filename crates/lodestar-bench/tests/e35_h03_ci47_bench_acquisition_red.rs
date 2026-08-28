@@ -282,24 +282,51 @@ fn run_acquisition_case(root: &Path, expected: &BTreeSet<String>, utf16_units: u
 }
 
 #[test]
-fn ci48_hijo_bench_publica_snapshot_para_largos_utf16_consecutivos() {
-    let sandbox = tempfile::tempdir().expect("CI48 sandbox de roots consecutivos");
-    let mut previous_units = None;
-    for extra_units in 0..4 {
-        let root = sandbox
-            .path()
-            .join(format!("ci48-root-{}", "x".repeat(extra_units)));
-        fs::create_dir(&root).expect("CI48 root exacto");
-        let utf16_units = root.to_string_lossy().encode_utf16().count();
-        if let Some(previous_units) = previous_units {
-            assert_eq!(
-                utf16_units,
-                previous_units + 1,
-                "CI48 anti-vacuidad: los roots deben cubrir largos UTF-16 consecutivos"
-            );
-        }
-        previous_units = Some(utf16_units);
-        let expected = write_fixture(&root);
-        run_acquisition_case(&root, &expected, utf16_units);
+fn ci49_hijo_bench_cubre_tempdir_directo_y_largos_utf16_consecutivos() {
+    // Conserva primero el root exacto de CI47/E33: ningún directorio anidado cambia su clase de
+    // longitud antes de ejecutar el hijo que produjo el rojo Windows de 66 unidades UTF-16.
+    let direct = tempfile::tempdir().expect("CI49 TempDir directo exacto");
+    let direct_units = direct.path().to_string_lossy().encode_utf16().count();
+    let expected = write_fixture(direct.path());
+    run_acquisition_case(direct.path(), &expected, direct_units);
+
+    // Un TempDir independiente con prefijo vacío revela la longitud fija del parent+sufijo que
+    // usa `tempfile` en este runner. Variar solo el prefijo conserva roots TempDir reales y permite
+    // cubrir el target remoto 66 junto a sus residuos consecutivos, sin anidar el workspace.
+    let calibration = tempfile::Builder::new()
+        .prefix("")
+        .tempdir()
+        .expect("CI49 TempDir de calibración");
+    let base_units = calibration.path().to_string_lossy().encode_utf16().count();
+    let expected = write_fixture(calibration.path());
+    run_acquisition_case(calibration.path(), &expected, base_units);
+
+    let first_target = std::cmp::max(66, base_units);
+    let mut covered_units = BTreeSet::from([direct_units, base_units]);
+    for target_units in first_target..first_target + 4 {
+        let prefix_units = target_units - base_units;
+        let prefix = "x".repeat(prefix_units);
+        let root = tempfile::Builder::new()
+            .prefix(&prefix)
+            .tempdir()
+            .expect("CI49 TempDir con largo UTF-16 dirigido");
+        let actual_units = root.path().to_string_lossy().encode_utf16().count();
+        assert_eq!(
+            actual_units, target_units,
+            "CI49 anti-vacuidad: el builder debe materializar el largo UTF-16 dirigido"
+        );
+        covered_units.insert(actual_units);
+        let expected = write_fixture(root.path());
+        run_acquisition_case(root.path(), &expected, actual_units);
     }
+    assert!(
+        (first_target..first_target + 4).all(|units| covered_units.contains(&units)),
+        "CI49 debe conservar cuatro largos UTF-16 consecutivos; covered={covered_units:?}"
+    );
+
+    #[cfg(windows)]
+    assert!(
+        covered_units.contains(&66),
+        "CI49 debe cubrir exactamente el target remoto de 66 unidades UTF-16; covered={covered_units:?}"
+    );
 }
