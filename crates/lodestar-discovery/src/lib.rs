@@ -1,5 +1,7 @@
 //! Discovery compacta compartida por workspace y store.
 
+pub mod config;
+
 use std::collections::BTreeSet;
 use std::path::Path;
 
@@ -77,13 +79,6 @@ pub enum DiscoveryError {
     Policy(String),
 }
 
-#[derive(Debug, Deserialize, Default)]
-#[serde(rename_all = "camelCase", default)]
-struct ConfigFile {
-    #[serde(default)]
-    discovery: DiscoverySection,
-}
-
 /// Sección `discovery` de la configuración efectiva de un workspace.
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", default, deny_unknown_fields)]
@@ -139,17 +134,20 @@ impl DiscoverySection {
 }
 
 pub fn load_policy(root: &Path) -> Result<DiscoveryPolicy, DiscoveryError> {
-    let path = root.join(".lodestar/config.yaml");
-    let raw = match std::fs::read_to_string(path) {
-        Ok(raw) => raw,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(DiscoveryPolicy::default())
-        }
-        Err(error) => return Err(DiscoveryError::Io(error.to_string())),
-    };
-    let config: ConfigFile =
-        serde_yaml::from_str(&raw).map_err(|error| DiscoveryError::Policy(error.to_string()))?;
+    let config = config::WorkspaceConfig::load(root).map_err(DiscoveryError::Policy)?;
     Ok(config.discovery.policy())
+}
+
+/// Evalúa el filtro `include` para una ruta candidata con la misma implementación que usa el
+/// inventario canónico. En particular, la extensión Markdown se considera equivalente para los
+/// cuatro casings ASCII (`md`, `mD`, `Md`, `MD`) sin relajar el nombre ni los directorios.
+pub fn path_matches_include(
+    root: &Path,
+    policy: &DiscoveryPolicy,
+    path: &RelPath,
+) -> Result<bool, DiscoveryError> {
+    let include = build_overrides(root, &policy.include, false)?;
+    Ok(include_matches(&include, &root.join(path.as_str())))
 }
 
 pub fn discover_inventory(

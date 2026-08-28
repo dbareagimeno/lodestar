@@ -224,7 +224,7 @@ fn publication_order_contract(swap: &str) -> Result<(), String> {
 fn windows_next_parameter_contract(swap: &str) -> Result<(), String> {
     require(
         swap,
-        "    fn swap_active(\n        &self,\n        next: &Path,\n        #[cfg(windows)] candidate: windows_vfs::PreparedCandidate,\n    )",
+        "    fn swap_active(\n        &self,\n        next: &Path,\n        #[cfg(windows)] candidate: windows_vfs::PreparedCandidate,\n        #[cfg(windows)] candidate_standby: Connection,\n    )",
         "swap_active debe preservar la firma y la semántica path de next en todas las plataformas",
     )?;
     for forbidden in [
@@ -289,8 +289,8 @@ fn c5_windows_publica_el_mismo_objeto_validado_sin_reopen_por_path() {
     );
     assert_ok(require(
         rebuild_to_swap,
-        "self.swap_active(&next, candidate)?;",
-        "el mismo PreparedCandidate debe llegar por valor al swap Windows",
+        "self.swap_active(&next, candidate, candidate_standby)?;",
+        "el mismo PreparedCandidate y su fallback ya abierto deben llegar por valor al swap Windows",
     ));
 
     let store_replace = section(
@@ -331,7 +331,7 @@ fn c5_windows_publica_el_mismo_objeto_validado_sin_reopen_por_path() {
 fn c5_c6_directory_sync_es_la_primera_barrera_fallable_post_rename() {
     let swap = section(
         STORE_SOURCE,
-        "    fn swap_active(\n        &self,\n        next: &Path,\n        #[cfg(windows)] candidate: windows_vfs::PreparedCandidate,\n    )",
+        "    fn swap_active(\n        &self,\n        next: &Path,\n        #[cfg(windows)] candidate: windows_vfs::PreparedCandidate,\n        #[cfg(windows)] candidate_standby: Connection,\n    )",
         "\n    /// Reabre la conexión compartida",
     );
     assert_ok(publication_order_contract(swap));
@@ -344,7 +344,7 @@ fn c5_c6_directory_sync_es_la_primera_barrera_fallable_post_rename() {
 fn ci24_windows_swap_consumira_next_explicitamente_sin_silenciar_warnings() {
     let swap = section(
         STORE_SOURCE,
-        "    fn swap_active(\n        &self,\n        next: &Path,\n        #[cfg(windows)] candidate: windows_vfs::PreparedCandidate,\n    )",
+        "    fn swap_active(\n        &self,\n        next: &Path,\n        #[cfg(windows)] candidate: windows_vfs::PreparedCandidate,\n        #[cfg(windows)] candidate_standby: Connection,\n    )",
         "\n    /// Reabre la conexión compartida",
     );
     assert_ok(windows_next_parameter_contract(swap));
@@ -428,7 +428,7 @@ fn guardas_contrafactuales_rechazan_reopen_fallback_flags_y_commit_prematuro() {
 
     let swap = section(
         STORE_SOURCE,
-        "    fn swap_active(\n        &self,\n        next: &Path,\n        #[cfg(windows)] candidate: windows_vfs::PreparedCandidate,\n    )",
+        "    fn swap_active(\n        &self,\n        next: &Path,\n        #[cfg(windows)] candidate: windows_vfs::PreparedCandidate,\n        #[cfg(windows)] candidate_standby: Connection,\n    )",
         "\n    /// Reabre la conexión compartida",
     );
     let without_late_commit =

@@ -259,9 +259,12 @@ pub fn exclusion_reason(
         return Ok(Some(motivo));
     }
 
-    // (3) `include`, el filtro FINAL sobre lo que sobrevivió a (1) y (2).
-    let include = build_include(root, policy)?;
-    if !incluido(&include, Path::new(path.as_str())) {
+    // (3) `include`, el filtro FINAL sobre lo que sobrevivió a (1) y (2). La compilación y la
+    //     equivalencia de casing Markdown pertenecen al inventario compartido: el guard no
+    //     mantiene una segunda interpretación.
+    if !lodestar_discovery::path_matches_include(root, policy, path)
+        .map_err(|error| WorkspaceError::Io(error.to_string()))?
+    {
         return Ok(Some(format!(
             "no casa con ningún glob de `discovery.include` ({:?})",
             policy.include
@@ -500,49 +503,4 @@ fn build_excludes(root: &Path, policy: &DiscoveryPolicy) -> Result<Override, Wor
     builder
         .build()
         .map_err(|e| WorkspaceError::Io(format!("política de descubrimiento inválida: {e}")))
-}
-
-/// Compila [`DiscoveryPolicy::include`] como matcher **independiente** del walker.
-///
-/// Se usa un `Override` (y no un `GlobSet` a pelo) para que los globs de `include` conserven
-/// exactamente la misma semántica `.gitignore` que tenían cuando iban dentro del `Override` del
-/// walker —`**/*.md` casa igual en la raíz que a diez niveles— y para que un glob mal escrito dé
-/// el mismo error que los de `exclude`. Lo que cambia no es cómo casa `include`, sino **cuándo** se
-/// consulta: ver [`discover`].
-fn build_include(root: &Path, policy: &DiscoveryPolicy) -> Result<Override, WorkspaceError> {
-    let mut builder = OverrideBuilder::new(root);
-    for glob in &policy.include {
-        builder.add(glob).map_err(|e| glob_invalido(glob, e))?;
-    }
-    builder
-        .build()
-        .map_err(|e| WorkspaceError::Io(format!("política de descubrimiento inválida: {e}")))
-}
-
-/// ¿Pasa `path` (un no-directorio) el filtro `include`?
-///
-/// Se consulta con la ruta completa que entrega el walker, igual que hace `ignore` con su propio
-/// `Override`: el matcher se construyó con la misma raíz y le quita el prefijo él solo. Un
-/// `include` vacío da un matcher vacío, que no casa con nada — coherente con «la config limita,
-/// nunca habilita»: una lista blanca sin entradas no incluye nada.
-fn incluido(include: &Override, path: &Path) -> bool {
-    if include.matched(path, false).is_whitelist() {
-        return true;
-    }
-    // E24-H12: `**/*.md` es un glob sensible a la capitalización, así que un `README.MD` guardado
-    // por una herramienta de Windows quedaba **invisible en silencio**: ni entraba en el
-    // inventario, ni se podía consultar, ni un enlace a él resolvía — y nada lo decía. En un
-    // volumen case-insensitive (macOS, Windows) es además literalmente el mismo fichero que
-    // `README.md`.
-    //
-    // Se reintenta el match con la extensión en minúsculas, de modo que solo cambia la
-    // capitalización de la EXTENSIÓN: el resto del glob (directorios, nombre) sigue exacto, y un
-    // `include` personalizado del usuario se sigue respetando tal cual.
-    match path.extension().and_then(|e| e.to_str()) {
-        Some(ext) if ext != ext.to_ascii_lowercase() => {
-            let bajado = path.with_extension(ext.to_ascii_lowercase());
-            include.matched(&bajado, false).is_whitelist()
-        }
-        _ => false,
-    }
 }

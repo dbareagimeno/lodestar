@@ -83,7 +83,7 @@ fn c5_c6_integridad_y_fk_preceden_sync_generacion_rename_y_fsync_directorio() {
     // esa misma conexion ejecuta ambos PRAGMA, se cierra y solo entonces se sincroniza el handle.
     assert_precedes(
         rebuild,
-        "open_validation_connection(&next)",
+        "let validation_conn = schema::open_validation_connection(&next)?;",
         "prepare_candidate(&validation_conn)",
         "C5/C6: debe abrirse la conexion de validacion antes de preparar su candidato",
     );
@@ -114,7 +114,7 @@ fn c5_c6_integridad_y_fk_preceden_sync_generacion_rename_y_fsync_directorio() {
     assert_precedes(
         rebuild,
         "pause_before_swap",
-        "self.swap_active(&next, candidate)",
+        "self.swap_active(&next, candidate, candidate_standby)?;",
         "C5/C6: la pausa debe preceder la publicacion del mismo candidato preparado",
     );
 

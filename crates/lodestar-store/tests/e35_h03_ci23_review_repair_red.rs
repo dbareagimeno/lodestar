@@ -334,7 +334,7 @@ fn c5_c6_windows_publica_el_mismo_handle_validado_sin_reabrir_next_por_path() {
 
     assert_precedes(
         rebuild,
-        "open_validation_connection(&next)",
+        "let validation_conn = schema::open_validation_connection(&next)?;",
         "prepare_candidate(&validation_conn)",
         "C5/C6 Windows: open read-only validation Connection before deriving its file object",
     );
@@ -365,7 +365,7 @@ fn c5_c6_windows_publica_el_mismo_handle_validado_sin_reabrir_next_por_path() {
     assert_precedes(
         rebuild,
         "pause_before_swap",
-        "self.swap_active(&next, candidate)",
+        "self.swap_active(&next, candidate, candidate_standby)?;",
         "C5/C6 Windows: pass the same candidate explicitly across the pause into publication",
     );
 

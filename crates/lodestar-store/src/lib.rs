@@ -460,6 +460,13 @@ impl Store {
         }
         let validation_conn = schema::open_validation_connection(&next)?;
         #[cfg(windows)]
+        let candidate_standby = schema::open_validation_connection(&next).map_err(|error| {
+            StoreError::Io(format!(
+                "open validated candidate fallback {}: {error}",
+                next.display()
+            ))
+        })?;
+        #[cfg(windows)]
         let candidate = windows_vfs::prepare_candidate(&validation_conn)
             .map_err(|error| StoreError::Io(error.to_string()))?;
         let check = schema::validate_database(&validation_conn);
@@ -482,6 +489,20 @@ impl Store {
             })?;
         #[cfg(windows)]
         let candidate_identity = candidate.identity();
+        #[cfg(windows)]
+        let candidate_standby_identity = windows_vfs::connection_identity(&candidate_standby)
+            .map_err(|error| {
+                StoreError::Io(format!(
+                    "authenticate validated candidate fallback {}: {error}",
+                    next.display()
+                ))
+            })?;
+        #[cfg(windows)]
+        if candidate_standby_identity != candidate_identity {
+            return Err(StoreError::Io(format!(
+                "validated candidate fallback identity mismatch: candidate_id={candidate_identity:?}; fallback_id={candidate_standby_identity:?}"
+            )));
+        }
         drop(validation_conn);
         #[cfg(windows)]
         let candidate_sync = candidate.sync();
@@ -517,7 +538,7 @@ impl Store {
             return Err(StoreError::Io("H03 failpoint before_swap".into()));
         }
         #[cfg(windows)]
-        self.swap_active(&next, candidate)?;
+        self.swap_active(&next, candidate, candidate_standby)?;
         #[cfg(not(windows))]
         self.swap_active(&next)?;
         #[cfg(windows)]
@@ -567,32 +588,12 @@ impl Store {
         &self,
         next: &Path,
         #[cfg(windows)] candidate: windows_vfs::PreparedCandidate,
+        #[cfg(windows)] candidate_standby: Connection,
     ) -> Result<(), StoreError> {
         #[cfg(windows)]
         let _ = next;
         #[cfg(windows)]
         let candidate_identity = candidate.identity();
-        #[cfg(windows)]
-        let candidate_standby = schema::open_validation_connection(next).map_err(|error| {
-            StoreError::Io(format!(
-                "open validated candidate fallback {}: {error}",
-                next.display()
-            ))
-        })?;
-        #[cfg(windows)]
-        let candidate_standby_identity = windows_vfs::connection_identity(&candidate_standby)
-            .map_err(|error| {
-                StoreError::Io(format!(
-                    "authenticate validated candidate fallback {}: {error}",
-                    next.display()
-                ))
-            })?;
-        #[cfg(windows)]
-        if candidate_standby_identity != candidate_identity {
-            return Err(StoreError::Io(format!(
-                "validated candidate fallback identity mismatch: candidate_id={candidate_identity:?}; fallback_id={candidate_standby_identity:?}"
-            )));
-        }
         let active = self.root.join(CACHE_DIR).join(DB_FILE);
         // Keep an unopened-WAL handle to the current generation so every pre-publication failure
         // can restore a usable disk-backed connection after the old connection has been closed.

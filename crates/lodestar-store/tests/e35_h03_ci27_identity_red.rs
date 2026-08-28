@@ -122,12 +122,12 @@ fn published_identity_contract(store: &str, windows: &str) -> Result<(), String>
     precedes(
         rebuild,
         "let candidate_identity = candidate.identity();",
-        "self.swap_active(&next, candidate)?;",
+        "self.swap_active(&next, candidate, candidate_standby)?;",
         "C5/C6: conservar candidate_id antes de consumir el handle en el rename",
     )?;
     precedes(
         rebuild,
-        "self.swap_active(&next, candidate)?;",
+        "self.swap_active(&next, candidate, candidate_standby)?;",
         "self.verify_published_document_count(candidate_document_count, candidate_identity)?;",
         "C5/C6: autenticar candidate_id solo después del swap",
     )?;
