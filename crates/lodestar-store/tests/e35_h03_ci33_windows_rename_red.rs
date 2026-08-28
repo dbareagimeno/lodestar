@@ -52,6 +52,45 @@ fn sentinel(connection: &rusqlite::Connection) -> String {
         .expect("leer el sentinela de generación")
 }
 
+#[cfg(windows)]
+fn path_diagnostics(label: &str, path: &std::path::Path) -> String {
+    let size = std::fs::metadata(path)
+        .map(|metadata| metadata.len().to_string())
+        .unwrap_or_else(|error| format!("error:{error}"));
+    let identity = windows_vfs::path_identity(path)
+        .map(|identity| format!("{identity:?}"))
+        .unwrap_or_else(|error| format!("error:{error}"));
+    format!(
+        "{label}={{path:{}, exists:{}, size:{size}, file_id:{identity}}}",
+        path.display(),
+        path.exists()
+    )
+}
+
+#[cfg(windows)]
+fn cache_diagnostics(
+    cache: &std::path::Path,
+    active: &std::path::Path,
+    next: &std::path::Path,
+) -> String {
+    let siblings = std::fs::read_dir(cache)
+        .map(|entries| {
+            entries
+                .map(|entry| match entry {
+                    Ok(entry) => path_diagnostics("sibling", &entry.path()),
+                    Err(error) => format!("sibling={{error:{error}}}"),
+                })
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+        .unwrap_or_else(|error| format!("read_dir_error:{error}"));
+    format!(
+        "{}; {}; cache_siblings=[{siblings}]",
+        path_diagnostics("active", active),
+        path_diagnostics("next", next)
+    )
+}
+
 /// C5/C6 — con la generación anterior todavía abierta, el único `FileRenameInfoEx` debe mover el
 /// mismo FILE_ID que pasó validación al `active` usando su destino Win32 absoluto preservado. Una apertura
 /// posterior ve el candidato, el handle antiguo conserva el snapshot anterior y un `index.db`
@@ -73,9 +112,19 @@ fn c5_c6_win32_publica_candidate_file_id_en_active_sin_tocar_cwd_homonimo() {
 
     let old = sqlite_with_sentinel(&active, "old-generation");
     let candidate_connection = sqlite_with_sentinel(&next, "candidate-generation");
+    let candidate_standby =
+        windows_vfs::open(&next).expect("abrir candidate_standby antes de fijar el handle");
     let candidate = windows_vfs::prepare_candidate(&candidate_connection)
         .expect("fijar por handle el objeto candidato validado");
     let candidate_id = candidate.identity();
+    let candidate_standby_id_before = windows_vfs::connection_identity(&candidate_standby)
+        .expect("identificar candidate_standby antes de publicar");
+    assert_eq!(
+        candidate_standby_id_before,
+        candidate_id,
+        "C5/C6 anti-vacuidad: candidate_standby debe autenticar el mismo objeto preparado antes del swap; candidate={candidate_id:?}; candidate_standby={candidate_standby_id_before:?}; {}",
+        cache_diagnostics(&cache, &active, &next)
+    );
     drop(candidate_connection);
     candidate
         .sync()
@@ -85,30 +134,67 @@ fn c5_c6_win32_publica_candidate_file_id_en_active_sin_tocar_cwd_homonimo() {
         let _cwd_guard = CurrentDirGuard::switch_to(&unrelated_cwd);
         windows_vfs::replace_durable(candidate, &active)
     };
-    publication.expect("C5: el swap atómico del candidato válido debe publicarse");
+    publication.unwrap_or_else(|error| {
+        panic!(
+            "C5: el swap atómico del candidato válido debe publicarse: {error}; candidate={candidate_id:?}; candidate_standby={:?}; {}",
+            windows_vfs::connection_identity(&candidate_standby),
+            cache_diagnostics(&cache, &active, &next)
+        )
+    });
+
+    let diagnostics_after_swap = cache_diagnostics(&cache, &active, &next);
+    assert!(
+        !next.exists(),
+        "C5: FileRenameInfoEx devolvió éxito pero el pathname .next sigue presente; candidate={candidate_id:?}; candidate_standby={:?}; {diagnostics_after_swap}",
+        windows_vfs::connection_identity(&candidate_standby)
+    );
 
     let active_id = windows_vfs::path_identity(&active)
         .expect("identificar el pathname publicado con un handle nuevo");
     assert_eq!(
         active_id, candidate_id,
-        "rojo causal CI33: FileRenameInfoEx devolvió éxito pero active conserva otro FILE_ID; candidate={candidate_id:?}; active={active_id:?}"
+        "rojo causal CI45: FileRenameInfoEx devolvió éxito pero active conserva otro FILE_ID; candidate={candidate_id:?}; active={active_id:?}; candidate_standby={:?}; {diagnostics_after_swap}",
+        windows_vfs::connection_identity(&candidate_standby)
     );
 
-    let published = windows_vfs::open(&active).expect("abrir la generación por el pathname final");
+    let published = windows_vfs::open(&active).unwrap_or_else(|error| {
+        panic!(
+            "C5: abrir la generación por el pathname final: {error}; candidate={candidate_id:?}; candidate_standby={:?}; {diagnostics_after_swap}",
+            windows_vfs::connection_identity(&candidate_standby)
+        )
+    });
+    let published_id = windows_vfs::connection_identity(&published)
+        .expect("identificar la nueva conexión abierta desde active");
+    assert_eq!(
+        published_id, candidate_id,
+        "rojo causal CI45: la nueva conexión active debe conservar candidate_id; candidate={candidate_id:?}; root_state={published_id:?}; candidate_standby={:?}; {diagnostics_after_swap}",
+        windows_vfs::connection_identity(&candidate_standby)
+    );
+    let candidate_standby_id_after = windows_vfs::connection_identity(&candidate_standby)
+        .expect("candidate_standby debe seguir identificable después del rename");
+    assert_eq!(
+        candidate_standby_id_after, candidate_id,
+        "C6: candidate_standby debe seguir anclado al objeto candidato tras el rename; candidate={candidate_id:?}; candidate_standby={candidate_standby_id_after:?}; root_state={published_id:?}; {diagnostics_after_swap}"
+    );
     assert_eq!(
         sentinel(&published),
         "candidate-generation",
-        "C5: toda apertura nueva debe observar exactamente el snapshot candidato"
+        "C5: toda apertura nueva debe observar exactamente el snapshot candidato; candidate={candidate_id:?}; root_state={published_id:?}; {diagnostics_after_swap}"
+    );
+    assert_eq!(
+        sentinel(&candidate_standby),
+        "candidate-generation",
+        "C6: candidate_standby debe seguir observando el snapshot candidato; candidate={candidate_id:?}; candidate_standby={candidate_standby_id_after:?}; {diagnostics_after_swap}"
     );
     assert_eq!(
         sentinel(&old),
         "old-generation",
-        "C6: el handle previo debe conservar consultable el snapshot anterior"
+        "C6: el handle previo debe conservar consultable el snapshot anterior; candidate={candidate_id:?}; active={active_id:?}; root_state={published_id:?}; {diagnostics_after_swap}"
     );
     assert_eq!(
         std::fs::read(&cwd_homonym).expect("releer homónimo del cwd"),
         b"CI33-CWD-MUST-NOT-CHANGE\n",
-        "C6: publicar la cache no puede reemplazar un pathname homónimo resuelto contra el cwd"
+        "C6: publicar la cache no puede reemplazar un pathname homónimo resuelto contra el cwd; candidate={candidate_id:?}; active={active_id:?}; root_state={published_id:?}; {diagnostics_after_swap}"
     );
 }
 
@@ -167,7 +253,8 @@ fn ci41_prepare_candidate_reopen_comparte_lectura_escritura_y_borrado() {
 #[cfg(not(windows))]
 #[test]
 fn c5_c6_win32_publica_candidate_file_id_en_active_sin_tocar_cwd_homonimo() {
-    let harness_declarations = HARNESS_SOURCE
+    let normalized_harness = HARNESS_SOURCE.replace("\r\n", "\n");
+    let harness_declarations = normalized_harness
         .split("#[cfg(not(windows))]\nconst WINDOWS_VFS_SOURCE")
         .next()
         .expect("guarda anti-vacuidad: prefijo de declaraciones del harness");
@@ -182,6 +269,51 @@ fn c5_c6_win32_publica_candidate_file_id_en_active_sin_tocar_cwd_homonimo() {
         ) && !harness_declarations.contains("#![allow(dead_code)]"),
         "CI34: dead_code debe acotarse al módulo windows_vfs incluido, nunca al crate de test"
     );
+
+    let native_start = normalized_harness
+        .find(concat!(
+            "#[cfg(windows)]\n#[test]\n",
+            "fn c5_c6_win32_publica_candidate_file_id_en_active_sin_tocar_cwd_homonimo()"
+        ))
+        .expect("CI45 anti-vacuidad: existe el harness nativo exacto");
+    let native_tail = &normalized_harness[native_start..];
+    let native_end = native_tail
+        .find("\n/// CI41")
+        .expect("CI45 anti-vacuidad: el harness nativo termina antes de CI41");
+    let native_test = &native_tail[..native_end];
+    let mut previous = None;
+    for marker in [
+        "let candidate_standby =",
+        "let candidate = windows_vfs::prepare_candidate(&candidate_connection)",
+        "let candidate_standby_id_before =",
+        "windows_vfs::replace_durable(candidate, &active)",
+        "!next.exists()",
+        "let active_id = windows_vfs::path_identity(&active)",
+        "let published = windows_vfs::open(&active)",
+        "let published_id = windows_vfs::connection_identity(&published)",
+        "let candidate_standby_id_after =",
+        "sentinel(&published)",
+        "sentinel(&candidate_standby)",
+        "sentinel(&old)",
+        "std::fs::read(&cwd_homonym)",
+    ] {
+        let positions: Vec<_> = native_test
+            .match_indices(marker)
+            .map(|(at, _)| at)
+            .collect();
+        assert_eq!(
+            positions.len(),
+            1,
+            "CI45 anti-vacuidad: `{marker}` debe identificar exactamente una fase del harness; posiciones={positions:?}"
+        );
+        if let Some(previous) = previous {
+            assert!(
+                previous < positions[0],
+                "CI45: la topología del harness está fuera de orden antes de `{marker}`"
+            );
+        }
+        previous = Some(positions[0]);
+    }
 
     let start = WINDOWS_VFS_SOURCE
         .find("fn rename_handle_to(")
