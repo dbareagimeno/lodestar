@@ -34,9 +34,9 @@ fn sentinel(connection: &rusqlite::Connection) -> String {
 }
 
 /// C5/C6 — con la generación anterior todavía abierta, el único `FileRenameInfoEx` debe mover el
-/// mismo FILE_ID que pasó validación al `active` same-directory usando solo su nombre simple. Una
-/// apertura posterior ve el candidato, el handle antiguo conserva el snapshot anterior y un
-/// `index.db` homónimo bajo el cwd queda byte a byte intacto.
+/// mismo FILE_ID que pasó validación al `active` usando su destino NT absoluto. Una apertura
+/// posterior ve el candidato, el handle antiguo conserva el snapshot anterior y un `index.db`
+/// homónimo bajo el cwd —incluso en otra unidad— queda byte a byte intacto.
 #[cfg(windows)]
 #[test]
 fn c5_c6_win32_publica_candidate_file_id_en_active_sin_tocar_cwd_homonimo() {
@@ -94,7 +94,7 @@ fn c5_c6_win32_publica_candidate_file_id_en_active_sin_tocar_cwd_homonimo() {
 }
 
 /// El mismo criterio se ejecuta en hosts no Windows como guarda estructural del artefacto que el
-/// harness nativo compilará: un único syscall, nombre simple y `RootDirectory = NULL`.
+/// harness nativo compilará: un único syscall, destino NT absoluto y `RootDirectory = NULL`.
 #[cfg(not(windows))]
 #[test]
 fn c5_c6_win32_publica_candidate_file_id_en_active_sin_tocar_cwd_homonimo() {
@@ -129,13 +129,14 @@ fn c5_c6_win32_publica_candidate_file_id_en_active_sin_tocar_cwd_homonimo() {
         "rojo causal CI33: la topología actual aún permite un relative-primary y un segundo syscall; la publicación C5 debe ser un único swap atómico"
     );
     assert!(
-        rename.contains("target.file_name()")
-            && rename.contains("wide_path(Path::new(file_name))")
+        rename.contains("wide_path(target)")
+            && rename.contains("windows_nt_path::to_nt_rename_path(&wide)")
             && rename.contains("(*info).RootDirectory = ptr::null_mut()")
             && !rename.contains("(*info).RootDirectory = parent_handle")
             && !rename.contains("CreateFileW(")
             && !rename.contains("target.parent()")
-            && !rename.contains("wide_path(target)"),
-        "C5/C6: el artefacto Win32 debe serializar solo target.file_name() con RootDirectory=NULL"
+            && !rename.contains("target.file_name()")
+            && !rename.contains("wide_path(Path::new(file_name))"),
+        "C5/C6: el artefacto Win32 debe convertir active a destino NT absoluto con RootDirectory=NULL"
     );
 }

@@ -33,6 +33,9 @@ use windows_sys::Win32::System::WindowsProgramming::{
 };
 use windows_sys::Win32::System::IO::OVERLAPPED;
 
+#[path = "windows_nt_path.rs"]
+mod windows_nt_path;
+
 const VFS_NAME: &str = "lodestar-win32-delete-share";
 const VFS_NAME_C: &[u8] = b"lodestar-win32-delete-share\0";
 const WIN32_VFS_NAME_C: &[u8] = b"win32\0";
@@ -625,14 +628,19 @@ fn rename_handle_to(
     handle: HANDLE,
     extended_flags: Option<u32>,
 ) -> std::io::Result<()> {
-    let file_name = target.file_name().ok_or_else(|| {
+    let mut wide = wide_path(target);
+    if wide.pop() != Some(0) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "rename target is not NUL terminated",
+        ));
+    }
+    let wide = windows_nt_path::to_nt_rename_path(&wide).map_err(|error| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
-            "rename target has no file name",
+            format!("invalid absolute rename target: {error}"),
         )
     })?;
-    let mut wide = wide_path(Path::new(file_name));
-    wide.pop();
     let name_bytes = wide.len().checked_mul(2).ok_or_else(|| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidInput,

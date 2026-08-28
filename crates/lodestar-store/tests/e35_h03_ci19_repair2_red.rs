@@ -3,8 +3,8 @@
 //! Un `fsync` físico no tiene un observable portátil desde una integración y el runner de esta
 //! fase es macOS, por lo que el reemplazo Windows tampoco puede ejecutarse. Estos tests leen el
 //! mismo fuente que compila el crate y fijan las propiedades binarias del protocolo: el objeto
-//! validado llega por handle a una única publicación same-directory con nombre simple inequívoco,
-//! y después del rename visible la primera operación fallable es la barrera del directorio.
+//! validado llega por handle a una única publicación con destino absoluto NT inequívoco, y después
+//! del rename visible la primera operación fallable es la barrera del directorio.
 
 const STORE_SOURCE: &str = include_str!("../src/lib.rs");
 const WINDOWS_VFS_SOURCE: &str = include_str!("../src/windows_vfs.rs");
@@ -140,30 +140,43 @@ fn windows_replace_contract(replace: &str, rename: &str) -> Result<(), String> {
     }
     require(
         rename,
-        "target.file_name()",
-        "el destino del único rename debe derivar el nombre simple del target same-directory",
+        "wide_path(target)",
+        "el protocolo debe obtener los UTF-16 del target absoluto",
     )?;
     require(
         rename,
-        "wide_path(Path::new(file_name))",
-        "FileName debe serializar solo el nombre simple derivado del target",
+        "windows_nt_path::to_nt_rename_path(&wide)",
+        "el path DOS/verbatim debe convertirse a namespace NT antes del syscall",
     )?;
     require(
         rename,
         "(*info).RootDirectory = ptr::null_mut();",
-        "el rename same-directory por nombre simple debe usar RootDirectory=NULL",
+        "el destino absoluto NT debe usar RootDirectory=NULL",
     )?;
-    for forbidden_relative_protocol in [
+    precedes(
+        rename,
+        "wide_path(target)",
+        "windows_nt_path::to_nt_rename_path(&wide)",
+        "la conversión NT debe consumir el target UTF-16",
+    )?;
+    precedes(
+        rename,
+        "windows_nt_path::to_nt_rename_path(&wide)",
+        "let name_bytes = wide.len()",
+        "solo la ruta NT convertida puede dimensionar FILE_RENAME_INFO",
+    )?;
+    for forbidden_refuted_protocol in [
         "(*info).RootDirectory = parent_handle",
         "ERROR_INVALID_PARAMETER",
         "CreateFileW(",
         "target.parent()",
-        "wide_path(target)",
+        "target.file_name()",
+        "wide_path(Path::new(file_name))",
     ] {
         reject(
             rename,
-            forbidden_relative_protocol,
-            "la publicación no puede conservar parent-handle, path completo ni fallback posterior",
+            forbidden_refuted_protocol,
+            "la publicación no puede conservar basename/cwd, parent-handle ni fallback posterior",
         )?;
     }
     Ok(())
@@ -400,10 +413,11 @@ fn guardas_contrafactuales_rechazan_reopen_relative_flags_y_commit_prematuro() {
         "RootDirectory=NULL",
     );
 
-    let full_target = rename.replacen("wide_path(Path::new(file_name))", "wide_path(target)", 1);
+    let raw_dos_target =
+        rename.replacen("windows_nt_path::to_nt_rename_path(&wide)", "Ok(wide)", 1);
     assert_rejected(
-        windows_replace_contract(replace, &full_target),
-        "solo el nombre simple",
+        windows_replace_contract(replace, &raw_dos_target),
+        "convertirse a namespace NT",
     );
 
     let weakened_flags = replace.replacen(
@@ -434,8 +448,8 @@ fn guardas_contrafactuales_rechazan_reopen_relative_flags_y_commit_prematuro() {
     );
 }
 
-/// Negativo C5/C6 — conservar el nombre simple en otra rama no legitima introducir un primer
-/// intento alternativo: el protocolo completo debe contener un solo syscall y un solo target.
+/// Negativo C5/C6 — conservar la ruta NT en otra rama no legitima introducir un primer intento
+/// alternativo: el protocolo completo debe contener un solo syscall y un solo target.
 #[test]
 fn c5_c6_contrafactual_rechaza_anteponer_un_rename_relativo() {
     let replace = section(

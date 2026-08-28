@@ -2,8 +2,8 @@
 //!
 //! These tests run on every host and inspect the Windows implementation that the crate ships.
 //! They pin relationships that cannot be exercised on a Unix runner: the validated SQLite file
-//! object must remain the publication source, and the same-directory target must be published by
-//! one unambiguous simple-name `FileRenameInfoEx` operation.
+//! object must remain the publication source, and the target must be published by one unambiguous
+//! NT-absolute `FileRenameInfoEx` operation.
 
 const STORE_SOURCE: &str = include_str!("../src/lib.rs");
 const SCHEMA_SOURCE: &str = include_str!("../src/schema.rs");
@@ -525,11 +525,11 @@ fn c5_c6_contrafactual_rechaza_sombrear_original_antes_de_reopenfile() {
     );
 }
 
-/// C5/C6 — native Windows evidence rejects both a DOS absolute target and a parent-handle target.
-/// Because candidate and active share a directory, publication uses only `active.file_name()` with
-/// `RootDirectory=NULL`. There is one mutation and no alternate corridor after success.
+/// C5/C6 — native Windows evidence rejects raw DOS, cwd-relative basename and parent-handle forms.
+/// Publication converts active to an NT absolute path with `RootDirectory=NULL`. There is one
+/// mutation and no alternate corridor after success.
 #[test]
-fn c5_c6_windows_publica_nombre_simple_en_un_unico_syscall() {
+fn c5_c6_windows_publica_destino_nt_absoluto_en_un_unico_syscall() {
     let rename = section(
         WINDOWS_VFS_SOURCE,
         "fn rename_handle_to(",
@@ -542,10 +542,10 @@ fn c5_c6_windows_publica_nombre_simple_en_un_unico_syscall() {
         "C5/C6 Windows: publication must have exactly one native rename syscall"
     );
     assert!(
-        rename.contains("target.file_name()")
-            && rename.contains("wide_path(Path::new(file_name))")
+        rename.contains("wide_path(target)")
+            && rename.contains("windows_nt_path::to_nt_rename_path(&wide)")
             && rename.contains("(*info).RootDirectory = ptr::null_mut()"),
-        "C5/C6 Windows: the sole syscall must receive only target.file_name() with RootDirectory=NULL"
+        "C5/C6 Windows: the sole syscall must receive the converted NT-absolute target with RootDirectory=NULL"
     );
     assert!(
         rename.contains("FileRenameInfoEx")
@@ -558,8 +558,9 @@ fn c5_c6_windows_publica_nombre_simple_en_un_unico_syscall() {
             && !rename.contains("ERROR_INVALID_PARAMETER")
             && !rename.contains("CreateFileW(")
             && !rename.contains("target.parent()")
-            && !rename.contains("wide_path(target)"),
-        "C5/C6 Windows: no parent-handle, full-path or INVALID_PARAMETER fallback may remain"
+            && !rename.contains("target.file_name()")
+            && !rename.contains("wide_path(Path::new(file_name))"),
+        "C5/C6 Windows: no basename/cwd, parent-handle or INVALID_PARAMETER fallback may remain"
     );
     assert_eq!(
         rename
@@ -588,18 +589,18 @@ fn c5_c6_windows_publica_nombre_simple_en_un_unico_syscall() {
     assert!(
         relative_counterfactual.contains("(*info).RootDirectory = parent_handle")
             && !relative_counterfactual.contains("(*info).RootDirectory = ptr::null_mut()"),
-        "anti-vacuity guard: the counterfactual must remove the sole simple-name anchor"
+        "anti-vacuity guard: the counterfactual must remove the sole NT-target anchor"
     );
 
-    let full_path_counterfactual =
-        rename.replacen("wide_path(Path::new(file_name))", "wide_path(target)", 1);
+    let raw_dos_counterfactual =
+        rename.replacen("windows_nt_path::to_nt_rename_path(&wide)", "Ok(wide)", 1);
     assert_ne!(
-        full_path_counterfactual, rename,
-        "anti-vacuity guard: the mutation must find the simple-name serialization"
+        raw_dos_counterfactual, rename,
+        "anti-vacuity guard: the mutation must find the NT conversion"
     );
     assert!(
-        full_path_counterfactual.contains("wide_path(target)")
-            && !full_path_counterfactual.contains("wide_path(Path::new(file_name))"),
-        "anti-vacuity guard: the counterfactual must replace simple-name serialization with a full path"
+        raw_dos_counterfactual.contains("Ok(wide)")
+            && !raw_dos_counterfactual.contains("windows_nt_path::to_nt_rename_path(&wide)"),
+        "anti-vacuity guard: the counterfactual must bypass NT conversion and retain raw DOS UTF-16"
     );
 }

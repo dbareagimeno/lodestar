@@ -1,8 +1,8 @@
-//! E35-H03 CI33 — publicación same-directory independiente del cwd en Windows.
+//! E35-H03 CI35 — publicación por ruta NT absoluta independiente del cwd en Windows.
 //!
-//! `.lodestar/index.db.next` y `.lodestar/index.db` comparten directorio por spec. La forma nativa
-//! ratificada usa solo `target.file_name()`, `RootDirectory=NULL` y un único `FileRenameInfoEx`:
-//! no serializa el path DOS completo y tampoco abre el padre como `RootDirectory` relativo.
+//! La forma nativa ratificada convierte drive/UNC/verbatim al namespace `\??\`, usa
+//! `RootDirectory=NULL` y un único `FileRenameInfoEx`. No entrega DOS crudo, no depende del cwd y
+//! tampoco abre el padre como `RootDirectory` relativo.
 
 use lodestar_store::Store;
 
@@ -19,7 +19,7 @@ fn section<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
     &tail[..end_at]
 }
 
-fn same_directory_publication_contract(windows_source: &str) -> Result<(), String> {
+fn nt_absolute_publication_contract(windows_source: &str) -> Result<(), String> {
     let rename = section(
         windows_source,
         "fn rename_handle_to(",
@@ -39,19 +39,20 @@ fn same_directory_publication_contract(windows_source: &str) -> Result<(), Strin
         );
     }
     for required in [
-        "target.file_name()",
-        "wide_path(Path::new(file_name))",
+        "wide_path(target)",
+        "windows_nt_path::to_nt_rename_path(&wide)",
         "(*info).RootDirectory = ptr::null_mut();",
         "(*info).Anonymous.Flags = extended_flags.unwrap_or(0);",
     ] {
         if !rename.contains(required) {
             return Err(format!(
-                "C5/C6: falta el paso same-directory ratificado `{required}`"
+                "C5/C6: falta el paso de publicación NT absoluta `{required}`"
             ));
         }
     }
     for forbidden in [
-        "wide_path(target)",
+        "target.file_name()",
+        "wide_path(Path::new(file_name))",
         "target.parent()",
         "(*info).RootDirectory = parent_handle",
         "CreateFileW(",
@@ -59,28 +60,28 @@ fn same_directory_publication_contract(windows_source: &str) -> Result<(), Strin
     ] {
         if rename.contains(forbidden) {
             return Err(format!(
-                "C5/C6: el protocolo no puede depender de path completo, parent-handle o fallback; apareció `{forbidden}`"
+                "C5/C6: el protocolo no puede depender de basename/cwd, parent-handle o fallback; apareció `{forbidden}`"
             ));
         }
     }
     Ok(())
 }
 
-/// C5/C6 — el artefacto Windows materializa el swap same-directory en una sola operación, con
-/// nombre simple y sin dependencia del cwd ni de un handle de directorio.
+/// C5/C6 — el artefacto Windows materializa el swap en una sola operación con destino NT absoluto,
+/// sin dependencia de la unidad del cwd ni de un handle de directorio.
 #[test]
-fn c5_c6_windows_publicacion_same_directory_usa_solo_file_name_y_root_null() {
-    same_directory_publication_contract(WINDOWS_VFS_SOURCE)
-        .unwrap_or_else(|error| panic!("rojo causal CI33: {error}"));
+fn c5_c6_windows_publicacion_usa_destino_nt_absoluto_y_root_null() {
+    nt_absolute_publication_contract(WINDOWS_VFS_SOURCE)
+        .unwrap_or_else(|error| panic!("rojo causal CI35: {error}"));
 }
 
 /// La API puede seguir aceptando un root relativo: `Store::open` lo fija léxicamente. Esta
-/// propiedad ya no se usa como precondición oculta del syscall, que recibe solo `file_name`.
+/// propiedad ya no se usa como precondición oculta del syscall, que recibe un destino NT absoluto.
 #[test]
 fn store_open_sigue_fijando_root_relativo_sin_acoplarlo_al_rename_win32() {
     let cwd = std::env::current_dir().expect("directorio de trabajo del proceso de test");
     let sandbox = tempfile::Builder::new()
-        .prefix("lodestar-ci33-relative-root-")
+        .prefix("lodestar-ci35-relative-root-")
         .tempdir_in(&cwd)
         .expect("sandbox temporal descendiente del cwd");
     let relative_root = sandbox
@@ -97,19 +98,19 @@ fn store_open_sigue_fijando_root_relativo_sin_acoplarlo_al_rename_win32() {
     assert_eq!(store.root(), expected);
 }
 
-/// Negativo C5/C6 — `RootDirectory=NULL` no autoriza recuperar el path DOS completo: la evidencia
-/// nativa que motivó este arbitraje rechazó precisamente esa forma.
+/// Negativo C5/C6 — `RootDirectory=NULL` no autoriza entregar el path DOS crudo: primero debe
+/// convertirse al namespace NT.
 #[test]
-fn c5_c6_contrafactual_rechaza_wide_path_del_target_completo() {
-    same_directory_publication_contract(WINDOWS_VFS_SOURCE)
+fn c5_c6_contrafactual_rechaza_target_dos_crudo_sin_conversion_nt() {
+    nt_absolute_publication_contract(WINDOWS_VFS_SOURCE)
         .expect("guarda anti-vacuidad: el fuente real debe cumplir antes del contrafactual");
-    let full_target =
-        WINDOWS_VFS_SOURCE.replacen("wide_path(Path::new(file_name))", "wide_path(target)", 1);
-    assert_ne!(full_target, WINDOWS_VFS_SOURCE);
-    let error = same_directory_publication_contract(&full_target)
-        .expect_err("wide_path(target) debe romper el contrato same-directory");
+    let raw_dos =
+        WINDOWS_VFS_SOURCE.replacen("windows_nt_path::to_nt_rename_path(&wide)", "Ok(wide)", 1);
+    assert_ne!(raw_dos, WINDOWS_VFS_SOURCE);
+    let error = nt_absolute_publication_contract(&raw_dos)
+        .expect_err("omitir la conversión NT debe romper el contrato");
     assert!(
-        error.contains("wide_path(Path::new(file_name))") || error.contains("wide_path(target)"),
+        error.contains("windows_nt_path::to_nt_rename_path"),
         "el contrafactual falló por otra causa: {error}"
     );
 }
@@ -117,8 +118,8 @@ fn c5_c6_contrafactual_rechaza_wide_path_del_target_completo() {
 /// Negativo C5/C6 — abrir el padre y usarlo como `RootDirectory` reintroduce la topología cuyo
 /// éxito nativo no autenticó el FILE_ID publicado.
 #[test]
-fn c5_c6_contrafactual_rechaza_parent_handle_con_nombre_simple() {
-    same_directory_publication_contract(WINDOWS_VFS_SOURCE)
+fn c5_c6_contrafactual_rechaza_parent_handle_con_destino_nt() {
+    nt_absolute_publication_contract(WINDOWS_VFS_SOURCE)
         .expect("guarda anti-vacuidad: el fuente real debe cumplir antes del contrafactual");
     let parent_handle = WINDOWS_VFS_SOURCE.replacen(
         "(*info).RootDirectory = ptr::null_mut();",
@@ -126,7 +127,7 @@ fn c5_c6_contrafactual_rechaza_parent_handle_con_nombre_simple() {
         1,
     );
     assert_ne!(parent_handle, WINDOWS_VFS_SOURCE);
-    let error = same_directory_publication_contract(&parent_handle)
+    let error = nt_absolute_publication_contract(&parent_handle)
         .expect_err("RootDirectory=parent_handle debe romper el contrato");
     assert!(
         error.contains("RootDirectory = ptr::null_mut()")
