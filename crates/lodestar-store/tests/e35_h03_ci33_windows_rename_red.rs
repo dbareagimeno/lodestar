@@ -93,6 +93,55 @@ fn c5_c6_win32_publica_candidate_file_id_en_active_sin_tocar_cwd_homonimo() {
     );
 }
 
+/// CI41 — `prepare_candidate` reabre el mismo objeto mientras la conexión SQLite escribible sigue
+/// viva. Windows exige que el nuevo handle comparta también escritura: omitir `FILE_SHARE_WRITE`
+/// produce `ERROR_SHARING_VIOLATION` antes de poder fijar la identidad validada.
+#[cfg(not(windows))]
+#[test]
+fn ci41_prepare_candidate_reopen_comparte_lectura_escritura_y_borrado() {
+    let source = WINDOWS_VFS_SOURCE.replace("\r\n", "\n");
+    let start = source
+        .find("pub(crate) fn prepare_candidate(")
+        .expect("guarda anti-vacuidad: existe prepare_candidate");
+    let tail = &source[start..];
+    let end = tail
+        .find("\nimpl PreparedCandidate {")
+        .expect("guarda anti-vacuidad: termina prepare_candidate");
+    let prepare_candidate = &tail[..end];
+
+    assert_eq!(
+        prepare_candidate.matches("ReOpenFile(").count(),
+        1,
+        "guarda anti-vacuidad: prepare_candidate debe tener exactamente un ReOpenFile"
+    );
+    assert!(
+        prepare_candidate.contains("GENERIC_READ | GENERIC_WRITE | DELETE"),
+        "guarda anti-vacuidad: la reapertura candidata debe coexistir con el handle SQLite escribible"
+    );
+
+    let compact: String = prepare_candidate
+        .chars()
+        .filter(|character| !character.is_ascii_whitespace())
+        .collect();
+    assert!(
+        !compact.contains(concat!(
+            "ReOpenFile(original,",
+            "GENERIC_READ|GENERIC_WRITE|DELETE,",
+            "FILE_SHARE_READ|FILE_SHARE_DELETE,"
+        )),
+        "rojo causal CI41: prepare_candidate omite FILE_SHARE_WRITE y Windows rechaza la reapertura escribible con ERROR_SHARING_VIOLATION"
+    );
+    assert!(
+        compact.contains(concat!(
+            "ReOpenFile(original,",
+            "GENERIC_READ|GENERIC_WRITE|DELETE,",
+            "FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,",
+            "FILE_FLAG_OPEN_REPARSE_POINT|FILE_FLAG_WRITE_THROUGH,)"
+        )),
+        "rojo causal CI41: ReOpenFile solicita escritura mientras la conexión SQLite sigue abierta, pero prepare_candidate no usa la máscara completa FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE"
+    );
+}
+
 /// El mismo criterio se ejecuta en hosts no Windows como guarda estructural del artefacto que el
 /// harness nativo compilará: un único syscall, destino NT absoluto y `RootDirectory = NULL`.
 #[cfg(not(windows))]

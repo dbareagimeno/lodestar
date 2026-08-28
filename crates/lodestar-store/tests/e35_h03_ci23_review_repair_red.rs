@@ -168,6 +168,18 @@ fn prepared_candidate_contract(preparation: &str) -> Result<(), String> {
         );
     }
 
+    let reopen = parenthesized_call(preparation, "ReOpenFile(")?;
+    contract_unique_position(
+        reopen,
+        "\n            GENERIC_READ | GENERIC_WRITE | DELETE,",
+        "ReOpenFile debe conservar acceso exacto GENERIC_READ | GENERIC_WRITE | DELETE",
+    )?;
+    contract_unique_position(
+        reopen,
+        "\n            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,",
+        "ReOpenFile debe compartir exactamente lectura, escritura y borrado",
+    )?;
+
     let ordered_steps = [
         (
             "ffi::sqlite3_file_control(",
@@ -240,8 +252,8 @@ fn assert_contract_rejected(result: Result<(), String>, expected_reason: &str) {
 
 /// C5/C6 — validation, the pause seam, and the atomic rename must all refer to one pinned file
 /// object. Extracting SQLite's `sqlite3_file` and duplicating its native handle prevents a path
-/// reopen from selecting a different `.next`; excluding `FILE_SHARE_WRITE` prevents an external
-/// writer from changing the validated candidate before publication.
+/// reopen from selecting a different `.next`; sharing read/write/delete preserves SQLite's own
+/// concurrent-open protocol while the pinned identity prevents publishing a different object.
 #[test]
 fn c5_c6_windows_publica_el_mismo_handle_validado_sin_reabrir_next_por_path() {
     let sources = normalized_sources();
@@ -305,9 +317,8 @@ fn c5_c6_windows_publica_el_mismo_handle_validado_sin_reabrir_next_por_path() {
         "C5/C6 Windows: the sqlite3_file handle must be duplicated and owned across validation, pause, and rename"
     );
     assert!(
-        prepared.contains("FILE_SHARE_READ | FILE_SHARE_DELETE")
-            && !prepared.contains("FILE_SHARE_WRITE"),
-        "C6 Windows: the pinned candidate must deny write sharing while allowing read/delete publication semantics"
+        prepared.contains("FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE"),
+        "C6 Windows: the pinned candidate must share exactly read/write/delete publication semantics"
     );
     assert!(
         prepared.contains("impl PreparedCandidate")
@@ -398,6 +409,20 @@ fn c5_c6_guardas_contrafactuales_rechazan_handle_reabierto_o_poseido_incorrecto(
     );
     prepared_candidate_contract(preparation)
         .unwrap_or_else(|error| panic!("guarda anti-vacuidad: el fuente real no cumple: {error}"));
+
+    let obsolete_share_mask = preparation.replacen(
+        "FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,",
+        "FILE_SHARE_READ | FILE_SHARE_DELETE,",
+        1,
+    );
+    assert_ne!(
+        obsolete_share_mask, preparation,
+        "guarda anti-vacuidad: la mutación debe encontrar la máscara de compartición arbitrada"
+    );
+    assert_contract_rejected(
+        prepared_candidate_contract(&obsolete_share_mask),
+        "compartir exactamente lectura, escritura y borrado",
+    );
 
     let another_connection = preparation.replacen(
         "\n            connection.handle(),",

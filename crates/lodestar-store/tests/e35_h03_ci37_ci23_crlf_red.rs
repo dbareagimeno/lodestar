@@ -149,7 +149,7 @@ const SUITE_EXPECTATIONS: &[SuiteExpectation<'static>] = &[
         includes: &[IncludeExpectation {
             binding: "WINDOWS_VFS_SOURCE",
             path: "windows_vfs.rs",
-            references: 4,
+            references: 5,
         }],
         anchor: None,
     },

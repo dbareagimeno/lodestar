@@ -397,7 +397,7 @@ pub(crate) fn prepare_candidate(connection: &Connection) -> std::io::Result<Prep
         ReOpenFile(
             original,
             GENERIC_READ | GENERIC_WRITE | DELETE,
-            FILE_SHARE_READ | FILE_SHARE_DELETE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
             FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_WRITE_THROUGH,
         )
     };
