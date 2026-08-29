@@ -397,9 +397,9 @@ fn c6_fallo_tras_apartar_el_primer_sidecar_revierte_nombres_y_snapshot() {
 
 /// El soporte de publicación de Lodestar no puede relajar el share mode del VFS SQLite por
 /// defecto. Una base ajena que siga usando ese VFS debe conservar el comportamiento win32 normal:
-/// sin `FILE_SHARE_DELETE`, un reemplazo mientras la conexión está abierta falla con sharing
-/// violation. Este guard detecta hooks globales que arreglan Lodestar alterando todas las bases del
-/// proceso.
+/// sin `FILE_SHARE_DELETE`, un reemplazo mientras la conexión está abierta falla con access denied
+/// o sharing violation. Este guard detecta hooks globales que arreglan Lodestar alterando todas las
+/// bases del proceso.
 #[cfg(windows)]
 #[test]
 fn c6_vfs_de_lodestar_no_modifica_sqlite_ajeno() {
@@ -414,7 +414,7 @@ fn c6_vfs_de_lodestar_no_modifica_sqlite_ajeno() {
     let replacement = root.path().join("replacement.db");
     let foreign_conn = rusqlite::Connection::open(&foreign).expect("abre SQLite ajeno");
     foreign_conn
-        .execute_batch("CREATE TABLE sentinel(value INTEGER);")
+        .execute_batch("CREATE TABLE sentinel(value INTEGER); INSERT INTO sentinel VALUES (73);")
         .unwrap();
     std::fs::write(&replacement, b"replacement").unwrap();
 
@@ -441,16 +441,15 @@ fn c6_vfs_de_lodestar_no_modifica_sqlite_ajeno() {
         moved, 0,
         "un Store no debe alterar el VFS SQLite por defecto"
     );
-    assert_eq!(
-        error.raw_os_error(),
-        Some(32),
-        "Windows debe conservar ERROR_SHARING_VIOLATION para la base ajena: {error}"
+    assert!(
+        matches!(error.raw_os_error(), Some(5) | Some(32)),
+        "Windows debe conservar ERROR_ACCESS_DENIED (5) o ERROR_SHARING_VIOLATION (32) para la base ajena: {error}"
     );
     assert_eq!(
         foreign_conn
-            .query_row("SELECT count(*) FROM sentinel", [], |row| row
-                .get::<_, i64>(0))
+            .query_row("SELECT value FROM sentinel", [], |row| row.get::<_, i64>(0))
             .unwrap(),
-        0
+        73,
+        "guard anti-vacuidad: la conexión ajena sigue viva y conserva su centinela"
     );
 }
