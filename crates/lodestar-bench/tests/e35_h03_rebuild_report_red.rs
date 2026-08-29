@@ -3,8 +3,10 @@
 
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
-use std::process::{Command, Output};
+use std::io::Read;
+use std::process::{Command, Output, Stdio};
 use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Default)]
 struct SqlTraceSummary {
@@ -22,9 +24,14 @@ fn trace_env_lock() -> &'static Mutex<()> {
     LOCK.get_or_init(|| Mutex::new(()))
 }
 
-fn read_sql_trace(path: &std::path::Path) -> SqlTraceSummary {
-    let contents = std::fs::read_to_string(path)
-        .unwrap_or_else(|error| panic!("H03: falta la traza SQL NDJSON {:?}: {error}", path));
+fn read_sql_trace(mut trace: std::fs::File, path: &std::path::Path) -> SqlTraceSummary {
+    let mut contents = String::new();
+    trace.read_to_string(&mut contents).unwrap_or_else(|error| {
+        panic!(
+            "H03: no se pudo leer la traza SQL NDJSON {:?}: {error}",
+            path
+        )
+    });
     let mut lines = contents.lines();
     let header: Value = serde_json::from_str(
         lines
@@ -138,9 +145,12 @@ fn report_for(profile: &str, scale: u64) -> Value {
     let _env_lock = trace_env_lock()
         .lock()
         .unwrap_or_else(|poison| poison.into_inner());
-    let trace_dir = tempfile::tempdir().unwrap();
-    let trace_path = trace_dir.path().join("rebuild.ndjson");
-    let output: Output = Command::new(env!("CARGO_BIN_EXE_lodestar-bench"))
+    let support = tempfile::tempdir().unwrap();
+    let root = support.path().join("workspace");
+    let trace_path = root.join(".lodestar/rebuild.ndjson");
+    assert!(!root.exists(), "H03: --root debe empezar inexistente");
+    assert!(!trace_path.exists(), "H03: la traza debe ser nueva");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_lodestar-bench"))
         .args([
             "--extreme",
             "--profile",
@@ -150,10 +160,31 @@ fn report_for(profile: &str, scale: u64) -> Value {
             "--iterations",
             "1",
         ])
+        .arg("--root")
+        .arg(&root)
         .env("RUST_BACKTRACE", "1")
         .env("LODESTAR_H03_SQL_TRACE", &trace_path)
-        .output()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let trace = loop {
+        match std::fs::File::open(&trace_path) {
+            Ok(trace) => break Some(trace),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => panic!("H03: no se pudo abrir la traza nueva {trace_path:?}: {error}"),
+        }
+        if child.try_wait().expect("H03: consultar banco").is_some() {
+            break None;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "H03: el banco no creó la traza dentro de <root>/.lodestar"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    };
+    let output: Output = child.wait_with_output().unwrap();
     assert!(
         output.status.success(),
         "banco H03 falló: stderr={} stdout={}",
@@ -161,7 +192,17 @@ fn report_for(profile: &str, scale: u64) -> Value {
         String::from_utf8_lossy(&output.stdout)
     );
     let mut report: Value = serde_json::from_slice(&output.stdout).unwrap();
-    let trace = read_sql_trace(&trace_path);
+    // `--extreme` limpia incluso una raíz explícita. El descriptor abierto mantiene viva la
+    // evidencia hasta leerla después de que el proceso haya terminado.
+    let trace = read_sql_trace(
+        trace.unwrap_or_else(|| {
+            panic!(
+                "H03: el banco terminó sin crear la traza nueva dentro de <root>/.lodestar: {}",
+                trace_path.display()
+            )
+        }),
+        &trace_path,
+    );
     report["h03_sql_trace"] = serde_json::json!({
         "build_id": trace.build_id,
         "prepares": trace.prepares,

@@ -12,6 +12,7 @@ keywords = ["okf", "knowledge-base", "markdown", "discovery", "filesystem"]
 categories = ["filesystem", "text-processing"]
 
 [dependencies]
+blake3 = { workspace = true }
 lodestar-core = { workspace = true }
 ignore = { workspace = true }
 serde = { workspace = true }

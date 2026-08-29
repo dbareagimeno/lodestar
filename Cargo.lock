@@ -1331,6 +1331,7 @@ dependencies = [
 name = "lodestar-discovery"
 version = "0.6.2"
 dependencies = [
+ "blake3",
  "ignore",
  "lodestar-core",
  "serde",

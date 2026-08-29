@@ -86,6 +86,37 @@ pub struct Workspace {
     _watcher: Option<Watcher>,
 }
 
+fn validate_control_plane_for_read(root: &Path) -> Result<(), WorkspaceError> {
+    let control = root.join(".lodestar");
+    let metadata = match std::fs::symlink_metadata(&control) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(WorkspaceError::Io(error.to_string())),
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(WorkspaceError::Io(format!(
+            "control plane must be a real directory: {}",
+            control.display()
+        )));
+    }
+    let canonical_root = std::fs::canonicalize(root).map_err(|error| {
+        WorkspaceError::Io(format!("canonicalize root {}: {error}", root.display()))
+    })?;
+    let canonical_control = std::fs::canonicalize(&control).map_err(|error| {
+        WorkspaceError::Io(format!(
+            "canonicalize control plane {}: {error}",
+            control.display()
+        ))
+    })?;
+    if canonical_control.parent() != Some(canonical_root.as_path()) {
+        return Err(WorkspaceError::Io(format!(
+            "control plane escapes workspace root: {}",
+            control.display()
+        )));
+    }
+    Ok(())
+}
+
 impl Workspace {
     /// Abre un workspace sobre un directorio cualquiera. **No** activa la cache incremental
     /// (usa [`Workspace::open_live`] o [`Workspace::enable_cache`]).
@@ -117,11 +148,14 @@ impl Workspace {
     pub fn open(root: &Path) -> Result<Self, WorkspaceError> {
         // La config se lee UNA vez por sesión: la raíz y su política son fijas mientras el
         // workspace vive (`ARCHITECTURE.md §20.5`). Es lo ÚNICO que hace abrir: una lectura.
-        let config = WorkspaceConfig::load(root).map_err(WorkspaceError::Io)?;
+        let root =
+            std::fs::canonicalize(root).map_err(|error| WorkspaceError::Io(error.to_string()))?;
+        validate_control_plane_for_read(&root)?;
+        let config = WorkspaceConfig::load(&root).map_err(WorkspaceError::Io)?;
         let memory_budget = MemoryBudget::from_bytes(config.performance.max_memory_bytes())
             .map_err(WorkspaceError::Io)?;
         Ok(Workspace {
-            root: root.to_path_buf(),
+            root,
             config,
             memory_budget,
             cache: None,

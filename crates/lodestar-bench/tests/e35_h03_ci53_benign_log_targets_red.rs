@@ -33,9 +33,11 @@ fn sql_evidence(bytes: &[u8]) -> bool {
 }
 
 fn rss_evidence(bytes: &[u8]) -> bool {
-    std::str::from_utf8(bytes)
-        .ok()
-        .is_some_and(|contents| contents.lines().any(|line| line.starts_with("rss_sample:rebuild:")))
+    std::str::from_utf8(bytes).ok().is_some_and(|contents| {
+        contents
+            .lines()
+            .any(|line| line.starts_with("rss_sample:rebuild:"))
+    })
 }
 
 fn timing_evidence(bytes: &[u8]) -> bool {

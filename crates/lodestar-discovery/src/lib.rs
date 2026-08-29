@@ -38,7 +38,7 @@ impl Default for DiscoveryPolicy {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct DiscoveredInventory {
     pub documents: Vec<RelPath>,
     pub other_files: BTreeSet<RelPath>,
@@ -57,6 +57,68 @@ pub struct DiscoveredInventory {
     /// canonical walk. They are part of the snapshot, not recaptured by the store later.
     pub entry_fingerprints: std::collections::BTreeMap<RelPath, DiscoveryFingerprint>,
     pub diagnostics: Vec<Check>,
+    authority: InventoryAuthority,
+}
+
+#[derive(Debug, Clone)]
+struct InventoryAuthority {
+    root: std::path::PathBuf,
+    policy: DiscoveryPolicy,
+    digest: [u8; 32],
+}
+
+impl Default for DiscoveredInventory {
+    fn default() -> Self {
+        Self {
+            documents: Vec::new(),
+            other_files: BTreeSet::new(),
+            directories: Vec::new(),
+            root_fingerprint: DiscoveryFingerprint::default(),
+            root_target_fingerprint: DiscoveryFingerprint::default(),
+            directory_fingerprints: std::collections::BTreeMap::new(),
+            entry_fingerprints: std::collections::BTreeMap::new(),
+            diagnostics: Vec::new(),
+            // A default value is deliberately not an authenticated discovery result. Keeping
+            // `Default` is source-compatible for consumers that use it as scratch storage, while
+            // the private impossible digest prevents it from crossing the Store authority seam.
+            authority: InventoryAuthority {
+                root: std::path::PathBuf::new(),
+                policy: DiscoveryPolicy::default(),
+                digest: [0; 32],
+            },
+        }
+    }
+}
+
+impl DiscoveredInventory {
+    /// Verifies that this value is the unmodified result of the canonical walker for exactly the
+    /// supplied root and policy. Public inventory fields remain inspectable for compatibility,
+    /// but mutating any authority-bearing field invalidates the private attestation.
+    pub fn verify_authority(
+        &self,
+        root: &Path,
+        policy: &DiscoveryPolicy,
+    ) -> Result<(), DiscoveryError> {
+        let digest = inventory_authority_digest(InventoryAuthorityMaterial {
+            documents: &self.documents,
+            other_files: &self.other_files,
+            directories: &self.directories,
+            root_fingerprint: self.root_fingerprint,
+            root_target_fingerprint: self.root_target_fingerprint,
+            directory_fingerprints: &self.directory_fingerprints,
+            entry_fingerprints: &self.entry_fingerprints,
+            diagnostics: &self.diagnostics,
+        })?;
+        if self.authority.root != root
+            || self.authority.policy != *policy
+            || self.authority.digest != digest
+        {
+            return Err(DiscoveryError::Policy(
+                "el inventario no procede de este root y policy canónicos o fue modificado".into(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// Identidad observable de un fichero o directorio para cerrar la ventana entre las dos pasadas.
@@ -312,6 +374,16 @@ pub fn discover_inventory(
             )));
         }
     }
+    let authority_digest = inventory_authority_digest(InventoryAuthorityMaterial {
+        documents: &documents,
+        other_files: &other_files,
+        directories: &directories,
+        root_fingerprint,
+        root_target_fingerprint,
+        directory_fingerprints: &directory_fingerprints,
+        entry_fingerprints: &entry_fingerprints,
+        diagnostics: &diagnostics,
+    })?;
     Ok(DiscoveredInventory {
         documents,
         other_files,
@@ -321,7 +393,76 @@ pub fn discover_inventory(
         directory_fingerprints,
         entry_fingerprints,
         diagnostics,
+        authority: InventoryAuthority {
+            root: root.to_path_buf(),
+            policy: policy.clone(),
+            digest: authority_digest,
+        },
     })
+}
+
+struct InventoryAuthorityMaterial<'a> {
+    documents: &'a [RelPath],
+    other_files: &'a BTreeSet<RelPath>,
+    directories: &'a [RelPath],
+    root_fingerprint: DiscoveryFingerprint,
+    root_target_fingerprint: DiscoveryFingerprint,
+    directory_fingerprints: &'a std::collections::BTreeMap<RelPath, DiscoveryFingerprint>,
+    entry_fingerprints: &'a std::collections::BTreeMap<RelPath, DiscoveryFingerprint>,
+    diagnostics: &'a [Check],
+}
+
+fn inventory_authority_digest(
+    material: InventoryAuthorityMaterial<'_>,
+) -> Result<[u8; 32], DiscoveryError> {
+    fn field(hasher: &mut blake3::Hasher, bytes: &[u8]) {
+        hasher.update(&(bytes.len() as u64).to_le_bytes());
+        hasher.update(bytes);
+    }
+
+    fn path(hasher: &mut blake3::Hasher, path: &RelPath) {
+        field(hasher, path.as_str().as_bytes());
+    }
+
+    fn fingerprint(hasher: &mut blake3::Hasher, value: DiscoveryFingerprint) {
+        hasher.update(&[value.kind]);
+        hasher.update(&value.size.to_le_bytes());
+        hasher.update(&value.mtime_ns.to_le_bytes());
+        hasher.update(&value.identity.to_le_bytes());
+        hasher.update(&value.ctime_ns.to_le_bytes());
+    }
+
+    let mut hasher = blake3::Hasher::new();
+    field(&mut hasher, b"lodestar-discovery-inventory-v1");
+    hasher.update(&(material.documents.len() as u64).to_le_bytes());
+    for document in material.documents {
+        path(&mut hasher, document);
+    }
+    hasher.update(&(material.other_files.len() as u64).to_le_bytes());
+    for other in material.other_files {
+        path(&mut hasher, other);
+    }
+    hasher.update(&(material.directories.len() as u64).to_le_bytes());
+    for directory in material.directories {
+        path(&mut hasher, directory);
+    }
+    fingerprint(&mut hasher, material.root_fingerprint);
+    fingerprint(&mut hasher, material.root_target_fingerprint);
+    hasher.update(&(material.directory_fingerprints.len() as u64).to_le_bytes());
+    for (directory, value) in material.directory_fingerprints {
+        path(&mut hasher, directory);
+        fingerprint(&mut hasher, *value);
+    }
+    hasher.update(&(material.entry_fingerprints.len() as u64).to_le_bytes());
+    for (entry, value) in material.entry_fingerprints {
+        path(&mut hasher, entry);
+        fingerprint(&mut hasher, *value);
+    }
+    let serialized_diagnostics = serde_yaml::to_string(material.diagnostics).map_err(|error| {
+        DiscoveryError::Io(format!("serializar autoridad de discovery: {error}"))
+    })?;
+    field(&mut hasher, serialized_diagnostics.as_bytes());
+    Ok(*hasher.finalize().as_bytes())
 }
 
 /// Captures filesystem identity and change time without opening a payload. `follow_target` is

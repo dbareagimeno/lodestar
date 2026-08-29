@@ -111,14 +111,74 @@ fn shared_state(root: &Path, db: &Path) -> Result<Arc<RootState>, StoreError> {
     Ok(state)
 }
 
+/// Materializes the derived control plane without ever accepting a redirect at its final path.
+/// The workspace root itself may legitimately be a symlink; the canonical containment check is
+/// therefore made against its followed target, while `.lodestar` must be a real directory entry.
+fn ensure_control_plane_directory(root: &Path, dir: &Path) -> Result<(), StoreError> {
+    match std::fs::symlink_metadata(dir) {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            match std::fs::create_dir(dir) {
+                Ok(()) => {}
+                // Another opener may have materialized the directory concurrently. Validate the
+                // winner below instead of following it implicitly.
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(error) => {
+                    return Err(StoreError::Io(format!(
+                        "create control plane {}: {error}",
+                        dir.display()
+                    )))
+                }
+            }
+        }
+        Err(error) => {
+            return Err(StoreError::Io(format!(
+                "inspect control plane {}: {error}",
+                dir.display()
+            )))
+        }
+    }
+
+    let metadata = std::fs::symlink_metadata(dir).map_err(|error| {
+        StoreError::Io(format!("inspect control plane {}: {error}", dir.display()))
+    })?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(StoreError::Io(format!(
+            "control plane must be a real directory: {}",
+            dir.display()
+        )));
+    }
+
+    let canonical_root = std::fs::canonicalize(root).map_err(|error| {
+        StoreError::Io(format!("canonicalize root {}: {error}", root.display()))
+    })?;
+    let canonical_dir = std::fs::canonicalize(dir).map_err(|error| {
+        StoreError::Io(format!(
+            "canonicalize control plane {}: {error}",
+            dir.display()
+        ))
+    })?;
+    if canonical_dir.parent() != Some(canonical_root.as_path()) {
+        return Err(StoreError::Io(format!(
+            "control plane escapes workspace root: {}",
+            dir.display()
+        )));
+    }
+    Ok(())
+}
+
 impl Store {
     /// Abre (o crea) la cache en `<root>/.lodestar/index.db`. Aplica el DDL; si `user_version`
     /// no coincide, hace un rebuild limpio del esquema. **No** indexa: llama a [`Store::rebuild`].
     pub fn open(root: &Path) -> Result<Self, StoreError> {
         let root = std::path::absolute(root).map_err(|error| StoreError::Io(error.to_string()))?;
+        let dir = root.join(CACHE_DIR);
+        // Validate the control-plane boundary before loading configuration from it. Otherwise a
+        // pre-existing `.lodestar` symlink could make this read an exterior `config.yaml` before
+        // `open_captured` gets a chance to reject the redirect.
+        ensure_control_plane_directory(&root, &dir)?;
         let discovery_policy = lodestar_discovery::load_policy(&root)
             .map_err(|error| StoreError::Io(error.to_string()))?;
-        let dir = root.join(CACHE_DIR);
         Self::open_captured(root, dir, discovery_policy)
     }
 
@@ -148,7 +208,7 @@ impl Store {
         dir: PathBuf,
         discovery_policy: DiscoveryPolicy,
     ) -> Result<Self, StoreError> {
-        std::fs::create_dir_all(&dir).map_err(|e| StoreError::Io(e.to_string()))?;
+        ensure_control_plane_directory(&root, &dir)?;
         let db = dir.join(DB_FILE);
         // Opening can create or replace a derived database while applying the schema. Serialize
         // that write with rebuild/upsert too; otherwise two fresh processes could race before
@@ -211,13 +271,19 @@ impl Store {
     ) -> Result<serde_json::Value, StoreError> {
         let _writer = self.writer_guard()?;
         let inventory_window = RssWindow::new()?;
-        let directories = inventory_ancestor_directories(paths, others);
+        let discovered = self.walk_inventory()?;
+        verify_canonical_discovery_snapshot(&self.root, &discovered)?;
+        if paths != discovered.documents.as_slice() || others != &discovered.other_files {
+            return Err(StoreError::Io(
+                "rebuild inventory does not match canonical discovery".into(),
+            ));
+        }
         self.rebuild_from_inventory_with_duration(
             paths,
             others,
-            &directories,
+            &discovered.directories,
             inventory_window,
-            None,
+            Some(&discovered),
         )
     }
 
@@ -230,6 +296,9 @@ impl Store {
     ) -> Result<serde_json::Value, StoreError> {
         let _writer = self.writer_guard()?;
         let inventory_window = RssWindow::new()?;
+        discovered
+            .verify_authority(&self.root, &self.discovery_policy)
+            .map_err(|error| StoreError::Io(error.to_string()))?;
         verify_canonical_discovery_snapshot(&self.root, discovered)?;
         self.rebuild_from_inventory_with_duration(
             &discovered.documents,
@@ -1514,7 +1583,7 @@ fn capture_rebuild_snapshot(
     others: &BTreeSet<RelPath>,
     directories: &[RelPath],
 ) -> Result<RebuildSnapshot, StoreError> {
-    prepare_payload_audit()?;
+    prepare_payload_audit(root)?;
     let mut entries = BTreeMap::new();
     for path in paths.iter().chain(others.iter()) {
         let full = root.join(path.as_str());
@@ -1532,19 +1601,136 @@ fn capture_rebuild_snapshot(
     })
 }
 
-/// El seam de auditoría de lectura escribe un sidecar bajo el root. Créalo antes de capturar la
-/// huella de la frontera para que su primera escritura de contenido no parezca una mutación del
-/// workspace; las altas reales siguen cambiando la huella del directorio y se rechazan.
-fn prepare_payload_audit() -> Result<(), StoreError> {
-    let Some(audit) = std::env::var_os("LODESTAR_H03_TEST_READ_AUDIT") else {
+/// El seam de auditoría de lectura solo puede escribir NDJSON dentro del plano de control
+/// `.lodestar/`. Créalo antes de capturar la huella de la frontera para que su primera escritura
+/// de contenido no parezca una mutación del workspace.
+fn prepare_payload_audit(root: &Path) -> Result<(), StoreError> {
+    let Some(audit) = payload_audit_path(root) else {
         return Ok(());
     };
+    let _ = open_payload_audit(&audit);
+    Ok(())
+}
+
+fn payload_audit_path(root: &Path) -> Option<PathBuf> {
+    let requested = PathBuf::from(std::env::var_os("LODESTAR_H03_TEST_READ_AUDIT")?);
+    if requested
+        .extension()
+        .and_then(|extension| extension.to_str())
+        != Some("ndjson")
+    {
+        return None;
+    }
+
+    let canonical_root = std::fs::canonicalize(root).ok()?;
+    let control_path = canonical_root.join(".lodestar");
+    let control_metadata = std::fs::symlink_metadata(&control_path).ok()?;
+    if control_metadata.file_type().is_symlink() || !control_metadata.is_dir() {
+        return None;
+    }
+    let control = std::fs::canonicalize(control_path).ok()?;
+    if !control.starts_with(&canonical_root) {
+        return None;
+    }
+
+    let parent = std::fs::canonicalize(requested.parent()?).ok()?;
+    if !parent.starts_with(&control) {
+        return None;
+    }
+
+    match std::fs::symlink_metadata(&requested) {
+        Ok(metadata)
+            if metadata.file_type().is_symlink()
+                || !metadata.is_file()
+                || !path_has_single_link(&requested, &metadata) =>
+        {
+            None
+        }
+        Ok(_) => std::fs::canonicalize(&requested)
+            .ok()
+            .filter(|target| target.starts_with(&control))
+            .map(|_| requested),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Some(requested),
+        Err(_) => None,
+    }
+}
+
+#[cfg(unix)]
+fn path_has_single_link(_path: &Path, metadata: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+
+    metadata.nlink() == 1
+}
+
+#[cfg(windows)]
+fn path_has_single_link(path: &Path, _metadata: &std::fs::Metadata) -> bool {
+    std::fs::File::open(path)
+        .and_then(|file| windows_vfs::file_has_single_link(&file))
+        .unwrap_or(false)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn path_has_single_link(_path: &Path, _metadata: &std::fs::Metadata) -> bool {
+    false
+}
+
+#[cfg(unix)]
+fn file_has_single_link(file: &std::fs::File) -> std::io::Result<bool> {
+    use std::os::unix::fs::MetadataExt;
+
+    Ok(file.metadata()?.nlink() == 1)
+}
+
+#[cfg(windows)]
+fn file_has_single_link(file: &std::fs::File) -> std::io::Result<bool> {
+    windows_vfs::file_has_single_link(file)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn file_has_single_link(_file: &std::fs::File) -> std::io::Result<bool> {
+    Ok(false)
+}
+
+fn open_payload_audit(path: &Path) -> Option<std::fs::File> {
+    let file = open_payload_audit_unchecked(path).ok()?;
+    let metadata = file.metadata().ok()?;
+    if metadata.file_type().is_symlink()
+        || !metadata.is_file()
+        || !file_has_single_link(&file).ok()?
+    {
+        return None;
+    }
+    Some(file)
+}
+
+#[cfg(unix)]
+fn open_payload_audit_unchecked(path: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+
     std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(audit)
-        .map(|_| ())
-        .map_err(|error| StoreError::Io(format!("rebuild read audit: {error}")))
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+}
+
+#[cfg(windows)]
+fn open_payload_audit_unchecked(path: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .custom_flags(windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn open_payload_audit_unchecked(_path: &Path) -> std::io::Result<std::fs::File> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "payload audit is unsupported on this platform",
+    ))
 }
 
 fn canonical_rebuild_snapshot(
@@ -1576,29 +1762,6 @@ fn canonical_rebuild_snapshot(
         directories,
         root_target: discovery_fingerprint(discovered.root_target_fingerprint),
     }
-}
-
-/// Derives the directory boundary available to callers that supply only documents and
-/// `other_files`. Canonical discovery uses its complete traversed-directory inventory instead, so
-/// it also covers additions inside directories that were empty during the first pass.
-fn inventory_ancestor_directories(paths: &[RelPath], others: &BTreeSet<RelPath>) -> Vec<RelPath> {
-    let mut directories = BTreeSet::new();
-    for path in paths.iter().chain(others.iter()) {
-        let mut parent = Path::new(path.as_str()).parent();
-        while let Some(directory) = parent {
-            if directory.as_os_str().is_empty() {
-                break;
-            }
-            // A parent of a valid RelPath is itself representable and cannot escape the root.
-            if let Some(text) = directory.to_str() {
-                if let Ok(relative) = RelPath::new(text) {
-                    directories.insert(relative);
-                }
-            }
-            parent = directory.parent();
-        }
-    }
-    directories.into_iter().collect()
 }
 
 fn snapshot_directories(
@@ -2181,17 +2344,10 @@ impl Drop for RssWindow {
 
 fn read_payload(root: &Path, path: &Path) -> Result<Vec<u8>, std::io::Error> {
     let content = std::fs::read(path)?;
-    let Some(audit) = std::env::var_os("LODESTAR_H03_TEST_READ_AUDIT") else {
+    let Some(audit) = payload_audit_path(root) else {
         return Ok(content);
     };
-    let audit = PathBuf::from(audit);
     let root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
-    let audit_parent = audit.parent().unwrap_or(Path::new("."));
-    let audit_parent =
-        std::fs::canonicalize(audit_parent).unwrap_or_else(|_| audit_parent.to_path_buf());
-    if !audit_parent.starts_with(&root) {
-        return Ok(content);
-    }
     static AUDIT_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     let _guard = AUDIT_LOCK
         .get_or_init(|| Mutex::new(()))
@@ -2203,10 +2359,9 @@ fn read_payload(root: &Path, path: &Path) -> Result<Vec<u8>, std::io::Error> {
         .unwrap_or(&canonical_path)
         .to_string_lossy()
         .replace('\\', "/");
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(audit)?;
+    let Some(mut file) = open_payload_audit(&audit) else {
+        return Ok(content);
+    };
     writeln!(
         file,
         "{}",
@@ -2398,16 +2553,24 @@ impl SqlTrace {
             .unwrap_or_default();
         let build_id = format!("{}-{timestamp}", std::process::id());
         let file = match sql_trace_path_for(next) {
-            Some(path) => {
-                if let Some(parent) = path.parent() {
-                    std::fs::create_dir_all(parent)
-                        .map_err(|error| StoreError::Io(error.to_string()))?;
+            Some(path) => match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(path)
+            {
+                Ok(file)
+                    if file_has_single_link(&file).map_err(|error| {
+                        StoreError::Io(format!("SQL trace metadata: {error}"))
+                    })? =>
+                {
+                    Some(file)
                 }
-                Some(
-                    std::fs::File::create(path)
-                        .map_err(|error| StoreError::Io(error.to_string()))?,
-                )
-            }
+                Ok(_) => None,
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => None,
+                Err(error) => {
+                    return Err(StoreError::Io(format!("create SQL trace: {error}")));
+                }
+            },
             None => None,
         };
         let mut trace = Self {
@@ -2471,14 +2634,17 @@ impl SqlTrace {
 
 fn sql_trace_path_for(next: &Path) -> Option<PathBuf> {
     let path = PathBuf::from(std::env::var_os("LODESTAR_H03_SQL_TRACE")?);
-    if path.parent() == next.parent() {
-        return Some(path);
+    let cache_dir = std::fs::canonicalize(next.parent()?).ok()?;
+    let root = std::fs::canonicalize(next.parent()?.parent()?).ok()?;
+    if !cache_dir.starts_with(&root) {
+        return None;
     }
-
-    // A process-wide diagnostic seam can briefly be visible to a rebuild for another root. An
-    // external collector must therefore name its owner explicitly; root-local traces are scoped
-    // by their parent directory without requiring the extra marker.
-    let requested_root = PathBuf::from(std::env::var_os("LODESTAR_H03_SQL_TRACE_ROOT")?);
-    let next_root = next.parent()?.parent()?;
-    (requested_root == next_root).then_some(path)
+    let parent = std::fs::canonicalize(path.parent()?).ok()?;
+    if !parent.starts_with(&cache_dir) {
+        return None;
+    }
+    match std::fs::symlink_metadata(&path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Some(path),
+        _ => None,
+    }
 }

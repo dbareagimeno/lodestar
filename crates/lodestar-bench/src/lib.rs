@@ -34,6 +34,9 @@ const CHANGE_PARENT_ENV: &str = "LODESTAR_BENCH_TEST_CHANGE_PARENT";
 const ITERATIONS_ENV: &str = "LODESTAR_BENCH_TEST_ITERATIONS";
 const RSS_SAMPLER_ENV: &str = "LODESTAR_BENCH_TEST_RSS_SAMPLER";
 const SQLITE_TIMING_TRACE_ENV: &str = "LODESTAR_BENCH_TEST_SQLITE_TIMING_TRACE";
+const SQLITE_TIMING_LOG_ENV: &str = "LODESTAR_BENCH_TEST_SQLITE_TIMING_LOG";
+const H03_SQL_TRACE_ENV: &str = "LODESTAR_H03_SQL_TRACE";
+const H03_RSS_TRACE_ENV: &str = "LODESTAR_H03_RSS_TRACE";
 const A6_REPO_ROOT_ENV: &str = "LODESTAR_BENCH_TEST_A6_REPO_ROOT";
 const BENCH_VARIANTS: [&str; 3] = ["disk-reparseo", "sqlite-raw", "ram-memoizado"];
 const FULL_PROFILE_NAMES: [&str; 2] = ["plano", "realista"];
@@ -119,6 +122,62 @@ struct Args {
 struct OwnedExtremeRoot {
     path: PathBuf,
     _temp: Option<tempfile::TempDir>,
+}
+
+struct ControlLog {
+    file: std::fs::File,
+}
+
+impl ControlLog {
+    fn create(root: &Path, env: &str) -> Option<Self> {
+        let path = new_control_log_path(root, env)?;
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+            .ok()?;
+        Some(Self { file })
+    }
+
+    fn write_line(&mut self, line: &str) {
+        let _ = writeln!(self.file, "{line}");
+    }
+}
+
+fn new_control_log_path(root: &Path, env: &str) -> Option<PathBuf> {
+    let requested = PathBuf::from(std::env::var_os(env)?);
+    let canonical_root = std::fs::canonicalize(root).ok()?;
+    let control_path = root.join(".lodestar");
+    let control_metadata = std::fs::symlink_metadata(&control_path).ok()?;
+    if control_metadata.file_type().is_symlink() || !control_metadata.is_dir() {
+        return None;
+    }
+    let control = std::fs::canonicalize(&control_path).ok()?;
+    if !control.starts_with(&canonical_root) {
+        return None;
+    }
+    let requested_parent = requested.parent()?;
+    let relative_parent = requested_parent.strip_prefix(&control_path).ok()?;
+    let mut current = control_path;
+    for component in relative_parent.components() {
+        match component {
+            std::path::Component::Normal(name) => current.push(name),
+            std::path::Component::CurDir => continue,
+            _ => return None,
+        }
+        let metadata = std::fs::symlink_metadata(&current).ok()?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return None;
+        }
+    }
+    let parent = std::fs::canonicalize(requested_parent).ok()?;
+    if !parent.starts_with(&control) {
+        return None;
+    }
+    match std::fs::symlink_metadata(&requested) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Some(requested),
+        _ => None,
+    }
 }
 
 impl Drop for OwnedExtremeRoot {
@@ -851,16 +910,16 @@ fn cold_open_samples_with_timing(
     variant: &str,
     iterations: usize,
     elapsed_ns: Option<&[u64]>,
-    timing_log: bool,
+    timing_log: &mut Option<ControlLog>,
 ) -> Value {
     let samples = (0..iterations)
         .map(|index| {
-            if timing_log {
-                sqlite_timing_log(&format!("phase:cold-open:{}:timer-start", index + 1));
+            if let Some(log) = timing_log.as_mut() {
+                log.write_line(&format!("phase:cold-open:{}:timer-start", index + 1));
             }
             let measured = cold_open(root, variant);
-            if timing_log {
-                sqlite_timing_log(&format!("phase:cold-open:{}:timer-end", index + 1));
+            if let Some(log) = timing_log.as_mut() {
+                log.write_line(&format!("phase:cold-open:{}:timer-end", index + 1));
             }
             let elapsed = elapsed_ns
                 .map(|values| values[index])
@@ -872,8 +931,8 @@ fn cold_open_samples_with_timing(
                         .and_then(Value::as_u64)
                 })
                 .unwrap_or(1);
-            if timing_log {
-                sqlite_timing_log(&format!("consume:cold-open:{}:{}", index + 1, elapsed));
+            if let Some(log) = timing_log.as_mut() {
+                log.write_line(&format!("consume:cold-open:{}:{}", index + 1, elapsed));
             }
             (
                 Duration::from_nanos(elapsed),
@@ -979,23 +1038,6 @@ fn sqlite_timing_trace_from_env(
     }))
 }
 
-fn sqlite_timing_log_enabled() -> bool {
-    std::env::var_os("LODESTAR_BENCH_TEST_SQLITE_TIMING_LOG").is_some()
-}
-
-fn sqlite_timing_log(line: &str) {
-    let Some(path) = std::env::var_os("LODESTAR_BENCH_TEST_SQLITE_TIMING_LOG") else {
-        return;
-    };
-    if let Ok(mut file) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-    {
-        let _ = writeln!(file, "{line}");
-    }
-}
-
 fn variant_row(
     app: &App,
     root: &Path,
@@ -1039,6 +1081,12 @@ fn variant_row_with_cold_iterations(
     let mut rebuild_rss: Option<Value> = None;
     let mut rebuild_report_public: Option<Value> = None;
     let mut trace_tools = Map::new();
+    let mut timing_log = (variant == "sqlite-raw")
+        .then(|| ControlLog::create(root, SQLITE_TIMING_LOG_ENV))
+        .flatten();
+    let mut h03_rss_trace = (variant == "sqlite-raw")
+        .then(|| ControlLog::create(root, H03_RSS_TRACE_ENV))
+        .flatten();
     let last: BTreeMap<String, Value> = match variant {
         "disk-reparseo" => {
             for index in 1..=iterations {
@@ -1056,28 +1104,27 @@ fn variant_row_with_cold_iterations(
             // externo puede reconstruir el mismo SQLite entre READY y CONTINUE; por eso cada
             // muestra abre una conexión fresca y solo mide `document_set` + servicio.
             let initial_store = Store::open(root).context("abrir store SQLite")?;
-            if std::env::var_os("LODESTAR_H03_SQL_TRACE").is_some() {
-                std::env::set_var("LODESTAR_H03_SQL_TRACE_ROOT", root);
-            }
-            let timing_log = sqlite_timing_log_enabled();
-            if timing_log {
-                sqlite_timing_log("phase:rebuild:start");
+            if let Some(log) = timing_log.as_mut() {
+                log.write_line("phase:rebuild:start");
             }
             let rebuild_start = Instant::now();
             let rebuild_report = initial_store.rebuild().context("rebuild SQLite")?;
-            if timing_log {
-                sqlite_timing_log("phase:rebuild:end");
+            if let Some(log) = timing_log.as_mut() {
+                log.write_line("phase:rebuild:end");
             }
             // This sample is deliberately taken after rebuild:end and before opening the first
             // read connection, so it cannot attribute query allocations to the rebuild.
             let measured_rebuild_rss = reconcile_rebuild_rss(
-                rebuild_rss_report(std::env::var_os(RSS_SAMPLER_ENV).as_deref()),
+                rebuild_rss_report(
+                    std::env::var_os(RSS_SAMPLER_ENV).as_deref(),
+                    h03_rss_trace.as_mut(),
+                ),
                 &rebuild_report,
             );
             let expose_rebuild_evidence = public_rebuild_evidence
                 || std::env::var_os(RSS_SAMPLER_ENV).is_some()
-                || std::env::var_os("LODESTAR_H03_SQL_TRACE").is_some()
-                || std::env::var_os("LODESTAR_H03_RSS_TRACE").is_some();
+                || std::env::var_os(H03_SQL_TRACE_ENV).is_some()
+                || std::env::var_os(H03_RSS_TRACE_ENV).is_some();
             if expose_rebuild_evidence {
                 rebuild_rss = Some(measured_rebuild_rss);
             }
@@ -1087,8 +1134,8 @@ fn variant_row_with_cold_iterations(
             let rebuild_elapsed = timing_trace
                 .map(|trace| Duration::from_nanos(trace.rebuild_elapsed_ns))
                 .unwrap_or_else(|| rebuild_start.elapsed());
-            if timing_log {
-                sqlite_timing_log(&format!("consume:rebuild:{}", rebuild_elapsed.as_nanos()));
+            if let Some(log) = timing_log.as_mut() {
+                log.write_line(&format!("consume:rebuild:{}", rebuild_elapsed.as_nanos()));
             }
             rebuild_samples.push((rebuild_elapsed, json!(true)));
             drop(initial_store);
@@ -1098,8 +1145,8 @@ fn variant_row_with_cold_iterations(
                     // Abrir una conexión fresca observa el SQLite reconstruido por la fase previa
                     // (o por el oráculo externo del protocolo); rebuild no entra en el percentile.
                     let store = Store::open(root).context("abrir store SQLite")?;
-                    if timing_log {
-                        sqlite_timing_log(&format!("phase:tool:{tool}:{index}:timer-start"));
+                    if let Some(log) = timing_log.as_mut() {
+                        log.write_line(&format!("phase:tool:{tool}:{index}:timer-start"));
                     }
                     let start = Instant::now();
                     let doc_set = store.document_set();
@@ -1111,9 +1158,9 @@ fn variant_row_with_cold_iterations(
                     let elapsed = timing_trace
                         .map(|trace| Duration::from_nanos(trace.tool_elapsed_ns[tool][index - 1]))
                         .unwrap_or(measured_elapsed);
-                    if timing_log {
-                        sqlite_timing_log(&format!("phase:tool:{tool}:{index}:timer-end"));
-                        sqlite_timing_log(&format!(
+                    if let Some(log) = timing_log.as_mut() {
+                        log.write_line(&format!("phase:tool:{tool}:{index}:timer-end"));
+                        log.write_line(&format!(
                             "consume:tool:{tool}:{index}:{}",
                             elapsed.as_nanos()
                         ));
@@ -1167,7 +1214,7 @@ fn variant_row_with_cold_iterations(
             variant,
             cold_iterations,
             timing_trace.map(|trace| trace.cold_open_elapsed_ns.as_slice()),
-            variant == "sqlite-raw" && sqlite_timing_log_enabled(),
+            &mut timing_log,
         ),
     );
     if !rebuild_samples.is_empty() {
@@ -1344,7 +1391,10 @@ fn rss_sampler_report(path: &OsStr, phase: Option<&str>) -> Value {
     })
 }
 
-fn rebuild_rss_report(test_sampler: Option<&OsStr>) -> Value {
+fn rebuild_rss_report(
+    test_sampler: Option<&OsStr>,
+    h03_rss_trace: Option<&mut ControlLog>,
+) -> Value {
     if let Some(path) = test_sampler {
         let sampled = rss_sampler_report(path, Some("rebuild"));
         if sampled.get("status").and_then(Value::as_str) == Some("available") {
@@ -1362,7 +1412,12 @@ fn rebuild_rss_report(test_sampler: Option<&OsStr>) -> Value {
         );
         if object.get("status").and_then(Value::as_str) == Some("available") {
             if let Some(bytes) = object.get("absolute_bytes").and_then(Value::as_u64) {
-                h03_rss_trace_sample(bytes);
+                if let Some(log) = h03_rss_trace {
+                    log.write_line(&format!(
+                        "rss_sample:rebuild:{}:{bytes}",
+                        std::process::id()
+                    ));
+                }
             }
         }
     }
@@ -1396,19 +1451,6 @@ fn reconcile_rebuild_rss(mut sampled: Value, rebuild_report: &Value) -> Value {
         );
     }
     sampled
-}
-
-fn h03_rss_trace_sample(bytes: u64) {
-    let Some(path) = std::env::var_os("LODESTAR_H03_RSS_TRACE") else {
-        return;
-    };
-    if let Ok(mut file) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-    {
-        let _ = writeln!(file, "rss_sample:rebuild:{}:{bytes}", std::process::id());
-    }
 }
 
 #[allow(clippy::needless_return)]

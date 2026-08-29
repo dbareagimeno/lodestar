@@ -8,6 +8,7 @@
 //! SQLite's process-wide syscall table and default VFS remain untouched.
 
 use std::ffi::{c_char, c_int, CStr};
+use std::os::windows::io::AsRawHandle;
 use std::path::{Path, PathBuf};
 use std::ptr;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -21,8 +22,9 @@ use windows_sys::Win32::Foundation::{
 };
 use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, CreateHardLinkW, FileDispositionInfoEx, FileIdInfo, FileRenameInfoEx,
-    FlushFileBuffers, GetFileInformationByHandleEx, LockFileEx, ReOpenFile,
-    SetFileInformationByHandle, DELETE, FILE_ATTRIBUTE_NORMAL, FILE_DISPOSITION_FLAG_DELETE,
+    FlushFileBuffers, GetFileInformationByHandle, GetFileInformationByHandleEx, LockFileEx,
+    ReOpenFile, SetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, DELETE,
+    FILE_ATTRIBUTE_NORMAL, FILE_DISPOSITION_FLAG_DELETE,
     FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE, FILE_DISPOSITION_FLAG_POSIX_SEMANTICS,
     FILE_DISPOSITION_INFO_EX, FILE_FLAG_OPEN_REPARSE_POINT, FILE_FLAG_WRITE_THROUGH, FILE_ID_INFO,
     FILE_RENAME_INFO, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
@@ -118,6 +120,20 @@ struct StagedSidecar {
     original: PathBuf,
     tombstone: PathBuf,
     renamed_handle: Option<OwnedHandle>,
+}
+
+pub(crate) fn file_has_single_link(file: &std::fs::File) -> std::io::Result<bool> {
+    let mut information = BY_HANDLE_FILE_INFORMATION::default();
+    let result = unsafe {
+        GetFileInformationByHandle(
+            file.as_raw_handle() as HANDLE,
+            std::ptr::addr_of_mut!(information),
+        )
+    };
+    if result == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(information.nNumberOfLinks == 1)
 }
 
 /// Holds DELETE access to the active main file and stages both sidecars under reversible names.

@@ -295,7 +295,7 @@ fn c2_rebuild_from_inventory_lee_cada_cuerpo_exactamente_una_vez() {
     let root = tempfile::tempdir().unwrap();
     let payload = markdown("regular", "sentinel-c2-regular-reader");
     write(root.path(), "docs/once.md", &payload);
-    let audit = root.path().join(".c2-reader-audit.ndjson");
+    let audit = root.path().join(".lodestar/.c2-reader-audit.ndjson");
     std::env::set_var("LODESTAR_H03_TEST_READ_AUDIT", &audit);
     let store = Store::open(root.path()).expect("C2: Store::open");
     let report = store

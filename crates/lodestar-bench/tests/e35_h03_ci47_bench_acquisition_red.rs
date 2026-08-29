@@ -139,14 +139,19 @@ fn assert_committed_snapshot(root: &Path, expected: &BTreeSet<String>, phase: &s
         disk_diagnostics(root)
     );
 
-    let allowed: BTreeSet<_> = ["index.db", "index.db-wal", "index.db-shm"]
-        .into_iter()
-        .collect();
+    let allowed = ["index.db", "index.db-wal", "index.db-shm"];
     let forbidden: Vec<_> = fs::read_dir(&cache)
         .expect("CI48 cache legible tras commit")
         .filter_map(Result::ok)
-        .filter_map(|entry| entry.file_name().into_string().ok())
-        .filter(|name| name.starts_with("index.db") && !allowed.contains(name.as_str()))
+        .filter_map(|entry| {
+            let name = entry.file_name();
+            let encoded = name.as_encoded_bytes();
+            (encoded.starts_with(b"index.db")
+                && !allowed
+                    .iter()
+                    .any(|item| name == std::ffi::OsStr::new(item)))
+            .then_some(name)
+        })
         .collect();
     assert!(
         forbidden.is_empty(),

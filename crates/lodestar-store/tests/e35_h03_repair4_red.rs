@@ -230,7 +230,7 @@ fn c6_toctou_mismo_tamano_mtime_restaurado_aborta_y_preserva_activo() {
     drop(initial);
 
     let source = root.path().join("doc.md");
-    let stamp = root.path().join("mtime-stamp");
+    let stamp = root.path().join(".lodestar/mtime-stamp");
     std::process::Command::new("touch")
         .args(["-r", source.to_str().unwrap(), stamp.to_str().unwrap()])
         .status()
