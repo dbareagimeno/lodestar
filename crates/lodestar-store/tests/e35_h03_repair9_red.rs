@@ -46,7 +46,13 @@ fn access_time_ns(path: &Path) -> u128 {
 }
 
 fn reset_access_time(path: &Path) {
-    let file = File::open(path).expect("abrir cuerpo para preparar el observador atime");
+    // Windows exige FILE_WRITE_ATTRIBUTES para SetFileTime; abrir solo para lectura hace que
+    // `set_times` falle con ERROR_ACCESS_DENIED aunque el fixture sea escribible.
+    let file = File::options()
+        .read(true)
+        .write(true)
+        .open(path)
+        .expect("abrir cuerpo escribible para preparar el observador atime");
     file.set_times(FileTimes::new().set_accessed(SystemTime::UNIX_EPOCH))
         .expect("el filesystem debe permitir fijar atime para la prueba");
 }
