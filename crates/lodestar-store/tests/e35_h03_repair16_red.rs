@@ -6,6 +6,7 @@
 #![cfg(windows)]
 
 use std::fs::{FileTimes, OpenOptions};
+use std::time::Duration;
 
 use lodestar_discovery::filesystem_fingerprint;
 
@@ -20,6 +21,9 @@ fn c6_windows_fingerprint_detecta_mutacion_mismo_tamano_con_mtime_restaurado() {
     let original_mtime = std::fs::metadata(&path).unwrap().modified().unwrap();
     let before = filesystem_fingerprint(&path, false).unwrap();
 
+    // Windows actualiza ChangeTime por quantums. Separar la captura inicial de la mutación evita
+    // que write + restauración de LastWriteTime queden dentro del mismo tick del reloj.
+    std::thread::sleep(Duration::from_millis(50));
     std::fs::write(&path, b"other-payload").unwrap();
     assert_eq!(
         b"first-payload".len(),
@@ -33,6 +37,11 @@ fn c6_windows_fingerprint_detecta_mutacion_mismo_tamano_con_mtime_restaurado() {
         .set_times(FileTimes::new().set_modified(original_mtime))
         .unwrap();
 
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        b"other-payload",
+        "anti-vacuidad: el payload final debe ser distinto del inicial"
+    );
     let after = filesystem_fingerprint(&path, false).unwrap();
     assert_eq!(
         before.kind, after.kind,
