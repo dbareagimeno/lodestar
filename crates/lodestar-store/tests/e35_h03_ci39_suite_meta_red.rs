@@ -12,6 +12,7 @@ const CI26: &str = include_str!("e35_h03_ci26_placeholder_red.rs");
 const CI27: &str = include_str!("e35_h03_ci27_identity_red.rs");
 const CI33: &str = include_str!("e35_h03_ci33_windows_rename_red.rs");
 const FINAL_RSS: &str = include_str!("e35_h03_final_review_rss_red.rs");
+const REPAIR9: &str = include_str!("e35_h03_repair9_red.rs");
 
 #[test]
 fn ci39_ci38_rechaza_include_alias_extra_y_tolerante_convertido_en_sensible() {
@@ -29,6 +30,7 @@ fn ci39_ci38_rechaza_include_alias_extra_y_tolerante_convertido_en_sensible() {
         ("e35_h03_ci27_identity_red.rs", CI27, true),
         ("e35_h03_ci33_windows_rename_red.rs", CI33, false),
         ("e35_h03_final_review_rss_red.rs", FINAL_RSS, false),
+        ("e35_h03_repair9_red.rs", REPAIR9, false),
     ];
     assert_eq!(
         suite.iter().filter(|(_, _, sensitive)| *sensitive).count(),
@@ -37,11 +39,11 @@ fn ci39_ci38_rechaza_include_alias_extra_y_tolerante_convertido_en_sensible() {
     );
     assert_eq!(
         suite.iter().filter(|(_, _, sensitive)| !*sensitive).count(),
-        5,
-        "anti-vacuidad: la partición base debe contener cinco consumidores tolerantes"
+        6,
+        "anti-vacuidad: la partición base debe contener seis consumidores tolerantes"
     );
     ci38::audit_suite_fixture(&suite)
-        .expect("anti-vacuidad: la suite real 4+5 debe satisfacer el auditor de CI38");
+        .expect("anti-vacuidad: la suite real 4+6 debe satisfacer el auditor de CI38");
 
     let ci26_with_uninventoried_include = format!(
         "{CI26}\nconst SECOND_STORE_ALIAS: &str = include_str!(\"../src/schema.rs\");\n\

@@ -9,7 +9,7 @@
 #![doc(html_no_source)]
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
@@ -2343,7 +2343,13 @@ impl Drop for RssWindow {
 }
 
 fn read_payload(root: &Path, path: &Path) -> Result<Vec<u8>, std::io::Error> {
-    let content = std::fs::read(path)?;
+    let mut open_count = 0_u64;
+    let mut read_count = 0_u64;
+    let mut file = std::fs::File::open(path)?;
+    open_count += 1;
+    let mut content = Vec::new();
+    file.read_to_end(&mut content)?;
+    read_count += 1;
     let Some(audit) = payload_audit_path(root) else {
         return Ok(content);
     };
@@ -2368,8 +2374,8 @@ fn read_payload(root: &Path, path: &Path) -> Result<Vec<u8>, std::io::Error> {
         serde_json::json!({
             "event": "payload_read",
             "path": relative,
-            "open_count": 1,
-            "read_count": 1,
+            "open_count": open_count,
+            "read_count": read_count,
             "bytes": content.len(),
         })
     )?;

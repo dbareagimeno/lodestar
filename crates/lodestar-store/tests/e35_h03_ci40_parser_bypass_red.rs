@@ -12,8 +12,9 @@ const CI26: &str = include_str!("e35_h03_ci26_placeholder_red.rs");
 const CI27: &str = include_str!("e35_h03_ci27_identity_red.rs");
 const CI33: &str = include_str!("e35_h03_ci33_windows_rename_red.rs");
 const FINAL_RSS: &str = include_str!("e35_h03_final_review_rss_red.rs");
+const REPAIR9: &str = include_str!("e35_h03_repair9_red.rs");
 
-fn real_suite() -> [(&'static str, &'static str, bool); 9] {
+fn real_suite() -> [(&'static str, &'static str, bool); 10] {
     [
         ("e35_h03_ci19_repair2_red.rs", CI19_REPAIR2, true),
         ("e35_h03_ci19_repair3_red.rs", CI19_REPAIR3, false),
@@ -28,14 +29,15 @@ fn real_suite() -> [(&'static str, &'static str, bool); 9] {
         ("e35_h03_ci27_identity_red.rs", CI27, true),
         ("e35_h03_ci33_windows_rename_red.rs", CI33, false),
         ("e35_h03_final_review_rss_red.rs", FINAL_RSS, false),
+        ("e35_h03_repair9_red.rs", REPAIR9, false),
     ]
 }
 
 fn assert_real_partition(suite: &[(&str, &str, bool)]) {
     assert_eq!(
         suite.len(),
-        9,
-        "anti-vacuidad: la suite real tiene nueve consumidores"
+        10,
+        "anti-vacuidad: la suite real tiene diez consumidores"
     );
     assert_eq!(
         suite.iter().filter(|(_, _, sensitive)| *sensitive).count(),
@@ -44,11 +46,11 @@ fn assert_real_partition(suite: &[(&str, &str, bool)]) {
     );
     assert_eq!(
         suite.iter().filter(|(_, _, sensitive)| !*sensitive).count(),
-        5,
-        "anti-vacuidad: la suite real conserva cinco consumidores tolerantes"
+        6,
+        "anti-vacuidad: la suite real conserva seis consumidores tolerantes"
     );
     ci38::audit_suite_fixture(suite)
-        .expect("anti-vacuidad: la suite real 4+5 debe superar el auditor CI38");
+        .expect("anti-vacuidad: la suite real 4+6 debe superar el auditor CI38");
 }
 
 #[test]

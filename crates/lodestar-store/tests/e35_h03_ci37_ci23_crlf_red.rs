@@ -16,6 +16,7 @@ const CI26_SOURCE: &str = include_str!("e35_h03_ci26_placeholder_red.rs");
 const CI27_SOURCE: &str = include_str!("e35_h03_ci27_identity_red.rs");
 const CI33_SOURCE: &str = include_str!("e35_h03_ci33_windows_rename_red.rs");
 const FINAL_RSS_SOURCE: &str = include_str!("e35_h03_final_review_rss_red.rs");
+const REPAIR9_SOURCE: &str = include_str!("e35_h03_repair9_red.rs");
 
 struct IncludeExpectation<'a> {
     binding: &'a str,
@@ -163,6 +164,16 @@ const SUITE_EXPECTATIONS: &[SuiteExpectation<'static>] = &[
         }],
         anchor: None,
     },
+    SuiteExpectation {
+        file: "e35_h03_repair9_red.rs",
+        sensitive: false,
+        includes: &[IncludeExpectation {
+            binding: "STORE_SOURCE",
+            path: "lib.rs",
+            references: 2,
+        }],
+        anchor: None,
+    },
 ];
 
 struct RawSource<'a> {
@@ -278,7 +289,7 @@ fn encoded_anchor(decoded: &str) -> String {
     decoded.replace('\n', "\\n")
 }
 
-fn real_suite() -> [(&'static str, &'static str, bool); 9] {
+fn real_suite() -> [(&'static str, &'static str, bool); 10] {
     [
         ("e35_h03_ci19_repair2_red.rs", CI19_SOURCE, true),
         ("e35_h03_ci19_repair3_red.rs", CI19_REPAIR3_SOURCE, false),
@@ -297,6 +308,7 @@ fn real_suite() -> [(&'static str, &'static str, bool); 9] {
         ("e35_h03_ci27_identity_red.rs", CI27_SOURCE, true),
         ("e35_h03_ci33_windows_rename_red.rs", CI33_SOURCE, false),
         ("e35_h03_final_review_rss_red.rs", FINAL_RSS_SOURCE, false),
+        ("e35_h03_repair9_red.rs", REPAIR9_SOURCE, false),
     ]
 }
 
