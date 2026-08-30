@@ -14,8 +14,12 @@ proporcional al riesgo y las refuerza con scripts verificables.
 4. **Entregable completo antes de juzgar.** Código, tests, contrato, docs y estado entran juntos en
    el expediente.
 5. **Revisión fresca por evidencia.** Los jueces no reciben intención ni razonamiento del autor.
-6. **Integración separada de corrección.** Rama, commit, push y PR son acciones explícitas, no
-   condiciones de Done.
+6. **Aislamiento por historia.** Cada historia nace desde `develop` actualizado en una rama y un
+   worktree nuevos, que no se reutilizan para otra historia.
+7. **CI hasta verde.** Cuando la historia tiene una ejecución remota, el SHA vigente no está Done
+   hasta que terminan verdes todos los checks obligatorios; cualquier rojo se diagnostica y repara.
+8. **Aprendizaje acumulativo.** Toda causa confirmada de rojo CI se añade al registro append-only
+   para mejorar tests, agentes, skills y gates sin reescribir incidentes anteriores.
 
 ## Jerarquía de autoridad
 
@@ -66,6 +70,10 @@ flowchart LR
     Q --> J["Revisión fresca"]
     J -- "fallo reproducible" --> G
     J -- "decisión normativa" --> S
+    J -- "integración autorizada" --> C["CI del SHA vigente"]
+    C -- "rojo" --> F["Registrar causa append-only"]
+    F --> G
+    C -- "verde" --> Z["Historia cerrada"]
 ```
 
 ### Rojo
@@ -149,7 +157,7 @@ parámetros, schemas, valores de wire y guardas anti-vacuidad.
 | Comando | Contenido |
 | --- | --- |
 | `scripts/agent-gates.sh contract` | Superficie estática + tests estructurales MCP. |
-| `scripts/agent-gates.sh policy` | Guidance vigente, contrato estático, pureza y dependencias retiradas, fuente única de errores. |
+| `scripts/agent-gates.sh policy` | Guidance vigente, registro CI append-only, contrato estático, pureza y dependencias retiradas, fuente única de errores. |
 | `scripts/agent-gates.sh full` | fmt, clippy estricto, build de targets, workspace tests, dos suites `test-failpoints`, doc, policy y demo smoke en Linux. |
 
 El gate completo refleja las puertas de CI que `cargo test --workspace` no cubre por sí solo. No
@@ -178,8 +186,71 @@ tres lentes. Docs mecánicas pueden revisarse directamente.
 
 ## Git e integración
 
-La sesión parte de un checkout o worktree basado en `develop`. El resultado normal es un diff
-verde y revisado. Solo crear ramas, commits, pushes o PRs cuando el usuario lo pida explícitamente.
+Antes de empezar una historia:
+
+1. actualizar `develop` mediante fast-forward desde `origin/develop`;
+2. crear una rama nueva para la historia desde ese SHA;
+3. crear un worktree nuevo y exclusivo asociado a esa rama;
+4. ejecutar allí spec, rojo, verde, gates y reparaciones; nunca implementar la historia en el
+   checkout principal ni reutilizar el worktree de otra.
+
+El resultado local previo a integración es un diff verde y revisado. Commit, push y PR siguen
+siendo acciones explícitas: solo se realizan cuando el usuario las solicita. Si todavía no existe
+una ejecución remota autorizada, el handoff debe decir **CI pendiente** y no presentar la historia
+como integrada o cerrada.
+
+### Cierre remoto: observar, registrar, reparar
+
+Cuando ya existe un push o PR, seguir la ejecución correspondiente al **SHA vigente** hasta estado
+terminal; `gh pr checks --watch` o `gh run watch` son formas válidas de observarla. No basta con que
+un subconjunto de jobs pase ni con que una ejecución anterior estuviera verde.
+
+Si cualquier check sale rojo:
+
+1. conservar el enlace al run y el log del job que falló;
+2. determinar la causa raíz antes de relanzar a ciegas, incluida la clasificación
+   `product`, `test`, `portability`, `dependency`, `policy`, `documentation`, `infrastructure` o
+   `flaky`;
+3. añadir una entrada a `docs/qa/ci-failures.jsonl` con síntoma, causa, reparación, prevención y
+   la mejora propuesta para agentes o skills;
+4. reparar en el mismo worktree con el proceso proporcional al riesgo, repetir gates locales,
+   publicar el nuevo SHA autorizado y volver a observar todos los checks;
+5. repetir el bucle hasta verde. Un rerun por infraestructura o flakiness también se registra: el
+   tiempo perdido es evidencia útil para endurecer el proceso.
+
+El registro es JSON Lines. La primera línea declara el schema; cada línea posterior representa una
+causa confirmada. Las entradas históricas son inmutables: una corrección se añade con el campo
+opcional `supersedes`, nunca se edita ni borra la línea anterior. Este ejemplo muestra la forma
+canónica (se presenta partido solo para lectura; en el fichero real cada objeto ocupa una línea):
+
+```json
+{
+  "id": "2026-08-26-run-123-rust-windows",
+  "occurred_at": "2026-08-26T12:34:56Z",
+  "run_url": "https://github.com/org/repo/actions/runs/123",
+  "commit": "0123456789abcdef0123456789abcdef01234567",
+  "branch": "feat/e35-h03",
+  "job": "Rust · fmt · clippy · build · test",
+  "platform": "windows-latest",
+  "classification": "portability",
+  "symptom": "el test de publicación falla al reemplazar index.db",
+  "root_cause": "el handle activo no compartía FILE_SHARE_DELETE",
+  "repair": "cerrar el handle antes del reemplazo y añadir regresión Windows",
+  "prevention": "ejecutar el test conductual en la matriz Windows",
+  "process_improvement": {
+    "agents": ["implementador", "juez_arquitectura"],
+    "skills": ["ciclo", "revisar"],
+    "action": "añadir al checklist la semántica de sharing de handles Windows"
+  }
+}
+```
+
+`python3 scripts/check-ci-failure-log.py` valida schema, campos e IDs, y compara el fichero con el
+SHA base del PR o con el commit anterior al push; en local usa `develop` como fallback. El contenido
+histórico debe seguir siendo su prefijo byte a byte. El check se ejecuta dentro de
+`scripts/agent-gates.sh policy` y `full`, por lo que CI rechaza modificaciones, borrados o
+reordenaciones de entradas previas y solo acepta bytes añadidos al final.
+
 `main` queda reservado al runbook de release de `RELEASING.md`.
 
 ## Referencias de Codex

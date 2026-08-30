@@ -217,6 +217,9 @@ parte del motor headless ni del flujo de desarrollo de v2; su diseño se documen
   `develop` por PR. **`main` solo recibe releases** (un PR de release `develop` → `main`, y de ahí
   el tag `vX.Y.Z`); no abras PRs de trabajo contra `main` ni commitees en él. El runbook completo
   está en [`RELEASING.md`](RELEASING.md).
+- **Una historia, un worktree.** Antes de implementarla, actualiza `develop` y crea desde ese SHA
+  una rama y un worktree nuevos y exclusivos; no trabajes la historia en el checkout principal ni
+  reutilices el worktree de otra.
 - **La spec de comportamiento es `docs/REFACTOR_PHASE_2.md` + `ARCHITECTURE.md §20`**, no el
   prototipo. Desde `E15-H04` `prototype/index.html` es **referencia histórica de v0.2.x**: sirve
   para entender por qué el core hace lo que hace (los quirks portados 1:1 de `splitFront`,
@@ -226,7 +229,9 @@ parte del motor headless ni del flujo de desarrollo de v2; su diseño se documen
   gana la spec. El arnés diferencial JS-vs-Rust se retiró con él; la red de seguridad de esa
   semántica son ahora los tests de `crates/lodestar-core/tests/core.rs`.
 - **Antes de mergear**: el CI exige fmt + clippy `-D warnings` + build `--all-targets` + tests +
-  doc + pureza del core. Ejecuta el subconjunto relevante en local.
+  doc + pureza del core. Ejecuta el subconjunto relevante en local y, cuando haya run remoto,
+  síguelo hasta verde. Todo rojo se diagnostica, se repara y se añade sin reescribir historia a
+  `docs/qa/ci-failures.jsonl`.
 - **`ARCHITECTURE.md` es la autoridad** en diseño; `decisiones/` lista lo que está abierto a
   criterio del usuario — si una decisión ratificada te parece equivocada, plantéalo explícitamente,
   no la deshagas por inercia.
@@ -251,5 +256,6 @@ La separación no depende solo de prompts: `phase-scope.py` limita la fase roja 
 `lodestar-app` con `test-failpoints`.
 
 Los jueces reciben solo spec, diff, autoridades y gates. Código, contrato, docs y estado afectados
-se completan antes del juicio. Ramas, commits, pushes y PRs se realizan únicamente a petición
-explícita; el resultado normal es un diff verde y revisado sobre una base `develop`.
+se completan antes del juicio. Cada historia usa rama y worktree nuevos desde `develop` actualizado;
+commits, pushes y PRs se realizan únicamente a petición explícita. Si existe CI remoto, el resultado
+no se considera cerrado hasta que el SHA vigente queda verde.
