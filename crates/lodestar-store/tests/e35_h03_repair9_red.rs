@@ -22,11 +22,10 @@ use lodestar_core::types::RelPath;
 use lodestar_discovery::{discover_inventory, DiscoveryPolicy};
 use lodestar_store::Store;
 #[cfg(windows)]
-use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+use windows_sys::Win32::Foundation::{GENERIC_READ, INVALID_HANDLE_VALUE};
 #[cfg(windows)]
 use windows_sys::Win32::Storage::FileSystem::{
-    CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_DELETE, FILE_SHARE_WRITE, GENERIC_READ,
-    OPEN_EXISTING,
+    CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_DELETE, FILE_SHARE_WRITE, OPEN_EXISTING,
 };
 
 const STORE_SOURCE: &str = include_str!("../src/lib.rs");
