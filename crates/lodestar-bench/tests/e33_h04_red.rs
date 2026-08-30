@@ -4,9 +4,9 @@
 //! scaffold, por lo que esta suite debe compilar y fallar por ausencia de su capacidad.
 
 use serde_json::{Map, Value};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use tempfile::TempDir;
@@ -608,10 +608,22 @@ fn cada_muestra_respeta_la_adquisicion_de_su_variante() {
         .expect("spawn acquisition probe");
     let stdout = child.stdout.take().expect("probe stdout");
     let mut lines = BufReader::new(stdout).lines();
-    let ready = lines
-        .next()
-        .expect("BDD-A4: READY line")
-        .expect("BDD-A4: READY UTF-8");
+    let ready = match lines.next() {
+        Some(line) => line.expect("BDD-A4: READY UTF-8"),
+        None => {
+            drop(child.stdin.take());
+            let mut stderr = Vec::new();
+            child
+                .stderr
+                .take()
+                .expect("BDD-A4 stderr")
+                .read_to_end(&mut stderr)
+                .expect("BDD-A4 stderr read");
+            let status = child.wait().expect("BDD-A4 child wait before READY");
+            let stderr = String::from_utf8_lossy(&stderr);
+            panic!("BDD-A4: falta READY; el proceso terminó con status={status}; stderr={stderr}");
+        }
+    };
     let ready: Value = serde_json::from_str(&ready).expect("BDD-A4: READY JSON");
     assert_eq!(required(&ready, "event", "BDD-A4 READY"), "READY");
     fs::write(
@@ -625,42 +637,80 @@ fn cada_muestra_respeta_la_adquisicion_de_su_variante() {
         .map(|line| line.expect("BDD-A4 output UTF-8"))
         .collect::<Vec<_>>()
         .join("\n");
-    let report: Value = serde_json::from_str(final_stdout.trim()).expect("BDD-A4 final JSON");
+    let mut stderr = Vec::new();
+    child
+        .stderr
+        .take()
+        .expect("BDD-A4 stderr")
+        .read_to_end(&mut stderr)
+        .expect("BDD-A4 stderr read");
+    let status = child.wait().expect("BDD-A4 child wait");
+    let stderr = String::from_utf8_lossy(&stderr);
+    assert!(
+        status.success(),
+        "BDD-A4: el probe debe terminar con exit 0; status={status}; stderr={stderr}; stdout={final_stdout}"
+    );
+    let report: Value = serde_json::from_str(final_stdout.trim()).unwrap_or_else(|error| {
+        panic!(
+            "BDD-A4: salida final debe ser JSON; error={error}; status={status}; stderr={stderr}; stdout={final_stdout}"
+        )
+    });
     let before = object(&report, "before", "BDD-A4 before");
     let after = object(&report, "after", "BDD-A4 after");
-    let before_counts: BTreeSet<_> = VARIANTS
+    let before_counts: BTreeMap<_, _> = VARIANTS
         .iter()
         .map(|variant| {
-            before
-                .get(*variant)
-                .and_then(Value::as_object)
-                .and_then(|row| row.get("document_count"))
-                .and_then(Value::as_u64)
-                .unwrap()
+            (
+                *variant,
+                before
+                    .get(*variant)
+                    .and_then(Value::as_object)
+                    .and_then(|row| row.get("document_count"))
+                    .and_then(Value::as_u64)
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "BDD-A4 before: document_count ausente/no entero para {variant}; before={before:?}"
+                        )
+                    }),
+            )
         })
         .collect();
-    assert_eq!(before_counts.len(), 1);
+    let after_counts: BTreeMap<_, _> = VARIANTS
+        .iter()
+        .map(|variant| {
+            (
+                *variant,
+                after
+                    .get(*variant)
+                    .and_then(Value::as_object)
+                    .and_then(|row| row.get("document_count"))
+                    .and_then(Value::as_u64)
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "BDD-A4 after: document_count ausente/no entero para {variant}; after={after:?}"
+                        )
+                    }),
+            )
+        })
+        .collect();
+    let distinct_before: BTreeSet<_> = before_counts.values().copied().collect();
+    assert_eq!(
+        distinct_before.len(),
+        1,
+        "BDD-A4: las tres variantes deben partir de la misma adquisición; before={before_counts:?}; after={after_counts:?}; status={status}; stderr={stderr}"
+    );
     for variant in VARIANTS {
-        let before_count = before
-            .get(variant)
-            .and_then(Value::as_object)
-            .and_then(|row| row.get("document_count"))
-            .and_then(Value::as_u64)
-            .unwrap();
-        let after_count = after
-            .get(variant)
-            .and_then(Value::as_object)
-            .and_then(|row| row.get("document_count"))
-            .and_then(Value::as_u64)
-            .unwrap();
+        let before_count = before_counts[variant];
+        let after_count = after_counts[variant];
         match variant {
-            "disk-reparseo" | "sqlite-raw" => assert!(
-                after_count > before_count,
-                "BDD-A4 {variant} debe ver la segunda adquisición"
+            "disk-reparseo" | "sqlite-raw" => assert_eq!(
+                after_count,
+                before_count + 1,
+                "BDD-A4 {variant} debe reflejar exactamente el documento añadido en la segunda adquisición; before={before_counts:?}; after={after_counts:?}"
             ),
             "ram-memoizado" => assert_eq!(
                 after_count, before_count,
-                "BDD-A4 RAM debe conservar el DocumentSet inicial"
+                "BDD-A4 RAM debe conservar el DocumentSet inicial; before={before_counts:?}; after={after_counts:?}"
             ),
             _ => unreachable!(),
         }
@@ -694,11 +744,6 @@ fn cada_muestra_respeta_la_adquisicion_de_su_variante() {
             "BDD-A4 rebuild no puede contaminar la muestra {variant}"
         );
     }
-    let status = child.wait().expect("BDD-A4 child wait");
-    assert!(
-        status.success(),
-        "BDD-A4: el probe debe terminar con exit 0, status={status}"
-    );
 }
 
 #[test]

@@ -329,35 +329,52 @@ fn p50_y_p95_son_derivados_exactos_de_sample_elapsed_ns() {
 }
 
 #[test]
-fn rss_por_variante_declara_worker_aislado_y_getrusage_portable() {
+fn rss_por_variante_declara_worker_aislado_y_metodo_portable() {
     let dir = tempfile::tempdir().expect("directorio temporal");
     let (output, _, _) = extreme_report(dir.path(), "3", "1");
     let report = report(&output, "RSS");
-    let rss_available = matches!(std::env::consts::OS, "macos" | "linux");
     for row in measurements(&report, "RSS") {
         let variant = row["variant"].as_str().unwrap_or("<missing>");
         let rss = row["rss"]
             .as_object()
             .unwrap_or_else(|| panic!("{variant}: falta rss"));
-        if rss_available {
-            assert_eq!(
-                rss["status"], "available",
-                "{variant}: RSS debe estar disponible"
-            );
-            assert!(rss["method"].as_str().unwrap_or("").contains("getrusage"));
-            assert!(rss["absolute_bytes"].as_u64().unwrap_or(0) > 0);
-        } else {
-            assert_eq!(rss["status"], "unavailable", "{variant}: RSS honesto");
-            assert!(rss["reason"]
-                .as_str()
-                .is_some_and(|reason| !reason.is_empty()));
-            for key in [
-                "raw_value",
-                "absolute_bytes",
-                "baseline_bytes",
-                "delta_bytes",
-            ] {
-                assert!(rss.get(key).is_none(), "{variant}: {key} no es una medida");
+        match std::env::consts::OS {
+            "macos" | "linux" => {
+                assert_eq!(
+                    rss["status"], "available",
+                    "{variant}: RSS debe estar disponible"
+                );
+                assert!(rss["method"].as_str().unwrap_or("").contains("getrusage"));
+                assert!(rss["absolute_bytes"].as_u64().unwrap_or(0) > 0);
+            }
+            "windows" => {
+                assert_eq!(
+                    rss["status"], "available",
+                    "{variant}: RSS debe estar disponible"
+                );
+                assert!(rss["absolute_bytes"].as_u64().unwrap_or(0) > 0);
+                assert_eq!(rss["raw_units"].as_str(), Some("bytes"));
+                assert!(
+                    rss["method"]
+                        .as_str()
+                        .is_some_and(|method| method.contains("GetProcessMemoryInfo")
+                            && method.contains("PeakWorkingSetSize")),
+                    "{variant}: la procedencia debe identificar la medición nativa de pico Windows"
+                );
+            }
+            _ => {
+                assert_eq!(rss["status"], "unavailable", "{variant}: RSS honesto");
+                assert!(rss["reason"]
+                    .as_str()
+                    .is_some_and(|reason| !reason.is_empty()));
+                for key in [
+                    "raw_value",
+                    "absolute_bytes",
+                    "baseline_bytes",
+                    "delta_bytes",
+                ] {
+                    assert!(rss.get(key).is_none(), "{variant}: {key} no es una medida");
+                }
             }
         }
         assert!(rss["units"].as_str().is_some_and(|value| !value.is_empty()));

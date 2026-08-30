@@ -59,7 +59,8 @@ fn max_memory_valido_no_se_proyecta_como_error() {
     let dir = tempfile::tempdir().expect("tempdir");
     escribe_config(dir.path(), "64MiB");
     let app = App::open(dir.path()).expect("64MiB debe abrir");
-    assert_eq!(app.workspace().root(), dir.path());
+    let expected_root = std::fs::canonicalize(dir.path()).expect("canonicalizar tempdir");
+    assert_eq!(app.workspace().root(), expected_root);
 }
 
 /// C4 — el binario real rechaza la configuración antes de abrir una sesión MCP.

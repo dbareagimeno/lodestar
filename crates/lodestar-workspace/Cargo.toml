@@ -13,13 +13,13 @@ categories = ["filesystem", "development-tools"]
 
 [dependencies]
 lodestar-core = { workspace = true }
+lodestar-discovery = { workspace = true }
 lodestar-store = { workspace = true }
 thiserror = { workspace = true }
 ignore = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 crossbeam-channel = "0.5"
-serde_yaml = { workspace = true }
 
 # E23-H23: comprobar si el dueño de un lock huérfano sigue vivo (`kill(pid, 0)`). Solo en Unix; en
 # Windows el TTL hace de red. No añade código externo nuevo al árbol: `libc` ya llega

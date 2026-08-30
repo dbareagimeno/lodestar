@@ -134,8 +134,9 @@ fn wait_for_next_ready(
     handled: &BTreeSet<(String, String, usize)>,
     ram_acquired: bool,
     child: &mut ChildGuard,
-    deadline: Instant,
+    inactivity_timeout: Duration,
 ) -> Option<(ReadyEvent, PathBuf)> {
+    let deadline = Instant::now() + inactivity_timeout;
     loop {
         let entries = fs::read_dir(barrier).expect("leer barrier A4");
         for entry in entries {
@@ -717,7 +718,6 @@ fn smoke_normal_honra_barrera_y_muestra_adquisicion_por_variante() {
     let mut sample_expected: BTreeMap<(String, String, usize), Value> = BTreeMap::new();
     let mut last_expected: BTreeMap<(String, String), Value> = BTreeMap::new();
     let mut generation = 0;
-    let deadline = Instant::now() + Duration::from_secs(20);
     while let Some((event, ready)) = wait_for_next_ready(
         barrier.path(),
         &variants,
@@ -725,7 +725,7 @@ fn smoke_normal_honra_barrera_y_muestra_adquisicion_por_variante() {
         &handled,
         ram_acquired,
         &mut child,
-        deadline,
+        Duration::from_secs(20),
     ) {
         fs::remove_file(&ready).expect("retirar READY atendido");
         match event {

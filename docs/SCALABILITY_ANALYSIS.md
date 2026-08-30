@@ -151,7 +151,8 @@ Propuesta en dos pasadas:
 
 #### Primera pasada: inventario
 
-Recorrer el filesystem e introducir progresivamente en SQLite únicamente información compacta:
+Recorrer el filesystem sin abrir cuerpos y conservar únicamente información compacta. Un path
+Markdown admitido por policy/tamaño todavía es un candidato de codificación desconocida:
 
 - path;
 - tipo de entrada;
@@ -161,14 +162,18 @@ Recorrer el filesystem e introducir progresivamente en SQLite únicamente inform
 
 #### Segunda pasada: indexación
 
-Cada worker:
+La segunda pasada procesa cada candidato exactamente una vez:
 
 1. toma un path;
-2. lee un documento;
-3. lo parsea mediante el core;
-4. produce la proyección indexable;
-5. entrega el resultado al escritor SQLite;
-6. libera el documento.
+2. lee su payload una sola vez y valida UTF-8 sobre esos mismos bytes;
+3. si es inválido, lo reclasifica como `other_files` y no lo parsea ni proyecta;
+4. si es válido, lo parsea una sola vez mediante el core;
+5. reutiliza ese `Parsed` para metadata, links y diagnósticos locales;
+6. produce la proyección indexable y libera el documento.
+
+En E35-H03 el escritor es secuencial. Los candidatos posteriores se representan provisionalmente
+como `WorkspaceFile`; al demostrar UTF-8 se promocionan en el inventario en `O(log N)` y un statement
+preparado reata los enlaces previos con semántica derivada de `LinkTarget`.
 
 La tubería debería tener varios workers de lectura/parseo, una cola limitada por bytes, un único escritor SQLite y backpressure.
 
@@ -438,7 +443,10 @@ En instalaciones locales o de un solo nodo Redis no debería ser necesario.
 
 ### Fase 2 — Memoria acotada
 
-5. Rebuild en streaming.
+5. ✅ E35-H03: rebuild en dos pasadas streaming con inventario compacto sin abrir cuerpos;
+   clasificación UTF-8, parseo y proyección ocurren una sola vez por candidato en la segunda pasada.
+   Los fingerprints de raíz y su destino real, entradas y frontera de directorios nacen en discovery
+   y se revalidan hasta el swap para detectar cambios sin un tercer walker, manteniendo un body vivo.
 6. Presupuesto `performance.maxMemory`, cola limitada por bytes y contabilidad de memoria retenida.
 7. Escritor SQLite dedicado y lectores separados.
 8. Paginación obligatoria para resultados potencialmente grandes.
@@ -462,7 +470,8 @@ En instalaciones locales o de un solo nodo Redis no debería ser necesario.
     `[4201]`, frontmatter exclusivo `[9877]`, `shared_count=10000` y ciclo de update/delete. La
     reducción es `126976 bytes` (`docsize` de external).
     Las optimizaciones posteriores de tokenizer/detail siguen abiertas.
-17. Construcciones por generación y cambios de esquema sin downtime.
+17. ✅ E35-H03: construcción `index.db.next` con authorizer insert-only/prepares reconciliados,
+    writer gate nativo interproceso, validación y swap atómico sin destruir antes el activo.
 
 ### Fase 5 — Escala empresarial distribuida
 

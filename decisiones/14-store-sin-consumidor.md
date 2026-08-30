@@ -152,3 +152,17 @@ y mantiene el objetivo de footprint `≤ 2,5×` como objetivo no bloqueante, con
 Esta mejora de la cache no decide entre **conectarla**, **acotarla** o **retirarla**. El frontmatter
 de esta ficha conserva `estado: "abierta"`, `prioridad: 5` y la recomendación histórica pendiente;
 E35-H02 no cambia la prioridad, no cierra §14 y no altera el contrato MCP/CLI.
+
+## Adenda de implementación — E35-H03 / issue #55 (2026-08-26)
+
+E35-H03 sustituye el cold rebuild que acumulaba cuerpos por inventario compacto sin lecturas de
+payload y una segunda pasada que lee cada candidato una vez. Los UTF-8 válidos se parsean una sola
+vez y los inválidos quedan como `other_files`; la promoción `O(log N)` reata enlaces adelantados sin
+crear una segunda verdad semántica. Construye una generación `.next` insert-only, verifica integridad y la publica
+atómicamente; fingerprints nacidos en discovery de raíz —incluido el destino real de un symlink—,
+entradas y directorios se revalidan tras el streaming y antes del swap para abortar ante cambios
+entre pasadas sin otro walker; un authorizer SQLite impide deletes lógicos/prepares no
+auditados, el índice previo sigue disponible ante pausa o fallo y los escritores quedan serializados
+entre procesos mediante lock nativo RAII. El banco separa RSS del rebuild y memoria controlable, con 60 s/512 MiB como objetivos
+`gate=false`. Esto mejora una cache derivada, pero no la conecta a App/MCP ni elige entre conectar,
+acotar o retirar: esta ficha conserva `estado: "abierta"` y su prioridad.

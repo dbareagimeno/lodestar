@@ -3,10 +3,10 @@
 //! La cache es derivada y desechable: cualquier versión o forma incompatible se elimina y se
 //! vuelve a crear. No existe una migración de filas, y el Markdown del workspace nunca se escribe.
 
-use rusqlite::Connection;
+use rusqlite::{Connection, OpenFlags};
 use std::collections::BTreeMap;
 
-use crate::error::StoreError;
+use crate::{error::StoreError, open_sqlite};
 
 /// Versión del esquema vNext de E35-H02. Un bump fuerza reconstrucción total.
 pub const USER_VERSION: i64 = 6;
@@ -15,6 +15,47 @@ pub(crate) fn apply_pragmas(conn: &Connection) -> Result<(), StoreError> {
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "foreign_keys", "ON")?;
     conn.busy_timeout(std::time::Duration::from_millis(5000))?;
+    Ok(())
+}
+
+/// Pragmas for a disposable generation. It is deliberately not WAL: the generation is never
+/// observed by readers and must be a single portable file at publication time.
+pub(crate) fn apply_build_pragmas(conn: &Connection) -> Result<(), StoreError> {
+    conn.pragma_update(None, "journal_mode", "DELETE")?;
+    conn.pragma_update(None, "synchronous", "NORMAL")?;
+    conn.pragma_update(None, "foreign_keys", "ON")?;
+    conn.busy_timeout(std::time::Duration::from_millis(5000))?;
+    Ok(())
+}
+
+pub(crate) fn open_build_connection(path: &std::path::Path) -> Result<Connection, StoreError> {
+    let conn = open_sqlite(path)?;
+    apply_build_pragmas(&conn)?;
+    create_schema(&conn)?;
+    set_user_version(&conn)?;
+    Ok(conn)
+}
+
+pub(crate) fn open_validation_connection(path: &std::path::Path) -> Result<Connection, StoreError> {
+    #[cfg(windows)]
+    let conn = crate::windows_vfs::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    #[cfg(not(windows))]
+    let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    Ok(conn)
+}
+
+pub(crate) fn validate_database(conn: &Connection) -> Result<(), StoreError> {
+    let integrity: String = conn
+        .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+        .map_err(|error| StoreError::Io(format!("integrity_check: {error}")))?;
+    if !integrity.eq_ignore_ascii_case("ok") {
+        return Err(StoreError::Io(format!("integrity_check: {integrity}")));
+    }
+    let mut foreign = conn.prepare("PRAGMA foreign_key_check")?;
+    let mut rows = foreign.query([])?;
+    if rows.next()?.is_some() {
+        return Err(StoreError::Io("foreign_key_check: violation".into()));
+    }
     Ok(())
 }
 
@@ -219,23 +260,4 @@ pub(crate) fn schema_is_current(conn: &Connection) -> Result<bool, StoreError> {
         }
     }
     Ok(true)
-}
-
-pub(crate) fn truncate_all(conn: &Connection) -> Result<(), StoreError> {
-    conn.execute_batch(
-        r#"
-        DROP TABLE documents_fts;
-        CREATE VIRTUAL TABLE documents_fts USING fts5(
-            path UNINDEXED, title, body, frontmatter_text,
-            content='', columnsize=0
-        );
-        DELETE FROM diagnostics;
-        DELETE FROM links;
-        DELETE FROM metadata;
-        DELETE FROM other_files;
-        DELETE FROM documents;
-        DELETE FROM fields;
-        "#,
-    )?;
-    Ok(())
 }
