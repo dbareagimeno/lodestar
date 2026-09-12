@@ -57,6 +57,8 @@
 | edit → UI < 150 ms | E3-H04, E8-H09 |
 | grafo 60 fps (Barnes-Hut, cap/cluster, virtualización) | E6-H05, E6-H08, E8-H09 |
 | Proyecciones SQL / eventos delta a escala | E3-H08, E5-H03 |
+| Rebuild SQLite streaming, insert-only y publicación atómica | E35-H03 |
+| Memoria controlable y RSS diagnóstico del rebuild | E35-H01, E35-H03 |
 
 ## §13.8 — Scope ratificado de git (v1) → historias
 

@@ -58,7 +58,7 @@ fn full_plan(iterations: &str) -> Value {
 
 fn tiny_root(directory: &Path) -> PathBuf {
     let root = directory.join("tiny-root");
-    fs::create_dir(&root).expect("crear fixture pequeña");
+    fs::create_dir_all(root.join(".lodestar")).expect("crear fixture pequeña y plano de control");
     fs::write(
         root.join("control.md"),
         "---\nservice: bench\ntags: [h09-r6]\n---\n# Control\nmarker-r6\n",
@@ -178,7 +178,7 @@ fn rss_sampler_observa_baseline_app_open_load_y_peak_en_orden() {
     let temp = tempfile::tempdir().expect("directorio temporal");
     let root = tiny_root(temp.path());
     let sampler = temp.path().join("rss-sampler.py");
-    let log = temp.path().join("rss-events.log");
+    let log = root.join(".lodestar/rss-events.log");
     fs::write(
         &sampler,
         r#"#!/usr/bin/env python3
@@ -350,8 +350,9 @@ fn preflight_requerido_es_trazable_y_crece_con_la_escala() {
 fn sqlite_rebuild_termina_antes_de_timers_y_consumos_deterministas() {
     let temp = tempfile::tempdir().expect("directorio temporal");
     let root = tiny_root(temp.path());
-    let trace = temp.path().join("sqlite-clock.json");
-    let phase_log = temp.path().join("sqlite-phases.log");
+    let control = root.join(".lodestar");
+    let trace = control.join("sqlite-clock.json");
+    let phase_log = control.join("sqlite-phases.log");
     let rebuild_ns = 9_000_000_001_u64;
     let mut tool_elapsed = serde_json::Map::new();
     for (index, tool) in TOOLS.iter().enumerate() {

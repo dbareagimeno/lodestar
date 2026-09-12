@@ -1134,6 +1134,29 @@ Esta adenda no conecta SQLite a App/MCP, no modifica el contrato MCP/CLI y no ci
 §14`. El objetivo de footprint Realista/100k `≤ 2,5×` se informa como objetivo de ingeniería, no
 como gate ni como permiso para hacer SQLite la lectura por defecto.
 
+### Adenda ratificada E35-H03 — rebuild streaming, insert-only y atómico
+
+El rebuild efectivo construye `index.db.next` en dos pasadas con la política canónica: inventario
+compacto de candidatos —sin abrir cuerpos e incluidos los directorios recorridos— primero y una
+única lectura después. Esa lectura clasifica UTF-8; los válidos se parsean una vez, se proyectan y
+liberan, mientras los inválidos pasan a `other_files` con `DOC-NOT-UTF8` sin parseo ni proyección.
+Los enlaces adelantados se reatan al promocionar el destino válido, con semántica derivada de
+`LinkTarget` y actualización `O(log N)` del inventario. Fingerprints de raíz —y de su destino real si es symlink—, entradas y directorios se
+capturan y estabilizan en discovery; Store los compara antes de leer cuerpos, tras el streaming y
+justo antes del swap, detectando modificaciones y cambios de pertenencia sin repetir el walker. La
+carga no usa deletes lógicos por documento y reutiliza
+statements; un authorizer SQLite deniega cualquier bypass y reconcilia los diez prepares, permitiendo
+solo mantenimiento shadow FTS5 dentro del INSERT auditado/commit. Solo tras comprobar integridad,
+cerrar y sincronizar la generación se hace rename y
+fsync del directorio. El índice anterior permanece consultable hasta la publicación; los escritores
+se serializan también entre procesos mediante lock nativo RAII y no pueden perder cambios detrás
+del swap.
+
+La telemetría separa `max_live_body_bytes` del RSS específico del rebuild y expone las cuatro fases;
+el pico de cada una procede de muestras de RSS residente actual contenidas en su ventana monotónica.
+Los objetivos 60 s/512 MiB siguen siendo evidencia no bloqueante. No cambia Markdown, configuración,
+MCP/CLI ni la decisión abierta §14.
+
 ---
 
 # Fase 10: validación genérica

@@ -1038,6 +1038,35 @@ impl Inventory {
     pub fn contains_file(&self, path: &RelPath) -> bool {
         self.other_files.contains(path)
     }
+
+    /// Promueve un candidato ya leído y validado como documento.
+    ///
+    /// La operación es pura respecto al disco y actualiza solo la clave plegada afectada en
+    /// `O(log N)`; el universo `documents ∪ other_files` no cambia. Así el store puede clasificar
+    /// enlaces a candidatos futuros como `WorkspaceFile` durante el streaming y reataarlos cuando
+    /// el cuerpo demuestra ser UTF-8.
+    pub fn promote_document(&mut self, path: RelPath) {
+        let folded_path = fold_path(path.as_str());
+        let previous = self.folded.get(&folded_path).cloned();
+        self.documents.insert(path.clone());
+        self.other_files.remove(&path);
+        match previous {
+            None => {
+                self.folded.insert(folded_path, path);
+            }
+            Some(current) if current == path => {}
+            Some(current) if self.documents.contains(&current) => {
+                if path < current {
+                    self.folded.insert(folded_path, path);
+                }
+            }
+            Some(_) => {
+                // A promoted document always takes precedence over an entry that is still only
+                // an `other_file`, independently of insertion order.
+                self.folded.insert(folded_path, path);
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

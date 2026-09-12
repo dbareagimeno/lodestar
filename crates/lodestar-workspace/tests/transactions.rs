@@ -222,7 +222,7 @@ fn staging_no_toca_canonico() {
     // El directorio de staging vive bajo `.lodestar/runtime/staging/`.
     let staging_path: PathBuf = staging.path().to_path_buf();
     assert!(
-        staging_path.starts_with(dir.path().join(".lodestar/runtime/staging")),
+        staging_path.starts_with(ws.root().join(".lodestar/runtime/staging")),
         "el staging no vive bajo .lodestar/runtime/staging: {}",
         staging_path.display()
     );
@@ -452,7 +452,7 @@ fn journal_prepared_antes_de_publicar() {
     // El fichero vive bajo `.lodestar/runtime/journal/<txnId>.json`.
     let journal_path: PathBuf = journal.path().to_path_buf();
     assert!(
-        journal_path.starts_with(dir.path().join(".lodestar/runtime/journal")),
+        journal_path.starts_with(ws.root().join(".lodestar/runtime/journal")),
         "el journal no vive bajo .lodestar/runtime/journal: {}",
         journal_path.display()
     );
@@ -596,7 +596,7 @@ fn backup_originales() {
     // El directorio de recuperación vive bajo `.lodestar/runtime/recovery/<txnId>/`.
     let recovery_root: PathBuf = recovery.path().to_path_buf();
     assert!(
-        recovery_root.starts_with(dir.path().join(".lodestar/runtime/recovery")),
+        recovery_root.starts_with(ws.root().join(".lodestar/runtime/recovery")),
         "la recuperación no vive bajo .lodestar/runtime/recovery: {}",
         recovery_root.display()
     );

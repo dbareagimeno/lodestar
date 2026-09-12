@@ -108,6 +108,39 @@ class ControlledMonotonic:
         self.crossed = True
 
 
+class DeadlineCrossingQueue:
+    """El primer get bloqueante entrega un frame sólo después de vencer su timeout."""
+
+    def __init__(self, clock, late_frame: str, queued_frame: str):
+        self.clock = clock
+        self.late_frame = late_frame
+        self.queued_frames = [queued_frame]
+        self.blocking_timeouts: list[float] = []
+        self.blocking_returns = 0
+        self.late_returned_at: float | None = None
+        self.nonblocking_calls = 0
+
+    def get_nowait(self):
+        self.nonblocking_calls += 1
+        # La primera operación debe entrar realmente en el camino bloqueante.
+        if self.nonblocking_calls == 1:
+            raise queue.Empty
+        if self.queued_frames:
+            return self.queued_frames.pop(0)
+        raise queue.Empty
+
+    def get(self, block=True, timeout=None):
+        if timeout is None or timeout <= 0:
+            raise AssertionError(f"get bloqueante sin plazo positivo: {timeout!r}")
+        self.blocking_timeouts.append(timeout)
+        if self.blocking_returns == 0:
+            self.clock.advance(timeout + 1.0)
+            self.blocking_returns += 1
+            self.late_returned_at = self.clock.monotonic()
+            return self.late_frame
+        raise queue.Empty
+
+
 class CountingPopenStdin:
     """Proxy que acredita intentos de write y puede coordinar el primer EOF terminal."""
 
@@ -4193,6 +4226,71 @@ def check_real_pipe_preserves_prefetched_second_frame() -> None:
     )
 
 
+def check_raw_line_preserves_frame_returned_after_blocking_deadline_fifo() -> None:
+    """Un get que termina tarde no autoriza a devolver el frame fuera del plazo."""
+    harness = load_harness()
+    clock = ControlledMonotonic()
+    harness.time = clock
+    initial_time = clock.monotonic()
+    late_frame = (
+        '{"jsonrpc":"2.0","id":101,'
+        '"result":{"marker":"LATE_AFTER_BLOCKING_DEADLINE"}}\n'
+    )
+    queued_frame = (
+        '{"jsonrpc":"2.0","id":102,'
+        '"result":{"marker":"ALREADY_QUEUED_SECOND"}}\n'
+    )
+    stdout_queue = DeadlineCrossingQueue(clock, late_frame, queued_frame)
+    instance = object.__new__(harness.LodestarSession)
+    instance.proc = SimulatedProcess(BlockingStdout())
+    instance._stdout_queue = stdout_queue
+    instance._stdout_eof = object()
+    instance._stdout_reader_lock = threading.Lock()
+    # Sentinel no nulo: la prueba controla la cola y no arranca un reader concurrente.
+    instance._stdout_reader = object()
+    instance._stdout_read_ack = threading.Event()
+    instance._stdout_eof_seen = threading.Event()
+    instance._stdout_waiting_ack = False
+
+    raw_lines = [
+        '{"jsonrpc":"2.0","method":"deadline/first"}',
+        '{"jsonrpc":"2.0","method":"deadline/second"}',
+        '{"jsonrpc":"2.0","method":"deadline/third"}',
+    ]
+    expired = instance.raw_line(raw_lines[0], timeout=TIMEOUT)
+    recovered_late = instance.raw_line(raw_lines[1], timeout=TIMEOUT)
+    recovered_next = instance.raw_line(raw_lines[2], timeout=TIMEOUT)
+
+    assert stdout_queue.blocking_returns == 1, (
+        "la guarda no forzó exactamente un retorno desde el get bloqueante"
+    )
+    assert len(stdout_queue.blocking_timeouts) >= 1, (
+        "raw_line no recorrió la obtención bloqueante de stdout"
+    )
+    assert 0 < stdout_queue.blocking_timeouts[0] <= TIMEOUT, (
+        f"plazo bloqueante inesperado: {stdout_queue.blocking_timeouts[0]!r}"
+    )
+    assert (
+        clock.crossed
+        and stdout_queue.late_returned_at is not None
+        and stdout_queue.late_returned_at > initial_time + TIMEOUT
+    ), "el frame no fue devuelto después del deadline acreditado"
+    assert expired is None, (
+        "raw_line devolvió fuera de plazo el frame obtenido tras el deadline: "
+        f"{expired!r}"
+    )
+    observed = [recovered_late, recovered_next]
+    expected = [json.loads(late_frame), json.loads(queued_frame)]
+    assert observed == expected, (
+        "el frame tardío debe conservarse y preceder al que ya estaba en cola: "
+        f"observed={observed!r} expected={expected!r}"
+    )
+    assert instance.proc.stdin.lines == [line + "\n" for line in raw_lines], (
+        f"las tres operaciones públicas no se escribieron exactamente una vez: "
+        f"{instance.proc.stdin.lines!r}"
+    )
+
+
 def check_real_pipe_discards_late_idless_error_before_current_response() -> None:
     """Un error sin id sólo pertenece a la llamada inválida aún dentro de su plazo.
 
@@ -6396,6 +6494,7 @@ CHECKS = {
     "malformed-observed-frame": check_malformed_json_returns_observed_server_parse_error_instead_of_silence,
     "notification-observed-frame": check_notification_returns_observed_server_method_error_instead_of_silence,
     "prefetched": check_real_pipe_preserves_prefetched_second_frame,
+    "blocking-return-after-deadline-fifo": check_raw_line_preserves_frame_returned_after_blocking_deadline_fifo,
     "late-idless-error": check_real_pipe_discards_late_idless_error_before_current_response,
     "silent-discards-expired-id": check_silent_input_discards_late_expired_request_response,
     "silent-discards-expired-idless-error": check_silent_input_discards_late_idless_error_from_expired_invalid_input,

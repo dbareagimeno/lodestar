@@ -123,6 +123,11 @@ fn l12_raw_line_recovers_buffered_id_2_after_expired_id_1() {
 }
 
 #[test]
+fn l12_raw_line_blocking_stdout_frame_after_deadline_times_out_and_is_recovered_fifo() {
+    run_raw_line_selftest("blocking-return-after-deadline-fifo");
+}
+
+#[test]
 fn l12_raw_line_discards_late_idless_error_before_current_id_2_response() {
     run_raw_line_selftest("late-idless-error");
 }

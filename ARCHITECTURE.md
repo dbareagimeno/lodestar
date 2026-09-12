@@ -57,6 +57,7 @@ permanece puro** y se introduce una **crate de orquestación** que compone core 
 crates/
   lodestar-core/        # PURO. modelo, conformidad, links, query, grafo, generación, export,
                         #       diff semántico OKF. Sin I/O, sin DB, sin git, sin runtime.
+  lodestar-discovery/   # I/O acotado. Dueño canónico de DiscoveryPolicy e inventario compacto.
         ▲          ▲
   lodestar-store/    lodestar-vcs/   # store: rusqlite+FTS5+watcher notify, dueño del DDL .lodestar/index.db.
         ▲          ▲                 # vcs:   git2/libgit2 (local: status/log/diff/commit/branch/merge/restore/init,
@@ -70,6 +71,9 @@ crates/
 
 - **No existe `lodestar_core::Workspace`** (arrastraría rusqlite/notify al core). El handle
   unificado vive en `lodestar-workspace`. Las tres fachadas dependen de esa crate, no de `store`.
+- **`DiscoveryPolicy` y el inventario compacto se definen UNA vez en `lodestar-discovery`.**
+  `lodestar-workspace` reexporta esos tipos exactos y tanto workspace como store delegan su recorrido
+  a esa crate; no existe conversión entre políticas espejo ni un segundo walker con semántica propia.
 - **`rusqlite` vive SOLO en `lodestar-store`.** El motor de grafo/conformidad del core opera
   sobre el mapa de ficheros en memoria (o un trait `ConceptStore`), **nunca declara DDL**.
 - **`git2`/libgit2 vive SOLO en `lodestar-vcs`** (igual que rusqlite en store). El core no sabe de git;
@@ -854,6 +858,8 @@ lógica de dominio"). No arrastra `rusqlite`/`git2`/`tokio`.
 
 ```
 lodestar-core (PURO)  ◄─ lodestar-store ─┐        lodestar-core ◄─ lodestar-vcs (DORMIDO: sin consumidores)
+lodestar-discovery ◄───────┬─────────────┤        (política + inventario canónicos, sin DB/runtime)
+                            │             │
    ▲  (+ core::schema, WorkspaceRevision) ▼
    └──────────────── lodestar-workspace (ÚNICO escritor + staging/journal/locks/recovery + cache + bus)
                               ▲
@@ -1568,6 +1574,39 @@ variantes produjeron búsquedas exclusivas de body `[4201]`, exclusivas de front
 El objetivo de footprint Realista/100k `≤ 2,5×` es una métrica de ingeniería no bloqueante (`gate = false`), y
 `decisiones §14` permanece abierta. Esta historia no conecta SQLite a App/MCP, no cambia
 `contracts/mcp.yml`, no implementa rebuild streaming/watcher dirigido ni decide la salida de §14.
+
+### 20.12.2 Adenda ratificada E35-H03 — rebuild streaming y publicación atómica (issue #55)
+
+La reconstrucción usa dos pasadas sujetas a la `DiscoveryPolicy` canónica: la primera conserva solo
+paths candidatos —con codificación todavía desconocida—, `other_files`, directorios recorridos y
+metadata compacta; nunca abre los cuerpos. La segunda lee cada candidato una sola vez: si es UTF-8,
+lo parsea una vez y proyecta el documento antes de liberar el payload; si no lo es, lo clasifica
+como `other_files`, emite `DOC-NOT-UTF8` y no lo parsea ni lo proyecta. Los enlaces a candidatos
+posteriores nacen como `WorkspaceFile` y se reatan al promover un documento válido, usando valores
+derivados de `LinkTarget`. `Workspace::enable_cache` no materializa un `FileMap` del corpus para
+alimentar el store. Los fingerprints de raíz —incluido el destino real cuando es un symlink—, cada
+entrada y la frontera de directorios se capturan en esa primera pasada. Se verifican al terminar
+discovery, al entrar en Store, tras el streaming y justo antes del swap; así una modificación, alta,
+baja o rename durante la segunda pasada aborta sin ejecutar un tercer walker ni publicar
+placeholders.
+
+El único escritor construye `.lodestar/index.db.next` con conexión separada, carga insert-only y
+statements preparados reutilizados. La promoción del inventario cuesta `O(log N)` y el reatado de
+enlaces reutiliza uno de los diez statements. Un authorizer SQLite deniega cualquier `DELETE`
+lógico y la auditoría reconcilia los diez prepares con callbacks reales de SQLite; solo el mantenimiento shadow
+`documents_fts_*` queda permitido durante el INSERT FTS auditado y su commit. Tras
+`integrity_check` y claves foráneas, cierra y sincroniza la
+base, la publica por rename en el mismo directorio y sincroniza el directorio. Hasta ese punto las
+lecturas siguen usando `index.db`; open/migración, rebuild, upsert, remove y reconcile comparten un
+writer gate intra-proceso más un lock nativo interproceso (`flock`/`LockFileEx`). El fichero del
+lock es persistente y la propiedad RAII pertenece al descriptor: no hay marker reclamable por
+PID/TTL y el SO libera el lock si el proceso termina.
+
+`RebuildReport` separa memoria controlable (`max_live_body_bytes`) de RSS diagnóstico y cronometra
+inventario, indexación, validación y swap. Cada fase muestrea RSS residente actual dentro de su
+propia ventana y publica recuento y límites monotónicos de las muestras. Los objetivos
+Realista/100k de 60 s y 512 MiB conservan
+`gate=false`. No hay cambio MCP/CLI, conexión del store al camino normal ni cierre de `decisiones §14`.
 
 ### 20.13 Migración de repositorios OKF existentes
 

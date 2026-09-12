@@ -10,7 +10,251 @@ use lodestar_core::links;
 use lodestar_core::model;
 use lodestar_core::types::{CheckCode, FieldPath, Inventory, LinkTarget, RelPath, Severity};
 
-use crate::error::StoreError;
+use crate::{error::StoreError, SqlAudit};
+
+/// Prepared projection used by the insert-only cold builder.  The statements are created once
+/// per build and reused for every document; unlike `upsert_file`, this path never deletes rows.
+pub(crate) struct StreamingProjection<'tx> {
+    document_ids: std::collections::BTreeMap<RelPath, i64>,
+    document_update: rusqlite::Statement<'tx>,
+    reattach_links: rusqlite::Statement<'tx>,
+    field_insert: rusqlite::Statement<'tx>,
+    field_id: rusqlite::Statement<'tx>,
+    metadata_insert: rusqlite::Statement<'tx>,
+    link_insert: rusqlite::Statement<'tx>,
+    diagnostic_insert: rusqlite::Statement<'tx>,
+    fts_insert: rusqlite::Statement<'tx>,
+}
+
+/// Documento ya leído y parseado por la pasada de streaming. Mantenerlo tipado evita que la
+/// proyección vuelva a parsear el cuerpo y mantiene su firma por debajo del límite de Clippy.
+pub(crate) struct ProjectionDocument<'a> {
+    pub(crate) path: &'a RelPath,
+    pub(crate) raw: &'a str,
+    pub(crate) parsed: &'a model::Parsed,
+    pub(crate) doc_id: i64,
+    pub(crate) mtime: i64,
+    pub(crate) size: i64,
+}
+
+impl<'tx> StreamingProjection<'tx> {
+    pub(crate) fn prepare(
+        tx: &'tx Transaction<'tx>,
+        mut begin_prepare: impl FnMut() -> u64,
+        mut finish_prepare: impl FnMut(u64, &str, &str) -> Result<(), StoreError>,
+        mut on_prepare: impl FnMut(&str, &str),
+    ) -> Result<Self, StoreError> {
+        let mark = begin_prepare();
+        let document_update = tx.prepare("UPDATE documents SET title=?1,body=?2,frontmatter_json=?3,frontmatter_text=?4,content_hash=?5,mtime=?6,size=?7 WHERE doc_id=?8")?;
+        finish_prepare(mark, "streaming.document_update", "UPDATE documents SET title=?1,body=?2,frontmatter_json=?3,frontmatter_text=?4,content_hash=?5,mtime=?6,size=?7 WHERE doc_id=?8")?;
+        on_prepare("streaming.document_update", "UPDATE documents SET title=?1,body=?2,frontmatter_json=?3,frontmatter_text=?4,content_hash=?5,mtime=?6,size=?7 WHERE doc_id=?8");
+        let mark = begin_prepare();
+        let reattach_links = tx.prepare("UPDATE links SET target_doc_id=?1,target_path=NULL,target_kind=?2,resolved=?3,is_edge=?4 WHERE target_path=?5 AND target_kind=?6 AND target_doc_id IS NULL")?;
+        finish_prepare(mark, "streaming.reattach_links", "UPDATE links SET target_doc_id=?1,target_path=NULL,target_kind=?2,resolved=?3,is_edge=?4 WHERE target_path=?5 AND target_kind=?6 AND target_doc_id IS NULL")?;
+        on_prepare("streaming.reattach_links", "UPDATE links SET target_doc_id=?1,target_path=NULL,target_kind=?2,resolved=?3,is_edge=?4 WHERE target_path=?5 AND target_kind=?6 AND target_doc_id IS NULL");
+        let mark = begin_prepare();
+        let field_insert = tx.prepare("INSERT OR IGNORE INTO fields(field_path) VALUES(?1)")?;
+        finish_prepare(
+            mark,
+            "streaming.field_insert",
+            "INSERT OR IGNORE INTO fields(field_path) VALUES(?1)",
+        )?;
+        on_prepare(
+            "streaming.field_insert",
+            "INSERT OR IGNORE INTO fields(field_path) VALUES(?1)",
+        );
+        let mark = begin_prepare();
+        let field_id = tx.prepare("SELECT field_id FROM fields WHERE field_path=?1")?;
+        finish_prepare(
+            mark,
+            "streaming.field_id",
+            "SELECT field_id FROM fields WHERE field_path=?1",
+        )?;
+        on_prepare(
+            "streaming.field_id",
+            "SELECT field_id FROM fields WHERE field_path=?1",
+        );
+        let mark = begin_prepare();
+        let metadata_insert = tx.prepare(
+            "INSERT INTO metadata(doc_id,field_id,value_json,value_type) VALUES(?1,?2,?3,?4)",
+        )?;
+        finish_prepare(
+            mark,
+            "streaming.metadata_insert",
+            "INSERT INTO metadata(doc_id,field_id,value_json,value_type) VALUES(?1,?2,?3,?4)",
+        )?;
+        on_prepare(
+            "streaming.metadata_insert",
+            "INSERT INTO metadata(doc_id,field_id,value_json,value_type) VALUES(?1,?2,?3,?4)",
+        );
+        let mark = begin_prepare();
+        let link_insert = tx.prepare("INSERT INTO links(source_doc_id,target_doc_id,raw_href,target_kind,target_path,fragment,resolved,is_edge) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)")?;
+        finish_prepare(mark, "streaming.link_insert", "INSERT INTO links(source_doc_id,target_doc_id,raw_href,target_kind,target_path,fragment,resolved,is_edge) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)")?;
+        on_prepare("streaming.link_insert", "INSERT INTO links(source_doc_id,target_doc_id,raw_href,target_kind,target_path,fragment,resolved,is_edge) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)");
+        let mark = begin_prepare();
+        let diagnostic_insert = tx.prepare("INSERT INTO diagnostics(doc_id,code,severity,message,range_json) VALUES(?1,?2,?3,?4,?5)")?;
+        finish_prepare(mark, "streaming.diagnostic_insert", "INSERT INTO diagnostics(doc_id,code,severity,message,range_json) VALUES(?1,?2,?3,?4,?5)")?;
+        on_prepare("streaming.diagnostic_insert", "INSERT INTO diagnostics(doc_id,code,severity,message,range_json) VALUES(?1,?2,?3,?4,?5)");
+        let mark = begin_prepare();
+        let fts_insert = tx.prepare("INSERT INTO documents_fts(rowid,path,title,body,frontmatter_text) VALUES(?1,?2,?3,?4,?5)")?;
+        finish_prepare(mark, "streaming.fts_insert", "INSERT INTO documents_fts(rowid,path,title,body,frontmatter_text) VALUES(?1,?2,?3,?4,?5)")?;
+        on_prepare("streaming.fts_insert", "INSERT INTO documents_fts(rowid,path,title,body,frontmatter_text) VALUES(?1,?2,?3,?4,?5)");
+        Ok(Self {
+            document_ids: std::collections::BTreeMap::new(),
+            document_update,
+            reattach_links,
+            field_insert,
+            field_id,
+            metadata_insert,
+            link_insert,
+            diagnostic_insert,
+            fts_insert,
+        })
+    }
+
+    pub(crate) fn insert(
+        &mut self,
+        document: ProjectionDocument<'_>,
+        inventory: &Inventory,
+        sql_audit: &SqlAudit,
+        mut on_insert: impl FnMut(&str),
+    ) -> Result<(), StoreError> {
+        let ProjectionDocument {
+            path,
+            raw,
+            parsed,
+            doc_id,
+            mtime,
+            size,
+        } = document;
+        // Updating the external-content row can make FTS5 maintain its shadow tables before the
+        // explicit FTS insert below. Keep the audited allowance alive for the whole projection.
+        let _fts_execution = sql_audit.fts_execution();
+        let fm = parsed.frontmatter.clone();
+        let hash = blake3::hash(raw.as_bytes());
+        let title = model::derived_title(fm.as_ref(), &parsed.body, path);
+        let fm_json = fm
+            .as_ref()
+            .map(|f| serde_json::to_string(&f.value).unwrap_or_else(|_| "{}".to_string()))
+            .unwrap_or_else(|| "{}".to_string());
+        // Metadata and FTS share one canonical text value from the one permitted `walk`. Keep
+        // this String alive across both statements so contentless FTS can later be deleted with
+        // exactly the same tuple persisted in `documents`.
+        let (frontmatter_text, metadata_by_path) = if let Some(f) = fm.as_ref() {
+            let mut fts_frontmatter = Vec::new();
+            let mut metadata_by_path: std::collections::BTreeMap<
+                String,
+                (FieldPath, String, &'static str, bool),
+            > = std::collections::BTreeMap::new();
+            for (field_path, value) in f.walk() {
+                let anchored = field_path.es_namespace_reservado();
+                let field_path = if anchored {
+                    field_path.anclado()
+                } else {
+                    field_path
+                };
+                let vtype = value_type(value);
+                let value_json = serde_json::to_string(
+                    &serde_json::to_value(value).unwrap_or(serde_json::Value::Null),
+                )
+                .unwrap_or_else(|_| "null".to_string());
+                if vtype == "string" || vtype == "array" {
+                    fts_frontmatter.push(value_json.clone());
+                }
+                let key = field_path.to_string();
+                let replace = metadata_by_path
+                    .get(&key)
+                    .map_or(true, |(_, _, _, previous_anchored)| {
+                        anchored && !previous_anchored
+                    });
+                if replace {
+                    metadata_by_path.insert(key, (field_path, value_json, vtype, anchored));
+                }
+            }
+            (fts_frontmatter.join(" "), Some(metadata_by_path))
+        } else {
+            (String::new(), None)
+        };
+        self.document_update.execute(rusqlite::params![
+            &title,
+            raw,
+            fm_json,
+            &frontmatter_text,
+            hash.as_bytes().as_slice(),
+            mtime,
+            size,
+            doc_id,
+        ])?;
+        self.document_ids.insert(path.clone(), doc_id);
+        let document_target = LinkTarget::Document(path.clone());
+        let workspace_file_target = LinkTarget::WorkspaceFile(path.clone());
+        self.reattach_links.execute(rusqlite::params![
+            doc_id,
+            target_kind(&document_target),
+            is_resolved(&document_target) as i64,
+            document_target.internal_path().is_some() as i64,
+            path.as_str(),
+            target_kind(&workspace_file_target),
+        ])?;
+        if let Some(metadata_by_path) = metadata_by_path {
+            for (field_path, value_json, vtype, _) in metadata_by_path.into_values() {
+                self.field_insert.execute([field_path.to_string()])?;
+                let field_id: i64 = self
+                    .field_id
+                    .query_row([field_path.to_string()], |r| r.get(0))?;
+                self.metadata_insert
+                    .execute(rusqlite::params![doc_id, field_id, value_json, vtype,])?;
+                on_insert("metadata");
+            }
+        }
+        self.fts_insert.execute(rusqlite::params![
+            doc_id,
+            path.as_str(),
+            &title,
+            raw,
+            &frontmatter_text,
+        ])?;
+        on_insert("documents_fts");
+
+        for raw_link in links::extract_links(&parsed.body) {
+            let resolved = links::resolve(&raw_link, path, inventory);
+            let target_doc_id: Option<i64> = match &resolved.target {
+                LinkTarget::Document(target) => self.document_ids.get(target).copied(),
+                _ => None,
+            };
+            let persisted_target_path = if target_doc_id.is_some() {
+                None
+            } else {
+                target_path(&resolved.target)
+            };
+            self.link_insert.execute(rusqlite::params![
+                doc_id,
+                target_doc_id,
+                resolved.href,
+                target_kind(&resolved.target),
+                persisted_target_path,
+                resolved.fragment,
+                is_resolved(&resolved.target) as i64,
+                resolved.target.internal_path().is_some() as i64,
+            ])?;
+            on_insert("links");
+        }
+        for check in lodestar_core::local_diagnostics(path, parsed, raw) {
+            let range_json = check
+                .range
+                .map(|r| serde_json::to_string(&r).unwrap_or_else(|_| "null".to_string()));
+            self.diagnostic_insert.execute(rusqlite::params![
+                doc_id,
+                check.code.as_str(),
+                severity_str(check.level),
+                check.msg,
+                range_json,
+            ])?;
+            on_insert("diagnostics");
+        }
+        Ok(())
+    }
+}
 
 /// ¿Es un diagnóstico de **enlace**? Esos no se materializan: dependen del inventario entero
 /// (crear un fichero repara el enlace roto de otro documento), así que materializarlos obligaría a
@@ -29,21 +273,6 @@ pub(crate) fn es_de_enlace(code: CheckCode) -> bool {
 /// Se computan con el core (autoridad) sobre un workspace de un solo fichero: como los checks
 /// locales dependen solo del contenido propio, el resultado —incluido el `range`— es idéntico al
 /// del workspace completo.
-fn local_diagnostics(path: &RelPath, raw: &str) -> Vec<lodestar_core::types::Check> {
-    let mut fm = lodestar_core::types::FileMap::new();
-    fm.insert(path.clone(), raw.to_string());
-    let doc_set = lodestar_core::DocumentSet::from_files(fm);
-    doc_set
-        .analyze()
-        .diagnostics
-        .get(path)
-        .cloned()
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|c| !es_de_enlace(c.code))
-        .collect()
-}
-
 /// El valor de wire de un [`Severity`] (`§20.9`), que es la columna `diagnostics.severity`.
 fn severity_str(level: Severity) -> &'static str {
     match level {
@@ -223,9 +452,18 @@ pub(crate) fn upsert_file(
     )?;
     // La materialización incremental puede haber escrito antes un enlace dangling hacia este
     // path. Al reaparecer el documento, se reata el FK y su clasificación.
+    let document_target = LinkTarget::Document(path.clone());
+    let missing_target = LinkTarget::Missing(path.clone());
     tx.execute(
-        "UPDATE links SET target_doc_id=?1,target_path=NULL,target_kind='document',resolved=1,is_edge=1 WHERE target_path=?2 AND target_kind='missing' AND target_doc_id IS NULL",
-        params![doc_id, p],
+        "UPDATE links SET target_doc_id=?1,target_path=NULL,target_kind=?2,resolved=?3,is_edge=?4 WHERE target_path=?5 AND target_kind=?6 AND target_doc_id IS NULL",
+        params![
+            doc_id,
+            target_kind(&document_target),
+            is_resolved(&document_target) as i64,
+            document_target.internal_path().is_some() as i64,
+            p,
+            target_kind(&missing_target),
+        ],
     )?;
 
     // Metadata genérica: una fila por propiedad direccionable del frontmatter (`walk`, E18-H01),
@@ -342,7 +580,7 @@ pub(crate) fn upsert_file(
 
     // Diagnostics locales (el core es la autoridad; los de enlace se sintetizan al leer). `range` va
     // serializado a `range_json` (E18-H02), o `NULL` si el diagnóstico no conoce su posición.
-    for check in local_diagnostics(path, raw) {
+    for check in lodestar_core::local_diagnostics(path, &parsed, raw) {
         let range_json = check
             .range
             .map(|r| serde_json::to_string(&r).unwrap_or_else(|_| "null".to_string()));

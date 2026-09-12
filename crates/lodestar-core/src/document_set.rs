@@ -3,7 +3,6 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::conform;
 use crate::links;
 use crate::model::{self, Parsed};
 use crate::types::{
@@ -140,7 +139,7 @@ impl DocumentSet {
         // (E17-H03), que necesitan el inventario completo y por eso se emiten aquí.
         let mut diagnostics: BTreeMap<RelPath, Vec<Check>> = BTreeMap::new();
         for (path, raw) in &self.files {
-            let mut checks = conform::validate_file(path, &self.parsed[path], raw);
+            let mut checks = crate::local_diagnostics(path, &self.parsed[path], raw);
             checks.extend(links::diagnose(path, raw, &outgoing[path], &self.inventory));
             diagnostics.insert(path.clone(), checks);
         }
