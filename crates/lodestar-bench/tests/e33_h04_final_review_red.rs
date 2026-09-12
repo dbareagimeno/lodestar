@@ -106,6 +106,47 @@ fn archive_resolved_develop(
         .output()
 }
 
+/// Decide si el `source_commit` archivado en la baseline es aceptable para el commit resuelto de
+/// develop. Con una base distinta de HEAD (`pull_request`, `push` a otra rama o ejecución local en
+/// rama de trabajo) se exige igualdad estricta con el commit resuelto. Cuando el resuelto es HEAD
+/// (`push` a develop, donde la referencia resuelta es el propio commit empujado y ningún commit
+/// puede llevar el SHA de su merge) se exige que la baseline proceda de la historia de develop. El
+/// oráculo de ascendencia se inyecta para poder fijar ambas ramas en tests.
+fn baseline_source_commit_aceptable<F>(
+    develop_commit: &str,
+    head_commit: &str,
+    baseline_commit: Option<&str>,
+    mut es_ancestro: F,
+) -> bool
+where
+    F: FnMut(&str, &str) -> bool,
+{
+    if develop_commit == head_commit {
+        baseline_commit.is_some_and(|commit| es_ancestro(commit, head_commit))
+    } else {
+        baseline_commit == Some(develop_commit)
+    }
+}
+
+fn head_commit(root: &Path) -> String {
+    let output = Command::new("git")
+        .args(["rev-parse", "HEAD^{commit}"])
+        .current_dir(root)
+        .output()
+        .expect("git rev-parse HEAD");
+    assert!(output.status.success(), "git rev-parse HEAD falló");
+    String::from_utf8_lossy(&output.stdout).trim().to_owned()
+}
+
+fn is_ancestor(root: &Path, ancestor: &str, descendant: &str) -> bool {
+    Command::new("git")
+        .args(["merge-base", "--is-ancestor", ancestor, descendant])
+        .current_dir(root)
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+}
+
 fn write_fixture(root: &Path, documents: usize) {
     fs::create_dir_all(root).expect("raíz fixture");
     for index in 0..documents {
@@ -1123,6 +1164,112 @@ fn archive_develop_usa_el_sha_resuelto_y_no_la_referencia_simbolica() {
     );
 }
 
+fn evaluar_baseline_con_oraculo(
+    baseline: Option<&str>,
+    es_ancestro: bool,
+    consultas: &mut Vec<(String, String)>,
+) -> bool {
+    baseline_source_commit_aceptable("head", "head", baseline, |ancestro, descendiente| {
+        consultas.push((ancestro.to_owned(), descendiente.to_owned()));
+        es_ancestro
+    })
+}
+
+#[test]
+fn baseline_exige_igualdad_estricta_cuando_el_commit_resuelto_no_es_head() {
+    let mut consultas = Vec::new();
+    {
+        let mut aceptable = |baseline: Option<&str>| {
+            baseline_source_commit_aceptable("base", "head", baseline, |ancestro, descendiente| {
+                consultas.push((ancestro.to_owned(), descendiente.to_owned()));
+                true
+            })
+        };
+
+        assert!(
+            aceptable(Some("base")),
+            "el commit resuelto debe valer tal cual"
+        );
+        assert!(!aceptable(Some("otro")), "otro commit no puede pasar");
+        assert!(!aceptable(None), "sin source_commit no hay baseline válida");
+    }
+    assert!(
+        consultas.is_empty(),
+        "con base distinta no se consulta la ascendencia: {consultas:?}"
+    );
+}
+
+#[test]
+fn baseline_exige_ascendencia_cuando_el_commit_resuelto_es_head() {
+    let mut consultas = Vec::new();
+
+    assert!(evaluar_baseline_con_oraculo(
+        Some("ancestro"),
+        true,
+        &mut consultas
+    ));
+    assert!(!evaluar_baseline_con_oraculo(
+        Some("ajeno"),
+        false,
+        &mut consultas
+    ));
+    assert!(!evaluar_baseline_con_oraculo(None, true, &mut consultas));
+    assert_eq!(
+        consultas,
+        [
+            ("ancestro".to_owned(), "head".to_owned()),
+            ("ajeno".to_owned(), "head".to_owned()),
+        ],
+        "la guarda debe consultar la ascendencia del source_commit archivado contra HEAD"
+    );
+}
+
+#[test]
+fn is_ancestor_distingue_un_ancestro_real_de_un_commit_ajeno() {
+    let repo = TempDir::new().expect("repo Git temporal");
+    let git = |args: &[&str]| {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(repo.path())
+            .output()
+            .expect("ejecutar Git temporal");
+        assert!(
+            output.status.success(),
+            "git {args:?} falló: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_owned()
+    };
+
+    git(&["init", "--quiet"]);
+    git(&["config", "user.email", "bench@example.invalid"]);
+    git(&["config", "user.name", "Lodestar Bench"]);
+    fs::write(repo.path().join("marker.txt"), "primero\n").expect("marker primero");
+    git(&["add", "marker.txt"]);
+    git(&["commit", "--quiet", "-m", "primero"]);
+    let primero = git(&["rev-parse", "HEAD"]);
+    fs::write(repo.path().join("marker.txt"), "segundo\n").expect("marker segundo");
+    git(&["commit", "--quiet", "-am", "segundo"]);
+    let segundo = git(&["rev-parse", "HEAD"]);
+
+    assert!(
+        is_ancestor(repo.path(), &primero, &segundo),
+        "el commit anterior es ancestro del actual"
+    );
+    assert!(
+        !is_ancestor(repo.path(), &segundo, &primero),
+        "un descendiente no es ancestro"
+    );
+    assert!(
+        !is_ancestor(
+            repo.path(),
+            "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+            &segundo
+        ),
+        "un commit ausente de la historia no puede acreditar procedencia"
+    );
+}
+
 fn semantic_mentions(value: &Value, needle: &str) -> bool {
     match value {
         Value::String(text) => text.contains(needle),
@@ -1358,9 +1505,20 @@ fn public_api_compara_develop_archive_baseline_y_current_con_features_default() 
     assert_public_api_snapshot_shape(&develop_value, "API develop");
     assert_public_api_snapshot_shape(&baseline, "API baseline");
     assert_public_api_snapshot_shape(&current_value, "API current");
-    assert_eq!(
-        baseline["metadata"]["source_commit"].as_str(),
-        Some(develop_commit.as_str())
+    // La igualdad estricta con el commit resuelto de develop solo es exigible cuando la base
+    // difiere de HEAD (`pull_request`, `push` a otra rama o ejecución local en rama de trabajo).
+    // En un push a develop no hay base distinta: la referencia resuelta es el propio commit
+    // empujado y ningún commit puede llevar el SHA de su merge, así que la igualdad sería
+    // insatisfacible —y dejaba la rama de integración roja de forma crónica—. Ahí se conserva la
+    // procedencia (la baseline tiene que salir de la historia de develop) y el oráculo real contra
+    // el drift de API son las dos igualdades semánticas.
+    let baseline_commit = baseline["metadata"]["source_commit"].as_str();
+    let head = head_commit(&root);
+    assert!(
+        baseline_source_commit_aceptable(develop_commit, &head, baseline_commit, |commit, head| {
+            is_ancestor(&root, commit, head)
+        }),
+        "el source_commit de la baseline no es aceptable: baseline={baseline_commit:?}, develop={develop_commit}, head={head}"
     );
     assert_eq!(develop_value["semantic"], baseline["semantic"]);
     assert_eq!(develop_value["semantic"], current_value["semantic"]);
