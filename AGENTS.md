@@ -21,7 +21,11 @@ sondas diferenciales.
 ## Reglas del repositorio
 
 - La base de integración es `develop`; `main` contiene únicamente releases.
-- No crear ramas, commits, pushes ni PRs salvo petición explícita. Entregar un diff revisado y verde.
+- Toda historia se implementa en un worktree y rama nuevos, exclusivos de esa historia y creados
+  después de actualizar `develop`. No reutilizar el checkout principal ni el worktree de otra historia.
+- No crear commits, pushes ni PRs salvo petición explícita. Cuando exista una ejecución remota de CI,
+  vigilarla hasta que todos los checks obligatorios estén verdes; un rojo se diagnostica, registra y
+  repara antes de cerrar la historia.
 - Preservar los seis invariantes activos de `ARCHITECTURE.md`/`CLAUDE.md`: Markdown en disco como
   fuente de verdad, core puro, una sola verdad computada, un solo contrato de tipos, único escritor
   y `RelPath` como chokepoint.
@@ -52,6 +56,8 @@ usuario.
 - Contrato: `scripts/agent-gates.sh contract`.
 - Política: `scripts/agent-gates.sh policy`.
 - Entrega de código: `scripts/agent-gates.sh full`.
+- Registro append-only de rojos CI: `python3 scripts/check-ci-failure-log.py` (incluido en `policy`
+  y `full`).
 
 Preferir tests de integración en `crates/<crate>/tests/` y fixtures de
 `crates/lodestar-fixtures/`. Un test inline comparte fichero con producción y no permite bloquear
