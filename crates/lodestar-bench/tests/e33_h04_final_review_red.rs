@@ -106,6 +106,25 @@ fn archive_resolved_develop(
         .output()
 }
 
+fn head_commit(root: &Path) -> String {
+    let output = Command::new("git")
+        .args(["rev-parse", "HEAD^{commit}"])
+        .current_dir(root)
+        .output()
+        .expect("git rev-parse HEAD");
+    assert!(output.status.success(), "git rev-parse HEAD falló");
+    String::from_utf8_lossy(&output.stdout).trim().to_owned()
+}
+
+fn is_ancestor(root: &Path, ancestor: &str, descendant: &str) -> bool {
+    Command::new("git")
+        .args(["merge-base", "--is-ancestor", ancestor, descendant])
+        .current_dir(root)
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+}
+
 fn write_fixture(root: &Path, documents: usize) {
     fs::create_dir_all(root).expect("raíz fixture");
     for index in 0..documents {
@@ -1358,10 +1377,22 @@ fn public_api_compara_develop_archive_baseline_y_current_con_features_default() 
     assert_public_api_snapshot_shape(&develop_value, "API develop");
     assert_public_api_snapshot_shape(&baseline, "API baseline");
     assert_public_api_snapshot_shape(&current_value, "API current");
-    assert_eq!(
-        baseline["metadata"]["source_commit"].as_str(),
-        Some(develop_commit.as_str())
-    );
+    // La igualdad estricta con el commit resuelto de develop solo es exigible cuando la base
+    // difiere de HEAD (contexto `pull_request`). En un push a develop no hay base distinta: la
+    // referencia resuelta es el propio commit empujado y ningún commit puede llevar el SHA de su
+    // merge, así que la igualdad sería insatisfacible —y dejaba la rama de integración roja de
+    // forma crónica—. Ahí se conserva la procedencia (la baseline tiene que salir de la historia
+    // de develop) y el oráculo real contra el drift de API son las dos igualdades semánticas.
+    let baseline_commit = baseline["metadata"]["source_commit"].as_str();
+    let head = head_commit(&root);
+    if develop_commit == &head {
+        assert!(
+            baseline_commit.is_some_and(|commit| is_ancestor(&root, commit, &head)),
+            "la baseline archivada debe proceder de la historia de develop: baseline={baseline_commit:?}, develop={develop_commit}, head={head}"
+        );
+    } else {
+        assert_eq!(baseline_commit, Some(develop_commit.as_str()));
+    }
     assert_eq!(develop_value["semantic"], baseline["semantic"]);
     assert_eq!(develop_value["semantic"], current_value["semantic"]);
 }
